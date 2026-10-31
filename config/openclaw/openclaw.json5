@@ -1,0 +1,55 @@
+// Locked-down OpenClaw Gateway config for the SF-004 container
+// (deploy/openclaw/compose.yaml). Paths are container paths; nothing from the
+// host is mounted. scripts/openclaw/sf004-docker.sh copies this file once into
+// the state volume as /home/node/.openclaw/openclaw.json (mode 0600) and never
+// overwrites an existing one. The gateway token is not in this file: it is a
+// SecretRef to a 0600 file generated inside the volume.
+{
+  gateway: {
+    mode: "local",
+    bind: "loopback",
+    port: 18789,
+    auth: {
+      mode: "token",
+      token: { source: "file", provider: "gatewaytoken", id: "value" },
+    },
+    tailscale: { mode: "off" },
+    // Offline profile (SF-004). config/openclaw/profiles/dashboard.json5 enables it
+    // for the host-loopback Dashboard (SF-005-UI).
+    controlUi: { enabled: false },
+    // On by default: an operator shell with the gateway process environment.
+    terminal: { enabled: false },
+    cliAgents: { enabled: false },
+    http: { endpoints: { chatCompletions: { enabled: false }, responses: { enabled: false } } },
+    tools: { deny: ["group:runtime", "group:fs", "group:automation", "group:web", "group:ui", "browser", "exec"] },
+  },
+  secrets: {
+    providers: {
+      gatewaytoken: { source: "file", path: "/home/node/.openclaw/secrets/gateway-token", mode: "singleValue" },
+    },
+  },
+  // Default is "minimal" LAN advertisement.
+  discovery: { mdns: { mode: "off" } },
+  browser: { enabled: false },
+  tools: {
+    profile: "minimal",
+    deny: ["group:runtime", "group:fs", "group:automation", "group:web", "group:ui", "browser", "exec"],
+    exec: { security: "deny", ask: "always" },
+    elevated: { enabled: false },
+    fs: { workspaceOnly: true },
+  },
+  skills: { allowBundled: [] },
+  plugins: { enabled: false },
+  hooks: { enabled: false },
+  cron: { enabled: false },
+  acp: { enabled: false },
+  update: { checkOnStart: false, auto: { enabled: false } },
+  telemetry: { enabled: false },
+  agents: {
+    defaults: {
+      workspace: "/home/node/.openclaw/workspace",
+      // No model is configured; no recurring agent turns.
+      heartbeat: { every: "0m" },
+    },
+  },
+}

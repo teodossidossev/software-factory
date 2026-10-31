@@ -1,0 +1,13 @@
+// SF-005-UI Dashboard profile: the only difference from config/openclaw/openclaw.json5
+// (the offline profile). Applied to the live config with
+// `scripts/openclaw/sf005-dashboard.sh enable` and removed again with `disable`;
+// keep both steps in line with the keys below.
+// The Gateway has no egress, so the UI's link favicon/preview fetches stay off.
+// Everything else stays as in the offline profile: token auth, loopback bind,
+// no operator terminal, no CLI agents, no HTTP model endpoints, no plugins,
+// hooks, browser, exec or model provider.
+{
+  gateway: {
+    controlUi: { enabled: true, automaticallyFetchFavicons: false },
+  },
+}

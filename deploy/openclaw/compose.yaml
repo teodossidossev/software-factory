@@ -1,0 +1,65 @@
+# SF-004: locked-down local OpenClaw Gateway.
+#
+# - Official image, pinned by index digest (2026.10.7, commit 157d8c2b, built by
+#   GitHub Actions in openclaw/openclaw; same digest on GHCR and Docker Hub).
+# - No network at all (network_mode: none): the gateway binds loopback inside the
+#   container and is reachable only by processes in the container, i.e. through
+#   `docker compose exec`. Nothing is published on the host or the LAN.
+# - No host mounts, no Docker socket, not privileged, all capabilities dropped,
+#   read-only root filesystem. State lives only in the named volume `home`.
+# - restart: "no": never starts on its own (no autostart after reboot).
+#
+# Operate it with scripts/openclaw/sf004-docker.sh; see docs/runbooks/openclaw-docker.md.
+name: software-factory-openclaw
+
+services:
+  gateway:
+    image: ghcr.io/openclaw/openclaw:2026.10.7@sha256:fb26f0841659dc757f23feec9adeab51f11d76779a409db5d22e191b43841afa
+    # The image is pulled only by the explicit, digest-checked pull step.
+    pull_policy: never
+    # The image's own `node` user (uid/gid 1000), stated explicitly.
+    user: "1000:1000"
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 2g
+    restart: "no"
+    # The gateway drains active work for up to 315s before exiting (upstream TimeoutStopSec=330).
+    stop_grace_period: 330s
+    environment:
+      HOME: /home/node
+      OPENCLAW_HOME: /home/node
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+      OPENCLAW_GATEWAY_PORT: "18789"
+      OPENCLAW_DISABLE_BONJOUR: "1"
+      OPENCLAW_NO_AUTO_UPDATE: "1"
+      DO_NOT_TRACK: "1"
+      TZ: UTC
+    volumes:
+      # Whole container home (upstream OPENCLAW_HOME_VOLUME layout): state, config,
+      # token, auth-profile secret dir and doctor's update captures.
+      - home:/home/node
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=256m
+    # The image entrypoint runs `openclaw doctor --fix --non-interactive` first.
+    command: ["node", "openclaw.mjs", "gateway", "--bind", "loopback", "--port", "18789"]
+    healthcheck:
+      test: ["CMD", "node", "dist/docker-healthcheck.js"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  home:

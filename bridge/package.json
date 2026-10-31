@@ -1,0 +1,26 @@
+{
+  "name": "software-factory-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-only MCP bridge for Software Factory (SF-001 pilot)",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "start": "node dist/src/main.js",
+    "smoke": "npm run build && node --test dist/test/*.test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/node": "2.1.2",
+    "@modelcontextprotocol/server": "2.4.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2"
+  }
+}

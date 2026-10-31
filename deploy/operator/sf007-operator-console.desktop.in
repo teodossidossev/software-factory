@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Software Factory operator console
+Comment=Review and approve accepted Software Factory jobs in a terminal (no network listener)
+Exec=gnome-terminal --title=Software-Factory-operator -- @NODE@ @MEDIATOR@/bridge/dist/src/operator/main.js console
+Icon=utilities-terminal
+Terminal=false
+Categories=Development;

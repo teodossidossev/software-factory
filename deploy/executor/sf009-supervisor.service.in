@@ -1,0 +1,18 @@
+# Software Factory SF-009 supervisor: a systemd *user* unit template. NOT installed by anything.
+# Rendered by `scripts/sf009-executor.sh render-unit <new-dir>`; installing and enabling it is a
+# separate, one-time operator decision (docs/runbooks/SF-009-autonomous-session-loop.md).
+# It runs as you, with no network listener and no extra privileges.
+[Unit]
+Description=Software Factory supervisor (SF-009): runs ChatGPT-authorized jobs you opted in to
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=@NODE@ @MEDIATOR@/bridge/dist/src/executor/main.js run
+Restart=no
+NoNewPrivileges=yes
+PrivateTmp=no
+UMask=0077
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Runs the compiled sf CLI (npm run build first).
+dir=$(dirname "$(readlink -f "$0")")
+exec node "$dir/../dist/src/cli.js" "$@"

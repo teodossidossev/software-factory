@@ -48,6 +48,9 @@ export function formatEvent(raw: string): string[] {
     const error = state.error !== undefined ? ` (${state.error.code}: ${state.error.message})` : '';
     return [`${prefix} state ${state.from ?? '-'} -> ${state.to}${error}`];
   }
+  if (record.type === 'notify_failed') {
+    return [`${prefix} notification via ${String(record.channel)} failed: ${oneLine(String(record.message))}`];
+  }
   const message = record.message as Record<string, unknown> | undefined;
   if (message === undefined) {
     return [];

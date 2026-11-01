@@ -22,6 +22,8 @@ their own review, so you drive the cycle through tools:
 5. When `check` says `awaiting_review`, read the Report and the Patch it returns. Review against the
    Task file, the repository standards and the plan. Then either `request_fix` with a Fix section
    (the next iteration starts at once) or `mark_clean` (the user takes over).
+   When `check` says `pushed`, `aborted` or `failed`, the ticket is finished for you and the
+   scheduled task can be deleted; `preparing_mr` means wait.
 6. Never approve, push, merge or close anything: those are the user's, in the terminal.
 
 Everything the Implementer knows about the ticket is in the Task file. Everything you need to
@@ -106,26 +108,71 @@ its rules (no Git, no edits to the Task file) with every prompt, and appends the
 - Mark Clean only when every earlier item is fixed or rejected with a reason you accept.
 - Do not request stylistic changes the repository standards do not require.
 
-## Git rules (draft, to be settled with the user)
+## Git rules
 
-- Branch name: `<ticket>-<short-slug>` from the base branch (for example `PROJ-123-export-csv`).
-- Commit messages: `<ticket>: <imperative summary, at most 72 characters>`, a blank line, then a
-  short body saying why. One commit per merge request unless the user asks otherwise.
-- Rebase onto the target only in MR preparation, or when the Context owner asks because the target
-  moved. Conflicts are resolved by the Implementer, then the diff is re-reviewed.
-- The Implementer never pushes. The factory pushes after verification.
+- The branch is `<ticket>-<slug>`, created by the factory from the base branch in the Task
+  file header. It is never renamed.
+- One commit per merge request. Header `<type>(<ticket>): <imperative summary>`, where
+  `<type>` is one of `feat`, `fix`, `chore`, `refactor`, `docs`, `test`, `perf`, `build`,
+  `ci`, `style`, `revert`, chosen from what the Task file asks for; `<ticket>` is the Jira
+  issue (always present in a factory job). At most 72 characters, no trailing period.
+  A blank line, then a body of one to five lines that says why, not what: the diff says
+  what. No trailers unless the repository's AGENTS.md asks for them.
+- Commits are made only in MR preparation, after the user's approve. Iterations commit
+  nothing.
+- MR preparation always rebases onto the target branch, so the merge request can be
+  fast-forwarded. The Implementer resolves conflicts keeping the reviewed behaviour; every
+  file whose content changed in the resolution goes back to the Context owner before the push.
+- The factory pushes `origin <branch>` once its checks pass. Nobody else pushes. The user
+  opens the merge request.
+- Never: force push, amend after the push, rewrite the base branch, change a submodule
+  pointer unless the Task file asks for it.
 
-## MR template (draft, adapted from the `visual-pr` skill)
+## MR template
+
+The first line is the MR title: the commit header. Then a blank line and this body, every
+heading kept in this order. "Screenshots" and "Browser support verified" apply to user
+interface changes; write `N/A` otherwise. A checklist box is ticked only for what was done.
 
 ```markdown
-<title: `<ticket>: <summary>`>
+<type>(<ticket>): <summary, the commit header>
 
-**Why the change:** one sentence.
+## What
+<The change in two or three sentences.>
 
-**Special things to note:** one to three bullets, or `- None.`
+## Why
+<The reason, from the ticket, in one or two sentences.>
 
-**Change outline:** a compact structural view (files by responsibility, contracts, data shapes,
-control flow), not a changelog.
+## How
+<The approach taken, in a few sentences.>
+
+## Why the change
+<Exactly one sentence.>
+
+## Special things to note
+<One to three bullets: reviewer warnings, migrations, compatibility constraints, deliberate
+omissions, surprising decisions. `- None.` when there are none.>
+
+## Change outline
+<A compact structural view for the reviewer: files by responsibility, contracts, data
+shapes, control or data flow. Prefer diff blocks for changes to an existing shape. Not prose,
+not a file-by-file changelog.>
+
+## Testing
+<Each check run with its result, and how to verify by hand when that matters.>
+
+## Screenshots
+<Before and after for user interface changes, or N/A.>
+
+## Checklist
+- [ ] Branch name
+- [ ] Target branch
+- [ ] Commit messages
+- [ ] Squash commits
+- [ ] MR name
+- [ ] MR Description
+- [ ] Tests
+- [ ] Browser support verified
 ```
 
 ## What the factory never does

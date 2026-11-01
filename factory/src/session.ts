@@ -1,22 +1,9 @@
 // The Implementer session driver: one Claude Agent SDK query() per turn, the first creating the
 // session, every later one resuming it. Turns are serialized; prompts sent while a turn runs are
 // queued and run in order. When the queue is empty the driver reports the outcome of the turns
-// since it was last idle. It knows nothing about jobs, Git or MCP.
-import { query, type SDKMessage, type SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
-
-const DENIED_GIT_COMMANDS = [
-  'add', 'commit', 'push', 'reset', 'clean', 'stash', 'checkout', 'switch', 'restore', 'rebase', 'merge',
-  'cherry-pick', 'revert', 'rm', 'mv', 'tag', 'branch', 'config', 'update-ref', 'update-index', 'worktree', 'am', 'pull', 'fetch',
-];
-// As bridge/src/execution/runner.ts: Git mutations stay the user's; .git and .env files are off limits.
-export const DENIED_TOOLS = [
-  ...DENIED_GIT_COMMANDS.map((command) => `Bash(git ${command}:*)`),
-  'Bash(sudo:*)',
-  'EnterWorktree',
-  'Edit(.git/**)',
-  'Write(.git/**)',
-  ...['Read', 'Edit', 'Write'].flatMap((tool) => [`${tool}(**/.env)`, `${tool}(**/.env.*)`]),
-];
+// since it was last idle. Each prompt carries its own deny list; the driver does not know why.
+// It knows nothing about jobs, Git or MCP.
+import { query, type SandboxSettings, type SDKMessage, type SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
 
 // Markers a running Claude Code session sets for its children; a session inheriting them acts as
 // a child and may not save its transcript.
@@ -53,6 +40,13 @@ export interface SessionOptions {
   claudePath: string | undefined;
   // An existing session to resume; undefined starts a new one with the first turn.
   sessionId?: string | undefined;
+  // Claude Code's sandbox for every turn; undefined runs without it.
+  sandbox?: SandboxSettings | undefined;
+}
+
+interface Queued {
+  prompt: string;
+  disallowedTools: string[];
 }
 
 export type IdleOutcome =
@@ -104,9 +98,12 @@ function assistantText(message: SDKMessage): string {
 export class ImplementerSession {
   readonly #options: SessionOptions;
   readonly #hooks: SessionHooks;
-  readonly #queue: string[] = [];
+  readonly #queue: Queued[] = [];
   #sessionId: string | undefined;
   #running = false;
+  #closed = false;
+  #abort: AbortController | undefined;
+  #drained: Promise<void> = Promise.resolve();
 
   constructor(options: SessionOptions, hooks: SessionHooks) {
     this.#options = options;
@@ -123,12 +120,24 @@ export class ImplementerSession {
     return this.#running;
   }
 
-  send(prompt: string): void {
-    this.#queue.push(prompt);
+  send(prompt: string, disallowedTools: string[]): void {
+    if (this.#closed) {
+      throw new Error('The session is closed.');
+    }
+    this.#queue.push({ prompt, disallowedTools });
     if (!this.#running) {
       this.#running = true;
-      void this.#drain();
+      this.#drained = this.#drain();
     }
+  }
+
+  // Ends the session: queued prompts are dropped, a running turn is aborted, and no idle outcome
+  // is reported. Resolves once the turn has stopped.
+  async close(): Promise<void> {
+    this.#closed = true;
+    this.#queue.length = 0;
+    this.#abort?.abort();
+    await this.#drained;
   }
 
   async #drain(): Promise<void> {
@@ -137,19 +146,22 @@ export class ImplementerSession {
     let outcome: IdleOutcome | undefined;
     try {
       while (this.#queue.length > 0) {
-        const prompt = this.#queue.shift()!;
-        const turn = await this.#turn(prompt);
+        const next = this.#queue.shift()!;
+        const turn = await this.#turn(next.prompt, next.disallowedTools);
         denials.push(...turn.denials);
         outcome = { ok: true, sessionId: this.#sessionId!, text: turn.text, denials, startedAt, result: turn.result };
       }
     } catch (error) {
       // A failed turn drops the prompts still queued: the job needs a person now.
       this.#queue.length = 0;
-      const code = error instanceof TurnError ? error.code : 'session_failed';
       const message = (error instanceof Error ? error.message : String(error)).slice(0, 1000);
+      const code = error instanceof TurnError ? error.code : /sandbox/i.test(message) ? 'sandbox_unavailable' : 'session_failed';
       outcome = { ok: false, code, message, startedAt };
     }
     this.#running = false;
+    if (this.#closed) {
+      return;
+    }
     try {
       await this.#hooks.idle(outcome!);
     } catch (error) {
@@ -157,9 +169,10 @@ export class ImplementerSession {
     }
   }
 
-  async #turn(prompt: string): Promise<{ text: string; denials: string[]; result: SDKResultMessage }> {
+  async #turn(prompt: string, disallowedTools: string[]): Promise<{ text: string; denials: string[]; result: SDKResultMessage }> {
     await this.#hooks.prompt(prompt);
     const abortController = new AbortController();
+    this.#abort = abortController;
     const turn = query({
       prompt,
       options: {
@@ -167,10 +180,12 @@ export class ImplementerSession {
         cwd: this.#options.cwd,
         permissionMode: 'auto',
         settingSources: ['user', 'project'],
-        disallowedTools: DENIED_TOOLS,
+        disallowedTools,
         maxTurns: this.#options.maxTurns,
-        env: sessionEnvironment(),
+        // A known startup failure (such as an unavailable sandbox) then ends with a result message.
+        env: { ...sessionEnvironment(), CLAUDE_CODE_STARTUP_FAILURE_RESULTS: '1' },
         ...(this.#sessionId !== undefined ? { resume: this.#sessionId } : {}),
+        ...(this.#options.sandbox !== undefined ? { sandbox: this.#options.sandbox } : {}),
         ...(this.#options.claudePath !== undefined ? { pathToClaudeCodeExecutable: this.#options.claudePath } : {}),
       },
     });
@@ -196,6 +211,9 @@ export class ImplementerSession {
     }
     if (result === undefined) {
       throw new TurnError('session_failed', 'The Implementer ended the turn without a result.');
+    }
+    if (result.subtype !== 'success' && result.startup_failure_reason === 'sandbox_required_unavailable') {
+      throw new TurnError('sandbox_unavailable', result.errors.join('; ') || 'The sandbox is not available.');
     }
     if (result.subtype !== 'success' || result.is_error) {
       const detail = result.subtype === 'success' ? result.result : result.errors.join('; ');

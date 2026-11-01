@@ -3,7 +3,10 @@
 // the --resume one), an assistant message, optionally a tool_use and its tool_result, and a
 // result. Each run takes the next turn script from $HOME/fake-claude.json ({"turns": [...]},
 // consumed in order through $HOME/fake-claude.count) and logs argv, prompt and environment
-// names to $HOME/fake-claude.log. A turn can write files into cwd to produce a Patch.
+// names to $HOME/fake-claude.log. A turn can write files into cwd to produce a Patch, then run a
+// list of argv commands in cwd (to stage, commit and rebase like the Implementer would), or end
+// with a startup failure. Sandbox arguments are logged with argv and otherwise ignored.
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -19,6 +22,10 @@ interface Turn {
   subtype?: string;
   // The SDK's cumulative session cost reported in the result; default 0.0123.
   costTotal?: number;
+  // argv lists run in cwd after the writes, without a shell; a failing command fails the test turn.
+  run?: string[][];
+  // Ends the turn with Claude Code's startup failure result (startup_failure_reason) and this message.
+  startupFailure?: string;
 }
 
 const home = process.env.HOME ?? '.';
@@ -45,6 +52,14 @@ const out = (message: Record<string, unknown>): void => {
 
 function run(prompt: string): void {
   appendFileSync(join(home, 'fake-claude.log'), `${JSON.stringify({ argv, prompt, sessionId, cwd: process.cwd(), env: Object.keys(process.env).sort() })}\n`);
+  if (turn.startupFailure !== undefined) {
+    out({
+      type: 'result', subtype: 'error_during_execution', is_error: true, num_turns: 0, duration_ms: 0, duration_api_ms: 0,
+      total_cost_usd: 0, usage: {}, modelUsage: {}, stop_reason: null, permission_denials: [], errors: [turn.startupFailure],
+      startup_failure_reason: 'sandbox_required_unavailable',
+    });
+    return;
+  }
   out({
     type: 'system', subtype: 'init', permissionMode: turn.permissionMode ?? option('permission-mode') ?? 'default',
     cwd: process.cwd(), tools: [], mcp_servers: [], model: 'fake-model', slash_commands: [], output_style: 'default',
@@ -53,6 +68,9 @@ function run(prompt: string): void {
   for (const [path, content] of Object.entries(turn.write ?? {})) {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, content);
+  }
+  for (const [command, ...args] of turn.run ?? []) {
+    execFileSync(command!, args, { stdio: ['ignore', 'ignore', 'pipe'] });
   }
   if (turn.tool === true) {
     out({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'npm test', description: 'Run the tests' } }] } });

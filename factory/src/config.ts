@@ -1,4 +1,5 @@
 // Execution configuration, read once when `sf serve` starts.
+import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { FactoryError } from './errors.js';
@@ -11,6 +12,28 @@ export interface Config {
   maxIterations: number;
   // Claude Code executable for the Implementer; undefined uses the SDK's bundled binary.
   claudePath: string | undefined;
+  // Claude Code's sandbox for every Implementer turn; undefined with SF_SANDBOX=off.
+  sandbox: SandboxSettings | undefined;
+}
+
+// Domains sandboxed commands may reach: the npm registry and SF_SANDBOX_DOMAINS (comma-separated).
+// The factory's own fetch and push run outside the sandbox, so the Git host is not needed.
+export function sandboxSettings(env: NodeJS.ProcessEnv = process.env): SandboxSettings | undefined {
+  if (env.SF_SANDBOX === 'off') {
+    return undefined;
+  }
+  const extra = (env.SF_SANDBOX_DOMAINS ?? '').split(',').map((domain) => domain.trim()).filter((domain) => domain !== '');
+  for (const domain of extra) {
+    if (!/^(\*\.)?[A-Za-z0-9.-]+$/.test(domain)) {
+      throw new FactoryError('invalid_config', `SF_SANDBOX_DOMAINS has an invalid domain "${domain}".`);
+    }
+  }
+  return {
+    enabled: true,
+    failIfUnavailable: true,
+    autoAllowBashIfSandboxed: true,
+    network: { allowedDomains: [...new Set(['registry.npmjs.org', ...extra])] },
+  };
 }
 
 export function stateDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -43,5 +66,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxTurns: positiveInteger(env, 'SF_MAX_TURNS', 150),
     maxIterations: positiveInteger(env, 'SF_MAX_ITERATIONS', 5),
     claudePath,
+    sandbox: sandboxSettings(env),
   };
 }

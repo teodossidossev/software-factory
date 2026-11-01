@@ -133,8 +133,17 @@ export function changedFilesSection(files: ChangedFile[], truncated: boolean): s
   return lines.join('\n');
 }
 
+// The paths a Patch against baseCommit covers: changed tracked files and untracked files,
+// filtered as the Patch is, never cut by its size limit.
+export async function changedPaths(cwd: string, baseCommit: string): Promise<{ tracked: string[]; untracked: string[] }> {
+  return {
+    tracked: nulList(await git(cwd, ['diff', '--name-only', '-z', '--no-renames', baseCommit])).filter(included),
+    untracked: nulList(await git(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])).filter(included),
+  };
+}
+
 export async function buildPatch(cwd: string, baseCommit: string): Promise<Patch> {
-  const tracked = nulList(await git(cwd, ['diff', '--name-only', '-z', '--no-renames', baseCommit])).filter(included);
+  const { tracked, untracked } = await changedPaths(cwd, baseCommit);
   const parts: Buffer[] = [];
   let size = 0;
   if (tracked.length > 0) {
@@ -142,7 +151,6 @@ export async function buildPatch(cwd: string, baseCommit: string): Promise<Patch
     parts.push(part);
     size += part.length;
   }
-  const untracked = nulList(await git(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])).filter(included);
   for (const path of untracked) {
     if (size > MAX_PATCH_BYTES) {
       break;

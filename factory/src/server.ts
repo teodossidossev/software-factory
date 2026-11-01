@@ -11,6 +11,7 @@ import * as z from 'zod/v4';
 import { FactoryError } from './errors.js';
 import type { Execution } from './execution.js';
 import { JOB_STATES } from './jobs.js';
+import { handbookSection } from './prompts.js';
 import { resolveWorkspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { DEFAULT_PAGE_BYTES, MAX_FILE_BYTES, MAX_PAGE_BYTES, MAX_PATH_LENGTH, MIN_PAGE_BYTES, RepoFiles, RepoReadError } from './repo-files.js';
 import { DEFAULT_RESULTS, MAX_QUERY_CHARS, MAX_RESULTS, search } from './search.js';
@@ -43,13 +44,7 @@ export async function packageVersion(): Promise<string> {
 
 // Extracts the "## Quick start" section, from its heading up to the next level-2 heading.
 export function quickStartSection(text: string): string {
-  const lines = text.split('\n');
-  const start = lines.findIndex((line) => line.trimEnd() === '## Quick start');
-  if (start < 0) {
-    throw new Error('The handbook has no "## Quick start" section.');
-  }
-  const next = lines.findIndex((line, index) => index > start && line.startsWith('## '));
-  return lines.slice(start, next < 0 ? undefined : next).join('\n').trim();
+  return handbookSection(text, '## Quick start');
 }
 
 export async function loadHandbook(path = process.env.SF_HANDBOOK || fileURLToPath(new URL('HANDBOOK.md', PACKAGE_ROOT))): Promise<Handbook> {
@@ -236,7 +231,9 @@ function createMcpServer(handbook: Handbook, version: string, execution: Executi
         'working, after how many minutes to check again. Once an iteration is published, every state except working and ' +
         'starting (awaiting_review, needs_human, ready_for_human_review, ...) also returns the last Report (full text) and ' +
         `one page of the Patch, paged like read_file: offset and max_bytes (default ${DEFAULT_PAGE_BYTES}, ` +
-        `${MIN_PAGE_BYTES}-${MAX_PAGE_BYTES}); call again with offset=patch.next_offset until it is null.`,
+        `${MIN_PAGE_BYTES}-${MAX_PAGE_BYTES}); call again with offset=patch.next_offset until it is null. Once MR ` +
+        'preparation wrote one, mr holds the merge request text. pushed, aborted and failed end the ticket for you; ' +
+        'preparing_mr means wait.',
       inputSchema: z.strictObject({
         workspace: workspaceName,
         ticket: ticketKey,
@@ -261,6 +258,7 @@ function createMcpServer(handbook: Handbook, version: string, execution: Executi
             next_offset: z.number().int().nullable(),
           })
           .optional(),
+        mr: z.string().optional(),
       }),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },

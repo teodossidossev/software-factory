@@ -1,5 +1,5 @@
 // Job state on disk: <state dir>/jobs/<workspace>/<ticket>/ with job.json, events.jsonl and
-// iterations/NNN/{report.md,patch.diff,meta.json}. Strictly parsed; every file but the event log
+// iterations/NNN/{report.md,patch.diff,meta.json}, and in MR preparation mr-snapshot.json and mr.md. Strictly parsed; every file but the event log
 // is replaced atomically. Knows nothing about Git or the Implementer session.
 import { appendFile, mkdir, readdir, readFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -19,19 +19,24 @@ export const JOB_STATES = [
   'failed',
 ] as const;
 export type JobState = (typeof JOB_STATES)[number];
-// States that hold the machine's one job slot.
-export const ACTIVE_STATES: readonly JobState[] = ['starting', 'working', 'awaiting_review'];
+// States that hold the machine's one job slot: every state in which the session may be alive.
+export const ACTIVE_STATES: readonly JobState[] = ['starting', 'working', 'awaiting_review', 'needs_human', 'ready_for_human_review', 'preparing_mr'];
 // States after which a new job for the same ticket may start.
 export const TERMINAL_STATES: readonly JobState[] = ['failed', 'aborted', 'pushed'];
 
 const timestamp = z.iso.datetime();
+const commit = z.string().regex(/^[0-9a-f]{40,64}$/);
 const jobSchema = z.strictObject({
   workspace: z.string().min(1),
   ticket: z.string().min(1),
   branch: z.string().min(1),
   base: z.string().min(1),
   // The commit the branch was created from; the Patch is the difference to it.
-  base_commit: z.string().regex(/^[0-9a-f]{40,64}$/).nullable(),
+  base_commit: commit.nullable(),
+  // The target commit the branch was rebased onto in MR preparation.
+  target_commit: commit.nullable().default(null),
+  // Number of MR preparation turns started.
+  mr_attempts: z.number().int().min(0).default(0),
   state: z.enum(JOB_STATES),
   // Number of published iterations.
   iteration: z.number().int().min(0),
@@ -41,7 +46,14 @@ const jobSchema = z.strictObject({
   updated_at: timestamp,
   error: z.strictObject({ code: z.string(), message: z.string() }).optional(),
 });
-export type Job = z.infer<typeof jobSchema>;
+export type Job = z.output<typeof jobSchema>;
+
+// The reviewed change at approve time: the blob hash of every Patch path (or "absent").
+export interface MrSnapshot {
+  target_ref: string;
+  target_commit: string;
+  files: Record<string, string>;
+}
 
 export interface ChangedFile {
   path: string;
@@ -70,11 +82,12 @@ export interface Iteration {
   meta: IterationMeta;
 }
 
-// One line of events.jsonl: an SDK message, a prompt sent, or a state change.
+// One line of events.jsonl: an SDK message, a prompt sent, a state change or a failed notification.
 export type EventRecord = { ts: string; iteration: number } & (
   | { message: unknown }
   | { prompt: string }
   | { state: { from: JobState | null; to: JobState; error?: { code: string; message: string } } }
+  | { type: 'notify_failed'; channel: string; message: string }
 );
 
 export function isActive(job: Job): boolean {
@@ -164,10 +177,30 @@ export class JobStore {
     return jobs.sort((a, b) => `${a.workspace}/${a.ticket}`.localeCompare(`${b.workspace}/${b.ticket}`));
   }
 
-  // Moves the job directory to <ticket>.<timestamp> next to it.
-  async archive(workspace: string, ticket: string): Promise<void> {
+  // Moves the job directory to <ticket>.<timestamp> next to it and returns that name.
+  async archive(workspace: string, ticket: string): Promise<string> {
     const stamp = now().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
-    await rename(this.dir(workspace, ticket), join(this.root, workspace, `${ticket}.${stamp}`));
+    const name = `${ticket}.${stamp}`;
+    await rename(this.dir(workspace, ticket), join(this.root, workspace, name));
+    return name;
+  }
+
+  // The MR text once it exists (copied at push or at a diff-check iteration).
+  readMrText(workspace: string, ticket: string): Promise<string | undefined> {
+    return readOrMissing(join(this.dir(workspace, ticket), 'mr.md'));
+  }
+
+  async writeMrText(workspace: string, ticket: string, text: string): Promise<void> {
+    await writeFileAtomic(join(this.dir(workspace, ticket), 'mr.md'), Buffer.from(text, 'utf8'));
+  }
+
+  async readSnapshot(workspace: string, ticket: string): Promise<MrSnapshot | undefined> {
+    const text = await readOrMissing(join(this.dir(workspace, ticket), 'mr-snapshot.json'));
+    return text === undefined ? undefined : (JSON.parse(text) as MrSnapshot);
+  }
+
+  async writeSnapshot(workspace: string, ticket: string, snapshot: MrSnapshot): Promise<void> {
+    await writeFileAtomic(join(this.dir(workspace, ticket), 'mr-snapshot.json'), Buffer.from(`${JSON.stringify(snapshot, null, 2)}\n`));
   }
 
   async appendEvent(workspace: string, ticket: string, record: EventRecord): Promise<void> {

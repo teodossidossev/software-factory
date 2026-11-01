@@ -2,180 +2,12 @@
 // directories, throwaway Git repositories and the fake Claude Code (test/support/fake-claude.ts)
 // as the Implementer executable. Tools are driven through the official MCP client.
 import assert from 'node:assert/strict';
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readdir, readFile, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { after, before, test } from 'node:test';
-import { fileURLToPath } from 'node:url';
-import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
 import { FACTORY_PROMPT_RULES, factoryPrompt } from '../src/prompts.js';
-import { saveRegistry } from '../src/registry.js';
-import { writeTask } from '../src/task-file.js';
-
-const CLI = fileURLToPath(new URL('../src/cli.js', import.meta.url));
-const FAKE = fileURLToPath(new URL('./support/fake-claude.js', import.meta.url));
-const READY = /listening on (http:\/\/127\.0\.0\.1:\d+\/mcp)/;
-
-let temp: string;
-const running = new Set<ChildProcess>();
-
-interface Env {
-  config: string;
-  state: string;
-  home: string;
-  extra?: Record<string, string>;
-}
-
-interface Served {
-  child: ChildProcess;
-  client: Client;
-}
-
-function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-}
-
-function processEnv(env: Env): NodeJS.ProcessEnv {
-  return {
-    PATH: process.env.PATH,
-    HOME: env.home,
-    SF_CONFIG_DIR: env.config,
-    SF_STATE_DIR: env.state,
-    SF_PORT: '0',
-    SF_CLAUDE: FAKE,
-    ...env.extra,
-  };
-}
-
-async function newEnv(name: string, extra: Record<string, string> = {}): Promise<Env> {
-  const root = join(temp, name);
-  const env = { config: join(root, 'config'), state: join(root, 'state'), home: join(root, 'home'), extra };
-  await mkdir(env.home, { recursive: true });
-  return env;
-}
-
-async function script(env: Env, turns: unknown[]): Promise<void> {
-  await writeFile(join(env.home, 'fake-claude.json'), JSON.stringify({ turns }));
-  await rm(join(env.home, 'fake-claude.count'), { force: true });
-}
-
-async function fakeLog(env: Env): Promise<Array<{ argv: string[]; prompt: string; sessionId: string; env: string[] }>> {
-  return (await readFile(join(env.home, 'fake-claude.log'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
-}
-
-// A repository with one commit on main; with origin, the work checkout is a clone of a bare repo.
-async function newRepo(env: Env, name: string, withOrigin: boolean): Promise<string> {
-  const seed = join(temp, `${name}-seed`);
-  await mkdir(seed);
-  git(seed, 'init', '-q', '-b', 'main');
-  await writeFile(join(seed, 'README.md'), 'hello\n');
-  await writeFile(join(seed, '.gitignore'), '*.log\n');
-  git(seed, 'add', '.');
-  git(seed, 'commit', '-q', '-m', 'initial');
-  let repo = seed;
-  if (withOrigin) {
-    const bare = join(temp, `${name}-origin.git`);
-    execFileSync('git', ['clone', '-q', '--bare', seed, bare]);
-    repo = join(temp, name);
-    execFileSync('git', ['clone', '-q', bare, repo]);
-  }
-  await saveRegistry({ workspaces: { app: { read_checkout: repo, work_checkout: repo } } }, env.config);
-  return repo;
-}
-
-function task(ticket: string, title: string, base = 'main'): string {
-  return `---\nticket: ${ticket}\ntitle: ${title}\nbase: ${base}\n---\n\n# ${ticket}: ${title}\n\nChange the README.\n`;
-}
-
-async function putTask(env: Env, repo: string, ticket: string, title: string, base = 'main'): Promise<void> {
-  await writeTask({ name: 'app', readCheckout: repo, workCheckout: repo }, ticket, task(ticket, title, base), new JobStore(env.state));
-}
-
-function runCli(env: Env, args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [CLI, ...args], { env: processEnv(env), stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString('utf8')));
-    child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString('utf8')));
-    child.once('close', (code) => resolve({ code, stdout, stderr }));
-  });
-}
-
-async function serve(env: Env): Promise<Served> {
-  const child = spawn(process.execPath, [CLI, 'serve'], { env: processEnv(env), stdio: ['ignore', 'pipe', 'pipe'] });
-  running.add(child);
-  child.once('exit', () => running.delete(child));
-  const url = await new Promise<URL>((resolve, reject) => {
-    let output = '';
-    const onData = (chunk: Buffer): void => {
-      output += chunk.toString('utf8');
-      const match = READY.exec(output);
-      if (match) {
-        child.stdout.off('data', onData);
-        resolve(new URL(match[1]!));
-      }
-    };
-    child.stdout.on('data', onData);
-    child.stderr.on('data', (chunk: Buffer) => (output += chunk.toString('utf8')));
-    child.once('exit', (code) => reject(new Error(`sf serve exited with ${code}:\n${output}`)));
-  });
-  const client = new Client({ name: 'sf-011-execution', version: '0.0.0' });
-  await client.connect(new StreamableHTTPClientTransport(url));
-  return { child, client };
-}
-
-async function stop(served: Served, signal: NodeJS.Signals = 'SIGTERM'): Promise<void> {
-  await served.client.close();
-  await new Promise<void>((resolve) => {
-    if (served.child.exitCode !== null) {
-      resolve();
-      return;
-    }
-    served.child.once('exit', () => resolve());
-    served.child.kill(signal);
-  });
-}
-
-async function call(served: Served, name: string, args: Record<string, unknown>): Promise<Record<string, any>> {
-  const result = await served.client.callTool({ name, arguments: args });
-  assert.equal(result.isError ?? false, false, JSON.stringify(result.content));
-  return result.structuredContent as Record<string, any>;
-}
-
-async function refused(served: Served, name: string, args: Record<string, unknown>): Promise<{ code: string; message: string }> {
-  const result = await served.client.callTool({ name, arguments: args });
-  assert.equal(result.isError, true, `expected ${name} to be refused`);
-  const [block] = result.content as Array<{ text: string }>;
-  return JSON.parse(block!.text);
-}
-
-async function waitFor(served: Served, ticket: string, state: string, iteration?: number): Promise<Record<string, any>> {
-  const deadline = Date.now() + 20_000;
-  for (;;) {
-    const checked = await call(served, 'check', { workspace: 'app', ticket });
-    if (checked.state === state && (iteration === undefined || checked.iteration === iteration)) {
-      return checked;
-    }
-    if (Date.now() > deadline) {
-      assert.fail(`timed out waiting for ${state}: ${JSON.stringify(checked)}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-}
-
-before(async () => {
-  temp = await realpath(await mkdtemp(join(tmpdir(), 'sf-exec-')));
-});
-
-after(async () => {
-  for (const child of running) {
-    child.kill('SIGKILL');
-  }
-  await rm(temp, { recursive: true, force: true });
-});
+import { call, fakeLog, git, newEnv, newRepo, putTask, refused, runCli, script, serve, stop, task, waitFor } from './support/harness.js';
 
 test('full cycle: start, awaiting_review with Report and Patch, request_fix, second iteration, mark_clean, watch', async () => {
   const env = await newEnv('cycle', { CLAUDE_CODE_SESSION_ID: 'outer', CLAUDE_CODE_CHILD_SESSION: '1', ANTHROPIC_API_KEY: 'test-key' });
@@ -325,6 +157,8 @@ test('queue and limits: say during a turn, job_active, iteration_limit, checkout
   assert.equal(limit.code, 'iteration_limit');
   const human = await call(served, 'check', { workspace: 'app', ticket: 'Q-1' });
   assert.deepEqual([human.state, human.error?.code], ['needs_human', 'iteration_limit']);
+  // needs_human holds the machine's job slot.
+  assert.equal((await refused(served, 'start', { workspace: 'app', ticket: 'Q-2' })).code, 'job_active');
   // needs_human still returns the last Report and Patch.
   assert.deepEqual([human.report, human.patch.sha256], [first.report, first.patch.sha256]);
   assert.doesNotMatch(await readFile(join(repo, '.software-factory', 'Q-1.md'), 'utf8'), /## Fix/);
@@ -337,6 +171,11 @@ test('queue and limits: say during a turn, job_active, iteration_limit, checkout
   await call(served, 'mark_clean', { workspace: 'app', ticket: 'Q-1' });
   assert.equal((await runCli(env, ['say', 'app', 'Q-1', 'x'])).code, 1);
   assert.equal((await refused(served, 'start', { workspace: 'app', ticket: 'Q-1' })).code, 'job_exists');
+  // ready_for_human_review holds the slot too; abort without --discard frees it and keeps the files.
+  assert.equal((await refused(served, 'start', { workspace: 'app', ticket: 'Q-2' })).code, 'job_active');
+  const aborted = await runCli(env, ['abort', 'app', 'Q-1']);
+  assert.equal(aborted.code, 0, aborted.stderr);
+  assert.match(aborted.stdout, /^state: aborted\nbranch: Q-1-first\ndiscarded: false\nThe branch and the files are left as they are\.$/m);
 
   // Q-1 left a.txt behind on its branch.
   const dirty = await refused(served, 'start', { workspace: 'app', ticket: 'Q-2' });

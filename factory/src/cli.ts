@@ -1,5 +1,6 @@
-// The sf command: `sf serve`, `sf workspace add|list|remove`, `sf start|say` (through the
-// socket of sf serve) and `sf status|watch` (reading the job state directly).
+// The sf command: `sf serve`, `sf workspace add|list|remove`, `sf start|say|approve|abort|reset`
+// (through the socket of sf serve), `sf status|watch` (reading the job state directly) and
+// `sf notify-test`.
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -8,6 +9,7 @@ import { FactoryError } from './errors.js';
 import { Execution } from './execution.js';
 import { callSocket, listenSocket } from './ipc.js';
 import { type Job, JobStore } from './jobs.js';
+import { jobNotification, notifyConfig, sendNotification, stateNotifier } from './notify.js';
 import { loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { loadHandbook, packageVersion, PortInUseError, SERVER_NAME, startServer } from './server.js';
 import { TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
@@ -22,7 +24,11 @@ const USAGE = `Usage:
   sf start <workspace> <ticket>                         Start the job for .software-factory/<ticket>.md
   sf say <workspace> <ticket> <message...>              Send a message into the job's Implementer session
   sf status [<workspace> <ticket>]                      Show one job or all jobs
-  sf watch <workspace> <ticket> [--once]                Show the session live (Ctrl+C stops)`;
+  sf watch <workspace> <ticket> [--once]                Show the session live (Ctrl+C stops)
+  sf approve <workspace> <ticket>                       MR preparation: commit, rebase, verify, push
+  sf abort <workspace> <ticket> [--discard]             End the job; --discard also removes the branch and its changes
+  sf reset <workspace> <ticket>                         End the session and archive the job; Git is not touched
+  sf notify-test                                        Send a test notification on every channel`;
 
 class UsageError extends Error {}
 
@@ -43,7 +49,8 @@ async function serve(): Promise<void> {
   const handbook = await loadHandbook();
   // Fail at startup on an invalid registry rather than on the first tool call.
   await loadRegistry();
-  const execution = new Execution(config, (name) => resolveWorkspace(name));
+  const notify = stateNotifier(notifyConfig(), new JobStore(config.stateDir));
+  const execution = new Execution(config, (name) => resolveWorkspace(name), notify, handbook.text);
   // The socket first: it refuses a second sf serve on the same state before recovery touches it.
   const socket = await listenSocket(config.stateDir, async ({ command, args }) => {
     const [workspace = '', ticket = '', ...words] = args;
@@ -52,6 +59,15 @@ async function serve(): Promise<void> {
     }
     if (command === 'say') {
       return execution.say(workspace, ticket, words.join(' '));
+    }
+    if (command === 'approve' && words.length === 0) {
+      return execution.approve(workspace, ticket);
+    }
+    if (command === 'abort' && (words.length === 0 || (words.length === 1 && words[0] === '--discard'))) {
+      return execution.abort(workspace, ticket, words.length === 1);
+    }
+    if (command === 'reset' && words.length === 0) {
+      return execution.reset(workspace, ticket);
     }
     throw new FactoryError('bad_request', `Unknown command "${command}".`);
   });
@@ -170,13 +186,72 @@ function checkJob(args: string[], command: string): [string, string] {
   return [workspace, ticket];
 }
 
-async function viaServer(command: string, args: string[]): Promise<void> {
+async function viaServer(command: string, args: string[]): Promise<Record<string, unknown>> {
   const response = await callSocket(stateDir(), { command, args });
   if (!response.ok) {
     throw new FactoryError(response.error.code, response.error.message);
   }
   const result = response.result as Record<string, unknown>;
-  console.log(Object.entries(result).map(([key, value]) => `${key}: ${String(value)}`).join('\n'));
+  const show = (value: unknown): string => (typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value));
+  console.log(Object.entries(result).map(([key, value]) => `${key}: ${show(value)}`).join('\n'));
+  return result;
+}
+
+async function approve(args: string[]): Promise<void> {
+  if (args.length !== 2) {
+    throw new UsageError('approve needs <workspace> <ticket>.');
+  }
+  console.log('MR preparation started; waiting for it to end (Ctrl+C stops waiting, not the preparation; sf watch shows it).');
+  const result = await viaServer('approve', checkJob(args, 'approve'));
+  if (result.state === 'awaiting_review') {
+    console.log('The prepared commit differs from the reviewed change; it went back to the Context owner. Run sf approve again after Clean.');
+  } else if (result.state === 'needs_human') {
+    console.log('Fix it with sf say or by hand, then run sf approve again.');
+  } else if (result.state === 'pushed' && result.link === undefined) {
+    console.log('No merge request link: the origin URL could not be parsed. Open the merge request for the branch above.');
+  }
+  if (result.state !== 'pushed') {
+    process.exitCode = 1;
+  }
+}
+
+async function abort(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { discard: { type: 'boolean' } } });
+  if (positionals.length !== 2) {
+    throw new UsageError('abort needs <workspace> <ticket> [--discard].');
+  }
+  const result = await viaServer('abort', [...checkJob(positionals, 'abort'), ...(values.discard === true ? ['--discard'] : [])]);
+  if (result.error !== undefined) {
+    process.exitCode = 1;
+  } else if (values.discard !== true) {
+    console.log('The branch and the files are left as they are.');
+  }
+}
+
+async function reset(args: string[]): Promise<void> {
+  if (args.length !== 2) {
+    throw new UsageError('reset needs <workspace> <ticket>.');
+  }
+  await viaServer('reset', checkJob(args, 'reset'));
+  console.log('The branch and the files in the work checkout are untouched.');
+}
+
+async function notifyTest(args: string[]): Promise<void> {
+  if (args.length !== 0) {
+    throw new UsageError('notify-test takes no arguments.');
+  }
+  const now = new Date().toISOString();
+  const job: Job = {
+    workspace: 'test', ticket: 'SF-TEST', branch: 'SF-TEST-notification', base: 'main', base_commit: null,
+    target_commit: null, mr_attempts: 0, state: 'pushed', iteration: 0, session_id: null, created_at: now, updated_at: now,
+  };
+  const results = await sendNotification(jobNotification(job, ['A test notification from sf notify-test']), notifyConfig());
+  for (const result of results) {
+    console.log(`${result.channel}: ${result.status} (${result.message})`);
+  }
+  if (results.some((result) => result.status === 'failed')) {
+    process.exitCode = 1;
+  }
 }
 
 function table(jobs: Job[]): string {
@@ -231,6 +306,22 @@ async function main(argv: string[]): Promise<void> {
       throw new UsageError('start needs <workspace> <ticket>.');
     }
     await viaServer('start', checkJob(rest, 'start'));
+    return;
+  }
+  if (command === 'approve') {
+    await approve(rest);
+    return;
+  }
+  if (command === 'abort') {
+    await abort(rest);
+    return;
+  }
+  if (command === 'reset') {
+    await reset(rest);
+    return;
+  }
+  if (command === 'notify-test') {
+    await notifyTest(rest);
     return;
   }
   if (command === 'say') {

@@ -1,5 +1,6 @@
 // The factory's MCP endpoint: a loopback HTTP listener serving /mcp through the SDK's
-// stateless handler, with the Handbook as instructions and the planning tools.
+// stateless handler, with the Handbook as instructions, the planning tools and the execution
+// tools. The execution tools call Execution; they know nothing about the Implementer process.
 import { readFile } from 'node:fs/promises';
 import { createServer, type Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -8,10 +9,12 @@ import { localhostHostValidation, localhostOriginValidation, toNodeHandler } fro
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { FactoryError } from './errors.js';
+import type { Execution } from './execution.js';
+import { JOB_STATES } from './jobs.js';
 import { resolveWorkspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { DEFAULT_PAGE_BYTES, MAX_FILE_BYTES, MAX_PAGE_BYTES, MAX_PATH_LENGTH, MIN_PAGE_BYTES, RepoFiles, RepoReadError } from './repo-files.js';
 import { DEFAULT_RESULTS, MAX_QUERY_CHARS, MAX_RESULTS, search } from './search.js';
-import { MAX_TASK_BYTES, TICKET_DESCRIPTION, TICKET_PATTERN, writeTask } from './task-file.js';
+import { MAX_FIX_BYTES, MAX_TASK_BYTES, TICKET_DESCRIPTION, TICKET_PATTERN, writeTask } from './task-file.js';
 
 export const SERVER_NAME = 'software-factory';
 const LOOPBACK_HOST = '127.0.0.1';
@@ -70,9 +73,10 @@ function toolError(error: unknown) {
 }
 
 const workspaceName = z.string().regex(WORKSPACE_NAME_PATTERN).describe(`Registered workspace name: ${WORKSPACE_NAME_DESCRIPTION}.`);
+const ticketKey = z.string().regex(TICKET_PATTERN).describe(`Ticket key, e.g. "PROJ-123": ${TICKET_DESCRIPTION}.`);
 const relativePath = (what: string) => z.string().min(1).max(MAX_PATH_LENGTH).describe(what);
 
-function createMcpServer(handbook: Handbook, version: string): McpServer {
+function createMcpServer(handbook: Handbook, version: string, execution: Execution): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version }, { instructions: handbook.quickStart });
 
   server.registerTool(
@@ -177,7 +181,7 @@ function createMcpServer(handbook: Handbook, version: string): McpServer {
         'Returns the checkout-relative path, created or replaced, byte count and sha256. Starts nothing.',
       inputSchema: z.strictObject({
         workspace: workspaceName,
-        ticket: z.string().regex(TICKET_PATTERN).describe(`Ticket key, e.g. "PROJ-123": ${TICKET_DESCRIPTION}.`),
+        ticket: ticketKey,
         content: z.string().min(1).describe('The whole Task file; see the handbook for the format.'),
       }),
       outputSchema: z.object({
@@ -190,11 +194,112 @@ function createMcpServer(handbook: Handbook, version: string): McpServer {
     },
     async ({ workspace, ticket, content }) => {
       try {
-        return toolResult({ ...(await writeTask(await resolveWorkspace(workspace), ticket, content)) });
+        return toolResult({ ...(await writeTask(await resolveWorkspace(workspace), ticket, content, execution.jobs)) });
       } catch (error) {
         return toolError(error);
       }
     },
+  );
+
+  const jobState = z.enum(JOB_STATES);
+  const errorShape = z.object({ code: z.string(), message: z.string() });
+  const run = async <T extends object>(work: () => Promise<T>) => {
+    try {
+      return toolResult({ ...(await work()) } as Record<string, unknown>);
+    } catch (error) {
+      return toolError(error);
+    }
+  };
+
+  server.registerTool(
+    'start',
+    {
+      title: 'Start the job',
+      description:
+        'Starts the job for a Task file written with write_task: verifies the work checkout is clean, fetches the base ' +
+        'branch from origin, creates the branch <ticket>-<slug of the title> and runs the first iteration ' +
+        '(/implement .software-factory/<ticket>.md) in a new Implementer session. One active job per machine. Returns ' +
+        'the branch, the state and after how many minutes to call check.',
+      inputSchema: z.strictObject({ workspace: workspaceName, ticket: ticketKey }),
+      outputSchema: z.object({ branch: z.string(), state: jobState, check_after_minutes: z.number().int() }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ workspace, ticket }) => run(() => execution.start(workspace, ticket)),
+  );
+
+  server.registerTool(
+    'check',
+    {
+      title: 'Check the job',
+      description:
+        'Returns the state of the job, its iteration count, branch, the time of the last state change (since) and, while ' +
+        'working, after how many minutes to check again. Once an iteration is published, every state except working and ' +
+        'starting (awaiting_review, needs_human, ready_for_human_review, ...) also returns the last Report (full text) and ' +
+        `one page of the Patch, paged like read_file: offset and max_bytes (default ${DEFAULT_PAGE_BYTES}, ` +
+        `${MIN_PAGE_BYTES}-${MAX_PAGE_BYTES}); call again with offset=patch.next_offset until it is null.`,
+      inputSchema: z.strictObject({
+        workspace: workspaceName,
+        ticket: ticketKey,
+        offset: z.number().int().min(0).optional().describe('Byte offset into the Patch; default 0.'),
+        max_bytes: z.number().int().min(MIN_PAGE_BYTES).max(MAX_PAGE_BYTES).optional().describe(`Maximum Patch bytes in this page; default ${DEFAULT_PAGE_BYTES}.`),
+      }),
+      outputSchema: z.object({
+        state: jobState,
+        iteration: z.number().int(),
+        branch: z.string(),
+        since: z.string(),
+        check_after_minutes: z.number().int().nullable(),
+        error: errorShape.optional(),
+        report: z.string().optional(),
+        patch: z
+          .object({
+            bytes: z.number().int(),
+            sha256: z.string(),
+            offset: z.number().int(),
+            returned_bytes: z.number().int(),
+            text: z.string(),
+            next_offset: z.number().int().nullable(),
+          })
+          .optional(),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ workspace, ticket, offset, max_bytes }) => run(() => execution.check(workspace, ticket, offset, max_bytes)),
+  );
+
+  server.registerTool(
+    'request_fix',
+    {
+      title: 'Request a fix',
+      description:
+        'Only in awaiting_review. Appends "## Fix N" with content to the Task file (N = the number of the iteration just ' +
+        'reviewed) and starts the next iteration in the same session (/implement .software-factory/<ticket>.md Fix N). ' +
+        `content: 1 to ${MAX_FIX_BYTES} bytes of Markdown, concrete items (path, what is wrong, what is expected). ` +
+        'Refused with iteration_limit after the configured number of iterations without Clean. Returns the iteration now ' +
+        'running and after how many minutes to check.',
+      inputSchema: z.strictObject({
+        workspace: workspaceName,
+        ticket: ticketKey,
+        content: z.string().min(1).describe('The body of the Fix section, without its heading.'),
+      }),
+      outputSchema: z.object({ iteration: z.number().int(), check_after_minutes: z.number().int() }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ workspace, ticket, content }) => run(() => execution.requestFix(workspace, ticket, content)),
+  );
+
+  server.registerTool(
+    'mark_clean',
+    {
+      title: 'Mark the job Clean',
+      description:
+        'Only in awaiting_review. Your verdict that the Patch needs no further Fix section: the job moves to ' +
+        'ready_for_human_review and the user takes over. Accepts nothing and pushes nothing.',
+      inputSchema: z.strictObject({ workspace: workspaceName, ticket: ticketKey }),
+      outputSchema: z.object({ state: jobState, iteration: z.number().int(), branch: z.string() }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ workspace, ticket }) => run(() => execution.markClean(workspace, ticket)),
   );
 
   return server;
@@ -218,8 +323,8 @@ function listen(server: HttpServer, port: number): Promise<AddressInfo> {
   });
 }
 
-export async function startServer(port: number, handbook: Handbook, version: string): Promise<RunningServer> {
-  const mcpHandler = createMcpHandler(() => createMcpServer(handbook, version));
+export async function startServer(port: number, handbook: Handbook, version: string, execution: Execution): Promise<RunningServer> {
+  const mcpHandler = createMcpHandler(() => createMcpServer(handbook, version, execution));
   const nodeHandler = toNodeHandler(mcpHandler);
   const validateHost = localhostHostValidation();
   const validateOrigin = localhostOriginValidation();

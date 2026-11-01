@@ -48,7 +48,7 @@ Implementer session stays alive until the user decides.
 | `search(workspace, query, mode, path_prefix?, max_results?)` | `mode: "path"` finds files whose relative path contains `query`; `mode: "content"` finds lines containing `query`. Both case-insensitive. Tracked and untracked files, ignored ones skipped. Bounded. |
 | `write_task(workspace, ticket, content)` | Creates or replaces the Task file `.software-factory/<ticket>.md` in the work checkout. Refused while a job on that ticket is running. |
 | `start(workspace, ticket)` | Creates the branch and starts the first iteration. Returns the check interval. |
-| `check(workspace, ticket)` | State of the job; when `awaiting_review`, the Report and the Patch (paged). |
+| `check(workspace, ticket, offset?, max_bytes?)` | State of the job and, once an iteration is published, the Report and the Patch (paged like `read_file`). |
 | `request_fix(workspace, ticket, content)` | Appends `## Fix N` with your content to the Task file and starts iteration N+1. Returns the check interval. |
 | `mark_clean(workspace, ticket)` | Your verdict that no further fix is needed. The user is notified. |
 
@@ -77,8 +77,8 @@ iterations; the last line of `/implement` ("commit your work") is denied on purp
 
 ## Report template
 
-The Implementer ends every iteration with a report in this form. The factory appends the changed-file
-table.
+The Implementer ends every iteration with a report in this form. The factory sends the template and
+its rules (no Git, no edits to the Task file) with every prompt, and appends the changed-file table.
 
 ```markdown
 # Report: <ticket>, iteration <N>

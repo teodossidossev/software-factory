@@ -6,15 +6,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
+import { JobStore } from '../src/jobs.js';
 import type { Workspace } from '../src/registry.js';
 import { checkTaskContent, MAX_TASK_BYTES, writeTask } from '../src/task-file.js';
 
 const VALID = '---\nticket: PROJ-1\ntitle: Export as CSV\nbase: master\n---\n\n# PROJ-1: Export as CSV\n';
 
 let temp: string;
+let jobs: JobStore;
 
 before(async () => {
   temp = await realpath(await mkdtemp(join(tmpdir(), 'sf-task-')));
+  jobs = new JobStore(join(temp, 'state'));
 });
 
 after(async () => {
@@ -56,7 +59,7 @@ test('checkTaskContent refuses content without a matching front matter', () => {
 
 test('writeTask creates and replaces the Task file atomically and excludes the folder once', async () => {
   const workspace = await newWorkspace('write');
-  const created = await writeTask(workspace, 'PROJ-1', VALID);
+  const created = await writeTask(workspace, 'PROJ-1', VALID, jobs);
   assert.equal(created.path, '.software-factory/PROJ-1.md');
   assert.equal(created.status, 'created');
   assert.equal(created.bytes, Buffer.byteLength(VALID));
@@ -67,7 +70,7 @@ test('writeTask creates and replaces the Task file atomically and excludes the f
   assert.equal((await stat(join(workspace.workCheckout, '.software-factory'))).mode & 0o777, 0o700);
 
   const second = `${VALID}\n## Fix 1\n`;
-  const replaced = await writeTask(workspace, 'PROJ-1', second);
+  const replaced = await writeTask(workspace, 'PROJ-1', second, jobs);
   assert.equal(replaced.status, 'replaced');
   assert.equal(await readFile(target, 'utf8'), second);
   assert.deepEqual(await readdir(join(workspace.workCheckout, '.software-factory')), ['PROJ-1.md']);
@@ -83,31 +86,31 @@ test('writeTask appends to an existing exclude without a trailing newline and ke
   const workspace = await newWorkspace('exclude');
   const excludePath = join(workspace.workCheckout, '.git', 'info', 'exclude');
   await writeFile(excludePath, '*.log');
-  await writeTask(workspace, 'PROJ-1', VALID);
+  await writeTask(workspace, 'PROJ-1', VALID, jobs);
   assert.equal(await readFile(excludePath, 'utf8'), '*.log\n.software-factory/\n');
 
   const other = await newWorkspace('exclude-present');
   const otherPath = join(other.workCheckout, '.git', 'info', 'exclude');
   await writeFile(otherPath, '/.software-factory/\n');
-  await writeTask(other, 'PROJ-1', VALID);
+  await writeTask(other, 'PROJ-1', VALID, jobs);
   assert.equal(await readFile(otherPath, 'utf8'), '/.software-factory/\n');
 });
 
 test('writeTask refuses bad tickets and symlinks on the way', async () => {
   const workspace = await newWorkspace('symlink');
   for (const ticket of ['', '../x', '.hidden', 'a/b', 'x'.repeat(65)]) {
-    await assert.rejects(writeTask(workspace, ticket, VALID.replace('PROJ-1', ticket)), { code: 'invalid_ticket' }, ticket);
+    await assert.rejects(writeTask(workspace, ticket, VALID.replace('PROJ-1', ticket), jobs), { code: 'invalid_ticket' }, ticket);
   }
   const elsewhere = join(temp, 'elsewhere');
   await mkdir(elsewhere);
   await symlink(elsewhere, join(workspace.workCheckout, '.software-factory'));
-  await assert.rejects(writeTask(workspace, 'PROJ-1', VALID), { code: 'forbidden_path' });
+  await assert.rejects(writeTask(workspace, 'PROJ-1', VALID, jobs), { code: 'forbidden_path' });
   assert.deepEqual(await readdir(elsewhere), []);
 
   const linked = await newWorkspace('file-symlink');
   await mkdir(join(linked.workCheckout, '.software-factory'));
   await writeFile(join(elsewhere, 'target.md'), 'keep');
   await symlink(join(elsewhere, 'target.md'), join(linked.workCheckout, '.software-factory', 'PROJ-1.md'));
-  await assert.rejects(writeTask(linked, 'PROJ-1', VALID), { code: 'forbidden_path' });
+  await assert.rejects(writeTask(linked, 'PROJ-1', VALID, jobs), { code: 'forbidden_path' });
   assert.equal(await readFile(join(elsewhere, 'target.md'), 'utf8'), 'keep');
 });

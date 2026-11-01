@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic.js';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
+import { TERMINAL_STATES, type JobStore } from './jobs.js';
 import type { Workspace } from './registry.js';
 
 export const TICKET_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -69,9 +70,15 @@ export function checkTaskContent(ticket: string, content: string): Buffer {
   return buffer;
 }
 
-// Seam for the execution subtask: write_task is refused while a job on this ticket is running.
-// No job state exists yet, so nothing is running and every write is allowed.
-export async function refuseWhileJobRunning(_workspace: Workspace, _ticket: string): Promise<void> {}
+export const MAX_FIX_BYTES = 64 * 1024;
+
+// write_task is refused while a job for the ticket exists in a non-terminal state.
+export async function refuseWhileJobRunning(workspace: Workspace, ticket: string, jobs: JobStore): Promise<void> {
+  const job = await jobs.read(workspace.name, ticket);
+  if (job !== undefined && !TERMINAL_STATES.includes(job.state)) {
+    throw new FactoryError('job_active', `The job for ${workspace.name}/${ticket} is ${job.state}; the Task file cannot be replaced now.`);
+  }
+}
 
 async function lstatOrMissing(path: string) {
   try {
@@ -113,18 +120,51 @@ export async function ensureExcluded(workCheckout: string): Promise<void> {
 // One write at a time in this process, so concurrent calls cannot append the exclude twice.
 let queue: Promise<unknown> = Promise.resolve();
 
-export function writeTask(workspace: Workspace, ticket: string, content: string): Promise<WriteTaskResult> {
-  const next = queue.catch(() => undefined).then(() => writeTaskNow(workspace, ticket, content));
+function serialized<T>(work: () => Promise<T>): Promise<T> {
+  const next = queue.catch(() => undefined).then(work);
   queue = next;
   return next;
 }
 
-async function writeTaskNow(workspace: Workspace, ticket: string, content: string): Promise<WriteTaskResult> {
-  if (!TICKET_PATTERN.test(ticket)) {
-    throw new FactoryError('invalid_ticket', `ticket must be ${TICKET_DESCRIPTION}.`);
+export function writeTask(workspace: Workspace, ticket: string, content: string, jobs: JobStore): Promise<WriteTaskResult> {
+  return serialized(async () => {
+    if (!TICKET_PATTERN.test(ticket)) {
+      throw new FactoryError('invalid_ticket', `ticket must be ${TICKET_DESCRIPTION}.`);
+    }
+    const buffer = checkTaskContent(ticket, content);
+    await refuseWhileJobRunning(workspace, ticket, jobs);
+    return writeTaskFile(workspace, ticket, buffer);
+  });
+}
+
+// Reads the Task file of the work checkout and returns its validated text.
+export async function readTask(workspace: Workspace, ticket: string): Promise<string> {
+  const path = `${TASK_DIR}/${ticket}.md`;
+  const stats = await lstatOrMissing(join(workspace.workCheckout, path));
+  if (stats === undefined) {
+    throw new FactoryError('task_not_found', `${path} does not exist in the work checkout of "${workspace.name}".`);
   }
-  const buffer = checkTaskContent(ticket, content);
-  await refuseWhileJobRunning(workspace, ticket);
+  if (!stats.isFile()) {
+    throw new FactoryError('forbidden_path', `${path} is not a regular file.`);
+  }
+  const content = await readFile(join(workspace.workCheckout, path), 'utf8');
+  checkTaskContent(ticket, content);
+  return content;
+}
+
+// Appends "## Fix N" to the Task file, keeping its existing content; returns the new text.
+export function appendFix(workspace: Workspace, ticket: string, fix: number, content: string): Promise<string> {
+  return serialized(async () => {
+    if (content.includes('\0') || /\p{Surrogate}/u.test(content) || content.length === 0 || Buffer.byteLength(content, 'utf8') > MAX_FIX_BYTES) {
+      throw new FactoryError('invalid_content', `content must be 1 to ${MAX_FIX_BYTES} bytes of well-formed UTF-8 without NUL characters.`);
+    }
+    const text = `${await readTask(workspace, ticket)}\n\n## Fix ${fix}\n\n${content}\n`;
+    await writeTaskFile(workspace, ticket, checkTaskContent(ticket, text));
+    return text;
+  });
+}
+
+async function writeTaskFile(workspace: Workspace, ticket: string, buffer: Buffer): Promise<WriteTaskResult> {
   await ensureExcluded(workspace.workCheckout);
 
   const dir = join(workspace.workCheckout, TASK_DIR);

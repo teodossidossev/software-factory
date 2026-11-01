@@ -97,6 +97,39 @@ function isContinuationByte(byte: number | undefined): boolean {
 
 const strictUtf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
+export interface Page {
+  bytes: number;
+  sha256: string;
+  offset: number;
+  returned_bytes: number;
+  text: string;
+  next_offset: number | null;
+}
+
+// One page of a UTF-8 buffer: at most maxBytes from offset, ending on a character boundary;
+// bytes and sha256 describe the whole buffer, which must be valid UTF-8.
+export function pageBuffer(buffer: Buffer, offset: number, maxBytes: number, name: string): Page {
+  if (offset > buffer.length || isContinuationByte(buffer[offset])) {
+    throw new RepoReadError(
+      'invalid_range',
+      `offset ${offset} is beyond the end of ${name} (${buffer.length} bytes) or inside a UTF-8 character.`,
+    );
+  }
+  // Move the page end back to a character boundary; max_bytes >= 4 keeps the page non-empty.
+  let end = Math.min(offset + maxBytes, buffer.length);
+  while (end < buffer.length && isContinuationByte(buffer[end])) {
+    end -= 1;
+  }
+  return {
+    bytes: buffer.length,
+    sha256: createHash('sha256').update(buffer).digest('hex'),
+    offset,
+    returned_bytes: end - offset,
+    text: strictUtf8.decode(buffer.subarray(offset, end)),
+    next_offset: end < buffer.length ? end : null,
+  };
+}
+
 export class RepoFiles {
   readonly #root: string;
 
@@ -127,27 +160,7 @@ export class RepoFiles {
       throw new RepoReadError('unsupported_content', `${path} contains NUL bytes and is not treated as text.`);
     }
 
-    if (offset > buffer.length || isContinuationByte(buffer[offset])) {
-      throw new RepoReadError(
-        'invalid_range',
-        `offset ${offset} is beyond the end of ${path} (${buffer.length} bytes) or inside a UTF-8 character.`,
-      );
-    }
-    // Move the page end back to a character boundary; max_bytes >= 4 keeps the page non-empty.
-    let end = Math.min(offset + maxBytes, buffer.length);
-    while (end < buffer.length && isContinuationByte(buffer[end])) {
-      end -= 1;
-    }
-    return {
-      path,
-      encoding: 'utf-8',
-      bytes: buffer.length,
-      sha256: createHash('sha256').update(buffer).digest('hex'),
-      offset,
-      returned_bytes: end - offset,
-      text: strictUtf8.decode(buffer.subarray(offset, end)),
-      next_offset: end < buffer.length ? end : null,
-    };
+    return { path, encoding: 'utf-8', ...pageBuffer(buffer, offset, maxBytes, path) };
   }
 
   // Applies the deny list to the requested path and to its symlink-free target,

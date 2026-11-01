@@ -11,7 +11,8 @@ export interface GitResult {
 
 function gitEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { GIT_OPTIONAL_LOCKS: '0' };
-  for (const name of ['PATH', 'HOME', 'LANG'] as const) {
+  // SSH_AUTH_SOCK lets `git fetch` reach an SSH remote with the user's agent.
+  for (const name of ['PATH', 'HOME', 'LANG', 'SSH_AUTH_SOCK'] as const) {
     if (process.env[name] !== undefined) {
       env[name] = process.env[name];
     }
@@ -19,9 +20,10 @@ function gitEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-export function runGit(cwd: string, args: string[], maxBytes = 1024 * 1024): Promise<GitResult> {
+// timeoutMs, when given, stops Git with SIGTERM; the result then has code null.
+export function runGit(cwd: string, args: string[], maxBytes = 1024 * 1024, timeoutMs?: number): Promise<GitResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn('git', args, { cwd, env: gitEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('git', args, { cwd, env: gitEnv(), stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, killSignal: 'SIGTERM' });
     const chunks: Buffer[] = [];
     let length = 0;
     let truncated = false;

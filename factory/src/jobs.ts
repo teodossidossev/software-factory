@@ -1,0 +1,206 @@
+// Job state on disk: <state dir>/jobs/<workspace>/<ticket>/ with job.json, events.jsonl and
+// iterations/NNN/{report.md,patch.diff,meta.json}. Strictly parsed; every file but the event log
+// is replaced atomically. Knows nothing about Git or the Implementer session.
+import { appendFile, mkdir, readdir, readFile, rename } from 'node:fs/promises';
+import { join } from 'node:path';
+import * as z from 'zod/v4';
+import { writeFileAtomic } from './atomic.js';
+import { FactoryError } from './errors.js';
+
+export const JOB_STATES = [
+  'starting',
+  'working',
+  'awaiting_review',
+  'needs_human',
+  'ready_for_human_review',
+  'preparing_mr',
+  'pushed',
+  'aborted',
+  'failed',
+] as const;
+export type JobState = (typeof JOB_STATES)[number];
+// States that hold the machine's one job slot.
+export const ACTIVE_STATES: readonly JobState[] = ['starting', 'working', 'awaiting_review'];
+// States after which a new job for the same ticket may start.
+export const TERMINAL_STATES: readonly JobState[] = ['failed', 'aborted', 'pushed'];
+
+const timestamp = z.iso.datetime();
+const jobSchema = z.strictObject({
+  workspace: z.string().min(1),
+  ticket: z.string().min(1),
+  branch: z.string().min(1),
+  base: z.string().min(1),
+  // The commit the branch was created from; the Patch is the difference to it.
+  base_commit: z.string().regex(/^[0-9a-f]{40,64}$/).nullable(),
+  state: z.enum(JOB_STATES),
+  // Number of published iterations.
+  iteration: z.number().int().min(0),
+  session_id: z.string().min(1).nullable(),
+  created_at: timestamp,
+  // Time of the last state change.
+  updated_at: timestamp,
+  error: z.strictObject({ code: z.string(), message: z.string() }).optional(),
+});
+export type Job = z.infer<typeof jobSchema>;
+
+export interface ChangedFile {
+  path: string;
+  added: number;
+  removed: number;
+}
+
+export interface IterationMeta {
+  iteration: number;
+  started_at: string;
+  ended_at: string;
+  // Tool names of denied tool calls, in order; never their inputs.
+  denials: string[];
+  changed_files: ChangedFile[];
+  patch_truncated: boolean;
+  submodule_changed: string[];
+  // This iteration's cost, and the SDK's cumulative total for the session.
+  cost_usd: number | null;
+  cost_usd_total: number | null;
+  duration_ms: number | null;
+}
+
+export interface Iteration {
+  report: string;
+  patch: Buffer;
+  meta: IterationMeta;
+}
+
+// One line of events.jsonl: an SDK message, a prompt sent, or a state change.
+export type EventRecord = { ts: string; iteration: number } & (
+  | { message: unknown }
+  | { prompt: string }
+  | { state: { from: JobState | null; to: JobState; error?: { code: string; message: string } } }
+);
+
+export function isActive(job: Job): boolean {
+  return ACTIVE_STATES.includes(job.state);
+}
+
+export function now(): string {
+  return new Date().toISOString();
+}
+
+async function readOrMissing(path: string): Promise<string | undefined> {
+  try {
+    return await readFile(path, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+export class JobStore {
+  readonly root: string;
+
+  // stateDir: the factory state directory; jobs live in its jobs/ subdirectory.
+  constructor(stateDir: string) {
+    this.root = join(stateDir, 'jobs');
+  }
+
+  // workspace and ticket are validated names (registry and Task file patterns), never paths.
+  dir(workspace: string, ticket: string): string {
+    return join(this.root, workspace, ticket);
+  }
+
+  eventsPath(workspace: string, ticket: string): string {
+    return join(this.dir(workspace, ticket), 'events.jsonl');
+  }
+
+  async read(workspace: string, ticket: string): Promise<Job | undefined> {
+    const text = await readOrMissing(join(this.dir(workspace, ticket), 'job.json'));
+    if (text === undefined) {
+      return undefined;
+    }
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new FactoryError('job_invalid', `job.json of ${workspace}/${ticket} is not valid JSON.`);
+    }
+    const parsed = jobSchema.safeParse(data);
+    if (!parsed.success || parsed.data.workspace !== workspace || parsed.data.ticket !== ticket) {
+      throw new FactoryError('job_invalid', `job.json of ${workspace}/${ticket} is invalid.`);
+    }
+    return parsed.data;
+  }
+
+  async write(job: Job): Promise<void> {
+    const dir = this.dir(job.workspace, job.ticket);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await writeFileAtomic(join(dir, 'job.json'), Buffer.from(`${JSON.stringify(jobSchema.parse(job), null, 2)}\n`));
+  }
+
+  // Every current job (archived ones excluded), sorted by workspace and ticket.
+  async list(): Promise<Job[]> {
+    const jobs: Job[] = [];
+    for (const workspace of await this.#entries(this.root)) {
+      for (const ticket of await this.#entries(join(this.root, workspace))) {
+        // Archived directories are named <ticket>.<timestamp>; their job.json names another ticket.
+        const text = await readOrMissing(join(this.root, workspace, ticket, 'job.json'));
+        if (text === undefined) {
+          continue;
+        }
+        let ticketInFile: unknown = ticket;
+        try {
+          ticketInFile = (JSON.parse(text) as { ticket?: unknown }).ticket;
+        } catch {
+          // read() below reports the invalid file.
+        }
+        if (ticketInFile === ticket) {
+          const job = await this.read(workspace, ticket);
+          if (job !== undefined) {
+            jobs.push(job);
+          }
+        }
+      }
+    }
+    return jobs.sort((a, b) => `${a.workspace}/${a.ticket}`.localeCompare(`${b.workspace}/${b.ticket}`));
+  }
+
+  // Moves the job directory to <ticket>.<timestamp> next to it.
+  async archive(workspace: string, ticket: string): Promise<void> {
+    const stamp = now().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+    await rename(this.dir(workspace, ticket), join(this.root, workspace, `${ticket}.${stamp}`));
+  }
+
+  async appendEvent(workspace: string, ticket: string, record: EventRecord): Promise<void> {
+    await appendFile(this.eventsPath(workspace, ticket), `${JSON.stringify(record)}\n`, { mode: 0o600 });
+  }
+
+  async writeIteration(workspace: string, ticket: string, iteration: Iteration): Promise<void> {
+    const dir = join(this.dir(workspace, ticket), 'iterations', String(iteration.meta.iteration).padStart(3, '0'));
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await writeFileAtomic(join(dir, 'patch.diff'), iteration.patch);
+    await writeFileAtomic(join(dir, 'meta.json'), Buffer.from(`${JSON.stringify(iteration.meta, null, 2)}\n`));
+    // The report last: its presence marks the iteration as complete.
+    await writeFileAtomic(join(dir, 'report.md'), Buffer.from(iteration.report, 'utf8'));
+  }
+
+  async readMeta(workspace: string, ticket: string, number: number): Promise<IterationMeta> {
+    const dir = join(this.dir(workspace, ticket), 'iterations', String(number).padStart(3, '0'));
+    return JSON.parse(await readFile(join(dir, 'meta.json'), 'utf8')) as IterationMeta;
+  }
+
+  async readIteration(workspace: string, ticket: string, number: number): Promise<{ report: string; patch: Buffer }> {
+    const dir = join(this.dir(workspace, ticket), 'iterations', String(number).padStart(3, '0'));
+    return { report: await readFile(join(dir, 'report.md'), 'utf8'), patch: await readFile(join(dir, 'patch.diff')) };
+  }
+
+  async #entries(dir: string): Promise<string[]> {
+    try {
+      return (await readdir(dir, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return [];
+      }
+      throw error;
+    }
+  }
+}

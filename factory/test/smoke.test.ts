@@ -28,7 +28,7 @@ let repo: string;
 const running = new Set<ChildProcess>();
 
 function env(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  return { PATH: process.env.PATH, HOME: process.env.HOME, SF_CONFIG_DIR: configDir, SF_PORT: '0', ...extra };
+  return { PATH: process.env.PATH, HOME: process.env.HOME, SF_CONFIG_DIR: configDir, SF_STATE_DIR: join(temp, 'state'), SF_PORT: '0', ...extra };
 }
 
 function runCli(args: string[], extra: Record<string, string> = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
@@ -165,7 +165,7 @@ test('sf workspace add, list and remove manage the registry with the documented 
   await rm(join(broken, '.git'), { recursive: true });
 });
 
-test('sf serve gives the Quick start as instructions and exactly the four planning tools', async () => {
+test('sf serve gives the Quick start as instructions and the planning and execution tools', async () => {
   const served = await serve();
   const client = await connect(served);
   const handbook = await readFile(HANDBOOK, 'utf8');
@@ -177,7 +177,7 @@ test('sf serve gives the Quick start as instructions and exactly the four planni
   assert.equal(client.getServerVersion()?.version, '0.1.0');
 
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map((tool) => tool.name).sort(), ['guide', 'read_file', 'search', 'write_task']);
+  assert.deepEqual(tools.map((tool) => tool.name).sort(), ['check', 'guide', 'mark_clean', 'read_file', 'request_fix', 'search', 'start', 'write_task']);
   const annotations = Object.fromEntries(tools.map((tool) => [tool.name, tool.annotations]));
   assert.equal(annotations.read_file?.readOnlyHint, true);
   assert.equal(annotations.search?.readOnlyHint, true);
@@ -277,7 +277,10 @@ test('sf serve guards Host and Origin, reports a busy port and refuses an invali
   assert.equal(await postStatus(served.url, { host: `attacker.example:${served.port}` }), 403);
   assert.equal(await postStatus(served.url, { origin: 'https://attacker.example' }), 403);
 
-  const busy = await runCli(['serve'], { SF_PORT: String(served.port) });
+  const busy = await runCli(['serve'], { SF_PORT: String(served.port), SF_STATE_DIR: join(temp, 'state-busy') });
+  const second = await runCli(['serve']);
+  assert.equal(second.code, 1);
+  assert.match(second.stderr, /already listening on the socket/);
   assert.equal(busy.code, 1);
   assert.match(busy.stderr, /already in use/);
   assert.equal(await stop(served), 0);
@@ -290,4 +293,7 @@ test('sf serve guards Host and Origin, reports a busy port and refuses an invali
   assert.match(invalid.stderr, /workspaces\.json is invalid/);
   assert.equal((await runCli(['serve'], { SF_HANDBOOK: join(temp, 'missing.md') })).code, 1);
   assert.equal((await runCli(['serve'], { SF_PORT: 'abc' })).code, 1);
+  const longState = await runCli(['serve'], { SF_STATE_DIR: join(temp, 'x'.repeat(120)) });
+  assert.equal(longState.code, 1);
+  assert.match(longState.stderr, /longer than 107 bytes; use a shorter SF_STATE_DIR/);
 });

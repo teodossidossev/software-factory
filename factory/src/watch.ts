@@ -1,0 +1,126 @@
+// `sf watch`: reads a job's events.jsonl directly (no server needed) and prints readable lines.
+import { open } from 'node:fs/promises';
+import { StringDecoder } from 'node:string_decoder';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { FactoryError } from './errors.js';
+
+const INPUT_CHARS = 120;
+const LINE_CHARS = 200;
+const POLL_MS = 300;
+
+function oneLine(text: string, max = LINE_CHARS): string {
+  const line = text.replace(/\s+/g, ' ').trim();
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+function blocks(message: Record<string, unknown>): Array<Record<string, unknown>> {
+  const content = (message.message as { content?: unknown } | undefined)?.content;
+  return Array.isArray(content) ? (content as Array<Record<string, unknown>>) : [];
+}
+
+function resultText(content: unknown): string {
+  if (typeof content === 'string') {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content.map((part: { text?: unknown }) => (typeof part?.text === 'string' ? part.text : '')).join(' ');
+  }
+  return '';
+}
+
+// The printable lines of one events.jsonl record (none for messages without visible content).
+export function formatEvent(raw: string): string[] {
+  let record: Record<string, unknown>;
+  try {
+    record = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return [];
+  }
+  const time = typeof record.ts === 'string' ? record.ts.slice(11, 19) : '--:--:--';
+  const prefix = `${time} [${String(record.iteration)}]`;
+  if (typeof record.prompt === 'string') {
+    // The factory's fixed rules block after the prompt is the same every time; it is not shown.
+    const rules = record.prompt.indexOf('\n\nRules from the Software Factory:');
+    return [`${prefix} > ${oneLine(rules < 0 ? record.prompt : record.prompt.slice(0, rules))}`];
+  }
+  const state = record.state as { from: string | null; to: string; error?: { code: string; message: string } } | undefined;
+  if (state !== undefined) {
+    const error = state.error !== undefined ? ` (${state.error.code}: ${state.error.message})` : '';
+    return [`${prefix} state ${state.from ?? '-'} -> ${state.to}${error}`];
+  }
+  const message = record.message as Record<string, unknown> | undefined;
+  if (message === undefined) {
+    return [];
+  }
+  if (message.type === 'system' && message.subtype === 'init') {
+    return [`${prefix} session ${String(message.session_id)} (permission mode ${String(message.permissionMode)}, model ${String(message.model)})`];
+  }
+  if (message.type === 'assistant') {
+    return blocks(message).flatMap((block) => {
+      if (block.type === 'text' && typeof block.text === 'string' && block.text.trim() !== '') {
+        return block.text
+          .trim()
+          .split('\n')
+          .filter((line) => line.trim() !== '')
+          .map((line, index) => `${prefix} ${index === 0 ? 'assistant:' : '          '} ${line}`);
+      }
+      if (block.type === 'tool_use') {
+        return [`${prefix} tool_use ${String(block.name)} ${JSON.stringify(block.input ?? {}).slice(0, INPUT_CHARS)}`];
+      }
+      return [];
+    });
+  }
+  if (message.type === 'user') {
+    return blocks(message)
+      .filter((block) => block.type === 'tool_result')
+      .map((block) => `${prefix} tool_result${block.is_error === true ? ' (error)' : ''}: ${oneLine(resultText(block.content))}`);
+  }
+  if (message.type === 'result') {
+    const cost = typeof message.total_cost_usd === 'number' ? `$${message.total_cost_usd.toFixed(4)}` : 'n/a';
+    const seconds = typeof message.duration_ms === 'number' ? `${(message.duration_ms / 1000).toFixed(1)} s` : 'n/a';
+    return [`${prefix} result ${String(message.subtype)}, cost ${cost}, duration ${seconds}, ${String(message.num_turns)} turns`];
+  }
+  return [];
+}
+
+// Prints every event; with follow, keeps reading new lines until the signal aborts.
+export async function watchEvents(path: string, follow: boolean, print: (line: string) => void, signal?: AbortSignal): Promise<void> {
+  let handle;
+  try {
+    handle = await open(path, 'r');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new FactoryError('job_not_found', 'This job has no events yet.');
+    }
+    throw error;
+  }
+  try {
+    let position = 0;
+    let pending = '';
+    const decoder = new StringDecoder('utf8');
+    const chunk = Buffer.alloc(65536);
+    for (;;) {
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
+      if (bytesRead > 0) {
+        position += bytesRead;
+        pending += decoder.write(chunk.subarray(0, bytesRead));
+        const lines = pending.split('\n');
+        pending = lines.pop()!;
+        for (const line of lines) {
+          formatEvent(line).forEach(print);
+        }
+        continue;
+      }
+      if (!follow || signal?.aborted) {
+        return;
+      }
+      try {
+        await sleep(POLL_MS, undefined, { signal });
+      } catch {
+        return;
+      }
+    }
+  } finally {
+    await handle.close();
+  }
+}

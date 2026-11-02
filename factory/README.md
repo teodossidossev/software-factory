@@ -19,10 +19,10 @@ bin/sf workspace add <name> --read <path> [--work <path>]   # --work defaults to
 bin/sf workspace list
 bin/sf workspace remove <name>
 bin/sf serve                      # foreground; Ctrl+C stops it; prints the dashboard URL
-bin/sf dashboard                  # the dashboard URL of the last sf serve start; works without sf serve
+bin/sf dashboard [--open]         # the dashboard URL of the last sf serve start; --open opens it with xdg-open; works without sf serve
 bin/sf start <workspace> <ticket> # start the job (same as the start tool); needs sf serve
 bin/sf say <workspace> <ticket> <message...>   # a user message into the session; needs sf serve
-bin/sf status [<workspace> <ticket>]           # one job or all jobs; works without sf serve
+bin/sf status [<workspace> <ticket>]           # one job or all jobs, with recorded cost and elapsed time; works without sf serve
 bin/sf watch <workspace> <ticket> [--once]     # the session live; works without sf serve
 bin/sf approve <workspace> <ticket>            # MR preparation and push; waits for the outcome; needs sf serve
 bin/sf abort <workspace> <ticket> [--discard]  # end the job; --discard removes the branch and its changes; needs sf serve
@@ -32,6 +32,23 @@ npm run typecheck && npm test
 ```
 
 Exit codes: 0 ok, 1 error, 2 usage. `sf approve` exits 1 unless the branch was pushed.
+
+### sf status
+
+One line per current job (archived ones excluded), sorted by workspace and ticket: `WORKSPACE`,
+`TICKET`, `STATE`, `ITER` (published iterations), `BRANCH`, `SINCE` (the last state change),
+`COST_USD`, `ELAPSED` and `ERROR` (the error code; `sf status <workspace> <ticket>` prints the
+message below the table). Both work without `sf serve`; they read the state directory.
+
+- `COST_USD` is the recorded cost: the sum of `cost_usd` over `meta.json` of the published
+  iterations 1 to `iteration`, with four decimals (`0.0000` for a real zero or no iteration yet).
+  A running iteration or an MR preparation turn adds nothing until its iteration is published, and
+  `cost_usd_total` is never used. `unknown` means a published iteration has no usable cost (its
+  `cost_usd` is null or missing, or its `meta.json` is missing); an unreadable or malformed
+  `meta.json` is an error.
+- `ELAPSED` is wall-clock time since `created_at` as `HH:MM:SS` (hours go beyond 23), including
+  waiting for review, for the user and for MR preparation. For a job in `pushed`, `aborted` or
+  `failed` it ends at `updated_at` and stops growing; for every other state it ends now.
 
 ## Environment
 
@@ -220,6 +237,14 @@ tunnel never reaches it. At every start `sf serve` writes a new random token (32
 that file and `SF_DASHBOARD_PORT`. The token changes on every `sf serve` start, so an open page
 stops working after a restart until it is reopened with the new URL. Any path without the right
 token answers 404 with an empty body.
+
+`sf dashboard --open` prints the same URL and then opens it in the browser with `xdg-open` (Linux
+only, from `xdg-utils`), run without a shell with the URL as its one argument and waited for up to
+10 s. The same checks as without `--open` come first (dashboard off, no or invalid token, invalid
+port: exit 1, nothing launched). When `xdg-open` is missing, exits unsuccessfully or does not finish
+in time, `sf` exits 1 with the reason; the printed URL stays usable by hand. Exit 0 means the
+launcher accepted the URL, not that the page loaded: nothing checks that `sf serve` is running.
+On another platform `--open` is refused (`open_unsupported`); plain `sf dashboard` works everywhere.
 
 Version 1 shows, live: every job with its state; for the selected job (the most recently updated
 one, or `#<workspace>/<ticket>` in the URL) the branch, base, state, iteration, cost and error,

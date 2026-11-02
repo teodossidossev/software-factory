@@ -223,6 +223,30 @@ export class JobStore {
     return JSON.parse(await readFile(join(dir, 'meta.json'), 'utf8')) as IterationMeta;
   }
 
+  // The recorded cost of the published iterations 1 to count: the sum of their cost_usd. Undefined
+  // when a metadata file is missing or a cost is not a finite nonnegative number (null, absent, ...);
+  // other read failures and malformed JSON throw. Later directories and cost_usd_total are ignored.
+  async recordedCost(workspace: string, ticket: string, count: number): Promise<number | undefined> {
+    let total = 0;
+    for (let number = 1; number <= count; number += 1) {
+      let meta: IterationMeta;
+      try {
+        meta = await this.readMeta(workspace, ticket, number);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          return undefined;
+        }
+        throw error;
+      }
+      const cost: unknown = meta.cost_usd;
+      if (typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0) {
+        return undefined;
+      }
+      total += cost;
+    }
+    return total;
+  }
+
   async readIteration(workspace: string, ticket: string, number: number): Promise<{ report: string; patch: Buffer }> {
     const dir = join(this.dir(workspace, ticket), 'iterations', String(number).padStart(3, '0'));
     return { report: await readFile(join(dir, 'report.md'), 'utf8'), patch: await readFile(join(dir, 'patch.diff')) };

@@ -4,6 +4,7 @@
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
+import { openInBrowser } from './browser.js';
 import { loadConfig, stateDir } from './config.js';
 import { DEFAULT_DASHBOARD_PORT, dashboardUrl, readToken, removeToken, type RunningDashboard, startDashboard } from './dashboard.js';
 import { FactoryError } from './errors.js';
@@ -13,24 +14,32 @@ import { type Job, JobStore } from './jobs.js';
 import { jobNotification, notifyConfig, sendNotification, stateNotifier } from './notify.js';
 import { loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { loadHandbook, packageVersion, PortInUseError, SERVER_NAME, startServer } from './server.js';
+import { type StatusRow, statusRows } from './status.js';
 import { TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { watchEvents } from './watch.js';
 
 const DEFAULT_PORT = 8787;
 const USAGE = `Usage:
   sf serve                                              Serve the MCP tools on 127.0.0.1:\${SF_PORT:-${DEFAULT_PORT}}/mcp and the dashboard
-  sf dashboard                                          Print the dashboard URL of the running sf serve
+  sf dashboard [--open]                                 Print the dashboard URL of the running sf serve; --open also opens it (xdg-open)
   sf workspace add <name> --read <path> [--work <path>] Register a workspace (--work defaults to --read)
   sf workspace list                                     List registered workspaces
   sf workspace remove <name>                            Unregister a workspace
   sf start <workspace> <ticket>                         Start the job for .software-factory/<ticket>.md
   sf say <workspace> <ticket> <message...>              Send a message into the job's Implementer session
-  sf status [<workspace> <ticket>]                      Show one job or all jobs
+  sf status [<workspace> <ticket>]                      Show one job or all jobs: state, iterations, recorded cost, elapsed time
   sf watch <workspace> <ticket> [--once]                Show the session live (Ctrl+C stops)
   sf approve <workspace> <ticket>                       MR preparation: commit, rebase, verify, push
   sf abort <workspace> <ticket> [--discard]             End the job; --discard also removes the branch and its changes
   sf reset <workspace> <ticket>                         End the session and archive the job; Git is not touched
-  sf notify-test                                        Send a test notification on every channel`;
+  sf notify-test                                        Send a test notification on every channel
+
+Notes:
+  COST_USD: cost_usd of the published iterations summed, four decimals; 0.0000 before the first one, unknown when one has no usable cost.
+            A running iteration or MR preparation adds nothing until its iteration is published.
+  ELAPSED: wall-clock time since the job was created, waiting included; stops at the last state change once pushed, aborted or failed.
+  dashboard --open: Linux with xdg-open; waits for the launcher at most 10 s; on a launcher failure exits 1 and leaves the printed URL to open by hand.
+Exit codes: 0 ok, 1 error, 2 usage.`;
 
 class UsageError extends Error {}
 
@@ -278,20 +287,22 @@ async function notifyTest(args: string[]): Promise<void> {
   }
 }
 
-function table(jobs: Job[]): string {
-  const rows = [
-    ['WORKSPACE', 'TICKET', 'STATE', 'ITER', 'BRANCH', 'SINCE', 'ERROR'],
-    ...jobs.map((job) => [job.workspace, job.ticket, job.state, String(job.iteration), job.branch, job.updated_at, job.error?.code ?? '']),
+function table(rows: StatusRow[]): string {
+  const cells = [
+    ['WORKSPACE', 'TICKET', 'STATE', 'ITER', 'BRANCH', 'SINCE', 'COST_USD', 'ELAPSED', 'ERROR'],
+    ...rows.map(({ job, cost, elapsed }) => [job.workspace, job.ticket, job.state, String(job.iteration), job.branch, job.updated_at, cost, elapsed, job.error?.code ?? '']),
   ];
-  const widths = rows[0]!.map((_, column) => Math.max(...rows.map((row) => row[column]!.length)));
-  return rows.map((row) => row.map((cell, column) => cell.padEnd(widths[column]!)).join('  ').trimEnd()).join('\n');
+  const widths = cells[0]!.map((_, column) => Math.max(...cells.map((row) => row[column]!.length)));
+  return cells.map((row) => row.map((cell, column) => cell.padEnd(widths[column]!)).join('  ').trimEnd()).join('\n');
 }
 
 async function status(args: string[]): Promise<void> {
   const jobs = new JobStore(stateDir());
+  // One clock reading for every row.
+  const now = new Date();
   if (args.length === 0) {
     const all = await jobs.list();
-    console.log(all.length === 0 ? 'No jobs.' : table(all));
+    console.log(all.length === 0 ? 'No jobs.' : table(await statusRows(jobs, all, now)));
     return;
   }
   if (args.length !== 2) {
@@ -302,7 +313,7 @@ async function status(args: string[]): Promise<void> {
   if (job === undefined) {
     throw new FactoryError('job_not_found', `There is no job for ${workspace}/${ticket}.`);
   }
-  console.log(table([job]));
+  console.log(table(await statusRows(jobs, [job], now)));
   if (job.error !== undefined) {
     console.log(`\n${job.error.code}: ${job.error.message}`);
   }
@@ -324,8 +335,9 @@ async function watch(args: string[]): Promise<void> {
 }
 
 async function dashboardCommand(args: string[]): Promise<void> {
-  if (args.length !== 0) {
-    throw new UsageError('dashboard takes no arguments.');
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { open: { type: 'boolean' } } });
+  if (positionals.length !== 0) {
+    throw new UsageError('dashboard takes no arguments (only --open).');
   }
   if (!dashboardOn()) {
     throw new FactoryError('dashboard_off', 'The dashboard is off (SF_DASHBOARD=off).');
@@ -335,8 +347,13 @@ async function dashboardCommand(args: string[]): Promise<void> {
   if (token === undefined) {
     throw new FactoryError('no_dashboard_token', 'There is no dashboard token: sf serve has not started with the dashboard on this state directory.');
   }
-  console.log(dashboardUrl(port, token).href);
+  const url = dashboardUrl(port, token).href;
+  console.log(url);
   console.log('The token changes on every sf serve start; the URL works while that sf serve runs.');
+  if (values.open === true) {
+    // The URL is printed first so it can be opened by hand when the launcher fails.
+    await openInBrowser(url);
+  }
 }
 
 async function main(argv: string[]): Promise<void> {

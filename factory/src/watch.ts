@@ -32,7 +32,7 @@ function resultText(content: unknown): string {
 export interface DescribedEvent {
   ts: string | null;
   iteration: number | null;
-  // "prompt", "state", "notify_failed", "placeholders_removed", "principal", or the SDK message type ("assistant", "user", "result", "system", ...).
+  // "prompt", "state", "notify_failed", "placeholders_removed", "principal", "event_delivered", "event_failed", or the SDK message type ("assistant", "user", "result", "system", ...).
   type: string;
   lines: string[];
 }
@@ -90,6 +90,10 @@ function recordLines(record: Record<string, unknown>): string[] {
   }
   if (record.type === 'principal') {
     return [`${prefix} ${String(record.tool)} by ${oneLine(String(record.principal))}`];
+  }
+  if (record.type === 'event_delivered' || record.type === 'event_failed') {
+    const outcome = record.type === 'event_delivered' ? 'delivered' : 'failed';
+    return [`${prefix} event to ${oneLine(String(record.subscription))} attempt ${String(record.attempt)} ${outcome}: ${oneLine(String(record.status))}`];
   }
   const message = record.message as Record<string, unknown> | undefined;
   if (message === undefined) {

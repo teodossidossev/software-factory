@@ -1,6 +1,7 @@
 // The sf command: `sf serve`, `sf workspace add|list|remove`, `sf start|say|approve|abort|reset`
 // (through the socket of sf serve), `sf status|watch|dashboard` (reading the state directory
-// directly), `sf notify-test` and `sf auth-test` (verifying a token from stdin without the server).
+// directly), `sf events list|remove|test` (through the socket), `sf notify-test` and `sf auth-test`
+// (verifying a token from stdin without the server).
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -9,6 +10,7 @@ import { openInBrowser } from './browser.js';
 import { authConfig, loadConfig, stateDir } from './config.js';
 import { DEFAULT_DASHBOARD_PORT, dashboardUrl, readToken, removeToken, type RunningDashboard, startDashboard } from './dashboard.js';
 import { FactoryError } from './errors.js';
+import { Events, type SubscriptionSummary } from './events.js';
 import { Execution, type StateListener } from './execution.js';
 import { callSocket, listenSocket } from './ipc.js';
 import { type Job, JobStore } from './jobs.js';
@@ -33,6 +35,9 @@ const USAGE = `Usage:
   sf approve <workspace> <ticket>                       MR preparation: commit, rebase, verify, push
   sf abort <workspace> <ticket> [--discard]             End the job; --discard also removes the branch and its changes
   sf reset <workspace> <ticket>                         End the session and archive the job; the branch and files are untouched
+  sf events list                                        List the MCP event subscriptions (no secrets)
+  sf events remove <id>                                 Remove an MCP event subscription
+  sf events test <id>                                   Send a test event (state "test") to a subscription and print the answer
   sf notify-test                                        Send a test notification on every channel
   sf auth-test                                          Verify an access token read from stdin with the SF_AUTH_* settings
 
@@ -70,15 +75,32 @@ async function serve(): Promise<void> {
   await loadRegistry();
   const jobs = new JobStore(config.stateDir);
   const notify = stateNotifier(notifyConfig(), jobs);
+  // MCP Events: loads the subscriptions and resumes the pending deliveries. Loopback callbacks
+  // only with SF_EVENTS_ALLOW_LOOPBACK=on (tests).
+  const events = await Events.open(config.stateDir, jobs, { allowLoopback: process.env.SF_EVENTS_ALLOW_LOOPBACK === 'on' });
   // The dashboard starts after recovery; until then its listener is a no-op.
   let dashboard: RunningDashboard | undefined;
   const onStateChange: StateListener = (job, from, lines) => {
     notify(job, from, lines);
+    events.onStateChange(job, from, lines);
     dashboard?.onStateChange(job, from);
   };
   const execution = new Execution(config, (name) => resolveWorkspace(name), onStateChange, handbook.text);
   // The socket first: it refuses a second sf serve on the same state before recovery touches it.
   const socket = await listenSocket(config.stateDir, async ({ command, args }) => {
+    if (command === 'events') {
+      const [action, id, ...extra] = args;
+      if (action === 'list' && id === undefined) {
+        return { subscriptions: events.subscriptions() };
+      }
+      if (action === 'remove' && id !== undefined && extra.length === 0) {
+        return events.remove(id);
+      }
+      if (action === 'test' && id !== undefined && extra.length === 0) {
+        return events.test(id);
+      }
+      throw new FactoryError('bad_request', 'Unknown events command.');
+    }
     const [workspace = '', ticket = '', ...words] = args;
     if (command === 'start' && words.length === 0) {
       return execution.start(workspace, ticket);
@@ -100,8 +122,9 @@ async function serve(): Promise<void> {
   let server;
   try {
     await execution.recover();
-    server = await startServer(port, handbook, await packageVersion(), execution, auth);
+    server = await startServer(port, handbook, await packageVersion(), execution, auth, undefined, events);
   } catch (error) {
+    events.close();
     await socket.close();
     throw error;
   }
@@ -112,6 +135,7 @@ async function serve(): Promise<void> {
       await removeToken(config.stateDir);
     }
   } catch (error) {
+    events.close();
     await Promise.all([server.close(), socket.close()]);
     throw error;
   }
@@ -127,6 +151,7 @@ async function serve(): Promise<void> {
     }
     stopping = true;
     console.log(`${SERVER_NAME} received ${signal}, shutting down`);
+    events.close();
     Promise.all([server.close(), socket.close(), dashboard?.close()]).then(
       () => process.exit(0),
       (error: unknown) => {
@@ -272,6 +297,47 @@ async function reset(args: string[]): Promise<void> {
   }
   await viaServer('reset', checkJob(args, 'reset'));
   console.log('The branch and the files in the work checkout are untouched.');
+}
+
+const SUBSCRIPTION_ID = /^sub_[A-Za-z0-9_-]{1,64}$/;
+
+function subscriptionTable(rows: SubscriptionSummary[]): string {
+  const cells = [
+    ['ID', 'PRINCIPAL', 'EVENT', 'INPUT', 'HOST', 'CREATED', 'REFRESH_BEFORE'],
+    ...rows.map((row) => [row.id, row.principal, row.event, JSON.stringify(row.input), row.host, row.createdAt, row.refreshBefore]),
+  ];
+  const widths = cells[0]!.map((_, column) => Math.max(...cells.map((row) => row[column]!.length)));
+  return cells.map((row) => row.map((cell, column) => cell.padEnd(widths[column]!)).join('  ').trimEnd()).join('\n');
+}
+
+// `sf events list|remove <id>|test <id>`, through the socket of sf serve.
+async function eventsCommand(args: string[]): Promise<void> {
+  const [action, id, ...extra] = args;
+  if (action === 'list') {
+    if (id !== undefined) {
+      throw new UsageError('events list takes no arguments.');
+    }
+    const response = await callSocket(stateDir(), { command: 'events', args: ['list'] });
+    if (!response.ok) {
+      throw new FactoryError(response.error.code, response.error.message);
+    }
+    const rows = (response.result as { subscriptions: SubscriptionSummary[] }).subscriptions;
+    console.log(rows.length === 0 ? 'No subscriptions.' : subscriptionTable(rows));
+    return;
+  }
+  if (action !== 'remove' && action !== 'test') {
+    throw new UsageError(action === undefined ? 'an events command is required.' : `unknown events command "${action}".`);
+  }
+  if (id === undefined || extra.length > 0) {
+    throw new UsageError(`events ${action} needs <id>.`);
+  }
+  if (!SUBSCRIPTION_ID.test(id)) {
+    throw new FactoryError('invalid_subscription', 'A subscription id looks like sub_<letters, digits, "_" and "-">; sf events list shows them.');
+  }
+  const result = await viaServer('events', [action, id]);
+  if (action === 'test' && result.delivered !== true) {
+    process.exitCode = 1;
+  }
 }
 
 async function notifyTest(args: string[]): Promise<void> {
@@ -424,6 +490,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'notify-test') {
     await notifyTest(rest);
+    return;
+  }
+  if (command === 'events') {
+    await eventsCommand(rest);
     return;
   }
   if (command === 'auth-test') {

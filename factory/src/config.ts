@@ -112,6 +112,10 @@ export function authConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig | u
     if (!/^[A-Za-z0-9_./-]+$/.test(method)) {
       throw new FactoryError('invalid_config', `SF_AUTH_OPEN_METHODS has an invalid method "${method}".`);
     }
+    // Events are bound to the principal; they never run without a token.
+    if (method.startsWith('events/')) {
+      throw new FactoryError('invalid_config', `SF_AUTH_OPEN_METHODS must not contain the event method "${method}".`);
+    }
   }
   return { issuer, audience, resource, openMethods: [...new Set(openMethods)] };
 }

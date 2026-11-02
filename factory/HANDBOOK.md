@@ -17,13 +17,19 @@ their own review, so you drive the cycle through tools:
 2. Split the solution into subtasks of about one merge request each (roughly 20-30 files, a soft
    limit). Each subtask gets one Task file.
 3. Write the Task file with `write_task` (format below). The user says "start": call `start`.
-4. `start` and every `request_fix` tell you when to check next. Create one scheduled task in this
-   conversation that calls `check` on that interval, if none exists yet.
+4. Subscribe once to the event `software_factory.job` for the workspace: create an event-triggered
+   task on the event `software_factory.job` that calls `check` for the ticket in the payload (ChatGPT
+   subscribes when the task is created on the connector; filter by `workspace`, or by `ticket`). It
+   fires when an iteration is published (`awaiting_review`) and on `needs_human`,
+   `ready_for_human_review`, `pushed`, `aborted` and `failed`. When events are not available in the
+   account: `start` and every `request_fix` tell you when to check next; create one scheduled task in
+   this conversation that calls `check` on that interval, if none exists yet.
 5. When `check` says `awaiting_review`, read the Report and the Patch it returns. Review against the
    Task file, the repository standards and the plan. Then either `request_fix` with a Fix section
    (the next iteration starts at once) or `mark_clean` (the user takes over).
-   When `check` says `pushed`, `aborted` or `failed`, the ticket is finished for you and the
-   scheduled task can be deleted; `preparing_mr` means wait.
+   When `check` says `pushed`, `aborted` or `failed`, the ticket is finished for you and a scheduled
+   task can be deleted (an event-triggered task for the workspace stays for the next ticket);
+   `preparing_mr` means wait.
 6. Never approve, push, merge or close anything: those are the user's, in the terminal.
 
 Everything the Implementer knows about the ticket is in the Task file. Everything you need to
@@ -32,10 +38,10 @@ resume after a context loss is `guide`, then `check`.
 ## The cycle
 
 ```
-plan ─► write_task ─► start ─► [check … awaiting_review] ─► review
-                                    ▲                           │
-                                    └──── request_fix (Fix N) ◄─┤ findings
-                                                                 └─ mark_clean ─► user: approve/abort
+plan ─► write_task ─► start ─► [event ─► check … awaiting_review] ─► review
+                                    ▲                                     │
+                                    └──── request_fix (Fix N) ◄───────────┤ findings
+                                                                           └─ mark_clean ─► user: approve/abort
 ```
 
 Limits: one active job per machine; five iterations without Clean ends in `needs_human`; the
@@ -53,6 +59,11 @@ Implementer session stays alive until the user decides.
 | `check(workspace, ticket, offset?, max_bytes?)` | State of the job and, once an iteration is published, the Report and the Patch (paged like `read_file`). |
 | `request_fix(workspace, ticket, content)` | Appends `## Fix N` with your content to the Task file and starts iteration N+1. Returns the check interval. |
 | `mark_clean(workspace, ticket)` | Your verdict that no further fix is needed. The user is notified. |
+
+There are no event tools: `events/list`, `events/subscribe` and `events/unsubscribe` are MCP
+protocol methods of the same connector, used by ChatGPT when an event-triggered task is created;
+the event `software_factory.job` carries `workspace`, `ticket`, `state`, `iteration`, `branch` and,
+when there is one, `error` or `mr.title`, never the Report or the Patch: `check` returns those.
 
 ## Task file format
 

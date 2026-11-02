@@ -187,6 +187,41 @@ output names what to fix: `wrong_audience` (the Default Audience or the resource
 (the clock or an old token), `unknown_kid` (another tenant), `jwks_unavailable` (Auth0 not
 reachable from this machine).
 
+## MCP Events (event-triggered tasks)
+
+Since SF-016 the factory tells ChatGPT when a job needs the Context owner, instead of an hourly
+scheduled task (protocol, shapes and delivery rules: `factory/README.md`, section MCP Events).
+Preconditions:
+
+- **OAuth on** (section above). Subscriptions belong to the token's `sub`; with *No
+  authentication* the event methods answer `unauthenticated` and no event-triggered task can be
+  created. `SF_AUTH_OPEN_METHODS` must not list `events/*` (`sf serve` refuses it).
+- **Outbound HTTPS from this machine** to the callback URL ChatGPT gives (an OpenAI host). The
+  deliveries are ordinary outbound POSTs from `sf serve`, not through the tunnel; they follow no
+  redirects and go only to public addresses.
+- MCP Events must be available for the account (Work chats; workspace controls for plugins and
+  event-triggered tasks apply). Otherwise the scheduled task below stays the way.
+
+In ChatGPT:
+
+1. After restarting `sf serve` with this version, open the **Software Factory** plugin at
+   https://chatgpt.com/plugins and press **Refresh**: the plugin page lists the event
+   `software_factory.job` next to the tools.
+2. In a Work chat, create an event-triggered task on the connector's event `software_factory.job`
+   with the filter `workspace` (or `ticket`), and as its instruction: call `check` for the
+   workspace and ticket in the payload, then review or report as the Handbook says. The exact UI
+   wording is not documented here; see the ChatGPT task UI. ChatGPT then calls `events/subscribe`;
+   the factory verifies the callback with a signed challenge before accepting.
+3. Check on this machine: `bin/sf events list` shows the subscription (id, principal, filter,
+   callback host, expiry); `bin/sf events test <id>` sends one event with `state: "test"` and
+   prints `status: 200` when ChatGPT accepted it.
+
+While a job runs, `sf watch` shows each delivery as `event to <id> attempt <n> delivered: 200` (or
+`failed: <status>`; 5xx and timeouts are retried for about 1 h 13 min). A `410` from ChatGPT ends
+the subscription (the task was deleted); create the task again. `bin/sf events remove <id>` stops
+deliveries from this side. ChatGPT refreshes a subscription before its `refreshBefore` (7 days);
+the subscriptions and pending deliveries survive a restart of `sf serve`.
+
 ## Working in ChatGPT
 
 1. Open a Work chat, type `@` and choose **Software Factory**.
@@ -194,10 +229,12 @@ reachable from this machine).
    tools, the Task file format and the templates. The connector also sends its Quick start as
    server instructions.
 3. Plan the ticket, write the Task file with `write_task`, and call `start` when the user says so.
-4. `start` and `request_fix` return `check_after_minutes`. In the planning conversation, create
-   one ChatGPT scheduled task that calls `check` for the ticket on that interval. It reads the
-   Report and the Patch when the job is `awaiting_review` and answers with `request_fix` or
-   `mark_clean`. Delete it when `check` says `pushed`, `aborted` or `failed`.
+4. With MCP Events (section above): one event-triggered task on `software_factory.job` for the
+   workspace calls `check` for the ticket in each event's payload. It reads the Report and the Patch
+   when the job is `awaiting_review` and answers with `request_fix` or `mark_clean`; it stays for the
+   next ticket. Without events (fallback): `start` and `request_fix` return `check_after_minutes`;
+   in the planning conversation, create one ChatGPT scheduled task that calls `check` for the ticket
+   on that interval, and delete it when `check` says `pushed`, `aborted` or `failed`.
 
 `write_task`, `start`, `request_fix` and `mark_clean` are write actions; ChatGPT may ask for
 confirmation.
@@ -215,3 +252,6 @@ confirmation.
   permission.
 - **403 from the factory.** A Host or Origin header that is not loopback; see `factory/README.md`.
 - **Old tools in ChatGPT.** Press **Refresh** on the plugin and open a new chat.
+- **No events arrive.** `bin/sf events list` (is there a subscription for this workspace?), then
+  `bin/sf events test <id>`: `blocked_address` or `connection_failed` means this machine cannot
+  reach the callback; `410` means ChatGPT dropped the task. `sf watch` shows each attempt.

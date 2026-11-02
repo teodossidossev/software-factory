@@ -22,7 +22,7 @@ bin/sf serve                      # foreground; Ctrl+C stops it; prints the dash
 bin/sf dashboard [--open]         # the dashboard URL of the last sf serve start; --open opens it with xdg-open; works without sf serve
 bin/sf start <workspace> <ticket> # start the job (same as the start tool); needs sf serve
 bin/sf say <workspace> <ticket> <message...>   # a user message into the session; needs sf serve
-bin/sf status [<workspace> <ticket>]           # one job or all jobs, with recorded cost and elapsed time; works without sf serve
+bin/sf status [<workspace> <ticket>]           # one job or all jobs, with estimated cost and elapsed time; works without sf serve
 bin/sf watch <workspace> <ticket> [--once]     # the session live; works without sf serve
 bin/sf approve <workspace> <ticket>            # MR preparation and push; waits for the outcome; needs sf serve
 bin/sf abort <workspace> <ticket> [--discard]  # end the job; --discard removes the branch and its changes; needs sf serve
@@ -37,11 +37,12 @@ Exit codes: 0 ok, 1 error, 2 usage. `sf approve` exits 1 unless the branch was p
 
 One line per current job (archived ones excluded), sorted by workspace and ticket: `WORKSPACE`,
 `TICKET`, `STATE`, `ITER` (published iterations), `BRANCH`, `SINCE` (the last state change),
-`COST_USD`, `ELAPSED` and `ERROR` (the error code; `sf status <workspace> <ticket>` prints the
+`EST_USD`, `ELAPSED` and `ERROR` (the error code; `sf status <workspace> <ticket>` prints the
 message below the table). Both work without `sf serve`; they read the state directory.
 
-- `COST_USD` is the recorded cost: the sum of `cost_usd` over `meta.json` of the published
-  iterations 1 to `iteration`, with four decimals (`0.0000` for a real zero or no iteration yet).
+- `EST_USD` is the recorded cost, an estimate of the API-equivalent price and not a charge: the
+  session usually runs on the user's Claude subscription. It is the sum of `cost_usd` over
+  `meta.json` of the published iterations 1 to `iteration`, with four decimals (`0.0000` for a real zero or no iteration yet).
   A running iteration or an MR preparation turn adds nothing until its iteration is published, and
   `cost_usd_total` is never used. `unknown` means a published iteration has no usable cost (its
   `cost_usd` is null or missing, or its `meta.json` is missing); an unreadable or malformed
@@ -65,9 +66,11 @@ message below the table). Both work without `sf serve`; they read the state dire
 | `SF_MAX_TURNS` | `150` | `maxTurns` of every Implementer turn. |
 | `SF_MAX_ITERATIONS` | `5` | Published iterations after which `request_fix` is refused (`iteration_limit`, job `needs_human`). |
 | `SF_CLAUDE` | bundled binary | Absolute path of the Claude Code executable (`pathToClaudeCodeExecutable`). |
+| `SF_MODEL` | unset | Model of every Implementer turn, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
 | `SF_SANDBOX` | on | `off` runs the Implementer without Claude Code's sandbox. |
 | `SF_SANDBOX_DOMAINS` | empty | Comma-separated extra hosts sandboxed commands may reach, besides `registry.npmjs.org`. |
 | `SF_DESKTOP_NOTIFY` | on | `off` disables the desktop notification. |
+| `SF_NOTIFY_ITERATIONS` | off | `on` also notifies `awaiting_review` (each published iteration). |
 | `SF_NTFY_URL` | unset | Full ntfy topic URL, e.g. `https://ntfy.sh/<topic>`; unset disables ntfy. |
 | `SF_NTFY_TOKEN` | unset | Sent as `Authorization: Bearer <token>` to a server that needs it. |
 
@@ -117,7 +120,8 @@ alive (`starting`, `working`, `awaiting_review`, `needs_human`, `ready_for_human
   `aborted` with `error.code` `discard_failed`. `--discard` is refused (`rebase_in_progress`) while
   a rebase or a Git lock is in progress in the work checkout.
 - `sf reset` works in every state: it ends a live session and archives the job directory as `start`
-  archives a terminal job. Git is not touched.
+  archives a terminal job. The branch and the files are not touched; only the job's snapshot ref
+  (`refs/sf/snapshot/<ticket>`) is deleted, as on `pushed` and `abort`.
 
 Every turn runs with `cwd` = work checkout, `permissionMode: "auto"`, `settingSources: ["user",
 "project"]`, a per-turn deny list from `src/rules.ts` (iterations: mutating Git commands, `sudo`,
@@ -125,7 +129,9 @@ Every turn runs with `cwd` = work checkout, `permissionMode: "auto"`, `settingSo
 `rebase`, `restore`, `checkout`, `switch`, `rm` and `mv` allowed), a filtered environment (no
 `SF_*`, no inherited Claude Code session markers) and, unless `SF_SANDBOX=off`, the sandbox
 `{enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, network: {allowedDomains:
-["registry.npmjs.org", ...SF_SANDBOX_DOMAINS]}}`. The factory's own `fetch` and `push` run outside
+["registry.npmjs.org", ...SF_SANDBOX_DOMAINS], allowLocalBinding: true, allowAllUnixSockets: true}}`.
+Local binding and Unix sockets are allowed so that the repository's own tests, which start servers on
+loopback and on Unix sockets, run inside the sandbox. The factory's own `fetch` and `push` run outside
 the Implementer, so the Git host is not needed there; a repository whose checks need other hosts
 (another package registry, a test service) lists them in `SF_SANDBOX_DOMAINS`. Nothing is written
 under `~/.claude`.
@@ -156,8 +162,14 @@ request form otherwise; only the branch when the `origin` URL cannot be parsed).
 
 1. Target: `git fetch origin <base>` (60 s) when `origin` exists, target `origin/<base>`, else the
    local `<base>`.
-2. Snapshot of the reviewed change: the working tree blob hash of every Patch path against
-   `base_commit` (`absent` for a deleted file), in `mr-snapshot.json`. A retry (the same
+2. Snapshot of the reviewed change: a commit of the reviewed working tree, built in a temporary
+   index (`GIT_INDEX_FILE` in the job directory): `read-tree <base_commit>`, every Patch path from
+   the working tree (`hash-object -w`, `update-index --add --cacheinfo`; deleted paths
+   `update-index --force-remove`), `write-tree`, `commit-tree <tree> -p <base_commit> -m "sf
+   snapshot <ticket>"`. The commit is kept under `refs/sf/snapshot/<ticket>` (so `gc` keeps it),
+   replaced on the next `approve` and deleted on `pushed`, `abort` and `reset`; the work checkout's
+   index, `HEAD` and files are not touched. `mr-snapshot.json` records `target_ref`,
+   `target_commit`, `base_commit`, `snapshot_commit` and the reviewed `paths`. A retry (the same
    `needs_human` with `mr_attempts > 0` condition) keeps the snapshot.
 3. State `preparing_mr`, `mr_attempts + 1`, one turn in the same session with the MR deny list and
    `mrPrompt` (`src/prompts.ts`): target, previous error on a retry, the instructions, and the
@@ -188,8 +200,14 @@ request form otherwise; only the branch when the `origin` URL cannot be parsed).
 
    A failed turn keeps its own code (for example `turn_failed` or `sandbox_unavailable`). Fix with
    `sf say` or by hand and run `sf approve` again.
-5. Diff check: `git diff --name-only <target> <branch>` must list exactly the snapshot's paths with
-   the snapshot's hashes. Otherwise `base_commit` and `target_commit` become the target commit, a
+5. Diff check by three-way merge: the change needs review again only when the branch differs from
+   what a clean merge of the reviewed change onto the target gives. The expected result is
+   `git merge-tree --write-tree --no-messages --name-only -z --merge-base <base_commit>
+   <target_commit> <snapshot_commit>`; exit code 1 means conflicts, and every path it names counts
+   as differing. For every reviewed path and every path of `git diff --name-only <target> <branch>`
+   the blob of `<expected tree>:<path>` must equal `<branch>:<path>` (absent on both sides is
+   equal), so a target change the rebase merged cleanly does not count. Otherwise `base_commit`
+   and `target_commit` become the target commit, a
    new iteration is published (the Implementer's report plus `## MR preparation` naming the paths
    that differ; the Patch against the target) and the job goes back to `awaiting_review`. After
    Clean, the next `sf approve` has nothing to commit or rebase and pushes.
@@ -198,7 +216,9 @@ request form otherwise; only the branch when the `origin` URL cannot be parsed).
 
 ## Notifications
 
-On `ready_for_human_review`, `needs_human`, `pushed` and `failed` (iterations are silent) the
+On `ready_for_human_review`, `needs_human`, `pushed` and `failed` (iterations are silent unless
+`SF_NOTIFY_ITERATIONS=on`, which adds `awaiting_review` with `Priority: default`, `Tags: eyes` and
+the body "Report and Patch of iteration N are ready for the Context owner") the
 factory sends a desktop notification (`notify-send --app-name="Software Factory" "<ticket>:
 <state>" <body>`, 5 s, when `notify-send` is on `PATH`) and, with `SF_NTFY_URL` set, one ntfy POST
 (10 s; headers `Title`, `Priority` high for `needs_human` and `failed`, `Tags`). The body has at most
@@ -220,7 +240,7 @@ dashboard-token                          # 0600, the dashboard token of the last
 jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, mr_attempts, state, iteration, session_id, created_at, updated_at, error
 jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed"}; what sf watch reads
 jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json}
-jobs/<workspace>/<ticket>/mr-snapshot.json   # the reviewed change at approve: target and blob hash per path
+jobs/<workspace>/<ticket>/mr-snapshot.json   # the reviewed change at approve: target, base_commit, snapshot_commit, paths
 jobs/<workspace>/<ticket>/mr.md              # the MR text, once pushed or after a diff-check iteration
 jobs/<workspace>/<ticket>.<timestamp>/   # an archived earlier job
 ```
@@ -247,7 +267,7 @@ launcher accepted the URL, not that the page loaded: nothing checks that `sf ser
 On another platform `--open` is refused (`open_unsupported`); plain `sf dashboard` works everywhere.
 
 Version 1 shows, live: every job with its state; for the selected job (the most recently updated
-one, or `#<workspace>/<ticket>` in the URL) the branch, base, state, iteration, cost and error,
+one, or `#<workspace>/<ticket>` in the URL) the branch, base, state, iteration, estimated cost ("est. $", not a charge) and error,
 the state history, each iteration's Report and Patch, the MR text once there is one, and the
 Implementer's event stream as `sf watch` prints it, following new lines (scrolling up switches
 follow off). It changes nothing: there is no write endpoint; approve, abort and say stay in the

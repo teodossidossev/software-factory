@@ -73,7 +73,7 @@ test('full cycle: start, awaiting_review with Report and Patch, request_fix, sec
     factoryPrompt('/implement .software-factory/DEMO-1.md Fix 1', 'DEMO-1', 2),
   ]);
   assert.match(log[0]!.prompt, /^\/implement \.software-factory\/DEMO-1\.md\n\nRules from the Software Factory:\n/);
-  assert.match(log[0]!.prompt, /Do not edit \.software-factory\/DEMO-1\.md;.*\n.*\n  # Report: DEMO-1, iteration 1\n/);
+  assert.match(log[0]!.prompt, /Do not edit \.software-factory\/DEMO-1\.md;.*\n- While working, run the tests of the files you change;.*\n.*\n  # Report: DEMO-1, iteration 1\n/);
   assert.match(log[1]!.prompt, /  # Report: DEMO-1, iteration 2\n/);
   assert.ok(log[1]!.prompt.endsWith('  ## Fix N items (only when answering a Fix section: a table of each item, fixed or rejected, with a note)'));
   const meta2 = JSON.parse(await readFile(join(jobDir, 'iterations', '002', 'meta.json'), 'utf8'));
@@ -116,8 +116,8 @@ test('full cycle: start, awaiting_review with Report and Patch, request_fix, sec
   assert.match(lines, /\[2\] state awaiting_review -> ready_for_human_review$/m);
 
   const status = await runCli(env, ['status']);
-  // COST_USD is the sum of the two published iterations' cost_usd (the fake reports 0.0123 per turn); ELAPSED counts from created_at.
-  assert.match(status.stdout, /^WORKSPACE\s+TICKET\s+STATE\s+ITER\s+BRANCH\s+SINCE\s+COST_USD\s+ELAPSED\s+ERROR\napp\s+DEMO-1\s+ready_for_human_review\s+2\s+DEMO-1-export-as-csv\s+\S+\s+0\.0500\s+\d{2,}:\d\d:\d\d\s*$/m);
+  // EST_USD is the sum of the two published iterations' cost_usd (the fake reports 0.0123 per turn); ELAPSED counts from created_at.
+  assert.match(status.stdout, /^WORKSPACE\s+TICKET\s+STATE\s+ITER\s+BRANCH\s+SINCE\s+EST_USD\s+ELAPSED\s+ERROR\napp\s+DEMO-1\s+ready_for_human_review\s+2\s+DEMO-1-export-as-csv\s+\S+\s+0\.0500\s+\d{2,}:\d\d:\d\d\s*$/m);
   // write_task stays refused until the job is terminal.
   assert.equal((await refused(served, 'write_task', { workspace: 'app', ticket: 'DEMO-1', content: task('DEMO-1', 'Other') })).code, 'job_active');
   assert.equal((await stat(join(env.state, 'sf.sock'))).mode & 0o777, 0o600);

@@ -13,6 +13,8 @@ export const NOTIFIED_STATES: readonly JobState[] = ['ready_for_human_review', '
 
 export interface NotifyConfig {
   desktop: boolean;
+  // SF_NOTIFY_ITERATIONS=on: awaiting_review (a published iteration) is notified too.
+  iterations: boolean;
   ntfyUrl: string | undefined;
   ntfyToken: string | undefined;
 }
@@ -34,13 +36,27 @@ export interface ChannelResult {
 export function notifyConfig(env: NodeJS.ProcessEnv = process.env): NotifyConfig {
   return {
     desktop: env.SF_DESKTOP_NOTIFY !== 'off',
+    iterations: env.SF_NOTIFY_ITERATIONS === 'on',
     ntfyUrl: env.SF_NTFY_URL || undefined,
     ntfyToken: env.SF_NTFY_TOKEN || undefined,
   };
 }
 
+// The states notified with this configuration.
+export function notifiedStates(config: NotifyConfig): readonly JobState[] {
+  return config.iterations ? [...NOTIFIED_STATES, 'awaiting_review'] : NOTIFIED_STATES;
+}
+
 // The notification for a job that reached state; lines: the MR title and link when pushed.
 export function jobNotification(job: Job, lines: string[] = []): Notification {
+  if (job.state === 'awaiting_review') {
+    return {
+      title: `${job.ticket}: ${job.state}`,
+      body: `Report and Patch of iteration ${job.iteration} are ready for the Context owner`,
+      priority: 'default',
+      tags: 'eyes',
+    };
+  }
   const body = [`branch: ${job.branch}`, ...(job.error !== undefined ? [`${job.error.code}: ${job.error.message}`] : []), ...lines].slice(0, 3);
   return {
     title: `${job.ticket}: ${job.state}`,
@@ -117,10 +133,12 @@ export async function sendNotification(notification: Notification, config: Notif
 }
 
 // The listener behind Execution's onStateChange: notifies for the user's states and records each
-// failed channel in the job's events.jsonl. Iterations (awaiting_review) are silent.
+// failed channel in the job's events.jsonl. Iterations (awaiting_review) are silent unless
+// SF_NOTIFY_ITERATIONS=on.
 export function stateNotifier(config: NotifyConfig, jobs: JobStore): (job: Job, from: JobState | null, lines?: string[]) => void {
+  const states = notifiedStates(config);
   return (job, _from, lines) => {
-    if (!NOTIFIED_STATES.includes(job.state)) {
+    if (!states.includes(job.state)) {
       return;
     }
     void (async () => {

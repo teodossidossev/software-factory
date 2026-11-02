@@ -27,16 +27,17 @@ const USAGE = `Usage:
   sf workspace remove <name>                            Unregister a workspace
   sf start <workspace> <ticket>                         Start the job for .software-factory/<ticket>.md
   sf say <workspace> <ticket> <message...>              Send a message into the job's Implementer session
-  sf status [<workspace> <ticket>]                      Show one job or all jobs: state, iterations, recorded cost, elapsed time
+  sf status [<workspace> <ticket>]                      Show one job or all jobs: state, iterations, estimated cost, elapsed time
   sf watch <workspace> <ticket> [--once]                Show the session live (Ctrl+C stops)
   sf approve <workspace> <ticket>                       MR preparation: commit, rebase, verify, push
   sf abort <workspace> <ticket> [--discard]             End the job; --discard also removes the branch and its changes
-  sf reset <workspace> <ticket>                         End the session and archive the job; Git is not touched
+  sf reset <workspace> <ticket>                         End the session and archive the job; the branch and files are untouched
   sf notify-test                                        Send a test notification on every channel
 
 Notes:
-  COST_USD: cost_usd of the published iterations summed, four decimals; 0.0000 before the first one, unknown when one has no usable cost.
-            A running iteration or MR preparation adds nothing until its iteration is published.
+  EST_USD: an estimate of the API-equivalent price, not a charge (the session usually runs on your Claude subscription):
+           cost_usd of the published iterations summed, four decimals; 0.0000 before the first one, unknown when one has no usable cost.
+           A running iteration or MR preparation adds nothing until its iteration is published.
   ELAPSED: wall-clock time since the job was created, waiting included; stops at the last state change once pushed, aborted or failed.
   dashboard --open: Linux with xdg-open; waits for the launcher at most 10 s; on a launcher failure exits 1 and leaves the printed URL to open by hand.
 Exit codes: 0 ok, 1 error, 2 usage.`;
@@ -289,7 +290,7 @@ async function notifyTest(args: string[]): Promise<void> {
 
 function table(rows: StatusRow[]): string {
   const cells = [
-    ['WORKSPACE', 'TICKET', 'STATE', 'ITER', 'BRANCH', 'SINCE', 'COST_USD', 'ELAPSED', 'ERROR'],
+    ['WORKSPACE', 'TICKET', 'STATE', 'ITER', 'BRANCH', 'SINCE', 'EST_USD', 'ELAPSED', 'ERROR'],
     ...rows.map(({ job, cost, elapsed }) => [job.workspace, job.ticket, job.state, String(job.iteration), job.branch, job.updated_at, cost, elapsed, job.error?.code ?? '']),
   ];
   const widths = cells[0]!.map((_, column) => Math.max(...cells.map((row) => row[column]!.length)));

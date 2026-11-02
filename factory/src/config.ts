@@ -14,10 +14,15 @@ export interface Config {
   claudePath: string | undefined;
   // Claude Code's sandbox for every Implementer turn; undefined with SF_SANDBOX=off.
   sandbox: SandboxSettings | undefined;
+  // The model of every Implementer turn (SF_MODEL, passed as is); undefined uses the user's Claude
+  // Code default.
+  model: string | undefined;
 }
 
 // Domains sandboxed commands may reach: the npm registry and SF_SANDBOX_DOMAINS (comma-separated).
-// The factory's own fetch and push run outside the sandbox, so the Git host is not needed.
+// The factory's own fetch and push run outside the sandbox, so the Git host is not needed. Binding
+// local ports and every Unix socket is allowed, so the repository's own tests can start servers on
+// loopback and on Unix sockets.
 export function sandboxSettings(env: NodeJS.ProcessEnv = process.env): SandboxSettings | undefined {
   if (env.SF_SANDBOX === 'off') {
     return undefined;
@@ -32,7 +37,7 @@ export function sandboxSettings(env: NodeJS.ProcessEnv = process.env): SandboxSe
     enabled: true,
     failIfUnavailable: true,
     autoAllowBashIfSandboxed: true,
-    network: { allowedDomains: [...new Set(['registry.npmjs.org', ...extra])] },
+    network: { allowedDomains: [...new Set(['registry.npmjs.org', ...extra])], allowLocalBinding: true, allowAllUnixSockets: true },
   };
 }
 
@@ -67,5 +72,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxIterations: positiveInteger(env, 'SF_MAX_ITERATIONS', 5),
     claudePath,
     sandbox: sandboxSettings(env),
+    model: env.SF_MODEL || undefined,
   };
 }

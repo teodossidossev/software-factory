@@ -1,11 +1,11 @@
 // MR preparation steps on the work checkout, all through runGit: the target, the snapshot of the
-// reviewed change, the verification at turn end, the diff check, the push and the merge request
-// link. The Execution drives them around the Implementer's turn; this module runs no turn.
-import { createHash } from 'node:crypto';
-import { lstat, readFile, readlink, stat } from 'node:fs/promises';
+// reviewed change, the verification at turn end, the diff check by three-way merge, the push and
+// the merge request link. The Execution drives them around the Implementer's turn; this module runs
+// no turn.
+import { lstat, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { FactoryError } from './errors.js';
-import { runGit } from './git.js';
+import { type GitExtraEnv, runGit } from './git.js';
 import type { MrSnapshot } from './jobs.js';
 import { changedPaths } from './patch.js';
 import { isPlaceholder } from './placeholders.js';
@@ -14,6 +14,10 @@ import { TASK_DIR } from './task-file.js';
 
 const FETCH_TIMEOUT_MS = 60_000;
 const PUSH_TIMEOUT_MS = 120_000;
+// update-index arguments per Git call, well below the argv limit.
+const UPDATE_INDEX_CHUNK = 200;
+// The identity of the snapshot commit, which never leaves the work checkout.
+const SNAPSHOT_IDENTITY = ['-c', 'user.name=Software Factory', '-c', 'user.email=software-factory@localhost'];
 export const MAX_MR_TEXT_BYTES = 64 * 1024;
 export const ABSENT = 'absent';
 
@@ -53,38 +57,95 @@ export async function resolveTarget(cwd: string, base: string): Promise<{ ref: s
   return { ref: ref.replace(/^refs\/(heads|remotes)\//, ''), commit: resolved.text };
 }
 
-// The blob hash Git would store for the working tree content of path, or "absent". A symbolic
-// link is stored as its target text, hashed here without following it (SHA-1 object format).
-async function workingTreeHash(cwd: string, path: string): Promise<string> {
+// The ref that keeps the snapshot commit of a job, so that gc does not remove it.
+export function snapshotRef(ticket: string): string {
+  return `refs/sf/snapshot/${ticket}`;
+}
+
+// stdout of a Git command that must succeed, trimmed.
+async function gitOk(cwd: string, args: string[], env?: GitExtraEnv): Promise<string> {
+  const result = await runGit(cwd, args, 1024 * 1024, undefined, env);
+  if (result.code !== 0) {
+    throw new Error(`git ${args.find((arg) => !arg.startsWith('-')) ?? args[0]} failed: ${result.stderr.trim().slice(0, 500)}`);
+  }
+  return result.stdout.toString('utf8').trim();
+}
+
+// The --cacheinfo value ("<mode>,<object>,<path>") of the working tree content of path, its blob
+// written to the object database; undefined when the path is deleted. hash-object follows a
+// symbolic link, so the link's target text is hashed from the scratch file instead.
+async function cacheInfo(cwd: string, path: string, scratch: string): Promise<string | undefined> {
   let stats;
   try {
     stats = await lstat(join(cwd, path));
   } catch {
-    return ABSENT;
+    return undefined;
   }
   if (stats.isSymbolicLink()) {
-    const body = Buffer.from(await readlink(join(cwd, path)), 'utf8');
-    return createHash('sha1').update(`blob ${body.length}\0`).update(body).digest('hex');
+    await writeFile(scratch, await readlink(join(cwd, path), { encoding: 'buffer' }));
+    return `120000,${await gitOk(cwd, ['hash-object', '-w', '--no-filters', '--', scratch])},${path}`;
   }
-  const result = await gitText(cwd, ['hash-object', '--', path]);
-  if (!result.ok) {
-    throw new Error(`git hash-object failed for ${path}: ${result.stderr}`);
+  if (stats.isDirectory()) {
+    // A submodule: the commit checked out in it.
+    return `160000,${await gitOk(join(cwd, path), ['rev-parse', '--verify', 'HEAD'])},${path}`;
   }
-  return result.text;
+  const mode = (stats.mode & 0o111) !== 0 ? '100755' : '100644';
+  return `${mode},${await gitOk(cwd, ['hash-object', '-w', '--', path])},${path}`;
 }
 
-// Every path of the current Patch with its working tree hash.
-export async function takeSnapshot(cwd: string, baseCommit: string, target: { ref: string; commit: string }): Promise<MrSnapshot> {
+// The reviewed change as a commit on top of baseCommit: a temporary index in scratchDir (the job
+// directory) reads baseCommit, takes every Patch path from the working tree (deleted paths are
+// removed), and its tree is committed and kept under snapshotRef(ticket), replacing an earlier one.
+// The work checkout's index, HEAD and files are not touched.
+export async function takeSnapshot(
+  cwd: string,
+  ticket: string,
+  baseCommit: string,
+  target: { ref: string; commit: string },
+  scratchDir: string,
+): Promise<MrSnapshot> {
   const { tracked, untracked } = await changedPaths(cwd, baseCommit);
-  const files: Record<string, string> = {};
-  for (const path of [...tracked, ...untracked].sort()) {
-    files[path] = await workingTreeHash(cwd, path);
+  const paths = [...new Set([...tracked, ...untracked])].sort();
+  // Absolute: Git runs in the work checkout, and SF_STATE_DIR may be relative.
+  const index = resolve(scratchDir, 'snapshot.index');
+  const scratch = resolve(scratchDir, 'snapshot.link');
+  const env: GitExtraEnv = { GIT_INDEX_FILE: index };
+  try {
+    await rm(index, { force: true });
+    await gitOk(cwd, ['read-tree', baseCommit], env);
+    const added: string[] = [];
+    const removed: string[] = [];
+    for (const path of paths) {
+      const info = await cacheInfo(cwd, path, scratch);
+      if (info === undefined) {
+        removed.push(path);
+      } else {
+        added.push(info);
+      }
+    }
+    for (let start = 0; start < added.length; start += UPDATE_INDEX_CHUNK) {
+      await gitOk(cwd, ['update-index', '--add', ...added.slice(start, start + UPDATE_INDEX_CHUNK).flatMap((info) => ['--cacheinfo', info])], env);
+    }
+    for (let start = 0; start < removed.length; start += UPDATE_INDEX_CHUNK) {
+      await gitOk(cwd, ['update-index', '--force-remove', '--', ...removed.slice(start, start + UPDATE_INDEX_CHUNK)], env);
+    }
+    const tree = await gitOk(cwd, ['write-tree'], env);
+    const commit = await gitOk(cwd, [...SNAPSHOT_IDENTITY, 'commit-tree', '--no-gpg-sign', tree, '-p', baseCommit, '-m', `sf snapshot ${ticket}`]);
+    await gitOk(cwd, ['update-ref', snapshotRef(ticket), commit]);
+    return { target_ref: target.ref, target_commit: target.commit, base_commit: baseCommit, snapshot_commit: commit, paths };
+  } finally {
+    await rm(index, { force: true });
+    await rm(scratch, { force: true });
   }
-  return { target_ref: target.ref, target_commit: target.commit, files };
 }
 
-// Paths whose committed state differs from the snapshot: listed in only one of them, or with
-// another hash. Sorted.
+// Removes snapshotRef(ticket); true when it is gone (or was never there).
+export async function deleteSnapshotRef(cwd: string, ticket: string): Promise<boolean> {
+  return (await runGit(cwd, ['update-ref', '-d', snapshotRef(ticket)])).code === 0;
+}
+
+// Paths whose object differs between expected and actual (ABSENT on both sides is equal), or that
+// only one of them lists. Sorted.
 export function compareSnapshot(expected: Record<string, string>, actual: Record<string, string>): string[] {
   const paths = new Set([...Object.keys(expected), ...Object.keys(actual)]);
   return [...paths].filter((path) => expected[path] !== actual[path]).sort();
@@ -200,18 +261,43 @@ export async function verifyPrepared(
   return { ok: true, mrText: text };
 }
 
-// Paths whose content on the branch differs from the reviewed snapshot.
+// The tree a clean three-way merge of the reviewed change onto the target gives, and the paths that
+// merge left in conflict. Exit code 1 means conflicts; with --no-messages --name-only -z stdout is
+// "<tree>\0" followed by "<path>\0" for each conflicted path.
+export async function expectedMerge(cwd: string, snapshot: MrSnapshot): Promise<{ tree: string; conflicted: string[] }> {
+  const merged = await runGit(cwd, [
+    'merge-tree', '--write-tree', '--no-messages', '--name-only', '-z',
+    '--merge-base', snapshot.base_commit, snapshot.target_commit, snapshot.snapshot_commit,
+  ]);
+  const [tree, ...conflicted] = merged.stdout.toString('utf8').split('\0').filter((entry) => entry !== '');
+  if ((merged.code !== 0 && merged.code !== 1) || merged.truncated || tree === undefined || !/^[0-9a-f]{40,64}$/.test(tree)) {
+    throw new Error(`git merge-tree failed: ${merged.stderr.trim().slice(0, 500)}`);
+  }
+  return { tree, conflicted: [...new Set(conflicted)] };
+}
+
+async function objectAt(cwd: string, spec: string): Promise<string> {
+  const object = await gitText(cwd, ['rev-parse', '--verify', '--quiet', spec]);
+  return object.ok && object.text !== '' ? object.text : ABSENT;
+}
+
+// Paths whose content on the branch differs from what a clean three-way merge of the reviewed
+// change onto the target gives: every conflicted path, and every reviewed path or path changed
+// between the target and the branch whose blob differs from the merge result's.
 export async function snapshotDiff(cwd: string, snapshot: MrSnapshot, branch: string): Promise<string[]> {
+  const { tree, conflicted } = await expectedMerge(cwd, snapshot);
   const listed = await runGit(cwd, ['diff', '--name-only', '-z', '--no-renames', snapshot.target_commit, branch]);
   if (listed.code !== 0) {
     throw new Error(`git diff failed: ${listed.stderr.trim()}`);
   }
+  const paths = new Set([...snapshot.paths, ...listed.stdout.toString('utf8').split('\0').filter((entry) => entry !== '')]);
+  const expected: Record<string, string> = {};
   const actual: Record<string, string> = {};
-  for (const path of listed.stdout.toString('utf8').split('\0').filter((entry) => entry !== '')) {
-    const blob = await gitText(cwd, ['rev-parse', '--verify', '--quiet', `${branch}:${path}`]);
-    actual[path] = blob.ok ? blob.text : ABSENT;
+  for (const path of paths) {
+    expected[path] = await objectAt(cwd, `${tree}:${path}`);
+    actual[path] = await objectAt(cwd, `${branch}:${path}`);
   }
-  return compareSnapshot(snapshot.files, actual);
+  return [...new Set([...compareSnapshot(expected, actual), ...conflicted])].sort();
 }
 
 // Nothing is pushed to main (or master) or to the job's base directly; every change reaches it

@@ -8,7 +8,7 @@ test('factoryPrompt puts the prompt first, then a blank line and the rules with 
   const [first, blank, ...rest] = prompt.split('\n');
   assert.deepEqual([first, blank], ['/implement .software-factory/PROJ-1.md Fix 2', '']);
   assert.equal(rest.join('\n'), FACTORY_PROMPT_RULES.replaceAll('<ticket>', 'PROJ-1').replace('<N>', '3'));
-  assert.match(prompt, /^- Do not edit \.software-factory\/PROJ-1\.md; the Context owner owns it\.$/m);
+  assert.match(prompt, /^- Do not edit \.software-factory\/PROJ-1\.md; the Context owner owns it\.\n- While working, run the tests of the files you change; run the repository's full test suite once, before the report\.\n- End your turn with a report/m);
   assert.match(prompt, /^ {2}# Report: PROJ-1, iteration 3$/m);
   assert.match(prompt, /^ {2}## Fix N items \(only when answering/m);
   assert.doesNotMatch(prompt, /<ticket>|<N>/);

@@ -1,15 +1,19 @@
-// The read-only Dashboard: a second loopback HTTP listener with the static page, JSON endpoints
-// and one server-sent event stream per open page. Every path starts with /d/<token>/; anything
-// else is an empty 404. Reads JobStore and events.jsonl only; job state changes arrive through
-// onStateChange, which `sf serve` composes with the notifier. Nothing here changes a job.
+// The Dashboard: a second loopback HTTP listener with the static page, JSON endpoints, one
+// server-sent event stream per open page and, since version 2, the User's actions approve, abort
+// and say as POST endpoints. Every path starts with /d/<token>/; anything else is an empty 404.
+// Reads JobStore and events.jsonl; job state changes arrive through onStateChange, which
+// `sf serve` composes with the notifier. The actions validate the HTTP request and delegate once
+// to the Execution of `sf serve` (DashboardActions); nothing here changes a job by itself.
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { localhostHostValidation, localhostOriginValidation } from '@modelcontextprotocol/node';
+import * as z from 'zod/v4';
 import { writeFileAtomic } from './atomic.js';
 import { FactoryError } from './errors.js';
+import type { Execution } from './execution.js';
 import type { Job, JobState, JobStore } from './jobs.js';
 import { WORKSPACE_NAME_PATTERN } from './registry.js';
 import { TICKET_PATTERN } from './task-file.js';
@@ -18,6 +22,8 @@ import { describeEvent, followLines } from './watch.js';
 export const DEFAULT_DASHBOARD_PORT = 8788;
 export const TOKEN_FILE = 'dashboard-token';
 export const MAX_STREAMS = 8;
+// The raw body of an action request, in bytes: a transport bound, not a lifecycle rule.
+export const MAX_ACTION_BODY_BYTES = 128 * 1024;
 const LOOPBACK_HOST = '127.0.0.1';
 const KEEP_ALIVE_MS = 15_000;
 const TOKEN_PATTERN = /^[0-9a-f]{64}$/;
@@ -33,6 +39,28 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
   '': { file: 'dashboard.html', type: 'text/html; charset=utf-8' },
   'app.js': { file: 'app.js', type: 'text/javascript; charset=utf-8' },
   'app.css': { file: 'app.css', type: 'text/css; charset=utf-8' },
+};
+
+// The User's actions, bound by `sf serve` to its one Execution: the same methods, guards and
+// results as the socket commands of sf approve, sf abort and sf say.
+export type DashboardActions = Pick<Execution, 'approve' | 'abort' | 'say'>;
+export type DashboardAction = keyof DashboardActions;
+
+// The request body of each action, strict: unknown keys, null, arrays and wrong types are
+// refused; shape is what the refusal names.
+const BODIES = {
+  approve: { shape: '{}', schema: z.strictObject({}) },
+  abort: { shape: '{"discard"?: boolean}', schema: z.strictObject({ discard: z.boolean().optional() }) },
+  say: { shape: '{"message": string}', schema: z.strictObject({ message: z.string() }) },
+};
+export const ACTIONS = Object.keys(BODIES) as DashboardAction[];
+
+// The HTTP status of a FactoryError the three methods can throw; any other code answers 500 and
+// keeps its code and message.
+const ERROR_STATUS: Record<string, number> = {
+  invalid_state: 409, turn_running: 409, rebase_in_progress: 409,
+  job_not_found: 404, workspace_not_found: 404,
+  invalid_content: 400,
 };
 
 export interface RunningDashboard {
@@ -142,13 +170,60 @@ function jobKey(workspace: string | undefined, ticket: string | undefined): [str
   return [workspace, ticket];
 }
 
+// api/jobs/<ws>/<ticket>/<action>, whatever the names: the method rule is decided by the route.
+function actionRoute(path: string[]): DashboardAction | undefined {
+  const [api, kind, , , action] = path;
+  return path.length === 5 && api === 'api' && kind === 'jobs' ? ACTIONS.find((known) => known === action) : undefined;
+}
+
+// application/json, optionally with a UTF-8 charset parameter; nothing else.
+function isJsonContentType(header: string | undefined): boolean {
+  if (header === undefined) {
+    return false;
+  }
+  const [type, ...params] = header.split(';').map((part) => part.trim().toLowerCase());
+  return type === 'application/json' && params.every((param) => param === '' || /^charset="?utf-?8"?$/.test(param));
+}
+
+// The whole body up to limit bytes, counted while streaming and against Content-Length first.
+// 'interrupted' when the connection ends before the body does: nothing is answered then.
+function readBody(req: IncomingMessage, limit: number): Promise<Buffer | 'too_large' | 'interrupted'> {
+  return new Promise((resolve) => {
+    const declared = req.headers['content-length'];
+    if (declared !== undefined && (!/^\d+$/.test(declared) || Number(declared) > limit)) {
+      resolve('too_large');
+      return;
+    }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
+    const settle = (value: Buffer | 'too_large' | 'interrupted'): void => {
+      if (!settled) {
+        settled = true;
+        resolve(value);
+      }
+    };
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > limit) {
+        settle('too_large');
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.once('end', () => settle(Buffer.concat(chunks)));
+    req.once('error', () => settle('interrupted'));
+    req.once('close', () => settle('interrupted'));
+  });
+}
+
 interface Stream {
   res: ServerResponse;
   job: [string, string] | undefined;
   abort: AbortController;
 }
 
-export async function startDashboard(port: number, stateDir: string, jobs: JobStore): Promise<RunningDashboard> {
+export async function startDashboard(port: number, stateDir: string, jobs: JobStore, actions: DashboardActions): Promise<RunningDashboard> {
   const files = new Map<string, { body: Buffer; type: string }>();
   for (const [path, { file, type }] of Object.entries(STATIC_FILES)) {
     files.set(path, { body: await readFile(new URL(file, STATIC_DIR)), type });
@@ -160,6 +235,8 @@ export async function startDashboard(port: number, stateDir: string, jobs: JobSt
   const streams = new Set<Stream>();
   const validateHost = localhostHostValidation();
   const validateOrigin = localhostOriginValidation();
+  // The exact origin of the page, known once the listener has its port.
+  let origin = '';
   const send = (stream: Stream, event: string, data: unknown): void => {
     stream.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
@@ -168,6 +245,9 @@ export async function startDashboard(port: number, stateDir: string, jobs: JobSt
   };
   const body = (res: ServerResponse, type: string, data: string | Buffer): void => {
     res.writeHead(200, { 'content-type': type }).end(data);
+  };
+  const json = (res: ServerResponse, status: number, data: unknown, headers: Record<string, string> = {}): void => {
+    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...headers }).end(JSON.stringify(data));
   };
 
   async function openStream(req: IncomingMessage, res: ServerResponse, query: URLSearchParams): Promise<void> {
@@ -282,6 +362,82 @@ export async function startDashboard(port: number, stateDir: string, jobs: JobSt
     empty(res, 404);
   }
 
+  // The validated body as the one Execution call it stands for, or undefined when it is invalid.
+  function toCall(action: DashboardAction, data: unknown, [workspace, ticket]: [string, string]): (() => Promise<unknown>) | undefined {
+    if (action === 'approve') {
+      return BODIES.approve.schema.safeParse(data).success ? () => actions.approve(workspace, ticket) : undefined;
+    }
+    if (action === 'abort') {
+      const parsed = BODIES.abort.schema.safeParse(data);
+      return parsed.success ? () => actions.abort(workspace, ticket, parsed.data.discard === true) : undefined;
+    }
+    const parsed = BODIES.say.schema.safeParse(data);
+    return parsed.success ? () => actions.say(workspace, ticket, parsed.data.message) : undefined;
+  }
+
+  // POST api/jobs/<ws>/<ticket>/<action>: the transport checks, then one Execution call. A page
+  // that goes away while the call runs stops waiting; the call itself goes on and settles here.
+  async function handleAction(req: IncomingMessage, res: ServerResponse, action: DashboardAction, key: [string, string]): Promise<void> {
+    let gone = false;
+    res.once('close', () => {
+      gone = true;
+    });
+    const fail = (status: number, code: string, message: string, headers: Record<string, string> = {}): void => {
+      json(res, status, { ok: false, error: { code, message } }, headers);
+    };
+    if (req.headers.origin !== origin) {
+      fail(403, 'invalid_origin', `Actions need the Origin ${origin}.`);
+      return;
+    }
+    if (!isJsonContentType(req.headers['content-type'])) {
+      fail(415, 'unsupported_media_type', 'Actions need Content-Type: application/json.');
+      return;
+    }
+    if ((await jobs.read(...key)) === undefined) {
+      empty(res, 404);
+      return;
+    }
+    const raw = await readBody(req, MAX_ACTION_BODY_BYTES);
+    if (raw === 'interrupted') {
+      return;
+    }
+    if (raw === 'too_large') {
+      fail(413, 'body_too_large', `The body must be at most ${MAX_ACTION_BODY_BYTES} bytes.`, { connection: 'close' });
+      return;
+    }
+    let data: unknown;
+    try {
+      data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw));
+    } catch {
+      fail(400, 'invalid_json', 'The body must be UTF-8 JSON.');
+      return;
+    }
+    const run = toCall(action, data, key);
+    if (run === undefined) {
+      fail(400, 'invalid_body', `${action} expects ${BODIES[action].shape}; no other keys, no null.`);
+      return;
+    }
+    let result: unknown;
+    try {
+      result = await run();
+    } catch (error) {
+      if (gone) {
+        return;
+      }
+      if (error instanceof FactoryError) {
+        fail(ERROR_STATUS[error.code] ?? 500, error.code, error.message);
+        return;
+      }
+      console.error(error);
+      fail(500, 'internal_error', 'The request failed inside the factory.');
+      return;
+    }
+    if (gone) {
+      return;
+    }
+    json(res, 200, { ok: true, result });
+  }
+
   const httpServer = createServer((req, res) => {
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
       res.setHeader(name, value);
@@ -296,18 +452,36 @@ export async function startDashboard(port: number, stateDir: string, jobs: JobSt
       empty(res, 404);
       return;
     }
-    if (req.method !== 'GET') {
-      empty(res, 405, { allow: 'GET' });
-      return;
-    }
-    route(req, res, path, target.searchParams).catch((error: unknown) => {
+    const failed = (error: unknown): void => {
       console.error(error);
+      if (res.destroyed) {
+        return;
+      }
       if (!res.headersSent) {
         empty(res, 500);
       } else {
         res.end();
       }
-    });
+    };
+    const action = actionRoute(path);
+    if (action !== undefined) {
+      if (req.method !== 'POST') {
+        empty(res, 405, { allow: 'POST' });
+        return;
+      }
+      const key = jobKey(path[2], path[3]);
+      if (key === undefined) {
+        empty(res, 404);
+        return;
+      }
+      handleAction(req, res, action, key).catch(failed);
+      return;
+    }
+    if (req.method !== 'GET') {
+      empty(res, 405, { allow: 'GET' });
+      return;
+    }
+    route(req, res, path, target.searchParams).catch(failed);
   });
 
   const address = await new Promise<AddressInfo>((resolve, reject) => {
@@ -322,6 +496,7 @@ export async function startDashboard(port: number, stateDir: string, jobs: JobSt
       resolve(httpServer.address() as AddressInfo);
     });
   });
+  origin = `http://${LOOPBACK_HOST}:${address.port}`;
 
   const refresh = async (job: Job): Promise<void> => {
     if (streams.size === 0) {

@@ -4,7 +4,7 @@ A local process that lets a model you plan with (ChatGPT first) drive Claude Cod
 ticket without you having to notice when Claude has finished. The Context owner writes a Task
 file, starts the job and reviews each iteration through MCP tools; the Implementer runs as a
 headless Claude Code session in the work checkout; you read the branch in the IDE and approve in
-the terminal. How it works: [design](docs/design/SF-011-factory.md). How to use it as the Context
+the terminal or on the dashboard. How it works: [design](docs/design/SF-011-factory.md). How to use it as the Context
 owner: [factory/HANDBOOK.md](factory/HANDBOOK.md).
 
 ## Components
@@ -13,7 +13,7 @@ owner: [factory/HANDBOOK.md](factory/HANDBOOK.md).
 | --- | --- | --- |
 | MCP server (loopback, port 8787) | `factory/src/server.ts` | [factory/README.md](factory/README.md) |
 | `sf` command | `factory/src/cli.ts`, `factory/bin/sf` | [factory/README.md](factory/README.md) |
-| Dashboard (read-only, port 8788) | `factory/src/dashboard.ts` | [factory/README.md](factory/README.md#dashboard) |
+| Dashboard (port 8788: the live view, approve, abort and say) | `factory/src/dashboard.ts` | [factory/README.md](factory/README.md#dashboard) |
 | ChatGPT tunnel wrapper | `scripts/sf-tunnel.sh` | [chatgpt-connection](docs/runbooks/chatgpt-connection.md) |
 
 ## Getting started
@@ -30,7 +30,8 @@ bin/sf serve                     # MCP on 127.0.0.1:8787/mcp; prints the dashboa
 In a second terminal, run the tunnel: `scripts/sf-tunnel.sh check`, then `scripts/sf-tunnel.sh
 run`. In ChatGPT, use the "Software Factory" connector (no authentication). Both are described in
 the [connection runbook](docs/runbooks/chatgpt-connection.md). The dashboard is at
-`http://127.0.0.1:8788/d/<token>/`; `bin/sf dashboard` prints the full URL.
+`http://127.0.0.1:8788/d/<token>/`; `bin/sf dashboard` prints the full URL. It shows the jobs
+live and takes your approve, abort and say, like `bin/sf approve|abort|say`.
 
 ## Local state outside version control
 

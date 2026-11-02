@@ -1,105 +1,16 @@
-// The read-only Dashboard: in-process against startDashboard (token, endpoints, the event stream,
+// The Dashboard's reads: in-process against startDashboard (token, endpoints, the event stream,
 // the stream limit, disconnects; the test process must exit by itself afterwards) and end to end
 // through `sf serve` with the fake Implementer (a real cycle, approve, SF_DASHBOARD=off, sf dashboard).
+// The actions (approve, abort, say) are in dashboard-actions.test.ts.
 import assert from 'node:assert/strict';
-import { mkdir, readdir, readFile, readlink, stat, writeFile } from 'node:fs/promises';
-import { get, request, type IncomingMessage } from 'node:http';
+import { readdir, readFile, readlink, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { MAX_STREAMS, type RunningDashboard, startDashboard, TOKEN_FILE } from '../src/dashboard.js';
-import { type EventRecord, type Job, type JobState, JobStore } from '../src/jobs.js';
+import { MAX_STREAMS, TOKEN_FILE } from '../src/dashboard.js';
+import type { Job } from '../src/jobs.js';
+import { CSP, fakeActions, fetchRaw, openStream, type Stream } from './support/dashboard-client.js';
+import { withDashboard } from './support/dashboard-state.js';
 import { call, newEnv, newRepo, putTask, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
-
-const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'";
-
-interface Reply {
-  status: number;
-  headers: IncomingMessage['headers'];
-  body: string;
-}
-
-function fetchRaw(url: URL | string, options: { method?: string; host?: string } = {}): Promise<Reply> {
-  return new Promise((resolve, reject) => {
-    const target = new URL(url);
-    const req = request(target, { method: options.method ?? 'GET', headers: options.host !== undefined ? { host: options.host } : {} }, (res) => {
-      let body = '';
-      res.setEncoding('utf8');
-      res.on('data', (chunk: string) => (body += chunk));
-      res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body }));
-    });
-    req.once('error', reject);
-    req.end();
-  });
-}
-
-interface SseEvent {
-  event: string;
-  data: any;
-}
-
-interface Stream {
-  status: number;
-  headers: IncomingMessage['headers'];
-  events: SseEvent[];
-  // The next event of that name after the ones already taken.
-  next(event: string, match?: (data: any) => boolean): Promise<any>;
-  close(): void;
-}
-
-function openStream(url: URL): Promise<Stream> {
-  return new Promise((resolve, reject) => {
-    const req = get(url, (res) => {
-      const events: SseEvent[] = [];
-      let taken = 0;
-      let wake: (() => void) | undefined;
-      let buffer = '';
-      res.setEncoding('utf8');
-      res.on('data', (chunk: string) => {
-        buffer += chunk;
-        let end;
-        while ((end = buffer.indexOf('\n\n')) >= 0) {
-          const block = buffer.slice(0, end);
-          buffer = buffer.slice(end + 2);
-          const name = /^event: (.*)$/m.exec(block)?.[1];
-          const data = /^data: (.*)$/m.exec(block)?.[1];
-          if (name !== undefined && data !== undefined) {
-            events.push({ event: name, data: JSON.parse(data) });
-            wake?.();
-          }
-        }
-      });
-      res.on('error', () => undefined);
-      resolve({
-        status: res.statusCode ?? 0,
-        headers: res.headers,
-        events,
-        async next(event, match = () => true) {
-          const deadline = Date.now() + 10_000;
-          for (;;) {
-            for (; taken < events.length; taken += 1) {
-              const candidate = events[taken]!;
-              if (candidate.event === event && match(candidate.data)) {
-                taken += 1;
-                return candidate.data;
-              }
-            }
-            if (Date.now() > deadline) {
-              assert.fail(`no ${event} event; got ${JSON.stringify(events.map((item) => item.event))}`);
-            }
-            await new Promise<void>((done) => {
-              wake = done;
-              setTimeout(done, 100);
-            });
-          }
-        },
-        close() {
-          req.destroy();
-        },
-      });
-    });
-    req.once('error', reject);
-  });
-}
 
 // Listening TCP sockets of a process, from /proc (Linux); undefined where /proc is not available.
 async function listeners(pid: number): Promise<number | undefined> {
@@ -119,52 +30,8 @@ async function listeners(pid: number): Promise<number | undefined> {
   }
 }
 
-const stateRecord = (from: JobState | null, to: JobState, ts: string): EventRecord => ({ ts, iteration: 0, state: { from, to } });
-
-async function fixture(name: string): Promise<{ state: string; jobs: JobStore; job: Job }> {
-  const state = join(temp, name);
-  await mkdir(state, { recursive: true });
-  const jobs = new JobStore(state);
-  const job: Job = {
-    workspace: 'app', ticket: 'T-1', branch: 'T-1-demo', base: 'main', base_commit: null, target_commit: null,
-    mr_attempts: 0, state: 'awaiting_review', iteration: 1, session_id: 's1',
-    created_at: '2026-11-01T10:00:00.000Z', updated_at: '2026-11-01T10:05:00.000Z',
-  };
-  await jobs.write(job);
-  await jobs.write({ ...job, ticket: 'T-0', branch: 'T-0-old', state: 'failed', iteration: 0, error: { code: 'start_failed', message: 'Git failed.' } });
-  await jobs.appendEvent('app', 'T-1', stateRecord(null, 'starting', '2026-11-01T10:00:00.000Z'));
-  await jobs.appendEvent('app', 'T-1', stateRecord('starting', 'working', '2026-11-01T10:00:01.000Z'));
-  await jobs.appendEvent('app', 'T-1', { ts: '2026-11-01T10:00:02.000Z', iteration: 0, prompt: '/implement .software-factory/T-1.md' });
-  await jobs.appendEvent('app', 'T-1', {
-    ts: '2026-11-01T10:00:03.000Z', iteration: 0,
-    message: { type: 'assistant', message: { content: [{ type: 'text', text: 'Working on it' }, { type: 'tool_use', name: 'Bash', input: { command: 'npm test' } }] } },
-  });
-  await jobs.appendEvent('app', 'T-1', { ts: '2026-11-01T10:04:00.000Z', iteration: 0, message: { type: 'result', subtype: 'success', total_cost_usd: 0.5, duration_ms: 2000, num_turns: 3 } });
-  await jobs.appendEvent('app', 'T-1', stateRecord('working', 'awaiting_review', '2026-11-01T10:05:00.000Z'));
-  await jobs.writeIteration('app', 'T-1', {
-    report: '# Report: T-1, iteration 1\n## Done\nThings.\n',
-    patch: Buffer.from('diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-hello\n+hello world\n'),
-    meta: {
-      iteration: 1, started_at: '2026-11-01T10:00:01.000Z', ended_at: '2026-11-01T10:05:00.000Z', denials: ['Bash'],
-      changed_files: [{ path: 'README.md', added: 1, removed: 1 }], patch_truncated: false, submodule_changed: [],
-      cost_usd: 0.5, cost_usd_total: 0.5, duration_ms: 2000,
-    },
-  });
-  return { state, jobs, job };
-}
-
-async function withDashboard(name: string, work: (dashboard: RunningDashboard, store: Awaited<ReturnType<typeof fixture>>) => Promise<void>): Promise<void> {
-  const store = await fixture(name);
-  const dashboard = await startDashboard(0, store.state, store.jobs);
-  try {
-    await work(dashboard, store);
-  } finally {
-    await dashboard.close();
-  }
-}
-
 test('dashboard: token, static files with the security headers, 404 and 405 with empty bodies', async () => {
-  await withDashboard('dash-token', async (dashboard, { state }) => {
+  await withDashboard('dash-token', fakeActions(), async (dashboard, { state }) => {
     const base = dashboard.url;
     const token = base.pathname.split('/')[2]!;
     assert.match(token, /^[0-9a-f]{64}$/);
@@ -198,7 +65,7 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
 });
 
 test('dashboard: jobs, job detail, report, patch and mr endpoints; bad names are 404', async () => {
-  await withDashboard('dash-api', async (dashboard, { jobs }) => {
+  await withDashboard('dash-api', fakeActions(), async (dashboard, { jobs }) => {
     const base = dashboard.url;
     const list = await fetchRaw(new URL('api/jobs', base));
     assert.equal(list.headers['content-type'], 'application/json; charset=utf-8');
@@ -242,7 +109,7 @@ test('dashboard: jobs, job detail, report, patch and mr endpoints; bad names are
 });
 
 test('dashboard: the stream sends jobs, the job and the events, follows the file, resumes, is limited and stops on disconnect', async () => {
-  await withDashboard('dash-stream', async (dashboard, { jobs, job }) => {
+  await withDashboard('dash-stream', fakeActions(), async (dashboard, { jobs, job }) => {
     const stream = await openStream(new URL('api/stream?job=app/T-1', dashboard.url));
     assert.equal(stream.status, 200);
     assert.equal(stream.headers['content-type'], 'text/event-stream; charset=utf-8');

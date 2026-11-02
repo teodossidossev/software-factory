@@ -55,6 +55,40 @@
         <pre id="mr-body" class="document"></pre>
       </details>
 
+      <section class="panel actions" aria-labelledby="actions-title">
+        <h3 id="actions-title">Actions</h3>
+        <div class="action-buttons">
+          <button id="approve-button" type="button" disabled>Approve…</button>
+          <button id="abort-button" type="button" disabled>Abort…</button>
+        </div>
+        <p id="action-reasons" class="muted"></p>
+        <div id="confirm" class="confirm" role="dialog" aria-modal="false" aria-labelledby="confirm-title" aria-describedby="confirm-text" hidden>
+          <h4 id="confirm-title"></h4>
+          <p id="confirm-text"></p>
+          <label id="discard-label" class="discard" hidden>
+            <input id="discard" type="checkbox">
+            Also discard: remove the branch and all its changes from the work checkout (git reset --hard, git clean, branch deleted). Cannot be undone.
+          </label>
+          <div class="action-buttons">
+            <button id="confirm-ok" type="button">Confirm</button>
+            <button id="confirm-cancel" type="button">Cancel</button>
+          </div>
+        </div>
+        <div id="action-status" class="status" role="status" aria-live="polite"></div>
+        <div id="action-doubt" class="status error" role="status" aria-live="polite"></div>
+        <div class="action-buttons">
+          <button id="refresh-button" type="button" hidden>Refresh state</button>
+        </div>
+        <form id="say-form" class="say">
+          <label for="say-input">Message to the Implementer (Enter adds a line; Send submits)</label>
+          <textarea id="say-input" rows="4" disabled></textarea>
+          <div class="action-buttons">
+            <button id="say-button" type="submit" disabled>Send</button>
+            <span id="say-reason" class="muted"></span>
+          </div>
+        </form>
+      </section>
+
       <section class="panel events-panel">
         <div class="events-head">
           <h3>Event stream</h3>

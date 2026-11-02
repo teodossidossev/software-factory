@@ -141,6 +141,43 @@ h3 { font-size: 14px; }
 .badge.s-failed { background: var(--s-failed); }
 
 .error { margin: 8px 0 0; padding: 6px 8px; border-radius: 6px; background: var(--error-bg); color: var(--del); overflow-wrap: anywhere; }
+
+/* Actions: approve, abort and say for the selected job. */
+.actions h3 { margin-bottom: 6px; }
+.action-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.action-buttons button {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.action-buttons button:disabled { opacity: 0.5; cursor: default; }
+.action-buttons button.danger { border-color: var(--del); color: var(--del); }
+.confirm { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--accent); border-radius: 6px; background: var(--selected); }
+.confirm h4 { margin: 0 0 4px; font-size: 14px; }
+.confirm p { margin: 0 0 8px; overflow-wrap: anywhere; }
+.confirm .discard { display: block; margin: 0 0 8px; color: var(--del); }
+.status { margin-top: 8px; padding: 6px 8px; border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.status:empty { display: none; }
+.status.pending { background: var(--selected); }
+.status.ok { background: var(--add-bg); color: var(--add); }
+.status.warn { background: var(--selected); color: var(--s-review); }
+.status.error { background: var(--error-bg); color: var(--del); }
+.say { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.say label { font-size: 13px; color: var(--muted); }
+.say textarea {
+  width: 100%;
+  resize: vertical;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: inherit;
+  font: 13px/1.4 var(--mono);
+}
 .muted { color: var(--muted); margin: 4px 0; }
 
 .history { margin: 0; padding-left: 20px; font-size: 13px; }

@@ -7,9 +7,10 @@ vocabulary is in [../CONTEXT.md](../CONTEXT.md).
 It provides the planning tools (`guide`, `read_file`, `search`, `write_task`) and the execution
 tools (`start`, `check`, `request_fix`, `mark_clean`). The Implementer runs as a headless Claude
 Agent SDK session (`@anthropic-ai/claude-agent-sdk`, pinned in `package.json`) in the work checkout,
-inside Claude Code's sandbox. After Clean the user finishes the ticket from the terminal with
-`sf approve` (MR preparation and push), `sf abort` or `sf reset`, and is told about the states that
-need them through a desktop notification and ntfy. The Context owner is told through MCP Events:
+inside Claude Code's sandbox. After Clean the user finishes the ticket with approve (MR
+preparation and push) or abort, from the terminal (`sf approve`, `sf abort`) or from the dashboard
+(section Dashboard), or with `sf reset` (terminal only), and is told about the states that need
+them through a desktop notification and ntfy. The Context owner is told through MCP Events:
 ChatGPT subscribes to the event `software_factory.job` and the factory POSTs a signed webhook on
 each state that needs it (section MCP Events).
 
@@ -399,7 +400,7 @@ change (`since` in `check`).
 
 ## Dashboard
 
-A read-only page served by `sf serve` on a second loopback listener,
+A page served by `sf serve` on a second loopback listener,
 `http://127.0.0.1:${SF_DASHBOARD_PORT:-8788}/d/<token>/`, separate from the MCP port so the
 tunnel never reaches it. At every start `sf serve` writes a new random token (32 bytes, hex) to
 `${SF_STATE_DIR}/dashboard-token` (0600) and prints the URL; `sf dashboard` prints it again from
@@ -415,16 +416,57 @@ in time, `sf` exits 1 with the reason; the printed URL stays usable by hand. Exi
 launcher accepted the URL, not that the page loaded: nothing checks that `sf serve` is running.
 On another platform `--open` is refused (`open_unsupported`); plain `sf dashboard` works everywhere.
 
-Version 1 shows, live: every job with its state; for the selected job (the most recently updated
+Version 2 shows, live: every job with its state; for the selected job (the most recently updated
 one, or `#<workspace>/<ticket>` in the URL) the branch, base, state, iteration, estimated cost ("est. $", not a charge) and error,
 the state history, each iteration's Report and Patch, the MR text once there is one, and the
 Implementer's event stream as `sf watch` prints it, following new lines (scrolling up switches
-follow off). It changes nothing: there is no write endpoint; approve, abort and say stay in the
-terminal (version 2 adds them). The page is plain HTML, CSS and JavaScript from `static/`, with no
-external resources, under `Content-Security-Policy: default-src 'none'; script-src 'self';
-style-src 'self'; connect-src 'self'; img-src 'self'` and `Cache-Control: no-store`.
+follow off). It also takes the user's three commands for the selected job, with the same meaning
+as in the terminal: approve (`sf approve`), abort (`sf abort`, with an explicit discard choice
+that is unchecked every time a confirmation opens: `sf abort --discard`) and say (`sf say`: a
+multiline message; Enter adds a line, only the Send button submits). Each is one deliberate
+click; approve and abort ask for a confirmation that names the job and the branch, explains what
+follows (MR preparation and push; the session ends and the files stay, or the branch and its
+changes go with discard) and sends nothing when cancelled. The page enables a control from the
+state it shows (approve in `awaiting_review`, `ready_for_human_review` and `needs_human` after
+an MR preparation; abort in every non-terminal state; say in `working`, `awaiting_review` and
+`needs_human`) and says why one is off, but the factory decides: a refusal such as
+`invalid_state` or `turn_running` from a concurrent `sf` command or Context-owner action is
+shown as it comes. Nothing is retried or replayed: a reload, a reconnect or a network error never
+repeats an action. An answer that does not settle the outcome (no answer, a body cut after the
+headers even with status 200, a 2xx without a result, `internal_error` or any 5xx without a
+factory code) is reported as an unknown outcome, because the action may have run; a 4xx, with or
+without JSON, and a 5xx with a factory code are definite. After an unknown outcome the draft stays
+and that job's controls stay off until a state read started after it succeeds (abort stays on while
+a preparation is known to run). A failed read says so and shows a Refresh state button; the next
+`job` event of the stream tries the read too. The read then lifts the hold but not the doubt: the
+page says to check the state and the event stream, in a line of its own that a definite answer
+does not replace, until the next action for the job starts; it sends nothing by itself. A read
+without an answer in 10 s counts as failed, and a confirmation that the hold makes unavailable
+closes. Approve and abort
+stay the user's: the Context owner has no tool for them.
 
-Endpoints under `/d/<token>/`, GET only (anything else 405):
+Approve keeps its request open until MR preparation ends, as `sf approve` does, while the state
+history and the event stream follow it; closing the page stops waiting, not the preparation, and
+the outcome is recorded in the job either way. The outcome is shown as the factory reports it:
+pushed with the branch, the MR title and the link as text to copy (the branch and the title
+only, with a note to open the merge request by hand, when the origin URL cannot be parsed); back
+to `awaiting_review`
+with the paths that differ; `needs_human` with the error; or aborted. None of the last three is
+called a success. Abort stays available in `preparing_mr`, including while the page's own
+approve is pending; it ends the preparation and settles that pending answer. Say shows whether
+the message was queued behind a running turn (it has not run yet) or started a turn; the draft
+stays on any error, only the text that was sent is cleared on acknowledgement, and drafts are
+kept per job when the selection changes. A confirmation and a request are bound to the job they
+were opened for: changing the selection closes the confirmation and never retargets a request,
+and an answer that arrives for another job changes nothing on the shown one.
+
+The page is plain HTML, CSS and JavaScript from `static/`, with no external resources, under
+`Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self';
+img-src 'self'` and `Cache-Control: no-store`; every value is rendered as text.
+
+Endpoints under `/d/<token>/`. The read endpoints are GET only (anything else `405` with
+`Allow: GET`); the action endpoints are POST only (anything else `405` with `Allow: POST`; GET,
+HEAD and OPTIONS never act):
 
 | Path | Answer |
 |---|---|
@@ -435,7 +477,80 @@ Endpoints under `/d/<token>/`, GET only (anything else 405):
 | `api/jobs/<ws>/<ticket>/mr` | the MR text, `text/markdown`; 404 until there is one |
 | `api/stream?job=<ws>/<ticket>&from=<line>` | server-sent events: `jobs` (on connect and on every state change), `job` (the job's detail, on connect and when it changes state), `event` (`{line, ts, iteration, type, text}` for every visible line of `events.jsonl` from the 0-based `from`, as `sf watch` formats it); a comment every 15 s; at most 8 streams, then 503 |
 
-Invalid workspace or ticket names and unknown jobs are 404.
+| Method and path | JSON body | Calls |
+|---|---|---|
+| `POST api/jobs/<ws>/<ticket>/approve` | `{}` | `Execution.approve(ws, ticket)`; answers when the preparation ends |
+| `POST api/jobs/<ws>/<ticket>/abort` | `{"discard": false}`; `discard` optional, default false | `Execution.abort(ws, ticket, discard)` |
+| `POST api/jobs/<ws>/<ticket>/say` | `{"message": "<text>"}` | `Execution.say(ws, ticket, message)`; the text goes as it is (nothing trimmed or split) |
+
+The actions go to the same `Execution` as the socket commands, under its lock and guards; there
+is no second state machine and no other mutation endpoint. An action request must carry the
+token, an `Origin` equal to the page's exact origin (`http://127.0.0.1:<port>` with the actual
+port; a missing Origin, another loopback address or port and the MCP origin are refused with
+`403 invalid_origin`; a `null` or foreign Origin is already refused, `403`, by the loopback
+Origin check every request passes), `Content-Type: application/json` (a `charset=utf-8`
+parameter is accepted; anything else `415 unsupported_media_type`) and a body of at most 128 KiB
+(`413 body_too_large`, checked against `Content-Length` and while reading; nothing is truncated)
+that is UTF-8 JSON (`400 invalid_json`) of exactly the shape above: an object with the listed keys
+of the listed types, no other key, no null, no array (`400 invalid_body`). Invalid names and
+unknown jobs are an empty `404`, as for the reads. Nothing reaches the Execution until every check
+has passed; a body cut by a disconnect is dropped without an answer. There is no CORS and no
+form-encoded variant; the Host and Origin checks of the reads apply to every request.
+
+Answers are JSON with the same security headers. A completed call is
+`200 {"ok": true, "result": <the method's result, unchanged>}` whatever the outcome: an approve
+that ended in `needs_human`, `awaiting_review` or `aborted`, and an abort that ended the job but
+failed to discard (`result.error.code` `discard_failed`; the page says the discard may be partial
+and never that the branch or the files were removed) are `200` too; the page reads `result`.
+A `FactoryError` is `{"ok": false, "error": {"code", "message"}}` with its code and message kept,
+under `409` for `invalid_state`, `turn_running` and `rebase_in_progress`, `404` for
+`job_not_found` and `workspace_not_found`, `400` for `invalid_content`, and `500` for any other
+code (a Git failure before the preparation, for example). Any other failure is `500`
+with `internal_error` and a fixed message; the cause is logged, never the body or the token.
+
+When the page's approve request is cut, the preparation goes on and its outcome is recorded in
+the job; another approve meanwhile is refused (`invalid_state`: the job is `preparing_mr`), so a
+second request does not start another preparation.
+
+### Checking the page by hand
+
+The automated checks run the page's script against a stand-in document
+(`test/support/fake-dom.ts`), not a browser: layout, focus, Enter in the textarea and the form's
+own behaviour are only checked by hand. With `sf serve` running on a throwaway repository and
+`SF_CLAUDE` pointing at `dist/test/support/fake-claude.js` (or a real job you are willing to
+end), in a browser:
+
+1. Open the URL of `sf dashboard --open` and select a job in `awaiting_review`: Approve…, Abort…
+   and the message box are on; in `pushed`, `aborted` or `failed` all are off with a reason.
+2. Say: type two lines (Enter adds a line and submits nothing), click Send: "Sent" and an empty
+   box; while that turn runs, send another: "Queued"; `sf watch` shows both prompts as typed.
+3. Abort: click Abort…; the dialog names the job and the branch and says the files stay; Cancel:
+   `sf status` is unchanged. Open it again: the discard box is unchecked; tick it: the button
+   reads "Abort and discard the branch" in red; Cancel and reopen: unchecked again. Confirm a
+   plain abort on a job you can lose: "Aborted; the branch … and the files stay"; the branch and
+   files are still there.
+4. Approve: from `ready_for_human_review` click Approve…, read the dialog, confirm: the status
+   says MR preparation started, the badge turns `preparing_mr`, Approve… is off with a reason,
+   Abort… stays on. When it ends: "Pushed …" with the title and the merge request link to copy
+   (or the note to open it by hand).
+5. A changed and a failed preparation (fake Implementer: one turn that commits an extra file, one
+   that commits nothing): "Not pushed: the prepared commit differs … in <paths>" and the job back
+   in `awaiting_review`; "Not pushed: MR preparation failed (mr_dirty: …)" with Approve… on again
+   for the retry. Neither reads as a success.
+6. Switching: start a say or an approve and select another job before the answer: that job's
+   controls, status and draft are untouched; switch back: the outcome is there. A draft typed for
+   each job stays with it.
+7. Pending approve and disconnect: confirm an approve, close the tab, reopen the URL: the job is
+   `preparing_mr`, `mr_attempts` did not grow, and the outcome appears in the history when it ends.
+8. Reconnect: stop `sf serve` with the page open: the header says reconnecting and no request is
+   re-sent; start it again and reopen the page with the new URL (the old token is 404).
+9. Unknown outcome: with DevTools offline (or `sf serve` stopped) send a message: "outcome is
+   unknown", the draft stays and Send, Approve… and Abort… stay off with a reason; the read fails
+   and Refresh state appears; back online, click it: the state is current, the controls return,
+   and nothing was re-sent.
+10. Layout: narrower than 760 px the job list stacks above the detail and the buttons wrap; in the
+   OS dark scheme the status colours and the dialog stay readable; Tab reaches Approve…, Abort…,
+   the dialog's buttons, the textarea and Send; Escape closes the dialog.
 
 ## Workspace registry
 

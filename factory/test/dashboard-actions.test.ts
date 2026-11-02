@@ -1,0 +1,429 @@
+// The Dashboard's actions (approve, abort, say): the HTTP contract in process against
+// startDashboard with a fake DashboardActions (methods per route, token, Origin, content type,
+// body bounds, strict JSON, error mapping, a pending and a disconnected approve), then end to
+// end through `sf serve`, where the same POSTs reach the real Execution and the fake Implementer.
+import assert from 'node:assert/strict';
+import { mkdir, readFile, rm, stat } from 'node:fs/promises';
+import { request } from 'node:http';
+import { connect } from 'node:net';
+import { join } from 'node:path';
+import { mock, test } from 'node:test';
+import { ACTIONS, MAX_ACTION_BODY_BYTES } from '../src/dashboard.js';
+import { FactoryError } from '../src/errors.js';
+import { JobStore } from '../src/jobs.js';
+import { factoryPrompt } from '../src/prompts.js';
+import { act, CSP, fakeActions, fetchRaw, openStream, type Reply } from './support/dashboard-client.js';
+import { withDashboard } from './support/dashboard-state.js';
+import { call, fakeLog, git, newEnv, newRepo, putTask, refused, script, serve, stop, waitFor } from './support/harness.js';
+
+
+const error = (reply: Reply): { status: number; code: string } => ({ status: reply.status, code: JSON.parse(reply.body).error.code });
+
+const result = (reply: Reply): Record<string, any> => {
+  assert.equal(reply.status, 200, reply.body);
+  const data = JSON.parse(reply.body);
+  assert.equal(data.ok, true);
+  return data.result;
+};
+
+async function until(condition: () => boolean): Promise<void> {
+  const deadline = Date.now() + 5000;
+  while (!condition()) {
+    assert.ok(Date.now() < deadline, 'timed out');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('dashboard actions: POST only on the action routes, GET only elsewhere, 404 for bad names and jobs; nothing is dispatched', async () => {
+  const fake = fakeActions();
+  await withDashboard('dash-act-routes', fake, async (dashboard) => {
+    const base = dashboard.url;
+    for (const action of ACTIONS) {
+      for (const method of ['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']) {
+        const reply = await act(base, `api/jobs/app/T-1/${action}`, {}, { method });
+        assert.deepEqual([reply.status, reply.headers.allow, reply.body], [405, 'POST', ''], `${method} ${action}`);
+        assert.equal(reply.headers['content-security-policy'], CSP);
+      }
+    }
+    for (const path of ['', 'app.js', 'api/jobs', 'api/jobs/app/T-1', 'api/jobs/app/T-1/mr', 'api/jobs/app/T-1/iterations/1/report', 'api/stream', 'api/jobs/app/T-1/approve/x', 'api/jobs/app/T-1/other']) {
+      const reply = await act(base, path, {});
+      assert.deepEqual([reply.status, reply.headers.allow, reply.body], [405, 'GET', ''], path);
+    }
+    for (const path of ['api/jobs/App/T-1/approve', 'api/jobs/-app/T-1/say', 'api/jobs/app/.T-1/approve', 'api/jobs/app/T-9/approve', 'api/jobs/app/T-1%2Fx/approve']) {
+      const reply = await act(base, path, { message: 'x' });
+      assert.deepEqual([reply.status, reply.body], [404, ''], path);
+    }
+    assert.deepEqual(fake.calls, []);
+    // The query string is ignored; the path names the job.
+    assert.equal((await act(base, 'api/jobs/app/T-1/say?x=1&job=app/T-9', { message: 'x' })).status, 200);
+    assert.deepEqual(fake.calls, [['say', 'app', 'T-1', 'x']]);
+    fake.calls.length = 0;
+    const token = base.pathname.split('/')[2]!;
+    const wrong = `${token.slice(0, -1)}${token.endsWith('0') ? '1' : '0'}`;
+    const origin = `http://127.0.0.1:${base.port}`;
+    for (const path of [`/d/${wrong}/api/jobs/app/T-1/approve`, `/d/${token}api/jobs/app/T-1/approve`, `/x/${token}/api/jobs/app/T-1/approve`]) {
+      const reply = await fetchRaw(`${origin}${path}`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: '{}' });
+      assert.deepEqual([reply.status, reply.body], [404, ''], path);
+    }
+    assert.deepEqual(fake.calls, []);
+  });
+});
+
+test('dashboard actions: the exact Origin, application/json, a bounded UTF-8 JSON body of the right shape; nothing else is dispatched', async () => {
+  const fake = fakeActions();
+  await withDashboard('dash-act-input', fake, async (dashboard) => {
+    const base = dashboard.url;
+    const port = Number(base.port);
+    const path = 'api/jobs/app/T-1/say';
+    const body = { message: 'hi' };
+    const headers = (origin: string | undefined, type: string | undefined): Record<string, string> =>
+      ({ ...(origin !== undefined ? { origin } : {}), ...(type !== undefined ? { 'content-type': type } : {}) });
+    const raw = (options: Parameters<typeof fetchRaw>[1]): Promise<Reply> => fetchRaw(new URL(path, base), { method: 'POST', body: JSON.stringify(body), ...options });
+
+    // Origin: the page's exact origin, port included.
+    for (const origin of [undefined, '', `http://localhost:${port}`, `http://127.0.0.1:${port + 1}`, 'http://127.0.0.1', `http://[::1]:${port}`, `https://127.0.0.1:${port}`, `http://127.0.0.1:${port}/`, `HTTP://127.0.0.1:${port}`]) {
+      const reply = await raw({ headers: headers(origin, 'application/json') });
+      assert.deepEqual(error(reply), { status: 403, code: 'invalid_origin' }, String(origin));
+      assert.equal(reply.headers['cache-control'], 'no-store');
+    }
+    // "null" and foreign origins fall to the SDK's validator first; the answer is a 403 either way.
+    assert.equal((await raw({ headers: headers('null', 'application/json') })).status, 403);
+    assert.equal((await raw({ headers: headers('http://attacker.example', 'application/json') })).status, 403);
+    assert.equal((await raw({ headers: headers('http://127.0.0.1:8787', 'application/json') })).status, 403);
+    assert.equal((await raw({ host: `localhost:${port}`, headers: headers(`http://localhost:${port}`, 'application/json') })).status, 403);
+
+    // Content type.
+    const origin = `http://127.0.0.1:${port}`;
+    for (const type of [undefined, '', 'text/plain', 'application/x-www-form-urlencoded', 'multipart/form-data', 'application/json; charset=utf-16', 'application/jsonx', 'application/json; boundary=x']) {
+      assert.deepEqual(error(await raw({ headers: headers(origin, type) })), { status: 415, code: 'unsupported_media_type' }, String(type));
+    }
+    assert.deepEqual(fake.calls, []);
+    for (const type of ['application/json', 'application/json; charset=utf-8', 'application/json;charset=UTF-8', 'Application/JSON; charset="utf-8"']) {
+      assert.equal((await raw({ headers: headers(origin, type) })).status, 200, type);
+    }
+    assert.equal(fake.calls.length, 4);
+    fake.calls.length = 0;
+
+    // Body shape, per action.
+    const bad: Array<[string, string]> = [
+      ['say', '[]'], ['say', 'null'], ['say', '"hi"'], ['say', '1'], ['say', '{}'], ['say', '{"message":1}'], ['say', '{"message":null}'],
+      ['say', '{"message":["x"]}'], ['say', '{"message":"x","extra":1}'], ['say', '{"message":"x","discard":true}'],
+      ['abort', '{"discard":"yes"}'], ['abort', '{"discard":null}'], ['abort', '{"discard":1}'], ['abort', '{"discard":true,"force":true}'], ['abort', '[]'],
+      ['approve', '{"x":1}'], ['approve', '[]'], ['approve', 'null'], ['approve', '{"discard":true}'], ['approve', '{"__proto__":{}}'],
+    ];
+    for (const [action, text] of bad) {
+      const reply = await act(base, `api/jobs/app/T-1/${action}`, undefined, { body: text });
+      assert.deepEqual(error(reply), { status: 400, code: 'invalid_body' }, `${action} ${text}`);
+    }
+    for (const text of ['', '{', '{"message":"x"', '{"message": "x"} x', "{'message':'x'}"]) {
+      assert.deepEqual(error(await act(base, 'api/jobs/app/T-1/say', undefined, { body: text })), { status: 400, code: 'invalid_json' }, JSON.stringify(text));
+    }
+    // Malformed UTF-8 (a lone continuation byte inside the string) is refused, not replaced.
+    const broken = Buffer.concat([Buffer.from('{"message":"a'), Buffer.from([0x80]), Buffer.from('b"}')]);
+    assert.deepEqual(error(await act(base, 'api/jobs/app/T-1/say', undefined, { body: broken })), { status: 400, code: 'invalid_json' });
+    assert.deepEqual(fake.calls, []);
+
+    // Bounds: exactly the limit passes; one byte more is 413, by Content-Length and while streaming.
+    const fill = (bytes: number): string => `{"message":"${'a'.repeat(bytes - '{"message":""}'.length)}"}`;
+    const exact = fill(MAX_ACTION_BODY_BYTES);
+    assert.equal(Buffer.byteLength(exact), MAX_ACTION_BODY_BYTES);
+    assert.equal((await act(base, 'api/jobs/app/T-1/say', undefined, { body: exact })).status, 200);
+    assert.equal((fake.calls[0]![3] as string).length, MAX_ACTION_BODY_BYTES - '{"message":""}'.length);
+    fake.calls.length = 0;
+    const over = fill(MAX_ACTION_BODY_BYTES + 1);
+    assert.deepEqual(error(await act(base, 'api/jobs/app/T-1/say', undefined, { body: over })), { status: 413, code: 'body_too_large' });
+    assert.deepEqual(error(await act(base, 'api/jobs/app/T-1/say', undefined, { body: over, chunk: 4096 })), { status: 413, code: 'body_too_large' });
+    assert.equal((await act(base, 'api/jobs/app/T-1/say', undefined, { body: fill(4 * 1024 * 1024), chunk: 65536 })).status, 413);
+    assert.equal((await act(base, 'api/jobs/app/T-1/say', undefined, { body: exact, chunk: 1000 })).status, 200);
+    assert.equal(fake.calls.length, 1);
+    fake.calls.length = 0;
+
+    // An interrupted body: no call, no answer, and the next request works.
+    await new Promise<void>((resolve, reject) => {
+      const socket = connect(port, '127.0.0.1', () => {
+        socket.write(`POST /d/${base.pathname.split('/')[2]}/${path} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nOrigin: ${origin}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"message":"par`);
+        setTimeout(() => {
+          socket.destroy();
+          resolve();
+        }, 150);
+      });
+      socket.once('error', reject);
+    });
+    await sleep(150);
+    assert.deepEqual(fake.calls, []);
+    assert.equal((await act(base, path, body)).status, 200);
+    assert.deepEqual(fake.calls, [['say', 'app', 'T-1', 'hi']]);
+  });
+});
+
+test('dashboard actions: exact arguments, results passed through unchanged, FactoryError codes mapped, failures sanitized', async () => {
+  const fake = fakeActions();
+  const errors = mock.method(console, 'error', () => undefined);
+  try {
+    await withDashboard('dash-act-dispatch', fake, async (dashboard) => {
+      const base = dashboard.url;
+      const outcome = { state: 'pushed', branch: 'T-1-demo', title: 'feat(T-1): Demo', link: 'https://example.invalid/compare/main...T-1-demo' };
+      fake.answer = outcome;
+      const approved = await act(base, 'api/jobs/app/T-1/approve', {});
+      assert.equal(approved.status, 200);
+      assert.equal(approved.headers['content-type'], 'application/json; charset=utf-8');
+      assert.equal(approved.headers['content-security-policy'], CSP);
+      assert.deepEqual(JSON.parse(approved.body), { ok: true, result: outcome });
+
+      fake.answer = { state: 'aborted', branch: 'T-1-demo', discarded: false, error: { code: 'discard_failed', message: 'git branch -D failed.' } };
+      for (const [body, discard] of [[{}, false], [{ discard: false }, false], [{ discard: true }, true]] as const) {
+        const reply = await act(base, 'api/jobs/app/T-1/abort', body);
+        assert.equal(reply.status, 200);
+        // An abort that ended the job but failed to discard is a completed call: 200, the error inside.
+        assert.deepEqual(JSON.parse(reply.body), { ok: true, result: fake.answer });
+        assert.deepEqual(fake.calls.at(-1), ['abort', 'app', 'T-1', discard]);
+      }
+
+      fake.answer = { state: 'working', queued: true };
+      const message = '  Keep  "quotes", \'apostrophes\' and\nnew\r\nlines — ünïcödé 🚀 \t ';
+      const said = await act(base, 'api/jobs/app/T-1/say', { message });
+      assert.deepEqual(JSON.parse(said.body), { ok: true, result: { state: 'working', queued: true } });
+      assert.deepEqual(fake.calls.at(-1), ['say', 'app', 'T-1', message]);
+      assert.equal(fake.calls.length, 5);
+
+      const mapping: Array<[string, number]> = [
+        ['invalid_state', 409], ['turn_running', 409], ['rebase_in_progress', 409], ['job_not_found', 404], ['workspace_not_found', 404], ['invalid_content', 400], ['fetch_failed', 500], ['base_not_found', 500],
+      ];
+      for (const [code, status] of mapping) {
+        fake.answer = new FactoryError(code, `The ${code} message.`);
+        const reply = await act(base, 'api/jobs/app/T-1/say', { message: 'x' });
+        assert.equal(reply.status, status, code);
+        assert.deepEqual(JSON.parse(reply.body), { ok: false, error: { code, message: `The ${code} message.` } });
+      }
+      assert.equal(errors.mock.callCount(), 0);
+      fake.answer = new Error('boom at /home/user/secret');
+      const failed = await act(base, 'api/jobs/app/T-1/approve', {});
+      assert.equal(failed.status, 500);
+      assert.deepEqual(JSON.parse(failed.body), { ok: false, error: { code: 'internal_error', message: 'The request failed inside the factory.' } });
+      assert.equal(errors.mock.callCount(), 1);
+      assert.equal(fake.calls.length, 5 + mapping.length + 1);
+    });
+  } finally {
+    errors.mock.restore();
+  }
+});
+
+test('dashboard actions: a pending approve leaves reads, the stream and abort responsive; a disconnected approve settles once, without a second call', async () => {
+  const fake = fakeActions();
+  const errors = mock.method(console, 'error', () => undefined);
+  try {
+    await withDashboard('dash-act-pending', fake, async (dashboard) => {
+      const base = dashboard.url;
+      let settle: ((outcome: unknown) => void) | undefined;
+      let pending = 0;
+      fake.approve = (workspace, ticket) => {
+        fake.calls.push(['approve', workspace, ticket]);
+        if (pending > 0) {
+          return Promise.reject(new FactoryError('invalid_state', 'the job is preparing_mr.'));
+        }
+        pending += 1;
+        return new Promise((resolve) => {
+          settle = (outcome) => {
+            pending -= 1;
+            resolve(outcome as never);
+          };
+        });
+      };
+      const origin = `http://127.0.0.1:${base.port}`;
+      const first = request(new URL('api/jobs/app/T-1/approve', base), { method: 'POST', headers: { origin, 'content-type': 'application/json', 'content-length': '2' } });
+      first.on('error', () => undefined);
+      first.end('{}');
+      await until(() => fake.calls.length === 1);
+
+      // While it waits: reads, the stream, a refused second approve and abort all answer.
+      assert.equal((await fetchRaw(new URL('api/jobs', base))).status, 200);
+      const stream = await openStream(new URL('api/stream?job=app/T-1', base));
+      assert.equal((await stream.next('jobs')).jobs.length, 2);
+      assert.deepEqual(error(await act(base, 'api/jobs/app/T-1/approve', {})), { status: 409, code: 'invalid_state' });
+      fake.answer = { state: 'aborted', branch: 'T-1-demo', discarded: false };
+      assert.equal((await act(base, 'api/jobs/app/T-1/abort', {})).status, 200);
+      assert.equal(fake.calls.length, 3);
+
+      // The page goes away: the call goes on and settles without a second attempt or an error.
+      first.destroy();
+      await sleep(100);
+      settle!({ state: 'pushed', branch: 'T-1-demo', title: 'feat(T-1): Demo' });
+      await sleep(100);
+      assert.equal(pending, 0);
+      assert.equal(fake.calls.filter((entry) => entry[0] === 'approve').length, 2);
+      assert.equal(errors.mock.callCount(), 0);
+      assert.equal((await fetchRaw(new URL('api/jobs/app/T-1', base))).status, 200);
+
+      // A pending approve answered normally, with the outcome as it is.
+      const done = act(base, 'api/jobs/app/T-1/approve', {});
+      await until(() => pending === 1);
+      settle!({ state: 'needs_human', branch: 'T-1-demo', error: { code: 'mr_dirty', message: 'dirty' } });
+      assert.deepEqual(JSON.parse((await done).body), { ok: true, result: { state: 'needs_human', branch: 'T-1-demo', error: { code: 'mr_dirty', message: 'dirty' } } });
+      stream.close();
+    });
+  } finally {
+    errors.mock.restore();
+  }
+});
+
+const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid'];
+const commit = (message: string): string[] => ['git', ...ID, 'commit', '-q', '-m', message];
+const REBASE = ['git', ...ID, 'rebase', '-q', 'origin/main'];
+
+function mrText(header: string): string {
+  return [
+    header, '', '## What', 'Changes files.', '## Why', 'The ticket asks for it.', '## How', 'One line.', '## Why the change',
+    'Readers need it.', '## Special things to note', '- None.', '## Change outline', '- files', '## Testing', 'npm test: passed',
+    '## Checklist', '- [x] Branch name', '',
+  ].join('\n');
+}
+
+test('dashboard actions end to end: say resumes needs_human, approve is refused before an MR attempt and allowed after, a failed and a pushed preparation, terminal refusals', async () => {
+  const env = await newEnv('dash-needs', { SF_MAX_ITERATIONS: '1' });
+  const repo = await newRepo(env, 'dash-needs-repo', true);
+  await putTask(env, repo, 'N-1', 'Needs human');
+  await script(env, [
+    { write: { 'a.txt': 'a\n' }, text: 'iteration 1' },
+    { write: { 'a.txt': 'aa\n' }, text: 'resumed' },
+    { startupFailure: 'sandbox: bubblewrap is not installed' },
+    { write: { '.software-factory/N-1.mr.md': mrText('feat(N-1): Add a') }, run: [['git', 'add', 'a.txt'], commit('feat(N-1): Add a'), REBASE], text: 'prepared' },
+  ]);
+  const served = await serve(env);
+  try {
+    const base = served.dashboard!;
+    await call(served, 'start', { workspace: 'app', ticket: 'N-1' });
+    await waitFor(served, 'N-1', 'awaiting_review', 1);
+    assert.equal((await refused(served, 'request_fix', { workspace: 'app', ticket: 'N-1', content: 'more' })).code, 'iteration_limit');
+    assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'N-1' })).state, 'needs_human');
+
+    // needs_human without an MR attempt: approve is refused, say resumes the session.
+    const early = await act(base, 'api/jobs/app/N-1/approve', {});
+    assert.equal(early.status, 409);
+    assert.match(JSON.parse(early.body).error.message, /^approve needs ready_for_human_review, awaiting_review or needs_human after an MR preparation; the job is needs_human\.$/);
+    assert.deepEqual(result(await act(base, 'api/jobs/app/N-1/say', { message: 'go on\nplease' })), { state: 'working', queued: false });
+    await waitFor(served, 'N-1', 'awaiting_review', 2);
+    for (const message of ['', '   \n\t ', 'a\u0000b']) {
+      assert.deepEqual(error(await act(base, 'api/jobs/app/N-1/say', { message })), { status: 400, code: 'invalid_content' }, JSON.stringify(message));
+    }
+
+    // Approve from awaiting_review; the MR turn fails to start: needs_human with the turn's code.
+    const failed = result(await act(base, 'api/jobs/app/N-1/approve', {}));
+    assert.deepEqual(failed, { state: 'needs_human', branch: 'N-1-needs-human', error: { code: 'sandbox_unavailable', message: 'sandbox: bubblewrap is not installed' } });
+    assert.equal((await new JobStore(env.state).read('app', 'N-1'))!.mr_attempts, 1);
+    // The retry pushes; no link, because the origin is a local path.
+    const pushed = result(await act(base, 'api/jobs/app/N-1/approve', {}));
+    assert.deepEqual(pushed, { state: 'pushed', branch: 'N-1-needs-human', title: 'feat(N-1): Add a' });
+    assert.equal((await fetchRaw(new URL('api/jobs/app/N-1/mr', base))).body, mrText('feat(N-1): Add a'));
+
+    // pushed is terminal for every action.
+    for (const [action, body] of [['approve', {}], ['abort', {}], ['abort', { discard: true }], ['say', { message: 'x' }]] as const) {
+      assert.deepEqual(error(await act(base, `api/jobs/app/N-1/${action}`, body)), { status: 409, code: 'invalid_state' }, action);
+    }
+    const log = await fakeLog(env);
+    assert.equal(log.length, 4);
+    assert.equal(log[1]!.prompt, factoryPrompt('go on\nplease', 'N-1', 2));
+  } finally {
+    await stop(served);
+  }
+});
+
+test('dashboard actions end to end: say queues during a turn, approve goes back to review, a disconnected approve still pushes, abort ends a preparation, discard and its refusals', async () => {
+  const env = await newEnv('dash-pending');
+  const repo = await newRepo(env, 'dash-pending-repo', true);
+  for (const ticket of ['C-1', 'C-2', 'C-3', 'C-4']) {
+    await putTask(env, repo, ticket, `Job ${ticket}`);
+  }
+  const message = 'Please  keep "quotes",\nnew lines — ünïcödé 🚀 ';
+  await script(env, [
+    // C-1: the say arrives while this turn runs and is queued as the next one.
+    { delayMs: 2500, write: { 'a.txt': 'a\n' }, text: 'iteration 1' },
+    { text: 'the said turn' },
+    // approve 1: the prepared commit adds b.txt, so the change goes back to review.
+    { write: { 'b.txt': 'b\n', '.software-factory/C-1.mr.md': mrText('feat(C-1): Add a and b') }, run: [['git', 'add', 'a.txt', 'b.txt'], commit('feat(C-1): Add a and b'), REBASE], text: 'prepared' },
+    // approve 2: slow; the page disconnects meanwhile.
+    { delayMs: 3000, text: 'nothing more' },
+    // C-2: a preparation that abort ends.
+    { write: { 'c.txt': 'c\n' } },
+    { delayMs: 6000, text: 'slow preparation' },
+    // C-3 and C-4: discard.
+    { write: { 'd.txt': 'd\n' } },
+    { write: { 'e.txt': 'e\n' } },
+  ]);
+  const served = await serve(env);
+  try {
+    const base = served.dashboard!;
+    const jobs = new JobStore(env.state);
+    await call(served, 'start', { workspace: 'app', ticket: 'C-1' });
+    assert.deepEqual(result(await act(base, 'api/jobs/app/C-1/say', { message })), { state: 'working', queued: true });
+    await waitFor(served, 'C-1', 'awaiting_review', 1);
+    const back = result(await act(base, 'api/jobs/app/C-1/approve', {}));
+    assert.deepEqual(back, { state: 'awaiting_review', branch: 'C-1-job-c-1', changed_paths: ['b.txt'] });
+    assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'C-1' })).iteration, 2);
+    await call(served, 'mark_clean', { workspace: 'app', ticket: 'C-1' });
+
+    // The second approve: the stream shows preparing_mr, reads work, approve and say are refused;
+    // then the page goes away and the preparation still pushes, once.
+    const stream = await openStream(new URL('api/stream?job=app/C-1', base));
+    await stream.next('jobs');
+    const origin = `http://127.0.0.1:${base.port}`;
+    const req = request(new URL('api/jobs/app/C-1/approve', base), { method: 'POST', headers: { origin, 'content-type': 'application/json', 'content-length': '2' } });
+    req.on('error', () => undefined);
+    req.end('{}');
+    assert.equal((await stream.next('jobs', (data) => data.jobs[0].state === 'preparing_mr')).jobs.length, 1);
+    assert.equal((await stream.next('job')).job.state, 'preparing_mr');
+    assert.equal(JSON.parse((await fetchRaw(new URL('api/jobs/app/C-1', base))).body).job.mr_attempts, 2);
+    assert.deepEqual(error(await act(base, 'api/jobs/app/C-1/approve', {})), { status: 409, code: 'invalid_state' });
+    assert.deepEqual(error(await act(base, 'api/jobs/app/C-1/say', { message: 'x' })), { status: 409, code: 'invalid_state' });
+    req.destroy();
+    assert.equal((await stream.next('jobs', (data) => data.jobs[0].state === 'pushed')).jobs[0].ticket, 'C-1');
+    stream.close();
+    const pushed = (await jobs.read('app', 'C-1'))!;
+    assert.deepEqual([pushed.state, pushed.mr_attempts, pushed.iteration], ['pushed', 2, 2]);
+    assert.deepEqual(error(await act(base, 'api/jobs/app/C-1/abort', {})), { status: 409, code: 'invalid_state' });
+    let log = await fakeLog(env);
+    assert.equal(log.length, 4);
+    assert.equal(log[1]!.prompt, factoryPrompt(message, 'C-1', 1));
+
+    // C-2: abort while the MR preparation runs ends the job and settles the pending approve.
+    await call(served, 'start', { workspace: 'app', ticket: 'C-2' });
+    await waitFor(served, 'C-2', 'awaiting_review', 1);
+    const pending = act(base, 'api/jobs/app/C-2/approve', {});
+    await waitFor(served, 'C-2', 'preparing_mr');
+    assert.deepEqual(result(await act(base, 'api/jobs/app/C-2/abort', {})), { state: 'aborted', branch: 'C-2-job-c-2', discarded: false });
+    assert.deepEqual(result(await pending), { state: 'aborted', branch: 'C-2-job-c-2' });
+    assert.deepEqual(error(await act(base, 'api/jobs/app/C-2/abort', {})), { status: 409, code: 'invalid_state' });
+    assert.equal(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'C-2-job-c-2');
+    assert.equal(await readFile(join(repo, 'c.txt'), 'utf8'), 'c\n');
+    await rm(join(repo, 'c.txt'));
+    git(repo, 'checkout', '-q', 'main');
+
+    // C-3: discard is refused during a rebase, then removes the branch and its files.
+    await call(served, 'start', { workspace: 'app', ticket: 'C-3' });
+    await waitFor(served, 'C-3', 'awaiting_review', 1);
+    await mkdir(join(repo, '.git', 'rebase-merge'));
+    assert.deepEqual(error(await act(base, 'api/jobs/app/C-3/abort', { discard: true })), { status: 409, code: 'rebase_in_progress' });
+    assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'C-3' })).state, 'awaiting_review');
+    await rm(join(repo, '.git', 'rebase-merge'), { recursive: true });
+    assert.deepEqual(result(await act(base, 'api/jobs/app/C-3/abort', { discard: true })), { state: 'aborted', branch: 'C-3-job-c-3', discarded: true });
+    assert.equal(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'main');
+    assert.equal(git(repo, 'branch', '--list', 'C-3-job-c-3'), '');
+    await assert.rejects(stat(join(repo, 'd.txt')), { code: 'ENOENT' });
+
+    // C-4: the branch was renamed by hand, so the discard's last step fails: aborted, discard_failed.
+    await call(served, 'start', { workspace: 'app', ticket: 'C-4' });
+    await waitFor(served, 'C-4', 'awaiting_review', 1);
+    git(repo, 'branch', '-m', 'C-4-job-c-4', 'C-4-renamed');
+    const partial = result(await act(base, 'api/jobs/app/C-4/abort', { discard: true }));
+    assert.deepEqual([partial.state, partial.branch, partial.discarded, partial.error.code], ['aborted', 'C-4-job-c-4', false, 'discard_failed']);
+    assert.match(partial.error.message, /^git branch -D C-4-job-c-4 failed:/);
+    assert.equal(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'main');
+    assert.equal((await jobs.read('app', 'C-4'))!.error?.code, 'discard_failed');
+    // Seven, not eight: the aborted preparation of C-2 was ended before its delayed turn logged.
+    log = await fakeLog(env);
+    assert.equal(log.length, 7);
+  } finally {
+    await stop(served);
+  }
+});

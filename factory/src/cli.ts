@@ -130,7 +130,9 @@ async function serve(): Promise<void> {
   }
   try {
     if (dashboardOn()) {
-      dashboard = await startDashboard(dashboardPort, config.stateDir, jobs);
+      // The dashboard's actions (DashboardActions: approve, abort and say only) run on the same
+      // Execution as the socket commands.
+      dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution);
     } else {
       await removeToken(config.stateDir);
     }

@@ -1,4 +1,5 @@
 // `sf watch`: reads a job's events.jsonl directly (no server needed) and prints readable lines.
+// The dashboard's event stream uses the same reading loop (followLines) and formatting (describeEvent).
 import { open } from 'node:fs/promises';
 import { StringDecoder } from 'node:string_decoder';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -28,14 +29,46 @@ function resultText(content: unknown): string {
   return '';
 }
 
-// The printable lines of one events.jsonl record (none for messages without visible content).
-export function formatEvent(raw: string): string[] {
+export interface DescribedEvent {
+  ts: string | null;
+  iteration: number | null;
+  // "prompt", "state", "notify_failed", or the SDK message type ("assistant", "user", "result", "system", ...).
+  type: string;
+  lines: string[];
+}
+
+// One events.jsonl record as its time, iteration, kind and printable lines; undefined for a line
+// that is not a JSON object.
+export function describeEvent(raw: string): DescribedEvent | undefined {
   let record: Record<string, unknown>;
   try {
     record = JSON.parse(raw) as Record<string, unknown>;
   } catch {
-    return [];
+    return undefined;
   }
+  if (typeof record !== 'object' || record === null) {
+    return undefined;
+  }
+  const message = record.message as { type?: unknown } | undefined;
+  const type = typeof record.prompt === 'string' ? 'prompt'
+    : record.state !== undefined ? 'state'
+    : typeof record.type === 'string' ? record.type
+    : typeof message?.type === 'string' ? message.type
+    : 'unknown';
+  return {
+    ts: typeof record.ts === 'string' ? record.ts : null,
+    iteration: typeof record.iteration === 'number' ? record.iteration : null,
+    type,
+    lines: recordLines(record),
+  };
+}
+
+// The printable lines of one events.jsonl record (none for messages without visible content).
+export function formatEvent(raw: string): string[] {
+  return describeEvent(raw)?.lines ?? [];
+}
+
+function recordLines(record: Record<string, unknown>): string[] {
   const time = typeof record.ts === 'string' ? record.ts.slice(11, 19) : '--:--:--';
   const prefix = `${time} [${String(record.iteration)}]`;
   if (typeof record.prompt === 'string') {
@@ -88,6 +121,12 @@ export function formatEvent(raw: string): string[] {
 
 // Prints every event; with follow, keeps reading new lines until the signal aborts.
 export async function watchEvents(path: string, follow: boolean, print: (line: string) => void, signal?: AbortSignal): Promise<void> {
+  await followLines(path, follow, (raw) => formatEvent(raw).forEach(print), signal);
+}
+
+// Calls onLine with every complete line of the file and its 0-based number; with follow, keeps
+// reading new lines until the signal aborts.
+export async function followLines(path: string, follow: boolean, onLine: (raw: string, index: number) => void, signal?: AbortSignal): Promise<void> {
   let handle;
   try {
     handle = await open(path, 'r');
@@ -99,10 +138,14 @@ export async function watchEvents(path: string, follow: boolean, print: (line: s
   }
   try {
     let position = 0;
+    let index = 0;
     let pending = '';
     const decoder = new StringDecoder('utf8');
     const chunk = Buffer.alloc(65536);
     for (;;) {
+      if (signal?.aborted) {
+        return;
+      }
       const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
       if (bytesRead > 0) {
         position += bytesRead;
@@ -110,7 +153,8 @@ export async function watchEvents(path: string, follow: boolean, print: (line: s
         const lines = pending.split('\n');
         pending = lines.pop()!;
         for (const line of lines) {
-          formatEvent(line).forEach(print);
+          onLine(line, index);
+          index += 1;
         }
         continue;
       }

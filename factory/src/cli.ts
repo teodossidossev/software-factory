@@ -1,12 +1,13 @@
 // The sf command: `sf serve`, `sf workspace add|list|remove`, `sf start|say|approve|abort|reset`
-// (through the socket of sf serve), `sf status|watch` (reading the job state directly) and
-// `sf notify-test`.
+// (through the socket of sf serve), `sf status|watch|dashboard` (reading the state directory
+// directly) and `sf notify-test`.
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { loadConfig, stateDir } from './config.js';
+import { DEFAULT_DASHBOARD_PORT, dashboardUrl, readToken, removeToken, type RunningDashboard, startDashboard } from './dashboard.js';
 import { FactoryError } from './errors.js';
-import { Execution } from './execution.js';
+import { Execution, type StateListener } from './execution.js';
 import { callSocket, listenSocket } from './ipc.js';
 import { type Job, JobStore } from './jobs.js';
 import { jobNotification, notifyConfig, sendNotification, stateNotifier } from './notify.js';
@@ -17,7 +18,8 @@ import { watchEvents } from './watch.js';
 
 const DEFAULT_PORT = 8788;
 const USAGE = `Usage:
-  sf serve                                              Serve the MCP tools on 127.0.0.1:\${SF_PORT:-${DEFAULT_PORT}}/mcp
+  sf serve                                              Serve the MCP tools on 127.0.0.1:\${SF_PORT:-${DEFAULT_PORT}}/mcp and the dashboard
+  sf dashboard                                          Print the dashboard URL of the running sf serve
   sf workspace add <name> --read <path> [--work <path>] Register a workspace (--work defaults to --read)
   sf workspace list                                     List registered workspaces
   sf workspace remove <name>                            Unregister a workspace
@@ -32,25 +34,36 @@ const USAGE = `Usage:
 
 class UsageError extends Error {}
 
-function parsePort(raw: string | undefined): number {
+function parsePort(name: 'SF_PORT' | 'SF_DASHBOARD_PORT', fallback: number): number {
+  const raw = process.env[name];
   if (raw === undefined || raw === '') {
-    return DEFAULT_PORT;
+    return fallback;
   }
   const port = Number(raw);
   if (!/^\d+$/.test(raw) || port > 65535) {
-    throw new FactoryError('invalid_port', `SF_PORT must be an integer between 0 and 65535, got "${raw}".`);
+    throw new FactoryError('invalid_port', `${name} must be an integer between 0 and 65535, got "${raw}".`);
   }
   return port;
 }
 
+const dashboardOn = (): boolean => process.env.SF_DASHBOARD !== 'off';
+
 async function serve(): Promise<void> {
-  const port = parsePort(process.env.SF_PORT);
+  const port = parsePort('SF_PORT', DEFAULT_PORT);
+  const dashboardPort = parsePort('SF_DASHBOARD_PORT', DEFAULT_DASHBOARD_PORT);
   const config = loadConfig();
   const handbook = await loadHandbook();
   // Fail at startup on an invalid registry rather than on the first tool call.
   await loadRegistry();
-  const notify = stateNotifier(notifyConfig(), new JobStore(config.stateDir));
-  const execution = new Execution(config, (name) => resolveWorkspace(name), notify, handbook.text);
+  const jobs = new JobStore(config.stateDir);
+  const notify = stateNotifier(notifyConfig(), jobs);
+  // The dashboard starts after recovery; until then its listener is a no-op.
+  let dashboard: RunningDashboard | undefined;
+  const onStateChange: StateListener = (job, from, lines) => {
+    notify(job, from, lines);
+    dashboard?.onStateChange(job, from);
+  };
+  const execution = new Execution(config, (name) => resolveWorkspace(name), onStateChange, handbook.text);
   // The socket first: it refuses a second sf serve on the same state before recovery touches it.
   const socket = await listenSocket(config.stateDir, async ({ command, args }) => {
     const [workspace = '', ticket = '', ...words] = args;
@@ -79,6 +92,17 @@ async function serve(): Promise<void> {
     await socket.close();
     throw error;
   }
+  try {
+    if (dashboardOn()) {
+      dashboard = await startDashboard(dashboardPort, config.stateDir, jobs);
+    } else {
+      await removeToken(config.stateDir);
+    }
+  } catch (error) {
+    await Promise.all([server.close(), socket.close()]);
+    throw error;
+  }
+  console.log(dashboard !== undefined ? `${SERVER_NAME} dashboard ${dashboard.url.href}` : `${SERVER_NAME} dashboard off (SF_DASHBOARD=off)`);
   console.log(`${SERVER_NAME} listening on ${server.url.href}`);
   console.log(`${SERVER_NAME} socket ${socket.path}`);
 
@@ -89,7 +113,7 @@ async function serve(): Promise<void> {
     }
     stopping = true;
     console.log(`${SERVER_NAME} received ${signal}, shutting down`);
-    Promise.all([server.close(), socket.close()]).then(
+    Promise.all([server.close(), socket.close(), dashboard?.close()]).then(
       () => process.exit(0),
       (error: unknown) => {
         console.error(error);
@@ -299,6 +323,22 @@ async function watch(args: string[]): Promise<void> {
   await watchEvents(jobs.eventsPath(workspace, ticket), values.once !== true, (line) => console.log(line), abort.signal);
 }
 
+async function dashboardCommand(args: string[]): Promise<void> {
+  if (args.length !== 0) {
+    throw new UsageError('dashboard takes no arguments.');
+  }
+  if (!dashboardOn()) {
+    throw new FactoryError('dashboard_off', 'The dashboard is off (SF_DASHBOARD=off).');
+  }
+  const port = parsePort('SF_DASHBOARD_PORT', DEFAULT_DASHBOARD_PORT);
+  const token = await readToken(stateDir());
+  if (token === undefined) {
+    throw new FactoryError('no_dashboard_token', 'There is no dashboard token: sf serve has not started with the dashboard on this state directory.');
+  }
+  console.log(dashboardUrl(port, token).href);
+  console.log('The token changes on every sf serve start; the URL works while that sf serve runs.');
+}
+
 async function main(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
   if (command === 'start') {
@@ -338,6 +378,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'watch') {
     await watch(rest);
+    return;
+  }
+  if (command === 'dashboard') {
+    await dashboardCommand(rest);
     return;
   }
   if (command === 'serve' && rest.length === 0) {

@@ -18,7 +18,8 @@ npm install && npm run build      # once, inside factory/
 bin/sf workspace add <name> --read <path> [--work <path>]   # --work defaults to --read
 bin/sf workspace list
 bin/sf workspace remove <name>
-bin/sf serve                      # foreground; Ctrl+C stops it
+bin/sf serve                      # foreground; Ctrl+C stops it; prints the dashboard URL
+bin/sf dashboard                  # the dashboard URL of the last sf serve start; works without sf serve
 bin/sf start <workspace> <ticket> # start the job (same as the start tool); needs sf serve
 bin/sf say <workspace> <ticket> <message...>   # a user message into the session; needs sf serve
 bin/sf status [<workspace> <ticket>]           # one job or all jobs; works without sf serve
@@ -37,6 +38,8 @@ Exit codes: 0 ok, 1 error, 2 usage. `sf approve` exits 1 unless the branch was p
 | Variable | Default | Meaning |
 |---|---|---|
 | `SF_PORT` | `8788` | Port of `http://127.0.0.1:<port>/mcp` (loopback only, Host and Origin checked). |
+| `SF_DASHBOARD` | on | `off` starts no dashboard listener (and removes an old `dashboard-token`). |
+| `SF_DASHBOARD_PORT` | `8789` | Port of the dashboard, `http://127.0.0.1:<port>/d/<token>/` (loopback only, Host and Origin checked). |
 | `SF_CONFIG_DIR` | `${XDG_CONFIG_HOME:-~/.config}/software-factory` | Directory of the workspace registry. |
 | `SF_HANDBOOK` | `factory/HANDBOOK.md` | Handbook served as instructions (its `## Quick start` section) and by `guide`. |
 | `SF_STATE_DIR` | `${XDG_STATE_HOME:-~/.local/state}/software-factory` | Job state and the `sf.sock` socket. |
@@ -180,6 +183,7 @@ State layout under `${SF_STATE_DIR}`:
 
 ```
 sf.sock                                  # 0600, while sf serve runs; one JSON request/response per connection
+dashboard-token                          # 0600, the dashboard token of the last sf serve start
 jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, mr_attempts, state, iteration, session_id, created_at, updated_at, error
 jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed"}; what sf watch reads
 jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json}
@@ -190,6 +194,38 @@ jobs/<workspace>/<ticket>.<timestamp>/   # an archived earlier job
 
 `iteration` in `job.json` counts published iterations; `updated_at` is the time of the last state
 change (`since` in `check`).
+
+## Dashboard
+
+A read-only page served by `sf serve` on a second loopback listener,
+`http://127.0.0.1:${SF_DASHBOARD_PORT:-8789}/d/<token>/`, separate from the MCP port so the
+tunnel never reaches it. At every start `sf serve` writes a new random token (32 bytes, hex) to
+`${SF_STATE_DIR}/dashboard-token` (0600) and prints the URL; `sf dashboard` prints it again from
+that file and `SF_DASHBOARD_PORT`. The token changes on every `sf serve` start, so an open page
+stops working after a restart until it is reopened with the new URL. Any path without the right
+token answers 404 with an empty body.
+
+Version 1 shows, live: every job with its state; for the selected job (the most recently updated
+one, or `#<workspace>/<ticket>` in the URL) the branch, base, state, iteration, cost and error,
+the state history, each iteration's Report and Patch, the MR text once there is one, and the
+Implementer's event stream as `sf watch` prints it, following new lines (scrolling up switches
+follow off). It changes nothing: there is no write endpoint; approve, abort and say stay in the
+terminal (version 2 adds them). The page is plain HTML, CSS and JavaScript from `static/`, with no
+external resources, under `Content-Security-Policy: default-src 'none'; script-src 'self';
+style-src 'self'; connect-src 'self'; img-src 'self'` and `Cache-Control: no-store`.
+
+Endpoints under `/d/<token>/`, GET only (anything else 405):
+
+| Path | Answer |
+|---|---|
+| `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, updated_at, created_at, error |
+| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials}], mr, history: [{ts, from, to, error?}]}` |
+| `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
+| `api/jobs/<ws>/<ticket>/iterations/<n>/patch` | the Patch, `text/x-diff` |
+| `api/jobs/<ws>/<ticket>/mr` | the MR text, `text/markdown`; 404 until there is one |
+| `api/stream?job=<ws>/<ticket>&from=<line>` | server-sent events: `jobs` (on connect and on every state change), `job` (the job's detail, on connect and when it changes state), `event` (`{line, ts, iteration, type, text}` for every visible line of `events.jsonl` from the 0-based `from`, as `sf watch` formats it); a comment every 15 s; at most 8 streams, then 503 |
+
+Invalid workspace or ticket names and unknown jobs are 404.
 
 ## Workspace registry
 

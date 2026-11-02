@@ -17,6 +17,7 @@ import { writeTask } from '../../src/task-file.js';
 export const CLI = fileURLToPath(new URL('../../src/cli.js', import.meta.url));
 export const FAKE = fileURLToPath(new URL('./fake-claude.js', import.meta.url));
 const READY = /listening on (http:\/\/127\.0\.0\.1:\d+\/mcp)/;
+const DASHBOARD = /dashboard (http:\/\/127\.0\.0\.1:\d+\/d\/[0-9a-f]{64}\/)/;
 
 export let temp: string;
 const running = new Set<ChildProcess>();
@@ -31,6 +32,8 @@ export interface Env {
 export interface Served {
   child: ChildProcess;
   client: Client;
+  // The printed dashboard URL; undefined with SF_DASHBOARD=off.
+  dashboard: URL | undefined;
 }
 
 export function git(cwd: string, ...args: string[]): string {
@@ -44,6 +47,7 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
     SF_CONFIG_DIR: env.config,
     SF_STATE_DIR: env.state,
     SF_PORT: '0',
+    SF_DASHBOARD_PORT: '0',
     SF_CLAUDE: FAKE,
     // The machine's real notify-send stays quiet; the notification test sets its own PATH.
     SF_DESKTOP_NOTIFY: 'off',
@@ -110,6 +114,7 @@ export async function serve(env: Env): Promise<Served> {
   const child = spawn(process.execPath, [CLI, 'serve'], { env: processEnv(env), stdio: ['ignore', 'pipe', 'pipe'] });
   running.add(child);
   child.once('exit', () => running.delete(child));
+  let dashboard: URL | undefined;
   const url = await new Promise<URL>((resolve, reject) => {
     let output = '';
     const onData = (chunk: Buffer): void => {
@@ -117,6 +122,8 @@ export async function serve(env: Env): Promise<Served> {
       const match = READY.exec(output);
       if (match) {
         child.stdout.off('data', onData);
+        const printed = DASHBOARD.exec(output);
+        dashboard = printed ? new URL(printed[1]!) : undefined;
         resolve(new URL(match[1]!));
       }
     };
@@ -126,7 +133,7 @@ export async function serve(env: Env): Promise<Served> {
   });
   const client = new Client({ name: 'sf-011-execution', version: '0.0.0' });
   await client.connect(new StreamableHTTPClientTransport(url));
-  return { child, client };
+  return { child, client, dashboard };
 }
 
 export async function stop(served: Served, signal: NodeJS.Signals = 'SIGTERM'): Promise<void> {

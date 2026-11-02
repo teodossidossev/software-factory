@@ -28,7 +28,7 @@ let repo: string;
 const running = new Set<ChildProcess>();
 
 function env(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  return { PATH: process.env.PATH, HOME: process.env.HOME, SF_CONFIG_DIR: configDir, SF_STATE_DIR: join(temp, 'state'), SF_PORT: '0', ...extra };
+  return { PATH: process.env.PATH, HOME: process.env.HOME, SF_CONFIG_DIR: configDir, SF_STATE_DIR: join(temp, 'state'), SF_PORT: '0', SF_DASHBOARD_PORT: '0', ...extra };
 }
 
 function runCli(args: string[], extra: Record<string, string> = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {

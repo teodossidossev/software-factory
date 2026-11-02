@@ -402,11 +402,13 @@ change (`since` in `check`).
 
 A page served by `sf serve` on a second loopback listener,
 `http://127.0.0.1:${SF_DASHBOARD_PORT:-8788}/d/<token>/`, separate from the MCP port so the
-tunnel never reaches it. At every start `sf serve` writes a new random token (32 bytes, hex) to
-`${SF_STATE_DIR}/dashboard-token` (0600) and prints the URL; `sf dashboard` prints it again from
-that file and `SF_DASHBOARD_PORT`. The token changes on every `sf serve` start, so an open page
-stops working after a restart until it is reopened with the new URL. Any path without the right
-token answers 404 with an empty body.
+tunnel never reaches it. The first `sf serve` writes a random token (32 bytes, hex) to
+`${SF_STATE_DIR}/dashboard-token` (0600) and prints the URL; later starts reuse the file, so a
+bookmark keeps working across restarts, and `sf dashboard` prints the URL again from that file
+and `SF_DASHBOARD_PORT`. `sf dashboard --rotate` removes the file: the next `sf serve` start makes
+a new token and prints the new URL (a running `sf serve` keeps the old one until then). A missing
+or unusable file is replaced at start the same way; `SF_DASHBOARD=off` removes it. Any path
+without the right token answers 404 with an empty body.
 
 `sf dashboard --open` prints the same URL and then opens it in the browser with `xdg-open` (Linux
 only, from `xdg-utils`), run without a shell with the URL as its one argument and waited for up to

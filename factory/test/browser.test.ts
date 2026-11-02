@@ -38,13 +38,13 @@ test('sf dashboard --open: prints the URL and runs xdg-open once with that URL a
   // Plain sf dashboard launches nothing.
   const plain = await runCli(env, ['dashboard']);
   assert.equal(plain.code, 0, plain.stderr);
-  assert.equal(plain.stdout, `${url}\nThe token changes on every sf serve start; the URL works while that sf serve runs.\n`);
+  assert.equal(plain.stdout, `${url}\nThe token stays the same across sf serve starts; sf dashboard --rotate makes the next start pick a new one.\n`);
   assert.deepEqual(await launcher.calls(), []);
 
   const opened = await runCli(env, ['dashboard', '--open']);
   assert.equal(opened.code, 0, opened.stderr);
   assert.equal(opened.stdout.split('\n')[0], url);
-  assert.match(opened.stdout, /The token changes on every sf serve start/);
+  assert.match(opened.stdout, /The token stays the same across sf serve starts/);
   assert.deepEqual(await launcher.calls(), [[url]]);
 });
 

@@ -42,6 +42,8 @@ export interface SessionOptions {
   sessionId?: string | undefined;
   // Claude Code's sandbox for every turn; undefined runs without it.
   sandbox?: SandboxSettings | undefined;
+  // The model option of query(); undefined leaves the user's Claude Code default.
+  model?: string | undefined;
 }
 
 interface Queued {
@@ -186,6 +188,7 @@ export class ImplementerSession {
         env: { ...sessionEnvironment(), CLAUDE_CODE_STARTUP_FAILURE_RESULTS: '1' },
         ...(this.#sessionId !== undefined ? { resume: this.#sessionId } : {}),
         ...(this.#options.sandbox !== undefined ? { sandbox: this.#options.sandbox } : {}),
+        ...(this.#options.model !== undefined ? { model: this.#options.model } : {}),
         ...(this.#options.claudePath !== undefined ? { pathToClaudeCodeExecutable: this.#options.claudePath } : {}),
       },
     });

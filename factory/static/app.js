@@ -79,7 +79,8 @@ function renderHeader(detail) {
   $('job-base').textContent = job.base;
   $('job-iteration').textContent = job.mr_attempts > 0 ? `${job.iteration} (MR attempts ${job.mr_attempts})` : String(job.iteration);
   const costs = detail.iterations.map((iteration) => iteration.cost_usd).filter((cost) => typeof cost === 'number');
-  $('job-cost').textContent = costs.length > 0 ? `$${costs.reduce((sum, cost) => sum + cost, 0).toFixed(4)}` : 'n/a';
+  // An estimate of the API-equivalent price, not a charge: the session usually runs on a subscription.
+  $('job-cost').textContent = costs.length > 0 ? `est. $${costs.reduce((sum, cost) => sum + cost, 0).toFixed(4)}` : 'n/a';
   $('job-updated').textContent = shortTime(job.updated_at);
   const error = $('job-error');
   error.hidden = job.error === null;

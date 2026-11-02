@@ -1,11 +1,11 @@
 // What `sf status` derives for display from a Job and its published iterations: the recorded cost
-// and the elapsed wall-clock time. Nothing here is persisted; the Job schema and meta.json stay as
+// (an estimate of the API-equivalent price, not a charge) and the elapsed wall-clock time. Nothing here is persisted; the Job schema and meta.json stay as
 // they are.
 import { type Job, type JobStore, TERMINAL_STATES } from './jobs.js';
 
 export interface StatusRow {
   job: Job;
-  // The recorded cost in USD with four decimals, or "unknown".
+  // The recorded cost in USD with four decimals, or "unknown"; an estimate, shown as EST_USD.
   cost: string;
   // The elapsed time as HH:MM:SS.
   elapsed: string;

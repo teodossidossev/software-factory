@@ -102,7 +102,7 @@ test('recorded cost: the sum of cost_usd of the published iterations, never cost
   ]);
 });
 
-test('sf status: COST_USD and ELAPSED columns for all jobs and for one job, archives excluded, no server', async () => {
+test('sf status: EST_USD and ELAPSED columns for all jobs and for one job, archives excluded, no server', async () => {
   const env = await newEnv('status-cli');
   const jobs = new JobStore(env.state);
   assert.equal((await runCli(env, ['status'])).stdout, 'No jobs.\n');
@@ -129,7 +129,7 @@ test('sf status: COST_USD and ELAPSED columns for all jobs and for one job, arch
   const all = await runCli(env, ['status']);
   assert.equal(all.code, 0, all.stderr);
   const lines = all.stdout.trimEnd().split('\n');
-  assert.match(lines[0]!, /^WORKSPACE\s+TICKET\s+STATE\s+ITER\s+BRANCH\s+SINCE\s+COST_USD\s+ELAPSED\s+ERROR$/);
+  assert.match(lines[0]!, /^WORKSPACE\s+TICKET\s+STATE\s+ITER\s+BRANCH\s+SINCE\s+EST_USD\s+ELAPSED\s+ERROR$/);
   const cells = lines.slice(1).map((line) => line.split(/\s+/));
   assert.deepEqual(cells.map((row) => row.slice(0, 6)), [
     ['app', 'S-1', 'awaiting_review', '2', 'S-1-two', '2026-11-01T12:00:00.000Z'],
@@ -150,7 +150,7 @@ test('sf status: COST_USD and ELAPSED columns for all jobs and for one job, arch
 
   const one = await runCli(env, ['status', 'app', 'S-2']);
   assert.equal(one.code, 0, one.stderr);
-  assert.match(one.stdout, /^WORKSPACE\s+TICKET\s+STATE\s+ITER\s+BRANCH\s+SINCE\s+COST_USD\s+ELAPSED\s+ERROR\napp\s+S-2\s+needs_human\s+1\s+S-2-zero\s+\S+\s+0\.0000\s+\d{2,}:\d\d:\d\d\s+turn_failed\n\nturn_failed: It stopped\.\n$/);
+  assert.match(one.stdout, /^WORKSPACE\s+TICKET\s+STATE\s+ITER\s+BRANCH\s+SINCE\s+EST_USD\s+ELAPSED\s+ERROR\napp\s+S-2\s+needs_human\s+1\s+S-2-zero\s+\S+\s+0\.0000\s+\d{2,}:\d\d:\d\d\s+turn_failed\n\nturn_failed: It stopped\.\n$/);
   assert.equal((await runCli(env, ['status', 'app', 'S-7'])).code, 1);
 
   // Malformed metadata is reported, not shown as zero.
@@ -160,12 +160,14 @@ test('sf status: COST_USD and ELAPSED columns for all jobs and for one job, arch
   assert.doesNotMatch(broken.stdout, /0\.0000/);
 });
 
-test('sf help documents the COST_USD and ELAPSED columns and dashboard --open', async () => {
+test('sf help documents the EST_USD (an estimate) and ELAPSED columns and dashboard --open', async () => {
   const help = await runCli(await newEnv('status-help'), ['help']);
   assert.equal(help.code, 0, help.stderr);
   assert.match(help.stdout, /^  sf status \[<workspace> <ticket>\] +Show one job or all jobs/m);
   assert.match(help.stdout, /^  sf dashboard \[--open\] +Print the dashboard URL/m);
-  assert.match(help.stdout, /COST_USD: cost_usd of the published iterations summed, four decimals; 0\.0000 before the first one, unknown when one has no usable cost/);
+  assert.match(help.stdout, /^  EST_USD: an estimate of the API-equivalent price, not a charge \(the session usually runs on your Claude subscription\):$/m);
+  assert.match(help.stdout, /cost_usd of the published iterations summed, four decimals; 0\.0000 before the first one, unknown when one has no usable cost/);
+  assert.doesNotMatch(help.stdout, /COST_USD/);
   assert.match(help.stdout, /ELAPSED: wall-clock time since the job was created, waiting included; stops at the last state change once pushed, aborted or failed/);
   assert.match(help.stdout, /dashboard --open: Linux with xdg-open; waits for the launcher at most 10 s; on a launcher failure exits 1 and leaves the printed URL to open by hand/);
 });

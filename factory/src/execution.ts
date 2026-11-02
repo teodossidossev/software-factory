@@ -7,7 +7,7 @@ import type { Config } from './config.js';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
 import { isActive, type Job, type JobState, JobStore, now, TERMINAL_STATES } from './jobs.js';
-import { gitBusy, mergeRequestLink, originUrl, pushBranch, resolveTarget, snapshotDiff, takeSnapshot, verifyPrepared } from './mr.js';
+import { deleteSnapshotRef, gitBusy, mergeRequestLink, originUrl, pushBranch, resolveTarget, snapshotDiff, takeSnapshot, verifyPrepared } from './mr.js';
 import { buildPatch, changedFilesSection, type Patch } from './patch.js';
 import { removeSandboxPlaceholders } from './placeholders.js';
 import { factoryPrompt, iterationCost, mrPrompt } from './prompts.js';
@@ -271,7 +271,7 @@ export class Execution {
     const session = new ImplementerSession(
       {
         cwd: workspace.workCheckout, maxTurns: this.#config.maxTurns, claudePath: this.#config.claudePath,
-        sessionId: job.session_id ?? undefined, sandbox: this.#config.sandbox,
+        sessionId: job.session_id ?? undefined, sandbox: this.#config.sandbox, model: this.#config.model,
       },
       {
         prompt: async (prompt) => {
@@ -409,6 +409,7 @@ export class Execution {
       const title = verified.mrText.split(/\r?\n/)[0]!;
       const url = await originUrl(cwd);
       const link = url === undefined ? undefined : mergeRequestLink(url, job.base, job.branch);
+      await this.#dropSnapshotRef(job.ticket, cwd);
       const pushed = await this.#transition({ ...job, target_commit: snapshot.target_commit }, 'pushed', undefined, [title, ...(link !== undefined ? [link] : [])]);
       this.#live.delete(key);
       console.log(`${job.workspace}/${job.ticket}: pushed ${job.branch}\n  ${title}${link !== undefined ? `\n  ${link}` : ''}`);
@@ -443,11 +444,12 @@ export class Execution {
       const workspace = live?.workspace ?? (await this.#resolve(workspaceName));
       const cwd = workspace.workCheckout;
       const target = await resolveTarget(cwd, job.base);
-      // A retry keeps the snapshot of the reviewed change: the branch may already be rebased.
+      // A retry keeps the snapshot of the reviewed change: the branch may already be rebased. A
+      // snapshot written before SF-014 (blob hashes, no commit) is replaced by a new one.
       const previous = retry ? await this.jobs.readSnapshot(workspaceName, ticket) : undefined;
-      const snapshot = previous !== undefined
+      const snapshot = previous?.snapshot_commit !== undefined
         ? { ...previous, target_ref: target.ref, target_commit: target.commit }
-        : await takeSnapshot(cwd, job.base_commit!, target);
+        : await takeSnapshot(cwd, ticket, job.base_commit!, target, this.jobs.dir(workspaceName, ticket));
       await this.jobs.writeSnapshot(workspaceName, ticket, snapshot);
       const attempt = job.mr_attempts + 1;
       const next = await this.#transition({ ...job, mr_attempts: attempt }, 'preparing_mr');
@@ -481,10 +483,24 @@ export class Execution {
         await this.#clean(job, job.iteration, cwd);
       }
       const failure = cwd !== undefined ? await this.#discard(cwd, job) : undefined;
+      await this.#dropSnapshotRef(ticket, cwd ?? live?.workspace.workCheckout, workspaceName);
       const next = await this.#transition(job, 'aborted', failure);
       this.#settleMr(key, { state: next.state, branch: next.branch });
       return { state: next.state, branch: next.branch, discarded: cwd !== undefined && failure === undefined, ...(failure !== undefined ? { error: failure } : {}) };
     });
+  }
+
+  // Best effort: the snapshot ref of the job goes with it (pushed, abort, reset). cwd is the work
+  // checkout when known, else it is resolved from workspaceName; a failure is logged and ignored.
+  async #dropSnapshotRef(ticket: string, cwd: string | undefined, workspaceName?: string): Promise<void> {
+    try {
+      const dir = cwd ?? (workspaceName !== undefined ? (await this.#resolve(workspaceName)).workCheckout : undefined);
+      if (dir !== undefined && !(await deleteSnapshotRef(dir, ticket))) {
+        console.error(`${ticket}: could not delete the snapshot ref in ${dir}`);
+      }
+    } catch (error) {
+      console.error(error);
+    }
   }
 
   async #endSession(key: string): Promise<void> {
@@ -513,12 +529,15 @@ export class Execution {
     return undefined;
   }
 
-  // The escape hatch: in any state, ends the session and archives the job; Git is not touched.
+  // The escape hatch: in any state, ends the session and archives the job; the branch and the
+  // files are not touched, only the job's snapshot ref is removed.
   reset(workspaceName: string, ticket: string): Promise<{ archived: string; branch: string }> {
     return this.#locked(async () => {
       const job = await this.#job(workspaceName, ticket);
       const key = `${workspaceName}/${ticket}`;
+      const live = this.#live.get(key);
       await this.#endSession(key);
+      await this.#dropSnapshotRef(ticket, live?.workspace.workCheckout, workspaceName);
       const archived = await this.jobs.archive(workspaceName, ticket);
       this.#settleMr(key, { state: job.state, branch: job.branch, error: { code: 'reset', message: 'The job was reset.' } });
       return { archived: `jobs/${workspaceName}/${archived}`, branch: job.branch };

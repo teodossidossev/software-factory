@@ -48,11 +48,14 @@ const jobSchema = z.strictObject({
 });
 export type Job = z.output<typeof jobSchema>;
 
-// The reviewed change at approve time: the blob hash of every Patch path (or "absent").
+// The reviewed change at approve (mr-snapshot.json): the commit of the reviewed working tree on top
+// of base_commit (kept under refs/sf/snapshot/<ticket>), the target, and the reviewed paths.
 export interface MrSnapshot {
   target_ref: string;
   target_commit: string;
-  files: Record<string, string>;
+  base_commit: string;
+  snapshot_commit: string;
+  paths: string[];
 }
 
 export interface ChangedFile {

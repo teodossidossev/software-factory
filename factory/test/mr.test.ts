@@ -1,12 +1,15 @@
 // Unit tests for the MR preparation rules: the commit header, the MR text, the merge request link,
-// the snapshot comparison, the push protection, the Handbook section extraction, the MR prompt,
+// the snapshot commit and the diff check by three-way merge, the push protection, the Handbook section extraction, the MR prompt,
 // the deny lists and the sandbox settings.
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { chmod, mkdtemp, readFile, realpath, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { sandboxSettings } from '../src/config.js';
-import { compareSnapshot, mergeRequestLink, mrTextProblem, pushProtection } from '../src/mr.js';
+import { ABSENT, compareSnapshot, deleteSnapshotRef, expectedMerge, mergeRequestLink, mrTextProblem, pushProtection, snapshotDiff, takeSnapshot } from '../src/mr.js';
 import { FACTORY_PROMPT_RULES, handbookSection, mrPrompt } from '../src/prompts.js';
 import { COMMIT_TYPES, commitHeader, DENIED_TOOLS, headerProblem, MR_DENIED_TOOLS } from '../src/rules.js';
 import { quickStartSection } from '../src/server.js';
@@ -77,13 +80,88 @@ test('mergeRequestLink derives GitHub and GitLab pages from https and ssh origin
   }
 });
 
-test('compareSnapshot names every path added, removed or changed against the snapshot', () => {
-  const snapshot = { 'README.md': 'aaa', 'gone.txt': 'absent', 'src/x.ts': 'bbb' };
-  assert.deepEqual(compareSnapshot(snapshot, { 'README.md': 'aaa', 'gone.txt': 'absent', 'src/x.ts': 'bbb' }), []);
-  assert.deepEqual(compareSnapshot(snapshot, { 'README.md': 'aaa', 'gone.txt': 'absent', 'src/x.ts': 'ccc', 'extra.txt': 'ddd' }), ['extra.txt', 'src/x.ts']);
-  // A reviewed file missing from the commit, and a deletion that was not made.
-  assert.deepEqual(compareSnapshot(snapshot, { 'gone.txt': 'eee', 'src/x.ts': 'bbb' }), ['README.md', 'gone.txt']);
+test('compareSnapshot compares the merge result with the branch per path; absent on both sides is equal', () => {
+  // expected: the blobs of the clean three-way merge's tree; actual: the branch's blobs.
+  const expected = { 'README.md': 'aaa', 'gone.txt': ABSENT, 'src/x.ts': 'bbb', 'upstream.txt': 'uuu' };
+  assert.deepEqual(compareSnapshot(expected, { 'README.md': 'aaa', 'gone.txt': ABSENT, 'src/x.ts': 'bbb', 'upstream.txt': 'uuu' }), []);
+  assert.deepEqual(compareSnapshot(expected, { 'README.md': 'aaa', 'gone.txt': ABSENT, 'src/x.ts': 'ccc', 'upstream.txt': 'uuu', 'extra.txt': 'ddd' }), ['extra.txt', 'src/x.ts']);
+  // A reviewed file missing from the branch, and a deletion that was not made.
+  assert.deepEqual(compareSnapshot(expected, { 'README.md': ABSENT, 'gone.txt': 'eee', 'src/x.ts': 'bbb', 'upstream.txt': 'uuu' }), ['README.md', 'gone.txt']);
   assert.deepEqual(compareSnapshot({}, {}), []);
+});
+
+test('takeSnapshot commits the reviewed working tree in a temporary index; snapshotDiff compares the branch with the three-way merge', async () => {
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'sf-snapshot-')));
+  try {
+    const repo = join(dir, 'repo');
+    const jobDir = join(dir, 'job');
+    const sh = (...args: string[]): string => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { cwd: repo, encoding: 'utf8' }).trim();
+    execFileSync('git', ['init', '-q', '-b', 'main', repo]);
+    execFileSync('mkdir', ['-p', jobDir]);
+    const nine = (edit: Record<number, string>): string => `${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => edit[n] ?? String(n)).join('\n')}\n`;
+    await writeFile(join(repo, 'f.txt'), nine({}));
+    await writeFile(join(repo, 'gone.txt'), 'gone\n');
+    await writeFile(join(repo, 'run.sh'), 'echo\n');
+    sh('add', '.');
+    sh('commit', '-q', '-m', 'base');
+    const base = sh('rev-parse', 'HEAD');
+    // The reviewed change, uncommitted: an edit, a deletion, an executable, a new file, a symlink.
+    await writeFile(join(repo, 'f.txt'), nine({ 9: '9 change' }));
+    await unlink(join(repo, 'gone.txt'));
+    await chmod(join(repo, 'run.sh'), 0o755);
+    await writeFile(join(repo, 'new.txt'), 'new\n');
+    await symlink('f.txt', join(repo, 'link'));
+    sh('add', 'f.txt');
+    const indexBefore = sh('ls-files', '-s');
+    const snapshot = await takeSnapshot(repo, 'T-1', base, { ref: 'main', commit: base }, jobDir);
+    assert.deepEqual(snapshot.paths, ['f.txt', 'gone.txt', 'link', 'new.txt', 'run.sh']);
+    assert.equal(sh('rev-parse', 'refs/sf/snapshot/T-1'), snapshot.snapshot_commit);
+    assert.equal(sh('rev-parse', `${snapshot.snapshot_commit}^`), base);
+    assert.equal(sh('ls-tree', '--name-only', snapshot.snapshot_commit).split('\n').join(','), 'f.txt,link,new.txt,run.sh');
+    assert.match(sh('ls-tree', snapshot.snapshot_commit, 'link'), /^120000 blob /);
+    assert.equal(sh('cat-file', '-p', `${snapshot.snapshot_commit}:link`), 'f.txt');
+    assert.match(sh('ls-tree', snapshot.snapshot_commit, 'run.sh'), /^100755 /);
+    // The work checkout's index, HEAD and files are untouched; the temporary files are gone.
+    assert.equal(sh('ls-files', '-s'), indexBefore);
+    assert.equal(sh('rev-parse', 'HEAD'), base);
+    await assert.rejects(stat(join(jobDir, 'snapshot.index')), { code: 'ENOENT' });
+
+    // The Implementer commits the change; the target moves in another hunk of f.txt and adds a file.
+    sh('checkout', '-q', '-b', 'T-1-x');
+    sh('add', '-A');
+    sh('commit', '-q', '-m', 'feat(T-1): Change');
+    sh('checkout', '-q', 'main');
+    await writeFile(join(repo, 'f.txt'), nine({ 1: '1 upstream' }));
+    await writeFile(join(repo, 'up.txt'), 'up\n');
+    sh('add', '.');
+    sh('commit', '-q', '-m', 'upstream');
+    const target = sh('rev-parse', 'HEAD');
+    sh('checkout', '-q', 'T-1-x');
+    sh('rebase', '-q', 'main');
+    const moved = { ...snapshot, target_commit: target };
+    assert.deepEqual((await expectedMerge(repo, moved)).conflicted, []);
+    assert.deepEqual(await snapshotDiff(repo, moved, 'T-1-x'), []);
+    // An extra change on the branch, and a reviewed path dropped from it.
+    await writeFile(join(repo, 'extra.txt'), 'extra\n');
+    await rm(join(repo, 'new.txt'));
+    sh('add', '-A');
+    sh('commit', '-q', '--amend', '-m', 'feat(T-1): Change');
+    assert.deepEqual(await snapshotDiff(repo, moved, 'T-1-x'), ['extra.txt', 'new.txt']);
+
+    // A target that conflicts with the change in line 9: the conflicted path counts as differing
+    // whatever the branch holds.
+    sh('checkout', '-q', '-b', 'other', base);
+    await writeFile(join(repo, 'f.txt'), nine({ 9: '9 upstream' }));
+    sh('commit', '-q', '-am', 'conflicting');
+    const conflicting = { ...snapshot, target_commit: sh('rev-parse', 'HEAD') };
+    assert.deepEqual((await expectedMerge(repo, conflicting)).conflicted, ['f.txt']);
+    assert.deepEqual(await snapshotDiff(repo, conflicting, 'T-1-x'), ['extra.txt', 'f.txt', 'new.txt', 'up.txt']);
+
+    assert.equal(await deleteSnapshotRef(repo, 'T-1'), true);
+    assert.throws(() => sh('rev-parse', '--verify', '--quiet', 'refs/sf/snapshot/T-1'));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('handbookSection extracts by heading and skips "## " lines inside fences; mrPrompt sends them verbatim', async () => {
@@ -135,12 +213,13 @@ test('the MR deny list allows staging, committing and rebasing; push and the res
   }
 });
 
-test('sandboxSettings allows the npm registry plus SF_SANDBOX_DOMAINS, and SF_SANDBOX=off disables it', () => {
+test('sandboxSettings allows the npm registry plus SF_SANDBOX_DOMAINS, local binding and Unix sockets, and SF_SANDBOX=off disables it', () => {
   assert.deepEqual(sandboxSettings({}), {
-    enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, network: { allowedDomains: ['registry.npmjs.org'] },
+    enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true,
+    network: { allowedDomains: ['registry.npmjs.org'], allowLocalBinding: true, allowAllUnixSockets: true },
   });
   assert.deepEqual(sandboxSettings({ SF_SANDBOX_DOMAINS: ' pypi.org, *.example.com ,,registry.npmjs.org' })!.network, {
-    allowedDomains: ['registry.npmjs.org', 'pypi.org', '*.example.com'],
+    allowedDomains: ['registry.npmjs.org', 'pypi.org', '*.example.com'], allowLocalBinding: true, allowAllUnixSockets: true,
   });
   assert.equal(sandboxSettings({ SF_SANDBOX: 'off', SF_SANDBOX_DOMAINS: 'pypi.org' }), undefined);
   assert.throws(() => sandboxSettings({ SF_SANDBOX_DOMAINS: 'https://x' }), /invalid domain/);

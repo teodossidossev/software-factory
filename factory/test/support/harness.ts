@@ -32,6 +32,10 @@ export interface Env {
 export interface Served {
   child: ChildProcess;
   client: Client;
+  // The printed MCP endpoint URL.
+  url: URL;
+  // What sf serve printed up to the listening line.
+  output: string;
   // The printed dashboard URL; undefined with SF_DASHBOARD=off.
   dashboard: URL | undefined;
 }
@@ -115,8 +119,8 @@ export async function serve(env: Env): Promise<Served> {
   running.add(child);
   child.once('exit', () => running.delete(child));
   let dashboard: URL | undefined;
+  let output = '';
   const url = await new Promise<URL>((resolve, reject) => {
-    let output = '';
     const onData = (chunk: Buffer): void => {
       output += chunk.toString('utf8');
       const match = READY.exec(output);
@@ -133,7 +137,7 @@ export async function serve(env: Env): Promise<Served> {
   });
   const client = new Client({ name: 'sf-011-execution', version: '0.0.0' });
   await client.connect(new StreamableHTTPClientTransport(url));
-  return { child, client, dashboard };
+  return { child, client, url, output, dashboard };
 }
 
 export async function stop(served: Served, signal: NodeJS.Signals = 'SIGTERM'): Promise<void> {

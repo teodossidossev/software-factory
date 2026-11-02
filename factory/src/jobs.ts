@@ -85,7 +85,8 @@ export interface Iteration {
   meta: IterationMeta;
 }
 
-// One line of events.jsonl: an SDK message, a prompt sent, a state change or a failed notification.
+// One line of events.jsonl: an SDK message, a prompt sent, a state change, a failed notification,
+// removed placeholders or the principal of a tool call.
 export type EventRecord = { ts: string; iteration: number } & (
   | { message: unknown }
   | { prompt: string }
@@ -93,7 +94,12 @@ export type EventRecord = { ts: string; iteration: number } & (
   | { type: 'notify_failed'; channel: string; message: string }
   // Sandbox placeholders the factory removed from the work checkout (src/placeholders.ts).
   | { type: 'placeholders_removed'; paths: string[] }
+  // The authenticated caller (the token's sub) of a successful tool call, with OAuth on.
+  | { type: 'principal'; tool: PrincipalTool; principal: string }
 );
+
+// The tools whose caller is logged as a principal event.
+export type PrincipalTool = 'start' | 'request_fix' | 'mark_clean' | 'write_task';
 
 export function isActive(job: Job): boolean {
   return ACTIVE_STATES.includes(job.state);

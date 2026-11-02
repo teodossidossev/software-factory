@@ -22,7 +22,8 @@ There is no inbound port, port forwarding or public listener.
 Credentials sit on two layers:
 - **Transport.** Only tunnel-client uses the runtime key (a `file:` reference in the profile).
 - **MCP.** No OAuth: ChatGPT is set to *No authentication*. The factory listens on loopback only,
-  checks Host and Origin, and is reachable only through the private tunnel (ADR-0002).
+  checks Host and Origin, and is reachable only through the private tunnel (ADR-0002). Since
+  SF-015 the factory can also require OAuth tokens from Auth0; see "OAuth with Auth0" below.
 
 ## Files and locations
 
@@ -129,6 +130,62 @@ After a change to the tools (or after switching the endpoint from the old bridge
 restart `sf serve`, open the existing **Software Factory** plugin at https://chatgpt.com/plugins
 (do not create a new one), press **Refresh** and check the tool list. Then open a **new** Work
 chat; an old conversation does not pick up new tools by itself.
+
+## OAuth with Auth0
+
+Optional; without it everything above stays as it is. ChatGPT runs the OAuth 2.1 code flow with
+PKCE against Auth0 and sends the access token to the factory, which only verifies it
+(`factory/README.md`, section OAuth). ChatGPT is a Client ID Metadata Document client, so there
+is no dynamic client registration and no client secret. Below, `<resource>` is the `https` URL
+ChatGPT uses as the server's identifier, for example `https://sf.example.com/mcp`; it must be the
+same string in Auth0, in the factory and in the metadata.
+
+**In Auth0** (Dashboard of the tenant `https://<tenant>.<region>.auth0.com/`):
+
+1. Applications → APIs → **Create API**: Identifier = `<resource>`, signing algorithm **RS256**.
+2. Settings → General → API Authorization Settings: **Default Audience** = `<resource>`, so
+   Auth0 issues JWT access tokens for this API.
+3. Settings → Advanced: turn on **Client ID Metadata Document Registration**, **Resource
+   Parameter Compatibility Profile** and **Include Issuer in Authorization Responses**.
+4. Applications: import the ChatGPT CIMD client **from its URL** (the client metadata document
+   URL ChatGPT names) and grant it access to the API of step 1 (its *APIs* tab, or the API's
+   *Machine to Machine / Application Access* tab).
+5. A user that may sign in (Database, Google or another connection enabled for that client).
+
+**In ChatGPT:** the connector (https://chatgpt.com/plugins) with **Authentication: OAuth**. Edit the
+existing **Software Factory** plugin or create it as in "The connector in ChatGPT" with OAuth
+instead of No authentication. ChatGPT reads the authorization server from the factory's metadata and
+signs in through Auth0 on first use.
+
+**The factory** (terminal 1, instead of the plain `bin/sf serve`):
+
+```bash
+cd factory
+export SF_AUTH_ISSUER=https://<tenant>.<region>.auth0.com/   # exactly the token's iss, trailing slash included
+export SF_AUTH_AUDIENCE=<resource>                         # the API identifier of step 1
+# export SF_AUTH_RESOURCE=<resource>                       # only when it differs from the audience
+bin/sf serve                                               # prints: auth: https://<tenant>... audience <resource>
+curl -s http://127.0.0.1:8787/.well-known/oauth-protected-resource   # the metadata document
+```
+
+To check a token by hand, without the server: copy an access token issued for the API (for example
+from the Auth0 API's *Test* tab) and pipe it in, so it never appears on the command line:
+`xclip -o -selection clipboard | bin/sf auth-test`. It prints `valid: sub ...` or
+`rejected: <reason>`.
+
+**Check the tunnel** (terminal 2, from the repository root):
+
+```bash
+tunnel-client doctor --profile software-factory --explain   # oauth_metadata must pass
+```
+
+Then, in a new Work chat, call a tool: ChatGPT asks to sign in once, and `sf watch` shows
+`start by <sub>` (and the same for `request_fix`, `mark_clean` and `write_task`) with the Auth0 user
+id. A `401` in ChatGPT with `software-factory bearer token rejected: <reason>` in the `sf serve`
+output names what to fix: `wrong_audience` (the Default Audience or the resource differs from
+`SF_AUTH_AUDIENCE`), `wrong_issuer` (`SF_AUTH_ISSUER` without its trailing slash), `expired`
+(the clock or an old token), `unknown_kid` (another tenant), `jwks_unavailable` (Auth0 not
+reachable from this machine).
 
 ## Working in ChatGPT
 

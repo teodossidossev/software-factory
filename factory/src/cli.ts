@@ -1,11 +1,12 @@
 // The sf command: `sf serve`, `sf workspace add|list|remove`, `sf start|say|approve|abort|reset`
 // (through the socket of sf serve), `sf status|watch|dashboard` (reading the state directory
-// directly) and `sf notify-test`.
+// directly), `sf notify-test` and `sf auth-test` (verifying a token from stdin without the server).
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
+import { AuthError, createVerifier } from './auth.js';
 import { openInBrowser } from './browser.js';
-import { loadConfig, stateDir } from './config.js';
+import { authConfig, loadConfig, stateDir } from './config.js';
 import { DEFAULT_DASHBOARD_PORT, dashboardUrl, readToken, removeToken, type RunningDashboard, startDashboard } from './dashboard.js';
 import { FactoryError } from './errors.js';
 import { Execution, type StateListener } from './execution.js';
@@ -33,6 +34,7 @@ const USAGE = `Usage:
   sf abort <workspace> <ticket> [--discard]             End the job; --discard also removes the branch and its changes
   sf reset <workspace> <ticket>                         End the session and archive the job; the branch and files are untouched
   sf notify-test                                        Send a test notification on every channel
+  sf auth-test                                          Verify an access token read from stdin with the SF_AUTH_* settings
 
 Notes:
   EST_USD: an estimate of the API-equivalent price, not a charge (the session usually runs on your Claude subscription):
@@ -62,6 +64,7 @@ async function serve(): Promise<void> {
   const port = parsePort('SF_PORT', DEFAULT_PORT);
   const dashboardPort = parsePort('SF_DASHBOARD_PORT', DEFAULT_DASHBOARD_PORT);
   const config = loadConfig();
+  const auth = authConfig();
   const handbook = await loadHandbook();
   // Fail at startup on an invalid registry rather than on the first tool call.
   await loadRegistry();
@@ -97,7 +100,7 @@ async function serve(): Promise<void> {
   let server;
   try {
     await execution.recover();
-    server = await startServer(port, handbook, await packageVersion(), execution);
+    server = await startServer(port, handbook, await packageVersion(), execution, auth);
   } catch (error) {
     await socket.close();
     throw error;
@@ -113,6 +116,7 @@ async function serve(): Promise<void> {
     throw error;
   }
   console.log(dashboard !== undefined ? `${SERVER_NAME} dashboard ${dashboard.url.href}` : `${SERVER_NAME} dashboard off (SF_DASHBOARD=off)`);
+  console.log(auth === undefined ? 'auth: off' : `auth: ${auth.issuer} audience ${auth.audience}`);
   console.log(`${SERVER_NAME} listening on ${server.url.href}`);
   console.log(`${SERVER_NAME} socket ${socket.path}`);
 
@@ -288,6 +292,46 @@ async function notifyTest(args: string[]): Promise<void> {
   }
 }
 
+// Reads the token from stdin, never from an argument, so it stays out of the shell history.
+async function readStdin(limit: number): Promise<string> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of process.stdin) {
+    size += (chunk as Buffer).length;
+    if (size > limit) {
+      throw new FactoryError('invalid_token_input', `stdin holds more than ${limit} bytes; expected one access token.`);
+    }
+    chunks.push(chunk as Buffer);
+  }
+  return Buffer.concat(chunks).toString('utf8').trim();
+}
+
+async function authTest(args: string[]): Promise<void> {
+  if (args.length !== 0) {
+    throw new UsageError('auth-test takes no arguments; pipe the token into stdin.');
+  }
+  const auth = authConfig();
+  if (auth === undefined) {
+    throw new FactoryError('auth_off', 'SF_AUTH_ISSUER is not set; there is nothing to verify against.');
+  }
+  const token = await readStdin(64 * 1024);
+  if (token === '') {
+    throw new FactoryError('invalid_token_input', 'stdin is empty; pipe the access token into sf auth-test.');
+  }
+  try {
+    const principal = await createVerifier(auth)(token);
+    console.log(`valid: sub ${principal.sub}`);
+    console.log(`scopes: ${principal.scopes.length === 0 ? '(none)' : principal.scopes.join(' ')}`);
+    console.log(`expires: ${new Date(principal.expiresAt * 1000).toISOString()}`);
+  } catch (error) {
+    if (!(error instanceof AuthError)) {
+      throw error;
+    }
+    console.log(`rejected: ${error.reason}`);
+    process.exitCode = 1;
+  }
+}
+
 function table(rows: StatusRow[]): string {
   const cells = [
     ['WORKSPACE', 'TICKET', 'STATE', 'ITER', 'BRANCH', 'SINCE', 'EST_USD', 'ELAPSED', 'ERROR'],
@@ -380,6 +424,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'notify-test') {
     await notifyTest(rest);
+    return;
+  }
+  if (command === 'auth-test') {
+    await authTest(rest);
     return;
   }
   if (command === 'say') {

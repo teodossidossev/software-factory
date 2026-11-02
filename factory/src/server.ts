@@ -1,16 +1,31 @@
 // The factory's MCP endpoint: a loopback HTTP listener serving /mcp through the SDK's
 // stateless handler, with the Handbook as instructions, the planning tools and the execution
 // tools. The execution tools call Execution; they know nothing about the Implementer process.
+// With OAuth configured (SF_AUTH_*), it is a resource server: it serves the protected resource
+// metadata and lets a POST /mcp through with a valid bearer token, or without one for the open
+// methods only; src/auth.ts verifies the tokens.
 import { readFile } from 'node:fs/promises';
-import { createServer, type Server as HttpServer } from 'node:http';
+import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
-import { localhostHostValidation, localhostOriginValidation, toNodeHandler } from '@modelcontextprotocol/node';
-import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
+import { localhostHostValidation, localhostOriginValidation, toNodeHandler, toWebRequest } from '@modelcontextprotocol/node';
+import {
+  type AuthInfo,
+  bearerAuthChallengeResponse,
+  createMcpHandler,
+  DEFAULT_MAX_REQUEST_BODY_SIZE,
+  getOAuthProtectedResourceMetadataUrl,
+  McpServer,
+  OAuthError,
+  OAuthErrorCode,
+  type OAuthTokenVerifier,
+  verifyBearerToken,
+} from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
+import { type AuthConfig, AuthError, createVerifier, type Verify } from './auth.js';
 import { FactoryError } from './errors.js';
 import type { Execution } from './execution.js';
-import { JOB_STATES } from './jobs.js';
+import { JOB_STATES, type JobStore, now, type PrincipalTool } from './jobs.js';
 import { handbookSection } from './prompts.js';
 import { resolveWorkspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { DEFAULT_PAGE_BYTES, MAX_FILE_BYTES, MAX_PAGE_BYTES, MAX_PATH_LENGTH, MIN_PAGE_BYTES, RepoFiles, RepoReadError } from './repo-files.js';
@@ -20,6 +35,10 @@ import { MAX_FIX_BYTES, MAX_TASK_BYTES, TICKET_DESCRIPTION, TICKET_PATTERN, writ
 export const SERVER_NAME = 'software-factory';
 const LOOPBACK_HOST = '127.0.0.1';
 const MCP_PATH = '/mcp';
+// Both paths serve the same document: the root one named in the challenge, and the path-aware one
+// (RFC 9728) some clients try for /mcp.
+const METADATA_PATHS = new Set(['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp']);
+const SCOPES_SUPPORTED = ['openid', 'profile', 'email'];
 // Compiled to dist/src/server.js; the package root is two levels up.
 const PACKAGE_ROOT = new URL('../../', import.meta.url);
 
@@ -65,6 +84,30 @@ function toolError(error: unknown) {
     console.error(error);
   }
   return { content: [{ type: 'text' as const, text: JSON.stringify({ code, message }) }], isError: true };
+}
+
+// The authenticated caller of a tool call: the token's sub, undefined without OAuth or for a call
+// let through as open.
+function principalOf(ctx: { http?: { authInfo?: AuthInfo } }): string | undefined {
+  const sub = ctx.http?.authInfo?.extra?.sub;
+  return typeof sub === 'string' ? sub : undefined;
+}
+
+// Appends the principal of a successful tool call to the job's events.jsonl. Without a job for
+// the ticket (write_task before the first start) there is no event log, so nothing is written.
+// A failure is logged and does not change the tool's result.
+async function recordPrincipal(jobs: JobStore, workspace: string, ticket: string, tool: PrincipalTool, principal: string | undefined): Promise<void> {
+  if (principal === undefined) {
+    return;
+  }
+  try {
+    const job = await jobs.read(workspace, ticket);
+    if (job !== undefined) {
+      await jobs.appendEvent(workspace, ticket, { ts: now(), iteration: job.iteration, type: 'principal', tool, principal });
+    }
+  } catch (error) {
+    console.error(error);
+  }
 }
 
 const workspaceName = z.string().regex(WORKSPACE_NAME_PATTERN).describe(`Registered workspace name: ${WORKSPACE_NAME_DESCRIPTION}.`);
@@ -187,9 +230,11 @@ function createMcpServer(handbook: Handbook, version: string, execution: Executi
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
-    async ({ workspace, ticket, content }) => {
+    async ({ workspace, ticket, content }, ctx) => {
       try {
-        return toolResult({ ...(await writeTask(await resolveWorkspace(workspace), ticket, content, execution.jobs)) });
+        const result = toolResult({ ...(await writeTask(await resolveWorkspace(workspace), ticket, content, execution.jobs)) });
+        await recordPrincipal(execution.jobs, workspace, ticket, 'write_task', principalOf(ctx));
+        return result;
       } catch (error) {
         return toolError(error);
       }
@@ -198,9 +243,14 @@ function createMcpServer(handbook: Handbook, version: string, execution: Executi
 
   const jobState = z.enum(JOB_STATES);
   const errorShape = z.object({ code: z.string(), message: z.string() });
-  const run = async <T extends object>(work: () => Promise<T>) => {
+  // principal: the tool and the caller's sub to log once the work succeeded.
+  const run = async <T extends object>(work: () => Promise<T>, principal?: { tool: PrincipalTool; workspace: string; ticket: string; sub: string | undefined }) => {
     try {
-      return toolResult({ ...(await work()) } as Record<string, unknown>);
+      const result = toolResult({ ...(await work()) } as Record<string, unknown>);
+      if (principal !== undefined) {
+        await recordPrincipal(execution.jobs, principal.workspace, principal.ticket, principal.tool, principal.sub);
+      }
+      return result;
     } catch (error) {
       return toolError(error);
     }
@@ -219,7 +269,7 @@ function createMcpServer(handbook: Handbook, version: string, execution: Executi
       outputSchema: z.object({ branch: z.string(), state: jobState, check_after_minutes: z.number().int() }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ workspace, ticket }) => run(() => execution.start(workspace, ticket)),
+    async ({ workspace, ticket }, ctx) => run(() => execution.start(workspace, ticket), { tool: 'start', workspace, ticket, sub: principalOf(ctx) }),
   );
 
   server.registerTool(
@@ -283,7 +333,8 @@ function createMcpServer(handbook: Handbook, version: string, execution: Executi
       outputSchema: z.object({ iteration: z.number().int(), check_after_minutes: z.number().int() }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ workspace, ticket, content }) => run(() => execution.requestFix(workspace, ticket, content)),
+    async ({ workspace, ticket, content }, ctx) =>
+      run(() => execution.requestFix(workspace, ticket, content), { tool: 'request_fix', workspace, ticket, sub: principalOf(ctx) }),
   );
 
   server.registerTool(
@@ -297,7 +348,7 @@ function createMcpServer(handbook: Handbook, version: string, execution: Executi
       outputSchema: z.object({ state: jobState, iteration: z.number().int(), branch: z.string() }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ workspace, ticket }) => run(() => execution.markClean(workspace, ticket)),
+    async ({ workspace, ticket }, ctx) => run(() => execution.markClean(workspace, ticket), { tool: 'mark_clean', workspace, ticket, sub: principalOf(ctx) }),
   );
 
   return server;
@@ -321,9 +372,126 @@ function listen(server: HttpServer, port: number): Promise<AddressInfo> {
   });
 }
 
-export async function startServer(port: number, handbook: Handbook, version: string, execution: Execution): Promise<RunningServer> {
+// Writes a web-standard Response (an SDK challenge) to a Node response.
+async function send(res: ServerResponse, response: Response): Promise<void> {
+  const body = Buffer.from(await response.arrayBuffer());
+  const headers: Record<string, string> = {};
+  response.headers.forEach((value, name) => {
+    headers[name] = value;
+  });
+  res.writeHead(response.status, headers).end(body);
+}
+
+interface Gate {
+  // The protected resource metadata document, serialized once.
+  metadata: string;
+  resourceMetadataUrl: string;
+  verifier: OAuthTokenVerifier;
+  openMethods: Set<string>;
+}
+
+// The SDK's verifier interface over src/auth.ts: AuthError becomes invalid_token (server_error when
+// the keys could not be fetched); the reason goes to the log, never the token.
+function tokenVerifier(verify: Verify): OAuthTokenVerifier {
+  return {
+    async verifyAccessToken(token: string): Promise<AuthInfo> {
+      try {
+        const principal = await verify(token);
+        return { token, clientId: principal.sub, scopes: principal.scopes, expiresAt: principal.expiresAt, extra: { sub: principal.sub } };
+      } catch (error) {
+        if (error instanceof AuthError) {
+          console.error(`${SERVER_NAME} bearer token rejected: ${error.reason}`);
+          throw new OAuthError(error.reason === 'jwks_unavailable' ? OAuthErrorCode.ServerError : OAuthErrorCode.InvalidToken, error.message);
+        }
+        throw error;
+      }
+    },
+  };
+}
+
+function createGate(auth: AuthConfig, verify: Verify): Gate {
+  // Built by hand: buildOAuthProtectedResourceMetadata needs the whole authorization server
+  // metadata, rewrites resource through URL.href (adding a slash to a bare origin, which then no
+  // longer equals the API identifier) and has no bearer_methods_supported.
+  const metadata = {
+    resource: auth.resource,
+    authorization_servers: [auth.issuer],
+    bearer_methods_supported: ['header'],
+    scopes_supported: SCOPES_SUPPORTED,
+  };
+  return {
+    metadata: JSON.stringify(metadata),
+    resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(new URL(new URL(auth.resource).origin)),
+    verifier: tokenVerifier(verify),
+    openMethods: new Set(auth.openMethods),
+  };
+}
+
+// The JSON-RPC method of a parsed body when it is a single message naming one; batches, responses
+// and anything unparseable have none and so are never open.
+function methodOf(body: unknown): string | undefined {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    return undefined;
+  }
+  const method = (body as { method?: unknown }).method;
+  return typeof method === 'string' ? method : undefined;
+}
+
+type NodeHandler = ReturnType<typeof toNodeHandler>;
+
+// POST /mcp with OAuth on: a bearer token must verify; without one, only an open method passes.
+async function gatedPost(gate: Gate, nodeHandler: NodeHandler, req: IncomingMessage & { auth?: AuthInfo }, res: ServerResponse): Promise<void> {
+  const challengeOptions = { resourceMetadataUrl: gate.resourceMetadataUrl };
+  const header = req.headers.authorization;
+  if (header !== undefined) {
+    try {
+      req.auth = await verifyBearerToken(header, { verifier: gate.verifier, resourceMetadataUrl: gate.resourceMetadataUrl });
+    } catch (error) {
+      await send(res, bearerAuthChallengeResponse(error, challengeOptions));
+      return;
+    }
+    await nodeHandler(req, res);
+    return;
+  }
+  // No token: read the body (bounded as the adapter bounds it) only to see the method.
+  let text: string;
+  try {
+    text = await (await toWebRequest(req, undefined, { maxRequestBodySize: DEFAULT_MAX_REQUEST_BODY_SIZE })).text();
+  } catch (error) {
+    if ((error as Error).name === 'RequestBodyTooLargeError') {
+      const body = JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: (error as Error).message }, id: null });
+      res.writeHead(413, { 'content-type': 'application/json', connection: 'close' }).end(body);
+      return;
+    }
+    throw error;
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = undefined;
+  }
+  const method = methodOf(body);
+  if (method === undefined || !gate.openMethods.has(method)) {
+    await send(res, bearerAuthChallengeResponse(new OAuthError(OAuthErrorCode.InvalidToken, 'Missing Authorization header'), challengeOptions));
+    return;
+  }
+  await nodeHandler(req, res, body);
+}
+
+// auth: the OAuth configuration (SF_AUTH_*), undefined for none; verify replaces the verifier
+// created from it (tests).
+export async function startServer(
+  port: number,
+  handbook: Handbook,
+  version: string,
+  execution: Execution,
+  auth?: AuthConfig,
+  verify?: Verify,
+): Promise<RunningServer> {
   const mcpHandler = createMcpHandler(() => createMcpServer(handbook, version, execution));
   const nodeHandler = toNodeHandler(mcpHandler);
+  const gate = auth === undefined ? undefined : createGate(auth, verify ?? createVerifier(auth));
   const validateHost = localhostHostValidation();
   const validateOrigin = localhostOriginValidation();
 
@@ -338,7 +506,26 @@ export async function startServer(port: number, handbook: Handbook, version: str
       res.writeHead(400, { 'content-type': 'application/json' }).end('{"error":"bad request target"}');
       return;
     }
+    if (gate !== undefined && METADATA_PATHS.has(target.pathname)) {
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        res.writeHead(405, { allow: 'GET, HEAD', 'content-type': 'application/json' }).end('{"error":"method not allowed"}');
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(req.method === 'GET' ? gate.metadata : undefined);
+      return;
+    }
     if (target.pathname === MCP_PATH) {
+      if (gate !== undefined && req.method === 'POST') {
+        gatedPost(gate, nodeHandler, req, res).catch((error: unknown) => {
+          console.error(error);
+          if (!res.headersSent) {
+            res.writeHead(500, { 'content-type': 'application/json' }).end('{"error":"internal error"}');
+          } else {
+            res.destroy();
+          }
+        });
+        return;
+      }
       void nodeHandler(req, res);
       return;
     }

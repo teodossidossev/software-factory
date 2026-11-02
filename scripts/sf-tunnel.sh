@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Software Factory: Secure MCP Tunnel helper for the local bridge (SF-002).
+# Software Factory: Secure MCP Tunnel helper for the local factory (sf serve).
 # Wraps the official tunnel-client with fixed settings; it never prints the runtime key.
 #
 #   scripts/sf-tunnel.sh init <tunnel_id>   create/replace the "software-factory" profile
 #   scripts/sf-tunnel.sh set-key            store the runtime key from a hidden prompt (0600 file)
-#   scripts/sf-tunnel.sh check              verify client, profile, key file and bridge (no network calls to OpenAI)
+#   scripts/sf-tunnel.sh check              verify client, profile, key file and factory (no network calls to OpenAI)
 #   scripts/sf-tunnel.sh doctor             tunnel-client doctor --explain for the profile
 #   scripts/sf-tunnel.sh run                check, then run the tunnel daemon in the foreground (Ctrl+C stops it)
 #
@@ -79,8 +79,8 @@ cmd_check() {
 
   local status
   status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$MCP_URL" || true)"
-  [[ "$status" != "000" ]] || fail "bridge not reachable at $MCP_URL (start it: cd bridge && npm start)"
-  ok "bridge answers at $MCP_URL (HTTP $status for a plain GET)"
+  [[ "$status" != "000" ]] || fail "factory not reachable at $MCP_URL (start it: cd factory && bin/sf serve)"
+  ok "factory answers at $MCP_URL (HTTP $status for a plain GET)"
 }
 
 case "${1:-}" in

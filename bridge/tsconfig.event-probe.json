@@ -1,7 +1,0 @@
-{
-  "extends": "./tsconfig.json",
-  "compilerOptions": {
-    "outDir": "sf010-event-probe-validation-dist"
-  },
-  "include": ["src/event-probe", "test/event-probe.test.ts"]
-}

@@ -1,0 +1,30 @@
+{
+  "name": "software-factory",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Software Factory: MCP tools for the Context owner and the sf CLI",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "sf": "bin/sf"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "start": "node dist/src/cli.js serve",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.316",
+    "@modelcontextprotocol/node": "2.1.2",
+    "@modelcontextprotocol/server": "2.4.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2"
+  }
+}

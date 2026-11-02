@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Software Factory</title>
+  <link rel="stylesheet" href="app.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="bar">
+    <h1>Software Factory</h1>
+    <span id="connection" class="connection">connecting</span>
+  </header>
+  <main class="layout">
+    <nav class="jobs" aria-label="Jobs">
+      <h2>Jobs</h2>
+      <p id="no-jobs" class="muted" hidden>No jobs yet.</p>
+      <ul id="job-list"></ul>
+    </nav>
+    <section id="detail" class="detail" hidden>
+      <div class="job-header">
+        <h2 id="job-ticket"></h2>
+        <span id="job-state" class="badge"></span>
+        <dl class="facts">
+          <dt>Branch</dt><dd id="job-branch"></dd>
+          <dt>Base</dt><dd id="job-base"></dd>
+          <dt>Iteration</dt><dd id="job-iteration"></dd>
+          <dt>Cost</dt><dd id="job-cost"></dd>
+          <dt>Updated</dt><dd id="job-updated"></dd>
+        </dl>
+        <p id="job-error" class="error" hidden></p>
+      </div>
+
+      <details class="panel" open>
+        <summary>State history</summary>
+        <ol id="history" class="history"></ol>
+      </details>
+
+      <details class="panel" open>
+        <summary>Iterations</summary>
+        <p id="no-iterations" class="muted">No iteration published yet.</p>
+        <div id="iteration-tabs" class="tabs" role="tablist"></div>
+        <div id="iteration-views" class="tabs secondary" role="tablist" hidden>
+          <button type="button" data-view="report" role="tab">Report</button>
+          <button type="button" data-view="patch" role="tab">Patch</button>
+        </div>
+        <p id="iteration-meta" class="muted"></p>
+        <pre id="iteration-body" class="document"></pre>
+      </details>
+
+      <details id="mr-panel" class="panel" open hidden>
+        <summary>Merge request text</summary>
+        <pre id="mr-body" class="document"></pre>
+      </details>
+
+      <section class="panel events-panel">
+        <div class="events-head">
+          <h3>Event stream</h3>
+          <label><input id="follow" type="checkbox" checked> follow</label>
+        </div>
+        <div id="events" class="events" tabindex="0"></div>
+      </section>
+    </section>
+  </main>
+</body>
+</html>

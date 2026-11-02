@@ -1,22 +1,14 @@
-# Bridge dependencies and build output
-bridge/node_modules/
-bridge/dist/
-# Disposable validation builds (validate.sh, sf010-event-probe-live.sh, SF010_BRIDGE_DIST)
-/bridge/sf*-validation-dist/
+# Factory dependencies and build output
+factory/node_modules/
+factory/dist/
 
-# Local pilot runtime data (probe artifact)
-factory-data/
-
-# Adapter instruction and continuation mirrors, kept on disk
+# Task files, Reports and MR texts of the factory, kept on disk
 /.software-factory/
 
 # Private configuration; versioned examples stay
 .env
 .env.*
 !.env.example
-
-# Generated review packages
-review/
 
 # IDE metadata
 /.idea/

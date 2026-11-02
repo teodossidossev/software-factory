@@ -9,7 +9,9 @@ tools (`start`, `check`, `request_fix`, `mark_clean`). The Implementer runs as a
 Agent SDK session (`@anthropic-ai/claude-agent-sdk`, pinned in `package.json`) in the work checkout,
 inside Claude Code's sandbox. After Clean the user finishes the ticket from the terminal with
 `sf approve` (MR preparation and push), `sf abort` or `sf reset`, and is told about the states that
-need them through a desktop notification and ntfy.
+need them through a desktop notification and ntfy. The Context owner is told through MCP Events:
+ChatGPT subscribes to the event `software_factory.job` and the factory POSTs a signed webhook on
+each state that needs it (section MCP Events).
 
 ## Commands
 
@@ -27,12 +29,16 @@ bin/sf watch <workspace> <ticket> [--once]     # the session live; works without
 bin/sf approve <workspace> <ticket>            # MR preparation and push; waits for the outcome; needs sf serve
 bin/sf abort <workspace> <ticket> [--discard]  # end the job; --discard removes the branch and its changes; needs sf serve
 bin/sf reset <workspace> <ticket>              # end the session and archive the job, Git untouched; needs sf serve
+bin/sf events list                             # MCP event subscriptions (no secrets); needs sf serve
+bin/sf events remove <id>                      # remove a subscription; needs sf serve
+bin/sf events test <id>                        # send a test event (state "test") to a subscription, print the answer; needs sf serve
 bin/sf notify-test                             # one test notification on every channel; works without sf serve
 bin/sf auth-test < token.txt                   # verify an access token from stdin with the SF_AUTH_* settings; works without sf serve
 npm run typecheck && npm test
 ```
 
-Exit codes: 0 ok, 1 error, 2 usage. `sf approve` exits 1 unless the branch was pushed.
+Exit codes: 0 ok, 1 error, 2 usage. `sf approve` exits 1 unless the branch was pushed; `sf events
+test` exits 1 unless the callback answered 2xx.
 
 ### sf status
 
@@ -77,13 +83,14 @@ message below the table). Both work without `sf serve`; they read the state dire
 | `SF_AUTH_ISSUER` | unset | OAuth issuer exactly as the tokens' `iss`, trailing slash included (Auth0: `https://<tenant>.<region>.auth0.com/`). Unset: no authentication at all. |
 | `SF_AUTH_AUDIENCE` | required with `SF_AUTH_ISSUER` | The API identifier that must be in the token's `aud` (a string or an array). |
 | `SF_AUTH_RESOURCE` | `SF_AUTH_AUDIENCE` | The `resource` of the protected resource metadata; an `https` URL. |
-| `SF_AUTH_OPEN_METHODS` | `initialize,ping,tools/list,server/discover,notifications/initialized` | Comma-separated MCP methods allowed without a token; empty opens none. |
+| `SF_AUTH_OPEN_METHODS` | `initialize,ping,tools/list,server/discover,notifications/initialized` | Comma-separated MCP methods allowed without a token; empty opens none. `events/*` methods are refused (`invalid_config`). |
+| `SF_EVENTS_ALLOW_LOOPBACK` | off | **Tests only.** `on` accepts event callback URLs on loopback (`127.0.0.0/8`, `::1`, `localhost`), over `http` too. Never set it in real use. |
 
 The socket path `${SF_STATE_DIR}/sf.sock` must fit a Unix socket address (107 bytes on Linux);
 a longer one is refused at start with `socket_path_too_long`.
 
 The execution variables are read once when `sf serve` starts. `sf status` and `sf watch` read
-`SF_STATE_DIR` themselves; `sf start`, `sf say`, `sf approve`, `sf abort` and `sf reset` use it to find the socket; `sf notify-test` reads the notification variables itself; `sf auth-test` reads `SF_AUTH_*` itself.
+`SF_STATE_DIR` themselves; `sf start`, `sf say`, `sf approve`, `sf abort`, `sf reset` and `sf events` use it to find the socket; `sf notify-test` reads the notification variables itself; `sf auth-test` reads `SF_AUTH_*` itself.
 
 ## OAuth
 
@@ -126,6 +133,99 @@ has no event log, so nothing is recorded for it.
 history), verifies it with the same code against the `SF_AUTH_*` settings and prints
 `valid: sub <sub>`, the scopes and the expiry (exit 0) or `rejected: <reason>` (exit 1). It does not
 need `sf serve`. For example `xclip -o -selection clipboard | bin/sf auth-test`.
+
+## MCP Events
+
+The factory implements the ChatGPT MCP Events contract (draft MCP Events specification, webhook
+delivery and callback verification only; no polling, streaming, replay, `gap` or `terminated`), so
+an event-triggered task in ChatGPT runs when a job needs the Context owner instead of on a
+schedule. `initialize` advertises the capability `events: {}`. The three methods are protocol
+methods on the same `/mcp` endpoint as the tools, not tools. They need the token's `sub`: with
+OAuth they are never open (`SF_AUTH_OPEN_METHODS` refuses them); without OAuth they answer the
+JSON-RPC error `-32000` with `data.reason` `unauthenticated`.
+
+**The event.** One, `software_factory.job`. `inputSchema` (the filter):
+`{workspace?: string, ticket?: string}`, no other keys; empty means every job. `payloadSchema`:
+`{workspace, ticket, state, iteration, branch, error?: {code, message}, mr?: {title}}`. It fires on
+every transition to `awaiting_review`, `needs_human`, `ready_for_human_review`, `pushed` (with
+`mr.title`), `aborted` and `failed`; `starting`, `working` and `preparing_mr` do not fire. `state`
+is `"test"` only for `sf events test`. Every authenticated principal may see and subscribe to it;
+deliveries go to every subscription whose filter matches.
+
+**`events/list`** `{cursor?}` → `{events: [{name, description, delivery: ["webhook"], inputSchema,
+payloadSchema}]}`, one page, no `nextCursor`.
+
+**`events/subscribe`** `{name, arguments?, delivery: {mode: "webhook", url, secret}, cursor?, ttlMs?}`
+→ `{id, refreshBefore, cursor: null, truncated: false, ttlMs}`.
+
+- `name` must be `software_factory.job` (else `-32602`, `unknown_event`); `delivery.mode` must be
+  `webhook` (`-32602`, `unsupported_delivery`); `arguments` must match the filter
+  (`-32602`, `invalid_arguments`); `secret` must be `whsec_` + canonical base64 of 24 to 64 bytes
+  (`-32602`, `invalid_secret`).
+- `url`: `https`, at most 2048 characters, no userinfo, the host not `localhost`/`*.localhost`
+  and not a non-public address literal (loopback, private, shared, link-local, documentation,
+  multicast, reserved, IPv4-mapped, unique-local; `-32015`, `invalid_url`). Every connection
+  (verification and delivery) resolves the host and connects only to public addresses, keeping
+  the hostname for TLS; none left is `blocked_address`.
+- The id is derived from `{principal, url, name, arguments}` (arguments in canonical JSON):
+  `sub_` + 32 base64url characters of a SHA-256. A subscribe with the same identity is a refresh: same
+  id, `createdAt` kept, the new secret stored (the old one also signs for 10 minutes).
+- Limits: 8 active subscriptions per principal, 32 in total (`-32000`, `subscription_limit`); a
+  refresh does not count.
+- Verification before storing: a POST of `{"type":"verification","challenge":"<32 random bytes,
+  base64url>"}`, signed like a delivery with `webhook-id: msg_verification_<random>` and
+  `X-MCP-Subscription-Id: <id>`, 10 s timeout. It needs a 2xx whose JSON body is `{"challenge":
+  "<the same>"}` (compared in constant time); otherwise `-32015` with `data.reason`
+  `challenge_failed`, `timeout`, `connection_failed` or `blocked_address`. A success for the same
+  principal, URL and secret is reused for an hour.
+- `refreshBefore`: now + 7 days; a `ttlMs` grants less (at least one minute); `ttlMs: null` (no
+  expiry) is not granted, the 7 days apply. An expired subscription gets no deliveries and is
+  dropped. ChatGPT refreshes with `events/subscribe` before `refreshBefore`.
+
+**`events/unsubscribe`** `{name, arguments?, delivery: {url}}` (the subscribe identity) or `{id}` →
+`{}`. Idempotent: an unknown subscription is `{}` too. Another principal's subscription is refused
+(`-32000`, `forbidden`).
+
+**Delivery.** One POST per event and subscription, body
+`{"eventId": "evt_<32 hex>", "name": "software_factory.job", "timestamp": "<ISO time of the
+transition>", "data": <payload>, "cursor": null}` (at most 256 KiB; never larger in practice),
+serialized once and sent byte for byte on every attempt. Headers: `Content-Type: application/json`,
+`webhook-id` (= `eventId`), `webhook-timestamp` (Unix seconds of this attempt), `webhook-signature`
+(`v1,<base64 HMAC-SHA256 of "<webhook-id>.<webhook-timestamp>.<body>">` keyed with the decoded
+secret, Standard Webhooks; two space-separated signatures during a secret rotation),
+`X-MCP-Subscription-Id`. Each attempt has 10 s and never follows a redirect, uses no proxy and runs
+in the `sf serve` process, never in the Implementer's environment. Outcomes:
+
+| Answer | Then |
+|---|---|
+| 2xx | delivered |
+| 410 | the subscription is removed with its pending deliveries |
+| 413 | the event is dropped |
+| other 3xx and 4xx, `blocked_address` | dropped, not retried |
+| 5xx, timeout, connection failure | retried after 5 s, 30 s, 2 min, 10 min and 1 h (at most 6 attempts), then dropped |
+
+Deliveries never block the state transition. Pending ones are kept in
+`${SF_STATE_DIR}/events-queue.json` (attempts made, next time, the exact body), so a restart of
+`sf serve` resumes them with the same `eventId` (a due one at once). Each attempt is appended to the
+job's `events.jsonl` as `{type: "event_delivered" | "event_failed", subscription, attempt, status}`
+(`status`: the HTTP status, or `timeout`, `connection_failed`, `blocked_address`, `too_large`,
+`no_subscription`); `sf watch` and the dashboard show it as one line,
+`event to <id> attempt <n> delivered|failed: <status>`.
+
+**Store.** `${SF_STATE_DIR}/subscriptions.json` (0600, replaced atomically):
+`{subscriptions: [{id, principal, event, input, url, secret, previousSecret?, previousSecretUntil?,
+createdAt, refreshBefore, cursor: null}]}`; the secret is stored as given because it signs the
+deliveries. An invalid file stops `sf serve` (`events_state_invalid`).
+
+**`sf events`** (through the socket): `list` prints `ID`, `PRINCIPAL`, `EVENT`, `INPUT`, `HOST`
+(of the URL only), `CREATED` and `REFRESH_BEFORE`, never the secret; `remove <id>` removes one and
+its pending deliveries; `test <id>` sends one event with `state: "test"` (workspace and ticket from
+the filter, else `test`/`SF-TEST`) once, without retry or job log, and prints `delivered` and
+`status` (a 410 removes the subscription).
+
+In ChatGPT the user creates an event-triggered task on the event `software_factory.job` of the
+Software Factory connector, with the instruction to call `check` for the ticket in the payload; the
+exact UI wording is not documented here (see the ChatGPT task UI).
 
 ## Jobs
 
@@ -283,9 +383,11 @@ State layout under `${SF_STATE_DIR}`:
 
 ```
 sf.sock                                  # 0600, while sf serve runs; one JSON request/response per connection
+subscriptions.json                       # 0600, MCP event subscriptions with their signing secrets (section MCP Events)
+events-queue.json                        # 0600, pending event deliveries, resumed at the next sf serve start
 dashboard-token                          # 0600, the dashboard token of the last sf serve start
 jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, mr_attempts, state, iteration, session_id, created_at, updated_at, error
-jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed"}; what sf watch reads
+jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "principal" | "event_delivered" | "event_failed" | ...}; what sf watch reads
 jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json}
 jobs/<workspace>/<ticket>/mr-snapshot.json   # the reviewed change at approve: target, base_commit, snapshot_commit, paths
 jobs/<workspace>/<ticket>/mr.md              # the MR text, once pushed or after a diff-check iteration

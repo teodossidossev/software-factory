@@ -196,3 +196,5 @@ h3 { font-size: 14px; }
 .event.t-result { color: var(--s-ready); }
 .event.t-user { color: var(--muted); }
 .event.t-notify_failed { color: var(--del); }
+.event.t-event_failed { color: var(--del); }
+.event.t-event_delivered { color: var(--muted); }

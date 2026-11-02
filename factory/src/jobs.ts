@@ -86,7 +86,7 @@ export interface Iteration {
 }
 
 // One line of events.jsonl: an SDK message, a prompt sent, a state change, a failed notification,
-// removed placeholders or the principal of a tool call.
+// removed placeholders, the principal of a tool call or the outcome of an MCP event delivery.
 export type EventRecord = { ts: string; iteration: number } & (
   | { message: unknown }
   | { prompt: string }
@@ -96,6 +96,9 @@ export type EventRecord = { ts: string; iteration: number } & (
   | { type: 'placeholders_removed'; paths: string[] }
   // The authenticated caller (the token's sub) of a successful tool call, with OAuth on.
   | { type: 'principal'; tool: PrincipalTool; principal: string }
+  // One delivery attempt of an MCP event (src/events.ts): status is the HTTP status, or why there
+  // was none (timeout, connection_failed, blocked_address, too_large, no_subscription).
+  | { type: 'event_delivered' | 'event_failed'; subscription: string; attempt: number; status: number | string }
 );
 
 // The tools whose caller is logged as a principal event.

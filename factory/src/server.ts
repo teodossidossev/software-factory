@@ -3,7 +3,9 @@
 // tools. The execution tools call Execution; they know nothing about the Implementer process.
 // With OAuth configured (SF_AUTH_*), it is a resource server: it serves the protected resource
 // metadata and lets a POST /mcp through with a valid bearer token, or without one for the open
-// methods only; src/auth.ts verifies the tokens.
+// methods only; src/auth.ts verifies the tokens. With an Events hub it advertises the events
+// capability and serves events/list, events/subscribe and events/unsubscribe (src/events.ts),
+// which need the token's sub.
 import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -19,11 +21,13 @@ import {
   OAuthError,
   OAuthErrorCode,
   type OAuthTokenVerifier,
+  ProtocolError,
   verifyBearerToken,
 } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { type AuthConfig, AuthError, createVerifier, type Verify } from './auth.js';
 import { FactoryError } from './errors.js';
+import { type Events, EventsError } from './events.js';
 import type { Execution } from './execution.js';
 import { JOB_STATES, type JobStore, now, type PrincipalTool } from './jobs.js';
 import { handbookSection } from './prompts.js';
@@ -86,8 +90,8 @@ function toolError(error: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify({ code, message }) }], isError: true };
 }
 
-// The authenticated caller of a tool call: the token's sub, undefined without OAuth or for a call
-// let through as open.
+// The authenticated caller of a tool call or event method: the token's sub, undefined without
+// OAuth or for a call let through as open.
 function principalOf(ctx: { http?: { authInfo?: AuthInfo } }): string | undefined {
   const sub = ctx.http?.authInfo?.extra?.sub;
   return typeof sub === 'string' ? sub : undefined;
@@ -114,8 +118,65 @@ const workspaceName = z.string().regex(WORKSPACE_NAME_PATTERN).describe(`Registe
 const ticketKey = z.string().regex(TICKET_PATTERN).describe(`Ticket key, e.g. "PROJ-123": ${TICKET_DESCRIPTION}.`);
 const relativePath = (what: string) => z.string().min(1).max(MAX_PATH_LENGTH).describe(what);
 
-function createMcpServer(handbook: Handbook, version: string, execution: Execution): McpServer {
+// The event methods' errors as JSON-RPC errors with data.reason; anything else is logged and
+// becomes an internal error.
+async function eventCall<T>(work: () => Promise<T> | T): Promise<T> {
+  try {
+    return await work();
+  } catch (error) {
+    if (error instanceof EventsError) {
+      throw new ProtocolError(error.code, error.message, { reason: error.reason });
+    }
+    console.error(error);
+    throw new ProtocolError(-32603, 'The request failed inside the factory.');
+  }
+}
+
+const eventArguments = z.record(z.string(), z.unknown());
+
+// The MCP Events methods (protocol methods, not tools) on the same endpoint as the tools. Params
+// are loose objects: unknown fields (e.g. _meta) are ignored.
+function registerEvents(server: McpServer, events: Events): void {
+  // events is not in the SDK's capability type; the capabilities are a loose object on the wire.
+  const capabilities: Record<string, unknown> = { events: {} };
+  server.server.registerCapabilities(capabilities as Parameters<typeof server.server.registerCapabilities>[0]);
+  server.server.setRequestHandler(
+    'events/list',
+    { params: z.looseObject({ cursor: z.string().nullable().optional() }).optional() },
+    async (_params, ctx) => eventCall(() => events.list(principalOf(ctx))),
+  );
+  server.server.setRequestHandler(
+    'events/subscribe',
+    {
+      params: z.looseObject({
+        name: z.string().min(1),
+        arguments: eventArguments.optional(),
+        delivery: z.looseObject({ mode: z.string(), url: z.string(), secret: z.string() }),
+        cursor: z.string().nullable().optional(),
+        ttlMs: z.number().int().positive().nullable().optional(),
+      }),
+    },
+    async (params, ctx) => eventCall(async () => ({ ...(await events.subscribe(principalOf(ctx), params)) })),
+  );
+  server.server.setRequestHandler(
+    'events/unsubscribe',
+    {
+      params: z.looseObject({
+        id: z.string().min(1).optional(),
+        name: z.string().min(1).optional(),
+        arguments: eventArguments.optional(),
+        delivery: z.looseObject({ mode: z.string().optional(), url: z.string() }).optional(),
+      }),
+    },
+    async (params, ctx) => eventCall(() => events.unsubscribe(principalOf(ctx), params)),
+  );
+}
+
+function createMcpServer(handbook: Handbook, version: string, execution: Execution, events: Events | undefined): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version }, { instructions: handbook.quickStart });
+  if (events !== undefined) {
+    registerEvents(server, events);
+  }
 
   server.registerTool(
     'guide',
@@ -480,7 +541,7 @@ async function gatedPost(gate: Gate, nodeHandler: NodeHandler, req: IncomingMess
 }
 
 // auth: the OAuth configuration (SF_AUTH_*), undefined for none; verify replaces the verifier
-// created from it (tests).
+// created from it (tests); events: the MCP Events hub, undefined for no events capability.
 export async function startServer(
   port: number,
   handbook: Handbook,
@@ -488,8 +549,9 @@ export async function startServer(
   execution: Execution,
   auth?: AuthConfig,
   verify?: Verify,
+  events?: Events,
 ): Promise<RunningServer> {
-  const mcpHandler = createMcpHandler(() => createMcpServer(handbook, version, execution));
+  const mcpHandler = createMcpHandler(() => createMcpServer(handbook, version, execution, events));
   const nodeHandler = toNodeHandler(mcpHandler);
   const gate = auth === undefined ? undefined : createGate(auth, verify ?? createVerifier(auth));
   const validateHost = localhostHostValidation();

@@ -1,8 +1,9 @@
 // The Patch of an iteration: the work checkout against the base commit, tracked changes plus
 // untracked files, without touching the index. .software-factory/, ignored and credential-like
-// paths are left out; the result is valid UTF-8 and at most MAX_PATCH_BYTES.
+// paths and sandbox placeholders (src/placeholders.ts) are left out; the result is valid UTF-8 and at most MAX_PATCH_BYTES.
 import { runGit } from './git.js';
 import type { ChangedFile } from './jobs.js';
+import { isPlaceholder } from './placeholders.js';
 import { isForbidden } from './repo-files.js';
 import { TASK_DIR } from './task-file.js';
 
@@ -134,12 +135,17 @@ export function changedFilesSection(files: ChangedFile[], truncated: boolean): s
 }
 
 // The paths a Patch against baseCommit covers: changed tracked files and untracked files,
-// filtered as the Patch is, never cut by its size limit.
+// filtered as the Patch is, never cut by its size limit. An untracked sandbox placeholder is
+// skipped, in case the sandbox recreated it after the factory's cleanup.
 export async function changedPaths(cwd: string, baseCommit: string): Promise<{ tracked: string[]; untracked: string[] }> {
-  return {
-    tracked: nulList(await git(cwd, ['diff', '--name-only', '-z', '--no-renames', baseCommit])).filter(included),
-    untracked: nulList(await git(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])).filter(included),
-  };
+  const tracked = nulList(await git(cwd, ['diff', '--name-only', '-z', '--no-renames', baseCommit])).filter(included);
+  const untracked: string[] = [];
+  for (const path of nulList(await git(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])).filter(included)) {
+    if (!(await isPlaceholder(cwd, path))) {
+      untracked.push(path);
+    }
+  }
+  return { tracked, untracked };
 }
 
 export async function buildPatch(cwd: string, baseCommit: string): Promise<Patch> {

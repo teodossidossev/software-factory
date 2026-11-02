@@ -2,7 +2,7 @@
 // directories, throwaway Git repositories and the fake Claude Code (test/support/fake-claude.ts)
 // as the Implementer executable. Tools are driven through the official MCP client.
 import assert from 'node:assert/strict';
-import { readdir, readFile, rm, stat } from 'node:fs/promises';
+import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
@@ -231,5 +231,66 @@ test('permission_mode_mismatch ends in needs_human; a restart turns working jobs
   const log = await fakeLog(env);
   assert.equal(log[1]!.prompt, factoryPrompt('please continue', 'M-1', 1));
   assert.ok(log[1]!.argv.includes('--resume=kept-session'));
+  await stop(served);
+});
+
+// The placeholders bubblewrap left in a real job's work checkout on 2026-11-02.
+const PLACEHOLDERS = [
+  '.bash_profile', '.bashrc', '.gitconfig', '.gitmodules', '.mcp.json',
+  '.claude/agents', '.claude/commands', '.claude/hooks', '.claude/launch.json', '.claude/loop.md',
+  '.claude/output-styles', '.claude/routines', '.claude/scheduled_tasks.json', '.claude/settings.json',
+  '.claude/settings.local.json', '.claude/skills', '.claude/workflows',
+];
+
+async function events(env: { state: string }, ticket: string): Promise<Array<Record<string, any>>> {
+  const text = await readFile(join(env.state, 'jobs', 'app', ticket, 'events.jsonl'), 'utf8');
+  return text.trim().split('\n').map((line) => JSON.parse(line)).filter((record) => record.type === 'placeholders_removed');
+}
+
+test('sandbox placeholders: start succeeds with them present, the Patch leaves them out, abort --discard cleans them', async () => {
+  const env = await newEnv('placeholders');
+  const repo = await newRepo(env, 'placeholders-repo', false);
+  await putTask(env, repo, 'P-1', 'Placeholders');
+  // A previous run left placeholders behind; start removes them before its dirty check.
+  for (const path of ['.bashrc', '.claude/settings.json']) {
+    await mkdir(join(repo, path, '..'), { recursive: true });
+    await writeFile(join(repo, path), '');
+    await chmod(join(repo, path), 0o444);
+  }
+  await mkdir(join(repo, '.claude', '.cc-writes'), { mode: 0o700 });
+  // A real dotfile with content is a change of its own and stays.
+  await script(env, [
+    { tool: true, write: { 'README.md': 'hello placeholders\n', '.editorconfig': 'root = true\n' }, placeholders: [...PLACEHOLDERS, '.claude/.cc-writes/'] },
+  ]);
+  const served = await serve(env);
+  assert.equal((await call(served, 'start', { workspace: 'app', ticket: 'P-1' })).state, 'working');
+  const first = await waitFor(served, 'P-1', 'awaiting_review', 1);
+
+  assert.match(first.patch.text, /\+\+\+ b\/README\.md/);
+  assert.match(first.patch.text, /\+\+\+ b\/\.editorconfig/);
+  assert.doesNotMatch(first.patch.text, /bash|gitconfig|gitmodules|mcp\.json|\.claude/);
+  assert.match(first.report, /\| README\.md \| 1 \| 1 \|\n\| \.editorconfig \| 1 \| 0 \|\n/);
+  assert.doesNotMatch(first.report, /\.bashrc|\.claude/);
+  const logged = await events(env, 'P-1');
+  assert.deepEqual(logged.map((record) => [record.iteration, record.paths]), [
+    [0, ['.bashrc', '.claude', '.claude/.cc-writes', '.claude/settings.json']],
+    [1, [...PLACEHOLDERS, '.claude', '.claude/.cc-writes'].sort()],
+  ]);
+  for (const path of ['.bashrc', '.claude', '.mcp.json']) {
+    await assert.rejects(stat(join(repo, path)), { code: 'ENOENT' }, path);
+  }
+  const watched = await runCli(env, ['watch', 'app', 'P-1', '--once']);
+  assert.match(watched.stdout, /^\d\d:\d\d:\d\d \[0\] placeholders removed: \.bashrc, \.claude, \.claude\/\.cc-writes, \.claude\/settings\.json$/m);
+  assert.match(watched.stdout, /^\d\d:\d\d:\d\d \[1\] placeholders removed: \.bash_profile, \.bashrc, \.claude, /m);
+
+  // Placeholders recreated before abort --discard are removed and logged as well.
+  await writeFile(join(repo, '.gitconfig'), '');
+  await chmod(join(repo, '.gitconfig'), 0o444);
+  const aborted = await runCli(env, ['abort', 'app', 'P-1', '--discard']);
+  assert.equal(aborted.code, 0, aborted.stdout + aborted.stderr);
+  assert.match(aborted.stdout, /^discarded: true$/m);
+  assert.deepEqual((await events(env, 'P-1')).at(-1)!.paths, ['.gitconfig']);
+  assert.equal(git(repo, 'status', '--porcelain', '--untracked-files=all').replace(/^\?\? \.software-factory\/.*\n/gm, ''), '');
+  assert.equal(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'main');
   await stop(served);
 });

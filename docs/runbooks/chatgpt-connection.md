@@ -1,42 +1,44 @@
-# Runbook: ChatGPT ↔ локален bridge през Secure MCP Tunnel
+# Runbook: ChatGPT and the local factory through the Secure MCP Tunnel
 
-Проверено с tunnel-client **v0.0.18** (`0.0.18+274a5588`) на Linux x86_64, Node v24.17.0. Реалната ChatGPT проба мина на 2026-10-25 (вижте `docs/reports/SF-002-report.md`).
+Verified with tunnel-client **v0.0.18** (`0.0.18+274a5588`) on Linux x86_64 and Node v24.17.0.
+The first real ChatGPT probe passed on 2026-10-25 (`docs/reports/SF-002-report.md`, task
+`docs/tasks/SF-002-connect-chatgpt.md`). SF-011 moved the endpoint from the old bridge to the
+factory; the tunnel, the profile and the connector did not change.
 
-Задача: `docs/tasks/SF-002-connect-chatgpt.md`. Отчет: `docs/reports/SF-002-report.md`.
+No secrets here. The runtime key lives only in a 0600 file outside the repository.
 
-Тук няма тайни. Runtime ключът стои само във файл с права 0600 извън repository-то.
-
-## Как минава заявката
+## How a request travels
 
 ```
-ChatGPT (Work чат, plugin "Software Factory", No authentication)
+ChatGPT (Work chat, connector "Software Factory", No authentication)
   → OpenAI-hosted /v1/mcp/{tunnel_id}
-  ← tunnel-client на тази машина: изходящ HTTPS към api.openai.com:443, long-poll
-  → http://127.0.0.1:8787/mcp   (bridge, само loopback)
-  → factory-data/probe.txt
+  ← tunnel-client on this machine: outbound HTTPS to api.openai.com:443, long poll
+  → http://127.0.0.1:8787/mcp   (sf serve, loopback only)
+  → the registered workspaces
 ```
 
-Няма входящ порт, port forwarding или публичен listener.
+There is no inbound port, port forwarding or public listener.
 
-Credential-ите са на два слоя:
-- **Транспорт.** Runtime ключът се ползва само от tunnel-client (`file:` референция в профила).
-- **MCP.** Слоят е без OAuth: в ChatGPT е избрано *No authentication*. Това е допустимо само за трите probe tools зад частния тунел.
+Credentials sit on two layers:
+- **Transport.** Only tunnel-client uses the runtime key (a `file:` reference in the profile).
+- **MCP.** No OAuth: ChatGPT is set to *No authentication*. The factory listens on loopback only,
+  checks Host and Origin, and is reachable only through the private tunnel (ADR-0002).
 
-## Файлове и места
+## Files and locations
 
-| Какво | Къде |
+| What | Where |
 | --- | --- |
-| tunnel-client | `~/.local/opt/tunnel-client/v0.0.18/` (+ bundled `cloudflared`), symlink `~/.local/bin/tunnel-client` |
-| Профил | `~/.config/tunnel-client/software-factory.yaml` (създава се с `scripts/sf-tunnel.sh init`) |
-| Пример за профила | `config/tunnel-client/software-factory.example.yaml` |
-| Runtime ключ | `~/.config/software-factory/tunnel-runtime.key` (0600, директория 0700) |
+| tunnel-client | `~/.local/opt/tunnel-client/v0.0.18/` (with bundled `cloudflared`), symlink `~/.local/bin/tunnel-client` |
+| Profile | `~/.config/tunnel-client/software-factory.yaml` (created by `scripts/sf-tunnel.sh init`) |
+| Profile example | `config/tunnel-client/software-factory.example.yaml` |
+| Runtime key | `~/.config/software-factory/tunnel-runtime.key` (0600, directory 0700) |
 | Launcher | `scripts/sf-tunnel.sh` (`init`, `set-key`, `check`, `doctor`, `run`) |
-| Bridge | `bridge/` на `127.0.0.1:8787/mcp`, данни в `factory-data/probe.txt` |
-| tunnel-client admin | `http://127.0.0.1:8790/ui`, `/healthz`, `/readyz` (само loopback) |
+| Factory | `factory/bin/sf serve` on `127.0.0.1:8787/mcp` |
+| tunnel-client admin | `http://127.0.0.1:8790/ui`, `/healthz`, `/readyz` (loopback only) |
 
-## Инсталация на tunnel-client (направено веднъж)
+## Installing tunnel-client (done once)
 
-Източник: https://github.com/openai/tunnel-client/releases/latest (v0.0.18, flavor `client`).
+Source: https://github.com/openai/tunnel-client/releases/latest (v0.0.18, flavor `client`).
 
 ```bash
 d=$(mktemp -d) && cd "$d"
@@ -50,83 +52,109 @@ ln -sfn ~/.local/opt/tunnel-client/v0.0.18/tunnel-client ~/.local/bin/tunnel-cli
 tunnel-client --version
 ```
 
-Очакван SHA256 на zip-а: `3c82307316acd93c88a384b62af1d81d3f4cb0efa975f9c0bfaef922866a04c4`. Стойността съвпада със `SHA256SUMS.txt` и с digest-а в GitHub API. Sigstore attestation не е проверена, защото `gh` липсва на машината.
+Expected SHA256 of the zip: `3c82307316acd93c88a384b62af1d81d3f4cb0efa975f9c0bfaef922866a04c4`. It
+matches `SHA256SUMS.txt` and the digest in the GitHub API. The Sigstore attestation was not
+checked, because `gh` was not installed.
 
-## Акаунт стъпки (прави ги потребителят)
+## Account steps (the user does these)
 
-Не поставяй ключ, парола или cookie в чата.
+Never paste a key, password or cookie into a chat.
 
-1. **Organization.** Отвори https://platform.openai.com и в горния ляв ъгъл избери personal Platform организацията, която ще притежава тунела.
-2. **Права.** В https://platform.openai.com/settings/organization/people/roles провери, че имаш Tunnels **Read + Manage + Use**. Manage е нужно за създаване, а Use за runtime ключа и за избора на тунел в ChatGPT. Нова роля може да се разпространи до 30 минути.
-3. **Тунел.** В https://platform.openai.com/settings/organization/tunnels създай тунел (име например `software-factory`).
-   - В associations трябва да са и тази Platform организация, и целевият ChatGPT workspace.
-   - Копирай `tunnel_id` (`tunnel_…`). Той е идентификатор, не тайна.
-   - Ако опцията липсва, запиши точния текст на екрана, без лични данни.
-4. **Runtime ключ.** В https://platform.openai.com/settings/organization/api-keys създай ключ за тунела. Принципалът му трябва да има Tunnels Read + Use.
-   - Веднага го запиши локално в IntelliJ терминала:
+1. **Organization.** Open https://platform.openai.com and, top left, choose the personal Platform
+   organization that owns the tunnel.
+2. **Permissions.** In https://platform.openai.com/settings/organization/people/roles check that you
+   have Tunnels **Read + Manage + Use**. Manage creates the tunnel; Use is needed for the runtime
+   key and for choosing the tunnel in ChatGPT. A new role can take up to 30 minutes to apply.
+3. **Tunnel.** In https://platform.openai.com/settings/organization/tunnels create a tunnel (for
+   example `software-factory`).
+   - Its associations must include this Platform organization and the target ChatGPT workspace.
+   - Copy the `tunnel_id` (`tunnel_…`). It is an identifier, not a secret.
+4. **Runtime key.** In https://platform.openai.com/settings/organization/api-keys create a key for
+   the tunnel. Its principal needs Tunnels Read + Use. Store it at once, from the repository root:
 
-     ```bash
-     cd /home/teo/IdeaProjects/software-factory
-     scripts/sf-tunnel.sh set-key      # hidden prompt; paste the key, Enter
-     ```
+   ```bash
+   scripts/sf-tunnel.sh set-key      # hidden prompt; paste the key, Enter
+   ```
 
-   - Това е транспортен credential, не разрешение за model API usage.
-   - Внимание: `set-key` иска runtime ключа (`sk-…`), не `tunnel_id`. При първия опит в SF-002 там беше въведен `tunnel_id` и control plane върна 401 Unauthorized. Сега `set-key` и `check` отхвърлят стойност, която започва с `tunnel_`.
+   - This is a transport credential, not permission to use the model API.
+   - `set-key` wants the runtime key (`sk-…`), not the `tunnel_id`. In SF-002 the `tunnel_id` was
+     entered there once and the control plane answered 401 Unauthorized. `set-key` and `check` now
+     refuse a value that starts with `tunnel_`.
 
-## Локално пускане
+## Running locally
 
-Две отделни терминални сесии, по една за всеки процес.
+Two terminals, one per process.
 
-**Bridge (терминал 1):**
+**Factory (terminal 1):**
 
 ```bash
-cd /home/teo/IdeaProjects/software-factory/bridge
-npm run build && npm start        # ready: "software-factory-bridge listening on http://127.0.0.1:8787/mcp"
+cd factory
+npm install && npm run build      # once, and after every change to factory/src
+bin/sf serve                      # prints the MCP URL http://127.0.0.1:8787/mcp and the dashboard URL
 ```
 
-**Тунел (терминал 2):**
+**Tunnel (terminal 2), from the repository root:**
 
 ```bash
-cd /home/teo/IdeaProjects/software-factory
 scripts/sf-tunnel.sh init tunnel_XXXXXXXX   # once, or when the tunnel changes
-scripts/sf-tunnel.sh check                  # exit 0 = client, profile, key file, bridge OK
+scripts/sf-tunnel.sh check                  # exit 0 = client, profile, key file and factory OK
 scripts/sf-tunnel.sh doctor                 # tunnel-client doctor --explain
 scripts/sf-tunnel.sh run                    # foreground daemon; keep it running
 tunnel-client health --port 8790 --require-control-plane-poll   # from another shell
 ```
 
-Спиране:
-- `Ctrl+C` в съответния терминал. `run` предава сигнала директно на tunnel-client чрез `exec`.
-- Ако процесът е фонов: `kill -TERM <pid>`. Намираш PID с `pgrep -f 'tunnel-client run --profile software-factory'` и `ss -ltnp | grep 8787`.
-- Спирай само тези два процеса.
+Stopping:
+- `Ctrl+C` in its terminal. `run` hands the signal straight to tunnel-client through `exec`.
+- For a background process: `kill -TERM <pid>`. Find the PID with
+  `pgrep -f 'tunnel-client run --profile software-factory'` and `ss -ltnp | grep 8787`.
+- Stop only these two processes.
 
-Рестарт: спри процеса и пусни отново същата команда. Тунелът не поддържа два активни клиента едновременно, затова първо спри стария.
+Restart: stop the process and run the same command again. The tunnel does not support two active
+clients at once, so stop the old one first. Restarting `sf serve` alone does not need a tunnel
+restart; check the tunnel with `tunnel-client health --port 8790 --require-control-plane-poll`.
 
-## Свързване в ChatGPT (докато `run` е здрав)
+## The connector in ChatGPT (while `run` is healthy)
 
-1. Отвори https://chatgpt.com/plugins, натисни **+** и избери **Add custom MCP server**.
-2. Name: `Software Factory`. Description (по избор): `Local probe bridge (SF-002 pilot)`.
-3. Connection: **Tunnel**. Избери тунела или въведи `tunnel_id`.
-4. Authentication: **No authentication**. Runtime ключът **не** се въвежда тук.
-5. Прочети предупреждението и избери **I understand and want to continue**, после **Create as a plugin**.
-6. В детайлите на plugin-а провери, че са открити точно `factory_status`, `factory_write_probe` и `factory_read_probe`. След това натисни **Install**.
-7. Отвори нов Work чат, напиши `@`, избери **Software Factory** и следвай пробата от задачата (§8).
-   - `factory_write_probe` е write действие и ChatGPT ще поиска потвърждение.
+The connector is created once and stays the same.
 
-При промяна на tool metadata използвай **Refresh** в настройките на plugin-а.
+1. Open https://chatgpt.com/plugins, press **+** and choose **Add custom MCP server**.
+2. Name: `Software Factory`.
+3. Connection: **Tunnel**. Choose the tunnel or enter the `tunnel_id`.
+4. Authentication: **No authentication**. The runtime key is **not** entered here.
+5. Read the warning, choose **I understand and want to continue**, then **Create as a plugin**.
+6. In the plugin details check that the tools are `guide`, `read_file`, `search`, `write_task`,
+   `start`, `check`, `request_fix` and `mark_clean`. Then press **Install**.
 
-## Refresh след нов или променен tool (напр. SF-003 `factory_read_file`)
+After a change to the tools (or after switching the endpoint from the old bridge to the factory):
+restart `sf serve`, open the existing **Software Factory** plugin at https://chatgpt.com/plugins
+(do not create a new one), press **Refresh** and check the tool list. Then open a **new** Work
+chat; an old conversation does not pick up new tools by itself.
 
-1. Рестартирай bridge-а с новия build. Спри стария процес (Ctrl+C или `kill -TERM <pid>` за процеса на `127.0.0.1:8787`), после пусни `cd bridge && npm run build && npm start`. Tunnel-client не е нужно да се рестартира; провери го с `tunnel-client health --port 8790 --require-control-plane-poll`.
-2. В ChatGPT отвори https://chatgpt.com/plugins и избери съществуващия **Software Factory**. Не създавай нов plugin.
-3. Натисни **Refresh**. Провери, че в списъка с tools са `factory_status`, `factory_write_probe`, `factory_read_probe` и `factory_read_file`.
-4. Отвори **нов** Work чат и избери `@Software Factory`. Стар разговор не се обновява автоматично; ползвай го само ако вече вижда новия tool.
+## Working in ChatGPT
 
-## Диагностика
+1. Open a Work chat, type `@` and choose **Software Factory**.
+2. The first call is `guide`. It returns the Handbook (`factory/HANDBOOK.md`): the cycle, the
+   tools, the Task file format and the templates. The connector also sends its Quick start as
+   server instructions.
+3. Plan the ticket, write the Task file with `write_task`, and call `start` when the user says so.
+4. `start` and `request_fix` return `check_after_minutes`. In the planning conversation, create
+   one ChatGPT scheduled task that calls `check` for the ticket on that interval. It reads the
+   Report and the Patch when the job is `awaiting_review` and answers with `request_fix` or
+   `mark_clean`. Delete it when `check` says `pushed`, `aborted` or `failed`.
 
-- `scripts/sf-tunnel.sh check` показва коя локална предпоставка липсва.
-- `tunnel-client doctor --profile software-factory --explain` проверява профила и връзката с control plane.
-- `http://127.0.0.1:8790/ui` е admin UI-ят на tunnel-client.
-- **`poll failed … 401 Unauthorized` в лога на `run`.** Ключовият файл не съдържа валиден runtime ключ за тази организация, или принципалът му няма Tunnels Read + Use.
-- **Тунелът не се вижда в ChatGPT.** Провери associations към workspace-а и правото Use.
-- **403 от bridge-а.** Наблюдавай само Host/Origin; виж задачата, §6.
+`write_task`, `start`, `request_fix` and `mark_clean` are write actions; ChatGPT may ask for
+confirmation.
+
+## Diagnostics
+
+- `scripts/sf-tunnel.sh check` shows which local precondition is missing, including a factory that
+  does not answer on 8787.
+- `tunnel-client doctor --profile software-factory --explain` checks the profile and the connection
+  to the control plane.
+- `http://127.0.0.1:8790/ui` is the tunnel-client admin UI.
+- **`poll failed … 401 Unauthorized` in the `run` log.** The key file does not hold a valid runtime
+  key for this organization, or its principal lacks Tunnels Read + Use.
+- **The tunnel is not visible in ChatGPT.** Check the associations to the workspace and the Use
+  permission.
+- **403 from the factory.** A Host or Origin header that is not loopback; see `factory/README.md`.
+- **Old tools in ChatGPT.** Press **Refresh** on the plugin and open a new chat.

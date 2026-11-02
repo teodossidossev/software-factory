@@ -27,3 +27,21 @@ independent review, explicit result acceptance and verified job closure.
 
 ChatGPT remains context owner and independent reviewer, Claude implements, OpenClaw is transport, and
 the user retains final result acceptance.
+
+## 2026-11-01: SF-011 replaces the earlier direction
+
+These decisions replace the roles entry of 2026-10-31 and the setup proposal. The earlier entries
+stay as history.
+
+- **Roles.** The Context owner is the model the user plans with, ChatGPT first. It plans, writes
+  the Task file, reviews and declares Clean. Claude Code implements, headless, in the work
+  checkout. The user reviews the branch in IntelliJ and approves in the terminal (`sf approve`).
+- **Transport.** No OpenClaw and no MCP Events. The Context owner polls with a ChatGPT scheduled
+  task that calls `check` (ADR-0002).
+- **Checkout.** No worktrees and no iteration commits. The Implementer works in the work checkout
+  and commits nothing during iterations (ADR-0001).
+- **Commits.** One commit per merge request, by the Git rules in `factory/HANDBOOK.md`, made in MR
+  preparation after approve. Nothing is pushed to main directly; every change goes through a merge
+  request.
+- **Task files.** Task files live in `.software-factory/` of the work checkout and are ignored by
+  Git.

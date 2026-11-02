@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
 import { loadHandbook } from '../src/server.js';
+import { pushBranch } from '../src/mr.js';
 import { mrPrompt } from '../src/prompts.js';
 import { call, fakeLog, git, newEnv, newRepo, putTask, refused, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
 
@@ -236,6 +237,24 @@ test('approve is refused in needs_human before any MR preparation', async () => 
   assert.equal(result.code, 1);
   assert.match(result.stderr, /^sf: approve needs ready_for_human_review, awaiting_review or needs_human after an MR preparation; the job is needs_human\.$/m);
   await stop(served);
+});
+
+test('the push refuses main, master and the base branch with mr_push_protected and leaves origin as it was', async () => {
+  const env = await newEnv('protected');
+  const repo = await newRepo(env, 'protected-repo', true);
+  const origin = join(temp, 'protected-repo-origin.git');
+  const before = git(origin, 'rev-parse', 'main').trim();
+  await writeFile(join(repo, 'README.md'), 'direct\n');
+  git(repo, ...ID, 'commit', '-q', '-am', 'feat(T-9): Direct');
+  git(repo, 'branch', 'master');
+  git(repo, 'branch', 'release-1');
+  for (const [branch, base] of [['main', 'main'], ['main', 'develop'], ['master', 'main'], ['release-1', 'release-1']] as const) {
+    const failure = await pushBranch(repo, branch, base);
+    assert.equal(failure?.code, 'mr_push_protected', `${branch} onto ${base}`);
+    assert.match(failure.message, /every change goes through a merge request/);
+  }
+  assert.equal(git(origin, 'rev-parse', 'main').trim(), before);
+  assert.equal(execFileSync('git', ['branch', '--list', 'master', 'release-1'], { cwd: origin }).toString().trim(), '');
 });
 
 test('abort with and without --discard, reset, and sandbox_unavailable', async () => {

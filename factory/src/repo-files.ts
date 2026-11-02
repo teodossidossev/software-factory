@@ -1,6 +1,6 @@
 // Read-only access to UTF-8 files of one workspace read checkout, for the read_file tool.
-// Ported from bridge/src/repo-files.ts. Callers pass checkout-relative paths only; the root
-// is a real path verified by the registry.
+// Ported from the repo-files.ts of the SF-003 bridge (removed in SF-011-e). Callers pass
+// checkout-relative paths only; the root is a real path verified by the registry.
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open, realpath, stat } from 'node:fs/promises';

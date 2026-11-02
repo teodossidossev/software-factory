@@ -15,7 +15,7 @@ import { WORKSPACE_NAME_PATTERN } from './registry.js';
 import { TICKET_PATTERN } from './task-file.js';
 import { describeEvent, followLines } from './watch.js';
 
-export const DEFAULT_DASHBOARD_PORT = 8789;
+export const DEFAULT_DASHBOARD_PORT = 8788;
 export const TOKEN_FILE = 'dashboard-token';
 export const MAX_STREAMS = 8;
 const LOOPBACK_HOST = '127.0.0.1';

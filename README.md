@@ -1,40 +1,47 @@
 # Software Factory
 
-A local mediator between ChatGPT, OpenClaw and Claude Code. ChatGPT owns context and reviews
-independently, OpenClaw is transport, Claude Code implements, and the user accepts results.
-
-Start with [docs/README.md](docs/README.md) for tasks, designs, runbooks, reports and known gaps.
+A local process that lets a model you plan with (ChatGPT first) drive Claude Code through a
+ticket without you having to notice when Claude has finished. The Context owner writes a Task
+file, starts the job and reviews each iteration through MCP tools; the Implementer runs as a
+headless Claude Code session in the work checkout; you read the branch in the IDE and approve in
+the terminal. How it works: [design](docs/design/SF-011-factory.md). How to use it as the Context
+owner: [factory/HANDBOOK.md](factory/HANDBOOK.md).
 
 ## Components
 
-| Component | Entry point | Runbook |
+| Component | Entry point | Documentation |
 | --- | --- | --- |
-| MCP bridge (loopback only) | `bridge/src/main.ts`, tools in `bridge/src/server.ts` | [bridge/README.md](bridge/README.md) |
+| MCP server (loopback, port 8787) | `factory/src/server.ts` | [factory/README.md](factory/README.md) |
+| `sf` command | `factory/src/cli.ts`, `factory/bin/sf` | [factory/README.md](factory/README.md) |
+| Dashboard (read-only, port 8788) | `factory/src/dashboard.ts` | [factory/README.md](factory/README.md#dashboard) |
 | ChatGPT tunnel wrapper | `scripts/sf-tunnel.sh` | [chatgpt-connection](docs/runbooks/chatgpt-connection.md) |
-| OpenClaw gateway and dashboard | `deploy/openclaw/compose.yaml`, `scripts/openclaw/` | [openclaw-docker](docs/runbooks/openclaw-docker.md), [openclaw-dashboard](docs/runbooks/openclaw-dashboard.md) |
-| Instruction dispatch | `scripts/openclaw/sf005-dispatch.sh`, `deploy/openclaw/sf-dispatch-receiver.mjs` | [openclaw-dispatch](docs/runbooks/openclaw-dispatch.md) |
-| Host execution adapter | `scripts/sf006-execute.sh`, `bridge/src/execution/` | [claude-execution](docs/runbooks/claude-execution.md) |
-| Operator console | `scripts/sf007-operator.sh`, `bridge/src/operator/` | [SF-007](docs/runbooks/SF-007-local-operator.md) |
-| Execution supervisor | `scripts/sf009-executor.sh`, `bridge/src/executor/` | [SF-009](docs/runbooks/SF-009-autonomous-session-loop.md) |
-| Review coordinator (offline, not active) | `scripts/sf010-reviewer.sh`, `bridge/src/reviewer/` | [SF-010 reviewer](docs/runbooks/SF-010-reviewer-foundation.md) |
-| Events discovery probe (stopped, passed once) | `scripts/sf010-event-probe-live.sh`, `bridge/src/event-probe/` | [SF-010 probe](docs/runbooks/SF-010-event-probe.md) |
 
-## Bridge development
+## Getting started
 
-Requires Node.js 24 or later. Run from `bridge/`:
+Requires Node.js 24 or later.
 
 ```bash
-npm ci
-npm run typecheck
+cd factory
+npm install && npm run build
+bin/sf workspace add <name> --read <path> [--work <path>]
+bin/sf serve                     # MCP on 127.0.0.1:8787/mcp; prints the dashboard URL
 ```
 
-`bridge/dist` is the compiled runtime of the running services. Do not rebuild it during a job.
-See the [SF-009 runbook](docs/runbooks/SF-009-autonomous-session-loop.md).
-
-There is no common setup or start command yet; see [decisions](docs/project/DECISIONS.md).
+In a second terminal, run the tunnel: `scripts/sf-tunnel.sh check`, then `scripts/sf-tunnel.sh
+run`. In ChatGPT, use the "Software Factory" connector (no authentication). Both are described in
+the [connection runbook](docs/runbooks/chatgpt-connection.md). The dashboard is at
+`http://127.0.0.1:8788/d/<token>/`; `bin/sf dashboard` prints the full URL.
 
 ## Local state outside version control
 
-`factory-data/` (runtime data and private app configuration), `.software-factory/` (adapter
-mirrors), `review/` (evidence packages), `bridge/dist/`, `bridge/node_modules/` and `.idea/` stay on
-disk and are ignored. Do not delete them as clutter: services, jobs and reviews rely on them.
+| Location | Contents |
+| --- | --- |
+| `~/.config/software-factory/` | Workspace registry and the tunnel runtime key |
+| `~/.local/state/software-factory/` | Job state, Reports, Patches, the socket and the dashboard token |
+| `.software-factory/` in each work checkout | Task files and MR texts, excluded from Git |
+
+## More
+
+- [CONTEXT.md](CONTEXT.md): the vocabulary.
+- [factory/HANDBOOK.md](factory/HANDBOOK.md): how the Context owner works with the factory.
+- [docs/README.md](docs/README.md): decisions, designs, ADRs, tasks and reports.

@@ -1,12 +1,12 @@
 // Unit tests for the MR preparation rules: the commit header, the MR text, the merge request link,
-// the snapshot comparison, the Handbook section extraction, the MR prompt, the deny lists and the
-// sandbox settings.
+// the snapshot comparison, the push protection, the Handbook section extraction, the MR prompt,
+// the deny lists and the sandbox settings.
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { sandboxSettings } from '../src/config.js';
-import { compareSnapshot, mergeRequestLink, mrTextProblem } from '../src/mr.js';
+import { compareSnapshot, mergeRequestLink, mrTextProblem, pushProtection } from '../src/mr.js';
 import { FACTORY_PROMPT_RULES, handbookSection, mrPrompt } from '../src/prompts.js';
 import { COMMIT_TYPES, commitHeader, DENIED_TOOLS, headerProblem, MR_DENIED_TOOLS } from '../src/rules.js';
 import { quickStartSection } from '../src/server.js';
@@ -144,4 +144,14 @@ test('sandboxSettings allows the npm registry plus SF_SANDBOX_DOMAINS, and SF_SA
   });
   assert.equal(sandboxSettings({ SF_SANDBOX: 'off', SF_SANDBOX_DOMAINS: 'pypi.org' }), undefined);
   assert.throws(() => sandboxSettings({ SF_SANDBOX_DOMAINS: 'https://x' }), /invalid domain/);
+});
+
+test('pushProtection refuses main, master and the base branch, and allows a ticket branch', () => {
+  for (const [branch, base] of [['main', 'develop'], ['master', 'main'], ['release-1', 'release-1'], ['main', 'main']] as const) {
+    const failure = pushProtection(branch, base);
+    assert.equal(failure?.code, 'mr_push_protected', `${branch} onto ${base}`);
+    assert.match(failure.message, /merge request/);
+  }
+  assert.equal(pushProtection('T-1-change-readme', 'main'), undefined);
+  assert.equal(pushProtection('main-fix', 'master'), undefined);
 });

@@ -16,7 +16,7 @@ import { loadHandbook, packageVersion, PortInUseError, SERVER_NAME, startServer 
 import { TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { watchEvents } from './watch.js';
 
-const DEFAULT_PORT = 8788;
+const DEFAULT_PORT = 8787;
 const USAGE = `Usage:
   sf serve                                              Serve the MCP tools on 127.0.0.1:\${SF_PORT:-${DEFAULT_PORT}}/mcp and the dashboard
   sf dashboard                                          Print the dashboard URL of the running sf serve

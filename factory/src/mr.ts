@@ -206,7 +206,25 @@ export async function snapshotDiff(cwd: string, snapshot: MrSnapshot, branch: st
   return compareSnapshot(snapshot.files, actual);
 }
 
-export async function pushBranch(cwd: string, branch: string): Promise<MrFailure | undefined> {
+// Nothing is pushed to main (or master) or to the job's base directly; every change reaches it
+// through a merge request (Handbook, Git rules).
+export const PROTECTED_BRANCHES: readonly string[] = ['main', 'master'];
+
+export function pushProtection(branch: string, base: string): MrFailure | undefined {
+  if (branch !== base && !PROTECTED_BRANCHES.includes(branch)) {
+    return undefined;
+  }
+  return {
+    code: 'mr_push_protected',
+    message: `refusing to push ${branch}: nothing is pushed to main, master or the base branch (${base}) directly; every change goes through a merge request`,
+  };
+}
+
+export async function pushBranch(cwd: string, branch: string, base: string): Promise<MrFailure | undefined> {
+  const protectedFailure = pushProtection(branch, base);
+  if (protectedFailure !== undefined) {
+    return protectedFailure;
+  }
   const result = await runGit(cwd, ['push', 'origin', `${branch}:${branch}`], 1024 * 1024, PUSH_TIMEOUT_MS);
   if (result.code === 0) {
     return undefined;

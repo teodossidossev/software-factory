@@ -368,7 +368,7 @@ export class Execution {
         settle(await this.#transition(published, 'awaiting_review'), { changed_paths: differing });
         return;
       }
-      const pushFailure = await pushBranch(cwd, job.branch);
+      const pushFailure = await pushBranch(cwd, job.branch, job.base);
       if (pushFailure !== undefined) {
         await needsHuman(pushFailure.code, pushFailure.message);
         return;

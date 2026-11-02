@@ -37,9 +37,9 @@ Exit codes: 0 ok, 1 error, 2 usage. `sf approve` exits 1 unless the branch was p
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SF_PORT` | `8788` | Port of `http://127.0.0.1:<port>/mcp` (loopback only, Host and Origin checked). |
+| `SF_PORT` | `8787` | Port of `http://127.0.0.1:<port>/mcp` (loopback only, Host and Origin checked). |
 | `SF_DASHBOARD` | on | `off` starts no dashboard listener (and removes an old `dashboard-token`). |
-| `SF_DASHBOARD_PORT` | `8789` | Port of the dashboard, `http://127.0.0.1:<port>/d/<token>/` (loopback only, Host and Origin checked). |
+| `SF_DASHBOARD_PORT` | `8788` | Port of the dashboard, `http://127.0.0.1:<port>/d/<token>/` (loopback only, Host and Origin checked). |
 | `SF_CONFIG_DIR` | `${XDG_CONFIG_HOME:-~/.config}/software-factory` | Directory of the workspace registry. |
 | `SF_HANDBOOK` | `factory/HANDBOOK.md` | Handbook served as instructions (its `## Quick start` section) and by `guide`. |
 | `SF_STATE_DIR` | `${XDG_STATE_HOME:-~/.local/state}/software-factory` | Job state and the `sf.sock` socket. |
@@ -150,6 +150,7 @@ request form otherwise; only the branch when the `origin` URL cannot be parsed).
    | `mr_commit_header` | the subject breaks `commitHeader(ticket)` in `src/rules.ts`: `<type>(<ticket>): <summary>`, type one of `feat fix chore refactor docs test perf build ci style revert`, at most 72 characters, no trailing period |
    | `mr_text_missing` | `.software-factory/<ticket>.mr.md` absent or empty |
    | `mr_text_invalid` | over 64 KiB, a first line that breaks the header rule or differs from the commit subject, or a missing `## What`, `## Why`, `## How`, `## Why the change`, `## Special things to note`, `## Change outline`, `## Testing` or `## Checklist` heading |
+   | `mr_push_protected` | the branch is `main`, `master` or the job's base: nothing is pushed there directly, every change goes through a merge request |
    | `mr_push_failed` | `git push origin <branch>:<branch>` failed (120 s; stderr in the message) |
    | `mr_failed`, `mr_serve_restarted` | the factory failed, or `sf serve` restarted, during preparation |
 
@@ -198,7 +199,7 @@ change (`since` in `check`).
 ## Dashboard
 
 A read-only page served by `sf serve` on a second loopback listener,
-`http://127.0.0.1:${SF_DASHBOARD_PORT:-8789}/d/<token>/`, separate from the MCP port so the
+`http://127.0.0.1:${SF_DASHBOARD_PORT:-8788}/d/<token>/`, separate from the MCP port so the
 tunnel never reaches it. At every start `sf serve` writes a new random token (32 bytes, hex) to
 `${SF_STATE_DIR}/dashboard-token` (0600) and prints the URL; `sf dashboard` prints it again from
 that file and `SF_DASHBOARD_PORT`. The token changes on every `sf serve` start, so an open page
@@ -241,11 +242,10 @@ An invalid file is an error, never ignored. `read_file` and `search` use the rea
 `write_task` writes `.software-factory/<ticket>.md` in the work checkout and adds
 `.software-factory/` to its `.git/info/exclude`.
 
-## Replacing `bridge/`
+## History
 
-`factory/` replaces the SF-001 to SF-010 bridge: one process with a Workspace registry instead of a
-single fixed repository root, Task files instead of `factory-data/` instructions and dispatch to
-OpenClaw, and an Agent SDK session instead of the file-based supervisor. It shares no code
-with `bridge/` (the file reader is a copy). Until the switch both run side by side: the bridge on
-port 8787 behind the tunnel, the factory on 8788; the switch moves the tunnel to the factory and
-`bridge/` is deleted afterwards (see `docs/design/SF-011-factory.md`).
+`factory/` replaced the bridge of SF-001 to SF-010: one process with a Workspace registry instead of
+a single fixed repository root, Task files instead of instructions under `factory-data/` and
+dispatch to a separate gateway, and an Agent SDK session instead of a file-based execution loop.
+The file reader is a copy of the bridge's. SF-011-e removed the bridge; the factory took over its
+port 8787 behind the tunnel (see `docs/design/SF-011-factory.md`).

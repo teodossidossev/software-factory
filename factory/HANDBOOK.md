@@ -125,6 +125,8 @@ its rules (no Git, no edits to the Task file) with every prompt, and appends the
   file whose content changed in the resolution goes back to the Context owner before the push.
 - The factory pushes `origin <branch>` once its checks pass. Nobody else pushes. The user
   opens the merge request.
+- Nothing is ever pushed to `main` (or `master`) directly, by anyone or any tool: every change
+  reaches it through a merge request. The factory refuses to push a branch named like the base.
 - Never: force push, amend after the push, rewrite the base branch, change a submodule
   pointer unless the Task file asks for it.
 

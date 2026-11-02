@@ -187,6 +187,20 @@ output names what to fix: `wrong_audience` (the Default Audience or the resource
 (the clock or an old token), `unknown_kid` (another tenant), `jwks_unavailable` (Auth0 not
 reachable from this machine).
 
+### Tunnel settings for OAuth
+
+ChatGPT discovers the factory's OAuth metadata through the tunnel's *harpoon* channel, which
+forwards plain HTTP requests to the loopback factory, and the tunnel client itself reads the
+authorization server's metadata at start. `scripts/sf-tunnel.sh run` therefore sets, when
+`~/.config/software-factory/auth.env` holds `SF_AUTH_ISSUER`:
+
+- `HARPOON_ALLOW_PLAINTEXT_HTTP=true`, so `http://127.0.0.1:8787` can be a harpoon target;
+- `MCP_OAUTH_TRUSTED_ORIGINS=<issuer origin>`, so the client may fetch the issuer's metadata.
+
+Without them the tunnel logs `destination origin is not trusted` and
+`dispatcher received unsupported channel "harpoon"`, and ChatGPT reports "Couldn't discover
+OAuth settings". Restart the tunnel after enabling OAuth in the factory: discovery runs at start.
+
 ## MCP Events (event-triggered tasks)
 
 Since SF-016 the factory tells ChatGPT when a job needs the Context owner, instead of an hourly

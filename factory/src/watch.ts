@@ -32,7 +32,7 @@ function resultText(content: unknown): string {
 export interface DescribedEvent {
   ts: string | null;
   iteration: number | null;
-  // "prompt", "state", "notify_failed", "placeholders_removed", or the SDK message type ("assistant", "user", "result", "system", ...).
+  // "prompt", "state", "notify_failed", "placeholders_removed", "principal", or the SDK message type ("assistant", "user", "result", "system", ...).
   type: string;
   lines: string[];
 }
@@ -87,6 +87,9 @@ function recordLines(record: Record<string, unknown>): string[] {
   if (record.type === 'placeholders_removed') {
     const paths = Array.isArray(record.paths) ? record.paths.map(String) : [];
     return [`${prefix} placeholders removed: ${oneLine(paths.join(', '))}`];
+  }
+  if (record.type === 'principal') {
+    return [`${prefix} ${String(record.tool)} by ${oneLine(String(record.principal))}`];
   }
   const message = record.message as Record<string, unknown> | undefined;
   if (message === undefined) {

@@ -28,6 +28,7 @@ bin/sf approve <workspace> <ticket>            # MR preparation and push; waits 
 bin/sf abort <workspace> <ticket> [--discard]  # end the job; --discard removes the branch and its changes; needs sf serve
 bin/sf reset <workspace> <ticket>              # end the session and archive the job, Git untouched; needs sf serve
 bin/sf notify-test                             # one test notification on every channel; works without sf serve
+bin/sf auth-test < token.txt                   # verify an access token from stdin with the SF_AUTH_* settings; works without sf serve
 npm run typecheck && npm test
 ```
 
@@ -73,12 +74,58 @@ message below the table). Both work without `sf serve`; they read the state dire
 | `SF_NOTIFY_ITERATIONS` | off | `on` also notifies `awaiting_review` (each published iteration). |
 | `SF_NTFY_URL` | unset | Full ntfy topic URL, e.g. `https://ntfy.sh/<topic>`; unset disables ntfy. |
 | `SF_NTFY_TOKEN` | unset | Sent as `Authorization: Bearer <token>` to a server that needs it. |
+| `SF_AUTH_ISSUER` | unset | OAuth issuer exactly as the tokens' `iss`, trailing slash included (Auth0: `https://<tenant>.<region>.auth0.com/`). Unset: no authentication at all. |
+| `SF_AUTH_AUDIENCE` | required with `SF_AUTH_ISSUER` | The API identifier that must be in the token's `aud` (a string or an array). |
+| `SF_AUTH_RESOURCE` | `SF_AUTH_AUDIENCE` | The `resource` of the protected resource metadata; an `https` URL. |
+| `SF_AUTH_OPEN_METHODS` | `initialize,ping,tools/list,server/discover,notifications/initialized` | Comma-separated MCP methods allowed without a token; empty opens none. |
 
 The socket path `${SF_STATE_DIR}/sf.sock` must fit a Unix socket address (107 bytes on Linux);
 a longer one is refused at start with `socket_path_too_long`.
 
 The execution variables are read once when `sf serve` starts. `sf status` and `sf watch` read
-`SF_STATE_DIR` themselves; `sf start`, `sf say`, `sf approve`, `sf abort` and `sf reset` use it to find the socket; `sf notify-test` reads the notification variables itself.
+`SF_STATE_DIR` themselves; `sf start`, `sf say`, `sf approve`, `sf abort` and `sf reset` use it to find the socket; `sf notify-test` reads the notification variables itself; `sf auth-test` reads `SF_AUTH_*` itself.
+
+## OAuth
+
+With `SF_AUTH_ISSUER` set, the MCP endpoint is an OAuth resource server (the authorization server is
+hosted, e.g. Auth0; the factory issues no tokens and knows no clients). `sf serve` prints
+`auth: <issuer> audience <audience>`, or `auth: off` without `SF_AUTH_ISSUER`, where everything
+behaves as without this section. An invalid combination stops `sf serve` with `invalid_config`.
+
+- `GET /.well-known/oauth-protected-resource` and `GET /.well-known/oauth-protected-resource/mcp`
+  return the same protected resource metadata (`Cache-Control: no-store`):
+  `{"resource": SF_AUTH_RESOURCE, "authorization_servers": [SF_AUTH_ISSUER], "bearer_methods_supported": ["header"], "scopes_supported": ["openid", "profile", "email"]}`.
+- `POST /mcp` with `Authorization: Bearer <token>`: the token must verify (below), whatever the
+  method; the tools then see the caller. An invalid token gets `401` with
+  `WWW-Authenticate: Bearer error="invalid_token", error_description="...", resource_metadata="<origin of SF_AUTH_RESOURCE>/.well-known/oauth-protected-resource"`
+  (`500` when the authorization server's keys cannot be fetched).
+- `POST /mcp` without a token: a single JSON-RPC message whose `method` is in
+  `SF_AUTH_OPEN_METHODS` runs unauthenticated (by default `initialize`, `ping`, `tools/list`,
+  `server/discover`, `notifications/initialized`); anything else, a batch, a response or an
+  unparseable body included, gets the same `401` challenge. Every `tools/call` needs a token by
+  default. The body limit is unchanged (4 MiB, `413` beyond).
+- `GET /mcp`, other methods and other paths are unchanged.
+
+A token is accepted when it is a JWT with `alg` `RS256` whose `kid` is in the issuer's JWKS and whose
+signature verifies, `iss` equals `SF_AUTH_ISSUER`, `aud` contains `SF_AUTH_AUDIENCE`, `exp` has not
+passed and `nbf` (if any) has (60 s leeway each; the SDK's bearer check additionally refuses a token
+past `exp` without leeway), and `sub` is set. The JWKS location is `jwks_uri` of
+`<issuer>.well-known/openid-configuration`, read once (falling back to `<issuer>.well-known/jwks.json`);
+keys are cached by `kid` for an hour, an unknown `kid` refetches the JWKS at most once per minute, and
+every request to the authorization server has a 10 s timeout. A rejection is logged as
+`software-factory bearer token rejected: <reason>` (`malformed`, `unsupported_alg`, `unknown_kid`,
+`bad_signature`, `wrong_issuer`, `wrong_audience`, `expired`, `not_yet_valid`, `missing_sub`,
+`jwks_unavailable`), never with the token.
+
+With a verified token, `start`, `request_fix`, `mark_clean` and `write_task` append
+`{"type": "principal", "tool": "<tool>", "principal": "<sub>"}` to the job's `events.jsonl` after
+they succeed; `sf watch` shows it as `<tool> by <sub>`. `write_task` for a ticket that has no job yet
+has no event log, so nothing is recorded for it.
+
+`sf auth-test` reads one token from stdin (never an argument, so it stays out of the shell
+history), verifies it with the same code against the `SF_AUTH_*` settings and prints
+`valid: sub <sub>`, the scopes and the expiry (exit 0) or `rejected: <reason>` (exit 1). It does not
+need `sf serve`. For example `xclip -o -selection clipboard | bin/sf auth-test`.
 
 ## Jobs
 

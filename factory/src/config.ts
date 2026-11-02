@@ -2,6 +2,7 @@
 import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
+import type { AuthConfig } from './auth.js';
 import { FactoryError } from './errors.js';
 
 export interface Config {
@@ -74,4 +75,43 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sandbox: sandboxSettings(env),
     model: env.SF_MODEL || undefined,
   };
+}
+
+export const DEFAULT_OPEN_METHODS = ['initialize', 'ping', 'tools/list', 'server/discover', 'notifications/initialized'];
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+// An absolute URL without fragment, HTTPS or HTTP on loopback (the latter for local tests).
+function webUrl(name: string, raw: string): URL {
+  const url = URL.parse(raw);
+  if (url === null || url.hash !== '' || !(url.protocol === 'https:' || (url.protocol === 'http:' && LOOPBACK_HOSTS.has(url.hostname)))) {
+    throw new FactoryError('invalid_config', `${name} must be an https URL without fragment, got "${raw}".`);
+  }
+  return url;
+}
+
+// OAuth for the MCP endpoint (SF_AUTH_*), read once when `sf serve` starts; undefined without
+// SF_AUTH_ISSUER, which means no authentication at all.
+export function authConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig | undefined {
+  const issuer = env.SF_AUTH_ISSUER ?? '';
+  if (issuer === '') {
+    return undefined;
+  }
+  const issuerUrl = webUrl('SF_AUTH_ISSUER', issuer);
+  if (issuerUrl.search !== '') {
+    throw new FactoryError('invalid_config', 'SF_AUTH_ISSUER must not have a query string.');
+  }
+  const audience = env.SF_AUTH_AUDIENCE ?? '';
+  if (audience === '') {
+    throw new FactoryError('invalid_config', 'SF_AUTH_AUDIENCE is required when SF_AUTH_ISSUER is set.');
+  }
+  const resource = env.SF_AUTH_RESOURCE || audience;
+  webUrl(env.SF_AUTH_RESOURCE ? 'SF_AUTH_RESOURCE' : 'SF_AUTH_RESOURCE (defaulting to SF_AUTH_AUDIENCE)', resource);
+  const rawMethods = env.SF_AUTH_OPEN_METHODS;
+  const openMethods = rawMethods === undefined ? DEFAULT_OPEN_METHODS : rawMethods.split(',').map((method) => method.trim()).filter((method) => method !== '');
+  for (const method of openMethods) {
+    if (!/^[A-Za-z0-9_./-]+$/.test(method)) {
+      throw new FactoryError('invalid_config', `SF_AUTH_OPEN_METHODS has an invalid method "${method}".`);
+    }
+  }
+  return { issuer, audience, resource, openMethods: [...new Set(openMethods)] };
 }

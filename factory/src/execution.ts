@@ -9,6 +9,7 @@ import { runGit } from './git.js';
 import { isActive, type Job, type JobState, JobStore, now, TERMINAL_STATES } from './jobs.js';
 import { gitBusy, mergeRequestLink, originUrl, pushBranch, resolveTarget, snapshotDiff, takeSnapshot, verifyPrepared } from './mr.js';
 import { buildPatch, changedFilesSection, type Patch } from './patch.js';
+import { removeSandboxPlaceholders } from './placeholders.js';
 import { factoryPrompt, iterationCost, mrPrompt } from './prompts.js';
 import { DENIED_TOOLS, MR_DENIED_TOOLS } from './rules.js';
 import type { Workspace } from './registry.js';
@@ -170,6 +171,8 @@ export class Execution {
       if (active !== undefined) {
         throw new FactoryError('job_active', `Job ${active.workspace}/${active.ticket} is ${active.state}; one job runs at a time.`);
       }
+      // Removed before the dirty check; logged once the new job has its events.jsonl.
+      const placeholders = await this.#removePlaceholders(workspace.workCheckout);
       await this.#refuseDirty(workspace);
       if (existing !== undefined) {
         await this.jobs.archive(workspace.name, ticket);
@@ -182,6 +185,7 @@ export class Execution {
       };
       await this.jobs.write(job);
       await this.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, state: { from: null, to: 'starting' } });
+      await this.#logPlaceholders(job, 0, placeholders);
       try {
         job = { ...job, base_commit: await this.#createBranch(workspace.workCheckout, base, branch) };
         await this.jobs.write(job);
@@ -194,6 +198,32 @@ export class Execution {
       this.#session(job, workspace).send(factoryPrompt(`/implement ${TASK_DIR}/${ticket}.md`, ticket, job.iteration + 1), DENIED_TOOLS);
       return { branch, state: job.state, check_after_minutes: this.#config.checkAfterStartMin };
     });
+  }
+
+  // Removes the sandbox's placeholder files from the work checkout; a failure is logged and the
+  // checks that follow (dirty check, Patch, MR verification) still skip or report them.
+  async #removePlaceholders(cwd: string): Promise<string[]> {
+    try {
+      return await removeSandboxPlaceholders(cwd);
+    } catch (error) {
+      console.error(error);
+      return [];
+    }
+  }
+
+  async #logPlaceholders(job: Job, iteration: number, paths: string[]): Promise<void> {
+    if (paths.length > 0) {
+      await this.jobs.appendEvent(job.workspace, job.ticket, { ts: now(), iteration, type: 'placeholders_removed', paths });
+    }
+  }
+
+  // Removes the placeholders and logs them under iteration (the turn's, as its messages are).
+  async #clean(job: Job, iteration: number, cwd: string): Promise<void> {
+    try {
+      await this.#logPlaceholders(job, iteration, await this.#removePlaceholders(cwd));
+    } catch (error) {
+      console.error(error);
+    }
   }
 
   async #refuseDirty(workspace: Workspace): Promise<void> {
@@ -282,11 +312,13 @@ export class Execution {
       if (live === undefined || job === undefined || live.session.busy) {
         return;
       }
-      if (job.state === 'preparing_mr') {
-        await this.#mrIdle(job, live, outcome);
+      if (job.state !== 'working' && job.state !== 'preparing_mr') {
         return;
       }
-      if (job.state !== 'working') {
+      // Before the Patch and before the MR verification, whatever the outcome of the turn.
+      await this.#clean(job, job.iteration + 1, live.workspace.workCheckout);
+      if (job.state === 'preparing_mr') {
+        await this.#mrIdle(job, live, outcome);
         return;
       }
       if (!outcome.ok) {
@@ -445,6 +477,9 @@ export class Execution {
         throw new FactoryError('rebase_in_progress', 'A rebase or a Git lock is in progress in the work checkout; reset --hard would lose it. Finish or abort it first, or abort without --discard.');
       }
       await this.#endSession(key);
+      if (cwd !== undefined) {
+        await this.#clean(job, job.iteration, cwd);
+      }
       const failure = cwd !== undefined ? await this.#discard(cwd, job) : undefined;
       const next = await this.#transition(job, 'aborted', failure);
       this.#settleMr(key, { state: next.state, branch: next.branch });

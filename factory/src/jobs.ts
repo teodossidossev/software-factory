@@ -88,6 +88,8 @@ export type EventRecord = { ts: string; iteration: number } & (
   | { prompt: string }
   | { state: { from: JobState | null; to: JobState; error?: { code: string; message: string } } }
   | { type: 'notify_failed'; channel: string; message: string }
+  // Sandbox placeholders the factory removed from the work checkout (src/placeholders.ts).
+  | { type: 'placeholders_removed'; paths: string[] }
 );
 
 export function isActive(job: Job): boolean {

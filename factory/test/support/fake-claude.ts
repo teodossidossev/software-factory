@@ -5,10 +5,10 @@
 // consumed in order through $HOME/fake-claude.count) and logs argv, prompt and environment
 // names to $HOME/fake-claude.log. A turn can write files into cwd to produce a Patch, then run a
 // list of argv commands in cwd (to stage, commit and rebase like the Implementer would), or end
-// with a startup failure. Sandbox arguments are logged with argv and otherwise ignored.
+// with a startup failure. A turn can also leave sandbox placeholders behind, like bubblewrap does. Sandbox arguments are logged with argv and otherwise ignored.
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 
@@ -24,6 +24,9 @@ interface Turn {
   costTotal?: number;
   // argv lists run in cwd after the writes, without a shell; a failing command fails the test turn.
   run?: string[][];
+  // Created after run, like the sandbox's mount points: a path ending in "/" as an empty
+  // directory with mode 0700, any other as a zero-byte file with mode 0444.
+  placeholders?: string[];
   // Ends the turn with Claude Code's startup failure result (startup_failure_reason) and this message.
   startupFailure?: string;
 }
@@ -71,6 +74,15 @@ function run(prompt: string): void {
   }
   for (const [command, ...args] of turn.run ?? []) {
     execFileSync(command!, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+  }
+  for (const path of turn.placeholders ?? []) {
+    if (path.endsWith('/')) {
+      mkdirSync(path, { recursive: true, mode: 0o700 });
+    } else {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, '');
+      chmodSync(path, 0o444);
+    }
   }
   if (turn.tool === true) {
     out({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'npm test', description: 'Run the tests' } }] } });

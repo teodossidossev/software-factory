@@ -8,6 +8,7 @@ import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
 import type { MrSnapshot } from './jobs.js';
 import { changedPaths } from './patch.js';
+import { isPlaceholder } from './placeholders.js';
 import { headerProblem, MR_REQUIRED_HEADINGS } from './rules.js';
 import { TASK_DIR } from './task-file.js';
 
@@ -153,9 +154,16 @@ export async function verifyPrepared(
   if (await gitBusy(cwd)) {
     return fail('mr_rebase_in_progress', 'A rebase (or a Git lock) is still in progress in the work checkout.');
   }
-  // Not trimmed: porcelain lines start with a status column that may be a space.
+  // Not trimmed: porcelain lines start with a status column that may be a space. An untracked
+  // sandbox placeholder recreated after the cleanup does not count (its plain name is never quoted).
   const status = await runGit(cwd, ['status', '--porcelain', '--untracked-files=all']);
-  const dirty = status.stdout.toString('utf8').split('\n').filter((line) => line !== '' && !/^.. "?\.software-factory\//.test(line));
+  const dirty: string[] = [];
+  for (const line of status.stdout.toString('utf8').split('\n')) {
+    if (line === '' || /^.. "?\.software-factory\//.test(line) || (line.startsWith('?? ') && (await isPlaceholder(cwd, line.slice(3))))) {
+      continue;
+    }
+    dirty.push(line);
+  }
   if (status.code !== 0 || dirty.length > 0) {
     return fail('mr_dirty', `The work checkout has ${dirty.length} uncommitted change(s): ${dirty.slice(0, 5).map((line) => line.slice(3)).join(', ')}.`);
   }

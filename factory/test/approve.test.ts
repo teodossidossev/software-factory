@@ -224,6 +224,41 @@ test('approve retries directly after a failed MR turn (sandbox_unavailable) and 
   await stop(served);
 });
 
+test('approve: placeholders the sandbox creates during the MR turn do not fail mr_dirty, the job is pushed', async () => {
+  const env = await newEnv('mrplaceholders');
+  const repo = await newRepo(env, 'mrplaceholders-repo', true);
+  const origin = join(temp, 'mrplaceholders-repo-origin.git');
+  await putTask(env, repo, 'P-2', 'Placeholders on approve');
+  const placeholders = ['.bashrc', '.gitconfig', '.mcp.json', '.claude/settings.json', '.claude/skills', '.claude/.cc-writes/'];
+  await script(env, [
+    { write: { 'README.md': 'prepared\n' }, placeholders },
+    // The MR turn stages by path; running the checks recreates the placeholders.
+    {
+      write: { '.software-factory/P-2.mr.md': mrText('feat(P-2): Prepare the README') },
+      run: [['git', 'add', 'README.md'], commit('feat(P-2): Prepare the README')],
+      placeholders,
+    },
+  ]);
+  const served = await serve(env);
+  await call(served, 'start', { workspace: 'app', ticket: 'P-2' });
+  await waitFor(served, 'P-2', 'awaiting_review', 1);
+  await call(served, 'mark_clean', { workspace: 'app', ticket: 'P-2' });
+  const pushed = await approve(env, 'P-2');
+  assert.equal(pushed.code, 0, pushed.stdout + pushed.stderr);
+  assert.match(pushed.stdout, /^state: pushed\nbranch: P-2-placeholders-on-approve\ntitle: feat\(P-2\): Prepare the README$/m);
+  // The pushed commit holds the change only.
+  const files = execFileSync('git', ['--git-dir', origin, 'show', '--name-only', '--format=', 'refs/heads/P-2-placeholders-on-approve'], { encoding: 'utf8' }).trim();
+  assert.equal(files, 'README.md');
+  const snapshot = JSON.parse(await readFile(join(env.state, 'jobs', 'app', 'P-2', 'mr-snapshot.json'), 'utf8'));
+  assert.deepEqual(Object.keys(snapshot.files), ['README.md']);
+  const logged = (await readFile(join(env.state, 'jobs', 'app', 'P-2', 'events.jsonl'), 'utf8'))
+    .trim().split('\n').map((line) => JSON.parse(line)).filter((record) => record.type === 'placeholders_removed');
+  const expected = ['.bashrc', '.claude', '.claude/.cc-writes', '.claude/settings.json', '.claude/skills', '.gitconfig', '.mcp.json'];
+  assert.deepEqual(logged.map((record) => [record.iteration, record.paths]), [[1, expected], [2, expected]]);
+  assert.equal(git(repo, 'status', '--porcelain', '--untracked-files=all').replace(/^\?\? \.software-factory\/.*\n/gm, ''), '');
+  await stop(served);
+});
+
 test('approve is refused in needs_human before any MR preparation', async () => {
   const env = await newEnv('noretry', { SF_MAX_ITERATIONS: '1' });
   const repo = await newRepo(env, 'noretry-repo', false);

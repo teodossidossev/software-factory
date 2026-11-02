@@ -113,6 +113,21 @@ the Implementer, so the Git host is not needed there; a repository whose checks 
 (another package registry, a test service) lists them in `SF_SANDBOX_DOMAINS`. Nothing is written
 under `~/.claude`.
 
+The sandbox (bubblewrap) needs a mount point for every path it masks. When such a path does not
+exist in the work checkout it creates it as a zero-byte file with mode 0444 and leaves it there:
+`.bashrc`, `.gitconfig`, `.gitmodules`, `.mcp.json`, `.claude/settings.json`, `.claude/skills` and
+others, plus the empty directory `.claude/.cc-writes/` (Claude Code's own). The factory removes them
+(`src/placeholders.ts`) after every turn, before the Patch is built and before the MR verification,
+in `start` before the dirty check, and in `abort --discard` before the Git steps, and logs what it
+removed as `placeholders removed: a, b, c` in `sf watch` and the dashboard. The exact rule: in the
+root of the work checkout an entry whose name starts with `.`, and in `.claude/` any entry, is
+removed when it is a regular file (not a symbolic link) of size 0 with mode exactly 0444; then
+`.claude/.cc-writes` and `.claude` are removed when they are empty directories. Nothing else is
+touched: a file with content, a writable file, a symbolic link, a non-empty directory and anything
+deeper or elsewhere stay. The Patch and the `mr_dirty` check also skip an untracked file that matches
+the rule, in case the sandbox recreates one after the cleanup. A file the factory left in place
+does not match the rule, so it is a change of the Implementer's or the user's.
+
 ## MR preparation
 
 `sf approve` is allowed in `ready_for_human_review`, in `awaiting_review` (the user's word is final

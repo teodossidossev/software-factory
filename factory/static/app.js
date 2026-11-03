@@ -25,6 +25,8 @@ const PENDING_TEXT = {
   say: 'Sending the message…',
 };
 const $ = (id) => document.getElementById(id);
+// The views of the selected job, one tab panel each (#tab-<name>).
+const JOB_TABS = [['iterations', 'Iterations'], ['mr', 'Merge request'], ['history', 'State history'], ['events', 'Event stream']];
 
 const state = {
   jobs: [],
@@ -32,6 +34,8 @@ const state = {
   detail: null,
   iteration: null, // selected iteration number
   view: 'report',
+  // The selected job view; kept across jobs.
+  tab: 'iterations',
   cache: new Map(), // "<n>/<view>" -> text, for the selected job
   source: null,
   retry: null,
@@ -140,15 +144,19 @@ function renderJobs() {
     button.type = 'button';
     button.setAttribute('aria-current', String(keyOf(job) === state.key));
     button.append(el('div', 'job-name', keyOf(job)));
+    button.append(el('div', 'job-workspace', `${job.workspace} · ${job.branch}`));
     const line = el('div', 'job-line');
     line.append(el('span', `badge s-${job.state}`, job.state));
-    // Only a missing or a broad reviewer is worth a badge; a subscribed job shows none.
-    if (job.reviewer === 'none') {
+    // Only a missing or a broad reviewer of a live job is worth a badge; a subscribed or a
+    // finished job shows none.
+    if (TERMINAL_STATES.includes(job.state)) {
+      // Nothing to review any more.
+    } else if (job.reviewer === 'none') {
       line.append(el('span', 'badge r-none', 'no reviewer'));
     } else if (job.reviewer === 'broad') {
       line.append(el('span', 'badge r-broad', 'broad'));
     }
-    line.append(el('span', '', `iter ${job.iteration}`));
+    line.append(el('span', 'iter', `iteration ${job.iteration}`));
     button.append(line);
     button.addEventListener('click', () => select(keyOf(job)));
     const item = el('li');
@@ -226,7 +234,8 @@ function renderReviewer() {
   }
   warning.hidden = warning.textContent === '';
   const setup = $('reviewer-setup');
-  const showSetup = reviewer.status === 'none' && detail.reviewerSetup !== undefined;
+  // The setup messages matter while the job can still be reviewed; a finished job only shows the line.
+  const showSetup = reviewer.status === 'none' && detail.reviewerSetup !== undefined && !TERMINAL_STATES.includes(detail.job.state);
   if (setup.hidden && showSetup) {
     $('copy-status').textContent = '';
   }
@@ -380,6 +389,7 @@ async function showMr() {
   const panel = $('mr-panel');
   if (!state.detail?.mr) {
     panel.hidden = true;
+    $('no-mr').hidden = false;
     return;
   }
   let text;
@@ -391,6 +401,7 @@ async function showMr() {
   if (key === state.key) {
     $('mr-body').replaceChildren(...renderReport(text));
     panel.hidden = false;
+    $('no-mr').hidden = true;
   }
 }
 
@@ -689,7 +700,7 @@ function renderConfirmButton() {
   const discard = confirm.action === 'abort' && $('discard').checked;
   const ok = $('confirm-ok');
   ok.textContent = confirm.action === 'approve' ? 'Approve: prepare and push' : discard ? 'Abort and discard the branch' : 'Abort, keep the files';
-  ok.className = discard ? 'danger' : '';
+  ok.className = discard ? 'btn btn-danger' : 'btn btn-primary';
 }
 
 function closeConfirm() {
@@ -726,8 +737,8 @@ function sendSay() {
 function renderSetup() {
   const workspaces = state.workspaces ?? [];
   const tickets = state.tickets ?? [];
-  const parts = [`${workspaces.length} workspace${workspaces.length === 1 ? '' : 's'}`, `${tickets.length} ticket${tickets.length === 1 ? '' : 's'} without a job`, 'New ticket'];
-  $('setup-summary').textContent = `· ${parts.join(' · ')}`;
+  const parts = [`${workspaces.length} workspace${workspaces.length === 1 ? '' : 's'}`, `${tickets.length} ticket${tickets.length === 1 ? '' : 's'} without a job`];
+  $('setup-summary').textContent = parts.join(' · ');
   // Open until there is a workspace and a job; decided once, from the first data, so the User's
   // own toggling is kept afterwards.
   if (!state.setupDecided && state.workspaces !== null) {
@@ -748,12 +759,12 @@ function renderWorkspaces() {
     if (row.problem) {
       item.append(el('div', 'ws-problem', row.problem));
     }
-    const line = el('div', 'action-buttons');
-    const remove = el('button', '', 'Remove');
+    const line = el('div', 'row');
+    const remove = el('button', 'btn btn-sm', 'Remove');
     remove.type = 'button';
     remove.disabled = state.setupPending.has('workspace') || row.liveJobs > 0;
     remove.addEventListener('click', () => void removeWorkspace(row.name));
-    line.append(remove, el('span', 'muted', row.liveJobs > 0 ? `${row.liveJobs} live job${row.liveJobs === 1 ? '' : 's'}: finish or abort them first.` : 'The registration only; nothing on disk changes.'));
+    line.append(remove, el('span', 'hint', row.liveJobs > 0 ? `${row.liveJobs} live job${row.liveJobs === 1 ? '' : 's'}: finish or abort them first.` : 'The registration only; nothing on disk changes.'));
     item.append(line);
     return item;
   }));
@@ -801,30 +812,30 @@ function renderTickets() {
     const reviewer = el('div', 'ticket-reviewer');
     reviewer.append(...reviewerLine(row.reviewer));
     item.append(reviewer);
-    const buttons = el('div', 'action-buttons');
+    const buttons = el('div', 'row');
     const url = typeof row.conversation?.url === 'string' && row.conversation.url.startsWith(CHATGPT_PREFILL_URL) ? row.conversation.url : null;
     if (url !== null) {
-      const link = el('a', 'button', 'Open the conversation');
+      const link = el('a', 'btn btn-sm btn-primary', 'Open the conversation');
       link.href = url;
       link.target = '_blank';
       link.rel = 'noopener noreferrer';
       buttons.append(link);
     }
-    const start = el('button', '', 'Start…');
+    const start = el('button', 'btn btn-sm', 'Start…');
     start.type = 'button';
     start.disabled = state.starting.has(key) || state.startConfirm !== null;
     start.addEventListener('click', () => openStartConfirm(row));
     buttons.append(start);
     item.append(buttons);
     if (url !== null) {
-      item.append(el('p', 'muted', 'The link opens ChatGPT in a new tab with the message in the composer; press Enter if it is not sent by itself. The same link, to copy:'));
+      item.append(el('p', 'hint', 'The link opens ChatGPT in a new tab with the message in the composer; press Enter if it is not sent by itself. The same link, to copy:'));
       const box = el('div', 'copy-box');
       const input = el('input');
       input.type = 'text';
       input.value = url;
       input.setAttribute('readonly', '');
       input.setAttribute('aria-label', `Conversation link of ${key}`);
-      const copy = el('button', '', 'Copy');
+      const copy = el('button', 'btn btn-sm', 'Copy');
       copy.type = 'button';
       copy.addEventListener('click', () => copyText(input, 'conversation-copy-status'));
       box.append(input, copy);
@@ -1082,7 +1093,34 @@ function select(key) {
   openStream();
 }
 
+function renderJobTabs() {
+  for (const button of $('job-tabs').querySelectorAll('button')) {
+    button.setAttribute('aria-selected', String(button.dataset.tab === state.tab));
+  }
+  for (const [name] of JOB_TABS) {
+    $(`tab-${name}`).hidden = name !== state.tab;
+  }
+}
+
+function selectTab(name) {
+  state.tab = name;
+  renderJobTabs();
+  if (name === 'events' && $('follow').checked) {
+    const events = $('events');
+    events.scrollTop = events.scrollHeight;
+  }
+}
+
 function init() {
+  $('job-tabs').replaceChildren(...JOB_TABS.map(([name, label]) => {
+    const button = el('button', '', label);
+    button.type = 'button';
+    button.setAttribute('role', 'tab');
+    button.dataset.tab = name;
+    button.addEventListener('click', () => selectTab(name));
+    return button;
+  }));
+  renderJobTabs();
   for (const button of $('iteration-views').querySelectorAll('button')) {
     button.addEventListener('click', () => {
       state.view = button.dataset.view;

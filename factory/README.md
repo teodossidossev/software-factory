@@ -471,10 +471,16 @@ stream (a state or subscription change, an action from a page, or a reload). Onl
 ChatGPT URL becomes a link: a conversation URL without that prefix is rendered without one.
 
 Version 2 shows, live: every job with its state; for the selected job (the most recently updated
-one, or `#<workspace>/<ticket>` in the URL) the branch, base, state, iteration, estimated cost ("est. $", not a charge) and error,
-the state history, each iteration's Report and Patch, the MR text once there is one, and the
-Implementer's event stream as `sf watch` prints it, following new lines (scrolling up switches
-follow off). It also takes the user's three commands for the selected job, with the same meaning
+one, or `#<workspace>/<ticket>` in the URL) a job card with the ticket, the state and the
+Approve… and Abort… buttons in its head, the branch, base, iteration, estimated cost ("est. $",
+not a charge) and update time as facts, the error, the Reviewer line and the message box; and
+under it one card with four tabs (SF-026): Iterations (each iteration's Report and Patch), Merge
+request (the MR text once there is one, else a note), State history, and Event stream (the
+Implementer's session as `sf watch` prints it, following new lines; scrolling up switches follow
+off). The selected tab is kept when another job is selected. The layout is one spacing and type
+scale on cards: the Setup card, a 300 px sidebar with the jobs (ticket, workspace and branch,
+state badge, a `no reviewer` or `broad` badge for live jobs only) and the collapsed
+Subscriptions table, and the job on the right; below 900 px everything stacks. It also takes the user's three commands for the selected job, with the same meaning
 as in the terminal: approve (`sf approve`), abort (`sf abort`, with an explicit discard choice
 that is unchecked every time a confirmation opens: `sf abort --discard`) and say (`sf say`: a
 multiline message; Enter adds a line, only the Send button submits). Each is one deliberate
@@ -519,9 +525,10 @@ from the subscriptions of `sf events list` and with the rules of `sf ticket`: `R
 subscribed` with the id, host and filter of the subscription filtered on the job's ticket (and on
 its workspace or none); `Reviewer: broad` (a warning) when only a subscription without a ticket
 filter receives it, naming the id and `sf events remove <id>`; `Reviewer: none` (red), "Nobody will
-review this job", with the two messages of `sf ticket` ("Call guide." and the instruction that
-creates the ticket's task and subscription) in boxes with a Copy button (the clipboard, or the text
-selected for Ctrl+C). When the ticket is subscribed and a broad subscription also matches, a
+review this job", and, while the job is not pushed, aborted or failed, a collapsed "Set up the
+reviewer in ChatGPT" block with the two messages of `sf ticket` ("Call guide." and the
+instruction that creates the ticket's task and subscription) in boxes with a Copy button (the
+clipboard, or the text selected for Ctrl+C). When the ticket is subscribed and a broad subscription also matches, a
 warning says ChatGPT would review it twice and names the `sf events remove` command. Send test
 event is on only for `subscribed`: one request to the ticket's own subscription, "Sending…", then
 whether it was delivered and the status, or the refusal; it is never retried, and an answer that
@@ -645,12 +652,16 @@ end), in a browser:
    200" (and ChatGPT answers in that conversation); switch jobs while it is out and the answer
    stays with its job. Subscribe a conversation without a ticket filter: the warning names it and
    `sf events remove <id>`; `sf events remove` it and the warning goes.
-11. Layout: narrower than 760 px the job list stacks above the detail and the buttons wrap; in the
+11. Layout: narrower than 900 px the job list stacks above the detail and the buttons wrap; in the
    OS dark scheme the status colours and the dialog stay readable; Tab reaches Approve…, Abort…,
    the dialog's buttons, the textarea and Send; Escape closes the dialog. The Reviewer block,
    the Copy boxes and the Subscriptions table stay readable in both schemes and wrap or scroll
    inside their panel, never the page.
-12. Start screen: with an empty registry (`SF_CONFIG_DIR` pointing at an empty directory) the
+12. Tabs: Iterations opens by default; Merge request says there is no text until approve, then
+   shows it; State history and Event stream hold their content; the chosen tab stays when
+   another job is selected. Approve… and Abort… sit in the head of the job card, next to the
+   state badge; their reasons when off are the line under the facts.
+13. Start screen: with an empty registry (`SF_CONFIG_DIR` pointing at an empty directory) the
    page opens on Setup with the Add form; add a throwaway repository by its path (a wrong path
    shows the refusal in place); New ticket with a key, a title and two lines of request writes
    `.software-factory/<key>.md` with `## Request` and `## Status: draft`, and the ticket appears

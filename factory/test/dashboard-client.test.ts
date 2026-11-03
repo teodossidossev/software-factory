@@ -234,14 +234,14 @@ test('client: abort keeps the files unless discard is explicitly checked; the ch
   page.$('discard').checked = true;
   page.$('discard').dispatch('change');
   assert.equal(page.$('confirm-ok').textContent, 'Abort and discard the branch');
-  assert.equal(page.$('confirm-ok').className, 'danger');
+  assert.equal(page.$('confirm-ok').className, 'btn btn-danger');
   page.$('confirm-cancel').click();
   assert.equal(posts(page).length, 0);
 
   // Opened again: unchecked; the plain abort sends discard false.
   page.$('abort-button').click();
   assert.equal(page.$('discard').checked, false);
-  assert.equal(page.$('confirm-ok').className, '');
+  assert.equal(page.$('confirm-ok').className, 'btn btn-primary');
   page.$('confirm-ok').click();
   await page.flush();
   assert.deepEqual([posts(page)[0]!.path, posts(page)[0]!.body], ['api/jobs/app/T-1/abort', '{"discard":false}']);
@@ -864,10 +864,12 @@ test('client: the job cards badge a missing or broad reviewer; the Subscriptions
   const stream = page.streams.at(-1)!;
   // Before the first subscriptions event: neither the table nor "No subscriptions.".
   assert.deepEqual([page.$('no-subscriptions').hidden, page.$('subscriptions-table').hidden], [true, true]);
-  stream.emit('jobs', { jobs: [{ ...job(A), reviewer: 'none' }, { ...job(B), reviewer: 'broad' }, { ...job({ ...B, ticket: 'T-3' }), reviewer: 'subscribed' }] });
+  stream.emit('jobs', { jobs: [{ ...job(A), reviewer: 'none' }, { ...job(B), reviewer: 'broad' }, { ...job({ ...B, ticket: 'T-3' }), reviewer: 'subscribed' }, { ...job({ ...B, ticket: 'T-4', state: 'pushed' }), reviewer: 'none' }] });
   const badges = (key: string): string[] => jobButton(page, key).all().filter((node) => node.className.startsWith('badge')).map((node) => `${node.className}:${node.textContent}`);
   assert.deepEqual(badges('app/T-1'), ['badge s-awaiting_review:awaiting_review', 'badge r-none:no reviewer']);
   assert.deepEqual(badges('app/T-2'), ['badge s-working:working', 'badge r-broad:broad']);
+  // A finished job has nothing to review: no reviewer badge.
+  assert.deepEqual(badges('app/T-4'), ['badge s-pushed:pushed']);
   assert.deepEqual(badges('app/T-3'), ['badge s-working:working']);
 
   stream.emit('subscriptions', { subscriptions: [] });
@@ -887,4 +889,36 @@ test('client: the job cards badge a missing or broad reviewer; the Subscriptions
   stream.emit('subscriptions', { subscriptions: [] });
   assert.equal(page.$('subscriptions-body').children.length, 0);
   assert.equal(page.$('no-subscriptions').hidden, false);
+});
+
+test('client: the job views are tabs; the selected one is kept across jobs; the MR tab says when there is no text', async () => {
+  const page = await openPage();
+  const tabs = page.$('job-tabs').querySelectorAll('button');
+  assert.deepEqual(tabs.map((button) => button.textContent), ['Iterations', 'Merge request', 'State history', 'Event stream']);
+  assert.deepEqual(tabs.map((button) => button.getAttribute('aria-selected')), ['true', 'false', 'false', 'false']);
+  assert.deepEqual(['tab-iterations', 'tab-mr', 'tab-history', 'tab-events'].map((id) => page.$(id).hidden), [false, true, true, true]);
+  assert.equal(page.$('no-mr').hidden, false);
+  assert.equal(page.$('mr-panel').hidden, true);
+  tabs[1]!.click();
+  assert.deepEqual(['tab-iterations', 'tab-mr', 'tab-history', 'tab-events'].map((id) => page.$(id).hidden), [true, false, true, true]);
+  assert.equal(tabs[1]!.getAttribute('aria-selected'), 'true');
+  // The MR text, once there is one, replaces the note.
+  page.streams.at(-1)!.emit('job', { ...detail(A), mr: true });
+  await page.flush();
+  page.requests.filter((request) => request.method === 'GET' && request.path === 'api/jobs/app/T-1/mr').at(-1)!.respond(200, 'feat(T-1): Demo\n\n## What\nIt.\n');
+  await page.flush();
+  assert.equal(page.$('no-mr').hidden, true);
+  assert.equal(page.$('mr-panel').hidden, false);
+  assert.equal(page.$('mr-body').textContent, 'feat(T-1): Demo\n\n## What\nIt.\n\n');
+  // Another job keeps the tab.
+  await selectJob(page, 'app/T-2');
+  assert.equal(tabs[1]!.getAttribute('aria-selected'), 'true');
+  assert.equal(page.$('tab-mr').hidden, false);
+  page.streams.at(-1)!.emit('job', detail(B));
+  await page.flush();
+  assert.equal(page.$('no-mr').hidden, false);
+  assert.equal(page.$('mr-panel').hidden, true);
+  tabs[3]!.click();
+  assert.equal(page.$('tab-events').hidden, false);
+  assert.equal(page.$('tab-mr').hidden, true);
 });

@@ -53,6 +53,15 @@ export function mayTouch(fields: Map<string, string>): string[] {
   return raw.split(/[,\s]+/).map((entry) => entry.trim().replace(/^(["'])(.*)\1$/, '$2')).filter((entry) => entry !== '');
 }
 
+// The skeleton of a ticket created from the dashboard (SF-028), and the draft of SF-025: the
+// Context owner has not written the Task yet, so no job may start on it.
+export const DRAFT_MARKER = '## Status: waiting for the Context owner';
+const OLD_DRAFT_MARKER = '## Status: draft';
+
+export function isDraft(content: string): boolean {
+  return content.split(/\r?\n/).some((line) => line.trim() === DRAFT_MARKER || line.trim() === OLD_DRAFT_MARKER);
+}
+
 // Validates the content of a Task file for ticket and returns its UTF-8 bytes.
 export function checkTaskContent(ticket: string, content: string): Buffer {
   if (content.includes('\0') || /\p{Surrogate}/u.test(content)) {

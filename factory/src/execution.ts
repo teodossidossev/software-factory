@@ -20,7 +20,7 @@ import { DENIED_TOOLS, MR_DENIED_TOOLS, sensitivityOf } from './rules.js';
 import type { Workspace } from './registry.js';
 import { DEFAULT_PAGE_BYTES, MAX_PAGE_BYTES, MIN_PAGE_BYTES, type Page, pageBuffer } from './repo-files.js';
 import { type IdleOutcome, ImplementerSession } from './session.js';
-import { appendFix, mayTouch, parseFrontMatter, readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
+import { appendFix, isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { addWorktree, deleteBranch, removeWorktree } from './worktree.js';
 
 export const MAX_REPORT_BYTES = 64 * 1024;
@@ -198,7 +198,11 @@ export class Execution {
         throw new FactoryError('invalid_ticket', `ticket must be ${TICKET_DESCRIPTION}.`);
       }
       const workspace = await this.#resolve(workspaceName);
-      const fields = parseFrontMatter(await readTask(workspace, ticket))!;
+      const content = await readTask(workspace, ticket);
+      if (isDraft(content)) {
+        throw new FactoryError('task_draft', `${TASK_DIR}/${ticket}.md is still the skeleton: the Context owner writes the Task with write_task first, then starts on the user's word.`);
+      }
+      const fields = parseFrontMatter(content)!;
       const base = fields.get('base')!;
       const branch = branchName(ticket, fields.get('title')!);
 

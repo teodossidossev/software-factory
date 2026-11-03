@@ -13,16 +13,18 @@ const RECONNECT_MS = 3000;
 const READ_TIMEOUT_MS = 10000;
 const TERMINAL_STATES = ['pushed', 'aborted', 'failed'];
 const SAY_STATES = ['working', 'awaiting_review', 'needs_human', 'ready_for_human_review'];
-const ACTION_LABELS = { approve: 'Approve', abort: 'Abort', say: 'Send' };
+const ACTION_LABELS = { approve: 'Approve', abort: 'Abort', say: 'Send', archive: 'Archive' };
 const PENDING_REASONS = {
   approve: 'the push was requested; waiting for its outcome.',
   abort: 'abort was requested; waiting for its outcome.',
   say: 'the message is being sent.',
+  archive: 'the job is being archived.',
 };
 const PENDING_TEXT = {
   approve: 'Pushing the branch…',
   abort: 'Abort requested; waiting for the job to end.',
   say: 'Sending the message…',
+  archive: 'Archiving the job…',
 };
 const $ = (id) => document.getElementById(id);
 // The views of the selected job, one tab panel each (#tab-<name>).
@@ -57,14 +59,13 @@ const state = {
   subscriptions: null,
   // The start screen: the registry and the tickets without a job (null until the stream sends
   // them), whether the section's open state was decided from the first data, the requests out
-  // for its forms, the open start confirmation and the tickets whose start is out.
+  // for its forms and the open delete confirmation of a ticket.
   workspaces: null,
   tickets: null,
   archived: [],
   setupDecided: false,
   setupPending: new Set(),
-  startConfirm: null,
-  starting: new Set(),
+  ticketConfirm: null,
 };
 // The only URL the page links to: the ChatGPT composer prefilled by the server.
 const CHATGPT_PREFILL_URL = 'https://chatgpt.com/?q=';
@@ -661,6 +662,12 @@ function renderActions() {
   }
   $('action-reasons').textContent = reasons.join(' ');
   $('refresh-button').hidden = state.unresolved.get(state.key)?.failed !== true;
+  // A finished job can leave the list: Archive replaces Approve and Abort, which are off anyway.
+  const finished = job !== null && TERMINAL_STATES.includes(job.state);
+  $('archive-job-button').hidden = !finished;
+  $('approve-button').hidden = finished;
+  $('abort-button').hidden = finished;
+  $('archive-job-button').disabled = !finished || state.pending.has(pendingId('archive', state.key ?? ''));
   const input = $('say-input');
   const sayReason = availability('say', job);
   // The draft stays editable while a message is out; only sending waits.
@@ -692,6 +699,9 @@ function setOutcome(key, outcome) {
 function describeOutcome(action, result) {
   const data = result !== null && typeof result === 'object' ? result : {};
   const detail = data.error ? `${data.error.code}: ${data.error.message}` : '';
+  if (action === 'archive') {
+    return { level: 'ok', text: `Archived: the job left the list (its history is in ${data.archived ?? 'the state directory'}); the branch ${data.branch ?? ''} is untouched.` };
+  }
   if (action === 'approve') {
     if (data.state === 'pushed') {
       const text = `Pushed ${data.branch}.${data.title ? ` ${data.title}` : ''}`;
@@ -972,6 +982,17 @@ function reviewerLine(reviewer) {
   return [el('span', 'r-none', 'Reviewer: none'), document.createTextNode(' nobody will review this ticket until ChatGPT subscribes to it: open the conversation.')];
 }
 
+// What the ticket waits for, in one line: the conversation, the User's start, or a new start.
+function ticketNext(row) {
+  if (row.draft) {
+    return 'Next: open the conversation. The LLM investigates, discusses it with you and writes the Task file; then say start there.';
+  }
+  if (row.job !== null) {
+    return `The last job ended ${row.job}. To run it again, say start in the ticket's conversation; or archive the ticket.`;
+  }
+  return 'The Task file is written. Say start in the ticket\'s conversation and the LLM starts the job.';
+}
+
 function renderArchived() {
   const rows = state.archived ?? [];
   $('archived').hidden = rows.length === 0;
@@ -981,7 +1002,7 @@ function renderArchived() {
     const item = el('li');
     item.append(el('div', 'ticket-name', `${key} · ${row.title}`));
     const buttons = el('div', 'row');
-    const busy = state.setupPending.has(`ticket:${key}`) || state.startConfirm !== null;
+    const busy = state.setupPending.has(`ticket:${key}`) || state.ticketConfirm !== null;
     const restore = el('button', 'btn btn-sm', 'Restore');
     restore.type = 'button';
     restore.disabled = busy;
@@ -989,7 +1010,7 @@ function renderArchived() {
     const remove = el('button', 'btn btn-sm btn-ghost-danger', 'Delete…');
     remove.type = 'button';
     remove.disabled = busy;
-    remove.addEventListener('click', () => openStartConfirm({ ...row, archivedRow: true }, 'delete'));
+    remove.addEventListener('click', () => openDeleteConfirm({ ...row, archivedRow: true }));
     buttons.append(restore, remove);
     item.append(buttons);
     return item;
@@ -1005,13 +1026,14 @@ function renderTickets() {
     const item = el('li');
     const name = el('div', 'ticket-name', `${key} · ${row.title}`);
     if (row.draft) {
-      name.append(el('span', 'badge t-draft', 'draft'));
+      name.append(el('span', 'badge t-draft', 'waiting for the conversation'));
     }
     if (row.job !== null) {
       name.append(el('span', 'badge t-job', `last job ${row.job}`));
     }
     item.append(name);
     item.append(el('div', 'ticket-line', `.software-factory/${row.ticket}.md · base ${row.base}`));
+    item.append(el('p', 'ticket-next', ticketNext(row)));
     const reviewer = el('div', 'ticket-reviewer');
     reviewer.append(...reviewerLine(row.reviewer));
     item.append(reviewer);
@@ -1024,11 +1046,7 @@ function renderTickets() {
       link.rel = 'noopener noreferrer';
       buttons.append(link);
     }
-    const start = el('button', 'btn btn-sm', 'Start…');
-    start.type = 'button';
-    start.disabled = state.starting.has(key) || state.startConfirm !== null;
-    start.addEventListener('click', () => openStartConfirm(row));
-    const busy = state.setupPending.has(`ticket:${key}`) || state.startConfirm !== null;
+    const busy = state.setupPending.has(`ticket:${key}`) || state.ticketConfirm !== null;
     const archive = el('button', 'btn btn-sm', 'Archive');
     archive.type = 'button';
     archive.disabled = busy;
@@ -1037,8 +1055,8 @@ function renderTickets() {
     const remove = el('button', 'btn btn-sm btn-ghost-danger', 'Delete…');
     remove.type = 'button';
     remove.disabled = busy;
-    remove.addEventListener('click', () => openStartConfirm(row, 'delete'));
-    buttons.append(start, archive, remove);
+    remove.addEventListener('click', () => openDeleteConfirm(row));
+    buttons.append(archive, remove);
     item.append(buttons);
     if (url !== null) {
       item.append(el('p', 'hint', 'The link opens ChatGPT in a new tab with the message in the composer; press Enter if it is not sent by itself. The same link, to copy:'));
@@ -1052,6 +1070,20 @@ function renderTickets() {
       copy.type = 'button';
       copy.addEventListener('click', () => copyText(input, 'conversation-copy-status'));
       box.append(input, copy);
+      item.append(box);
+    } else if (typeof row.conversation?.message === 'string') {
+      // Too long for a link: the first message to paste into a new ChatGPT conversation.
+      item.append(el('p', 'hint', 'The first message is too long for a link: copy it and paste it into a new ChatGPT conversation of this project.'));
+      const box = el('div', 'copy-box');
+      const area = el('textarea');
+      area.rows = 4;
+      area.value = row.conversation.message;
+      area.setAttribute('readonly', '');
+      area.setAttribute('aria-label', `First message of ${key}`);
+      const copy = el('button', 'btn btn-sm', 'Copy');
+      copy.type = 'button';
+      copy.addEventListener('click', () => copyText(area, 'conversation-copy-status'));
+      box.append(area, copy);
       item.append(box);
     }
     return item;
@@ -1135,7 +1167,7 @@ async function submitTicket() {
     return;
   }
   const result = await setupRequest('ticket', 'api/tickets', { workspace, ticket, title, request }, 'ticket-status', (data) =>
-    ({ level: 'ok', text: `Draft written: ${data.path} in ${data.workspace} (base ${data.base}). Next, under Tickets: Open the conversation, then Start… when ChatGPT has planned it and you said start.` }));
+    ({ level: 'ok', text: `Ticket created: ${data.path} in ${data.workspace} (base ${data.base}), an empty skeleton. Next, under Tickets: Open the conversation; your words are its first message.` }));
   if (result !== undefined) {
     $('ticket-key').value = '';
     $('ticket-title').value = '';
@@ -1156,86 +1188,38 @@ async function ticketAction(action, row) {
     restore: (data) => `Restored ${key}: ${data.path}.`,
     delete: (data) => `Deleted ${key}: ${Array.isArray(data.deleted) ? data.deleted.join(', ') : ''}.${data.jobArchived ? ' Its finished job left the Jobs list.' : ''}`,
   };
-  await setupRequest(id, `api/tickets/${jobPath(key)}/${action}`, {}, 'start-status', (data) => ({ level: 'ok', text: texts[action](data ?? {}) }));
+  await setupRequest(id, `api/tickets/${jobPath(key)}/${action}`, {}, 'ticket-action-status', (data) => ({ level: 'ok', text: texts[action](data ?? {}) }));
 }
 
-function openStartConfirm(row, action = 'start') {
+// Delete asks first: it cannot be undone.
+function openDeleteConfirm(row) {
   const key = `${row.workspace}/${row.ticket}`;
-  if (state.startConfirm !== null || state.starting.has(key)) {
+  if (state.ticketConfirm !== null) {
     return;
   }
-  state.startConfirm = { key, row, action };
-  if (action === 'delete') {
-    $('start-confirm-title').textContent = `Delete ${key}?`;
-    $('start-confirm-text').textContent = `Deletes .software-factory/${row.ticket}.md and its MR text${row.archivedRow ? ' from the archive' : ''}. Cannot be undone; Archive keeps the file instead. A finished job of the ticket leaves the Jobs list (its history stays in the state directory).`;
-    $('start-ok').textContent = 'Delete the ticket';
-    $('start-ok').className = 'btn btn-danger';
-    $('start-confirm').hidden = false;
-    renderTickets();
-    $('start-cancel').focus();
-    return;
-  }
-  $('start-ok').textContent = 'Start the job';
-  $('start-ok').className = 'btn btn-primary';
-  $('start-confirm-title').textContent = `Start ${key}?`;
-  const lines = [`Creates the branch from ${row.base} in the work checkout of ${row.workspace} and starts the first iteration of the Implementer on .software-factory/${row.ticket}.md.`];
-  if (row.draft) {
-    lines.push('This ticket is still a draft: the Context owner has not rewritten it with write_task, so the Implementer would get your request text as it is.');
-  }
-  if (row.reviewer?.status === 'none') {
-    lines.push('Nobody will review this job: ChatGPT has not subscribed to this ticket. Its iterations will wait in awaiting_review until someone calls check. Start anyway?');
-  } else if (row.reviewer?.status === 'broad') {
-    lines.push(`Only a subscription without a ticket filter (${row.reviewer.id}) receives its events.`);
-  }
-  $('start-confirm-text').textContent = lines.join(' ');
-  $('start-confirm').hidden = false;
+  state.ticketConfirm = { key, row };
+  $('ticket-confirm-title').textContent = `Delete ${key}?`;
+  $('ticket-confirm-text').textContent = `Deletes .software-factory/${row.ticket}.md and its MR text${row.archivedRow ? ' from the archive' : ''}. Cannot be undone; Archive keeps the file instead. A finished job of the ticket leaves the Jobs list (its history stays in the state directory).`;
+  $('ticket-ok').textContent = 'Delete the ticket';
+  $('ticket-ok').className = 'btn btn-danger';
+  $('ticket-confirm').hidden = false;
   renderTickets();
-  $('start-cancel').focus();
+  $('ticket-cancel').focus();
 }
 
-function closeStartConfirm() {
-  state.startConfirm = null;
-  $('start-confirm').hidden = true;
+function closeTicketConfirm() {
+  state.ticketConfirm = null;
+  $('ticket-confirm').hidden = true;
   renderTickets();
 }
 
-async function submitStart() {
-  const confirm = state.startConfirm;
+async function submitTicketConfirm() {
+  const confirm = state.ticketConfirm;
   if (confirm === null) {
     return;
   }
-  closeStartConfirm();
-  if (confirm.action === 'delete') {
-    await ticketAction('delete', confirm.row);
-    return;
-  }
-  const { key } = confirm;
-  if (state.starting.has(key)) {
-    return;
-  }
-  state.starting.add(key);
-  setSetupStatus('start-status', { level: 'pending', text: `Starting ${key}…` });
-  renderTickets();
-  let outcome;
-  let started = false;
-  try {
-    const result = await post(`api/jobs/${jobPath(key)}/start`, {});
-    const data = result !== null && typeof result === 'object' ? result : {};
-    started = true;
-    outcome = { level: 'ok', text: `Started ${key} on branch ${data.branch} (state ${data.state}). The job is selected below; the Context owner is told by its events.` };
-  } catch (error) {
-    outcome = error instanceof ActionError
-      ? { level: 'error', text: `${error.code}: ${error.message}` }
-      : { level: 'error', text: `The request failed (${error.message}); the job may have started. Check the Jobs list; nothing is retried.` };
-  }
-  state.starting.delete(key);
-  setSetupStatus('start-status', outcome);
-  if (started) {
-    $('setup').open = false;
-    select(key);
-  } else {
-    renderTickets();
-  }
+  closeTicketConfirm();
+  await ticketAction('delete', confirm.row);
 }
 
 function appendEvent(event) {
@@ -1409,6 +1393,11 @@ function init() {
   });
 
   $('approve-button').addEventListener('click', () => openConfirm('approve'));
+  $('archive-job-button').addEventListener('click', () => {
+    if (state.key !== null) {
+      void run('archive', state.key, {});
+    }
+  });
   $('abort-button').addEventListener('click', () => openConfirm('abort'));
   $('confirm-ok').addEventListener('click', submitConfirm);
   $('confirm-cancel').addEventListener('click', closeConfirm);
@@ -1445,11 +1434,11 @@ function init() {
     event.preventDefault();
     void submitTicket();
   });
-  $('start-ok').addEventListener('click', () => void submitStart());
-  $('start-cancel').addEventListener('click', closeStartConfirm);
-  $('start-confirm').addEventListener('keydown', (event) => {
+  $('ticket-ok').addEventListener('click', () => void submitTicketConfirm());
+  $('ticket-cancel').addEventListener('click', closeTicketConfirm);
+  $('ticket-confirm').addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
-      closeStartConfirm();
+      closeTicketConfirm();
     }
   });
 

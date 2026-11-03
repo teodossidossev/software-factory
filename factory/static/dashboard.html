@@ -58,8 +58,9 @@
               <input id="ticket-title" type="text" autocomplete="off" placeholder="One line">
             </div>
             <div class="field">
-              <label for="ticket-request">What to implement, in your words</label>
+              <label for="ticket-request">What you want, in your words</label>
               <textarea id="ticket-request" rows="5"></textarea>
+              <p class="hint">Not written into the Task file: these words open the conversation, where the LLM investigates, discusses it with you and writes the Task file. The job starts when you say start in that conversation.</p>
             </div>
             <fieldset class="owner">
               <legend>Context owner</legend>
@@ -67,7 +68,7 @@
               <label class="choice is-off"><input id="owner-claude" type="radio" name="owner" value="claude" disabled> Claude Code (SF-023)</label>
             </fieldset>
             <div class="row">
-              <button id="ticket-create" type="submit" class="btn btn-primary">Create the ticket draft</button>
+              <button id="ticket-create" type="submit" class="btn btn-primary">Create the ticket</button>
             </div>
             <div id="ticket-status" class="status" role="status" aria-live="polite"></div>
           </form>
@@ -78,15 +79,15 @@
             <summary class="card-head"><span class="section-title">Archived <span id="archived-count"></span></span></summary>
             <ul id="archived-list" class="cards"></ul>
           </details>
-          <div id="start-confirm" class="confirm" role="dialog" aria-modal="false" aria-labelledby="start-confirm-title" aria-describedby="start-confirm-text" hidden>
-            <h4 id="start-confirm-title"></h4>
-            <p id="start-confirm-text"></p>
+          <div id="ticket-confirm" class="confirm" role="dialog" aria-modal="false" aria-labelledby="ticket-confirm-title" aria-describedby="ticket-confirm-text" hidden>
+            <h4 id="ticket-confirm-title"></h4>
+            <p id="ticket-confirm-text"></p>
             <div class="row">
-              <button id="start-ok" type="button" class="btn btn-primary">Start the job</button>
-              <button id="start-cancel" type="button" class="btn">Cancel</button>
+              <button id="ticket-ok" type="button" class="btn btn-danger">Delete the ticket</button>
+              <button id="ticket-cancel" type="button" class="btn">Cancel</button>
             </div>
           </div>
-          <div id="start-status" class="status" role="status" aria-live="polite"></div>
+          <div id="ticket-action-status" class="status" role="status" aria-live="polite"></div>
           <p id="conversation-copy-status" class="hint" role="status" aria-live="polite"></p>
         </section>
       </div>
@@ -122,6 +123,7 @@
             <div class="row head-actions">
               <button id="approve-button" type="button" class="btn btn-primary" disabled>Approve…</button>
               <button id="abort-button" type="button" class="btn" disabled>Abort…</button>
+              <button id="archive-job-button" type="button" class="btn" hidden>Archive</button>
               <button id="refresh-button" type="button" class="btn" hidden>Refresh state</button>
             </div>
           </div>

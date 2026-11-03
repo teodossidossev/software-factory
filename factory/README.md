@@ -513,26 +513,28 @@ nothing on disk changes) and an Add form: a name and the path of the local check
 pasted (the page cannot browse the machine's disk), validated as `sf workspace add` does (an
 absolute path that exists and is the root of a non-bare Git work tree, a name not registered
 yet) with the refusal shown as it comes; the checkout is where the Task files live and from which every job's worktree is created.
-**New ticket** takes the workspace, the ticket key, a one-line title, the request in the user's
-words and the Context owner (ChatGPT; Claude Code is listed and disabled until SF-023) and writes
-a **ticket draft**, `.software-factory/<ticket>.md` in the checkout, through the Task file
-writer: the front matter (`ticket`, `title`, `base` = the branch `origin/HEAD` points at, else
-`main`), `# <ticket>: <title>`, `## Request` with the text verbatim, and `## Status: draft` with
-one line saying the Context owner turns it into the Task format with `write_task`. An existing
-Task file is never replaced from the page (`409 ticket_exists`). **Tickets** lists the Task files
-of every usable workspace whose ticket has no live job (drafts, with a `draft` badge, and finished
-ones with their last job's state), each with its `Reviewer` line by the rules of the Reviewer
-block and two controls: *Open the conversation*, a link (`target=_blank`, opened only by the
-user's click, and the same URL in a box to copy) to `https://chatgpt.com/?q=` plus the message
-of `ticketConversation` URL-encoded, which prefills the ChatGPT composer with: use the Software
-Factory connector, call `guide`, read the draft with `read_file`, plan and rewrite the file with
-`write_task`, subscribe with the ticket's filter (the `sf ticket` instruction) and wait for
-"start"; whether ChatGPT sends it by itself is up to ChatGPT, so the page says to press Enter
-if it is not. And *Start…*, which asks for a confirmation naming the base and the checkout and
-saying when the ticket is still a draft and when nobody reviews it (`Reviewer: none`), then
-`POST api/jobs/<ws>/<ticket>/start`: the same `Execution.start` and guards as `sf start`
-(`job_limit`, `branch_exists`, `worktree_exists`, `job_exists`, `task_not_found` are shown with
-their texts). On success the section collapses and the new job is selected. The workspaces and
+**New ticket** takes the workspace, the ticket key, a one-line title, what the user wants in their
+own words and the Context owner (ChatGPT; Claude Code is listed and disabled until SF-023), and
+writes a **ticket skeleton** (SF-028), `.software-factory/<ticket>.md` in the checkout, through
+the Task file writer: the front matter (`ticket`, `title`, `base` = the branch `origin/HEAD`
+points at, else `main`), `# <ticket>: <title>` and `## Status: waiting for the Context owner`
+with one line of explanation. The user's words are **not** written into it: they are kept in the
+state directory (`<state dir>/requests/<workspace>/<ticket>.md`) and become the first message of
+the ticket's conversation. An existing Task file is never replaced from the page
+(`409 ticket_exists`). **Tickets** lists the Task files of every usable workspace whose ticket
+has no live job, each with a line saying what it waits for (the conversation; the user's start;
+a new start after a finished job), a `waiting for the conversation` badge for a skeleton, its last
+job's state, its `Reviewer` line by the rules of the Reviewer block, and *Open the conversation*:
+a link (`target=_blank`, opened only by the user's click, and the same URL in a box to copy) to
+`https://chatgpt.com/?q=` plus the message of `ticketConversation` URL-encoded. The message names
+the connector, `guide`, the ticket and the workspace, carries the user's words, and tells the
+Context owner to investigate (`read_file`, `search`), discuss, write the Task file over the
+skeleton with `write_task`, subscribe with the ticket's filter (the `sf ticket` instruction), and
+call `start` itself only when the user says start. A message too long for a link (over 7500
+characters of URL) is offered in a box to copy instead. Whether ChatGPT sends a prefilled message
+by itself is up to ChatGPT, so the page says to press Enter if it is not. There is no Start
+button: the job starts in the conversation (or with `sf start` in the terminal). Archive, Restore
+and Delete… are described under SF-027. The workspaces and
 the tickets come with the stream (`workspaces` and `tickets` events) on connect, after every
 change made from a page, on every state change and on every change of the subscriptions, so two
 open pages agree and the Reviewer line of a ticket turns to `subscribed` when ChatGPT subscribes.
@@ -622,7 +624,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials}], mr, history: [{ts, from, to, error?}], reviewer, reviewerSetup: {guide, instruction}}`; `reviewer` is `{status: "subscribed" \| "broad", id, host, input, broad: [<ids of the subscriptions without a ticket filter that match>]}` or `{status: "none"}` |
 | `api/subscriptions` | `{subscriptions: [{id, principal, input, host, createdAt, refreshBefore, job: "<ws>/<ticket>" \| null}]}`, the active subscriptions without URL or secret; `job` is the non-terminal job the ticket filter matches |
 | `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem}]}`: the registry, the checkout's path, its non-terminal jobs, and why the checkout cannot be used now or `null` |
-| `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, job, reviewer, conversation: {message, url}}]}`: the Task files without a live job; `job` is the last job's state or `null`; `reviewer` as in the job detail; `url` is `https://chatgpt.com/?q=<message URL-encoded>` |
+| `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, reviewer, conversation: {message, url}}], archived: [{workspace, ticket, title}]}`: the Task files without a live job; `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `reviewer` as in the job detail; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/patch` | the Patch, `text/x-diff` |
 | `api/jobs/<ws>/<ticket>/mr` | the MR text, `text/markdown`; 404 until there is one |
@@ -634,10 +636,9 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `POST api/jobs/<ws>/<ticket>/abort` | `{"discard": false}`; `discard` optional, default false | `Execution.abort(ws, ticket, discard)` |
 | `POST api/jobs/<ws>/<ticket>/say` | `{"message": "<text>"}` | `Execution.say(ws, ticket, message)`; the text goes as it is (nothing trimmed or split) |
 | `POST api/jobs/<ws>/<ticket>/test-event` | `{}` | `sf events test` for the job's `subscribed` subscription: one test event (state `"test"`), result `{subscription, delivered, status}`; without one `404 no_subscription` and nothing is sent |
-| `POST api/jobs/<ws>/<ticket>/start` | `{}` | `Execution.start(ws, ticket)`, as `sf start`; the job need not exist yet (invalid names are an empty `404`); result `{branch, state, check_after_minutes}` |
 | `POST api/workspaces` | `{"name": string, "path": string}` | `Setup.addWorkspace`: the rules of `sf workspace add`; result the workspace row |
 | `POST api/workspaces/<name>/remove` | `{}` | `Setup.removeWorkspace`; `409 workspace_busy` while the workspace has a live job; result `{removed}` |
-| `POST api/tickets` | `{"workspace", "ticket", "title", "request"}` | `Setup.createTicket`: the ticket draft through the Task file writer; result `{workspace, ticket, path, base}` |
+| `POST api/tickets` | `{"workspace", "ticket", "title", "request"}` | `Setup.createTicket`: the ticket skeleton through the Task file writer, the request kept for the conversation; result `{workspace, ticket, path, base}` |
 
 The actions go to the same `Execution` as the socket commands, under its lock and guards; there
 is no second state machine and no other mutation endpoint. `test-event` goes to the same Events
@@ -757,13 +758,14 @@ end), in a browser:
 13. Start screen: with an empty registry (`SF_CONFIG_DIR` pointing at an empty directory) the
    page opens on Setup with the Add form; add a throwaway repository by its path (a wrong path
    shows the refusal in place); New ticket with a key, a title and two lines of request writes
-   `.software-factory/<key>.md` with `## Request` and `## Status: draft`, and the ticket appears
-   under Tickets with `Reviewer: none` and a `draft` badge. *Open the conversation* opens a new
-   tab on chatgpt.com with the message in the composer (press Enter if it stays there); the same
-   URL is in the box and Copy puts it on the clipboard. Once the conversation created its task,
-   the line turns to `Reviewer: subscribed` without a reload. Start… asks for confirmation (it
-   names the draft and the missing reviewer when they apply); Cancel sends nothing; Confirm: the
-   section collapses, the job is selected and `sf status` shows it. With a workspace and a job
+   `.software-factory/<key>.md` as a skeleton (`## Status: waiting for the Context owner`, no
+   request text), and the ticket appears under Tickets with `Reviewer: none`, a `waiting for the
+   conversation` badge and the line saying to open the conversation; there is no Start button.
+   *Open the conversation* opens a new tab on chatgpt.com with your words in the first message
+   (press Enter if it stays there); the same URL is in the box and Copy puts it on the
+   clipboard. Once the conversation created its task, the line turns to `Reviewer: subscribed`
+   without a reload; once ChatGPT wrote the Task file the badge goes and the line says to say
+   start in the conversation; after "start" the job appears under Jobs. With a workspace and a job
    the page opens with Setup collapsed and the summary line; Remove on a workspace with a live
    job is off with the reason. Narrow and dark: the two columns stack, the forms and the ticket
    cards stay readable and wrap inside their panel.

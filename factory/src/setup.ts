@@ -4,19 +4,20 @@
 // `sf workspace add` and `write_task`, so the CLI and the page agree; a job is started through
 // the Execution, never from here.
 import { lstat, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
+import { writeFileAtomic } from './atomic.js';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
 import { type JobState, type JobStore, TERMINAL_STATES } from './jobs.js';
 import { loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, type Workspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
-import { MAX_TASK_BYTES, parseFrontMatter, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN, writeTask } from './task-file.js';
+import { DRAFT_MARKER, isDraft, MAX_TASK_BYTES, parseFrontMatter, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN, writeTask } from './task-file.js';
 
 export const MAX_TITLE_CHARS = 200;
 export const MAX_REQUEST_BYTES = 64 * 1024;
 // The line that marks a Task file written from the dashboard and not yet rewritten by the
 // Context owner.
-export const DRAFT_MARKER = '## Status: draft';
-export const DRAFT_NOTE = 'Written from the dashboard; the Context owner turns this into the Task format with write_task before start.';
+export { DRAFT_MARKER, isDraft } from './task-file.js';
+export const DRAFT_NOTE = 'Created from the dashboard. The Context owner writes the Task here with write_task after discussing the ticket with the User; the job starts only on the User\'s word.';
 
 export interface WorkspaceRow {
   name: string;
@@ -35,6 +36,8 @@ export interface TicketRow {
   base: string;
   // True while the file still carries the draft marker.
   draft: boolean;
+  // The User's words of New ticket, kept for the conversation (not in the Task file), or null.
+  request: string | null;
   // The state of the ticket's last job when it ended, or null without a job.
   job: JobState | null;
 }
@@ -74,15 +77,13 @@ async function isFile(path: string): Promise<boolean> {
   }
 }
 
-// The content of a ticket draft: the Task front matter, the User's request verbatim and the
-// draft marker with its one-line note.
-export function draftContent(ticket: string, title: string, base: string, request: string): string {
-  return `---\nticket: ${ticket}\ntitle: ${title}\nbase: ${base}\n---\n\n# ${ticket}: ${title}\n\n## Request\n\n${request.replace(/\r\n/g, '\n').replace(/\n+$/, '')}\n\n${DRAFT_MARKER}\n\n${DRAFT_NOTE}\n`;
+// The skeleton of a new ticket (SF-028): the Task front matter, the heading and the marker with
+// its note. The User's own words are not in it: they open the conversation instead.
+export function draftContent(ticket: string, title: string, base: string): string {
+  return `---\nticket: ${ticket}\ntitle: ${title}\nbase: ${base}\n---\n\n# ${ticket}: ${title}\n\n${DRAFT_MARKER}\n\n${DRAFT_NOTE}\n`;
 }
 
-export function isDraft(content: string): boolean {
-  return content.split(/\r?\n/).some((line) => line.trim() === DRAFT_MARKER);
-}
+
 
 // The checkout's default branch: the branch origin/HEAD points at, else "main".
 export async function defaultBranch(checkout: string): Promise<string> {
@@ -214,10 +215,24 @@ export class Setup {
         if (job !== undefined && !TERMINAL_STATES.includes(job.state)) {
           continue;
         }
-        rows.push({ workspace: name, ticket, title: fields.get('title')!, base: fields.get('base')!, draft: isDraft(content), job: job?.state ?? null });
+        rows.push({ workspace: name, ticket, title: fields.get('title')!, base: fields.get('base')!, draft: isDraft(content), request: await this.#readRequest(name, ticket), job: job?.state ?? null });
       }
     }
     return rows;
+  }
+
+  // The User's words of New ticket live in the state directory, next to the jobs, never in the
+  // repository: <state dir>/requests/<workspace>/<ticket>.md.
+  #requestPath(name: string, ticket: string): string {
+    return join(dirname(this.#jobs.root), 'requests', name, `${ticket}.md`);
+  }
+
+  async #readRequest(name: string, ticket: string): Promise<string | null> {
+    try {
+      return await readFile(this.#requestPath(name, ticket), 'utf8');
+    } catch {
+      return null;
+    }
   }
 
   // The workspace of a ticket action, with both names checked; a live job refuses it.
@@ -302,6 +317,7 @@ export class Setup {
       for (const path of found) {
         await rm(join(target.dir, path));
       }
+      await rm(this.#requestPath(name, ticket), { force: true });
       return { deleted: found.map((path) => `${TASK_DIR}/${path}`), jobEnded: target.jobEnded };
     });
     const jobArchived = await this.#retire(name, ticket, jobEnded);
@@ -338,8 +354,9 @@ export class Setup {
     return rows;
   }
 
-  // Writes the ticket draft through the Task file writer (the exclude entry, the job guard); an
-  // existing Task file for the ticket is never replaced from here.
+  // Writes the ticket skeleton through the Task file writer (the exclude entry, the job guard) and
+  // keeps the User's words for the conversation in the state directory; an existing Task file for
+  // the ticket is never replaced from here.
   createTicket(input: TicketInput): Promise<{ workspace: string; ticket: string; path: string; base: string }> {
     return this.#exclusive(async () => {
       const { workspace: name, ticket } = input;
@@ -372,7 +389,9 @@ export class Setup {
         throw new FactoryError('ticket_exists', `${path} already exists in workspace "${name}"; the ticket is listed below.`);
       }
       const base = await defaultBranch(workspace.workCheckout);
-      await writeTask(workspace, ticket, draftContent(ticket, title, base, request), this.#jobs);
+      await writeTask(workspace, ticket, draftContent(ticket, title, base), this.#jobs);
+      await mkdir(dirname(this.#requestPath(name, ticket)), { recursive: true, mode: 0o700 });
+      await writeFileAtomic(this.#requestPath(name, ticket), Buffer.from(request.replace(/\r\n/g, '\n'), 'utf8'));
       return { workspace: name, ticket, path, base };
     });
   }

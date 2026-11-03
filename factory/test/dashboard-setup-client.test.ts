@@ -184,7 +184,7 @@ test('setup client: the new-ticket form posts the exact fields, clears on succes
   await page.flush();
   posts(page)[1]!.respond(200, { ok: true, result: { workspace: 'web', ticket: 'W-7', path: '.software-factory/W-7.md', base: 'develop' } });
   await page.flush();
-  assert.equal(page.$('ticket-status').textContent, 'Draft written: .software-factory/W-7.md in web (base develop). Next, under Tickets: Open the conversation, then Start… when ChatGPT has planned it and you said start.');
+  assert.equal(page.$('ticket-status').textContent, 'Ticket created: .software-factory/W-7.md in web (base develop), an empty skeleton. Next, under Tickets: Open the conversation; your words are its first message.');
   assert.deepEqual([page.$('ticket-key').value, page.$('ticket-title').value, page.$('ticket-request').value, page.$('ticket-workspace').value], ['', '', '', 'web']);
 });
 
@@ -196,11 +196,12 @@ test('setup client: the tickets with badges, the reviewer line, the conversation
     ticket('app/T-7', { reviewer: { status: 'broad', id: 'sub_all', host: 'chatgpt.example', input: {}, broad: ['sub_all'] }, conversation: { message: 'x', url: 'javascript:alert(1)' } }),
   ], { writeText: async (text) => void written.push(text) });
   const [five, six, seven] = items(page, 'ticket-list');
-  assert.equal((five!.children[0] as FakeElement).textContent, 'app/T-5 · Ticket T-5draft');
+  assert.equal((five!.children[0] as FakeElement).textContent, 'app/T-5 · Ticket T-5waiting for the conversation');
   assert.equal((five!.children[0] as FakeElement).all().map((element) => element.className).join(' '), 'badge t-draft');
   assert.equal((five!.children[1] as FakeElement).textContent, '.software-factory/T-5.md · base main');
-  assert.equal((five!.children[2] as FakeElement).textContent, 'Reviewer: none nobody will review this ticket until ChatGPT subscribes to it: open the conversation.');
-  assert.equal(((five!.children[2] as FakeElement).children[0] as FakeElement).className, 'r-none');
+  assert.equal((five!.children[2] as FakeElement).className, 'ticket-next');
+  assert.equal((five!.children[3] as FakeElement).textContent, 'Reviewer: none nobody will review this ticket until ChatGPT subscribes to it: open the conversation.');
+  assert.equal(((five!.children[3] as FakeElement).children[0] as FakeElement).className, 'r-none');
   const open = link(five!)!;
   assert.deepEqual([open.textContent, open.href, open.target, open.rel], ['Open the conversation', `${PREFIX}${encodeURIComponent('Use the Software Factory connector for T-5.')}`, '_blank', 'noopener noreferrer']);
   const box = five!.all().find((element) => element.tagName === 'INPUT')!;
@@ -216,76 +217,33 @@ test('setup client: the tickets with badges, the reviewer line, the conversation
   assert.equal(page.$('conversation-copy-status').textContent, 'Copied.');
 
   assert.equal((six!.children[0] as FakeElement).textContent, 'app/T-6 · Ticket T-6last job pushed');
-  assert.equal((six!.children[2] as FakeElement).textContent, 'Reviewer: subscribed sub_own, chatgpt.example');
-  assert.equal((seven!.children[2] as FakeElement).textContent, 'Reviewer: broad sub_all has no ticket filter; it would review this ticket along with every other one (sf events remove sub_all).');
+  assert.equal((six!.children[3] as FakeElement).textContent, 'Reviewer: subscribed sub_own, chatgpt.example');
+  assert.equal((seven!.children[3] as FakeElement).textContent, 'Reviewer: broad sub_all has no ticket filter; it would review this ticket along with every other one (sf events remove sub_all).');
   // A URL that is not the ChatGPT prefill is not linked and not offered to copy.
   assert.equal(link(seven!), undefined);
   assert.equal(seven!.all().some((element) => element.tagName === 'INPUT'), false);
-  assert.equal(buttons(seven!).map((button) => button.textContent).join(','), 'Start…,Archive,Delete…');
+  // The message is still offered as text to copy; it is never a link.
+  assert.equal(buttons(seven!).map((button) => button.textContent).join(','), 'Archive,Delete…,Copy');
 });
 
-test('setup client: Start asks for a confirmation that names the draft and the missing reviewer; cancel sends nothing; one request; the job is selected on success', async () => {
-  const page = await openPage([], [workspace('app')], [ticket('app/T-5'), ticket('app/T-6', { draft: false, reviewer: { status: 'subscribed', id: 'sub_own', host: 'h', input: {}, broad: [] } })]);
-  const startOf = (index: number): FakeElement => buttons(items(page, 'ticket-list')[index]!).find((button) => button.textContent === 'Start…')!;
-  assert.equal(page.$('start-confirm').hidden, true);
-  startOf(0).click();
-  assert.equal(page.$('start-confirm').hidden, false);
-  assert.equal(page.$('start-confirm-title').textContent, 'Start app/T-5?');
-  const text = page.$('start-confirm-text').textContent;
-  assert.match(text, /^Creates the branch from main in the work checkout of app and starts the first iteration of the Implementer on \.software-factory\/T-5\.md\./);
-  assert.match(text, /still a draft/);
-  assert.match(text, /Nobody will review this job: ChatGPT has not subscribed to this ticket\..*Start anyway\?/);
-  assert.equal(page.document.activeElement, page.$('start-cancel'));
-  // Every Start is off while a confirmation is open.
-  assert.equal(startOf(0).disabled, true);
-  assert.equal(startOf(1).disabled, true);
-  page.$('start-cancel').click();
-  assert.equal(page.$('start-confirm').hidden, true);
-  assert.equal(posts(page).length, 0);
-  assert.equal(startOf(0).disabled, false);
-  startOf(1).click();
-  const plain = page.$('start-confirm-text').textContent;
-  assert.doesNotMatch(plain, /draft|Nobody/);
-  page.$('start-confirm').dispatch('keydown', { key: 'Escape' });
-  assert.equal(page.$('start-confirm').hidden, true);
-  assert.equal(posts(page).length, 0);
-
-  startOf(0).click();
-  page.$('start-ok').click();
-  page.$('start-ok').click();
-  await page.flush();
-  assert.equal(posts(page).length, 1);
-  assert.deepEqual([posts(page)[0]!.path, posts(page)[0]!.body], ['api/jobs/app/T-5/start', '{}']);
-  assert.equal(page.$('start-confirm').hidden, true);
-  assert.equal(page.$('start-status').className, 'status pending');
-  assert.equal(startOf(0).disabled, true);
-  // A refusal is shown as it comes; the ticket stays.
-  posts(page)[0]!.respond(409, { ok: false, error: { code: 'checkout_dirty', message: 'The work checkout has 2 uncommitted change(s).' } });
-  await page.flush();
-  assert.equal(page.$('start-status').textContent, 'checkout_dirty: The work checkout has 2 uncommitted change(s).');
-  assert.equal(page.$('start-status').className, 'status error');
-  assert.equal(startOf(0).disabled, false);
-  assert.equal(page.$('setup').open, true);
-
-  // Success: the status, the section collapses and the new job is selected (its stream opens).
-  const streamsBefore = page.streams.length;
-  startOf(0).click();
-  page.$('start-ok').click();
-  await page.flush();
-  posts(page)[1]!.respond(200, { ok: true, result: { branch: 'T-5-ticket-t-5', state: 'working', check_after_minutes: 15 } });
-  await page.flush();
-  assert.equal(page.$('start-status').textContent, 'Started app/T-5 on branch T-5-ticket-t-5 (state working). The job is selected below; the Context owner is told by its events.');
-  assert.equal(page.$('setup').open, false);
-  assert.equal(page.location.hash, '#app/T-5');
-  assert.equal(page.streams.length, streamsBefore + 1);
-  assert.match(page.streams.at(-1)!.url, /job=app%2FT-5/);
-  // A network failure: the job may have started; nothing is retried.
-  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('app/T-5')] });
-  startOf(0).click();
-  page.$('start-ok').click();
-  await page.flush();
-  posts(page)[2]!.fail();
-  await page.flush();
-  assert.match(page.$('start-status').textContent, /^The request failed \(Failed to fetch\); the job may have started\. Check the Jobs list; nothing is retried\./);
-  assert.equal(posts(page).length, 3);
+test('setup client: no Start button; each ticket says what it waits for; a message too long for a link is offered to copy', async () => {
+  const long = 'x'.repeat(9000);
+  const page = await openPage([], [workspace('app')], [
+    ticket('app/T-5'),
+    ticket('app/T-6', { draft: false }),
+    ticket('app/T-7', { draft: false, job: 'aborted' }),
+    ticket('app/T-8', { conversation: { message: long, url: null } }),
+  ]);
+  const cards = items(page, 'ticket-list');
+  assert.ok(cards.every((card) => !buttons(card).some((button) => /Start/.test(button.textContent))));
+  const next = (card: FakeElement): string => card.all().find((element) => element.className === 'ticket-next')!.textContent;
+  assert.match(next(cards[0]!), /^Next: open the conversation\. The LLM investigates, discusses it with you and writes the Task file; then say start there\.$/);
+  assert.equal(next(cards[1]!), "The Task file is written. Say start in the ticket's conversation and the LLM starts the job.");
+  assert.equal(next(cards[2]!), "The last job ended aborted. To run it again, say start in the ticket's conversation; or archive the ticket.");
+  // Too long for a link: no link, the message in a box with Copy.
+  assert.equal(link(cards[3]!), undefined);
+  const area = cards[3]!.all().find((element) => element.tagName === 'TEXTAREA')!;
+  assert.equal(area.value, long);
+  assert.match(cards[3]!.textContent, /too long for a link: copy it and paste it into a new ChatGPT conversation/);
+  assert.equal(page.requests.filter((request) => request.method === 'POST').length, 0);
 });

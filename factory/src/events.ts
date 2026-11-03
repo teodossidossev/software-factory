@@ -190,16 +190,24 @@ export function ticketInstruction(workspace: string, ticket: string): string {
 // The message that opens the ChatGPT conversation of a ticket from the dashboard (SF-025): the
 // connector, guide, the draft to read, the rewrite with write_task, the subscription of
 // ticketInstruction, and the wait for the User's start.
-export function ticketConversation(workspace: string, ticket: string): string {
+// SF-028: the User's own words open the conversation; they are never written into the Task file.
+// The Context owner investigates, discusses, writes the Task file over the skeleton, and starts
+// the job itself, only on the User's word.
+export function ticketConversation(workspace: string, ticket: string, request?: string): string {
+  const words = request === undefined || request.trim() === '' ? '' : `Here is what I want, in my words:\n\n${request.trim()}\n\n`;
   return (
-    `Use the Software Factory connector. Call guide. ` +
-    `Then read the ticket draft of ${ticket} with read_file (workspace "${workspace}", path ".software-factory/${ticket}.md"): ` +
-    `its "## Request" section is what I want implemented. Plan the ticket with me, read the repository where that helps, and rewrite that file ` +
-    `in the Task format with write_task (workspace "${workspace}", ticket "${ticket}"), replacing the draft lines. ` +
+    `Use the Software Factory connector. Call guide. This conversation is for ticket ${ticket} in workspace ${workspace}.\n\n` +
+    words +
+    `Investigate it: read the repository with read_file and search, ask me what is unclear, and discuss the solution with me. ` +
+    `When we agree, write the Task file with write_task (workspace "${workspace}", ticket "${ticket}"), replacing the skeleton ` +
+    `.software-factory/${ticket}.md, and show me the plan. ` +
     `${ticketInstruction(workspace, ticket)} ` +
-    `Report the plan and wait for my "start".`
+    `Do not call start until I say start (or "давай", "почвай"); when I do, call start for this ticket yourself.`
   );
 }
+
+// Above this length the prefilled link is not offered; the message is copied by hand instead.
+export const MAX_CONVERSATION_URL = 7500;
 
 // The ChatGPT composer prefilled with the message; sending it may still need Enter.
 export const CHATGPT_PREFILL_URL = 'https://chatgpt.com/?q=';

@@ -1,6 +1,6 @@
 // A small stand-in for the dashboard page, so static/app.js runs under node:vm: a document with
 // the elements of static/dashboard.html (by id), elements with the properties the script uses,
-// a scripted fetch and a scripted EventSource. It is not a browser: layout, focus order, CSS and
+// a scripted fetch, a scripted EventSource and, when the test gives one, a clipboard. It is not a browser: layout, focus order, CSS and
 // default actions (Enter in a textarea, a form's own submission) are out of its reach; the manual
 // browser steps in factory/README.md cover those.
 import { readFile } from 'node:fs/promises';
@@ -30,6 +30,8 @@ export class FakeElement {
   href = '';
   rel = '';
   target = '';
+  // Set by select(), as a text field's whole text is selected.
+  selected = false;
   scrollTop = 0;
   scrollHeight = 0;
   clientHeight = 0;
@@ -91,6 +93,10 @@ export class FakeElement {
 
   focus(): void {
     this.document.activeElement = this;
+  }
+
+  select(): void {
+    this.selected = true;
   }
 
   // Tag selectors only.
@@ -208,7 +214,8 @@ export interface Page {
 // Builds the document from the page's HTML (every element with an id, under its tag), runs
 // app.js in a fresh context against it and returns the handles. Fetches are answered by the
 // test, through requests[i].respond, unless autoGet answers a GET (undefined leaves it pending).
-export async function loadPage(staticDir: URL, autoGet: (path: string) => unknown): Promise<Page> {
+// Without a clipboard, navigator has none (as in a context where the browser refuses it).
+export async function loadPage(staticDir: URL, autoGet: (path: string) => unknown, clipboard?: { writeText(text: string): Promise<void> }): Promise<Page> {
   const html = await readFile(new URL('dashboard.html', staticDir), 'utf8');
   const source = await readFile(new URL('app.js', staticDir), 'utf8');
   const document = new FakeDocument();
@@ -274,7 +281,8 @@ export async function loadPage(staticDir: URL, autoGet: (path: string) => unknow
       timers[id - 1]!.cleared = true;
     }
   };
-  const context = createContext({ document, window, location, history, fetch, EventSource: FakeEventSource, setTimeout: fakeSetTimeout, clearTimeout: fakeClearTimeout, URLSearchParams, console });
+  const navigator = clipboard === undefined ? {} : { clipboard };
+  const context = createContext({ document, window, location, history, navigator, fetch, EventSource: FakeEventSource, setTimeout: fakeSetTimeout, clearTimeout: fakeClearTimeout, URLSearchParams, console });
   runInContext(source, context, { filename: 'app.js' });
   return {
     document,

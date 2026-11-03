@@ -10,7 +10,7 @@ import { openInBrowser } from './browser.js';
 import { authConfig, loadConfig, stateDir } from './config.js';
 import { DEFAULT_DASHBOARD_PORT, dashboardUrl, readToken, removeToken, type RunningDashboard, startDashboard } from './dashboard.js';
 import { FactoryError } from './errors.js';
-import { Events, type SubscriptionSummary } from './events.js';
+import { coversTicketBroadly, Events, ownsTicket, type SubscriptionSummary, TICKET_GUIDE, ticketInstruction } from './events.js';
 import { Execution, type StateListener } from './execution.js';
 import { callSocket, listenSocket } from './ipc.js';
 import { type Job, JobStore } from './jobs.js';
@@ -38,6 +38,7 @@ const USAGE = `Usage:
   sf events list                                        List the MCP event subscriptions (no secrets)
   sf events remove <id>                                 Remove an MCP event subscription
   sf events test <id>                                   Send a test event (state "test") to a subscription and print the answer
+  sf ticket <workspace> <ticket> [--no-wait]            Set up the ChatGPT conversation of one ticket: the instruction to paste, wait for its subscription, test it
   sf notify-test                                        Send a test notification on every channel
   sf auth-test                                          Verify an access token read from stdin with the SF_AUTH_* settings
 
@@ -131,8 +132,8 @@ async function serve(): Promise<void> {
   try {
     if (dashboardOn()) {
       // The dashboard's actions (DashboardActions: approve, abort and say only) run on the same
-      // Execution as the socket commands.
-      dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution);
+      // Execution as the socket commands; its reviewers are the subscriptions of the same Events.
+      dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, events);
     } else {
       await removeToken(config.stateDir);
     }
@@ -342,6 +343,58 @@ async function eventsCommand(args: string[]): Promise<void> {
   }
 }
 
+const TICKET_WAIT_MS = 15 * 60 * 1000;
+const TICKET_POLL_MS = 3000;
+
+// `sf ticket <workspace> <ticket>`: the ChatGPT conversation of one ticket. Warns about
+// subscriptions that would also receive its events, prints the instruction to paste, waits for
+// the ticket's own subscription (--no-wait: exit 1 instead) and sends it a test event.
+async function ticketCommand(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { 'no-wait': { type: 'boolean' } } });
+  const [workspace, ticket] = checkJob(positionals, 'ticket');
+  const list = async (): Promise<SubscriptionSummary[]> => {
+    const response = await callSocket(stateDir(), { command: 'events', args: ['list'] });
+    if (!response.ok) {
+      throw new FactoryError(response.error.code, response.error.message);
+    }
+    return (response.result as { subscriptions: SubscriptionSummary[] }).subscriptions;
+  };
+  const own = (row: SubscriptionSummary): boolean => ownsTicket(row.input, workspace, ticket);
+  const broad = (row: SubscriptionSummary): boolean => coversTicketBroadly(row.input, workspace);
+
+  const rows = await list();
+  for (const row of rows.filter(broad)) {
+    console.log(`Warning: subscription ${row.id} (input ${JSON.stringify(row.input)}) would also receive the events of ${ticket}, so two conversations would review it. Remove it with: sf events remove ${row.id}`);
+  }
+  let found = rows.find(own);
+  if (found === undefined) {
+    console.log(`Step 1  In ChatGPT, in the project of workspace ${workspace}, open a new conversation for ${ticket} and send:\n\n    ${TICKET_GUIDE}\n`);
+    console.log(`Step 2  Then send this instruction (it creates the event-triggered task and the subscription for ${ticket}):\n\n    ${ticketInstruction(workspace, ticket)}\n`);
+    if (values['no-wait'] === true) {
+      console.log(`No subscription for ${ticket} yet. Run sf ticket ${workspace} ${ticket} again to wait for it and test it.`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`Step 3  Waiting for the subscription of ${ticket} (up to 15 minutes; Ctrl+C stops, sf ticket again resumes)...`);
+    const deadline = Date.now() + TICKET_WAIT_MS;
+    while (found === undefined) {
+      if (Date.now() > deadline) {
+        throw new FactoryError('subscription_timeout', `No subscription for ${ticket} appeared in 15 minutes; sf events list shows what ChatGPT created.`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, TICKET_POLL_MS));
+      found = (await list()).find(own);
+    }
+  }
+  console.log(`Subscribed: ${found.id} (input ${JSON.stringify(found.input)}, ${found.host}).`);
+  console.log(`Step 4  Sending a test event to ${found.id}; ChatGPT should answer in that conversation with job_not_found for the test job.`);
+  const result = await viaServer('events', ['test', found.id]);
+  if (result.delivered !== true) {
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`Done. Plan ${ticket} in that conversation: write_task, then "start". Its events go only there.`);
+}
+
 async function notifyTest(args: string[]): Promise<void> {
   if (args.length !== 0) {
     throw new UsageError('notify-test takes no arguments.');
@@ -502,6 +555,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'events') {
     await eventsCommand(rest);
+    return;
+  }
+  if (command === 'ticket') {
+    await ticketCommand(rest);
     return;
   }
   if (command === 'auth-test') {

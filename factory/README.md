@@ -33,6 +33,7 @@ bin/sf reset <workspace> <ticket>              # end the session and archive the
 bin/sf events list                             # MCP event subscriptions (no secrets); needs sf serve
 bin/sf events remove <id>                      # remove a subscription; needs sf serve
 bin/sf events test <id>                        # send a test event (state "test") to a subscription, print the answer; needs sf serve
+bin/sf ticket <workspace> <ticket> [--no-wait] # the ChatGPT conversation of one ticket: instruction to paste, wait for its subscription, test it; needs sf serve
 bin/sf notify-test                             # one test notification on every channel; works without sf serve
 bin/sf auth-test < token.txt                   # verify an access token from stdin with the SF_AUTH_* settings; works without sf serve
 npm run typecheck && npm test
@@ -151,7 +152,12 @@ JSON-RPC error `-32000` with `data.reason` `unauthenticated`.
 every transition to `awaiting_review`, `needs_human`, `ready_for_human_review`, `pushed` (with
 `mr.title`), `aborted` and `failed`; `starting`, `working` and `preparing_mr` do not fire. `state`
 is `"test"` only for `sf events test`. Every authenticated principal may see and subscribe to it;
-deliveries go to every subscription whose filter matches.
+deliveries go to every subscription whose filter matches. The intended setup is one subscription
+per ticket, from the ChatGPT conversation that plans it: `sf ticket <workspace> <ticket>` prints
+the instruction to paste there, warns about subscriptions that would also match the ticket, waits
+for the ticket's subscription and sends it a test event (`--no-wait` prints and exits 1 when there
+is none). The dashboard shows the same answer per job (its Reviewer block, with the same two
+messages to copy and a test event to send) and lists the subscriptions, refreshed on every change.
 
 **`events/list`** `{cursor?}` → `{events: [{name, description, delivery: ["webhook"], inputSchema,
 payloadSchema}]}`, one page, no `nextCursor`.
@@ -462,6 +468,24 @@ kept per job when the selection changes. A confirmation and a request are bound 
 were opened for: changing the selection closes the confirmation and never retargets a request,
 and an answer that arrives for another job changes nothing on the shown one.
 
+**Reviewer.** Under the job's header fields the page says who receives the job's MCP Events,
+from the subscriptions of `sf events list` and with the rules of `sf ticket`: `Reviewer:
+subscribed` with the id, host and filter of the subscription filtered on the job's ticket (and on
+its workspace or none); `Reviewer: broad` (a warning) when only a subscription without a ticket
+filter receives it, naming the id and `sf events remove <id>`; `Reviewer: none` (red), "Nobody will
+review this job", with the two messages of `sf ticket` ("Call guide." and the instruction that
+creates the ticket's task and subscription) in boxes with a Copy button (the clipboard, or the text
+selected for Ctrl+C). When the ticket is subscribed and a broad subscription also matches, a
+warning says ChatGPT would review it twice and names the `sf events remove` command. Send test
+event is on only for `subscribed`: one request to the ticket's own subscription, "Sending…", then
+whether it was delivered and the status, or the refusal; it is never retried, and an answer that
+arrives after the selection changed is kept for its own job. The job list shows a `no reviewer`
+(red) or `broad` badge on the card; a subscribed job has none. A Subscriptions section under the
+job list shows each subscription's id, filter, host, refresh time and the live (not pushed,
+aborted or failed) job its ticket filter matches, or "No subscriptions.". A subscribe, refresh,
+unsubscribe, `sf events remove` and a 410 push the list, the subscriptions and the selected job
+again over the stream; a subscription that only expires shows until the next refresh.
+
 The page is plain HTML, CSS and JavaScript from `static/`, with no external resources, under
 `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self';
 img-src 'self'` and `Cache-Control: no-store`; every value is rendered as text.
@@ -472,21 +496,24 @@ HEAD and OPTIONS never act):
 
 | Path | Answer |
 |---|---|
-| `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, updated_at, created_at, error |
-| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials}], mr, history: [{ts, from, to, error?}]}` |
+| `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, updated_at, created_at, error, reviewer (`subscribed`, `broad` or `none`) |
+| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials}], mr, history: [{ts, from, to, error?}], reviewer, reviewerSetup: {guide, instruction}}`; `reviewer` is `{status: "subscribed" \| "broad", id, host, input, broad: [<ids of the subscriptions without a ticket filter that match>]}` or `{status: "none"}` |
+| `api/subscriptions` | `{subscriptions: [{id, principal, input, host, createdAt, refreshBefore, job: "<ws>/<ticket>" \| null}]}`, the active subscriptions without URL or secret; `job` is the non-terminal job the ticket filter matches |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/patch` | the Patch, `text/x-diff` |
 | `api/jobs/<ws>/<ticket>/mr` | the MR text, `text/markdown`; 404 until there is one |
-| `api/stream?job=<ws>/<ticket>&from=<line>` | server-sent events: `jobs` (on connect and on every state change), `job` (the job's detail, on connect and when it changes state), `event` (`{line, ts, iteration, type, text}` for every visible line of `events.jsonl` from the 0-based `from`, as `sf watch` formats it); a comment every 15 s; at most 8 streams, then 503 |
+| `api/stream?job=<ws>/<ticket>&from=<line>` | server-sent events: `jobs` (on connect, on every state change and on every change of the subscriptions), `subscriptions` (as `api/subscriptions`, at the same times), `job` (the job's detail, on connect, when it changes state and when the subscriptions change), `event` (`{line, ts, iteration, type, text}` for every visible line of `events.jsonl` from the 0-based `from`, as `sf watch` formats it); a comment every 15 s; at most 8 streams, then 503 |
 
 | Method and path | JSON body | Calls |
 |---|---|---|
 | `POST api/jobs/<ws>/<ticket>/approve` | `{}` | `Execution.approve(ws, ticket)`; answers when the preparation ends |
 | `POST api/jobs/<ws>/<ticket>/abort` | `{"discard": false}`; `discard` optional, default false | `Execution.abort(ws, ticket, discard)` |
 | `POST api/jobs/<ws>/<ticket>/say` | `{"message": "<text>"}` | `Execution.say(ws, ticket, message)`; the text goes as it is (nothing trimmed or split) |
+| `POST api/jobs/<ws>/<ticket>/test-event` | `{}` | `sf events test` for the job's `subscribed` subscription: one test event (state `"test"`), result `{subscription, delivered, status}`; without one `404 no_subscription` and nothing is sent |
 
 The actions go to the same `Execution` as the socket commands, under its lock and guards; there
-is no second state machine and no other mutation endpoint. An action request must carry the
+is no second state machine and no other mutation endpoint. `test-event` goes to the same Events
+hub as `sf events test`, with the same checks as the actions below; it changes no job. An action request must carry the
 token, an `Origin` equal to the page's exact origin (`http://127.0.0.1:<port>` with the actual
 port; a missing Origin, another loopback address or port and the MCP origin are refused with
 `403 invalid_origin`; a `null` or foreign Origin is already refused, `403`, by the loopback
@@ -506,7 +533,7 @@ failed to discard (`result.error.code` `discard_failed`; the page says the disca
 and never that the branch or the files were removed) are `200` too; the page reads `result`.
 A `FactoryError` is `{"ok": false, "error": {"code", "message"}}` with its code and message kept,
 under `409` for `invalid_state`, `turn_running` and `rebase_in_progress`, `404` for
-`job_not_found` and `workspace_not_found`, `400` for `invalid_content`, and `500` for any other
+`job_not_found`, `workspace_not_found`, `no_subscription` and `subscription_not_found`, `400` for `invalid_content`, and `500` for any other
 code (a Git failure before the preparation, for example). Any other failure is `500`
 with `internal_error` and a fixed message; the cause is logged, never the body or the token.
 
@@ -550,9 +577,20 @@ end), in a browser:
    unknown", the draft stays and Send, Approve… and Abort… stay off with a reason; the read fails
    and Refresh state appears; back online, click it: the state is current, the controls return,
    and nothing was re-sent.
-10. Layout: narrower than 760 px the job list stacks above the detail and the buttons wrap; in the
+10. Reviewer: on a job without a subscription the block reads `Reviewer: none` in red, the card
+   in the list has a red `no reviewer` badge, Send test event is off and the two boxes hold
+   "Call guide." and the instruction; Copy puts each on the clipboard (paste it somewhere to
+   check). Send them in a new ChatGPT conversation: once the subscription is created the block
+   turns to `Reviewer: subscribed` with its id, the badge goes and the Subscriptions section shows
+   the row with the job, without a reload. Send test event: "Sending…", then "delivered, status
+   200" (and ChatGPT answers in that conversation); switch jobs while it is out and the answer
+   stays with its job. Subscribe a conversation without a ticket filter: the warning names it and
+   `sf events remove <id>`; `sf events remove` it and the warning goes.
+11. Layout: narrower than 760 px the job list stacks above the detail and the buttons wrap; in the
    OS dark scheme the status colours and the dialog stay readable; Tab reaches Approve…, Abort…,
-   the dialog's buttons, the textarea and Send; Escape closes the dialog.
+   the dialog's buttons, the textarea and Send; Escape closes the dialog. The Reviewer block,
+   the Copy boxes and the Subscriptions table stay readable in both schemes and wrap or scroll
+   inside their panel, never the page.
 
 ## Workspace registry
 

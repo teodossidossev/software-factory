@@ -1,14 +1,16 @@
 // The Dashboard's reads: in-process against startDashboard (token, endpoints, the event stream,
-// the stream limit, disconnects; the test process must exit by itself afterwards) and end to end
-// through `sf serve` with the fake Implementer (a real cycle, approve, SF_DASHBOARD=off, sf dashboard).
-// The actions (approve, abort, say) are in dashboard-actions.test.ts.
+// the stream limit, disconnects, the reviewers and api/subscriptions; the test process must exit by
+// itself afterwards) and end to end through `sf serve` with the fake Implementer (a real cycle,
+// approve, SF_DASHBOARD=off, sf dashboard). The actions (approve, abort, say, test-event) are in
+// dashboard-actions.test.ts.
 import assert from 'node:assert/strict';
 import { readdir, readFile, readlink, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { MAX_STREAMS, startDashboard, TOKEN_FILE } from '../src/dashboard.js';
+import { ticketInstruction } from '../src/events.js';
 import type { Job } from '../src/jobs.js';
-import { CSP, fakeActions, fetchRaw, openStream, type Stream } from './support/dashboard-client.js';
+import { CSP, fakeActions, fakeReviewers, fetchRaw, openStream, type Stream, subscription } from './support/dashboard-client.js';
 import { withDashboard } from './support/dashboard-state.js';
 import { call, newEnv, newRepo, putTask, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
 
@@ -39,14 +41,14 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
     assert.equal((await stat(join(state, TOKEN_FILE))).mode & 0o777, 0o600);
 
     // A later start reuses the token of the file; an unusable file is replaced.
-    const again = await startDashboard(0, state, jobs, fakeActions());
+    const again = await startDashboard(0, state, jobs, fakeActions(), fakeReviewers());
     try {
       assert.equal(again.url.pathname, `/d/${token}/`);
     } finally {
       await again.close();
     }
     await writeFile(join(state, TOKEN_FILE), 'not a token\n');
-    const replaced = await startDashboard(0, state, jobs, fakeActions());
+    const replaced = await startDashboard(0, state, jobs, fakeActions(), fakeReviewers());
     try {
       const fresh = replaced.url.pathname.split('/')[2]!;
       assert.match(fresh, /^[0-9a-f]{64}$/);
@@ -90,7 +92,7 @@ test('dashboard: jobs, job detail, report, patch and mr endpoints; bad names are
     assert.equal(list.headers['content-type'], 'application/json; charset=utf-8');
     const { jobs: all } = JSON.parse(list.body);
     assert.deepEqual(all.map((job: Job) => [job.ticket, job.state]), [['T-0', 'failed'], ['T-1', 'awaiting_review']]);
-    assert.deepEqual(Object.keys(all[1]).sort(), ['base', 'branch', 'created_at', 'error', 'iteration', 'mr_attempts', 'state', 'ticket', 'updated_at', 'workspace']);
+    assert.deepEqual(Object.keys(all[1]).sort(), ['base', 'branch', 'created_at', 'error', 'iteration', 'mr_attempts', 'reviewer', 'state', 'ticket', 'updated_at', 'workspace']);
     assert.deepEqual(all[0].error, { code: 'start_failed', message: 'Git failed.' });
 
     const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body);
@@ -280,4 +282,109 @@ test('dashboard end to end: a fake cycle, the stream across mark_clean, mr after
   } finally {
     await stop(off);
   }
+});
+
+test('dashboard: api/subscriptions lists the subscriptions without secrets, each with the live job its ticket filter matches; GET only', async () => {
+  const reviewers = fakeReviewers([
+    subscription('sub_own', { workspace: 'app', ticket: 'T-1' }),
+    subscription('sub_any_ws', { ticket: 'T-1' }, 'other.example'),
+    subscription('sub_ended', { ticket: 'T-0' }),
+    subscription('sub_other_ws', { workspace: 'web', ticket: 'T-1' }),
+    subscription('sub_broad', { workspace: 'app' }),
+  ]);
+  await withDashboard('dash-subs', fakeActions(), async (dashboard) => {
+    const base = dashboard.url;
+    const reply = await fetchRaw(new URL('api/subscriptions', base));
+    assert.equal(reply.status, 200);
+    assert.equal(reply.headers['content-type'], 'application/json; charset=utf-8');
+    assert.equal(reply.headers['content-security-policy'], CSP);
+    assert.equal(reply.headers['cache-control'], 'no-store');
+    const { subscriptions } = JSON.parse(reply.body);
+    assert.deepEqual(Object.keys(subscriptions[0]).sort(), ['createdAt', 'host', 'id', 'input', 'job', 'principal', 'refreshBefore']);
+    assert.deepEqual(subscriptions[1], {
+      id: 'sub_any_ws', principal: 'user-1', input: { ticket: 'T-1' }, host: 'other.example',
+      createdAt: '2026-11-01T09:00:00.000Z', refreshBefore: '2026-11-08T09:00:00.000Z', job: 'app/T-1',
+    });
+    // T-0 is failed: no live job; another workspace and no ticket filter match none either.
+    assert.deepEqual(subscriptions.map((row: { id: string; job: string | null }) => [row.id, row.job]), [
+      ['sub_own', 'app/T-1'], ['sub_any_ws', 'app/T-1'], ['sub_ended', null], ['sub_other_ws', null], ['sub_broad', null],
+    ]);
+    for (const method of ['POST', 'PUT', 'DELETE', 'OPTIONS']) {
+      const refused = await fetchRaw(new URL('api/subscriptions', base), { method, headers: { origin: `http://127.0.0.1:${base.port}`, 'content-type': 'application/json' }, body: '{}' });
+      assert.deepEqual([refused.status, refused.headers.allow, refused.body], [405, 'GET', ''], method);
+    }
+    const token = base.pathname.split('/')[2]!;
+    const wrong = `${token.slice(0, -1)}${token.endsWith('0') ? '1' : '0'}`;
+    for (const path of [`/d/${wrong}/api/subscriptions`, '/api/subscriptions', `/d/${token}/api/subscriptions/x`]) {
+      const other = await fetchRaw(`http://127.0.0.1:${base.port}${path}`);
+      assert.deepEqual([other.status, other.body], [404, ''], path);
+    }
+    reviewers.rows = [];
+    assert.deepEqual(JSON.parse((await fetchRaw(new URL('api/subscriptions', base))).body), { subscriptions: [] });
+  }, reviewers);
+});
+
+test('dashboard: every job carries its reviewer (subscribed, broad, none, and subscribed with broad ones) and the setup messages', async () => {
+  const reviewers = fakeReviewers();
+  await withDashboard('dash-reviewer', fakeActions(), async (dashboard) => {
+    const read = async (): Promise<{ detail: any; card: string }> => {
+      const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', dashboard.url))).body);
+      const { jobs: all } = JSON.parse((await fetchRaw(new URL('api/jobs', dashboard.url))).body);
+      return { detail, card: all.find((job: Job) => job.ticket === 'T-1').reviewer };
+    };
+    let { detail, card } = await read();
+    assert.deepEqual(detail.reviewer, { status: 'none' });
+    assert.equal(card, 'none');
+    assert.deepEqual(detail.reviewerSetup, { guide: 'Call guide.', instruction: ticketInstruction('app', 'T-1') });
+    assert.match(detail.reviewerSetup.instruction, /\{"workspace": "app", "ticket": "T-1"\}/);
+
+    // Another workspace's filters do not reach the job.
+    reviewers.rows = [subscription('sub_web', { workspace: 'web' }), subscription('sub_web_t1', { workspace: 'web', ticket: 'T-1' })];
+    assert.deepEqual((await read()).detail.reviewer, { status: 'none' });
+
+    reviewers.rows = [subscription('sub_app', { workspace: 'app' }), subscription('sub_all', {})];
+    ({ detail, card } = await read());
+    assert.deepEqual(detail.reviewer, { status: 'broad', id: 'sub_app', host: 'chatgpt.example', input: { workspace: 'app' }, broad: ['sub_app', 'sub_all'] });
+    assert.equal(card, 'broad');
+
+    reviewers.rows = [subscription('sub_own', { workspace: 'app', ticket: 'T-1' })];
+    ({ detail, card } = await read());
+    assert.deepEqual(detail.reviewer, { status: 'subscribed', id: 'sub_own', host: 'chatgpt.example', input: { workspace: 'app', ticket: 'T-1' }, broad: [] });
+    assert.equal(card, 'subscribed');
+
+    // Both: the ticket's own subscription wins and the broad one is named.
+    reviewers.rows = [subscription('sub_all', {}), subscription('sub_own', { ticket: 'T-1' })];
+    ({ detail, card } = await read());
+    assert.deepEqual([detail.reviewer.status, detail.reviewer.id, detail.reviewer.broad], ['subscribed', 'sub_own', ['sub_all']]);
+    assert.equal(card, 'subscribed');
+  }, reviewers);
+});
+
+test('dashboard: a change of the subscriptions refreshes the jobs, the subscriptions and the job of every open page', async () => {
+  const reviewers = fakeReviewers();
+  await withDashboard('dash-reviewer-sse', fakeActions(), async (dashboard) => {
+    const selected = await openStream(new URL('api/stream?job=app/T-1', dashboard.url));
+    const plain = await openStream(new URL('api/stream', dashboard.url));
+    try {
+      assert.deepEqual((await selected.next('subscriptions')).subscriptions, []);
+      assert.deepEqual((await selected.next('job')).reviewer, { status: 'none' });
+      await plain.next('subscriptions');
+      assert.equal(reviewers.listeners(), 1);
+
+      reviewers.set([subscription('sub_own', { workspace: 'app', ticket: 'T-1' })]);
+      const ticketCard = (data: { jobs: Array<{ ticket: string; reviewer: string }> }): string | undefined => data.jobs.find((job) => job.ticket === 'T-1')?.reviewer;
+      assert.equal(ticketCard(await selected.next('jobs', (data) => ticketCard(data) === 'subscribed')), 'subscribed');
+      const subscriptions = await selected.next('subscriptions', (data) => data.subscriptions.length === 1);
+      assert.equal(subscriptions.subscriptions[0].job, 'app/T-1');
+      assert.equal((await selected.next('job', (data) => data.reviewer.status === 'subscribed')).reviewer.id, 'sub_own');
+      await plain.next('jobs', (data) => ticketCard(data) === 'subscribed');
+      await plain.next('subscriptions', (data) => data.subscriptions.length === 1);
+      assert.equal(plain.events.some((event) => event.event === 'job'), false);
+    } finally {
+      selected.close();
+      plain.close();
+    }
+  }, reviewers);
+  // Closing the dashboard stops listening.
+  assert.equal(reviewers.listeners(), 0);
 });

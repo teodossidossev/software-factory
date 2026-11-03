@@ -18,6 +18,16 @@
       <h2>Jobs</h2>
       <p id="no-jobs" class="muted" hidden>No jobs yet.</p>
       <ul id="job-list"></ul>
+      <details class="panel subscriptions" open>
+        <summary>Subscriptions</summary>
+        <p id="no-subscriptions" class="muted" hidden>No subscriptions.</p>
+        <div class="table-scroll">
+          <table id="subscriptions-table" hidden>
+            <thead><tr><th>Id</th><th>Filter</th><th>Host</th><th>Refresh before</th><th>Live job</th></tr></thead>
+            <tbody id="subscriptions-body"></tbody>
+          </table>
+        </div>
+      </details>
     </nav>
     <section id="detail" class="detail" hidden>
       <div class="job-header">
@@ -31,6 +41,27 @@
           <dt>Updated</dt><dd id="job-updated"></dd>
         </dl>
         <p id="job-error" class="error" hidden></p>
+        <div id="reviewer" class="reviewer" hidden>
+          <p id="reviewer-line" class="reviewer-line"></p>
+          <p id="reviewer-warning" class="reviewer-warning" hidden></p>
+          <div id="reviewer-setup" class="reviewer-setup" hidden>
+            <p class="muted">Set it up as sf ticket does: in ChatGPT, in the project of this workspace, open a new conversation for this ticket and send these two messages, in order.</p>
+            <div class="copy-box">
+              <textarea id="setup-guide" rows="1" readonly aria-label="First message"></textarea>
+              <button id="copy-guide" type="button">Copy</button>
+            </div>
+            <div class="copy-box">
+              <textarea id="setup-instruction" rows="4" readonly aria-label="Second message"></textarea>
+              <button id="copy-instruction" type="button">Copy</button>
+            </div>
+            <p id="copy-status" class="muted" role="status" aria-live="polite"></p>
+          </div>
+          <div class="action-buttons">
+            <button id="test-event-button" type="button" disabled>Send test event</button>
+            <span id="test-event-reason" class="muted"></span>
+          </div>
+          <div id="test-event-status" class="status" role="status" aria-live="polite"></div>
+        </div>
       </div>
 
       <details class="panel" open>

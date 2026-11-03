@@ -7,6 +7,7 @@ import { lstat, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 import { writeFileAtomic } from './atomic.js';
 import { FactoryError } from './errors.js';
+import type { ExclusiveScope } from './execution.js';
 import { runGit } from './git.js';
 import { type JobState, type JobStore, TERMINAL_STATES } from './jobs.js';
 import { loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, type Workspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
@@ -61,12 +62,12 @@ export interface TicketInput {
 export interface SetupOptions {
   configDir: string;
   jobs: JobStore;
-  // Runs work under the Execution's lock, so a registry change and a job start never interleave.
-  exclusive: <T>(work: () => Promise<T>) => Promise<T>;
-  // Ends a finished job of the ticket when its Task file is archived or deleted: the job leaves
-  // the Jobs list (archived in the state directory) and its worktree, if one was kept, is removed.
-  // sf serve binds it to Execution.reset, which takes the lock itself.
-  retireJob?: (workspace: string, ticket: string) => Promise<unknown>;
+  // Runs work under the Execution's lock, so a registry or ticket change and a job start never
+  // interleave. Its scope retires a finished job of the ticket within the same lock acquisition
+  // when the Task file is archived or deleted: the job leaves the Jobs list (archived in the state
+  // directory) and its worktree, if one was kept, is removed. sf serve binds it to
+  // Execution.exclusive.
+  exclusive: <T>(work: (scope: ExclusiveScope) => Promise<T>) => Promise<T>;
 }
 
 async function isFile(path: string): Promise<boolean> {
@@ -97,13 +98,11 @@ export class Setup {
   readonly #configDir: string;
   readonly #jobs: JobStore;
   readonly #exclusive: SetupOptions['exclusive'];
-  readonly #retireJob: SetupOptions['retireJob'];
 
   constructor(options: SetupOptions) {
     this.#configDir = options.configDir;
     this.#jobs = options.jobs;
     this.#exclusive = options.exclusive;
-    this.#retireJob = options.retireJob;
   }
 
   async #liveJobs(): Promise<Map<string, number>> {
@@ -235,7 +234,8 @@ export class Setup {
     }
   }
 
-  // The workspace of a ticket action, with both names checked; a live job refuses it.
+  // The workspace of a ticket action, with both names checked; a live job refuses it. jobEnded:
+  // the ticket has a finished job, read under the lock of the action that retires it.
   async #ticketTarget(name: string, ticket: string): Promise<{ workspace: Workspace; dir: string; jobEnded: boolean }> {
     if (!WORKSPACE_NAME_PATTERN.test(name)) {
       throw new FactoryError('invalid_name', `workspace name must be ${WORKSPACE_NAME_DESCRIPTION}.`);
@@ -251,33 +251,39 @@ export class Setup {
     return { workspace, dir: join(workspace.workCheckout, TASK_DIR), jobEnded: job !== undefined };
   }
 
-  // A finished job of the ticket leaves the Jobs list once its Task file goes.
-  async #retire(name: string, ticket: string, jobEnded: boolean): Promise<boolean> {
-    if (!jobEnded || this.#retireJob === undefined) {
+  // A finished job of the ticket leaves the Jobs list before its Task file goes, in the same lock
+  // acquisition as the check that found it.
+  async #retire(scope: ExclusiveScope, name: string, ticket: string, jobEnded: boolean): Promise<boolean> {
+    if (!jobEnded) {
       return false;
     }
-    await this.#retireJob(name, ticket);
+    await scope.retireFinished(name, ticket);
     return true;
   }
 
   // Moves <ticket>.md (and <ticket>.mr.md) into .software-factory/archive/, replacing an older
-  // archived copy; a finished job of the ticket is archived with it.
-  async archiveTicket(name: string, ticket: string): Promise<{ workspace: string; ticket: string; path: string; jobArchived: boolean }> {
-    const { jobEnded } = await this.#exclusive(async () => {
+  // archived copy; a finished job of the ticket is archived first. All under one lock acquisition:
+  // check, retire the job, then move the files. A failed retirement moves nothing; a file
+  // operation that fails after it leaves the job archived and the files as far as they got.
+  archiveTicket(name: string, ticket: string): Promise<{ workspace: string; ticket: string; path: string; jobArchived: boolean }> {
+    return this.#exclusive(async (scope) => {
       const target = await this.#ticketTarget(name, ticket);
       if (!(await isFile(join(target.dir, `${ticket}.md`)))) {
         throw new FactoryError('task_not_found', `${TASK_DIR}/${ticket}.md does not exist in workspace "${name}".`);
       }
-      await mkdir(join(target.dir, ARCHIVE_DIR), { recursive: true, mode: 0o700 });
+      const files: string[] = [];
       for (const file of [`${ticket}.md`, `${ticket}.mr.md`]) {
         if (await isFile(join(target.dir, file))) {
-          await rename(join(target.dir, file), join(target.dir, ARCHIVE_DIR, file));
+          files.push(file);
         }
       }
-      return target;
+      const jobArchived = await this.#retire(scope, name, ticket, target.jobEnded);
+      await mkdir(join(target.dir, ARCHIVE_DIR), { recursive: true, mode: 0o700 });
+      for (const file of files) {
+        await rename(join(target.dir, file), join(target.dir, ARCHIVE_DIR, file));
+      }
+      return { workspace: name, ticket, path: `${TASK_DIR}/${ARCHIVE_DIR}/${ticket}.md`, jobArchived };
     });
-    const jobArchived = await this.#retire(name, ticket, jobEnded);
-    return { workspace: name, ticket, path: `${TASK_DIR}/${ARCHIVE_DIR}/${ticket}.md`, jobArchived };
   }
 
   // Moves an archived Task file (and its MR text) back; refused when the ticket has a Task file.
@@ -299,10 +305,11 @@ export class Setup {
     });
   }
 
-  // Deletes the Task file and the MR text of the ticket, active or archived; a finished job of the
-  // ticket is archived (its history stays in the state directory).
-  async deleteTicket(name: string, ticket: string): Promise<{ workspace: string; ticket: string; deleted: string[]; jobArchived: boolean }> {
-    const { deleted, jobEnded } = await this.#exclusive(async () => {
+  // Deletes the Task file and the MR text of the ticket, active or archived, and the stored
+  // request; a finished job of the ticket is archived first (its history stays in the state
+  // directory). The same order and failure behaviour as archiveTicket.
+  deleteTicket(name: string, ticket: string): Promise<{ workspace: string; ticket: string; deleted: string[]; jobArchived: boolean }> {
+    return this.#exclusive(async (scope) => {
       const target = await this.#ticketTarget(name, ticket);
       const paths = [`${ticket}.md`, `${ticket}.mr.md`, `${ARCHIVE_DIR}/${ticket}.md`, `${ARCHIVE_DIR}/${ticket}.mr.md`];
       const found: string[] = [];
@@ -314,14 +321,13 @@ export class Setup {
       if (!found.some((path) => path.endsWith(`${ticket}.md`) && !path.endsWith('.mr.md'))) {
         throw new FactoryError('task_not_found', `There is no Task file for ${ticket} in workspace "${name}".`);
       }
+      const jobArchived = await this.#retire(scope, name, ticket, target.jobEnded);
       for (const path of found) {
         await rm(join(target.dir, path));
       }
       await rm(this.#requestPath(name, ticket), { force: true });
-      return { deleted: found.map((path) => `${TASK_DIR}/${path}`), jobEnded: target.jobEnded };
+      return { workspace: name, ticket, deleted: found.map((path) => `${TASK_DIR}/${path}`), jobArchived };
     });
-    const jobArchived = await this.#retire(name, ticket, jobEnded);
-    return { workspace: name, ticket, deleted, jobArchived };
   }
 
   // The archived Task files of every usable workspace, sorted by workspace and ticket.

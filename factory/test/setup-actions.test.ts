@@ -1,6 +1,6 @@
 // Archive, restore and delete of a ticket (SF-027): the files move or go, a live job refuses, a
-// finished job leaves the Jobs list through retireJob; the HTTP routes with the action checks; the
-// page's buttons, the delete confirmation and the archived list.
+// finished job leaves the Jobs list through the lock's retireFinished; the HTTP routes with the
+// action checks; the page's buttons, the delete confirmation and the archived list.
 import assert from 'node:assert/strict';
 import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -32,12 +32,17 @@ test('setup: archive moves the Task file and the MR text, restore brings them ba
   const repo = await newRepo(env, 'ticket-actions-repo', false);
   const jobs = new JobStore(env.state);
   const retired: string[] = [];
+  // An immediate lock whose scope archives the job record; test/ticket-retirement.test.ts runs
+  // the real Execution lock and retirement.
   const setup = new Setup({
-    configDir: env.config, jobs, exclusive: (work) => work(),
-    retireJob: async (workspace, ticket) => {
-      retired.push(`${workspace}/${ticket}`);
-      await jobs.archive(workspace, ticket);
-    },
+    configDir: env.config, jobs,
+    exclusive: (work) => work({
+      retireFinished: async (workspace, ticket) => {
+        retired.push(`${workspace}/${ticket}`);
+        const { branch } = (await jobs.read(workspace, ticket))!;
+        return { archived: `jobs/${workspace}/${await jobs.archive(workspace, ticket)}`, branch };
+      },
+    }),
   });
   const dir = join(repo, '.software-factory');
   await putTask(env, repo, 'T-1', 'One');
@@ -175,14 +180,16 @@ test('dashboard: a finished job is archived from its card; a live one is refused
   const actions = fakeActions({ archived: 'jobs/app/T-0.20261103T100000Z', branch: 'T-0-old' });
   await withDashboard('dash-archive-job', actions, async (dashboard) => {
     const base = dashboard.url;
-    // T-0 is failed in the fixture, T-1 awaiting_review.
+    // T-0 is failed in the fixture, T-1 awaiting_review. The terminal guard is the Execution's
+    // archiveFinished (never reset); its refusal reaches the page as 409 invalid_state.
     const done = await act(base, 'api/jobs/app/T-0/archive', {});
     assert.equal(done.status, 200, done.body);
-    assert.deepEqual(actions.calls, [['reset', 'app', 'T-0']]);
+    assert.deepEqual(actions.calls, [['archiveFinished', 'app', 'T-0']]);
+    actions.answer = new FactoryError('invalid_state', 'Only a finished job can be archived; the job is awaiting_review. Abort it first.');
     assert.deepEqual(error(await act(base, 'api/jobs/app/T-1/archive', {})), { status: 409, code: 'invalid_state' });
     assert.deepEqual(error(await act(base, 'api/jobs/app/T-0/archive', undefined, { body: '{"x":1}' })), { status: 400, code: 'invalid_body' });
     assert.equal((await act(base, 'api/jobs/app/T-0/archive', {}, { method: 'GET' })).status, 405);
-    assert.equal(actions.calls.length, 1);
+    assert.deepEqual(actions.calls, [['archiveFinished', 'app', 'T-0'], ['archiveFinished', 'app', 'T-1']]);
   });
 
   const STATIC_DIR = new URL('../../static/', import.meta.url);

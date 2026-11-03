@@ -143,7 +143,7 @@ export function openStream(url: URL): Promise<Stream> {
   });
 }
 
-export type Call = ['approve', string, string] | ['abort', string, string, boolean] | ['say', string, string, string] | ['reset', string, string];
+export type Call = ['approve', string, string] | ['abort', string, string, boolean] | ['say', string, string, string] | ['archiveFinished', string, string];
 
 export interface FakeActions extends DashboardActions {
   calls: Call[];
@@ -160,7 +160,7 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
     approve: (workspace, ticket) => reply(['approve', workspace, ticket]),
     abort: (workspace, ticket, discard) => reply(['abort', workspace, ticket, discard]),
     say: (workspace, ticket, message) => reply(['say', workspace, ticket, message]),
-    reset: (workspace, ticket) => reply(['reset', workspace, ticket]),
+    archiveFinished: (workspace, ticket) => reply(['archiveFinished', workspace, ticket]),
   };
   async function reply(call: Call): Promise<any> {
     fake.calls.push(call);

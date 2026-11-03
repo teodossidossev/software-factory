@@ -316,6 +316,14 @@ factory beyond its Git refs (branches, `refs/sf/snapshot/*`) and worktree regist
   ref (`refs/sf/snapshot/<ticket>`) is deleted, as on `pushed` and `abort`. When the workspace is
   no longer registered (or its checkout is gone), only the job record is archived and the result
   says `checkout: unavailable`; the dashboard's Archive of a finished job behaves the same.
+  That Archive checks the state and retires the job in one hold of the execution lock, so a job
+  that replaced the finished one in the meantime is refused (`invalid_state`), never retired.
+- The ticket actions Archive and Delete (dashboard start screen) run in one hold of the same lock:
+  they check the ticket (a live job refuses with `job_active`), retire its finished job, and only
+  then move or delete the Task and MR files (and, for Delete, the stored request). Restore and
+  `start` wait for the whole action. A retirement that fails changes no file. A file operation
+  that fails after a successful retirement is reported, but the job stays archived and the files
+  stay as far as they got; nothing is rolled back.
 
 The checkout's Git operations of one workspace (fetch, worktree add and remove, branch delete,
 the snapshot ref, push) are serialized through one Git lock per workspace; turns, publication,

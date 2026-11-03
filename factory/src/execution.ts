@@ -1,10 +1,10 @@
 // The job lifecycle: start, check, request_fix, mark_clean (the MR preparation and the branch,
-// SF-019), say, approve (the push), abort, reset, status and the restart rule. Owns the
-// Implementer session of each job, which works in the job's own worktree, and publishes an
-// iteration (Report, Patch and the file list) when the session goes idle. Every state change
-// goes through #transition, the seam for notifications. Several jobs of one workspace run at the
-// same time, up to SF_MAX_JOBS; the Git operations on the shared checkout are serialized per
-// workspace.
+// SF-019), say, approve (the push), abort, reset (and the dashboard's terminal-only Archive),
+// status and the restart rule. Owns the Implementer session of each job, which works in the
+// job's own worktree, and publishes an iteration (Report, Patch and the file list) when the
+// session goes idle. Every state change goes through #transition, the seam for notifications.
+// Several jobs of one workspace run at the same time, up to SF_MAX_JOBS; the Git operations on
+// the shared checkout are serialized per workspace.
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { copyFile, mkdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -88,6 +88,22 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+// What the retirement of a job did: the archived job directory, the branch left as it is, and
+// whether the checkout could not be cleaned (workspace unregistered or gone).
+export interface Retired {
+  archived: string;
+  branch: string;
+  checkout?: 'unavailable';
+}
+
+// What exclusive() hands its work: new calls only until the work settles; the lock is held until
+// every call made has settled.
+export interface ExclusiveScope {
+  // Retires the ticket's current job, which must be terminal (job_active otherwise), as reset
+  // does; job_not_found without a job. A failure also fails the exclusive section.
+  retireFinished(workspace: string, ticket: string): Promise<Retired>;
+}
+
 interface Live {
   workspace: Workspace;
   session: ImplementerSession;
@@ -123,9 +139,43 @@ export class Execution {
   }
 
   // Runs work under the same lock as the job operations, for changes that must not interleave
-  // with a start (the workspace registry of the dashboard's start screen).
-  exclusive<T>(work: () => Promise<T>): Promise<T> {
-    return this.#locked(work);
+  // with a start (the workspace registry and the ticket actions of the dashboard's start screen).
+  // The scope lets the work retire a finished job inside the same lock acquisition. It closes
+  // when the work settles, so a later call cannot reach a job created after it, and the lock is
+  // held until every retirement started through it has settled, awaited by the work or not. A
+  // retirement that fails fails the section: with the work's own error when the work failed too,
+  // else with the retirement's (never a success the retirement did not have).
+  exclusive<T>(work: (scope: ExclusiveScope) => Promise<T>): Promise<T> {
+    return this.#locked(async () => {
+      let open = true;
+      // Each started retirement as a promise that never rejects; the failures are kept here. The
+      // handler is attached at once, so an unawaited failure is never an unhandled rejection.
+      const started: Array<Promise<void>> = [];
+      const failures: unknown[] = [];
+      const scope: ExclusiveScope = {
+        retireFinished: (workspaceName, ticket) => {
+          if (!open) {
+            return Promise.reject(new FactoryError('scope_closed', 'The exclusive section has ended; the job was not retired.'));
+          }
+          const retirement = this.#finishedJob(workspaceName, ticket, 'job_active').then((job) => this.#retire(job));
+          started.push(retirement.then(() => undefined, (error: unknown) => {
+            failures.push(error);
+          }));
+          return retirement;
+        },
+      };
+      let result: T;
+      try {
+        result = await work(scope);
+      } finally {
+        open = false;
+        await Promise.all(started);
+      }
+      if (failures.length > 0) {
+        throw failures[0];
+      }
+      return result;
+    });
   }
 
   // The checkout's Git operations of one workspace (fetch, worktree add and remove, branch
@@ -644,34 +694,59 @@ export class Execution {
   // the branch is not touched, only the job's snapshot ref is removed.
   // A job whose workspace is no longer registered (or whose checkout is gone) is still archived:
   // only the Git clean-up of the checkout is skipped, and the result says so.
-  reset(workspaceName: string, ticket: string): Promise<{ archived: string; branch: string; checkout?: 'unavailable' }> {
-    return this.#locked(async () => {
-      const job = await this.#job(workspaceName, ticket);
-      const key = `${workspaceName}/${ticket}`;
-      const live = this.#live.get(key);
-      let workspace: Workspace | undefined = live?.workspace;
-      if (workspace === undefined) {
-        try {
-          workspace = await this.#resolve(workspaceName);
-        } catch (error) {
-          if (!(error instanceof FactoryError) || (error.code !== 'workspace_not_found' && error.code !== 'workspace_invalid')) {
-            throw error;
-          }
+  reset(workspaceName: string, ticket: string): Promise<Retired> {
+    return this.#locked(async () => this.#retire(await this.#job(workspaceName, ticket)));
+  }
+
+  // The dashboard's Archive of a job card: reset, for a finished job only. The state is checked
+  // and the job retired in one lock acquisition, so a job that replaced it is refused, never
+  // retired.
+  archiveFinished(workspaceName: string, ticket: string): Promise<Retired> {
+    return this.#locked(async () => this.#retire(await this.#finishedJob(workspaceName, ticket, 'invalid_state')));
+  }
+
+  // The ticket's current job, refused unless it is terminal, with the code (and the message) of
+  // the caller: invalid_state for the job card, job_active for a ticket action. Only under the lock.
+  async #finishedJob(workspaceName: string, ticket: string, code: 'invalid_state' | 'job_active'): Promise<Job> {
+    const job = await this.#job(workspaceName, ticket);
+    if (!TERMINAL_STATES.includes(job.state)) {
+      const message = code === 'invalid_state'
+        ? `Only a finished job can be archived; the job is ${job.state}. Abort it first.`
+        : `The job for ${workspaceName}/${ticket} is ${job.state}; abort it first.`;
+      throw new FactoryError(code, message);
+    }
+    return job;
+  }
+
+  // Ends the session, removes the worktree (best effort, logged) and the snapshot ref, and
+  // archives the job directory; the branch is not touched. Only under the lock, with the job read
+  // under the same acquisition.
+  async #retire(job: Job): Promise<Retired> {
+    const { workspace: workspaceName, ticket } = job;
+    const key = `${workspaceName}/${ticket}`;
+    const live = this.#live.get(key);
+    let workspace: Workspace | undefined = live?.workspace;
+    if (workspace === undefined) {
+      try {
+        workspace = await this.#resolve(workspaceName);
+      } catch (error) {
+        if (!(error instanceof FactoryError) || (error.code !== 'workspace_not_found' && error.code !== 'workspace_invalid')) {
+          throw error;
         }
       }
-      await this.#endSession(key);
-      if (workspace !== undefined) {
-        const checkout = workspace.workCheckout;
-        const worktree = job.worktree ?? this.#worktreePath(workspaceName, ticket);
-        const failure = await this.#gitLocked(workspaceName, () => removeWorktree(checkout, worktree));
-        if (failure !== undefined) {
-          console.error(`${key}: ${failure}`);
-        }
-        await this.#dropSnapshotRef(ticket, checkout);
+    }
+    await this.#endSession(key);
+    if (workspace !== undefined) {
+      const checkout = workspace.workCheckout;
+      const worktree = job.worktree ?? this.#worktreePath(workspaceName, ticket);
+      const failure = await this.#gitLocked(workspaceName, () => removeWorktree(checkout, worktree));
+      if (failure !== undefined) {
+        console.error(`${key}: ${failure}`);
       }
-      const archived = await this.jobs.archive(workspaceName, ticket);
-      return { archived: `jobs/${workspaceName}/${archived}`, branch: job.branch, ...(workspace === undefined ? { checkout: 'unavailable' as const } : {}) };
-    });
+      await this.#dropSnapshotRef(ticket, checkout);
+    }
+    const archived = await this.jobs.archive(workspaceName, ticket);
+    return { archived: `jobs/${workspaceName}/${archived}`, branch: job.branch, ...(workspace === undefined ? { checkout: 'unavailable' as const } : {}) };
   }
 
   async check(workspace: string, ticket: string, offset = 0, maxBytes = DEFAULT_PAGE_BYTES): Promise<CheckResult> {

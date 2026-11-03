@@ -50,7 +50,8 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 // The User's actions, bound by `sf serve` to its one Execution: the same methods, guards and
 // results as the socket commands of sf approve, sf abort and sf say. A job is started in the
 // ticket's conversation (the Context owner's start), or with sf start; not from the page (SF-028).
-export type DashboardActions = Pick<Execution, 'approve' | 'abort' | 'say' | 'reset'>;
+// Archive of a job card is archiveFinished (terminal only), never the any-state reset.
+export type DashboardActions = Pick<Execution, 'approve' | 'abort' | 'say' | 'archiveFinished'>;
 export type DashboardAction = 'approve' | 'abort' | 'say' | 'archive';
 export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'archive'];
 
@@ -606,15 +607,10 @@ export async function startDashboard(
       };
     }
     if (action === 'archive') {
-      // A finished job leaves the Jobs list: sf reset (the history is archived, a kept worktree
-      // removed, the branch untouched). A live job is refused; abort it first.
-      const run = async (): Promise<unknown> => {
-        const job = await jobs.read(workspace, ticket);
-        if (job !== undefined && !TERMINAL_STATES.includes(job.state)) {
-          throw new FactoryError('invalid_state', `Only a finished job can be archived; the job is ${job.state}. Abort it first.`);
-        }
-        return actions.reset(workspace, ticket);
-      };
+      // A finished job leaves the Jobs list as with sf reset (the history is archived, a kept
+      // worktree removed, the branch untouched). A live job is refused (invalid_state); the
+      // Execution checks the state and retires the job under one lock acquisition.
+      const run = (): Promise<unknown> => actions.archiveFinished(workspace, ticket);
       return { route: action, exists, call: (data) => (parse(BODIES.archive.schema, data) ? run : undefined), refreshJobs: true };
     }
     if (action === 'test-event') {

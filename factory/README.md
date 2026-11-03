@@ -36,6 +36,7 @@ bin/sf events test <id>                        # send a test event (state "test"
 bin/sf ticket <workspace> <ticket> [--no-wait] # the ChatGPT conversation of one ticket: instruction to paste, wait for its subscription, test it; needs sf serve
 bin/sf notify-test                             # one test notification on every channel; works without sf serve
 bin/sf auth-test < token.txt                   # verify an access token from stdin with the SF_AUTH_* settings; works without sf serve
+bin/sf info                                    # version, directories, settings, sf serve and tunnel state, workspaces, jobs, subscriptions; works without sf serve
 npm run typecheck && npm test
 ```
 
@@ -65,6 +66,7 @@ message below the table). Both work without `sf serve`; they read the state dire
 | Variable | Default | Meaning |
 |---|---|---|
 | `SF_PORT` | `8787` | Port of `http://127.0.0.1:<port>/mcp` (loopback only, Host and Origin checked). |
+| `SF_ENV_FILE` | `~/.config/software-factory/auth.env` | Environment file every `sf` command reads first: `KEY=VALUE` lines, `#` comments, optional `export`, quotes allowed; a variable already set in the environment wins; a missing file is fine. Empty value: no file. The repository root's `npm run serve` relies on it. |
 | `SF_DASHBOARD` | on | `off` starts no dashboard listener (and removes an old `dashboard-token`). |
 | `SF_DASHBOARD_PORT` | `8788` | Port of the dashboard, `http://127.0.0.1:<port>/d/<token>/` (loopback only, Host and Origin checked). |
 | `SF_CONFIG_DIR` | `${XDG_CONFIG_HOME:-~/.config}/software-factory` | Directory of the workspace registry. |

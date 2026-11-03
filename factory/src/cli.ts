@@ -7,15 +7,16 @@ import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { AuthError, createVerifier } from './auth.js';
 import { openInBrowser } from './browser.js';
-import { authConfig, loadConfig, stateDir } from './config.js';
+import { authConfig, envFilePath, loadConfig, loadEnvFile, stateDir } from './config.js';
 import { DEFAULT_DASHBOARD_PORT, dashboardUrl, readToken, removeToken, type RunningDashboard, startDashboard } from './dashboard.js';
 import { FactoryError } from './errors.js';
 import { coversTicketBroadly, Events, ownsTicket, type SubscriptionSummary, TICKET_GUIDE, ticketInstruction } from './events.js';
 import { Execution, type StateListener } from './execution.js';
-import { callSocket, listenSocket } from './ipc.js';
+import { existsSync } from 'node:fs';
+import { callSocket, listenSocket, socketPath } from './ipc.js';
 import { type Job, JobStore } from './jobs.js';
 import { jobNotification, notifyConfig, sendNotification, stateNotifier } from './notify.js';
-import { loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
+import { configDir, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { loadHandbook, packageVersion, PortInUseError, SERVER_NAME, startServer } from './server.js';
 import { type StatusRow, statusRows } from './status.js';
 import { TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
@@ -41,6 +42,7 @@ const USAGE = `Usage:
   sf ticket <workspace> <ticket> [--no-wait]            Set up the ChatGPT conversation of one ticket: the instruction to paste, wait for its subscription, test it
   sf notify-test                                        Send a test notification on every channel
   sf auth-test                                          Verify an access token read from stdin with the SF_AUTH_* settings
+  sf info                                               Version, directories, settings, whether sf serve and the tunnel run, workspaces, jobs, subscriptions
 
 Notes:
   EST_USD: an estimate of the API-equivalent price, not a charge (the session usually runs on your Claude subscription):
@@ -427,6 +429,68 @@ async function readStdin(limit: number): Promise<string> {
   return Buffer.concat(chunks).toString('utf8').trim();
 }
 
+// `sf info`: one screen with everything a person asks before the first command. Works without
+// sf serve; what needs it says so.
+async function info(args: string[]): Promise<void> {
+  if (args.length !== 0) {
+    throw new UsageError('info takes no arguments.');
+  }
+  const state = stateDir();
+  const lines: string[] = [];
+  const row = (name: string, value: string): void => {
+    lines.push(`${name.padEnd(14)}${value}`);
+  };
+  row('version', `${SERVER_NAME} ${await packageVersion()}`);
+  row('config', configDir());
+  const envFile = envFilePath();
+  row('env file', envFile === undefined ? 'off (SF_ENV_FILE is empty)' : `${envFile} (${existsSync(envFile) ? 'read' : 'absent'})`);
+  row('state', state);
+  const auth = authConfig();
+  row('mcp', `http://127.0.0.1:${parsePort('SF_PORT', DEFAULT_PORT)}/mcp, auth ${auth === undefined ? 'off' : `${auth.issuer} audience ${auth.audience}`}`);
+  const token = dashboardOn() ? await readToken(state) : undefined;
+  row('dashboard', !dashboardOn() ? 'off (SF_DASHBOARD=off)' : token === undefined ? 'no token yet (starts with sf serve)' : dashboardUrl(parsePort('SF_DASHBOARD_PORT', DEFAULT_DASHBOARD_PORT), token).href);
+  row('model', process.env.SF_MODEL || 'Claude Code default');
+  const notify = notifyConfig();
+  row('notify', `ntfy ${notify.ntfyUrl === undefined ? 'off' : 'on'}, desktop ${notify.desktop ? 'on' : 'off'}, iterations ${notify.iterations ? 'on' : 'off'}`);
+
+  // sf serve answers on its socket; the tunnel on its health port.
+  let subscriptions: SubscriptionSummary[] | undefined;
+  try {
+    const response = await callSocket(state, { command: 'events', args: ['list'] });
+    subscriptions = response.ok ? (response.result as { subscriptions: SubscriptionSummary[] }).subscriptions : [];
+    row('serve', `running (${socketPath(state)})`);
+  } catch {
+    row('serve', 'not running (npm run serve)');
+  }
+  const health = process.env.SF_TUNNEL_HEALTH || '127.0.0.1:8790';
+  try {
+    const reply = await fetch(`http://${health}/readyz`, { signal: AbortSignal.timeout(1500) });
+    row('tunnel', `${reply.ok ? 'ready' : `answers ${reply.status}`} (http://${health}/readyz)`);
+  } catch {
+    row('tunnel', 'not running (npm run tunnel)');
+  }
+
+  const registry = await loadRegistry();
+  const names = Object.keys(registry.workspaces).sort();
+  row('workspaces', names.length === 0 ? 'none (sf workspace add <name> --read <path>)' : '');
+  for (const name of names) {
+    const entry = registry.workspaces[name]!;
+    lines.push(`  ${name}: read ${entry.read_checkout}${entry.work_checkout === entry.read_checkout ? '' : `, work ${entry.work_checkout}`}`);
+  }
+  console.log(lines.join('\n'));
+
+  const jobs = new JobStore(state);
+  const all = await jobs.list();
+  console.log(`\njobs${all.length === 0 ? ': none' : ''}`);
+  if (all.length > 0) {
+    console.log(table(await statusRows(jobs, all, new Date())));
+  }
+  console.log(`\nsubscriptions${subscriptions === undefined ? ': needs sf serve' : subscriptions.length === 0 ? ': none (sf ticket <workspace> <ticket>)' : ''}`);
+  if (subscriptions !== undefined && subscriptions.length > 0) {
+    console.log(subscriptionTable(subscriptions));
+  }
+}
+
 async function authTest(args: string[]): Promise<void> {
   if (args.length !== 0) {
     throw new UsageError('auth-test takes no arguments; pipe the token into stdin.');
@@ -530,6 +594,8 @@ async function dashboardCommand(args: string[]): Promise<void> {
 
 async function main(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
+  // SF_* settings from the environment file (auth.env), for every command alike.
+  loadEnvFile();
   if (command === 'start') {
     if (rest.length !== 2) {
       throw new UsageError('start needs <workspace> <ticket>.');
@@ -563,6 +629,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'auth-test') {
     await authTest(rest);
+    return;
+  }
+  if (command === 'info') {
+    await info(rest);
     return;
   }
   if (command === 'say') {

@@ -1,0 +1,24 @@
+{
+  "name": "software-factory-root",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Software Factory: the commands to set up, run, test and inspect the factory from the repository root. The code lives in factory/.",
+  "scripts": {
+    "setup": "npm ci --prefix factory && npm run build --prefix factory",
+    "build": "npm run build --prefix factory",
+    "typecheck": "npm run typecheck --prefix factory",
+    "test": "npm test --prefix factory",
+    "serve": "factory/bin/sf serve",
+    "tunnel": "scripts/sf-tunnel.sh run",
+    "dashboard": "factory/bin/sf dashboard --open",
+    "status": "factory/bin/sf status",
+    "info": "factory/bin/sf info",
+    "ticket": "factory/bin/sf ticket",
+    "events": "factory/bin/sf events list",
+    "sf": "factory/bin/sf",
+    "help": "factory/bin/sf --help"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

@@ -31,20 +31,28 @@ their own review, so you drive the cycle through tools:
    dashboard's first message), create an event-triggered task on
    the event `software_factory.job` subscribed with `arguments` `{"workspace", "ticket"}` of this
    ticket only, that calls `check` for the ticket in the payload (ChatGPT subscribes when the task
-   is created on the connector). A subscription without a `ticket` filter receives every ticket of
-   the workspace and makes a second review of each; it is for a single-job setup only. The event
-   fires when an iteration is published (`awaiting_review`) and on `needs_human`,
-   `ready_for_human_review`, `pushed`, `aborted` and `failed`. When events are not available in the
-   account: `start` and every `request_fix` tell you when to check next; create one scheduled task in
-   this conversation that calls `check` on that interval, if none exists yet.
-5. When `check` says `awaiting_review`, read the Report and the Patch it returns. Review against the
-   Task file, the repository standards and the plan. `check.files` names the sensitive paths of
-   the iteration (dependency manifests, lockfiles, environment and tool configuration, CI,
-   containers, IDE and agent files, root dotfiles) and whether the Task file's `may_touch`
-   declared them, and the deleted paths; the Report lists both first. Then either `request_fix`
-   with a Fix section (the next iteration starts at once) or `mark_clean`: for every undeclared
-   sensitive path say in your verdict why the change needs it and name it in `sensitive`, or
-   `request_fix` its removal; `mark_clean` is refused (`sensitive_unacknowledged`) otherwise.
+   is created on the connector). Give the task that instruction word for word: a task told only to
+   check and report leaves every iteration waiting for the user. A subscription without a `ticket`
+   filter receives every ticket of the workspace and makes a second review of each; it is for a
+   single-job setup only. The event fires when an iteration is published (`awaiting_review`) and
+   on `needs_human`, `ready_for_human_review`, `pushed`, `aborted` and `failed`. When events are
+   not available in the account: `start` and every `request_fix` tell you when to check next;
+   create one scheduled task in this conversation that calls `check` on that interval, if none
+   exists yet.
+5. When `check` says `awaiting_review`, review at once, whatever brought you to it (an event, a
+   scheduled check, the user asking about the job): read the Report and the Patch it returns,
+   review against the Task file, the repository standards and the plan, and end the same turn
+   with `request_fix` or `mark_clean`. Never end it with a summary, a review announced for later
+   or a question: nobody answers until the user's own review, so the job would wait for nothing.
+   What only the user can verify (a manual scenario, real data) goes into your verdict for their
+   review; it is no reason to wait. Ask the user only for a decision the Task file leaves to them.
+   `check.files` names the sensitive paths of the iteration (dependency manifests, lockfiles,
+   environment and tool configuration, CI, containers, IDE and agent files, root dotfiles) and
+   whether the Task file's `may_touch` declared them, and the deleted paths; the Report lists
+   both first. `request_fix` carries a Fix section and the next iteration starts at once. Before
+   `mark_clean`, for every undeclared sensitive path say in your verdict why the change needs it
+   and name it in `sensitive`, or `request_fix` its removal; `mark_clean` is refused
+   (`sensitive_unacknowledged`) otherwise.
    `mark_clean` makes the factory commit by the Git rules, rebase and verify (state
    `preparing_mr`, then `ready_for_human_review` with the branch in the user's checkout, or
    `needs_human` with the reason: call `mark_clean` again after fixing it with the user, or
@@ -140,6 +148,10 @@ its rules (no Git, no edits to the Task file) with every prompt, and appends the
 
 ## Review rules for the Context owner
 
+- These rules hold for whoever reviews, whichever model and whatever started the review.
+- A review is not a report: it ends, in the same turn, with `request_fix` or `mark_clean`. The
+  user is not asked and does not answer between `start` and their own review; ask only for a
+  decision the Task file leaves to them.
 - Review the Patch against the Task file, the plan and the repository standards. The Report says
   what was checked; verify claims against the Patch, do not trust them.
 - A Fix section lists concrete items: path, what is wrong, what is expected. No restating of the

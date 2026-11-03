@@ -179,6 +179,12 @@ test('handbookSection extracts by heading and skips "## " lines inside fences; m
   assert.doesNotMatch(template, /What the factory never does/);
   assert.equal(quickStartSection(handbook), handbookSection(handbook, '## Quick start'));
   assert.match(handbookSection(handbook, '## Quick start'), /When `check` says `pushed` or `aborted`, the ticket is finished for you/);
+  // SF-034: whoever reviews acts in the same turn; a review is never a report that waits.
+  assert.match(handbookSection(handbook, '## Quick start'), /review at once, whatever brought you to it[\s\S]*end the same turn\s+with `request_fix` or `mark_clean`/);
+  assert.match(handbookSection(handbook, '## Quick start'), /Never end it with a summary, a review announced for later\s+or a question/);
+  const review = handbookSection(handbook, '## Review rules for the Context owner');
+  assert.match(review, /whoever reviews, whichever model and whatever started the review/);
+  assert.match(review, /A review is not a report: it ends, in the same turn, with `request_fix` or `mark_clean`/);
   assert.throws(() => handbookSection(handbook, '## Nope'), /no "## Nope" section/);
 
   const input = { ticket: 'T-1', branch: 'T-1-x', targetRef: 'origin/main', targetCommit: 'a'.repeat(40), attempt: 1, handbook };

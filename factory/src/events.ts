@@ -180,9 +180,11 @@ export const TICKET_GUIDE = 'Call guide.';
 export function ticketInstruction(workspace: string, ticket: string): string {
   return (
     `When you receive the event software_factory.job for ticket ${ticket} in workspace ${workspace} ` +
-    `(subscribe to that event with arguments {"workspace": "${workspace}", "ticket": "${ticket}"}, nothing else): ` +
+    `(subscribe to that event with arguments {"workspace": "${workspace}", "ticket": "${ticket}"}, nothing else; ` +
+    'give the task this whole instruction word for word): ' +
     'call guide, then check with the workspace and ticket of the payload, and act by the guide: ' +
-    'on awaiting_review review the Report and the Patch and call request_fix or mark_clean; ' +
+    'on awaiting_review review the Report and the Patch in that same run and end it with request_fix or mark_clean, ' +
+    'without waiting for me; ' +
     'on needs_human, pushed, aborted or failed only summarise the state.'
   );
 }

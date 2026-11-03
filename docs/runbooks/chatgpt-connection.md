@@ -274,8 +274,8 @@ The manual path, step by step:
 3. Plan the ticket, write the Task file with `write_task`, and call `start` when the user says so.
 4. With MCP Events (section above): one event-triggered task on `software_factory.job` per
    ticket calls `check` for the ticket in each event's payload. It reads the Report and the Patch
-   when the job is `awaiting_review` and answers with `request_fix` or `mark_clean` (naming every
-   undeclared sensitive path it accepts); when the job ends (`pushed` or `aborted`) the factory
+   when the job is `awaiting_review` and answers with `request_fix` or `mark_clean` in the same
+   run, without waiting for you (naming every undeclared sensitive path it accepts); when the job ends (`pushed` or `aborted`) the factory
    removes the ticket's subscription after that last event, so the task never fires again; delete
    it from the Scheduled view when convenient. A `failed` start keeps it for the next start. Without events (fallback): `start` and `request_fix` return `check_after_minutes`;
    in the planning conversation, create one ChatGPT scheduled task that calls `check` for the ticket
@@ -308,6 +308,11 @@ confirmation.
 - **A daily Reconnect.** Auth0's access token lives 24 h and ChatGPT holds no refresh token
   (`offline_access` is neither advertised nor allowed on the API). Until that changes, connect
   again when a call answers 401.
+- **ChatGPT reads the Report and stops** ("next: an independent review", "next: request_fix")
+  until you tell it to go on. The event-triggered task's instruction was shortened to checking
+  and reporting. Open the task in ChatGPT's Scheduled view and replace its instruction with the
+  one `bin/sf ticket <workspace> <ticket> --no-wait` prints (also in the dashboard's Reviewer
+  block); for the iteration already waiting, tell the conversation to review it.
 - **No events arrive.** `bin/sf events list` (is there a subscription for this workspace?), then
   `bin/sf events test <id>`: `blocked_address` or `connection_failed` means this machine cannot
   reach the callback; `410` means ChatGPT dropped the task. `sf watch` shows each attempt.

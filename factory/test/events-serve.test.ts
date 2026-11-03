@@ -243,7 +243,7 @@ test('sf ticket: warns about a broad subscription, prints the instruction, finds
     assert.equal(none.code, 1, none.stderr);
     assert.match(none.stdout, /^Step 1 {2}In ChatGPT, in the project of workspace app, open a new conversation for EV-2/m);
     assert.match(none.stdout, /Call guide\./);
-    assert.match(none.stdout, /arguments \{"workspace": "app", "ticket": "EV-2"\}, nothing else\): call guide, then check/);
+    assert.match(none.stdout, /arguments \{"workspace": "app", "ticket": "EV-2"\}, nothing else; give the task this whole instruction word for word\): call guide, then check/);
     assert.match(none.stdout, /^No subscription for EV-2 yet\./m);
     assert.doesNotMatch(none.stdout, /Warning/);
 

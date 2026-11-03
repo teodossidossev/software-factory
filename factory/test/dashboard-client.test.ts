@@ -6,7 +6,7 @@
 // manual steps are in factory/README.md.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { type FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
+import { FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
 
 const STATIC_DIR = new URL('../../static/', import.meta.url);
 
@@ -876,8 +876,8 @@ test('client: a late test-event answer lands on its own job only; each job keeps
 test('client: the job cards badge a missing or broad reviewer; the Subscriptions section follows the stream', async () => {
   const page = await openPage();
   const stream = page.streams.at(-1)!;
-  // Before the first subscriptions event: neither the table nor "No subscriptions.".
-  assert.deepEqual([page.$('no-subscriptions').hidden, page.$('subscriptions-table').hidden], [true, true]);
+  // Before the first subscriptions event: neither the list nor "No subscriptions.".
+  assert.deepEqual([page.$('no-subscriptions').hidden, page.$('subscription-list').hidden], [true, true]);
   stream.emit('jobs', { jobs: [{ ...job(A), reviewer: 'none' }, { ...job(B), reviewer: 'broad' }, { ...job({ ...B, ticket: 'T-3' }), reviewer: 'subscribed' }, { ...job({ ...B, ticket: 'T-4', state: 'pushed' }), reviewer: 'none' }] });
   const badges = (key: string): string[] => jobButton(page, key).all().filter((node) => node.className.startsWith('badge')).map((node) => `${node.className}:${node.textContent}`);
   assert.deepEqual(badges('app/T-1'), ['badge s-ready_for_human_review:ready_for_human_review', 'badge r-none:no reviewer']);
@@ -887,21 +887,26 @@ test('client: the job cards badge a missing or broad reviewer; the Subscriptions
   assert.deepEqual(badges('app/T-3'), ['badge s-working:working']);
 
   stream.emit('subscriptions', { subscriptions: [] });
-  assert.deepEqual([page.$('no-subscriptions').hidden, page.$('subscriptions-table').hidden], [false, true]);
+  assert.deepEqual([page.$('no-subscriptions').hidden, page.$('subscription-list').hidden], [false, true]);
   stream.emit('subscriptions', {
     subscriptions: [
       { id: 'sub_own', principal: 'user-1', input: { workspace: 'app', ticket: 'T-1' }, host: 'chatgpt.example', createdAt: '2026-11-01T09:00:00.000Z', refreshBefore: '2026-11-08T09:00:00.000Z', job: 'app/T-1' },
       { id: 'sub_all', principal: 'user-1', input: {}, host: '<b>x</b>', createdAt: '2026-11-01T09:00:00.000Z', refreshBefore: '2026-11-08T09:00:00.123Z', job: null },
     ],
   });
-  assert.deepEqual([page.$('no-subscriptions').hidden, page.$('subscriptions-table').hidden], [true, false]);
-  const rows = page.$('subscriptions-body').children.map((row) => (row as FakeElement).children.map((cell) => cell.textContent));
-  assert.deepEqual(rows, [
-    ['sub_own', '{"workspace":"app","ticket":"T-1"}', 'chatgpt.example', '2026-11-08 09:00:00Z', 'app/T-1'],
-    ['sub_all', '{}', '<b>x</b>', '2026-11-08 09:00:00Z', '–'],
+  assert.deepEqual([page.$('no-subscriptions').hidden, page.$('subscription-list').hidden], [true, false]);
+  // One compact entry each: the scope in words (a broad one badged), the live job, the refresh
+  // deadline and the host, then the id, whole in its tooltip. The host is text, never markup.
+  const entries = page.$('subscription-list').children.map((item) => (item as FakeElement).children.map((line) => line.textContent));
+  assert.deepEqual(entries, [
+    ['app / T-1', 'live job · refresh by 2026-11-08 09:00Z · chatgpt.example', 'sub_own'],
+    ['Every workspace and ticketbroad', 'no live job · refresh by 2026-11-08 09:00Z · <b>x</b>', 'sub_all'],
   ]);
+  const second = page.$('subscription-list').children[1] as FakeElement;
+  assert.equal((second.children[2] as FakeElement).attributes.get('title'), 'sub_all');
+  assert.deepEqual((second.children[0] as FakeElement).children.filter((node) => node instanceof FakeElement).map((node) => `${(node as FakeElement).className}:${node.textContent}`), ['badge r-broad:broad']);
   stream.emit('subscriptions', { subscriptions: [] });
-  assert.equal(page.$('subscriptions-body').children.length, 0);
+  assert.equal(page.$('subscription-list').children.length, 0);
   assert.equal(page.$('no-subscriptions').hidden, false);
 });
 

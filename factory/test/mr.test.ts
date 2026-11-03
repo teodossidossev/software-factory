@@ -178,7 +178,7 @@ test('handbookSection extracts by heading and skips "## " lines inside fences; m
   assert.ok(template.endsWith('- [ ] Browser support verified\n```'));
   assert.doesNotMatch(template, /What the factory never does/);
   assert.equal(quickStartSection(handbook), handbookSection(handbook, '## Quick start'));
-  assert.match(handbookSection(handbook, '## Quick start'), /`pushed`, `aborted` or `failed`/);
+  assert.match(handbookSection(handbook, '## Quick start'), /When `check` says `pushed` or `aborted`, the ticket is finished for you/);
   assert.throws(() => handbookSection(handbook, '## Nope'), /no "## Nope" section/);
 
   const input = { ticket: 'T-1', branch: 'T-1-x', targetRef: 'origin/main', targetCommit: 'a'.repeat(40), attempt: 1, handbook };

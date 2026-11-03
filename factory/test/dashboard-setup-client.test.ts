@@ -64,7 +64,7 @@ const link = (item: FakeElement): FakeElement | undefined => item.all().find((el
 test('setup client: open until there is a workspace and a job, collapsed with a summary afterwards; the lists and the forms follow the stream', async () => {
   const empty = await openPage([], [], []);
   assert.equal(empty.$('setup').open, true);
-  assert.equal(empty.$('setup-summary').textContent, '· 0 workspaces · 0 tickets without a job · New ticket');
+  assert.equal(empty.$('setup-summary').textContent, '0 workspaces · 0 tickets without a job');
   assert.equal(empty.$('no-workspaces').hidden, false);
   assert.equal(empty.$('no-tickets').hidden, false);
   assert.equal(empty.$('ticket-create').disabled, true);
@@ -79,13 +79,13 @@ test('setup client: open until there is a workspace and a job, collapsed with a 
   assert.equal(empty.$('ticket-create').disabled, false);
   assert.deepEqual(empty.$('ticket-workspace').children.map((option) => (option as FakeElement).value), ['app']);
   assert.equal(empty.$('ticket-workspace').value, 'app');
-  assert.equal(empty.$('setup-summary').textContent, '· 1 workspace · 0 tickets without a job · New ticket');
+  assert.equal(empty.$('setup-summary').textContent, '1 workspace · 0 tickets without a job');
 
   // Workspaces and jobs: collapsed from the first data, and the User's toggle is kept afterwards
   // (one page at a time: the fake streams belong to the last page loaded).
   const busy = await openPage([job('T-1')], [workspace('app', 1), workspace('web', 0, 'The work checkout does not exist.')], [ticket('app/T-5'), ticket('web/W-1')]);
   assert.equal(busy.$('setup').open, false);
-  assert.equal(busy.$('setup-summary').textContent, '· 2 workspaces · 2 tickets without a job · New ticket');
+  assert.equal(busy.$('setup-summary').textContent, '2 workspaces · 2 tickets without a job');
   // The list: name, path, the problem, and Remove off while a job is live.
   const [app, web] = items(busy, 'workspace-list');
   assert.equal((app!.children[0] as FakeElement).textContent, 'app');

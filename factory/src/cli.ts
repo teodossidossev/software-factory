@@ -105,7 +105,11 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   };
   const execution = new Execution(config, (name) => resolveWorkspace(name), onStateChange, handbook.text);
   // The start screen of the dashboard: the registry and the Task files, under the Execution's lock.
-  const setup = new Setup({ configDir: configDir(), jobs, exclusive: (work) => execution.exclusive(work) });
+  const setup = new Setup({
+    configDir: configDir(), jobs, exclusive: (work) => execution.exclusive(work),
+    // A finished job leaves with its Task file: reset archives it and removes a kept worktree.
+    retireJob: (workspace, ticket) => execution.reset(workspace, ticket),
+  });
   // The socket first: it refuses a second sf serve on the same state before recovery touches it.
   const socket = await listenSocket(config.stateDir, async ({ command, args }) => {
     if (command === 'events') {

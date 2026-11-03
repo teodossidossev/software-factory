@@ -221,7 +221,7 @@ test('setup client: the tickets with badges, the reviewer line, the conversation
   // A URL that is not the ChatGPT prefill is not linked and not offered to copy.
   assert.equal(link(seven!), undefined);
   assert.equal(seven!.all().some((element) => element.tagName === 'INPUT'), false);
-  assert.equal(buttons(seven!).map((button) => button.textContent).join(','), 'Start…');
+  assert.equal(buttons(seven!).map((button) => button.textContent).join(','), 'Start…,Archive,Delete…');
 });
 
 test('setup client: Start asks for a confirmation that names the draft and the missing reviewer; cancel sends nothing; one request; the job is selected on success', async () => {

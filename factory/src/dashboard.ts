@@ -58,12 +58,22 @@ export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'start'];
 export type DashboardReviewers = Pick<Events, 'subscriptions' | 'test' | 'onChange'>;
 
 // The start screen's data and changes: the workspace registry and the Task files (src/setup.ts).
-export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'removeWorkspace' | 'tickets' | 'createTicket'>;
+export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'removeWorkspace' | 'tickets' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'archivedTickets'>;
 
 // A dashboard without a start screen (in-process tests of the older endpoints).
 const NO_SETUP: DashboardSetup = {
   workspaces: async () => [],
   tickets: async () => [],
+  archivedTickets: async () => [],
+  archiveTicket: async () => {
+    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
+  },
+  restoreTicket: async () => {
+    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
+  },
+  deleteTicket: async () => {
+    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
+  },
   addWorkspace: async () => {
     throw new FactoryError('setup_unavailable', 'The start screen is not available.');
   },
@@ -88,6 +98,9 @@ const BODIES = {
   'test-event': { shape: '{}', schema: z.strictObject({}) },
   'workspace-add': { shape: '{"name": string, "path": string}', schema: z.strictObject({ name: z.string(), path: z.string() }) },
   'workspace-remove': { shape: '{}', schema: z.strictObject({}) },
+  'ticket-archive': { shape: '{}', schema: z.strictObject({}) },
+  'ticket-restore': { shape: '{}', schema: z.strictObject({}) },
+  'ticket-delete': { shape: '{}', schema: z.strictObject({}) },
   'ticket-new': { shape: '{"workspace": string, "ticket": string, "title": string, "request": string}', schema: z.strictObject({ workspace: z.string(), ticket: z.string(), title: z.string(), request: z.string() }) },
 };
 type PostRoute = keyof typeof BODIES;
@@ -219,6 +232,7 @@ async function ticketsPayload(setup: DashboardSetup, reviewers: DashboardReviewe
       const message = ticketConversation(row.workspace, row.ticket);
       return { ...row, reviewer: reviewerOf(subscriptions, row.workspace, row.ticket), conversation: { message, url: conversationUrl(message) } };
     }),
+    archived: await setup.archivedTickets(),
   };
 }
 
@@ -293,6 +307,7 @@ function jobKey(workspace: string | undefined, ticket: string | undefined): [str
 type Target =
   | { kind: 'action'; action: ActionRoute; workspace: string | undefined; ticket: string | undefined }
   | { kind: 'workspace-remove'; name: string | undefined }
+  | { kind: 'ticket-action'; action: 'archive' | 'restore' | 'delete'; workspace: string | undefined; ticket: string | undefined }
   | { kind: 'both'; route: 'workspace-add' | 'ticket-new' }
   | { kind: 'read' };
 
@@ -315,6 +330,9 @@ function targetOf(path: string[]): Target {
   }
   if (kind === 'tickets' && path.length === 2) {
     return { kind: 'both', route: 'ticket-new' };
+  }
+  if (kind === 'tickets' && path.length === 5 && (c === 'archive' || c === 'restore' || c === 'delete')) {
+    return { kind: 'ticket-action', action: c, workspace: a, ticket: b };
   }
   return { kind: 'read' };
 }
@@ -374,6 +392,8 @@ interface Post {
   exists?: () => Promise<boolean>;
   call: (data: unknown) => (() => Promise<unknown>) | undefined;
   refreshSetup?: boolean;
+  // The action may end a job too (archive, delete): every page gets the jobs again.
+  refreshJobs?: boolean;
 }
 
 export async function startDashboard(
@@ -599,6 +619,17 @@ export async function startDashboard(
   }
 
   function setupPost(target: Exclude<Target, { kind: 'read' | 'action' }>): Post | undefined {
+    if (target.kind === 'ticket-action') {
+      const key = jobKey(target.workspace, target.ticket);
+      if (key === undefined) {
+        return undefined;
+      }
+      const [workspace, ticket] = key;
+      const route = `ticket-${target.action}` as const;
+      const methods = { archive: setup.archiveTicket, restore: setup.restoreTicket, delete: setup.deleteTicket };
+      const method = methods[target.action].bind(setup);
+      return { route, call: (data) => (BODIES[route].schema.safeParse(data).success ? () => method(workspace, ticket) : undefined), refreshSetup: true, refreshJobs: target.action !== 'restore' };
+    }
     if (target.kind === 'workspace-remove') {
       const name = target.name;
       if (name === undefined || !WORKSPACE_NAME_PATTERN.test(name)) {
@@ -683,7 +714,9 @@ export async function startDashboard(
       fail(500, 'internal_error', 'The request failed inside the factory.');
       return;
     }
-    if (post.refreshSetup === true) {
+    if (post.refreshJobs === true) {
+      refreshAll().catch((error: unknown) => console.error(error));
+    } else if (post.refreshSetup === true) {
       sendSetup(streams).catch((error: unknown) => console.error(error));
     }
     if (gone) {
@@ -718,7 +751,7 @@ export async function startDashboard(
       }
     };
     const what = targetOf(path);
-    if (what.kind === 'action' || what.kind === 'workspace-remove') {
+    if (what.kind === 'action' || what.kind === 'workspace-remove' || what.kind === 'ticket-action') {
       if (req.method !== 'POST') {
         empty(res, 405, { allow: 'POST' });
         return;
@@ -781,6 +814,21 @@ export async function startDashboard(
     }
     await sendSetup(streams);
   };
+
+  // A ticket action that may have archived a job: every page gets the jobs, the subscriptions and
+  // the setup data again (a page following that job sees it gone from the list).
+  async function refreshAll(): Promise<void> {
+    if (streams.size === 0) {
+      return;
+    }
+    const list = await jobsPayload(jobs, reviewers);
+    const subscriptions = await subscriptionsPayload(jobs, reviewers);
+    for (const stream of streams) {
+      send(stream, 'jobs', list);
+      send(stream, 'subscriptions', subscriptions);
+    }
+    await sendSetup(streams);
+  }
 
   // The subscriptions changed: every page gets the list, the subscriptions, the tickets (their
   // reviewer lines) and its job again.

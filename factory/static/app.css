@@ -283,6 +283,9 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 .badge.r-none { background: var(--s-failed); }
 .badge.r-broad { background: var(--s-review); }
 .badge.t-draft { background: var(--s-review); }
+.archived > .card-head .section-title { margin: 0; }
+.archived[open] > .card-head { margin-bottom: 8px; }
+.btn-ghost-danger { color: var(--del); }
 .badge.t-job { background: var(--s-ended); }
 
 /* The setup card. */

@@ -290,6 +290,11 @@ confirmation.
   permission.
 - **403 from the factory.** A Host or Origin header that is not loopback; see `factory/README.md`.
 - **Old tools in ChatGPT.** Press **Refresh** on the plugin and open a new chat.
+- **ChatGPT cannot create the subscription** (for example "Webhook connectors could not be
+  validated before creation", without a reason). `serve.log` in the state directory has one line
+  per `events/list`, `events/subscribe` and `events/unsubscribe`: the filter, the callback host and
+  `ok` or `refused <reason> (<message>)`. No `events/subscribe` line means the call never reached
+  the factory: refresh the plugin and look at the tunnel.
 - **No events arrive.** `bin/sf events list` (is there a subscription for this workspace?), then
   `bin/sf events test <id>`: `blocked_address` or `connection_failed` means this machine cannot
   reach the callback; `410` means ChatGPT dropped the task. `sf watch` shows each attempt.

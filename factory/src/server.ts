@@ -27,7 +27,7 @@ import {
 import * as z from 'zod/v4';
 import { type AuthConfig, AuthError, createVerifier, type Verify } from './auth.js';
 import { FactoryError } from './errors.js';
-import { type Events, EventsError } from './events.js';
+import { type Events, EventsError, INVALID_PARAMS } from './events.js';
 import type { Execution } from './execution.js';
 import { JOB_STATES, type JobStore, now, type PrincipalTool } from './jobs.js';
 import { handbookSection } from './prompts.js';
@@ -119,20 +119,44 @@ const ticketKey = z.string().regex(TICKET_PATTERN).describe(`Ticket key, e.g. "P
 const relativePath = (what: string) => z.string().min(1).max(MAX_PATH_LENGTH).describe(what);
 
 // The event methods' errors as JSON-RPC errors with data.reason; anything else is logged and
-// becomes an internal error.
-async function eventCall<T>(work: () => Promise<T> | T): Promise<T> {
+// becomes an internal error. Every call leaves one line in the serve log (method, filter, callback
+// host, outcome; never the secret or the full callback URL): ChatGPT reports a refused
+// subscription without the reason.
+async function eventCall<T>(method: string, detail: string, work: () => Promise<T> | T): Promise<T> {
+  const line = (outcome: string) => console.error(`${method}${detail === '' ? '' : ` ${detail}`}: ${outcome}`);
   try {
-    return await work();
+    const result = await work();
+    line('ok');
+    return result;
   } catch (error) {
     if (error instanceof EventsError) {
+      line(`refused ${error.reason} (${error.message})`);
       throw new ProtocolError(error.code, error.message, { reason: error.reason });
     }
+    line('internal error');
     console.error(error);
     throw new ProtocolError(-32603, 'The request failed inside the factory.');
   }
 }
 
 const eventArguments = z.record(z.string(), z.unknown());
+const subscribeParams = z.looseObject({
+  name: z.string().min(1),
+  arguments: eventArguments.optional(),
+  delivery: z.looseObject({ mode: z.string(), url: z.string(), secret: z.string() }),
+  cursor: z.string().nullable().optional(),
+  ttlMs: z.number().int().positive().nullable().optional(),
+});
+
+// The filter and the callback's host (or a subscription id) for the serve log.
+function describeEventCall(args: Record<string, unknown> | undefined, target: string | undefined): string {
+  let where = target ?? '';
+  const url = URL.parse(where);
+  if (url !== null) {
+    where = url.host;
+  }
+  return `${JSON.stringify(args ?? {})}${where === '' ? '' : ` to ${where}`}`;
+}
 
 // The MCP Events methods (protocol methods, not tools) on the same endpoint as the tools. Params
 // are loose objects: unknown fields (e.g. _meta) are ignored.
@@ -143,21 +167,23 @@ function registerEvents(server: McpServer, events: Events): void {
   server.server.setRequestHandler(
     'events/list',
     { params: z.looseObject({ cursor: z.string().nullable().optional() }).optional() },
-    async (_params, ctx) => eventCall(() => events.list(principalOf(ctx))),
+    async (_params, ctx) => eventCall('events/list', '', () => events.list(principalOf(ctx))),
   );
-  server.server.setRequestHandler(
-    'events/subscribe',
-    {
-      params: z.looseObject({
-        name: z.string().min(1),
-        arguments: eventArguments.optional(),
-        delivery: z.looseObject({ mode: z.string(), url: z.string(), secret: z.string() }),
-        cursor: z.string().nullable().optional(),
-        ttlMs: z.number().int().positive().nullable().optional(),
-      }),
-    },
-    async (params, ctx) => eventCall(async () => ({ ...(await events.subscribe(principalOf(ctx), params)) })),
-  );
+  // The SDK only checks that params is an object: the shape is checked inside, so that a refused
+  // shape is logged with its reason like every other refusal.
+  server.server.setRequestHandler('events/subscribe', { params: z.looseObject({}) }, async (raw, ctx) => {
+    const loose = raw as { arguments?: unknown; delivery?: { url?: unknown } };
+    const args = typeof loose.arguments === 'object' && loose.arguments !== null ? (loose.arguments as Record<string, unknown>) : undefined;
+    const url = typeof loose.delivery?.url === 'string' ? loose.delivery.url : undefined;
+    return eventCall('events/subscribe', describeEventCall(args, url), async () => {
+      const parsed = subscribeParams.safeParse(raw);
+      if (!parsed.success) {
+        const issues = parsed.error.issues.map((issue) => `${issue.path.join('.') || 'params'}: ${issue.message}`).join('; ');
+        throw new EventsError(INVALID_PARAMS, 'invalid_params', `Invalid events/subscribe params: ${issues}.`);
+      }
+      return { ...(await events.subscribe(principalOf(ctx), parsed.data)) };
+    });
+  });
   server.server.setRequestHandler(
     'events/unsubscribe',
     {
@@ -168,7 +194,8 @@ function registerEvents(server: McpServer, events: Events): void {
         delivery: z.looseObject({ mode: z.string().optional(), url: z.string() }).optional(),
       }),
     },
-    async (params, ctx) => eventCall(() => events.unsubscribe(principalOf(ctx), params)),
+    async (params, ctx) =>
+      eventCall('events/unsubscribe', describeEventCall(params.arguments, params.delivery?.url ?? params.id), () => events.unsubscribe(principalOf(ctx), params)),
   );
 }
 

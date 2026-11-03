@@ -157,10 +157,17 @@ same string in Auth0, in the factory and in the metadata.
    *Machine to Machine / Application Access* tab).
 5. A user that may sign in (Database, Google or another connection enabled for that client).
 
-**In ChatGPT:** the connector (https://chatgpt.com/plugins) with **Authentication: OAuth**. Edit the
-existing **Software Factory** plugin or create it as in "The connector in ChatGPT" with OAuth
-instead of No authentication. ChatGPT reads the authorization server from the factory's metadata and
-signs in through Auth0 on first use.
+**In ChatGPT:** the connector (https://chatgpt.com/plugins) with **Authentication: OAuth** and
+**OIDC enabled unticked**. Edit the existing **Software Factory** plugin or create it as in "The
+connector in ChatGPT" with OAuth instead of No authentication. ChatGPT reads the authorization
+server from the factory's metadata and signs in through Auth0 on first use.
+
+With *OIDC enabled* ticked, ChatGPT wants an ID token with the `openid` scopes before it contacts
+the factory, and Auth0 does not grant those scopes to this kind of client (the exchange logs
+`scope: null`): the sign-in and the code exchange succeed in Auth0's logs, the factory and the tunnel
+see nothing, and ChatGPT shows "We couldn't connect this account" (its callback answers
+`OAUTH_OWNER_PROFILE_ID_MISSING`, visible in the browser's network panel). Seen on 2026-11-03,
+when the first day's token expired; the plugin had connected the day before with the same settings.
 
 **The factory** (terminal 1, instead of the plain `bin/sf serve`):
 
@@ -295,6 +302,12 @@ confirmation.
   per `events/list`, `events/subscribe` and `events/unsubscribe`: the filter, the callback host and
   `ok` or `refused <reason> (<message>)`. No `events/subscribe` line means the call never reached
   the factory: refresh the plugin and look at the tunnel.
+- **"We couldn't connect this account" at Connect or Reconnect**, with Success Login and Success
+  Exchange in Auth0's logs and nothing in `serve.log` or `tunnel.log`: the plugin has *OIDC
+  enabled* ticked (section OAuth with Auth0). Untick it, or create the plugin again without it.
+- **A daily Reconnect.** Auth0's access token lives 24 h and ChatGPT holds no refresh token
+  (`offline_access` is neither advertised nor allowed on the API). Until that changes, connect
+  again when a call answers 401.
 - **No events arrive.** `bin/sf events list` (is there a subscription for this workspace?), then
   `bin/sf events test <id>`: `blocked_address` or `connection_failed` means this machine cannot
   reach the callback; `410` means ChatGPT dropped the task. `sf watch` shows each attempt.

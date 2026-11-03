@@ -537,6 +537,18 @@ test('abort with and without --discard, reset, and sandbox_unavailable, with wor
   // reset works in any state, a live session included.
   assert.equal((await runCli(env, ['reset', 'app', 'A-4'])).code, 0);
 
+  // reset of a finished job whose workspace was unregistered meanwhile: the record is archived,
+  // Git is not touched (the aborted A-1 keeps its worktree).
+  const registry = await readFile(join(env.config, 'workspaces.json'), 'utf8');
+  await writeFile(join(env.config, 'workspaces.json'), '{"workspaces":{}}\n');
+  const orphan = await runCli(env, ['reset', 'app', 'A-1']);
+  assert.equal(orphan.code, 0, orphan.stderr);
+  assert.match(orphan.stdout, /^checkout: unavailable$/m);
+  assert.match(orphan.stdout, /only the job record was archived; nothing in Git was touched\.$/m);
+  assert.equal((await refused(served, 'check', { workspace: 'app', ticket: 'A-1' })).code, 'job_not_found');
+  assert.ok((await stat(worktree('A-1'))).isDirectory());
+  await writeFile(join(env.config, 'workspaces.json'), registry);
+
   const log = await fakeLog(env);
   const settings = JSON.parse(log[0]!.argv[log[0]!.argv.indexOf('--settings') + 1]!);
   assert.deepEqual(settings.sandbox.network.allowedDomains, ['registry.npmjs.org', 'example.org']);

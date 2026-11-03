@@ -313,7 +313,9 @@ factory beyond its Git refs (branches, `refs/sf/snapshot/*`) and worktree regist
   (`rebase_in_progress`) while a rebase or a Git lock is in progress in the worktree.
 - `sf reset` works in every state: it ends a live session, removes the worktree and archives the
   job directory as `start` archives a terminal job. The branch is not touched; the job's snapshot
-  ref (`refs/sf/snapshot/<ticket>`) is deleted, as on `pushed` and `abort`.
+  ref (`refs/sf/snapshot/<ticket>`) is deleted, as on `pushed` and `abort`. When the workspace is
+  no longer registered (or its checkout is gone), only the job record is archived and the result
+  says `checkout: unavailable`; the dashboard's Archive of a finished job behaves the same.
 
 The checkout's Git operations of one workspace (fetch, worktree add and remove, branch delete,
 the snapshot ref, push) are serialized through one Git lock per workspace; turns, publication,

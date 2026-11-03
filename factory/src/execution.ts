@@ -642,21 +642,35 @@ export class Execution {
 
   // The escape hatch: in any state, ends the session, removes the worktree and archives the job;
   // the branch is not touched, only the job's snapshot ref is removed.
-  reset(workspaceName: string, ticket: string): Promise<{ archived: string; branch: string }> {
+  // A job whose workspace is no longer registered (or whose checkout is gone) is still archived:
+  // only the Git clean-up of the checkout is skipped, and the result says so.
+  reset(workspaceName: string, ticket: string): Promise<{ archived: string; branch: string; checkout?: 'unavailable' }> {
     return this.#locked(async () => {
       const job = await this.#job(workspaceName, ticket);
       const key = `${workspaceName}/${ticket}`;
       const live = this.#live.get(key);
-      const workspace = live?.workspace ?? (await this.#resolve(workspaceName));
-      await this.#endSession(key);
-      const worktree = job.worktree ?? this.#worktreePath(workspaceName, ticket);
-      const failure = await this.#gitLocked(workspaceName, () => removeWorktree(workspace.workCheckout, worktree));
-      if (failure !== undefined) {
-        console.error(`${key}: ${failure}`);
+      let workspace: Workspace | undefined = live?.workspace;
+      if (workspace === undefined) {
+        try {
+          workspace = await this.#resolve(workspaceName);
+        } catch (error) {
+          if (!(error instanceof FactoryError) || (error.code !== 'workspace_not_found' && error.code !== 'workspace_invalid')) {
+            throw error;
+          }
+        }
       }
-      await this.#dropSnapshotRef(ticket, workspace.workCheckout);
+      await this.#endSession(key);
+      if (workspace !== undefined) {
+        const checkout = workspace.workCheckout;
+        const worktree = job.worktree ?? this.#worktreePath(workspaceName, ticket);
+        const failure = await this.#gitLocked(workspaceName, () => removeWorktree(checkout, worktree));
+        if (failure !== undefined) {
+          console.error(`${key}: ${failure}`);
+        }
+        await this.#dropSnapshotRef(ticket, checkout);
+      }
       const archived = await this.jobs.archive(workspaceName, ticket);
-      return { archived: `jobs/${workspaceName}/${archived}`, branch: job.branch };
+      return { archived: `jobs/${workspaceName}/${archived}`, branch: job.branch, ...(workspace === undefined ? { checkout: 'unavailable' as const } : {}) };
     });
   }
 

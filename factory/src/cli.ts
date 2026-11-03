@@ -407,8 +407,10 @@ async function reset(args: string[]): Promise<void> {
   if (args.length !== 2) {
     throw new UsageError('reset needs <workspace> <ticket>.');
   }
-  await viaServer('reset', checkJob(args, 'reset'));
-  console.log('The worktree is removed; the branch is untouched.');
+  const result = await viaServer('reset', checkJob(args, 'reset'));
+  console.log(result.checkout === 'unavailable'
+    ? 'The workspace is not registered (or its checkout is gone): only the job record was archived; nothing in Git was touched.'
+    : 'The worktree is removed; the branch is untouched.');
 }
 
 const SUBSCRIPTION_ID = /^sub_[A-Za-z0-9_-]{1,64}$/;

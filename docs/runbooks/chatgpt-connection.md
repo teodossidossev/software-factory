@@ -221,14 +221,21 @@ In ChatGPT:
 1. After restarting `sf serve` with this version, open the **Software Factory** plugin at
    https://chatgpt.com/plugins and press **Refresh**: the plugin page lists the event
    `software_factory.job` next to the tools.
-2. In a Work chat, create an event-triggered task on the connector's event `software_factory.job`
-   with the filter `workspace` (or `ticket`), and as its instruction: call `check` for the
-   workspace and ticket in the payload, then review or report as the Handbook says. The exact UI
-   wording is not documented here; see the ChatGPT task UI. ChatGPT then calls `events/subscribe`;
-   the factory verifies the callback with a signed challenge before accepting.
-3. Check on this machine: `bin/sf events list` shows the subscription (id, principal, filter,
-   callback host, expiry); `bin/sf events test <id>` sends one event with `state: "test"` and
-   prints `status: 200` when ChatGPT accepted it.
+2. One conversation per ticket. On this machine run `bin/sf ticket <workspace> <ticket>`: it
+   warns about subscriptions that would also match the ticket (a filter without `ticket` makes a
+   second review), prints the two things to send in a new conversation of the workspace's project
+   ("Call guide." and the instruction that creates the event-triggered task subscribed with the
+   filter `{"workspace", "ticket"}`), waits for that subscription to appear and sends it a test
+   event. ChatGPT creates the subscription with `events/subscribe` when the task is created; the
+   factory verifies the callback with a signed challenge before accepting. The task runs in the
+   conversation where it was created, so plan, `write_task` and `start` the ticket there.
+3. By hand instead: `bin/sf events list` shows the subscriptions (id, principal, filter, callback
+   host, expiry); `bin/sf events test <id>` sends one event with `state: "test"` and prints
+   `status: 200` when ChatGPT accepted it. `bin/sf ticket ... --no-wait` only prints the
+   instruction.
+4. Or in the dashboard (`bin/sf dashboard --open`): the job's Reviewer block says whether the
+   ticket is subscribed, shows the same two messages to copy when nobody reviews it, warns about a
+   subscription without a ticket filter and sends the test event.
 
 While a job runs, `sf watch` shows each delivery as `event to <id> attempt <n> delivered: 200` (or
 `failed: <status>`; 5xx and timeouts are retried for about 1 h 13 min). A `410` from ChatGPT ends

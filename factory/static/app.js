@@ -1,7 +1,9 @@
 // Software Factory dashboard v2. Loads api/jobs, follows one job through api/stream (server-sent
 // events) and renders it. The User's approve, abort and say go as POSTs to
 // api/jobs/<ws>/<ticket>/<action>: each one is a deliberate click, confirmed for approve and
-// abort, never retried or replayed by the page. Every value goes in through textContent.
+// abort, never retried or replayed by the page. Who reviews the job comes with its detail (the
+// Reviewer block, with the two messages of sf ticket to copy and a test event to send) and the
+// subscriptions with the stream. Every value goes in through textContent.
 'use strict';
 
 const RECONNECT_MS = 3000;
@@ -40,6 +42,10 @@ const state = {
   unresolved: new Map(),
   doubts: new Map(),
   confirm: null,
+  // The test event, per job: "<key>" while its request is out, and the last outcome shown.
+  testing: new Set(),
+  testOutcomes: new Map(),
+  subscriptions: null,
 };
 
 function el(tag, className, text) {
@@ -118,12 +124,35 @@ function renderJobs() {
     button.setAttribute('aria-current', String(keyOf(job) === state.key));
     button.append(el('div', 'job-name', keyOf(job)));
     const line = el('div', 'job-line');
-    line.append(el('span', `badge s-${job.state}`, job.state), el('span', '', `iter ${job.iteration}`));
+    line.append(el('span', `badge s-${job.state}`, job.state));
+    // Only a missing or a broad reviewer is worth a badge; a subscribed job shows none.
+    if (job.reviewer === 'none') {
+      line.append(el('span', 'badge r-none', 'no reviewer'));
+    } else if (job.reviewer === 'broad') {
+      line.append(el('span', 'badge r-broad', 'broad'));
+    }
+    line.append(el('span', '', `iter ${job.iteration}`));
     button.append(line);
     button.addEventListener('click', () => select(keyOf(job)));
     const item = el('li');
     item.append(button);
     return item;
+  }));
+}
+
+const filterText = (input) => JSON.stringify(input ?? {});
+
+function renderSubscriptions() {
+  const rows = state.subscriptions;
+  $('no-subscriptions').hidden = rows === null || rows.length > 0;
+  $('subscriptions-table').hidden = rows === null || rows.length === 0;
+  $('subscriptions-body').replaceChildren(...(rows ?? []).map((row) => {
+    const tr = el('tr');
+    tr.append(
+      el('td', 'mono', row.id), el('td', 'mono', filterText(row.input)), el('td', '', row.host),
+      el('td', 'mono', shortTime(row.refreshBefore)), el('td', 'mono', row.job ?? '–'),
+    );
+    return tr;
   }));
 }
 
@@ -147,6 +176,103 @@ function renderHeader(detail) {
   const error = $('job-error');
   error.hidden = job.error === null;
   error.textContent = job.error === null ? '' : `${job.error.code}: ${job.error.message}`;
+}
+
+// The Reviewer block: who receives this job's events, the messages that set it up when nobody
+// does, and the test event.
+function renderReviewer() {
+  const detail = state.detail;
+  const reviewer = detail?.reviewer;
+  const block = $('reviewer');
+  block.hidden = reviewer === undefined;
+  if (reviewer === undefined) {
+    // Loading another job: its setup boxes start afresh.
+    $('reviewer-setup').hidden = true;
+    $('copy-status').textContent = '';
+    return;
+  }
+  const line = $('reviewer-line');
+  const warning = $('reviewer-warning');
+  const broad = Array.isArray(reviewer.broad) ? reviewer.broad : [];
+  const removal = broad.map((id) => `sf events remove ${id}`).join('; ');
+  if (reviewer.status === 'subscribed') {
+    line.replaceChildren(el('span', 'r-subscribed', 'Reviewer: subscribed'), document.createTextNode(` ${reviewer.id}, ${reviewer.host}, filter ${filterText(reviewer.input)}`));
+    warning.textContent = broad.length > 0
+      ? `Also receiving this job's events, without a ticket filter: ${broad.join(', ')}. ChatGPT would review it twice. Remove with: ${removal}`
+      : '';
+  } else if (reviewer.status === 'broad') {
+    line.replaceChildren(el('span', 'r-broad', 'Reviewer: broad'), document.createTextNode(` ${reviewer.id}, ${reviewer.host}, filter ${filterText(reviewer.input)}`));
+    warning.textContent = `${broad.join(', ')} has no ticket filter: that conversation reviews this job along with every other job it matches. Remove with: ${removal}, then set up this ticket with sf ticket.`;
+  } else {
+    line.replaceChildren(el('span', 'r-none', 'Reviewer: none'), document.createTextNode(' Nobody will review this job.'));
+    warning.textContent = '';
+  }
+  warning.hidden = warning.textContent === '';
+  const setup = $('reviewer-setup');
+  const showSetup = reviewer.status === 'none' && detail.reviewerSetup !== undefined;
+  if (setup.hidden && showSetup) {
+    $('copy-status').textContent = '';
+  }
+  setup.hidden = !showSetup;
+  $('setup-guide').value = showSetup ? detail.reviewerSetup.guide : '';
+  $('setup-instruction').value = showSetup ? detail.reviewerSetup.instruction : '';
+  const key = keyOf(detail.job);
+  const sending = state.testing.has(key);
+  $('test-event-button').disabled = reviewer.status !== 'subscribed' || sending;
+  $('test-event-reason').textContent = reviewer.status === 'subscribed' || sending ? '' : 'needs a subscription filtered on this ticket.';
+  renderTestOutcome(state.testOutcomes.get(key) ?? null);
+}
+
+function renderTestOutcome(outcome) {
+  const node = $('test-event-status');
+  node.className = outcome === null ? 'status' : `status ${outcome.level}`;
+  node.textContent = outcome === null ? '' : outcome.text;
+}
+
+// One test event to the job's own subscription; the answer goes to that job only.
+async function sendTestEvent() {
+  const key = state.key;
+  if (key === null || state.detail?.reviewer?.status !== 'subscribed' || state.testing.has(key)) {
+    return;
+  }
+  state.testing.add(key);
+  state.testOutcomes.set(key, { level: 'pending', text: 'Sending…' });
+  renderReviewer();
+  let outcome;
+  try {
+    const result = await post(`api/jobs/${jobPath(key)}/test-event`, {});
+    const data = result !== null && typeof result === 'object' ? result : {};
+    outcome = data.delivered === true
+      ? { level: 'ok', text: `Test event to ${data.subscription}: delivered, status ${data.status}. ChatGPT should answer in that conversation.` }
+      : { level: 'error', text: `Test event to ${data.subscription}: not delivered, status ${data.status}.` };
+  } catch (error) {
+    outcome = error instanceof ActionError
+      ? { level: 'error', text: `${error.code}: ${error.message}` }
+      : { level: 'error', text: `The test event failed (${error.message}); it may have been sent. Nothing is retried.` };
+  }
+  state.testing.delete(key);
+  state.testOutcomes.set(key, outcome);
+  if (key === state.key && state.detail !== null) {
+    renderReviewer();
+  }
+}
+
+// Copies a setup message; without the clipboard the text is selected for Ctrl+C.
+function copySetup(id) {
+  const box = $(id);
+  const done = (text) => {
+    $('copy-status').textContent = text;
+  };
+  const select = () => {
+    box.focus();
+    box.select();
+    done('Selected: press Ctrl+C to copy.');
+  };
+  if (typeof navigator === 'undefined' || navigator.clipboard === undefined) {
+    select();
+    return;
+  }
+  navigator.clipboard.writeText(box.value).then(() => done('Copied.'), select);
 }
 
 function renderHistory(history) {
@@ -269,6 +395,7 @@ function renderDetail(detail) {
   void showIteration();
   void showMr();
   renderActions();
+  renderReviewer();
 }
 
 const preparationKnown = (job) => job.state === 'preparing_mr' || state.pending.has(pendingId('approve', keyOf(job)));
@@ -614,6 +741,10 @@ function openStream() {
       select(keyOf(mostRecent()));
     }
   });
+  source.addEventListener('subscriptions', (message) => {
+    state.subscriptions = JSON.parse(message.data).subscriptions;
+    renderSubscriptions();
+  });
   source.addEventListener('job', (message) => {
     if (key === state.key) {
       renderDetail(JSON.parse(message.data));
@@ -660,6 +791,7 @@ function select(key) {
   renderOutcome(state.outcomes.get(key) ?? null);
   $('action-doubt').textContent = state.doubts.get(key) ?? '';
   renderActions();
+  renderReviewer();
   history.replaceState(null, '', `#${key}`);
   renderJobs();
   openStream();
@@ -703,6 +835,9 @@ function init() {
   });
   $('discard').addEventListener('change', renderConfirmButton);
   $('refresh-button').addEventListener('click', () => void settleUnknown(state.key));
+  $('test-event-button').addEventListener('click', () => void sendTestEvent());
+  $('copy-guide').addEventListener('click', () => copySetup('setup-guide'));
+  $('copy-instruction').addEventListener('click', () => copySetup('setup-instruction'));
   $('say-input').addEventListener('input', () => {
     if (state.key !== null) {
       state.drafts.set(state.key, $('say-input').value);
@@ -715,6 +850,7 @@ function init() {
     sendSay();
   });
 
+  renderSubscriptions();
   load();
 }
 

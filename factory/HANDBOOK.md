@@ -17,9 +17,12 @@ their own review, so you drive the cycle through tools:
 2. Split the solution into subtasks of about one merge request each (roughly 20-30 files, a soft
    limit). Each subtask gets one Task file.
 3. Write the Task file with `write_task` (format below). The user says "start": call `start`.
-4. Subscribe once to the event `software_factory.job` for the workspace: create an event-triggered
-   task on the event `software_factory.job` that calls `check` for the ticket in the payload (ChatGPT
-   subscribes when the task is created on the connector; filter by `workspace`, or by `ticket`). It
+4. One conversation per ticket: the conversation that plans a ticket is the one that reviews it.
+   When the user pastes the instruction printed by `sf ticket`, create an event-triggered task on
+   the event `software_factory.job` subscribed with `arguments` `{"workspace", "ticket"}` of this
+   ticket only, that calls `check` for the ticket in the payload (ChatGPT subscribes when the task
+   is created on the connector). A subscription without a `ticket` filter receives every ticket of
+   the workspace and makes a second review of each; it is for a single-job setup only. The event
    fires when an iteration is published (`awaiting_review`) and on `needs_human`,
    `ready_for_human_review`, `pushed`, `aborted` and `failed`. When events are not available in the
    account: `start` and every `request_fix` tell you when to check next; create one scheduled task in
@@ -28,7 +31,8 @@ their own review, so you drive the cycle through tools:
    Task file, the repository standards and the plan. Then either `request_fix` with a Fix section
    (the next iteration starts at once) or `mark_clean` (the user takes over).
    When `check` says `pushed`, `aborted` or `failed`, the ticket is finished for you and a scheduled
-   task can be deleted (an event-triggered task for the workspace stays for the next ticket);
+   task can be deleted (the event-triggered task of the ticket never fires again; the user deletes
+   it from the Scheduled view);
    `preparing_mr` means wait.
 6. Never approve, push, merge or close anything: those are the user's, in the terminal or on the
    dashboard.

@@ -1,10 +1,12 @@
 // A raw HTTP client of the Dashboard for tests: one request with full control of method, headers
 // and body (fetchRaw), an action POST as the page sends it (act), a server-sent event stream
-// (openStream) and a fake DashboardActions that records every call (fakeActions).
+// (openStream), a fake DashboardActions that records every call (fakeActions) and a fake
+// DashboardReviewers with settable subscriptions (fakeReviewers).
 import assert from 'node:assert/strict';
 import { get, request, type IncomingMessage } from 'node:http';
-import type { DashboardActions } from '../../src/dashboard.js';
+import type { DashboardActions, DashboardReviewers } from '../../src/dashboard.js';
 import { FactoryError } from '../../src/errors.js';
+import type { EventInput, SubscriptionSummary, TestOutcome } from '../../src/events.js';
 
 export const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'";
 
@@ -165,5 +167,52 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
     }
     return value;
   }
+  return fake;
+}
+
+export interface FakeReviewers extends DashboardReviewers {
+  rows: SubscriptionSummary[];
+  // The ids test was called with, in order.
+  tests: string[];
+  // What the next test answers: a TestOutcome, an error to throw, or a function.
+  answer: unknown;
+  // Replaces the subscriptions and tells the listeners, as Events does after a change.
+  set(rows: SubscriptionSummary[]): void;
+  listeners(): number;
+}
+
+export function subscription(id: string, input: EventInput, host = 'chatgpt.example'): SubscriptionSummary {
+  return { id, principal: 'user-1', event: 'software_factory.job', input, host, createdAt: '2026-11-01T09:00:00.000Z', refreshBefore: '2026-11-08T09:00:00.000Z' };
+}
+
+export function fakeReviewers(rows: SubscriptionSummary[] = []): FakeReviewers {
+  const listeners = new Set<() => void>();
+  const fake: FakeReviewers = {
+    rows,
+    tests: [],
+    answer: undefined,
+    subscriptions: () => fake.rows,
+    async test(id) {
+      fake.tests.push(id);
+      const value = typeof fake.answer === 'function' ? await (fake.answer as () => unknown)() : fake.answer;
+      if (value instanceof Error) {
+        throw value;
+      }
+      return (value ?? { subscription: id, delivered: true, status: 200 }) as TestOutcome;
+    },
+    onChange(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    set(next) {
+      fake.rows = next;
+      for (const listener of listeners) {
+        listener();
+      }
+    },
+    listeners: () => listeners.size,
+  };
   return fake;
 }

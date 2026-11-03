@@ -216,6 +216,47 @@ test('events: capability, list, subscribe checks, the fake cycle delivered and s
   }
 });
 
+test('sf ticket: warns about a broad subscription, prints the instruction, finds the ticket subscription and tests it', async () => {
+  const env = await eventsEnv('events-ticket');
+  const repo = await newRepo(env, 'ticket-repo', true);
+  await putTask(env, repo, 'EV-2', 'Ticket demo');
+  const served = await serve(env);
+  const token = as.sign(as.claims());
+  try {
+    await rpc(served.url, 'initialize', initialize);
+    const subscribe = (path: string, args: Record<string, unknown>) =>
+      rpc(served.url, 'events/subscribe', { name: 'software_factory.job', arguments: args, delivery: { mode: 'webhook', url: sink.url(path), secret: sink.secret }, cursor: null }, token);
+
+    // No subscription for the ticket yet: --no-wait prints the steps and exits 1.
+    const none = await runCli(env, ['ticket', 'app', 'EV-2', '--no-wait']);
+    assert.equal(none.code, 1, none.stderr);
+    assert.match(none.stdout, /^Step 1 {2}In ChatGPT, in the project of workspace app, open a new conversation for EV-2/m);
+    assert.match(none.stdout, /Call guide\./);
+    assert.match(none.stdout, /arguments \{"workspace": "app", "ticket": "EV-2"\}, nothing else\): call guide, then check/);
+    assert.match(none.stdout, /^No subscription for EV-2 yet\./m);
+    assert.doesNotMatch(none.stdout, /Warning/);
+
+    // A broad subscription is warned about; the ticket's own one is found and tested.
+    const broad = (await subscribe('/broad', { workspace: 'app' })).result.id as string;
+    const own = (await subscribe('/own', { workspace: 'app', ticket: 'EV-2' })).result.id as string;
+    const other = (await subscribe('/other', { workspace: 'app', ticket: 'EV-3' })).result.id as string;
+    const done = await runCli(env, ['ticket', 'app', 'EV-2']);
+    assert.equal(done.code, 0, done.stdout + done.stderr);
+    assert.match(done.stdout, new RegExp(`^Warning: subscription ${broad} .* Remove it with: sf events remove ${broad}$`, 'm'));
+    assert.doesNotMatch(done.stdout, new RegExp(other));
+    assert.doesNotMatch(done.stdout, /^Step 1/m);
+    assert.match(done.stdout, new RegExp(`^Subscribed: ${own} \\(input \\{"ticket":"EV-2","workspace":"app"\\}, 127\\.0\\.0\\.1:\\d+\\)\\.$`, 'm'));
+    assert.match(done.stdout, /^delivered: true$/m);
+    assert.match(done.stdout, /^Done\. Plan EV-2 in that conversation: write_task, then "start"\./m);
+    const test = (await sink.waitFor('/own', 2))[1]!;
+    assert.deepEqual([test.json.data.state, test.json.data.ticket, test.json.data.workspace], ['test', 'EV-2', 'app']);
+    assert.equal((await sink.waitFor('/broad', 1)).length, 1);
+    assert.equal((await runCli(env, ['ticket', 'app'])).code, 2);
+  } finally {
+    await stop(served);
+  }
+});
+
 test('events: a delivery pending at a restart of sf serve is resumed with the same event id', async () => {
   const env = await eventsEnv('events-restart');
   const repo = await newRepo(env, 'events-restart-repo', true);

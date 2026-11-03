@@ -1,9 +1,11 @@
 // A state directory for in-process Dashboard tests: two jobs (T-1 awaiting_review with one
-// published iteration and its events, T-0 failed) and a running Dashboard over it.
+// published iteration and its events, T-0 failed) and a running Dashboard over it (no
+// subscriptions unless the test passes its reviewers).
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { type DashboardActions, type RunningDashboard, startDashboard } from '../../src/dashboard.js';
+import { type DashboardActions, type DashboardReviewers, type RunningDashboard, startDashboard } from '../../src/dashboard.js';
 import { type EventRecord, type Job, type JobState, JobStore } from '../../src/jobs.js';
+import { fakeReviewers } from './dashboard-client.js';
 import { temp } from './harness.js';
 
 const stateRecord = (from: JobState | null, to: JobState, ts: string): EventRecord => ({ ts, iteration: 0, state: { from, to } });
@@ -46,9 +48,14 @@ export async function fixture(name: string): Promise<Fixture> {
   return { state, jobs, job };
 }
 
-export async function withDashboard(name: string, actions: DashboardActions, work: (dashboard: RunningDashboard, store: Fixture) => Promise<void>): Promise<void> {
+export async function withDashboard(
+  name: string,
+  actions: DashboardActions,
+  work: (dashboard: RunningDashboard, store: Fixture) => Promise<void>,
+  reviewers: DashboardReviewers = fakeReviewers(),
+): Promise<void> {
   const store = await fixture(name);
-  const dashboard = await startDashboard(0, store.state, store.jobs, actions);
+  const dashboard = await startDashboard(0, store.state, store.jobs, actions, reviewers);
   try {
     await work(dashboard, store);
   } finally {

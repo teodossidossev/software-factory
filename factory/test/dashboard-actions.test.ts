@@ -12,7 +12,7 @@ import { ACTIONS, MAX_ACTION_BODY_BYTES } from '../src/dashboard.js';
 import { FactoryError } from '../src/errors.js';
 import { JobStore } from '../src/jobs.js';
 import { factoryPrompt } from '../src/prompts.js';
-import { act, CSP, fakeActions, fetchRaw, openStream, type Reply } from './support/dashboard-client.js';
+import { act, CSP, fakeActions, fakeReviewers, fetchRaw, openStream, type Reply, subscription } from './support/dashboard-client.js';
 import { withDashboard } from './support/dashboard-state.js';
 import { call, fakeLog, git, newEnv, newRepo, putTask, refused, script, serve, stop, waitFor } from './support/harness.js';
 
@@ -426,4 +426,51 @@ test('dashboard actions end to end: say queues during a turn, approve goes back 
   } finally {
     await stop(served);
   }
+});
+
+test('dashboard test-event: POST only, the action checks, the ticket\'s own subscription or no_subscription; one test per request', async () => {
+  const fake = fakeActions();
+  const reviewers = fakeReviewers();
+  await withDashboard('dash-act-test-event', fake, async (dashboard) => {
+    const base = dashboard.url;
+    const path = 'api/jobs/app/T-1/test-event';
+    reviewers.rows = [subscription('sub_all', {}), subscription('sub_own', { workspace: 'app', ticket: 'T-1' })];
+    for (const method of ['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']) {
+      const reply = await act(base, path, {}, { method });
+      assert.deepEqual([reply.status, reply.headers.allow, reply.body], [405, 'POST', ''], method);
+    }
+    const port = Number(base.port);
+    assert.deepEqual(error(await act(base, path, {}, { headers: { origin: `http://localhost:${port}` } })), { status: 403, code: 'invalid_origin' });
+    assert.deepEqual(error(await act(base, path, {}, { headers: { origin: '' } })), { status: 403, code: 'invalid_origin' });
+    assert.deepEqual(error(await act(base, path, {}, { headers: { 'content-type': 'text/plain' } })), { status: 415, code: 'unsupported_media_type' });
+    for (const text of ['{"id":"sub_all"}', '[]', 'null']) {
+      assert.deepEqual(error(await act(base, path, undefined, { body: text })), { status: 400, code: 'invalid_body' }, text);
+    }
+    assert.deepEqual(error(await act(base, path, undefined, { body: '{' })), { status: 400, code: 'invalid_json' });
+    assert.deepEqual(error(await act(base, path, undefined, { body: 'x'.repeat(MAX_ACTION_BODY_BYTES + 1) })), { status: 413, code: 'body_too_large' });
+    for (const other of ['api/jobs/app/T-9/test-event', 'api/jobs/App/T-1/test-event']) {
+      const reply = await act(base, other, {});
+      assert.deepEqual([reply.status, reply.body], [404, ''], other);
+    }
+    assert.deepEqual(reviewers.tests, []);
+
+    // The ticket's own subscription, never the broad one; the outcome comes back unchanged.
+    assert.deepEqual(result(await act(base, path, {})), { subscription: 'sub_own', delivered: true, status: 200 });
+    assert.deepEqual(reviewers.tests, ['sub_own']);
+    reviewers.answer = { subscription: 'sub_own', delivered: false, status: 'timeout' };
+    assert.deepEqual(result(await act(base, path, {})), { subscription: 'sub_own', delivered: false, status: 'timeout' });
+    reviewers.answer = new FactoryError('subscription_not_found', 'There is no subscription sub_own.');
+    assert.deepEqual(error(await act(base, path, {})), { status: 404, code: 'subscription_not_found' });
+    assert.deepEqual(reviewers.tests, ['sub_own', 'sub_own', 'sub_own']);
+
+    // Only broad ones, or none: refused before any test.
+    for (const rows of [[subscription('sub_all', {})], []]) {
+      reviewers.rows = rows;
+      const reply = await act(base, path, {});
+      assert.deepEqual(error(reply), { status: 404, code: 'no_subscription' });
+      assert.match(JSON.parse(reply.body).error.message, /sf ticket app T-1/);
+    }
+    assert.equal(reviewers.tests.length, 3);
+    assert.deepEqual(fake.calls, []);
+  }, reviewers);
 });

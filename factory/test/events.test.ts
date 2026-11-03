@@ -228,3 +228,38 @@ test('hub: verification timeout and failure, limits, refresh, retries, 410, 413 
     events.close();
   }
 });
+
+test('hub: onChange hears every change of the subscriptions (subscribe, refresh, unsubscribe, remove, a 410), until stopped', async () => {
+  const state = join(temp, 'hub-change');
+  const events = await Events.open(state, new JobStore(state), { allowLoopback: true, requestTimeoutMs: 300 });
+  let changes = 0;
+  const stop = events.onChange(() => {
+    changes += 1;
+  });
+  try {
+    const first = await events.subscribe('p1', { name: 'software_factory.job', arguments: { ticket: 'C-1' }, delivery: delivery('/change') });
+    assert.equal(changes, 1);
+    await events.subscribe('p1', { name: 'software_factory.job', arguments: { ticket: 'C-1' }, delivery: delivery('/change') });
+    assert.equal(changes, 2);
+    await events.unsubscribe('p1', { id: first.id });
+    assert.equal(changes, 3);
+    // Unsubscribing an unknown subscription changes nothing.
+    await events.unsubscribe('p1', { id: first.id });
+    assert.equal(changes, 3);
+    const second = await events.subscribe('p1', { name: 'software_factory.job', arguments: { ticket: 'C-2' }, delivery: delivery('/change') });
+    await events.remove(second.id);
+    assert.equal(changes, 5);
+    const third = await events.subscribe('p1', { name: 'software_factory.job', arguments: { ticket: 'C-3' }, delivery: delivery('/change') });
+    sink.plan.push(200);
+    await events.test(third.id);
+    assert.equal(changes, 6);
+    sink.plan.push(410);
+    assert.deepEqual(await events.test(third.id), { subscription: third.id, delivered: false, status: 410 });
+    assert.equal(changes, 7);
+    stop();
+    await events.subscribe('p1', { name: 'software_factory.job', arguments: { ticket: 'C-4' }, delivery: delivery('/change') });
+    assert.equal(changes, 7);
+  } finally {
+    events.close();
+  }
+});

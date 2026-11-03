@@ -1,10 +1,12 @@
 // Behaviour of static/app.js, run under node:vm against the fake page of test/support/fake-dom.ts:
 // the action matrix per state, the confirmations (cancel, discard, double submission), the say
 // draft rules, the outcome texts and what happens when the selection changes while a request is
-// out. These are script checks, not browser acceptance: the manual steps are in factory/README.md.
+// out, and the Reviewer block (its three states, the setup boxes, the test event), the reviewer
+// badges and the Subscriptions section. These are script checks, not browser acceptance: the
+// manual steps are in factory/README.md.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
+import { type FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
 
 const STATIC_DIR = new URL('../../static/', import.meta.url);
 
@@ -698,4 +700,191 @@ test('client: a read that never answers becomes a failed refresh; the warning st
   posts(page)[1]!.respond(200, { ok: true, result: { state: 'aborted', branch: 'T-1-demo', discarded: false, error: { code: 'discard_failed', message: 'failed.' } } });
   await page.flush();
   assert.match(status(page), /discard failed/);
+});
+
+// The detail with a reviewer, as the server sends it.
+const SETUP = { guide: 'Call guide.', instruction: 'When you receive the event software_factory.job for ticket T-1 …' };
+const OWN = { status: 'subscribed', id: 'sub_own', host: 'chatgpt.example', input: { workspace: 'app', ticket: 'T-1' }, broad: [] as string[] };
+function reviewed(shape: JobShape, reviewer: Record<string, unknown>) {
+  return { ...detail(shape), reviewer, reviewerSetup: { ...SETUP, instruction: SETUP.instruction.replace('T-1', shape.ticket) } };
+}
+const testPosts = (page: Page): FetchRequest[] => posts(page).filter((request) => request.path.endsWith('/test-event'));
+
+test('client: the Reviewer block for subscribed, none, broad and subscribed with broad ones; the setup boxes only for none', async () => {
+  const page = await openPage();
+  const stream = page.streams.at(-1)!;
+  // A detail without a reviewer (an older server) shows no block.
+  assert.equal(page.$('reviewer').hidden, true);
+
+  stream.emit('job', reviewed(A, OWN));
+  assert.equal(page.$('reviewer').hidden, false);
+  assert.equal(page.$('reviewer-line').textContent, 'Reviewer: subscribed sub_own, chatgpt.example, filter {"workspace":"app","ticket":"T-1"}');
+  assert.equal((page.$('reviewer-line').children[0] as FakeElement).className, 'r-subscribed');
+  assert.equal(page.$('reviewer-warning').hidden, true);
+  assert.equal(page.$('reviewer-setup').hidden, true);
+
+  stream.emit('job', reviewed(A, { status: 'none' }));
+  assert.equal(page.$('reviewer-line').textContent, 'Reviewer: none Nobody will review this job.');
+  assert.equal((page.$('reviewer-line').children[0] as FakeElement).className, 'r-none');
+  assert.equal(page.$('reviewer-setup').hidden, false);
+  assert.equal(page.$('setup-guide').value, 'Call guide.');
+  assert.equal(page.$('setup-instruction').value, SETUP.instruction);
+  assert.equal(page.$('reviewer-warning').hidden, true);
+
+  stream.emit('job', reviewed(A, { status: 'broad', id: 'sub_app', host: 'chatgpt.example', input: { workspace: 'app' }, broad: ['sub_app', 'sub_all'] }));
+  assert.equal(page.$('reviewer-line').textContent, 'Reviewer: broad sub_app, chatgpt.example, filter {"workspace":"app"}');
+  assert.equal((page.$('reviewer-line').children[0] as FakeElement).className, 'r-broad');
+  assert.equal(page.$('reviewer-warning').hidden, false);
+  assert.match(page.$('reviewer-warning').textContent, /sub_app, sub_all has no ticket filter/);
+  assert.match(page.$('reviewer-warning').textContent, /sf events remove sub_app; sf events remove sub_all/);
+  assert.equal(page.$('reviewer-setup').hidden, true);
+  assert.equal(page.$('setup-guide').value, '');
+
+  stream.emit('job', reviewed(A, { ...OWN, broad: ['sub_all'] }));
+  assert.match(page.$('reviewer-line').textContent, /^Reviewer: subscribed sub_own/);
+  assert.equal(page.$('reviewer-warning').hidden, false);
+  assert.match(page.$('reviewer-warning').textContent, /sub_all\. ChatGPT would review it twice\. Remove with: sf events remove sub_all$/);
+  assert.equal(page.$('reviewer-setup').hidden, true);
+});
+
+test('client: the Copy buttons write the setup message to the clipboard, or select it when there is none', async () => {
+  const copied: string[] = [];
+  const withClipboard = await loadPage(STATIC_DIR, (path) => (path === 'api/jobs' ? { jobs: [job(A)] } : undefined), { writeText: async (text) => void copied.push(text) });
+  withClipboard.document.dispatch('DOMContentLoaded');
+  await withClipboard.flush();
+  withClipboard.streams.at(-1)!.emit('job', reviewed(A, { status: 'none' }));
+  withClipboard.$('copy-instruction').click();
+  await withClipboard.flush();
+  withClipboard.$('copy-guide').click();
+  await withClipboard.flush();
+  assert.deepEqual(copied, [SETUP.instruction, 'Call guide.']);
+  assert.equal(withClipboard.$('copy-status').textContent, 'Copied.');
+
+  // No clipboard, or one that refuses: the text is selected for Ctrl+C.
+  const page = await openPage();
+  page.streams.at(-1)!.emit('job', reviewed(A, { status: 'none' }));
+  page.$('copy-guide').click();
+  assert.equal(page.$('setup-guide').selected, true);
+  assert.equal(page.document.activeElement, page.$('setup-guide'));
+  assert.equal(page.$('copy-status').textContent, 'Selected: press Ctrl+C to copy.');
+  const refusing = await loadPage(STATIC_DIR, (path) => (path === 'api/jobs' ? { jobs: [job(A)] } : undefined), { writeText: async () => Promise.reject(new Error('denied')) });
+  refusing.document.dispatch('DOMContentLoaded');
+  await refusing.flush();
+  refusing.streams.at(-1)!.emit('job', reviewed(A, { status: 'none' }));
+  refusing.$('copy-instruction').click();
+  await refusing.flush();
+  assert.equal(refusing.$('setup-instruction').selected, true);
+  assert.match(refusing.$('copy-status').textContent, /press Ctrl\+C/);
+});
+
+test('client: Send test event only when subscribed, one request at a time, the outcome or the error as text, never retried', async () => {
+  const page = await openPage();
+  const stream = page.streams.at(-1)!;
+  const button = page.$('test-event-button');
+  for (const reviewer of [{ status: 'none' }, { status: 'broad', id: 'sub_all', host: 'h', input: {}, broad: ['sub_all'] }]) {
+    stream.emit('job', reviewed(A, reviewer));
+    assert.equal(button.disabled, true, reviewer.status);
+    assert.match(page.$('test-event-reason').textContent, /needs a subscription filtered on this ticket/);
+    button.click();
+  }
+  await page.flush();
+  assert.equal(testPosts(page).length, 0);
+
+  stream.emit('job', reviewed(A, OWN));
+  assert.equal(button.disabled, false);
+  assert.equal(page.$('test-event-reason').textContent, '');
+  button.click();
+  await page.flush();
+  assert.equal(testPosts(page).length, 1);
+  const sent = testPosts(page)[0]!;
+  assert.deepEqual([sent.path, sent.body, sent.headers['content-type']], ['api/jobs/app/T-1/test-event', '{}', 'application/json']);
+  assert.equal(page.$('test-event-status').textContent, 'Sending…');
+  assert.equal(button.disabled, true);
+  // A detail arriving meanwhile keeps it off.
+  stream.emit('job', reviewed(A, OWN));
+  assert.equal(button.disabled, true);
+  button.click();
+  await page.flush();
+  assert.equal(testPosts(page).length, 1);
+  sent.respond(200, { ok: true, result: { subscription: 'sub_own', delivered: true, status: 200 } });
+  await page.flush();
+  assert.match(page.$('test-event-status').textContent, /^Test event to sub_own: delivered, status 200\./);
+  assert.equal(page.$('test-event-status').className, 'status ok');
+  assert.equal(button.disabled, false);
+
+  button.click();
+  await page.flush();
+  testPosts(page)[1]!.respond(200, { ok: true, result: { subscription: 'sub_own', delivered: false, status: 'timeout' } });
+  await page.flush();
+  assert.equal(page.$('test-event-status').textContent, 'Test event to sub_own: not delivered, status timeout.');
+  assert.equal(page.$('test-event-status').className, 'status error');
+
+  button.click();
+  await page.flush();
+  testPosts(page)[2]!.respond(404, { ok: false, error: { code: 'no_subscription', message: 'No subscription is filtered on T-1.' } });
+  await page.flush();
+  assert.equal(page.$('test-event-status').textContent, 'no_subscription: No subscription is filtered on T-1.');
+
+  button.click();
+  await page.flush();
+  testPosts(page)[3]!.fail();
+  await page.flush();
+  assert.match(page.$('test-event-status').textContent, /^The test event failed \(Failed to fetch\); it may have been sent\. Nothing is retried\./);
+  assert.equal(testPosts(page).length, 4);
+  assert.equal(page.timers.filter((timer) => !timer.cleared).length, 0);
+  // The approve, abort and say controls never took part.
+  assert.equal(page.$('action-status').textContent, '');
+});
+
+test('client: a late test-event answer lands on its own job only; each job keeps its outcome', async () => {
+  const page = await openPage();
+  page.streams.at(-1)!.emit('job', reviewed(A, OWN));
+  page.$('test-event-button').click();
+  await page.flush();
+  assert.equal(testPosts(page).length, 1);
+
+  await selectJob(page, 'app/T-2');
+  assert.equal(page.$('reviewer').hidden, true);
+  page.streams.at(-1)!.emit('job', reviewed(B, { ...OWN, id: 'sub_b', input: { ticket: 'T-2' } }));
+  assert.equal(page.$('test-event-status').textContent, '');
+  assert.equal(page.$('test-event-button').disabled, false);
+  testPosts(page)[0]!.respond(200, { ok: true, result: { subscription: 'sub_own', delivered: true, status: 200 } });
+  await page.flush();
+  assert.equal(page.$('test-event-status').textContent, '');
+  assert.equal(page.$('test-event-button').disabled, false);
+  assert.equal(page.$('job-ticket').textContent, 'T-2');
+
+  await selectJob(page, 'app/T-1');
+  page.streams.at(-1)!.emit('job', reviewed(A, OWN));
+  assert.match(page.$('test-event-status').textContent, /^Test event to sub_own: delivered/);
+});
+
+test('client: the job cards badge a missing or broad reviewer; the Subscriptions section follows the stream', async () => {
+  const page = await openPage();
+  const stream = page.streams.at(-1)!;
+  // Before the first subscriptions event: neither the table nor "No subscriptions.".
+  assert.deepEqual([page.$('no-subscriptions').hidden, page.$('subscriptions-table').hidden], [true, true]);
+  stream.emit('jobs', { jobs: [{ ...job(A), reviewer: 'none' }, { ...job(B), reviewer: 'broad' }, { ...job({ ...B, ticket: 'T-3' }), reviewer: 'subscribed' }] });
+  const badges = (key: string): string[] => jobButton(page, key).all().filter((node) => node.className.startsWith('badge')).map((node) => `${node.className}:${node.textContent}`);
+  assert.deepEqual(badges('app/T-1'), ['badge s-awaiting_review:awaiting_review', 'badge r-none:no reviewer']);
+  assert.deepEqual(badges('app/T-2'), ['badge s-working:working', 'badge r-broad:broad']);
+  assert.deepEqual(badges('app/T-3'), ['badge s-working:working']);
+
+  stream.emit('subscriptions', { subscriptions: [] });
+  assert.deepEqual([page.$('no-subscriptions').hidden, page.$('subscriptions-table').hidden], [false, true]);
+  stream.emit('subscriptions', {
+    subscriptions: [
+      { id: 'sub_own', principal: 'user-1', input: { workspace: 'app', ticket: 'T-1' }, host: 'chatgpt.example', createdAt: '2026-11-01T09:00:00.000Z', refreshBefore: '2026-11-08T09:00:00.000Z', job: 'app/T-1' },
+      { id: 'sub_all', principal: 'user-1', input: {}, host: '<b>x</b>', createdAt: '2026-11-01T09:00:00.000Z', refreshBefore: '2026-11-08T09:00:00.123Z', job: null },
+    ],
+  });
+  assert.deepEqual([page.$('no-subscriptions').hidden, page.$('subscriptions-table').hidden], [true, false]);
+  const rows = page.$('subscriptions-body').children.map((row) => (row as FakeElement).children.map((cell) => cell.textContent));
+  assert.deepEqual(rows, [
+    ['sub_own', '{"workspace":"app","ticket":"T-1"}', 'chatgpt.example', '2026-11-08 09:00:00Z', 'app/T-1'],
+    ['sub_all', '{}', '<b>x</b>', '2026-11-08 09:00:00Z', '–'],
+  ]);
+  stream.emit('subscriptions', { subscriptions: [] });
+  assert.equal(page.$('subscriptions-body').children.length, 0);
+  assert.equal(page.$('no-subscriptions').hidden, false);
 });

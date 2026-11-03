@@ -161,6 +161,32 @@ function matches(input: EventInput, payload: JobPayload): boolean {
   return (input.workspace === undefined || input.workspace === payload.workspace) && (input.ticket === undefined || input.ticket === payload.ticket);
 }
 
+// The ticket's own subscription: a filter on that ticket (and on its workspace, or on none).
+export function ownsTicket(input: EventInput, workspace: string, ticket: string): boolean {
+  return input.ticket === ticket && (input.workspace === undefined || input.workspace === workspace);
+}
+
+// A subscription without a ticket filter that still receives the ticket's events, so a second
+// conversation would review it.
+export function coversTicketBroadly(input: EventInput, workspace: string): boolean {
+  return input.ticket === undefined && (input.workspace === undefined || input.workspace === workspace);
+}
+
+// The two messages that set up the ChatGPT conversation of one ticket (sf ticket, the dashboard).
+export const TICKET_GUIDE = 'Call guide.';
+
+// The instruction the user pastes into the ticket's ChatGPT conversation: it creates the
+// event-triggered task and the subscription filtered on this ticket.
+export function ticketInstruction(workspace: string, ticket: string): string {
+  return (
+    `When you receive the event software_factory.job for ticket ${ticket} in workspace ${workspace} ` +
+    `(subscribe to that event with arguments {"workspace": "${workspace}", "ticket": "${ticket}"}, nothing else): ` +
+    'call guide, then check with the workspace and ticket of the payload, and act by the guide: ' +
+    'on awaiting_review review the Report and the Patch and call request_fix or mark_clean; ' +
+    'on needs_human, pushed, aborted or failed only summarise the state.'
+  );
+}
+
 // JSON with object keys sorted at every level, so key order never changes an identity.
 export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) {
@@ -530,6 +556,8 @@ export class Events {
   readonly #verified = new Map<string, number>();
   #lock: Promise<unknown> = Promise.resolve();
   #closed = false;
+  // Called after the set of subscriptions changed (the dashboard refreshes its pages).
+  readonly #changeListeners = new Set<() => void>();
 
   private constructor(stateDir: string, jobs: JobStore, options: EventsOptions, subscriptions: Subscription[], queue: QueueEntry[]) {
     this.#subscriptionsPath = join(stateDir, 'subscriptions.json');
@@ -575,6 +603,26 @@ export class Events {
 
   async #saveQueue(): Promise<void> {
     await writeFileAtomic(this.#queuePath, Buffer.from(`${JSON.stringify({ deliveries: this.#queue }, null, 2)}\n`), 0o600);
+  }
+
+  // Registers a listener for changes of the subscriptions (subscribe, refresh, secret rotation,
+  // unsubscribe, remove, a 410); returns its removal. A listener must not throw; one that does is
+  // logged.
+  onChange(listener: () => void): () => void {
+    this.#changeListeners.add(listener);
+    return () => {
+      this.#changeListeners.delete(listener);
+    };
+  }
+
+  #changed(): void {
+    for (const listener of this.#changeListeners) {
+      try {
+        listener();
+      } catch (error) {
+        console.error(error);
+      }
+    }
   }
 
   #active(at = Date.now()): Subscription[] {
@@ -632,6 +680,7 @@ export class Events {
       };
       this.#subscriptions = [...this.#subscriptions.filter((item) => item.id !== id && Date.parse(item.refreshBefore) > at), subscription];
       await this.#saveSubscriptions();
+      this.#changed();
       return { id, refreshBefore: subscription.refreshBefore, cursor: null, truncated: false, ttlMs: ttl };
     });
   }
@@ -816,6 +865,7 @@ export class Events {
   async #drop(id: string): Promise<void> {
     this.#subscriptions = this.#subscriptions.filter((subscription) => subscription.id !== id);
     await this.#saveSubscriptions();
+    this.#changed();
     const before = this.#queue.length;
     this.#queue = this.#queue.filter((entry) => {
       if (entry.subscription !== id) {

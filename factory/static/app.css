@@ -173,6 +173,69 @@ h3 { font-size: 14px; }
 .badge.r-none { background: var(--s-failed); color: #fff; }
 .badge.r-broad { background: var(--s-review); color: #fff; }
 
+/* The start screen (SF-025): workspaces, a new ticket and the tickets without a job. */
+.setup { grid-column: 1 / -1; }
+.setup summary span { font-weight: 400; font-size: 13px; }
+.setup-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+@media (max-width: 760px) {
+  .setup-grid { grid-template-columns: minmax(0, 1fr); }
+}
+.setup-column { min-width: 0; }
+.setup-column h3 { margin-bottom: 6px; }
+.setup-column .tickets-title { margin-top: 14px; }
+.setup-form { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.setup-form label { font-size: 13px; color: var(--muted); margin-top: 4px; }
+.setup-form input[type="text"], .setup-form select, .setup-form textarea {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+}
+.setup-form textarea { resize: vertical; font: 13px/1.4 var(--mono); }
+.setup-form .action-buttons { margin-top: 6px; }
+.owner { margin: 6px 0 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; }
+.owner legend { font-size: 13px; color: var(--muted); padding: 0 4px; }
+.owner label { display: block; margin: 2px 0; color: inherit; }
+.workspace-list, .ticket-list { list-style: none; margin: 0; padding: 0; }
+.workspace-list li, .ticket-list li {
+  margin-bottom: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+.workspace-list .ws-name, .ticket-list .ticket-name { font-weight: 600; overflow-wrap: anywhere; }
+.workspace-list .ws-path, .ticket-list .ticket-line { font-family: var(--mono); font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.workspace-list .ws-problem { color: var(--del); overflow-wrap: anywhere; }
+.workspace-list .action-buttons, .ticket-list .action-buttons { margin-top: 4px; }
+.ticket-list .badge { margin-left: 6px; }
+.ticket-list .ticket-reviewer { font-family: var(--mono); font-size: 12.5px; margin: 2px 0; overflow-wrap: anywhere; }
+.ticket-list a.button {
+  display: inline-block;
+  padding: 5px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  color: var(--accent);
+  text-decoration: none;
+  font: inherit;
+}
+.ticket-list .copy-box { margin-top: 4px; }
+.ticket-list .copy-box input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: inherit;
+  font: 12px/1.4 var(--mono);
+}
+.badge.t-draft { background: var(--s-review); }
+.badge.t-job { background: var(--s-ended); }
+
 /* Subscriptions, under the job list. */
 .subscriptions { margin-top: 10px; padding: 8px; }
 .table-scroll { overflow-x: auto; }

@@ -105,6 +105,12 @@ export class Execution {
     return next;
   }
 
+  // Runs work under the same lock as the job operations, for changes that must not interleave
+  // with a start (the workspace registry of the dashboard's start screen).
+  exclusive<T>(work: () => Promise<T>): Promise<T> {
+    return this.#locked(work);
+  }
+
   async #transition(job: Job, to: JobState, error?: { code: string; message: string }, lines?: string[]): Promise<Job> {
     const from = job.state;
     const { error: _previous, ...rest } = job;

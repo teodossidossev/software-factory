@@ -3,7 +3,10 @@
 // api/jobs/<ws>/<ticket>/<action>: each one is a deliberate click, confirmed for approve and
 // abort, never retried or replayed by the page. Who reviews the job comes with its detail (the
 // Reviewer block, with the two messages of sf ticket to copy and a test event to send) and the
-// subscriptions with the stream. Every value goes in through textContent.
+// subscriptions with the stream. The start screen (Setup) lists the workspaces and the tickets
+// without a job, adds a workspace, writes a ticket draft, opens the ChatGPT conversation of a
+// ticket (a link the User clicks) and starts a job (confirmed). Every value goes in through
+// textContent; the one href is the server's ChatGPT URL, checked against its fixed prefix.
 'use strict';
 
 const RECONNECT_MS = 3000;
@@ -46,7 +49,18 @@ const state = {
   testing: new Set(),
   testOutcomes: new Map(),
   subscriptions: null,
+  // The start screen: the registry and the tickets without a job (null until the stream sends
+  // them), whether the section's open state was decided from the first data, the requests out
+  // for its forms, the open start confirmation and the tickets whose start is out.
+  workspaces: null,
+  tickets: null,
+  setupDecided: false,
+  setupPending: new Set(),
+  startConfirm: null,
+  starting: new Set(),
 };
+// The only URL the page links to: the ChatGPT composer prefilled by the server.
+const CHATGPT_PREFILL_URL = 'https://chatgpt.com/?q=';
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -117,6 +131,9 @@ function setConnection(text, kind) {
 function renderJobs() {
   const list = $('job-list');
   $('no-jobs').hidden = state.jobs.length > 0;
+  if (!state.setupDecided && state.workspaces !== null) {
+    renderSetup();
+  }
   const sorted = [...state.jobs].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   list.replaceChildren(...sorted.map((job) => {
     const button = el('button');
@@ -705,6 +722,266 @@ function sendSay() {
   void run('say', key, { message });
 }
 
+// The start screen.
+function renderSetup() {
+  const workspaces = state.workspaces ?? [];
+  const tickets = state.tickets ?? [];
+  const parts = [`${workspaces.length} workspace${workspaces.length === 1 ? '' : 's'}`, `${tickets.length} ticket${tickets.length === 1 ? '' : 's'} without a job`, 'New ticket'];
+  $('setup-summary').textContent = `· ${parts.join(' · ')}`;
+  // Open until there is a workspace and a job; decided once, from the first data, so the User's
+  // own toggling is kept afterwards.
+  if (!state.setupDecided && state.workspaces !== null) {
+    state.setupDecided = true;
+    $('setup').open = workspaces.length === 0 || state.jobs.length === 0;
+  }
+  renderWorkspaces();
+  renderTickets();
+}
+
+function renderWorkspaces() {
+  const rows = state.workspaces ?? [];
+  $('no-workspaces').hidden = state.workspaces === null || rows.length > 0;
+  $('workspace-list').replaceChildren(...rows.map((row) => {
+    const item = el('li');
+    item.append(el('div', 'ws-name', row.name));
+    item.append(el('div', 'ws-path', row.path));
+    if (row.problem) {
+      item.append(el('div', 'ws-problem', row.problem));
+    }
+    const line = el('div', 'action-buttons');
+    const remove = el('button', '', 'Remove');
+    remove.type = 'button';
+    remove.disabled = state.setupPending.has('workspace') || row.liveJobs > 0;
+    remove.addEventListener('click', () => void removeWorkspace(row.name));
+    line.append(remove, el('span', 'muted', row.liveJobs > 0 ? `${row.liveJobs} live job${row.liveJobs === 1 ? '' : 's'}: finish or abort them first.` : 'The registration only; nothing on disk changes.'));
+    item.append(line);
+    return item;
+  }));
+  // The workspace choice of the form keeps its value while the options are replaced.
+  const select = $('ticket-workspace');
+  const chosen = select.value;
+  select.replaceChildren(...rows.map((row) => {
+    const option = el('option', '', row.name);
+    option.value = row.name;
+    return option;
+  }));
+  select.value = rows.some((row) => row.name === chosen) ? chosen : (rows[0]?.name ?? '');
+  select.disabled = rows.length === 0;
+  $('ticket-create').disabled = rows.length === 0 || state.setupPending.has('ticket');
+}
+
+function reviewerLine(reviewer) {
+  if (reviewer === undefined || reviewer === null) {
+    return [el('span', '', 'Reviewer: unknown')];
+  }
+  if (reviewer.status === 'subscribed') {
+    return [el('span', 'r-subscribed', 'Reviewer: subscribed'), document.createTextNode(` ${reviewer.id}, ${reviewer.host}`)];
+  }
+  if (reviewer.status === 'broad') {
+    return [el('span', 'r-broad', 'Reviewer: broad'), document.createTextNode(` ${reviewer.id} has no ticket filter; it would review this ticket along with every other one (sf events remove ${reviewer.id}).`)];
+  }
+  return [el('span', 'r-none', 'Reviewer: none'), document.createTextNode(' nobody will review this ticket until ChatGPT subscribes to it: open the conversation.')];
+}
+
+function renderTickets() {
+  const rows = state.tickets ?? [];
+  $('no-tickets').hidden = state.tickets === null || rows.length > 0;
+  $('ticket-list').replaceChildren(...rows.map((row) => {
+    const key = `${row.workspace}/${row.ticket}`;
+    const item = el('li');
+    const name = el('div', 'ticket-name', `${key} · ${row.title}`);
+    if (row.draft) {
+      name.append(el('span', 'badge t-draft', 'draft'));
+    }
+    if (row.job !== null) {
+      name.append(el('span', 'badge t-job', `last job ${row.job}`));
+    }
+    item.append(name);
+    item.append(el('div', 'ticket-line', `.software-factory/${row.ticket}.md · base ${row.base}`));
+    const reviewer = el('div', 'ticket-reviewer');
+    reviewer.append(...reviewerLine(row.reviewer));
+    item.append(reviewer);
+    const buttons = el('div', 'action-buttons');
+    const url = typeof row.conversation?.url === 'string' && row.conversation.url.startsWith(CHATGPT_PREFILL_URL) ? row.conversation.url : null;
+    if (url !== null) {
+      const link = el('a', 'button', 'Open the conversation');
+      link.href = url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      buttons.append(link);
+    }
+    const start = el('button', '', 'Start…');
+    start.type = 'button';
+    start.disabled = state.starting.has(key) || state.startConfirm !== null;
+    start.addEventListener('click', () => openStartConfirm(row));
+    buttons.append(start);
+    item.append(buttons);
+    if (url !== null) {
+      item.append(el('p', 'muted', 'The link opens ChatGPT in a new tab with the message in the composer; press Enter if it is not sent by itself. The same link, to copy:'));
+      const box = el('div', 'copy-box');
+      const input = el('input');
+      input.type = 'text';
+      input.value = url;
+      input.setAttribute('readonly', '');
+      input.setAttribute('aria-label', `Conversation link of ${key}`);
+      const copy = el('button', '', 'Copy');
+      copy.type = 'button';
+      copy.addEventListener('click', () => copyText(input, 'conversation-copy-status'));
+      box.append(input, copy);
+      item.append(box);
+    }
+    return item;
+  }));
+}
+
+// Copies a field's text; without the clipboard the text is selected for Ctrl+C.
+function copyText(box, statusId) {
+  const done = (text) => {
+    $(statusId).textContent = text;
+  };
+  const select = () => {
+    box.focus();
+    box.select();
+    done('Selected: press Ctrl+C to copy.');
+  };
+  if (typeof navigator === 'undefined' || navigator.clipboard === undefined) {
+    select();
+    return;
+  }
+  navigator.clipboard.writeText(box.value).then(() => done('Copied.'), select);
+}
+
+function setSetupStatus(id, outcome) {
+  const node = $(id);
+  node.className = outcome === null ? 'status' : `status ${outcome.level}`;
+  node.textContent = outcome === null ? '' : outcome.text;
+}
+
+// One request for one form; the page sends nothing twice.
+async function setupRequest(what, path, body, statusId, describe) {
+  if (state.setupPending.has(what)) {
+    return undefined;
+  }
+  state.setupPending.add(what);
+  setSetupStatus(statusId, { level: 'pending', text: 'Sending…' });
+  renderSetup();
+  let result;
+  let outcome;
+  try {
+    result = await post(path, body);
+    outcome = describe(result);
+  } catch (error) {
+    outcome = error instanceof ActionError
+      ? { level: 'error', text: `${error.code}: ${error.message}` }
+      : { level: 'error', text: `The request failed (${error.message}); it may have taken effect. The lists below refresh on the next change; reload the page to see the current state.` };
+  }
+  state.setupPending.delete(what);
+  setSetupStatus(statusId, outcome);
+  renderSetup();
+  return outcome.level === 'ok' ? result : undefined;
+}
+
+async function submitWorkspace() {
+  const name = $('workspace-name').value.trim();
+  const path = $('workspace-path').value.trim();
+  if (name === '' || path === '') {
+    setSetupStatus('workspace-status', { level: 'error', text: 'A name and the path of the local checkout are needed.' });
+    return;
+  }
+  const result = await setupRequest('workspace', 'api/workspaces', { name, path }, 'workspace-status', (data) =>
+    ({ level: 'ok', text: `Registered ${data.name} (${data.path}). Next: New ticket.` }));
+  if (result !== undefined) {
+    $('workspace-name').value = '';
+    $('workspace-path').value = '';
+  }
+}
+
+async function removeWorkspace(name) {
+  await setupRequest('workspace', `api/workspaces/${encodeURIComponent(name)}/remove`, {}, 'workspace-status', (data) =>
+    ({ level: 'ok', text: `Removed ${data.removed} from the registry; the checkout and its files are untouched.` }));
+}
+
+async function submitTicket() {
+  const workspace = $('ticket-workspace').value;
+  const ticket = $('ticket-key').value.trim();
+  const title = $('ticket-title').value.trim();
+  const request = $('ticket-request').value;
+  if (workspace === '' || ticket === '' || title === '' || request.trim() === '') {
+    setSetupStatus('ticket-status', { level: 'error', text: 'The workspace, the ticket key, the title and the request are all needed.' });
+    return;
+  }
+  const result = await setupRequest('ticket', 'api/tickets', { workspace, ticket, title, request }, 'ticket-status', (data) =>
+    ({ level: 'ok', text: `Draft written: ${data.path} in ${data.workspace} (base ${data.base}). Next, under Tickets: Open the conversation, then Start… when ChatGPT has planned it and you said start.` }));
+  if (result !== undefined) {
+    $('ticket-key').value = '';
+    $('ticket-title').value = '';
+    $('ticket-request').value = '';
+  }
+}
+
+function openStartConfirm(row) {
+  const key = `${row.workspace}/${row.ticket}`;
+  if (state.startConfirm !== null || state.starting.has(key)) {
+    return;
+  }
+  state.startConfirm = { key, row };
+  $('start-confirm-title').textContent = `Start ${key}?`;
+  const lines = [`Creates the branch from ${row.base} in the work checkout of ${row.workspace} and starts the first iteration of the Implementer on .software-factory/${row.ticket}.md.`];
+  if (row.draft) {
+    lines.push('This ticket is still a draft: the Context owner has not rewritten it with write_task, so the Implementer would get your request text as it is.');
+  }
+  if (row.reviewer?.status === 'none') {
+    lines.push('Nobody will review this job: ChatGPT has not subscribed to this ticket. Its iterations will wait in awaiting_review until someone calls check. Start anyway?');
+  } else if (row.reviewer?.status === 'broad') {
+    lines.push(`Only a subscription without a ticket filter (${row.reviewer.id}) receives its events.`);
+  }
+  $('start-confirm-text').textContent = lines.join(' ');
+  $('start-confirm').hidden = false;
+  renderTickets();
+  $('start-cancel').focus();
+}
+
+function closeStartConfirm() {
+  state.startConfirm = null;
+  $('start-confirm').hidden = true;
+  renderTickets();
+}
+
+async function submitStart() {
+  const confirm = state.startConfirm;
+  if (confirm === null) {
+    return;
+  }
+  closeStartConfirm();
+  const { key } = confirm;
+  if (state.starting.has(key)) {
+    return;
+  }
+  state.starting.add(key);
+  setSetupStatus('start-status', { level: 'pending', text: `Starting ${key}…` });
+  renderTickets();
+  let outcome;
+  let started = false;
+  try {
+    const result = await post(`api/jobs/${jobPath(key)}/start`, {});
+    const data = result !== null && typeof result === 'object' ? result : {};
+    started = true;
+    outcome = { level: 'ok', text: `Started ${key} on branch ${data.branch} (state ${data.state}). The job is selected below; the Context owner is told by its events.` };
+  } catch (error) {
+    outcome = error instanceof ActionError
+      ? { level: 'error', text: `${error.code}: ${error.message}` }
+      : { level: 'error', text: `The request failed (${error.message}); the job may have started. Check the Jobs list; nothing is retried.` };
+  }
+  state.starting.delete(key);
+  setSetupStatus('start-status', outcome);
+  if (started) {
+    $('setup').open = false;
+    select(key);
+  } else {
+    renderTickets();
+  }
+}
+
 function appendEvent(event) {
   const events = $('events');
   const block = el('div', `event t-${event.type}`, event.text);
@@ -744,6 +1021,14 @@ function openStream() {
   source.addEventListener('subscriptions', (message) => {
     state.subscriptions = JSON.parse(message.data).subscriptions;
     renderSubscriptions();
+  });
+  source.addEventListener('workspaces', (message) => {
+    state.workspaces = JSON.parse(message.data).workspaces;
+    renderSetup();
+  });
+  source.addEventListener('tickets', (message) => {
+    state.tickets = JSON.parse(message.data).tickets;
+    renderSetup();
   });
   source.addEventListener('job', (message) => {
     if (key === state.key) {
@@ -850,7 +1135,24 @@ function init() {
     sendSay();
   });
 
+  $('workspace-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    void submitWorkspace();
+  });
+  $('ticket-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    void submitTicket();
+  });
+  $('start-ok').addEventListener('click', () => void submitStart());
+  $('start-cancel').addEventListener('click', closeStartConfirm);
+  $('start-confirm').addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      closeStartConfirm();
+    }
+  });
+
   renderSubscriptions();
+  renderSetup();
   load();
 }
 

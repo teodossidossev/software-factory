@@ -49,6 +49,13 @@ appended later. It is the complete instruction for the Implementer and the compl
 Context owner.
 _Avoid_: instruction, instruction.md, spec
 
+**Ticket draft**:
+A Task file as the Dashboard writes it from the User's request before the Context owner has
+planned: the header, the request verbatim under `## Request`, and a `## Status: draft` line. The
+Context owner replaces it with the Task format through `write_task`; the factory treats it as a
+Task file otherwise.
+_Avoid_: stub, placeholder task, request file
+
 **Fix section**:
 A `## Fix N` section the Context owner appends to the Task file after a review. Appending one is
 the request for the next Iteration.

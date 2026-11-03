@@ -86,6 +86,11 @@ Never paste a key, password or cookie into a chat.
 
 Two terminals, one per process.
 
+One terminal does for both: `npm start` at the repository root (`sf up`) runs the factory, the
+tunnel (`scripts/sf-tunnel.sh run`, its lines prefixed `tunnel | `) and opens the dashboard;
+Ctrl+C stops both. When the profile or the key is missing it says so in one line and runs
+without the tunnel. The two halves separately:
+
 **Factory (terminal 1):**
 
 ```bash
@@ -244,6 +249,15 @@ deliveries from this side. ChatGPT refreshes a subscription before its `refreshB
 the subscriptions and pending deliveries survive a restart of `sf serve`.
 
 ## Working in ChatGPT
+
+From the dashboard (`npm start` at the repository root opens it; SF-025): under **New ticket**
+write the ticket key, a title and the request in your words; the page writes the ticket draft.
+Under **Tickets** press **Open the conversation**: a new tab opens ChatGPT with the whole first
+message in the composer (the connector, `guide`, the draft to read, the rewrite with
+`write_task`, the event-triggered task subscribed to this ticket, and the wait for "start");
+press Enter if it is not sent by itself. Plan with ChatGPT there; when it has rewritten the Task
+file and created the task, the ticket's line reads `Reviewer: subscribed`. Say "start" to
+ChatGPT, or press **Start…** on the page. The manual path, step by step:
 
 1. Open a Work chat, type `@` and choose **Software Factory**.
 2. The first call is `guide`. It returns the Handbook (`factory/HANDBOOK.md`): the cycle, the

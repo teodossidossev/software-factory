@@ -23,6 +23,7 @@ export class FakeElement {
   id = '';
   className = '';
   hidden = false;
+  open = false;
   disabled = false;
   checked = false;
   value = '';
@@ -219,10 +220,20 @@ export async function loadPage(staticDir: URL, autoGet: (path: string) => unknow
   const html = await readFile(new URL('dashboard.html', staticDir), 'utf8');
   const source = await readFile(new URL('app.js', staticDir), 'utf8');
   const document = new FakeDocument();
-  for (const match of html.matchAll(/<(\w+)[^>]*\bid="([^"]+)"/g)) {
+  for (const match of html.matchAll(/<(\w+)([^>]*)>/g)) {
+    const attributes = match[2]!;
+    const id = /\bid="([^"]+)"/.exec(attributes)?.[1];
+    if (id === undefined) {
+      continue;
+    }
     const element = document.createElement(match[1]!);
-    element.id = match[2]!;
-    document.elements.set(element.id, element);
+    element.id = id;
+    // The boolean attributes the page starts with, as a browser would read them.
+    element.hidden = /\shidden(?=[\s>]|$)/.test(attributes);
+    element.checked = /\schecked(?=[\s>]|$)/.test(attributes);
+    element.disabled = /\sdisabled(?=[\s>]|$)/.test(attributes);
+    element.open = /\sopen(?=[\s>]|$)/.test(attributes);
+    document.elements.set(id, element);
   }
   // The two view tabs are the only elements the script finds without an id.
   for (const view of ['report', 'patch']) {

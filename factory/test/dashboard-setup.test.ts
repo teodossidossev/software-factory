@@ -1,5 +1,5 @@
-// The start screen's HTTP contract (SF-025): api/workspaces and api/tickets on GET and POST,
-// api/workspaces/<name>/remove and api/jobs/<ws>/<ticket>/start on POST, with the action checks
+// The start screen's HTTP contract (SF-025, SF-028): api/workspaces and api/tickets on GET and POST,
+// api/workspaces/<name>/remove on POST (no start route: the job starts in the conversation), with the action checks
 // of SF-018, against fake setup and actions in process; the stream's workspaces and tickets
 // events; then end to end through `sf serve`: a workspace added from the page, a ticket draft, a
 // subscription that turns the ticket's reviewer line, and a start that creates the real job.
@@ -17,7 +17,7 @@ import { draftContent } from '../src/setup.js';
 import { act, CSP, fakeActions, fakeReviewers, fakeSetup, fetchRaw, openStream, type Reply, subscription, ticketRow, workspaceRow } from './support/dashboard-client.js';
 import { withDashboard } from './support/dashboard-state.js';
 import { AUDIENCE, type FakeAs, startFakeAs } from './support/fake-as.js';
-import { call, git, newEnv, newRepo, runCli, script, serve, type Served, stop, temp, waitFor } from './support/harness.js';
+import { call, git, newEnv, newRepo, refused, runCli, script, serve, type Served, stop, temp, waitFor } from './support/harness.js';
 import { startWebhookSink } from './support/webhook-sink.js';
 
 const error = (reply: Reply): { status: number; code: string } => ({ status: reply.status, code: JSON.parse(reply.body).error.code });
@@ -44,13 +44,13 @@ test('dashboard setup: the reads, the method rules per path and the token; nothi
     const tickets = await fetchRaw(new URL('api/tickets', base));
     assert.equal(tickets.status, 200);
     const rows = JSON.parse(tickets.body).tickets;
-    assert.deepEqual(Object.keys(rows[0]).sort(), ['base', 'conversation', 'draft', 'job', 'reviewer', 'ticket', 'title', 'workspace']);
+    assert.deepEqual(Object.keys(rows[0]).sort(), ['base', 'conversation', 'draft', 'job', 'request', 'reviewer', 'ticket', 'title', 'workspace']);
     assert.deepEqual(rows[0].reviewer, { status: 'subscribed', id: 'sub_own', host: 'chatgpt.example', input: { workspace: 'app', ticket: 'T-5' }, broad: [] });
     assert.deepEqual([rows[1].reviewer.status, rows[1].reviewer.id, rows[1].draft, rows[1].job], ['broad', 'sub_web', false, 'pushed']);
     // The conversation: the message names the connector, guide, the draft, write_task, the subscription and the wait; the URL is the prefilled composer.
     const message = rows[0].conversation.message as string;
     assert.equal(message, ticketConversation('app', 'T-5'));
-    for (const part of ['Software Factory connector', 'Call guide', 'read_file (workspace "app", path ".software-factory/T-5.md")', 'write_task (workspace "app", ticket "T-5")', ticketInstruction('app', 'T-5'), 'wait for my "start"']) {
+    for (const part of ['Software Factory connector', 'Call guide', 'ticket T-5 in workspace app', 'read_file and search', 'write_task (workspace "app", ticket "T-5")', ticketInstruction('app', 'T-5'), 'Do not call start until I say start']) {
       assert.ok(message.includes(part), part);
     }
     assert.equal(rows[0].conversation.url, `${CHATGPT_PREFILL_URL}${encodeURIComponent(message)}`);
@@ -67,7 +67,10 @@ test('dashboard setup: the reads, the method rules per path and the token; nothi
         assert.deepEqual([reply.status, reply.headers.allow, reply.body], [405, 'GET, POST', ''], `${method} ${path}`);
       }
     }
-    for (const path of ['api/workspaces/app/remove', 'api/jobs/app/T-5/start']) {
+    // No start route: a POST there is an unknown path (GET only), and nothing is dispatched.
+    const noStart = await act(base, 'api/jobs/app/T-5/start', {});
+    assert.deepEqual([noStart.status, noStart.headers.allow], [405, 'GET']);
+    for (const path of ['api/workspaces/app/remove']) {
       for (const method of ['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']) {
         const reply = await fetchRaw(new URL(path, base), { method, headers, body: '{}' });
         assert.deepEqual([reply.status, reply.headers.allow, reply.body], [405, 'POST', ''], `${method} ${path}`);
@@ -105,7 +108,7 @@ test('dashboard setup: the action checks apply to the setup POSTs; exact argumen
     const base = dashboard.url;
     const port = Number(base.port);
     // Origin, content type, body bounds and JSON: as for the job actions.
-    for (const path of ['api/workspaces', 'api/tickets', 'api/workspaces/app/remove', 'api/jobs/app/T-5/start']) {
+    for (const path of ['api/workspaces', 'api/tickets', 'api/workspaces/app/remove']) {
       assert.deepEqual(error(await act(base, path, {}, { headers: { origin: `http://localhost:${port}` } })), { status: 403, code: 'invalid_origin' }, path);
       assert.deepEqual(error(await act(base, path, {}, { headers: { origin: '' } })), { status: 403, code: 'invalid_origin' }, path);
       assert.deepEqual(error(await act(base, path, {}, { headers: { 'content-type': 'text/plain' } })), { status: 415, code: 'unsupported_media_type' }, path);
@@ -115,7 +118,7 @@ test('dashboard setup: the action checks apply to the setup POSTs; exact argumen
     const bad: Array<[string, string]> = [
       ['api/workspaces', '{}'], ['api/workspaces', '{"name":"app"}'], ['api/workspaces', '{"name":"app","path":1}'], ['api/workspaces', '{"name":"app","path":"/x","work":"/y"}'], ['api/workspaces', '[]'], ['api/workspaces', 'null'],
       ['api/tickets', '{}'], ['api/tickets', '{"workspace":"app","ticket":"T-1","title":"t"}'], ['api/tickets', '{"workspace":"app","ticket":"T-1","title":"t","request":null}'], ['api/tickets', '{"workspace":"app","ticket":"T-1","title":"t","request":"r","base":"main"}'],
-      ['api/workspaces/app/remove', '{"force":true}'], ['api/workspaces/app/remove', '[]'], ['api/jobs/app/T-5/start', '{"x":1}'], ['api/jobs/app/T-5/start', 'null'],
+      ['api/workspaces/app/remove', '{"force":true}'], ['api/workspaces/app/remove', '[]'],
     ];
     for (const [path, text] of bad) {
       const reply = await act(base, path, undefined, { body: text });
@@ -140,20 +143,10 @@ test('dashboard setup: the action checks apply to the setup POSTs; exact argumen
     assert.deepEqual(result(await act(base, 'api/tickets', { workspace: 'app', ticket: 'T-6', title: 'Six', request })), { workspace: 'app', ticket: 'T-6', path: '.software-factory/T-6.md', base: 'main' });
     assert.deepEqual(setup.calls.at(-1), ['createTicket', { workspace: 'app', ticket: 'T-6', title: 'Six', request }]);
     await stream.next('tickets');
-    assert.deepEqual(result(await act(base, 'api/jobs/app/T-5/start', {})), { branch: 'T-5-ticket-t-5', state: 'working', check_after_minutes: 15 });
-    assert.deepEqual(fake.calls, [['start', 'app', 'T-5']]);
-    await stream.next('tickets');
-    // start needs no job yet (a 404 would make it unusable); invalid names are 404 before any call.
-    for (const path of ['api/jobs/App/T-5/start', 'api/jobs/app/.T-5/start', 'api/jobs/app/T-5%2Fx/start']) {
-      const reply = await act(base, path, {});
-      assert.deepEqual([reply.status, reply.body], [404, ''], path);
-    }
-    assert.equal(fake.calls.length, 1);
+    assert.deepEqual(fake.calls, []);
 
-    // Error mapping: the guards of start and of the setup with their codes and messages.
+    // Error mapping: the guards of the setup with their codes and messages.
     const mapping: Array<[string, string, number]> = [
-      ['api/jobs/app/T-5/start', 'job_exists', 409], ['api/jobs/app/T-5/start', 'job_active', 409], ['api/jobs/app/T-5/start', 'checkout_dirty', 409], ['api/jobs/app/T-5/start', 'branch_exists', 409],
-      ['api/jobs/app/T-5/start', 'task_not_found', 404], ['api/jobs/app/T-5/start', 'workspace_not_found', 404], ['api/jobs/app/T-5/start', 'invalid_ticket', 400], ['api/jobs/app/T-5/start', 'start_failed', 500],
       ['api/workspaces', 'workspace_exists', 409], ['api/workspaces', 'workspace_invalid', 400], ['api/workspaces', 'invalid_name', 400],
       ['api/workspaces/app/remove', 'workspace_busy', 409], ['api/workspaces/app/remove', 'workspace_not_found', 404],
       ['api/tickets', 'ticket_exists', 409], ['api/tickets', 'invalid_content', 400], ['api/tickets', 'job_active', 409],
@@ -219,13 +212,17 @@ test('dashboard setup end to end: a workspace from the page, a ticket draft, the
     assert.match(listed.stdout, new RegExp(`^app\\n  checkout: ${repo}$`, 'm'));
     assert.deepEqual(error(await act(base, 'api/workspaces', { name: 'app', path: repo })), { status: 409, code: 'workspace_exists' });
 
-    // A ticket draft: the exact file, listed with Reviewer none; a second one is refused.
-    const created = result(await act(base, 'api/tickets', { workspace: 'app', ticket: 'T-1', title: 'Change README', request: 'Say hello world in the README.' }));
+    // A ticket skeleton: the exact file without the user's words, listed with Reviewer none; the
+    // words are in the conversation's first message; a second ticket is refused.
+    const words = 'Say hello world in the README.';
+    const created = result(await act(base, 'api/tickets', { workspace: 'app', ticket: 'T-1', title: 'Change README', request: words }));
     assert.deepEqual(created, { workspace: 'app', ticket: 'T-1', path: '.software-factory/T-1.md', base: 'main' });
-    assert.equal(await readFile(join(repo, '.software-factory', 'T-1.md'), 'utf8'), draftContent('T-1', 'Change README', 'main', 'Say hello world in the README.'));
+    assert.equal(await readFile(join(repo, '.software-factory', 'T-1.md'), 'utf8'), draftContent('T-1', 'Change README', 'main'));
+    assert.doesNotMatch(await readFile(join(repo, '.software-factory', 'T-1.md'), 'utf8'), /hello world/);
     const tickets = (await stream.next('tickets', (data) => data.tickets.length === 1)).tickets;
-    assert.deepEqual([tickets[0].ticket, tickets[0].draft, tickets[0].job, tickets[0].reviewer], ['T-1', true, null, { status: 'none' }]);
-    assert.equal(tickets[0].conversation.url, conversationUrl(ticketConversation('app', 'T-1')));
+    assert.deepEqual([tickets[0].ticket, tickets[0].draft, tickets[0].request, tickets[0].job, tickets[0].reviewer], ['T-1', true, words, null, { status: 'none' }]);
+    assert.equal(tickets[0].conversation.url, conversationUrl(ticketConversation('app', 'T-1', words)));
+    assert.match(tickets[0].conversation.message, /Here is what I want, in my words:\n\nSay hello world in the README\./);
     assert.deepEqual(error(await act(base, 'api/tickets', { workspace: 'app', ticket: 'T-1', title: 'Again', request: 'x' })), { status: 409, code: 'ticket_exists' });
 
     // ChatGPT subscribes to the ticket: the line turns to subscribed without a reload.
@@ -233,32 +230,30 @@ test('dashboard setup end to end: a workspace from the page, a ticket draft, the
     const subscribed = (await stream.next('tickets', (data) => data.tickets[0]?.reviewer.status === 'subscribed')).tickets[0];
     assert.deepEqual([subscribed.reviewer.id, subscribed.reviewer.input], [id, { workspace: 'app', ticket: 'T-1' }]);
 
-    // Start from the page: the real Execution, its guards, the job; the ticket leaves the list and
-    // the workspace counts a live job; the checkout cannot be removed meanwhile.
-    git(repo, 'checkout', '-q', '-b', 'T-1-change-readme');
-    git(repo, 'checkout', '-q', 'main');
-    assert.deepEqual(error(await act(base, 'api/jobs/app/T-1/start', {})), { status: 409, code: 'branch_exists' });
-    git(repo, 'branch', '-q', '-D', 'T-1-change-readme');
-    const notRegistered = await act(base, 'api/jobs/web/T-1/start', {});
-    assert.deepEqual(error(notRegistered), { status: 404, code: 'workspace_not_found' });
-    assert.deepEqual(error(await act(base, 'api/jobs/app/T-9/start', {})), { status: 404, code: 'task_not_found' });
-    const started = result(await act(base, 'api/jobs/app/T-1/start', {}));
+    // The Context owner cannot start on the skeleton; it writes the Task file, then starts (on
+    // the user's word, in the conversation). The ticket leaves the list, the workspace counts a
+    // live job, and the checkout cannot be removed meanwhile.
+    const draft = await refused(authed, 'start', { workspace: 'app', ticket: 'T-1' });
+    assert.equal(draft.code, 'task_draft');
+    assert.equal(await new JobStore(env.state).read('app', 'T-1'), undefined);
+    await call(authed, 'write_task', { workspace: 'app', ticket: 'T-1', content: '---\nticket: T-1\ntitle: Change README\nbase: main\n---\n\n# T-1: Change README\n\nSay hello world in the README.\n' });
+    const written = JSON.parse((await fetchRaw(new URL('api/tickets', base))).body).tickets[0];
+    assert.deepEqual([written.ticket, written.draft], ['T-1', false]);
+    const started = await call(authed, 'start', { workspace: 'app', ticket: 'T-1' });
     assert.deepEqual([started.branch, started.state, started.check_after_minutes], ['T-1-change-readme', 'working', 15]);
     assert.equal((await stream.next('tickets', (data) => data.tickets.length === 0)).tickets.length, 0);
     assert.equal((await stream.next('workspaces', (data) => data.workspaces[0]?.liveJobs === 1)).workspaces[0].name, 'app');
-    assert.deepEqual(error(await act(base, 'api/jobs/app/T-1/start', {})), { status: 409, code: 'job_exists' });
     assert.deepEqual(error(await act(base, 'api/workspaces/app/remove', {})), { status: 409, code: 'workspace_busy' });
     await waitFor(authed, 'T-1', 'awaiting_review', 1);
     const job = (await new JobStore(env.state).read('app', 'T-1'))!;
     assert.deepEqual([job.branch, job.base, job.iteration], ['T-1-change-readme', 'main', 1]);
-    // The subscription received the events (the refused start with branch_exists failed a job
-    // record first), so the conversation of the ticket reviews it.
-    assert.deepEqual((await sink.waitFor('/t1', 3)).slice(1).map((request) => request.json.data.state), ['failed', 'awaiting_review']);
+    // The subscription received the event, so the conversation of the ticket reviews it.
+    assert.deepEqual((await sink.waitFor('/t1', 2)).slice(1).map((request) => request.json.data.state), ['awaiting_review']);
     // Ended: the ticket is listed again with its last job, and the workspace can be removed.
     await call(authed, 'mark_clean', { workspace: 'app', ticket: 'T-1' });
     assert.equal((await runCli(env, ['abort', 'app', 'T-1'])).code, 0);
     const back = (await stream.next('tickets', (data) => data.tickets.length === 1)).tickets[0];
-    assert.deepEqual([back.ticket, back.draft, back.job], ['T-1', true, 'aborted']);
+    assert.deepEqual([back.ticket, back.draft, back.job], ['T-1', false, 'aborted']);
     assert.deepEqual(result(await act(base, 'api/workspaces/app/remove', {})), { removed: 'app' });
     assert.deepEqual((await loadRegistry(env.config)).workspaces, {});
     stream.close();

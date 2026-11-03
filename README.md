@@ -31,13 +31,14 @@ Then, in the dashboard (`http://127.0.0.1:8788/d/<token>/`, opened for you; `npm
 opens it again):
 
 1. **Workspaces**: add the local checkout of the repository to work in (a name and its path).
-2. **New ticket**: the workspace, the ticket key, a title and what to implement, in your words.
-   The page writes a ticket draft, `.software-factory/<ticket>.md` in that checkout.
-3. **Tickets**: *Open the conversation* opens ChatGPT in a new tab with the message that makes
-   it read the draft, plan with you, rewrite the Task file and subscribe to the ticket's events
-   (press Enter if the message is not sent by itself). When ChatGPT has planned the ticket and
-   you have said "start" to it, the ticket's line reads `Reviewer: subscribed`; press
-   **Start…**.
+2. **New ticket**: the workspace, the ticket key, a title and what you want, in your words.
+   The page creates an empty skeleton, `.software-factory/<ticket>.md`; your words are not
+   written into it.
+3. **Tickets**: *Open the conversation* opens ChatGPT in a new tab with your words as the first
+   message (press Enter if it is not sent by itself). There the LLM investigates, discusses the
+   ticket with you, writes the Task file and subscribes to the ticket's events. When you agree,
+   say "start" (or "давай") in that conversation and the LLM starts the job; there is no Start
+   button in the page.
 4. The job appears under Jobs: the Implementer works in a worktree, ChatGPT reviews each
    iteration (the Files view lists every changed file, sensitive and deleted ones first), and
    when it declares Clean the factory makes the one commit and the branch is in your checkout:

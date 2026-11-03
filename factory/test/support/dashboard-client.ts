@@ -143,7 +143,7 @@ export function openStream(url: URL): Promise<Stream> {
   });
 }
 
-export type Call = ['approve', string, string] | ['abort', string, string, boolean] | ['say', string, string, string] | ['start', string, string];
+export type Call = ['approve', string, string] | ['abort', string, string, boolean] | ['say', string, string, string] | ['reset', string, string];
 
 export interface FakeActions extends DashboardActions {
   calls: Call[];
@@ -160,7 +160,7 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
     approve: (workspace, ticket) => reply(['approve', workspace, ticket]),
     abort: (workspace, ticket, discard) => reply(['abort', workspace, ticket, discard]),
     say: (workspace, ticket, message) => reply(['say', workspace, ticket, message]),
-    start: (workspace, ticket) => reply(['start', workspace, ticket]),
+    reset: (workspace, ticket) => reply(['reset', workspace, ticket]),
   };
   async function reply(call: Call): Promise<any> {
     fake.calls.push(call);
@@ -235,7 +235,7 @@ export function workspaceRow(name: string, path = `/srv/${name}`, liveJobs = 0):
 }
 
 export function ticketRow(workspace: string, ticket: string, title = `Ticket ${ticket}`, draft = true, job: TicketRow['job'] = null): TicketRow {
-  return { workspace, ticket, title, base: 'main', draft, job };
+  return { workspace, ticket, title, base: 'main', draft, request: null, job };
 }
 
 // Lists rows and records every change; the change answers with `answer` (thrown when it is an

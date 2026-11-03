@@ -312,6 +312,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 .ws-path, .ticket-line { font-family: var(--mono); font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
 .ws-problem { color: var(--del); font-size: 13px; overflow-wrap: anywhere; }
 .ticket-reviewer { font-size: 13px; overflow-wrap: anywhere; }
+.ticket-next { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
 .r-subscribed { color: var(--s-ready); font-weight: 600; }
 .r-broad { color: var(--warn); font-weight: 600; }
 .r-none { color: var(--del); font-weight: 600; }

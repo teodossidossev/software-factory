@@ -250,14 +250,15 @@ the subscriptions and pending deliveries survive a restart of `sf serve`.
 
 ## Working in ChatGPT
 
-From the dashboard (`npm start` at the repository root opens it; SF-025): under **New ticket**
-write the ticket key, a title and the request in your words; the page writes the ticket draft.
-Under **Tickets** press **Open the conversation**: a new tab opens ChatGPT with the whole first
-message in the composer (the connector, `guide`, the draft to read, the rewrite with
-`write_task`, the event-triggered task subscribed to this ticket, and the wait for "start");
-press Enter if it is not sent by itself. Plan with ChatGPT there; when it has rewritten the Task
-file and created the task, the ticket's line reads `Reviewer: subscribed`. Say "start" to
-ChatGPT, or press **Start…** on the page. The manual path, step by step:
+From the dashboard (`npm start` at the repository root opens it; SF-025, SF-028): under **New
+ticket** write the ticket key, a title and what you want in your words; the page creates an empty
+skeleton of the Task file and keeps your words for the conversation. Under **Tickets** press
+**Open the conversation**: a new tab opens ChatGPT with the whole first message in the composer
+(the connector, `guide`, your words, the instruction to investigate, discuss, write the Task
+file with `write_task`, create the event-triggered task subscribed to this ticket, and to start
+only on your word); press Enter if it is not sent by itself. Discuss with ChatGPT there; when the
+Task file is written and you agree, say "start" in that conversation and ChatGPT calls `start`.
+The manual path, step by step:
 
 1. Open a Work chat, type `@` and choose **Software Factory**.
 2. The first call is `guide`. It returns the Handbook (`factory/HANDBOOK.md`): the cycle, the

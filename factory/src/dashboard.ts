@@ -17,7 +17,7 @@ import { localhostHostValidation, localhostOriginValidation } from '@modelcontex
 import * as z from 'zod/v4';
 import { writeFileAtomic } from './atomic.js';
 import { FactoryError } from './errors.js';
-import { conversationUrl, coversTicketBroadly, type Events, ownsTicket, type SubscriptionSummary, TICKET_GUIDE, ticketConversation, ticketInstruction } from './events.js';
+import { conversationUrl, coversTicketBroadly, type Events, MAX_CONVERSATION_URL, ownsTicket, type SubscriptionSummary, TICKET_GUIDE, ticketConversation, ticketInstruction } from './events.js';
 import type { Execution } from './execution.js';
 import { type Job, type JobState, type JobStore, TERMINAL_STATES } from './jobs.js';
 import { WORKSPACE_NAME_PATTERN } from './registry.js';
@@ -48,10 +48,11 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 };
 
 // The User's actions, bound by `sf serve` to its one Execution: the same methods, guards and
-// results as the socket commands of sf approve, sf abort, sf say and sf start.
-export type DashboardActions = Pick<Execution, 'approve' | 'abort' | 'say' | 'start'>;
-export type DashboardAction = keyof DashboardActions;
-export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'start'];
+// results as the socket commands of sf approve, sf abort and sf say. A job is started in the
+// ticket's conversation (the Context owner's start), or with sf start; not from the page (SF-028).
+export type DashboardActions = Pick<Execution, 'approve' | 'abort' | 'say' | 'reset'>;
+export type DashboardAction = 'approve' | 'abort' | 'say' | 'archive';
+export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'archive'];
 
 // The MCP Events subscriptions, bound by `sf serve` to its Events hub: read, test one, and hear
 // about changes (the returned function stops listening).
@@ -94,8 +95,8 @@ const BODIES = {
   approve: { shape: '{"as_is"?: boolean}', schema: z.strictObject({ as_is: z.boolean().optional() }) },
   abort: { shape: '{"discard"?: boolean}', schema: z.strictObject({ discard: z.boolean().optional() }) },
   say: { shape: '{"message": string}', schema: z.strictObject({ message: z.string() }) },
-  start: { shape: '{}', schema: z.strictObject({}) },
   'test-event': { shape: '{}', schema: z.strictObject({}) },
+  archive: { shape: '{}', schema: z.strictObject({}) },
   'workspace-add': { shape: '{"name": string, "path": string}', schema: z.strictObject({ name: z.string(), path: z.string() }) },
   'workspace-remove': { shape: '{}', schema: z.strictObject({}) },
   'ticket-archive': { shape: '{}', schema: z.strictObject({}) },
@@ -104,13 +105,13 @@ const BODIES = {
   'ticket-new': { shape: '{"workspace": string, "ticket": string, "title": string, "request": string}', schema: z.strictObject({ workspace: z.string(), ticket: z.string(), title: z.string(), request: z.string() }) },
 };
 type PostRoute = keyof typeof BODIES;
-const ACTION_ROUTES: ActionRoute[] = ['approve', 'abort', 'say', 'start', 'test-event'];
+const ACTION_ROUTES: ActionRoute[] = ['approve', 'abort', 'say', 'archive', 'test-event'];
 
 // The HTTP status of a FactoryError the methods can throw; any other code answers 500 and keeps
 // its code and message.
 const ERROR_STATUS: Record<string, number> = {
   invalid_state: 409, turn_running: 409, rebase_in_progress: 409,
-  job_exists: 409, job_active: 409, job_limit: 409, checkout_dirty: 409, branch_exists: 409, branch_changed: 409, branch_missing: 409, worktree_exists: 409,
+  job_exists: 409, job_active: 409, job_limit: 409, task_draft: 409, checkout_dirty: 409, branch_exists: 409, branch_changed: 409, branch_missing: 409, worktree_exists: 409,
   worktree_missing: 409, sensitive_unacknowledged: 409, ticket_exists: 409, workspace_exists: 409, workspace_busy: 409,
   job_not_found: 404, workspace_not_found: 404, task_not_found: 404,
   invalid_content: 400, invalid_ticket: 400, invalid_name: 400, workspace_invalid: 400,
@@ -229,8 +230,10 @@ async function ticketsPayload(setup: DashboardSetup, reviewers: DashboardReviewe
   const subscriptions = reviewers.subscriptions();
   return {
     tickets: (await setup.tickets()).map((row) => {
-      const message = ticketConversation(row.workspace, row.ticket);
-      return { ...row, reviewer: reviewerOf(subscriptions, row.workspace, row.ticket), conversation: { message, url: conversationUrl(message) } };
+      const message = ticketConversation(row.workspace, row.ticket, row.request ?? undefined);
+      const url = conversationUrl(message);
+      // A very long message does not fit a link; the page offers it to copy instead.
+      return { ...row, reviewer: reviewerOf(subscriptions, row.workspace, row.ticket), conversation: { message, url: url.length <= MAX_CONVERSATION_URL ? url : null } };
     }),
     archived: await setup.archivedTickets(),
   };
@@ -583,8 +586,7 @@ export async function startDashboard(
       const parsed = schema.safeParse(data);
       return parsed.success ? parsed.data : undefined;
     };
-    // start needs no job yet; every other action needs the job to exist.
-    const exists = action === 'start' ? undefined : async (): Promise<boolean> => (await jobs.read(workspace, ticket)) !== undefined;
+    const exists = async (): Promise<boolean> => (await jobs.read(workspace, ticket)) !== undefined;
     if (action === 'approve') {
       return {
         route: action, exists,
@@ -603,11 +605,20 @@ export async function startDashboard(
         },
       };
     }
+    if (action === 'archive') {
+      // A finished job leaves the Jobs list: sf reset (the history is archived, a kept worktree
+      // removed, the branch untouched). A live job is refused; abort it first.
+      const run = async (): Promise<unknown> => {
+        const job = await jobs.read(workspace, ticket);
+        if (job !== undefined && !TERMINAL_STATES.includes(job.state)) {
+          throw new FactoryError('invalid_state', `Only a finished job can be archived; the job is ${job.state}. Abort it first.`);
+        }
+        return actions.reset(workspace, ticket);
+      };
+      return { route: action, exists, call: (data) => (parse(BODIES.archive.schema, data) ? run : undefined), refreshJobs: true };
+    }
     if (action === 'test-event') {
       return { route: action, exists, call: (data) => (parse(BODIES['test-event'].schema, data) ? () => testEvent(workspace, ticket) : undefined) };
-    }
-    if (action === 'start') {
-      return { route: action, call: (data) => (parse(BODIES.start.schema, data) ? () => actions.start(workspace, ticket) : undefined), refreshSetup: true };
     }
     return {
       route: action, exists,

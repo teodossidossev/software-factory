@@ -42,9 +42,11 @@ async function refused(work: Promise<unknown>, code: string): Promise<string> {
   assert.fail(`expected ${code}`);
 }
 
-test('setup: draftContent and isDraft', () => {
-  const content = draftContent('T-1', 'Do it', 'main', 'Make it\r\nso.\n\n');
-  assert.equal(content, `---\nticket: T-1\ntitle: Do it\nbase: main\n---\n\n# T-1: Do it\n\n## Request\n\nMake it\nso.\n\n${DRAFT_MARKER}\n\n${DRAFT_NOTE}\n`);
+test('setup: draftContent is the skeleton without the user\'s words; isDraft knows it and the older draft', () => {
+  const content = draftContent('T-1', 'Do it', 'main');
+  assert.equal(content, `---\nticket: T-1\ntitle: Do it\nbase: main\n---\n\n# T-1: Do it\n\n${DRAFT_MARKER}\n\n${DRAFT_NOTE}\n`);
+  assert.equal(DRAFT_MARKER, '## Status: waiting for the Context owner');
+  assert.equal(isDraft('---\nticket: T-1\n---\n## Status: draft\n'), true);
   assert.equal(isDraft(content), true);
   assert.equal(isDraft(content.replace(`${DRAFT_MARKER}\n\n${DRAFT_NOTE}\n`, '## Acceptance\n- done\n')), false);
   assert.equal(isDraft(`---\nticket: T-1\n---\n  ${DRAFT_MARKER}  \n`), true);
@@ -102,15 +104,17 @@ test('setup: tickets lists the Task files without a live job; createTicket write
 
   const created = await setup.createTicket({ workspace: 'app', ticket: 'T-1', title: '  Add a thing  ', request: 'Please add\nthe thing.' });
   assert.deepEqual(created, { workspace: 'app', ticket: 'T-1', path: '.software-factory/T-1.md', base: 'main' });
-  assert.equal(await readFile(join(repo, '.software-factory', 'T-1.md'), 'utf8'), draftContent('T-1', 'Add a thing', 'main', 'Please add\nthe thing.'));
+  assert.equal(await readFile(join(repo, '.software-factory', 'T-1.md'), 'utf8'), draftContent('T-1', 'Add a thing', 'main'));
+  // The user's words are kept for the conversation in the state directory, not in the repository.
+  assert.equal(await readFile(join(env.state, 'requests', 'app', 'T-1.md'), 'utf8'), 'Please add\nthe thing.');
   // The Task directory is excluded from Git, as write_task does it.
   assert.match(await readFile(join(repo, '.git', 'info', 'exclude'), 'utf8'), /^\.software-factory\/$/m);
   assert.equal(git(repo, 'status', '--porcelain'), '');
-  assert.deepEqual(await setup.tickets(), [{ workspace: 'app', ticket: 'T-1', title: 'Add a thing', base: 'main', draft: true, job: null }]);
+  assert.deepEqual(await setup.tickets(), [{ workspace: 'app', ticket: 'T-1', title: 'Add a thing', base: 'main', draft: true, request: 'Please add\nthe thing.', job: null }]);
 
   // Refused: an existing ticket (never replaced), bad names, an empty or oversized title or request, an unknown workspace.
   assert.match(await refused(setup.createTicket({ workspace: 'app', ticket: 'T-1', title: 'Again', request: 'x' }), 'ticket_exists'), /already exists in workspace "app"/);
-  assert.equal(await readFile(join(repo, '.software-factory', 'T-1.md'), 'utf8'), draftContent('T-1', 'Add a thing', 'main', 'Please add\nthe thing.'));
+  assert.equal(await readFile(join(repo, '.software-factory', 'T-1.md'), 'utf8'), draftContent('T-1', 'Add a thing', 'main'));
   await refused(setup.createTicket({ workspace: 'App', ticket: 'T-2', title: 't', request: 'r' }), 'invalid_name');
   await refused(setup.createTicket({ workspace: 'app', ticket: '.T-2', title: 't', request: 'r' }), 'invalid_ticket');
   await refused(setup.createTicket({ workspace: 'app', ticket: '../T-2', title: 't', request: 'r' }), 'invalid_ticket');
@@ -135,8 +139,8 @@ test('setup: tickets lists the Task files without a live job; createTicket write
   await writeFile(join(repo, '.software-factory', 'T-5.md'), '---\nticket: T-9\ntitle: Other\nbase: main\n---\n');
   await writeFile(join(repo, '.software-factory', '.T-6.md'), '---\nticket: .T-6\ntitle: Hidden\nbase: main\n---\n');
   assert.deepEqual(await setup.tickets(), [
-    { workspace: 'app', ticket: 'T-1', title: 'Add a thing', base: 'main', draft: true, job: null },
-    { workspace: 'app', ticket: 'T-3', title: 'Third', base: 'main', draft: false, job: 'pushed' },
+    { workspace: 'app', ticket: 'T-1', title: 'Add a thing', base: 'main', draft: true, request: 'Please add\nthe thing.', job: null },
+    { workspace: 'app', ticket: 'T-3', title: 'Third', base: 'main', draft: false, request: null, job: 'pushed' },
   ]);
   await refused(setup.createTicket({ workspace: 'app', ticket: 'T-2', title: 't', request: 'r' }), 'ticket_exists');
 

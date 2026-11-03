@@ -1,6 +1,8 @@
 // The workspace registry: ${SF_CONFIG_DIR:-${XDG_CONFIG_HOME:-~/.config}/software-factory}/workspaces.json.
-// Strictly parsed; an invalid file is an error, a missing file an empty registry. Checkout paths
-// are verified at use time: each must be the root of a non-bare Git work tree.
+// Strictly parsed; an invalid file is an error, a missing file an empty registry. The checkout
+// path is verified at use time: it must be the root of a non-bare Git work tree. Since SF-019 a
+// workspace is one checkout: the Implementer works in a worktree of it, so a separate work
+// checkout (`work_checkout`) is read for compatibility and ignored.
 import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -21,7 +23,7 @@ const absolutePath = z
 const registrySchema = z.strictObject({
   workspaces: z.record(
     z.string().regex(WORKSPACE_NAME_PATTERN),
-    z.strictObject({ read_checkout: absolutePath, work_checkout: absolutePath }),
+    z.strictObject({ read_checkout: absolutePath, work_checkout: absolutePath.optional() }),
   ),
 });
 
@@ -30,9 +32,16 @@ export type WorkspaceEntry = Registry['workspaces'][string];
 
 export interface Workspace {
   name: string;
-  // Real paths, verified as Git work tree roots; for file operations only, never returned to clients.
+  // The real path of the checkout, verified as a Git work tree root; for file operations only,
+  // never returned to clients. Both names hold the same path since SF-019: the Context owner reads
+  // it, the Task files live in it, and every job's worktree is created from it.
   readCheckout: string;
   workCheckout: string;
+}
+
+// The entries whose ignored work_checkout differs from the checkout, for one warning at start.
+export function ignoredWorkCheckouts(registry: Registry): string[] {
+  return Object.entries(registry.workspaces).filter(([, entry]) => entry.work_checkout !== undefined && entry.work_checkout !== entry.read_checkout).map(([name]) => name);
 }
 
 export function configDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -98,11 +107,8 @@ export async function resolveWorkspace(name: string, dir = configDir()): Promise
     throw new FactoryError('workspace_not_found', `Workspace "${name}" is not registered.`);
   }
   try {
-    return {
-      name,
-      readCheckout: await verifyCheckout(entry.read_checkout, 'read checkout'),
-      workCheckout: await verifyCheckout(entry.work_checkout, 'work checkout'),
-    };
+    const checkout = await verifyCheckout(entry.read_checkout, 'checkout');
+    return { name, readCheckout: checkout, workCheckout: checkout };
   } catch (error) {
     if (error instanceof FactoryError) {
       throw new FactoryError(error.code, `Workspace "${name}": ${error.message}`);

@@ -235,8 +235,8 @@ export async function loadPage(staticDir: URL, autoGet: (path: string) => unknow
     element.open = /\sopen(?=[\s>]|$)/.test(attributes);
     document.elements.set(id, element);
   }
-  // The two view tabs are the only elements the script finds without an id.
-  for (const view of ['report', 'patch']) {
+  // The three view tabs are the only elements the script finds without an id.
+  for (const view of ['report', 'files', 'patch']) {
     const button = document.createElement('button');
     button.dataset.view = view;
     document.elements.get('iteration-views')!.append(button);

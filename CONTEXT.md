@@ -37,10 +37,10 @@ _Avoid_: bridge, mediator, supervisor
 A Jira issue. Its key names the Task file and the Job.
 
 **Workspace**:
-A registered application repository: a name, a read checkout (the User's IDE checkout, used by the
-Context owner for reading) and a work checkout (where the Implementer works). They may be the same
-directory.
-_Avoid_: app, app_id, project
+A registered application repository: a name and its local checkout (the User's IDE checkout,
+read by the Context owner, where the Task files live and from which every Job's Worktree is
+created). The Implementer never works in it.
+_Avoid_: app, app_id, project, work checkout
 
 **Task file**:
 The one Markdown file per Ticket, `.software-factory/<ticket>.md` in the work checkout, excluded
@@ -64,9 +64,16 @@ _Avoid_: findings, review request, feedback
 **Job**:
 One Ticket being implemented in one Workspace on one Branch. Identified by the Branch name.
 
+**Worktree**:
+The Git worktree of one Job, created from the Workspace's checkout at start under the factory's
+state directory, where the Implementer works. Removed at Clean (the Branch stays), at the end of
+the Job and by reset; recreated from the Branch when a fix is asked after Clean.
+_Avoid_: work checkout, sandbox directory
+
 **Branch**:
-The Git branch created at Job start from the fetched base branch, in the work checkout. The User
-checks it out in the IDE to watch the work.
+The Git branch created at Job start from the fetched base branch, checked out in the Job's
+Worktree. At Clean it receives the one commit of the change and the User checks it out in the
+IDE for Human review.
 
 **Iteration**:
 One execution of one section of the Task file by the Implementer: the first runs the task, each
@@ -78,26 +85,35 @@ The Implementer's account of an Iteration, in the factory's template: what was d
 their results, open questions, and what happened to each item of the Fix section it answered.
 
 **Patch**:
-The uncommitted difference between the work checkout and the base branch after an Iteration,
+The uncommitted difference between the Worktree and the base branch after an Iteration,
 including new files, excluding ignored and credential-like files. Nothing is committed during
 Iterations.
 _Avoid_: snapshot, diff artifact, export
 
+**Sensitive path**:
+A changed file that is unusual for a Ticket to touch: dependency manifests and lockfiles,
+environment and tool configuration, CI and container files, IDE and agent files, root dotfiles.
+Declared when the Task file's `may_touch` names it, undeclared otherwise; an undeclared one must
+be acknowledged by the Context owner at Clean.
+_Avoid_: protected file, system file
+
 **Clean**:
-The Context owner's verdict that the Patch needs no further Fix section. It moves the Job to human
-review; it accepts nothing.
+The Context owner's verdict that the Patch needs no further Fix section, with every undeclared
+Sensitive path acknowledged. It starts MR preparation; it accepts nothing and pushes nothing.
 
 **Human review**:
-The User reading the Branch in the IDE after Clean. It ends with approve or abort.
+The User reading the Branch in the IDE after Clean. It ends with approve, a further fix, or abort.
 
 **Approve**:
-The User's command that starts MR preparation. Given in the terminal (v1) or the Dashboard (v2).
+The User's command that pushes the Branch prepared at Clean. Given in the terminal or the
+Dashboard; refused when the Branch tip was edited by hand unless pushed as it is.
 _Avoid_: accept, acceptance
 
 **MR preparation**:
-The phase after Approve: the Implementer rebases onto the target branch, resolves conflicts, commits
-by the Git rules and writes the merge request title and description; the factory verifies and
-pushes. The User opens the merge request.
+The phase that Clean starts: in the Worktree the Implementer commits by the Git rules, rebases
+onto the target branch, resolves conflicts and writes the merge request title and description;
+the factory verifies, removes the Worktree and leaves the Branch with one commit for Human
+review. The User opens the merge request after Approve.
 
 **Check**:
 The Context owner's periodic question to the factory about a Job, made by a ChatGPT scheduled task,

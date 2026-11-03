@@ -91,6 +91,9 @@ function recordLines(record: Record<string, unknown>): string[] {
   if (record.type === 'principal') {
     return [`${prefix} ${String(record.tool)} by ${oneLine(String(record.principal))}`];
   }
+  if (record.type === 'subscription_removed') {
+    return [`${prefix} subscription ${oneLine(String(record.subscription))} removed: the job ended`];
+  }
   if (record.type === 'event_delivered' || record.type === 'event_failed') {
     const outcome = record.type === 'event_delivered' ? 'delivered' : 'failed';
     return [`${prefix} event to ${oneLine(String(record.subscription))} attempt ${String(record.attempt)} ${outcome}: ${oneLine(String(record.status))}`];

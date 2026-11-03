@@ -12,15 +12,15 @@
 const RECONNECT_MS = 3000;
 const READ_TIMEOUT_MS = 10000;
 const TERMINAL_STATES = ['pushed', 'aborted', 'failed'];
-const SAY_STATES = ['working', 'awaiting_review', 'needs_human'];
+const SAY_STATES = ['working', 'awaiting_review', 'needs_human', 'ready_for_human_review'];
 const ACTION_LABELS = { approve: 'Approve', abort: 'Abort', say: 'Send' };
 const PENDING_REASONS = {
-  approve: 'MR preparation was requested; waiting for its outcome.',
+  approve: 'the push was requested; waiting for its outcome.',
   abort: 'abort was requested; waiting for its outcome.',
   say: 'the message is being sent.',
 };
 const PENDING_TEXT = {
-  approve: 'MR preparation started; waiting for it to end (the state history and the event stream below follow it). Closing this page stops waiting, not the preparation; the outcome stays in the job.',
+  approve: 'Pushing the branch…',
   abort: 'Abort requested; waiting for the job to end.',
   say: 'Sending the message…',
 };
@@ -49,6 +49,8 @@ const state = {
   unresolved: new Map(),
   doubts: new Map(),
   confirm: null,
+  // The files expanded in the Files view: "<iteration>/<path>" of the selected job.
+  expanded: new Set(),
   // The test event, per job: "<key>" while its request is out, and the last outcome shown.
   testing: new Set(),
   testOutcomes: new Map(),
@@ -132,6 +134,22 @@ function setConnection(text, kind) {
   node.className = `connection ${kind}`;
 }
 
+// The file badges of a job (SF-024): the count of the last iteration, and warnings for undeclared
+// sensitive and deleted files.
+function fileBadges(job) {
+  const badges = [];
+  if (typeof job.files === 'number' && job.files > 0) {
+    badges.push(el('span', 'badge f-count', `${job.files} file${job.files === 1 ? '' : 's'}`));
+  }
+  if (typeof job.undeclared === 'number' && job.undeclared > 0) {
+    badges.push(el('span', 'badge f-undeclared', `${job.undeclared} sensitive`));
+  }
+  if (typeof job.deleted === 'number' && job.deleted > 0) {
+    badges.push(el('span', 'badge f-deleted', `${job.deleted} deleted`));
+  }
+  return badges;
+}
+
 function renderJobs() {
   const list = $('job-list');
   $('no-jobs').hidden = state.jobs.length > 0;
@@ -156,6 +174,7 @@ function renderJobs() {
     } else if (job.reviewer === 'broad') {
       line.append(el('span', 'badge r-broad', 'broad'));
     }
+    line.append(...fileBadges(job));
     line.append(el('span', 'iter', `iteration ${job.iteration}`));
     button.append(line);
     button.addEventListener('click', () => select(keyOf(job)));
@@ -198,6 +217,8 @@ function renderHeader(detail) {
   // An estimate of the API-equivalent price, not a charge: the session usually runs on a subscription.
   $('job-cost').textContent = costs.length > 0 ? `est. $${costs.reduce((sum, cost) => sum + cost, 0).toFixed(4)}` : 'n/a';
   $('job-updated').textContent = shortTime(job.updated_at);
+  $('job-worktree').textContent = typeof job.worktree === 'string' ? job.worktree : (job.state === 'ready_for_human_review' ? 'none: the branch is in the checkout' : 'none');
+  $('job-badges').replaceChildren(...fileBadges(job));
   const error = $('job-error');
   error.hidden = job.error === null;
   error.textContent = job.error === null ? '' : `${job.error.code}: ${job.error.message}`;
@@ -366,22 +387,178 @@ async function showIteration() {
   const cost = typeof meta.cost_usd === 'number' ? `$${meta.cost_usd.toFixed(4)}` : 'n/a';
   $('iteration-meta').textContent = `${shortTime(meta.started_at)} – ${shortTime(meta.ended_at)}, cost ${cost}, ` +
     `${meta.changed_files} changed file(s), ${meta.denials} denial(s)${meta.patch_truncated ? ', patch truncated' : ''}`;
-  const cacheKey = `${meta.number}/${state.view}`;
+  const filesView = state.view === 'files';
+  $('files-view').hidden = !filesView;
+  body.hidden = filesView;
+  if (filesView) {
+    body.replaceChildren();
+    renderFiles(meta);
+    return;
+  }
+  const text = await iterationText(key, meta.number, state.view);
+  if (text === undefined) {
+    return;
+  }
+  if (`${meta.number}/${state.view}` === `${state.iteration}/${state.view}`) {
+    body.replaceChildren(...(state.view === 'patch' ? renderPatch(text) : renderReport(text)));
+  }
+}
+
+// The Report or the Patch of an iteration, loaded once per job; undefined when the selection
+// changed while it loaded.
+async function iterationText(key, number, view) {
+  const cacheKey = `${number}/${view}`;
   let text = state.cache.get(cacheKey);
   if (text === undefined) {
     try {
-      text = await getText(`api/jobs/${jobPath(key)}/iterations/${meta.number}/${state.view}`);
+      text = await getText(`api/jobs/${jobPath(key)}/iterations/${number}/${view}`);
     } catch (error) {
       text = `Could not load: ${error.message}`;
     }
     if (key !== state.key) {
-      return;
+      return undefined;
     }
     state.cache.set(cacheKey, text);
   }
-  if (cacheKey === `${state.iteration}/${state.view}`) {
-    body.replaceChildren(...(state.view === 'patch' ? renderPatch(text) : renderReport(text)));
+  return text;
+}
+
+// The rows of the Files view in order: undeclared sensitive, declared sensitive, deleted, the
+// rest by file name; each row knows its group label.
+function fileRows(files) {
+  const name = (file) => file.path.slice(file.path.lastIndexOf('/') + 1);
+  const byName = (a, b) => name(a).localeCompare(name(b)) || a.path.localeCompare(b.path);
+  const undeclared = files.filter((file) => file.sensitive === 'undeclared').sort(byName);
+  const declared = files.filter((file) => file.sensitive === 'declared').sort(byName);
+  const deleted = files.filter((file) => file.sensitive === 'no' && file.status === 'deleted').sort(byName);
+  const rest = files.filter((file) => file.sensitive === 'no' && file.status !== 'deleted').sort(byName);
+  return [
+    ...undeclared.map((file) => ({ file, group: 'Sensitive, undeclared' })),
+    ...declared.map((file) => ({ file, group: 'Sensitive, declared' })),
+    ...deleted.map((file) => ({ file, group: 'Deleted' })),
+    ...rest.map((file) => ({ file, group: 'Changed' })),
+  ];
+}
+
+// The part of a unified Patch that belongs to one file: from its "diff --git" header to the next
+// header; undefined when the Patch omits it (binary, or beyond the size limit).
+function fileDiff(patch, path) {
+  const lines = patch.split('\n');
+  const plain = `diff --git a/${path} b/${path}`;
+  const start = lines.findIndex((line) => line === plain || (line.startsWith('diff --git "a/') && line.includes(path)));
+  if (start < 0) {
+    return undefined;
   }
+  let end = lines.findIndex((line, index) => index > start && line.startsWith('diff --git '));
+  if (end < 0) {
+    end = lines.length;
+  }
+  return lines.slice(start, end).join('\n');
+}
+
+function renderFiles(meta) {
+  const files = Array.isArray(meta.files) ? meta.files : null;
+  $('no-files').hidden = files !== null && files.length > 0;
+  $('no-files').textContent = files === null ? 'This iteration was published before the file list existed; the Report lists its files.' : 'No files changed.';
+  const undeclared = (files ?? []).filter((file) => file.sensitive === 'undeclared').length;
+  const deleted = (files ?? []).filter((file) => file.status === 'deleted').length;
+  const parts = [`Files ${(files ?? []).length}`];
+  if (undeclared > 0) {
+    parts.push(`${undeclared} sensitive undeclared`);
+  }
+  if (deleted > 0) {
+    parts.push(`${deleted} deleted`);
+  }
+  $('files-summary').textContent = parts.join(' · ');
+  const rows = fileRows(files ?? []);
+  $('files-expand').disabled = rows.length === 0;
+  $('files-collapse').disabled = rows.length === 0;
+  let group = null;
+  const items = [];
+  for (const { file, group: label } of rows) {
+    if (label !== group) {
+      group = label;
+      const heading = el('li', 'file-group', label);
+      items.push(heading);
+    }
+    items.push(fileRow(meta, file));
+  }
+  $('files-list').replaceChildren(...items);
+}
+
+function fileRow(meta, file) {
+  const item = el('li');
+  const row = el('button', `file-row s-${file.status}`);
+  row.type = 'button';
+  const slash = file.path.lastIndexOf('/');
+  row.append(el('span', 'file-name', file.path.slice(slash + 1)));
+  if (slash >= 0) {
+    row.append(el('span', 'file-dir', file.path.slice(0, slash)));
+  }
+  if (file.status === 'renamed' && typeof file.from === 'string') {
+    row.append(el('span', 'file-dir', `← ${file.from}`));
+  }
+  const labels = el('span', 'file-labels');
+  if (file.sensitive !== 'no') {
+    labels.append(el('span', `file-label ${file.sensitive}`, `sensitive, ${file.sensitive}`));
+  }
+  if (file.status === 'deleted') {
+    labels.append(el('span', 'file-label deleted', 'deleted'));
+  }
+  const counts = el('span', 'file-counts');
+  counts.append(el('span', 'add', `+${file.additions}`), document.createTextNode(' '), el('span', 'del', `−${file.deletions}`));
+  labels.append(counts);
+  row.append(labels);
+  const id = `${meta.number}/${file.path}`;
+  row.setAttribute('aria-expanded', String(state.expanded.has(id)));
+  row.addEventListener('click', () => void toggleFile(meta, file));
+  item.append(row);
+  if (state.expanded.has(id)) {
+    const diff = el('pre', 'document file-diff');
+    diff.textContent = 'Loading the Patch…';
+    item.append(diff);
+    void fillDiff(diff, meta, file);
+  }
+  return item;
+}
+
+async function fillDiff(node, meta, file) {
+  const text = await iterationText(state.key, meta.number, 'patch');
+  if (text === undefined) {
+    return;
+  }
+  const section = fileDiff(text, file.path);
+  if (section === undefined) {
+    node.replaceChildren(document.createTextNode(`The Patch omits ${file.path}: a binary file, or beyond the Patch size limit.`));
+  } else {
+    node.replaceChildren(...renderPatch(section));
+  }
+}
+
+async function toggleFile(meta, file) {
+  const id = `${meta.number}/${file.path}`;
+  if (state.expanded.has(id)) {
+    state.expanded.delete(id);
+  } else {
+    state.expanded.add(id);
+  }
+  renderFiles(meta);
+}
+
+function setAllExpanded(expanded) {
+  const meta = state.detail?.iterations.find((iteration) => iteration.number === state.iteration);
+  if (meta === undefined) {
+    return;
+  }
+  for (const file of Array.isArray(meta.files) ? meta.files : []) {
+    const id = `${meta.number}/${file.path}`;
+    if (expanded) {
+      state.expanded.add(id);
+    } else {
+      state.expanded.delete(id);
+    }
+  }
+  renderFiles(meta);
 }
 
 async function showMr() {
@@ -445,21 +622,24 @@ function availability(action, job) {
       : "the last action's outcome is unknown; waiting for the current state.";
   }
   if (action === 'approve') {
-    if (job.state === 'awaiting_review' || job.state === 'ready_for_human_review' || (job.state === 'needs_human' && job.mr_attempts > 0)) {
+    if (job.state === 'ready_for_human_review' || (job.state === 'needs_human' && typeof job.prepared_commit === 'string' && job.worktree === null)) {
       return '';
     }
     if (job.state === 'needs_human') {
-      return 'approve can only retry an MR preparation; send a message or fix by hand first.';
+      return 'approve pushes a branch prepared at Clean; this job has none yet.';
     }
     if (job.state === 'preparing_mr') {
-      return 'MR preparation is already running.';
+      return 'the branch is being prepared.';
+    }
+    if (job.state === 'awaiting_review') {
+      return 'the Context owner has not declared Clean yet.';
     }
     return `not available while the job is ${job.state}.`;
   }
   if (action === 'abort') {
     return TERMINAL_STATES.includes(job.state) ? `the job is already ${job.state}.` : '';
   }
-  return SAY_STATES.includes(job.state) ? '' : `messages need working, awaiting_review or needs_human; the job is ${job.state}.`;
+  return SAY_STATES.includes(job.state) ? '' : `messages need working, awaiting_review, needs_human or ready_for_human_review; the job is ${job.state}.`;
 }
 
 function renderActions() {
@@ -518,25 +698,18 @@ function describeOutcome(action, result) {
         ? { level: 'ok', text: `${text} Merge request:`, link: data.link }
         : { level: 'ok', text: `${text} No merge request link: the origin URL could not be parsed. Open the merge request for branch ${data.branch} by hand.` };
     }
-    if (data.state === 'awaiting_review') {
-      const paths = Array.isArray(data.changed_paths) && data.changed_paths.length > 0 ? data.changed_paths.join(', ') : 'some paths';
-      return { level: 'warn', text: `Not pushed: the prepared commit differs from the reviewed change in ${paths}. It went back to the Context owner for review; approve again after Clean.` };
-    }
     if (data.state === 'needs_human') {
-      return { level: 'error', text: `Not pushed: MR preparation failed (${detail || 'no details'}). Fix it with a message below or by hand, then approve again.` };
+      return { level: 'error', text: `Not pushed: the push failed (${detail || 'no details'}). Fix it, then approve again.` };
     }
-    if (data.state === 'aborted') {
-      return { level: 'warn', text: 'Not pushed: the job was aborted during MR preparation.' };
-    }
-    return { level: 'warn', text: `Not pushed: MR preparation ended with state ${data.state}${detail ? ` (${detail})` : ''}.` };
+    return { level: 'warn', text: `Not pushed: the job is ${data.state}${detail ? ` (${detail})` : ''}.` };
   }
   if (action === 'abort') {
     if (data.error) {
-      return { level: 'error', text: `The job ended (${data.state}), but discard failed: ${detail} The discard may be partial: look at the branch ${data.branch} and the work checkout by hand before relying on either.` };
+      return { level: 'error', text: `The job ended (${data.state}), but discard failed: ${detail} The discard may be partial: look at the branch ${data.branch} and the worktree by hand before relying on either.` };
     }
     return data.discarded === true
-      ? { level: 'ok', text: `Aborted; the branch ${data.branch} and its changes were removed.` }
-      : { level: 'ok', text: `Aborted; the branch ${data.branch} and the files stay.` };
+      ? { level: 'ok', text: `Aborted; the branch ${data.branch}, its worktree and its changes were removed.` }
+      : { level: 'ok', text: `Aborted; the branch ${data.branch} stays${typeof data.worktree === 'string' ? ` with its worktree ${data.worktree}` : ''}.` };
   }
   return data.queued === true
     ? { level: 'ok', text: `Queued: the message runs after the current turn ends (state ${data.state}); it has not run yet.` }
@@ -682,10 +855,12 @@ function openConfirm(action) {
   state.confirm = { action, key };
   $('confirm-title').textContent = `${ACTION_LABELS[action]} ${key}?`;
   $('confirm-text').textContent = action === 'approve'
-    ? `Starts MR preparation for branch ${job.branch}: the Implementer commits and rebases onto ${job.base}, the factory verifies and pushes the branch to origin.`
-    : `Ends the job on branch ${job.branch}: the Implementer session stops and queued messages are dropped. The branch and the files stay as they are.`;
+    ? `Pushes branch ${job.branch} to origin: the one commit the factory prepared at Clean, rebased onto ${job.base}. Nothing is committed or rebased now; a tip edited by hand is refused unless pushed as it is.`
+    : `Ends the job on branch ${job.branch}: the Implementer session stops and queued messages are dropped. The branch and its worktree stay as they are.`;
   $('discard').checked = false;
+  $('as-is').checked = false;
   $('discard-label').hidden = action !== 'abort';
+  $('as-is-label').hidden = action !== 'approve';
   $('confirm').hidden = false;
   renderConfirmButton();
   renderActions();
@@ -699,7 +874,7 @@ function renderConfirmButton() {
   }
   const discard = confirm.action === 'abort' && $('discard').checked;
   const ok = $('confirm-ok');
-  ok.textContent = confirm.action === 'approve' ? 'Approve: prepare and push' : discard ? 'Abort and discard the branch' : 'Abort, keep the files';
+  ok.textContent = confirm.action === 'approve' ? ($('as-is').checked ? 'Approve: push as it is' : 'Approve: push the branch') : discard ? 'Abort and discard the branch' : 'Abort, keep the worktree';
   ok.className = discard ? 'btn btn-danger' : 'btn btn-primary';
 }
 
@@ -707,6 +882,7 @@ function closeConfirm() {
   state.confirm = null;
   $('confirm').hidden = true;
   $('discard').checked = false;
+  $('as-is').checked = false;
   renderActions();
 }
 
@@ -716,12 +892,13 @@ function submitConfirm() {
     return;
   }
   const discard = confirm.action === 'abort' && $('discard').checked;
+  const asIs = confirm.action === 'approve' && $('as-is').checked;
   closeConfirm();
   // The target was captured when the confirmation opened; a selection changed since drops it.
   if (confirm.key !== state.key) {
     return;
   }
-  void run(confirm.action, confirm.key, confirm.action === 'abort' ? { discard } : {});
+  void run(confirm.action, confirm.key, confirm.action === 'abort' ? { discard } : asIs ? { as_is: true } : {});
 }
 
 function sendSay() {
@@ -1076,6 +1253,7 @@ function select(key) {
   state.detail = null;
   state.iteration = null;
   state.cache = new Map();
+  state.expanded = new Set();
   state.lastLine = -1;
   $('events').replaceChildren();
   $('iteration-body').replaceChildren();
@@ -1157,6 +1335,9 @@ function init() {
     }
   });
   $('discard').addEventListener('change', renderConfirmButton);
+  $('as-is').addEventListener('change', renderConfirmButton);
+  $('files-expand').addEventListener('click', () => setAllExpanded(true));
+  $('files-collapse').addEventListener('click', () => setAllExpanded(false));
   $('refresh-button').addEventListener('click', () => void settleUnknown(state.key));
   $('test-event-button').addEventListener('click', () => void sendTestEvent());
   $('copy-guide').addEventListener('click', () => copySetup('setup-guide'));

@@ -17,13 +17,20 @@ interface JobShape {
   mr_attempts?: number;
   iteration?: number;
   updated_at?: string;
+  // The prepared branch tip (set for ready_for_human_review and a failed push) and the worktree.
+  prepared_commit?: string | null;
+  worktree?: string | null;
 }
 
 function job(shape: JobShape) {
+  const prepared = shape.state === 'ready_for_human_review' || shape.state === 'pushed';
   return {
     workspace: shape.workspace, ticket: shape.ticket, branch: `${shape.ticket}-demo`, base: 'main', state: shape.state,
     iteration: shape.iteration ?? 1, mr_attempts: shape.mr_attempts ?? 0, updated_at: shape.updated_at ?? '2026-11-01T10:05:00.000Z',
     created_at: '2026-11-01T10:00:00.000Z', error: null,
+    prepared_commit: shape.prepared_commit !== undefined ? shape.prepared_commit : (prepared ? 'a'.repeat(40) : null),
+    worktree: shape.worktree !== undefined ? shape.worktree : (prepared ? null : `/wt/${shape.ticket}`),
+    files: 0, undeclared: 0, deleted: 0,
   };
 }
 
@@ -31,7 +38,8 @@ function detail(shape: JobShape) {
   return { job: job(shape), iterations: [], mr: false, history: [{ ts: '2026-11-01T10:00:00.000Z', from: null, to: 'starting' }] };
 }
 
-const A = { workspace: 'app', ticket: 'T-1', state: 'awaiting_review', updated_at: '2026-11-01T10:05:00.000Z' };
+// A is the job the user acts on: ready_for_human_review, the branch prepared at Clean.
+const A = { workspace: 'app', ticket: 'T-1', state: 'ready_for_human_review', updated_at: '2026-11-01T10:05:00.000Z' };
 const B = { workspace: 'app', ticket: 'T-2', state: 'working', updated_at: '2026-11-01T10:04:00.000Z' };
 
 // The page with two jobs, A selected (the most recent) and its detail shown.
@@ -81,22 +89,24 @@ async function selectJob(page: Page, key: string): Promise<void> {
 
 test('client: the controls follow the state matrix and the pending action', async () => {
   const page = await openPage();
-  const matrix: Array<[string, number, boolean, boolean, boolean]> = [
+  const matrix: Array<[string, number, boolean, boolean, boolean, Partial<JobShape>?]> = [
     // state, mr_attempts, approve on, abort on, say on
     ['starting', 0, false, true, false],
     ['working', 0, false, true, true],
-    ['awaiting_review', 0, true, true, true],
+    ['awaiting_review', 0, false, true, true],
     ['needs_human', 0, false, true, true],
-    ['needs_human', 1, true, true, true],
-    ['ready_for_human_review', 0, true, true, false],
+    ['needs_human', 1, false, true, true],
+    // A failed push: the branch is prepared and the worktree gone, so approve can retry.
+    ['needs_human', 1, true, true, true, { prepared_commit: 'b'.repeat(40), worktree: null }],
+    ['ready_for_human_review', 0, true, true, true],
     ['preparing_mr', 1, false, true, false],
     ['pushed', 1, false, false, false],
     ['aborted', 0, false, false, false],
     ['failed', 0, false, false, false],
   ];
   const stream = page.streams.at(-1)!;
-  for (const [state, attempts, approve, abort, say] of matrix) {
-    stream.emit('job', detail({ ...A, state, mr_attempts: attempts }));
+  for (const [state, attempts, approve, abort, say, extra] of matrix) {
+    stream.emit('job', detail({ ...A, state, mr_attempts: attempts, ...(extra ?? {}) }));
     page.$('say-input').value = 'draft';
     page.$('say-input').dispatch('input');
     const label = `${state}/${attempts}`;
@@ -116,9 +126,11 @@ test('client: the controls follow the state matrix and the pending action', asyn
     page.$('say-input').dispatch('input');
     assert.equal(page.$('say-button').disabled, true, JSON.stringify(text));
   }
-  // The reasons name the rule for needs_human before an MR attempt.
+  // The reasons name the rule for needs_human without a prepared branch, and for awaiting_review.
   stream.emit('job', detail({ ...A, state: 'needs_human' }));
-  assert.match(page.$('action-reasons').textContent, /Approve: approve can only retry an MR preparation/);
+  assert.match(page.$('action-reasons').textContent, /Approve: approve pushes a branch prepared at Clean; this job has none yet\./);
+  stream.emit('job', detail({ ...A, state: 'awaiting_review' }));
+  assert.match(page.$('action-reasons').textContent, /Approve: the Context owner has not declared Clean yet\./);
   // While approve is pending, approve is off with its own reason and abort stays on.
   stream.emit('job', detail(A));
   page.$('approve-button').click();
@@ -126,9 +138,9 @@ test('client: the controls follow the state matrix and the pending action', asyn
   await page.flush();
   assert.equal(posts(page).length, 1);
   assert.equal(page.$('approve-button').disabled, true);
-  assert.match(page.$('action-reasons').textContent, /Approve: MR preparation was requested/);
+  assert.match(page.$('action-reasons').textContent, /Approve: the push was requested/);
   assert.equal(page.$('abort-button').disabled, false);
-  assert.match(status(page), /^MR preparation started; waiting for it to end/);
+  assert.match(status(page), /^Pushing the branch…/);
   assert.equal(page.$('action-status').className, 'status pending');
   // A state change meanwhile keeps the pending rule.
   stream.emit('job', detail({ ...A, state: 'preparing_mr', mr_attempts: 1 }));
@@ -143,9 +155,11 @@ test('client: approve and abort need a confirmation that names the job; cancel s
   page.$('approve-button').click();
   assert.equal(page.$('confirm').hidden, false);
   assert.equal(page.$('confirm-title').textContent, 'Approve app/T-1?');
-  assert.match(page.$('confirm-text').textContent, /branch T-1-demo.*rebases onto main.*pushes/);
+  assert.match(page.$('confirm-text').textContent, /Pushes branch T-1-demo to origin.*prepared at Clean, rebased onto main/);
   assert.equal(page.$('discard-label').hidden, true);
-  assert.equal(page.$('confirm-ok').textContent, 'Approve: prepare and push');
+  assert.equal(page.$('as-is-label').hidden, false);
+  assert.equal(page.$('as-is').checked, false);
+  assert.equal(page.$('confirm-ok').textContent, 'Approve: push the branch');
   assert.equal(page.document.activeElement, page.$('confirm-cancel'));
   // Both action buttons are off while the confirmation is open: no retargeting.
   assert.equal(page.$('approve-button').disabled, true);
@@ -186,9 +200,8 @@ test('client: approve and abort need a confirmation that names the job; cancel s
   const outcomes: Array<[Record<string, unknown>, RegExp, string]> = [
     [{ state: 'pushed', branch: 'T-1-demo', title: 'feat(T-1): Demo' }, /No merge request link: the origin URL could not be parsed\. Open the merge request for branch T-1-demo by hand\./, 'ok'],
     [{ state: 'pushed', branch: 'T-1-demo', title: 't', link: 'javascript:alert(1)' }, /Merge request: javascript:alert\(1\)$/, 'ok'],
-    [{ state: 'awaiting_review', branch: 'T-1-demo', changed_paths: ['b.txt', 'c.txt'] }, /^Not pushed: the prepared commit differs from the reviewed change in b\.txt, c\.txt\. It went back to the Context owner/, 'warn'],
-    [{ state: 'needs_human', branch: 'T-1-demo', error: { code: 'mr_dirty', message: 'The work checkout has 1 uncommitted change(s).' } }, /^Not pushed: MR preparation failed \(mr_dirty: The work checkout has 1 uncommitted change\(s\)\.\)\. Fix it with a message below or by hand, then approve again\./, 'error'],
-    [{ state: 'aborted', branch: 'T-1-demo' }, /^Not pushed: the job was aborted during MR preparation\./, 'warn'],
+    [{ state: 'needs_human', branch: 'T-1-demo', error: { code: 'mr_push_failed', message: 'git push origin T-1-demo failed: rejected.' } }, /^Not pushed: the push failed \(mr_push_failed: git push origin T-1-demo failed: rejected\.\)\. Fix it, then approve again\./, 'error'],
+    [{ state: 'aborted', branch: 'T-1-demo' }, /^Not pushed: the job is aborted\./, 'warn'],
   ];
   for (const [result, expected, level] of outcomes) {
     page.$('approve-button').click();
@@ -227,10 +240,11 @@ test('client: abort keeps the files unless discard is explicitly checked; the ch
   const page = await openPage();
   page.$('abort-button').click();
   assert.equal(page.$('confirm-title').textContent, 'Abort app/T-1?');
-  assert.match(page.$('confirm-text').textContent, /branch T-1-demo.*The branch and the files stay as they are\./);
+  assert.match(page.$('confirm-text').textContent, /branch T-1-demo.*The branch and its worktree stay as they are\./);
+  assert.equal(page.$('as-is-label').hidden, true);
   assert.equal(page.$('discard-label').hidden, false);
   assert.equal(page.$('discard').checked, false);
-  assert.equal(page.$('confirm-ok').textContent, 'Abort, keep the files');
+  assert.equal(page.$('confirm-ok').textContent, 'Abort, keep the worktree');
   page.$('discard').checked = true;
   page.$('discard').dispatch('change');
   assert.equal(page.$('confirm-ok').textContent, 'Abort and discard the branch');
@@ -247,7 +261,7 @@ test('client: abort keeps the files unless discard is explicitly checked; the ch
   assert.deepEqual([posts(page)[0]!.path, posts(page)[0]!.body], ['api/jobs/app/T-1/abort', '{"discard":false}']);
   posts(page)[0]!.respond(200, { ok: true, result: { state: 'aborted', branch: 'T-1-demo', discarded: false } });
   await page.flush();
-  assert.equal(status(page), 'Aborted; the branch T-1-demo and the files stay.');
+  assert.equal(status(page), 'Aborted; the branch T-1-demo stays.');
 
   // The explicit discard sends true; its outcomes.
   page.streams.at(-1)!.emit('job', detail(A));
@@ -259,7 +273,7 @@ test('client: abort keeps the files unless discard is explicitly checked; the ch
   assert.equal(posts(page)[1]!.body, '{"discard":true}');
   posts(page)[1]!.respond(200, { ok: true, result: { state: 'aborted', branch: 'T-1-demo', discarded: true } });
   await page.flush();
-  assert.equal(status(page), 'Aborted; the branch T-1-demo and its changes were removed.');
+  assert.equal(status(page), 'Aborted; the branch T-1-demo, its worktree and its changes were removed.');
   page.streams.at(-1)!.emit('job', detail(A));
   page.$('abort-button').click();
   page.$('discard').checked = true;
@@ -267,7 +281,7 @@ test('client: abort keeps the files unless discard is explicitly checked; the ch
   await page.flush();
   posts(page)[2]!.respond(200, { ok: true, result: { state: 'aborted', branch: 'T-1-demo', discarded: false, error: { code: 'discard_failed', message: 'git branch -D T-1-demo failed: not found. The work checkout needs a look.' } } });
   await page.flush();
-  assert.match(status(page), /^The job ended \(aborted\), but discard failed: discard_failed: git branch -D T-1-demo failed: not found\. The work checkout needs a look\. The discard may be partial: look at the branch T-1-demo and the work checkout by hand/);
+  assert.match(status(page), /^The job ended \(aborted\), but discard failed: discard_failed: git branch -D T-1-demo failed: not found\. The work checkout needs a look\. The discard may be partial: look at the branch T-1-demo and the worktree by hand/);
   assert.doesNotMatch(status(page), /were removed|were not removed/);
   assert.equal(page.$('action-status').className, 'status error');
   // A refusal of discard keeps the job and the draft choice visible as an error.
@@ -410,13 +424,13 @@ test('client: switching jobs keeps drafts and outcomes per job, closes a confirm
   await page.flush();
   await selectJob(page, 'app/T-2');
   page.streams.at(-1)!.emit('job', detail(B));
-  posts(page)[1]!.respond(200, { ok: true, result: { state: 'needs_human', branch: 'T-1-demo', error: { code: 'mr_dirty', message: 'dirty' } } });
+  posts(page)[1]!.respond(200, { ok: true, result: { state: 'needs_human', branch: 'T-1-demo', error: { code: 'mr_push_failed', message: 'rejected' } } });
   await page.flush();
   assert.equal(status(page), '');
   assert.equal(page.$('abort-button').disabled, false);
   assert.equal(page.$('approve-button').disabled, true);
   await selectJob(page, 'app/T-1');
-  assert.match(status(page), /^Not pushed: MR preparation failed \(mr_dirty: dirty\)/);
+  assert.match(status(page), /^Not pushed: the push failed \(mr_push_failed: rejected\)/);
   // The refresh after the answer was for A; it never rendered into B.
   assert.ok(page.requests.some((request) => request.method === 'GET' && request.path === 'api/jobs/app/T-1'));
 });
@@ -593,12 +607,12 @@ test('client: an unknown outcome keeps abort for a known preparation, closes a s
   approve.respond(200, { ok: true, result: { state: 'aborted', branch: 'T-1-demo' } });
   await page.flush();
   // The definite answer and the unknown outcome are both shown, before and after the refresh.
-  assert.match(status(page), /^Not pushed: the job was aborted[^]*outcome is unknown: the state below is being refreshed/);
+  assert.match(status(page), /^Not pushed: the job is aborted[^]*outcome is unknown: the state below is being refreshed/);
   for (const request of refreshes(page)) {
     request.respond(200, detail({ ...A, state: 'aborted' }));
   }
   await page.flush();
-  assert.match(status(page), /^Not pushed: the job was aborted[^]*outcome is unknown: it may have taken effect/);
+  assert.match(status(page), /^Not pushed: the job is aborted[^]*outcome is unknown: it may have taken effect/);
 
   // A lost approve request with the preparation visible on the stream: abort stays reachable.
   stream.emit('job', detail(A));
@@ -866,7 +880,7 @@ test('client: the job cards badge a missing or broad reviewer; the Subscriptions
   assert.deepEqual([page.$('no-subscriptions').hidden, page.$('subscriptions-table').hidden], [true, true]);
   stream.emit('jobs', { jobs: [{ ...job(A), reviewer: 'none' }, { ...job(B), reviewer: 'broad' }, { ...job({ ...B, ticket: 'T-3' }), reviewer: 'subscribed' }, { ...job({ ...B, ticket: 'T-4', state: 'pushed' }), reviewer: 'none' }] });
   const badges = (key: string): string[] => jobButton(page, key).all().filter((node) => node.className.startsWith('badge')).map((node) => `${node.className}:${node.textContent}`);
-  assert.deepEqual(badges('app/T-1'), ['badge s-awaiting_review:awaiting_review', 'badge r-none:no reviewer']);
+  assert.deepEqual(badges('app/T-1'), ['badge s-ready_for_human_review:ready_for_human_review', 'badge r-none:no reviewer']);
   assert.deepEqual(badges('app/T-2'), ['badge s-working:working', 'badge r-broad:broad']);
   // A finished job has nothing to review: no reviewer badge.
   assert.deepEqual(badges('app/T-4'), ['badge s-pushed:pushed']);
@@ -921,4 +935,111 @@ test('client: the job views are tabs; the selected one is kept across jobs; the 
   tabs[3]!.click();
   assert.equal(page.$('tab-events').hidden, false);
   assert.equal(page.$('tab-mr').hidden, true);
+});
+
+// The Files view (SF-024): the rows in IntelliJ's shape and order, the diff of one file on
+// demand from the loaded Patch, the badges on the job card and in the list.
+test('client: the Files view lists sensitive, deleted and the rest in order, expands one file\'s diff from the Patch, and the badges count them', async () => {
+  const files = [
+    { path: 'src/zeta.ts', status: 'modified', sensitive: 'no', additions: 2, deletions: 1 },
+    { path: 'package.json', status: 'modified', sensitive: 'declared', additions: 1, deletions: 1 },
+    { path: 'src/old.ts', status: 'deleted', sensitive: 'no', additions: 0, deletions: 3 },
+    { path: '.github/workflows/ci.yml', status: 'added', sensitive: 'undeclared', additions: 5, deletions: 0 },
+    { path: 'lib/alpha.ts', status: 'added', sensitive: 'no', additions: 1, deletions: 0 },
+    { path: 'img.png', status: 'added', sensitive: 'no', additions: 0, deletions: 0 },
+  ];
+  const patch = [
+    'diff --git a/src/zeta.ts b/src/zeta.ts', 'index 1..2 100644', '--- a/src/zeta.ts', '+++ b/src/zeta.ts', '@@ -1,2 +1,3 @@', '-old', '+new', '+more', ' same',
+    'diff --git a/src/old.ts b/src/old.ts', 'deleted file mode 100644', '--- a/src/old.ts', '+++ /dev/null', '@@ -1,3 +0,0 @@', '-a', '-b', '-c',
+    'diff --git a/lib/alpha.ts b/lib/alpha.ts', 'new file mode 100644', '--- /dev/null', '+++ b/lib/alpha.ts', '@@ -0,0 +1 @@', '+alpha', '',
+  ].join('\n');
+  const withFiles = (shape: JobShape) => ({
+    ...detail(shape),
+    job: { ...job(shape), files: 6, undeclared: 1, deleted: 1 },
+    iterations: [{ number: 1, started_at: '2026-11-01T10:00:01.000Z', ended_at: '2026-11-01T10:05:00.000Z', cost_usd: 0.5, changed_files: 6, patch_truncated: false, denials: 0, files }],
+  });
+  const page = await loadPage(STATIC_DIR, (path) => {
+    if (path === 'api/jobs') {
+      return { jobs: [{ ...job(A), files: 6, undeclared: 1, deleted: 1 }] };
+    }
+    if (path === 'api/jobs/app/T-1') {
+      return withFiles(A);
+    }
+    return path === 'api/jobs/app/T-1/iterations/1/patch' ? patch : undefined;
+  });
+  page.document.dispatch('DOMContentLoaded');
+  await page.flush();
+  const stream = page.streams.at(-1)!;
+  stream.emit('open');
+  stream.emit('jobs', { jobs: [{ ...job(A), files: 6, undeclared: 1, deleted: 1 }] });
+  stream.emit('job', withFiles(A));
+  await page.flush();
+
+  // Badges: on the job card and on the list card.
+  assert.deepEqual(page.$('job-badges').all().map((element) => `${element.className}:${element.textContent}`), ['badge f-count:6 files', 'badge f-undeclared:1 sensitive', 'badge f-deleted:1 deleted']);
+  const card = jobButton(page, 'app/T-1');
+  assert.deepEqual(card.all().filter((element) => element.className.startsWith('badge f-')).map((element) => element.textContent), ['6 files', '1 sensitive', '1 deleted']);
+
+  // The Files view: hidden under Report, shown under Files; the summary and the order.
+  assert.equal(page.$('files-view').hidden, true);
+  const views = page.$('iteration-views').querySelectorAll('button');
+  views.find((button) => button.dataset.view === 'files')!.click();
+  await page.flush();
+  assert.equal(page.$('files-view').hidden, false);
+  assert.equal(page.$('iteration-body').hidden, true);
+  assert.equal(page.$('files-summary').textContent, 'Files 6 · 1 sensitive undeclared · 1 deleted');
+  const items = page.$('files-list').children as FakeElement[];
+  const rows = items.filter((item) => item.className !== 'file-group');
+  const groups = items.filter((item) => item.className === 'file-group').map((item) => item.textContent);
+  assert.deepEqual(groups, ['Sensitive, undeclared', 'Sensitive, declared', 'Deleted', 'Changed']);
+  const rowOf = (item: FakeElement): FakeElement => item.children[0] as FakeElement;
+  const name = (item: FakeElement): string => (rowOf(item).children[0] as FakeElement).textContent;
+  assert.deepEqual(rows.map(name), ['ci.yml', 'package.json', 'old.ts', 'alpha.ts', 'img.png', 'zeta.ts']);
+  assert.deepEqual(rows.map((item) => rowOf(item).className), ['file-row s-added', 'file-row s-modified', 'file-row s-deleted', 'file-row s-added', 'file-row s-added', 'file-row s-modified']);
+  // The directory in a muted span, the labels and the counts.
+  const first = rowOf(rows[0]!);
+  assert.equal((first.children[1] as FakeElement).className, 'file-dir');
+  assert.equal((first.children[1] as FakeElement).textContent, '.github/workflows');
+  assert.equal(first.textContent, 'ci.yml.github/workflowssensitive, undeclared+5 −0');
+  assert.equal(rowOf(rows[2]!).textContent, 'old.tssrcdeleted+0 −3');
+  assert.ok(rowOf(rows[1]!).all().some((element) => element.className === 'file-label declared'));
+  assert.ok(rows.every((item) => rowOf(item).getAttribute('aria-expanded') === 'false'));
+  assert.equal(page.requests.filter((request) => request.path.endsWith('/patch')).length, 0);
+
+  // A click expands exactly that file's diff, split from the Patch loaded once; a second click collapses it.
+  rowOf(rows[5]!).click();
+  await page.flush();
+  const expanded = (page.$('files-list').children as FakeElement[]).filter((item) => item.className !== 'file-group');
+  assert.equal(rowOf(expanded[5]!).getAttribute('aria-expanded'), 'true');
+  const diff = expanded[5]!.children[1] as FakeElement;
+  assert.equal(diff.className, 'document file-diff');
+  assert.equal(diff.textContent, 'diff --git a/src/zeta.ts b/src/zeta.ts\nindex 1..2 100644\n--- a/src/zeta.ts\n+++ b/src/zeta.ts\n@@ -1,2 +1,3 @@\n-old\n+new\n+more\n same\n');
+  assert.deepEqual(diff.all().map((element) => element.className).slice(0, 6), ['file', 'file', 'file', 'file', 'hunk', 'del']);
+  assert.equal(expanded[4]!.children.length, 1);
+  assert.equal(page.requests.filter((request) => request.path.endsWith('/patch')).length, 1);
+  rowOf(expanded[5]!).click();
+  await page.flush();
+  assert.equal(((page.$('files-list').children as FakeElement[]).filter((item) => item.className !== 'file-group')[5]!).children.length, 1);
+  // A deleted file's diff; a file the Patch omits says so; the Patch is not fetched again.
+  page.$('files-expand').click();
+  await page.flush();
+  const all = (page.$('files-list').children as FakeElement[]).filter((item) => item.className !== 'file-group');
+  assert.ok(all.every((item) => item.children.length === 2));
+  assert.match((all[2]!.children[1] as FakeElement).textContent, /^diff --git a\/src\/old\.ts b\/src\/old\.ts\ndeleted file mode 100644\n/);
+  assert.equal((all[4]!.children[1] as FakeElement).textContent, 'The Patch omits img.png: a binary file, or beyond the Patch size limit.');
+  assert.equal((all[0]!.children[1] as FakeElement).textContent, 'The Patch omits .github/workflows/ci.yml: a binary file, or beyond the Patch size limit.');
+  assert.equal(page.requests.filter((request) => request.path.endsWith('/patch')).length, 1);
+  page.$('files-collapse').click();
+  await page.flush();
+  assert.ok((page.$('files-list').children as FakeElement[]).filter((item) => item.className !== 'file-group').every((item) => item.children.length === 1));
+
+  // An iteration without a list says so; Report hides the view again.
+  stream.emit('job', { ...withFiles(A), iterations: [{ number: 1, started_at: '', ended_at: '', cost_usd: null, changed_files: 0, patch_truncated: false, denials: 0, files: null }] });
+  await page.flush();
+  assert.equal(page.$('no-files').hidden, false);
+  assert.match(page.$('no-files').textContent, /published before the file list existed/);
+  views.find((button) => button.dataset.view === 'report')!.click();
+  await page.flush();
+  assert.equal(page.$('files-view').hidden, true);
+  assert.equal(page.$('iteration-body').hidden, false);
 });

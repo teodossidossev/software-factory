@@ -26,7 +26,7 @@ function setupOf(config: string, jobs: JobStore): Setup {
 
 function jobOf(workspace: string, ticket: string, state: Job['state']): Job {
   return {
-    workspace, ticket, branch: `${ticket}-x`, base: 'main', base_commit: null, target_commit: null, mr_attempts: 0, state,
+    workspace, ticket, branch: `${ticket}-x`, base: 'main', base_commit: null, target_commit: null, worktree: null, prepared_commit: null, mr_attempts: 0, state,
     iteration: 0, session_id: null, created_at: '2026-11-01T10:00:00.000Z', updated_at: '2026-11-01T10:00:00.000Z',
   };
 }
@@ -72,7 +72,7 @@ test('setup: workspaces, add with the CLI rules, remove and its live-job guard',
   const second = await newRepo({ ...env, config: join(temp, 'setup-ws-other') }, 'setup-ws-second', false);
   const added = await setup.addWorkspace('second', `${second}/`);
   assert.deepEqual(added, { name: 'second', path: second, liveJobs: 0, problem: null });
-  assert.deepEqual((await loadRegistry(env.config)).workspaces.second, { read_checkout: second, work_checkout: second });
+  assert.deepEqual((await loadRegistry(env.config)).workspaces.second, { read_checkout: second });
   assert.deepEqual((await setup.workspaces()).map((row) => row.name), ['app', 'second']);
 
   // Live jobs are counted; a workspace with a live job cannot be removed; a missing checkout is a problem, not a failure.
@@ -89,7 +89,7 @@ test('setup: workspaces, add with the CLI rules, remove and its live-job guard',
   await rm(second, { recursive: true });
   await saveRegistry({ workspaces: { app: { read_checkout: repo, work_checkout: repo }, lost: { read_checkout: second, work_checkout: second } } }, env.config);
   const rows = await setup.workspaces();
-  assert.deepEqual(rows.map((row) => [row.name, row.problem]), [['app', null], ['lost', 'The work checkout does not exist.']]);
+  assert.deepEqual(rows.map((row) => [row.name, row.problem]), [['app', null], ['lost', 'The checkout does not exist.']]);
 });
 
 test('setup: tickets lists the Task files without a live job; createTicket writes the draft once', async () => {

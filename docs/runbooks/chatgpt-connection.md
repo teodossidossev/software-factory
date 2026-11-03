@@ -264,10 +264,12 @@ ChatGPT, or press **Start…** on the page. The manual path, step by step:
    tools, the Task file format and the templates. The connector also sends its Quick start as
    server instructions.
 3. Plan the ticket, write the Task file with `write_task`, and call `start` when the user says so.
-4. With MCP Events (section above): one event-triggered task on `software_factory.job` for the
-   workspace calls `check` for the ticket in each event's payload. It reads the Report and the Patch
-   when the job is `awaiting_review` and answers with `request_fix` or `mark_clean`; it stays for the
-   next ticket. Without events (fallback): `start` and `request_fix` return `check_after_minutes`;
+4. With MCP Events (section above): one event-triggered task on `software_factory.job` per
+   ticket calls `check` for the ticket in each event's payload. It reads the Report and the Patch
+   when the job is `awaiting_review` and answers with `request_fix` or `mark_clean` (naming every
+   undeclared sensitive path it accepts); when the job ends (`pushed` or `aborted`) the factory
+   removes the ticket's subscription after that last event, so the task never fires again; delete
+   it from the Scheduled view when convenient. A `failed` start keeps it for the next start. Without events (fallback): `start` and `request_fix` return `check_after_minutes`;
    in the planning conversation, create one ChatGPT scheduled task that calls `check` for the ticket
    on that interval, and delete it when `check` says `pushed`, `aborted` or `failed`.
 

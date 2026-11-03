@@ -22,7 +22,8 @@ their own review, so you drive the cycle through tools:
 2. Split the solution into subtasks of about one merge request each (roughly 20-30 files, a soft
    limit). Each subtask gets one Task file.
 3. Write the Task file with `write_task` (format below). The user says "start": call `start`,
-   or the user presses Start on the dashboard; either way the job starts once.
+   or the user presses Start on the dashboard; either way the job starts once. The Implementer
+   works in a worktree of its own; several tickets of a workspace run at the same time.
 4. One conversation per ticket: the conversation that plans a ticket is the one that reviews it.
    When the user pastes the instruction printed by `sf ticket` (or it comes inside the
    dashboard's first message), create an event-triggered task on
@@ -35,12 +36,23 @@ their own review, so you drive the cycle through tools:
    account: `start` and every `request_fix` tell you when to check next; create one scheduled task in
    this conversation that calls `check` on that interval, if none exists yet.
 5. When `check` says `awaiting_review`, read the Report and the Patch it returns. Review against the
-   Task file, the repository standards and the plan. Then either `request_fix` with a Fix section
-   (the next iteration starts at once) or `mark_clean` (the user takes over).
-   When `check` says `pushed`, `aborted` or `failed`, the ticket is finished for you and a scheduled
-   task can be deleted (the event-triggered task of the ticket never fires again; the user deletes
-   it from the Scheduled view);
-   `preparing_mr` means wait.
+   Task file, the repository standards and the plan. `check.files` names the sensitive paths of
+   the iteration (dependency manifests, lockfiles, environment and tool configuration, CI,
+   containers, IDE and agent files, root dotfiles) and whether the Task file's `may_touch`
+   declared them, and the deleted paths; the Report lists both first. Then either `request_fix`
+   with a Fix section (the next iteration starts at once) or `mark_clean`: for every undeclared
+   sensitive path say in your verdict why the change needs it and name it in `sensitive`, or
+   `request_fix` its removal; `mark_clean` is refused (`sensitive_unacknowledged`) otherwise.
+   `mark_clean` makes the factory commit by the Git rules, rebase and verify (state
+   `preparing_mr`, then `ready_for_human_review` with the branch in the user's checkout, or
+   `needs_human` with the reason: call `mark_clean` again after fixing it with the user, or
+   `request_fix`); a prepared commit that differs from the reviewed change comes back as a new
+   iteration in `awaiting_review`. After `ready_for_human_review` the user may still ask you for
+   a fix: `request_fix` reopens the branch and the next Clean amends the commit.
+   When `check` says `pushed` or `aborted`, the ticket is finished for you: the factory removes
+   this ticket's event subscription after that last event, so the task never fires again (the
+   user deletes it from the Scheduled view when convenient). `failed` is a start that did not get
+   going; the subscription stays and the user may `start` again. `preparing_mr` means wait.
 6. Never approve, push, merge or close anything: those are the user's, in the terminal or on the
    dashboard.
 
@@ -56,8 +68,9 @@ plan ─► write_task ─► start ─► [event ─► check … awaiting_revi
                                                                            └─ mark_clean ─► user: approve/abort
 ```
 
-Limits: one active job per machine; five iterations without Clean ends in `needs_human`; the
-Implementer session stays alive until the user decides.
+Limits: `SF_MAX_JOBS` (default 3) live jobs per workspace, each in its own worktree; five
+iterations without Clean ends in `needs_human`; the Implementer session stays alive until the
+user decides.
 
 ## Tools
 
@@ -67,10 +80,10 @@ Implementer session stays alive until the user decides.
 | `read_file(workspace, path, offset?, max_bytes?)` | Reads a UTF-8 file from the workspace's read checkout, paged. Credential-like paths are refused. |
 | `search(workspace, query, mode, path_prefix?, max_results?)` | `mode: "path"` finds files whose relative path contains `query`; `mode: "content"` finds lines containing `query`. Both case-insensitive. Tracked and untracked files, ignored ones skipped. Bounded. |
 | `write_task(workspace, ticket, content)` | Creates or replaces the Task file `.software-factory/<ticket>.md` in the work checkout. Refused while a job on that ticket is running. |
-| `start(workspace, ticket)` | Creates the branch and starts the first iteration. Returns the check interval. |
-| `check(workspace, ticket, offset?, max_bytes?)` | State of the job and, once an iteration is published, the Report and the Patch (paged like `read_file`). |
-| `request_fix(workspace, ticket, content)` | Appends `## Fix N` with your content to the Task file and starts iteration N+1. Returns the check interval. |
-| `mark_clean(workspace, ticket)` | Your verdict that no further fix is needed. The user is notified. |
+| `start(workspace, ticket)` | Creates the branch in a worktree of its own and starts the first iteration. Returns the check interval and the worktree. |
+| `check(workspace, ticket, offset?, max_bytes?)` | State of the job and, once an iteration is published, the Report, the Patch (paged like `read_file`) and `files` (the sensitive and the deleted paths). |
+| `request_fix(workspace, ticket, content)` | Appends `## Fix N` with your content to the Task file and starts iteration N+1 (after Clean: reopens the branch; the next Clean amends). Returns the check interval. |
+| `mark_clean(workspace, ticket, sensitive?)` | Your verdict that no further fix is needed, with every undeclared sensitive path you accept. The factory commits, rebases and verifies; the user takes over at `ready_for_human_review`. |
 
 There are no event tools: `events/list`, `events/subscribe` and `events/unsubscribe` are MCP
 protocol methods of the same connector, used by ChatGPT when an event-triggered task is created;
@@ -84,6 +97,7 @@ when there is one, `error` or `mr.title`, never the Report or the Patch: `check`
 ticket: PROJ-123
 title: Short title of the subtask
 base: master          # branch to start from; a feature branch if this depends on unmerged work
+may_touch: [package.json, .github/**]   # optional: sensitive paths or globs this ticket is expected to change
 ---
 
 # PROJ-123: Short title
@@ -134,15 +148,15 @@ its rules (no Git, no edits to the Task file) with every prompt, and appends the
 ## Git rules
 
 - The branch is `<ticket>-<slug>`, created by the factory from the base branch in the Task
-  file header. It is never renamed.
+  file header, in a worktree of the job. It is never renamed.
 - One commit per merge request. Header `<type>(<ticket>): <imperative summary>`, where
   `<type>` is one of `feat`, `fix`, `chore`, `refactor`, `docs`, `test`, `perf`, `build`,
   `ci`, `style`, `revert`, chosen from what the Task file asks for; `<ticket>` is the Jira
   issue (always present in a factory job). At most 72 characters, no trailing period.
   A blank line, then a body of one to five lines that says why, not what: the diff says
   what. No trailers unless the repository's AGENTS.md asks for them.
-- Commits are made only in MR preparation, after the user's approve. Iterations commit
-  nothing.
+- Commits are made only in MR preparation, which runs when the Context owner declares Clean.
+  Iterations commit nothing. The user's approve pushes the prepared commit.
 - MR preparation always rebases onto the target branch, so the merge request can be
   fast-forwarded. The Implementer resolves conflicts keeping the reviewed behaviour; every
   file whose content changed in the resolution goes back to the Context owner before the push.
@@ -202,6 +216,6 @@ not a file-by-file changelog.>
 
 ## What the factory never does
 
-Commit, push, merge, rebase or amend without the user's approve; read or expose credentials; run
-with a dirty work checkout; act on a model's claim of user approval that the user did not give in
-the terminal or on the dashboard.
+Push, merge, or commit outside the MR preparation of a Clean; touch the user's checkout beyond
+its Git refs and worktree registrations; read or expose credentials; act on a model's claim of
+user approval that the user did not give in the terminal or on the dashboard.

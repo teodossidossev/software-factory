@@ -3,8 +3,9 @@
 A local process that lets a model you plan with (ChatGPT first) drive Claude Code through a
 ticket without you having to notice when Claude has finished. The Context owner writes a Task
 file, reviews each iteration through MCP tools and asks for fixes; the Implementer runs as a
-headless Claude Code session in the work checkout; you start the job from the dashboard, read
-the branch in the IDE and approve in the terminal or on the dashboard. How it works: [design](docs/design/SF-011-factory.md). How to use it as the Context
+headless Claude Code session in a worktree of its own, several tickets at a time; when the
+reviewer declares Clean the factory commits and rebases, and you check the branch out in the
+IDE, run it, and approve (the push) in the terminal or on the dashboard. How it works: [design](docs/design/SF-011-factory.md). How to use it as the Context
 owner: [factory/HANDBOOK.md](factory/HANDBOOK.md).
 
 ## Components
@@ -37,9 +38,11 @@ opens it again):
    (press Enter if the message is not sent by itself). When ChatGPT has planned the ticket and
    you have said "start" to it, the ticket's line reads `Reviewer: subscribed`; press
    **Start…**.
-4. The job appears under Jobs: the Implementer works, ChatGPT reviews each iteration, and when it
-   declares Clean you read the branch in the IDE and approve (push) or abort, here or in the
-   terminal.
+4. The job appears under Jobs: the Implementer works in a worktree, ChatGPT reviews each
+   iteration (the Files view lists every changed file, sensitive and deleted ones first), and
+   when it declares Clean the factory makes the one commit and the branch is in your checkout:
+   `git checkout <branch>` in the IDE, run it, then approve (push) or abort, here or in the
+   terminal, or ask ChatGPT for another fix.
 
 The pieces separately, when wanted:
 
@@ -68,7 +71,8 @@ one line and runs without the tunnel.
 | --- | --- |
 | `~/.config/software-factory/` | Workspace registry and the tunnel runtime key |
 | `~/.local/state/software-factory/` | Job state, Reports, Patches, the socket and the dashboard token |
-| `.software-factory/` in each work checkout | Task files and MR texts, excluded from Git |
+| `.software-factory/` in each checkout | Task files and MR texts, excluded from Git |
+| `~/.local/state/software-factory/worktrees/` | One Git worktree per running job |
 
 ## More
 

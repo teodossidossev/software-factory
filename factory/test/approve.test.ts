@@ -1,11 +1,12 @@
-// End-to-end tests of MR preparation (sf approve), abort, reset, the sandbox arguments and the
-// notifications, with the fake Claude staging, committing and rebasing like the Implementer.
+// End-to-end tests of the MR preparation at Clean (mark_clean), the push at approve, abort, reset,
+// the sandbox arguments and the notifications, with the fake Claude staging, committing and
+// rebasing in the job's worktree like the Implementer.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingHttpHeaders } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
 import { loadHandbook } from '../src/server.js';
@@ -51,7 +52,7 @@ function pushToOrigin(origin: string, files: Record<string, string>, message: st
   return git(other, 'rev-parse', 'HEAD').trim();
 }
 
-// The commit of the job's snapshot ref in the work checkout, or undefined when there is none.
+// The commit of the job's snapshot ref in the checkout, or undefined when there is none.
 function snapshotRefCommit(repo: string, ticket: string): string | undefined {
   try {
     return git(repo, 'rev-parse', '--verify', '--quiet', `refs/sf/snapshot/${ticket}`).trim();
@@ -63,11 +64,22 @@ function snapshotRefCommit(repo: string, ticket: string): string | undefined {
 const NINE = ['1', '2', '3', '4', '5', '6', '7', '8', '9'];
 const lines = (edit: Record<number, string>): string => `${NINE.map((line, index) => edit[index + 1] ?? line).join('\n')}\n`;
 
-async function approve(env: Parameters<typeof runCli>[0], ticket: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  return runCli(env, ['approve', 'app', ticket]);
+async function approve(env: Parameters<typeof runCli>[0], ticket: string, ...flags: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return runCli(env, ['approve', 'app', ticket, ...flags]);
 }
 
-test('approve: each mr_* check fails in turn, retries keep the snapshot, the last attempt rebases and pushes', async () => {
+const worktreeOf = (env: { state: string }, ticket: string): string => join(env.state, 'worktrees', 'app', ticket);
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test('mark_clean: each mr_* check fails in turn, retries keep the snapshot and the worktree, the last attempt rebases; approve refuses a hand-edited tip and pushes with --as-is', async () => {
   const env = await newEnv('approve', { SF_SANDBOX_DOMAINS: 'pypi.org' });
   const repo = await newRepo(env, 'approve-repo', true);
   const origin = join(temp, 'approve-repo-origin.git');
@@ -93,8 +105,8 @@ test('approve: each mr_* check fails in turn, retries keep the snapshot, the las
   const served = await serve(env);
   await call(served, 'start', { workspace: 'app', ticket: 'T-1' });
   await waitFor(served, 'T-1', 'awaiting_review', 1);
-  await call(served, 'mark_clean', { workspace: 'app', ticket: 'T-1' });
   const branch = 'T-1-change-readme';
+  const worktree = worktreeOf(env, 'T-1');
 
   const expectations: Array<[string, RegExp]> = [
     ['mr_dirty', /The work checkout has 1 uncommitted change\(s\): README\.md\./],
@@ -109,54 +121,64 @@ test('approve: each mr_* check fails in turn, retries keep the snapshot, the las
     if (code === 'mr_not_rebased') {
       upstream = moveOrigin(origin, 'other.txt');
     }
-    const result = await approve(env, 'T-1');
-    assert.equal(result.code, 1, `${code}: ${result.stdout}${result.stderr}`);
-    assert.match(result.stdout, /^MR preparation started; waiting/);
-    assert.match(result.stdout, new RegExp(`^state: needs_human\\nbranch: ${branch}\\nerror: \\{"code":"${code}"`, 'm'));
-    assert.match(result.stdout, /Fix it with sf say or by hand, then run sf approve again\./);
-    const checked = await call(served, 'check', { workspace: 'app', ticket: 'T-1' });
-    assert.deepEqual([checked.state, checked.error.code], ['needs_human', code]);
+    // The first Clean from awaiting_review; every later one the retry from needs_human.
+    assert.equal((await call(served, 'mark_clean', { workspace: 'app', ticket: 'T-1' })).state, 'preparing_mr');
+    const checked = await waitFor(served, 'T-1', 'needs_human');
+    assert.equal(checked.error.code, code);
     assert.match(checked.error.message, message);
     const job = (await new JobStore(env.state).read('app', 'T-1'))!;
     assert.equal(job.mr_attempts, index + 1);
+    // The worktree stays for the retry; approve has nothing to push yet.
+    assert.equal(job.worktree, worktree);
+    assert.equal((await approve(env, 'T-1')).code, 1);
     if (index === 0) {
-      // needs_human after a failed preparation holds the slot.
-      await putTask(env, repo, 'T-2', 'Other');
-      assert.equal((await refused(served, 'start', { workspace: 'app', ticket: 'T-2' })).code, 'job_active');
-      assert.equal((await approve(env, 'T-2')).code, 1);
+      assert.equal((await refused(served, 'request_fix', { workspace: 'app', ticket: 'T-1', content: 'x' })).code, 'invalid_state');
     }
   }
 
-  const pushed = await approve(env, 'T-1');
-  assert.equal(pushed.code, 0, pushed.stdout + pushed.stderr);
-  assert.match(pushed.stdout, new RegExp(`^state: pushed\\nbranch: ${branch}\\ntitle: feat\\(T-1\\): Change the README$`, 'm'));
-  assert.match(pushed.stdout, /No merge request link: the origin URL could not be parsed\./);
-  // The branch landed in origin, rebased onto the moved main, with one commit.
-  const remote = execFileSync('git', ['--git-dir', origin, 'rev-parse', `refs/heads/${branch}`], { encoding: 'utf8' }).trim();
-  assert.equal(remote, git(repo, 'rev-parse', 'HEAD').trim());
-  assert.equal(execFileSync('git', ['--git-dir', origin, 'rev-parse', `${branch}~1`], { encoding: 'utf8' }).trim(), upstream);
-  assert.equal(execFileSync('git', ['--git-dir', origin, 'log', '-1', '--format=%s', branch], { encoding: 'utf8' }).trim(), 'feat(T-1): Change the README');
-  const done = await call(served, 'check', { workspace: 'app', ticket: 'T-1' });
-  assert.equal(done.state, 'pushed');
-  assert.equal(done.error, undefined);
-  assert.equal(done.mr, mrText('feat(T-1): Change the README'));
+  assert.equal((await call(served, 'mark_clean', { workspace: 'app', ticket: 'T-1' })).state, 'preparing_mr');
+  const ready = await waitFor(served, 'T-1', 'ready_for_human_review', 1);
+  assert.equal(ready.mr, mrText('feat(T-1): Change the README'));
+  // The worktree is gone, the branch has one commit on top of the moved main in the checkout.
+  assert.equal(await exists(worktree), false);
+  assert.equal(git(repo, 'rev-parse', `${branch}~1`).trim(), upstream);
+  assert.equal(git(repo, 'log', '-1', '--format=%s', branch).trim(), 'feat(T-1): Change the README');
   const jobDir = join(env.state, 'jobs', 'app', 'T-1');
-  assert.equal(await readFile(join(jobDir, 'mr.md'), 'utf8'), done.mr);
-  const job = (await new JobStore(env.state).read('app', 'T-1'))!;
-  assert.deepEqual([job.target_commit, job.mr_attempts, job.iteration], [upstream, 7, 1]);
+  assert.equal(await readFile(join(jobDir, 'mr.md'), 'utf8'), ready.mr);
+  let job = (await new JobStore(env.state).read('app', 'T-1'))!;
+  const prepared = git(repo, 'rev-parse', branch).trim();
+  assert.deepEqual([job.target_commit, job.base_commit, job.prepared_commit, job.worktree, job.mr_attempts, job.iteration], [upstream, upstream, prepared, null, 7, 1]);
   // The snapshot of attempt 1 was kept through the retries; the target is the last one. Its commit
-  // holds the reviewed tree on top of the base, and its ref is gone once pushed.
+  // holds the reviewed tree on top of the base, and its ref stays until the job ends.
   const snapshot = JSON.parse(await readFile(join(jobDir, 'mr-snapshot.json'), 'utf8'));
   const original = git(repo, 'rev-parse', `${upstream}~1`).trim();
   assert.deepEqual(snapshot.paths, ['README.md']);
   assert.deepEqual([snapshot.target_ref, snapshot.target_commit, snapshot.base_commit], ['origin/main', upstream, original]);
   assert.equal(git(repo, 'rev-parse', `${snapshot.snapshot_commit}:README.md`).trim(), git(repo, 'rev-parse', `${branch}:README.md`).trim());
-  assert.equal(git(repo, 'rev-parse', `${snapshot.snapshot_commit}^`).trim(), original);
-  assert.equal(git(repo, 'log', '-1', '--format=%s', snapshot.snapshot_commit).trim(), 'sf snapshot T-1');
-  assert.equal(snapshotRefCommit(repo, 'T-1'), undefined);
+  assert.equal(snapshotRefCommit(repo, 'T-1'), snapshot.snapshot_commit);
   await assert.rejects(stat(join(jobDir, 'snapshot.index')), { code: 'ENOENT' });
 
-  // The MR turns: the MR prompt and deny list; iterations keep the full deny list; sandbox on.
+  // The user edits the branch by hand: approve refuses, --as-is pushes the edited tip.
+  const tree = git(repo, 'rev-parse', `${branch}^{tree}`).trim();
+  const edited = execFileSync('git', [...ID, 'commit-tree', tree, '-p', prepared, '-m', 'feat(T-1): Change the README'], { cwd: repo, encoding: 'utf8' }).trim();
+  git(repo, 'update-ref', `refs/heads/${branch}`, edited);
+  const changed = await approve(env, 'T-1');
+  assert.equal(changed.code, 1);
+  assert.match(changed.stderr, new RegExp(`^sf: The tip of ${branch} is ${edited.slice(0, 12)}, not the prepared ${prepared.slice(0, 12)}: it was edited by hand\\. Approve with --as-is to push it as it is\\.$`, 'm'));
+  assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'T-1' })).state, 'ready_for_human_review');
+  const pushed = await approve(env, 'T-1', '--as-is');
+  assert.equal(pushed.code, 0, pushed.stdout + pushed.stderr);
+  assert.match(pushed.stdout, new RegExp(`^state: pushed\\nbranch: ${branch}\\ntitle: feat\\(T-1\\): Change the README$`, 'm'));
+  assert.match(pushed.stdout, /No merge request link: the origin URL could not be parsed\./);
+  const remote = execFileSync('git', ['--git-dir', origin, 'rev-parse', `refs/heads/${branch}`], { encoding: 'utf8' }).trim();
+  assert.equal(remote, edited);
+  const done = await call(served, 'check', { workspace: 'app', ticket: 'T-1' });
+  assert.deepEqual([done.state, done.error, done.mr], ['pushed', undefined, ready.mr]);
+  job = (await new JobStore(env.state).read('app', 'T-1'))!;
+  assert.deepEqual([job.prepared_commit, job.mr_attempts], [edited, 7]);
+  assert.equal(snapshotRefCommit(repo, 'T-1'), undefined);
+
+  // The MR turns: the MR prompt and deny list; iterations keep the full deny list; sandbox on; every turn in the worktree.
   const log = await fakeLog(env);
   const handbook = (await loadHandbook()).text;
   assert.equal(log.length, 8);
@@ -164,6 +186,7 @@ test('approve: each mr_* check fails in turn, retries keep the snapshot, the las
   assert.match(log[7]!.prompt, new RegExp(`^Target: origin/main at ${upstream}\\.$`, 'm'));
   assert.match(log[2]!.prompt, /This is attempt 2\. The previous attempt failed the factory's checks: The work checkout has 1 uncommitted change\(s\): README\.md\./);
   assert.doesNotMatch(log[1]!.prompt, /Rules from the Software Factory/);
+  assert.ok(log.every((entry) => entry.cwd === worktree));
   const denied = (entry: { argv: string[] }): string => entry.argv.find((arg) => arg.startsWith('--disallowedTools='))!;
   assert.match(denied(log[0]!), /Bash\(git commit:\*\)/);
   for (const entry of log.slice(1)) {
@@ -171,21 +194,19 @@ test('approve: each mr_* check fails in turn, retries keep the snapshot, the las
     assert.match(denied(entry), /Bash\(git push:\*\)/);
     assert.ok(entry.argv.includes(`--resume=${log[0]!.sessionId}`));
   }
-  // The SDK passes the sandbox as an inline --settings JSON.
   const settings = JSON.parse(log[0]!.argv[log[0]!.argv.indexOf('--settings') + 1]!);
   assert.deepEqual(settings.sandbox, {
     enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true,
     network: { allowedDomains: ['registry.npmjs.org', 'pypi.org'], allowLocalBinding: true, allowAllUnixSockets: true },
   });
-  // No SF_MODEL: no --model, the user's Claude Code default applies.
   assert.ok(log.every((entry) => !entry.argv.some((arg) => arg === '--model' || arg.startsWith('--model='))));
-  // pushed frees the slot: the next ticket starts in the same (clean) work checkout.
-  assert.equal((await call(served, 'start', { workspace: 'app', ticket: 'T-2' })).state, 'working');
-  await waitFor(served, 'T-2', 'awaiting_review', 1);
+  // pushed is terminal: approve again is refused; the checkout stayed on main throughout.
+  assert.equal((await approve(env, 'T-1')).code, 1);
+  assert.equal(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'main');
   await stop(served);
 });
 
-test('approve: a prepared commit that differs from the reviewed change goes back to review against the target', async () => {
+test('mark_clean: a prepared commit that differs from the reviewed change goes back to review against the target in the same worktree; a fix after Clean reopens the worktree and the next Clean amends', async () => {
   const env = await newEnv('diffcheck');
   const repo = await newRepo(env, 'diffcheck-repo', true);
   const origin = join(temp, 'diffcheck-repo-origin.git');
@@ -195,22 +216,23 @@ test('approve: a prepared commit that differs from the reviewed change goes back
     { write: { 'a.txt': 'a\n' }, text: 'iteration 1' },
     // The Implementer touches one more file during preparation.
     { write: { 'b.txt': 'b\n', [mrPath]: mrText('feat(D-1): Add a and b') }, run: [ADD, commit('feat(D-1): Add a and b'), REBASE], text: 'Prepared; also added b.txt.' },
-    // Second approve: nothing to commit, nothing to rebase.
+    // Second Clean: nothing to commit, nothing to rebase.
     { text: 'Nothing left to do.' },
+    // A fix after Clean, in the reopened worktree.
+    { write: { 'c.txt': 'c\n' }, text: 'iteration 3: added c' },
+    // Its Clean amends the prepared commit.
+    { write: { [mrPath]: mrText('feat(D-1): Add a, b and c') }, run: [['git', 'add', 'c.txt'], ['git', ...ID, 'commit', '-q', '--amend', '-m', 'feat(D-1): Add a, b and c']], text: 'Amended.' },
   ]);
   const served = await serve(env);
   await call(served, 'start', { workspace: 'app', ticket: 'D-1' });
   const first = await waitFor(served, 'D-1', 'awaiting_review', 1);
-  const oldBase = (await new JobStore(env.state).read('app', 'D-1'))!.base_commit;
+  const jobs = new JobStore(env.state);
+  const oldBase = (await jobs.read('app', 'D-1'))!.base_commit;
   const upstream = moveOrigin(origin, 'up.txt');
+  const worktree = worktreeOf(env, 'D-1');
 
-  // Approve straight from awaiting_review: the user's word is final.
-  const back = await approve(env, 'D-1');
-  assert.equal(back.code, 1, back.stdout + back.stderr);
-  assert.match(back.stdout, /^state: awaiting_review\nbranch: D-1-add-files\nchanged_paths: \["b\.txt"\]$/m);
-  assert.match(back.stdout, /went back to the Context owner/);
-  const second = await call(served, 'check', { workspace: 'app', ticket: 'D-1' });
-  assert.equal(second.iteration, 2);
+  await call(served, 'mark_clean', { workspace: 'app', ticket: 'D-1' });
+  const second = await waitFor(served, 'D-1', 'awaiting_review', 2);
   assert.match(second.report, /^Prepared; also added b\.txt\.\n\n## MR preparation\n\nThe prepared commit differs from the reviewed change in: b\.txt\. The Patch is now against the target origin\/main \([0-9a-f]{40}\)\.\n\n## Changed files\n/);
   // The Patch is against the target: both files, not the upstream change.
   assert.match(second.patch.text, /\+\+\+ b\/a\.txt/);
@@ -218,16 +240,38 @@ test('approve: a prepared commit that differs from the reviewed change goes back
   assert.doesNotMatch(second.patch.text, /up\.txt/);
   assert.notEqual(second.patch.sha256, first.patch.sha256);
   assert.equal(second.mr, mrText('feat(D-1): Add a and b'));
-  const job = (await new JobStore(env.state).read('app', 'D-1'))!;
-  assert.deepEqual([job.base_commit, job.target_commit], [upstream, upstream]);
+  let job = (await jobs.read('app', 'D-1'))!;
+  assert.deepEqual([job.base_commit, job.target_commit, job.worktree], [upstream, upstream, worktree]);
   assert.notEqual(oldBase, upstream);
   assert.throws(() => execFileSync('git', ['--git-dir', origin, 'rev-parse', '--verify', 'refs/heads/D-1-add-files'], { stdio: 'ignore' }));
 
   await call(served, 'mark_clean', { workspace: 'app', ticket: 'D-1' });
+  await waitFor(served, 'D-1', 'ready_for_human_review', 2);
+  assert.equal(await exists(worktree), false);
+  const prepared = git(repo, 'rev-parse', 'D-1-add-files').trim();
+  job = (await jobs.read('app', 'D-1'))!;
+  assert.equal(job.prepared_commit, prepared);
+
+  // request_fix from ready_for_human_review: the worktree is recreated from the branch, the next
+  // iteration's Patch is the whole change against the target, and Clean amends the one commit.
+  assert.deepEqual(await call(served, 'request_fix', { workspace: 'app', ticket: 'D-1', content: 'Add c.txt too.' }), { iteration: 3, check_after_minutes: 5 });
+  const third = await waitFor(served, 'D-1', 'awaiting_review', 3);
+  assert.match(third.patch.text, /\+\+\+ b\/a\.txt/);
+  assert.match(third.patch.text, /\+\+\+ b\/c\.txt/);
+  assert.equal(git(worktree, 'rev-parse', 'HEAD').trim(), prepared);
+  await call(served, 'mark_clean', { workspace: 'app', ticket: 'D-1' });
+  await waitFor(served, 'D-1', 'ready_for_human_review', 3);
+  assert.equal(git(repo, 'rev-list', '--count', `${upstream}..D-1-add-files`).trim(), '1');
+  assert.equal(git(repo, 'log', '-1', '--format=%s', 'D-1-add-files').trim(), 'feat(D-1): Add a, b and c');
+  assert.equal(git(repo, 'show', 'D-1-add-files:c.txt'), 'c\n');
+  job = (await jobs.read('app', 'D-1'))!;
+  assert.notEqual(job.prepared_commit, prepared);
+  assert.equal(job.worktree, null);
+
   const pushed = await approve(env, 'D-1');
   assert.equal(pushed.code, 0, pushed.stdout + pushed.stderr);
-  assert.match(pushed.stdout, /^state: pushed\nbranch: D-1-add-files\ntitle: feat\(D-1\): Add a and b$/m);
-  assert.equal(execFileSync('git', ['--git-dir', origin, 'rev-parse', 'refs/heads/D-1-add-files'], { encoding: 'utf8' }).trim(), git(repo, 'rev-parse', 'HEAD').trim());
+  assert.match(pushed.stdout, /^state: pushed\nbranch: D-1-add-files\ntitle: feat\(D-1\): Add a, b and c$/m);
+  assert.equal(execFileSync('git', ['--git-dir', origin, 'rev-parse', 'refs/heads/D-1-add-files'], { encoding: 'utf8' }).trim(), job.prepared_commit);
   assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'D-1' })).state, 'pushed');
   await stop(served);
 });
@@ -242,7 +286,7 @@ async function linesRepo(env: Parameters<typeof runCli>[0], name: string): Promi
   return { repo, origin: join(temp, `${name}-origin.git`) };
 }
 
-test('approve: the target moved in another hunk of a reviewed file; the rebase merges it and the job is pushed without a new iteration', async () => {
+test('mark_clean: the target moved in another hunk of a reviewed file; the rebase merges it and the branch is ready without a new iteration', async () => {
   const env = await newEnv('mergeclean');
   const { repo, origin } = await linesRepo(env, 'mergeclean-repo');
   await putTask(env, repo, 'M-1', 'Edit line nine');
@@ -257,22 +301,22 @@ test('approve: the target moved in another hunk of a reviewed file; the rebase m
   const served = await serve(env);
   await call(served, 'start', { workspace: 'app', ticket: 'M-1' });
   await waitFor(served, 'M-1', 'awaiting_review', 1);
-  await call(served, 'mark_clean', { workspace: 'app', ticket: 'M-1' });
   // The same file changes on the target, in line 1: a clean three-way merge.
   const upstream = pushToOrigin(origin, { 'lines.txt': lines({ 1: '1 upstream' }) }, 'upstream line one');
-
+  await call(served, 'mark_clean', { workspace: 'app', ticket: 'M-1' });
+  await waitFor(served, 'M-1', 'ready_for_human_review', 1);
+  const job = (await new JobStore(env.state).read('app', 'M-1'))!;
+  assert.deepEqual([job.iteration, job.target_commit], [1, upstream]);
+  assert.equal(git(repo, 'show', 'M-1-edit-line-nine:lines.txt'), lines({ 1: '1 upstream', 9: '9 change' }));
   const pushed = await approve(env, 'M-1');
   assert.equal(pushed.code, 0, pushed.stdout + pushed.stderr);
   assert.match(pushed.stdout, /^state: pushed\nbranch: M-1-edit-line-nine\ntitle: feat\(M-1\): Edit line nine$/m);
-  const job = (await new JobStore(env.state).read('app', 'M-1'))!;
-  assert.deepEqual([job.state, job.iteration, job.target_commit], ['pushed', 1, upstream]);
-  const pushedFile = execFileSync('git', ['--git-dir', origin, 'show', 'M-1-edit-line-nine:lines.txt'], { encoding: 'utf8' });
-  assert.equal(pushedFile, lines({ 1: '1 upstream', 9: '9 change' }));
+  assert.equal(execFileSync('git', ['--git-dir', origin, 'show', 'M-1-edit-line-nine:lines.txt'], { encoding: 'utf8' }), lines({ 1: '1 upstream', 9: '9 change' }));
   assert.equal(snapshotRefCommit(repo, 'M-1'), undefined);
   await stop(served);
 });
 
-test('approve: the target moved in the same hunk; the resolved conflict goes back to review naming the file, the next approve pushes', async () => {
+test('mark_clean: the target moved in the same hunk; the resolved conflict goes back to review naming the file, the next Clean is ready', async () => {
   const env = await newEnv('mergeconflict');
   const { repo, origin } = await linesRepo(env, 'mergeconflict-repo');
   await putTask(env, repo, 'M-2', 'Edit line nine');
@@ -295,14 +339,10 @@ test('approve: the target moved in the same hunk; the resolved conflict goes bac
   const served = await serve(env);
   await call(served, 'start', { workspace: 'app', ticket: 'M-2' });
   await waitFor(served, 'M-2', 'awaiting_review', 1);
-  await call(served, 'mark_clean', { workspace: 'app', ticket: 'M-2' });
   const upstream = pushToOrigin(origin, { 'lines.txt': lines({ 9: '9 upstream' }) }, 'upstream line nine');
 
-  const back = await approve(env, 'M-2');
-  assert.equal(back.code, 1, back.stdout + back.stderr);
-  assert.match(back.stdout, /^state: awaiting_review\nbranch: M-2-edit-line-nine\nchanged_paths: \["lines\.txt"\]$/m);
-  const second = await call(served, 'check', { workspace: 'app', ticket: 'M-2' });
-  assert.equal(second.iteration, 2);
+  await call(served, 'mark_clean', { workspace: 'app', ticket: 'M-2' });
+  const second = await waitFor(served, 'M-2', 'awaiting_review', 2);
   assert.match(second.report, /\n## MR preparation\n\nThe prepared commit differs from the reviewed change in: lines\.txt\. /);
   assert.match(second.patch.text, /^-9 upstream\n\+9 change and upstream$/m);
   // The snapshot ref stays until the job ends; the snapshot holds the reviewed content.
@@ -311,20 +351,20 @@ test('approve: the target moved in the same hunk; the resolved conflict goes bac
   assert.equal(snapshotRefCommit(repo, 'M-2'), first.snapshot_commit);
   assert.equal(git(repo, 'show', `${first.snapshot_commit}:lines.txt`), lines({ 9: '9 change' }));
 
-  // The next approve replaces the snapshot (now against the target) and pushes.
+  // The next Clean replaces the snapshot (now against the target) and readies the branch.
   await call(served, 'mark_clean', { workspace: 'app', ticket: 'M-2' });
-  const pushed = await approve(env, 'M-2');
-  assert.equal(pushed.code, 0, pushed.stdout + pushed.stderr);
-  assert.match(pushed.stdout, /^state: pushed\nbranch: M-2-edit-line-nine\ntitle: feat\(M-2\): Edit line nine$/m);
+  await waitFor(served, 'M-2', 'ready_for_human_review', 2);
   const next = JSON.parse(await readFile(join(jobDir, 'mr-snapshot.json'), 'utf8'));
   assert.deepEqual([next.base_commit, next.target_commit, next.paths], [upstream, upstream, ['lines.txt']]);
   assert.notEqual(next.snapshot_commit, first.snapshot_commit);
+  const pushed = await approve(env, 'M-2');
+  assert.equal(pushed.code, 0, pushed.stdout + pushed.stderr);
   assert.equal(snapshotRefCommit(repo, 'M-2'), undefined);
   assert.equal(execFileSync('git', ['--git-dir', origin, 'show', 'M-2-edit-line-nine:lines.txt'], { encoding: 'utf8' }), resolved);
   await stop(served);
 });
 
-test('approve retries directly after a failed MR turn (sandbox_unavailable) and pushes', async () => {
+test('mark_clean retries directly after a failed MR turn (sandbox_unavailable); approve pushes', async () => {
   const env = await newEnv('retry');
   const repo = await newRepo(env, 'retry-repo', true);
   const origin = join(temp, 'retry-repo-origin.git');
@@ -337,9 +377,11 @@ test('approve retries directly after a failed MR turn (sandbox_unavailable) and 
   const served = await serve(env);
   await call(served, 'start', { workspace: 'app', ticket: 'R-1' });
   await waitFor(served, 'R-1', 'awaiting_review', 1);
-  const failed = await approve(env, 'R-1');
-  assert.equal(failed.code, 1);
-  assert.match(failed.stdout, /^state: needs_human\nbranch: R-1-retry\nerror: \{"code":"sandbox_unavailable","message":"sandbox: bubblewrap is not installed"\}$/m);
+  await call(served, 'mark_clean', { workspace: 'app', ticket: 'R-1' });
+  const failed = await waitFor(served, 'R-1', 'needs_human');
+  assert.deepEqual(failed.error, { code: 'sandbox_unavailable', message: 'sandbox: bubblewrap is not installed' });
+  await call(served, 'mark_clean', { workspace: 'app', ticket: 'R-1' });
+  await waitFor(served, 'R-1', 'ready_for_human_review', 1);
   const pushed = await approve(env, 'R-1');
   assert.equal(pushed.code, 0, pushed.stdout + pushed.stderr);
   assert.match(pushed.stdout, /^state: pushed\nbranch: R-1-retry\ntitle: fix\(R-1\): Retry the README$/m);
@@ -349,10 +391,9 @@ test('approve retries directly after a failed MR turn (sandbox_unavailable) and 
   await stop(served);
 });
 
-test('approve: placeholders the sandbox creates during the MR turn do not fail mr_dirty, the job is pushed', async () => {
+test('mark_clean: placeholders the sandbox creates during the MR turn do not fail mr_dirty; the branch holds the change only', async () => {
   const env = await newEnv('mrplaceholders');
   const repo = await newRepo(env, 'mrplaceholders-repo', true);
-  const origin = join(temp, 'mrplaceholders-repo-origin.git');
   await putTask(env, repo, 'P-2', 'Placeholders on approve');
   const placeholders = ['.bashrc', '.gitconfig', '.mcp.json', '.claude/settings.json', '.claude/skills', '.claude/.cc-writes/'];
   await script(env, [
@@ -368,15 +409,11 @@ test('approve: placeholders the sandbox creates during the MR turn do not fail m
   await call(served, 'start', { workspace: 'app', ticket: 'P-2' });
   await waitFor(served, 'P-2', 'awaiting_review', 1);
   await call(served, 'mark_clean', { workspace: 'app', ticket: 'P-2' });
-  const pushed = await approve(env, 'P-2');
-  assert.equal(pushed.code, 0, pushed.stdout + pushed.stderr);
-  assert.match(pushed.stdout, /^state: pushed\nbranch: P-2-placeholders-on-approve\ntitle: feat\(P-2\): Prepare the README$/m);
-  // The pushed commit holds the change only.
-  const files = execFileSync('git', ['--git-dir', origin, 'show', '--name-only', '--format=', 'refs/heads/P-2-placeholders-on-approve'], { encoding: 'utf8' }).trim();
+  await waitFor(served, 'P-2', 'ready_for_human_review', 1);
+  const files = git(repo, 'show', '--name-only', '--format=', 'P-2-placeholders-on-approve').trim();
   assert.equal(files, 'README.md');
   const snapshot = JSON.parse(await readFile(join(env.state, 'jobs', 'app', 'P-2', 'mr-snapshot.json'), 'utf8'));
   assert.deepEqual(snapshot.paths, ['README.md']);
-  // The snapshot commit holds the change only, no placeholder.
   assert.equal(git(repo, 'diff', '--name-only', snapshot.base_commit, snapshot.snapshot_commit).trim(), 'README.md');
   const logged = (await readFile(join(env.state, 'jobs', 'app', 'P-2', 'events.jsonl'), 'utf8'))
     .trim().split('\n').map((line) => JSON.parse(line)).filter((record) => record.type === 'placeholders_removed');
@@ -386,7 +423,7 @@ test('approve: placeholders the sandbox creates during the MR turn do not fail m
   await stop(served);
 });
 
-test('approve is refused in needs_human before any MR preparation', async () => {
+test('mark_clean is refused in needs_human before any MR preparation; approve is refused without a prepared branch', async () => {
   const env = await newEnv('noretry', { SF_MAX_ITERATIONS: '1' });
   const repo = await newRepo(env, 'noretry-repo', false);
   await putTask(env, repo, 'R-2', 'No retry');
@@ -394,10 +431,13 @@ test('approve is refused in needs_human before any MR preparation', async () => 
   const served = await serve(env);
   await call(served, 'start', { workspace: 'app', ticket: 'R-2' });
   await waitFor(served, 'R-2', 'awaiting_review', 1);
+  const early = await approve(env, 'R-2');
+  assert.equal(early.code, 1);
+  assert.match(early.stderr, /^sf: approve needs ready_for_human_review \(the branch prepared at Clean\); the job is awaiting_review\.$/m);
   assert.equal((await refused(served, 'request_fix', { workspace: 'app', ticket: 'R-2', content: 'x' })).code, 'iteration_limit');
-  const result = await approve(env, 'R-2');
-  assert.equal(result.code, 1);
-  assert.match(result.stderr, /^sf: approve needs ready_for_human_review, awaiting_review or needs_human after an MR preparation; the job is needs_human\.$/m);
+  const result = await refused(served, 'mark_clean', { workspace: 'app', ticket: 'R-2' });
+  assert.equal(result.code, 'invalid_state');
+  assert.match(result.message, /^mark_clean needs awaiting_review \(or needs_human after an MR preparation\); the job is needs_human\.$/);
   await stop(served);
 });
 
@@ -419,7 +459,7 @@ test('the push refuses main, master and the base branch with mr_push_protected a
   assert.equal(execFileSync('git', ['branch', '--list', 'master', 'release-1'], { cwd: origin }).toString().trim(), '');
 });
 
-test('abort with and without --discard, reset, and sandbox_unavailable', async () => {
+test('abort with and without --discard, reset, and sandbox_unavailable, with worktrees', async () => {
   const env = await newEnv('abort', { SF_SANDBOX_DOMAINS: 'example.org' });
   const repo = await newRepo(env, 'abort-repo', false);
   for (const ticket of ['A-1', 'A-2', 'A-3', 'A-4']) {
@@ -433,8 +473,9 @@ test('abort with and without --discard, reset, and sandbox_unavailable', async (
     { startupFailure: 'sandbox: bubblewrap is not installed' },
   ]);
   const served = await serve(env);
+  const worktree = (ticket: string): string => worktreeOf(env, ticket);
 
-  // A snapshot ref as approve leaves it; abort (with or without --discard) and reset delete it.
+  // A snapshot ref as Clean leaves it; abort (with or without --discard) and reset delete it.
   const fakeSnapshotRef = (ticket: string): void => {
     git(repo, 'update-ref', `refs/sf/snapshot/${ticket}`, git(repo, 'rev-parse', 'main').trim());
   };
@@ -442,56 +483,52 @@ test('abort with and without --discard, reset, and sandbox_unavailable', async (
     fakeSnapshotRef(ticket);
   }
 
-  // abort while a turn runs: the session ends, nothing else changes.
+  // abort while a turn runs: the session ends, the worktree and the branch stay.
   await call(served, 'start', { workspace: 'app', ticket: 'A-1' });
   const aborted = await runCli(env, ['abort', 'app', 'A-1']);
   assert.equal(aborted.code, 0, aborted.stderr);
-  assert.match(aborted.stdout, /^state: aborted\nbranch: A-1-job-a-1\ndiscarded: false\nThe branch and the files are left as they are\.$/m);
+  assert.match(aborted.stdout, new RegExp(`^state: aborted\\nbranch: A-1-job-a-1\\ndiscarded: false\\nworktree: ${worktree('A-1')}\\nThe branch and its worktree are left as they are: ${worktree('A-1')}$`, 'm'));
   await new Promise((resolve) => setTimeout(resolve, 5500));
-  await assert.rejects(stat(join(repo, 'late.txt')), { code: 'ENOENT' });
+  await assert.rejects(stat(join(worktree('A-1'), 'late.txt')), { code: 'ENOENT' });
   const a1 = await call(served, 'check', { workspace: 'app', ticket: 'A-1' });
   assert.deepEqual([a1.state, a1.error], ['aborted', undefined]);
-  assert.equal(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'A-1-job-a-1');
+  assert.equal(git(worktree('A-1'), 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'A-1-job-a-1');
+  assert.equal(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'main');
   assert.equal(snapshotRefCommit(repo, 'A-1'), undefined);
   assert.equal((await runCli(env, ['abort', 'app', 'A-1'])).code, 1);
-  git(repo, 'checkout', '-q', 'main');
 
-  // abort --discard: refused during a rebase, then branch and changes gone, .software-factory kept.
+  // abort --discard: refused during a rebase in the worktree, then the worktree and the branch are gone.
   await call(served, 'start', { workspace: 'app', ticket: 'A-2' });
   await waitFor(served, 'A-2', 'awaiting_review', 1);
-  await mkdir(join(repo, '.git', 'rebase-merge'));
+  const gitDir = resolve(worktree('A-2'), execFileSync('git', ['rev-parse', '--git-dir'], { cwd: worktree('A-2'), encoding: 'utf8' }).trim());
+  await mkdir(join(gitDir, 'rebase-merge'), { recursive: true });
   const busy = await runCli(env, ['abort', 'app', 'A-2', '--discard']);
   assert.equal(busy.code, 1);
   assert.match(busy.stderr, /^sf: A rebase or a Git lock is in progress/);
   assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'A-2' })).state, 'awaiting_review');
-  await rm(join(repo, '.git', 'rebase-merge'), { recursive: true });
+  await rm(join(gitDir, 'rebase-merge'), { recursive: true });
   const discarded = await runCli(env, ['abort', 'app', 'A-2', '--discard']);
   assert.equal(discarded.code, 0, discarded.stderr);
-  assert.match(discarded.stdout, /^state: aborted\nbranch: A-2-job-a-2\ndiscarded: true$/m);
+  assert.match(discarded.stdout, /^state: aborted\nbranch: A-2-job-a-2\ndiscarded: true\nworktree: null$/m);
   assert.equal(snapshotRefCommit(repo, 'A-2'), undefined);
-  assert.equal(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'main');
+  assert.equal(await exists(worktree('A-2')), false);
   assert.equal(git(repo, 'branch', '--list', 'A-2-job-a-2'), '');
   assert.equal(git(repo, 'status', '--porcelain'), '');
   assert.equal(await readFile(join(repo, 'README.md'), 'utf8'), 'hello\n');
-  await assert.rejects(stat(join(repo, 'y.txt')), { code: 'ENOENT' });
-  // No -x: ignored and excluded files survive.
-  assert.equal(await readFile(join(repo, 'debug.log'), 'utf8'), 'ignored\n');
   assert.ok((await stat(join(repo, '.software-factory', 'A-2.md'))).isFile());
 
-  // reset: the job directory is archived, Git untouched.
+  // reset: the job directory is archived, the worktree removed, the branch untouched.
   await call(served, 'start', { workspace: 'app', ticket: 'A-3' });
   await waitFor(served, 'A-3', 'awaiting_review', 1);
   const reset = await runCli(env, ['reset', 'app', 'A-3']);
   assert.equal(reset.code, 0, reset.stderr);
-  assert.match(reset.stdout, /^archived: jobs\/app\/A-3\.\d{8}T\d{6}Z\nbranch: A-3-job-a-3\nThe branch and the files in the work checkout are untouched\.$/m);
+  assert.match(reset.stdout, /^archived: jobs\/app\/A-3\.\d{8}T\d{6}Z\nbranch: A-3-job-a-3\nThe worktree is removed; the branch is untouched\.$/m);
   assert.equal((await refused(served, 'check', { workspace: 'app', ticket: 'A-3' })).code, 'job_not_found');
   assert.equal((await readdir(join(env.state, 'jobs', 'app'))).filter((name) => name.startsWith('A-3.')).length, 1);
-  assert.equal(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'A-3-job-a-3');
-  assert.equal(await readFile(join(repo, 'z.txt'), 'utf8'), 'z\n');
+  assert.equal(await exists(worktree('A-3')), false);
+  assert.equal(git(repo, 'branch', '--list', 'A-3-job-a-3').trim(), 'A-3-job-a-3');
   assert.equal(snapshotRefCommit(repo, 'A-3'), undefined);
   assert.equal((await runCli(env, ['reset', 'app', 'A-3'])).code, 1);
-  await rm(join(repo, 'z.txt'));
-  git(repo, 'checkout', '-q', 'main');
 
   // A query that ends because the sandbox is unavailable.
   await call(served, 'start', { workspace: 'app', ticket: 'A-4' });
@@ -532,7 +569,7 @@ interface Received {
   body: string;
 }
 
-test('notifications: desktop and ntfy for the user\'s states, silent iterations, notify_failed, notify-test', async () => {
+test('notifications: desktop and ntfy for the user\'s states, silent iterations, the file lines at ready, notify_failed, notify-test', async () => {
   const received: Received[] = [];
   const ntfy = createServer((req, res) => {
     let body = '';
@@ -575,7 +612,11 @@ test('notifications: desktop and ntfy for the user\'s states, silent iterations,
 
   const repo = await newRepo(env, 'notify-repo', false);
   await putTask(env, repo, 'N-1', 'Notify me');
-  await script(env, [{ text: 'iteration 1' }, { text: 'iteration 2' }]);
+  await script(env, [
+    { text: 'iteration 1', write: { 'a.txt': 'a\n' } },
+    { text: 'iteration 2', write: { 'package.json': '{}\n' }, run: [['rm', 'a.txt']] },
+    { write: { '.software-factory/N-1.mr.md': mrText('feat(N-1): Notify me') }, run: [['git', 'add', 'package.json'], commit('feat(N-1): Notify me')], text: 'prepared' },
+  ]);
   const served = await serve(env);
   await call(served, 'start', { workspace: 'app', ticket: 'N-1' });
   await waitFor(served, 'N-1', 'awaiting_review', 1);
@@ -593,11 +634,13 @@ test('notifications: desktop and ntfy for the user\'s states, silent iterations,
   );
   assert.deepEqual((await desktop())[0], ['--app-name=Software Factory', 'N-1: needs_human', body]);
 
-  // ntfy down: the failure is recorded, the job is unaffected, the desktop still notifies.
+  // ntfy down: the failure is recorded, the job is unaffected, the desktop still notifies; the
+  // ready notification names the MR title and the sensitive paths (the deleted line is the fourth, cut).
   await new Promise<void>((resolve) => ntfy.close(() => resolve()));
   await runCli(env, ['say', 'app', 'N-1', 'go', 'on']);
   await waitFor(served, 'N-1', 'awaiting_review', 2);
-  await call(served, 'mark_clean', { workspace: 'app', ticket: 'N-1' });
+  await call(served, 'mark_clean', { workspace: 'app', ticket: 'N-1', sensitive: ['package.json'] });
+  await waitFor(served, 'N-1', 'ready_for_human_review', 2);
   const events = join(env.state, 'jobs', 'app', 'N-1', 'events.jsonl');
   const failures = async (): Promise<Array<Record<string, unknown>>> =>
     (await readFile(events, 'utf8')).trim().split('\n').map((line) => JSON.parse(line)).filter((record) => record.type === 'notify_failed');
@@ -605,7 +648,7 @@ test('notifications: desktop and ntfy for the user\'s states, silent iterations,
   const [failure] = await failures();
   assert.equal(failure!.channel, 'ntfy');
   assert.match(String(failure!.message), /fetch failed|ECONNREFUSED/);
-  assert.deepEqual((await desktop())[1]!.slice(1), ['N-1: ready_for_human_review', 'branch: N-1-notify-me']);
+  assert.deepEqual((await desktop())[1]!.slice(1), ['N-1: ready_for_human_review', 'branch: N-1-notify-me\nfeat(N-1): Notify me\nsensitive: package.json (undeclared)']);
   assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'N-1' })).state, 'ready_for_human_review');
   assert.match((await runCli(env, ['watch', 'app', 'N-1', '--once'])).stdout, /\[2\] notification via ntfy failed: /);
   const down = await runCli(env, ['notify-test']);
@@ -614,7 +657,7 @@ test('notifications: desktop and ntfy for the user\'s states, silent iterations,
   await stop(served);
 });
 
-test('SF_NOTIFY_ITERATIONS=on notifies awaiting_review on ntfy with the iteration; off it stays silent', async () => {
+test('SF_NOTIFY_ITERATIONS=on notifies awaiting_review on ntfy with the iteration and the file lines; off it stays silent', async () => {
   const received: Received[] = [];
   const ntfy = createServer((req, res) => {
     let body = '';
@@ -631,7 +674,7 @@ test('SF_NOTIFY_ITERATIONS=on notifies awaiting_review on ntfy with the iteratio
     const env = await newEnv(`notify-iterations-${setting}`, { SF_NTFY_URL: url, SF_NOTIFY_ITERATIONS: setting });
     const repo = await newRepo(env, `notify-iterations-${setting}-repo`, false);
     await putTask(env, repo, 'N-2', 'Notify iterations');
-    await script(env, [{ text: 'iteration 1' }]);
+    await script(env, [{ text: 'iteration 1', write: { 'b.txt': 'b\n' }, run: [['rm', 'README.md']] }]);
     const served = await serve(env);
     await call(served, 'start', { workspace: 'app', ticket: 'N-2' });
     await waitFor(served, 'N-2', 'awaiting_review', 1);
@@ -644,7 +687,7 @@ test('SF_NOTIFY_ITERATIONS=on notifies awaiting_review on ntfy with the iteratio
     if (expected === 1) {
       assert.deepEqual(
         [received[0]!.headers.title, received[0]!.headers.priority, received[0]!.headers.tags, received[0]!.body],
-        ['N-2: awaiting_review', 'default', 'eyes', 'Report and Patch of iteration 1 are ready for the Context owner'],
+        ['N-2: awaiting_review', 'default', 'eyes', 'Report and Patch of iteration 1 are ready for the Context owner\nsensitive: none\ndeleted: README.md'],
       );
     }
     await stop(served);

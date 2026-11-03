@@ -2,7 +2,7 @@
 import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import type { AuthConfig } from './auth.js';
 import { FactoryError } from './errors.js';
 import { configDir } from './registry.js';
@@ -20,6 +20,12 @@ export interface Config {
   // The model of every Implementer turn (SF_MODEL, passed as is); undefined uses the user's Claude
   // Code default.
   model: string | undefined;
+  // Where the worktree of every job is created: <root>/<workspace>/<ticket> (SF_WORKTREE_ROOT).
+  worktreeRoot: string;
+  // Live jobs per workspace (SF_MAX_JOBS).
+  maxJobs: number;
+  // Extra sensitive path globs (SF_SENSITIVE_PATHS), on top of rules.ts.
+  sensitivePaths: string[];
 }
 
 // Domains sandboxed commands may reach: the npm registry and SF_SANDBOX_DOMAINS (comma-separated).
@@ -49,6 +55,21 @@ export function stateDir(env: NodeJS.ProcessEnv = process.env): string {
     return env.SF_STATE_DIR;
   }
   return join(env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'software-factory');
+}
+
+export function worktreeRoot(env: NodeJS.ProcessEnv = process.env): string {
+  if (env.SF_WORKTREE_ROOT) {
+    if (!isAbsolute(env.SF_WORKTREE_ROOT)) {
+      throw new FactoryError('invalid_config', 'SF_WORKTREE_ROOT must be an absolute path.');
+    }
+    return env.SF_WORKTREE_ROOT;
+  }
+  return join(stateDir(env), 'worktrees');
+}
+
+// Comma-separated globs; empty entries are dropped.
+export function sensitivePaths(env: NodeJS.ProcessEnv = process.env): string[] {
+  return (env.SF_SENSITIVE_PATHS ?? '').split(',').map((pattern) => pattern.trim()).filter((pattern) => pattern !== '');
 }
 
 // The environment file every sf command reads before anything else: SF_ENV_FILE, or
@@ -130,6 +151,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     claudePath,
     sandbox: sandboxSettings(env),
     model: env.SF_MODEL || undefined,
+    worktreeRoot: resolve(worktreeRoot(env)),
+    maxJobs: positiveInteger(env, 'SF_MAX_JOBS', 3),
+    sensitivePaths: sensitivePaths(env),
   };
 }
 

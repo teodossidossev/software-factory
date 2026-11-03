@@ -481,6 +481,9 @@ const queueEntrySchema = z.strictObject({
   body: z.string(),
   // Attempts made so far.
   attempt: z.number().int().min(0),
+  // The last event of a job (SF-019): once this delivery ends, the subscription is removed when
+  // it is the ticket's own.
+  final: z.boolean().optional(),
   nextAt: timestamp,
 });
 type QueueEntry = z.output<typeof queueEntrySchema>;
@@ -786,20 +789,29 @@ export class Events {
     this.#enqueue(job, jobPayload(job, lines)).catch((error: unknown) => console.error(error));
   };
 
+  // One conversation per ticket (SF-019): when a job is pushed or aborted, the subscriptions
+  // filtered on its ticket get the last event and are then removed, so the conversation never
+  // fires again. A failed job (a start that did not get going) keeps them: the same conversation
+  // starts the ticket again.
   async #enqueue(job: Job, payload: JobPayload): Promise<void> {
+    const ending = job.state === 'pushed' || job.state === 'aborted';
     await this.#locked(async () => {
       const added: QueueEntry[] = [];
       for (const subscription of this.#active()) {
         if (subscription.event !== EVENT_NAME || !matches(subscription.input, payload)) {
           continue;
         }
+        const own = ending && ownsTicket(subscription.input, job.workspace, job.ticket);
         const eventId = newEventId();
         const body = envelope(eventId, job.updated_at, payload);
         if (Buffer.byteLength(body) > MAX_BODY_BYTES) {
           await this.#log({ workspace: job.workspace, ticket: job.ticket, iteration: job.iteration }, 'event_failed', subscription.id, 0, 'too_large');
+          if (own) {
+            await this.#retire(subscription.id, job);
+          }
           continue;
         }
-        added.push({ eventId, subscription: subscription.id, workspace: job.workspace, ticket: job.ticket, iteration: job.iteration, body, attempt: 0, nextAt: now() });
+        added.push({ eventId, subscription: subscription.id, workspace: job.workspace, ticket: job.ticket, iteration: job.iteration, body, attempt: 0, nextAt: now(), ...(own ? { final: true } : {}) });
       }
       if (added.length === 0) {
         return;
@@ -869,6 +881,24 @@ export class Events {
       await this.#saveQueue();
     });
     await this.#log(entry, verdict === 'delivered' ? 'event_delivered' : 'event_failed', subscription.id, attempt, status);
+    // The job's last event has ended its delivery (delivered, given up, or gone): the ticket's
+    // subscription goes with it.
+    if (entry.final === true && delay === undefined && verdict !== 'gone') {
+      await this.#locked(() => this.#retire(subscription.id, entry));
+    }
+  }
+
+  // Removes a subscription at the end of its ticket's job and logs it on the job; inside the lock.
+  async #retire(id: string, job: { workspace: string; ticket: string; iteration: number }): Promise<void> {
+    if (!this.#subscriptions.some((subscription) => subscription.id === id)) {
+      return;
+    }
+    await this.#drop(id);
+    try {
+      await this.#jobs.appendEvent(job.workspace, job.ticket, { ts: now(), iteration: job.iteration, type: 'subscription_removed', subscription: id });
+    } catch (error) {
+      console.error(error);
+    }
   }
 
   // One signed POST of body to the subscription; the secret replaced within the rotation window

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdir, readFile, rm, stat } from 'node:fs/promises';
 import { request } from 'node:http';
 import { connect } from 'node:net';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { mock, test } from 'node:test';
 import { ACTIONS, MAX_ACTION_BODY_BYTES } from '../src/dashboard.js';
 import { FactoryError } from '../src/errors.js';
@@ -274,13 +274,14 @@ const REBASE = ['git', ...ID, 'rebase', '-q', 'origin/main'];
 
 function mrText(header: string): string {
   return [
-    header, '', '## What', 'Changes files.', '## Why', 'The ticket asks for it.', '## How', 'One line.', '## Why the change',
+    header, '',
+    '## What', 'Changes files.', '## Why', 'The ticket asks for it.', '## How', 'One line.', '## Why the change',
     'Readers need it.', '## Special things to note', '- None.', '## Change outline', '- files', '## Testing', 'npm test: passed',
     '## Checklist', '- [x] Branch name', '',
   ].join('\n');
 }
 
-test('dashboard actions end to end: say resumes needs_human, approve is refused before an MR attempt and allowed after, a failed and a pushed preparation, terminal refusals', async () => {
+test('dashboard actions end to end: say resumes needs_human, approve is refused until Clean prepared the branch, the push from the page, terminal refusals', async () => {
   const env = await newEnv('dash-needs', { SF_MAX_ITERATIONS: '1' });
   const repo = await newRepo(env, 'dash-needs-repo', true);
   await putTask(env, repo, 'N-1', 'Needs human');
@@ -298,21 +299,29 @@ test('dashboard actions end to end: say resumes needs_human, approve is refused 
     assert.equal((await refused(served, 'request_fix', { workspace: 'app', ticket: 'N-1', content: 'more' })).code, 'iteration_limit');
     assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'N-1' })).state, 'needs_human');
 
-    // needs_human without an MR attempt: approve is refused, say resumes the session.
+    // needs_human without a prepared branch: approve is refused, say resumes the session.
     const early = await act(base, 'api/jobs/app/N-1/approve', {});
     assert.equal(early.status, 409);
-    assert.match(JSON.parse(early.body).error.message, /^approve needs ready_for_human_review, awaiting_review or needs_human after an MR preparation; the job is needs_human\.$/);
+    assert.match(JSON.parse(early.body).error.message, /^approve needs ready_for_human_review \(the branch prepared at Clean\); the job is needs_human\.$/);
     assert.deepEqual(result(await act(base, 'api/jobs/app/N-1/say', { message: 'go on\nplease' })), { state: 'working', queued: false });
     await waitFor(served, 'N-1', 'awaiting_review', 2);
     for (const message of ['', '   \n\t ', 'a\u0000b']) {
       assert.deepEqual(error(await act(base, 'api/jobs/app/N-1/say', { message })), { status: 400, code: 'invalid_content' }, JSON.stringify(message));
     }
+    assert.deepEqual(error(await act(base, 'api/jobs/app/N-1/approve', {})), { status: 409, code: 'invalid_state' });
 
-    // Approve from awaiting_review; the MR turn fails to start: needs_human with the turn's code.
-    const failed = result(await act(base, 'api/jobs/app/N-1/approve', {}));
-    assert.deepEqual(failed, { state: 'needs_human', branch: 'N-1-needs-human', error: { code: 'sandbox_unavailable', message: 'sandbox: bubblewrap is not installed' } });
+    // Clean: the MR turn fails to start (needs_human with the turn's code), the retry prepares the branch.
+    await call(served, 'mark_clean', { workspace: 'app', ticket: 'N-1' });
+    const failed = await waitFor(served, 'N-1', 'needs_human');
+    assert.deepEqual(failed.error, { code: 'sandbox_unavailable', message: 'sandbox: bubblewrap is not installed' });
+    assert.deepEqual(error(await act(base, 'api/jobs/app/N-1/approve', {})), { status: 409, code: 'invalid_state' });
     assert.equal((await new JobStore(env.state).read('app', 'N-1'))!.mr_attempts, 1);
-    // The retry pushes; no link, because the origin is a local path.
+    await call(served, 'mark_clean', { workspace: 'app', ticket: 'N-1' });
+    await waitFor(served, 'N-1', 'ready_for_human_review', 2);
+    const ready = JSON.parse((await fetchRaw(new URL('api/jobs/app/N-1', base))).body);
+    assert.equal(ready.job.worktree, null);
+    assert.match(ready.job.prepared_commit, /^[0-9a-f]{40}$/);
+    // The push from the page; no link, because the origin is a local path.
     const pushed = result(await act(base, 'api/jobs/app/N-1/approve', {}));
     assert.deepEqual(pushed, { state: 'pushed', branch: 'N-1-needs-human', title: 'feat(N-1): Add a' });
     assert.equal((await fetchRaw(new URL('api/jobs/app/N-1/mr', base))).body, mrText('feat(N-1): Add a'));
@@ -329,7 +338,7 @@ test('dashboard actions end to end: say resumes needs_human, approve is refused 
   }
 });
 
-test('dashboard actions end to end: say queues during a turn, approve goes back to review, a disconnected approve still pushes, abort ends a preparation, discard and its refusals', async () => {
+test('dashboard actions end to end: say queues during a turn, a hand-edited tip needs as_is, abort ends a preparation, discard and its refusals', async () => {
   const env = await newEnv('dash-pending');
   const repo = await newRepo(env, 'dash-pending-repo', true);
   for (const ticket of ['C-1', 'C-2', 'C-3', 'C-4']) {
@@ -340,10 +349,10 @@ test('dashboard actions end to end: say queues during a turn, approve goes back 
     // C-1: the say arrives while this turn runs and is queued as the next one.
     { delayMs: 2500, write: { 'a.txt': 'a\n' }, text: 'iteration 1' },
     { text: 'the said turn' },
-    // approve 1: the prepared commit adds b.txt, so the change goes back to review.
+    // Clean 1: the prepared commit adds b.txt, so the change goes back to review.
     { write: { 'b.txt': 'b\n', '.software-factory/C-1.mr.md': mrText('feat(C-1): Add a and b') }, run: [['git', 'add', 'a.txt', 'b.txt'], commit('feat(C-1): Add a and b'), REBASE], text: 'prepared' },
-    // approve 2: slow; the page disconnects meanwhile.
-    { delayMs: 3000, text: 'nothing more' },
+    // Clean 2: nothing more to do.
+    { text: 'nothing more' },
     // C-2: a preparation that abort ends.
     { write: { 'c.txt': 'c\n' } },
     { delayMs: 6000, text: 'slow preparation' },
@@ -355,61 +364,64 @@ test('dashboard actions end to end: say queues during a turn, approve goes back 
   try {
     const base = served.dashboard!;
     const jobs = new JobStore(env.state);
+    const worktree = (ticket: string): string => join(env.state, 'worktrees', 'app', ticket);
     await call(served, 'start', { workspace: 'app', ticket: 'C-1' });
     assert.deepEqual(result(await act(base, 'api/jobs/app/C-1/say', { message })), { state: 'working', queued: true });
     await waitFor(served, 'C-1', 'awaiting_review', 1);
-    const back = result(await act(base, 'api/jobs/app/C-1/approve', {}));
-    assert.deepEqual(back, { state: 'awaiting_review', branch: 'C-1-job-c-1', changed_paths: ['b.txt'] });
-    assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'C-1' })).iteration, 2);
     await call(served, 'mark_clean', { workspace: 'app', ticket: 'C-1' });
+    await waitFor(served, 'C-1', 'awaiting_review', 2);
+    assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'C-1' })).iteration, 2);
 
-    // The second approve: the stream shows preparing_mr, reads work, approve and say are refused;
-    // then the page goes away and the preparation still pushes, once.
+    // The second Clean: the stream shows preparing_mr, then ready; approve and say are refused meanwhile.
     const stream = await openStream(new URL('api/stream?job=app/C-1', base));
     await stream.next('jobs');
-    const origin = `http://127.0.0.1:${base.port}`;
-    const req = request(new URL('api/jobs/app/C-1/approve', base), { method: 'POST', headers: { origin, 'content-type': 'application/json', 'content-length': '2' } });
-    req.on('error', () => undefined);
-    req.end('{}');
+    await call(served, 'mark_clean', { workspace: 'app', ticket: 'C-1' });
     assert.equal((await stream.next('jobs', (data) => data.jobs[0].state === 'preparing_mr')).jobs.length, 1);
-    assert.equal((await stream.next('job')).job.state, 'preparing_mr');
-    assert.equal(JSON.parse((await fetchRaw(new URL('api/jobs/app/C-1', base))).body).job.mr_attempts, 2);
     assert.deepEqual(error(await act(base, 'api/jobs/app/C-1/approve', {})), { status: 409, code: 'invalid_state' });
     assert.deepEqual(error(await act(base, 'api/jobs/app/C-1/say', { message: 'x' })), { status: 409, code: 'invalid_state' });
-    req.destroy();
-    assert.equal((await stream.next('jobs', (data) => data.jobs[0].state === 'pushed')).jobs[0].ticket, 'C-1');
+    assert.equal((await stream.next('jobs', (data) => data.jobs[0].state === 'ready_for_human_review')).jobs[0].ticket, 'C-1');
     stream.close();
+    const prepared = (await jobs.read('app', 'C-1'))!.prepared_commit!;
+    assert.equal(git(repo, 'rev-parse', 'C-1-job-c-1').trim(), prepared);
+    // The tip is edited by hand: refused, then pushed as it is.
+    const tree = git(repo, 'rev-parse', 'C-1-job-c-1^{tree}').trim();
+    const edited = git(repo, 'commit-tree', tree, '-p', prepared, '-m', 'feat(C-1): Add a and b').trim();
+    git(repo, 'update-ref', 'refs/heads/C-1-job-c-1', edited);
+    const changed = await act(base, 'api/jobs/app/C-1/approve', {});
+    assert.deepEqual(error(changed), { status: 409, code: 'branch_changed' });
+    assert.match(JSON.parse(changed.body).error.message, /Approve with --as-is/);
+    assert.deepEqual(error(await act(base, 'api/jobs/app/C-1/approve', { as_is: false })), { status: 409, code: 'branch_changed' });
+    assert.deepEqual(result(await act(base, 'api/jobs/app/C-1/approve', { as_is: true })), { state: 'pushed', branch: 'C-1-job-c-1', title: 'feat(C-1): Add a and b' });
     const pushed = (await jobs.read('app', 'C-1'))!;
-    assert.deepEqual([pushed.state, pushed.mr_attempts, pushed.iteration], ['pushed', 2, 2]);
+    assert.deepEqual([pushed.state, pushed.mr_attempts, pushed.iteration, pushed.prepared_commit], ['pushed', 2, 2, edited]);
     assert.deepEqual(error(await act(base, 'api/jobs/app/C-1/abort', {})), { status: 409, code: 'invalid_state' });
     let log = await fakeLog(env);
     assert.equal(log.length, 4);
     assert.equal(log[1]!.prompt, factoryPrompt(message, 'C-1', 1));
 
-    // C-2: abort while the MR preparation runs ends the job and settles the pending approve.
+    // C-2: abort while the MR preparation runs ends the job; the worktree stays.
     await call(served, 'start', { workspace: 'app', ticket: 'C-2' });
     await waitFor(served, 'C-2', 'awaiting_review', 1);
-    const pending = act(base, 'api/jobs/app/C-2/approve', {});
+    await call(served, 'mark_clean', { workspace: 'app', ticket: 'C-2' });
     await waitFor(served, 'C-2', 'preparing_mr');
-    assert.deepEqual(result(await act(base, 'api/jobs/app/C-2/abort', {})), { state: 'aborted', branch: 'C-2-job-c-2', discarded: false });
-    assert.deepEqual(result(await pending), { state: 'aborted', branch: 'C-2-job-c-2' });
+    assert.deepEqual(result(await act(base, 'api/jobs/app/C-2/abort', {})), { state: 'aborted', branch: 'C-2-job-c-2', discarded: false, worktree: worktree('C-2') });
     assert.deepEqual(error(await act(base, 'api/jobs/app/C-2/abort', {})), { status: 409, code: 'invalid_state' });
-    assert.equal(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'C-2-job-c-2');
-    assert.equal(await readFile(join(repo, 'c.txt'), 'utf8'), 'c\n');
-    await rm(join(repo, 'c.txt'));
-    git(repo, 'checkout', '-q', 'main');
+    assert.equal(git(worktree('C-2'), 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'C-2-job-c-2');
+    assert.equal(await readFile(join(worktree('C-2'), 'c.txt'), 'utf8'), 'c\n');
+    assert.equal(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'main');
 
-    // C-3: discard is refused during a rebase, then removes the branch and its files.
+    // C-3: discard is refused during a rebase in the worktree, then removes the worktree and the branch.
     await call(served, 'start', { workspace: 'app', ticket: 'C-3' });
     await waitFor(served, 'C-3', 'awaiting_review', 1);
-    await mkdir(join(repo, '.git', 'rebase-merge'));
+    const gitDir = resolve(worktree('C-3'), git(worktree('C-3'), 'rev-parse', '--git-dir').trim());
+    await mkdir(join(gitDir, 'rebase-merge'));
     assert.deepEqual(error(await act(base, 'api/jobs/app/C-3/abort', { discard: true })), { status: 409, code: 'rebase_in_progress' });
     assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'C-3' })).state, 'awaiting_review');
-    await rm(join(repo, '.git', 'rebase-merge'), { recursive: true });
-    assert.deepEqual(result(await act(base, 'api/jobs/app/C-3/abort', { discard: true })), { state: 'aborted', branch: 'C-3-job-c-3', discarded: true });
+    await rm(join(gitDir, 'rebase-merge'), { recursive: true });
+    assert.deepEqual(result(await act(base, 'api/jobs/app/C-3/abort', { discard: true })), { state: 'aborted', branch: 'C-3-job-c-3', discarded: true, worktree: null });
     assert.equal(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'main');
     assert.equal(git(repo, 'branch', '--list', 'C-3-job-c-3'), '');
-    await assert.rejects(stat(join(repo, 'd.txt')), { code: 'ENOENT' });
+    await assert.rejects(stat(worktree('C-3')), { code: 'ENOENT' });
 
     // C-4: the branch was renamed by hand, so the discard's last step fails: aborted, discard_failed.
     await call(served, 'start', { workspace: 'app', ticket: 'C-4' });
@@ -418,7 +430,6 @@ test('dashboard actions end to end: say queues during a turn, approve goes back 
     const partial = result(await act(base, 'api/jobs/app/C-4/abort', { discard: true }));
     assert.deepEqual([partial.state, partial.branch, partial.discarded, partial.error.code], ['aborted', 'C-4-job-c-4', false, 'discard_failed']);
     assert.match(partial.error.message, /^git branch -D C-4-job-c-4 failed:/);
-    assert.equal(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'main');
     assert.equal((await jobs.read('app', 'C-4'))!.error?.code, 'discard_failed');
     // Seven, not eight: the aborted preparation of C-2 was ended before its delayed turn logged.
     log = await fakeLog(env);

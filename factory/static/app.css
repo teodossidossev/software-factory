@@ -417,6 +417,48 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 .document .file { font-weight: 700; }
 .document .hunk { color: var(--hunk); }
 
+/* The Files view (SF-024): IntelliJ's Changes list, a row per file, the diff under it on demand. */
+.job-badges { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.badge.f-count { background: var(--s-ended); }
+.badge.f-undeclared { background: var(--s-failed); }
+.badge.f-deleted { background: var(--s-human); }
+.files { display: flex; flex-direction: column; gap: 8px; }
+.files-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.files-summary { font-weight: 600; }
+.files-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+.files-list li { border-bottom: 1px solid var(--border); }
+.files-list li:last-child { border-bottom: none; }
+.files-list .file-group { padding: 4px 10px; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; color: var(--muted); background: var(--panel-2); }
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.file-row:hover { background: var(--panel-2); }
+.file-row .file-name { font-weight: 500; }
+.file-row .file-dir { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+.file-row .file-labels { margin-left: auto; display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+.file-row .file-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; padding: 1px 6px; border-radius: 4px; background: var(--panel-2); color: var(--muted); }
+.file-row .file-label.undeclared { background: var(--del-bg); color: var(--del); }
+.file-row .file-label.declared { background: var(--warn-bg); color: var(--warn); }
+.file-row .file-label.deleted { background: var(--panel-2); color: var(--muted); }
+.file-row .file-counts { font-family: var(--mono); font-size: 12px; }
+.file-row .file-counts .add { color: var(--add); }
+.file-row .file-counts .del { color: var(--del); }
+.file-row.s-added .file-name { color: var(--add); }
+.file-row.s-modified .file-name { color: var(--accent); }
+.file-row.s-deleted .file-name { color: var(--muted); text-decoration: line-through; }
+.file-row.s-renamed .file-name { color: var(--hunk); }
+.file-diff { margin: 0 10px 8px; max-height: 50vh; }
+
 .history { margin: 0; padding-left: 24px; display: flex; flex-direction: column; gap: 4px; }
 .history time { font-family: var(--mono); font-size: 12.5px; color: var(--muted); margin-right: 8px; }
 .history .history-error { color: var(--del); }

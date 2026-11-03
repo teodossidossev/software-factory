@@ -117,17 +117,24 @@ behaves as without this section. An invalid combination stops `sf serve` with `i
 
 - `GET /.well-known/oauth-protected-resource` and `GET /.well-known/oauth-protected-resource/mcp`
   return the same protected resource metadata (`Cache-Control: no-store`):
-  `{"resource": SF_AUTH_RESOURCE, "authorization_servers": [SF_AUTH_ISSUER], "bearer_methods_supported": ["header"], "scopes_supported": ["openid", "profile", "email"]}`.
+  `{"resource": SF_AUTH_RESOURCE, "authorization_servers": [SF_AUTH_ISSUER], "bearer_methods_supported": ["header"], "scopes_supported": ["openid", "profile", "email", "offline_access"]}`.
 - `POST /mcp` with `Authorization: Bearer <token>`: the token must verify (below), whatever the
   method; the tools then see the caller. An invalid token gets `401` with
-  `WWW-Authenticate: Bearer error="invalid_token", error_description="...", resource_metadata="<origin of SF_AUTH_RESOURCE>/.well-known/oauth-protected-resource"`
-  (`500` when the authorization server's keys cannot be fetched).
+  `WWW-Authenticate: Bearer error="invalid_token", error_description="...", scope="offline_access", resource_metadata="<origin of SF_AUTH_RESOURCE>/.well-known/oauth-protected-resource"`
+  (`500`, without a challenge, when the authorization server's keys cannot be fetched).
 - `POST /mcp` without a token: a single JSON-RPC message whose `method` is in
   `SF_AUTH_OPEN_METHODS` runs unauthenticated (by default `initialize`, `ping`, `tools/list`,
   `server/discover`, `notifications/initialized`); anything else, a batch, a response or an
   unparseable body included, gets the same `401` challenge. Every `tools/call` needs a token by
   default. The body limit is unchanged (4 MiB, `413` beyond).
 - `GET /mcp`, other methods and other paths are unchanged.
+
+`offline_access` in the metadata and the challenge's `scope="offline_access"` are hints meant to
+prompt ChatGPT to ask Auth0 for a refresh token, so that the connection outlives the access token
+(SF-033). They are an agreed ChatGPT compatibility measure, not a standards requirement: the MCP
+authorization draft recommends that a resource server leave `offline_access` out, refresh being the
+business of the client and the authorization server. The factory requires no scope of a token
+(one without `offline_access` is accepted), never sees a refresh token and has no token endpoint.
 
 A token is accepted when it is a JWT with `alg` `RS256` whose `kid` is in the issuer's JWKS and whose
 signature verifies, `iss` equals `SF_AUTH_ISSUER`, `aud` contains `SF_AUTH_AUDIENCE`, `exp` has not

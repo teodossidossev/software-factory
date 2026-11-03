@@ -42,7 +42,10 @@ const MCP_PATH = '/mcp';
 // Both paths serve the same document: the root one named in the challenge, and the path-aware one
 // (RFC 9728) some clients try for /mcp.
 const METADATA_PATHS = new Set(['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp']);
-const SCOPES_SUPPORTED = ['openid', 'profile', 'email'];
+// Advertised and hinted in the 401 challenge, never required of a token: an agreed ChatGPT
+// compatibility measure (SF-033), see README.md, section OAuth.
+const OFFLINE_ACCESS = 'offline_access';
+const SCOPES_SUPPORTED = ['openid', 'profile', 'email', OFFLINE_ACCESS];
 // Compiled to dist/src/server.js; the package root is two levels up.
 const PACKAGE_ROOT = new URL('../../', import.meta.url);
 
@@ -541,7 +544,9 @@ type NodeHandler = ReturnType<typeof toNodeHandler>;
 
 // POST /mcp with OAuth on: a bearer token must verify; without one, only an open method passes.
 async function gatedPost(gate: Gate, nodeHandler: NodeHandler, req: IncomingMessage & { auth?: AuthInfo }, res: ServerResponse): Promise<void> {
-  const challengeOptions = { resourceMetadataUrl: gate.resourceMetadataUrl };
+  // requiredScopes here only writes the scope="offline_access" hint into the challenge; it is not
+  // passed to verifyBearerToken, which would then refuse tokens without it.
+  const challengeOptions = { resourceMetadataUrl: gate.resourceMetadataUrl, requiredScopes: [OFFLINE_ACCESS] };
   const header = req.headers.authorization;
   if (header !== undefined) {
     try {

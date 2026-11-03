@@ -60,6 +60,7 @@ const state = {
   // for its forms, the open start confirmation and the tickets whose start is out.
   workspaces: null,
   tickets: null,
+  archived: [],
   setupDecided: false,
   setupPending: new Set(),
   startConfirm: null,
@@ -971,7 +972,32 @@ function reviewerLine(reviewer) {
   return [el('span', 'r-none', 'Reviewer: none'), document.createTextNode(' nobody will review this ticket until ChatGPT subscribes to it: open the conversation.')];
 }
 
+function renderArchived() {
+  const rows = state.archived ?? [];
+  $('archived').hidden = rows.length === 0;
+  $('archived-count').textContent = `(${rows.length})`;
+  $('archived-list').replaceChildren(...rows.map((row) => {
+    const key = `${row.workspace}/${row.ticket}`;
+    const item = el('li');
+    item.append(el('div', 'ticket-name', `${key} · ${row.title}`));
+    const buttons = el('div', 'row');
+    const busy = state.setupPending.has(`ticket:${key}`) || state.startConfirm !== null;
+    const restore = el('button', 'btn btn-sm', 'Restore');
+    restore.type = 'button';
+    restore.disabled = busy;
+    restore.addEventListener('click', () => void ticketAction('restore', row));
+    const remove = el('button', 'btn btn-sm btn-ghost-danger', 'Delete…');
+    remove.type = 'button';
+    remove.disabled = busy;
+    remove.addEventListener('click', () => openStartConfirm({ ...row, archivedRow: true }, 'delete'));
+    buttons.append(restore, remove);
+    item.append(buttons);
+    return item;
+  }));
+}
+
 function renderTickets() {
+  renderArchived();
   const rows = state.tickets ?? [];
   $('no-tickets').hidden = state.tickets === null || rows.length > 0;
   $('ticket-list').replaceChildren(...rows.map((row) => {
@@ -1002,7 +1028,17 @@ function renderTickets() {
     start.type = 'button';
     start.disabled = state.starting.has(key) || state.startConfirm !== null;
     start.addEventListener('click', () => openStartConfirm(row));
-    buttons.append(start);
+    const busy = state.setupPending.has(`ticket:${key}`) || state.startConfirm !== null;
+    const archive = el('button', 'btn btn-sm', 'Archive');
+    archive.type = 'button';
+    archive.disabled = busy;
+    archive.title = 'Move the Task file to .software-factory/archive/; a finished job of the ticket leaves the Jobs list';
+    archive.addEventListener('click', () => void ticketAction('archive', row));
+    const remove = el('button', 'btn btn-sm btn-ghost-danger', 'Delete…');
+    remove.type = 'button';
+    remove.disabled = busy;
+    remove.addEventListener('click', () => openStartConfirm(row, 'delete'));
+    buttons.append(start, archive, remove);
     item.append(buttons);
     if (url !== null) {
       item.append(el('p', 'hint', 'The link opens ChatGPT in a new tab with the message in the composer; press Enter if it is not sent by itself. The same link, to copy:'));
@@ -1107,12 +1143,40 @@ async function submitTicket() {
   }
 }
 
-function openStartConfirm(row) {
+// Archive, restore or delete one ticket; one request per ticket at a time, the outcome in the
+// start status line.
+async function ticketAction(action, row) {
+  const key = `${row.workspace}/${row.ticket}`;
+  const id = `ticket:${key}`;
+  if (state.setupPending.has(id)) {
+    return;
+  }
+  const texts = {
+    archive: (data) => `Archived ${key}: ${data.path}.${data.jobArchived ? ' Its finished job left the Jobs list.' : ''}`,
+    restore: (data) => `Restored ${key}: ${data.path}.`,
+    delete: (data) => `Deleted ${key}: ${Array.isArray(data.deleted) ? data.deleted.join(', ') : ''}.${data.jobArchived ? ' Its finished job left the Jobs list.' : ''}`,
+  };
+  await setupRequest(id, `api/tickets/${jobPath(key)}/${action}`, {}, 'start-status', (data) => ({ level: 'ok', text: texts[action](data ?? {}) }));
+}
+
+function openStartConfirm(row, action = 'start') {
   const key = `${row.workspace}/${row.ticket}`;
   if (state.startConfirm !== null || state.starting.has(key)) {
     return;
   }
-  state.startConfirm = { key, row };
+  state.startConfirm = { key, row, action };
+  if (action === 'delete') {
+    $('start-confirm-title').textContent = `Delete ${key}?`;
+    $('start-confirm-text').textContent = `Deletes .software-factory/${row.ticket}.md and its MR text${row.archivedRow ? ' from the archive' : ''}. Cannot be undone; Archive keeps the file instead. A finished job of the ticket leaves the Jobs list (its history stays in the state directory).`;
+    $('start-ok').textContent = 'Delete the ticket';
+    $('start-ok').className = 'btn btn-danger';
+    $('start-confirm').hidden = false;
+    renderTickets();
+    $('start-cancel').focus();
+    return;
+  }
+  $('start-ok').textContent = 'Start the job';
+  $('start-ok').className = 'btn btn-primary';
   $('start-confirm-title').textContent = `Start ${key}?`;
   const lines = [`Creates the branch from ${row.base} in the work checkout of ${row.workspace} and starts the first iteration of the Implementer on .software-factory/${row.ticket}.md.`];
   if (row.draft) {
@@ -1141,6 +1205,10 @@ async function submitStart() {
     return;
   }
   closeStartConfirm();
+  if (confirm.action === 'delete') {
+    await ticketAction('delete', confirm.row);
+    return;
+  }
   const { key } = confirm;
   if (state.starting.has(key)) {
     return;
@@ -1202,6 +1270,19 @@ function openStream() {
   source.addEventListener('jobs', (message) => {
     state.jobs = JSON.parse(message.data).jobs;
     renderJobs();
+    if (state.key !== null && !state.jobs.some((job) => keyOf(job) === state.key)) {
+      // The selected job left the list (its ticket was archived or deleted).
+      if (state.jobs.length > 0) {
+        select(keyOf(mostRecent()));
+      } else {
+        state.key = null;
+        state.detail = null;
+        $('detail').hidden = true;
+        history.replaceState(null, '', '#');
+        openStream();
+      }
+      return;
+    }
     if (state.key === null && state.jobs.length > 0) {
       select(keyOf(mostRecent()));
     }
@@ -1215,7 +1296,9 @@ function openStream() {
     renderSetup();
   });
   source.addEventListener('tickets', (message) => {
-    state.tickets = JSON.parse(message.data).tickets;
+    const data = JSON.parse(message.data);
+    state.tickets = data.tickets;
+    state.archived = Array.isArray(data.archived) ? data.archived : [];
     renderSetup();
   });
   source.addEventListener('job', (message) => {

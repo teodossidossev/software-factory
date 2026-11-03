@@ -8,7 +8,7 @@ import { get, request, type IncomingMessage } from 'node:http';
 import type { DashboardActions, DashboardReviewers, DashboardSetup } from '../../src/dashboard.js';
 import { FactoryError } from '../../src/errors.js';
 import type { EventInput, SubscriptionSummary, TestOutcome } from '../../src/events.js';
-import type { TicketInput, TicketRow, WorkspaceRow } from '../../src/setup.js';
+import type { ArchivedRow, TicketInput, TicketRow, WorkspaceRow } from '../../src/setup.js';
 
 export const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'";
 
@@ -220,10 +220,11 @@ export function fakeReviewers(rows: SubscriptionSummary[] = []): FakeReviewers {
   return fake;
 }
 
-export type SetupCall = ['addWorkspace', string, string] | ['removeWorkspace', string] | ['createTicket', TicketInput];
+export type SetupCall = ['addWorkspace', string, string] | ['removeWorkspace', string] | ['createTicket', TicketInput]
+  | ['archiveTicket', string, string] | ['restoreTicket', string, string] | ['deleteTicket', string, string];
 
 export interface FakeSetup extends DashboardSetup {
-  rows: { workspaces: WorkspaceRow[]; tickets: TicketRow[] };
+  rows: { workspaces: WorkspaceRow[]; tickets: TicketRow[]; archived: ArchivedRow[] };
   calls: SetupCall[];
   // What the next change answers: a value, an error to throw, or a function.
   answer: unknown;
@@ -239,13 +240,17 @@ export function ticketRow(workspace: string, ticket: string, title = `Ticket ${t
 
 // Lists rows and records every change; the change answers with `answer` (thrown when it is an
 // Error; awaited when it is a function) or, by default, with a plausible result.
-export function fakeSetup(workspaces: WorkspaceRow[] = [], tickets: TicketRow[] = []): FakeSetup {
+export function fakeSetup(workspaces: WorkspaceRow[] = [], tickets: TicketRow[] = [], archived: ArchivedRow[] = []): FakeSetup {
   const fake: FakeSetup = {
-    rows: { workspaces, tickets },
+    rows: { workspaces, tickets, archived },
     calls: [],
     answer: undefined,
     workspaces: async () => fake.rows.workspaces,
     tickets: async () => fake.rows.tickets,
+    archivedTickets: async () => fake.rows.archived,
+    archiveTicket: (workspace, ticket) => reply(['archiveTicket', workspace, ticket], { workspace, ticket, path: `.software-factory/archive/${ticket}.md`, jobArchived: false }),
+    restoreTicket: (workspace, ticket) => reply(['restoreTicket', workspace, ticket], { workspace, ticket, path: `.software-factory/${ticket}.md` }),
+    deleteTicket: (workspace, ticket) => reply(['deleteTicket', workspace, ticket], { workspace, ticket, deleted: [`.software-factory/${ticket}.md`], jobArchived: false }),
     addWorkspace: (name, path) => reply(['addWorkspace', name, path], workspaceRow(name, path)),
     removeWorkspace: (name) => reply(['removeWorkspace', name], { removed: name }),
     createTicket: (input) => reply(['createTicket', input], { workspace: input.workspace, ticket: input.ticket, path: `.software-factory/${input.ticket}.md`, base: 'main' }),

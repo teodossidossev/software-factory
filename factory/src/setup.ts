@@ -3,7 +3,7 @@
 // from the User's request). It uses the same registry file, validation and Task file writer as
 // `sf workspace add` and `write_task`, so the CLI and the page agree; a job is started through
 // the Execution, never from here.
-import { readdir, readFile } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
@@ -39,6 +39,15 @@ export interface TicketRow {
   job: JobState | null;
 }
 
+// An archived Task file: .software-factory/archive/<ticket>.md (SF-027).
+export interface ArchivedRow {
+  workspace: string;
+  ticket: string;
+  title: string;
+}
+
+export const ARCHIVE_DIR = 'archive';
+
 export interface TicketInput {
   workspace: string;
   ticket: string;
@@ -51,6 +60,18 @@ export interface SetupOptions {
   jobs: JobStore;
   // Runs work under the Execution's lock, so a registry change and a job start never interleave.
   exclusive: <T>(work: () => Promise<T>) => Promise<T>;
+  // Ends a finished job of the ticket when its Task file is archived or deleted: the job leaves
+  // the Jobs list (archived in the state directory) and its worktree, if one was kept, is removed.
+  // sf serve binds it to Execution.reset, which takes the lock itself.
+  retireJob?: (workspace: string, ticket: string) => Promise<unknown>;
+}
+
+async function isFile(path: string): Promise<boolean> {
+  try {
+    return (await lstat(path)).isFile();
+  } catch {
+    return false;
+  }
 }
 
 // The content of a ticket draft: the Task front matter, the User's request verbatim and the
@@ -75,11 +96,13 @@ export class Setup {
   readonly #configDir: string;
   readonly #jobs: JobStore;
   readonly #exclusive: SetupOptions['exclusive'];
+  readonly #retireJob: SetupOptions['retireJob'];
 
   constructor(options: SetupOptions) {
     this.#configDir = options.configDir;
     this.#jobs = options.jobs;
     this.#exclusive = options.exclusive;
+    this.#retireJob = options.retireJob;
   }
 
   async #liveJobs(): Promise<Map<string, number>> {
@@ -192,6 +215,124 @@ export class Setup {
           continue;
         }
         rows.push({ workspace: name, ticket, title: fields.get('title')!, base: fields.get('base')!, draft: isDraft(content), job: job?.state ?? null });
+      }
+    }
+    return rows;
+  }
+
+  // The workspace of a ticket action, with both names checked; a live job refuses it.
+  async #ticketTarget(name: string, ticket: string): Promise<{ workspace: Workspace; dir: string; jobEnded: boolean }> {
+    if (!WORKSPACE_NAME_PATTERN.test(name)) {
+      throw new FactoryError('invalid_name', `workspace name must be ${WORKSPACE_NAME_DESCRIPTION}.`);
+    }
+    if (!TICKET_PATTERN.test(ticket)) {
+      throw new FactoryError('invalid_ticket', `ticket must be ${TICKET_DESCRIPTION}.`);
+    }
+    const workspace = await resolveWorkspace(name, this.#configDir);
+    const job = await this.#jobs.read(name, ticket);
+    if (job !== undefined && !TERMINAL_STATES.includes(job.state)) {
+      throw new FactoryError('job_active', `The job for ${name}/${ticket} is ${job.state}; abort it first.`);
+    }
+    return { workspace, dir: join(workspace.workCheckout, TASK_DIR), jobEnded: job !== undefined };
+  }
+
+  // A finished job of the ticket leaves the Jobs list once its Task file goes.
+  async #retire(name: string, ticket: string, jobEnded: boolean): Promise<boolean> {
+    if (!jobEnded || this.#retireJob === undefined) {
+      return false;
+    }
+    await this.#retireJob(name, ticket);
+    return true;
+  }
+
+  // Moves <ticket>.md (and <ticket>.mr.md) into .software-factory/archive/, replacing an older
+  // archived copy; a finished job of the ticket is archived with it.
+  async archiveTicket(name: string, ticket: string): Promise<{ workspace: string; ticket: string; path: string; jobArchived: boolean }> {
+    const { jobEnded } = await this.#exclusive(async () => {
+      const target = await this.#ticketTarget(name, ticket);
+      if (!(await isFile(join(target.dir, `${ticket}.md`)))) {
+        throw new FactoryError('task_not_found', `${TASK_DIR}/${ticket}.md does not exist in workspace "${name}".`);
+      }
+      await mkdir(join(target.dir, ARCHIVE_DIR), { recursive: true, mode: 0o700 });
+      for (const file of [`${ticket}.md`, `${ticket}.mr.md`]) {
+        if (await isFile(join(target.dir, file))) {
+          await rename(join(target.dir, file), join(target.dir, ARCHIVE_DIR, file));
+        }
+      }
+      return target;
+    });
+    const jobArchived = await this.#retire(name, ticket, jobEnded);
+    return { workspace: name, ticket, path: `${TASK_DIR}/${ARCHIVE_DIR}/${ticket}.md`, jobArchived };
+  }
+
+  // Moves an archived Task file (and its MR text) back; refused when the ticket has a Task file.
+  restoreTicket(name: string, ticket: string): Promise<{ workspace: string; ticket: string; path: string }> {
+    return this.#exclusive(async () => {
+      const { dir } = await this.#ticketTarget(name, ticket);
+      if (await isFile(join(dir, `${ticket}.md`))) {
+        throw new FactoryError('ticket_exists', `${TASK_DIR}/${ticket}.md already exists in workspace "${name}".`);
+      }
+      if (!(await isFile(join(dir, ARCHIVE_DIR, `${ticket}.md`)))) {
+        throw new FactoryError('task_not_found', `${TASK_DIR}/${ARCHIVE_DIR}/${ticket}.md does not exist in workspace "${name}".`);
+      }
+      for (const file of [`${ticket}.md`, `${ticket}.mr.md`]) {
+        if (await isFile(join(dir, ARCHIVE_DIR, file))) {
+          await rename(join(dir, ARCHIVE_DIR, file), join(dir, file));
+        }
+      }
+      return { workspace: name, ticket, path: `${TASK_DIR}/${ticket}.md` };
+    });
+  }
+
+  // Deletes the Task file and the MR text of the ticket, active or archived; a finished job of the
+  // ticket is archived (its history stays in the state directory).
+  async deleteTicket(name: string, ticket: string): Promise<{ workspace: string; ticket: string; deleted: string[]; jobArchived: boolean }> {
+    const { deleted, jobEnded } = await this.#exclusive(async () => {
+      const target = await this.#ticketTarget(name, ticket);
+      const paths = [`${ticket}.md`, `${ticket}.mr.md`, `${ARCHIVE_DIR}/${ticket}.md`, `${ARCHIVE_DIR}/${ticket}.mr.md`];
+      const found: string[] = [];
+      for (const path of paths) {
+        if (await isFile(join(target.dir, path))) {
+          found.push(path);
+        }
+      }
+      if (!found.some((path) => path.endsWith(`${ticket}.md`) && !path.endsWith('.mr.md'))) {
+        throw new FactoryError('task_not_found', `There is no Task file for ${ticket} in workspace "${name}".`);
+      }
+      for (const path of found) {
+        await rm(join(target.dir, path));
+      }
+      return { deleted: found.map((path) => `${TASK_DIR}/${path}`), jobEnded: target.jobEnded };
+    });
+    const jobArchived = await this.#retire(name, ticket, jobEnded);
+    return { workspace: name, ticket, deleted, jobArchived };
+  }
+
+  // The archived Task files of every usable workspace, sorted by workspace and ticket.
+  async archivedTickets(): Promise<ArchivedRow[]> {
+    const { workspaces } = await loadRegistry(this.#configDir);
+    const rows: ArchivedRow[] = [];
+    for (const name of Object.keys(workspaces).sort()) {
+      let workspace: Workspace;
+      try {
+        workspace = await resolveWorkspace(name, this.#configDir);
+      } catch {
+        continue;
+      }
+      const dir = join(workspace.workCheckout, TASK_DIR, ARCHIVE_DIR);
+      let names: string[];
+      try {
+        names = (await readdir(dir, { withFileTypes: true })).filter((entry) => entry.isFile()).map((entry) => entry.name).sort();
+      } catch {
+        continue;
+      }
+      for (const file of names) {
+        const ticket = /^(.+)\.md$/.exec(file)?.[1];
+        if (ticket === undefined || ticket.endsWith('.mr') || !TICKET_PATTERN.test(ticket)) {
+          continue;
+        }
+        const fields = parseFrontMatter(await readFile(join(dir, file), 'utf8'));
+        rows.push({ workspace: name, ticket, title: fields?.get('title') || ticket });
       }
     }
     return rows;

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { readdir, readFile, readlink, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { MAX_STREAMS, TOKEN_FILE } from '../src/dashboard.js';
+import { MAX_STREAMS, startDashboard, TOKEN_FILE } from '../src/dashboard.js';
 import type { Job } from '../src/jobs.js';
 import { CSP, fakeActions, fetchRaw, openStream, type Stream } from './support/dashboard-client.js';
 import { withDashboard } from './support/dashboard-state.js';
@@ -31,12 +31,31 @@ async function listeners(pid: number): Promise<number | undefined> {
 }
 
 test('dashboard: token, static files with the security headers, 404 and 405 with empty bodies', async () => {
-  await withDashboard('dash-token', fakeActions(), async (dashboard, { state }) => {
+  await withDashboard('dash-token', fakeActions(), async (dashboard, { state, jobs }) => {
     const base = dashboard.url;
     const token = base.pathname.split('/')[2]!;
     assert.match(token, /^[0-9a-f]{64}$/);
     assert.equal(await readFile(join(state, TOKEN_FILE), 'utf8'), `${token}\n`);
     assert.equal((await stat(join(state, TOKEN_FILE))).mode & 0o777, 0o600);
+
+    // A later start reuses the token of the file; an unusable file is replaced.
+    const again = await startDashboard(0, state, jobs, fakeActions());
+    try {
+      assert.equal(again.url.pathname, `/d/${token}/`);
+    } finally {
+      await again.close();
+    }
+    await writeFile(join(state, TOKEN_FILE), 'not a token\n');
+    const replaced = await startDashboard(0, state, jobs, fakeActions());
+    try {
+      const fresh = replaced.url.pathname.split('/')[2]!;
+      assert.match(fresh, /^[0-9a-f]{64}$/);
+      assert.notEqual(fresh, token);
+      assert.equal(await readFile(join(state, TOKEN_FILE), 'utf8'), `${fresh}\n`);
+    } finally {
+      await replaced.close();
+    }
+    await writeFile(join(state, TOKEN_FILE), `${token}\n`);
 
     const origin = `http://127.0.0.1:${base.port}`;
     const wrong = `${token.slice(0, -1)}${token.endsWith('0') ? '1' : '0'}`;
@@ -209,8 +228,15 @@ test('dashboard end to end: a fake cycle, the stream across mark_clean, mr after
     const printed = await runCli({ ...env, extra: { SF_DASHBOARD_PORT: '8799' } }, ['dashboard']);
     assert.equal(printed.code, 0, printed.stderr);
     assert.equal(printed.stdout.split('\n')[0], `http://127.0.0.1:8799/d/${token}/`);
-    assert.match(printed.stdout, /The token changes on every sf serve start/);
+    assert.match(printed.stdout, /The token stays the same across sf serve starts/);
     assert.equal((await runCli({ ...env, extra: { SF_DASHBOARD: 'off' } }, ['dashboard'])).code, 1);
+    // --rotate removes the file; the running sf serve keeps its token, the next start makes a new one.
+    const rotated = await runCli(env, ['dashboard', '--rotate']);
+    assert.equal(rotated.code, 0, rotated.stderr);
+    assert.match(rotated.stdout, /Dashboard token removed; the next sf serve start/);
+    await assert.rejects(stat(join(env.state, TOKEN_FILE)), { code: 'ENOENT' });
+    assert.equal((await fetchRaw(new URL('api/jobs', base))).status, 200);
+    await writeFile(join(env.state, TOKEN_FILE), `${token}\n`);
 
     await call(served, 'start', { workspace: 'app', ticket: 'T-1' });
     await waitFor(served, 'T-1', 'awaiting_review', 1);

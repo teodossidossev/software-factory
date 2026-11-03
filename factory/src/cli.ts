@@ -24,7 +24,7 @@ import { watchEvents } from './watch.js';
 const DEFAULT_PORT = 8787;
 const USAGE = `Usage:
   sf serve                                              Serve the MCP tools on 127.0.0.1:\${SF_PORT:-${DEFAULT_PORT}}/mcp and the dashboard
-  sf dashboard [--open]                                 Print the dashboard URL of the running sf serve; --open also opens it (xdg-open)
+  sf dashboard [--open] [--rotate]                      Print the dashboard URL; --open also opens it (xdg-open); --rotate removes the token so the next sf serve makes a new one
   sf workspace add <name> --read <path> [--work <path>] Register a workspace (--work defaults to --read)
   sf workspace list                                     List registered workspaces
   sf workspace remove <name>                            Unregister a workspace
@@ -448,12 +448,18 @@ async function watch(args: string[]): Promise<void> {
 }
 
 async function dashboardCommand(args: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { open: { type: 'boolean' } } });
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { open: { type: 'boolean' }, rotate: { type: 'boolean' } } });
   if (positionals.length !== 0) {
-    throw new UsageError('dashboard takes no arguments (only --open).');
+    throw new UsageError('dashboard takes no arguments (only --open and --rotate).');
   }
   if (!dashboardOn()) {
     throw new FactoryError('dashboard_off', 'The dashboard is off (SF_DASHBOARD=off).');
+  }
+  if (values.rotate === true) {
+    // The running sf serve keeps its token in memory; the new one appears at the next start.
+    await removeToken(stateDir());
+    console.log('Dashboard token removed; the next sf serve start creates a new one and prints the new URL.');
+    return;
   }
   const port = parsePort('SF_DASHBOARD_PORT', DEFAULT_DASHBOARD_PORT);
   const token = await readToken(stateDir());
@@ -462,7 +468,7 @@ async function dashboardCommand(args: string[]): Promise<void> {
   }
   const url = dashboardUrl(port, token).href;
   console.log(url);
-  console.log('The token changes on every sf serve start; the URL works while that sf serve runs.');
+  console.log('The token stays the same across sf serve starts; sf dashboard --rotate makes the next start pick a new one.');
   if (values.open === true) {
     // The URL is printed first so it can be opened by hand when the launcher fails.
     await openInBrowser(url);

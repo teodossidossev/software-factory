@@ -74,7 +74,7 @@ export function dashboardUrl(port: number, token: string): URL {
   return new URL(`http://${LOOPBACK_HOST}:${port}/d/${token}/`);
 }
 
-// The token of the last `sf serve` start, or undefined when the file is missing.
+// The dashboard token, or undefined when the file is missing; kept across `sf serve` starts.
 export async function readToken(stateDir: string): Promise<string | undefined> {
   let text: string;
   try {
@@ -228,9 +228,14 @@ export async function startDashboard(port: number, stateDir: string, jobs: JobSt
   for (const [path, { file, type }] of Object.entries(STATIC_FILES)) {
     files.set(path, { body: await readFile(new URL(file, STATIC_DIR)), type });
   }
-  const tokenText = randomBytes(32).toString('hex');
+  // The token persists across starts, so a bookmark keeps working; a missing or unusable file
+  // gets a new one (sf dashboard --rotate removes the file on purpose).
+  let tokenText = await readToken(stateDir).catch(() => undefined);
+  if (tokenText === undefined) {
+    tokenText = randomBytes(32).toString('hex');
+    await writeFileAtomic(join(stateDir, TOKEN_FILE), Buffer.from(`${tokenText}\n`));
+  }
   const token = Buffer.from(tokenText, 'utf8');
-  await writeFileAtomic(join(stateDir, TOKEN_FILE), Buffer.from(`${tokenText}\n`));
 
   const streams = new Set<Stream>();
   const validateHost = localhostHostValidation();

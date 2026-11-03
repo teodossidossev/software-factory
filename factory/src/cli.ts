@@ -1,9 +1,12 @@
-// The sf command: `sf serve`, `sf workspace add|list|remove`, `sf start|say|approve|abort|reset`
-// (through the socket of sf serve), `sf status|watch|dashboard` (reading the state directory
-// directly), `sf events list|remove|test` (through the socket), `sf notify-test` and `sf auth-test`
-// (verifying a token from stdin without the server).
+// The sf command: `sf serve`, `sf up` (serve, the tunnel and the browser), `sf workspace
+// add|list|remove`, `sf start|say|approve|abort|reset` (through the socket of sf serve),
+// `sf status|watch|dashboard` (reading the state directory directly), `sf events list|remove|test`
+// (through the socket), `sf notify-test` and `sf auth-test` (verifying a token from stdin without
+// the server).
 // Exit codes: 0 ok, 1 error, 2 usage.
+import { type ChildProcess, spawn } from 'node:child_process';
 import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { AuthError, createVerifier } from './auth.js';
 import { openInBrowser } from './browser.js';
@@ -18,6 +21,7 @@ import { type Job, JobStore } from './jobs.js';
 import { jobNotification, notifyConfig, sendNotification, stateNotifier } from './notify.js';
 import { configDir, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { loadHandbook, packageVersion, PortInUseError, SERVER_NAME, startServer } from './server.js';
+import { Setup } from './setup.js';
 import { type StatusRow, statusRows } from './status.js';
 import { TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { watchEvents } from './watch.js';
@@ -25,6 +29,7 @@ import { watchEvents } from './watch.js';
 const DEFAULT_PORT = 8787;
 const USAGE = `Usage:
   sf serve                                              Serve the MCP tools on 127.0.0.1:\${SF_PORT:-${DEFAULT_PORT}}/mcp and the dashboard
+  sf up [--no-open] [--no-tunnel]                       sf serve plus the ChatGPT tunnel (scripts/sf-tunnel.sh run) in one terminal, and open the dashboard; Ctrl+C stops both
   sf dashboard [--open] [--rotate]                      Print the dashboard URL; --open also opens it (xdg-open); --rotate removes the token so the next sf serve makes a new one
   sf workspace add <name> --read <path> [--work <path>] Register a workspace (--work defaults to --read)
   sf workspace list                                     List registered workspaces
@@ -68,7 +73,12 @@ function parsePort(name: 'SF_PORT' | 'SF_DASHBOARD_PORT', fallback: number): num
 
 const dashboardOn = (): boolean => process.env.SF_DASHBOARD !== 'off';
 
-async function serve(): Promise<void> {
+interface ServeHooks {
+  // Called once, before the servers close, when a signal stops sf serve.
+  beforeStop?: () => void;
+}
+
+async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefined }> {
   const port = parsePort('SF_PORT', DEFAULT_PORT);
   const dashboardPort = parsePort('SF_DASHBOARD_PORT', DEFAULT_DASHBOARD_PORT);
   const config = loadConfig();
@@ -89,6 +99,8 @@ async function serve(): Promise<void> {
     dashboard?.onStateChange(job, from);
   };
   const execution = new Execution(config, (name) => resolveWorkspace(name), onStateChange, handbook.text);
+  // The start screen of the dashboard: the registry and the Task files, under the Execution's lock.
+  const setup = new Setup({ configDir: configDir(), jobs, exclusive: (work) => execution.exclusive(work) });
   // The socket first: it refuses a second sf serve on the same state before recovery touches it.
   const socket = await listenSocket(config.stateDir, async ({ command, args }) => {
     if (command === 'events') {
@@ -135,7 +147,7 @@ async function serve(): Promise<void> {
     if (dashboardOn()) {
       // The dashboard's actions (DashboardActions: approve, abort and say only) run on the same
       // Execution as the socket commands; its reviewers are the subscriptions of the same Events.
-      dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, events);
+      dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, events, setup);
     } else {
       await removeToken(config.stateDir);
     }
@@ -156,6 +168,7 @@ async function serve(): Promise<void> {
     }
     stopping = true;
     console.log(`${SERVER_NAME} received ${signal}, shutting down`);
+    hooks.beforeStop?.();
     events.close();
     Promise.all([server.close(), socket.close(), dashboard?.close()]).then(
       () => process.exit(0),
@@ -167,6 +180,91 @@ async function serve(): Promise<void> {
   };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
+  return { dashboard: dashboard?.url };
+}
+
+const RUNBOOK = 'docs/runbooks/chatgpt-connection.md';
+
+// scripts/sf-tunnel.sh of this package (dist/src/cli.js is three levels below the repository
+// root), or SF_TUNNEL_SCRIPT.
+function tunnelScript(): string {
+  return process.env.SF_TUNNEL_SCRIPT || fileURLToPath(new URL('../../../scripts/sf-tunnel.sh', import.meta.url));
+}
+
+// The tunnel as a child of sf up, its output on stderr prefixed "tunnel | ". A missing script,
+// a failed check or an exit is reported once; sf up goes on without the tunnel.
+interface Tunnel {
+  // Ends the tunnel on purpose: its exit is not reported as a failure.
+  stop(): void;
+}
+
+function startTunnel(): Tunnel | undefined {
+  const script = tunnelScript();
+  if (!existsSync(script)) {
+    console.error(`tunnel | not started: ${script} is missing; the dashboard works without it (${RUNBOOK}).`);
+    return undefined;
+  }
+  const child: ChildProcess = spawn(script, ['run'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const forward = (stream: NodeJS.ReadableStream): void => {
+    let rest = '';
+    stream.setEncoding('utf8');
+    stream.on('data', (chunk: string) => {
+      rest += chunk;
+      const lines = rest.split('\n');
+      rest = lines.pop() ?? '';
+      for (const line of lines) {
+        console.error(`tunnel | ${line}`);
+      }
+    });
+    stream.on('end', () => {
+      if (rest !== '') {
+        console.error(`tunnel | ${rest}`);
+        rest = '';
+      }
+    });
+  };
+  forward(child.stdout!);
+  forward(child.stderr!);
+  let wanted = false;
+  child.once('error', (error) => {
+    console.error(`tunnel | could not start (${error.message}); sf up goes on without it (${RUNBOOK}).`);
+  });
+  child.once('exit', (code, signal) => {
+    if (!wanted) {
+      console.error(`tunnel | exited (${code ?? signal}); sf up goes on without it and the dashboard works. Fix it and run npm run tunnel in another terminal (${RUNBOOK}).`);
+    }
+  });
+  return {
+    stop() {
+      wanted = true;
+      child.kill('SIGTERM');
+    },
+  };
+}
+
+// `sf up`: sf serve in this process, the tunnel as a child, the dashboard in the browser.
+async function up(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { 'no-open': { type: 'boolean' }, 'no-tunnel': { type: 'boolean' } } });
+  if (positionals.length !== 0) {
+    throw new UsageError('up takes no arguments (only --no-open and --no-tunnel).');
+  }
+  let tunnel: Tunnel | undefined;
+  const { dashboard } = await serve({ beforeStop: () => tunnel?.stop() });
+  // The tunnel's check needs the factory to answer, so it starts after serve.
+  if (values['no-tunnel'] !== true) {
+    tunnel = startTunnel();
+  } else {
+    console.log('tunnel: not started (--no-tunnel)');
+  }
+  if (values['no-open'] === true || dashboard === undefined) {
+    return;
+  }
+  try {
+    await openInBrowser(dashboard.href);
+  } catch (error) {
+    // The URL was printed by serve; the page can be opened by hand.
+    console.error(`sf: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function checkName(name: string | undefined): string {
@@ -657,6 +755,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'serve' && rest.length === 0) {
     await serve();
+    return;
+  }
+  if (command === 'up') {
+    await up(rest);
     return;
   }
   if (command === 'workspace') {

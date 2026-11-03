@@ -2,31 +2,16 @@
 // never a real browser) exactly once as one argument; usage, configuration and launcher failures
 // keep the documented exit codes, and nothing is launched on an invalid configuration.
 import assert from 'node:assert/strict';
-import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { openInBrowser } from '../src/browser.js';
 import { TOKEN_FILE } from '../src/dashboard.js';
 import { FactoryError } from '../src/errors.js';
+import { fakeLauncher } from './support/fake-launcher.js';
 import { newEnv, runCli, temp } from './support/harness.js';
 
 const TOKEN = 'ab'.repeat(32);
-
-// A directory with a fake xdg-open that records each call's arguments and exits with the given code.
-async function fakeLauncher(name: string, exit: number, body = ''): Promise<{ bin: string; calls(): Promise<string[][]> }> {
-  const bin = join(temp, name);
-  const log = join(bin, 'xdg-open.log');
-  await mkdir(bin, { recursive: true });
-  await writeFile(join(bin, 'xdg-open'), `#!/bin/sh\nfor a in "$@"; do printf '%s\\037' "$a"; done >> '${log}'\nprintf '\\036' >> '${log}'\n${body}\nexit ${exit}\n`);
-  await chmod(join(bin, 'xdg-open'), 0o755);
-  return {
-    bin,
-    async calls() {
-      const text = await readFile(log, 'utf8').catch(() => '');
-      return text.split('\x1e').filter((entry) => entry !== '').map((entry) => entry.split('\x1f').slice(0, -1));
-    },
-  };
-}
 
 test('sf dashboard --open: prints the URL and runs xdg-open once with that URL as its only argument', async () => {
   const launcher = await fakeLauncher('open-ok', 0);

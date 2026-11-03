@@ -5,6 +5,7 @@
   "description": "Software Factory: the commands to set up, run, test and inspect the factory from the repository root. The code lives in factory/.",
   "scripts": {
     "setup": "npm ci --prefix factory && npm run build --prefix factory",
+    "start": "factory/bin/sf up",
     "build": "npm run build --prefix factory",
     "typecheck": "npm run typecheck --prefix factory",
     "test": "npm test --prefix factory",

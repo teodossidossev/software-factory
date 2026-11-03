@@ -1,12 +1,14 @@
 // A raw HTTP client of the Dashboard for tests: one request with full control of method, headers
 // and body (fetchRaw), an action POST as the page sends it (act), a server-sent event stream
-// (openStream), a fake DashboardActions that records every call (fakeActions) and a fake
-// DashboardReviewers with settable subscriptions (fakeReviewers).
+// (openStream), a fake DashboardActions that records every call (fakeActions), a fake
+// DashboardReviewers with settable subscriptions (fakeReviewers) and a fake DashboardSetup with
+// settable workspaces and tickets that records every change (fakeSetup).
 import assert from 'node:assert/strict';
 import { get, request, type IncomingMessage } from 'node:http';
-import type { DashboardActions, DashboardReviewers } from '../../src/dashboard.js';
+import type { DashboardActions, DashboardReviewers, DashboardSetup } from '../../src/dashboard.js';
 import { FactoryError } from '../../src/errors.js';
 import type { EventInput, SubscriptionSummary, TestOutcome } from '../../src/events.js';
+import type { TicketInput, TicketRow, WorkspaceRow } from '../../src/setup.js';
 
 export const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'";
 
@@ -141,7 +143,7 @@ export function openStream(url: URL): Promise<Stream> {
   });
 }
 
-export type Call = ['approve', string, string] | ['abort', string, string, boolean] | ['say', string, string, string];
+export type Call = ['approve', string, string] | ['abort', string, string, boolean] | ['say', string, string, string] | ['start', string, string];
 
 export interface FakeActions extends DashboardActions {
   calls: Call[];
@@ -158,6 +160,7 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
     approve: (workspace, ticket) => reply(['approve', workspace, ticket]),
     abort: (workspace, ticket, discard) => reply(['abort', workspace, ticket, discard]),
     say: (workspace, ticket, message) => reply(['say', workspace, ticket, message]),
+    start: (workspace, ticket) => reply(['start', workspace, ticket]),
   };
   async function reply(call: Call): Promise<any> {
     fake.calls.push(call);
@@ -214,5 +217,46 @@ export function fakeReviewers(rows: SubscriptionSummary[] = []): FakeReviewers {
     },
     listeners: () => listeners.size,
   };
+  return fake;
+}
+
+export type SetupCall = ['addWorkspace', string, string] | ['removeWorkspace', string] | ['createTicket', TicketInput];
+
+export interface FakeSetup extends DashboardSetup {
+  rows: { workspaces: WorkspaceRow[]; tickets: TicketRow[] };
+  calls: SetupCall[];
+  // What the next change answers: a value, an error to throw, or a function.
+  answer: unknown;
+}
+
+export function workspaceRow(name: string, path = `/srv/${name}`, liveJobs = 0): WorkspaceRow {
+  return { name, path, liveJobs, problem: null };
+}
+
+export function ticketRow(workspace: string, ticket: string, title = `Ticket ${ticket}`, draft = true, job: TicketRow['job'] = null): TicketRow {
+  return { workspace, ticket, title, base: 'main', draft, job };
+}
+
+// Lists rows and records every change; the change answers with `answer` (thrown when it is an
+// Error; awaited when it is a function) or, by default, with a plausible result.
+export function fakeSetup(workspaces: WorkspaceRow[] = [], tickets: TicketRow[] = []): FakeSetup {
+  const fake: FakeSetup = {
+    rows: { workspaces, tickets },
+    calls: [],
+    answer: undefined,
+    workspaces: async () => fake.rows.workspaces,
+    tickets: async () => fake.rows.tickets,
+    addWorkspace: (name, path) => reply(['addWorkspace', name, path], workspaceRow(name, path)),
+    removeWorkspace: (name) => reply(['removeWorkspace', name], { removed: name }),
+    createTicket: (input) => reply(['createTicket', input], { workspace: input.workspace, ticket: input.ticket, path: `.software-factory/${input.ticket}.md`, base: 'main' }),
+  };
+  async function reply(call: SetupCall, fallback: unknown): Promise<any> {
+    fake.calls.push(call);
+    const value = fake.answer === undefined ? fallback : typeof fake.answer === 'function' ? await (fake.answer as () => unknown)() : fake.answer;
+    if (value instanceof Error || value instanceof FactoryError) {
+      throw value;
+    }
+    return value;
+  }
   return fake;
 }

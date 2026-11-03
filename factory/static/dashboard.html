@@ -14,6 +14,62 @@
     <span id="connection" class="connection">connecting</span>
   </header>
   <main class="layout">
+    <details id="setup" class="panel setup" open>
+      <summary>Setup <span id="setup-summary" class="muted"></span></summary>
+      <div class="setup-grid">
+        <section class="setup-column" aria-labelledby="workspaces-title">
+          <h3 id="workspaces-title">Workspaces</h3>
+          <p id="no-workspaces" class="muted" hidden>No workspace yet. Add the local checkout of the repository to work in.</p>
+          <ul id="workspace-list" class="workspace-list"></ul>
+          <form id="workspace-form" class="setup-form">
+            <label for="workspace-name">Name</label>
+            <input id="workspace-name" type="text" autocomplete="off" spellcheck="false">
+            <label for="workspace-path">Path of the local checkout (typed or pasted: the page cannot browse this machine's disk)</label>
+            <input id="workspace-path" type="text" autocomplete="off" spellcheck="false">
+            <div class="action-buttons">
+              <button id="workspace-add" type="submit">Add workspace</button>
+            </div>
+            <p class="muted">The Implementer works in this checkout: do not edit it in the IDE while a job runs (a worktree per job comes with SF-019).</p>
+            <div id="workspace-status" class="status" role="status" aria-live="polite"></div>
+          </form>
+        </section>
+        <section class="setup-column" aria-labelledby="ticket-title-heading">
+          <h3 id="ticket-title-heading">New ticket</h3>
+          <form id="ticket-form" class="setup-form">
+            <label for="ticket-workspace">Workspace</label>
+            <select id="ticket-workspace"></select>
+            <label for="ticket-key">Ticket key</label>
+            <input id="ticket-key" type="text" autocomplete="off" spellcheck="false">
+            <label for="ticket-title">Title (one line)</label>
+            <input id="ticket-title" type="text" autocomplete="off">
+            <label for="ticket-request">What to implement, in your words</label>
+            <textarea id="ticket-request" rows="6"></textarea>
+            <fieldset class="owner">
+              <legend>Context owner</legend>
+              <label><input id="owner-chatgpt" type="radio" name="owner" value="chatgpt" checked> ChatGPT, in the browser</label>
+              <label class="muted"><input id="owner-claude" type="radio" name="owner" value="claude" disabled> Claude Code (SF-023)</label>
+            </fieldset>
+            <div class="action-buttons">
+              <button id="ticket-create" type="submit">Create the ticket draft</button>
+            </div>
+            <div id="ticket-status" class="status" role="status" aria-live="polite"></div>
+          </form>
+          <h3 class="tickets-title">Tickets</h3>
+          <p id="no-tickets" class="muted" hidden>No ticket without a job.</p>
+          <ul id="ticket-list" class="ticket-list"></ul>
+          <div id="start-confirm" class="confirm" role="dialog" aria-modal="false" aria-labelledby="start-confirm-title" aria-describedby="start-confirm-text" hidden>
+            <h4 id="start-confirm-title"></h4>
+            <p id="start-confirm-text"></p>
+            <div class="action-buttons">
+              <button id="start-ok" type="button">Start the job</button>
+              <button id="start-cancel" type="button">Cancel</button>
+            </div>
+          </div>
+          <div id="start-status" class="status" role="status" aria-live="polite"></div>
+          <p id="conversation-copy-status" class="muted" role="status" aria-live="polite"></p>
+        </section>
+      </div>
+    </details>
     <nav class="jobs" aria-label="Jobs">
       <h2>Jobs</h2>
       <p id="no-jobs" class="muted" hidden>No jobs yet.</p>

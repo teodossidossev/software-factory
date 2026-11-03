@@ -55,6 +55,8 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
     SF_CLAUDE: FAKE,
     // The machine's real notify-send stays quiet; the notification test sets its own PATH.
     SF_DESKTOP_NOTIFY: 'off',
+    // No real tunnel: sf up reports the missing script unless the test gives a fake one.
+    SF_TUNNEL_SCRIPT: join(temp, 'no-such-tunnel.sh'),
     ...env.extra,
   };
 }
@@ -114,8 +116,9 @@ export function runCli(env: Env, args: string[]): Promise<{ code: number | null;
   });
 }
 
-export async function serve(env: Env): Promise<Served> {
-  const child = spawn(process.execPath, [CLI, 'serve'], { env: processEnv(env), stdio: ['ignore', 'pipe', 'pipe'] });
+// args: the sf command line (`serve`, or `up` with its options).
+export async function serve(env: Env, args: string[] = ['serve']): Promise<Served> {
+  const child = spawn(process.execPath, [CLI, ...args], { env: processEnv(env), stdio: ['ignore', 'pipe', 'pipe'] });
   running.add(child);
   child.once('exit', () => running.delete(child));
   let dashboard: URL | undefined;

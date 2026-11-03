@@ -187,6 +187,27 @@ export function ticketInstruction(workspace: string, ticket: string): string {
   );
 }
 
+// The message that opens the ChatGPT conversation of a ticket from the dashboard (SF-025): the
+// connector, guide, the draft to read, the rewrite with write_task, the subscription of
+// ticketInstruction, and the wait for the User's start.
+export function ticketConversation(workspace: string, ticket: string): string {
+  return (
+    `Use the Software Factory connector. Call guide. ` +
+    `Then read the ticket draft of ${ticket} with read_file (workspace "${workspace}", path ".software-factory/${ticket}.md"): ` +
+    `its "## Request" section is what I want implemented. Plan the ticket with me, read the repository where that helps, and rewrite that file ` +
+    `in the Task format with write_task (workspace "${workspace}", ticket "${ticket}"), replacing the draft lines. ` +
+    `${ticketInstruction(workspace, ticket)} ` +
+    `Report the plan and wait for my "start".`
+  );
+}
+
+// The ChatGPT composer prefilled with the message; sending it may still need Enter.
+export const CHATGPT_PREFILL_URL = 'https://chatgpt.com/?q=';
+
+export function conversationUrl(message: string): string {
+  return `${CHATGPT_PREFILL_URL}${encodeURIComponent(message)}`;
+}
+
 // JSON with object keys sorted at every level, so key order never changes an identity.
 export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) {

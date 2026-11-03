@@ -6,7 +6,8 @@
 // to the Execution of `sf serve` (DashboardActions); nothing here changes a job by itself. Who
 // reviews a job comes from the MCP Events subscriptions (DashboardReviewers): every job carries its
 // reviewer, api/subscriptions lists them and test-event sends one test event; a change of the
-// subscriptions refreshes every open page.
+// subscriptions refreshes every open page. The start screen (SF-025) adds the workspaces and the
+// tickets (DashboardSetup: the registry and the Task files) and the start of a job.
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -16,10 +17,11 @@ import { localhostHostValidation, localhostOriginValidation } from '@modelcontex
 import * as z from 'zod/v4';
 import { writeFileAtomic } from './atomic.js';
 import { FactoryError } from './errors.js';
-import { coversTicketBroadly, type Events, ownsTicket, type SubscriptionSummary, TICKET_GUIDE, ticketInstruction } from './events.js';
+import { conversationUrl, coversTicketBroadly, type Events, ownsTicket, type SubscriptionSummary, TICKET_GUIDE, ticketConversation, ticketInstruction } from './events.js';
 import type { Execution } from './execution.js';
 import { type Job, type JobState, type JobStore, TERMINAL_STATES } from './jobs.js';
 import { WORKSPACE_NAME_PATTERN } from './registry.js';
+import type { Setup } from './setup.js';
 import { TICKET_PATTERN } from './task-file.js';
 import { describeEvent, followLines } from './watch.js';
 
@@ -46,34 +48,58 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 };
 
 // The User's actions, bound by `sf serve` to its one Execution: the same methods, guards and
-// results as the socket commands of sf approve, sf abort and sf say.
-export type DashboardActions = Pick<Execution, 'approve' | 'abort' | 'say'>;
+// results as the socket commands of sf approve, sf abort, sf say and sf start.
+export type DashboardActions = Pick<Execution, 'approve' | 'abort' | 'say' | 'start'>;
 export type DashboardAction = keyof DashboardActions;
-export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say'];
+export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'start'];
 
 // The MCP Events subscriptions, bound by `sf serve` to its Events hub: read, test one, and hear
 // about changes (the returned function stops listening).
 export type DashboardReviewers = Pick<Events, 'subscriptions' | 'test' | 'onChange'>;
 
-// Every POST route under api/jobs/<ws>/<ticket>/: the three actions and the test event.
+// The start screen's data and changes: the workspace registry and the Task files (src/setup.ts).
+export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'removeWorkspace' | 'tickets' | 'createTicket'>;
+
+// A dashboard without a start screen (in-process tests of the older endpoints).
+const NO_SETUP: DashboardSetup = {
+  workspaces: async () => [],
+  tickets: async () => [],
+  addWorkspace: async () => {
+    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
+  },
+  removeWorkspace: async () => {
+    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
+  },
+  createTicket: async () => {
+    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
+  },
+};
+
+// Every POST route under api/jobs/<ws>/<ticket>/: the four actions and the test event.
 type ActionRoute = DashboardAction | 'test-event';
 
-// The request body of each action, strict: unknown keys, null, arrays and wrong types are
+// The request body of each POST route, strict: unknown keys, null, arrays and wrong types are
 // refused; shape is what the refusal names.
 const BODIES = {
   approve: { shape: '{}', schema: z.strictObject({}) },
   abort: { shape: '{"discard"?: boolean}', schema: z.strictObject({ discard: z.boolean().optional() }) },
   say: { shape: '{"message": string}', schema: z.strictObject({ message: z.string() }) },
+  start: { shape: '{}', schema: z.strictObject({}) },
   'test-event': { shape: '{}', schema: z.strictObject({}) },
+  'workspace-add': { shape: '{"name": string, "path": string}', schema: z.strictObject({ name: z.string(), path: z.string() }) },
+  'workspace-remove': { shape: '{}', schema: z.strictObject({}) },
+  'ticket-new': { shape: '{"workspace": string, "ticket": string, "title": string, "request": string}', schema: z.strictObject({ workspace: z.string(), ticket: z.string(), title: z.string(), request: z.string() }) },
 };
-const ROUTES = Object.keys(BODIES) as ActionRoute[];
+type PostRoute = keyof typeof BODIES;
+const ACTION_ROUTES: ActionRoute[] = ['approve', 'abort', 'say', 'start', 'test-event'];
 
-// The HTTP status of a FactoryError the three methods can throw; any other code answers 500 and
-// keeps its code and message.
+// The HTTP status of a FactoryError the methods can throw; any other code answers 500 and keeps
+// its code and message.
 const ERROR_STATUS: Record<string, number> = {
   invalid_state: 409, turn_running: 409, rebase_in_progress: 409,
-  job_not_found: 404, workspace_not_found: 404,
-  invalid_content: 400,
+  job_exists: 409, job_active: 409, checkout_dirty: 409, branch_exists: 409, ticket_exists: 409, workspace_exists: 409, workspace_busy: 409,
+  job_not_found: 404, workspace_not_found: 404, task_not_found: 404,
+  invalid_content: 400, invalid_ticket: 400, invalid_name: 400, workspace_invalid: 400,
   no_subscription: 404, subscription_not_found: 404,
 };
 
@@ -153,6 +179,22 @@ async function subscriptionsPayload(jobs: JobStore, reviewers: DashboardReviewer
   };
 }
 
+async function workspacesPayload(setup: DashboardSetup) {
+  return { workspaces: await setup.workspaces() };
+}
+
+// The tickets without a live job, each with its reviewer (the rules of the Reviewer block) and
+// the ChatGPT conversation that plans it: the message and the prefilled URL.
+async function ticketsPayload(setup: DashboardSetup, reviewers: DashboardReviewers) {
+  const subscriptions = reviewers.subscriptions();
+  return {
+    tickets: (await setup.tickets()).map((row) => {
+      const message = ticketConversation(row.workspace, row.ticket);
+      return { ...row, reviewer: reviewerOf(subscriptions, row.workspace, row.ticket), conversation: { message, url: conversationUrl(message) } };
+    }),
+  };
+}
+
 async function stateHistory(jobs: JobStore, workspace: string, ticket: string) {
   let text = '';
   try {
@@ -217,10 +259,35 @@ function jobKey(workspace: string | undefined, ticket: string | undefined): [str
   return [workspace, ticket];
 }
 
-// api/jobs/<ws>/<ticket>/<action>, whatever the names: the method rule is decided by the route.
-function actionRoute(path: string[]): ActionRoute | undefined {
-  const [api, kind, , , action] = path;
-  return path.length === 5 && api === 'api' && kind === 'jobs' ? ROUTES.find((known) => known === action) : undefined;
+// What a path is for the method rule: a job action (POST only), a setup action (POST only), a
+// path that lists on GET and acts on POST, or a read (GET only).
+type Target =
+  | { kind: 'action'; action: ActionRoute; workspace: string | undefined; ticket: string | undefined }
+  | { kind: 'workspace-remove'; name: string | undefined }
+  | { kind: 'both'; route: 'workspace-add' | 'ticket-new' }
+  | { kind: 'read' };
+
+function targetOf(path: string[]): Target {
+  const [api, kind, a, b, c] = path;
+  if (api !== 'api') {
+    return { kind: 'read' };
+  }
+  if (kind === 'jobs' && path.length === 5) {
+    const action = ACTION_ROUTES.find((known) => known === c);
+    if (action !== undefined) {
+      return { kind: 'action', action, workspace: a, ticket: b };
+    }
+  }
+  if (kind === 'workspaces' && path.length === 2) {
+    return { kind: 'both', route: 'workspace-add' };
+  }
+  if (kind === 'workspaces' && path.length === 4 && b === 'remove' && c === undefined) {
+    return { kind: 'workspace-remove', name: a };
+  }
+  if (kind === 'tickets' && path.length === 2) {
+    return { kind: 'both', route: 'ticket-new' };
+  }
+  return { kind: 'read' };
 }
 
 // application/json, optionally with a UTF-8 charset parameter; nothing else.
@@ -270,7 +337,19 @@ interface Stream {
   abort: AbortController;
 }
 
-export async function startDashboard(port: number, stateDir: string, jobs: JobStore, actions: DashboardActions, reviewers: DashboardReviewers): Promise<RunningDashboard> {
+// One POST, validated and dispatched: the body shape, the one call it stands for, and whether
+// the page refreshes its setup data after it.
+interface Post {
+  route: PostRoute;
+  // A check before the body is read; false answers an empty 404.
+  exists?: () => Promise<boolean>;
+  call: (data: unknown) => (() => Promise<unknown>) | undefined;
+  refreshSetup?: boolean;
+}
+
+export async function startDashboard(
+  port: number, stateDir: string, jobs: JobStore, actions: DashboardActions, reviewers: DashboardReviewers, setup: DashboardSetup = NO_SETUP,
+): Promise<RunningDashboard> {
   const files = new Map<string, { body: Buffer; type: string }>();
   for (const [path, { file, type }] of Object.entries(STATIC_FILES)) {
     files.set(path, { body: await readFile(new URL(file, STATIC_DIR)), type });
@@ -290,7 +369,9 @@ export async function startDashboard(port: number, stateDir: string, jobs: JobSt
   // The exact origin of the page, known once the listener has its port.
   let origin = '';
   const send = (stream: Stream, event: string, data: unknown): void => {
-    stream.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    if (!stream.abort.signal.aborted) {
+      stream.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    }
   };
   const empty = (res: ServerResponse, status: number, headers: Record<string, string> = {}): void => {
     res.writeHead(status, headers).end();
@@ -301,6 +382,16 @@ export async function startDashboard(port: number, stateDir: string, jobs: JobSt
   const json = (res: ServerResponse, status: number, data: unknown, headers: Record<string, string> = {}): void => {
     res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...headers }).end(JSON.stringify(data));
   };
+
+  // The start screen's data, sent to every page on connect and after every change.
+  async function sendSetup(targets: Iterable<Stream>): Promise<void> {
+    const workspaces = await workspacesPayload(setup);
+    const tickets = await ticketsPayload(setup, reviewers);
+    for (const stream of targets) {
+      send(stream, 'workspaces', workspaces);
+      send(stream, 'tickets', tickets);
+    }
+  }
 
   async function openStream(req: IncomingMessage, res: ServerResponse, query: URLSearchParams): Promise<void> {
     const [workspace, ticket, ...more] = (query.get('job') ?? '').split('/');
@@ -337,21 +428,20 @@ export async function startDashboard(port: number, stateDir: string, jobs: JobSt
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', connection: 'keep-alive' });
     res.flushHeaders();
     send(stream, 'jobs', await jobsPayload(jobs, reviewers));
-    if (!stream.abort.signal.aborted) {
-      send(stream, 'subscriptions', await subscriptionsPayload(jobs, reviewers));
-    }
+    send(stream, 'subscriptions', await subscriptionsPayload(jobs, reviewers));
+    await sendSetup([stream]);
     if (key === undefined) {
       return;
     }
     const job = await jobs.read(...key);
-    if (job !== undefined && !stream.abort.signal.aborted) {
+    if (job !== undefined) {
       send(stream, 'job', await jobDetail(jobs, reviewers, job));
     }
     const start = Number(from);
     try {
       await followLines(jobs.eventsPath(...key), true, (raw, line) => {
         const event = line >= start ? describeEvent(raw) : undefined;
-        if (event !== undefined && event.lines.length > 0 && !stream.abort.signal.aborted) {
+        if (event !== undefined && event.lines.length > 0) {
           send(stream, 'event', { line, ts: event.ts, iteration: event.iteration, type: event.type, text: event.lines.join('\n') });
         }
       }, stream.abort.signal);
@@ -380,6 +470,14 @@ export async function startDashboard(port: number, stateDir: string, jobs: JobSt
     }
     if (joined === 'api/subscriptions') {
       body(res, 'application/json; charset=utf-8', JSON.stringify(await subscriptionsPayload(jobs, reviewers)));
+      return;
+    }
+    if (joined === 'api/workspaces') {
+      body(res, 'application/json; charset=utf-8', JSON.stringify(await workspacesPayload(setup)));
+      return;
+    }
+    if (joined === 'api/tickets') {
+      body(res, 'application/json; charset=utf-8', JSON.stringify(await ticketsPayload(setup, reviewers)));
       return;
     }
     if (joined === 'api/stream') {
@@ -430,26 +528,72 @@ export async function startDashboard(port: number, stateDir: string, jobs: JobSt
     return reviewers.test(reviewer.id);
   }
 
-  // The validated body as the one Execution (or Events) call it stands for, or undefined when it
-  // is invalid.
-  function toCall(action: ActionRoute, data: unknown, [workspace, ticket]: [string, string]): (() => Promise<unknown>) | undefined {
+  // The job action as the one Execution (or Events) call it stands for.
+  function jobPost(action: ActionRoute, [workspace, ticket]: [string, string]): Post {
+    const parse = <T>(schema: z.ZodType<T>, data: unknown): T | undefined => {
+      const parsed = schema.safeParse(data);
+      return parsed.success ? parsed.data : undefined;
+    };
+    // start needs no job yet; every other action needs the job to exist.
+    const exists = action === 'start' ? undefined : async (): Promise<boolean> => (await jobs.read(workspace, ticket)) !== undefined;
     if (action === 'approve') {
-      return BODIES.approve.schema.safeParse(data).success ? () => actions.approve(workspace, ticket) : undefined;
+      return { route: action, exists, call: (data) => (parse(BODIES.approve.schema, data) ? () => actions.approve(workspace, ticket) : undefined) };
     }
     if (action === 'abort') {
-      const parsed = BODIES.abort.schema.safeParse(data);
-      return parsed.success ? () => actions.abort(workspace, ticket, parsed.data.discard === true) : undefined;
+      return {
+        route: action, exists,
+        call: (data) => {
+          const parsed = parse(BODIES.abort.schema, data);
+          return parsed ? () => actions.abort(workspace, ticket, parsed.discard === true) : undefined;
+        },
+      };
     }
     if (action === 'test-event') {
-      return BODIES['test-event'].schema.safeParse(data).success ? () => testEvent(workspace, ticket) : undefined;
+      return { route: action, exists, call: (data) => (parse(BODIES['test-event'].schema, data) ? () => testEvent(workspace, ticket) : undefined) };
     }
-    const parsed = BODIES.say.schema.safeParse(data);
-    return parsed.success ? () => actions.say(workspace, ticket, parsed.data.message) : undefined;
+    if (action === 'start') {
+      return { route: action, call: (data) => (parse(BODIES.start.schema, data) ? () => actions.start(workspace, ticket) : undefined), refreshSetup: true };
+    }
+    return {
+      route: action, exists,
+      call: (data) => {
+        const parsed = parse(BODIES.say.schema, data);
+        return parsed ? () => actions.say(workspace, ticket, parsed.message) : undefined;
+      },
+    };
   }
 
-  // POST api/jobs/<ws>/<ticket>/<action>: the transport checks, then one Execution call. A page
-  // that goes away while the call runs stops waiting; the call itself goes on and settles here.
-  async function handleAction(req: IncomingMessage, res: ServerResponse, action: ActionRoute, key: [string, string]): Promise<void> {
+  function setupPost(target: Exclude<Target, { kind: 'read' | 'action' }>): Post | undefined {
+    if (target.kind === 'workspace-remove') {
+      const name = target.name;
+      if (name === undefined || !WORKSPACE_NAME_PATTERN.test(name)) {
+        return undefined;
+      }
+      return { route: 'workspace-remove', call: (data) => (BODIES['workspace-remove'].schema.safeParse(data).success ? () => setup.removeWorkspace(name) : undefined), refreshSetup: true };
+    }
+    if (target.route === 'workspace-add') {
+      return {
+        route: 'workspace-add',
+        call: (data) => {
+          const parsed = BODIES['workspace-add'].schema.safeParse(data);
+          return parsed.success ? () => setup.addWorkspace(parsed.data.name, parsed.data.path) : undefined;
+        },
+        refreshSetup: true,
+      };
+    }
+    return {
+      route: 'ticket-new',
+      call: (data) => {
+        const parsed = BODIES['ticket-new'].schema.safeParse(data);
+        return parsed.success ? () => setup.createTicket(parsed.data) : undefined;
+      },
+      refreshSetup: true,
+    };
+  }
+
+  // A POST: the transport checks, then one call. A page that goes away while the call runs stops
+  // waiting; the call itself goes on and settles here.
+  async function handlePost(req: IncomingMessage, res: ServerResponse, post: Post): Promise<void> {
     let gone = false;
     res.once('close', () => {
       gone = true;
@@ -465,7 +609,7 @@ export async function startDashboard(port: number, stateDir: string, jobs: JobSt
       fail(415, 'unsupported_media_type', 'Actions need Content-Type: application/json.');
       return;
     }
-    if ((await jobs.read(...key)) === undefined) {
+    if (post.exists !== undefined && !(await post.exists())) {
       empty(res, 404);
       return;
     }
@@ -484,9 +628,9 @@ export async function startDashboard(port: number, stateDir: string, jobs: JobSt
       fail(400, 'invalid_json', 'The body must be UTF-8 JSON.');
       return;
     }
-    const run = toCall(action, data, key);
+    const run = post.call(data);
     if (run === undefined) {
-      fail(400, 'invalid_body', `${action} expects ${BODIES[action].shape}; no other keys, no null.`);
+      fail(400, 'invalid_body', `${post.route} expects ${BODIES[post.route].shape}; no other keys, no null.`);
       return;
     }
     let result: unknown;
@@ -503,6 +647,9 @@ export async function startDashboard(port: number, stateDir: string, jobs: JobSt
       console.error(error);
       fail(500, 'internal_error', 'The request failed inside the factory.');
       return;
+    }
+    if (post.refreshSetup === true) {
+      sendSetup(streams).catch((error: unknown) => console.error(error));
     }
     if (gone) {
       return;
@@ -535,22 +682,32 @@ export async function startDashboard(port: number, stateDir: string, jobs: JobSt
         res.end();
       }
     };
-    const action = actionRoute(path);
-    if (action !== undefined) {
+    const what = targetOf(path);
+    if (what.kind === 'action' || what.kind === 'workspace-remove') {
       if (req.method !== 'POST') {
         empty(res, 405, { allow: 'POST' });
         return;
       }
-      const key = jobKey(path[2], path[3]);
-      if (key === undefined) {
+      let post: Post | undefined;
+      if (what.kind === 'action') {
+        const key = jobKey(what.workspace, what.ticket);
+        post = key === undefined ? undefined : jobPost(what.action, key);
+      } else {
+        post = setupPost(what);
+      }
+      if (post === undefined) {
         empty(res, 404);
         return;
       }
-      handleAction(req, res, action, key).catch(failed);
+      handlePost(req, res, post).catch(failed);
+      return;
+    }
+    if (what.kind === 'both' && req.method === 'POST') {
+      handlePost(req, res, setupPost(what)!).catch(failed);
       return;
     }
     if (req.method !== 'GET') {
-      empty(res, 405, { allow: 'GET' });
+      empty(res, 405, { allow: what.kind === 'both' ? 'GET, POST' : 'GET' });
       return;
     }
     route(req, res, path, target.searchParams).catch(failed);
@@ -570,6 +727,8 @@ export async function startDashboard(port: number, stateDir: string, jobs: JobSt
   });
   origin = `http://${LOOPBACK_HOST}:${address.port}`;
 
+  // A state change: every page gets the list, the subscriptions, the setup data (a job that
+  // starts or ends changes the tickets and the live counts) and, where it is selected, the job.
   const refresh = async (job: Job): Promise<void> => {
     if (streams.size === 0) {
       return;
@@ -585,9 +744,11 @@ export async function startDashboard(port: number, stateDir: string, jobs: JobSt
         send(stream, 'job', detail);
       }
     }
+    await sendSetup(streams);
   };
 
-  // The subscriptions changed: every page gets the list, the subscriptions and its job again.
+  // The subscriptions changed: every page gets the list, the subscriptions, the tickets (their
+  // reviewer lines) and its job again.
   const refreshReviewers = async (): Promise<void> => {
     if (streams.size === 0) {
       return;
@@ -610,6 +771,7 @@ export async function startDashboard(port: number, stateDir: string, jobs: JobSt
         send(stream, 'job', detail);
       }
     }
+    await sendSetup(streams);
   };
   const stopListening = reviewers.onChange(() => {
     refreshReviewers().catch((error: unknown) => console.error(error));

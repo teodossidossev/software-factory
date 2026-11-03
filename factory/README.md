@@ -22,6 +22,7 @@ bin/sf workspace add <name> --read <path> [--work <path>]   # --work defaults to
 bin/sf workspace list
 bin/sf workspace remove <name>
 bin/sf serve                      # foreground; Ctrl+C stops it; prints the dashboard URL
+bin/sf up [--no-open] [--no-tunnel]   # sf serve plus the tunnel (../scripts/sf-tunnel.sh run, output prefixed "tunnel | ") and the dashboard opened in the browser; Ctrl+C stops both; npm start at the repository root
 bin/sf dashboard [--open]         # the dashboard URL of the last sf serve start; --open opens it with xdg-open; works without sf serve
 bin/sf start <workspace> <ticket> # start the job (same as the start tool); needs sf serve
 bin/sf say <workspace> <ticket> <message...>   # a user message into the session; needs sf serve
@@ -42,6 +43,14 @@ npm run typecheck && npm test
 
 Exit codes: 0 ok, 1 error, 2 usage. `sf approve` exits 1 unless the branch was pushed; `sf events
 test` exits 1 unless the callback answered 2xx.
+
+`sf up` is `sf serve` in the same process, then the tunnel as a child process (`SF_TUNNEL_SCRIPT`
+names another script) and the dashboard through `xdg-open` once serve listens. When the script is
+missing, its check fails (no profile or key: `scripts/sf-tunnel.sh check`) or the tunnel exits on
+its own, one `tunnel | ...` line says so with the runbook path and `sf up` goes on without it; it
+is not restarted (`npm run tunnel` in another terminal once it is fixed). A launcher failure is
+one `sf: ...` line and the printed URL stays usable by hand. A signal stops the tunnel first, then
+the servers, exit code 0.
 
 ### sf status
 
@@ -426,6 +435,41 @@ in time, `sf` exits 1 with the reason; the printed URL stays usable by hand. Exi
 launcher accepted the URL, not that the page loaded: nothing checks that `sf serve` is running.
 On another platform `--open` is refused (`open_unsupported`); plain `sf dashboard` works everywhere.
 
+**The start screen (SF-025).** A Setup section at the top of the page, open while there is no
+workspace or no job and collapsed with a one-line summary afterwards (the user's own toggling is
+kept), in two parts. **Workspaces** lists the registry (name, path, live jobs, a problem such as a
+missing checkout) with Remove (off while the workspace has a live job; the registration only,
+nothing on disk changes) and an Add form: a name and the path of the local checkout, typed or
+pasted (the page cannot browse the machine's disk), validated as `sf workspace add` does (an
+absolute path that exists and is the root of a non-bare Git work tree, a name not registered
+yet) with the refusal shown as it comes; read and work checkout are the same until SF-019.
+**New ticket** takes the workspace, the ticket key, a one-line title, the request in the user's
+words and the Context owner (ChatGPT; Claude Code is listed and disabled until SF-023) and writes
+a **ticket draft**, `.software-factory/<ticket>.md` in the work checkout, through the Task file
+writer: the front matter (`ticket`, `title`, `base` = the branch `origin/HEAD` points at, else
+`main`), `# <ticket>: <title>`, `## Request` with the text verbatim, and `## Status: draft` with
+one line saying the Context owner turns it into the Task format with `write_task`. An existing
+Task file is never replaced from the page (`409 ticket_exists`). **Tickets** lists the Task files
+of every usable workspace whose ticket has no live job (drafts, with a `draft` badge, and finished
+ones with their last job's state), each with its `Reviewer` line by the rules of the Reviewer
+block and two controls: *Open the conversation*, a link (`target=_blank`, opened only by the
+user's click, and the same URL in a box to copy) to `https://chatgpt.com/?q=` plus the message
+of `ticketConversation` URL-encoded, which prefills the ChatGPT composer with: use the Software
+Factory connector, call `guide`, read the draft with `read_file`, plan and rewrite the file with
+`write_task`, subscribe with the ticket's filter (the `sf ticket` instruction) and wait for
+"start"; whether ChatGPT sends it by itself is up to ChatGPT, so the page says to press Enter
+if it is not. And *Start…*, which asks for a confirmation naming the base and the checkout and
+saying when the ticket is still a draft and when nobody reviews it (`Reviewer: none`), then
+`POST api/jobs/<ws>/<ticket>/start`: the same `Execution.start` and guards as `sf start`
+(`checkout_dirty`, `branch_exists`, `job_exists`, `job_active`, `task_not_found` are shown with
+their texts). On success the section collapses and the new job is selected. The workspaces and
+the tickets come with the stream (`workspaces` and `tickets` events) on connect, after every
+change made from a page, on every state change and on every change of the subscriptions, so two
+open pages agree and the Reviewer line of a ticket turns to `subscribed` when ChatGPT subscribes.
+A change made with `sf workspace add|remove` or `write_task` shows at the next refresh of the
+stream (a state or subscription change, an action from a page, or a reload). Only the server's
+ChatGPT URL becomes a link: a conversation URL without that prefix is rendered without one.
+
 Version 2 shows, live: every job with its state; for the selected job (the most recently updated
 one, or `#<workspace>/<ticket>` in the URL) the branch, base, state, iteration, estimated cost ("est. $", not a charge) and error,
 the state history, each iteration's Report and Patch, the MR text once there is one, and the
@@ -494,17 +538,20 @@ img-src 'self'` and `Cache-Control: no-store`; every value is rendered as text.
 
 Endpoints under `/d/<token>/`. The read endpoints are GET only (anything else `405` with
 `Allow: GET`); the action endpoints are POST only (anything else `405` with `Allow: POST`; GET,
-HEAD and OPTIONS never act):
+HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and act on POST
+(anything else `405` with `Allow: GET, POST`):
 
 | Path | Answer |
 |---|---|
 | `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, updated_at, created_at, error, reviewer (`subscribed`, `broad` or `none`) |
 | `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials}], mr, history: [{ts, from, to, error?}], reviewer, reviewerSetup: {guide, instruction}}`; `reviewer` is `{status: "subscribed" \| "broad", id, host, input, broad: [<ids of the subscriptions without a ticket filter that match>]}` or `{status: "none"}` |
 | `api/subscriptions` | `{subscriptions: [{id, principal, input, host, createdAt, refreshBefore, job: "<ws>/<ticket>" \| null}]}`, the active subscriptions without URL or secret; `job` is the non-terminal job the ticket filter matches |
+| `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem}]}`: the registry, the work checkout's path, its non-terminal jobs, and why the checkout cannot be used now or `null` |
+| `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, job, reviewer, conversation: {message, url}}]}`: the Task files without a live job; `job` is the last job's state or `null`; `reviewer` as in the job detail; `url` is `https://chatgpt.com/?q=<message URL-encoded>` |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/patch` | the Patch, `text/x-diff` |
 | `api/jobs/<ws>/<ticket>/mr` | the MR text, `text/markdown`; 404 until there is one |
-| `api/stream?job=<ws>/<ticket>&from=<line>` | server-sent events: `jobs` (on connect, on every state change and on every change of the subscriptions), `subscriptions` (as `api/subscriptions`, at the same times), `job` (the job's detail, on connect, when it changes state and when the subscriptions change), `event` (`{line, ts, iteration, type, text}` for every visible line of `events.jsonl` from the 0-based `from`, as `sf watch` formats it); a comment every 15 s; at most 8 streams, then 503 |
+| `api/stream?job=<ws>/<ticket>&from=<line>` | server-sent events: `jobs` (on connect, on every state change and on every change of the subscriptions), `subscriptions` (as `api/subscriptions`, at the same times), `workspaces` and `tickets` (as the two endpoints, at the same times and after every setup action from a page), `job` (the job's detail, on connect, when it changes state and when the subscriptions change), `event` (`{line, ts, iteration, type, text}` for every visible line of `events.jsonl` from the 0-based `from`, as `sf watch` formats it); a comment every 15 s; at most 8 streams, then 503 |
 
 | Method and path | JSON body | Calls |
 |---|---|---|
@@ -512,10 +559,17 @@ HEAD and OPTIONS never act):
 | `POST api/jobs/<ws>/<ticket>/abort` | `{"discard": false}`; `discard` optional, default false | `Execution.abort(ws, ticket, discard)` |
 | `POST api/jobs/<ws>/<ticket>/say` | `{"message": "<text>"}` | `Execution.say(ws, ticket, message)`; the text goes as it is (nothing trimmed or split) |
 | `POST api/jobs/<ws>/<ticket>/test-event` | `{}` | `sf events test` for the job's `subscribed` subscription: one test event (state `"test"`), result `{subscription, delivered, status}`; without one `404 no_subscription` and nothing is sent |
+| `POST api/jobs/<ws>/<ticket>/start` | `{}` | `Execution.start(ws, ticket)`, as `sf start`; the job need not exist yet (invalid names are an empty `404`); result `{branch, state, check_after_minutes}` |
+| `POST api/workspaces` | `{"name": string, "path": string}` | `Setup.addWorkspace`: the rules of `sf workspace add`; result the workspace row |
+| `POST api/workspaces/<name>/remove` | `{}` | `Setup.removeWorkspace`; `409 workspace_busy` while the workspace has a live job; result `{removed}` |
+| `POST api/tickets` | `{"workspace", "ticket", "title", "request"}` | `Setup.createTicket`: the ticket draft through the Task file writer; result `{workspace, ticket, path, base}` |
 
 The actions go to the same `Execution` as the socket commands, under its lock and guards; there
 is no second state machine and no other mutation endpoint. `test-event` goes to the same Events
-hub as `sf events test`, with the same checks as the actions below; it changes no job. An action request must carry the
+hub as `sf events test`, with the same checks as the actions below; it changes no job. The setup
+actions go to `src/setup.ts`, which writes the same registry file as `sf workspace add|remove`
+and the same Task files as `write_task`, under the Execution's lock, so a registry change and a
+start never interleave. An action request must carry the
 token, an `Origin` equal to the page's exact origin (`http://127.0.0.1:<port>` with the actual
 port; a missing Origin, another loopback address or port and the MCP origin are refused with
 `403 invalid_origin`; a `null` or foreign Origin is already refused, `403`, by the loopback
@@ -534,9 +588,12 @@ that ended in `needs_human`, `awaiting_review` or `aborted`, and an abort that e
 failed to discard (`result.error.code` `discard_failed`; the page says the discard may be partial
 and never that the branch or the files were removed) are `200` too; the page reads `result`.
 A `FactoryError` is `{"ok": false, "error": {"code", "message"}}` with its code and message kept,
-under `409` for `invalid_state`, `turn_running` and `rebase_in_progress`, `404` for
-`job_not_found`, `workspace_not_found`, `no_subscription` and `subscription_not_found`, `400` for `invalid_content`, and `500` for any other
-code (a Git failure before the preparation, for example). Any other failure is `500`
+under `409` for `invalid_state`, `turn_running`, `rebase_in_progress`, `job_exists`, `job_active`,
+`checkout_dirty`, `branch_exists`, `ticket_exists`, `workspace_exists` and `workspace_busy`,
+`404` for `job_not_found`, `workspace_not_found`, `task_not_found`, `no_subscription` and
+`subscription_not_found`, `400` for `invalid_content`, `invalid_ticket`, `invalid_name` and
+`workspace_invalid`, and `500` for any other code (a Git failure before the preparation, for
+example). Any other failure is `500`
 with `internal_error` and a fixed message; the cause is logged, never the body or the token.
 
 When the page's approve request is cut, the preparation goes on and its outcome is recorded in
@@ -593,10 +650,24 @@ end), in a browser:
    the dialog's buttons, the textarea and Send; Escape closes the dialog. The Reviewer block,
    the Copy boxes and the Subscriptions table stay readable in both schemes and wrap or scroll
    inside their panel, never the page.
+12. Start screen: with an empty registry (`SF_CONFIG_DIR` pointing at an empty directory) the
+   page opens on Setup with the Add form; add a throwaway repository by its path (a wrong path
+   shows the refusal in place); New ticket with a key, a title and two lines of request writes
+   `.software-factory/<key>.md` with `## Request` and `## Status: draft`, and the ticket appears
+   under Tickets with `Reviewer: none` and a `draft` badge. *Open the conversation* opens a new
+   tab on chatgpt.com with the message in the composer (press Enter if it stays there); the same
+   URL is in the box and Copy puts it on the clipboard. Once the conversation created its task,
+   the line turns to `Reviewer: subscribed` without a reload. Start… asks for confirmation (it
+   names the draft and the missing reviewer when they apply); Cancel sends nothing; Confirm: the
+   section collapses, the job is selected and `sf status` shows it. With a workspace and a job
+   the page opens with Setup collapsed and the summary line; Remove on a workspace with a live
+   job is off with the reason. Narrow and dark: the two columns stack, the forms and the ticket
+   cards stay readable and wrap inside their panel.
 
 ## Workspace registry
 
-`<config dir>/workspaces.json`, written by `sf workspace add|remove`:
+`<config dir>/workspaces.json`, written by `sf workspace add|remove` and by the dashboard's start
+screen (`POST api/workspaces`, which registers the path as read and work checkout alike):
 
 ```json
 { "workspaces": { "my-app": { "read_checkout": "/abs/path", "work_checkout": "/abs/path" } } }

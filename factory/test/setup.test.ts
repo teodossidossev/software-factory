@@ -7,17 +7,23 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
+import type { ExclusiveScope } from '../src/execution.js';
 import { type Job, JobStore } from '../src/jobs.js';
 import { loadRegistry, saveRegistry } from '../src/registry.js';
 import { defaultBranch, draftContent, DRAFT_MARKER, DRAFT_NOTE, isDraft, MAX_REQUEST_BYTES, Setup } from '../src/setup.js';
 import { git, newEnv, newRepo, putTask, temp } from './support/harness.js';
+
+// These tests have no finished job to retire: a call would be a bug.
+const NO_RETIREMENT: ExclusiveScope = {
+  retireFinished: async () => assert.fail('no job is retired here'),
+};
 
 function setupOf(config: string, jobs: JobStore): Setup {
   let lock: Promise<unknown> = Promise.resolve();
   return new Setup({
     configDir: config, jobs,
     exclusive: (work) => {
-      const next = lock.catch(() => undefined).then(work);
+      const next = lock.catch(() => undefined).then(() => work(NO_RETIREMENT));
       lock = next;
       return next;
     },

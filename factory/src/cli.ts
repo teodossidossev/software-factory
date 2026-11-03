@@ -105,11 +105,9 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   };
   const execution = new Execution(config, (name) => resolveWorkspace(name), onStateChange, handbook.text);
   // The start screen of the dashboard: the registry and the Task files, under the Execution's lock.
-  const setup = new Setup({
-    configDir: configDir(), jobs, exclusive: (work) => execution.exclusive(work),
-    // A finished job leaves with its Task file: reset archives it and removes a kept worktree.
-    retireJob: (workspace, ticket) => execution.reset(workspace, ticket),
-  });
+  // A finished job leaves with its Task file through the lock's scope, in the same acquisition as
+  // the ticket action's checks: it is archived and a kept worktree removed.
+  const setup = new Setup({ configDir: configDir(), jobs, exclusive: (work) => execution.exclusive(work) });
   // The socket first: it refuses a second sf serve on the same state before recovery touches it.
   const socket = await listenSocket(config.stateDir, async ({ command, args }) => {
     if (command === 'events') {
@@ -154,8 +152,9 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   }
   try {
     if (dashboardOn()) {
-      // The dashboard's actions (DashboardActions: approve, abort and say only) run on the same
-      // Execution as the socket commands; its reviewers are the subscriptions of the same Events.
+      // The dashboard's actions (DashboardActions: approve, abort, say and archiveFinished) run on
+      // the same Execution as the socket commands; its reviewers are the subscriptions of the same
+      // Events.
       dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, events, setup);
     } else {
       await removeToken(config.stateDir);

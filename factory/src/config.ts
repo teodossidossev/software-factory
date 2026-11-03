@@ -1,9 +1,11 @@
 // Execution configuration, read once when `sf serve` starts.
 import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import type { AuthConfig } from './auth.js';
 import { FactoryError } from './errors.js';
+import { configDir } from './registry.js';
 
 export interface Config {
   stateDir: string;
@@ -47,6 +49,60 @@ export function stateDir(env: NodeJS.ProcessEnv = process.env): string {
     return env.SF_STATE_DIR;
   }
   return join(env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'software-factory');
+}
+
+// The environment file every sf command reads before anything else: SF_ENV_FILE, or
+// <config dir>/auth.env (the file the Auth0 setup writes). KEY=VALUE lines, "#" comments, an
+// optional "export " prefix, single or double quotes around the value. A variable already set
+// in the environment wins. Returns the names it set; a missing file sets nothing.
+export function parseEnvFile(text: string): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (line === '' || line.startsWith('#')) {
+      continue;
+    }
+    const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    if (match === null) {
+      throw new FactoryError('invalid_env_file', `Not a KEY=VALUE line: "${line}".`);
+    }
+    let value = match[2]!.trim();
+    if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
+      value = value.slice(1, -1);
+    }
+    values[match[1]!] = value;
+  }
+  return values;
+}
+
+export function envFilePath(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (env.SF_ENV_FILE !== undefined) {
+    return env.SF_ENV_FILE === '' ? undefined : env.SF_ENV_FILE;
+  }
+  return join(configDir(env), 'auth.env');
+}
+
+export function loadEnvFile(env: NodeJS.ProcessEnv = process.env, path = envFilePath(env)): string[] {
+  if (path === undefined) {
+    return [];
+  }
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return [];
+    }
+    throw error;
+  }
+  const set: string[] = [];
+  for (const [name, value] of Object.entries(parseEnvFile(text))) {
+    if (env[name] === undefined) {
+      env[name] = value;
+      set.push(name);
+    }
+  }
+  return set;
 }
 
 function positiveInteger(env: NodeJS.ProcessEnv, name: string, fallback: number): number {

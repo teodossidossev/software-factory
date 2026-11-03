@@ -81,7 +81,7 @@ type ActionRoute = DashboardAction | 'test-event';
 // The request body of each POST route, strict: unknown keys, null, arrays and wrong types are
 // refused; shape is what the refusal names.
 const BODIES = {
-  approve: { shape: '{}', schema: z.strictObject({}) },
+  approve: { shape: '{"as_is"?: boolean}', schema: z.strictObject({ as_is: z.boolean().optional() }) },
   abort: { shape: '{"discard"?: boolean}', schema: z.strictObject({ discard: z.boolean().optional() }) },
   say: { shape: '{"message": string}', schema: z.strictObject({ message: z.string() }) },
   start: { shape: '{}', schema: z.strictObject({}) },
@@ -97,7 +97,8 @@ const ACTION_ROUTES: ActionRoute[] = ['approve', 'abort', 'say', 'start', 'test-
 // its code and message.
 const ERROR_STATUS: Record<string, number> = {
   invalid_state: 409, turn_running: 409, rebase_in_progress: 409,
-  job_exists: 409, job_active: 409, checkout_dirty: 409, branch_exists: 409, ticket_exists: 409, workspace_exists: 409, workspace_busy: 409,
+  job_exists: 409, job_active: 409, job_limit: 409, checkout_dirty: 409, branch_exists: 409, branch_changed: 409, branch_missing: 409, worktree_exists: 409,
+  worktree_missing: 409, sensitive_unacknowledged: 409, ticket_exists: 409, workspace_exists: 409, workspace_busy: 409,
   job_not_found: 404, workspace_not_found: 404, task_not_found: 404,
   invalid_content: 400, invalid_ticket: 400, invalid_name: 400, workspace_invalid: 400,
   no_subscription: 404, subscription_not_found: 404,
@@ -154,17 +155,43 @@ export async function removeToken(stateDir: string): Promise<void> {
   await rm(join(stateDir, TOKEN_FILE), { force: true });
 }
 
-function jobSummary(job: Job) {
+// The file counts of the last published iteration (SF-024): every file, the undeclared sensitive
+// ones and the deleted ones; zeros before the first iteration or for an iteration without a list.
+async function fileCounts(jobs: JobStore, job: Job): Promise<{ files: number; undeclared: number; deleted: number }> {
+  const none = { files: 0, undeclared: 0, deleted: 0 };
+  if (job.iteration === 0) {
+    return none;
+  }
+  try {
+    const files = (await jobs.readMeta(job.workspace, job.ticket, job.iteration)).files ?? [];
+    return {
+      files: files.length,
+      undeclared: files.filter((change) => change.sensitive === 'undeclared').length,
+      deleted: files.filter((change) => change.status === 'deleted').length,
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return none;
+    }
+    throw error;
+  }
+}
+
+function jobSummary(job: Job, counts: { files: number; undeclared: number; deleted: number }) {
   return {
     workspace: job.workspace, ticket: job.ticket, branch: job.branch, base: job.base, state: job.state,
     iteration: job.iteration, mr_attempts: job.mr_attempts, updated_at: job.updated_at, created_at: job.created_at,
-    error: job.error ?? null,
+    error: job.error ?? null, worktree: job.worktree, prepared_commit: job.prepared_commit, ...counts,
   };
 }
 
 async function jobsPayload(jobs: JobStore, reviewers: DashboardReviewers) {
   const subscriptions = reviewers.subscriptions();
-  return { jobs: (await jobs.list()).map((job) => ({ ...jobSummary(job), reviewer: reviewerOf(subscriptions, job.workspace, job.ticket).status })) };
+  const list = [];
+  for (const job of await jobs.list()) {
+    list.push({ ...jobSummary(job, await fileCounts(jobs, job)), reviewer: reviewerOf(subscriptions, job.workspace, job.ticket).status });
+  }
+  return { jobs: list };
 }
 
 // The subscriptions without secrets, each with the live (non-terminal) job its ticket filter
@@ -228,6 +255,8 @@ async function jobDetail(jobs: JobStore, reviewers: DashboardReviewers, job: Job
       iterations.push({
         number, started_at: meta.started_at, ended_at: meta.ended_at, cost_usd: meta.cost_usd,
         changed_files: meta.changed_files.length, patch_truncated: meta.patch_truncated, denials: meta.denials.length,
+        // The structured file list (SF-024); null for an iteration published before it.
+        files: meta.files ?? null,
       });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -236,7 +265,7 @@ async function jobDetail(jobs: JobStore, reviewers: DashboardReviewers, job: Job
     }
   }
   return {
-    job: jobSummary(job),
+    job: jobSummary(job, await fileCounts(jobs, job)),
     iterations,
     mr: (await jobs.readMrText(job.workspace, job.ticket)) !== undefined,
     history: await stateHistory(jobs, job.workspace, job.ticket),
@@ -537,7 +566,13 @@ export async function startDashboard(
     // start needs no job yet; every other action needs the job to exist.
     const exists = action === 'start' ? undefined : async (): Promise<boolean> => (await jobs.read(workspace, ticket)) !== undefined;
     if (action === 'approve') {
-      return { route: action, exists, call: (data) => (parse(BODIES.approve.schema, data) ? () => actions.approve(workspace, ticket) : undefined) };
+      return {
+        route: action, exists,
+        call: (data) => {
+          const parsed = parse(BODIES.approve.schema, data);
+          return parsed ? () => actions.approve(workspace, ticket, parsed.as_is === true) : undefined;
+        },
+      };
     }
     if (action === 'abort') {
       return {

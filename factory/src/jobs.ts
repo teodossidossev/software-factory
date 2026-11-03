@@ -35,6 +35,10 @@ const jobSchema = z.strictObject({
   base_commit: commit.nullable(),
   // The target commit the branch was rebased onto in MR preparation.
   target_commit: commit.nullable().default(null),
+  // The job's worktree (SF-019), absolute; null before start, after Clean and once removed.
+  worktree: z.string().min(1).nullable().default(null),
+  // The branch tip the factory prepared at Clean; approve pushes it unless the tip moved.
+  prepared_commit: commit.nullable().default(null),
   // Number of MR preparation turns started.
   mr_attempts: z.number().int().min(0).default(0),
   state: z.enum(JOB_STATES),
@@ -64,6 +68,17 @@ export interface ChangedFile {
   removed: number;
 }
 
+// One file of an iteration (SF-024): its status against the base, whether it is a sensitive
+// path and whether the Task file declared it, and its line counts.
+export interface FileChange {
+  path: string;
+  status: 'added' | 'modified' | 'deleted' | 'renamed';
+  from?: string;
+  sensitive: 'declared' | 'undeclared' | 'no';
+  additions: number;
+  deletions: number;
+}
+
 export interface IterationMeta {
   iteration: number;
   started_at: string;
@@ -71,6 +86,8 @@ export interface IterationMeta {
   // Tool names of denied tool calls, in order; never their inputs.
   denials: string[];
   changed_files: ChangedFile[];
+  // The structured file list (SF-024); absent in iterations published before it.
+  files?: FileChange[];
   patch_truncated: boolean;
   submodule_changed: string[];
   // This iteration's cost, and the SDK's cumulative total for the session.
@@ -99,6 +116,8 @@ export type EventRecord = { ts: string; iteration: number } & (
   // One delivery attempt of an MCP event (src/events.ts): status is the HTTP status, or why there
   // was none (timeout, connection_failed, blocked_address, too_large, no_subscription).
   | { type: 'event_delivered' | 'event_failed'; subscription: string; attempt: number; status: number | string }
+  // The ticket's subscription removed after the last event of the job (SF-019).
+  | { type: 'subscription_removed'; subscription: string }
 );
 
 // The tools whose caller is logged as a principal event.

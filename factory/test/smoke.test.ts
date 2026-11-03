@@ -154,12 +154,16 @@ test('sf workspace add, list and remove manage the registry with the documented 
   assert.equal(added.code, 0, added.stderr);
   assert.equal((await runCli(['workspace', 'add', 'demo', '--read', repo])).code, 1);
   const registry = JSON.parse(await readFile(join(configDir, 'workspaces.json'), 'utf8'));
-  assert.deepEqual(registry, { workspaces: { demo: { read_checkout: repo, work_checkout: repo } } });
-  assert.match((await runCli(['workspace', 'list'])).stdout, /^demo\n {2}read: /);
+  assert.deepEqual(registry, { workspaces: { demo: { read_checkout: repo } } });
+  assert.match((await runCli(['workspace', 'list'])).stdout, /^demo\n {2}checkout: /);
 
+  // --work is retired (SF-019): every job works in a worktree of the checkout.
   const broken = join(temp, 'broken');
   execFileSync('git', ['init', '-q', broken]);
-  assert.equal((await runCli(['workspace', 'add', 'broken', '--read', repo, '--work', broken])).code, 0);
+  const retired = await runCli(['workspace', 'add', 'broken', '--read', repo, '--work', broken]);
+  assert.equal(retired.code, 1);
+  assert.match(retired.stderr, /--work is no longer supported/);
+  assert.equal((await runCli(['workspace', 'add', 'broken', '--read', broken])).code, 0);
   assert.equal((await runCli(['workspace', 'add', 'gone', '--read', broken])).code, 0);
   assert.equal((await runCli(['workspace', 'remove', 'gone'])).code, 0);
   await rm(join(broken, '.git'), { recursive: true });

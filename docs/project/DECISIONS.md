@@ -45,3 +45,21 @@ stay as history.
   request.
 - **Task files.** Task files live in `.software-factory/` of the work checkout and are ignored by
   Git.
+
+## 2026-11-03: worktree per job, parallel jobs, the branch at Clean (SF-019)
+
+Replaces the Checkout entry of 2026-11-01 (ADR-0001, now superseded by ADR-0004).
+
+- **Worktree.** Every job works in a Git worktree of the workspace's checkout, never in the
+  User's IDE checkout. A workspace is one checkout; the separate work checkout is retired.
+- **Parallel jobs.** Up to `SF_MAX_JOBS` live jobs per workspace at a time, each with its own
+  session and worktree; one ChatGPT conversation per ticket, subscribed to that ticket only, and
+  removed by the factory after the job's last event (`pushed` or `aborted`).
+- **Branch at Clean.** `mark_clean` runs the MR preparation (commit by the Git rules, rebase,
+  verification) and removes the worktree; the branch, with one commit, is in the User's
+  repository for human review. `approve` pushes it and nothing else.
+- **Sensitive files (SF-024).** Dependency manifests, lockfiles, environment and tool
+  configuration, CI, containers, IDE and agent files and root dotfiles are listed first in every
+  Report and in the dashboard's Files view; an undeclared one (not in the Task file's
+  `may_touch`) must be acknowledged by the Context owner in `mark_clean`; deleted files are
+  always listed separately.

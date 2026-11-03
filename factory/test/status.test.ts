@@ -10,7 +10,7 @@ import { newEnv, runCli, temp } from './support/harness.js';
 
 const CREATED = '2026-11-01T10:00:00.000Z';
 const base: Job = {
-  workspace: 'app', ticket: 'T-1', branch: 'T-1-demo', base: 'main', base_commit: null, target_commit: null,
+  workspace: 'app', ticket: 'T-1', branch: 'T-1-demo', base: 'main', base_commit: null, target_commit: null, worktree: null, prepared_commit: null,
   mr_attempts: 0, state: 'awaiting_review', iteration: 0, session_id: null, created_at: CREATED, updated_at: CREATED,
 };
 
@@ -150,7 +150,7 @@ test('sf status: EST_USD and ELAPSED columns for all jobs and for one job, archi
 
   const one = await runCli(env, ['status', 'app', 'S-2']);
   assert.equal(one.code, 0, one.stderr);
-  assert.match(one.stdout, /^WORKSPACE\s+TICKET\s+STATE\s+ITER\s+BRANCH\s+SINCE\s+EST_USD\s+ELAPSED\s+ERROR\napp\s+S-2\s+needs_human\s+1\s+S-2-zero\s+\S+\s+0\.0000\s+\d{2,}:\d\d:\d\d\s+turn_failed\n\nturn_failed: It stopped\.\n$/);
+  assert.match(one.stdout, /^WORKSPACE\s+TICKET\s+STATE\s+ITER\s+BRANCH\s+SINCE\s+EST_USD\s+ELAPSED\s+ERROR\napp\s+S-2\s+needs_human\s+1\s+S-2-zero\s+\S+\s+0\.0000\s+\d{2,}:\d\d:\d\d\s+turn_failed\n\nturn_failed: It stopped\.\nsensitive: none\ndeleted: none\n$/);
   assert.equal((await runCli(env, ['status', 'app', 'S-7'])).code, 1);
 
   // Malformed metadata is reported, not shown as zero.

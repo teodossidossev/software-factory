@@ -73,7 +73,7 @@ export async function script(env: Env, turns: unknown[]): Promise<void> {
   await rm(join(env.home, 'fake-claude.count'), { force: true });
 }
 
-export async function fakeLog(env: Env): Promise<Array<{ argv: string[]; prompt: string; sessionId: string; env: string[] }>> {
+export async function fakeLog(env: Env): Promise<Array<{ argv: string[]; prompt: string; sessionId: string; cwd: string; env: string[] }>> {
   return (await readFile(join(env.home, 'fake-claude.log'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
 }
 

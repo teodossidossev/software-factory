@@ -17,12 +17,13 @@ import { coversTicketBroadly, Events, ownsTicket, type SubscriptionSummary, TICK
 import { Execution, type StateListener } from './execution.js';
 import { existsSync } from 'node:fs';
 import { callSocket, listenSocket, socketPath } from './ipc.js';
-import { type Job, JobStore } from './jobs.js';
+import { type Job, JobStore, TERMINAL_STATES } from './jobs.js';
 import { jobNotification, notifyConfig, sendNotification, stateNotifier } from './notify.js';
-import { configDir, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
+import { configDir, ignoredWorkCheckouts, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { loadHandbook, packageVersion, PortInUseError, SERVER_NAME, startServer } from './server.js';
 import { Setup } from './setup.js';
 import { type StatusRow, statusRows } from './status.js';
+import { fileSummaryLines } from './patch.js';
 import { TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { watchEvents } from './watch.js';
 
@@ -31,16 +32,16 @@ const USAGE = `Usage:
   sf serve                                              Serve the MCP tools on 127.0.0.1:\${SF_PORT:-${DEFAULT_PORT}}/mcp and the dashboard
   sf up [--no-open] [--no-tunnel]                       sf serve plus the ChatGPT tunnel (scripts/sf-tunnel.sh run) in one terminal, and open the dashboard; Ctrl+C stops both
   sf dashboard [--open] [--rotate]                      Print the dashboard URL; --open also opens it (xdg-open); --rotate removes the token so the next sf serve makes a new one
-  sf workspace add <name> --read <path> [--work <path>] Register a workspace (--work defaults to --read)
+  sf workspace add <name> --read <path>                 Register a workspace: the local checkout (every job works in a worktree of it)
   sf workspace list                                     List registered workspaces
   sf workspace remove <name>                            Unregister a workspace
-  sf start <workspace> <ticket>                         Start the job for .software-factory/<ticket>.md
+  sf start <workspace> <ticket>                         Start the job for .software-factory/<ticket>.md in a worktree of its own (up to SF_MAX_JOBS per workspace)
   sf say <workspace> <ticket> <message...>              Send a message into the job's Implementer session
   sf status [<workspace> <ticket>]                      Show one job or all jobs: state, iterations, estimated cost, elapsed time
   sf watch <workspace> <ticket> [--once]                Show the session live (Ctrl+C stops)
-  sf approve <workspace> <ticket>                       MR preparation: commit, rebase, verify, push
-  sf abort <workspace> <ticket> [--discard]             End the job; --discard also removes the branch and its changes
-  sf reset <workspace> <ticket>                         End the session and archive the job; the branch and files are untouched
+  sf approve <workspace> <ticket> [--as-is]             Push the branch prepared at Clean; --as-is pushes it even if its tip was edited by hand
+  sf abort <workspace> <ticket> [--discard]             End the job; the worktree stays (its path is printed); --discard removes the worktree and the branch
+  sf reset <workspace> <ticket>                         End the session, remove the worktree and archive the job; the branch is untouched
   sf events list                                        List the MCP event subscriptions (no secrets)
   sf events remove <id>                                 Remove an MCP event subscription
   sf events test <id>                                   Send a test event (state "test") to a subscription and print the answer
@@ -85,7 +86,11 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   const auth = authConfig();
   const handbook = await loadHandbook();
   // Fail at startup on an invalid registry rather than on the first tool call.
-  await loadRegistry();
+  const registry = await loadRegistry();
+  const ignored = ignoredWorkCheckouts(registry);
+  if (ignored.length > 0) {
+    console.error(`warning: the work_checkout of workspace(s) ${ignored.join(', ')} is ignored since SF-019: every job works in a worktree of the checkout.`);
+  }
   const jobs = new JobStore(config.stateDir);
   const notify = stateNotifier(notifyConfig(), jobs);
   // MCP Events: loads the subscriptions and resumes the pending deliveries. Loopback callbacks
@@ -123,8 +128,8 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     if (command === 'say') {
       return execution.say(workspace, ticket, words.join(' '));
     }
-    if (command === 'approve' && words.length === 0) {
-      return execution.approve(workspace, ticket);
+    if (command === 'approve' && (words.length === 0 || (words.length === 1 && words[0] === '--as-is'))) {
+      return execution.approve(workspace, ticket, words.length === 1);
     }
     if (command === 'abort' && (words.length === 0 || (words.length === 1 && words[0] === '--discard'))) {
       return execution.abort(workspace, ticket, words.length === 1);
@@ -302,7 +307,7 @@ async function workspace(args: string[]): Promise<void> {
       console.log('No workspaces registered.');
     }
     for (const [name, entry] of entries) {
-      console.log(`${name}\n  read: ${entry.read_checkout}\n  work: ${entry.work_checkout}`);
+      console.log(`${name}\n  checkout: ${entry.read_checkout}`);
     }
     return;
   }
@@ -315,15 +320,17 @@ async function workspace(args: string[]): Promise<void> {
     if (read === undefined) {
       throw new UsageError('workspace add requires --read <path>.');
     }
-    const work = (values.work as string | undefined) ?? read;
+    if (values.work !== undefined) {
+      throw new FactoryError('work_checkout_retired', '--work is no longer supported: every job works in a worktree of the checkout (SF-019).');
+    }
     const registry = await loadRegistry();
     if (Object.hasOwn(registry.workspaces, name)) {
       throw new FactoryError('workspace_exists', `workspace "${name}" is already registered; remove it first.`);
     }
-    const entry = { read_checkout: await checkout(read, '--read'), work_checkout: await checkout(work, '--work') };
+    const entry = { read_checkout: await checkout(read, '--read') };
     registry.workspaces[name] = entry;
     await saveRegistry(registry);
-    console.log(`Registered workspace "${name}" (read: ${entry.read_checkout}, work: ${entry.work_checkout}).`);
+    console.log(`Registered workspace "${name}" (checkout: ${entry.read_checkout}).`);
     return;
   }
   if (command === 'remove') {
@@ -364,15 +371,13 @@ async function viaServer(command: string, args: string[]): Promise<Record<string
 }
 
 async function approve(args: string[]): Promise<void> {
-  if (args.length !== 2) {
-    throw new UsageError('approve needs <workspace> <ticket>.');
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { 'as-is': { type: 'boolean' } } });
+  if (positionals.length !== 2) {
+    throw new UsageError('approve needs <workspace> <ticket> [--as-is].');
   }
-  console.log('MR preparation started; waiting for it to end (Ctrl+C stops waiting, not the preparation; sf watch shows it).');
-  const result = await viaServer('approve', checkJob(args, 'approve'));
-  if (result.state === 'awaiting_review') {
-    console.log('The prepared commit differs from the reviewed change; it went back to the Context owner. Run sf approve again after Clean.');
-  } else if (result.state === 'needs_human') {
-    console.log('Fix it with sf say or by hand, then run sf approve again.');
+  const result = await viaServer('approve', [...checkJob(positionals, 'approve'), ...(values['as-is'] === true ? ['--as-is'] : [])]);
+  if (result.state === 'needs_human') {
+    console.log('The push failed; fix it and run sf approve again.');
   } else if (result.state === 'pushed' && result.link === undefined) {
     console.log('No merge request link: the origin URL could not be parsed. Open the merge request for the branch above.');
   }
@@ -390,7 +395,7 @@ async function abort(args: string[]): Promise<void> {
   if (result.error !== undefined) {
     process.exitCode = 1;
   } else if (values.discard !== true) {
-    console.log('The branch and the files are left as they are.');
+    console.log(result.worktree === null ? 'The branch is left as it is.' : `The branch and its worktree are left as they are: ${String(result.worktree)}`);
   }
 }
 
@@ -399,15 +404,20 @@ async function reset(args: string[]): Promise<void> {
     throw new UsageError('reset needs <workspace> <ticket>.');
   }
   await viaServer('reset', checkJob(args, 'reset'));
-  console.log('The branch and the files in the work checkout are untouched.');
+  console.log('The worktree is removed; the branch is untouched.');
 }
 
 const SUBSCRIPTION_ID = /^sub_[A-Za-z0-9_-]{1,64}$/;
 
-function subscriptionTable(rows: SubscriptionSummary[]): string {
+// live: the current jobs, so each subscription shows the live job its ticket filter matches.
+function subscriptionTable(rows: SubscriptionSummary[], live: Job[] = []): string {
+  const matched = (row: SubscriptionSummary): string => {
+    const job = live.find((candidate) => !TERMINAL_STATES.includes(candidate.state) && ownsTicket(row.input, candidate.workspace, candidate.ticket));
+    return job === undefined ? '-' : `${job.workspace}/${job.ticket} ${job.state}`;
+  };
   const cells = [
-    ['ID', 'PRINCIPAL', 'EVENT', 'INPUT', 'HOST', 'CREATED', 'REFRESH_BEFORE'],
-    ...rows.map((row) => [row.id, row.principal, row.event, JSON.stringify(row.input), row.host, row.createdAt, row.refreshBefore]),
+    ['ID', 'PRINCIPAL', 'EVENT', 'INPUT', 'HOST', 'CREATED', 'REFRESH_BEFORE', 'LIVE_JOB'],
+    ...rows.map((row) => [row.id, row.principal, row.event, JSON.stringify(row.input), row.host, row.createdAt, row.refreshBefore, matched(row)]),
   ];
   const widths = cells[0]!.map((_, column) => Math.max(...cells.map((row) => row[column]!.length)));
   return cells.map((row) => row.map((cell, column) => cell.padEnd(widths[column]!)).join('  ').trimEnd()).join('\n');
@@ -425,7 +435,7 @@ async function eventsCommand(args: string[]): Promise<void> {
       throw new FactoryError(response.error.code, response.error.message);
     }
     const rows = (response.result as { subscriptions: SubscriptionSummary[] }).subscriptions;
-    console.log(rows.length === 0 ? 'No subscriptions.' : subscriptionTable(rows));
+    console.log(rows.length === 0 ? 'No subscriptions.' : subscriptionTable(rows, await new JobStore(stateDir()).list()));
     return;
   }
   if (action !== 'remove' && action !== 'test') {
@@ -501,7 +511,7 @@ async function notifyTest(args: string[]): Promise<void> {
   }
   const now = new Date().toISOString();
   const job: Job = {
-    workspace: 'test', ticket: 'SF-TEST', branch: 'SF-TEST-notification', base: 'main', base_commit: null,
+    workspace: 'test', ticket: 'SF-TEST', branch: 'SF-TEST-notification', base: 'main', base_commit: null, worktree: null, prepared_commit: null,
     target_commit: null, mr_attempts: 0, state: 'pushed', iteration: 0, session_id: null, created_at: now, updated_at: now,
   };
   const results = await sendNotification(jobNotification(job, ['A test notification from sf notify-test']), notifyConfig());
@@ -573,7 +583,7 @@ async function info(args: string[]): Promise<void> {
   row('workspaces', names.length === 0 ? 'none (sf workspace add <name> --read <path>)' : '');
   for (const name of names) {
     const entry = registry.workspaces[name]!;
-    lines.push(`  ${name}: read ${entry.read_checkout}${entry.work_checkout === entry.read_checkout ? '' : `, work ${entry.work_checkout}`}`);
+    lines.push(`  ${name}: ${entry.read_checkout}`);
   }
   console.log(lines.join('\n'));
 
@@ -585,7 +595,7 @@ async function info(args: string[]): Promise<void> {
   }
   console.log(`\nsubscriptions${subscriptions === undefined ? ': needs sf serve' : subscriptions.length === 0 ? ': none (sf ticket <workspace> <ticket>)' : ''}`);
   if (subscriptions !== undefined && subscriptions.length > 0) {
-    console.log(subscriptionTable(subscriptions));
+    console.log(subscriptionTable(subscriptions, all));
   }
 }
 
@@ -644,6 +654,22 @@ async function status(args: string[]): Promise<void> {
   console.log(table(await statusRows(jobs, [job], now)));
   if (job.error !== undefined) {
     console.log(`\n${job.error.code}: ${job.error.message}`);
+  }
+  if (job.worktree !== null) {
+    console.log(`\nworktree: ${job.worktree}`);
+  }
+  // The sensitive and the deleted paths of the last published iteration (SF-024).
+  if (job.iteration > 0) {
+    try {
+      const files = (await jobs.readMeta(workspace, ticket, job.iteration)).files ?? [];
+      for (const line of fileSummaryLines(files)) {
+        console.log(line);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+    }
   }
 }
 

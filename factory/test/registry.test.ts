@@ -46,7 +46,8 @@ test('parseRegistry refuses invalid files instead of ignoring them', () => {
   invalid('{"workspaces":[]}');
   invalid(JSON.stringify({ workspaces: {}, extra: true }));
   invalid(JSON.stringify({ workspaces: { app: { ...entry, extra: 1 } } }));
-  invalid(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app' } } }));
+  // work_checkout is optional since SF-019 (read and ignored).
+  assert.deepEqual(parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app' } } })).workspaces.app, { read_checkout: '/srv/app' });
   invalid(JSON.stringify({ workspaces: { app: { ...entry, read_checkout: 'relative/path' } } }));
   invalid(JSON.stringify({ workspaces: { app: { ...entry, work_checkout: '' } } }));
   invalid(JSON.stringify({ workspaces: { app: { ...entry, work_checkout: 42 } } }));
@@ -69,7 +70,7 @@ test('loadRegistry treats a missing file as empty and round-trips saved registri
   await assert.rejects(loadRegistry(dir), { code: 'registry_invalid' });
 });
 
-test('resolveWorkspace verifies that both checkouts are Git work tree roots', async () => {
+test('resolveWorkspace verifies that the checkout is a Git work tree root; work_checkout is ignored', async () => {
   const dir = join(temp, 'resolve');
   const outside = join(temp, 'plain');
   await mkdir(outside);
@@ -86,7 +87,9 @@ test('resolveWorkspace verifies that both checkouts are Git work tree roots', as
     dir,
   );
   assert.deepEqual(await resolveWorkspace('good', dir), { name: 'good', readCheckout: repo, workCheckout: repo });
-  for (const name of ['sub', 'plain', 'bare', 'gone']) {
+  // The ignored work_checkout may point anywhere: the checkout is what counts.
+  assert.deepEqual(await resolveWorkspace('plain', dir), { name: 'plain', readCheckout: repo, workCheckout: repo });
+  for (const name of ['sub', 'bare', 'gone']) {
     await assert.rejects(resolveWorkspace(name, dir), (error: unknown) => {
       assert.ok(error instanceof FactoryError);
       assert.equal(error.code, 'workspace_invalid');

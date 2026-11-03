@@ -47,12 +47,13 @@ export function notifiedStates(config: NotifyConfig): readonly JobState[] {
   return config.iterations ? [...NOTIFIED_STATES, 'awaiting_review'] : NOTIFIED_STATES;
 }
 
-// The notification for a job that reached state; lines: the MR title and link when pushed.
+// The notification for a job that reached state; lines: the MR title and link when pushed, the
+// sensitive and deleted paths of the iteration (SF-024).
 export function jobNotification(job: Job, lines: string[] = []): Notification {
   if (job.state === 'awaiting_review') {
     return {
       title: `${job.ticket}: ${job.state}`,
-      body: `Report and Patch of iteration ${job.iteration} are ready for the Context owner`,
+      body: [`Report and Patch of iteration ${job.iteration} are ready for the Context owner`, ...lines].slice(0, 3).join('\n'),
       priority: 'default',
       tags: 'eyes',
     };

@@ -22,7 +22,7 @@ export async function fixture(name: string): Promise<Fixture> {
   const jobs = new JobStore(state);
   const job: Job = {
     workspace: 'app', ticket: 'T-1', branch: 'T-1-demo', base: 'main', base_commit: null, target_commit: null,
-    mr_attempts: 0, state: 'awaiting_review', iteration: 1, session_id: 's1',
+    worktree: null, prepared_commit: null, mr_attempts: 0, state: 'awaiting_review', iteration: 1, session_id: 's1',
     created_at: '2026-11-01T10:00:00.000Z', updated_at: '2026-11-01T10:05:00.000Z',
   };
   await jobs.write(job);

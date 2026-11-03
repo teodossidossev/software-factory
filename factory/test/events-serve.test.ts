@@ -153,6 +153,7 @@ test('events: capability, list, subscribe checks, the fake cycle delivered and s
     await call(authed, 'start', { workspace: 'app', ticket: 'EV-1' });
     await waitFor(authed, 'EV-1', 'awaiting_review', 1);
     await call(authed, 'mark_clean', { workspace: 'app', ticket: 'EV-1' });
+    await waitFor(authed, 'EV-1', 'ready_for_human_review', 1);
     const approved = await runCli(env, ['approve', 'app', 'EV-1']);
     assert.equal(approved.code, 0, approved.stdout + approved.stderr);
     const deliveries = (await sink.waitFor('/a', 5)).slice(2);
@@ -188,7 +189,7 @@ test('events: capability, list, subscribe checks, the fake cycle delivered and s
     // sf events list, test and remove.
     const list = await runCli(env, ['events', 'list']);
     assert.equal(list.code, 0, list.stderr);
-    assert.match(list.stdout, /^ID\s+PRINCIPAL\s+EVENT\s+INPUT\s+HOST\s+CREATED\s+REFRESH_BEFORE$/m);
+    assert.match(list.stdout, /^ID\s+PRINCIPAL\s+EVENT\s+INPUT\s+HOST\s+CREATED\s+REFRESH_BEFORE\s+LIVE_JOB$/m);
     assert.match(list.stdout, new RegExp(`^${subA}\\s+auth0\\|user-1\\s+software_factory\\.job\\s+\\{"workspace":"app"\\}\\s+127\\.0\\.0\\.1:\\d+\\s`, 'm'));
     assert.doesNotMatch(list.stdout, new RegExp(subB));
     assert.ok(!list.stdout.includes(sink.secret.slice(6)));
@@ -294,6 +295,55 @@ test('events: a delivery pending at a restart of sf serve is resumed with the sa
     const outcomes = (await jobEvents(env, 'RS-1')).filter((record) => typeof record.type === 'string' && String(record.type).startsWith('event_'));
     assert.deepEqual(outcomes.map(({ type, attempt, status }) => [type, attempt, status]), [['event_failed', 1, 500], ['event_delivered', 2, 200]]);
     assert.deepEqual(JSON.parse(await readFile(join(env.state, 'events-queue.json'), 'utf8')), { deliveries: [] });
+  } finally {
+    await stop(served);
+  }
+});
+
+test('one conversation per ticket: the ticket\'s subscription receives the last event of its job and is then removed; a broad one stays; sf events list names the live job', async () => {
+  const env = await eventsEnv('events-retire');
+  const repo = await newRepo(env, 'events-retire-repo', true);
+  await putTask(env, repo, 'RM-1', 'Retire demo');
+  await putTask(env, repo, 'RM-2', 'Other demo');
+  await script(env, [{ write: { 'README.md': 'one\n' }, text: 'one' }, { write: { 'README.md': 'two\n' }, text: 'two' }]);
+  const served = await serve(env);
+  const token = as.sign(as.claims());
+  try {
+    await rpc(served.url, 'initialize', initialize);
+    const subscribe = (path: string, args: Record<string, unknown>) =>
+      rpc(served.url, 'events/subscribe', { name: 'software_factory.job', arguments: args, delivery: { mode: 'webhook', url: sink.url(path), secret: sink.secret }, cursor: null }, token);
+    const own = (await subscribe('/rm1', { workspace: 'app', ticket: 'RM-1' })).result.id as string;
+    const other = (await subscribe('/rm2', { ticket: 'RM-2' })).result.id as string;
+    const broad = (await subscribe('/rmall', { workspace: 'app' })).result.id as string;
+    const authed = await authedClient(served, token);
+    await call(authed, 'start', { workspace: 'app', ticket: 'RM-1' });
+    await call(authed, 'start', { workspace: 'app', ticket: 'RM-2' });
+    await waitFor(authed, 'RM-1', 'awaiting_review', 1);
+    await waitFor(authed, 'RM-2', 'awaiting_review', 1);
+    // Each ticket's subscription got its own event only; the list names the live jobs.
+    assert.equal((await sink.waitFor('/rm1', 2))[1]!.json.data.ticket, 'RM-1');
+    assert.equal((await sink.waitFor('/rm2', 2))[1]!.json.data.ticket, 'RM-2');
+    const list = await runCli(env, ['events', 'list']);
+    assert.match(list.stdout, new RegExp(`^${own}\\s.*\\sapp/RM-1 awaiting_review$`, 'm'));
+    assert.match(list.stdout, new RegExp(`^${other}\\s.*\\sapp/RM-2 awaiting_review$`, 'm'));
+    assert.match(list.stdout, new RegExp(`^${broad}\\s.*\\s-$`, 'm'));
+
+    // RM-1 ends: its subscription receives aborted, then goes; the broad one and RM-2's stay.
+    assert.equal((await runCli(env, ['abort', 'app', 'RM-1'])).code, 0);
+    const last = (await sink.waitFor('/rm1', 3))[2]!;
+    assert.deepEqual([last.json.data.ticket, last.json.data.state], ['RM-1', 'aborted']);
+    await until(async () => (await jobEvents(env, 'RM-1')).some((record) => record.type === 'subscription_removed'));
+    const removed = (await jobEvents(env, 'RM-1')).find((record) => record.type === 'subscription_removed')!;
+    assert.equal(removed.subscription, own);
+    const delivered = (await jobEvents(env, 'RM-1')).filter((record) => record.type === 'event_delivered' && record.subscription === own);
+    assert.equal(delivered.length, 2);
+    const after = await runCli(env, ['events', 'list']);
+    assert.doesNotMatch(after.stdout, new RegExp(own));
+    assert.match(after.stdout, new RegExp(`^${other}\\s`, 'm'));
+    assert.match(after.stdout, new RegExp(`^${broad}\\s`, 'm'));
+    assert.match((await runCli(env, ['watch', 'app', 'RM-1', '--once'])).stdout, new RegExp(`subscription ${own} removed: the job ended$`, 'm'));
+    assert.equal((await sink.waitFor('/rmall', 4)).length, 4);
+    await authed.client.close();
   } finally {
     await stop(served);
   }

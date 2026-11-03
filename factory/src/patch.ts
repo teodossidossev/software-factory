@@ -2,9 +2,10 @@
 // untracked files, without touching the index. .software-factory/, ignored and credential-like
 // paths and sandbox placeholders (src/placeholders.ts) are left out; the result is valid UTF-8 and at most MAX_PATCH_BYTES.
 import { runGit } from './git.js';
-import type { ChangedFile } from './jobs.js';
+import type { ChangedFile, FileChange } from './jobs.js';
 import { isPlaceholder } from './placeholders.js';
 import { isForbidden } from './repo-files.js';
+import { type Sensitivity, sensitivityOf } from './rules.js';
 import { TASK_DIR } from './task-file.js';
 
 export const MAX_PATCH_BYTES = 2 * 1024 * 1024;
@@ -114,9 +115,19 @@ export function changedFiles(patch: string): { files: ChangedFile[]; submodules:
   return { files, submodules };
 }
 
-// Appended to the Implementer's report by the factory.
-export function changedFilesSection(files: ChangedFile[], truncated: boolean): string {
+// Appended to the Implementer's report by the factory. With the structured file list the
+// sensitive paths (declared or undeclared by may_touch) and the deleted paths come first, each
+// under its own heading, so a reviewer never folds them into the rest.
+export function changedFilesSection(files: ChangedFile[], truncated: boolean, changes: FileChange[] = []): string {
   const lines = ['## Changed files', ''];
+  const sensitive = changes.filter((change) => change.sensitive !== 'no');
+  const deleted = changes.filter((change) => change.status === 'deleted');
+  if (sensitive.length > 0) {
+    lines.push('### Sensitive', '', ...sensitive.map((change) => `- ${change.path} (${change.sensitive}${change.status === 'deleted' ? ', deleted' : ''})`), '');
+  }
+  if (deleted.length > 0) {
+    lines.push('### Deleted', '', ...deleted.map((change) => `- ${change.path}`), '');
+  }
   if (files.length === 0) {
     lines.push('No changes.');
   } else {
@@ -133,6 +144,43 @@ export function changedFilesSection(files: ChangedFile[], truncated: boolean): s
   }
   return lines.join('\n');
 }
+
+// The sensitive and the deleted paths of an iteration as the notification lines carry them.
+export function fileSummaryLines(changes: FileChange[]): string[] {
+  const sensitive = changes.filter((change) => change.sensitive !== 'no').map((change) => `${change.path}${change.sensitive === 'undeclared' ? ' (undeclared)' : ''}`);
+  const deleted = changes.filter((change) => change.status === 'deleted').map((change) => change.path);
+  return [`sensitive: ${sensitive.length === 0 ? 'none' : sensitive.join(', ')}`, `deleted: ${deleted.length === 0 ? 'none' : deleted.join(', ')}`];
+}
+
+const STATUS_LETTERS: Record<string, FileChange['status']> = { A: 'added', M: 'modified', D: 'deleted', T: 'modified' };
+
+// The structured file list of an iteration (SF-024): the status of every changed tracked file
+// (`git diff --name-status`) and every untracked file as added, the line counts from the Patch
+// table (0 for a file the Patch omits), and the sensitivity from the rules and may_touch.
+export async function fileChanges(
+  cwd: string, baseCommit: string, counted: ChangedFile[], sensitivity: (path: string) => Sensitivity,
+): Promise<FileChange[]> {
+  const { tracked, untracked } = await changedPaths(cwd, baseCommit);
+  const statuses = new Map<string, FileChange['status']>();
+  if (tracked.length > 0) {
+    const entries = nulList(await git(cwd, ['diff', '--name-status', '-z', '--no-renames', baseCommit, '--', ...tracked.map((path) => `:(literal)${path}`)]));
+    for (let index = 0; index + 1 < entries.length; index += 2) {
+      statuses.set(entries[index + 1]!, STATUS_LETTERS[entries[index]!.charAt(0)] ?? 'modified');
+    }
+  }
+  const counts = new Map(counted.map((file) => [file.path, file]));
+  const changes: FileChange[] = [];
+  for (const path of [...tracked, ...untracked]) {
+    const file = counts.get(path);
+    changes.push({
+      path, status: statuses.get(path) ?? 'added', sensitive: sensitivity(path),
+      additions: file?.added ?? 0, deletions: file?.removed ?? 0,
+    });
+  }
+  return changes;
+}
+
+export { sensitivityOf };
 
 // The paths a Patch against baseCommit covers: changed tracked files and untracked files,
 // filtered as the Patch is, never cut by its size limit. An untracked sandbox placeholder is

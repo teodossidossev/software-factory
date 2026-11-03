@@ -20,7 +20,7 @@ export const DRAFT_NOTE = 'Written from the dashboard; the Context owner turns t
 
 export interface WorkspaceRow {
   name: string;
-  // The registered work checkout, as registered (the page shows what the User typed).
+  // The registered checkout, as registered (the page shows what the User typed).
   path: string;
   // The jobs of the workspace that are not pushed, aborted or failed.
   liveJobs: number;
@@ -100,11 +100,11 @@ export class Setup {
       const entry = workspaces[name]!;
       let problem: string | null = null;
       try {
-        await verifyCheckout(entry.work_checkout, 'work checkout');
+        await verifyCheckout(entry.read_checkout, 'checkout');
       } catch (error) {
-        problem = error instanceof FactoryError ? error.message : 'The work checkout could not be verified.';
+        problem = error instanceof FactoryError ? error.message : 'The checkout could not be verified.';
       }
-      rows.push({ name, path: entry.work_checkout, liveJobs: live.get(name) ?? 0, problem });
+      rows.push({ name, path: entry.read_checkout, liveJobs: live.get(name) ?? 0, problem });
     }
     return rows;
   }
@@ -125,7 +125,7 @@ export class Setup {
         throw new FactoryError('workspace_exists', `workspace "${name}" is already registered; remove it first.`);
       }
       const real = await verifyCheckout(path, 'path');
-      registry.workspaces[name] = { read_checkout: real, work_checkout: real };
+      registry.workspaces[name] = { read_checkout: real };
       await saveRegistry(registry, this.#configDir);
       return { name, path: real, liveJobs: 0, problem: null };
     });

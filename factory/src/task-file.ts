@@ -46,6 +46,13 @@ export function parseFrontMatter(content: string): Map<string, string> | undefin
   return fields;
 }
 
+// The paths or globs the Task file declares it is expected to change: `may_touch:` in the front
+// matter, as "[a, b]" or "a, b" (comma or whitespace separated).
+export function mayTouch(fields: Map<string, string>): string[] {
+  const raw = (fields.get('may_touch') ?? '').trim().replace(/^\[|\]$/g, '');
+  return raw.split(/[,\s]+/).map((entry) => entry.trim().replace(/^(["'])(.*)\1$/, '$2')).filter((entry) => entry !== '');
+}
+
 // Validates the content of a Task file for ticket and returns its UTF-8 bytes.
 export function checkTaskContent(ticket: string, content: string): Buffer {
   if (content.includes('\0') || /\p{Surrogate}/u.test(content)) {

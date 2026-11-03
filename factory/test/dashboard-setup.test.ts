@@ -214,9 +214,9 @@ test('dashboard setup end to end: a workspace from the page, a ticket draft, the
     assert.deepEqual(JSON.parse(missing.body), { ok: false, error: { code: 'workspace_invalid', message: 'The path does not exist.' } });
     assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'app', path: repo })), { name: 'app', path: repo, liveJobs: 0, problem: null });
     assert.deepEqual((await stream.next('workspaces')).workspaces, [{ name: 'app', path: repo, liveJobs: 0, problem: null }]);
-    assert.deepEqual((await loadRegistry(env.config)).workspaces, { app: { read_checkout: repo, work_checkout: repo } });
+    assert.deepEqual((await loadRegistry(env.config)).workspaces, { app: { read_checkout: repo } });
     const listed = await runCli(env, ['workspace', 'list']);
-    assert.match(listed.stdout, new RegExp(`^app\\n  read: ${repo}\\n  work: ${repo}$`, 'm'));
+    assert.match(listed.stdout, new RegExp(`^app\\n  checkout: ${repo}$`, 'm'));
     assert.deepEqual(error(await act(base, 'api/workspaces', { name: 'app', path: repo })), { status: 409, code: 'workspace_exists' });
 
     // A ticket draft: the exact file, listed with Reviewer none; a second one is refused.

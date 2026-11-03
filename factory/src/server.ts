@@ -322,12 +322,13 @@ function createMcpServer(handbook: Handbook, version: string, execution: Executi
     {
       title: 'Start the job',
       description:
-        'Starts the job for a Task file written with write_task: verifies the work checkout is clean, fetches the base ' +
-        'branch from origin, creates the branch <ticket>-<slug of the title> and runs the first iteration ' +
-        '(/implement .software-factory/<ticket>.md) in a new Implementer session. One active job per machine. Returns ' +
-        'the branch, the state and after how many minutes to call check.',
+        'Starts the job for a Task file written with write_task: fetches the base branch from origin, creates the ' +
+        'branch <ticket>-<slug of the title> in a worktree of its own and runs the first iteration ' +
+        '(/implement .software-factory/<ticket>.md) in a new Implementer session. Several jobs of a workspace run at ' +
+        'the same time (job_limit above SF_MAX_JOBS). Returns the branch, the state, the worktree and after how many ' +
+        'minutes to call check.',
       inputSchema: z.strictObject({ workspace: workspaceName, ticket: ticketKey }),
-      outputSchema: z.object({ branch: z.string(), state: jobState, check_after_minutes: z.number().int() }),
+      outputSchema: z.object({ branch: z.string(), state: jobState, check_after_minutes: z.number().int(), worktree: z.string() }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     async ({ workspace, ticket }, ctx) => run(() => execution.start(workspace, ticket), { tool: 'start', workspace, ticket, sub: principalOf(ctx) }),
@@ -343,8 +344,9 @@ function createMcpServer(handbook: Handbook, version: string, execution: Executi
         'starting (awaiting_review, needs_human, ready_for_human_review, ...) also returns the last Report (full text) and ' +
         `one page of the Patch, paged like read_file: offset and max_bytes (default ${DEFAULT_PAGE_BYTES}, ` +
         `${MIN_PAGE_BYTES}-${MAX_PAGE_BYTES}); call again with offset=patch.next_offset until it is null. Once MR ` +
-        'preparation wrote one, mr holds the merge request text. pushed, aborted and failed end the ticket for you; ' +
-        'preparing_mr means wait.',
+        'preparation wrote one, mr holds the merge request text. files lists the sensitive paths (declared by the Task ' +
+        "file's may_touch or not) and the deleted paths of the last iteration. pushed, aborted and failed end the " +
+        'ticket for you; preparing_mr means wait.',
       inputSchema: z.strictObject({
         workspace: workspaceName,
         ticket: ticketKey,
@@ -370,6 +372,7 @@ function createMcpServer(handbook: Handbook, version: string, execution: Executi
           })
           .optional(),
         mr: z.string().optional(),
+        files: z.object({ sensitive: z.array(z.object({ path: z.string(), declared: z.boolean() })), deleted: z.array(z.string()) }).optional(),
       }),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
@@ -381,7 +384,8 @@ function createMcpServer(handbook: Handbook, version: string, execution: Executi
     {
       title: 'Request a fix',
       description:
-        'Only in awaiting_review. Appends "## Fix N" with content to the Task file (N = the number of the iteration just ' +
+        'In awaiting_review, or in ready_for_human_review (the branch is reopened in a worktree and the next Clean amends ' +
+        'the prepared commit). Appends "## Fix N" with content to the Task file (N = the number of the iteration just ' +
         'reviewed) and starts the next iteration in the same session (/implement .software-factory/<ticket>.md Fix N). ' +
         `content: 1 to ${MAX_FIX_BYTES} bytes of Markdown, concrete items (path, what is wrong, what is expected). ` +
         'Refused with iteration_limit after the configured number of iterations without Clean. Returns the iteration now ' +
@@ -403,13 +407,21 @@ function createMcpServer(handbook: Handbook, version: string, execution: Executi
     {
       title: 'Mark the job Clean',
       description:
-        'Only in awaiting_review. Your verdict that the Patch needs no further Fix section: the job moves to ' +
-        'ready_for_human_review and the user takes over. Accepts nothing and pushes nothing.',
-      inputSchema: z.strictObject({ workspace: workspaceName, ticket: ticketKey }),
+        'Only in awaiting_review (or needs_human after a failed MR preparation, as the retry). Your verdict that the ' +
+        'Patch needs no further Fix section: the factory commits by the Git rules, rebases onto the base, verifies and ' +
+        'puts the branch in the user\'s checkout (state preparing_mr, then ready_for_human_review, or needs_human with the ' +
+        'reason; a prepared commit that differs from the reviewed change goes back to awaiting_review). Every ' +
+        'undeclared sensitive path of the reviewed iteration (check.files.sensitive with declared false) must be named ' +
+        'in sensitive, else sensitive_unacknowledged. Pushes nothing: the user approves.',
+      inputSchema: z.strictObject({
+        workspace: workspaceName,
+        ticket: ticketKey,
+        sensitive: z.array(z.string()).optional().describe('The undeclared sensitive paths you reviewed and accept, exactly as check.files lists them.'),
+      }),
       outputSchema: z.object({ state: jobState, iteration: z.number().int(), branch: z.string() }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ workspace, ticket }, ctx) => run(() => execution.markClean(workspace, ticket), { tool: 'mark_clean', workspace, ticket, sub: principalOf(ctx) }),
+    async ({ workspace, ticket, sensitive }, ctx) => run(() => execution.markClean(workspace, ticket, sensitive ?? []), { tool: 'mark_clean', workspace, ticket, sub: principalOf(ctx) }),
   );
 
   return server;

@@ -1,5 +1,6 @@
-// The verifiable part of the Git rules and the tool deny lists the factory hands to the
-// Implementer session per turn. The Handbook (## Git rules, ## MR template) is the prose source.
+// The verifiable part of the Git rules, the tool deny lists the factory hands to the Implementer
+// session per turn, and the sensitive paths (SF-024). The Handbook (## Git rules, ## MR template)
+// is the prose source.
 
 // Conventional Commits types allowed in the commit header.
 export const COMMIT_TYPES = ['feat', 'fix', 'chore', 'refactor', 'docs', 'test', 'perf', 'build', 'ci', 'style', 'revert'];
@@ -63,3 +64,83 @@ function deniedTools(gitCommands: string[]): string[] {
 export const DENIED_TOOLS = deniedTools(ALL_GIT_COMMANDS);
 // MR preparation: add, commit, rebase and conflict resolution allowed; push and the rest denied.
 export const MR_DENIED_TOOLS = deniedTools(ALL_GIT_COMMANDS.filter((command) => !MR_ALLOWED_GIT_COMMANDS.has(command)));
+
+// Paths that are unusual for a ticket to touch: dependency manifests and lockfiles, environment
+// and tool configuration, CI and containers, IDE and agent files, and every dotfile in the root.
+// Globs from the repository root: `*` and `?` never cross "/", `**` does, `{a,b}` alternates.
+export const SENSITIVE_PATHS: readonly string[] = [
+  'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb',
+  'pom.xml', 'build.gradle', 'build.gradle.kts', 'settings.gradle*', 'gradle.properties',
+  'requirements*.txt', 'pyproject.toml', 'Pipfile*', 'poetry.lock', 'go.mod', 'go.sum', 'Cargo.toml', 'Cargo.lock',
+  'Gemfile*', 'composer.json', 'composer.lock',
+  '**/.env*', '**/*.env', '.npmrc', '.nvmrc', '.tool-versions', 'tsconfig*.json', '*.config.{js,ts,mjs,cjs}',
+  '.eslintrc*', '.prettierrc*', '.editorconfig', '.gitignore', '.gitattributes', '.gitmodules',
+  '.github/**', '.gitlab-ci.yml', 'Jenkinsfile', 'Dockerfile*', 'docker-compose*.yml', 'compose*.yml', '.dockerignore', 'Makefile',
+  '.idea/**', '.vscode/**', '.claude/**', 'CLAUDE.md', 'AGENTS.md',
+  '.*',
+];
+
+function escapeGlobChar(char: string): string {
+  return /[.*+?^${}()|[\]\\]/.test(char) ? `\\${char}` : char;
+}
+
+// A glob as a regular expression over "/"-separated paths from the repository root.
+export function globToRegExp(glob: string): RegExp {
+  let source = '';
+  let index = 0;
+  while (index < glob.length) {
+    const char = glob[index]!;
+    if (char === '*' && glob[index + 1] === '*') {
+      // "**/" matches zero or more directories; a trailing "**" matches the rest.
+      if (glob[index + 2] === '/') {
+        source += '(?:.*/)?';
+        index += 3;
+      } else {
+        source += '.*';
+        index += 2;
+      }
+    } else if (char === '*') {
+      source += '[^/]*';
+      index += 1;
+    } else if (char === '?') {
+      source += '[^/]';
+      index += 1;
+    } else if (char === '{') {
+      const end = glob.indexOf('}', index);
+      if (end < 0) {
+        source += '\\{';
+        index += 1;
+      } else {
+        const options = glob.slice(index + 1, end).split(',').map((option) => [...option].map(escapeGlobChar).join(''));
+        source += `(?:${options.join('|')})`;
+        index = end + 1;
+      }
+    } else {
+      source += escapeGlobChar(char);
+      index += 1;
+    }
+  }
+  return new RegExp(`^${source}$`);
+}
+
+const compiled = new Map<string, RegExp>();
+
+export function matchesGlob(path: string, glob: string): boolean {
+  let regexp = compiled.get(glob);
+  if (regexp === undefined) {
+    regexp = globToRegExp(glob);
+    compiled.set(glob, regexp);
+  }
+  return regexp.test(path);
+}
+
+export type Sensitivity = 'declared' | 'undeclared' | 'no';
+
+// Whether a path is sensitive (SENSITIVE_PATHS plus extra globs) and, when it is, whether the
+// Task file declared it with may_touch (paths or globs).
+export function sensitivityOf(path: string, mayTouch: readonly string[], extra: readonly string[] = []): Sensitivity {
+  if (![...SENSITIVE_PATHS, ...extra].some((glob) => matchesGlob(path, glob))) {
+    return 'no';
+  }
+  return mayTouch.some((glob) => glob === path || matchesGlob(path, glob)) ? 'declared' : 'undeclared';
+}

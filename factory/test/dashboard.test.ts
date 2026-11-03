@@ -92,7 +92,7 @@ test('dashboard: jobs, job detail, report, patch and mr endpoints; bad names are
     assert.equal(list.headers['content-type'], 'application/json; charset=utf-8');
     const { jobs: all } = JSON.parse(list.body);
     assert.deepEqual(all.map((job: Job) => [job.ticket, job.state]), [['T-0', 'failed'], ['T-1', 'awaiting_review']]);
-    assert.deepEqual(Object.keys(all[1]).sort(), ['base', 'branch', 'created_at', 'error', 'iteration', 'mr_attempts', 'reviewer', 'state', 'ticket', 'updated_at', 'workspace']);
+    assert.deepEqual(Object.keys(all[1]).sort(), ['base', 'branch', 'created_at', 'deleted', 'error', 'files', 'iteration', 'mr_attempts', 'prepared_commit', 'reviewer', 'state', 'ticket', 'undeclared', 'updated_at', 'workspace', 'worktree']);
     assert.deepEqual(all[0].error, { code: 'start_failed', message: 'Git failed.' });
 
     const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body);
@@ -100,7 +100,7 @@ test('dashboard: jobs, job detail, report, patch and mr endpoints; bad names are
     assert.equal(detail.mr, false);
     assert.deepEqual(detail.iterations, [{
       number: 1, started_at: '2026-11-01T10:00:01.000Z', ended_at: '2026-11-01T10:05:00.000Z', cost_usd: 0.5,
-      changed_files: 1, patch_truncated: false, denials: 1,
+      changed_files: 1, patch_truncated: false, denials: 1, files: null,
     }]);
     assert.deepEqual(detail.history.map((entry: { from: string | null; to: string }) => [entry.from, entry.to]), [[null, 'starting'], ['starting', 'working'], ['working', 'awaiting_review']]);
     assert.equal(detail.history[2].ts, '2026-11-01T10:05:00.000Z');
@@ -207,7 +207,7 @@ function mrText(header: string): string {
   ].join('\n');
 }
 
-test('dashboard end to end: a fake cycle, the stream across mark_clean, mr after approve, sf dashboard', async () => {
+test('dashboard end to end: a fake cycle, the stream across mark_clean (the branch prepared), mr at ready, approve pushes, sf dashboard', async () => {
   const env = await newEnv('dash-e2e');
   const repo = await newRepo(env, 'dash-repo', true);
   await putTask(env, repo, 'T-1', 'Change README');
@@ -256,15 +256,20 @@ test('dashboard end to end: a fake cycle, the stream across mark_clean, mr after
     assert.equal((await stream.next('jobs')).jobs[0].state, 'awaiting_review');
     await stream.next('event', (event) => event.text.includes('tool_result: ok 1 tests passed'));
     await call(served, 'mark_clean', { workspace: 'app', ticket: 'T-1' });
+    assert.equal((await stream.next('jobs', (data) => data.jobs[0].state === 'preparing_mr')).jobs.length, 1);
     assert.equal((await stream.next('jobs', (data) => data.jobs[0].state === 'ready_for_human_review')).jobs.length, 1);
-    assert.equal((await stream.next('job')).job.state, 'ready_for_human_review');
-    await stream.next('event', (event) => event.type === 'state' && event.text.endsWith('awaiting_review -> ready_for_human_review'));
+    const readyDetail = await stream.next('job', (data) => data.job.state === 'ready_for_human_review');
+    assert.deepEqual([readyDetail.job.worktree, readyDetail.mr, readyDetail.job.files], [null, true, 1]);
+    await stream.next('event', (event) => event.type === 'state' && event.text.endsWith('preparing_mr -> ready_for_human_review'));
     stream.close();
+    const mr = await fetchRaw(new URL('api/jobs/app/T-1/mr', base));
+    assert.deepEqual([mr.status, mr.body], [200, mrText('feat(T-1): Change the README')]);
+    // The file list of the iteration comes with the detail.
+    const withFiles = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body);
+    assert.deepEqual(withFiles.iterations[0].files, [{ path: 'README.md', status: 'modified', sensitive: 'no', additions: 1, deletions: 1 }]);
 
     const approved = await runCli(env, ['approve', 'app', 'T-1']);
     assert.equal(approved.code, 0, approved.stdout + approved.stderr);
-    const mr = await fetchRaw(new URL('api/jobs/app/T-1/mr', base));
-    assert.deepEqual([mr.status, mr.body], [200, mrText('feat(T-1): Change the README')]);
     assert.equal(JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body).job.state, 'pushed');
   } finally {
     await stop(served);

@@ -124,6 +124,16 @@ test('events: capability, list, subscribe checks, the fake cycle delivered and s
     assert.deepEqual([badUrl.error?.code, badUrl.error?.data], [-32015, { reason: 'invalid_url' }]);
     const badSecret = await subscribe('/a', {}, 'whsec_c2hvcnQ=');
     assert.deepEqual([badSecret.error?.code, badSecret.error?.data], [-32602, { reason: 'invalid_secret' }]);
+    // A params shape the factory does not accept is refused with its reason, and every call leaves
+    // one line in the serve log (filter and callback host, never the secret).
+    let log = '';
+    served.child.stderr?.on('data', (chunk: Buffer) => (log += chunk.toString('utf8')));
+    const noSecret = await rpc(served.url, 'events/subscribe', { name: 'software_factory.job', arguments: { workspace: 'app' }, delivery: { mode: 'webhook', url: sink.url('/a') } }, token);
+    assert.deepEqual([noSecret.error?.code, noSecret.error?.data], [-32602, { reason: 'invalid_params' }]);
+    assert.match(noSecret.error?.message ?? '', /delivery\.secret/);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.match(log, /^events\/subscribe \{"workspace":"app"\} to [^ ]+: refused invalid_params /m);
+    assert.doesNotMatch(log, /whsec_/);
     sink.plan.push('wrong_challenge');
     const failed = await subscribe('/a', { workspace: 'app' });
     assert.deepEqual([failed.error?.code, failed.error?.data], [-32015, { reason: 'challenge_failed' }]);

@@ -348,11 +348,12 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 .job-list .job-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; font-size: 12px; color: var(--muted); }
 .job-list .job-line .iter { margin-left: auto; }
 
-.subscriptions .table-scroll { overflow-x: auto; }
-.subscriptions table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-.subscriptions th, .subscriptions td { padding: 4px 6px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
-.subscriptions th { color: var(--muted); font-weight: 600; white-space: nowrap; }
-.subscriptions td { overflow-wrap: anywhere; }
+.sub-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.sub-list li { padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel); min-width: 0; }
+.sub-list .sub-scope { font-weight: 600; font-size: 13.5px; overflow-wrap: anywhere; }
+.sub-list .sub-scope .badge { margin-left: 6px; }
+.sub-list .sub-meta { font-size: 12px; color: var(--muted); margin-top: 2px; overflow-wrap: anywhere; }
+.sub-list .sub-id { font: 11.5px/1.4 var(--mono); color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* The job card: title and actions first, then the facts, then the reviewer and the message. */
 .job-card { display: flex; flex-direction: column; gap: 12px; }

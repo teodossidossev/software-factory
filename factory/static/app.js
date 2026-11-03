@@ -188,17 +188,39 @@ function renderJobs() {
 
 const filterText = (input) => JSON.stringify(input ?? {});
 
+// What a subscription's filter covers, in words: a ticket, every ticket of a workspace, or all.
+function subscriptionScope(input) {
+  const workspace = input?.workspace;
+  const ticket = input?.ticket;
+  if (workspace !== undefined && ticket !== undefined) {
+    return `${workspace} / ${ticket}`;
+  }
+  if (workspace !== undefined) {
+    return `${workspace}, every ticket`;
+  }
+  return ticket !== undefined ? `${ticket}, every workspace` : 'Every workspace and ticket';
+}
+
+// One compact entry per subscription: the scope first, then the live job, the refresh deadline
+// and the callback host; the id (for sf events test/remove) last, shortened, whole in the tooltip.
 function renderSubscriptions() {
   const rows = state.subscriptions;
   $('no-subscriptions').hidden = rows === null || rows.length > 0;
-  $('subscriptions-table').hidden = rows === null || rows.length === 0;
-  $('subscriptions-body').replaceChildren(...(rows ?? []).map((row) => {
-    const tr = el('tr');
-    tr.append(
-      el('td', 'mono', row.id), el('td', 'mono', filterText(row.input)), el('td', '', row.host),
-      el('td', 'mono', shortTime(row.refreshBefore)), el('td', 'mono', row.job ?? '–'),
-    );
-    return tr;
+  $('subscription-list').hidden = rows === null || rows.length === 0;
+  $('subscription-list').replaceChildren(...(rows ?? []).map((row) => {
+    const item = el('li');
+    const scope = el('div', 'sub-scope', subscriptionScope(row.input));
+    if (row.input?.ticket === undefined) {
+      scope.append(el('span', 'badge r-broad', 'broad'));
+    }
+    const live = row.job === null || row.job === undefined
+      ? 'no live job'
+      : (row.input?.ticket === undefined ? `live job ${row.job}` : 'live job');
+    const refresh = shortTime(row.refreshBefore).replace(/:\d\dZ$/, 'Z');
+    const id = el('div', 'sub-id', row.id);
+    id.setAttribute('title', row.id);
+    item.append(scope, el('div', 'sub-meta', `${live} · refresh by ${refresh} · ${row.host}`), id);
+    return item;
   }));
 }
 

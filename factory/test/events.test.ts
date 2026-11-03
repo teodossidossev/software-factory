@@ -19,6 +19,7 @@ import {
   signatureHeader,
   signPayload,
   subscriptionId,
+  ticketInstruction,
   validateCallbackUrl,
   verdictOf,
 } from '../src/events.js';
@@ -90,6 +91,14 @@ test('validateCallbackUrl: https, no userinfo, no non-public literals or localho
   assert.equal(validateCallbackUrl('http://localhost:9/hook', true).hostname, 'localhost');
   assert.throws(() => validateCallbackUrl('https://10.1.2.3/hook', true), EventsError);
   assert.throws(() => validateCallbackUrl('http://receiver.example.com/hook', true), EventsError);
+});
+
+test('ticketInstruction makes the event-triggered task review and act in the same run', () => {
+  const instruction = ticketInstruction('app', 'T-1');
+  assert.match(instruction, /arguments \{"workspace": "app", "ticket": "T-1"\}, nothing else/);
+  assert.match(instruction, /give the task this whole instruction word for word/);
+  assert.match(instruction, /on awaiting_review review the Report and the Patch in that same run and end it with request_fix or mark_clean, without waiting for me;/);
+  assert.match(instruction, /on needs_human, pushed, aborted or failed only summarise the state\.$/);
 });
 
 test('isPublicAddress', () => {

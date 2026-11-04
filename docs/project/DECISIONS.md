@@ -63,3 +63,18 @@ Replaces the Checkout entry of 2026-11-01 (ADR-0001, now superseded by ADR-0004)
   Report and in the dashboard's Files view; an undeclared one (not in the Task file's
   `may_touch`) must be acknowledged by the Context owner in `mark_clean`; deleted files are
   always listed separately.
+
+## 2026-11-04: API reviewers, ChatGPT plans only, the factory does Git (SF-036)
+
+Replaces the Roles and Transport entries of 2026-11-01 and the MCP Events transport of SF-016
+(ADR-0005, which supersedes ADR-0002).
+
+- **Roles.** ChatGPT plans and writes the Task file through a read-only connection, nothing
+  else. Claude implements and reviews every iteration in a fresh read-only session. An OpenAI
+  model through the API gives the deciding verdict before Clean (at most three rounds with
+  fixes, a token ceiling per ticket). The user starts, approves, aborts and reviews the branch.
+- **Git.** At Clean the factory commits and rebases outside the sandbox; the Implementer only
+  writes the merge request text.
+- **Removed.** MCP Events, OAuth and Auth0, the execution tools over MCP, the Reviewer block,
+  `sf ticket`, `sf events`, the nudge.
+- **Runtime.** Each job runs in its own process, so restarting `sf serve` does not stop it.

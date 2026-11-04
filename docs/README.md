@@ -3,8 +3,8 @@
 | Location | Contents |
 | --- | --- |
 | [project/DECISIONS.md](project/DECISIONS.md) | Approved project decisions |
-| `design/` | Designs: SF-007, SF-009, SF-010 reviewer (history), SF-011 (current) |
-| `adr/` | Architecture decision records of SF-011 |
+| `design/` | Designs: SF-007, SF-009, SF-010 reviewer (history), SF-011, SF-036 (current) |
+| `adr/` | Architecture decision records since SF-011 |
 | `runbooks/` | [chatgpt-connection](runbooks/chatgpt-connection.md): the tunnel and the ChatGPT connector |
 | `tasks/` | Task definitions of SF-001 to SF-010, one or more per SF number |
 | `reports/` | Dated implementation reports. Historical: they are not updated to match later work |
@@ -33,20 +33,19 @@ that no longer exists.
 | SF-010 | Review foundation | [task](tasks/SF-010-reviewer-foundation.md) | retired | None |
 | SF-010 | Events discovery | None | retired | [report](reports/SF-010-chatgpt-events-report.md) |
 | SF-010 | Repository cleanup | [task](tasks/SF-010-repository-cleanup.md) | None | [report](reports/SF-010-repository-cleanup-report.md) |
-| SF-011 | The factory | [design](design/SF-011-factory.md), ADRs [0001](adr/0001-work-checkout-no-worktree-no-iteration-commits.md), [0002](adr/0002-chatgpt-scheduled-task-instead-of-events.md), [0003](adr/0003-headless-session-with-live-view.md) | [connection](runbooks/chatgpt-connection.md) | Outside version control |
+| SF-011 | The factory | [design](design/SF-011-factory.md), ADRs [0001](adr/0001-work-checkout-no-worktree-no-iteration-commits.md) (superseded), [0002](adr/0002-chatgpt-scheduled-task-instead-of-events.md) (superseded), [0003](adr/0003-headless-session-with-live-view.md), [0004](adr/0004-worktree-per-job-branch-at-clean.md) | [connection](runbooks/chatgpt-connection.md) | Outside version control |
+| SF-036 | API reviewers, factory-owned Git | [design](design/SF-036-reviewers.md), ADR [0005](adr/0005-api-reviewers-and-factory-git.md) | [connection](runbooks/chatgpt-connection.md) | Outside version control |
 
 The Task files and Reports of SF-011 (subtasks `SF-011-a` to `SF-011-e`) live in the ignored
 `.software-factory/` directory, not in version control.
 
 Design documents: [SF-007](design/SF-007-local-operator.md), [SF-009](design/SF-009-autonomous-session-loop.md),
-[SF-010 reviewer](design/SF-010-reviewer-foundation.md) (history), [SF-011](design/SF-011-factory.md) (current).
+[SF-010 reviewer](design/SF-010-reviewer-foundation.md) (history), [SF-011](design/SF-011-factory.md), [SF-036](design/SF-036-reviewers.md) (current).
 
 ## Known gaps
 
-- **Dashboard v2:** approve, abort and say from the dashboard are not implemented. They stay in
-  the terminal.
 - **Integrations:** Jira and Git host integrations are not implemented. The job records the ticket
   key, workspace and branch for them.
-- **Concurrent jobs:** not implemented. One active job per machine.
-- **Scheduled task context:** whether the ChatGPT scheduled task sees the planning conversation's
-  context is verified in the pilot.
+- **SF-036 in progress:** the reviewers, factory-owned Git and the per-job process of
+  [SF-036](design/SF-036-reviewers.md) land ticket by ticket (SF-037 to SF-042); until SF-040 the
+  ChatGPT transport of SF-016 is still in the code.

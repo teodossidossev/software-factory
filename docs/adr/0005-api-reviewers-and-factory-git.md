@@ -15,6 +15,13 @@ independent verdict before Clean (the gate). At Clean the factory commits and re
 outside the sandbox; the Implementer only writes the merge request text. The user starts a job
 from the dashboard or the terminal. Each job runs in its own process.
 
+**Amended 2026-11-04 (SF-039):** the gate is the Codex CLI (`codex exec`) on the user's ChatGPT
+subscription, not the OpenAI Responses API: the user has a subscription, not API access. Codex
+reads the worktree itself in its read-only sandbox, so the factory implements no function tools,
+and no API key is needed; the gate is off when no Codex executable is found (or with
+`SF_GATE=off`). The token ceiling protects the subscription's limits rather than money. The
+Decision and Consequences below are read with this amendment.
+
 ## Context
 
 ADR-0002 made the planning ChatGPT conversation the reviewer and woke it with a scheduled task;

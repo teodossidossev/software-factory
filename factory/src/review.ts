@@ -75,7 +75,18 @@ function pathLines(files: FileChange[] | undefined): string[] {
 // The prompt of the review: what it is and how to answer, the Handbook's review rules, then the
 // material of the iteration.
 export function reviewPrompt(input: ReviewInput): string {
-  const { ticket, iteration } = input;
+  return [
+    `Code review of iteration ${input.iteration} of ticket ${input.ticket}. You review; you change nothing.`,
+    'The current directory is the job\'s worktree: it holds the change of this iteration, not committed. Your tools are Read, Grep and Glob; nothing else is available.',
+    ...reviewBody(input),
+  ].join('\n');
+}
+
+// The rules of every reviewer (the Claude review and the gate, src/gate.ts), the Handbook's review
+// rules and the material of the iteration: the Task file, the Report, the sensitive and deleted
+// paths and the Patch, inline up to MAX_REVIEW_PATCH_BYTES.
+export function reviewBody(input: ReviewInput): string[] {
+  const { ticket } = input;
   const cut = input.patch.length > MAX_REVIEW_PATCH_BYTES;
   const notes: string[] = [];
   if (cut) {
@@ -85,8 +96,6 @@ export function reviewPrompt(input: ReviewInput): string {
     notes.push('The published Patch was cut at its size limit. Read the changed files in the worktree for the rest.');
   }
   return [
-    `Code review of iteration ${iteration} of ticket ${ticket}. You review; you change nothing.`,
-    'The current directory is the job\'s worktree: it holds the change of this iteration, not committed. Your tools are Read, Grep and Glob; nothing else is available.',
     '',
     '- Verify the claims of the Report against the files. Do not trust them.',
     `- Review the change against the Task file (${TASK_DIR}/${ticket}.md, below), its \`## Review brief\` section when it has one, and the repository standards: AGENTS.md, CLAUDE.md and the docs you find.`,
@@ -112,7 +121,7 @@ export function reviewPrompt(input: ReviewInput): string {
     '<patch>',
     (cut ? cutBuffer(input.patch, MAX_REVIEW_PATCH_BYTES) : input.patch.toString('utf8')).trimEnd(),
     '</patch>',
-  ].join('\n');
+  ];
 }
 
 export interface ReviewOptions {
@@ -130,7 +139,7 @@ export type ReviewOutcome =
   | { ok: true; output: ReviewOutput; costUsd: number | null; startedAt: string; endedAt: string }
   | { ok: false; message: string; startedAt: string; endedAt: string };
 
-function issues(error: z.ZodError): string {
+export function issues(error: z.ZodError): string {
   return error.issues.map((issue) => `${issue.path.map(String).join('.') || '(root)'}: ${issue.message}`).join('; ');
 }
 
@@ -194,13 +203,14 @@ export async function runReview(prompt: string, options: ReviewOptions): Promise
   return { ok: true, output: parsed.data, costUsd: result.total_cost_usd ?? null, startedAt, endedAt: new Date().toISOString() };
 }
 
-const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
+// Text on one line: every run of whitespace a single space.
+export const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
 
-// The body of the Fix section the factory writes for a review: the summary as a lead line, then one
-// numbered item per entry.
-export function fixContent(summary: string, items: ReviewItem[]): string {
+// The body of the Fix section the factory writes for a review: the summary as a lead line (by: who
+// reviewed), then one numbered item per entry.
+export function fixContent(summary: string, items: ReviewItem[], by = 'Claude'): string {
   return [
-    `Review by Claude: ${oneLine(summary) || 'see the items.'}`,
+    `Review by ${by}: ${oneLine(summary) || 'see the items.'}`,
     '',
     ...items.map((item, index) => `${index + 1}. \`${oneLine(item.path)}\`: ${oneLine(item.problem)} Expected: ${oneLine(item.expected)}`),
   ].join('\n');

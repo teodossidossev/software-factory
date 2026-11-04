@@ -78,3 +78,6 @@ Replaces the Roles and Transport entries of 2026-11-01 and the MCP Events transp
 - **Removed.** MCP Events, OAuth and Auth0, the execution tools over MCP, the Reviewer block,
   `sf ticket`, `sf events`, the nudge.
 - **Runtime.** Each job runs in its own process, so restarting `sf serve` does not stop it.
+- **Gate amended (2026-11-04, SF-039).** The user has a ChatGPT subscription, not API access: the
+  gate runs the Codex CLI (`codex exec`, read-only sandbox in the worktree) signed in with the
+  ChatGPT account, with no API key and no function tools of the factory.

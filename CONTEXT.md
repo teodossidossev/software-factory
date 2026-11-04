@@ -101,13 +101,21 @@ _Avoid_: protected file, system file
 The check of one Iteration against its Task file, the repository standards and the Handbook's
 review rules, by a fresh read-only Claude session the factory starts in the Worktree when the
 Iteration is published. It ends with a verdict: `fix` with items, which become the next Fix
-section, or `clean`, which is Clean. A failed Review hands the Job to the User.
+section, or `clean`, which, with the Gate on, goes to the Gate. A failed Review hands the Job to
+the User.
 _Avoid_: code review session, audit
 
+**Gate**:
+The second, deciding Review of an Iteration that a Claude Review found clean, run by the Codex CLI
+on the User's ChatGPT subscription in a read-only sandbox in the Worktree. Its `clean` is Clean,
+its `fix` the next Fix section; it is limited in rounds and tokens per Job, and off when no Codex
+is found. A failed Gate hands the Job to the User.
+_Avoid_: OpenAI reviewer, second opinion
+
 **Clean**:
-The Review's or the Context owner's verdict that the Patch needs no further Fix section, with
-every undeclared Sensitive path acknowledged. It starts MR preparation; it accepts nothing and
-pushes nothing.
+The deciding Review's (the Gate's when it is on) or the Context owner's verdict that the Patch
+needs no further Fix section, with every undeclared Sensitive path acknowledged. It starts MR
+preparation; it accepts nothing and pushes nothing.
 
 **Human review**:
 The User reading the Branch in the IDE after Clean. It ends with approve, a further fix, or abort.

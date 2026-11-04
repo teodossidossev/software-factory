@@ -1,7 +1,7 @@
 // Job state on disk: <state dir>/jobs/<workspace>/<ticket>/ with job.json, events.jsonl and
-// iterations/NNN/{report.md,patch.diff,meta.json,review.json}, and from MR preparation on mr.md. Strictly
-// parsed; every file but the event log is replaced atomically. Knows nothing about Git or the
-// Implementer session.
+// iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json} (plus the gate's schema and
+// output files), and from MR preparation on mr.md. Strictly parsed; every file but the event log
+// is replaced atomically. Knows nothing about Git or the Implementer session.
 import { appendFile, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import * as z from 'zod/v4';
@@ -47,6 +47,10 @@ const jobSchema = z.strictObject({
   iteration: z.number().int().min(0),
   // Number of Fix sections written (by the review or request_fix); SF_MAX_ITERATIONS limits it.
   fixes: z.number().int().min(0).default(0),
+  // Fix verdicts of the gate (SF-039); SF_GATE_MAX_ROUNDS limits them.
+  gate_fixes: z.number().int().min(0).default(0),
+  // Input plus output tokens of every gate run of the job; SF_GATE_MAX_TOKENS limits them.
+  gate_tokens: z.number().int().min(0).default(0),
   session_id: z.string().min(1).nullable(),
   created_at: timestamp,
   // Time of the last state change.
@@ -103,6 +107,28 @@ export type ReviewRecord =
     }
   | { reviewer: string; error: string };
 
+// The token usage of one gate run, from Codex's turn.completed events.
+export interface GateTokens {
+  input: number;
+  cached_input: number;
+  output: number;
+}
+
+// iterations/NNN/gate.json: the gate's review of the iteration (SF-039), or why it failed.
+export type GateRecord =
+  | {
+      reviewer: string;
+      verdict: 'clean' | 'fix';
+      summary: string;
+      items: Array<{ path: string; problem: string; expected: string }>;
+      accepted_sensitive: string[];
+      model?: string;
+      tokens: GateTokens;
+      started_at: string;
+      ended_at: string;
+    }
+  | { reviewer: string; error: string; model?: string; tokens: GateTokens; started_at: string; ended_at: string };
+
 export interface Iteration {
   report: string;
   patch: Buffer;
@@ -125,7 +151,8 @@ export type EventRecord = { ts: string; iteration: number } & (
   | { type: 'event_delivered' | 'event_failed'; subscription: string; attempt: number; status: number | string }
   // The ticket's subscription removed after the last event of the job (SF-019).
   | { type: 'subscription_removed'; subscription: string }
-  // The outcome of a review (SF-038); ignored when the job had moved on before it ended.
+  // The outcome of a review (SF-038), Claude's or the gate's (SF-039, reviewer codex); ignored when
+  // the job had moved on before it ended.
   | { type: 'review'; reviewer: string; verdict: 'clean' | 'fix'; items: number; ignored?: true }
   | { type: 'review_failed'; reviewer: string; error: string; ignored?: true }
 );
@@ -255,9 +282,13 @@ export class JobStore {
     return JSON.parse(await readFile(join(dir, 'meta.json'), 'utf8')) as IterationMeta;
   }
 
+  // The directory of one published iteration.
+  iterationDir(workspace: string, ticket: string, number: number): string {
+    return join(this.dir(workspace, ticket), 'iterations', String(number).padStart(3, '0'));
+  }
+
   async writeReview(workspace: string, ticket: string, number: number, review: ReviewRecord): Promise<void> {
-    const dir = join(this.dir(workspace, ticket), 'iterations', String(number).padStart(3, '0'));
-    await writeFileAtomic(join(dir, 'review.json'), Buffer.from(`${JSON.stringify(review, null, 2)}\n`));
+    await writeFileAtomic(join(this.iterationDir(workspace, ticket, number), 'review.json'), Buffer.from(`${JSON.stringify(review, null, 2)}\n`));
   }
 
   // Before a retried review (SF-044): the failed record goes, so the iteration's review shows as running.
@@ -268,9 +299,18 @@ export class JobStore {
 
   // The review of an iteration; undefined while none ended (or with the review off).
   async readReview(workspace: string, ticket: string, number: number): Promise<ReviewRecord | undefined> {
-    const dir = join(this.dir(workspace, ticket), 'iterations', String(number).padStart(3, '0'));
-    const text = await readOrMissing(join(dir, 'review.json'));
+    const text = await readOrMissing(join(this.iterationDir(workspace, ticket, number), 'review.json'));
     return text === undefined ? undefined : (JSON.parse(text) as ReviewRecord);
+  }
+
+  async writeGate(workspace: string, ticket: string, number: number, gate: GateRecord): Promise<void> {
+    await writeFileAtomic(join(this.iterationDir(workspace, ticket, number), 'gate.json'), Buffer.from(`${JSON.stringify(gate, null, 2)}\n`));
+  }
+
+  // The gate's review of an iteration; undefined while none ended (or with the gate off).
+  async readGate(workspace: string, ticket: string, number: number): Promise<GateRecord | undefined> {
+    const text = await readOrMissing(join(this.iterationDir(workspace, ticket, number), 'gate.json'));
+    return text === undefined ? undefined : (JSON.parse(text) as GateRecord);
   }
 
   // The recorded cost of the published iterations 1 to count: the sum of their cost_usd and of the

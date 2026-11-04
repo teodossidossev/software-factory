@@ -422,7 +422,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 .document .file { font-weight: 700; }
 .document .hunk { color: var(--hunk); }
 
-/* The Claude review of an iteration (SF-038). */
+/* The reviews of an iteration: Claude's (SF-038) and the gate's (SF-039). */
 .review { padding: 8px 12px; border: 1px solid var(--border); border-left-width: 4px; border-radius: var(--radius-sm); }
 .review.v-clean { border-left-color: var(--add); }
 .review.v-fix { border-left-color: var(--warn); }

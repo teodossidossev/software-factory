@@ -10,11 +10,12 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { AuthError, createVerifier } from './auth.js';
 import { openInBrowser } from './browser.js';
-import { authConfig, envFilePath, loadConfig, loadEnvFile, stateDir } from './config.js';
+import { authConfig, envFilePath, gateConfig, loadConfig, loadEnvFile, stateDir } from './config.js';
 import { DEFAULT_DASHBOARD_PORT, dashboardUrl, readToken, removeToken, type RunningDashboard, startDashboard } from './dashboard.js';
 import { FactoryError } from './errors.js';
 import { coversTicketBroadly, Events, ownsTicket, type SubscriptionSummary, TICKET_GUIDE, ticketInstruction } from './events.js';
 import { Execution, type StateListener } from './execution.js';
+import { codexVersion } from './gate.js';
 import { existsSync } from 'node:fs';
 import { callSocket, listenSocket, socketPath } from './ipc.js';
 import { type Job, JobStore, TERMINAL_STATES } from './jobs.js';
@@ -170,6 +171,9 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   }
   console.log(dashboard !== undefined ? `${SERVER_NAME} dashboard ${dashboard.url.href}` : `${SERVER_NAME} dashboard off (SF_DASHBOARD=off)`);
   console.log(auth === undefined ? 'auth: off' : `auth: ${auth.issuer} audience ${auth.audience}`);
+  if (!config.gate.on && config.gate.missing === true) {
+    console.log(`gate: off (${config.gate.reason}); the Claude review decides`);
+  }
   console.log(`${SERVER_NAME} listening on ${server.url.href}`);
   console.log(`${SERVER_NAME} socket ${socket.path}`);
 
@@ -521,7 +525,7 @@ async function notifyTest(args: string[]): Promise<void> {
   const now = new Date().toISOString();
   const job: Job = {
     workspace: 'test', ticket: 'SF-TEST', branch: 'SF-TEST-notification', base: 'main', base_commit: null, worktree: null, prepared_commit: null,
-    target_commit: null, mr_attempts: 0, fixes: 0, state: 'pushed', iteration: 0, session_id: null, created_at: now, updated_at: now,
+    target_commit: null, mr_attempts: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'pushed', iteration: 0, session_id: null, created_at: now, updated_at: now,
   };
   const results = await sendNotification(jobNotification(job, ['A test notification from sf notify-test']), notifyConfig());
   for (const result of results) {
@@ -567,6 +571,18 @@ async function info(args: string[]): Promise<void> {
   const token = dashboardOn() ? await readToken(state) : undefined;
   row('dashboard', !dashboardOn() ? 'off (SF_DASHBOARD=off)' : token === undefined ? 'no token yet (starts with sf serve)' : dashboardUrl(parsePort('SF_DASHBOARD_PORT', DEFAULT_DASHBOARD_PORT), token).href);
   row('model', process.env.SF_MODEL || 'Claude Code default');
+  let gate: ReturnType<typeof gateConfig> | undefined;
+  try {
+    gate = gateConfig();
+  } catch (error) {
+    row('gate', `invalid: ${(error as Error).message}`);
+  }
+  if (gate?.on === true) {
+    const version = await codexVersion(gate.codexPath);
+    row('gate', `codex ${version === undefined ? gate.codexPath : `${version} (${gate.codexPath})`}`);
+  } else if (gate !== undefined) {
+    row('gate', `off (${gate.reason})`);
+  }
   const notify = notifyConfig();
   row('notify', `ntfy ${notify.ntfyUrl === undefined ? 'off' : 'on'}, desktop ${notify.desktop ? 'on' : 'off'}, iterations ${notify.iterations ? 'on' : 'off'}`);
 

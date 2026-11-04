@@ -32,7 +32,7 @@ function resultText(content: unknown): string {
 export interface DescribedEvent {
   ts: string | null;
   iteration: number | null;
-  // "prompt", "state", "notify_failed", "placeholders_removed", "principal", "event_delivered", "event_failed", "review", "review_failed", or the SDK message type ("assistant", "user", "result", "system", ...).
+  // "prompt", "state", "notify_failed", "placeholders_removed", "principal", "event_delivered", "event_failed", "review", "review_failed" (Claude's or the gate's), or the SDK message type ("assistant", "user", "result", "system", ...).
   type: string;
   lines: string[];
 }

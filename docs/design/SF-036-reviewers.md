@@ -47,12 +47,19 @@ sensitive paths the summary names; one it does not name is a fix item.
 
 - **Claude**: a fresh Agent SDK `query()`, `cwd` the worktree, tools `Read`, `Grep`, `Glob` only,
   `outputFormat` with the schema above. Its text, verdict and cost are kept with the iteration.
+  Amended 2026-11-05 (SF-050): a session that sees the Task file, the Report, the Patch and the
+  repository, nothing the user wrote outside it. `settingSources: ['project']` keeps the
+  repository's `CLAUDE.md`, `AGENTS.md` and `.claude/` settings and leaves out the user's settings
+  and `~/.claude/CLAUDE.md`; `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` leaves out the user's auto-memory;
+  `claudeMdExcludes` leaves out the instruction files of the directories above the worktree.
 - **Gate** (amended 2026-11-04, SF-039): the Codex CLI on the user's ChatGPT subscription, no API
-  key: `codex exec --ephemeral --sandbox read-only --cd <worktree> --output-schema <file>
-  --output-last-message <file> --json [--model SF_CODEX_MODEL] -`, the prompt on stdin, the
-  environment without `SF_*`. Codex reads the worktree itself (read-only commands such as `git diff
-  <base_commit>`, `rg`, reading files; no credentials), so the factory implements no function
-  tools. The output schema is the one above in strict form (every property required,
+  key: `codex exec --ephemeral --sandbox read-only --disable memories -c
+  memories.use_memories=false --cd <worktree> --output-schema <file> --output-last-message <file>
+  --json [--model SF_CODEX_MODEL] -`, the prompt on stdin, the environment without `SF_*`. Without
+  the user's Codex memories (SF-050); the user's global `AGENTS.md` in `CODEX_HOME` still loads, as
+  Codex documents no switch for it. Codex reads the worktree itself (read-only commands such as
+  `git diff <base_commit>`, `rg`, reading files; no credentials), so the factory implements no
+  function tools. The output schema is the one above in strict form (every property required,
   `additionalProperties: false`); token usage comes from the JSONL events. Runs only after a clean
   Claude verdict. Recorded in `iterations/NNN/gate.json`.
 

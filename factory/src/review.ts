@@ -2,7 +2,8 @@
 // the job's worktree, with the Task file, the Report, the Patch and the sensitive and deleted paths
 // in its prompt and a structured verdict as its output. Knows nothing about job states; the
 // Execution applies the verdict.
-import { query, type SandboxSettings, type SDKMessage, type SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
+import { dirname, resolve } from 'node:path';
+import { type Options, query, type SandboxSettings, type SDKMessage, type SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
 import * as z from 'zod/v4';
 import type { FileChange } from './jobs.js';
 import { handbookSection } from './prompts.js';
@@ -138,6 +139,50 @@ export interface ReviewOptions {
   onMessage?: (message: SDKMessage) => Promise<void>;
 }
 
+// The instruction files the CLI loads as project instructions from a directory, with
+// settingSources ['project']: it walks up from its cwd and loads each directory's.
+const PROJECT_INSTRUCTION_FILES = ['CLAUDE.md', '.claude/CLAUDE.md', 'AGENTS.md', '.claude/AGENTS.md', '.claude/rules/**'];
+
+// A path as a picomatch pattern that matches only itself.
+const literalPattern = (path: string): string => path.replace(/[\\*?[\]{}()!+@|]/g, '\\$&');
+
+// The project instruction files of every directory above the worktree, as claudeMdExcludes
+// patterns: the user's files there (such as ~/CLAUDE.md, or ~/.claude/CLAUDE.md read as a project
+// file of the home directory) are not the repository's standards.
+export function outsideInstructionFiles(cwd: string): string[] {
+  const patterns: string[] = [];
+  let dir = resolve(cwd);
+  while (dirname(dir) !== dir) {
+    dir = dirname(dir);
+    patterns.push(...PROJECT_INSTRUCTION_FILES.map((file) => `${literalPattern(dir === '/' ? '' : dir)}/${file}`));
+  }
+  return patterns;
+}
+
+// The query() options of a review session (SF-050): read-only tools, the schema, and the
+// repository's own settings and instructions only. settingSources ['project'] leaves out the user's
+// settings and ~/.claude/CLAUDE.md; CLAUDE_CODE_DISABLE_AUTO_MEMORY leaves out the user's
+// auto-memory of the project, which the CLI loads whatever the setting sources; claudeMdExcludes
+// leaves out the instruction files above the worktree.
+export function reviewSessionOptions(options: Omit<ReviewOptions, 'onMessage' | 'signal'>, abortController: AbortController): Options {
+  return {
+    abortController,
+    cwd: options.cwd,
+    permissionMode: 'auto',
+    settingSources: ['project'],
+    settings: { claudeMdExcludes: outsideInstructionFiles(options.cwd) },
+    tools: REVIEW_TOOLS,
+    disallowedTools: REVIEW_DENIED_TOOLS,
+    outputFormat: { type: 'json_schema', schema: REVIEW_SCHEMA },
+    maxTurns: options.maxTurns,
+    // A known startup failure (such as an unavailable sandbox) then ends with a result message.
+    env: { ...sessionEnvironment(), CLAUDE_CODE_STARTUP_FAILURE_RESULTS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
+    ...(options.sandbox !== undefined ? { sandbox: options.sandbox } : {}),
+    ...(options.model !== undefined ? { model: options.model } : {}),
+    ...(options.claudePath !== undefined ? { pathToClaudeCodeExecutable: options.claudePath } : {}),
+  };
+}
+
 export type ReviewOutcome =
   | { ok: true; output: ReviewOutput; costUsd: number | null; startedAt: string; endedAt: string }
   | { ok: false; message: string; startedAt: string; endedAt: string };
@@ -156,24 +201,7 @@ export async function runReview(prompt: string, options: ReviewOptions): Promise
   options.signal.addEventListener('abort', onAbort, { once: true });
   let result: SDKResultMessage | undefined;
   try {
-    const session = query({
-      prompt,
-      options: {
-        abortController,
-        cwd: options.cwd,
-        permissionMode: 'auto',
-        settingSources: ['user', 'project'],
-        tools: REVIEW_TOOLS,
-        disallowedTools: REVIEW_DENIED_TOOLS,
-        outputFormat: { type: 'json_schema', schema: REVIEW_SCHEMA },
-        maxTurns: options.maxTurns,
-        // A known startup failure (such as an unavailable sandbox) then ends with a result message.
-        env: { ...sessionEnvironment(), CLAUDE_CODE_STARTUP_FAILURE_RESULTS: '1' },
-        ...(options.sandbox !== undefined ? { sandbox: options.sandbox } : {}),
-        ...(options.model !== undefined ? { model: options.model } : {}),
-        ...(options.claudePath !== undefined ? { pathToClaudeCodeExecutable: options.claudePath } : {}),
-      },
-    });
+    const session = query({ prompt, options: reviewSessionOptions(options, abortController) });
     for await (const message of session) {
       await options.onMessage?.(message).catch((error: unknown) => console.error(error));
       if (message.type === 'result') {

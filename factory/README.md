@@ -194,6 +194,17 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   and `Glob` only (`tools`), and `Bash`, `Edit`, `Write`, `NotebookEdit`, `WebFetch`, `WebSearch`,
   `Task`, `Agent` and the `.env` rules denied as well. It has the Implementer's permission mode,
   sandbox and filtered environment, `maxTurns` `SF_REVIEW_MAX_TURNS` and model `SF_REVIEW_MODEL`.
+  It sees the Task file, the Report, the Patch and the repository, nothing the user wrote outside
+  it (SF-050): `settingSources: ['project']` keeps the repository's `CLAUDE.md`, `AGENTS.md`,
+  `.claude/rules` and `.claude/settings.json` and leaves out the user's settings and
+  `~/.claude/CLAUDE.md`; `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` in its environment leaves out the
+  user's auto-memory of the project, which Claude Code loads whatever the setting sources; and
+  `claudeMdExcludes` (in the `settings` option) lists the `CLAUDE.md`, `.claude/CLAUDE.md`,
+  `AGENTS.md`, `.claude/AGENTS.md` and `.claude/rules/**` of every directory above the worktree,
+  which Claude Code would otherwise load as project instructions (`~/CLAUDE.md`, and
+  `~/.claude/CLAUDE.md` or `~/.claude/AGENTS.md` read as the home directory's). `CLAUDE.local.md`
+  needs no exclude: it loads only with the `local` setting source. The Implementer's session keeps
+  `['user', 'project']`.
   Its prompt says what to verify, then carries the Handbook's `## Review rules for the Context
   owner` verbatim, the Task file (with its `## Review brief` when there is one), the Report, the
   sensitive and deleted paths of the iteration and the Patch inline up to 256 KiB (beyond that, the
@@ -307,12 +318,17 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   (`SF_GATE=codex` and a Codex executable found), a clean Claude verdict (after its sensitive-path
   rule) does not go to Clean: the factory runs the Codex CLI on the user's ChatGPT sign-in (it must
   be signed in: `codex login`; no API key), without a shell: `codex exec --ephemeral --sandbox
-  read-only --cd <worktree> --output-schema <schema file> --output-last-message <out file> --json
-  [--model SF_CODEX_MODEL] -`, the prompt on stdin. The schema and out files are
-  `gate-schema.json` and `gate-output.json` in the iteration's directory. The user's
-  `~/.codex/config.toml` and login apply; the environment is the factory's without any `SF_*`
-  variable. Codex reads the worktree itself in its read-only sandbox. Its prompt is the review
-  prompt adapted: the base commit (so it can run `git diff <base_commit>`), the read-only commands
+  read-only --disable memories -c memories.use_memories=false --cd <worktree> --output-schema
+  <schema file> --output-last-message <out file> --json [--model SF_CODEX_MODEL] -`, the prompt on
+  stdin. The schema and out files are `gate-schema.json` and `gate-output.json` in the iteration's
+  directory. The user's `~/.codex/config.toml` and login apply; the environment is the factory's
+  without any `SF_*` variable. The gate sees the Task file, the Report, the Patch and the
+  repository with its `AGENTS.md` (SF-050): `--disable memories` and `memories.use_memories=false`
+  keep the user's Codex memories out, whatever `config.toml` says. The user's global
+  `~/.codex/AGENTS.md` (or `AGENTS.override.md`) still loads: Codex documents no switch for it, and
+  `CODEX_HOME` is not moved, since the login refreshes itself there. Codex reads the worktree
+  itself in its read-only sandbox. Its prompt is the review prompt adapted: the base commit (so
+  it can run `git diff <base_commit>`), the read-only commands
   it may run, that it must not leave the worktree or read credentials, that it decides after a
   clean Claude review, then the same rules and material as the Claude review. The schema is the
   review's in the strict form structured outputs need (every property required,

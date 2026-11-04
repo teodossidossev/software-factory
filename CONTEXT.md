@@ -64,8 +64,9 @@ Task file otherwise.
 _Avoid_: stub, placeholder task, request file
 
 **Fix section**:
-A `## Fix N` section appended to the Task file after a Review, by the factory from a `fix` verdict.
-Appending one is the request for the next Iteration.
+A `## Fix N` section appended to the Task file after a Review, by the factory from a verdict it
+acts on as `fix`: the blocker and major items, then the Nits as optional. Appending one is the
+request for the next Iteration.
 _Avoid_: findings, review request, feedback
 
 **Job**:
@@ -107,21 +108,32 @@ _Avoid_: protected file, system file
 **Review**:
 The check of one Iteration against its Task file, the repository standards and the Handbook's
 review rules, by a fresh read-only Claude session the factory starts in the Worktree when the
-Iteration is published. It ends with a verdict: `fix` with items, which become the next Fix
-section, or `clean`, which, with the Gate on, goes to the Gate. A failed Review hands the Job to
-the User.
+Iteration is published. It ends with a verdict, `fix` or `clean`, and items with a Severity. The
+factory acts on it as `fix` only with a blocker or major item (or an undeclared Sensitive path not
+accepted): the items become the next Fix section. Otherwise it counts as `clean`, which, with the
+Gate on, goes to the Gate. A failed Review hands the Job to the User.
 _Avoid_: code review session, audit
+
+**Severity**:
+The weight of a Review item: `blocker` (the change is wrong, unsafe or breaks the Task's
+acceptance), `major` (a real defect or a Task requirement not met, but contained) or `nit`.
+
+**Nit**:
+A Review item of Severity `nit`: style, naming, wording, a narrower variant of a risk already
+accepted, a nice-to-have. A Nit never blocks; the Nits of the Iteration that reaches Clean go into
+the MR text as `### Nits not applied`.
+_Avoid_: minor, suggestion (for a Nit)
 
 **Gate**:
 The second, deciding Review of an Iteration that a Claude Review found clean, run by the Codex CLI
-on the User's ChatGPT plan in a read-only sandbox in the Worktree. Its `clean` is Clean,
-its `fix` the next Fix section; it is limited in rounds and tokens per Job, and off when no Codex
+on the User's ChatGPT plan in a read-only sandbox in the Worktree. Its verdict, acted on by the
+same rule as the Review's, is Clean or the next Fix section; it is limited in rounds and tokens per Job, and off when no Codex
 is found. A failed Gate hands the Job to the User.
 _Avoid_: OpenAI reviewer, second opinion
 
 **Clean**:
-The deciding Review's (the Gate's when it is on) verdict that the Patch
-needs no further Fix section, with every undeclared Sensitive path acknowledged. It starts MR
+The deciding Review's (the Gate's when it is on) verdict, as the factory acts on it, that the
+Patch needs no further Fix section (no blocker or major item), with every undeclared Sensitive path acknowledged. It starts MR
 preparation; it accepts nothing and pushes nothing.
 
 **Human review**:

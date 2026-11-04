@@ -20,11 +20,11 @@ const CLAUDE_CLEAN = { verdict: 'clean', summary: 'Claude found it right.', item
 const GATE_FIX = {
   verdict: 'fix',
   summary: 'The greeting\nis wrong.',
-  items: [{ path: 'README.md', problem: 'It greets the world.', expected: 'It greets the reader.' }],
+  items: [{ path: 'README.md', problem: 'It greets the world.', expected: 'It greets the reader.', severity: 'major' }],
   accepted_sensitive: [],
 };
 const GATE_CLEAN = { verdict: 'clean', summary: 'Codex found it right.', items: [], accepted_sensitive: [] };
-const FIX_SECTION = '## Fix 1\n\nReview by Codex: The greeting is wrong.\n\n1. `README.md`: It greets the world. Expected: It greets the reader.\n';
+const FIX_SECTION = '## Fix 1\n\nReview by Codex: The greeting is wrong.\n\n1. [major] `README.md`: It greets the world. Expected: It greets the reader.\n';
 
 function mrText(header: string): string {
   return [
@@ -100,6 +100,10 @@ test('the strict schema: no $schema, every object has additionalProperties false
     assert.deepEqual(object.required, Object.keys(object.properties as object));
   }
   assert.deepEqual([...(GATE_SCHEMA.required as string[])].sort(), ['accepted_sensitive', 'items', 'summary', 'verdict']);
+  // Every item has a severity (SF-051), required in the strict form.
+  const item = (GATE_SCHEMA.properties as { items: { items: { properties: Record<string, { enum?: string[] }>; required: string[] } } }).items.items;
+  assert.deepEqual(item.required, ['path', 'problem', 'expected', 'severity']);
+  assert.deepEqual(item.properties.severity?.enum, ['blocker', 'major', 'nit']);
   assert.deepEqual(gateArgs({ cwd: '/w', dir: '/d', model: 'm' }).slice(-3), ['--model', 'm', '-']);
 });
 
@@ -396,6 +400,98 @@ test('fix: the gate\'s Fix section, the next iteration, Claude again, the gate a
   }
 });
 
+// SF-051: the severity of review items.
+const nit = (path: string, problem: string, expected = 'Nicer.') => ({ path, problem, expected, severity: 'nit' });
+
+test('severity: one major among nits is the gate\'s Fix section with the nits as optional; a Claude fix with nits only goes to the gate, a gate fix with nits only to MR preparation, and the nits of both reach the MR text', async () => {
+  const env = await newEnv('gate-nits', gateEnv());
+  const repo = await newRepo(env, 'gate-nits-repo', false);
+  await putTask(env, repo, 'G-10', 'Greet the reader');
+  await script(env, [
+    { write: { 'README.md': 'hello world\n' }, text: 'Report of iteration 1' },
+    { write: { 'README.md': 'hello reader\n' }, text: 'Report of iteration 2' },
+    { write: { '.software-factory/G-10.mr.md': mrText('feat(G-10): Greet the reader') }, text: 'prepared' },
+  ]);
+  const claudeNit = nit('README.md', 'No capital.');
+  await reviewScript(env, [
+    { output: { ...CLAUDE_CLEAN, items: [claudeNit] } },
+    { output: { verdict: 'fix', summary: 'Nits only.', items: [claudeNit], accepted_sensitive: [] } },
+  ]);
+  await codexScript(env, [
+    { output: { ...GATE_FIX, items: [nit('a.txt', 'A narrower variant.'), ...GATE_FIX.items] } },
+    { output: { verdict: 'fix', summary: 'Nits only.', items: [nit('README.md', 'No  capital.', 'Other.'), nit('a.txt', 'A narrower variant.')], accepted_sensitive: [] } },
+  ]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'G-10' });
+    await waitFor(served, 'G-10', 'ready_for_human_review', 2);
+    assert.equal(await taskFile(repo, 'G-10'), `${task('G-10', 'Greet the reader')}\n\n${[
+      '## Fix 1', '', 'Review by Codex: The greeting is wrong.', '',
+      '1. [major] `README.md`: It greets the world. Expected: It greets the reader.', '',
+      'Nits (optional):',
+      '2. [nit] `a.txt`: A narrower variant. Expected: Nicer.', '',
+    ].join('\n')}`);
+    const jobs = new JobStore(env.state);
+    const job = (await jobs.read('app', 'G-10'))!;
+    assert.deepEqual([job.fixes, job.gate_fixes], [1, 1]);
+    assert.equal((await codexLog(env)).length, 2);
+    // Recorded as given; the events carry the verdict acted on.
+    const gate = await jobs.readGate('app', 'G-10', 2);
+    assert.ok(gate !== undefined && 'verdict' in gate);
+    assert.equal(gate.verdict, 'fix');
+    assert.deepEqual((await eventsOf(env, 'G-10')).filter((record) => record.type === 'review').map((record) => [record.iteration, record.reviewer, record.verdict, record.effective]), [
+      [1, 'claude', 'clean', undefined], [1, 'codex', 'fix', undefined], [2, 'claude', 'fix', 'clean'], [2, 'codex', 'fix', 'clean'],
+    ]);
+    assert.match((await runCli(env, ['watch', 'app', 'G-10', '--once'])).stdout, /^\d\d:\d\d:\d\d \[2\] review by codex: fix \(2 items\), acted on as clean$/m);
+    // The nits of iteration 2 from both reviewers, deduplicated by path and problem.
+    const mr = (await jobs.readMrText('app', 'G-10'))!;
+    assert.ok(mr.includes([
+      '## Special things to note',
+      '### Nits not applied',
+      '- [nit] `README.md`: No capital. Expected: Nicer.',
+      '- [nit] `a.txt`: A narrower variant. Expected: Nicer.',
+      '',
+      '## Change outline',
+    ].join('\n')), mr);
+  } finally {
+    await stop(served);
+  }
+});
+
+test('severity: a gate fix with nits only is still a fix when it leaves an undeclared sensitive path unaccepted', async () => {
+  const env = await newEnv('gate-nits-sensitive', gateEnv());
+  const repo = await newRepo(env, 'gate-nits-sensitive-repo', false);
+  await putTask(env, repo, 'G-11', 'Add a script');
+  await script(env, [
+    { write: { 'package.json': '{}\n' }, text: 'iteration 1' },
+    { text: 'package.json is needed.' },
+    { write: { '.software-factory/G-11.mr.md': mrText('feat(G-11): Add a script') }, text: 'prepared' },
+  ]);
+  const accepted = { ...CLAUDE_CLEAN, summary: 'package.json is needed.', accepted_sensitive: ['package.json'] };
+  await reviewScript(env, [{ output: accepted }, { output: accepted }]);
+  await codexScript(env, [
+    { output: { verdict: 'fix', summary: 'Nits only.', items: [nit('package.json', 'A narrower variant of the accepted risk.')], accepted_sensitive: [] } },
+    { output: { ...GATE_CLEAN, accepted_sensitive: ['package.json'] } },
+  ]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'G-11' });
+    await waitFor(served, 'G-11', 'ready_for_human_review', 2);
+    assert.ok((await taskFile(repo, 'G-11')).endsWith([
+      '## Fix 1', '', 'Review by Codex: Nits only.', '',
+      '1. [major] `package.json`: Undeclared sensitive path. Expected: Remove it, or justify it in the Report.', '',
+      'Nits (optional):',
+      '2. [nit] `package.json`: A narrower variant of the accepted risk. Expected: Nicer.', '',
+    ].join('\n')));
+    assert.equal((await new JobStore(env.state).read('app', 'G-11'))!.gate_fixes, 1);
+    assert.deepEqual((await eventsOf(env, 'G-11')).filter((record) => record.type === 'review').map((record) => [record.iteration, record.reviewer, record.verdict, record.effective]), [
+      [1, 'claude', 'clean', undefined], [1, 'codex', 'fix', undefined], [2, 'claude', 'clean', undefined], [2, 'codex', 'clean', undefined],
+    ]);
+  } finally {
+    await stop(served);
+  }
+});
+
 test('SF_GATE_MAX_ROUNDS=1: the second fix of the gate is not applied; needs_human gate_rounds with both summaries', async () => {
   const env = await newEnv('gate-rounds', gateEnv({ SF_GATE_MAX_ROUNDS: '1' }));
   const repo = await newRepo(env, 'gate-rounds-repo', false);
@@ -609,7 +705,7 @@ test('sf accept (SF-047): after gate_rounds with a clean Claude review the job g
   const env = await newEnv('gate-accept', gateEnv({ SF_GATE_MAX_ROUNDS: '1' }));
   const repo = await newRepo(env, 'gate-accept-repo', false);
   await putTask(env, repo, 'G-8', 'Accept over the gate');
-  const stillWrong = { ...GATE_FIX, summary: 'Still wrong.', items: [{ path: 'a.txt', problem: 'A narrower variant.', expected: 'Even narrower.' }] };
+  const stillWrong = { ...GATE_FIX, summary: 'Still wrong.', items: [{ path: 'a.txt', problem: 'A narrower variant.', expected: 'Even narrower.', severity: 'major' }] };
   await script(env, [
     { write: { 'a.txt': '1\n' } },
     { write: { 'a.txt': '2\n' } },
@@ -627,7 +723,7 @@ test('sf accept (SF-047): after gate_rounds with a clean Claude review the job g
     // Refused without a clean Claude review of the last iteration: nothing recorded, nothing moves.
     const reviewPath = join(iterationDir(env, 'G-8', 2), 'review.json');
     const review = await readFile(reviewPath, 'utf8');
-    await writeFile(reviewPath, JSON.stringify({ ...JSON.parse(review), verdict: 'fix' }));
+    await writeFile(reviewPath, JSON.stringify({ ...JSON.parse(review), verdict: 'fix', items: [{ path: 'a.txt', problem: 'Wrong.', expected: 'Right.', severity: 'major' }] }));
     const notClean = await runCli(env, ['accept', 'app', 'G-8']);
     assert.equal(notClean.code, 1);
     assert.match(notClean.stderr, /^sf: sf accept needs a clean Claude review of the last iteration \(2\); it says fix/);

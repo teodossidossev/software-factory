@@ -19,10 +19,20 @@ export const REVIEW_TOOLS = ['Read', 'Grep', 'Glob'];
 // Denied as well, should a tool outside REVIEW_TOOLS still be offered.
 export const REVIEW_DENIED_TOOLS = ['Bash', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task', 'Agent', ...ENV_FILE_RULES];
 
+// The weight of a review item (SF-051). Only blocker and major items make a fix; nits never block.
+export const SEVERITIES = ['blocker', 'major', 'nit'] as const;
+export type Severity = (typeof SEVERITIES)[number];
+// The definitions both reviewers read (reviewBody) and the schema carries.
+export const SEVERITY_DEFINITIONS: Record<Severity, string> = {
+  blocker: "the change is wrong, unsafe or breaks the Task's acceptance",
+  major: 'a real defect or a Task requirement not met, but contained',
+  nit: 'style, naming, wording, a narrower variant of a risk already accepted, a nice-to-have',
+};
 const reviewItem = z.strictObject({
   path: z.string().describe('The file the item is about.'),
   problem: z.string().describe('What is wrong.'),
   expected: z.string().describe('What is expected instead.'),
+  severity: z.enum(SEVERITIES).describe(SEVERITIES.map((severity) => `${severity}: ${SEVERITY_DEFINITIONS[severity]}`).join('; ')),
 });
 export const reviewOutput = z.strictObject({
   verdict: z.enum(['clean', 'fix']),
@@ -101,8 +111,10 @@ export function reviewBody(input: ReviewInput): string[] {
     '- Verify the claims of the Report against the files. Do not trust them.',
     `- Review the change against the Task file (${TASK_DIR}/${ticket}.md, below), its \`## Review brief\` section when it has one, and the repository standards: AGENTS.md, CLAUDE.md and the docs you find.`,
     '- Follow the review rules below (the Handbook\'s).',
-    '- Return `fix` with concrete items (path, what is wrong, what is expected), or `clean` when the change needs no further fix. Items of `clean` are ignored.',
-    '- An undeclared sensitive path stays only when you name it in accepted_sensitive and justify it in summary; otherwise it becomes a fix item.',
+    '- Give every item a severity:',
+    ...SEVERITIES.map((severity) => `  - \`${severity}\`: ${SEVERITY_DEFINITIONS[severity]}.`),
+    '- Return `fix` with concrete items (path, what is wrong, what is expected, severity) when at least one item is a blocker or major; otherwise `clean`, with any nits as its items. The factory acts on the items, whatever the verdict says: a blocker or major item makes a fix, and a `fix` with nits only counts as `clean`. Nits are recorded, never block, and the Implementer may leave them.',
+    '- An undeclared sensitive path stays only when you name it in accepted_sensitive and justify it in summary; otherwise it becomes a major fix item, whatever severity you give it.',
     '',
     handbookSection(input.handbook, '## Review rules'),
     '',
@@ -238,17 +250,66 @@ export async function runReview(prompt: string, options: ReviewOptions): Promise
 // Text on one line: every run of whitespace a single space.
 export const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
 
+// One item on one line: its severity, path, problem and what is expected.
+export function itemLine(item: ReviewItem): string {
+  return `[${item.severity}] \`${oneLine(item.path)}\`: ${oneLine(item.problem)} Expected: ${oneLine(item.expected)}`;
+}
+
 // The body of the Fix section the factory writes for a review: the summary as a lead line (by: who
-// reviewed), then one numbered item per entry.
+// reviewed), then one numbered item per blocker or major entry, then the nits, numbered on, under
+// "Nits (optional):".
 export function fixContent(summary: string, items: ReviewItem[], by = 'Claude'): string {
+  const blockers = blocking(items);
+  const optional = nits(items);
   return [
     `Review by ${by}: ${oneLine(summary) || 'see the items.'}`,
     '',
-    ...items.map((item, index) => `${index + 1}. \`${oneLine(item.path)}\`: ${oneLine(item.problem)} Expected: ${oneLine(item.expected)}`),
+    ...blockers.map((item, index) => `${index + 1}. ${itemLine(item)}`),
+    ...(optional.length > 0 ? ['', 'Nits (optional):', ...optional.map((item, index) => `${blockers.length + index + 1}. ${itemLine(item)}`)] : []),
   ].join('\n');
 }
 
-// The fix item of an undeclared sensitive path a clean verdict did not accept.
+// The fix item of an undeclared sensitive path a verdict did not accept: always major.
 export function sensitiveItem(path: string): ReviewItem {
-  return { path, problem: 'Undeclared sensitive path.', expected: 'Remove it, or justify it in the Report.' };
+  return { path, problem: 'Undeclared sensitive path.', expected: 'Remove it, or justify it in the Report.', severity: 'major' };
+}
+
+// The items that block: blocker and major.
+export const blocking = (items: ReviewItem[]): ReviewItem[] => items.filter((item) => item.severity !== 'nit');
+// The items that never block.
+export const nits = (items: ReviewItem[]): ReviewItem[] => items.filter((item) => item.severity === 'nit');
+
+// A verdict as the reviewer writes it, or as the factory acts on it.
+export type Verdict = 'clean' | 'fix';
+
+// The reviewer's verdict before the sensitive-path rule, as the factory acts on it (SF-051): a round
+// is clean when it has no blocker or major item, whatever the reviewer wrote; fix otherwise.
+export function actedVerdict(output: Pick<ReviewOutput, 'items'>): Verdict {
+  return blocking(output.items).length > 0 ? 'fix' : 'clean';
+}
+
+// The verdict the factory acts on, for both reviewers (SF-051): fix when the reviewer gave a
+// blocker or major item, or when an undeclared sensitive path is not accepted (unaccepted, always
+// major); clean otherwise, whatever the reviewer wrote. The items of a fix are the blocking ones
+// (the reviewer's, then the unaccepted paths), then the reviewer's nits; none for clean.
+export function decide(output: Pick<ReviewOutput, 'items'>, unaccepted: ReviewItem[]): { verdict: Verdict; items: ReviewItem[] } {
+  const own = blocking(output.items);
+  if (own.length === 0 && unaccepted.length === 0) {
+    return { verdict: 'clean', items: [] };
+  }
+  return { verdict: 'fix', items: [...own, ...unaccepted, ...nits(output.items)] };
+}
+
+// The nits of the given verdicts, deduplicated by path and problem text (on one line), in order.
+export function uniqueNits(outputs: Array<Pick<ReviewOutput, 'items'>>): ReviewItem[] {
+  const seen = new Set<string>();
+  const result: ReviewItem[] = [];
+  for (const item of outputs.flatMap((output) => nits(output.items))) {
+    const key = `${oneLine(item.path)}\n${oneLine(item.problem)}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(item);
+    }
+  }
+  return result;
 }

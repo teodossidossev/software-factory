@@ -6,12 +6,12 @@
 // accepts (the fake refuses one it would not) and the retry of a failed review (SF-044).
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFile, stat } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
 import { handbookSection } from '../src/prompts.js';
-import { REVIEW_DENIED_TOOLS, REVIEW_SCHEMA, reviewSessionOptions } from '../src/review.js';
+import { actedVerdict, decide, fixContent, REVIEW_DENIED_TOOLS, REVIEW_SCHEMA, type ReviewItem, reviewPrompt, reviewSessionOptions, sensitiveItem, uniqueNits } from '../src/review.js';
 import { loadHandbook } from '../src/server.js';
 import { act, fetchRaw } from './support/dashboard-client.js';
 import { call, type Env, FAKE, fakeLog, git, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor } from './support/harness.js';
@@ -19,11 +19,11 @@ import { call, type Env, FAKE, fakeLog, git, newEnv, newRepo, putTask, reviewLog
 const FIX = {
   verdict: 'fix',
   summary: 'The greeting  is\nwrong.',
-  items: [{ path: 'README.md', problem: 'It greets the world.', expected: 'It greets the reader.' }],
+  items: [{ path: 'README.md', problem: 'It greets the world.', expected: 'It greets the reader.', severity: 'major' }],
   accepted_sensitive: [],
 };
 const CLEAN = { verdict: 'clean', summary: 'The greeting is right.', items: [], accepted_sensitive: [] };
-const FIX_SECTION = '## Fix 1\n\nReview by Claude: The greeting is wrong.\n\n1. `README.md`: It greets the world. Expected: It greets the reader.\n';
+const FIX_SECTION = '## Fix 1\n\nReview by Claude: The greeting is wrong.\n\n1. [major] `README.md`: It greets the world. Expected: It greets the reader.\n';
 
 function mrText(header: string): string {
   return [
@@ -183,13 +183,146 @@ test('clean with an undeclared sensitive path it does not accept becomes a fix; 
     const ready = await waitFor(served, 'S-1', 'ready_for_human_review', 2);
     assert.equal(ready.review.summary, accepted.summary);
     assert.ok((await taskFile(repo, 'S-1')).endsWith(
-      '\n\n## Fix 1\n\nReview by Claude: The greeting is right.\n\n1. `package.json`: Undeclared sensitive path. Expected: Remove it, or justify it in the Report.\n',
+      '\n\n## Fix 1\n\nReview by Claude: The greeting is right.\n\n1. [major] `package.json`: Undeclared sensitive path. Expected: Remove it, or justify it in the Report.\n',
     ));
     const [first] = await reviewLog(env);
     assert.ok(first!.prompt.includes('<sensitive_and_deleted_paths>\n- sensitive, undeclared: package.json\n</sensitive_and_deleted_paths>'));
     assert.equal(git(repo, 'show', '--name-only', '--format=', 'S-1-add-a-script').trim(), 'a.txt\npackage.json');
-    // The review's own verdict is what the event records.
-    assert.deepEqual((await eventsOf(env, 'S-1')).filter((record) => record.type === 'review').map((record) => [record.iteration, record.verdict]), [[1, 'clean'], [2, 'clean']]);
+    // The review's own verdict is what the event records, with the one acted on when it differs.
+    assert.deepEqual((await eventsOf(env, 'S-1')).filter((record) => record.type === 'review').map((record) => [record.iteration, record.verdict, record.effective]), [[1, 'clean', 'fix'], [2, 'clean', undefined]]);
+  } finally {
+    await stop(served);
+  }
+});
+
+// SF-051: the severity of review items.
+const major = (path: string, problem: string): ReviewItem => ({ path, problem, expected: 'Fixed.', severity: 'major' });
+const nit = (path: string, problem: string, expected = 'Nicer.'): ReviewItem => ({ path, problem, expected, severity: 'nit' });
+
+test('the review schema gives every item a severity (blocker, major, nit) and the prompt defines them', async () => {
+  const items = (REVIEW_SCHEMA.properties as { items: { items: { properties: Record<string, { enum?: string[] }>; required: string[] } } }).items.items;
+  assert.deepEqual(items.properties.severity?.enum, ['blocker', 'major', 'nit']);
+  assert.ok(items.required.includes('severity'));
+  const prompt = reviewPrompt({ ticket: 'R-1', iteration: 1, task: 't', report: 'r', patch: Buffer.from('p'), patchTruncated: false, files: [], handbook: (await loadHandbook()).text });
+  assert.ok(prompt.includes("- `blocker`: the change is wrong, unsafe or breaks the Task's acceptance."), prompt);
+  assert.ok(prompt.includes('- `major`: a real defect or a Task requirement not met, but contained.'));
+  assert.ok(prompt.includes('- `nit`: style, naming, wording, a narrower variant of a risk already accepted, a nice-to-have.'));
+});
+
+test('the verdict rule: fix only with a blocker or major item or an unaccepted sensitive path; the Fix section lists the nits last as optional', () => {
+  const nits = [nit('a.txt', 'Wording.'), nit('b.txt', 'Naming.')];
+  assert.deepEqual(decide({ items: nits }, []), { verdict: 'clean', items: [] });
+  assert.equal(actedVerdict({ items: nits }), 'clean');
+  // The items decide, whatever the reviewer wrote: a major item in a clean verdict is a fix too.
+  assert.equal(actedVerdict({ items: [...nits, major('c.txt', 'Broken.')] }), 'fix');
+  assert.deepEqual(decide({ items: [major('c.txt', 'Broken.'), ...nits] }, []), { verdict: 'fix', items: [major('c.txt', 'Broken.'), ...nits] });
+  const sensitive = sensitiveItem('package.json');
+  assert.equal(sensitive.severity, 'major');
+  assert.deepEqual(decide({ items: nits }, [sensitive]), { verdict: 'fix', items: [sensitive, ...nits] });
+  const blocker: ReviewItem = { ...major('c.txt', 'Unsafe.'), severity: 'blocker' };
+  assert.deepEqual(decide({ items: [nits[0]!, blocker, nits[1]!] }, [sensitive]).items, [blocker, sensitive, ...nits]);
+  assert.equal(fixContent('Two  things.', [blocker, sensitive, ...nits], 'Codex'), [
+    'Review by Codex: Two things.', '',
+    '1. [blocker] `c.txt`: Unsafe. Expected: Fixed.',
+    '2. [major] `package.json`: Undeclared sensitive path. Expected: Remove it, or justify it in the Report.', '',
+    'Nits (optional):',
+    '3. [nit] `a.txt`: Wording. Expected: Nicer.',
+    '4. [nit] `b.txt`: Naming. Expected: Nicer.',
+  ].join('\n'));
+  // Deduplicated by path and problem text across both reviewers.
+  assert.deepEqual(uniqueNits([{ items: [...nits, major('a.txt', 'Wording.')] }, { items: [nit('a.txt', ' Wording. ', 'Other.'), nit('a.txt', 'Other.')] }]), [...nits, nit('a.txt', 'Other.')]);
+});
+
+test('a review or gate stored before severity existed reads with every item major', async () => {
+  const env = await newEnv('review-old-records');
+  const jobs = new JobStore(env.state);
+  const item = { path: 'README.md', problem: 'Old.', expected: 'New.' };
+  const dir = jobs.iterationDir('app', 'O-1', 1);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, 'review.json'), JSON.stringify({ reviewer: 'claude', verdict: 'fix', summary: 's', items: [item, { ...item, severity: 'nit' }], accepted_sensitive: [], cost_usd: null, started_at: 'a', ended_at: 'b' }));
+  await writeFile(join(dir, 'gate.json'), JSON.stringify({ reviewer: 'codex', verdict: 'fix', summary: 's', items: [item], accepted_sensitive: [], tokens: { input: 0, cached_input: 0, output: 0 }, started_at: 'a', ended_at: 'b' }));
+  await writeFile(join(dir, 'gate-override.json'), JSON.stringify({ at: 'a', code: 'gate_rounds', unapplied: [item] }));
+  const review = await jobs.readReview('app', 'O-1', 1);
+  assert.ok(review !== undefined && 'items' in review);
+  assert.deepEqual(review.items, [{ ...item, severity: 'major' }, { ...item, severity: 'nit' }]);
+  assert.equal(actedVerdict(review), 'fix');
+  const gate = await jobs.readGate('app', 'O-1', 1);
+  assert.ok(gate !== undefined && 'items' in gate);
+  assert.deepEqual(gate.items, [{ ...item, severity: 'major' }]);
+  assert.deepEqual((await jobs.readGateOverride('app', 'O-1', 1))!.unapplied, [{ ...item, severity: 'major' }]);
+});
+
+test('one major among nits is a Fix section with the nits as optional; a fix with nits only goes on as clean and its nits reach the MR text', async () => {
+  const env = await newEnv('review-nits', { SF_REVIEW: 'on' });
+  const repo = await newRepo(env, 'review-nits-repo', false);
+  await putTask(env, repo, 'N-1', 'Greet the reader');
+  await script(env, [
+    { write: { 'README.md': 'hello world\n' }, text: 'Report of iteration 1' },
+    { write: { 'README.md': 'hello reader\n' }, text: 'Report of iteration 2' },
+    { write: { '.software-factory/N-1.mr.md': mrText('feat(N-1): Greet the reader') }, text: 'prepared' },
+  ]);
+  const first = { verdict: 'fix', summary: 'One real problem.', items: [nit('README.md', 'No capital.'), major('README.md', 'It greets the world.')], accepted_sensitive: [] };
+  const second = { verdict: 'fix', summary: 'Only nits left.', items: [nit('README.md', 'No capital.'), nit('README.md', 'No  capital.', 'Same.'), nit('a.txt', 'Could say more.')], accepted_sensitive: [] };
+  await reviewScript(env, [{ output: first }, { output: second }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'N-1' });
+    const ready = await waitFor(served, 'N-1', 'ready_for_human_review', 2);
+    assert.equal(await taskFile(repo, 'N-1'), `${task('N-1', 'Greet the reader')}\n\n${[
+      '## Fix 1', '', 'Review by Claude: One real problem.', '',
+      '1. [major] `README.md`: It greets the world. Expected: Fixed.', '',
+      'Nits (optional):',
+      '2. [nit] `README.md`: No capital. Expected: Nicer.', '',
+    ].join('\n')}`);
+    // Recorded as given; the event carries the verdict acted on.
+    assert.deepEqual(ready.review, { status: 'done', verdict: 'fix', summary: second.summary });
+    const jobs = new JobStore(env.state);
+    const recorded = await jobs.readReview('app', 'N-1', 2);
+    assert.ok(recorded !== undefined && 'verdict' in recorded);
+    assert.deepEqual([recorded.verdict, recorded.items], ['fix', second.items]);
+    assert.deepEqual((await eventsOf(env, 'N-1')).filter((record) => record.type === 'review').map((record) => [record.iteration, record.verdict, record.effective]), [[1, 'fix', undefined], [2, 'fix', 'clean']]);
+    assert.match((await runCli(env, ['watch', 'app', 'N-1', '--once'])).stdout, /^\d\d:\d\d:\d\d \[2\] review by claude: fix \(3 items\), acted on as clean$/m);
+    assert.equal((await jobs.read('app', 'N-1'))!.fixes, 1);
+    // The nits of the clean iteration, deduplicated, in the MR text by the factory; the model's "- None." goes.
+    const mr = (await jobs.readMrText('app', 'N-1'))!;
+    assert.ok(mr.includes([
+      '## Special things to note',
+      '### Nits not applied',
+      '- [nit] `README.md`: No capital. Expected: Nicer.',
+      '- [nit] `a.txt`: Could say more. Expected: Nicer.',
+      '',
+      '## Change outline',
+    ].join('\n')), mr);
+  } finally {
+    await stop(served);
+  }
+});
+
+test('a fix with nits only still makes a fix when an undeclared sensitive path is not accepted, whatever severity the reviewer gave it', async () => {
+  const env = await newEnv('review-nits-sensitive', { SF_REVIEW: 'on' });
+  const repo = await newRepo(env, 'review-nits-sensitive-repo', false);
+  await putTask(env, repo, 'N-2', 'Add a script');
+  await script(env, [
+    { write: { 'package.json': '{}\n' }, text: 'iteration 1' },
+    { text: 'package.json is needed.' },
+    { write: { '.software-factory/N-2.mr.md': mrText('feat(N-2): Add a script') }, text: 'prepared' },
+  ]);
+  const nitsOnly = { verdict: 'fix', summary: 'Only nits.', items: [nit('package.json', 'Undeclared, but small.')], accepted_sensitive: [] };
+  const accepted = { ...CLEAN, summary: 'package.json is accepted: the tests run with npm.', accepted_sensitive: ['package.json'] };
+  await reviewScript(env, [{ output: nitsOnly }, { output: accepted }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'N-2' });
+    await waitFor(served, 'N-2', 'ready_for_human_review', 2);
+    assert.ok((await taskFile(repo, 'N-2')).endsWith([
+      '## Fix 1', '', 'Review by Claude: Only nits.', '',
+      '1. [major] `package.json`: Undeclared sensitive path. Expected: Remove it, or justify it in the Report.', '',
+      'Nits (optional):',
+      '2. [nit] `package.json`: Undeclared, but small. Expected: Nicer.', '',
+    ].join('\n')));
+    assert.deepEqual((await eventsOf(env, 'N-2')).filter((record) => record.type === 'review').map((record) => [record.iteration, record.verdict, record.effective]), [[1, 'fix', undefined], [2, 'clean', undefined]]);
+    // The clean iteration had no nits: no list in the MR text.
+    assert.ok(!(await new JobStore(env.state).readMrText('app', 'N-2'))!.includes('### Nits not applied'));
   } finally {
     await stop(served);
   }

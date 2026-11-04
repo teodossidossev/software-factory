@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import * as z from 'zod/v4';
 import { writeFileAtomic, writeFileAtomicWith } from './atomic.js';
 import { FactoryError } from './errors.js';
+import type { ReviewItem } from './review.js';
 
 export const JOB_STATES = [
   'starting',
@@ -109,7 +110,7 @@ export type ReviewRecord =
       reviewer: string;
       verdict: 'clean' | 'fix';
       summary: string;
-      items: Array<{ path: string; problem: string; expected: string }>;
+      items: ReviewItem[];
       accepted_sensitive: string[];
       cost_usd: number | null;
       started_at: string;
@@ -130,7 +131,7 @@ export type GateRecord =
       reviewer: string;
       verdict: 'clean' | 'fix';
       summary: string;
-      items: Array<{ path: string; problem: string; expected: string }>;
+      items: ReviewItem[];
       accepted_sensitive: string[];
       model?: string;
       tokens: GateTokens;
@@ -146,7 +147,7 @@ export type GateRecord =
 export interface GateOverride {
   at: string;
   code: string;
-  unapplied: Array<{ path: string; problem: string; expected: string }> | string;
+  unapplied: ReviewItem[] | string;
 }
 
 export interface Iteration {
@@ -166,7 +167,9 @@ export type EventRecord = { ts: string; iteration: number } & (
   | { type: 'placeholders_removed'; paths: string[] }
   // The outcome of a review (SF-038), Claude's or the gate's (SF-039, reviewer codex); ignored when
   // the job had moved on before it ended.
-  | { type: 'review'; reviewer: string; verdict: 'clean' | 'fix'; items: number; ignored?: true }
+  // effective: the verdict the factory acted on when it is not the reviewer's (SF-051): clean for a
+  // fix with nits only, fix for a clean that leaves an undeclared sensitive path unaccepted.
+  | { type: 'review'; reviewer: string; verdict: 'clean' | 'fix'; items: number; effective?: 'clean' | 'fix'; ignored?: true }
   | { type: 'review_failed'; reviewer: string; error: string; ignored?: true }
   // The reviewers live (SF-045): one JSONL event of the Codex gate's stdout, one SDK message of the
   // Claude review session; truncated when cut to MAX_LIVE_EVENT_BYTES (cutEvent).
@@ -233,6 +236,16 @@ export function isActive(job: Job): boolean {
 
 export function now(): string {
   return new Date().toISOString();
+}
+
+// Items stored before SF-051 have no severity: they read as major.
+function majorUnlessSet(items: ReviewItem[]): ReviewItem[] {
+  return items.map((item) => (item.severity === undefined ? { ...item, severity: 'major' } : item));
+}
+
+// A review or gate record with every item's severity set.
+function withSeverity<T extends ReviewRecord | GateRecord>(record: T): T {
+  return 'items' in record && Array.isArray(record.items) ? { ...record, items: majorUnlessSet(record.items) } : record;
 }
 
 async function readOrMissing(path: string): Promise<string | undefined> {
@@ -375,7 +388,7 @@ export class JobStore {
   // The review of an iteration; undefined while none ended (or with the review off).
   async readReview(workspace: string, ticket: string, number: number): Promise<ReviewRecord | undefined> {
     const text = await readOrMissing(join(this.iterationDir(workspace, ticket, number), 'review.json'));
-    return text === undefined ? undefined : (JSON.parse(text) as ReviewRecord);
+    return text === undefined ? undefined : withSeverity(JSON.parse(text) as ReviewRecord);
   }
 
   async writeGate(workspace: string, ticket: string, number: number, gate: GateRecord): Promise<void> {
@@ -389,13 +402,17 @@ export class JobStore {
   // The user's override of the gate on an iteration (SF-047); undefined when there is none.
   async readGateOverride(workspace: string, ticket: string, number: number): Promise<GateOverride | undefined> {
     const text = await readOrMissing(join(this.iterationDir(workspace, ticket, number), 'gate-override.json'));
-    return text === undefined ? undefined : (JSON.parse(text) as GateOverride);
+    if (text === undefined) {
+      return undefined;
+    }
+    const override = JSON.parse(text) as GateOverride;
+    return Array.isArray(override.unapplied) ? { ...override, unapplied: majorUnlessSet(override.unapplied) } : override;
   }
 
   // The gate's review of an iteration; undefined while none ended (or with the gate off).
   async readGate(workspace: string, ticket: string, number: number): Promise<GateRecord | undefined> {
     const text = await readOrMissing(join(this.iterationDir(workspace, ticket, number), 'gate.json'));
-    return text === undefined ? undefined : (JSON.parse(text) as GateRecord);
+    return text === undefined ? undefined : withSeverity(JSON.parse(text) as GateRecord);
   }
 
   // The recorded cost of the published iterations 1 to count: the sum of their cost_usd and of the

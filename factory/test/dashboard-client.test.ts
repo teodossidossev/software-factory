@@ -1,8 +1,9 @@
 // Behaviour of static/app.js, run under node:vm against the fake page of test/support/fake-dom.ts:
 // the action matrix per state, the confirmations (cancel, discard, double submission), the say
 // draft rules, the outcome texts and what happens when the selection changes while a request is
-// out, the job views and the reviews. These are script checks, not browser acceptance: the
-// manual steps are in factory/README.md.
+// out. The job opens in the board's drawer (the URL's #<ws>/<ticket> or its card); the board
+// itself is tested in dashboard-board-client.test.ts. These are script checks, not browser
+// acceptance: the manual steps are in factory/README.md.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { type FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
@@ -51,6 +52,8 @@ async function openPage(states: Record<string, JobShape> = { 'app/T-1': A, 'app/
     const match = /^api\/jobs\/([^/]+)\/([^/]+)$/.exec(path);
     return match && !hold.on ? detail(states[`${match[1]}/${match[2]}`]!) : undefined;
   });
+  // The job in the URL opens in the drawer once the jobs are loaded.
+  page.location.hash = '#app/T-1';
   page.document.dispatch('DOMContentLoaded');
   await page.flush();
   const stream = page.streams.at(-1)!;
@@ -77,8 +80,10 @@ function assertControls(page: Page, label: string, approve: boolean, abort: bool
   assert.deepEqual([!page.$('approve-button').disabled, !page.$('abort-button').disabled, !page.$('say-button').disabled], [approve, abort, send], label);
 }
 
+// The card of a job on the board: the button that opens it in the drawer.
 function jobButton(page: Page, key: string) {
-  return page.$('job-list').all().find((element) => element.tagName === 'BUTTON' && element.textContent.startsWith(key))!;
+  const all = ['implementing', 'reviewing', 'you', 'done'].flatMap((column) => page.$(`list-${column}`).all());
+  return all.find((element) => element.tagName === 'BUTTON' && element.dataset.key === key)!;
 }
 
 async function selectJob(page: Page, key: string): Promise<void> {
@@ -748,7 +753,7 @@ test('client: the job views are tabs; the selected one is kept across jobs; the 
 });
 
 // The Files view (SF-024): the rows in IntelliJ's shape and order, the diff of one file on
-// demand from the loaded Patch, the badges on the job card and in the list.
+// demand from the loaded Patch, the badges on the job card and the chips on the board card.
 test('client: the Files view lists sensitive, deleted and the rest in order, expands one file\'s diff from the Patch, and the badges count them', async () => {
   const files = [
     { path: 'src/zeta.ts', status: 'modified', sensitive: 'no', additions: 2, deletions: 1 },
@@ -777,18 +782,19 @@ test('client: the Files view lists sensitive, deleted and the rest in order, exp
     }
     return path === 'api/jobs/app/T-1/iterations/1/patch' ? patch : undefined;
   });
+  page.location.hash = '#app/T-1';
   page.document.dispatch('DOMContentLoaded');
   await page.flush();
   const stream = page.streams.at(-1)!;
   stream.emit('open');
-  stream.emit('jobs', { jobs: [{ ...job(A), files: 6, undeclared: 1, deleted: 1 }] });
+  stream.emit('jobs', { jobs: [{ ...job(A), files: 6, undeclared: 1, deleted: 1, cost_usd: 0.5 }] });
   stream.emit('job', withFiles(A));
   await page.flush();
 
-  // Badges: on the job card and on the list card.
+  // Badges on the job card; the board card's chips: the iteration, the files, the sensitive ones and the cost.
   assert.deepEqual(page.$('job-badges').all().map((element) => `${element.className}:${element.textContent}`), ['badge f-count:6 files', 'badge f-undeclared:1 sensitive', 'badge f-deleted:1 deleted']);
   const card = jobButton(page, 'app/T-1');
-  assert.deepEqual(card.all().filter((element) => element.className.startsWith('badge f-')).map((element) => element.textContent), ['6 files', '1 sensitive', '1 deleted']);
+  assert.deepEqual(card.all().filter((element) => element.className.split(' ')[0] === 'chip').map((element) => element.textContent), ['iteration 1', '6 files', '1 sensitive', 'est. $0.50']);
 
   // The Files view: hidden under Report, shown under Files; the summary and the order.
   assert.equal(page.$('files-view').hidden, true);

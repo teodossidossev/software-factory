@@ -1,8 +1,9 @@
 // The dashboard's start screen, server side: the workspaces of the registry (list, add, remove)
 // and the tickets of each workspace (list the Task files without a live job, write a ticket draft
-// from the User's request). It uses the same registry file, validation and Task file writer as
-// `sf workspace add` and `write_task`, so the CLI and the page agree; a job is started through
-// the Execution, never from here.
+// from the User's request, read a Task file's text and title for the board). It uses the same
+// registry file, validation and Task file reader and writer as `sf workspace add` and
+// `write_task`, so the CLI and the page agree; a job is started through the Execution, never from
+// here.
 import { lstat, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 import { writeFileAtomic } from './atomic.js';
@@ -11,7 +12,7 @@ import type { ExclusiveScope } from './execution.js';
 import { runGit } from './git.js';
 import { type JobState, type JobStore, TERMINAL_STATES } from './jobs.js';
 import { loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, type Workspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
-import { DRAFT_MARKER, isDraft, MAX_TASK_BYTES, parseFrontMatter, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN, writeTask } from './task-file.js';
+import { ARCHIVE_DIR, DRAFT_MARKER, isDraft, MAX_TASK_BYTES, parseFrontMatter, readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN, writeTask } from './task-file.js';
 
 export const MAX_TITLE_CHARS = 200;
 export const MAX_REQUEST_BYTES = 64 * 1024;
@@ -50,7 +51,7 @@ export interface ArchivedRow {
   title: string;
 }
 
-export const ARCHIVE_DIR = 'archive';
+export { ARCHIVE_DIR } from './task-file.js';
 
 export interface TicketInput {
   workspace: string;
@@ -328,6 +329,39 @@ export class Setup {
       await rm(this.#requestPath(name, ticket), { force: true });
       return { workspace: name, ticket, deleted: found.map((path) => `${TASK_DIR}/${path}`), jobArchived };
     });
+  }
+
+  // The text of a ticket's Task file (archived: its copy in the archive), through the Task file
+  // reader: both names checked, a regular file of valid Task content, else a refusal.
+  async taskText(name: string, ticket: string, archived = false): Promise<string> {
+    if (!WORKSPACE_NAME_PATTERN.test(name)) {
+      throw new FactoryError('invalid_name', `workspace name must be ${WORKSPACE_NAME_DESCRIPTION}.`);
+    }
+    if (!TICKET_PATTERN.test(ticket)) {
+      throw new FactoryError('invalid_ticket', `ticket must be ${TICKET_DESCRIPTION}.`);
+    }
+    return readTask(await resolveWorkspace(name, this.#configDir), ticket, archived);
+  }
+
+  // The title of a ticket's Task file, or null when there is none to read (a job whose Task file
+  // was archived or deleted, an unregistered workspace): the board's card falls back to the
+  // branch. Read for every job on every refresh, so only the registry and the file are read (no
+  // Git check of the checkout); the title is display text, never a decision.
+  async taskTitle(name: string, ticket: string): Promise<string | null> {
+    try {
+      const { workspaces } = await loadRegistry(this.#configDir);
+      const entry = WORKSPACE_NAME_PATTERN.test(name) && TICKET_PATTERN.test(ticket) && Object.hasOwn(workspaces, name) ? workspaces[name] : undefined;
+      if (entry === undefined) {
+        return null;
+      }
+      const path = join(entry.read_checkout, TASK_DIR, `${ticket}.md`);
+      if (!(await isFile(path)) || (await lstat(path)).size > MAX_TASK_BYTES) {
+        return null;
+      }
+      return parseFrontMatter(await readFile(path, 'utf8'))?.get('title') || null;
+    } catch {
+      return null;
+    }
   }
 
   // The archived Task files of every usable workspace, sorted by workspace and ticket.

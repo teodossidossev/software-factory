@@ -1,7 +1,8 @@
 // A raw HTTP client of the Dashboard for tests: one request with full control of method, headers
 // and body (fetchRaw), an action POST as the page sends it (act), a server-sent event stream
 // (openStream), a fake DashboardActions that records every call (fakeActions) and a fake
-// DashboardSetup with settable workspaces and tickets that records every change (fakeSetup).
+// DashboardSetup with settable workspaces, tickets and Task files that records every change
+// (fakeSetup).
 import assert from 'node:assert/strict';
 import { get, request, type IncomingMessage } from 'node:http';
 import type { DashboardActions, DashboardSetup } from '../../src/dashboard.js';
@@ -198,6 +199,11 @@ export type SetupCall = ['addWorkspace', string, string] | ['removeWorkspace', s
 
 export interface FakeSetup extends DashboardSetup {
   rows: { workspaces: WorkspaceRow[]; tickets: TicketRow[]; archived: ArchivedRow[] };
+  // The Task files taskText reads, by "<ws>/<ticket>" (archived: "<ws>/archive/<ticket>"); a
+  // missing one is task_not_found. taskTitle reads the title of the active one.
+  texts: Map<string, string>;
+  // The taskText calls, in order: "<ws>/<ticket>" or "<ws>/archive/<ticket>".
+  reads: string[];
   calls: SetupCall[];
   // What the next change answers: a value, an error to throw, or a function.
   answer: unknown;
@@ -216,8 +222,20 @@ export function ticketRow(workspace: string, ticket: string, title = `Ticket ${t
 export function fakeSetup(workspaces: WorkspaceRow[] = [], tickets: TicketRow[] = [], archived: ArchivedRow[] = []): FakeSetup {
   const fake: FakeSetup = {
     rows: { workspaces, tickets, archived },
+    texts: new Map(),
+    reads: [],
     calls: [],
     answer: undefined,
+    taskText: async (workspace, ticket, archived = false) => {
+      const key = archived ? `${workspace}/archive/${ticket}` : `${workspace}/${ticket}`;
+      fake.reads.push(key);
+      const text = fake.texts.get(key);
+      if (text === undefined) {
+        throw new FactoryError('task_not_found', `No Task file for ${key}.`);
+      }
+      return text;
+    },
+    taskTitle: async (workspace, ticket) => /^title: (.*)$/m.exec(fake.texts.get(`${workspace}/${ticket}`) ?? '')?.[1] ?? null,
     workspaces: async () => fake.rows.workspaces,
     tickets: async () => fake.rows.tickets,
     archivedTickets: async () => fake.rows.archived,

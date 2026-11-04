@@ -10,204 +10,241 @@
 </head>
 <body>
   <header class="topbar">
-    <h1>Software Factory</h1>
-    <span id="connection" class="connection">connecting</span>
+    <div class="topbar-title">
+      <h1>Software Factory</h1>
+      <span id="connection" class="connection">connecting</span>
+    </div>
+    <nav class="row topbar-actions" aria-label="Setup">
+      <button id="open-archived" type="button" class="link-button">Archived <span id="archived-count"></span></button>
+      <button id="open-workspaces" type="button" class="btn">Workspaces</button>
+      <button id="open-new-ticket" type="button" class="btn btn-primary">New ticket</button>
+    </nav>
   </header>
   <main class="page">
-    <details id="setup" class="card setup" open>
-      <summary class="card-head">
-        <span class="card-title">Setup</span>
-        <span id="setup-summary" class="hint"></span>
-      </summary>
-      <div class="setup-grid">
-        <section class="setup-column" aria-labelledby="workspaces-title">
-          <h3 id="workspaces-title" class="section-title">Workspaces</h3>
-          <p id="no-workspaces" class="hint" hidden>No workspace yet. Add the local checkout of the repository to work in.</p>
-          <ul id="workspace-list" class="cards"></ul>
-          <form id="workspace-form" class="form">
-            <div class="field">
-              <label for="workspace-name">Name</label>
-              <input id="workspace-name" type="text" autocomplete="off" spellcheck="false" placeholder="my-app">
-            </div>
-            <div class="field">
-              <label for="workspace-path">Path of the local checkout</label>
-              <input id="workspace-path" type="text" autocomplete="off" spellcheck="false" placeholder="/home/me/projects/my-app">
-              <p class="hint">Typed or pasted: the page cannot browse this machine's disk. The Implementer works in this checkout, so do not edit it in the IDE while a job runs (a worktree per job comes with SF-019).</p>
-            </div>
-            <div class="row">
-              <button id="workspace-add" type="submit" class="btn">Add workspace</button>
-            </div>
-            <div id="workspace-status" class="status" role="status" aria-live="polite"></div>
-          </form>
-        </section>
-        <section class="setup-column" aria-labelledby="ticket-title-heading">
-          <h3 id="ticket-title-heading" class="section-title">New ticket</h3>
-          <form id="ticket-form" class="form">
-            <div class="field-row">
-              <div class="field">
-                <label for="ticket-workspace">Workspace</label>
-                <select id="ticket-workspace"></select>
-              </div>
-              <div class="field">
-                <label for="ticket-key">Ticket key</label>
-                <input id="ticket-key" type="text" autocomplete="off" spellcheck="false" placeholder="PROJ-123">
-              </div>
-            </div>
-            <div class="field">
-              <label for="ticket-title">Title</label>
-              <input id="ticket-title" type="text" autocomplete="off" placeholder="One line">
-            </div>
-            <div class="field">
-              <label for="ticket-request">What you want, in your words</label>
-              <textarea id="ticket-request" rows="5"></textarea>
-              <p class="hint">Not written into the Task file: these words open the conversation, where ChatGPT investigates, discusses it with you and writes the Task file. Once it is written, you start the job here, under Tickets.</p>
-            </div>
-            <fieldset class="owner">
-              <legend>Context owner</legend>
-              <label class="choice"><input id="owner-chatgpt" type="radio" name="owner" value="chatgpt" checked> ChatGPT, in the browser</label>
-              <label class="choice is-off"><input id="owner-claude" type="radio" name="owner" value="claude" disabled> Claude Code (SF-023)</label>
-            </fieldset>
-            <div class="row">
-              <button id="ticket-create" type="submit" class="btn btn-primary">Create the ticket</button>
-            </div>
-            <div id="ticket-status" class="status" role="status" aria-live="polite"></div>
-          </form>
-          <h3 class="section-title tickets-title">Tickets without a job</h3>
-          <p id="no-tickets" class="hint" hidden>None yet. A ticket created above appears here until its job starts.</p>
-          <ul id="ticket-list" class="cards"></ul>
-          <details id="archived" class="archived" hidden>
-            <summary class="card-head"><span class="section-title">Archived <span id="archived-count"></span></span></summary>
-            <ul id="archived-list" class="cards"></ul>
-          </details>
-          <div id="ticket-confirm" class="confirm" role="dialog" aria-modal="false" aria-labelledby="ticket-confirm-title" aria-describedby="ticket-confirm-text" hidden>
-            <h4 id="ticket-confirm-title"></h4>
-            <p id="ticket-confirm-text"></p>
-            <div class="row">
-              <button id="ticket-ok" type="button" class="btn btn-danger">Delete the ticket</button>
-              <button id="ticket-cancel" type="button" class="btn">Cancel</button>
-            </div>
-          </div>
-          <div id="ticket-action-status" class="status" role="status" aria-live="polite"></div>
-          <p id="conversation-copy-status" class="hint" role="status" aria-live="polite"></p>
-        </section>
-      </div>
-    </details>
-
-    <div class="workbench">
-      <nav class="sidebar" aria-label="Jobs">
-        <section class="card">
-          <h2 class="card-title">Jobs</h2>
-          <p id="no-jobs" class="hint" hidden>No jobs yet.</p>
-          <ul id="job-list" class="job-list"></ul>
-        </section>
-      </nav>
-
-      <section id="detail" class="detail" hidden>
-        <div class="card job-card">
-          <div class="job-head">
-            <div class="job-title">
-              <h2 id="job-ticket"></h2>
-              <span id="job-state" class="badge"></span>
-              <span id="job-badges" class="job-badges"></span>
-            </div>
-            <div class="row head-actions">
-              <button id="approve-button" type="button" class="btn btn-primary" disabled>Approve…</button>
-              <button id="abort-button" type="button" class="btn" disabled>Abort…</button>
-              <button id="retry-review-button" type="button" class="btn" hidden>Retry review</button>
-              <button id="archive-job-button" type="button" class="btn" hidden>Archive</button>
-              <button id="refresh-button" type="button" class="btn" hidden>Refresh state</button>
-            </div>
-          </div>
-          <dl class="facts">
-            <div><dt>Branch</dt><dd id="job-branch"></dd></div>
-            <div><dt>Base</dt><dd id="job-base"></dd></div>
-            <div><dt>Iteration</dt><dd id="job-iteration"></dd></div>
-            <div><dt title="An estimate of the API-equivalent price, not a charge">Cost</dt><dd id="job-cost"></dd></div>
-            <div><dt>Updated</dt><dd id="job-updated"></dd></div>
-            <div><dt>Worktree</dt><dd id="job-worktree"></dd></div>
-          </dl>
-          <p id="job-error" class="error" hidden></p>
-          <p id="action-reasons" class="hint"></p>
-          <div id="confirm" class="confirm" role="dialog" aria-modal="false" aria-labelledby="confirm-title" aria-describedby="confirm-text" hidden>
-            <h4 id="confirm-title"></h4>
-            <p id="confirm-text"></p>
-            <label id="discard-label" class="choice danger-text" hidden>
-              <input id="discard" type="checkbox">
-              Also discard: remove the worktree and the branch with all its changes (git worktree remove --force, git branch -D). Cannot be undone.
-            </label>
-            <label id="as-is-label" class="choice" hidden>
-              <input id="as-is" type="checkbox">
-              Push the branch as it is, even if its tip is not the commit the factory prepared (it was edited by hand).
-            </label>
-            <div class="row">
-              <button id="confirm-ok" type="button" class="btn btn-primary">Confirm</button>
-              <button id="confirm-cancel" type="button" class="btn">Cancel</button>
-            </div>
-          </div>
-          <div id="action-status" class="status" role="status" aria-live="polite"></div>
-          <div id="action-doubt" class="status error" role="status" aria-live="polite"></div>
-
-          <form id="say-form" class="say">
-            <label for="say-input" class="section-title">Message to the Implementer</label>
-            <textarea id="say-input" rows="3" disabled placeholder="Enter adds a line; Send submits"></textarea>
-            <div class="row">
-              <button id="say-button" type="submit" class="btn" disabled>Send</button>
-              <span id="say-reason" class="hint"></span>
-            </div>
-          </form>
-        </div>
-
-        <div class="card">
-          <div id="job-tabs" class="tabs primary" role="tablist" aria-label="Job views"></div>
-
-          <div id="tab-iterations" class="tab-panel">
-            <p id="no-iterations" class="hint">No iteration published yet.</p>
-            <div class="tabs-row">
-              <div id="iteration-tabs" class="tabs" role="tablist"></div>
-              <div id="iteration-views" class="tabs secondary" role="tablist" hidden>
-                <button type="button" data-view="report" role="tab">Report</button>
-                <button type="button" data-view="files" role="tab">Files</button>
-                <button type="button" data-view="patch" role="tab">Patch</button>
-              </div>
-            </div>
-            <p id="iteration-meta" class="hint"></p>
-            <div id="iteration-review" class="review" hidden></div>
-            <div id="iteration-gate" class="review" hidden></div>
-            <div id="files-view" class="files" hidden>
-              <div class="files-head">
-                <span id="files-summary" class="files-summary"></span>
-                <span class="row">
-                  <button id="files-expand" type="button" class="btn btn-sm">Expand all</button>
-                  <button id="files-collapse" type="button" class="btn btn-sm">Collapse all</button>
-                </span>
-              </div>
-              <p id="no-files" class="hint" hidden></p>
-              <ul id="files-list" class="files-list"></ul>
-            </div>
-            <pre id="iteration-body" class="document"></pre>
-          </div>
-
-          <div id="tab-mr" class="tab-panel" hidden>
-            <p id="no-mr" class="hint">No merge request text yet: it is written during MR preparation, after approve.</p>
-            <div id="mr-panel" hidden>
-              <pre id="mr-body" class="document"></pre>
-            </div>
-          </div>
-
-          <div id="tab-history" class="tab-panel" hidden>
-            <ol id="history" class="history"></ol>
-          </div>
-
-          <div id="tab-events" class="tab-panel" hidden>
-            <div class="events-head">
-              <p class="hint">The Implementer's session, as sf watch prints it.</p>
-              <label class="choice"><input id="follow" type="checkbox" checked> follow</label>
-            </div>
-            <div id="events" class="events" tabindex="0"></div>
-          </div>
-        </div>
+    <div id="workspace-filter" class="filter" role="group" aria-label="Workspace"></div>
+    <p id="board-hint" class="hint" hidden></p>
+    <div id="board" class="board">
+      <section class="col" aria-labelledby="col-planned-title">
+        <div class="col-head"><h2 id="col-planned-title">Planned</h2><span id="count-planned" class="count"></span></div>
+        <ul id="list-planned" class="col-list"></ul>
+      </section>
+      <section class="col" aria-labelledby="col-implementing-title">
+        <div class="col-head"><h2 id="col-implementing-title">Implementing</h2><span id="count-implementing" class="count"></span></div>
+        <ul id="list-implementing" class="col-list"></ul>
+      </section>
+      <section class="col" aria-labelledby="col-reviewing-title">
+        <div class="col-head"><h2 id="col-reviewing-title">Reviewing</h2><span id="count-reviewing" class="count"></span></div>
+        <ul id="list-reviewing" class="col-list"></ul>
+      </section>
+      <section class="col col-you" aria-labelledby="col-you-title">
+        <div class="col-head"><h2 id="col-you-title">Your turn</h2><span id="count-you" class="count"></span></div>
+        <ul id="list-you" class="col-list"></ul>
+      </section>
+      <section class="col" aria-labelledby="col-done-title">
+        <div class="col-head"><h2 id="col-done-title">Done</h2><span id="count-done" class="count"></span></div>
+        <ul id="list-done" class="col-list"></ul>
+        <button id="done-all" type="button" class="link-button" hidden></button>
       </section>
     </div>
   </main>
+
+  <div id="ticket-action-status" class="status toast" role="status" aria-live="polite" title="Click to dismiss"></div>
+  <div id="ticket-confirm" class="confirm modal" role="dialog" aria-modal="true" aria-labelledby="ticket-confirm-title" aria-describedby="ticket-confirm-text" hidden>
+    <h4 id="ticket-confirm-title"></h4>
+    <p id="ticket-confirm-text"></p>
+    <div class="row">
+      <button id="ticket-ok" type="button" class="btn btn-danger">Delete the ticket</button>
+      <button id="ticket-cancel" type="button" class="btn">Cancel</button>
+    </div>
+  </div>
+
+  <div id="scrim" class="scrim" hidden></div>
+  <aside id="drawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1" hidden>
+    <div class="drawer-head">
+      <div class="drawer-heading">
+        <p id="drawer-kicker" class="drawer-kicker"></p>
+        <h2 id="drawer-title"></h2>
+      </div>
+      <button id="drawer-close" type="button" class="btn" aria-label="Close">✕</button>
+    </div>
+
+    <section id="task-panel" class="panel" hidden>
+      <div id="task-conversation" class="task-conversation" hidden>
+        <p id="task-conversation-hint" class="hint"></p>
+        <div class="row"><a id="task-conversation-link" class="btn btn-sm btn-primary" target="_blank" rel="noopener noreferrer" hidden>Open the conversation</a></div>
+        <div class="copy-box">
+          <textarea id="task-conversation-text" rows="2" readonly aria-label="The conversation link or its first message"></textarea>
+          <button id="task-conversation-copy" type="button" class="btn btn-sm">Copy</button>
+        </div>
+        <p id="conversation-copy-status" class="hint" role="status" aria-live="polite"></p>
+      </div>
+      <pre id="task-body" class="document"></pre>
+    </section>
+
+    <section id="workspaces-panel" class="panel" hidden>
+      <p id="no-workspaces" class="hint" hidden>No workspace yet. Add the local checkout of the repository to work in.</p>
+      <ul id="workspace-list" class="cards"></ul>
+      <form id="workspace-form" class="form">
+        <h3 class="section-title">Add a workspace</h3>
+        <div class="field">
+          <label for="workspace-name">Name</label>
+          <input id="workspace-name" type="text" autocomplete="off" spellcheck="false" placeholder="my-app">
+        </div>
+        <div class="field">
+          <label for="workspace-path">Path of the local checkout</label>
+          <input id="workspace-path" type="text" autocomplete="off" spellcheck="false" placeholder="/home/me/projects/my-app">
+          <p class="hint">Typed or pasted: the page cannot browse this machine's disk. Every job works in a worktree created from this checkout.</p>
+        </div>
+        <div class="row">
+          <button id="workspace-add" type="submit" class="btn">Add workspace</button>
+        </div>
+        <div id="workspace-status" class="status" role="status" aria-live="polite"></div>
+      </form>
+    </section>
+
+    <section id="ticket-panel" class="panel" hidden>
+      <form id="ticket-form" class="form">
+        <div class="field-row">
+          <div class="field">
+            <label for="ticket-workspace">Workspace</label>
+            <select id="ticket-workspace"></select>
+          </div>
+          <div class="field">
+            <label for="ticket-key">Ticket key</label>
+            <input id="ticket-key" type="text" autocomplete="off" spellcheck="false" placeholder="PROJ-123">
+          </div>
+        </div>
+        <div class="field">
+          <label for="ticket-title">Title</label>
+          <input id="ticket-title" type="text" autocomplete="off" placeholder="One line">
+        </div>
+        <div class="field">
+          <label for="ticket-request">What you want, in your words</label>
+          <textarea id="ticket-request" rows="5"></textarea>
+          <p class="hint">Not written into the Task file: these words open the conversation, where ChatGPT investigates, discusses it with you and writes the Task file. Once it is written, you start the job on the board, with Start on its Planned card.</p>
+        </div>
+        <fieldset class="owner">
+          <legend>Context owner</legend>
+          <label class="choice"><input id="owner-chatgpt" type="radio" name="owner" value="chatgpt" checked> ChatGPT, in the browser</label>
+          <label class="choice is-off"><input id="owner-claude" type="radio" name="owner" value="claude" disabled> Claude Code (SF-023)</label>
+        </fieldset>
+        <div class="row">
+          <button id="ticket-create" type="submit" class="btn btn-primary">Create the ticket</button>
+        </div>
+        <div id="ticket-status" class="status" role="status" aria-live="polite"></div>
+      </form>
+    </section>
+
+    <section id="archived-panel" class="panel" hidden>
+      <p id="no-archived" class="hint">No archived ticket.</p>
+      <ul id="archived-list" class="cards"></ul>
+    </section>
+
+    <section id="detail" class="detail" hidden>
+      <div class="card job-card">
+        <div class="job-head">
+          <div class="job-title">
+            <h2 id="job-ticket"></h2>
+            <span id="job-state" class="badge"></span>
+            <span id="job-badges" class="job-badges"></span>
+          </div>
+          <div class="row head-actions">
+            <button id="approve-button" type="button" class="btn btn-primary" disabled>Approve…</button>
+            <button id="abort-button" type="button" class="btn" disabled>Abort…</button>
+            <button id="retry-review-button" type="button" class="btn" hidden>Retry review</button>
+            <button id="archive-job-button" type="button" class="btn" hidden>Archive</button>
+            <button id="refresh-button" type="button" class="btn" hidden>Refresh state</button>
+          </div>
+        </div>
+        <dl class="facts">
+          <div><dt>Branch</dt><dd id="job-branch"></dd></div>
+          <div><dt>Base</dt><dd id="job-base"></dd></div>
+          <div><dt>Iteration</dt><dd id="job-iteration"></dd></div>
+          <div><dt title="An estimate of the API-equivalent price, not a charge">Cost</dt><dd id="job-cost"></dd></div>
+          <div><dt>Updated</dt><dd id="job-updated"></dd></div>
+          <div><dt>Worktree</dt><dd id="job-worktree"></dd></div>
+        </dl>
+        <p id="job-error" class="error" hidden></p>
+        <p id="action-reasons" class="hint"></p>
+        <div id="confirm" class="confirm" role="dialog" aria-modal="false" aria-labelledby="confirm-title" aria-describedby="confirm-text" hidden>
+          <h4 id="confirm-title"></h4>
+          <p id="confirm-text"></p>
+          <label id="discard-label" class="choice danger-text" hidden>
+            <input id="discard" type="checkbox">
+            Also discard: remove the worktree and the branch with all its changes (git worktree remove --force, git branch -D). Cannot be undone.
+          </label>
+          <label id="as-is-label" class="choice" hidden>
+            <input id="as-is" type="checkbox">
+            Push the branch as it is, even if its tip is not the commit the factory prepared (it was edited by hand).
+          </label>
+          <div class="row">
+            <button id="confirm-ok" type="button" class="btn btn-primary">Confirm</button>
+            <button id="confirm-cancel" type="button" class="btn">Cancel</button>
+          </div>
+        </div>
+        <div id="action-status" class="status" role="status" aria-live="polite"></div>
+        <div id="action-doubt" class="status error" role="status" aria-live="polite"></div>
+
+        <form id="say-form" class="say">
+          <label for="say-input" class="section-title">Message to the Implementer</label>
+          <textarea id="say-input" rows="3" disabled placeholder="Enter adds a line; Send submits"></textarea>
+          <div class="row">
+            <button id="say-button" type="submit" class="btn" disabled>Send</button>
+            <span id="say-reason" class="hint"></span>
+          </div>
+        </form>
+      </div>
+
+      <div class="card">
+        <div id="job-tabs" class="tabs primary" role="tablist" aria-label="Job views"></div>
+
+        <div id="tab-iterations" class="tab-panel">
+          <p id="no-iterations" class="hint">No iteration published yet.</p>
+          <div class="tabs-row">
+            <div id="iteration-tabs" class="tabs" role="tablist"></div>
+            <div id="iteration-views" class="tabs secondary" role="tablist" hidden>
+              <button type="button" data-view="report" role="tab">Report</button>
+              <button type="button" data-view="files" role="tab">Files</button>
+              <button type="button" data-view="patch" role="tab">Patch</button>
+            </div>
+          </div>
+          <p id="iteration-meta" class="hint"></p>
+          <div id="iteration-review" class="review" hidden></div>
+          <div id="iteration-gate" class="review" hidden></div>
+          <div id="files-view" class="files" hidden>
+            <div class="files-head">
+              <span id="files-summary" class="files-summary"></span>
+              <span class="row">
+                <button id="files-expand" type="button" class="btn btn-sm">Expand all</button>
+                <button id="files-collapse" type="button" class="btn btn-sm">Collapse all</button>
+              </span>
+            </div>
+            <p id="no-files" class="hint" hidden></p>
+            <ul id="files-list" class="files-list"></ul>
+          </div>
+          <pre id="iteration-body" class="document"></pre>
+        </div>
+
+        <div id="tab-mr" class="tab-panel" hidden>
+          <p id="no-mr" class="hint">No merge request text yet: it is written during MR preparation, after approve.</p>
+          <div id="mr-panel" hidden>
+            <pre id="mr-body" class="document"></pre>
+          </div>
+        </div>
+
+        <div id="tab-history" class="tab-panel" hidden>
+          <ol id="history" class="history"></ol>
+        </div>
+
+        <div id="tab-events" class="tab-panel" hidden>
+          <div class="events-head">
+            <p class="hint">The Implementer's session, as sf watch prints it.</p>
+            <label class="choice"><input id="follow" type="checkbox" checked> follow</label>
+          </div>
+          <div id="events" class="events" tabindex="0"></div>
+        </div>
+      </div>
+    </section>
+  </aside>
 </body>
 </html>

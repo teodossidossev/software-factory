@@ -14,6 +14,8 @@ export const TICKET_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 export const TICKET_DESCRIPTION = '1-64 characters of A-Z, a-z, 0-9, ".", "_" and "-", starting with a letter or digit';
 export const MAX_TASK_BYTES = 256 * 1024;
 export const TASK_DIR = '.software-factory';
+// Archived Task files: .software-factory/archive/<ticket>.md (SF-027).
+export const ARCHIVE_DIR = 'archive';
 const EXCLUDE_ENTRY = `${TASK_DIR}/`;
 const EXCLUDE_EQUIVALENTS = new Set([TASK_DIR, `/${TASK_DIR}`, EXCLUDE_ENTRY, `/${EXCLUDE_ENTRY}`]);
 
@@ -153,9 +155,9 @@ export function writeTask(workspace: Workspace, ticket: string, content: string,
   });
 }
 
-// Reads the Task file of the work checkout and returns its validated text.
-export async function readTask(workspace: Workspace, ticket: string): Promise<string> {
-  const path = `${TASK_DIR}/${ticket}.md`;
+// Reads the Task file of the work checkout (or its archived copy) and returns its validated text.
+export async function readTask(workspace: Workspace, ticket: string, archived = false): Promise<string> {
+  const path = archived ? `${TASK_DIR}/${ARCHIVE_DIR}/${ticket}.md` : `${TASK_DIR}/${ticket}.md`;
   const stats = await lstatOrMissing(join(workspace.workCheckout, path));
   if (stats === undefined) {
     throw new FactoryError('task_not_found', `${path} does not exist in the work checkout of "${workspace.name}".`);

@@ -1,8 +1,9 @@
 // The start screen's HTTP contract (SF-025, SF-028, SF-040): api/workspaces and api/tickets on GET
-// and POST, api/workspaces/<name>/remove and api/tickets/<ws>/<ticket>/start on POST, with the
-// action checks of SF-018, against fake setup and actions in process; the stream's workspaces and
-// tickets events; then end to end through `sf serve`: a workspace added from the page, a ticket
-// draft, the Task file written by the planner over MCP, and the User's start from the page.
+// and POST, api/workspaces/<name>/remove and api/tickets/<ws>/<ticket>/start on POST (the board's
+// Task route is in dashboard-board.test.ts), with the action checks of SF-018, against fake setup
+// and actions in process; the stream's workspaces and tickets events; then end to end through
+// `sf serve`: a workspace added from the page, a ticket draft, the Task file written by the
+// planner over MCP, and the User's start from the page.
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';

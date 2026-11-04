@@ -115,27 +115,19 @@ p { margin: 0; }
 .connection.live::before { background: var(--s-ready); }
 .connection.down::before { background: var(--s-failed); }
 
-/* The page: one column of cards, the workbench below the setup. */
+/* The page: the workspace filter above the board. */
 .page {
-  max-width: 1440px;
+  max-width: 1680px;
   margin: 0 auto;
   padding: 16px 24px 48px;
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
-.workbench {
-  display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
-  gap: 16px;
-  align-items: start;
-}
-.sidebar { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .detail { min-width: 0; display: flex; flex-direction: column; gap: 16px; }
 
 @media (max-width: 900px) {
   .page { padding: 12px 16px 32px; }
-  .workbench { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* Cards. */
@@ -280,20 +272,9 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 .badge.s-ready_for_human_review { background: var(--s-ready); }
 .badge.s-pushed { background: var(--s-pushed); }
 .badge.s-failed { background: var(--s-failed); }
-.badge.t-draft { background: var(--s-review); }
-.archived > .card-head .section-title { margin: 0; }
-.archived[open] > .card-head { margin-bottom: 8px; }
 .btn-ghost-danger { color: var(--del); }
-.badge.t-job { background: var(--s-ended); }
 
-/* The setup card. */
-.setup-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; }
-@media (max-width: 900px) {
-  .setup-grid { grid-template-columns: minmax(0, 1fr); }
-}
-.setup-column { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
-.setup-column > .form { margin-top: 4px; }
-.tickets-title { margin-top: 12px; }
+/* The setup panels of the drawer. */
 .cards { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .cards:empty { display: none; }
 .cards li {
@@ -306,10 +287,8 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
   gap: 6px;
 }
 .ws-name, .ticket-name { font-weight: 600; overflow-wrap: anywhere; }
-.ticket-name .badge { margin-left: 8px; }
-.ws-path, .ticket-line { font-family: var(--mono); font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.ws-path { font-family: var(--mono); font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
 .ws-problem { color: var(--del); font-size: 13px; overflow-wrap: anywhere; }
-.ticket-next { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
 .copy-box { display: flex; gap: 8px; align-items: flex-start; }
 .copy-box input, .copy-box textarea {
   flex: 1;
@@ -320,28 +299,6 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
   font: 12.5px/1.4 var(--mono);
 }
 .copy-box textarea { resize: vertical; }
-
-/* The job list in the sidebar. */
-.job-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.job-list button {
-  display: block;
-  width: 100%;
-  padding: 10px 12px;
-  text-align: left;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--panel);
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-}
-.job-list button:hover { background: var(--panel-2); }
-.job-list button[aria-current="true"] { background: var(--selected); border-color: var(--accent); }
-.job-list .job-name { font-weight: 600; font-size: 15px; overflow-wrap: anywhere; }
-.job-list .job-workspace { font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
-.job-list .job-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; font-size: 12px; color: var(--muted); }
-.job-list .job-line .iter { margin-left: auto; }
-
 
 /* The job card: title and actions first, then the facts, then the message. */
 .job-card { display: flex; flex-direction: column; gap: 12px; }
@@ -478,3 +435,184 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 .event.t-user { color: var(--muted); }
 .event.t-notify_failed, .event.t-event_failed { color: var(--del); }
 .event.t-event_delivered { color: var(--muted); }
+
+/* The header: the title and the connection, then Archived, Workspaces and New ticket. */
+.topbar { height: auto; min-height: 48px; padding: 8px 24px; flex-wrap: wrap; }
+.topbar-title { display: flex; align-items: center; gap: 12px; }
+.link-button {
+  border: none;
+  background: none;
+  padding: 0 4px;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.link-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+
+/* The workspace filter. */
+.filter { display: flex; flex-wrap: wrap; gap: 6px; }
+.filter-button {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--panel);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.filter-button[aria-pressed="true"] { background: var(--fg); border-color: var(--fg); color: var(--bg); }
+.filter-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* The board: five columns of cards, scrolled sideways when the window is narrow. */
+.board {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(220px, 1fr));
+  gap: 12px;
+  align-items: start;
+  overflow-x: auto;
+  padding-bottom: 8px;
+}
+.col {
+  min-width: 0;
+  padding: 10px;
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.col-you { background: var(--selected); border-color: var(--accent); }
+.col-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 2px 2px 0; }
+.col-head h2 { font-size: 14px; }
+.col-head .count { font: 600 12px/1 var(--mono); color: var(--muted); }
+.col-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.col-empty { font-size: 13px; color: var(--muted); padding: 4px 2px; }
+
+.board-card {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+}
+.board-card:hover { border-color: var(--border-strong); }
+.card-open, .card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 10px;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+.card-open { cursor: pointer; border-radius: var(--radius-sm); }
+.card-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.card-open[aria-current="true"] { box-shadow: inset 0 0 0 2px var(--accent); }
+.card-key { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--muted); }
+.card-key .mono { font-weight: 600; }
+.card-ws { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-title { font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+.card-now { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); }
+.card-who { font-weight: 500; color: var(--fg); }
+.card-error {
+  font-size: 12px;
+  color: var(--del);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.card-wait { font-size: 12.5px; color: var(--muted); font-style: italic; }
+.card-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 10px 10px; }
+.board-card .status { margin: 0 10px 10px; padding: 6px 8px; font-size: 12px; }
+
+/* The pipeline: Implement, Claude review, Codex gate, MR, You. */
+.pipe { display: inline-grid; grid-template-columns: repeat(5, 1fr); gap: 3px; width: 92px; flex: none; }
+.pipe .seg { height: 6px; border-radius: 2px; background: var(--border); }
+.pipe .seg.done { background: var(--s-ready); }
+.pipe .seg.current { background: var(--accent); }
+.pipe .seg.current:last-child { background: var(--s-human); }
+.pipe .seg.halted { background: var(--s-failed); }
+
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip {
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.chip.chip-good { color: var(--add); background: var(--add-bg); border-color: transparent; }
+.chip.chip-bad { color: var(--del); background: var(--del-bg); border-color: transparent; }
+
+/* The ticket actions' outcome, above everything, and the Start or Delete confirmation. */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  width: min(640px, calc(100vw - 32px));
+  z-index: 70;
+  box-shadow: 0 4px 16px rgba(16, 24, 40, 0.18);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+.modal {
+  position: fixed;
+  top: 20vh;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(520px, calc(100vw - 32px));
+  z-index: 80;
+  box-shadow: 0 8px 32px rgba(16, 24, 40, 0.25);
+  background: var(--panel);
+}
+
+/* The drawer on the right, over the board. */
+.scrim { position: fixed; inset: 0; background: rgba(10, 15, 20, 0.35); z-index: 40; }
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(880px, 100vw);
+  z-index: 50;
+  overflow-y: auto;
+  padding: 16px 20px 64px;
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  box-shadow: -4px 0 24px rgba(16, 24, 40, 0.15);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.drawer:focus { outline: none; }
+.drawer-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.drawer-heading { min-width: 0; }
+.drawer-heading h2 { overflow-wrap: anywhere; }
+.drawer-kicker { font: 12.5px/1.4 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+.panel { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.task-conversation { padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel); display: flex; flex-direction: column; gap: 8px; }
+
+/* A phone: the columns stack, Your turn first; the drawer takes the whole width. */
+@media (max-width: 760px) {
+  .topbar { padding: 8px 16px; }
+  .board { grid-template-columns: minmax(0, 1fr); overflow-x: visible; }
+  .col-you { order: -1; }
+  .drawer { padding: 12px 12px 48px; }
+}

@@ -11,6 +11,9 @@ import { type FakeElement, type FetchRequest, loadPage, type Page } from './supp
 
 const STATIC_DIR = new URL('../../static/', import.meta.url);
 
+// The page shows local time (SF-049); the zone is set, not the machine's: Sofia is UTC+2 in November.
+process.env.TZ = 'Europe/Sofia';
+
 function job(state: string, extra: Record<string, unknown> = {}) {
   const prepared = state === 'ready_for_human_review' || state === 'pushed';
   return {
@@ -149,9 +152,11 @@ test('job client: the pipeline stepper for each state: done, current with since 
   }
   // The current step says since when; the Codex gate since the end of the Claude review.
   await show(page, detail(job('working')));
-  assert.match(captions(page)[0]!, /^since 10:05 \(.+\)$/);
+  assert.match(captions(page)[0]!, /^since 12:05 \(.+\)$/);
+  // The exact UTC moment on hover.
+  assert.equal((elements(page, 'job-stepper')[0]!.children[2] as FakeElement).getAttribute('title'), '2026-11-01T10:05:00.000Z');
   await show(page, detail(job('awaiting_review'), { iterations: reviewed(CLEAN) }));
-  assert.match(captions(page)[2]!, /^since 10:06 \(.+\)$/);
+  assert.match(captions(page)[2]!, /^since 12:06 \(.+\)$/);
   // The gate off; the gate overridden by the user.
   await show(page, detail(job('preparing_mr'), { iterations: reviewed(CLEAN), gate: false }));
   assert.deepEqual([steps(page), captions(page)[2]], [['done', 'done', 'off', 'current', 'todo'], 'off']);
@@ -201,8 +206,10 @@ test('job client: the next-action panel says who acts now and offers the actions
   }));
   assert.deepEqual(facts(page), {
     Base: 'main', Iteration: '2', 'Fix sections': '2', 'Gate rounds': '1', 'Gate tokens': '1500', 'Estimated cost': 'est. $1.3750',
-    Updated: '2026-11-01 10:05:00Z', Worktree: '/wt/T-1',
+    Updated: '2026-11-01 12:05:00', Worktree: '/wt/T-1',
   });
+  const updated = (elements(page, 'job-facts').find((row) => row.textContent.startsWith('Updated'))!.children[1] as FakeElement).children[0] as FakeElement;
+  assert.deepEqual([updated.tagName, updated.getAttribute('datetime'), updated.getAttribute('title')], ['TIME', '2026-11-01T10:05:00.000Z', '2026-11-01T10:05:00.000Z']);
 
   // The state history, compact, with the user's override of the gate.
   await show(page, detail(job('preparing_mr'), {
@@ -210,12 +217,19 @@ test('job client: the next-action panel says who acts now and offers the actions
       { ts: '2026-11-01T10:00:00.000Z', from: null, to: 'starting' },
       { ts: '2026-11-01T10:20:00.000Z', from: 'awaiting_review', to: 'needs_human', error: { code: 'gate_rounds', message: 'Three rounds.' } },
       { ts: '2026-11-01T10:30:00.000Z', event: 'gate_overridden', code: 'gate_rounds', unapplied: 2 },
-      { ts: '2026-11-01T10:30:00.000Z', from: 'needs_human', to: 'preparing_mr' },
+      { ts: '2026-11-04T10:14:25.668Z', from: 'needs_human', to: 'preparing_mr' },
+      // A record without a time: the server sends String(undefined); it shows no time.
+      { ts: 'undefined', from: 'preparing_mr', to: 'ready_for_human_review' },
     ],
   }));
+  // Local date and time; the exact UTC moment in the datetime and the title of the <time>.
   assert.deepEqual(texts(page.$('history')), [
-    '10:00- → starting', '10:20awaiting_review → needs_human gate_rounds', '10:30gate overridden by you (gate_rounds): 2 Codex items not applied', '10:30needs_human → preparing_mr',
+    '2026-11-01 12:00:00- → starting', '2026-11-01 12:20:00awaiting_review → needs_human gate_rounds',
+    '2026-11-01 12:30:00gate overridden by you (gate_rounds): 2 Codex items not applied', '2026-11-04 12:14:25needs_human → preparing_mr',
+    'preparing_mr → ready_for_human_review',
   ]);
+  const time = elements(page, 'history')[3]!.children[0] as FakeElement;
+  assert.deepEqual([time.tagName, time.getAttribute('datetime'), time.getAttribute('title')], ['TIME', '2026-11-04T10:14:25.668Z', '2026-11-04T10:14:25.668Z']);
   assert.equal((elements(page, 'history')[1]!.children[2] as FakeElement).getAttribute('title'), 'Three rounds.');
 });
 
@@ -285,6 +299,9 @@ test('job client: Changes shows the Report, the files with their marks next to t
     ['Iteration 1', 'false'], ['Iteration 2 · Fix 1', 'true'],
   ]);
   assert.equal(page.$('iteration-report').textContent, '# Report of 2\nDone.\n');
+  // The iteration's start and end in local time, the UTC moments on the <time> elements.
+  assert.equal(page.$('iteration-meta').textContent, '2026-11-01 12:00:01 – 2026-11-01 12:05:00, cost $0.5000, 6 changed file(s), 0 denial(s)');
+  assert.deepEqual(page.$('iteration-meta').all().map((element) => element.getAttribute('datetime')), [META.started_at, META.ended_at]);
   assert.equal(page.$('files-summary').textContent, 'Files 6 · 1 sensitive undeclared · 1 deleted');
   const items = elements(page, 'files-list');
   assert.deepEqual(items.filter((item) => item.className === 'file-group').map((item) => item.textContent), ['Sensitive, undeclared', 'Sensitive, declared', 'Deleted', 'Changed']);
@@ -352,7 +369,8 @@ test('job client: Reviews shows per iteration, newest first, the Claude and the 
   assert.deepEqual(block(1, 1), ['review v-failed', ['Codex gate: failed', 'Codex wrote no output.']]);
   assert.deepEqual(block(2, 0), ['review v-clean', ['Claude review: clean, cost $0.2500', 'Right.', 'Accepted sensitive paths: package.json']]);
   assert.deepEqual(block(2, 1), ['review v-fix', ['Codex gate: fix (1 item), 1100 tokens', 'Not quite.', 'README.md: It greets the world. Expected: It greets the reader.']]);
-  assert.equal((rows[2]!.children[2] as FakeElement).textContent, 'You accepted this iteration over the gate (gate_rounds) at 2026-11-01 10:30:00Z.');
+  assert.equal((rows[2]!.children[2] as FakeElement).textContent, 'You accepted this iteration over the gate (gate_rounds) at 2026-11-01 12:30:00.');
+  assert.equal((rows[2]!.children[2] as FakeElement).all().find((element) => element.tagName === 'TIME')?.getAttribute('datetime'), override.at);
   assert.deepEqual(block(3, 0), ['review v-fix', [
     'Claude review: fix (2 items), cost $0.2500', 'The greeting is wrong.', 'README.md: It greets the world. Expected: It greets the reader.a.txt: Empty. Expected: A line.',
   ]]);

@@ -5,8 +5,11 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { type IterationMeta, type Job, JobStore } from '../src/jobs.js';
-import { elapsedSeconds, formatCost, formatElapsed, statusRows } from '../src/status.js';
+import { elapsedSeconds, formatCost, formatElapsed, formatSince, statusRows } from '../src/status.js';
 import { newEnv, runCli, temp } from './support/harness.js';
+
+// SINCE prints the local time of the sf process (SF-049); the zone is set, not the machine's.
+process.env.TZ = 'Europe/Sofia';
 
 const CREATED = '2026-11-01T10:00:00.000Z';
 const base: Job = {
@@ -20,6 +23,13 @@ function meta(iteration: number, cost: number | null, total: number | null = cos
     cost_usd: cost, cost_usd_total: total, duration_ms: 1000,
   };
 }
+
+test('SINCE: the stored time in local time; a missing or unparsable one is empty, not printed as stored', () => {
+  assert.equal(formatSince('2026-11-04T10:14:25.668Z'), '2026-11-04 12:14:25');
+  assert.equal(formatSince('not a time'), '');
+  assert.equal(formatSince(''), '');
+  assert.equal(formatSince(undefined), '');
+});
 
 async function publish(jobs: JobStore, ticket: string, ...metas: IterationMeta[]): Promise<void> {
   for (const entry of metas) {
@@ -130,14 +140,15 @@ test('sf status: EST_USD and ELAPSED columns for all jobs and for one job, archi
   assert.equal(all.code, 0, all.stderr);
   const lines = all.stdout.trimEnd().split('\n');
   assert.match(lines[0]!, /^WORKSPACE\s+TICKET\s+STATE\s+ITER\s+BRANCH\s+SINCE\s+EST_USD\s+ELAPSED\s+ERROR$/);
-  const cells = lines.slice(1).map((line) => line.split(/\s+/));
+  // Columns are two or more spaces apart; SINCE, local time in Sofia (UTC+2), has one space of its own.
+  const cells = lines.slice(1).map((line) => line.split(/ {2,}/));
   assert.deepEqual(cells.map((row) => row.slice(0, 6)), [
-    ['app', 'S-1', 'awaiting_review', '2', 'S-1-two', '2026-11-01T12:00:00.000Z'],
-    ['app', 'S-2', 'needs_human', '1', 'S-2-zero', CREATED],
-    ['app', 'S-3', 'working', '0', 'S-3-new', CREATED],
-    ['app', 'S-4', 'pushed', '1', 'S-4-null', '2026-11-02T11:02:03.000Z'],
-    ['app', 'S-5', 'aborted', '1', 'S-5-gone', CREATED],
-    ['app', 'S-6', 'failed', '1', 'S-6-fail', '2026-11-01T10:59:59.999Z'],
+    ['app', 'S-1', 'awaiting_review', '2', 'S-1-two', '2026-11-01 14:00:00'],
+    ['app', 'S-2', 'needs_human', '1', 'S-2-zero', '2026-11-01 12:00:00'],
+    ['app', 'S-3', 'working', '0', 'S-3-new', '2026-11-01 12:00:00'],
+    ['app', 'S-4', 'pushed', '1', 'S-4-null', '2026-11-02 13:02:03'],
+    ['app', 'S-5', 'aborted', '1', 'S-5-gone', '2026-11-01 12:00:00'],
+    ['app', 'S-6', 'failed', '1', 'S-6-fail', '2026-11-01 12:59:59'],
   ]);
   assert.deepEqual(cells.map((row) => row[6]), ['0.0500', '0.0000', '0.0000', 'unknown', 'unknown', '1.5000']);
   // Terminal jobs: created_at to updated_at. Live jobs: created_at to now, hours since 2026-11-01.
@@ -150,7 +161,7 @@ test('sf status: EST_USD and ELAPSED columns for all jobs and for one job, archi
 
   const one = await runCli(env, ['status', 'app', 'S-2']);
   assert.equal(one.code, 0, one.stderr);
-  assert.match(one.stdout, /^WORKSPACE\s+TICKET\s+STATE\s+ITER\s+BRANCH\s+SINCE\s+EST_USD\s+ELAPSED\s+ERROR\napp\s+S-2\s+needs_human\s+1\s+S-2-zero\s+\S+\s+0\.0000\s+\d{2,}:\d\d:\d\d\s+turn_failed\n\nturn_failed: It stopped\.\nsensitive: none\ndeleted: none\n$/);
+  assert.match(one.stdout, /^WORKSPACE\s+TICKET\s+STATE\s+ITER\s+BRANCH\s+SINCE\s+EST_USD\s+ELAPSED\s+ERROR\napp\s+S-2\s+needs_human\s+1\s+S-2-zero\s+2026-11-01 12:00:00\s+0\.0000\s+\d{2,}:\d\d:\d\d\s+turn_failed\n\nturn_failed: It stopped\.\nsensitive: none\ndeleted: none\n$/);
   assert.equal((await runCli(env, ['status', 'app', 'S-7'])).code, 1);
 
   // Malformed metadata is reported, not shown as zero.

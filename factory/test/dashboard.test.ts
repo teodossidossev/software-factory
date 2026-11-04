@@ -12,6 +12,9 @@ import { CSP, fakeActions, fetchRaw, openStream, type Stream } from './support/d
 import { withDashboard } from './support/dashboard-state.js';
 import { call, newEnv, newRepo, putTask, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
 
+// The live log prints the local time of the sf process (SF-049); Sofia is UTC+2 in November.
+process.env.TZ = 'Europe/Sofia';
+
 // Listening TCP sockets of a process, from /proc (Linux); undefined where /proc is not available.
 async function listeners(pid: number): Promise<number | undefined> {
   try {
@@ -139,18 +142,18 @@ test('dashboard: the stream sends jobs, the job and the events, follows the file
     assert.equal((await stream.next('job')).iterations.length, 1);
     // Every visible line from 0: states, the prompt, the assistant text and tool, the result.
     const state0 = await stream.next('event');
-    assert.deepEqual(state0, { line: 0, ts: '2026-11-01T10:00:00.000Z', iteration: 0, type: 'state', text: '10:00:00 [0] state - -> starting' });
+    assert.deepEqual(state0, { line: 0, ts: '2026-11-01T10:00:00.000Z', iteration: 0, type: 'state', text: '12:00:00 [0] state - -> starting' });
     await stream.next('event', (event) => event.line === 1);
     assert.equal((await stream.next('event')).type, 'prompt');
     const assistant = await stream.next('event');
     assert.deepEqual([assistant.line, assistant.type], [3, 'assistant']);
-    assert.equal(assistant.text, '10:00:03 [0] assistant: Working on it\n10:00:03 [0] tool_use Bash {"command":"npm test"}');
-    assert.equal((await stream.next('event')).text, '10:04:00 [0] result success, cost $0.5000, duration 2.0 s, 3 turns');
+    assert.equal(assistant.text, '12:00:03 [0] assistant: Working on it\n12:00:03 [0] tool_use Bash {"command":"npm test"}');
+    assert.equal((await stream.next('event')).text, '12:04:00 [0] result success, cost $0.5000, duration 2.0 s, 3 turns');
     assert.equal((await stream.next('event')).line, 5);
 
     // A line appended while connected arrives as the next event.
-    await jobs.appendEvent('app', 'T-1', { ts: '2026-11-01T10:06:00.000Z', iteration: 1, prompt: 'hello from say' });
-    assert.deepEqual(await stream.next('event'), { line: 6, ts: '2026-11-01T10:06:00.000Z', iteration: 1, type: 'prompt', text: '10:06:00 [1] > hello from say' });
+    await jobs.appendEvent('app', 'T-1', { ts: '2026-11-04T10:14:25.668Z', iteration: 1, prompt: 'hello from say' });
+    assert.deepEqual(await stream.next('event'), { line: 6, ts: '2026-11-04T10:14:25.668Z', iteration: 1, type: 'prompt', text: '12:14:25 [1] > hello from say' });
 
     // A state change refreshes jobs and the selected job.
     const ready: Job = { ...job, state: 'ready_for_human_review', updated_at: '2026-11-01T10:07:00.000Z' };

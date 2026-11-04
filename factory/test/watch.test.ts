@@ -6,6 +6,9 @@ import { test } from 'node:test';
 import { cutEvent, MAX_LIVE_EVENT_BYTES } from '../src/jobs.js';
 import { describeEvent, formatEvent } from '../src/watch.js';
 
+// The lines print local time (SF-049); UTC here keeps the stored and the printed time alike.
+process.env.TZ = 'UTC';
+
 const TS = '2026-11-04T10:11:12.000Z';
 const gate = (event: unknown, extra: Record<string, unknown> = {}): string =>
   JSON.stringify({ ts: TS, iteration: 2, type: 'gate_event', reviewer: 'codex', event, ...extra });

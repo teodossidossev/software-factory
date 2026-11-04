@@ -122,13 +122,14 @@ test('dashboard: the ticket action routes are POST only with the action checks, 
   }, setup);
 });
 
-test('client: a ticket card has Archive and Delete…; delete asks first; the archived list restores and deletes; a selected job that leaves the list is replaced', async () => {
+test('client: a Planned card has Archive and Delete…; delete asks first; the archived list restores and deletes; an open job that leaves the board closes its drawer', async () => {
   const STATIC_DIR = new URL('../../static/', import.meta.url);
   const pushed = {
     workspace: 'app', ticket: 'T-1', branch: 'T-1-x', base: 'main', state: 'pushed', iteration: 1, mr_attempts: 1, updated_at: '2026-11-01T10:05:00.000Z',
     created_at: '2026-11-01T10:00:00.000Z', error: null, worktree: null, prepared_commit: 'a'.repeat(40), files: 0, undeclared: 0, deleted: 0,
   };
   const page = await loadPage(STATIC_DIR, (path) => (path === 'api/jobs' ? { jobs: [pushed] } : path === 'api/jobs/app/T-1' ? { job: pushed, iterations: [], mr: false, history: [] } : undefined));
+  page.location.hash = '#app/T-1';
   page.document.dispatch('DOMContentLoaded');
   await page.flush();
   const stream = page.streams.at(-1)!;
@@ -137,43 +138,43 @@ test('client: a ticket card has Archive and Delete…; delete asks first; the ar
   stream.emit('workspaces', { workspaces: [workspaceRow('app')] });
   stream.emit('tickets', { tickets: [{ ...ticketRow('app', 'T-1', 'One', false, 'pushed'), conversation: { message: 'm', url: 'https://chatgpt.com/?q=m' } }], archived: [{ workspace: 'app', ticket: 'T-0', title: 'Zero' }] });
   await page.flush();
-  const card = page.$('ticket-list').children[0] as FakeElement;
+  const card = page.$('list-planned').children[0] as FakeElement;
   const buttons = card.all().filter((element) => element.tagName === 'BUTTON');
-  // A written Task file comes with the User's Start first (SF-040).
-  assert.deepEqual(buttons.map((button) => button.textContent), ['Start', 'Archive', 'Delete…', 'Copy']);
+  assert.deepEqual(buttons.map((button) => button.textContent), ['Start', 'Task', 'Archive', 'Delete…']);
   // Archive: one request, the outcome in the status line.
-  buttons[1]!.click();
-  buttons[1]!.click();
+  buttons[2]!.click();
+  (page.$('list-planned').children[0] as FakeElement).all().find((element) => element.textContent === 'Archive')!.click();
   await page.flush();
   const posts = (): typeof page.requests => page.requests.filter((request) => request.method === 'POST');
   assert.deepEqual([posts().length, posts()[0]!.path, posts()[0]!.body], [1, 'api/tickets/app/T-1/archive', '{}']);
   posts()[0]!.respond(200, { ok: true, result: { workspace: 'app', ticket: 'T-1', path: '.software-factory/archive/T-1.md', jobArchived: true } });
   await page.flush();
-  assert.equal(page.$('ticket-action-status').textContent, 'Archived app/T-1: .software-factory/archive/T-1.md. Its finished job left the Jobs list.');
+  assert.equal(page.$('ticket-action-status').textContent, 'Archived app/T-1: .software-factory/archive/T-1.md. Its finished job left the board.');
   // Delete… asks first; Cancel sends nothing; Confirm deletes.
-  (page.$('ticket-list').children[0] as FakeElement).all().find((element) => element.textContent === 'Delete…')!.click();
+  (page.$('list-planned').children[0] as FakeElement).all().find((element) => element.textContent === 'Delete…')!.click();
   assert.equal(page.$('ticket-confirm').hidden, false);
   assert.equal(page.$('ticket-confirm-title').textContent, 'Delete app/T-1?');
   assert.match(page.$('ticket-confirm-text').textContent, /Cannot be undone; Archive keeps the file instead\./);
   assert.deepEqual([page.$('ticket-ok').textContent, page.$('ticket-ok').className], ['Delete the ticket', 'btn btn-danger']);
   page.$('ticket-cancel').click();
   assert.equal(posts().length, 1);
-  (page.$('ticket-list').children[0] as FakeElement).all().find((element) => element.textContent === 'Delete…')!.click();
+  (page.$('list-planned').children[0] as FakeElement).all().find((element) => element.textContent === 'Delete…')!.click();
   page.$('ticket-ok').click();
   await page.flush();
   assert.deepEqual([posts().length, posts()[1]!.path], [2, 'api/tickets/app/T-1/delete']);
-  // The archived list: Restore and Delete….
-  assert.equal(page.$('archived').hidden, false);
+  // The archived list, behind the header's Archived link: Task, Restore and Delete….
   assert.equal(page.$('archived-count').textContent, '(1)');
   const archivedButtons = (page.$('archived-list').children[0] as FakeElement).all().filter((element) => element.tagName === 'BUTTON');
-  assert.deepEqual(archivedButtons.map((button) => button.textContent), ['Restore', 'Delete…']);
-  archivedButtons[0]!.click();
+  assert.deepEqual(archivedButtons.map((button) => button.textContent), ['Task', 'Restore', 'Delete…']);
+  archivedButtons[1]!.click();
   await page.flush();
   assert.equal(posts()[2]!.path, 'api/tickets/app/T-0/restore');
-  // The selected job leaves the list: the detail hides and the stream follows no job.
-  stream.emit('jobs', { jobs: [] });
+  // The open job leaves the board: the drawer closes and the stream follows no job.
+  assert.equal(page.$('detail').hidden, false);
+  page.streams.at(-1)!.emit('jobs', { jobs: [] });
   await page.flush();
   assert.equal(page.$('detail').hidden, true);
+  assert.equal(page.$('drawer').hidden, true);
   assert.doesNotMatch(page.streams.at(-1)!.url, /job=/);
 });
 
@@ -199,6 +200,7 @@ test('dashboard: a finished job is archived from its card; a live one is refused
     created_at: '2026-11-01T10:00:00.000Z', error: null, worktree: null, prepared_commit: null, files: 0, undeclared: 0, deleted: 0,
   });
   const page = await loadPage(STATIC_DIR, (path) => (path === 'api/jobs' ? { jobs: [shape('aborted')] } : path === 'api/jobs/app/T-1' ? { job: shape('aborted'), iterations: [], mr: false, history: [] } : undefined));
+  page.location.hash = '#app/T-1';
   page.document.dispatch('DOMContentLoaded');
   await page.flush();
   const stream = page.streams.at(-1)!;

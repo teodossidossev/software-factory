@@ -162,3 +162,30 @@ test('setup: tickets lists the Task files without a live job; createTicket write
   await saveRegistry({ workspaces: { app: { read_checkout: repo, work_checkout: repo }, gone: { read_checkout: gone, work_checkout: gone } } }, env.config);
   assert.deepEqual((await setup.tickets()).map((row) => `${row.workspace}/${row.ticket}`), ['app/T-1', 'app/T-3', 'app/T-7']);
 });
+
+test('setup: taskText reads the Task file or its archived copy through the reader; taskTitle is the title or null', async () => {
+  const env = await newEnv('setup-task-text');
+  const repo = await newRepo(env, 'setup-task-text-repo', true);
+  const jobs = new JobStore(env.state);
+  const setup = setupOf(env.config, jobs);
+  await putTask(env, repo, 'T-1', 'First <b>one</b>');
+  const text = await setup.taskText('app', 'T-1');
+  assert.equal(text, await readFile(join(repo, '.software-factory', 'T-1.md'), 'utf8'));
+  assert.equal(await setup.taskTitle('app', 'T-1'), 'First <b>one</b>');
+  // The archive only with archived; the active file is not read then.
+  await refused(setup.taskText('app', 'T-1', true), 'task_not_found');
+  await mkdir(join(repo, '.software-factory', 'archive'), { recursive: true });
+  await writeFile(join(repo, '.software-factory', 'archive', 'T-0.md'), '---\nticket: T-0\ntitle: Zero\nbase: main\n---\n\nOld.\n');
+  assert.equal(await setup.taskText('app', 'T-0', true), '---\nticket: T-0\ntitle: Zero\nbase: main\n---\n\nOld.\n');
+  await refused(setup.taskText('app', 'T-0'), 'task_not_found');
+  assert.equal(await setup.taskTitle('app', 'T-0'), null);
+  // The reader's refusals: not a Task file of the ticket, bad names, an unknown workspace.
+  await writeFile(join(repo, '.software-factory', 'T-2.md'), '---\nticket: T-9\ntitle: Wrong\nbase: main\n---\n');
+  await refused(setup.taskText('app', 'T-2'), 'invalid_content');
+  await refused(setup.taskText('App', 'T-1'), 'invalid_name');
+  await refused(setup.taskText('app', '../T-1'), 'invalid_ticket');
+  await refused(setup.taskText('other', 'T-1'), 'workspace_not_found');
+  for (const [workspace, ticket] of [['App', 'T-1'], ['app', '../T-1'], ['other', 'T-1'], ['app', 'T-3']]) {
+    assert.equal(await setup.taskTitle(workspace!, ticket!), null, `${workspace}/${ticket}`);
+  }
+});

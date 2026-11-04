@@ -7,7 +7,7 @@
 // to the Execution of `sf serve` (DashboardActions); nothing here changes a job by itself. The
 // start screen (SF-025) adds the workspaces and the tickets (DashboardSetup: the registry and the
 // Task files), the ChatGPT conversation that plans a ticket, and the User's start of a ticket
-// whose Task file is written (SF-040).
+// whose Task file is written (SF-040); the board (SF-046) adds the text of a Task file.
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -56,13 +56,17 @@ export type DashboardAction = 'approve' | 'abort' | 'say' | 'review' | 'archive'
 export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'review', 'archive'];
 
 // The start screen's data and changes: the workspace registry and the Task files (src/setup.ts).
-export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'removeWorkspace' | 'tickets' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'archivedTickets'>;
+export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'removeWorkspace' | 'tickets' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'archivedTickets' | 'taskText' | 'taskTitle'>;
 
 // A dashboard without a start screen (in-process tests of the older endpoints).
 const NO_SETUP: DashboardSetup = {
   workspaces: async () => [],
   tickets: async () => [],
   archivedTickets: async () => [],
+  taskTitle: async () => null,
+  taskText: async () => {
+    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
+  },
   archiveTicket: async () => {
     throw new FactoryError('setup_unavailable', 'The start screen is not available.');
   },
@@ -167,6 +171,42 @@ async function fileCounts(jobs: JobStore, job: Job): Promise<{ files: number; un
   }
 }
 
+type Verdict = 'clean' | 'fix' | 'failed' | null;
+const verdictOf = (record: { verdict: 'clean' | 'fix' } | { error: string } | undefined): Verdict =>
+  record === undefined ? null : 'verdict' in record ? record.verdict : 'failed';
+
+// What a board card shows besides the job record (SF-046): the estimated cost of the iterations
+// and their Claude reviews (the job card's sum), and the last iteration's Claude review and gate
+// with the end of that review, which tell the pipeline segment of awaiting_review and since when
+// the gate runs.
+async function boardFacts(jobs: JobStore, job: Job): Promise<{ cost_usd: number | null; review: Verdict; review_ended_at: string | null; gate: Verdict }> {
+  let cost: number | null = null;
+  const add = (value: number | null | undefined): void => {
+    if (typeof value === 'number') {
+      cost = (cost ?? 0) + value;
+    }
+  };
+  let review: Awaited<ReturnType<JobStore['readReview']>>;
+  for (let number = 1; number <= job.iteration; number += 1) {
+    try {
+      add((await jobs.readMeta(job.workspace, job.ticket, number)).cost_usd);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+    }
+    review = await jobs.readReview(job.workspace, job.ticket, number);
+    add(review !== undefined && 'verdict' in review ? review.cost_usd : undefined);
+  }
+  const gate = job.iteration > 0 ? await jobs.readGate(job.workspace, job.ticket, job.iteration) : undefined;
+  return {
+    cost_usd: cost,
+    review: verdictOf(review),
+    review_ended_at: review !== undefined && 'verdict' in review ? review.ended_at : null,
+    gate: verdictOf(gate),
+  };
+}
+
 function jobSummary(job: Job, counts: { files: number; undeclared: number; deleted: number }) {
   return {
     workspace: job.workspace, ticket: job.ticket, branch: job.branch, base: job.base, state: job.state,
@@ -175,10 +215,13 @@ function jobSummary(job: Job, counts: { files: number; undeclared: number; delet
   };
 }
 
-async function jobsPayload(jobs: JobStore) {
+async function jobsPayload(jobs: JobStore, setup: DashboardSetup) {
   const list = [];
   for (const job of await jobs.list()) {
-    list.push(jobSummary(job, await fileCounts(jobs, job)));
+    list.push({
+      ...jobSummary(job, await fileCounts(jobs, job)),
+      title: await setup.taskTitle(job.workspace, job.ticket), ...(await boardFacts(jobs, job)),
+    });
   }
   return { jobs: list };
 }
@@ -442,7 +485,7 @@ export async function startDashboard(
     res.once('close', end);
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', connection: 'keep-alive' });
     res.flushHeaders();
-    send(stream, 'jobs', await jobsPayload(jobs));
+    send(stream, 'jobs', await jobsPayload(jobs, setup));
     await sendSetup([stream]);
     if (key === undefined) {
       return;
@@ -479,7 +522,7 @@ export async function startDashboard(
       return;
     }
     if (joined === 'api/jobs') {
-      body(res, 'application/json; charset=utf-8', JSON.stringify(await jobsPayload(jobs)));
+      body(res, 'application/json; charset=utf-8', JSON.stringify(await jobsPayload(jobs, setup)));
       return;
     }
     if (joined === 'api/workspaces') {
@@ -495,6 +538,10 @@ export async function startDashboard(
       return;
     }
     const [, kind, ...rest] = path;
+    if (kind === 'tickets') {
+      await taskText(res, rest, query);
+      return;
+    }
     const key = kind === 'jobs' ? jobKey(rest[0], rest[1]) : undefined;
     const job = key === undefined ? undefined : await jobs.read(...key);
     if (key === undefined || job === undefined) {
@@ -527,6 +574,34 @@ export async function startDashboard(
       return;
     }
     empty(res, 404);
+  }
+
+  // GET api/tickets/<ws>/<ticket>/task[?archived=1]: the Task file through the Task file reader,
+  // as text/markdown. A missing ticket, workspace or file is an empty 404, as for the other reads;
+  // a file the reader refuses (not a Task file, not a regular file) answers its refusal.
+  async function taskText(res: ServerResponse, rest: string[], query: URLSearchParams): Promise<void> {
+    const key = rest.length === 3 && rest[2] === 'task' ? jobKey(rest[0], rest[1]) : undefined;
+    const archived = query.get('archived');
+    if (key === undefined || (archived !== null && archived !== '1') || query.getAll('archived').length > 1) {
+      empty(res, 404);
+      return;
+    }
+    let text: string;
+    try {
+      text = await setup.taskText(...key, archived === '1');
+    } catch (error) {
+      if (!(error instanceof FactoryError)) {
+        throw error;
+      }
+      const status = ERROR_STATUS[error.code] ?? 500;
+      if (status === 404) {
+        empty(res, 404);
+      } else {
+        json(res, status, { ok: false, error: { code: error.code, message: error.message } });
+      }
+      return;
+    }
+    body(res, 'text/markdown; charset=utf-8', text);
   }
 
   // The job action as the one Execution call it stands for.
@@ -764,7 +839,7 @@ export async function startDashboard(
     if (streams.size === 0) {
       return;
     }
-    const list = await jobsPayload(jobs);
+    const list = await jobsPayload(jobs, setup);
     const selected = [...streams].filter((stream) => stream.job?.[0] === job.workspace && stream.job[1] === job.ticket);
     const detail = selected.length > 0 ? await jobDetail(jobs, job) : undefined;
     for (const stream of streams) {
@@ -782,7 +857,7 @@ export async function startDashboard(
     if (streams.size === 0) {
       return;
     }
-    const list = await jobsPayload(jobs);
+    const list = await jobsPayload(jobs, setup);
     for (const stream of streams) {
       send(stream, 'jobs', list);
     }

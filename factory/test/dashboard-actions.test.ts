@@ -494,3 +494,29 @@ test('dashboard review: POST only, the action checks, Execution.retryReview once
     assert.equal(fake.calls.length, 4);
   });
 });
+
+test('dashboard accept (SF-047): POST only, the action checks, Execution.acceptGate once per request, its refusals mapped', async () => {
+  const fake = fakeActions({ state: 'preparing_mr', iteration: 3, branch: 'T-1-demo' });
+  await withDashboard('dash-act-accept', fake, async (dashboard) => {
+    const base = dashboard.url;
+    const path = 'api/jobs/app/T-1/accept';
+    for (const method of ['GET', 'PUT']) {
+      const reply = await act(base, path, {}, { method });
+      assert.deepEqual([reply.status, reply.headers.allow, reply.body], [405, 'POST', ''], method);
+    }
+    assert.deepEqual(error(await act(base, path, {}, { headers: { origin: '' } })), { status: 403, code: 'invalid_origin' });
+    for (const body of ['{"items":[]}', '[]', 'null']) {
+      assert.deepEqual(error(await act(base, path, undefined, { body })), { status: 400, code: 'invalid_body' }, body);
+    }
+    assert.deepEqual([(await act(base, 'api/jobs/app/T-9/accept', {})).status], [404]);
+    assert.deepEqual(fake.calls, []);
+
+    assert.deepEqual(result(await act(base, path, {})), { state: 'preparing_mr', iteration: 3, branch: 'T-1-demo' });
+    assert.deepEqual(fake.calls, [['acceptGate', 'app', 'T-1']]);
+    for (const [code, status] of [['invalid_state', 409], ['sensitive_unacknowledged', 409], ['worktree_missing', 409], ['turn_running', 409]] as const) {
+      fake.answer = new FactoryError(code, `The ${code} message.`);
+      assert.deepEqual(error(await act(base, path, {})), { status, code }, code);
+    }
+    assert.equal(fake.calls.length, 5);
+  });
+});

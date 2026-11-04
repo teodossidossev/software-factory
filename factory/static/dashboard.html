@@ -141,104 +141,135 @@
     </section>
 
     <section id="detail" class="detail" hidden>
-      <div class="card job-card">
-        <div class="job-head">
-          <div class="job-title">
-            <h2 id="job-ticket"></h2>
-            <span id="job-state" class="badge"></span>
-            <span id="job-badges" class="job-badges"></span>
-          </div>
-          <div class="row head-actions">
+      <header class="jd-head">
+        <div class="jd-title">
+          <h3 id="job-ticket" class="mono"></h3>
+          <span id="job-state" class="badge"></span>
+          <span id="job-badges" class="job-badges"></span>
+        </div>
+        <div class="row jd-branch">
+          <code id="job-branch" class="mono"></code>
+          <button id="copy-checkout" type="button" class="btn btn-sm">Copy checkout command</button>
+          <span id="checkout-copy-status" class="hint" role="status" aria-live="polite"></span>
+        </div>
+        <textarea id="checkout-text" class="copy-fallback" rows="1" readonly aria-label="The checkout command" hidden></textarea>
+        <ol id="job-stepper" class="stepper" aria-label="Pipeline"></ol>
+        <p id="job-halt" class="halt" hidden></p>
+      </header>
+
+      <aside class="jd-rail" aria-label="Next action and facts">
+        <section id="next-panel" class="next">
+          <p id="next-who" class="next-who"></p>
+          <p id="next-headline" class="next-headline"></p>
+          <p id="next-why" class="hint"></p>
+          <div class="row next-actions">
             <button id="approve-button" type="button" class="btn btn-primary" disabled>Approve…</button>
+            <button id="accept-gate-button" type="button" class="btn btn-primary" hidden>Accept and prepare MR…</button>
+            <button id="retry-review-button" type="button" class="btn btn-primary" hidden>Retry review</button>
             <button id="abort-button" type="button" class="btn" disabled>Abort…</button>
-            <button id="retry-review-button" type="button" class="btn" hidden>Retry review</button>
             <button id="archive-job-button" type="button" class="btn" hidden>Archive</button>
             <button id="refresh-button" type="button" class="btn" hidden>Refresh state</button>
           </div>
-        </div>
-        <dl class="facts">
-          <div><dt>Branch</dt><dd id="job-branch"></dd></div>
-          <div><dt>Base</dt><dd id="job-base"></dd></div>
-          <div><dt>Iteration</dt><dd id="job-iteration"></dd></div>
-          <div><dt title="An estimate of the API-equivalent price, not a charge">Cost</dt><dd id="job-cost"></dd></div>
-          <div><dt>Updated</dt><dd id="job-updated"></dd></div>
-          <div><dt>Worktree</dt><dd id="job-worktree"></dd></div>
-        </dl>
-        <p id="job-error" class="error" hidden></p>
-        <p id="action-reasons" class="hint"></p>
-        <div id="confirm" class="confirm" role="dialog" aria-modal="false" aria-labelledby="confirm-title" aria-describedby="confirm-text" hidden>
-          <h4 id="confirm-title"></h4>
-          <p id="confirm-text"></p>
-          <label id="discard-label" class="choice danger-text" hidden>
-            <input id="discard" type="checkbox">
-            Also discard: remove the worktree and the branch with all its changes (git worktree remove --force, git branch -D). Cannot be undone.
-          </label>
-          <label id="as-is-label" class="choice" hidden>
-            <input id="as-is" type="checkbox">
-            Push the branch as it is, even if its tip is not the commit the factory prepared (it was edited by hand).
-          </label>
-          <div class="row">
-            <button id="confirm-ok" type="button" class="btn btn-primary">Confirm</button>
-            <button id="confirm-cancel" type="button" class="btn">Cancel</button>
+          <p id="action-reasons" class="hint"></p>
+          <div id="confirm" class="confirm" role="dialog" aria-modal="false" aria-labelledby="confirm-title" aria-describedby="confirm-text" hidden>
+            <h4 id="confirm-title"></h4>
+            <p id="confirm-text"></p>
+            <div id="confirm-items" class="confirm-items" hidden>
+              <p id="confirm-items-title" class="section-title"></p>
+              <ol id="confirm-items-list" class="review-items"></ol>
+            </div>
+            <label id="discard-label" class="choice danger-text" hidden>
+              <input id="discard" type="checkbox">
+              Also discard: remove the worktree and the branch with all its changes (git worktree remove --force, git branch -D). Cannot be undone.
+            </label>
+            <label id="as-is-label" class="choice" hidden>
+              <input id="as-is" type="checkbox">
+              Push the branch as it is, even if its tip is not the commit the factory prepared (it was edited by hand).
+            </label>
+            <div class="row">
+              <button id="confirm-ok" type="button" class="btn btn-primary">Confirm</button>
+              <button id="confirm-cancel" type="button" class="btn">Cancel</button>
+            </div>
           </div>
+          <div id="action-status" class="status" role="status" aria-live="polite"></div>
+          <div id="action-doubt" class="status error" role="status" aria-live="polite"></div>
+
+          <form id="say-form" class="say">
+            <label for="say-input" class="section-title">Message to the Implementer</label>
+            <textarea id="say-input" rows="3" disabled placeholder="Enter adds a line; Send submits"></textarea>
+            <div class="row">
+              <button id="say-button" type="submit" class="btn" disabled>Send</button>
+              <span id="say-reason" class="hint"></span>
+            </div>
+          </form>
+        </section>
+        <section class="rail-section">
+          <h4 class="section-title">Facts</h4>
+          <dl id="job-facts" class="facts"></dl>
+        </section>
+        <section class="rail-section">
+          <h4 class="section-title">State history</h4>
+          <ol id="history" class="history"></ol>
+        </section>
+      </aside>
+
+      <div class="jd-main">
+        <div id="job-tabs" class="tabs flat" role="tablist" aria-label="Job views"></div>
+
+        <div id="tab-task" class="tab-panel" role="tabpanel" hidden>
+          <p id="job-task-path" class="hint mono"></p>
+          <pre id="job-task" class="document"></pre>
         </div>
-        <div id="action-status" class="status" role="status" aria-live="polite"></div>
-        <div id="action-doubt" class="status error" role="status" aria-live="polite"></div>
 
-        <form id="say-form" class="say">
-          <label for="say-input" class="section-title">Message to the Implementer</label>
-          <textarea id="say-input" rows="3" disabled placeholder="Enter adds a line; Send submits"></textarea>
-          <div class="row">
-            <button id="say-button" type="submit" class="btn" disabled>Send</button>
-            <span id="say-reason" class="hint"></span>
-          </div>
-        </form>
-      </div>
-
-      <div class="card">
-        <div id="job-tabs" class="tabs primary" role="tablist" aria-label="Job views"></div>
-
-        <div id="tab-iterations" class="tab-panel">
+        <div id="tab-changes" class="tab-panel" role="tabpanel" hidden>
           <p id="no-iterations" class="hint">No iteration published yet.</p>
-          <div class="tabs-row">
-            <div id="iteration-tabs" class="tabs" role="tablist"></div>
-            <div id="iteration-views" class="tabs secondary" role="tablist" hidden>
-              <button type="button" data-view="report" role="tab">Report</button>
-              <button type="button" data-view="files" role="tab">Files</button>
-              <button type="button" data-view="patch" role="tab">Patch</button>
+          <div id="changes-body" class="changes-body" hidden>
+            <div id="iteration-picker" class="seg" role="group" aria-label="Iteration"></div>
+            <p id="iteration-meta" class="hint"></p>
+            <details id="report-box" class="box" open>
+              <summary class="section-title">Report</summary>
+              <pre id="iteration-report" class="document"></pre>
+            </details>
+            <div class="changes">
+              <div class="files">
+                <p id="files-summary" class="files-summary"></p>
+                <p id="no-files" class="hint" hidden></p>
+                <ul id="files-list" class="files-list" aria-label="Changed files"></ul>
+              </div>
+              <div class="patch">
+                <p id="patch-note" class="hint"></p>
+                <pre id="patch-body" class="document"></pre>
+              </div>
             </div>
           </div>
-          <p id="iteration-meta" class="hint"></p>
-          <div id="iteration-review" class="review" hidden></div>
-          <div id="iteration-gate" class="review" hidden></div>
-          <div id="files-view" class="files" hidden>
-            <div class="files-head">
-              <span id="files-summary" class="files-summary"></span>
-              <span class="row">
-                <button id="files-expand" type="button" class="btn btn-sm">Expand all</button>
-                <button id="files-collapse" type="button" class="btn btn-sm">Collapse all</button>
-              </span>
-            </div>
-            <p id="no-files" class="hint" hidden></p>
-            <ul id="files-list" class="files-list"></ul>
-          </div>
-          <pre id="iteration-body" class="document"></pre>
         </div>
 
-        <div id="tab-mr" class="tab-panel" hidden>
-          <p id="no-mr" class="hint">No merge request text yet: it is written during MR preparation, after approve.</p>
-          <div id="mr-panel" hidden>
+        <div id="tab-reviews" class="tab-panel" role="tabpanel" hidden>
+          <p class="hint">Claude reviews every iteration; after a clean one the Codex gate reviews it, and its verdict decides.</p>
+          <p id="no-reviews" class="hint">No iteration to review yet.</p>
+          <div id="reviews-list" class="reviews"></div>
+        </div>
+
+        <div id="tab-mr" class="tab-panel" role="tabpanel" hidden>
+          <p id="no-mr" class="hint">No merge request text yet: it is written during MR preparation, after the reviews.</p>
+          <div id="mr-panel" class="mr-panel" hidden>
+            <div class="row">
+              <button id="mr-copy" type="button" class="btn btn-sm btn-primary">Copy MR text</button>
+              <span id="mr-copy-status" class="hint" role="status" aria-live="polite"></span>
+            </div>
+            <textarea id="mr-copy-text" class="copy-fallback" rows="8" readonly aria-label="The MR text" hidden></textarea>
             <pre id="mr-body" class="document"></pre>
           </div>
+          <div id="mr-unapplied" class="unapplied" hidden>
+            <h4>Codex items not applied</h4>
+            <p id="mr-unapplied-note" class="hint"></p>
+            <ol id="mr-unapplied-list" class="review-items"></ol>
+          </div>
         </div>
 
-        <div id="tab-history" class="tab-panel" hidden>
-          <ol id="history" class="history"></ol>
-        </div>
-
-        <div id="tab-events" class="tab-panel" hidden>
+        <div id="tab-log" class="tab-panel" role="tabpanel" hidden>
           <div class="events-head">
-            <p class="hint">The Implementer's session, as sf watch prints it.</p>
+            <div id="log-filters" class="seg" role="group" aria-label="Show lines from"></div>
             <label class="choice"><input id="follow" type="checkbox" checked> follow</label>
           </div>
           <div id="events" class="events" tabindex="0"></div>

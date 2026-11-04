@@ -162,7 +162,7 @@ export function openStream(url: URL): Promise<Stream> {
   });
 }
 
-export type Call = ['start', string, string] | ['approve', string, string] | ['abort', string, string, boolean] | ['say', string, string, string] | ['retryReview', string, string] | ['archiveFinished', string, string];
+export type Call = ['start', string, string] | ['approve', string, string] | ['abort', string, string, boolean] | ['say', string, string, string] | ['retryReview', string, string] | ['acceptGate', string, string] | ['archiveFinished', string, string];
 
 export interface FakeActions extends DashboardActions {
   calls: Call[];
@@ -181,6 +181,7 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
     abort: (workspace, ticket, discard) => reply(['abort', workspace, ticket, discard]),
     say: (workspace, ticket, message) => reply(['say', workspace, ticket, message]),
     retryReview: (workspace, ticket) => reply(['retryReview', workspace, ticket]),
+    acceptGate: (workspace, ticket) => reply(['acceptGate', workspace, ticket]),
     archiveFinished: (workspace, ticket) => reply(['archiveFinished', workspace, ticket]),
   };
   async function reply(call: Call): Promise<any> {

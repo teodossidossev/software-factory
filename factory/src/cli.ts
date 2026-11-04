@@ -35,6 +35,7 @@ const USAGE = `Usage:
   sf start <workspace> <ticket>                         Start the job for .software-factory/<ticket>.md in a worktree of its own (up to SF_MAX_JOBS per workspace)
   sf say <workspace> <ticket> <message...>              Send a message into the job's Implementer session
   sf review <workspace> <ticket>                        Retry a failed Claude review (needs_human with review_failed) of the last iteration
+  sf accept <workspace> <ticket>                        Accept a clean Claude review over a stopped gate (needs_human with gate_rounds, gate_budget or gate_failed) and prepare the MR
   sf status [<workspace> <ticket>]                      Show one job or all jobs: state, iterations, estimated cost, elapsed time
   sf watch <workspace> <ticket> [--once]                Show the session live (Ctrl+C stops)
   sf approve <workspace> <ticket> [--as-is]             Push the branch prepared at Clean; --as-is pushes it even if its tip was edited by hand
@@ -113,6 +114,9 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     if (command === 'review' && words.length === 0) {
       return execution.retryReview(workspace, ticket);
     }
+    if (command === 'accept' && words.length === 0) {
+      return execution.acceptGate(workspace, ticket);
+    }
     if (command === 'approve' && (words.length === 0 || (words.length === 1 && words[0] === '--as-is'))) {
       return execution.approve(workspace, ticket, words.length === 1);
     }
@@ -146,9 +150,9 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   }
   try {
     if (dashboardOn()) {
-      // The dashboard's actions (DashboardActions: start, approve, abort, say, retryReview and
-      // archiveFinished) run on the same Execution as the socket commands.
-      dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, setup);
+      // The dashboard's actions (DashboardActions: start, approve, abort, say, retryReview,
+      // acceptGate and archiveFinished) run on the same Execution as the socket commands.
+      dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, setup, { gate: config.gate.on });
     } else {
       await removeToken(config.stateDir);
     }
@@ -597,6 +601,13 @@ async function main(argv: string[]): Promise<void> {
       throw new UsageError('review needs <workspace> <ticket>.');
     }
     await viaServer('review', checkJob(rest, 'review'));
+    return;
+  }
+  if (command === 'accept') {
+    if (rest.length !== 2) {
+      throw new UsageError('accept needs <workspace> <ticket>.');
+    }
+    await viaServer('accept', checkJob(rest, 'accept'));
     return;
   }
   if (command === 'approve') {

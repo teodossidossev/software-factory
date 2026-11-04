@@ -1,10 +1,12 @@
 // Software Factory dashboard: the board (SF-046). Five columns from the stream's jobs and
 // tickets: Planned (the Task files without a live job), Implementing, Reviewing, Your turn and
 // Done, each card with the pipeline bar, who acts now and since when, and on Your turn the one
-// action that unblocks it. A job card opens the job in a drawer: the job card and tabs of
-// version 2, whose approve, abort, say and Retry review go as POSTs to
-// api/jobs/<ws>/<ticket>/<action>, each one a deliberate click, confirmed for approve and abort,
-// never retried or replayed by the page. A Planned card starts its job (POST
+// action that unblocks it. A job card opens the job in a wide drawer (SF-047), at the URL hash
+// #<ws>/<ticket>: its header with the pipeline stepper, the next-action panel with the facts and
+// the state history, and the flat tabs Task, Changes, Reviews, MR and Live log. Its approve,
+// abort, say, Retry review and Accept and prepare MR go as POSTs to
+// api/jobs/<ws>/<ticket>/<action>, each one a deliberate click, confirmed for approve, abort and
+// accept, never retried or replayed by the page. A Planned card starts its job (POST
 // api/tickets/<ws>/<ticket>/start, confirmed, never retried) and opens its Task text in the same
 // drawer, as do Workspaces, New ticket and Archived. Every value goes in through textContent; the
 // one href is the server's ChatGPT URL, checked against its fixed prefix.
@@ -14,8 +16,9 @@ const RECONNECT_MS = 3000;
 const READ_TIMEOUT_MS = 10000;
 const TERMINAL_STATES = ['pushed', 'aborted', 'failed'];
 const SAY_STATES = ['working', 'awaiting_review', 'needs_human', 'ready_for_human_review'];
-const ACTION_LABELS = { approve: 'Approve', abort: 'Abort', say: 'Send', review: 'Retry review', archive: 'Archive' };
+const ACTION_LABELS = { approve: 'Approve', abort: 'Abort', say: 'Send', review: 'Retry review', accept: 'Accept and prepare MR', archive: 'Archive' };
 const PENDING_REASONS = {
+  accept: 'the override was requested; waiting for its outcome.',
   approve: 'the push was requested; waiting for its outcome.',
   abort: 'abort was requested; waiting for its outcome.',
   say: 'the message is being sent.',
@@ -23,6 +26,7 @@ const PENDING_REASONS = {
   archive: 'the job is being archived.',
 };
 const PENDING_TEXT = {
+  accept: 'Accepting over the gate…',
   approve: 'Pushing the branch…',
   abort: 'Abort requested; waiting for the job to end.',
   say: 'Sending the message…',
@@ -30,18 +34,30 @@ const PENDING_TEXT = {
   archive: 'Archiving the job…',
 };
 const $ = (id) => document.getElementById(id);
-// The views of the selected job, one tab panel each (#tab-<name>).
-const JOB_TABS = [['iterations', 'Iterations'], ['mr', 'Merge request'], ['history', 'State history'], ['events', 'Event stream']];
+// The views of the selected job, flat tabs, one panel each (#tab-<name>).
+const JOB_TABS = [['task', 'Task'], ['changes', 'Changes'], ['reviews', 'Reviews'], ['mr', 'MR'], ['log', 'Live log']];
+// The steps of the job's pipeline in the drawer.
+const STEPS = ['Implement', 'Claude review', 'Codex gate', 'MR preparation', 'You'];
+// The codes of a job the gate stopped, which Accept and prepare MR takes on (SF-047).
+const GATE_CODES = ['gate_rounds', 'gate_budget', 'gate_failed'];
+// The Live log's filters: who a line comes from.
+const LOG_FILTERS = [['all', 'All'], ['implementer', 'Implementer'], ['claude', 'Claude review'], ['codex', 'Codex'], ['state', 'State']];
 
 const state = {
   jobs: [],
   key: null, // "<ws>/<ticket>" of the job open in the drawer
   detail: null,
-  iteration: null, // selected iteration number
-  view: 'report',
-  // The selected job view; kept across jobs.
-  tab: 'iterations',
+  iteration: null, // the iteration selected in Changes
+  // The selected job tab; kept across jobs.
+  tab: 'changes',
   cache: new Map(), // "<n>/<view>" -> text, for the selected job
+  // "<key>/<n>" of the Report and Patch drawn in Changes; "<iteration>/<path>" of the file clicked
+  // in its list; the stamp of the Task text shown; the MR text loaded; the Live log's filter.
+  drawn: null,
+  target: null,
+  jobTask: null,
+  mrText: null,
+  logFilter: 'all',
   source: null,
   retry: null,
   lastLine: -1,
@@ -54,8 +70,6 @@ const state = {
   unresolved: new Map(),
   doubts: new Map(),
   confirm: null,
-  // The files expanded in the Files view: "<iteration>/<path>" of the selected job.
-  expanded: new Set(),
   // The registry, the tickets without a live job and the archived ones (null until the stream
   // sends them), the requests out for the setup forms and the ticket actions, and the open
   // confirmation of a ticket's start or delete.
@@ -161,6 +175,169 @@ function fileBadges(job) {
   return badges;
 }
 
+// ---------- The job in the drawer (SF-047): header, pipeline, next action, facts, flat tabs ----------
+
+const verdictOf = (record) => (record === null || record === undefined ? null : typeof record.error === 'string' ? 'failed' : record.verdict);
+const iterationOf = (detail, number) => detail.iterations.find((iteration) => iteration.number === number) ?? null;
+const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
+// "10:05" of a timestamp.
+const clock = (ts) => (typeof ts === 'string' ? ts.slice(11, 16) : '');
+
+// The job of a detail with what the board adds to a card: the Claude verdict of the last
+// iteration and its end, which tell the Claude review from the Codex gate in awaiting_review.
+function flowJob(detail) {
+  const review = iterationOf(detail, detail.job.iteration)?.review ?? null;
+  return { ...detail.job, review: verdictOf(review), review_ended_at: typeof review?.ended_at === 'string' ? review.ended_at : null };
+}
+
+// The user may accept the last iteration over the stopped gate (Accept and prepare MR): the gate
+// handed the job over (gate_rounds, gate_budget, gate_failed) and Claude's review of that
+// iteration is clean. Guidance only: the factory checks it again.
+function gateAcceptable(detail) {
+  const job = detail?.job;
+  if (job === undefined || job === null || job.state !== 'needs_human' || !GATE_CODES.includes(job.error?.code)) {
+    return false;
+  }
+  return verdictOf(iterationOf(detail, job.iteration)?.review) === 'clean';
+}
+
+// The Codex items the gate asked for on the job's last iteration, or its error: what Accept and
+// prepare MR goes without. ran is false when no gate ran on it (the budget was used up first).
+function gateLeftovers(detail) {
+  const gate = iterationOf(detail, detail.job.iteration)?.gate ?? null;
+  if (gate === null) {
+    return { items: [], error: null, ran: false };
+  }
+  return typeof gate.error === 'string' ? { items: [], error: gate.error, ran: true } : { items: gate.items ?? [], error: null, ran: true };
+}
+
+// The user's override of the gate that still stands (SF-047): the newest gate-override.json, unless
+// a later iteration was reviewed by the gate again; null when there is none.
+function standingOverride(detail) {
+  for (const iteration of [...detail.iterations].reverse()) {
+    if (iteration.gate_override !== null && iteration.gate_override !== undefined) {
+      return iteration.gate_override;
+    }
+    if (iteration.gate !== null && iteration.gate !== undefined) {
+      return null;
+    }
+  }
+  return null;
+}
+
+// A plain sentence for each code that stops a job: what happened and what moves it on.
+function haltSentence(detail) {
+  const job = detail.job;
+  const code = job.error?.code ?? '';
+  const accept = gateAcceptable(detail) ? ' Accept and prepare the MR, tell the Implementer what to do, or abort.' : ' Tell the Implementer what to do, or abort.';
+  if (job.state === 'failed') {
+    return 'The job failed and cannot go on; archive it.';
+  }
+  switch (code) {
+    case 'review_failed':
+      return 'The Claude review could not run. Retry it.';
+    case 'gate_failed':
+      return `The Codex gate stopped without a verdict.${accept}`;
+    case 'gate_rounds':
+      return `Codex asked for fixes more often than the round limit allows.${accept}`;
+    case 'gate_budget':
+      return `The gate used up its token budget for this job.${accept}`;
+    case 'iteration_limit':
+      return 'The reviewers asked for fixes too many times. Give the Implementer a direction, or abort.';
+    case 'mr_conflict':
+      return `The rebase onto ${job.base} conflicts and the Implementer could not resolve it. Tell it how, or abort.`;
+    case 'mr_push_failed':
+    case 'mr_push_protected':
+      return 'The push failed. Fix the cause, then approve again.';
+    case 'serve_restarted':
+    case 'mr_serve_restarted':
+      return 'sf serve restarted while the job ran. Message the Implementer to go on, or abort.';
+    default:
+      return code.startsWith('mr_')
+        ? 'The MR preparation stopped. Read the error, then message the Implementer, or abort.'
+        : 'The job stopped and needs you. Read the error, then message the Implementer, or abort.';
+  }
+}
+
+// The five steps of the job: done, current (with since when), halted (with the code), to do, or
+// off for the gate when it is off.
+function jobSteps(detail) {
+  const job = flowJob(detail);
+  const flow = pipeline(job);
+  const overridden = standingOverride(detail) !== null;
+  return STEPS.map((name, index) => {
+    let status = segmentStatus(flow, index);
+    let caption = '';
+    if (index === 2 && detail.gate === false && status !== 'current' && status !== 'halted') {
+      status = 'off';
+      caption = 'off';
+    } else if (status === 'current') {
+      const from = index === 2 && job.state === 'awaiting_review' ? (job.review_ended_at ?? job.updated_at) : job.updated_at;
+      caption = `since ${clock(from)} (${since(from)})`;
+    } else if (status === 'halted') {
+      caption = job.error?.code ?? job.state;
+    } else if (status === 'done' && index === 2 && overridden) {
+      caption = 'overridden by you';
+    }
+    return { name, status, caption };
+  });
+}
+
+function renderStepper(detail) {
+  $('job-stepper').replaceChildren(...jobSteps(detail).map((step, index) => {
+    const item = el('li', `step ${step.status}`);
+    item.dataset.status = step.status;
+    if (step.status === 'current' || step.status === 'halted') {
+      item.setAttribute('aria-current', 'step');
+    }
+    const knob = step.status === 'done' ? '✓' : step.status === 'halted' ? '!' : String(index + 1);
+    item.append(el('span', 'knob', knob), el('span', 'step-name', step.name), el('span', 'step-caption', step.caption));
+    return item;
+  }));
+  const job = detail.job;
+  const halted = pipeline(flowJob(detail)).halted;
+  const halt = $('job-halt');
+  halt.hidden = !halted;
+  halt.replaceChildren(...(halted ? [el('strong', 'mono', job.error?.code ?? job.state), document.createTextNode(` ${haltSentence(detail)}`)] : []));
+}
+
+// Who acts now, what they do and what follows.
+function nextAction(detail) {
+  const job = detail.job;
+  const n = job.iteration;
+  switch (job.state) {
+    case 'starting':
+      return { who: 'Now · Implementer', headline: 'The worktree is being created and the Implementer starts.', why: 'Then it works on iteration 1.' };
+    case 'working':
+      return { who: 'Now · Implementer', headline: `The Implementer is working on iteration ${n + 1}.`, why: 'When it publishes its Report and Patch, Claude reviews them.' };
+    case 'awaiting_review':
+      return flowJob(detail).review === 'clean'
+        ? { who: 'Now · Codex gate', headline: `Codex is reviewing iteration ${n}.`, why: 'Its verdict decides: clean goes on to MR preparation, fix goes back to the Implementer.' }
+        : { who: 'Now · Claude review', headline: `Claude is reviewing iteration ${n}.`, why: 'Clean goes on to the Codex gate; fix becomes the next Fix section.' };
+    case 'preparing_mr':
+      return { who: 'Now · Factory', headline: `The factory commits the change and rebases it onto ${job.base}.`, why: 'Then the branch comes to you to approve.' };
+    case 'ready_for_human_review':
+      return { who: 'Your turn', headline: 'The branch is ready: approve to push it, or abort.', why: `Branch ${job.branch}: one commit on ${job.base}.` };
+    case 'needs_human':
+      return { who: 'Your turn', headline: haltSentence(detail), why: job.error ? `${job.error.code}: ${job.error.message}` : '' };
+    case 'pushed':
+      return { who: 'Finished', headline: `Pushed ${job.branch}.`, why: 'Open the merge request with the MR text; archive the job when it is merged.' };
+    case 'aborted':
+      return { who: 'Finished', headline: 'Aborted.', why: 'Archive the job to take it off the board.' };
+    default:
+      return { who: 'Finished', headline: 'Failed.', why: job.error ? `${job.error.code}: ${job.error.message}` : '' };
+  }
+}
+
+function renderNext(detail) {
+  const next = nextAction(detail);
+  const waited = TERMINAL_STATES.includes(detail.job.state) ? '' : ` · for ${since(detail.job.updated_at)}`;
+  $('next-who').textContent = `${next.who}${waited}`;
+  $('next-panel').className = `next ${next.who === 'Your turn' ? 'you' : next.who === 'Finished' ? 'finished' : 'running'}`;
+  $('next-headline').textContent = next.headline;
+  $('next-why').textContent = next.why;
+}
+
 function renderHeader(detail) {
   const job = detail.job;
   $('job-ticket').textContent = job.ticket;
@@ -168,49 +345,163 @@ function renderHeader(detail) {
   badge.textContent = job.state;
   badge.className = `badge s-${job.state}`;
   $('job-branch').textContent = job.branch;
-  $('job-base').textContent = job.base;
-  $('job-iteration').textContent = job.mr_attempts > 0 ? `${job.iteration} (MR attempts ${job.mr_attempts})` : String(job.iteration);
-  // The iterations and their reviews.
-  const costs = detail.iterations.flatMap((iteration) => [iteration.cost_usd, iteration.review?.cost_usd]).filter((cost) => typeof cost === 'number');
-  // An estimate of the API-equivalent price, not a charge: the session usually runs on a Claude plan.
-  $('job-cost').textContent = costs.length > 0 ? `est. $${costs.reduce((sum, cost) => sum + cost, 0).toFixed(4)}` : 'n/a';
-  $('job-updated').textContent = shortTime(job.updated_at);
-  $('job-worktree').textContent = typeof job.worktree === 'string' ? job.worktree : (job.state === 'ready_for_human_review' ? 'none: the branch is in the checkout' : 'none');
   $('job-badges').replaceChildren(...fileBadges(job));
-  const error = $('job-error');
-  error.hidden = job.error === null;
-  error.textContent = job.error === null ? '' : `${job.error.code}: ${job.error.message}`;
+  renderStepper(detail);
 }
 
+// The facts, stacked: one term and its value per row.
+function renderFacts(detail) {
+  const job = detail.job;
+  const costs = detail.iterations.flatMap((iteration) => [iteration.cost_usd, iteration.review?.cost_usd]).filter((cost) => typeof cost === 'number');
+  const rows = [
+    ['Base', job.base],
+    ['Iteration', job.mr_attempts > 0 ? `${job.iteration} (MR attempts ${job.mr_attempts})` : String(job.iteration)],
+    ['Fix sections', String(job.fixes ?? 0)],
+    ['Gate rounds', String(job.gate_fixes ?? 0)],
+    ['Gate tokens', String(job.gate_tokens ?? 0)],
+    // An estimate of the API-equivalent price, not a charge: the session usually runs on a Claude plan.
+    ['Estimated cost', costs.length > 0 ? `est. $${costs.reduce((sum, cost) => sum + cost, 0).toFixed(4)}` : 'n/a'],
+    ['Updated', shortTime(job.updated_at)],
+    ['Worktree', typeof job.worktree === 'string' ? job.worktree : (job.state === 'ready_for_human_review' ? 'none: the branch is in the checkout' : 'none')],
+  ];
+  $('job-facts').replaceChildren(...rows.map(([term, value]) => {
+    const row = el('div');
+    const dt = el('dt', '', term);
+    if (term === 'Estimated cost') {
+      dt.setAttribute('title', 'An estimate of the API-equivalent price, not a charge');
+    }
+    row.append(dt, el('dd', '', value));
+    return row;
+  }));
+}
+
+// The state changes, and the user's override of the gate, compact: the time, the change, the code.
 function renderHistory(history) {
   $('history').replaceChildren(...history.map((entry) => {
     const item = el('li');
-    item.append(el('time', '', shortTime(entry.ts)), document.createTextNode(`${entry.from ?? '-'} → ${entry.to}`));
+    item.append(el('time', '', clock(entry.ts)));
+    item.setAttribute('title', shortTime(entry.ts));
+    if (entry.event === 'gate_overridden') {
+      item.className = 'history-override';
+      item.append(document.createTextNode(`gate overridden by you (${entry.code}): ${plural(entry.unapplied, 'Codex item')} not applied`));
+      return item;
+    }
+    item.append(document.createTextNode(`${entry.from ?? '-'} → ${entry.to}`));
     if (entry.error) {
-      item.append(el('span', 'history-error', ` (${entry.error.code}: ${entry.error.message})`));
+      const code = el('span', 'history-error', ` ${entry.error.code}`);
+      code.setAttribute('title', entry.error.message);
+      item.append(code);
     }
     return item;
   }));
 }
 
-function renderIterationTabs(iterations) {
+// ---------- Tabs ----------
+
+function renderJobTabs() {
+  const detail = state.detail;
+  const counts = {
+    changes: detail === null ? null : (iterationOf(detail, state.iteration)?.files?.length ?? null),
+    reviews: detail === null ? null : detail.iterations.filter((iteration) => iteration.review || iteration.gate).length,
+  };
+  for (const button of $('job-tabs').querySelectorAll('button')) {
+    const name = button.dataset.tab;
+    button.setAttribute('aria-selected', String(name === state.tab));
+    const label = JOB_TABS.find(([tab]) => tab === name)[1];
+    const count = counts[name];
+    button.replaceChildren(document.createTextNode(label), ...(typeof count === 'number' && count > 0 ? [el('span', 'tab-count', String(count))] : []));
+  }
+  for (const [name] of JOB_TABS) {
+    $(`tab-${name}`).hidden = name !== state.tab;
+  }
+}
+
+function selectTab(name) {
+  state.tab = name;
+  renderJobTabs();
+  showTab();
+}
+
+// Loads what the selected tab shows, once per job and iteration.
+function showTab() {
+  if (state.detail === null) {
+    return;
+  }
+  if (state.tab === 'task') {
+    void showJobTask(state.detail);
+  } else if (state.tab === 'changes') {
+    void showIteration();
+  } else if (state.tab === 'log' && $('follow').checked) {
+    const events = $('events');
+    events.scrollTop = events.scrollHeight;
+  }
+}
+
+// ---------- Task ----------
+
+// The Task file of the job, Fix sections included: read again when a Fix section is written.
+async function showJobTask(detail) {
+  const key = state.key;
+  const stamp = `${key}#${detail.job.fixes ?? 0}#${detail.job.iteration}`;
+  if (state.jobTask === stamp) {
+    return;
+  }
+  state.jobTask = stamp;
+  $('job-task-path').textContent = `.software-factory/${detail.job.ticket}.md`;
+  if ($('job-task').children.length === 0) {
+    $('job-task').replaceChildren(document.createTextNode('Loading the Task file…'));
+  }
+  let text;
+  try {
+    text = await getText(`api/tickets/${jobPath(key)}/task`);
+  } catch (error) {
+    // The ticket may have been archived since the job started.
+    try {
+      text = await getText(`api/tickets/${jobPath(key)}/task?archived=1`);
+    } catch {
+      text = `Could not load the Task file: ${error.message}`;
+      // The next job event tries again.
+      if (state.jobTask === stamp) {
+        state.jobTask = null;
+      }
+    }
+  }
+  if (state.key === key && state.jobTask === stamp) {
+    $('job-task').replaceChildren(...renderReport(text));
+  }
+}
+
+// ---------- Changes ----------
+
+function renderChanges(detail) {
+  const iterations = detail.iterations;
   $('no-iterations').hidden = iterations.length > 0;
-  $('iteration-views').hidden = iterations.length === 0;
-  $('iteration-tabs').replaceChildren(...iterations.map((iteration) => {
-    const button = el('button', '', `Iteration ${iteration.number}`);
+  $('changes-body').hidden = iterations.length === 0;
+  $('iteration-picker').hidden = iterations.length < 2;
+  $('iteration-picker').replaceChildren(...iterations.map((iteration) => {
+    const button = el('button', '', iteration.number > 1 ? `Iteration ${iteration.number} · Fix ${iteration.number - 1}` : `Iteration ${iteration.number}`);
     button.type = 'button';
-    button.setAttribute('role', 'tab');
-    button.setAttribute('aria-selected', String(iteration.number === state.iteration));
+    button.dataset.iteration = String(iteration.number);
+    button.setAttribute('aria-pressed', String(iteration.number === state.iteration));
     button.addEventListener('click', () => {
       state.iteration = iteration.number;
-      renderIterationTabs(state.detail.iterations);
+      state.target = null;
+      renderChanges(state.detail);
+      renderJobTabs();
       void showIteration();
     });
     return button;
   }));
-  for (const button of $('iteration-views').querySelectorAll('button')) {
-    button.setAttribute('aria-selected', String(button.dataset.view === state.view));
+  const meta = iterationOf(detail, state.iteration);
+  if (meta === null) {
+    $('iteration-meta').textContent = '';
+    $('files-list').replaceChildren();
+    return;
   }
+  const cost = typeof meta.cost_usd === 'number' ? `$${meta.cost_usd.toFixed(4)}` : 'n/a';
+  $('iteration-meta').textContent = `${shortTime(meta.started_at)} – ${shortTime(meta.ended_at)}, cost ${cost}, ` +
+    `${meta.changed_files} changed file(s), ${meta.denials} denial(s)${meta.patch_truncated ? ', patch truncated' : ''}`;
+  renderFiles(meta);
 }
 
 // Report: preformatted, Markdown headings bold.
@@ -235,72 +526,71 @@ function renderPatch(text) {
   });
 }
 
-async function showIteration() {
-  const key = state.key;
-  const body = $('iteration-body');
-  const meta = state.detail?.iterations.find((iteration) => iteration.number === state.iteration);
-  if (meta === undefined) {
-    body.replaceChildren();
-    $('iteration-meta').textContent = '';
-    renderReview($('iteration-review'), null);
-    renderReview($('iteration-gate'), null);
-    return;
+// The file of the list a Patch header belongs to; null for none.
+function headerPath(header, files) {
+  for (const file of files) {
+    if (header === `diff --git a/${file.path} b/${file.path}` || (typeof file.from === 'string' && header === `diff --git a/${file.from} b/${file.path}`) ||
+      (header.startsWith('diff --git "a/') && header.endsWith(` "b/${file.path}"`))) {
+      return file.path;
+    }
   }
-  const cost = typeof meta.cost_usd === 'number' ? `$${meta.cost_usd.toFixed(4)}` : 'n/a';
-  $('iteration-meta').textContent = `${shortTime(meta.started_at)} – ${shortTime(meta.ended_at)}, cost ${cost}, ` +
-    `${meta.changed_files} changed file(s), ${meta.denials} denial(s)${meta.patch_truncated ? ', patch truncated' : ''}`;
-  renderReview($('iteration-review'), meta.review ?? null);
-  renderReview($('iteration-gate'), meta.gate ?? null);
-  const filesView = state.view === 'files';
-  $('files-view').hidden = !filesView;
-  body.hidden = filesView;
-  if (filesView) {
-    body.replaceChildren();
-    renderFiles(meta);
-    return;
-  }
-  const text = await iterationText(key, meta.number, state.view);
-  if (text === undefined) {
-    return;
-  }
-  if (`${meta.number}/${state.view}` === `${state.iteration}/${state.view}`) {
-    body.replaceChildren(...(state.view === 'patch' ? renderPatch(text) : renderReport(text)));
-  }
+  return null;
 }
 
-// A review of the selected iteration in its block: Claude's (SF-038) or the gate's (SF-039), with
-// its verdict, summary and items, or why it failed; hidden while none ended.
-function renderReview(block, review) {
-  block.hidden = review === null;
-  if (review === null) {
-    block.replaceChildren();
+// The Patch in one block per file, each knowing its path, so a click in the list can find it.
+function patchSections(text, files) {
+  const sections = [];
+  let current = null;
+  for (const line of text.split('\n')) {
+    if (current === null || line.startsWith('diff --git ')) {
+      current = { path: line.startsWith('diff --git ') ? headerPath(line, files) : null, lines: [] };
+      sections.push(current);
+    }
+    current.lines.push(line);
+  }
+  return sections.filter((section) => section.lines.some((line) => line !== ''));
+}
+
+// The Report and the Patch of the selected iteration, loaded once and drawn once per iteration.
+async function showIteration() {
+  const key = state.key;
+  const meta = state.detail === null ? null : iterationOf(state.detail, state.iteration);
+  if (meta === null) {
+    state.drawn = null;
+    $('iteration-report').replaceChildren();
+    $('patch-body').replaceChildren();
+    $('patch-note').textContent = '';
     return;
   }
-  if (typeof review.error === 'string') {
-    block.className = 'review v-failed';
-    block.replaceChildren(el('p', 'review-verdict', `Review by ${review.reviewer}: failed`), el('p', 'review-summary', review.error));
+  const id = `${key}/${meta.number}`;
+  if (state.drawn === id) {
     return;
   }
-  const count = review.items.length;
-  const verdict = review.verdict === 'fix' ? `fix (${count} ${count === 1 ? 'item' : 'items'})` : review.verdict;
-  const cost = typeof review.cost_usd === 'number' ? `, cost $${review.cost_usd.toFixed(4)}` : '';
-  const tokens = review.tokens !== null && typeof review.tokens === 'object' && typeof review.tokens.input === 'number'
-    ? `, ${review.tokens.input + review.tokens.output} tokens` : '';
-  block.className = `review v-${review.verdict}`;
-  const children = [el('p', 'review-verdict', `Review by ${review.reviewer}: ${verdict}${cost}${tokens}`), el('p', 'review-summary', review.summary)];
-  if (review.verdict === 'fix' && count > 0) {
-    const list = el('ol', 'review-items');
-    list.append(...review.items.map((item) => {
-      const entry = el('li');
-      entry.append(el('code', '', item.path), document.createTextNode(`: ${item.problem} Expected: ${item.expected}`));
-      return entry;
-    }));
-    children.push(list);
+  state.drawn = id;
+  $('iteration-report').replaceChildren(document.createTextNode('Loading the Report…'));
+  $('patch-body').replaceChildren(document.createTextNode('Loading the Patch…'));
+  $('patch-note').textContent = '';
+  // Each is drawn when it arrives, if the iteration is still the one shown.
+  const current = () => state.drawn === id && state.iteration === meta.number;
+  void iterationText(key, meta.number, 'report').then((report) => {
+    if (report !== undefined && current()) {
+      $('iteration-report').replaceChildren(...renderReport(report));
+    }
+  });
+  const patch = await iterationText(key, meta.number, 'patch');
+  if (patch === undefined || !current()) {
+    return;
   }
-  if (review.accepted_sensitive.length > 0) {
-    children.push(el('p', 'review-accepted', `Accepted sensitive paths: ${review.accepted_sensitive.join(', ')}`));
-  }
-  block.replaceChildren(...children);
+  const files = Array.isArray(meta.files) ? meta.files : [];
+  $('patch-body').replaceChildren(...patchSections(patch, files).map((section) => {
+    const block = el('span', 'patch-file');
+    if (section.path !== null) {
+      block.dataset.path = section.path;
+    }
+    block.append(...renderPatch(section.lines.join('\n')));
+    return block;
+  }));
+  markTarget(false);
 }
 
 // The Report or the Patch of an iteration, loaded once per job; undefined when the selection
@@ -322,8 +612,8 @@ async function iterationText(key, number, view) {
   return text;
 }
 
-// The rows of the Files view in order: undeclared sensitive, declared sensitive, deleted, the
-// rest by file name; each row knows its group label.
+// The rows of the file list in order: undeclared sensitive, declared sensitive, deleted, the rest
+// by file name; each row knows its group label.
 function fileRows(files) {
   const name = (file) => file.path.slice(file.path.lastIndexOf('/') + 1);
   const byName = (a, b) => name(a).localeCompare(name(b)) || a.path.localeCompare(b.path);
@@ -337,22 +627,6 @@ function fileRows(files) {
     ...deleted.map((file) => ({ file, group: 'Deleted' })),
     ...rest.map((file) => ({ file, group: 'Changed' })),
   ];
-}
-
-// The part of a unified Patch that belongs to one file: from its "diff --git" header to the next
-// header; undefined when the Patch omits it (binary, or beyond the size limit).
-function fileDiff(patch, path) {
-  const lines = patch.split('\n');
-  const plain = `diff --git a/${path} b/${path}`;
-  const start = lines.findIndex((line) => line === plain || (line.startsWith('diff --git "a/') && line.includes(path)));
-  if (start < 0) {
-    return undefined;
-  }
-  let end = lines.findIndex((line, index) => index > start && line.startsWith('diff --git '));
-  if (end < 0) {
-    end = lines.length;
-  }
-  return lines.slice(start, end).join('\n');
 }
 
 function renderFiles(meta) {
@@ -369,16 +643,12 @@ function renderFiles(meta) {
     parts.push(`${deleted} deleted`);
   }
   $('files-summary').textContent = parts.join(' · ');
-  const rows = fileRows(files ?? []);
-  $('files-expand').disabled = rows.length === 0;
-  $('files-collapse').disabled = rows.length === 0;
   let group = null;
   const items = [];
-  for (const { file, group: label } of rows) {
+  for (const { file, group: label } of fileRows(files ?? [])) {
     if (label !== group) {
       group = label;
-      const heading = el('li', 'file-group', label);
-      items.push(heading);
+      items.push(el('li', 'file-group', label));
     }
     items.push(fileRow(meta, file));
   }
@@ -389,6 +659,7 @@ function fileRow(meta, file) {
   const item = el('li');
   const row = el('button', `file-row s-${file.status}`);
   row.type = 'button';
+  row.dataset.path = file.path;
   const slash = file.path.lastIndexOf('/');
   row.append(el('span', 'file-name', file.path.slice(slash + 1)));
   if (slash >= 0) {
@@ -408,76 +679,231 @@ function fileRow(meta, file) {
   counts.append(el('span', 'add', `+${file.additions}`), document.createTextNode(' '), el('span', 'del', `−${file.deletions}`));
   labels.append(counts);
   row.append(labels);
-  const id = `${meta.number}/${file.path}`;
-  row.setAttribute('aria-expanded', String(state.expanded.has(id)));
-  row.addEventListener('click', () => void toggleFile(meta, file));
+  row.setAttribute('aria-current', String(state.target === `${meta.number}/${file.path}`));
+  row.addEventListener('click', () => {
+    state.target = `${meta.number}/${file.path}`;
+    markTarget(true);
+  });
   item.append(row);
-  if (state.expanded.has(id)) {
-    const diff = el('pre', 'document file-diff');
-    diff.textContent = 'Loading the Patch…';
-    item.append(diff);
-    void fillDiff(diff, meta, file);
-  }
   return item;
 }
 
-async function fillDiff(node, meta, file) {
-  const text = await iterationText(state.key, meta.number, 'patch');
-  if (text === undefined) {
-    return;
+// Marks the clicked file in the list and its diff in the Patch, and scrolls the diff into view;
+// a file the Patch omits says so.
+function markTarget(scroll) {
+  const prefix = `${state.iteration}/`;
+  const path = state.target !== null && state.target.startsWith(prefix) ? state.target.slice(prefix.length) : null;
+  for (const row of $('files-list').querySelectorAll('button')) {
+    row.setAttribute('aria-current', String(path !== null && row.dataset.path === path));
   }
-  const section = fileDiff(text, file.path);
-  if (section === undefined) {
-    node.replaceChildren(document.createTextNode(`The Patch omits ${file.path}: a binary file, or beyond the Patch size limit.`));
-  } else {
-    node.replaceChildren(...renderPatch(section));
-  }
-}
-
-async function toggleFile(meta, file) {
-  const id = `${meta.number}/${file.path}`;
-  if (state.expanded.has(id)) {
-    state.expanded.delete(id);
-  } else {
-    state.expanded.add(id);
-  }
-  renderFiles(meta);
-}
-
-function setAllExpanded(expanded) {
-  const meta = state.detail?.iterations.find((iteration) => iteration.number === state.iteration);
-  if (meta === undefined) {
-    return;
-  }
-  for (const file of Array.isArray(meta.files) ? meta.files : []) {
-    const id = `${meta.number}/${file.path}`;
-    if (expanded) {
-      state.expanded.add(id);
-    } else {
-      state.expanded.delete(id);
+  let found = false;
+  const blocks = [...$('patch-body').children].filter((block) => block.nodeType === 1);
+  for (const block of blocks) {
+    const on = path !== null && block.dataset.path === path;
+    block.setAttribute('aria-current', String(on));
+    if (on) {
+      found = true;
+      if (scroll && typeof block.scrollIntoView === 'function') {
+        block.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      }
     }
   }
-  renderFiles(meta);
+  const meta = state.detail === null ? null : iterationOf(state.detail, state.iteration);
+  const notes = [];
+  if (meta?.patch_truncated) {
+    notes.push('The Patch is cut at its size limit.');
+  }
+  if (path !== null && !found && blocks.length > 0) {
+    notes.push(`The Patch omits ${path}: a binary file, or beyond the Patch size limit.`);
+  }
+  $('patch-note').textContent = notes.join(' ');
+}
+
+// ---------- Reviews ----------
+
+// One review item as a list entry: the path as code, the problem, and what is expected.
+function itemEntry(item, expected = true) {
+  const entry = el('li');
+  entry.append(el('code', '', item.path), document.createTextNode(`: ${item.problem}${expected ? ` Expected: ${item.expected}` : ''}`));
+  return entry;
+}
+
+// What a review block says while it has no record.
+function pendingReview(detail, iteration, reviewer) {
+  const job = detail.job;
+  const current = iteration.number === job.iteration && job.state === 'awaiting_review';
+  if (reviewer === 'claude') {
+    return current && (iteration.review ?? null) === null ? 'reviewing now…' : 'not run';
+  }
+  if (detail.gate === false) {
+    return 'off';
+  }
+  if (current) {
+    return verdictOf(iteration.review) === 'clean' ? 'reviewing now…' : 'after a clean Claude review';
+  }
+  return 'not run';
+}
+
+// One reviewer's verdict on one iteration: the verdict with its cost or tokens, the summary, the
+// items, the accepted sensitive paths; or why it failed; or that there is none.
+function reviewBlock(name, review, pending) {
+  if (review === null || review === undefined) {
+    const none = el('div', 'review v-none');
+    none.append(el('p', 'review-verdict', `${name}: ${pending}`));
+    return none;
+  }
+  if (typeof review.error === 'string') {
+    const block = el('div', 'review v-failed');
+    block.append(el('p', 'review-verdict', `${name}: failed`), el('p', 'review-summary', review.error));
+    return block;
+  }
+  const count = review.items.length;
+  const verdict = review.verdict === 'fix' ? `fix (${plural(count, 'item')})` : review.verdict;
+  const cost = typeof review.cost_usd === 'number' ? `, cost $${review.cost_usd.toFixed(4)}` : '';
+  const tokens = review.tokens !== null && typeof review.tokens === 'object' && typeof review.tokens.input === 'number'
+    ? `, ${review.tokens.input + review.tokens.output} tokens` : '';
+  const block = el('div', `review v-${review.verdict}`);
+  block.append(el('p', 'review-verdict', `${name}: ${verdict}${cost}${tokens}`), el('p', 'review-summary', review.summary));
+  if (count > 0) {
+    const list = el('ol', 'review-items');
+    list.append(...review.items.map((item) => itemEntry(item)));
+    block.append(list);
+  }
+  if (Array.isArray(review.accepted_sensitive) && review.accepted_sensitive.length > 0) {
+    block.append(el('p', 'review-accepted', `Accepted sensitive paths: ${review.accepted_sensitive.join(', ')}`));
+  }
+  return block;
+}
+
+// Per iteration, newest first: the Claude verdict and the Codex verdict side by side.
+function renderReviews(detail) {
+  $('no-reviews').hidden = detail.iterations.length > 0;
+  $('reviews-list').replaceChildren(...[...detail.iterations].reverse().map((iteration) => {
+    const row = el('section', 'review-row');
+    row.dataset.iteration = String(iteration.number);
+    row.append(el('h4', '', `Iteration ${iteration.number}`));
+    const pair = el('div', 'review-pair');
+    pair.append(
+      reviewBlock('Claude review', iteration.review, pendingReview(detail, iteration, 'claude')),
+      reviewBlock('Codex gate', iteration.gate, pendingReview(detail, iteration, 'codex')),
+    );
+    row.append(pair);
+    const override = iteration.gate_override;
+    if (override !== null && override !== undefined) {
+      row.append(el('p', 'review-override', `You accepted this iteration over the gate (${override.code}) at ${shortTime(override.at)}.`));
+    }
+    return row;
+  }));
+}
+
+// ---------- MR ----------
+
+// The MR text as it is copied: the title line, a blank line and the body.
+function mrCopyText(text) {
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  const body = lines.slice(1).join('\n').replace(/^(\s*\n)+/, '').trimEnd();
+  return body === '' ? lines[0] : `${lines[0]}\n\n${body}`;
 }
 
 async function showMr() {
   const key = state.key;
-  const panel = $('mr-panel');
+  renderUnapplied(state.detail);
   if (!state.detail?.mr) {
-    panel.hidden = true;
+    state.mrText = null;
+    $('mr-panel').hidden = true;
     $('no-mr').hidden = false;
     return;
   }
   let text;
+  let failure = null;
   try {
     text = await getText(`api/jobs/${jobPath(key)}/mr`);
   } catch (error) {
-    text = `Could not load: ${error.message}`;
+    failure = error;
   }
-  if (key === state.key) {
-    $('mr-body').replaceChildren(...renderReport(text));
-    panel.hidden = false;
-    $('no-mr').hidden = true;
+  if (key !== state.key) {
+    return;
+  }
+  state.mrText = failure === null ? text : null;
+  $('mr-body').replaceChildren(...renderReport(failure === null ? text : `Could not load: ${failure.message}`));
+  $('mr-copy').disabled = failure !== null;
+  $('mr-panel').hidden = false;
+  $('no-mr').hidden = true;
+}
+
+// The Codex items the user accepted the change without (SF-047), for a follow-up ticket.
+function renderUnapplied(detail) {
+  const override = detail === null ? null : standingOverride(detail);
+  $('mr-unapplied').hidden = override === null;
+  if (override === null) {
+    $('mr-unapplied-list').replaceChildren();
+    return;
+  }
+  const items = Array.isArray(override.unapplied) ? override.unapplied : [];
+  $('mr-unapplied-note').textContent = typeof override.unapplied === 'string'
+    ? `You accepted the change over the gate (${override.code}); the gate failed: ${override.unapplied}`
+    : `You accepted the change over the gate (${override.code}); ${items.length === 0 ? 'the gate left no item.' : 'these could go into a follow-up ticket:'}`;
+  $('mr-unapplied-list').replaceChildren(...items.map((item) => itemEntry(item)));
+}
+
+// Copies text; without the clipboard it shows the text in box, selected for Ctrl+C.
+function copyValue(text, box, statusId) {
+  const select = () => {
+    box.value = text;
+    box.hidden = false;
+    box.focus();
+    box.select();
+    $(statusId).textContent = 'Selected: press Ctrl+C to copy.';
+  };
+  if (typeof navigator === 'undefined' || navigator.clipboard === undefined) {
+    select();
+    return;
+  }
+  navigator.clipboard.writeText(text).then(() => {
+    $(statusId).textContent = 'Copied.';
+  }, select);
+}
+
+// ---------- Live log ----------
+
+// Who an event line comes from, for the log's filters.
+function eventSource(event) {
+  switch (event.type) {
+    case 'state':
+    case 'gate_overridden':
+      return 'state';
+    case 'gate_event':
+      return 'codex';
+    case 'review_message':
+      return 'claude';
+    case 'review':
+    case 'review_failed':
+      return /\breview by codex\b/.test(event.text) ? 'codex' : 'claude';
+    case 'notify_failed':
+    case 'placeholders_removed':
+      // The factory's own lines go with the state changes.
+      return 'state';
+    default:
+      return 'implementer';
+  }
+}
+
+const logShows = (source) => state.logFilter === 'all' || state.logFilter === source;
+
+function renderLogFilters() {
+  for (const button of $('log-filters').querySelectorAll('button')) {
+    button.setAttribute('aria-pressed', String(button.dataset.filter === state.logFilter));
+  }
+}
+
+function setLogFilter(filter) {
+  state.logFilter = filter;
+  renderLogFilters();
+  for (const line of $('events').children) {
+    line.hidden = !logShows(line.dataset.source);
+  }
+  if ($('follow').checked) {
+    $('events').scrollTop = $('events').scrollHeight;
   }
 }
 
@@ -494,9 +920,13 @@ function renderDetail(detail) {
     state.iteration = newest;
   }
   renderHeader(detail);
+  renderNext(detail);
+  renderFacts(detail);
   renderHistory(detail.history);
-  renderIterationTabs(detail.iterations);
-  void showIteration();
+  renderChanges(detail);
+  renderReviews(detail);
+  renderJobTabs();
+  showTab();
   void showMr();
   renderActions();
   // Approve… on a Your turn card opens its confirmation once the job is shown.
@@ -545,6 +975,10 @@ function availability(action, job) {
   if (action === 'review') {
     return reviewFailed(job) ? '' : 'only after a failed review.';
   }
+  if (action === 'accept') {
+    return state.detail !== null && keyOf(state.detail.job) === keyOf(job) && gateAcceptable(state.detail)
+      ? '' : 'only after the gate stopped the job (gate_rounds, gate_budget or gate_failed) with a clean Claude review.';
+  }
   return SAY_STATES.includes(job.state) ? '' : `messages need working, awaiting_review, needs_human or ready_for_human_review; the job is ${job.state}.`;
 }
 
@@ -571,6 +1005,14 @@ function renderActions() {
   $('retry-review-button').disabled = !retryable || retryReason !== '';
   if (retryable && retryReason !== '') {
     reasons.push(`${ACTION_LABELS.review}: ${retryReason}`);
+  }
+  // Accept and prepare MR shows only when the gate stopped the job after a clean Claude review.
+  const acceptable = job !== null && gateAcceptable(state.detail);
+  const acceptReason = availability('accept', job);
+  $('accept-gate-button').hidden = !acceptable;
+  $('accept-gate-button').disabled = !acceptable || acceptReason !== '' || state.confirm !== null;
+  if (acceptable && acceptReason !== '') {
+    reasons.push(`${ACTION_LABELS.accept}: ${acceptReason}`);
   }
   $('action-reasons').textContent = reasons.join(' ');
   $('refresh-button').hidden = state.unresolved.get(state.key)?.failed !== true;
@@ -628,6 +1070,9 @@ function describeOutcome(action, result) {
   }
   if (action === 'review') {
     return { level: 'ok', text: `The review of iteration ${data.iteration} runs again (state ${data.state}).` };
+  }
+  if (action === 'accept') {
+    return { level: 'ok', text: `Accepted over the gate: the factory prepares the MR of iteration ${data.iteration} (state ${data.state}).` };
   }
   if (action === 'abort') {
     if (data.error) {
@@ -785,9 +1230,13 @@ function openConfirm(action) {
   const key = keyOf(job);
   state.confirm = { action, key };
   $('confirm-title').textContent = `${ACTION_LABELS[action]} ${key}?`;
-  $('confirm-text').textContent = action === 'approve'
-    ? `Pushes branch ${job.branch} to origin: the one commit the factory prepared at Clean, rebased onto ${job.base}. Nothing is committed or rebased now; a tip edited by hand is refused unless pushed as it is.`
-    : `Ends the job on branch ${job.branch}: the Implementer session stops and queued messages are dropped. The branch and its worktree stay as they are.`;
+  const texts = {
+    approve: `Pushes branch ${job.branch} to origin: the one commit the factory prepared at Clean, rebased onto ${job.base}. Nothing is committed or rebased now; a tip edited by hand is refused unless pushed as it is.`,
+    abort: `Ends the job on branch ${job.branch}: the Implementer session stops and queued messages are dropped. The branch and its worktree stay as they are.`,
+    accept: `Overrides the Codex gate (${job.error?.code}): iteration ${job.iteration}, which Claude reviewed clean, goes on as after a clean gate. The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. The override is recorded in the job's history.`,
+  };
+  $('confirm-text').textContent = texts[action];
+  renderConfirmItems(action === 'accept' ? gateLeftovers(state.detail) : null);
   $('discard').checked = false;
   $('as-is').checked = false;
   $('discard-label').hidden = action !== 'abort';
@@ -798,6 +1247,20 @@ function openConfirm(action) {
   $('confirm-cancel').focus();
 }
 
+// The Codex items Accept and prepare MR goes without, listed in its confirmation (path, problem).
+function renderConfirmItems(leftovers) {
+  $('confirm-items').hidden = leftovers === null;
+  if (leftovers === null) {
+    $('confirm-items-list').replaceChildren();
+    return;
+  }
+  $('confirm-items-title').textContent = leftovers.error !== null
+    ? `The gate failed, so no Codex item is known: ${leftovers.error}`
+    : !leftovers.ran ? 'Codex did not review this iteration (its token budget was used up before it ran), so what it would ask for is not known.'
+      : leftovers.items.length === 0 ? 'The gate left no Codex item on this iteration.' : `Codex items that will not be applied (${leftovers.items.length}):`;
+  $('confirm-items-list').replaceChildren(...leftovers.items.map((item) => itemEntry(item, false)));
+}
+
 function renderConfirmButton() {
   const confirm = state.confirm;
   if (confirm === null) {
@@ -805,13 +1268,15 @@ function renderConfirmButton() {
   }
   const discard = confirm.action === 'abort' && $('discard').checked;
   const ok = $('confirm-ok');
-  ok.textContent = confirm.action === 'approve' ? ($('as-is').checked ? 'Approve: push as it is' : 'Approve: push the branch') : discard ? 'Abort and discard the branch' : 'Abort, keep the worktree';
+  ok.textContent = confirm.action === 'accept' ? 'Accept and prepare the MR'
+    : confirm.action === 'approve' ? ($('as-is').checked ? 'Approve: push as it is' : 'Approve: push the branch') : discard ? 'Abort and discard the branch' : 'Abort, keep the worktree';
   ok.className = discard ? 'btn btn-danger' : 'btn btn-primary';
 }
 
 function closeConfirm() {
   state.confirm = null;
   $('confirm').hidden = true;
+  renderConfirmItems(null);
   $('discard').checked = false;
   $('as-is').checked = false;
   renderActions();
@@ -1171,6 +1636,8 @@ function showDrawer(kind, kicker, title) {
   for (const [name, id] of Object.entries(PANELS)) {
     $(id).hidden = name !== kind;
   }
+  // The job takes a wide drawer; the rest a narrow one.
+  $('drawer').className = kind === 'job' ? 'drawer wide' : 'drawer';
   $('drawer-kicker').textContent = kicker;
   $('drawer-title').textContent = title;
   $('drawer').hidden = false;
@@ -1554,9 +2021,13 @@ async function holdStart(key, reason) {
 
 // ---------- The stream ----------
 
+// One line of the Live log, marked with who it comes from and hidden by the filter.
 function appendEvent(event) {
   const events = $('events');
-  const block = el('div', `event t-${event.type}`, event.text);
+  const source = eventSource(event);
+  const block = el('div', `event t-${event.type} from-${source}`, event.text);
+  block.dataset.source = source;
+  block.hidden = !logShows(source);
   events.append(block);
   if ($('follow').checked) {
     events.scrollTop = events.scrollHeight;
@@ -1644,12 +2115,22 @@ function select(key) {
   state.detail = null;
   state.iteration = null;
   state.cache = new Map();
-  state.expanded = new Set();
+  state.drawn = null;
+  state.target = null;
+  state.jobTask = null;
+  state.mrText = null;
   state.lastLine = -1;
   $('events').replaceChildren();
-  $('iteration-body').replaceChildren();
+  $('iteration-report').replaceChildren();
+  $('patch-body').replaceChildren();
+  $('job-task').replaceChildren();
   $('mr-panel').hidden = true;
+  $('mr-unapplied').hidden = true;
   $('follow').checked = true;
+  for (const [box, status] of [['checkout-text', 'checkout-copy-status'], ['mr-copy-text', 'mr-copy-status']]) {
+    $(box).hidden = true;
+    $(status).textContent = '';
+  }
   // The controls go off until this job's detail arrives; its draft and last outcome come back.
   closeConfirm();
   $('say-input').value = state.drafts.get(key) ?? '';
@@ -1658,24 +2139,6 @@ function select(key) {
   renderActions();
   history.replaceState(null, '', `#${key}`);
   openStream();
-}
-
-function renderJobTabs() {
-  for (const button of $('job-tabs').querySelectorAll('button')) {
-    button.setAttribute('aria-selected', String(button.dataset.tab === state.tab));
-  }
-  for (const [name] of JOB_TABS) {
-    $(`tab-${name}`).hidden = name !== state.tab;
-  }
-}
-
-function selectTab(name) {
-  state.tab = name;
-  renderJobTabs();
-  if (name === 'events' && $('follow').checked) {
-    const events = $('events');
-    events.scrollTop = events.scrollHeight;
-  }
 }
 
 function init() {
@@ -1688,13 +2151,14 @@ function init() {
     return button;
   }));
   renderJobTabs();
-  for (const button of $('iteration-views').querySelectorAll('button')) {
-    button.addEventListener('click', () => {
-      state.view = button.dataset.view;
-      renderIterationTabs(state.detail?.iterations ?? []);
-      void showIteration();
-    });
-  }
+  $('log-filters').replaceChildren(...LOG_FILTERS.map(([filter, label]) => {
+    const button = el('button', '', label);
+    button.type = 'button';
+    button.dataset.filter = filter;
+    button.addEventListener('click', () => setLogFilter(filter));
+    return button;
+  }));
+  renderLogFilters();
   const events = $('events');
   events.addEventListener('scroll', () => {
     // Scrolling up switches follow off; the checkbox turns it on again.
@@ -1761,8 +2225,18 @@ function init() {
   });
   $('discard').addEventListener('change', renderConfirmButton);
   $('as-is').addEventListener('change', renderConfirmButton);
-  $('files-expand').addEventListener('click', () => setAllExpanded(true));
-  $('files-collapse').addEventListener('click', () => setAllExpanded(false));
+  $('accept-gate-button').addEventListener('click', () => openConfirm('accept'));
+  $('copy-checkout').addEventListener('click', () => {
+    const job = state.detail?.job;
+    if (job) {
+      copyValue(`git checkout ${job.branch}`, $('checkout-text'), 'checkout-copy-status');
+    }
+  });
+  $('mr-copy').addEventListener('click', () => {
+    if (typeof state.mrText === 'string') {
+      copyValue(mrCopyText(state.mrText), $('mr-copy-text'), 'mr-copy-status');
+    }
+  });
   $('refresh-button').addEventListener('click', () => void settleUnknown(state.key));
   $('say-input').addEventListener('input', () => {
     if (state.key !== null) {

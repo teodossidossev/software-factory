@@ -1,6 +1,6 @@
 // The job lifecycle: start, check, requestFix, markClean (the MR preparation and the branch,
 // SF-019, committed and rebased by the factory, SF-037), say, retryReview (the retry of a failed
-// review, SF-044), approve (the push), abort, reset
+// review, SF-044), acceptGate (the user's override of a stopped gate, SF-047), approve (the push), abort, reset
 // (and the dashboard's terminal-only Archive), status and the restart rule. Owns the Implementer session of each job, which works in the
 // job's own worktree, and publishes an iteration (Report, Patch and the file list) when the
 // session goes idle; then the Claude review of that iteration runs (SF-038, src/review.ts), and
@@ -17,7 +17,7 @@ import type { Config } from './config.js';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
 import { GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from './gate.js';
-import { cutEvent, type FileChange, type GateRecord, isActive, type Job, type JobState, JobStore, now, type ReviewRecord, TERMINAL_STATES } from './jobs.js';
+import { cutEvent, type FileChange, type GateOverride, type GateRecord, isActive, type Job, type JobState, JobStore, now, type ReviewRecord, TERMINAL_STATES } from './jobs.js';
 import { abortRebase, commitAndRebase, continueRebase, gitBusy, mergeRequestLink, originUrl, pushBranch, readMrText, rebaseInProgress, resolveTarget, unmergedPaths } from './mr.js';
 import { buildPatch, changedFilesSection, fileChanges, fileSummaryLines, type Patch } from './patch.js';
 import { removeSandboxPlaceholders } from './placeholders.js';
@@ -33,6 +33,8 @@ import { addWorktree, deleteBranch, removeWorktree } from './worktree.js';
 
 export const MAX_REPORT_BYTES = 64 * 1024;
 const MAX_SLUG = 40;
+// The codes of a job the gate handed to the user, which sf accept may take on to MR preparation.
+export const GATE_OVERRIDE_CODES: readonly string[] = ['gate_rounds', 'gate_budget', 'gate_failed'];
 
 export interface CheckResult {
   state: JobState;
@@ -635,6 +637,34 @@ export class Execution {
     });
   }
 
+  // The user's override of a stopped gate (sf accept, the dashboard's Accept and prepare MR): a job
+  // the gate handed over (needs_human with gate_rounds, gate_budget or gate_failed) whose last
+  // iteration has a clean Claude review goes on as after a clean gate, to MR preparation with the
+  // paths Claude accepted. The override is recorded first: gate-override.json with the Codex
+  // items not applied (or the gate's error) and a gate_overridden event.
+  acceptGate(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; branch: string }> {
+    return this.#locked(async () => {
+      const job = await this.#job(workspaceName, ticket);
+      const code = job.error?.code;
+      if (job.state !== 'needs_human' || code === undefined || !GATE_OVERRIDE_CODES.includes(code)) {
+        throw new FactoryError('invalid_state', `sf accept needs needs_human after the gate stopped (${GATE_OVERRIDE_CODES.join(', ')}); the job is ${job.state}${code !== undefined ? ` (${code})` : ''}.`);
+      }
+      const review = job.iteration > 0 ? await this.jobs.readReview(workspaceName, ticket, job.iteration) : undefined;
+      if (review === undefined || !('verdict' in review) || review.verdict !== 'clean') {
+        const what = review === undefined ? 'has none' : 'verdict' in review ? `says ${review.verdict}` : 'failed';
+        throw new FactoryError('invalid_state', `sf accept needs a clean Claude review of the last iteration (${job.iteration}); it ${what}.`);
+      }
+      const unaccepted = await this.#unaccepted(job, review.accepted_sensitive);
+      if (unaccepted.length > 0) {
+        throw new FactoryError('invalid_state', `sf accept needs a clean Claude review of the last iteration (${job.iteration}); it does not accept the undeclared sensitive path(s) ${unaccepted.map((item) => item.path).join(', ')}.`);
+      }
+      const gate = await this.jobs.readGate(workspaceName, ticket, job.iteration);
+      const unapplied = gate === undefined ? [] : 'verdict' in gate ? gate.items : gate.error;
+      const override: GateOverride = { at: now(), code, unapplied };
+      return this.#prepareMr(job, review.accepted_sensitive, override);
+    });
+  }
+
   #cancelReview(key: string): void {
     this.#reviews.get(key)?.controller.abort();
     this.#reviews.delete(key);
@@ -913,10 +943,12 @@ export class Execution {
   }
 
   // The work of mark_clean, also run for a clean verdict of the review. Only under the lock.
-  async #prepareMr(job: Job, sensitive: string[]): Promise<{ state: JobState; iteration: number; branch: string }> {
+  // With override (acceptGate, which checked the state), the override is recorded once every
+  // check has passed, before the job moves on.
+  async #prepareMr(job: Job, sensitive: string[], override?: GateOverride): Promise<{ state: JobState; iteration: number; branch: string }> {
     const { workspace: workspaceName, ticket } = job;
-    const retry = job.state === 'needs_human' && job.mr_attempts > 0 && job.worktree !== null;
-    if (!(job.state === 'awaiting_review' || retry)) {
+    const retry = override === undefined && job.state === 'needs_human' && job.mr_attempts > 0 && job.worktree !== null;
+    if (!(job.state === 'awaiting_review' || retry || override !== undefined)) {
       throw new FactoryError('invalid_state', `mark_clean needs awaiting_review (or needs_human after an MR preparation); the job is ${job.state}.`);
     }
     const unacknowledged = ((await this.#lastFiles(job)) ?? [])
@@ -940,6 +972,13 @@ export class Execution {
       await abortRebase(cwd);
       return resolveTarget(workspace.workCheckout, job.base);
     });
+    if (override !== undefined) {
+      await this.jobs.writeGateOverride(workspaceName, ticket, job.iteration, override);
+      await this.jobs.appendEvent(workspaceName, ticket, {
+        ts: override.at, iteration: job.iteration, type: 'gate_overridden', code: override.code,
+        unapplied: Array.isArray(override.unapplied) ? override.unapplied.length : 0,
+      });
+    }
     const attempt = job.mr_attempts + 1;
     const next = await this.#transition({ ...job, target_commit: target.commit, mr_attempts: attempt }, 'preparing_mr');
     await this.#syncTask(workspace, next);

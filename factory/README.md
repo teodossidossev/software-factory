@@ -29,6 +29,7 @@ bin/sf dashboard [--open]         # the dashboard URL of the last sf serve start
 bin/sf start <workspace> <ticket> # start the job in a worktree of its own (same as the dashboard's Start); needs sf serve
 bin/sf say <workspace> <ticket> <message...>   # a user message into the session; needs sf serve
 bin/sf review <workspace> <ticket>             # retry a failed Claude review (needs_human with review_failed); needs sf serve
+bin/sf accept <workspace> <ticket>             # accept a clean Claude review over a stopped gate (gate_rounds, gate_budget, gate_failed) and prepare the MR; needs sf serve
 bin/sf status [<workspace> <ticket>]           # one job (with its worktree, sensitive and deleted paths) or all jobs, with estimated cost and elapsed time; works without sf serve
 bin/sf watch <workspace> <ticket> [--once]     # the session live; works without sf serve
 bin/sf approve <workspace> <ticket> [--as-is]  # push the branch prepared at Clean; --as-is pushes a tip edited by hand; needs sf serve
@@ -109,7 +110,7 @@ The socket path `${SF_STATE_DIR}/sf.sock` must fit a Unix socket address (107 by
 a longer one is refused at start with `socket_path_too_long`.
 
 The execution variables are read once when `sf serve` starts. `sf status` and `sf watch` read
-`SF_STATE_DIR` themselves; `sf start`, `sf say`, `sf review`, `sf approve`, `sf abort` and `sf reset` use it to find the socket; `sf notify-test` reads the notification variables itself.
+`SF_STATE_DIR` themselves; `sf start`, `sf say`, `sf review`, `sf accept`, `sf approve`, `sf abort` and `sf reset` use it to find the socket; `sf notify-test` reads the notification variables itself.
 
 ## Jobs
 
@@ -242,6 +243,22 @@ user goes on with `sf say`, approve, abort or reset. None of them is an MCP tool
   the review of that iteration starts again. It is refused with `invalid_state` unless the job is
   `needs_human` with `review_failed`, and with `review_off` when `SF_REVIEW=off`. The worktree must
   still exist (`worktree_missing` otherwise).
+- `sf accept <workspace> <ticket>` (SF-047), or *Accept and prepare MR…* on the dashboard, lets the
+  user override the gate once it stopped the job: `needs_human` with `gate_rounds`, `gate_budget` or
+  `gate_failed`, and a clean Claude review of the last iteration (`review.json` with verdict
+  `clean` that accepts every undeclared sensitive path). The job then takes the same path as after a
+  clean gate: MR preparation with the paths Claude accepted, so the factory commits, rebases and the
+  job goes on to `preparing_mr` and `ready_for_human_review` as usual. Before it moves on, the
+  override is recorded: `iterations/NNN/gate-override.json` `{at, code, unapplied}` (`unapplied`
+  is the Codex items of that iteration's `gate.json`, its error when the gate failed, or `[]` when
+  no gate ran on it) and a `gate_overridden` event `{type: "gate_overridden", code, unapplied: <count
+  of items>}`, which `sf watch` shows as `gate overridden by the user (gate_rounds): 2 Codex items not
+  applied` and the dashboard's state history lists. Any other state or code, or a Claude review that
+  is missing, failed, says fix or leaves an undeclared sensitive path unaccepted, is refused with
+  `invalid_state` and the reason; the MR preparation's own refusals (`worktree_missing`,
+  `turn_running`) apply, and nothing is recorded when it is refused. This is the way on when Claude
+  is clean and Codex keeps finding ever narrower variants (ADR-0005); the Codex items not applied
+  stay visible for a follow-up ticket.
 - The **gate** (SF-039, `src/gate.ts`) is the second, deciding review. With the gate on
   (`SF_GATE=codex` and a Codex executable found), a clean Claude verdict (after its sensitive-path
   rule) does not go to Clean: the factory runs the Codex CLI on the user's ChatGPT sign-in (it must
@@ -305,7 +322,8 @@ user goes on with `sf say`, approve, abort or reset. None of them is an MCP tool
   (`permission_mode_mismatch`), an unavailable sandbox (`sandbox_unavailable`, with the SDK's
   message), a failed review (`review_failed`), a failed gate (`gate_failed`), the gate's round
   limit (`gate_rounds`) or token ceiling (`gate_budget`) or the iteration limit put the job in
-  `needs_human`.
+  `needs_human`. After a gate code, `sf accept` (above) goes on to MR preparation; otherwise `sf
+  say` starts another iteration.
   When `sf serve` starts, jobs found `working` become `needs_human` (`serve_restarted`) and keep
   their session for `sf say`; jobs found `preparing_mr` become `needs_human` (`mr_serve_restarted`)
   (`sf say` goes on: its iteration is reviewed again); a job found `awaiting_review` whose last iteration has no `review.json`
@@ -509,8 +527,8 @@ State layout under `${SF_STATE_DIR}`:
 sf.sock                                  # 0600, while sf serve runs; one JSON request/response per connection
 dashboard-token                          # 0600, the dashboard token of the last sf serve start
 jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, state, iteration, fixes, gate_fixes, gate_tokens, session_id, created_at, updated_at, error
-jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "review" | "review_failed" | "review_message" | "gate_event" | ...}; what sf watch reads
-jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-schema.json,gate-output.json,conflict-resolution.diff}
+jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "review" | "review_failed" | "review_message" | "gate_event" | "gate_overridden" | ...}; what sf watch reads
+jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-override.json,gate-schema.json,gate-output.json,conflict-resolution.diff}
 worktrees/<workspace>/<ticket>/          # the job's worktree (SF_WORKTREE_ROOT), from start to Clean, abort or reset
 jobs/<workspace>/<ticket>/mr.md              # the MR text, once the branch is ready or after a conflict iteration
 jobs/<workspace>/<ticket>.<timestamp>/   # an archived earlier job
@@ -558,7 +576,7 @@ preparation · 1 min`, `You · approve · 2 min`, `You · retry review · …`, 
 the last iteration (and its undeclared sensitive ones) and the estimated cost ("est. $", not a
 charge). A Your turn card carries the one action that unblocks it: *Approve…* (the job opens with
 its approve confirmation), *Retry review* after a failed Claude review (sent at once, as the
-button in the job card) or *Open the job*; the job's last outcome shows under it. A Planned card
+button in the drawer) or *Open the job*; the job's last outcome shows under it. A Planned card
 shows the ticket, its base and its last job, and **Start** (a skeleton says "waiting for the plan"
 instead), **Task**, Archive and Delete…. Start asks first, naming the workspace, the ticket and the
 base branch, then sends `POST api/tickets/<ws>/<ticket>/start` once: `Execution.start`, the same
@@ -575,8 +593,8 @@ board follows the stream's `jobs`, `tickets` and `workspaces` events: a card mov
 job changes state, and "since when" moves on every minute. On a phone-wide window (below 760 px)
 the columns stack with Your turn first; light and dark follow the system as before.
 
-**The drawer.** Clicking a job card opens the job in a drawer on the right, over the board (until
-SF-047 replaces its content): the job card and tabs described below, the URL becomes
+**The drawer.** Clicking a job card opens the job in a wide drawer on the right, over the board
+(the whole width on a phone): the job detail described below (SF-047), the URL becomes
 `#<workspace>/<ticket>` (opening that URL opens the drawer) and the stream follows that job;
 ✕, a click beside the drawer or Escape closes it and the stream follows no job. A job that leaves
 the board (its ticket archived or deleted) closes it. The same drawer holds the Task text and the
@@ -614,28 +632,64 @@ from a page, or a reload). The ChatGPT reviewer of SF-031 to SF-035 is gone with
 (SF-040): there is no Reviewer line, no "Set up the reviewer in ChatGPT", no Nudge, no Send test
 event and no Subscriptions.
 
-The job in the drawer shows, live, a job card with the ticket, the state and the Approve… and
-Abort… buttons in its head, the branch, base, iteration, estimated cost ("est. $", not a charge)
-and update time as facts, the error and the message box; and under it one card with four tabs
-(SF-026): Iterations (each iteration's Report and Patch, and under its meta line the Claude review:
-the verdict, the summary, the numbered items and the accepted sensitive paths, or why it failed,
-and under it the gate's verdict the same way with its tokens; the job's estimated cost includes the
-Claude reviews), Merge request (the MR text once there is one, else a note), State history, and
-Event stream (the Implementer's session and the reviewers live as `sf watch` prints them,
-following new lines; scrolling up switches follow off). The selected tab is kept when another job
-is opened. It also takes the user's three commands for the job, with the same meaning
-as in the terminal: approve (`sf approve`, the push of the branch prepared at Clean, with an
-explicit "as it is" choice for a tip edited by hand: `sf approve --as-is`), abort (`sf abort`,
-with an explicit discard choice that is unchecked every time a confirmation opens: `sf abort
---discard`) and say (`sf say`: a multiline message; Enter adds a line, only the Send button
-submits). A job in `needs_human` after a failed review (`review_failed`) also shows a Retry review
-button in the head of its card (`sf review`, SF-044); it is hidden in every other case and sends
-at once, without a confirmation. Each is one deliberate click; approve and abort ask for a confirmation that names the
-job and the branch, explains what follows (the push; the session ends and the worktree stays, or
-the worktree and the branch go with discard) and sends nothing when cancelled. The page enables
+**The job detail (SF-047).** The drawer shows the job live, in the shape the user chose from the
+dashboard redesign prototype (variant C, branch `prototype-dashboard-redesign`):
+
+- **Header**: the ticket key, the state badge and the file badges (`N files`, `M sensitive` in red,
+  `K deleted`), the branch with *Copy checkout command* (`git checkout <branch>` on the clipboard,
+  or shown selected for Ctrl+C when the browser refuses it), and the **pipeline stepper**:
+  Implement → Claude review → Codex gate → MR preparation → You. Each step is done (✓), current
+  (with since when: `since 10:05 (4 min)`; the gate from the end of the clean Claude review), halted
+  (red, with its error code) or to do; the gate step reads *off* when `SF_GATE` is off, and
+  *overridden by you* after `sf accept`. A halted job has a line with the code and a plain sentence
+  of what moves it on: `review_failed` "The Claude review could not run. Retry it.", `gate_rounds`
+  "Codex asked for fixes more often than the round limit allows. Accept and prepare the MR, tell
+  the Implementer what to do, or abort.", `gate_budget`, `gate_failed`, `iteration_limit`,
+  `mr_conflict`, a failed push, `serve_restarted`, and a general sentence for any other code.
+- **Next action** (a right rail on a wide window, above the tabs below about 1100 px): who acts now
+  and for how long (`Now · Implementer`, `Now · Claude review`, `Now · Codex gate`, `Now · Factory`,
+  `Your turn`, `Finished`), what they do and what follows, and the actions that move the job on:
+  *Approve…* (`ready_for_human_review`, and `needs_human` after a failed push), *Accept and prepare
+  MR…* (only for `gate_rounds`, `gate_budget` and `gate_failed` with a clean Claude review of the
+  last iteration), *Retry review* (`needs_human` with `review_failed`), *Abort…*, *Archive* for a
+  finished job, and the message box to the Implementer (say). Under it the **facts**, stacked one
+  per row: base, iteration (and MR attempts), Fix sections, gate rounds, gate tokens, the estimated
+  cost ("est. $", not a charge; the iterations and their Claude reviews), the update time and the
+  worktree path, wrapping inside the rail. Then the **state history** as a compact list: the time,
+  `from → to`, the error code (its message on hover), and the user's override of the gate.
+- **Flat tabs** (no tabs inside tabs; the selected one is kept when another job is opened):
+  **Task** (the Task file through `GET api/tickets/<ws>/<ticket>/task`, Fix sections included, as
+  text; read when the tab opens and again when a Fix section is written; the archived file when the
+  ticket was archived), **Changes** (the default: an iteration picker when there is more than one,
+  the meta line, the Implementer's Report, and the file list next to the Patch; see Files below),
+  **Reviews** (per iteration, newest first, the Claude verdict and the Codex verdict side by side:
+  the verdict with its cost or tokens, the summary, the numbered items, the accepted sensitive
+  paths, or why it failed, or *reviewing now…*, *after a clean Claude review*, *not run* or *off*;
+  an iteration accepted over the gate says so), **MR** (the MR text once there is one, else a note;
+  *Copy MR text* puts the title line, a blank line and the body on the clipboard, or shows the text
+  selected for Ctrl+C when the browser refuses; after `sf accept`, *Codex items not applied* under
+  it lists the items (path, problem, expected) or the gate's error, for a follow-up ticket) and
+  **Live log** (the event stream as `sf watch` prints it, with the filters All, Implementer, Claude
+  review, Codex and State: the `review |` and `codex |` lines of SF-045 and the reviewers' verdict
+  lines go to Claude review and Codex, the state changes, the override and the factory's own lines
+  (placeholders removed, a failed notification) to State, the session to Implementer; new lines follow the filter; follow keeps the newest line in view and scrolling up
+  switches it off).
+
+The job's actions take the user's commands with the same meaning as in the terminal: approve (`sf
+approve`, the push of the branch prepared at Clean, with an explicit "as it is" choice for a tip
+edited by hand: `sf approve --as-is`), abort (`sf abort`, with an explicit discard choice that is
+unchecked every time a confirmation opens: `sf abort --discard`), say (`sf say`: a multiline
+message; Enter adds a line, only the Send button submits), Retry review (`sf review`, SF-044, sent
+at once without a confirmation) and Accept and prepare MR (`sf accept`, SF-047: its confirmation
+names the job and lists the Codex items that will not be applied, path and problem, or the gate's
+error, so the user accepts them knowingly). Each is one deliberate click; approve, abort and accept ask for a confirmation that names the
+job, explains what follows (the push; the session ends and the worktree stays, or the worktree and
+the branch go with discard; MR preparation without the Codex items) and sends nothing when
+cancelled. The page enables
 a control from the state it shows (approve in `ready_for_human_review` and in `needs_human`
 after a failed push; abort in every non-terminal state; say in `working`, `awaiting_review`,
-`needs_human` and `ready_for_human_review`) and says why one is off, but the factory decides: a
+`needs_human` and `ready_for_human_review`; accept after a gate code with a clean Claude review)
+and says why one is off, but the factory decides: a
 refusal such as
 `invalid_state` or `turn_running` from a concurrent `sf` command or reviewer verdict is
 shown as it comes. Nothing is retried or replayed: a reload, a reconnect or a network error never
@@ -675,8 +729,8 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 
 | Path | Answer |
 |---|---|
-| `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, updated_at, created_at, error, and for the board (SF-046) `title` (of the Task file, or `null`), `cost_usd` (the estimate of the iterations and their Claude reviews, or `null`), `review` and `gate` (the last iteration's verdicts: `clean`, `fix`, `failed` or `null`) and `review_ended_at` (the end of that clean or fix Claude review, or `null`) |
-| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate}], mr, history: [{ts, from, to, error?}]}` |
+| `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, fixes, gate_fixes, gate_tokens, updated_at, created_at, error, and for the board (SF-046) `title` (of the Task file, or `null`), `cost_usd` (the estimate of the iterations and their Claude reviews, or `null`), `review` and `gate` (the last iteration's verdicts: `clean`, `fix`, `failed` or `null`) and `review_ended_at` (the end of that clean or fix Claude review, or `null`) |
+| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied}]}`; `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null` |
 | `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem}]}`: the registry, the checkout's path, its non-terminal jobs, and why the checkout cannot be used now or `null` |
 | `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, conversation: {message, url}}], archived: [{workspace, ticket, title}]}`: the Task files without a live job; `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
@@ -691,6 +745,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `POST api/jobs/<ws>/<ticket>/abort` | `{"discard": false}`; `discard` optional, default false | `Execution.abort(ws, ticket, discard)` |
 | `POST api/jobs/<ws>/<ticket>/say` | `{"message": "<text>"}` | `Execution.say(ws, ticket, message)`; the text goes as it is (nothing trimmed or split) |
 | `POST api/jobs/<ws>/<ticket>/review` | `{}` | `Execution.retryReview(ws, ticket)` (`sf review`): the failed review of the last iteration runs again; result `{state, iteration}`; `409 invalid_state` unless the job is `needs_human` with `review_failed`, `409 review_off` with `SF_REVIEW=off` |
+| `POST api/jobs/<ws>/<ticket>/accept` | `{}` | `Execution.acceptGate(ws, ticket)` (`sf accept`, SF-047): the override of the stopped gate, then MR preparation; result `{state, iteration, branch}`; `409 invalid_state` with the reason unless the job is `needs_human` with `gate_rounds`, `gate_budget` or `gate_failed` and a clean Claude review of the last iteration; the MR preparation's refusals (`409 worktree_missing`, `409 turn_running`) |
 | `POST api/workspaces` | `{"name": string, "path": string}` | `Setup.addWorkspace`: the rules of `sf workspace add`; result the workspace row |
 | `POST api/workspaces/<name>/remove` | `{}` | `Setup.removeWorkspace`; `409 workspace_busy` while the workspace has a live job; result `{removed}` |
 | `POST api/tickets` | `{"workspace", "ticket", "title", "request"}` | `Setup.createTicket`: the ticket skeleton through the Task file writer, the request kept for the conversation; result `{workspace, ticket, path, base}` |
@@ -732,20 +787,19 @@ with `internal_error` and a fixed message; the cause is logged, never the body o
 When the page's approve request is cut, the push goes on and its outcome is recorded in the job;
 a second approve of a pushed job is refused (`invalid_state`).
 
-**Files (SF-024).** The Iterations tab has a third view, Files, next to Report and Patch: the
-structured file list of the selected iteration in the shape of IntelliJ's Changes list. One row
-per file, the file name first and its directory after it in a muted colour, the row coloured by
-status (added green, modified blue, deleted grey with the name struck through), labels
-`sensitive, undeclared` / `sensitive, declared` / `deleted`, and the counts `+n −m` at the right.
-Groups in this order: sensitive undeclared, sensitive declared, deleted, then the rest, each
-sorted by file name. A click on a row expands, under it, that file's part of the iteration's
-Patch (the section from its `diff --git` header to the next one, split in the browser from the
-Patch text loaded once; nothing new from the server) as a unified diff with added lines green,
-removed lines red and hunk headers muted; a second click collapses it. All rows start collapsed;
-Expand all and Collapse all are in the view's header with the summary `Files N · M sensitive
-undeclared · K deleted`. A file the Patch omits (binary, or beyond the Patch size limit) says so
-in place of the diff; an iteration published before the list existed says so instead of rows.
-The job card's head carries badges: `N files`, and `M sensitive` (red) and
+**Files (SF-024, SF-047).** The Changes tab shows the structured file list of the selected
+iteration next to its Patch, in the shape of IntelliJ's Changes list. One row per file, the file
+name first and its directory after it in a muted colour, the row coloured by status (added green,
+modified blue, deleted grey with the name struck through), labels `sensitive, undeclared` /
+`sensitive, declared` / `deleted`, and the counts `+n −m` at the right. Groups in this order:
+sensitive undeclared, sensitive declared, deleted, then the rest, each sorted by file name, under
+the summary `Files N · M sensitive undeclared · K deleted`. The Patch beside it is the whole
+unified diff of the iteration (loaded once per iteration), added lines green, removed lines red,
+hunk headers muted, one block per file. A click on a row marks it and its block and scrolls the
+diff to that file; a file the Patch omits (binary, or beyond the Patch size limit) says so above
+the Patch; an iteration published before the list existed says so instead of rows. On a narrow
+window the list goes above the Patch.
+The job's header carries badges: `N files`, and `M sensitive` (red) and
 `K deleted` (orange) when the last iteration has undeclared sensitive or deleted files (the board
 card shows the files and the sensitive ones as chips); the
 `ready_for_human_review` job keeps the list of that iteration. The job detail's `iterations`
@@ -773,8 +827,9 @@ end), in a browser:
 3. Task: click Task on a Planned card: the drawer shows the Task file as text, headings bold; a
    line `<script>alert(1)</script>` written into a Task file shows as that text, nothing runs.
    Archived → Task shows an archived file.
-4. Drawer: click a job card: the drawer opens on the right with the job card and its tabs, the URL
-   ends in `#<workspace>/<ticket>`; reload: the drawer opens on the same job. ✕, a click on the
+4. Drawer: click a job card: the wide drawer opens on the right with the header, the stepper, the
+   next-action rail and the tabs; the URL ends in `#<workspace>/<ticket>`; reload: the drawer
+   opens on the same job. Copy checkout command puts `git checkout <branch>` on the clipboard. ✕, a click on the
    board beside it and Escape close it (Escape in an open approve or abort dialog closes only
    the dialog).
 5. Say: in the drawer of a job in `awaiting_review` type two lines (Enter adds a line and submits
@@ -808,16 +863,24 @@ end), in a browser:
    it on the clipboard. Once ChatGPT wrote the Task file, Start appears on the card. Remove on a
    workspace with a live job is off with the reason. Nowhere on the page is there a Reviewer
    line, a reviewer setup, Nudge, Send test event or Subscriptions.
-13. Tabs: Iterations opens by default; Merge request says there is no text until Clean prepared
-   the branch, then shows it; State history and Event stream hold their content; the chosen tab
-   stays when another job is opened.
-14. Files: in the Iterations tab choose Files: the rows in the IntelliJ shape and order, the
-   labels and counts; click a row: its diff opens under it, coloured; click again: it closes;
-   Expand all opens every row, a binary file says the Patch omits it.
+13. Tabs: Changes opens by default; Task shows the Task file with its Fix sections; Reviews shows
+   both verdicts of every iteration side by side; MR says there is no text until MR preparation
+   wrote it, then shows it, and Copy MR text puts the title, a blank line and the body on the
+   clipboard (paste it into the MR form); Live log follows the job and its filters keep one source;
+   the chosen tab stays when another job is opened. The facts' worktree path wraps inside the rail.
+14. Changes: the file list in the IntelliJ shape and order beside the Patch; click a row: the
+   Patch scrolls to that file and marks it; a binary file says the Patch omits it.
 15. Layout: narrower than 760 px the columns stack with Your turn first and the drawer takes the
    whole width; between 760 and about 1200 px the board scrolls sideways inside the page; in the
    OS dark scheme the pipeline colours, the chips and the dialogs stay readable; Tab reaches each
-   card, its action, the drawer's ✕, Approve…, Abort…, the dialog's buttons, the textarea and Send.
+   card, its action, the drawer's ✕, the tabs, Approve…, Abort…, the dialog's buttons, the
+   textarea and Send. Between about 760 and 1100 px the next-action panel sits above the tabs; on a
+   phone the stepper stacks.
+16. Accept and prepare MR (a fake Codex scripted to ask for fixes past `SF_GATE_MAX_ROUNDS=1`): the
+   job is under Your turn with the gate step red and `gate_rounds`; the rail offers *Accept and
+   prepare MR…*; its dialog lists the Codex items; Cancel sends nothing; confirm: the job goes to
+   MR preparation and Your turn, the state history shows the override, and the MR tab lists the
+   Codex items not applied.
 
 ## Workspace registry
 

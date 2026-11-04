@@ -1,6 +1,6 @@
-// End-to-end tests of the MR preparation at Clean (mark_clean), the push at approve, abort, reset,
-// the sandbox arguments and the notifications, with the fake Claude staging, committing and
-// rebasing in the job's worktree like the Implementer.
+// End-to-end tests of the MR preparation at Clean (mark_clean: the MR text turn, the factory's
+// commit and rebase, the conflict turn), the push at approve, abort, reset, the sandbox arguments
+// and the notifications, with the fake Claude writing files in the job's worktree.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -11,32 +11,25 @@ import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
 import { loadHandbook } from '../src/server.js';
 import { pushBranch } from '../src/mr.js';
-import { mrPrompt } from '../src/prompts.js';
+import { conflictPrompt, mrPrompt } from '../src/prompts.js';
 import { call, fakeLog, git, newEnv, newRepo, putTask, refused, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
 
 const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid'];
-const commit = (message: string): string[] => ['git', ...ID, 'commit', '-q', '-m', message];
-const ADD = ['git', 'add', '-A'];
-const REBASE = ['git', ...ID, 'rebase', '-q', 'origin/main'];
 
 function mrText(header: string): string {
   return [
     header, '',
-    '## What', 'Changes the README.', '## Why', 'The ticket asks for it.', '## How', 'One line.', '## Why the change', 'Readers need it.',
+    '## What', 'Changes the README.', '## Why', 'The ticket asks for it.', '', 'Readers need the new line.', '## How', 'One line.', '## Why the change', 'Readers need it.',
     '## Special things to note', '- None.', '## Change outline', '- README.md', '## Testing', 'npm test: passed', '## Screenshots', 'N/A',
     '## Checklist', '- [x] Branch name', '- [x] Target branch', '',
   ].join('\n');
 }
+// The commit body the factory takes from mrText's ## Why section.
+const BODY = 'The ticket asks for it.\nReaders need the new line.';
 
 // Pushes a commit adding path to origin/main from a separate clone.
 function moveOrigin(origin: string, path: string): string {
-  const other = join(temp, `move-${path.replace(/\W/g, '')}-${Date.now()}`);
-  execFileSync('git', ['clone', '-q', origin, other]);
-  execFileSync('sh', ['-c', 'echo upstream > "$1"', 'sh', path], { cwd: other });
-  git(other, 'add', '.');
-  git(other, 'commit', '-q', '-m', `upstream ${path}`);
-  git(other, 'push', '-q', 'origin', 'main');
-  return git(other, 'rev-parse', 'HEAD').trim();
+  return pushToOrigin(origin, { [path]: 'upstream\n' }, `upstream ${path}`);
 }
 
 // Pushes a commit writing files on origin/main from a separate clone; returns the commit.
@@ -50,15 +43,6 @@ function pushToOrigin(origin: string, files: Record<string, string>, message: st
   git(other, 'commit', '-q', '-m', message);
   git(other, 'push', '-q', 'origin', 'main');
   return git(other, 'rev-parse', 'HEAD').trim();
-}
-
-// The commit of the job's snapshot ref in the checkout, or undefined when there is none.
-function snapshotRefCommit(repo: string, ticket: string): string | undefined {
-  try {
-    return git(repo, 'rev-parse', '--verify', '--quiet', `refs/sf/snapshot/${ticket}`).trim();
-  } catch {
-    return undefined;
-  }
 }
 
 const NINE = ['1', '2', '3', '4', '5', '6', '7', '8', '9'];
@@ -79,84 +63,51 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-test('mark_clean: each mr_* check fails in turn, retries keep the snapshot and the worktree, the last attempt rebases; approve refuses a hand-edited tip and pushes with --as-is', async () => {
+// True while a rebase is in progress in the worktree.
+async function rebasing(worktree: string): Promise<boolean> {
+  const dir = resolve(worktree, git(worktree, 'rev-parse', '--git-dir').trim());
+  return (await exists(join(dir, 'rebase-merge'))) || (await exists(join(dir, 'rebase-apply')));
+}
+
+const denied = (entry: { argv: string[] }): string => entry.argv.find((arg) => arg.startsWith('--disallowedTools='))!;
+
+test('mark_clean: the MR turn writes the MR text only; the factory commits once on top of the moved target with the ## Why body; approve refuses a hand-edited tip and pushes with --as-is', async () => {
   const env = await newEnv('approve', { SF_SANDBOX_DOMAINS: 'pypi.org' });
   const repo = await newRepo(env, 'approve-repo', true);
   const origin = join(temp, 'approve-repo-origin.git');
   await putTask(env, repo, 'T-1', 'Change README');
-  const mrPath = '.software-factory/T-1.mr.md';
   await script(env, [
-    { write: { 'README.md': 'hello world\n' }, text: 'iteration 1' },
-    // 1: nothing committed.
-    { write: { [mrPath]: mrText('feat(T-1): Change the README') }, text: 'attempt 1' },
-    // 2: a header that breaks the rules.
-    { run: [ADD, commit('feat(T-1): Change the README.')], text: 'attempt 2' },
-    // 3: two commits.
-    { run: [['git', ...ID, 'commit', '-q', '--allow-empty', '-m', 'feat(T-1): Second']], text: 'attempt 3' },
-    // 4: one good commit, but no MR text.
-    { run: [['git', 'reset', '-q', '--soft', 'HEAD~2'], commit('feat(T-1): Change the README'), ['rm', mrPath]], text: 'attempt 4' },
-    // 5: MR text back, but its title differs from the commit subject.
-    { write: { [mrPath]: mrText('feat(T-1): Change the README file') }, text: 'attempt 5' },
-    // 6: the right title, but origin/main moved and the branch is not rebased.
-    { write: { [mrPath]: mrText('feat(T-1): Change the README') }, text: 'attempt 6' },
-    // 7: rebased.
-    { run: [REBASE], text: '# Report: T-1, MR preparation 7\n\n## Done\nRebased.' },
+    { write: { 'README.md': 'hello world\n', 'debug.log': 'ignored\n' }, text: 'iteration 1' },
+    { write: { '.software-factory/T-1.mr.md': mrText('feat(T-1): Change the README') }, text: '# Report: T-1, MR preparation 1\n\n## Done\nfeat(T-1): Change the README' },
   ]);
   const served = await serve(env);
   await call(served, 'start', { workspace: 'app', ticket: 'T-1' });
   await waitFor(served, 'T-1', 'awaiting_review', 1);
   const branch = 'T-1-change-readme';
   const worktree = worktreeOf(env, 'T-1');
-
-  const expectations: Array<[string, RegExp]> = [
-    ['mr_dirty', /The work checkout has 1 uncommitted change\(s\): README\.md\./],
-    ['mr_commit_header', /The commit header "feat\(T-1\): Change the README\." breaks the rules: it ends with a period\./],
-    ['mr_commit_count', /T-1-change-readme has 2 commit\(s\) on top of the target; the rules want exactly 1\./],
-    ['mr_text_missing', /\.software-factory\/T-1\.mr\.md does not exist\./],
-    ['mr_text_invalid', /is invalid: its title "feat\(T-1\): Change the README file" differs from the commit subject "feat\(T-1\): Change the README"\./],
-    ['mr_not_rebased', /T-1-change-readme does not contain the target commit [0-9a-f]{12}; it is not rebased\./],
-  ];
-  let upstream = '';
-  for (const [index, [code, message]] of expectations.entries()) {
-    if (code === 'mr_not_rebased') {
-      upstream = moveOrigin(origin, 'other.txt');
-    }
-    // The first Clean from awaiting_review; every later one the retry from needs_human.
-    assert.equal((await call(served, 'mark_clean', { workspace: 'app', ticket: 'T-1' })).state, 'preparing_mr');
-    const checked = await waitFor(served, 'T-1', 'needs_human');
-    assert.equal(checked.error.code, code);
-    assert.match(checked.error.message, message);
-    const job = (await new JobStore(env.state).read('app', 'T-1'))!;
-    assert.equal(job.mr_attempts, index + 1);
-    // The worktree stays for the retry; approve has nothing to push yet.
-    assert.equal(job.worktree, worktree);
-    assert.equal((await approve(env, 'T-1')).code, 1);
-    if (index === 0) {
-      assert.equal((await refused(served, 'request_fix', { workspace: 'app', ticket: 'T-1', content: 'x' })).code, 'invalid_state');
-    }
-  }
+  const jobs = new JobStore(env.state);
+  const original = (await jobs.read('app', 'T-1'))!.base_commit!;
+  const upstream = moveOrigin(origin, 'other.txt');
 
   assert.equal((await call(served, 'mark_clean', { workspace: 'app', ticket: 'T-1' })).state, 'preparing_mr');
   const ready = await waitFor(served, 'T-1', 'ready_for_human_review', 1);
   assert.equal(ready.mr, mrText('feat(T-1): Change the README'));
-  // The worktree is gone, the branch has one commit on top of the moved main in the checkout.
+  // The worktree is gone; the branch has one commit on top of the moved main in the checkout,
+  // with the title as subject, the ## Why lines as body and the user's identity.
   assert.equal(await exists(worktree), false);
+  assert.equal(git(repo, 'rev-list', '--count', `${upstream}..${branch}`).trim(), '1');
   assert.equal(git(repo, 'rev-parse', `${branch}~1`).trim(), upstream);
-  assert.equal(git(repo, 'log', '-1', '--format=%s', branch).trim(), 'feat(T-1): Change the README');
+  assert.equal(git(repo, 'log', '-1', '--format=%s%n%n%b', branch).trim(), `feat(T-1): Change the README\n\n${BODY}`);
+  assert.equal(git(repo, 'log', '-1', '--format=%an <%ae>', branch).trim(), 'Test User <test@example.invalid>');
+  // Only the reviewed change: no ignored file, no .software-factory/.
+  assert.equal(git(repo, 'show', '--name-only', '--format=', branch).trim(), 'README.md');
   const jobDir = join(env.state, 'jobs', 'app', 'T-1');
   assert.equal(await readFile(join(jobDir, 'mr.md'), 'utf8'), ready.mr);
-  let job = (await new JobStore(env.state).read('app', 'T-1'))!;
+  let job = (await jobs.read('app', 'T-1'))!;
   const prepared = git(repo, 'rev-parse', branch).trim();
-  assert.deepEqual([job.target_commit, job.base_commit, job.prepared_commit, job.worktree, job.mr_attempts, job.iteration], [upstream, upstream, prepared, null, 7, 1]);
-  // The snapshot of attempt 1 was kept through the retries; the target is the last one. Its commit
-  // holds the reviewed tree on top of the base, and its ref stays until the job ends.
-  const snapshot = JSON.parse(await readFile(join(jobDir, 'mr-snapshot.json'), 'utf8'));
-  const original = git(repo, 'rev-parse', `${upstream}~1`).trim();
-  assert.deepEqual(snapshot.paths, ['README.md']);
-  assert.deepEqual([snapshot.target_ref, snapshot.target_commit, snapshot.base_commit], ['origin/main', upstream, original]);
-  assert.equal(git(repo, 'rev-parse', `${snapshot.snapshot_commit}:README.md`).trim(), git(repo, 'rev-parse', `${branch}:README.md`).trim());
-  assert.equal(snapshotRefCommit(repo, 'T-1'), snapshot.snapshot_commit);
-  await assert.rejects(stat(join(jobDir, 'snapshot.index')), { code: 'ENOENT' });
+  assert.deepEqual([job.target_commit, job.base_commit, job.prepared_commit, job.worktree, job.mr_attempts, job.iteration], [upstream, upstream, prepared, null, 1, 1]);
+  assert.equal(await exists(join(jobDir, 'mr-snapshot.json')), false);
+  assert.equal(git(repo, 'for-each-ref', 'refs/sf/'), '');
 
   // The user edits the branch by hand: approve refuses, --as-is pushes the edited tip.
   const tree = git(repo, 'rev-parse', `${branch}^{tree}`).trim();
@@ -174,26 +125,24 @@ test('mark_clean: each mr_* check fails in turn, retries keep the snapshot and t
   assert.equal(remote, edited);
   const done = await call(served, 'check', { workspace: 'app', ticket: 'T-1' });
   assert.deepEqual([done.state, done.error, done.mr], ['pushed', undefined, ready.mr]);
-  job = (await new JobStore(env.state).read('app', 'T-1'))!;
-  assert.deepEqual([job.prepared_commit, job.mr_attempts], [edited, 7]);
-  assert.equal(snapshotRefCommit(repo, 'T-1'), undefined);
+  job = (await jobs.read('app', 'T-1'))!;
+  assert.deepEqual([job.prepared_commit, job.mr_attempts], [edited, 1]);
 
-  // The MR turns: the MR prompt and deny list; iterations keep the full deny list; sandbox on; every turn in the worktree.
+  // The MR turn: the MR prompt with the target of this Clean, and the full deny list (git commit
+  // included); sandbox on; every turn in the worktree and the same session.
   const log = await fakeLog(env);
   const handbook = (await loadHandbook()).text;
-  assert.equal(log.length, 8);
-  assert.equal(log[1]!.prompt, mrPrompt({ ticket: 'T-1', branch, targetRef: 'origin/main', targetCommit: original, attempt: 1, handbook }));
-  assert.match(log[7]!.prompt, new RegExp(`^Target: origin/main at ${upstream}\\.$`, 'm'));
-  assert.match(log[2]!.prompt, /This is attempt 2\. The previous attempt failed the factory's checks: The work checkout has 1 uncommitted change\(s\): README\.md\./);
+  assert.equal(log.length, 2);
+  assert.notEqual(upstream, original);
+  assert.equal(log[1]!.prompt, mrPrompt({ ticket: 'T-1', branch, targetRef: 'origin/main', targetCommit: upstream, attempt: 1, handbook }));
   assert.doesNotMatch(log[1]!.prompt, /Rules from the Software Factory/);
   assert.ok(log.every((entry) => entry.cwd === worktree));
-  const denied = (entry: { argv: string[] }): string => entry.argv.find((arg) => arg.startsWith('--disallowedTools='))!;
-  assert.match(denied(log[0]!), /Bash\(git commit:\*\)/);
-  for (const entry of log.slice(1)) {
-    assert.doesNotMatch(denied(entry), /Bash\(git (commit|add|rebase):\*\)/);
-    assert.match(denied(entry), /Bash\(git push:\*\)/);
-    assert.ok(entry.argv.includes(`--resume=${log[0]!.sessionId}`));
+  for (const entry of log) {
+    assert.match(denied(entry), /Bash\(git commit:\*\)/);
+    assert.match(denied(entry), /Bash\(git (add|rebase|push):\*\)/);
   }
+  assert.equal(denied(log[1]!), denied(log[0]!));
+  assert.ok(log[1]!.argv.includes(`--resume=${log[0]!.sessionId}`));
   const settings = JSON.parse(log[0]!.argv[log[0]!.argv.indexOf('--settings') + 1]!);
   assert.deepEqual(settings.sandbox, {
     enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true,
@@ -206,73 +155,103 @@ test('mark_clean: each mr_* check fails in turn, retries keep the snapshot and t
   await stop(served);
 });
 
-test('mark_clean: a prepared commit that differs from the reviewed change goes back to review against the target in the same worktree; a fix after Clean reopens the worktree and the next Clean amends', async () => {
-  const env = await newEnv('diffcheck');
-  const repo = await newRepo(env, 'diffcheck-repo', true);
-  const origin = join(temp, 'diffcheck-repo-origin.git');
+test('mark_clean: a missing, then an invalid MR text is needs_human with its code and commits nothing; the retry prepares the branch', async () => {
+  const env = await newEnv('mrtext');
+  const repo = await newRepo(env, 'mrtext-repo', true);
+  await putTask(env, repo, 'T-2', 'Add a');
+  const mrPath = '.software-factory/T-2.mr.md';
+  await script(env, [
+    { write: { 'a.txt': 'a\n' }, text: 'iteration 1' },
+    { text: 'attempt 1: no MR text' },
+    { write: { [mrPath]: mrText('feat(T-2): Add a.') }, text: 'attempt 2: a title with a period' },
+    { write: { [mrPath]: mrText('feat(T-2): Add a') }, text: 'attempt 3' },
+  ]);
+  const served = await serve(env);
+  await call(served, 'start', { workspace: 'app', ticket: 'T-2' });
+  await waitFor(served, 'T-2', 'awaiting_review', 1);
+  const jobs = new JobStore(env.state);
+  const base = (await jobs.read('app', 'T-2'))!.base_commit!;
+  const branch = 'T-2-add-a';
+  const worktree = worktreeOf(env, 'T-2');
+
+  const expectations: Array<[string, RegExp]> = [
+    ['mr_text_missing', /^\.software-factory\/T-2\.mr\.md does not exist\.$/],
+    ['mr_text_invalid', /^\.software-factory\/T-2\.mr\.md is invalid: its first line "feat\(T-2\): Add a\." is not a valid title: it ends with a period\.$/],
+  ];
+  for (const [index, [code, message]] of expectations.entries()) {
+    // The first Clean from awaiting_review; the second the retry from needs_human.
+    assert.equal((await call(served, 'mark_clean', { workspace: 'app', ticket: 'T-2' })).state, 'preparing_mr');
+    const checked = await waitFor(served, 'T-2', 'needs_human');
+    assert.equal(checked.error.code, code);
+    assert.match(checked.error.message, message);
+    const job = (await jobs.read('app', 'T-2'))!;
+    assert.deepEqual([job.mr_attempts, job.worktree, job.prepared_commit], [index + 1, worktree, null]);
+    // Nothing committed: the branch is still at its base, the change uncommitted in the worktree.
+    assert.equal(git(repo, 'rev-parse', branch).trim(), base);
+    assert.equal(git(worktree, 'status', '--porcelain', '--', 'a.txt'), '?? a.txt\n');
+    assert.equal((await approve(env, 'T-2')).code, 1);
+    if (index === 0) {
+      assert.equal((await refused(served, 'request_fix', { workspace: 'app', ticket: 'T-2', content: 'x' })).code, 'invalid_state');
+    }
+  }
+  await call(served, 'mark_clean', { workspace: 'app', ticket: 'T-2' });
+  await waitFor(served, 'T-2', 'ready_for_human_review', 1);
+  assert.equal(git(repo, 'rev-list', '--count', `${base}..${branch}`).trim(), '1');
+  assert.equal(git(repo, 'log', '-1', '--format=%s', branch).trim(), 'feat(T-2): Add a');
+  assert.equal((await jobs.read('app', 'T-2'))!.mr_attempts, 3);
+  const log = await fakeLog(env);
+  assert.match(log[2]!.prompt, /^This is attempt 2\. The previous attempt failed: \.software-factory\/T-2\.mr\.md does not exist\.$/m);
+  assert.match(log[3]!.prompt, /^This is attempt 3\. The previous attempt failed: .*it ends with a period\.$/m);
+  await stop(served);
+});
+
+test('mark_clean after a fix asked in ready_for_human_review: still one commit, with the new file, without a file reverted by the fix', async () => {
+  const env = await newEnv('fixafter');
+  const repo = await newRepo(env, 'fixafter-repo', true);
+  const origin = join(temp, 'fixafter-repo-origin.git');
   await putTask(env, repo, 'D-1', 'Add files');
   const mrPath = '.software-factory/D-1.mr.md';
   await script(env, [
-    { write: { 'a.txt': 'a\n' }, text: 'iteration 1' },
-    // The Implementer touches one more file during preparation.
-    { write: { 'b.txt': 'b\n', [mrPath]: mrText('feat(D-1): Add a and b') }, run: [ADD, commit('feat(D-1): Add a and b'), REBASE], text: 'Prepared; also added b.txt.' },
-    // Second Clean: nothing to commit, nothing to rebase.
-    { text: 'Nothing left to do.' },
-    // A fix after Clean, in the reopened worktree.
-    { write: { 'c.txt': 'c\n' }, text: 'iteration 3: added c' },
-    // Its Clean amends the prepared commit.
-    { write: { [mrPath]: mrText('feat(D-1): Add a, b and c') }, run: [['git', 'add', 'c.txt'], ['git', ...ID, 'commit', '-q', '--amend', '-m', 'feat(D-1): Add a, b and c']], text: 'Amended.' },
+    { write: { 'a.txt': 'a\n', 'README.md': 'changed\n' }, text: 'iteration 1' },
+    { write: { [mrPath]: mrText('feat(D-1): Add a') }, text: 'MR text 1' },
+    // The fix after Clean, in the reopened worktree: adds c.txt and puts the README back.
+    { write: { 'c.txt': 'c\n', 'README.md': 'hello\n' }, text: 'iteration 2: added c, README as before' },
+    { write: { [mrPath]: mrText('feat(D-1): Add a and c') }, text: 'MR text 2' },
   ]);
   const served = await serve(env);
   await call(served, 'start', { workspace: 'app', ticket: 'D-1' });
-  const first = await waitFor(served, 'D-1', 'awaiting_review', 1);
+  await waitFor(served, 'D-1', 'awaiting_review', 1);
   const jobs = new JobStore(env.state);
-  const oldBase = (await jobs.read('app', 'D-1'))!.base_commit;
-  const upstream = moveOrigin(origin, 'up.txt');
+  const base = (await jobs.read('app', 'D-1'))!.base_commit!;
+  const branch = 'D-1-add-files';
   const worktree = worktreeOf(env, 'D-1');
 
   await call(served, 'mark_clean', { workspace: 'app', ticket: 'D-1' });
+  await waitFor(served, 'D-1', 'ready_for_human_review', 1);
+  const prepared = git(repo, 'rev-parse', branch).trim();
+  assert.equal(git(repo, 'show', '--name-only', '--format=', branch).trim(), 'README.md\na.txt');
+
+  // request_fix from ready_for_human_review: the worktree is recreated from the branch and the
+  // next iteration's Patch is the whole change against the target.
+  assert.deepEqual(await call(served, 'request_fix', { workspace: 'app', ticket: 'D-1', content: 'Add c.txt, keep the README.' }), { iteration: 2, check_after_minutes: 5 });
   const second = await waitFor(served, 'D-1', 'awaiting_review', 2);
-  assert.match(second.report, /^Prepared; also added b\.txt\.\n\n## MR preparation\n\nThe prepared commit differs from the reviewed change in: b\.txt\. The Patch is now against the target origin\/main \([0-9a-f]{40}\)\.\n\n## Changed files\n/);
-  // The Patch is against the target: both files, not the upstream change.
   assert.match(second.patch.text, /\+\+\+ b\/a\.txt/);
-  assert.match(second.patch.text, /\+\+\+ b\/b\.txt/);
-  assert.doesNotMatch(second.patch.text, /up\.txt/);
-  assert.notEqual(second.patch.sha256, first.patch.sha256);
-  assert.equal(second.mr, mrText('feat(D-1): Add a and b'));
-  let job = (await jobs.read('app', 'D-1'))!;
-  assert.deepEqual([job.base_commit, job.target_commit, job.worktree], [upstream, upstream, worktree]);
-  assert.notEqual(oldBase, upstream);
-  assert.throws(() => execFileSync('git', ['--git-dir', origin, 'rev-parse', '--verify', 'refs/heads/D-1-add-files'], { stdio: 'ignore' }));
-
-  await call(served, 'mark_clean', { workspace: 'app', ticket: 'D-1' });
-  await waitFor(served, 'D-1', 'ready_for_human_review', 2);
-  assert.equal(await exists(worktree), false);
-  const prepared = git(repo, 'rev-parse', 'D-1-add-files').trim();
-  job = (await jobs.read('app', 'D-1'))!;
-  assert.equal(job.prepared_commit, prepared);
-
-  // request_fix from ready_for_human_review: the worktree is recreated from the branch, the next
-  // iteration's Patch is the whole change against the target, and Clean amends the one commit.
-  assert.deepEqual(await call(served, 'request_fix', { workspace: 'app', ticket: 'D-1', content: 'Add c.txt too.' }), { iteration: 3, check_after_minutes: 5 });
-  const third = await waitFor(served, 'D-1', 'awaiting_review', 3);
-  assert.match(third.patch.text, /\+\+\+ b\/a\.txt/);
-  assert.match(third.patch.text, /\+\+\+ b\/c\.txt/);
+  assert.match(second.patch.text, /\+\+\+ b\/c\.txt/);
+  assert.doesNotMatch(second.patch.text, /README/);
   assert.equal(git(worktree, 'rev-parse', 'HEAD').trim(), prepared);
   await call(served, 'mark_clean', { workspace: 'app', ticket: 'D-1' });
-  await waitFor(served, 'D-1', 'ready_for_human_review', 3);
-  assert.equal(git(repo, 'rev-list', '--count', `${upstream}..D-1-add-files`).trim(), '1');
-  assert.equal(git(repo, 'log', '-1', '--format=%s', 'D-1-add-files').trim(), 'feat(D-1): Add a, b and c');
-  assert.equal(git(repo, 'show', 'D-1-add-files:c.txt'), 'c\n');
-  job = (await jobs.read('app', 'D-1'))!;
+  await waitFor(served, 'D-1', 'ready_for_human_review', 2);
+  assert.equal(git(repo, 'rev-list', '--count', `${base}..${branch}`).trim(), '1');
+  assert.equal(git(repo, 'log', '-1', '--format=%s', branch).trim(), 'feat(D-1): Add a and c');
+  assert.equal(git(repo, 'show', '--name-only', '--format=', branch).trim(), 'a.txt\nc.txt');
+  const job = (await jobs.read('app', 'D-1'))!;
   assert.notEqual(job.prepared_commit, prepared);
-  assert.equal(job.worktree, null);
+  assert.deepEqual([job.worktree, job.mr_attempts], [null, 2]);
 
   const pushed = await approve(env, 'D-1');
   assert.equal(pushed.code, 0, pushed.stdout + pushed.stderr);
-  assert.match(pushed.stdout, /^state: pushed\nbranch: D-1-add-files\ntitle: feat\(D-1\): Add a, b and c$/m);
-  assert.equal(execFileSync('git', ['--git-dir', origin, 'rev-parse', 'refs/heads/D-1-add-files'], { encoding: 'utf8' }).trim(), job.prepared_commit);
-  assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'D-1' })).state, 'pushed');
+  assert.match(pushed.stdout, /^state: pushed\nbranch: D-1-add-files\ntitle: feat\(D-1\): Add a and c$/m);
+  assert.equal(execFileSync('git', ['--git-dir', origin, 'rev-parse', `refs/heads/${branch}`], { encoding: 'utf8' }).trim(), job.prepared_commit);
   await stop(served);
 });
 
@@ -292,74 +271,79 @@ test('mark_clean: the target moved in another hunk of a reviewed file; the rebas
   await putTask(env, repo, 'M-1', 'Edit line nine');
   await script(env, [
     { write: { 'lines.txt': lines({ 9: '9 change' }) }, text: 'iteration 1' },
-    {
-      write: { '.software-factory/M-1.mr.md': mrText('feat(M-1): Edit line nine') },
-      run: [['git', 'add', 'lines.txt'], commit('feat(M-1): Edit line nine'), REBASE],
-      text: 'Prepared.',
-    },
+    { write: { '.software-factory/M-1.mr.md': mrText('feat(M-1): Edit line nine') }, text: 'MR text' },
   ]);
   const served = await serve(env);
   await call(served, 'start', { workspace: 'app', ticket: 'M-1' });
   await waitFor(served, 'M-1', 'awaiting_review', 1);
-  // The same file changes on the target, in line 1: a clean three-way merge.
+  // The same file changes on the target, in line 1: a clean rebase.
   const upstream = pushToOrigin(origin, { 'lines.txt': lines({ 1: '1 upstream' }) }, 'upstream line one');
   await call(served, 'mark_clean', { workspace: 'app', ticket: 'M-1' });
   await waitFor(served, 'M-1', 'ready_for_human_review', 1);
   const job = (await new JobStore(env.state).read('app', 'M-1'))!;
-  assert.deepEqual([job.iteration, job.target_commit], [1, upstream]);
+  assert.deepEqual([job.iteration, job.target_commit, job.base_commit], [1, upstream, upstream]);
+  assert.equal(git(repo, 'rev-parse', 'M-1-edit-line-nine~1').trim(), upstream);
   assert.equal(git(repo, 'show', 'M-1-edit-line-nine:lines.txt'), lines({ 1: '1 upstream', 9: '9 change' }));
+  assert.equal((await fakeLog(env)).length, 2);
   const pushed = await approve(env, 'M-1');
   assert.equal(pushed.code, 0, pushed.stdout + pushed.stderr);
   assert.match(pushed.stdout, /^state: pushed\nbranch: M-1-edit-line-nine\ntitle: feat\(M-1\): Edit line nine$/m);
   assert.equal(execFileSync('git', ['--git-dir', origin, 'show', 'M-1-edit-line-nine:lines.txt'], { encoding: 'utf8' }), lines({ 1: '1 upstream', 9: '9 change' }));
-  assert.equal(snapshotRefCommit(repo, 'M-1'), undefined);
   await stop(served);
 });
 
-test('mark_clean: the target moved in the same hunk; the resolved conflict goes back to review naming the file, the next Clean is ready', async () => {
+test('mark_clean: the target moved in the same hunk; a conflict turn that leaves markers is mr_conflict with the rebase aborted, one that resolves it goes back to review naming the file, the next Clean is ready', async () => {
   const env = await newEnv('mergeconflict');
   const { repo, origin } = await linesRepo(env, 'mergeconflict-repo');
   await putTask(env, repo, 'M-2', 'Edit line nine');
   const resolved = lines({ 9: '9 change and upstream' });
-  const rebaseResolving = [
-    'sh', '-c',
-    'git -c user.name=t -c user.email=t@example.invalid rebase -q origin/main >/dev/null 2>&1 || '
-      + '{ printf "%s" "$1" > lines.txt && git add lines.txt && GIT_EDITOR=true git -c user.name=t -c user.email=t@example.invalid rebase --continue >/dev/null; }',
-    'sh', resolved,
-  ];
   await script(env, [
     { write: { 'lines.txt': lines({ 9: '9 change' }) }, text: 'iteration 1' },
-    {
-      write: { '.software-factory/M-2.mr.md': mrText('feat(M-2): Edit line nine') },
-      run: [['git', 'add', 'lines.txt'], commit('feat(M-2): Edit line nine'), rebaseResolving],
-      text: 'Prepared; resolved a conflict in lines.txt.',
-    },
-    { text: 'Nothing left to do.' },
+    { write: { '.software-factory/M-2.mr.md': mrText('feat(M-2): Edit line nine') }, text: 'MR text' },
+    // Conflict turn 1 changes nothing: the markers stay.
+    { text: 'Could not resolve.' },
+    // The retry: the MR text is still in the worktree; conflict turn 2 resolves the file.
+    { text: 'MR text kept' },
+    { write: { 'lines.txt': resolved }, text: '# Report: M-2, conflict resolution\n\n## Done\nlines.txt: kept both changes.' },
+    // The next Clean.
+    { text: 'MR text kept' },
   ]);
   const served = await serve(env);
   await call(served, 'start', { workspace: 'app', ticket: 'M-2' });
   await waitFor(served, 'M-2', 'awaiting_review', 1);
+  const worktree = worktreeOf(env, 'M-2');
+  const jobs = new JobStore(env.state);
   const upstream = pushToOrigin(origin, { 'lines.txt': lines({ 9: '9 upstream' }) }, 'upstream line nine');
 
   await call(served, 'mark_clean', { workspace: 'app', ticket: 'M-2' });
-  const second = await waitFor(served, 'M-2', 'awaiting_review', 2);
-  assert.match(second.report, /\n## MR preparation\n\nThe prepared commit differs from the reviewed change in: lines\.txt\. /);
-  assert.match(second.patch.text, /^-9 upstream\n\+9 change and upstream$/m);
-  // The snapshot ref stays until the job ends; the snapshot holds the reviewed content.
-  const jobDir = join(env.state, 'jobs', 'app', 'M-2');
-  const first = JSON.parse(await readFile(join(jobDir, 'mr-snapshot.json'), 'utf8'));
-  assert.equal(snapshotRefCommit(repo, 'M-2'), first.snapshot_commit);
-  assert.equal(git(repo, 'show', `${first.snapshot_commit}:lines.txt`), lines({ 9: '9 change' }));
+  const failed = await waitFor(served, 'M-2', 'needs_human');
+  assert.deepEqual(failed.error, { code: 'mr_conflict', message: 'The rebase had conflicts in lines.txt; conflict markers are left in lines.txt. The rebase was aborted.' });
+  assert.equal(await rebasing(worktree), false);
+  assert.equal(await readFile(join(worktree, 'lines.txt'), 'utf8'), lines({ 9: '9 change' }));
+  let log = await fakeLog(env);
+  assert.equal(log[2]!.prompt, conflictPrompt({ ticket: 'M-2', targetRef: 'origin/main', targetCommit: upstream, files: ['lines.txt'] }));
+  assert.match(denied(log[2]!), /Bash\(git add:\*\)/);
 
-  // The next Clean replaces the snapshot (now against the target) and readies the branch.
+  // The retry: the conflict is resolved, and the change goes back to review against the target.
+  await call(served, 'mark_clean', { workspace: 'app', ticket: 'M-2' });
+  const second = await waitFor(served, 'M-2', 'awaiting_review', 2);
+  assert.match(second.report, new RegExp(`^# Report: M-2, conflict resolution\\n\\n## Done\\nlines\\.txt: kept both changes\\.\\n\\n## MR preparation\\n\\nThe rebase onto origin/main \\(${upstream}\\) had conflicts in lines\\.txt, resolved by the Implementer\\. The Patch is now against the target\\.\\n\\n## Changed files\\n`));
+  assert.match(second.patch.text, /^-9 upstream\n\+9 change and upstream$/m);
+  let job = (await jobs.read('app', 'M-2'))!;
+  assert.deepEqual([job.base_commit, job.target_commit, job.worktree, job.mr_attempts], [upstream, upstream, worktree, 2]);
+  assert.equal(git(worktree, 'rev-parse', 'HEAD~1').trim(), upstream);
+  assert.equal(await rebasing(worktree), false);
+
+  // The next Clean commits again (one commit); the rebase has nothing to do.
   await call(served, 'mark_clean', { workspace: 'app', ticket: 'M-2' });
   await waitFor(served, 'M-2', 'ready_for_human_review', 2);
-  const next = JSON.parse(await readFile(join(jobDir, 'mr-snapshot.json'), 'utf8'));
-  assert.deepEqual([next.base_commit, next.target_commit, next.paths], [upstream, upstream, ['lines.txt']]);
-  assert.notEqual(next.snapshot_commit, first.snapshot_commit);
+  assert.equal(git(repo, 'rev-list', '--count', `${upstream}..M-2-edit-line-nine`).trim(), '1');
+  job = (await jobs.read('app', 'M-2'))!;
+  assert.deepEqual([job.iteration, job.mr_attempts, job.worktree], [2, 3, null]);
+  log = await fakeLog(env);
+  assert.equal(log.length, 6);
   const pushed = await approve(env, 'M-2');
   assert.equal(pushed.code, 0, pushed.stdout + pushed.stderr);
-  assert.equal(snapshotRefCommit(repo, 'M-2'), undefined);
   assert.equal(execFileSync('git', ['--git-dir', origin, 'show', 'M-2-edit-line-nine:lines.txt'], { encoding: 'utf8' }), resolved);
   await stop(served);
 });
@@ -372,7 +356,7 @@ test('mark_clean retries directly after a failed MR turn (sandbox_unavailable); 
   await script(env, [
     { write: { 'README.md': 'retry\n' } },
     { startupFailure: 'sandbox: bubblewrap is not installed' },
-    { write: { '.software-factory/R-1.mr.md': mrText('fix(R-1): Retry the README') }, run: [['git', 'add', 'README.md'], commit('fix(R-1): Retry the README')] },
+    { write: { '.software-factory/R-1.mr.md': mrText('fix(R-1): Retry the README') } },
   ]);
   const served = await serve(env);
   await call(served, 'start', { workspace: 'app', ticket: 'R-1' });
@@ -391,19 +375,15 @@ test('mark_clean retries directly after a failed MR turn (sandbox_unavailable); 
   await stop(served);
 });
 
-test('mark_clean: placeholders the sandbox creates during the MR turn do not fail mr_dirty; the branch holds the change only', async () => {
+test('mark_clean: sandbox placeholders and untracked ignored files never reach the commit', async () => {
   const env = await newEnv('mrplaceholders');
   const repo = await newRepo(env, 'mrplaceholders-repo', true);
   await putTask(env, repo, 'P-2', 'Placeholders on approve');
-  const placeholders = ['.bashrc', '.gitconfig', '.mcp.json', '.claude/settings.json', '.claude/skills', '.claude/.cc-writes/'];
+  const placeholders = ['.bashrc', '.gitconfig', '.gitmodules', '.mcp.json', '.claude/settings.json', '.claude/skills', '.claude/.cc-writes/'];
   await script(env, [
-    { write: { 'README.md': 'prepared\n' }, placeholders },
-    // The MR turn stages by path; running the checks recreates the placeholders.
-    {
-      write: { '.software-factory/P-2.mr.md': mrText('feat(P-2): Prepare the README') },
-      run: [['git', 'add', 'README.md'], commit('feat(P-2): Prepare the README')],
-      placeholders,
-    },
+    { write: { 'README.md': 'prepared\n', 'build.log': 'ignored\n' }, placeholders },
+    // The MR turn leaves the placeholders behind again.
+    { write: { '.software-factory/P-2.mr.md': mrText('feat(P-2): Prepare the README') }, placeholders },
   ]);
   const served = await serve(env);
   await call(served, 'start', { workspace: 'app', ticket: 'P-2' });
@@ -412,12 +392,9 @@ test('mark_clean: placeholders the sandbox creates during the MR turn do not fai
   await waitFor(served, 'P-2', 'ready_for_human_review', 1);
   const files = git(repo, 'show', '--name-only', '--format=', 'P-2-placeholders-on-approve').trim();
   assert.equal(files, 'README.md');
-  const snapshot = JSON.parse(await readFile(join(env.state, 'jobs', 'app', 'P-2', 'mr-snapshot.json'), 'utf8'));
-  assert.deepEqual(snapshot.paths, ['README.md']);
-  assert.equal(git(repo, 'diff', '--name-only', snapshot.base_commit, snapshot.snapshot_commit).trim(), 'README.md');
   const logged = (await readFile(join(env.state, 'jobs', 'app', 'P-2', 'events.jsonl'), 'utf8'))
     .trim().split('\n').map((line) => JSON.parse(line)).filter((record) => record.type === 'placeholders_removed');
-  const expected = ['.bashrc', '.claude', '.claude/.cc-writes', '.claude/settings.json', '.claude/skills', '.gitconfig', '.mcp.json'];
+  const expected = ['.bashrc', '.claude', '.claude/.cc-writes', '.claude/settings.json', '.claude/skills', '.gitconfig', '.gitmodules', '.mcp.json'];
   assert.deepEqual(logged.map((record) => [record.iteration, record.paths]), [[1, expected], [2, expected]]);
   assert.equal(git(repo, 'status', '--porcelain', '--untracked-files=all').replace(/^\?\? \.software-factory\/.*\n/gm, ''), '');
   await stop(served);
@@ -475,14 +452,6 @@ test('abort with and without --discard, reset, and sandbox_unavailable, with wor
   const served = await serve(env);
   const worktree = (ticket: string): string => worktreeOf(env, ticket);
 
-  // A snapshot ref as Clean leaves it; abort (with or without --discard) and reset delete it.
-  const fakeSnapshotRef = (ticket: string): void => {
-    git(repo, 'update-ref', `refs/sf/snapshot/${ticket}`, git(repo, 'rev-parse', 'main').trim());
-  };
-  for (const ticket of ['A-1', 'A-2', 'A-3']) {
-    fakeSnapshotRef(ticket);
-  }
-
   // abort while a turn runs: the session ends, the worktree and the branch stay.
   await call(served, 'start', { workspace: 'app', ticket: 'A-1' });
   const aborted = await runCli(env, ['abort', 'app', 'A-1']);
@@ -494,7 +463,6 @@ test('abort with and without --discard, reset, and sandbox_unavailable, with wor
   assert.deepEqual([a1.state, a1.error], ['aborted', undefined]);
   assert.equal(git(worktree('A-1'), 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'A-1-job-a-1');
   assert.equal(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'main');
-  assert.equal(snapshotRefCommit(repo, 'A-1'), undefined);
   assert.equal((await runCli(env, ['abort', 'app', 'A-1'])).code, 1);
 
   // abort --discard: refused during a rebase in the worktree, then the worktree and the branch are gone.
@@ -510,7 +478,6 @@ test('abort with and without --discard, reset, and sandbox_unavailable, with wor
   const discarded = await runCli(env, ['abort', 'app', 'A-2', '--discard']);
   assert.equal(discarded.code, 0, discarded.stderr);
   assert.match(discarded.stdout, /^state: aborted\nbranch: A-2-job-a-2\ndiscarded: true\nworktree: null$/m);
-  assert.equal(snapshotRefCommit(repo, 'A-2'), undefined);
   assert.equal(await exists(worktree('A-2')), false);
   assert.equal(git(repo, 'branch', '--list', 'A-2-job-a-2'), '');
   assert.equal(git(repo, 'status', '--porcelain'), '');
@@ -527,7 +494,6 @@ test('abort with and without --discard, reset, and sandbox_unavailable, with wor
   assert.equal((await readdir(join(env.state, 'jobs', 'app'))).filter((name) => name.startsWith('A-3.')).length, 1);
   assert.equal(await exists(worktree('A-3')), false);
   assert.equal(git(repo, 'branch', '--list', 'A-3-job-a-3').trim(), 'A-3-job-a-3');
-  assert.equal(snapshotRefCommit(repo, 'A-3'), undefined);
   assert.equal((await runCli(env, ['reset', 'app', 'A-3'])).code, 1);
 
   // A query that ends because the sandbox is unavailable.
@@ -627,7 +593,7 @@ test('notifications: desktop and ntfy for the user\'s states, silent iterations,
   await script(env, [
     { text: 'iteration 1', write: { 'a.txt': 'a\n' } },
     { text: 'iteration 2', write: { 'package.json': '{}\n' }, run: [['rm', 'a.txt']] },
-    { write: { '.software-factory/N-1.mr.md': mrText('feat(N-1): Notify me') }, run: [['git', 'add', 'package.json'], commit('feat(N-1): Notify me')], text: 'prepared' },
+    { write: { '.software-factory/N-1.mr.md': mrText('feat(N-1): Notify me') }, text: 'prepared' },
   ]);
   const served = await serve(env);
   await call(served, 'start', { workspace: 'app', ticket: 'N-1' });

@@ -7,8 +7,8 @@ vocabulary is in [../CONTEXT.md](../CONTEXT.md).
 It provides the planning tools (`guide`, `read_file`, `search`, `write_task`) and the execution
 tools (`start`, `check`, `request_fix`, `mark_clean`). The Implementer runs as a headless Claude
 Agent SDK session (`@anthropic-ai/claude-agent-sdk`, pinned in `package.json`) in a worktree of
-the job, inside Claude Code's sandbox. At Clean the factory commits, rebases and verifies, and
-the user finishes the ticket with approve (the push) or abort, from the terminal (`sf approve`,
+the job, inside Claude Code's sandbox. At Clean the Implementer writes the merge request text
+and the factory commits and rebases, and the user finishes the ticket with approve (the push) or abort, from the terminal (`sf approve`,
 `sf abort`) or from the dashboard (section Dashboard), or with `sf reset` (terminal only), and is
 told about the states that need them through a desktop notification and ntfy. The Context owner is told through MCP Events:
 ChatGPT subscribes to the event `software_factory.job` and the factory POSTs a signed webhook on
@@ -272,7 +272,7 @@ live state (`starting`, `working`, `awaiting_review`, `needs_human`, `ready_for_
 `job_limit`, naming the live tickets. Every job works in a **worktree** of its own (SF-019,
 ADR-0004): `${SF_WORKTREE_ROOT:-<state dir>/worktrees}/<workspace>/<ticket>`, created from the
 workspace's checkout; the checkout itself (the user's IDE checkout) is never written by the
-factory beyond its Git refs (branches, `refs/sf/snapshot/*`) and worktree registrations.
+factory beyond its Git refs (branches) and worktree registrations.
 
 - `start` reads `.software-factory/<ticket>.md` of the checkout (its `base` and `title`), fetches
   `origin <base>` when `origin` exists (60 s), refuses an existing branch (`branch_exists`) or a
@@ -295,7 +295,7 @@ factory beyond its Git refs (branches, `refs/sf/snapshot/*`) and worktree regist
   and runs `/implement .software-factory/<ticket>.md Fix N` in the same session (`resume`). From
   `ready_for_human_review` it first reopens a worktree from the branch (`git worktree add <path>
   <branch>`): the next iteration's Patch is the whole change against the target, and the next
-  Clean amends the prepared commit.
+  Clean commits the whole change again as one commit.
 - `mark_clean` runs the MR preparation (section below) and ends in `ready_for_human_review` with
   the branch in the checkout. It takes `sensitive`, the undeclared sensitive paths of the reviewed
   iteration the Context owner accepts; any left out refuse it with `sensitive_unacknowledged`.
@@ -323,8 +323,7 @@ factory beyond its Git refs (branches, `refs/sf/snapshot/*`) and worktree regist
   failing step leaves `aborted` with `error.code` `discard_failed`. `--discard` is refused
   (`rebase_in_progress`) while a rebase or a Git lock is in progress in the worktree.
 - `sf reset` works in every state: it ends a live session, removes the worktree and archives the
-  job directory as `start` archives a terminal job. The branch is not touched; the job's snapshot
-  ref (`refs/sf/snapshot/<ticket>`) is deleted, as on `pushed` and `abort`. When the workspace is
+  job directory as `start` archives a terminal job. The branch is not touched. When the workspace is
   no longer registered (or its checkout is gone), only the job record is archived and the result
   says `checkout: unavailable`; the dashboard's Archive of a finished job behaves the same.
   That Archive checks the state and retires the job in one hold of the execution lock, so a job
@@ -337,18 +336,17 @@ factory beyond its Git refs (branches, `refs/sf/snapshot/*`) and worktree regist
   stay as far as they got; nothing is rolled back.
 
 The checkout's Git operations of one workspace (fetch, worktree add and remove, branch delete,
-the snapshot ref, push) are serialized through one Git lock per workspace; turns, publication,
+the commit and rebase at Clean, push) are serialized through one Git lock per workspace; turns, publication,
 `check`, `say` and the start of another job run concurrently.
 
 Every turn runs with `cwd` = the job's worktree, `permissionMode: "auto"`, `settingSources: ["user",
-"project"]`, a per-turn deny list from `src/rules.ts` (iterations: mutating Git commands, `sudo`,
-`EnterWorktree`, `.git/**` edits, `.env` files; MR preparation: the same with `add`, `commit`,
-`rebase`, `restore`, `checkout`, `switch`, `rm` and `mv` allowed), a filtered environment (no
+"project"]`, a deny list from `src/rules.ts` (mutating Git commands, `sudo`, `EnterWorktree`, `.git/**`
+edits, `.env` files; the same for every turn, MR preparation included), a filtered environment (no
 `SF_*`, no inherited Claude Code session markers) and, unless `SF_SANDBOX=off`, the sandbox
 `{enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, network: {allowedDomains:
 ["registry.npmjs.org", ...SF_SANDBOX_DOMAINS], allowLocalBinding: true, allowAllUnixSockets: true}}`.
 Local binding and Unix sockets are allowed so that the repository's own tests, which start servers on
-loopback and on Unix sockets, run inside the sandbox. The factory's own `fetch` and `push` run outside
+loopback and on Unix sockets, run inside the sandbox. The factory's own `fetch`, commit, rebase and `push` run outside
 the Implementer, so the Git host is not needed there; a repository whose checks need other hosts
 (another package registry, a test service) lists them in `SF_SANDBOX_DOMAINS`. Nothing is written
 under `~/.claude`.
@@ -357,14 +355,14 @@ The sandbox (bubblewrap) needs a mount point for every path it masks. When such 
 exist in the worktree it creates it as a zero-byte file with mode 0444 and leaves it there:
 `.bashrc`, `.gitconfig`, `.gitmodules`, `.mcp.json`, `.claude/settings.json`, `.claude/skills` and
 others, plus the empty directory `.claude/.cc-writes/` (Claude Code's own). The factory removes them
-(`src/placeholders.ts`) after every turn, before the Patch is built and before the MR verification,
+(`src/placeholders.ts`) after every turn, before the Patch is built and before the MR commit,
 and in `abort` before the Git steps, and logs what it
 removed as `placeholders removed: a, b, c` in `sf watch` and the dashboard. The exact rule: in the
 root of the worktree an entry whose name starts with `.`, and in `.claude/` any entry, is
 removed when it is a regular file (not a symbolic link) of size 0 with mode exactly 0444; then
 `.claude/.cc-writes` and `.claude` are removed when they are empty directories. Nothing else is
 touched: a file with content, a writable file, a symbolic link, a non-empty directory and anything
-deeper or elsewhere stay. The Patch and the `mr_dirty` check also skip an untracked file that matches
+deeper or elsewhere stay. The Patch and the MR commit also skip an untracked file that matches
 the rule, in case the sandbox recreates one after the cleanup. A file the factory left in place
 does not match the rule, so it is a change of the Implementer's or the user's.
 
@@ -396,59 +394,69 @@ MR preparation runs when the Context owner calls `mark_clean` (from `awaiting_re
 retry from `needs_human` after a failed preparation, `mr_attempts > 0`); never while a turn runs.
 It ends in `ready_for_human_review` with the branch, holding exactly one commit, in the user's
 checkout, and the worktree removed. `sf approve` then pushes that commit and nothing else.
+The Implementer only writes the MR text. The factory commits and rebases itself, outside the
+sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's placeholders.
 
 1. Target: `git fetch origin <base>` (60 s) when `origin` exists, target `origin/<base>`, else the
-   local `<base>`.
-2. Snapshot of the reviewed change: a commit of the reviewed worktree, built in a temporary
-   index (`GIT_INDEX_FILE` in the job directory): `read-tree <base_commit>`, every Patch path from
-   the worktree (`hash-object -w`, `update-index --add --cacheinfo`; deleted paths
-   `update-index --force-remove`), `write-tree`, `commit-tree <tree> -p <base_commit> -m "sf
-   snapshot <ticket>"`. The commit is kept under `refs/sf/snapshot/<ticket>` (so `gc` keeps it),
-   replaced on the next Clean and deleted on `pushed`, `abort` and `reset`; the worktree's
-   index, `HEAD` and files are not touched. `mr-snapshot.json` records `target_ref`,
-   `target_commit`, `base_commit`, `snapshot_commit` and the reviewed `paths`. A retry keeps the
-   snapshot.
-3. State `preparing_mr`, `mr_attempts + 1`, one turn in the same session with the MR deny list and
-   `mrPrompt` (`src/prompts.ts`): target, previous error on a retry, the instructions, and the
-   Handbook's `## Git rules` and `## MR template` verbatim. The instructions:
-   - stage the files of the reviewed change by path, never `git add -A`, `git add .` or
-     `git add -u` (inside the sandbox `git status` shows placeholder files such as `.bashrc`,
-     `.gitconfig`, `.idea` and `.mcp.json` as untracked; they are not part of the change);
-   - commit by the rules; when the branch already has a commit on top of the target (a Clean
-     after a diff-check review, or after a fix asked in `ready_for_human_review`), amend it with
-     `git commit --amend` instead of adding one;
-   - `git rebase <target>`, resolve conflicts, run the checks;
-   - write `.software-factory/<ticket>.mr.md`, its title exactly the commit subject;
-   - use `git rev-parse --abbrev-ref HEAD` for the current branch (`git branch` is denied).
-4. Verification, the first failure wins, each ending in `needs_human` with the worktree kept for
-   the retry:
+   local `<base>`. Its commit is stored as `target_commit`. A rebase left in progress by a restart
+   of `sf serve` is aborted first.
+2. State `preparing_mr`, `mr_attempts + 1`, and the **MR text turn**: one turn in the same session
+   with the deny list of every turn (all mutating Git commands stay denied) and `mrPrompt`
+   (`src/prompts.ts`). The prompt names the target and, on a retry, the previous error. It asks
+   for `.software-factory/<ticket>.mr.md` only: the first line is the title, which is also the
+   commit header; a blank line; the body by the MR template. It says that the factory commits,
+   rebases and pushes, and that the commit body is taken from the `## Why` section. It asks for a
+   short report (`# Report: <ticket>, MR preparation <attempt>`, `## Done`, `## Open questions`)
+   and ends with the Handbook's `## Git rules` and `## MR template` verbatim.
+3. When that turn ends, the factory checks the MR text, then works in the worktree under the
+   workspace's Git lock. Every Git call runs with `-c core.hooksPath=/dev/null`, so no repository
+   hook runs outside the sandbox, and with a 60 s timeout.
+   - `git reset -q --mixed <base_commit>` when the branch has commits on top of `base_commit` (a
+     fix after Clean, or a retry after a commit). `HEAD` and the index go back to the base and the
+     files stay, so the result is always one commit.
+   - The paths: the Patch's paths against `base_commit` (tracked and untracked, without ignored,
+     credential-like, `.software-factory/` paths and sandbox placeholders), minus submodules (a
+     directory whose index entry has mode 160000). The Git rules forbid changing a submodule
+     pointer; the Patch already reports one.
+   - `git add --all -- <paths>`, 200 paths per call. An empty index diff is `mr_empty`.
+   - `git commit -q -m <title> -m <body>`: the body is the non-empty lines of the MR text's
+     `## Why` section, at most five. The identity and the signing configuration are the user's
+     Git configuration.
+   - `git rebase -q <target commit>`, unless the target is already an ancestor of `HEAD`.
+4. A rebase that stops on conflicts (unmerged paths in `git diff --name-only --diff-filter=U`)
+   stays in progress, the job stays `preparing_mr`, and the factory sends one **conflict turn**
+   (`conflictPrompt`, the same deny list). It lists the files and asks the Implementer to resolve
+   them by editing: keep the reviewed behaviour and the target's changes, leave no conflict
+   markers, run the checks of those files, run no Git command, and report
+   (`# Report: <ticket>, conflict resolution`, `## Done` per file, `## Checks`,
+   `## Open questions`). When that turn ends:
+   - a failed turn, or a listed file that still holds a line starting with `<<<<<<< `, `=======`
+     alone or `>>>>>>> `, is `git rebase --abort` and `needs_human` with `mr_conflict`, naming the
+     files;
+   - otherwise `git add -- <files>` and `git -c core.editor=true rebase --continue`; a failure is
+     the abort and `mr_conflict` as well;
+   - after a successful continue the change is no longer the reviewed one. `base_commit` and
+     `target_commit` become the target, and a new iteration is published: the conflict turn's
+     report plus `## MR preparation` (the rebase onto `<target ref>` (`<commit>`) had conflicts in
+     `<files>`, resolved by the Implementer), and the Patch against the target. The worktree stays
+     and the job goes back to `awaiting_review`. The next Clean commits again, and its rebase has
+     nothing to do.
+5. Failures end in `needs_human` with the worktree kept for the retry. Nothing is committed when
+   the MR text fails its check.
 
    | Code | Meaning |
    |---|---|
-   | `mr_branch_mismatch` | `HEAD` of the worktree is not on the branch |
-   | `mr_rebase_in_progress` | a rebase (or a Git lock) is still in progress |
-   | `mr_dirty` | uncommitted changes outside `.software-factory/` |
-   | `mr_not_rebased` | the target commit is not an ancestor of the branch |
-   | `mr_commit_count` | not exactly one commit on top of the target |
-   | `mr_commit_header` | the subject breaks `commitHeader(ticket)` in `src/rules.ts`: `<type>(<ticket>): <summary>`, type one of `feat fix chore refactor docs test perf build ci style revert`, at most 72 characters, no trailing period |
    | `mr_text_missing` | `.software-factory/<ticket>.mr.md` absent or empty |
-   | `mr_text_invalid` | over 64 KiB, a first line that breaks the header rule or differs from the commit subject, or a missing `## What`, `## Why`, `## How`, `## Why the change`, `## Special things to note`, `## Change outline`, `## Testing` or `## Checklist` heading |
+   | `mr_text_invalid` | over 64 KiB, a first line that breaks `commitHeader(ticket)` in `src/rules.ts` (`<type>(<ticket>): <summary>`, type one of `feat fix chore refactor docs test perf build ci style revert`, at most 72 characters, no trailing period), or a missing `## What`, `## Why`, `## How`, `## Why the change`, `## Special things to note`, `## Change outline`, `## Testing` or `## Checklist` heading |
+   | `mr_empty` | the reviewed change has nothing to commit against `base_commit` |
+   | `mr_commit_failed` | `git commit` failed, for example without a Git identity (stderr in the message) |
+   | `mr_rebase_failed` | `git rebase` failed without conflicts; it was aborted |
+   | `mr_conflict` | the conflict turn failed or left markers, or the rebase did not continue; it was aborted |
    | `worktree_remove_failed` | the branch is prepared but the worktree could not be removed |
    | `mr_failed`, `mr_serve_restarted` | the factory failed, or `sf serve` restarted, during preparation |
 
-   A failed turn keeps its own code (for example `turn_failed` or `sandbox_unavailable`). Fix with
-   `sf say` or by hand in the worktree and call `mark_clean` again.
-5. Diff check by three-way merge: the change needs review again only when the branch differs from
-   what a clean merge of the reviewed change onto the target gives. The expected result is
-   `git merge-tree --write-tree --no-messages --name-only -z --merge-base <base_commit>
-   <target_commit> <snapshot_commit>`; exit code 1 means conflicts, and every path it names counts
-   as differing. For every reviewed path and every path of `git diff --name-only <target> <branch>`
-   the blob of `<expected tree>:<path>` must equal `<branch>:<path>` (absent on both sides is
-   equal), so a target change the rebase merged cleanly does not count. Otherwise `base_commit`
-   and `target_commit` become the target commit, a new iteration is published (the Implementer's
-   report plus `## MR preparation` naming the paths that differ; the Patch against the target),
-   the worktree stays and the job goes back to `awaiting_review`. After Clean, the next
-   preparation has nothing to commit or rebase.
+   A failed MR text turn keeps its own code (for example `turn_failed` or `sandbox_unavailable`).
+   Fix with `sf say` or by hand in the worktree and call `mark_clean` again.
 6. Ready: the MR text is copied to `mr.md`, `base_commit` and `target_commit` become the target,
    `prepared_commit` the branch tip, the worktree is removed (`git worktree remove --force`,
    `git worktree prune`; `worktree` becomes null) and the job is `ready_for_human_review`,
@@ -497,9 +505,8 @@ dashboard-token                          # 0600, the dashboard token of the last
 jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, state, iteration, session_id, created_at, updated_at, error
 jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "principal" | "event_delivered" | "event_failed" | "subscription_removed" | ...}; what sf watch reads
 jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json}
-jobs/<workspace>/<ticket>/mr-snapshot.json   # the reviewed change at Clean: target, base_commit, snapshot_commit, paths
 worktrees/<workspace>/<ticket>/          # the job's worktree (SF_WORKTREE_ROOT), from start to Clean, abort or reset
-jobs/<workspace>/<ticket>/mr.md              # the MR text, once pushed or after a diff-check iteration
+jobs/<workspace>/<ticket>/mr.md              # the MR text, once the branch is ready or after a conflict iteration
 jobs/<workspace>/<ticket>.<timestamp>/   # an archived earlier job
 ```
 
@@ -740,10 +747,10 @@ end), in a browser:
    says MR preparation started, the badge turns `preparing_mr`, Approve… is off with a reason,
    Abort… stays on. When it ends: "Pushed …" with the title and the merge request link to copy
    (or the note to open it by hand).
-5. A changed and a failed preparation (fake Implementer: one turn that commits an extra file, one
-   that commits nothing): "Not pushed: the prepared commit differs … in <paths>" and the job back
-   in `awaiting_review`; "Not pushed: MR preparation failed (mr_dirty: …)" with Approve… on again
-   for the retry. Neither reads as a success.
+5. A conflicting and a failed preparation (fake Implementer: a target moved in the same hunk and a
+   conflict turn that resolves it; an MR text turn that writes nothing): the job back in
+   `awaiting_review` with `## MR preparation` naming the file in the Report; the job in
+   `needs_human` with `mr_text_missing`. Neither reads as a success.
 6. Switching: start a say or an approve and select another job before the answer: that job's
    controls, status and draft are untouched; switch back: the outcome is there. A draft typed for
    each job stays with it.

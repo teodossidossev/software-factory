@@ -1,6 +1,7 @@
 // Job state on disk: <state dir>/jobs/<workspace>/<ticket>/ with job.json, events.jsonl and
-// iterations/NNN/{report.md,patch.diff,meta.json}, and in MR preparation mr-snapshot.json and mr.md. Strictly parsed; every file but the event log
-// is replaced atomically. Knows nothing about Git or the Implementer session.
+// iterations/NNN/{report.md,patch.diff,meta.json}, and from MR preparation on mr.md. Strictly
+// parsed; every file but the event log is replaced atomically. Knows nothing about Git or the
+// Implementer session.
 import { appendFile, mkdir, readdir, readFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import * as z from 'zod/v4';
@@ -33,7 +34,7 @@ const jobSchema = z.strictObject({
   base: z.string().min(1),
   // The commit the branch was created from; the Patch is the difference to it.
   base_commit: commit.nullable(),
-  // The target commit the branch was rebased onto in MR preparation.
+  // The target commit of MR preparation: resolved at Clean, the commit the branch is rebased onto.
   target_commit: commit.nullable().default(null),
   // The job's worktree (SF-019), absolute; null before start, after Clean and once removed.
   worktree: z.string().min(1).nullable().default(null),
@@ -51,16 +52,6 @@ const jobSchema = z.strictObject({
   error: z.strictObject({ code: z.string(), message: z.string() }).optional(),
 });
 export type Job = z.output<typeof jobSchema>;
-
-// The reviewed change at approve (mr-snapshot.json): the commit of the reviewed working tree on top
-// of base_commit (kept under refs/sf/snapshot/<ticket>), the target, and the reviewed paths.
-export interface MrSnapshot {
-  target_ref: string;
-  target_commit: string;
-  base_commit: string;
-  snapshot_commit: string;
-  paths: string[];
-}
 
 export interface ChangedFile {
   path: string;
@@ -218,22 +209,13 @@ export class JobStore {
     return name;
   }
 
-  // The MR text once it exists (copied at push or at a diff-check iteration).
+  // The MR text once it exists (copied when the branch is ready, or at a conflict iteration).
   readMrText(workspace: string, ticket: string): Promise<string | undefined> {
     return readOrMissing(join(this.dir(workspace, ticket), 'mr.md'));
   }
 
   async writeMrText(workspace: string, ticket: string, text: string): Promise<void> {
     await writeFileAtomic(join(this.dir(workspace, ticket), 'mr.md'), Buffer.from(text, 'utf8'));
-  }
-
-  async readSnapshot(workspace: string, ticket: string): Promise<MrSnapshot | undefined> {
-    const text = await readOrMissing(join(this.dir(workspace, ticket), 'mr-snapshot.json'));
-    return text === undefined ? undefined : (JSON.parse(text) as MrSnapshot);
-  }
-
-  async writeSnapshot(workspace: string, ticket: string, snapshot: MrSnapshot): Promise<void> {
-    await writeFileAtomic(join(this.dir(workspace, ticket), 'mr-snapshot.json'), Buffer.from(`${JSON.stringify(snapshot, null, 2)}\n`));
   }
 
   async appendEvent(workspace: string, ticket: string, record: EventRecord): Promise<void> {

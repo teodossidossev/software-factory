@@ -438,9 +438,9 @@ function createMcpServer(handbook: Handbook, version: string, execution: Executi
       title: 'Mark the job Clean',
       description:
         'Only in awaiting_review (or needs_human after a failed MR preparation, as the retry). Your verdict that the ' +
-        'Patch needs no further Fix section: the factory commits by the Git rules, rebases onto the base, verifies and ' +
-        'puts the branch in the user\'s checkout (state preparing_mr, then ready_for_human_review, or needs_human with the ' +
-        'reason; a prepared commit that differs from the reviewed change goes back to awaiting_review). Every ' +
+        'Patch needs no further Fix section: the Implementer writes the MR text, the factory commits by the Git rules, ' +
+        'rebases onto the base and puts the branch in the user\'s checkout (state preparing_mr, then ready_for_human_review, ' +
+        'or needs_human with the reason; a rebase whose conflicts the Implementer resolved goes back to awaiting_review). Every ' +
         'undeclared sensitive path of the reviewed iteration (check.files.sensitive with declared false) must be named ' +
         'in sensitive, else sensitive_unacknowledged. Pushes nothing: the user approves.',
       inputSchema: z.strictObject({

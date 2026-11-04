@@ -1,6 +1,6 @@
 // The fixed block the factory appends to every prompt it sends to the Implementer: the factory's
-// rules and the Report template, which the Implementer cannot read anywhere else; and the prompt
-// of the MR preparation turn.
+// rules and the Report template, which the Implementer cannot read anywhere else; and the prompts
+// of the MR text turn and the conflict turn at Clean.
 import { TASK_DIR } from './task-file.js';
 
 export const FACTORY_PROMPT_RULES = `Rules from the Software Factory:
@@ -62,32 +62,27 @@ export interface MrPromptInput {
   handbook: string;
 }
 
-// The prompt of the MR preparation turn. FACTORY_PROMPT_RULES is not sent here: its first rule
-// forbids what this turn must do; the Task-file rule and the Report form are restated instead.
+// The prompt of the MR text turn at Clean. FACTORY_PROMPT_RULES is not sent here: this turn writes
+// the MR text only; the Task-file rule and the Report form are restated instead.
 export function mrPrompt(input: MrPromptInput): string {
   const { ticket, branch, targetRef, targetCommit } = input;
+  const path = `${TASK_DIR}/${ticket}.mr.md`;
   const lines = [
     `MR preparation for ${ticket} on branch ${branch}. The user approved the reviewed change.`,
     `Target: ${targetRef} at ${targetCommit}.`,
     '',
   ];
   if (input.previousError !== undefined) {
-    lines.push(`This is attempt ${input.attempt}. The previous attempt failed the factory's checks: ${input.previousError}`, '');
+    lines.push(`This is attempt ${input.attempt}. The previous attempt failed: ${input.previousError}`, '');
   }
   lines.push(
-    'Do this, in order:',
-    '1. Stage the files of the reviewed change by path (`git add <path>...`); never `git add -A`, `git add .` or `git add -u`. Inside the sandbox `git status` shows placeholder files such as .bashrc, .gitconfig, .idea and .mcp.json as untracked; they are not part of the change. .software-factory/ stays uncommitted.',
-    `2. Commit by the Git rules below, as one commit on this branch. When the branch already has a commit on top of ${targetRef} (a second approve after a review), amend that commit (\`git commit --amend\`) instead of adding a second one.`,
-    `3. Run \`git rebase ${targetRef}\`.`,
-    '4. Resolve conflicts, if any, keeping the reviewed behaviour.',
-    "5. Run the repository's checks after the rebase.",
-    `6. Write the MR text to ${TASK_DIR}/${ticket}.mr.md: the first line is the title, exactly the commit subject, then a blank line, then the body by the MR template below.`,
-    '7. Do not push, fetch, merge, reset or switch branches; the factory verifies and pushes. For the current branch use `git rev-parse --abbrev-ref HEAD`; `git branch` is denied.',
+    `Your only task in this turn: write the MR text to ${path}. Its first line is the title, which is also the commit header by the Git rules below; then a blank line; then the body by the MR template below.`,
+    `The factory commits, rebases and pushes, not you. It commits the reviewed change as one commit on this branch: the header is the title, the body is the non-empty lines of the \`## Why\` section (at most five, so keep it short and say why, not what). Then it rebases that commit onto ${targetRef}.`,
+    'Change no other file and run no Git command that changes the repository; those commands are denied.',
     `Do not edit ${TASK_DIR}/${ticket}.md; the Context owner owns it.`,
     'End your turn with a short report in this form, as your last message:',
     `  # Report: ${ticket}, MR preparation ${input.attempt}`,
-    '  ## Done        (what was committed and rebased; which files changed during conflict resolution, or "none")',
-    '  ## Checks      (each command run with its result; "not run" and why, when not run)',
+    '  ## Done        (the MR title)',
     '  ## Open questions   ("None." when there are none)',
     '',
     handbookSection(input.handbook, '## Git rules'),
@@ -95,4 +90,32 @@ export function mrPrompt(input: MrPromptInput): string {
     handbookSection(input.handbook, '## MR template'),
   );
   return lines.join('\n');
+}
+
+export interface ConflictPromptInput {
+  ticket: string;
+  targetRef: string;
+  targetCommit: string;
+  // The files the stopped rebase left unmerged.
+  files: string[];
+}
+
+// The prompt of the conflict turn: the factory's rebase at Clean stopped and stays in progress;
+// the Implementer only edits the listed files, the factory stages them and continues.
+export function conflictPrompt(input: ConflictPromptInput): string {
+  const { ticket, targetRef, targetCommit, files } = input;
+  return [
+    `The factory's rebase of ${ticket} onto ${targetRef} (${targetCommit}) stopped with conflicts in these files:`,
+    ...files.map((file) => `- ${file}`),
+    '',
+    'Resolve the conflicts by editing these files. Keep the reviewed behaviour and the changes of the target. Leave no conflict markers: no line starting with `<<<<<<< `, `=======` or `>>>>>>> `.',
+    'Run the checks of these files.',
+    'Run no Git command; the factory stages the files and continues the rebase. A file left with a marker aborts the rebase.',
+    `Do not edit ${TASK_DIR}/${ticket}.md; the Context owner owns it.`,
+    'End your turn with a report in this form, as your last message:',
+    `  # Report: ${ticket}, conflict resolution`,
+    '  ## Done        (per file: how the conflict was resolved)',
+    '  ## Checks      (each command run with its result; "not run" and why, when not run)',
+    '  ## Open questions   ("None." when there are none)',
+  ].join('\n');
 }

@@ -1,6 +1,6 @@
 // The job lifecycle: start, check, request_fix, mark_clean (the MR preparation and the branch,
-// SF-019), say, approve (the push), abort, reset (and the dashboard's terminal-only Archive),
-// status and the restart rule. Owns the Implementer session of each job, which works in the
+// SF-019, committed and rebased by the factory, SF-037), say, approve (the push), abort, reset
+// (and the dashboard's terminal-only Archive), status and the restart rule. Owns the Implementer session of each job, which works in the
 // job's own worktree, and publishes an iteration (Report, Patch and the file list) when the
 // session goes idle. Every state change goes through #transition, the seam for notifications.
 // Several jobs of one workspace run at the same time, up to SF_MAX_JOBS; the Git operations on
@@ -12,11 +12,11 @@ import type { Config } from './config.js';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
 import { type FileChange, isActive, type Job, type JobState, JobStore, now, TERMINAL_STATES } from './jobs.js';
-import { deleteSnapshotRef, gitBusy, mergeRequestLink, originUrl, pushBranch, resolveTarget, snapshotDiff, takeSnapshot, verifyPrepared } from './mr.js';
+import { abortRebase, commitAndRebase, continueRebase, gitBusy, mergeRequestLink, originUrl, pushBranch, readMrText, rebaseInProgress, resolveTarget, unmergedPaths } from './mr.js';
 import { buildPatch, changedFilesSection, fileChanges, fileSummaryLines, type Patch } from './patch.js';
 import { removeSandboxPlaceholders } from './placeholders.js';
-import { factoryPrompt, iterationCost, mrPrompt } from './prompts.js';
-import { DENIED_TOOLS, MR_DENIED_TOOLS, sensitivityOf } from './rules.js';
+import { conflictPrompt, factoryPrompt, iterationCost, mrPrompt } from './prompts.js';
+import { DENIED_TOOLS, sensitivityOf } from './rules.js';
 import type { Workspace } from './registry.js';
 import { DEFAULT_PAGE_BYTES, MAX_PAGE_BYTES, MIN_PAGE_BYTES, type Page, pageBuffer } from './repo-files.js';
 import { type IdleOutcome, ImplementerSession } from './session.js';
@@ -109,6 +109,9 @@ interface Live {
   session: ImplementerSession;
   // The session's cwd: the job's worktree.
   cwd: string;
+  // During MR preparation: the target's ref name, and the files of a stopped rebase while the
+  // conflict turn runs.
+  mr?: { targetRef: string; conflicts?: string[] };
 }
 
 export class Execution {
@@ -179,7 +182,7 @@ export class Execution {
   }
 
   // The checkout's Git operations of one workspace (fetch, worktree add and remove, branch
-  // delete, snapshot ref, push) never interleave; the rest runs concurrently.
+  // delete, the commit and rebase at Clean, push) never interleave; the rest runs concurrently.
   #gitLocked<T>(workspace: string, work: () => Promise<T>): Promise<T> {
     const previous = this.#gitLocks.get(workspace) ?? Promise.resolve();
     const next = previous.catch(() => undefined).then(work);
@@ -335,8 +338,8 @@ export class Execution {
     await copyFile(join(workspace.workCheckout, TASK_DIR, `${job.ticket}.md`), join(dir, `${job.ticket}.md`));
   }
 
-  // Removes the sandbox's placeholder files from the worktree; a failure is logged and the
-  // checks that follow (Patch, MR verification) still skip or report them.
+  // Removes the sandbox's placeholder files from the worktree; a failure is logged and the steps
+  // that follow (Patch, MR commit) still skip them.
   async #removePlaceholders(cwd: string): Promise<string[]> {
     try {
       return await removeSandboxPlaceholders(cwd);
@@ -421,7 +424,7 @@ export class Execution {
       if (job.state !== 'working' && job.state !== 'preparing_mr') {
         return;
       }
-      // Before the Patch and before the MR verification, whatever the outcome of the turn.
+      // Before the Patch and before the MR commit, whatever the outcome of the turn.
       await this.#clean(job, job.iteration + 1, live.cwd);
       if (job.state === 'preparing_mr') {
         await this.#mrIdle(job, live, outcome);
@@ -484,57 +487,95 @@ export class Execution {
     return { job: { ...job, iteration: number }, changes };
   }
 
-  // The end of the MR preparation turn (mark_clean): verify, compare with the reviewed change,
-  // then record the branch tip, remove the worktree and hand the job to the user.
+  // The end of a turn of MR preparation (mark_clean). After the MR text turn: validate the text,
+  // then the factory commits and rebases in the worktree. A rebase that stops on conflicts stays
+  // in progress for one conflict turn, whose end comes back here (#conflictIdle). Ready: record
+  // the branch tip, remove the worktree and hand the job to the user.
   async #mrIdle(job: Job, live: Live, outcome: IdleOutcome): Promise<void> {
-    const key = `${job.workspace}/${job.ticket}`;
     const cwd = live.cwd;
     const needsHuman = async (code: string, message: string): Promise<void> => {
       await this.#transition(job, 'needs_human', { code, message });
     };
     try {
+      if (await rebaseInProgress(cwd)) {
+        await this.#conflictIdle(job, live, outcome);
+        return;
+      }
       if (!outcome.ok) {
         await needsHuman(outcome.code, outcome.message);
         return;
       }
-      const snapshot = (await this.jobs.readSnapshot(job.workspace, job.ticket))!;
-      const verified = await verifyPrepared(cwd, job, snapshot.target_commit);
-      if (!verified.ok) {
-        await needsHuman(verified.code, verified.message);
+      const mrText = await readMrText(cwd, job.ticket);
+      if (!mrText.ok) {
+        await needsHuman(mrText.code, mrText.message);
         return;
       }
-      const differing = await snapshotDiff(cwd, snapshot, job.branch);
-      if (differing.length > 0) {
-        // The change is no longer the reviewed one: it goes back to the Context owner, now
-        // against the target.
-        const rebased: Job = { ...job, base_commit: snapshot.target_commit, target_commit: snapshot.target_commit };
-        const note = [
-          '## MR preparation',
-          '',
-          `The prepared commit differs from the reviewed change in: ${differing.join(', ')}. The Patch is now against the target ${snapshot.target_ref} (${snapshot.target_commit}).`,
-        ].join('\n');
-        const { job: published, changes } = await this.#publish(rebased, live, outcome, await buildPatch(cwd, snapshot.target_commit), [note]);
-        await this.jobs.writeMrText(job.workspace, job.ticket, verified.mrText);
-        await this.#transition(published, 'awaiting_review', undefined, fileSummaryLines(changes));
+      const targetCommit = job.target_commit!;
+      const prepared = await this.#gitLocked(job.workspace, () => commitAndRebase(cwd, { baseCommit: job.base_commit!, targetCommit, mrText: mrText.text }));
+      if (prepared.kind === 'failed') {
+        await needsHuman(prepared.failure.code, prepared.failure.message);
         return;
       }
-      const tip = (await runGit(cwd, ['rev-parse', '--verify', `refs/heads/${job.branch}`])).stdout.toString('utf8').trim();
-      await this.jobs.writeMrText(job.workspace, job.ticket, verified.mrText);
-      const title = verified.mrText.split(/\r?\n/)[0]!;
-      // The worktree goes: the branch, with its one commit, is in the checkout for the IDE.
-      const failure = await this.#gitLocked(job.workspace, () => removeWorktree(live.workspace.workCheckout, cwd));
-      if (failure !== undefined) {
-        await needsHuman('worktree_remove_failed', `${failure} The branch ${job.branch} is prepared; remove the worktree by hand and call mark_clean again.`);
+      await this.jobs.writeMrText(job.workspace, job.ticket, mrText.text);
+      if (prepared.kind === 'conflict') {
+        // The job stays preparing_mr while the Implementer resolves the conflicts.
+        const targetRef = live.mr?.targetRef ?? job.base;
+        live.mr = { targetRef, conflicts: prepared.files };
+        live.session.send(conflictPrompt({ ticket: job.ticket, targetRef, targetCommit, files: prepared.files }), DENIED_TOOLS);
         return;
       }
-      this.#live.delete(key);
-      const lines = [title, ...fileSummaryLines((await this.#lastFiles(job)) ?? [])];
-      await this.#transition({ ...job, base_commit: snapshot.target_commit, target_commit: snapshot.target_commit, prepared_commit: tip, worktree: null }, 'ready_for_human_review', undefined, lines);
-      console.log(`${job.workspace}/${job.ticket}: branch ${job.branch} ready (${title})`);
+      await this.#ready(job, live, mrText.text);
     } catch (error) {
       console.error(error);
       await needsHuman('mr_failed', `MR preparation failed inside the factory: ${(error as Error).message}`.slice(0, 1000));
     }
+  }
+
+  // The end of the conflict turn: a failed turn, a file still holding a conflict marker or a
+  // failing continue aborts the rebase (mr_conflict). After a continue the change is no longer the
+  // reviewed one: it goes back to review against the target, in the same worktree.
+  async #conflictIdle(job: Job, live: Live, outcome: IdleOutcome): Promise<void> {
+    const cwd = live.cwd;
+    const files = live.mr?.conflicts ?? (await unmergedPaths(cwd));
+    const targetRef = live.mr?.targetRef ?? job.base;
+    const targetCommit = job.target_commit!;
+    live.mr = { targetRef };
+    if (!outcome.ok) {
+      await this.#gitLocked(job.workspace, () => abortRebase(cwd));
+      const message = `The rebase had conflicts in ${files.join(', ')}; the conflict turn failed (${outcome.code}: ${outcome.message}). The rebase was aborted.`;
+      await this.#transition(job, 'needs_human', { code: 'mr_conflict', message: message.slice(0, 1000) });
+      return;
+    }
+    const failure = await this.#gitLocked(job.workspace, () => continueRebase(cwd, files));
+    if (failure !== undefined) {
+      await this.#transition(job, 'needs_human', failure);
+      return;
+    }
+    const rebased: Job = { ...job, base_commit: targetCommit, target_commit: targetCommit };
+    const note = [
+      '## MR preparation',
+      '',
+      `The rebase onto ${targetRef} (${targetCommit}) had conflicts in ${files.join(', ')}, resolved by the Implementer. The Patch is now against the target.`,
+    ].join('\n');
+    const { job: published, changes } = await this.#publish(rebased, live, outcome, await buildPatch(cwd, targetCommit), [note]);
+    await this.#transition(published, 'awaiting_review', undefined, fileSummaryLines(changes));
+  }
+
+  // The branch holds the one commit on top of the target: the worktree goes (the branch stays in
+  // the checkout for the IDE) and the user takes over.
+  async #ready(job: Job, live: Live, mrText: string): Promise<void> {
+    const cwd = live.cwd;
+    const tip = (await runGit(cwd, ['rev-parse', '--verify', `refs/heads/${job.branch}`])).stdout.toString('utf8').trim();
+    const title = mrText.split(/\r?\n/)[0]!;
+    const failure = await this.#gitLocked(job.workspace, () => removeWorktree(live.workspace.workCheckout, cwd));
+    if (failure !== undefined) {
+      await this.#transition(job, 'needs_human', { code: 'worktree_remove_failed', message: `${failure} The branch ${job.branch} is prepared; remove the worktree by hand and call mark_clean again.` });
+      return;
+    }
+    this.#live.delete(`${job.workspace}/${job.ticket}`);
+    const lines = [title, ...fileSummaryLines((await this.#lastFiles(job)) ?? [])];
+    await this.#transition({ ...job, base_commit: job.target_commit, prepared_commit: tip, worktree: null }, 'ready_for_human_review', undefined, lines);
+    console.log(`${job.workspace}/${job.ticket}: branch ${job.branch} ready (${title})`);
   }
 
   async #lastFiles(job: Job): Promise<FileChange[] | undefined> {
@@ -549,9 +590,10 @@ export class Execution {
   }
 
   // The Context owner's Clean: every undeclared sensitive path of the reviewed iteration must be
-  // acknowledged; then the MR preparation turn runs in the worktree (snapshot, commit, rebase,
-  // verification), and the job ends in ready_for_human_review with the branch in the checkout.
-  // Also the retry after a failed preparation (needs_human with mr_attempts > 0).
+  // acknowledged; then the target is resolved and the MR text turn runs in the worktree. When it
+  // ends the factory commits and rebases (#mrIdle), and the job ends in ready_for_human_review with
+  // the branch in the checkout. Also the retry after a failed preparation (needs_human with
+  // mr_attempts > 0).
   markClean(workspaceName: string, ticket: string, sensitive: string[] = []): Promise<{ state: JobState; iteration: number; branch: string }> {
     return this.#locked(async () => {
       const job = await this.#job(workspaceName, ticket);
@@ -575,21 +617,21 @@ export class Execution {
       }
       const workspace = live?.workspace ?? (await this.#resolve(workspaceName));
       const cwd = job.worktree;
-      const target = await this.#gitLocked(workspaceName, () => resolveTarget(workspace.workCheckout, job.base));
-      // A retry keeps the snapshot of the reviewed change: the branch may already be rebased.
-      const previous = retry ? await this.jobs.readSnapshot(workspaceName, ticket) : undefined;
-      const snapshot = previous?.snapshot_commit !== undefined
-        ? { ...previous, target_ref: target.ref, target_commit: target.commit }
-        : await takeSnapshot(cwd, ticket, job.base_commit!, target, this.jobs.dir(workspaceName, ticket));
-      await this.jobs.writeSnapshot(workspaceName, ticket, snapshot);
+      const target = await this.#gitLocked(workspaceName, async () => {
+        // A rebase left in progress when sf serve restarted during a conflict turn.
+        await abortRebase(cwd);
+        return resolveTarget(workspace.workCheckout, job.base);
+      });
       const attempt = job.mr_attempts + 1;
-      const next = await this.#transition({ ...job, mr_attempts: attempt }, 'preparing_mr');
+      const next = await this.#transition({ ...job, target_commit: target.commit, mr_attempts: attempt }, 'preparing_mr');
       await this.#syncTask(workspace, next);
       const prompt = mrPrompt({
         ticket, branch: job.branch, targetRef: target.ref, targetCommit: target.commit, attempt,
         previousError: retry ? job.error?.message : undefined, handbook: this.#handbook,
       });
-      this.#session(next, workspace).send(prompt, MR_DENIED_TOOLS);
+      const session = this.#session(next, workspace);
+      this.#live.get(key)!.mr = { targetRef: target.ref };
+      session.send(prompt, DENIED_TOOLS);
       return { state: next.state, iteration: next.iteration, branch: next.branch };
     });
   }
@@ -622,7 +664,6 @@ export class Execution {
       const title = mrText.split(/\r?\n/)[0] ?? '';
       const url = await originUrl(checkout);
       const link = url === undefined ? undefined : mergeRequestLink(url, job.base, job.branch);
-      await this.#dropSnapshotRef(ticket, checkout);
       const pushed = await this.#transition({ ...job, prepared_commit: tip }, 'pushed', undefined, [title, ...(link !== undefined ? [link] : [])]);
       this.#live.delete(`${workspaceName}/${ticket}`);
       console.log(`${job.workspace}/${job.ticket}: pushed ${job.branch}\n  ${title}${link !== undefined ? `\n  ${link}` : ''}`);
@@ -650,23 +691,10 @@ export class Execution {
         await this.#clean(job, job.iteration, worktree);
       }
       const failure = discard ? await this.#gitLocked(workspaceName, () => this.#discard(workspace.workCheckout, job, worktree)) : undefined;
-      await this.#dropSnapshotRef(ticket, workspace.workCheckout);
       const kept = discard && failure === undefined ? null : worktree;
       const next = await this.#transition({ ...job, worktree: kept }, 'aborted', failure);
       return { state: next.state, branch: next.branch, discarded: discard && failure === undefined, worktree: kept, ...(failure !== undefined ? { error: failure } : {}) };
     });
-  }
-
-  // Best effort: the snapshot ref of the job goes with it (pushed, abort, reset); a failure is
-  // logged and ignored.
-  async #dropSnapshotRef(ticket: string, checkout: string): Promise<void> {
-    try {
-      if (!(await deleteSnapshotRef(checkout, ticket))) {
-        console.error(`${ticket}: could not delete the snapshot ref in ${checkout}`);
-      }
-    } catch (error) {
-      console.error(error);
-    }
   }
 
   async #endSession(key: string): Promise<void> {
@@ -691,7 +719,7 @@ export class Execution {
   }
 
   // The escape hatch: in any state, ends the session, removes the worktree and archives the job;
-  // the branch is not touched, only the job's snapshot ref is removed.
+  // the branch is not touched.
   // A job whose workspace is no longer registered (or whose checkout is gone) is still archived:
   // only the Git clean-up of the checkout is skipped, and the result says so.
   reset(workspaceName: string, ticket: string): Promise<Retired> {
@@ -718,9 +746,8 @@ export class Execution {
     return job;
   }
 
-  // Ends the session, removes the worktree (best effort, logged) and the snapshot ref, and
-  // archives the job directory; the branch is not touched. Only under the lock, with the job read
-  // under the same acquisition.
+  // Ends the session, removes the worktree (best effort, logged) and archives the job directory;
+  // the branch is not touched. Only under the lock, with the job read under the same acquisition.
   async #retire(job: Job): Promise<Retired> {
     const { workspace: workspaceName, ticket } = job;
     const key = `${workspaceName}/${ticket}`;
@@ -743,7 +770,6 @@ export class Execution {
       if (failure !== undefined) {
         console.error(`${key}: ${failure}`);
       }
-      await this.#dropSnapshotRef(ticket, checkout);
     }
     const archived = await this.jobs.archive(workspaceName, ticket);
     return { archived: `jobs/${workspaceName}/${archived}`, branch: job.branch, ...(workspace === undefined ? { checkout: 'unavailable' as const } : {}) };
@@ -783,7 +809,7 @@ export class Execution {
   }
 
   // After Clean the worktree is gone: a further fix or message recreates it from the branch, and
-  // the next Clean amends the prepared commit.
+  // the next Clean commits the whole change again as one commit.
   async #reopen(job: Job, workspace: Workspace): Promise<Job> {
     const worktree = this.#worktreePath(job.workspace, job.ticket);
     await this.#gitLocked(job.workspace, async () => {

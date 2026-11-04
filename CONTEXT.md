@@ -110,10 +110,11 @@ Dashboard; refused when the Branch tip was edited by hand unless pushed as it is
 _Avoid_: accept, acceptance
 
 **MR preparation**:
-The phase that Clean starts: in the Worktree the Implementer commits by the Git rules, rebases
-onto the target branch, resolves conflicts and writes the merge request title and description;
-the factory verifies, removes the Worktree and leaves the Branch with one commit for Human
-review. The User opens the merge request after Approve.
+The phase that Clean starts: in the Worktree the Implementer writes the merge request title and
+description; the factory, outside the sandbox, commits the reviewed change by the Git rules as one
+commit and rebases it onto the target branch. On a conflict the Implementer resolves the files and
+the change goes back to review. Then the factory removes the Worktree and leaves the Branch with
+one commit for Human review. The User opens the merge request after Approve.
 
 **Check**:
 The Context owner's periodic question to the factory about a Job, made by a ChatGPT scheduled task,

@@ -65,6 +65,8 @@ export async function newEnv(name: string, extra: Record<string, string> = {}): 
   const root = join(temp, name);
   const env = { config: join(root, 'config'), state: join(root, 'state'), home: join(root, 'home'), extra };
   await mkdir(env.home, { recursive: true });
+  // The factory commits at Clean with the user's Git identity.
+  await writeFile(join(env.home, '.gitconfig'), '[user]\n\tname = Test User\n\temail = test@example.invalid\n');
   return env;
 }
 

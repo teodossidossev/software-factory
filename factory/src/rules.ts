@@ -46,24 +46,16 @@ const ALL_GIT_COMMANDS = [
   'add', 'commit', 'push', 'reset', 'clean', 'stash', 'checkout', 'switch', 'restore', 'rebase', 'merge',
   'cherry-pick', 'revert', 'rm', 'mv', 'tag', 'branch', 'config', 'update-ref', 'update-index', 'worktree', 'am', 'pull', 'fetch',
 ];
-// What MR preparation needs: staging, committing, rebasing and resolving conflicts.
-const MR_ALLOWED_GIT_COMMANDS = new Set(['add', 'commit', 'rebase', 'restore', 'checkout', 'switch', 'rm', 'mv']);
-
-function deniedTools(gitCommands: string[]): string[] {
-  return [
-    ...gitCommands.map((command) => `Bash(git ${command}:*)`),
-    'Bash(sudo:*)',
-    'EnterWorktree',
-    'Edit(.git/**)',
-    'Write(.git/**)',
-    ...['Read', 'Edit', 'Write'].flatMap((tool) => [`${tool}(**/.env)`, `${tool}(**/.env.*)`]),
-  ];
-}
-
-// Iterations: every mutating Git command stays the user's; .git and .env files are off limits.
-export const DENIED_TOOLS = deniedTools(ALL_GIT_COMMANDS);
-// MR preparation: add, commit, rebase and conflict resolution allowed; push and the rest denied.
-export const MR_DENIED_TOOLS = deniedTools(ALL_GIT_COMMANDS.filter((command) => !MR_ALLOWED_GIT_COMMANDS.has(command)));
+// Every turn, MR preparation included: every mutating Git command is the factory's or the user's;
+// .git and .env files are off limits.
+export const DENIED_TOOLS = [
+  ...ALL_GIT_COMMANDS.map((command) => `Bash(git ${command}:*)`),
+  'Bash(sudo:*)',
+  'EnterWorktree',
+  'Edit(.git/**)',
+  'Write(.git/**)',
+  ...['Read', 'Edit', 'Write'].flatMap((tool) => [`${tool}(**/.env)`, `${tool}(**/.env.*)`]),
+];
 
 // Paths that are unusual for a ticket to touch: dependency manifests and lockfiles, environment
 // and tool configuration, CI and containers, IDE and agent files, and every dotfile in the root.

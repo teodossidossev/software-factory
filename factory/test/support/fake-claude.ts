@@ -4,7 +4,7 @@
 // result. Each run takes the next turn script from $HOME/fake-claude.json ({"turns": [...]},
 // consumed in order through $HOME/fake-claude.count) and logs argv, prompt and environment
 // names to $HOME/fake-claude.log. A turn can write files into cwd to produce a Patch, then run a
-// list of argv commands in cwd (to stage, commit and rebase like the Implementer would), or end
+// list of argv commands in cwd (to delete files or run Git where a test needs it), or end
 // with a startup failure. A turn can also leave sandbox placeholders behind, like bubblewrap does. Sandbox arguments are logged with argv and otherwise ignored.
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';

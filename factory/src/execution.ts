@@ -11,7 +11,12 @@
 // reaches these methods since SF-040. Every state change goes through #transition, the seam for
 // notifications.
 // Several jobs of one workspace run at the same time, up to SF_MAX_JOBS; the Git operations on
-// the shared checkout are serialized per workspace.
+// the shared checkout are serialized per workspace, across processes.
+// Since SF-042 each job's turns, reviews and gate run in the job's runner (src/runner.ts), a
+// detached `sf run` with an Execution of its own in runner mode: sf serve creates the job at start,
+// queues the requests that need a turn or a review (the first turn, say, a Fix section, Clean, the
+// retry of a review, the override of the gate) and waits for the runner's reply; abort and reset
+// stop the runner first. approve and the merge request stay in sf serve.
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { copyFile, type FileHandle, mkdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -30,6 +35,8 @@ import { DENIED_TOOLS, sensitivityOf } from './rules.js';
 import type { Workspace } from './registry.js';
 import { DEFAULT_PAGE_BYTES, MAX_PAGE_BYTES, MIN_PAGE_BYTES, type Page, pageBuffer } from './repo-files.js';
 import { fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, sensitiveItem } from './review.js';
+import { withLock } from './pid-lock.js';
+import { type Launch, type RunnerRequest, Runners, type RunnerWork } from './runner.js';
 import { type IdleOutcome, ImplementerSession } from './session.js';
 import { appendFix, isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { addWorktree, deleteBranch, removeWorktree } from './worktree.js';
@@ -161,7 +168,15 @@ interface RunningReview {
   controller: AbortController;
 }
 
-export class Execution {
+export interface ExecutionOptions {
+  // Runner mode (sf run): the one job this Execution runs. Without it the Execution is sf serve's,
+  // which runs no turn and no review itself.
+  runner?: { workspace: string; ticket: string };
+  // How sf serve starts a runner; the default spawns `sf run`.
+  launch?: Launch;
+}
+
+export class Execution implements RunnerWork {
   readonly jobs: JobStore;
   readonly #config: Config;
   readonly #resolve: (name: string) => Promise<Workspace>;
@@ -171,23 +186,38 @@ export class Execution {
   // The running review of each job, by "<workspace>/<ticket>".
   readonly #reviews = new Map<string, RunningReview>();
   #lock: Promise<unknown> = Promise.resolve();
-  // One Git lock per workspace for the operations on the shared checkout.
+  // The operations under #locked not settled yet.
+  #pending = 0;
+  // One Git lock per workspace for the operations on the shared checkout; a lock file under the
+  // state directory serializes them with the other processes' (sf serve and the runners).
   readonly #gitLocks = new Map<string, Promise<unknown>>();
+  // Runner mode: the job; sf serve: the runners it talks to.
+  readonly #runner: { workspace: string; ticket: string } | undefined;
+  readonly #runners: Runners | undefined;
+  // Runner mode: stop() was called; nothing new starts.
+  #stopping = false;
 
   // handbook: the loaded Handbook text; MR preparation sends its Git rules and MR template, the
   // review its review rules.
-  constructor(config: Config, resolve: (name: string) => Promise<Workspace>, onStateChange: StateListener = () => {}, handbook = '') {
+  constructor(config: Config, resolve: (name: string) => Promise<Workspace>, onStateChange: StateListener = () => {}, handbook = '', options: ExecutionOptions = {}) {
     this.#config = config;
     this.jobs = new JobStore(config.stateDir);
     this.#resolve = resolve;
     this.#onStateChange = onStateChange;
     this.#handbook = handbook;
+    this.#runner = options.runner;
+    this.#runners = options.runner === undefined ? new Runners(this.jobs, options.launch) : undefined;
   }
 
   // One state-changing operation at a time.
   #locked<T>(work: () => Promise<T>): Promise<T> {
+    this.#pending += 1;
     const next = this.#lock.catch(() => undefined).then(work);
     this.#lock = next;
+    const settled = (): void => {
+      this.#pending -= 1;
+    };
+    next.then(settled, settled);
     return next;
   }
 
@@ -235,7 +265,8 @@ export class Execution {
   // delete, the commit and rebase at Clean, push) never interleave; the rest runs concurrently.
   #gitLocked<T>(workspace: string, work: () => Promise<T>): Promise<T> {
     const previous = this.#gitLocks.get(workspace) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(work);
+    const path = join(this.#config.stateDir, 'locks', `git-${workspace}.lock`);
+    const next = previous.catch(() => undefined).then(() => withLock(path, work));
     this.#gitLocks.set(workspace, next);
     return next;
   }
@@ -277,27 +308,60 @@ export class Execution {
     return join(this.#config.worktreeRoot, workspace, ticket);
   }
 
-  // At serve start no turn is live: working jobs need a person, interrupted starts failed, a job
-  // awaiting review whose last iteration has no review gets one, and one whose last iteration has a
-  // clean review but no gate.json gets its gate (or, with the gate off now, Clean).
+  // At serve start (SF-042): a job in working, preparing_mr or awaiting_review whose runner is alive
+  // is left alone. Without a runner, a working job and an MR preparation need a person, an
+  // interrupted start failed, and a job awaiting review whose last iteration has no review, or a
+  // clean review but no gate.json, gets a runner, which resumes it (resume: the review, the gate,
+  // or with the gate off now, Clean).
   recover(): Promise<void> {
     return this.#locked(async () => {
+      const runners = this.#serveRunners();
       for (const job of await this.jobs.list()) {
-        const review = job.state === 'awaiting_review' && job.iteration > 0 ? await this.jobs.readReview(job.workspace, job.ticket, job.iteration) : undefined;
-        if (job.state === 'awaiting_review' && job.iteration > 0 && review === undefined) {
-          this.#startReview(job);
-        } else if (review !== undefined && 'verdict' in review && review.verdict === 'clean'
-          && (await this.jobs.readGate(job.workspace, job.ticket, job.iteration)) === undefined) {
-          await this.#applying(job, () => this.#afterClaude(job, review));
+        if (['working', 'preparing_mr', 'awaiting_review'].includes(job.state) && (await runners.owner(job.workspace, job.ticket)) !== undefined) {
+          continue;
+        }
+        if (job.state === 'awaiting_review') {
+          if (await this.#resumable(job)) {
+            await runners.ensure(job.workspace, job.ticket);
+          }
         } else if (job.state === 'working') {
-          await this.#transition(job, 'needs_human', { code: 'serve_restarted', message: 'sf serve restarted while the iteration ran; use sf say to continue.' });
+          await this.#transition(job, 'needs_human', { code: 'serve_restarted', message: 'sf serve restarted and the runner of the job had ended while the iteration ran; use sf say to continue.' });
         } else if (job.state === 'preparing_mr') {
-          await this.#transition(job, 'needs_human', { code: 'mr_serve_restarted', message: 'sf serve restarted during MR preparation; go on with sf say (its iteration is reviewed again and a clean verdict prepares the branch again), or abort or reset the job.' });
+          await this.#transition(job, 'needs_human', { code: 'mr_serve_restarted', message: 'sf serve restarted and the runner of the job had ended during MR preparation; go on with sf say (its iteration is reviewed again and a clean verdict prepares the branch again), or abort or reset the job.' });
         } else if (job.state === 'starting') {
           await this.#transition(job, 'failed', { code: 'serve_restarted', message: 'sf serve restarted while the job was starting.' });
         }
       }
     });
+  }
+
+  // A job awaiting review that has something to resume: its last iteration has no review (with the
+  // review on), or a clean one and no gate.json.
+  async #resumable(job: Job): Promise<boolean> {
+    if (job.state !== 'awaiting_review' || job.iteration === 0) {
+      return false;
+    }
+    const review = await this.jobs.readReview(job.workspace, job.ticket, job.iteration);
+    if (review === undefined) {
+      return this.#config.review;
+    }
+    return 'verdict' in review && review.verdict === 'clean' && (await this.jobs.readGate(job.workspace, job.ticket, job.iteration)) === undefined;
+  }
+
+  // sf serve's runners; runner mode has none and never reaches the calls that need them.
+  #serveRunners(): Runners {
+    if (this.#runners === undefined) {
+      throw new Error('Only sf serve starts and stops runners.');
+    }
+    return this.#runners;
+  }
+
+  // Runner mode's job; sf serve runs no turn and no review itself.
+  #runnerJob(): { workspace: string; ticket: string } {
+    if (this.#runner === undefined) {
+      throw new Error("Turns and reviews run in the job's runner, not in sf serve.");
+    }
+    return this.#runner;
   }
 
   // Creates the job record and its worktree, then runs the first iteration. The validation and
@@ -362,7 +426,8 @@ export class Execution {
       await this.jobs.write(job);
       await this.#syncTask(workspace, job);
       job = await this.#transition(job, 'working');
-      this.#session(job, workspace).send(factoryPrompt(`/implement ${TASK_DIR}/${ticket}.md`, ticket, job.iteration + 1), DENIED_TOOLS);
+      // The first turn runs in the job's runner.
+      await this.#serveRunners().queue(workspace.name, ticket, { kind: 'turn', prompt: factoryPrompt(`/implement ${TASK_DIR}/${ticket}.md`, ticket, job.iteration + 1) });
       return { branch, state: job.state, check_after_minutes: this.#config.checkAfterStartMin, worktree };
     });
   }
@@ -422,8 +487,12 @@ export class Execution {
     }
   }
 
-  // The job's live session, created on first use with the worktree as cwd.
+  // The job's live session, created on first use with the worktree as cwd. Runner mode only.
   #session(job: Job, workspace: Workspace): ImplementerSession {
+    this.#runnerJob();
+    if (this.#stopping) {
+      throw new FactoryError('runner_stopping', 'The runner of the job is stopping; no turn starts.');
+    }
     const key = `${job.workspace}/${job.ticket}`;
     const live = this.#live.get(key);
     if (live !== undefined) {
@@ -626,7 +695,8 @@ export class Execution {
   // Starts the Claude review of the job's last iteration; it runs outside the lock. A review still
   // running for the job is cancelled. Nothing with SF_REVIEW=off.
   #startReview(job: Job): void {
-    if (!this.#config.review) {
+    this.#runnerJob();
+    if (!this.#config.review || this.#stopping) {
       return;
     }
     const key = `${job.workspace}/${job.ticket}`;
@@ -640,14 +710,24 @@ export class Execution {
   // back to awaiting_review without a new iteration, the failed review.json goes, and the review
   // of the last iteration runs again.
   retryReview(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number }> {
+    return this.#request(workspaceName, ticket, { kind: 'review' }) as Promise<{ state: JobState; iteration: number }>;
+  }
+
+  // sf review needs the review on and a job that a failed review handed to the user.
+  #checkRetryReview(job: Job): void {
+    if (!this.#config.review) {
+      throw new FactoryError('review_off', 'The Claude review is off (SF_REVIEW=off); nothing would review the iteration.');
+    }
+    if (job.state !== 'needs_human' || job.error?.code !== 'review_failed') {
+      throw new FactoryError('invalid_state', `sf review needs needs_human after a failed review (review_failed); the job is ${job.state}${job.error !== undefined ? ` (${job.error.code})` : ''}.`);
+    }
+  }
+
+  // The retry in the runner.
+  #retryReview(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number }> {
     return this.#locked(async () => {
       const job = await this.#job(workspaceName, ticket);
-      if (!this.#config.review) {
-        throw new FactoryError('review_off', 'The Claude review is off (SF_REVIEW=off); nothing would review the iteration.');
-      }
-      if (job.state !== 'needs_human' || job.error?.code !== 'review_failed') {
-        throw new FactoryError('invalid_state', `sf review needs needs_human after a failed review (review_failed); the job is ${job.state}${job.error !== undefined ? ` (${job.error.code})` : ''}.`);
-      }
+      this.#checkRetryReview(job);
       if (job.worktree === null || !(await exists(job.worktree))) {
         throw new FactoryError('worktree_missing', `The worktree of ${workspaceName}/${ticket} is missing; sf reset the ticket and start again.`);
       }
@@ -664,12 +744,23 @@ export class Execution {
   // paths Claude accepted. The override is recorded first: gate-override.json with the Codex
   // items not applied (or the gate's error) and a gate_overridden event.
   acceptGate(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; branch: string }> {
+    return this.#request(workspaceName, ticket, { kind: 'accept' }) as Promise<{ state: JobState; iteration: number; branch: string }>;
+  }
+
+  // The code the gate stopped with; invalid_state unless it is one sf accept takes on.
+  #checkAcceptGate(job: Job): string {
+    const code = job.error?.code;
+    if (job.state !== 'needs_human' || code === undefined || !GATE_OVERRIDE_CODES.includes(code)) {
+      throw new FactoryError('invalid_state', `sf accept needs needs_human after the gate stopped (${GATE_OVERRIDE_CODES.join(', ')}); the job is ${job.state}${code !== undefined ? ` (${code})` : ''}.`);
+    }
+    return code;
+  }
+
+  // The override in the runner.
+  #acceptGate(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; branch: string }> {
     return this.#locked(async () => {
       const job = await this.#job(workspaceName, ticket);
-      const code = job.error?.code;
-      if (job.state !== 'needs_human' || code === undefined || !GATE_OVERRIDE_CODES.includes(code)) {
-        throw new FactoryError('invalid_state', `sf accept needs needs_human after the gate stopped (${GATE_OVERRIDE_CODES.join(', ')}); the job is ${job.state}${code !== undefined ? ` (${code})` : ''}.`);
-      }
+      const code = this.#checkAcceptGate(job);
       const review = job.iteration > 0 ? await this.jobs.readReview(workspaceName, ticket, job.iteration) : undefined;
       if (review === undefined || !('verdict' in review) || review.verdict !== 'clean') {
         const what = review === undefined ? 'has none' : 'verdict' in review ? `says ${review.verdict}` : 'failed';
@@ -824,6 +915,10 @@ export class Execution {
       });
       return;
     }
+    this.#runnerJob();
+    if (this.#stopping) {
+      return;
+    }
     const key = `${job.workspace}/${job.ticket}`;
     this.#reviews.get(key)?.controller.abort();
     const running: RunningReview = { reviewer: GATE_REVIEWER, iteration: job.iteration, controller: new AbortController() };
@@ -960,7 +1055,17 @@ export class Execution {
   // the branch in the checkout. Also the retry after a failed preparation (needs_human with
   // mr_attempts > 0).
   markClean(workspaceName: string, ticket: string, sensitive: string[] = []): Promise<{ state: JobState; iteration: number; branch: string }> {
-    return this.#locked(async () => this.#prepareMr(await this.#job(workspaceName, ticket), sensitive));
+    return this.#request(workspaceName, ticket, { kind: 'clean', sensitive }) as Promise<{ state: JobState; iteration: number; branch: string }>;
+  }
+
+  // Whether MR preparation may start: awaiting_review, the retry after a failed preparation, or the
+  // override of a stopped gate (acceptGate, which checked the state); returns whether it is the retry.
+  #checkPrepareMr(job: Job, override?: GateOverride): boolean {
+    const retry = override === undefined && job.state === 'needs_human' && job.mr_attempts > 0 && job.worktree !== null;
+    if (!(job.state === 'awaiting_review' || retry || override !== undefined)) {
+      throw new FactoryError('invalid_state', `mark_clean needs awaiting_review (or needs_human after an MR preparation); the job is ${job.state}.`);
+    }
+    return retry;
   }
 
   // The work of mark_clean, also run for a clean verdict of the review. Only under the lock.
@@ -968,10 +1073,7 @@ export class Execution {
   // check has passed, before the job moves on.
   async #prepareMr(job: Job, sensitive: string[], override?: GateOverride): Promise<{ state: JobState; iteration: number; branch: string }> {
     const { workspace: workspaceName, ticket } = job;
-    const retry = override === undefined && job.state === 'needs_human' && job.mr_attempts > 0 && job.worktree !== null;
-    if (!(job.state === 'awaiting_review' || retry || override !== undefined)) {
-      throw new FactoryError('invalid_state', `mark_clean needs awaiting_review (or needs_human after an MR preparation); the job is ${job.state}.`);
-    }
+    const retry = this.#checkPrepareMr(job, override);
     const unacknowledged = ((await this.#lastFiles(job)) ?? [])
       .filter((change) => change.sensitive === 'undeclared' && !sensitive.includes(change.path))
       .map((change) => change.path);
@@ -1017,10 +1119,22 @@ export class Execution {
   // or rebased here; a tip that moved since is refused unless asIs.
   approve(workspaceName: string, ticket: string, asIs = false): Promise<MrOutcome> {
     return this.#locked(async () => {
+      // Refused at once in a state approve does not take; checked again once the runner has ended.
+      this.#checkApprovable(await this.#job(workspaceName, ticket), 'approve');
+      await this.#settled(workspaceName, ticket);
       const job = await this.#job(workspaceName, ticket);
       this.#checkApprovable(job, 'approve');
       return this.#approve(job, await this.#resolve(workspaceName), asIs);
     });
+  }
+
+  // The push writes a job no runner may write at the same time: the job's runner has ended (it
+  // exits once the job waits for the user) and no request (sf say, a fix) waits for one;
+  // runner_active otherwise. Only under the lock, under which every request is queued.
+  async #settled(workspaceName: string, ticket: string): Promise<void> {
+    if (!(await this.#serveRunners().settled(workspaceName, ticket))) {
+      throw new FactoryError('runner_active', `The runner of ${workspaceName}/${ticket} is running a request (sf say or a fix); wait for the job to wait for you again.`);
+    }
   }
 
   // The job's prepared branch can be pushed: ready_for_human_review, or needs_human after a push
@@ -1131,6 +1245,10 @@ export class Execution {
   // the merge request, in one action. The host and its token are checked before anything is pushed.
   createMergeRequest(workspaceName: string, ticket: string): Promise<MrOutcome> {
     return this.#locked(async () => {
+      // A job that approve would push: its runner has ended first.
+      if (this.#approvable(await this.#job(workspaceName, ticket))) {
+        await this.#settled(workspaceName, ticket);
+      }
       const job = await this.#job(workspaceName, ticket);
       const combined = this.#approvable(job);
       if (!(job.state === 'pushed' || combined)) {
@@ -1213,22 +1331,24 @@ export class Execution {
     return choice.ok ? { host: choice.kind, reason: null } : { host: choice.kind, reason: choice.reason };
   }
 
-  // Ends the job: the session stops; the worktree stays unless discard, which removes it and the
-  // branch.
+  // Ends the job: the runner stops (and with it the session, the review and the gate); the worktree
+  // stays unless discard, which removes it and the branch.
   abort(workspaceName: string, ticket: string, discard: boolean): Promise<{ state: JobState; branch: string; discarded: boolean; worktree: string | null; error?: { code: string; message: string } }> {
     return this.#locked(async () => {
-      const job = await this.#job(workspaceName, ticket);
-      if (TERMINAL_STATES.includes(job.state)) {
-        throw new FactoryError('invalid_state', `The job is already ${job.state}.`);
+      const found = await this.#job(workspaceName, ticket);
+      if (TERMINAL_STATES.includes(found.state)) {
+        throw new FactoryError('invalid_state', `The job is already ${found.state}.`);
       }
-      const key = `${workspaceName}/${ticket}`;
-      const live = this.#live.get(key);
-      const workspace = live?.workspace ?? (await this.#resolve(workspaceName));
-      const worktree = job.worktree !== null && (await exists(job.worktree)) ? job.worktree : null;
-      if (discard && worktree !== null && (await gitBusy(worktree))) {
+      const workspace = await this.#resolve(workspaceName);
+      const existing = async (job: Job): Promise<string | null> => (job.worktree !== null && (await exists(job.worktree)) ? job.worktree : null);
+      const before = await existing(found);
+      if (discard && before !== null && (await gitBusy(before))) {
         throw new FactoryError('rebase_in_progress', 'A rebase or a Git lock is in progress in the worktree; discard would lose it. Finish or abort it first, or abort without --discard.');
       }
-      await this.#endSession(key);
+      await this.#endSession(workspaceName, ticket);
+      // The job as its runner left it.
+      const job = await this.#job(workspaceName, ticket);
+      const worktree = await existing(job);
       if (worktree !== null) {
         await this.#clean(job, job.iteration, worktree);
       }
@@ -1239,12 +1359,15 @@ export class Execution {
     });
   }
 
-  // Ends the session and cancels a running review, whose outcome is then never applied.
-  async #endSession(key: string): Promise<void> {
+  // Stops the job's runner, which ends its session and cancels its review, whose outcome is then
+  // never applied.
+  async #endSession(workspace: string, ticket: string): Promise<void> {
+    const key = `${workspace}/${ticket}`;
     this.#cancelReview(key);
     const live = this.#live.get(key);
     this.#live.delete(key);
     await live?.session.close();
+    await this.#runners?.stop(workspace, ticket);
   }
 
   // The worktree and the branch go; the checkout is not touched.
@@ -1306,7 +1429,7 @@ export class Execution {
         }
       }
     }
-    await this.#endSession(key);
+    await this.#endSession(workspaceName, ticket);
     if (workspace !== undefined) {
       const checkout = workspace.workCheckout;
       const worktree = job.worktree ?? this.#worktreePath(workspaceName, ticket);
@@ -1412,7 +1535,14 @@ export class Execution {
   }
 
   requestFix(workspaceName: string, ticket: string, content: string): Promise<{ iteration: number; check_after_minutes: number }> {
-    return this.#locked(async () => this.#fix(await this.#job(workspaceName, ticket), content));
+    return this.#request(workspaceName, ticket, { kind: 'fix', content }) as Promise<{ iteration: number; check_after_minutes: number }>;
+  }
+
+  // A Fix section needs a job awaiting review or in human review.
+  #checkFix(job: Job): void {
+    if (job.state !== 'awaiting_review' && job.state !== 'ready_for_human_review') {
+      throw new FactoryError('invalid_state', `request_fix needs awaiting_review or ready_for_human_review; the job is ${job.state}.`);
+    }
   }
 
   // The work of request_fix, also run for a fix verdict of the review: appends ## Fix N and starts
@@ -1421,9 +1551,7 @@ export class Execution {
   async #fix(current: Job, content: string, counts: Partial<Pick<Job, 'gate_fixes'>> = {}): Promise<{ iteration: number; check_after_minutes: number }> {
     let job = current;
     const { workspace: workspaceName, ticket } = job;
-    if (job.state !== 'awaiting_review' && job.state !== 'ready_for_human_review') {
-      throw new FactoryError('invalid_state', `request_fix needs awaiting_review or ready_for_human_review; the job is ${job.state}.`);
-    }
+    this.#checkFix(job);
     if (job.fixes >= this.#config.maxIterations) {
       const message = `${job.fixes} Fix sections were written, the limit of SF_MAX_ITERATIONS`;
       await this.#transition(job, 'needs_human', { code: 'iteration_limit', message: `${message}; the user decides how to go on.` });
@@ -1441,16 +1569,27 @@ export class Execution {
     return { iteration: job.iteration + 1, check_after_minutes: this.#config.checkAfterFixMin };
   }
 
-  // A user message into the session, queued as its next turn.
+  // A user message into the session, queued as its next turn (in the runner's queue first, then,
+  // while a turn runs, in the session's).
   say(workspaceName: string, ticket: string, message: string): Promise<{ state: JobState; queued: boolean }> {
+    return this.#request(workspaceName, ticket, { kind: 'say', message }) as Promise<{ state: JobState; queued: boolean }>;
+  }
+
+  // sf say needs a job with a session to go on with and a non-empty text message.
+  #checkSay(job: Job, message: string): void {
+    if (!['working', 'awaiting_review', 'needs_human', 'ready_for_human_review'].includes(job.state)) {
+      throw new FactoryError('invalid_state', `sf say needs working, awaiting_review, needs_human or ready_for_human_review; the job is ${job.state}.`);
+    }
+    if (message.trim() === '' || message.includes('\0')) {
+      throw new FactoryError('invalid_content', 'The message must be non-empty text.');
+    }
+  }
+
+  // The message in the runner.
+  #say(workspaceName: string, ticket: string, message: string): Promise<{ state: JobState; queued: boolean }> {
     return this.#locked(async () => {
       let job = await this.#job(workspaceName, ticket);
-      if (!['working', 'awaiting_review', 'needs_human', 'ready_for_human_review'].includes(job.state)) {
-        throw new FactoryError('invalid_state', `sf say needs working, awaiting_review, needs_human or ready_for_human_review; the job is ${job.state}.`);
-      }
-      if (message.trim() === '' || message.includes('\0')) {
-        throw new FactoryError('invalid_content', 'The message must be non-empty text.');
-      }
+      this.#checkSay(job, message);
       const workspace = this.#live.get(`${workspaceName}/${ticket}`)?.workspace ?? (await this.#resolve(workspaceName));
       if (job.state === 'ready_for_human_review') {
         job = await this.#reopen(job, workspace);
@@ -1467,6 +1606,102 @@ export class Execution {
       session.send(factoryPrompt(message, ticket, job.iteration + 1), DENIED_TOOLS);
       return { state: job.state, queued };
     });
+  }
+
+  // sf serve's side of a request: under the lock (so approve, abort and reset see it queued), the
+  // state is checked first, so a request the runner would refuse starts no runner, and the request
+  // is queued; then the runner's reply, outside the lock, is the result. The runner checks again
+  // when it applies the request.
+  async #request(workspaceName: string, ticket: string, request: Exclude<RunnerRequest, { kind: 'turn' }>): Promise<unknown> {
+    const id = await this.#locked(async () => {
+      this.#check(await this.#job(workspaceName, ticket), request);
+      return this.#serveRunners().queue(workspaceName, ticket, request);
+    });
+    return this.#serveRunners().reply(workspaceName, ticket, id);
+  }
+
+  // The state checks of a request, the same in sf serve and in the runner.
+  #check(job: Job, request: Exclude<RunnerRequest, { kind: 'turn' }>): void {
+    switch (request.kind) {
+      case 'say':
+        this.#checkSay(job, request.message);
+        break;
+      case 'fix':
+        this.#checkFix(job);
+        break;
+      case 'clean':
+        this.#checkPrepareMr(job);
+        break;
+      case 'review':
+        this.#checkRetryReview(job);
+        break;
+      case 'accept':
+        this.#checkAcceptGate(job);
+        break;
+    }
+  }
+
+  // Runner mode: applies one request of sf serve to the job.
+  apply(request: RunnerRequest): Promise<unknown> {
+    const { workspace, ticket } = this.#runnerJob();
+    switch (request.kind) {
+      case 'turn':
+        return this.#locked(async () => {
+          const job = await this.#job(workspace, ticket);
+          if (job.state !== 'working') {
+            throw new FactoryError('invalid_state', `The first turn needs working; the job is ${job.state}.`);
+          }
+          this.#session(job, await this.#resolve(workspace)).send(request.prompt, DENIED_TOOLS);
+          return {};
+        });
+      case 'say':
+        return this.#say(workspace, ticket, request.message);
+      case 'fix':
+        return this.#locked(async () => this.#fix(await this.#job(workspace, ticket), request.content));
+      case 'clean':
+        return this.#locked(async () => this.#prepareMr(await this.#job(workspace, ticket), request.sensitive));
+      case 'review':
+        return this.#retryReview(workspace, ticket);
+      case 'accept':
+        return this.#acceptGate(workspace, ticket);
+    }
+  }
+
+  // Runner mode: what the job was doing when its last runner ended. A job awaiting review whose
+  // last iteration has no review gets one; one whose review is clean and has no gate.json gets its
+  // gate (or, with the gate off now, Clean).
+  resume(): Promise<void> {
+    const { workspace, ticket } = this.#runnerJob();
+    return this.#locked(async () => {
+      const job = await this.jobs.read(workspace, ticket);
+      if (job === undefined || this.#reviews.has(`${workspace}/${ticket}`) || !(await this.#resumable(job))) {
+        return;
+      }
+      const review = await this.jobs.readReview(workspace, ticket, job.iteration);
+      if (review === undefined) {
+        this.#startReview(job);
+      } else if ('verdict' in review) {
+        await this.#applying(job, () => this.#afterClaude(job, review));
+      }
+    });
+  }
+
+  // Runner mode: no turn runs or waits, no review or gate runs, no state change is in progress.
+  get idle(): boolean {
+    return this.#pending === 0 && this.#reviews.size === 0 && ![...this.#live.values()].some((live) => live.session.busy);
+  }
+
+  // Runner mode, on SIGTERM (abort, reset): the turn, the review and the gate end and their outcome
+  // is never applied; resolves once the state change in progress, if any, is written.
+  async stop(): Promise<void> {
+    this.#stopping = true;
+    for (const key of [...this.#reviews.keys()]) {
+      this.#cancelReview(key);
+    }
+    const sessions = [...this.#live.values()].map((live) => live.session);
+    this.#live.clear();
+    await Promise.all(sessions.map((session) => session.close()));
+    await this.#locked(async () => undefined);
   }
 
   async status(workspace?: string, ticket?: string): Promise<Job[]> {

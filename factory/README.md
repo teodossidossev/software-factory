@@ -40,6 +40,7 @@ bin/sf abort <workspace> <ticket> [--discard]  # end the job; the worktree stays
 bin/sf reset <workspace> <ticket>              # end the session, remove the worktree and archive the job; the branch stays; needs sf serve
 bin/sf notify-test                             # one test notification on every channel; works without sf serve
 bin/sf info                                    # version, directories, settings (gate: codex <version or path> | off (<reason>)), sf serve and tunnel state, workspaces, jobs; works without sf serve
+bin/sf run <workspace> <ticket>                # the job's runner (section Jobs); sf serve starts it detached, one per job; refused (runner_running) while the job has one
 npm run typecheck && npm test
 ```
 
@@ -134,6 +135,40 @@ factory beyond its Git refs (branches) and worktree registrations.
 The job operations below are the Execution's (`src/execution.ts`): the user starts a job (the
 dashboard's Start, `sf start`), the reviewers' verdicts take the fix and the clean paths, and the
 user goes on with `sf say`, approve, abort or reset. None of them is an MCP tool.
+
+**Each job runs in its own process** (SF-042, `src/runner.ts`). `sf serve` creates the job at
+`start`; the job's turns, its reviews and its gate run in the job's **runner**, `sf run <workspace>
+<ticket>`, a detached child process (a session of its own: neither Ctrl+C nor the end of `sf serve`
+reaches it). The runner resumes the Implementer session by `session_id`, runs the queued turns,
+publishes, runs the review and the gate, applies their verdict (the Fix section, Clean and MR
+preparation), writes the job's state, sends the notifications, and exits when the job waits for a
+person (`needs_human`, `ready_for_human_review`, `awaiting_review` with no review to run) or has
+ended. A restart of `sf serve` therefore leaves a working job working.
+
+- One runner per job: `runner.pid` in the job directory holds its pid (and, from `/proc`, its start
+  time, so a reused pid is not taken for it); a second `sf run` of the job is refused with
+  `runner_running`, and a lock whose process is gone is taken over. Before `sf serve` starts a
+  runner for a job whose last runner was killed or crashed, what that runner left behind (its
+  process group: Claude Code, Codex) is ended.
+- `sf serve`, the dashboard and the CLI read the state from disk and talk to the runner only
+  through files: `start`, `sf say`, a Fix section, Clean, `sf review` and `sf accept` write a request
+  into `queue/` of the job directory (the state is checked first, so a refused request starts no
+  runner), start a runner when none runs, and wait for the runner's answer in `replies/` (at most
+  120 s: `runner_timeout`; a runner that ends without answering, or that is started three times
+  and never takes the request: `runner_failed`). `start` does not
+  wait: it answers once the job is `working` and its first turn queued. A request queued while a
+  turn runs is taken by the runner and, for `sf say`, waits in the session as the next turn.
+- `sf abort` and `sf reset` stop the runner with SIGTERM (SIGKILL after 15 s): its turn, review and
+  gate end without their outcome being applied, and what the runner started that is still left
+  (its process group) ends too; then `sf serve` changes the state. `approve` and the merge request
+  stay in `sf serve` (they only push and talk to the Git host); `approve` and `sf mr create` wait
+  up to 10 s for the job's runner to end and are refused with `runner_active` while it runs or a
+  request (`sf say`, a fix) waits for it.
+- The runner's output goes to `runner.log` in the job directory. The dashboard of `sf serve`
+  follows the state the runners write through the job files (`fs.watch`, and a look every second).
+- The Git operations on a workspace's checkout (fetch, worktree add and remove, the commit and
+  rebase at Clean, push) are serialized across the processes by `locks/git-<workspace>.lock` in the
+  state directory.
 
 - `start` reads `.software-factory/<ticket>.md` of the checkout (its `base` and `title`), fetches
   `origin <base>` when `origin` exists (60 s), refuses an existing branch (`branch_exists`) or a
@@ -333,20 +368,22 @@ user goes on with `sf say`, approve, abort or reset. None of them is an MCP tool
   limit (`gate_rounds`) or token ceiling (`gate_budget`) or the iteration limit put the job in
   `needs_human`. After a gate code, `sf accept` (above) goes on to MR preparation; otherwise `sf
   say` starts another iteration.
-  When `sf serve` starts, jobs found `working` become `needs_human` (`serve_restarted`) and keep
-  their session for `sf say`; jobs found `preparing_mr` become `needs_human` (`mr_serve_restarted`)
-  (`sf say` goes on: its iteration is reviewed again); a job found `awaiting_review` whose last iteration has no `review.json`
-  gets its review, and one whose last iteration has a clean `review.json` and no `gate.json` gets
-  its gate (with the gate off by now, the Claude verdict runs Clean). Nothing is retried
+  When `sf serve` starts, a job found `working`, `preparing_mr` or `awaiting_review` whose runner is
+  alive is left alone. Without a live runner, jobs found `working` become `needs_human`
+  (`serve_restarted`) and keep their session for `sf say`; jobs found `preparing_mr` become
+  `needs_human` (`mr_serve_restarted`) (`sf say` goes on: its iteration is reviewed again); a job
+  found `awaiting_review` whose last iteration has no `review.json` gets a runner that runs its
+  review, and one whose last iteration has a clean `review.json` and no `gate.json` gets a runner
+  that runs its gate (with the gate off by now, the Claude verdict runs Clean). Nothing is retried
   automatically.
 - `check` also returns `mr`, the MR text, once MR preparation produced one.
-- `sf abort` works in every non-terminal state: it aborts the running turn (queued prompts are
-  dropped) and sets `aborted` without `error`; the branch and the worktree stay, and the
+- `sf abort` works in every non-terminal state: it stops the job's runner, which aborts the running
+  turn (queued prompts and requests are dropped) and sets `aborted` without `error`; the branch and the worktree stay, and the
   worktree's path is printed (`worktree` in the result). `--discard` removes the worktree
   (`git worktree remove --force`, `git worktree prune`) and the branch (`git branch -D`); a
   failing step leaves `aborted` with `error.code` `discard_failed`. `--discard` is refused
   (`rebase_in_progress`) while a rebase or a Git lock is in progress in the worktree.
-- `sf reset` works in every state: it ends a live session, removes the worktree and archives the
+- `sf reset` works in every state: it stops the job's runner (ending a live session), removes the worktree and archives the
   job directory as `start` archives a terminal job. The branch is not touched. When the workspace is
   no longer registered (or its checkout is gone), only the job record is archived and the result
   says `checkout: unavailable`; the dashboard's Archive of a finished job behaves the same.
@@ -579,6 +616,10 @@ jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | st
 jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-override.json,gate-schema.json,gate-output.json,conflict-resolution.diff}
 worktrees/<workspace>/<ticket>/          # the job's worktree (SF_WORKTREE_ROOT), from start to Clean, abort or reset
 jobs/<workspace>/<ticket>/mr.md              # the MR text, once the branch is ready or after a conflict iteration
+jobs/<workspace>/<ticket>/runner.pid     # the pid of the job's runner (sf run) while it runs (SF-042)
+jobs/<workspace>/<ticket>/queue/, replies/   # sf serve's requests to the runner, one JSON file each, and the runner's answers
+jobs/<workspace>/<ticket>/runner.log     # the output of the job's runners
+locks/git-<workspace>.lock               # held during a Git operation on the workspace's checkout, by sf serve or a runner
 jobs/<workspace>/<ticket>.<timestamp>/   # an archived earlier job
 ```
 
@@ -806,12 +847,12 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 
 | Method and path | JSON body | Calls |
 |---|---|---|
-| `POST api/jobs/<ws>/<ticket>/approve` | `{"as_is"?: boolean}` | `Execution.approve(ws, ticket, as_is)`: the push of the prepared branch; `as_is` pushes a tip edited by hand |
+| `POST api/jobs/<ws>/<ticket>/approve` | `{"as_is"?: boolean}` | `Execution.approve(ws, ticket, as_is)`: the push of the prepared branch; `as_is` pushes a tip edited by hand; it waits up to 10 s for the job's runner to end and is refused with `409 runner_active` while the runner runs or a request (`sf say`, a fix) waits for it (SF-042) |
 | `POST api/jobs/<ws>/<ticket>/abort` | `{"discard": false}`; `discard` optional, default false | `Execution.abort(ws, ticket, discard)` |
-| `POST api/jobs/<ws>/<ticket>/say` | `{"message": "<text>"}` | `Execution.say(ws, ticket, message)`; the text goes as it is (nothing trimmed or split) |
-| `POST api/jobs/<ws>/<ticket>/review` | `{}` | `Execution.retryReview(ws, ticket)` (`sf review`): the failed review of the last iteration runs again; result `{state, iteration}`; `409 invalid_state` unless the job is `needs_human` with `review_failed`, `409 review_off` with `SF_REVIEW=off` |
-| `POST api/jobs/<ws>/<ticket>/accept` | `{}` | `Execution.acceptGate(ws, ticket)` (`sf accept`, SF-047): the override of the stopped gate, then MR preparation; result `{state, iteration, branch}`; `409 invalid_state` with the reason unless the job is `needs_human` with `gate_rounds`, `gate_budget` or `gate_failed` and a clean Claude review of the last iteration; the MR preparation's refusals (`409 worktree_missing`, `409 turn_running`) |
-| `POST api/jobs/<ws>/<ticket>/mr-create` | `{}` | `Execution.createMergeRequest(ws, ticket)` (`sf mr create`, SF-048): result `{state, branch, title?, link?, mr?: {host, number, url, state, reused}, error?}`; `409` for `invalid_state`, `mr_token_missing`, `mr_host_unsupported`, `mr_text_missing`; `502` for `mr_auth_failed`, `mr_host_error`, `mr_host_unreachable` |
+| `POST api/jobs/<ws>/<ticket>/say` | `{"message": "<text>"}` | `Execution.say(ws, ticket, message)`; the text goes as it is (nothing trimmed or split); answered by the job's runner (SF-042), so `500 runner_failed` or `500 runner_timeout` can come back |
+| `POST api/jobs/<ws>/<ticket>/review` | `{}` | `Execution.retryReview(ws, ticket)` (`sf review`): the failed review of the last iteration runs again; result `{state, iteration}`; `409 invalid_state` unless the job is `needs_human` with `review_failed`, `409 review_off` with `SF_REVIEW=off`; answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
+| `POST api/jobs/<ws>/<ticket>/accept` | `{}` | `Execution.acceptGate(ws, ticket)` (`sf accept`, SF-047): the override of the stopped gate, then MR preparation; result `{state, iteration, branch}`; `409 invalid_state` with the reason unless the job is `needs_human` with `gate_rounds`, `gate_budget` or `gate_failed` and a clean Claude review of the last iteration; the MR preparation's refusals (`409 worktree_missing`, `409 turn_running`); answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
+| `POST api/jobs/<ws>/<ticket>/mr-create` | `{}` | `Execution.createMergeRequest(ws, ticket)` (`sf mr create`, SF-048): result `{state, branch, title?, link?, mr?: {host, number, url, state, reused}, error?}`; from `ready_for_human_review` it waits for the job's runner like approve; `409` for `invalid_state`, `runner_active`, `mr_token_missing`, `mr_host_unsupported`, `mr_text_missing`; `502` for `mr_auth_failed`, `mr_host_error`, `mr_host_unreachable` |
 | `POST api/jobs/<ws>/<ticket>/mr-merge` | `{}` | `Execution.mergeMergeRequest(ws, ticket)` (`sf mr merge`): result `{state, branch, mr}`; `409 mr_not_mergeable` with the host's reason, `409 mr_not_open`, and the codes above |
 | `POST api/jobs/<ws>/<ticket>/mr-status` | `{}` | `Execution.mergeRequestStatus(ws, ticket)` (`sf mr status`): result `{state, branch, mr, status: {number, url, state, draft, mergeable, reason?, checks?, merge_commit?}}`; every page gets the jobs again, and the pages that show the job its detail (a merge request merged or closed on the host shows so at once) |
 | `POST api/workspaces` | `{"name": string, "path": string}` | `Setup.addWorkspace`: the rules of `sf workspace add`; result the workspace row |
@@ -843,13 +884,14 @@ that ended in `needs_human`, `awaiting_review` or `aborted`, and an abort that e
 failed to discard (`result.error.code` `discard_failed`; the page says the discard may be partial
 and never that the branch or the files were removed) are `200` too; the page reads `result`.
 A `FactoryError` is `{"ok": false, "error": {"code", "message"}}` with its code and message kept,
-under `409` for `invalid_state`, `turn_running`, `rebase_in_progress`, `review_off`, `job_exists`, `job_active`,
+under `409` for `invalid_state`, `turn_running`, `rebase_in_progress`, `review_off`, `runner_active`, `job_exists`, `job_active`,
 `job_limit`, `task_draft`, `checkout_dirty`, `branch_exists`, `branch_changed`, `branch_missing`,
 `worktree_exists`, `worktree_missing`, `sensitive_unacknowledged`, `ticket_exists`,
 `workspace_exists` and `workspace_busy`,
 `404` for `job_not_found`, `workspace_not_found` and `task_not_found`, `400` for `invalid_content`, `invalid_ticket`, `invalid_name` and
 `workspace_invalid`, and `500` for any other code (a Git failure before the preparation, for
-example). Any other failure is `500`
+example; `runner_failed` and `runner_timeout` of a request the job's runner answers: say,
+review, accept). Any other failure is `500`
 with `internal_error` and a fixed message; the cause is logged, never the body or the token.
 
 When the page's approve request is cut, the push goes on and its outcome is recorded in the job;

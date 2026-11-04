@@ -21,16 +21,22 @@ _Avoid_: reviewer (ambiguous), planner, ChatGPT connector
 
 **Implementer**:
 The Claude Code session that executes a Task file in the work checkout.
-_Avoid_: executor, agent, runner
+_Avoid_: executor, agent, runner (the Runner is the process the session runs in)
 
 **User**:
 The one person who owns the machine, the Ticket, human review, approve, abort and the merge request.
 _Avoid_: operator
 
 **Factory**:
-The single local process that serves the planning tools to the Context owner, runs the
-Implementer and the Reviews, keeps job state, notifies the User and serves the Dashboard.
+The local process (`sf serve`) that serves the planning tools to the Context owner, starts the
+Jobs and their Runners, keeps job state, notifies the User and serves the Dashboard.
 _Avoid_: bridge, mediator, supervisor
+
+**Runner**:
+The process of one Job (`sf run`), detached from the Factory, that runs the Job's Implementer
+turns, its Reviews and the Gate and writes the Job's state, so a restart of the Factory leaves the
+Job running. One per Job; it ends when the Job waits for the User or has ended.
+_Avoid_: worker, daemon, job process
 
 ### Work
 

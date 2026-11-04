@@ -139,14 +139,15 @@ export async function sendNotification(notification: Notification, config: Notif
 
 // The listener behind Execution's onStateChange: notifies for the user's states and records each
 // failed channel in the job's events.jsonl. Iterations (awaiting_review) are silent unless
-// SF_NOTIFY_ITERATIONS=on.
-export function stateNotifier(config: NotifyConfig, jobs: JobStore): (job: Job, from: JobState | null, lines?: string[]) => void {
+// SF_NOTIFY_ITERATIONS=on. The promise settles when every channel is done (a job's runner waits for
+// it before it exits); it never rejects.
+export function stateNotifier(config: NotifyConfig, jobs: JobStore): (job: Job, from: JobState | null, lines?: string[]) => Promise<void> {
   const states = notifiedStates(config);
   return (job, _from, lines) => {
     if (!states.includes(job.state)) {
-      return;
+      return Promise.resolve();
     }
-    void (async () => {
+    return (async () => {
       for (const result of await sendNotification(jobNotification(job, lines), config)) {
         if (result.status === 'failed') {
           await jobs.appendEvent(job.workspace, job.ticket, {

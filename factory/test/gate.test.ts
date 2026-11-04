@@ -508,15 +508,22 @@ test('abort during a gate run kills Codex; its outcome is never applied', async 
   }
 });
 
-test('sf serve stopped during a gate run kills Codex; the next sf serve starts the gate of the clean iteration again', async () => {
+test('sf serve stopped during a gate run leaves the runner and Codex to finish, and a restarted one leaves them alone (SF-042); a runner killed during the gate: the next sf serve ends its Codex and runs the gate again', async () => {
   const env = await newEnv('gate-restart', gateEnv());
   const repo = await newRepo(env, 'gate-restart-repo', false);
   await putTask(env, repo, 'R-1', 'Restart');
+  await putTask(env, repo, 'R-2', 'Killed');
   await script(env, [
     { write: { 'a.txt': 'a\n' } },
     { write: { '.software-factory/R-1.mr.md': mrText('feat(R-1): Restart') }, text: 'prepared' },
+    { write: { 'b.txt': 'b\n' } },
+    { write: { '.software-factory/R-2.mr.md': mrText('feat(R-2): Killed') }, text: 'prepared' },
   ]);
-  await codexScript(env, [{ delayMs: 10_000 }, { output: GATE_CLEAN }]);
+  await codexScript(env, [{ delayMs: 5_000, output: GATE_CLEAN }, { delayMs: 30_000 }, { output: GATE_CLEAN }]);
+  const jobs = new JobStore(env.state);
+  const lock = (ticket: string): string => join(env.state, 'jobs', 'app', ticket, 'runner.pid');
+
+  // sf serve stops while the gate of R-1 runs: the runner goes on, Clean prepares the branch.
   let served = await serve(env);
   try {
     await call(served, 'start', { workspace: 'app', ticket: 'R-1' });
@@ -525,12 +532,39 @@ test('sf serve stopped during a gate run kills Codex; the next sf serve starts t
     await stop(served);
   }
   const [first] = await codexLog(env);
-  await until('Codex to end with sf serve', async () => !alive(first!.pid));
+  assert.ok(alive(first!.pid), 'Codex outlives sf serve');
+  // A restarted sf serve leaves the review of the live runner alone: no second gate run.
   served = await serve(env);
   try {
+    assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'R-1' })).state, 'awaiting_review');
     await waitFor(served, 'R-1', 'ready_for_human_review', 1);
-    assert.equal((await codexLog(env)).length, 2);
-    assert.equal((await reviewLog(env)).length, 1);
+  } finally {
+    await stop(served);
+  }
+  assert.equal((await codexLog(env)).length, 1);
+  assert.equal((await jobs.readGate('app', 'R-1', 1) as { verdict?: string }).verdict, 'clean');
+  await until('the runner of R-1 to end', async () => !(await exists(lock('R-1'))));
+
+  // The runner of R-2 is killed during its gate, Codex with it: the next sf serve starts the gate again.
+  served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'R-2' });
+    await until('the gate of R-2 to run', async () => (await codexLog(env)).length === 2);
+  } finally {
+    await stop(served);
+  }
+  const runner = Number((await readFile(lock('R-2'), 'utf8')).trim().split(' ')[0]);
+  const second = (await codexLog(env))[1]!;
+  process.kill(runner, 'SIGKILL');
+  await until('the runner to end', async () => !alive(runner));
+  assert.ok(alive(second.pid), 'Codex is left behind by the killed runner');
+  assert.equal((await jobs.read('app', 'R-2'))!.state, 'awaiting_review');
+  served = await serve(env);
+  try {
+    await until('the Codex of the killed runner to end', async () => !alive(second.pid));
+    await waitFor(served, 'R-2', 'ready_for_human_review', 1);
+    assert.equal((await codexLog(env)).length, 3);
+    assert.equal((await reviewLog(env)).length, 2);
   } finally {
     await stop(served);
   }

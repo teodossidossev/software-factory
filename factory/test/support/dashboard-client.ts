@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { get, request, type IncomingMessage } from 'node:http';
 import type { DashboardActions, DashboardReviewers, DashboardSetup } from '../../src/dashboard.js';
 import { FactoryError } from '../../src/errors.js';
-import type { EventInput, SubscriptionSummary, TestOutcome } from '../../src/events.js';
+import type { EventInput, NudgeOutcome, SubscriptionSummary, TestOutcome } from '../../src/events.js';
 import type { ArchivedRow, TicketInput, TicketRow, WorkspaceRow } from '../../src/setup.js';
 
 export const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'";
@@ -179,6 +179,10 @@ export interface FakeReviewers extends DashboardReviewers {
   tests: string[];
   // What the next test answers: a TestOutcome, an error to throw, or a function.
   answer: unknown;
+  // The jobs nudge was called with ("<workspace>/<ticket>@<state>"), and what it answers: a
+  // NudgeOutcome, an error to throw, or a function; by default every row is queued.
+  nudges: string[];
+  nudgeAnswer: unknown;
   // Replaces the subscriptions and tells the listeners, as Events does after a change.
   set(rows: SubscriptionSummary[]): void;
   listeners(): number;
@@ -194,7 +198,17 @@ export function fakeReviewers(rows: SubscriptionSummary[] = []): FakeReviewers {
     rows,
     tests: [],
     answer: undefined,
+    nudges: [],
+    nudgeAnswer: undefined,
     subscriptions: () => fake.rows,
+    async nudge(job) {
+      fake.nudges.push(`${job.workspace}/${job.ticket}@${job.state}`);
+      const value = typeof fake.nudgeAnswer === 'function' ? await (fake.nudgeAnswer as () => unknown)() : fake.nudgeAnswer;
+      if (value instanceof Error) {
+        throw value;
+      }
+      return (value ?? { queued: fake.rows.map((row) => row.id), pending: [] }) as NudgeOutcome;
+    },
     async test(id) {
       fake.tests.push(id);
       const value = typeof fake.answer === 'function' ? await (fake.answer as () => unknown)() : fake.answer;

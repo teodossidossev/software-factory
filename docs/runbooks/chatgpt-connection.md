@@ -247,7 +247,9 @@ In ChatGPT:
    instruction.
 4. Or in the dashboard (`bin/sf dashboard --open`): the job's Reviewer block says whether the
    ticket is subscribed, shows the same two messages to copy when nobody reviews it, warns about a
-   subscription without a ticket filter and sends the test event.
+   subscription without a ticket filter and sends the test event. While the job is in
+   `awaiting_review`, **Nudge the reviewer** sends that event again: the task runs once more in
+   its conversation and reviews; nothing needs to be typed in ChatGPT.
 
 While a job runs, `sf watch` shows each delivery as `event to <id> attempt <n> delivered: 200` (or
 `failed: <status>`; 5xx and timeouts are retried for about 1 h 13 min). A `410` from ChatGPT ends
@@ -312,7 +314,7 @@ confirmation.
   until you tell it to go on. The event-triggered task's instruction was shortened to checking
   and reporting. Open the task in ChatGPT's Scheduled view and replace its instruction with the
   one `bin/sf ticket <workspace> <ticket> --no-wait` prints (also in the dashboard's Reviewer
-  block); for the iteration already waiting, tell the conversation to review it.
+  block); for the iteration already waiting, press **Nudge the reviewer** on the job's page.
 - **No events arrive.** `bin/sf events list` (is there a subscription for this workspace?), then
   `bin/sf events test <id>`: `blocked_address` or `connection_failed` means this machine cannot
   reach the callback; `410` means ChatGPT dropped the task. `sf watch` shows each attempt.

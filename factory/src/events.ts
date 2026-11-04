@@ -561,6 +561,13 @@ export interface SubscriptionSummary {
   refreshBefore: string;
 }
 
+// A nudge (SF-035): the subscriptions that got the event again, and those that already had one
+// on its way for this iteration (nothing added for them).
+export interface NudgeOutcome {
+  queued: string[];
+  pending: string[];
+}
+
 export interface TestOutcome {
   subscription: string;
   delivered: boolean;
@@ -796,24 +803,46 @@ export class Events {
     if (!FIRING_STATES.includes(job.state) || this.#closed) {
       return;
     }
-    this.#enqueue(job, jobPayload(job, lines)).catch((error: unknown) => console.error(error));
+    this.#enqueue(job, jobPayload(job, lines), job.updated_at).catch((error: unknown) => console.error(error));
   };
+
+  // SF-035: the user's nudge from the dashboard. A job in awaiting_review waits for its reviewer;
+  // the event of that state goes again, now, to every subscription that receives the job's
+  // events, through the same queue and retries as the first. A subscription that still has a
+  // delivery of this iteration on its way gets nothing more. No subscription is a refusal.
+  async nudge(job: Job): Promise<NudgeOutcome> {
+    if (job.state !== 'awaiting_review') {
+      throw new FactoryError('invalid_state', `Only a job in awaiting_review waits for its reviewer; ${job.ticket} is ${job.state}.`);
+    }
+    const outcome = await this.#enqueue(job, jobPayload(job), now(), true);
+    if (outcome.queued.length === 0 && outcome.pending.length === 0) {
+      throw new FactoryError('no_subscription', `No subscription receives the events of ${job.ticket}; sf ticket ${job.workspace} ${job.ticket} sets one up.`);
+    }
+    return outcome;
+  }
 
   // One conversation per ticket (SF-019): when a job is pushed or aborted, the subscriptions
   // filtered on its ticket get the last event and are then removed, so the conversation never
   // fires again. A failed job (a start that did not get going) keeps them: the same conversation
   // starts the ticket again.
-  async #enqueue(job: Job, payload: JobPayload): Promise<void> {
+  // skipPending (a nudge): a subscription with a delivery of this job's iteration still queued
+  // gets no second one.
+  async #enqueue(job: Job, payload: JobPayload, occurredAt: string, skipPending = false): Promise<NudgeOutcome> {
     const ending = job.state === 'pushed' || job.state === 'aborted';
-    await this.#locked(async () => {
+    return this.#locked(async () => {
       const added: QueueEntry[] = [];
+      const pending: string[] = [];
       for (const subscription of this.#active()) {
         if (subscription.event !== EVENT_NAME || !matches(subscription.input, payload)) {
           continue;
         }
+        if (skipPending && this.#queue.some((entry) => entry.subscription === subscription.id && entry.workspace === job.workspace && entry.ticket === job.ticket && entry.iteration === job.iteration)) {
+          pending.push(subscription.id);
+          continue;
+        }
         const own = ending && ownsTicket(subscription.input, job.workspace, job.ticket);
         const eventId = newEventId();
-        const body = envelope(eventId, job.updated_at, payload);
+        const body = envelope(eventId, occurredAt, payload);
         if (Buffer.byteLength(body) > MAX_BODY_BYTES) {
           await this.#log({ workspace: job.workspace, ticket: job.ticket, iteration: job.iteration }, 'event_failed', subscription.id, 0, 'too_large');
           if (own) {
@@ -823,14 +852,16 @@ export class Events {
         }
         added.push({ eventId, subscription: subscription.id, workspace: job.workspace, ticket: job.ticket, iteration: job.iteration, body, attempt: 0, nextAt: now(), ...(own ? { final: true } : {}) });
       }
+      const outcome = { queued: added.map((entry) => entry.subscription), pending };
       if (added.length === 0) {
-        return;
+        return outcome;
       }
       this.#queue = [...this.#queue, ...added];
       await this.#saveQueue();
       for (const entry of added) {
         this.#schedule(entry);
       }
+      return outcome;
     });
   }
 

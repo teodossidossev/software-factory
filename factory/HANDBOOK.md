@@ -35,7 +35,9 @@ their own review, so you drive the cycle through tools:
    check and report leaves every iteration waiting for the user. A subscription without a `ticket`
    filter receives every ticket of the workspace and makes a second review of each; it is for a
    single-job setup only. The event fires when an iteration is published (`awaiting_review`) and
-   on `needs_human`, `ready_for_human_review`, `pushed`, `aborted` and `failed`. When events are
+   on `needs_human`, `ready_for_human_review`, `pushed`, `aborted` and `failed`; the user may send
+   the `awaiting_review` event again from the dashboard when no verdict came: review as for the
+   first. When events are
    not available in the account: `start` and every `request_fix` tell you when to check next;
    create one scheduled task in this conversation that calls `check` on that interval, if none
    exists yet.

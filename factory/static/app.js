@@ -56,6 +56,10 @@ const state = {
   // The test event, per job: "<key>" while its request is out, and the last outcome shown.
   testing: new Set(),
   testOutcomes: new Map(),
+  // The nudge (SF-035), per job: "<key>" while its request is out, and the last outcome with the
+  // iteration it was for (shown only while that iteration still waits for review).
+  nudging: new Set(),
+  nudgeOutcomes: new Map(),
   subscriptions: null,
   // The start screen: the registry and the tickets without a job (null until the stream sends
   // them), whether the section's open state was decided from the first data, the requests out
@@ -249,7 +253,7 @@ function renderHeader(detail) {
 }
 
 // The Reviewer block: who receives this job's events, the messages that set it up when nobody
-// does, and the test event.
+// does, the nudge and the test event.
 function renderReviewer() {
   const detail = state.detail;
   const reviewer = detail?.reviewer;
@@ -292,6 +296,56 @@ function renderReviewer() {
   $('test-event-button').disabled = reviewer.status !== 'subscribed' || sending;
   $('test-event-reason').textContent = reviewer.status === 'subscribed' || sending ? '' : 'needs a subscription filtered on this ticket.';
   renderTestOutcome(state.testOutcomes.get(key) ?? null);
+  renderNudge(detail, reviewer, key);
+}
+
+// The nudge: on while the job waits for review and someone receives its events.
+function renderNudge(detail, reviewer, key) {
+  const waiting = detail.job.state === 'awaiting_review';
+  const nudging = state.nudging.has(key);
+  $('nudge-button').disabled = !waiting || reviewer.status === 'none' || nudging;
+  $('nudge-reason').textContent = nudging ? ''
+    : !waiting ? 'only while the job waits for review.'
+    : reviewer.status === 'none' ? 'needs a subscription that receives this job.' : 'sends the awaiting_review event again.';
+  const outcome = state.nudgeOutcomes.get(key) ?? null;
+  const shown = outcome !== null && (outcome.level === 'pending' || (waiting && outcome.iteration === detail.job.iteration)) ? outcome : null;
+  const node = $('nudge-status');
+  node.className = shown === null ? 'status' : `status ${shown.level}`;
+  node.textContent = shown === null ? '' : shown.text;
+}
+
+// The job's awaiting_review event again, to every subscription that receives it; the answer goes
+// to that job only.
+async function nudgeReviewer() {
+  const key = state.key;
+  const detail = state.detail;
+  if (key === null || detail === null || detail.job.state !== 'awaiting_review' || (detail.reviewer?.status ?? 'none') === 'none' || state.nudging.has(key)) {
+    return;
+  }
+  const iteration = detail.job.iteration;
+  state.nudging.add(key);
+  state.nudgeOutcomes.set(key, { level: 'pending', text: 'Sending…', iteration });
+  renderReviewer();
+  let outcome;
+  try {
+    const result = await post(`api/jobs/${jobPath(key)}/nudge`, {});
+    const data = result !== null && typeof result === 'object' ? result : {};
+    const queued = Array.isArray(data.queued) ? data.queued : [];
+    const pending = Array.isArray(data.pending) ? data.pending : [];
+    const still = pending.length > 0 ? ` Still on its way to ${pending.join(', ')}.` : '';
+    outcome = queued.length > 0
+      ? { level: 'ok', text: `Sent the awaiting_review event of iteration ${iteration} again to ${queued.join(', ')}: the reviewer reviews it in that conversation.${still}` }
+      : { level: 'ok', text: `The event is still on its way to ${pending.join(', ')}; nothing more was sent.` };
+  } catch (error) {
+    outcome = error instanceof ActionError
+      ? { level: 'error', text: `${error.code}: ${error.message}` }
+      : { level: 'error', text: `The nudge failed (${error.message}); it may have been sent.` };
+  }
+  state.nudging.delete(key);
+  state.nudgeOutcomes.set(key, { ...outcome, iteration });
+  if (key === state.key && state.detail !== null) {
+    renderReviewer();
+  }
 }
 
 function renderTestOutcome(outcome) {
@@ -1434,6 +1488,7 @@ function init() {
   $('files-collapse').addEventListener('click', () => setAllExpanded(false));
   $('refresh-button').addEventListener('click', () => void settleUnknown(state.key));
   $('test-event-button').addEventListener('click', () => void sendTestEvent());
+  $('nudge-button').addEventListener('click', () => void nudgeReviewer());
   $('copy-guide').addEventListener('click', () => copySetup('setup-guide'));
   $('copy-instruction').addEventListener('click', () => copySetup('setup-instruction'));
   $('say-input').addEventListener('input', () => {

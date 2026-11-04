@@ -1,7 +1,9 @@
 // What `sf status` derives for display from a Job and its published iterations: the recorded cost
-// (an estimate of the API-equivalent price, not a charge) and the elapsed wall-clock time. Nothing here is persisted; the Job schema and meta.json stay as
-// they are.
+// (an estimate of the API-equivalent price, not a charge), the elapsed wall-clock time and the
+// last state change in local time (SINCE). Nothing here is persisted; the Job schema and
+// meta.json stay as they are.
 import { type Job, type JobStore, TERMINAL_STATES } from './jobs.js';
+import { localTime } from './local-time.js';
 
 export interface StatusRow {
   job: Job;
@@ -9,6 +11,8 @@ export interface StatusRow {
   cost: string;
   // The elapsed time as HH:MM:SS.
   elapsed: string;
+  // The last state change in local time, shown as SINCE.
+  since: string;
 }
 
 // Whole seconds from created_at to now, or to updated_at (the last state change) once the job is
@@ -27,6 +31,12 @@ export function formatElapsed(seconds: number): string {
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secondsLeft).padStart(2, '0')}`;
 }
 
+// SINCE: updated_at in local time (SF-049), "YYYY-MM-DD HH:MM:SS"; empty when it is missing or
+// does not parse, never the stored value.
+export function formatSince(ts: unknown): string {
+  return localTime(ts) ?? '';
+}
+
 export function formatCost(cost: number | undefined): string {
   return cost === undefined ? 'unknown' : cost.toFixed(4);
 }
@@ -35,7 +45,7 @@ export function formatCost(cost: number | undefined): string {
 export async function statusRows(jobs: JobStore, list: Job[], now: Date): Promise<StatusRow[]> {
   const rows: StatusRow[] = [];
   for (const job of list) {
-    rows.push({ job, cost: formatCost(await jobs.recordedCost(job.workspace, job.ticket, job.iteration)), elapsed: formatElapsed(elapsedSeconds(job, now)) });
+    rows.push({ job, cost: formatCost(await jobs.recordedCost(job.workspace, job.ticket, job.iteration)), elapsed: formatElapsed(elapsedSeconds(job, now)), since: formatSince(job.updated_at) });
   }
   return rows;
 }

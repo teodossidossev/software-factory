@@ -72,6 +72,8 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
     SF_GATE: 'off',
     // The job steps of call() and refused() through the socket.
     SF_TEST_HOOKS: 'on',
+    // The zone of the times sf prints: the test file's own (SF-049), else the machine's.
+    ...(process.env.TZ !== undefined ? { TZ: process.env.TZ } : {}),
     ...env.extra,
   };
 }

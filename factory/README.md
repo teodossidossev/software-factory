@@ -58,9 +58,9 @@ the servers, exit code 0.
 ### sf status
 
 One line per current job (archived ones excluded), sorted by workspace and ticket: `WORKSPACE`,
-`TICKET`, `STATE`, `ITER` (published iterations), `BRANCH`, `SINCE` (the last state change),
-`EST_USD`, `ELAPSED` and `ERROR` (the error code; `sf status <workspace> <ticket>` prints the
-message below the table). Both work without `sf serve`; they read the state directory.
+`TICKET`, `STATE`, `ITER` (published iterations), `BRANCH`, `SINCE` (the last state change, in
+local time), `EST_USD`, `ELAPSED` and `ERROR` (the error code; `sf status <workspace> <ticket>`
+prints the message below the table). Both work without `sf serve`; they read the state directory.
 
 - `EST_USD` is the recorded cost, an estimate of the API-equivalent price and not a charge: the
   session usually runs on the user's Claude plan. It is the sum of `cost_usd` over
@@ -584,6 +584,11 @@ jobs/<workspace>/<ticket>.<timestamp>/   # an archived earlier job
 
 `iteration` in `job.json` counts published iterations; `updated_at` is the time of the last state
 change (`since` in `check` and `SINCE` in `sf status`).
+
+Every stored time is ISO 8601 UTC with `Z`. What the factory shows is local time (SF-049):
+`sf watch`, the dashboard's live log and `SINCE` in `sf status` in the zone the `sf` process runs
+in (`TZ`), the rest of the dashboard in the browser's (`YYYY-MM-DD HH:MM:SS`, the stored UTC value
+on hover).
 
 ## Dashboard
 

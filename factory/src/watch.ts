@@ -4,6 +4,7 @@ import { open } from 'node:fs/promises';
 import { StringDecoder } from 'node:string_decoder';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { FactoryError } from './errors.js';
+import { localTime } from './local-time.js';
 
 const INPUT_CHARS = 120;
 const LINE_CHARS = 200;
@@ -71,7 +72,7 @@ export function formatEvent(raw: string): string[] {
 }
 
 function recordLines(record: Record<string, unknown>): string[] {
-  const time = typeof record.ts === 'string' ? record.ts.slice(11, 19) : '--:--:--';
+  const time = localTime(record.ts)?.slice(11) ?? '--:--:--';
   const prefix = `${time} [${String(record.iteration)}]`;
   if (typeof record.prompt === 'string') {
     // The factory's fixed rules block after the prompt is the same every time; it is not shown.

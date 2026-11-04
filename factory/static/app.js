@@ -119,7 +119,27 @@ function el(tag, className, text) {
 
 const keyOf = (job) => `${job.workspace}/${job.ticket}`;
 const jobPath = (key) => key.split('/').map(encodeURIComponent).join('/');
-const shortTime = (ts) => (typeof ts === 'string' ? ts.replace('T', ' ').replace(/\.\d+Z$/, 'Z') : '');
+// "2026-11-04 12:14:25" of a stored timestamp (ISO 8601 UTC) in the browser's local time (SF-049);
+// empty when it is missing or does not parse.
+function localTime(ts) {
+  const date = typeof ts === 'string' ? new Date(ts) : null;
+  if (date === null || Number.isNaN(date.getTime())) {
+    return '';
+  }
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+// A <time> of a stored timestamp: the local time as text, the exact UTC moment in its datetime
+// and its title, so hovering shows it.
+function timeEl(ts) {
+  const text = localTime(ts);
+  const node = el('time', '', text);
+  if (text !== '') {
+    node.setAttribute('datetime', ts);
+    node.setAttribute('title', ts);
+  }
+  return node;
+}
 const pendingId = (action, key) => `${action}\n${key}`;
 
 async function getText(path) {
@@ -193,8 +213,8 @@ function fileBadges(job) {
 const verdictOf = (record) => (record === null || record === undefined ? null : typeof record.error === 'string' ? 'failed' : record.verdict);
 const iterationOf = (detail, number) => detail.iterations.find((iteration) => iteration.number === number) ?? null;
 const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
-// "10:05" of a timestamp.
-const clock = (ts) => (typeof ts === 'string' ? ts.slice(11, 16) : '');
+// "10:05" of a timestamp, local time.
+const clock = (ts) => localTime(ts).slice(11, 16);
 
 // The job of a detail with what the board adds to a card: the Claude verdict of the last
 // iteration and its end, which tell the Claude review from the Codex gate in awaiting_review.
@@ -281,18 +301,21 @@ function jobSteps(detail) {
   return STEPS.map((name, index) => {
     let status = segmentStatus(flow, index);
     let caption = '';
+    // The stored time the caption's "since" is of, shown exactly on hover.
+    let at = null;
     if (index === 2 && detail.gate === false && status !== 'current' && status !== 'halted') {
       status = 'off';
       caption = 'off';
     } else if (status === 'current') {
       const from = index === 2 && job.state === 'awaiting_review' ? (job.review_ended_at ?? job.updated_at) : job.updated_at;
       caption = `since ${clock(from)} (${since(from)})`;
+      at = from;
     } else if (status === 'halted') {
       caption = job.error?.code ?? job.state;
     } else if (status === 'done' && index === 2 && overridden) {
       caption = 'overridden by you';
     }
-    return { name, status, caption };
+    return { name, status, caption, at };
   });
 }
 
@@ -304,7 +327,11 @@ function renderStepper(detail) {
       item.setAttribute('aria-current', 'step');
     }
     const knob = step.status === 'done' ? '✓' : step.status === 'halted' ? '!' : String(index + 1);
-    item.append(el('span', 'knob', knob), el('span', 'step-name', step.name), el('span', 'step-caption', step.caption));
+    const caption = el('span', 'step-caption', step.caption);
+    if (typeof step.at === 'string') {
+      caption.setAttribute('title', step.at);
+    }
+    item.append(el('span', 'knob', knob), el('span', 'step-name', step.name), caption);
     return item;
   }));
   const job = detail.job;
@@ -425,7 +452,7 @@ function renderFacts(detail) {
     ['Gate tokens', String(job.gate_tokens ?? 0)],
     // An estimate of the API-equivalent price, not a charge: the session usually runs on a Claude plan.
     ['Estimated cost', costs.length > 0 ? `est. $${costs.reduce((sum, cost) => sum + cost, 0).toFixed(4)}` : 'n/a'],
-    ['Updated', shortTime(job.updated_at)],
+    ['Updated', timeEl(job.updated_at)],
     ['Worktree', typeof job.worktree === 'string' ? job.worktree : (job.state === 'ready_for_human_review' ? 'none: the branch is in the checkout' : 'none')],
   ];
   $('job-facts').replaceChildren(...rows.map(([term, value]) => {
@@ -434,7 +461,9 @@ function renderFacts(detail) {
     if (term === 'Estimated cost') {
       dt.setAttribute('title', 'An estimate of the API-equivalent price, not a charge');
     }
-    row.append(dt, el('dd', '', value));
+    const dd = el('dd');
+    dd.append(value);
+    row.append(dt, dd);
     return row;
   }));
 }
@@ -443,8 +472,7 @@ function renderFacts(detail) {
 function renderHistory(history) {
   $('history').replaceChildren(...history.map((entry) => {
     const item = el('li');
-    item.append(el('time', '', clock(entry.ts)));
-    item.setAttribute('title', shortTime(entry.ts));
+    item.append(timeEl(entry.ts));
     if (entry.event === 'gate_overridden') {
       item.className = 'history-override';
       item.append(document.createTextNode(`gate overridden by you (${entry.code}): ${plural(entry.unapplied, 'Codex item')} not applied`));
@@ -563,8 +591,8 @@ function renderChanges(detail) {
     return;
   }
   const cost = typeof meta.cost_usd === 'number' ? `$${meta.cost_usd.toFixed(4)}` : 'n/a';
-  $('iteration-meta').textContent = `${shortTime(meta.started_at)} – ${shortTime(meta.ended_at)}, cost ${cost}, ` +
-    `${meta.changed_files} changed file(s), ${meta.denials} denial(s)${meta.patch_truncated ? ', patch truncated' : ''}`;
+  $('iteration-meta').replaceChildren(timeEl(meta.started_at), ' – ', timeEl(meta.ended_at), `, cost ${cost}, ` +
+    `${meta.changed_files} changed file(s), ${meta.denials} denial(s)${meta.patch_truncated ? ', patch truncated' : ''}`);
   renderFiles(meta);
 }
 
@@ -854,7 +882,9 @@ function renderReviews(detail) {
     row.append(pair);
     const override = iteration.gate_override;
     if (override !== null && override !== undefined) {
-      row.append(el('p', 'review-override', `You accepted this iteration over the gate (${override.code}) at ${shortTime(override.at)}.`));
+      const accepted = el('p', 'review-override', `You accepted this iteration over the gate (${override.code}) at `);
+      accepted.append(timeEl(override.at), '.');
+      row.append(accepted);
     }
     return row;
   }));

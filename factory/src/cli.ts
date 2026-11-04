@@ -53,6 +53,7 @@ Notes:
   EST_USD: an estimate of the API-equivalent price, not a charge (the session usually runs on your Claude plan):
            cost_usd of the published iterations summed, four decimals; 0.0000 before the first one, unknown when one has no usable cost.
            A running iteration or MR preparation adds nothing until its iteration is published.
+  SINCE:   the last state change in local time (the stored times are UTC).
   ELAPSED: wall-clock time since the job was created, waiting included; stops at the last state change once pushed, aborted or failed.
   dashboard --open: Linux with xdg-open; waits for the launcher at most 10 s; on a launcher failure exits 1 and leaves the printed URL to open by hand.
 Exit codes: 0 ok, 1 error, 2 usage.`;
@@ -570,7 +571,7 @@ async function info(args: string[]): Promise<void> {
 function table(rows: StatusRow[]): string {
   const cells = [
     ['WORKSPACE', 'TICKET', 'STATE', 'ITER', 'BRANCH', 'SINCE', 'EST_USD', 'ELAPSED', 'ERROR'],
-    ...rows.map(({ job, cost, elapsed }) => [job.workspace, job.ticket, job.state, String(job.iteration), job.branch, job.updated_at, cost, elapsed, job.error?.code ?? '']),
+    ...rows.map(({ job, cost, elapsed, since }) => [job.workspace, job.ticket, job.state, String(job.iteration), job.branch, since, cost, elapsed, job.error?.code ?? '']),
   ];
   const widths = cells[0]!.map((_, column) => Math.max(...cells.map((row) => row[column]!.length)));
   return cells.map((row) => row.map((cell, column) => cell.padEnd(widths[column]!)).join('  ').trimEnd()).join('\n');

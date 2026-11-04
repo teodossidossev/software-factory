@@ -103,6 +103,13 @@ test('the strict schema: no $schema, every object has additionalProperties false
   assert.deepEqual(gateArgs({ cwd: '/w', dir: '/d', model: 'm' }).slice(-3), ['--model', 'm', '-']);
 });
 
+test('the gate runs without the user\'s Codex memories: the feature off and no memories injected', () => {
+  const args = gateArgs({ cwd: '/w', dir: '/d', model: undefined });
+  const pairs = args.slice(0, -1).map((arg, index) => `${arg} ${args[index + 1]}`);
+  assert.ok(pairs.includes('--disable memories'), args.join(' '));
+  assert.ok(pairs.includes('-c memories.use_memories=false'), args.join(' '));
+});
+
 test('clean: Claude, then the gate in a read-only Codex in the worktree, then Clean; the argv, the prompt, the environment, gate.json, check, sf watch, sf info and the dashboard', async () => {
   const env = await newEnv('gate-clean', gateEnv());
   const repo = await newRepo(env, 'gate-clean-repo', false);
@@ -126,12 +133,12 @@ test('clean: Claude, then the gate in a read-only Codex in the worktree, then Cl
     ]);
     assert.equal((await reviewLog(env)).length, 1);
 
-    // The call: exec, read-only, in the worktree, the schema and output files in the iteration's
-    // directory, JSONL, no --model, the prompt on stdin; no SF_* variable.
+    // The call: exec, read-only, without the user's memories, in the worktree, the schema and output
+    // files in the iteration's directory, JSONL, no --model, the prompt on stdin; no SF_* variable.
     const [run] = await codexLog(env);
     const dir = iterationDir(env, 'G-1', 1);
     assert.deepEqual(run!.argv, [
-      'exec', '--ephemeral', '--sandbox', 'read-only', '--cd', worktreeOf(env, 'G-1'),
+      'exec', '--ephemeral', '--sandbox', 'read-only', '--disable', 'memories', '-c', 'memories.use_memories=false', '--cd', worktreeOf(env, 'G-1'),
       '--output-schema', join(dir, 'gate-schema.json'), '--output-last-message', join(dir, 'gate-output.json'), '--json', '-',
     ]);
     assert.equal(run!.cwd, worktreeOf(env, 'G-1'));

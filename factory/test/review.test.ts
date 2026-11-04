@@ -7,11 +7,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFile, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
 import { handbookSection } from '../src/prompts.js';
-import { REVIEW_DENIED_TOOLS, REVIEW_SCHEMA } from '../src/review.js';
+import { REVIEW_DENIED_TOOLS, REVIEW_SCHEMA, reviewSessionOptions } from '../src/review.js';
 import { loadHandbook } from '../src/server.js';
 import { act, fetchRaw } from './support/dashboard-client.js';
 import { call, type Env, FAKE, fakeLog, git, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor } from './support/harness.js';
@@ -49,6 +49,26 @@ async function exists(path: string): Promise<boolean> {
 async function eventsOf(env: Env, ticket: string): Promise<Array<Record<string, unknown>>> {
   return (await readFile(join(env.state, 'jobs', 'app', ticket, 'events.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
 }
+
+test('the review session sees the repository\'s settings and instructions only: no user settings, no auto-memory, no instruction file above the worktree', () => {
+  const abortController = new AbortController();
+  const cwd = '/home/u/state/worktrees/app/R-1';
+  const options = reviewSessionOptions({ cwd, claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 7, }, abortController);
+  assert.equal(options.cwd, cwd);
+  assert.deepEqual(options.settingSources, ['project']);
+  assert.equal(options.env?.CLAUDE_CODE_DISABLE_AUTO_MEMORY, '1');
+  const excludes = (options.settings as { claudeMdExcludes?: string[] }).claudeMdExcludes ?? [];
+  for (const dir of ['/home/u/state/worktrees/app', '/home/u/state/worktrees', '/home/u/state', '/home/u', '/home']) {
+    for (const file of ['CLAUDE.md', '.claude/CLAUDE.md', 'AGENTS.md', '.claude/AGENTS.md', '.claude/rules/**']) {
+      assert.ok(excludes.includes(`${dir}/${file}`), `${dir}/${file} not in ${excludes.join(', ')}`);
+    }
+  }
+  // The worktree's own files stay.
+  assert.ok(!excludes.some((pattern) => pattern.startsWith(`${cwd}/`)), excludes.join(', '));
+  // A glob character in a directory name is matched literally.
+  const special = reviewSessionOptions({ cwd: '/srv/a (b)/w', claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 7, }, abortController);
+  assert.ok((special.settings as { claudeMdExcludes: string[] }).claudeMdExcludes.includes('/srv/a \\(b\\)/CLAUDE.md'));
+});
 
 test('fix, then clean: the Fix section from the items, the next iteration, Clean; the read-only argv, the prompt, review.json, check, sf watch, sf status and the dashboard', async () => {
   const env = await newEnv('review-cycle', { SF_REVIEW: 'on', SF_REVIEW_MAX_TURNS: '7', SF_REVIEW_MODEL: 'fake-reviewer' });
@@ -90,7 +110,14 @@ test('fix, then clean: the Fix section from the items, the next iteration, Clean
       assert.ok(!entry.argv.some((arg) => arg.startsWith('--resume')), entry.argv.join(' '));
       assert.ok(!turns.some((turn) => turn.sessionId === entry.sessionId));
       assert.ok(!entry.env.some((name) => name.startsWith('SF_')));
+      // The repository's settings and instructions only: no user settings, no auto-memory.
+      assert.equal(option(entry.argv, 'setting-sources'), 'project');
+      assert.ok(entry.env.includes('CLAUDE_CODE_DISABLE_AUTO_MEMORY'), entry.env.join(','));
+      const settings = JSON.parse(entry.argv[entry.argv.indexOf('--settings') + 1] ?? '{}') as { claudeMdExcludes?: string[] };
+      assert.ok(settings.claudeMdExcludes?.includes(join(dirname(entry.cwd), 'CLAUDE.md')), entry.argv.join(' '));
     }
+    // The Implementer's session keeps the user's settings.
+    assert.ok(turns.every((turn) => option(turn.argv, 'setting-sources') === 'user,project'));
     assert.equal(REVIEW_DENIED_TOOLS.filter((tool) => ['Bash', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task', 'Agent', 'Read(**/.env)'].includes(tool)).length, 9);
     const [first, second] = reviews.map((entry) => entry.prompt);
     assert.match(first!, /^Code review of iteration 1 of ticket R-1\. /);

@@ -2,8 +2,10 @@
 // fake Claude, whose runs with --json-schema are reviews scripted by $HOME/fake-review.json: a fix
 // verdict becomes ## Fix N and the next iteration, a clean one runs Clean, undeclared sensitive
 // paths, failures, SF_REVIEW=off and the review at serve start, abort during a review, the limit on
-// Fix sections, and what check, sf watch, sf status and the dashboard show.
+// Fix sections, and what check, sf watch, sf status and the dashboard show. Then the schema the CLI
+// accepts (the fake refuses one it would not) and the retry of a failed review (SF-044).
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -11,8 +13,8 @@ import { JobStore } from '../src/jobs.js';
 import { handbookSection } from '../src/prompts.js';
 import { REVIEW_DENIED_TOOLS, REVIEW_SCHEMA } from '../src/review.js';
 import { loadHandbook } from '../src/server.js';
-import { fetchRaw } from './support/dashboard-client.js';
-import { call, type Env, fakeLog, git, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor } from './support/harness.js';
+import { act, fetchRaw } from './support/dashboard-client.js';
+import { call, type Env, FAKE, fakeLog, git, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor } from './support/harness.js';
 
 const FIX = {
   verdict: 'fix',
@@ -261,6 +263,94 @@ test('SF_MAX_ITERATIONS=1 counts Fix sections: an sf say turn and one Fix are al
     // Iteration 1's review was cancelled by the next one, or recorded as ignored; never applied.
     const reviews = (await eventsOf(env, 'L-1')).filter((record) => record.type === 'review');
     assert.deepEqual(reviews.filter((record) => record.ignored !== true).map((record) => record.iteration), [2, 3]);
+  } finally {
+    await stop(served);
+  }
+});
+
+test('the review schema is draft-07 without $schema; the fake refuses a $schema the CLI does not know, as the CLI does', async () => {
+  assert.equal(REVIEW_SCHEMA.$schema, undefined);
+  assert.doesNotMatch(JSON.stringify(REVIEW_SCHEMA), /2020-12|prefixItems|\$defs|unevaluated|dependentRequired|dependentSchemas/);
+  assert.deepEqual(REVIEW_SCHEMA.required, ['verdict', 'summary', 'items', 'accepted_sensitive']);
+  assert.equal(REVIEW_SCHEMA.additionalProperties, false);
+  const env = await newEnv('review-schema');
+  const runFake = (schema: Record<string, unknown>): { status: number | null; stderr: string } =>
+    spawnSync(process.execPath, [FAKE, '--json-schema', JSON.stringify(schema)], { env: { PATH: process.env.PATH, HOME: env.home }, stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8' });
+  const refused = runFake({ ...REVIEW_SCHEMA, $schema: 'https://json-schema.org/draft/2020-12/schema' });
+  assert.deepEqual([refused.status, refused.stderr], [1, 'Error: --json-schema is not a valid JSON Schema: no schema with key or ref "https://json-schema.org/draft/2020-12/schema"\n']);
+  for (const schema of [REVIEW_SCHEMA, { ...REVIEW_SCHEMA, $schema: 'http://json-schema.org/draft-07/schema#' }]) {
+    const accepted = runFake(schema);
+    assert.deepEqual([accepted.status, accepted.stderr], [0, '']);
+  }
+});
+
+test('retry a failed review: sf review and the dashboard put the job back to awaiting_review and review the same iteration again; refused in other states and with the review off', async () => {
+  const env = await newEnv('review-retry', { SF_REVIEW: 'on' });
+  const repo = await newRepo(env, 'review-retry-repo', false);
+  await putTask(env, repo, 'R-2', 'Greet the reader');
+  await script(env, [
+    { write: { 'README.md': 'hello world\n' }, text: 'Report of iteration 1' },
+    { write: { 'README.md': 'hello reader\n' }, text: 'Report of iteration 2' },
+    { write: { '.software-factory/R-2.mr.md': mrText('feat(R-2): Greet the reader') }, text: 'prepared' },
+  ]);
+  await reviewScript(env, [{ subtype: 'error_max_turns' }, { noOutput: true }, { output: FIX }, { output: CLEAN }]);
+  const jobs = new JobStore(env.state);
+  let served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'R-2' });
+    const failed = await waitFor(served, 'R-2', 'needs_human', 1);
+    assert.equal(failed.error.code, 'review_failed');
+  } finally {
+    await stop(served);
+  }
+
+  // With the review off nothing would review it: refused, the job as it was.
+  env.extra = { SF_REVIEW: 'off' };
+  served = await serve(env);
+  try {
+    const off = await runCli(env, ['review', 'app', 'R-2']);
+    assert.equal(off.code, 1);
+    assert.match(off.stderr, /The Claude review is off \(SF_REVIEW=off\)/);
+    assert.equal((await jobs.read('app', 'R-2'))!.state, 'needs_human');
+  } finally {
+    await stop(served);
+  }
+
+  env.extra = { SF_REVIEW: 'on' };
+  served = await serve(env);
+  try {
+    // sf review: the same iteration, the error cleared; the second review fails too.
+    const retried = await runCli(env, ['review', 'app', 'R-2']);
+    assert.equal(retried.code, 0, retried.stderr);
+    assert.match(retried.stdout, /^state: awaiting_review\niteration: 1$/m);
+    const again = await waitFor(served, 'R-2', 'needs_human', 1);
+    assert.equal(again.error.message, 'The review returned no structured output.');
+    assert.deepEqual(await jobs.readReview('app', 'R-2', 1), { reviewer: 'claude', error: again.error.message });
+
+    // The dashboard's route: the third review's fix starts iteration 2, whose review is clean.
+    const reply = await act(served.dashboard!, 'api/jobs/app/R-2/review', {});
+    assert.equal(reply.status, 200, reply.body);
+    assert.deepEqual(JSON.parse(reply.body).result, { state: 'awaiting_review', iteration: 1 });
+    await waitFor(served, 'R-2', 'ready_for_human_review', 2);
+    assert.equal(await taskFile(repo, 'R-2'), `${task('R-2', 'Greet the reader')}\n\n${FIX_SECTION}`);
+    const recorded = await jobs.readReview('app', 'R-2', 1);
+    assert.ok(recorded !== undefined && 'verdict' in recorded && recorded.verdict === 'fix');
+    assert.equal((await reviewLog(env)).length, 4);
+    assert.deepEqual((await reviewLog(env)).map((entry) => entry.prompt.split('\n')[0]), [1, 1, 1, 2].map((n) => `Code review of iteration ${n} of ticket R-2. You review; you change nothing.`));
+    const events = await eventsOf(env, 'R-2');
+    assert.deepEqual(events.filter((record) => typeof record.type === 'string' && record.type.startsWith('review')).map((record) => [record.iteration, record.type, record.verdict]), [
+      [1, 'review_failed', undefined], [1, 'review_failed', undefined], [1, 'review', 'fix'], [2, 'review', 'clean'],
+    ]);
+    const retries = events.filter((record) => (record.state as { from?: string } | undefined)?.from === 'needs_human');
+    assert.deepEqual(retries.map((record) => [record.iteration, (record.state as { to: string }).to, 'error' in (record.state as object)]), [[1, 'awaiting_review', false], [1, 'awaiting_review', false]]);
+
+    // Any other state is refused, by sf review and by the route.
+    const ready = await runCli(env, ['review', 'app', 'R-2']);
+    assert.equal(ready.code, 1);
+    assert.match(ready.stderr, /sf review needs needs_human after a failed review \(review_failed\); the job is ready_for_human_review\./);
+    const refusedRoute = await act(served.dashboard!, 'api/jobs/app/R-2/review', {});
+    assert.deepEqual([refusedRoute.status, JSON.parse(refusedRoute.body).error.code], [409, 'invalid_state']);
+    assert.equal((await reviewLog(env)).length, 4);
   } finally {
     await stop(served);
   }

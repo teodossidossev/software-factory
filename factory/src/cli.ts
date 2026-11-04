@@ -1,5 +1,5 @@
 // The sf command: `sf serve`, `sf up` (serve, the tunnel and the browser), `sf workspace
-// add|list|remove`, `sf start|say|approve|abort|reset` (through the socket of sf serve),
+// add|list|remove`, `sf start|say|review|approve|abort|reset` (through the socket of sf serve),
 // `sf status|watch|dashboard` (reading the state directory directly), `sf events list|remove|test`
 // (through the socket), `sf notify-test` and `sf auth-test` (verifying a token from stdin without
 // the server).
@@ -37,6 +37,7 @@ const USAGE = `Usage:
   sf workspace remove <name>                            Unregister a workspace
   sf start <workspace> <ticket>                         Start the job for .software-factory/<ticket>.md in a worktree of its own (up to SF_MAX_JOBS per workspace)
   sf say <workspace> <ticket> <message...>              Send a message into the job's Implementer session
+  sf review <workspace> <ticket>                        Retry a failed Claude review (needs_human with review_failed) of the last iteration
   sf status [<workspace> <ticket>]                      Show one job or all jobs: state, iterations, estimated cost, elapsed time
   sf watch <workspace> <ticket> [--once]                Show the session live (Ctrl+C stops)
   sf approve <workspace> <ticket> [--as-is]             Push the branch prepared at Clean; --as-is pushes it even if its tip was edited by hand
@@ -130,6 +131,9 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     if (command === 'say') {
       return execution.say(workspace, ticket, words.join(' '));
     }
+    if (command === 'review' && words.length === 0) {
+      return execution.retryReview(workspace, ticket);
+    }
     if (command === 'approve' && (words.length === 0 || (words.length === 1 && words[0] === '--as-is'))) {
       return execution.approve(workspace, ticket, words.length === 1);
     }
@@ -152,9 +156,9 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   }
   try {
     if (dashboardOn()) {
-      // The dashboard's actions (DashboardActions: approve, abort, say and archiveFinished) run on
-      // the same Execution as the socket commands; its reviewers are the subscriptions of the same
-      // Events.
+      // The dashboard's actions (DashboardActions: approve, abort, say, retryReview and
+      // archiveFinished) run on the same Execution as the socket commands; its reviewers are the
+      // subscriptions of the same Events.
       dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, events, setup);
     } else {
       await removeToken(config.stateDir);
@@ -730,6 +734,13 @@ async function main(argv: string[]): Promise<void> {
       throw new UsageError('start needs <workspace> <ticket>.');
     }
     await viaServer('start', checkJob(rest, 'start'));
+    return;
+  }
+  if (command === 'review') {
+    if (rest.length !== 2) {
+      throw new UsageError('review needs <workspace> <ticket>.');
+    }
+    await viaServer('review', checkJob(rest, 'review'));
     return;
   }
   if (command === 'approve') {

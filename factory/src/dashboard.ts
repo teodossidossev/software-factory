@@ -1,6 +1,7 @@
 // The Dashboard: a second loopback HTTP listener with the static page, JSON endpoints, one
-// server-sent event stream per open page and, since version 2, the User's actions approve, abort
-// and say as POST endpoints. Every path starts with /d/<token>/; anything else is an empty 404.
+// server-sent event stream per open page and, since version 2, the User's actions approve, abort,
+// say and the retry of a failed review (SF-044) as POST endpoints. Every path starts with
+// /d/<token>/; anything else is an empty 404.
 // Reads JobStore and events.jsonl; job state changes arrive through onStateChange, which
 // `sf serve` composes with the notifier. The actions validate the HTTP request and delegate once
 // to the Execution of `sf serve` (DashboardActions); nothing here changes a job by itself. Who
@@ -48,12 +49,12 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 };
 
 // The User's actions, bound by `sf serve` to its one Execution: the same methods, guards and
-// results as the socket commands of sf approve, sf abort and sf say. A job is started in the
-// ticket's conversation (the Context owner's start), or with sf start; not from the page (SF-028).
+// results as the socket commands of sf approve, sf abort, sf say and sf review. A job is started
+// in the ticket's conversation (the Context owner's start), or with sf start; not from the page (SF-028).
 // Archive of a job card is archiveFinished (terminal only), never the any-state reset.
-export type DashboardActions = Pick<Execution, 'approve' | 'abort' | 'say' | 'archiveFinished'>;
-export type DashboardAction = 'approve' | 'abort' | 'say' | 'archive';
-export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'archive'];
+export type DashboardActions = Pick<Execution, 'approve' | 'abort' | 'say' | 'retryReview' | 'archiveFinished'>;
+export type DashboardAction = 'approve' | 'abort' | 'say' | 'review' | 'archive';
+export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'review', 'archive'];
 
 // The MCP Events subscriptions, bound by `sf serve` to its Events hub: read, test one, nudge a
 // job's reviewer, and hear about changes (the returned function stops listening).
@@ -87,7 +88,7 @@ const NO_SETUP: DashboardSetup = {
   },
 };
 
-// Every POST route under api/jobs/<ws>/<ticket>/: the four actions, the test event and the nudge.
+// Every POST route under api/jobs/<ws>/<ticket>/: the five actions, the test event and the nudge.
 type ActionRoute = DashboardAction | 'test-event' | 'nudge';
 
 // The request body of each POST route, strict: unknown keys, null, arrays and wrong types are
@@ -96,6 +97,7 @@ const BODIES = {
   approve: { shape: '{"as_is"?: boolean}', schema: z.strictObject({ as_is: z.boolean().optional() }) },
   abort: { shape: '{"discard"?: boolean}', schema: z.strictObject({ discard: z.boolean().optional() }) },
   say: { shape: '{"message": string}', schema: z.strictObject({ message: z.string() }) },
+  review: { shape: '{}', schema: z.strictObject({}) },
   'test-event': { shape: '{}', schema: z.strictObject({}) },
   nudge: { shape: '{}', schema: z.strictObject({}) },
   archive: { shape: '{}', schema: z.strictObject({}) },
@@ -107,12 +109,12 @@ const BODIES = {
   'ticket-new': { shape: '{"workspace": string, "ticket": string, "title": string, "request": string}', schema: z.strictObject({ workspace: z.string(), ticket: z.string(), title: z.string(), request: z.string() }) },
 };
 type PostRoute = keyof typeof BODIES;
-const ACTION_ROUTES: ActionRoute[] = ['approve', 'abort', 'say', 'archive', 'test-event', 'nudge'];
+const ACTION_ROUTES: ActionRoute[] = ['approve', 'abort', 'say', 'review', 'archive', 'test-event', 'nudge'];
 
 // The HTTP status of a FactoryError the methods can throw; any other code answers 500 and keeps
 // its code and message.
 const ERROR_STATUS: Record<string, number> = {
-  invalid_state: 409, turn_running: 409, rebase_in_progress: 409,
+  invalid_state: 409, turn_running: 409, rebase_in_progress: 409, review_off: 409,
   job_exists: 409, job_active: 409, job_limit: 409, task_draft: 409, checkout_dirty: 409, branch_exists: 409, branch_changed: 409, branch_missing: 409, worktree_exists: 409,
   worktree_missing: 409, sensitive_unacknowledged: 409, ticket_exists: 409, workspace_exists: 409, workspace_busy: 409,
   job_not_found: 404, workspace_not_found: 404, task_not_found: 404,
@@ -608,6 +610,11 @@ export async function startDashboard(
           return parsed ? () => actions.abort(workspace, ticket, parsed.discard === true) : undefined;
         },
       };
+    }
+    if (action === 'review') {
+      // sf review: the Execution refuses any state but needs_human with review_failed.
+      const run = (): Promise<unknown> => actions.retryReview(workspace, ticket);
+      return { route: action, exists, call: (data) => (parse(BODIES.review.schema, data) ? run : undefined) };
     }
     if (action === 'archive') {
       // A finished job leaves the Jobs list as with sf reset (the history is archived, a kept

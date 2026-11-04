@@ -1181,3 +1181,54 @@ test('client: the Iterations tab shows the review of the selected iteration, and
   assert.equal(review.className, 'review v-failed');
   assert.deepEqual((review.children as FakeElement[]).map((child) => child.textContent), ['Review by claude: failed', 'The review returned no structured output.']);
 });
+
+const reviewPosts = (page: Page): FetchRequest[] => posts(page).filter((request) => request.path.endsWith('/review'));
+
+test('client: Retry review shows only in needs_human after a failed review; one request at a time; the outcome or the refusal as text', async () => {
+  const page = await openPage();
+  const stream = page.streams.at(-1)!;
+  const button = page.$('retry-review-button');
+  const stuck = (code: string | null) => {
+    const shown = detail({ ...A, state: 'needs_human' });
+    return { ...shown, job: { ...shown.job, error: code === null ? null : { code, message: `The ${code} message.` } } };
+  };
+  // Hidden in every other state, and for needs_human with another cause.
+  assert.equal(button.hidden, true);
+  for (const shown of [stuck(null), stuck('iteration_limit'), detail({ ...A, state: 'awaiting_review' })]) {
+    stream.emit('job', shown);
+    assert.equal(button.hidden, true, JSON.stringify(shown.job.error));
+  }
+  stream.emit('job', stuck('review_failed'));
+  assert.deepEqual([button.hidden, button.disabled], [false, false]);
+  assert.doesNotMatch(page.$('action-reasons').textContent, /Retry review/);
+
+  button.click();
+  await page.flush();
+  const sent = reviewPosts(page)[0]!;
+  assert.deepEqual([sent.path, sent.body, sent.headers['content-type']], ['api/jobs/app/T-1/review', '{}', 'application/json']);
+  assert.equal(page.$('action-status').textContent, 'Restarting the review…');
+  assert.equal(button.disabled, true);
+  assert.match(page.$('action-reasons').textContent, /Retry review: the review is being restarted\./);
+  button.click();
+  await page.flush();
+  assert.equal(reviewPosts(page).length, 1);
+  sent.respond(200, { ok: true, result: { state: 'awaiting_review', iteration: 1 } });
+  await page.flush();
+  assert.equal(page.$('action-status').textContent, 'The review of iteration 1 runs again (state awaiting_review).');
+  assert.equal(page.$('action-status').className, 'status ok');
+  stream.emit('job', detail({ ...A, state: 'awaiting_review' }));
+  assert.equal(button.hidden, true);
+
+  // A refusal is shown as it comes.
+  stream.emit('job', stuck('review_failed'));
+  button.click();
+  await page.flush();
+  reviewPosts(page)[1]!.respond(409, { ok: false, error: { code: 'review_off', message: 'The Claude review is off (SF_REVIEW=off); nothing would review the iteration.' } });
+  await page.flush();
+  assert.equal(page.$('action-status').textContent, 'review_off: The Claude review is off (SF_REVIEW=off); nothing would review the iteration.');
+  assert.equal(page.$('action-status').className, 'status error');
+  // Nothing holds the button after a definite answer (the fake's refreshed detail is another state).
+  stream.emit('job', stuck('review_failed'));
+  assert.deepEqual([button.hidden, button.disabled], [false, false]);
+  assert.equal(reviewPosts(page).length, 2);
+});

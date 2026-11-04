@@ -1,5 +1,6 @@
 // The job lifecycle: start, check, request_fix, mark_clean (the MR preparation and the branch,
-// SF-019, committed and rebased by the factory, SF-037), say, approve (the push), abort, reset
+// SF-019, committed and rebased by the factory, SF-037), say, retryReview (the retry of a failed
+// review, SF-044), approve (the push), abort, reset
 // (and the dashboard's terminal-only Archive), status and the restart rule. Owns the Implementer session of each job, which works in the
 // job's own worktree, and publishes an iteration (Report, Patch and the file list) when the
 // session goes idle; then the Claude review of that iteration runs (SF-038, src/review.ts) and its
@@ -589,6 +590,28 @@ export class Execution {
     const running: RunningReview = { iteration: job.iteration, controller: new AbortController() };
     this.#reviews.set(key, running);
     this.#review(job, running).catch((error: unknown) => console.error(error));
+  }
+
+  // The user's retry of a failed review (sf review, the dashboard's Retry review): the job goes
+  // back to awaiting_review without a new iteration, the failed review.json goes, and the review
+  // of the last iteration runs again.
+  retryReview(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number }> {
+    return this.#locked(async () => {
+      const job = await this.#job(workspaceName, ticket);
+      if (!this.#config.review) {
+        throw new FactoryError('review_off', 'The Claude review is off (SF_REVIEW=off); nothing would review the iteration.');
+      }
+      if (job.state !== 'needs_human' || job.error?.code !== 'review_failed') {
+        throw new FactoryError('invalid_state', `sf review needs needs_human after a failed review (review_failed); the job is ${job.state}${job.error !== undefined ? ` (${job.error.code})` : ''}.`);
+      }
+      if (job.worktree === null || !(await exists(job.worktree))) {
+        throw new FactoryError('worktree_missing', `The worktree of ${workspaceName}/${ticket} is missing; sf reset the ticket and start again.`);
+      }
+      await this.jobs.removeReview(workspaceName, ticket, job.iteration);
+      const next = await this.#transition(job, 'awaiting_review');
+      this.#startReview(next);
+      return { state: next.state, iteration: next.iteration };
+    });
   }
 
   #cancelReview(key: string): void {

@@ -509,3 +509,29 @@ test('dashboard nudge: POST only, the action checks, the job as it is now to the
     assert.deepEqual(fake.calls, []);
   }, reviewers);
 });
+
+test('dashboard review: POST only, the action checks, Execution.retryReview once per request, its refusals mapped', async () => {
+  const fake = fakeActions({ state: 'awaiting_review', iteration: 2 });
+  await withDashboard('dash-act-review', fake, async (dashboard) => {
+    const base = dashboard.url;
+    const path = 'api/jobs/app/T-1/review';
+    for (const method of ['GET', 'PUT']) {
+      const reply = await act(base, path, {}, { method });
+      assert.deepEqual([reply.status, reply.headers.allow, reply.body], [405, 'POST', ''], method);
+    }
+    assert.deepEqual(error(await act(base, path, {}, { headers: { origin: '' } })), { status: 403, code: 'invalid_origin' });
+    for (const body of ['{"iteration":1}', '[]', 'null']) {
+      assert.deepEqual(error(await act(base, path, undefined, { body })), { status: 400, code: 'invalid_body' }, body);
+    }
+    assert.deepEqual([(await act(base, 'api/jobs/app/T-9/review', {})).status], [404]);
+    assert.deepEqual(fake.calls, []);
+
+    assert.deepEqual(result(await act(base, path, {})), { state: 'awaiting_review', iteration: 2 });
+    assert.deepEqual(fake.calls, [['retryReview', 'app', 'T-1']]);
+    for (const [code, status] of [['invalid_state', 409], ['review_off', 409], ['worktree_missing', 409]] as const) {
+      fake.answer = new FactoryError(code, `The ${code} message.`);
+      assert.deepEqual(error(await act(base, path, {})), { status, code }, code);
+    }
+    assert.equal(fake.calls.length, 4);
+  });
+});

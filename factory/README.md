@@ -26,6 +26,7 @@ bin/sf up [--no-open] [--no-tunnel]   # sf serve plus the tunnel (../scripts/sf-
 bin/sf dashboard [--open]         # the dashboard URL of the last sf serve start; --open opens it with xdg-open; works without sf serve
 bin/sf start <workspace> <ticket> # start the job in a worktree of its own (same as the start tool); needs sf serve
 bin/sf say <workspace> <ticket> <message...>   # a user message into the session; needs sf serve
+bin/sf review <workspace> <ticket>             # retry a failed Claude review (needs_human with review_failed); needs sf serve
 bin/sf status [<workspace> <ticket>]           # one job (with its worktree, sensitive and deleted paths) or all jobs, with estimated cost and elapsed time; works without sf serve
 bin/sf watch <workspace> <ticket> [--once]     # the session live; works without sf serve
 bin/sf approve <workspace> <ticket> [--as-is]  # push the branch prepared at Clean; --as-is pushes a tip edited by hand; needs sf serve
@@ -110,7 +111,7 @@ The socket path `${SF_STATE_DIR}/sf.sock` must fit a Unix socket address (107 by
 a longer one is refused at start with `socket_path_too_long`.
 
 The execution variables are read once when `sf serve` starts. `sf status` and `sf watch` read
-`SF_STATE_DIR` themselves; `sf start`, `sf say`, `sf approve`, `sf abort`, `sf reset` and `sf events` use it to find the socket; `sf notify-test` reads the notification variables itself; `sf auth-test` reads `SF_AUTH_*` itself.
+`SF_STATE_DIR` themselves; `sf start`, `sf say`, `sf review`, `sf approve`, `sf abort`, `sf reset` and `sf events` use it to find the socket; `sf notify-test` reads the notification variables itself; `sf auth-test` reads `SF_AUTH_*` itself.
 
 ## OAuth
 
@@ -307,7 +308,10 @@ factory beyond its Git refs (branches) and worktree registrations.
   sensitive and deleted paths of the iteration and the Patch inline up to 256 KiB (beyond that, the
   first 256 KiB and a note to read the changed files). Its output is structured
   (`outputFormat: {type: "json_schema"}`), validated with zod: `{verdict: "clean" | "fix", summary,
-  items: [{path, problem, expected}], accepted_sensitive}`.
+  items: [{path, problem, expected}], accepted_sensitive}`. The SDK hands the schema to the Claude
+  Code CLI as `--json-schema`. It is generated as draft-07 and sent without `$schema`, because the
+  CLI refuses the draft 2020-12 `$schema` that zod writes by default (SF-044). The fake Claude of
+  the tests refuses such a schema the same way.
 - The review runs outside the execution lock. Its verdict is applied under the lock only while the
   job is still `awaiting_review` at the same iteration; otherwise (an `sf say`, a `request_fix` or a
   `mark_clean` came first) it is recorded and ignored. `fix` writes `## Fix N` from the items (the
@@ -316,7 +320,7 @@ factory beyond its Git refs (branches) and worktree registrations.
   `mark_clean` with `accepted_sensitive`; an undeclared sensitive path it does not accept turns it
   into a fix item instead. A review that fails (an error, a turn that is not a success, no or an
   invalid structured output, `fix` without items) puts the job in `needs_human` with
-  `review_failed`; nothing is retried. `sf abort` and `sf reset` cancel a running review, whose
+  `review_failed`; nothing is retried by itself. `sf abort` and `sf reset` cancel a running review, whose
   outcome is then never applied; a newer review of the same job cancels an older one.
 - Every review that ends is kept in `iterations/NNN/review.json`: `{reviewer: "claude", verdict,
   summary, items, accepted_sensitive, cost_usd, started_at, ended_at}`, or `{reviewer, error}` when
@@ -325,6 +329,12 @@ factory beyond its Git refs (branches) and worktree registrations.
   `sf watch` and the dashboard's Event stream show it as `review by claude: fix (3 items)`,
   `review by claude: clean` or `review by claude failed: <error>`. A cancelled review leaves
   nothing. The review's own session messages are not logged.
+- `sf review <workspace> <ticket>` (SF-044), or Retry review on the dashboard, retries a failed
+  review. The job goes back to `awaiting_review` with its error cleared, at the same iteration (a
+  state change, no new iteration). The failed `review.json` of the last iteration is removed, and
+  the review of that iteration starts again. It is refused with `invalid_state` unless the job is
+  `needs_human` with `review_failed`, and with `review_off` when `SF_REVIEW=off`. The worktree must
+  still exist (`worktree_missing` otherwise).
 - The job counts its Fix sections in `fixes` (the review's and `request_fix`'s). Once it reaches
   `SF_MAX_ITERATIONS`, the next Fix is refused: `needs_human` with `iteration_limit`. An `sf say`
   turn publishes an iteration but writes no Fix section, so it does not count.
@@ -627,7 +637,9 @@ as in the terminal: approve (`sf approve`, the push of the branch prepared at Cl
 explicit "as it is" choice for a tip edited by hand: `sf approve --as-is`), abort (`sf abort`,
 with an explicit discard choice that is unchecked every time a confirmation opens: `sf abort
 --discard`) and say (`sf say`: a multiline message; Enter adds a line, only the Send button
-submits). Each is one deliberate click; approve and abort ask for a confirmation that names the
+submits). A job in `needs_human` after a failed review (`review_failed`) also shows a Retry review
+button in the head of its card (`sf review`, SF-044); it is hidden in every other case and sends
+at once, without a confirmation. Each is one deliberate click; approve and abort ask for a confirmation that names the
 job and the branch, explains what follows (the push; the session ends and the worktree stays, or
 the worktree and the branch go with discard) and sends nothing when cancelled. The page enables
 a control from the state it shows (approve in `ready_for_human_review` and in `needs_human`
@@ -705,6 +717,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `POST api/jobs/<ws>/<ticket>/approve` | `{"as_is"?: boolean}` | `Execution.approve(ws, ticket, as_is)`: the push of the prepared branch; `as_is` pushes a tip edited by hand |
 | `POST api/jobs/<ws>/<ticket>/abort` | `{"discard": false}`; `discard` optional, default false | `Execution.abort(ws, ticket, discard)` |
 | `POST api/jobs/<ws>/<ticket>/say` | `{"message": "<text>"}` | `Execution.say(ws, ticket, message)`; the text goes as it is (nothing trimmed or split) |
+| `POST api/jobs/<ws>/<ticket>/review` | `{}` | `Execution.retryReview(ws, ticket)` (`sf review`): the failed review of the last iteration runs again; result `{state, iteration}`; `409 invalid_state` unless the job is `needs_human` with `review_failed`, `409 review_off` with `SF_REVIEW=off` |
 | `POST api/jobs/<ws>/<ticket>/test-event` | `{}` | `sf events test` for the job's `subscribed` subscription: one test event (state `"test"`), result `{subscription, delivered, status}`; without one `404 no_subscription` and nothing is sent |
 | `POST api/jobs/<ws>/<ticket>/nudge` | `{}` | `Events.nudge(job)`: the job's `awaiting_review` event again to every subscription that receives it, queued like a state change; result `{queued, pending}` (subscription ids: sent now, already on their way); `409 invalid_state` in any other state, `404 no_subscription` when nobody receives the job |
 | `POST api/workspaces` | `{"name": string, "path": string}` | `Setup.addWorkspace`: the rules of `sf workspace add`; result the workspace row |
@@ -816,7 +829,9 @@ end), in a browser:
    only for a job in `awaiting_review` with a subscription: "Sent the awaiting_review event of
    iteration <n> again to <id>", `sf watch` shows the delivery and the reviewer answers with
    `request_fix` or `mark_clean` in that conversation; once the job moves on the button goes off
-   and the line goes.
+   and the line goes. Retry review (a fake review scripted to fail): the job in `needs_human` with
+   `review_failed` shows the button next to Abort…; click it: "The review of iteration <n> runs
+   again", the badge turns `awaiting_review` and the button goes.
 11. Layout: narrower than 900 px the job list stacks above the detail and the buttons wrap; in the
    OS dark scheme the status colours and the dialog stay readable; Tab reaches Approve…, Abort…,
    the dialog's buttons, the textarea and Send; Escape closes the dialog. The Reviewer block,

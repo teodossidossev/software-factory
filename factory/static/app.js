@@ -1,9 +1,9 @@
 // Software Factory dashboard v2. Loads api/jobs, follows one job through api/stream (server-sent
-// events) and renders it. The User's approve, abort and say go as POSTs to
-// api/jobs/<ws>/<ticket>/<action>: each one is a deliberate click, confirmed for approve and
-// abort, never retried or replayed by the page. Who reviews the job comes with its detail (the
-// Reviewer block, with the two messages of sf ticket to copy and a test event to send) and the
-// subscriptions with the stream. The start screen (Setup) lists the workspaces and the tickets
+// events) and renders it. The User's approve, abort, say and Retry review (after a failed Claude
+// review, SF-044) go as POSTs to api/jobs/<ws>/<ticket>/<action>: each one is a deliberate click,
+// confirmed for approve and abort, never retried or replayed by the page. Who reviews the job
+// comes with its detail (the Reviewer block, with the two messages of sf ticket to copy and a
+// test event to send) and the subscriptions with the stream. The start screen (Setup) lists the workspaces and the tickets
 // without a job, adds a workspace, writes a ticket draft, opens the ChatGPT conversation of a
 // ticket (a link the User clicks) and starts a job (confirmed). Every value goes in through
 // textContent; the one href is the server's ChatGPT URL, checked against its fixed prefix.
@@ -13,17 +13,19 @@ const RECONNECT_MS = 3000;
 const READ_TIMEOUT_MS = 10000;
 const TERMINAL_STATES = ['pushed', 'aborted', 'failed'];
 const SAY_STATES = ['working', 'awaiting_review', 'needs_human', 'ready_for_human_review'];
-const ACTION_LABELS = { approve: 'Approve', abort: 'Abort', say: 'Send', archive: 'Archive' };
+const ACTION_LABELS = { approve: 'Approve', abort: 'Abort', say: 'Send', review: 'Retry review', archive: 'Archive' };
 const PENDING_REASONS = {
   approve: 'the push was requested; waiting for its outcome.',
   abort: 'abort was requested; waiting for its outcome.',
   say: 'the message is being sent.',
+  review: 'the review is being restarted.',
   archive: 'the job is being archived.',
 };
 const PENDING_TEXT = {
   approve: 'Pushing the branch…',
   abort: 'Abort requested; waiting for the job to end.',
   say: 'Sending the message…',
+  review: 'Restarting the review…',
   archive: 'Archiving the job…',
 };
 const $ = (id) => document.getElementById(id);
@@ -718,6 +720,9 @@ function renderDetail(detail) {
   renderReviewer();
 }
 
+// The job waits for the user after a failed Claude review: Retry review runs it again.
+const reviewFailed = (job) => job.state === 'needs_human' && job.error?.code === 'review_failed';
+
 const preparationKnown = (job) => job.state === 'preparing_mr' || state.pending.has(pendingId('approve', keyOf(job)));
 
 // Why an action is unavailable for the job, or '' when the page lets it through. Guidance only:
@@ -754,6 +759,9 @@ function availability(action, job) {
   if (action === 'abort') {
     return TERMINAL_STATES.includes(job.state) ? `the job is already ${job.state}.` : '';
   }
+  if (action === 'review') {
+    return reviewFailed(job) ? '' : 'only after a failed review.';
+  }
   return SAY_STATES.includes(job.state) ? '' : `messages need working, awaiting_review, needs_human or ready_for_human_review; the job is ${job.state}.`;
 }
 
@@ -772,6 +780,14 @@ function renderActions() {
     if (reason !== '') {
       reasons.push(`${ACTION_LABELS[action]}: ${reason}`);
     }
+  }
+  // Retry review shows only after a failed review; while it is held, its reason says why.
+  const retryable = job !== null && reviewFailed(job);
+  const retryReason = availability('review', job);
+  $('retry-review-button').hidden = !retryable;
+  $('retry-review-button').disabled = !retryable || retryReason !== '';
+  if (retryable && retryReason !== '') {
+    reasons.push(`${ACTION_LABELS.review}: ${retryReason}`);
   }
   $('action-reasons').textContent = reasons.join(' ');
   $('refresh-button').hidden = state.unresolved.get(state.key)?.failed !== true;
@@ -826,6 +842,9 @@ function describeOutcome(action, result) {
       return { level: 'error', text: `Not pushed: the push failed (${detail || 'no details'}). Fix it, then approve again.` };
     }
     return { level: 'warn', text: `Not pushed: the job is ${data.state}${detail ? ` (${detail})` : ''}.` };
+  }
+  if (action === 'review') {
+    return { level: 'ok', text: `The review of iteration ${data.iteration} runs again (state ${data.state}).` };
   }
   if (action === 'abort') {
     if (data.error) {
@@ -1512,6 +1531,11 @@ function init() {
     }
   });
   $('abort-button').addEventListener('click', () => openConfirm('abort'));
+  $('retry-review-button').addEventListener('click', () => {
+    if (state.key !== null) {
+      void run('review', state.key, {});
+    }
+  });
   $('confirm-ok').addEventListener('click', submitConfirm);
   $('confirm-cancel').addEventListener('click', closeConfirm);
   $('confirm').addEventListener('keydown', (event) => {

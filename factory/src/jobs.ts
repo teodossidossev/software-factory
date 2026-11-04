@@ -2,7 +2,7 @@
 // iterations/NNN/{report.md,patch.diff,meta.json,review.json}, and from MR preparation on mr.md. Strictly
 // parsed; every file but the event log is replaced atomically. Knows nothing about Git or the
 // Implementer session.
-import { appendFile, mkdir, readdir, readFile, rename } from 'node:fs/promises';
+import { appendFile, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import * as z from 'zod/v4';
 import { writeFileAtomic } from './atomic.js';
@@ -258,6 +258,12 @@ export class JobStore {
   async writeReview(workspace: string, ticket: string, number: number, review: ReviewRecord): Promise<void> {
     const dir = join(this.dir(workspace, ticket), 'iterations', String(number).padStart(3, '0'));
     await writeFileAtomic(join(dir, 'review.json'), Buffer.from(`${JSON.stringify(review, null, 2)}\n`));
+  }
+
+  // Before a retried review (SF-044): the failed record goes, so the iteration's review shows as running.
+  async removeReview(workspace: string, ticket: string, number: number): Promise<void> {
+    const dir = join(this.dir(workspace, ticket), 'iterations', String(number).padStart(3, '0'));
+    await rm(join(dir, 'review.json'), { force: true });
   }
 
   // The review of an iteration; undefined while none ended (or with the review off).

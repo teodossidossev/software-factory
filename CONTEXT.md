@@ -57,8 +57,8 @@ Task file otherwise.
 _Avoid_: stub, placeholder task, request file
 
 **Fix section**:
-A `## Fix N` section the Context owner appends to the Task file after a review. Appending one is
-the request for the next Iteration.
+A `## Fix N` section appended to the Task file after a Review, by the factory from a `fix` verdict
+or by the Context owner. Appending one is the request for the next Iteration.
 _Avoid_: findings, review request, feedback
 
 **Job**:
@@ -97,9 +97,17 @@ Declared when the Task file's `may_touch` names it, undeclared otherwise; an und
 be acknowledged by the Context owner at Clean.
 _Avoid_: protected file, system file
 
+**Review**:
+The check of one Iteration against its Task file, the repository standards and the Handbook's
+review rules, by a fresh read-only Claude session the factory starts in the Worktree when the
+Iteration is published. It ends with a verdict: `fix` with items, which become the next Fix
+section, or `clean`, which is Clean. A failed Review hands the Job to the User.
+_Avoid_: code review session, audit
+
 **Clean**:
-The Context owner's verdict that the Patch needs no further Fix section, with every undeclared
-Sensitive path acknowledged. It starts MR preparation; it accepts nothing and pushes nothing.
+The Review's or the Context owner's verdict that the Patch needs no further Fix section, with
+every undeclared Sensitive path acknowledged. It starts MR preparation; it accepts nothing and
+pushes nothing.
 
 **Human review**:
 The User reading the Branch in the IDE after Clean. It ends with approve, a further fix, or abort.

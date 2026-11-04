@@ -517,7 +517,7 @@ async function notifyTest(args: string[]): Promise<void> {
   const now = new Date().toISOString();
   const job: Job = {
     workspace: 'test', ticket: 'SF-TEST', branch: 'SF-TEST-notification', base: 'main', base_commit: null, worktree: null, prepared_commit: null,
-    target_commit: null, mr_attempts: 0, state: 'pushed', iteration: 0, session_id: null, created_at: now, updated_at: now,
+    target_commit: null, mr_attempts: 0, fixes: 0, state: 'pushed', iteration: 0, session_id: null, created_at: now, updated_at: now,
   };
   const results = await sendNotification(jobNotification(job, ['A test notification from sf notify-test']), notifyConfig());
   for (const result of results) {

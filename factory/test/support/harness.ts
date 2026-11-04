@@ -57,6 +57,8 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
     SF_DESKTOP_NOTIFY: 'off',
     // No real tunnel: sf up reports the missing script unless the test gives a fake one.
     SF_TUNNEL_SCRIPT: join(temp, 'no-such-tunnel.sh'),
+    // No Claude review unless the test turns it on (test/review.test.ts).
+    SF_REVIEW: 'off',
     ...env.extra,
   };
 }
@@ -77,6 +79,16 @@ export async function script(env: Env, turns: unknown[]): Promise<void> {
 
 export async function fakeLog(env: Env): Promise<Array<{ argv: string[]; prompt: string; sessionId: string; cwd: string; env: string[] }>> {
   return (await readFile(join(env.home, 'fake-claude.log'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+}
+
+// The fake's review script (runs with --json-schema), consumed in order.
+export async function reviewScript(env: Env, reviews: unknown[]): Promise<void> {
+  await writeFile(join(env.home, 'fake-review.json'), JSON.stringify({ reviews }));
+  await rm(join(env.home, 'fake-review.count'), { force: true });
+}
+
+export async function reviewLog(env: Env): Promise<Array<{ argv: string[]; prompt: string; sessionId: string; cwd: string; env: string[] }>> {
+  return (await readFile(join(env.home, 'fake-review.log'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
 }
 
 // A repository with one commit on main; with origin, the work checkout is a clone of a bare repo.

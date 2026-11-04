@@ -46,6 +46,8 @@ const ALL_GIT_COMMANDS = [
   'add', 'commit', 'push', 'reset', 'clean', 'stash', 'checkout', 'switch', 'restore', 'rebase', 'merge',
   'cherry-pick', 'revert', 'rm', 'mv', 'tag', 'branch', 'config', 'update-ref', 'update-index', 'worktree', 'am', 'pull', 'fetch',
 ];
+// .env files are off limits to every session, the reviewer's included.
+export const ENV_FILE_RULES = ['Read', 'Edit', 'Write'].flatMap((tool) => [`${tool}(**/.env)`, `${tool}(**/.env.*)`]);
 // Every turn, MR preparation included: every mutating Git command is the factory's or the user's;
 // .git and .env files are off limits.
 export const DENIED_TOOLS = [
@@ -54,7 +56,7 @@ export const DENIED_TOOLS = [
   'EnterWorktree',
   'Edit(.git/**)',
   'Write(.git/**)',
-  ...['Read', 'Edit', 'Write'].flatMap((tool) => [`${tool}(**/.env)`, `${tool}(**/.env.*)`]),
+  ...ENV_FILE_RULES,
 ];
 
 // Paths that are unusual for a ticket to touch: dependency manifests and lockfiles, environment

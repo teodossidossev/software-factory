@@ -404,10 +404,12 @@ test('mark_clean is refused in needs_human before any MR preparation; approve is
   const env = await newEnv('noretry', { SF_MAX_ITERATIONS: '1' });
   const repo = await newRepo(env, 'noretry-repo', false);
   await putTask(env, repo, 'R-2', 'No retry');
-  await script(env, [{}]);
+  await script(env, [{}, {}]);
   const served = await serve(env);
   await call(served, 'start', { workspace: 'app', ticket: 'R-2' });
   await waitFor(served, 'R-2', 'awaiting_review', 1);
+  await call(served, 'request_fix', { workspace: 'app', ticket: 'R-2', content: 'first' });
+  await waitFor(served, 'R-2', 'awaiting_review', 2);
   const early = await approve(env, 'R-2');
   assert.equal(early.code, 1);
   assert.match(early.stderr, /^sf: approve needs ready_for_human_review \(the branch prepared at Clean\); the job is awaiting_review\.$/m);
@@ -592,19 +594,22 @@ test('notifications: desktop and ntfy for the user\'s states, silent iterations,
   await putTask(env, repo, 'N-1', 'Notify me');
   await script(env, [
     { text: 'iteration 1', write: { 'a.txt': 'a\n' } },
-    { text: 'iteration 2', write: { 'package.json': '{}\n' }, run: [['rm', 'a.txt']] },
+    { text: 'fixed' },
+    { text: 'iteration 3', write: { 'package.json': '{}\n' }, run: [['rm', 'a.txt']] },
     { write: { '.software-factory/N-1.mr.md': mrText('feat(N-1): Notify me') }, text: 'prepared' },
   ]);
   const served = await serve(env);
   await call(served, 'start', { workspace: 'app', ticket: 'N-1' });
   await waitFor(served, 'N-1', 'awaiting_review', 1);
   await new Promise((resolve) => setTimeout(resolve, 300));
+  await call(served, 'request_fix', { workspace: 'app', ticket: 'N-1', content: 'first' });
+  await waitFor(served, 'N-1', 'awaiting_review', 2);
   // Iterations are silent.
   assert.deepEqual([received.length, (await desktop()).length], [0, 0]);
 
   assert.equal((await refused(served, 'request_fix', { workspace: 'app', ticket: 'N-1', content: 'more' })).code, 'iteration_limit');
   await until(async () => received.length === 1 && (await desktop()).length === 1);
-  const body = 'branch: N-1-notify-me\niteration_limit: 1 iterations were published without Clean; the user decides how to go on.';
+  const body = 'branch: N-1-notify-me\niteration_limit: 1 Fix sections were written, the limit of SF_MAX_ITERATIONS; the user decides how to go on.';
   assert.equal(received[0]!.body, body);
   assert.deepEqual(
     [received[0]!.headers.title, received[0]!.headers.priority, received[0]!.headers.tags, received[0]!.headers.authorization],
@@ -616,9 +621,9 @@ test('notifications: desktop and ntfy for the user\'s states, silent iterations,
   // ready notification names the MR title and the sensitive paths (the deleted line is the fourth, cut).
   await new Promise<void>((resolve) => ntfy.close(() => resolve()));
   await runCli(env, ['say', 'app', 'N-1', 'go', 'on']);
-  await waitFor(served, 'N-1', 'awaiting_review', 2);
+  await waitFor(served, 'N-1', 'awaiting_review', 3);
   await call(served, 'mark_clean', { workspace: 'app', ticket: 'N-1', sensitive: ['package.json'] });
-  await waitFor(served, 'N-1', 'ready_for_human_review', 2);
+  await waitFor(served, 'N-1', 'ready_for_human_review', 3);
   const events = join(env.state, 'jobs', 'app', 'N-1', 'events.jsonl');
   const failures = async (): Promise<Array<Record<string, unknown>>> =>
     (await readFile(events, 'utf8')).trim().split('\n').map((line) => JSON.parse(line)).filter((record) => record.type === 'notify_failed');
@@ -628,7 +633,7 @@ test('notifications: desktop and ntfy for the user\'s states, silent iterations,
   assert.match(String(failure!.message), /fetch failed|ECONNREFUSED/);
   assert.deepEqual((await desktop())[1]!.slice(1), ['N-1: ready_for_human_review', 'branch: N-1-notify-me\nfeat(N-1): Notify me\nsensitive: package.json (undeclared)']);
   assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'N-1' })).state, 'ready_for_human_review');
-  assert.match((await runCli(env, ['watch', 'app', 'N-1', '--once'])).stdout, /\[2\] notification via ntfy failed: /);
+  assert.match((await runCli(env, ['watch', 'app', 'N-1', '--once'])).stdout, /\[3\] notification via ntfy failed: /);
   const down = await runCli(env, ['notify-test']);
   assert.equal(down.code, 1);
   assert.match(down.stdout, /^desktop: sent \(notify-send succeeded\)\nntfy: failed \(/);

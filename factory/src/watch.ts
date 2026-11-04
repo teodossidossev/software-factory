@@ -32,7 +32,7 @@ function resultText(content: unknown): string {
 export interface DescribedEvent {
   ts: string | null;
   iteration: number | null;
-  // "prompt", "state", "notify_failed", "placeholders_removed", "principal", "event_delivered", "event_failed", or the SDK message type ("assistant", "user", "result", "system", ...).
+  // "prompt", "state", "notify_failed", "placeholders_removed", "principal", "event_delivered", "event_failed", "review", "review_failed", or the SDK message type ("assistant", "user", "result", "system", ...).
   type: string;
   lines: string[];
 }
@@ -97,6 +97,15 @@ function recordLines(record: Record<string, unknown>): string[] {
   if (record.type === 'event_delivered' || record.type === 'event_failed') {
     const outcome = record.type === 'event_delivered' ? 'delivered' : 'failed';
     return [`${prefix} event to ${oneLine(String(record.subscription))} attempt ${String(record.attempt)} ${outcome}: ${oneLine(String(record.status))}`];
+  }
+  if (record.type === 'review' || record.type === 'review_failed') {
+    const ignored = record.ignored === true ? ' (ignored: the job had moved on)' : '';
+    if (record.type === 'review_failed') {
+      return [`${prefix} review by ${String(record.reviewer)} failed: ${oneLine(String(record.error))}${ignored}`];
+    }
+    const count = typeof record.items === 'number' ? record.items : 0;
+    const items = record.verdict === 'fix' ? ` (${count} ${count === 1 ? 'item' : 'items'})` : '';
+    return [`${prefix} review by ${String(record.reviewer)}: ${String(record.verdict)}${items}${ignored}`];
   }
   const message = record.message as Record<string, unknown> | undefined;
   if (message === undefined) {

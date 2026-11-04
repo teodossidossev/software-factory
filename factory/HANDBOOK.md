@@ -81,9 +81,15 @@ plan ─► write_task ─► start ─► [event ─► check … awaiting_revi
                                                                            └─ mark_clean ─► user: approve/abort
 ```
 
-Limits: `SF_MAX_JOBS` (default 3) live jobs per workspace, each in its own worktree; five
-iterations without Clean ends in `needs_human`; the Implementer session stays alive until the
-user decides.
+Limits: `SF_MAX_JOBS` (default 3) live jobs per workspace, each in its own worktree; after five
+Fix sections the next one is refused and the job goes to `needs_human` (a user message does not
+count); the Implementer session stays alive until the user decides.
+
+The factory runs its own Claude review on every published iteration: a fresh, read-only Claude
+session in the job's worktree, with the Task file, the Report, the Patch and the review rules
+below. A `fix` verdict becomes the next `## Fix N`, written by the factory, and the next iteration
+starts; a `clean` verdict runs Clean. `check` shows it as `review`. Until it ends, the job stays
+in `awaiting_review`; whoever acts first decides, and a review whose job moved on is ignored.
 
 ## Tools
 
@@ -118,10 +124,17 @@ may_touch: [package.json, .github/**]   # optional: sensitive paths or globs thi
 <The task: what to build, where, the decisions made in planning, acceptance criteria,
 what is out of scope. Reference repository standards by path instead of restating them.>
 
+## Review brief
+
+<Optional: what the reviewers must check, and why the plan's decisions were made.>
+
 ## Fix 1
 
 <Written by the Context owner after review: each item states file, what is wrong, what is expected.>
 ```
+
+`## Review brief` is optional. The reviewers read it with the rest of the Task file; the
+Implementer sees it too, so it states checks and reasons, not instructions.
 
 The Implementer is started with `/implement .software-factory/<ticket>.md` for the first iteration
 and `/implement .software-factory/<ticket>.md Fix N` for each later one. It commits nothing during

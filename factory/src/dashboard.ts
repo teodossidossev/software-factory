@@ -276,6 +276,8 @@ async function jobDetail(jobs: JobStore, reviewers: DashboardReviewers, job: Job
         changed_files: meta.changed_files.length, patch_truncated: meta.patch_truncated, denials: meta.denials.length,
         // The structured file list (SF-024); null for an iteration published before it.
         files: meta.files ?? null,
+        // The Claude review (SF-038): review.json as written; null while none ended.
+        review: (await jobs.readReview(job.workspace, job.ticket, number)) ?? null,
       });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {

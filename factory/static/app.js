@@ -241,7 +241,8 @@ function renderHeader(detail) {
   $('job-branch').textContent = job.branch;
   $('job-base').textContent = job.base;
   $('job-iteration').textContent = job.mr_attempts > 0 ? `${job.iteration} (MR attempts ${job.mr_attempts})` : String(job.iteration);
-  const costs = detail.iterations.map((iteration) => iteration.cost_usd).filter((cost) => typeof cost === 'number');
+  // The iterations and their reviews.
+  const costs = detail.iterations.flatMap((iteration) => [iteration.cost_usd, iteration.review?.cost_usd]).filter((cost) => typeof cost === 'number');
   // An estimate of the API-equivalent price, not a charge: the session usually runs on a subscription.
   $('job-cost').textContent = costs.length > 0 ? `est. $${costs.reduce((sum, cost) => sum + cost, 0).toFixed(4)}` : 'n/a';
   $('job-updated').textContent = shortTime(job.updated_at);
@@ -460,11 +461,13 @@ async function showIteration() {
   if (meta === undefined) {
     body.replaceChildren();
     $('iteration-meta').textContent = '';
+    renderReview(null);
     return;
   }
   const cost = typeof meta.cost_usd === 'number' ? `$${meta.cost_usd.toFixed(4)}` : 'n/a';
   $('iteration-meta').textContent = `${shortTime(meta.started_at)} – ${shortTime(meta.ended_at)}, cost ${cost}, ` +
     `${meta.changed_files} changed file(s), ${meta.denials} denial(s)${meta.patch_truncated ? ', patch truncated' : ''}`;
+  renderReview(meta.review ?? null);
   const filesView = state.view === 'files';
   $('files-view').hidden = !filesView;
   body.hidden = filesView;
@@ -480,6 +483,40 @@ async function showIteration() {
   if (`${meta.number}/${state.view}` === `${state.iteration}/${state.view}`) {
     body.replaceChildren(...(state.view === 'patch' ? renderPatch(text) : renderReport(text)));
   }
+}
+
+// The Claude review of the selected iteration (SF-038): its verdict, summary and items, or why it
+// failed; hidden while none ended.
+function renderReview(review) {
+  const block = $('iteration-review');
+  block.hidden = review === null;
+  if (review === null) {
+    block.replaceChildren();
+    return;
+  }
+  if (typeof review.error === 'string') {
+    block.className = 'review v-failed';
+    block.replaceChildren(el('p', 'review-verdict', `Review by ${review.reviewer}: failed`), el('p', 'review-summary', review.error));
+    return;
+  }
+  const count = review.items.length;
+  const verdict = review.verdict === 'fix' ? `fix (${count} ${count === 1 ? 'item' : 'items'})` : review.verdict;
+  const cost = typeof review.cost_usd === 'number' ? `, cost $${review.cost_usd.toFixed(4)}` : '';
+  block.className = `review v-${review.verdict}`;
+  const children = [el('p', 'review-verdict', `Review by ${review.reviewer}: ${verdict}${cost}`), el('p', 'review-summary', review.summary)];
+  if (review.verdict === 'fix' && count > 0) {
+    const list = el('ol', 'review-items');
+    list.append(...review.items.map((item) => {
+      const entry = el('li');
+      entry.append(el('code', '', item.path), document.createTextNode(`: ${item.problem} Expected: ${item.expected}`));
+      return entry;
+    }));
+    children.push(list);
+  }
+  if (review.accepted_sensitive.length > 0) {
+    children.push(el('p', 'review-accepted', `Accepted sensitive paths: ${review.accepted_sensitive.join(', ')}`));
+  }
+  block.replaceChildren(...children);
 }
 
 // The Report or the Patch of an iteration, loaded once per job; undefined when the selection

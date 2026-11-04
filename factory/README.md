@@ -61,7 +61,8 @@ message below the table). Both work without `sf serve`; they read the state dire
 
 - `EST_USD` is the recorded cost, an estimate of the API-equivalent price and not a charge: the
   session usually runs on the user's Claude subscription. It is the sum of `cost_usd` over
-  `meta.json` of the published iterations 1 to `iteration`, with four decimals (`0.0000` for a real zero or no iteration yet).
+  `meta.json` of the published iterations 1 to `iteration`, plus the `cost_usd` of their reviews
+  (`review.json`; a failed review adds nothing), with four decimals (`0.0000` for a real zero or no iteration yet).
   A running iteration or an MR preparation turn adds nothing until its iteration is published, and
   `cost_usd_total` is never used. `unknown` means a published iteration has no usable cost (its
   `cost_usd` is null or missing, or its `meta.json` is missing); an unreadable or malformed
@@ -87,10 +88,13 @@ message below the table). Both work without `sf serve`; they read the state dire
 | `SF_CHECK_AFTER_START_MIN` | `15` | `check_after_minutes` returned by `start` and by `check` during the first iteration. |
 | `SF_CHECK_AFTER_FIX_MIN` | `5` | `check_after_minutes` returned by `request_fix` and by `check` during later iterations. |
 | `SF_MAX_TURNS` | `150` | `maxTurns` of every Implementer turn. |
-| `SF_MAX_ITERATIONS` | `5` | Published iterations after which `request_fix` is refused (`iteration_limit`, job `needs_human`). |
+| `SF_MAX_ITERATIONS` | `5` | Fix sections a job may get (the review's and `request_fix`'s, counted in the job's `fixes`); the next Fix is refused (`iteration_limit`, job `needs_human`). An `sf say` turn does not count. |
 | `SF_CLAUDE` | bundled binary | Absolute path of the Claude Code executable (`pathToClaudeCodeExecutable`). |
 | `SF_MODEL` | unset | Model of every Implementer turn, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
-| `SF_SANDBOX` | on | `off` runs the Implementer without Claude Code's sandbox. |
+| `SF_REVIEW` | on | `off` runs no Claude review: a published iteration stays in `awaiting_review` for `request_fix` or `mark_clean`. |
+| `SF_REVIEW_MODEL` | unset | Model of the Claude review, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
+| `SF_REVIEW_MAX_TURNS` | `60` | `maxTurns` of the Claude review. |
+| `SF_SANDBOX` | on | `off` runs the Implementer and the review without Claude Code's sandbox. |
 | `SF_SANDBOX_DOMAINS` | empty | Comma-separated extra hosts sandboxed commands may reach, besides `registry.npmjs.org`. |
 | `SF_DESKTOP_NOTIFY` | on | `off` disables the desktop notification. |
 | `SF_NOTIFY_ITERATIONS` | off | `on` also notifies `awaiting_review` (each published iteration). |
@@ -290,7 +294,40 @@ factory beyond its Git refs (branches) and worktree registrations.
   (`git diff <base commit>` plus untracked files in the worktree, without ignored,
   credential-like and `.software-factory/` paths, at most 2 MiB) and the structured file list
   (`files` in `meta.json`, SF-024: `path`, `status` added/modified/deleted, `sensitive`
-  declared/undeclared/no, `additions`, `deletions`). The job goes to `awaiting_review`.
+  declared/undeclared/no, `additions`, `deletions`). The job goes to `awaiting_review`, and the
+  Claude review of the iteration starts (below).
+- The **review** (SF-038, `src/review.ts`) runs on every published iteration, after an Implementer
+  turn and after the conflict re-publication of MR preparation, unless `SF_REVIEW=off`. It is a
+  fresh Agent SDK `query()` (never `resume`) in the worktree, read-only: the tools `Read`, `Grep`
+  and `Glob` only (`tools`), and `Bash`, `Edit`, `Write`, `NotebookEdit`, `WebFetch`, `WebSearch`,
+  `Task`, `Agent` and the `.env` rules denied as well. It has the Implementer's permission mode,
+  sandbox and filtered environment, `maxTurns` `SF_REVIEW_MAX_TURNS` and model `SF_REVIEW_MODEL`.
+  Its prompt says what to verify, then carries the Handbook's `## Review rules for the Context
+  owner` verbatim, the Task file (with its `## Review brief` when there is one), the Report, the
+  sensitive and deleted paths of the iteration and the Patch inline up to 256 KiB (beyond that, the
+  first 256 KiB and a note to read the changed files). Its output is structured
+  (`outputFormat: {type: "json_schema"}`), validated with zod: `{verdict: "clean" | "fix", summary,
+  items: [{path, problem, expected}], accepted_sensitive}`.
+- The review runs outside the execution lock. Its verdict is applied under the lock only while the
+  job is still `awaiting_review` at the same iteration; otherwise (an `sf say`, a `request_fix` or a
+  `mark_clean` came first) it is recorded and ignored. `fix` writes `## Fix N` from the items (the
+  summary as a lead line, then one numbered item per entry: path, what is wrong, what is expected)
+  and runs the next iteration, the same path as `request_fix`. `clean` runs the same path as
+  `mark_clean` with `accepted_sensitive`; an undeclared sensitive path it does not accept turns it
+  into a fix item instead. A review that fails (an error, a turn that is not a success, no or an
+  invalid structured output, `fix` without items) puts the job in `needs_human` with
+  `review_failed`; nothing is retried. `sf abort` and `sf reset` cancel a running review, whose
+  outcome is then never applied; a newer review of the same job cancels an older one.
+- Every review that ends is kept in `iterations/NNN/review.json`: `{reviewer: "claude", verdict,
+  summary, items, accepted_sensitive, cost_usd, started_at, ended_at}`, or `{reviewer, error}` when
+  it failed. One line goes to `events.jsonl`: `{type: "review", reviewer, verdict, items: <count>}`
+  or `{type: "review_failed", reviewer, error}`, with `ignored: true` when the job had moved on.
+  `sf watch` and the dashboard's Event stream show it as `review by claude: fix (3 items)`,
+  `review by claude: clean` or `review by claude failed: <error>`. A cancelled review leaves
+  nothing. The review's own session messages are not logged.
+- The job counts its Fix sections in `fixes` (the review's and `request_fix`'s). Once it reaches
+  `SF_MAX_ITERATIONS`, the next Fix is refused: `needs_human` with `iteration_limit`. An `sf say`
+  turn publishes an iteration but writes no Fix section, so it does not count.
 - `request_fix` appends `## Fix N` to the Task file of the checkout, copies it into the worktree
   and runs `/implement .software-factory/<ticket>.md Fix N` in the same session (`resume`). From
   `ready_for_human_review` it first reopens a worktree from the branch (`git worktree add <path>
@@ -305,16 +342,19 @@ factory beyond its Git refs (branches) and worktree registrations.
 - `check` returns the last published Report and Patch in every state except `working` and
   `starting`, and `files`: the sensitive paths (with `declared`) and the deleted paths of that
   iteration. `meta.json` records `cost_usd` (this iteration's cost) and `cost_usd_total` (the
-  SDK's cumulative total for the session).
+  SDK's cumulative total for the session). `check` also returns `review` for the last iteration:
+  `{status: "running" | "done" | "failed" | "off", verdict?, summary?}` (`running` also while the
+  review is due; `failed` with the error as `summary`).
 - `sf say` queues a message as the next turn (in `working`, `awaiting_review`, `needs_human` or
   `ready_for_human_review`, where it reopens the worktree like `request_fix`); outside `working`
   the job goes back to `working` and publishes a new iteration at the end.
 - A failed turn, a session that does not report permission mode `auto`
   (`permission_mode_mismatch`), an unavailable sandbox (`sandbox_unavailable`, with the SDK's
-  message) or the iteration limit put the job in `needs_human`. When `sf serve` starts, jobs found
-  `working` become `needs_human` (`serve_restarted`) and keep their session for `sf say`; jobs found
-  `preparing_mr` become `needs_human` (`mr_serve_restarted`) for another `mark_clean`. Nothing is
-  retried automatically.
+  message), a failed review (`review_failed`) or the iteration limit put the job in `needs_human`.
+  When `sf serve` starts, jobs found `working` become `needs_human` (`serve_restarted`) and keep
+  their session for `sf say`; jobs found `preparing_mr` become `needs_human` (`mr_serve_restarted`)
+  for another `mark_clean`; a job found `awaiting_review` whose last iteration has no `review.json`
+  gets its review. Nothing is retried automatically.
 - `check` also returns `mr`, the MR text, once MR preparation produced one.
 - `sf abort` works in every non-terminal state: it aborts the running turn (queued prompts are
   dropped) and sets `aborted` without `error`; the branch and the worktree stay, and the
@@ -503,8 +543,8 @@ subscriptions.json                       # 0600, MCP event subscriptions with th
 events-queue.json                        # 0600, pending event deliveries, resumed at the next sf serve start
 dashboard-token                          # 0600, the dashboard token of the last sf serve start
 jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, state, iteration, session_id, created_at, updated_at, error
-jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "principal" | "event_delivered" | "event_failed" | "subscription_removed" | ...}; what sf watch reads
-jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json}
+jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "principal" | "event_delivered" | "event_failed" | "subscription_removed" | "review" | "review_failed" | ...}; what sf watch reads
+jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json}
 worktrees/<workspace>/<ticket>/          # the job's worktree (SF_WORKTREE_ROOT), from start to Clean, abort or reset
 jobs/<workspace>/<ticket>/mr.md              # the MR text, once the branch is ready or after a conflict iteration
 jobs/<workspace>/<ticket>.<timestamp>/   # an archived earlier job
@@ -574,7 +614,9 @@ Version 2 shows, live: every job with its state; for the selected job (the most 
 one, or `#<workspace>/<ticket>` in the URL) a job card with the ticket, the state and the
 Approve… and Abort… buttons in its head, the branch, base, iteration, estimated cost ("est. $",
 not a charge) and update time as facts, the error, the Reviewer line and the message box; and
-under it one card with four tabs (SF-026): Iterations (each iteration's Report and Patch), Merge
+under it one card with four tabs (SF-026): Iterations (each iteration's Report and Patch, and under
+its meta line the Claude review: the verdict, the summary, the numbered items and the accepted
+sensitive paths, or why it failed; the job's estimated cost includes the reviews), Merge
 request (the MR text once there is one, else a note), State history, and Event stream (the
 Implementer's session as `sf watch` prints it, following new lines; scrolling up switches follow
 off). The selected tab is kept when another job is selected. The layout is one spacing and type
@@ -649,7 +691,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | Path | Answer |
 |---|---|
 | `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, updated_at, created_at, error, reviewer (`subscribed`, `broad` or `none`) |
-| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials}], mr, history: [{ts, from, to, error?}], reviewer, reviewerSetup: {guide, instruction}}`; `reviewer` is `{status: "subscribed" \| "broad", id, host, input, broad: [<ids of the subscriptions without a ticket filter that match>]}` or `{status: "none"}` |
+| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review}], mr, history: [{ts, from, to, error?}], reviewer, reviewerSetup: {guide, instruction}}`; `reviewer` is `{status: "subscribed" \| "broad", id, host, input, broad: [<ids of the subscriptions without a ticket filter that match>]}` or `{status: "none"}` |
 | `api/subscriptions` | `{subscriptions: [{id, principal, input, host, createdAt, refreshBefore, job: "<ws>/<ticket>" \| null}]}`, the active subscriptions without URL or secret; `job` is the non-terminal job the ticket filter matches |
 | `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem}]}`: the registry, the checkout's path, its non-terminal jobs, and why the checkout cannot be used now or `null` |
 | `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, reviewer, conversation: {message, url}}], archived: [{workspace, ticket, title}]}`: the Task files without a live job; `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `reviewer` as in the job detail; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |

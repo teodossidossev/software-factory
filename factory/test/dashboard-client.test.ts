@@ -1118,3 +1118,66 @@ test('client: the Files view lists sensitive, deleted and the rest in order, exp
   assert.equal(page.$('files-view').hidden, true);
   assert.equal(page.$('iteration-body').hidden, false);
 });
+
+// The Claude review of each iteration (SF-038): verdict, summary and items under the meta line, a
+// failure, nothing while none ended; the job's cost counts the reviews.
+test('client: the Iterations tab shows the review of the selected iteration, and the job cost includes the reviews', async () => {
+  const meta = { started_at: '2026-11-01T10:00:01.000Z', ended_at: '2026-11-01T10:05:00.000Z', changed_files: 1, patch_truncated: false, denials: 0, files: null };
+  const fix = {
+    reviewer: 'claude', verdict: 'fix', summary: 'The greeting is wrong.', accepted_sensitive: [], cost_usd: 0.25,
+    items: [{ path: 'README.md', problem: 'It greets the world.', expected: 'It greets the reader.' }, { path: 'a.txt', problem: 'Empty.', expected: 'A line.' }],
+    started_at: '2026-11-01T10:05:01.000Z', ended_at: '2026-11-01T10:06:00.000Z',
+  };
+  const clean = { ...fix, verdict: 'clean', summary: 'Right now.', items: [], accepted_sensitive: ['package.json'], cost_usd: 0.125 };
+  const withReviews = (third: unknown) => ({
+    ...detail(A),
+    iterations: [
+      { number: 1, cost_usd: 0.5, ...meta, review: fix },
+      { number: 2, cost_usd: 0.5, ...meta, review: clean },
+      { number: 3, cost_usd: null, ...meta, review: third },
+    ],
+  });
+  const page = await loadPage(STATIC_DIR, (path) => {
+    if (path === 'api/jobs') {
+      return { jobs: [job(A)] };
+    }
+    if (path === 'api/jobs/app/T-1') {
+      return withReviews(null);
+    }
+    return path.endsWith('/report') ? '# Report' : undefined;
+  });
+  page.document.dispatch('DOMContentLoaded');
+  await page.flush();
+  const stream = page.streams.at(-1)!;
+  stream.emit('open');
+  stream.emit('jobs', { jobs: [job(A)] });
+  stream.emit('job', withReviews(null));
+  await page.flush();
+  const review = page.$('iteration-review');
+  const select = async (number: number): Promise<void> => {
+    (page.$('iteration-tabs').children as FakeElement[])[number - 1]!.click();
+    await page.flush();
+  };
+  assert.equal(page.$('job-cost').textContent, 'est. $1.3750');
+
+  await select(3);
+  assert.deepEqual([review.hidden, review.children.length], [true, 0]);
+  await select(1);
+  assert.deepEqual([review.hidden, review.className], [false, 'review v-fix']);
+  const children = review.children as FakeElement[];
+  assert.deepEqual(children.map((child) => child.textContent), [
+    'Review by claude: fix (2 items), cost $0.2500',
+    'The greeting is wrong.',
+    'README.md: It greets the world. Expected: It greets the reader.a.txt: Empty. Expected: A line.',
+  ]);
+  assert.equal(children[2]!.tagName, 'OL');
+  await select(2);
+  assert.deepEqual((review.children as FakeElement[]).map((child) => child.textContent), [
+    'Review by claude: clean, cost $0.1250', 'Right now.', 'Accepted sensitive paths: package.json',
+  ]);
+  stream.emit('job', withReviews({ reviewer: 'claude', error: 'The review returned no structured output.' }));
+  await page.flush();
+  await select(3);
+  assert.equal(review.className, 'review v-failed');
+  assert.deepEqual((review.children as FakeElement[]).map((child) => child.textContent), ['Review by claude: failed', 'The review returned no structured output.']);
+});

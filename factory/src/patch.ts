@@ -1,7 +1,7 @@
 // The Patch of an iteration: the work checkout against the base commit, tracked changes plus
 // untracked files, without touching the index. .software-factory/, ignored and credential-like
 // paths and sandbox placeholders (src/placeholders.ts) are left out; the result is valid UTF-8 and at most MAX_PATCH_BYTES.
-import { runGit } from './git.js';
+import { runGit, runGitToFile } from './git.js';
 import type { ChangedFile, FileChange } from './jobs.js';
 import { isPlaceholder } from './placeholders.js';
 import { isForbidden } from './repo-files.js';
@@ -216,4 +216,25 @@ export async function buildPatch(cwd: string, baseCommit: string): Promise<Patch
   }
   const { patch, truncated } = assemblePatch(parts);
   return { patch, truncated, ...changedFiles(patch.toString('utf8')) };
+}
+
+// Writes the working tree against commit to the open file fd as a patch `git apply` takes, binary
+// files included: the paths of the Patch (tracked and untracked, filtered as the Patch is). Git
+// writes straight into the file, so the patch is never cut, whatever its size. It saves a
+// conflict resolution the rebase could not continue (src/mr.ts).
+export async function writeResolutionPatch(cwd: string, commit: string, fd: number): Promise<void> {
+  const { tracked, untracked } = await changedPaths(cwd, commit);
+  const diff = async (args: string[], okCodes: number[]): Promise<void> => {
+    const result = await runGitToFile(cwd, ['diff', ...DIFF_FLAGS, '--binary', ...args], fd);
+    if (result.code === null || !okCodes.includes(result.code)) {
+      throw new Error(`git diff failed (${result.code}): ${result.stderr.trim()}`);
+    }
+  };
+  if (tracked.length > 0) {
+    await diff([commit, '--', ...tracked.map((path) => `:(literal)${path}`)], [0]);
+  }
+  for (const path of untracked) {
+    // Exit code 1 means "differences found", which is always the case here.
+    await diff(['--no-index', '--', '/dev/null', path], [0, 1]);
+  }
 }

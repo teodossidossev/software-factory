@@ -304,7 +304,8 @@ test('mark_clean: the target moved in the same hunk; a conflict turn that leaves
     { text: 'Could not resolve.' },
     // The retry: the MR text is still in the worktree; conflict turn 2 resolves the file.
     { text: 'MR text kept' },
-    { write: { 'lines.txt': resolved }, text: '# Report: M-2, conflict resolution\n\n## Done\nlines.txt: kept both changes.' },
+    // It also edits a file that did not conflict, to make the merge build.
+    { write: { 'lines.txt': resolved, 'notes.txt': 'adapted\n' }, text: '# Report: M-2, conflict resolution\n\n## Done\nlines.txt: kept both changes.' },
     // The next Clean.
     { text: 'MR text kept' },
   ]);
@@ -332,6 +333,7 @@ test('mark_clean: the target moved in the same hunk; a conflict turn that leaves
   let job = (await jobs.read('app', 'M-2'))!;
   assert.deepEqual([job.base_commit, job.target_commit, job.worktree, job.mr_attempts], [upstream, upstream, worktree, 2]);
   assert.equal(git(worktree, 'rev-parse', 'HEAD~1').trim(), upstream);
+  assert.equal(git(worktree, 'show', '--name-only', '--format=', 'HEAD').trim(), 'lines.txt\nnotes.txt');
   assert.equal(await rebasing(worktree), false);
 
   // The next Clean commits again (one commit); the rebase has nothing to do.
@@ -345,6 +347,50 @@ test('mark_clean: the target moved in the same hunk; a conflict turn that leaves
   const pushed = await approve(env, 'M-2');
   assert.equal(pushed.code, 0, pushed.stdout + pushed.stderr);
   assert.equal(execFileSync('git', ['--git-dir', origin, 'show', 'M-2-edit-line-nine:lines.txt'], { encoding: 'utf8' }), resolved);
+  await stop(served);
+});
+
+test('mark_clean: a resolved conflict whose rebase --continue fails keeps the resolution as conflict-resolution.diff and names it in mr_conflict', async () => {
+  const env = await newEnv('continuefails');
+  const { repo, origin } = await linesRepo(env, 'continuefails-repo');
+  await putTask(env, repo, 'M-3', 'Edit line nine');
+  const resolved = lines({ 9: '9 change and upstream' });
+  // Commits are signed by a fake gpg that signs until the refuse file exists. The rebase keeps the
+  // signing option it started with, so the commit and the rebase sign and the continue fails.
+  const refuse = join(env.home, 'refuse-signing');
+  const signer = join(env.home, 'fake-gpg');
+  await writeFile(signer, `#!/bin/sh\ncat >/dev/null\n[ -e '${refuse}' ] && { echo 'signing refused' >&2; exit 1; }\nprintf '\\n[GNUPG:] SIG_CREATED D 1 8 00 0 0\\n' >&2\nprintf -- '-----BEGIN PGP SIGNATURE-----\\nfake\\n-----END PGP SIGNATURE-----\\n'\n`, { mode: 0o755 });
+  git(repo, 'config', 'commit.gpgsign', 'true');
+  git(repo, 'config', 'gpg.program', signer);
+  await script(env, [
+    { write: { 'lines.txt': lines({ 9: '9 change' }) }, text: 'iteration 1' },
+    { write: { '.software-factory/M-3.mr.md': mrText('feat(M-3): Edit line nine') }, text: 'MR text' },
+    // The turn resolves the conflict and edits another file, then the signing program starts
+    // refusing: the continue's commit fails.
+    {
+      write: { 'lines.txt': resolved, 'notes.txt': 'adapted\n' },
+      run: [['touch', refuse]],
+      text: '# Report: M-3, conflict resolution',
+    },
+  ]);
+  const served = await serve(env);
+  await call(served, 'start', { workspace: 'app', ticket: 'M-3' });
+  await waitFor(served, 'M-3', 'awaiting_review', 1);
+  const worktree = worktreeOf(env, 'M-3');
+  const upstream = pushToOrigin(origin, { 'lines.txt': lines({ 9: '9 upstream' }) }, 'upstream line nine');
+
+  await call(served, 'mark_clean', { workspace: 'app', ticket: 'M-3' });
+  const failed = await waitFor(served, 'M-3', 'needs_human');
+  const saved = join(new JobStore(env.state).iterationDir('app', 'M-3', 1), 'conflict-resolution.diff');
+  assert.equal(failed.error?.code, 'mr_conflict');
+  assert.ok(failed.error!.message.startsWith(`The rebase had conflicts in lines.txt; the resolved files are saved in ${saved}, a patch against ${upstream}. git rebase failed: `), failed.error!.message);
+  assert.match(failed.error!.message, /gpg failed to sign.*The rebase was aborted\.$/s);
+  assert.equal(await rebasing(worktree), false);
+  assert.equal(await readFile(join(worktree, 'lines.txt'), 'utf8'), lines({ 9: '9 change' }));
+  // The patch takes the target to the resolved state.
+  const patch = await readFile(saved, 'utf8');
+  assert.match(patch, /^-9 upstream\n\+9 change and upstream$/m);
+  assert.match(patch, /^\+adapted$/m);
   await stop(served);
 });
 

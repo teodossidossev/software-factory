@@ -52,6 +52,21 @@ export function runGit(cwd: string, args: string[], maxBytes = 1024 * 1024, time
   });
 }
 
+// Runs Git with its stdout written to the open file fd (no limit, nothing held in memory).
+export function runGitToFile(cwd: string, args: string[], fd: number): Promise<{ code: number | null; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', args, { cwd, env: gitEnv(), stdio: ['ignore', fd, 'pipe'] });
+    let stderr = '';
+    child.stderr!.on('data', (chunk: Buffer) => {
+      if (stderr.length < 4096) {
+        stderr += chunk.toString('utf8');
+      }
+    });
+    child.once('error', reject);
+    child.once('close', (code) => resolve({ code, stderr }));
+  });
+}
+
 // The Git work tree root containing cwd, or undefined (not a repository, bare, or Git failed).
 export async function gitToplevel(cwd: string): Promise<string | undefined> {
   try {

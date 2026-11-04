@@ -1,15 +1,21 @@
 // Atomic file replacement: a complete temp file (fsynced) renamed over the target.
 import { randomUUID } from 'node:crypto';
-import { open, rename, rm } from 'node:fs/promises';
+import { type FileHandle, open, rename, rm } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
-export async function writeFileAtomic(target: string, data: Buffer, mode = 0o600): Promise<void> {
+export function writeFileAtomic(target: string, data: Buffer, mode = 0o600): Promise<void> {
+  return writeFileAtomicWith(target, (handle) => handle.writeFile(data), mode);
+}
+
+// The same, with the content written by write into the temp file's handle (a stream, a child
+// process's stdout, ...); a write that throws leaves the target alone.
+export async function writeFileAtomicWith(target: string, write: (handle: FileHandle) => Promise<void>, mode = 0o600): Promise<void> {
   const dir = dirname(target);
   const tempPath = join(dir, `.${basename(target)}.${randomUUID()}.tmp`);
   try {
     const handle = await open(tempPath, 'wx', mode);
     try {
-      await handle.writeFile(data);
+      await write(handle);
       await handle.sync();
     } finally {
       await handle.close();

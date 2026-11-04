@@ -2,11 +2,11 @@
 // factory's commit and rebase at Clean, the conflict resolution around it, the push and the merge
 // request link. Git runs here outside the sandbox, so the repository's hooks are switched off.
 // The Execution drives them around the Implementer's turns; this module runs no turn.
-import { lstat, readFile } from 'node:fs/promises';
+import { type FileHandle, lstat, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
-import { changedPaths } from './patch.js';
+import { changedPaths, writeResolutionPatch } from './patch.js';
 import { headerProblem, MR_REQUIRED_HEADINGS } from './rules.js';
 import { TASK_DIR } from './task-file.js';
 
@@ -40,9 +40,15 @@ function factoryGit(cwd: string, args: string[]): ReturnType<typeof runGit> {
   return runGit(cwd, ['-c', 'core.hooksPath=/dev/null', ...args], 1024 * 1024, GIT_TIMEOUT_MS);
 }
 
-function gitFailure(args: string[], result: { code: number | null; stderr: string }): string {
-  const command = `git ${args.find((arg) => !arg.startsWith('-')) ?? args[0]}`;
-  return result.code === null ? `${command} did not finish within ${GIT_TIMEOUT_MS / 1000} s` : `${command} failed: ${result.stderr.trim().slice(0, 500)}`;
+// Why a factory Git call failed: its stderr, or its stdout when stderr is empty (Git prints some
+// rebase refusals on stdout).
+export function gitFailure(args: string[], result: { code: number | null; stderr: string; stdout: Buffer }): string {
+  const command = `git ${args.find((arg, index) => !arg.startsWith('-') && args[index - 1] !== '-c') ?? args[0]}`;
+  if (result.code === null) {
+    return `${command} did not finish within ${GIT_TIMEOUT_MS / 1000} s`;
+  }
+  const stderr = result.stderr.trim();
+  return `${command} failed: ${(stderr !== '' ? stderr : result.stdout.toString('utf8').trim()).slice(0, 500)}`;
 }
 
 // stdout of a factory Git call that must succeed.
@@ -286,22 +292,37 @@ export async function filesWithMarkers(cwd: string, files: string[]): Promise<st
   return marked;
 }
 
-// After the conflict turn: the resolved files are staged and the rebase continues. A file that
-// still holds a marker, or a continue that fails, aborts the rebase (mr_conflict).
-export async function continueRebase(cwd: string, files: string[]): Promise<MrFailure | undefined> {
+// After the conflict turn: every change of the worktree against the target is staged (the
+// conflicted files and any other file the turn changed, filtered as the factory's commit is) and
+// the rebase continues. A file that still holds a marker aborts the rebase (mr_conflict). A
+// continue that fails first saves the resolved worktree, a patch against targetCommit: save opens
+// the file, runs the writer it is given on it and returns where the patch is. Then the rebase is
+// aborted (mr_conflict naming the patch); nothing is retried.
+export async function continueRebase(
+  cwd: string, input: { files: string[]; targetCommit: string; save: (write: (handle: FileHandle) => Promise<void>) => Promise<string> },
+): Promise<MrFailure | undefined> {
+  const { files, targetCommit, save } = input;
   const conflict = (detail: string): MrFailure => ({ code: 'mr_conflict', message: `The rebase had conflicts in ${files.join(', ')}; ${detail} The rebase was aborted.` });
   const marked = await filesWithMarkers(cwd, files);
   if (marked.length > 0) {
     await abortRebase(cwd);
     return conflict(`conflict markers are left in ${marked.join(', ')}.`);
   }
-  for (const chunk of chunks(files)) {
+  const changed = await commitPaths(cwd, targetCommit);
+  for (const chunk of chunks([...new Set([...files, ...changed])].sort())) {
     await factoryGitOk(cwd, ['add', '--all', '--', ...chunk.map(literal)]);
   }
   const continued = await factoryGit(cwd, ['-c', 'core.editor=true', 'rebase', '--continue']);
   if (continued.code !== 0) {
+    // The saved patch first, so a message cut short still names it.
+    let kept: string;
+    try {
+      kept = `the resolved files are saved in ${await save((handle) => writeResolutionPatch(cwd, targetCommit, handle.fd))}, a patch against ${targetCommit}`;
+    } catch (error) {
+      kept = `the resolved files could not be saved (${(error as Error).message.slice(0, 200)})`;
+    }
     await abortRebase(cwd);
-    return conflict(`${gitFailure(['rebase'], continued)}.`);
+    return { code: 'mr_conflict', message: `The rebase had conflicts in ${files.join(', ')}; ${kept}. ${gitFailure(['rebase'], continued)}. The rebase was aborted.` };
   }
   return undefined;
 }

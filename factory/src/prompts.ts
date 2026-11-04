@@ -110,7 +110,7 @@ export function conflictPrompt(input: ConflictPromptInput): string {
     '',
     'Resolve the conflicts by editing these files. Keep the reviewed behaviour and the changes of the target. Leave no conflict markers: no line starting with `<<<<<<< `, `=======` or `>>>>>>> `.',
     'Run the checks of these files.',
-    'Run no Git command; the factory stages the files and continues the rebase. A file left with a marker aborts the rebase.',
+    'Edit other files only as far as the merge needs them to build and pass. Run no Git command; the factory stages every change and continues the rebase. A file left with a marker aborts the rebase.',
     `Do not edit ${TASK_DIR}/${ticket}.md; the Context owner owns it.`,
     'End your turn with a report in this form, as your last message:',
     `  # Report: ${ticket}, conflict resolution`,

@@ -2,10 +2,10 @@
 // iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json} (plus the gate's schema and
 // output files), and from MR preparation on mr.md. Strictly parsed; every file but the event log
 // is replaced atomically. Knows nothing about Git or the Implementer session.
-import { appendFile, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
+import { appendFile, type FileHandle, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import * as z from 'zod/v4';
-import { writeFileAtomic } from './atomic.js';
+import { writeFileAtomic, writeFileAtomicWith } from './atomic.js';
 import { FactoryError } from './errors.js';
 
 export const JOB_STATES = [
@@ -325,6 +325,14 @@ export class JobStore {
   // The directory of one published iteration.
   iterationDir(workspace: string, ticket: string, number: number): string {
     return join(this.dir(workspace, ticket), 'iterations', String(number).padStart(3, '0'));
+  }
+
+  // The resolution of a conflict turn whose rebase could not continue (SF-056), kept with the
+  // iteration being rebased, its content written by write; returns the file's path.
+  async writeConflictResolution(workspace: string, ticket: string, number: number, write: (handle: FileHandle) => Promise<void>): Promise<string> {
+    const path = join(this.iterationDir(workspace, ticket, number), 'conflict-resolution.diff');
+    await writeFileAtomicWith(path, write);
+    return path;
   }
 
   async writeReview(workspace: string, ticket: string, number: number, review: ReviewRecord): Promise<void> {

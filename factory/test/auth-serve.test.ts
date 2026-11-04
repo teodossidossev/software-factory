@@ -6,7 +6,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
-import { AUDIENCE, type FakeAs, startFakeAs } from './support/fake-as.js';
+import { AUDIENCE, type FakeAs, newKey, startFakeAs } from './support/fake-as.js';
 import { CLI, type Env, newEnv, newRepo, processEnv, putTask, runCli, script, serve, type Served, stop, waitFor } from './support/harness.js';
 
 const RESOURCE_METADATA = 'https://sf.example.test/.well-known/oauth-protected-resource';
@@ -38,13 +38,17 @@ function post(url: URL, body: unknown, token?: string): Promise<Response> {
 
 const guideCall = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'guide', arguments: {} } };
 
-async function assertChallenge(response: Response): Promise<void> {
+const MISSING_HEADER = 'Missing Authorization header';
+
+// A 401 with the whole Bearer challenge: the error, the offline_access scope hint (SF-033) and
+// the metadata URL; the body is the OAuth error JSON.
+async function assertChallenge(response: Response, description: string): Promise<void> {
   assert.equal(response.status, 401);
-  const challenge = response.headers.get('www-authenticate') ?? '';
-  assert.match(challenge, /^Bearer /);
-  assert.match(challenge, /error="invalid_token"/);
-  assert.ok(challenge.includes(`resource_metadata="${RESOURCE_METADATA}"`), challenge);
-  assert.equal(((await response.json()) as { error: string }).error, 'invalid_token');
+  assert.equal(
+    response.headers.get('www-authenticate'),
+    `Bearer error="invalid_token", error_description="${description}", scope="offline_access", resource_metadata="${RESOURCE_METADATA}"`,
+  );
+  assert.deepEqual(await response.json(), { error: 'invalid_token', error_description: description });
 }
 
 // A client sending the token on every request.
@@ -88,7 +92,7 @@ test('sf serve with OAuth: metadata, open methods, the challenge, principals in 
         resource: 'https://sf.example.test/mcp',
         authorization_servers: [as.issuer],
         bearer_methods_supported: ['header'],
-        scopes_supported: ['openid', 'profile', 'email'],
+        scopes_supported: ['openid', 'profile', 'email', 'offline_access'],
       });
     }
     assert.equal((await fetch(new URL('/.well-known/oauth-protected-resource', served.url), { method: 'POST' })).status, 405);
@@ -96,21 +100,24 @@ test('sf serve with OAuth: metadata, open methods, the challenge, principals in 
     // tools/list is open; tools/call is not.
     const tools = await served.client.listTools();
     assert.ok(tools.tools.some((tool) => tool.name === 'guide'));
-    await assertChallenge(await post(served.url, guideCall));
+    await assertChallenge(await post(served.url, guideCall), MISSING_HEADER);
     // A batch, a body without a method and an unparseable body are never open.
-    await assertChallenge(await post(served.url, [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }]));
-    await assertChallenge(await post(served.url, { jsonrpc: '2.0', id: 1, result: {} }));
-    await assertChallenge(await post(served.url, '{not json'));
+    await assertChallenge(await post(served.url, [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }]), MISSING_HEADER);
+    await assertChallenge(await post(served.url, { jsonrpc: '2.0', id: 1, result: {} }), MISSING_HEADER);
+    await assertChallenge(await post(served.url, '{not json'), MISSING_HEADER);
     // An invalid token is refused even for an open method.
     const expired = as.sign(as.claims({ exp: Math.floor(Date.now() / 1000) - 3600 }));
-    await assertChallenge(await post(served.url, guideCall, expired));
-    await assertChallenge(await post(served.url, { jsonrpc: '2.0', id: 1, method: 'tools/list' }, expired));
-    await assertChallenge(await post(served.url, guideCall, as.sign(as.claims({ aud: 'https://other.example.test/mcp' }))));
+    await assertChallenge(await post(served.url, guideCall, expired), 'Token rejected: expired.');
+    await assertChallenge(await post(served.url, { jsonrpc: '2.0', id: 1, method: 'tools/list' }, expired), 'Token rejected: expired.');
+    await assertChallenge(await post(served.url, guideCall, as.sign(as.claims({ aud: 'https://other.example.test/mcp' }))), 'Token rejected: wrong_audience.');
+    await assertChallenge(await post(served.url, guideCall, as.sign(as.claims({ iss: 'https://other.example.test/' }))), 'Token rejected: wrong_issuer.');
+    await assertChallenge(await post(served.url, guideCall, as.sign(as.claims(), { key: newKey() })), 'Token rejected: bad_signature.');
     // GET /mcp is unchanged by OAuth.
     const get = await fetch(served.url, { headers: { accept: 'text/event-stream' } });
     assert.notEqual(get.status, 401);
 
-    const authed = await authedClient(served, as.sign(as.claims()));
+    // A token with only the prior scopes, no offline_access, is accepted: the hint is not enforced.
+    const authed = await authedClient(served, as.sign(as.claims({ scope: 'openid profile email' })));
     const guide = await authed.client.callTool({ name: 'guide', arguments: {} });
     assert.equal(guide.isError ?? false, false);
     const started = await authed.client.callTool({ name: 'start', arguments: { workspace: 'app', ticket: 'AUTH-1' } });
@@ -127,6 +134,22 @@ test('sf serve with OAuth: metadata, open methods, the challenge, principals in 
     assert.match(watched.stdout, /\[1\] mark_clean by auth0\|user-1$/m);
     await authed.client.close();
   } finally {
+    await stop(served);
+  }
+});
+
+test('sf serve with OAuth: the authorization server keys unreachable is a 500, not a challenge', async () => {
+  const env = await authEnv('auth-jwks-down', { SF_AUTH_RESOURCE: 'https://sf.example.test/mcp' });
+  await newRepo(env, 'auth-jwks-down-repo', false);
+  const served = await serve(env);
+  as.jwksUp = false;
+  try {
+    const response = await post(served.url, guideCall, as.sign(as.claims()));
+    assert.equal(response.status, 500);
+    assert.equal(response.headers.get('www-authenticate'), null);
+    assert.deepEqual(await response.json(), { error: 'server_error', error_description: 'Token rejected: jwks_unavailable.' });
+  } finally {
+    as.jwksUp = true;
     await stop(served);
   }
 });

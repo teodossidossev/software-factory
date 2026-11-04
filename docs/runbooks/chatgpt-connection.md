@@ -156,6 +156,11 @@ same string in Auth0, in the factory and in the metadata.
    URL ChatGPT names) and grant it access to the API of step 1 (its *APIs* tab, or the API's
    *Machine to Machine / Application Access* tab).
 5. A user that may sign in (Database, Google or another connection enabled for that client).
+6. Applications → APIs → the API of step 1 (here **Software Factory**, identifier `<resource>`,
+   for this factory `https://software-factory.local/mcp`) → Settings: turn on
+   **Allow Offline Access** and save. Without it Auth0 issues no refresh token for this API, and
+   ChatGPT has to connect again whenever the access token expires (section "Refresh tokens"
+   below).
 
 **In ChatGPT:** the connector (https://chatgpt.com/plugins) with **Authentication: OAuth** and
 **OIDC enabled unticked**. Edit the existing **Software Factory** plugin or create it as in "The
@@ -198,6 +203,61 @@ output names what to fix: `wrong_audience` (the Default Audience or the resource
 `SF_AUTH_AUDIENCE`), `wrong_issuer` (`SF_AUTH_ISSUER` without its trailing slash), `expired`
 (the clock or an old token), `unknown_kid` (another tenant), `jwks_unavailable` (Auth0 not
 reachable from this machine).
+
+### Refresh tokens: keeping the connection past the access token's lifetime
+
+Auth0 issues this API's access tokens for 86400 s (24 h). The connection survives that only when
+ChatGPT holds a refresh token: ChatGPT requests it with the `offline_access` scope, Auth0 issues it
+when the API allows offline access (Auth0 step 6), and ChatGPT stores and uses it. The factory stays
+a resource server: it never sees a refresh token and has no token endpoint. To prompt ChatGPT to ask for
+`offline_access`, the factory lists it in `scopes_supported` of its metadata and adds
+`scope="offline_access"` to its `401` challenge. That is an agreed ChatGPT compatibility measure
+(SF-033), not a standards requirement (the MCP authorization draft recommends leaving it out) and not
+an API permission: a token without `offline_access` is still accepted.
+
+Turning on Allow Offline Access does not change an existing authorization and does not prove that a
+refresh token was issued. After the change and the deployment of the factory (both the user's, by
+the usual process), check and then connect again:
+
+1. **The hints are served.** Auth0's discovery document lists the scope, both metadata paths list
+   it, and a protected request without a token is challenged with it. Auth0 may list the scope
+   tenant-wide, so its discovery document does not show whether step 6 is on; check the API's
+   setting itself.
+
+   ```bash
+   curl -s https://<tenant>.<region>.auth0.com/.well-known/openid-configuration | grep -o '"offline_access"'
+   curl -s http://127.0.0.1:8787/.well-known/oauth-protected-resource       # "offline_access" in scopes_supported
+   curl -s http://127.0.0.1:8787/.well-known/oauth-protected-resource/mcp   # the same
+   curl -si http://127.0.0.1:8787/mcp -H 'content-type: application/json' \
+     -H 'accept: application/json, text/event-stream' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"guide","arguments":{}}}' \
+     | grep -i '^www-authenticate'   # 401: Bearer error="invalid_token", ..., scope="offline_access", resource_metadata="..."
+   ```
+
+2. **A fresh connection.** Press **Refresh** on the plugin, then disconnect and connect again so that
+   ChatGPT runs a new authorization with consent. Leave **OIDC enabled** unticked (SF-032): that
+   checkbox is not the `openid` scope and has nothing to do with `offline_access`. Troubleshooting: if
+   ChatGPT keeps the scopes it read when the plugin was created and step 3 shows no
+   `offline_access`, creating the plugin again may be needed; this is not always required.
+3. **The initial evidence.** In Auth0 → Monitoring → Logs, for the ChatGPT client and `<resource>`,
+   the authorization and the code exchange of the new connection must show `offline_access` in the
+   scope. That is necessary, not proof that a later refresh succeeds. Note the time of the
+   connection.
+4. **The refresh itself.** Once 86400 s have passed since that connection, call a tool that needs
+   the token (for example `guide` in a Work chat). Auth0's logs must show a successful refresh-token
+   exchange for the same client, and the call must succeed without Reconnect or a new interactive
+   sign-in. ChatGPT may refresh before the expiry; what counts is a refresh correlated with continued
+   use after the original token would have expired. If ChatGPT was idle at the expiry, check at its
+   next authenticated call.
+
+Record only non-secret evidence: times, Auth0 log event IDs, client and resource identifiers,
+scopes, success or failure. Never copy an access token, refresh token, code or credential into a
+log, a report or a chat.
+
+If ChatGPT still never requests `offline_access` after the plugin refresh, a new connection and,
+where needed, a new plugin, report what was observed to the user. A longer access token lifetime in
+Auth0 (up to the 30 days the user named as a fallback) widens the window in which a leaked token is
+usable; it is the user's decision alone and not the fix for this.
 
 ### Tunnel settings for OAuth
 
@@ -307,9 +367,9 @@ confirmation.
 - **"We couldn't connect this account" at Connect or Reconnect**, with Success Login and Success
   Exchange in Auth0's logs and nothing in `serve.log` or `tunnel.log`: the plugin has *OIDC
   enabled* ticked (section OAuth with Auth0). Untick it, or create the plugin again without it.
-- **A daily Reconnect.** Auth0's access token lives 24 h and ChatGPT holds no refresh token
-  (`offline_access` is neither advertised nor allowed on the API). Until that changes, connect
-  again when a call answers 401.
+- **A daily Reconnect.** Auth0's access token lives 24 h and ChatGPT holds no refresh token. Check
+  Allow Offline Access on the API and work through "Refresh tokens" in the section OAuth with
+  Auth0; until a refresh is seen in Auth0's logs, connect again when a call answers 401.
 - **ChatGPT reads the Report and stops** ("next: an independent review", "next: request_fix")
   until you tell it to go on. The event-triggered task's instruction was shortened to checking
   and reporting. Open the task in ChatGPT's Scheduled view and replace its instruction with the

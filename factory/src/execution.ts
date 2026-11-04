@@ -1,6 +1,8 @@
 // The job lifecycle: start, check, requestFix, markClean (the MR preparation and the branch,
 // SF-019, committed and rebased by the factory, SF-037), say, retryReview (the retry of a failed
-// review, SF-044), acceptGate (the user's override of a stopped gate, SF-047), approve (the push), abort, reset
+// review, SF-044), acceptGate (the user's override of a stopped gate, SF-047), approve (the push),
+// the merge request on the Git host (SF-048: createMergeRequest, mergeMergeRequest,
+// mergeRequestStatus), abort, reset
 // (and the dashboard's terminal-only Archive), status and the restart rule. Owns the Implementer session of each job, which works in the
 // job's own worktree, and publishes an iteration (Report, Patch and the file list) when the
 // session goes idle; then the Claude review of that iteration runs (SF-038, src/review.ts), and
@@ -15,9 +17,10 @@ import { copyFile, type FileHandle, mkdir, readFile, stat } from 'node:fs/promis
 import { join } from 'node:path';
 import type { Config } from './config.js';
 import { FactoryError } from './errors.js';
+import { chooseForge, type Forge, type ForgeKind, forgeFor, type MergeRequestStatus } from './forge.js';
 import { runGit } from './git.js';
 import { GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from './gate.js';
-import { cutEvent, type FileChange, type GateOverride, type GateRecord, isActive, type Job, type JobState, JobStore, now, type ReviewRecord, TERMINAL_STATES } from './jobs.js';
+import { cutEvent, type FileChange, type GateOverride, type GateRecord, isActive, type Job, type JobMr, type JobState, JobStore, now, type ReviewRecord, TERMINAL_STATES } from './jobs.js';
 import { abortRebase, commitAndRebase, continueRebase, gitBusy, mergeRequestLink, originUrl, pushBranch, readMrText, rebaseInProgress, resolveTarget, unmergedPaths } from './mr.js';
 import { buildPatch, changedFilesSection, fileChanges, fileSummaryLines, type Patch } from './patch.js';
 import { removeSandboxPlaceholders } from './placeholders.js';
@@ -62,13 +65,31 @@ export interface ReviewStatus {
 // lines: extra notification lines (the MR title and link when pushed, the file summary).
 export type StateListener = (job: Job, from: JobState | null, lines?: string[]) => void;
 
-// How approve (the push) ended.
+// How approve (the push) or sf mr create ended: error is the failed push (needs_human), or, with
+// the job pushed, the merge request that could not be opened.
 export interface MrOutcome {
   state: JobState;
   branch: string;
   error?: { code: string; message: string };
   title?: string;
   link?: string;
+  // The merge request opened (or reused) on the Git host (SF-048).
+  mr?: JobMr & { reused: boolean };
+}
+
+// The merge request's title and body, from the MR text.
+interface MrContent {
+  title: string;
+  body: string;
+}
+
+// An error as an outcome's {code, message}; anything but a FactoryError is logged and kept generic.
+function mrFailure(error: unknown): { code: string; message: string } {
+  if (error instanceof FactoryError) {
+    return { code: error.code, message: error.message };
+  }
+  console.error(error);
+  return { code: 'internal_error', message: 'The merge request failed inside the factory.' };
 }
 
 type Success = Extract<IdleOutcome, { ok: true }>;
@@ -311,7 +332,7 @@ export class Execution {
       const worktree = this.#worktreePath(workspace.name, ticket);
       const job: Job = {
         workspace: workspace.name, ticket, branch, base, base_commit: null, state: 'starting', worktree, prepared_commit: null,
-        iteration: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, target_commit: null, mr_attempts: 0, created_at: created, updated_at: created,
+        iteration: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, created_at: created, updated_at: created,
       };
       await this.jobs.write(job);
       await this.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, state: { from: null, to: 'starting' } });
@@ -997,34 +1018,199 @@ export class Execution {
   approve(workspaceName: string, ticket: string, asIs = false): Promise<MrOutcome> {
     return this.#locked(async () => {
       const job = await this.#job(workspaceName, ticket);
-      const pushRetry = job.state === 'needs_human' && job.prepared_commit !== null && job.worktree === null;
-      if (!(job.state === 'ready_for_human_review' || pushRetry)) {
-        throw new FactoryError('invalid_state', `approve needs ready_for_human_review (the branch prepared at Clean); the job is ${job.state}.`);
+      this.#checkApprovable(job, 'approve');
+      return this.#approve(job, await this.#resolve(workspaceName), asIs);
+    });
+  }
+
+  // The job's prepared branch can be pushed: ready_for_human_review, or needs_human after a push
+  // that failed.
+  #approvable(job: Job): boolean {
+    return job.state === 'ready_for_human_review' || (job.state === 'needs_human' && job.prepared_commit !== null && job.worktree === null);
+  }
+
+  #checkApprovable(job: Job, command: string): void {
+    if (!this.#approvable(job)) {
+      throw new FactoryError('invalid_state', `${command} needs ready_for_human_review (the branch prepared at Clean); the job is ${job.state}.`);
+    }
+  }
+
+  // The push of approve. With open (sf mr create from ready_for_human_review), the merge request
+  // is opened after the push and before the job moves to pushed, so the one notification carries
+  // its link; a merge request that fails to open leaves the job pushed, with the failure in the
+  // outcome. Only under the lock.
+  async #approve(job: Job, workspace: Workspace, asIs: boolean, open?: { forge: Forge; content: MrContent }): Promise<MrOutcome> {
+    const { workspace: workspaceName, ticket } = job;
+    const checkout = workspace.workCheckout;
+    const tipResult = await runGit(checkout, ['rev-parse', '--verify', '--quiet', `refs/heads/${job.branch}`]);
+    const tip = tipResult.stdout.toString('utf8').trim();
+    if (tipResult.code !== 0 || tip === '') {
+      throw new FactoryError('branch_missing', `The branch ${job.branch} no longer exists in the checkout.`);
+    }
+    if (tip !== job.prepared_commit && !asIs) {
+      throw new FactoryError('branch_changed', `The tip of ${job.branch} is ${tip.slice(0, 12)}, not the prepared ${(job.prepared_commit ?? '').slice(0, 12)}: it was edited by hand. Approve with --as-is to push it as it is.`);
+    }
+    const pushFailure = await this.#gitLocked(workspaceName, () => pushBranch(checkout, job.branch, job.base));
+    if (pushFailure !== undefined) {
+      const next = await this.#transition(job, 'needs_human', pushFailure);
+      return { state: next.state, branch: next.branch, error: pushFailure };
+    }
+    const mrText = (await this.jobs.readMrText(workspaceName, ticket)) ?? '';
+    const title = mrText.split(/\r?\n/)[0] ?? '';
+    const url = await originUrl(checkout);
+    const link = url === undefined ? undefined : mergeRequestLink(url, job.base, job.branch);
+    let opened: (JobMr & { reused: boolean }) | undefined;
+    let failure: { code: string; message: string } | undefined;
+    if (open !== undefined) {
+      try {
+        opened = await this.#openMr(job, open.forge, open.content);
+      } catch (error) {
+        failure = mrFailure(error);
+      }
+    }
+    const mr = opened === undefined ? job.mr : { host: opened.host, number: opened.number, url: opened.url, state: opened.state };
+    const lines = [title, ...(opened !== undefined ? [`Merge request #${opened.number}: ${opened.url}`] : link !== undefined ? [link] : [])];
+    const pushed = await this.#transition({ ...job, prepared_commit: tip, mr }, 'pushed', undefined, lines);
+    if (opened !== undefined) {
+      await this.#mrEvent(pushed, opened.reused ? 'reused' : 'created');
+    }
+    this.#live.delete(`${workspaceName}/${ticket}`);
+    console.log(`${job.workspace}/${job.ticket}: pushed ${job.branch}\n  ${title}${link !== undefined ? `\n  ${link}` : ''}`);
+    return {
+      state: pushed.state, branch: pushed.branch, ...(title !== '' ? { title } : {}), ...(link !== undefined ? { link } : {}),
+      ...(opened !== undefined ? { mr: opened } : {}), ...(failure !== undefined ? { error: failure } : {}),
+    };
+  }
+
+  // The MR text as the merge request's title (its first line) and body (the rest).
+  async #mrContent(job: Job): Promise<MrContent> {
+    const text = await this.jobs.readMrText(job.workspace, job.ticket);
+    if (text === undefined || text.trim() === '') {
+      throw new FactoryError('mr_text_missing', `The job ${job.workspace}/${job.ticket} has no MR text to open a merge request with.`);
+    }
+    const [title = '', ...rest] = text.split(/\r?\n/);
+    return { title, body: rest.join('\n').replace(/^\s*\n/, '') };
+  }
+
+  // The Forge of the job's workspace (its checkout's origin); refused when the job's merge request
+  // is on another host than the origin now is.
+  async #forge(job: Job, workspace?: Workspace): Promise<Forge> {
+    const checkout = (workspace ?? (await this.#resolve(job.workspace))).workCheckout;
+    const forge = forgeFor(await originUrl(checkout), this.#config.forge);
+    if (job.mr !== null && job.mr.host !== forge.kind) {
+      throw new FactoryError('mr_host_changed', `The merge request #${job.mr.number} is on ${job.mr.host}, but the checkout's origin is now on ${forge.kind}.`);
+    }
+    return forge;
+  }
+
+  async #openMr(job: Job, forge: Forge, content: MrContent): Promise<JobMr & { reused: boolean }> {
+    const opened = await forge.open({ branch: job.branch, base: job.base, title: content.title, body: content.body });
+    return { host: forge.kind, number: opened.number, url: opened.url, state: opened.state, reused: opened.reused };
+  }
+
+  async #mrEvent(job: Job, action: 'created' | 'reused' | 'merged' | 'updated'): Promise<void> {
+    const mr = job.mr!;
+    await this.jobs.appendEvent(job.workspace, job.ticket, {
+      ts: now(), iteration: job.iteration, type: 'merge_request', action, host: mr.host, number: mr.number, url: mr.url, mr_state: mr.state,
+      ...(typeof mr.merge_commit === 'string' ? { merge_commit: mr.merge_commit } : {}),
+    });
+  }
+
+  // A change of the job's merge request outside a state change: the listeners (the notification,
+  // the dashboard) hear of it as of a job that stays in its state.
+  #announce(job: Job, lines: string[]): void {
+    try {
+      this.#onStateChange(job, job.state, lines);
+    } catch (listenerError) {
+      console.error(listenerError);
+    }
+  }
+
+  // sf mr create (SF-048): opens the merge request of a pushed job on the Git host, or reuses the
+  // one already open for the branch; from ready_for_human_review it is approve (the push) and then
+  // the merge request, in one action. The host and its token are checked before anything is pushed.
+  createMergeRequest(workspaceName: string, ticket: string): Promise<MrOutcome> {
+    return this.#locked(async () => {
+      const job = await this.#job(workspaceName, ticket);
+      const combined = this.#approvable(job);
+      if (!(job.state === 'pushed' || combined)) {
+        throw new FactoryError('invalid_state', `sf mr create needs pushed, or ready_for_human_review (approve, then the merge request); the job is ${job.state}.`);
+      }
+      if (job.mr?.state === 'merged') {
+        throw new FactoryError('invalid_state', `The merge request #${job.mr.number} of ${workspaceName}/${ticket} is already merged.`);
       }
       const workspace = await this.#resolve(workspaceName);
-      const checkout = workspace.workCheckout;
-      const tipResult = await runGit(checkout, ['rev-parse', '--verify', '--quiet', `refs/heads/${job.branch}`]);
-      const tip = tipResult.stdout.toString('utf8').trim();
-      if (tipResult.code !== 0 || tip === '') {
-        throw new FactoryError('branch_missing', `The branch ${job.branch} no longer exists in the checkout.`);
+      const forge = await this.#forge(job, workspace);
+      const content = await this.#mrContent(job);
+      if (combined) {
+        return this.#approve(job, workspace, false, { forge, content });
       }
-      if (tip !== job.prepared_commit && !asIs) {
-        throw new FactoryError('branch_changed', `The tip of ${job.branch} is ${tip.slice(0, 12)}, not the prepared ${(job.prepared_commit ?? '').slice(0, 12)}: it was edited by hand. Approve with --as-is to push it as it is.`);
-      }
-      const pushFailure = await this.#gitLocked(workspaceName, () => pushBranch(checkout, job.branch, job.base));
-      if (pushFailure !== undefined) {
-        const next = await this.#transition(job, 'needs_human', pushFailure);
-        return { state: next.state, branch: next.branch, error: pushFailure };
-      }
-      const mrText = (await this.jobs.readMrText(workspaceName, ticket)) ?? '';
-      const title = mrText.split(/\r?\n/)[0] ?? '';
-      const url = await originUrl(checkout);
-      const link = url === undefined ? undefined : mergeRequestLink(url, job.base, job.branch);
-      const pushed = await this.#transition({ ...job, prepared_commit: tip }, 'pushed', undefined, [title, ...(link !== undefined ? [link] : [])]);
-      this.#live.delete(`${workspaceName}/${ticket}`);
-      console.log(`${job.workspace}/${job.ticket}: pushed ${job.branch}\n  ${title}${link !== undefined ? `\n  ${link}` : ''}`);
-      return { state: pushed.state, branch: pushed.branch, ...(title !== '' ? { title } : {}), ...(link !== undefined ? { link } : {}) };
+      const opened = await this.#openMr(job, forge, content);
+      const next: Job = { ...job, mr: { host: opened.host, number: opened.number, url: opened.url, state: opened.state } };
+      await this.jobs.write(next);
+      await this.#mrEvent(next, opened.reused ? 'reused' : 'created');
+      this.#announce(next, [content.title, `Merge request #${opened.number}: ${opened.url}`]);
+      return { state: next.state, branch: next.branch, title: content.title, mr: opened };
     });
+  }
+
+  // sf mr merge (SF-048): merges the job's open merge request through the host's API (no push, no
+  // force). The host's refusal (conflicts, failing required checks, a draft) comes back as
+  // mr_not_mergeable with its reason, and nothing changes.
+  mergeMergeRequest(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; mr: JobMr }> {
+    return this.#locked(async () => {
+      const job = await this.#job(workspaceName, ticket);
+      if (job.state !== 'pushed' || job.mr === null) {
+        throw new FactoryError('invalid_state', `sf mr merge needs a pushed job with a merge request (sf mr create opens one); the job is ${job.state}${job.state === 'pushed' ? ' without one' : ''}.`);
+      }
+      if (job.mr.state !== 'open') {
+        throw new FactoryError('invalid_state', `The merge request #${job.mr.number} is ${job.mr.state}; only an open one is merged.`);
+      }
+      const forge = await this.#forge(job);
+      const merged = await forge.merge(job.mr.number);
+      const next: Job = { ...job, mr: { ...job.mr, state: 'merged', merge_commit: merged.merge_commit } };
+      await this.jobs.write(next);
+      await this.#mrEvent(next, 'merged');
+      this.#announce(next, [`Merge request #${job.mr.number} merged into ${job.base}`, job.mr.url]);
+      return { state: next.state, branch: next.branch, mr: next.mr! };
+    });
+  }
+
+  // sf mr status (SF-048): what the host says of the job's merge request now. A merge request the
+  // host has merged or closed meanwhile (by hand) is recorded so; nobody is notified.
+  async mergeRequestStatus(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; mr: JobMr; status: MergeRequestStatus }> {
+    const job = await this.#job(workspaceName, ticket);
+    if (job.mr === null) {
+      throw new FactoryError('invalid_state', `No merge request is recorded for ${workspaceName}/${ticket}; sf mr create opens one.`);
+    }
+    const number = job.mr.number;
+    const status = await (await this.#forge(job)).status(number);
+    return this.#locked(async () => {
+      const current = await this.#job(workspaceName, ticket);
+      if (current.mr === null || current.mr.number !== number || current.mr.state === status.state) {
+        return { state: current.state, branch: current.branch, mr: current.mr ?? job.mr!, status };
+      }
+      const next: Job = { ...current, mr: { ...current.mr, state: status.state, ...(status.merge_commit !== undefined ? { merge_commit: status.merge_commit } : {}) } };
+      await this.jobs.write(next);
+      await this.#mrEvent(next, 'updated');
+      return { state: next.state, branch: next.branch, mr: next.mr!, status };
+    });
+  }
+
+  // Whether the merge request actions are on for a workspace: its host, or why they are off (the
+  // variable missing, an origin on no supported host, the workspace gone). No request is sent.
+  async mergeRequestHost(workspaceName: string): Promise<{ host: ForgeKind | null; reason: string | null }> {
+    let origin: string | undefined;
+    try {
+      origin = await originUrl((await this.#resolve(workspaceName)).workCheckout);
+    } catch (error) {
+      if (error instanceof FactoryError) {
+        return { host: null, reason: error.message };
+      }
+      throw error;
+    }
+    const choice = chooseForge(origin, this.#config.forge);
+    return choice.ok ? { host: choice.kind, reason: null } : { host: choice.kind, reason: choice.reason };
   }
 
   // Ends the job: the session stops; the worktree stays unless discard, which removes it and the

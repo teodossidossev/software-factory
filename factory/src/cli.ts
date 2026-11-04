@@ -1,5 +1,6 @@
 // The sf command: `sf serve`, `sf up` (serve, the tunnel and the browser), `sf workspace
-// add|list|remove`, `sf start|say|review|approve|abort|reset` (through the socket of sf serve),
+// add|list|remove`, `sf start|say|review|approve|abort|reset` and `sf mr create|merge|status`
+// (through the socket of sf serve),
 // `sf status|watch|dashboard` (reading the state directory directly), `sf notify-test` and `sf info`.
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { type ChildProcess, spawn } from 'node:child_process';
@@ -11,6 +12,7 @@ import { envFilePath, gateConfig, loadConfig, loadEnvFile, stateDir } from './co
 import { DEFAULT_DASHBOARD_PORT, dashboardUrl, readToken, removeToken, type RunningDashboard, startDashboard } from './dashboard.js';
 import { FactoryError } from './errors.js';
 import { Execution, type StateListener } from './execution.js';
+import { forgeSettings, withoutHostTokens } from './forge.js';
 import { codexVersion } from './gate.js';
 import { existsSync } from 'node:fs';
 import { callSocket, listenSocket, socketPath } from './ipc.js';
@@ -39,6 +41,9 @@ const USAGE = `Usage:
   sf status [<workspace> <ticket>]                      Show one job or all jobs: state, iterations, estimated cost, elapsed time
   sf watch <workspace> <ticket> [--once]                Show the session live (Ctrl+C stops)
   sf approve <workspace> <ticket> [--as-is]             Push the branch prepared at Clean; --as-is pushes it even if its tip was edited by hand
+  sf mr create <workspace> <ticket>                     Open the merge request of a pushed job on GitHub or GitLab (or reuse the open one); from ready_for_human_review: approve, then open it
+  sf mr merge <workspace> <ticket>                      Merge the job's open merge request through the host's API; refused with the host's reason when it cannot be merged
+  sf mr status <workspace> <ticket>                     The merge request's state on the host: open, merged or closed, mergeable or not, the checks
   sf abort <workspace> <ticket> [--discard]             End the job; the worktree stays (its path is printed); --discard removes the worktree and the branch
   sf reset <workspace> <ticket>                         End the session, remove the worktree and archive the job; the branch is untouched
   sf notify-test                                        Send a test notification on every channel
@@ -126,6 +131,16 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     if (command === 'reset' && words.length === 0) {
       return execution.reset(workspace, ticket);
     }
+    // sf mr create|merge|status (SF-048).
+    if (command === 'mr-create' && words.length === 0) {
+      return execution.createMergeRequest(workspace, ticket);
+    }
+    if (command === 'mr-merge' && words.length === 0) {
+      return execution.mergeMergeRequest(workspace, ticket);
+    }
+    if (command === 'mr-status' && words.length === 0) {
+      return execution.mergeRequestStatus(workspace, ticket);
+    }
     // Tests only (SF_TEST_HOOKS=on): check, and a reviewer's verdict without a review session,
     // so the end-to-end tests drive the cycle step by step. No CLI command sends these.
     if (testHooks && command === 'check' && words.length <= 2) {
@@ -209,7 +224,7 @@ function startTunnel(): Tunnel | undefined {
     console.error(`tunnel | not started: ${script} is missing; the dashboard works without it (${RUNBOOK}).`);
     return undefined;
   }
-  const child: ChildProcess = spawn(script, ['run'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const child: ChildProcess = spawn(script, ['run'], { env: withoutHostTokens(), stdio: ['ignore', 'pipe', 'pipe'] });
   const forward = (stream: NodeJS.ReadableStream): void => {
     let rest = '';
     stream.setEncoding('utf8');
@@ -359,12 +374,17 @@ function checkJob(args: string[], command: string): [string, string] {
   return [workspace, ticket];
 }
 
-async function viaServer(command: string, args: string[]): Promise<Record<string, unknown>> {
+// The result of a socket command of sf serve; a refusal throws its code and message.
+async function request(command: string, args: string[]): Promise<Record<string, unknown>> {
   const response = await callSocket(stateDir(), { command, args });
   if (!response.ok) {
     throw new FactoryError(response.error.code, response.error.message);
   }
-  const result = response.result as Record<string, unknown>;
+  return response.result as Record<string, unknown>;
+}
+
+async function viaServer(command: string, args: string[]): Promise<Record<string, unknown>> {
+  const result = await request(command, args);
   const show = (value: unknown): string => (typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value));
   console.log(Object.entries(result).map(([key, value]) => `${key}: ${show(value)}`).join('\n'));
   return result;
@@ -382,6 +402,50 @@ async function approve(args: string[]): Promise<void> {
     console.log('No merge request link: the origin URL could not be parsed. Open the merge request for the branch above.');
   }
   if (result.state !== 'pushed') {
+    process.exitCode = 1;
+  }
+}
+
+// sf mr create|merge|status <workspace> <ticket> (SF-048), through the socket of sf serve.
+async function mergeRequest(args: string[]): Promise<void> {
+  const [sub, ...rest] = args;
+  if (sub !== 'create' && sub !== 'merge' && sub !== 'status') {
+    throw new UsageError(sub === undefined ? 'mr needs create, merge or status.' : `unknown mr command "${sub}".`);
+  }
+  if (rest.length !== 2) {
+    throw new UsageError(`mr ${sub} needs <workspace> <ticket>.`);
+  }
+  const result = await request(`mr-${sub}`, checkJob(rest, `mr ${sub}`));
+  const mr = result.mr as { number: number; url: string; state: string; reused?: boolean; merge_commit?: string | null } | undefined;
+  const error = result.error as { code: string; message: string } | undefined;
+  const lines: string[] = [`state: ${String(result.state)}`, `branch: ${String(result.branch)}`];
+  if (sub === 'create') {
+    if (typeof result.title === 'string') {
+      lines.push(`title: ${result.title}`);
+    }
+    if (mr !== undefined) {
+      lines.push(`merge request: #${mr.number} ${mr.reused === true ? 'already open, reused' : 'opened'}`, `url: ${mr.url}`);
+    }
+    if (error !== undefined) {
+      lines.push(result.state === 'pushed'
+        ? `The branch is pushed, but the merge request was not opened: ${error.code}: ${error.message}`
+        : `The push failed: ${error.code}: ${error.message}`);
+    }
+  } else if (sub === 'merge' && mr !== undefined) {
+    lines.push(`merge request: #${mr.number} merged`, ...(typeof mr.merge_commit === 'string' ? [`merge commit: ${mr.merge_commit}`] : []), `url: ${mr.url}`);
+  } else if (sub === 'status') {
+    const status = result.status as { number: number; url: string; state: string; draft: boolean; mergeable: boolean | null; reason?: string; checks?: string; merge_commit?: string };
+    lines.push(
+      `merge request: #${status.number} ${status.state}${status.draft ? ' (draft)' : ''}`,
+      `url: ${status.url}`,
+      ...(status.state === 'open' ? [`mergeable: ${status.mergeable === null ? 'not known yet' : status.mergeable ? 'yes' : 'no'}`] : []),
+      ...(status.reason !== undefined && status.state === 'open' ? [`reason: ${status.reason}`] : []),
+      ...(status.checks !== undefined ? [`checks: ${status.checks}`] : []),
+      ...(status.merge_commit !== undefined ? [`merge commit: ${status.merge_commit}`] : []),
+    );
+  }
+  console.log(lines.join('\n'));
+  if (error !== undefined) {
     process.exitCode = 1;
   }
 }
@@ -416,7 +480,7 @@ async function notifyTest(args: string[]): Promise<void> {
   const now = new Date().toISOString();
   const job: Job = {
     workspace: 'test', ticket: 'SF-TEST', branch: 'SF-TEST-notification', base: 'main', base_commit: null, worktree: null, prepared_commit: null,
-    target_commit: null, mr_attempts: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'pushed', iteration: 0, session_id: null, created_at: now, updated_at: now,
+    target_commit: null, mr_attempts: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'pushed', iteration: 0, session_id: null, mr: null, created_at: now, updated_at: now,
   };
   const results = await sendNotification(jobNotification(job, ['A test notification from sf notify-test']), notifyConfig());
   for (const result of results) {
@@ -461,6 +525,15 @@ async function info(args: string[]): Promise<void> {
   }
   const notify = notifyConfig();
   row('notify', `ntfy ${notify.ntfyUrl === undefined ? 'off' : 'on'}, desktop ${notify.desktop ? 'on' : 'off'}, iterations ${notify.iterations ? 'on' : 'off'}`);
+  // Whether the tokens are set, never their values; SF_GITLAB_URL as checked by forgeSettings (no
+  // credentials, query or fragment), or its refusal, which never shows them either.
+  const isSet = (name: string): string => (process.env[name] ? 'set' : 'not set');
+  try {
+    const { gitlabUrl } = forgeSettings();
+    row('git hosts', `SF_GITHUB_TOKEN ${isSet('SF_GITHUB_TOKEN')}, SF_GITLAB_TOKEN ${isSet('SF_GITLAB_TOKEN')}${gitlabUrl !== undefined ? `, SF_GITLAB_URL ${gitlabUrl}` : ''}`);
+  } catch (error) {
+    row('git hosts', `invalid: ${(error as Error).message}`);
+  }
 
   // sf serve answers on its socket; the tunnel on its health port.
   try {
@@ -616,6 +689,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'abort') {
     await abort(rest);
+    return;
+  }
+  if (command === 'mr') {
+    await mergeRequest(rest);
     return;
   }
   if (command === 'reset') {

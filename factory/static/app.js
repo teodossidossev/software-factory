@@ -4,19 +4,24 @@
 // action that unblocks it. A job card opens the job in a wide drawer (SF-047), at the URL hash
 // #<ws>/<ticket>: its header with the pipeline stepper, the next-action panel with the facts and
 // the state history, and the flat tabs Task, Changes, Reviews, MR and Live log. Its approve,
-// abort, say, Retry review and Accept and prepare MR go as POSTs to
-// api/jobs/<ws>/<ticket>/<action>, each one a deliberate click, confirmed for approve, abort and
-// accept, never retried or replayed by the page. A Planned card starts its job (POST
+// abort, say, Retry review, Accept and prepare MR, and the merge request on the Git host (SF-048:
+// Create merge request, Merge, Refresh MR status) go as POSTs to api/jobs/<ws>/<ticket>/<action>,
+// each one a deliberate click, confirmed for approve, abort, accept, create and merge, never
+// retried or replayed by the page. A Planned card starts its job (POST
 // api/tickets/<ws>/<ticket>/start, confirmed, never retried) and opens its Task text in the same
 // drawer, as do Workspaces, New ticket and Archived. Every value goes in through textContent; the
-// one href is the server's ChatGPT URL, checked against its fixed prefix.
+// hrefs are the server's ChatGPT URL, checked against its fixed prefix, and a merge request's
+// https URL from the Git host.
 'use strict';
 
 const RECONNECT_MS = 3000;
 const READ_TIMEOUT_MS = 10000;
 const TERMINAL_STATES = ['pushed', 'aborted', 'failed'];
 const SAY_STATES = ['working', 'awaiting_review', 'needs_human', 'ready_for_human_review'];
-const ACTION_LABELS = { approve: 'Approve', abort: 'Abort', say: 'Send', review: 'Retry review', accept: 'Accept and prepare MR', archive: 'Archive' };
+const ACTION_LABELS = {
+  approve: 'Approve', abort: 'Abort', say: 'Send', review: 'Retry review', accept: 'Accept and prepare MR', archive: 'Archive',
+  'mr-create': 'Create merge request', 'mr-merge': 'Merge', 'mr-status': 'Refresh MR status',
+};
 const PENDING_REASONS = {
   accept: 'the override was requested; waiting for its outcome.',
   approve: 'the push was requested; waiting for its outcome.',
@@ -24,6 +29,9 @@ const PENDING_REASONS = {
   say: 'the message is being sent.',
   review: 'the review is being restarted.',
   archive: 'the job is being archived.',
+  'mr-create': 'the merge request was requested; waiting for its outcome.',
+  'mr-merge': 'the merge was requested; waiting for its outcome.',
+  'mr-status': 'the merge request is being read from the host.',
 };
 const PENDING_TEXT = {
   accept: 'Accepting over the gate…',
@@ -32,6 +40,9 @@ const PENDING_TEXT = {
   say: 'Sending the message…',
   review: 'Restarting the review…',
   archive: 'Archiving the job…',
+  'mr-create': 'Opening the merge request…',
+  'mr-merge': 'Merging the merge request…',
+  'mr-status': 'Reading the merge request from the host…',
 };
 const $ = (id) => document.getElementById(id);
 // The views of the selected job, flat tabs, one panel each (#tab-<name>).
@@ -88,6 +99,8 @@ const state = {
   task: null,
   wantConfirm: null,
   startHolds: new Map(),
+  // The last merge request status read from the host, per job (SF-048).
+  mrStatus: new Map(),
 };
 // The only URL the page links to: the ChatGPT composer prefilled by the server (the prefix of
 // src/conversation.ts).
@@ -317,16 +330,67 @@ function nextAction(detail) {
     case 'preparing_mr':
       return { who: 'Now · Factory', headline: `The factory commits the change and rebases it onto ${job.base}.`, why: 'Then the branch comes to you to approve.' };
     case 'ready_for_human_review':
-      return { who: 'Your turn', headline: 'The branch is ready: approve to push it, or abort.', why: `Branch ${job.branch}: one commit on ${job.base}.` };
+      return {
+        who: 'Your turn', headline: 'The branch is ready: approve to push it, or create the merge request (push and open it), or abort.',
+        why: `Branch ${job.branch}: one commit on ${job.base}.${typeof detail.mr_title === 'string' ? ` Merge request title: ${detail.mr_title}` : ''}`,
+      };
     case 'needs_human':
       return { who: 'Your turn', headline: haltSentence(detail), why: job.error ? `${job.error.code}: ${job.error.message}` : '' };
     case 'pushed':
-      return { who: 'Finished', headline: `Pushed ${job.branch}.`, why: 'Open the merge request with the MR text; archive the job when it is merged.' };
+      if (hasMr(job) && job.mr.state === 'merged') {
+        return { who: 'Finished', headline: `Merged merge request #${job.mr.number} into ${job.base}.`, why: 'Archive the job to take it off the board.' };
+      }
+      if (hasMr(job) && job.mr.state === 'open') {
+        return { who: 'Finished', headline: `Pushed ${job.branch}; merge request #${job.mr.number} is open.`, why: `Merge it into ${job.base} here or on the host; archive the job when it is merged.` };
+      }
+      return {
+        who: 'Finished', headline: `Pushed ${job.branch}.`,
+        why: `Create the merge request here${typeof detail.mr_title === 'string' ? ` (${detail.mr_title})` : ''}, or open it with the MR text by hand; archive the job when it is merged.`,
+      };
     case 'aborted':
       return { who: 'Finished', headline: 'Aborted.', why: 'Archive the job to take it off the board.' };
     default:
       return { who: 'Finished', headline: 'Failed.', why: job.error ? `${job.error.code}: ${job.error.message}` : '' };
   }
+}
+
+// The merge request on the Git host (SF-048): its number, state and link, and the status last read.
+function renderMr(detail) {
+  const job = detail.job;
+  const line = $('mr-line');
+  line.hidden = !hasMr(job);
+  line.replaceChildren(...(hasMr(job) ? [document.createTextNode(`Merge request #${job.mr.number} (${job.mr.state}): `), mrLink(job.mr)] : []));
+  // The status last read shows only while it is of the merge request the job shows now (the same
+  // number and state): after a merge, a close or a new merge request it stays hidden. It is kept, so
+  // a status that saw the merge first shows once the job's update records it.
+  const read = state.mrStatus.get(keyOf(job));
+  const status = read !== undefined && hasMr(job) && read.number === job.mr.number && read.state === job.mr.state ? read : undefined;
+  $('mr-status-line').hidden = status === undefined;
+  $('mr-status-line').textContent = status === undefined ? '' : mrStatusText(status);
+}
+
+// A merge request's URL as a link when it is https, else as text.
+function mrLink(mr) {
+  if (typeof mr.url === 'string' && /^https:\/\/[^\s]+$/.test(mr.url)) {
+    const link = el('a', 'mono', mr.url);
+    link.href = mr.url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    return link;
+  }
+  return el('span', 'mono', String(mr.url));
+}
+
+// What the host said of the merge request: "open, mergeable, checks 2 passed" or why not.
+function mrStatusText(status) {
+  const parts = [`#${status.number} ${status.state}${status.draft ? ' (draft)' : ''}`];
+  if (status.state === 'open') {
+    parts.push(status.mergeable === true ? 'mergeable' : status.mergeable === false ? `not mergeable: ${status.reason ?? 'no reason given'}` : `mergeable not known yet${status.reason ? ` (${status.reason})` : ''}`);
+  }
+  if (typeof status.checks === 'string') {
+    parts.push(`checks: ${status.checks}`);
+  }
+  return `On the host: ${parts.join(', ')}.`;
 }
 
 function renderNext(detail) {
@@ -881,6 +945,7 @@ function eventSource(event) {
       return /\breview by codex\b/.test(event.text) ? 'codex' : 'claude';
     case 'notify_failed':
     case 'placeholders_removed':
+    case 'merge_request':
       // The factory's own lines go with the state changes.
       return 'state';
     default:
@@ -921,6 +986,7 @@ function renderDetail(detail) {
   }
   renderHeader(detail);
   renderNext(detail);
+  renderMr(detail);
   renderFacts(detail);
   renderHistory(detail.history);
   renderChanges(detail);
@@ -972,6 +1038,18 @@ function availability(action, job) {
   if (action === 'abort') {
     return TERMINAL_STATES.includes(job.state) ? `the job is already ${job.state}.` : '';
   }
+  if (action === 'mr-create') {
+    if (!canCreateMr(job)) {
+      return hasMr(job) && job.state === 'pushed' ? `the merge request #${job.mr.number} is ${job.mr.state}.` : 'a merge request needs a pushed branch, or one ready to approve.';
+    }
+    return mrOff(job);
+  }
+  if (action === 'mr-merge') {
+    return canMerge(job) ? mrOff(job) : 'only an open merge request of a pushed job is merged.';
+  }
+  if (action === 'mr-status') {
+    return hasMr(job) ? mrOff(job) : 'no merge request yet.';
+  }
   if (action === 'review') {
     return reviewFailed(job) ? '' : 'only after a failed review.';
   }
@@ -1013,6 +1091,16 @@ function renderActions() {
   $('accept-gate-button').disabled = !acceptable || acceptReason !== '' || state.confirm !== null;
   if (acceptable && acceptReason !== '') {
     reasons.push(`${ACTION_LABELS.accept}: ${acceptReason}`);
+  }
+  // The merge request on the Git host (SF-048): each button shows where it applies; while the
+  // actions are off (a token missing), the reason names the variable.
+  for (const [action, shown] of [['mr-create', job !== null && canCreateMr(job)], ['mr-merge', job !== null && canMerge(job)], ['mr-status', job !== null && hasMr(job)]]) {
+    const reason = availability(action, job);
+    $(`${action}-button`).hidden = !shown;
+    $(`${action}-button`).disabled = !shown || reason !== '' || state.confirm !== null;
+    if (shown && reason !== '') {
+      reasons.push(`${ACTION_LABELS[action]}: ${reason}`);
+    }
   }
   $('action-reasons').textContent = reasons.join(' ');
   $('refresh-button').hidden = state.unresolved.get(state.key)?.failed !== true;
@@ -1068,6 +1156,29 @@ function describeOutcome(action, result) {
     }
     return { level: 'warn', text: `Not pushed: the job is ${data.state}${detail ? ` (${detail})` : ''}.` };
   }
+  if (action === 'mr-create') {
+    if (data.mr !== null && typeof data.mr === 'object') {
+      // From ready_for_human_review the push came first: the outcome carries the compare link too.
+      const pushed = typeof data.link === 'string' ? `Pushed ${data.branch}. ` : '';
+      return { level: 'ok', text: `${pushed}Merge request #${data.mr.number} ${data.mr.reused === true ? 'was already open; reused' : 'opened'}:`, link: data.mr.url };
+    }
+    if (data.state === 'pushed' && data.error) {
+      return { level: 'error', text: `Pushed ${data.branch}, but the merge request was not opened (${detail}). Fix it, then create the merge request again.` };
+    }
+    if (data.state === 'needs_human') {
+      return { level: 'error', text: `Not pushed: the push failed (${detail || 'no details'}). Fix it, then try again.` };
+    }
+    return { level: 'warn', text: `No merge request: the job is ${data.state}${detail ? ` (${detail})` : ''}.` };
+  }
+  if (action === 'mr-merge') {
+    const commit = typeof data.mr?.merge_commit === 'string' ? ` (merge commit ${data.mr.merge_commit.slice(0, 12)})` : '';
+    return { level: 'ok', text: `Merged merge request #${data.mr?.number}${commit}.` };
+  }
+  if (action === 'mr-status') {
+    return data.status !== null && typeof data.status === 'object'
+      ? { level: 'ok', text: mrStatusText(data.status) }
+      : { level: 'warn', text: 'The host said nothing of the merge request.' };
+  }
   if (action === 'review') {
     return { level: 'ok', text: `The review of iteration ${data.iteration} runs again (state ${data.state}).` };
   }
@@ -1106,6 +1217,9 @@ async function run(action, key, body) {
   try {
     const result = await post(`api/jobs/${jobPath(key)}/${action}`, body);
     outcome = describeOutcome(action, result);
+    if (action === 'mr-status' && result !== null && typeof result === 'object' && result.status) {
+      state.mrStatus.set(key, result.status);
+    }
     // The sent draft goes; text edited meanwhile stays.
     if (action === 'say' && state.drafts.get(key) === body.message) {
       state.drafts.delete(key);
@@ -1230,7 +1344,15 @@ function openConfirm(action) {
   const key = keyOf(job);
   state.confirm = { action, key };
   $('confirm-title').textContent = `${ACTION_LABELS[action]} ${key}?`;
+  const host = job.mr_host?.host === 'gitlab' ? 'GitLab' : 'GitHub';
+  const mrTitle = typeof state.detail?.mr_title === 'string' ? state.detail.mr_title : '(the MR text\'s first line)';
   const texts = {
+    'mr-create': canApprove(job)
+      ? `Pushes branch ${job.branch} to origin as Approve does, then opens a merge request on ${host} from ${job.branch} into ${job.base}, titled “${mrTitle}”, with the rest of the MR text as its description.`
+      : `Opens a merge request on ${host} from ${job.branch} into ${job.base}, titled “${mrTitle}”, with the rest of the MR text as its description. One already open for the branch is reused.`,
+    'mr-merge': hasMr(job)
+      ? `Merges merge request #${job.mr.number} (${job.branch}) into ${job.base} on ${host} through its API, as a merge commit. Nothing is pushed or forced; the host refuses a merge request it cannot merge (conflicts, failing required checks, a draft) and says why.`
+      : '',
     approve: `Pushes branch ${job.branch} to origin: the one commit the factory prepared at Clean, rebased onto ${job.base}. Nothing is committed or rebased now; a tip edited by hand is refused unless pushed as it is.`,
     abort: `Ends the job on branch ${job.branch}: the Implementer session stops and queued messages are dropped. The branch and its worktree stay as they are.`,
     accept: `Overrides the Codex gate (${job.error?.code}): iteration ${job.iteration}, which Claude reviewed clean, goes on as after a clean gate. The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. The override is recorded in the job's history.`,
@@ -1268,7 +1390,10 @@ function renderConfirmButton() {
   }
   const discard = confirm.action === 'abort' && $('discard').checked;
   const ok = $('confirm-ok');
-  ok.textContent = confirm.action === 'accept' ? 'Accept and prepare the MR'
+  const job = state.detail?.job;
+  ok.textContent = confirm.action === 'mr-create' ? 'Create the merge request'
+    : confirm.action === 'mr-merge' ? `Merge #${job?.mr?.number} into ${job?.base}`
+    : confirm.action === 'accept' ? 'Accept and prepare the MR'
     : confirm.action === 'approve' ? ($('as-is').checked ? 'Approve: push as it is' : 'Approve: push the branch') : discard ? 'Abort and discard the branch' : 'Abort, keep the worktree';
   ok.className = discard ? 'btn btn-danger' : 'btn btn-primary';
 }
@@ -1326,6 +1451,15 @@ const DONE_LABELS = { pushed: 'Pushed', aborted: 'Aborted', failed: 'Failed' };
 // The job can be pushed: the branch prepared at Clean is ready, or its push failed and approve
 // tries again.
 const canApprove = (job) => job.state === 'ready_for_human_review' || (job.state === 'needs_human' && typeof job.prepared_commit === 'string' && job.worktree === null);
+
+// The merge request on the Git host (SF-048): the job has one; Create merge request applies to a
+// branch ready to approve (push, then open) and to a pushed one without an open or merged one;
+// Merge to an open one. mrOff: why the actions are off for the job's workspace, or ''.
+const hasMr = (job) => job.mr !== null && typeof job.mr === 'object';
+const canCreateMr = (job) => canApprove(job) || (job.state === 'pushed' && !(hasMr(job) && job.mr.state !== 'closed'));
+const canMerge = (job) => job.state === 'pushed' && hasMr(job) && job.mr.state === 'open';
+const mrOff = (job) => (job.mr_host === null || typeof job.mr_host !== 'object' ? 'the Git host is not known yet.'
+  : typeof job.mr_host.reason === 'string' && job.mr_host.reason !== '' ? `${job.mr_host.reason}.` : '');
 
 // Where a halted job stopped, from its error: the review, the gate, the push, the MR
 // preparation, else the implementation.
@@ -1489,6 +1623,8 @@ function jobCard(job) {
   item.append(open);
   if (COLUMN_OF[job.state] === 'you') {
     item.append(...yourTurn(job));
+  } else if (job.state === 'pushed') {
+    item.append(...pushedFoot(job));
   }
   return item;
 }
@@ -1516,6 +1652,9 @@ function yourTurn(job) {
   }
   button.type = 'button';
   foot.append(button);
+  if (canApprove(job)) {
+    foot.append(mrCardButton(job, 'mr-create'));
+  }
   const parts = [foot];
   const outcome = state.outcomes.get(key) ?? null;
   if (outcome !== null) {
@@ -1524,6 +1663,44 @@ function yourTurn(job) {
   const doubt = state.doubts.get(key);
   if (doubt !== undefined && doubt !== '') {
     parts.push(el('p', 'status error', doubt));
+  }
+  return parts;
+}
+
+// A board card's Create merge request… or Merge…: opens the job with that confirmation; off with
+// the reason as its title while the action is unavailable.
+function mrCardButton(job, action) {
+  const key = keyOf(job);
+  const button = el('button', 'btn btn-sm', `${ACTION_LABELS[action]}…`);
+  button.type = 'button';
+  const reason = availability(action, job);
+  button.disabled = reason !== '';
+  if (reason !== '') {
+    button.setAttribute('title', reason);
+  }
+  button.addEventListener('click', () => openJob(key, action));
+  return button;
+}
+
+// A pushed job on Done (SF-048): its merge request with the link, and Create merge request… or
+// Merge… where they apply, with the job's last outcome.
+function pushedFoot(job) {
+  const key = keyOf(job);
+  const parts = [];
+  if (hasMr(job)) {
+    const line = el('p', 'card-mr card-foot');
+    line.append(document.createTextNode(`#${job.mr.number} ${job.mr.state} `), mrLink(job.mr));
+    parts.push(line);
+  }
+  const actions = [canCreateMr(job) ? 'mr-create' : null, canMerge(job) ? 'mr-merge' : null].filter((action) => action !== null);
+  if (actions.length > 0) {
+    const foot = el('div', 'card-foot');
+    foot.append(...actions.map((action) => mrCardButton(job, action)));
+    parts.push(foot);
+  }
+  const outcome = state.outcomes.get(key) ?? null;
+  if (outcome !== null) {
+    parts.push(el('p', `status ${outcome.level}`, outcome.text));
   }
   return parts;
 }
@@ -2204,6 +2381,14 @@ function init() {
 
   // The job in the drawer.
   $('approve-button').addEventListener('click', () => openConfirm('approve'));
+  $('mr-create-button').addEventListener('click', () => openConfirm('mr-create'));
+  $('mr-merge-button').addEventListener('click', () => openConfirm('mr-merge'));
+  $('mr-status-button').addEventListener('click', () => {
+    const job = state.detail?.job ?? null;
+    if (job !== null && availability('mr-status', job) === '') {
+      void run('mr-status', keyOf(job), {});
+    }
+  });
   $('archive-job-button').addEventListener('click', () => {
     if (state.key !== null) {
       void run('archive', state.key, {});

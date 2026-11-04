@@ -4,6 +4,7 @@
 // loaded. Failures are FactoryErrors telling the user to open the printed URL by hand.
 import { spawn } from 'node:child_process';
 import { FactoryError } from './errors.js';
+import { withoutHostTokens } from './forge.js';
 
 const LAUNCHER = 'xdg-open';
 const LAUNCH_TIMEOUT_MS = 10_000;
@@ -15,7 +16,7 @@ export function openInBrowser(url: string, timeoutMs = LAUNCH_TIMEOUT_MS): Promi
   }
   return new Promise((resolve, reject) => {
     // No pipes: a browser started by the launcher may inherit them and must not keep sf waiting.
-    const child = spawn(LAUNCHER, [url], { stdio: 'ignore', timeout: timeoutMs, killSignal: 'SIGKILL' });
+    const child = spawn(LAUNCHER, [url], { env: withoutHostTokens(), stdio: 'ignore', timeout: timeoutMs, killSignal: 'SIGKILL' });
     child.once('error', (error) => {
       const code = (error as NodeJS.ErrnoException).code;
       reject(new FactoryError('open_failed', code === 'ENOENT'

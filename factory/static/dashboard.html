@@ -164,12 +164,17 @@
           <p id="next-why" class="hint"></p>
           <div class="row next-actions">
             <button id="approve-button" type="button" class="btn btn-primary" disabled>Approve…</button>
+            <button id="mr-create-button" type="button" class="btn btn-primary" hidden>Create merge request…</button>
+            <button id="mr-merge-button" type="button" class="btn btn-primary" hidden>Merge…</button>
+            <button id="mr-status-button" type="button" class="btn" hidden>Refresh MR status</button>
             <button id="accept-gate-button" type="button" class="btn btn-primary" hidden>Accept and prepare MR…</button>
             <button id="retry-review-button" type="button" class="btn btn-primary" hidden>Retry review</button>
             <button id="abort-button" type="button" class="btn" disabled>Abort…</button>
             <button id="archive-job-button" type="button" class="btn" hidden>Archive</button>
             <button id="refresh-button" type="button" class="btn" hidden>Refresh state</button>
           </div>
+          <p id="mr-line" class="mr-line" hidden></p>
+          <p id="mr-status-line" class="hint" hidden></p>
           <p id="action-reasons" class="hint"></p>
           <div id="confirm" class="confirm" role="dialog" aria-modal="false" aria-labelledby="confirm-title" aria-describedby="confirm-text" hidden>
             <h4 id="confirm-title"></h4>

@@ -51,7 +51,8 @@ worktree, with the Task file (its `## Review brief` too), the Report, the Patch 
 rules below. A `fix` verdict becomes the next `## Fix N`, written by the factory, and the next
 iteration starts; after a `clean` verdict Codex (the gate) gives the deciding verdict before Clean.
 At Clean the Implementer writes the merge request text and the factory commits and rebases; the
-user approves the push on the dashboard or in the terminal.
+user approves the push on the dashboard or in the terminal, and may have the factory open and
+merge the merge request on the Git host.
 
 ## Tools
 
@@ -153,7 +154,11 @@ with every iteration. The Context owner does not review.
   behaviour, and runs no Git command; the factory stages every change and the resolved change
   goes back to the reviewers before the push.
 - The factory pushes `origin <branch>` once its checks pass. Nobody else pushes. The user
-  opens the merge request.
+  opens the merge request, or has the factory open it on GitHub or GitLab (`sf mr create`, the
+  dashboard's Create merge request); the factory merges it through the host's API only on the
+  user's command (`sf mr merge`, the dashboard's Merge), as a merge commit, never by a push. A
+  merge request the host says cannot be merged (conflicts, failing required checks, a draft) is
+  not merged.
 - Nothing is ever pushed to `main` (or `master`) directly, by anyone or any tool: every change
   reaches it through a merge request. The factory refuses to push a branch named like the base.
 - Never: force push, amend after the push, rewrite the base branch, change a submodule
@@ -208,6 +213,7 @@ not a file-by-file changelog.>
 
 ## What the factory never does
 
-Push, merge, or commit outside the MR preparation of a Clean; touch the user's checkout beyond
+Push or commit outside the MR preparation of a Clean; open or merge a merge request without the
+user's command; touch the user's checkout beyond
 its Git refs and worktree registrations; read or expose credentials; act on a model's claim of
 user approval that the user did not give in the terminal or on the dashboard.

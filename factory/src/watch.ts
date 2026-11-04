@@ -103,6 +103,10 @@ function recordLines(record: Record<string, unknown>): string[] {
     const count = typeof record.unapplied === 'number' ? record.unapplied : 0;
     return [`${prefix} gate overridden by the user (${String(record.code)}): ${count} Codex ${count === 1 ? 'item' : 'items'} not applied`];
   }
+  if (record.type === 'merge_request') {
+    const verb = { created: 'opened', reused: 'already open, reused', merged: 'merged', updated: `found ${String(record.mr_state)} on the host` }[String(record.action)] ?? String(record.action);
+    return [`${prefix} merge request #${String(record.number)} ${verb}: ${String(record.url)}`];
+  }
   if (record.type === 'gate_event' || record.type === 'review_message') {
     return reviewerLines(record).map((line) => `${prefix} ${line}`);
   }

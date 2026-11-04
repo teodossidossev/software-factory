@@ -170,6 +170,8 @@ p { margin: 0; }
 .next.finished { border-left-color: var(--s-ended); }
 .next-who { font-size: 12px; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; color: var(--muted); }
 .next-headline { font-weight: 600; overflow-wrap: anywhere; }
+.mr-line, .card-mr { overflow-wrap: anywhere; }
+.card-mr { margin: 0; font-size: 12px; }
 .rail-section { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .confirm-items { display: flex; flex-direction: column; gap: 4px; }
 

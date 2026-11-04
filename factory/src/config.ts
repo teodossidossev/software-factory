@@ -4,6 +4,7 @@ import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { FactoryError } from './errors.js';
+import { type ForgeSettings, forgeSettings } from './forge.js';
 import { configDir } from './registry.js';
 
 export interface Config {
@@ -41,6 +42,8 @@ export interface Config {
   gateMaxTokens: number;
   // How long one gate run may take (SF_GATE_TIMEOUT_MS).
   gateTimeoutMs: number;
+  // The Git hosts' tokens and API bases for the merge requests (SF-048).
+  forge: ForgeSettings;
 }
 
 // The gate: on with its Codex executable, or off with why (missing: no executable was found).
@@ -215,5 +218,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     gateMaxRounds: positiveInteger(env, 'SF_GATE_MAX_ROUNDS', 5),
     gateMaxTokens: positiveInteger(env, 'SF_GATE_MAX_TOKENS', 5_000_000, 1_000_000_000),
     gateTimeoutMs: positiveInteger(env, 'SF_GATE_TIMEOUT_MS', 900_000, 86_400_000),
+    forge: forgeSettings(env),
   };
 }

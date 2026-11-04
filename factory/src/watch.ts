@@ -34,7 +34,7 @@ function resultText(content: unknown): string {
 export interface DescribedEvent {
   ts: string | null;
   iteration: number | null;
-  // "prompt", "state", "notify_failed", "placeholders_removed", "principal", "event_delivered", "event_failed", "review", "review_failed" (Claude's or the gate's), "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
+  // "prompt", "state", "notify_failed", "placeholders_removed", "review", "review_failed" (Claude's or the gate's), "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
   type: string;
   lines: string[];
 }
@@ -89,16 +89,6 @@ function recordLines(record: Record<string, unknown>): string[] {
   if (record.type === 'placeholders_removed') {
     const paths = Array.isArray(record.paths) ? record.paths.map(String) : [];
     return [`${prefix} placeholders removed: ${oneLine(paths.join(', '))}`];
-  }
-  if (record.type === 'principal') {
-    return [`${prefix} ${String(record.tool)} by ${oneLine(String(record.principal))}`];
-  }
-  if (record.type === 'subscription_removed') {
-    return [`${prefix} subscription ${oneLine(String(record.subscription))} removed: the job ended`];
-  }
-  if (record.type === 'event_delivered' || record.type === 'event_failed') {
-    const outcome = record.type === 'event_delivered' ? 'delivered' : 'failed';
-    return [`${prefix} event to ${oneLine(String(record.subscription))} attempt ${String(record.attempt)} ${outcome}: ${oneLine(String(record.status))}`];
   }
   if (record.type === 'review' || record.type === 'review_failed') {
     const ignored = record.ignored === true ? ' (ignored: the job had moved on)' : '';

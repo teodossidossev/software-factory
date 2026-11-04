@@ -1,12 +1,11 @@
 // Software Factory dashboard v2. Loads api/jobs, follows one job through api/stream (server-sent
 // events) and renders it. The User's approve, abort, say and Retry review (after a failed Claude
 // review, SF-044) go as POSTs to api/jobs/<ws>/<ticket>/<action>: each one is a deliberate click,
-// confirmed for approve and abort, never retried or replayed by the page. Who reviews the job
-// comes with its detail (the Reviewer block, with the two messages of sf ticket to copy and a
-// test event to send) and the subscriptions with the stream. The start screen (Setup) lists the workspaces and the tickets
-// without a job, adds a workspace, writes a ticket draft, opens the ChatGPT conversation of a
-// ticket (a link the User clicks) and starts a job (confirmed). Every value goes in through
-// textContent; the one href is the server's ChatGPT URL, checked against its fixed prefix.
+// confirmed for approve and abort, never retried or replayed by the page. The start screen (Setup)
+// lists the workspaces and the tickets without a job, adds a workspace, writes a ticket draft,
+// opens the ChatGPT conversation that plans a ticket (a link the User clicks) and starts the job
+// of a ticket whose Task file is written (SF-040). Every value goes in through textContent; the
+// one href is the server's ChatGPT URL, checked against its fixed prefix.
 'use strict';
 
 const RECONNECT_MS = 3000;
@@ -55,14 +54,6 @@ const state = {
   confirm: null,
   // The files expanded in the Files view: "<iteration>/<path>" of the selected job.
   expanded: new Set(),
-  // The test event, per job: "<key>" while its request is out, and the last outcome shown.
-  testing: new Set(),
-  testOutcomes: new Map(),
-  // The nudge (SF-035), per job: "<key>" while its request is out, and the last outcome with the
-  // iteration it was for (shown only while that iteration still waits for review).
-  nudging: new Set(),
-  nudgeOutcomes: new Map(),
-  subscriptions: null,
   // The start screen: the registry and the tickets without a job (null until the stream sends
   // them), whether the section's open state was decided from the first data, the requests out
   // for its forms and the open delete confirmation of a ticket.
@@ -73,7 +64,8 @@ const state = {
   setupPending: new Set(),
   ticketConfirm: null,
 };
-// The only URL the page links to: the ChatGPT composer prefilled by the server.
+// The only URL the page links to: the ChatGPT composer prefilled by the server (the prefix of
+// src/conversation.ts).
 const CHATGPT_PREFILL_URL = 'https://chatgpt.com/?q=';
 
 function el(tag, className, text) {
@@ -173,59 +165,12 @@ function renderJobs() {
     button.append(el('div', 'job-workspace', `${job.workspace} · ${job.branch}`));
     const line = el('div', 'job-line');
     line.append(el('span', `badge s-${job.state}`, job.state));
-    // Only a missing or a broad reviewer of a live job is worth a badge; a subscribed or a
-    // finished job shows none.
-    if (TERMINAL_STATES.includes(job.state)) {
-      // Nothing to review any more.
-    } else if (job.reviewer === 'none') {
-      line.append(el('span', 'badge r-none', 'no reviewer'));
-    } else if (job.reviewer === 'broad') {
-      line.append(el('span', 'badge r-broad', 'broad'));
-    }
     line.append(...fileBadges(job));
     line.append(el('span', 'iter', `iteration ${job.iteration}`));
     button.append(line);
     button.addEventListener('click', () => select(keyOf(job)));
     const item = el('li');
     item.append(button);
-    return item;
-  }));
-}
-
-const filterText = (input) => JSON.stringify(input ?? {});
-
-// What a subscription's filter covers, in words: a ticket, every ticket of a workspace, or all.
-function subscriptionScope(input) {
-  const workspace = input?.workspace;
-  const ticket = input?.ticket;
-  if (workspace !== undefined && ticket !== undefined) {
-    return `${workspace} / ${ticket}`;
-  }
-  if (workspace !== undefined) {
-    return `${workspace}, every ticket`;
-  }
-  return ticket !== undefined ? `${ticket}, every workspace` : 'Every workspace and ticket';
-}
-
-// One compact entry per subscription: the scope first, then the live job, the refresh deadline
-// and the callback host; the id (for sf events test/remove) last, shortened, whole in the tooltip.
-function renderSubscriptions() {
-  const rows = state.subscriptions;
-  $('no-subscriptions').hidden = rows === null || rows.length > 0;
-  $('subscription-list').hidden = rows === null || rows.length === 0;
-  $('subscription-list').replaceChildren(...(rows ?? []).map((row) => {
-    const item = el('li');
-    const scope = el('div', 'sub-scope', subscriptionScope(row.input));
-    if (row.input?.ticket === undefined) {
-      scope.append(el('span', 'badge r-broad', 'broad'));
-    }
-    const live = row.job === null || row.job === undefined
-      ? 'no live job'
-      : (row.input?.ticket === undefined ? `live job ${row.job}` : 'live job');
-    const refresh = shortTime(row.refreshBefore).replace(/:\d\dZ$/, 'Z');
-    const id = el('div', 'sub-id', row.id);
-    id.setAttribute('title', row.id);
-    item.append(scope, el('div', 'sub-meta', `${live} · refresh by ${refresh} · ${row.host}`), id);
     return item;
   }));
 }
@@ -245,7 +190,7 @@ function renderHeader(detail) {
   $('job-iteration').textContent = job.mr_attempts > 0 ? `${job.iteration} (MR attempts ${job.mr_attempts})` : String(job.iteration);
   // The iterations and their reviews.
   const costs = detail.iterations.flatMap((iteration) => [iteration.cost_usd, iteration.review?.cost_usd]).filter((cost) => typeof cost === 'number');
-  // An estimate of the API-equivalent price, not a charge: the session usually runs on a subscription.
+  // An estimate of the API-equivalent price, not a charge: the session usually runs on a Claude plan.
   $('job-cost').textContent = costs.length > 0 ? `est. $${costs.reduce((sum, cost) => sum + cost, 0).toFixed(4)}` : 'n/a';
   $('job-updated').textContent = shortTime(job.updated_at);
   $('job-worktree').textContent = typeof job.worktree === 'string' ? job.worktree : (job.state === 'ready_for_human_review' ? 'none: the branch is in the checkout' : 'none');
@@ -253,154 +198,6 @@ function renderHeader(detail) {
   const error = $('job-error');
   error.hidden = job.error === null;
   error.textContent = job.error === null ? '' : `${job.error.code}: ${job.error.message}`;
-}
-
-// The Reviewer block: who receives this job's events, the messages that set it up when nobody
-// does, the nudge and the test event.
-function renderReviewer() {
-  const detail = state.detail;
-  const reviewer = detail?.reviewer;
-  const block = $('reviewer');
-  block.hidden = reviewer === undefined;
-  if (reviewer === undefined) {
-    // Loading another job: its setup boxes start afresh.
-    $('reviewer-setup').hidden = true;
-    $('copy-status').textContent = '';
-    return;
-  }
-  const line = $('reviewer-line');
-  const warning = $('reviewer-warning');
-  const broad = Array.isArray(reviewer.broad) ? reviewer.broad : [];
-  const removal = broad.map((id) => `sf events remove ${id}`).join('; ');
-  if (reviewer.status === 'subscribed') {
-    line.replaceChildren(el('span', 'r-subscribed', 'Reviewer: subscribed'), document.createTextNode(` ${reviewer.id}, ${reviewer.host}, filter ${filterText(reviewer.input)}`));
-    warning.textContent = broad.length > 0
-      ? `Also receiving this job's events, without a ticket filter: ${broad.join(', ')}. ChatGPT would review it twice. Remove with: ${removal}`
-      : '';
-  } else if (reviewer.status === 'broad') {
-    line.replaceChildren(el('span', 'r-broad', 'Reviewer: broad'), document.createTextNode(` ${reviewer.id}, ${reviewer.host}, filter ${filterText(reviewer.input)}`));
-    warning.textContent = `${broad.join(', ')} has no ticket filter: that conversation reviews this job along with every other job it matches. Remove with: ${removal}, then set up this ticket with sf ticket.`;
-  } else {
-    line.replaceChildren(el('span', 'r-none', 'Reviewer: none'), document.createTextNode(' Nobody will review this job.'));
-    warning.textContent = '';
-  }
-  warning.hidden = warning.textContent === '';
-  const setup = $('reviewer-setup');
-  // The setup messages matter while the job can still be reviewed; a finished job only shows the line.
-  const showSetup = reviewer.status === 'none' && detail.reviewerSetup !== undefined && !TERMINAL_STATES.includes(detail.job.state);
-  if (setup.hidden && showSetup) {
-    $('copy-status').textContent = '';
-  }
-  setup.hidden = !showSetup;
-  $('setup-guide').value = showSetup ? detail.reviewerSetup.guide : '';
-  $('setup-instruction').value = showSetup ? detail.reviewerSetup.instruction : '';
-  const key = keyOf(detail.job);
-  const sending = state.testing.has(key);
-  $('test-event-button').disabled = reviewer.status !== 'subscribed' || sending;
-  $('test-event-reason').textContent = reviewer.status === 'subscribed' || sending ? '' : 'needs a subscription filtered on this ticket.';
-  renderTestOutcome(state.testOutcomes.get(key) ?? null);
-  renderNudge(detail, reviewer, key);
-}
-
-// The nudge: on while the job waits for review and someone receives its events.
-function renderNudge(detail, reviewer, key) {
-  const waiting = detail.job.state === 'awaiting_review';
-  const nudging = state.nudging.has(key);
-  $('nudge-button').disabled = !waiting || reviewer.status === 'none' || nudging;
-  $('nudge-reason').textContent = nudging ? ''
-    : !waiting ? 'only while the job waits for review.'
-    : reviewer.status === 'none' ? 'needs a subscription that receives this job.' : 'sends the awaiting_review event again.';
-  const outcome = state.nudgeOutcomes.get(key) ?? null;
-  const shown = outcome !== null && (outcome.level === 'pending' || (waiting && outcome.iteration === detail.job.iteration)) ? outcome : null;
-  const node = $('nudge-status');
-  node.className = shown === null ? 'status' : `status ${shown.level}`;
-  node.textContent = shown === null ? '' : shown.text;
-}
-
-// The job's awaiting_review event again, to every subscription that receives it; the answer goes
-// to that job only.
-async function nudgeReviewer() {
-  const key = state.key;
-  const detail = state.detail;
-  if (key === null || detail === null || detail.job.state !== 'awaiting_review' || (detail.reviewer?.status ?? 'none') === 'none' || state.nudging.has(key)) {
-    return;
-  }
-  const iteration = detail.job.iteration;
-  state.nudging.add(key);
-  state.nudgeOutcomes.set(key, { level: 'pending', text: 'Sending…', iteration });
-  renderReviewer();
-  let outcome;
-  try {
-    const result = await post(`api/jobs/${jobPath(key)}/nudge`, {});
-    const data = result !== null && typeof result === 'object' ? result : {};
-    const queued = Array.isArray(data.queued) ? data.queued : [];
-    const pending = Array.isArray(data.pending) ? data.pending : [];
-    const still = pending.length > 0 ? ` Still on its way to ${pending.join(', ')}.` : '';
-    outcome = queued.length > 0
-      ? { level: 'ok', text: `Sent the awaiting_review event of iteration ${iteration} again to ${queued.join(', ')}: the reviewer reviews it in that conversation.${still}` }
-      : { level: 'ok', text: `The event is still on its way to ${pending.join(', ')}; nothing more was sent.` };
-  } catch (error) {
-    outcome = error instanceof ActionError
-      ? { level: 'error', text: `${error.code}: ${error.message}` }
-      : { level: 'error', text: `The nudge failed (${error.message}); it may have been sent.` };
-  }
-  state.nudging.delete(key);
-  state.nudgeOutcomes.set(key, { ...outcome, iteration });
-  if (key === state.key && state.detail !== null) {
-    renderReviewer();
-  }
-}
-
-function renderTestOutcome(outcome) {
-  const node = $('test-event-status');
-  node.className = outcome === null ? 'status' : `status ${outcome.level}`;
-  node.textContent = outcome === null ? '' : outcome.text;
-}
-
-// One test event to the job's own subscription; the answer goes to that job only.
-async function sendTestEvent() {
-  const key = state.key;
-  if (key === null || state.detail?.reviewer?.status !== 'subscribed' || state.testing.has(key)) {
-    return;
-  }
-  state.testing.add(key);
-  state.testOutcomes.set(key, { level: 'pending', text: 'Sending…' });
-  renderReviewer();
-  let outcome;
-  try {
-    const result = await post(`api/jobs/${jobPath(key)}/test-event`, {});
-    const data = result !== null && typeof result === 'object' ? result : {};
-    outcome = data.delivered === true
-      ? { level: 'ok', text: `Test event to ${data.subscription}: delivered, status ${data.status}. ChatGPT should answer in that conversation.` }
-      : { level: 'error', text: `Test event to ${data.subscription}: not delivered, status ${data.status}.` };
-  } catch (error) {
-    outcome = error instanceof ActionError
-      ? { level: 'error', text: `${error.code}: ${error.message}` }
-      : { level: 'error', text: `The test event failed (${error.message}); it may have been sent. Nothing is retried.` };
-  }
-  state.testing.delete(key);
-  state.testOutcomes.set(key, outcome);
-  if (key === state.key && state.detail !== null) {
-    renderReviewer();
-  }
-}
-
-// Copies a setup message; without the clipboard the text is selected for Ctrl+C.
-function copySetup(id) {
-  const box = $(id);
-  const done = (text) => {
-    $('copy-status').textContent = text;
-  };
-  const select = () => {
-    box.focus();
-    box.select();
-    done('Selected: press Ctrl+C to copy.');
-  };
-  if (typeof navigator === 'undefined' || navigator.clipboard === undefined) {
-    select();
-    return;
-  }
-  navigator.clipboard.writeText(box.value).then(() => done('Copied.'), select);
 }
 
 function renderHistory(history) {
@@ -720,7 +517,6 @@ function renderDetail(detail) {
   void showIteration();
   void showMr();
   renderActions();
-  renderReviewer();
 }
 
 // The job waits for the user after a failed Claude review: Retry review runs it again.
@@ -755,7 +551,7 @@ function availability(action, job) {
       return 'the branch is being prepared.';
     }
     if (job.state === 'awaiting_review') {
-      return 'the Context owner has not declared Clean yet.';
+      return 'the reviewers have not reached Clean yet.';
     }
     return `not available while the job is ${job.state}.`;
   }
@@ -1104,28 +900,15 @@ function renderWorkspaces() {
   $('ticket-create').disabled = rows.length === 0 || state.setupPending.has('ticket');
 }
 
-function reviewerLine(reviewer) {
-  if (reviewer === undefined || reviewer === null) {
-    return [el('span', '', 'Reviewer: unknown')];
-  }
-  if (reviewer.status === 'subscribed') {
-    return [el('span', 'r-subscribed', 'Reviewer: subscribed'), document.createTextNode(` ${reviewer.id}, ${reviewer.host}`)];
-  }
-  if (reviewer.status === 'broad') {
-    return [el('span', 'r-broad', 'Reviewer: broad'), document.createTextNode(` ${reviewer.id} has no ticket filter; it would review this ticket along with every other one (sf events remove ${reviewer.id}).`)];
-  }
-  return [el('span', 'r-none', 'Reviewer: none'), document.createTextNode(' nobody will review this ticket until ChatGPT subscribes to it: open the conversation.')];
-}
-
 // What the ticket waits for, in one line: the conversation, the User's start, or a new start.
 function ticketNext(row) {
   if (row.draft) {
-    return 'Next: open the conversation. The LLM investigates, discusses it with you and writes the Task file; then say start there.';
+    return 'Next: open the conversation. ChatGPT investigates, discusses it with you and writes the Task file; then start the job here.';
   }
   if (row.job !== null) {
-    return `The last job ended ${row.job}. To run it again, say start in the ticket's conversation; or archive the ticket.`;
+    return `The last job ended ${row.job}. To run it again, Start it here; or archive the ticket.`;
   }
-  return 'The Task file is written. Say start in the ticket\'s conversation and the LLM starts the job.';
+  return 'The Task file is written. Read it, then Start: the factory runs the job and its reviewers.';
 }
 
 function renderArchived() {
@@ -1161,7 +944,7 @@ function renderTickets() {
     const item = el('li');
     const name = el('div', 'ticket-name', `${key} · ${row.title}`);
     if (row.draft) {
-      name.append(el('span', 'badge t-draft', 'waiting for the conversation'));
+      name.append(el('span', 'badge t-draft', 'waiting for the plan'));
     }
     if (row.job !== null) {
       name.append(el('span', 'badge t-job', `last job ${row.job}`));
@@ -1169,19 +952,25 @@ function renderTickets() {
     item.append(name);
     item.append(el('div', 'ticket-line', `.software-factory/${row.ticket}.md · base ${row.base}`));
     item.append(el('p', 'ticket-next', ticketNext(row)));
-    const reviewer = el('div', 'ticket-reviewer');
-    reviewer.append(...reviewerLine(row.reviewer));
-    item.append(reviewer);
     const buttons = el('div', 'row');
+    const busy = state.setupPending.has(`ticket:${key}`) || state.ticketConfirm !== null;
+    // The User's start (SF-040): only once the planner wrote the Task file over the skeleton.
+    if (!row.draft) {
+      const start = el('button', 'btn btn-sm btn-primary', 'Start');
+      start.type = 'button';
+      start.disabled = busy;
+      start.title = 'Start the job: a branch in a worktree of its own and the first iteration';
+      start.addEventListener('click', () => void ticketAction('start', row));
+      buttons.append(start);
+    }
     const url = typeof row.conversation?.url === 'string' && row.conversation.url.startsWith(CHATGPT_PREFILL_URL) ? row.conversation.url : null;
     if (url !== null) {
-      const link = el('a', 'btn btn-sm btn-primary', 'Open the conversation');
+      const link = el('a', `btn btn-sm${row.draft ? ' btn-primary' : ''}`, 'Open the conversation');
       link.href = url;
       link.target = '_blank';
       link.rel = 'noopener noreferrer';
       buttons.append(link);
     }
-    const busy = state.setupPending.has(`ticket:${key}`) || state.ticketConfirm !== null;
     const archive = el('button', 'btn btn-sm', 'Archive');
     archive.type = 'button';
     archive.disabled = busy;
@@ -1310,8 +1099,8 @@ async function submitTicket() {
   }
 }
 
-// Archive, restore or delete one ticket; one request per ticket at a time, the outcome in the
-// start status line.
+// Start, archive, restore or delete one ticket; one request per ticket at a time, the outcome in
+// the start status line.
 async function ticketAction(action, row) {
   const key = `${row.workspace}/${row.ticket}`;
   const id = `ticket:${key}`;
@@ -1319,6 +1108,7 @@ async function ticketAction(action, row) {
     return;
   }
   const texts = {
+    start: (data) => `Started ${key}: branch ${data.branch}, ${data.state}. It is in the Jobs list.`,
     archive: (data) => `Archived ${key}: ${data.path}.${data.jobArchived ? ' Its finished job left the Jobs list.' : ''}`,
     restore: (data) => `Restored ${key}: ${data.path}.`,
     delete: (data) => `Deleted ${key}: ${Array.isArray(data.deleted) ? data.deleted.join(', ') : ''}.${data.jobArchived ? ' Its finished job left the Jobs list.' : ''}`,
@@ -1406,10 +1196,6 @@ function openStream() {
       select(keyOf(mostRecent()));
     }
   });
-  source.addEventListener('subscriptions', (message) => {
-    state.subscriptions = JSON.parse(message.data).subscriptions;
-    renderSubscriptions();
-  });
   source.addEventListener('workspaces', (message) => {
     state.workspaces = JSON.parse(message.data).workspaces;
     renderSetup();
@@ -1467,7 +1253,6 @@ function select(key) {
   renderOutcome(state.outcomes.get(key) ?? null);
   $('action-doubt').textContent = state.doubts.get(key) ?? '';
   renderActions();
-  renderReviewer();
   history.replaceState(null, '', `#${key}`);
   renderJobs();
   openStream();
@@ -1551,10 +1336,6 @@ function init() {
   $('files-expand').addEventListener('click', () => setAllExpanded(true));
   $('files-collapse').addEventListener('click', () => setAllExpanded(false));
   $('refresh-button').addEventListener('click', () => void settleUnknown(state.key));
-  $('test-event-button').addEventListener('click', () => void sendTestEvent());
-  $('nudge-button').addEventListener('click', () => void nudgeReviewer());
-  $('copy-guide').addEventListener('click', () => copySetup('setup-guide'));
-  $('copy-instruction').addEventListener('click', () => copySetup('setup-instruction'));
   $('say-input').addEventListener('input', () => {
     if (state.key !== null) {
       state.drafts.set(state.key, $('say-input').value);
@@ -1583,7 +1364,6 @@ function init() {
     }
   });
 
-  renderSubscriptions();
   renderSetup();
   load();
 }

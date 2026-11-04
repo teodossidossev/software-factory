@@ -147,13 +147,17 @@ test('handbookSection extracts by heading and skips "## " lines inside fences; m
   assert.ok(template.endsWith('- [ ] Browser support verified\n```'));
   assert.doesNotMatch(template, /What the factory never does/);
   assert.equal(quickStartSection(handbook), handbookSection(handbook, '## Quick start'));
-  assert.match(handbookSection(handbook, '## Quick start'), /When `check` says `pushed` or `aborted`, the ticket is finished for you/);
-  // SF-034: whoever reviews acts in the same turn; a review is never a report that waits.
-  assert.match(handbookSection(handbook, '## Quick start'), /review at once, whatever brought you to it[\s\S]*end the same turn\s+with `request_fix` or `mark_clean`/);
-  assert.match(handbookSection(handbook, '## Quick start'), /Never end it with a summary, a review announced for later\s+or a question/);
-  const review = handbookSection(handbook, '## Review rules for the Context owner');
-  assert.match(review, /whoever reviews, whichever model and whatever started the review/);
-  assert.match(review, /A review is not a report: it ends, in the same turn, with `request_fix` or `mark_clean`/);
+  // SF-040: the Context owner plans only; the user starts; the reviewers review.
+  const quick = handbookSection(handbook, '## Quick start');
+  assert.match(quick, /You never start, review, fix,\s+clean or approve a job/);
+  assert.match(quick, /The user reads it and starts the job on the dashboard/);
+  assert.match(quick, /`## Review brief`/);
+  for (const gone of [/`check`/, /`start`/, /request_fix/, /mark_clean/, /subscri/i, /event/i]) {
+    assert.doesNotMatch(handbook, gone);
+  }
+  const review = handbookSection(handbook, '## Review rules');
+  assert.match(review, /the factory sends this section to the Claude review and to the Codex gate/);
+  assert.match(review, /A review ends with a verdict: `fix` with its items, or `clean`/);
   assert.throws(() => handbookSection(handbook, '## Nope'), /no "## Nope" section/);
 
   const input = { ticket: 'T-1', branch: 'T-1-x', targetRef: 'origin/main', targetCommit: 'a'.repeat(40), attempt: 1, handbook };

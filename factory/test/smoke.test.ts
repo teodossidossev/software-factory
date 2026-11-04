@@ -181,7 +181,8 @@ test('sf serve gives the Quick start as instructions and the planning and execut
   assert.equal(client.getServerVersion()?.version, '0.1.0');
 
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map((tool) => tool.name).sort(), ['check', 'guide', 'mark_clean', 'read_file', 'request_fix', 'search', 'start', 'write_task']);
+  // SF-040: the planning tools only; jobs are started, reviewed and approved elsewhere.
+  assert.deepEqual(tools.map((tool) => tool.name).sort(), ['guide', 'read_file', 'search', 'write_task']);
   const annotations = Object.fromEntries(tools.map((tool) => [tool.name, tool.annotations]));
   assert.equal(annotations.read_file?.readOnlyHint, true);
   assert.equal(annotations.search?.readOnlyHint, true);

@@ -1,4 +1,4 @@
-// The Dashboard's actions (approve, abort, say): the HTTP contract in process against
+// The Dashboard's actions (approve, abort, say, review, archive, and the start of a ticket): the HTTP contract in process against
 // startDashboard with a fake DashboardActions (methods per route, token, Origin, content type,
 // body bounds, strict JSON, error mapping, a pending and a disconnected approve), then end to
 // end through `sf serve`, where the same POSTs reach the real Execution and the fake Implementer.
@@ -12,7 +12,7 @@ import { ACTIONS, MAX_ACTION_BODY_BYTES } from '../src/dashboard.js';
 import { FactoryError } from '../src/errors.js';
 import { JobStore } from '../src/jobs.js';
 import { factoryPrompt } from '../src/prompts.js';
-import { act, CSP, fakeActions, fakeReviewers, fetchRaw, openStream, type Reply, subscription } from './support/dashboard-client.js';
+import { act, CSP, fakeActions, fetchRaw, openStream, type Reply } from './support/dashboard-client.js';
 import { withDashboard } from './support/dashboard-state.js';
 import { call, fakeLog, git, newEnv, newRepo, putTask, refused, script, serve, stop, waitFor } from './support/harness.js';
 
@@ -434,80 +434,39 @@ test('dashboard actions end to end: say queues during a turn, a hand-edited tip 
   }
 });
 
-test('dashboard test-event: POST only, the action checks, the ticket\'s own subscription or no_subscription; one test per request', async () => {
-  const fake = fakeActions();
-  const reviewers = fakeReviewers();
-  await withDashboard('dash-act-test-event', fake, async (dashboard) => {
+test('dashboard ticket start (SF-040): POST only, the action checks, Execution.start once per request, its refusals mapped; test-event and nudge are gone', async () => {
+  const fake = fakeActions({ branch: 'T-5-demo', state: 'starting', check_after_minutes: 15, worktree: '/w/app/T-5' });
+  await withDashboard('dash-act-start', fake, async (dashboard) => {
     const base = dashboard.url;
-    const path = 'api/jobs/app/T-1/test-event';
-    reviewers.rows = [subscription('sub_all', {}), subscription('sub_own', { workspace: 'app', ticket: 'T-1' })];
-    for (const method of ['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']) {
+    const path = 'api/tickets/app/T-5/start';
+    for (const method of ['GET', 'HEAD', 'PUT']) {
       const reply = await act(base, path, {}, { method });
       assert.deepEqual([reply.status, reply.headers.allow, reply.body], [405, 'POST', ''], method);
     }
-    const port = Number(base.port);
-    assert.deepEqual(error(await act(base, path, {}, { headers: { origin: `http://localhost:${port}` } })), { status: 403, code: 'invalid_origin' });
-    assert.deepEqual(error(await act(base, path, {}, { headers: { origin: '' } })), { status: 403, code: 'invalid_origin' });
-    assert.deepEqual(error(await act(base, path, {}, { headers: { 'content-type': 'text/plain' } })), { status: 415, code: 'unsupported_media_type' });
-    for (const text of ['{"id":"sub_all"}', '[]', 'null']) {
-      assert.deepEqual(error(await act(base, path, undefined, { body: text })), { status: 400, code: 'invalid_body' }, text);
+    assert.deepEqual(error(await act(base, path, { now: true })), { status: 400, code: 'invalid_body' });
+    assert.deepEqual(error(await act(base, path, undefined, { body: 'null' })), { status: 400, code: 'invalid_body' });
+    assert.equal((await act(base, path, {}, { headers: { origin: 'http://evil.example' } })).status, 403);
+    for (const other of ['api/tickets/App/T-5/start', 'api/tickets/app/.T-5/start', 'api/tickets/app/T-5/start/x']) {
+      assert.notEqual((await act(base, other, {})).status, 200, other);
     }
-    assert.deepEqual(error(await act(base, path, undefined, { body: '{' })), { status: 400, code: 'invalid_json' });
-    assert.deepEqual(error(await act(base, path, undefined, { body: 'x'.repeat(MAX_ACTION_BODY_BYTES + 1) })), { status: 413, code: 'body_too_large' });
-    for (const other of ['api/jobs/app/T-9/test-event', 'api/jobs/App/T-1/test-event']) {
-      const reply = await act(base, other, {});
-      assert.deepEqual([reply.status, reply.body], [404, ''], other);
-    }
-    assert.deepEqual(reviewers.tests, []);
-
-    // The ticket's own subscription, never the broad one; the outcome comes back unchanged.
-    assert.deepEqual(result(await act(base, path, {})), { subscription: 'sub_own', delivered: true, status: 200 });
-    assert.deepEqual(reviewers.tests, ['sub_own']);
-    reviewers.answer = { subscription: 'sub_own', delivered: false, status: 'timeout' };
-    assert.deepEqual(result(await act(base, path, {})), { subscription: 'sub_own', delivered: false, status: 'timeout' });
-    reviewers.answer = new FactoryError('subscription_not_found', 'There is no subscription sub_own.');
-    assert.deepEqual(error(await act(base, path, {})), { status: 404, code: 'subscription_not_found' });
-    assert.deepEqual(reviewers.tests, ['sub_own', 'sub_own', 'sub_own']);
-
-    // Only broad ones, or none: refused before any test.
-    for (const rows of [[subscription('sub_all', {})], []]) {
-      reviewers.rows = rows;
-      const reply = await act(base, path, {});
-      assert.deepEqual(error(reply), { status: 404, code: 'no_subscription' });
-      assert.match(JSON.parse(reply.body).error.message, /sf ticket app T-1/);
-    }
-    assert.equal(reviewers.tests.length, 3);
     assert.deepEqual(fake.calls, []);
-  }, reviewers);
-});
 
-test('dashboard nudge: POST only, the action checks, the job as it is now to the hub, its outcome or refusal unchanged', async () => {
-  const fake = fakeActions();
-  const reviewers = fakeReviewers([subscription('sub_own', { workspace: 'app', ticket: 'T-1' })]);
-  await withDashboard('dash-act-nudge', fake, async (dashboard, store) => {
-    const base = dashboard.url;
-    const path = 'api/jobs/app/T-1/nudge';
-    for (const method of ['GET', 'PUT']) {
-      const reply = await act(base, path, {}, { method });
-      assert.deepEqual([reply.status, reply.headers.allow, reply.body], [405, 'POST', ''], method);
+    // No job is needed: the ticket's job does not exist yet.
+    assert.deepEqual(result(await act(base, path, {})), { branch: 'T-5-demo', state: 'starting', check_after_minutes: 15, worktree: '/w/app/T-5' });
+    assert.deepEqual(fake.calls, [['start', 'app', 'T-5']]);
+    fake.answer = new FactoryError('task_draft', 'The Task file is still the skeleton.');
+    assert.deepEqual(error(await act(base, path, {})), { status: 409, code: 'task_draft' });
+    fake.answer = new FactoryError('job_limit', 'Three jobs run in app.');
+    assert.deepEqual(error(await act(base, path, {})), { status: 409, code: 'job_limit' });
+    assert.equal(fake.calls.length, 3);
+
+    // The reviewer routes of the MCP Events era answer like any unknown path.
+    for (const gone of ['api/jobs/app/T-1/test-event', 'api/jobs/app/T-1/nudge']) {
+      const reply = await act(base, gone, {});
+      assert.deepEqual([reply.status, reply.headers.allow, reply.body], [405, 'GET', ''], gone);
     }
-    assert.deepEqual(error(await act(base, path, {}, { headers: { origin: '' } })), { status: 403, code: 'invalid_origin' });
-    assert.deepEqual(error(await act(base, path, undefined, { body: '{"subscription":"sub_own"}' })), { status: 400, code: 'invalid_body' });
-    assert.deepEqual([(await act(base, 'api/jobs/app/T-9/nudge', {})).status], [404]);
-    assert.deepEqual(reviewers.nudges, []);
-
-    assert.deepEqual(result(await act(base, path, {})), { queued: ['sub_own'], pending: [] });
-    reviewers.nudgeAnswer = { queued: [], pending: ['sub_own'] };
-    assert.deepEqual(result(await act(base, path, {})), { queued: [], pending: ['sub_own'] });
-    // The job is read when the nudge runs: the hub sees its state now.
-    await store.jobs.write({ ...store.job, state: 'working' });
-    reviewers.nudgeAnswer = new FactoryError('invalid_state', 'Only a job in awaiting_review waits for its reviewer; T-1 is working.');
-    assert.deepEqual(error(await act(base, path, {})), { status: 409, code: 'invalid_state' });
-    reviewers.nudgeAnswer = new FactoryError('no_subscription', 'No subscription receives the events of T-1.');
-    assert.deepEqual(error(await act(base, path, {})), { status: 404, code: 'no_subscription' });
-    assert.deepEqual(reviewers.nudges, ['app/T-1@awaiting_review', 'app/T-1@awaiting_review', 'app/T-1@working', 'app/T-1@working']);
-    assert.deepEqual(fake.calls, []);
-  }, reviewers);
+    assert.equal(fake.calls.length, 3);
+  });
 });
 
 test('dashboard review: POST only, the action checks, Execution.retryReview once per request, its refusals mapped', async () => {

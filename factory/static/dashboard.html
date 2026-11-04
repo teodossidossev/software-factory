@@ -60,7 +60,7 @@
             <div class="field">
               <label for="ticket-request">What you want, in your words</label>
               <textarea id="ticket-request" rows="5"></textarea>
-              <p class="hint">Not written into the Task file: these words open the conversation, where the LLM investigates, discusses it with you and writes the Task file. The job starts when you say start in that conversation.</p>
+              <p class="hint">Not written into the Task file: these words open the conversation, where ChatGPT investigates, discusses it with you and writes the Task file. Once it is written, you start the job here, under Tickets.</p>
             </div>
             <fieldset class="owner">
               <legend>Context owner</legend>
@@ -100,11 +100,6 @@
           <p id="no-jobs" class="hint" hidden>No jobs yet.</p>
           <ul id="job-list" class="job-list"></ul>
         </section>
-        <details class="card subscriptions">
-          <summary class="card-head"><span class="card-title">Subscriptions</span></summary>
-          <p id="no-subscriptions" class="hint" hidden>No subscriptions.</p>
-          <ul id="subscription-list" class="sub-list" hidden></ul>
-        </details>
       </nav>
 
       <section id="detail" class="detail" hidden>
@@ -151,34 +146,6 @@
           </div>
           <div id="action-status" class="status" role="status" aria-live="polite"></div>
           <div id="action-doubt" class="status error" role="status" aria-live="polite"></div>
-
-          <div id="reviewer" class="reviewer" hidden>
-            <p id="reviewer-line" class="reviewer-line"></p>
-            <p id="reviewer-warning" class="status warn" hidden></p>
-            <details id="reviewer-setup" class="reviewer-setup" hidden>
-              <summary class="card-head"><span class="section-title">Set up the reviewer in ChatGPT</span></summary>
-              <p class="hint">Nobody receives this job's events yet. In ChatGPT, in the project of this workspace, open a new conversation for this ticket and send these two messages, in order.</p>
-              <div class="copy-box">
-                <textarea id="setup-guide" rows="1" readonly aria-label="First message"></textarea>
-                <button id="copy-guide" type="button" class="btn btn-sm">Copy</button>
-              </div>
-              <div class="copy-box">
-                <textarea id="setup-instruction" rows="3" readonly aria-label="Second message"></textarea>
-                <button id="copy-instruction" type="button" class="btn btn-sm">Copy</button>
-              </div>
-              <p id="copy-status" class="hint" role="status" aria-live="polite"></p>
-            </details>
-            <div class="row">
-              <button id="nudge-button" type="button" class="btn btn-sm btn-primary" disabled>Nudge the reviewer</button>
-              <span id="nudge-reason" class="hint"></span>
-            </div>
-            <div id="nudge-status" class="status" role="status" aria-live="polite"></div>
-            <div class="row">
-              <button id="test-event-button" type="button" class="btn btn-sm" disabled>Send test event</button>
-              <span id="test-event-reason" class="hint"></span>
-            </div>
-            <div id="test-event-status" class="status" role="status" aria-live="polite"></div>
-          </div>
 
           <form id="say-form" class="say">
             <label for="say-input" class="section-title">Message to the Implementer</label>

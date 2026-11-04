@@ -1,8 +1,10 @@
 // Shared helpers of the end-to-end tests: the real `sf serve` and `sf` CLI with private config
 // and state directories, throwaway Git repositories and the fake Claude Code
 // (test/support/fake-claude.ts) as the Implementer executable, the fake Codex
-// (test/support/fake-codex.ts) for the gate, tools driven through the official
-// MCP client. Importing it registers the before/after hooks that create and remove the temp dir.
+// (test/support/fake-codex.ts) for the gate, the planning tools driven through the official
+// MCP client and the job steps through the socket of sf serve: start as sf start sends it, and with
+// SF_TEST_HOOKS=on check and a reviewer's verdict without a review session (fix, clean). Importing it registers the before/after hooks
+// that create and remove the temp dir.
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
@@ -11,6 +13,7 @@ import { join } from 'node:path';
 import { after, before } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { callSocket } from '../../src/ipc.js';
 import { JobStore } from '../../src/jobs.js';
 import { saveRegistry } from '../../src/registry.js';
 import { writeTask } from '../../src/task-file.js';
@@ -42,6 +45,8 @@ export interface Served {
   output: string;
   // The printed dashboard URL; undefined with SF_DASHBOARD=off.
   dashboard: URL | undefined;
+  // The state directory, for the socket.
+  state: string;
 }
 
 export function git(cwd: string, ...args: string[]): string {
@@ -65,6 +70,8 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
     SF_REVIEW: 'off',
     // No gate unless the test turns it on (test/gate.test.ts).
     SF_GATE: 'off',
+    // The job steps of call() and refused() through the socket.
+    SF_TEST_HOOKS: 'on',
     ...env.extra,
   };
 }
@@ -171,7 +178,7 @@ export async function serve(env: Env, args: string[] = ['serve']): Promise<Serve
   });
   const client = new Client({ name: 'sf-011-execution', version: '0.0.0' });
   await client.connect(new StreamableHTTPClientTransport(url));
-  return { child, client, url, output, dashboard };
+  return { child, client, url, output, dashboard, state: env.state };
 }
 
 export async function stop(served: Served, signal: NodeJS.Signals = 'SIGTERM'): Promise<void> {
@@ -186,17 +193,45 @@ export async function stop(served: Served, signal: NodeJS.Signals = 'SIGTERM'): 
   });
 }
 
-export async function call(served: Served, name: string, args: Record<string, unknown>): Promise<Record<string, any>> {
+// The job steps that are no MCP tools since SF-040, as the socket commands of sf serve: the user's
+// start (sf start), check, and the verdicts of a reviewer (fix, clean). The tests keep the old tool
+// names (request_fix, mark_clean) for the steps: they name the Execution paths the steps take.
+const SOCKET_STEPS: Record<string, (args: Record<string, any>) => { command: string; args: string[] }> = {
+  start: ({ workspace, ticket }) => ({ command: 'start', args: [workspace, ticket] }),
+  check: ({ workspace, ticket, offset, max_bytes }) => ({
+    command: 'check',
+    args: [workspace, ticket, ...(offset !== undefined || max_bytes !== undefined ? [String(offset ?? 0)] : []), ...(max_bytes !== undefined ? [String(max_bytes)] : [])],
+  }),
+  request_fix: ({ workspace, ticket, content }) => ({ command: 'fix', args: [workspace, ticket, content] }),
+  mark_clean: ({ workspace, ticket, sensitive }) => ({ command: 'clean', args: [workspace, ticket, ...(sensitive ?? [])] }),
+};
+
+// One step: a planning tool through MCP, a job step through the socket; ok with its result, or
+// refused with the code and message.
+async function step(served: Served, name: string, args: Record<string, unknown>): Promise<{ ok: true; result: Record<string, any> } | { ok: false; error: { code: string; message: string } }> {
+  const viaSocket = SOCKET_STEPS[name];
+  if (viaSocket !== undefined) {
+    const response = await callSocket(served.state, viaSocket(args));
+    return response.ok ? { ok: true, result: response.result as Record<string, any> } : response;
+  }
   const result = await served.client.callTool({ name, arguments: args });
-  assert.equal(result.isError ?? false, false, JSON.stringify(result.content));
-  return result.structuredContent as Record<string, any>;
+  if (result.isError === true) {
+    const [block] = result.content as Array<{ text: string }>;
+    return { ok: false, error: JSON.parse(block!.text) };
+  }
+  return { ok: true, result: result.structuredContent as Record<string, any> };
+}
+
+export async function call(served: Served, name: string, args: Record<string, unknown>): Promise<Record<string, any>> {
+  const outcome = await step(served, name, args);
+  assert.equal(outcome.ok, true, JSON.stringify(outcome));
+  return (outcome as { result: Record<string, any> }).result;
 }
 
 export async function refused(served: Served, name: string, args: Record<string, unknown>): Promise<{ code: string; message: string }> {
-  const result = await served.client.callTool({ name, arguments: args });
-  assert.equal(result.isError, true, `expected ${name} to be refused`);
-  const [block] = result.content as Array<{ text: string }>;
-  return JSON.parse(block!.text);
+  const outcome = await step(served, name, args);
+  assert.equal(outcome.ok, false, `expected ${name} to be refused`);
+  return (outcome as { error: { code: string; message: string } }).error;
 }
 
 export async function waitFor(served: Served, ticket: string, state: string, iteration?: number): Promise<Record<string, any>> {

@@ -165,7 +165,7 @@ test('sf help documents the EST_USD (an estimate) and ELAPSED columns and dashbo
   assert.equal(help.code, 0, help.stderr);
   assert.match(help.stdout, /^  sf status \[<workspace> <ticket>\] +Show one job or all jobs/m);
   assert.match(help.stdout, /^  sf dashboard \[--open\] \[--rotate\] +Print the dashboard URL/m);
-  assert.match(help.stdout, /^  EST_USD: an estimate of the API-equivalent price, not a charge \(the session usually runs on your Claude subscription\):$/m);
+  assert.match(help.stdout, /^  EST_USD: an estimate of the API-equivalent price, not a charge \(the session usually runs on your Claude plan\):$/m);
   assert.match(help.stdout, /cost_usd of the published iterations summed, four decimals; 0\.0000 before the first one, unknown when one has no usable cost/);
   assert.doesNotMatch(help.stdout, /COST_USD/);
   assert.match(help.stdout, /ELAPSED: wall-clock time since the job was created, waiting included; stops at the last state change once pushed, aborted or failed/);

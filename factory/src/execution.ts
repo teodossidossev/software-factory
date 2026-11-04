@@ -1,11 +1,12 @@
-// The job lifecycle: start, check, request_fix, mark_clean (the MR preparation and the branch,
+// The job lifecycle: start, check, requestFix, markClean (the MR preparation and the branch,
 // SF-019, committed and rebased by the factory, SF-037), say, retryReview (the retry of a failed
 // review, SF-044), approve (the push), abort, reset
 // (and the dashboard's terminal-only Archive), status and the restart rule. Owns the Implementer session of each job, which works in the
 // job's own worktree, and publishes an iteration (Report, Patch and the file list) when the
 // session goes idle; then the Claude review of that iteration runs (SF-038, src/review.ts), and
 // after a clean one the Codex gate (SF-039, src/gate.ts); the deciding verdict takes the path of
-// request_fix or mark_clean. Every state change goes through #transition, the seam for
+// requestFix or markClean. The user starts and approves (the dashboard, the CLI); no MCP tool
+// reaches these methods since SF-040. Every state change goes through #transition, the seam for
 // notifications.
 // Several jobs of one workspace run at the same time, up to SF_MAX_JOBS; the Git operations on
 // the shared checkout are serialized per workspace.
@@ -268,7 +269,7 @@ export class Execution {
         } else if (job.state === 'working') {
           await this.#transition(job, 'needs_human', { code: 'serve_restarted', message: 'sf serve restarted while the iteration ran; use sf say to continue.' });
         } else if (job.state === 'preparing_mr') {
-          await this.#transition(job, 'needs_human', { code: 'mr_serve_restarted', message: 'sf serve restarted during MR preparation; call mark_clean again.' });
+          await this.#transition(job, 'needs_human', { code: 'mr_serve_restarted', message: 'sf serve restarted during MR preparation; go on with sf say (its iteration is reviewed again and a clean verdict prepares the branch again), or abort or reset the job.' });
         } else if (job.state === 'starting') {
           await this.#transition(job, 'failed', { code: 'serve_restarted', message: 'sf serve restarted while the job was starting.' });
         }
@@ -287,7 +288,7 @@ export class Execution {
       const workspace = await this.#resolve(workspaceName);
       const content = await readTask(workspace, ticket);
       if (isDraft(content)) {
-        throw new FactoryError('task_draft', `${TASK_DIR}/${ticket}.md is still the skeleton: the Context owner writes the Task with write_task first, then starts on the user's word.`);
+        throw new FactoryError('task_draft', `${TASK_DIR}/${ticket}.md is still the skeleton: the Context owner writes the Task with write_task first, then the user starts the job.`);
       }
       const fields = parseFrontMatter(content)!;
       const base = fields.get('base')!;
@@ -878,7 +879,7 @@ export class Execution {
     const title = mrText.split(/\r?\n/)[0]!;
     const failure = await this.#gitLocked(job.workspace, () => removeWorktree(live.workspace.workCheckout, cwd));
     if (failure !== undefined) {
-      await this.#transition(job, 'needs_human', { code: 'worktree_remove_failed', message: `${failure} The branch ${job.branch} is prepared; remove the worktree by hand and call mark_clean again.` });
+      await this.#transition(job, 'needs_human', { code: 'worktree_remove_failed', message: `${failure} The branch ${job.branch} is prepared; remove the worktree by hand, then go on with sf say (its iteration is reviewed again and a clean verdict prepares the branch again), or abort or reset the job.` });
       return;
     }
     this.#live.delete(`${job.workspace}/${job.ticket}`);
@@ -898,7 +899,7 @@ export class Execution {
     }
   }
 
-  // The Context owner's Clean: every undeclared sensitive path of the reviewed iteration must be
+  // Clean (the deciding clean verdict): every undeclared sensitive path of the reviewed iteration must be
   // acknowledged; then the target is resolved and the MR text turn runs in the worktree. When it
   // ends the factory commits and rebases (#mrIdle), and the job ends in ready_for_human_review with
   // the branch in the checkout. Also the retry after a failed preparation (needs_human with
@@ -918,7 +919,7 @@ export class Execution {
       .filter((change) => change.sensitive === 'undeclared' && !sensitive.includes(change.path))
       .map((change) => change.path);
     if (unacknowledged.length > 0) {
-      throw new FactoryError('sensitive_unacknowledged', `Undeclared sensitive path(s) in the reviewed iteration: ${unacknowledged.join(', ')}. Name each in sensitive with the reason it is needed, or request_fix its removal.`);
+      throw new FactoryError('sensitive_unacknowledged', `Undeclared sensitive path(s) in the reviewed iteration: ${unacknowledged.join(', ')}. Each must be named in the accepted sensitive paths with the reason it is needed; otherwise it is a fix item.`);
     }
     if (job.worktree === null || !(await exists(job.worktree))) {
       throw new FactoryError('worktree_missing', `The worktree of ${workspaceName}/${ticket} is missing; sf reset the ticket and start again.`);

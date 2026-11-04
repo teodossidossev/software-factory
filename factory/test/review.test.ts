@@ -94,7 +94,7 @@ test('fix, then clean: the Fix section from the items, the next iteration, Clean
     assert.equal(REVIEW_DENIED_TOOLS.filter((tool) => ['Bash', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task', 'Agent', 'Read(**/.env)'].includes(tool)).length, 9);
     const [first, second] = reviews.map((entry) => entry.prompt);
     assert.match(first!, /^Code review of iteration 1 of ticket R-1\. /);
-    assert.ok(first!.includes(handbookSection((await loadHandbook()).text, '## Review rules for the Context owner')));
+    assert.ok(first!.includes(handbookSection((await loadHandbook()).text, '## Review rules')));
     assert.ok(first!.includes(`<task_file path=".software-factory/R-1.md">\n${task('R-1', 'Greet the reader').trimEnd()}\n</task_file>`));
     assert.ok(first!.includes('<report>\nReport of iteration 1\n'));
     assert.ok(first!.includes('<sensitive_and_deleted_paths>\nNone.\n</sensitive_and_deleted_paths>'));

@@ -1,24 +1,20 @@
 // The sf command: `sf serve`, `sf up` (serve, the tunnel and the browser), `sf workspace
 // add|list|remove`, `sf start|say|review|approve|abort|reset` (through the socket of sf serve),
-// `sf status|watch|dashboard` (reading the state directory directly), `sf events list|remove|test`
-// (through the socket), `sf notify-test` and `sf auth-test` (verifying a token from stdin without
-// the server).
+// `sf status|watch|dashboard` (reading the state directory directly), `sf notify-test` and `sf info`.
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { type ChildProcess, spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { AuthError, createVerifier } from './auth.js';
 import { openInBrowser } from './browser.js';
-import { authConfig, envFilePath, gateConfig, loadConfig, loadEnvFile, stateDir } from './config.js';
+import { envFilePath, gateConfig, loadConfig, loadEnvFile, stateDir } from './config.js';
 import { DEFAULT_DASHBOARD_PORT, dashboardUrl, readToken, removeToken, type RunningDashboard, startDashboard } from './dashboard.js';
 import { FactoryError } from './errors.js';
-import { coversTicketBroadly, Events, ownsTicket, type SubscriptionSummary, TICKET_GUIDE, ticketInstruction } from './events.js';
 import { Execution, type StateListener } from './execution.js';
 import { codexVersion } from './gate.js';
 import { existsSync } from 'node:fs';
 import { callSocket, listenSocket, socketPath } from './ipc.js';
-import { type Job, JobStore, TERMINAL_STATES } from './jobs.js';
+import { type Job, JobStore } from './jobs.js';
 import { jobNotification, notifyConfig, sendNotification, stateNotifier } from './notify.js';
 import { configDir, ignoredWorkCheckouts, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { loadHandbook, packageVersion, PortInUseError, SERVER_NAME, startServer } from './server.js';
@@ -31,7 +27,7 @@ import { watchEvents } from './watch.js';
 const DEFAULT_PORT = 8787;
 const USAGE = `Usage:
   sf serve                                              Serve the MCP tools on 127.0.0.1:\${SF_PORT:-${DEFAULT_PORT}}/mcp and the dashboard
-  sf up [--no-open] [--no-tunnel]                       sf serve plus the ChatGPT tunnel (scripts/sf-tunnel.sh run) in one terminal, and open the dashboard; Ctrl+C stops both
+  sf up [--no-open] [--no-tunnel]                       sf serve plus the planning tunnel for ChatGPT (scripts/sf-tunnel.sh run) in one terminal, and open the dashboard; Ctrl+C stops both
   sf dashboard [--open] [--rotate]                      Print the dashboard URL; --open also opens it (xdg-open); --rotate removes the token so the next sf serve makes a new one
   sf workspace add <name> --read <path>                 Register a workspace: the local checkout (every job works in a worktree of it)
   sf workspace list                                     List registered workspaces
@@ -44,16 +40,11 @@ const USAGE = `Usage:
   sf approve <workspace> <ticket> [--as-is]             Push the branch prepared at Clean; --as-is pushes it even if its tip was edited by hand
   sf abort <workspace> <ticket> [--discard]             End the job; the worktree stays (its path is printed); --discard removes the worktree and the branch
   sf reset <workspace> <ticket>                         End the session, remove the worktree and archive the job; the branch is untouched
-  sf events list                                        List the MCP event subscriptions (no secrets)
-  sf events remove <id>                                 Remove an MCP event subscription
-  sf events test <id>                                   Send a test event (state "test") to a subscription and print the answer
-  sf ticket <workspace> <ticket> [--no-wait]            Set up the ChatGPT conversation of one ticket: the instruction to paste, wait for its subscription, test it
   sf notify-test                                        Send a test notification on every channel
-  sf auth-test                                          Verify an access token read from stdin with the SF_AUTH_* settings
-  sf info                                               Version, directories, settings, whether sf serve and the tunnel run, workspaces, jobs, subscriptions
+  sf info                                               Version, directories, settings, whether sf serve and the tunnel run, workspaces, jobs
 
 Notes:
-  EST_USD: an estimate of the API-equivalent price, not a charge (the session usually runs on your Claude subscription):
+  EST_USD: an estimate of the API-equivalent price, not a charge (the session usually runs on your Claude plan):
            cost_usd of the published iterations summed, four decimals; 0.0000 before the first one, unknown when one has no usable cost.
            A running iteration or MR preparation adds nothing until its iteration is published.
   ELAPSED: wall-clock time since the job was created, waiting included; stops at the last state change once pushed, aborted or failed.
@@ -85,7 +76,6 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   const port = parsePort('SF_PORT', DEFAULT_PORT);
   const dashboardPort = parsePort('SF_DASHBOARD_PORT', DEFAULT_DASHBOARD_PORT);
   const config = loadConfig();
-  const auth = authConfig();
   const handbook = await loadHandbook();
   // Fail at startup on an invalid registry rather than on the first tool call.
   const registry = await loadRegistry();
@@ -95,14 +85,10 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   }
   const jobs = new JobStore(config.stateDir);
   const notify = stateNotifier(notifyConfig(), jobs);
-  // MCP Events: loads the subscriptions and resumes the pending deliveries. Loopback callbacks
-  // only with SF_EVENTS_ALLOW_LOOPBACK=on (tests).
-  const events = await Events.open(config.stateDir, jobs, { allowLoopback: process.env.SF_EVENTS_ALLOW_LOOPBACK === 'on' });
   // The dashboard starts after recovery; until then its listener is a no-op.
   let dashboard: RunningDashboard | undefined;
   const onStateChange: StateListener = (job, from, lines) => {
     notify(job, from, lines);
-    events.onStateChange(job, from, lines);
     dashboard?.onStateChange(job, from);
   };
   const execution = new Execution(config, (name) => resolveWorkspace(name), onStateChange, handbook.text);
@@ -110,20 +96,12 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   // A finished job leaves with its Task file through the lock's scope, in the same acquisition as
   // the ticket action's checks: it is archived and a kept worktree removed.
   const setup = new Setup({ configDir: configDir(), jobs, exclusive: (work) => execution.exclusive(work) });
+  const testHooks = process.env.SF_TEST_HOOKS === 'on';
   // The socket first: it refuses a second sf serve on the same state before recovery touches it.
   const socket = await listenSocket(config.stateDir, async ({ command, args }) => {
-    if (command === 'events') {
-      const [action, id, ...extra] = args;
-      if (action === 'list' && id === undefined) {
-        return { subscriptions: events.subscriptions() };
-      }
-      if (action === 'remove' && id !== undefined && extra.length === 0) {
-        return events.remove(id);
-      }
-      if (action === 'test' && id !== undefined && extra.length === 0) {
-        return events.test(id);
-      }
-      throw new FactoryError('bad_request', 'Unknown events command.');
+    // sf info: whether sf serve answers.
+    if (command === 'ping') {
+      return {};
     }
     const [workspace = '', ticket = '', ...words] = args;
     if (command === 'start' && words.length === 0) {
@@ -144,33 +122,41 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     if (command === 'reset' && words.length === 0) {
       return execution.reset(workspace, ticket);
     }
+    // Tests only (SF_TEST_HOOKS=on): check, and a reviewer's verdict without a review session,
+    // so the end-to-end tests drive the cycle step by step. No CLI command sends these.
+    if (testHooks && command === 'check' && words.length <= 2) {
+      const [offset, maxBytes] = words.map(Number);
+      return execution.check(workspace, ticket, offset, maxBytes);
+    }
+    if (testHooks && command === 'fix' && words.length === 1) {
+      return execution.requestFix(workspace, ticket, words[0]!);
+    }
+    if (testHooks && command === 'clean') {
+      return execution.markClean(workspace, ticket, words);
+    }
     throw new FactoryError('bad_request', `Unknown command "${command}".`);
   });
   let server;
   try {
     await execution.recover();
-    server = await startServer(port, handbook, await packageVersion(), execution, auth, undefined, events);
+    server = await startServer(port, handbook, await packageVersion(), execution);
   } catch (error) {
-    events.close();
     await socket.close();
     throw error;
   }
   try {
     if (dashboardOn()) {
-      // The dashboard's actions (DashboardActions: approve, abort, say, retryReview and
-      // archiveFinished) run on the same Execution as the socket commands; its reviewers are the
-      // subscriptions of the same Events.
-      dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, events, setup);
+      // The dashboard's actions (DashboardActions: start, approve, abort, say, retryReview and
+      // archiveFinished) run on the same Execution as the socket commands.
+      dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, setup);
     } else {
       await removeToken(config.stateDir);
     }
   } catch (error) {
-    events.close();
     await Promise.all([server.close(), socket.close()]);
     throw error;
   }
   console.log(dashboard !== undefined ? `${SERVER_NAME} dashboard ${dashboard.url.href}` : `${SERVER_NAME} dashboard off (SF_DASHBOARD=off)`);
-  console.log(auth === undefined ? 'auth: off' : `auth: ${auth.issuer} audience ${auth.audience}`);
   if (!config.gate.on && config.gate.missing === true) {
     console.log(`gate: off (${config.gate.reason}); the Claude review decides`);
   }
@@ -185,7 +171,6 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     stopping = true;
     console.log(`${SERVER_NAME} received ${signal}, shutting down`);
     hooks.beforeStop?.();
-    events.close();
     Promise.all([server.close(), socket.close(), dashboard?.close()]).then(
       () => process.exit(0),
       (error: unknown) => {
@@ -420,104 +405,6 @@ async function reset(args: string[]): Promise<void> {
     : 'The worktree is removed; the branch is untouched.');
 }
 
-const SUBSCRIPTION_ID = /^sub_[A-Za-z0-9_-]{1,64}$/;
-
-// live: the current jobs, so each subscription shows the live job its ticket filter matches.
-function subscriptionTable(rows: SubscriptionSummary[], live: Job[] = []): string {
-  const matched = (row: SubscriptionSummary): string => {
-    const job = live.find((candidate) => !TERMINAL_STATES.includes(candidate.state) && ownsTicket(row.input, candidate.workspace, candidate.ticket));
-    return job === undefined ? '-' : `${job.workspace}/${job.ticket} ${job.state}`;
-  };
-  const cells = [
-    ['ID', 'PRINCIPAL', 'EVENT', 'INPUT', 'HOST', 'CREATED', 'REFRESH_BEFORE', 'LIVE_JOB'],
-    ...rows.map((row) => [row.id, row.principal, row.event, JSON.stringify(row.input), row.host, row.createdAt, row.refreshBefore, matched(row)]),
-  ];
-  const widths = cells[0]!.map((_, column) => Math.max(...cells.map((row) => row[column]!.length)));
-  return cells.map((row) => row.map((cell, column) => cell.padEnd(widths[column]!)).join('  ').trimEnd()).join('\n');
-}
-
-// `sf events list|remove <id>|test <id>`, through the socket of sf serve.
-async function eventsCommand(args: string[]): Promise<void> {
-  const [action, id, ...extra] = args;
-  if (action === 'list') {
-    if (id !== undefined) {
-      throw new UsageError('events list takes no arguments.');
-    }
-    const response = await callSocket(stateDir(), { command: 'events', args: ['list'] });
-    if (!response.ok) {
-      throw new FactoryError(response.error.code, response.error.message);
-    }
-    const rows = (response.result as { subscriptions: SubscriptionSummary[] }).subscriptions;
-    console.log(rows.length === 0 ? 'No subscriptions.' : subscriptionTable(rows, await new JobStore(stateDir()).list()));
-    return;
-  }
-  if (action !== 'remove' && action !== 'test') {
-    throw new UsageError(action === undefined ? 'an events command is required.' : `unknown events command "${action}".`);
-  }
-  if (id === undefined || extra.length > 0) {
-    throw new UsageError(`events ${action} needs <id>.`);
-  }
-  if (!SUBSCRIPTION_ID.test(id)) {
-    throw new FactoryError('invalid_subscription', 'A subscription id looks like sub_<letters, digits, "_" and "-">; sf events list shows them.');
-  }
-  const result = await viaServer('events', [action, id]);
-  if (action === 'test' && result.delivered !== true) {
-    process.exitCode = 1;
-  }
-}
-
-const TICKET_WAIT_MS = 15 * 60 * 1000;
-const TICKET_POLL_MS = 3000;
-
-// `sf ticket <workspace> <ticket>`: the ChatGPT conversation of one ticket. Warns about
-// subscriptions that would also receive its events, prints the instruction to paste, waits for
-// the ticket's own subscription (--no-wait: exit 1 instead) and sends it a test event.
-async function ticketCommand(args: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { 'no-wait': { type: 'boolean' } } });
-  const [workspace, ticket] = checkJob(positionals, 'ticket');
-  const list = async (): Promise<SubscriptionSummary[]> => {
-    const response = await callSocket(stateDir(), { command: 'events', args: ['list'] });
-    if (!response.ok) {
-      throw new FactoryError(response.error.code, response.error.message);
-    }
-    return (response.result as { subscriptions: SubscriptionSummary[] }).subscriptions;
-  };
-  const own = (row: SubscriptionSummary): boolean => ownsTicket(row.input, workspace, ticket);
-  const broad = (row: SubscriptionSummary): boolean => coversTicketBroadly(row.input, workspace);
-
-  const rows = await list();
-  for (const row of rows.filter(broad)) {
-    console.log(`Warning: subscription ${row.id} (input ${JSON.stringify(row.input)}) would also receive the events of ${ticket}, so two conversations would review it. Remove it with: sf events remove ${row.id}`);
-  }
-  let found = rows.find(own);
-  if (found === undefined) {
-    console.log(`Step 1  In ChatGPT, in the project of workspace ${workspace}, open a new conversation for ${ticket} and send:\n\n    ${TICKET_GUIDE}\n`);
-    console.log(`Step 2  Then send this instruction (it creates the event-triggered task and the subscription for ${ticket}):\n\n    ${ticketInstruction(workspace, ticket)}\n`);
-    if (values['no-wait'] === true) {
-      console.log(`No subscription for ${ticket} yet. Run sf ticket ${workspace} ${ticket} again to wait for it and test it.`);
-      process.exitCode = 1;
-      return;
-    }
-    console.log(`Step 3  Waiting for the subscription of ${ticket} (up to 15 minutes; Ctrl+C stops, sf ticket again resumes)...`);
-    const deadline = Date.now() + TICKET_WAIT_MS;
-    while (found === undefined) {
-      if (Date.now() > deadline) {
-        throw new FactoryError('subscription_timeout', `No subscription for ${ticket} appeared in 15 minutes; sf events list shows what ChatGPT created.`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, TICKET_POLL_MS));
-      found = (await list()).find(own);
-    }
-  }
-  console.log(`Subscribed: ${found.id} (input ${JSON.stringify(found.input)}, ${found.host}).`);
-  console.log(`Step 4  Sending a test event to ${found.id}; ChatGPT should answer in that conversation with job_not_found for the test job.`);
-  const result = await viaServer('events', ['test', found.id]);
-  if (result.delivered !== true) {
-    process.exitCode = 1;
-    return;
-  }
-  console.log(`Done. Plan ${ticket} in that conversation: write_task, then "start". Its events go only there.`);
-}
-
 async function notifyTest(args: string[]): Promise<void> {
   if (args.length !== 0) {
     throw new UsageError('notify-test takes no arguments.');
@@ -536,20 +423,6 @@ async function notifyTest(args: string[]): Promise<void> {
   }
 }
 
-// Reads the token from stdin, never from an argument, so it stays out of the shell history.
-async function readStdin(limit: number): Promise<string> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of process.stdin) {
-    size += (chunk as Buffer).length;
-    if (size > limit) {
-      throw new FactoryError('invalid_token_input', `stdin holds more than ${limit} bytes; expected one access token.`);
-    }
-    chunks.push(chunk as Buffer);
-  }
-  return Buffer.concat(chunks).toString('utf8').trim();
-}
-
 // `sf info`: one screen with everything a person asks before the first command. Works without
 // sf serve; what needs it says so.
 async function info(args: string[]): Promise<void> {
@@ -566,8 +439,7 @@ async function info(args: string[]): Promise<void> {
   const envFile = envFilePath();
   row('env file', envFile === undefined ? 'off (SF_ENV_FILE is empty)' : `${envFile} (${existsSync(envFile) ? 'read' : 'absent'})`);
   row('state', state);
-  const auth = authConfig();
-  row('mcp', `http://127.0.0.1:${parsePort('SF_PORT', DEFAULT_PORT)}/mcp, auth ${auth === undefined ? 'off' : `${auth.issuer} audience ${auth.audience}`}`);
+  row('mcp', `http://127.0.0.1:${parsePort('SF_PORT', DEFAULT_PORT)}/mcp (planning tools, loopback only)`);
   const token = dashboardOn() ? await readToken(state) : undefined;
   row('dashboard', !dashboardOn() ? 'off (SF_DASHBOARD=off)' : token === undefined ? 'no token yet (starts with sf serve)' : dashboardUrl(parsePort('SF_DASHBOARD_PORT', DEFAULT_DASHBOARD_PORT), token).href);
   row('model', process.env.SF_MODEL || 'Claude Code default');
@@ -587,10 +459,8 @@ async function info(args: string[]): Promise<void> {
   row('notify', `ntfy ${notify.ntfyUrl === undefined ? 'off' : 'on'}, desktop ${notify.desktop ? 'on' : 'off'}, iterations ${notify.iterations ? 'on' : 'off'}`);
 
   // sf serve answers on its socket; the tunnel on its health port.
-  let subscriptions: SubscriptionSummary[] | undefined;
   try {
-    const response = await callSocket(state, { command: 'events', args: ['list'] });
-    subscriptions = response.ok ? (response.result as { subscriptions: SubscriptionSummary[] }).subscriptions : [];
+    await callSocket(state, { command: 'ping', args: [] });
     row('serve', `running (${socketPath(state)})`);
   } catch {
     row('serve', 'not running (npm run serve)');
@@ -617,36 +487,6 @@ async function info(args: string[]): Promise<void> {
   console.log(`\njobs${all.length === 0 ? ': none' : ''}`);
   if (all.length > 0) {
     console.log(table(await statusRows(jobs, all, new Date())));
-  }
-  console.log(`\nsubscriptions${subscriptions === undefined ? ': needs sf serve' : subscriptions.length === 0 ? ': none (sf ticket <workspace> <ticket>)' : ''}`);
-  if (subscriptions !== undefined && subscriptions.length > 0) {
-    console.log(subscriptionTable(subscriptions, all));
-  }
-}
-
-async function authTest(args: string[]): Promise<void> {
-  if (args.length !== 0) {
-    throw new UsageError('auth-test takes no arguments; pipe the token into stdin.');
-  }
-  const auth = authConfig();
-  if (auth === undefined) {
-    throw new FactoryError('auth_off', 'SF_AUTH_ISSUER is not set; there is nothing to verify against.');
-  }
-  const token = await readStdin(64 * 1024);
-  if (token === '') {
-    throw new FactoryError('invalid_token_input', 'stdin is empty; pipe the access token into sf auth-test.');
-  }
-  try {
-    const principal = await createVerifier(auth)(token);
-    console.log(`valid: sub ${principal.sub}`);
-    console.log(`scopes: ${principal.scopes.length === 0 ? '(none)' : principal.scopes.join(' ')}`);
-    console.log(`expires: ${new Date(principal.expiresAt * 1000).toISOString()}`);
-  } catch (error) {
-    if (!(error instanceof AuthError)) {
-      throw error;
-    }
-    console.log(`rejected: ${error.reason}`);
-    process.exitCode = 1;
   }
 }
 
@@ -773,18 +613,6 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'notify-test') {
     await notifyTest(rest);
-    return;
-  }
-  if (command === 'events') {
-    await eventsCommand(rest);
-    return;
-  }
-  if (command === 'ticket') {
-    await ticketCommand(rest);
-    return;
-  }
-  if (command === 'auth-test') {
-    await authTest(rest);
     return;
   }
   if (command === 'info') {

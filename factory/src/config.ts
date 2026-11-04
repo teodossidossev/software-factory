@@ -3,7 +3,6 @@ import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
 import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
-import type { AuthConfig } from './auth.js';
 import { FactoryError } from './errors.js';
 import { configDir } from './registry.js';
 
@@ -92,7 +91,7 @@ export function sensitivePaths(env: NodeJS.ProcessEnv = process.env): string[] {
 }
 
 // The environment file every sf command reads before anything else: SF_ENV_FILE, or
-// <config dir>/auth.env (the file the Auth0 setup writes). KEY=VALUE lines, "#" comments, an
+// <config dir>/auth.env (its historical name; it holds any SF_* setting). KEY=VALUE lines, "#" comments, an
 // optional "export " prefix, single or double quotes around the value. A variable already set
 // in the environment wins. Returns the names it set; a missing file sets nothing.
 export function parseEnvFile(text: string): Record<string, string> {
@@ -213,51 +212,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     reviewMaxTurns: positiveInteger(env, 'SF_REVIEW_MAX_TURNS', 60),
     gate: gateConfig(env),
     codexModel: env.SF_CODEX_MODEL || undefined,
-    gateMaxRounds: positiveInteger(env, 'SF_GATE_MAX_ROUNDS', 3),
+    gateMaxRounds: positiveInteger(env, 'SF_GATE_MAX_ROUNDS', 5),
     gateMaxTokens: positiveInteger(env, 'SF_GATE_MAX_TOKENS', 5_000_000, 1_000_000_000),
     gateTimeoutMs: positiveInteger(env, 'SF_GATE_TIMEOUT_MS', 900_000, 86_400_000),
   };
-}
-
-export const DEFAULT_OPEN_METHODS = ['initialize', 'ping', 'tools/list', 'server/discover', 'notifications/initialized'];
-const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
-
-// An absolute URL without fragment, HTTPS or HTTP on loopback (the latter for local tests).
-function webUrl(name: string, raw: string): URL {
-  const url = URL.parse(raw);
-  if (url === null || url.hash !== '' || !(url.protocol === 'https:' || (url.protocol === 'http:' && LOOPBACK_HOSTS.has(url.hostname)))) {
-    throw new FactoryError('invalid_config', `${name} must be an https URL without fragment, got "${raw}".`);
-  }
-  return url;
-}
-
-// OAuth for the MCP endpoint (SF_AUTH_*), read once when `sf serve` starts; undefined without
-// SF_AUTH_ISSUER, which means no authentication at all.
-export function authConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig | undefined {
-  const issuer = env.SF_AUTH_ISSUER ?? '';
-  if (issuer === '') {
-    return undefined;
-  }
-  const issuerUrl = webUrl('SF_AUTH_ISSUER', issuer);
-  if (issuerUrl.search !== '') {
-    throw new FactoryError('invalid_config', 'SF_AUTH_ISSUER must not have a query string.');
-  }
-  const audience = env.SF_AUTH_AUDIENCE ?? '';
-  if (audience === '') {
-    throw new FactoryError('invalid_config', 'SF_AUTH_AUDIENCE is required when SF_AUTH_ISSUER is set.');
-  }
-  const resource = env.SF_AUTH_RESOURCE || audience;
-  webUrl(env.SF_AUTH_RESOURCE ? 'SF_AUTH_RESOURCE' : 'SF_AUTH_RESOURCE (defaulting to SF_AUTH_AUDIENCE)', resource);
-  const rawMethods = env.SF_AUTH_OPEN_METHODS;
-  const openMethods = rawMethods === undefined ? DEFAULT_OPEN_METHODS : rawMethods.split(',').map((method) => method.trim()).filter((method) => method !== '');
-  for (const method of openMethods) {
-    if (!/^[A-Za-z0-9_./-]+$/.test(method)) {
-      throw new FactoryError('invalid_config', `SF_AUTH_OPEN_METHODS has an invalid method "${method}".`);
-    }
-    // Events are bound to the principal; they never run without a token.
-    if (method.startsWith('events/')) {
-      throw new FactoryError('invalid_config', `SF_AUTH_OPEN_METHODS must not contain the event method "${method}".`);
-    }
-  }
-  return { issuer, audience, resource, openMethods: [...new Set(openMethods)] };
 }

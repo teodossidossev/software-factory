@@ -101,18 +101,6 @@ case "${1:-}" in
   run)
     cmd_check
     # exec hands SIGINT/SIGTERM straight to tunnel-client.
-    # OAuth through the tunnel (SF-015): ChatGPT discovers the factory's metadata through the
-    # tunnel's harpoon channel, whose loopback target is plain HTTP, and the tunnel must trust the
-    # authorization server's origin to read its metadata. Both come from the factory's auth.env.
-    AUTH_ENV="${SF_AUTH_ENV:-${XDG_CONFIG_HOME:-$HOME/.config}/software-factory/auth.env}"
-    if [[ -f "$AUTH_ENV" ]]; then
-      issuer=$(grep -E '^SF_AUTH_ISSUER=' "$AUTH_ENV" | tail -n1 | cut -d= -f2-)
-      if [[ -n "$issuer" ]]; then
-        export HARPOON_ALLOW_PLAINTEXT_HTTP="${HARPOON_ALLOW_PLAINTEXT_HTTP:-true}"
-        export MCP_OAUTH_TRUSTED_ORIGINS="${MCP_OAUTH_TRUSTED_ORIGINS:-${issuer%/}}"
-        ok "oauth: trusted origin ${issuer%/}, plaintext harpoon target allowed"
-      fi
-    fi
     exec tunnel-client run --profile "$PROFILE" --profile-dir "$PROFILE_DIR"
     ;;
   *)

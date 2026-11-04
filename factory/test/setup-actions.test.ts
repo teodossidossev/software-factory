@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
 import { type Job, JobStore } from '../src/jobs.js';
 import { Setup } from '../src/setup.js';
-import { act, fakeActions, fakeReviewers, fakeSetup, fetchRaw, openStream, type Reply, ticketRow, workspaceRow } from './support/dashboard-client.js';
+import { act, fakeActions, fakeSetup, fetchRaw, openStream, type Reply, ticketRow, workspaceRow } from './support/dashboard-client.js';
 import { withDashboard } from './support/dashboard-state.js';
 import { type FakeElement, loadPage } from './support/fake-dom.js';
 import { newEnv, newRepo, putTask } from './support/harness.js';
@@ -119,14 +119,14 @@ test('dashboard: the ticket action routes are POST only with the action checks, 
       assert.deepEqual(error(await act(base, 'api/tickets/app/T-5/delete', {})), { status, code });
     }
     stream.close();
-  }, fakeReviewers(), setup);
+  }, setup);
 });
 
 test('client: a ticket card has Archive and Delete…; delete asks first; the archived list restores and deletes; a selected job that leaves the list is replaced', async () => {
   const STATIC_DIR = new URL('../../static/', import.meta.url);
   const pushed = {
     workspace: 'app', ticket: 'T-1', branch: 'T-1-x', base: 'main', state: 'pushed', iteration: 1, mr_attempts: 1, updated_at: '2026-11-01T10:05:00.000Z',
-    created_at: '2026-11-01T10:00:00.000Z', error: null, worktree: null, prepared_commit: 'a'.repeat(40), files: 0, undeclared: 0, deleted: 0, reviewer: 'none',
+    created_at: '2026-11-01T10:00:00.000Z', error: null, worktree: null, prepared_commit: 'a'.repeat(40), files: 0, undeclared: 0, deleted: 0,
   };
   const page = await loadPage(STATIC_DIR, (path) => (path === 'api/jobs' ? { jobs: [pushed] } : path === 'api/jobs/app/T-1' ? { job: pushed, iterations: [], mr: false, history: [] } : undefined));
   page.document.dispatch('DOMContentLoaded');
@@ -135,14 +135,15 @@ test('client: a ticket card has Archive and Delete…; delete asks first; the ar
   stream.emit('open');
   stream.emit('jobs', { jobs: [pushed] });
   stream.emit('workspaces', { workspaces: [workspaceRow('app')] });
-  stream.emit('tickets', { tickets: [{ ...ticketRow('app', 'T-1', 'One', false, 'pushed'), reviewer: { status: 'none' }, conversation: { message: 'm', url: 'https://chatgpt.com/?q=m' } }], archived: [{ workspace: 'app', ticket: 'T-0', title: 'Zero' }] });
+  stream.emit('tickets', { tickets: [{ ...ticketRow('app', 'T-1', 'One', false, 'pushed'), conversation: { message: 'm', url: 'https://chatgpt.com/?q=m' } }], archived: [{ workspace: 'app', ticket: 'T-0', title: 'Zero' }] });
   await page.flush();
   const card = page.$('ticket-list').children[0] as FakeElement;
   const buttons = card.all().filter((element) => element.tagName === 'BUTTON');
-  assert.deepEqual(buttons.map((button) => button.textContent), ['Archive', 'Delete…', 'Copy']);
+  // A written Task file comes with the User's Start first (SF-040).
+  assert.deepEqual(buttons.map((button) => button.textContent), ['Start', 'Archive', 'Delete…', 'Copy']);
   // Archive: one request, the outcome in the status line.
-  buttons[0]!.click();
-  buttons[0]!.click();
+  buttons[1]!.click();
+  buttons[1]!.click();
   await page.flush();
   const posts = (): typeof page.requests => page.requests.filter((request) => request.method === 'POST');
   assert.deepEqual([posts().length, posts()[0]!.path, posts()[0]!.body], [1, 'api/tickets/app/T-1/archive', '{}']);
@@ -195,7 +196,7 @@ test('dashboard: a finished job is archived from its card; a live one is refused
   const STATIC_DIR = new URL('../../static/', import.meta.url);
   const shape = (state: string) => ({
     workspace: 'app', ticket: 'T-1', branch: 'T-1-x', base: 'main', state, iteration: 0, mr_attempts: 0, updated_at: '2026-11-01T10:05:00.000Z',
-    created_at: '2026-11-01T10:00:00.000Z', error: null, worktree: null, prepared_commit: null, files: 0, undeclared: 0, deleted: 0, reviewer: 'none',
+    created_at: '2026-11-01T10:00:00.000Z', error: null, worktree: null, prepared_commit: null, files: 0, undeclared: 0, deleted: 0,
   });
   const page = await loadPage(STATIC_DIR, (path) => (path === 'api/jobs' ? { jobs: [shape('aborted')] } : path === 'api/jobs/app/T-1' ? { job: shape('aborted'), iterations: [], mr: false, history: [] } : undefined));
   page.document.dispatch('DOMContentLoaded');

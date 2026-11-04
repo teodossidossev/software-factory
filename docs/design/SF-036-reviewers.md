@@ -61,7 +61,7 @@ sensitive paths the summary names; one it does not name is a fix item.
 | Rule | Value |
 |---|---|
 | Fix sections without Clean | `SF_MAX_ITERATIONS` (default 5), counted on Fix sections, then `needs_human` |
-| Gate rounds with fixes | `SF_GATE_MAX_ROUNDS` (default 3), then `needs_human` with both verdicts |
+| Gate rounds with fixes | `SF_GATE_MAX_ROUNDS` (default 5), then `needs_human` with both verdicts |
 | Gate tokens per ticket | `SF_GATE_MAX_TOKENS` (default 5000000, input plus output), then `needs_human` with `gate_budget` |
 | Gate run time | `SF_GATE_TIMEOUT_MS` (default 900000), then `needs_human` with `gate_failed` |
 | Disagreement | the gate decides |

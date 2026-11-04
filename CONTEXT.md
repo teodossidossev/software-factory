@@ -1,6 +1,6 @@
 # Software Factory
 
-A local mediator that lets ChatGPT plan and review, Claude Code implement, and the user accept,
+A local mediator that lets ChatGPT plan, Claude Code implement, Claude and Codex review, and the user accept,
 without the user having to notice when Claude has finished. It exists to remove the Idle gap.
 
 ## Language
@@ -14,8 +14,9 @@ make it zero. Every feature is judged by how much of it it removes.
 ### People and agents
 
 **Context owner**:
-ChatGPT, in the web conversation where a Ticket was planned. It plans, writes the Task file,
-checks progress, reviews and writes Fix sections.
+ChatGPT, in the web conversation where a Ticket is planned. It plans only: it reads the Workspace,
+discusses the Ticket with the User, writes the Task file with its Review brief and tells the User
+it is ready. It does not start, review or approve Jobs.
 _Avoid_: reviewer (ambiguous), planner, ChatGPT connector
 
 **Implementer**:
@@ -27,8 +28,8 @@ The one person who owns the machine, the Ticket, human review, approve, abort an
 _Avoid_: operator
 
 **Factory**:
-The single local process that serves tools to the Context owner, runs the Implementer, keeps job
-state, notifies the User and later serves the Dashboard.
+The single local process that serves the planning tools to the Context owner, runs the
+Implementer and the Reviews, keeps job state, notifies the User and serves the Dashboard.
 _Avoid_: bridge, mediator, supervisor
 
 ### Work
@@ -45,8 +46,8 @@ _Avoid_: app, app_id, project, work checkout
 **Task file**:
 The one Markdown file per Ticket, `.software-factory/<ticket>.md` in the work checkout, excluded
 from Git locally. It holds a short header (base branch, title), the task, and every Fix section
-appended later. It is the complete instruction for the Implementer and the complete brief for the
-Context owner.
+appended later, and a `## Review brief` for the Reviews. It is the complete instruction for the
+Implementer and the complete brief for the Reviews.
 _Avoid_: instruction, instruction.md, spec
 
 **Ticket draft**:
@@ -57,8 +58,8 @@ Task file otherwise.
 _Avoid_: stub, placeholder task, request file
 
 **Fix section**:
-A `## Fix N` section appended to the Task file after a Review, by the factory from a `fix` verdict
-or by the Context owner. Appending one is the request for the next Iteration.
+A `## Fix N` section appended to the Task file after a Review, by the factory from a `fix` verdict.
+Appending one is the request for the next Iteration.
 _Avoid_: findings, review request, feedback
 
 **Job**:
@@ -94,7 +95,7 @@ _Avoid_: snapshot, diff artifact, export
 A changed file that is unusual for a Ticket to touch: dependency manifests and lockfiles,
 environment and tool configuration, CI and container files, IDE and agent files, root dotfiles.
 Declared when the Task file's `may_touch` names it, undeclared otherwise; an undeclared one must
-be acknowledged by the Context owner at Clean.
+be accepted by the deciding Review at Clean.
 _Avoid_: protected file, system file
 
 **Review**:
@@ -107,13 +108,13 @@ _Avoid_: code review session, audit
 
 **Gate**:
 The second, deciding Review of an Iteration that a Claude Review found clean, run by the Codex CLI
-on the User's ChatGPT subscription in a read-only sandbox in the Worktree. Its `clean` is Clean,
+on the User's ChatGPT plan in a read-only sandbox in the Worktree. Its `clean` is Clean,
 its `fix` the next Fix section; it is limited in rounds and tokens per Job, and off when no Codex
 is found. A failed Gate hands the Job to the User.
 _Avoid_: OpenAI reviewer, second opinion
 
 **Clean**:
-The deciding Review's (the Gate's when it is on) or the Context owner's verdict that the Patch
+The deciding Review's (the Gate's when it is on) verdict that the Patch
 needs no further Fix section, with every undeclared Sensitive path acknowledged. It starts MR
 preparation; it accepts nothing and pushes nothing.
 
@@ -132,10 +133,6 @@ commit and rebases it onto the target branch. On a conflict the Implementer reso
 the change goes back to review. Then the factory removes the Worktree and leaves the Branch with
 one commit for Human review. The User opens the merge request after Approve.
 
-**Check**:
-The Context owner's periodic question to the factory about a Job, made by a ChatGPT scheduled task,
-not by the User.
-
 ### Rules and templates
 
 **Git rules**:
@@ -147,8 +144,8 @@ Factory-owned formats the Implementer must follow for the Report and for the mer
 description.
 
 **Handbook**:
-The factory-owned document that tells any Context owner how to work with the factory: the cycle,
-the tools and their order, the Task file format, Clean, the check intervals, the Git rules and the
-templates. One file, served as MCP server instructions at connect time, in full through the `guide`
+The factory-owned document that tells any Context owner how to plan with the factory: the cycle,
+the tools and their order, the Task file format with its Review brief, the review rules the Reviews
+follow, the Git rules and the templates. One file, served as MCP server instructions at connect time, in full through the `guide`
 tool, and readable in the repository. It describes how we work, never a particular Ticket.
 _Avoid_: system prompt, onboarding, protocol doc

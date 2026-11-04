@@ -18,7 +18,7 @@ export const MAX_REQUEST_BYTES = 64 * 1024;
 // The line that marks a Task file written from the dashboard and not yet rewritten by the
 // Context owner.
 export { DRAFT_MARKER, isDraft } from './task-file.js';
-export const DRAFT_NOTE = 'Created from the dashboard. The Context owner writes the Task here with write_task after discussing the ticket with the User; the job starts only on the User\'s word.';
+export const DRAFT_NOTE = 'Created from the dashboard. The Context owner writes the Task here with write_task after discussing the ticket with the User; the User starts the job on the dashboard.';
 
 export interface WorkspaceRow {
   name: string;

@@ -136,7 +136,8 @@ export interface Iteration {
 }
 
 // One line of events.jsonl: an SDK message, a prompt sent, a state change, a failed notification,
-// removed placeholders, the principal of a tool call or the outcome of an MCP event delivery.
+// removed placeholders, the principal of a tool call, the outcome of an MCP event delivery, or a
+// review's outcome, Codex event or Claude message.
 export type EventRecord = { ts: string; iteration: number } & (
   | { message: unknown }
   | { prompt: string }
@@ -155,7 +156,57 @@ export type EventRecord = { ts: string; iteration: number } & (
   // the job had moved on before it ended.
   | { type: 'review'; reviewer: string; verdict: 'clean' | 'fix'; items: number; ignored?: true }
   | { type: 'review_failed'; reviewer: string; error: string; ignored?: true }
+  // The reviewers live (SF-045): one JSONL event of the Codex gate's stdout, one SDK message of the
+  // Claude review session; truncated when cut to MAX_LIVE_EVENT_BYTES (cutEvent).
+  | { type: 'gate_event'; reviewer: string; event: unknown; truncated?: true }
+  | { type: 'review_message'; reviewer: string; message: unknown; truncated?: true }
 );
+
+// The bound of one reviewer event or message in events.jsonl (SF-045), in bytes of its JSON.
+export const MAX_LIVE_EVENT_BYTES = 16 * 1024;
+
+// A string cut to at most limit UTF-16 units and marked, without splitting a surrogate pair.
+function cutString(text: string, limit: number): string {
+  if (text.length <= limit) {
+    return text;
+  }
+  const code = text.charCodeAt(limit - 1);
+  const end = code >= 0xd800 && code <= 0xdbff ? limit - 1 : limit;
+  return `${text.slice(0, end)}…`;
+}
+
+// The value with every string cut to limit and every array to its first limit entries.
+function shrink(value: unknown, limit: number): unknown {
+  if (typeof value === 'string') {
+    return cutString(value, limit);
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, limit).map((entry) => shrink(entry, limit));
+  }
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, shrink(entry, limit)]));
+  }
+  return value;
+}
+
+const jsonBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value) ?? 'null');
+
+// An event (a parsed Codex event, an SDK message) within MAX_LIVE_EVENT_BYTES of JSON: as it is
+// when it fits, else with its strings and arrays cut ever shorter until it fits, at the last its
+// type alone.
+export function cutEvent(value: unknown): { value: unknown; truncated: boolean } {
+  if (jsonBytes(value) <= MAX_LIVE_EVENT_BYTES) {
+    return { value, truncated: false };
+  }
+  for (const limit of [4096, 1024, 256, 64, 16]) {
+    const cut = shrink(value, limit);
+    if (jsonBytes(cut) <= MAX_LIVE_EVENT_BYTES) {
+      return { value: cut, truncated: true };
+    }
+  }
+  const type = (value as { type?: unknown } | null)?.type;
+  return { value: typeof type === 'string' ? { type: cutString(type, 64) } : null, truncated: true };
+}
 
 // The tools whose caller is logged as a principal event.
 export type PrincipalTool = 'start' | 'request_fix' | 'mark_clean' | 'write_task';

@@ -16,10 +16,11 @@ import type { Config } from './config.js';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
 import { GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from './gate.js';
-import { type FileChange, type GateRecord, isActive, type Job, type JobState, JobStore, now, type ReviewRecord, TERMINAL_STATES } from './jobs.js';
+import { cutEvent, type FileChange, type GateRecord, isActive, type Job, type JobState, JobStore, now, type ReviewRecord, TERMINAL_STATES } from './jobs.js';
 import { abortRebase, commitAndRebase, continueRebase, gitBusy, mergeRequestLink, originUrl, pushBranch, readMrText, rebaseInProgress, resolveTarget, unmergedPaths } from './mr.js';
 import { buildPatch, changedFilesSection, fileChanges, fileSummaryLines, type Patch } from './patch.js';
 import { removeSandboxPlaceholders } from './placeholders.js';
+import { Redactor } from './redact.js';
 import { conflictPrompt, factoryPrompt, iterationCost, mrPrompt } from './prompts.js';
 import { DENIED_TOOLS, sensitivityOf } from './rules.js';
 import type { Workspace } from './registry.js';
@@ -645,9 +646,21 @@ export class Execution {
     };
   }
 
+  // Appends one message of a running review (review_message) or one Codex event of a running gate
+  // (gate_event), already redacted (src/redact.ts), to the job's events.jsonl, cut to its bound
+  // (SF-045).
+  #appendLive(job: Job, type: 'review_message' | 'gate_event', raw: unknown): Promise<void> {
+    const { value, truncated } = cutEvent(raw);
+    const cut = truncated ? { truncated: true as const } : {};
+    return this.jobs.appendEvent(job.workspace, job.ticket, type === 'review_message'
+      ? { ts: now(), iteration: job.iteration, type, reviewer: REVIEWER, message: value, ...cut }
+      : { ts: now(), iteration: job.iteration, type, reviewer: GATE_REVIEWER, event: value, ...cut });
+  }
+
   // Runs the review session, then applies its outcome under the lock.
   async #review(job: Job, running: RunningReview): Promise<void> {
     let outcome: ReviewOutcome;
+    const redactor = new Redactor({ cwd: job.worktree ?? '' });
     try {
       if (job.worktree === null) {
         throw new Error('the job has no worktree');
@@ -656,12 +669,20 @@ export class Execution {
       outcome = await runReview(prompt, {
         cwd: job.worktree, claudePath: this.#config.claudePath, sandbox: this.#config.sandbox, model: this.#config.reviewModel,
         maxTurns: this.#config.reviewMaxTurns, signal: running.controller.signal,
+        // The session live in events.jsonl (SF-045).
+        onMessage: (message) => this.#appendLive(job, 'review_message', redactor.reviewMessage(message)),
       });
     } catch (error) {
       const at = now();
       outcome = { ok: false, message: `The review could not start: ${(error as Error).message}`.slice(0, 1000), startedAt: at, endedAt: at };
     }
-    await this.#locked(() => this.#reviewed(job, running, outcome));
+    // The failure message goes to review.json, the event and the job's error: withheld or redacted
+    // like the session's prose (src/redact.ts, failure).
+    if (!outcome.ok) {
+      outcome = { ...outcome, message: redactor.failure(outcome.message) };
+    }
+    const ended = outcome;
+    await this.#locked(() => this.#reviewed(job, running, ended));
   }
 
   // The end of a review. A cancelled one leaves no trace. Otherwise review.json and the event are
@@ -759,6 +780,7 @@ export class Execution {
     const { workspace: name, ticket, iteration } = job;
     const gate = this.#config.gate;
     let outcome: GateOutcome;
+    const redactor = new Redactor({ cwd: job.worktree ?? '' });
     try {
       if (job.worktree === null || job.base_commit === null || !gate.on) {
         throw new Error('the job has no worktree or base commit');
@@ -767,12 +789,20 @@ export class Execution {
       outcome = await runGate(prompt, {
         codexPath: gate.codexPath, cwd: job.worktree, dir: this.jobs.iterationDir(name, ticket, iteration), model: this.#config.codexModel,
         timeoutMs: this.#config.gateTimeoutMs, signal: running.controller.signal,
+        // The run live in events.jsonl (SF-045).
+        onEvent: (event) => this.#appendLive(job, 'gate_event', redactor.codexEvent(event)),
       });
     } catch (error) {
       const at = now();
       outcome = { ok: false, message: `The gate could not start: ${(error as Error).message}`.slice(0, 1000), tokens: noTokens(), startedAt: at, endedAt: at };
     }
-    await this.#locked(() => this.#gated(job, running, claude, outcome));
+    // The failure message (Codex's stderr or error event) goes to gate.json, the event and the
+    // job's error: withheld or redacted like the run's prose (src/redact.ts, failure).
+    if (!outcome.ok) {
+      outcome = { ...outcome, message: redactor.failure(outcome.message) };
+    }
+    const ended = outcome;
+    await this.#locked(() => this.#gated(job, running, claude, ended));
   }
 
   // The end of a gate run. A cancelled one leaves no trace. Otherwise its tokens count for the job,

@@ -34,6 +34,14 @@ interface Turn {
   placeholders?: string[];
   // Ends the turn with Claude Code's startup failure result (startup_failure_reason) and this message.
   startupFailure?: string;
+  // Review runs only (SF-045): says the values of ANTHROPIC_FAKE_SECRET and ANTHROPIC_FAKE_PIN, quotes
+  // ~/.codex/config.toml, reads ~/.codex/auth.json, then repeats it without naming it.
+  leak?: boolean;
+  // Review runs only (SF-045): after a Read of ~/.codex/auth.json, every message type with this
+  // literal in each free-text field, ending in a failed result whose errors hold it.
+  walk?: string;
+  // Review runs only: the errors of a result that is not a success (default: one fixed error).
+  errors?: string[];
   // Review runs only: the structured output of the result (default: a clean verdict), or none.
   output?: unknown;
   noOutput?: boolean;
@@ -127,18 +135,43 @@ function run(prompt: string): void {
   });
 }
 
-// A review: init, one assistant message, and the result with the structured output.
+// A review: init, a Read of README.md and its result, one assistant message, and the result with
+// the structured output.
 function runReview(): void {
   out({
     type: 'system', subtype: 'init', permissionMode: option('permission-mode') ?? 'default', cwd: process.cwd(), tools: [], mcp_servers: [],
     model: 'fake-model', slash_commands: [], output_style: 'default', skills: [], plugins: [], apiKeySource: 'none', claude_code_version: '0.0.0-fake',
   });
+  out({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'tool_use', id: 'r1', name: 'Read', input: { file_path: 'README.md' } }] } });
+  out({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'r1', is_error: false, content: 'the file' }] } });
+  if (turn.leak === true) {
+    const say = (text: string): void => out({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'text', text }] } });
+    say(`The secret is ${process.env.ANTHROPIC_FAKE_SECRET ?? ''}, the pin ${process.env.ANTHROPIC_FAKE_PIN ?? ''}.`);
+    say(`${join(home, '.codex', 'config.toml')}: model = "fake-codex-config-model"`);
+    out({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'tool_use', id: 'r2', name: 'Read', input: { file_path: join(home, '.codex', 'auth.json') } }] } });
+    out({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'r2', is_error: false, content: '{"auth_mode": "chatgpt", "last_refresh": "fake-codex-auth-file-content"}' }] } });
+    say('The auth file says fake-codex-auth-repeated.');
+  }
+  if (turn.walk !== undefined) {
+    const literal = turn.walk;
+    const assistant = (...content: unknown[]): void => out({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content } });
+    const user = (extra: Record<string, unknown>, ...content: unknown[]): void => out({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content }, ...extra });
+    assistant({ type: 'tool_use', id: 'w0', name: 'Read', input: { file_path: join(home, '.codex', 'auth.json') } });
+    user({}, { type: 'tool_result', tool_use_id: 'w0', is_error: false, content: '{}' });
+    assistant(
+      { type: 'text', text: literal }, { type: 'thinking', thinking: literal, signature: 'sig' },
+      { type: 'tool_use', id: 'w1', name: 'Grep', input: { pattern: literal, path: 'src' } }, { type: 'tool_use', id: 'w2', name: 'Read', input: { file_path: literal } },
+    );
+    user({ tool_use_result: { content: literal } }, { type: 'tool_result', tool_use_id: 'w1', is_error: false, content: literal }, { type: 'tool_result', tool_use_id: 'w2', is_error: true, content: [{ type: 'text', text: literal }] });
+    out({ type: 'system', subtype: 'notification', text: literal });
+  }
   out({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'text', text: 'Reviewed.' }] } });
-  const subtype = turn.subtype ?? 'success';
+  const subtype = turn.walk !== undefined ? 'error_during_execution' : (turn.subtype ?? 'success');
   out({
     type: 'result', subtype, is_error: subtype !== 'success', result: '', num_turns: 3, duration_ms: 2345, duration_api_ms: 2000,
     total_cost_usd: turn.costTotal ?? 0.0456, usage: {}, modelUsage: {}, stop_reason: null, permission_denials: [],
-    errors: subtype === 'success' ? undefined : ['fake review failure'],
+    errors: subtype === 'success' ? undefined : (turn.walk !== undefined ? [turn.walk] : (turn.errors ?? ['fake review failure'])),
+    ...(turn.walk !== undefined ? { result: turn.walk } : {}),
     ...(turn.noOutput === true || subtype !== 'success' ? {} : { structured_output: turn.output ?? CLEAN }),
   });
 }

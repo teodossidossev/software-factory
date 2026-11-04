@@ -9,7 +9,8 @@
 // A run with --json-schema is a review (SF-038): its script comes from $HOME/fake-review.json
 // ({"reviews": [...]}, consumed through $HOME/fake-review.count) and it logs to
 // $HOME/fake-review.log, so the Implementer's script and log stay as they are. A review entry gives
-// the structured output, or a subtype or noOutput to fail, and an optional delay.
+// the structured output, or a subtype or noOutput to fail, and an optional delay. Like the real CLI,
+// it refuses a --json-schema whose $schema is not draft-07 (SF-044): exit 1 before anything else.
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -50,8 +51,19 @@ const option = (name: string): string | undefined => {
   return index >= 0 ? argv[index + 1] : undefined;
 };
 
+// The CLI's validator knows the draft-07 meta-schema only; any other $schema is refused at start.
+const DRAFT_07 = ['http://json-schema.org/draft-07/schema#', 'http://json-schema.org/draft-07/schema'];
+const schema = option('json-schema');
+if (schema !== undefined) {
+  const declared: unknown = (JSON.parse(schema) as { $schema?: unknown }).$schema;
+  if (declared !== undefined && !DRAFT_07.includes(String(declared))) {
+    process.stderr.write(`Error: --json-schema is not a valid JSON Schema: no schema with key or ref "${String(declared)}"\n`);
+    process.exit(1);
+  }
+}
+
 const home = process.env.HOME ?? '.';
-const review = option('json-schema') !== undefined;
+const review = schema !== undefined;
 const name = review ? 'fake-review' : 'fake-claude';
 const controlPath = join(home, `${name}.json`);
 const countPath = join(home, `${name}.count`);

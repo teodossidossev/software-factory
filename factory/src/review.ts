@@ -31,8 +31,11 @@ export const reviewOutput = z.strictObject({
 });
 export type ReviewOutput = z.output<typeof reviewOutput>;
 export type ReviewItem = z.output<typeof reviewItem>;
-// The schema sent as outputFormat, from the same definition as the validation.
-export const REVIEW_SCHEMA = z.toJSONSchema(reviewOutput) as Record<string, unknown>;
+// The schema sent as outputFormat (the CLI's --json-schema), from the same definition as the
+// validation: draft-07 output without $schema, since the CLI refuses zod's default draft 2020-12
+// $schema (SF-044).
+const { $schema: _draft, ...reviewSchema } = z.toJSONSchema(reviewOutput, { target: 'draft-7' });
+export const REVIEW_SCHEMA: Record<string, unknown> = reviewSchema;
 
 export interface ReviewInput {
   ticket: string;

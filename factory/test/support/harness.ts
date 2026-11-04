@@ -1,10 +1,11 @@
 // Shared helpers of the end-to-end tests: the real `sf serve` and `sf` CLI with private config
 // and state directories, throwaway Git repositories and the fake Claude Code
-// (test/support/fake-claude.ts) as the Implementer executable, tools driven through the official
+// (test/support/fake-claude.ts) as the Implementer executable, the fake Codex
+// (test/support/fake-codex.ts) for the gate, tools driven through the official
 // MCP client. Importing it registers the before/after hooks that create and remove the temp dir.
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before } from 'node:test';
@@ -16,10 +17,13 @@ import { writeTask } from '../../src/task-file.js';
 
 export const CLI = fileURLToPath(new URL('../../src/cli.js', import.meta.url));
 export const FAKE = fileURLToPath(new URL('./fake-claude.js', import.meta.url));
+const FAKE_CODEX_SCRIPT = fileURLToPath(new URL('./fake-codex.js', import.meta.url));
 const READY = /listening on (http:\/\/127\.0\.0\.1:\d+\/mcp)/;
 const DASHBOARD = /dashboard (http:\/\/127\.0\.0\.1:\d+\/d\/[0-9a-f]{64}\/)/;
 
 export let temp: string;
+// The fake Codex executable (test/support/fake-codex.ts behind a shell wrapper), for SF_CODEX.
+export let fakeCodex: string;
 const running = new Set<ChildProcess>();
 
 export interface Env {
@@ -59,6 +63,8 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
     SF_TUNNEL_SCRIPT: join(temp, 'no-such-tunnel.sh'),
     // No Claude review unless the test turns it on (test/review.test.ts).
     SF_REVIEW: 'off',
+    // No gate unless the test turns it on (test/gate.test.ts).
+    SF_GATE: 'off',
     ...env.extra,
   };
 }
@@ -89,6 +95,17 @@ export async function reviewScript(env: Env, reviews: unknown[]): Promise<void> 
 
 export async function reviewLog(env: Env): Promise<Array<{ argv: string[]; prompt: string; sessionId: string; cwd: string; env: string[] }>> {
   return (await readFile(join(env.home, 'fake-review.log'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+}
+
+// The fake Codex's run script, consumed in order.
+export async function codexScript(env: Env, runs: unknown[]): Promise<void> {
+  await writeFile(join(env.home, 'fake-codex.json'), JSON.stringify({ runs }));
+  await rm(join(env.home, 'fake-codex.count'), { force: true });
+}
+
+// What the fake Codex logged of each run.
+export async function codexLog(env: Env): Promise<Array<{ argv: string[]; cwd: string; prompt: string; env: string[]; pid: number }>> {
+  return (await readFile(join(env.home, 'fake-codex.log'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
 }
 
 // A repository with one commit on main; with origin, the work checkout is a clone of a bare repo.
@@ -198,6 +215,9 @@ export async function waitFor(served: Served, ticket: string, state: string, ite
 
 before(async () => {
   temp = await realpath(await mkdtemp(join(tmpdir(), 'sf-exec-')));
+  fakeCodex = join(temp, 'fake-codex');
+  await writeFile(fakeCodex, `#!/bin/sh\nexec '${process.execPath}' '${FAKE_CODEX_SCRIPT}' "$@"\n`);
+  await chmod(fakeCodex, 0o755);
 });
 
 after(async () => {

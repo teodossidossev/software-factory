@@ -38,7 +38,7 @@ bin/sf events test <id>                        # send a test event (state "test"
 bin/sf ticket <workspace> <ticket> [--no-wait] # the ChatGPT conversation of one ticket: instruction to paste, wait for its subscription, test it; needs sf serve
 bin/sf notify-test                             # one test notification on every channel; works without sf serve
 bin/sf auth-test < token.txt                   # verify an access token from stdin with the SF_AUTH_* settings; works without sf serve
-bin/sf info                                    # version, directories, settings, sf serve and tunnel state, workspaces, jobs, subscriptions; works without sf serve
+bin/sf info                                    # version, directories, settings (gate: codex <version or path> | off (<reason>)), sf serve and tunnel state, workspaces, jobs, subscriptions; works without sf serve
 npm run typecheck && npm test
 ```
 
@@ -95,6 +95,12 @@ message below the table). Both work without `sf serve`; they read the state dire
 | `SF_REVIEW` | on | `off` runs no Claude review: a published iteration stays in `awaiting_review` for `request_fix` or `mark_clean`. |
 | `SF_REVIEW_MODEL` | unset | Model of the Claude review, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
 | `SF_REVIEW_MAX_TURNS` | `60` | `maxTurns` of the Claude review. |
+| `SF_GATE` | `codex` | The gate after a clean Claude review (SF-039): `codex` runs the Codex CLI, `off` lets the Claude verdict decide. With `codex` and no executable found the gate is off, and `sf serve` prints one line saying so. |
+| `SF_CODEX` | `codex` on `PATH` | Absolute path of the Codex CLI executable. Pointing at nothing turns the gate off; it is not looked for on `PATH` then. |
+| `SF_CODEX_MODEL` | unset | Model of the gate, passed as `--model`; unset uses Codex's default (the user's `~/.codex/config.toml`). |
+| `SF_GATE_MAX_ROUNDS` | `3` | Fix verdicts of the gate per job (the job's `gate_fixes`); the next one is not applied (`gate_rounds`, job `needs_human`). |
+| `SF_GATE_MAX_TOKENS` | `5000000` | Input plus output tokens of all gate runs of a job (the job's `gate_tokens`); a gate does not start at the limit, and a run that goes over it is not applied (`gate_budget`, job `needs_human`). |
+| `SF_GATE_TIMEOUT_MS` | `900000` | How long one gate run may take; then SIGTERM, and SIGKILL 5 s later (`gate_failed`). |
 | `SF_SANDBOX` | on | `off` runs the Implementer and the review without Claude Code's sandbox. |
 | `SF_SANDBOX_DOMAINS` | empty | Comma-separated extra hosts sandboxed commands may reach, besides `registry.npmjs.org`. |
 | `SF_DESKTOP_NOTIFY` | on | `off` disables the desktop notification. |
@@ -335,6 +341,41 @@ factory beyond its Git refs (branches) and worktree registrations.
   the review of that iteration starts again. It is refused with `invalid_state` unless the job is
   `needs_human` with `review_failed`, and with `review_off` when `SF_REVIEW=off`. The worktree must
   still exist (`worktree_missing` otherwise).
+- The **gate** (SF-039, `src/gate.ts`) is the second, deciding review. With the gate on
+  (`SF_GATE=codex` and a Codex executable found), a clean Claude verdict (after its sensitive-path
+  rule) does not go to Clean: the factory runs the Codex CLI on the user's ChatGPT sign-in (it must
+  be signed in: `codex login`; no API key), without a shell: `codex exec --ephemeral --sandbox
+  read-only --cd <worktree> --output-schema <schema file> --output-last-message <out file> --json
+  [--model SF_CODEX_MODEL] -`, the prompt on stdin. The schema and out files are
+  `gate-schema.json` and `gate-output.json` in the iteration's directory. The user's
+  `~/.codex/config.toml` and login apply; the environment is the factory's without any `SF_*`
+  variable. Codex reads the worktree itself in its read-only sandbox. Its prompt is the review
+  prompt adapted: the base commit (so it can run `git diff <base_commit>`), the read-only commands
+  it may run, that it must not leave the worktree or read credentials, that it decides after a
+  clean Claude review, then the same rules and material as the Claude review. The schema is the
+  review's in the strict form structured outputs need (every property required,
+  `additionalProperties: false` at every level); the out file is validated with the same zod
+  schema. The JSONL on stdout gives the usage of `turn.completed` (`input_tokens`,
+  `cached_input_tokens`, `output_tokens`) and the `error` events; stderr is kept, bounded, for the
+  failure message.
+- The gate runs outside the lock, like the review, and its verdict applies only while the job is
+  still `awaiting_review` at the same iteration. `clean` runs the `mark_clean` path with the union
+  of both reviewers' `accepted_sensitive`; an undeclared sensitive path the gate does not accept is
+  a fix item. `fix` writes `## Fix N` (lead line `Review by Codex: <summary>`) and runs the next
+  iteration, which Claude reviews again, and the gate again after a clean verdict. The job counts
+  the gate's fixes in `gate_fixes`: at `SF_GATE_MAX_ROUNDS` the next one is not applied
+  (`needs_human`, `gate_rounds`, the message holds both reviewers' summaries). Every run adds its
+  input plus output tokens to the job's `gate_tokens`: a gate does not start once they reach
+  `SF_GATE_MAX_TOKENS`, and a run that takes them over it is recorded but not applied (both
+  `needs_human`, `gate_budget`). A non-zero exit, a timeout, a missing or invalid output or a
+  Codex `error` event is `needs_human` with `gate_failed` (the exit code or signal and the last
+  error line); nothing is retried. `sf abort` and `sf reset` kill a running gate; its outcome is
+  then never applied. `sf serve` kills a running gate when it stops.
+- Every gate run that ends is kept in `iterations/NNN/gate.json`: `{reviewer: "codex", verdict,
+  summary, items, accepted_sensitive, model?, tokens: {input, cached_input, output}, started_at,
+  ended_at}`, or `{reviewer, error, model?, tokens, started_at, ended_at}` when it failed (`model`
+  only with `SF_CODEX_MODEL`). Its event lines are the review's, with `reviewer: "codex"`: `review
+  by codex: clean`, `review by codex: fix (2 items)`, `review by codex failed: <error>`.
 - The job counts its Fix sections in `fixes` (the review's and `request_fix`'s). Once it reaches
   `SF_MAX_ITERATIONS`, the next Fix is refused: `needs_human` with `iteration_limit`. An `sf say`
   turn publishes an iteration but writes no Fix section, so it does not count.
@@ -353,18 +394,23 @@ factory beyond its Git refs (branches) and worktree registrations.
   `starting`, and `files`: the sensitive paths (with `declared`) and the deleted paths of that
   iteration. `meta.json` records `cost_usd` (this iteration's cost) and `cost_usd_total` (the
   SDK's cumulative total for the session). `check` also returns `review` for the last iteration:
-  `{status: "running" | "done" | "failed" | "off", verdict?, summary?}` (`running` also while the
-  review is due; `failed` with the error as `summary`).
+  `{status: "running" | "done" | "failed" | "off", verdict?, summary?, gate?}` (`running` also while the
+  review is due; `failed` with the error as `summary`). After a clean Claude verdict with the gate
+  on, `gate` is the gate's status in the same form (no `off`; absent with the gate off).
 - `sf say` queues a message as the next turn (in `working`, `awaiting_review`, `needs_human` or
   `ready_for_human_review`, where it reopens the worktree like `request_fix`); outside `working`
   the job goes back to `working` and publishes a new iteration at the end.
 - A failed turn, a session that does not report permission mode `auto`
   (`permission_mode_mismatch`), an unavailable sandbox (`sandbox_unavailable`, with the SDK's
-  message), a failed review (`review_failed`) or the iteration limit put the job in `needs_human`.
+  message), a failed review (`review_failed`), a failed gate (`gate_failed`), the gate's round
+  limit (`gate_rounds`) or token ceiling (`gate_budget`) or the iteration limit put the job in
+  `needs_human`.
   When `sf serve` starts, jobs found `working` become `needs_human` (`serve_restarted`) and keep
   their session for `sf say`; jobs found `preparing_mr` become `needs_human` (`mr_serve_restarted`)
   for another `mark_clean`; a job found `awaiting_review` whose last iteration has no `review.json`
-  gets its review. Nothing is retried automatically.
+  gets its review, and one whose last iteration has a clean `review.json` and no `gate.json` gets
+  its gate (with the gate off by now, the Claude verdict runs Clean). Nothing is retried
+  automatically.
 - `check` also returns `mr`, the MR text, once MR preparation produced one.
 - `sf abort` works in every non-terminal state: it aborts the running turn (queued prompts are
   dropped) and sets `aborted` without `error`; the branch and the worktree stay, and the
@@ -552,9 +598,9 @@ sf.sock                                  # 0600, while sf serve runs; one JSON r
 subscriptions.json                       # 0600, MCP event subscriptions with their signing secrets (section MCP Events)
 events-queue.json                        # 0600, pending event deliveries, resumed at the next sf serve start
 dashboard-token                          # 0600, the dashboard token of the last sf serve start
-jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, state, iteration, session_id, created_at, updated_at, error
+jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, state, iteration, fixes, gate_fixes, gate_tokens, session_id, created_at, updated_at, error
 jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "principal" | "event_delivered" | "event_failed" | "subscription_removed" | "review" | "review_failed" | ...}; what sf watch reads
-jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json}
+jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-schema.json,gate-output.json}
 worktrees/<workspace>/<ticket>/          # the job's worktree (SF_WORKTREE_ROOT), from start to Clean, abort or reset
 jobs/<workspace>/<ticket>/mr.md              # the MR text, once the branch is ready or after a conflict iteration
 jobs/<workspace>/<ticket>.<timestamp>/   # an archived earlier job
@@ -626,7 +672,8 @@ Approve… and Abort… buttons in its head, the branch, base, iteration, estima
 not a charge) and update time as facts, the error, the Reviewer line and the message box; and
 under it one card with four tabs (SF-026): Iterations (each iteration's Report and Patch, and under
 its meta line the Claude review: the verdict, the summary, the numbered items and the accepted
-sensitive paths, or why it failed; the job's estimated cost includes the reviews), Merge
+sensitive paths, or why it failed, and under it the gate's verdict the same way with its tokens;
+the job's estimated cost includes the Claude reviews), Merge
 request (the MR text once there is one, else a note), State history, and Event stream (the
 Implementer's session as `sf watch` prints it, following new lines; scrolling up switches follow
 off). The selected tab is kept when another job is selected. The layout is one spacing and type
@@ -703,7 +750,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | Path | Answer |
 |---|---|
 | `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, updated_at, created_at, error, reviewer (`subscribed`, `broad` or `none`) |
-| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review}], mr, history: [{ts, from, to, error?}], reviewer, reviewerSetup: {guide, instruction}}`; `reviewer` is `{status: "subscribed" \| "broad", id, host, input, broad: [<ids of the subscriptions without a ticket filter that match>]}` or `{status: "none"}` |
+| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate}], mr, history: [{ts, from, to, error?}], reviewer, reviewerSetup: {guide, instruction}}`; `reviewer` is `{status: "subscribed" \| "broad", id, host, input, broad: [<ids of the subscriptions without a ticket filter that match>]}` or `{status: "none"}` |
 | `api/subscriptions` | `{subscriptions: [{id, principal, input, host, createdAt, refreshBefore, job: "<ws>/<ticket>" \| null}]}`, the active subscriptions without URL or secret; `job` is the non-terminal job the ticket filter matches |
 | `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem}]}`: the registry, the checkout's path, its non-terminal jobs, and why the checkout cannot be used now or `null` |
 | `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, reviewer, conversation: {message, url}}], archived: [{workspace, ticket, title}]}`: the Task files without a live job; `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `reviewer` as in the job detail; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |

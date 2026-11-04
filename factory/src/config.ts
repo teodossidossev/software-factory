@@ -1,8 +1,8 @@
 // Execution configuration, read once when `sf serve` starts.
 import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
-import { readFileSync } from 'node:fs';
+import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import type { AuthConfig } from './auth.js';
 import { FactoryError } from './errors.js';
 import { configDir } from './registry.js';
@@ -32,7 +32,20 @@ export interface Config {
   reviewModel: string | undefined;
   // maxTurns of the review (SF_REVIEW_MAX_TURNS).
   reviewMaxTurns: number;
+  // The Codex gate after a clean Claude review (SF-039): the executable, or why the gate is off.
+  gate: Gate;
+  // The model of the gate (SF_CODEX_MODEL, passed as --model); undefined uses Codex's default.
+  codexModel: string | undefined;
+  // Fix verdicts of the gate per job before the next one goes to the user (SF_GATE_MAX_ROUNDS).
+  gateMaxRounds: number;
+  // Input plus output tokens of the gate per job (SF_GATE_MAX_TOKENS).
+  gateMaxTokens: number;
+  // How long one gate run may take (SF_GATE_TIMEOUT_MS).
+  gateTimeoutMs: number;
 }
+
+// The gate: on with its Codex executable, or off with why (missing: no executable was found).
+export type Gate = { on: true; codexPath: string } | { on: false; reason: string; missing?: true };
 
 // Domains sandboxed commands may reach: the npm registry and SF_SANDBOX_DOMAINS (comma-separated).
 // The factory's own fetch and push run outside the sandbox, so the Git host is not needed. Binding
@@ -132,15 +145,50 @@ export function loadEnvFile(env: NodeJS.ProcessEnv = process.env, path = envFile
   return set;
 }
 
-function positiveInteger(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+function positiveInteger(env: NodeJS.ProcessEnv, name: string, fallback: number, max = 100000): number {
   const raw = env[name];
   if (raw === undefined || raw === '') {
     return fallback;
   }
-  if (!/^\d+$/.test(raw) || Number(raw) < 1 || Number(raw) > 100000) {
+  if (!/^\d+$/.test(raw) || Number(raw) < 1 || Number(raw) > max) {
     throw new FactoryError('invalid_config', `${name} must be a positive integer, got "${raw}".`);
   }
   return Number(raw);
+}
+
+// An executable regular file.
+function executable(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+// The gate (SF_GATE: codex, the default, or off): the executable is SF_CODEX (an absolute path) or
+// codex on PATH; when there is none the gate is off, with missing set.
+export function gateConfig(env: NodeJS.ProcessEnv = process.env): Gate {
+  const mode = env.SF_GATE || 'codex';
+  if (mode === 'off') {
+    return { on: false, reason: 'SF_GATE=off' };
+  }
+  if (mode !== 'codex') {
+    throw new FactoryError('invalid_config', `SF_GATE must be codex or off, got "${mode}".`);
+  }
+  const configured = env.SF_CODEX || undefined;
+  if (configured !== undefined) {
+    if (!isAbsolute(configured)) {
+      throw new FactoryError('invalid_config', 'SF_CODEX must be an absolute path.');
+    }
+    return executable(configured) ? { on: true, codexPath: configured } : { on: false, reason: `SF_CODEX ${configured} is not an executable file`, missing: true };
+  }
+  for (const dir of (env.PATH ?? '').split(delimiter)) {
+    if (dir !== '' && isAbsolute(dir) && executable(join(dir, 'codex'))) {
+      return { on: true, codexPath: join(dir, 'codex') };
+    }
+  }
+  return { on: false, reason: 'no codex on PATH; set SF_CODEX', missing: true };
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -163,6 +211,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     review: env.SF_REVIEW !== 'off',
     reviewModel: env.SF_REVIEW_MODEL || undefined,
     reviewMaxTurns: positiveInteger(env, 'SF_REVIEW_MAX_TURNS', 60),
+    gate: gateConfig(env),
+    codexModel: env.SF_CODEX_MODEL || undefined,
+    gateMaxRounds: positiveInteger(env, 'SF_GATE_MAX_ROUNDS', 3),
+    gateMaxTokens: positiveInteger(env, 'SF_GATE_MAX_TOKENS', 5_000_000, 1_000_000_000),
+    gateTimeoutMs: positiveInteger(env, 'SF_GATE_TIMEOUT_MS', 900_000, 86_400_000),
   };
 }
 

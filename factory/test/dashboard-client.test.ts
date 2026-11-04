@@ -1232,3 +1232,53 @@ test('client: Retry review shows only in needs_human after a failed review; one 
   assert.deepEqual([button.hidden, button.disabled], [false, false]);
   assert.equal(reviewPosts(page).length, 2);
 });
+
+// The gate (SF-039): its verdict in its own block under Claude's, with its tokens; hidden while none
+// ended.
+test('client: the Iterations tab shows the gate\'s verdict under the Claude review', async () => {
+  const meta = { started_at: '2026-11-01T10:00:01.000Z', ended_at: '2026-11-01T10:05:00.000Z', changed_files: 1, patch_truncated: false, denials: 0, files: null };
+  const times = { started_at: '2026-11-01T10:05:01.000Z', ended_at: '2026-11-01T10:06:00.000Z' };
+  const claude = { reviewer: 'claude', verdict: 'clean', summary: 'Right.', items: [], accepted_sensitive: [], cost_usd: 0.25, ...times };
+  const gate = {
+    reviewer: 'codex', verdict: 'fix', summary: 'Not quite.', accepted_sensitive: [], model: 'gpt-x', tokens: { input: 1000, cached_input: 200, output: 100 },
+    items: [{ path: 'README.md', problem: 'It greets the world.', expected: 'It greets the reader.' }], ...times,
+  };
+  const withGate = {
+    ...detail(A),
+    iterations: [
+      { number: 1, cost_usd: 0.5, ...meta, review: claude, gate },
+      { number: 2, cost_usd: 0.5, ...meta, review: claude, gate: { reviewer: 'codex', error: 'Codex wrote no output.', tokens: { input: 0, cached_input: 0, output: 0 }, ...times } },
+      { number: 3, cost_usd: 0.5, ...meta, review: claude, gate: null },
+    ],
+  };
+  const page = await loadPage(STATIC_DIR, (path) => {
+    if (path === 'api/jobs') {
+      return { jobs: [job(A)] };
+    }
+    if (path === 'api/jobs/app/T-1') {
+      return withGate;
+    }
+    return path.endsWith('/report') ? '# Report' : undefined;
+  });
+  page.document.dispatch('DOMContentLoaded');
+  await page.flush();
+  const stream = page.streams.at(-1)!;
+  stream.emit('open');
+  stream.emit('jobs', { jobs: [job(A)] });
+  stream.emit('job', withGate);
+  await page.flush();
+  const select = async (number: number): Promise<void> => {
+    (page.$('iteration-tabs').children as FakeElement[])[number - 1]!.click();
+    await page.flush();
+  };
+  const texts = (id: string): string[] => (page.$(id).children as FakeElement[]).map((child) => child.textContent);
+  await select(1);
+  assert.deepEqual(texts('iteration-review'), ['Review by claude: clean, cost $0.2500', 'Right.']);
+  assert.deepEqual([page.$('iteration-gate').hidden, page.$('iteration-gate').className], [false, 'review v-fix']);
+  assert.deepEqual(texts('iteration-gate'), ['Review by codex: fix (1 item), 1100 tokens', 'Not quite.', 'README.md: It greets the world. Expected: It greets the reader.']);
+  await select(2);
+  assert.equal(page.$('iteration-gate').className, 'review v-failed');
+  assert.deepEqual(texts('iteration-gate'), ['Review by codex: failed', 'Codex wrote no output.']);
+  await select(3);
+  assert.deepEqual([page.$('iteration-review').hidden, page.$('iteration-gate').hidden, page.$('iteration-gate').children.length], [false, true, 0]);
+});

@@ -280,6 +280,8 @@ async function jobDetail(jobs: JobStore, reviewers: DashboardReviewers, job: Job
         files: meta.files ?? null,
         // The Claude review (SF-038): review.json as written; null while none ended.
         review: (await jobs.readReview(job.workspace, job.ticket, number)) ?? null,
+        // The gate (SF-039): gate.json as written; null while none ended.
+        gate: (await jobs.readGate(job.workspace, job.ticket, number)) ?? null,
       });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {

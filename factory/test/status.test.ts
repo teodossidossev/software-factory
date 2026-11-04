@@ -11,7 +11,7 @@ import { newEnv, runCli, temp } from './support/harness.js';
 const CREATED = '2026-11-01T10:00:00.000Z';
 const base: Job = {
   workspace: 'app', ticket: 'T-1', branch: 'T-1-demo', base: 'main', base_commit: null, target_commit: null, worktree: null, prepared_commit: null,
-  mr_attempts: 0, fixes: 0, state: 'awaiting_review', iteration: 0, session_id: null, created_at: CREATED, updated_at: CREATED,
+  mr_attempts: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'awaiting_review', iteration: 0, session_id: null, created_at: CREATED, updated_at: CREATED,
 };
 
 function meta(iteration: number, cost: number | null, total: number | null = cost): IterationMeta {

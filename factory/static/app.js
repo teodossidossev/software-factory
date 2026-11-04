@@ -463,13 +463,15 @@ async function showIteration() {
   if (meta === undefined) {
     body.replaceChildren();
     $('iteration-meta').textContent = '';
-    renderReview(null);
+    renderReview($('iteration-review'), null);
+    renderReview($('iteration-gate'), null);
     return;
   }
   const cost = typeof meta.cost_usd === 'number' ? `$${meta.cost_usd.toFixed(4)}` : 'n/a';
   $('iteration-meta').textContent = `${shortTime(meta.started_at)} – ${shortTime(meta.ended_at)}, cost ${cost}, ` +
     `${meta.changed_files} changed file(s), ${meta.denials} denial(s)${meta.patch_truncated ? ', patch truncated' : ''}`;
-  renderReview(meta.review ?? null);
+  renderReview($('iteration-review'), meta.review ?? null);
+  renderReview($('iteration-gate'), meta.gate ?? null);
   const filesView = state.view === 'files';
   $('files-view').hidden = !filesView;
   body.hidden = filesView;
@@ -487,10 +489,9 @@ async function showIteration() {
   }
 }
 
-// The Claude review of the selected iteration (SF-038): its verdict, summary and items, or why it
-// failed; hidden while none ended.
-function renderReview(review) {
-  const block = $('iteration-review');
+// A review of the selected iteration in its block: Claude's (SF-038) or the gate's (SF-039), with
+// its verdict, summary and items, or why it failed; hidden while none ended.
+function renderReview(block, review) {
   block.hidden = review === null;
   if (review === null) {
     block.replaceChildren();
@@ -504,8 +505,10 @@ function renderReview(review) {
   const count = review.items.length;
   const verdict = review.verdict === 'fix' ? `fix (${count} ${count === 1 ? 'item' : 'items'})` : review.verdict;
   const cost = typeof review.cost_usd === 'number' ? `, cost $${review.cost_usd.toFixed(4)}` : '';
+  const tokens = review.tokens !== null && typeof review.tokens === 'object' && typeof review.tokens.input === 'number'
+    ? `, ${review.tokens.input + review.tokens.output} tokens` : '';
   block.className = `review v-${review.verdict}`;
-  const children = [el('p', 'review-verdict', `Review by ${review.reviewer}: ${verdict}${cost}`), el('p', 'review-summary', review.summary)];
+  const children = [el('p', 'review-verdict', `Review by ${review.reviewer}: ${verdict}${cost}${tokens}`), el('p', 'review-summary', review.summary)];
   if (review.verdict === 'fix' && count > 0) {
     const list = el('ol', 'review-items');
     list.append(...review.items.map((item) => {

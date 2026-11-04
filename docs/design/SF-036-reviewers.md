@@ -12,7 +12,7 @@ plan in ChatGPT ─► write_task ─► user: Start ─► iteration ─► Cla
                                                    └──────────────┤
                                                                   │ clean
                                                                   ▼
-                                                 gate (OpenAI) ── fix: ## Fix N ─► iteration
+                                                 gate (Codex)  ── fix: ## Fix N ─► iteration
                                                                   │ clean
                                                                   ▼
                                     factory: MR text turn, commit, rebase ─► ready_for_human_review
@@ -47,9 +47,14 @@ sensitive paths the summary names; one it does not name is a fix item.
 
 - **Claude**: a fresh Agent SDK `query()`, `cwd` the worktree, tools `Read`, `Grep`, `Glob` only,
   `outputFormat` with the schema above. Its text, verdict and cost are kept with the iteration.
-- **Gate**: the OpenAI Responses API, `SF_OPENAI_MODEL`, function tools `read_file` and `search`
-  over the worktree (the factory's own readers, credential-like paths refused), structured output
-  with the same schema, a bounded number of tool rounds. Runs only after a clean Claude verdict.
+- **Gate** (amended 2026-11-04, SF-039): the Codex CLI on the user's ChatGPT subscription, no API
+  key: `codex exec --ephemeral --sandbox read-only --cd <worktree> --output-schema <file>
+  --output-last-message <file> --json [--model SF_CODEX_MODEL] -`, the prompt on stdin, the
+  environment without `SF_*`. Codex reads the worktree itself (read-only commands such as `git diff
+  <base_commit>`, `rg`, reading files; no credentials), so the factory implements no function
+  tools. The output schema is the one above in strict form (every property required,
+  `additionalProperties: false`); token usage comes from the JSONL events. Runs only after a clean
+  Claude verdict. Recorded in `iterations/NNN/gate.json`.
 
 ## 4. Rules
 
@@ -57,9 +62,10 @@ sensitive paths the summary names; one it does not name is a fix item.
 |---|---|
 | Fix sections without Clean | `SF_MAX_ITERATIONS` (default 5), counted on Fix sections, then `needs_human` |
 | Gate rounds with fixes | `SF_GATE_MAX_ROUNDS` (default 3), then `needs_human` with both verdicts |
-| Gate tokens per ticket | `SF_OPENAI_MAX_TOKENS`, then `needs_human` |
+| Gate tokens per ticket | `SF_GATE_MAX_TOKENS` (default 5000000, input plus output), then `needs_human` with `gate_budget` |
+| Gate run time | `SF_GATE_TIMEOUT_MS` (default 900000), then `needs_human` with `gate_failed` |
 | Disagreement | the gate decides |
-| Gate off | without `SF_OPENAI_API_KEY` and `SF_OPENAI_MODEL`; the Claude verdict decides |
+| Gate off | `SF_GATE=off`, or no Codex executable (`SF_CODEX`, else `codex` on `PATH`); the Claude verdict decides |
 
 ## 5. Git at Clean
 
@@ -83,7 +89,7 @@ the Handbook as the planner's guide. Everything else of the MCP surface goes.
 | SF-036 | This design, ADR-0005 |
 | SF-037 | The factory commits and rebases at Clean |
 | SF-038 | Claude reviews every iteration |
-| SF-039 | The OpenAI gate before Clean |
+| SF-039 | The Codex gate before Clean (amended 2026-11-04: Codex CLI on the ChatGPT subscription, not the OpenAI API) |
 | SF-040 | Remove the ChatGPT execution transport |
 | SF-041 | Start button and MR text copy on the dashboard |
 | SF-042 | Each job runs in its own process |

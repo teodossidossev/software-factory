@@ -1,18 +1,20 @@
 # software-factory
 
-The local factory process. It serves MCP tools to the Context owner (ChatGPT or any MCP client)
-and provides the `sf` command. How to work with it is in [HANDBOOK.md](HANDBOOK.md); the
+The local factory process. It serves the planning tools to the Context owner (ChatGPT or any MCP
+client), runs the jobs and provides the `sf` command. How to work with it is in [HANDBOOK.md](HANDBOOK.md); the
 vocabulary is in [../CONTEXT.md](../CONTEXT.md).
 
-It provides the planning tools (`guide`, `read_file`, `search`, `write_task`) and the execution
-tools (`start`, `check`, `request_fix`, `mark_clean`). The Implementer runs as a headless Claude
+The MCP endpoint serves only the planning tools (`guide`, `read_file`, `search`, `write_task`):
+the Context owner reads the repository, discusses the ticket with the user and writes the Task file
+with its `## Review brief`. The user starts the job, with the Start button of the ticket on the
+dashboard or with `sf start`. The Implementer runs as a headless Claude
 Agent SDK session (`@anthropic-ai/claude-agent-sdk`, pinned in `package.json`) in a worktree of
 the job, inside Claude Code's sandbox. At Clean the Implementer writes the merge request text
 and the factory commits and rebases, and the user finishes the ticket with approve (the push) or abort, from the terminal (`sf approve`,
 `sf abort`) or from the dashboard (section Dashboard), or with `sf reset` (terminal only), and is
-told about the states that need them through a desktop notification and ntfy. The Context owner is told through MCP Events:
-ChatGPT subscribes to the event `software_factory.job` and the factory POSTs a signed webhook on
-each state that needs it (section MCP Events).
+told about the states that need them through a desktop notification and ntfy. Every published
+iteration is reviewed by a fresh read-only Claude session and, when it finds it clean, by the Codex
+gate (section Jobs); their fix verdicts become the next Fix section without anyone in between.
 
 ## Commands
 
@@ -24,7 +26,7 @@ bin/sf workspace remove <name>
 bin/sf serve                      # foreground; Ctrl+C stops it; prints the dashboard URL
 bin/sf up [--no-open] [--no-tunnel]   # sf serve plus the tunnel (../scripts/sf-tunnel.sh run, output prefixed "tunnel | ") and the dashboard opened in the browser; Ctrl+C stops both; npm start at the repository root
 bin/sf dashboard [--open]         # the dashboard URL of the last sf serve start; --open opens it with xdg-open; works without sf serve
-bin/sf start <workspace> <ticket> # start the job in a worktree of its own (same as the start tool); needs sf serve
+bin/sf start <workspace> <ticket> # start the job in a worktree of its own (same as the dashboard's Start); needs sf serve
 bin/sf say <workspace> <ticket> <message...>   # a user message into the session; needs sf serve
 bin/sf review <workspace> <ticket>             # retry a failed Claude review (needs_human with review_failed); needs sf serve
 bin/sf status [<workspace> <ticket>]           # one job (with its worktree, sensitive and deleted paths) or all jobs, with estimated cost and elapsed time; works without sf serve
@@ -32,18 +34,12 @@ bin/sf watch <workspace> <ticket> [--once]     # the session live; works without
 bin/sf approve <workspace> <ticket> [--as-is]  # push the branch prepared at Clean; --as-is pushes a tip edited by hand; needs sf serve
 bin/sf abort <workspace> <ticket> [--discard]  # end the job; the worktree stays (its path printed); --discard removes the worktree and the branch; needs sf serve
 bin/sf reset <workspace> <ticket>              # end the session, remove the worktree and archive the job; the branch stays; needs sf serve
-bin/sf events list                             # MCP event subscriptions (no secrets) with the live job each ticket filter matches; needs sf serve
-bin/sf events remove <id>                      # remove a subscription; needs sf serve
-bin/sf events test <id>                        # send a test event (state "test") to a subscription, print the answer; needs sf serve
-bin/sf ticket <workspace> <ticket> [--no-wait] # the ChatGPT conversation of one ticket: instruction to paste, wait for its subscription, test it; needs sf serve
 bin/sf notify-test                             # one test notification on every channel; works without sf serve
-bin/sf auth-test < token.txt                   # verify an access token from stdin with the SF_AUTH_* settings; works without sf serve
-bin/sf info                                    # version, directories, settings (gate: codex <version or path> | off (<reason>)), sf serve and tunnel state, workspaces, jobs, subscriptions; works without sf serve
+bin/sf info                                    # version, directories, settings (gate: codex <version or path> | off (<reason>)), sf serve and tunnel state, workspaces, jobs; works without sf serve
 npm run typecheck && npm test
 ```
 
-Exit codes: 0 ok, 1 error, 2 usage. `sf approve` exits 1 unless the branch was pushed; `sf events
-test` exits 1 unless the callback answered 2xx.
+Exit codes: 0 ok, 1 error, 2 usage. `sf approve` exits 1 unless the branch was pushed.
 
 `sf up` is `sf serve` in the same process, then the tunnel as a child process (`SF_TUNNEL_SCRIPT`
 names another script) and the dashboard through `xdg-open` once serve listens. When the script is
@@ -61,7 +57,7 @@ One line per current job (archived ones excluded), sorted by workspace and ticke
 message below the table). Both work without `sf serve`; they read the state directory.
 
 - `EST_USD` is the recorded cost, an estimate of the API-equivalent price and not a charge: the
-  session usually runs on the user's Claude subscription. It is the sum of `cost_usd` over
+  session usually runs on the user's Claude plan. It is the sum of `cost_usd` over
   `meta.json` of the published iterations 1 to `iteration`, plus the `cost_usd` of their reviews
   (`review.json`; a failed review adds nothing), with four decimals (`0.0000` for a real zero or no iteration yet).
   A running iteration or an MR preparation turn adds nothing until its iteration is published, and
@@ -77,7 +73,7 @@ message below the table). Both work without `sf serve`; they read the state dire
 | Variable | Default | Meaning |
 |---|---|---|
 | `SF_PORT` | `8787` | Port of `http://127.0.0.1:<port>/mcp` (loopback only, Host and Origin checked). |
-| `SF_ENV_FILE` | `~/.config/software-factory/auth.env` | Environment file every `sf` command reads first: `KEY=VALUE` lines, `#` comments, optional `export`, quotes allowed; a variable already set in the environment wins; a missing file is fine. Empty value: no file. The repository root's `npm run serve` relies on it. |
+| `SF_ENV_FILE` | `~/.config/software-factory/auth.env` (a historical name) | Environment file every `sf` command reads first: `KEY=VALUE` lines, `#` comments, optional `export`, quotes allowed; a variable already set in the environment wins; a missing file is fine. Empty value: no file. The repository root's `npm run serve` relies on it. |
 | `SF_DASHBOARD` | on | `off` starts no dashboard listener (and removes an old `dashboard-token`). |
 | `SF_DASHBOARD_PORT` | `8788` | Port of the dashboard, `http://127.0.0.1:<port>/d/<token>/` (loopback only, Host and Origin checked). |
 | `SF_CONFIG_DIR` | `${XDG_CONFIG_HOME:-~/.config}/software-factory` | Directory of the workspace registry. |
@@ -86,19 +82,19 @@ message below the table). Both work without `sf serve`; they read the state dire
 | `SF_WORKTREE_ROOT` | `${SF_STATE_DIR}/worktrees` | Where every job's worktree is created: `<root>/<workspace>/<ticket>`; absolute. |
 | `SF_MAX_JOBS` | `3` | Live jobs per workspace; a further `start` is `job_limit`. |
 | `SF_SENSITIVE_PATHS` | empty | Comma-separated globs added to the sensitive paths of `src/rules.ts`. |
-| `SF_CHECK_AFTER_START_MIN` | `15` | `check_after_minutes` returned by `start` and by `check` during the first iteration. |
-| `SF_CHECK_AFTER_FIX_MIN` | `5` | `check_after_minutes` returned by `request_fix` and by `check` during later iterations. |
+| `SF_CHECK_AFTER_START_MIN` | `15` | `check_after_minutes` in the result of a start and of the job's status during the first iteration. |
+| `SF_CHECK_AFTER_FIX_MIN` | `5` | `check_after_minutes` in the job's status during later iterations. |
 | `SF_MAX_TURNS` | `150` | `maxTurns` of every Implementer turn. |
-| `SF_MAX_ITERATIONS` | `5` | Fix sections a job may get (the review's and `request_fix`'s, counted in the job's `fixes`); the next Fix is refused (`iteration_limit`, job `needs_human`). An `sf say` turn does not count. |
+| `SF_MAX_ITERATIONS` | `5` | Fix sections a job may get (the reviewers', counted in the job's `fixes`); the next Fix is refused (`iteration_limit`, job `needs_human`). An `sf say` turn does not count. |
 | `SF_CLAUDE` | bundled binary | Absolute path of the Claude Code executable (`pathToClaudeCodeExecutable`). |
 | `SF_MODEL` | unset | Model of every Implementer turn, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
-| `SF_REVIEW` | on | `off` runs no Claude review: a published iteration stays in `awaiting_review` for `request_fix` or `mark_clean`. |
+| `SF_REVIEW` | on | `off` runs no Claude review (nor the gate): a published iteration stays in `awaiting_review` until the user goes on with `sf say` or aborts. |
 | `SF_REVIEW_MODEL` | unset | Model of the Claude review, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
 | `SF_REVIEW_MAX_TURNS` | `60` | `maxTurns` of the Claude review. |
 | `SF_GATE` | `codex` | The gate after a clean Claude review (SF-039): `codex` runs the Codex CLI, `off` lets the Claude verdict decide. With `codex` and no executable found the gate is off, and `sf serve` prints one line saying so. |
 | `SF_CODEX` | `codex` on `PATH` | Absolute path of the Codex CLI executable. Pointing at nothing turns the gate off; it is not looked for on `PATH` then. |
 | `SF_CODEX_MODEL` | unset | Model of the gate, passed as `--model`; unset uses Codex's default (the user's `~/.codex/config.toml`). |
-| `SF_GATE_MAX_ROUNDS` | `3` | Fix verdicts of the gate per job (the job's `gate_fixes`); the next one is not applied (`gate_rounds`, job `needs_human`). |
+| `SF_GATE_MAX_ROUNDS` | `5` | Fix verdicts of the gate per job (the job's `gate_fixes`); the next one is not applied (`gate_rounds`, job `needs_human`). |
 | `SF_GATE_MAX_TOKENS` | `5000000` | Input plus output tokens of all gate runs of a job (the job's `gate_tokens`); a gate does not start at the limit, and a run that goes over it is not applied (`gate_budget`, job `needs_human`). |
 | `SF_GATE_TIMEOUT_MS` | `900000` | How long one gate run may take; then SIGTERM, and SIGKILL 5 s later (`gate_failed`). |
 | `SF_SANDBOX` | on | `off` runs the Implementer and the review without Claude Code's sandbox. |
@@ -107,173 +103,13 @@ message below the table). Both work without `sf serve`; they read the state dire
 | `SF_NOTIFY_ITERATIONS` | off | `on` also notifies `awaiting_review` (each published iteration). |
 | `SF_NTFY_URL` | unset | Full ntfy topic URL, e.g. `https://ntfy.sh/<topic>`; unset disables ntfy. |
 | `SF_NTFY_TOKEN` | unset | Sent as `Authorization: Bearer <token>` to a server that needs it. |
-| `SF_AUTH_ISSUER` | unset | OAuth issuer exactly as the tokens' `iss`, trailing slash included (Auth0: `https://<tenant>.<region>.auth0.com/`). Unset: no authentication at all. |
-| `SF_AUTH_AUDIENCE` | required with `SF_AUTH_ISSUER` | The API identifier that must be in the token's `aud` (a string or an array). |
-| `SF_AUTH_RESOURCE` | `SF_AUTH_AUDIENCE` | The `resource` of the protected resource metadata; an `https` URL. |
-| `SF_AUTH_OPEN_METHODS` | `initialize,ping,tools/list,server/discover,notifications/initialized` | Comma-separated MCP methods allowed without a token; empty opens none. `events/*` methods are refused (`invalid_config`). |
-| `SF_EVENTS_ALLOW_LOOPBACK` | off | **Tests only.** `on` accepts event callback URLs on loopback (`127.0.0.0/8`, `::1`, `localhost`), over `http` too. Never set it in real use. |
+| `SF_TEST_HOOKS` | off | Tests only. `on` makes `sf serve` answer the socket commands `check`, `fix` and `clean` (the reviewers' verdict paths without a review session) for the end-to-end tests. Never set it in real use. |
 
 The socket path `${SF_STATE_DIR}/sf.sock` must fit a Unix socket address (107 bytes on Linux);
 a longer one is refused at start with `socket_path_too_long`.
 
 The execution variables are read once when `sf serve` starts. `sf status` and `sf watch` read
-`SF_STATE_DIR` themselves; `sf start`, `sf say`, `sf review`, `sf approve`, `sf abort`, `sf reset` and `sf events` use it to find the socket; `sf notify-test` reads the notification variables itself; `sf auth-test` reads `SF_AUTH_*` itself.
-
-## OAuth
-
-With `SF_AUTH_ISSUER` set, the MCP endpoint is an OAuth resource server (the authorization server is
-hosted, e.g. Auth0; the factory issues no tokens and knows no clients). `sf serve` prints
-`auth: <issuer> audience <audience>`, or `auth: off` without `SF_AUTH_ISSUER`, where everything
-behaves as without this section. An invalid combination stops `sf serve` with `invalid_config`.
-
-- `GET /.well-known/oauth-protected-resource` and `GET /.well-known/oauth-protected-resource/mcp`
-  return the same protected resource metadata (`Cache-Control: no-store`):
-  `{"resource": SF_AUTH_RESOURCE, "authorization_servers": [SF_AUTH_ISSUER], "bearer_methods_supported": ["header"], "scopes_supported": ["openid", "profile", "email", "offline_access"]}`.
-- `POST /mcp` with `Authorization: Bearer <token>`: the token must verify (below), whatever the
-  method; the tools then see the caller. An invalid token gets `401` with
-  `WWW-Authenticate: Bearer error="invalid_token", error_description="...", scope="offline_access", resource_metadata="<origin of SF_AUTH_RESOURCE>/.well-known/oauth-protected-resource"`
-  (`500`, without a challenge, when the authorization server's keys cannot be fetched).
-- `POST /mcp` without a token: a single JSON-RPC message whose `method` is in
-  `SF_AUTH_OPEN_METHODS` runs unauthenticated (by default `initialize`, `ping`, `tools/list`,
-  `server/discover`, `notifications/initialized`); anything else, a batch, a response or an
-  unparseable body included, gets the same `401` challenge. Every `tools/call` needs a token by
-  default. The body limit is unchanged (4 MiB, `413` beyond).
-- `GET /mcp`, other methods and other paths are unchanged.
-
-`offline_access` in the metadata and the challenge's `scope="offline_access"` are hints meant to
-prompt ChatGPT to ask Auth0 for a refresh token, so that the connection outlives the access token
-(SF-033). They are an agreed ChatGPT compatibility measure, not a standards requirement: the MCP
-authorization draft recommends that a resource server leave `offline_access` out, refresh being the
-business of the client and the authorization server. The factory requires no scope of a token
-(one without `offline_access` is accepted), never sees a refresh token and has no token endpoint.
-
-A token is accepted when it is a JWT with `alg` `RS256` whose `kid` is in the issuer's JWKS and whose
-signature verifies, `iss` equals `SF_AUTH_ISSUER`, `aud` contains `SF_AUTH_AUDIENCE`, `exp` has not
-passed and `nbf` (if any) has (60 s leeway each; the SDK's bearer check additionally refuses a token
-past `exp` without leeway), and `sub` is set. The JWKS location is `jwks_uri` of
-`<issuer>.well-known/openid-configuration`, read once (falling back to `<issuer>.well-known/jwks.json`);
-keys are cached by `kid` for an hour, an unknown `kid` refetches the JWKS at most once per minute, and
-every request to the authorization server has a 10 s timeout. A rejection is logged as
-`software-factory bearer token rejected: <reason>` (`malformed`, `unsupported_alg`, `unknown_kid`,
-`bad_signature`, `wrong_issuer`, `wrong_audience`, `expired`, `not_yet_valid`, `missing_sub`,
-`jwks_unavailable`), never with the token.
-
-With a verified token, `start`, `request_fix`, `mark_clean` and `write_task` append
-`{"type": "principal", "tool": "<tool>", "principal": "<sub>"}` to the job's `events.jsonl` after
-they succeed; `sf watch` shows it as `<tool> by <sub>`. `write_task` for a ticket that has no job yet
-has no event log, so nothing is recorded for it.
-
-`sf auth-test` reads one token from stdin (never an argument, so it stays out of the shell
-history), verifies it with the same code against the `SF_AUTH_*` settings and prints
-`valid: sub <sub>`, the scopes and the expiry (exit 0) or `rejected: <reason>` (exit 1). It does not
-need `sf serve`. For example `xclip -o -selection clipboard | bin/sf auth-test`.
-
-## MCP Events
-
-The factory implements the ChatGPT MCP Events contract (draft MCP Events specification, webhook
-delivery and callback verification only; no polling, streaming, replay, `gap` or `terminated`), so
-an event-triggered task in ChatGPT runs when a job needs the Context owner instead of on a
-schedule. `initialize` advertises the capability `events: {}`. The three methods are protocol
-methods on the same `/mcp` endpoint as the tools, not tools. They need the token's `sub`: with
-OAuth they are never open (`SF_AUTH_OPEN_METHODS` refuses them); without OAuth they answer the
-JSON-RPC error `-32000` with `data.reason` `unauthenticated`.
-
-**The event.** One, `software_factory.job`. `inputSchema` (the filter):
-`{workspace?: string, ticket?: string}`, no other keys; empty means every job. `payloadSchema`:
-`{workspace, ticket, state, iteration, branch, error?: {code, message}, mr?: {title}}`. It fires on
-every transition to `awaiting_review`, `needs_human`, `ready_for_human_review`, `pushed` (with
-`mr.title`), `aborted` and `failed`; `starting`, `working` and `preparing_mr` do not fire. `state`
-is `"test"` only for `sf events test`. Every authenticated principal may see and subscribe to it;
-deliveries go to every subscription whose filter matches. The intended setup is one subscription
-per ticket, from the ChatGPT conversation that plans it: `sf ticket <workspace> <ticket>` prints
-the instruction to paste there, warns about subscriptions that would also match the ticket, waits
-for the ticket's subscription and sends it a test event (`--no-wait` prints and exits 1 when there
-is none). The dashboard shows the same answer per job (its Reviewer block, with the same two
-messages to copy and a test event to send) and lists the subscriptions, refreshed on every change.
-A job in `awaiting_review` whose reviewer has not acted can be nudged from the same block (SF-035):
-the `awaiting_review` event goes again, with a new `eventId` and the current time, to every
-subscription that receives the job, through the same queue and retries; a subscription that
-still has a delivery of that iteration on its way gets no second one.
-
-**`events/list`** `{cursor?}` → `{events: [{name, description, delivery: ["webhook"], inputSchema,
-payloadSchema}]}`, one page, no `nextCursor`.
-
-**`events/subscribe`** `{name, arguments?, delivery: {mode: "webhook", url, secret}, cursor?, ttlMs?}`
-→ `{id, refreshBefore, cursor: null, truncated: false, ttlMs}`.
-
-- `name` must be `software_factory.job` (else `-32602`, `unknown_event`); `delivery.mode` must be
-  `webhook` (`-32602`, `unsupported_delivery`); `arguments` must match the filter
-  (`-32602`, `invalid_arguments`); `secret` must be `whsec_` + canonical base64 of 24 to 64 bytes
-  (`-32602`, `invalid_secret`).
-- `url`: `https`, at most 2048 characters, no userinfo, the host not `localhost`/`*.localhost`
-  and not a non-public address literal (loopback, private, shared, link-local, documentation,
-  multicast, reserved, IPv4-mapped, unique-local; `-32015`, `invalid_url`). Every connection
-  (verification and delivery) resolves the host and connects only to public addresses, keeping
-  the hostname for TLS; none left is `blocked_address`.
-- The id is derived from `{principal, url, name, arguments}` (arguments in canonical JSON):
-  `sub_` + 32 base64url characters of a SHA-256. A subscribe with the same identity is a refresh: same
-  id, `createdAt` kept, the new secret stored (the old one also signs for 10 minutes).
-- Limits: 8 active subscriptions per principal, 32 in total (`-32000`, `subscription_limit`); a
-  refresh does not count.
-- Verification before storing: a POST of `{"type":"verification","challenge":"<32 random bytes,
-  base64url>"}`, signed like a delivery with `webhook-id: msg_verification_<random>` and
-  `X-MCP-Subscription-Id: <id>`, 10 s timeout. It needs a 2xx whose JSON body is `{"challenge":
-  "<the same>"}` (compared in constant time); otherwise `-32015` with `data.reason`
-  `challenge_failed`, `timeout`, `connection_failed` or `blocked_address`. A success for the same
-  principal, URL and secret is reused for an hour.
-- `refreshBefore`: now + 7 days; a `ttlMs` grants less (at least one minute); `ttlMs: null` (no
-  expiry) is not granted, the 7 days apply. An expired subscription gets no deliveries and is
-  dropped. ChatGPT refreshes with `events/subscribe` before `refreshBefore`.
-
-**`events/unsubscribe`** `{name, arguments?, delivery: {url}}` (the subscribe identity) or `{id}` →
-`{}`. Idempotent: an unknown subscription is `{}` too. Another principal's subscription is refused
-(`-32000`, `forbidden`).
-
-**Delivery.** One POST per event and subscription, body
-`{"eventId": "evt_<32 hex>", "name": "software_factory.job", "timestamp": "<ISO time of the
-transition>", "data": <payload>, "cursor": null}` (at most 256 KiB; never larger in practice),
-serialized once and sent byte for byte on every attempt. Headers: `Content-Type: application/json`,
-`webhook-id` (= `eventId`), `webhook-timestamp` (Unix seconds of this attempt), `webhook-signature`
-(`v1,<base64 HMAC-SHA256 of "<webhook-id>.<webhook-timestamp>.<body>">` keyed with the decoded
-secret, Standard Webhooks; two space-separated signatures during a secret rotation),
-`X-MCP-Subscription-Id`. Each attempt has 10 s and never follows a redirect, uses no proxy and runs
-in the `sf serve` process, never in the Implementer's environment. Outcomes:
-
-| Answer | Then |
-|---|---|
-| 2xx | delivered |
-| 410 | the subscription is removed with its pending deliveries |
-| 413 | the event is dropped |
-| other 3xx and 4xx, `blocked_address` | dropped, not retried |
-| 5xx, timeout, connection failure | retried after 5 s, 30 s, 2 min, 10 min and 1 h (at most 6 attempts), then dropped |
-
-Deliveries never block the state transition. Pending ones are kept in
-`${SF_STATE_DIR}/events-queue.json` (attempts made, next time, the exact body), so a restart of
-`sf serve` resumes them with the same `eventId` (a due one at once). Each attempt is appended to the
-job's `events.jsonl` as `{type: "event_delivered" | "event_failed", subscription, attempt, status}`
-(`status`: the HTTP status, or `timeout`, `connection_failed`, `blocked_address`, `too_large`,
-`no_subscription`); `sf watch` and the dashboard show it as one line,
-`event to <id> attempt <n> delivered|failed: <status>`.
-
-**Store.** `${SF_STATE_DIR}/subscriptions.json` (0600, replaced atomically):
-`{subscriptions: [{id, principal, event, input, url, secret, previousSecret?, previousSecretUntil?,
-createdAt, refreshBefore, cursor: null}]}`; the secret is stored as given because it signs the
-deliveries. An invalid file stops `sf serve` (`events_state_invalid`).
-
-**`sf events`** (through the socket): `list` prints `ID`, `PRINCIPAL`, `EVENT`, `INPUT`, `HOST`
-(of the URL only), `CREATED` and `REFRESH_BEFORE`, never the secret; `remove <id>` removes one and
-its pending deliveries; `test <id>` sends one event with `state: "test"` (workspace and ticket from
-the filter, else `test`/`SF-TEST`) once, without retry or job log, and prints `delivered` and
-`status` (a 410 removes the subscription).
-
-In ChatGPT the user creates an event-triggered task on the event `software_factory.job` of the
-Software Factory connector, with the instruction to call `check` for the ticket in the payload; the
-exact UI wording is not documented here (see the ChatGPT task UI). One conversation per ticket
-(SF-019): when a job is `pushed` or `aborted`, every subscription whose `ticket` filter is that
-job's ticket receives that last event (delivered, or given up after the retries) and is then
-removed, logged on the job as `subscription_removed` (`sf watch`: `subscription <id> removed:
-the job ended`); a `failed` start keeps it for the next start. `sf events list` shows, per
-subscription, the live job its ticket filter matches (`LIVE_JOB`).
+`SF_STATE_DIR` themselves; `sf start`, `sf say`, `sf review`, `sf approve`, `sf abort` and `sf reset` use it to find the socket; `sf notify-test` reads the notification variables itself.
 
 ## Jobs
 
@@ -284,6 +120,10 @@ live state (`starting`, `working`, `awaiting_review`, `needs_human`, `ready_for_
 ADR-0004): `${SF_WORKTREE_ROOT:-<state dir>/worktrees}/<workspace>/<ticket>`, created from the
 workspace's checkout; the checkout itself (the user's IDE checkout) is never written by the
 factory beyond its Git refs (branches) and worktree registrations.
+
+The job operations below are the Execution's (`src/execution.ts`): the user starts a job (the
+dashboard's Start, `sf start`), the reviewers' verdicts take the fix and the clean paths, and the
+user goes on with `sf say`, approve, abort or reset. None of them is an MCP tool.
 
 - `start` reads `.software-factory/<ticket>.md` of the checkout (its `base` and `title`), fetches
   `origin <base>` when `origin` exists (60 s), refuses an existing branch (`branch_exists`) or a
@@ -319,11 +159,11 @@ factory beyond its Git refs (branches) and worktree registrations.
   CLI refuses the draft 2020-12 `$schema` that zod writes by default (SF-044). The fake Claude of
   the tests refuses such a schema the same way.
 - The review runs outside the execution lock. Its verdict is applied under the lock only while the
-  job is still `awaiting_review` at the same iteration; otherwise (an `sf say`, a `request_fix` or a
-  `mark_clean` came first) it is recorded and ignored. `fix` writes `## Fix N` from the items (the
+  job is still `awaiting_review` at the same iteration; otherwise (an `sf say` or an abort came
+  first) it is recorded and ignored. `fix` writes `## Fix N` from the items (the
   summary as a lead line, then one numbered item per entry: path, what is wrong, what is expected)
-  and runs the next iteration, the same path as `request_fix`. `clean` runs the same path as
-  `mark_clean` with `accepted_sensitive`; an undeclared sensitive path it does not accept turns it
+  and runs the next iteration (the fix path, below). `clean` runs the clean path (below) with
+  `accepted_sensitive`; an undeclared sensitive path it does not accept turns it
   into a fix item instead. A review that fails (an error, a turn that is not a success, no or an
   invalid structured output, `fix` without items) puts the job in `needs_human` with
   `review_failed`; nothing is retried by itself. `sf abort` and `sf reset` cancel a running review, whose
@@ -346,7 +186,7 @@ factory beyond its Git refs (branches) and worktree registrations.
     `[redacted:<NAME>]`, except the variables named public in `src/redact.ts`: the shell's and
     the desktop session's (`HOME`, `PATH`, `USER`, `LANG`, `LC_*`, `XDG_*`, `npm_package_*`,
     `npm_lifecycle_*` and the like; not `npm_config_*`) and the factory's own settings that hold
-    no secret, listed one by one (not `SF_NTFY_TOKEN`, `SF_NTFY_URL` or `SF_AUTH_*`). A short
+    no secret, listed one by one (not `SF_NTFY_TOKEN` or `SF_NTFY_URL`). A short
     value of another variable (`1`, `on`) shows as `[redacted:<NAME>]` wherever it stands alone,
     except in the fields the protocol sets (`type`, `subtype`, `role`, the ids, `status`);
   - keys by their form become `[redacted]`: `sk-…`, `ghp_…`, `github_pat_…`, `AKIA…`, `xox?-…`,
@@ -420,7 +260,7 @@ factory beyond its Git refs (branches) and worktree registrations.
   `cached_input_tokens`, `output_tokens`) and the `error` events; stderr is kept, bounded, for the
   failure message.
 - The gate runs outside the lock, like the review, and its verdict applies only while the job is
-  still `awaiting_review` at the same iteration. `clean` runs the `mark_clean` path with the union
+  still `awaiting_review` at the same iteration. `clean` runs the clean path with the union
   of both reviewers' `accepted_sensitive`; an undeclared sensitive path the gate does not accept is
   a fix item. `fix` writes `## Fix N` (lead line `Review by Codex: <summary>`) and runs the next
   iteration, which Claude reviews again, and the gate again after a clean verdict. The job counts
@@ -437,21 +277,21 @@ factory beyond its Git refs (branches) and worktree registrations.
   ended_at}`, or `{reviewer, error, model?, tokens, started_at, ended_at}` when it failed (`model`
   only with `SF_CODEX_MODEL`). Its event lines are the review's, with `reviewer: "codex"`: `review
   by codex: clean`, `review by codex: fix (2 items)`, `review by codex failed: <error>`.
-- The job counts its Fix sections in `fixes` (the review's and `request_fix`'s). Once it reaches
+- The job counts its Fix sections in `fixes` (the reviewers'). Once it reaches
   `SF_MAX_ITERATIONS`, the next Fix is refused: `needs_human` with `iteration_limit`. An `sf say`
   turn publishes an iteration but writes no Fix section, so it does not count.
-- `request_fix` appends `## Fix N` to the Task file of the checkout, copies it into the worktree
+- The fix path appends `## Fix N` to the Task file of the checkout, copies it into the worktree
   and runs `/implement .software-factory/<ticket>.md Fix N` in the same session (`resume`). From
   `ready_for_human_review` it first reopens a worktree from the branch (`git worktree add <path>
   <branch>`): the next iteration's Patch is the whole change against the target, and the next
   Clean commits the whole change again as one commit.
-- `mark_clean` runs the MR preparation (section below) and ends in `ready_for_human_review` with
+- The clean path runs the MR preparation (section below) and ends in `ready_for_human_review` with
   the branch in the checkout. It takes `sensitive`, the undeclared sensitive paths of the reviewed
-  iteration the Context owner accepts; any left out refuse it with `sensitive_unacknowledged`.
-- Every prompt the factory sends (the `/implement` line of `start` and `request_fix`, or the user's
+  iteration the reviewers accept; any left out refuse it with `sensitive_unacknowledged`.
+- Every prompt the factory sends (the `/implement` line of a start and of the fix path, or the user's
   message of `sf say`) is followed by a blank line and `FACTORY_PROMPT_RULES` (`src/prompts.ts`):
   the factory's rules and the Report template, with the ticket and iteration filled in.
-- `check` returns the last published Report and Patch in every state except `working` and
+- `check` (only the end-to-end tests call it, through `SF_TEST_HOOKS=on`) returns the last published Report and Patch in every state except `working` and
   `starting`, and `files`: the sensitive paths (with `declared`) and the deleted paths of that
   iteration. `meta.json` records `cost_usd` (this iteration's cost) and `cost_usd_total` (the
   SDK's cumulative total for the session). `check` also returns `review` for the last iteration:
@@ -459,7 +299,7 @@ factory beyond its Git refs (branches) and worktree registrations.
   review is due; `failed` with the error as `summary`). After a clean Claude verdict with the gate
   on, `gate` is the gate's status in the same form (no `off`; absent with the gate off).
 - `sf say` queues a message as the next turn (in `working`, `awaiting_review`, `needs_human` or
-  `ready_for_human_review`, where it reopens the worktree like `request_fix`); outside `working`
+  `ready_for_human_review`, where it reopens the worktree like the fix path); outside `working`
   the job goes back to `working` and publishes a new iteration at the end.
 - A failed turn, a session that does not report permission mode `auto`
   (`permission_mode_mismatch`), an unavailable sandbox (`sandbox_unavailable`, with the SDK's
@@ -468,7 +308,7 @@ factory beyond its Git refs (branches) and worktree registrations.
   `needs_human`.
   When `sf serve` starts, jobs found `working` become `needs_human` (`serve_restarted`) and keep
   their session for `sf say`; jobs found `preparing_mr` become `needs_human` (`mr_serve_restarted`)
-  for another `mark_clean`; a job found `awaiting_review` whose last iteration has no `review.json`
+  (`sf say` goes on: its iteration is reviewed again); a job found `awaiting_review` whose last iteration has no `review.json`
   gets its review, and one whose last iteration has a clean `review.json` and no `gate.json` gets
   its gate (with the gate off by now, the Claude verdict runs Clean). Nothing is retried
   automatically.
@@ -547,8 +387,8 @@ Implementer; listing them is a second net for files created by tools it runs.
 
 ## MR preparation
 
-MR preparation runs when the Context owner calls `mark_clean` (from `awaiting_review`, or as the
-retry from `needs_human` after a failed preparation, `mr_attempts > 0`); never while a turn runs.
+MR preparation runs on the deciding clean verdict (the clean path, from `awaiting_review`, or as
+the retry from `needs_human` after a failed preparation, `mr_attempts > 0`); never while a turn runs.
 It ends in `ready_for_human_review` with the branch, holding exactly one commit, in the user's
 checkout, and the worktree removed. `sf approve` then pushes that commit and nothing else.
 The Implementer only writes the MR text. The factory commits and rebases itself, outside the
@@ -613,7 +453,8 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    | `mr_failed`, `mr_serve_restarted` | the factory failed, or `sf serve` restarted, during preparation |
 
    A failed MR text turn keeps its own code (for example `turn_failed` or `sandbox_unavailable`).
-   Fix with `sf say` or by hand in the worktree and call `mark_clean` again.
+   Fix with `sf say` (its iteration is reviewed again, and a clean verdict prepares again) or by
+   hand in the worktree followed by an `sf say`.
 6. Ready: the MR text is copied to `mr.md`, `base_commit` and `target_commit` become the target,
    `prepared_commit` the branch tip, the worktree is removed (`git worktree remove --force`,
    `git worktree prune`; `worktree` becomes null) and the job is `ready_for_human_review`,
@@ -638,7 +479,7 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
 
 On `ready_for_human_review`, `needs_human`, `pushed` and `failed` (iterations are silent unless
 `SF_NOTIFY_ITERATIONS=on`, which adds `awaiting_review` with `Priority: default`, `Tags: eyes` and
-the body "Report and Patch of iteration N are ready for the Context owner") the
+the body "Report and Patch of iteration N are ready for the reviewers") the
 factory sends a desktop notification (`notify-send --app-name="Software Factory" "<ticket>:
 <state>" <body>`, 5 s, when `notify-send` is on `PATH`) and, with `SF_NTFY_URL` set, one ntfy POST
 (10 s; headers `Title`, `Priority` high for `needs_human` and `failed`, `Tags`). The body has at most
@@ -647,7 +488,7 @@ the job; it is appended to `events.jsonl` as `{type: "notify_failed", channel, m
 by `sf watch`. `sf notify-test` sends one test notification on both channels and prints what each
 did.
 
-ntfy is a push notification service: install the ntfy app on the phone and subscribe to a topic
+ntfy is a push notification service: install the ntfy app on the phone and add a topic
 name of your choice, then set `SF_NTFY_URL` to that topic's URL (for example
 `https://ntfy.sh/<topic>`). On the free public server the topic name is the only secret, so make it
 long and unguessable.
@@ -656,11 +497,9 @@ State layout under `${SF_STATE_DIR}`:
 
 ```
 sf.sock                                  # 0600, while sf serve runs; one JSON request/response per connection
-subscriptions.json                       # 0600, MCP event subscriptions with their signing secrets (section MCP Events)
-events-queue.json                        # 0600, pending event deliveries, resumed at the next sf serve start
 dashboard-token                          # 0600, the dashboard token of the last sf serve start
 jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, state, iteration, fixes, gate_fixes, gate_tokens, session_id, created_at, updated_at, error
-jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "principal" | "event_delivered" | "event_failed" | "subscription_removed" | "review" | "review_failed" | "review_message" | "gate_event" | ...}; what sf watch reads
+jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "review" | "review_failed" | "review_message" | "gate_event" | ...}; what sf watch reads
 jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-schema.json,gate-output.json}
 worktrees/<workspace>/<ticket>/          # the job's worktree (SF_WORKTREE_ROOT), from start to Clean, abort or reset
 jobs/<workspace>/<ticket>/mr.md              # the MR text, once the branch is ready or after a conflict iteration
@@ -668,7 +507,7 @@ jobs/<workspace>/<ticket>.<timestamp>/   # an archived earlier job
 ```
 
 `iteration` in `job.json` counts published iterations; `updated_at` is the time of the last state
-change (`since` in `check`).
+change (`since` in `check` and `SINCE` in `sf status`).
 
 ## Dashboard
 
@@ -708,29 +547,29 @@ state directory (`<state dir>/requests/<workspace>/<ticket>.md`) and become the 
 the ticket's conversation. An existing Task file is never replaced from the page
 (`409 ticket_exists`). **Tickets** lists the Task files of every usable workspace whose ticket
 has no live job, each with a line saying what it waits for (the conversation; the user's start;
-a new start after a finished job), a `waiting for the conversation` badge for a skeleton, its last
-job's state, its `Reviewer` line by the rules of the Reviewer block, and *Open the conversation*:
+a new start after a finished job), a `waiting for the plan` badge for a skeleton, its last
+job's state, a **Start** button once the Task file is no longer the skeleton (SF-040), and *Open
+the conversation*:
 a link (`target=_blank`, opened only by the user's click, and the same URL in a box to copy) to
 `https://chatgpt.com/?q=` plus the message of `ticketConversation` URL-encoded. The message names
 the connector, `guide`, the ticket and the workspace, carries the user's words, and tells the
 Context owner to investigate (`read_file`, `search`), discuss, write the Task file over the
-skeleton with `write_task`, subscribe with the ticket's filter (the `sf ticket` instruction), and
-call `start` itself only when the user says start. A message too long for a link (over 7500
+skeleton with `write_task` with a `## Review brief`, and then tell the user it is ready: it only
+plans and never starts, reviews or approves a job. A message too long for a link (over 7500
 characters of URL) is offered in a box to copy instead. Whether ChatGPT sends a prefilled message
-by itself is up to ChatGPT, so the page says to press Enter if it is not. There is no Start
-button: the job starts in the conversation (or with `sf start` in the terminal). Archive, Restore
-and Delete… are described under SF-027. The workspaces and
-the tickets come with the stream (`workspaces` and `tickets` events) on connect, after every
-change made from a page, on every state change and on every change of the subscriptions, so two
-open pages agree and the Reviewer line of a ticket turns to `subscribed` when ChatGPT subscribes.
-A change made with `sf workspace add|remove` or `write_task` shows at the next refresh of the
-stream (a state or subscription change, an action from a page, or a reload). Only the server's
+by itself is up to ChatGPT, so the page says to press Enter if it is not. The user reads the Task
+file and presses Start (`sf start` in the terminal does the same): one request, the outcome in
+the line under the list, and the job appears under Jobs. Archive, Restore and Delete… are
+described under SF-027. The workspaces and the tickets come with the stream (`workspaces` and
+`tickets` events) on connect, after every change made from a page and on every state change, so
+two open pages agree. A change made with `sf workspace add|remove` or `write_task` shows at the
+next refresh of the stream (a state change, an action from a page, or a reload). Only the server's
 ChatGPT URL becomes a link: a conversation URL without that prefix is rendered without one.
 
 Version 2 shows, live: every job with its state; for the selected job (the most recently updated
 one, or `#<workspace>/<ticket>` in the URL) a job card with the ticket, the state and the
 Approve… and Abort… buttons in its head, the branch, base, iteration, estimated cost ("est. $",
-not a charge) and update time as facts, the error, the Reviewer line and the message box; and
+not a charge) and update time as facts, the error and the message box; and
 under it one card with four tabs (SF-026): Iterations (each iteration's Report and Patch, and under
 its meta line the Claude review: the verdict, the summary, the numbered items and the accepted
 sensitive paths, or why it failed, and under it the gate's verdict the same way with its tokens;
@@ -739,8 +578,7 @@ request (the MR text once there is one, else a note), State history, and Event s
 Implementer's session and the reviewers live as `sf watch` prints them, following new lines; scrolling up switches follow
 off). The selected tab is kept when another job is selected. The layout is one spacing and type
 scale on cards: the Setup card, a 300 px sidebar with the jobs (ticket, workspace and branch,
-state badge, a `no reviewer` or `broad` badge for live jobs only) and the collapsed
-Subscriptions table, and the job on the right; below 900 px everything stacks. It also takes the user's three commands for the selected job, with the same meaning
+state badge), and the job on the right; below 900 px everything stacks. It also takes the user's three commands for the selected job, with the same meaning
 as in the terminal: approve (`sf approve`, the push of the branch prepared at Clean, with an
 explicit "as it is" choice for a tip edited by hand: `sf approve --as-is`), abort (`sf abort`,
 with an explicit discard choice that is unchecked every time a confirmation opens: `sf abort
@@ -754,7 +592,7 @@ a control from the state it shows (approve in `ready_for_human_review` and in `n
 after a failed push; abort in every non-terminal state; say in `working`, `awaiting_review`,
 `needs_human` and `ready_for_human_review`) and says why one is off, but the factory decides: a
 refusal such as
-`invalid_state` or `turn_running` from a concurrent `sf` command or Context-owner action is
+`invalid_state` or `turn_running` from a concurrent `sf` command or reviewer verdict is
 shown as it comes. Nothing is retried or replayed: a reload, a reconnect or a network error never
 repeats an action. An answer that does not settle the outcome (no answer, a body cut after the
 headers even with status 200, a 2xx without a result, `internal_error` or any 5xx without a
@@ -766,7 +604,7 @@ a preparation is known to run). A failed read says so and shows a Refresh state 
 page says to check the state and the event stream, in a line of its own that a definite answer
 does not replace, until the next action for the job starts; it sends nothing by itself. A read
 without an answer in 10 s counts as failed, and a confirmation that the hold makes unavailable
-closes. Approve and abort
+closes. Start, approve and abort
 stay the user's: the Context owner has no tool for them.
 
 Approve answers when the push ends. The outcome is shown as the factory reports it: pushed with
@@ -780,25 +618,6 @@ kept per job when the selection changes. A confirmation and a request are bound 
 were opened for: changing the selection closes the confirmation and never retargets a request,
 and an answer that arrives for another job changes nothing on the shown one.
 
-**Reviewer.** Under the job's header fields the page says who receives the job's MCP Events,
-from the subscriptions of `sf events list` and with the rules of `sf ticket`: `Reviewer:
-subscribed` with the id, host and filter of the subscription filtered on the job's ticket (and on
-its workspace or none); `Reviewer: broad` (a warning) when only a subscription without a ticket
-filter receives it, naming the id and `sf events remove <id>`; `Reviewer: none` (red), "Nobody will
-review this job", and, while the job is not pushed, aborted or failed, a collapsed "Set up the
-reviewer in ChatGPT" block with the two messages of `sf ticket` ("Call guide." and the
-instruction that creates the ticket's task and subscription) in boxes with a Copy button (the
-clipboard, or the text selected for Ctrl+C). When the ticket is subscribed and a broad subscription also matches, a
-warning says ChatGPT would review it twice and names the `sf events remove` command. Send test
-event is on only for `subscribed`: one request to the ticket's own subscription, "Sending…", then
-whether it was delivered and the status, or the refusal; it is never retried, and an answer that
-arrives after the selection changed is kept for its own job. The job list shows a `no reviewer`
-(red) or `broad` badge on the card; a subscribed job has none. A Subscriptions section under the
-job list shows each subscription's id, filter, host, refresh time and the live (not pushed,
-aborted or failed) job its ticket filter matches, or "No subscriptions.". A subscribe, refresh,
-unsubscribe, `sf events remove`, a 410 and the removal at the end of a job push the list, the subscriptions and the selected job
-again over the stream; a subscription that only expires shows until the next refresh.
-
 The page is plain HTML, CSS and JavaScript from `static/`, with no external resources, under
 `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self';
 img-src 'self'` and `Cache-Control: no-store`; every value is rendered as text.
@@ -810,15 +629,14 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 
 | Path | Answer |
 |---|---|
-| `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, updated_at, created_at, error, reviewer (`subscribed`, `broad` or `none`) |
-| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate}], mr, history: [{ts, from, to, error?}], reviewer, reviewerSetup: {guide, instruction}}`; `reviewer` is `{status: "subscribed" \| "broad", id, host, input, broad: [<ids of the subscriptions without a ticket filter that match>]}` or `{status: "none"}` |
-| `api/subscriptions` | `{subscriptions: [{id, principal, input, host, createdAt, refreshBefore, job: "<ws>/<ticket>" \| null}]}`, the active subscriptions without URL or secret; `job` is the non-terminal job the ticket filter matches |
+| `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, updated_at, created_at, error |
+| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate}], mr, history: [{ts, from, to, error?}]}` |
 | `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem}]}`: the registry, the checkout's path, its non-terminal jobs, and why the checkout cannot be used now or `null` |
-| `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, reviewer, conversation: {message, url}}], archived: [{workspace, ticket, title}]}`: the Task files without a live job; `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `reviewer` as in the job detail; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
+| `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, conversation: {message, url}}], archived: [{workspace, ticket, title}]}`: the Task files without a live job; `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/patch` | the Patch, `text/x-diff` |
 | `api/jobs/<ws>/<ticket>/mr` | the MR text, `text/markdown`; 404 until there is one |
-| `api/stream?job=<ws>/<ticket>&from=<line>` | server-sent events: `jobs` (on connect, on every state change and on every change of the subscriptions), `subscriptions` (as `api/subscriptions`, at the same times), `workspaces` and `tickets` (as the two endpoints, at the same times and after every setup action from a page), `job` (the job's detail, on connect, when it changes state and when the subscriptions change), `event` (`{line, ts, iteration, type, text}` for every visible line of `events.jsonl` from the 0-based `from`, as `sf watch` formats it); a comment every 15 s; at most 8 streams, then 503 |
+| `api/stream?job=<ws>/<ticket>&from=<line>` | server-sent events: `jobs` (on connect and on every state change), `workspaces` and `tickets` (as the two endpoints, at the same times and after every setup action from a page), `job` (the job's detail, on connect and when it changes state), `event` (`{line, ts, iteration, type, text}` for every visible line of `events.jsonl` from the 0-based `from`, as `sf watch` formats it); a comment every 15 s; at most 8 streams, then 503 |
 
 | Method and path | JSON body | Calls |
 |---|---|---|
@@ -826,16 +644,13 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `POST api/jobs/<ws>/<ticket>/abort` | `{"discard": false}`; `discard` optional, default false | `Execution.abort(ws, ticket, discard)` |
 | `POST api/jobs/<ws>/<ticket>/say` | `{"message": "<text>"}` | `Execution.say(ws, ticket, message)`; the text goes as it is (nothing trimmed or split) |
 | `POST api/jobs/<ws>/<ticket>/review` | `{}` | `Execution.retryReview(ws, ticket)` (`sf review`): the failed review of the last iteration runs again; result `{state, iteration}`; `409 invalid_state` unless the job is `needs_human` with `review_failed`, `409 review_off` with `SF_REVIEW=off` |
-| `POST api/jobs/<ws>/<ticket>/test-event` | `{}` | `sf events test` for the job's `subscribed` subscription: one test event (state `"test"`), result `{subscription, delivered, status}`; without one `404 no_subscription` and nothing is sent |
-| `POST api/jobs/<ws>/<ticket>/nudge` | `{}` | `Events.nudge(job)`: the job's `awaiting_review` event again to every subscription that receives it, queued like a state change; result `{queued, pending}` (subscription ids: sent now, already on their way); `409 invalid_state` in any other state, `404 no_subscription` when nobody receives the job |
 | `POST api/workspaces` | `{"name": string, "path": string}` | `Setup.addWorkspace`: the rules of `sf workspace add`; result the workspace row |
 | `POST api/workspaces/<name>/remove` | `{}` | `Setup.removeWorkspace`; `409 workspace_busy` while the workspace has a live job; result `{removed}` |
 | `POST api/tickets` | `{"workspace", "ticket", "title", "request"}` | `Setup.createTicket`: the ticket skeleton through the Task file writer, the request kept for the conversation; result `{workspace, ticket, path, base}` |
+| `POST api/tickets/<ws>/<ticket>/start` | `{}` | `Execution.start(ws, ticket)` (`sf start`, SF-040): the job of the ticket's Task file; result `{branch, state, check_after_minutes, worktree}`; refusals as `sf start` (`job_exists`, `job_limit`, `branch_exists`, ...) |
 
 The actions go to the same `Execution` as the socket commands, under its lock and guards; there
-is no second state machine and no other mutation endpoint. `test-event` goes to the same Events
-hub as `sf events test`, and `nudge` to the same queue as a state change, with the same checks as
-the actions below; neither changes a job. The setup
+is no second state machine and no other mutation endpoint. The setup
 actions go to `src/setup.ts`, which writes the same registry file as `sf workspace add|remove`
 and the same Task files as `write_task`, under the Execution's lock, so a registry change and a
 start never interleave. An action request must carry the
@@ -861,8 +676,7 @@ under `409` for `invalid_state`, `turn_running`, `rebase_in_progress`, `job_exis
 `job_limit`, `checkout_dirty`, `branch_exists`, `branch_changed`, `branch_missing`,
 `worktree_exists`, `worktree_missing`, `sensitive_unacknowledged`, `ticket_exists`,
 `workspace_exists` and `workspace_busy`,
-`404` for `job_not_found`, `workspace_not_found`, `task_not_found`, `no_subscription` and
-`subscription_not_found`, `400` for `invalid_content`, `invalid_ticket`, `invalid_name` and
+`404` for `job_not_found`, `workspace_not_found` and `task_not_found`, `400` for `invalid_content`, `invalid_ticket`, `invalid_name` and
 `workspace_invalid`, and `500` for any other code (a Git failure before the preparation, for
 example). Any other failure is `500`
 with `internal_error` and a fixed message; the cause is logged, never the body or the token.
@@ -925,26 +739,13 @@ end), in a browser:
    unknown", the draft stays and Send, Approve… and Abort… stay off with a reason; the read fails
    and Refresh state appears; back online, click it: the state is current, the controls return,
    and nothing was re-sent.
-10. Reviewer: on a job without a subscription the block reads `Reviewer: none` in red, the card
-   in the list has a red `no reviewer` badge, Send test event is off and the two boxes hold
-   "Call guide." and the instruction; Copy puts each on the clipboard (paste it somewhere to
-   check). Send them in a new ChatGPT conversation: once the subscription is created the block
-   turns to `Reviewer: subscribed` with its id, the badge goes and the Subscriptions section shows
-   the row with the job, without a reload. Send test event: "Sending…", then "delivered, status
-   200" (and ChatGPT answers in that conversation); switch jobs while it is out and the answer
-   stays with its job. Subscribe a conversation without a ticket filter: the warning names it and
-   `sf events remove <id>`; `sf events remove` it and the warning goes. Nudge the reviewer is on
-   only for a job in `awaiting_review` with a subscription: "Sent the awaiting_review event of
-   iteration <n> again to <id>", `sf watch` shows the delivery and the reviewer answers with
-   `request_fix` or `mark_clean` in that conversation; once the job moves on the button goes off
-   and the line goes. Retry review (a fake review scripted to fail): the job in `needs_human` with
+10. Retry review (a fake review scripted to fail): the job in `needs_human` with
    `review_failed` shows the button next to Abort…; click it: "The review of iteration <n> runs
    again", the badge turns `awaiting_review` and the button goes.
 11. Layout: narrower than 900 px the job list stacks above the detail and the buttons wrap; in the
    OS dark scheme the status colours and the dialog stay readable; Tab reaches Approve…, Abort…,
-   the dialog's buttons, the textarea and Send; Escape closes the dialog. The Reviewer block,
-   the Copy boxes and the Subscriptions table stay readable in both schemes and wrap or scroll
-   inside their panel, never the page.
+   the dialog's buttons, the textarea and Send; Escape closes the dialog. The Copy boxes stay readable in both
+   schemes and wrap or scroll inside their panel, never the page.
 12. Tabs: Iterations opens by default; Merge request says there is no text until Clean prepared
    the branch, then shows it; State history and Event stream hold their content; the chosen tab
    stays when another job is selected. Approve… and Abort… sit in the head of the job card, next
@@ -958,13 +759,13 @@ end), in a browser:
    page opens on Setup with the Add form; add a throwaway repository by its path (a wrong path
    shows the refusal in place); New ticket with a key, a title and two lines of request writes
    `.software-factory/<key>.md` as a skeleton (`## Status: waiting for the Context owner`, no
-   request text), and the ticket appears under Tickets with `Reviewer: none`, a `waiting for the
-   conversation` badge and the line saying to open the conversation; there is no Start button.
+   request text), and the ticket appears under Tickets with a `waiting for the plan` badge and the
+   line saying to open the conversation; there is no Start button yet.
    *Open the conversation* opens a new tab on chatgpt.com with your words in the first message
    (press Enter if it stays there); the same URL is in the box and Copy puts it on the
-   clipboard. Once the conversation created its task, the line turns to `Reviewer: subscribed`
-   without a reload; once ChatGPT wrote the Task file the badge goes and the line says to say
-   start in the conversation; after "start" the job appears under Jobs. With a workspace and a job
+   clipboard. Once ChatGPT wrote the Task file the badge goes, the line says to read it and Start,
+   and the Start button appears; press it: the outcome line names the branch and the job appears
+   under Jobs. With a workspace and a job
    the page opens with Setup collapsed and the summary line; Remove on a workspace with a live
    job is off with the reason. Narrow and dark: the two columns stack, the forms and the ticket
    cards stay readable and wrap inside their panel.

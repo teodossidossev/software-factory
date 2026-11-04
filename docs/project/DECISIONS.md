@@ -71,8 +71,8 @@ Replaces the Roles and Transport entries of 2026-11-01 and the MCP Events transp
 
 - **Roles.** ChatGPT plans and writes the Task file through a read-only connection, nothing
   else. Claude implements and reviews every iteration in a fresh read-only session. An OpenAI
-  model through the API gives the deciding verdict before Clean (at most three rounds with
-  fixes, a token ceiling per ticket). The user starts, approves, aborts and reviews the branch.
+  model through the API gives the deciding verdict before Clean (at most five rounds with
+  fixes, `SF_GATE_MAX_ROUNDS`, and a token ceiling per ticket). The user starts, approves, aborts and reviews the branch.
 - **Git.** At Clean the factory commits and rebases outside the sandbox; the Implementer only
   writes the merge request text.
 - **Removed.** MCP Events, OAuth and Auth0, the execution tools over MCP, the Reviewer block,

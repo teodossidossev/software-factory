@@ -46,7 +46,7 @@ diff check existed only to verify Git work a model had done.
   structured output (clean, or Fix items with path, problem, expected). Fix items become the next
   `## Fix N` and the next iteration starts at once.
 - **Gate.** On a clean Claude verdict, an OpenAI model through the Responses API, with read and
-  search over the worktree as function tools, gives the verdict that decides. At most three gate
+  search over the worktree as function tools, gives the verdict that decides. At most five gate
   rounds with fixes, then `needs_human` with both verdicts; a per-ticket token ceiling. Every
   change that reaches the branch passes it, including a fix asked during human review. Without
   an OpenAI key the gate is off and the Claude verdict decides.

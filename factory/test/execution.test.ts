@@ -435,7 +435,8 @@ test('sensitive paths (SF-024): declared by may_touch or not, deleted files, mar
   // Clean without the undeclared paths is refused and starts nothing; with them it prepares the branch.
   const unacknowledged = await refused(served, 'mark_clean', { workspace: 'app', ticket: 'S-1' });
   assert.equal(unacknowledged.code, 'sensitive_unacknowledged');
-  assert.match(unacknowledged.message, /^Undeclared sensitive path\(s\) in the reviewed iteration: package-lock\.json, \.github\/workflows\/ci\.yml\. Name each in sensitive/);
+  assert.match(unacknowledged.message, /^Undeclared sensitive path\(s\) in the reviewed iteration: package-lock\.json, \.github\/workflows\/ci\.yml\. Each must be named in the accepted sensitive paths with the reason it is needed; otherwise it is a fix item\.$/);
+  assert.doesNotMatch(unacknowledged.message, /request_fix|mark_clean/);
   assert.equal((await refused(served, 'mark_clean', { workspace: 'app', ticket: 'S-1', sensitive: ['package-lock.json'] })).code, 'sensitive_unacknowledged');
   assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'S-1' })).state, 'awaiting_review');
   assert.equal((await fakeLog(env)).length, 1);

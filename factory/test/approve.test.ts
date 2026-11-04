@@ -670,7 +670,7 @@ test('SF_NOTIFY_ITERATIONS=on notifies awaiting_review on ntfy with the iteratio
     if (expected === 1) {
       assert.deepEqual(
         [received[0]!.headers.title, received[0]!.headers.priority, received[0]!.headers.tags, received[0]!.body],
-        ['N-2: awaiting_review', 'default', 'eyes', 'Report and Patch of iteration 1 are ready for the Context owner\nsensitive: none\ndeleted: README.md'],
+        ['N-2: awaiting_review', 'default', 'eyes', 'Report and Patch of iteration 1 are ready for the reviewers\nsensitive: none\ndeleted: README.md'],
       );
     }
     await stop(served);

@@ -280,8 +280,6 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 .badge.s-ready_for_human_review { background: var(--s-ready); }
 .badge.s-pushed { background: var(--s-pushed); }
 .badge.s-failed { background: var(--s-failed); }
-.badge.r-none { background: var(--s-failed); }
-.badge.r-broad { background: var(--s-review); }
 .badge.t-draft { background: var(--s-review); }
 .archived > .card-head .section-title { margin: 0; }
 .archived[open] > .card-head { margin-bottom: 8px; }
@@ -311,11 +309,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 .ticket-name .badge { margin-left: 8px; }
 .ws-path, .ticket-line { font-family: var(--mono); font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
 .ws-problem { color: var(--del); font-size: 13px; overflow-wrap: anywhere; }
-.ticket-reviewer { font-size: 13px; overflow-wrap: anywhere; }
 .ticket-next { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
-.r-subscribed { color: var(--s-ready); font-weight: 600; }
-.r-broad { color: var(--warn); font-weight: 600; }
-.r-none { color: var(--del); font-weight: 600; }
 .copy-box { display: flex; gap: 8px; align-items: flex-start; }
 .copy-box input, .copy-box textarea {
   flex: 1;
@@ -348,14 +342,8 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 .job-list .job-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; font-size: 12px; color: var(--muted); }
 .job-list .job-line .iter { margin-left: auto; }
 
-.sub-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.sub-list li { padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel); min-width: 0; }
-.sub-list .sub-scope { font-weight: 600; font-size: 13.5px; overflow-wrap: anywhere; }
-.sub-list .sub-scope .badge { margin-left: 6px; }
-.sub-list .sub-meta { font-size: 12px; color: var(--muted); margin-top: 2px; overflow-wrap: anywhere; }
-.sub-list .sub-id { font: 11.5px/1.4 var(--mono); color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* The job card: title and actions first, then the facts, then the reviewer and the message. */
+/* The job card: title and actions first, then the facts, then the message. */
 .job-card { display: flex; flex-direction: column; gap: 12px; }
 .job-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
 .job-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -371,13 +359,6 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 }
 .facts dt { font-size: 12px; color: var(--muted); }
 .facts dd { margin: 0; font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
-.reviewer { padding-top: 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
-.reviewer-line { font-size: 13px; overflow-wrap: anywhere; }
-.reviewer-setup { padding: 10px 12px; border-radius: var(--radius-sm); background: var(--panel-2); }
-.reviewer-setup > .card-head .section-title { margin: 0; }
-.reviewer-setup[open] > .card-head { margin-bottom: 8px; }
-.reviewer-setup > :not(summary) { margin-bottom: 8px; }
-.reviewer-setup > :last-child { margin-bottom: 0; }
 .say { padding-top: 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
 .say textarea { font: 13px/1.45 var(--mono); }
 

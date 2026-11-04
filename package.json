@@ -14,8 +14,6 @@
     "dashboard": "factory/bin/sf dashboard --open",
     "status": "factory/bin/sf status",
     "info": "factory/bin/sf info",
-    "ticket": "factory/bin/sf ticket",
-    "events": "factory/bin/sf events list",
     "sf": "factory/bin/sf",
     "help": "factory/bin/sf --help"
   },

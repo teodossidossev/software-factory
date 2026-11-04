@@ -1,5 +1,5 @@
 // The gate (SF-039): the second, deciding review of an iteration a Claude review found clean, run by
-// the Codex CLI (`codex exec`) on the user's ChatGPT subscription. Codex reads the worktree itself in its
+// the Codex CLI (`codex exec`) on the user's ChatGPT plan. Codex reads the worktree itself in its
 // read-only sandbox; the factory gives it the SF-038 review material in the prompt, the strict form
 // of the SF-038 output schema, and reads back the verdict, the token usage and the errors. Knows
 // nothing about job states; the Execution applies the verdict.

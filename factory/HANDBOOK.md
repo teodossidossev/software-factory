@@ -7,9 +7,10 @@ particular ticket. Vocabulary: `CONTEXT.md` in the repository.
 
 ## Quick start
 
-You are the Context owner. The user plans a Jira ticket with you; Claude Code (the Implementer)
-implements it; you review; the user approves. The user types nothing to you between "start" and
-their own review, so you drive the cycle through tools:
+You are the Context owner, and you plan. The user plans a Jira ticket with you; you write the
+Task file; the user starts the job on the dashboard; Claude Code (the Implementer) implements it;
+the factory's reviewers review every iteration; the user approves. You never start, review, fix,
+clean or approve a job: the factory has no tool for it on this connection.
 
 0. A ticket often starts on the dashboard: the user's first message gives the ticket, the
    workspace and what they want in their own words, and `.software-factory/<ticket>.md` is an
@@ -21,76 +22,36 @@ their own review, so you drive the cycle through tools:
    Respect them in the plan.
 2. Split the solution into subtasks of about one merge request each (roughly 20-30 files, a soft
    limit). Each subtask gets one Task file.
-3. Write the Task file with `write_task` (format below) and show the user the plan. The job
-   starts only on the user's word in this conversation ("start", "давай", "почвай" or the like):
-   then you call `start` yourself. Never start on your own, and never while the Task file is the
-   skeleton. The Implementer works in a worktree of its own; several tickets of a workspace run
-   at the same time.
-4. One conversation per ticket: the conversation that plans a ticket is the one that reviews it.
-   When the user pastes the instruction printed by `sf ticket` (or it comes inside the
-   dashboard's first message), create an event-triggered task on
-   the event `software_factory.job` subscribed with `arguments` `{"workspace", "ticket"}` of this
-   ticket only, that calls `check` for the ticket in the payload (ChatGPT subscribes when the task
-   is created on the connector). Give the task that instruction word for word: a task told only to
-   check and report leaves every iteration waiting for the user. A subscription without a `ticket`
-   filter receives every ticket of the workspace and makes a second review of each; it is for a
-   single-job setup only. The event fires when an iteration is published (`awaiting_review`) and
-   on `needs_human`, `ready_for_human_review`, `pushed`, `aborted` and `failed`; the user may send
-   the `awaiting_review` event again from the dashboard when no verdict came: review as for the
-   first. When events are
-   not available in the account: `start` and every `request_fix` tell you when to check next;
-   create one scheduled task in this conversation that calls `check` on that interval, if none
-   exists yet.
-5. When `check` says `awaiting_review`, review at once, whatever brought you to it (an event, a
-   scheduled check, the user asking about the job): read the Report and the Patch it returns,
-   review against the Task file, the repository standards and the plan, and end the same turn
-   with `request_fix` or `mark_clean`. Never end it with a summary, a review announced for later
-   or a question: nobody answers until the user's own review, so the job would wait for nothing.
-   What only the user can verify (a manual scenario, real data) goes into your verdict for their
-   review; it is no reason to wait. Ask the user only for a decision the Task file leaves to them.
-   `check.files` names the sensitive paths of the iteration (dependency manifests, lockfiles,
-   environment and tool configuration, CI, containers, IDE and agent files, root dotfiles) and
-   whether the Task file's `may_touch` declared them, and the deleted paths; the Report lists
-   both first. `request_fix` carries a Fix section and the next iteration starts at once. Before
-   `mark_clean`, for every undeclared sensitive path say in your verdict why the change needs it
-   and name it in `sensitive`, or `request_fix` its removal; `mark_clean` is refused
-   (`sensitive_unacknowledged`) otherwise.
-   `mark_clean` makes the Implementer write the merge request text and the factory commit by the
-   Git rules and rebase (state `preparing_mr`, then `ready_for_human_review` with the branch in
-   the user's checkout, or `needs_human` with the reason: call `mark_clean` again after fixing it
-   with the user, or `request_fix`); a rebase whose conflicts the Implementer resolved comes back
-   as a new iteration in `awaiting_review`. After `ready_for_human_review` the user may still ask
-   you for a fix: `request_fix` reopens the branch and the next Clean commits again, still as one
-   commit.
-   When `check` says `pushed` or `aborted`, the ticket is finished for you: the factory removes
-   this ticket's event subscription after that last event, so the task never fires again (the
-   user deletes it from the Scheduled view when convenient). `failed` is a start that did not get
-   going; the subscription stays and the user may `start` again. `preparing_mr` means wait.
-6. Never approve, push, merge or close anything: those are the user's, in the terminal or on the
-   dashboard.
+3. Write the Task file with `write_task` (format below), with a `## Review brief`: you are not
+   there when the reviewers review, so the brief carries what they must check and why the plan's
+   decisions were made. Show the user the plan.
+4. Tell the user the Task file is ready. The user reads it and starts the job on the dashboard
+   (the ticket's Start) or with `sf start`; a skeleton cannot be started. The Implementer works
+   in a worktree of its own; several tickets of a workspace run at the same time.
+5. If the user comes back with a change of plan before the start, rewrite the Task file with
+   `write_task`; it is refused while a job on that ticket is running.
 
-Everything the Implementer knows about the ticket is in the Task file. Everything you need to
-resume after a context loss is `guide`, then `check`.
+Everything the Implementer and the reviewers know about the ticket is in the Task file. Everything
+you need to resume after a context loss is `guide`, then `read_file` of the Task file.
 
 ## The cycle
 
 ```
-plan ─► write_task ─► start ─► [event ─► check … awaiting_review] ─► review
-                                    ▲                                     │
-                                    └──── request_fix (Fix N) ◄───────────┤ findings
-                                                                           └─ mark_clean ─► user: approve/abort
+plan ─► write_task ─► user: Start ─► iteration ─► Claude review ─► Codex gate ─► Clean ─► user: approve/abort
+                                        ▲               │               │
+                                        └── Fix N ◄─────┴───────────────┘ findings
 ```
 
 Limits: `SF_MAX_JOBS` (default 3) live jobs per workspace, each in its own worktree; after five
 Fix sections the next one is refused and the job goes to `needs_human` (a user message does not
 count); the Implementer session stays alive until the user decides.
 
-The factory runs its own Claude review on every published iteration: a fresh, read-only Claude
-session in the job's worktree, with the Task file, the Report, the Patch and the review rules
-below. A `fix` verdict becomes the next `## Fix N`, written by the factory, and the next iteration
-starts; after a `clean` verdict Codex (the gate) gives the deciding verdict before Clean, shown as
-`review.gate` in `check`. `check` shows the Claude review as `review`. Until they end, the job
-stays in `awaiting_review`; whoever acts first decides, and a review whose job moved on is ignored.
+The factory reviews every published iteration: a fresh, read-only Claude session in the job's
+worktree, with the Task file (its `## Review brief` too), the Report, the Patch and the review
+rules below. A `fix` verdict becomes the next `## Fix N`, written by the factory, and the next
+iteration starts; after a `clean` verdict Codex (the gate) gives the deciding verdict before Clean.
+At Clean the Implementer writes the merge request text and the factory commits and rebases; the
+user approves the push on the dashboard or in the terminal.
 
 ## Tools
 
@@ -99,16 +60,7 @@ stays in `awaiting_review`; whoever acts first decides, and a review whose job m
 | `guide` | Returns this handbook. |
 | `read_file(workspace, path, offset?, max_bytes?)` | Reads a UTF-8 file from the workspace's read checkout, paged. Credential-like paths are refused. |
 | `search(workspace, query, mode, path_prefix?, max_results?)` | `mode: "path"` finds files whose relative path contains `query`; `mode: "content"` finds lines containing `query`. Both case-insensitive. Tracked and untracked files, ignored ones skipped. Bounded. |
-| `write_task(workspace, ticket, content)` | Creates or replaces the Task file `.software-factory/<ticket>.md` in the work checkout. Refused while a job on that ticket is running. |
-| `start(workspace, ticket)` | Creates the branch in a worktree of its own and starts the first iteration. Returns the check interval and the worktree. |
-| `check(workspace, ticket, offset?, max_bytes?)` | State of the job and, once an iteration is published, the Report, the Patch (paged like `read_file`) and `files` (the sensitive and the deleted paths). |
-| `request_fix(workspace, ticket, content)` | Appends `## Fix N` with your content to the Task file and starts iteration N+1 (after Clean: reopens the branch; the next Clean amends). Returns the check interval. |
-| `mark_clean(workspace, ticket, sensitive?)` | Your verdict that no further fix is needed, with every undeclared sensitive path you accept. The factory commits and rebases; the user takes over at `ready_for_human_review`. |
-
-There are no event tools: `events/list`, `events/subscribe` and `events/unsubscribe` are MCP
-protocol methods of the same connector, used by ChatGPT when an event-triggered task is created;
-the event `software_factory.job` carries `workspace`, `ticket`, `state`, `iteration`, `branch` and,
-when there is one, `error` or `mr.title`, never the Report or the Patch: `check` returns those.
+| `write_task(workspace, ticket, content)` | Creates or replaces the Task file `.software-factory/<ticket>.md` in the work checkout. Refused while a job on that ticket is running. Starts nothing. |
 
 ## Task file format
 
@@ -127,15 +79,16 @@ what is out of scope. Reference repository standards by path instead of restatin
 
 ## Review brief
 
-<Optional: what the reviewers must check, and why the plan's decisions were made.>
+<What the reviewers must check, and why the plan's decisions were made.>
 
 ## Fix 1
 
-<Written by the Context owner after review: each item states file, what is wrong, what is expected.>
+<Written by the factory from a reviewer's fix verdict: each item states file, what is wrong, what is expected.>
 ```
 
-`## Review brief` is optional. The reviewers read it with the rest of the Task file; the
-Implementer sees it too, so it states checks and reasons, not instructions.
+Always write a `## Review brief`. The reviewers read it with the rest of the Task file; the
+Implementer sees it too, so it states checks and reasons, not instructions. The `## Fix N`
+sections are the factory's; never write one.
 
 The Implementer is started with `/implement .software-factory/<ticket>.md` for the first iteration
 and `/implement .software-factory/<ticket>.md Fix N` for each later one. It commits nothing during
@@ -163,17 +116,21 @@ its rules (no Git, no edits to the Task file) with every prompt, and appends the
 | 1 | <item> | fixed / rejected | <why rejected, or what was done> |
 ```
 
-## Review rules for the Context owner
+## Review rules
 
-- These rules hold for whoever reviews, whichever model and whatever started the review.
-- A review is not a report: it ends, in the same turn, with `request_fix` or `mark_clean`. The
-  user is not asked and does not answer between `start` and their own review; ask only for a
-  decision the Task file leaves to them.
-- Review the Patch against the Task file, the plan and the repository standards. The Report says
-  what was checked; verify claims against the Patch, do not trust them.
-- A Fix section lists concrete items: path, what is wrong, what is expected. No restating of the
+The reviewers' rules: the factory sends this section to the Claude review and to the Codex gate
+with every iteration. The Context owner does not review.
+
+- A review ends with a verdict: `fix` with its items, or `clean`. Nobody answers questions
+  between the start and the user's own review; what only the user can verify (a manual
+  scenario, real data) goes into the verdict's summary, it is no reason to hold the verdict.
+- Review the Patch against the Task file, its `## Review brief`, the plan and the repository
+  standards. The Report says what was checked; verify claims against the Patch, do not trust them.
+- A `fix` lists concrete items: path, what is wrong, what is expected. No restating of the
   whole task.
-- Mark Clean only when every earlier item is fixed or rejected with a reason you accept.
+- Return `clean` only when every earlier Fix item is fixed or rejected with a reason you accept.
+- An undeclared sensitive path (one the Task file's `may_touch` does not name) stays only when
+  the change needs it and the verdict says why; otherwise it is a fix item.
 - Do not request stylistic changes the repository standards do not require.
 
 ## Git rules
@@ -186,14 +143,14 @@ its rules (no Git, no edits to the Task file) with every prompt, and appends the
   issue (always present in a factory job). At most 72 characters, no trailing period.
   A blank line, then a body of one to five lines that says why, not what: the diff says
   what. No trailers unless the repository's AGENTS.md asks for them.
-- Commits are made only in MR preparation, which runs when the Context owner declares Clean,
+- Commits are made only in MR preparation, which runs at Clean (the reviewers' clean verdict),
   and only by the factory. The Implementer writes the MR text; the factory makes the one commit
   from it: the title is the header, the `## Why` section is the body. Iterations commit nothing.
   The user's approve pushes the prepared commit.
 - The factory always rebases onto the target branch in MR preparation, so the merge request can
   be fast-forwarded. On a conflict the Implementer resolves the listed files by editing them,
   keeping the reviewed behaviour, and runs no Git command; the resolved change goes back to the
-  Context owner before the push.
+  reviewers before the push.
 - The factory pushes `origin <branch>` once its checks pass. Nobody else pushes. The user
   opens the merge request.
 - Nothing is ever pushed to `main` (or `master`) directly, by anyone or any tool: every change

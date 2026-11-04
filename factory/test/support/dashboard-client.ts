@@ -1,13 +1,11 @@
 // A raw HTTP client of the Dashboard for tests: one request with full control of method, headers
 // and body (fetchRaw), an action POST as the page sends it (act), a server-sent event stream
-// (openStream), a fake DashboardActions that records every call (fakeActions), a fake
-// DashboardReviewers with settable subscriptions (fakeReviewers) and a fake DashboardSetup with
-// settable workspaces and tickets that records every change (fakeSetup).
+// (openStream), a fake DashboardActions that records every call (fakeActions) and a fake
+// DashboardSetup with settable workspaces and tickets that records every change (fakeSetup).
 import assert from 'node:assert/strict';
 import { get, request, type IncomingMessage } from 'node:http';
-import type { DashboardActions, DashboardReviewers, DashboardSetup } from '../../src/dashboard.js';
+import type { DashboardActions, DashboardSetup } from '../../src/dashboard.js';
 import { FactoryError } from '../../src/errors.js';
-import type { EventInput, NudgeOutcome, SubscriptionSummary, TestOutcome } from '../../src/events.js';
 import type { ArchivedRow, TicketInput, TicketRow, WorkspaceRow } from '../../src/setup.js';
 
 export const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'";
@@ -85,6 +83,10 @@ export interface Stream {
   events: SseEvent[];
   // The next event of that name after the ones already taken.
   next(event: string, match?: (data: any) => boolean): Promise<any>;
+  // An event of that name received at any time, taken or not, without taking it: for an event whose
+  // order against the others is not fixed (a state line of events.jsonl, read by the follower,
+  // may come before or after the jobs refresh of the same transition).
+  seen(event: string, match?: (data: any) => boolean): Promise<any>;
   close(): void;
 }
 
@@ -134,6 +136,22 @@ export function openStream(url: URL): Promise<Stream> {
             });
           }
         },
+        async seen(event, match = () => true) {
+          const deadline = Date.now() + 10_000;
+          for (;;) {
+            const found = events.find((candidate) => candidate.event === event && match(candidate.data));
+            if (found !== undefined) {
+              return found.data;
+            }
+            if (Date.now() > deadline) {
+              assert.fail(`no ${event} event; got ${JSON.stringify(events.map((item) => item.event))}`);
+            }
+            await new Promise<void>((done) => {
+              wake = done;
+              setTimeout(done, 100);
+            });
+          }
+        },
         close() {
           req.destroy();
         },
@@ -143,7 +161,7 @@ export function openStream(url: URL): Promise<Stream> {
   });
 }
 
-export type Call = ['approve', string, string] | ['abort', string, string, boolean] | ['say', string, string, string] | ['retryReview', string, string] | ['archiveFinished', string, string];
+export type Call = ['start', string, string] | ['approve', string, string] | ['abort', string, string, boolean] | ['say', string, string, string] | ['retryReview', string, string] | ['archiveFinished', string, string];
 
 export interface FakeActions extends DashboardActions {
   calls: Call[];
@@ -157,6 +175,7 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
   const fake: FakeActions = {
     calls: [],
     answer,
+    start: (workspace, ticket) => reply(['start', workspace, ticket]),
     approve: (workspace, ticket) => reply(['approve', workspace, ticket]),
     abort: (workspace, ticket, discard) => reply(['abort', workspace, ticket, discard]),
     say: (workspace, ticket, message) => reply(['say', workspace, ticket, message]),
@@ -171,67 +190,6 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
     }
     return value;
   }
-  return fake;
-}
-
-export interface FakeReviewers extends DashboardReviewers {
-  rows: SubscriptionSummary[];
-  // The ids test was called with, in order.
-  tests: string[];
-  // What the next test answers: a TestOutcome, an error to throw, or a function.
-  answer: unknown;
-  // The jobs nudge was called with ("<workspace>/<ticket>@<state>"), and what it answers: a
-  // NudgeOutcome, an error to throw, or a function; by default every row is queued.
-  nudges: string[];
-  nudgeAnswer: unknown;
-  // Replaces the subscriptions and tells the listeners, as Events does after a change.
-  set(rows: SubscriptionSummary[]): void;
-  listeners(): number;
-}
-
-export function subscription(id: string, input: EventInput, host = 'chatgpt.example'): SubscriptionSummary {
-  return { id, principal: 'user-1', event: 'software_factory.job', input, host, createdAt: '2026-11-01T09:00:00.000Z', refreshBefore: '2026-11-08T09:00:00.000Z' };
-}
-
-export function fakeReviewers(rows: SubscriptionSummary[] = []): FakeReviewers {
-  const listeners = new Set<() => void>();
-  const fake: FakeReviewers = {
-    rows,
-    tests: [],
-    answer: undefined,
-    nudges: [],
-    nudgeAnswer: undefined,
-    subscriptions: () => fake.rows,
-    async nudge(job) {
-      fake.nudges.push(`${job.workspace}/${job.ticket}@${job.state}`);
-      const value = typeof fake.nudgeAnswer === 'function' ? await (fake.nudgeAnswer as () => unknown)() : fake.nudgeAnswer;
-      if (value instanceof Error) {
-        throw value;
-      }
-      return (value ?? { queued: fake.rows.map((row) => row.id), pending: [] }) as NudgeOutcome;
-    },
-    async test(id) {
-      fake.tests.push(id);
-      const value = typeof fake.answer === 'function' ? await (fake.answer as () => unknown)() : fake.answer;
-      if (value instanceof Error) {
-        throw value;
-      }
-      return (value ?? { subscription: id, delivered: true, status: 200 }) as TestOutcome;
-    },
-    onChange(listener) {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
-    set(next) {
-      fake.rows = next;
-      for (const listener of listeners) {
-        listener();
-      }
-    },
-    listeners: () => listeners.size,
-  };
   return fake;
 }
 

@@ -77,7 +77,7 @@ test('sf up: serve, the tunnel child with prefixed output, the dashboard opened 
   const env = await newEnv('up-ok', { PATH: `${launcher.bin}:${TOOLS}`, SF_TUNNEL_SCRIPT: tunnel.script });
   const up = await spawnUp(env, []);
   try {
-    assert.match(up.out(), /auth: off\n/);
+    assert.doesNotMatch(up.out(), /auth: /);
     await up.until(() => up.err().includes('tunnel | sf-tunnel: ok: fake tunnel up') && up.err().includes('tunnel | fake warning'), 'the tunnel lines');
     assert.match(await readFile(tunnel.log, 'utf8'), /^args run$/m);
     const deadline = Date.now() + 5_000;

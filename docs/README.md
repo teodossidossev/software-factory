@@ -47,5 +47,5 @@ Design documents: [SF-007](design/SF-007-local-operator.md), [SF-009](design/SF-
 - **Integrations:** Jira and Git host integrations are not implemented. The job records the ticket
   key, workspace and branch for them.
 - **SF-036 in progress:** the reviewers, factory-owned Git and the per-job process of
-  [SF-036](design/SF-036-reviewers.md) land ticket by ticket (SF-037 to SF-042); until SF-040 the
-  ChatGPT transport of SF-016 is still in the code.
+  [SF-036](design/SF-036-reviewers.md) land ticket by ticket (SF-037 to SF-042). SF-040 removed
+  the ChatGPT transport of SF-016; SF-041 and SF-042 are still to land.

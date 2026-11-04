@@ -3,7 +3,9 @@
 Verified with tunnel-client **v0.0.18** (`0.0.18+274a5588`) on Linux x86_64 and Node v24.17.0.
 The first real ChatGPT probe passed on 2026-10-25 (`docs/reports/SF-002-report.md`, task
 `docs/tasks/SF-002-connect-chatgpt.md`). SF-011 moved the endpoint from the old bridge to the
-factory; the tunnel, the profile and the connector did not change.
+factory; the tunnel, the profile and the connector did not change. Since SF-040 ChatGPT only plans
+through it: it reads the repository, discusses the ticket with the user and writes the Task file;
+the user starts the job on the dashboard, and the factory's own reviewers review it.
 
 No secrets here. The runtime key lives only in a 0600 file outside the repository.
 
@@ -21,9 +23,10 @@ There is no inbound port, port forwarding or public listener.
 
 Credentials sit on two layers:
 - **Transport.** Only tunnel-client uses the runtime key (a `file:` reference in the profile).
-- **MCP.** No OAuth: ChatGPT is set to *No authentication*. The factory listens on loopback only,
-  checks Host and Origin, and is reachable only through the private tunnel (ADR-0002). Since
-  SF-015 the factory can also require OAuth tokens from Auth0; see "OAuth with Auth0" below.
+- **MCP.** No authentication: ChatGPT is set to *No authentication*. The factory listens on
+  loopback only, checks Host and Origin, and is reachable only through the private tunnel
+  (ADR-0002). Its tools only plan (`guide`, `read_file`, `search`, `write_task`); nothing reached
+  through them starts, reviews or approves a job.
 
 ## Files and locations
 
@@ -128,194 +131,13 @@ The connector is created once and stays the same.
 3. Connection: **Tunnel**. Choose the tunnel or enter the `tunnel_id`.
 4. Authentication: **No authentication**. The runtime key is **not** entered here.
 5. Read the warning, choose **I understand and want to continue**, then **Create as a plugin**.
-6. In the plugin details check that the tools are `guide`, `read_file`, `search`, `write_task`,
-   `start`, `check`, `request_fix` and `mark_clean`. Then press **Install**.
+6. In the plugin details check that the tools are `guide`, `read_file`, `search` and
+   `write_task`. Then press **Install**.
 
 After a change to the tools (or after switching the endpoint from the old bridge to the factory):
 restart `sf serve`, open the existing **Software Factory** plugin at https://chatgpt.com/plugins
 (do not create a new one), press **Refresh** and check the tool list. Then open a **new** Work
 chat; an old conversation does not pick up new tools by itself.
-
-## OAuth with Auth0
-
-Optional; without it everything above stays as it is. ChatGPT runs the OAuth 2.1 code flow with
-PKCE against Auth0 and sends the access token to the factory, which only verifies it
-(`factory/README.md`, section OAuth). ChatGPT is a Client ID Metadata Document client, so there
-is no dynamic client registration and no client secret. Below, `<resource>` is the `https` URL
-ChatGPT uses as the server's identifier, for example `https://sf.example.com/mcp`; it must be the
-same string in Auth0, in the factory and in the metadata.
-
-**In Auth0** (Dashboard of the tenant `https://<tenant>.<region>.auth0.com/`):
-
-1. Applications → APIs → **Create API**: Identifier = `<resource>`, signing algorithm **RS256**.
-2. Settings → General → API Authorization Settings: **Default Audience** = `<resource>`, so
-   Auth0 issues JWT access tokens for this API.
-3. Settings → Advanced: turn on **Client ID Metadata Document Registration**, **Resource
-   Parameter Compatibility Profile** and **Include Issuer in Authorization Responses**.
-4. Applications: import the ChatGPT CIMD client **from its URL** (the client metadata document
-   URL ChatGPT names) and grant it access to the API of step 1 (its *APIs* tab, or the API's
-   *Machine to Machine / Application Access* tab).
-5. A user that may sign in (Database, Google or another connection enabled for that client).
-6. Applications → APIs → the API of step 1 (here **Software Factory**, identifier `<resource>`,
-   for this factory `https://software-factory.local/mcp`) → Settings: turn on
-   **Allow Offline Access** and save. Without it Auth0 issues no refresh token for this API, and
-   ChatGPT has to connect again whenever the access token expires (section "Refresh tokens"
-   below).
-
-**In ChatGPT:** the connector (https://chatgpt.com/plugins) with **Authentication: OAuth** and
-**OIDC enabled unticked**. Edit the existing **Software Factory** plugin or create it as in "The
-connector in ChatGPT" with OAuth instead of No authentication. ChatGPT reads the authorization
-server from the factory's metadata and signs in through Auth0 on first use.
-
-With *OIDC enabled* ticked, ChatGPT wants an ID token with the `openid` scopes before it contacts
-the factory, and Auth0 does not grant those scopes to this kind of client (the exchange logs
-`scope: null`): the sign-in and the code exchange succeed in Auth0's logs, the factory and the tunnel
-see nothing, and ChatGPT shows "We couldn't connect this account" (its callback answers
-`OAUTH_OWNER_PROFILE_ID_MISSING`, visible in the browser's network panel). Seen on 2026-11-03,
-when the first day's token expired; the plugin had connected the day before with the same settings.
-
-**The factory** (terminal 1, instead of the plain `bin/sf serve`):
-
-```bash
-cd factory
-export SF_AUTH_ISSUER=https://<tenant>.<region>.auth0.com/   # exactly the token's iss, trailing slash included
-export SF_AUTH_AUDIENCE=<resource>                         # the API identifier of step 1
-# export SF_AUTH_RESOURCE=<resource>                       # only when it differs from the audience
-bin/sf serve                                               # prints: auth: https://<tenant>... audience <resource>
-curl -s http://127.0.0.1:8787/.well-known/oauth-protected-resource   # the metadata document
-```
-
-To check a token by hand, without the server: copy an access token issued for the API (for example
-from the Auth0 API's *Test* tab) and pipe it in, so it never appears on the command line:
-`xclip -o -selection clipboard | bin/sf auth-test`. It prints `valid: sub ...` or
-`rejected: <reason>`.
-
-**Check the tunnel** (terminal 2, from the repository root):
-
-```bash
-tunnel-client doctor --profile software-factory --explain   # oauth_metadata must pass
-```
-
-Then, in a new Work chat, call a tool: ChatGPT asks to sign in once, and `sf watch` shows
-`start by <sub>` (and the same for `request_fix`, `mark_clean` and `write_task`) with the Auth0 user
-id. A `401` in ChatGPT with `software-factory bearer token rejected: <reason>` in the `sf serve`
-output names what to fix: `wrong_audience` (the Default Audience or the resource differs from
-`SF_AUTH_AUDIENCE`), `wrong_issuer` (`SF_AUTH_ISSUER` without its trailing slash), `expired`
-(the clock or an old token), `unknown_kid` (another tenant), `jwks_unavailable` (Auth0 not
-reachable from this machine).
-
-### Refresh tokens: keeping the connection past the access token's lifetime
-
-Auth0 issues this API's access tokens for 86400 s (24 h). The connection survives that only when
-ChatGPT holds a refresh token: ChatGPT requests it with the `offline_access` scope, Auth0 issues it
-when the API allows offline access (Auth0 step 6), and ChatGPT stores and uses it. The factory stays
-a resource server: it never sees a refresh token and has no token endpoint. To prompt ChatGPT to ask for
-`offline_access`, the factory lists it in `scopes_supported` of its metadata and adds
-`scope="offline_access"` to its `401` challenge. That is an agreed ChatGPT compatibility measure
-(SF-033), not a standards requirement (the MCP authorization draft recommends leaving it out) and not
-an API permission: a token without `offline_access` is still accepted.
-
-Turning on Allow Offline Access does not change an existing authorization and does not prove that a
-refresh token was issued. After the change and the deployment of the factory (both the user's, by
-the usual process), check and then connect again:
-
-1. **The hints are served.** Auth0's discovery document lists the scope, both metadata paths list
-   it, and a protected request without a token is challenged with it. Auth0 may list the scope
-   tenant-wide, so its discovery document does not show whether step 6 is on; check the API's
-   setting itself.
-
-   ```bash
-   curl -s https://<tenant>.<region>.auth0.com/.well-known/openid-configuration | grep -o '"offline_access"'
-   curl -s http://127.0.0.1:8787/.well-known/oauth-protected-resource       # "offline_access" in scopes_supported
-   curl -s http://127.0.0.1:8787/.well-known/oauth-protected-resource/mcp   # the same
-   curl -si http://127.0.0.1:8787/mcp -H 'content-type: application/json' \
-     -H 'accept: application/json, text/event-stream' \
-     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"guide","arguments":{}}}' \
-     | grep -i '^www-authenticate'   # 401: Bearer error="invalid_token", ..., scope="offline_access", resource_metadata="..."
-   ```
-
-2. **A fresh connection.** Press **Refresh** on the plugin, then disconnect and connect again so that
-   ChatGPT runs a new authorization with consent. Leave **OIDC enabled** unticked (SF-032): that
-   checkbox is not the `openid` scope and has nothing to do with `offline_access`. Troubleshooting: if
-   ChatGPT keeps the scopes it read when the plugin was created and step 3 shows no
-   `offline_access`, creating the plugin again may be needed; this is not always required.
-3. **The initial evidence.** In Auth0 → Monitoring → Logs, for the ChatGPT client and `<resource>`,
-   the authorization and the code exchange of the new connection must show `offline_access` in the
-   scope. That is necessary, not proof that a later refresh succeeds. Note the time of the
-   connection.
-4. **The refresh itself.** Once 86400 s have passed since that connection, call a tool that needs
-   the token (for example `guide` in a Work chat). Auth0's logs must show a successful refresh-token
-   exchange for the same client, and the call must succeed without Reconnect or a new interactive
-   sign-in. ChatGPT may refresh before the expiry; what counts is a refresh correlated with continued
-   use after the original token would have expired. If ChatGPT was idle at the expiry, check at its
-   next authenticated call.
-
-Record only non-secret evidence: times, Auth0 log event IDs, client and resource identifiers,
-scopes, success or failure. Never copy an access token, refresh token, code or credential into a
-log, a report or a chat.
-
-If ChatGPT still never requests `offline_access` after the plugin refresh, a new connection and,
-where needed, a new plugin, report what was observed to the user. A longer access token lifetime in
-Auth0 (up to the 30 days the user named as a fallback) widens the window in which a leaked token is
-usable; it is the user's decision alone and not the fix for this.
-
-### Tunnel settings for OAuth
-
-ChatGPT discovers the factory's OAuth metadata through the tunnel's *harpoon* channel, which
-forwards plain HTTP requests to the loopback factory, and the tunnel client itself reads the
-authorization server's metadata at start. `scripts/sf-tunnel.sh run` therefore sets, when
-`~/.config/software-factory/auth.env` holds `SF_AUTH_ISSUER`:
-
-- `HARPOON_ALLOW_PLAINTEXT_HTTP=true`, so `http://127.0.0.1:8787` can be a harpoon target;
-- `MCP_OAUTH_TRUSTED_ORIGINS=<issuer origin>`, so the client may fetch the issuer's metadata.
-
-Without them the tunnel logs `destination origin is not trusted` and
-`dispatcher received unsupported channel "harpoon"`, and ChatGPT reports "Couldn't discover
-OAuth settings". Restart the tunnel after enabling OAuth in the factory: discovery runs at start.
-
-## MCP Events (event-triggered tasks)
-
-Since SF-016 the factory tells ChatGPT when a job needs the Context owner, instead of an hourly
-scheduled task (protocol, shapes and delivery rules: `factory/README.md`, section MCP Events).
-Preconditions:
-
-- **OAuth on** (section above). Subscriptions belong to the token's `sub`; with *No
-  authentication* the event methods answer `unauthenticated` and no event-triggered task can be
-  created. `SF_AUTH_OPEN_METHODS` must not list `events/*` (`sf serve` refuses it).
-- **Outbound HTTPS from this machine** to the callback URL ChatGPT gives (an OpenAI host). The
-  deliveries are ordinary outbound POSTs from `sf serve`, not through the tunnel; they follow no
-  redirects and go only to public addresses.
-- MCP Events must be available for the account (Work chats; workspace controls for plugins and
-  event-triggered tasks apply). Otherwise the scheduled task below stays the way.
-
-In ChatGPT:
-
-1. After restarting `sf serve` with this version, open the **Software Factory** plugin at
-   https://chatgpt.com/plugins and press **Refresh**: the plugin page lists the event
-   `software_factory.job` next to the tools.
-2. One conversation per ticket. On this machine run `bin/sf ticket <workspace> <ticket>`: it
-   warns about subscriptions that would also match the ticket (a filter without `ticket` makes a
-   second review), prints the two things to send in a new conversation of the workspace's project
-   ("Call guide." and the instruction that creates the event-triggered task subscribed with the
-   filter `{"workspace", "ticket"}`), waits for that subscription to appear and sends it a test
-   event. ChatGPT creates the subscription with `events/subscribe` when the task is created; the
-   factory verifies the callback with a signed challenge before accepting. The task runs in the
-   conversation where it was created, so plan, `write_task` and `start` the ticket there.
-3. By hand instead: `bin/sf events list` shows the subscriptions (id, principal, filter, callback
-   host, expiry); `bin/sf events test <id>` sends one event with `state: "test"` and prints
-   `status: 200` when ChatGPT accepted it. `bin/sf ticket ... --no-wait` only prints the
-   instruction.
-4. Or in the dashboard (`bin/sf dashboard --open`): the job's Reviewer block says whether the
-   ticket is subscribed, shows the same two messages to copy when nobody reviews it, warns about a
-   subscription without a ticket filter and sends the test event. While the job is in
-   `awaiting_review`, **Nudge the reviewer** sends that event again: the task runs once more in
-   its conversation and reviews; nothing needs to be typed in ChatGPT.
-
-While a job runs, `sf watch` shows each delivery as `event to <id> attempt <n> delivered: 200` (or
-`failed: <status>`; 5xx and timeouts are retried for about 1 h 13 min). A `410` from ChatGPT ends
-the subscription (the task was deleted); create the task again. `bin/sf events remove <id>` stops
-deliveries from this side. ChatGPT refreshes a subscription before its `refreshBefore` (7 days);
-the subscriptions and pending deliveries survive a restart of `sf serve`.
 
 ## Working in ChatGPT
 
@@ -324,27 +146,22 @@ ticket** write the ticket key, a title and what you want in your words; the page
 skeleton of the Task file and keeps your words for the conversation. Under **Tickets** press
 **Open the conversation**: a new tab opens ChatGPT with the whole first message in the composer
 (the connector, `guide`, your words, the instruction to investigate, discuss, write the Task
-file with `write_task`, create the event-triggered task subscribed to this ticket, and to start
-only on your word); press Enter if it is not sent by itself. Discuss with ChatGPT there; when the
-Task file is written and you agree, say "start" in that conversation and ChatGPT calls `start`.
-The manual path, step by step:
+file with `write_task` with a `## Review brief`, and then tell you it is ready); press Enter if it
+is not sent by itself. Discuss with ChatGPT there; when it says the Task file is ready, read it
+and press **Start** on the ticket's row in the dashboard (or run `bin/sf start <workspace>
+<ticket>`). The manual path, step by step:
 
 1. Open a Work chat, type `@` and choose **Software Factory**.
 2. The first call is `guide`. It returns the Handbook (`factory/HANDBOOK.md`): the cycle, the
    tools, the Task file format and the templates. The connector also sends its Quick start as
    server instructions.
-3. Plan the ticket, write the Task file with `write_task`, and call `start` when the user says so.
-4. With MCP Events (section above): one event-triggered task on `software_factory.job` per
-   ticket calls `check` for the ticket in each event's payload. It reads the Report and the Patch
-   when the job is `awaiting_review` and answers with `request_fix` or `mark_clean` in the same
-   run, without waiting for you (naming every undeclared sensitive path it accepts); when the job ends (`pushed` or `aborted`) the factory
-   removes the ticket's subscription after that last event, so the task never fires again; delete
-   it from the Scheduled view when convenient. A `failed` start keeps it for the next start. Without events (fallback): `start` and `request_fix` return `check_after_minutes`;
-   in the planning conversation, create one ChatGPT scheduled task that calls `check` for the ticket
-   on that interval, and delete it when `check` says `pushed`, `aborted` or `failed`.
+3. Plan the ticket and write the Task file with `write_task`, with a `## Review brief` for the
+   reviewers; ChatGPT then tells you it is ready.
+4. You start the job on the dashboard (or with `sf start`). From there the factory runs it: a
+   fresh Claude review and the Codex gate review each iteration and turn their findings into Fix
+   sections, and you approve or abort at the end. ChatGPT is not involved after planning.
 
-`write_task`, `start`, `request_fix` and `mark_clean` are write actions; ChatGPT may ask for
-confirmation.
+`write_task` is the only write action; ChatGPT may ask for confirmation.
 
 ## Diagnostics
 
@@ -358,23 +175,6 @@ confirmation.
 - **The tunnel is not visible in ChatGPT.** Check the associations to the workspace and the Use
   permission.
 - **403 from the factory.** A Host or Origin header that is not loopback; see `factory/README.md`.
-- **Old tools in ChatGPT.** Press **Refresh** on the plugin and open a new chat.
-- **ChatGPT cannot create the subscription** (for example "Webhook connectors could not be
-  validated before creation", without a reason). `serve.log` in the state directory has one line
-  per `events/list`, `events/subscribe` and `events/unsubscribe`: the filter, the callback host and
-  `ok` or `refused <reason> (<message>)`. No `events/subscribe` line means the call never reached
-  the factory: refresh the plugin and look at the tunnel.
-- **"We couldn't connect this account" at Connect or Reconnect**, with Success Login and Success
-  Exchange in Auth0's logs and nothing in `serve.log` or `tunnel.log`: the plugin has *OIDC
-  enabled* ticked (section OAuth with Auth0). Untick it, or create the plugin again without it.
-- **A daily Reconnect.** Auth0's access token lives 24 h and ChatGPT holds no refresh token. Check
-  Allow Offline Access on the API and work through "Refresh tokens" in the section OAuth with
-  Auth0; until a refresh is seen in Auth0's logs, connect again when a call answers 401.
-- **ChatGPT reads the Report and stops** ("next: an independent review", "next: request_fix")
-  until you tell it to go on. The event-triggered task's instruction was shortened to checking
-  and reporting. Open the task in ChatGPT's Scheduled view and replace its instruction with the
-  one `bin/sf ticket <workspace> <ticket> --no-wait` prints (also in the dashboard's Reviewer
-  block); for the iteration already waiting, press **Nudge the reviewer** on the job's page.
-- **No events arrive.** `bin/sf events list` (is there a subscription for this workspace?), then
-  `bin/sf events test <id>`: `blocked_address` or `connection_failed` means this machine cannot
-  reach the callback; `410` means ChatGPT dropped the task. `sf watch` shows each attempt.
+- **Old tools in ChatGPT.** Press **Refresh** on the plugin and open a new chat. After SF-040 the
+  list holds only `guide`, `read_file`, `search` and `write_task`, and the plugin's
+  Authentication must be *No authentication* (edit it, or create the plugin again).

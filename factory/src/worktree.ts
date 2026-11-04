@@ -1,5 +1,5 @@
 // The worktree of a job (SF-019): created from the workspace's checkout at start, recreated from
-// the branch after Clean when the Context owner asks for another fix, and removed at Clean, at
+// the branch after Clean when a reviewer asks for another fix, and removed at Clean, at
 // the end of the job and by reset. Every Git call runs through runGit; nothing here knows about
 // jobs or sessions.
 import { stat } from 'node:fs/promises';

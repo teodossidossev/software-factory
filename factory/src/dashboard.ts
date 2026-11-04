@@ -4,11 +4,10 @@
 // /d/<token>/; anything else is an empty 404.
 // Reads JobStore and events.jsonl; job state changes arrive through onStateChange, which
 // `sf serve` composes with the notifier. The actions validate the HTTP request and delegate once
-// to the Execution of `sf serve` (DashboardActions); nothing here changes a job by itself. Who
-// reviews a job comes from the MCP Events subscriptions (DashboardReviewers): every job carries its
-// reviewer, api/subscriptions lists them, test-event sends one test event and nudge (SF-035) sends
-// a job's awaiting_review event again; a change of the subscriptions refreshes every open page. The start screen (SF-025) adds the workspaces and the
-// tickets (DashboardSetup: the registry and the Task files) and the start of a job.
+// to the Execution of `sf serve` (DashboardActions); nothing here changes a job by itself. The
+// start screen (SF-025) adds the workspaces and the tickets (DashboardSetup: the registry and the
+// Task files), the ChatGPT conversation that plans a ticket, and the User's start of a ticket
+// whose Task file is written (SF-040).
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -17,10 +16,10 @@ import { join } from 'node:path';
 import { localhostHostValidation, localhostOriginValidation } from '@modelcontextprotocol/node';
 import * as z from 'zod/v4';
 import { writeFileAtomic } from './atomic.js';
+import { conversationUrl, MAX_CONVERSATION_URL, ticketConversation } from './conversation.js';
 import { FactoryError } from './errors.js';
-import { conversationUrl, coversTicketBroadly, type Events, MAX_CONVERSATION_URL, ownsTicket, type SubscriptionSummary, TICKET_GUIDE, ticketConversation, ticketInstruction } from './events.js';
 import type { Execution } from './execution.js';
-import { type Job, type JobState, type JobStore, TERMINAL_STATES } from './jobs.js';
+import type { Job, JobState, JobStore } from './jobs.js';
 import { WORKSPACE_NAME_PATTERN } from './registry.js';
 import type { Setup } from './setup.js';
 import { TICKET_PATTERN } from './task-file.js';
@@ -49,16 +48,12 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 };
 
 // The User's actions, bound by `sf serve` to its one Execution: the same methods, guards and
-// results as the socket commands of sf approve, sf abort, sf say and sf review. A job is started
-// in the ticket's conversation (the Context owner's start), or with sf start; not from the page (SF-028).
-// Archive of a job card is archiveFinished (terminal only), never the any-state reset.
-export type DashboardActions = Pick<Execution, 'approve' | 'abort' | 'say' | 'retryReview' | 'archiveFinished'>;
+// results as the socket commands of sf start, sf approve, sf abort, sf say and sf review. A job is
+// started from its ticket on the start screen once the Task file is written (SF-040), or with
+// sf start. Archive of a job card is archiveFinished (terminal only), never the any-state reset.
+export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | 'say' | 'retryReview' | 'archiveFinished'>;
 export type DashboardAction = 'approve' | 'abort' | 'say' | 'review' | 'archive';
 export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'review', 'archive'];
-
-// The MCP Events subscriptions, bound by `sf serve` to its Events hub: read, test one, nudge a
-// job's reviewer, and hear about changes (the returned function stops listening).
-export type DashboardReviewers = Pick<Events, 'subscriptions' | 'test' | 'nudge' | 'onChange'>;
 
 // The start screen's data and changes: the workspace registry and the Task files (src/setup.ts).
 export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'removeWorkspace' | 'tickets' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'archivedTickets'>;
@@ -88,9 +83,6 @@ const NO_SETUP: DashboardSetup = {
   },
 };
 
-// Every POST route under api/jobs/<ws>/<ticket>/: the five actions, the test event and the nudge.
-type ActionRoute = DashboardAction | 'test-event' | 'nudge';
-
 // The request body of each POST route, strict: unknown keys, null, arrays and wrong types are
 // refused; shape is what the refusal names.
 const BODIES = {
@@ -98,18 +90,16 @@ const BODIES = {
   abort: { shape: '{"discard"?: boolean}', schema: z.strictObject({ discard: z.boolean().optional() }) },
   say: { shape: '{"message": string}', schema: z.strictObject({ message: z.string() }) },
   review: { shape: '{}', schema: z.strictObject({}) },
-  'test-event': { shape: '{}', schema: z.strictObject({}) },
-  nudge: { shape: '{}', schema: z.strictObject({}) },
   archive: { shape: '{}', schema: z.strictObject({}) },
   'workspace-add': { shape: '{"name": string, "path": string}', schema: z.strictObject({ name: z.string(), path: z.string() }) },
   'workspace-remove': { shape: '{}', schema: z.strictObject({}) },
   'ticket-archive': { shape: '{}', schema: z.strictObject({}) },
   'ticket-restore': { shape: '{}', schema: z.strictObject({}) },
   'ticket-delete': { shape: '{}', schema: z.strictObject({}) },
+  'ticket-start': { shape: '{}', schema: z.strictObject({}) },
   'ticket-new': { shape: '{"workspace": string, "ticket": string, "title": string, "request": string}', schema: z.strictObject({ workspace: z.string(), ticket: z.string(), title: z.string(), request: z.string() }) },
 };
 type PostRoute = keyof typeof BODIES;
-const ACTION_ROUTES: ActionRoute[] = ['approve', 'abort', 'say', 'review', 'archive', 'test-event', 'nudge'];
 
 // The HTTP status of a FactoryError the methods can throw; any other code answers 500 and keeps
 // its code and message.
@@ -119,25 +109,7 @@ const ERROR_STATUS: Record<string, number> = {
   worktree_missing: 409, sensitive_unacknowledged: 409, ticket_exists: 409, workspace_exists: 409, workspace_busy: 409,
   job_not_found: 404, workspace_not_found: 404, task_not_found: 404,
   invalid_content: 400, invalid_ticket: 400, invalid_name: 400, workspace_invalid: 400,
-  no_subscription: 404, subscription_not_found: 404,
 };
-
-// Who reviews a job: its own subscription (filtered on its ticket), else one without a ticket
-// filter that still receives its events, else nobody. broad lists every subscription of the
-// second kind, so the page can warn that the job would be reviewed twice.
-export type Reviewer =
-  | { status: 'subscribed' | 'broad'; id: string; host: string; input: SubscriptionSummary['input']; broad: string[] }
-  | { status: 'none' };
-
-export function reviewerOf(subscriptions: SubscriptionSummary[], workspace: string, ticket: string): Reviewer {
-  const own = subscriptions.find((subscription) => ownsTicket(subscription.input, workspace, ticket));
-  const broad = subscriptions.filter((subscription) => coversTicketBroadly(subscription.input, workspace));
-  const chosen = own ?? broad[0];
-  if (chosen === undefined) {
-    return { status: 'none' };
-  }
-  return { status: own !== undefined ? 'subscribed' : 'broad', id: chosen.id, host: chosen.host, input: chosen.input, broad: broad.map((subscription) => subscription.id) };
-}
 
 export interface RunningDashboard {
   url: URL;
@@ -203,41 +175,27 @@ function jobSummary(job: Job, counts: { files: number; undeclared: number; delet
   };
 }
 
-async function jobsPayload(jobs: JobStore, reviewers: DashboardReviewers) {
-  const subscriptions = reviewers.subscriptions();
+async function jobsPayload(jobs: JobStore) {
   const list = [];
   for (const job of await jobs.list()) {
-    list.push({ ...jobSummary(job, await fileCounts(jobs, job)), reviewer: reviewerOf(subscriptions, job.workspace, job.ticket).status });
+    list.push(jobSummary(job, await fileCounts(jobs, job)));
   }
   return { jobs: list };
-}
-
-// The subscriptions without secrets, each with the live (non-terminal) job its ticket filter
-// matches, if any.
-async function subscriptionsPayload(jobs: JobStore, reviewers: DashboardReviewers) {
-  const live = (await jobs.list()).filter((job) => !TERMINAL_STATES.includes(job.state));
-  return {
-    subscriptions: reviewers.subscriptions().map(({ id, principal, input, host, createdAt, refreshBefore }) => {
-      const job = live.find((candidate) => ownsTicket(input, candidate.workspace, candidate.ticket));
-      return { id, principal, input, host, createdAt, refreshBefore, job: job === undefined ? null : `${job.workspace}/${job.ticket}` };
-    }),
-  };
 }
 
 async function workspacesPayload(setup: DashboardSetup) {
   return { workspaces: await setup.workspaces() };
 }
 
-// The tickets without a live job, each with its reviewer (the rules of the Reviewer block) and
-// the ChatGPT conversation that plans it: the message and the prefilled URL.
-async function ticketsPayload(setup: DashboardSetup, reviewers: DashboardReviewers) {
-  const subscriptions = reviewers.subscriptions();
+// The tickets without a live job, each with the ChatGPT conversation that plans it: the message
+// and the prefilled URL.
+async function ticketsPayload(setup: DashboardSetup) {
   return {
     tickets: (await setup.tickets()).map((row) => {
       const message = ticketConversation(row.workspace, row.ticket, row.request ?? undefined);
       const url = conversationUrl(message);
       // A very long message does not fit a link; the page offers it to copy instead.
-      return { ...row, reviewer: reviewerOf(subscriptions, row.workspace, row.ticket), conversation: { message, url: url.length <= MAX_CONVERSATION_URL ? url : null } };
+      return { ...row, conversation: { message, url: url.length <= MAX_CONVERSATION_URL ? url : null } };
     }),
     archived: await setup.archivedTickets(),
   };
@@ -268,7 +226,7 @@ async function stateHistory(jobs: JobStore, workspace: string, ticket: string) {
   return history;
 }
 
-async function jobDetail(jobs: JobStore, reviewers: DashboardReviewers, job: Job) {
+async function jobDetail(jobs: JobStore, job: Job) {
   const iterations = [];
   for (let number = 1; number <= job.iteration; number += 1) {
     try {
@@ -294,9 +252,6 @@ async function jobDetail(jobs: JobStore, reviewers: DashboardReviewers, job: Job
     iterations,
     mr: (await jobs.readMrText(job.workspace, job.ticket)) !== undefined,
     history: await stateHistory(jobs, job.workspace, job.ticket),
-    reviewer: reviewerOf(reviewers.subscriptions(), job.workspace, job.ticket),
-    // The two messages of `sf ticket`, worded in one place.
-    reviewerSetup: { guide: TICKET_GUIDE, instruction: ticketInstruction(job.workspace, job.ticket) },
   };
 }
 
@@ -316,9 +271,9 @@ function jobKey(workspace: string | undefined, ticket: string | undefined): [str
 // What a path is for the method rule: a job action (POST only), a setup action (POST only), a
 // path that lists on GET and acts on POST, or a read (GET only).
 type Target =
-  | { kind: 'action'; action: ActionRoute; workspace: string | undefined; ticket: string | undefined }
+  | { kind: 'action'; action: DashboardAction; workspace: string | undefined; ticket: string | undefined }
   | { kind: 'workspace-remove'; name: string | undefined }
-  | { kind: 'ticket-action'; action: 'archive' | 'restore' | 'delete'; workspace: string | undefined; ticket: string | undefined }
+  | { kind: 'ticket-action'; action: 'archive' | 'restore' | 'delete' | 'start'; workspace: string | undefined; ticket: string | undefined }
   | { kind: 'both'; route: 'workspace-add' | 'ticket-new' }
   | { kind: 'read' };
 
@@ -328,7 +283,7 @@ function targetOf(path: string[]): Target {
     return { kind: 'read' };
   }
   if (kind === 'jobs' && path.length === 5) {
-    const action = ACTION_ROUTES.find((known) => known === c);
+    const action = ACTIONS.find((known) => known === c);
     if (action !== undefined) {
       return { kind: 'action', action, workspace: a, ticket: b };
     }
@@ -342,7 +297,7 @@ function targetOf(path: string[]): Target {
   if (kind === 'tickets' && path.length === 2) {
     return { kind: 'both', route: 'ticket-new' };
   }
-  if (kind === 'tickets' && path.length === 5 && (c === 'archive' || c === 'restore' || c === 'delete')) {
+  if (kind === 'tickets' && path.length === 5 && (c === 'archive' || c === 'restore' || c === 'delete' || c === 'start')) {
     return { kind: 'ticket-action', action: c, workspace: a, ticket: b };
   }
   return { kind: 'read' };
@@ -408,7 +363,7 @@ interface Post {
 }
 
 export async function startDashboard(
-  port: number, stateDir: string, jobs: JobStore, actions: DashboardActions, reviewers: DashboardReviewers, setup: DashboardSetup = NO_SETUP,
+  port: number, stateDir: string, jobs: JobStore, actions: DashboardActions, setup: DashboardSetup = NO_SETUP,
 ): Promise<RunningDashboard> {
   const files = new Map<string, { body: Buffer; type: string }>();
   for (const [path, { file, type }] of Object.entries(STATIC_FILES)) {
@@ -446,7 +401,7 @@ export async function startDashboard(
   // The start screen's data, sent to every page on connect and after every change.
   async function sendSetup(targets: Iterable<Stream>): Promise<void> {
     const workspaces = await workspacesPayload(setup);
-    const tickets = await ticketsPayload(setup, reviewers);
+    const tickets = await ticketsPayload(setup);
     for (const stream of targets) {
       send(stream, 'workspaces', workspaces);
       send(stream, 'tickets', tickets);
@@ -487,15 +442,14 @@ export async function startDashboard(
     res.once('close', end);
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', connection: 'keep-alive' });
     res.flushHeaders();
-    send(stream, 'jobs', await jobsPayload(jobs, reviewers));
-    send(stream, 'subscriptions', await subscriptionsPayload(jobs, reviewers));
+    send(stream, 'jobs', await jobsPayload(jobs));
     await sendSetup([stream]);
     if (key === undefined) {
       return;
     }
     const job = await jobs.read(...key);
     if (job !== undefined) {
-      send(stream, 'job', await jobDetail(jobs, reviewers, job));
+      send(stream, 'job', await jobDetail(jobs, job));
     }
     const start = Number(from);
     try {
@@ -525,11 +479,7 @@ export async function startDashboard(
       return;
     }
     if (joined === 'api/jobs') {
-      body(res, 'application/json; charset=utf-8', JSON.stringify(await jobsPayload(jobs, reviewers)));
-      return;
-    }
-    if (joined === 'api/subscriptions') {
-      body(res, 'application/json; charset=utf-8', JSON.stringify(await subscriptionsPayload(jobs, reviewers)));
+      body(res, 'application/json; charset=utf-8', JSON.stringify(await jobsPayload(jobs)));
       return;
     }
     if (joined === 'api/workspaces') {
@@ -537,7 +487,7 @@ export async function startDashboard(
       return;
     }
     if (joined === 'api/tickets') {
-      body(res, 'application/json; charset=utf-8', JSON.stringify(await ticketsPayload(setup, reviewers)));
+      body(res, 'application/json; charset=utf-8', JSON.stringify(await ticketsPayload(setup)));
       return;
     }
     if (joined === 'api/stream') {
@@ -553,7 +503,7 @@ export async function startDashboard(
     }
     const [, , ...tail] = rest;
     if (tail.length === 0) {
-      body(res, 'application/json; charset=utf-8', JSON.stringify(await jobDetail(jobs, reviewers, job)));
+      body(res, 'application/json; charset=utf-8', JSON.stringify(await jobDetail(jobs, job)));
       return;
     }
     if (tail.length === 1 && tail[0] === 'mr') {
@@ -579,17 +529,8 @@ export async function startDashboard(
     empty(res, 404);
   }
 
-  // One test event to the job's own subscription; none is a refusal, never a broad one.
-  async function testEvent(workspace: string, ticket: string): Promise<unknown> {
-    const reviewer = reviewerOf(reviewers.subscriptions(), workspace, ticket);
-    if (reviewer.status !== 'subscribed') {
-      throw new FactoryError('no_subscription', `No subscription is filtered on ${ticket}; sf ticket ${workspace} ${ticket} sets one up.`);
-    }
-    return reviewers.test(reviewer.id);
-  }
-
-  // The job action as the one Execution (or Events) call it stands for.
-  function jobPost(action: ActionRoute, [workspace, ticket]: [string, string]): Post {
+  // The job action as the one Execution call it stands for.
+  function jobPost(action: DashboardAction, [workspace, ticket]: [string, string]): Post {
     const parse = <T>(schema: z.ZodType<T>, data: unknown): T | undefined => {
       const parsed = schema.safeParse(data);
       return parsed.success ? parsed.data : undefined;
@@ -625,20 +566,6 @@ export async function startDashboard(
       const run = (): Promise<unknown> => actions.archiveFinished(workspace, ticket);
       return { route: action, exists, call: (data) => (parse(BODIES.archive.schema, data) ? run : undefined), refreshJobs: true };
     }
-    if (action === 'test-event') {
-      return { route: action, exists, call: (data) => (parse(BODIES['test-event'].schema, data) ? () => testEvent(workspace, ticket) : undefined) };
-    }
-    if (action === 'nudge') {
-      // The job is read when the nudge runs; the hub refuses any state but awaiting_review.
-      const run = async (): Promise<unknown> => {
-        const job = await jobs.read(workspace, ticket);
-        if (job === undefined) {
-          throw new FactoryError('job_not_found', `There is no job for ${ticket}.`);
-        }
-        return reviewers.nudge(job);
-      };
-      return { route: action, exists, call: (data) => (parse(BODIES.nudge.schema, data) ? run : undefined) };
-    }
     return {
       route: action, exists,
       call: (data) => {
@@ -655,6 +582,12 @@ export async function startDashboard(
         return undefined;
       }
       const [workspace, ticket] = key;
+      if (target.action === 'start') {
+        // sf start: the Execution refuses a skeleton (task_draft), a live job and every other
+        // reason a job cannot start; the new job and the shorter ticket list reach every page.
+        const run = (): Promise<unknown> => actions.start(workspace, ticket);
+        return { route: 'ticket-start', call: (data) => (BODIES['ticket-start'].schema.safeParse(data).success ? run : undefined), refreshJobs: true };
+      }
       const route = `ticket-${target.action}` as const;
       const methods = { archive: setup.archiveTicket, restore: setup.restoreTicket, delete: setup.deleteTicket };
       const method = methods[target.action].bind(setup);
@@ -825,19 +758,17 @@ export async function startDashboard(
   });
   origin = `http://${LOOPBACK_HOST}:${address.port}`;
 
-  // A state change: every page gets the list, the subscriptions, the setup data (a job that
-  // starts or ends changes the tickets and the live counts) and, where it is selected, the job.
+  // A state change: every page gets the list, the setup data (a job that starts or ends changes
+  // the tickets and the live counts) and, where it is selected, the job.
   const refresh = async (job: Job): Promise<void> => {
     if (streams.size === 0) {
       return;
     }
-    const list = await jobsPayload(jobs, reviewers);
-    const subscriptions = await subscriptionsPayload(jobs, reviewers);
+    const list = await jobsPayload(jobs);
     const selected = [...streams].filter((stream) => stream.job?.[0] === job.workspace && stream.job[1] === job.ticket);
-    const detail = selected.length > 0 ? await jobDetail(jobs, reviewers, job) : undefined;
+    const detail = selected.length > 0 ? await jobDetail(jobs, job) : undefined;
     for (const stream of streams) {
       send(stream, 'jobs', list);
-      send(stream, 'subscriptions', subscriptions);
       if (detail !== undefined && selected.includes(stream)) {
         send(stream, 'job', detail);
       }
@@ -845,50 +776,18 @@ export async function startDashboard(
     await sendSetup(streams);
   };
 
-  // A ticket action that may have archived a job: every page gets the jobs, the subscriptions and
-  // the setup data again (a page following that job sees it gone from the list).
+  // A ticket action that may have archived or started a job: every page gets the jobs and the
+  // setup data again (a page following an archived job sees it gone from the list).
   async function refreshAll(): Promise<void> {
     if (streams.size === 0) {
       return;
     }
-    const list = await jobsPayload(jobs, reviewers);
-    const subscriptions = await subscriptionsPayload(jobs, reviewers);
+    const list = await jobsPayload(jobs);
     for (const stream of streams) {
       send(stream, 'jobs', list);
-      send(stream, 'subscriptions', subscriptions);
     }
     await sendSetup(streams);
   }
-
-  // The subscriptions changed: every page gets the list, the subscriptions, the tickets (their
-  // reviewer lines) and its job again.
-  const refreshReviewers = async (): Promise<void> => {
-    if (streams.size === 0) {
-      return;
-    }
-    const list = await jobsPayload(jobs, reviewers);
-    const subscriptions = await subscriptionsPayload(jobs, reviewers);
-    const details = new Map<string, unknown>();
-    for (const stream of streams) {
-      const name = stream.job?.join('/');
-      if (stream.job !== undefined && name !== undefined && !details.has(name)) {
-        const job = await jobs.read(...stream.job);
-        details.set(name, job === undefined ? undefined : await jobDetail(jobs, reviewers, job));
-      }
-    }
-    for (const stream of streams) {
-      send(stream, 'jobs', list);
-      send(stream, 'subscriptions', subscriptions);
-      const detail = details.get(stream.job?.join('/') ?? '');
-      if (detail !== undefined) {
-        send(stream, 'job', detail);
-      }
-    }
-    await sendSetup(streams);
-  };
-  const stopListening = reviewers.onChange(() => {
-    refreshReviewers().catch((error: unknown) => console.error(error));
-  });
 
   return {
     url: dashboardUrl(address.port, tokenText),
@@ -896,7 +795,6 @@ export async function startDashboard(
       refresh(job).catch((error: unknown) => console.error(error));
     },
     async close() {
-      stopListening();
       for (const stream of streams) {
         stream.abort.abort();
         stream.res.end();

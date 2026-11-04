@@ -47,6 +47,7 @@ test('sf info: works without sf serve, reads the env file and reports the state'
   assert.match(shown.stdout, /^tunnel {8}not running \(npm run tunnel\)$/m);
   assert.match(shown.stdout, /^dashboard {5}no token yet/m);
   assert.match(shown.stdout, /^jobs: none$/m);
-  assert.match(shown.stdout, /^subscriptions: needs sf serve$/m);
+  assert.match(shown.stdout, /^mcp {11}http:\/\/127\.0\.0\.1:\d+\/mcp \(planning tools, loopback only\)$/m);
+  assert.doesNotMatch(shown.stdout, /subscriptions|auth /);
   assert.equal((await runCli(env, ['info', 'extra'])).code, 2);
 });

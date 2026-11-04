@@ -11,7 +11,7 @@
 // Several jobs of one workspace run at the same time, up to SF_MAX_JOBS; the Git operations on
 // the shared checkout are serialized per workspace.
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { copyFile, mkdir, readFile, stat } from 'node:fs/promises';
+import { copyFile, type FileHandle, mkdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Config } from './config.js';
 import { FactoryError } from './errors.js';
@@ -567,8 +567,10 @@ export class Execution {
   }
 
   // The end of the conflict turn: a failed turn, a file still holding a conflict marker or a
-  // failing continue aborts the rebase (mr_conflict). After a continue the change is no longer the
-  // reviewed one: it goes back to review against the target, in the same worktree.
+  // failing continue aborts the rebase (mr_conflict); a failing continue first saves the resolved
+  // worktree as conflict-resolution.diff of the last published iteration. After a continue the
+  // change is no longer the reviewed one: it goes back to review against the target, in the same
+  // worktree.
   async #conflictIdle(job: Job, live: Live, outcome: IdleOutcome): Promise<void> {
     const cwd = live.cwd;
     const files = live.mr?.conflicts ?? (await unmergedPaths(cwd));
@@ -581,7 +583,9 @@ export class Execution {
       await this.#transition(job, 'needs_human', { code: 'mr_conflict', message: message.slice(0, 1000) });
       return;
     }
-    const failure = await this.#gitLocked(job.workspace, () => continueRebase(cwd, files));
+    // A continue that fails keeps the resolution next to the iteration being rebased.
+    const save = (write: (handle: FileHandle) => Promise<void>): Promise<string> => this.jobs.writeConflictResolution(job.workspace, job.ticket, job.iteration, write);
+    const failure = await this.#gitLocked(job.workspace, () => continueRebase(cwd, { files, targetCommit, save }));
     if (failure !== undefined) {
       await this.#transition(job, 'needs_human', failure);
       return;

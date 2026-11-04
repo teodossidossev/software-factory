@@ -4,13 +4,14 @@
 // sandbox settings.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { type FileHandle, mkdir, mkdtemp, open, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { sandboxSettings } from '../src/config.js';
-import { commitAndRebase, commitBody, commitPaths, filesWithMarkers, mergeRequestLink, mrTextProblem, pushProtection, submodulePaths } from '../src/mr.js';
+import { commitAndRebase, commitBody, commitPaths, continueRebase, filesWithMarkers, gitFailure, mergeRequestLink, mrTextProblem, pushProtection, rebaseInProgress, submodulePaths } from '../src/mr.js';
 import { conflictPrompt, FACTORY_PROMPT_RULES, handbookSection, mrPrompt } from '../src/prompts.js';
 import { COMMIT_TYPES, commitHeader, DENIED_TOOLS, headerProblem } from '../src/rules.js';
 import { quickStartSection } from '../src/server.js';
@@ -133,6 +134,112 @@ test('commitAndRebase makes one commit of the Patch paths without the submodule 
   }
 });
 
+// A repository whose change (one commit on base) conflicts with the target in conflict.txt; the
+// factory's commit and rebase have stopped on it.
+async function stoppedRebase(dir: string): Promise<{ repo: string; sh: (...args: string[]) => string; target: string }> {
+  const repo = join(dir, 'repo');
+  const sh = (...args: string[]): string => execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+  execFileSync('git', ['init', '-q', '-b', 'main', repo]);
+  for (const [key, value] of [['user.name', 't'], ['user.email', 't@example.invalid'], ['commit.gpgsign', 'false']]) {
+    sh('config', key!, value!);
+  }
+  await writeFile(join(repo, 'conflict.txt'), 'base\n');
+  await writeFile(join(repo, 'other.txt'), 'other\n');
+  sh('add', '.');
+  sh('commit', '-q', '-m', 'base');
+  const base = sh('rev-parse', 'HEAD');
+  await writeFile(join(repo, 'conflict.txt'), 'target\n');
+  sh('commit', '-q', '-am', 'target');
+  const target = sh('rev-parse', 'HEAD');
+  sh('checkout', '-q', '-b', 'change', base);
+  await writeFile(join(repo, 'conflict.txt'), 'change\n');
+  const prepared = await commitAndRebase(repo, { baseCommit: base, targetCommit: target, mrText: VALID_MR_TEXT });
+  assert.deepEqual(prepared, { kind: 'conflict', files: ['conflict.txt'] });
+  return { repo, sh, target };
+}
+
+test('continueRebase stages every change of the conflict turn, not only the conflicted files, and commits them all', async () => {
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'sf-continue-')));
+  try {
+    const { repo, sh, target } = await stoppedRebase(dir);
+    // The turn resolves the conflict, edits a file that did not conflict and adds one.
+    await writeFile(join(repo, 'conflict.txt'), 'target and change\n');
+    await writeFile(join(repo, 'other.txt'), 'other, adapted to the target\n');
+    await writeFile(join(repo, 'new.txt'), 'new\n');
+    const save = async (): Promise<string> => assert.fail('nothing is saved when the rebase continues');
+    assert.equal(await continueRebase(repo, { files: ['conflict.txt'], targetCommit: target, save }), undefined);
+    assert.equal(sh('rev-parse', 'HEAD~1'), target);
+    assert.equal(sh('show', '--name-only', '--format=', 'HEAD'), 'conflict.txt\nnew.txt\nother.txt');
+    assert.equal(sh('status', '--porcelain'), '');
+    assert.equal(sh('show', 'HEAD:other.txt'), 'other, adapted to the target');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('continueRebase: a continue that fails with only stdout names it, saves the whole resolved worktree as a patch against the target and aborts', async () => {
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'sf-continue-fail-')));
+  const path = process.env.PATH;
+  try {
+    const { repo, sh, target } = await stoppedRebase(dir);
+    await writeFile(join(repo, 'conflict.txt'), 'target and change\n');
+    await writeFile(join(repo, 'other.txt'), 'other, adapted to the target\n');
+    // Larger than any in-memory Git output limit (1 MiB, the Patch's 2 MiB): the patch is not cut.
+    const large = Array.from({ length: 100_000 }, (_, index) => `line ${index} of a large resolved file\n`).join('');
+    await writeFile(join(repo, 'large.txt'), large);
+    const binary = randomBytes(3 * 1024 * 1024);
+    await writeFile(join(repo, 'new.bin'), binary);
+    // A git that refuses `rebase --continue` on stdout only, with an empty stderr, as the
+    // continue of the SF-046 job did.
+    const bin = join(dir, 'bin');
+    await mkdir(bin);
+    const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+    await writeFile(join(bin, 'git'), `#!/bin/sh\nfor arg in "$@"; do\n  if [ "$arg" = --continue ]; then echo 'Could not continue: refused on stdout'; exit 1; fi\ndone\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
+    process.env.PATH = `${bin}:${path}`;
+    const resolutionPath = join(dir, 'conflict-resolution.diff');
+    const save = async (write: (handle: FileHandle) => Promise<void>): Promise<string> => {
+      // Saved while the rebase is still in progress, before the abort.
+      assert.equal(await rebaseInProgress(repo), true);
+      const handle = await open(resolutionPath, 'w');
+      try {
+        await write(handle);
+      } finally {
+        await handle.close();
+      }
+      return resolutionPath;
+    };
+    const failure = await continueRebase(repo, { files: ['conflict.txt'], targetCommit: target, save });
+    assert.deepEqual(failure, {
+      code: 'mr_conflict',
+      message: `The rebase had conflicts in conflict.txt; the resolved files are saved in ${resolutionPath}, a patch against ${target}. git rebase failed: Could not continue: refused on stdout. The rebase was aborted.`,
+    });
+    assert.equal(await rebaseInProgress(repo), false);
+    assert.equal(await readFile(join(repo, 'conflict.txt'), 'utf8'), 'change\n');
+    // The patch brings the target to the resolved state, the binary file included.
+    const patch = await readFile(resolutionPath, 'utf8');
+    assert.match(patch, /^\+target and change$/m);
+    assert.match(patch, /^\+other, adapted to the target$/m);
+    assert.match(patch, /^GIT binary patch$/m);
+    sh('checkout', '-q', '--detach', target);
+    sh('clean', '-fdq');
+    sh('apply', '--index', resolutionPath);
+    assert.equal(await readFile(join(repo, 'conflict.txt'), 'utf8'), 'target and change\n');
+    assert.equal(await readFile(join(repo, 'other.txt'), 'utf8'), 'other, adapted to the target\n');
+    assert.equal(await readFile(join(repo, 'large.txt'), 'utf8'), large);
+    assert.deepEqual(await readFile(join(repo, 'new.bin')), binary);
+  } finally {
+    process.env.PATH = path;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('gitFailure says why: stderr, else stdout when stderr is empty, cut at 500 characters', () => {
+  assert.equal(gitFailure(['rebase'], { code: 1, stderr: ' error: refused \n', stdout: Buffer.from('ignored') }), 'git rebase failed: error: refused');
+  assert.equal(gitFailure(['-c', 'x=y', 'rebase', '--continue'], { code: 1, stderr: '', stdout: Buffer.from('\nCould not continue\n') }), 'git rebase failed: Could not continue');
+  assert.equal(gitFailure(['rebase'], { code: 1, stderr: '', stdout: Buffer.from('x'.repeat(600)) }), `git rebase failed: ${'x'.repeat(500)}`);
+  assert.equal(gitFailure(['rebase'], { code: null, stderr: '', stdout: Buffer.alloc(0) }), 'git rebase did not finish within 60 s');
+});
+
 test('handbookSection extracts by heading and skips "## " lines inside fences; mrPrompt sends them verbatim', async () => {
   const handbook = await readFile(HANDBOOK, 'utf8');
   const rules = handbookSection(handbook, '## Git rules');
@@ -179,7 +286,7 @@ test('handbookSection extracts by heading and skips "## " lines inside fences; m
   assert.match(conflict, new RegExp(`^The factory's rebase of T-1 onto origin/main \\(${'b'.repeat(40)}\\) stopped with conflicts in these files:\n- a\\.txt\n- src/b\\.ts\n\n`));
   assert.match(conflict, /Keep the reviewed behaviour and the changes of the target\. Leave no conflict markers/);
   assert.match(conflict, /^Run the checks of these files\.$/m);
-  assert.match(conflict, /^Run no Git command; the factory stages the files and continues the rebase\./m);
+  assert.match(conflict, /^Edit other files only as far as the merge needs them to build and pass\. Run no Git command; the factory stages every change and continues the rebase\./m);
   assert.match(conflict, /^ {2}# Report: T-1, conflict resolution\n {2}## Done {8}\(per file: .*\)\n {2}## Checks .*\n {2}## Open questions/m);
 });
 

@@ -424,14 +424,24 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    stays in progress, the job stays `preparing_mr`, and the factory sends one **conflict turn**
    (`conflictPrompt`, the same deny list). It lists the files and asks the Implementer to resolve
    them by editing: keep the reviewed behaviour and the target's changes, leave no conflict
-   markers, run the checks of those files, run no Git command, and report
+   markers, edit other files only as far as the merge needs them to build and pass, run the
+   checks of those files, run no Git command, and report
    (`# Report: <ticket>, conflict resolution`, `## Done` per file, `## Checks`,
    `## Open questions`). When that turn ends:
    - a failed turn, or a listed file that still holds a line starting with `<<<<<<< `, `=======`
      alone or `>>>>>>> `, is `git rebase --abort` and `needs_human` with `mr_conflict`, naming the
      files;
-   - otherwise `git add -- <files>` and `git -c core.editor=true rebase --continue`; a failure is
-     the abort and `mr_conflict` as well;
+   - otherwise the factory stages every change of the turn, not only the conflicted files:
+     `git add --all` over the listed files plus the worktree's changes against the target, with
+     the exclusions of its commit (`.software-factory/`, ignored, credential-like and placeholder
+     paths, submodule pointers), then `git -c core.editor=true rebase --continue`;
+   - a continue that fails keeps the resolution: before the abort the factory saves the resolved
+     worktree as `iterations/NNN/conflict-resolution.diff` of the last published iteration
+     (`git diff --binary <target commit>` of the working tree plus the untracked files, the paths
+     of the Patch, uncut), then `git rebase --abort` and `needs_human` with `mr_conflict`, whose
+     message gives Git's reason (stderr, or stdout when stderr is empty) and the patch's path.
+     Nothing is retried; the user or the coordinator applies the patch on the target
+     (`git apply --index`) and finishes by hand;
    - after a successful continue the change is no longer the reviewed one. `base_commit` and
      `target_commit` become the target, and a new iteration is published: the conflict turn's
      report plus `## MR preparation` (the rebase onto `<target ref>` (`<commit>`) had conflicts in
@@ -448,7 +458,7 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    | `mr_empty` | the reviewed change has nothing to commit against `base_commit` |
    | `mr_commit_failed` | `git commit` failed, for example without a Git identity (stderr in the message) |
    | `mr_rebase_failed` | `git rebase` failed without conflicts; it was aborted |
-   | `mr_conflict` | the conflict turn failed or left markers, or the rebase did not continue; it was aborted |
+   | `mr_conflict` | the conflict turn failed or left markers, or the rebase did not continue; it was aborted. When the continue failed, the resolution is kept in `iterations/NNN/conflict-resolution.diff` (named in the message) |
    | `worktree_remove_failed` | the branch is prepared but the worktree could not be removed |
    | `mr_failed`, `mr_serve_restarted` | the factory failed, or `sf serve` restarted, during preparation |
 
@@ -500,7 +510,7 @@ sf.sock                                  # 0600, while sf serve runs; one JSON r
 dashboard-token                          # 0600, the dashboard token of the last sf serve start
 jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, state, iteration, fixes, gate_fixes, gate_tokens, session_id, created_at, updated_at, error
 jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "review" | "review_failed" | "review_message" | "gate_event" | ...}; what sf watch reads
-jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-schema.json,gate-output.json}
+jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-schema.json,gate-output.json,conflict-resolution.diff}
 worktrees/<workspace>/<ticket>/          # the job's worktree (SF_WORKTREE_ROOT), from start to Clean, abort or reset
 jobs/<workspace>/<ticket>/mr.md              # the MR text, once the branch is ready or after a conflict iteration
 jobs/<workspace>/<ticket>.<timestamp>/   # an archived earlier job

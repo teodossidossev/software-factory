@@ -148,9 +148,10 @@ with every iteration. The Context owner does not review.
   from it: the title is the header, the `## Why` section is the body. Iterations commit nothing.
   The user's approve pushes the prepared commit.
 - The factory always rebases onto the target branch in MR preparation, so the merge request can
-  be fast-forwarded. On a conflict the Implementer resolves the listed files by editing them,
-  keeping the reviewed behaviour, and runs no Git command; the resolved change goes back to the
-  reviewers before the push.
+  be fast-forwarded. On a conflict the Implementer resolves the listed files by editing them
+  (and other files only as far as the merge needs them to build and pass), keeping the reviewed
+  behaviour, and runs no Git command; the factory stages every change and the resolved change
+  goes back to the reviewers before the push.
 - The factory pushes `origin <branch>` once its checks pass. Nobody else pushes. The user
   opens the merge request.
 - Nothing is ever pushed to `main` (or `master`) directly, by anyone or any tool: every change

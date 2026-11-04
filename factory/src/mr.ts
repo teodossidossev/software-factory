@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
 import { changedPaths, writeResolutionPatch } from './patch.js';
-import { headerProblem, MR_REQUIRED_HEADINGS } from './rules.js';
+import { headerProblem, MR_REQUIRED_HEADINGS, sectionLines, testingProblem } from './rules.js';
 import { TASK_DIR } from './task-file.js';
 
 const FETCH_TIMEOUT_MS = 60_000;
@@ -138,7 +138,7 @@ export function mrTextProblem(ticket: string, text: string): string | undefined 
   if (missing.length > 0) {
     return `it lacks the heading(s) ${missing.join(', ')}`;
   }
-  return undefined;
+  return testingProblem(lines);
 }
 
 // The MR text the Implementer wrote into the worktree, validated: missing or empty is
@@ -168,21 +168,11 @@ export async function readMrText(cwd: string, ticket: string): Promise<{ ok: tru
 
 // The commit body: the non-empty lines of the MR text's ## Why section, at most five.
 export function commitBody(text: string): string {
-  const lines = text.split(/\r?\n/);
-  const start = lines.findIndex((line) => line.trimEnd() === '## Why');
-  if (start < 0) {
-    return '';
-  }
-  const body: string[] = [];
-  for (const line of lines.slice(start + 1)) {
-    if (/^#{1,2} /.test(line)) {
-      break;
-    }
-    if (line.trim() !== '' && body.length < MAX_BODY_LINES) {
-      body.push(line.trimEnd());
-    }
-  }
-  return body.join('\n');
+  return sectionLines(text.split(/\r?\n/), '## Why')
+    .filter((line) => line.trim() !== '')
+    .slice(0, MAX_BODY_LINES)
+    .map((line) => line.trimEnd())
+    .join('\n');
 }
 
 // The subset of paths that are submodules: a directory in the worktree whose index entry has

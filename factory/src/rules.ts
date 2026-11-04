@@ -17,6 +17,42 @@ export const MR_REQUIRED_HEADINGS = [
   '## Checklist',
 ];
 
+// The lines of one level-2 section of the MR text, without its heading, up to the next level-1 or
+// level-2 heading outside a code fence; empty when the heading is absent.
+export function sectionLines(lines: string[], heading: string): string[] {
+  const start = lines.findIndex((line) => line.trimEnd() === heading);
+  if (start < 0) {
+    return [];
+  }
+  const section: string[] = [];
+  let fenced = false;
+  for (const line of lines.slice(start + 1)) {
+    if (line.startsWith('```')) {
+      fenced = !fenced;
+    } else if (!fenced && /^#{1,2} /u.test(line)) {
+      break;
+    }
+    section.push(line);
+  }
+  return section;
+}
+
+// SF-058: the ## Testing section lists only what was run in this job. The MR prompt states the
+// rule; testingProblem refuses the line that most often breaks it.
+export const MR_TESTING_RULE = '`## Testing` lists only what was run in this job, with its result; anything not run (manual steps, live checks, browsers) goes on a line starting with `Not checked:`, saying who can run it';
+// A line that starts, after any list marker, checkbox or emphasis, with "By hand" or "Manual".
+const MANUAL_CLAIM = /^\s*(?:(?:[-*+]|\d+[.)])\s+)?(?:\[[ xX]\]\s+)?[*_]*(?:by hand\b|manual)/iu;
+
+// Why the MR text's ## Testing section claims a manual step as run, or undefined: a line there
+// that starts with "By hand" or "Manual" must also contain "not".
+export function testingProblem(lines: string[]): string | undefined {
+  const claim = sectionLines(lines, '## Testing').find((line) => MANUAL_CLAIM.test(line) && !/not/iu.test(line));
+  if (claim === undefined) {
+    return undefined;
+  }
+  return `its ## Testing line "${claim.trim().slice(0, 100)}" reads as a check that was run; ${MR_TESTING_RULE}`;
+}
+
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

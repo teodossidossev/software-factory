@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { sandboxSettings } from '../src/config.js';
 import { commitAndRebase, commitBody, commitPaths, continueRebase, filesWithMarkers, gitFailure, mergeRequestLink, mrTextProblem, pushProtection, rebaseInProgress, submodulePaths } from '../src/mr.js';
 import { conflictPrompt, FACTORY_PROMPT_RULES, handbookSection, mrPrompt } from '../src/prompts.js';
-import { COMMIT_TYPES, commitHeader, DENIED_TOOLS, headerProblem } from '../src/rules.js';
+import { COMMIT_TYPES, commitHeader, DENIED_TOOLS, headerProblem, testingProblem } from '../src/rules.js';
 import { quickStartSection } from '../src/server.js';
 
 const HANDBOOK = fileURLToPath(new URL('../../HANDBOOK.md', import.meta.url));
@@ -24,6 +24,26 @@ const VALID_MR_TEXT = [
   '## What', 'x', '## Why', 'x', '## How', 'x', '## Why the change', 'x', '## Special things to note', '- None.',
   '## Change outline', 'x', '## Testing', 'x', '## Screenshots', 'N/A', '## Checklist', '- [x] Branch name', '',
 ].join('\n');
+
+// SF-058: a ## Testing line that claims a manual step nobody ran is refused like a missing heading.
+test('mrTextProblem refuses a ## Testing line "By hand" or "Manual" without "not", with the reason', () => {
+  const withTesting = (...lines: string[]) => VALID_MR_TEXT.replace('## Testing\nx\n', `## Testing\n${lines.join('\n')}\n`);
+  const refused = mrTextProblem('T-1', withTesting('- `npm test`: 412 passed', '- By hand: open the page'));
+  assert.equal(refused, 'its ## Testing line "- By hand: open the page" reads as a check that was run; `## Testing` lists only what was run in this job, with its result; anything not run (manual steps, live checks, browsers) goes on a line starting with `Not checked:`, saying who can run it');
+  assert.equal(mrTextProblem('T-1', withTesting('- `npm test`: 412 passed', '- Not checked: by hand, open the page (the user, in a browser)')), undefined);
+  for (const line of ['By hand, open the page', '* Manual: click Save', '- Manually tested the drawer', '  - **By hand:** open the page', '1. manual check of the board']) {
+    assert.match(mrTextProblem('T-1', withTesting(line))!, /^its ## Testing line ".*" reads as a check that was run;/, line);
+  }
+  for (const line of ['- By hand: not run; the user can open the page', '- Manual check: Not run', '- By hand: cannot run here', '- Nothing by hand', '- Opened by hand: the page loads', '- By handling the error twice: passed']) {
+    assert.equal(mrTextProblem('T-1', withTesting(line)), undefined, line);
+  }
+  // Only the ## Testing section is checked.
+  // A "# " line inside a code fence does not end the section.
+  assert.match(mrTextProblem('T-1', withTesting('```sh', '# the suite', 'npm test', '```', '- By hand: open the page'))!, /^its ## Testing line "- By hand: open the page"/);
+  assert.equal(mrTextProblem('T-1', VALID_MR_TEXT.replace('## How\nx\n', '## How\nBy hand: none of it\nManual wiring of the routes\n')), undefined);
+  assert.match(testingProblem(['## Testing', '- By hand: open the page', '## Screenshots', 'Manual'])!, /^its ## Testing line "- By hand: open the page" reads as a check that was run;/);
+  assert.equal(testingProblem(['## Testing', '- ran it', '## Checklist', '- By hand']), undefined);
+});
 
 test('commitHeader accepts every type with the ticket as scope and refuses the rest', () => {
   for (const type of COMMIT_TYPES) {
@@ -252,6 +272,8 @@ test('handbookSection extracts by heading and skips "## " lines inside fences; m
     assert.match(template, new RegExp(`^${heading}$`, 'm'), heading);
   }
   assert.ok(template.endsWith('- [ ] Browser support verified\n```'));
+  // SF-058: the template shows a step that was not run.
+  assert.match(template, /^## Testing\n<[^>]*`- Not checked: [^`]+`[^>]*>\n\n## Screenshots$/m);
   assert.doesNotMatch(template, /What the factory never does/);
   assert.equal(quickStartSection(handbook), handbookSection(handbook, '## Quick start'));
   // SF-040: the Context owner plans only; the user starts; the reviewers review.
@@ -280,6 +302,8 @@ test('handbookSection extracts by heading and skips "## " lines inside fences; m
   assert.match(prompt, /^ {2}# Report: T-1, MR preparation 1\n {2}## Done {8}\(the MR title\)\n {2}## Open questions/m);
   assert.ok(!prompt.includes(FACTORY_PROMPT_RULES.split('\n')[1]!));
   assert.doesNotMatch(prompt, /previous attempt/);
+  // SF-058: ## Testing lists only what was run; the rest goes on a `Not checked:` line.
+  assert.match(prompt, /^`## Testing` lists only what was run in this job, with its result; anything not run \(manual steps, live checks, browsers\) goes on a line starting with `Not checked:`, saying who can run it\.$/m);
   assert.match(mrPrompt({ ...input, attempt: 2, previousError: 'The MR text is missing.' }), /^This is attempt 2\. The previous attempt failed: The MR text is missing\.$/m);
 
   const conflict = conflictPrompt({ ticket: 'T-1', targetRef: 'origin/main', targetCommit: 'b'.repeat(40), files: ['a.txt', 'src/b.ts'] });

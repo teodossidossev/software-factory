@@ -195,7 +195,9 @@ shapes, control or data flow. Prefer diff blocks for changes to an existing shap
 not a file-by-file changelog.>
 
 ## Testing
-<Each check run with its result, and how to verify by hand when that matters.>
+<Only what was run in this job, each check with its result. Anything not run (manual steps,
+live checks, browsers) goes on a line starting with `Not checked:`, saying who can run it,
+for example `- Not checked: by hand, open the dashboard and click Clean (the user, in a browser)`.>
 
 ## Screenshots
 <Before and after for user interface changes, or N/A.>

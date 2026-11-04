@@ -1,5 +1,5 @@
 // Job state on disk: <state dir>/jobs/<workspace>/<ticket>/ with job.json, events.jsonl and
-// iterations/NNN/{report.md,patch.diff,meta.json}, and from MR preparation on mr.md. Strictly
+// iterations/NNN/{report.md,patch.diff,meta.json,review.json}, and from MR preparation on mr.md. Strictly
 // parsed; every file but the event log is replaced atomically. Knows nothing about Git or the
 // Implementer session.
 import { appendFile, mkdir, readdir, readFile, rename } from 'node:fs/promises';
@@ -45,6 +45,8 @@ const jobSchema = z.strictObject({
   state: z.enum(JOB_STATES),
   // Number of published iterations.
   iteration: z.number().int().min(0),
+  // Number of Fix sections written (by the review or request_fix); SF_MAX_ITERATIONS limits it.
+  fixes: z.number().int().min(0).default(0),
   session_id: z.string().min(1).nullable(),
   created_at: timestamp,
   // Time of the last state change.
@@ -87,6 +89,20 @@ export interface IterationMeta {
   duration_ms: number | null;
 }
 
+// iterations/NNN/review.json: the Claude review of the iteration (SF-038), or why it failed.
+export type ReviewRecord =
+  | {
+      reviewer: string;
+      verdict: 'clean' | 'fix';
+      summary: string;
+      items: Array<{ path: string; problem: string; expected: string }>;
+      accepted_sensitive: string[];
+      cost_usd: number | null;
+      started_at: string;
+      ended_at: string;
+    }
+  | { reviewer: string; error: string };
+
 export interface Iteration {
   report: string;
   patch: Buffer;
@@ -109,6 +125,9 @@ export type EventRecord = { ts: string; iteration: number } & (
   | { type: 'event_delivered' | 'event_failed'; subscription: string; attempt: number; status: number | string }
   // The ticket's subscription removed after the last event of the job (SF-019).
   | { type: 'subscription_removed'; subscription: string }
+  // The outcome of a review (SF-038); ignored when the job had moved on before it ended.
+  | { type: 'review'; reviewer: string; verdict: 'clean' | 'fix'; items: number; ignored?: true }
+  | { type: 'review_failed'; reviewer: string; error: string; ignored?: true }
 );
 
 // The tools whose caller is logged as a principal event.
@@ -236,9 +255,23 @@ export class JobStore {
     return JSON.parse(await readFile(join(dir, 'meta.json'), 'utf8')) as IterationMeta;
   }
 
-  // The recorded cost of the published iterations 1 to count: the sum of their cost_usd. Undefined
-  // when a metadata file is missing or a cost is not a finite nonnegative number (null, absent, ...);
-  // other read failures and malformed JSON throw. Later directories and cost_usd_total are ignored.
+  async writeReview(workspace: string, ticket: string, number: number, review: ReviewRecord): Promise<void> {
+    const dir = join(this.dir(workspace, ticket), 'iterations', String(number).padStart(3, '0'));
+    await writeFileAtomic(join(dir, 'review.json'), Buffer.from(`${JSON.stringify(review, null, 2)}\n`));
+  }
+
+  // The review of an iteration; undefined while none ended (or with the review off).
+  async readReview(workspace: string, ticket: string, number: number): Promise<ReviewRecord | undefined> {
+    const dir = join(this.dir(workspace, ticket), 'iterations', String(number).padStart(3, '0'));
+    const text = await readOrMissing(join(dir, 'review.json'));
+    return text === undefined ? undefined : (JSON.parse(text) as ReviewRecord);
+  }
+
+  // The recorded cost of the published iterations 1 to count: the sum of their cost_usd and of the
+  // cost_usd of their reviews. Undefined when a metadata file is missing or a cost is not a finite
+  // nonnegative number (null, absent, ...); an iteration without a review, or a failed review, adds
+  // nothing. Other read failures and malformed JSON throw. Later directories and cost_usd_total are
+  // ignored.
   async recordedCost(workspace: string, ticket: string, count: number): Promise<number | undefined> {
     let total = 0;
     for (let number = 1; number <= count; number += 1) {
@@ -256,6 +289,14 @@ export class JobStore {
         return undefined;
       }
       total += cost;
+      const review = await this.readReview(workspace, ticket, number);
+      if (review !== undefined && 'verdict' in review) {
+        const reviewCost: unknown = review.cost_usd;
+        if (typeof reviewCost !== 'number' || !Number.isFinite(reviewCost) || reviewCost < 0) {
+          return undefined;
+        }
+        total += reviewCost;
+      }
     }
     return total;
   }

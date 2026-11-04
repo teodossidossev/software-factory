@@ -100,7 +100,7 @@ test('dashboard: jobs, job detail, report, patch and mr endpoints; bad names are
     assert.equal(detail.mr, false);
     assert.deepEqual(detail.iterations, [{
       number: 1, started_at: '2026-11-01T10:00:01.000Z', ended_at: '2026-11-01T10:05:00.000Z', cost_usd: 0.5,
-      changed_files: 1, patch_truncated: false, denials: 1, files: null,
+      changed_files: 1, patch_truncated: false, denials: 1, files: null, review: null,
     }]);
     assert.deepEqual(detail.history.map((entry: { from: string | null; to: string }) => [entry.from, entry.to]), [[null, 'starting'], ['starting', 'working'], ['working', 'awaiting_review']]);
     assert.equal(detail.history[2].ts, '2026-11-01T10:05:00.000Z');

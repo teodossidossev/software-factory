@@ -6,6 +6,10 @@
 // names to $HOME/fake-claude.log. A turn can write files into cwd to produce a Patch, then run a
 // list of argv commands in cwd (to delete files or run Git where a test needs it), or end
 // with a startup failure. A turn can also leave sandbox placeholders behind, like bubblewrap does. Sandbox arguments are logged with argv and otherwise ignored.
+// A run with --json-schema is a review (SF-038): its script comes from $HOME/fake-review.json
+// ({"reviews": [...]}, consumed through $HOME/fake-review.count) and it logs to
+// $HOME/fake-review.log, so the Implementer's script and log stay as they are. A review entry gives
+// the structured output, or a subtype or noOutput to fail, and an optional delay.
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -29,15 +33,12 @@ interface Turn {
   placeholders?: string[];
   // Ends the turn with Claude Code's startup failure result (startup_failure_reason) and this message.
   startupFailure?: string;
+  // Review runs only: the structured output of the result (default: a clean verdict), or none.
+  output?: unknown;
+  noOutput?: boolean;
 }
 
-const home = process.env.HOME ?? '.';
-const controlPath = join(home, 'fake-claude.json');
-const countPath = join(home, 'fake-claude.count');
-const turns: Turn[] = existsSync(controlPath) ? (JSON.parse(readFileSync(controlPath, 'utf8')) as { turns: Turn[] }).turns : [];
-const count = existsSync(countPath) ? Number(readFileSync(countPath, 'utf8')) : 0;
-writeFileSync(countPath, String(count + 1));
-const turn: Turn = turns[count] ?? {};
+const CLEAN = { verdict: 'clean', summary: 'Looks right.', items: [], accepted_sensitive: [] };
 
 const argv = process.argv.slice(2);
 const option = (name: string): string | undefined => {
@@ -48,13 +49,28 @@ const option = (name: string): string | undefined => {
   const index = argv.indexOf(`--${name}`);
   return index >= 0 ? argv[index + 1] : undefined;
 };
+
+const home = process.env.HOME ?? '.';
+const review = option('json-schema') !== undefined;
+const name = review ? 'fake-review' : 'fake-claude';
+const controlPath = join(home, `${name}.json`);
+const countPath = join(home, `${name}.count`);
+const control = existsSync(controlPath) ? (JSON.parse(readFileSync(controlPath, 'utf8')) as { turns?: Turn[]; reviews?: Turn[] }) : {};
+const turns: Turn[] = (review ? control.reviews : control.turns) ?? [];
+const count = existsSync(countPath) ? Number(readFileSync(countPath, 'utf8')) : 0;
+writeFileSync(countPath, String(count + 1));
+const turn: Turn = turns[count] ?? {};
 const sessionId = option('resume') ?? randomUUID();
 const out = (message: Record<string, unknown>): void => {
   process.stdout.write(`${JSON.stringify({ session_id: sessionId, uuid: randomUUID(), ...message })}\n`);
 };
 
 function run(prompt: string): void {
-  appendFileSync(join(home, 'fake-claude.log'), `${JSON.stringify({ argv, prompt, sessionId, cwd: process.cwd(), env: Object.keys(process.env).sort() })}\n`);
+  appendFileSync(join(home, `${name}.log`), `${JSON.stringify({ argv, prompt, sessionId, cwd: process.cwd(), env: Object.keys(process.env).sort() })}\n`);
+  if (review) {
+    runReview();
+    return;
+  }
   if (turn.startupFailure !== undefined) {
     out({
       type: 'result', subtype: 'error_during_execution', is_error: true, num_turns: 0, duration_ms: 0, duration_api_ms: 0,
@@ -96,6 +112,22 @@ function run(prompt: string): void {
     duration_api_ms: 1000, total_cost_usd: turn.costTotal ?? 0.0123, usage: {}, modelUsage: {}, stop_reason: null,
     errors: subtype === 'success' ? undefined : ['fake failure'],
     permission_denials: (turn.denials ?? []).map((name, index) => ({ tool_name: name, tool_use_id: `d${index}`, tool_input: { command: 'git commit -m secret-input' } })),
+  });
+}
+
+// A review: init, one assistant message, and the result with the structured output.
+function runReview(): void {
+  out({
+    type: 'system', subtype: 'init', permissionMode: option('permission-mode') ?? 'default', cwd: process.cwd(), tools: [], mcp_servers: [],
+    model: 'fake-model', slash_commands: [], output_style: 'default', skills: [], plugins: [], apiKeySource: 'none', claude_code_version: '0.0.0-fake',
+  });
+  out({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'text', text: 'Reviewed.' }] } });
+  const subtype = turn.subtype ?? 'success';
+  out({
+    type: 'result', subtype, is_error: subtype !== 'success', result: '', num_turns: 3, duration_ms: 2345, duration_api_ms: 2000,
+    total_cost_usd: turn.costTotal ?? 0.0456, usage: {}, modelUsage: {}, stop_reason: null, permission_denials: [],
+    errors: subtype === 'success' ? undefined : ['fake review failure'],
+    ...(turn.noOutput === true || subtype !== 'success' ? {} : { structured_output: turn.output ?? CLEAN }),
   });
 }
 

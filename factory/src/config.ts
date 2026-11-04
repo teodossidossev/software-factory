@@ -26,6 +26,12 @@ export interface Config {
   maxJobs: number;
   // Extra sensitive path globs (SF_SENSITIVE_PATHS), on top of rules.ts.
   sensitivePaths: string[];
+  // The Claude review of every published iteration (SF-038); false with SF_REVIEW=off.
+  review: boolean;
+  // The model of the review (SF_REVIEW_MODEL, passed as is); undefined uses the user's default.
+  reviewModel: string | undefined;
+  // maxTurns of the review (SF_REVIEW_MAX_TURNS).
+  reviewMaxTurns: number;
 }
 
 // Domains sandboxed commands may reach: the npm registry and SF_SANDBOX_DOMAINS (comma-separated).
@@ -154,6 +160,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     worktreeRoot: resolve(worktreeRoot(env)),
     maxJobs: positiveInteger(env, 'SF_MAX_JOBS', 3),
     sensitivePaths: sensitivePaths(env),
+    review: env.SF_REVIEW !== 'off',
+    reviewModel: env.SF_REVIEW_MODEL || undefined,
+    reviewMaxTurns: positiveInteger(env, 'SF_REVIEW_MAX_TURNS', 60),
   };
 }
 

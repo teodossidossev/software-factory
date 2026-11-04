@@ -147,7 +147,7 @@ test('postJson: the lookup refuses a host resolving to loopback; redirects are n
 function job(ticket: string, state: Job['state'], iteration = 1): Job {
   const at = new Date().toISOString();
   return {
-    workspace: 'app', ticket, branch: `${ticket}-branch`, base: 'main', base_commit: null, target_commit: null, worktree: null, prepared_commit: null, mr_attempts: 0,
+    workspace: 'app', ticket, branch: `${ticket}-branch`, base: 'main', base_commit: null, target_commit: null, worktree: null, prepared_commit: null, mr_attempts: 0, fixes: 0,
     state, iteration, session_id: null, created_at: at, updated_at: at,
   };
 }

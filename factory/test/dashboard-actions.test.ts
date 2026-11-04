@@ -283,6 +283,7 @@ test('dashboard actions end to end: say resumes needs_human, approve is refused 
   await putTask(env, repo, 'N-1', 'Needs human');
   await script(env, [
     { write: { 'a.txt': 'a\n' }, text: 'iteration 1' },
+    { text: 'fixed' },
     { write: { 'a.txt': 'aa\n' }, text: 'resumed' },
     { startupFailure: 'sandbox: bubblewrap is not installed' },
     { write: { '.software-factory/N-1.mr.md': mrText('feat(N-1): Add a') }, text: 'prepared' },
@@ -292,6 +293,9 @@ test('dashboard actions end to end: say resumes needs_human, approve is refused 
     const base = served.dashboard!;
     await call(served, 'start', { workspace: 'app', ticket: 'N-1' });
     await waitFor(served, 'N-1', 'awaiting_review', 1);
+    // SF_MAX_ITERATIONS=1: one Fix section, then iteration_limit.
+    await call(served, 'request_fix', { workspace: 'app', ticket: 'N-1', content: 'first' });
+    await waitFor(served, 'N-1', 'awaiting_review', 2);
     assert.equal((await refused(served, 'request_fix', { workspace: 'app', ticket: 'N-1', content: 'more' })).code, 'iteration_limit');
     assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'N-1' })).state, 'needs_human');
 
@@ -300,7 +304,7 @@ test('dashboard actions end to end: say resumes needs_human, approve is refused 
     assert.equal(early.status, 409);
     assert.match(JSON.parse(early.body).error.message, /^approve needs ready_for_human_review \(the branch prepared at Clean\); the job is needs_human\.$/);
     assert.deepEqual(result(await act(base, 'api/jobs/app/N-1/say', { message: 'go on\nplease' })), { state: 'working', queued: false });
-    await waitFor(served, 'N-1', 'awaiting_review', 2);
+    await waitFor(served, 'N-1', 'awaiting_review', 3);
     for (const message of ['', '   \n\t ', 'a\u0000b']) {
       assert.deepEqual(error(await act(base, 'api/jobs/app/N-1/say', { message })), { status: 400, code: 'invalid_content' }, JSON.stringify(message));
     }
@@ -313,7 +317,7 @@ test('dashboard actions end to end: say resumes needs_human, approve is refused 
     assert.deepEqual(error(await act(base, 'api/jobs/app/N-1/approve', {})), { status: 409, code: 'invalid_state' });
     assert.equal((await new JobStore(env.state).read('app', 'N-1'))!.mr_attempts, 1);
     await call(served, 'mark_clean', { workspace: 'app', ticket: 'N-1' });
-    await waitFor(served, 'N-1', 'ready_for_human_review', 2);
+    await waitFor(served, 'N-1', 'ready_for_human_review', 3);
     const ready = JSON.parse((await fetchRaw(new URL('api/jobs/app/N-1', base))).body);
     assert.equal(ready.job.worktree, null);
     assert.match(ready.job.prepared_commit, /^[0-9a-f]{40}$/);
@@ -327,8 +331,8 @@ test('dashboard actions end to end: say resumes needs_human, approve is refused 
       assert.deepEqual(error(await act(base, `api/jobs/app/N-1/${action}`, body)), { status: 409, code: 'invalid_state' }, action);
     }
     const log = await fakeLog(env);
-    assert.equal(log.length, 4);
-    assert.equal(log[1]!.prompt, factoryPrompt('go on\nplease', 'N-1', 2));
+    assert.equal(log.length, 5);
+    assert.equal(log[2]!.prompt, factoryPrompt('go on\nplease', 'N-1', 3));
   } finally {
     await stop(served);
   }

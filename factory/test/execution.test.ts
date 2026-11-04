@@ -245,7 +245,7 @@ test('queue and limits: say during a turn, iteration_limit, base_not_found, bran
   for (const [ticket, title, base] of [['Q-1', 'First'], ['Q-2', 'Second'], ['Q-3', 'Third', 'nope'], ['Q-4', 'Fourth']] as const) {
     await putTask(env, repo, ticket, title, base);
   }
-  await script(env, [{ delayMs: 1500, write: { 'a.txt': '1\n' }, text: 'first turn' }, { text: 'after say' }, { text: 'continued' }, { write: { 'q4.txt': 'q\n' } }]);
+  await script(env, [{ delayMs: 1500, write: { 'a.txt': '1\n' }, text: 'first turn' }, { text: 'after say' }, { text: 'fixed' }, { text: 'continued' }, { write: { 'q4.txt': 'q\n' } }]);
   const served = await serve(env);
   const worktree = join(env.state, 'worktrees', 'app', 'Q-1');
 
@@ -263,17 +263,21 @@ test('queue and limits: say during a turn, iteration_limit, base_not_found, bran
   assert.ok(log[1]!.prompt.includes(FACTORY_PROMPT_RULES.split('\n')[1]!));
   assert.ok(log[1]!.argv.includes(`--resume=${log[0]!.sessionId}`));
 
+  // SF_MAX_ITERATIONS=1 counts Fix sections: the say turn did not use it up, the second Fix is refused.
+  await call(served, 'request_fix', { workspace: 'app', ticket: 'Q-1', content: 'first' });
+  const fixed = await waitFor(served, 'Q-1', 'awaiting_review', 2);
   const limit = await refused(served, 'request_fix', { workspace: 'app', ticket: 'Q-1', content: 'more' });
   assert.equal(limit.code, 'iteration_limit');
+  assert.equal(limit.message, '1 Fix sections were written, the limit of SF_MAX_ITERATIONS; the job needs the user.');
   const human = await call(served, 'check', { workspace: 'app', ticket: 'Q-1' });
   assert.deepEqual([human.state, human.error?.code], ['needs_human', 'iteration_limit']);
   // needs_human still returns the last Report and Patch.
-  assert.deepEqual([human.report, human.patch.sha256], [first.report, first.patch.sha256]);
-  assert.doesNotMatch(await readFile(join(repo, '.software-factory', 'Q-1.md'), 'utf8'), /## Fix/);
+  assert.deepEqual([human.report, human.patch.sha256], [fixed.report, fixed.patch.sha256]);
+  assert.equal((await readFile(join(repo, '.software-factory', 'Q-1.md'), 'utf8')).match(/^## Fix /gm)?.length, 1);
 
   // sf say continues a needs_human job; its turn end publishes a new iteration.
   assert.match((await runCli(env, ['say', 'app', 'Q-1', 'go', 'on'])).stdout, /^state: working\nqueued: false$/m);
-  const continued = await waitFor(served, 'Q-1', 'awaiting_review', 2);
+  const continued = await waitFor(served, 'Q-1', 'awaiting_review', 3);
   assert.equal(continued.error, undefined);
   assert.match(continued.report, /^continued\n/);
   assert.equal((await refused(served, 'start', { workspace: 'app', ticket: 'Q-1' })).code, 'job_exists');

@@ -422,6 +422,16 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 .document .file { font-weight: 700; }
 .document .hunk { color: var(--hunk); }
 
+/* The Claude review of an iteration (SF-038). */
+.review { padding: 8px 12px; border: 1px solid var(--border); border-left-width: 4px; border-radius: var(--radius-sm); }
+.review.v-clean { border-left-color: var(--add); }
+.review.v-fix { border-left-color: var(--warn); }
+.review.v-failed { border-left-color: var(--del); }
+.review p { margin: 0 0 4px; overflow-wrap: anywhere; }
+.review .review-verdict { font-weight: 600; }
+.review .review-items { margin: 4px 0 0; padding-left: 24px; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
+.review .review-accepted { color: var(--muted); font-size: 13px; }
+
 /* The Files view (SF-024): IntelliJ's Changes list, a row per file, the diff under it on demand. */
 .job-badges { display: inline-flex; flex-wrap: wrap; gap: 6px; }
 .badge.f-count { background: var(--s-ended); }

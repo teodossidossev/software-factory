@@ -2,16 +2,18 @@
 // SF-019, committed and rebased by the factory, SF-037), say, approve (the push), abort, reset
 // (and the dashboard's terminal-only Archive), status and the restart rule. Owns the Implementer session of each job, which works in the
 // job's own worktree, and publishes an iteration (Report, Patch and the file list) when the
-// session goes idle. Every state change goes through #transition, the seam for notifications.
+// session goes idle; then the Claude review of that iteration runs (SF-038, src/review.ts) and its
+// verdict takes the path of request_fix or mark_clean. Every state change goes through #transition,
+// the seam for notifications.
 // Several jobs of one workspace run at the same time, up to SF_MAX_JOBS; the Git operations on
 // the shared checkout are serialized per workspace.
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { copyFile, mkdir, stat } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Config } from './config.js';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
-import { type FileChange, isActive, type Job, type JobState, JobStore, now, TERMINAL_STATES } from './jobs.js';
+import { type FileChange, isActive, type Job, type JobState, JobStore, now, type ReviewRecord, TERMINAL_STATES } from './jobs.js';
 import { abortRebase, commitAndRebase, continueRebase, gitBusy, mergeRequestLink, originUrl, pushBranch, readMrText, rebaseInProgress, resolveTarget, unmergedPaths } from './mr.js';
 import { buildPatch, changedFilesSection, fileChanges, fileSummaryLines, type Patch } from './patch.js';
 import { removeSandboxPlaceholders } from './placeholders.js';
@@ -19,6 +21,7 @@ import { conflictPrompt, factoryPrompt, iterationCost, mrPrompt } from './prompt
 import { DENIED_TOOLS, sensitivityOf } from './rules.js';
 import type { Workspace } from './registry.js';
 import { DEFAULT_PAGE_BYTES, MAX_PAGE_BYTES, MIN_PAGE_BYTES, type Page, pageBuffer } from './repo-files.js';
+import { fixContent, REVIEWER, type ReviewOutcome, reviewPrompt, runReview, sensitiveItem } from './review.js';
 import { type IdleOutcome, ImplementerSession } from './session.js';
 import { appendFix, isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { addWorktree, deleteBranch, removeWorktree } from './worktree.js';
@@ -39,6 +42,8 @@ export interface CheckResult {
   mr?: string;
   // The sensitive and the deleted paths of the last published iteration.
   files?: { sensitive: Array<{ path: string; declared: boolean }>; deleted: string[] };
+  // The Claude review of the last published iteration.
+  review?: { status: 'running' | 'done' | 'failed' | 'off'; verdict?: 'clean' | 'fix'; summary?: string };
 }
 
 // lines: extra notification lines (the MR title and link when pushed, the file summary).
@@ -114,6 +119,12 @@ interface Live {
   mr?: { targetRef: string; conflicts?: string[] };
 }
 
+// A Claude review in progress: the iteration it reviews and what cancels it.
+interface RunningReview {
+  iteration: number;
+  controller: AbortController;
+}
+
 export class Execution {
   readonly jobs: JobStore;
   readonly #config: Config;
@@ -121,11 +132,14 @@ export class Execution {
   readonly #onStateChange: StateListener;
   readonly #handbook: string;
   readonly #live = new Map<string, Live>();
+  // The running review of each job, by "<workspace>/<ticket>".
+  readonly #reviews = new Map<string, RunningReview>();
   #lock: Promise<unknown> = Promise.resolve();
   // One Git lock per workspace for the operations on the shared checkout.
   readonly #gitLocks = new Map<string, Promise<unknown>>();
 
-  // handbook: the loaded Handbook text; MR preparation sends its Git rules and MR template.
+  // handbook: the loaded Handbook text; MR preparation sends its Git rules and MR template, the
+  // review its review rules.
   constructor(config: Config, resolve: (name: string) => Promise<Workspace>, onStateChange: StateListener = () => {}, handbook = '') {
     this.#config = config;
     this.jobs = new JobStore(config.stateDir);
@@ -227,11 +241,14 @@ export class Execution {
     return join(this.#config.worktreeRoot, workspace, ticket);
   }
 
-  // At serve start no turn is live: working jobs need a person, interrupted starts failed.
+  // At serve start no turn is live: working jobs need a person, interrupted starts failed, and a
+  // job awaiting review whose last iteration has no review gets one.
   recover(): Promise<void> {
     return this.#locked(async () => {
       for (const job of await this.jobs.list()) {
-        if (job.state === 'working') {
+        if (job.state === 'awaiting_review' && job.iteration > 0 && (await this.jobs.readReview(job.workspace, job.ticket, job.iteration)) === undefined) {
+          this.#startReview(job);
+        } else if (job.state === 'working') {
           await this.#transition(job, 'needs_human', { code: 'serve_restarted', message: 'sf serve restarted while the iteration ran; use sf say to continue.' });
         } else if (job.state === 'preparing_mr') {
           await this.#transition(job, 'needs_human', { code: 'mr_serve_restarted', message: 'sf serve restarted during MR preparation; call mark_clean again.' });
@@ -274,7 +291,7 @@ export class Execution {
       const worktree = this.#worktreePath(workspace.name, ticket);
       const job: Job = {
         workspace: workspace.name, ticket, branch, base, base_commit: null, state: 'starting', worktree, prepared_commit: null,
-        iteration: 0, session_id: null, target_commit: null, mr_attempts: 0, created_at: created, updated_at: created,
+        iteration: 0, fixes: 0, session_id: null, target_commit: null, mr_attempts: 0, created_at: created, updated_at: created,
       };
       await this.jobs.write(job);
       await this.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, state: { from: null, to: 'starting' } });
@@ -436,7 +453,7 @@ export class Execution {
       }
       try {
         const { job: published, changes } = await this.#publish(job, live, outcome, await buildPatch(live.cwd, job.base_commit!), []);
-        await this.#transition(published, 'awaiting_review', undefined, fileSummaryLines(changes));
+        this.#startReview(await this.#transition(published, 'awaiting_review', undefined, fileSummaryLines(changes)));
       } catch (error) {
         console.error(error);
         await this.#transition(job, 'needs_human', { code: 'publish_failed', message: 'The Report and Patch could not be published.' });
@@ -558,7 +575,104 @@ export class Execution {
       `The rebase onto ${targetRef} (${targetCommit}) had conflicts in ${files.join(', ')}, resolved by the Implementer. The Patch is now against the target.`,
     ].join('\n');
     const { job: published, changes } = await this.#publish(rebased, live, outcome, await buildPatch(cwd, targetCommit), [note]);
-    await this.#transition(published, 'awaiting_review', undefined, fileSummaryLines(changes));
+    this.#startReview(await this.#transition(published, 'awaiting_review', undefined, fileSummaryLines(changes)));
+  }
+
+  // Starts the Claude review of the job's last iteration; it runs outside the lock. A review still
+  // running for the job is cancelled. Nothing with SF_REVIEW=off.
+  #startReview(job: Job): void {
+    if (!this.#config.review) {
+      return;
+    }
+    const key = `${job.workspace}/${job.ticket}`;
+    this.#reviews.get(key)?.controller.abort();
+    const running: RunningReview = { iteration: job.iteration, controller: new AbortController() };
+    this.#reviews.set(key, running);
+    this.#review(job, running).catch((error: unknown) => console.error(error));
+  }
+
+  #cancelReview(key: string): void {
+    this.#reviews.get(key)?.controller.abort();
+    this.#reviews.delete(key);
+  }
+
+  // Runs the review session, then applies its outcome under the lock.
+  async #review(job: Job, running: RunningReview): Promise<void> {
+    const { workspace: name, ticket, iteration } = job;
+    let outcome: ReviewOutcome;
+    try {
+      if (job.worktree === null) {
+        throw new Error('the job has no worktree');
+      }
+      const { report, patch } = await this.jobs.readIteration(name, ticket, iteration);
+      const meta = await this.jobs.readMeta(name, ticket, iteration);
+      const prompt = reviewPrompt({
+        ticket, iteration, report, patch, patchTruncated: meta.patch_truncated, files: meta.files, handbook: this.#handbook,
+        task: await readFile(join(job.worktree, TASK_DIR, `${ticket}.md`), 'utf8'),
+      });
+      outcome = await runReview(prompt, {
+        cwd: job.worktree, claudePath: this.#config.claudePath, sandbox: this.#config.sandbox, model: this.#config.reviewModel,
+        maxTurns: this.#config.reviewMaxTurns, signal: running.controller.signal,
+      });
+    } catch (error) {
+      const at = now();
+      outcome = { ok: false, message: `The review could not start: ${(error as Error).message}`.slice(0, 1000), startedAt: at, endedAt: at };
+    }
+    await this.#locked(() => this.#reviewed(job, running, outcome));
+  }
+
+  // The end of a review. A cancelled one leaves no trace. Otherwise review.json and the event are
+  // written; the verdict applies only while the job still awaits review of the same iteration.
+  async #reviewed(reviewed: Job, running: RunningReview, outcome: ReviewOutcome): Promise<void> {
+    const { workspace: name, ticket, iteration } = reviewed;
+    const key = `${name}/${ticket}`;
+    if (this.#reviews.get(key) !== running || running.controller.signal.aborted) {
+      return;
+    }
+    this.#reviews.delete(key);
+    const job = await this.jobs.read(name, ticket);
+    // Another job of the ticket (after a reset) is not this review's.
+    if (job === undefined || job.created_at !== reviewed.created_at) {
+      return;
+    }
+    const current = job.state === 'awaiting_review' && job.iteration === iteration;
+    const ignored = current ? {} : { ignored: true as const };
+    const record: ReviewRecord = outcome.ok
+      ? { reviewer: REVIEWER, ...outcome.output, cost_usd: outcome.costUsd, started_at: outcome.startedAt, ended_at: outcome.endedAt }
+      : { reviewer: REVIEWER, error: outcome.message };
+    await this.jobs.writeReview(name, ticket, iteration, record);
+    await this.jobs.appendEvent(name, ticket, outcome.ok
+      ? { ts: now(), iteration, type: 'review', reviewer: REVIEWER, verdict: outcome.output.verdict, items: outcome.output.items.length, ...ignored }
+      : { ts: now(), iteration, type: 'review_failed', reviewer: REVIEWER, error: outcome.message, ...ignored });
+    if (!current) {
+      return;
+    }
+    if (!outcome.ok) {
+      await this.#transition(job, 'needs_human', { code: 'review_failed', message: outcome.message });
+      return;
+    }
+    const { verdict, summary, items, accepted_sensitive: accepted } = outcome.output;
+    const unaccepted = ((await this.#lastFiles(job)) ?? [])
+      .filter((change) => change.sensitive === 'undeclared' && !accepted.includes(change.path))
+      .map((change) => sensitiveItem(change.path));
+    try {
+      if (verdict === 'fix' || unaccepted.length > 0) {
+        await this.#fix(job, fixContent(summary, [...(verdict === 'fix' ? items : []), ...unaccepted]));
+      } else {
+        await this.#prepareMr(job, accepted);
+      }
+    } catch (error) {
+      // iteration_limit has already handed the job to the user.
+      if (error instanceof FactoryError && error.code === 'iteration_limit') {
+        return;
+      }
+      console.error(error);
+      const latest = await this.jobs.read(name, ticket);
+      if (latest?.state === 'awaiting_review') {
+        const code = error instanceof FactoryError ? error.code : 'review_failed';
+        await this.#transition(latest, 'needs_human', { code, message: `The review's verdict could not be applied: ${(error as Error).message}`.slice(0, 1000) });
+      }
+    }
   }
 
   // The branch holds the one commit on top of the target: the worktree goes (the branch stays in
@@ -595,45 +709,48 @@ export class Execution {
   // the branch in the checkout. Also the retry after a failed preparation (needs_human with
   // mr_attempts > 0).
   markClean(workspaceName: string, ticket: string, sensitive: string[] = []): Promise<{ state: JobState; iteration: number; branch: string }> {
-    return this.#locked(async () => {
-      const job = await this.#job(workspaceName, ticket);
-      const retry = job.state === 'needs_human' && job.mr_attempts > 0 && job.worktree !== null;
-      if (!(job.state === 'awaiting_review' || retry)) {
-        throw new FactoryError('invalid_state', `mark_clean needs awaiting_review (or needs_human after an MR preparation); the job is ${job.state}.`);
-      }
-      const unacknowledged = ((await this.#lastFiles(job)) ?? [])
-        .filter((change) => change.sensitive === 'undeclared' && !sensitive.includes(change.path))
-        .map((change) => change.path);
-      if (unacknowledged.length > 0) {
-        throw new FactoryError('sensitive_unacknowledged', `Undeclared sensitive path(s) in the reviewed iteration: ${unacknowledged.join(', ')}. Name each in sensitive with the reason it is needed, or request_fix its removal.`);
-      }
-      if (job.worktree === null || !(await exists(job.worktree))) {
-        throw new FactoryError('worktree_missing', `The worktree of ${workspaceName}/${ticket} is missing; sf reset the ticket and start again.`);
-      }
-      const key = `${workspaceName}/${ticket}`;
-      const live = this.#live.get(key);
-      if (live?.session.busy === true) {
-        throw new FactoryError('turn_running', 'A turn of the Implementer is running; wait for it to end.');
-      }
-      const workspace = live?.workspace ?? (await this.#resolve(workspaceName));
-      const cwd = job.worktree;
-      const target = await this.#gitLocked(workspaceName, async () => {
-        // A rebase left in progress when sf serve restarted during a conflict turn.
-        await abortRebase(cwd);
-        return resolveTarget(workspace.workCheckout, job.base);
-      });
-      const attempt = job.mr_attempts + 1;
-      const next = await this.#transition({ ...job, target_commit: target.commit, mr_attempts: attempt }, 'preparing_mr');
-      await this.#syncTask(workspace, next);
-      const prompt = mrPrompt({
-        ticket, branch: job.branch, targetRef: target.ref, targetCommit: target.commit, attempt,
-        previousError: retry ? job.error?.message : undefined, handbook: this.#handbook,
-      });
-      const session = this.#session(next, workspace);
-      this.#live.get(key)!.mr = { targetRef: target.ref };
-      session.send(prompt, DENIED_TOOLS);
-      return { state: next.state, iteration: next.iteration, branch: next.branch };
+    return this.#locked(async () => this.#prepareMr(await this.#job(workspaceName, ticket), sensitive));
+  }
+
+  // The work of mark_clean, also run for a clean verdict of the review. Only under the lock.
+  async #prepareMr(job: Job, sensitive: string[]): Promise<{ state: JobState; iteration: number; branch: string }> {
+    const { workspace: workspaceName, ticket } = job;
+    const retry = job.state === 'needs_human' && job.mr_attempts > 0 && job.worktree !== null;
+    if (!(job.state === 'awaiting_review' || retry)) {
+      throw new FactoryError('invalid_state', `mark_clean needs awaiting_review (or needs_human after an MR preparation); the job is ${job.state}.`);
+    }
+    const unacknowledged = ((await this.#lastFiles(job)) ?? [])
+      .filter((change) => change.sensitive === 'undeclared' && !sensitive.includes(change.path))
+      .map((change) => change.path);
+    if (unacknowledged.length > 0) {
+      throw new FactoryError('sensitive_unacknowledged', `Undeclared sensitive path(s) in the reviewed iteration: ${unacknowledged.join(', ')}. Name each in sensitive with the reason it is needed, or request_fix its removal.`);
+    }
+    if (job.worktree === null || !(await exists(job.worktree))) {
+      throw new FactoryError('worktree_missing', `The worktree of ${workspaceName}/${ticket} is missing; sf reset the ticket and start again.`);
+    }
+    const key = `${workspaceName}/${ticket}`;
+    const live = this.#live.get(key);
+    if (live?.session.busy === true) {
+      throw new FactoryError('turn_running', 'A turn of the Implementer is running; wait for it to end.');
+    }
+    const workspace = live?.workspace ?? (await this.#resolve(workspaceName));
+    const cwd = job.worktree;
+    const target = await this.#gitLocked(workspaceName, async () => {
+      // A rebase left in progress when sf serve restarted during a conflict turn.
+      await abortRebase(cwd);
+      return resolveTarget(workspace.workCheckout, job.base);
     });
+    const attempt = job.mr_attempts + 1;
+    const next = await this.#transition({ ...job, target_commit: target.commit, mr_attempts: attempt }, 'preparing_mr');
+    await this.#syncTask(workspace, next);
+    const prompt = mrPrompt({
+      ticket, branch: job.branch, targetRef: target.ref, targetCommit: target.commit, attempt,
+      previousError: retry ? job.error?.message : undefined, handbook: this.#handbook,
+    });
+    const session = this.#session(next, workspace);
+    this.#live.get(key)!.mr = { targetRef: target.ref };
+    session.send(prompt, DENIED_TOOLS);
+    return { state: next.state, iteration: next.iteration, branch: next.branch };
   }
 
   // The user's approve: the branch the factory prepared at Clean is pushed. Nothing is committed
@@ -697,7 +814,9 @@ export class Execution {
     });
   }
 
+  // Ends the session and cancels a running review, whose outcome is then never applied.
   async #endSession(key: string): Promise<void> {
+    this.#cancelReview(key);
     const live = this.#live.get(key);
     this.#live.delete(key);
     await live?.session.close();
@@ -805,7 +924,30 @@ export class Execution {
     if (mr !== undefined) {
       result.mr = cutUtf8(mr, MAX_REPORT_BYTES);
     }
+    const review = await this.#reviewStatus(job);
+    if (review !== undefined) {
+      result.review = review;
+    }
     return result;
+  }
+
+  // The review of the last published iteration: its record once it ended, running while it runs or
+  // is due, off with SF_REVIEW=off; undefined before the first iteration and when none will run.
+  async #reviewStatus(job: Job): Promise<CheckResult['review']> {
+    if (job.iteration === 0) {
+      return undefined;
+    }
+    const record = await this.jobs.readReview(job.workspace, job.ticket, job.iteration);
+    if (record !== undefined) {
+      return 'verdict' in record ? { status: 'done', verdict: record.verdict, summary: record.summary } : { status: 'failed', summary: record.error };
+    }
+    if (this.#reviews.get(`${job.workspace}/${job.ticket}`)?.iteration === job.iteration) {
+      return { status: 'running' };
+    }
+    if (!this.#config.review) {
+      return { status: 'off' };
+    }
+    return job.state === 'awaiting_review' ? { status: 'running' } : undefined;
   }
 
   // After Clean the worktree is gone: a further fix or message recreates it from the branch, and
@@ -822,29 +964,33 @@ export class Execution {
   }
 
   requestFix(workspaceName: string, ticket: string, content: string): Promise<{ iteration: number; check_after_minutes: number }> {
-    return this.#locked(async () => {
-      let job = await this.#job(workspaceName, ticket);
-      if (job.state !== 'awaiting_review' && job.state !== 'ready_for_human_review') {
-        throw new FactoryError('invalid_state', `request_fix needs awaiting_review or ready_for_human_review; the job is ${job.state}.`);
-      }
-      if (job.iteration >= this.#config.maxIterations) {
-        await this.#transition(job, 'needs_human', {
-          code: 'iteration_limit',
-          message: `${job.iteration} iterations were published without Clean; the user decides how to go on.`,
-        });
-        throw new FactoryError('iteration_limit', `${job.iteration} iterations were published without Clean; the job needs the user.`);
-      }
-      const workspace = await this.#resolve(workspaceName);
-      if (job.state === 'ready_for_human_review') {
-        job = await this.#reopen(job, workspace);
-      }
-      const fix = job.iteration;
-      await appendFix(workspace, ticket, fix, content);
-      await this.#syncTask(workspace, job);
-      job = await this.#transition(job, 'working');
-      this.#session(job, workspace).send(factoryPrompt(`/implement ${TASK_DIR}/${ticket}.md Fix ${fix}`, ticket, job.iteration + 1), DENIED_TOOLS);
-      return { iteration: job.iteration + 1, check_after_minutes: this.#config.checkAfterFixMin };
-    });
+    return this.#locked(async () => this.#fix(await this.#job(workspaceName, ticket), content));
+  }
+
+  // The work of request_fix, also run for a fix verdict of the review: appends ## Fix N and starts
+  // the next iteration. SF_MAX_ITERATIONS limits the Fix sections; an sf say turn does not count.
+  // Only under the lock.
+  async #fix(current: Job, content: string): Promise<{ iteration: number; check_after_minutes: number }> {
+    let job = current;
+    const { workspace: workspaceName, ticket } = job;
+    if (job.state !== 'awaiting_review' && job.state !== 'ready_for_human_review') {
+      throw new FactoryError('invalid_state', `request_fix needs awaiting_review or ready_for_human_review; the job is ${job.state}.`);
+    }
+    if (job.fixes >= this.#config.maxIterations) {
+      const message = `${job.fixes} Fix sections were written, the limit of SF_MAX_ITERATIONS`;
+      await this.#transition(job, 'needs_human', { code: 'iteration_limit', message: `${message}; the user decides how to go on.` });
+      throw new FactoryError('iteration_limit', `${message}; the job needs the user.`);
+    }
+    const workspace = await this.#resolve(workspaceName);
+    if (job.state === 'ready_for_human_review') {
+      job = await this.#reopen(job, workspace);
+    }
+    const fix = job.iteration;
+    await appendFix(workspace, ticket, fix, content);
+    await this.#syncTask(workspace, job);
+    job = await this.#transition({ ...job, fixes: job.fixes + 1 }, 'working');
+    this.#session(job, workspace).send(factoryPrompt(`/implement ${TASK_DIR}/${ticket}.md Fix ${fix}`, ticket, job.iteration + 1), DENIED_TOOLS);
+    return { iteration: job.iteration + 1, check_after_minutes: this.#config.checkAfterFixMin };
   }
 
   // A user message into the session, queued as its next turn.

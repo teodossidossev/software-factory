@@ -40,6 +40,7 @@ async function world(name: string): Promise<World> {
   const config: Config = {
     stateDir: env.state, checkAfterStartMin: 15, checkAfterFixMin: 5, maxTurns: 10, maxIterations: 5, claudePath: FAKE,
     sandbox: undefined, model: undefined, worktreeRoot: join(env.state, 'worktrees'), maxJobs: 3, sensitivePaths: [],
+    review: false, reviewModel: undefined, reviewMaxTurns: 60,
   };
   const execution = new Execution(config, (workspace) => resolveWorkspace(workspace, env.config));
   const jobs = new JobStore(env.state);
@@ -139,7 +140,7 @@ async function holdLock(execution: Execution): Promise<{ release: () => void; do
 function finished(ticket: string, state: Job['state'], sessionId: string): Job {
   return {
     workspace: 'app', ticket, branch: `${ticket}-old`, base: 'main', base_commit: null, target_commit: null, worktree: null, prepared_commit: null,
-    mr_attempts: 0, state, iteration: 1, session_id: sessionId, created_at: '2026-11-03T10:00:00.000Z', updated_at: '2026-11-03T10:00:00.000Z',
+    mr_attempts: 0, fixes: 0, state, iteration: 1, session_id: sessionId, created_at: '2026-11-03T10:00:00.000Z', updated_at: '2026-11-03T10:00:00.000Z',
   };
 }
 

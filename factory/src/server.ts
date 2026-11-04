@@ -375,8 +375,9 @@ function createMcpServer(handbook: Handbook, version: string, execution: Executi
         `one page of the Patch, paged like read_file: offset and max_bytes (default ${DEFAULT_PAGE_BYTES}, ` +
         `${MIN_PAGE_BYTES}-${MAX_PAGE_BYTES}); call again with offset=patch.next_offset until it is null. Once MR ` +
         'preparation wrote one, mr holds the merge request text. files lists the sensitive paths (declared by the Task ' +
-        "file's may_touch or not) and the deleted paths of the last iteration. pushed, aborted and failed end the " +
-        'ticket for you; preparing_mr means wait.',
+        "file's may_touch or not) and the deleted paths of the last iteration. review is the factory's Claude review of " +
+        'the last iteration (running, done with its verdict and summary, failed, or off). pushed, aborted and failed end ' +
+        'the ticket for you; preparing_mr means wait.',
       inputSchema: z.strictObject({
         workspace: workspaceName,
         ticket: ticketKey,
@@ -403,6 +404,9 @@ function createMcpServer(handbook: Handbook, version: string, execution: Executi
           .optional(),
         mr: z.string().optional(),
         files: z.object({ sensitive: z.array(z.object({ path: z.string(), declared: z.boolean() })), deleted: z.array(z.string()) }).optional(),
+        review: z
+          .object({ status: z.enum(['running', 'done', 'failed', 'off']), verdict: z.enum(['clean', 'fix']).optional(), summary: z.string().optional() })
+          .optional(),
       }),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
@@ -418,7 +422,7 @@ function createMcpServer(handbook: Handbook, version: string, execution: Executi
         'the prepared commit). Appends "## Fix N" with content to the Task file (N = the number of the iteration just ' +
         'reviewed) and starts the next iteration in the same session (/implement .software-factory/<ticket>.md Fix N). ' +
         `content: 1 to ${MAX_FIX_BYTES} bytes of Markdown, concrete items (path, what is wrong, what is expected). ` +
-        'Refused with iteration_limit after the configured number of iterations without Clean. Returns the iteration now ' +
+        'Refused with iteration_limit once the job has the configured number of Fix sections. Returns the iteration now ' +
         'running and after how many minutes to check.',
       inputSchema: z.strictObject({
         workspace: workspaceName,

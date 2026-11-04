@@ -197,8 +197,6 @@ test('dashboard: the stream sends jobs, the job and the events, follows the file
   });
 });
 
-const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid'];
-
 function mrText(header: string): string {
   return [
     header, '', '## What', 'Changes the README.', '## Why', 'The ticket asks for it.', '## How', 'One line.', '## Why the change',
@@ -213,7 +211,7 @@ test('dashboard end to end: a fake cycle, the stream across mark_clean (the bran
   await putTask(env, repo, 'T-1', 'Change README');
   await script(env, [
     { write: { 'README.md': 'hello world\n' }, tool: true, text: '# Report: T-1, iteration 1\n\n## Done\nChanged.' },
-    { write: { '.software-factory/T-1.mr.md': mrText('feat(T-1): Change the README') }, run: [['git', 'add', 'README.md'], ['git', ...ID, 'commit', '-q', '-m', 'feat(T-1): Change the README']], text: 'prepared' },
+    { write: { '.software-factory/T-1.mr.md': mrText('feat(T-1): Change the README') }, text: 'prepared' },
   ]);
   const missing = await runCli(env, ['dashboard']);
   assert.equal(missing.code, 1);

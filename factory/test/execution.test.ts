@@ -13,8 +13,6 @@ import { writeTask } from '../src/task-file.js';
 import { call, fakeLog, git, newEnv, newRepo, putTask, refused, runCli, script, serve, stop, task, temp, waitFor } from './support/harness.js';
 
 const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid'];
-const commit = (message: string): string[] => ['git', ...ID, 'commit', '-q', '-m', message];
-const REBASE = ['git', ...ID, 'rebase', '-q', 'origin/main'];
 
 function mrText(header: string): string {
   return [
@@ -42,8 +40,8 @@ test('full cycle in a worktree: start, awaiting_review with Report, Patch and fi
       write: { 'README.md': 'hello world\n', 'src/new.ts': 'export {};\n', 'debug.log': 'ignored\n' },
     },
     { costTotal: 0.05, text: '# Report: DEMO-1, iteration 2\n\n## Fix 1 items\n| 1 | x | fixed | |', write: { 'src/new.ts': 'export const x = 1;\n' } },
-    // The MR preparation turn at Clean: stage by path, commit, rebase, the MR text.
-    { write: { '.software-factory/DEMO-1.mr.md': mrText('feat(DEMO-1): Export as CSV') }, run: [['git', 'add', 'README.md', 'src/new.ts'], commit('feat(DEMO-1): Export as CSV'), REBASE], text: '# Report: DEMO-1, MR preparation 1\n\n## Done\nCommitted.' },
+    // The MR text turn at Clean: the factory commits and rebases.
+    { write: { '.software-factory/DEMO-1.mr.md': mrText('feat(DEMO-1): Export as CSV') }, text: '# Report: DEMO-1, MR preparation 1\n\n## Done\nWrote the MR text.' },
   ]);
   const before = treeState(repo);
   const served = await serve(env);
@@ -412,7 +410,7 @@ test('sensitive paths (SF-024): declared by may_touch or not, deleted files, mar
       run: [['rm', 'src/old.ts', 'package-lock.json']],
       text: 'iteration 1',
     },
-    { write: { '.software-factory/S-1.mr.md': mrText('feat(S-1): Touch files') }, run: [['git', 'add', '-A', '--', 'package.json', 'package-lock.json', 'src', '.github', 'docs'], commit('feat(S-1): Touch files'), REBASE], text: 'prepared' },
+    { write: { '.software-factory/S-1.mr.md': mrText('feat(S-1): Touch files') }, text: 'prepared' },
   ]);
   const served = await serve(env);
   await call(served, 'start', { workspace: 'app', ticket: 'S-1' });

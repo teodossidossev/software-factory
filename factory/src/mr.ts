@@ -1,25 +1,24 @@
-// MR preparation steps on the work checkout, all through runGit: the target, the snapshot of the
-// reviewed change, the verification at turn end, the diff check by three-way merge, the push and
-// the merge request link. The Execution drives them around the Implementer's turn; this module runs
-// no turn.
-import { lstat, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises';
+// MR preparation steps on the work checkout, all through runGit: the target, the MR text, the
+// factory's commit and rebase at Clean, the conflict resolution around it, the push and the merge
+// request link. Git runs here outside the sandbox, so the repository's hooks are switched off.
+// The Execution drives them around the Implementer's turns; this module runs no turn.
+import { lstat, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { FactoryError } from './errors.js';
-import { type GitExtraEnv, runGit } from './git.js';
-import type { MrSnapshot } from './jobs.js';
+import { runGit } from './git.js';
 import { changedPaths } from './patch.js';
-import { isPlaceholder } from './placeholders.js';
 import { headerProblem, MR_REQUIRED_HEADINGS } from './rules.js';
 import { TASK_DIR } from './task-file.js';
 
 const FETCH_TIMEOUT_MS = 60_000;
 const PUSH_TIMEOUT_MS = 120_000;
-// update-index arguments per Git call, well below the argv limit.
-const UPDATE_INDEX_CHUNK = 200;
-// The identity of the snapshot commit, which never leaves the work checkout.
-const SNAPSHOT_IDENTITY = ['-c', 'user.name=Software Factory', '-c', 'user.email=software-factory@localhost'];
+// Each Git call of the commit and the rebase; a signing prompt that never returns ends here.
+const GIT_TIMEOUT_MS = 60_000;
+// Paths per Git call, well below the argv limit.
+const PATH_CHUNK = 200;
+// Lines of the MR text's ## Why section that become the commit body.
+const MAX_BODY_LINES = 5;
 export const MAX_MR_TEXT_BYTES = 64 * 1024;
-export const ABSENT = 'absent';
 
 export interface MrFailure {
   code: string;
@@ -34,6 +33,40 @@ async function gitText(cwd: string, args: string[]): Promise<{ ok: boolean; text
   const result = await runGit(cwd, args);
   return { ok: result.code === 0, text: result.stdout.toString('utf8').trim(), stderr: result.stderr.trim() };
 }
+
+// Git as the factory runs it in the worktree at Clean: no repository hooks (they would run
+// outside the sandbox) and a timeout.
+function factoryGit(cwd: string, args: string[]): ReturnType<typeof runGit> {
+  return runGit(cwd, ['-c', 'core.hooksPath=/dev/null', ...args], 1024 * 1024, GIT_TIMEOUT_MS);
+}
+
+function gitFailure(args: string[], result: { code: number | null; stderr: string }): string {
+  const command = `git ${args.find((arg) => !arg.startsWith('-')) ?? args[0]}`;
+  return result.code === null ? `${command} did not finish within ${GIT_TIMEOUT_MS / 1000} s` : `${command} failed: ${result.stderr.trim().slice(0, 500)}`;
+}
+
+// stdout of a factory Git call that must succeed.
+async function factoryGitOk(cwd: string, args: string[]): Promise<string> {
+  const result = await factoryGit(cwd, args);
+  if (result.code !== 0) {
+    throw new Error(gitFailure(args, result));
+  }
+  return result.stdout.toString('utf8');
+}
+
+function nulList(output: string): string[] {
+  return output.split('\0').filter((entry) => entry !== '');
+}
+
+function chunks<T>(items: T[]): T[][] {
+  const result: T[][] = [];
+  for (let start = 0; start < items.length; start += PATH_CHUNK) {
+    result.push(items.slice(start, start + PATH_CHUNK));
+  }
+  return result;
+}
+
+const literal = (path: string): string => `:(literal)${path}`;
 
 // The ref to start from or rebase onto: origin/<base> after a fetch when origin exists, else the
 // local <base>; and its commit.
@@ -57,127 +90,32 @@ export async function resolveTarget(cwd: string, base: string): Promise<{ ref: s
   return { ref: ref.replace(/^refs\/(heads|remotes)\//, ''), commit: resolved.text };
 }
 
-// The ref that keeps the snapshot commit of a job, so that gc does not remove it.
-export function snapshotRef(ticket: string): string {
-  return `refs/sf/snapshot/${ticket}`;
-}
-
-// stdout of a Git command that must succeed, trimmed.
-async function gitOk(cwd: string, args: string[], env?: GitExtraEnv): Promise<string> {
-  const result = await runGit(cwd, args, 1024 * 1024, undefined, env);
-  if (result.code !== 0) {
-    throw new Error(`git ${args.find((arg) => !arg.startsWith('-')) ?? args[0]} failed: ${result.stderr.trim().slice(0, 500)}`);
-  }
-  return result.stdout.toString('utf8').trim();
-}
-
-// The --cacheinfo value ("<mode>,<object>,<path>") of the working tree content of path, its blob
-// written to the object database; undefined when the path is deleted. hash-object follows a
-// symbolic link, so the link's target text is hashed from the scratch file instead.
-async function cacheInfo(cwd: string, path: string, scratch: string): Promise<string | undefined> {
-  let stats;
-  try {
-    stats = await lstat(join(cwd, path));
-  } catch {
-    return undefined;
-  }
-  if (stats.isSymbolicLink()) {
-    await writeFile(scratch, await readlink(join(cwd, path), { encoding: 'buffer' }));
-    return `120000,${await gitOk(cwd, ['hash-object', '-w', '--no-filters', '--', scratch])},${path}`;
-  }
-  if (stats.isDirectory()) {
-    // A submodule: the commit checked out in it.
-    return `160000,${await gitOk(join(cwd, path), ['rev-parse', '--verify', 'HEAD'])},${path}`;
-  }
-  const mode = (stats.mode & 0o111) !== 0 ? '100755' : '100644';
-  return `${mode},${await gitOk(cwd, ['hash-object', '-w', '--', path])},${path}`;
-}
-
-// The reviewed change as a commit on top of baseCommit: a temporary index in scratchDir (the job
-// directory) reads baseCommit, takes every Patch path from the working tree (deleted paths are
-// removed), and its tree is committed and kept under snapshotRef(ticket), replacing an earlier one.
-// The work checkout's index, HEAD and files are not touched.
-export async function takeSnapshot(
-  cwd: string,
-  ticket: string,
-  baseCommit: string,
-  target: { ref: string; commit: string },
-  scratchDir: string,
-): Promise<MrSnapshot> {
-  const { tracked, untracked } = await changedPaths(cwd, baseCommit);
-  const paths = [...new Set([...tracked, ...untracked])].sort();
-  // Absolute: Git runs in the work checkout, and SF_STATE_DIR may be relative.
-  const index = resolve(scratchDir, 'snapshot.index');
-  const scratch = resolve(scratchDir, 'snapshot.link');
-  const env: GitExtraEnv = { GIT_INDEX_FILE: index };
-  try {
-    await rm(index, { force: true });
-    await gitOk(cwd, ['read-tree', baseCommit], env);
-    const added: string[] = [];
-    const removed: string[] = [];
-    for (const path of paths) {
-      const info = await cacheInfo(cwd, path, scratch);
-      if (info === undefined) {
-        removed.push(path);
-      } else {
-        added.push(info);
-      }
-    }
-    for (let start = 0; start < added.length; start += UPDATE_INDEX_CHUNK) {
-      await gitOk(cwd, ['update-index', '--add', ...added.slice(start, start + UPDATE_INDEX_CHUNK).flatMap((info) => ['--cacheinfo', info])], env);
-    }
-    for (let start = 0; start < removed.length; start += UPDATE_INDEX_CHUNK) {
-      await gitOk(cwd, ['update-index', '--force-remove', '--', ...removed.slice(start, start + UPDATE_INDEX_CHUNK)], env);
-    }
-    const tree = await gitOk(cwd, ['write-tree'], env);
-    const commit = await gitOk(cwd, [...SNAPSHOT_IDENTITY, 'commit-tree', '--no-gpg-sign', tree, '-p', baseCommit, '-m', `sf snapshot ${ticket}`]);
-    await gitOk(cwd, ['update-ref', snapshotRef(ticket), commit]);
-    return { target_ref: target.ref, target_commit: target.commit, base_commit: baseCommit, snapshot_commit: commit, paths };
-  } finally {
-    await rm(index, { force: true });
-    await rm(scratch, { force: true });
-  }
-}
-
-// Removes snapshotRef(ticket); true when it is gone (or was never there).
-export async function deleteSnapshotRef(cwd: string, ticket: string): Promise<boolean> {
-  return (await runGit(cwd, ['update-ref', '-d', snapshotRef(ticket)])).code === 0;
-}
-
-// Paths whose object differs between expected and actual (ABSENT on both sides is equal), or that
-// only one of them lists. Sorted.
-export function compareSnapshot(expected: Record<string, string>, actual: Record<string, string>): string[] {
-  const paths = new Set([...Object.keys(expected), ...Object.keys(actual)]);
-  return [...paths].filter((path) => expected[path] !== actual[path]).sort();
-}
-
 async function gitDir(cwd: string): Promise<string> {
   return resolve(cwd, (await gitText(cwd, ['rev-parse', '--git-dir'])).text);
 }
 
 async function exists(path: string): Promise<boolean> {
   try {
-    await stat(path);
+    await lstat(path);
     return true;
   } catch {
     return false;
   }
 }
 
-// True while a rebase is in progress or Git holds the index lock.
-export async function gitBusy(cwd: string): Promise<boolean> {
+// True while a rebase is in progress in the worktree.
+export async function rebaseInProgress(cwd: string): Promise<boolean> {
   const dir = await gitDir(cwd);
-  for (const name of ['rebase-merge', 'rebase-apply', 'index.lock']) {
-    if (await exists(join(dir, name))) {
-      return true;
-    }
-  }
-  return false;
+  return (await exists(join(dir, 'rebase-merge'))) || (await exists(join(dir, 'rebase-apply')));
 }
 
-// Problems of the MR text, or undefined when it is valid; subject, when given, is the commit
-// subject the title must equal.
-export function mrTextProblem(ticket: string, text: string, subject?: string): string | undefined {
+// True while a rebase is in progress or Git holds the index lock.
+export async function gitBusy(cwd: string): Promise<boolean> {
+  return (await rebaseInProgress(cwd)) || (await exists(join(await gitDir(cwd), 'index.lock')));
+}
+
+// Problems of the MR text, or undefined when it is valid.
+export function mrTextProblem(ticket: string, text: string): string | undefined {
   const bytes = Buffer.byteLength(text, 'utf8');
   if (text.trim() === '') {
     return 'it is empty';
@@ -190,9 +128,6 @@ export function mrTextProblem(ticket: string, text: string, subject?: string): s
   if (header !== undefined) {
     return `its first line "${lines[0]!.slice(0, 100)}" is not a valid title: ${header}`;
   }
-  if (subject !== undefined && lines[0] !== subject) {
-    return `its title "${lines[0]!.slice(0, 100)}" differs from the commit subject "${subject.slice(0, 100)}"`;
-  }
   const missing = MR_REQUIRED_HEADINGS.filter((heading) => !lines.some((line) => line.trimEnd() === heading));
   if (missing.length > 0) {
     return `it lacks the heading(s) ${missing.join(', ')}`;
@@ -200,46 +135,10 @@ export function mrTextProblem(ticket: string, text: string, subject?: string): s
   return undefined;
 }
 
-// The checks after the MR preparation turn, the first failure winning; the MR text on success.
-export async function verifyPrepared(
-  cwd: string,
-  job: { ticket: string; branch: string },
-  targetCommit: string,
-): Promise<{ ok: true; mrText: string } | ({ ok: false } & MrFailure)> {
+// The MR text the Implementer wrote into the worktree, validated: missing or empty is
+// mr_text_missing, any other problem mr_text_invalid.
+export async function readMrText(cwd: string, ticket: string): Promise<{ ok: true; text: string } | ({ ok: false } & MrFailure)> {
   const fail = (code: string, message: string) => ({ ok: false as const, code, message });
-  const { ticket, branch } = job;
-  const head = await gitText(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
-  if (!head.ok || head.text !== branch) {
-    return fail('mr_branch_mismatch', `HEAD is ${head.ok ? `on ${head.text}` : 'detached'}, not on ${branch}.`);
-  }
-  if (await gitBusy(cwd)) {
-    return fail('mr_rebase_in_progress', 'A rebase (or a Git lock) is still in progress in the work checkout.');
-  }
-  // Not trimmed: porcelain lines start with a status column that may be a space. An untracked
-  // sandbox placeholder recreated after the cleanup does not count (its plain name is never quoted).
-  const status = await runGit(cwd, ['status', '--porcelain', '--untracked-files=all']);
-  const dirty: string[] = [];
-  for (const line of status.stdout.toString('utf8').split('\n')) {
-    if (line === '' || /^.. "?\.software-factory\//.test(line) || (line.startsWith('?? ') && (await isPlaceholder(cwd, line.slice(3))))) {
-      continue;
-    }
-    dirty.push(line);
-  }
-  if (status.code !== 0 || dirty.length > 0) {
-    return fail('mr_dirty', `The work checkout has ${dirty.length} uncommitted change(s): ${dirty.slice(0, 5).map((line) => line.slice(3)).join(', ')}.`);
-  }
-  if (!(await gitText(cwd, ['merge-base', '--is-ancestor', targetCommit, branch])).ok) {
-    return fail('mr_not_rebased', `${branch} does not contain the target commit ${targetCommit.slice(0, 12)}; it is not rebased.`);
-  }
-  const count = (await gitText(cwd, ['rev-list', '--count', `${targetCommit}..${branch}`])).text;
-  if (count !== '1') {
-    return fail('mr_commit_count', `${branch} has ${count} commit(s) on top of the target; the rules want exactly 1.`);
-  }
-  const subject = (await gitText(cwd, ['log', '-1', '--format=%s', branch])).text;
-  const problem = headerProblem(ticket, subject);
-  if (problem !== undefined) {
-    return fail('mr_commit_header', `The commit header "${subject.slice(0, 100)}" breaks the rules: ${problem}.`);
-  }
   const path = mrTextPath(ticket);
   let text: string;
   try {
@@ -254,50 +153,157 @@ export async function verifyPrepared(
   } catch {
     return fail('mr_text_missing', `${path} does not exist.`);
   }
-  const invalid = mrTextProblem(ticket, text, subject);
+  const invalid = mrTextProblem(ticket, text);
   if (invalid !== undefined) {
     return fail(text.trim() === '' ? 'mr_text_missing' : 'mr_text_invalid', `${path} is invalid: ${invalid}.`);
   }
-  return { ok: true, mrText: text };
+  return { ok: true, text };
 }
 
-// The tree a clean three-way merge of the reviewed change onto the target gives, and the paths that
-// merge left in conflict. Exit code 1 means conflicts; with --no-messages --name-only -z stdout is
-// "<tree>\0" followed by "<path>\0" for each conflicted path.
-export async function expectedMerge(cwd: string, snapshot: MrSnapshot): Promise<{ tree: string; conflicted: string[] }> {
-  const merged = await runGit(cwd, [
-    'merge-tree', '--write-tree', '--no-messages', '--name-only', '-z',
-    '--merge-base', snapshot.base_commit, snapshot.target_commit, snapshot.snapshot_commit,
-  ]);
-  const [tree, ...conflicted] = merged.stdout.toString('utf8').split('\0').filter((entry) => entry !== '');
-  if ((merged.code !== 0 && merged.code !== 1) || merged.truncated || tree === undefined || !/^[0-9a-f]{40,64}$/.test(tree)) {
-    throw new Error(`git merge-tree failed: ${merged.stderr.trim().slice(0, 500)}`);
+// The commit body: the non-empty lines of the MR text's ## Why section, at most five.
+export function commitBody(text: string): string {
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trimEnd() === '## Why');
+  if (start < 0) {
+    return '';
   }
-  return { tree, conflicted: [...new Set(conflicted)] };
-}
-
-async function objectAt(cwd: string, spec: string): Promise<string> {
-  const object = await gitText(cwd, ['rev-parse', '--verify', '--quiet', spec]);
-  return object.ok && object.text !== '' ? object.text : ABSENT;
-}
-
-// Paths whose content on the branch differs from what a clean three-way merge of the reviewed
-// change onto the target gives: every conflicted path, and every reviewed path or path changed
-// between the target and the branch whose blob differs from the merge result's.
-export async function snapshotDiff(cwd: string, snapshot: MrSnapshot, branch: string): Promise<string[]> {
-  const { tree, conflicted } = await expectedMerge(cwd, snapshot);
-  const listed = await runGit(cwd, ['diff', '--name-only', '-z', '--no-renames', snapshot.target_commit, branch]);
-  if (listed.code !== 0) {
-    throw new Error(`git diff failed: ${listed.stderr.trim()}`);
+  const body: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (/^#{1,2} /.test(line)) {
+      break;
+    }
+    if (line.trim() !== '' && body.length < MAX_BODY_LINES) {
+      body.push(line.trimEnd());
+    }
   }
-  const paths = new Set([...snapshot.paths, ...listed.stdout.toString('utf8').split('\0').filter((entry) => entry !== '')]);
-  const expected: Record<string, string> = {};
-  const actual: Record<string, string> = {};
+  return body.join('\n');
+}
+
+// The subset of paths that are submodules: a directory in the worktree whose index entry has
+// mode 160000. Their pointer is never committed by the factory (Git rules).
+export async function submodulePaths(cwd: string, paths: string[]): Promise<string[]> {
+  const gitlinks = new Set<string>();
+  for (const chunk of chunks(paths)) {
+    const output = await factoryGitOk(cwd, ['ls-files', '--stage', '-z', '--', ...chunk.map(literal)]);
+    for (const entry of nulList(output)) {
+      const match = /^160000 [0-9a-f]+ \d+\t(.*)$/s.exec(entry);
+      if (match !== null) {
+        gitlinks.add(match[1]!);
+      }
+    }
+  }
+  const result: string[] = [];
   for (const path of paths) {
-    expected[path] = await objectAt(cwd, `${tree}:${path}`);
-    actual[path] = await objectAt(cwd, `${branch}:${path}`);
+    if (gitlinks.has(path) && (await lstat(join(cwd, path)).then((stats) => stats.isDirectory(), () => false))) {
+      result.push(path);
+    }
   }
-  return [...new Set([...compareSnapshot(expected, actual), ...conflicted])].sort();
+  return result;
+}
+
+// The paths the factory commits: the Patch's paths against baseCommit (tracked and untracked,
+// filtered as the Patch is) without the submodules.
+export async function commitPaths(cwd: string, baseCommit: string): Promise<string[]> {
+  const { tracked, untracked } = await changedPaths(cwd, baseCommit);
+  const paths = [...new Set([...tracked, ...untracked])].sort();
+  const submodules = new Set(await submodulePaths(cwd, paths));
+  return paths.filter((path) => !submodules.has(path));
+}
+
+// The paths left unmerged by a stopped rebase.
+export async function unmergedPaths(cwd: string): Promise<string[]> {
+  return nulList(await factoryGitOk(cwd, ['diff', '--name-only', '-z', '--diff-filter=U'])).sort();
+}
+
+// How the factory's commit and rebase at Clean ended: the branch is ready, the rebase stopped on
+// conflicts in files (and stays in progress), or a failure (no rebase left in progress).
+export type Prepared = { kind: 'ready' } | { kind: 'conflict'; files: string[] } | { kind: 'failed'; failure: MrFailure };
+
+// Aborts a rebase in progress; true when there was one (also one that sf serve left behind when
+// it restarted during a conflict turn).
+export async function abortRebase(cwd: string): Promise<boolean> {
+  if (!(await rebaseInProgress(cwd))) {
+    return false;
+  }
+  await factoryGitOk(cwd, ['rebase', '--abort']);
+  return true;
+}
+
+// The reviewed change as one commit on top of baseCommit, rebased onto targetCommit. A commit
+// already on the branch (a fix after Clean, a retry) is undone first with `reset --mixed`, which
+// leaves the working tree alone, so the result is always one commit. The identity and the signing
+// configuration are the user's Git configuration.
+export async function commitAndRebase(cwd: string, input: { baseCommit: string; targetCommit: string; mrText: string }): Promise<Prepared> {
+  const { baseCommit, targetCommit, mrText } = input;
+  const head = (await factoryGitOk(cwd, ['rev-parse', '--verify', 'HEAD'])).trim();
+  if (head !== baseCommit) {
+    await factoryGitOk(cwd, ['reset', '-q', '--mixed', baseCommit]);
+  }
+  for (const chunk of chunks(await commitPaths(cwd, baseCommit))) {
+    await factoryGitOk(cwd, ['add', '--all', '--', ...chunk.map(literal)]);
+  }
+  const staged = await factoryGit(cwd, ['diff', '--cached', '--quiet']);
+  if (staged.code === 0) {
+    return { kind: 'failed', failure: { code: 'mr_empty', message: 'The reviewed change has nothing to commit against the base.' } };
+  }
+  if (staged.code !== 1) {
+    throw new Error(gitFailure(['diff'], staged));
+  }
+  const title = mrText.split(/\r?\n/)[0]!;
+  const body = commitBody(mrText);
+  const commitArgs = ['commit', '-q', '-m', title, ...(body !== '' ? ['-m', body] : [])];
+  const committed = await factoryGit(cwd, commitArgs);
+  if (committed.code !== 0) {
+    return { kind: 'failed', failure: { code: 'mr_commit_failed', message: `${gitFailure(commitArgs, committed)}.` } };
+  }
+  if ((await factoryGit(cwd, ['merge-base', '--is-ancestor', targetCommit, 'HEAD'])).code === 0) {
+    return { kind: 'ready' };
+  }
+  const rebased = await factoryGit(cwd, ['rebase', '-q', targetCommit]);
+  if (rebased.code === 0) {
+    return { kind: 'ready' };
+  }
+  const files = rebased.code === null ? [] : await unmergedPaths(cwd);
+  if (files.length > 0) {
+    return { kind: 'conflict', files };
+  }
+  await abortRebase(cwd);
+  return { kind: 'failed', failure: { code: 'mr_rebase_failed', message: `${gitFailure(['rebase'], rebased)}.` } };
+}
+
+// A line a conflict resolution must not leave behind.
+const CONFLICT_MARKER = /^(<<<<<<< |=======\r?$|>>>>>>> )/m;
+
+// The files of a stopped rebase that still hold a conflict marker line.
+export async function filesWithMarkers(cwd: string, files: string[]): Promise<string[]> {
+  const marked: string[] = [];
+  for (const file of files) {
+    const text = await readFile(join(cwd, file), 'utf8').catch(() => '');
+    if (CONFLICT_MARKER.test(text)) {
+      marked.push(file);
+    }
+  }
+  return marked;
+}
+
+// After the conflict turn: the resolved files are staged and the rebase continues. A file that
+// still holds a marker, or a continue that fails, aborts the rebase (mr_conflict).
+export async function continueRebase(cwd: string, files: string[]): Promise<MrFailure | undefined> {
+  const conflict = (detail: string): MrFailure => ({ code: 'mr_conflict', message: `The rebase had conflicts in ${files.join(', ')}; ${detail} The rebase was aborted.` });
+  const marked = await filesWithMarkers(cwd, files);
+  if (marked.length > 0) {
+    await abortRebase(cwd);
+    return conflict(`conflict markers are left in ${marked.join(', ')}.`);
+  }
+  for (const chunk of chunks(files)) {
+    await factoryGitOk(cwd, ['add', '--all', '--', ...chunk.map(literal)]);
+  }
+  const continued = await factoryGit(cwd, ['-c', 'core.editor=true', 'rebase', '--continue']);
+  if (continued.code !== 0) {
+    await abortRebase(cwd);
+    return conflict(`${gitFailure(['rebase'], continued)}.`);
+  }
+  return undefined;
 }
 
 // Nothing is pushed to main (or master) or to the job's base directly; every change reaches it

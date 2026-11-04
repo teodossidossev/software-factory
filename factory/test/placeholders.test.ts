@@ -1,12 +1,12 @@
 // Unit tests for the removal of the sandbox's placeholder files and the shared predicate, also
-// as used by changedPaths and the mr_dirty check.
+// as used by changedPaths and the factory's commit at Clean.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, before, test } from 'node:test';
-import { verifyPrepared } from '../src/mr.js';
+import { commitPaths } from '../src/mr.js';
 import { changedPaths } from '../src/patch.js';
 import { isPlaceholder, removeSandboxPlaceholders } from '../src/placeholders.js';
 
@@ -158,7 +158,7 @@ test('errors other than "not found" are thrown', async () => {
   }
 });
 
-test('changedPaths and the mr_dirty check skip an untracked placeholder, not a real change', async () => {
+test('changedPaths and the commit paths at Clean skip an untracked placeholder, not a real change', async () => {
   const cwd = await dir();
   git(cwd, 'init', '-q', '-b', 'main');
   await writeFile(join(cwd, 'README.md'), 'hello\n');
@@ -173,11 +173,7 @@ test('changedPaths and the mr_dirty check skip an untracked placeholder, not a r
   await writeFile(join(cwd, '.prettierrc'), 'real\n');
 
   assert.deepEqual(await changedPaths(cwd, base), { tracked: ['README.md'], untracked: ['.prettierrc'] });
-  const dirty = await verifyPrepared(cwd, { ticket: 'T-1', branch: 'T-1-x' }, base);
-  assert.deepEqual(dirty.ok ? undefined : [dirty.code, dirty.message], ['mr_dirty', 'The work checkout has 1 uncommitted change(s): .prettierrc.']);
-
+  assert.deepEqual(await commitPaths(cwd, base), ['.prettierrc', 'README.md']);
   await rm(join(cwd, '.prettierrc'));
-  const clean = await verifyPrepared(cwd, { ticket: 'T-1', branch: 'T-1-x' }, base);
-  // Past mr_dirty: the next failure is the missing MR text.
-  assert.equal(clean.ok ? 'ok' : clean.code, 'mr_text_missing');
+  assert.deepEqual(await commitPaths(cwd, base), ['README.md']);
 });

@@ -24,10 +24,6 @@ after(async () => {
   await as.close();
 });
 
-const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid'];
-const ADD = ['git', 'add', '-A'];
-const REBASE = ['git', ...ID, 'rebase', '-q', 'origin/main'];
-const commit = (message: string): string[] => ['git', ...ID, 'commit', '-q', '-m', message];
 
 function mrText(header: string): string {
   return [
@@ -100,7 +96,7 @@ test('events: capability, list, subscribe checks, the fake cycle delivered and s
   await putTask(env, repo, 'EV-1', 'Events demo');
   await script(env, [
     { write: { 'README.md': 'hello events\n' }, text: '# Report: EV-1, iteration 1\n\n## Done\nChanged the README.' },
-    { write: { '.software-factory/EV-1.mr.md': mrText('feat(EV-1): Change the README') }, run: [ADD, commit('feat(EV-1): Change the README'), REBASE], text: 'Prepared.' },
+    { write: { '.software-factory/EV-1.mr.md': mrText('feat(EV-1): Change the README') }, text: 'Prepared.' },
   ]);
   const served = await serve(env);
   const token = as.sign(as.claims());

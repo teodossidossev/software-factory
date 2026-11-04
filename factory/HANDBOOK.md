@@ -55,12 +55,13 @@ their own review, so you drive the cycle through tools:
    `mark_clean`, for every undeclared sensitive path say in your verdict why the change needs it
    and name it in `sensitive`, or `request_fix` its removal; `mark_clean` is refused
    (`sensitive_unacknowledged`) otherwise.
-   `mark_clean` makes the factory commit by the Git rules, rebase and verify (state
-   `preparing_mr`, then `ready_for_human_review` with the branch in the user's checkout, or
-   `needs_human` with the reason: call `mark_clean` again after fixing it with the user, or
-   `request_fix`); a prepared commit that differs from the reviewed change comes back as a new
-   iteration in `awaiting_review`. After `ready_for_human_review` the user may still ask you for
-   a fix: `request_fix` reopens the branch and the next Clean amends the commit.
+   `mark_clean` makes the Implementer write the merge request text and the factory commit by the
+   Git rules and rebase (state `preparing_mr`, then `ready_for_human_review` with the branch in
+   the user's checkout, or `needs_human` with the reason: call `mark_clean` again after fixing it
+   with the user, or `request_fix`); a rebase whose conflicts the Implementer resolved comes back
+   as a new iteration in `awaiting_review`. After `ready_for_human_review` the user may still ask
+   you for a fix: `request_fix` reopens the branch and the next Clean commits again, still as one
+   commit.
    When `check` says `pushed` or `aborted`, the ticket is finished for you: the factory removes
    this ticket's event subscription after that last event, so the task never fires again (the
    user deletes it from the Scheduled view when convenient). `failed` is a start that did not get
@@ -95,7 +96,7 @@ user decides.
 | `start(workspace, ticket)` | Creates the branch in a worktree of its own and starts the first iteration. Returns the check interval and the worktree. |
 | `check(workspace, ticket, offset?, max_bytes?)` | State of the job and, once an iteration is published, the Report, the Patch (paged like `read_file`) and `files` (the sensitive and the deleted paths). |
 | `request_fix(workspace, ticket, content)` | Appends `## Fix N` with your content to the Task file and starts iteration N+1 (after Clean: reopens the branch; the next Clean amends). Returns the check interval. |
-| `mark_clean(workspace, ticket, sensitive?)` | Your verdict that no further fix is needed, with every undeclared sensitive path you accept. The factory commits, rebases and verifies; the user takes over at `ready_for_human_review`. |
+| `mark_clean(workspace, ticket, sensitive?)` | Your verdict that no further fix is needed, with every undeclared sensitive path you accept. The factory commits and rebases; the user takes over at `ready_for_human_review`. |
 
 There are no event tools: `events/list`, `events/subscribe` and `events/unsubscribe` are MCP
 protocol methods of the same connector, used by ChatGPT when an event-triggered task is created;
@@ -171,11 +172,14 @@ its rules (no Git, no edits to the Task file) with every prompt, and appends the
   issue (always present in a factory job). At most 72 characters, no trailing period.
   A blank line, then a body of one to five lines that says why, not what: the diff says
   what. No trailers unless the repository's AGENTS.md asks for them.
-- Commits are made only in MR preparation, which runs when the Context owner declares Clean.
-  Iterations commit nothing. The user's approve pushes the prepared commit.
-- MR preparation always rebases onto the target branch, so the merge request can be
-  fast-forwarded. The Implementer resolves conflicts keeping the reviewed behaviour; every
-  file whose content changed in the resolution goes back to the Context owner before the push.
+- Commits are made only in MR preparation, which runs when the Context owner declares Clean,
+  and only by the factory. The Implementer writes the MR text; the factory makes the one commit
+  from it: the title is the header, the `## Why` section is the body. Iterations commit nothing.
+  The user's approve pushes the prepared commit.
+- The factory always rebases onto the target branch in MR preparation, so the merge request can
+  be fast-forwarded. On a conflict the Implementer resolves the listed files by editing them,
+  keeping the reviewed behaviour, and runs no Git command; the resolved change goes back to the
+  Context owner before the push.
 - The factory pushes `origin <branch>` once its checks pass. Nobody else pushes. The user
   opens the merge request.
 - Nothing is ever pushed to `main` (or `master`) directly, by anyone or any tool: every change

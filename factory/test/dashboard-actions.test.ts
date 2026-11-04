@@ -268,10 +268,6 @@ test('dashboard actions: a pending approve leaves reads, the stream and abort re
   }
 });
 
-const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid'];
-const commit = (message: string): string[] => ['git', ...ID, 'commit', '-q', '-m', message];
-const REBASE = ['git', ...ID, 'rebase', '-q', 'origin/main'];
-
 function mrText(header: string): string {
   return [
     header, '',
@@ -289,7 +285,7 @@ test('dashboard actions end to end: say resumes needs_human, approve is refused 
     { write: { 'a.txt': 'a\n' }, text: 'iteration 1' },
     { write: { 'a.txt': 'aa\n' }, text: 'resumed' },
     { startupFailure: 'sandbox: bubblewrap is not installed' },
-    { write: { '.software-factory/N-1.mr.md': mrText('feat(N-1): Add a') }, run: [['git', 'add', 'a.txt'], commit('feat(N-1): Add a'), REBASE], text: 'prepared' },
+    { write: { '.software-factory/N-1.mr.md': mrText('feat(N-1): Add a') }, text: 'prepared' },
   ]);
   const served = await serve(env);
   try {
@@ -349,10 +345,8 @@ test('dashboard actions end to end: say queues during a turn, a hand-edited tip 
     // C-1: the say arrives while this turn runs and is queued as the next one.
     { delayMs: 2500, write: { 'a.txt': 'a\n' }, text: 'iteration 1' },
     { text: 'the said turn' },
-    // Clean 1: the prepared commit adds b.txt, so the change goes back to review.
-    { write: { 'b.txt': 'b\n', '.software-factory/C-1.mr.md': mrText('feat(C-1): Add a and b') }, run: [['git', 'add', 'a.txt', 'b.txt'], commit('feat(C-1): Add a and b'), REBASE], text: 'prepared' },
-    // Clean 2: nothing more to do.
-    { text: 'nothing more' },
+    // Clean: the MR text; the factory commits.
+    { write: { '.software-factory/C-1.mr.md': mrText('feat(C-1): Add a') }, text: 'prepared' },
     // C-2: a preparation that abort ends.
     { write: { 'c.txt': 'c\n' } },
     { delayMs: 6000, text: 'slow preparation' },
@@ -368,11 +362,8 @@ test('dashboard actions end to end: say queues during a turn, a hand-edited tip 
     await call(served, 'start', { workspace: 'app', ticket: 'C-1' });
     assert.deepEqual(result(await act(base, 'api/jobs/app/C-1/say', { message })), { state: 'working', queued: true });
     await waitFor(served, 'C-1', 'awaiting_review', 1);
-    await call(served, 'mark_clean', { workspace: 'app', ticket: 'C-1' });
-    await waitFor(served, 'C-1', 'awaiting_review', 2);
-    assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'C-1' })).iteration, 2);
 
-    // The second Clean: the stream shows preparing_mr, then ready; approve and say are refused meanwhile.
+    // Clean: the stream shows preparing_mr, then ready; approve and say are refused meanwhile.
     const stream = await openStream(new URL('api/stream?job=app/C-1', base));
     await stream.next('jobs');
     await call(served, 'mark_clean', { workspace: 'app', ticket: 'C-1' });
@@ -385,18 +376,18 @@ test('dashboard actions end to end: say queues during a turn, a hand-edited tip 
     assert.equal(git(repo, 'rev-parse', 'C-1-job-c-1').trim(), prepared);
     // The tip is edited by hand: refused, then pushed as it is.
     const tree = git(repo, 'rev-parse', 'C-1-job-c-1^{tree}').trim();
-    const edited = git(repo, 'commit-tree', tree, '-p', prepared, '-m', 'feat(C-1): Add a and b').trim();
+    const edited = git(repo, 'commit-tree', tree, '-p', prepared, '-m', 'feat(C-1): Add a').trim();
     git(repo, 'update-ref', 'refs/heads/C-1-job-c-1', edited);
     const changed = await act(base, 'api/jobs/app/C-1/approve', {});
     assert.deepEqual(error(changed), { status: 409, code: 'branch_changed' });
     assert.match(JSON.parse(changed.body).error.message, /Approve with --as-is/);
     assert.deepEqual(error(await act(base, 'api/jobs/app/C-1/approve', { as_is: false })), { status: 409, code: 'branch_changed' });
-    assert.deepEqual(result(await act(base, 'api/jobs/app/C-1/approve', { as_is: true })), { state: 'pushed', branch: 'C-1-job-c-1', title: 'feat(C-1): Add a and b' });
+    assert.deepEqual(result(await act(base, 'api/jobs/app/C-1/approve', { as_is: true })), { state: 'pushed', branch: 'C-1-job-c-1', title: 'feat(C-1): Add a' });
     const pushed = (await jobs.read('app', 'C-1'))!;
-    assert.deepEqual([pushed.state, pushed.mr_attempts, pushed.iteration, pushed.prepared_commit], ['pushed', 2, 2, edited]);
+    assert.deepEqual([pushed.state, pushed.mr_attempts, pushed.iteration, pushed.prepared_commit], ['pushed', 1, 1, edited]);
     assert.deepEqual(error(await act(base, 'api/jobs/app/C-1/abort', {})), { status: 409, code: 'invalid_state' });
     let log = await fakeLog(env);
-    assert.equal(log.length, 4);
+    assert.equal(log.length, 3);
     assert.equal(log[1]!.prompt, factoryPrompt(message, 'C-1', 1));
 
     // C-2: abort while the MR preparation runs ends the job; the worktree stays.
@@ -431,9 +422,9 @@ test('dashboard actions end to end: say queues during a turn, a hand-edited tip 
     assert.deepEqual([partial.state, partial.branch, partial.discarded, partial.error.code], ['aborted', 'C-4-job-c-4', false, 'discard_failed']);
     assert.match(partial.error.message, /^git branch -D C-4-job-c-4 failed:/);
     assert.equal((await jobs.read('app', 'C-4'))!.error?.code, 'discard_failed');
-    // Seven, not eight: the aborted preparation of C-2 was ended before its delayed turn logged.
+    // Six, not seven: the aborted preparation of C-2 was ended before its delayed turn logged.
     log = await fakeLog(env);
-    assert.equal(log.length, 7);
+    assert.equal(log.length, 6);
   } finally {
     await stop(served);
   }

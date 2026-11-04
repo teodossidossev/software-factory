@@ -333,8 +333,69 @@ factory beyond its Git refs (branches) and worktree registrations.
   it failed. One line goes to `events.jsonl`: `{type: "review", reviewer, verdict, items: <count>}`
   or `{type: "review_failed", reviewer, error}`, with `ignored: true` when the job had moved on.
   `sf watch` and the dashboard's Event stream show it as `review by claude: fix (3 items)`,
-  `review by claude: clean` or `review by claude failed: <error>`. A cancelled review leaves
-  nothing. The review's own session messages are not logged.
+  `review by claude: clean` or `review by claude failed: <error>`. A cancelled review leaves no
+  outcome.
+- The reviewers live (SF-045): while a review runs, every SDK message of its session goes to
+  `events.jsonl` as it arrives: `{ts, iteration, type: "review_message", reviewer: "claude",
+  message}`; while a gate runs, every JSONL event of Codex's stdout that parses (other lines are
+  skipped): `{ts, iteration, type: "gate_event", reviewer: "codex", event}`. A message or event
+  whose JSON is above 16 KiB is cut (its strings and lists shortened) and carries `truncated:
+  true`. Only the message or event itself is logged, and redacted first (`src/redact.ts`, one
+  redactor per run, before the cut):
+  - every value of the factory's environment, as a whole value and whatever its length, becomes
+    `[redacted:<NAME>]`, except the variables named public in `src/redact.ts`: the shell's and
+    the desktop session's (`HOME`, `PATH`, `USER`, `LANG`, `LC_*`, `XDG_*`, `npm_package_*`,
+    `npm_lifecycle_*` and the like; not `npm_config_*`) and the factory's own settings that hold
+    no secret, listed one by one (not `SF_NTFY_TOKEN`, `SF_NTFY_URL` or `SF_AUTH_*`). A short
+    value of another variable (`1`, `on`) shows as `[redacted:<NAME>]` wherever it stands alone,
+    except in the fields the protocol sets (`type`, `subtype`, `role`, the ids, `status`);
+  - keys by their form become `[redacted]`: `sk-…`, `ghp_…`, `github_pat_…`, `AKIA…`, `xox?-…`,
+    `AIza…`, JWTs, `Bearer`/`Basic` credentials, URL credentials, private key blocks, upper-case
+    assignments whose name ends with KEY, TOKEN, SECRET, PASSWORD or CREDENTIAL(S)
+    (`OPENAI_API_KEY=…`), and quoted JSON, TOML or INI values of a field named that way
+    (`"access_token": "…"`, `api_key = "…"`, `"apiKey": "…"`);
+  - `[withheld: it may hold the environment or a file outside the worktree]` replaces the output
+    of a Codex command that reaches outside the worktree (`~`, `$HOME`, `..`, `$CODEX_HOME`, `cd`
+    alone, an absolute path not in the worktree other than `/dev/null` and the like), prints the
+    environment (`env`, `printenv`, also by a path, `export`/`declare` without an assignment, `set`
+    alone) or reads it (an interpreter with `os.environ`, `process.env`, `getenv`; a secret
+    variable); an output that shows `~/.codex` or another dotfile of the home by its path (the
+    worktree's own paths aside, which by default lie under `~/.local/state`), or names one the
+    short way (`~/.codex/config.toml`), or holds three lines in the shape of an environment dump;
+    the result, and arguments or errors that name such a file, of an MCP tool call; and the result
+    of a review tool use whose path (or Glob pattern) reaches outside the worktree, or that shows
+    or names such a file.
+  - Such a read (a command or tool use reaching outside, an output showing a home file by its
+    path, an MCP result) marks the run: from then on every string field of every later Codex
+    event and Claude review message is withheld (messages, reasoning, outputs, errors of any
+    shape, tool inputs and results, the result text, errors and structured verdict), but the
+    protocol's fields (`type`, `subtype`, `role`, the ids, `status`), Codex's command lines and
+    the review's tool names; numbers (exit codes, token counts) stay. Within one review message,
+    the blocks before the read stay. Before that, prose is withheld only when it shows or names a
+    home file as above, and so is a Codex error or failed turn message. A search for these words
+    inside the worktree (`rg process.env`, `rg .codex`) does not mark the run.
+  - The failure message of a review or a gate (`review.json`, `gate.json`, the `review_failed`
+    line, the job's error) is redacted the same way and withheld like prose: the factory's
+    lead-in up to the first `: ` stays (`Codex reported an error: `), and the detail after it
+    (Codex's error or stderr, the review's errors) is withheld when it shows or names a home file
+    or the run has read something withheld.
+  - **Known issue.** Codex's command lines stay readable after a run is marked, so a command
+    that repeats a value it read outside the worktree (`echo <value read from ~/.codex>`) shows
+    that value on its `codex | $ …` line, in `events.jsonl` and in `sf watch`, unless the value
+    is in the environment or has the form of a key. The Codex gate raised this on SF-045; it was
+    accepted so that the live log keeps the commands, which are its point.
+
+  A cancelled run keeps what it logged until then. `sf watch` and the Event stream
+  show them one line each, before the verdict line:
+  - Claude review: `review | <tool>(<file or pattern>)` for a tool use, `review | <text>` for each
+    line of assistant text; its init, tool results and result show nothing.
+  - Codex: `codex | $ <command>` when a command starts, `codex | exit <code>` and up to three
+    lines of its output (`…` when there are more) when it completes, `codex | <text>` for each
+    line of an agent message, `codex | reasoning: <first line>`, `codex | turn completed (<input>
+    in, <output> out tokens)`, `codex | error: <message>` for an error, a failed turn or an error
+    item; other events show nothing.
+  - A cut one ends with ` (cut)`; one that would show nothing shows `codex | <event type> (cut)`
+    (`review | <message type> (cut)`).
 - `sf review <workspace> <ticket>` (SF-044), or Retry review on the dashboard, retries a failed
   review. The job goes back to `awaiting_review` with its error cleared, at the same iteration (a
   state change, no new iteration). The failed `review.json` of the last iteration is removed, and
@@ -599,7 +660,7 @@ subscriptions.json                       # 0600, MCP event subscriptions with th
 events-queue.json                        # 0600, pending event deliveries, resumed at the next sf serve start
 dashboard-token                          # 0600, the dashboard token of the last sf serve start
 jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, state, iteration, fixes, gate_fixes, gate_tokens, session_id, created_at, updated_at, error
-jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "principal" | "event_delivered" | "event_failed" | "subscription_removed" | "review" | "review_failed" | ...}; what sf watch reads
+jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "principal" | "event_delivered" | "event_failed" | "subscription_removed" | "review" | "review_failed" | "review_message" | "gate_event" | ...}; what sf watch reads
 jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-schema.json,gate-output.json}
 worktrees/<workspace>/<ticket>/          # the job's worktree (SF_WORKTREE_ROOT), from start to Clean, abort or reset
 jobs/<workspace>/<ticket>/mr.md              # the MR text, once the branch is ready or after a conflict iteration
@@ -675,7 +736,7 @@ its meta line the Claude review: the verdict, the summary, the numbered items an
 sensitive paths, or why it failed, and under it the gate's verdict the same way with its tokens;
 the job's estimated cost includes the Claude reviews), Merge
 request (the MR text once there is one, else a note), State history, and Event stream (the
-Implementer's session as `sf watch` prints it, following new lines; scrolling up switches follow
+Implementer's session and the reviewers live as `sf watch` prints them, following new lines; scrolling up switches follow
 off). The selected tab is kept when another job is selected. The layout is one spacing and type
 scale on cards: the Setup card, a 300 px sidebar with the jobs (ticket, workspace and branch,
 state badge, a `no reviewer` or `broad` badge for live jobs only) and the collapsed

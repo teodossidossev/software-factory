@@ -72,6 +72,9 @@ export interface GateOptions {
   timeoutMs: number;
   // Cancels the run (abort, reset, a newer review): the process is killed.
   signal: AbortSignal;
+  // Every JSONL event of stdout that parses, in order, as it arrives (SF-045); runGate waits for
+  // the calls before it returns, and a failing call changes nothing of the outcome.
+  onEvent?: (event: unknown) => Promise<void>;
 }
 
 export type GateOutcome = { tokens: GateTokens; startedAt: string; endedAt: string } & (
@@ -97,17 +100,20 @@ export function gateEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.Pr
   return Object.fromEntries(Object.entries(env).filter(([name, value]) => value !== undefined && !name.startsWith('SF_')));
 }
 
-// One JSONL event of `codex exec --json`: the usage of turn.completed, the message of an error.
-function readEvent(line: string, tokens: GateTokens, errors: string[]): void {
-  let event: Record<string, unknown>;
+// One JSONL line of `codex exec --json` as an event object; undefined for a line that does not
+// parse to an object.
+function parseEvent(line: string): Record<string, unknown> | undefined {
+  let parsed: unknown;
   try {
-    event = JSON.parse(line) as Record<string, unknown>;
+    parsed = JSON.parse(line);
   } catch {
-    return;
+    return undefined;
   }
-  if (event === null || typeof event !== 'object') {
-    return;
-  }
+  return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : undefined;
+}
+
+// Counts one event of `codex exec --json`: the usage of turn.completed, the message of an error.
+function tallyEvent(event: Record<string, unknown>, tokens: GateTokens, errors: string[]): void {
   const count = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : 0);
   if (event.type === 'turn.completed' && event.usage !== null && typeof event.usage === 'object') {
     const usage = event.usage as Record<string, unknown>;
@@ -147,6 +153,19 @@ export async function runGate(prompt: string, options: GateOptions): Promise<Gat
   const errors: string[] = [];
   let stderr = '';
   let timedOut = false;
+  // The onEvent calls, one after the other.
+  let delivered = Promise.resolve();
+  const onLine = (line: string): void => {
+    const event = parseEvent(line);
+    if (event === undefined) {
+      return;
+    }
+    tallyEvent(event, tokens, errors);
+    const { onEvent } = options;
+    if (onEvent !== undefined) {
+      delivered = delivered.then(() => onEvent(event)).catch((error: unknown) => console.error(error));
+    }
+  };
   const ended = await new Promise<{ code: number | null; signal: NodeJS.Signals | null } | { spawnError: Error }>((resolve) => {
     const child = spawn(options.codexPath, gateArgs(options), { cwd: options.cwd, env: gateEnvironment(), stdio: ['pipe', 'pipe', 'pipe'] });
     let killTimer: NodeJS.Timeout | undefined;
@@ -173,7 +192,7 @@ export async function runGate(prompt: string, options: GateOptions): Promise<Gat
       const lines = pending.split('\n');
       pending = lines.pop()!;
       for (const line of lines) {
-        readEvent(line, tokens, errors);
+        onLine(line);
       }
     });
     child.stderr.on('data', (chunk: Buffer) => {
@@ -187,12 +206,15 @@ export async function runGate(prompt: string, options: GateOptions): Promise<Gat
       clearTimeout(killTimer);
       process.off('exit', onExit);
       options.signal.removeEventListener('abort', kill);
-      readEvent(pending, tokens, errors);
+      // An error and then a close both end here; the last line counts once.
+      onLine(pending);
+      pending = '';
       resolve(result);
     };
     child.once('error', (error) => finish({ spawnError: error }));
     child.once('close', (code, signal) => finish({ code, signal }));
   });
+  await delivered;
   if ('spawnError' in ended) {
     return failed(`The gate could not start: ${ended.spawnError.message}`);
   }

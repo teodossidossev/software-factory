@@ -8,6 +8,8 @@ import { FactoryError } from './errors.js';
 const INPUT_CHARS = 120;
 const LINE_CHARS = 200;
 const POLL_MS = 300;
+// The first lines of a Codex command's output shown when it completes.
+const OUTPUT_LINES = 3;
 
 function oneLine(text: string, max = LINE_CHARS): string {
   const line = text.replace(/\s+/g, ' ').trim();
@@ -32,7 +34,7 @@ function resultText(content: unknown): string {
 export interface DescribedEvent {
   ts: string | null;
   iteration: number | null;
-  // "prompt", "state", "notify_failed", "placeholders_removed", "principal", "event_delivered", "event_failed", "review", "review_failed" (Claude's or the gate's), or the SDK message type ("assistant", "user", "result", "system", ...).
+  // "prompt", "state", "notify_failed", "placeholders_removed", "principal", "event_delivered", "event_failed", "review", "review_failed" (Claude's or the gate's), "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
   type: string;
   lines: string[];
 }
@@ -107,6 +109,9 @@ function recordLines(record: Record<string, unknown>): string[] {
     const items = record.verdict === 'fix' ? ` (${count} ${count === 1 ? 'item' : 'items'})` : '';
     return [`${prefix} review by ${String(record.reviewer)}: ${String(record.verdict)}${items}${ignored}`];
   }
+  if (record.type === 'gate_event' || record.type === 'review_message') {
+    return reviewerLines(record).map((line) => `${prefix} ${line}`);
+  }
   const message = record.message as Record<string, unknown> | undefined;
   if (message === undefined) {
     return [];
@@ -140,6 +145,90 @@ function recordLines(record: Record<string, unknown>): string[] {
     return [`${prefix} result ${String(message.subtype)}, cost ${cost}, duration ${seconds}, ${String(message.num_turns)} turns`];
   }
   return [];
+}
+
+// The non-empty lines of a text, trimmed.
+function textLines(text: string): string[] {
+  return text.split('\n').map((line) => line.trim()).filter((line) => line !== '');
+}
+
+const asRecord = (value: unknown): Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+
+// The lines of one Codex event of the gate (SF-039), without the "codex | " prefix.
+function codexLines(event: Record<string, unknown>): string[] {
+  const item = asRecord(event.item);
+  if (event.type === 'error') {
+    return [`error: ${oneLine(String(event.message ?? 'error'))}`];
+  }
+  if (event.type === 'turn.failed') {
+    return [`error: ${oneLine(String(asRecord(event.error).message ?? 'turn failed'))}`];
+  }
+  if (event.type === 'turn.completed') {
+    const usage = asRecord(event.usage);
+    return [`turn completed (${String(usage.input_tokens ?? 0)} in, ${String(usage.output_tokens ?? 0)} out tokens)`];
+  }
+  if (event.type === 'item.started' && item.type === 'command_execution') {
+    const command = Array.isArray(item.command) ? item.command.map(String).join(' ') : String(item.command ?? '');
+    return [`$ ${oneLine(command)}`];
+  }
+  if (event.type !== 'item.completed') {
+    return [];
+  }
+  if (item.type === 'command_execution') {
+    const output = textLines(typeof item.aggregated_output === 'string' ? item.aggregated_output : '');
+    const shown = output.slice(0, OUTPUT_LINES).map((line) => `  ${oneLine(line)}`);
+    return [`exit ${String(item.exit_code ?? '?')}`, ...shown, ...(output.length > OUTPUT_LINES ? ['  …'] : [])];
+  }
+  if (item.type === 'agent_message' && typeof item.text === 'string') {
+    return textLines(item.text).map((line) => oneLine(line));
+  }
+  if (item.type === 'reasoning' && typeof item.text === 'string') {
+    const first = textLines(item.text)[0];
+    return first !== undefined ? [`reasoning: ${oneLine(first)}`] : [];
+  }
+  if (item.type === 'error') {
+    return [`error: ${oneLine(String(item.message ?? 'error'))}`];
+  }
+  return [];
+}
+
+// The short input of a review tool use: the file or pattern it is about, else its JSON.
+function shortInput(input: unknown): string {
+  const fields = asRecord(input);
+  const named = ['file_path', 'pattern', 'path'].map((key) => fields[key]).find((value) => typeof value === 'string');
+  return oneLine(typeof named === 'string' ? named : JSON.stringify(input ?? {}), INPUT_CHARS);
+}
+
+// The lines of one Claude review message (SF-038), without the "review | " prefix: its text and
+// tool uses. The verdict has its own record.
+function reviewLines(message: Record<string, unknown>): string[] {
+  if (message.type !== 'assistant') {
+    return [];
+  }
+  return blocks(message).flatMap((block) => {
+    if (block.type === 'text' && typeof block.text === 'string') {
+      return textLines(block.text).map((line) => oneLine(line));
+    }
+    if (block.type === 'tool_use') {
+      return [`${oneLine(String(block.name))}(${shortInput(block.input)})`];
+    }
+    return [];
+  });
+}
+
+// A gate_event or review_message record (SF-045) as reviewer-prefixed lines; a cut one is marked.
+function reviewerLines(record: Record<string, unknown>): string[] {
+  const codex = record.type === 'gate_event';
+  const body = asRecord(codex ? record.event : record.message);
+  const lines = codex ? codexLines(body) : reviewLines(body);
+  if (record.truncated === true) {
+    if (lines.length === 0) {
+      lines.push(oneLine(String(body.type ?? 'event')));
+    }
+    lines[lines.length - 1] += ' (cut)';
+  }
+  return lines.map((line) => `${codex ? 'codex' : 'review'} | ${line}`);
 }
 
 // Prints every event; with follow, keeps reading new lines until the signal aborts.

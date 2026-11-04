@@ -3,8 +3,10 @@
 // environment names and its pid to $HOME/fake-codex.log, takes its run script from
 // $HOME/fake-codex.json ({"runs": [...]}, consumed in order through $HOME/fake-codex.count), and
 // then writes the run's output (default: a clean verdict) to the --output-last-message file and
-// prints JSONL events ending in turn.completed with a usage, or simulates a failure: an exit code,
-// no output, an invalid output, an error event, a delay (for timeouts and aborts).
+// prints JSONL events (a reasoning item, a command started and completed, lines that are not JSON objects,
+// an agent message, optionally one above the 16 KiB bound of SF-045) ending in turn.completed with
+// a usage, or simulates a failure: an exit code, no output, an invalid output, an error event, a
+// delay (for timeouts and aborts).
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -21,6 +23,14 @@ interface Run {
   error?: string;
   // Waits this long before answering.
   delayMs?: number;
+  // Prints an agent message of this many bytes before the last one (to be cut at its bound).
+  bigMessageBytes?: number;
+  // Leaks (SF-045): says the values of ANTHROPIC_FAKE_SECRET and ANTHROPIC_FAKE_PIN, quotes ~/.codex/config.toml,
+  // cats ~/.co*/auth.json, runs /usr/bin/env, then repeats the auth file without naming it.
+  leak?: boolean;
+  // After cat ~/.codex/auth.json, prints every event type with this literal in each free-text field,
+  // ending in an error and a failed turn (SF-045).
+  walk?: string;
   // The usage of turn.completed; default 1000 input (200 cached) and 100 output tokens.
   usage?: { input_tokens: number; cached_input_tokens: number; output_tokens: number };
 }
@@ -68,7 +78,42 @@ function answer(): void {
   if (run.error !== undefined) {
     event({ type: 'error', message: run.error });
   }
-  event({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: 'Reviewed.' } });
+  event({ type: 'item.completed', item: { id: 'item_0', type: 'reasoning', text: '**Reading the diff**\n\nFirst the patch.' } });
+  event({ type: 'item.started', item: { id: 'item_1', type: 'command_execution', command: 'bash -lc \'git status\'', aggregated_output: '', exit_code: null, status: 'in_progress' } });
+  process.stdout.write('not a JSON line\nnull\n');
+  event({ type: 'item.completed', item: { id: 'item_1', type: 'command_execution', command: 'bash -lc \'git status\'', aggregated_output: 'On branch fake\nnothing to commit\n', exit_code: 0, status: 'completed' } });
+  if (run.leak === true) {
+    const secret = process.env.ANTHROPIC_FAKE_SECRET ?? '';
+    const auth = JSON.stringify({ OPENAI_API_KEY: null, tokens: { access_token: 'fake-access-token-value', refresh_token: 'fake-refresh-token-value' } });
+    event({ type: 'item.completed', item: { id: 'leak_0', type: 'agent_message', text: `The secret is ${secret}, the pin ${process.env.ANTHROPIC_FAKE_PIN ?? ''}.` } });
+    event({ type: 'item.completed', item: { id: 'leak_p', type: 'agent_message', text: `${join(home, '.codex', 'config.toml')}: model = "fake-codex-config-model"` } });
+    event({ type: 'item.completed', item: { id: 'leak_1', type: 'command_execution', command: 'bash -lc \'cat ~/.co*/auth.json\'', aggregated_output: auth, exit_code: 0, status: 'completed' } });
+    event({ type: 'item.completed', item: { id: 'leak_2', type: 'command_execution', command: '/usr/bin/env', aggregated_output: `ANTHROPIC_FAKE_SECRET=${secret}\nHOME=${home}\n`, exit_code: 0, status: 'completed' } });
+    event({ type: 'item.completed', item: { id: 'leak_3', type: 'agent_message', text: 'The auth file says fake-codex-auth-repeated.' } });
+  }
+  if (run.walk !== undefined) {
+    const literal = run.walk;
+    const read = { id: 'walk_0', type: 'command_execution', command: 'bash -lc \'cat ~/.codex/auth.json\'', aggregated_output: '', exit_code: null, status: 'in_progress' };
+    event({ type: 'item.started', item: read });
+    event({ type: 'item.completed', item: { ...read, aggregated_output: '{}', exit_code: 0, status: 'completed' } });
+    for (const phase of ['item.started', 'item.updated', 'item.completed']) {
+      event({ type: phase, item: { id: 'walk_1', type: 'agent_message', text: literal } });
+    }
+    event({ type: 'item.completed', item: { id: 'walk_2', type: 'reasoning', text: literal } });
+    event({ type: 'item.started', item: { id: 'walk_3', type: 'command_execution', command: 'cat README.md', aggregated_output: '', exit_code: null, status: 'in_progress' } });
+    event({ type: 'item.completed', item: { id: 'walk_3', type: 'command_execution', command: 'cat README.md', aggregated_output: literal, exit_code: 0, status: 'completed' } });
+    event({ type: 'item.completed', item: { id: 'walk_4', type: 'file_change', changes: [{ path: literal, kind: 'update' }], status: 'completed' } });
+    event({ type: 'item.completed', item: { id: 'walk_5', type: 'mcp_tool_call', server: literal, tool: literal, arguments: { q: literal }, result: { content: literal }, error: { message: literal }, status: 'failed' } });
+    event({ type: 'item.completed', item: { id: 'walk_6', type: 'web_search', query: literal } });
+    event({ type: 'item.updated', item: { id: 'walk_7', type: 'todo_list', items: [{ text: literal, completed: false }] } });
+    event({ type: 'item.completed', item: { id: 'walk_8', type: 'error', message: literal } });
+    event({ type: 'error', message: literal });
+    event({ type: 'turn.failed', error: { message: literal } });
+  }
+  if (run.bigMessageBytes !== undefined) {
+    event({ type: 'item.completed', item: { id: 'item_2', type: 'agent_message', text: `Big ${'b'.repeat(run.bigMessageBytes)}` } });
+  }
+  event({ type: 'item.completed', item: { id: 'item_3', type: 'agent_message', text: 'Reviewed.' } });
   event({ type: 'turn.completed', usage: run.usage ?? { input_tokens: 1000, cached_input_tokens: 200, output_tokens: 100 } });
   if (run.exitCode !== undefined) {
     process.stderr.write('fake codex: something went wrong\n');

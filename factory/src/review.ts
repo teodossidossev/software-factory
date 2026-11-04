@@ -2,7 +2,7 @@
 // the job's worktree, with the Task file, the Report, the Patch and the sensitive and deleted paths
 // in its prompt and a structured verdict as its output. Knows nothing about job states; the
 // Execution applies the verdict.
-import { query, type SandboxSettings, type SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
+import { query, type SandboxSettings, type SDKMessage, type SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
 import * as z from 'zod/v4';
 import type { FileChange } from './jobs.js';
 import { handbookSection } from './prompts.js';
@@ -133,6 +133,9 @@ export interface ReviewOptions {
   maxTurns: number;
   // Aborts the session (abort, reset, a newer review).
   signal: AbortSignal;
+  // Every SDK message of the session, in order, awaited before the next one (SF-045); a failing
+  // call changes nothing of the outcome.
+  onMessage?: (message: SDKMessage) => Promise<void>;
 }
 
 export type ReviewOutcome =
@@ -172,6 +175,7 @@ export async function runReview(prompt: string, options: ReviewOptions): Promise
       },
     });
     for await (const message of session) {
+      await options.onMessage?.(message).catch((error: unknown) => console.error(error));
       if (message.type === 'result') {
         result = message;
       }

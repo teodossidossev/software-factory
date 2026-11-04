@@ -9,6 +9,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { GATE_SCHEMA, gateArgs } from '../src/gate.js';
+import { WITHHELD } from '../src/redact.js';
 import { JobStore } from '../src/jobs.js';
 import { fetchRaw } from './support/dashboard-client.js';
 import {
@@ -60,6 +61,9 @@ function alive(pid: number): boolean {
   }
 }
 
+// The lines of sf watch without their time (HH:MM:SS and a space).
+const withoutTime = (stdout: string): string[] => stdout.split('\n').map((line) => line.slice('00:00:00 '.length));
+
 async function eventsOf(env: Env, ticket: string): Promise<Array<Record<string, unknown>>> {
   return (await readFile(join(env.state, 'jobs', 'app', ticket, 'events.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
 }
@@ -108,7 +112,7 @@ test('clean: Claude, then the gate in a read-only Codex in the worktree, then Cl
     { write: { '.software-factory/G-1.mr.md': mrText('feat(G-1): Greet the reader') }, text: 'prepared' },
   ]);
   await reviewScript(env, [{ output: CLAUDE_CLEAN }]);
-  await codexScript(env, [{ output: GATE_CLEAN, usage: { input_tokens: 1200, cached_input_tokens: 300, output_tokens: 34 } }]);
+  await codexScript(env, [{ output: GATE_CLEAN, usage: { input_tokens: 1200, cached_input_tokens: 300, output_tokens: 34 }, bigMessageBytes: 20 * 1024 }]);
   const served = await serve(env);
   try {
     assert.doesNotMatch(served.output, /^gate:/m);
@@ -155,9 +159,185 @@ test('clean: Claude, then the gate in a read-only Codex in the worktree, then Cl
     assert.deepEqual((await eventsOf(env, 'G-1')).filter((record) => record.type === 'review').map((record) => [record.reviewer, record.verdict]), [['claude', 'clean'], ['codex', 'clean']]);
     const watched = await runCli(env, ['watch', 'app', 'G-1', '--once']);
     assert.match(watched.stdout, /^\d\d:\d\d:\d\d \[1\] review by codex: clean$/m);
+    // The gate live (SF-045): every Codex event that parses, in order, the big one cut; then the
+    // verdict line. Nothing but the event itself is logged.
+    const live = (await eventsOf(env, 'G-1')).filter((record) => record.type === 'gate_event');
+    const kind = (record: Record<string, unknown>): string => {
+      const event = record.event as { type: string; item?: { type: string } };
+      return event.item !== undefined ? `${event.type} ${event.item.type}` : event.type;
+    };
+    assert.deepEqual(live.map(kind), [
+      'thread.started', 'turn.started', 'item.completed reasoning', 'item.started command_execution', 'item.completed command_execution',
+      'item.completed agent_message', 'item.completed agent_message', 'turn.completed',
+    ]);
+    assert.deepEqual(live.map((record) => record.truncated ?? false), [false, false, false, false, false, true, false, false]);
+    assert.ok(live.every((record) => record.reviewer === 'codex' && record.iteration === 1));
+    assert.ok(live.every((record) => Object.keys(record).filter((key) => key !== 'truncated').sort().join() === 'event,iteration,reviewer,ts,type'));
+    const big = JSON.stringify(live[5]!.event);
+    assert.ok(Buffer.byteLength(big) <= 16 * 1024 && big.includes('Big bbb'), String(Buffer.byteLength(big)));
+    const codexLines = withoutTime(watched.stdout).filter((line) => /^\[1\] (codex \||review by codex)/.test(line)).map((line) => line.slice('[1] '.length));
+    assert.equal(codexLines.length, 9, codexLines.join('\n'));
+    assert.deepEqual([...codexLines.slice(0, 5), codexLines[5]!.replace(/b{20,}…/, 'b…'), ...codexLines.slice(6)], [
+      'codex | reasoning: **Reading the diff**',
+      'codex | $ bash -lc \'git status\'',
+      'codex | exit 0',
+      'codex |   On branch fake',
+      'codex |   nothing to commit',
+      'codex | Big b… (cut)',
+      'codex | Reviewed.',
+      'codex | turn completed (1200 in, 34 out tokens)',
+      'review by codex: clean',
+    ]);
     assert.match((await runCli(env, ['info'])).stdout, new RegExp(`^gate {10}codex codex-cli 0\\.0\\.0-fake \\(${fakeCodex.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)$`, 'm'));
     const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/G-1', served.dashboard!))).body);
     assert.deepEqual([detail.iterations[0].review.reviewer, detail.iterations[0].gate.reviewer, detail.iterations[0].gate.verdict], ['claude', 'codex', 'clean']);
+  } finally {
+    await stop(served);
+  }
+});
+
+test('the live events and the failure records hold no environment value, key or content from outside the worktree (SF-045)', async () => {
+  const secret = 'leaky-secret-value-0123456789';
+  // A short secret counts as much as a long one.
+  const pin = 'q7z';
+  const env = await newEnv('gate-leak', gateEnv({ ANTHROPIC_FAKE_SECRET: secret, ANTHROPIC_FAKE_PIN: pin, SF_MAX_JOBS: '4' }));
+  const repo = await newRepo(env, 'gate-leak-repo', false);
+  await putTask(env, repo, 'L-1', 'Greet the reader');
+  await putTask(env, repo, 'L-2', 'Greet the writer');
+  await putTask(env, repo, 'L-3', 'Greet the editor');
+  await putTask(env, repo, 'L-4', 'Greet the printer');
+  // A literal no pattern knows, in a failure that quotes ~/.codex.
+  const literal = 'fake-literal-auth-content';
+  await script(env, [
+    { write: { 'README.md': 'hello reader\n' }, text: 'Report of iteration 1' },
+    { write: { '.software-factory/L-1.mr.md': mrText('feat(L-1): Greet the reader') }, text: 'prepared' },
+    { write: { 'WRITER.md': 'hello writer\n' }, text: 'Report of iteration 1' },
+    { write: { 'EDITOR.md': 'hello editor\n' }, text: 'Report of iteration 1' },
+    { write: { 'PRINTER.md': 'hello printer\n' }, text: 'Report of iteration 1' },
+  ]);
+  await reviewScript(env, [
+    { output: CLAUDE_CLEAN, leak: true }, { output: CLAUDE_CLEAN }, { output: CLAUDE_CLEAN },
+    { subtype: 'error_during_execution', errors: [`~/.codex/config.toml: ${literal}`] },
+  ]);
+  await codexScript(env, [
+    { output: GATE_CLEAN, leak: true }, { error: `quota exceeded for ${secret}` },
+    { error: `${join(env.home, '.codex', 'auth.json')}: ${literal}` },
+  ]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'L-1' });
+    await waitFor(served, 'L-1', 'ready_for_human_review', 1);
+    const raw = await readFile(join(env.state, 'jobs', 'app', 'L-1', 'events.jsonl'), 'utf8');
+    for (const leaked of [secret, pin, 'fake-codex-config-model', 'fake-codex-auth-repeated', 'fake-access-token-value', 'fake-refresh-token-value', 'fake-codex-auth-file-content']) {
+      assert.ok(!raw.includes(leaked), leaked);
+    }
+    const watched = (await runCli(env, ['watch', 'app', 'L-1', '--once'])).stdout;
+    for (const leaked of [secret, pin, 'fake-codex-config-model', 'fake-codex-auth-repeated']) {
+      assert.ok(!watched.includes(leaked), leaked);
+    }
+    const lines = withoutTime(watched);
+    for (const expected of [
+      `[1] review | Read(${join(env.home, '.codex', 'auth.json')})`,
+      '[1] review | The secret is [redacted:ANTHROPIC_FAKE_SECRET], the pin [redacted:ANTHROPIC_FAKE_PIN].',
+      '[1] codex | exit 0',
+      `[1] codex |   ${WITHHELD}`,
+      '[1] codex | The secret is [redacted:ANTHROPIC_FAKE_SECRET], the pin [redacted:ANTHROPIC_FAKE_PIN].',
+      // The prose that quotes ~/.codex, and the prose after the read that repeats it.
+      `[1] review | ${WITHHELD}`,
+      `[1] codex | ${WITHHELD}`,
+    ]) {
+      assert.ok(lines.includes(expected), `${expected}\n${lines.join('\n')}`);
+    }
+    const events = await eventsOf(env, 'L-1');
+    const results = events.filter((record) => record.type === 'review_message' && (record.message as { type: string }).type === 'user');
+    assert.deepEqual(results.map((record) => ((record.message as { message: { content: Array<{ content: unknown }> } }).message.content[0]!.content)), ['the file', WITHHELD]);
+    const outputs = events.filter((record) => record.type === 'gate_event').map((record) => (record.event as { item?: { id?: string; aggregated_output?: string } }).item)
+      .filter((item) => item?.id?.startsWith('leak_') === true && item.aggregated_output !== undefined).map((item) => item!.aggregated_output);
+    assert.deepEqual(outputs, [WITHHELD, WITHHELD]);
+
+    // A failed gate: Codex's error is redacted in gate.json, the event and the job's error.
+    await call(served, 'start', { workspace: 'app', ticket: 'L-2' });
+    const failed = await waitFor(served, 'L-2', 'needs_human', 1);
+    assert.equal(failed.error.code, 'gate_failed');
+    const message = 'Codex reported an error: quota exceeded for [redacted:ANTHROPIC_FAKE_SECRET]';
+    assert.equal(failed.error.message, message);
+    const recorded = await new JobStore(env.state).readGate('app', 'L-2', 1);
+    assert.ok(recorded !== undefined && 'error' in recorded && recorded.error === message);
+    const rawFailed = await readFile(join(env.state, 'jobs', 'app', 'L-2', 'events.jsonl'), 'utf8');
+    assert.ok(!rawFailed.includes(secret));
+    assert.ok(rawFailed.includes('quota exceeded for [redacted:ANTHROPIC_FAKE_SECRET]'));
+
+    // A failed gate and a failed review whose error quotes ~/.codex: the detail is withheld in the
+    // live event, gate.json or review.json, the review_failed line, sf watch and the job's error.
+    const jobs = new JobStore(env.state);
+    for (const [ticket, code, expected] of [
+      ['L-3', 'gate_failed', `Codex reported an error: ${WITHHELD}`],
+      ['L-4', 'review_failed', `The review ended with error_during_execution: ${WITHHELD}`],
+    ] as const) {
+      await call(served, 'start', { workspace: 'app', ticket });
+      const stopped = await waitFor(served, ticket, 'needs_human', 1);
+      assert.deepEqual([stopped.error.code, stopped.error.message], [code, expected]);
+      const record = ticket === 'L-3' ? await jobs.readGate('app', ticket, 1) : await jobs.readReview('app', ticket, 1);
+      assert.ok(record !== undefined && 'error' in record && record.error === expected, JSON.stringify(record));
+      const rawEvents = await readFile(join(env.state, 'jobs', 'app', ticket, 'events.jsonl'), 'utf8');
+      assert.ok(!rawEvents.includes(literal), ticket);
+      assert.ok((await eventsOf(env, ticket)).some((event) => event.type === 'review_failed' && event.error === expected), ticket);
+      const watchedFailure = (await runCli(env, ['watch', 'app', ticket, '--once'])).stdout;
+      assert.ok(!watchedFailure.includes(literal), ticket);
+      assert.ok(withoutTime(watchedFailure).includes(`[1] review by ${ticket === 'L-3' ? 'codex' : 'claude'} failed: ${expected}`), watchedFailure);
+    }
+  } finally {
+    await stop(served);
+  }
+});
+
+test('after a read of ~/.codex marks the run, no free-text field of any later Codex event or Claude message reaches events.jsonl, the records, sf watch or the job error (SF-045)', async () => {
+  // A literal no pattern knows, in every free-text field of every event and message type.
+  const literal = 'walk-literal-zq81';
+  const env = await newEnv('gate-walk', gateEnv());
+  const repo = await newRepo(env, 'gate-walk-repo', false);
+  await putTask(env, repo, 'W-1', 'Walk the gate');
+  await putTask(env, repo, 'W-2', 'Walk the review');
+  await script(env, [
+    { write: { 'GATE.md': 'gate\n' }, text: 'Report of iteration 1' },
+    { write: { 'REVIEW.md': 'review\n' }, text: 'Report of iteration 1' },
+  ]);
+  await reviewScript(env, [{ output: CLAUDE_CLEAN }, { walk: literal }]);
+  await codexScript(env, [{ walk: literal }]);
+  const served = await serve(env);
+  try {
+    const jobs = new JobStore(env.state);
+    for (const [ticket, code, reviewer, expected] of [
+      ['W-1', 'gate_failed', 'codex', `Codex reported an error: ${WITHHELD}`],
+      ['W-2', 'review_failed', 'claude', `The review ended with error_during_execution: ${WITHHELD}`],
+    ] as const) {
+      await call(served, 'start', { workspace: 'app', ticket });
+      const stopped = await waitFor(served, ticket, 'needs_human', 1);
+      assert.deepEqual([stopped.error.code, stopped.error.message], [code, expected], ticket);
+      const dir = join(env.state, 'jobs', 'app', ticket);
+      // events.jsonl (every live event, the review_failed line), the record, job.json.
+      const raw = await readFile(join(dir, 'events.jsonl'), 'utf8');
+      assert.ok(!raw.includes(literal), `${ticket} events.jsonl`);
+      const record = ticket === 'W-1' ? await jobs.readGate('app', ticket, 1) : await jobs.readReview('app', ticket, 1);
+      assert.ok(record !== undefined && 'error' in record && record.error === expected, JSON.stringify(record));
+      assert.ok(!(await readFile(join(dir, 'job.json'), 'utf8')).includes(literal), `${ticket} job.json`);
+      // The walk reached events.jsonl: the live events of the run after the read are there, withheld.
+      const live = (await eventsOf(env, ticket)).filter((event) => event.type === (ticket === 'W-1' ? 'gate_event' : 'review_message'));
+      assert.ok(live.length >= (ticket === 'W-1' ? 16 : 6), `${ticket}: ${live.length} live events`);
+      assert.ok(JSON.stringify(live).includes(WITHHELD), ticket);
+      // sf watch: no literal; the command lines, exit codes, token counts and the verdict line stay.
+      const watched = (await runCli(env, ['watch', 'app', ticket, '--once'])).stdout;
+      assert.ok(!watched.includes(literal), `${ticket} sf watch:\n${watched}`);
+      const lines = withoutTime(watched);
+      assert.ok(lines.includes(`[1] review by ${reviewer} failed: ${expected}`), watched);
+      if (ticket === 'W-1') {
+        for (const kept of ["[1] codex | $ bash -lc 'cat ~/.codex/auth.json'", '[1] codex | $ cat README.md', '[1] codex | exit 0', `[1] codex | error: ${WITHHELD}`, `[1] codex | ${WITHHELD}`]) {
+          assert.ok(lines.includes(kept), `${kept}\n${watched}`);
+        }
+      } else {
+        assert.ok(lines.includes(`[1] review | ${WITHHELD}`), watched);
+      }
+    }
   } finally {
     await stop(served);
   }

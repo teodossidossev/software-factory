@@ -116,6 +116,18 @@ test('fix, then clean: the Fix section from the items, the next iteration, Clean
     const watched = await runCli(env, ['watch', 'app', 'R-1', '--once']);
     assert.match(watched.stdout, /^\d\d:\d\d:\d\d \[1\] review by claude: fix \(1 item\)$/m);
     assert.match(watched.stdout, /^\d\d:\d\d:\d\d \[2\] review by claude: clean$/m);
+    // The review sessions live (SF-045): every SDK message of each, then the verdict line.
+    const live = (await eventsOf(env, 'R-1')).filter((record) => record.type === 'review_message' || record.type === 'review');
+    assert.deepEqual(live.map((record) => [record.iteration, record.type, (record.message as { type?: string } | undefined)?.type ?? record.verdict]), [1, 2].flatMap((iteration) => [
+      [iteration, 'review_message', 'system'], [iteration, 'review_message', 'assistant'], [iteration, 'review_message', 'user'],
+      [iteration, 'review_message', 'assistant'], [iteration, 'review_message', 'result'], [iteration, 'review', iteration === 1 ? 'fix' : 'clean'],
+    ]));
+    assert.ok(live.filter((record) => record.type === 'review_message').every((record) => record.reviewer === 'claude' && Object.keys(record).sort().join() === 'iteration,message,reviewer,ts,type'));
+    const reviewLines = watched.stdout.split('\n').filter((line) => / review( |$)/.test(line)).map((line) => line.slice(9));
+    assert.deepEqual(reviewLines, [
+      '[1] review | Read(README.md)', '[1] review | Reviewed.', '[1] review by claude: fix (1 item)',
+      '[2] review | Read(README.md)', '[2] review | Reviewed.', '[2] review by claude: clean',
+    ]);
     // The Implementer's cost (0.0123, then 0 more in the same session) and both reviews.
     assert.equal((await jobs.recordedCost('app', 'R-1', 2))!.toFixed(4), '0.1035');
     assert.match((await runCli(env, ['status'])).stdout, /\bR-1\b.*\b0\.1035\b/);
@@ -234,7 +246,7 @@ test('abort during a running review: the review is cancelled, its outcome never 
     assert.deepEqual([checked.state, checked.iteration, checked.review], ['aborted', 1, undefined]);
     assert.equal(await new JobStore(env.state).readReview('app', 'A-1', 1), undefined);
     assert.doesNotMatch(await taskFile(repo, 'A-1'), /## Fix/);
-    assert.equal((await eventsOf(env, 'A-1')).filter((record) => typeof record.type === 'string' && record.type.startsWith('review')).length, 0);
+    assert.equal((await eventsOf(env, 'A-1')).filter((record) => (record.type === 'review' || record.type === 'review_failed')).length, 0);
     assert.equal((await fakeLog(env)).length, 1);
   } finally {
     await stop(served);
@@ -338,7 +350,7 @@ test('retry a failed review: sf review and the dashboard put the job back to awa
     assert.equal((await reviewLog(env)).length, 4);
     assert.deepEqual((await reviewLog(env)).map((entry) => entry.prompt.split('\n')[0]), [1, 1, 1, 2].map((n) => `Code review of iteration ${n} of ticket R-2. You review; you change nothing.`));
     const events = await eventsOf(env, 'R-2');
-    assert.deepEqual(events.filter((record) => typeof record.type === 'string' && record.type.startsWith('review')).map((record) => [record.iteration, record.type, record.verdict]), [
+    assert.deepEqual(events.filter((record) => (record.type === 'review' || record.type === 'review_failed')).map((record) => [record.iteration, record.type, record.verdict]), [
       [1, 'review_failed', undefined], [1, 'review_failed', undefined], [1, 'review', 'fix'], [2, 'review', 'clean'],
     ]);
     const retries = events.filter((record) => (record.state as { from?: string } | undefined)?.from === 'needs_human');

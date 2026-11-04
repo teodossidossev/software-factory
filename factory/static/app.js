@@ -1,6 +1,6 @@
 // Software Factory dashboard: the board (SF-046). Five columns from the stream's jobs and
-// tickets: Planned (the Task files without a live job), Implementing, Reviewing, Your turn and
-// Done, each card with the pipeline bar, who acts now and since when, and on Your turn the one
+// tickets: Planned (the Task files without a job, or whose last job failed or was aborted),
+// Implementing, Reviewing, Your turn and Done, each card with the pipeline bar, who acts now and since when, and on Your turn the one
 // action that unblocks it. A job card opens the job in a wide drawer (SF-047), at the URL hash
 // #<ws>/<ticket>: its header with the pipeline stepper, the next-action panel with the facts and
 // the state history, and the flat tabs Task, Changes, Reviews, MR and Live log. Its approve,
@@ -1464,7 +1464,9 @@ function sendSay() {
 
 // ---------- The board ----------
 
-// The column of each job state; the tickets without a live job are Planned.
+// The column of each job state; the tickets without a live job are Planned. One column per
+// ticket (SF-057): a ticket whose last job failed or was aborted is Planned (to start again), not
+// also Done; a pushed one is only Done.
 const COLUMN_OF = {
   starting: 'implementing', working: 'implementing',
   awaiting_review: 'reviewing', preparing_mr: 'reviewing',
@@ -1477,6 +1479,7 @@ const EMPTY_TEXT = { planned: 'No ticket waits to start.', implementing: 'Nothin
 const DONE_LIMIT = 10;
 const SEGMENTS = ['Implement', 'Claude review', 'Codex gate', 'MR', 'You'];
 const DONE_LABELS = { pushed: 'Pushed', aborted: 'Aborted', failed: 'Failed' };
+const RESTARTABLE = ['failed', 'aborted'];
 
 // The job can be pushed: the branch prepared at Clean is ready, or its push failed and approve
 // tries again.
@@ -1712,20 +1715,30 @@ function mrCardButton(job, action) {
   return button;
 }
 
-// A pushed job on Done (SF-048): its merge request with the link, and Create merge request… or
-// Merge… where they apply, with the job's last outcome.
+// A pushed job on Done (SF-048): its merge request with the link, Create merge request… or
+// Merge… where they apply, Archive ticket while its Task file is active (SF-057: the ticket has
+// no Planned card then), and the job's last outcome.
 function pushedFoot(job) {
   const key = keyOf(job);
   const parts = [];
+  const row = (state.tickets ?? []).find((ticket) => keyOf(ticket) === key) ?? null;
   if (hasMr(job)) {
     const line = el('p', 'card-mr card-foot');
     line.append(document.createTextNode(`#${job.mr.number} ${job.mr.state} `), mrLink(job.mr));
     parts.push(line);
   }
   const actions = [canCreateMr(job) ? 'mr-create' : null, canMerge(job) ? 'mr-merge' : null].filter((action) => action !== null);
-  if (actions.length > 0) {
+  if (actions.length > 0 || row !== null) {
     const foot = el('div', 'card-foot');
     foot.append(...actions.map((action) => mrCardButton(job, action)));
+    if (row !== null) {
+      const archive = el('button', 'btn btn-sm', 'Archive ticket');
+      archive.type = 'button';
+      archive.disabled = state.setupPending.has(`ticket:${key}`) || state.ticketConfirm !== null;
+      archive.title = 'Move the Task file to .software-factory/archive/; the finished job leaves the board';
+      archive.addEventListener('click', () => void ticketAction('archive', row));
+      foot.append(archive);
+    }
     parts.push(foot);
   }
   const outcome = state.outcomes.get(key) ?? null;
@@ -1735,18 +1748,37 @@ function pushedFoot(job) {
   return parts;
 }
 
-// A Planned card: the ticket, its last job, Start (or "waiting for the plan" for a skeleton),
-// Task, Archive and Delete….
+// The state of a ticket's last job: the jobs list (read from the stream) before the tickets list,
+// which may be older; null without one.
+function lastJobState(row) {
+  return jobByKey(keyOf(row))?.state ?? row.job ?? null;
+}
+
+// One column per ticket (SF-057): a ticket is Planned without a job or after a failed or aborted
+// one; any other job (active, or pushed) keeps it in that job's column only.
+function isPlanned(row) {
+  const last = lastJobState(row);
+  return last === null || RESTARTABLE.includes(last);
+}
+
+// A Planned card: the ticket, its last job (failed or aborted; the mark opens that job), Start (or
+// "waiting for the plan" for a skeleton), Task, Archive and Delete….
 function ticketCard(row) {
-  const key = `${row.workspace}/${row.ticket}`;
+  const key = keyOf(row);
   const item = el('li', 'board-card planned');
   item.dataset.key = key;
   const body = el('div', 'card-body');
   body.append(...cardHead(row.ticket, row.workspace, row.title));
   const chips = el('span', 'chips');
   chips.append(chip(`from ${row.base}`));
-  if (row.job !== null && row.job !== undefined) {
-    chips.append(chip(`last job ${row.job}`, row.job === 'pushed' ? 'chip-good' : row.job === 'failed' ? 'chip-bad' : ''));
+  const last = lastJobState(row);
+  if (last !== null) {
+    const mark = el('button', `chip chip-button${last === 'failed' ? ' chip-bad' : ''}`, `last job ${last}`);
+    mark.type = 'button';
+    mark.title = 'Open the last job';
+    mark.disabled = jobByKey(key) === null; // only from the tickets list: nothing to open yet
+    mark.addEventListener('click', () => openJob(key));
+    chips.append(mark);
   }
   body.append(chips);
   item.append(body);
@@ -1803,8 +1835,14 @@ function renderBoard() {
   renderFilter();
   const byUpdate = (a, b) => b.updated_at.localeCompare(a.updated_at);
   const jobs = state.jobs.filter((job) => visible(job.workspace)).sort(byUpdate);
-  const lists = { planned: (state.tickets ?? []).filter((row) => visible(row.workspace)), implementing: [], reviewing: [], you: [], done: [] };
+  // A failed or aborted job whose ticket is Planned is not also in Done.
+  const planned = (state.tickets ?? []).filter((row) => visible(row.workspace) && isPlanned(row));
+  const plannedKeys = new Set(planned.map(keyOf));
+  const lists = { planned, implementing: [], reviewing: [], you: [], done: [] };
   for (const job of jobs) {
+    if (RESTARTABLE.includes(job.state) && plannedKeys.has(keyOf(job))) {
+      continue;
+    }
     lists[COLUMN_OF[job.state] ?? 'done'].push(job);
   }
   for (const column of COLUMNS) {

@@ -610,41 +610,46 @@ in time, `sf` exits 1 with the reason; the printed URL stays usable by hand. Exi
 launcher accepted the URL, not that the page loaded: nothing checks that `sf serve` is running.
 On another platform `--open` is refused (`open_unsupported`); plain `sf dashboard` works everywhere.
 
-**The board (SF-046).** The page is a board that reads like a Kanban board, with five columns
-whose headers count their cards: **Planned** (the Task files of every usable workspace whose
-ticket has no live job: skeletons and written tasks, with the last finished job's state when there
-was one), **Implementing** (`starting`, `working`), **Reviewing** (`awaiting_review`, that is the
+**The board (SF-046).** The page is a board that reads like a Kanban board, with five columns whose
+headers count their cards: **Planned** (the Task files of every usable workspace whose ticket has no
+job, or whose last job is `failed` or `aborted`: skeletons and written tasks, with that state as a
+mark), **Implementing** (`starting`, `working`), **Reviewing** (`awaiting_review`, that is the
 Claude review or the Codex gate runs or is due, and `preparing_mr`), **Your turn** (`needs_human`,
-`ready_for_human_review`) and **Done** (`pushed`, `aborted`, `failed`, the most recent first; the
-last ten, then *Show all*). A workspace filter above the board keeps one workspace's cards (and
-counts) or all. A job card shows the ticket key, the workspace and the title of its Task file (the
-branch when the file is gone); a five-segment pipeline bar (Implement, Claude review, Codex gate,
-MR, You) with the segments passed in green, the current one marked and a halted one red (a
-`needs_human` or `failed` job halts where its error points: `review_failed` at the Claude review,
-`gate_*` at the gate, a failed push at You, `mr_*` at MR, anything else at Implement; a pushed job
-has every segment done); one line saying who acts now and since when (`Implementer · 3 min`,
-`Claude review · 1 min`, `Codex gate · 4 min` counted from the end of the clean Claude review, `MR
-preparation · 1 min`, `You · approve · 2 min`, `You · retry review · …`, `You · <error code> · …`,
-`Pushed · 2 h 5 min ago`), the error of a halted job, and chips for the iteration, the files of
-the last iteration (and its undeclared sensitive ones) and the estimated cost ("est. $", not a
-charge). A Your turn card carries the one action that unblocks it: *Approve…* (the job opens with
-its approve confirmation), *Retry review* after a failed Claude review (sent at once, as the
-button in the drawer) or *Open the job*; the job's last outcome shows under it. A Planned card
-shows the ticket, its base and its last job, and **Start** (a skeleton says "waiting for the plan"
-instead), **Task**, Archive and Delete…. Start asks first, naming the workspace, the ticket and the
-base branch, then sends `POST api/tickets/<ws>/<ticket>/start` once: `Execution.start`, the same
-call as `sf start`, with its refusals (`task_draft`, `job_limit`,
-`job_exists`, `branch_exists`, `checkout_dirty`, ...) shown as they come; the job's card appears
-under Implementing from the stream. An answer that does not settle the outcome (no answer, a body
-cut after the headers, a 2xx without a result, a 5xx without a factory code) is an unknown
-outcome: nothing is re-sent, and Start stays off for that ticket until `api/jobs` is read again
-(at once; when that read fails, until the stream's next `jobs` event), with a line saying to check
-the board before starting again. Task opens the Task file (`GET api/tickets/<ws>/<ticket>/task`)
-in the drawer as text: one line per line, Markdown headings bold by a line rule, never HTML from
-the file; for a ticket not archived, the drawer also offers its ChatGPT conversation (below). The
-board follows the stream's `jobs`, `tickets` and `workspaces` events: a card moves column when its
-job changes state, and "since when" moves on every minute. On a phone-wide window (below 760 px)
-the columns stack with Your turn first; light and dark follow the system as before.
+`ready_for_human_review`) and **Done** (`pushed`, and `aborted` or `failed` when the ticket has no
+Planned card, its Task file archived or deleted; the most recent first; the last ten, then *Show
+all*). A ticket shows in one column only (SF-057): a pushed one only under Done, a failed or aborted
+one only under Planned, one with an active job only in that job's column. The Done card of a pushed
+job whose Task file is still active carries *Archive ticket* (the Archive of the Planned card it no
+longer has). A workspace filter above the board keeps one workspace's cards (and counts) or all. A
+job card shows the ticket key, the workspace and the title of its Task file (of its archived copy
+when the Task file is archived; the branch when neither is there); a five-segment pipeline bar
+(Implement, Claude review, Codex gate, MR, You) with the segments passed in green, the current one
+marked and a halted one red (a `needs_human` or `failed` job halts where its error points:
+`review_failed` at the Claude review, `gate_*` at the gate, a failed push at You, `mr_*` at MR,
+anything else at Implement; a pushed job has every segment done); one line saying who acts now and
+since when (`Implementer · 3 min`, `Claude review · 1 min`, `Codex gate · 4 min` counted from the
+end of the clean Claude review, `MR preparation · 1 min`, `You · approve · 2 min`, `You · retry
+review · …`, `You · <error code> · …`, `Pushed · 2 h 5 min ago`), the error of a halted job, and
+chips for the iteration, the files of the last iteration (and its undeclared sensitive ones) and the
+estimated cost ("est. $", not a charge). A Your turn card carries the one action that unblocks it:
+*Approve…* (the job opens with its approve confirmation), *Retry review* after a failed Claude
+review (sent at once, as the button in the drawer) or *Open the job*; the job's last outcome shows
+under it. A Planned card shows the ticket, its base and, after a failed or aborted job, that state
+as a mark that opens the job, and **Start** to run it (again) (a skeleton says "waiting for the
+plan" instead), **Task**, Archive and Delete…. Start asks first, naming the workspace, the ticket
+and the base branch, then sends `POST api/tickets/<ws>/<ticket>/start` once: `Execution.start`, the
+same call as `sf start`, with its refusals (`task_draft`, `job_limit`, `job_exists`,
+`branch_exists`, `checkout_dirty`, ...) shown as they come; the job's card appears under
+Implementing from the stream. An answer that does not settle the outcome (no answer, a body cut
+after the headers, a 2xx without a result, a 5xx without a factory code) is an unknown outcome:
+nothing is re-sent, and Start stays off for that ticket until `api/jobs` is read again (at once;
+when that read fails, until the stream's next `jobs` event), with a line saying to check the board
+before starting again. Task opens the Task file (`GET api/tickets/<ws>/<ticket>/task`) in the drawer
+as text: one line per line, Markdown headings bold by a line rule, never HTML from the file; for a
+ticket not archived, the drawer also offers its ChatGPT conversation (below). The board follows the
+stream's `jobs`, `tickets` and `workspaces` events: a card moves column when its job changes state,
+and "since when" moves on every minute. On a phone-wide window (below 760 px) the columns stack with
+Your turn first; light and dark follow the system as before.
 
 **The drawer.** Clicking a job card opens the job in a wide drawer on the right, over the board
 (the whole width on a phone): the job detail described below (SF-047), the URL becomes

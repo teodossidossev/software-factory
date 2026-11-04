@@ -163,7 +163,7 @@ test('setup: tickets lists the Task files without a live job; createTicket write
   assert.deepEqual((await setup.tickets()).map((row) => `${row.workspace}/${row.ticket}`), ['app/T-1', 'app/T-3', 'app/T-7']);
 });
 
-test('setup: taskText reads the Task file or its archived copy through the reader; taskTitle is the title or null', async () => {
+test('setup: taskText reads the Task file or its archived copy through the reader; taskTitle is the title (active, else archived) or null', async () => {
   const env = await newEnv('setup-task-text');
   const repo = await newRepo(env, 'setup-task-text-repo', true);
   const jobs = new JobStore(env.state);
@@ -178,7 +178,10 @@ test('setup: taskText reads the Task file or its archived copy through the reade
   await writeFile(join(repo, '.software-factory', 'archive', 'T-0.md'), '---\nticket: T-0\ntitle: Zero\nbase: main\n---\n\nOld.\n');
   assert.equal(await setup.taskText('app', 'T-0', true), '---\nticket: T-0\ntitle: Zero\nbase: main\n---\n\nOld.\n');
   await refused(setup.taskText('app', 'T-0'), 'task_not_found');
-  assert.equal(await setup.taskTitle('app', 'T-0'), null);
+  // The title of an archived Task file comes from the archive (SF-057); the active file wins.
+  assert.equal(await setup.taskTitle('app', 'T-0'), 'Zero');
+  await writeFile(join(repo, '.software-factory', 'archive', 'T-1.md'), '---\nticket: T-1\ntitle: Archived one\nbase: main\n---\n');
+  assert.equal(await setup.taskTitle('app', 'T-1'), 'First <b>one</b>');
   // The reader's refusals: not a Task file of the ticket, bad names, an unknown workspace.
   await writeFile(join(repo, '.software-factory', 'T-2.md'), '---\nticket: T-9\ntitle: Wrong\nbase: main\n---\n');
   await refused(setup.taskText('app', 'T-2'), 'invalid_content');

@@ -124,25 +124,26 @@ test('dashboard: the ticket action routes are POST only with the action checks, 
 
 test('client: a Planned card has Archive and Delete…; delete asks first; the archived list restores and deletes; an open job that leaves the board closes its drawer', async () => {
   const STATIC_DIR = new URL('../../static/', import.meta.url);
-  const pushed = {
-    workspace: 'app', ticket: 'T-1', branch: 'T-1-x', base: 'main', state: 'pushed', iteration: 1, mr_attempts: 1, updated_at: '2026-11-01T10:05:00.000Z',
+  // A failed job: its ticket is Planned (a pushed one is only on Done, SF-057).
+  const finished = {
+    workspace: 'app', ticket: 'T-1', branch: 'T-1-x', base: 'main', state: 'failed', iteration: 1, mr_attempts: 1, updated_at: '2026-11-01T10:05:00.000Z',
     created_at: '2026-11-01T10:00:00.000Z', error: null, worktree: null, prepared_commit: 'a'.repeat(40), files: 0, undeclared: 0, deleted: 0,
   };
-  const page = await loadPage(STATIC_DIR, (path) => (path === 'api/jobs' ? { jobs: [pushed] } : path === 'api/jobs/app/T-1' ? { job: pushed, iterations: [], mr: false, history: [] } : undefined));
+  const page = await loadPage(STATIC_DIR, (path) => (path === 'api/jobs' ? { jobs: [finished] } : path === 'api/jobs/app/T-1' ? { job: finished, iterations: [], mr: false, history: [] } : undefined));
   page.location.hash = '#app/T-1';
   page.document.dispatch('DOMContentLoaded');
   await page.flush();
   const stream = page.streams.at(-1)!;
   stream.emit('open');
-  stream.emit('jobs', { jobs: [pushed] });
+  stream.emit('jobs', { jobs: [finished] });
   stream.emit('workspaces', { workspaces: [workspaceRow('app')] });
-  stream.emit('tickets', { tickets: [{ ...ticketRow('app', 'T-1', 'One', false, 'pushed'), conversation: { message: 'm', url: 'https://chatgpt.com/?q=m' } }], archived: [{ workspace: 'app', ticket: 'T-0', title: 'Zero' }] });
+  stream.emit('tickets', { tickets: [{ ...ticketRow('app', 'T-1', 'One', false, 'failed'), conversation: { message: 'm', url: 'https://chatgpt.com/?q=m' } }], archived: [{ workspace: 'app', ticket: 'T-0', title: 'Zero' }] });
   await page.flush();
   const card = page.$('list-planned').children[0] as FakeElement;
   const buttons = card.all().filter((element) => element.tagName === 'BUTTON');
-  assert.deepEqual(buttons.map((button) => button.textContent), ['Start', 'Task', 'Archive', 'Delete…']);
+  assert.deepEqual(buttons.map((button) => button.textContent), ['last job failed', 'Start', 'Task', 'Archive', 'Delete…']);
   // Archive: one request, the outcome in the status line.
-  buttons[2]!.click();
+  buttons[3]!.click();
   (page.$('list-planned').children[0] as FakeElement).all().find((element) => element.textContent === 'Archive')!.click();
   await page.flush();
   const posts = (): typeof page.requests => page.requests.filter((request) => request.method === 'POST');

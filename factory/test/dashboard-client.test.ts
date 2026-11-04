@@ -873,6 +873,76 @@ test('client: a late test-event answer lands on its own job only; each job keeps
   assert.match(page.$('test-event-status').textContent, /^Test event to sub_own: delivered/);
 });
 
+const nudgePosts = (page: Page): FetchRequest[] => posts(page).filter((request) => request.path.endsWith('/nudge'));
+
+test('client: Nudge the reviewer only in awaiting_review with someone receiving the job; one request at a time; the outcome until the iteration moves on', async () => {
+  const page = await openPage();
+  const stream = page.streams.at(-1)!;
+  const button = page.$('nudge-button');
+  const waiting = { ...A, state: 'awaiting_review', iteration: 2 };
+  // Off for a job that does not wait for review, and for nobody receiving it.
+  stream.emit('job', reviewed(A, OWN));
+  assert.equal(button.disabled, true);
+  assert.equal(page.$('nudge-reason').textContent, 'only while the job waits for review.');
+  stream.emit('job', reviewed(waiting, { status: 'none' }));
+  assert.equal(button.disabled, true);
+  assert.equal(page.$('nudge-reason').textContent, 'needs a subscription that receives this job.');
+  button.click();
+  await page.flush();
+  assert.equal(nudgePosts(page).length, 0);
+
+  // A broad subscription receives the job's events too.
+  stream.emit('job', reviewed(waiting, { status: 'broad', id: 'sub_all', host: 'h', input: {}, broad: ['sub_all'] }));
+  assert.equal(button.disabled, false);
+  stream.emit('job', reviewed(waiting, OWN));
+  assert.equal(button.disabled, false);
+  assert.equal(page.$('nudge-reason').textContent, 'sends the awaiting_review event again.');
+  button.click();
+  await page.flush();
+  const sent = nudgePosts(page)[0]!;
+  assert.deepEqual([sent.path, sent.body, sent.headers['content-type']], ['api/jobs/app/T-1/nudge', '{}', 'application/json']);
+  assert.equal(page.$('nudge-status').textContent, 'Sending…');
+  assert.equal(button.disabled, true);
+  button.click();
+  await page.flush();
+  assert.equal(nudgePosts(page).length, 1);
+  sent.respond(200, { ok: true, result: { queued: ['sub_own'], pending: [] } });
+  await page.flush();
+  assert.equal(page.$('nudge-status').textContent, 'Sent the awaiting_review event of iteration 2 again to sub_own: the reviewer reviews it in that conversation.');
+  assert.equal(page.$('nudge-status').className, 'status ok');
+  assert.equal(button.disabled, false);
+
+  button.click();
+  await page.flush();
+  nudgePosts(page)[1]!.respond(200, { ok: true, result: { queued: [], pending: ['sub_own'] } });
+  await page.flush();
+  assert.equal(page.$('nudge-status').textContent, 'The event is still on its way to sub_own; nothing more was sent.');
+
+  button.click();
+  await page.flush();
+  nudgePosts(page)[2]!.respond(409, { ok: false, error: { code: 'invalid_state', message: 'Only a job in awaiting_review waits for its reviewer; T-1 is working.' } });
+  await page.flush();
+  assert.equal(page.$('nudge-status').textContent, 'invalid_state: Only a job in awaiting_review waits for its reviewer; T-1 is working.');
+  assert.equal(page.$('nudge-status').className, 'status error');
+
+  button.click();
+  await page.flush();
+  nudgePosts(page)[3]!.fail();
+  await page.flush();
+  assert.match(page.$('nudge-status').textContent, /^The nudge failed \(Failed to fetch\); it may have been sent\./);
+
+  // The reviewer acted: the next state hides the outcome; so does the next iteration.
+  stream.emit('job', reviewed({ ...waiting, state: 'working' }, OWN));
+  assert.equal(page.$('nudge-status').textContent, '');
+  assert.equal(button.disabled, true);
+  stream.emit('job', reviewed({ ...waiting, iteration: 3 }, OWN));
+  assert.equal(page.$('nudge-status').textContent, '');
+  assert.equal(button.disabled, false);
+  assert.equal(nudgePosts(page).length, 4);
+  assert.equal(testPosts(page).length, 0);
+  assert.equal(page.$('action-status').textContent, '');
+});
+
 test('client: the job cards badge a missing or broad reviewer; the Subscriptions section follows the stream', async () => {
   const page = await openPage();
   const stream = page.streams.at(-1)!;

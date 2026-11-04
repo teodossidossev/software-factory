@@ -238,6 +238,48 @@ test('hub: verification timeout and failure, limits, refresh, retries, 410, 413 
   }
 });
 
+test('hub: a nudge sends the awaiting_review event again to every subscription of the job, once while one is on its way', async () => {
+  const state = join(temp, 'nudge');
+  const jobs = new JobStore(state);
+  const events = await Events.open(state, jobs, { allowLoopback: true, requestTimeoutMs: 300, backoffMs: [50, 50] });
+  try {
+    const own = await events.subscribe('p1', { name: 'software_factory.job', arguments: { workspace: 'app', ticket: 'N-1' }, delivery: delivery('/nudge') });
+    const broad = await events.subscribe('p1', { name: 'software_factory.job', arguments: { workspace: 'app' }, delivery: delivery('/nudge-broad') });
+    const waiting = { ...job('N-1', 'awaiting_review', 2), updated_at: '2026-11-01T10:00:00.000Z' };
+    await jobs.write(waiting);
+
+    // Only a job waiting for review; only a job someone receives.
+    await assert.rejects(events.nudge(job('N-1', 'working', 2)), { code: 'invalid_state' });
+    await assert.rejects(events.nudge({ ...job('N-9', 'awaiting_review'), workspace: 'other' }), { code: 'no_subscription' });
+
+    const before = Date.now();
+    assert.deepEqual(await events.nudge(waiting), { queued: [own.id, broad.id], pending: [] });
+    const [first] = (await sink.waitFor('/nudge', 2)).slice(1);
+    const [second] = (await sink.waitFor('/nudge-broad', 2)).slice(1);
+    for (const request of [first!, second!]) {
+      assert.ok(request.signatureValid);
+      assert.equal(request.json.name, 'software_factory.job');
+      assert.deepEqual(request.json.data, { workspace: 'app', ticket: 'N-1', state: 'awaiting_review', iteration: 2, branch: 'N-1-branch' });
+      // The time of the nudge, not of the state change.
+      assert.ok(Date.parse(request.json.timestamp) >= before - 1000);
+    }
+    assert.notEqual(first!.json.eventId, second!.json.eventId);
+    await until(async () => (await eventLog(jobs, 'N-1')).length === 2);
+    assert.deepEqual((await eventLog(jobs, 'N-1')).map(({ type, attempt, status }) => [type, attempt, status]), [['event_delivered', 1, 200], ['event_delivered', 1, 200]]);
+
+    // While a delivery is on its way, a second nudge adds nothing for that subscription.
+    await events.remove(broad.id);
+    sink.plan.push('hang');
+    assert.deepEqual(await events.nudge(waiting), { queued: [own.id], pending: [] });
+    assert.deepEqual(await events.nudge(waiting), { queued: [], pending: [own.id] });
+    await until(async () => (await eventLog(jobs, 'N-1')).filter((record) => record.type === 'event_delivered').length === 3);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(sink.requests.filter((request) => request.path === '/nudge').length, 4);
+  } finally {
+    events.close();
+  }
+});
+
 test('hub: onChange hears every change of the subscriptions (subscribe, refresh, unsubscribe, remove, a 410), until stopped', async () => {
   const state = join(temp, 'hub-change');
   const events = await Events.open(state, new JobStore(state), { allowLoopback: true, requestTimeoutMs: 300 });

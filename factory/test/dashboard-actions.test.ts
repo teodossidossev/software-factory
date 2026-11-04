@@ -485,3 +485,32 @@ test('dashboard test-event: POST only, the action checks, the ticket\'s own subs
     assert.deepEqual(fake.calls, []);
   }, reviewers);
 });
+
+test('dashboard nudge: POST only, the action checks, the job as it is now to the hub, its outcome or refusal unchanged', async () => {
+  const fake = fakeActions();
+  const reviewers = fakeReviewers([subscription('sub_own', { workspace: 'app', ticket: 'T-1' })]);
+  await withDashboard('dash-act-nudge', fake, async (dashboard, store) => {
+    const base = dashboard.url;
+    const path = 'api/jobs/app/T-1/nudge';
+    for (const method of ['GET', 'PUT']) {
+      const reply = await act(base, path, {}, { method });
+      assert.deepEqual([reply.status, reply.headers.allow, reply.body], [405, 'POST', ''], method);
+    }
+    assert.deepEqual(error(await act(base, path, {}, { headers: { origin: '' } })), { status: 403, code: 'invalid_origin' });
+    assert.deepEqual(error(await act(base, path, undefined, { body: '{"subscription":"sub_own"}' })), { status: 400, code: 'invalid_body' });
+    assert.deepEqual([(await act(base, 'api/jobs/app/T-9/nudge', {})).status], [404]);
+    assert.deepEqual(reviewers.nudges, []);
+
+    assert.deepEqual(result(await act(base, path, {})), { queued: ['sub_own'], pending: [] });
+    reviewers.nudgeAnswer = { queued: [], pending: ['sub_own'] };
+    assert.deepEqual(result(await act(base, path, {})), { queued: [], pending: ['sub_own'] });
+    // The job is read when the nudge runs: the hub sees its state now.
+    await store.jobs.write({ ...store.job, state: 'working' });
+    reviewers.nudgeAnswer = new FactoryError('invalid_state', 'Only a job in awaiting_review waits for its reviewer; T-1 is working.');
+    assert.deepEqual(error(await act(base, path, {})), { status: 409, code: 'invalid_state' });
+    reviewers.nudgeAnswer = new FactoryError('no_subscription', 'No subscription receives the events of T-1.');
+    assert.deepEqual(error(await act(base, path, {})), { status: 404, code: 'no_subscription' });
+    assert.deepEqual(reviewers.nudges, ['app/T-1@awaiting_review', 'app/T-1@awaiting_review', 'app/T-1@working', 'app/T-1@working']);
+    assert.deepEqual(fake.calls, []);
+  }, reviewers);
+});

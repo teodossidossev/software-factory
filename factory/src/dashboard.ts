@@ -5,8 +5,8 @@
 // `sf serve` composes with the notifier. The actions validate the HTTP request and delegate once
 // to the Execution of `sf serve` (DashboardActions); nothing here changes a job by itself. Who
 // reviews a job comes from the MCP Events subscriptions (DashboardReviewers): every job carries its
-// reviewer, api/subscriptions lists them and test-event sends one test event; a change of the
-// subscriptions refreshes every open page. The start screen (SF-025) adds the workspaces and the
+// reviewer, api/subscriptions lists them, test-event sends one test event and nudge (SF-035) sends
+// a job's awaiting_review event again; a change of the subscriptions refreshes every open page. The start screen (SF-025) adds the workspaces and the
 // tickets (DashboardSetup: the registry and the Task files) and the start of a job.
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
@@ -55,9 +55,9 @@ export type DashboardActions = Pick<Execution, 'approve' | 'abort' | 'say' | 'ar
 export type DashboardAction = 'approve' | 'abort' | 'say' | 'archive';
 export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'archive'];
 
-// The MCP Events subscriptions, bound by `sf serve` to its Events hub: read, test one, and hear
-// about changes (the returned function stops listening).
-export type DashboardReviewers = Pick<Events, 'subscriptions' | 'test' | 'onChange'>;
+// The MCP Events subscriptions, bound by `sf serve` to its Events hub: read, test one, nudge a
+// job's reviewer, and hear about changes (the returned function stops listening).
+export type DashboardReviewers = Pick<Events, 'subscriptions' | 'test' | 'nudge' | 'onChange'>;
 
 // The start screen's data and changes: the workspace registry and the Task files (src/setup.ts).
 export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'removeWorkspace' | 'tickets' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'archivedTickets'>;
@@ -87,8 +87,8 @@ const NO_SETUP: DashboardSetup = {
   },
 };
 
-// Every POST route under api/jobs/<ws>/<ticket>/: the four actions and the test event.
-type ActionRoute = DashboardAction | 'test-event';
+// Every POST route under api/jobs/<ws>/<ticket>/: the four actions, the test event and the nudge.
+type ActionRoute = DashboardAction | 'test-event' | 'nudge';
 
 // The request body of each POST route, strict: unknown keys, null, arrays and wrong types are
 // refused; shape is what the refusal names.
@@ -97,6 +97,7 @@ const BODIES = {
   abort: { shape: '{"discard"?: boolean}', schema: z.strictObject({ discard: z.boolean().optional() }) },
   say: { shape: '{"message": string}', schema: z.strictObject({ message: z.string() }) },
   'test-event': { shape: '{}', schema: z.strictObject({}) },
+  nudge: { shape: '{}', schema: z.strictObject({}) },
   archive: { shape: '{}', schema: z.strictObject({}) },
   'workspace-add': { shape: '{"name": string, "path": string}', schema: z.strictObject({ name: z.string(), path: z.string() }) },
   'workspace-remove': { shape: '{}', schema: z.strictObject({}) },
@@ -106,7 +107,7 @@ const BODIES = {
   'ticket-new': { shape: '{"workspace": string, "ticket": string, "title": string, "request": string}', schema: z.strictObject({ workspace: z.string(), ticket: z.string(), title: z.string(), request: z.string() }) },
 };
 type PostRoute = keyof typeof BODIES;
-const ACTION_ROUTES: ActionRoute[] = ['approve', 'abort', 'say', 'archive', 'test-event'];
+const ACTION_ROUTES: ActionRoute[] = ['approve', 'abort', 'say', 'archive', 'test-event', 'nudge'];
 
 // The HTTP status of a FactoryError the methods can throw; any other code answers 500 and keeps
 // its code and message.
@@ -615,6 +616,17 @@ export async function startDashboard(
     }
     if (action === 'test-event') {
       return { route: action, exists, call: (data) => (parse(BODIES['test-event'].schema, data) ? () => testEvent(workspace, ticket) : undefined) };
+    }
+    if (action === 'nudge') {
+      // The job is read when the nudge runs; the hub refuses any state but awaiting_review.
+      const run = async (): Promise<unknown> => {
+        const job = await jobs.read(workspace, ticket);
+        if (job === undefined) {
+          throw new FactoryError('job_not_found', `There is no job for ${ticket}.`);
+        }
+        return reviewers.nudge(job);
+      };
+      return { route: action, exists, call: (data) => (parse(BODIES.nudge.schema, data) ? run : undefined) };
     }
     return {
       route: action, exists,

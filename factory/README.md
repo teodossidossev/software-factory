@@ -172,6 +172,10 @@ the instruction to paste there, warns about subscriptions that would also match 
 for the ticket's subscription and sends it a test event (`--no-wait` prints and exits 1 when there
 is none). The dashboard shows the same answer per job (its Reviewer block, with the same two
 messages to copy and a test event to send) and lists the subscriptions, refreshed on every change.
+A job in `awaiting_review` whose reviewer has not acted can be nudged from the same block (SF-035):
+the `awaiting_review` event goes again, with a new `eventId` and the current time, to every
+subscription that receives the job, through the same queue and retries; a subscription that
+still has a delivery of that iteration on its way gets no second one.
 
 **`events/list`** `{cursor?}` → `{events: [{name, description, delivery: ["webhook"], inputSchema,
 payloadSchema}]}`, one page, no `nextCursor`.
@@ -646,13 +650,15 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `POST api/jobs/<ws>/<ticket>/abort` | `{"discard": false}`; `discard` optional, default false | `Execution.abort(ws, ticket, discard)` |
 | `POST api/jobs/<ws>/<ticket>/say` | `{"message": "<text>"}` | `Execution.say(ws, ticket, message)`; the text goes as it is (nothing trimmed or split) |
 | `POST api/jobs/<ws>/<ticket>/test-event` | `{}` | `sf events test` for the job's `subscribed` subscription: one test event (state `"test"`), result `{subscription, delivered, status}`; without one `404 no_subscription` and nothing is sent |
+| `POST api/jobs/<ws>/<ticket>/nudge` | `{}` | `Events.nudge(job)`: the job's `awaiting_review` event again to every subscription that receives it, queued like a state change; result `{queued, pending}` (subscription ids: sent now, already on their way); `409 invalid_state` in any other state, `404 no_subscription` when nobody receives the job |
 | `POST api/workspaces` | `{"name": string, "path": string}` | `Setup.addWorkspace`: the rules of `sf workspace add`; result the workspace row |
 | `POST api/workspaces/<name>/remove` | `{}` | `Setup.removeWorkspace`; `409 workspace_busy` while the workspace has a live job; result `{removed}` |
 | `POST api/tickets` | `{"workspace", "ticket", "title", "request"}` | `Setup.createTicket`: the ticket skeleton through the Task file writer, the request kept for the conversation; result `{workspace, ticket, path, base}` |
 
 The actions go to the same `Execution` as the socket commands, under its lock and guards; there
 is no second state machine and no other mutation endpoint. `test-event` goes to the same Events
-hub as `sf events test`, with the same checks as the actions below; it changes no job. The setup
+hub as `sf events test`, and `nudge` to the same queue as a state change, with the same checks as
+the actions below; neither changes a job. The setup
 actions go to `src/setup.ts`, which writes the same registry file as `sf workspace add|remove`
 and the same Task files as `write_task`, under the Execution's lock, so a registry change and a
 start never interleave. An action request must carry the
@@ -750,7 +756,11 @@ end), in a browser:
    the row with the job, without a reload. Send test event: "Sending…", then "delivered, status
    200" (and ChatGPT answers in that conversation); switch jobs while it is out and the answer
    stays with its job. Subscribe a conversation without a ticket filter: the warning names it and
-   `sf events remove <id>`; `sf events remove` it and the warning goes.
+   `sf events remove <id>`; `sf events remove` it and the warning goes. Nudge the reviewer is on
+   only for a job in `awaiting_review` with a subscription: "Sent the awaiting_review event of
+   iteration <n> again to <id>", `sf watch` shows the delivery and the reviewer answers with
+   `request_fix` or `mark_clean` in that conversation; once the job moves on the button goes off
+   and the line goes.
 11. Layout: narrower than 900 px the job list stacks above the detail and the buttons wrap; in the
    OS dark scheme the status colours and the dialog stay readable; Tab reaches Approve…, Abort…,
    the dialog's buttons, the textarea and Send; Escape closes the dialog. The Reviewer block,

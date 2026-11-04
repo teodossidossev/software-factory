@@ -1,6 +1,7 @@
 // The Dashboard: a second loopback HTTP listener with the static page, JSON endpoints, one
 // server-sent event stream per open page and, since version 2, the User's actions approve, abort,
-// say and the retry of a failed review (SF-044) as POST endpoints. Every path starts with
+// say and the retry of a failed review (SF-044) as POST endpoints, and the override of a stopped
+// gate (SF-047). Every path starts with
 // /d/<token>/; anything else is an empty 404.
 // Reads JobStore and events.jsonl; job state changes arrive through onStateChange, which
 // `sf serve` composes with the notifier. The actions validate the HTTP request and delegate once
@@ -51,9 +52,9 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 // results as the socket commands of sf start, sf approve, sf abort, sf say and sf review. A job is
 // started from its ticket on the start screen once the Task file is written (SF-040), or with
 // sf start. Archive of a job card is archiveFinished (terminal only), never the any-state reset.
-export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | 'say' | 'retryReview' | 'archiveFinished'>;
-export type DashboardAction = 'approve' | 'abort' | 'say' | 'review' | 'archive';
-export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'review', 'archive'];
+export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | 'say' | 'retryReview' | 'acceptGate' | 'archiveFinished'>;
+export type DashboardAction = 'approve' | 'abort' | 'say' | 'review' | 'accept' | 'archive';
+export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'review', 'accept', 'archive'];
 
 // The start screen's data and changes: the workspace registry and the Task files (src/setup.ts).
 export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'removeWorkspace' | 'tickets' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'archivedTickets' | 'taskText' | 'taskTitle'>;
@@ -94,6 +95,7 @@ const BODIES = {
   abort: { shape: '{"discard"?: boolean}', schema: z.strictObject({ discard: z.boolean().optional() }) },
   say: { shape: '{"message": string}', schema: z.strictObject({ message: z.string() }) },
   review: { shape: '{}', schema: z.strictObject({}) },
+  accept: { shape: '{}', schema: z.strictObject({}) },
   archive: { shape: '{}', schema: z.strictObject({}) },
   'workspace-add': { shape: '{"name": string, "path": string}', schema: z.strictObject({ name: z.string(), path: z.string() }) },
   'workspace-remove': { shape: '{}', schema: z.strictObject({}) },
@@ -211,7 +213,8 @@ function jobSummary(job: Job, counts: { files: number; undeclared: number; delet
   return {
     workspace: job.workspace, ticket: job.ticket, branch: job.branch, base: job.base, state: job.state,
     iteration: job.iteration, mr_attempts: job.mr_attempts, updated_at: job.updated_at, created_at: job.created_at,
-    error: job.error ?? null, worktree: job.worktree, prepared_commit: job.prepared_commit, ...counts,
+    error: job.error ?? null, worktree: job.worktree, prepared_commit: job.prepared_commit,
+    fixes: job.fixes, gate_fixes: job.gate_fixes, gate_tokens: job.gate_tokens, ...counts,
   };
 }
 
@@ -253,9 +256,11 @@ async function stateHistory(jobs: JobStore, workspace: string, ticket: string) {
       throw error;
     }
   }
-  const history: Array<{ ts: string; from: string | null; to: string; error?: { code: string; message: string } }> = [];
+  type Entry = { ts: string; from: string | null; to: string; error?: { code: string; message: string } }
+    | { ts: string; event: 'gate_overridden'; code: string; unapplied: number };
+  const history: Entry[] = [];
   for (const line of text.split('\n')) {
-    let record: { ts?: unknown; state?: { from: string | null; to: string; error?: { code: string; message: string } } };
+    let record: { ts?: unknown; type?: unknown; code?: unknown; unapplied?: unknown; state?: { from: string | null; to: string; error?: { code: string; message: string } } };
     try {
       record = JSON.parse(line) as typeof record;
     } catch {
@@ -264,12 +269,15 @@ async function stateHistory(jobs: JobStore, workspace: string, ticket: string) {
     if (typeof record === 'object' && record !== null && typeof record.state === 'object' && record.state !== null) {
       const { from, to, error } = record.state;
       history.push({ ts: String(record.ts), from: from ?? null, to, ...(error !== undefined ? { error } : {}) });
+    } else if (typeof record === 'object' && record !== null && record.type === 'gate_overridden') {
+      // The user's override of the gate (SF-047) is part of the job's history.
+      history.push({ ts: String(record.ts), event: 'gate_overridden', code: String(record.code), unapplied: typeof record.unapplied === 'number' ? record.unapplied : 0 });
     }
   }
   return history;
 }
 
-async function jobDetail(jobs: JobStore, job: Job) {
+async function jobDetail(jobs: JobStore, job: Job, gate: boolean) {
   const iterations = [];
   for (let number = 1; number <= job.iteration; number += 1) {
     try {
@@ -283,6 +291,8 @@ async function jobDetail(jobs: JobStore, job: Job) {
         review: (await jobs.readReview(job.workspace, job.ticket, number)) ?? null,
         // The gate (SF-039): gate.json as written; null while none ended.
         gate: (await jobs.readGate(job.workspace, job.ticket, number)) ?? null,
+        // The user's override of the stopped gate (SF-047): gate-override.json; null when none.
+        gate_override: (await jobs.readGateOverride(job.workspace, job.ticket, number)) ?? null,
       });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -294,6 +304,8 @@ async function jobDetail(jobs: JobStore, job: Job) {
     job: jobSummary(job, await fileCounts(jobs, job)),
     iterations,
     mr: (await jobs.readMrText(job.workspace, job.ticket)) !== undefined,
+    // Whether the Codex gate is on (SF_GATE): the pipeline shows its step as off otherwise.
+    gate,
     history: await stateHistory(jobs, job.workspace, job.ticket),
   };
 }
@@ -405,8 +417,9 @@ interface Post {
   refreshJobs?: boolean;
 }
 
+// gate: whether the Codex gate is on (SF_GATE), shown in the job's pipeline.
 export async function startDashboard(
-  port: number, stateDir: string, jobs: JobStore, actions: DashboardActions, setup: DashboardSetup = NO_SETUP,
+  port: number, stateDir: string, jobs: JobStore, actions: DashboardActions, setup: DashboardSetup = NO_SETUP, { gate: gateOn = true }: { gate?: boolean } = {},
 ): Promise<RunningDashboard> {
   const files = new Map<string, { body: Buffer; type: string }>();
   for (const [path, { file, type }] of Object.entries(STATIC_FILES)) {
@@ -492,7 +505,7 @@ export async function startDashboard(
     }
     const job = await jobs.read(...key);
     if (job !== undefined) {
-      send(stream, 'job', await jobDetail(jobs, job));
+      send(stream, 'job', await jobDetail(jobs, job, gateOn));
     }
     const start = Number(from);
     try {
@@ -550,7 +563,7 @@ export async function startDashboard(
     }
     const [, , ...tail] = rest;
     if (tail.length === 0) {
-      body(res, 'application/json; charset=utf-8', JSON.stringify(await jobDetail(jobs, job)));
+      body(res, 'application/json; charset=utf-8', JSON.stringify(await jobDetail(jobs, job, gateOn)));
       return;
     }
     if (tail.length === 1 && tail[0] === 'mr') {
@@ -633,6 +646,12 @@ export async function startDashboard(
       // sf review: the Execution refuses any state but needs_human with review_failed.
       const run = (): Promise<unknown> => actions.retryReview(workspace, ticket);
       return { route: action, exists, call: (data) => (parse(BODIES.review.schema, data) ? run : undefined) };
+    }
+    if (action === 'accept') {
+      // sf accept: the Execution refuses any state but needs_human after the gate stopped, with a
+      // clean Claude review of the last iteration.
+      const run = (): Promise<unknown> => actions.acceptGate(workspace, ticket);
+      return { route: action, exists, call: (data) => (parse(BODIES.accept.schema, data) ? run : undefined) };
     }
     if (action === 'archive') {
       // A finished job leaves the Jobs list as with sf reset (the history is archived, a kept
@@ -841,7 +860,7 @@ export async function startDashboard(
     }
     const list = await jobsPayload(jobs, setup);
     const selected = [...streams].filter((stream) => stream.job?.[0] === job.workspace && stream.job[1] === job.ticket);
-    const detail = selected.length > 0 ? await jobDetail(jobs, job) : undefined;
+    const detail = selected.length > 0 ? await jobDetail(jobs, job, gateOn) : undefined;
     for (const stream of streams) {
       send(stream, 'jobs', list);
       if (detail !== undefined && selected.includes(stream)) {

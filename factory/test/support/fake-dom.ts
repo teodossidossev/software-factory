@@ -36,6 +36,8 @@ export class FakeElement {
   scrollTop = 0;
   scrollHeight = 0;
   clientHeight = 0;
+  // How often scrollIntoView was called.
+  scrolledIntoView = 0;
   children: Array<FakeElement | FakeText> = [];
   dataset: Record<string, string> = {};
   readonly attributes = new Map<string, string>();
@@ -98,6 +100,10 @@ export class FakeElement {
 
   select(): void {
     this.selected = true;
+  }
+
+  scrollIntoView(): void {
+    this.scrolledIntoView += 1;
   }
 
   // Tag selectors only.
@@ -234,12 +240,6 @@ export async function loadPage(staticDir: URL, autoGet: (path: string) => unknow
     element.disabled = /\sdisabled(?=[\s>]|$)/.test(attributes);
     element.open = /\sopen(?=[\s>]|$)/.test(attributes);
     document.elements.set(id, element);
-  }
-  // The three view tabs are the only elements the script finds without an id.
-  for (const view of ['report', 'files', 'patch']) {
-    const button = document.createElement('button');
-    button.dataset.view = view;
-    document.elements.get('iteration-views')!.append(button);
   }
   const requests: FetchRequest[] = [];
   const fetch = (path: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<unknown> =>

@@ -90,7 +90,7 @@ test('dashboard: jobs, job detail, report, patch and mr endpoints; bad names are
     assert.equal(list.headers['content-type'], 'application/json; charset=utf-8');
     const { jobs: all } = JSON.parse(list.body);
     assert.deepEqual(all.map((job: Job) => [job.ticket, job.state]), [['T-0', 'failed'], ['T-1', 'awaiting_review']]);
-    assert.deepEqual(Object.keys(all[1]).sort(), ['base', 'branch', 'cost_usd', 'created_at', 'deleted', 'error', 'files', 'gate', 'iteration', 'mr_attempts', 'prepared_commit', 'review', 'review_ended_at', 'state', 'ticket', 'title', 'undeclared', 'updated_at', 'workspace', 'worktree']);
+    assert.deepEqual(Object.keys(all[1]).sort(), ['base', 'branch', 'cost_usd', 'created_at', 'deleted', 'error', 'files', 'fixes', 'gate', 'gate_fixes', 'gate_tokens', 'iteration', 'mr_attempts', 'prepared_commit', 'review', 'review_ended_at', 'state', 'ticket', 'title', 'undeclared', 'updated_at', 'workspace', 'worktree']);
     assert.deepEqual(all[0].error, { code: 'start_failed', message: 'Git failed.' });
 
     const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body);
@@ -98,7 +98,7 @@ test('dashboard: jobs, job detail, report, patch and mr endpoints; bad names are
     assert.equal(detail.mr, false);
     assert.deepEqual(detail.iterations, [{
       number: 1, started_at: '2026-11-01T10:00:01.000Z', ended_at: '2026-11-01T10:05:00.000Z', cost_usd: 0.5,
-      changed_files: 1, patch_truncated: false, denials: 1, files: null, review: null, gate: null,
+      changed_files: 1, patch_truncated: false, denials: 1, files: null, review: null, gate: null, gate_override: null,
     }]);
     assert.deepEqual(detail.history.map((entry: { from: string | null; to: string }) => [entry.from, entry.to]), [[null, 'starting'], ['starting', 'working'], ['working', 'awaiting_review']]);
     assert.equal(detail.history[2].ts, '2026-11-01T10:05:00.000Z');
@@ -290,7 +290,7 @@ test('dashboard (SF-040): no reviewer or subscription in the data; the subscript
   await withDashboard('dash-no-reviewer', fakeActions(), async (dashboard) => {
     const base = dashboard.url;
     const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body);
-    assert.deepEqual(Object.keys(detail).sort(), ['history', 'iterations', 'job', 'mr']);
+    assert.deepEqual(Object.keys(detail).sort(), ['gate', 'history', 'iterations', 'job', 'mr']);
     const { jobs: all } = JSON.parse((await fetchRaw(new URL('api/jobs', base))).body);
     assert.ok(all.every((job: Record<string, unknown>) => !('reviewer' in job)));
     assert.deepEqual([(await fetchRaw(new URL('api/subscriptions', base))).status], [404]);

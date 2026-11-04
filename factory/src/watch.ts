@@ -34,7 +34,7 @@ function resultText(content: unknown): string {
 export interface DescribedEvent {
   ts: string | null;
   iteration: number | null;
-  // "prompt", "state", "notify_failed", "placeholders_removed", "review", "review_failed" (Claude's or the gate's), "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
+  // "prompt", "state", "notify_failed", "placeholders_removed", "review", "review_failed" (Claude's or the gate's), "gate_overridden" (the user accepted over the stopped gate), "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
   type: string;
   lines: string[];
 }
@@ -98,6 +98,10 @@ function recordLines(record: Record<string, unknown>): string[] {
     const count = typeof record.items === 'number' ? record.items : 0;
     const items = record.verdict === 'fix' ? ` (${count} ${count === 1 ? 'item' : 'items'})` : '';
     return [`${prefix} review by ${String(record.reviewer)}: ${String(record.verdict)}${items}${ignored}`];
+  }
+  if (record.type === 'gate_overridden') {
+    const count = typeof record.unapplied === 'number' ? record.unapplied : 0;
+    return [`${prefix} gate overridden by the user (${String(record.code)}): ${count} Codex ${count === 1 ? 'item' : 'items'} not applied`];
   }
   if (record.type === 'gate_event' || record.type === 'review_message') {
     return reviewerLines(record).map((line) => `${prefix} ${line}`);

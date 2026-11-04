@@ -22,6 +22,17 @@ and no API key is needed; the gate is off when no Codex executable is found (or 
 `SF_GATE=off`). The token ceiling protects the subscription's limits rather than money. The
 Decision and Consequences below are read with this amendment.
 
+**Amended 2026-11-04 (SF-047):** the user can override the gate once it stops a job. After its
+rounds or its token budget run out (`gate_rounds`, `gate_budget`), or when it fails
+(`gate_failed`), and only while Claude's review of the last iteration is clean, `sf accept` or
+*Accept and prepare MR* on the dashboard takes the job on to MR preparation as a clean gate would.
+SF-045 hit the round limit twice with Claude clean and Codex finding ever narrower variants, and
+the only way on was `sf say`, which starts yet another iteration. The override is a deliberate,
+confirmed step of the user, never the factory's: the Codex items not applied are listed before it
+is confirmed, recorded in `gate-override.json` with a `gate_overridden` event, and shown under the
+MR text for a follow-up ticket. "Every change that reaches the branch passes" the gate therefore
+reads: passes it, or is accepted over it by the user with what it asked for on record.
+
 ## Context
 
 ADR-0002 made the planning ChatGPT conversation the reviewer and woke it with a scheduled task;
@@ -47,7 +58,8 @@ diff check existed only to verify Git work a model had done.
   `## Fix N` and the next iteration starts at once.
 - **Gate.** On a clean Claude verdict, an OpenAI model through the Responses API, with read and
   search over the worktree as function tools, gives the verdict that decides. At most five gate
-  rounds with fixes, then `needs_human` with both verdicts; a per-ticket token ceiling. Every
+  rounds with fixes, then `needs_human` with both verdicts, which the user can accept over the
+  gate (SF-047 amendment above); a per-ticket token ceiling. Every
   change that reaches the branch passes it, including a fix asked during human review. Without
   an OpenAI key the gate is off and the Claude verdict decides.
 - **Git at Clean.** The Implementer writes `.software-factory/<ticket>.mr.md`; the factory adds the

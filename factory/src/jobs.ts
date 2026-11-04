@@ -1,6 +1,6 @@
 // Job state on disk: <state dir>/jobs/<workspace>/<ticket>/ with job.json, events.jsonl and
-// iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json} (plus the gate's schema and
-// output files), and from MR preparation on mr.md. Strictly parsed; every file but the event log
+// iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-override.json} (plus the
+// gate's schema and output files), and from MR preparation on mr.md. Strictly parsed; every file but the event log
 // is replaced atomically. Knows nothing about Git or the Implementer session.
 import { appendFile, type FileHandle, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -129,6 +129,16 @@ export type GateRecord =
     }
   | { reviewer: string; error: string; model?: string; tokens: GateTokens; started_at: string; ended_at: string };
 
+// iterations/NNN/gate-override.json (SF-047): the user accepted the iteration over a stopped gate
+// (needs_human with code gate_rounds, gate_budget or gate_failed) with Claude's clean review; at
+// is when, unapplied the Codex items of the iteration's gate.json the change goes without, or the
+// gate's error when it failed ([] when no gate ran on the iteration).
+export interface GateOverride {
+  at: string;
+  code: string;
+  unapplied: Array<{ path: string; problem: string; expected: string }> | string;
+}
+
 export interface Iteration {
   report: string;
   patch: Buffer;
@@ -152,6 +162,9 @@ export type EventRecord = { ts: string; iteration: number } & (
   // Claude review session; truncated when cut to MAX_LIVE_EVENT_BYTES (cutEvent).
   | { type: 'gate_event'; reviewer: string; event: unknown; truncated?: true }
   | { type: 'review_message'; reviewer: string; message: unknown; truncated?: true }
+  // The user accepted the iteration over the stopped gate (SF-047): the code it stopped with and
+  // the number of Codex items not applied (0 when the gate failed or did not run).
+  | { type: 'gate_overridden'; code: string; unapplied: number }
 );
 
 // The bound of one reviewer event or message in events.jsonl (SF-045), in bytes of its JSON.
@@ -353,6 +366,16 @@ export class JobStore {
 
   async writeGate(workspace: string, ticket: string, number: number, gate: GateRecord): Promise<void> {
     await writeFileAtomic(join(this.iterationDir(workspace, ticket, number), 'gate.json'), Buffer.from(`${JSON.stringify(gate, null, 2)}\n`));
+  }
+
+  async writeGateOverride(workspace: string, ticket: string, number: number, override: GateOverride): Promise<void> {
+    await writeFileAtomic(join(this.iterationDir(workspace, ticket, number), 'gate-override.json'), Buffer.from(`${JSON.stringify(override, null, 2)}\n`));
+  }
+
+  // The user's override of the gate on an iteration (SF-047); undefined when there is none.
+  async readGateOverride(workspace: string, ticket: string, number: number): Promise<GateOverride | undefined> {
+    const text = await readOrMissing(join(this.iterationDir(workspace, ticket, number), 'gate-override.json'));
+    return text === undefined ? undefined : (JSON.parse(text) as GateOverride);
   }
 
   // The gate's review of an iteration; undefined while none ended (or with the gate off).

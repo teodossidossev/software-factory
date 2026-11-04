@@ -5,7 +5,7 @@
 // limit, the token ceiling, failures, abort and serve restart during a gate, the gate off, and the
 // strict schema.
 import assert from 'node:assert/strict';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { GATE_SCHEMA, gateArgs } from '../src/gate.js';
@@ -561,5 +561,105 @@ test('gate off: SF_GATE=off, and SF_CODEX pointing at nothing (one line at sf se
     } finally {
       await stop(served);
     }
+  }
+});
+
+test('sf accept (SF-047): after gate_rounds with a clean Claude review the job goes on to MR preparation; the override is recorded; refused otherwise', async () => {
+  const env = await newEnv('gate-accept', gateEnv({ SF_GATE_MAX_ROUNDS: '1' }));
+  const repo = await newRepo(env, 'gate-accept-repo', false);
+  await putTask(env, repo, 'G-8', 'Accept over the gate');
+  const stillWrong = { ...GATE_FIX, summary: 'Still wrong.', items: [{ path: 'a.txt', problem: 'A narrower variant.', expected: 'Even narrower.' }] };
+  await script(env, [
+    { write: { 'a.txt': '1\n' } },
+    { write: { 'a.txt': '2\n' } },
+    { write: { '.software-factory/G-8.mr.md': mrText('feat(G-8): Accept over the gate') }, text: 'prepared' },
+  ]);
+  await reviewScript(env, [{ output: CLAUDE_CLEAN }, { output: CLAUDE_CLEAN }]);
+  await codexScript(env, [{ output: GATE_FIX }, { output: stillWrong }]);
+  const served = await serve(env);
+  try {
+    // Refused while the job is not stopped by the gate.
+    await call(served, 'start', { workspace: 'app', ticket: 'G-8' });
+    const limited = await waitFor(served, 'G-8', 'needs_human', 2);
+    assert.equal(limited.error.code, 'gate_rounds');
+
+    // Refused without a clean Claude review of the last iteration: nothing recorded, nothing moves.
+    const reviewPath = join(iterationDir(env, 'G-8', 2), 'review.json');
+    const review = await readFile(reviewPath, 'utf8');
+    await writeFile(reviewPath, JSON.stringify({ ...JSON.parse(review), verdict: 'fix' }));
+    const notClean = await runCli(env, ['accept', 'app', 'G-8']);
+    assert.equal(notClean.code, 1);
+    assert.match(notClean.stderr, /^sf: sf accept needs a clean Claude review of the last iteration \(2\); it says fix/);
+    assert.equal(await exists(join(iterationDir(env, 'G-8', 2), 'gate-override.json')), false);
+    assert.equal((await new JobStore(env.state).read('app', 'G-8'))!.state, 'needs_human');
+    await writeFile(reviewPath, review);
+
+    const accepted = await runCli(env, ['accept', 'app', 'G-8']);
+    assert.equal(accepted.code, 0, accepted.stderr);
+    assert.match(accepted.stdout, /^state: preparing_mr$/m);
+    const ready = await waitFor(served, 'G-8', 'ready_for_human_review', 2);
+    assert.equal(git(repo, 'show', `${ready.branch}:a.txt`), '2\n');
+
+    const override = JSON.parse(await readFile(join(iterationDir(env, 'G-8', 2), 'gate-override.json'), 'utf8'));
+    assert.match(override.at, /^\d{4}-\d\d-\d\dT/);
+    assert.deepEqual({ ...override, at: undefined }, { at: undefined, code: 'gate_rounds', unapplied: stillWrong.items });
+    const events = await eventsOf(env, 'G-8');
+    const index = events.findIndex((record) => record.type === 'gate_overridden');
+    assert.deepEqual({ ...events[index], ts: undefined }, { ts: undefined, iteration: 2, type: 'gate_overridden', code: 'gate_rounds', unapplied: 1 });
+    // Recorded before the job moved on to MR preparation.
+    assert.deepEqual((events[index + 1]!.state as { from: string; to: string }), { from: 'needs_human', to: 'preparing_mr' });
+    assert.match((await runCli(env, ['watch', 'app', 'G-8', '--once'])).stdout, /^\d\d:\d\d:\d\d \[2\] gate overridden by the user \(gate_rounds\): 1 Codex item not applied$/m);
+
+    // The dashboard: the override in the iteration and in the state history.
+    const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/G-8', served.dashboard!))).body);
+    assert.equal(detail.gate, true);
+    assert.deepEqual(detail.iterations[1].gate_override, override);
+    assert.deepEqual(detail.history.filter((entry: Record<string, unknown>) => entry.event === 'gate_overridden').map(({ ts: _ts, ...entry }: Record<string, unknown>) => entry), [
+      { event: 'gate_overridden', code: 'gate_rounds', unapplied: 1 },
+    ]);
+    assert.deepEqual([detail.job.fixes, detail.job.gate_fixes], [1, 1]);
+
+    // Refused in any other state.
+    const again = await runCli(env, ['accept', 'app', 'G-8']);
+    assert.equal(again.code, 1);
+    assert.match(again.stderr, /^sf: sf accept needs needs_human after the gate stopped \(gate_rounds, gate_budget, gate_failed\); the job is ready_for_human_review/);
+    assert.equal((await runCli(env, ['accept', 'app'])).code, 2);
+  } finally {
+    await stop(served);
+  }
+});
+
+test('sf accept (SF-047): a failed gate is accepted with its error as what goes unapplied; another needs_human code is refused', async () => {
+  const env = await newEnv('gate-accept-failed', gateEnv());
+  const repo = await newRepo(env, 'gate-accept-failed-repo', false);
+  await putTask(env, repo, 'G-9', 'Accept a failed gate');
+  await script(env, [
+    { write: { 'a.txt': '1\n' } },
+    { write: { '.software-factory/G-9.mr.md': mrText('feat(G-9): Accept a failed gate') }, text: 'prepared' },
+  ]);
+  await reviewScript(env, [{ output: CLAUDE_CLEAN }]);
+  await codexScript(env, [{ exitCode: 3 }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'G-9' });
+    const failed = await waitFor(served, 'G-9', 'needs_human', 1);
+    assert.equal(failed.error.code, 'gate_failed');
+    const store = new JobStore(env.state);
+    // Another code of needs_human is refused.
+    const job = (await store.read('app', 'G-9'))!;
+    await store.write({ ...job, error: { code: 'iteration_limit', message: 'x' } });
+    const refused = await runCli(env, ['accept', 'app', 'G-9']);
+    assert.equal(refused.code, 1);
+    assert.match(refused.stderr, /^sf: sf accept needs needs_human.*the job is needs_human \(iteration_limit\)/);
+    await store.write(job);
+
+    assert.equal((await runCli(env, ['accept', 'app', 'G-9'])).code, 0);
+    await waitFor(served, 'G-9', 'ready_for_human_review', 1);
+    const override = JSON.parse(await readFile(join(iterationDir(env, 'G-9', 1), 'gate-override.json'), 'utf8'));
+    assert.equal(override.code, 'gate_failed');
+    assert.equal(typeof override.unapplied, 'string');
+    assert.equal(override.unapplied, failed.error.message);
+  } finally {
+    await stop(served);
   }
 });

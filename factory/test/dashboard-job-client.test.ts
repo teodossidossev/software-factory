@@ -174,7 +174,7 @@ test('job client: the next-action panel says who acts now and offers the actions
     [job('awaiting_review'), [iteration(1)], /^Now · Claude review/, 'Claude is reviewing iteration 1.', ['abort-button']],
     [job('awaiting_review'), [iteration(1, { review: CLEAN })], /^Now · Codex gate/, 'Codex is reviewing iteration 1.', ['abort-button']],
     [job('preparing_mr'), [iteration(1, { review: CLEAN })], /^Now · Factory/, 'The factory commits the change and rebases it onto main.', ['abort-button']],
-    [job('ready_for_human_review'), [iteration(1, { review: CLEAN })], /^Your turn/, 'The branch is ready: approve to push it, or abort.', ['approve-button', 'abort-button']],
+    [job('ready_for_human_review'), [iteration(1, { review: CLEAN })], /^Your turn/, 'The branch is ready: approve to push it, or create the merge request (push and open it), or abort.', ['approve-button', 'abort-button']],
     [job('needs_human', { error: { code: 'review_failed', message: 'No output.' } }), [iteration(1, { review: { reviewer: 'claude', error: 'No output.' } })], /^Your turn/,
       'The Claude review could not run. Retry it.', ['retry-review-button', 'abort-button']],
     [job('needs_human', { error: { code: 'gate_rounds', message: 'Three rounds.' } }), [iteration(1, { review: CLEAN, gate: GATE_FIX })], /^Your turn/,

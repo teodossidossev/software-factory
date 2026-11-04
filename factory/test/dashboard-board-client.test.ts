@@ -126,9 +126,9 @@ test('board client: the pipeline segment per state, a halted one red, and who ac
   assert.equal(card(page, 'app/RF').all().find((element) => element.className === 'pipe')!.getAttribute('aria-label'), 'Pipeline: Claude review, halted');
   // A halted job says why on its card.
   assert.match(card(page, 'app/RF').textContent, /review_failed: overloaded/);
-  // The one action of each Your turn card.
+  // The action of each Your turn card; a branch to approve also offers Create merge request… (SF-048).
   assert.deepEqual(['R', 'RF', 'GR', 'PF'].map((name) => buttons(card(page, `app/${name}`)).filter((element) => element.className.startsWith('btn')).map((element) => element.textContent)),
-    [['Approve…'], ['Retry review'], ['Open the job'], ['Approve…']]);
+    [['Approve…', 'Create merge request…'], ['Retry review'], ['Open the job'], ['Approve…', 'Create merge request…']]);
 });
 
 test('board client: Start asks first, naming the workspace, the ticket and the base; Cancel sends nothing; a refusal shows as it comes; a skeleton waits for the plan', async () => {

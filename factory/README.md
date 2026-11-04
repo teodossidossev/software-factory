@@ -33,6 +33,9 @@ bin/sf accept <workspace> <ticket>             # accept a clean Claude review ov
 bin/sf status [<workspace> <ticket>]           # one job (with its worktree, sensitive and deleted paths) or all jobs, with estimated cost and elapsed time; works without sf serve
 bin/sf watch <workspace> <ticket> [--once]     # the session live; works without sf serve
 bin/sf approve <workspace> <ticket> [--as-is]  # push the branch prepared at Clean; --as-is pushes a tip edited by hand; needs sf serve
+bin/sf mr create <workspace> <ticket>          # open the job's merge request on GitHub or GitLab (or reuse the open one); from ready_for_human_review: approve, then open; needs sf serve
+bin/sf mr merge <workspace> <ticket>           # merge the job's open merge request through the host's API (refused with the host's reason); needs sf serve
+bin/sf mr status <workspace> <ticket>          # the merge request on the host: open, merged or closed, mergeable or why not, the checks; needs sf serve
 bin/sf abort <workspace> <ticket> [--discard]  # end the job; the worktree stays (its path printed); --discard removes the worktree and the branch; needs sf serve
 bin/sf reset <workspace> <ticket>              # end the session, remove the worktree and archive the job; the branch stays; needs sf serve
 bin/sf notify-test                             # one test notification on every channel; works without sf serve
@@ -40,7 +43,9 @@ bin/sf info                                    # version, directories, settings 
 npm run typecheck && npm test
 ```
 
-Exit codes: 0 ok, 1 error, 2 usage. `sf approve` exits 1 unless the branch was pushed.
+Exit codes: 0 ok, 1 error, 2 usage. `sf approve` exits 1 unless the branch was pushed; `sf mr
+create` exits 1 when the push or the merge request failed (the branch may be pushed then: the
+output says so).
 
 `sf up` is `sf serve` in the same process, then the tunnel as a child process (`SF_TUNNEL_SCRIPT`
 names another script) and the dashboard through `xdg-open` once serve listens. When the script is
@@ -104,13 +109,17 @@ message below the table). Both work without `sf serve`; they read the state dire
 | `SF_NOTIFY_ITERATIONS` | off | `on` also notifies `awaiting_review` (each published iteration). |
 | `SF_NTFY_URL` | unset | Full ntfy topic URL, e.g. `https://ntfy.sh/<topic>`; unset disables ntfy. |
 | `SF_NTFY_TOKEN` | unset | Sent as `Authorization: Bearer <token>` to a server that needs it. |
+| `SF_GITHUB_TOKEN` | unset | The GitHub token of the merge request actions (SF-048): a fine-grained token with Pull requests read/write and Contents read on the repository (Checks read too for the checks in `sf mr status`). Sent only as `Authorization: Bearer <token>` to `https://api.github.com`. Unset turns the actions off for workspaces on `github.com`, saying so. |
+| `SF_GITLAB_TOKEN` | unset | The GitLab token (scope `api`) of the merge request actions, sent only as `Authorization: Bearer <token>` to the GitLab API of the workspace's origin host. Unset turns the actions off for GitLab workspaces. |
+| `SF_GITLAB_URL` | `https://<host>/api/v4` | The GitLab API base when it differs (another port or path; `http` only on loopback, so the token never travels in cleartext: any other `http` URL is refused at start). Set, the GitLab token goes to this URL only, and only for workspaces whose origin is on its host name; other hosts are refused (`mr_host_unsupported`). |
+| `SF_GITHUB_API` | `https://api.github.com` | Tests only: the fake GitHub on loopback (`127.0.0.1`, `localhost` or `[::1]`); any other host is refused at start. |
 | `SF_TEST_HOOKS` | off | Tests only. `on` makes `sf serve` answer the socket commands `check`, `fix` and `clean` (the reviewers' verdict paths without a review session) for the end-to-end tests. Never set it in real use. |
 
 The socket path `${SF_STATE_DIR}/sf.sock` must fit a Unix socket address (107 bytes on Linux);
 a longer one is refused at start with `socket_path_too_long`.
 
 The execution variables are read once when `sf serve` starts. `sf status` and `sf watch` read
-`SF_STATE_DIR` themselves; `sf start`, `sf say`, `sf review`, `sf accept`, `sf approve`, `sf abort` and `sf reset` use it to find the socket; `sf notify-test` reads the notification variables itself.
+`SF_STATE_DIR` themselves; `sf start`, `sf say`, `sf review`, `sf accept`, `sf approve`, `sf mr`, `sf abort` and `sf reset` use it to find the socket; `sf notify-test` reads the notification variables itself.
 
 ## Jobs
 
@@ -503,6 +512,43 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    | `mr_push_protected` | the branch is `main`, `master` or the job's base: nothing is pushed there directly, every change goes through a merge request |
    | `mr_push_failed` | `git push origin <branch>:<branch>` failed (120 s; stderr in the message) |
 
+8. `sf mr create` (or the dashboard's Create merge request, SF-048): for a `pushed` job, opens a
+   pull request (GitHub) or merge request (GitLab) from the branch into the base, titled with the
+   MR text's first line, the rest of the MR text as the body; one already open for the branch is
+   reused, never duplicated. From `ready_for_human_review` (or `needs_human` after a failed push)
+   it is approve and then the merge request, in one action; the host and the token are checked
+   before anything is pushed. The host is chosen from the checkout's `origin` URL (as for the
+   compare link): `github.com` is GitHub, any other host GitLab (except hosts known not to be
+   GitLab). The job records `mr: {host, number, url, state: "open"}`, appends a `merge_request`
+   event, and the notification and the dashboard show the link. A merge request that fails to
+   open after a push leaves the job `pushed`, with the failure in the result.
+9. `sf mr merge` (the dashboard's Merge): merges the job's open merge request through the host's
+   API: GitHub's merge method `merge` with GitHub's own commit title, GitLab's `PUT .../merge`.
+   No push, no force. A draft, a conflict or anything else the host refuses (failing required
+   checks, missing approvals) is `mr_not_mergeable` with the host's reason, and nothing changes.
+   Merged: `mr.state` `merged`, `mr.merge_commit`, a `merge_request` event and a notification.
+10. `sf mr status` (the dashboard's Refresh MR status): what the host says now: open, merged or
+    closed, draft, mergeable or why not, and the checks (GitHub's check runs of the head commit,
+    GitLab's head pipeline) when the host reports them. A merge request merged or closed on the
+    host meanwhile is recorded so, without a notification.
+
+   | Code | Meaning |
+   |---|---|
+   | `mr_token_missing` | the workspace's host has no token: `SF_GITHUB_TOKEN` or `SF_GITLAB_TOKEN` is named |
+   | `mr_host_unsupported` | the origin names no GitHub or GitLab repository, or a host other than `SF_GITLAB_URL`'s |
+   | `mr_auth_failed` | the host refused the token (401); the message names the variable, never the token |
+   | `mr_host_error` | the host refused the request (its status and words), or answered with a redirect, which is never followed |
+   | `mr_host_unreachable` | the host did not answer (30 s) |
+   | `mr_not_mergeable` | the host cannot merge it: a draft, conflicts, failing required checks, ...; the host's reason in the message |
+   | `mr_not_open` | the merge request is merged or closed on the host |
+   | `mr_host_changed` | the job's merge request is on another host than the checkout's origin now is |
+
+   The tokens are read from the environment file, kept out of every child process (the
+   Implementer, the reviewers, Git, `notify-send`), never logged and never written to a job file;
+   `sf info` says only whether each is set, and shows `SF_GITLAB_URL` as checked at start; a
+   refused `SF_GITHUB_API` or `SF_GITLAB_URL` is named in its message with any credentials, query
+   or fragment replaced by `[redacted]`.
+
 ## Notifications
 
 On `ready_for_human_review`, `needs_human`, `pushed` and `failed` (iterations are silent unless
@@ -511,7 +557,9 @@ the body "Report and Patch of iteration N are ready for the reviewers") the
 factory sends a desktop notification (`notify-send --app-name="Software Factory" "<ticket>:
 <state>" <body>`, 5 s, when `notify-send` is on `PATH`) and, with `SF_NTFY_URL` set, one ntfy POST
 (10 s; headers `Title`, `Priority` high for `needs_human` and `failed`, `Tags`). The body has at most
-three lines: the branch, the error, or the MR title and link when pushed. A failure never changes
+three lines: the branch, the error, or the MR title and link when pushed. Once the factory opens
+or merges a merge request (SF-048), the title is `<ticket>: merge request #<n> opened` (or `merged`)
+and the body has its link. A failure never changes
 the job; it is appended to `events.jsonl` as `{type: "notify_failed", channel, message}` and shown
 by `sf watch`. `sf notify-test` sends one test notification on both channels and prints what each
 did.
@@ -526,8 +574,8 @@ State layout under `${SF_STATE_DIR}`:
 ```
 sf.sock                                  # 0600, while sf serve runs; one JSON request/response per connection
 dashboard-token                          # 0600, the dashboard token of the last sf serve start
-jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, state, iteration, fixes, gate_fixes, gate_tokens, session_id, created_at, updated_at, error
-jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "review" | "review_failed" | "review_message" | "gate_event" | "gate_overridden" | ...}; what sf watch reads
+jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, state, iteration, fixes, gate_fixes, gate_tokens, session_id, created_at, updated_at, error, mr ({host, number, url, state, merge_commit?} or null)
+jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "review" | "review_failed" | "review_message" | "gate_event" | "gate_overridden" | "merge_request" | ...}; what sf watch reads
 jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-override.json,gate-schema.json,gate-output.json,conflict-resolution.diff}
 worktrees/<workspace>/<ticket>/          # the job's worktree (SF_WORKTREE_ROOT), from start to Clean, abort or reset
 jobs/<workspace>/<ticket>/mr.md              # the MR text, once the branch is ready or after a conflict iteration
@@ -682,7 +730,14 @@ unchecked every time a confirmation opens: `sf abort --discard`), say (`sf say`:
 message; Enter adds a line, only the Send button submits), Retry review (`sf review`, SF-044, sent
 at once without a confirmation) and Accept and prepare MR (`sf accept`, SF-047: its confirmation
 names the job and lists the Codex items that will not be applied, path and problem, or the gate's
-error, so the user accepts them knowingly). Each is one deliberate click; approve, abort and accept ask for a confirmation that names the
+error, so the user accepts them knowingly). The merge request (SF-048) has Create merge request
+(`sf mr create`; its confirmation shows the title, the host and the target branch, and from
+`ready_for_human_review` says the branch is pushed first), Merge (`sf mr merge`; its confirmation
+names the number and the target branch) and Refresh MR status (`sf mr status`) in the next-action
+panel, with the merge request's link; the Your turn cards offer Create merge request… next to
+Approve…, the Done cards of pushed jobs Create merge request… or Merge… and the link. Without the
+token for the workspace's host the buttons stay off and the reason names the missing variable.
+Approve stays for users who open merge requests themselves. Each is one deliberate click; approve, abort and accept ask for a confirmation that names the
 job, explains what follows (the push; the session ends and the worktree stays, or the worktree and
 the branch go with discard; MR preparation without the Codex items) and sends nothing when
 cancelled. The page enables
@@ -729,8 +784,8 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 
 | Path | Answer |
 |---|---|
-| `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, fixes, gate_fixes, gate_tokens, updated_at, created_at, error, and for the board (SF-046) `title` (of the Task file, or `null`), `cost_usd` (the estimate of the iterations and their Claude reviews, or `null`), `review` and `gate` (the last iteration's verdicts: `clean`, `fix`, `failed` or `null`) and `review_ended_at` (the end of that clean or fix Claude review, or `null`) |
-| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied}]}`; `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null` |
+| `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, fixes, gate_fixes, gate_tokens, updated_at, created_at, error, and for the board (SF-046) `title` (of the Task file, or `null`), `cost_usd` (the estimate of the iterations and their Claude reviews, or `null`), `review` and `gate` (the last iteration's verdicts: `clean`, `fix`, `failed` or `null`) and `review_ended_at` (the end of that clean or fix Claude review, or `null`); `mr` (the merge request on the Git host or `null`) and `mr_host` (`{host, reason}`: `github`, `gitlab` or `null`, and why the merge request actions are off or `null`) |
+| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied} or {ts, event: "merge_request", action, number, url, state}], mr_title}`; `mr_title` is the MR text's first line or `null`; `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null` |
 | `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem}]}`: the registry, the checkout's path, its non-terminal jobs, and why the checkout cannot be used now or `null` |
 | `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, conversation: {message, url}}], archived: [{workspace, ticket, title}]}`: the Task files without a live job; `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
@@ -746,6 +801,9 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `POST api/jobs/<ws>/<ticket>/say` | `{"message": "<text>"}` | `Execution.say(ws, ticket, message)`; the text goes as it is (nothing trimmed or split) |
 | `POST api/jobs/<ws>/<ticket>/review` | `{}` | `Execution.retryReview(ws, ticket)` (`sf review`): the failed review of the last iteration runs again; result `{state, iteration}`; `409 invalid_state` unless the job is `needs_human` with `review_failed`, `409 review_off` with `SF_REVIEW=off` |
 | `POST api/jobs/<ws>/<ticket>/accept` | `{}` | `Execution.acceptGate(ws, ticket)` (`sf accept`, SF-047): the override of the stopped gate, then MR preparation; result `{state, iteration, branch}`; `409 invalid_state` with the reason unless the job is `needs_human` with `gate_rounds`, `gate_budget` or `gate_failed` and a clean Claude review of the last iteration; the MR preparation's refusals (`409 worktree_missing`, `409 turn_running`) |
+| `POST api/jobs/<ws>/<ticket>/mr-create` | `{}` | `Execution.createMergeRequest(ws, ticket)` (`sf mr create`, SF-048): result `{state, branch, title?, link?, mr?: {host, number, url, state, reused}, error?}`; `409` for `invalid_state`, `mr_token_missing`, `mr_host_unsupported`, `mr_text_missing`; `502` for `mr_auth_failed`, `mr_host_error`, `mr_host_unreachable` |
+| `POST api/jobs/<ws>/<ticket>/mr-merge` | `{}` | `Execution.mergeMergeRequest(ws, ticket)` (`sf mr merge`): result `{state, branch, mr}`; `409 mr_not_mergeable` with the host's reason, `409 mr_not_open`, and the codes above |
+| `POST api/jobs/<ws>/<ticket>/mr-status` | `{}` | `Execution.mergeRequestStatus(ws, ticket)` (`sf mr status`): result `{state, branch, mr, status: {number, url, state, draft, mergeable, reason?, checks?, merge_commit?}}`; every page gets the jobs again, and the pages that show the job its detail (a merge request merged or closed on the host shows so at once) |
 | `POST api/workspaces` | `{"name": string, "path": string}` | `Setup.addWorkspace`: the rules of `sf workspace add`; result the workspace row |
 | `POST api/workspaces/<name>/remove` | `{}` | `Setup.removeWorkspace`; `409 workspace_busy` while the workspace has a live job; result `{removed}` |
 | `POST api/tickets` | `{"workspace", "ticket", "title", "request"}` | `Setup.createTicket`: the ticket skeleton through the Task file writer, the request kept for the conversation; result `{workspace, ticket, path, base}` |

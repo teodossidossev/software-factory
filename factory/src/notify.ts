@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access } from 'node:fs/promises';
 import { delimiter, join } from 'node:path';
+import { withoutHostTokens } from './forge.js';
 import type { Job, JobState, JobStore } from './jobs.js';
 import { now } from './jobs.js';
 
@@ -47,7 +48,8 @@ export function notifiedStates(config: NotifyConfig): readonly JobState[] {
   return config.iterations ? [...NOTIFIED_STATES, 'awaiting_review'] : NOTIFIED_STATES;
 }
 
-// The notification for a job that reached state; lines: the MR title and link when pushed, the
+// The notification for a job that reached state (or whose merge request was opened or merged);
+// lines: the MR title and link (or the merge request's) when pushed, the
 // sensitive and deleted paths of the iteration (SF-024).
 export function jobNotification(job: Job, lines: string[] = []): Notification {
   if (job.state === 'awaiting_review') {
@@ -59,8 +61,10 @@ export function jobNotification(job: Job, lines: string[] = []): Notification {
     };
   }
   const body = [`branch: ${job.branch}`, ...(job.error !== undefined ? [`${job.error.code}: ${job.error.message}`] : []), ...lines].slice(0, 3);
+  // A pushed job's merge request on the Git host (SF-048) names the title once it is opened or merged.
+  const mr = job.state === 'pushed' && job.mr !== null && job.mr !== undefined ? job.mr : undefined;
   return {
-    title: `${job.ticket}: ${job.state}`,
+    title: mr !== undefined ? `${job.ticket}: merge request #${mr.number} ${mr.state === 'open' ? 'opened' : mr.state}` : `${job.ticket}: ${job.state}`,
     body: body.join('\n'),
     priority: job.state === 'needs_human' || job.state === 'failed' ? 'high' : 'default',
     tags: job.state === 'pushed' ? 'white_check_mark' : job.state === 'ready_for_human_review' ? 'eyes' : 'warning',
@@ -87,7 +91,7 @@ async function desktop(notification: Notification, config: NotifyConfig): Promis
   if (executable === undefined) {
     return { channel: 'desktop', status: 'skipped', message: 'notify-send is not on PATH' };
   }
-  const { SF_NTFY_TOKEN: _token, ...env } = process.env;
+  const { SF_NTFY_TOKEN: _token, ...env } = withoutHostTokens();
   return new Promise((resolve) => {
     const child = spawn(executable, ['--app-name=Software Factory', notification.title, notification.body], {
       env, stdio: ['ignore', 'ignore', 'pipe'], timeout: DESKTOP_TIMEOUT_MS,

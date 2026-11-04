@@ -162,12 +162,15 @@ export function openStream(url: URL): Promise<Stream> {
   });
 }
 
-export type Call = ['start', string, string] | ['approve', string, string] | ['abort', string, string, boolean] | ['say', string, string, string] | ['retryReview', string, string] | ['acceptGate', string, string] | ['archiveFinished', string, string];
+export type Call = ['start', string, string] | ['approve', string, string] | ['abort', string, string, boolean] | ['say', string, string, string] | ['retryReview', string, string] | ['acceptGate', string, string] | ['archiveFinished', string, string]
+  | ['createMergeRequest', string, string] | ['mergeMergeRequest', string, string] | ['mergeRequestStatus', string, string];
 
 export interface FakeActions extends DashboardActions {
   calls: Call[];
   // What the next calls answer: a value, a FactoryError or any error to throw, or a function.
   answer: unknown;
+  // What mergeRequestHost answers for every workspace; its calls are not recorded (every payload asks).
+  mrHost: { host: 'github' | 'gitlab' | null; reason: string | null };
 }
 
 // Records every call and answers with `answer` (thrown when it is an Error; awaited when it is a
@@ -183,6 +186,11 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
     retryReview: (workspace, ticket) => reply(['retryReview', workspace, ticket]),
     acceptGate: (workspace, ticket) => reply(['acceptGate', workspace, ticket]),
     archiveFinished: (workspace, ticket) => reply(['archiveFinished', workspace, ticket]),
+    createMergeRequest: (workspace, ticket) => reply(['createMergeRequest', workspace, ticket]),
+    mergeMergeRequest: (workspace, ticket) => reply(['mergeMergeRequest', workspace, ticket]),
+    mergeRequestStatus: (workspace, ticket) => reply(['mergeRequestStatus', workspace, ticket]),
+    mrHost: { host: 'github', reason: null },
+    mergeRequestHost: async () => fake.mrHost,
   };
   async function reply(call: Call): Promise<any> {
     fake.calls.push(call);

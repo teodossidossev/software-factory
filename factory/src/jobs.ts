@@ -56,8 +56,18 @@ const jobSchema = z.strictObject({
   // Time of the last state change.
   updated_at: timestamp,
   error: z.strictObject({ code: z.string(), message: z.string() }).optional(),
+  // The merge request the factory opened on the Git host (SF-048), from pushed on; null before.
+  mr: z.strictObject({
+    host: z.enum(['github', 'gitlab']),
+    number: z.number().int().min(1),
+    url: z.string().min(1),
+    state: z.enum(['open', 'merged', 'closed']),
+    // The merge commit once merged, when the host reports it.
+    merge_commit: commit.nullable().optional(),
+  }).nullable().default(null),
 });
 export type Job = z.output<typeof jobSchema>;
+export type JobMr = NonNullable<Job['mr']>;
 
 export interface ChangedFile {
   path: string;
@@ -165,6 +175,10 @@ export type EventRecord = { ts: string; iteration: number } & (
   // The user accepted the iteration over the stopped gate (SF-047): the code it stopped with and
   // the number of Codex items not applied (0 when the gate failed or did not run).
   | { type: 'gate_overridden'; code: string; unapplied: number }
+  // The merge request on the Git host (SF-048): opened, reused (already open for the branch),
+  // merged by the factory, or found merged or closed on the host by sf mr status.
+  // mr_state, not state: a record with state is a state change.
+  | { type: 'merge_request'; action: 'created' | 'reused' | 'merged' | 'updated'; host: JobMr['host']; number: number; url: string; mr_state: JobMr['state']; merge_commit?: string }
 );
 
 // The bound of one reviewer event or message in events.jsonl (SF-045), in bytes of its JSON.

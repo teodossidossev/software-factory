@@ -359,9 +359,10 @@ export async function originUrl(cwd: string): Promise<string | undefined> {
   return result.ok && result.text !== '' ? result.text : undefined;
 }
 
-// The page that opens a merge request for branch into base, derived from the origin URL:
-// GitHub's compare view for github.com, GitLab's new merge request form otherwise.
-export function mergeRequestLink(url: string, base: string, branch: string): string | undefined {
+// The host and the repository path of an origin URL (https, ssh, git or scp-like): the host with
+// its port for http(s), without it otherwise; the path without slashes around it and without
+// .git. Undefined for a local path or a URL without an owner/repository path.
+export function parseOrigin(url: string): { host: string; path: string } | undefined {
   let host: string;
   let path: string;
   const scp = /^(?:[^@/\s]+@)?([^:/\s]+):(?!\/)(.+)$/.exec(url);
@@ -382,6 +383,17 @@ export function mergeRequestLink(url: string, base: string, branch: string): str
   if (path === '' || !path.includes('/')) {
     return undefined;
   }
+  return { host, path };
+}
+
+// The page that opens a merge request for branch into base, derived from the origin URL:
+// GitHub's compare view for github.com, GitLab's new merge request form otherwise.
+export function mergeRequestLink(url: string, base: string, branch: string): string | undefined {
+  const origin = parseOrigin(url);
+  if (origin === undefined) {
+    return undefined;
+  }
+  const { host, path } = origin;
   if (host === 'github.com') {
     return `https://${host}/${path}/compare/${base}...${branch}?expand=1`;
   }

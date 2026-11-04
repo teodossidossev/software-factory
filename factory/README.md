@@ -466,9 +466,11 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    (`src/prompts.ts`). The prompt names the target and, on a retry, the previous error. It asks
    for `.software-factory/<ticket>.mr.md` only: the first line is the title, which is also the
    commit header; a blank line; the body by the MR template. It says that the factory commits,
-   rebases and pushes, and that the commit body is taken from the `## Why` section. It asks for a
-   short report (`# Report: <ticket>, MR preparation <attempt>`, `## Done`, `## Open questions`)
-   and ends with the Handbook's `## Git rules` and `## MR template` verbatim.
+   rebases and pushes, and that the commit body is taken from the `## Why` section. It states
+   `MR_TESTING_RULE` (`src/rules.ts`): `## Testing` lists only what was run in this job, with its
+   result, and anything not run goes on a line starting with `Not checked:`, saying who can run
+   it. It asks for a short report (`# Report: <ticket>, MR preparation <attempt>`, `## Done`,
+   `## Open questions`) and ends with the Handbook's `## Git rules` and `## MR template` verbatim.
 3. When that turn ends, the factory checks the MR text, then works in the worktree under the
    workspace's Git lock. Every Git call runs with `-c core.hooksPath=/dev/null`, so no repository
    hook runs outside the sandbox, and with a 60 s timeout.
@@ -518,7 +520,7 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    | Code | Meaning |
    |---|---|
    | `mr_text_missing` | `.software-factory/<ticket>.mr.md` absent or empty |
-   | `mr_text_invalid` | over 64 KiB, a first line that breaks `commitHeader(ticket)` in `src/rules.ts` (`<type>(<ticket>): <summary>`, type one of `feat fix chore refactor docs test perf build ci style revert`, at most 72 characters, no trailing period), or a missing `## What`, `## Why`, `## How`, `## Why the change`, `## Special things to note`, `## Change outline`, `## Testing` or `## Checklist` heading |
+   | `mr_text_invalid` | over 64 KiB, a first line that breaks `commitHeader(ticket)` in `src/rules.ts` (`<type>(<ticket>): <summary>`, type one of `feat fix chore refactor docs test perf build ci style revert`, at most 72 characters, no trailing period), or a missing `## What`, `## Why`, `## How`, `## Why the change`, `## Special things to note`, `## Change outline`, `## Testing` or `## Checklist` heading, or a `## Testing` line that starts with `By hand` or `Manual` (after any list marker, checkbox or emphasis) and does not contain `not` (`testingProblem` in `src/rules.ts`) |
    | `mr_empty` | the reviewed change has nothing to commit against `base_commit` |
    | `mr_commit_failed` | `git commit` failed, for example without a Git identity (stderr in the message) |
    | `mr_rebase_failed` | `git rebase` failed without conflicts; it was aborted |

@@ -98,7 +98,9 @@ function recordLines(record: Record<string, unknown>): string[] {
     }
     const count = typeof record.items === 'number' ? record.items : 0;
     const items = record.verdict === 'fix' ? ` (${count} ${count === 1 ? 'item' : 'items'})` : '';
-    return [`${prefix} review by ${String(record.reviewer)}: ${String(record.verdict)}${items}${ignored}`];
+    // The verdict the factory acted on, when it is not the reviewer's (SF-051).
+    const effective = record.effective === 'clean' || record.effective === 'fix' ? `, acted on as ${record.effective}` : '';
+    return [`${prefix} review by ${String(record.reviewer)}: ${String(record.verdict)}${items}${effective}${ignored}`];
   }
   if (record.type === 'gate_overridden') {
     const count = typeof record.unapplied === 'number' ? record.unapplied : 0;

@@ -127,11 +127,21 @@ with every iteration. The Context owner does not review.
   scenario, real data) goes into the verdict's summary, it is no reason to hold the verdict.
 - Review the Patch against the Task file, its `## Review brief`, the plan and the repository
   standards. The Report says what was checked; verify claims against the Patch, do not trust them.
-- A `fix` lists concrete items: path, what is wrong, what is expected. No restating of the
-  whole task.
-- Return `clean` only when every earlier Fix item is fixed or rejected with a reason you accept.
+- A `fix` lists concrete items: path, what is wrong, what is expected, severity. No restating of
+  the whole task.
+- Every item has a severity:
+  - `blocker`: the change is wrong, unsafe or breaks the Task's acceptance.
+  - `major`: a real defect or a Task requirement not met, but contained.
+  - `nit`: style, naming, wording, a narrower variant of a risk already accepted, a nice-to-have.
+- Only a `blocker` or `major` item makes a fix, whatever the verdict says. A `fix` with nits
+  only counts as `clean`: the
+  factory records it as given, keeps the nits, and lists them in the MR text as
+  `### Nits not applied`. Nits never block; in a Fix section they come last, as optional.
+- Return `clean` only when every earlier blocker and major Fix item is fixed or rejected with a
+  reason you accept. Earlier nits may stay.
 - An undeclared sensitive path (one the Task file's `may_touch` does not name) stays only when
-  the change needs it and the verdict says why; otherwise it is a fix item.
+  the change needs it and the verdict says why; otherwise it is a major fix item, whatever
+  severity the reviewer gives it.
 - Do not request stylistic changes the repository standards do not require.
 
 ## Git rules

@@ -205,31 +205,43 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   `~/.claude/CLAUDE.md` or `~/.claude/AGENTS.md` read as the home directory's). `CLAUDE.local.md`
   needs no exclude: it loads only with the `local` setting source. The Implementer's session keeps
   `['user', 'project']`.
-  Its prompt says what to verify, then carries the Handbook's `## Review rules for the Context
-  owner` verbatim, the Task file (with its `## Review brief` when there is one), the Report, the
+  Its prompt says what to verify and defines the item severities, then carries the Handbook's
+  `## Review rules` verbatim, the Task file (with its `## Review brief` when there is one), the Report, the
   sensitive and deleted paths of the iteration and the Patch inline up to 256 KiB (beyond that, the
   first 256 KiB and a note to read the changed files). Its output is structured
   (`outputFormat: {type: "json_schema"}`), validated with zod: `{verdict: "clean" | "fix", summary,
-  items: [{path, problem, expected}], accepted_sensitive}`. The SDK hands the schema to the Claude
+  items: [{path, problem, expected, severity}], accepted_sensitive}`, `severity` one of `blocker`
+  (the change is wrong, unsafe or breaks the Task's acceptance), `major` (a real defect or a Task
+  requirement not met, but contained) or `nit` (style, naming, wording, a narrower variant of a risk
+  already accepted, a nice-to-have); one definition, `reviewItem` in `src/review.ts` (SF-051). The SDK hands the schema to the Claude
   Code CLI as `--json-schema`. It is generated as draft-07 and sent without `$schema`, because the
   CLI refuses the draft 2020-12 `$schema` that zod writes by default (SF-044). The fake Claude of
   the tests refuses such a schema the same way.
 - The review runs outside the execution lock. Its verdict is applied under the lock only while the
   job is still `awaiting_review` at the same iteration; otherwise (an `sf say` or an abort came
-  first) it is recorded and ignored. `fix` writes `## Fix N` from the items (the
-  summary as a lead line, then one numbered item per entry: path, what is wrong, what is expected)
-  and runs the next iteration (the fix path, below). `clean` runs the clean path (below) with
-  `accepted_sensitive`; an undeclared sensitive path it does not accept turns it
-  into a fix item instead. A review that fails (an error, a turn that is not a success, no or an
+  first) it is recorded and ignored. The factory decides how to act on a verdict, the same way for
+  both reviewers (`decide` in `src/review.ts`, SF-051): it is a fix only when it has at least one
+  `blocker` or `major` item (whatever the verdict says), or when an undeclared sensitive path is not in
+  `accepted_sensitive` (that path is then a `major` item, whatever the reviewer said of it);
+  otherwise it is clean, whatever the reviewer wrote, so a `fix` with nits only goes on as clean
+  (Claude's to the gate, the gate's to MR preparation). A fix writes `## Fix N` (the summary as a
+  lead line, then one numbered line per blocker and major item, `1. [major] \`path\`: problem
+  Expected: expected`, then the nits numbered on under `Nits (optional):`, which the Implementer
+  may leave) and runs the next iteration (the fix path, below). A clean runs the clean path
+  (below) with `accepted_sensitive`. A review stored before SF-051 (items without `severity`) reads
+  as all `major`. A review that fails (an error, a turn that is not a success, no or an
   invalid structured output, `fix` without items) puts the job in `needs_human` with
   `review_failed`; nothing is retried by itself. `sf abort` and `sf reset` cancel a running review, whose
   outcome is then never applied; a newer review of the same job cancels an older one.
 - Every review that ends is kept in `iterations/NNN/review.json`: `{reviewer: "claude", verdict,
   summary, items, accepted_sensitive, cost_usd, started_at, ended_at}`, or `{reviewer, error}` when
-  it failed. One line goes to `events.jsonl`: `{type: "review", reviewer, verdict, items: <count>}`
-  or `{type: "review_failed", reviewer, error}`, with `ignored: true` when the job had moved on.
-  `sf watch` and the dashboard's Event stream show it as `review by claude: fix (3 items)`,
-  `review by claude: clean` or `review by claude failed: <error>`. A cancelled review leaves no
+  it failed. The verdict is recorded as the reviewer gave it. One line goes to `events.jsonl`:
+  `{type: "review", reviewer, verdict, items: <count>}`, with `effective: "clean" | "fix"` when the
+  factory acted otherwise (a `fix` with nits only; a `clean` with a blocker or major item, or one
+  that leaves an undeclared sensitive path unaccepted), or `{type: "review_failed", reviewer, error}`, with `ignored: true` when the job had
+  moved on. `sf watch` and the dashboard's Event stream show it as `review by claude: fix (3
+  items)`, `review by claude: fix (2 items), acted on as clean`, `review by claude: clean` or
+  `review by claude failed: <error>`. A cancelled review leaves no
   outcome.
 - The reviewers live (SF-045): while a review runs, every SDK message of its session goes to
   `events.jsonl` as it arrives: `{ts, iteration, type: "review_message", reviewer: "claude",
@@ -301,7 +313,7 @@ ended. A restart of `sf serve` therefore leaves a working job working.
 - `sf accept <workspace> <ticket>` (SF-047), or *Accept and prepare MR…* on the dashboard, lets the
   user override the gate once it stopped the job: `needs_human` with `gate_rounds`, `gate_budget` or
   `gate_failed`, and a clean Claude review of the last iteration (`review.json` with verdict
-  `clean` that accepts every undeclared sensitive path). The job then takes the same path as after a
+  `clean` or `fix`, with no blocker or major item, that accepts every undeclared sensitive path). The job then takes the same path as after a
   clean gate: MR preparation with the paths Claude accepted, so the factory commits, rebases and the
   job goes on to `preparing_mr` and `ready_for_human_review` as usual. Before it moves on, the
   override is recorded: `iterations/NNN/gate-override.json` `{at, code, unapplied}` (`unapplied`
@@ -337,9 +349,10 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   `cached_input_tokens`, `output_tokens`) and the `error` events; stderr is kept, bounded, for the
   failure message.
 - The gate runs outside the lock, like the review, and its verdict applies only while the job is
-  still `awaiting_review` at the same iteration. `clean` runs the clean path with the union
-  of both reviewers' `accepted_sensitive`; an undeclared sensitive path the gate does not accept is
-  a fix item. `fix` writes `## Fix N` (lead line `Review by Codex: <summary>`) and runs the next
+  still `awaiting_review` at the same iteration, by the same rule as Claude's (`decide`, SF-051).
+  Clean (a `fix` with nits only too) runs the clean path with the union of both reviewers'
+  `accepted_sensitive`; an undeclared sensitive path the gate does not accept is a major fix item.
+  A fix writes `## Fix N` (lead line `Review by Codex: <summary>`) and runs the next
   iteration, which Claude reviews again, and the gate again after a clean verdict. The job counts
   the gate's fixes in `gate_fixes`: at `SF_GATE_MAX_ROUNDS` the next one is not applied
   (`needs_human`, `gate_rounds`, the message holds both reviewers' summaries). Every run adds its
@@ -353,7 +366,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   summary, items, accepted_sensitive, model?, tokens: {input, cached_input, output}, started_at,
   ended_at}`, or `{reviewer, error, model?, tokens, started_at, ended_at}` when it failed (`model`
   only with `SF_CODEX_MODEL`). Its event lines are the review's, with `reviewer: "codex"`: `review
-  by codex: clean`, `review by codex: fix (2 items)`, `review by codex failed: <error>`.
+  by codex: clean`, `review by codex: fix (2 items)`, `review by codex: fix (2 items), acted on as
+  clean`, `review by codex failed: <error>`.
 - The job counts its Fix sections in `fixes` (the reviewers'). Once it reaches
   `SF_MAX_ITERATIONS`, the next Fix is refused: `needs_human` with `iteration_limit`. An `sf say`
   turn publishes an iteration but writes no Fix section, so it does not count.
@@ -490,6 +504,12 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
 3. When that turn ends, the factory checks the MR text, then works in the worktree under the
    workspace's Git lock. Every Git call runs with `-c core.hooksPath=/dev/null`, so no repository
    hook runs outside the sandbox, and with a 60 s timeout.
+   Before the commit, the factory writes the nits of the iteration that reached Clean into the MR
+   text (SF-051): those of its `review.json` and `gate.json`, deduplicated by path and problem
+   text, as a `### Nits not applied` list (`- [nit] \`path\`: problem Expected: expected`) at the
+   end of `## Special things to note`. It replaces any such list already there and drops a lone
+   `- None.`; without nits the text stays as written. The list is cut, with a closing line that
+   counts the rest, to keep the text within 64 KiB (`withNits` in `src/mr.ts`).
    - `git reset -q --mixed <base_commit>` when the branch has commits on top of `base_commit` (a
      fix after Clean, or a retry after a commit). `HEAD` and the index go back to the base and the
      files stay, so the result is always one commit.
@@ -547,7 +567,7 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    A failed MR text turn keeps its own code (for example `turn_failed` or `sandbox_unavailable`).
    Fix with `sf say` (its iteration is reviewed again, and a clean verdict prepares again) or by
    hand in the worktree followed by an `sf say`.
-6. Ready: the MR text is copied to `mr.md`, `base_commit` and `target_commit` become the target,
+6. Ready: the MR text, with the nits, is copied to `mr.md`, `base_commit` and `target_commit` become the target,
    `prepared_commit` the branch tip, the worktree is removed (`git worktree remove --force`,
    `git worktree prune`; `worktree` becomes null) and the job is `ready_for_human_review`,
    notified with the MR title and the file lines. `git checkout <branch>` in the checkout then

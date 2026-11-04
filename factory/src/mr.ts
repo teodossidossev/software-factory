@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
 import { changedPaths, writeResolutionPatch } from './patch.js';
+import { itemLine, type ReviewItem } from './review.js';
 import { headerProblem, MR_REQUIRED_HEADINGS, sectionLines, testingProblem } from './rules.js';
 import { TASK_DIR } from './task-file.js';
 
@@ -164,6 +165,71 @@ export async function readMrText(cwd: string, ticket: string): Promise<{ ok: tru
     return fail(text.trim() === '' ? 'mr_text_missing' : 'mr_text_invalid', `${path} is invalid: ${invalid}.`);
   }
   return { ok: true, text };
+}
+
+const SPECIAL_HEADING = '## Special things to note';
+export const NITS_HEADING = '### Nits not applied';
+
+// Within the lines from to to, the index of heading and of the next line that matches stop after
+// it, both outside a code fence (end is to without one); undefined when the heading is absent.
+function sectionRange(lines: string[], heading: string, from: number, to: number, stop: RegExp): { start: number; end: number } | undefined {
+  let fenced = false;
+  let start: number | undefined;
+  for (let index = from; index < to; index += 1) {
+    const line = lines[index]!;
+    if (line.startsWith('```')) {
+      fenced = !fenced;
+    } else if (!fenced && start === undefined && line.trimEnd() === heading) {
+      start = index;
+    } else if (!fenced && start !== undefined && stop.test(line)) {
+      return { start, end: index };
+    }
+  }
+  return start === undefined ? undefined : { start, end: to };
+}
+
+// The MR text with the factory's list of the nits not applied (SF-051): a `### Nits not applied`
+// subsection at the end of `## Special things to note`, one line per nit, replacing any such
+// subsection already there (the model's, or an earlier preparation's). A lone `- None.` there
+// goes. Without nits only the old subsection goes; without either the text stays as it is. The
+// list is cut, with a closing line that counts the rest, so the text stays within
+// MAX_MR_TEXT_BYTES.
+export function withNits(text: string, nits: ReviewItem[], iteration: number): string {
+  const nitLines = nits.map((item) => `- ${itemLine(item)}`);
+  const lines = text.split('\n');
+  const special = sectionRange(lines, SPECIAL_HEADING, 0, lines.length, /^#{1,2} /u);
+  if (special === undefined) {
+    return text;
+  }
+  const old = sectionRange(lines, NITS_HEADING, special.start + 1, special.end, /^#{1,3} /u);
+  if (nitLines.length === 0 && old === undefined) {
+    return text;
+  }
+  let body = lines.slice(special.start + 1, special.end);
+  if (old !== undefined) {
+    body = [...lines.slice(special.start + 1, old.start), ...lines.slice(old.end, special.end)];
+  }
+  while (body.length > 0 && body.at(-1)!.trim() === '') {
+    body.pop();
+  }
+  const build = (section: string[]): string => [...lines.slice(0, special.start + 1), ...section, ...lines.slice(special.end)].join('\n');
+  if (nitLines.length === 0) {
+    return build(special.end < lines.length ? [...body, ''] : body);
+  }
+  const content = body.filter((line) => line.trim() !== '');
+  if (content.length === 1 && /^\s*[-*]\s+None\.?\s*$/iu.test(content[0]!)) {
+    body = body.filter((line) => line.trim() === '');
+  }
+  const lead = body.some((line) => line.trim() !== '') ? [...body, ''] : body;
+  for (let shown = nitLines.length; shown >= 0; shown -= 1) {
+    const rest = nitLines.length - shown;
+    const list = [...nitLines.slice(0, shown), ...(rest > 0 ? [`- … and ${rest} more: see review.json and gate.json of iteration ${iteration}.`] : [])];
+    const result = build([...lead, NITS_HEADING, ...list, ...(special.end < lines.length ? [''] : [])]);
+    if (Buffer.byteLength(result, 'utf8') <= MAX_MR_TEXT_BYTES) {
+      return result;
+    }
+  }
+  return build(special.end < lines.length ? [...body, ''] : body);
 }
 
 // The commit body: the non-empty lines of the MR text's ## Why section, at most five.

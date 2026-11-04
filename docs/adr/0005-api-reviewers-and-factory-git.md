@@ -33,6 +33,16 @@ is confirmed, recorded in `gate-override.json` with a `gate_overridden` event, a
 MR text for a follow-up ticket. "Every change that reaches the branch passes" the gate therefore
 reads: passes it, or is accepted over it by the user with what it asked for on record.
 
+**Amended 2026-11-05 (SF-051):** a nit never blocks. Every review item has a severity: `blocker`
+(the change is wrong, unsafe or breaks the Task's acceptance), `major` (a real defect or a Task
+requirement not met, but contained) or `nit` (style, naming, wording, a narrower variant of a risk
+already accepted, a nice-to-have). The factory, not the reviewer, decides, the same way for both
+reviewers: a round is a fix only with a blocker or major item, or an undeclared sensitive path not
+accepted (always major); a `fix` with nits only goes on as clean. On SF-045 the gate held the job
+in fix rounds with ever narrower items, each a Fix section whatever its weight. Nits are not lost:
+in a fix round they follow the blocking items as optional, and those of the iteration that reaches
+Clean go into the MR text as `### Nits not applied`, written by the factory.
+
 ## Context
 
 ADR-0002 made the planning ChatGPT conversation the reviewer and woke it with a scheduled task;
@@ -54,8 +64,9 @@ diff check existed only to verify Git work a model had done.
   cleans a job. The Task file's `## Review brief` carries what the reviewers must check and why
   the plan's decisions were made.
 - **Review of every iteration.** A fresh Agent SDK `query()` in the worktree, read-only, with
-  structured output (clean, or Fix items with path, problem, expected). Fix items become the next
-  `## Fix N` and the next iteration starts at once.
+  structured output (clean, or Fix items with path, problem, expected and, since SF-051, severity).
+  Blocker and major items become the next `## Fix N` and the next iteration starts at once; nits
+  never block.
 - **Gate.** On a clean Claude verdict, an OpenAI model through the Responses API, with read and
   search over the worktree as function tools, gives the verdict that decides. At most five gate
   rounds with fixes, then `needs_human` with both verdicts, which the user can accept over the

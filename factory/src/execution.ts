@@ -26,7 +26,7 @@ import { chooseForge, type Forge, type ForgeKind, forgeFor, type MergeRequestSta
 import { runGit } from './git.js';
 import { GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from './gate.js';
 import { cutEvent, type FileChange, type GateOverride, type GateRecord, isActive, type Job, type JobMr, type JobState, JobStore, now, type ReviewRecord, TERMINAL_STATES } from './jobs.js';
-import { abortRebase, commitAndRebase, continueRebase, gitBusy, mergeRequestLink, originUrl, pushBranch, readMrText, rebaseInProgress, resolveTarget, unmergedPaths } from './mr.js';
+import { abortRebase, commitAndRebase, continueRebase, gitBusy, mergeRequestLink, originUrl, pushBranch, readMrText, rebaseInProgress, resolveTarget, unmergedPaths, withNits } from './mr.js';
 import { buildPatch, changedFilesSection, fileChanges, fileSummaryLines, type Patch } from './patch.js';
 import { removeSandboxPlaceholders } from './placeholders.js';
 import { Redactor } from './redact.js';
@@ -34,7 +34,7 @@ import { conflictPrompt, factoryPrompt, iterationCost, mrPrompt } from './prompt
 import { DENIED_TOOLS, sensitivityOf } from './rules.js';
 import type { Workspace } from './registry.js';
 import { DEFAULT_PAGE_BYTES, MAX_PAGE_BYTES, MIN_PAGE_BYTES, type Page, pageBuffer } from './repo-files.js';
-import { fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, sensitiveItem } from './review.js';
+import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, sensitiveItem, uniqueNits } from './review.js';
 import { withLock } from './pid-lock.js';
 import { type Launch, type RunnerRequest, Runners, type RunnerWork } from './runner.js';
 import { type IdleOutcome, ImplementerSession } from './session.js';
@@ -336,7 +336,7 @@ export class Execution implements RunnerWork {
   }
 
   // A job awaiting review that has something to resume: its last iteration has no review (with the
-  // review on), or a clean one and no gate.json.
+  // review on), or one acted on as clean (SF-051: a fix with nits only is) and no gate.json.
   async #resumable(job: Job): Promise<boolean> {
     if (job.state !== 'awaiting_review' || job.iteration === 0) {
       return false;
@@ -345,7 +345,7 @@ export class Execution implements RunnerWork {
     if (review === undefined) {
       return this.#config.review;
     }
-    return 'verdict' in review && review.verdict === 'clean' && (await this.jobs.readGate(job.workspace, job.ticket, job.iteration)) === undefined;
+    return 'verdict' in review && actedVerdict(review) === 'clean' && (await this.jobs.readGate(job.workspace, job.ticket, job.iteration)) === undefined;
   }
 
   // sf serve's runners; runner mode has none and never reaches the calls that need them.
@@ -632,11 +632,13 @@ export class Execution implements RunnerWork {
         await needsHuman(outcome.code, outcome.message);
         return;
       }
-      const mrText = await readMrText(cwd, job.ticket);
-      if (!mrText.ok) {
-        await needsHuman(mrText.code, mrText.message);
+      const written = await readMrText(cwd, job.ticket);
+      if (!written.ok) {
+        await needsHuman(written.code, written.message);
         return;
       }
+      // The nits of the reviewed iteration go into the MR text by the factory's hand (SF-051).
+      const mrText = { text: withNits(written.text, await this.#nitsAtClean(job), job.iteration) };
       const targetCommit = job.target_commit!;
       const prepared = await this.#gitLocked(job.workspace, () => commitAndRebase(cwd, { baseCommit: job.base_commit!, targetCommit, mrText: mrText.text }));
       if (prepared.kind === 'failed') {
@@ -656,6 +658,14 @@ export class Execution implements RunnerWork {
       console.error(error);
       await needsHuman('mr_failed', `MR preparation failed inside the factory: ${(error as Error).message}`.slice(0, 1000));
     }
+  }
+
+  // The nits of the job's last iteration (SF-051): those of its Claude review and of its gate,
+  // deduplicated by path and problem; the iteration that reaches Clean leaves them unapplied.
+  async #nitsAtClean(job: Job): Promise<ReviewItem[]> {
+    const { workspace, ticket, iteration } = job;
+    const records = [await this.jobs.readReview(workspace, ticket, iteration), await this.jobs.readGate(workspace, ticket, iteration)];
+    return uniqueNits(records.flatMap((record) => (record !== undefined && 'items' in record ? [record] : [])));
   }
 
   // The end of the conflict turn: a failed turn, a file still holding a conflict marker or a
@@ -762,8 +772,8 @@ export class Execution implements RunnerWork {
       const job = await this.#job(workspaceName, ticket);
       const code = this.#checkAcceptGate(job);
       const review = job.iteration > 0 ? await this.jobs.readReview(workspaceName, ticket, job.iteration) : undefined;
-      if (review === undefined || !('verdict' in review) || review.verdict !== 'clean') {
-        const what = review === undefined ? 'has none' : 'verdict' in review ? `says ${review.verdict}` : 'failed';
+      if (review === undefined || !('verdict' in review) || actedVerdict(review) !== 'clean') {
+        const what = review === undefined ? 'has none' : !('verdict' in review) ? 'failed' : review.verdict === 'fix' ? 'says fix' : 'says clean with a blocker or major item';
         throw new FactoryError('invalid_state', `sf accept needs a clean Claude review of the last iteration (${job.iteration}); it ${what}.`);
       }
       const unaccepted = await this.#unaccepted(job, review.accepted_sensitive);
@@ -853,7 +863,7 @@ export class Execution implements RunnerWork {
       : { reviewer: REVIEWER, error: outcome.message };
     await this.jobs.writeReview(name, ticket, iteration, record);
     await this.jobs.appendEvent(name, ticket, outcome.ok
-      ? { ts: now(), iteration, type: 'review', reviewer: REVIEWER, verdict: outcome.output.verdict, items: outcome.output.items.length, ...ignored }
+      ? { ts: now(), iteration, type: 'review', reviewer: REVIEWER, ...(await this.#verdictOf(job, outcome.output)), items: outcome.output.items.length, ...ignored }
       : { ts: now(), iteration, type: 'review_failed', reviewer: REVIEWER, error: outcome.message, ...ignored });
     if (!current) {
       return;
@@ -872,13 +882,20 @@ export class Execution implements RunnerWork {
       .map((change) => sensitiveItem(change.path));
   }
 
-  // The Claude verdict: fix (or an undeclared sensitive path it does not accept) is the next Fix
-  // section; clean starts the gate, or with the gate off runs Clean. Only under the lock.
+  // The reviewer's verdict for the event, with the one the factory acts on (decide) when it differs.
+  async #verdictOf(job: Job, output: ReviewOutput): Promise<{ verdict: Verdict; effective?: Verdict }> {
+    const effective = decide(output, await this.#unaccepted(job, output.accepted_sensitive)).verdict;
+    return effective === output.verdict ? { verdict: output.verdict } : { verdict: output.verdict, effective };
+  }
+
+  // The Claude verdict as the factory acts on it (decide, SF-051): fix (a blocker or major item, or
+  // an undeclared sensitive path it does not accept) is the next Fix section; clean (a fix with
+  // nits only too) starts the gate, or with the gate off runs Clean. Only under the lock.
   async #afterClaude(job: Job, output: ReviewOutput): Promise<void> {
-    const { verdict, summary, items, accepted_sensitive: accepted } = output;
-    const unaccepted = await this.#unaccepted(job, accepted);
-    if (verdict === 'fix' || unaccepted.length > 0) {
-      await this.#fix(job, fixContent(summary, [...(verdict === 'fix' ? items : []), ...unaccepted]));
+    const { summary, accepted_sensitive: accepted } = output;
+    const decision = decide(output, await this.#unaccepted(job, accepted));
+    if (decision.verdict === 'fix') {
+      await this.#fix(job, fixContent(summary, decision.items));
     } else if (this.#config.gate.on) {
       await this.#startGate(job, output);
     } else {
@@ -958,7 +975,8 @@ export class Execution implements RunnerWork {
 
   // The end of a gate run. A cancelled one leaves no trace. Otherwise its tokens count for the job,
   // gate.json and the event are written, and the verdict applies only while the job still awaits
-  // review of the same iteration: clean runs Clean with the paths both reviewers accepted, fix (or an
+  // review of the same iteration, as the factory acts on it (decide, SF-051): clean (a fix with nits
+  // only too) runs Clean with the paths both reviewers accepted, fix (a blocker or major item, or an
   // undeclared sensitive path the gate does not accept) is the next Fix section unless the gate's
   // rounds are used up.
   async #gated(gated: Job, running: RunningReview, claude: ReviewOutput, outcome: GateOutcome): Promise<void> {
@@ -987,7 +1005,7 @@ export class Execution implements RunnerWork {
       : { reviewer: GATE_REVIEWER, error: outcome.message, ...model, tokens: outcome.tokens, ...times };
     await this.jobs.writeGate(name, ticket, iteration, record);
     await this.jobs.appendEvent(name, ticket, outcome.ok
-      ? { ts: now(), iteration, type: 'review', reviewer: GATE_REVIEWER, verdict: outcome.output.verdict, items: outcome.output.items.length, ...ignored }
+      ? { ts: now(), iteration, type: 'review', reviewer: GATE_REVIEWER, ...(await this.#verdictOf(job, outcome.output)), items: outcome.output.items.length, ...ignored }
       : { ts: now(), iteration, type: 'review_failed', reviewer: GATE_REVIEWER, error: outcome.message, ...ignored });
     if (!current) {
       return;
@@ -1003,9 +1021,9 @@ export class Execution implements RunnerWork {
       });
       return;
     }
-    const { verdict, summary, items, accepted_sensitive: accepted } = outcome.output;
-    const unaccepted = await this.#unaccepted(job, accepted);
-    const fixing = verdict === 'fix' || unaccepted.length > 0;
+    const { summary, accepted_sensitive: accepted } = outcome.output;
+    const decision = decide(outcome.output, await this.#unaccepted(job, accepted));
+    const fixing = decision.verdict === 'fix';
     if (fixing && job.gate_fixes >= this.#config.gateMaxRounds) {
       const message = `The gate asked for a fix ${job.gate_fixes + 1} times, over the limit of SF_GATE_MAX_ROUNDS (${this.#config.gateMaxRounds}); the fix was not applied. Claude: ${oneLine(claude.summary)} Codex: ${oneLine(summary)}`;
       await this.#transition(job, 'needs_human', { code: 'gate_rounds', message: message.slice(0, 2000) });
@@ -1014,7 +1032,7 @@ export class Execution implements RunnerWork {
     const decided = job;
     await this.#applying(decided, async () => {
       if (fixing) {
-        await this.#fix(decided, fixContent(summary, [...(verdict === 'fix' ? items : []), ...unaccepted], 'Codex'), { gate_fixes: decided.gate_fixes + 1 });
+        await this.#fix(decided, fixContent(summary, decision.items, 'Codex'), { gate_fixes: decided.gate_fixes + 1 });
       } else {
         await this.#prepareMr(decided, [...new Set([...claude.accepted_sensitive, ...accepted])]);
       }
@@ -1481,7 +1499,7 @@ export class Execution implements RunnerWork {
 
   // The review of the last published iteration: its record once it ended, running while it runs or
   // is due, off with SF_REVIEW=off; undefined before the first iteration and when none will run.
-  // After a clean Claude verdict, gate is the gate's the same way; absent with the gate off.
+  // After a Claude verdict acted on as clean, gate is the gate's the same way; absent with the gate off.
   async #reviewStatus(job: Job): Promise<CheckResult['review']> {
     if (job.iteration === 0) {
       return undefined;
@@ -1493,7 +1511,7 @@ export class Execution implements RunnerWork {
         return { status: 'failed', summary: record.error };
       }
       const done: CheckResult['review'] = { status: 'done', verdict: record.verdict, summary: record.summary };
-      const gate = record.verdict === 'clean' ? await this.#gateStatus(job, running) : undefined;
+      const gate = actedVerdict(record) === 'clean' ? await this.#gateStatus(job, running) : undefined;
       return gate !== undefined ? { ...done, gate } : done;
     }
     if (running?.reviewer === REVIEWER && running.iteration === job.iteration) {

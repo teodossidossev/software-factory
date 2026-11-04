@@ -12,7 +12,7 @@ import { JobStore } from '../src/jobs.js';
 import { loadHandbook } from '../src/server.js';
 import { pushBranch } from '../src/mr.js';
 import { conflictPrompt, mrPrompt } from '../src/prompts.js';
-import { call, fakeLog, git, newEnv, newRepo, putTask, refused, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
+import { call, fakeLog, git, newEnv, newRepo, putTask, refused, runCli, script, serve, stop, temp, turnsStarted, waitFor } from './support/harness.js';
 
 const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid'];
 
@@ -502,6 +502,7 @@ test('abort with and without --discard, reset, and sandbox_unavailable, with wor
 
   // abort while a turn runs: the session ends, the worktree and the branch stay.
   await call(served, 'start', { workspace: 'app', ticket: 'A-1' });
+  await turnsStarted(env, 1);
   const aborted = await runCli(env, ['abort', 'app', 'A-1']);
   assert.equal(aborted.code, 0, aborted.stderr);
   assert.match(aborted.stdout, new RegExp(`^state: aborted\\nbranch: A-1-job-a-1\\ndiscarded: false\\nworktree: ${worktree('A-1')}\\nThe branch and its worktree are left as they are: ${worktree('A-1')}$`, 'm'));

@@ -14,8 +14,9 @@ import { FactoryError } from '../src/errors.js';
 import { type ExclusiveScope, Execution } from '../src/execution.js';
 import { type Job, JobStore, TERMINAL_STATES } from '../src/jobs.js';
 import { resolveWorkspace } from '../src/registry.js';
+import { runnerLauncher } from '../src/runner.js';
 import { Setup } from '../src/setup.js';
-import { type Env, FAKE, git, newEnv, newRepo, putTask, script } from './support/harness.js';
+import { type Env, FAKE, git, newEnv, newRepo, processEnv, putTask, script } from './support/harness.js';
 
 const TIMEOUT = { timeout: 60_000 };
 
@@ -44,7 +45,8 @@ async function world(name: string): Promise<World> {
     gate: { on: false, reason: 'SF_GATE=off' }, codexModel: undefined, gateMaxRounds: 3, gateMaxTokens: 5_000_000, gateTimeoutMs: 900_000,
     forge: { githubToken: undefined, githubApi: 'https://api.github.com', gitlabToken: undefined, gitlabUrl: undefined },
   };
-  const execution = new Execution(config, (workspace) => resolveWorkspace(workspace, env.config));
+  // The job's runner (SF-042) gets the test's directories and the fake Claude Code.
+  const execution = new Execution(config, (workspace) => resolveWorkspace(workspace, env.config), () => {}, '', { launch: runnerLauncher(processEnv(env)) });
   const jobs = new JobStore(env.state);
   const setup = new Setup({ configDir: env.config, jobs, exclusive: (work) => execution.exclusive(work) });
   return { env, repo, dir: join(repo, '.software-factory'), state: env.state, execution, setup, jobs };

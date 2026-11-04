@@ -1,7 +1,8 @@
 // The sf command: `sf serve`, `sf up` (serve, the tunnel and the browser), `sf workspace
 // add|list|remove`, `sf start|say|review|approve|abort|reset` and `sf mr create|merge|status`
 // (through the socket of sf serve),
-// `sf status|watch|dashboard` (reading the state directory directly), `sf notify-test` and `sf info`.
+// `sf status|watch|dashboard` (reading the state directory directly), `sf notify-test`, `sf info`
+// and `sf run`, the job's runner that sf serve starts (SF-042, src/runner.ts).
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { type ChildProcess, spawn } from 'node:child_process';
 import { resolve } from 'node:path';
@@ -17,6 +18,7 @@ import { codexVersion } from './gate.js';
 import { existsSync } from 'node:fs';
 import { callSocket, listenSocket, socketPath } from './ipc.js';
 import { type Job, JobStore } from './jobs.js';
+import { followJobs, runJob } from './runner.js';
 import { jobNotification, notifyConfig, sendNotification, stateNotifier } from './notify.js';
 import { configDir, ignoredWorkCheckouts, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { loadHandbook, packageVersion, PortInUseError, SERVER_NAME, startServer } from './server.js';
@@ -48,6 +50,7 @@ const USAGE = `Usage:
   sf reset <workspace> <ticket>                         End the session, remove the worktree and archive the job; the branch is untouched
   sf notify-test                                        Send a test notification on every channel
   sf info                                               Version, directories, settings, whether sf serve and the tunnel run, workspaces, jobs
+  sf run <workspace> <ticket>                           The job's runner: its turns, reviews and gate, detached from sf serve (sf serve starts it; one per job)
 
 Notes:
   EST_USD: an estimate of the API-equivalent price, not a charge (the session usually runs on your Claude plan):
@@ -182,6 +185,8 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   }
   console.log(`${SERVER_NAME} listening on ${server.url.href}`);
   console.log(`${SERVER_NAME} socket ${socket.path}`);
+  // The runners write the state of their jobs; the dashboard hears of it from disk (SF-042).
+  const followed = followJobs(jobs, (job, from) => dashboard?.onStateChange(job, from));
 
   let stopping = false;
   const stop = (signal: NodeJS.Signals): void => {
@@ -191,6 +196,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     stopping = true;
     console.log(`${SERVER_NAME} received ${signal}, shutting down`);
     hooks.beforeStop?.();
+    followed.close();
     Promise.all([server.close(), socket.close(), dashboard?.close()]).then(
       () => process.exit(0),
       (error: unknown) => {
@@ -474,6 +480,33 @@ async function reset(args: string[]): Promise<void> {
     : 'The worktree is removed; the branch is untouched.');
 }
 
+// `sf run <workspace> <ticket>` (SF-042): the job's runner, started detached by sf serve. Runs the
+// queued requests, the turns, the reviews and the gate of the job, notifies like sf serve, and
+// ends when nothing is left to run; runner_running when the job has a runner already.
+async function run(args: string[]): Promise<void> {
+  if (args.length !== 2) {
+    throw new UsageError('run needs <workspace> <ticket>.');
+  }
+  const [workspace, ticket] = checkJob(args, 'run');
+  const config = loadConfig();
+  const handbook = await loadHandbook();
+  const jobs = new JobStore(config.stateDir);
+  if ((await jobs.read(workspace, ticket)) === undefined) {
+    throw new FactoryError('job_not_found', `There is no job for ${workspace}/${ticket}.`);
+  }
+  const notify = stateNotifier(notifyConfig(), jobs);
+  const sending = new Set<Promise<void>>();
+  const onStateChange: StateListener = (job, from, lines) => {
+    const sent = notify(job, from, lines);
+    sending.add(sent);
+    void sent.finally(() => sending.delete(sent));
+  };
+  const execution = new Execution(config, (name) => resolveWorkspace(name), onStateChange, handbook.text, { runner: { workspace, ticket } });
+  console.log(`${new Date().toISOString()} runner ${process.pid} for ${workspace}/${ticket} started`);
+  await runJob(jobs.dir(workspace, ticket), execution, { settle: async () => void (await Promise.allSettled([...sending])) });
+  console.log(`${new Date().toISOString()} runner ${process.pid} for ${workspace}/${ticket} ended`);
+}
+
 async function notifyTest(args: string[]): Promise<void> {
   if (args.length !== 0) {
     throw new UsageError('notify-test takes no arguments.');
@@ -727,6 +760,11 @@ async function main(argv: string[]): Promise<void> {
   if (command === 'dashboard') {
     await dashboardCommand(rest);
     return;
+  }
+  if (command === 'run') {
+    await run(rest);
+    // Nothing is left to wait for; an idle HTTP keep-alive of a notification must not hold the exit.
+    process.exit(0);
   }
   if (command === 'serve' && rest.length === 0) {
     await serve();

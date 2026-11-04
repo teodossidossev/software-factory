@@ -116,7 +116,7 @@ type PostRoute = keyof typeof BODIES;
 // The HTTP status of a FactoryError the methods can throw; any other code answers 500 and keeps
 // its code and message.
 const ERROR_STATUS: Record<string, number> = {
-  invalid_state: 409, turn_running: 409, rebase_in_progress: 409, review_off: 409,
+  invalid_state: 409, turn_running: 409, rebase_in_progress: 409, review_off: 409, runner_active: 409,
   job_exists: 409, job_active: 409, job_limit: 409, task_draft: 409, checkout_dirty: 409, branch_exists: 409, branch_changed: 409, branch_missing: 409, worktree_exists: 409,
   worktree_missing: 409, sensitive_unacknowledged: 409, ticket_exists: 409, workspace_exists: 409, workspace_busy: 409,
   job_not_found: 404, workspace_not_found: 404, task_not_found: 404,

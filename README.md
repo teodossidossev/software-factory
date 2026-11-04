@@ -3,7 +3,8 @@
 A local process that takes a ticket you planned with a model (ChatGPT first) through Claude Code
 without you having to notice when Claude has finished. The Context owner reads the repository
 through MCP planning tools and writes the Task file; you start the job on the dashboard; the Implementer runs as a
-headless Claude Code session in a worktree of its own, several tickets at a time; a fresh Claude
+headless Claude Code session in a worktree of its own, several tickets at a time, each job in a
+process of its own (`sf run`) that a restart of `sf serve` leaves running; a fresh Claude
 review and the Codex gate review each iteration and turn their findings into fixes; at Clean the
 factory commits and rebases, and you check the branch out in the IDE, run it, and approve (the
 push) in the terminal or on the dashboard. How it works: [design](docs/design/SF-011-factory.md). How to use it as the Context
@@ -15,6 +16,7 @@ owner: [factory/HANDBOOK.md](factory/HANDBOOK.md).
 | --- | --- | --- |
 | MCP server for planning (loopback, port 8787) | `factory/src/server.ts` | [factory/README.md](factory/README.md) |
 | `sf` command | `factory/src/cli.ts`, `factory/bin/sf` | [factory/README.md](factory/README.md) |
+| Job runner (`sf run`, one detached process per job: its turns, reviews and gate) | `factory/src/runner.ts` | [factory/README.md](factory/README.md#jobs) |
 | Dashboard (port 8788: the start screen, the live view, start, approve, abort and say) | `factory/src/dashboard.ts`, `factory/src/setup.ts` | [factory/README.md](factory/README.md#dashboard) |
 | ChatGPT tunnel wrapper | `scripts/sf-tunnel.sh` | [chatgpt-connection](docs/runbooks/chatgpt-connection.md) |
 
@@ -50,7 +52,7 @@ opens it again):
 The pieces separately, when wanted:
 
 ```bash
-npm run serve                    # sf serve alone (foreground)
+npm run serve                    # sf serve alone (foreground); stopping it leaves running jobs running
 npm run tunnel                   # the ChatGPT tunnel alone (second terminal)
 npm run dashboard                # open the dashboard in the browser
 npm run info                     # version, settings, whether serve and the tunnel run, workspaces, jobs

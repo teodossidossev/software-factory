@@ -7,7 +7,7 @@
 // that create and remove the temp dir.
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before } from 'node:test';
@@ -90,6 +90,23 @@ export async function newEnv(name: string, extra: Record<string, string> = {}): 
 export async function script(env: Env, turns: unknown[]): Promise<void> {
   await writeFile(join(env.home, 'fake-claude.json'), JSON.stringify({ turns }));
   await rm(join(env.home, 'fake-claude.count'), { force: true });
+}
+
+// Waits until the fake Claude Code has started count Implementer runs (each takes its turn script
+// when it starts, before a delayed turn writes anything): since SF-042 sf start answers before the
+// job's runner has started the first turn.
+export async function turnsStarted(env: Env, count: number): Promise<void> {
+  const deadline = Date.now() + 20_000;
+  for (;;) {
+    const text = await readFile(join(env.home, 'fake-claude.count'), 'utf8').catch(() => '0');
+    if (Number(text) >= count) {
+      return;
+    }
+    if (Date.now() > deadline) {
+      assert.fail(`timed out waiting for ${count} Implementer run(s); ${text} started`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
 }
 
 export async function fakeLog(env: Env): Promise<Array<{ argv: string[]; prompt: string; sessionId: string; cwd: string; env: string[] }>> {
@@ -257,9 +274,30 @@ before(async () => {
   await chmod(fakeCodex, 0o755);
 });
 
+// The pids of the job runners (SF-042) whose lock is under dir: they outlive sf serve by design.
+export async function runnerPids(dir: string): Promise<number[]> {
+  const pids: number[] = [];
+  for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
+    if (entry.isFile() && entry.name === 'runner.pid') {
+      const pid = Number((await readFile(join(entry.parentPath, entry.name), 'utf8').catch(() => '')).trim().split(' ')[0]);
+      if (Number.isInteger(pid) && pid > 0) {
+        pids.push(pid);
+      }
+    }
+  }
+  return pids;
+}
+
 after(async () => {
   for (const child of running) {
     child.kill('SIGKILL');
+  }
+  for (const pid of await runnerPids(temp).catch(() => [])) {
+    // Only a live `sf run` of these tests, never a process that reused a stale lock's pid.
+    const command = await readFile(`/proc/${pid}/cmdline`, 'utf8').catch(() => '');
+    if (command.includes(`${CLI}\0run\0`)) {
+      process.kill(pid, 'SIGKILL');
+    }
   }
   await rm(temp, { recursive: true, force: true });
 });

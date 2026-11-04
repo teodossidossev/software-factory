@@ -599,6 +599,8 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 }
 .chip.chip-good { color: var(--add); background: var(--add-bg); border-color: transparent; }
 .chip.chip-bad { color: var(--del); background: var(--del-bg); border-color: transparent; }
+.chip.chip-button { font-family: inherit; cursor: pointer; }
+.chip.chip-button:disabled { cursor: default; }
 
 /* The ticket actions' outcome, above everything, and the Start or Delete confirmation. */
 .toast {

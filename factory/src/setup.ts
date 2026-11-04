@@ -343,10 +343,11 @@ export class Setup {
     return readTask(await resolveWorkspace(name, this.#configDir), ticket, archived);
   }
 
-  // The title of a ticket's Task file, or null when there is none to read (a job whose Task file
-  // was archived or deleted, an unregistered workspace): the board's card falls back to the
-  // branch. Read for every job on every refresh, so only the registry and the file are read (no
-  // Git check of the checkout); the title is display text, never a decision.
+  // The title of a ticket's Task file, read from the active file or, when it is not there, from
+  // its archived copy (SF-057); null when there is none to read (a deleted Task file, an
+  // unregistered workspace): the board's card falls back to the branch. Read for every job on
+  // every refresh, so only the registry and the file are read (no Git check of the checkout); the
+  // title is display text, never a decision.
   async taskTitle(name: string, ticket: string): Promise<string | null> {
     try {
       const { workspaces } = await loadRegistry(this.#configDir);
@@ -354,11 +355,13 @@ export class Setup {
       if (entry === undefined) {
         return null;
       }
-      const path = join(entry.read_checkout, TASK_DIR, `${ticket}.md`);
-      if (!(await isFile(path)) || (await lstat(path)).size > MAX_TASK_BYTES) {
-        return null;
+      const dir = join(entry.read_checkout, TASK_DIR);
+      for (const path of [join(dir, `${ticket}.md`), join(dir, ARCHIVE_DIR, `${ticket}.md`)]) {
+        if (await isFile(path)) {
+          return (await lstat(path)).size > MAX_TASK_BYTES ? null : parseFrontMatter(await readFile(path, 'utf8'))?.get('title') || null;
+        }
       }
-      return parseFrontMatter(await readFile(path, 'utf8'))?.get('title') || null;
+      return null;
     } catch {
       return null;
     }

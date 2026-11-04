@@ -68,7 +68,7 @@ const posts = (page: Page): FetchRequest[] => page.requests.filter((request) => 
 test('board client: the columns follow the states, Planned holds the tickets, the headers count, Done shows the last ten', async () => {
   const states = ['starting', 'working', 'awaiting_review', 'preparing_mr', 'needs_human', 'ready_for_human_review', 'pushed', 'aborted', 'failed'];
   const jobs = states.map((state, index) => job(`J-${index}`, state));
-  const page = await openBoard(jobs, [ticket('app/T-1', { draft: true }), ticket('app/T-2', { job: 'pushed' })]);
+  const page = await openBoard(jobs, [ticket('app/T-1', { draft: true }), ticket('app/T-2', { job: 'failed' })]);
   assert.deepEqual(keys(page, 'planned'), ['app/T-1', 'app/T-2']);
   assert.deepEqual(keys(page, 'implementing').sort(), ['app/J-0', 'app/J-1']);
   assert.deepEqual(keys(page, 'reviewing').sort(), ['app/J-2', 'app/J-3']);
@@ -80,7 +80,7 @@ test('board client: the columns follow the states, Planned holds the tickets, th
   assert.match(working.textContent, /^J-1appTitle of J-1/);
   assert.match(who(working), /^Implementer · 4 min$/);
   // The last job's state on a Planned card; an empty column says so.
-  assert.match(card(page, 'app/T-2').textContent, /last job pushed/);
+  assert.match(card(page, 'app/T-2').textContent, /last job failed/);
   page.streams.at(-1)!.emit('tickets', { tickets: [], archived: [] });
   assert.equal(page.$('list-planned').children.length, 1);
   assert.equal((page.$('list-planned').children[0] as FakeElement).className, 'col-empty');
@@ -95,6 +95,43 @@ test('board client: the columns follow the states, Planned holds the tickets, th
   page.$('done-all').click();
   assert.equal(keys(page, 'done').length, 12);
   assert.equal(page.$('done-all').textContent, 'Show the last 10');
+});
+
+test('board client: one column per ticket: a pushed one only in Done, a failed or aborted one in Planned with Start, an active one once', async () => {
+  // The tickets list says what the jobs were when it was read; the jobs list is newer (W-1 was
+  // started again since). A failed job whose Task file is archived has no Planned card: it stays
+  // in Done.
+  const jobs = [job('P-1', 'pushed'), job('F-1', 'failed', { error: { code: 'boom', message: 'it broke' } }), job('A-1', 'aborted'), job('W-1', 'working'), job('X-1', 'failed')];
+  const tickets = [ticket('app/A-1', { job: 'aborted' }), ticket('app/F-1', { job: 'failed' }), ticket('app/N-1'), ticket('app/P-1', { job: 'pushed' }), ticket('app/W-1', { job: 'failed' })];
+  const page = await openBoard(jobs, tickets);
+  assert.deepEqual(keys(page, 'planned'), ['app/A-1', 'app/F-1', 'app/N-1']);
+  assert.deepEqual(keys(page, 'implementing'), ['app/W-1']);
+  assert.deepEqual(keys(page, 'done').sort(), ['app/P-1', 'app/X-1']);
+  assert.deepEqual(COLUMNS.map((column) => page.$(`count-${column}`).textContent), ['3', '1', '0', '0', '2']);
+  const all = COLUMNS.flatMap((column) => keys(page, column));
+  assert.equal(new Set(all).size, all.length);
+  // The Done card of the pushed job carries its title; the Planned cards mark the last job and
+  // start it again.
+  assert.match(card(page, 'app/P-1').textContent, /^P-1appTitle of P-1/);
+  // Its Task file is still active, so the Done card archives it (the Planned card no longer shows).
+  assert.equal(button(card(page, 'app/X-1'), 'Archive ticket'), undefined);
+  button(card(page, 'app/P-1'), 'Archive ticket')!.click();
+  await page.flush();
+  assert.deepEqual(posts(page).map((request) => request.path), ['api/tickets/app/P-1/archive']);
+  for (const [key, mark] of [['app/F-1', 'last job failed'], ['app/A-1', 'last job aborted']] as const) {
+    const item = card(page, key);
+    assert.ok(button(item, 'Start'), key);
+    assert.ok(button(item, mark), key);
+  }
+  assert.doesNotMatch(card(page, 'app/N-1').textContent, /last job/);
+  // The mark opens the last job in the drawer.
+  button(card(page, 'app/F-1'), 'last job failed')!.click();
+  await page.flush();
+  assert.equal(page.location.hash, '#app/F-1');
+  // A job pushed since the tickets were read leaves Planned at once.
+  page.streams.at(-1)!.emit('jobs', { jobs: [job('P-1', 'pushed'), job('F-1', 'pushed'), job('A-1', 'aborted'), job('W-1', 'working'), job('X-1', 'failed')] });
+  assert.deepEqual(keys(page, 'planned'), ['app/A-1', 'app/N-1']);
+  assert.deepEqual(keys(page, 'done').sort(), ['app/F-1', 'app/P-1', 'app/X-1']);
 });
 
 test('board client: the pipeline segment per state, a halted one red, and who acts now', async () => {
@@ -194,12 +231,15 @@ test('board client: a start whose answer is lost holds Start until the board is 
   await page.flush();
   assert.match(page.$('ticket-action-status').textContent, /^The start of app\/T-2 failed \(Failed to fetch\)\. Its outcome is unknown: the job may have started; the board is being read again\.$/);
   assert.equal(button(card(page, 'app/T-2'), 'Start')!.disabled, true);
-  // The read: the job exists, so the card is on Implementing; Start is back for the ticket row.
+  // The read: the job exists, so the ticket is only on Implementing (one column per ticket); once
+  // the job has failed the ticket is Planned again and Start is back.
   const read = page.requests.filter((request) => request.path === 'api/jobs').at(-1)!;
   read.respond(200, { jobs: [job('T-2', 'starting')] });
   await page.flush();
-  assert.deepEqual(keys(page, 'implementing'), ['app/T-2']);
+  assert.deepEqual([keys(page, 'planned'), keys(page, 'implementing')], [[], ['app/T-2']]);
   assert.match(page.$('ticket-action-status').textContent, /The board is current: check it before starting again\.$/);
+  page.streams.at(-1)!.emit('jobs', { jobs: [job('T-2', 'failed')] });
+  assert.deepEqual([keys(page, 'planned'), keys(page, 'done')], [['app/T-2'], []]);
   assert.equal(button(card(page, 'app/T-2'), 'Start')!.disabled, false);
 
   // A failed read keeps the hold until the stream's next jobs event.

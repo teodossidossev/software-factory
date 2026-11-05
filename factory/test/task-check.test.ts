@@ -1,9 +1,10 @@
 // The Task check (SF-054): the schema (paraphrase first) and the verdict rule, the scope
 // comparison, the prompt (the Task file and nothing of the Context owner or the jobs), the read-only
 // session and what it may not read (the path guard of Read, Grep and Glob, end to end through the
-// SDK's PreToolUse hook), the storage by sha and the stale mark, the Start note; then
-// end to end with the fake Claude: sf check-task, a failed check, the dashboard's Check, its
-// endpoint and the tickets' summary, and the Context owner's task_check tool.
+// SDK's PreToolUse hook, which lets the SDK's StructuredOutput answer through), the storage by sha
+// and the stale mark, the Start note; then end to end with the fake Claude: sf check-task, a failed
+// check, the dashboard's Check, its endpoint and the tickets' summary, and the Context owner's
+// task_check tool.
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
@@ -215,6 +216,24 @@ test('the guard: Read, Grep and Glob stay inside the check\'s worktree, symlinks
   }
 });
 
+test('the guard lets the SDK\'s StructuredOutput through, by its exact name only; any other tool keeps its rules', async () => {
+  const root = await realpath(temp);
+  const repo = join(root, 'guard-answer');
+  await mkdir(repo, { recursive: true });
+  // The answer, whatever it holds: it is not a file access.
+  for (const input of [OUTPUT, {}, { paraphrase: 'x', file_path: '/etc/passwd', path: '~', pattern: '../**' }, 'not an object', null]) {
+    assert.equal(await guardReason(repo, 'StructuredOutput', input), undefined, JSON.stringify(input));
+  }
+  // Names like it are other tools, refused.
+  for (const tool of ['structuredoutput', 'StructuredOutput ', ' StructuredOutput', 'StructuredOutputs', 'StructuredOutput*', 'mcp__x__StructuredOutput', 'Structured', 'Frobnicate']) {
+    assert.match(await guardReason(repo, tool, OUTPUT) ?? 'allowed', /^The Task check reads the repository with Read, Grep and Glob only/, tool);
+  }
+  // Read, Grep and Glob outside the root are still refused.
+  for (const [tool, input] of [['Read', { file_path: '/etc/passwd' }], ['Grep', { pattern: 'x', path: root }], ['Glob', { pattern: `${root}/**` }]] as const) {
+    assert.match(await guardReason(repo, tool, input) ?? 'allowed', /^The Task check may read only the repository checkout /, `${tool} ${JSON.stringify(input)}`);
+  }
+});
+
 test('the links out of the check\'s worktree are cut, the links inside it kept', async () => {
   const root = await realpath(temp);
   const tree = join(root, 'links-root');
@@ -353,6 +372,9 @@ test('end to end, Grep, Glob and Read cannot reach the Context owner\'s material
   const run = await runCli(env, ['check-task', 'app', 'C-6']);
   assert.equal(run.code, 0, run.stderr);
   const log = await probeLog(env);
+  // The answer came last, through the same hook, and was let through.
+  const answer = log.pop()!;
+  assert.deepEqual([answer.tool, answer.decision, answer.hooks], ['StructuredOutput', 'allow', 1]);
   // Every call went through the factory's hook, which decided as expected.
   assert.deepEqual(log.map((entry) => entry.hooks), probes.map(() => 1));
   assert.deepEqual(log.map((entry) => entry.decision), probes.map(([decision]) => decision));
@@ -370,6 +392,19 @@ test('end to end, Grep, Glob and Read cannot reach the Context owner\'s material
   }
   const braces = log.find((entry) => entry.input.pattern === '**/*.{md,json}')!;
   assert.deepEqual(braces.output.split('\n').map((line) => basename(line)), ['README.md']);
+});
+
+test('end to end, the session answers with StructuredOutput after a Read: the hook lets the answer through and the check is stored as done', async () => {
+  const content = taskText('C-8');
+  const { env } = await checkEnv('check-answer', 'C-8', content);
+  await reviewScript(env, [{ output: OUTPUT, probes: [{ tool: 'Read', input: { file_path: 'README.md' } }] }]);
+  const run = await runCli(env, ['check-task', 'app', 'C-8']);
+  assert.equal(run.code, 0, run.stdout + run.stderr);
+  const log = await probeLog(env);
+  assert.deepEqual(log.map((entry) => [entry.tool, entry.decision, entry.hooks]), [['Read', 'allow', 1], ['StructuredOutput', 'allow', 1]]);
+  assert.deepEqual(log[1]!.input, OUTPUT);
+  const stored = (await new CheckStore(env.state).read('app', 'C-8', taskSha256(content)))!;
+  assert.deepEqual([stored.status, stored.error, stored.output?.paraphrase], ['checked', null, OUTPUT.paraphrase]);
 });
 
 test('a check whose base cannot be checked out fails without a session', async () => {

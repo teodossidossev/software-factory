@@ -1,13 +1,14 @@
 // The Dashboard's reads: in-process against startDashboard (token, endpoints, the event stream,
-// the stream limit, disconnects; the test process must exit by itself afterwards) and end to end
-// through `sf serve` with the fake Implementer (a real cycle, approve, SF_DASHBOARD=off,
-// sf dashboard). The actions (approve, abort, say, review, archive) are in dashboard-actions.test.ts.
+// the job's Stream route and entries event (SF-082), the stream limit, disconnects; the test
+// process must exit by itself afterwards) and end to end through `sf serve` with the fake
+// Implementer (a real cycle, approve, SF_DASHBOARD=off, sf dashboard). The actions (approve,
+// abort, say, review, archive) are in dashboard-actions.test.ts.
 import assert from 'node:assert/strict';
-import { readdir, readFile, readlink, stat, writeFile } from 'node:fs/promises';
+import { appendFile, readdir, readFile, readlink, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { MAX_STREAMS, startDashboard, TOKEN_FILE } from '../src/dashboard.js';
-import type { Job } from '../src/jobs.js';
+import { MAX_STREAMS, startDashboard, STREAM_PAGE_LINES, TOKEN_FILE } from '../src/dashboard.js';
+import type { EventRecord, Job } from '../src/jobs.js';
 import { CSP, fakeActions, fetchRaw, openStream, type Stream } from './support/dashboard-client.js';
 import { withDashboard } from './support/dashboard-state.js';
 import { call, newEnv, newRepo, putTask, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
@@ -307,6 +308,130 @@ test('dashboard (SF-040): no reviewer or subscription in the data; the subscript
       // The opening events, in order, up to the job; no subscriptions among them.
       await stream.next('job');
       assert.deepEqual(stream.events.map((item) => item.event), ['jobs', 'workspaces', 'tickets', 'job']);
+    } finally {
+      stream.close();
+    }
+  });
+});
+
+// One events.jsonl line of a fixture: a record at a fixed time, in iteration 1.
+const eventLine = (record: Record<string, unknown>): string => `${JSON.stringify({ ts: '2026-11-05T10:00:00.000Z', iteration: 1, ...record })}\n`;
+const toolUse = (id: string): Record<string, unknown> => ({ message: { type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Bash', input: { command: 'npm test' } }] } } });
+const toolResult = (id: string): Record<string, unknown> => ({ message: { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } } });
+
+test('dashboard (SF-082): the job stream route pages events.jsonl by from and next; a pair split across pages keeps its id; guards answer 404', async () => {
+  await withDashboard('dash-job-stream', fakeActions(), async (dashboard, { jobs }) => {
+    const base = dashboard.url;
+    const page = async (query = ''): Promise<{ entries: Array<Record<string, any>>; next: number; end: boolean }> => {
+      const reply = await fetchRaw(new URL(`api/jobs/app/T-1/stream${query}`, base));
+      assert.equal(reply.status, 200, query);
+      assert.equal(reply.headers['content-type'], 'application/json; charset=utf-8');
+      return JSON.parse(reply.body);
+    };
+    // The fixture's 6 lines, in line order: states, the prompt, text and tool, the result, the publish.
+    const first = await page();
+    assert.deepEqual([first.next, first.end], [6, true]);
+    assert.deepEqual(first.entries.map((entry) => [entry.k, entry.t, entry.who]), [
+      ['0', 'state', 'factory'], ['1', 'state', 'factory'], ['2', 'prompt', 'factory'], ['3.0', 'text', 'implementer'], ['3.1', 'tool', 'implementer'],
+      ['4', 'result', 'implementer'], ['5.0', 'state', 'factory'], ['5.1', 'changes', 'factory'],
+    ]);
+    assert.deepEqual(first.entries[7], { t: 'changes', who: 'factory', files: 1, paths: ['README.md'], k: '5.1', ts: '2026-11-01T10:05:00.000Z', it: 1 });
+    assert.deepEqual(await page('?from=4'), { ...first, entries: first.entries.slice(5) });
+
+    // More than 2000 lines: a tool_use as the last line of one page, its result the first of the next.
+    const lines: string[] = [];
+    for (let line = 6; line < STREAM_PAGE_LINES - 1; line += 1) {
+      lines.push(eventLine({ type: 'placeholders_removed', paths: [`p${line}`] }));
+    }
+    lines.push(eventLine(toolUse('split')), eventLine(toolResult('split')));
+    for (let line = STREAM_PAGE_LINES + 1; line < 2050; line += 1) {
+      lines.push(eventLine({ type: 'placeholders_removed', paths: [`p${line}`] }));
+    }
+    await appendFile(jobs.eventsPath('app', 'T-1'), lines.join(''));
+    const one = await page('?from=0');
+    assert.deepEqual([one.next, one.end], [STREAM_PAGE_LINES, false]);
+    const last = one.entries.at(-1)!;
+    assert.deepEqual([last.k, last.t, last.id, last.line], [String(STREAM_PAGE_LINES - 1), 'tool', 'split', 'Bash npm test']);
+    const two = await page(`?from=${one.next}`);
+    assert.deepEqual([two.next, two.end, two.entries.length], [2050, true, 2050 - STREAM_PAGE_LINES]);
+    assert.deepEqual([two.entries[0]!.k, two.entries[0]!.t, two.entries[0]!.id, two.entries[0]!.out], [String(STREAM_PAGE_LINES), 'tool_result', 'split', '1 line']);
+    assert.deepEqual(await page('?from=2050'), { entries: [], next: 2050, end: true });
+    assert.deepEqual(await page('?from=999999999'), { entries: [], next: 999999999, end: true });
+
+    // A job without events.jsonl; then the guards: an unknown job, a bad from.
+    const none = await fetchRaw(new URL('api/jobs/app/T-0/stream?from=3', base));
+    assert.deepEqual([none.status, JSON.parse(none.body)], [200, { entries: [], next: 0, end: true }]);
+    for (const path of [
+      'api/jobs/app/T-9/stream', 'api/jobs/app/T-9/stream?from=x', 'api/jobs/APP/T-1/stream', 'api/jobs/app/T-1/stream?from=-1',
+      'api/jobs/app/T-1/stream?from=1234567890', 'api/jobs/app/T-1/stream?from=', 'api/jobs/app/T-1/stream?from=1.5', 'api/jobs/app/T-1/stream/x',
+    ]) {
+      const reply = await fetchRaw(new URL(path, base));
+      assert.deepEqual([reply.status, reply.body], [404, ''], path);
+    }
+  });
+});
+
+test('dashboard (SF-082): the live stream sends the entries of each line from from, in line order, beside the unchanged event', async () => {
+  await withDashboard('dash-job-entries', fakeActions(), async (dashboard, { jobs }) => {
+    const stream = await openStream(new URL('api/stream?job=app/T-1', dashboard.url));
+    try {
+      const page = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1/stream', dashboard.url))).body);
+      // The live entries of the existing lines are the page's.
+      const live: Array<Record<string, unknown>> = [];
+      for (let line = 0; line < 6; line += 1) {
+        const event = await stream.next('entries');
+        assert.equal(event.line, line);
+        live.push(...event.entries);
+      }
+      assert.deepEqual(live, page.entries);
+
+      // A tool_use, the page read, then its result appended: the result arrives live with the same id.
+      await jobs.appendEvent('app', 'T-1', { ts: '2026-11-05T10:00:00.000Z', iteration: 1, ...toolUse('tu-live') } as EventRecord);
+      assert.deepEqual((await stream.next('entries')).entries.map((entry: Record<string, unknown>) => [entry.t, entry.id]), [['tool', 'tu-live']]);
+      const read = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1/stream?from=6', dashboard.url))).body);
+      assert.deepEqual([read.next, read.entries.map((entry: Record<string, unknown>) => entry.id)], [7, ['tu-live']]);
+      await jobs.appendEvent('app', 'T-1', { ts: '2026-11-05T10:00:01.000Z', iteration: 1, ...toolResult('tu-live') } as EventRecord);
+      const result = await stream.next('entries');
+      assert.deepEqual([result.line, result.entries[0].t, result.entries[0].id], [7, 'tool_result', 'tu-live']);
+
+      // A review line, whose entry reads review.json, appended just before a plain line: it arrives first.
+      await jobs.writeReview('app', 'T-1', 1, {
+        reviewer: 'claude', verdict: 'fix', summary: 'One thing.', items: [{ severity: 'major', path: 'README.md', problem: 'P.', expected: 'E.' }],
+        accepted_sensitive: [], cost_usd: 0.1, started_at: '2026-11-05T10:00:02.000Z', ended_at: '2026-11-05T10:00:03.000Z',
+      });
+      await appendFile(jobs.eventsPath('app', 'T-1'), eventLine({ type: 'review', reviewer: 'claude', verdict: 'fix', items: 1 }) + eventLine({ prompt: 'plain' }));
+      const verdict = await stream.next('entries');
+      assert.equal(verdict.line, 8);
+      assert.deepEqual([verdict.entries[0].t, verdict.entries[0].summary, verdict.entries[0].items.length], ['verdict', 'One thing.', 1]);
+      const plain = await stream.next('entries');
+      assert.deepEqual([plain.line, plain.entries[0].t, plain.entries[0].text], [9, 'user', 'plain']);
+      // The old event message is unchanged.
+      assert.deepEqual(await stream.seen('event', (event) => event.line === 9), { line: 9, ts: '2026-11-05T10:00:00.000Z', iteration: 1, type: 'prompt', text: '12:00:00 [1] > plain' });
+
+      // A line with no entries sends no entries event; from skips the earlier lines.
+      await appendFile(jobs.eventsPath('app', 'T-1'), `not json\n${eventLine({ prompt: 'after' })}`);
+      assert.equal((await stream.next('entries')).line, 11);
+      const resumed = await openStream(new URL('api/stream?job=app/T-1&from=9', dashboard.url));
+      try {
+        assert.deepEqual([(await resumed.next('entries')).line, (await resumed.next('entries')).line], [9, 11]);
+      } finally {
+        resumed.close();
+      }
+
+      // A failed build (an invalid ledger.json for the verdict's ids) is logged and its line
+      // skipped; the next line still comes.
+      await writeFile(join(jobs.dir('app', 'T-1'), 'ledger.json'), 'not json');
+      const logged: unknown[] = [];
+      const log = console.error;
+      console.error = (...args: unknown[]) => logged.push(...args);
+      try {
+        await appendFile(jobs.eventsPath('app', 'T-1'), eventLine({ type: 'review', reviewer: 'claude', verdict: 'fix', items: 1 }) + eventLine({ prompt: 'next' }));
+        assert.equal((await stream.next('entries')).line, 13);
+      } finally {
+        console.error = log;
+      }
+      assert.match(String(logged[0]), /ledger\.json of app\/T-1 is not valid JSON/);
+      assert.ok(!stream.events.some((item) => item.event === 'entries' && item.data.line === 12));
     } finally {
       stream.close();
     }

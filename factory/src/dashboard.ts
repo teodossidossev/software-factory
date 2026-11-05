@@ -21,6 +21,7 @@ import { conversationUrl, MAX_CONVERSATION_URL, ticketConversation } from './con
 import { FactoryError } from './errors.js';
 import type { Execution } from './execution.js';
 import type { Job, JobState, JobStore } from './jobs.js';
+import { DECISIONS } from './ledger.js';
 import { WORKSPACE_NAME_PATTERN } from './registry.js';
 import type { Setup } from './setup.js';
 import { TICKET_PATTERN } from './task-file.js';
@@ -54,10 +55,10 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 // sf start. Archive of a job card is archiveFinished (terminal only), never the any-state reset.
 // The merge request on the Git host (SF-048): mr-create, mr-merge and mr-status as sf mr create,
 // merge and status, and mergeRequestHost for whether they are on for a job's workspace.
-export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | 'say' | 'retryReview' | 'acceptGate' | 'archiveFinished'
+export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | 'say' | 'retryReview' | 'acceptGate' | 'settle' | 'archiveFinished'
   | 'createMergeRequest' | 'mergeMergeRequest' | 'mergeRequestStatus' | 'mergeRequestHost'>;
-export type DashboardAction = 'approve' | 'abort' | 'say' | 'review' | 'accept' | 'archive' | 'mr-create' | 'mr-merge' | 'mr-status';
-export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'review', 'accept', 'archive', 'mr-create', 'mr-merge', 'mr-status'];
+export type DashboardAction = 'approve' | 'abort' | 'say' | 'review' | 'accept' | 'settle' | 'archive' | 'mr-create' | 'mr-merge' | 'mr-status';
+export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'review', 'accept', 'settle', 'archive', 'mr-create', 'mr-merge', 'mr-status'];
 
 // The start screen's data and changes: the workspace registry and the Task files (src/setup.ts).
 export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'removeWorkspace' | 'tickets' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'archivedTickets' | 'taskText' | 'taskTitle'>;
@@ -99,6 +100,7 @@ const BODIES = {
   say: { shape: '{"message": string}', schema: z.strictObject({ message: z.string() }) },
   review: { shape: '{}', schema: z.strictObject({}) },
   accept: { shape: '{}', schema: z.strictObject({}) },
+  settle: { shape: '{"id": string, "decision": "accept" | "fix", "note"?: string}', schema: z.strictObject({ id: z.string(), decision: z.enum(DECISIONS), note: z.string().optional() }) },
   archive: { shape: '{}', schema: z.strictObject({}) },
   'mr-create': { shape: '{}', schema: z.strictObject({}) },
   'mr-merge': { shape: '{}', schema: z.strictObject({}) },
@@ -345,6 +347,8 @@ async function jobDetail(jobs: JobStore, job: Job, gate: boolean, actions: Dashb
     mr_title: mrText === undefined ? null : (mrText.split(/\r?\n/)[0] ?? ''),
     // Whether the Codex gate is on (SF_GATE): the pipeline shows its step as off otherwise.
     gate,
+    // The findings ledger (SF-052): ledger.json as written; [] before the first Fix section.
+    ledger: await jobs.readLedger(job.workspace, job.ticket),
     history: await stateHistory(jobs, job.workspace, job.ticket),
   };
 }
@@ -694,6 +698,17 @@ export async function startDashboard(
       // clean Claude review of the last iteration.
       const run = (): Promise<unknown> => actions.acceptGate(workspace, ticket);
       return { route: action, exists, call: (data) => (parse(BODIES.accept.schema, data) ? run : undefined) };
+    }
+    if (action === 'settle') {
+      // sf settle (SF-052): the Execution refuses any state but needs_human, and any entry but an
+      // escalated or contested one.
+      return {
+        route: action, exists,
+        call: (data) => {
+          const parsed = parse(BODIES.settle.schema, data);
+          return parsed ? () => actions.settle(workspace, ticket, parsed.id, parsed.decision, parsed.note ?? '') : undefined;
+        },
+      };
     }
     if (action === 'mr-create' || action === 'mr-merge' || action === 'mr-status') {
       // sf mr create, merge and status (SF-048). The Execution announces an opened or merged merge

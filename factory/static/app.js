@@ -19,11 +19,12 @@ const READ_TIMEOUT_MS = 10000;
 const TERMINAL_STATES = ['pushed', 'aborted', 'failed'];
 const SAY_STATES = ['working', 'awaiting_review', 'needs_human', 'ready_for_human_review'];
 const ACTION_LABELS = {
-  approve: 'Approve', abort: 'Abort', say: 'Send', review: 'Retry review', accept: 'Accept and prepare MR', archive: 'Archive',
+  approve: 'Approve', abort: 'Abort', say: 'Send', review: 'Retry review', accept: 'Accept and prepare MR', settle: 'Settle', archive: 'Archive',
   'mr-create': 'Create merge request', 'mr-merge': 'Merge', 'mr-status': 'Refresh MR status',
 };
 const PENDING_REASONS = {
   accept: 'the override was requested; waiting for its outcome.',
+  settle: 'a settlement was requested; waiting for its outcome.',
   approve: 'the push was requested; waiting for its outcome.',
   abort: 'abort was requested; waiting for its outcome.',
   say: 'the message is being sent.',
@@ -35,6 +36,7 @@ const PENDING_REASONS = {
 };
 const PENDING_TEXT = {
   accept: 'Accepting over the gate…',
+  settle: 'Settling the finding…',
   approve: 'Pushing the branch…',
   abort: 'Abort requested; waiting for the job to end.',
   say: 'Sending the message…',
@@ -51,6 +53,11 @@ const JOB_TABS = [['task', 'Task'], ['changes', 'Changes'], ['reviews', 'Reviews
 const STEPS = ['Implement', 'Claude review', 'Codex gate', 'MR preparation', 'You'];
 // The codes of a job the gate stopped, which Accept and prepare MR takes on (SF-047).
 const GATE_CODES = ['gate_rounds', 'gate_budget', 'gate_failed'];
+// The ledger's stops (SF-052) that Accept and prepare MR takes on as well.
+const LEDGER_CODES = ['review_churn', 'review_disputed'];
+const ACCEPT_CODES = [...GATE_CODES, ...LEDGER_CODES];
+// The stops whose findings the user settles here (Accept risk, Must fix).
+const SETTLE_STOPS = ['escalated', ...LEDGER_CODES];
 // The Live log's filters: who a line comes from.
 const LOG_FILTERS = [['all', 'All'], ['implementer', 'Implementer'], ['claude', 'Claude review'], ['codex', 'Codex'], ['state', 'State']];
 
@@ -224,24 +231,89 @@ function flowJob(detail) {
 }
 
 // The user may accept the last iteration over the stopped gate (Accept and prepare MR): the gate
-// handed the job over (gate_rounds, gate_budget, gate_failed) and Claude's review of that
-// iteration is clean. Guidance only: the factory checks it again.
+// handed the job over (gate_rounds, gate_budget, gate_failed), or the ledger did (SF-052:
+// review_churn, review_disputed), and Claude's review of that iteration is clean. Guidance only:
+// the factory checks it again.
 function gateAcceptable(detail) {
   const job = detail?.job;
-  if (job === undefined || job === null || job.state !== 'needs_human' || !GATE_CODES.includes(job.error?.code)) {
+  if (job === undefined || job === null || job.state !== 'needs_human' || !ACCEPT_CODES.includes(job.error?.code)) {
     return false;
   }
-  return verdictOf(iterationOf(detail, job.iteration)?.review) === 'clean';
+  return actedClean(iterationOf(detail, job.iteration)?.review);
+}
+
+// A Claude review the factory acts on as clean, as the factory decides it: a verdict without a
+// blocker or major item (an item without a severity reads as major), the items the ledger dropped
+// aside (SF-052).
+function actedClean(review) {
+  if (verdictOf(review) !== 'clean' && verdictOf(review) !== 'fix') {
+    return false;
+  }
+  const dropped = new Set((review.dropped ?? []).map((item) => JSON.stringify(item)));
+  return (review.items ?? []).every((item) => item.severity === 'nit' || dropped.has(JSON.stringify(item)));
 }
 
 // The Codex items the gate asked for on the job's last iteration, or its error: what Accept and
 // prepare MR goes without. ran is false when no gate ran on it (the budget was used up first).
 function gateLeftovers(detail) {
+  if (LEDGER_CODES.includes(detail.job.error?.code)) {
+    return { items: ledgerOpen(detail), error: null, ran: true, ledger: true };
+  }
   const gate = iterationOf(detail, detail.job.iteration)?.gate ?? null;
   if (gate === null) {
     return { items: [], error: null, ran: false };
   }
   return typeof gate.error === 'string' ? { items: [], error: gate.error, ran: true } : { items: gate.items ?? [], error: null, ran: true };
+}
+
+// The ledger's findings an Accept over a ledger stop goes without (SF-052): open entries, the
+// fixes the user decided and the disputed contests.
+function ledgerOpen(detail) {
+  return (detail.ledger ?? []).filter((entry) => entry.status === 'open' || entry.status === 'user_fix' || (entry.status === 'contested' && entry.dispute !== null));
+}
+
+// The ledger's findings the user settles while the job waits (SF-052): escalated entries and
+// contests, each with Accept risk and Must fix.
+function settleable(detail) {
+  if (detail?.job?.state !== 'needs_human' || !SETTLE_STOPS.includes(detail.job.error?.code)) {
+    return [];
+  }
+  return (detail.ledger ?? []).filter((entry) => entry.status === 'escalated' || entry.status === 'contested');
+}
+
+function renderLedger(detail) {
+  const entries = settleable(detail);
+  $('ledger-panel').hidden = entries.length === 0;
+  const key = keyOf(detail.job);
+  const busy = state.pending.has(pendingId('settle', key));
+  $('ledger-list').replaceChildren(...entries.map((entry) => {
+    const item = el('li', 'ledger-entry');
+    item.append(el('p', '', `${entry.id} · ${entry.status} · ${entry.severity} · ${entry.path}: ${entry.problem}`));
+    if (entry.status === 'escalated') {
+      item.append(el('p', 'hint', `The Implementer asks: ${entry.response}`));
+    } else {
+      item.append(el('p', 'hint', `The Implementer contests it: ${entry.response} Evidence: ${entry.evidence}`));
+      if (entry.dispute !== null && entry.dispute !== undefined) {
+        item.append(el('p', 'hint', `${entry.dispute.reviewer === 'codex' ? 'Codex' : 'Claude'} reopens it: ${entry.dispute.reason}`));
+      }
+    }
+    const note = el('input', 'ledger-note');
+    note.type = 'text';
+    note.placeholder = 'Note (optional)';
+    note.setAttribute('aria-label', `Note on ${entry.id}`);
+    const accept = el('button', 'btn', 'Accept risk');
+    const fix = el('button', 'btn btn-primary', 'Must fix');
+    for (const [button, decision] of [[accept, 'accept'], [fix, 'fix']]) {
+      button.type = 'button';
+      button.disabled = busy;
+      button.dataset.settle = `${entry.id}:${decision}`;
+      button.addEventListener('click', () => void run('settle', key, { id: entry.id, decision, note: note.value }));
+    }
+    const row = el('div', 'row');
+    row.append(note, accept, fix);
+    item.append(row);
+    return item;
+  }));
 }
 
 // The user's override of the gate that still stands (SF-047): the newest gate-override.json, unless
@@ -267,6 +339,12 @@ function haltSentence(detail) {
     return 'The job failed and cannot go on; archive it.';
   }
   switch (code) {
+    case 'escalated':
+      return 'The Implementer escalated a question only you can answer. Settle each finding below: Accept risk or Must fix; then the job goes on.';
+    case 'review_disputed':
+      return `A reviewer disputes the Implementer's contest of a finding.${gateAcceptable(detail) ? ' Accept and prepare the MR,' : ''} settle the finding below (Accept risk or Must fix), message the Implementer, or abort to go back to planning (the branch stays).`;
+    case 'review_churn':
+      return `The fixes keep making new findings.${gateAcceptable(detail) ? ' Accept and prepare the MR,' : ''} continue (settle a finding or message the Implementer), or abort to go back to planning (the branch stays).`;
     case 'review_failed':
       return 'The Claude review could not run. Retry it.';
     case 'gate_failed':
@@ -816,6 +894,9 @@ function markTarget(scroll) {
 // One review item as a list entry: the path as code, the problem, and what is expected.
 function itemEntry(item, expected = true) {
   const entry = el('li');
+  if (typeof item.id === 'string') {
+    entry.append(document.createTextNode(`${item.id} `));
+  }
   entry.append(el('code', '', item.path), document.createTextNode(`: ${item.problem}${expected ? ` Expected: ${item.expected}` : ''}`));
   return entry;
 }
@@ -1021,6 +1102,7 @@ function renderDetail(detail) {
   renderHistory(detail.history);
   renderChanges(detail);
   renderReviews(detail);
+  renderLedger(detail);
   renderJobTabs();
   showTab();
   void showMr();
@@ -1215,6 +1297,13 @@ function describeOutcome(action, result) {
   if (action === 'accept') {
     return { level: 'ok', text: `Accepted over the gate: the factory prepares the MR of iteration ${data.iteration} (state ${data.state}).` };
   }
+  if (action === 'settle') {
+    const status = data.status === 'accepted_risk' ? 'accepted as a risk' : data.status === 'user_fix' ? 'to be fixed' : data.status;
+    const waiting = Array.isArray(data.waiting) ? data.waiting : [];
+    return waiting.length > 0
+      ? { level: 'ok', text: `Settled ${data.id}: ${status}. Still to settle: ${waiting.join(', ')}.` }
+      : { level: 'ok', text: `Settled ${data.id}: ${status} (state ${data.state}).` };
+  }
   if (action === 'abort') {
     if (data.error) {
       return { level: 'error', text: `The job ended (${data.state}), but discard failed: ${detail} The discard may be partial: look at the branch ${data.branch} and the worktree by hand before relying on either.` };
@@ -1385,7 +1474,9 @@ function openConfirm(action) {
       : '',
     approve: `Pushes branch ${job.branch} to origin: the one commit the factory prepared at Clean, rebased onto ${job.base}. Nothing is committed or rebased now; a tip edited by hand is refused unless pushed as it is.`,
     abort: `Ends the job on branch ${job.branch}: the Implementer session stops and queued messages are dropped. The branch and its worktree stay as they are.`,
-    accept: `Overrides the Codex gate (${job.error?.code}): iteration ${job.iteration}, which Claude reviewed clean, goes on as after a clean gate. The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. The override is recorded in the job's history.`,
+    accept: LEDGER_CODES.includes(job.error?.code)
+      ? `Accepts iteration ${job.iteration}, which Claude reviewed clean, over the ledger's stop (${job.error?.code}). The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. The open findings are not applied; the override is recorded in the job's history.`
+      : `Overrides the Codex gate (${job.error?.code}): iteration ${job.iteration}, which Claude reviewed clean, goes on as after a clean gate. The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. The override is recorded in the job's history.`,
   };
   $('confirm-text').textContent = texts[action];
   renderConfirmItems(action === 'accept' ? gateLeftovers(state.detail) : null);
@@ -1406,7 +1497,9 @@ function renderConfirmItems(leftovers) {
     $('confirm-items-list').replaceChildren();
     return;
   }
-  $('confirm-items-title').textContent = leftovers.error !== null
+  $('confirm-items-title').textContent = leftovers.ledger === true
+    ? (leftovers.items.length === 0 ? 'No open finding is left in the ledger.' : `Open findings of the ledger that will not be applied (${leftovers.items.length}):`)
+    : leftovers.error !== null
     ? `The gate failed, so no Codex item is known: ${leftovers.error}`
     : !leftovers.ran ? 'Codex did not review this iteration (its token budget was used up before it ran), so what it would ask for is not known.'
       : leftovers.items.length === 0 ? 'The gate left no Codex item on this iteration.' : `Codex items that will not be applied (${leftovers.items.length}):`;

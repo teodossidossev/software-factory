@@ -1,12 +1,14 @@
 // Job state on disk: <state dir>/jobs/<workspace>/<ticket>/ with job.json, events.jsonl and
 // iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-override.json} (plus the
-// gate's schema and output files), and from MR preparation on mr.md. Strictly parsed; every file but the event log
+// gate's schema and output files), ledger.json (the findings ledger, SF-052) from the first Fix
+// section on, and from MR preparation on mr.md. Strictly parsed; every file but the event log
 // is replaced atomically. Knows nothing about Git or the Implementer session.
 import { appendFile, type FileHandle, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import * as z from 'zod/v4';
 import { writeFileAtomic, writeFileAtomicWith } from './atomic.js';
 import { FactoryError } from './errors.js';
+import { type LedgerEntry, ledgerSchema } from './ledger.js';
 import type { ReviewItem } from './review.js';
 
 export const JOB_STATES = [
@@ -112,6 +114,8 @@ export type ReviewRecord =
       summary: string;
       items: ReviewItem[];
       accepted_sensitive: string[];
+      // The items that reopened an accepted risk (SF-052): dropped, the user decided.
+      dropped?: ReviewItem[];
       cost_usd: number | null;
       started_at: string;
       ended_at: string;
@@ -133,6 +137,8 @@ export type GateRecord =
       summary: string;
       items: ReviewItem[];
       accepted_sensitive: string[];
+      // The items that reopened an accepted risk (SF-052): dropped, the user decided.
+      dropped?: ReviewItem[];
       model?: string;
       tokens: GateTokens;
       started_at: string;
@@ -143,11 +149,12 @@ export type GateRecord =
 // iterations/NNN/gate-override.json (SF-047): the user accepted the iteration over a stopped gate
 // (needs_human with code gate_rounds, gate_budget or gate_failed) with Claude's clean review; at
 // is when, unapplied the Codex items of the iteration's gate.json the change goes without, or the
-// gate's error when it failed ([] when no gate ran on the iteration).
+// gate's error when it failed ([] when no gate ran on the iteration). Over a ledger stop (SF-052:
+// review_churn, review_disputed) unapplied are the ledger's open findings, each with its id.
 export interface GateOverride {
   at: string;
   code: string;
-  unapplied: ReviewItem[] | string;
+  unapplied: Array<ReviewItem & { id?: string }> | string;
 }
 
 export interface Iteration {
@@ -393,6 +400,35 @@ export class JobStore {
 
   async writeGate(workspace: string, ticket: string, number: number, gate: GateRecord): Promise<void> {
     await writeFileAtomic(join(this.iterationDir(workspace, ticket, number), 'gate.json'), Buffer.from(`${JSON.stringify(gate, null, 2)}\n`));
+  }
+
+  // Before the stopped gate runs again (SF-052, after the user settled a dispute).
+  async removeGate(workspace: string, ticket: string, number: number): Promise<void> {
+    await rm(join(this.iterationDir(workspace, ticket, number), 'gate.json'), { force: true });
+  }
+
+  // The findings ledger (SF-052); [] before the first Fix section. Strictly parsed.
+  async readLedger(workspace: string, ticket: string): Promise<LedgerEntry[]> {
+    const text = await readOrMissing(join(this.dir(workspace, ticket), 'ledger.json'));
+    if (text === undefined) {
+      return [];
+    }
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new FactoryError('ledger_invalid', `ledger.json of ${workspace}/${ticket} is not valid JSON.`);
+    }
+    const parsed = ledgerSchema.safeParse(data);
+    if (!parsed.success) {
+      throw new FactoryError('ledger_invalid', `ledger.json of ${workspace}/${ticket} is invalid.`);
+    }
+    return parsed.data;
+  }
+
+  // Replaced atomically; only under the job lock of the Execution.
+  async writeLedger(workspace: string, ticket: string, ledger: LedgerEntry[]): Promise<void> {
+    await writeFileAtomic(join(this.dir(workspace, ticket), 'ledger.json'), Buffer.from(`${JSON.stringify(ledgerSchema.parse(ledger), null, 2)}\n`));
   }
 
   async writeGateOverride(workspace: string, ticket: string, number: number, override: GateOverride): Promise<void> {

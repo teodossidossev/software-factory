@@ -13,7 +13,8 @@ export const FACTORY_PROMPT_RULES = `Rules from the Software Factory:
   ## Done        (what was built or changed, by responsibility)
   ## Checks      (each command run with its result; "not run" and why, when not run)
   ## Open questions   ("None." when there are none)
-  ## Fix N items (only when answering a Fix section: a table of each item, fixed or rejected, with a note)`;
+  ## Fix N items (only when answering a Fix section: one row per item, by its id: | R7 | fixed / contested / escalated / left | <evidence or note> |)
+- Answer each Fix item: fixed; contested only with evidence a reviewer can check without you (a path:line in the worktree, a test name, or a §section of the Task file), else it reads as open; escalated only when it turns on something only the user knows, outside the repository and the Task file (the note is the question); left for nits only.`;
 
 // first: the command or the user's message; iteration: the number of the iteration to be published.
 export function factoryPrompt(first: string, ticket: string, iteration: number): string {

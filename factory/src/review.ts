@@ -6,6 +6,7 @@ import { dirname, resolve } from 'node:path';
 import { type Options, query, type SandboxSettings, type SDKMessage, type SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
 import * as z from 'zod/v4';
 import type { FileChange } from './jobs.js';
+import { type FixItem, fixItemLine, LEDGER_REF, type LedgerEntry, SENSITIVE_PROBLEM, settledLines } from './ledger.js';
 import { handbookSection } from './prompts.js';
 import { ENV_FILE_RULES } from './rules.js';
 import { sessionEnvironment } from './session.js';
@@ -33,6 +34,10 @@ const reviewItem = z.strictObject({
   problem: z.string().describe('What is wrong.'),
   expected: z.string().describe('What is expected instead.'),
   severity: z.enum(SEVERITIES).describe(SEVERITIES.map((severity) => `${severity}: ${SEVERITY_DEFINITIONS[severity]}`).join('; ')),
+  // The ledger (SF-052): each a ledger id or "" (anything else is an invalid verdict); absent in
+  // verdicts and records before it, read as "".
+  reopens: z.string().regex(LEDGER_REF).default('').describe('The ledger id of the settled finding this item reopens (only when the settlement is wrong by evidence in the worktree; say why in problem), or "".'),
+  caused_by: z.string().regex(LEDGER_REF).default('').describe('The ledger id of the fix whose change caused this item, or "".'),
 });
 export const reviewOutput = z.strictObject({
   verdict: z.enum(['clean', 'fix']),
@@ -40,8 +45,10 @@ export const reviewOutput = z.strictObject({
   items: z.array(reviewItem),
   accepted_sensitive: z.array(z.string()).describe('The undeclared sensitive paths you accept, each justified in summary.'),
 });
-export type ReviewOutput = z.output<typeof reviewOutput>;
-export type ReviewItem = z.output<typeof reviewItem>;
+// An item as the reviewers give it and the records keep it: reopens and caused_by may be absent
+// (verdicts and records before SF-052).
+export type ReviewItem = z.input<typeof reviewItem>;
+export type ReviewOutput = Omit<z.output<typeof reviewOutput>, 'items'> & { items: ReviewItem[] };
 // The schema sent as outputFormat (the CLI's --json-schema), from the same definition as the
 // validation: draft-07 output without $schema, since the CLI refuses zod's default draft 2020-12
 // $schema (SF-044).
@@ -61,6 +68,8 @@ export interface ReviewInput {
   files: FileChange[] | undefined;
   // The loaded Handbook text; its review rules are sent verbatim.
   handbook: string;
+  // The job's findings ledger (SF-052); its settled entries are sent.
+  ledger?: LedgerEntry[];
 }
 
 function cutBuffer(buffer: Buffer, maxBytes: number): string {
@@ -115,6 +124,8 @@ export function reviewBody(input: ReviewInput): string[] {
     ...SEVERITIES.map((severity) => `  - \`${severity}\`: ${SEVERITY_DEFINITIONS[severity]}.`),
     '- Return `fix` with concrete items (path, what is wrong, what is expected, severity) when at least one item is a blocker or major; otherwise `clean`, with any nits as its items. The factory acts on the items, whatever the verdict says: a blocker or major item makes a fix, and a `fix` with nits only counts as `clean`. Nits are recorded, never block, and the Implementer may leave them.',
     '- An undeclared sensitive path stays only when you name it in accepted_sensitive and justify it in summary; otherwise it becomes a major fix item, whatever severity you give it.',
+    '- The settled findings below (<settled_findings>) are the ledger\'s entries already settled: fixed, contested with evidence, escalated, left (a nit), accepted by the user (accepted_risk) or to be fixed by the user\'s decision (user_fix). Do not raise a settled finding again, nor a narrower variant of it. Raise it only when the settlement is wrong by evidence in the worktree; then set `reopens` to its id and say why in problem. An item that reopens an accepted risk is dropped: the user decided.',
+    '- Set `caused_by` to the id of the fix whose change caused the item. `reopens` and `caused_by` are each a ledger id or "".',
     '',
     handbookSection(input.handbook, '## Review rules'),
     '',
@@ -129,6 +140,10 @@ export function reviewBody(input: ReviewInput): string[] {
     '<sensitive_and_deleted_paths>',
     ...pathLines(input.files),
     '</sensitive_and_deleted_paths>',
+    '',
+    '<settled_findings>',
+    ...settledLines(input.ledger ?? []),
+    '</settled_findings>',
     '',
     ...notes.map((note) => `Note: ${note}`),
     '<patch>',
@@ -257,21 +272,22 @@ export function itemLine(item: ReviewItem): string {
 
 // The body of the Fix section the factory writes for a review: the summary as a lead line (by: who
 // reviewed), then one numbered item per blocker or major entry, then the nits, numbered on, under
-// "Nits (optional):".
-export function fixContent(summary: string, items: ReviewItem[], by = 'Claude'): string {
-  const blockers = blocking(items);
-  const optional = nits(items);
+// "Nits (optional):"; each item with its ledger id (SF-052).
+export function fixContent(summary: string, items: FixItem[], by = 'Claude'): string {
+  // A fix the user decided is never optional, whatever its severity.
+  const optional = items.filter((fixItem) => fixItem.item.severity === 'nit' && fixItem.userNote === undefined);
+  const blockers = items.filter((fixItem) => !optional.includes(fixItem));
   return [
     `Review by ${by}: ${oneLine(summary) || 'see the items.'}`,
     '',
-    ...blockers.map((item, index) => `${index + 1}. ${itemLine(item)}`),
-    ...(optional.length > 0 ? ['', 'Nits (optional):', ...optional.map((item, index) => `${blockers.length + index + 1}. ${itemLine(item)}`)] : []),
+    ...blockers.map((fixItem, index) => `${index + 1}. ${fixItemLine(fixItem)}`),
+    ...(optional.length > 0 ? ['', 'Nits (optional):', ...optional.map((fixItem, index) => `${blockers.length + index + 1}. ${fixItemLine(fixItem)}`)] : []),
   ].join('\n');
 }
 
 // The fix item of an undeclared sensitive path a verdict did not accept: always major.
 export function sensitiveItem(path: string): ReviewItem {
-  return { path, problem: 'Undeclared sensitive path.', expected: 'Remove it, or justify it in the Report.', severity: 'major' };
+  return { path, problem: SENSITIVE_PROBLEM, expected: 'Remove it, or justify it in the Report.', severity: 'major' };
 }
 
 // The items that block: blocker and major.
@@ -284,7 +300,7 @@ export type Verdict = 'clean' | 'fix';
 
 // The reviewer's verdict before the sensitive-path rule, as the factory acts on it (SF-051): a round
 // is clean when it has no blocker or major item, whatever the reviewer wrote; fix otherwise.
-export function actedVerdict(output: Pick<ReviewOutput, 'items'>): Verdict {
+export function actedVerdict(output: { items: ReviewItem[] }): Verdict {
   return blocking(output.items).length > 0 ? 'fix' : 'clean';
 }
 
@@ -292,7 +308,7 @@ export function actedVerdict(output: Pick<ReviewOutput, 'items'>): Verdict {
 // blocker or major item, or when an undeclared sensitive path is not accepted (unaccepted, always
 // major); clean otherwise, whatever the reviewer wrote. The items of a fix are the blocking ones
 // (the reviewer's, then the unaccepted paths), then the reviewer's nits; none for clean.
-export function decide(output: Pick<ReviewOutput, 'items'>, unaccepted: ReviewItem[]): { verdict: Verdict; items: ReviewItem[] } {
+export function decide(output: { items: ReviewItem[] }, unaccepted: ReviewItem[]): { verdict: Verdict; items: ReviewItem[] } {
   const own = blocking(output.items);
   if (own.length === 0 && unaccepted.length === 0) {
     return { verdict: 'clean', items: [] };
@@ -301,7 +317,7 @@ export function decide(output: Pick<ReviewOutput, 'items'>, unaccepted: ReviewIt
 }
 
 // The nits of the given verdicts, deduplicated by path and problem text (on one line), in order.
-export function uniqueNits(outputs: Array<Pick<ReviewOutput, 'items'>>): ReviewItem[] {
+export function uniqueNits(outputs: Array<{ items: ReviewItem[] }>): ReviewItem[] {
   const seen = new Set<string>();
   const result: ReviewItem[] = [];
   for (const item of outputs.flatMap((output) => nits(output.items))) {

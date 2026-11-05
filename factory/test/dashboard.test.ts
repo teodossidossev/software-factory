@@ -293,7 +293,7 @@ test('dashboard (SF-040): no reviewer or subscription in the data; the subscript
   await withDashboard('dash-no-reviewer', fakeActions(), async (dashboard) => {
     const base = dashboard.url;
     const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body);
-    assert.deepEqual(Object.keys(detail).sort(), ['gate', 'history', 'iterations', 'job', 'mr', 'mr_title']);
+    assert.deepEqual(Object.keys(detail).sort(), ['gate', 'history', 'iterations', 'job', 'ledger', 'mr', 'mr_title']);
     const { jobs: all } = JSON.parse((await fetchRaw(new URL('api/jobs', base))).body);
     assert.ok(all.every((job: Record<string, unknown>) => !('reviewer' in job)));
     assert.deepEqual([(await fetchRaw(new URL('api/subscriptions', base))).status], [404]);

@@ -113,9 +113,22 @@ its rules (no Git, no edits to the Task file) with every prompt, and appends the
 <Anything the reviewer must decide. "None." when there are none.>
 
 ## Fix N items            (only for iterations that answer a Fix section)
-| # | Item | Outcome | Note |
-| 1 | <item> | fixed / rejected | <why rejected, or what was done> |
+| Id | Outcome | Evidence or note |
+| R7 | fixed / contested / escalated / left | <what was done, the evidence, or the question> |
 ```
+
+Every Fix item has a ledger id (`1. [R7, major] ...`); answer each one by its id:
+
+- `fixed`: done.
+- `contested`: the item is wrong, with evidence a reviewer can check without you: a `path:line` in
+  the worktree, a test name, or a `§section` of the Task file. A wish to contest is not evidence;
+  a contest without it reads as `open`.
+- `escalated`: the item turns on something only the user knows (outside the repository and the
+  Task file); the note is the question. The job stops for the user before the review.
+- `left`: a nit not done. For a blocker or major it reads as `open`.
+
+A row the factory cannot read leaves its item `open`; an open blocker or major comes back in the
+next Fix section.
 
 ## Review rules
 
@@ -137,8 +150,17 @@ with every iteration. The Context owner does not review.
   only counts as `clean`: the
   factory records it as given, keeps the nits, and lists them in the MR text as
   `### Nits not applied`. Nits never block; in a Fix section they come last, as optional.
-- Return `clean` only when every earlier blocker and major Fix item is fixed or rejected with a
-  reason you accept. Earlier nits may stay.
+- Return `clean` only when every earlier blocker and major Fix item is fixed or contested with
+  evidence you accept. Earlier nits may stay.
+- Settled findings (the ledger's `<settled_findings>` in the prompt: fixed, contested,
+  escalated, left, accepted by the user, or to be fixed by the user's decision) are not raised
+  again, nor a narrower variant of them. Raise one only when its settlement is wrong by evidence
+  in the worktree: set `reopens` to its id and say why. An item that reopens a risk the user
+  accepted is dropped; one that reopens a contest goes to the user as a dispute; a fix reopened a
+  second time is churn and stops the loop.
+- Set `caused_by` to the id of the fix whose change caused an item. When every blocker and major
+  item was caused by earlier fixes, the fixes are making the findings and the loop stops for the
+  user.
 - An undeclared sensitive path (one the Task file's `may_touch` does not name) stays only when
   the change needs it and the verdict says why; otherwise it is a major fix item, whatever
   severity the reviewer gives it.

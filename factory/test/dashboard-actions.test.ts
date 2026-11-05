@@ -520,3 +520,21 @@ test('dashboard accept (SF-047): POST only, the action checks, Execution.acceptG
     assert.equal(fake.calls.length, 5);
   });
 });
+
+test('dashboard settle (SF-052): POST {id, decision, note?} only, strictly parsed; Execution.settle once per request, its refusals mapped', async () => {
+  const fake = fakeActions({ state: 'awaiting_review', id: 'R1', status: 'accepted_risk', waiting: [] });
+  await withDashboard('dash-act-settle', fake, async (dashboard) => {
+    const base = dashboard.url;
+    const path = 'api/jobs/app/T-1/settle';
+    assert.deepEqual([(await act(base, path, {}, { method: 'GET' })).status], [405]);
+    for (const body of ['{}', '{"id":"R1"}', '{"id":"R1","decision":"maybe"}', '{"id":"R1","decision":"fix","note":3}', '{"id":"R1","decision":"fix","extra":1}', 'null']) {
+      assert.deepEqual(error(await act(base, path, undefined, { body })), { status: 400, code: 'invalid_body' }, body);
+    }
+    assert.deepEqual(fake.calls, []);
+    assert.deepEqual(result(await act(base, path, { id: 'R1', decision: 'accept' })), { state: 'awaiting_review', id: 'R1', status: 'accepted_risk', waiting: [] });
+    assert.deepEqual(result(await act(base, path, { id: 'R2', decision: 'fix', note: 'Handle null.' })), { state: 'awaiting_review', id: 'R1', status: 'accepted_risk', waiting: [] });
+    assert.deepEqual(fake.calls, [['settle', 'app', 'T-1', 'R1', 'accept', ''], ['settle', 'app', 'T-1', 'R2', 'fix', 'Handle null.']]);
+    fake.answer = new FactoryError('invalid_state', 'R1 is fixed; only an escalated or contested entry is settled.');
+    assert.deepEqual(error(await act(base, path, { id: 'R1', decision: 'accept' })), { status: 409, code: 'invalid_state' });
+  });
+});

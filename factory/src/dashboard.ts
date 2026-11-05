@@ -26,7 +26,7 @@ import type { Execution } from './execution.js';
 import { lineEntries, type StreamEntry, streamContext } from './job-stream.js';
 import type { Job, JobState, JobStore } from './jobs.js';
 import { DECISIONS, unsettled } from './ledger.js';
-import { WORKSPACE_NAME_PATTERN } from './registry.js';
+import { HANDOFF_MODES, WORKSPACE_NAME_PATTERN } from './registry.js';
 import type { Setup } from './setup.js';
 import type { CheckSummary, TaskChecks } from './task-check.js';
 import { turnLimitLine } from './turn-limit.js';
@@ -131,7 +131,7 @@ const BODIES = {
   handover: { shape: '{}', schema: z.strictObject({}) },
   takeback: { shape: '{}', schema: z.strictObject({}) },
   'handed-done': { shape: '{}', schema: z.strictObject({}) },
-  'workspace-add': { shape: '{"name": string, "path": string}', schema: z.strictObject({ name: z.string(), path: z.string() }) },
+  'workspace-add': { shape: '{"name": string, "path": string, "handoff"?: "checkout" | "off"}', schema: z.strictObject({ name: z.string(), path: z.string(), handoff: z.enum(HANDOFF_MODES).optional() }) },
   'workspace-remove': { shape: '{}', schema: z.strictObject({}) },
   'ticket-archive': { shape: '{}', schema: z.strictObject({}) },
   'ticket-restore': { shape: '{}', schema: z.strictObject({}) },
@@ -1160,7 +1160,7 @@ export async function startDashboard(
         route: 'workspace-add',
         call: (data) => {
           const parsed = BODIES['workspace-add'].schema.safeParse(data);
-          return parsed.success ? () => setup.addWorkspace(parsed.data.name, parsed.data.path) : undefined;
+          return parsed.success ? () => setup.addWorkspace(parsed.data.name, parsed.data.path, parsed.data.handoff) : undefined;
         },
         refreshSetup: true,
       };

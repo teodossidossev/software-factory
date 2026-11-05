@@ -22,7 +22,7 @@ function detail(ticket: string) {
   return { job: job(ticket), iterations: [], mr: false, history: [] };
 }
 
-const workspace = (name: string, liveJobs = 0, problem: string | null = null) => ({ name, path: `/srv/${name}`, liveJobs, problem });
+const workspace = (name: string, liveJobs = 0, problem: string | null = null, handoff: 'checkout' | 'off' | null = null) => ({ name, path: `/srv/${name}`, liveJobs, problem, handoff });
 
 function ticket(key: string, extra: Record<string, unknown> = {}) {
   const [workspaceName, name] = key.split('/') as [string, string];
@@ -107,6 +107,10 @@ test('setup client: Workspaces and New ticket open in the drawer from the header
   assert.equal((web!.children[2] as FakeElement).className, 'ws-problem');
   assert.equal((web!.children[2] as FakeElement).textContent, 'The work checkout does not exist.');
   assert.equal(buttons(web!)[0]!.disabled, false);
+  // The hand-over setting (SF-083): the workspace's own, or SF_HANDOFF's.
+  assert.equal(app!.querySelector('.ws-handoff')!.textContent, 'Hand-over: as SF_HANDOFF');
+  busy.streams.at(-1)!.emit('workspaces', { workspaces: [workspace('app', 0, null, 'off')] });
+  assert.equal(items(busy, 'workspace-list')[0]!.querySelector('.ws-handoff')!.textContent, 'Hand-over: off (this workspace)');
   // The workspace choice keeps its value while the options are replaced.
   busy.$('ticket-workspace').value = 'web';
   busy.streams.at(-1)!.emit('workspaces', { workspaces: [workspace('app'), workspace('web')] });
@@ -163,6 +167,17 @@ test('setup client: the workspace form posts once, reports the answer, clears on
   buttons(items(page, 'workspace-list')[0]!)[0]!.click();
   await page.flush();
   assert.equal(posts(page).length, 4);
+
+  // The hand-over choice (SF-083): sent only when chosen, cleared with the fields on success.
+  page.$('workspace-name').value = 'own';
+  page.$('workspace-path').value = '/srv/own';
+  page.$('workspace-handoff').value = 'off';
+  page.$('workspace-form').dispatch('submit');
+  await page.flush();
+  assert.deepEqual(JSON.parse(posts(page)[4]!.body!), { name: 'own', path: '/srv/own', handoff: 'off' });
+  posts(page)[4]!.respond(200, { ok: true, result: workspace('own', 0, null, 'off') });
+  await page.flush();
+  assert.deepEqual([page.$('workspace-name').value, page.$('workspace-path').value, page.$('workspace-handoff').value], ['', '', '']);
 });
 
 test('setup client: the new-ticket form posts the exact fields, clears on success, keeps them on a refusal', async () => {

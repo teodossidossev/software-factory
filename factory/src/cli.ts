@@ -11,7 +11,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { openInBrowser } from './browser.js';
-import { envFilePath, gateConfig, loadConfig, loadEnvFile, stateDir } from './config.js';
+import { envFilePath, gateConfig, handoffSetting, loadConfig, loadEnvFile, stateDir } from './config.js';
 import { DEFAULT_DASHBOARD_PORT, dashboardUrl, readToken, removeToken, type RunningDashboard, startDashboard } from './dashboard.js';
 import { FactoryError } from './errors.js';
 import { Execution, type StateListener } from './execution.js';
@@ -22,7 +22,7 @@ import { callSocket, listenSocket, socketPath } from './ipc.js';
 import { type Job, JobStore } from './jobs.js';
 import { followJobs, runJob } from './runner.js';
 import { jobNotification, notifyConfig, sendNotification, stateNotifier } from './notify.js';
-import { configDir, ignoredWorkCheckouts, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
+import { configDir, HANDOFF_MODES, ignoredWorkCheckouts, isHandoffMode, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN, type WorkspaceEntry } from './registry.js';
 import { loadHandbook, packageVersion, PortInUseError, SERVER_NAME, startServer } from './server.js';
 import { Setup } from './setup.js';
 import { handoverLines, type StatusRow, statusRows } from './status.js';
@@ -37,8 +37,8 @@ const USAGE = `Usage:
   sf serve                                              Serve the MCP tools on 127.0.0.1:\${SF_PORT:-${DEFAULT_PORT}}/mcp and the dashboard
   sf up [--no-open] [--no-tunnel]                       sf serve plus the planning tunnel for ChatGPT (scripts/sf-tunnel.sh run) in one terminal, and open the dashboard; Ctrl+C stops both
   sf dashboard [--open] [--rotate]                      Print the dashboard URL; --open also opens it (xdg-open); --rotate removes the token so the next sf serve makes a new one
-  sf workspace add <name> --read <path>                 Register a workspace: the local checkout (every job works in a worktree of it)
-  sf workspace list                                     List registered workspaces
+  sf workspace add <name> --read <path> [--handoff checkout|off]  Register a workspace: the local checkout (every job works in a worktree of it); --handoff: its own hand-over setting, over SF_HANDOFF
+  sf workspace list                                     List registered workspaces and their hand-over setting
   sf workspace remove <name>                            Unregister a workspace
   sf check-task <workspace> <ticket>                    Check the Task file before Start: a read-only Claude session reads it and the repository, and prints its paraphrase, its findings by severity and its verdict (stored by the Task file's sha256; it only advises)
   sf start <workspace> <ticket>                         Start the job for .software-factory/<ticket>.md in a worktree of its own (up to SF_MAX_JOBS per workspace)
@@ -56,7 +56,7 @@ const USAGE = `Usage:
   sf pause <workspace> <ticket>                         Pause a working job or one awaiting review: the turn, review or gate stops at once; worktree, branch, session and history stay
   sf resume <workspace> <ticket> [message...]           Go on with a paused job where it stopped (the turn with the message, or "Continue where you stopped."; an interrupted review or gate runs again); a Task file changed meanwhile is handed on with its diff
   sf restart <workspace> <ticket> [--keep-files]        Start the ticket again from its current Task file on a fresh worktree and branch (paused, aborted, failed or needs_human); the old job is archived, its branch deleted only without commits and never pushed; --keep-files copies the old worktree's changed and new files in first
-  sf handover <workspace> <ticket>                      Hand over to my checkout: the job's branch in the workspace's checkout at its base, the job's changes as Local Changes, the commit message prefilled (ready_for_human_review; automatic with SF_HANDOFF=checkout)
+  sf handover <workspace> <ticket>                      Hand over to my checkout: the job's branch in the workspace's checkout at its base, the job's changes as Local Changes, the commit message prefilled (ready_for_human_review; automatic with hand-over on: the workspace's handoff, else SF_HANDOFF=checkout)
   sf takeback <workspace> <ticket>                      Take it back: the branch back from your checkout into the job (handed_over), only while your checkout is as the factory left it
   sf handed-done <workspace> <ticket>                   I opened the MR myself: the job is pushed once origin has the branch with your changes (handed_over)
   sf abort <workspace> <ticket> [--discard]             End the job; the worktree stays (its path is printed); --discard removes the worktree and the branch
@@ -337,6 +337,19 @@ async function up(args: string[]): Promise<void> {
   }
 }
 
+// The hand-over setting that decides for a workspace's jobs (SF-083): its own handoff, else
+// SF_HANDOFF with this shell's value (sf serve reads its own environment).
+function handoffLabel(entry: WorkspaceEntry): string {
+  if (entry.handoff !== undefined) {
+    return `${entry.handoff} (this workspace)`;
+  }
+  try {
+    return `${handoffSetting()} (SF_HANDOFF)`;
+  } catch {
+    return 'SF_HANDOFF (invalid)';
+  }
+}
+
 function checkName(name: string | undefined): string {
   if (name === undefined) {
     throw new UsageError('a workspace name is required.');
@@ -361,7 +374,7 @@ async function workspace(args: string[]): Promise<void> {
     args: rest,
     allowPositionals: true,
     strict: true,
-    options: command === 'add' ? { read: { type: 'string' }, work: { type: 'string' } } : {},
+    options: command === 'add' ? { read: { type: 'string' }, work: { type: 'string' }, handoff: { type: 'string' } } : {},
   });
   if (command === 'list') {
     if (positionals.length > 0) {
@@ -372,7 +385,7 @@ async function workspace(args: string[]): Promise<void> {
       console.log('No workspaces registered.');
     }
     for (const [name, entry] of entries) {
-      console.log(`${name}\n  checkout: ${entry.read_checkout}`);
+      console.log(`${name}\n  checkout: ${entry.read_checkout}\n  hand-over: ${handoffLabel(entry)}`);
     }
     return;
   }
@@ -388,14 +401,18 @@ async function workspace(args: string[]): Promise<void> {
     if (values.work !== undefined) {
       throw new FactoryError('work_checkout_retired', '--work is no longer supported: every job works in a worktree of the checkout (SF-019).');
     }
+    const handoff = values.handoff;
+    if (handoff !== undefined && !isHandoffMode(handoff)) {
+      throw new UsageError(`--handoff must be ${HANDOFF_MODES.join(' or ')}, got "${String(handoff)}".`);
+    }
     const registry = await loadRegistry();
     if (Object.hasOwn(registry.workspaces, name)) {
       throw new FactoryError('workspace_exists', `workspace "${name}" is already registered; remove it first.`);
     }
-    const entry = { read_checkout: await checkout(read, '--read') };
+    const entry: WorkspaceEntry = { read_checkout: await checkout(read, '--read'), ...(handoff !== undefined ? { handoff } : {}) };
     registry.workspaces[name] = entry;
     await saveRegistry(registry);
-    console.log(`Registered workspace "${name}" (checkout: ${entry.read_checkout}).`);
+    console.log(`Registered workspace "${name}" (checkout: ${entry.read_checkout}; hand-over: ${handoffLabel(entry)}).`);
     return;
   }
   if (command === 'remove') {
@@ -664,7 +681,7 @@ async function info(args: string[]): Promise<void> {
   row('workspaces', names.length === 0 ? 'none (sf workspace add <name> --read <path>)' : '');
   for (const name of names) {
     const entry = registry.workspaces[name]!;
-    lines.push(`  ${name}: ${entry.read_checkout}`);
+    lines.push(`  ${name}: ${entry.read_checkout} (hand-over: ${handoffLabel(entry)})`);
   }
   console.log(lines.join('\n'));
 

@@ -2992,6 +2992,8 @@ function renderWorkspaces() {
     if (row.problem) {
       item.append(el('div', 'ws-problem', row.problem));
     }
+    // The workspace's own hand-over setting (SF-083), or SF_HANDOFF's.
+    item.append(el('div', 'ws-handoff hint', row.handoff === 'checkout' || row.handoff === 'off' ? `Hand-over: ${row.handoff} (this workspace)` : 'Hand-over: as SF_HANDOFF'));
     const line = el('div', 'row');
     const remove = el('button', 'btn btn-sm', 'Remove');
     remove.type = 'button';
@@ -3096,15 +3098,18 @@ async function setupRequest(what, path, body, statusId, describe) {
 async function submitWorkspace() {
   const name = $('workspace-name').value.trim();
   const path = $('workspace-path').value.trim();
+  // The workspace's own hand-over setting (SF-083); empty: SF_HANDOFF applies.
+  const handoff = $('workspace-handoff').value;
   if (name === '' || path === '') {
     setSetupStatus('workspace-status', { level: 'error', text: 'A name and the path of the local checkout are needed.' });
     return;
   }
-  const result = await setupRequest('workspace', 'api/workspaces', { name, path }, 'workspace-status', (data) =>
+  const result = await setupRequest('workspace', 'api/workspaces', { name, path, ...(handoff !== '' ? { handoff } : {}) }, 'workspace-status', (data) =>
     ({ level: 'ok', text: `Registered ${data.name} (${data.path}). Next: New ticket.` }));
   if (result !== undefined) {
     $('workspace-name').value = '';
     $('workspace-path').value = '';
+    $('workspace-handoff').value = '';
   }
 }
 

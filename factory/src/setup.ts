@@ -11,7 +11,7 @@ import { FactoryError } from './errors.js';
 import type { ExclusiveScope } from './execution.js';
 import { runGit } from './git.js';
 import { type JobState, type JobStore, TERMINAL_STATES } from './jobs.js';
-import { loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, type Workspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
+import { type HandoffMode, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, type Workspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { ARCHIVE_DIR, DRAFT_MARKER, isDraft, MAX_TASK_BYTES, parseFrontMatter, readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN, writeTask } from './task-file.js';
 
 export const MAX_TITLE_CHARS = 200;
@@ -29,6 +29,8 @@ export interface WorkspaceRow {
   liveJobs: number;
   // Why the checkout cannot be used right now (missing, not a Git work tree), or null.
   problem: string | null;
+  // The workspace's own hand-over setting (SF-083), or null: SF_HANDOFF applies.
+  handoff: HandoffMode | null;
 }
 
 export interface TicketRow {
@@ -128,15 +130,16 @@ export class Setup {
       } catch (error) {
         problem = error instanceof FactoryError ? error.message : 'The checkout could not be verified.';
       }
-      rows.push({ name, path: entry.read_checkout, liveJobs: live.get(name) ?? 0, problem });
+      rows.push({ name, path: entry.read_checkout, liveJobs: live.get(name) ?? 0, problem, handoff: entry.handoff ?? null });
     }
     return rows;
   }
 
-  // The same rules as `sf workspace add <name> --read <path>`: the name pattern, an absolute path
-  // that is the root of a non-bare Git work tree, a name not registered yet. Until SF-019 the
-  // work checkout is the read checkout.
-  addWorkspace(name: string, path: string): Promise<WorkspaceRow> {
+  // The same rules as `sf workspace add <name> --read <path> [--handoff ...]`: the name pattern, an
+  // absolute path that is the root of a non-bare Git work tree, a name not registered yet. Until
+  // SF-019 the work checkout is the read checkout. handoff: the workspace's own hand-over setting
+  // (SF-083); undefined: SF_HANDOFF applies.
+  addWorkspace(name: string, path: string, handoff?: HandoffMode): Promise<WorkspaceRow> {
     return this.#exclusive(async () => {
       if (!WORKSPACE_NAME_PATTERN.test(name)) {
         throw new FactoryError('invalid_name', `workspace name must be ${WORKSPACE_NAME_DESCRIPTION}.`);
@@ -149,9 +152,9 @@ export class Setup {
         throw new FactoryError('workspace_exists', `workspace "${name}" is already registered; remove it first.`);
       }
       const real = await verifyCheckout(path, 'path');
-      registry.workspaces[name] = { read_checkout: real };
+      registry.workspaces[name] = { read_checkout: real, ...(handoff !== undefined ? { handoff } : {}) };
       await saveRegistry(registry, this.#configDir);
-      return { name, path: real, liveJobs: 0, problem: null };
+      return { name, path: real, liveJobs: 0, problem: null, handoff: handoff ?? null };
     });
   }
 

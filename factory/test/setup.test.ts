@@ -63,7 +63,7 @@ test('setup: workspaces, add with the CLI rules, remove and its live-job guard',
   const repo = await newRepo(env, 'setup-ws-repo', true);
   const jobs = new JobStore(env.state);
   const setup = setupOf(env.config, jobs);
-  assert.deepEqual(await setup.workspaces(), [{ name: 'app', path: repo, liveJobs: 0, problem: null }]);
+  assert.deepEqual(await setup.workspaces(), [{ name: 'app', path: repo, liveJobs: 0, problem: null, handoff: null }]);
 
   // The CLI's rules: the name pattern, an absolute path, an existing Git work tree root, no duplicate.
   assert.match(await refused(setup.addWorkspace('Bad', repo), 'invalid_name'), /workspace name must be/);
@@ -79,9 +79,15 @@ test('setup: workspaces, add with the CLI rules, remove and its live-job guard',
   // Added: the real path, read and work alike, and the CLI's registry sees it.
   const second = await newRepo({ ...env, config: join(temp, 'setup-ws-other') }, 'setup-ws-second', false);
   const added = await setup.addWorkspace('second', `${second}/`);
-  assert.deepEqual(added, { name: 'second', path: second, liveJobs: 0, problem: null });
+  assert.deepEqual(added, { name: 'second', path: second, liveJobs: 0, problem: null, handoff: null });
   assert.deepEqual((await loadRegistry(env.config)).workspaces.second, { read_checkout: second });
   assert.deepEqual((await setup.workspaces()).map((row) => row.name), ['app', 'second']);
+  // The workspace's own hand-over setting (SF-083): stored in the registry and shown in the row.
+  const third = await newRepo({ ...env, config: join(temp, 'setup-ws-third-config') }, 'setup-ws-third', false);
+  assert.deepEqual(await setup.addWorkspace('third', third, 'off'), { name: 'third', path: third, liveJobs: 0, problem: null, handoff: 'off' });
+  assert.deepEqual((await loadRegistry(env.config)).workspaces.third, { read_checkout: third, handoff: 'off' });
+  assert.deepEqual((await setup.workspaces()).map((row) => [row.name, row.handoff]), [['app', null], ['second', null], ['third', 'off']]);
+  await setup.removeWorkspace('third');
 
   // Live jobs are counted; a workspace with a live job cannot be removed; a missing checkout is a problem, not a failure.
   await jobs.write(jobOf('second', 'S-1', 'working'));

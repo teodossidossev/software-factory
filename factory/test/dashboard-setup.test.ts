@@ -36,7 +36,7 @@ test('dashboard setup: the reads, the method rules per path and the token; nothi
     assert.equal(workspaces.status, 200);
     assert.equal(workspaces.headers['content-type'], 'application/json; charset=utf-8');
     assert.equal(workspaces.headers['content-security-policy'], CSP);
-    assert.deepEqual(JSON.parse(workspaces.body), { workspaces: [{ name: 'app', path: '/srv/app', liveJobs: 1, problem: null }, { name: 'web', path: '/srv/web', liveJobs: 0, problem: null }] });
+    assert.deepEqual(JSON.parse(workspaces.body), { workspaces: [{ name: 'app', path: '/srv/app', liveJobs: 1, problem: null, handoff: null }, { name: 'web', path: '/srv/web', liveJobs: 0, problem: null, handoff: null }] });
 
     const tickets = await fetchRaw(new URL('api/tickets', base));
     assert.equal(tickets.status, 200);
@@ -115,7 +115,7 @@ test('dashboard setup: the action checks apply to the setup POSTs; exact argumen
       assert.deepEqual(error(await act(base, path, undefined, { body: 'x'.repeat(MAX_ACTION_BODY_BYTES + 1) })), { status: 413, code: 'body_too_large' }, path);
     }
     const bad: Array<[string, string]> = [
-      ['api/workspaces', '{}'], ['api/workspaces', '{"name":"app"}'], ['api/workspaces', '{"name":"app","path":1}'], ['api/workspaces', '{"name":"app","path":"/x","work":"/y"}'], ['api/workspaces', '[]'], ['api/workspaces', 'null'],
+      ['api/workspaces', '{}'], ['api/workspaces', '{"name":"app"}'], ['api/workspaces', '{"name":"app","path":1}'], ['api/workspaces', '{"name":"app","path":"/x","work":"/y"}'], ['api/workspaces', '{"name":"app","path":"/x","handoff":"on"}'], ['api/workspaces', '{"name":"app","path":"/x","handoff":null}'], ['api/workspaces', '[]'], ['api/workspaces', 'null'],
       ['api/tickets', '{}'], ['api/tickets', '{"workspace":"app","ticket":"T-1","title":"t"}'], ['api/tickets', '{"workspace":"app","ticket":"T-1","title":"t","request":null}'], ['api/tickets', '{"workspace":"app","ticket":"T-1","title":"t","request":"r","base":"main"}'],
       ['api/workspaces/app/remove', '{"force":true}'], ['api/workspaces/app/remove', '[]'],
       ['api/tickets/app/T-5/start', '{"now":true}'], ['api/tickets/app/T-5/start', '[]'], ['api/tickets/app/T-5/start', 'null'],
@@ -131,8 +131,13 @@ test('dashboard setup: the action checks apply to the setup POSTs; exact argumen
     const stream = await openStream(new URL('api/stream', base));
     assert.deepEqual((await stream.next('workspaces')).workspaces.map((row: { name: string }) => row.name), ['app']);
     assert.equal((await stream.next('tickets')).tickets[0].ticket, 'T-5');
-    assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'web', path: '/srv/web' })), { name: 'web', path: '/srv/web', liveJobs: 0, problem: null });
+    assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'web', path: '/srv/web' })), { name: 'web', path: '/srv/web', liveJobs: 0, problem: null, handoff: null });
     assert.deepEqual(setup.calls.at(-1), ['addWorkspace', 'web', '/srv/web']);
+    await stream.next('workspaces');
+    await stream.next('tickets');
+    // The workspace's own hand-over setting (SF-083).
+    assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'web', path: '/srv/web', handoff: 'off' })), { name: 'web', path: '/srv/web', liveJobs: 0, problem: null, handoff: 'off' });
+    assert.deepEqual(setup.calls.at(-1), ['addWorkspace', 'web', '/srv/web', 'off']);
     setup.rows.workspaces = [...setup.rows.workspaces, workspaceRow('web')];
     await stream.next('workspaces');
     await stream.next('tickets');
@@ -181,11 +186,11 @@ test('dashboard setup end to end: a workspace from the page, a ticket draft, the
     // Add: the CLI's rules and texts, then the registry the CLI reads.
     const missing = await act(base, 'api/workspaces', { name: 'app', path: join(temp, 'nowhere') });
     assert.deepEqual(JSON.parse(missing.body), { ok: false, error: { code: 'workspace_invalid', message: 'The path does not exist.' } });
-    assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'app', path: repo })), { name: 'app', path: repo, liveJobs: 0, problem: null });
-    assert.deepEqual((await stream.next('workspaces')).workspaces, [{ name: 'app', path: repo, liveJobs: 0, problem: null }]);
-    assert.deepEqual((await loadRegistry(env.config)).workspaces, { app: { read_checkout: repo } });
+    assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'app', path: repo, handoff: 'off' })), { name: 'app', path: repo, liveJobs: 0, problem: null, handoff: 'off' });
+    assert.deepEqual((await stream.next('workspaces')).workspaces, [{ name: 'app', path: repo, liveJobs: 0, problem: null, handoff: 'off' }]);
+    assert.deepEqual((await loadRegistry(env.config)).workspaces, { app: { read_checkout: repo, handoff: 'off' } });
     const listed = await runCli(env, ['workspace', 'list']);
-    assert.match(listed.stdout, new RegExp(`^app\\n  checkout: ${repo}$`, 'm'));
+    assert.match(listed.stdout, new RegExp(`^app\\n  checkout: ${repo}\\n  hand-over: off \\(this workspace\\)$`, 'm'));
     assert.deepEqual(error(await act(base, 'api/workspaces', { name: 'app', path: repo })), { status: 409, code: 'workspace_exists' });
 
     // A ticket skeleton: the exact file without the user's words; the words are in the

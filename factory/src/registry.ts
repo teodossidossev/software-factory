@@ -2,7 +2,8 @@
 // Strictly parsed; an invalid file is an error, a missing file an empty registry. The checkout
 // path is verified at use time: it must be the root of a non-bare Git work tree. Since SF-019 a
 // workspace is one checkout: the Implementer works in a worktree of it, so a separate work
-// checkout (`work_checkout`) is read for compatibility and ignored.
+// checkout (`work_checkout`) is read for compatibility and ignored. A workspace's optional `handoff`
+// (SF-083) wins over SF_HANDOFF for its jobs.
 import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -20,10 +21,22 @@ const absolutePath = z
   .min(1)
   .refine((value) => isAbsolute(value) && !value.includes('\0'), 'must be an absolute path without NUL');
 
+// The hand-over settings (SF-073, SF-083): checkout hands a job ready for review over to the
+// workspace's checkout; off leaves it in ready_for_human_review.
+export const HANDOFF_MODES = ['checkout', 'off'] as const;
+export type HandoffMode = (typeof HANDOFF_MODES)[number];
+// The handoff_skipped code of a job that was not handed over because hand-over is off (SF-083):
+// a setting, not a refusal.
+export const HANDOFF_OFF_CODE = 'handoff_off';
+
+export function isHandoffMode(value: unknown): value is HandoffMode {
+  return (HANDOFF_MODES as readonly unknown[]).includes(value);
+}
+
 const registrySchema = z.strictObject({
   workspaces: z.record(
     z.string().regex(WORKSPACE_NAME_PATTERN),
-    z.strictObject({ read_checkout: absolutePath, work_checkout: absolutePath.optional() }),
+    z.strictObject({ read_checkout: absolutePath, work_checkout: absolutePath.optional(), handoff: z.enum(HANDOFF_MODES).optional() }),
   ),
 });
 
@@ -37,6 +50,8 @@ export interface Workspace {
   // it, the Task files live in it, and every job's worktree is created from it.
   readCheckout: string;
   workCheckout: string;
+  // The workspace's own hand-over setting (SF-083); absent: SF_HANDOFF applies.
+  handoff?: HandoffMode;
 }
 
 // The entries whose ignored work_checkout differs from the checkout, for one warning at start.
@@ -108,7 +123,7 @@ export async function resolveWorkspace(name: string, dir = configDir()): Promise
   }
   try {
     const checkout = await verifyCheckout(entry.read_checkout, 'checkout');
-    return { name, readCheckout: checkout, workCheckout: checkout };
+    return { name, readCheckout: checkout, workCheckout: checkout, ...(entry.handoff !== undefined ? { handoff: entry.handoff } : {}) };
   } catch (error) {
     if (error instanceof FactoryError) {
       throw new FactoryError(error.code, `Workspace "${name}": ${error.message}`);

@@ -110,7 +110,7 @@ prints the message below the table). Both work without `sf serve`; they read the
 | `SF_REVIEW` | on | `off` runs no Claude review (nor the gate): a published iteration stays in `awaiting_review` until the user goes on with `sf say` or aborts. |
 | `SF_REVIEW_MODEL` | unset | Model of the Claude review, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
 | `SF_REVIEW_MAX_TURNS` | `60` | `maxTurns` of the Claude review. |
-| `SF_HANDOFF` | `checkout` | The hand-over at ready for review (SF-073, section Hand-over to your checkout): `checkout` checks the job's branch out in the workspace's checkout with its changes as Local Changes; `off` leaves the job in `ready_for_human_review` with its worktree. Anything else refuses to start (`invalid_config`). |
+| `SF_HANDOFF` | `checkout` | The hand-over at ready for review (SF-073, section Hand-over to your checkout): `checkout` checks the job's branch out in the workspace's checkout with its changes as Local Changes; `off` leaves the job in `ready_for_human_review` with its worktree. A workspace's own `handoff` in `workspaces.json` wins over it (SF-083). Anything else refuses to start (`invalid_config`). |
 | `SF_SIMPLIFY` | on | The simplification pass (SF-055) after the deciding clean verdict of a job with at least one Fix section; `off` goes straight to MR preparation. It uses `SF_REVIEW_MODEL` and `SF_REVIEW_MAX_TURNS`. |
 | `SF_TASK_CHECK_MAX_TURNS` | `30` | `maxTurns` of the Task check (SF-054); its model is `SF_REVIEW_MODEL`. |
 | `SF_GATE` | `codex` | The gate after a clean Claude review (SF-039): `codex` runs the Codex CLI, `off` lets the Claude verdict decide. With `codex` and no executable found the gate is off, and `sf serve` prints one line saying so. |
@@ -804,8 +804,9 @@ SF-067. To change course without abort, reset and a branch deleted by hand.
 MR preparation runs on the deciding clean verdict (the clean path, from `awaiting_review`, or as
 the retry from `needs_human` after a failed preparation, `mr_attempts > 0`); never while a turn runs.
 It ends with the branch holding exactly one commit: handed over to the user's checkout
-(`handed_over`, section Hand-over to your checkout) or, with `SF_HANDOFF=off` or when the hand-over
-was refused, in `ready_for_human_review`. The worktree stays until the hand-over or the push (SF-073).
+(`handed_over`, section Hand-over to your checkout) or, with hand-over off (the workspace's
+`handoff`, else `SF_HANDOFF`) or when the hand-over was refused, in `ready_for_human_review`.
+The worktree stays until the hand-over or the push (SF-073).
 `sf approve` then pushes that commit and nothing else.
 The Implementer only writes the MR text. The factory commits and rebases itself, outside the
 sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's placeholders.
@@ -903,9 +904,10 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    Fix with `sf say` (its iteration is reviewed again, and a clean verdict prepares again) or by
    hand in the worktree followed by an `sf say`.
 6. Ready: the MR text, with the nits, is copied to `mr.md`, `base_commit` and `target_commit` become the target,
-   `prepared_commit` the branch tip, and the worktree stays (SF-073). With `SF_HANDOFF=checkout`
-   the factory hands the job over to the checkout at once (`handed_over`); otherwise, or when the
-   hand-over is refused (`handoff_skipped`), the job is `ready_for_human_review`. Either is
+   `prepared_commit` the branch tip, and the worktree stays (SF-073). With hand-over on (the
+   workspace's `handoff`, else `SF_HANDOFF`, SF-083) the factory hands the job over to the checkout
+   at once (`handed_over`); otherwise, or when the hand-over is refused, the job is
+   `ready_for_human_review` with `handoff_skipped` saying why. Either is
    notified with the MR title and the file lines.
 7. `sf approve` (or the dashboard's Approve): allowed in `ready_for_human_review`, in
    `handed_over` (section Hand-over to your checkout), and in `needs_human` after a failed push
@@ -1015,12 +1017,24 @@ step 2 made sure nothing sits where the job adds a file. An undo that fails is
 the record keeps its step, so `recover()` repairs it when `sf serve` starts. A checkout already on
 the job's branch is refused (`handover_refused`).
 
-**When it runs.** With `SF_HANDOFF=checkout` (the default) at the end of MR preparation: the job
+**When it runs.** At the end of MR preparation when hand-over is on for the job's workspace: the job
 goes from `preparing_mr` to `handed_over` with one notification. A refusal leaves it in
 `ready_for_human_review` with the refusal as `handoff_skipped: {code, message}` (in the
 notification, `sf status` and the board, next to Hand over to my checkout); it is cleared on a
 hand-over and whenever the job leaves `ready_for_human_review`. By hand: `sf handover` from
 `ready_for_human_review`; a refusal answers its code and leaves the job as it was.
+
+**Per workspace** (SF-083). A workspace's `handoff` in `workspaces.json` (`"checkout"` or `"off"`;
+`sf workspace add --handoff`, the dashboard's workspace form) wins over `SF_HANDOFF` for its jobs;
+without it `SF_HANDOFF` applies (default `checkout`). The registry is read when the job is ready, so
+an edit applies to running jobs too. Hand-over off leaves the job in `ready_for_human_review` with
+`handoff_skipped` code `handoff_off`, whose message names the setting that decided: "hand-over off
+for this workspace (handoff "off" in workspaces.json)" or "hand-over off (SF_HANDOFF=off)".
+`sf status` and the board show it; the notification leaves it out (a setting is not news) and keeps
+the MR title and the file lines. `sf handover` still hands the job over by hand. Use `off` for a
+workspace whose checkout must not be switched to every job's branch, such as the factory's own,
+where a coordinating session opens and merges the merge requests with `sf mr create` and
+`sf mr merge`.
 
 **The state `handed_over`** holds no `SF_MAX_JOBS` slot (nothing of the job runs) but is not
 terminal: no new job of the ticket starts. It goes to `working` (Ask for changes),
@@ -1633,16 +1647,26 @@ end), in a browser:
 screen (`POST api/workspaces`):
 
 ```json
-{ "workspaces": { "my-app": { "read_checkout": "/abs/path" } } }
+{
+  "workspaces": {
+    "my-app": { "read_checkout": "/abs/path" },
+    "software-factory": { "read_checkout": "/abs/path2", "handoff": "off" }
+  }
+}
 ```
 
-Names are 1-64 characters of `a-z`, `0-9` and `-`, starting and ending with a letter or digit.
-The path must be absolute and, whenever a tool uses it, the root of a non-bare Git work tree.
-An invalid file is an error, never ignored. `read_file` and `search` read the checkout;
-`write_task` writes `.software-factory/<ticket>.md` in it and adds `.software-factory/` to its
-`.git/info/exclude`; every job's worktree is created from it (SF-019). A `work_checkout` field of
-an older registry is read and ignored, with one warning when `sf serve` starts; `sf workspace add
---work` is refused.
+Names are 1-64 characters of `a-z`, `0-9` and `-`, starting and ending with a letter or digit. The
+path must be absolute and, whenever a tool uses it, the root of a non-bare Git work tree. An invalid
+file is an error, never ignored. `read_file` and `search` read the checkout; `write_task` writes
+`.software-factory/<ticket>.md` in it and adds `.software-factory/` to its `.git/info/exclude`;
+every job's worktree is created from it (SF-019). A `work_checkout` field of an older registry is
+read and ignored, with one warning when `sf serve` starts; `sf workspace add --work` is refused. The
+optional `handoff` (`"checkout"` or `"off"`, any other value makes the file invalid) is the
+workspace's own hand-over setting and wins over `SF_HANDOFF` (SF-083, section Hand-over to your
+checkout); `sf workspace add --handoff checkout|off` and the dashboard's workspace form set it.
+`sf workspace list` and `sf info` show the setting that applies (the workspace's, or `SF_HANDOFF`
+with the shell's value); the form's list shows the workspace's own or "as SF_HANDOFF". To change it
+for a registered workspace, edit the file: it is read at each use.
 
 ## History
 

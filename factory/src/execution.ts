@@ -22,7 +22,7 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { chmod, copyFile, type FileHandle, lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink } from 'node:fs/promises';
 import { dirname, join, resolve as resolvePath, sep } from 'node:path';
-import type { Config } from './config.js';
+import { type Config, handoffOffNotice } from './config.js';
 import { FactoryError } from './errors.js';
 import { chooseForge, type Forge, type ForgeKind, forgeFor, type MergeRequestStatus } from './forge.js';
 import { runGit } from './git.js';
@@ -1825,10 +1825,11 @@ export class Execution implements RunnerWork {
     });
   }
 
-  // The branch holds the one commit on top of the target. With SF_HANDOFF=checkout (SF-073) the
-  // factory hands it over to the workspace's checkout at once (handed_over); a refusal leaves it in
-  // ready_for_human_review with the reason (handoff_skipped). The worktree stays until the hand-over
-  // or the push.
+  // The branch holds the one commit on top of the target. With hand-over on (SF-073; the
+  // workspace's handoff in workspaces.json, else SF_HANDOFF, SF-083) the factory hands it over to
+  // the workspace's checkout at once (handed_over); a refusal leaves it in ready_for_human_review
+  // with the reason (handoff_skipped), and so does hand-over off, naming the setting. The worktree
+  // stays until the hand-over or the push.
   async #ready(job: Job, live: Live, mrText: string): Promise<void> {
     const cwd = live.cwd;
     const tip = (await runGit(cwd, ['rev-parse', '--verify', `refs/heads/${job.branch}`])).stdout.toString('utf8').trim();
@@ -1836,7 +1837,14 @@ export class Execution implements RunnerWork {
     this.#live.delete(`${job.workspace}/${job.ticket}`);
     const lines = [content.title, notificationLine((await this.#lastFiles(job)) ?? [])];
     let ready: Job = { ...job, base_commit: job.target_commit, prepared_commit: tip };
-    if (this.#config.handoff === 'checkout') {
+    // The registry as it is now: its handoff may have changed while the job ran. When it cannot be
+    // read or the checkout not verified, the setting from the job's start applies (the hand-over
+    // itself then answers the checkout's problem as its refusal).
+    const own = (await this.#resolve(job.workspace).catch(() => live.workspace)).handoff;
+    const off = handoffOffNotice(own, this.#config.handoff, job.ticket);
+    if (off !== undefined) {
+      ready = { ...ready, handoff_skipped: off };
+    } else {
       const outcome = await this.#handOver(ready, live.workspace, content);
       if (outcome.ok) {
         await this.#transition(outcome.job, 'handed_over', undefined, lines);

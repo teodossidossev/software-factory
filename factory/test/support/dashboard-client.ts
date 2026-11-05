@@ -8,6 +8,7 @@ import { get, request, type IncomingMessage } from 'node:http';
 import type { DashboardActions, DashboardSetup } from '../../src/dashboard.js';
 import { FactoryError } from '../../src/errors.js';
 import type { ArchivedRow, TicketInput, TicketRow, WorkspaceRow } from '../../src/setup.js';
+import type { HandoffMode } from '../../src/registry.js';
 
 export const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'";
 
@@ -218,7 +219,7 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
   return fake;
 }
 
-export type SetupCall = ['addWorkspace', string, string] | ['removeWorkspace', string] | ['createTicket', TicketInput]
+export type SetupCall = ['addWorkspace', string, string] | ['addWorkspace', string, string, HandoffMode] | ['removeWorkspace', string] | ['createTicket', TicketInput]
   | ['archiveTicket', string, string] | ['restoreTicket', string, string] | ['deleteTicket', string, string];
 
 export interface FakeSetup extends DashboardSetup {
@@ -233,8 +234,8 @@ export interface FakeSetup extends DashboardSetup {
   answer: unknown;
 }
 
-export function workspaceRow(name: string, path = `/srv/${name}`, liveJobs = 0): WorkspaceRow {
-  return { name, path, liveJobs, problem: null };
+export function workspaceRow(name: string, path = `/srv/${name}`, liveJobs = 0, handoff: WorkspaceRow['handoff'] = null): WorkspaceRow {
+  return { name, path, liveJobs, problem: null, handoff };
 }
 
 export function ticketRow(workspace: string, ticket: string, title = `Ticket ${ticket}`, draft = true, job: TicketRow['job'] = null): TicketRow {
@@ -266,7 +267,7 @@ export function fakeSetup(workspaces: WorkspaceRow[] = [], tickets: TicketRow[] 
     archiveTicket: (workspace, ticket) => reply(['archiveTicket', workspace, ticket], { workspace, ticket, path: `.software-factory/archive/${ticket}.md`, jobArchived: false }),
     restoreTicket: (workspace, ticket) => reply(['restoreTicket', workspace, ticket], { workspace, ticket, path: `.software-factory/${ticket}.md` }),
     deleteTicket: (workspace, ticket) => reply(['deleteTicket', workspace, ticket], { workspace, ticket, deleted: [`.software-factory/${ticket}.md`], jobArchived: false }),
-    addWorkspace: (name, path) => reply(['addWorkspace', name, path], workspaceRow(name, path)),
+    addWorkspace: (name, path, handoff) => reply(handoff === undefined ? ['addWorkspace', name, path] : ['addWorkspace', name, path, handoff], workspaceRow(name, path, 0, handoff ?? null)),
     removeWorkspace: (name) => reply(['removeWorkspace', name], { removed: name }),
     createTicket: (input) => reply(['createTicket', input], { workspace: input.workspace, ticket: input.ticket, path: `.software-factory/${input.ticket}.md`, base: 'main' }),
   };

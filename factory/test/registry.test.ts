@@ -53,6 +53,16 @@ test('parseRegistry refuses invalid files instead of ignoring them', () => {
   invalid(JSON.stringify({ workspaces: { app: { ...entry, work_checkout: 42 } } }));
 });
 
+test('parseRegistry (SF-083): a workspace may set handoff to checkout or off; any other value is refused', () => {
+  for (const handoff of ['checkout', 'off'] as const) {
+    assert.deepEqual(parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', handoff } } })).workspaces.app, { read_checkout: '/srv/app', handoff });
+  }
+  for (const handoff of ['', 'on', 'Off', 'true', null, true, 1]) {
+    invalid(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', handoff } } }));
+  }
+  assert.throws(() => parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', handoff: 'on' } } })), /workspaces\.app\.handoff/);
+});
+
 test('configDir honours SF_CONFIG_DIR, then XDG_CONFIG_HOME, then ~/.config', () => {
   assert.equal(configDir({ SF_CONFIG_DIR: '/c', XDG_CONFIG_HOME: '/x' }), '/c');
   assert.equal(configDir({ XDG_CONFIG_HOME: '/x' }), '/x/software-factory');
@@ -87,6 +97,9 @@ test('resolveWorkspace verifies that the checkout is a Git work tree root; work_
     dir,
   );
   assert.deepEqual(await resolveWorkspace('good', dir), { name: 'good', readCheckout: repo, workCheckout: repo });
+  // The workspace's own hand-over setting comes along (SF-083).
+  await saveRegistry({ workspaces: { off: { read_checkout: repo, handoff: 'off' } } }, join(temp, 'resolve-handoff'));
+  assert.deepEqual(await resolveWorkspace('off', join(temp, 'resolve-handoff')), { name: 'off', readCheckout: repo, workCheckout: repo, handoff: 'off' });
   // The ignored work_checkout may point anywhere: the checkout is what counts.
   assert.deepEqual(await resolveWorkspace('plain', dir), { name: 'plain', readCheckout: repo, workCheckout: repo });
   for (const name of ['sub', 'bare', 'gone']) {

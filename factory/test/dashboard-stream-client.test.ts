@@ -497,7 +497,7 @@ test('stream client: the composer per state: its sentence, its message box and i
       'Paused by you during iteration 2. Resume continues the same session (with your message, if you write one below); Restart starts the ticket again from its current Task file.'],
     [job('paused', { paused: { from: 'awaiting_review', step: 'review', at: at(5) } }), ['Resume', 'Restart…', 'Abort…'], 'disabled',
       'Paused by you during iteration 1. Resume runs it again; Restart starts the ticket again from its current Task file.'],
-    [job('ready_for_human_review'), ['Approve…', 'Hand over to my checkout', 'Create merge request', 'Send', 'Abort…'], 'shown', 'Reviews are clean and the MR text is written. Push when you are happy.'],
+    [job('ready_for_human_review'), ['Review the MR and push', 'Approve…', 'Hand over to my checkout', 'Create merge request', 'Send', 'Abort…'], 'shown', 'Reviews are clean and the MR text is written. Push when you are happy.'],
     [job('handed_over', { prepared_commit: 'a'.repeat(40), worktree: null }), ['Approve…', 'Ask for changes', 'I opened the MR myself', 'Take it back', 'Create merge request', 'Abort…'], 'shown', 'In your checkout on T-1-demo.'],
     [job('pushed'), ['Create merge request', 'Archive'], 'hidden', 'Pushed at 12:05.'],
     [job('pushed', { mr: mr('closed') }), ['Create merge request', 'Refresh MR status', 'Archive'], 'hidden', 'Pushed at 12:05.'],

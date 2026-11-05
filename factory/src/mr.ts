@@ -10,10 +10,12 @@ import { changedPaths, writeResolutionPatch } from './patch.js';
 import { itemLine, type ReviewItem } from './review.js';
 import { type LedgerEntry, notFixed, notFixedLine } from './ledger.js';
 import { type Suggestion, suggestionLine } from './simplify.js';
-import { headerProblem, MR_REQUIRED_HEADINGS, testingProblem } from './rules.js';
+import { COMMIT_TYPES, headerProblem, manualClaim, MAX_HEADER_CHARS, MR_REQUIRED_HEADINGS, testingProblem } from './rules.js';
 import { TASK_DIR } from './task-file.js';
 
 const FETCH_TIMEOUT_MS = 60_000;
+// The check of origin before a branch rename (SF-080, git ls-remote).
+const LS_REMOTE_TIMEOUT_MS = 15_000;
 const PUSH_TIMEOUT_MS = 120_000;
 // Each Git call of the commit and the rebase; a signing prompt that never returns ends here.
 const GIT_TIMEOUT_MS = 60_000;
@@ -268,6 +270,116 @@ export function mrMessage(text: string): { title: string; body: string } {
   return { title, body: rest.join('\n') };
 }
 
+// A message as the factory writes it, into the commit and into mr.md (SF-080): the title, a blank
+// line, the body and a final newline; the title and a newline when the body is empty.
+export function messageText(message: { title: string; body: string }): string {
+  return `${message.body === '' ? message.title : `${message.title}\n\n${message.body}`}\n`;
+}
+
+// Whether two messages have the same title and body.
+export function sameMessage(a: { title: string; body: string }, b: { title: string; body: string }): boolean {
+  return a.title === b.title && a.body === b.body;
+}
+
+// The message of a commit as mrMessage reads it (title and body), or undefined when the commit
+// cannot be read. Local only.
+export async function commitMessage(cwd: string, commit: string): Promise<{ title: string; body: string } | undefined> {
+  const result = await runGit(cwd, ['log', '-1', '--format=%B', commit, '--']);
+  return result.code === 0 ? mrMessage(result.stdout.toString('utf8')) : undefined;
+}
+
+// The prepared commit's message rewritten (SF-080), before any push, in the job's worktree whose
+// HEAD is that commit: `commit --amend --only` without paths changes the message only, never the
+// staged files or the tree; the author and the author date stay, the user's commit.gpgSign
+// applies as at Clean. The message goes through a file in the Git dir, as commitAndRebase writes
+// it. Returns the new HEAD; a failure is mr_commit_failed and leaves the commit as it was.
+export async function rewriteMessage(cwd: string, message: { title: string; body: string }): Promise<string> {
+  const messagePath = resolve(cwd, (await factoryGitOk(cwd, ['rev-parse', '--git-path', 'factory-commit-msg'])).trim());
+  const args = ['commit', '-q', '--amend', '--only', '--cleanup=verbatim', '-F', messagePath];
+  let committed: Awaited<ReturnType<typeof runGit>>;
+  try {
+    await writeFile(messagePath, messageText(message));
+    committed = await factoryGit(cwd, args);
+  } finally {
+    await rm(messagePath, { force: true });
+  }
+  if (committed.code !== 0) {
+    throw new FactoryError('mr_commit_failed', `The commit message could not be changed: ${gitFailure(args, committed)}.`);
+  }
+  return (await factoryGitOk(cwd, ['rev-parse', '--verify', 'HEAD'])).trim();
+}
+
+// The branches of names that exist on origin (refs/heads/<name>), by one `git ls-remote` with a
+// 15 s timeout; an origin that cannot be asked is branch_locked "Could not check origin for
+// <first name>: <Git's message>".
+export async function branchesOnOrigin(cwd: string, names: string[]): Promise<Set<string>> {
+  const refs = names.map((name) => `refs/heads/${name}`);
+  const result = await runGit(cwd, ['ls-remote', 'origin', ...refs], 1024 * 1024, LS_REMOTE_TIMEOUT_MS);
+  if (result.code !== 0) {
+    const why = result.code === null ? `no answer within ${LS_REMOTE_TIMEOUT_MS / 1000} s` : result.stderr.trim().slice(0, 300);
+    throw new FactoryError('branch_locked', `Could not check origin for ${names[0]}: ${why}`);
+  }
+  const found = new Set(result.stdout.toString('utf8').split('\n').map((line) => line.split('\t')[1]?.trim()));
+  return new Set(names.filter((name, index) => found.has(refs[index])));
+}
+
+// The worktrees of the checkout (the checkout itself included) that have branch checked out.
+export async function worktreesOn(checkout: string, branch: string): Promise<string[]> {
+  const listed = await runGit(checkout, ['worktree', 'list', '--porcelain', '-z']);
+  if (listed.code !== 0) {
+    throw new Error(gitFailure(['worktree'], listed));
+  }
+  const paths: string[] = [];
+  let path: string | undefined;
+  for (const field of nulList(listed.stdout.toString('utf8'))) {
+    if (field.startsWith('worktree ')) {
+      path = field.slice('worktree '.length);
+    } else if (field === `branch refs/heads/${branch}` && path !== undefined) {
+      paths.push(path);
+    }
+  }
+  return paths;
+}
+
+// Whether name is a branch name Git takes (`check-ref-format --branch`), not an option.
+export async function validBranchName(cwd: string, name: string): Promise<boolean> {
+  return name !== '' && !name.startsWith('-') && (await runGit(cwd, ['check-ref-format', '--branch', name])).code === 0;
+}
+
+// Every problem of an MR text and its branch and base for the Merge request screen (SF-080), each
+// with its field, in the screen's words: the title against the commit header rule (headerProblem),
+// the body once per missing required heading and once for a manual check claimed as run
+// (testingProblem), an empty branch or base. The same rules as mrTextProblem, every problem listed.
+export function mrProblems(ticket: string, message: { title: string; body: string }, branch: string, base: string): Array<{ field: 'title' | 'body' | 'branch' | 'base'; message: string }> {
+  const problems: Array<{ field: 'title' | 'body' | 'branch' | 'base'; message: string }> = [];
+  const title = message.title;
+  if (headerProblem(ticket, title) !== undefined) {
+    const length = [...title].length;
+    problems.push({
+      field: 'title',
+      message: title.trim() === '' ? 'The title is required.'
+        : length > MAX_HEADER_CHARS ? `The title has ${length} characters, more than ${MAX_HEADER_CHARS}.`
+        : title.endsWith('.') ? 'The title ends with a period.'
+        : `The title must read "<type>(${ticket}): <summary>", with <type> one of ${COMMIT_TYPES.join(', ')}.`,
+    });
+  }
+  if (branch.trim() === '') {
+    problems.push({ field: 'branch', message: 'The branch is required.' });
+  }
+  if (base.trim() === '') {
+    problems.push({ field: 'base', message: 'The base branch is required.' });
+  }
+  const lines = message.body.split('\n');
+  for (const heading of MR_REQUIRED_HEADINGS.filter((required) => !lines.some((line) => line.trimEnd() === required))) {
+    problems.push({ field: 'body', message: `Missing heading: ${heading}.` });
+  }
+  const claim = manualClaim(lines);
+  if (claim !== undefined) {
+    problems.push({ field: 'body', message: `SF-058: the ## Testing line "${claim.trim().slice(0, 90)}" reads as a check that was run. Anything not run goes on a line starting with "Not checked:".` });
+  }
+  return problems;
+}
+
 // The subset of paths that are submodules: a directory in the worktree whose index entry has
 // mode 160000. Their pointer is never committed by the factory (Git rules).
 export async function submodulePaths(cwd: string, paths: string[]): Promise<string[]> {
@@ -345,7 +457,7 @@ export async function commitAndRebase(cwd: string, input: { baseCommit: string; 
   const commitArgs = ['commit', '-q', '--cleanup=verbatim', '-F', messagePath];
   let committed: Awaited<ReturnType<typeof runGit>>;
   try {
-    await writeFile(messagePath, `${body === '' ? title : `${title}\n\n${body}`}\n`);
+    await writeFile(messagePath, messageText({ title, body }));
     committed = await factoryGit(cwd, commitArgs);
   } finally {
     await rm(messagePath, { force: true });

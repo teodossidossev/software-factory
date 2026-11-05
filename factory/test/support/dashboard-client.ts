@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { get, request, type IncomingMessage } from 'node:http';
 import type { DashboardActions, DashboardSetup } from '../../src/dashboard.js';
 import { FactoryError } from '../../src/errors.js';
+import type { MrInput } from '../../src/execution.js';
 import type { ArchivedRow, JobDependencies, TicketInput, TicketRow, WorkspaceRow } from '../../src/setup.js';
 import { type HandoffMode, type WorkspaceColor, workspaceColor } from '../../src/registry.js';
 import { taskSha256 } from '../../src/task-file.js';
@@ -167,7 +168,8 @@ export function openStream(url: URL): Promise<Stream> {
 export type Call = ['start', string, string] | ['approve', string, string] | ['abort', string, string, boolean] | ['say', string, string, string] | ['retryReview', string, string] | ['acceptGate', string, string] | ['settle', string, string, string, string, string] | ['archiveFinished', string, string]
   | ['createMergeRequest', string, string] | ['mergeMergeRequest', string, string] | ['mergeRequestStatus', string, string] | ['simplify', string, string]
   | ['pause', string, string] | ['resumePaused', string, string, string] | ['restart', string, string, boolean]
-  | ['handover', string, string] | ['takeback', string, string] | ['handedDone', string, string] | ['checkHandedOver', string, string, number];
+  | ['handover', string, string] | ['takeback', string, string] | ['handedDone', string, string] | ['checkHandedOver', string, string, number]
+  | ['mergeRequestView', string, string] | ['saveMr', string, string, MrInput] | ['resetMr', string, string];
 
 export interface FakeActions extends DashboardActions {
   calls: Call[];
@@ -175,6 +177,8 @@ export interface FakeActions extends DashboardActions {
   answer: unknown;
   // What mergeRequestHost answers for every workspace; its calls are not recorded (every payload asks).
   mrHost: { host: 'github' | 'gitlab' | null; reason: string | null };
+  // What mergeRequestView answers (SF-080): undefined, the view, or an error to throw.
+  mrView: unknown;
 }
 
 // Records every call and answers with `answer` (thrown when it is an Error; awaited when it is a
@@ -208,6 +212,17 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
     },
     mrHost: { host: 'github', reason: null },
     mergeRequestHost: async () => fake.mrHost,
+    // The Merge request screen (SF-080): the view's reads are recorded and answered with mrView.
+    mrView: undefined,
+    mergeRequestView: async (workspace, ticket) => {
+      fake.calls.push(['mergeRequestView', workspace, ticket]);
+      if (fake.mrView instanceof Error) {
+        throw fake.mrView;
+      }
+      return fake.mrView as Awaited<ReturnType<DashboardActions['mergeRequestView']>>;
+    },
+    saveMr: (workspace, ticket, input) => reply(['saveMr', workspace, ticket, input]),
+    resetMr: (workspace, ticket) => reply(['resetMr', workspace, ticket]),
   };
   async function reply(call: Call): Promise<any> {
     fake.calls.push(call);

@@ -82,25 +82,8 @@
     </div>
     <!-- The Changes screen (SF-079): app.js builds the tree, the divider and the diff pane in it. -->
     <div class="scr" id="scrChanges" hidden></div>
-    <!-- The Merge request screen of SF-080; until it lands, the old MR view. -->
-    <div class="scr" id="scrMr" hidden>
-      <div class="olddetail">
-        <p id="no-mr" class="hint">No merge request text yet: it is written during MR preparation, after the reviews.</p>
-        <div id="mr-panel" class="mr-panel" hidden>
-          <div class="row">
-            <button id="mr-copy" type="button" class="btn btn-sm btn-primary">Copy MR text</button>
-            <span id="mr-copy-status" class="hint" role="status" aria-live="polite"></span>
-          </div>
-          <textarea id="mr-copy-text" class="copy-fallback" rows="8" readonly aria-label="The MR text" hidden></textarea>
-          <pre id="mr-body" class="document"></pre>
-        </div>
-        <div id="mr-unapplied" class="unapplied" hidden>
-          <h4>Codex items not applied</h4>
-          <p id="mr-unapplied-note" class="hint"></p>
-          <ol id="mr-unapplied-list" class="review-items"></ol>
-        </div>
-      </div>
-    </div>
+    <!-- The Merge request screen (SF-080): app.js builds the form, the side panel and the bar in it. -->
+    <div class="scr" id="scrMr" hidden></div>
   </section>
 
   <!-- The planned ticket's page (SF-081): app.js builds its header, the Task file and the plan in it. -->

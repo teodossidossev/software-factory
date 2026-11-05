@@ -35,7 +35,7 @@ function resultText(content: unknown): string {
 export interface DescribedEvent {
   ts: string | null;
   iteration: number | null;
-  // "prompt", "state", "notify_failed", "placeholders_removed", "review", "review_failed" (Claude's or the gate's), "gate_overridden" (the user accepted over the stopped gate), "simplify" and "simplify_chosen" (SF-055), "interrupted" and "task_changed" (SF-067), "turn_limit_continued" (SF-069), "sandbox_lock_removed" (SF-085), "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
+  // "prompt", "state", "notify_failed", "placeholders_removed", "review", "review_failed" (Claude's or the gate's), "gate_overridden" (the user accepted over the stopped gate), "simplify" and "simplify_chosen" (SF-055), "interrupted" and "task_changed" (SF-067), "turn_limit_continued" (SF-069), "sandbox_lock_removed" (SF-085), "mr_edited" (SF-080), "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
   type: string;
   lines: string[];
 }
@@ -136,6 +136,15 @@ function recordLines(record: Record<string, unknown>): string[] {
   // The sandbox's leftover config lock, removed by the factory (SF-085).
   if (record.type === 'sandbox_lock_removed') {
     return [`${prefix} removed the config lock the sandbox left: ${String(record.path)}`];
+  }
+  // The MR text (SF-080): the user's save or reset, or a new Clean that kept the user's text.
+  if (record.type === 'mr_edited') {
+    const line = { saved: 'You edited the MR text', reset: "You reset the MR text to the factory's", factory_new: 'Clean wrote a new MR text; yours is kept. Compare or reset on the Merge request screen.' }[String(record.action)];
+    if (line === undefined) {
+      return [`${prefix} MR text: ${String(record.action)}`];
+    }
+    const moved = [typeof record.branch === 'string' ? `branch ${record.branch}` : '', typeof record.base === 'string' ? `base ${record.base}` : ''].filter((part) => part !== '');
+    return [`${prefix} ${line}${moved.length > 0 ? ` (${moved.join(', ')})` : ''}`];
   }
   if (record.type === 'merge_request') {
     const verb = { created: 'opened', reused: 'already open, reused', merged: 'merged', updated: `found ${String(record.mr_state)} on the host` }[String(record.action)] ?? String(record.action);

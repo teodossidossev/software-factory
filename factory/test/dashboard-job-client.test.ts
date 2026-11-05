@@ -31,14 +31,9 @@ type Detail = { job: Job; iterations: Array<Record<string, unknown>>; mr: boolea
 
 const times = { started_at: '2026-11-01T10:05:01.000Z', ended_at: '2026-11-01T10:06:00.000Z' };
 const META = { started_at: '2026-11-01T10:00:01.000Z', ended_at: '2026-11-01T10:05:00.000Z', cost_usd: 0.5, changed_files: 1, patch_truncated: false, denials: 0, files: null };
-const CLEAN = { reviewer: 'claude', verdict: 'clean', summary: 'Right.', items: [], accepted_sensitive: [], cost_usd: 0.25, ...times };
 const CLAUDE_FIX = {
   reviewer: 'claude', verdict: 'fix', summary: 'The greeting is wrong.', accepted_sensitive: [], cost_usd: 0.25,
   items: [{ path: 'README.md', problem: 'It greets the world.', expected: 'It greets the reader.' }, { path: 'a.txt', problem: 'Empty.', expected: 'A line.' }], ...times,
-};
-const GATE_FIX = {
-  reviewer: 'codex', verdict: 'fix', summary: 'Not quite.', accepted_sensitive: [], model: 'gpt-x', tokens: { input: 1000, cached_input: 200, output: 100 },
-  items: [{ path: 'README.md', problem: 'It greets the world.', expected: 'It greets the reader.' }], ...times,
 };
 const GATE_FAILED = { reviewer: 'codex', error: 'Codex wrote no output.', tokens: { input: 0, cached_input: 0, output: 0 }, ...times };
 
@@ -163,7 +158,7 @@ test('job client: the switch: Stream (s), Changes (N) (c), Merge request (m), ar
   const shown = detail(job('awaiting_review', { files: 3 }), { iterations: [iteration(1)] });
   const page = await openJob(shown, (path) => (path.endsWith('/report') || path.endsWith('/patch') || path.endsWith('/mr') ? 'text' : undefined));
   assert.deepEqual(tabs(page).map((tab) => [tab.textContent, tab.getAttribute('aria-selected')]), [['Stream s', 'true'], ['Changes (3) c', 'false'], ['Merge request m', 'false']]);
-  assert.deepEqual([tabOf(page, 'mr').getAttribute('aria-disabled'), tabOf(page, 'mr').getAttribute('title')], ['true', 'No MR text yet: written at Clean']);
+  assert.deepEqual([tabOf(page, 'mr').getAttribute('aria-disabled'), tabOf(page, 'mr').disabled, tabOf(page, 'mr').getAttribute('title')], ['true', true, 'No MR text yet: written at Clean']);
   // c opens Changes; s goes back to the Stream; a click on Changes as well.
   page.key('c');
   await page.flush();
@@ -184,11 +179,11 @@ test('job client: the switch: Stream (s), Changes (N) (c), Merge request (m), ar
   // With MR text: m opens it, the count is left out when it is not a number.
   page.streams.at(-1)!.emit('jobs', { jobs: [job('ready_for_human_review', { files: null })] });
   await show(page, detail(job('ready_for_human_review', { files: null }), { mr: true, iterations: [iteration(1)] }));
-  assert.deepEqual([tabOf(page, 'mr').getAttribute('aria-disabled'), tabOf(page, 'changes').textContent], ['false', 'Changes c']);
+  assert.deepEqual([tabOf(page, 'mr').getAttribute('aria-disabled'), tabOf(page, 'mr').disabled, tabOf(page, 'changes').textContent], ['false', false, 'Changes c']);
   page.key('m');
   await page.flush();
   assert.deepEqual([shownScreens(page), page.location.hash], [['scrMr'], '#app/T-1/mr']);
-  assert.equal(gets(page, 'api/jobs/app/T-1/mr').length, 1);
+  assert.deepEqual([gets(page, 'api/jobs/app/T-1/mr-view').length, gets(page, 'api/jobs/app/T-1/mr').length], [1, 0]);
   page.$('toast-close').click();
   page.key('Escape');
   assert.deepEqual(shownScreens(page), ['scrStream']);
@@ -209,59 +204,18 @@ test('job client: the old Changes view is gone; Changes (N) counts job.files; th
   assert.equal(page.requests.filter((request) => /\/iterations\/\d+\/patch$/.test(request.path)).length, 0);
 });
 
-const clipboardOf = (fail = false) => {
-  const written: string[] = [];
-  return {
-    written,
-    writeText: async (text: string): Promise<void> => {
-      if (fail) {
-        throw new Error('denied');
-      }
-      written.push(text);
-    },
-  };
-};
-
-test('job client: the Merge request screen shows the MR text; Copy MR text puts the title, a blank line and the body on the clipboard, or selects it; the Codex items not applied under it', async () => {
-  const mr = 'feat(T-1): Demo\r\n\r\n\r\n## What\r\nIt.\r\n\r\n';
-  const clipboard = clipboardOf();
-  const shown = detail(job('ready_for_human_review', { iteration: 2 }), { mr: true, iterations: [iteration(1), iteration(2, { review: CLEAN, gate: GATE_FIX })] });
-  const page = await openJob(detail(job('working')), (path) => (path === 'api/jobs/app/T-1/mr' ? mr : undefined), clipboard, [], '/mr');
-  assert.deepEqual(shownScreens(page), ['scrMr']);
-  assert.deepEqual([page.$('no-mr').hidden, page.$('mr-panel').hidden, page.$('mr-unapplied').hidden], [false, true, true]);
-
-  await show(page, shown);
-  assert.deepEqual([page.$('no-mr').hidden, page.$('mr-panel').hidden], [true, false]);
-  assert.match(page.$('mr-body').textContent, /^feat\(T-1\): Demo\r?\n/);
-  page.$('mr-copy').click();
-  await page.flush();
-  assert.deepEqual(clipboard.written, ['feat(T-1): Demo\n\n## What\nIt.']);
-  assert.equal(page.$('mr-copy-status').textContent, 'Copied.');
-  assert.equal(page.$('mr-copy-text').hidden, true);
-
-  // The user accepted the change over the gate: the Codex items not applied, for a follow-up.
-  const accepted = { ...shown, iterations: [iteration(1), iteration(2, { review: CLEAN, gate: GATE_FIX, gate_override: { at: times.ended_at, code: 'gate_rounds', unapplied: GATE_FIX.items } })] };
-  await show(page, accepted);
-  assert.equal(page.$('mr-unapplied').hidden, false);
-  assert.equal(page.$('mr-unapplied-note').textContent, 'You accepted the change over the gate (gate_rounds); these could go into a follow-up ticket:');
-  assert.deepEqual(texts(page.$('mr-unapplied-list')), ['README.md: It greets the world. Expected: It greets the reader.']);
-  await show(page, { ...shown, iterations: [iteration(1, { gate_override: { at: times.ended_at, code: 'gate_failed', unapplied: 'Codex wrote no output.' } })] });
-  assert.equal(page.$('mr-unapplied-note').textContent, 'You accepted the change over the gate (gate_failed); the gate failed: Codex wrote no output.');
-  assert.deepEqual(texts(page.$('mr-unapplied-list')), []);
-  // An override an iteration later reviewed by the gate again replaced: nothing listed.
-  await show(page, { ...accepted, iterations: [...accepted.iterations, iteration(3, { review: CLEAN, gate: { ...GATE_FIX, verdict: 'clean', items: [] } })] });
-  assert.equal(page.$('mr-unapplied').hidden, true);
-
-
-  // Without the clipboard, or when the browser refuses it: the text shown and selected for Ctrl+C.
-  for (const refusing of [undefined, clipboardOf(true)]) {
-    const other = await openJob(shown, (path) => (path === 'api/jobs/app/T-1/mr' ? mr : undefined), refusing, [], '/mr');
-    other.$('mr-copy').click();
-    await other.flush();
-    const box = other.$('mr-copy-text');
-    assert.deepEqual([box.hidden, box.value, box.selected], [false, 'feat(T-1): Demo\n\n## What\nIt.', true]);
-    assert.equal(other.$('mr-copy-status').textContent, 'Selected: press Ctrl+C to copy.');
+// SF-080: the Merge request screen replaced the old MR view: none of its elements is left and the
+// page reads mr-view, never the plain mr route. The screen itself is tested in
+// merge-request-client.test.ts.
+test('job client: the old MR view is gone; the Merge request screen reads mr-view; without MR text it says when it comes', async () => {
+  const page = await openJob(detail(job('working')), () => undefined, undefined, [], '/mr');
+  for (const id of ['no-mr', 'mr-panel', 'mr-copy', 'mr-copy-status', 'mr-copy-text', 'mr-body', 'mr-unapplied', 'mr-unapplied-note', 'mr-unapplied-list']) {
+    assert.equal(page.document.getElementById(id), null, id);
   }
+  assert.deepEqual(shownScreens(page), ['scrMr']);
+  assert.equal(page.$('scrMr').textContent, 'No MR text yet: written at Clean, when both reviews pass.');
+  await show(page, detail(job('ready_for_human_review'), { mr: true }));
+  assert.deepEqual([gets(page, 'api/jobs/app/T-1/mr-view').length, gets(page, 'api/jobs/app/T-1/mr').length], [1, 0]);
 });
 
 // The hand-over (SF-073) in the composer: the actions of a handed-over job and of a ready one the
@@ -294,7 +248,7 @@ test('job client (SF-073): a handed-over job says "In your checkout on <branch>"
   page.streams.at(-1)!.emit('jobs', { jobs: [skipped] });
   await show(page, detail(skipped));
   assert.equal(page.$('composer-sentence').children[1]!.textContent, 'Not handed over to your checkout: T-1: ready, but your checkout has changes; hand it over when you are ready');
-  assert.deepEqual(acts().map((node) => node.textContent), ['Approve…', 'Hand over to my checkout', 'Create merge request', 'Send', 'Abort…']);
+  assert.deepEqual(acts().map((node) => node.textContent), ['Review the MR and push', 'Approve…', 'Hand over to my checkout', 'Create merge request', 'Send', 'Abort…']);
   act('Hand over to my checkout').click();
   await page.flush();
   assert.deepEqual(posted('handover').map((request) => request.body), ['{}']);

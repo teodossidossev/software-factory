@@ -120,3 +120,12 @@ test('Claude review messages: tool uses with a short input, assistant text; init
 test('the Implementer\'s messages print as before', () => {
   assert.deepEqual(formatEvent(JSON.stringify({ ts: TS, iteration: 1, message: assistant([{ type: 'text', text: 'Done.' }]) })), ['10:11:12 [1] assistant: Done.']);
 });
+
+test('the MR text (SF-080): the user\'s save and reset, with a branch or base the save changed, and a new Clean that kept the user\'s text', () => {
+  const edited = (extra: Record<string, unknown>): string => JSON.stringify({ ts: TS, iteration: 2, type: 'mr_edited', ...extra });
+  assert.deepEqual(describeEvent(edited({ action: 'saved' })), { ts: TS, iteration: 2, type: 'mr_edited', lines: ['10:11:12 [2] You edited the MR text'] });
+  assert.deepEqual(formatEvent(edited({ action: 'saved', branch: 'T-1-other' })), ['10:11:12 [2] You edited the MR text (branch T-1-other)']);
+  assert.deepEqual(formatEvent(edited({ action: 'saved', base: 'release' })), ['10:11:12 [2] You edited the MR text (base release)']);
+  assert.deepEqual(formatEvent(edited({ action: 'reset' })), ["10:11:12 [2] You reset the MR text to the factory's"]);
+  assert.deepEqual(formatEvent(edited({ action: 'factory_new' })), ['10:11:12 [2] Clean wrote a new MR text; yours is kept. Compare or reset on the Merge request screen.']);
+});

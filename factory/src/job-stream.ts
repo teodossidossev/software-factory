@@ -5,7 +5,7 @@
 // review record). The builder never joins a tool and its result: the client does, by id.
 import type { GateRecord, IterationMeta, JobStore, ReviewRecord, SimplifyRecord } from './jobs.js';
 import type { LedgerEntry } from './ledger.js';
-import { describeEvent, shortInput } from './watch.js';
+import { describeEvent, limitStateText, shortInput } from './watch.js';
 
 // The bound of a tool's input and a tool's result in an entry, in characters.
 export const DETAIL_CHARS = 16384;
@@ -41,7 +41,8 @@ type Body =
   | { t: 'tool'; id: string; line: string; detail: string }
   | { t: 'tool_result'; id: string; out: string; result: string; err: boolean }
   | { t: 'result'; turns: number | null; ms: number | null; cost: number | null }
-  | { t: 'state'; from: string | null; to: string; code: string | null; msg: string | null }
+  // text: the line of a park on a usage limit or the resume from it (SF-072, describeEvent).
+  | { t: 'state'; from: string | null; to: string; code: string | null; msg: string | null; text?: string }
   | { t: 'verdict'; verdict: string; effective: string | null; summary?: string; items?: VerdictItem[] }
   | { t: 'changes'; files: number; paths: string[] }
   | { t: 'simplify'; suggestions: SimplifySuggestion[]; saves_lines: number }
@@ -309,9 +310,10 @@ async function drafts(raw: string, record: Record<string, unknown>, it: number, 
     const state = asRecord(record.state);
     const error = asRecord(state.error);
     const code = typeof error.code === 'string' ? error.code : null;
+    const text = limitStateText(state.from, state.to);
     const entry: Draft = {
       t: 'state', who: 'factory', from: typeof state.from === 'string' ? state.from : null, to: String(state.to),
-      code, msg: typeof error.message === 'string' ? error.message : null,
+      code, msg: typeof error.message === 'string' ? error.message : null, ...(text !== undefined ? { text } : {}),
     };
     return [entry, ...(await changesEntry({ from: state.from, to: state.to, code }, it, ctx))];
   }

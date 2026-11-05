@@ -735,7 +735,7 @@ test('board client: api/jobs is read again every 15 s only while a card runs and
   assert.equal(jobReads(page).length, before);
 });
 
-test('board client: without a run queue (the tickets payload has none) the queue controls stay hidden and no queue route is called; the Rules menu stays hidden with the queue too (SF-072)', async () => {
+test('board client: without a run queue (the tickets payload has none) the queue controls and the Rules menu stay hidden and no queue route is called; with the queue both show (SF-072)', async () => {
   const page = await openBoard([job('T-1', 'working')], [ticket('app/T-2', { queue_position: 1, queue_error: null })]);
   assert.deepEqual(page.document.querySelectorAll('#rulesMenu input').map((input) => [input.type, input.name, input.value]),
     [['radio', 'rule', 'resume-then-queue'], ['radio', 'rule', 'resume-only'], ['radio', 'rule', 'wait']]);
@@ -753,12 +753,12 @@ test('board client: without a run queue (the tickets payload has none) the queue
   await page.flush();
   assert.deepEqual(page.requests.filter((request) => /queue|limit|rule/i.test(request.path)).map((request) => request.path), []);
   assert.deepEqual(keys(page, 'queue'), ['app/T-2']);
-  // With the queue: its controls show; the Rules menu stays hidden.
+  // With the queue: its controls and the Rules button show; the menu itself opens on a click.
   page.streams.at(-1)!.emit('tickets', { tickets: [ticket('app/T-2', { queue_position: 1, queue_error: null })], archived: [], queue: QUEUE });
-  assert.deepEqual([page.$('qctl').hidden, page.document.querySelector('.menuwrap')!.hidden, page.$('rulesMenu').hidden], [false, true, true]);
+  assert.deepEqual([page.$('qctl').hidden, page.document.querySelector('.menuwrap')!.hidden, page.$('rulesMenu').hidden], [false, false, true]);
 });
 
-const QUEUE = { max_running: 2, running: 1, held: false, hold_reason: null, next: { workspace: 'app', ticket: 'T-3' } };
+const QUEUE = { max_running: 2, running: 1, held: false, hold_reason: null, next: { workspace: 'app', ticket: 'T-3' }, on_limit: 'resume-then-queue', limit_hold: null };
 // The Queue column's items: a card's key and position, or an item's class and text.
 const queueItems = (page: Page): string[][] => page.$('qlist').children.map((child) => {
   const item = child as FakeElement;
@@ -1114,4 +1114,71 @@ test('board client (SF-084): the job page header shows the workspace chip in its
   lineOf(head, 'needed')!.all().find((element) => element.classList.contains('dchip'))!.click();
   await page.flush();
   assert.deepEqual([onJobPage(page), page.document.activeElement], [false, card(page, 'app/Q-1')]);
+});
+
+// SF-072: a job parked on a usage limit, as the jobs payload has it.
+const PARK_AT = '2026-11-04T22:00:00.000Z';
+const parkedJob = (ticket: string, extra: Record<string, unknown> = {}) => job(ticket, 'waiting_limit', {
+  iteration: 0, paused: { from: 'working', step: 'turn', at: PARK_AT }, limit: { provider: 'claude', resets_at: '2026-11-05T01:00:00.000Z' }, ...extra,
+});
+
+test('board client (SF-072): a parked job is in Implementing, holds its slot and says when the limit resets; after a reset under wait its card asks to resume and Resume posts at once', async () => {
+  const page = await openBoard([parkedJob('T-1'), parkedJob('T-2', { limit: { provider: 'codex', resets_at: '2026-11-05T01:00:00.000Z', reset_seen: true, notified_at: PARK_AT } }), job('T-3', 'working')], []);
+  assert.deepEqual(keys(page, 'implementing').sort(), ['app/T-1', 'app/T-2', 'app/T-3']);
+  const parked = card(page, 'app/T-1');
+  // 03:00 in Sofia; the turn was under way: iteration 1.
+  assert.deepEqual([part(parked, 'parked')?.textContent, part(parked, 'meta')?.textContent, part(parked, 'now')], ['Waiting for limits · resets at 03:00', 'Iteration 1 · parked, holds its slot', undefined]);
+  assert.deepEqual(labels(parked), []);
+  assert.match(page.$('summary').textContent, /· 3 running$/);
+  const reset = card(page, 'app/T-2');
+  assert.deepEqual([part(reset, 'parked')?.textContent, labels(reset)], ['Limit reset: resume?', ['Resume']]);
+  button(reset, 'Resume')!.click();
+  button(reset, 'Resume')!.click();
+  await page.flush();
+  assert.deepEqual(posts(page).map((request) => [request.path, request.body]), [['api/jobs/app/T-2/resume', '{}']]);
+  // The job page's sentence (the composer is in dashboard-job-client.test.ts).
+  const jobPage = await openBoard([parkedJob('T-1')], [], [workspace('app')], '#app/T-1');
+  assert.equal(jobPage.$('jhead').all().find((element) => element.className === 'sentence')!.textContent,
+    'Waiting for limits: the Claude usage limit resets at 03:00 (iteration 1). The factory resumes it then; Resume now goes on before the reset (with your message, if you write one below)');
+});
+
+test('board client (SF-072): #qstatus while a job is parked: held by the usage limit with its reset, whatever the hold by hand; once every reset passed under wait, the jobs to resume', async () => {
+  const page = await openQueue(queuedTickets(), { ...QUEUE, running: 2, limit_hold: { parked: 1, resets_at: '2026-11-05T01:00:00.000Z' } });
+  assert.deepEqual([page.$('qstatus').className, page.$('qstatus').textContent], ['qstatus held', 'Queue held: usage limit, resets at 03:00 · 2 running']);
+  const stream = page.streams.at(-1)!;
+  stream.emit('tickets', { tickets: queuedTickets(), archived: [], queue: { ...QUEUE, held: true, hold_reason: 'usage limit reset; release the queue to go on', limit_hold: { parked: 1, resets_at: null } } });
+  assert.deepEqual([page.$('qstatus').className, page.$('qstatus').textContent], ['qstatus held', 'Queue held: usage limit reset, resume the parked jobs · 1 running']);
+  stream.emit('tickets', { tickets: queuedTickets(), archived: [], queue: { ...QUEUE, held: true, hold_reason: 'usage limit reset; release the queue to go on' } });
+  assert.equal(page.$('qstatus').textContent, 'Queue held: usage limit reset; release the queue to go on · 1 running');
+});
+
+test('board client (SF-072): the Rules menu opens from the top bar with the queue\'s rule checked; a choice posts api/queue/rule once; Escape and a click outside close it', async () => {
+  const page = await openQueue(queuedTickets(), { ...QUEUE, on_limit: 'resume-only' });
+  const rules = (): Array<[string, boolean]> => ['resume-then-queue', 'resume-only', 'wait'].map((rule) => [rule, page.$(`rule-${rule}`).checked]);
+  assert.deepEqual([page.document.querySelector('.menuwrap')!.hidden, page.$('rulesMenu').hidden, page.$('rulesBtn').getAttribute('aria-expanded')], [false, true, 'false']);
+  page.$('rulesBtn').click();
+  assert.deepEqual([page.$('rulesMenu').hidden, page.$('rulesBtn').getAttribute('aria-expanded')], [false, 'true']);
+  assert.deepEqual(rules(), [['resume-then-queue', false], ['resume-only', true], ['wait', false]]);
+  page.$('rule-wait').checked = true;
+  page.$('rule-wait').dispatch('change');
+  await page.flush();
+  assert.deepEqual(posts(page).map((request) => [request.path, request.body]), [['api/queue/rule', '{"rule":"wait"}']]);
+  assert.equal(page.$('rule-wait').disabled, true);
+  posts(page)[0]!.respond(200, { ok: true, result: { on_limit: 'wait' } });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, 'At a usage limit reset nothing resumes: you resume the parked jobs.');
+  // The board shows the server's rule: until the tickets come again, the old one.
+  assert.deepEqual(rules(), [['resume-then-queue', false], ['resume-only', true], ['wait', false]]);
+  page.streams.at(-1)!.emit('tickets', { tickets: queuedTickets(), archived: [], queue: { ...QUEUE, on_limit: 'wait' } });
+  assert.deepEqual(rules(), [['resume-then-queue', false], ['resume-only', false], ['wait', true]]);
+  // The same rule again posts nothing.
+  page.$('rule-wait').dispatch('change');
+  await page.flush();
+  assert.equal(posts(page).length, 1);
+  page.key('Escape');
+  assert.deepEqual([page.$('rulesMenu').hidden, page.$('rulesBtn').getAttribute('aria-expanded')], [true, 'false']);
+  page.$('rulesBtn').click();
+  assert.equal(page.$('rulesMenu').hidden, false);
+  page.$('summary').click();
+  assert.equal(page.$('rulesMenu').hidden, true);
 });

@@ -253,3 +253,37 @@ test('job client (SF-073): a handed-over job says "In your checkout on <branch>"
   await page.flush();
   assert.deepEqual(posted('handover').map((request) => request.body), ['{}']);
 });
+
+test('job client (SF-072): a job waiting for limits offers Resume now and Abort…; from a turn Resume now carries the message box\'s text, from a review round none; after a reset under wait it says so', async () => {
+  const limit = { provider: 'claude', resets_at: '2026-11-05T01:00:00.000Z' };
+  const turn = job('waiting_limit', { iteration: 1, paused: { from: 'working', step: 'turn', at: '2026-11-01T10:04:00.000Z' }, limit });
+  const page = await openJob(detail(turn));
+  const acts = (): FakeElement[] => page.$('acts').children as FakeElement[];
+  const act = (label: string): FakeElement => acts().find((node) => node.textContent === label)!;
+  const posted = (): FetchRequest[] => page.requests.filter((request) => request.method === 'POST' && request.path === 'api/jobs/app/T-1/resume');
+  const placeholder = (): string => (page.$('msg') as unknown as { placeholder: string }).placeholder;
+  assert.deepEqual(facts(page).slice(0, 2), [
+    'Waiting for limits: the Claude usage limit resets at 03:00 (iteration 2). The factory resumes it then; Resume now goes on before the reset (with your message, if you write one below)', 'Iteration 2',
+  ]);
+  assert.equal(page.$('job').className, 'st-waiting_limit');
+  assert.deepEqual(acts().map((node) => [node.textContent, node.className]), [['Resume now', 'btn primary'], ['Abort…', 'btn danger']]);
+  assert.deepEqual([page.$('msg').disabled, placeholder()], [false, 'Resume now sends this to the Implementer, if you write one']);
+  page.$('msg').value = 'Go on with the tests.';
+  page.$('msg').dispatch('input');
+  act('Resume now').click();
+  await page.flush();
+  assert.deepEqual(posted().map((request) => request.body), ['{"message":"Go on with the tests."}']);
+  posted()[0]!.respond(200, { ok: true, result: { state: 'working', iteration: 1, step: 'turn', task_changed: false } });
+  await page.flush();
+  assert.equal(page.$('action-status').textContent, 'Resumed: the Implementer goes on with iteration 2.');
+
+  // Parked in the gate: no message goes with Resume now.
+  const gate = job('waiting_limit', { iteration: 1, paused: { from: 'awaiting_review', step: 'gate', at: '2026-11-01T10:04:00.000Z' }, limit: { provider: 'codex', resets_at: '2026-11-05T01:00:00.000Z', reset_seen: true, notified_at: '2026-11-05T01:00:01.000Z' } });
+  page.streams.at(-1)!.emit('jobs', { jobs: [gate] });
+  await show(page, detail(gate));
+  assert.equal(facts(page)[0], 'The Codex usage limit reset during iteration 1; the job waits for you. Resume now goes on');
+  assert.deepEqual([page.$('msg').disabled, placeholder()], [true, 'Resume now, then message the Implementer']);
+  act('Resume now').click();
+  await page.flush();
+  assert.equal(posted().at(-1)!.body, '{}');
+});

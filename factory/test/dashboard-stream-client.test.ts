@@ -711,3 +711,14 @@ test('stream client: an unknown outcome shows its warning; Refresh state shows o
   assert.match(page.$('action-doubt').textContent, /: it may have taken effect\. The state shown is current/);
   assert.deepEqual([act(page, 'Pause').disabled, posts(page).length], [false, 1]);
 });
+
+test('stream client (SF-072): the park on a usage limit and the resume from it show the factory\'s line with the change as a tag', async () => {
+  const row = job('waiting_limit', { paused: { from: 'working', step: 'turn', at: at(1) }, limit: { provider: 'claude', resets_at: at(30) } });
+  const page = await withEntries(row, detail(row), [
+    { ...state('0', 'working', 'waiting_limit'), text: 'Parked: usage limit reached' },
+    { ...state('1', 'waiting_limit', 'working', null, null, 31), text: 'Resumed after the usage limit reset' },
+  ]);
+  assert.deepEqual(nodes(page).map((node) => [node.dataset.k, node.querySelector('.body')!.textContent]), [
+    ['0', 'Parked: usage limit reachedworking → waiting_limit'], ['1', 'Resumed after the usage limit resetwaiting_limit → working'],
+  ]);
+});

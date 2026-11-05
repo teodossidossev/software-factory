@@ -2,6 +2,7 @@
 // add|list|remove`, `sf start|say|review|approve|pause|resume|restart|abort|reset`,
 // `sf handover|takeback|handed-done` (SF-073) and
 // `sf mr create|merge|status` and `sf queue list|add|remove|move|limit|hold|release` (SF-071)
+// and `sf queue on-limit` (SF-072)
 // (through the socket of sf serve),
 // `sf status|watch|dashboard` (reading the state directory directly), `sf check-task` (the Task
 // check of SF-054, run here and stored in the state directory), `sf rules` (the coding rules of
@@ -24,13 +25,14 @@ import { codexVersion } from './gate.js';
 import { existsSync } from 'node:fs';
 import { callSocket, listenSocket, socketPath } from './ipc.js';
 import { type Job, type JobState, JobStore } from './jobs.js';
-import { MAX_RUNNING, MIN_RUNNING, QueueStore, type QueueView, RunQueue } from './queue.js';
+import { localTime } from './local-time.js';
+import { MAX_RUNNING, MIN_RUNNING, ON_LIMIT_RULES, QueueStore, type QueueView, RunQueue } from './queue.js';
 import { followJobs, runJob } from './runner.js';
 import { jobNotification, notifyConfig, sendNotification, stateNotifier } from './notify.js';
 import { configDir, HANDOFF_MODES, ignoredWorkCheckouts, isHandoffMode, isWorkspaceColor, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_COLORS, workspaceColor, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN, type WorkspaceEntry } from './registry.js';
 import { loadHandbook, packageVersion, PortInUseError, SERVER_NAME, startServer } from './server.js';
 import { Setup } from './setup.js';
-import { handoverLines, type StatusRow, statusRows } from './status.js';
+import { handoverLines, limitLine, type StatusRow, statusRows } from './status.js';
 import { fileSummaryLines } from './patch.js';
 import { CheckStore, checkLines, checkSettings, refuseDraft, runTaskCheck, TaskChecks } from './task-check.js';
 import { TicketHistory } from './ticket-history.js';
@@ -54,13 +56,14 @@ const USAGE = `Usage:
   sf attach <workspace> <ticket> <file> [name]          Attach an image (PNG, JPEG, WebP or GIF by its bytes, at most 5 MB, 10 per ticket) to the ticket: .software-factory/<ticket>/<name> next to its Task file; name: default the next number (1.png, 2.png, ...); refused while a job of the ticket runs (paused aside); no sf serve needed
   sf attach <workspace> <ticket> --remove <name>        Remove an image of the ticket, under the same guard
   sf start <workspace> <ticket>                         Start the job for .software-factory/<ticket>.md in a worktree of its own
-  sf queue list                                         The run queue: the limit of jobs at once, the running count, held or not, and the queued tickets in order with what each waits for, and the starts that failed
+  sf queue list                                         The run queue: the limit of jobs at once, the running count, held or not (by hand, or by a job parked on a usage limit), the rule at a limit's reset, and the queued tickets in order with what each waits for, and the starts that failed
   sf queue add <workspace> <ticket> [--at N]            Queue a planned ticket at position N (1-based; default: the end); sf serve starts it by itself when a slot is free and its lands_after tickets are merged
   sf queue remove <workspace> <ticket>                  Take a ticket out of the queue
   sf queue move <workspace> <ticket> <N>                Move a queued ticket to position N
   sf queue limit <N>                                    Run up to N jobs at once (1-20, every workspace; default SF_MAX_JOBS); gates only the queue's own starts, a start by hand always goes
   sf queue hold [reason...]                             Hold the queue: it starts nothing until sf queue release
-  sf queue release                                      Release a held queue
+  sf queue release                                      Release a held queue (a job parked on a usage limit still holds it until it goes on)
+  sf queue on-limit resume-then-queue|resume-only|wait  What happens when a usage limit resets: resume the parked jobs, then start queued tickets again (default); resume them and hold the queue; or hold the queue and let you resume them
   sf say <workspace> <ticket> <message...>              Send a message into the job's Implementer session; on a handed-over job: Ask for changes (your checkout's edits go back into the job first)
   sf review <workspace> <ticket>                        Retry a failed Claude review (needs_human with review_failed) of the last iteration
   sf accept <workspace> <ticket>                        Accept a clean Claude review over a stopped gate (needs_human with gate_rounds, gate_budget or gate_failed) or a ledger stop (review_churn, review_disputed) and prepare the MR; on simplify_offered: skip the suggestions (listed in the MR text)
@@ -73,8 +76,8 @@ const USAGE = `Usage:
   sf mr merge <workspace> <ticket>                      Merge the job's open merge request through the host's API; refused with the host's reason when it cannot be merged
   sf mr status <workspace> <ticket>                     The merge request's state on the host: open, merged or closed, mergeable or not, the checks
   sf pause <workspace> <ticket>                         Pause a working job or one awaiting review: the turn, review or gate stops at once; worktree, branch, session and history stay
-  sf resume <workspace> <ticket> [message...]           Go on with a paused job where it stopped (the turn with the message, or "Continue where you stopped."; an interrupted review or gate runs again); a Task file changed meanwhile is handed on with its diff
-  sf restart <workspace> <ticket> [--keep-files]        Start the ticket again from its current Task file on a fresh worktree and branch (paused, aborted, failed or needs_human); the old job is archived, its branch deleted only without commits and never pushed; --keep-files copies the old worktree's changed and new files in first
+  sf resume <workspace> <ticket> [message...]           Go on with a paused job, or one waiting for a usage limit (now, before the reset), where it stopped (the turn with the message, or "Continue where you stopped."; an interrupted review or gate runs again); a Task file changed meanwhile is handed on with its diff
+  sf restart <workspace> <ticket> [--keep-files]        Start the ticket again from its current Task file on a fresh worktree and branch (paused, waiting_limit, aborted, failed or needs_human); the old job is archived, its branch deleted only without commits and never pushed; --keep-files copies the old worktree's changed and new files in first
   sf handover <workspace> <ticket>                      Hand over to my checkout: the job's branch in the workspace's checkout at its base, the job's changes as Local Changes, the commit message prefilled (ready_for_human_review; automatic with hand-over on: the workspace's handoff, else SF_HANDOFF=checkout)
   sf takeback <workspace> <ticket>                      Take it back: the branch back from your checkout into the job (handed_over), only while your checkout is as the factory left it
   sf handed-done <workspace> <ticket>                   I opened the MR myself: the job is pushed once origin has the branch with your changes (handed_over)
@@ -156,7 +159,12 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   // The run queue's scheduler: a pass after recovery, on every job state change (sf serve's own and
   // the runners', below), on every change of the queue; a pass that changed something refreshes
   // every page.
-  const runQueue = new RunQueue(queueStore, execution, setup, jobs, { onChange: () => dashboard?.refreshSetup() });
+  // At a usage limit's reset (SF-072) it resumes the parked jobs (or marks them, under wait) and sends
+  // one notification.
+  const runQueue = new RunQueue(queueStore, execution, setup, jobs, {
+    onChange: () => dashboard?.refreshSetup(),
+    notify: (notification) => sendNotification(notification, notifyConfig()),
+  });
   // The Task checks (SF-054): started from the dashboard, read by the Context owner's task_check; an ended
   // check reaches every page.
   // A check's worktree shares the checkout's Git directory: when the last check of the workspace
@@ -558,6 +566,9 @@ function queueCommand(queue: RunQueue, command: string, args: string[]): Promise
   if (command === 'release' && args.length === 0) {
     return queue.release();
   }
+  if (command === 'on-limit' && args.length === 1) {
+    return queue.rule(args[0]!);
+  }
   return Promise.reject(new FactoryError('bad_request', `Unknown command "queue-${command}".`));
 }
 
@@ -569,6 +580,9 @@ function queueLines(view: QueueView): string[] {
     `limit: ${view.max_running} job${view.max_running === 1 ? '' : 's'} at once`,
     `running: ${view.running}`,
     `held: ${view.held ? `yes${view.hold_reason !== null ? ` (${view.hold_reason})` : ''}` : 'no'}`,
+    // The limit hold (SF-072): parked jobs hold the queue, whatever the hold by hand.
+    ...(view.limit_hold !== null ? [`usage limit: ${view.limit_hold.parked} parked job${view.limit_hold.parked === 1 ? ' holds' : 's hold'} the queue${view.limit_hold.resets_at !== null ? `, resets at ${localTime(view.limit_hold.resets_at)}` : ''}`] : []),
+    `on limit reset: ${view.on_limit}`,
     `next: ${view.next !== null ? ref(view.next) : 'nothing ready'}`,
   ];
   lines.push(view.entries.length === 0 ? 'queue: empty' : 'queue:');
@@ -593,7 +607,7 @@ function wholeNumber(value: string | undefined, what: string): string {
   return value;
 }
 
-// sf queue list|add|remove|move|limit|hold|release: the arguments checked here, the change in sf serve.
+// sf queue list|add|remove|move|limit|hold|release|on-limit: the arguments checked here, the change in sf serve.
 async function queue(args: string[]): Promise<void> {
   const [command, ...rest] = args;
   if (command === 'list') {
@@ -642,6 +656,13 @@ async function queue(args: string[]): Promise<void> {
       throw new UsageError('queue release takes no arguments.');
     }
     await viaServer('queue-release', []);
+    return;
+  }
+  if (command === 'on-limit') {
+    if (rest.length !== 1 || !(ON_LIMIT_RULES as readonly string[]).includes(rest[0]!)) {
+      throw new UsageError(`queue on-limit needs one of ${ON_LIMIT_RULES.join(', ')}.`);
+    }
+    await viaServer('queue-on-limit', rest);
     return;
   }
   throw new UsageError(command === undefined ? 'a queue command is required.' : `unknown queue command "${command}".`);
@@ -947,10 +968,8 @@ async function status(args: string[]): Promise<void> {
     const all = await jobs.list();
     console.log(all.length === 0 ? 'No jobs.' : table(await statusRows(jobs, all, now)));
     // The jobs whose Implementer went on by itself after a turn limit (SF-069), one line each.
-    const turnLimits = all.flatMap((job) => {
-      const line = turnLimitLine(job);
-      return line === undefined ? [] : [`${job.workspace}/${job.ticket}: ${line}`];
-    });
+    // And the jobs parked on a usage limit (SF-072), with the provider and the reset.
+    const turnLimits = all.flatMap((job) => [turnLimitLine(job), limitLine(job)].flatMap((line) => (line === undefined ? [] : [`${job.workspace}/${job.ticket}: ${line}`])));
     if (turnLimits.length > 0) {
       console.log(`\n${turnLimits.join('\n')}`);
     }
@@ -971,6 +990,11 @@ async function status(args: string[]): Promise<void> {
   const turnLimit = turnLimitLine(job);
   if (turnLimit !== undefined) {
     console.log(`\n${turnLimit}`);
+  }
+  // A job parked on a usage limit (SF-072).
+  const limit = limitLine(job);
+  if (limit !== undefined) {
+    console.log(`\n${limit}`);
   }
   // The job in the user's checkout, or why it is not (SF-073).
   const handover = handoverLines(job, (await jobs.readMrText(workspace, ticket))?.split(/\r?\n/)[0]);

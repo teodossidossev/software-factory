@@ -7,12 +7,15 @@ import { delimiter, join } from 'node:path';
 import { withoutHostTokens } from './forge.js';
 import type { Job, JobState, JobStore } from './jobs.js';
 import { now } from './jobs.js';
+import { localTime } from './local-time.js';
 import { HANDOFF_OFF_CODE } from './registry.js';
 import { turnLimitLine } from './turn-limit.js';
 
 const DESKTOP_TIMEOUT_MS = 5_000;
 const NTFY_TIMEOUT_MS = 10_000;
-export const NOTIFIED_STATES: readonly JobState[] = ['ready_for_human_review', 'handed_over', 'needs_human', 'paused', 'pushed', 'failed'];
+export const NOTIFIED_STATES: readonly JobState[] = ['ready_for_human_review', 'handed_over', 'needs_human', 'paused', 'waiting_limit', 'pushed', 'failed'];
+// The name of a usage limit's provider in a notification (SF-072).
+const PROVIDER_NAMES = { claude: 'Claude', codex: 'Codex' } as const;
 
 export interface NotifyConfig {
   desktop: boolean;
@@ -75,6 +78,17 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
       tags: 'pause_button',
     };
   }
+  if (job.state === 'waiting_limit') {
+    // SF-072: whose usage limit, and until when (local time, HH:MM) the job is parked.
+    const limit = job.limit;
+    const until = limit !== undefined ? localTime(limit.resets_at)?.slice(11, 16) : undefined;
+    return {
+      title: `${job.ticket}: waiting for limits`,
+      body: [`Usage limit (${limit !== undefined ? PROVIDER_NAMES[limit.provider] : 'unknown'}): parked until ${until ?? 'the reset'}`, `branch: ${job.branch}`, ...lines].slice(0, 3).join('\n'),
+      priority: 'default',
+      tags: 'hourglass',
+    };
+  }
   if (job.state === 'handed_over') {
     // SF-073: the changes wait in the user's checkout; extra holds the MR title and the file lines.
     return {
@@ -96,6 +110,14 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
     priority: job.state === 'needs_human' || job.state === 'failed' ? 'high' : 'default',
     tags: job.state === 'pushed' ? 'white_check_mark' : job.state === 'ready_for_human_review' ? 'eyes' : 'warning',
   };
+}
+
+// The one notification of the run queue at a usage limit's reset (SF-072): the parked jobs it
+// resumed, or (rule wait) those that wait for the user.
+export function limitResetNotification(resumed: number, waiting: number): Notification {
+  const jobs = (count: number): string => `${count} job${count === 1 ? '' : 's'}`;
+  const parts = [...(resumed > 0 ? [`${jobs(resumed)} resumed`] : []), ...(waiting > 0 ? [`${jobs(waiting)} ${waiting === 1 ? 'waits' : 'wait'} for you`] : [])];
+  return { title: 'Usage limit reset', body: `Usage limit reset: ${parts.join(', ')}`, priority: 'default', tags: 'hourglass' };
 }
 
 async function findExecutable(name: string, path: string | undefined): Promise<string | undefined> {

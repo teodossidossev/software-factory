@@ -71,6 +71,18 @@ export function formatEvent(raw: string): string[] {
   return describeEvent(raw)?.lines ?? [];
 }
 
+// The line of a state change into or out of waiting_limit (SF-072): parked on a usage limit, or
+// resumed from it into the turn or the review; undefined for any other change.
+export function limitStateText(from: unknown, to: unknown): string | undefined {
+  if (to === 'waiting_limit') {
+    return 'Parked: usage limit reached';
+  }
+  if (from === 'waiting_limit' && (to === 'working' || to === 'awaiting_review')) {
+    return 'Resumed after the usage limit reset';
+  }
+  return undefined;
+}
+
 function recordLines(record: Record<string, unknown>): string[] {
   const time = localTime(record.ts)?.slice(11) ?? '--:--:--';
   const prefix = `${time} [${String(record.iteration)}]`;
@@ -81,6 +93,11 @@ function recordLines(record: Record<string, unknown>): string[] {
   }
   const state = record.state as { from: string | null; to: string; error?: { code: string; message: string } } | undefined;
   if (state !== undefined) {
+    // The park on a usage limit and the resume from it (SF-072).
+    const limit = limitStateText(state.from, state.to);
+    if (limit !== undefined) {
+      return [`${prefix} ${limit}`];
+    }
     const error = state.error !== undefined ? ` (${state.error.code}: ${state.error.message})` : '';
     return [`${prefix} state ${state.from ?? '-'} -> ${state.to}${error}`];
   }

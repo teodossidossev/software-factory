@@ -30,9 +30,13 @@ const TERMINAL_STATES = ['pushed', 'aborted', 'failed'];
 const SAY_STATES = ['working', 'awaiting_review', 'needs_human', 'ready_for_human_review', 'handed_over'];
 // The hand-over to the user's checkout (SF-073): the composer's actions, each with the state it takes.
 const HANDOVER_ACTIONS = [['handover', 'ready_for_human_review'], ['handed-done', 'handed_over'], ['takeback', 'handed_over']];
-// Pause, Resume and Restart (SF-067): the states each takes.
+// Pause, Resume and Restart (SF-067): the states each takes; a job parked on a usage limit
+// (SF-072, waiting_limit) is resumed (Resume now) and restarted like a paused one.
 const PAUSE_STATES = ['working', 'awaiting_review'];
-const RESTART_STATES = ['paused', 'aborted', 'failed', 'needs_human'];
+const RESUME_STATES = ['paused', 'waiting_limit'];
+const RESTART_STATES = ['paused', 'waiting_limit', 'aborted', 'failed', 'needs_human'];
+// The rule at a usage limit's reset (SF-072), as the Rules menu names them.
+const ON_LIMIT_RULES = ['resume-then-queue', 'resume-only', 'wait'];
 const ACTION_LABELS = {
   approve: 'Approve', abort: 'Abort', say: 'Send', review: 'Retry review', accept: 'Accept and prepare MR', settle: 'Settle', simplify: 'Simplify', archive: 'Archive',
   'mr-create': 'Create merge request', 'mr-merge': 'Merge', 'mr-status': 'Refresh MR status', pause: 'Pause', resume: 'Resume', restart: 'Restart',
@@ -367,8 +371,23 @@ function pausedNext(job) {
   return `${again}; Restart starts the ticket again from its current Task file`;
 }
 
-// The sentence of the job page's header and composer: sentence(), and for a paused job what moves it on.
-const headSentence = (job) => (job.state === 'paused' ? `${sentence(job)}. ${pausedNext(job)}` : sentence(job));
+// What moves a job parked on a usage limit on (SF-072).
+function parkedNext(job) {
+  const turn = job.paused?.from === 'working';
+  if (job.limit?.reset_seen === true) {
+    return `Resume now goes on${turn ? ' (with your message, if you write one below)' : ''}`;
+  }
+  return `The factory resumes it then; Resume now goes on before the reset${turn ? ' (with your message, if you write one below)' : ''}`;
+}
+
+// The sentence of the job page's header and composer: sentence(), and for a paused or parked job
+// what moves it on.
+const headSentence = (job) => (job.state === 'paused' ? `${sentence(job)}. ${pausedNext(job)}`
+  : job.state === 'waiting_limit' ? `${sentence(job)}. ${parkedNext(job)}` : sentence(job));
+
+// A parked job's reset time (SF-072), HH:MM in local time, or null.
+const limitClock = (job) => (typeof job.limit?.resets_at === 'string' ? clock(job.limit.resets_at) : null);
+const LIMIT_PROVIDERS = { claude: 'Claude', codex: 'Codex' };
 
 // A merge request's URL as a link when it is https, else as text.
 function mrLink(mr) {
@@ -1621,10 +1640,14 @@ function copyValue(text, box, say) {
 const WHO = { implementer: 'Implementer', claude: 'Claude review', codex: 'Codex gate', mr: 'MR writer', factory: 'Factory', you: 'You' };
 const STATE_WORD = {
   starting: 'Starting', working: 'Implementing', awaiting_review: 'In review', preparing_mr: 'Writing the MR', needs_human: 'Waiting for you',
-  ready_for_human_review: 'Ready for you', handed_over: 'Handed over to your checkout', paused: 'Paused by you', pushed: 'Pushed', aborted: 'Aborted', failed: 'Failed',
+  ready_for_human_review: 'Ready for you', handed_over: 'Handed over to your checkout', paused: 'Paused by you', waiting_limit: 'Waiting for limits', pushed: 'Pushed', aborted: 'Aborted', failed: 'Failed',
 };
-// The line of a state change that is not a stop.
+// The line of a state change that is not a stop; the factory's own line when it gives one (SF-072:
+// the park on a usage limit and the resume from it).
 const STATE_TEXT = (entry) => {
+  if (typeof entry.text === 'string' && entry.text !== '') {
+    return entry.text;
+  }
   if (entry.to === 'awaiting_review') {
     return 'The Implementer finished; the reviews start';
   }
@@ -2515,6 +2538,10 @@ function actionsFor(job, detail) {
     case 'paused':
       list = [{ a: 'resume', l: 'Resume' }, RESTART, ABORT];
       break;
+    case 'waiting_limit':
+      // SF-072: no message waits for a parked job; Resume now carries it (from a turn).
+      list = [{ a: 'resume', l: 'Resume now' }, ABORT];
+      break;
     case 'ready_for_human_review':
       // SF-080: the Merge request screen first; Approve… stays.
       list = [{ a: 'review-mr', l: ACTION_LABELS['review-mr'] }, { a: 'approve', l: 'Approve…' }, { a: 'handover', l: ACTION_LABELS.handover }, ...(canCreateMr(job) ? [{ a: 'mr-create', l: 'Create merge request' }] : []), SEND, ABORT];
@@ -2601,7 +2628,8 @@ function renderComposer() {
   $('composer-sentence').replaceChildren(...cs);
   msg.hidden = finished;
   msg.disabled = !(SAY_STATES.includes(job.state) || pausedTurn(job));
-  msg.placeholder = job.state === 'paused' ? (pausedTurn(job) ? 'Resume sends this to the Implementer, if you write one' : 'Resume, then message the Implementer')
+  const resumeWord = job.state === 'waiting_limit' ? 'Resume now' : 'Resume';
+  msg.placeholder = RESUME_STATES.includes(job.state) ? (pausedTurn(job) ? `${resumeWord} sends this to the Implementer, if you write one` : `${resumeWord}, then message the Implementer`)
     : PLACEHOLDER[job.state] ?? 'Message';
   const buttons = actionsFor(job, state.detail).map((action) => {
     const node = button(`btn${action.p ? ' primary' : ''}${action.d ? ' danger' : ''}`, action.l, { act: action.a });
@@ -2699,10 +2727,10 @@ function availability(action, job) {
     return PAUSE_STATES.includes(job.state) ? '' : 'only while the Implementer works or the reviewers review.';
   }
   if (action === 'resume') {
-    return job.state === 'paused' ? '' : 'only for a paused job.';
+    return RESUME_STATES.includes(job.state) ? '' : 'only for a paused job, or one waiting for limits.';
   }
   if (action === 'restart') {
-    return RESTART_STATES.includes(job.state) ? '' : 'only for a paused, aborted, failed or needs_human job.';
+    return RESTART_STATES.includes(job.state) ? '' : 'only for a paused, waiting for limits, aborted, failed or needs_human job.';
   }
   if (action === 'mr-create') {
     if (!canCreateMr(job)) {
@@ -2733,11 +2761,15 @@ function availability(action, job) {
   if (job.state === 'paused') {
     return pausedTurn(job) ? 'the job is paused: Resume sends the message.' : 'the job is paused: Resume, then send the message.';
   }
+  if (job.state === 'waiting_limit') {
+    return pausedTurn(job) ? 'the job waits for limits: Resume now sends the message.' : 'the job waits for limits: Resume now, then send the message.';
+  }
   return SAY_STATES.includes(job.state) ? '' : `messages need working, awaiting_review, needs_human, ready_for_human_review or handed_over; the job is ${job.state}.`;
 }
 
-// A job paused during the Implementer's turn (SF-067): its Resume takes the message.
-const pausedTurn = (job) => job.state === 'paused' && job.paused?.from === 'working';
+// A job paused (SF-067) or parked on a usage limit (SF-072) during the Implementer's turn: its
+// Resume takes the message.
+const pausedTurn = (job) => RESUME_STATES.includes(job.state) && job.paused?.from === 'working';
 
 function renderOutcome(outcome) {
   const node = $('action-status');
@@ -3173,7 +3205,7 @@ function settle(id, decision) {
 // ticket (SF-057): a ticket whose last job failed or was aborted is in the Queue (to start again),
 // not also in Done; a pushed one is only in Done.
 const COLUMN_OF = {
-  starting: 'implementing', working: 'implementing',
+  starting: 'implementing', working: 'implementing', waiting_limit: 'implementing',
   awaiting_review: 'reviewing', preparing_mr: 'reviewing',
   needs_human: 'you', ready_for_human_review: 'you', handed_over: 'you', paused: 'you',
   pushed: 'done', aborted: 'done', failed: 'done',
@@ -3191,8 +3223,9 @@ const LIMIT_MAX = 20;
 const DONE_LIMIT = 8;
 const DONE_LABELS = { pushed: 'Pushed', aborted: 'Aborted', failed: 'Failed' };
 const RESTARTABLE = ['failed', 'aborted'];
-// The states of a running card: the Now line, the tool calls, the cost "so far".
-const RUNNING = ['starting', 'working', 'awaiting_review', 'preparing_mr'];
+// The states of a running card: the Now line, the tool calls, the cost "so far"; a job parked on a
+// usage limit (SF-072) holds its slot and counts as running, with a card of its own.
+const RUNNING = ['starting', 'working', 'awaiting_review', 'preparing_mr', 'waiting_limit'];
 // While a card runs and the page is visible, api/jobs is read again this often.
 const REFRESH_MS = 15000;
 // An ok or info message of the toast goes after this long, unless the pointer is on it.
@@ -3231,7 +3264,7 @@ const counted = (n, word, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
 // session), else the last one published; never 0.
 const SESSION_CODES = ['serve_restarted', 'session_failed', 'turn_failed', 'max_turns', 'sandbox_unavailable', 'permission_mode_mismatch', 'publish_failed'];
 function shownIteration(job) {
-  const underWay = job.state === 'starting' || job.state === 'working' || (job.state === 'paused' && job.paused?.step === 'turn')
+  const underWay = job.state === 'starting' || job.state === 'working' || (RESUME_STATES.includes(job.state) && job.paused?.step === 'turn')
     || (job.state === 'needs_human' && SESSION_CODES.includes(job.error?.code));
   return Math.max(1, underWay ? job.iteration + 1 : job.iteration);
 }
@@ -3380,6 +3413,14 @@ function sentence(job) {
       return `The Implementer is working on iteration ${it}`;
     case 'paused':
       return `Paused by you during iteration ${it}`;
+    case 'waiting_limit': {
+      // SF-072: parked on a usage limit.
+      const who = LIMIT_PROVIDERS[job.limit?.provider] ?? 'The';
+      if (job.limit?.reset_seen === true) {
+        return `The ${who} usage limit reset during iteration ${it}; the job waits for you`;
+      }
+      return `Waiting for limits: the ${who} usage limit resets at ${limitClock(job) ?? 'its reset'} (iteration ${it})`;
+    }
     case 'awaiting_review':
       return `Claude and Codex are reviewing iteration ${it}`;
     case 'preparing_mr':
@@ -3649,7 +3690,19 @@ function jobCard(job) {
   const item = boardCard(key, job.workspace);
   item.dataset.open = key;
   item.append(cardRow(job), el('div', 'title', titleOf(job)));
-  if (RUNNING.includes(job.state)) {
+  if (job.state === 'waiting_limit') {
+    // SF-072: parked on a usage limit, holding its slot; once the reset passed under the rule wait,
+    // the user resumes it.
+    if (job.limit?.reset_seen === true) {
+      const act = el('div', 'act');
+      const resume = button('btn primary small', ACTION_LABELS.resume, { run: 'resume', key });
+      resume.disabled = availability('resume', job) !== '';
+      act.append(resume);
+      item.append(el('div', 'parked', 'Limit reset: resume?'), el('div', 'meta', `Iteration ${shownIteration(job)} · parked, holds its slot`), act);
+    } else {
+      item.append(el('div', 'parked', `Waiting for limits · resets at ${limitClock(job) ?? '—'}`), el('div', 'meta', `Iteration ${shownIteration(job)} · parked, holds its slot`));
+    }
+  } else if (RUNNING.includes(job.state)) {
     const now = nowLine(job);
     const line = el('div', 'now');
     const what = el('span', '', now.what);
@@ -3910,11 +3963,61 @@ function renderQueueBar() {
   $('limDown').disabled = busy || queue.max_running <= LIMIT_MIN;
   $('limUp').disabled = busy || queue.max_running >= LIMIT_MAX;
   const status = $('qstatus');
-  status.className = queue.held ? 'qstatus held' : 'qstatus';
+  // SF-072: a job parked on a usage limit holds the queue, whatever the hold by hand.
+  const limitHold = queue.limit_hold !== null && typeof queue.limit_hold === 'object' ? queue.limit_hold : null;
+  status.className = queue.held || limitHold !== null ? 'qstatus held' : 'qstatus';
   const free = Math.max(0, queue.max_running - queue.running);
-  status.textContent = queue.held
-    ? `Queue held${queue.hold_reason ? `: ${queue.hold_reason}` : ''} · ${queue.running} running`
-    : `${queue.running} running · ${free} slot${free === 1 ? '' : 's'} free · next: ${queue.next?.ticket ?? 'nothing ready'}`;
+  status.textContent = limitHold !== null
+    ? `Queue held: usage limit${typeof limitHold.resets_at === 'string' ? `, resets at ${clock(limitHold.resets_at)}` : ' reset, resume the parked jobs'} · ${queue.running} running`
+    : queue.held
+      ? `Queue held${queue.hold_reason ? `: ${queue.hold_reason}` : ''} · ${queue.running} running`
+      : `${queue.running} running · ${free} slot${free === 1 ? '' : 's'} free · next: ${queue.next?.ticket ?? 'nothing ready'}`;
+  renderRules();
+}
+
+// The Rules menu of the top bar (SF-072): the rule at a usage limit's reset, checked as the queue
+// has it; a change is posted at once (api/queue/rule) and the board shows the server's queue.
+function renderRules() {
+  const queue = state.queue;
+  const wrap = $('rulesBtn').parentElement;
+  wrap.hidden = queue === null;
+  if (queue === null) {
+    closeRules();
+    return;
+  }
+  const busy = state.setupPending.has('queue:rule');
+  for (const rule of ON_LIMIT_RULES) {
+    const input = $(`rule-${rule}`);
+    input.checked = queue.on_limit === rule;
+    input.disabled = busy;
+  }
+}
+// The Rules button: the menu opens or closes (only with the queue).
+function toggleRules() {
+  if (state.queue === null) {
+    return;
+  }
+  const menu = $('rulesMenu');
+  menu.hidden = !menu.hidden;
+  $('rulesBtn').setAttribute('aria-expanded', String(!menu.hidden));
+}
+// The menu closes (Escape, a click outside, the queue gone).
+function closeRules() {
+  $('rulesMenu').hidden = true;
+  $('rulesBtn').setAttribute('aria-expanded', 'false');
+}
+// The toast after a rule was saved.
+const RULE_TEXT = {
+  'resume-then-queue': 'At a usage limit reset the parked jobs resume, then the queue goes on.',
+  'resume-only': 'At a usage limit reset the parked jobs resume; the queue stays held until you release it.',
+  wait: 'At a usage limit reset nothing resumes: you resume the parked jobs.',
+};
+// A rule chosen in the menu: posted once unless it is the queue's already.
+function setRule(rule) {
+  if (state.queue === null || !ON_LIMIT_RULES.includes(rule) || rule === state.queue.on_limit) {
+    return;
+  }
+  void setupRequest('queue:rule', 'api/queue/rule', { rule }, 'toast', (data) => ({ level: 'ok', text: RULE_TEXT[data?.on_limit] ?? 'Rule saved.' }));
 }
 
 // The queued tickets of every workspace, in their order.
@@ -4401,11 +4504,19 @@ function renderJobs() {
 // listeners).
 function onClick(event) {
   const target = typeof event.target?.closest === 'function'
-    ? event.target.closest('[data-tk],[data-tkimg],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],#limUp,#limDown,[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived')
+    ? event.target.closest('[data-tk],[data-tkimg],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],#limUp,#limDown,#rulesBtn,[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived')
     : null;
   // An open ⋯ menu closes on any click but its own toggle (its items act, then it is closed).
   if (state.openMenu !== null && (target === null || target.dataset.menu === undefined)) {
     setCardMenu(null);
+  }
+  // The Rules menu (SF-072) closes on a click outside it.
+  if (typeof event.target?.closest === 'function' && event.target.closest('.menuwrap') === null && !$('rulesMenu').hidden) {
+    closeRules();
+  }
+  if (target?.id === 'rulesBtn') {
+    toggleRules();
+    return;
   }
   // A link (a merge request's) goes where it points; it does not open the card around it.
   if (target === null || target.disabled || (typeof event.target.closest === 'function' && event.target.closest('a') !== null)) {
@@ -4572,6 +4683,11 @@ function onInput(event) {
 // The Changes screen's selector and Collapse unchanged.
 function onChange(event) {
   const target = event.target;
+  // A rule of the Rules menu (SF-072).
+  if (target?.name === 'rule' && target.checked) {
+    setRule(target.value);
+    return;
+  }
   if (target?.id === 'cxview') {
     ui.cx.view = target.value === 'all' ? 'all' : Number(target.value);
     renderChanges();
@@ -4594,6 +4710,13 @@ function onKey(event) {
     return;
   }
   const target = event.target;
+  // Escape closes the open Rules menu first (SF-072).
+  if (event.key === 'Escape' && !$('rulesMenu').hidden) {
+    event.preventDefault();
+    closeRules();
+    $('rulesBtn').focus();
+    return;
+  }
   if (target?.id === 'vdiv' && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
     event.preventDefault();
     dividerKey(event);

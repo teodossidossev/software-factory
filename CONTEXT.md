@@ -96,13 +96,21 @@ _Avoid_: suspended, on hold, stopped (for a Paused Job); aborted (that Job has e
 
 **Queue**:
 The one order of the planned Tickets of every Workspace that the factory starts by itself, and the
-run limit `max_running`: how many Jobs may run at once (starting, working, awaiting review or
-preparing the MR) in every Workspace together; the User sets it, `SF_MAX_JOBS` is only its
+run limit `max_running`: how many Jobs may run at once (starting, working, awaiting review,
+preparing the MR or Waiting for limits) in every Workspace together; the User sets it, `SF_MAX_JOBS` is only its
 default. When a slot is free, `sf serve` starts the first queued Ticket whose `lands_after`
 Tickets are all merged; it never starts one twice. The limit gates only these starts: a start by
 hand always goes, and its Job counts as running. The User adds, removes, reorders, holds and
 releases it (the board, `sf queue`); the Context owner reads it and adds to it.
 _Avoid_: backlog, schedule, planned list (for the Queue); slots per workspace
+
+**Waiting for limits**:
+The state (`waiting_limit`) of a Job whose session hit the plan's usage limit (Claude's or Codex's):
+it is parked as if Paused, the interrupted turn or Review round thrown away, never a verdict, and
+it keeps its slot in the Queue's run limit. While any Job waits for limits the Queue starts
+nothing. At the limit's reset the Queue applies its rule (resume the parked Jobs then go on, resume
+them only, or wait for the User); the User may Resume one at any time, with a message after a turn.
+_Avoid_: rate-limited, throttled, on hold (the Queue's hold by hand is another thing)
 
 **Worktree**:
 The Git worktree of one Job, created from the Workspace's checkout at start under the factory's

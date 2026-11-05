@@ -39,7 +39,8 @@ bin/sf queue remove <workspace> <ticket>        # take it out of the queue; need
 bin/sf queue move <workspace> <ticket> <N>      # move a queued ticket to position N; needs sf serve
 bin/sf queue limit <N>            # run up to N jobs at once (1-20, every workspace); needs sf serve
 bin/sf queue hold [reason...]     # the queue starts nothing until release; needs sf serve
-bin/sf queue release              # needs sf serve
+bin/sf queue release              # needs sf serve; a job parked on a usage limit still holds the queue
+bin/sf queue on-limit resume-then-queue|resume-only|wait  # what the queue does when a usage limit resets (section Usage limit); needs sf serve
 bin/sf say <workspace> <ticket> <message...>   # a user message into the session; on a handed-over job it is Ask for changes (section Hand-over to your checkout); needs sf serve
 bin/sf review <workspace> <ticket>             # retry a failed Claude review (needs_human with review_failed); needs sf serve
 bin/sf accept <workspace> <ticket>             # accept a clean Claude review over a stopped gate (gate_rounds, gate_budget, gate_failed) or a ledger stop (review_churn, review_disputed) and prepare the MR, or skip the simplification pass's suggestions (simplify_offered); needs sf serve
@@ -935,6 +936,55 @@ SF-067. To change course without abort, reset and a branch deleted by hand.
 - Notifications: `paused` is notified (default priority, "Paused during the <step>; Resume goes on
   from there."). `sf status` shows `paused` like any state.
 
+### Usage limit (waiting_limit)
+
+SF-072. When a session hits the plan's usage limit ("You've hit your 5-hour limit · resets 3am
+(Europe/Sofia)"), the job parks instead of stopping, and goes on when the limit resets.
+
+- **Detection** (`usageLimit(text, now, source)` in `src/usage-limit.ts`, on the first line of the
+  failure message, before its redaction): the Implementer turn (a turn ending `session_failed` or
+  `turn_failed`), the Claude review and the simplification pass match `/hit your .*limit/i`
+  (provider `claude`); the gate matches `/usage limit|rate limit/i` (provider `codex`). The reset:
+  "resets <time>" is the next such time after now in the named IANA zone, "resets <Mon D>, <time>"
+  that date (next year when past), "try again in <duration>" now plus the duration; no zone or an
+  unknown one is `sf serve`'s; nothing parseable: the queue tries again 30 minutes after the park.
+  MR preparation (`preparing_mr`) is not parked: it stops in `needs_human` as before, and so do the
+  Task checks (their stored error names the limit). A round the job had moved on from is recorded
+  as before, `ignored`.
+- **Park**: the job goes to `waiting_limit`. Nothing of the round is recorded (no `review.json`,
+  `gate.json` or `simplify.json`, no `review_failed` or `simplify` event, and a parked gate run's
+  tokens are not added to `gate_tokens`); an `interrupted` event is,
+  as for a pause, so the round runs again on Resume (an interrupted simplification pass does not use
+  up its one run). `job.json` keeps `paused` (`from` `working` for a turn, `awaiting_review` for a
+  round; `step`, `at`) and gets `limit: {provider, resets_at}`, with `resets_at` the parsed reset or
+  `paused.at` + 30 minutes. A parked job holds its slot: `waiting_limit` counts as running
+  (`RUNNING_STATES`), though no session runs. `sf serve`'s recovery leaves it alone.
+- **Commands** on a parked job: `sf resume [message...]` goes on now, before the reset (the message
+  rule of a paused job: a message only after a turn); `sf abort`, `sf reset` and `sf restart` as
+  for a paused job. `sf say` is refused (`invalid_state`, "Resume the job with a message: sf resume
+  <ws> <ticket> [message]"), and so is `sf pause`.
+- **The limit hold**: while any job is `waiting_limit` the run queue starts nothing, whichever
+  provider's limit it is; jobs that run go on, and one that hits its own limit parks too. This hold
+  is computed, never stored: `sf queue release` does not end it. A start by hand, a restart or a
+  Resume still goes, and counts against `max_running` with the parked jobs.
+- **The reset**: `RunQueue` keeps one timer at the earliest `resets_at` of the parked jobs (armed
+  again after an `sf serve` restart; a reset passed meanwhile is due at once). When it fires, each
+  parked job whose reset has passed is taken in park order, read again under the Execution's lock
+  (one aborted, reset, restarted or resumed since is skipped), and `queue.json`'s `on_limit` applies:
+  `resume-then-queue` (default) resumes it, and the queue starts tickets again once no job is
+  parked; `resume-only` resumes it and holds the queue by hand ("usage limit reset; release the
+  queue to go on"); `wait` resumes nothing, marks the job `limit.reset_seen` (with
+  `limit.notified_at`; the timer skips it from then on) and holds the queue by hand, and the card
+  asks "Limit reset: resume?". The resume is SF-067's Resume without a message (a turn goes on in
+  the same session, a round runs again); one that fails (`worktree_missing`) hands the job to the
+  user in `needs_human` with that error. A session that hits a limit again parks the job again.
+  `sf queue on-limit <rule>` and the board's Rules menu set the rule (`invalid_rule` otherwise);
+  `sf queue list` prints it and the limit hold.
+- **Notifications**: each park is notified ("Usage limit (Claude): parked until 03:00"), and each
+  reset once: "Usage limit reset: N jobs resumed" (or "N jobs wait for you" under `wait`).
+  `sf status` shows the provider and the reset in local time; `sf watch` and the Stream show
+  "Parked: usage limit reached" and "Resumed after the usage limit reset".
+
 ## MR preparation
 
 MR preparation runs on the deciding clean verdict (the clean path, from `awaiting_review`, or as
@@ -1307,7 +1357,7 @@ exists.
 
 ## Notifications
 
-On `ready_for_human_review`, `handed_over`, `needs_human`, `paused`, `pushed` and `failed` (iterations are silent unless
+On `ready_for_human_review`, `handed_over`, `needs_human`, `paused`, `waiting_limit` (SF-072), `pushed` and `failed` (iterations are silent unless
 `SF_NOTIFY_ITERATIONS=on`, which adds `awaiting_review` with `Priority: default`, `Tags: eyes` and
 the body "Report and Patch of iteration N are ready for the reviewers") the
 factory sends a desktop notification (`notify-send --app-name="Software Factory" "<ticket>:
@@ -1358,12 +1408,13 @@ SF-071. The planned tickets of every workspace form one **run queue**: an order 
 a limit `max_running` of the jobs that run at once (1-20, every workspace together; default
 `SF_MAX_JOBS`, 3), and `sf serve` starting the next queued ticket by itself when a slot is free.
 It lives in `<state dir>/queue.json` (written atomically): `{"version": 1, "max_running": N,
-"held": false, "hold_reason": null, "entries": [{workspace, ticket, queued_at}], "errors":
+"held": false, "hold_reason": null, "on_limit": "resume-then-queue", "entries": [{workspace, ticket, queued_at}], "errors":
 [{workspace, ticket, code, message, at}]}`. A missing file is an empty queue; an invalid one stops
 `sf serve` at its start (`queue_invalid`), as an invalid registry does.
 
-- **Running** is `starting`, `working`, `awaiting_review` or `preparing_mr` (`RUNNING_STATES` in
-  `src/jobs.ts`), whoever started the job. A paused job and the jobs that wait for the user
+- **Running** is `starting`, `working`, `awaiting_review`, `preparing_mr` or `waiting_limit` (a job
+  parked on a usage limit holds its slot, SF-072) (`RUNNING_STATES` in `src/jobs.ts`), whoever
+  started the job. A paused job and the jobs that wait for the user
   (`needs_human`, `ready_for_human_review`, `handed_over`) do not count.
 - **The limit gates only the queue's own starts.** A start by hand (the board's Start, `sf start`),
   a restart, a resume, an Ask for changes and a take back always go; their jobs count when the
@@ -1398,9 +1449,10 @@ It lives in `<state dir>/queue.json` (written atomically): `{"version": 1, "max_
   skeleton, `job_exists` for a ticket with a live job, `already_queued`; N beyond the end is the
   end), `sf queue remove` and `sf queue move <ws> <ticket> <N>` (`not_queued` for a ticket not
   queued), `sf queue limit <N>` (`invalid_limit` outside 1-20), `sf queue hold [reason…]` and
-  `sf queue release` (the hold and its reason survive a restart); `sf queue list` prints the limit,
-  the running count, the hold, the next ticket to start, the entries with what each waits for, and
-  the starts that failed. They go to `sf serve` over its socket, as `sf start` does. The board
+  `sf queue release` (the hold and its reason survive a restart; a job parked on a usage limit
+  holds the queue whatever the hold by hand, SF-072), `sf queue on-limit <rule>` (section Usage
+  limit); `sf queue list` prints the limit, the running count, the hold, the limit hold and the rule,
+  the next ticket to start, the entries with what each waits for, and the starts that failed. They go to `sf serve` over its socket, as `sf start` does. The board
   posts the same changes (`api/queue/*`, section Dashboard) and the Context owner has `queue_list`
   and `queue_add` (below); neither removes nor moves.
 - **MCP tools** for the Context owner: `queue_list({})` returns `{max_running, running, held,
@@ -1437,12 +1489,16 @@ a click keeps that workspace's cards and counts, a second click shows all again)
 *Workspaces* and *New ticket*, and the run queue's controls (SF-071, section Run queue): "Run up
 to [− N +] jobs at once" (the stepper posts `api/queue/limit`, off at 1 and 20 and while a change
 is out) and the queue's status, "2 running · 1 slot free · next: SF-069" ("nothing ready" when no
-entry can start) or, held, "Queue held: <reason> · 2 running" in the warning colour. The Rules menu
-stays hidden until SF-072. Five columns, each heading with its count: **Queue** (the Task files of
+entry can start) or, held, "Queue held: <reason> · 2 running" in the warning colour; while a job is
+parked on a usage limit (SF-072) "Queue held: usage limit, resets at 03:00 · 2 running" (once every
+reset passed under `wait`: "Queue held: usage limit reset, resume the parked jobs"). *Rules ▾*
+opens the Rules menu (SF-072): "When the usage limit resets", with the queue's rule checked
+(*Resume parked jobs, then go on with the queue*, *Resume parked jobs only*, *Wait for me*); a
+choice posts `api/queue/rule` at once; a click outside or Escape closes it. Five columns, each heading with its count: **Queue** (the Task files of
 every usable workspace whose ticket has no job, or whose last job is `failed` or `aborted`: first
 the queued ones in the queue's order, each with its position, or "The queue is empty: add a ticket
 below.", then a "Not queued" divider and the other planned tickets; the heading counts the queued
-ones), **Implementing** (`starting`, `working`), **Reviewing** (`awaiting_review`, that is the
+ones), **Implementing** (`starting`, `working`, `waiting_limit`), **Reviewing** (`awaiting_review`, that is the
 Claude review or the Codex gate, and `preparing_mr`), **Your turn** (`needs_human`,
 `ready_for_human_review`, `handed_over`, `paused`) and **Done** (`pushed`, and `aborted` or `failed` when the
 ticket has no Queue card; the most recent first; the last eight, then *Show all N*, which shows the
@@ -1472,7 +1528,9 @@ prepared; on `ready_for_human_review` "Ready to push: reviews clean, MR text wri
 the MR and push* (the job's page with the Approve confirmation open) and *Create merge request…*,
 and the reason when the automatic hand-over was refused (SF-073); on `handed_over` "In your
 checkout on <branch>" with the same buttons; on `paused` "Paused by you" with *Resume* (sent at once; SF-067: "Task file changed since the job
-started" when it did). The job's last outcome shows under them. A **Done** card says "Pushed · 2
+started" when it did). A job parked on a usage limit (SF-072, under Implementing) says "Waiting for
+limits · resets at 03:00" and "Iteration N · parked, holds its slot"; once its reset passed under
+`wait`, "Limit reset: resume?" with *Resume* (sent at once). The job's last outcome shows under them. A **Done** card says "Pushed · 2
 iterations · 14:05" (Aborted, Failed); a pushed one keeps its merge request (`#N state` with the
 link), *Create merge request…* or *Merge…* and, while its Task file is active, *Archive ticket*;
 an aborted or failed one has no button (its page has Restart and Archive). SF-069's line about a
@@ -1557,7 +1615,7 @@ one table, `STOPS` in `static/app.js`:
 | `review_failed` | error | Claude review could not run | Retry review |
 | `serve_restarted` | error | Interrupted by a restart | Tell it to go on |
 | `mr_serve_restarted`, `mr_interrupted` | error | MR preparation interrupted | Tell it to go on |
-| `session_failed` with the usage-limit message | error | Usage limit reached | Tell it to go on |
+| `session_failed` with the usage-limit message (a job stopped before SF-072; an MR preparation still stops so) | error | Usage limit reached | Tell it to go on |
 | `session_failed`, `turn_failed`, `permission_mode_mismatch` | error | Implementer session failed | Tell it to go on |
 | `sandbox_unavailable` | error | Sandbox unavailable | Tell it to go on |
 | `publish_failed` | error | Iteration not published | Tell it to go on |
@@ -1591,7 +1649,7 @@ confirmation where it has one; *Tell it to go on* is a message, "Go on." when th
 | `review_failed` | the review's error | Retry review, Abort… |
 | `serve_restarted` | nothing | Tell it to go on, Restart…, Abort… |
 | `mr_serve_restarted`, `mr_interrupted`, `publish_failed` | nothing | Tell it to go on, Abort… |
-| `session_failed` with the usage-limit message, `sandbox_unavailable` | the message | Tell it to go on, Abort… |
+| `session_failed` with the usage-limit message (before SF-072, and MR preparation), `sandbox_unavailable` | the message | Tell it to go on, Abort… |
 | `session_failed`, `turn_failed`, `permission_mode_mismatch` | the whole message | Tell it to go on, Restart…, Abort… |
 | `mr_conflict` | the conflicting files | Tell it how (Send), Abort… |
 | `mr_text_missing`, `mr_text_invalid` | the rule it breaks | Send, Abort… |
@@ -1775,7 +1833,9 @@ a header, then the Stream with the composer pinned at the bottom.
   adds a line, Ctrl+Enter or Send sends) and the actions that apply now, the primary first; one that
   is off says why in its title. `starting`, `working`, `awaiting_review`: Send, Pause, Abort…;
   `preparing_mr`: Abort… only (no message is taken while the MR text is written); `paused`: Resume
-  (with the box's text when the Implementer's turn was paused), Restart…, Abort…;
+  (with the box's text when the Implementer's turn was paused), Restart…, Abort…; `waiting_limit`
+  (SF-072): *Resume now* (with the box's text when the job was parked in a turn; no message waits for
+  a parked job), Abort…;
   `ready_for_human_review`: *Review the MR and push* (primary, SF-080: it opens the Merge request
   screen), Approve…, *Hand over to my checkout* (SF-073; the composer
   says why the automatic hand-over did not happen, when it was refused), Create merge request (when
@@ -1868,7 +1928,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, fixes, gate_fixes, gate_tokens, updated_at, created_at, error, and for the board (SF-046) `title` (of the Task file, or `null`), `cost_usd` (the estimate of the iterations and their Claude reviews, or `null`), `review` and `gate` (the last iteration's verdicts: `clean`, `fix`, `failed` or `null`) and `review_ended_at` (the end of that clean or fix Claude review, or `null`); `mr` (the merge request on the Git host or `null`) and `mr_host` (`{host, reason}`: `github`, `gitlab` or `null`, and why the merge request actions are off or `null`); for the v3 card (SF-077) `now` (`{who, what, ts}` of a running job: the Implementer's last tool call or the first line of its last text, read from at most the last 256 KB of `events.jsonl`; the Claude review or the Codex gate reviewing iteration N; the MR writer; else `null`), `tool_calls` (the Implementer's tool calls in the job, counted incrementally: only the bytes added since the last count are read) and `stop` (for `needs_human`, `{items, saves_lines}`: the suggestions of the last simplification pass and the lines they save, the ledger entries to settle (`escalated`, `review_disputed`), the open ones (`review_churn`) or the last gate's items (`gate_rounds`, `gate_budget`), none for other codes; `null` otherwise) |
 | `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override, simplify}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied} or {ts, event: "merge_request", action, number, url, state}], mr_title, ledger}`; `mr_title` is the MR text's first line or `null`; `ledger` is `ledger.json` as written (`[]` before the first Fix section, SF-052); `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null`, `simplify` its `simplify.json` (SF-055) or `null` |
 | `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem, handoff, color}]}`: the registry, the checkout's path, its non-terminal jobs, why the checkout cannot be used now or `null`, its own hand-over setting or `null`, and its colour on the board (SF-084: its `color`, else the one its name picks) |
-| `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, lands_after, attachments, conversation: {message, url}, queue_position, queue_error}], archived: [{workspace, ticket, title}], job_lands_after: [{workspace, ticket, lands_after}], queue: {max_running, running, held, hold_reason, next}}`: the Task files without a live job; `queue_position` its 1-based place in the run queue or `null`, `queue_error` the queue's failed start `{code, message}` or `null`, `queue` the run queue (`next`: `{workspace, ticket}` of the first entry that waits for nothing, or `null`; the whole `queue` is `null` without a run queue) (SF-071, section Run queue); `lands_after` the tickets its Task file waits for, `[{workspace, ticket, state}]` with `state` `merged`, `pushed`, `running`, `planned` or `missing` (SF-084, section Dashboard), and `job_lands_after` the same for the Task files with a live job; `attachments` its images `[{name, bytes, type}]` (SF-064, section Ticket images); `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
+| `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, lands_after, attachments, conversation: {message, url}, queue_position, queue_error}], archived: [{workspace, ticket, title}], job_lands_after: [{workspace, ticket, lands_after}], queue: {max_running, running, held, hold_reason, next, on_limit, limit_hold}}`: the Task files without a live job; `queue_position` its 1-based place in the run queue or `null`, `queue_error` the queue's failed start `{code, message}` or `null`, `queue` the run queue (`next`: `{workspace, ticket}` of the first entry that waits for nothing, or `null`; `on_limit` the rule at a usage limit's reset and `limit_hold` `{parked, resets_at}` while a job is parked, else `null`, SF-072; the whole `queue` is `null` without a run queue) (SF-071, section Run queue); `lands_after` the tickets its Task file waits for, `[{workspace, ticket, state}]` with `state` `merged`, `pushed`, `running`, `planned` or `missing` (SF-084, section Dashboard), and `job_lands_after` the same for the Task files with a live job; `attachments` its images `[{name, bytes, type}]` (SF-064, section Ticket images); `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/patch` | the Patch, `text/x-diff` |
 | `api/jobs/<ws>/<ticket>/mr` | the MR text, `text/markdown`; 404 until there is one |
@@ -1907,7 +1967,8 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `POST api/queue/remove` | `{"workspace": string, "ticket": string}` | `RunQueue.remove` (`sf queue remove`); `409 not_queued` |
 | `POST api/queue/move` | `{"workspace": string, "ticket": string, "to": integer >= 1}` | `RunQueue.move` (`sf queue move`): result `{position}`; `409 not_queued` |
 | `POST api/queue/limit` | `{"max_running": number}` | `RunQueue.limit` (`sf queue limit`): result `{max_running}`; `400 invalid_limit` outside 1-20 or not whole |
-| `POST api/queue/hold`, `.../release` | `{"reason"?: string}`, `{}` | `RunQueue.hold`, `release` (`sf queue hold`, `release`) |
+| `POST api/queue/hold`, `.../release` | `{"reason"?: string}`, `{}` | `RunQueue.hold`, `release` (`sf queue hold`, `release`); a release does not end the limit hold of a parked job (SF-072) |
+| `POST api/queue/rule` | `{"rule": string}` | `RunQueue.rule` (`sf queue on-limit`, SF-072): result `{on_limit}`; `400 invalid_rule` unless `resume-then-queue`, `resume-only` or `wait` |
 
 The actions go to the same `Execution` as the socket commands, under its lock and guards; there
 is no second state machine and no other mutation endpoint. The setup
@@ -2100,7 +2161,8 @@ end), in a browser:
    scrolls to that card. Narrow the window: no Queue card overlaps the next column, keys do not
    wrap. With more than eight finished
    jobs Done shows eight and *Show all N*, which expands the column in place. The run queue's
-   controls are shown ("Run up to N jobs at once" and its status); the Rules menu is not.
+   controls are shown ("Run up to N jobs at once" and its status) and *Rules ▾*, whose menu opens
+   below it with the queue's rule checked and closes on Escape or a click outside (SF-072).
 2. Start: on a Queue card with a written Task file click Start: the dialog names the workspace,
    the ticket and the base branch; Cancel sends nothing (`sf status` unchanged). Confirm: the toast
    at the top says the job started and goes after 6 s, and the card appears under Implementing,

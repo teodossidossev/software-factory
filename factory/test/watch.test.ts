@@ -129,3 +129,12 @@ test('the MR text (SF-080): the user\'s save and reset, with a branch or base th
   assert.deepEqual(formatEvent(edited({ action: 'reset' })), ["10:11:12 [2] You reset the MR text to the factory's"]);
   assert.deepEqual(formatEvent(edited({ action: 'factory_new' })), ['10:11:12 [2] Clean wrote a new MR text; yours is kept. Compare or reset on the Merge request screen.']);
 });
+
+test('the park on a usage limit and the resume from it (SF-072): their own lines; the other changes of waiting_limit as state changes', () => {
+  const state = (from: string, to: string, extra: Record<string, unknown> = {}): string => JSON.stringify({ ts: TS, iteration: 1, state: { from, to, ...extra } });
+  assert.deepEqual(describeEvent(state('working', 'waiting_limit')), { ts: TS, iteration: 1, type: 'state', lines: ['10:11:12 [1] Parked: usage limit reached'] });
+  assert.deepEqual(formatEvent(state('waiting_limit', 'working')), ['10:11:12 [1] Resumed after the usage limit reset']);
+  assert.deepEqual(formatEvent(state('waiting_limit', 'awaiting_review')), ['10:11:12 [1] Resumed after the usage limit reset']);
+  assert.deepEqual(formatEvent(state('waiting_limit', 'aborted')), ['10:11:12 [1] state waiting_limit -> aborted']);
+  assert.deepEqual(formatEvent(state('waiting_limit', 'needs_human', { error: { code: 'worktree_missing', message: 'gone' } })), ['10:11:12 [1] state waiting_limit -> needs_human (worktree_missing: gone)']);
+});

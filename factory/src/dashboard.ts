@@ -106,8 +106,9 @@ export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'remove
 export type DashboardChecks = Pick<TaskChecks, 'start' | 'view' | 'summary'>;
 
 // The run queue (SF-071): its view for the tickets payload and the board's changes.
-export type DashboardQueue = Pick<RunQueue, 'view' | 'add' | 'remove' | 'move' | 'limit' | 'hold' | 'release'>;
-export const QUEUE_ACTIONS = ['add', 'remove', 'move', 'limit', 'hold', 'release'] as const;
+// rule: the rule at a usage limit's reset (SF-072).
+export type DashboardQueue = Pick<RunQueue, 'view' | 'add' | 'remove' | 'move' | 'limit' | 'hold' | 'release' | 'rule'>;
+export const QUEUE_ACTIONS = ['add', 'remove', 'move', 'limit', 'hold', 'release', 'rule'] as const;
 type QueueAction = (typeof QUEUE_ACTIONS)[number];
 
 // A dashboard without a start screen (in-process tests of the older endpoints).
@@ -206,6 +207,9 @@ const BODIES = {
   'queue-limit': { shape: '{"max_running": number}', schema: z.strictObject({ max_running: z.number() }) },
   'queue-hold': { shape: '{"reason"?: string}', schema: z.strictObject({ reason: z.string().optional() }) },
   'queue-release': { shape: '{}', schema: z.strictObject({}) },
+  // The Rules menu (SF-072): the rule at a usage limit's reset; its values are the queue's own check
+  // (invalid_rule).
+  'queue-rule': { shape: '{"rule": string}', schema: z.strictObject({ rule: z.string() }) },
 };
 type PostRoute = keyof typeof BODIES;
 
@@ -237,7 +241,7 @@ const ERROR_STATUS: Record<string, number> = {
   // origin did not say where a handed-over branch is (SF-073).
   push_check_failed: 502,
   // The run queue (SF-071).
-  already_queued: 409, not_queued: 409, invalid_limit: 400, invalid_position: 400,
+  already_queued: 409, not_queued: 409, invalid_limit: 400, invalid_position: 400, invalid_rule: 400,
   // A ticket's images (SF-064): not an image, too large, too many, and a Task file that refers to
   // one the ticket does not have (also an image to remove that is not there).
   attachment_type: 400, attachment_too_large: 413, attachment_limit: 409, attachment_missing: 400,
@@ -365,7 +369,8 @@ async function taskChangedOf(setup: DashboardSetup, job: Job): Promise<boolean |
 
 // mr: the merge request on the Git host (SF-048), null before one is opened; mr_host: whether the
 // merge request actions are on for the job's workspace; paused: what a pause interrupted (SF-067),
-// null unless paused; task_changed: taskChangedOf; turn_limit: the line of a chain that went on by
+// null unless paused (or parked on a usage limit, SF-072); limit: the usage limit of a parked job
+// (provider, resets_at, reset_seen), null otherwise; task_changed: taskChangedOf; turn_limit: the line of a chain that went on by
 // itself after a turn limit (SF-069), null without one; handover: the job in the user's checkout
 // (SF-073), null otherwise; handoff_skipped: why the automatic hand-over did not happen, null
 // otherwise.
@@ -375,7 +380,7 @@ function jobSummary(job: Job, counts: { files: number; undeclared: number; delet
     iteration: job.iteration, mr_attempts: job.mr_attempts, updated_at: job.updated_at, created_at: job.created_at,
     error: job.error ?? null, worktree: job.worktree, prepared_commit: job.prepared_commit,
     fixes: job.fixes, gate_fixes: job.gate_fixes, gate_tokens: job.gate_tokens, ...counts,
-    mr: job.mr, mr_host: mrHost, paused: job.paused ?? null, task_changed: taskChanged, turn_limit: turnLimitLine(job) ?? null,
+    mr: job.mr, mr_host: mrHost, paused: job.paused ?? null, limit: job.limit ?? null, task_changed: taskChanged, turn_limit: turnLimitLine(job) ?? null,
     handover: job.handover ?? null, handoff_skipped: job.handoff_skipped ?? null,
   };
 }
@@ -609,7 +614,9 @@ async function ticketsPayload(setup: DashboardSetup, checks: DashboardChecks | u
   }
   return {
     tickets, archived: await setup.archivedTickets(), job_lands_after: await setup.jobDependencies(),
-    queue: view === undefined ? null : { max_running: view.max_running, running: view.running, held: view.held, hold_reason: view.hold_reason, next: view.next },
+    queue: view === undefined ? null : {
+      max_running: view.max_running, running: view.running, held: view.held, hold_reason: view.hold_reason, next: view.next, on_limit: view.on_limit, limit_hold: view.limit_hold,
+    },
   };
 }
 
@@ -1526,6 +1533,7 @@ export async function startDashboard(
       limit: (data) => runQueue.limit(data.max_running),
       hold: (data) => runQueue.hold(data.reason),
       release: () => runQueue.release(),
+      rule: (data) => runQueue.rule(data.rule),
     };
     const route = `queue-${action}` as const;
     return {

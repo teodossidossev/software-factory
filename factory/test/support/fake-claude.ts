@@ -52,7 +52,8 @@ interface Turn {
   // Review runs only (SF-045): after a Read of ~/.codex/auth.json, every message type with this
   // literal in each free-text field, ending in a failed result whose errors hold it.
   walk?: string;
-  // Review runs only: the errors of a result that is not a success (default: one fixed error).
+  // The errors of a result that is not a success (default: one fixed error); for an Implementer turn
+  // too (SF-072: a usage limit's message).
   errors?: string[];
   // Review runs only: the structured output of the result (default: a clean verdict), or none.
   output?: unknown;
@@ -265,7 +266,7 @@ function run(prompt: string): void {
   out({
     type: 'result', subtype, is_error: subtype !== 'success', result: text, num_turns: 2, duration_ms: 1234,
     duration_api_ms: 1000, total_cost_usd: turn.costTotal ?? 0.0123, usage: {}, modelUsage: {}, stop_reason: null,
-    errors: subtype === 'success' ? undefined : ['fake failure'],
+    errors: subtype === 'success' ? undefined : (turn.errors ?? ['fake failure']),
     permission_denials: (turn.denials ?? []).map((name, index) => ({ tool_name: name, tool_use_id: `d${index}`, tool_input: { command: 'git commit -m secret-input' } })),
   });
 }

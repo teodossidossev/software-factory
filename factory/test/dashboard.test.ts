@@ -99,7 +99,7 @@ test('dashboard: jobs, job detail, report, patch and mr endpoints; bad names are
     assert.equal(list.headers['content-type'], 'application/json; charset=utf-8');
     const { jobs: all } = JSON.parse(list.body);
     assert.deepEqual(all.map((job: Job) => [job.ticket, job.state]), [['T-0', 'failed'], ['T-1', 'awaiting_review']]);
-    assert.deepEqual(Object.keys(all[1]).sort(), ['base', 'branch', 'cost_usd', 'created_at', 'deleted', 'error', 'files', 'fixes', 'gate', 'gate_fixes', 'gate_tokens', 'handoff_skipped', 'handover', 'iteration', 'mr', 'mr_attempts', 'mr_host', 'now', 'paused', 'prepared_commit', 'review', 'review_ended_at', 'state', 'stop', 'task_changed', 'ticket', 'title', 'tool_calls', 'turn_limit', 'undeclared', 'updated_at', 'workspace', 'worktree']);
+    assert.deepEqual(Object.keys(all[1]).sort(), ['base', 'branch', 'cost_usd', 'created_at', 'deleted', 'error', 'files', 'fixes', 'gate', 'gate_fixes', 'gate_tokens', 'handoff_skipped', 'handover', 'iteration', 'limit', 'mr', 'mr_attempts', 'mr_host', 'now', 'paused', 'prepared_commit', 'review', 'review_ended_at', 'state', 'stop', 'task_changed', 'ticket', 'title', 'tool_calls', 'turn_limit', 'undeclared', 'updated_at', 'workspace', 'worktree']);
     assert.deepEqual(all[0].error, { code: 'start_failed', message: 'Git failed.' });
 
     const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body);
@@ -580,4 +580,33 @@ test('dashboard (SF-080): mr-view reads the Execution\'s view (an empty 404 with
       }
     }
   });
+});
+
+test('dashboard api/queue/rule (SF-072): POST {"rule"} sets the rule at a usage limit reset; an unknown one is invalid_rule (400), a bad body invalid_body; the tickets payload shows it', async () => {
+  const { QueueStore, RunQueue } = await import('../src/queue.js');
+  const { fakeSetup } = await import('./support/dashboard-client.js');
+  const dir = join(temp, 'dash-queue-rule-store');
+  await mkdir(dir, { recursive: true });
+  const store = new QueueStore(dir, 3);
+  const jobs = new JobStore(dir);
+  const noSetup = { dependencyStates: async () => [], lastJobBase: async () => undefined };
+  const queue = new RunQueue(store, { start: async () => ({}) as never, fetchBase: async () => undefined, limitReset: async () => 'skipped' as const }, noSetup, jobs);
+  await withDashboard('dash-queue-rule-live', fakeActions(), async (dashboard) => {
+    const base = dashboard.url;
+    const tickets = async () => JSON.parse((await fetchRaw(new URL('api/tickets', base))).body).queue;
+    assert.equal((await tickets()).on_limit, 'resume-then-queue');
+    assert.deepEqual((await tickets()).limit_hold, null);
+    for (const body of [{}, { rule: 1 }, { rule: 'wait', extra: true }]) {
+      const reply = await act(base, 'api/queue/rule', body);
+      assert.deepEqual([reply.status, JSON.parse(reply.body).error.code], [400, 'invalid_body'], JSON.stringify(body));
+    }
+    const unknown = await act(base, 'api/queue/rule', { rule: 'never' });
+    assert.deepEqual([unknown.status, JSON.parse(unknown.body).error.code], [400, 'invalid_rule']);
+    const set = await act(base, 'api/queue/rule', { rule: 'wait' });
+    assert.deepEqual([set.status, JSON.parse(set.body)], [200, { ok: true, result: { on_limit: 'wait' } }]);
+    await queue.idle();
+    assert.equal((await store.read()).on_limit, 'wait');
+    assert.equal((await tickets()).on_limit, 'wait');
+  }, fakeSetup(), { queue });
+  queue.close();
 });

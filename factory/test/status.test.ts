@@ -5,8 +5,8 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { type IterationMeta, type Job, JobStore } from '../src/jobs.js';
-import { jobNotification, NOTIFIED_STATES } from '../src/notify.js';
-import { elapsedSeconds, formatCost, formatElapsed, formatSince, handoverLines, statusRows } from '../src/status.js';
+import { jobNotification, limitResetNotification, NOTIFIED_STATES } from '../src/notify.js';
+import { elapsedSeconds, formatCost, formatElapsed, formatSince, handoverLines, limitLine, statusRows } from '../src/status.js';
 import { newEnv, runCli, temp } from './support/harness.js';
 
 // SINCE prints the local time of the sf process (SF-049); the zone is set, not the machine's.
@@ -211,4 +211,31 @@ test('sf status and the notification of a handed-over job (SF-073): in your chec
   assert.equal(one.code, 0, one.stderr);
   assert.match(one.stdout, /\nin your checkout on T-1-demo\nMR title: feat\(T-9\): Demo\n/);
   assert.match(one.stdout, /handed_over/);
+});
+
+test('sf status and the notifications of a job parked on a usage limit (SF-072): the provider and the reset in local time; the reset notification of the run queue', async () => {
+  const parked: Job = {
+    ...base, state: 'waiting_limit', iteration: 1, paused: { from: 'working', step: 'turn', at: CREATED },
+    limit: { provider: 'claude', resets_at: '2026-11-05T01:00:00.000Z' },
+  };
+  // 03:00 in Sofia.
+  assert.equal(limitLine(parked), 'waiting for the usage limit (Claude): resets at 2026-11-05 03:00:00');
+  assert.equal(limitLine({ ...parked, limit: { provider: 'codex', resets_at: parked.limit!.resets_at, reset_seen: true, notified_at: CREATED } }), 'usage limit (Codex) reset: sf resume app T-1 goes on');
+  assert.equal(limitLine(base), undefined);
+
+  assert.ok(NOTIFIED_STATES.includes('waiting_limit'));
+  const note = jobNotification(parked);
+  assert.deepEqual([note.title, note.body, note.priority], ['T-1: waiting for limits', 'Usage limit (Claude): parked until 03:00\nbranch: T-1-demo', 'default']);
+  assert.deepEqual(limitResetNotification(2, 0), { title: 'Usage limit reset', body: 'Usage limit reset: 2 jobs resumed', priority: 'default', tags: 'hourglass' });
+  assert.equal(limitResetNotification(0, 1).body, 'Usage limit reset: 1 job waits for you');
+
+  const env = await newEnv('status-parked');
+  const jobs = new JobStore(env.state);
+  await jobs.write({ ...parked, ticket: 'T-8' });
+  const one = await runCli(env, ['status', 'app', 'T-8']);
+  assert.equal(one.code, 0, one.stderr);
+  assert.match(one.stdout, /waiting_limit/);
+  assert.match(one.stdout, /\nwaiting for the usage limit \(Claude\): resets at \d{4}-\d\d-\d\d \d\d:\d\d:\d\d\n/);
+  const all = await runCli(env, ['status']);
+  assert.match(all.stdout, /\napp\/T-8: waiting for the usage limit \(Claude\): resets at /);
 });

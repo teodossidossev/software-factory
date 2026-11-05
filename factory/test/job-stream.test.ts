@@ -326,3 +326,13 @@ test('streamContext: reads through the JobStore, caches within one context, a mi
   assert.equal(await ctx.taskCopy(), '# T-1\n');
   assert.equal(await streamContext(jobs, 'app', 'T-1').taskCopy(), '# T-1 changed\n');
 });
+
+test('lineEntries: the park on a usage limit and the resume from it (SF-072) carry their line; no changes entry; other states none', async () => {
+  assert.deepEqual(await one({ state: { from: 'working', to: 'waiting_limit' } }), {
+    t: 'state', who: 'factory', from: 'working', to: 'waiting_limit', code: null, msg: null, text: 'Parked: usage limit reached', k: '7', ts: TS, it: 2,
+  });
+  assert.deepEqual(await build({ state: { from: 'waiting_limit', to: 'awaiting_review' } }, { meta: { 2: meta(2) } }), [
+    { t: 'state', who: 'factory', from: 'waiting_limit', to: 'awaiting_review', code: null, msg: null, text: 'Resumed after the usage limit reset', k: '7', ts: TS, it: 2 },
+  ]);
+  assert.equal((await one({ state: { from: 'waiting_limit', to: 'aborted' } })).text, undefined);
+});

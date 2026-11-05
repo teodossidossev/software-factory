@@ -21,6 +21,9 @@ export const JOB_STATES = [
   'needs_human',
   // The user paused the job (SF-067): nothing runs; sf resume goes on where it stopped.
   'paused',
+  // A session hit the plan's usage limit (SF-072): parked, nothing runs, the job keeps its slot; the
+  // run queue resumes it when the limit resets, or sf resume does now.
+  'waiting_limit',
   'ready_for_human_review',
   // The job's changes are in the workspace's checkout on its branch (SF-073): the user reviews them
   // there; nothing of the job runs.
@@ -35,9 +38,10 @@ export type JobState = (typeof JOB_STATES)[number];
 // job runs; nor is handed_over (SF-073): the job's changes wait in the user's checkout.
 export const ACTIVE_STATES: readonly JobState[] = ['starting', 'working', 'awaiting_review', 'needs_human', 'ready_for_human_review', 'preparing_mr'];
 // The states that count as running against the run queue's limit max_running (SF-071), across
-// every workspace: the job works or is reviewed. A paused job and one that waits for the user
-// (needs_human, ready_for_human_review, handed_over) do not count.
-export const RUNNING_STATES: readonly JobState[] = ['starting', 'working', 'awaiting_review', 'preparing_mr'];
+// every workspace: the job works or is reviewed, or is parked on a usage limit (SF-072: it holds
+// its slot). A paused job and one that waits for the user (needs_human, ready_for_human_review,
+// handed_over) do not count.
+export const RUNNING_STATES: readonly JobState[] = ['starting', 'working', 'awaiting_review', 'preparing_mr', 'waiting_limit'];
 // States after which a new job for the same ticket may start.
 export const TERMINAL_STATES: readonly JobState[] = ['failed', 'aborted', 'pushed'];
 // The states sf pause takes (SF-067), and what was interrupted when the job was paused: the
@@ -46,8 +50,14 @@ export const TERMINAL_STATES: readonly JobState[] = ['failed', 'aborted', 'pushe
 export const PAUSABLE_STATES = ['working', 'awaiting_review'] as const;
 export const PAUSE_STEPS = ['turn', 'review', 'gate', 'simplify'] as const;
 export type PauseStep = (typeof PAUSE_STEPS)[number];
-// The states sf restart takes (SF-067): a job that waits for the user or has ended, not pushed.
-export const RESTARTABLE_STATES: readonly JobState[] = ['paused', 'aborted', 'failed', 'needs_human'];
+// The states sf restart takes (SF-067): a job that waits for the user or has ended, not pushed, or
+// is parked on a usage limit (SF-072).
+export const RESTARTABLE_STATES: readonly JobState[] = ['paused', 'waiting_limit', 'aborted', 'failed', 'needs_human'];
+// The states sf resume takes: paused (SF-067) and waiting_limit (SF-072).
+export const RESUMABLE_STATES: readonly JobState[] = ['paused', 'waiting_limit'];
+// How long a job parked on a usage limit without a parsed reset time waits before the run queue
+// tries it again (SF-072).
+export const LIMIT_RETRY_MS = 30 * 60_000;
 
 const timestamp = z.iso.datetime();
 const commit = z.string().regex(/^[0-9a-f]{40,64}$/);
@@ -107,8 +117,18 @@ const jobSchema = z.strictObject({
   // into the worktree and on a Resume that found the Task file changed; absent in a job started
   // before. task.md keeps the version the Implementer was last given, which can be older.
   task_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
-  // While paused (SF-067): the state the job was paused in, what was interrupted, and when.
+  // While paused (SF-067) or waiting_limit (SF-072): the state the job was paused in, what was
+  // interrupted, and when.
   paused: z.strictObject({ from: z.enum(PAUSABLE_STATES), step: z.enum(PAUSE_STEPS).nullable(), at: timestamp }).optional(),
+  // While waiting_limit (SF-072): whose usage limit the session hit and when the run queue goes on
+  // (the parsed reset, else paused.at + 30 minutes); reset_seen once that time passed under the
+  // rule wait (the user resumes), with when the user was told.
+  limit: z.strictObject({
+    provider: z.enum(['claude', 'codex']),
+    resets_at: timestamp,
+    reset_seen: z.literal(true).optional(),
+    notified_at: timestamp.optional(),
+  }).optional(),
   // The continuations the factory sent by itself in the Implementer's current chain of turns, after
   // a turn limit (SF-069), and how many the chain may have; absent once a new chain starts.
   turn_limit: z.strictObject({ continued: z.number().int().min(1), allowed: z.number().int().min(0) }).optional(),
@@ -276,6 +296,7 @@ export type EventRecord = { ts: string; iteration: number } & (
   | { type: 'simplify_chosen'; choice: 'simplify' | 'skip'; suggestions: number }
   // A step the user's Pause interrupted (SF-067): the turn, or a round of a reviewer, thrown away
   // and run again on Resume; never a verdict.
+  // A usage limit (SF-072) interrupts the same way: the job parks in waiting_limit.
   | { type: 'interrupted'; step: PauseStep; reviewer?: string }
   // The Task file changed while the job was paused (SF-067): the sha256 the job had, and the new one.
   | { type: 'task_changed'; from: string | null; to: string }

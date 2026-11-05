@@ -11,8 +11,8 @@ import { test } from 'node:test';
 import type { Config } from '../src/config.js';
 import { FactoryError } from '../src/errors.js';
 import { type ExclusiveScope, Execution } from '../src/execution.js';
-import { type Job, type JobState, JobStore, now } from '../src/jobs.js';
-import { QueueStore, RunQueue } from '../src/queue.js';
+import { type Job, type JobState, JobStore, LIMIT_RETRY_MS, now } from '../src/jobs.js';
+import { LIMIT_RESET_HOLD_REASON, QueueStore, RunQueue } from '../src/queue.js';
 import { resolveWorkspace, saveRegistry } from '../src/registry.js';
 import { followJobs } from '../src/runner.js';
 import { Setup } from '../src/setup.js';
@@ -71,6 +71,30 @@ class FakeExecution {
   fetchBase(workspace: string, base: string): Promise<void> {
     this.fetches.push(`${workspace} ${base}`);
     return this.#real.fetchBase(workspace, base);
+  }
+
+  // The reset of a parked job's usage limit (SF-072), as Execution.limitReset does it on the record:
+  // skipped unless still parked with the park the queue saw; resumed (to its paused.from, or
+  // needs_human with failResume's error), or marked reset_seen.
+  readonly resets: string[] = [];
+  failResume: FactoryError | undefined;
+  async limitReset(workspace: string, ticket: string, parkedAt: string, resume: boolean): Promise<'resumed' | 'waiting' | 'failed' | 'skipped'> {
+    const job = await this.#jobs.read(workspace, ticket);
+    if (job === undefined || job.state !== 'waiting_limit' || job.limit === undefined || job.limit.reset_seen === true || job.paused?.at !== parkedAt) {
+      return 'skipped';
+    }
+    this.resets.push(`${workspace}/${ticket} ${resume ? 'resume' : 'wait'}`);
+    if (!resume) {
+      await this.#jobs.write({ ...job, limit: { ...job.limit, reset_seen: true, notified_at: now() } });
+      return 'waiting';
+    }
+    const { paused, limit: _limit, ...rest } = job;
+    if (this.failResume !== undefined) {
+      await this.#jobs.write({ ...rest, state: 'needs_human', error: { code: this.failResume.code, message: this.failResume.message } });
+      return 'failed';
+    }
+    await this.#jobs.write({ ...rest, state: paused?.from ?? 'working' });
+    return 'resumed';
   }
 }
 
@@ -405,14 +429,266 @@ test('a runner-side transition read through followJobs (ready_for_human_review) 
   }
 });
 
+// SF-072: a job parked on a usage limit, as Execution's park leaves it.
+function parked(workspace: string, ticket: string, at: string, resetsAt: string, from: 'working' | 'awaiting_review' = 'working', provider: 'claude' | 'codex' = 'claude'): Job {
+  return {
+    ...jobRecord(workspace, ticket, 'waiting_limit', { iteration: 1 }),
+    paused: { from, step: from === 'working' ? 'turn' : 'review', at }, limit: { provider, resets_at: resetsAt },
+  };
+}
+
+// A queue with a clock the test sets and the notifications it sends.
+function limitQueue(w: World, clock: { now: number }): { queue: RunQueue; notes: string[] } {
+  const notes: string[] = [];
+  const queue = new RunQueue(w.store, w.execution, w.setup, w.jobs, {
+    resolve: (workspace) => resolveWorkspace(workspace, w.env.config), clock: () => clock.now,
+    notify: async (notification) => {
+      notes.push(notification.body);
+    },
+  });
+  return { queue, notes };
+}
+
+const T0 = Date.parse('2026-11-05T00:00:00.000Z');
+const iso = (ms: number): string => new Date(ms).toISOString();
+
+test('usage limit (SF-072): a parked job holds its slot and the queue; releasing the hold by hand starts nothing; a start by hand goes and counts', TIMEOUT, async () => {
+  const w = await world('queue-limit-hold');
+  const clock = { now: T0 };
+  const { queue } = limitQueue(w, clock);
+  try {
+    for (const ticket of ['H-1', 'H-2']) {
+      await plan(w, ticket);
+    }
+    await w.jobs.write(parked('app', 'P-1', iso(T0 - 1000), iso(T0 + 3_600_000)));
+    await queue.limit(3);
+    await queue.add('app', 'H-1');
+    await queue.idle();
+    assert.deepEqual(w.execution.starts, [], 'nothing starts while a job is parked, slots free or not');
+    let view = await queue.view();
+    assert.deepEqual([view.running, view.held, view.on_limit, view.limit_hold], [1, false, 'resume-then-queue', { parked: 1, resets_at: iso(T0 + 3_600_000) }]);
+    // The hold by hand and its release never end the limit hold.
+    await queue.hold('night');
+    await queue.release();
+    await queue.idle();
+    assert.deepEqual(w.execution.starts, []);
+    // A start by hand (the user's choice) goes, and counts against max_running with the parked job.
+    await w.jobs.write(jobRecord('app', 'M-1', 'working'));
+    await queue.limit(2);
+    await queue.add('app', 'H-2');
+    await queue.idle();
+    view = await queue.view();
+    assert.deepEqual([view.running, w.execution.starts], [2, []]);
+    // The parked job is aborted: the limit hold ends, and the queue fills the one free slot.
+    await w.jobs.write({ ...(await w.jobs.read('app', 'P-1'))!, state: 'aborted' });
+    await queue.schedule();
+    await queue.idle();
+    assert.deepEqual(w.execution.starts, ['app/H-1']);
+    await setState(w, 'app', 'M-1', 'needs_human');
+    await queue.schedule();
+    await queue.idle();
+    assert.deepEqual(w.execution.starts, ['app/H-1', 'app/H-2']);
+    assert.equal((await queue.view()).limit_hold, null);
+  } finally {
+    queue.close();
+  }
+});
+
+test('usage limit (SF-072): resume-then-queue at a simulated reset resumes the due jobs in park order, then the queue goes on; one notification', TIMEOUT, async () => {
+  const w = await world('queue-limit-rtq');
+  const clock = { now: T0 };
+  const { queue, notes } = limitQueue(w, clock);
+  try {
+    await plan(w, 'N-1');
+    await w.jobs.write(parked('app', 'P-2', iso(T0 - 1000), iso(T0 + 60_000), 'awaiting_review', 'codex'));
+    await w.jobs.write(parked('app', 'P-1', iso(T0 - 2000), iso(T0 + 60_000)));
+    // P-3 resets later: it stays parked and keeps the queue held.
+    await w.jobs.write(parked('app', 'P-3', iso(T0 - 500), iso(T0 + 120_000)));
+    await queue.add('app', 'N-1');
+    await queue.idle();
+    assert.deepEqual([w.execution.resets, w.execution.starts], [[], []]);
+    clock.now = T0 + 60_000;
+    await queue.schedule();
+    await queue.idle();
+    assert.deepEqual(w.execution.resets, ['app/P-1 resume', 'app/P-2 resume']);
+    assert.deepEqual([(await w.jobs.read('app', 'P-1'))!.state, (await w.jobs.read('app', 'P-2'))!.state], ['working', 'awaiting_review']);
+    assert.deepEqual(notes, ['Usage limit reset: 2 jobs resumed']);
+    assert.deepEqual(w.execution.starts, [], 'P-3 still holds the queue');
+    assert.equal((await w.store.read()).held, false);
+    clock.now = T0 + 120_000;
+    await queue.schedule();
+    await queue.idle();
+    assert.deepEqual(notes, ['Usage limit reset: 2 jobs resumed', 'Usage limit reset: 1 job resumed']);
+    // Three running against the limit 3: N-1 waits for a slot, not for the limit.
+    assert.deepEqual(w.execution.starts, []);
+    await setState(w, 'app', 'P-3', 'ready_for_human_review');
+    await queue.schedule();
+    await queue.idle();
+    assert.deepEqual(w.execution.starts, ['app/N-1']);
+  } finally {
+    queue.close();
+  }
+});
+
+test('usage limit (SF-072): the reset timer fires by itself at the earliest reset, and a job with no parsed reset is retried 30 minutes after its park', TIMEOUT, async () => {
+  const w = await world('queue-limit-timer');
+  // The real clock: the timer fires by itself.
+  const { queue, notes } = limitQueue(w, { get now() { return Date.now(); } });
+  try {
+    // No parsed reset: the park stored paused.at + 30 minutes (LIMIT_RETRY_MS).
+    const at = Date.now() - LIMIT_RETRY_MS + 150;
+    await w.jobs.write(parked('app', 'P-1', iso(at), iso(at + LIMIT_RETRY_MS)));
+    await queue.schedule();
+    await queue.idle();
+    assert.deepEqual(w.execution.resets, []);
+    const deadline = Date.now() + 5000;
+    while (w.execution.resets.length === 0) {
+      assert.ok(Date.now() < deadline, 'the timer did not fire');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    await queue.idle();
+    assert.deepEqual(w.execution.resets, ['app/P-1 resume']);
+    assert.deepEqual(notes, ['Usage limit reset: 1 job resumed']);
+  } finally {
+    queue.close();
+  }
+});
+
+test('usage limit (SF-072): resume-only resumes and holds the queue by hand; wait resumes nothing, marks the jobs and holds the queue; the timer skips them', TIMEOUT, async () => {
+  const w = await world('queue-limit-rules');
+  const clock = { now: T0 };
+  const { queue, notes } = limitQueue(w, clock);
+  try {
+    await plan(w, 'N-1');
+    await w.jobs.write(parked('app', 'P-1', iso(T0 - 1000), iso(T0 + 1000)));
+    await queue.add('app', 'N-1');
+    await assert.rejects(queue.rule('later'), { code: 'invalid_rule' });
+    assert.deepEqual(await queue.rule('resume-only'), { on_limit: 'resume-only' });
+    clock.now = T0 + 1000;
+    await queue.schedule();
+    await queue.idle();
+    assert.deepEqual(w.execution.resets, ['app/P-1 resume']);
+    assert.deepEqual(notes, ['Usage limit reset: 1 job resumed']);
+    let file = await w.store.read();
+    assert.deepEqual([file.held, file.hold_reason], [true, LIMIT_RESET_HOLD_REASON]);
+    assert.deepEqual(w.execution.starts, []);
+
+    // wait: nothing resumes.
+    await queue.rule('wait');
+    await w.jobs.write(parked('app', 'P-2', iso(T0 + 2000), iso(T0 + 3000)));
+    await queue.release();
+    await queue.idle();
+    assert.deepEqual(w.execution.starts, [], 'P-2 holds the queue');
+    clock.now = T0 + 3000;
+    await queue.schedule();
+    await queue.idle();
+    assert.deepEqual(w.execution.resets, ['app/P-1 resume', 'app/P-2 wait']);
+    const waiting = (await w.jobs.read('app', 'P-2'))!;
+    assert.deepEqual([waiting.state, waiting.limit?.reset_seen, typeof waiting.limit?.notified_at], ['waiting_limit', true, 'string']);
+    assert.deepEqual(notes, ['Usage limit reset: 1 job resumed', 'Usage limit reset: 1 job waits for you']);
+    file = await w.store.read();
+    assert.deepEqual([file.held, file.hold_reason], [true, LIMIT_RESET_HOLD_REASON]);
+    assert.deepEqual((await queue.view()).limit_hold, { parked: 1, resets_at: null });
+    // Later passes skip it: no second mark, no second notification; released by hand, the queue
+    // still starts nothing while it is parked.
+    await queue.release();
+    clock.now = T0 + 60_000;
+    await queue.schedule();
+    await queue.idle();
+    assert.deepEqual([w.execution.resets.length, notes.length, w.execution.starts], [2, 2, []]);
+    // The user resumes it: the queue goes on.
+    await setState(w, 'app', 'P-2', 'working');
+    await queue.schedule();
+    await queue.idle();
+    assert.deepEqual(w.execution.starts, ['app/N-1']);
+  } finally {
+    queue.close();
+  }
+});
+
+test('usage limit (SF-072): a job aborted, reset or resumed by hand before its reset is skipped; a timed resume that fails leaves the job in needs_human', TIMEOUT, async () => {
+  const w = await world('queue-limit-skip');
+  const clock = { now: T0 };
+  const { queue, notes } = limitQueue(w, clock);
+  try {
+    await w.jobs.write(parked('app', 'P-1', iso(T0 - 1000), iso(T0 + 1000)));
+    await w.jobs.write(parked('app', 'P-2', iso(T0 - 900), iso(T0 + 1000)));
+    await w.jobs.write(parked('app', 'P-3', iso(T0 - 800), iso(T0 + 1000)));
+    await queue.idle();
+    // Meanwhile: P-1 aborted, P-2 resumed by hand, P-3 reset (archived).
+    await setState(w, 'app', 'P-1', 'aborted');
+    await setState(w, 'app', 'P-2', 'working');
+    await w.jobs.archive('app', 'P-3');
+    clock.now = T0 + 1000;
+    await queue.schedule();
+    await queue.idle();
+    assert.deepEqual([w.execution.resets, notes], [[], []]);
+    assert.deepEqual([(await w.jobs.read('app', 'P-1'))!.state, (await w.jobs.read('app', 'P-2'))!.state], ['aborted', 'working']);
+    // A timed resume that throws: the job needs the user with that error; the timer moves on.
+    await w.jobs.write(parked('app', 'P-4', iso(T0 + 1000), iso(T0 + 2000)));
+    w.execution.failResume = new FactoryError('worktree_missing', 'The worktree of app/P-4 is missing; sf restart the ticket.');
+    clock.now = T0 + 2000;
+    await queue.schedule();
+    await queue.idle();
+    const failed = (await w.jobs.read('app', 'P-4'))!;
+    assert.deepEqual([failed.state, failed.error?.code], ['needs_human', 'worktree_missing']);
+    assert.deepEqual(notes, []);
+    assert.equal((await queue.view()).limit_hold, null);
+  } finally {
+    queue.close();
+  }
+});
+
+test('usage limit (SF-072): a restarted sf serve keeps the parked jobs and its queue resumes a reset that passed while it was down', TIMEOUT, async () => {
+  const w = await world('queue-limit-restart');
+  const clock = { now: T0 };
+  const first = limitQueue(w, clock);
+  await w.jobs.write(parked('app', 'P-1', iso(T0 - 1000), iso(T0 + 1000)));
+  await first.queue.schedule();
+  await first.queue.idle();
+  first.queue.close();
+  assert.equal((await w.jobs.read('app', 'P-1'))!.state, 'waiting_limit');
+  clock.now = T0 + 5000;
+  const second = limitQueue(w, clock);
+  try {
+    await second.queue.schedule();
+    await second.queue.idle();
+    assert.deepEqual(w.execution.resets, ['app/P-1 resume']);
+    assert.deepEqual(second.notes, ['Usage limit reset: 1 job resumed']);
+  } finally {
+    second.queue.close();
+  }
+});
+
+test('sf queue on-limit (SF-072): the rule is checked by the CLI, stored by sf serve and shown by sf queue list', TIMEOUT, async () => {
+  const env = await newEnv('queue-on-limit');
+  await newRepo(env, 'queue-on-limit-repo', false);
+  const served = await serve(env);
+  try {
+    assert.equal((await runCli(env, ['queue', 'on-limit', 'wait'])).stdout, 'on_limit: wait\n');
+    assert.match((await runCli(env, ['queue', 'list'])).stdout, /^held: no\non limit reset: wait$/m);
+    assert.equal(JSON.parse(await readFile(join(env.state, 'queue.json'), 'utf8')).on_limit, 'wait');
+    const bad = await runCli(env, ['queue', 'on-limit', 'later']);
+    assert.deepEqual([bad.code, /queue on-limit needs one of resume-then-queue, resume-only, wait\./.test(bad.stderr)], [2, true]);
+    assert.equal(JSON.parse(await readFile(join(env.state, 'queue.json'), 'utf8')).on_limit, 'wait');
+  } finally {
+    await stop(served);
+  }
+});
+
 test('an invalid queue.json is an error; a missing one is an empty queue whose limit is SF_MAX_JOBS within 1-20', async () => {
   const env = await newEnv('queue-file');
   await mkdir(env.state, { recursive: true });
-  assert.deepEqual(await new QueueStore(env.state, 3).read(), { version: 1, max_running: 3, held: false, hold_reason: null, entries: [], errors: [] });
+  assert.deepEqual(await new QueueStore(env.state, 3).read(), { version: 1, max_running: 3, held: false, hold_reason: null, on_limit: 'resume-then-queue', entries: [], errors: [] });
   assert.equal((await new QueueStore(env.state, 50).read()).max_running, 20);
   await writeFile(join(env.state, 'queue.json'), '{"version": 1, "max_running": 0, "held": false, "hold_reason": null, "entries": [], "errors": []}');
   await assert.rejects(new QueueStore(env.state, 3).read(), { code: 'queue_invalid' });
   await writeFile(join(env.state, 'queue.json'), 'not json');
+  await assert.rejects(new QueueStore(env.state, 3).read(), { code: 'queue_invalid' });
+  // A queue.json written before SF-072 has no on_limit: the default; an unknown rule is invalid.
+  await writeFile(join(env.state, 'queue.json'), '{"version": 1, "max_running": 2, "held": false, "hold_reason": null, "entries": [], "errors": []}');
+  assert.equal((await new QueueStore(env.state, 3).read()).on_limit, 'resume-then-queue');
+  await writeFile(join(env.state, 'queue.json'), '{"version": 1, "max_running": 2, "held": false, "hold_reason": null, "on_limit": "later", "entries": [], "errors": []}');
   await assert.rejects(new QueueStore(env.state, 3).read(), { code: 'queue_invalid' });
 });
 
@@ -476,7 +752,7 @@ test('sf serve: queue two tickets with limit 1, the second starts by itself once
     const said = await runCli(env, ['say', 'app', 'M-1', 'go', 'on']);
     assert.equal(said.code, 0, said.stderr);
     const list = await runCli(env, ['queue', 'list']);
-    assert.match(list.stdout, /^limit: 1 job at once\nrunning: 3\nheld: no\nnext: app\/Q-2\nqueue:\n {2}1\. app\/Q-2\n$/);
+    assert.match(list.stdout, /^limit: 1 job at once\nrunning: 3\nheld: no\non limit reset: resume-then-queue\nnext: app\/Q-2\nqueue:\n {2}1\. app\/Q-2\n$/);
     assert.equal((await refused(served, 'start', { workspace: 'app', ticket: 'M-2' })).code, 'job_exists');
     await waitFor(served, 'M-2', 'awaiting_review', 1);
     await waitFor(served, 'M-1', 'awaiting_review', 1);
@@ -494,7 +770,7 @@ test('sf serve: queue two tickets with limit 1, the second starts by itself once
     await waitFor(served, 'Q-1', 'ready_for_human_review');
     await started(env, 'Q-2');
     await waitFor(served, 'Q-2', 'awaiting_review', 1);
-    assert.match((await runCli(env, ['queue', 'list'])).stdout, /^limit: 1 job at once\nrunning: 1\nheld: no\nnext: nothing ready\nqueue: empty\n$/);
+    assert.match((await runCli(env, ['queue', 'list'])).stdout, /^limit: 1 job at once\nrunning: 1\nheld: no\non limit reset: resume-then-queue\nnext: nothing ready\nqueue: empty\n$/);
     const file = JSON.parse(await readFile(join(env.state, 'queue.json'), 'utf8'));
     assert.deepEqual([file.max_running, file.entries, file.held], [1, [], false]);
     await turnsStarted(env, 6);

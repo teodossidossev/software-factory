@@ -492,13 +492,14 @@ function fakeQueue(view: QueueView): DashboardQueue & { calls: unknown[][]; answ
     limit: (max: number) => fake.change('limit', max),
     hold: (reason?: string) => fake.change('hold', reason),
     release: () => fake.change('release'),
+    rule: (rule: string) => fake.change('rule', rule),
   };
   return fake;
 }
 
 test('dashboard queue (SF-071): the six POST routes with strict bodies, one queue call each, its refusals mapped, the pages refreshed; the tickets payload carries the queue; none without a queue', async () => {
   const view: QueueView = {
-    max_running: 2, running: 1, held: true, hold_reason: 'usage limit', errors: [{ workspace: 'web', ticket: 'W-1', code: 'branch_exists', message: 'The branch exists.', at: '2026-11-05T10:00:00.000Z' }],
+    max_running: 2, running: 1, held: true, hold_reason: 'usage limit', on_limit: 'resume-then-queue', limit_hold: null, errors: [{ workspace: 'web', ticket: 'W-1', code: 'branch_exists', message: 'The branch exists.', at: '2026-11-05T10:00:00.000Z' }],
     entries: [{ workspace: 'app', ticket: 'T-5', position: 1, queued_at: '2026-11-05T09:00:00.000Z', waits_for: [] }], next: { workspace: 'app', ticket: 'T-5' },
   };
   const queue = fakeQueue(view);
@@ -507,7 +508,7 @@ test('dashboard queue (SF-071): the six POST routes with strict bodies, one queu
     const base = dashboard.url;
     // The tickets payload: the queue's state, each row's position and failed start.
     const payload = JSON.parse((await fetchRaw(new URL('api/tickets', base))).body);
-    assert.deepEqual(payload.queue, { max_running: 2, running: 1, held: true, hold_reason: 'usage limit', next: { workspace: 'app', ticket: 'T-5' } });
+    assert.deepEqual(payload.queue, { max_running: 2, running: 1, held: true, hold_reason: 'usage limit', next: { workspace: 'app', ticket: 'T-5' }, on_limit: 'resume-then-queue', limit_hold: null });
     assert.deepEqual(payload.tickets.map((row: Record<string, unknown>) => [row.ticket, row.queue_position, row.queue_error]), [
       ['T-5', 1, null], ['T-6', null, null], ['W-1', null, { code: 'branch_exists', message: 'The branch exists.' }],
     ]);

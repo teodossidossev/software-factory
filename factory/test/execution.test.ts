@@ -364,6 +364,37 @@ test('the queue\'s own start counts the running jobs of every workspace against 
   await assert.rejects(execution.start('app', 'L-1', { queued: true }), { code: 'job_limit', message: '2 jobs run (X-1 working, X-2 starting); the limit is 1.' });
 });
 
+test('usage limit (SF-072): a parked job counts against max_running for the queue\'s own start; limitReset re-reads the job under the lock: one no longer parked, parked again or already marked is skipped; under wait it is marked reset_seen', async () => {
+  const env = await newEnv('limit-reset');
+  const repo = await newRepo(env, 'limit-reset-repo', false);
+  await putTask(env, repo, 'L-9', 'Limited');
+  const jobs = new JobStore(env.state);
+  const at = new Date(Date.now() - 60_000).toISOString();
+  const record = (ticket: string, state: JobState, parkedAt = at): Job => ({
+    workspace: 'app', ticket, branch: `${ticket}-b`, base: 'main', base_commit: null, state, worktree: null, prepared_commit: null,
+    iteration: 1, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, created_at: at, updated_at: at,
+    ...(state === 'waiting_limit' ? { paused: { from: 'working' as const, step: 'turn' as const, at: parkedAt }, limit: { provider: 'claude' as const, resets_at: at } } : {}),
+  });
+  await jobs.write(record('L-1', 'waiting_limit'));
+  await jobs.write(record('L-2', 'aborted'));
+  await jobs.write(record('L-3', 'waiting_limit', new Date().toISOString()));
+  const store = new QueueStore(env.state, 3);
+  await store.write({ ...(await store.read()), max_running: 2 });
+  const config = loadConfig({ SF_STATE_DIR: env.state, SF_CLAUDE: FAKE });
+  const execution = new Execution(config, (name) => resolveWorkspace(name, env.config));
+  await assert.rejects(execution.start('app', 'L-9', { queued: true }), { code: 'job_limit', message: '2 jobs run (L-1 waiting_limit, L-3 waiting_limit); the limit is 2.' });
+  assert.equal(await execution.limitReset('app', 'L-2', at, true), 'skipped');
+  assert.equal(await execution.limitReset('app', 'L-3', at, true), 'skipped', 'parked again since the queue saw it');
+  assert.equal(await execution.limitReset('app', 'L-1', at, false), 'waiting');
+  const marked = (await jobs.read('app', 'L-1'))!;
+  assert.deepEqual([marked.state, marked.limit?.reset_seen, typeof marked.limit?.notified_at, marked.paused?.at], ['waiting_limit', true, 'string', at]);
+  assert.equal(await execution.limitReset('app', 'L-1', at, true), 'skipped', 'already handled under wait');
+  // Restartable and resumable: the refusals name waiting_limit.
+  await assert.rejects(execution.resumePaused('app', 'L-2'), { code: 'invalid_state', message: 'sf resume needs paused or waiting_limit; the job is aborted.' });
+  await assert.rejects(execution.say('app', 'L-1', 'hello'), { code: 'invalid_state', message: 'The job waits for the usage limit to reset. Resume the job with a message: sf resume app L-1 [message]' });
+  await assert.rejects(execution.pause('app', 'L-1'), { code: 'invalid_state', message: 'sf pause needs working or awaiting_review; the job is waiting_limit.' });
+});
+
 test('queue and limits: say during a turn, iteration_limit, base_not_found, branch_exists, abort --discard removes the worktree and the branch', async () => {
   const env = await newEnv('limits', { SF_MAX_ITERATIONS: '1' });
   const repo = await newRepo(env, 'limits-repo', false);

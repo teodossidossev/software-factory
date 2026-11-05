@@ -50,6 +50,20 @@ export function handoverLines(job: Job, mrTitle: string | undefined): string[] {
   return [];
 }
 
+// The usage-limit line of sf status for a parked job (SF-072): whose limit and when it resets, in
+// local time; or, once it reset under the rule wait, that the job waits for the user's Resume.
+// undefined otherwise.
+export function limitLine(job: Job): string | undefined {
+  if (job.state !== 'waiting_limit' || job.limit === undefined) {
+    return undefined;
+  }
+  const provider = job.limit.provider === 'claude' ? 'Claude' : 'Codex';
+  if (job.limit.reset_seen === true) {
+    return `usage limit (${provider}) reset: sf resume ${job.workspace} ${job.ticket} goes on`;
+  }
+  return `waiting for the usage limit (${provider}): resets at ${localTime(job.limit.resets_at) ?? job.limit.resets_at}`;
+}
+
 export function formatCost(cost: number | undefined): string {
   return cost === undefined ? 'unknown' : cost.toFixed(4);
 }

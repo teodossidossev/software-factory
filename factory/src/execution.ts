@@ -3,7 +3,8 @@
 // review, SF-044), acceptGate (the user's override of a stopped gate, SF-047), approve (the push),
 // the merge request on the Git host (SF-048: createMergeRequest, mergeMergeRequest,
 // mergeRequestStatus), simplify (the user's choice on the offer of the simplification pass,
-// SF-055), pause, resume and restart (SF-067: resumePaused, restart), abort, reset
+// SF-055), pause, resume and restart (SF-067: resumePaused, restart), the park of a job whose session
+// hit a usage limit and its resume at the reset (SF-072: waiting_limit, limitReset), abort, reset
 // (and the dashboard's terminal-only Archive), status and the rule for a restart of sf serve. Owns the Implementer session of each job, which works in the
 // job's own worktree, and publishes an iteration (Report, Patch and the file list) when the
 // session goes idle; then the Claude review of that iteration runs (SF-038, src/review.ts), and
@@ -32,7 +33,7 @@ import { chooseForge, type Forge, type ForgeKind, forgeFor, type MergeRequestSta
 import { runGit } from './git.js';
 import { GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from './gate.js';
 import { askForChanges, attachWorktree, checkBranchFree, commitMessagePath, finishAsk, handOver, isAncestor, remoteBranch, type RemoteBranch, restoreConfig, savedRef, settleAfterPush, subjectOf, takeBack, undoHandover } from './handoff.js';
-import { cutEvent, type FileChange, type GateOverride, type GateRecord, type Handover, type Job, type JobMr, type JobState, JobStore, now, PAUSABLE_STATES, type PauseStep, RESTARTABLE_STATES, type ReviewRecord, type SimplifyRecord, TERMINAL_STATES } from './jobs.js';
+import { cutEvent, type FileChange, type GateOverride, type GateRecord, type Handover, type Job, type JobMr, type JobState, JobStore, LIMIT_RETRY_MS, now, PAUSABLE_STATES, type PauseStep, RESTARTABLE_STATES, RESUMABLE_STATES, type ReviewRecord, type SimplifyRecord, TERMINAL_STATES } from './jobs.js';
 import { answerFix, applyVerdict, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, escalationMessage, headings, LEDGER_ID, type LedgerEntry, FACTORY_PROBLEMS, SCOPE_PROBLEM, SENSITIVE_PROBLEM, settle, SETTLE_CODES, unappliedEntries, unsettled, userFixItems } from './ledger.js';
 import {
   abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitBusy, gitFailure, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl,
@@ -57,6 +58,7 @@ import { type IdleOutcome, ImplementerSession, type LimitAnswer, type LimitedTur
 import { CONTINUE_PROMPT, limitDecision, worktreeChanged, type WorktreeState, worktreeState } from './turn-limit.js';
 import { appendFix, isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskDiff, taskScope, taskSha256, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { TicketHistory } from './ticket-history.js';
+import { type UsageLimit, usageLimit } from './usage-limit.js';
 import { addWorktree, deleteBranch, removeWorktree } from './worktree.js';
 
 export const MAX_REPORT_BYTES = 64 * 1024;
@@ -549,12 +551,15 @@ export class Execution implements RunnerWork {
 
   async #transition(job: Job, to: JobState, error?: { code: string; message: string }, lines?: string[]): Promise<Job> {
     const from = job.state;
-    // What a pause interrupted is kept only while the job is paused (SF-067); why the hand-over did
-    // not happen only while ready_for_human_review, and the hand-over only while handed_over, unless
-    // one of its steps was cut off (SF-073: recover() repairs it).
-    const { error: _previous, paused, handoff_skipped: skipped, handover, ...rest } = job;
+    // What a pause interrupted is kept only while the job is paused (SF-067) or parked on a usage
+    // limit (SF-072, with the limit); why the hand-over did not happen only while
+    // ready_for_human_review, and the hand-over only while handed_over, unless one of its steps was
+    // cut off (SF-073: recover() repairs it).
+    const { error: _previous, paused, limit, handoff_skipped: skipped, handover, ...rest } = job;
     const next: Job = {
-      ...rest, state: to, updated_at: now(), ...(error !== undefined ? { error } : {}), ...(to === 'paused' && paused !== undefined ? { paused } : {}),
+      ...rest, state: to, updated_at: now(), ...(error !== undefined ? { error } : {}),
+      ...(RESUMABLE_STATES.includes(to) && paused !== undefined ? { paused } : {}),
+      ...(to === 'waiting_limit' && limit !== undefined ? { limit } : {}),
       ...(to === 'ready_for_human_review' && skipped !== undefined ? { handoff_skipped: skipped } : {}),
       ...(handover !== undefined && (to === 'handed_over' || handover.step !== null) ? { handover } : {}),
     };
@@ -592,7 +597,8 @@ export class Execution implements RunnerWork {
   }
 
   // At serve start (SF-042): a job in working, preparing_mr or awaiting_review whose runner is alive
-  // is left alone, and so is a paused one (SF-067). Without a runner, a working job and an MR preparation need a person, an
+  // is left alone, and so is a paused one (SF-067) and one parked on a usage limit (SF-072: the run
+  // queue arms its timer from limit.resets_at). Without a runner, a working job and an MR preparation need a person, an
   // interrupted start failed, and a job awaiting review whose last iteration has no review, or a
   // clean review but no gate.json, or a clean gate.json and a simplification pass that never applied
   // (SF-055), gets a runner, which resumes it (resume: the review, the gate, the pass, or with the
@@ -1104,6 +1110,12 @@ export class Execution implements RunnerWork {
         return;
       }
       if (!outcome.ok) {
+        // A turn that hit the plan's usage limit parks the job (SF-072); its turn runs again on Resume.
+        const limit = outcome.code === 'session_failed' || outcome.code === 'turn_failed' ? usageLimit(outcome.message, new Date(), 'claude') : undefined;
+        if (limit !== undefined) {
+          await this.#park(job, 'turn', limit);
+          return;
+        }
         await this.#transition(job, 'needs_human', { code: outcome.code, message: outcome.message });
         return;
       }
@@ -1576,6 +1588,8 @@ export class Execution implements RunnerWork {
       const at = now();
       outcome = { ok: false, message: `The review could not start: ${(error as Error).message}`.slice(0, 1000), startedAt: at, endedAt: at };
     }
+    // A usage limit (SF-072) is read from the message as the session wrote it, before redaction.
+    const limit = outcome.ok ? undefined : usageLimit(outcome.message, new Date(), 'claude');
     // The failure message goes to review.json, the event and the job's error: withheld or redacted
     // like the session's prose (src/redact.ts, failure).
     if (!outcome.ok) {
@@ -1583,12 +1597,14 @@ export class Execution implements RunnerWork {
     }
     const ended = outcome;
     await this.#afterSession(job);
-    await this.#locked(() => this.#reviewed(job, running, ended));
+    await this.#locked(() => this.#reviewed(job, running, ended, limit));
   }
 
-  // The end of a review. A cancelled one leaves no trace. Otherwise review.json and the event are
-  // written; the verdict applies only while the job still awaits review of the same iteration.
-  async #reviewed(reviewed: Job, running: RunningReview, outcome: ReviewOutcome): Promise<void> {
+  // The end of a review. A cancelled one leaves no trace. One that hit a usage limit (limit) while
+  // the job still awaits review of the same iteration parks the job (SF-072) and writes nothing of
+  // the round. Otherwise review.json and the event are written; the verdict applies only while the
+  // job still awaits review of the same iteration.
+  async #reviewed(reviewed: Job, running: RunningReview, outcome: ReviewOutcome, limit?: UsageLimit): Promise<void> {
     const { workspace: name, ticket, iteration } = reviewed;
     const key = `${name}/${ticket}`;
     if (this.#reviews.get(key) !== running || running.controller.signal.aborted) {
@@ -1601,6 +1617,10 @@ export class Execution implements RunnerWork {
       return;
     }
     const current = job.state === 'awaiting_review' && job.iteration === iteration;
+    if (current && limit !== undefined) {
+      await this.#park(job, 'review', limit);
+      return;
+    }
     const ignored = current ? {} : { ignored: true as const };
     const record: ReviewRecord = outcome.ok
       ? { reviewer: REVIEWER, ...outcome.output, cost_usd: outcome.costUsd, started_at: outcome.startedAt, ended_at: outcome.endedAt }
@@ -1743,6 +1763,8 @@ export class Execution implements RunnerWork {
       const at = now();
       outcome = { ok: false, message: `The gate could not start: ${(error as Error).message}`.slice(0, 1000), tokens: noTokens(), startedAt: at, endedAt: at };
     }
+    // A usage limit of the plan (SF-072), read before redaction.
+    const limit = outcome.ok ? undefined : usageLimit(outcome.message, new Date(), 'codex');
     // The failure message (Codex's stderr or error event) goes to gate.json, the event and the
     // job's error: withheld or redacted like the run's prose (src/redact.ts, failure).
     if (!outcome.ok) {
@@ -1750,7 +1772,7 @@ export class Execution implements RunnerWork {
     }
     const ended = outcome;
     await this.#afterSession(job);
-    await this.#locked(() => this.#gated(job, running, claude, ended));
+    await this.#locked(() => this.#gated(job, running, claude, ended, limit));
   }
 
   // The end of a gate run. A cancelled one leaves no trace. Otherwise its tokens count for the job,
@@ -1758,8 +1780,10 @@ export class Execution implements RunnerWork {
   // review of the same iteration, as the factory acts on it (decide, SF-051): clean (a fix with nits
   // only too) runs Clean with the paths both reviewers accepted, fix (a blocker or major item, or an
   // undeclared sensitive path or a path outside the Task's scope the gate does not accept) is the
-  // next Fix section unless the gate's rounds are used up.
-  async #gated(gated: Job, running: RunningReview, claude: ReviewOutput, outcome: GateOutcome): Promise<void> {
+  // next Fix section unless the gate's rounds are used up. A run that hit a usage limit (limit) while
+  // the job still awaits review of the same iteration parks the job (SF-072): no gate.json, no event,
+  // no tokens charged.
+  async #gated(gated: Job, running: RunningReview, claude: ReviewOutput, outcome: GateOutcome, limit?: UsageLimit): Promise<void> {
     const { workspace: name, ticket, iteration } = gated;
     const key = `${name}/${ticket}`;
     if (this.#reviews.get(key) !== running || running.controller.signal.aborted) {
@@ -1770,13 +1794,19 @@ export class Execution implements RunnerWork {
     if (read === undefined || read.created_at !== gated.created_at) {
       return;
     }
+    const current = read.state === 'awaiting_review' && read.iteration === iteration;
+    // A run that hit a usage limit is discarded whole (SF-072): its tokens are not charged either,
+    // so a parked and rerun round never counts toward SF_GATE_MAX_TOKENS.
+    if (current && limit !== undefined) {
+      await this.#park(read, 'gate', limit);
+      return;
+    }
     let job = read;
     const used = outcome.tokens.input + outcome.tokens.output;
     if (used > 0) {
       job = { ...job, gate_tokens: job.gate_tokens + used };
       await this.jobs.write(job);
     }
-    const current = job.state === 'awaiting_review' && job.iteration === iteration;
     const ignored = current ? {} : { ignored: true as const };
     const model = this.#config.codexModel !== undefined ? { model: this.#config.codexModel } : {};
     const times = { started_at: outcome.startedAt, ended_at: outcome.endedAt };
@@ -1929,18 +1959,22 @@ export class Execution implements RunnerWork {
       const at = now();
       outcome = { ok: false, message: `The simplification pass could not start: ${(error as Error).message}`.slice(0, 1000), model: null, startedAt: at, endedAt: at };
     }
+    // A usage limit of the plan (SF-072), read before redaction.
+    const limit = outcome.ok ? undefined : usageLimit(outcome.message, new Date(), 'claude');
     if (!outcome.ok) {
       outcome = { ...outcome, message: redactor.failure(outcome.message) };
     }
     const ended = outcome;
     await this.#afterSession(job);
-    await this.#locked(() => this.#simplifyEnded(job, running, sensitive, ended));
+    await this.#locked(() => this.#simplifyEnded(job, running, sensitive, ended, limit));
   }
 
   // The end of the pass. A cancelled one leaves no trace; one the job moved on from leaves only its
   // event (ignored); either way the job's simplify_iteration keeps any later pass from running. Otherwise simplify.json (the suggestions the
-  // ledger guard kept, and those it dropped) and the event are written and the outcome applies.
-  async #simplifyEnded(started: Job, running: RunningReview, sensitive: string[], outcome: StructuredOutcome<SimplifyOutput>): Promise<void> {
+  // ledger guard kept, and those it dropped) and the event are written and the outcome applies. A
+  // pass that hit a usage limit (limit) while the job is still current parks the job instead
+  // (SF-072): no simplify.json, no event, and the pass runs again on Resume.
+  async #simplifyEnded(started: Job, running: RunningReview, sensitive: string[], outcome: StructuredOutcome<SimplifyOutput>, limit?: UsageLimit): Promise<void> {
     const { workspace, ticket, iteration } = started;
     const key = `${workspace}/${ticket}`;
     if (this.#reviews.get(key) !== running || running.controller.signal.aborted) {
@@ -1952,6 +1986,10 @@ export class Execution implements RunnerWork {
       return;
     }
     const current = job.state === 'awaiting_review' && job.iteration === iteration;
+    if (current && limit !== undefined) {
+      await this.#park(job, 'simplify', limit);
+      return;
+    }
     const guarded = outcome.ok ? guardSuggestions(outcome.output.suggestions, await this.jobs.readLedger(workspace, ticket)) : undefined;
     await this.jobs.appendEvent(workspace, ticket, {
       ts: now(), iteration, type: 'simplify', reviewer: SIMPLIFIER, suggestions: guarded?.kept.length ?? 0, dropped: guarded?.dropped.length ?? 0,
@@ -3147,6 +3185,67 @@ export class Execution implements RunnerWork {
     });
   }
 
+  // A session of the job hit the plan's usage limit (SF-072): the job parks in waiting_limit, as a
+  // pause would leave it (paused: from working for the turn, awaiting_review for a round; the
+  // interrupted event, so the round is due again on Resume; a simplification pass not used up), with
+  // the limit: its provider and when the run queue goes on (the parsed reset, else paused.at + 30
+  // minutes). Nothing of the round is recorded. Only under the lock, in the runner.
+  async #park(job: Job, step: PauseStep, limit: UsageLimit): Promise<void> {
+    const from = job.state === 'working' ? 'working' as const : 'awaiting_review' as const;
+    const iteration = from === 'working' ? job.iteration + 1 : job.iteration;
+    const at = now();
+    const resetsAt = limit.resets_at ?? new Date(Date.parse(at) + LIMIT_RETRY_MS).toISOString();
+    // The pass runs again on Resume: its one run per job was not used up.
+    const { simplify_iteration: _started, ...withoutPass } = job;
+    const parked: Job = { ...(step === 'simplify' ? withoutPass : job), paused: { from, step, at }, limit: { provider: limit.provider, resets_at: resetsAt } };
+    const reviewer = { review: REVIEWER, gate: GATE_REVIEWER, simplify: SIMPLIFIER, turn: undefined }[step];
+    await this.jobs.appendEvent(job.workspace, job.ticket, { ts: at, iteration, type: 'interrupted', step, ...(reviewer !== undefined ? { reviewer } : {}) });
+    await this.#transition(parked, 'waiting_limit');
+  }
+
+  // The run queue's step for a parked job whose limit reset (SF-072), in sf serve. The job is read
+  // again under the lock: one no longer parked since the queue saw it (parkedAt: its paused.at;
+  // aborted, reset, restarted, resumed by hand, parked again) or already handled is skipped. resume:
+  // the job is resumed as sf resume does it, without a message (its runner's reply awaited outside the
+  // lock; a resume that fails hands the job to the user with that error: failed); otherwise the
+  // reset is only marked (reset_seen, notified_at) and the job waits for the user (waiting).
+  async limitReset(workspaceName: string, ticket: string, parkedAt: string, resume: boolean): Promise<'resumed' | 'waiting' | 'failed' | 'skipped'> {
+    // A resume that fails, queued or in the runner: the job, still parked as the queue saw it, goes
+    // to the user with the error. Only under the lock.
+    const fail = async (error: unknown): Promise<'failed'> => {
+      const failure = error instanceof FactoryError ? { code: error.code, message: error.message } : { code: 'resume_failed', message: `The resume after the usage limit failed: ${(error as Error).message}`.slice(0, 1000) };
+      const job = await this.jobs.read(workspaceName, ticket);
+      if (job?.state === 'waiting_limit' && job.paused?.at === parkedAt) {
+        await this.#transition(job, 'needs_human', failure);
+      }
+      return 'failed';
+    };
+    const queued = await this.#locked(async (): Promise<string | 'waiting' | 'skipped' | 'failed'> => {
+      const job = await this.jobs.read(workspaceName, ticket);
+      if (job === undefined || job.state !== 'waiting_limit' || job.limit === undefined || job.limit.reset_seen === true || job.paused?.at !== parkedAt) {
+        return 'skipped';
+      }
+      if (!resume) {
+        await this.jobs.write({ ...job, limit: { ...job.limit, reset_seen: true, notified_at: now() } });
+        return 'waiting';
+      }
+      try {
+        return await this.#serveRunners().queue(workspaceName, ticket, { kind: 'resume', message: '' });
+      } catch (error) {
+        return fail(error);
+      }
+    });
+    if (queued === 'waiting' || queued === 'skipped' || queued === 'failed') {
+      return queued;
+    }
+    try {
+      await this.#serveRunners().reply(workspaceName, ticket, queued);
+      return 'resumed';
+    } catch (error) {
+      return this.#locked(() => fail(error));
+    }
+  }
+
   // What a job in working or awaiting_review was doing: the turn, or the review round that runs or
   // is due on its last iteration (the Claude review, the gate after a clean one, the simplification
   // pass once started); null when none was (awaiting review with the review off).
@@ -3191,10 +3290,12 @@ export class Execution implements RunnerWork {
     return this.#serveRunners().reply(workspaceName, ticket, id) as Promise<Resumed>;
   }
 
-  // sf resume needs a paused job; a message only when a turn was paused, and then plain text.
+  // sf resume needs a paused job, or one parked on a usage limit (SF-072: resumed now, before the
+  // reset); a message only when a turn was paused, and then plain text. From waiting_limit the job
+  // already holds its slot.
   #checkResume(job: Job, message: string): void {
-    if (job.state !== 'paused') {
-      throw new FactoryError('invalid_state', `sf resume needs paused; the job is ${job.state}.`);
+    if (!RESUMABLE_STATES.includes(job.state)) {
+      throw new FactoryError('invalid_state', `sf resume needs paused or waiting_limit; the job is ${job.state}.`);
     }
     if (message.includes('\0')) {
       throw new FactoryError('invalid_content', 'The message must be text.');
@@ -3264,8 +3365,8 @@ export class Execution implements RunnerWork {
   }
 
   // sf restart (SF-067): the ticket starts again from its current Task file, as a new job on a fresh
-  // worktree and branch from the Task's base, for a job that is paused, aborted, failed or needs the
-  // user. The old job is retired as reset does (its runner stopped, its worktree removed, its
+  // worktree and branch from the Task's base, for a job that is paused, parked on a usage limit
+  // (SF-072), aborted, failed or needs the user. The old job is retired as reset does (its runner stopped, its worktree removed, its
   // directory archived), and its branch deleted, only when it has no commit beyond the job's base
   // and was never pushed; otherwise nothing is touched and the restart is refused with the reason
   // (restart_refused). keepFiles: the old worktree's changed and new files go into the new worktree
@@ -3275,7 +3376,7 @@ export class Execution implements RunnerWork {
       const old = await this.#job(workspaceName, ticket);
       checkNotInCheckout(old);
       if (!RESTARTABLE_STATES.includes(old.state)) {
-        throw new FactoryError('invalid_state', `sf restart needs paused, aborted, failed or needs_human; the job is ${old.state}.`);
+        throw new FactoryError('invalid_state', `sf restart needs paused, waiting_limit, aborted, failed or needs_human; the job is ${old.state}.`);
       }
       const workspace = await this.#resolve(workspaceName);
       const checkout = workspace.workCheckout;
@@ -3629,6 +3730,10 @@ export class Execution implements RunnerWork {
     // A step of the hand-over that was cut off is repaired by recover() first (SF-073).
     if (job.handover !== undefined && job.handover.step !== null) {
       throw cutOffError(job, job.handover.step);
+    }
+    // A parked job (SF-072) has no session to queue a message in: Resume carries it.
+    if (job.state === 'waiting_limit') {
+      throw new FactoryError('invalid_state', `The job waits for the usage limit to reset. Resume the job with a message: sf resume ${job.workspace} ${job.ticket} [message]`);
     }
     if (!['working', 'awaiting_review', 'needs_human', 'ready_for_human_review', 'handed_over'].includes(job.state)) {
       throw new FactoryError('invalid_state', `sf say needs working, awaiting_review, needs_human, ready_for_human_review or handed_over; the job is ${job.state}.`);

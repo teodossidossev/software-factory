@@ -20,7 +20,7 @@
         <span class="stepper"><button id="limDown" type="button" aria-label="One job fewer">−</button><output id="limVal"></output><button id="limUp" type="button" aria-label="One job more">+</button></span>
         <span>jobs at once</span>
         <span class="qstatus" id="qstatus"></span>
-        <!-- Shown and wired by SF-072 -->
+        <!-- The rule at a usage limit's reset (SF-072) -->
         <div class="menuwrap" hidden><button class="btn small" id="rulesBtn" type="button" aria-expanded="false">Rules ▾</button><div class="menu" id="rulesMenu" hidden><b>When the usage limit resets</b><label><input type="radio" name="rule" value="resume-then-queue" id="rule-resume-then-queue"> Resume parked jobs, then go on with the queue</label><label><input type="radio" name="rule" value="resume-only" id="rule-resume-only"> Resume parked jobs only</label><label><input type="radio" name="rule" value="wait" id="rule-wait"> Wait for me</label></div></div>
       </div>
       <nav class="ws" aria-label="Setup">

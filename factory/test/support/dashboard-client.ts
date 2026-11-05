@@ -163,7 +163,8 @@ export function openStream(url: URL): Promise<Stream> {
 }
 
 export type Call = ['start', string, string] | ['approve', string, string] | ['abort', string, string, boolean] | ['say', string, string, string] | ['retryReview', string, string] | ['acceptGate', string, string] | ['settle', string, string, string, string, string] | ['archiveFinished', string, string]
-  | ['createMergeRequest', string, string] | ['mergeMergeRequest', string, string] | ['mergeRequestStatus', string, string] | ['simplify', string, string];
+  | ['createMergeRequest', string, string] | ['mergeMergeRequest', string, string] | ['mergeRequestStatus', string, string] | ['simplify', string, string]
+  | ['pause', string, string] | ['resumePaused', string, string, string] | ['restart', string, string, boolean];
 
 export interface FakeActions extends DashboardActions {
   calls: Call[];
@@ -191,6 +192,9 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
     createMergeRequest: (workspace, ticket) => reply(['createMergeRequest', workspace, ticket]),
     mergeMergeRequest: (workspace, ticket) => reply(['mergeMergeRequest', workspace, ticket]),
     mergeRequestStatus: (workspace, ticket) => reply(['mergeRequestStatus', workspace, ticket]),
+    pause: (workspace, ticket) => reply(['pause', workspace, ticket]),
+    resumePaused: (workspace, ticket, message) => reply(['resumePaused', workspace, ticket, message ?? '']),
+    restart: (workspace, ticket, keepFiles) => reply(['restart', workspace, ticket, keepFiles ?? false]),
     mrHost: { host: 'github', reason: null },
     mergeRequestHost: async () => fake.mrHost,
   };

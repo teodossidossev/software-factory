@@ -10,7 +10,7 @@ import { now } from './jobs.js';
 
 const DESKTOP_TIMEOUT_MS = 5_000;
 const NTFY_TIMEOUT_MS = 10_000;
-export const NOTIFIED_STATES: readonly JobState[] = ['ready_for_human_review', 'needs_human', 'pushed', 'failed'];
+export const NOTIFIED_STATES: readonly JobState[] = ['ready_for_human_review', 'needs_human', 'paused', 'pushed', 'failed'];
 
 export interface NotifyConfig {
   desktop: boolean;
@@ -58,6 +58,16 @@ export function jobNotification(job: Job, lines: string[] = []): Notification {
       body: [`Report and Patch of iteration ${job.iteration} are ready for the reviewers`, ...lines].slice(0, 3).join('\n'),
       priority: 'default',
       tags: 'eyes',
+    };
+  }
+  if (job.state === 'paused') {
+    // SF-067: what the pause interrupted, which Resume runs again.
+    const step = job.paused?.step;
+    return {
+      title: `${job.ticket}: paused`,
+      body: [`branch: ${job.branch}`, step !== undefined && step !== null ? `Paused during the ${step}; Resume goes on from there.` : 'Paused; Resume goes on from there.', ...lines].slice(0, 3).join('\n'),
+      priority: 'default',
+      tags: 'pause_button',
     };
   }
   const body = [`branch: ${job.branch}`, ...(job.error !== undefined ? [`${job.error.code}: ${job.error.message}`] : []), ...lines].slice(0, 3);

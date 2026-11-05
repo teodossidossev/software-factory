@@ -2,7 +2,8 @@
 // repository-local .git/info/exclude (never .gitignore).
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, readFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic.js';
 import { FactoryError } from './errors.js';
@@ -103,10 +104,11 @@ export function checkTaskContent(ticket: string, content: string): Buffer {
 
 export const MAX_FIX_BYTES = 64 * 1024;
 
-// write_task is refused while a job for the ticket exists in a non-terminal state.
+// write_task is refused while a job for the ticket exists in a non-terminal state, paused aside
+// (SF-067): the Task file changes while the job is paused, and Resume hands the change on.
 export async function refuseWhileJobRunning(workspace: Workspace, ticket: string, jobs: JobStore): Promise<void> {
   const job = await jobs.read(workspace.name, ticket);
-  if (job !== undefined && !TERMINAL_STATES.includes(job.state)) {
+  if (job !== undefined && !TERMINAL_STATES.includes(job.state) && job.state !== 'paused') {
     throw new FactoryError('job_active', `The job for ${workspace.name}/${ticket} is ${job.state}; the Task file cannot be replaced now.`);
   }
 }
@@ -166,6 +168,41 @@ export function writeTask(workspace: Workspace, ticket: string, content: string,
     await refuseWhileJobRunning(workspace, ticket, jobs);
     return writeTaskFile(workspace, ticket, buffer);
   });
+}
+
+// The sha256 of a Task file's text (SF-067): what a job records of the version it was given.
+export function taskSha256(content: string): string {
+  return createHash('sha256').update(content, 'utf8').digest('hex');
+}
+
+// The bound of a Task file diff (SF-067) in bytes; a longer one is not sent.
+export const MAX_TASK_DIFF_BYTES = 64 * 1024;
+
+// The unified diff of the ticket's Task file from before to after (SF-067), with the file's own
+// path in its header (a/ and b/ .software-factory/<ticket>.md); undefined when Git cannot make one
+// or it is longer than MAX_TASK_DIFF_BYTES.
+export async function taskDiff(ticket: string, before: string, after: string): Promise<string | undefined> {
+  const dir = await mkdtemp(join(tmpdir(), 'sf-task-diff-'));
+  try {
+    await mkdir(join(dir, 'a'));
+    await mkdir(join(dir, 'b'));
+    await writeFile(join(dir, 'a', `${ticket}.md`), before, 'utf8');
+    await writeFile(join(dir, 'b', `${ticket}.md`), after, 'utf8');
+    // Exit code 1: the files differ.
+    const result = await runGit(dir, ['diff', '--no-index', '--no-color', '--no-ext-diff', '-U3', '--', `a/${ticket}.md`, `b/${ticket}.md`], MAX_TASK_DIFF_BYTES + 4096);
+    if (result.code !== 1 || result.truncated) {
+      return undefined;
+    }
+    const lines = result.stdout.toString('utf8').split('\n');
+    const first = lines.findIndex((line) => line.startsWith('@@'));
+    if (first < 0) {
+      return undefined;
+    }
+    const diff = [`--- a/${TASK_DIR}/${ticket}.md`, `+++ b/${TASK_DIR}/${ticket}.md`, ...lines.slice(first)].join('\n').replace(/\n$/, '');
+    return Buffer.byteLength(diff, 'utf8') > MAX_TASK_DIFF_BYTES ? undefined : diff;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 // Reads the Task file of the work checkout (or its archived copy) and returns its validated text.

@@ -26,7 +26,7 @@ import { DECISIONS } from './ledger.js';
 import { WORKSPACE_NAME_PATTERN } from './registry.js';
 import type { Setup } from './setup.js';
 import type { CheckSummary, TaskChecks } from './task-check.js';
-import { TICKET_PATTERN } from './task-file.js';
+import { taskSha256, TICKET_PATTERN } from './task-file.js';
 import { describeEvent, followLines } from './watch.js';
 
 export const DEFAULT_DASHBOARD_PORT = 8788;
@@ -57,10 +57,11 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 // sf start. Archive of a job card is archiveFinished (terminal only), never the any-state reset.
 // The merge request on the Git host (SF-048): mr-create, mr-merge and mr-status as sf mr create,
 // merge and status, and mergeRequestHost for whether they are on for a job's workspace.
+// Pause, Resume and Restart (SF-067) as sf pause, resume and restart.
 export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | 'say' | 'retryReview' | 'acceptGate' | 'settle' | 'simplify' | 'archiveFinished'
-  | 'createMergeRequest' | 'mergeMergeRequest' | 'mergeRequestStatus' | 'mergeRequestHost'>;
-export type DashboardAction = 'approve' | 'abort' | 'say' | 'review' | 'accept' | 'settle' | 'simplify' | 'archive' | 'mr-create' | 'mr-merge' | 'mr-status';
-export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'review', 'accept', 'settle', 'simplify', 'archive', 'mr-create', 'mr-merge', 'mr-status'];
+  | 'createMergeRequest' | 'mergeMergeRequest' | 'mergeRequestStatus' | 'mergeRequestHost' | 'pause' | 'resumePaused' | 'restart'>;
+export type DashboardAction = 'approve' | 'abort' | 'say' | 'review' | 'accept' | 'settle' | 'simplify' | 'archive' | 'mr-create' | 'mr-merge' | 'mr-status' | 'pause' | 'resume' | 'restart';
+export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'review', 'accept', 'settle', 'simplify', 'archive', 'mr-create', 'mr-merge', 'mr-status', 'pause', 'resume', 'restart'];
 
 // The start screen's data and changes: the workspace registry and the Task files (src/setup.ts).
 export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'removeWorkspace' | 'tickets' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'archivedTickets' | 'taskText' | 'taskTitle'>;
@@ -111,6 +112,9 @@ const BODIES = {
   'mr-create': { shape: '{}', schema: z.strictObject({}) },
   'mr-merge': { shape: '{}', schema: z.strictObject({}) },
   'mr-status': { shape: '{}', schema: z.strictObject({}) },
+  pause: { shape: '{}', schema: z.strictObject({}) },
+  resume: { shape: '{"message"?: string}', schema: z.strictObject({ message: z.string().optional() }) },
+  restart: { shape: '{"keep_files"?: boolean}', schema: z.strictObject({ keep_files: z.boolean().optional() }) },
   'workspace-add': { shape: '{"name": string, "path": string}', schema: z.strictObject({ name: z.string(), path: z.string() }) },
   'workspace-remove': { shape: '{}', schema: z.strictObject({}) },
   'ticket-archive': { shape: '{}', schema: z.strictObject({}) },
@@ -131,6 +135,8 @@ const ERROR_STATUS: Record<string, number> = {
   job_not_found: 404, workspace_not_found: 404, task_not_found: 404,
   // The Task check (SF-054): one at a time per ticket.
   check_running: 409,
+  // A Restart that would delete a branch with commits or a pushed one (SF-067).
+  restart_refused: 409,
   invalid_content: 400, invalid_ticket: 400, invalid_name: 400, workspace_invalid: 400,
   // The merge request (SF-048): the host's refusals and the actions being off are conflicts; a host
   // that failed or refused the token is a bad gateway.
@@ -244,15 +250,30 @@ async function mrHostOf(actions: DashboardActions, workspace: string): Promise<M
   }
 }
 
+// Whether the Task file of a paused job changed since the Implementer was last given it (SF-067):
+// its sha256 against the job's; null for a job not paused, without a recorded sha256, or whose Task
+// file cannot be read.
+async function taskChangedOf(setup: DashboardSetup, job: Job): Promise<boolean | null> {
+  if (job.state !== 'paused' || job.task_sha256 === undefined) {
+    return null;
+  }
+  try {
+    return taskSha256(await setup.taskText(job.workspace, job.ticket)) !== job.task_sha256;
+  } catch {
+    return null;
+  }
+}
+
 // mr: the merge request on the Git host (SF-048), null before one is opened; mr_host: whether the
-// merge request actions are on for the job's workspace.
-function jobSummary(job: Job, counts: { files: number; undeclared: number; deleted: number }, mrHost: MrHost) {
+// merge request actions are on for the job's workspace; paused: what a pause interrupted (SF-067),
+// null unless paused; task_changed: taskChangedOf.
+function jobSummary(job: Job, counts: { files: number; undeclared: number; deleted: number }, mrHost: MrHost, taskChanged: boolean | null) {
   return {
     workspace: job.workspace, ticket: job.ticket, branch: job.branch, base: job.base, state: job.state,
     iteration: job.iteration, mr_attempts: job.mr_attempts, updated_at: job.updated_at, created_at: job.created_at,
     error: job.error ?? null, worktree: job.worktree, prepared_commit: job.prepared_commit,
     fixes: job.fixes, gate_fixes: job.gate_fixes, gate_tokens: job.gate_tokens, ...counts,
-    mr: job.mr, mr_host: mrHost,
+    mr: job.mr, mr_host: mrHost, paused: job.paused ?? null, task_changed: taskChanged,
   };
 }
 
@@ -264,7 +285,7 @@ async function jobsPayload(jobs: JobStore, setup: DashboardSetup, actions: Dashb
       hosts.set(job.workspace, await mrHostOf(actions, job.workspace));
     }
     list.push({
-      ...jobSummary(job, await fileCounts(jobs, job), hosts.get(job.workspace)!),
+      ...jobSummary(job, await fileCounts(jobs, job), hosts.get(job.workspace)!, await taskChangedOf(setup, job)),
       title: await setup.taskTitle(job.workspace, job.ticket), ...(await boardFacts(jobs, job)),
     });
   }
@@ -338,7 +359,7 @@ async function stateHistory(jobs: JobStore, workspace: string, ticket: string) {
   return history;
 }
 
-async function jobDetail(jobs: JobStore, job: Job, gate: boolean, actions: DashboardActions) {
+async function jobDetail(jobs: JobStore, job: Job, gate: boolean, actions: DashboardActions, setup: DashboardSetup) {
   const iterations = [];
   for (let number = 1; number <= job.iteration; number += 1) {
     try {
@@ -365,7 +386,7 @@ async function jobDetail(jobs: JobStore, job: Job, gate: boolean, actions: Dashb
   }
   const mrText = await jobs.readMrText(job.workspace, job.ticket);
   return {
-    job: jobSummary(job, await fileCounts(jobs, job), await mrHostOf(actions, job.workspace)),
+    job: jobSummary(job, await fileCounts(jobs, job), await mrHostOf(actions, job.workspace), await taskChangedOf(setup, job)),
     iterations,
     mr: mrText !== undefined,
     // The merge request's title on the Git host: the MR text's first line (SF-048).
@@ -583,7 +604,7 @@ export async function startDashboard(
     }
     const job = await jobs.read(...key);
     if (job !== undefined) {
-      send(stream, 'job', await jobDetail(jobs, job, gateOn, actions));
+      send(stream, 'job', await jobDetail(jobs, job, gateOn, actions, setup));
     }
     const start = Number(from);
     try {
@@ -641,7 +662,7 @@ export async function startDashboard(
     }
     const [, , ...tail] = rest;
     if (tail.length === 0) {
-      body(res, 'application/json; charset=utf-8', JSON.stringify(await jobDetail(jobs, job, gateOn, actions)));
+      body(res, 'application/json; charset=utf-8', JSON.stringify(await jobDetail(jobs, job, gateOn, actions, setup)));
       return;
     }
     if (tail.length === 1 && tail[0] === 'mr') {
@@ -792,6 +813,31 @@ export async function startDashboard(
       return {
         route: action, exists, call: (data) => (parse(BODIES[action].schema, data) ? run : undefined),
         ...(action === 'mr-status' ? { refreshJob: [workspace, ticket] as [string, string] } : {}),
+      };
+    }
+    if (action === 'pause') {
+      // sf pause (SF-067): the Execution refuses any state but working and awaiting_review.
+      const run = (): Promise<unknown> => actions.pause(workspace, ticket);
+      return { route: action, exists, call: (data) => (parse(BODIES.pause.schema, data) ? run : undefined) };
+    }
+    if (action === 'resume') {
+      // sf resume (SF-067): paused only; a message only when a turn was paused.
+      return {
+        route: action, exists,
+        call: (data) => {
+          const parsed = parse(BODIES.resume.schema, data);
+          return parsed ? () => actions.resumePaused(workspace, ticket, parsed.message ?? '') : undefined;
+        },
+      };
+    }
+    if (action === 'restart') {
+      // sf restart (SF-067): a new job replaces the old one, so every page gets the jobs again.
+      return {
+        route: action, exists, refreshJobs: true,
+        call: (data) => {
+          const parsed = parse(BODIES.restart.schema, data);
+          return parsed ? () => actions.restart(workspace, ticket, parsed.keep_files === true) : undefined;
+        },
       };
     }
     if (action === 'archive') {
@@ -1018,7 +1064,7 @@ export async function startDashboard(
     }
     const list = await jobsPayload(jobs, setup, actions);
     const selected = [...streams].filter((stream) => stream.job?.[0] === job.workspace && stream.job[1] === job.ticket);
-    const detail = selected.length > 0 ? await jobDetail(jobs, job, gateOn, actions) : undefined;
+    const detail = selected.length > 0 ? await jobDetail(jobs, job, gateOn, actions, setup) : undefined;
     for (const stream of streams) {
       send(stream, 'jobs', list);
       if (detail !== undefined && selected.includes(stream)) {

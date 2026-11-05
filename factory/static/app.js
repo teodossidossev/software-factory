@@ -1,29 +1,31 @@
-// Software Factory dashboard v3 (SF-077), the port of docs/design/dashboard-v3/prototype.html: the
-// top bar (the summary, the connection, the workspace filter, Archived, Workspaces and New ticket;
-// the queue controls and the Rules menu stay hidden until SF-071 and SF-072), the board's five
-// columns Queue, Implementing, Reviewing, Your turn and Done, whose cards say who acts now, why a
-// job stopped (one table, STOPS) and carry one primary action only where the user acts, and the
-// full pages a card opens: a job's page at #<ws>/<ticket> (/changes, /mr), with the job detail of
-// SF-047 inside it until SF-078, and a planned ticket's page at #<ws>/<ticket>/ticket (its Task in
-// the drawer until SF-081). The board's messages go to the toast. The job's approve, abort, say,
-// Retry review, Accept and prepare MR, Pause, Resume, Restart and the merge request on the Git host
-// (SF-048) go as POSTs to api/jobs/<ws>/<ticket>/<action>, each one a deliberate click, confirmed
-// where it pushes, ends, overrides or merges, never retried or replayed by the page. A Queue card
-// starts its job (POST api/tickets/<ws>/<ticket>/start, confirmed, never retried; its confirmation
-// says when the Task is not checked, the check is stale or not ready) and runs the Task check
-// (SF-054: Check, POST api/tickets/<ws>/<ticket>/check; it only advises). Every value goes in
-// through textContent; the hrefs are the server's ChatGPT URL, checked against its fixed prefix,
-// and a merge request's https URL from the Git host.
+// Software Factory dashboard v3 (SF-077, SF-078), the port of docs/design/dashboard-v3/prototype.html:
+// the top bar (the summary, the connection, the workspace filter, Archived, Workspaces and New
+// ticket; the queue controls and the Rules menu stay hidden until SF-071 and SF-072), the board's
+// five columns Queue, Implementing, Reviewing, Your turn and Done, whose cards say who acts now, why
+// a job stopped (one table, STOPS) and carry one primary action only where the user acts, and the
+// full pages a card opens: a job's page at #<ws>/<ticket> (/changes, /mr) and a planned ticket's
+// page at #<ws>/<ticket>/ticket (its Task in the drawer until SF-081). The job's page (SF-078): its
+// header with the screen switch, and the Stream, one chronological list of the job's entries
+// (SF-082: read page by page from api/jobs/<ws>/<ticket>/stream, then live from the stream's entries
+// events), with its stop block and the composer pinned at the bottom; the Changes and Merge request
+// screens show the old Changes and MR views until SF-079 and SF-080. The board's messages go to the
+// toast. The job's actions (approve, abort, say, Retry review, Accept and prepare MR, Simplify,
+// settle, Pause, Resume, Restart, archive and the merge request on the Git host, SF-048) go as POSTs
+// to api/jobs/<ws>/<ticket>/<action>, each one a deliberate click, confirmed inline where it pushes,
+// ends, overrides or merges, never retried or replayed by the page. A Queue card starts its job
+// (POST api/tickets/<ws>/<ticket>/start, confirmed, never retried; its confirmation says when the
+// Task is not checked, the check is stale or not ready) and runs the Task check (SF-054: Check, POST
+// api/tickets/<ws>/<ticket>/check; it only advises). Every value goes in through textContent; the
+// hrefs are the server's ChatGPT URL, checked against its fixed prefix, and a merge request's https
+// URL from the Git host.
 'use strict';
 
 const RECONNECT_MS = 3000;
 const READ_TIMEOUT_MS = 10000;
 const TERMINAL_STATES = ['pushed', 'aborted', 'failed'];
 const SAY_STATES = ['working', 'awaiting_review', 'needs_human', 'ready_for_human_review', 'handed_over'];
-// The hand-over to the user's checkout (SF-073): the buttons of the job, each with the state it takes.
+// The hand-over to the user's checkout (SF-073): the composer's actions, each with the state it takes.
 const HANDOVER_ACTIONS = [['handover', 'ready_for_human_review'], ['handed-done', 'handed_over'], ['takeback', 'handed_over']];
-// Their buttons by action, made once the page loads (init).
-const handoverButtons = {};
 // Pause, Resume and Restart (SF-067): the states each takes.
 const PAUSE_STATES = ['working', 'awaiting_review'];
 const RESTART_STATES = ['paused', 'aborted', 'failed', 'needs_human'];
@@ -71,10 +73,6 @@ const PENDING_TEXT = {
   'handed-done': 'Asking origin for your push…',
 };
 const $ = (id) => document.getElementById(id);
-// The views of the selected job, flat tabs, one panel each (#tab-<name>).
-const JOB_TABS = [['task', 'Task'], ['changes', 'Changes'], ['reviews', 'Reviews'], ['mr', 'MR'], ['log', 'Live log']];
-// The steps of the job's pipeline in the drawer.
-const STEPS = ['Implement', 'Claude review', 'Codex gate', 'MR preparation', 'You'];
 // The codes of a job the gate stopped, which Accept and prepare MR takes on (SF-047).
 const GATE_CODES = ['gate_rounds', 'gate_budget', 'gate_failed'];
 // The ledger's stops (SF-052) that Accept and prepare MR takes on as well.
@@ -84,27 +82,36 @@ const SIMPLIFY_CODE = 'simplify_offered';
 const ACCEPT_CODES = [...GATE_CODES, ...LEDGER_CODES, SIMPLIFY_CODE];
 // The stops whose findings the user settles here (Accept risk, Must fix).
 const SETTLE_STOPS = ['escalated', ...LEDGER_CODES];
-// The Live log's filters: who a line comes from.
-const LOG_FILTERS = [['all', 'All'], ['implementer', 'Implementer'], ['claude', 'Claude review'], ['codex', 'Codex'], ['state', 'State']];
 
 const state = {
   jobs: [],
   key: null, // "<ws>/<ticket>" of the job open on its page
   detail: null,
   iteration: null, // the iteration selected in Changes
-  // The selected job tab; kept across jobs.
-  tab: 'changes',
   cache: new Map(), // "<n>/<view>" -> text, for the selected job
-  // "<key>/<n>" of the Report and Patch drawn in Changes; "<iteration>/<path>" of the file clicked
-  // in its list; the stamp of the Task text shown; the MR text loaded; the Live log's filter.
+  // "<key>/<n>" of the Report and Patch drawn in Changes; "<iteration>/<path>" of the file a click
+  // or a path link marked, and whether to scroll to it once drawn; the implement prompt's Task
+  // (its stamp, the Task text and its check); the MR text loaded.
   drawn: null,
   target: null,
-  jobTask: null,
+  scrollTarget: false,
+  taskView: null,
   mrText: null,
-  logFilter: 'all',
   source: null,
   retry: null,
-  lastLine: -1,
+  // The Stream (SF-078): the next line of events.jsonl to read (the last page's next, then each
+  // live entries event's line + 1); the entries shown in order (a tool carries its joined result
+  // as res) and the keys taken; the token of the page load under way; the label before each entry
+  // (a continuation hides its author), the last label; the notes typed on ledger entries; what the
+  // stop block was last drawn from.
+  lastLine: 0,
+  entries: [],
+  seen: new Set(),
+  streamLoad: null,
+  labels: new Map(),
+  prevLabel: null,
+  notes: new Map(),
+  stopSig: null,
   // Actions, per job: "<action>\n<key>" while its request is out; the last outcome shown for the
   // job; the draft message; the job's unknown outcome until a current state is read after it,
   // and its warning; and the open confirmation, with the job it was opened for.
@@ -240,36 +247,12 @@ function setConnection(text, kind) {
   node.hidden = kind === 'live';
 }
 
-// The file badges of a job (SF-024): the count of the last iteration, and warnings for undeclared
-// sensitive and deleted files.
-function fileBadges(job) {
-  const badges = [];
-  if (typeof job.files === 'number' && job.files > 0) {
-    badges.push(el('span', 'badge f-count', `${job.files} file${job.files === 1 ? '' : 's'}`));
-  }
-  if (typeof job.undeclared === 'number' && job.undeclared > 0) {
-    badges.push(el('span', 'badge f-undeclared', `${job.undeclared} sensitive`));
-  }
-  if (typeof job.deleted === 'number' && job.deleted > 0) {
-    badges.push(el('span', 'badge f-deleted', `${job.deleted} deleted`));
-  }
-  return badges;
-}
-
-// ---------- The job in the drawer (SF-047): header, pipeline, next action, facts, flat tabs ----------
+// ---------- The job page (SF-078): what its header, Stream, stop block and composer read ----------
 
 const verdictOf = (record) => (record === null || record === undefined ? null : typeof record.error === 'string' ? 'failed' : record.verdict);
 const iterationOf = (detail, number) => detail.iterations.find((iteration) => iteration.number === number) ?? null;
-const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
 // "10:05" of a timestamp, local time.
 const clock = (ts) => localTime(ts).slice(11, 16);
-
-// The job of a detail with what the board adds to a card: the Claude verdict of the last
-// iteration and its end, which tell the Claude review from the Codex gate in awaiting_review.
-function flowJob(detail) {
-  const review = iterationOf(detail, detail.job.iteration)?.review ?? null;
-  return { ...detail.job, review: verdictOf(review), review_ended_at: typeof review?.ended_at === 'string' ? review.ended_at : null };
-}
 
 // The user may accept the last iteration over the stopped gate (Accept and prepare MR): the gate
 // handed the job over (gate_rounds, gate_budget, gate_failed), or the ledger did (SF-052:
@@ -317,7 +300,7 @@ function ledgerOpen(detail) {
 const simplifiable = (job) => job !== null && job !== undefined && job.state === 'needs_human' && job.error?.code === SIMPLIFY_CODE;
 
 // The suggestions the simplification pass offers on the job's last iteration (SF-055), for the
-// confirmations of Simplify and of Accept (Skip).
+// stop block and the confirmations of Simplify and of Skip (accept).
 function offeredSuggestions(detail) {
   const record = iterationOf(detail, detail?.job?.iteration)?.simplify ?? null;
   return { items: Array.isArray(record?.suggestions) ? record.suggestions : [], suggestions: true };
@@ -330,41 +313,6 @@ function settleable(detail) {
     return [];
   }
   return (detail.ledger ?? []).filter((entry) => entry.status === 'escalated' || entry.status === 'contested');
-}
-
-function renderLedger(detail) {
-  const entries = settleable(detail);
-  $('ledger-panel').hidden = entries.length === 0;
-  const key = keyOf(detail.job);
-  const busy = state.pending.has(pendingId('settle', key));
-  $('ledger-list').replaceChildren(...entries.map((entry) => {
-    const item = el('li', 'ledger-entry');
-    item.append(el('p', '', `${entry.id} · ${entry.status} · ${entry.severity} · ${entry.path}: ${entry.problem}`));
-    if (entry.status === 'escalated') {
-      item.append(el('p', 'hint', `The Implementer asks: ${entry.response}`));
-    } else {
-      item.append(el('p', 'hint', `The Implementer contests it: ${entry.response} Evidence: ${entry.evidence}`));
-      if (entry.dispute !== null && entry.dispute !== undefined) {
-        item.append(el('p', 'hint', `${entry.dispute.reviewer === 'codex' ? 'Codex' : 'Claude'} reopens it: ${entry.dispute.reason}`));
-      }
-    }
-    const note = el('input', 'ledger-note');
-    note.type = 'text';
-    note.placeholder = 'Note (optional)';
-    note.setAttribute('aria-label', `Note on ${entry.id}`);
-    const accept = el('button', 'btn', 'Accept risk');
-    const fix = el('button', 'btn btn-primary', 'Must fix');
-    for (const [button, decision] of [[accept, 'accept'], [fix, 'fix']]) {
-      button.type = 'button';
-      button.disabled = busy;
-      button.dataset.settle = `${entry.id}:${decision}`;
-      button.addEventListener('click', () => void run('settle', key, { id: entry.id, decision, note: note.value }));
-    }
-    const row = el('div', 'row');
-    row.append(note, accept, fix);
-    item.append(row);
-    return item;
-  }));
 }
 
 // The user's override of the gate that still stands (SF-047): the newest gate-override.json, unless
@@ -384,172 +332,16 @@ function standingOverride(detail) {
 // The notice of a paused job whose Task file changed since the Implementer was last given it (SF-067).
 const TASK_CHANGED = 'Task file changed since the job started: Resume hands the change to the Implementer and the reviewers.';
 
-// What a pause interrupted (SF-067) and what moves the job on.
-function pausedSentence(job) {
+// What moves a paused job on (SF-067), after "Paused by you during iteration N".
+function pausedNext(job) {
   const step = job.paused?.step;
-  const what = step === 'turn' ? `the Implementer's turn on iteration ${job.iteration + 1}`
-    : step === 'review' ? `the Claude review of iteration ${job.iteration}`
-    : step === 'gate' ? `the Codex gate on iteration ${job.iteration}`
-    : step === 'simplify' ? `the simplification pass on iteration ${job.iteration}` : null;
-  const again = step === 'turn' ? 'Resume continues the same session (with your message, if you write one below)' : what !== null ? 'Resume runs it again' : 'Resume goes on';
-  return `${what !== null ? `You paused ${what}.` : 'You paused the job.'} ${again}; Restart starts the ticket again from its current Task file.`;
+  const again = step === 'turn' ? 'Resume continues the same session (with your message, if you write one below)'
+    : ['review', 'gate', 'simplify'].includes(step) ? 'Resume runs it again' : 'Resume goes on';
+  return `${again}; Restart starts the ticket again from its current Task file`;
 }
 
-// A plain sentence for each code that stops a job: what happened and what moves it on.
-function haltSentence(detail) {
-  const job = detail.job;
-  const code = job.error?.code ?? '';
-  const accept = gateAcceptable(detail) ? ' Accept and prepare the MR, tell the Implementer what to do, or abort.' : ' Tell the Implementer what to do, or abort.';
-  if (job.state === 'failed') {
-    return 'The job failed and cannot go on; restart or archive it.';
-  }
-  if (job.state === 'paused') {
-    return pausedSentence(job);
-  }
-  switch (code) {
-    case SIMPLIFY_CODE:
-      return 'The reviewers found the change clean, and the simplification pass found things the review fixes added that the Task does not need. Simplify (one more Fix section, reviewed as usual), or Accept and prepare the MR without them (they are listed in the MR text).';
-    case 'escalated':
-      return 'The Implementer escalated a question only you can answer. Settle each finding below: Accept risk or Must fix; then the job goes on.';
-    case 'review_disputed':
-      return `A reviewer disputes the Implementer's contest of a finding.${gateAcceptable(detail) ? ' Accept and prepare the MR,' : ''} settle the finding below (Accept risk or Must fix), message the Implementer, or abort to go back to planning (the branch stays).`;
-    case 'review_churn':
-      return `The fixes keep making new findings.${gateAcceptable(detail) ? ' Accept and prepare the MR,' : ''} continue (settle a finding or message the Implementer), or abort to go back to planning (the branch stays).`;
-    case 'review_failed':
-      return 'The Claude review could not run. Retry it.';
-    case 'gate_failed':
-      return `The Codex gate stopped without a verdict.${accept}`;
-    case 'gate_rounds':
-      return `Codex asked for fixes more often than the round limit allows.${accept}`;
-    case 'gate_budget':
-      return `The gate used up its token budget for this job.${accept}`;
-    case 'iteration_limit':
-      return 'The reviewers asked for fixes too many times. Give the Implementer a direction, or abort.';
-    case 'mr_conflict':
-      return `The rebase onto ${job.base} conflicts and the Implementer could not resolve it. Tell it how, or abort.`;
-    case 'mr_push_failed':
-    case 'mr_push_protected':
-      return 'The push failed. Fix the cause, then approve again.';
-    case 'serve_restarted':
-    case 'mr_serve_restarted':
-      return 'sf serve restarted while the job ran. Message the Implementer to go on, or abort.';
-    default:
-      return code.startsWith('mr_')
-        ? 'The MR preparation stopped. Read the error, then message the Implementer, or abort.'
-        : 'The job stopped and needs you. Read the error, then message the Implementer, or abort.';
-  }
-}
-
-// The five steps of the job: done, current (with since when), halted (with the code), to do, or
-// off for the gate when it is off.
-function jobSteps(detail) {
-  const job = flowJob(detail);
-  const flow = pipeline(job);
-  const overridden = standingOverride(detail) !== null;
-  return STEPS.map((name, index) => {
-    let status = segmentStatus(flow, index);
-    let caption = '';
-    // The stored time the caption's "since" is of, shown exactly on hover.
-    let at = null;
-    if (index === 2 && detail.gate === false && status !== 'current' && status !== 'halted') {
-      status = 'off';
-      caption = 'off';
-    } else if (status === 'current') {
-      const from = index === 2 && job.state === 'awaiting_review' ? (job.review_ended_at ?? job.updated_at) : job.updated_at;
-      caption = `since ${clock(from)} (${since(from)})`;
-      at = from;
-    } else if (status === 'halted') {
-      caption = job.error?.code ?? job.state;
-    } else if (status === 'done' && index === 2 && overridden) {
-      caption = 'overridden by you';
-    }
-    return { name, status, caption, at };
-  });
-}
-
-function renderStepper(detail) {
-  $('job-stepper').replaceChildren(...jobSteps(detail).map((step, index) => {
-    const item = el('li', `step ${step.status}`);
-    item.dataset.status = step.status;
-    if (step.status === 'current' || step.status === 'halted') {
-      item.setAttribute('aria-current', 'step');
-    }
-    const knob = step.status === 'done' ? '✓' : step.status === 'halted' ? '!' : String(index + 1);
-    const caption = el('span', 'step-caption', step.caption);
-    if (typeof step.at === 'string') {
-      caption.setAttribute('title', step.at);
-    }
-    item.append(el('span', 'knob', knob), el('span', 'step-name', step.name), caption);
-    return item;
-  }));
-  const job = detail.job;
-  const halted = pipeline(flowJob(detail)).halted;
-  const halt = $('job-halt');
-  halt.hidden = !halted;
-  halt.replaceChildren(...(halted ? [el('strong', 'mono', job.error?.code ?? job.state), document.createTextNode(` ${haltSentence(detail)}`)] : []));
-}
-
-// Who acts now, what they do and what follows.
-function nextAction(detail) {
-  const job = detail.job;
-  const n = job.iteration;
-  switch (job.state) {
-    case 'starting':
-      return { who: 'Now · Implementer', headline: 'The worktree is being created and the Implementer starts.', why: 'Then it works on iteration 1.' };
-    case 'working':
-      return { who: 'Now · Implementer', headline: `The Implementer is working on iteration ${n + 1}.`, why: 'When it publishes its Report and Patch, Claude reviews them.' };
-    case 'awaiting_review':
-      return flowJob(detail).review === 'clean'
-        ? { who: 'Now · Codex gate', headline: `Codex is reviewing iteration ${n}.`, why: 'Its verdict decides: clean goes on to MR preparation, fix goes back to the Implementer.' }
-        : { who: 'Now · Claude review', headline: `Claude is reviewing iteration ${n}.`, why: 'Clean goes on to the Codex gate; fix becomes the next Fix section.' };
-    case 'preparing_mr':
-      return { who: 'Now · Factory', headline: `The factory commits the change and rebases it onto ${job.base}.`, why: 'Then the branch comes to you to approve.' };
-    case 'ready_for_human_review':
-      return {
-        who: 'Your turn', headline: 'The branch is ready: approve to push it, or create the merge request (push and open it), or abort.',
-        why: `${skippedNote(job)}Branch ${job.branch}: one commit on ${job.base}.${typeof detail.mr_title === 'string' ? ` Merge request title: ${detail.mr_title}` : ''}`,
-      };
-    case 'handed_over':
-      return {
-        who: 'Your turn', headline: `${checkoutLine(job)}.`,
-        why: `Read, run and change it there. Approve pushes it; Ask for changes sends your edits and your message to the Implementer; Take it back returns it to the factory.${typeof detail.mr_title === 'string' ? ` Merge request title: ${detail.mr_title}` : ''}${job.error ? ` ${job.error.code}: ${job.error.message}` : ''}`,
-      };
-    case 'needs_human':
-      return { who: 'Your turn', headline: haltSentence(detail), why: job.error ? `${job.error.code}: ${job.error.message}` : '' };
-    case 'paused':
-      return { who: 'Your turn', headline: pausedSentence(job), why: job.task_changed === true ? TASK_CHANGED : '' };
-    case 'pushed':
-      if (hasMr(job) && job.mr.state === 'merged') {
-        return { who: 'Finished', headline: `Merged merge request #${job.mr.number} into ${job.base}.`, why: 'Archive the job to take it off the board.' };
-      }
-      if (hasMr(job) && job.mr.state === 'open') {
-        return { who: 'Finished', headline: `Pushed ${job.branch}; merge request #${job.mr.number} is open.`, why: `Merge it into ${job.base} here or on the host; archive the job when it is merged.` };
-      }
-      return {
-        who: 'Finished', headline: `Pushed ${job.branch}.`,
-        why: `Create the merge request here${typeof detail.mr_title === 'string' ? ` (${detail.mr_title})` : ''}, or open it with the MR text by hand; archive the job when it is merged.`,
-      };
-    case 'aborted':
-      return { who: 'Finished', headline: 'Aborted.', why: 'Archive the job to take it off the board.' };
-    default:
-      return { who: 'Finished', headline: 'Failed.', why: job.error ? `${job.error.code}: ${job.error.message}` : '' };
-  }
-}
-
-// The merge request on the Git host (SF-048): its number, state and link, and the status last read.
-function renderMr(detail) {
-  const job = detail.job;
-  const line = $('mr-line');
-  line.hidden = !hasMr(job);
-  line.replaceChildren(...(hasMr(job) ? [document.createTextNode(`Merge request #${job.mr.number} (${job.mr.state}): `), mrLink(job.mr)] : []));
-  // The status last read shows only while it is of the merge request the job shows now (the same
-  // number and state): after a merge, a close or a new merge request it stays hidden. It is kept, so
-  // a status that saw the merge first shows once the job's update records it.
-  const read = state.mrStatus.get(keyOf(job));
-  const status = read !== undefined && hasMr(job) && read.number === job.mr.number && read.state === job.mr.state ? read : undefined;
-  $('mr-status-line').hidden = status === undefined;
-  $('mr-status-line').textContent = status === undefined ? '' : mrStatusText(status);
-}
+// The sentence of the job page's header and composer: sentence(), and for a paused job what moves it on.
+const headSentence = (job) => (job.state === 'paused' ? `${sentence(job)}. ${pausedNext(job)}` : sentence(job));
 
 // A merge request's URL as a link when it is https, else as text.
 function mrLink(mr) {
@@ -575,154 +367,11 @@ function mrStatusText(status) {
   return `On the host: ${parts.join(', ')}.`;
 }
 
-function renderNext(detail) {
-  const next = nextAction(detail);
-  const waited = TERMINAL_STATES.includes(detail.job.state) ? '' : ` · for ${since(detail.job.updated_at)}`;
-  $('next-who').textContent = `${next.who}${waited}`;
-  $('next-panel').className = `next ${next.who === 'Your turn' ? 'you' : next.who === 'Finished' ? 'finished' : 'running'}`;
-  $('next-headline').textContent = next.headline;
-  $('next-why').textContent = next.why;
-}
-
-function renderHeader(detail) {
-  const job = detail.job;
-  $('job-ticket').textContent = job.ticket;
-  const badge = $('job-state');
-  badge.textContent = job.state;
-  badge.className = `badge s-${job.state}`;
-  $('job-branch').textContent = job.branch;
-  $('job-badges').replaceChildren(...fileBadges(job));
-  renderStepper(detail);
-}
-
-// The facts, stacked: one term and its value per row.
-function renderFacts(detail) {
-  const job = detail.job;
-  const costs = detail.iterations.flatMap((iteration) => [iteration.cost_usd, iteration.review?.cost_usd]).filter((cost) => typeof cost === 'number');
-  const rows = [
-    ['Base', job.base],
-    ['Iteration', job.mr_attempts > 0 ? `${job.iteration} (MR attempts ${job.mr_attempts})` : String(job.iteration)],
-    ['Fix sections', String(job.fixes ?? 0)],
-    ['Gate rounds', String(job.gate_fixes ?? 0)],
-    ['Gate tokens', String(job.gate_tokens ?? 0)],
-    // An estimate of the API-equivalent price, not a charge: the session usually runs on a Claude plan.
-    ['Estimated cost', costs.length > 0 ? `est. $${costs.reduce((sum, cost) => sum + cost, 0).toFixed(4)}` : 'n/a'],
-    ['Updated', timeEl(job.updated_at)],
-    ['Worktree', typeof job.worktree === 'string' ? job.worktree : 'none'],
-  ];
-  $('job-facts').replaceChildren(...rows.map(([term, value]) => {
-    const row = el('div');
-    const dt = el('dt', '', term);
-    if (term === 'Estimated cost') {
-      dt.setAttribute('title', 'An estimate of the API-equivalent price, not a charge');
-    }
-    const dd = el('dd');
-    dd.append(value);
-    row.append(dt, dd);
-    return row;
-  }));
-}
-
-// The state changes, and the user's override of the gate, compact: the time, the change, the code.
-function renderHistory(history) {
-  $('history').replaceChildren(...history.map((entry) => {
-    const item = el('li');
-    item.append(timeEl(entry.ts));
-    if (entry.event === 'gate_overridden') {
-      item.className = 'history-override';
-      item.append(document.createTextNode(`gate overridden by you (${entry.code}): ${plural(entry.unapplied, 'Codex item')} not applied`));
-      return item;
-    }
-    item.append(document.createTextNode(`${entry.from ?? '-'} → ${entry.to}`));
-    if (entry.error) {
-      const code = el('span', 'history-error', ` ${entry.error.code}`);
-      code.setAttribute('title', entry.error.message);
-      item.append(code);
-    }
-    return item;
-  }));
-}
-
-// ---------- Tabs ----------
-
-function renderJobTabs() {
-  const detail = state.detail;
-  const counts = {
-    changes: detail === null ? null : (iterationOf(detail, state.iteration)?.files?.length ?? null),
-    reviews: detail === null ? null : detail.iterations.filter((iteration) => iteration.review || iteration.gate).length,
-  };
-  for (const button of $('job-tabs').querySelectorAll('button')) {
-    const name = button.dataset.tab;
-    button.setAttribute('aria-selected', String(name === state.tab));
-    const label = JOB_TABS.find(([tab]) => tab === name)[1];
-    const count = counts[name];
-    button.replaceChildren(document.createTextNode(label), ...(typeof count === 'number' && count > 0 ? [el('span', 'tab-count', String(count))] : []));
-  }
-  for (const [name] of JOB_TABS) {
-    $(`tab-${name}`).hidden = name !== state.tab;
-  }
-}
-
-function selectTab(name) {
-  state.tab = name;
-  renderJobTabs();
-  showTab();
-}
-
-// Loads what the selected tab shows, once per job and iteration.
-function showTab() {
-  if (state.detail === null) {
-    return;
-  }
-  if (state.tab === 'task') {
-    void showJobTask(state.detail);
-  } else if (state.tab === 'changes') {
-    void showIteration();
-  } else if (state.tab === 'log' && $('follow').checked) {
-    const events = $('events');
-    events.scrollTop = events.scrollHeight;
-  }
-}
-
-// ---------- Task ----------
-
-// The Task file of the job, Fix sections included: read again when a Fix section is written.
-async function showJobTask(detail) {
-  const key = state.key;
-  const stamp = `${key}#${detail.job.fixes ?? 0}#${detail.job.iteration}`;
-  if (state.jobTask === stamp) {
-    return;
-  }
-  state.jobTask = stamp;
-  $('job-task-path').textContent = `.software-factory/${detail.job.ticket}.md`;
-  if ($('job-task').children.length === 0) {
-    $('job-task').replaceChildren(document.createTextNode('Loading the Task file…'));
-  }
-  let text;
-  try {
-    text = await getText(`api/tickets/${jobPath(key)}/task`);
-  } catch (error) {
-    // The ticket may have been archived since the job started.
-    try {
-      text = await getText(`api/tickets/${jobPath(key)}/task?archived=1`);
-    } catch {
-      text = `Could not load the Task file: ${error.message}`;
-      // The next job event tries again.
-      if (state.jobTask === stamp) {
-        state.jobTask = null;
-      }
-    }
-  }
-  if (state.key === key && state.jobTask === stamp) {
-    $('job-task').replaceChildren(...renderReport(text));
-  }
-  await showCheck('job-task-check', key, () => state.key === key && state.jobTask === stamp);
-}
-
 // ---------- Task check (SF-054) ----------
 
-// The last check of a ticket, as the Task drawer and the job's Task tab show it: the stale mark and
-// the verdict, the paraphrase above the findings (by severity), then the expected files.
+// The last check of a ticket, as the Task drawer and the implement prompt's Task toggle show it:
+// the stale mark and the verdict, the paraphrase above the findings (by severity), then the
+// expected files.
 function renderCheck(view) {
   const box = [];
   const record = view.check;
@@ -778,15 +427,20 @@ function renderCheck(view) {
   return box;
 }
 
-// Loads a ticket's last check into the container while current() holds; hidden when the factory
-// has none to show (no Task checks, no Task file).
-async function showCheck(id, key, current) {
-  let view = null;
+// A ticket's last check as the factory has it; null when it has none to show (no Task checks, no
+// Task file).
+async function readCheck(key) {
   try {
-    view = JSON.parse(await getText(`api/tickets/${jobPath(key)}/check`));
+    return JSON.parse(await getText(`api/tickets/${jobPath(key)}/check`));
   } catch {
-    view = null;
+    return null;
   }
+}
+
+// Loads a ticket's last check into the container while current() holds; hidden when the factory
+// has none to show.
+async function showCheck(id, key, current) {
+  const view = await readCheck(key);
   if (!current()) {
     return;
   }
@@ -801,7 +455,7 @@ async function checkTicket(row) {
     ({ level: 'ok', text: `Checking ${key}: a read-only Claude session reads the Task file and the repository; the card shows the verdict when it ends. It only advises: Start stays yours.` }));
 }
 
-// ---------- Changes ----------
+// ---------- The Changes screen: the old Changes view until SF-079 ----------
 
 function renderChanges(detail) {
   const iterations = detail.iterations;
@@ -817,7 +471,6 @@ function renderChanges(detail) {
       state.iteration = iteration.number;
       state.target = null;
       renderChanges(state.detail);
-      renderJobTabs();
       void showIteration();
     });
     return button;
@@ -881,7 +534,8 @@ function patchSections(text, files) {
   return sections.filter((section) => section.lines.some((line) => line !== ''));
 }
 
-// The Report and the Patch of the selected iteration, loaded once and drawn once per iteration.
+// The Report and the Patch of the selected iteration, loaded once and drawn once per iteration; a
+// path link's file is scrolled to once its Patch is drawn.
 async function showIteration() {
   const key = state.key;
   const meta = state.detail === null ? null : iterationOf(state.detail, state.iteration);
@@ -894,6 +548,8 @@ async function showIteration() {
   }
   const id = `${key}/${meta.number}`;
   if (state.drawn === id) {
+    markTarget(state.scrollTarget);
+    state.scrollTarget = false;
     return;
   }
   state.drawn = id;
@@ -920,7 +576,8 @@ async function showIteration() {
     block.append(...renderPatch(section.lines.join('\n')));
     return block;
   }));
-  markTarget(false);
+  markTarget(state.scrollTarget);
+  state.scrollTarget = false;
 }
 
 // The Report or the Patch of an iteration, loaded once per job; undefined when the selection
@@ -1057,7 +714,20 @@ function markTarget(scroll) {
   $('patch-note').textContent = notes.join(' ');
 }
 
-// ---------- Reviews ----------
+// A path link of the Stream (the prototype's openChanges): the Changes screen at that iteration
+// and file; until SF-079 the old Changes view with the iteration selected and the file marked.
+function openChanges(path, it) {
+  if (ui.job === null) {
+    return;
+  }
+  const number = it === null || it === undefined || it === '' ? null : Number(it);
+  if (number !== null && Number.isInteger(number)) {
+    state.iteration = number;
+  }
+  state.target = path !== null && path !== undefined && number !== null ? `${number}/${path}` : null;
+  state.scrollTarget = state.target !== null;
+  go(ui.job, 'changes');
+}
 
 // One review item as a list entry: the path as code, the problem, and what is expected.
 function itemEntry(item, expected = true) {
@@ -1069,77 +739,7 @@ function itemEntry(item, expected = true) {
   return entry;
 }
 
-// What a review block says while it has no record.
-function pendingReview(detail, iteration, reviewer) {
-  const job = detail.job;
-  const current = iteration.number === job.iteration && job.state === 'awaiting_review';
-  if (reviewer === 'claude') {
-    return current && (iteration.review ?? null) === null ? 'reviewing now…' : 'not run';
-  }
-  if (detail.gate === false) {
-    return 'off';
-  }
-  if (current) {
-    return verdictOf(iteration.review) === 'clean' ? 'reviewing now…' : 'after a clean Claude review';
-  }
-  return 'not run';
-}
-
-// One reviewer's verdict on one iteration: the verdict with its cost or tokens, the summary, the
-// items, the accepted sensitive paths; or why it failed; or that there is none.
-function reviewBlock(name, review, pending) {
-  if (review === null || review === undefined) {
-    const none = el('div', 'review v-none');
-    none.append(el('p', 'review-verdict', `${name}: ${pending}`));
-    return none;
-  }
-  if (typeof review.error === 'string') {
-    const block = el('div', 'review v-failed');
-    block.append(el('p', 'review-verdict', `${name}: failed`), el('p', 'review-summary', review.error));
-    return block;
-  }
-  const count = review.items.length;
-  const verdict = review.verdict === 'fix' ? `fix (${plural(count, 'item')})` : review.verdict;
-  const cost = typeof review.cost_usd === 'number' ? `, cost $${review.cost_usd.toFixed(4)}` : '';
-  const tokens = review.tokens !== null && typeof review.tokens === 'object' && typeof review.tokens.input === 'number'
-    ? `, ${review.tokens.input + review.tokens.output} tokens` : '';
-  const block = el('div', `review v-${review.verdict}`);
-  block.append(el('p', 'review-verdict', `${name}: ${verdict}${cost}${tokens}`), el('p', 'review-summary', review.summary));
-  if (count > 0) {
-    const list = el('ol', 'review-items');
-    list.append(...review.items.map((item) => itemEntry(item)));
-    block.append(list);
-  }
-  if (Array.isArray(review.accepted_sensitive) && review.accepted_sensitive.length > 0) {
-    block.append(el('p', 'review-accepted', `Accepted sensitive paths: ${review.accepted_sensitive.join(', ')}`));
-  }
-  return block;
-}
-
-// Per iteration, newest first: the Claude verdict and the Codex verdict side by side.
-function renderReviews(detail) {
-  $('no-reviews').hidden = detail.iterations.length > 0;
-  $('reviews-list').replaceChildren(...[...detail.iterations].reverse().map((iteration) => {
-    const row = el('section', 'review-row');
-    row.dataset.iteration = String(iteration.number);
-    row.append(el('h4', '', `Iteration ${iteration.number}`));
-    const pair = el('div', 'review-pair');
-    pair.append(
-      reviewBlock('Claude review', iteration.review, pendingReview(detail, iteration, 'claude')),
-      reviewBlock('Codex gate', iteration.gate, pendingReview(detail, iteration, 'codex')),
-    );
-    row.append(pair);
-    const override = iteration.gate_override;
-    if (override !== null && override !== undefined) {
-      const accepted = el('p', 'review-override', `You accepted this iteration over the gate (${override.code}) at `);
-      accepted.append(timeEl(override.at), '.');
-      row.append(accepted);
-    }
-    return row;
-  }));
-}
-
-// ---------- MR ----------
+// ---------- The Merge request screen: the old MR view until SF-080 ----------
 
 // The MR text as it is copied: the title line, a blank line and the body.
 function mrCopyText(text) {
@@ -1189,73 +789,1031 @@ function renderUnapplied(detail) {
   $('mr-unapplied-list').replaceChildren(...items.map((item) => itemEntry(item)));
 }
 
-// Copies text; without the clipboard it shows the text in box, selected for Ctrl+C.
-function copyValue(text, box, statusId) {
+// Copies text; without the clipboard it shows the text in box, selected for Ctrl+C. say tells the
+// user which.
+function copyValue(text, box, say) {
   const select = () => {
     box.value = text;
     box.hidden = false;
     box.focus();
     box.select();
-    $(statusId).textContent = 'Selected: press Ctrl+C to copy.';
+    say('Selected: press Ctrl+C to copy.');
   };
   if (typeof navigator === 'undefined' || navigator.clipboard === undefined) {
     select();
     return;
   }
-  navigator.clipboard.writeText(text).then(() => {
-    $(statusId).textContent = 'Copied.';
-  }, select);
+  navigator.clipboard.writeText(text).then(() => say('Copied.'), select);
 }
 
-// ---------- Live log ----------
+// ---------- The Stream (SF-078): SF-082's entries, as the prototype's renderStream and entryHtml ----------
 
-// Who an event line comes from, for the log's filters.
-function eventSource(event) {
-  switch (event.type) {
-    case 'state':
-    case 'gate_overridden':
-      return 'state';
-    case 'gate_event':
-      return 'codex';
-    case 'review_message':
-      return 'claude';
-    case 'review':
+// Who an entry is of, as the prototype names them.
+const WHO = { implementer: 'Implementer', claude: 'Claude review', codex: 'Codex gate', mr: 'MR writer', factory: 'Factory', you: 'You' };
+const STATE_WORD = {
+  starting: 'Starting', working: 'Implementing', awaiting_review: 'In review', preparing_mr: 'Writing the MR', needs_human: 'Waiting for you',
+  ready_for_human_review: 'Ready for you', handed_over: 'Handed over to your checkout', paused: 'Paused by you', pushed: 'Pushed', aborted: 'Aborted', failed: 'Failed',
+};
+// The line of a state change that is not a stop.
+const STATE_TEXT = (entry) => {
+  if (entry.to === 'awaiting_review') {
+    return 'The Implementer finished; the reviews start';
+  }
+  if (entry.to === 'working' && entry.from === 'awaiting_review') {
+    return 'Codex asked for fixes; back to the Implementer';
+  }
+  if (entry.to === 'working') {
+    return 'The Implementer starts';
+  }
+  if (entry.to === 'preparing_mr') {
+    return 'Both reviews clean; the MR text is being written';
+  }
+  if (entry.to === 'ready_for_human_review') {
+    return 'Ready for you';
+  }
+  if (entry.to === 'pushed') {
+    return 'Pushed';
+  }
+  return STATE_WORD[entry.to] ?? entry.to;
+};
+// A text entry longer than this many lines is clamped, with "Show all N lines".
+const CLAMP_LINES = 8;
+// A changes entry links this many files, then "and N more".
+const SHOWN_FILES = 14;
+
+// A path as its folder and its file name ('' without a folder).
+const splitPath = (path) => {
+  const at = path.lastIndexOf('/');
+  return at < 0 ? ['', path] : [path.slice(0, at), path.slice(at + 1)];
+};
+
+// A path that opens the Changes screen at that file and iteration (the prototype's pathLink).
+function pathLink(path, it) {
+  const text = String(path ?? '');
+  const [dir, name] = splitPath(text);
+  const node = button('pathlink', '', { cfile: text, cit: it ? String(it) : '' });
+  node.setAttribute('title', `Open ${text} in Changes${it ? ` at iteration ${it}` : ''}`);
+  if (dir !== '') {
+    node.append(el('span', 'd', `${dir}/`));
+  }
+  node.append(name);
+  return node;
+}
+
+// Text with `code`, **bold** and Markdown headings (the prototype's prose), as nodes.
+function prose(text) {
+  const nodes = [];
+  String(text ?? '').split('\n').forEach((line, index) => {
+    if (index > 0) {
+      nodes.push(document.createTextNode('\n'));
+    }
+    if (/^#{1,4} /.test(line)) {
+      nodes.push(el('span', 'h', line));
+      return;
+    }
+    for (const part of line.split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/)) {
+      if (/^`[^`\n]+`$/.test(part)) {
+        nodes.push(el('code', '', part.slice(1, -1)));
+      } else if (/^\*\*[^*\n]+\*\*$/.test(part)) {
+        nodes.push(el('b', '', part.slice(2, -2)));
+      } else if (part !== '') {
+        nodes.push(document.createTextNode(part));
+      }
+    }
+  });
+  return nodes;
+}
+
+// The tool's line: its verb, the rest, and once its result came, "→ <out>" (.bad on a failure).
+function toolLine(entry) {
+  const line = String(entry.line ?? '');
+  const at = line.indexOf(' ');
+  const nodes = [el('span', 'verb', at < 0 ? line : line.slice(0, at)), document.createTextNode(at < 0 ? '' : ` ${line.slice(at + 1)}`)];
+  if (entry.res !== undefined) {
+    nodes.push(document.createTextNode(' '), el('span', entry.res.err ? 'out bad' : 'out', `→ ${entry.res.out}`));
+  }
+  return nodes;
+}
+
+// A finding's severity as its pill (.sev-<severity>); an item without one reads as major.
+function severityTag(value) {
+  const severity = String(value ?? 'major');
+  return el('span', `sev sev-${/^[a-z]+$/.test(severity) ? severity : 'major'}`, severity);
+}
+
+// A finding of a verdict or a Fix section: its ledger id (or #n), severity, path, problem and what
+// is expected.
+function findingHtml(item, index, it) {
+  const node = el('li', 'finding');
+  node.append(el('span', 'fid', typeof item.id === 'string' && item.id !== '' ? item.id : `#${index + 1}`), severityTag(item.severity), pathLink(item.path, it));
+  const problem = el('div', 'problem');
+  problem.append(...prose(item.problem));
+  node.append(problem);
+  if (typeof item.expected === 'string' && item.expected !== '') {
+    const expected = el('div', 'expected');
+    expected.append('Expected: ', ...prose(item.expected));
+    node.append(expected);
+  }
+  return node;
+}
+
+// The items of a Fix section as the factory writes them (fixItemLine, src/ledger.ts): one line each,
+// "1. [R1, major] `path`: problem Expected: expected".
+function fixItems(text) {
+  const items = [];
+  for (const line of String(text ?? '').split('\n')) {
+    const match = /^\d+\. \[(R\d+), (\w+)\] `([^`]*)`: (.*)$/.exec(line);
+    if (match !== null) {
+      const [problem, ...expected] = match[4].split(' Expected: ');
+      items.push({ id: match[1], severity: match[2], path: match[3], problem, expected: expected.join(' Expected: ') });
+    }
+  }
+  return items;
+}
+
+// A toggle of an entry (data-toggle: the entry's key, or "<key>/task", "<key>/report").
+const toggleButton = (key, text) => button('linkish', text, { toggle: key });
+
+// The changes entry: the iteration's files as path links, Open these changes (c) and its Report.
+function changesEntry(entry) {
+  const block = el('div', 'block');
+  const paths = Array.isArray(entry.paths) ? entry.paths : [];
+  const head = el('div', 'bh', `Iteration ${entry.it} ended: ${counted(typeof entry.files === 'number' ? entry.files : paths.length, 'file')} changed`);
+  const open = button('btn small', 'Open these changes ', { changes: String(entry.it) });
+  open.append(el('span', 'kbd', 'c'));
+  head.append(el('span', 'grow'), open);
+  const links = el('div', 'flinks');
+  links.append(...paths.slice(0, SHOWN_FILES).map((path) => pathLink(path, entry.it)));
+  if (paths.length > SHOWN_FILES) {
+    links.append(button('linkish', `and ${paths.length - SHOWN_FILES} more`, { changes: String(entry.it) }));
+  }
+  const report = `${entry.k}/report`;
+  const shown = ui.open.has(report);
+  const toggleRow = el('div');
+  toggleRow.append(toggleButton(report, shown ? 'Hide the Report' : 'Report'));
+  block.append(head, links, toggleRow);
+  if (shown) {
+    const text = state.cache.get(`${entry.it}/report`);
+    const pre = el('pre', 'raw doc');
+    pre.append(...(text === undefined ? [document.createTextNode('Loading the Report…')] : renderReport(text)));
+    block.append(pre);
+  }
+  return block;
+}
+
+// The implement prompt's Task: the Task file and its last check, from the sources of the old Task
+// tab, once per job and Fix section.
+async function loadTaskView() {
+  const key = state.key;
+  const job = state.detail?.job ?? jobByKey(key);
+  const stamp = `${key}#${job?.fixes ?? 0}#${job?.iteration ?? 0}`;
+  if (key === null || state.taskView?.stamp === stamp) {
+    return;
+  }
+  const view = { stamp, text: null, check: null };
+  state.taskView = view;
+  let text;
+  try {
+    text = await getText(`api/tickets/${jobPath(key)}/task`);
+  } catch (error) {
+    // The ticket may have been archived since the job started.
+    try {
+      text = await getText(`api/tickets/${jobPath(key)}/task?archived=1`);
+    } catch {
+      text = `Could not load the Task file: ${error.message}`;
+      // The next toggle tries again.
+      view.stamp = null;
+    }
+  }
+  view.check = await readCheck(key);
+  view.text = text;
+  if (state.key === key && state.taskView === view) {
+    redrawWhere((entry) => entry.t === 'prompt' && entry.kind === 'implement');
+  }
+}
+
+// A prompt: the Fix section with its items, or a line with the prompt behind a toggle (and the Task
+// behind another for the implement prompt); "Continue where you stopped." as a factory line.
+function promptBody(entry, open) {
+  const changed = entry.task_changed === true ? [document.createTextNode(' '), el('span', 'muted fs12', "with the Task file's change")] : [];
+  if (entry.kind === 'continue') {
+    const line = el('div', '', 'Continue where you stopped.');
+    line.append(...changed);
+    return [line];
+  }
+  if (entry.kind === 'fix') {
+    const items = fixItems(entry.fix);
+    const block = el('div', 'block fixsec');
+    const head = el('div', 'bh', `Fix ${entry.fix_n} sent to the Implementer `);
+    head.append(el('span', 'muted light', counted(items.length, 'item')), ...changed);
+    const intro = el('div', 'summary');
+    intro.append(...prose(String(entry.fix ?? '').split(/\n\d+\. \[R/)[0].trim()));
+    const list = el('ul', 'findings');
+    list.append(...items.map((item, index) => findingHtml(item, index, entry.it)));
+    block.append(head, intro, list, toggleButton(entry.k, open ? 'Hide the full prompt' : 'Show the full prompt'));
+    if (open) {
+      block.append(el('pre', 'raw', entry.text));
+    }
+    return [block];
+  }
+  const what = { implement: 'The Implementer got the Task file', mr: 'MR preparation started', conflict: 'The Implementer is asked to resolve the rebase conflict' }[entry.kind] ?? 'Prompt';
+  const line = el('div');
+  line.append(el('b', '', what), ' ', el('span', 'mono muted fs12', entry.first ?? ''), ' ', toggleButton(entry.k, open ? 'hide prompt' : 'prompt'));
+  const task = `${entry.k}/task`;
+  if (entry.kind === 'implement') {
+    line.append(' ', toggleButton(task, ui.open.has(task) ? 'hide Task' : 'Task'));
+  }
+  line.append(...changed);
+  const nodes = [line];
+  if (open) {
+    nodes.push(el('pre', 'raw', entry.text));
+  }
+  if (entry.kind === 'implement' && ui.open.has(task)) {
+    const view = state.taskView;
+    if (view === null || view.text === null) {
+      nodes.push(el('div', 'muted', 'Loading the Task file…'));
+    } else {
+      if (view.check !== null) {
+        const check = el('div', 'task-check');
+        check.append(...renderCheck(view.check));
+        nodes.push(check);
+      }
+      const text = el('pre', 'raw doc');
+      text.append(...renderReport(view.text));
+      nodes.push(text);
+    }
+  }
+  return nodes;
+}
+
+// A verdict of the Claude review or the Codex gate: the pill, the count, the summary (clamped) and
+// the findings.
+function verdictBody(entry, open) {
+  const items = Array.isArray(entry.items) ? entry.items : [];
+  const effective = entry.effective ?? entry.verdict;
+  const block = el('div', open ? 'block' : 'block clamp');
+  const head = el('div', 'bh', `${entry.who === 'codex' ? 'Codex gate' : 'Claude review'} · iteration ${entry.it} `);
+  head.append(el('span', `verdict ${effective === 'clean' ? 'clean' : 'fix'}`, effective === 'clean' ? 'clean' : 'asks for fixes'),
+    el('span', 'muted light', items.length > 0 ? counted(items.length, entry.who === 'codex' ? 'finding' : 'note') : 'no findings'));
+  block.append(head);
+  if (typeof entry.summary === 'string' && entry.summary !== '') {
+    const summary = el('div', 'summary');
+    summary.append(...prose(entry.summary));
+    block.append(summary, toggleButton(entry.k, open ? 'Show less' : 'Show the whole summary'));
+  }
+  if (items.length > 0) {
+    const list = el('ul', 'findings');
+    list.append(...items.map((item, index) => findingHtml(item, index, entry.it)));
+    block.append(list);
+  }
+  return block;
+}
+
+// The suggestions of a simplification pass, as findings: the path, what, why and the lines it saves.
+function suggestionItems(suggestions, it) {
+  const list = el('ul', 'findings');
+  list.append(...suggestions.map((item, index) => {
+    const node = el('li', 'finding');
+    node.append(el('span', 'fid', `#${index + 1}`), pathLink(item.path, it));
+    const what = el('div', 'problem');
+    what.append(...prose(item.what));
+    const why = el('div', 'expected');
+    why.append('Why: ', ...prose(item.why));
+    node.append(what, why, el('div', 'expected', `saves about ${counted(Number(item.saves_lines) || 0, 'line')}`));
+    return node;
+  }));
+  return list;
+}
+
+// The note typed on a ledger entry, per job: ledger ids (R1, R2, …) start again in every job.
+const noteKey = (id) => `${state.key}/${id}`;
+
+// One ledger entry of a stop: the id, severity, path and problem, what the Implementer said, a
+// dispute's reason, and Accept risk / Must fix with a note; a settled one shows its decision.
+function ledgerFinding(entry, busy) {
+  const node = el('li', 'finding');
+  node.dataset.id = entry.id;
+  node.append(el('span', 'fid', entry.id), severityTag(entry.severity), pathLink(entry.path, entry.iteration > 0 ? entry.iteration : null));
+  const problem = el('div', 'problem');
+  problem.append(...prose(entry.problem));
+  node.append(problem);
+  if (entry.status === 'escalated') {
+    node.append(el('div', 'expected', `The Implementer asks: ${entry.response}`));
+  } else if (entry.status === 'contested' || (entry.dispute !== null && entry.dispute !== undefined)) {
+    node.append(el('div', 'expected', `The Implementer contests it: ${entry.response}`), el('div', 'expected', `Evidence: ${entry.evidence || 'none given'}`));
+    if (entry.dispute !== null && entry.dispute !== undefined) {
+      node.append(el('div', 'expected', `${entry.dispute.reviewer === 'codex' ? 'Codex' : 'Claude'} reopens it: ${entry.dispute.reason}`));
+    }
+  } else {
+    node.append(el('div', 'expected', `Expected: ${entry.expected}`));
+  }
+  const decide = el('div', 'decide');
+  if (entry.settled !== null && entry.settled !== undefined) {
+    decide.append(el('span', 'decided', entry.settled.decision === 'accept' ? 'Accepted risk' : 'Must fix'));
+    if (entry.settled.note) {
+      decide.append(el('span', 'muted', entry.settled.note));
+    }
+  } else if (entry.status === 'escalated' || entry.status === 'contested') {
+    const note = el('input', 'note');
+    note.type = 'text';
+    note.placeholder = 'Note (optional)';
+    note.value = state.notes.get(noteKey(entry.id)) ?? '';
+    note.dataset.note = entry.id;
+    note.setAttribute('aria-label', `Note on ${entry.id}`);
+    decide.append(note);
+    for (const [text, decision] of [['Accept risk', 'accept'], ['Must fix', 'fix']]) {
+      const choice = button('btn small', text, { settle: `${entry.id}:${decision}` });
+      choice.disabled = busy !== '';
+      if (busy !== '') {
+        choice.setAttribute('title', busy);
+      }
+      decide.append(choice);
+    }
+  } else {
+    return node;
+  }
+  node.append(decide);
+  return node;
+}
+
+// The ledger entries of a ledger stop: those to settle, the open ones of a churn stop, and the
+// ones settled since the stop (with their decision), in ledger order.
+function stopLedger(detail, code, since) {
+  const keep = new Set([...settleable(detail), ...(code === 'review_churn' ? ledgerOpen(detail) : [])]);
+  return (detail.ledger ?? []).filter((entry) => keep.has(entry) || (entry.settled !== null && entry.settled !== undefined && typeof since === 'string' && entry.settled.at >= since));
+}
+
+// What the stop block shows for its code (the Task's table): the suggestions, the entries to
+// settle, the findings, the gate's tokens, an error or the message.
+function stopInline(job, detail, entry) {
+  const code = typeof job.error?.code === 'string' ? job.error.code : '';
+  const message = typeof job.error?.message === 'string' ? job.error.message : '';
+  const whole = () => (message === '' ? [] : [el('pre', 'raw', message)]);
+  const last = detail === null ? null : iterationOf(detail, job.iteration);
+  const findings = (items) => {
+    const list = el('ul', 'findings');
+    list.append(...items.map((item, index) => findingHtml(item, index, job.iteration)));
+    return items.length === 0 ? [] : [list];
+  };
+  if (usageLimited(job)) {
+    return whole();
+  }
+  switch (STOP_ALIASES[code] ?? code) {
+    case SIMPLIFY_CODE: {
+      const items = detail === null ? (job.stop?.items ?? []) : offeredSuggestions(detail).items;
+      return items.length === 0 ? [] : [suggestionItems(items, job.iteration)];
+    }
+    case 'escalated':
+    case 'review_disputed':
+    case 'review_churn': {
+      if (detail === null) {
+        return [];
+      }
+      const entries = stopLedger(detail, code, entry.ts);
+      if (entries.length === 0) {
+        return [el('div', 'muted', 'No ledger entry is left to settle.')];
+      }
+      const busy = availability('settle', detail.job);
+      const list = el('ul', 'findings');
+      list.append(...entries.map((item) => ledgerFinding(item, busy)));
+      return [list];
+    }
+    case 'gate_rounds':
+      return findings(Array.isArray(last?.gate?.items) ? last.gate.items : (job.stop?.items ?? []));
+    case 'gate_budget':
+      return [el('div', '', `The Codex gate used ${typeof job.gate_tokens === 'number' ? job.gate_tokens.toLocaleString('en-US') : 'its'} tokens.`)];
+    case 'iteration_limit':
+      return findings([...(last?.review?.items ?? []), ...(last?.gate?.items ?? [])]);
+    case 'gate_failed':
+      return typeof last?.gate?.error === 'string' ? [el('pre', 'raw', last.gate.error)] : whole();
     case 'review_failed':
-      return /\breview by codex\b/.test(event.text) ? 'codex' : 'claude';
-    case 'notify_failed':
-    case 'placeholders_removed':
-    case 'merge_request':
-    case 'turn_limit_continued':
-      // The factory's own lines go with the state changes.
-      return 'state';
+      return typeof last?.review?.error === 'string' ? [el('pre', 'raw', last.review.error)] : whole();
+    case 'mr_conflict': {
+      const files = /conflicts in (.+?);/.exec(message)?.[1];
+      if (files === undefined) {
+        return whole();
+      }
+      const list = el('div', 'flinks');
+      list.append(...files.split(', ').map((path) => el('span', 'mono fs12', path)));
+      return [list];
+    }
+    case 'worktree_remove_failed':
+      return typeof job.worktree === 'string' ? [el('div', 'mono fs12', job.worktree)] : whole();
+    case 'max_turns':
+    case 'serve_restarted':
+    case 'mr_serve_restarted':
+    case 'publish_failed':
+    case 'mr_empty':
+    case 'mr_push_protected':
+      return [];
     default:
-      return 'implementer';
+      return whole();
   }
 }
 
-const logShows = (source) => state.logFilter === 'all' || state.logFilter === source;
+// A needs_human state entry: the stop block. The live one (the last, while the job waits) also has
+// the sentence and what its code needs; an earlier one its message. A decision is labelled "Your
+// decision", never as an error.
+function stopBlock(entry, live) {
+  const job = live ? shownJob() : null;
+  const stop = stopEntry(job ?? { error: { code: entry.code ?? '', message: entry.msg ?? '' } });
+  const block = el('div', 'block stop');
+  const head = el('div', 'bh');
+  head.append(el('span', stop.kind === 'decision' ? 'verdict fix' : 'verdict stop', stop.kind === 'decision' ? 'Your decision' : 'Stopped'), stop.reason);
+  if (typeof entry.code === 'string') {
+    head.append(el('span', 'tag', entry.code));
+  }
+  block.append(head);
+  if (job === null) {
+    if (typeof entry.msg === 'string' && entry.msg !== '') {
+      block.append(el('div', 'muted', entry.msg));
+    }
+    return block;
+  }
+  block.id = 'stopblock';
+  const detail = shownDetail();
+  block.append(el('div', '', stop.sentence(job)), ...stopInline(job, detail, entry));
+  return block;
+}
 
-function renderLogFilters() {
-  for (const button of $('log-filters').querySelectorAll('button')) {
-    button.setAttribute('aria-pressed', String(button.dataset.filter === state.logFilter));
+// The body of one entry.
+function entryBody(entry, open) {
+  switch (entry.t) {
+    case 'tool': {
+      const line = button('line', '', { toggle: entry.k });
+      line.setAttribute('title', entry.res === undefined ? String(entry.line ?? '') : `${entry.line}  → ${entry.res.out}`);
+      line.append(...toolLine(entry));
+      if (!open) {
+        return [line];
+      }
+      const more = el('div', 'more');
+      more.append(el('span', 'lbl', 'Input'), el('pre', '', String(entry.detail ?? '')));
+      if (entry.res !== undefined) {
+        more.append(el('span', 'lbl', 'Output'), el('pre', '', entry.res.result));
+      }
+      return [line, more];
+    }
+    case 'text': {
+      const text = String(entry.text ?? '');
+      const lines = text.split('\n').length;
+      const body = el('div', 'prose');
+      if (entry.who === 'codex' && /^\[withheld/.test(text)) {
+        body.append(el('span', 'muted', '(message withheld by the factory)'));
+      } else {
+        body.append(...prose(text));
+      }
+      return lines > CLAMP_LINES ? [body, toggleButton(entry.k, open ? 'Show less' : `Show all ${lines} lines`)] : [body];
+    }
+    case 'result':
+      return [['Turn ended', typeof entry.turns === 'number' ? counted(entry.turns, 'turn') : null, typeof entry.ms === 'number' ? dur(entry.ms) : null,
+        `session ${money(entry.cost)}`].filter((part) => part !== null).join(' · ')];
+    case 'state': {
+      if (entry.to === 'needs_human') {
+        return [stopBlock(entry, entry.k === stopKey())];
+      }
+      const nodes = [el('b', '', STATE_TEXT(entry)), el('span', 'tag', `${entry.from ?? '–'} → ${entry.to}`)];
+      if (typeof entry.msg === 'string' && entry.msg !== '') {
+        nodes.push(el('span', '', entry.msg));
+      }
+      return nodes;
+    }
+    case 'prompt':
+      return promptBody(entry, open);
+    case 'verdict':
+      return [verdictBody(entry, open)];
+    case 'changes':
+      return [changesEntry(entry)];
+    case 'simplify': {
+      const suggestions = Array.isArray(entry.suggestions) ? entry.suggestions : [];
+      const block = el('div', 'block');
+      const head = el('div', 'bh', `Simplification pass · iteration ${entry.it} `);
+      head.append(el('span', 'muted light', suggestions.length > 0 ? `${counted(suggestions.length, 'suggestion')}, saves about ${counted(entry.saves_lines ?? 0, 'line')}` : 'no suggestion'));
+      block.append(head);
+      if (suggestions.length > 0) {
+        block.append(suggestionItems(suggestions, entry.it));
+      }
+      return [block];
+    }
+    case 'user': {
+      const block = el('div', 'block you');
+      const text = el('div', 'prose');
+      text.append(...prose(entry.text));
+      block.append(text);
+      if (entry.task_changed === true) {
+        block.append(el('span', 'muted fs12', "with the Task file's change"));
+      }
+      return [block];
+    }
+    default:
+      // note, and any type the page does not know: its text.
+      return [String(entry.text ?? '')];
   }
 }
 
-function setLogFilter(filter) {
-  state.logFilter = filter;
-  renderLogFilters();
-  for (const line of $('events').children) {
-    line.hidden = !logShows(line.dataset.source);
+// One entry as li.e.e-<t>.who-<who>: the local time, who (hidden when the same author goes on) and
+// the body. Returns the node and its label.
+function entryHtml(entry, prevWho) {
+  const open = ui.open.has(entry.k);
+  const who = typeof entry.who === 'string' && Object.hasOwn(WHO, entry.who) ? entry.who : 'factory';
+  const label = entry.t === 'state' ? 'State' : entry.t === 'prompt' ? 'Factory' : WHO[who];
+  const cont = prevWho === label && ['tool', 'text', 'result'].includes(entry.t);
+  const lines = entry.t === 'text' ? String(entry.text ?? '').split('\n').length : 0;
+  const node = el('li', `e e-${/^[a-z_]+$/.test(String(entry.t)) ? entry.t : 'note'} who-${who}${open ? ' open' : ''}${entry.res?.err ? ' err' : ''}${!open && lines > CLAMP_LINES ? ' clamp' : ''}`);
+  node.dataset.k = entry.k;
+  const body = el('div', 'body');
+  body.append(...entryBody(entry, open));
+  node.append(el('span', 'ts', clock(entry.ts)), el('span', cont ? 'who cont' : 'who', label), body);
+  return { node, label };
+}
+
+// The separator before a prompt: "Iteration N" (with the Fix N tag) or "MR preparation". A Fix
+// section's it is the iterations published when it was sent, so its work is iteration it + 1. A
+// continue prompt goes on in its iteration, without one.
+function sepFor(entry) {
+  const sep = el('li', 'sep', entry.kind === 'mr' || entry.kind === 'conflict' ? 'MR preparation' : `Iteration ${entry.kind === 'fix' ? entry.it + 1 : entry.it}`);
+  if (entry.kind === 'fix') {
+    sep.append(' ', el('span', 'tag', `Fix ${entry.fix_n}`));
   }
-  if ($('follow').checked) {
-    $('events').scrollTop = $('events').scrollHeight;
+  return sep;
+}
+
+// The nodes of the next entry of the Stream: its separator, if any, and its li.
+function streamItems(entry) {
+  const nodes = [];
+  if (entry.t === 'prompt' && entry.kind !== 'continue') {
+    nodes.push(sepFor(entry));
+    state.prevLabel = null;
+  }
+  state.labels.set(entry.k, state.prevLabel);
+  const { node, label } = entryHtml(entry, state.prevLabel);
+  state.prevLabel = label;
+  nodes.push(node);
+  return nodes;
+}
+
+// The whole Stream of the open job.
+function renderStream() {
+  state.prevLabel = null;
+  state.labels.clear();
+  $('stream').replaceChildren(...state.entries.flatMap(streamItems));
+  state.stopSig = stopSignature();
+  markSel(false);
+}
+
+// The li of an entry in the Stream, by its key.
+const entryNode = (k) => [...$('stream').children].find((node) => node.nodeType === 1 && node.dataset.k === k) ?? null;
+
+// One entry drawn again in place (a joined result, a toggle, the stop).
+function redrawEntry(entry) {
+  const old = entryNode(entry.k);
+  if (old !== null) {
+    old.replaceWith(entryHtml(entry, state.labels.get(entry.k) ?? null).node);
   }
 }
+
+// The entries that pass test drawn again, the scroll and the selection kept.
+function redrawWhere(test) {
+  keepScroll(() => state.entries.filter(test).forEach(redrawEntry));
+  markSel(false);
+}
+
+// The open job's own job object: the jobs payload's (it has the stop's numbers), else the detail's.
+function shownJob() {
+  if (ui.job === null) {
+    return null;
+  }
+  return jobByKey(ui.job) ?? shownDetail()?.job ?? null;
+}
+
+// The detail of the job on its page; null while it has not arrived.
+function shownDetail() {
+  return ui.job !== null && state.detail !== null && keyOf(state.detail.job) === ui.job ? state.detail : null;
+}
+
+// The key of the live stop: the last needs_human state entry while the job waits; else null.
+function stopKey() {
+  if (shownJob()?.state !== 'needs_human') {
+    return null;
+  }
+  for (let index = state.entries.length - 1; index >= 0; index -= 1) {
+    const entry = state.entries[index];
+    if (entry.t === 'state' && entry.to === 'needs_human') {
+      return entry.k;
+    }
+  }
+  return null;
+}
+
+// What the stop block shows depends on; it is drawn again only when this changed, so a note being
+// typed stays.
+function stopSignature() {
+  const job = shownJob();
+  const detail = state.detail;
+  const last = detail === null ? null : iterationOf(detail, detail.job.iteration);
+  return JSON.stringify([stopKey(), job?.state, job?.error, job?.stop, job?.gate_tokens, job?.worktree, job?.iteration, detail?.ledger, last?.simplify, last?.review, last?.gate,
+    detail === null ? '' : availability('settle', detail.job)]);
+}
+
+// The stop blocks drawn again when what they show changed.
+function refreshStop() {
+  const signature = stopSignature();
+  if (signature !== state.stopSig) {
+    state.stopSig = signature;
+    redrawWhere((entry) => entry.t === 'state' && entry.to === 'needs_human');
+  }
+}
+
+// The tool a result belongs to: the last tool entry with its id; null when the page has not seen it.
+function toolOf(id) {
+  for (let index = state.entries.length - 1; index >= 0; index -= 1) {
+    const entry = state.entries[index];
+    if (entry.t === 'tool' && entry.id === id) {
+      return entry;
+    }
+  }
+  return null;
+}
+
+// Takes the entries of a page or of a live event, alike: an entry whose k is shown is ignored; a
+// tool_result joins its tool by id (dropped without it). Returns the entries added and the tools
+// that got their result.
+function takeEntries(list) {
+  const added = [];
+  const joined = [];
+  for (const entry of Array.isArray(list) ? list : []) {
+    if (entry === null || typeof entry !== 'object' || typeof entry.k !== 'string' || state.seen.has(entry.k)) {
+      continue;
+    }
+    state.seen.add(entry.k);
+    if (entry.t === 'tool_result') {
+      const tool = typeof entry.id === 'string' && entry.id !== '' ? toolOf(entry.id) : null;
+      if (tool !== null) {
+        tool.res = { out: String(entry.out ?? ''), result: String(entry.result ?? ''), err: entry.err === true };
+        if (!joined.includes(tool) && !added.includes(tool)) {
+          joined.push(tool);
+        }
+      }
+      continue;
+    }
+    state.entries.push(entry);
+    added.push(entry);
+  }
+  return { added, joined };
+}
+
+// The Stream after new entries: appended, the joined tools drawn again, the stop moved; the view
+// stays at the bottom only when it was at the bottom.
+function showEntries(list) {
+  const { added, joined } = takeEntries(list);
+  if (added.length === 0 && joined.length === 0) {
+    return;
+  }
+  const wrap = $('streamwrap');
+  const bottom = wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 8;
+  $('stream').append(...added.flatMap(streamItems));
+  joined.forEach(redrawEntry);
+  if (added.some((entry) => entry.t === 'state')) {
+    state.stopSig = null;
+  }
+  refreshStop();
+  markSel(false);
+  if (bottom) {
+    wrap.scrollTop = wrap.scrollHeight;
+  }
+  // A card's button that points at the stop waits for its block.
+  applyWantedFocus();
+}
+
+// Reads the job's Stream page by page from line 0, then follows it live from the last next. A page
+// that cannot be read leaves the rest to the live stream, which sends every line from there.
+async function loadStream(key) {
+  const token = {};
+  state.streamLoad = token;
+  for (;;) {
+    let page;
+    try {
+      page = JSON.parse(await getText(`api/jobs/${jobPath(key)}/stream?from=${state.lastLine}`));
+    } catch {
+      page = null;
+    }
+    if (state.streamLoad !== token || state.key !== key) {
+      return;
+    }
+    if (page === null) {
+      break;
+    }
+    showEntries(page.entries);
+    const next = Number(page.next);
+    const moved = Number.isInteger(next) && next > state.lastLine;
+    if (moved) {
+      state.lastLine = next;
+    }
+    if (page.end === true || !moved) {
+      break;
+    }
+  }
+  state.streamLoad = null;
+  openStream();
+  if (ui.screen === 'stream' && ui.job === key) {
+    const wrap = $('streamwrap');
+    wrap.scrollTop = wrap.scrollHeight;
+  }
+}
+
+// The entries of the Stream, in order (the prototype's entries()).
+const entries = () => [...$('stream').children].filter((node) => node.nodeType === 1 && node.classList.contains('e'));
+
+// The selected entry (j, k, G, a click) marked .sel.
+function markSel(scroll) {
+  const all = entries();
+  all.forEach((node) => node.classList.remove('sel'));
+  if (ui.sel >= 0 && all[ui.sel] !== undefined) {
+    all[ui.sel].classList.add('sel');
+    if (scroll) {
+      all[ui.sel].scrollIntoView({ block: 'nearest' });
+    }
+  }
+}
+
+// Runs work (a redraw) with the Stream's scroll position kept.
+function keepScroll(work) {
+  const wrap = $('streamwrap');
+  const top = wrap.scrollTop;
+  work();
+  wrap.scrollTop = top;
+}
+
+// A toggle of an entry: its Input and Output, all its lines, the whole summary, the full prompt, the
+// Task or the Report.
+function toggle(key) {
+  if (ui.open.has(key)) {
+    ui.open.delete(key);
+  } else {
+    ui.open.add(key);
+  }
+  const [k, part] = key.split('/');
+  const entry = state.entries.find((candidate) => candidate.k === k);
+  if (entry === undefined) {
+    return;
+  }
+  redrawWhere((candidate) => candidate === entry);
+  if (part === 'task' && ui.open.has(key)) {
+    void loadTaskView();
+  } else if (part === 'report' && ui.open.has(key) && state.key !== null) {
+    const shown = state.key;
+    void iterationText(shown, entry.it, 'report').then((text) => {
+      if (text !== undefined && state.key === shown) {
+        redrawWhere((candidate) => candidate === entry);
+      }
+    });
+  }
+}
+
+// ---------- The header (SF-078, the prototype's renderHead) ----------
+
+// Draws a part of the job page again (the header, the composer's actions: on every jobs event,
+// every 15 s while the job runs) and keeps the focus on the button it was on.
+function keepFocus(container, work) {
+  const active = document.activeElement;
+  const data = active !== null && active !== undefined && container.contains(active) ? active.dataset ?? {} : {};
+  const name = ['act', 'goto', 'back', 'copyBranch'].find((key) => data[key] !== undefined);
+  work();
+  if (name !== undefined) {
+    const attribute = name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
+    [...container.querySelectorAll(`[data-${attribute}]`)].find((node) => node.dataset[name] === data[name])?.focus();
+  }
+}
+
+// ← Board (Esc), the key, the title and the code of a stop; the switch Stream (s), Changes (N) (c)
+// and Merge request (m); the sentence with the state's dot, the iteration, the cost, the time and
+// the branch, which copies its checkout command.
+function renderHead() {
+  const job = shownJob();
+  if (job === null) {
+    return;
+  }
+  $('job').className = `st-${job.state}`;
+  const backButton = button('btn back', '← Board', { back: '' });
+  backButton.setAttribute('title', 'Back to the board (Esc)');
+  const t1 = el('div', 't1');
+  const title = el('span', 'title', titleOf(job));
+  title.setAttribute('title', titleOf(job));
+  t1.append(el('span', 'key', job.ticket), title);
+  if (job.state === 'needs_human' && typeof job.error?.code === 'string') {
+    t1.append(el('span', 'tag', job.error.code));
+  }
+  const switcher = el('div', 'switch');
+  switcher.setAttribute('role', 'tablist');
+  switcher.setAttribute('aria-label', 'Job screens');
+  const mrOk = mrAvailable();
+  for (const [screen, text, key] of [['stream', 'Stream', 's'], ['changes', typeof job.files === 'number' ? `Changes (${job.files})` : 'Changes', 'c'], ['mr', 'Merge request', 'm']]) {
+    const tab = button(ui.screen === screen ? 'on' : '', `${text} `, { goto: screen });
+    tab.setAttribute('role', 'tab');
+    tab.setAttribute('aria-selected', String(ui.screen === screen));
+    tab.append(el('span', 'kbd', key));
+    if (screen === 'mr') {
+      tab.setAttribute('aria-disabled', String(!mrOk));
+      tab.setAttribute('title', mrOk ? 'The merge request text' : 'No MR text yet: written at Clean');
+    }
+    switcher.append(tab);
+  }
+  const tools = el('div', 'tools');
+  tools.append(switcher);
+  const running = RUNNING.includes(job.state);
+  const t2 = el('div', 't2');
+  const line = el('span', 'sentence');
+  line.append(el('span', 'dot'), document.createTextNode(headSentence(job)));
+  const branch = button('mono fs12 branch', job.branch, { copyBranch: '' });
+  branch.setAttribute('title', `Copy the checkout command: git checkout ${job.branch}`);
+  const end = running ? Date.now() : Date.parse(job.updated_at);
+  t2.append(line, el('span', '', `Iteration ${shownIteration(job)}${job.state === 'working' || job.state === 'starting' ? ' (running)' : ''}`),
+    el('span', '', `${money(job.cost_usd)}${running ? ' so far' : ''} (Claude, est.)`), el('span', '', `${dur(end - Date.parse(job.created_at))} elapsed`), branch);
+  keepFocus($('jhead'), () => $('jhead').replaceChildren(backButton, t1, tools, t2));
+}
+
+// The job has its MR text (written at Clean): the Merge request screen applies.
+const mrAvailable = () => shownDetail()?.mr === true;
+
+// ---------- The composer (SF-078, the prototype's actionsFor and renderComposer) ----------
+
+const SEND = { a: 'say', l: 'Send' };
+const GO_ON = { a: 'goon', l: 'Tell it to go on' };
+const ABORT = { a: 'abort', l: 'Abort…', d: true };
+const RESTART = { a: 'restart', l: 'Restart…' };
+const ARCHIVE = { a: 'archive', l: 'Archive' };
+
+// The actions of a stopped job, by its code (the Task's table), primary first.
+function stopActions(job, detail) {
+  const accept = gateAcceptable(detail) ? [{ a: 'accept', l: 'Accept and prepare MR' }] : [];
+  if (usageLimited(job)) {
+    return [GO_ON, ABORT];
+  }
+  const code = typeof job.error?.code === 'string' ? job.error.code : '';
+  switch (STOP_ALIASES[code] ?? code) {
+    case SIMPLIFY_CODE:
+      return [{ a: 'simplify', l: 'Simplify' }, { a: 'accept', l: 'Skip' }, SEND, ABORT];
+    case 'escalated':
+      return [SEND, ABORT];
+    case 'review_disputed':
+    case 'review_churn':
+    case 'gate_rounds':
+    case 'gate_budget':
+      return [...accept, SEND, ABORT];
+    case 'iteration_limit':
+      return [SEND, RESTART, ABORT];
+    case 'gate_failed':
+      return [...accept, GO_ON, ABORT];
+    case 'review_failed':
+      return [{ a: 'review', l: 'Retry review' }, ABORT];
+    case 'serve_restarted':
+    case 'session_failed':
+      return [GO_ON, RESTART, ABORT];
+    case 'max_turns':
+    case 'mr_serve_restarted':
+    case 'sandbox_unavailable':
+    case 'publish_failed':
+    case 'mr_failed':
+    case 'worktree_remove_failed':
+      return [GO_ON, ABORT];
+    case 'mr_conflict':
+      return [{ a: 'say', l: 'Tell it how' }, ABORT];
+    case 'mr_push_failed':
+      return [{ a: 'approve', l: 'Push again' }, ABORT];
+    case 'mr_push_protected':
+      // Open the Merge request screen to rename the branch comes with SF-080.
+      return [ABORT];
+    default:
+      return [SEND, ABORT];
+  }
+}
+
+// The actions that apply to the job now, primary first ({ a: action, l: label, p: primary, d:
+// danger }); a finished job has no primary.
+function actionsFor(job, detail) {
+  let list;
+  switch (job.state) {
+    case 'starting':
+    case 'working':
+    case 'awaiting_review':
+      list = [SEND, { a: 'pause', l: 'Pause' }, ABORT];
+      break;
+    case 'preparing_mr':
+      list = [ABORT];
+      break;
+    case 'paused':
+      list = [{ a: 'resume', l: 'Resume' }, RESTART, ABORT];
+      break;
+    case 'ready_for_human_review':
+      list = [{ a: 'approve', l: 'Approve…' }, { a: 'handover', l: ACTION_LABELS.handover }, ...(canCreateMr(job) ? [{ a: 'mr-create', l: 'Create merge request' }] : []), SEND, ABORT];
+      break;
+    case 'handed_over':
+      // SF-073: the branch waits in the user's checkout; the message is Ask for changes (the
+      // checkout's edits go with it).
+      list = [{ a: 'approve', l: 'Approve…' }, { a: 'say', l: 'Ask for changes' }, { a: 'handed-done', l: ACTION_LABELS['handed-done'] }, { a: 'takeback', l: ACTION_LABELS.takeback },
+        ...(canCreateMr(job) ? [{ a: 'mr-create', l: 'Create merge request' }] : []), ABORT];
+      break;
+    case 'needs_human':
+      list = stopActions(job, detail);
+      break;
+    case 'pushed':
+      return [...(canCreateMr(job) ? [{ a: 'mr-create', l: 'Create merge request' }] : []), ...(canMerge(job) ? [{ a: 'mr-merge', l: 'Merge…' }] : []),
+        ...(hasMr(job) ? [{ a: 'mr-status', l: 'Refresh MR status' }] : []), ARCHIVE];
+    case 'aborted':
+    case 'failed':
+      return [RESTART, ARCHIVE];
+    default:
+      list = [ABORT];
+  }
+  return list.map((action, index) => ({ ...action, p: index === 0 && action.d !== true }));
+}
+
+// The placeholder of the message box, per state.
+const PLACEHOLDER = {
+  starting: 'Message the Implementer; it reads it at its next step (Ctrl+Enter sends)',
+  working: 'Message the Implementer; it reads it at its next step (Ctrl+Enter sends)',
+  awaiting_review: 'Message the job; the Implementer reads it when the reviews end',
+  needs_human: 'Or tell the Implementer what to do instead',
+  ready_for_human_review: 'Ask the Implementer for a last change before you push',
+  handed_over: 'Ask the Implementer for changes; the edits in your checkout go with it',
+  preparing_mr: 'The factory takes no message while it writes the MR text',
+};
+
+// The composer: the sentence in bold (and the merge request of a pushed job), the inline
+// confirmation, the message box and the actions; a disabled action has its reason as its title.
+function renderComposer() {
+  const job = state.detail?.job ?? null;
+  // A confirmation opened before the doubt is not one the user could open now.
+  if (state.confirm !== null && state.unresolved.has(state.confirm.key) && availability(state.confirm.action, job) !== '') {
+    closeConfirm();
+    return;
+  }
+  const msg = $('msg');
+  $('refresh-button').hidden = state.unresolved.get(state.key)?.failed !== true;
+  if (job === null) {
+    $('composer-sentence').replaceChildren(el('span', 'muted', 'Loading the job…'));
+    $('acts').replaceChildren();
+    msg.disabled = true;
+    return;
+  }
+  // The detail's job, with what only the jobs payload has (the stop's numbers).
+  const cs = [el('b', '', `${headSentence({ ...(shownJob() ?? {}), ...job })}.`)];
+  if (job.state === 'paused' && job.task_changed === true) {
+    cs.push(el('span', 'muted', TASK_CHANGED));
+  }
+  // The hand-over (SF-073): why a job ready for review was not handed over; what a handed-over one takes.
+  if (job.state === 'ready_for_human_review' && skippedNote(job) !== '') {
+    cs.push(el('span', 'muted', skippedNote(job).trim()));
+  }
+  if (job.state === 'handed_over') {
+    cs.push(el('span', 'muted', `Read, run and change it there. Approve pushes it; Ask for changes sends your edits and your message to the Implementer; Take it back returns it to the factory.${job.error ? ` ${job.error.code}: ${job.error.message}` : ''}`));
+  }
+  if (hasMr(job)) {
+    const line = el('span', 'mr-line');
+    line.id = 'mr-line';
+    line.append(document.createTextNode(`Merge request #${job.mr.number} (${job.mr.state}): `), mrLink(job.mr));
+    cs.push(line);
+    // The status last read shows only while it is of the merge request the job shows now (the same
+    // number and state): after a merge, a close or a new merge request it stays hidden.
+    const read = state.mrStatus.get(keyOf(job));
+    if (read !== undefined && read.number === job.mr.number && read.state === job.mr.state) {
+      const status = el('span', 'muted', mrStatusText(read));
+      status.id = 'mr-status-line';
+      cs.push(status);
+    }
+  }
+  const finished = TERMINAL_STATES.includes(job.state);
+  if (finished) {
+    cs.push(el('span', 'muted', 'The message box is hidden on a finished job.'));
+  }
+  $('composer-sentence').replaceChildren(...cs);
+  msg.hidden = finished;
+  msg.disabled = !(SAY_STATES.includes(job.state) || pausedTurn(job));
+  msg.placeholder = job.state === 'paused' ? (pausedTurn(job) ? 'Resume sends this to the Implementer, if you write one' : 'Resume, then message the Implementer')
+    : PLACEHOLDER[job.state] ?? 'Message';
+  const buttons = actionsFor(job, state.detail).map((action) => {
+    const node = button(`btn${action.p ? ' primary' : ''}${action.d ? ' danger' : ''}`, action.l, { act: action.a });
+    node.id = `${action.a}-button`;
+    let reason = availability(action.a === 'goon' ? 'say' : action.a, job);
+    if (reason === '' && state.confirm !== null) {
+      reason = 'a confirmation is open: confirm or cancel it first.';
+    }
+    if (reason === '' && action.a === 'say' && msg.value.trim() === '') {
+      reason = 'write a message first.';
+    }
+    node.disabled = reason !== '';
+    if (reason !== '') {
+      node.setAttribute('title', reason);
+    }
+    return node;
+  });
+  keepFocus($('acts'), () => $('acts').replaceChildren(...buttons));
+}
+
+// ---------- The job's detail and its actions ----------
 
 function renderDetail(detail) {
   const previous = state.detail;
   state.detail = detail;
-  $('detail').hidden = false;
   const numbers = detail.iterations.map((iteration) => iteration.number);
   const newest = numbers.length > 0 ? numbers[numbers.length - 1] : null;
   // Follow the newest iteration unless the user picked an older one.
@@ -1264,18 +1822,15 @@ function renderDetail(detail) {
   if (wasNewest || !numbers.includes(state.iteration)) {
     state.iteration = newest;
   }
-  renderHeader(detail);
-  renderNext(detail);
-  renderMr(detail);
-  renderFacts(detail);
-  renderHistory(detail.history);
+  renderHead();
   renderChanges(detail);
-  renderReviews(detail);
-  renderLedger(detail);
-  renderJobTabs();
-  showTab();
-  void showMr();
-  renderActions();
+  if (ui.screen === 'changes') {
+    void showIteration();
+  } else if (ui.screen === 'mr') {
+    void showMr();
+  }
+  renderComposer();
+  refreshStop();
   // Approve… on a Your turn card opens its confirmation once the job is shown, and a card's button
   // its stop or its message box.
   openWantedConfirm();
@@ -1320,6 +1875,9 @@ function availability(action, job) {
   }
   if (action === 'abort') {
     return TERMINAL_STATES.includes(job.state) ? `the job is already ${job.state}.` : '';
+  }
+  if (action === 'archive') {
+    return TERMINAL_STATES.includes(job.state) ? '' : 'only a finished job is archived.';
   }
   if (action === 'pause') {
     if (job.state === 'preparing_mr') {
@@ -1367,94 +1925,6 @@ function availability(action, job) {
 
 // A job paused during the Implementer's turn (SF-067): its Resume takes the message.
 const pausedTurn = (job) => job.state === 'paused' && job.paused?.from === 'working';
-
-function renderActions() {
-  const job = state.detail?.job ?? null;
-  // A confirmation opened before the doubt is not one the User could open now.
-  if (state.confirm !== null && state.unresolved.has(state.confirm.key) && availability(state.confirm.action, job) !== '') {
-    closeConfirm();
-    return;
-  }
-  const reasons = [];
-  for (const action of ['approve', 'abort']) {
-    const reason = availability(action, job);
-    // Both stay off while a confirmation is open, so it cannot be retargeted.
-    $(`${action}-button`).disabled = reason !== '' || state.confirm !== null;
-    if (reason !== '') {
-      reasons.push(`${ACTION_LABELS[action]}: ${reason}`);
-    }
-  }
-  // Retry review shows only after a failed review; while it is held, its reason says why.
-  const retryable = job !== null && reviewFailed(job);
-  const retryReason = availability('review', job);
-  $('retry-review-button').hidden = !retryable;
-  $('retry-review-button').disabled = !retryable || retryReason !== '';
-  if (retryable && retryReason !== '') {
-    reasons.push(`${ACTION_LABELS.review}: ${retryReason}`);
-  }
-  // Accept and prepare MR shows only when the gate stopped the job after a clean Claude review.
-  const acceptable = job !== null && gateAcceptable(state.detail);
-  const acceptReason = availability('accept', job);
-  $('accept-gate-button').hidden = !acceptable;
-  $('accept-gate-button').disabled = !acceptable || acceptReason !== '' || state.confirm !== null;
-  if (acceptable && acceptReason !== '') {
-    reasons.push(`${ACTION_LABELS.accept}: ${acceptReason}`);
-  }
-  // Pause, Resume and Restart (SF-067): each shows where it applies; Restart is confirmed.
-  for (const action of ['pause', 'resume', 'restart']) {
-    const shown = job !== null && (action === 'pause' ? [...PAUSE_STATES, 'preparing_mr'] : action === 'resume' ? ['paused'] : RESTART_STATES).includes(job.state);
-    const reason = availability(action, job);
-    $(`${action}-button`).hidden = !shown;
-    $(`${action}-button`).disabled = !shown || reason !== '' || state.confirm !== null;
-    if (shown && reason !== '') {
-      reasons.push(`${ACTION_LABELS[action]}: ${reason}`);
-    }
-  }
-  // The hand-over (SF-073): each button shows in the state it takes.
-  for (const [action, wanted] of HANDOVER_ACTIONS) {
-    const button = handoverButtons[action];
-    if (button === undefined) {
-      continue;
-    }
-    const shown = job !== null && job.state === wanted;
-    const reason = availability(action, job);
-    button.hidden = !shown;
-    button.disabled = !shown || reason !== '' || state.confirm !== null;
-    if (shown && reason !== '') {
-      reasons.push(`${ACTION_LABELS[action]}: ${reason}`);
-    }
-  }
-  // Simplify shows only on the offer of the simplification pass (SF-055).
-  const offered = job !== null && simplifiable(job);
-  $('simplify-button').hidden = !offered;
-  $('simplify-button').disabled = !offered || availability('simplify', job) !== '' || state.confirm !== null;
-  // The merge request on the Git host (SF-048): each button shows where it applies; while the
-  // actions are off (a token missing), the reason names the variable.
-  for (const [action, shown] of [['mr-create', job !== null && canCreateMr(job)], ['mr-merge', job !== null && canMerge(job)], ['mr-status', job !== null && hasMr(job)]]) {
-    const reason = availability(action, job);
-    $(`${action}-button`).hidden = !shown;
-    $(`${action}-button`).disabled = !shown || reason !== '' || state.confirm !== null;
-    if (shown && reason !== '') {
-      reasons.push(`${ACTION_LABELS[action]}: ${reason}`);
-    }
-  }
-  $('action-reasons').textContent = reasons.join(' ');
-  $('refresh-button').hidden = state.unresolved.get(state.key)?.failed !== true;
-  // A finished job can leave the list: Archive replaces Approve and Abort, which are off anyway.
-  const finished = job !== null && TERMINAL_STATES.includes(job.state);
-  $('archive-job-button').hidden = !finished;
-  $('approve-button').hidden = finished;
-  $('abort-button').hidden = finished;
-  $('archive-job-button').disabled = !finished || state.pending.has(pendingId('archive', state.key ?? ''));
-  const input = $('say-input');
-  const sayReason = availability('say', job);
-  // The draft stays editable while a message is out; only sending waits.
-  input.disabled = job === null || !(SAY_STATES.includes(job.state) || pausedTurn(job));
-  $('say-button').disabled = sayReason !== '' || input.value.trim() === '';
-  // On a handed-over job the message is Ask for changes (SF-073): the checkout's edits go with it.
-  $('say-button').textContent = job !== null && job.state === 'handed_over' ? 'Ask for changes' : 'Send';
-  $('say-reason').textContent = sayReason === '' ? '' : `${ACTION_LABELS.say}: ${sayReason}`;
-}
 
 function renderOutcome(outcome) {
   const node = $('action-status');
@@ -1571,6 +2041,13 @@ function describeOutcome(action, result) {
     : { level: 'ok', text: `Sent: the Implementer is working on it (state ${data.state}).` };
 }
 
+// The short words of a success, for the toast of the job page.
+const DONE_TEXT = {
+  say: 'Message sent', approve: 'Pushed', abort: 'Aborted', review: 'The review runs again', accept: 'The MR is being prepared', settle: 'Settled',
+  simplify: 'Simplify sent to the Implementer', archive: 'Archived', 'mr-create': 'Merge request opened', 'mr-merge': 'Merged', 'mr-status': 'MR status read',
+  pause: 'Paused', resume: 'Resumed', restart: 'Restarted', handover: 'Handed over to your checkout', takeback: 'Taken back', 'handed-done': 'Your push is recorded',
+};
+
 // One request for one job; the result goes to that job only, whatever is selected by then.
 async function run(action, key, body) {
   const id = pendingId(action, key);
@@ -1583,7 +2060,8 @@ async function run(action, key, body) {
   }
   const waiting = { level: 'pending', text: PENDING_TEXT[action] };
   setOutcome(key, waiting);
-  renderActions();
+  renderComposer();
+  refreshStop();
   renderBoard();
   let outcome;
   let unknownReason;
@@ -1597,8 +2075,11 @@ async function run(action, key, body) {
     if ((action === 'say' || action === 'resume') && typeof body.message === 'string' && state.drafts.get(key) === body.message) {
       state.drafts.delete(key);
       if (key === state.key) {
-        $('say-input').value = '';
+        $('msg').value = '';
       }
+    }
+    if (action === 'settle' && typeof body.id === 'string') {
+      state.notes.delete(`${key}/${body.id}`);
     }
   } catch (error) {
     if (error instanceof ActionError) {
@@ -1616,7 +2097,11 @@ async function run(action, key, body) {
     return;
   }
   setOutcome(key, outcome);
-  renderActions();
+  if (outcome.level === 'ok' && key === ui.job) {
+    toast({ level: 'ok', text: DONE_TEXT[action] ?? 'Done' });
+  }
+  renderComposer();
+  refreshStop();
   renderBoard();
   void refreshDetail(key);
 }
@@ -1678,8 +2163,9 @@ async function settleUnknown(key) {
   const lead = `The request failed (${entry.reason}). Its outcome is unknown`;
   entry.refreshing = true;
   entry.failed = false;
-  showDoubt(key, `${lead}: the state below is being refreshed; check it before choosing a next action.`);
-  renderActions();
+  showDoubt(key, `${lead}: the state is being refreshed; check it before choosing a next action.`);
+  renderComposer();
+  refreshStop();
   renderBoard();
   let detail;
   let failure;
@@ -1695,20 +2181,23 @@ async function settleUnknown(key) {
   if (failure !== undefined) {
     entry.failed = true;
     showDoubt(key, `${lead} and the current state could not be loaded (${failure.message}). The controls stay off until it is: use Refresh state, or wait for the page to reconnect. If sf serve restarted, open the new dashboard URL.`);
-    renderActions();
+    renderComposer();
+    refreshStop();
     renderBoard();
     return;
   }
   state.unresolved.delete(key);
-  showDoubt(key, `${lead}: it may have taken effect. The state below is current; check it and the event stream before choosing a next action.`);
+  showDoubt(key, `${lead}: it may have taken effect. The state shown is current; check it and the Stream before choosing a next action.`);
   if (key === state.key) {
     renderDetail(detail);
   } else {
-    renderActions();
+    renderComposer();
   }
   renderBoard();
 }
 
+// The confirmations, inline in the composer (the prototype's Abort), each with today's content;
+// the action is posted only from its button.
 function openConfirm(action) {
   const job = state.detail?.job ?? null;
   if (job === null || availability(action, job) !== '' || state.confirm !== null) {
@@ -1749,7 +2238,7 @@ function openConfirm(action) {
   $('as-is-label').hidden = action !== 'approve';
   $('confirm').hidden = false;
   renderConfirmButton();
-  renderActions();
+  renderComposer();
   $('confirm-cancel').focus();
 }
 
@@ -1792,7 +2281,7 @@ function renderConfirmButton() {
     : confirm.action === 'accept' ? (job?.error?.code === SIMPLIFY_CODE ? 'Skip and prepare the MR' : 'Accept and prepare the MR')
     : confirm.action === 'restart' ? ($('keep-files').checked ? 'Restart, keep the files' : 'Restart')
     : confirm.action === 'approve' ? ($('as-is').checked ? 'Approve: push as it is' : 'Approve: push the branch') : discard ? 'Abort and discard the branch' : 'Abort, keep the worktree';
-  ok.className = discard ? 'btn btn-danger' : 'btn btn-primary';
+  ok.className = confirm.action === 'abort' ? 'btn small danger' : 'btn small primary';
 }
 
 function closeConfirm() {
@@ -1802,7 +2291,7 @@ function closeConfirm() {
   $('discard').checked = false;
   $('as-is').checked = false;
   $('keep-files').checked = false;
-  renderActions();
+  renderComposer();
 }
 
 function submitConfirm() {
@@ -1821,15 +2310,47 @@ function submitConfirm() {
   void run(confirm.action, confirm.key, confirm.action === 'abort' ? { discard } : confirm.action === 'restart' ? { keep_files: keepFiles } : asIs ? { as_is: true } : {});
 }
 
-function sendSay() {
+// Send, and Tell it to go on ("Go on." for an empty box): the message box's text, once.
+function sendSay(goOn = false) {
   const key = state.key;
-  const message = $('say-input').value;
-  if (key === null || message.trim() === '' || availability('say', state.detail?.job ?? null) !== '') {
+  const text = $('msg').value;
+  if (key === null || (text.trim() === '' && !goOn) || availability('say', state.detail?.job ?? null) !== '') {
     return;
   }
-  void run('say', key, { message });
+  void run('say', key, { message: text.trim() === '' ? 'Go on.' : text });
 }
 
+// A button of the composer (the prototype's act): the ones that ask first open their confirmation;
+// Send, Tell it to go on, Pause, Resume, Retry review, Refresh MR status, Archive and the hand-over's
+// actions (SF-073) post at once.
+function act(action) {
+  const job = state.detail?.job ?? null;
+  if (job === null) {
+    return;
+  }
+  const key = keyOf(job);
+  if (action === 'say' || action === 'goon') {
+    sendSay(action === 'goon');
+  } else if (['abort', 'restart', 'approve', 'accept', 'simplify', 'mr-create', 'mr-merge'].includes(action)) {
+    openConfirm(action);
+  } else if (action === 'resume') {
+    const message = $('msg').value;
+    if (availability('resume', job) === '') {
+      void run('resume', key, pausedTurn(job) && message.trim() !== '' ? { message } : {});
+    }
+  } else if (['pause', 'review', 'mr-status', 'archive', ...HANDOVER_ACTIONS.map(([name]) => name)].includes(action) && availability(action, job) === '') {
+    void run(action, key, {});
+  }
+}
+
+// Accept risk or Must fix on a ledger entry of the stop: posted at once, with its note.
+function settle(id, decision) {
+  const job = state.detail?.job ?? null;
+  if (job === null || availability('settle', job) !== '') {
+    return;
+  }
+  void run('settle', keyOf(job), { id, decision, note: state.notes.get(noteKey(id)) ?? '' });
+}
 
 // ---------- The board (SF-077: the v3 board of docs/design/dashboard-v3/prototype.html) ----------
 
@@ -1876,93 +2397,6 @@ const canMerge = (job) => job.state === 'pushed' && hasMr(job) && job.mr.state =
 const mrOff = (job) => (job.mr_host === null || typeof job.mr_host !== 'object' ? 'the Git host is not known yet.'
   : typeof job.mr_host.reason === 'string' && job.mr_host.reason !== '' ? `${job.mr_host.reason}.` : '');
 
-// Where a halted job stopped, from its error: the review, the gate, the push, the MR
-// preparation, else the implementation.
-function haltedSegment(job) {
-  const code = typeof job.error?.code === 'string' ? job.error.code : '';
-  if (code === 'review_failed') {
-    return 1;
-  }
-  if (code.startsWith('gate_')) {
-    return 2;
-  }
-  // The simplification pass runs after the gate, before MR preparation (SF-055).
-  if (code === SIMPLIFY_CODE) {
-    return 3;
-  }
-  if (canApprove(job)) {
-    return 4;
-  }
-  return code.startsWith('mr_') ? 3 : 0;
-}
-
-// Where a paused job stopped (SF-067): the turn, the review, the gate or the simplification pass.
-function pausedSegment(job) {
-  const step = job.paused?.step;
-  if (step === 'turn' || job.paused?.from === 'working') {
-    return 0;
-  }
-  return step === 'simplify' ? 3 : step === 'gate' || job.review === 'clean' ? 2 : 1;
-}
-
-// The pipeline position of a job: the current segment (null when there is none), whether it is
-// halted there, and whether the whole pipeline is done (pushed). awaiting_review is the Claude
-// review until the last iteration has a clean one, then the Codex gate.
-function pipeline(job) {
-  switch (job.state) {
-    case 'starting':
-    case 'working':
-      return { segment: 0, halted: false, complete: false };
-    case 'awaiting_review':
-      return { segment: job.review === 'clean' ? 2 : 1, halted: false, complete: false };
-    case 'preparing_mr':
-      return { segment: 3, halted: false, complete: false };
-    case 'ready_for_human_review':
-    case 'handed_over':
-      return { segment: 4, halted: false, complete: false };
-    case 'needs_human':
-    case 'failed':
-      return { segment: haltedSegment(job), halted: true, complete: false };
-    case 'paused':
-      // Held where the pause stopped it (SF-067).
-      return { segment: pausedSegment(job), halted: true, complete: false };
-    case 'pushed':
-      return { segment: null, halted: false, complete: true };
-    default:
-      return { segment: null, halted: false, complete: false };
-  }
-}
-
-function segmentStatus(flow, index) {
-  if (flow.complete) {
-    return 'done';
-  }
-  if (flow.segment === null || index > flow.segment) {
-    return 'todo';
-  }
-  if (index < flow.segment) {
-    return 'done';
-  }
-  return flow.halted ? 'halted' : 'current';
-}
-
-// How long ago ts was, in words: "< 1 min", "4 min", "2 h 5 min", "3 d".
-function since(ts) {
-  const ms = Date.now() - Date.parse(ts);
-  if (!Number.isFinite(ms)) {
-    return '';
-  }
-  const minutes = Math.max(0, Math.floor(ms / 60000));
-  if (minutes < 1) {
-    return '< 1 min';
-  }
-  if (minutes < 60) {
-    return `${minutes} min`;
-  }
-  const hours = Math.floor(minutes / 60);
-  return hours < 24 ? `${hours} h ${minutes % 60} min` : `${Math.floor(hours / 24)} d`;
-}
-
 // A duration as the prototype writes it: "14 min", "1 h 4 min".
 const dur = (ms) => {
   const m = Math.max(0, Math.round(ms / 60000));
@@ -1973,9 +2407,9 @@ const money = (value) => (typeof value === 'number' ? `$${value.toFixed(2)}` : '
 const firstLine = (text) => (typeof text === 'string' ? text.split('\n')[0].trim() : '');
 const counted = (n, word, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
 
-// The iteration a job shows, numbered from 1, the same on its card and on its page (SF-078 uses it
-// too): the one under way while the Implementer works on it (starting, working, paused in its
-// turn, stopped by its session), else the last one published; never 0.
+// The iteration a job shows, numbered from 1, the same on its card and on its page: the one under
+// way while the Implementer works on it (starting, working, paused in its turn, stopped by its
+// session), else the last one published; never 0.
 const SESSION_CODES = ['serve_restarted', 'session_failed', 'turn_failed', 'max_turns', 'sandbox_unavailable', 'permission_mode_mismatch', 'publish_failed'];
 function shownIteration(job) {
   const underWay = job.state === 'starting' || job.state === 'working' || (job.state === 'paused' && job.paused?.step === 'turn')
@@ -1991,11 +2425,11 @@ const said = (job) => (firstLine(job.error?.message) === '' ? '' : `: ${firstLin
 const usageLimited = (job) => job.error?.code === 'session_failed' && /hit your .*limit/i.test(firstLine(job.error?.message));
 const resetTime = (job) => /resets\s+(.+)$/i.exec(firstLine(job.error?.message))?.[1] ?? null;
 
-// The stop codes (SF-077): one table for the cards and the job page (SF-078 uses it for the job
-// header, the stop block and the composer). A decision (the factory needs the user's choice;
-// nothing failed) never shows as an error; an error does. Each entry: its kind, the card's reason,
-// the sentence (with the job's numbers, or the words without one that is not known) and the
-// card's button. N, M, X and T come from the job; the codes of factory/src.
+// The stop codes (SF-077): one table for the cards and the job page (its header, its stop block
+// and its composer, SF-078). A decision (the factory needs the user's choice; nothing failed) never
+// shows as an error; an error does. Each entry: its kind, the card's reason, the sentence (with the
+// job's numbers, or the words without one that is not known) and the card's button. N, M, X and T
+// come from the job; the codes of factory/src.
 const STOPS = {
   simplify_offered: {
     kind: 'decision', reason: 'Simplification offered', button: () => 'Simplify or skip',
@@ -2555,10 +2989,9 @@ function armToast() {
 
 // The view shown: 'board', a job's 'stream', 'changes' or 'mr' (ui.job is its key "<ws>/<ticket>"),
 // or a planned ticket's page 'ticket' (ui.ticket); ui.opener is the key of the card that opened
-// it; pending: the hash names a job or ticket not loaded yet.
-const ui = { screen: 'board', job: null, ticket: null, opener: null, pending: false };
-// The tab of the moved job detail each job screen selects; the Stream keeps the tab chosen.
-const SCREEN_TAB = { changes: 'changes', mr: 'mr' };
+// it; pending: the hash names a job or ticket not loaded yet. On the Stream: sel, the selected
+// entry (j, k, G), and open, the toggles open.
+const ui = { screen: 'board', job: null, ticket: null, opener: null, pending: false, sel: -1, open: new Set() };
 
 // The URL hash of the view: #<ws>/<ticket> (the Stream), #<ws>/<ticket>/changes, /mr, /ticket;
 // a new one is a new history entry, so Back and Forward move between them.
@@ -2569,40 +3002,46 @@ function setHash() {
   }
 }
 
-// The job page's header (SF-078 adds its switch and facts): ← Board, the key and the title, the
-// sentence, the iteration and the branch.
-function renderHead() {
-  const job = ui.job === null ? null : (jobByKey(ui.job) ?? (state.detail !== null && keyOf(state.detail.job) === ui.job ? state.detail.job : null));
-  if (job === null) {
+// The job page's screen (the prototype's renderJobScreen): the header, and the Stream, the Changes
+// or the Merge request screen.
+function renderJobScreen() {
+  renderHead();
+  $('scrStream').hidden = ui.screen !== 'stream';
+  $('scrChanges').hidden = ui.screen !== 'changes';
+  $('scrMr').hidden = ui.screen !== 'mr';
+  if (state.detail === null || keyOf(state.detail.job) !== ui.job) {
     return;
   }
-  $('job').className = `st-${job.state}`;
-  const backButton = button('btn back', '← Board', { back: '' });
-  backButton.title = 'Back to the board';
-  const t1 = el('div', 't1');
-  const title = el('span', 'title', titleOf(job));
-  title.setAttribute('title', titleOf(job));
-  t1.append(el('span', 'key', job.ticket), title);
-  if (job.state === 'needs_human' && typeof job.error?.code === 'string') {
-    t1.append(el('span', 'tag', job.error.code));
+  if (ui.screen === 'changes') {
+    renderChanges(state.detail);
+    void showIteration();
+  } else if (ui.screen === 'mr') {
+    void showMr();
   }
-  const t2 = el('div', 't2');
-  const line = el('span', 'sentence');
-  line.append(el('span', 'dot'), document.createTextNode(sentence(job)));
-  t2.append(line, el('span', '', `Iteration ${shownIteration(job)}`), el('span', 'mono fs12', job.branch));
-  $('jhead').replaceChildren(backButton, t1, t2);
 }
 
 // Opens a job's page on a screen; focus 'stop' or 'composer' is where its card's action points;
 // confirm ('approve', 'mr-create', 'mr-merge') opens that confirmation once its detail is shown.
+// The Merge request screen waits for the MR text (written at Clean).
 function go(key, screen = 'stream', focus = undefined, confirm = undefined) {
   if (jobByKey(key) === null) {
     return;
   }
+  if (screen === 'mr' && state.detail !== null && keyOf(state.detail.job) === key && state.detail.mr !== true) {
+    toast({ level: 'info', text: 'No MR text yet: written at Clean' });
+    if (ui.job === key && ui.screen !== 'board') {
+      return;
+    }
+    screen = 'stream';
+  }
   if (state.drawer !== null) {
     hideDrawer();
   }
-  const from = ui.screen;
+  const fresh = ui.job !== key;
+  if (fresh) {
+    ui.sel = -1;
+    ui.open.clear();
+  }
   ui.screen = screen;
   ui.job = key;
   ui.ticket = null;
@@ -2611,33 +3050,41 @@ function go(key, screen = 'stream', focus = undefined, confirm = undefined) {
   $('board').hidden = true;
   $('ticket').hidden = true;
   $('job').hidden = false;
-  if (SCREEN_TAB[screen] !== undefined) {
-    selectTab(SCREEN_TAB[screen]);
-  } else if (SCREEN_TAB[from] !== undefined && SCREEN_TAB[state.tab] !== undefined) {
-    // From Changes or Merge request back to the Stream: the Live log is the old page's stream.
-    selectTab('log');
-  }
   state.wantConfirm = confirm === undefined ? null : { action: confirm, key };
   select(key);
-  renderHead();
+  renderJobScreen();
   setHash();
   openWantedConfirm();
   state.wantFocus = focus ?? null;
   applyWantedFocus();
+  if (screen === 'stream' && state.wantFocus === null && state.confirm === null) {
+    $('streamwrap').focus();
+  }
 }
 
-// Where a card's button points once the job's detail is shown: the message box ('composer') or
-// the next action with the stop's findings ('stop').
+// Where a card's button points once the job's detail is shown: the message box, or the primary
+// action when the box takes nothing now ('composer'), or the stop block ('stop').
 function applyWantedFocus() {
   const focus = state.wantFocus;
   if (focus === null || state.detail === null || keyOf(state.detail.job) !== ui.job) {
     return;
   }
   state.wantFocus = null;
-  if (focus === 'composer' && !$('say-input').disabled) {
-    $('say-input').focus();
+  if (focus === 'composer') {
+    const box = $('msg');
+    if (!box.disabled && !box.hidden) {
+      box.focus();
+    } else {
+      $('acts').querySelector('.btn.primary')?.focus();
+    }
   } else {
-    $('next-panel').scrollIntoView({ block: 'center' });
+    // The stop block may come with the Stream, after the detail.
+    const stop = $('stopblock');
+    if (stop !== null) {
+      stop.scrollIntoView({ block: 'center' });
+    } else {
+      state.wantFocus = focus;
+    }
   }
 }
 
@@ -2716,22 +3163,26 @@ function route() {
   }
 }
 
-// The jobs changed (the stream, a read): the board and the open job's header; a job page whose job
-// left the board (its ticket archived or deleted) goes back to the board.
+// The jobs changed (the stream, a read): the board and the open job's header, its composer and its
+// stop; a job page whose job left the board (its ticket archived or deleted) goes back to the board.
 function renderJobs() {
   if (ui.job !== null && jobByKey(ui.job) === null) {
     back();
     return;
   }
   renderBoard();
-  renderHead();
+  if (ui.job !== null) {
+    renderHead();
+    renderComposer();
+    refreshStop();
+  }
 }
 
-// The delegated click listener of the top bar, the board, the cards, the job page's header and
-// the toast (the moved job detail and the drawer keep their own listeners until SF-078 and SF-081).
+// The delegated click listener of the top bar, the board, the cards, the job page (its header, the
+// Stream and the composer) and the toast (the drawer keeps its own listeners until SF-081).
 function onClick(event) {
   const target = typeof event.target?.closest === 'function'
-    ? event.target.closest('[data-qact],[data-run],[data-open],[data-ticket],[data-back],[data-ws],#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived')
+    ? event.target.closest('[data-qact],[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-toggle],[data-act],[data-settle],[data-copy-branch],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived')
     : null;
   // A link (a merge request's) goes where it points; it does not open the card around it.
   if (target === null || target.disabled || (typeof event.target.closest === 'function' && event.target.closest('a') !== null)) {
@@ -2761,19 +3212,63 @@ function onClick(event) {
     openTicket(target.dataset.ticket);
   } else if (target.hasAttribute('data-back')) {
     back();
+  } else if (target.dataset.goto !== undefined) {
+    if (target.dataset.goto === 'changes') {
+      openChanges(null, null);
+    } else {
+      go(ui.job, target.dataset.goto);
+    }
+  } else if (target.dataset.cfile !== undefined) {
+    openChanges(target.dataset.cfile, target.dataset.cit || null);
+  } else if (target.dataset.changes !== undefined) {
+    openChanges(null, target.dataset.changes);
+  } else if (target.dataset.toggle !== undefined) {
+    toggle(target.dataset.toggle);
+  } else if (target.dataset.act !== undefined) {
+    act(target.dataset.act);
+  } else if (target.dataset.settle !== undefined) {
+    const [id, decision] = target.dataset.settle.split(':');
+    settle(id, decision);
+  } else if (target.hasAttribute('data-copy-branch')) {
+    const job = shownJob();
+    if (job !== null) {
+      copyValue(`git checkout ${job.branch}`, $('checkout-text'), (text) => toast({ level: 'info', text: `${text} git checkout ${job.branch}` }));
+    }
+  } else if (target.matches('#stream li.e')) {
+    ui.sel = entries().indexOf(target);
+    markSel(false);
   }
 }
 
-// The delegated keys: j and k move between the board's cards, Enter opens the focused one; Escape
-// on a job or ticket page goes back one level (a screen of the job to its Stream, the Stream to the
-// board) and closes the toast first. Alt+Up and Alt+Down move a queued card with SF-071's queue.
+// What typing in the job page keeps: the draft of the message box (and Send follows it), a note on
+// a ledger entry.
+function onInput(event) {
+  const target = event.target;
+  if (target?.id === 'msg') {
+    if (state.key !== null) {
+      state.drafts.set(state.key, target.value);
+    }
+    renderComposer();
+  } else if (typeof target?.dataset?.note === 'string') {
+    state.notes.set(noteKey(target.dataset.note), target.value);
+  }
+}
+
+// The delegated keys: j and k move between the board's cards, Enter opens the focused one. On a
+// job page: Escape closes an open confirmation, then goes back one level (a screen of the job to
+// its Stream, the Stream to the board); c, m and s switch the screens; on the Stream j and k select
+// an entry, G the last, Enter toggles the selected one; Ctrl+Enter in the message box sends.
+// Escape closes the toast first. Alt+Up and Alt+Down move a queued card with SF-071's queue.
 function onKey(event) {
   if (event.defaultPrevented) {
     return;
   }
   const target = event.target;
   if (typeof target?.closest === 'function' && target.closest('textarea, input, select') !== null) {
-    if (event.key === 'Escape' && ui.screen !== 'board') {
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && target.id === 'msg') {
+      event.preventDefault();
+      act('say');
+    } else if (event.key === 'Escape' && ui.screen !== 'board') {
       target.blur();
     }
     return;
@@ -2805,10 +3300,43 @@ function onKey(event) {
   }
   if (event.key === 'Escape') {
     event.preventDefault();
-    if (ui.screen === 'changes' || ui.screen === 'mr') {
+    if (state.confirm !== null) {
+      closeConfirm();
+    } else if (ui.screen === 'changes' || ui.screen === 'mr') {
       go(ui.job, 'stream');
     } else {
       back();
+    }
+    return;
+  }
+  if (ui.job === null) {
+    return;
+  }
+  if (event.key === 'c' && ui.screen !== 'changes') {
+    event.preventDefault();
+    openChanges(null, null);
+  } else if (event.key === 'm' && ui.screen !== 'mr') {
+    event.preventDefault();
+    go(ui.job, 'mr');
+  } else if (event.key === 's' && ui.screen !== 'stream') {
+    event.preventDefault();
+    go(ui.job, 'stream');
+  } else if (ui.screen === 'stream') {
+    const all = entries();
+    if (event.key === 'j' || event.key === 'k') {
+      event.preventDefault();
+      ui.sel = ui.sel < 0 ? (event.key === 'j' ? 0 : all.length - 1) : Math.min(all.length - 1, Math.max(0, ui.sel + (event.key === 'j' ? 1 : -1)));
+      markSel(true);
+    } else if (event.key === 'G') {
+      event.preventDefault();
+      ui.sel = all.length - 1;
+      markSel(true);
+    } else if (event.key === 'Enter' && ui.sel >= 0 && document.activeElement?.tagName !== 'BUTTON') {
+      const toggleOf = all[ui.sel]?.querySelector('[data-toggle]');
+      if (toggleOf !== null && toggleOf !== undefined) {
+        event.preventDefault();
+        toggle(toggleOf.dataset.toggle);
+      }
     }
   }
 }
@@ -2884,7 +3412,8 @@ function leaveJob() {
   state.key = null;
   state.detail = null;
   state.wantConfirm = null;
-  $('detail').hidden = true;
+  state.wantFocus = null;
+  state.streamLoad = null;
   openStream();
 }
 
@@ -3269,19 +3798,6 @@ async function holdStart(key, reason) {
 
 // ---------- The stream ----------
 
-// One line of the Live log, marked with who it comes from and hidden by the filter.
-function appendEvent(event) {
-  const events = $('events');
-  const source = eventSource(event);
-  const block = el('div', `event t-${event.type} from-${source}`, event.text);
-  block.dataset.source = source;
-  block.hidden = !logShows(source);
-  events.append(block);
-  if ($('follow').checked) {
-    events.scrollTop = events.scrollHeight;
-  }
-}
-
 function closeStream() {
   clearTimeout(state.retry);
   state.retry = null;
@@ -3294,9 +3810,10 @@ function closeStream() {
 function openStream() {
   closeStream();
   const params = new URLSearchParams();
+  // A job's stream resumes at the next line to read: after the pages, after a reconnect.
   if (state.key !== null) {
     params.set('job', state.key);
-    params.set('from', String(state.lastLine + 1));
+    params.set('from', String(state.lastLine));
   }
   const key = state.key;
   const source = new EventSource(`api/stream?${params}`);
@@ -3333,22 +3850,22 @@ function openStream() {
   source.addEventListener('job', (message) => {
     if (key === state.key) {
       renderDetail(JSON.parse(message.data));
-      renderHead();
       // The stream is back: try the read that failed, on its own or after a reconnect.
       if (state.unresolved.get(key)?.failed === true) {
         void settleUnknown(key);
       }
     }
   });
-  source.addEventListener('event', (message) => {
-    const event = JSON.parse(message.data);
-    if (key === state.key && event.line > state.lastLine) {
-      state.lastLine = event.line;
-      appendEvent(event);
+  // The Stream's entries of one line (SF-082), as a page gives them.
+  source.addEventListener('entries', (message) => {
+    const data = JSON.parse(message.data);
+    if (key === state.key && Number.isInteger(data.line)) {
+      state.lastLine = Math.max(state.lastLine, data.line + 1);
+      showEntries(data.entries);
     }
   });
   source.addEventListener('error', () => {
-    // Reconnect ourselves after 3 s, resuming after the last line seen.
+    // Reconnect ourselves after 3 s, resuming at the next line to read.
     source.close();
     if (state.source === source) {
       state.source = null;
@@ -3358,9 +3875,9 @@ function openStream() {
   });
 }
 
-// Follows one job: its detail, its events and its controls, in the drawer.
+// Follows one job: its detail, its Stream (read page by page, then live) and its controls.
 function select(key) {
-  if (key === state.key && state.source !== null) {
+  if (key === state.key) {
     return;
   }
   state.key = key;
@@ -3369,59 +3886,30 @@ function select(key) {
   state.cache = new Map();
   state.drawn = null;
   state.target = null;
-  state.jobTask = null;
+  state.taskView = null;
   state.mrText = null;
-  state.lastLine = -1;
-  $('events').replaceChildren();
+  state.lastLine = 0;
+  state.entries = [];
+  state.seen = new Set();
+  state.stopSig = null;
+  renderStream();
   $('iteration-report').replaceChildren();
   $('patch-body').replaceChildren();
-  $('job-task').replaceChildren();
   $('mr-panel').hidden = true;
   $('mr-unapplied').hidden = true;
-  $('follow').checked = true;
-  for (const [box, status] of [['checkout-text', 'checkout-copy-status'], ['mr-copy-text', 'mr-copy-status']]) {
-    $(box).hidden = true;
-    $(status).textContent = '';
-  }
+  $('checkout-text').hidden = true;
+  $('mr-copy-text').hidden = true;
+  $('mr-copy-status').textContent = '';
   // The controls go off until this job's detail arrives; its draft and last outcome come back.
   closeConfirm();
-  $('say-input').value = state.drafts.get(key) ?? '';
+  $('msg').value = state.drafts.get(key) ?? '';
   renderOutcome(state.outcomes.get(key) ?? null);
   $('action-doubt').textContent = state.doubts.get(key) ?? '';
-  renderActions();
-  openStream();
+  renderComposer();
+  void loadStream(key);
 }
 
 function init() {
-  $('job-tabs').replaceChildren(...JOB_TABS.map(([name, label]) => {
-    const button = el('button', '', label);
-    button.type = 'button';
-    button.setAttribute('role', 'tab');
-    button.dataset.tab = name;
-    button.addEventListener('click', () => selectTab(name));
-    return button;
-  }));
-  renderJobTabs();
-  $('log-filters').replaceChildren(...LOG_FILTERS.map(([filter, label]) => {
-    const button = el('button', '', label);
-    button.type = 'button';
-    button.dataset.filter = filter;
-    button.addEventListener('click', () => setLogFilter(filter));
-    return button;
-  }));
-  renderLogFilters();
-  const events = $('events');
-  events.addEventListener('scroll', () => {
-    // Scrolling up switches follow off; the checkbox turns it on again.
-    if (events.scrollTop + events.clientHeight < events.scrollHeight - 8) {
-      $('follow').checked = false;
-    }
-  });
-  $('follow').addEventListener('change', () => {
-    if ($('follow').checked) {
-      events.scrollTop = events.scrollHeight;
-    }
-  });
   // Back and Forward of the browser, and a link to a job or ticket.
   window.addEventListener('hashchange', route);
 
@@ -3429,6 +3917,7 @@ function init() {
   // delegated listener each.
   document.addEventListener('click', onClick);
   document.addEventListener('keydown', onKey);
+  document.addEventListener('input', onInput);
   document.addEventListener('visibilitychange', scheduleRefresh);
   $('toast').addEventListener('mouseenter', () => {
     state.toastHover = true;
@@ -3451,66 +3940,12 @@ function init() {
   });
   $('task-conversation-copy').addEventListener('click', () => copyText($('task-conversation-text'), 'conversation-copy-status'));
 
-  // The job detail, moved into the job page until SF-078.
-  $('approve-button').addEventListener('click', () => openConfirm('approve'));
-  $('mr-create-button').addEventListener('click', () => openConfirm('mr-create'));
-  $('mr-merge-button').addEventListener('click', () => openConfirm('mr-merge'));
-  $('mr-status-button').addEventListener('click', () => {
-    const job = state.detail?.job ?? null;
-    if (job !== null && availability('mr-status', job) === '') {
-      void run('mr-status', keyOf(job), {});
-    }
-  });
-  $('archive-job-button').addEventListener('click', () => {
-    if (state.key !== null) {
-      void run('archive', state.key, {});
-    }
-  });
-  $('abort-button').addEventListener('click', () => openConfirm('abort'));
-  // Pause and Resume go at once (SF-067); Restart is confirmed. Resume of a job paused during a
-  // turn takes the message written below, if any.
-  $('pause-button').addEventListener('click', () => {
-    const job = state.detail?.job ?? null;
-    if (job !== null && availability('pause', job) === '') {
-      void run('pause', keyOf(job), {});
-    }
-  });
-  $('resume-button').addEventListener('click', () => {
-    const job = state.detail?.job ?? null;
-    if (job !== null && availability('resume', job) === '') {
-      const message = $('say-input').value;
-      void run('resume', keyOf(job), pausedTurn(job) && message.trim() !== '' ? { message } : {});
-    }
-  });
-  $('restart-button').addEventListener('click', () => openConfirm('restart'));
-  // The hand-over buttons (SF-073), after the job's other actions; each goes at once.
-  const handoverRow = el('div', 'row next-actions');
-  handoverRow.id = 'handover-actions';
-  for (const [action] of HANDOVER_ACTIONS) {
-    const button = el('button', action === 'handover' ? 'btn btn-primary' : 'btn', ACTION_LABELS[action]);
-    button.type = 'button';
-    button.id = `${action}-button`;
-    button.hidden = true;
-    button.dataset.action = action;
-    button.addEventListener('click', () => {
-      const job = state.detail?.job ?? null;
-      if (job !== null && availability(action, job) === '') {
-        void run(action, keyOf(job), {});
-      }
-    });
-    handoverButtons[action] = button;
-    handoverRow.append(button);
-  }
-  $('next-panel').append(handoverRow);
-  $('retry-review-button').addEventListener('click', () => {
-    if (state.key !== null) {
-      void run('review', state.key, {});
-    }
-  });
+  // The job page: the composer's confirmation (its buttons go through the delegated listener),
+  // the Merge request screen's Copy MR text and Refresh state of an unknown outcome.
   $('confirm-ok').addEventListener('click', submitConfirm);
   $('confirm-cancel').addEventListener('click', closeConfirm);
   $('confirm').addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
+    if (event.key === 'Escape' && state.confirm !== null) {
       event.preventDefault();
       closeConfirm();
     }
@@ -3518,31 +3953,14 @@ function init() {
   $('discard').addEventListener('change', renderConfirmButton);
   $('as-is').addEventListener('change', renderConfirmButton);
   $('keep-files').addEventListener('change', renderConfirmButton);
-  $('accept-gate-button').addEventListener('click', () => openConfirm('accept'));
-  $('simplify-button').addEventListener('click', () => openConfirm('simplify'));
-  $('copy-checkout').addEventListener('click', () => {
-    const job = state.detail?.job;
-    if (job) {
-      copyValue(`git checkout ${job.branch}`, $('checkout-text'), 'checkout-copy-status');
-    }
-  });
   $('mr-copy').addEventListener('click', () => {
     if (typeof state.mrText === 'string') {
-      copyValue(mrCopyText(state.mrText), $('mr-copy-text'), 'mr-copy-status');
+      copyValue(mrCopyText(state.mrText), $('mr-copy-text'), (text) => {
+        $('mr-copy-status').textContent = text;
+      });
     }
   });
   $('refresh-button').addEventListener('click', () => void settleUnknown(state.key));
-  $('say-input').addEventListener('input', () => {
-    if (state.key !== null) {
-      state.drafts.set(state.key, $('say-input').value);
-    }
-    renderActions();
-  });
-  // Enter in the textarea adds a line; only the Send button submits the form.
-  $('say-form').addEventListener('submit', (event) => {
-    event.preventDefault();
-    sendSay();
-  });
 
   // Setup and the ticket actions.
   $('workspace-form').addEventListener('submit', (event) => {

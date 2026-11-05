@@ -70,7 +70,7 @@ test('setup client: Workspaces and New ticket open in the drawer from the header
   // Workspaces: the drawer shows its panel only.
   empty.$('open-workspaces').click();
   assert.deepEqual([empty.$('drawer').hidden, empty.$('scrim').hidden, empty.$('drawer-title').textContent], [false, false, 'Workspaces']);
-  assert.deepEqual(['workspaces-panel', 'ticket-panel', 'archived-panel', 'task-panel', 'detail'].map((id) => empty.$(id).hidden), [false, true, true, true, true]);
+  assert.deepEqual(['workspaces-panel', 'ticket-panel', 'archived-panel', 'task-panel'].map((id) => empty.$(id).hidden), [false, true, true, true]);
   assert.equal(empty.$('no-workspaces').hidden, false);
   assert.equal(empty.document.activeElement, empty.$('drawer-close'));
 

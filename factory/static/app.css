@@ -2,7 +2,8 @@
    docs/design/dashboard-v3/prototype.html, verbatim, without its prototype-only rules (the
    PROTOTYPE badge, the floating bar, the State panel, the simulated tags and blocks, --proto-bg).
    After it: the prototype's inline styles as rules (CSP), the live page's own pieces in its style,
-   and the old page's rules the drawer and the moved job detail use until SF-078 and SF-081. */
+   and the old page's rules the drawer, the old Changes and MR views (until SF-079 and SF-080) and
+   the Task check use. */
 /* Layout: the board keeps its five columns; a job opens as a full page: sticky head, one stream, composer pinned at the bottom.
    Tokens follow the live dashboard's app.css so the prototype reads as the same tool. */
 :root {
@@ -391,7 +392,10 @@ textarea.mdedit.fld { font: 12.5px/1.5 var(--mono); padding: 8px; border: 1px so
    attribute (the prototype page's first style element), the connection, the workspace filter and
    the setup buttons in the top bar, the board's hint, the toast's close button and its error, an
    error reason, the "last job" mark, a card's last outcome, the new ticket's highlight, a Queue
-   card's wrapping actions, and the job detail inside the job page. */
+   card's wrapping actions; on the job page (SF-078) the header's branch button and the checkout
+   command's copy box, the old Changes and MR views inside their screens, the composer's inline
+   confirmation with today's content (its list and its choices), its outcome and unknown-outcome
+   lines, a ledger entry's note field in the stop block, and the Task and Report of an entry. */
 [hidden]:not([hidden=until-found i]) { display: none !important; }
 #connection.down { color: var(--warn); border-color: var(--warn); }
 .topbar nav.ws { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -412,93 +416,56 @@ button.tag:hover { border-color: var(--accent); }
 .card.hl { border-color: var(--accent); box-shadow: 0 0 0 3px var(--selected); }
 .card .act { flex-wrap: wrap; align-items: center; }
 .jhead .t1 .tag { font-weight: 400; }
-#job > #detail { flex: 1; min-height: 0; overflow-y: auto; padding-block: 16px 24px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.jhead .t2 .branch { all: unset; cursor: pointer; font: 12px var(--mono); }
+.jhead .t2 .branch:hover { color: var(--accent); text-decoration: underline; }
+.jhead .t2 .branch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#scrChanges:not([hidden]), #scrMr:not([hidden]) { display: block; overflow-y: auto; }
+.olddetail { display: flex; flex-direction: column; gap: 12px; min-width: 0; padding-block: 16px 24px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.composer .confirm .confirm-items, .composer .confirm .choice { flex-basis: 100%; color: var(--fg); }
+.composer .confirm ol { margin: 4px 0 0; padding-left: 22px; font-size: 12px; overflow-wrap: anywhere; }
+.composer .confirm #confirm-text { color: var(--fg); }
+.composer .status { padding: 4px 10px; }
+.composer .doubt { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.composer .doubt:has(#action-doubt:empty):has(#refresh-button[hidden]) { display: none; }
+.finding .decide input.note { flex: 1 1 180px; min-width: 0; height: 26px; padding: 0 8px; font: 12px var(--sans); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); }
+pre.raw.doc .heading { font-weight: 700; }
+#stream .task-check { margin: 6px 0; font-size: 13px; }
 
-/* Kept from the old page until SF-078 and SF-081 */
-/* The drawer (Workspaces, New ticket, Archived and a planned ticket's Task), the job detail moved
-   into the job page (#detail), the ticket confirmation (#ticket-confirm) and the drawer's scrim:
-   the old rules, each scoped under its element so it cannot change the board or the prototype's
-   rules. Where a prototype rule of the same name reaches in (.btn, .confirm, .files), the kept rule
-   sets what the old page had. */
-#detail { --s-pushed: #276749; }
-:is(#drawer, #detail, #ticket-confirm) :is(h2, h3, h4) { margin: 0; font-weight: 600; line-height: 1.3; }
-:is(#drawer, #detail, #ticket-confirm) h2 { font-size: 20px; }
-:is(#drawer, #detail, #ticket-confirm) :is(h3, h4) { font-size: 14px; }
-:is(#drawer, #detail, #ticket-confirm) p { margin: 0; }
-:is(#drawer, #detail) .hint { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
-:is(#drawer, #detail) .hint:empty { display: none; }
-:is(#drawer, #detail) .mono { font-family: var(--mono); }
-#detail .error { padding: 8px 12px; border-radius: var(--radius-sm); background: var(--del-bg); color: var(--del); overflow-wrap: anywhere; }
-#detail .danger-text { color: var(--del); }
+/* Kept from the old page until SF-079, SF-080 and SF-081 */
+/* The drawer (Workspaces, New ticket, Archived and a planned ticket's Task), the old Changes and MR
+   views inside the job page's screens (.olddetail), the ticket confirmation (#ticket-confirm), the
+   drawer's scrim, the composer's status lines and choices, and the Task check: the old rules, each
+   scoped under its element so it cannot change the board or the prototype's rules. Where a
+   prototype rule of the same name reaches in (.btn, .confirm, .files), the kept rule sets what the
+   old page had. */
+:is(#drawer, .olddetail, #ticket-confirm) :is(h2, h3, h4) { margin: 0; font-weight: 600; line-height: 1.3; }
+:is(#drawer, .olddetail, #ticket-confirm) h2 { font-size: 20px; }
+:is(#drawer, .olddetail, #ticket-confirm) :is(h3, h4) { font-size: 14px; }
+:is(#drawer, .olddetail, #ticket-confirm) p { margin: 0; }
+:is(#drawer, .olddetail) .hint { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+:is(#drawer, .olddetail) .hint:empty { display: none; }
+:is(#drawer, .olddetail) .mono { font-family: var(--mono); }
 
-/* The job detail (SF-047): the header across, the next action in a right rail beside the flat tabs
-   on a wide screen, above them on a narrow one. */
-#detail { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px 20px; align-items: start; }
-#detail .jd-head { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 12px; padding-bottom: 16px; border-bottom: 1px solid var(--border); min-width: 0; }
-#detail .jd-rail { grid-column: 2; grid-row: 2; display: flex; flex-direction: column; gap: 16px; min-width: 0; position: sticky; top: 0; }
-#detail .jd-main { grid-column: 1; grid-row: 2; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-@media (max-width: 1100px) {
-  #detail { grid-template-columns: minmax(0, 1fr); }
-  #detail .jd-rail { grid-column: 1; grid-row: 2; position: static; }
-  #detail .jd-main { grid-row: 3; }
-}
-#detail .jd-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; min-width: 0; }
-#detail .jd-branch code { font-size: 13px; overflow-wrap: anywhere; }
-#detail .copy-fallback { width: 100%; font: 12.5px/1.45 var(--mono); }
-#detail .halt { padding: 8px 12px; border-radius: var(--radius-sm); background: var(--del-bg); color: var(--del); overflow-wrap: anywhere; }
-
-/* The pipeline (the old .stepper): five steps, done ticked, current ringed, halted red, the gate dashed when off. */
-#detail .pipeline { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
-#detail .step { position: relative; display: grid; gap: 2px; justify-items: start; padding-right: 8px; min-width: 0; }
-#detail .step::before { content: ""; position: absolute; top: 10px; left: 26px; right: 4px; height: 2px; background: var(--border); }
-#detail .step:last-child::before { display: none; }
-#detail .step.done::before { background: var(--s-ready); }
-#detail .step .knob { position: relative; width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--border-strong); background: var(--panel); display: grid; place-items: center; font: 600 11px/1 var(--mono); color: var(--muted); }
-#detail .step.done .knob { background: var(--s-ready); border-color: var(--s-ready); color: #fff; }
-#detail .step.current .knob { border-color: var(--accent); background: var(--accent); color: var(--accent-fg); box-shadow: 0 0 0 4px var(--selected); }
-#detail .step.current:last-child .knob { border-color: var(--s-human); background: var(--s-human); }
-#detail .step.halted .knob { background: var(--s-failed); border-color: var(--s-failed); color: #fff; }
-#detail .step.off .knob { border-style: dashed; }
-#detail .step-name { font-size: 13px; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
-#detail .step.todo .step-name, #detail .step.off .step-name { color: var(--muted); }
-#detail .step-caption { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
-#detail .step.halted .step-caption { color: var(--del); font-family: var(--mono); }
-@media (max-width: 560px) {
-  #detail .pipeline { grid-template-columns: minmax(0, 1fr); gap: 6px; }
-  #detail .step { grid-template-columns: 22px minmax(0, 1fr); column-gap: 8px; align-items: center; }
-  #detail .step::before { display: none; }
-  #detail .step .knob { grid-row: span 2; }
-}
-
-/* The next action: who acts now, what moves the job on. */
-#detail .next { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px solid var(--border); border-left-width: 4px; border-radius: var(--radius); background: var(--panel); min-width: 0; }
-#detail .next.you { border-left-color: var(--s-human); }
-#detail .next.running { border-left-color: var(--accent); }
-#detail .next.finished { border-left-color: var(--s-ended); }
-#detail .next-who { font-size: 12px; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; color: var(--muted); }
-#detail .next-headline { font-weight: 600; overflow-wrap: anywhere; }
-#detail .mr-line { overflow-wrap: anywhere; }
-#detail .rail-section { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-#detail .confirm-items { display: flex; flex-direction: column; gap: 4px; }
-:is(#drawer, #detail) .section-title { display: block; margin: 0 0 8px; font-size: 13px; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; color: var(--muted); }
+#job > .copy-fallback { width: 100%; font: 12.5px/1.45 var(--mono); }
+:is(#drawer, .olddetail) .section-title { display: block; margin: 0 0 8px; font-size: 13px; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; color: var(--muted); }
 
 /* Controls: one height, one shape. */
-:is(#drawer, #detail, #ticket-confirm) .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: var(--control); padding: 0 14px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--panel); color: inherit; font: inherit; font-weight: 500; line-height: 1; cursor: pointer; text-decoration: none; white-space: nowrap; }
-:is(#drawer, #detail, #ticket-confirm) .btn:hover { background: var(--panel-2); }
-:is(#drawer, #detail, #ticket-confirm) .btn:disabled { opacity: 0.45; cursor: default; }
-:is(#drawer, #detail, #ticket-confirm) .btn:disabled:hover { background: var(--panel); }
-:is(#drawer, #detail, #ticket-confirm) .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
-:is(#drawer, #detail, #ticket-confirm) .btn-primary:hover { filter: brightness(1.08); background: var(--accent); }
-:is(#drawer, #detail, #ticket-confirm) .btn-primary:disabled:hover { background: var(--accent); filter: none; }
-:is(#drawer, #detail, #ticket-confirm) .btn-danger { background: var(--del); border-color: var(--del); color: #fff; }
-:is(#drawer, #detail, #ticket-confirm) .btn-danger:hover { filter: brightness(1.08); background: var(--del); }
-:is(#drawer, #detail) .btn-sm { height: 28px; padding: 0 10px; font-size: 13px; }
+:is(#drawer, .olddetail, #ticket-confirm) .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: var(--control); padding: 0 14px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--panel); color: inherit; font: inherit; font-weight: 500; line-height: 1; cursor: pointer; text-decoration: none; white-space: nowrap; }
+:is(#drawer, .olddetail, #ticket-confirm) .btn:hover { background: var(--panel-2); }
+:is(#drawer, .olddetail, #ticket-confirm) .btn:disabled { opacity: 0.45; cursor: default; }
+:is(#drawer, .olddetail, #ticket-confirm) .btn:disabled:hover { background: var(--panel); }
+:is(#drawer, .olddetail, #ticket-confirm) .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+:is(#drawer, .olddetail, #ticket-confirm) .btn-primary:hover { filter: brightness(1.08); background: var(--accent); }
+:is(#drawer, .olddetail, #ticket-confirm) .btn-primary:disabled:hover { background: var(--accent); filter: none; }
+:is(#drawer, .olddetail, #ticket-confirm) .btn-danger { background: var(--del); border-color: var(--del); color: #fff; }
+:is(#drawer, .olddetail, #ticket-confirm) .btn-danger:hover { filter: brightness(1.08); background: var(--del); }
+:is(#drawer, .olddetail) .btn-sm { height: 28px; padding: 0 10px; font-size: 13px; }
 #drawer .btn-ghost-danger { color: var(--del); }
-:is(#drawer, #detail, #ticket-confirm) .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-:is(#drawer, #detail) :is(input[type="text"], select, textarea) { width: 100%; min-height: var(--control); padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--panel); color: inherit; font: inherit; }
-:is(#drawer, #detail) textarea { resize: vertical; line-height: 1.45; }
-:is(#drawer, #detail, #ticket-confirm) :is(input, select, textarea, .btn, .tabs button):focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-:is(#drawer, #detail) :is(input, textarea)::placeholder { color: var(--muted); opacity: 0.8; }
+:is(#drawer, .olddetail, #ticket-confirm) .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+:is(#drawer, .olddetail) :is(input[type="text"], select, textarea) { width: 100%; min-height: var(--control); padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--panel); color: inherit; font: inherit; }
+:is(#drawer, .olddetail) textarea { resize: vertical; line-height: 1.45; }
+:is(#drawer, .olddetail, #ticket-confirm) :is(input, select, textarea, .btn):focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+:is(#drawer, .olddetail) :is(input, textarea)::placeholder { color: var(--muted); opacity: 0.8; }
 
 /* Forms. */
 #drawer .form { display: flex; flex-direction: column; gap: 12px; }
@@ -508,33 +475,24 @@ button.tag:hover { border-color: var(--accent); }
 @media (max-width: 560px) {
   #drawer .field-row { grid-template-columns: minmax(0, 1fr); }
 }
-:is(#drawer, #detail) .choice { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+:is(#drawer, #composer) .choice { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
 #drawer .choice.is-off { color: var(--muted); cursor: default; }
 #drawer .owner { margin: 0; padding: 8px 12px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); display: flex; flex-direction: column; gap: 4px; }
 #drawer .owner legend { font-size: 13px; font-weight: 500; padding: 0 4px; }
 
 /* Status lines under a form or an action. */
-:is(#drawer, #detail) .status { padding: 8px 12px; border-radius: var(--radius-sm); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
-:is(#drawer, #detail) .status:empty { display: none; }
-:is(#drawer, #detail) .status.pending { background: var(--selected); }
-:is(#drawer, #detail) .status.ok { background: var(--add-bg); color: var(--add); }
-:is(#drawer, #detail) .status.warn { background: var(--warn-bg); color: var(--warn); }
-:is(#drawer, #detail) .status.error { background: var(--del-bg); color: var(--del); }
+:is(#drawer, #composer) .status { padding: 8px 12px; border-radius: var(--radius-sm); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+:is(#drawer, #composer) .status:empty { display: none; }
+:is(#drawer, #composer) .status.pending { background: var(--selected); }
+:is(#drawer, #composer) .status.ok { background: var(--add-bg); color: var(--add); }
+:is(#drawer, #composer) .status.warn { background: var(--warn-bg); color: var(--warn); }
+:is(#drawer, #composer) .status.error { background: var(--del-bg); color: var(--del); }
 
 /* Confirmations: a boxed dialog in place; the Start or Delete one of a Queue card above the page.
    align-items, flex-wrap, font-size and color undo the prototype's .confirm (the composer's line). */
-#detail .confirm, #ticket-confirm { padding: 12px 14px; border: 1px solid var(--accent); border-radius: var(--radius-sm); background: var(--selected); display: flex; flex-direction: column; gap: 8px; align-items: stretch; flex-wrap: nowrap; font-size: inherit; color: var(--fg); }
-#detail .confirm p, #ticket-confirm p { overflow-wrap: anywhere; }
+#ticket-confirm { padding: 12px 14px; border: 1px solid var(--accent); border-radius: var(--radius-sm); background: var(--selected); display: flex; flex-direction: column; gap: 8px; align-items: stretch; flex-wrap: nowrap; font-size: inherit; color: var(--fg); }
+#ticket-confirm p { overflow-wrap: anywhere; }
 #ticket-confirm { position: fixed; top: 20vh; left: 50%; transform: translateX(-50%); width: min(520px, calc(100vw - 32px)); z-index: 80; box-shadow: 0 8px 32px rgba(16, 24, 40, 0.25); background: var(--panel); }
-
-/* Badges. */
-#detail .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; line-height: 1.4; color: #fff; background: var(--s-ended); white-space: nowrap; vertical-align: middle; }
-#detail .badge.s-starting, #detail .badge.s-working, #detail .badge.s-preparing_mr { background: var(--s-working); }
-#detail .badge.s-awaiting_review { background: var(--s-review); }
-#detail .badge.s-needs_human, #detail .badge.s-paused { background: var(--s-human); }
-#detail .badge.s-ready_for_human_review { background: var(--s-ready); }
-#detail .badge.s-pushed { background: var(--s-pushed); }
-#detail .badge.s-failed { background: var(--s-failed); }
 
 /* The setup panels of the drawer. */
 #drawer .cards { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
@@ -547,87 +505,39 @@ button.tag:hover { border-color: var(--accent); }
 #drawer .copy-box :is(input, textarea) { flex: 1; min-width: 0; min-height: 28px; padding: 4px 8px; background: var(--panel); font: 12.5px/1.4 var(--mono); }
 #drawer .copy-box textarea { resize: vertical; }
 
-/* The facts and the message to the Implementer. */
-#detail .facts { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px 16px; margin: 0; padding: 12px 14px; border-radius: var(--radius-sm); background: var(--panel-2); }
-#detail .facts dt { font-size: 12px; color: var(--muted); }
-#detail .facts > div { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 8px; align-items: baseline; }
-#detail .facts dd { margin: 0; font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; word-break: break-word; min-width: 0; }
-#detail .say { padding-top: 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
-#detail .say textarea { font: 13px/1.45 var(--mono); }
-
-/* Tabs: the base look; the job's flat tabs refine it below. */
-#detail .tabs { display: flex; flex-wrap: wrap; gap: 4px; }
-#detail .tabs button { height: 30px; padding: 0 12px; border: 1px solid transparent; border-radius: var(--radius-sm); background: transparent; color: var(--muted); font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; }
-#detail .tabs button:hover { background: var(--panel-2); color: var(--fg); }
-#detail .tabs button[aria-selected="true"] { background: var(--selected); border-color: var(--accent); color: var(--fg); }
-#detail .tab-panel { display: flex; flex-direction: column; gap: 8px; }
-
 /* Documents: the Task text, the Report, the Patch and the MR text. */
-:is(#drawer, #detail) .document { margin: 0; max-height: 70vh; overflow: auto; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel-2); font: 13px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
-:is(#drawer, #detail) .document:empty { display: none; }
-:is(#drawer, #detail) .document .heading { font-weight: 700; }
-#detail .document .add { color: var(--add); background: var(--add-bg); }
-#detail .document .del { color: var(--del); background: var(--del-bg); }
-#detail .document .file { font-weight: 700; }
-#detail .document .hunk { color: var(--hunk); }
-
-/* The reviews of an iteration: Claude's (SF-038) and the gate's (SF-039). */
-#detail .review { padding: 8px 12px; border: 1px solid var(--border); border-left-width: 4px; border-radius: var(--radius-sm); }
-#detail .review.v-clean { border-left-color: var(--add); }
-#detail .review.v-fix { border-left-color: var(--warn); }
-#detail .review.v-failed { border-left-color: var(--del); }
-#detail .review p { margin: 0 0 4px; overflow-wrap: anywhere; }
-#detail .review .review-verdict { font-weight: 600; }
-#detail .review .review-items { margin: 4px 0 0; padding-left: 24px; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
-#detail .review .review-accepted { color: var(--muted); font-size: 13px; }
+:is(#drawer, .olddetail) .document { margin: 0; max-height: 70vh; overflow: auto; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel-2); font: 13px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+:is(#drawer, .olddetail) .document:empty { display: none; }
+:is(#drawer, .olddetail) .document .heading { font-weight: 700; }
+.olddetail .document .add { color: var(--add); background: var(--add-bg); }
+.olddetail .document .del { color: var(--del); background: var(--del-bg); }
+.olddetail .document .file { font-weight: 700; }
+.olddetail .document .hunk { color: var(--hunk); }
 
 /* The Files view (SF-024): a row per file, the diff beside it. */
-#detail .job-badges { display: inline-flex; flex-wrap: wrap; gap: 6px; }
-#detail .badge.f-count { background: var(--s-ended); }
-#detail .badge.f-undeclared { background: var(--s-failed); }
-#detail .badge.f-deleted { background: var(--s-human); }
-#detail .files { display: flex; flex-direction: column; gap: 8px; }
-#detail .files-summary { font-weight: 600; }
-#detail .files-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
-#detail .files-list li { border-bottom: 1px solid var(--border); }
-#detail .files-list li:last-child { border-bottom: none; }
-#detail .files-list .file-group { padding: 4px 10px; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; color: var(--muted); background: var(--panel-2); }
-#detail .file-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 10px; border: none; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-#detail .file-row:hover { background: var(--panel-2); }
-#detail .file-row .file-name { font-weight: 500; }
-#detail .file-row .file-dir { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
-#detail .file-row .file-labels { margin-left: auto; display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
-#detail .file-row .file-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; padding: 1px 6px; border-radius: 4px; background: var(--panel-2); color: var(--muted); }
-#detail .file-row .file-label.undeclared { background: var(--del-bg); color: var(--del); }
-#detail .file-row .file-label.declared { background: var(--warn-bg); color: var(--warn); }
-#detail .file-row .file-label.out-of-scope { background: var(--warn-bg); color: var(--warn); }
-#detail .file-row .file-label.deleted { background: var(--panel-2); color: var(--muted); }
-#detail .file-row .file-counts { font-family: var(--mono); font-size: 12px; }
-#detail .file-row .file-counts .add { color: var(--add); }
-#detail .file-row .file-counts .del { color: var(--del); }
-#detail .file-row.s-added .file-name { color: var(--add); }
-#detail .file-row.s-modified .file-name { color: var(--accent); }
-#detail .file-row.s-deleted .file-name { color: var(--muted); text-decoration: line-through; }
-#detail .file-row.s-renamed .file-name { color: var(--hunk); }
-
-/* The state history and the Live log. */
-#detail .history { margin: 0; padding-left: 0; list-style: none; font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
-#detail .history li { overflow-wrap: anywhere; }
-#detail .history time { font-family: var(--mono); font-size: 12.5px; color: var(--muted); margin-right: 8px; }
-#detail .history .history-error { color: var(--del); }
-#detail .history .history-override { color: var(--warn); }
-#detail .events-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-#detail .events { height: 60vh; min-height: 240px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel-2); padding: 6px 10px; font: 12.5px/1.45 var(--mono); }
-#detail .event { padding: 4px 0; border-bottom: 1px solid var(--border); white-space: pre-wrap; overflow-wrap: anywhere; }
-#detail .event:last-child { border-bottom: none; }
-#detail .event.t-state { color: var(--accent); font-weight: 600; }
-#detail .event.t-prompt { color: var(--hunk); }
-#detail .event.t-result { color: var(--s-ready); }
-#detail .event.t-user { color: var(--muted); }
-#detail .event.t-notify_failed, #detail .event.t-event_failed { color: var(--del); }
-#detail .event.t-event_delivered { color: var(--muted); }
-#detail .event.from-claude { color: var(--hunk); }
-#detail .event.from-codex { color: var(--warn); }
+.olddetail .files { display: flex; flex-direction: column; gap: 8px; }
+.olddetail .files-summary { font-weight: 600; }
+.olddetail .files-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+.olddetail .files-list li { border-bottom: 1px solid var(--border); }
+.olddetail .files-list li:last-child { border-bottom: none; }
+.olddetail .files-list .file-group { padding: 4px 10px; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; color: var(--muted); background: var(--panel-2); }
+.olddetail .file-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 10px; border: none; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.olddetail .file-row:hover { background: var(--panel-2); }
+.olddetail .file-row .file-name { font-weight: 500; }
+.olddetail .file-row .file-dir { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+.olddetail .file-row .file-labels { margin-left: auto; display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+.olddetail .file-row .file-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; padding: 1px 6px; border-radius: 4px; background: var(--panel-2); color: var(--muted); }
+.olddetail .file-row .file-label.undeclared { background: var(--del-bg); color: var(--del); }
+.olddetail .file-row .file-label.declared { background: var(--warn-bg); color: var(--warn); }
+.olddetail .file-row .file-label.out-of-scope { background: var(--warn-bg); color: var(--warn); }
+.olddetail .file-row .file-label.deleted { background: var(--panel-2); color: var(--muted); }
+.olddetail .file-row .file-counts { font-family: var(--mono); font-size: 12px; }
+.olddetail .file-row .file-counts .add { color: var(--add); }
+.olddetail .file-row .file-counts .del { color: var(--del); }
+.olddetail .file-row.s-added .file-name { color: var(--add); }
+.olddetail .file-row.s-modified .file-name { color: var(--accent); }
+.olddetail .file-row.s-deleted .file-name { color: var(--muted); text-decoration: line-through; }
+.olddetail .file-row.s-renamed .file-name { color: var(--hunk); }
 
 /* The drawer on the right, over the board, and its scrim. */
 #scrim { position: fixed; inset: 0; background: rgba(10, 15, 20, 0.35); z-index: 40; }
@@ -643,51 +553,38 @@ button.tag:hover { border-color: var(--accent); }
   #drawer { padding: 12px 12px 48px; }
 }
 
-/* The flat tabs of the job and their panels. */
-#detail .tabs.flat { gap: 0; border-bottom: 1px solid var(--border); flex-wrap: nowrap; overflow-x: auto; }
-#detail .tabs.flat button { height: 36px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; margin-bottom: -1px; background: none; white-space: nowrap; display: inline-flex; gap: 6px; align-items: center; }
-#detail .tabs.flat button[aria-selected="true"] { border-bottom-color: var(--accent); background: none; color: var(--fg); }
-#detail .tab-count { font: 500 11px/1 var(--mono); background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px; padding: 2px 6px; color: var(--muted); }
-#detail .seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; align-self: flex-start; }
-#detail .seg button { border: 0; border-right: 1px solid var(--border); background: var(--panel); color: var(--fg); padding: 4px 10px; font-size: 13px; cursor: pointer; }
-#detail .seg button:last-child { border-right: 0; }
-#detail .seg button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
-#detail .seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-#detail .box { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; background: var(--panel); }
-#detail .box > summary { cursor: pointer; }
-#detail .box[open] > summary { margin-bottom: 8px; }
-#detail .changes-body { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-#detail .changes { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 12px; align-items: start; }
-#detail .changes .files { position: sticky; top: 0; max-height: 80vh; overflow: auto; }
-#detail .changes .patch { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-#detail .file-row[aria-current="true"] { background: var(--selected); }
-#detail .patch-file { display: block; }
-#detail .patch-file[aria-current="true"] { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+.olddetail .seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; align-self: flex-start; }
+.olddetail .seg button { border: 0; border-right: 1px solid var(--border); background: var(--panel); color: var(--fg); padding: 4px 10px; font-size: 13px; cursor: pointer; }
+.olddetail .seg button:last-child { border-right: 0; }
+.olddetail .seg button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+.olddetail .seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.olddetail .box { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; background: var(--panel); }
+.olddetail .box > summary { cursor: pointer; }
+.olddetail .box[open] > summary { margin-bottom: 8px; }
+.olddetail .changes-body { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.olddetail .changes { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 12px; align-items: start; }
+.olddetail .changes .files { position: sticky; top: 0; max-height: 80vh; overflow: auto; }
+.olddetail .changes .patch { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.olddetail .file-row[aria-current="true"] { background: var(--selected); }
+.olddetail .patch-file { display: block; }
+.olddetail .patch-file[aria-current="true"] { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
 @media (max-width: 760px) {
-  #detail .changes { grid-template-columns: minmax(0, 1fr); }
-  #detail .changes .files { position: static; max-height: 240px; }
+  .olddetail .changes { grid-template-columns: minmax(0, 1fr); }
+  .olddetail .changes .files { position: static; max-height: 240px; }
 }
-#detail .reviews { display: flex; flex-direction: column; gap: 16px; }
-#detail .review-row { display: flex; flex-direction: column; gap: 8px; }
-#detail .review-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; }
-@media (max-width: 760px) {
-  #detail .review-pair { grid-template-columns: minmax(0, 1fr); }
-}
-#detail .review.v-none { color: var(--muted); border-style: dashed; border-left-width: 1px; }
-#detail .review-override { font-size: 13px; color: var(--warn); }
-#detail .mr-panel { display: flex; flex-direction: column; gap: 8px; }
-#detail .unapplied { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--warn); border-radius: var(--radius-sm); background: var(--warn-bg); overflow-wrap: anywhere; }
-#detail .unapplied ol { margin: 0; padding-left: 24px; }
+.olddetail .mr-panel { display: flex; flex-direction: column; gap: 8px; }
+.olddetail .unapplied { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--warn); border-radius: var(--radius-sm); background: var(--warn-bg); overflow-wrap: anywhere; }
+.olddetail .unapplied ol { margin: 0; padding-left: 24px; }
 
 /* The Task check (SF-054): above the Task text, the paraphrase before the findings. */
-:is(#drawer, #detail) .task-check { margin: 0 0 12px; padding: 8px 12px; border: 1px solid var(--border); border-left-width: 4px; border-radius: var(--radius-sm); overflow-wrap: anywhere; }
-:is(#drawer, #detail) .task-check p { margin: 0 0 4px; }
-:is(#drawer, #detail) .task-check .check-head { font-weight: 600; }
-:is(#drawer, #detail) .task-check .check-stale { color: var(--warn); font-weight: 600; }
-:is(#drawer, #detail) .task-check .check-error { color: var(--del); }
-:is(#drawer, #detail) .task-check .check-title { margin: 8px 0 4px; font-size: 13px; }
-:is(#drawer, #detail) .task-check .check-severity { margin-top: 6px; font-weight: 600; }
-:is(#drawer, #detail) .task-check .check-severity.s-blocker { color: var(--del); }
-:is(#drawer, #detail) .task-check .check-severity.s-major { color: var(--warn); }
-:is(#drawer, #detail) .task-check :is(.check-findings, .check-files) { margin: 2px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 2px; }
-:is(#drawer, #detail) .task-check .check-kind { font-weight: 600; }
+:is(#drawer, #stream) .task-check { margin: 0 0 12px; padding: 8px 12px; border: 1px solid var(--border); border-left-width: 4px; border-radius: var(--radius-sm); overflow-wrap: anywhere; }
+:is(#drawer, #stream) .task-check p { margin: 0 0 4px; }
+:is(#drawer, #stream) .task-check .check-head { font-weight: 600; }
+:is(#drawer, #stream) .task-check .check-stale { color: var(--warn); font-weight: 600; }
+:is(#drawer, #stream) .task-check .check-error { color: var(--del); }
+:is(#drawer, #stream) .task-check .check-title { margin: 8px 0 4px; font-size: 13px; }
+:is(#drawer, #stream) .task-check .check-severity { margin-top: 6px; font-weight: 600; }
+:is(#drawer, #stream) .task-check .check-severity.s-blocker { color: var(--del); }
+:is(#drawer, #stream) .task-check .check-severity.s-major { color: var(--warn); }
+:is(#drawer, #stream) .task-check :is(.check-findings, .check-files) { margin: 2px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 2px; }
+:is(#drawer, #stream) .task-check .check-kind { font-weight: 600; }

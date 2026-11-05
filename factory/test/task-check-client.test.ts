@@ -1,8 +1,9 @@
 // The Task check in static/app.js (SF-054), under node:vm against the fake page of
 // test/support/fake-dom.ts: the Queue card's check note and Check (one POST, off while a check runs),
 // the Start confirmation's note (not checked, stale, not ready: N blocker, M major; none for a
-// ready check), and the last check in the Task drawer and the job's Task tab: the stale mark, the
-// paraphrase above the findings, by severity. Start stays on whatever the check says.
+// ready check), and the last check in the Task drawer and behind the job's Task toggle (on the
+// implement prompt of its Stream, SF-078): the stale mark, the paraphrase above the findings, by
+// severity. Start stays on whatever the check says.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { type FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
@@ -141,25 +142,30 @@ test('check client: the Task drawer shows the last check above the Task text: th
   assert.match(lines(page, 'task-check')[0]!, /^Task check: not checked yet\./);
 });
 
-test('check client: the job\'s Task tab shows the last check, a failed one with its error', async () => {
+test('check client: the Task toggle of the job\'s implement prompt shows the last check, a failed one with its error', async () => {
   const job = {
     workspace: 'app', ticket: 'T-1', branch: 'T-1-demo', base: 'main', state: 'working', iteration: 1, mr_attempts: 0,
     updated_at: '2026-11-01T10:05:00.000Z', created_at: '2026-11-01T10:00:00.000Z', error: null, prepared_commit: null, worktree: '/wt/T-1',
     fixes: 0, gate_fixes: 0, gate_tokens: 0, files: 0, undeclared: 0, deleted: 0, title: 'Demo',
   };
   const failed = { ...VIEW, stale: false, check: { ...VIEW.check, status: 'failed', output: null, error: 'The check ended with error_max_turns: limit' } };
+  const prompt = { k: '2', ts: '2026-11-01T10:00:02.000Z', it: 1, who: 'factory', t: 'prompt', kind: 'implement', text: '/implement .software-factory/T-1.md', first: '/implement .software-factory/T-1.md', task_changed: false };
   const page = await openBoard([], (path) => {
     if (path === 'api/jobs/app/T-1') {
       return { job, iterations: [], mr: false, gate: true, history: [] };
+    }
+    if (path === 'api/jobs/app/T-1/stream?from=0') {
+      return { entries: [prompt], next: 3, end: true };
     }
     return path === 'api/tickets/app/T-1/task' ? '---\nticket: T-1\n---\n' : path === 'api/tickets/app/T-1/check' ? failed : undefined;
   }, [job], '#app/T-1');
   page.streams.at(-1)!.emit('job', { job, iterations: [], mr: false, gate: true, history: [] });
   await page.flush();
-  page.$('job-tabs').querySelectorAll('button').find((tab) => tab.dataset.tab === 'task')!.click();
+  const entry = (page.$('stream').children as FakeElement[]).find((child) => child.dataset.k === '2')!;
+  button(entry, 'Task')!.click();
   await page.flush();
-  assert.equal(page.$('job-task-check').hidden, false);
-  const shown = lines(page, 'job-task-check');
+  const check = page.$('stream').all().find((element) => element.className === 'task-check')!;
+  const shown = check.children.map((child) => child.textContent);
   assert.match(shown[0]!, /^Task check: check failed · /);
   assert.deepEqual(shown.slice(1), ['The check ended with error_max_turns: limit']);
 });

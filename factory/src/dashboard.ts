@@ -64,10 +64,17 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 // The merge request on the Git host (SF-048): mr-create, mr-merge and mr-status as sf mr create,
 // merge and status, and mergeRequestHost for whether they are on for a job's workspace.
 // Pause, Resume and Restart (SF-067) as sf pause, resume and restart.
+// The hand-over to the user's checkout (SF-073): handover, takeback and handed-done as sf handover,
+// takeback and handed-done, and checkHandedOver, the check for the user's own push that the job's
+// detail starts.
 export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | 'say' | 'retryReview' | 'acceptGate' | 'settle' | 'simplify' | 'archiveFinished'
-  | 'createMergeRequest' | 'mergeMergeRequest' | 'mergeRequestStatus' | 'mergeRequestHost' | 'pause' | 'resumePaused' | 'restart'>;
-export type DashboardAction = 'approve' | 'abort' | 'say' | 'review' | 'accept' | 'settle' | 'simplify' | 'archive' | 'mr-create' | 'mr-merge' | 'mr-status' | 'pause' | 'resume' | 'restart';
-export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'review', 'accept', 'settle', 'simplify', 'archive', 'mr-create', 'mr-merge', 'mr-status', 'pause', 'resume', 'restart'];
+  | 'createMergeRequest' | 'mergeMergeRequest' | 'mergeRequestStatus' | 'mergeRequestHost' | 'pause' | 'resumePaused' | 'restart'
+  | 'handover' | 'takeback' | 'handedDone' | 'checkHandedOver'>;
+export type DashboardAction = 'approve' | 'abort' | 'say' | 'review' | 'accept' | 'settle' | 'simplify' | 'archive' | 'mr-create' | 'mr-merge' | 'mr-status' | 'pause' | 'resume' | 'restart'
+  | 'handover' | 'takeback' | 'handed-done';
+export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'review', 'accept', 'settle', 'simplify', 'archive', 'mr-create', 'mr-merge', 'mr-status', 'pause', 'resume', 'restart', 'handover', 'takeback', 'handed-done'];
+// How often the job's detail asks origin for the user's push of a handed-over branch (SF-073).
+const PUSH_CHECK_INTERVAL_MS = 60_000;
 
 // The start screen's data and changes: the workspace registry and the Task files (src/setup.ts).
 export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'removeWorkspace' | 'tickets' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'archivedTickets' | 'taskText' | 'taskTitle'>;
@@ -121,6 +128,9 @@ const BODIES = {
   pause: { shape: '{}', schema: z.strictObject({}) },
   resume: { shape: '{"message"?: string}', schema: z.strictObject({ message: z.string().optional() }) },
   restart: { shape: '{"keep_files"?: boolean}', schema: z.strictObject({ keep_files: z.boolean().optional() }) },
+  handover: { shape: '{}', schema: z.strictObject({}) },
+  takeback: { shape: '{}', schema: z.strictObject({}) },
+  'handed-done': { shape: '{}', schema: z.strictObject({}) },
   'workspace-add': { shape: '{"name": string, "path": string}', schema: z.strictObject({ name: z.string(), path: z.string() }) },
   'workspace-remove': { shape: '{}', schema: z.strictObject({}) },
   'ticket-archive': { shape: '{}', schema: z.strictObject({}) },
@@ -143,11 +153,16 @@ const ERROR_STATUS: Record<string, number> = {
   check_running: 409,
   // A Restart that would delete a branch with commits or a pushed one (SF-067).
   restart_refused: 409,
+  // The hand-over to the user's checkout (SF-073) and its way back.
+  checkout_busy: 409, handover_refused: 409, handover_mismatch: 409, checkout_changing: 409, checkout_moved: 409,
+  takeback_changed: 409, takeback_switch_failed: 409, branch_in_checkout: 409, not_pushed: 409, handed_over: 409, handover_interrupted: 409, ask_interrupted: 409,
   invalid_content: 400, invalid_ticket: 400, invalid_name: 400, workspace_invalid: 400,
   // The merge request (SF-048): the host's refusals and the actions being off are conflicts; a host
   // that failed or refused the token is a bad gateway.
   mr_not_mergeable: 409, mr_not_open: 409, mr_token_missing: 409, mr_host_unsupported: 409, mr_host_changed: 409, mr_text_missing: 409,
   mr_auth_failed: 502, mr_host_error: 502, mr_host_unreachable: 502,
+  // origin did not say where a handed-over branch is (SF-073).
+  push_check_failed: 502,
 };
 
 export interface RunningDashboard {
@@ -273,7 +288,9 @@ async function taskChangedOf(setup: DashboardSetup, job: Job): Promise<boolean |
 // mr: the merge request on the Git host (SF-048), null before one is opened; mr_host: whether the
 // merge request actions are on for the job's workspace; paused: what a pause interrupted (SF-067),
 // null unless paused; task_changed: taskChangedOf; turn_limit: the line of a chain that went on by
-// itself after a turn limit (SF-069), null without one.
+// itself after a turn limit (SF-069), null without one; handover: the job in the user's checkout
+// (SF-073), null otherwise; handoff_skipped: why the automatic hand-over did not happen, null
+// otherwise.
 function jobSummary(job: Job, counts: { files: number; undeclared: number; deleted: number }, mrHost: MrHost, taskChanged: boolean | null) {
   return {
     workspace: job.workspace, ticket: job.ticket, branch: job.branch, base: job.base, state: job.state,
@@ -281,6 +298,7 @@ function jobSummary(job: Job, counts: { files: number; undeclared: number; delet
     error: job.error ?? null, worktree: job.worktree, prepared_commit: job.prepared_commit,
     fixes: job.fixes, gate_fixes: job.gate_fixes, gate_tokens: job.gate_tokens, ...counts,
     mr: job.mr, mr_host: mrHost, paused: job.paused ?? null, task_changed: taskChanged, turn_limit: turnLimitLine(job) ?? null,
+    handover: job.handover ?? null, handoff_skipped: job.handoff_skipped ?? null,
   };
 }
 
@@ -865,6 +883,11 @@ export async function startDashboard(
     }
     const [, , ...tail] = rest;
     if (tail.length === 0) {
+      // A handed-over job (SF-073): origin is asked for the user's push, without waiting and at most
+      // once a minute; a push found reaches the page through the job's events.
+      if (job.state === 'handed_over') {
+        void actions.checkHandedOver(job.workspace, job.ticket, PUSH_CHECK_INTERVAL_MS).catch((error: unknown) => console.error(error));
+      }
       body(res, 'application/json; charset=utf-8', JSON.stringify(await jobDetail(jobs, job, gateOn, actions, setup)));
       return;
     }
@@ -1082,6 +1105,14 @@ export async function startDashboard(
           return parsed ? () => actions.restart(workspace, ticket, parsed.keep_files === true) : undefined;
         },
       };
+    }
+    if (action === 'handover' || action === 'takeback' || action === 'handed-done') {
+      // sf handover, takeback and handed-done (SF-073): the Execution refuses any state but
+      // ready_for_human_review (handover) and handed_over (the others).
+      const methods = { handover: actions.handover, takeback: actions.takeback, 'handed-done': actions.handedDone };
+      const method = methods[action].bind(actions);
+      const run = (): Promise<unknown> => method(workspace, ticket);
+      return { route: action, exists, call: (data) => (parse(BODIES[action].schema, data) ? run : undefined) };
     }
     if (action === 'archive') {
       // A finished job leaves the Jobs list as with sf reset (the history is archived, a kept

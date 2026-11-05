@@ -747,3 +747,46 @@ test('job client (SF-067): Pause on a working job; a paused one on Your turn wit
   assert.deepEqual([pause!.hidden, pause!.disabled], [false, true]);
   assert.match(page.$('action-reasons').textContent, /Pause: the MR is being prepared/);
 });
+
+// The hand-over buttons (SF-073), made by app.js in the next-action panel.
+const handoverButton = (page: Page, action: string): FakeElement => page.$('next-panel').querySelectorAll('button').find((button) => button.dataset.action === action)!;
+
+test('job client (SF-073): a handed-over job shows "In your checkout on <branch>", Ask for changes, Approve, I opened the MR myself and Take it back; a ready one with handoff_skipped shows Hand over to my checkout and the skip message, and its kept worktree', async () => {
+  const handover = { branch: 'T-1-demo', saved: 'a'.repeat(40), base: 'b'.repeat(40), previous: { branch: 'main' }, untracked: [], template: null, cleanup: null, at: '2026-11-01T10:06:00.000Z', checked_at: null, step: null };
+  const handed = job('handed_over', { prepared_commit: 'a'.repeat(40), worktree: null, handover, handoff_skipped: null });
+  const page = await openJob(detail(handed, { mr: true, mr_title: 'feat(T-1): Demo' } as Partial<Omit<Detail, 'job'>>));
+  assert.equal(page.$('next-headline').textContent, 'In your checkout on T-1-demo.');
+  assert.match(page.$('next-why').textContent, /Merge request title: feat\(T-1\): Demo$/);
+  const shown = (action: string): boolean => !handoverButton(page, action).hidden;
+  assert.deepEqual([shown('handover'), shown('handed-done'), shown('takeback')], [false, true, true]);
+  assert.deepEqual([handoverButton(page, 'handed-done').textContent, handoverButton(page, 'takeback').textContent], ['I opened the MR myself', 'Take it back']);
+  assert.deepEqual([page.$('approve-button').hidden, page.$('approve-button').disabled], [false, false]);
+  assert.equal(page.$('say-button').textContent, 'Ask for changes');
+  assert.equal(page.$('say-input').disabled, false);
+  assert.equal(facts(page).Worktree, 'none');
+  // The card on the board says where the job is.
+  const card = page.$('list-you').all().find((node) => node.className === 'reason ready' && node.textContent === 'In your checkout on T-1-demo');
+  assert.notEqual(card, undefined);
+
+  // Take it back goes at once.
+  handoverButton(page, 'takeback').click();
+  await page.flush();
+  const back = posts(page).filter((request) => request.path.endsWith('/takeback'));
+  assert.deepEqual(back.map((request) => [request.path, request.body]), [['api/jobs/app/T-1/takeback', '{}']]);
+  back[0]!.respond(200, { ok: true, result: { state: 'ready_for_human_review', branch: 'T-1-demo', worktree: '/wt/T-1' } });
+  await page.flush();
+  assert.match(page.$('action-status').textContent, /^Taken back: /);
+
+  // Ready for review, not handed over: the skip message and Hand over to my checkout.
+  const skipped = job('ready_for_human_review', { worktree: '/wt/T-1', handoff_skipped: { code: 'checkout_dirty', message: 'T-1: ready, but your checkout has changes; hand it over when you are ready' }, handover: null });
+  page.streams.at(-1)!.emit('jobs', { jobs: [skipped] });
+  await show(page, detail(skipped));
+  assert.match(page.$('next-why').textContent, /^Not handed over to your checkout: T-1: ready, but your checkout has changes; hand it over when you are ready /);
+  assert.deepEqual([shown('handover'), shown('handed-done'), shown('takeback')], [true, false, false]);
+  assert.equal(handoverButton(page, 'handover').textContent, 'Hand over to my checkout');
+  assert.equal(page.$('say-button').textContent, 'Send');
+  assert.equal(facts(page).Worktree, '/wt/T-1');
+  handoverButton(page, 'handover').click();
+  await page.flush();
+  assert.deepEqual(posts(page).filter((request) => request.path.endsWith('/handover')).map((request) => request.body), ['{}']);
+});

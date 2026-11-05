@@ -94,7 +94,7 @@ test('dashboard: jobs, job detail, report, patch and mr endpoints; bad names are
     assert.equal(list.headers['content-type'], 'application/json; charset=utf-8');
     const { jobs: all } = JSON.parse(list.body);
     assert.deepEqual(all.map((job: Job) => [job.ticket, job.state]), [['T-0', 'failed'], ['T-1', 'awaiting_review']]);
-    assert.deepEqual(Object.keys(all[1]).sort(), ['base', 'branch', 'cost_usd', 'created_at', 'deleted', 'error', 'files', 'fixes', 'gate', 'gate_fixes', 'gate_tokens', 'iteration', 'mr', 'mr_attempts', 'mr_host', 'now', 'paused', 'prepared_commit', 'review', 'review_ended_at', 'state', 'stop', 'task_changed', 'ticket', 'title', 'tool_calls', 'turn_limit', 'undeclared', 'updated_at', 'workspace', 'worktree']);
+    assert.deepEqual(Object.keys(all[1]).sort(), ['base', 'branch', 'cost_usd', 'created_at', 'deleted', 'error', 'files', 'fixes', 'gate', 'gate_fixes', 'gate_tokens', 'handoff_skipped', 'handover', 'iteration', 'mr', 'mr_attempts', 'mr_host', 'now', 'paused', 'prepared_commit', 'review', 'review_ended_at', 'state', 'stop', 'task_changed', 'ticket', 'title', 'tool_calls', 'turn_limit', 'undeclared', 'updated_at', 'workspace', 'worktree']);
     assert.deepEqual(all[0].error, { code: 'start_failed', message: 'Git failed.' });
 
     const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body);
@@ -259,7 +259,8 @@ test('dashboard end to end: a fake cycle, the stream across mark_clean (the bran
     assert.equal((await stream.next('jobs', (data) => data.jobs[0].state === 'preparing_mr')).jobs.length, 1);
     assert.equal((await stream.next('jobs', (data) => data.jobs[0].state === 'ready_for_human_review')).jobs.length, 1);
     const readyDetail = await stream.next('job', (data) => data.job.state === 'ready_for_human_review');
-    assert.deepEqual([readyDetail.job.worktree, readyDetail.mr, readyDetail.job.files], [null, true, 1]);
+    // The worktree stays until the push (SF-073).
+    assert.deepEqual([readyDetail.job.worktree, readyDetail.mr, readyDetail.job.files], [join(env.state, 'worktrees', 'app', 'T-1'), true, 1]);
     // The state line comes through the follower; it may arrive before or after the jobs and job above.
     await stream.seen('event', (event) => event.type === 'state' && event.text.endsWith('preparing_mr -> ready_for_human_review'));
     stream.close();

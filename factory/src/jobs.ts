@@ -21,6 +21,9 @@ export const JOB_STATES = [
   // The user paused the job (SF-067): nothing runs; sf resume goes on where it stopped.
   'paused',
   'ready_for_human_review',
+  // The job's changes are in the workspace's checkout on its branch (SF-073): the user reviews them
+  // there; nothing of the job runs.
+  'handed_over',
   'preparing_mr',
   'pushed',
   'aborted',
@@ -28,7 +31,8 @@ export const JOB_STATES = [
 ] as const;
 export type JobState = (typeof JOB_STATES)[number];
 // States that hold the machine's one job slot: every state in which the session may be alive.
-// paused is not one (SF-067): nothing of a paused job runs, and it does not count toward SF_MAX_JOBS.
+// paused is not one (SF-067): nothing of a paused job runs, and it does not count toward SF_MAX_JOBS;
+// nor is handed_over (SF-073): the job's changes wait in the user's checkout.
 export const ACTIVE_STATES: readonly JobState[] = ['starting', 'working', 'awaiting_review', 'needs_human', 'ready_for_human_review', 'preparing_mr'];
 // States after which a new job for the same ticket may start.
 export const TERMINAL_STATES: readonly JobState[] = ['failed', 'aborted', 'pushed'];
@@ -43,6 +47,30 @@ export const RESTARTABLE_STATES: readonly JobState[] = ['paused', 'aborted', 'fa
 
 const timestamp = z.iso.datetime();
 const commit = z.string().regex(/^[0-9a-f]{40,64}$/);
+
+// The steps of a hand-over (SF-073) that change the checkout; recorded before the change, so
+// recover() can repair one that was cut off.
+export const HANDOVER_STEPS = ['handing_over', 'asking'] as const;
+// A job in the user's checkout (SF-073): its branch, the job's commit S saved as
+// refs/factory/<ticket>, the base B the branch was reset to, what the checkout was on before
+// (a branch, or a detached commit), the user's untracked files from before (never touched), the
+// local commit.template and commit.cleanup the factory replaced (null: unset), when it was handed
+// over and when origin was last asked for the user's push; step while a change is in progress, and
+// during Ask for changes the snapshot of the checkout (refs/factory/<ticket>-ask).
+const handoverSchema = z.strictObject({
+  branch: z.string().min(1),
+  saved: commit,
+  base: commit,
+  previous: z.union([z.strictObject({ branch: z.string().min(1) }), z.strictObject({ commit })]),
+  untracked: z.array(z.string()),
+  template: z.string().nullable(),
+  cleanup: z.string().nullable(),
+  at: timestamp,
+  checked_at: timestamp.nullable(),
+  step: z.enum(HANDOVER_STEPS).nullable(),
+  snapshot: commit.optional(),
+});
+export type Handover = z.output<typeof handoverSchema>;
 const jobSchema = z.strictObject({
   workspace: z.string().min(1),
   ticket: z.string().min(1),
@@ -84,6 +112,11 @@ const jobSchema = z.strictObject({
   // Time of the last state change.
   updated_at: timestamp,
   error: z.strictObject({ code: z.string(), message: z.string() }).optional(),
+  // The job in the user's checkout (SF-073); absent otherwise.
+  handover: handoverSchema.optional(),
+  // Why the automatic hand-over did not happen at ready for review (SF-073); absent once the job
+  // leaves ready_for_human_review or is handed over.
+  handoff_skipped: z.strictObject({ code: z.string(), message: z.string() }).optional(),
   // The merge request the factory opened on the Git host (SF-048), from pushed on; null before.
   mr: z.strictObject({
     host: z.enum(['github', 'gitlab']),
@@ -248,6 +281,13 @@ export type EventRecord = { ts: string; iteration: number } & (
   // merged by the factory, or found merged or closed on the host by sf mr status.
   // mr_state, not state: a record with state is a state change.
   | { type: 'merge_request'; action: 'created' | 'reused' | 'merged' | 'updated'; host: JobMr['host']; number: number; url: string; mr_state: JobMr['state']; merge_commit?: string }
+  // The hand-over to the user's checkout (SF-073): done, ended (by Ask for changes, Take it back, the
+  // push or abort, with the record as it was), or a note (a worktree that could not be removed, the
+  // files Ask for changes left in the checkout because they changed).
+  | { type: 'handover'; action: 'handed_over' | 'ended' | 'note'; handover?: Handover; note?: string }
+  // The user's own push of a handed-over branch, found on origin (SF-073): the commit, and whether
+  // its tree is the job's commit's (null when the commit is not known locally).
+  | { type: 'handover_pushed'; commit: string; same_tree: boolean | null }
 );
 
 // The bound of one reviewer event or message in events.jsonl (SF-045), in bytes of its JSON.
@@ -364,6 +404,11 @@ export class JobStore {
     const dir = this.dir(job.workspace, job.ticket);
     await mkdir(dir, { recursive: true, mode: 0o700 });
     await writeFileAtomic(join(dir, 'job.json'), Buffer.from(`${JSON.stringify(jobSchema.parse(job), null, 2)}\n`));
+  }
+
+  // The workspaces that have a job directory, current or archived, sorted.
+  workspaceNames(): Promise<string[]> {
+    return this.#entries(this.root);
   }
 
   // Every current job (archived ones excluded), sorted by workspace and ticket.

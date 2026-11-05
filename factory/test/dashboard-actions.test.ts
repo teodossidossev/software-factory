@@ -319,7 +319,8 @@ test('dashboard actions end to end: say resumes needs_human, approve is refused 
     await call(served, 'mark_clean', { workspace: 'app', ticket: 'N-1' });
     await waitFor(served, 'N-1', 'ready_for_human_review', 3);
     const ready = JSON.parse((await fetchRaw(new URL('api/jobs/app/N-1', base))).body);
-    assert.equal(ready.job.worktree, null);
+    // The worktree stays until the push (SF-073).
+    assert.equal(ready.job.worktree, join(env.state, 'worktrees', 'app', 'N-1'));
     assert.match(ready.job.prepared_commit, /^[0-9a-f]{40}$/);
     // The push from the page; no link, because the origin is a local path.
     const pushed = result(await act(base, 'api/jobs/app/N-1/approve', {}));
@@ -553,5 +554,38 @@ test('dashboard simplify (SF-055): POST {} only; Execution.simplify once per req
     assert.deepEqual(fake.calls, [['simplify', 'app', 'T-1']]);
     fake.answer = new FactoryError('invalid_state', 'sf simplify needs needs_human with simplify_offered; the job is working.');
     assert.deepEqual(error(await act(base, path, {})), { status: 409, code: 'invalid_state' });
+  });
+});
+
+test('dashboard hand-over (SF-073): handover, takeback and handed-done POST {} only, one Execution call each, the new codes answered 409; a handed-over job\'s detail starts the push check', async () => {
+  const fake = fakeActions({ state: 'handed_over', branch: 'T-1-demo' });
+  await withDashboard('dash-act-handover', fake, async (dashboard, { jobs, job }) => {
+    const base = dashboard.url;
+    for (const [action, method] of [['handover', 'handover'], ['takeback', 'takeback'], ['handed-done', 'handedDone']] as const) {
+      const path = `api/jobs/app/T-1/${action}`;
+      assert.equal((await act(base, path, {}, { method: 'GET' })).status, 405);
+      assert.deepEqual(error(await act(base, path, undefined, { body: '{"x":1}' })), { status: 400, code: 'invalid_body' }, action);
+      fake.calls.length = 0;
+      fake.answer = { state: 'handed_over', branch: 'T-1-demo' };
+      assert.deepEqual(result(await act(base, path, {})), { state: 'handed_over', branch: 'T-1-demo' });
+      assert.deepEqual(fake.calls, [[method, 'app', 'T-1']]);
+    }
+    for (const code of ['checkout_dirty', 'checkout_busy', 'handover_refused', 'handover_mismatch', 'checkout_changing', 'checkout_moved', 'takeback_changed', 'takeback_switch_failed', 'branch_in_checkout', 'not_pushed', 'handed_over', 'handover_interrupted', 'ask_interrupted']) {
+      fake.answer = new FactoryError(code, `refused: ${code}`);
+      assert.deepEqual(error(await act(base, 'api/jobs/app/T-1/takeback', {})), { status: 409, code }, code);
+    }
+    // The detail of a job that is not handed over asks nothing; a handed-over one starts the check
+    // (at most once a minute, the Execution decides) and answers without waiting for it.
+    fake.calls.length = 0;
+    await fetchRaw(new URL('api/jobs/app/T-1', base));
+    assert.deepEqual(fake.calls, []);
+    const commit = 'a'.repeat(40);
+    await jobs.write({
+      ...job, state: 'handed_over', prepared_commit: commit, base_commit: 'b'.repeat(40),
+      handover: { branch: 'T-1-demo', saved: commit, base: 'b'.repeat(40), previous: { branch: 'main' }, untracked: [], template: null, cleanup: null, at: '2026-11-01T10:06:00.000Z', checked_at: null, step: null },
+    });
+    const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body);
+    assert.deepEqual([detail.job.state, detail.job.handover.branch, detail.job.handoff_skipped], ['handed_over', 'T-1-demo', null]);
+    assert.deepEqual(fake.calls, [['checkHandedOver', 'app', 'T-1', 60_000]]);
   });
 });

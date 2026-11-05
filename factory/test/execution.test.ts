@@ -129,27 +129,28 @@ test('full cycle in a worktree: start, awaiting_review with Report, Patch and fi
 
   // approve is not available before Clean: the branch is prepared at Clean.
   assert.equal((await runCli(env, ['approve', 'app', 'DEMO-1'])).code, 1);
-  // Clean: the MR preparation turn runs in the worktree, then the worktree goes and the branch
-  // holds one commit on top of origin/main in the checkout.
+  // Clean: the MR preparation turn runs in the worktree, then the branch holds one commit on top
+  // of origin/main; the worktree stays until the push (SF-073), with the branch checked out.
   assert.deepEqual(await call(served, 'mark_clean', { workspace: 'app', ticket: 'DEMO-1' }), { state: 'preparing_mr', iteration: 2, branch: 'DEMO-1-export-as-csv' });
   const clean = await waitFor(served, 'DEMO-1', 'ready_for_human_review', 2);
   assert.deepEqual([clean.report, clean.patch.sha256, clean.mr], [second.report, second.patch.sha256, mrText('feat(DEMO-1): Export as CSV')]);
-  await assert.rejects(stat(worktree), { code: 'ENOENT' });
-  assert.ok(!git(repo, 'worktree', 'list').includes(worktree));
+  assert.ok((await stat(worktree)).isDirectory());
+  assert.ok(git(repo, 'worktree', 'list').includes(worktree));
+  assert.equal(git(worktree, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'DEMO-1-export-as-csv');
   assert.equal(git(repo, 'rev-list', '--count', 'origin/main..DEMO-1-export-as-csv').trim(), '1');
   assert.equal(git(repo, 'log', '-1', '--format=%s', 'DEMO-1-export-as-csv').trim(), 'feat(DEMO-1): Export as CSV');
   assert.equal(git(repo, 'show', 'DEMO-1-export-as-csv:src/new.ts'), 'export const x = 1;\n');
   assert.equal(treeState(repo), before);
   job = JSON.parse(await readFile(join(jobDir, 'job.json'), 'utf8'));
-  assert.deepEqual([job.worktree, job.prepared_commit, job.base_commit, job.target_commit], [null, git(repo, 'rev-parse', 'DEMO-1-export-as-csv').trim(), git(repo, 'rev-parse', 'origin/main').trim(), git(repo, 'rev-parse', 'origin/main').trim()]);
+  assert.deepEqual([job.worktree, job.prepared_commit, job.base_commit, job.target_commit], [worktree, git(repo, 'rev-parse', 'DEMO-1-export-as-csv').trim(), git(repo, 'rev-parse', 'origin/main').trim(), git(repo, 'rev-parse', 'origin/main').trim()]);
   log = await fakeLog(env);
   assert.equal(log.length, 3);
   assert.match(log[2]!.prompt, /^MR preparation for DEMO-1 on branch DEMO-1-export-as-csv\./);
   assert.equal(log[2]!.cwd, worktree);
-  // The user can check the branch out in the IDE; the checkout itself is still on main.
-  git(repo, 'checkout', '-q', 'DEMO-1-export-as-csv');
-  assert.equal(await readFile(join(repo, 'src', 'new.ts'), 'utf8'), 'export const x = 1;\n');
-  git(repo, 'checkout', '-q', 'main');
+  // The branch is in the checkout's repository (the kept worktree holds it); the checkout itself
+  // is still on main.
+  assert.equal(git(repo, 'show', 'DEMO-1-export-as-csv:src/new.ts'), 'export const x = 1;\n');
+  assert.equal(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'main');
 
   const watched = await runCli(env, ['watch', 'app', 'DEMO-1', '--once']);
   assert.equal(watched.code, 0, watched.stderr);
@@ -174,6 +175,10 @@ test('full cycle in a worktree: start, awaiting_review with Report, Patch and fi
   assert.equal(git(join(temp, 'cycle-repo-origin.git'), 'rev-parse', 'DEMO-1-export-as-csv').trim(), job.prepared_commit);
   assert.equal((await fakeLog(env)).length, 3);
   assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'DEMO-1' })).state, 'pushed');
+  // The push removed the worktree.
+  await assert.rejects(stat(worktree), { code: 'ENOENT' });
+  assert.ok(!git(repo, 'worktree', 'list').includes(worktree));
+  assert.equal((await new JobStore(env.state).read('app', 'DEMO-1'))!.worktree, null);
   assert.equal(treeState(repo), before);
   await stop(served);
   await assert.rejects(stat(join(env.state, 'sf.sock')), { code: 'ENOENT' });

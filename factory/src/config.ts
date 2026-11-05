@@ -52,6 +52,9 @@ export interface Config {
   gateTimeoutMs: number;
   // The Git hosts' tokens and API bases for the merge requests (SF-048).
   forge: ForgeSettings;
+  // SF_HANDOFF (SF-073): checkout, the default, hands a job ready for review over to the
+  // workspace's checkout on its branch; off leaves it in ready_for_human_review.
+  handoff: 'checkout' | 'off';
 }
 
 // The gate: on with its Codex executable, or off with why (missing: no executable was found).
@@ -213,6 +216,15 @@ export function gateConfig(env: NodeJS.ProcessEnv = process.env): Gate {
   return { on: false, reason: 'no codex on PATH; set SF_CODEX', missing: true };
 }
 
+// SF_HANDOFF: checkout (the default) or off.
+export function handoffSetting(env: NodeJS.ProcessEnv = process.env): Config['handoff'] {
+  const mode = env.SF_HANDOFF || 'checkout';
+  if (mode !== 'checkout' && mode !== 'off') {
+    throw new FactoryError('invalid_config', `SF_HANDOFF must be checkout or off, got "${mode}".`);
+  }
+  return mode;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const claudePath = env.SF_CLAUDE || undefined;
   if (claudePath !== undefined && !isAbsolute(claudePath)) {
@@ -242,5 +254,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     gateMaxTokens: positiveInteger(env, 'SF_GATE_MAX_TOKENS', 5_000_000, 1_000_000_000),
     gateTimeoutMs: positiveInteger(env, 'SF_GATE_TIMEOUT_MS', 900_000, 86_400_000),
     forge: forgeSettings(env),
+    handoff: handoffSetting(env),
   };
 }

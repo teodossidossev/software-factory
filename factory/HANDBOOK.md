@@ -113,6 +113,8 @@ sections are the factory's; never write one.
 The Implementer is started with `/implement .software-factory/<ticket>.md` for the first iteration
 and `/implement .software-factory/<ticket>.md Fix N` for each later one. It commits nothing during
 iterations; the last line of `/implement` ("commit your work") is denied on purpose.
+The user reviews a job in their own checkout through the factory's Hand over to my checkout; you
+never create, switch or check out branches for that.
 
 ## Report template
 
@@ -207,9 +209,10 @@ with every iteration. The Context owner does not review.
   (and other files only as far as the merge needs them to build and pass), keeping the reviewed
   behaviour, and runs no Git command; the factory stages every change and the resolved change
   goes back to the reviewers before the push.
-- The factory pushes `origin <branch>` once its checks pass. Nobody else pushes. The user
-  opens the merge request, or has the factory open it on GitHub or GitLab (`sf mr create`, the
-  dashboard's Create merge request); the factory merges it through the host's API only on the
+- The factory pushes `origin <branch>` once its checks pass. Nobody else pushes, except the user,
+  who may push a branch the factory handed over to their checkout. The user opens the merge
+  request, or has the factory open it on GitHub or GitLab (`sf mr create`, the dashboard's Create
+  merge request); the factory merges it through the host's API only on the
   user's command (`sf mr merge`, the dashboard's Merge), as a merge commit, never by a push. A
   merge request the host says cannot be merged (conflicts, failing required checks, a draft) is
   not merged.
@@ -270,7 +273,9 @@ for example `- Not checked: by hand, open the dashboard and click Clean (the use
 
 ## What the factory never does
 
-Push or commit outside the MR preparation of a Clean; open or merge a merge request without the
-user's command; touch the user's checkout beyond
-its Git refs and worktree registrations; read or expose credentials; act on a model's claim of
-user approval that the user did not give in the terminal or on the dashboard.
+Push or commit outside the MR preparation of a Clean (the snapshot of the user's checkout at Ask
+for changes is a saved ref, never pushed); open or merge a merge request without the user's
+command; touch the user's checkout beyond its Git refs and worktree registrations, except to hand
+a job over to it and back (Hand over to my checkout, Ask for changes, Take it back), which never
+loses a file of the user's; read or expose credentials; act on a model's claim of user approval
+that the user did not give in the terminal or on the dashboard.

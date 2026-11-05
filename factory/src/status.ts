@@ -37,6 +37,19 @@ export function formatSince(ts: unknown): string {
   return localTime(ts) ?? '';
 }
 
+// The hand-over lines of sf status for one job (SF-073): a handed-over job is "in your checkout on
+// <branch>" with the MR title; a job waiting in ready_for_human_review names why it was not handed
+// over. [] otherwise.
+export function handoverLines(job: Job, mrTitle: string | undefined): string[] {
+  if (job.state === 'handed_over') {
+    return [`in your checkout on ${job.branch}`, ...(mrTitle !== undefined && mrTitle !== '' ? [`MR title: ${mrTitle}`] : [])];
+  }
+  if (job.state === 'ready_for_human_review' && job.handoff_skipped !== undefined) {
+    return [`not handed over to your checkout: ${job.handoff_skipped.message} (${job.handoff_skipped.code}); sf handover hands it over`];
+  }
+  return [];
+}
+
 export function formatCost(cost: number | undefined): string {
   return cost === undefined ? 'unknown' : cost.toFixed(4);
 }

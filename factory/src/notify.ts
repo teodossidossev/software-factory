@@ -11,7 +11,7 @@ import { turnLimitLine } from './turn-limit.js';
 
 const DESKTOP_TIMEOUT_MS = 5_000;
 const NTFY_TIMEOUT_MS = 10_000;
-export const NOTIFIED_STATES: readonly JobState[] = ['ready_for_human_review', 'needs_human', 'paused', 'pushed', 'failed'];
+export const NOTIFIED_STATES: readonly JobState[] = ['ready_for_human_review', 'handed_over', 'needs_human', 'paused', 'pushed', 'failed'];
 
 export interface NotifyConfig {
   desktop: boolean;
@@ -74,7 +74,18 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
       tags: 'pause_button',
     };
   }
-  const body = [`branch: ${job.branch}`, ...(job.error !== undefined ? [`${job.error.code}: ${job.error.message}`] : []), ...lines].slice(0, 3);
+  if (job.state === 'handed_over') {
+    // SF-073: the changes wait in the user's checkout; extra holds the MR title and the file lines.
+    return {
+      title: `${job.ticket}: in your checkout`,
+      body: [`in your checkout on ${job.branch}`, ...(job.error !== undefined ? [`${job.error.code}: ${job.error.message}`] : []), ...lines].slice(0, 3).join('\n'),
+      priority: 'default',
+      tags: 'eyes',
+    };
+  }
+  // Why the automatic hand-over did not happen (SF-073).
+  const skipped = job.state === 'ready_for_human_review' && job.handoff_skipped !== undefined ? [job.handoff_skipped.message] : [];
+  const body = [`branch: ${job.branch}`, ...(job.error !== undefined ? [`${job.error.code}: ${job.error.message}`] : []), ...skipped, ...lines].slice(0, 3);
   // A pushed job's merge request on the Git host (SF-048) names the title once it is opened or merged.
   const mr = job.state === 'pushed' && job.mr !== null && job.mr !== undefined ? job.mr : undefined;
   return {

@@ -432,12 +432,15 @@ export function pushProtection(branch: string, base: string): MrFailure | undefi
   };
 }
 
-export async function pushBranch(cwd: string, branch: string, base: string): Promise<MrFailure | undefined> {
+// source: the ref pushed to the branch (SF-073: the saved commit of a handed-over job,
+// refs/factory/<ticket>); the branch itself by default. The protections are the same.
+export async function pushBranch(cwd: string, branch: string, base: string, source?: string): Promise<MrFailure | undefined> {
   const protectedFailure = pushProtection(branch, base);
   if (protectedFailure !== undefined) {
     return protectedFailure;
   }
-  const result = await runGit(cwd, ['push', 'origin', `${branch}:${branch}`], 1024 * 1024, PUSH_TIMEOUT_MS);
+  const refspec = source === undefined ? `${branch}:${branch}` : `${source}:refs/heads/${branch}`;
+  const result = await runGit(cwd, ['push', 'origin', refspec], 1024 * 1024, PUSH_TIMEOUT_MS);
   if (result.code === 0) {
     return undefined;
   }

@@ -11,7 +11,8 @@
 // whose Task file is written (SF-040); the board (SF-046) adds the text of a Task file; the Task
 // check (SF-054) adds each ticket's last check, its start (Check) and its view. The board v3
 // (SF-077) adds to each job row what its card shows: who acts now, the Implementer's tool calls
-// and the findings a stopped job waits on.
+// and the findings a stopped job waits on. The Changes screen (SF-079) reads the file lists and the
+// file versions of the iterations (src/changes.ts), read-only.
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { open, readFile, rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -20,6 +21,7 @@ import { join } from 'node:path';
 import { localhostHostValidation, localhostOriginValidation } from '@modelcontextprotocol/node';
 import * as z from 'zod/v4';
 import { writeFileAtomic } from './atomic.js';
+import { Changes } from './changes.js';
 import { conversationUrl, MAX_CONVERSATION_URL, ticketConversation } from './conversation.js';
 import { FactoryError } from './errors.js';
 import type { Execution } from './execution.js';
@@ -616,6 +618,11 @@ function sameToken(given: string, token: Buffer): boolean {
   return candidate.length === token.length && timingSafeEqual(candidate, token);
 }
 
+// An iteration number of a query or a path: 1 to 9999, written without a leading zero.
+function iterationParam(value: string | null | undefined): number | undefined {
+  return typeof value === 'string' && /^[1-9]\d{0,3}$/.test(value) ? Number(value) : undefined;
+}
+
 // "<ws>/<ticket>" as validated names, or undefined.
 function jobKey(workspace: string | undefined, ticket: string | undefined): [string, string] | undefined {
   if (workspace === undefined || ticket === undefined || !WORKSPACE_NAME_PATTERN.test(workspace) || !TICKET_PATTERN.test(ticket)) {
@@ -747,6 +754,7 @@ export async function startDashboard(
 
   const streams = new Set<Stream>();
   const toolCalls = new ToolCallCounter();
+  const changes = new Changes(jobs);
   const validateHost = localhostHostValidation();
   const validateOrigin = localhostOriginValidation();
   // The exact origin of the page, known once the listener has its port.
@@ -916,8 +924,17 @@ export async function startDashboard(
       body(res, 'text/markdown; charset=utf-8', text);
       return;
     }
+    if (tail.length === 1 && (tail[0] === 'changes' || tail[0] === 'file')) {
+      const data = tail[0] === 'changes' ? await changesOf(job, query) : await fileOf(job, query);
+      if (data === undefined) {
+        empty(res, 404);
+        return;
+      }
+      json(res, 200, data);
+      return;
+    }
     const number = Number(tail[1]);
-    if (tail.length === 3 && tail[0] === 'iterations' && /^[1-9]\d{0,3}$/.test(tail[1] ?? '') && number <= job.iteration
+    if (tail.length === 3 && tail[0] === 'iterations' && iterationParam(tail[1]) !== undefined && number <= job.iteration
       && (tail[2] === 'report' || tail[2] === 'patch')) {
       const iteration = await jobs.readIteration(...key, number);
       if (tail[2] === 'report') {
@@ -928,6 +945,41 @@ export async function startDashboard(
       return;
     }
     empty(res, 404);
+  }
+
+  // GET api/jobs/<ws>/<ticket>/changes (SF-079): the base and the published iterations; with
+  // ?from=base|<N>&to=<N> the files of that view (the base of to against to, or to - 1 against to).
+  // Any other query or pair is undefined (an empty 404).
+  async function changesOf(job: Job, query: URLSearchParams): Promise<unknown> {
+    const keys = [...query.keys()];
+    if (keys.length === 0) {
+      return changes.index(job);
+    }
+    const from = query.get('from');
+    const to = iterationParam(query.get('to'));
+    if (keys.length !== 2 || from === null || to === undefined || (from !== 'base' && iterationParam(from) === undefined)) {
+      return undefined;
+    }
+    return changes.files(job, from === 'base' ? 'base' : Number(from), to);
+  }
+
+  // GET api/jobs/<ws>/<ticket>/file?at=base|<N>&path=<path> (SF-079; &of=<N> with at=base, the
+  // last iteration when left out): one side of one file of a view's list.
+  async function fileOf(job: Job, query: URLSearchParams): Promise<unknown> {
+    const at = query.get('at');
+    const path = query.get('path');
+    const of = query.get('of');
+    const allowed = new Set(['at', 'path', ...(at === 'base' ? ['of'] : [])]);
+    const keys = [...query.keys()];
+    if (at === null || path === null || keys.some((name) => !allowed.has(name)) || new Set(keys).size !== keys.length) {
+      return undefined;
+    }
+    if (at === 'base') {
+      const n = of === null ? job.iteration : iterationParam(of);
+      return n === undefined ? undefined : changes.file(job, 'base', n, path);
+    }
+    const n = iterationParam(at);
+    return n === undefined ? undefined : changes.file(job, n, n, path);
   }
 
   // GET api/jobs/<ws>/<ticket>/stream?from=<line> (SF-082): the entries of at most STREAM_PAGE_LINES

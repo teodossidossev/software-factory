@@ -2,11 +2,11 @@
 // (SF-078), run under node:vm against the fake page of test/support/fake-dom.ts: the URL hash that
 // opens the page, the header for each state (the sentence, the iteration from shownIteration, the
 // cost, the elapsed time, the branch that copies its checkout command), the screen switch and its
-// keys s, c and m, Merge request off without MR text; the old Changes view (the Report, the files
-// next to the Patch) and MR view (Copy MR text, the Codex items not applied) inside their screens
-// until SF-079 and SF-080. The Stream, its stop blocks and the composer are tested in
-// dashboard-stream-client.test.ts. Script checks, not browser acceptance: the manual steps are in
-// factory/README.md.
+// keys s, c and m, Merge request off without MR text; the old MR view (Copy MR text, the Codex
+// items not applied) inside its screen until SF-080, and that the old Changes view is gone (SF-079:
+// the Changes screen is tested in dashboard-changes-client.test.ts). The Stream, its stop blocks
+// and the composer are tested in dashboard-stream-client.test.ts. Script checks, not browser
+// acceptance: the manual steps are in factory/README.md.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { type FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
@@ -78,7 +78,6 @@ async function show(page: Page, shown: Detail): Promise<void> {
   await page.flush();
 }
 
-const elements = (page: Page, id: string): FakeElement[] => page.$(id).children as FakeElement[];
 const texts = (node: FakeElement): string[] => (node.children as FakeElement[]).map((child) => child.textContent);
 const gets = (page: Page, path: string): FetchRequest[] => page.requests.filter((request) => request.method === 'GET' && request.path === path);
 
@@ -197,103 +196,17 @@ test('job client: the switch: Stream (s), Changes (N) (c), Merge request (m), ar
   assert.deepEqual([page.$('job').hidden, page.location.hash], [true, '#']);
 });
 
-// SF-053: a file outside the Task's scope carries an "out of scope" mark; the summary counts them.
-test("job client: a file outside the Task's scope is marked out of scope in the file list and counted in the summary", async () => {
-  const files = [
-    { path: 'src/a.ts', status: 'added', sensitive: 'no', scope: 'in', additions: 1, deletions: 0 },
-    { path: 'notes.txt', status: 'added', sensitive: 'no', scope: 'out', additions: 1, deletions: 0 },
-    { path: '.editorconfig', status: 'added', sensitive: 'undeclared', scope: 'out', additions: 1, deletions: 0 },
-    { path: 'old.ts', status: 'modified', sensitive: 'no', scope: 'none', additions: 1, deletions: 1 },
-  ];
-  const shown = detail(job('awaiting_review', { iteration: 1, files: 4, undeclared: 1 }), { iterations: [iteration(1, { changed_files: 4, files })] });
-  const page = await openJob(shown, (path) => (path.endsWith('/report') ? 'Done.' : path.endsWith('/patch') ? '' : undefined), undefined, [], '/changes');
-  assert.equal(page.$('files-summary').textContent, 'Files 4 · 1 sensitive undeclared · 2 out of scope');
-  const rows = elements(page, 'files-list').filter((item) => item.className !== 'file-group').map((item) => item.children[0] as FakeElement);
-  const marks = (path: string): string[] => rows.find((row) => row.dataset.path === path)!.all().filter((element) => element.className.startsWith('file-label ')).map((element) => element.textContent);
-  assert.deepEqual(marks('notes.txt'), ['out of scope']);
-  assert.deepEqual(marks('.editorconfig'), ['sensitive, undeclared', 'out of scope']);
-  assert.deepEqual(marks('src/a.ts'), []);
-  assert.deepEqual(marks('old.ts'), []);
-});
-
-// The Changes screen, until SF-079 the old Changes view: the iteration picker, the Report, the file
-// list (SF-024's order and marks) next to the Patch; a file click marks and scrolls its diff.
-test('job client: the Changes screen shows the Report, the files with their marks next to the Patch; a file click scrolls to its diff', async () => {
-  const files = [
-    { path: 'src/zeta.ts', status: 'modified', sensitive: 'no', additions: 2, deletions: 1 },
-    { path: 'package.json', status: 'modified', sensitive: 'declared', additions: 1, deletions: 1 },
-    { path: 'src/old.ts', status: 'deleted', sensitive: 'no', additions: 0, deletions: 3 },
-    { path: '.github/workflows/ci.yml', status: 'added', sensitive: 'undeclared', additions: 5, deletions: 0 },
-    { path: 'lib/alpha.ts', status: 'added', sensitive: 'no', additions: 1, deletions: 0 },
-    { path: 'img.png', status: 'added', sensitive: 'no', additions: 0, deletions: 0 },
-  ];
-  const patch = [
-    'diff --git a/src/zeta.ts b/src/zeta.ts', 'index 1..2 100644', '--- a/src/zeta.ts', '+++ b/src/zeta.ts', '@@ -1,2 +1,3 @@', '-old', '+new', '+more', ' same',
-    'diff --git a/src/old.ts b/src/old.ts', 'deleted file mode 100644', '--- a/src/old.ts', '+++ /dev/null', '@@ -1,3 +0,0 @@', '-a', '-b', '-c',
-    'diff --git a/lib/alpha.ts b/lib/alpha.ts', 'new file mode 100644', '--- /dev/null', '+++ b/lib/alpha.ts', '@@ -0,0 +1 @@', '+alpha', '',
-  ].join('\n');
-  const counts = { files: 6, undeclared: 1, deleted: 1 };
-  const shown = detail(job('awaiting_review', { iteration: 2, ...counts }), {
-    iterations: [iteration(1, { files: [] }), iteration(2, { changed_files: 6, files })],
-  });
-  const page = await openJob(shown, (path) => {
-    if (path === 'api/jobs/app/T-1/iterations/2/patch') {
-      return patch;
-    }
-    return path.endsWith('/report') ? `# Report of ${path.split('/')[5]}\nDone.` : undefined;
-  }, undefined, [], '/changes');
-  assert.deepEqual([shownScreens(page), tabOf(page, 'changes').textContent, tabOf(page, 'changes').getAttribute('aria-selected')], [['scrChanges'], 'Changes (6) c', 'true']);
-  // The newest iteration, picked from the iterations.
-  assert.deepEqual(page.$('iteration-picker').querySelectorAll('button').map((button) => [button.textContent, button.getAttribute('aria-pressed')]), [
-    ['Iteration 1', 'false'], ['Iteration 2 · Fix 1', 'true'],
-  ]);
-  assert.equal(page.$('iteration-report').textContent, '# Report of 2\nDone.\n');
-  // The iteration's start and end in local time, the UTC moments on the <time> elements.
-  assert.equal(page.$('iteration-meta').textContent, '2026-11-01 12:00:01 – 2026-11-01 12:05:00, cost $0.5000, 6 changed file(s), 0 denial(s)');
-  assert.deepEqual(page.$('iteration-meta').all().map((element) => element.getAttribute('datetime')), [META.started_at, META.ended_at]);
-  assert.equal(page.$('files-summary').textContent, 'Files 6 · 1 sensitive undeclared · 1 deleted');
-  const items = elements(page, 'files-list');
-  assert.deepEqual(items.filter((item) => item.className === 'file-group').map((item) => item.textContent), ['Sensitive, undeclared', 'Sensitive, declared', 'Deleted', 'Changed']);
-  const rows = items.filter((item) => item.className !== 'file-group').map((item) => item.children[0] as FakeElement);
-  assert.deepEqual(rows.map((row) => row.dataset.path), ['.github/workflows/ci.yml', 'package.json', 'src/old.ts', 'lib/alpha.ts', 'img.png', 'src/zeta.ts']);
-  assert.equal(rows[0]!.textContent, 'ci.yml.github/workflowssensitive, undeclared+5 −0');
-  assert.equal(rows[2]!.textContent, 'old.tssrcdeleted+0 −3');
-  assert.ok(rows[1]!.all().some((element) => element.className === 'file-label declared'));
-
-  // The Patch, one block per file, as text with its lines coloured.
-  const blocks = elements(page, 'patch-body');
-  assert.deepEqual(blocks.map((block) => block.dataset.path), ['src/zeta.ts', 'src/old.ts', 'lib/alpha.ts']);
-  assert.equal(page.$('patch-body').textContent, `${patch}\n`);
-  assert.deepEqual(blocks[0]!.all().map((element) => element.className).slice(0, 6), ['file', 'file', 'file', 'file', 'hunk', 'del']);
-  assert.equal(gets(page, 'api/jobs/app/T-1/iterations/2/patch').length, 1);
-
-  // A file click marks the row and its diff and scrolls the diff into view.
-  rows[5]!.click();
-  assert.deepEqual(blocks.map((block) => [block.getAttribute('aria-current'), block.scrolledIntoView]), [['true', 1], ['false', 0], ['false', 0]]);
-  assert.deepEqual(rows.map((row) => row.getAttribute('aria-current')), ['false', 'false', 'false', 'false', 'false', 'true']);
-  assert.equal(page.$('patch-note').textContent, '');
-  rows[2]!.click();
-  assert.deepEqual(blocks.map((block) => block.scrolledIntoView), [1, 1, 0]);
-  // A file the Patch omits says so.
-  rows[4]!.click();
-  assert.equal(page.$('patch-note').textContent, 'The Patch omits img.png: a binary file, or beyond the Patch size limit.');
-  assert.ok(blocks.every((block) => block.getAttribute('aria-current') === 'false'));
-
-  // A job event redraws nothing it has drawn; the Patch is read once.
-  await show(page, shown);
-  assert.equal(elements(page, 'patch-body')[0], blocks[0]);
-  assert.equal(gets(page, 'api/jobs/app/T-1/iterations/2/patch').length, 1);
-
-  // An older iteration, picked: its own Report and Patch; no files.
-  page.$('iteration-picker').querySelectorAll('button')[0]!.click();
-  await page.flush();
-  assert.equal(page.$('iteration-report').textContent, '# Report of 1\nDone.\n');
-  assert.deepEqual([page.$('no-files').hidden, page.$('no-files').textContent], [false, 'No files changed.']);
-  // An iteration published before the file list says so; no iteration yet says that.
-  await show(page, detail(job('awaiting_review'), { iterations: [iteration(1)] }));
-  assert.match(page.$('no-files').textContent, /published before the file list existed/);
-  await show(page, detail(job('working', { iteration: 0 })));
-  assert.deepEqual([page.$('no-iterations').hidden, page.$('changes-body').hidden], [false, true]);
+// SF-079: the Changes screen replaced the old Changes view: none of its elements is left, and the
+// tab's count is still job.files. The screen itself is tested in dashboard-changes-client.test.ts.
+test('job client: the old Changes view is gone; Changes (N) counts job.files; the screen reads the changes route', async () => {
+  const shown = detail(job('awaiting_review', { iteration: 1, files: 4 }), { iterations: [iteration(1)] });
+  const page = await openJob(shown, (path) => (path === 'api/jobs/app/T-1/changes' ? { base: { ref: 'main', commit: null }, iterations: [] } : undefined), undefined, [], '/changes');
+  for (const id of ['no-iterations', 'changes-body', 'iteration-picker', 'iteration-meta', 'report-box', 'iteration-report', 'files-summary', 'no-files', 'files-list', 'patch-note', 'patch-body']) {
+    assert.equal(page.document.getElementById(id), null, id);
+  }
+  assert.deepEqual([shownScreens(page), tabOf(page, 'changes').textContent], [['scrChanges'], 'Changes (4) c']);
+  assert.equal(gets(page, 'api/jobs/app/T-1/changes').length, 1);
+  assert.equal(page.requests.filter((request) => /\/iterations\/\d+\/patch$/.test(request.path)).length, 0);
 });
 
 const clipboardOf = (fail = false) => {

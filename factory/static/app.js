@@ -7,9 +7,10 @@
 // page at #<ws>/<ticket>/ticket (its Task in the drawer until SF-081). The job's page (SF-078): its
 // header with the screen switch, and the Stream, one chronological list of the job's entries
 // (SF-082: read page by page from api/jobs/<ws>/<ticket>/stream, then live from the stream's entries
-// events), with its stop block and the composer pinned at the bottom; the Changes and Merge request
-// screens show the old Changes and MR views until SF-079 and SF-080. The board's messages go to the
-// toast. The job's actions (approve, abort, say, Retry review, Accept and prepare MR, Simplify,
+// events), with its stop block and the composer pinned at the bottom; the Changes screen (SF-079):
+// the file tree and the side-by-side or unified diff of an iteration's files, read from
+// api/jobs/<ws>/<ticket>/changes and /file; the Merge request screen shows the old MR view until
+// SF-080. The board's messages go to the toast. The job's actions (approve, abort, say, Retry review, Accept and prepare MR, Simplify,
 // settle, Pause, Resume, Restart, archive and the merge request on the Git host, SF-048) go as POSTs
 // to api/jobs/<ws>/<ticket>/<action>, each one a deliberate click, confirmed inline where it pushes,
 // ends, overrides or merges, never retried or replayed by the page. A Queue card starts its job
@@ -87,14 +88,10 @@ const state = {
   jobs: [],
   key: null, // "<ws>/<ticket>" of the job open on its page
   detail: null,
-  iteration: null, // the iteration selected in Changes
   cache: new Map(), // "<n>/<view>" -> text, for the selected job
-  // "<key>/<n>" of the Report and Patch drawn in Changes; "<iteration>/<path>" of the file a click
-  // or a path link marked, and whether to scroll to it once drawn; the implement prompt's Task
+  // The Changes screen's data of the selected job (SF-079, cxData); the implement prompt's Task
   // (its stamp, the Task text and its check); the MR text loaded.
-  drawn: null,
-  target: null,
-  scrollTarget: false,
+  cx: cxData(),
   taskView: null,
   mrText: null,
   source: null,
@@ -459,129 +456,11 @@ async function checkTicket(row) {
     ({ level: 'ok', text: `Checking ${key}: a read-only Claude session reads the Task file and the repository; the card shows the verdict when it ends. It only advises: Start stays yours.` }));
 }
 
-// ---------- The Changes screen: the old Changes view until SF-079 ----------
+// ---------- The Changes screen (SF-079): the prototype's file tree, diff pane and iteration selector ----------
 
-function renderChanges(detail) {
-  const iterations = detail.iterations;
-  $('no-iterations').hidden = iterations.length > 0;
-  $('changes-body').hidden = iterations.length === 0;
-  $('iteration-picker').hidden = iterations.length < 2;
-  $('iteration-picker').replaceChildren(...iterations.map((iteration) => {
-    const button = el('button', '', iteration.number > 1 ? `Iteration ${iteration.number} · Fix ${iteration.number - 1}` : `Iteration ${iteration.number}`);
-    button.type = 'button';
-    button.dataset.iteration = String(iteration.number);
-    button.setAttribute('aria-pressed', String(iteration.number === state.iteration));
-    button.addEventListener('click', () => {
-      state.iteration = iteration.number;
-      state.target = null;
-      renderChanges(state.detail);
-      void showIteration();
-    });
-    return button;
-  }));
-  const meta = iterationOf(detail, state.iteration);
-  if (meta === null) {
-    $('iteration-meta').textContent = '';
-    $('files-list').replaceChildren();
-    return;
-  }
-  const cost = typeof meta.cost_usd === 'number' ? `$${meta.cost_usd.toFixed(4)}` : 'n/a';
-  $('iteration-meta').replaceChildren(timeEl(meta.started_at), ' – ', timeEl(meta.ended_at), `, cost ${cost}, ` +
-    `${meta.changed_files} changed file(s), ${meta.denials} denial(s)${meta.patch_truncated ? ', patch truncated' : ''}`);
-  renderFiles(meta);
-}
-
-// Report: preformatted, Markdown headings bold.
+// Report: preformatted, Markdown headings bold (the Stream's changes entries and the MR text).
 function renderReport(text) {
   return text.split('\n').map((line) => el('span', /^#{1,6}\s/.test(line) ? 'heading' : '', `${line}\n`));
-}
-
-// Patch: preformatted, + and - lines coloured, file headers bold.
-function renderPatch(text) {
-  return text.split('\n').map((line) => {
-    let className = '';
-    if (/^(diff --git |\+\+\+ |--- |index |new file mode |deleted file mode |rename |similarity |Binary files )/.test(line)) {
-      className = 'file';
-    } else if (line.startsWith('@@')) {
-      className = 'hunk';
-    } else if (line.startsWith('+')) {
-      className = 'add';
-    } else if (line.startsWith('-')) {
-      className = 'del';
-    }
-    return el('span', className, `${line}\n`);
-  });
-}
-
-// The file of the list a Patch header belongs to; null for none.
-function headerPath(header, files) {
-  for (const file of files) {
-    if (header === `diff --git a/${file.path} b/${file.path}` || (typeof file.from === 'string' && header === `diff --git a/${file.from} b/${file.path}`) ||
-      (header.startsWith('diff --git "a/') && header.endsWith(` "b/${file.path}"`))) {
-      return file.path;
-    }
-  }
-  return null;
-}
-
-// The Patch in one block per file, each knowing its path, so a click in the list can find it.
-function patchSections(text, files) {
-  const sections = [];
-  let current = null;
-  for (const line of text.split('\n')) {
-    if (current === null || line.startsWith('diff --git ')) {
-      current = { path: line.startsWith('diff --git ') ? headerPath(line, files) : null, lines: [] };
-      sections.push(current);
-    }
-    current.lines.push(line);
-  }
-  return sections.filter((section) => section.lines.some((line) => line !== ''));
-}
-
-// The Report and the Patch of the selected iteration, loaded once and drawn once per iteration; a
-// path link's file is scrolled to once its Patch is drawn.
-async function showIteration() {
-  const key = state.key;
-  const meta = state.detail === null ? null : iterationOf(state.detail, state.iteration);
-  if (meta === null) {
-    state.drawn = null;
-    $('iteration-report').replaceChildren();
-    $('patch-body').replaceChildren();
-    $('patch-note').textContent = '';
-    return;
-  }
-  const id = `${key}/${meta.number}`;
-  if (state.drawn === id) {
-    markTarget(state.scrollTarget);
-    state.scrollTarget = false;
-    return;
-  }
-  state.drawn = id;
-  $('iteration-report').replaceChildren(document.createTextNode('Loading the Report…'));
-  $('patch-body').replaceChildren(document.createTextNode('Loading the Patch…'));
-  $('patch-note').textContent = '';
-  // Each is drawn when it arrives, if the iteration is still the one shown.
-  const current = () => state.drawn === id && state.iteration === meta.number;
-  void iterationText(key, meta.number, 'report').then((report) => {
-    if (report !== undefined && current()) {
-      $('iteration-report').replaceChildren(...renderReport(report));
-    }
-  });
-  const patch = await iterationText(key, meta.number, 'patch');
-  if (patch === undefined || !current()) {
-    return;
-  }
-  const files = Array.isArray(meta.files) ? meta.files : [];
-  $('patch-body').replaceChildren(...patchSections(patch, files).map((section) => {
-    const block = el('span', 'patch-file');
-    if (section.path !== null) {
-      block.dataset.path = section.path;
-    }
-    block.append(...renderPatch(section.lines.join('\n')));
-    return block;
-  }));
-  markTarget(state.scrollTarget);
-  state.scrollTarget = false;
 }
 
 // The Report or the Patch of an iteration, loaded once per job; undefined when the selection
@@ -603,134 +482,504 @@ async function iterationText(key, number, view) {
   return text;
 }
 
-// The rows of the file list in order: undeclared sensitive, declared sensitive, deleted, the rest
-// by file name; each row knows its group label.
-function fileRows(files) {
-  const name = (file) => file.path.slice(file.path.lastIndexOf('/') + 1);
-  const byName = (a, b) => name(a).localeCompare(name(b)) || a.path.localeCompare(b.path);
-  const undeclared = files.filter((file) => file.sensitive === 'undeclared').sort(byName);
-  const declared = files.filter((file) => file.sensitive === 'declared').sort(byName);
-  const deleted = files.filter((file) => file.sensitive === 'no' && file.status === 'deleted').sort(byName);
-  const rest = files.filter((file) => file.sensitive === 'no' && file.status !== 'deleted').sort(byName);
-  return [
-    ...undeclared.map((file) => ({ file, group: 'Sensitive, undeclared' })),
-    ...declared.map((file) => ({ file, group: 'Sensitive, declared' })),
-    ...deleted.map((file) => ({ file, group: 'Deleted' })),
-    ...rest.map((file) => ({ file, group: 'Changed' })),
-  ];
-}
-
-function renderFiles(meta) {
-  const files = Array.isArray(meta.files) ? meta.files : null;
-  $('no-files').hidden = files !== null && files.length > 0;
-  $('no-files').textContent = files === null ? 'This iteration was published before the file list existed; the Report lists its files.' : 'No files changed.';
-  const undeclared = (files ?? []).filter((file) => file.sensitive === 'undeclared').length;
-  const outside = (files ?? []).filter((file) => file.scope === 'out').length;
-  const deleted = (files ?? []).filter((file) => file.status === 'deleted').length;
-  const parts = [`Files ${(files ?? []).length}`];
-  if (undeclared > 0) {
-    parts.push(`${undeclared} sensitive undeclared`);
-  }
-  if (outside > 0) {
-    parts.push(`${outside} out of scope`);
-  }
-  if (deleted > 0) {
-    parts.push(`${deleted} deleted`);
-  }
-  $('files-summary').textContent = parts.join(' · ');
-  let group = null;
-  const items = [];
-  for (const { file, group: label } of fileRows(files ?? [])) {
-    if (label !== group) {
-      group = label;
-      items.push(el('li', 'file-group', label));
+// localStorage as the prototype's store: a browser that refuses it keeps the default.
+const store = {
+  get(name) {
+    try {
+      return localStorage.getItem(name);
+    } catch {
+      return null;
     }
-    items.push(fileRow(meta, file));
-  }
-  $('files-list').replaceChildren(...items);
+  },
+  set(name, value) {
+    try {
+      localStorage.setItem(name, value);
+    } catch {
+      // none
+    }
+  },
+};
+const DIFF_MODE_KEY = 'sf-diff-mode';
+
+// The Changes data of the job shown, read from the server: the index of api/jobs/<key>/changes and
+// the stamp (the job's iteration and state) it was read for, the stamp being read; the file lists
+// per view ("<from>|<to>"), the sides of the files per "<side>|<path>" (side "base:<N>" or "<N>"),
+// each 'loading', the answer or { error }; the line diffs per pair of sides; whether the tree takes
+// the focus once its list arrives.
+function cxData() {
+  return { index: null, stamp: null, loading: null, lists: new Map(), sides: new Map(), diffs: new Map(), focusTree: false };
 }
 
-function fileRow(meta, file) {
-  const item = el('li');
-  const row = el('button', `file-row s-${file.status}`);
-  row.type = 'button';
-  row.dataset.path = file.path;
-  const slash = file.path.lastIndexOf('/');
-  row.append(el('span', 'file-name', file.path.slice(slash + 1)));
-  if (slash >= 0) {
-    row.append(el('span', 'file-dir', file.path.slice(0, slash)));
+// Reads path into map at id once; done runs when it arrives for the same job's data.
+function cxGet(map, id, path, done) {
+  if (map.has(id)) {
+    return map.get(id);
   }
-  if (file.status === 'renamed' && typeof file.from === 'string') {
-    row.append(el('span', 'file-dir', `← ${file.from}`));
-  }
-  const labels = el('span', 'file-labels');
-  if (file.sensitive !== 'no') {
-    labels.append(el('span', `file-label ${file.sensitive}`, `sensitive, ${file.sensitive}`));
-  }
-  // Outside the Task's scope (SF-053); a file of a list without scope has none.
-  if (file.scope === 'out') {
-    labels.append(el('span', 'file-label out-of-scope', 'out of scope'));
-  }
-  if (file.status === 'deleted') {
-    labels.append(el('span', 'file-label deleted', 'deleted'));
-  }
-  const counts = el('span', 'file-counts');
-  counts.append(el('span', 'add', `+${file.additions}`), document.createTextNode(' '), el('span', 'del', `−${file.deletions}`));
-  labels.append(counts);
-  row.append(labels);
-  row.setAttribute('aria-current', String(state.target === `${meta.number}/${file.path}`));
-  row.addEventListener('click', () => {
-    state.target = `${meta.number}/${file.path}`;
-    markTarget(true);
+  map.set(id, 'loading');
+  const data = state.cx;
+  getText(path).then((text) => JSON.parse(text)).catch((error) => ({ error: error.message })).then((value) => {
+    if (state.cx === data && map.get(id) === 'loading') {
+      map.set(id, value);
+      done();
+    }
   });
-  item.append(row);
-  return item;
+  return 'loading';
 }
 
-// Marks the clicked file in the list and its diff in the Patch, and scrolls the diff into view;
-// a file the Patch omits says so.
-function markTarget(scroll) {
-  const prefix = `${state.iteration}/`;
-  const path = state.target !== null && state.target.startsWith(prefix) ? state.target.slice(prefix.length) : null;
-  for (const row of $('files-list').querySelectorAll('button')) {
-    row.setAttribute('aria-current', String(path !== null && row.dataset.path === path));
+// The index of the job's iterations, read again when the job's iteration or state changes (a new
+// iteration, a rebase); the one read before stays shown until the new one arrives. A new index
+// whose bases differ from the old one's drops the lists and sides read against them.
+function cxIndex() {
+  const job = shownJob();
+  const data = state.cx;
+  const stamp = `${job.iteration}|${job.state}`;
+  if (data.stamp !== stamp && data.loading !== stamp) {
+    data.loading = stamp;
+    const key = state.key;
+    getText(`api/jobs/${jobPath(key)}/changes`).then((text) => JSON.parse(text)).catch((error) => ({ error: error.message })).then((index) => {
+      if (state.cx !== data || data.loading !== stamp) {
+        return;
+      }
+      const bases = (value) => (Array.isArray(value?.iterations) ? value.iterations.map((iteration) => iteration.base_commit) : []);
+      const fresh = bases(index);
+      if (bases(data.index).some((base, at) => fresh[at] !== base)) {
+        data.lists.clear();
+        data.sides.clear();
+        data.diffs.clear();
+      }
+      data.loading = null;
+      data.stamp = stamp;
+      data.index = index;
+      if (ui.screen === 'changes' && ui.job === key) {
+        renderChanges(data.focusTree || ($('tlist')?.contains(document.activeElement) ?? false));
+      }
+    });
   }
-  let found = false;
-  const blocks = [...$('patch-body').children].filter((block) => block.nodeType === 1);
-  for (const block of blocks) {
-    const on = path !== null && block.dataset.path === path;
-    block.setAttribute('aria-current', String(on));
-    if (on) {
-      found = true;
-      if (scroll && typeof block.scrollIntoView === 'function') {
-        block.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  return data.index;
+}
+
+function itersOf() {
+  const index = state.cx.index;
+  return index !== null && Array.isArray(index.iterations) ? index.iterations : [];
+}
+
+// The pair of a view: All changes is the last iteration's base against it, Iteration 1 its base
+// against it, Iteration N iteration N - 1 against N.
+function viewPair(view) {
+  const its = itersOf();
+  const to = view === 'all' ? its[its.length - 1].n : view;
+  return [view === 'all' || to === 1 ? 'base' : to - 1, to];
+}
+
+// The file list of a view: 'loading', { error } or { files, more }.
+function listOf(view) {
+  const [from, to] = viewPair(view);
+  return cxGet(state.cx.lists, `${from}|${to}`, `api/jobs/${jobPath(state.key)}/changes?from=${from}&to=${to}`, () => {
+    if (ui.screen === 'changes') {
+      renderChanges(state.cx.focusTree);
+    }
+  });
+}
+
+function changeSet(view) {
+  const list = itersOf().length === 0 ? null : listOf(view ?? 'all');
+  return list !== null && Array.isArray(list.files) ? list.files : [];
+}
+
+// The two sides of a view, as the file route names them: "base:<N>" (the base of iteration N) or "<N>".
+function sidesOf(view) {
+  const [from, to] = viewPair(view);
+  return [from === 'base' ? `base:${to}` : String(from), String(to)];
+}
+
+function sideOf(side, path) {
+  const [at, of] = side.startsWith('base:') ? ['base', side.slice(5)] : [side, null];
+  return cxGet(state.cx.sides, `${side}|${path}`, `api/jobs/${jobPath(state.key)}/file?at=${at}${of === null ? '' : `&of=${of}`}&path=${encodeURIComponent(path)}`, () => {
+    if (ui.screen === 'changes') {
+      renderDiffPane();
+    }
+  });
+}
+
+// The lines of one side ("<side>|<path>"): none when the file is absent there.
+const linesOf = (id) => {
+  const version = state.cx.sides.get(id);
+  if (version?.kind !== 'text') {
+    return [];
+  }
+  const ls = version.text.split('\n');
+  if (ls.length && ls[ls.length - 1] === '') {
+    ls.pop();
+  }
+  return ls;
+};
+
+// ---- line diff (Myers, with common prefix and suffix trimmed first), the prototype's. One change:
+// off is max + 1 (the prototype's max), so the trace's slice at d = max starts at 0, not at -1 (a
+// one-line replacement read the wrong trace).
+function myers(A, B) {
+  const N = A.length, M = B.length;
+  if (!N) return B.map((_, j) => ['+', -1, j]);
+  if (!M) return A.map((_, i) => ['-', i, -1]);
+  const max = N + M, off = max + 1, V = new Int32Array(2 * max + 3), trace = [];
+  for (let d = 0; d <= max; d++) {
+    if (d > 2500) return [...A.map((_, i) => ['-', i, -1]), ...B.map((_, j) => ['+', -1, j])];
+    trace.push(V.slice(off - d - 1, off + d + 2));
+    for (let k = -d; k <= d; k += 2) {
+      let x = (k === -d || (k !== d && V[off + k - 1] < V[off + k + 1])) ? V[off + k + 1] : V[off + k - 1] + 1;
+      let y = x - k;
+      while (x < N && y < M && A[x] === B[y]) { x++; y++; }
+      V[off + k] = x;
+      if (x >= N && y >= M) {
+        const ops = []; let cx = N, cy = M;
+        for (let dd = d; dd >= 0; dd--) {
+          const v = trace[dd], at = (kk) => v[kk + dd + 1];
+          const kk = cx - cy;
+          const pk = (kk === -dd || (kk !== dd && at(kk - 1) < at(kk + 1))) ? kk + 1 : kk - 1;
+          const px = dd === 0 ? 0 : at(pk), py = px - pk;
+          while (cx > px && cy > py) { ops.push(['=', cx - 1, cy - 1]); cx--; cy--; }
+          if (dd > 0) { if (cx === px) ops.push(['+', -1, cy - 1]); else ops.push(['-', cx - 1, -1]); }
+          cx = px; cy = py;
+        }
+        return ops.reverse();
       }
     }
   }
-  const meta = state.detail === null ? null : iterationOf(state.detail, state.iteration);
-  const notes = [];
-  if (meta?.patch_truncated) {
-    notes.push('The Patch is cut at its size limit.');
+  return [];
+}
+function getDiff(f) {
+  const key = f.a + '|' + f.b;
+  if (state.cx.diffs.has(key)) return state.cx.diffs.get(key);
+  const A = linesOf(f.a), B = linesOf(f.b);
+  let s = 0; while (s < A.length && s < B.length && A[s] === B[s]) s++;
+  let ea = A.length, eb = B.length; while (ea > s && eb > s && A[ea - 1] === B[eb - 1]) { ea--; eb--; }
+  const mid = myers(A.slice(s, ea), B.slice(s, eb)).map(([t, i, j]) => [t, i < 0 ? -1 : i + s, j < 0 ? -1 : j + s]);
+  const ops = [];
+  for (let i = 0; i < s; i++) ops.push(['=', i, i]);
+  ops.push(...mid);
+  for (let i = 0; i < A.length - ea; i++) ops.push(['=', ea + i, eb + i]);
+  const d = { ops, A, B, add: ops.filter((o) => o[0] === '+').length, del: ops.filter((o) => o[0] === '-').length };
+  state.cx.diffs.set(key, d);
+  return d;
+}
+// The changed words of a line pair: the part between the common prefix and suffix, as nodes.
+function wordHl(a, b) {
+  let p = 0; while (p < a.length && p < b.length && a[p] === b[p]) p++;
+  let s = 0; while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+  const wrap = (t, cls) => { const m = t.slice(p, t.length - s); return [t.slice(0, p), ...(m ? [el('span', cls, m)] : []), t.slice(t.length - s)].filter((part) => part !== ''); };
+  return [wrap(a, 'w-del'), wrap(b, 'w-add')];
+}
+// The diff of a file as rows (the prototype's diffHtml, built as nodes): side-by-side or unified,
+// unchanged runs folded to "⋯ N unchanged lines" with 3 lines of context, none at the file's edges.
+function diffHtml(f) {
+  const d = getDiff(f); const { A, B, ops } = d;
+  const side = ui.cx.mode === 'side', C = 3;
+  const segs = [];
+  for (let i = 0; i < ops.length;) {
+    if (ops[i][0] === '=') { const s = { t: 'eq', rows: [] }; while (i < ops.length && ops[i][0] === '=') { s.rows.push(ops[i]); i++; } segs.push(s); }
+    else { const s = { t: 'chg', dels: [], adds: [] }; while (i < ops.length && ops[i][0] !== '=') { if (ops[i][0] === '-') s.dels.push(ops[i][1]); else s.adds.push(ops[i][2]); i++; } segs.push(s); }
   }
-  if (path !== null && !found && blocks.length > 0) {
-    notes.push(`The Patch omits ${path}: a binary file, or beyond the Patch size limit.`);
-  }
-  $('patch-note').textContent = notes.join(' ');
+  const ln = (n) => el('span', 'ln', n === null ? '' : String(n));
+  const cell = (cls, parts) => { const c = el('span', cls); c.append(...parts); return c; };
+  const rowOf = (cls, ...cells) => { const r = el('div', cls); r.append(...cells); return r; };
+  const eq = (o) => side ? rowOf('r', ln(o[1] + 1), el('span', 'c', A[o[1]]), ln(o[2] + 1), el('span', 'c', B[o[2]]))
+    : rowOf('r', ln(o[1] + 1), ln(o[2] + 1), el('span', 'sg'), el('span', 'c', A[o[1]]));
+  const rows = [];
+  segs.forEach((s, si) => {
+    if (s.t === 'eq') {
+      const fid = `${f.path}|${ui.cx.view}|${si}`;
+      const head = si === 0 ? 0 : C, tail = si === segs.length - 1 ? 0 : C;
+      if (ui.cx.collapse && !ui.cx.unfolded.has(fid) && s.rows.length > head + tail + 2) {
+        rows.push(...s.rows.slice(0, head).map(eq), button('fold', `⋯ ${s.rows.length - head - tail} unchanged lines`, { fold: fid }), ...s.rows.slice(s.rows.length - tail).map(eq));
+      } else rows.push(...s.rows.map(eq));
+      return;
+    }
+    const n = Math.max(s.dels.length, s.adds.length);
+    const pair = (k) => { const ai = s.dels[k], bi = s.adds[k]; return ai != null && bi != null && s.dels.length === s.adds.length ? wordHl(A[ai], B[bi]) : [ai != null ? [A[ai]] : [], bi != null ? [B[bi]] : []]; };
+    if (side) {
+      for (let k = 0; k < n; k++) { const ai = s.dels[k], bi = s.adds[k]; const [ah, bh] = pair(k);
+        rows.push(rowOf('r', ln(ai != null ? ai + 1 : null), cell(`c ${ai != null ? 'del' : 'void'}`, ah), ln(bi != null ? bi + 1 : null), cell(`c ${bi != null ? 'add' : 'void'}`, bh))); }
+    } else {
+      const hs = Array.from({ length: n }, (_, k) => pair(k));
+      s.dels.forEach((ai, k) => { rows.push(rowOf('r del', ln(ai + 1), ln(null), el('span', 'sg', '−'), cell('c', hs[k][0]))); });
+      s.adds.forEach((bi, k) => { rows.push(rowOf('r add', ln(null), ln(bi + 1), el('span', 'sg', '+'), cell('c', hs[k][1]))); });
+    }
+  });
+  const node = el('div', `dfile${side ? '' : ' uni'}`);
+  node.append(...(ops.length ? rows : [el('div', 'dempty', 'Empty file.')]));
+  return node;
 }
 
-// A path link of the Stream (the prototype's openChanges): the Changes screen at that iteration
-// and file; until SF-079 the old Changes view with the iteration selected and the file marked.
-function openChanges(path, it) {
-  if (ui.job === null) {
+// ---- the tree
+function visibleFiles() { const all = changeSet(ui.cx.view); const q = ui.cx.q.toLowerCase(); return { all, files: q ? all.filter((f) => f.path.toLowerCase().includes(q)) : all }; }
+function treeRows(files) {
+  if (ui.cx.flat) return files.map((f) => ({ id: 'f:' + f.path, type: 'file', f, depth: 0 }));
+  const root = { dirs: new Map(), files: [] };
+  for (const f of files) { const parts = f.path.split('/'); let n = root; for (const p of parts.slice(0, -1)) { if (!n.dirs.has(p)) n.dirs.set(p, { dirs: new Map(), files: [] }); n = n.dirs.get(p); } n.files.push(f); }
+  const count = (n) => n.files.length + [...n.dirs.values()].reduce((s, c) => s + count(c), 0);
+  const out = [];
+  const walk = (node, prefix, depth, parent) => {
+    for (const [name, child] of [...node.dirs].sort((a, b) => a[0].localeCompare(b[0]))) {
+      let nm = name, c = child, full = prefix + name;
+      while (c.files.length === 0 && c.dirs.size === 1) { const [n2, c2] = [...c.dirs][0]; nm += '/' + n2; full += '/' + n2; c = c2; }
+      const id = 'd:' + full;
+      out.push({ id, type: 'dir', path: full, name: nm, depth, count: count(c), parent, open: !ui.cx.collapsed.has(full) });
+      if (!ui.cx.collapsed.has(full)) walk(c, full + '/', depth + 1, id);
+    }
+    for (const f of [...node.files].sort((a, b) => a.path.localeCompare(b.path))) out.push({ id: 'f:' + f.path, type: 'file', f, depth, parent });
+  };
+  walk(root, '', 0, null);
+  return out;
+}
+const LETTER = { modified: 'M', added: 'A', deleted: 'D' };
+// One row of the tree: a folder (▾/▸, its name compacted, its file count) or a file (M/A/D, its
+// name, its folder in the flat list, a binary or unavailable tag, +a −d), its depth as --d.
+function rowHtml(r) {
+  const cur = ui.cx.cursor === r.id;
+  const li = el('li');
+  li.setAttribute('role', 'none');
+  let row;
+  if (r.type === 'dir') {
+    row = button(`trow dir${cur ? ' sel' : ''}`, '', { trow: r.id });
+    row.setAttribute('aria-expanded', String(r.open));
+    row.append(el('span', 'tw', r.open ? '▾' : '▸'), el('span', 'ic', '▤'), el('span', 'nm', r.name), el('span', 'cnt', String(r.count)));
+  } else {
+    const f = r.f, [dir, name] = splitPath(f.path);
+    row = button(`trow vcs-${f.status}${cur ? ' sel' : ''}`, '', { trow: r.id });
+    row.setAttribute('title', `${f.path} (${f.status})`);
+    row.append(el('span', 'tw'), el('span', 'lt', LETTER[f.status] ?? 'M'), el('span', 'nm', name));
+    if (ui.cx.flat) row.append(el('span', 'dn', dir));
+    if (f.unavailable) row.append(el('span', 'tag', 'unavailable'));
+    else if (f.binary) row.append(el('span', 'tag', 'binary'));
+    const cnt = el('span', 'cnt');
+    cnt.append(el('span', 'a', `+${f.additions}`), ' ', el('span', 'r', `−${f.deletions}`));
+    row.append(cnt);
+  }
+  row.setAttribute('role', 'treeitem');
+  row.setAttribute('tabindex', cur ? '0' : '-1');
+  row.style.setProperty('--d', String(r.depth));
+  li.append(row);
+  return li;
+}
+function renderTree(focus) {
+  const { all, files } = visibleFiles();
+  const rows = treeRows(files);
+  ui.cx.rows = rows;
+  if (!rows.some((r) => r.id === ui.cx.cursor)) ui.cx.cursor = ui.cx.sel && rows.some((r) => r.id === 'f:' + ui.cx.sel) ? 'f:' + ui.cx.sel : rows.find((r) => r.type === 'file')?.id ?? rows[0]?.id ?? null;
+  const n = (s) => all.filter((f) => f.status === s).length;
+  let add = 0, del = 0; for (const f of all) { add += f.additions; del += f.deletions; }
+  const more = listOf(ui.cx.view)?.more === true;
+  $('cxsum').replaceChildren(el('b', '', `${all.length} files`), `: ${n('modified')} modified, ${n('added')} added, ${n('deleted')} deleted · `, el('span', 'a', `+${add}`), ' ', el('span', 'r', `−${del}`),
+    ...(files.length !== all.length ? [` · ${files.length} match`] : []), ...(more ? [' · the first 3000 files only'] : []));
+  // The focus stays in the tree when it was there: on the cursor's row.
+  const inTree = $('tlist').contains(document.activeElement);
+  $('tlist').replaceChildren(...(rows.length ? rows.map(rowHtml) : [el('li', 'dempty', 'No file matches the filter.')]));
+  const node = [...$('tlist').querySelectorAll('.trow')].find((row) => row.dataset.trow === ui.cx.cursor);
+  if (node) { node.scrollIntoView({ block: 'nearest' }); if (focus || inTree) node.focus(); }
+}
+function iterLabel(v) { const its = itersOf(); return v === 'all' ? `All changes (final${its.length ? ', after iteration ' + its[its.length - 1].n : ''})` : `Iteration ${v}${v > 1 ? ` (Fix ${v - 1})` : ''}`; }
+// A commit in a note, short (12 characters, as elsewhere on the page).
+const shortCommit = (commit) => commit.slice(0, 12);
+// The diff pane's toolbar (◀ ⇧F7, F7 ▶, the path, i/n · status, the iteration selector, the
+// layout, Collapse unchanged) and its body: the notes and the diff of the selected file, its two
+// sides read from the file route when it is selected.
+function renderDiffPane() {
+  if ($('dtool') === null) return;
+  const { files } = visibleFiles();
+  const f = files.find((x) => x.path === ui.cx.sel) || null;
+  const idx = f ? files.indexOf(f) : -1;
+  const its = itersOf();
+  const focused = document.activeElement?.id;
+  const prev = button('btn small', '◀ ', { fstep: '-1' });
+  prev.setAttribute('title', 'Previous file (Shift+F7 or p)');
+  prev.append(el('span', 'kbd', '⇧F7'));
+  prev.disabled = idx <= 0;
+  const next = button('btn small', '', { fstep: '1' });
+  next.setAttribute('title', 'Next file (F7 or n)');
+  next.append(el('span', 'kbd', 'F7'), ' ▶');
+  next.disabled = idx < 0 || idx >= files.length - 1;
+  const dpath = el('span', 'dpath', f ? f.path : 'No file selected');
+  dpath.setAttribute('title', f?.path || '');
+  const select = el('select');
+  select.id = 'cxview';
+  select.setAttribute('aria-label', 'Which changes');
+  for (const v of ['all', ...its.map((x) => x.n)]) {
+    const option = el('option', '', iterLabel(v));
+    option.value = String(v);
+    option.selected = ui.cx.view === v;
+    select.append(option);
+  }
+  select.value = String(ui.cx.view);
+  const seg = el('span', 'seg2');
+  seg.setAttribute('role', 'group');
+  seg.setAttribute('aria-label', 'Diff layout');
+  seg.append(button(ui.cx.mode === 'side' ? 'on' : '', 'Side-by-side', { mode: 'side' }), button(ui.cx.mode === 'uni' ? 'on' : '', 'Unified', { mode: 'uni' }));
+  const collapse = el('input');
+  collapse.type = 'checkbox';
+  collapse.id = 'cxcollapse';
+  collapse.checked = ui.cx.collapse;
+  const label = el('label');
+  label.append(collapse, ' Collapse unchanged');
+  $('dtool').replaceChildren(prev, next, dpath, ...(f ? [el('span', 'muted fs12', `${idx + 1}/${files.length} · ${f.status}`)] : []), el('span', 'sp'), select, seg, label);
+  if (focused === 'cxview' || focused === 'cxcollapse') $(focused).focus();
+  const body = $('dbody');
+  if (!f) { body.replaceChildren(el('div', 'dempty', listOf(ui.cx.view) === 'loading' ? 'Loading…' : 'Select a file on the left.')); return; }
+  const notes = [];
+  if (f.status === 'deleted') notes.push(el('div', 'dnote', 'Deleted file: the old content, all removed.'));
+  else if (f.status === 'added') notes.push(el('div', 'dnote', 'New file: all added.'));
+  // A conflict-resolved rebase between iteration N - 1 and N: this view also shows the upstream changes.
+  if (ui.cx.view !== 'all' && ui.cx.view > 1) {
+    const before = its.find((x) => x.n === ui.cx.view - 1)?.base_commit, after = its.find((x) => x.n === ui.cx.view)?.base_commit;
+    if (before && after && before !== after) notes.push(el('div', 'dnote', `The base moved from ${shortCommit(before)} to ${shortCommit(after)} before iteration ${ui.cx.view}: this view also shows those upstream changes.`));
+  }
+  const [a, b] = sidesOf(ui.cx.view);
+  const versions = [sideOf(a, f.path), sideOf(b, f.path)];
+  const message = (text) => { body.replaceChildren(...notes, el('div', 'dempty', text)); body.scrollTop = 0; };
+  if (versions.includes('loading')) return message('Loading…');
+  const failed = versions.find((v) => typeof v?.error === 'string');
+  if (failed) return message(`Could not load the file: ${failed.error}`);
+  const unavailable = versions.find((v) => v.kind === 'unavailable');
+  if (unavailable) return message(unavailable.reason);
+  if (f.binary || versions.some((v) => v.kind === 'binary')) return message('Binary file: not shown.');
+  if (versions.some((v) => v.kind === 'too_large')) return message('Larger than 1 MiB: not shown.');
+  if (f.unavailable) return message('This file is not available.');
+  if (f.status === 'modified' && ui.cx.mode === 'side') {
+    const split = el('div', 'dnote split');
+    split.append(el('span', '', `Before (${ui.cx.view === 'all' || ui.cx.view === 1 ? state.cx.index.base?.ref ?? '' : 'iteration ' + (ui.cx.view - 1)})`),
+      el('span', '', `After (iteration ${ui.cx.view === 'all' ? its[its.length - 1].n : ui.cx.view})`));
+    notes.push(split);
+  }
+  body.replaceChildren(...notes, diffHtml({ path: f.path, a: `${a}|${f.path}`, b: `${b}|${f.path}` }));
+  body.scrollTop = 0;
+}
+// The Changes screen: the empty states, else the tree, the divider and the diff pane, built once
+// and redrawn in place.
+function renderChanges(focusTree) {
+  const job = shownJob(); const node = $('scrChanges');
+  if (job === null) return;
+  const index = cxIndex();
+  const notice = (text) => { node.replaceChildren(el('div', 'dempty span', text)); };
+  if (index === null) return notice('Loading…');
+  if (typeof index.error === 'string') return notice(`Could not load the changes: ${index.error}`);
+  const its = itersOf();
+  if (!its.length) return notice(`No iteration has ended yet. The changes appear here when the Implementer finishes iteration ${shownIteration(job) || 1}; until then its edits are in the stream.`);
+  if (ui.cx.view !== 'all' && !its.some((x) => x.n === ui.cx.view)) ui.cx.view = 'all';
+  if (node.querySelector('#tlist') === null) {
+    const q = el('input', 'ffq');
+    q.id = 'cxq';
+    q.type = 'search';
+    q.setAttribute('placeholder', 'Filter files (/)');
+    q.setAttribute('aria-label', 'Filter files');
+    const seg = el('span', 'seg2');
+    seg.setAttribute('role', 'group');
+    seg.setAttribute('aria-label', 'Tree layout');
+    seg.append(button('', 'Group by directory', { flat: '0' }), button('', 'Flat list', { flat: '1' }));
+    const row = el('div', 'row');
+    row.append(seg);
+    const sum = el('div', 'sum');
+    sum.id = 'cxsum';
+    const tb = el('div', 'tb');
+    tb.append(q, row, sum);
+    const list = el('ul', 'tlist');
+    list.id = 'tlist';
+    list.setAttribute('role', 'tree');
+    list.setAttribute('aria-label', 'Changed files');
+    const tree = el('div', 'tree');
+    tree.append(tb, list);
+    const vdiv = el('div', 'vdiv');
+    vdiv.id = 'vdiv';
+    vdiv.setAttribute('role', 'separator');
+    vdiv.setAttribute('aria-orientation', 'vertical');
+    vdiv.setAttribute('aria-label', 'Resize the file tree');
+    vdiv.setAttribute('tabindex', '0');
+    const tool = el('div', 'dtool');
+    tool.id = 'dtool';
+    const body = el('div', 'dbody');
+    body.id = 'dbody';
+    body.setAttribute('tabindex', '-1');
+    const pane = el('div', 'dpane');
+    pane.append(tool, body);
+    node.replaceChildren(tree, vdiv, pane);
+  }
+  $('cxq').value = ui.cx.q;
+  node.querySelectorAll('[data-flat]').forEach((b) => b.classList.toggle('on', (b.dataset.flat === '1') === ui.cx.flat));
+  const list = listOf(ui.cx.view);
+  if (list === 'loading' || typeof list?.error === 'string') {
+    $('cxsum').textContent = '';
+    $('tlist').replaceChildren(el('li', 'dempty', list === 'loading' ? 'Loading…' : `Could not load the files: ${list.error}`));
+    renderDiffPane();
     return;
   }
-  const number = it === null || it === undefined || it === '' ? null : Number(it);
-  if (number !== null && Number.isInteger(number)) {
-    state.iteration = number;
+  // A path link's file that did not change in its iteration: All changes.
+  if (ui.cx.check !== null) {
+    const path = ui.cx.check;
+    ui.cx.check = null;
+    if (ui.cx.view !== 'all' && !list.files.some((f) => f.path === path)) {
+      ui.cx.view = 'all';
+      return renderChanges(focusTree);
+    }
   }
-  state.target = path !== null && path !== undefined && number !== null ? `${number}/${path}` : null;
-  state.scrollTarget = state.target !== null;
+  const { files } = visibleFiles();
+  if (!ui.cx.sel || !files.some((f) => f.path === ui.cx.sel)) ui.cx.sel = files[0]?.path ?? null;
+  ui.cx.cursor = ui.cx.sel ? 'f:' + ui.cx.sel : ui.cx.cursor;
+  state.cx.focusTree = false;
+  renderTree(focusTree); renderDiffPane();
+}
+function selectRow(id, focus) {
+  ui.cx.cursor = id;
+  if (id && id.startsWith('f:')) { const p = id.slice(2); if (p !== ui.cx.sel) { ui.cx.sel = p; renderDiffPane(); } }
+  renderTree(focus);
+}
+// The tree's keys: Up and Down move, Left closes a folder or goes to the parent, Right opens a
+// folder or goes into it, Enter opens or closes a folder, or shows the file's diff.
+function treeKey(ev) {
+  const rows = ui.cx.rows || []; const i = rows.findIndex((r) => r.id === ui.cx.cursor); const r = rows[i];
+  if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') { ev.preventDefault(); const n = rows[Math.max(0, Math.min(rows.length - 1, i + (ev.key === 'ArrowDown' ? 1 : -1)))]; if (n) selectRow(n.id, true); return true; }
+  if (!r) return false;
+  if (ev.key === 'ArrowLeft') { ev.preventDefault(); if (r.type === 'dir' && r.open) { ui.cx.collapsed.add(r.path); renderTree(true); } else if (r.parent) selectRow(r.parent, true); return true; }
+  if (ev.key === 'ArrowRight') { ev.preventDefault(); if (r.type === 'dir' && !r.open) { ui.cx.collapsed.delete(r.path); renderTree(true); } else if (r.type === 'dir') { const n = rows[i + 1]; if (n) selectRow(n.id, true); } return true; }
+  if (ev.key === 'Enter') { ev.preventDefault(); if (r.type === 'dir') { if (r.open) ui.cx.collapsed.add(r.path); else ui.cx.collapsed.delete(r.path); renderTree(true); } else { selectRow(r.id, false); $('dbody').focus(); } return true; }
+  return false;
+}
+// F7 / Shift+F7 and n / p: the next or previous file of the list, the folders on the way opened.
+function fileStep(d) {
+  const { files } = visibleFiles();
+  const i = files.findIndex((f) => f.path === ui.cx.sel); const n = files[i + d];
+  if (!n) return toast({ level: 'info', text: d > 0 ? 'Last file' : 'First file' });
+  for (const r of (ui.cx.rows || [])) if (r.type === 'dir' && n.path.startsWith(r.path + '/')) ui.cx.collapsed.delete(r.path);
+  selectRow('f:' + n.path, false);
+}
+// Open the Changes screen on a file, at an iteration when that file changed in it (All changes
+// otherwise, decided once that iteration's list is read), the folders on the way opened.
+function openChanges(path, it) {
+  if (ui.job === null) return;
+  ui.cx.q = '';
+  let view = it ? Number(it) : 'all';
+  if (!Number.isInteger(view) || view < 1) view = 'all';
+  if (state.cx.index !== null && !itersOf().some((x) => x.n === view)) view = 'all';
+  ui.cx.view = view;
+  ui.cx.check = path && view !== 'all' ? path : null;
+  if (path) { ui.cx.sel = path; for (const p of [...ui.cx.collapsed]) if (path.startsWith(p + '/')) ui.cx.collapsed.delete(p); }
   go(ui.job, 'changes');
+}
+// The divider between the tree and the diff: dragged with the pointer, Arrow Left and Right with
+// the keyboard; the width (--tree-w on the page) is kept for the page's life.
+let treeW = 320;
+function treeWidth(width) {
+  treeW = Math.round(width);
+  document.documentElement.style.setProperty('--tree-w', `${treeW}px`);
+}
+function onDividerDown(ev) {
+  const d = typeof ev.target?.closest === 'function' ? ev.target.closest('#vdiv') : null; if (!d) return;
+  d.setPointerCapture?.(ev.pointerId); d.classList.add('drag');
+  const move = (e) => { const r = $('scrChanges').getBoundingClientRect(); treeWidth(Math.max(200, Math.min(r.width - 360, e.clientX - r.left))); };
+  const up = () => { d.classList.remove('drag'); d.removeEventListener('pointermove', move); d.removeEventListener('pointerup', up); };
+  d.addEventListener('pointermove', move); d.addEventListener('pointerup', up);
+}
+function dividerKey(ev) {
+  const tree = document.querySelector('#scrChanges .tree');
+  const w = typeof tree?.getBoundingClientRect === 'function' ? tree.getBoundingClientRect().width : treeW;
+  treeWidth(Math.max(200, w + (ev.key === 'ArrowLeft' ? -32 : 32)));
 }
 
 // One review item as a list entry: the path as code, the problem, and what is expected.
@@ -1818,20 +2067,16 @@ function renderComposer() {
 // ---------- The job's detail and its actions ----------
 
 function renderDetail(detail) {
-  const previous = state.detail;
   state.detail = detail;
-  const numbers = detail.iterations.map((iteration) => iteration.number);
-  const newest = numbers.length > 0 ? numbers[numbers.length - 1] : null;
-  // Follow the newest iteration unless the user picked an older one.
-  const wasNewest = previous === null || state.iteration === null ||
-    state.iteration === previous.iterations[previous.iterations.length - 1]?.number;
-  if (wasNewest || !numbers.includes(state.iteration)) {
-    state.iteration = newest;
-  }
   renderHead();
-  renderChanges(detail);
+  // Changes reads its index again when the job's iteration or state moved; the screen stays as it
+  // is until the new index arrives.
   if (ui.screen === 'changes') {
-    void showIteration();
+    if ($('scrChanges').children.length === 0) {
+      renderChanges();
+    } else {
+      cxIndex();
+    }
   } else if (ui.screen === 'mr') {
     void showMr();
   }
@@ -3246,8 +3491,15 @@ function armToast() {
 // or a planned ticket's page 'ticket' (ui.ticket); ui.opener is the key of the card that opened
 // it; pending: the hash names a job or ticket not loaded yet. On the Stream: sel, the selected
 // entry (j, k, G), and open, the toggles open.
-// related: the card whose dependencies and dependents the board shows (SF-084), or null.
-const ui = { screen: 'board', job: null, ticket: null, opener: null, pending: false, sel: -1, open: new Set(), related: null };
+// related: the card whose dependencies and dependents the board shows (SF-084), or null. On
+// Changes (SF-079), cx as the prototype's: the view ('all' or an iteration), the selected file, the
+// tree's cursor and rows, the filter, the flat list, the closed folders, the diff layout ('side' or
+// 'uni', kept in localStorage), Collapse unchanged, the folds opened, and the path a path link
+// opened, checked against its iteration's list once it is read.
+const ui = {
+  screen: 'board', job: null, ticket: null, opener: null, pending: false, sel: -1, open: new Set(), related: null,
+  cx: { view: 'all', sel: null, cursor: null, rows: [], q: '', flat: false, collapsed: new Set(), mode: 'side', collapse: true, unfolded: new Set(), check: null },
+};
 
 // The URL hash of the view: #<ws>/<ticket> (the Stream), #<ws>/<ticket>/changes, /mr, /ticket;
 // a new one is a new history entry, so Back and Forward move between them.
@@ -3269,8 +3521,7 @@ function renderJobScreen() {
     return;
   }
   if (ui.screen === 'changes') {
-    renderChanges(state.detail);
-    void showIteration();
+    renderChanges();
   } else if (ui.screen === 'mr') {
     void showMr();
   }
@@ -3297,6 +3548,10 @@ function go(key, screen = 'stream', focus = undefined, confirm = undefined) {
   if (fresh) {
     ui.sel = -1;
     ui.open.clear();
+    ui.cx = { ...ui.cx, view: screen === 'changes' ? ui.cx.view : 'all', sel: screen === 'changes' ? ui.cx.sel : null, q: '', collapsed: new Set(), unfolded: new Set(), cursor: null, check: screen === 'changes' ? ui.cx.check : null };
+  }
+  if (screen !== 'changes') {
+    $('scrChanges').replaceChildren();
   }
   ui.screen = screen;
   ui.job = key;
@@ -3315,6 +3570,11 @@ function go(key, screen = 'stream', focus = undefined, confirm = undefined) {
   applyWantedFocus();
   if (screen === 'stream' && state.wantFocus === null && state.confirm === null) {
     $('streamwrap').focus();
+  } else if (screen === 'changes') {
+    // The selected row, now or once the list arrives.
+    const row = document.querySelector('#tlist .trow.sel');
+    state.cx.focusTree = row === null;
+    row?.focus();
   }
 }
 
@@ -3438,7 +3698,7 @@ function renderJobs() {
 // Stream and the composer) and the toast (the drawer keeps its own listeners until SF-081).
 function onClick(event) {
   const target = typeof event.target?.closest === 'function'
-    ? event.target.closest('[data-dep],[data-menu],[data-qact],[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-toggle],[data-act],[data-settle],[data-copy-branch],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived')
+    ? event.target.closest('[data-dep],[data-menu],[data-qact],[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-settle],[data-copy-branch],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived')
     : null;
   // An open ⋯ menu closes on any click but its own toggle (its items act, then it is closed).
   if (state.openMenu !== null && (target === null || target.dataset.menu === undefined)) {
@@ -3490,7 +3750,31 @@ function onClick(event) {
   } else if (target.dataset.cfile !== undefined) {
     openChanges(target.dataset.cfile, target.dataset.cit || null);
   } else if (target.dataset.changes !== undefined) {
+    ui.cx.sel = null;
     openChanges(null, target.dataset.changes);
+  } else if (target.dataset.fstep !== undefined) {
+    fileStep(Number(target.dataset.fstep));
+  } else if (target.dataset.trow !== undefined) {
+    // A click on the folder under the cursor opens or closes it.
+    const row = ui.cx.rows.find((x) => x.id === target.dataset.trow);
+    if (row?.type === 'dir' && ui.cx.cursor === row.id) {
+      if (row.open) ui.cx.collapsed.add(row.path);
+      else ui.cx.collapsed.delete(row.path);
+    }
+    selectRow(target.dataset.trow, true);
+  } else if (target.dataset.fold !== undefined) {
+    ui.cx.unfolded.add(target.dataset.fold);
+    const body = $('dbody');
+    const top = body.scrollTop;
+    renderDiffPane();
+    body.scrollTop = top;
+  } else if (target.dataset.mode !== undefined) {
+    ui.cx.mode = target.dataset.mode === 'uni' ? 'uni' : 'side';
+    store.set(DIFF_MODE_KEY, ui.cx.mode);
+    renderDiffPane();
+  } else if (target.dataset.flat !== undefined) {
+    ui.cx.flat = target.dataset.flat === '1';
+    renderChanges();
   } else if (target.dataset.toggle !== undefined) {
     toggle(target.dataset.toggle);
   } else if (target.dataset.act !== undefined) {
@@ -3520,6 +3804,27 @@ function onInput(event) {
     renderComposer();
   } else if (typeof target?.dataset?.note === 'string') {
     state.notes.set(noteKey(target.dataset.note), target.value);
+  } else if (target?.id === 'cxq') {
+    // The Changes filter: the tree follows; the diff shows the first match when the selected file is filtered out.
+    ui.cx.q = target.value;
+    renderTree(false);
+    const { files } = visibleFiles();
+    if (!files.some((f) => f.path === ui.cx.sel)) {
+      ui.cx.sel = files[0]?.path ?? null;
+    }
+    renderDiffPane();
+  }
+}
+
+// The Changes screen's selector and Collapse unchanged.
+function onChange(event) {
+  const target = event.target;
+  if (target?.id === 'cxview') {
+    ui.cx.view = target.value === 'all' ? 'all' : Number(target.value);
+    renderChanges();
+  } else if (target?.id === 'cxcollapse') {
+    ui.cx.collapse = target.checked;
+    renderDiffPane();
   }
 }
 
@@ -3527,18 +3832,36 @@ function onInput(event) {
 // job page: Escape closes an open confirmation, then goes back one level (a screen of the job to
 // its Stream, the Stream to the board); c, m and s switch the screens; on the Stream j and k select
 // an entry, G the last, Enter toggles the selected one; Ctrl+Enter in the message box sends.
-// Escape closes the toast first. Alt+Up and Alt+Down move a queued card with SF-071's queue.
+// Escape closes the toast first. Alt+Up and Alt+Down move a queued card with SF-071's queue. On
+// Changes (SF-079): / the filter (Arrow Down or Enter in it goes to the tree), the tree's keys
+// (treeKey), F7 / Shift+F7 and n / p the next and previous file, Arrow Left and Right on the
+// divider its width.
 function onKey(event) {
   if (event.defaultPrevented) {
     return;
   }
   const target = event.target;
+  if (target?.id === 'vdiv' && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+    event.preventDefault();
+    dividerKey(event);
+    return;
+  }
   if (typeof target?.closest === 'function' && target.closest('textarea, input, select') !== null) {
     if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && target.id === 'msg') {
       event.preventDefault();
       act('say');
     } else if (event.key === 'Escape' && ui.screen !== 'board') {
       target.blur();
+    } else if (target.id === 'cxq' && (event.key === 'ArrowDown' || event.key === 'Enter')) {
+      event.preventDefault();
+      document.querySelector('#tlist .trow.sel')?.focus();
+    }
+    return;
+  }
+  if (event.key === 'F7') {
+    if (ui.screen === 'changes' && state.drawer === null) {
+      event.preventDefault();
+      fileStep(event.shiftKey ? -1 : 1);
     }
     return;
   }
@@ -3595,7 +3918,7 @@ function onKey(event) {
   }
   if (event.key === 'c' && ui.screen !== 'changes') {
     event.preventDefault();
-    openChanges(null, null);
+    openChanges(ui.cx.sel, null);
   } else if (event.key === 'm' && ui.screen !== 'mr') {
     event.preventDefault();
     go(ui.job, 'mr');
@@ -3618,6 +3941,16 @@ function onKey(event) {
         event.preventDefault();
         toggle(toggleOf.dataset.toggle);
       }
+    }
+  } else if (ui.screen === 'changes') {
+    if (event.key === '/') {
+      event.preventDefault();
+      $('cxq')?.focus();
+    } else if (event.key === 'n' || event.key === 'p') {
+      event.preventDefault();
+      fileStep(event.key === 'n' ? 1 : -1);
+    } else if (!(typeof target?.closest === 'function' && target.closest('#dbody') !== null && (event.key === 'ArrowUp' || event.key === 'ArrowDown'))) {
+      treeKey(event);
     }
   }
 }
@@ -4172,10 +4505,8 @@ function select(key) {
   }
   state.key = key;
   state.detail = null;
-  state.iteration = null;
   state.cache = new Map();
-  state.drawn = null;
-  state.target = null;
+  state.cx = cxData();
   state.taskView = null;
   state.mrText = null;
   state.lastLine = 0;
@@ -4183,8 +4514,7 @@ function select(key) {
   state.seen = new Set();
   state.stopSig = null;
   renderStream();
-  $('iteration-report').replaceChildren();
-  $('patch-body').replaceChildren();
+  $('scrChanges').replaceChildren();
   $('mr-panel').hidden = true;
   $('mr-unapplied').hidden = true;
   $('checkout-text').hidden = true;
@@ -4212,6 +4542,13 @@ function init() {
   document.addEventListener('focusout', onCardBlur);
   $('cols').addEventListener('mouseleave', () => relate(null));
   document.addEventListener('input', onInput);
+  document.addEventListener('change', onChange);
+  document.addEventListener('pointerdown', onDividerDown);
+  // The diff layout chosen before (SF-079).
+  const mode = store.get(DIFF_MODE_KEY);
+  if (mode === 'side' || mode === 'uni') {
+    ui.cx.mode = mode;
+  }
   document.addEventListener('visibilitychange', scheduleRefresh);
   $('toast').addEventListener('mouseenter', () => {
     state.toastHover = true;

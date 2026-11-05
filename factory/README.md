@@ -1505,12 +1505,12 @@ a header, then the Stream with the composer pinned at the bottom.
   box, Restart… and Archive. A confirmation opens inline in the composer, before anything is sent;
   under it the outcome line and the warning of an unknown outcome, with *Refresh state* when the
   read after it failed.
-- **Changes** and **Merge request**: until SF-079 and SF-080 they show the old Changes view (the
-  iteration picker, the meta line, the Implementer's Report and the file list next to the Patch;
-  see Files below; a path link selects its iteration and marks its file) and the old MR view (the
-  MR text once there is one, else a note; *Copy MR text* puts the title line, a blank line and the
-  body on the clipboard, or shows the text selected for Ctrl+C when the browser refuses; after `sf
-  accept`, *Codex items not applied* lists the items or the gate's error, for a follow-up ticket).
+- **Changes** (SF-079): the file tree on the left and the diff of the selected file on the right,
+  as IntelliJ shows them; see Changes below.
+- **Merge request**: until SF-080 it shows the old MR view (the MR text once there is one, else a
+  note; *Copy MR text* puts the title line, a blank line and the body on the clipboard, or shows
+  the text selected for Ctrl+C when the browser refuses; after `sf accept`, *Codex items not
+  applied* lists the items or the gate's error, for a follow-up ticket).
 
 The old job detail of SF-047 is gone: its pipeline, next-action panel, facts, state history and
 Task, Reviews and Live log tabs are covered by the Stream (the state changes, the verdicts, the
@@ -1590,6 +1590,9 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/patch` | the Patch, `text/x-diff` |
 | `api/jobs/<ws>/<ticket>/mr` | the MR text, `text/markdown`; 404 until there is one |
+| `api/jobs/<ws>/<ticket>/changes` | the Changes screen's iterations (SF-079): `{base: {ref, commit}, iterations: [{n, ended_at, truncated, base_commit}]}`; `base.ref` is the job's base branch, `base.commit` the last published iteration's base; an iteration's `base_commit` is `null` when it is not known (section Changes) |
+| `api/jobs/<ws>/<ticket>/changes?from=base\|<N>&to=<N>` | the files of a view: `{files: [{path, status, additions, deletions, binary, unavailable}], more}`, `status` `added`, `modified` or `deleted`, sorted by path, at most 3000 files (`more: true` beyond). Only two pairs: `from=base` with a published `to` (the base of iteration `to` against `to`) and `from=<to − 1>` with `to` ≥ 2; any other pair, a half pair or another parameter is an empty 404 |
+| `api/jobs/<ws>/<ticket>/file?at=base\|<N>&path=<path>` | one side of one file (SF-079): `{kind: "text", text}`, `{kind: "absent"}`, `{kind: "binary", bytes}` (the blob's size, `null` at an iteration whose Patch holds no content), `{kind: "too_large", bytes}` above 1 MiB, or `{kind: "unavailable", reason}`; `at=base` takes `&of=<N>`, the iteration whose base is meant (the last one when left out). Only a path of a `changes` list of a view that shows that side is served (for `at=base&of=N` the list of `from=base&to=N`; for `at=N` those of `from=base&to=N`, `from=N−1&to=N` and `from=N&to=N+1`); any other path, `..`, `.software-factory/`, an iteration not published or another parameter is an empty 404 |
 | `api/jobs/<ws>/<ticket>/stream?from=<line>` | the job's Stream (SF-082) for the v3 job page: `{entries, next, end}`, the entries of at most 2000 lines of `events.jsonl` from the 0-based `from` (default 0, at most 9 digits, else 404), in line order; `next` is the first line not read, `end` whether the file has no more lines (a `from` past the last line: `{entries: [], next: from, end: true}`; a job without `events.jsonl`: `{entries: [], next: 0, end: true}`). Each entry has `t`, `k` (`"<line>"`, or `"<line>.<n>"` when the line gives several), `ts`, `it` (the record's iteration, at least 1) and `who` (`implementer`, `claude`, `codex`, `you`, `factory` or `mr`). Types: `prompt` (`kind` `implement`, `fix` with `fix_n` and the `## Fix N` section of `task.md` as `fix`, `mr`, `conflict` or `continue`; `text` without the factory's rules block, `first`, `task_changed` when the Task-change note was cut from `text`), `user` (the user's message, `text`, `task_changed`), `text`, `tool` (`id`, `line`, `detail`: the input as JSON, at most 16384 characters), `tool_result` (`id`, `out`, `result` at most 16384 characters, `err`; never merged into its `tool`: the client joins them by `id`), `result` (`turns`, `ms`, `cost`), `state` (`from`, `to`, `code`, `msg`), `verdict` (`verdict`, `effective`, and `summary` and `items` with their ledger `id` only when the iteration's `review.json` or `gate.json` matches the record's verdict and item count), `changes` (after a published iteration: `files`, `paths` from `meta.json`), `simplify` (`suggestions`, `saves_lines`) and `note` (every other record, as one `sf watch` line without its time and prefix). An entry depends only on its line and the job's files when it is built (`src/job-stream.ts`); a live `verdict` can lack the ledger ids a later page load has |
 | `api/tickets/<ws>/<ticket>/task` | the ticket's Task file, `text/markdown`, read through the Task file reader (a regular file of valid Task content); `?archived=1` reads `.software-factory/archive/<ticket>.md` instead (any other `archived` value is 404); an unknown workspace or a missing file is an empty 404, a file the reader refuses its refusal (`400 invalid_content`) |
 | `api/stream?job=<ws>/<ticket>&from=<line>` | server-sent events: `jobs` (on connect and on every state change), `workspaces` and `tickets` (as the two endpoints, at the same times and after every setup action from a page), `job` (the job's detail, on connect and when it changes state), `event` (`{line, ts, iteration, type, text}` for every visible line of `events.jsonl` from the 0-based `from`, as `sf watch` formats it; the page reads `entries` since SF-078), `entries` (`{line, entries}`, the line's entries as `api/jobs/<ws>/<ticket>/stream` gives them, for every line from `from` that has entries, strictly in line order; a line whose build fails is logged and skipped); a comment every 15 s; at most 8 streams, then 503 |
@@ -1649,22 +1652,59 @@ with `internal_error` and a fixed message; the cause is logged, never the body o
 When the page's approve request is cut, the push goes on and its outcome is recorded in the job;
 a second approve of a pushed job is refused (`invalid_state`).
 
-**Files (SF-024, SF-047).** The Changes screen shows the structured file list of the selected
-iteration next to its Patch, in the shape of IntelliJ's Changes list. One row per file, the file
-name first and its directory after it in a muted colour, the row coloured by status (added green,
-modified blue, deleted grey with the name struck through), labels `sensitive, undeclared` /
-`sensitive, declared` / `deleted`, and the counts `+n −m` at the right. Groups in this order:
-sensitive undeclared, sensitive declared, deleted, then the rest, each sorted by file name, under
-the summary `Files N · M sensitive undeclared · K deleted`. The Patch beside it is the whole
-unified diff of the iteration (loaded once per iteration), added lines green, removed lines red,
-hunk headers muted, one block per file. A click on a row marks it and its block and scrolls the
-diff to that file; a file the Patch omits (binary, or beyond the Patch size limit) says so above
-the Patch; an iteration published before the list existed says so instead of rows. On a narrow
-window the list goes above the Patch.
-The job's header shows the count as *Changes (N)*; the
-`ready_for_human_review` job keeps the list of that iteration. The job detail's `iterations`
-carry `files` (the list, or `null`), and `api/jobs` rows `files`, `undeclared`, `deleted`
-counts, `worktree` and `prepared_commit`.
+### Changes
+
+The job page's Changes screen (SF-079, the prototype's `renderChanges`) shows a job's files the way
+IntelliJ does: the file tree on the left, the diff of the selected file on the right, read-only.
+
+- **Tree.** The filter (`/`), *Group by directory* or *Flat list*, the summary "N files: a modified,
+  b added, c deleted · +x −y" (with "· k match" while filtering), and one row per file: M, A or D,
+  the name (in the flat list its folder after it), `+a −d`; modified blue, added green, deleted grey
+  and struck through; a `binary` or `unavailable` tag. A folder that holds one folder only is shown
+  as one row (`a/b/c`), with ▾/▸ and its file count. The divider between tree and diff is dragged
+  with the pointer, or moved with Arrow Left and Right when focused; the width stays while the page
+  is open.
+- **Diff.** The toolbar: ◀ Shift+F7 and F7 ▶, the path, "i/n · status", the view, *Side-by-side* or
+  *Unified* (kept in the browser's localStorage), *Collapse unchanged* (on: unchanged runs fold to
+  "⋯ N unchanged lines" with 3 lines of context around each change, none at the file's edges; a
+  click unfolds). Changed words are highlighted. A new file says "New file: all added", a deleted
+  one "Deleted file: the old content, all removed", a modified one side by side "Before (<base>)" or
+  "Before (iteration N−1)" and "After (iteration N)". A binary file, a file above 1 MiB and an
+  unavailable file say so instead of a diff. The line diff is computed in the page (the prototype's
+  Myers with the common prefix and suffix trimmed first; beyond 2500 steps a file shows all lines
+  removed and added).
+- **Views.** *All changes (final, after iteration N)* is the last iteration against its base;
+  *Iteration N (Fix N−1)* is iteration N − 1 against N (iteration 1 against its base). After a
+  conflict-resolved rebase between two iterations, Iteration N also shows the upstream changes and
+  says "The base moved from <old> to <new> before iteration N". A running iteration is not shown;
+  before the first one ends the screen says when the changes come.
+- **Keys.** `/` the filter (Arrow Down or Enter in it goes to the tree); in the tree Arrow Up and
+  Down move, Left closes a folder or goes to its parent, Right opens it, Enter opens a folder or
+  shows the file's diff; F7 / Shift+F7 and `n` / `p` the next and previous file; `s`, `m` the other
+  screens; Escape the Stream. A path link of the Stream opens Changes at that file and iteration
+  (All changes when the file did not change in it); *Open these changes* at that iteration.
+
+The header's *Changes (N)* is the `files` count of `api/jobs` (the last iteration's file list,
+SF-024); the sensitive and out-of-scope marks of each file are in the Stream's changes entry and
+its Report, not on this screen.
+
+How the factory gets the file versions (`src/changes.ts`). Each iteration's `meta.json` records
+`base_commit`, the commit its Patch is against (an iteration published before has none: it uses
+the job's `base_commit` while MR preparation never started, else its files are unavailable, the job
+may have been rebased since). The tree after iteration N is the tree of N's base with N's Patch
+applied, built by Git in a temporary index (`read-tree`, `apply --cached`, `write-tree`) in the
+workspace's checkout, with the new objects in the job's own object directory
+(`<job dir>/objects`, the checkout's objects as alternates): nothing is written into the
+checkout's repository, its index, its refs or the job's worktree. The tree id is kept in
+`iterations/NNN/tree` and rebuilt when missing or when its objects are gone. A section of the Patch
+that holds no exact text is left out of the tree and its file marked: "Binary files … differ"
+(`binary`), a submodule, a section that is not UTF-8 (the Patch holds U+FFFD for those bytes), and
+the section a truncated Patch was cut in; after a cut at 2 MB every file of `meta.json` with no
+section is unavailable too (every file, when the iteration has no file list). A Patch that does not
+apply makes every file of that iteration unavailable with Git's message; so does a checkout that is
+missing or not a Git work tree. The lists drop every path a Patch never contains
+(`.software-factory/` and credential-like paths), also among the upstream changes between two
+bases. The results are cached in memory, 16 per job.
 
 ### Checking the page by hand
 
@@ -1749,12 +1789,21 @@ end), in a browser:
    at the bottom (scroll up: it stays where you are). Each tool call is one line with its result;
    `j`, `k`, `G` and Enter select and open entries; long texts say *Show all N lines*; the implement
    prompt's *Task* shows the Task file with its Fix sections and its Task check. A path in a
-   verdict opens Changes at that iteration with its file marked. Stop `sf serve` and start it again
+   verdict opens Changes at that iteration with its file selected (All changes when the file did
+   not change in that iteration). Stop `sf serve` and start it again
    (open the new URL): the Stream reads again and shows no entry twice. Merge request says there
    is no text until MR preparation wrote it, then shows it, and Copy MR text puts the title, a
    blank line and the body on the clipboard.
-15. Changes: the file list in the IntelliJ shape and order beside the Patch; click a row: the
-   Patch scrolls to that file and marks it; a binary file says the Patch omits it.
+15. Changes: open Changes of a real finished job next to `prototype-full.html` (branch
+   `prototype-dashboard-v3`) and compare, in light and dark: the tree (folders compacted, M/A/D in
+   blue, green and grey struck through, the counts, the filter, the flat list), both diff layouts
+   (side by side with Before/After, unified, the changed words, *Collapse unchanged* and a click on
+   "⋯ N unchanged lines"), the view selector (All changes, each iteration with its Fix) and the keys
+   (`/`, the arrows and Enter in the tree, F7 / Shift+F7, `n` / `p`, Escape). Drag the divider and
+   move it with Arrow Left and Right; switch to the Stream and back: the width stays. Reload: the
+   layout chosen stays. A binary file, a file above 1 MiB and, on a job whose Patch was cut, a
+   file after the cut say so instead of a diff. List each difference from the prototype with its
+   reason.
 16. Layout: Tab reaches each card, its buttons, the job page's *← Board*, the switch, the Stream's
    toggles and path links, the composer's message box and buttons and a confirmation's buttons.
    On a phone the header wraps and the composer's buttons go under the message box.

@@ -1,9 +1,10 @@
 // Job state on disk: <state dir>/jobs/<workspace>/<ticket>/ with job.json, events.jsonl and
 // iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-override.json,simplify.json} (plus the
-// gate's schema and output files), ledger.json (the findings ledger, SF-052) from the first Fix
-// section on, task.md (the Task file as the Implementer was last given it, SF-067), and from MR
-// preparation on mr.md. Strictly parsed; every file but the event log
-// is replaced atomically. Knows nothing about Git or the Implementer session.
+// gate's schema and output files, and tree, SF-079), ledger.json (the findings ledger, SF-052) from
+// the first Fix section on, task.md (the Task file as the Implementer was last given it, SF-067),
+// from MR preparation on mr.md, and objects/ (SF-079). Strictly parsed; every file but the event
+// log is replaced atomically. Knows nothing about the Implementer session, nor about Git: tree and
+// objects/ are only named here, src/changes.ts writes them.
 import { appendFile, type FileHandle, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import * as z from 'zod/v4';
@@ -165,6 +166,8 @@ export interface IterationMeta {
   cost_usd: number | null;
   cost_usd_total: number | null;
   duration_ms: number | null;
+  // The commit the iteration's Patch is against (SF-079); absent in iterations published before.
+  base_commit?: string;
 }
 
 // iterations/NNN/review.json: the Claude review of the iteration (SF-038), or why it failed.
@@ -491,6 +494,18 @@ export class JobStore {
   // The directory of one published iteration.
   iterationDir(workspace: string, ticket: string, number: number): string {
     return join(this.dir(workspace, ticket), 'iterations', String(number).padStart(3, '0'));
+  }
+
+  // iterations/NNN/tree (SF-079): the tree id of the job's files after the iteration, derived by
+  // src/changes.ts from the iteration's base and Patch.
+  treePath(workspace: string, ticket: string, number: number): string {
+    return join(this.iterationDir(workspace, ticket, number), 'tree');
+  }
+
+  // The job's own Git object directory (SF-079): the objects of the iteration trees, with the
+  // workspace's objects as alternates; nothing is written into the workspace's repository.
+  objectsDir(workspace: string, ticket: string): string {
+    return join(this.dir(workspace, ticket), 'objects');
   }
 
   // The resolution of a conflict turn whose rebase could not continue (SF-056), kept with the

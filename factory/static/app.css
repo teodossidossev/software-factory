@@ -2,8 +2,7 @@
    docs/design/dashboard-v3/prototype.html, verbatim, without its prototype-only rules (the
    PROTOTYPE badge, the floating bar, the State panel, the simulated tags and blocks, --proto-bg).
    After it: the prototype's inline styles as rules (CSP), the live page's own pieces in its style,
-   and the old page's rules the drawer, the old Changes and MR views (until SF-079 and SF-080) and
-   the Task check use. */
+   and the old page's rules the drawer, the old MR view (until SF-080) and the Task check use. */
 /* Layout: the board keeps its five columns; a job opens as a full page: sticky head, one stream, composer pinned at the bottom.
    Tokens follow the live dashboard's app.css so the prototype reads as the same tool. */
 :root {
@@ -238,6 +237,9 @@ code, pre, .mono { font-family: var(--mono); }
 .trow .dn { color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 1 1 0; }
 .trow .cnt { margin-left: auto; color: var(--muted); font-size: 11px; flex: none; font-variant-numeric: tabular-nums; }
 .trow .cnt .a { color: var(--add); } .trow .cnt .r { color: var(--del); }
+/* SF-079: the summary's +x and −y (the prototype's inline colours) and a file's binary or unavailable tag. */
+.tree .sum .a { color: var(--add); } .tree .sum .r { color: var(--del); }
+.trow .tag { flex: none; font-size: 10px; line-height: 16px; }
 .trow .lt { flex: none; font-size: 10px; font-weight: 700; width: 12px; text-align: center; }
 .vcs-modified .nm, .vcs-modified .lt { color: var(--vcs-mod); }
 .vcs-added .nm, .vcs-added .lt { color: var(--vcs-add); }
@@ -470,7 +472,7 @@ button.tag:hover { border-color: var(--accent); }
 .jhead .t2 .branch { all: unset; cursor: pointer; font: 12px var(--mono); }
 .jhead .t2 .branch:hover { color: var(--accent); text-decoration: underline; }
 .jhead .t2 .branch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-#scrChanges:not([hidden]), #scrMr:not([hidden]) { display: block; overflow-y: auto; }
+#scrMr:not([hidden]) { display: block; overflow-y: auto; }
 .olddetail { display: flex; flex-direction: column; gap: 12px; min-width: 0; padding-block: 16px 24px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
 .composer .confirm .confirm-items, .composer .confirm .choice { flex-basis: 100%; color: var(--fg); }
 .composer .confirm ol { margin: 4px 0 0; padding-left: 22px; font-size: 12px; overflow-wrap: anywhere; }
@@ -482,9 +484,9 @@ button.tag:hover { border-color: var(--accent); }
 pre.raw.doc .heading { font-weight: 700; }
 #stream .task-check { margin: 6px 0; font-size: 13px; }
 
-/* Kept from the old page until SF-079, SF-080 and SF-081 */
-/* The drawer (Workspaces, New ticket, Archived and a planned ticket's Task), the old Changes and MR
-   views inside the job page's screens (.olddetail), the ticket confirmation (#ticket-confirm), the
+/* Kept from the old page until SF-080 and SF-081 */
+/* The drawer (Workspaces, New ticket, Archived and a planned ticket's Task), the old MR view inside
+   the job page's screen (.olddetail), the ticket confirmation (#ticket-confirm), the
    drawer's scrim, the composer's status lines and choices, and the Task check: the old rules, each
    scoped under its element so it cannot change the board or the prototype's rules. Where a
    prototype rule of the same name reaches in (.btn, .confirm, .files), the kept rule sets what the
@@ -556,39 +558,11 @@ pre.raw.doc .heading { font-weight: 700; }
 #drawer .copy-box :is(input, textarea) { flex: 1; min-width: 0; min-height: 28px; padding: 4px 8px; background: var(--panel); font: 12.5px/1.4 var(--mono); }
 #drawer .copy-box textarea { resize: vertical; }
 
-/* Documents: the Task text, the Report, the Patch and the MR text. */
+/* Documents: the Task text and the MR text. */
 :is(#drawer, .olddetail) .document { margin: 0; max-height: 70vh; overflow: auto; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel-2); font: 13px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 :is(#drawer, .olddetail) .document:empty { display: none; }
 :is(#drawer, .olddetail) .document .heading { font-weight: 700; }
-.olddetail .document .add { color: var(--add); background: var(--add-bg); }
-.olddetail .document .del { color: var(--del); background: var(--del-bg); }
-.olddetail .document .file { font-weight: 700; }
-.olddetail .document .hunk { color: var(--hunk); }
 
-/* The Files view (SF-024): a row per file, the diff beside it. */
-.olddetail .files { display: flex; flex-direction: column; gap: 8px; }
-.olddetail .files-summary { font-weight: 600; }
-.olddetail .files-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
-.olddetail .files-list li { border-bottom: 1px solid var(--border); }
-.olddetail .files-list li:last-child { border-bottom: none; }
-.olddetail .files-list .file-group { padding: 4px 10px; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; color: var(--muted); background: var(--panel-2); }
-.olddetail .file-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 10px; border: none; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-.olddetail .file-row:hover { background: var(--panel-2); }
-.olddetail .file-row .file-name { font-weight: 500; }
-.olddetail .file-row .file-dir { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
-.olddetail .file-row .file-labels { margin-left: auto; display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
-.olddetail .file-row .file-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; padding: 1px 6px; border-radius: 4px; background: var(--panel-2); color: var(--muted); }
-.olddetail .file-row .file-label.undeclared { background: var(--del-bg); color: var(--del); }
-.olddetail .file-row .file-label.declared { background: var(--warn-bg); color: var(--warn); }
-.olddetail .file-row .file-label.out-of-scope { background: var(--warn-bg); color: var(--warn); }
-.olddetail .file-row .file-label.deleted { background: var(--panel-2); color: var(--muted); }
-.olddetail .file-row .file-counts { font-family: var(--mono); font-size: 12px; }
-.olddetail .file-row .file-counts .add { color: var(--add); }
-.olddetail .file-row .file-counts .del { color: var(--del); }
-.olddetail .file-row.s-added .file-name { color: var(--add); }
-.olddetail .file-row.s-modified .file-name { color: var(--accent); }
-.olddetail .file-row.s-deleted .file-name { color: var(--muted); text-decoration: line-through; }
-.olddetail .file-row.s-renamed .file-name { color: var(--hunk); }
 
 /* The drawer on the right, over the board, and its scrim. */
 #scrim { position: fixed; inset: 0; background: rgba(10, 15, 20, 0.35); z-index: 40; }
@@ -604,25 +578,6 @@ pre.raw.doc .heading { font-weight: 700; }
   #drawer { padding: 12px 12px 48px; }
 }
 
-.olddetail .seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; align-self: flex-start; }
-.olddetail .seg button { border: 0; border-right: 1px solid var(--border); background: var(--panel); color: var(--fg); padding: 4px 10px; font-size: 13px; cursor: pointer; }
-.olddetail .seg button:last-child { border-right: 0; }
-.olddetail .seg button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
-.olddetail .seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.olddetail .box { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; background: var(--panel); }
-.olddetail .box > summary { cursor: pointer; }
-.olddetail .box[open] > summary { margin-bottom: 8px; }
-.olddetail .changes-body { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-.olddetail .changes { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 12px; align-items: start; }
-.olddetail .changes .files { position: sticky; top: 0; max-height: 80vh; overflow: auto; }
-.olddetail .changes .patch { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.olddetail .file-row[aria-current="true"] { background: var(--selected); }
-.olddetail .patch-file { display: block; }
-.olddetail .patch-file[aria-current="true"] { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
-@media (max-width: 760px) {
-  .olddetail .changes { grid-template-columns: minmax(0, 1fr); }
-  .olddetail .changes .files { position: static; max-height: 240px; }
-}
 .olddetail .mr-panel { display: flex; flex-direction: column; gap: 8px; }
 .olddetail .unapplied { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--warn); border-radius: var(--radius-sm); background: var(--warn-bg); overflow-wrap: anywhere; }
 .olddetail .unapplied ol { margin: 0; padding-left: 24px; }

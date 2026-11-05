@@ -80,31 +80,9 @@
         </div>
       </div>
     </div>
-    <!-- The Changes screen of SF-079 and the Merge request screen of SF-080; until they land, the old Changes and MR views. -->
-    <div class="scr" id="scrChanges" hidden>
-      <div class="olddetail">
-        <p id="no-iterations" class="hint">No iteration published yet.</p>
-        <div id="changes-body" class="changes-body" hidden>
-          <div id="iteration-picker" class="seg" role="group" aria-label="Iteration"></div>
-          <p id="iteration-meta" class="hint"></p>
-          <details id="report-box" class="box" open>
-            <summary class="section-title">Report</summary>
-            <pre id="iteration-report" class="document"></pre>
-          </details>
-          <div class="changes">
-            <div class="files">
-              <p id="files-summary" class="files-summary"></p>
-              <p id="no-files" class="hint" hidden></p>
-              <ul id="files-list" class="files-list" aria-label="Changed files"></ul>
-            </div>
-            <div class="patch">
-              <p id="patch-note" class="hint"></p>
-              <pre id="patch-body" class="document"></pre>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
+    <!-- The Changes screen (SF-079): app.js builds the tree, the divider and the diff pane in it. -->
+    <div class="scr" id="scrChanges" hidden></div>
+    <!-- The Merge request screen of SF-080; until it lands, the old MR view. -->
     <div class="scr" id="scrMr" hidden>
       <div class="olddetail">
         <p id="no-mr" class="hint">No merge request text yet: it is written during MR preparation, after the reviews.</p>

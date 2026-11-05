@@ -1,5 +1,6 @@
-// Behaviour of the job drawer in static/app.js (SF-047), run under node:vm against the fake page of
-// test/support/fake-dom.ts: the URL hash that opens it, the pipeline stepper per state with the
+// Behaviour of the job detail in static/app.js (SF-047), inside the job's full page since SF-077, run
+// under node:vm against the fake page of test/support/fake-dom.ts: the URL hash that opens it, the
+// pipeline per state with the
 // halted codes, the next-action panel, the facts and the state history, and the flat tabs Task,
 // Changes, Reviews, MR (Copy MR text, the Codex items not applied) and Live log (its filters);
 // Accept and prepare MR with its confirmation. The actions shared with the old job card are tested
@@ -86,11 +87,15 @@ const gets = (page: Page, path: string): FetchRequest[] => page.requests.filter(
 const facts = (page: Page): Record<string, string> =>
   Object.fromEntries(elements(page, 'job-facts').map((row) => [(row.children[0] as FakeElement).textContent, (row.children[1] as FakeElement).textContent]));
 
-test('job client: the hash opens the job in a wide drawer; a hash change opens another; closing clears the hash', async () => {
+// The key and the title in the job page's header.
+const headTitle = (page: Page): string => (page.$('jhead').children[1] as FakeElement).textContent;
+
+test('job client: the hash opens the job as its full page; a hash change opens another; ← Board clears the hash', async () => {
   const other = { ...job('working'), ticket: 'T-2', branch: 'T-2-demo' };
   const page = await openJob(detail(job('working')), () => undefined, undefined, [other]);
-  assert.deepEqual([page.$('drawer').hidden, page.$('drawer').className, page.$('detail').hidden], [false, 'drawer wide', false]);
-  assert.deepEqual([page.$('job-ticket').textContent, page.$('drawer-title').textContent, page.$('job-branch').textContent], ['T-1', 'T-1 · Demo', 'T-1-demo']);
+  assert.deepEqual([page.$('job').hidden, page.$('board').hidden, page.$('drawer').hidden, page.$('detail').hidden], [false, true, true, false]);
+  assert.equal(page.$('detail').parentNode, page.$('job'));
+  assert.deepEqual([page.$('job-ticket').textContent, headTitle(page), page.$('job-branch').textContent], ['T-1', 'T-1Demo', 'T-1-demo']);
   assert.equal(page.location.hash, '#app/T-1');
   assert.equal(page.streams.at(-1)!.url, 'api/stream?job=app%2FT-1&from=0');
 
@@ -98,13 +103,13 @@ test('job client: the hash opens the job in a wide drawer; a hash change opens a
   page.window.dispatch('hashchange');
   await page.flush();
   assert.equal(page.streams.at(-1)!.url, 'api/stream?job=app%2FT-2&from=0');
-  assert.equal(page.$('drawer-title').textContent, 'T-2 · Demo');
+  assert.equal(headTitle(page), 'T-2Demo');
 
-  page.$('drawer-close').click();
-  assert.deepEqual([page.$('drawer').hidden, page.location.hash], [true, '#']);
-  // A non-job drawer is the narrow one.
+  (page.$('jhead').children[0] as FakeElement).click();
+  assert.deepEqual([page.$('job').hidden, page.$('board').hidden, page.location.hash], [true, false, '#']);
+  // The drawer is left for Workspaces, New ticket, Archived and a planned ticket's Task.
   page.$('open-workspaces').click();
-  assert.equal(page.$('drawer').className, 'drawer');
+  assert.deepEqual([page.$('drawer').hidden, page.$('drawer').className, page.$('detail').hidden], [false, 'drawer', true]);
 });
 
 test('job client: the pipeline stepper for each state: done, current with since when, halted with the code and a sentence, the gate off', async () => {
@@ -699,9 +704,9 @@ test('job client (SF-067): Pause on a working job; a paused one on Your turn wit
   const row = job('paused', { paused: { from: 'working', step: 'turn', at: '2026-11-01T10:06:00.000Z' }, task_changed: true });
   page.streams.at(-1)!.emit('jobs', { jobs: [row] });
   await show(page, detail(row));
-  const item = (page.$('list-you').children as FakeElement[]).find((child) => child.dataset?.key === 'app/T-1')!;
+  const item = (page.$('list-you').children as FakeElement[]).find((child) => child.dataset?.open === 'app/T-1')!;
   assert.match(item.textContent, /Task file changed since the job started/);
-  assert.match(item.textContent, /You · paused/);
+  assert.match(item.textContent, /Paused by you/);
   assert.match(page.$('next-headline').textContent, /^You paused the Implementer's turn on iteration 2\. Resume continues the same session \(with your message, if you write one below\); Restart starts the ticket again from its current Task file\.$/);
   assert.match(page.$('next-why').textContent, /^Task file changed since the job started/);
   assert.deepEqual([pause!.hidden, resume!.hidden, resume!.disabled, restart!.hidden, restart!.disabled], [true, false, false, false, false]);

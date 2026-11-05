@@ -1,5 +1,5 @@
 // The Task check in static/app.js (SF-054), under node:vm against the fake page of
-// test/support/fake-dom.ts: the Planned card's chip and Check (one POST, off while a check runs),
+// test/support/fake-dom.ts: the Queue card's check note and Check (one POST, off while a check runs),
 // the Start confirmation's note (not checked, stale, not ready: N blocker, M major; none for a
 // ready check), and the last check in the Task drawer and the job's Task tab: the stale mark, the
 // paraphrase above the findings, by severity. Start stays on whatever the check says.
@@ -47,12 +47,13 @@ async function openBoard(tickets: ReturnType<typeof ticket>[], get: (path: strin
   return page;
 }
 
-const card = (page: Page, key: string): FakeElement => page.$('list-planned').children.find((child) => (child as FakeElement).dataset?.key === key) as FakeElement;
+const card = (page: Page, key: string): FakeElement => page.$('qlist').children.find((child) => (child as FakeElement).dataset?.ticket === key) as FakeElement;
 const button = (item: FakeElement, label: string): FakeElement | undefined => item.all().find((element) => element.tagName === 'BUTTON' && element.textContent === label);
-const chips = (item: FakeElement): string[] => item.all().filter((element) => (element.className === 'chip' || element.className.startsWith('chip '))).map((element) => element.textContent);
+// The check note on the card's right side (SF-077).
+const note = (item: FakeElement): string => item.all().find((element) => element.className === 'money')!.textContent;
 const posts = (page: Page): FetchRequest[] => page.requests.filter((request) => request.method === 'POST');
 
-test('check client: the card\'s chip and Check: one POST, off while the check runs; none for a draft or without the Task checks', async () => {
+test('check client: the card\'s check note and Check: one POST, off while the check runs; none for a draft or without the Task checks', async () => {
   const page = await openBoard([
     ticket('T-1', { check: summary() }),
     ticket('T-2', { check: summary({ state: 'not_ready', blockers: 2, majors: 1, start_note: 'not ready: 2 blocker, 1 major' }) }),
@@ -60,9 +61,12 @@ test('check client: the card\'s chip and Check: one POST, off while the check ru
     ticket('T-4', { check: summary({ running: true }) }),
     ticket('T-5', { draft: true, check: summary() }),
     ticket('T-6'),
+    ticket('T-7', { check: summary({ state: 'ready', start_note: null }) }),
+    ticket('T-8', { check: summary({ state: 'failed', start_note: 'check failed' }) }),
+    ticket('T-9', { check: summary({ state: 'not_ready', stale: true, blockers: 1, majors: 0, start_note: 'stale' }) }),
   ]);
-  assert.deepEqual(['T-1', 'T-2', 'T-3', 'T-4', 'T-5', 'T-6'].map((name) => chips(card(page, `app/${name}`)).filter((text) => text !== 'from main')),
-    [['not checked'], ['not ready: 2 blocker, 1 major'], ['ready · stale'], ['checking…'], [], []]);
+  assert.deepEqual(['T-1', 'T-2', 'T-3', 'T-4', 'T-5', 'T-6', 'T-7', 'T-8', 'T-9'].map((name) => note(card(page, `app/${name}`))),
+    ['not checked', 'not ready: 2 blocker, 1 major', 'check: ready · stale', 'checking…', 'draft', 'not checked', 'check: ready', 'check failed', 'not ready: 1 blocker, 0 major · stale']);
   assert.deepEqual(['T-1', 'T-4'].map((name) => button(card(page, `app/${name}`), 'Check')!.disabled), [false, true]);
   assert.deepEqual(['T-5', 'T-6'].map((name) => button(card(page, `app/${name}`), 'Check')), [undefined, undefined]);
 
@@ -75,7 +79,7 @@ test('check client: the card\'s chip and Check: one POST, off while the check ru
   assert.equal(posts(page).length, 1);
   posts(page)[0]!.respond(200, { ok: true, result: { started: true, sha256: 'a'.repeat(64) } });
   await page.flush();
-  assert.match(page.$('ticket-action-status').textContent, /^Checking app\/T-1: .* It only advises: Start stays yours\.$/);
+  assert.match(page.$('toast-text').textContent, /^Checking app\/T-1: .* It only advises: Start stays yours\.$/);
   // Start is never off for the check.
   assert.deepEqual(['T-1', 'T-2', 'T-3', 'T-4'].map((name) => button(card(page, `app/${name}`), 'Start')!.disabled), [false, false, false, false]);
 });
@@ -114,7 +118,7 @@ const lines = (page: Page, id: string): string[] => (page.$(id).children as Fake
 
 test('check client: the Task drawer shows the last check above the Task text: the stale mark, the paraphrase above the findings by severity, the files', async () => {
   const page = await openBoard([ticket('T-1', { check: summary({ state: 'not_ready', stale: true, blockers: 1, ended_at: VIEW.check.ended_at, start_note: 'stale' }) })]);
-  button(card(page, 'app/T-1'), 'Task')!.click();
+  card(page, 'app/T-1').click();
   await page.flush();
   page.requests.find((request) => request.path === 'api/tickets/app/T-1/task')!.respond(200, '---\nticket: T-1\n---\n# T-1\n');
   await page.flush();

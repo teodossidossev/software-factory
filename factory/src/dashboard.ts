@@ -9,9 +9,11 @@
 // start screen (SF-025) adds the workspaces and the tickets (DashboardSetup: the registry and the
 // Task files), the ChatGPT conversation that plans a ticket, and the User's start of a ticket
 // whose Task file is written (SF-040); the board (SF-046) adds the text of a Task file; the Task
-// check (SF-054) adds each ticket's last check, its start (Check) and its view.
+// check (SF-054) adds each ticket's last check, its start (Check) and its view. The board v3
+// (SF-077) adds to each job row what its card shows: who acts now, the Implementer's tool calls
+// and the findings a stopped job waits on.
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { readFile, rm } from 'node:fs/promises';
+import { open, readFile, rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
@@ -22,13 +24,13 @@ import { conversationUrl, MAX_CONVERSATION_URL, ticketConversation } from './con
 import { FactoryError } from './errors.js';
 import type { Execution } from './execution.js';
 import type { Job, JobState, JobStore } from './jobs.js';
-import { DECISIONS } from './ledger.js';
+import { DECISIONS, unsettled } from './ledger.js';
 import { WORKSPACE_NAME_PATTERN } from './registry.js';
 import type { Setup } from './setup.js';
 import type { CheckSummary, TaskChecks } from './task-check.js';
 import { turnLimitLine } from './turn-limit.js';
 import { taskSha256, TICKET_PATTERN } from './task-file.js';
-import { describeEvent, followLines } from './watch.js';
+import { describeEvent, followLines, shortInput } from './watch.js';
 
 export const DEFAULT_DASHBOARD_PORT = 8788;
 export const TOKEN_FILE = 'dashboard-token';
@@ -279,16 +281,196 @@ function jobSummary(job: Job, counts: { files: number; undeclared: number; delet
   };
 }
 
-async function jobsPayload(jobs: JobStore, setup: DashboardSetup, actions: DashboardActions) {
+// The Now line reads at most this much of the end of events.jsonl; the tool calls are counted in
+// chunks of TOOL_CALL_CHUNK_BYTES.
+export const NOW_TAIL_BYTES = 256 * 1024;
+const TOOL_CALL_CHUNK_BYTES = 1024 * 1024;
+const NOW_TEXT_CHARS = 200;
+
+interface NowLine {
+  who: string;
+  what: string;
+  ts: string | null;
+}
+
+// The content blocks of an Implementer message: an SDK assistant message the session logged as it
+// came (the reviewers' come as review_message and gate_event records); none for any other record.
+function implementerBlocks(raw: string): { ts: string | null; blocks: Array<Record<string, unknown>> } | undefined {
+  let record: Record<string, unknown>;
+  try {
+    record = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+  if (record === null || typeof record !== 'object' || record.type !== undefined) {
+    return undefined;
+  }
+  const message = record.message as { type?: unknown; message?: { content?: unknown } } | undefined;
+  const content = message?.type === 'assistant' ? message.message?.content : undefined;
+  return Array.isArray(content) ? { ts: typeof record.ts === 'string' ? record.ts : null, blocks: content as Array<Record<string, unknown>> } : undefined;
+}
+
+// The complete lines of the last bytes of a file (the first, cut one dropped); none when it is missing.
+async function tailLines(path: string, bytes: number): Promise<string[]> {
+  let handle;
+  try {
+    handle = await open(path, 'r');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return [];
+    }
+    throw error;
+  }
+  try {
+    const { size } = await handle.stat();
+    const start = Math.max(0, size - bytes);
+    const buffer = Buffer.alloc(size - start);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+    const lines = buffer.subarray(0, bytesRead).toString('utf8').split('\n');
+    return start > 0 ? lines.slice(1) : lines;
+  } finally {
+    await handle.close();
+  }
+}
+
+// The last thing the Implementer did, from the tail of the log: its last tool call (the verb and
+// the short input of sf watch) or the first line of its last text.
+function lastImplementerStep(lines: string[]): NowLine | null {
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const found = implementerBlocks(lines[index]!);
+    for (const block of [...(found?.blocks ?? [])].reverse()) {
+      if (block.type === 'tool_use') {
+        return { who: 'Implementer', what: `${String(block.name)} ${shortInput(block.input)}`, ts: found!.ts };
+      }
+      if (block.type === 'text' && typeof block.text === 'string' && block.text.trim() !== '') {
+        const first = block.text.trim().split('\n')[0]!.replace(/\s+/g, ' ').trim();
+        return { who: 'Implementer', what: first.length > NOW_TEXT_CHARS ? `${first.slice(0, NOW_TEXT_CHARS - 1)}…` : first, ts: found!.ts };
+      }
+    }
+  }
+  return null;
+}
+
+// Who acts now on a running job and what it does (SF-077): the Implementer's last step, the
+// reviewer of the last iteration (Codex once Claude's review of it is clean), the MR writer; null
+// for a job that is not running, or an Implementer with no step in the tail yet.
+async function nowOf(jobs: JobStore, job: Job, facts: { review: Verdict; review_ended_at: string | null }): Promise<NowLine | null> {
+  switch (job.state) {
+    case 'starting':
+    case 'working':
+      return lastImplementerStep(await tailLines(jobs.eventsPath(job.workspace, job.ticket), NOW_TAIL_BYTES));
+    case 'awaiting_review':
+      return facts.review === 'clean'
+        ? { who: 'Codex gate', what: `reviewing iteration ${job.iteration}`, ts: facts.review_ended_at }
+        : { who: 'Claude review', what: `reviewing iteration ${job.iteration}`, ts: job.updated_at };
+    case 'preparing_mr':
+      return { who: 'MR writer', what: 'writing the MR text', ts: job.updated_at };
+    default:
+      return null;
+  }
+}
+
+const toolUses = (raw: string): number =>
+  raw.includes('"tool_use"') ? (implementerBlocks(raw)?.blocks.filter((block) => block.type === 'tool_use').length ?? 0) : 0;
+
+// The Implementer's tool calls of each job, counted incrementally: per events.jsonl the bytes
+// already read, the count so far and the cut line at the end; a log replaced (a restart) or cut
+// shorter is counted again from the start. One count per log at a time.
+export class ToolCallCounter {
+  private readonly seen = new Map<string, { ino: number; offset: number; count: number; rest: Buffer }>();
+  private readonly running = new Map<string, Promise<number>>();
+  // The bytes read so far, for the tests.
+  bytesRead = 0;
+
+  count(path: string): Promise<number> {
+    const next = (this.running.get(path) ?? Promise.resolve(0)).catch(() => 0).then(() => this.read(path));
+    this.running.set(path, next);
+    return next;
+  }
+
+  private async read(path: string): Promise<number> {
+    let handle;
+    try {
+      handle = await open(path, 'r');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.seen.delete(path);
+        return 0;
+      }
+      throw error;
+    }
+    try {
+      const { ino, size } = await handle.stat();
+      let entry = this.seen.get(path);
+      if (entry === undefined || entry.ino !== ino || size < entry.offset) {
+        entry = { ino, offset: 0, count: 0, rest: Buffer.alloc(0) };
+      }
+      while (entry.offset < size) {
+        const chunk = Buffer.alloc(Math.min(TOOL_CALL_CHUNK_BYTES, size - entry.offset));
+        const { bytesRead } = await handle.read(chunk, 0, chunk.length, entry.offset);
+        if (bytesRead === 0) {
+          break;
+        }
+        entry.offset += bytesRead;
+        this.bytesRead += bytesRead;
+        const data = Buffer.concat([entry.rest, chunk.subarray(0, bytesRead)]);
+        let start = 0;
+        for (let end = data.indexOf(10, start); end !== -1; end = data.indexOf(10, start)) {
+          entry.count += toolUses(data.toString('utf8', start, end));
+          start = end + 1;
+        }
+        entry.rest = Buffer.from(data.subarray(start));
+      }
+      this.seen.set(path, entry);
+      return entry.count;
+    } finally {
+      await handle.close();
+    }
+  }
+}
+
+// What a stopped job waits on (SF-077), for its card: the suggestions of the last simplification
+// pass and the lines they save (simplify_offered), the ledger entries to settle (escalated,
+// review_disputed: the ledger's unsettled ones), the open ones (review_churn), the items of the last gate (gate_rounds,
+// gate_budget); none for any other stop; null unless the job is needs_human.
+async function stopOf(jobs: JobStore, job: Job): Promise<{ items: unknown[]; saves_lines: number | null } | null> {
+  if (job.state !== 'needs_human') {
+    return null;
+  }
+  const code = job.error?.code;
+  if (code === 'simplify_offered') {
+    const record = await jobs.readSimplify(job.workspace, job.ticket, job.iteration);
+    const items = record !== undefined && 'suggestions' in record ? record.suggestions : [];
+    return { items, saves_lines: items.reduce((sum, item) => sum + item.saves_lines, 0) };
+  }
+  if (code === 'escalated' || code === 'review_disputed' || code === 'review_churn') {
+    const ledger = await jobs.readLedger(job.workspace, job.ticket);
+    return { items: code === 'review_churn' ? ledger.filter((entry) => entry.status === 'open') : unsettled(ledger), saves_lines: null };
+  }
+  if (code === 'gate_rounds' || code === 'gate_budget') {
+    for (let number = job.iteration; number >= 1; number -= 1) {
+      const gate = await jobs.readGate(job.workspace, job.ticket, number);
+      if (gate !== undefined && 'verdict' in gate) {
+        return { items: gate.items, saves_lines: null };
+      }
+    }
+  }
+  return { items: [], saves_lines: null };
+}
+
+// now: nowOf; tool_calls: the Implementer's tool calls in the job (ToolCallCounter); stop: stopOf.
+async function jobsPayload(jobs: JobStore, setup: DashboardSetup, actions: DashboardActions, toolCalls: ToolCallCounter) {
   const list = [];
   const hosts = new Map<string, MrHost>();
   for (const job of await jobs.list()) {
     if (!hosts.has(job.workspace)) {
       hosts.set(job.workspace, await mrHostOf(actions, job.workspace));
     }
+    const facts = await boardFacts(jobs, job);
     list.push({
       ...jobSummary(job, await fileCounts(jobs, job), hosts.get(job.workspace)!, await taskChangedOf(setup, job)),
-      title: await setup.taskTitle(job.workspace, job.ticket), ...(await boardFacts(jobs, job)),
+      title: await setup.taskTitle(job.workspace, job.ticket), ...facts,
+      now: await nowOf(jobs, job, facts), tool_calls: await toolCalls.count(jobs.eventsPath(job.workspace, job.ticket)), stop: await stopOf(jobs, job),
     });
   }
   return { jobs: list };
@@ -536,6 +718,7 @@ export async function startDashboard(
   const token = Buffer.from(tokenText, 'utf8');
 
   const streams = new Set<Stream>();
+  const toolCalls = new ToolCallCounter();
   const validateHost = localhostHostValidation();
   const validateOrigin = localhostOriginValidation();
   // The exact origin of the page, known once the listener has its port.
@@ -599,7 +782,7 @@ export async function startDashboard(
     res.once('close', end);
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', connection: 'keep-alive' });
     res.flushHeaders();
-    send(stream, 'jobs', await jobsPayload(jobs, setup, actions));
+    send(stream, 'jobs', await jobsPayload(jobs, setup, actions, toolCalls));
     await sendSetup([stream]);
     if (key === undefined) {
       return;
@@ -636,7 +819,7 @@ export async function startDashboard(
       return;
     }
     if (joined === 'api/jobs') {
-      body(res, 'application/json; charset=utf-8', JSON.stringify(await jobsPayload(jobs, setup, actions)));
+      body(res, 'application/json; charset=utf-8', JSON.stringify(await jobsPayload(jobs, setup, actions, toolCalls)));
       return;
     }
     if (joined === 'api/workspaces') {
@@ -1064,7 +1247,7 @@ export async function startDashboard(
     if (streams.size === 0) {
       return;
     }
-    const list = await jobsPayload(jobs, setup, actions);
+    const list = await jobsPayload(jobs, setup, actions, toolCalls);
     const selected = [...streams].filter((stream) => stream.job?.[0] === job.workspace && stream.job[1] === job.ticket);
     const detail = selected.length > 0 ? await jobDetail(jobs, job, gateOn, actions, setup) : undefined;
     for (const stream of streams) {
@@ -1082,7 +1265,7 @@ export async function startDashboard(
     if (streams.size === 0) {
       return;
     }
-    const list = await jobsPayload(jobs, setup, actions);
+    const list = await jobsPayload(jobs, setup, actions, toolCalls);
     for (const stream of streams) {
       send(stream, 'jobs', list);
     }

@@ -193,11 +193,11 @@ document and the code. It only advises: Start is never refused for it.
   as ready.
 - **Where it runs and shows**: `sf check-task <workspace> <ticket>` runs one in its own process
   (no `sf serve` needed) and prints the paraphrase, the findings by severity, the files and the
-  verdict, and where it stored the record (an open dashboard shows it at its next refresh). On the dashboard a Planned card has **Check** (`POST
+  verdict, and where it stored the record (an open dashboard shows it at its next refresh). On the dashboard a Queue card has **Check** (`POST
   api/tickets/<ws>/<ticket>/check`: answers at once, refused with `check_running` while one runs
   or is being set up for the ticket (the ticket is reserved before anything else, so two requests
-  at once start one check) and with `task_draft` for a skeleton) and a chip with the last check (`not
-  checked`, `checking…`, `ready`, `not ready: N blocker, M major`, `check failed`, `· stale`); the
+  at once start one check) and with `task_draft` for a skeleton) and a note with the last check (`not
+  checked`, `checking…`, `check: ready`, `not ready: N blocker, M major`, `check failed`, `· stale`); the
   tickets of the stream carry the summary (`check`). `GET api/tickets/<ws>/<ticket>/check` is the
   last check with `stale`, `running` and the current sha256; the Task drawer and the job's Task tab
   show it above the Task text, the paraphrase above the findings. Start's confirmation adds "Task
@@ -1020,59 +1020,124 @@ in time, `sf` exits 1 with the reason; the printed URL stays usable by hand. Exi
 launcher accepted the URL, not that the page loaded: nothing checks that `sf serve` is running.
 On another platform `--open` is refused (`open_unsupported`); plain `sf dashboard` works everywhere.
 
-**The board (SF-046).** The page is a board that reads like a Kanban board, with five columns whose
-headers count their cards: **Planned** (the Task files of every usable workspace whose ticket has no
-job, or whose last job is `failed` or `aborted`: skeletons and written tasks, with that state as a
-mark), **Implementing** (`starting`, `working`), **Reviewing** (`awaiting_review`, that is the
-Claude review or the Codex gate runs or is due, and `preparing_mr`), **Your turn** (`needs_human`,
-`ready_for_human_review`, `paused`) and **Done** (`pushed`, and `aborted` or `failed` when the ticket has no
-Planned card, its Task file archived or deleted; the most recent first; the last ten, then *Show
-all*). A ticket shows in one column only (SF-057): a pushed one only under Done, a failed or aborted
-one only under Planned, one with an active job only in that job's column. The Done card of a pushed
-job whose Task file is still active carries *Archive ticket* (the Archive of the Planned card it no
-longer has). A workspace filter above the board keeps one workspace's cards (and counts) or all. A
-job card shows the ticket key, the workspace and the title of its Task file (of its archived copy
-when the Task file is archived; the branch when neither is there); a five-segment pipeline bar
-(Implement, Claude review, Codex gate, MR, You) with the segments passed in green, the current one
-marked and a halted one red (a `needs_human` or `failed` job halts where its error points:
-`review_failed` at the Claude review, `gate_*` at the gate, a failed push at You, `mr_*` at MR,
-anything else at Implement; a pushed job has every segment done); one line saying who acts now and
-since when (`Implementer · 3 min`, `Claude review · 1 min`, `Codex gate · 4 min` counted from the
-end of the clean Claude review, `MR preparation · 1 min`, `You · approve · 2 min`, `You · retry
-review · …`, `You · <error code> · …`, `Pushed · 2 h 5 min ago`), the error of a halted job, and
-chips for the iteration, the files of the last iteration (and its undeclared sensitive ones) and the
-estimated cost ("est. $", not a charge). A Your turn card carries the one action that unblocks it:
-*Approve…* (the job opens with its approve confirmation), *Retry review* after a failed Claude
-review (sent at once, as the button in the drawer), *Resume* on a paused job (SF-067; sent at once;
-the card also says "Task file changed since the job started" when it did, and halts the pipeline
-bar where the pause stopped it) or *Open the job*; the job's last outcome shows under it. In the
-job's drawer, *Pause* shows on a working job or one in review (held, with the reason, while the MR
-is prepared), *Resume* on a paused one (a job paused during a turn sends the message written in the
-message box with it) and *Restart…* on a paused, aborted, failed or needs_human one; Restart asks
-first, saying what is thrown away, with *Keep the files* (section Pause, Resume and Restart). A Planned card shows the ticket, its base and, after a failed or aborted job, that state
-as a mark that opens the job, and **Start** to run it (again) (a skeleton says "waiting for the
-plan" instead), **Check** with the chip of the last Task check (section Task check), **Task**,
-Archive and Delete…. Start asks first, naming the workspace, the ticket and the base branch (and
-the Task check's note: not checked, stale, check failed or not ready: N blocker, M major), then sends `POST api/tickets/<ws>/<ticket>/start` once: `Execution.start`, the
-same call as `sf start`, with its refusals (`task_draft`, `job_limit`, `job_exists`,
-`branch_exists`, `checkout_dirty`, ...) shown as they come; the job's card appears under
-Implementing from the stream. An answer that does not settle the outcome (no answer, a body cut
-after the headers, a 2xx without a result, a 5xx without a factory code) is an unknown outcome:
-nothing is re-sent, and Start stays off for that ticket until `api/jobs` is read again (at once;
-when that read fails, until the stream's next `jobs` event), with a line saying to check the board
-before starting again. Task opens the Task file (`GET api/tickets/<ws>/<ticket>/task`) in the drawer
-as text: one line per line, Markdown headings bold by a line rule, never HTML from the file; for a
-ticket not archived, the drawer also offers its ChatGPT conversation (below). The board follows the
-stream's `jobs`, `tickets` and `workspaces` events: a card moves column when its job changes state,
-and "since when" moves on every minute. On a phone-wide window (below 760 px) the columns stack with
-Your turn first; light and dark follow the system as before.
+**The board (SF-046, v3 since SF-077).** The page is the board of the dashboard v3 design
+(`docs/design/dashboard-v3/`, ported from its prototype: the same CSS, light and dark by the system,
+the same markup and keys). The top bar has the title, "N wait for you · M running" (the page title
+is `(N) Software Factory` while N > 0), the connection as a tag while the stream is not connected,
+the workspace filter (all workspaces or one, its cards and counts), *Archived* (with its count),
+*Workspaces* and *New ticket*. The queue controls ("Run up to N jobs at once", the queue status) and
+the Rules menu are there but hidden until SF-071 and SF-072 bring their routes. Five columns, each
+heading with its count: **Queue** (the Task files of every usable workspace whose ticket has no job,
+or whose last job is `failed` or `aborted`; until SF-071 it is today's Planned list, without an
+order), **Implementing** (`starting`, `working`), **Reviewing** (`awaiting_review`, that is the
+Claude review or the Codex gate, and `preparing_mr`), **Your turn** (`needs_human`,
+`ready_for_human_review`, `paused`) and **Done** (`pushed`, and `aborted` or `failed` when the
+ticket has no Queue card; the most recent first; the last eight, then *Show all N*, which shows the
+rest in place and becomes *Show the last 8*). A ticket shows in one column only (SF-057): a pushed
+one only under Done, a failed or aborted one only in the Queue, one with an active job only in that
+job's column. An empty column says so.
 
-**The drawer.** Clicking a job card opens the job in a wide drawer on the right, over the board
-(the whole width on a phone): the job detail described below (SF-047), the URL becomes
-`#<workspace>/<ticket>` (opening that URL opens the drawer) and the stream follows that job;
-✕, a click beside the drawer or Escape closes it and the stream follows no job. A job that leaves
-the board (its ticket archived or deleted) closes it. The same drawer holds the Task text and the
-setup, which moved behind the header: **Workspaces** lists the registry (name, path, live jobs, a
+Each **card** has a first line with the ticket key, the workspace when the board shows more than
+one, the stop code as a tag on a `needs_human` job, and the money at the right: the estimated cost
+of its iterations and Claude reviews ("$1.23", not a charge) and the time since the job was
+created, "so far" while it runs (`$1.23 so far · 14 min`), or the time it took (`$1.23 · 1 h 4
+min`); then the title of its Task file (the branch without one). A **running** card (`starting`,
+`working`, `awaiting_review`, `preparing_mr`) says who acts now and what: "Now: Implementer" with
+its last tool call (`Read factory/src/jobs.ts`) or the first line of its last text, "Now: Claude
+review" or "Now: Codex gate" reviewing iteration N, "Now: MR writer" writing the MR text, and the
+iteration with the Implementer's tool calls. While a card runs and the page is visible, the page
+reads `api/jobs` again every 15 s so this line and the time move; nothing else is polled, and the
+board is drawn again every minute for the other cards' times. A **Your turn** card carries the one
+primary button of the board: on `needs_human` the reason in plain words and the button of the stop
+table below (it opens the job's page at the stop, *Retry review* is sent at once, *Push again*
+opens the Approve confirmation), with *Create merge request…* beside it when the branch is
+prepared; on `ready_for_human_review` "Ready to push: reviews clean, MR text written" with *Review
+the MR and push* (the job's page with the Approve confirmation open) and *Create merge request…*;
+on `paused` "Paused by you" with *Resume* (sent at once; SF-067: "Task file changed since the job
+started" when it did). The job's last outcome shows under them. A **Done** card says "Pushed · 2
+iterations · 14:05" (Aborted, Failed); a pushed one keeps its merge request (`#N state` with the
+link), *Create merge request…* or *Merge…* and, while its Task file is active, *Archive ticket*;
+an aborted or failed one has no button (its page has Restart and Archive). SF-069's line about a
+turn that went on by itself after the turn limit stays on the card. The iteration is numbered from
+1 and is the same on the card and on the job's page: the one under way while the Implementer works
+on it (`starting`, `working`, paused in its turn, stopped by its session), else the last one
+published.
+
+A **Queue card** shows the ticket key, the mark of its last job (`last job failed`, a button that
+opens that job's page), the Task check's note at the right (`checking…`, `check: ready`, `not
+ready: 1 blocker, 2 major`, `check failed`, each with ` · stale` when the Task file changed since,
+`not checked`, or `draft` for a skeleton) and the title, then **Start** (the only primary button)
+or "waiting for the plan" for a skeleton, **Check** (section Task check), Archive and Delete…. A
+click on the card opens the planned ticket (its Task in the drawer until SF-081). Start asks first,
+naming the workspace, the ticket and the base branch (and the Task check's note: not checked,
+stale, check failed or not ready: N blocker, M major), then sends `POST
+api/tickets/<ws>/<ticket>/start` once: `Execution.start`, the same call as `sf start`, with its
+refusals (`task_draft`, `job_limit`, `job_exists`, `branch_exists`, `checkout_dirty`, ...) shown
+as they come; the job's card appears under Implementing from the stream. An answer that does not
+settle the outcome (no answer, a body cut after the headers, a 2xx without a result, a 5xx without
+a factory code) is an unknown outcome: nothing is re-sent, and Start stays off for that ticket
+until `api/jobs` is read again (at once; when that read fails, until the stream's next `jobs`
+event), with a message saying to check the board before starting again. The board follows the
+stream's `jobs`, `tickets` and `workspaces` events: a card moves column when its job changes state.
+On a phone-wide window (below 760 px) the columns stack with Your turn first, then Implementing
+and Reviewing.
+
+**The stop table.** A stop is a **decision** (the factory needs the user's choice; nothing failed:
+never red, never "Stopped") or an **error** (its reason in red). The card shows the reason and the
+button; the job's page (SF-078) says the sentence; one table, `STOPS` in `static/app.js`:
+
+| Code | Kind | Reason on the card | Button |
+|---|---|---|---|
+| `simplify_offered` | decision | Simplification offered | Simplify or skip |
+| `escalated` | decision | Question for you | Answer N questions |
+| `review_disputed` | decision | A reviewer disputes a contest | Settle N findings |
+| `review_churn` | decision | Fixes keep making findings | Decide N findings |
+| `gate_rounds` | decision | Codex round limit reached | Decide N findings |
+| `gate_budget` | decision | Codex token budget used up | Decide |
+| `iteration_limit` | decision | Fix round limit reached | Give a direction |
+| `max_turns` | decision | Turn limit reached | Tell it to go on |
+| `gate_failed` | error | Codex gate gave no verdict | Decide |
+| `review_failed` | error | Claude review could not run | Retry review |
+| `serve_restarted` | error | Interrupted by a restart | Tell it to go on |
+| `mr_serve_restarted`, `mr_interrupted` | error | MR preparation interrupted | Tell it to go on |
+| `session_failed` with the usage-limit message | error | Usage limit reached | Tell it to go on |
+| `session_failed`, `turn_failed`, `permission_mode_mismatch` | error | Implementer session failed | Tell it to go on |
+| `sandbox_unavailable` | error | Sandbox unavailable | Tell it to go on |
+| `publish_failed` | error | Iteration not published | Tell it to go on |
+| `mr_conflict` | error | Rebase conflict | Tell it how |
+| `mr_text_missing`, `mr_text_invalid` | error | MR text missing or invalid | Tell it to fix it |
+| `mr_empty` | error | Nothing to commit | Tell it what is missing |
+| `mr_commit_failed`, `mr_rebase_failed`, `mr_failed` | error | MR preparation failed | Tell it to go on |
+| `worktree_remove_failed` | error | Worktree not removed | Tell it to go on |
+| `mr_push_failed` | error | Push failed | Push again |
+| `mr_push_protected` | error | Push refused | Open the job |
+| any other code | error | Stopped | Open the job |
+
+N is the number of findings or suggestions the job waits on (`stop` of `api/jobs`); the card's
+second line says "N findings to decide", or "stopped at HH:MM" when there is none.
+
+**Full pages.** One view shows at a time: the board, a job's page or a planned ticket's page; the
+URL hash says which, and the browser's Back and Forward move between them: `#<workspace>/<ticket>`
+is the job's page (today's job links keep working), `#<workspace>/<ticket>/changes` and `/mr` the
+same page with its Changes or MR tab selected (their own screens come with SF-079 and SF-080), and
+`#<workspace>/<ticket>/ticket` the planned ticket (until SF-081 the board with the ticket's Task
+drawer open). A hash for a job or ticket the board does not have shows the board. A click on a job
+card opens its page: a header with *← Board*, the key, the title, the state in a sentence, the
+iteration and the branch, and below it the job detail described below (SF-047, until SF-078
+replaces it); the stream follows that job. A job that leaves the board (its ticket archived or
+deleted) goes back to the board. **Keys** on the board: `j` and `k` move between the cards, Enter
+opens the focused card; on a page, Escape goes back one level (Changes or MR to the job's Stream,
+the Stream or a planned ticket to the board) and the focus returns to the card that opened it.
+Alt+Up and Alt+Down move a queued card once SF-071 brings the queue.
+
+**Messages.** The board's messages (a start, a check, an archive, a restore or a delete, and their
+refusals) show in one toast at the top: an ok message goes after 6 s (not while the pointer is on
+it), an error stays until closed; × and Escape close it; a new message replaces the old one. The
+messages of a form in the drawer stay under the form.
+
+**The drawer.** The drawer on the right is left for **Workspaces**, **New ticket**, **Archived**
+and a planned ticket's Task (the whole width on a phone); ✕, a click beside it or Escape closes it.
+**Workspaces** lists the registry (name, path, live jobs, a
 problem such as a missing checkout) with Remove (off while the workspace has a live job; the
 registration only, nothing on disk changes) and an Add form: a name and the path of the local
 checkout, typed or pasted (the page cannot browse the machine's disk), validated as `sf workspace
@@ -1085,11 +1150,15 @@ file writer: the front matter (`ticket`, `title`, `base` = the branch `origin/HE
 `main`), `# <ticket>: <title>` and `## Status: waiting for the Context owner` with one line of
 explanation. The user's words are **not** written into it: they are kept in the state directory
 (`<state dir>/requests/<workspace>/<ticket>.md`) and become the first message of the ticket's
-conversation. An existing Task file is never replaced from the page (`409 ticket_exists`).
-**Archived** (a link in the header, with the count) lists the archived tickets with Task (the
-archived text), Restore and Delete…; Archive, Restore and Delete… are described under SF-027 (a
-finished job of the ticket leaves the board with them). With no workspace, or no ticket and no
-job, a line above the board says where to begin.
+conversation. An existing Task file is never replaced from the page (`409 ticket_exists`). Once
+the ticket is created the dialog closes and the board scrolls to the new Queue card and highlights
+it (its page, once SF-081 lands); a refusal keeps the dialog open with the error and the input.
+Nothing opens the ChatGPT tab by itself. **Archived** (with the count) lists the archived tickets
+with Task (the archived text), Restore and Delete…; Archive, Restore and Delete… are described
+under SF-027 (a finished job of the ticket leaves the board with them). The Task drawer shows the
+Task file (`GET api/tickets/<ws>/<ticket>/task`) as text: one line per line, Markdown headings bold
+by a line rule, never HTML from the file, with the last Task check above it. With no workspace, or
+no ticket and no job, a line above the board says where to begin.
 
 The ticket's **conversation** in its Task drawer: *Open the conversation*, a link (`target=_blank`,
 opened only by the user's click, and the same URL in a box to copy) to `https://chatgpt.com/?q=`
@@ -1097,7 +1166,7 @@ plus the message of `ticketConversation` URL-encoded. The message names the conn
 ticket and the workspace, carries the user's words, and tells the Context owner to investigate
 (`read_file`, `search`), discuss, write the Task file over the skeleton with `write_task` with a
 `## Review brief`, and then tell the user it is ready: it only plans and never starts, reviews or
-approves a job; the user reads the Task file and presses Start on its Planned card. A message too
+approves a job; the user reads the Task file and presses Start on its Queue card. A message too
 long for a link (over 7500 characters of URL) is offered in the box to copy instead.
 Whether ChatGPT sends a prefilled message by itself is up to ChatGPT, so the page says to press
 Enter if it is not. Only the server's ChatGPT URL becomes a link. A change made with `sf workspace
@@ -1106,12 +1175,13 @@ from a page, or a reload). The ChatGPT reviewer of SF-031 to SF-035 is gone with
 (SF-040): there is no Reviewer line, no "Set up the reviewer in ChatGPT", no Nudge, no Send test
 event and no Subscriptions.
 
-**The job detail (SF-047).** The drawer shows the job live, in the shape the user chose from the
-dashboard redesign prototype (variant C, branch `prototype-dashboard-redesign`):
+**The job detail (SF-047).** The job's page shows the job live under its header, in the shape the
+user chose from the dashboard redesign prototype (variant C, branch `prototype-dashboard-redesign`),
+until SF-078 replaces it with the v3 Stream:
 
 - **Header**: the ticket key, the state badge and the file badges (`N files`, `M sensitive` in red,
   `K deleted`), the branch with *Copy checkout command* (`git checkout <branch>` on the clipboard,
-  or shown selected for Ctrl+C when the browser refuses it), and the **pipeline stepper**:
+  or shown selected for Ctrl+C when the browser refuses it), and the **pipeline** (`.pipeline`):
   Implement → Claude review → Codex gate → MR preparation → You. Each step is done (✓), current
   (with since when: `since 10:05 (4 min)`; the gate from the end of the clean Claude review), halted
   (red, with its error code) or to do; the gate step reads *off* when `SF_GATE` is off, and
@@ -1172,7 +1242,8 @@ error, so the user accepts them knowingly). The merge request (SF-048) has Creat
 `ready_for_human_review` says the branch is pushed first), Merge (`sf mr merge`; its confirmation
 names the number and the target branch) and Refresh MR status (`sf mr status`) in the next-action
 panel, with the merge request's link; the Your turn cards offer Create merge request… next to
-Approve…, the Done cards of pushed jobs Create merge request… or Merge… and the link. Without the
+their primary button, the Done cards of pushed jobs Create merge request… or Merge… and the link
+(each opens the job's page with its confirmation). Without the
 token for the workspace's host the buttons stay off and the reason names the missing variable.
 Approve stays for users who open merge requests themselves. Each is one deliberate click; approve, abort and accept ask for a confirmation that names the
 job, explains what follows (the push; the session ends and the worktree stays, or the worktree and
@@ -1206,7 +1277,7 @@ with the push error; `branch_changed` as the refusal it is. Abort stays availabl
 the message was queued behind a running turn (it has not run yet) or started a turn; the draft
 stays on any error, only the text that was sent is cleared on acknowledgement, and drafts are
 kept per job when another job is opened. A confirmation and a request are bound to the job they
-were opened for: opening another job or closing the drawer closes the confirmation and never
+were opened for: opening another job or leaving the job's page closes the confirmation and never
 retargets a request, and an answer that arrives for another job changes nothing on the shown one
 (it shows on that job's card and when it is opened again).
 
@@ -1221,7 +1292,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 
 | Path | Answer |
 |---|---|
-| `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, fixes, gate_fixes, gate_tokens, updated_at, created_at, error, and for the board (SF-046) `title` (of the Task file, or `null`), `cost_usd` (the estimate of the iterations and their Claude reviews, or `null`), `review` and `gate` (the last iteration's verdicts: `clean`, `fix`, `failed` or `null`) and `review_ended_at` (the end of that clean or fix Claude review, or `null`); `mr` (the merge request on the Git host or `null`) and `mr_host` (`{host, reason}`: `github`, `gitlab` or `null`, and why the merge request actions are off or `null`) |
+| `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, fixes, gate_fixes, gate_tokens, updated_at, created_at, error, and for the board (SF-046) `title` (of the Task file, or `null`), `cost_usd` (the estimate of the iterations and their Claude reviews, or `null`), `review` and `gate` (the last iteration's verdicts: `clean`, `fix`, `failed` or `null`) and `review_ended_at` (the end of that clean or fix Claude review, or `null`); `mr` (the merge request on the Git host or `null`) and `mr_host` (`{host, reason}`: `github`, `gitlab` or `null`, and why the merge request actions are off or `null`); for the v3 card (SF-077) `now` (`{who, what, ts}` of a running job: the Implementer's last tool call or the first line of its last text, read from at most the last 256 KB of `events.jsonl`; the Claude review or the Codex gate reviewing iteration N; the MR writer; else `null`), `tool_calls` (the Implementer's tool calls in the job, counted incrementally: only the bytes added since the last count are read) and `stop` (for `needs_human`, `{items, saves_lines}`: the suggestions of the last simplification pass and the lines they save, the ledger entries to settle (`escalated`, `review_disputed`), the open ones (`review_churn`) or the last gate's items (`gate_rounds`, `gate_budget`), none for other codes; `null` otherwise) |
 | `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override, simplify}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied} or {ts, event: "merge_request", action, number, url, state}], mr_title, ledger}`; `mr_title` is the MR text's first line or `null`; `ledger` is `ledger.json` as written (`[]` before the first Fix section, SF-052); `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null`, `simplify` its `simplify.json` (SF-055) or `null` |
 | `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem}]}`: the registry, the checkout's path, its non-terminal jobs, and why the checkout cannot be used now or `null` |
 | `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, conversation: {message, url}}], archived: [{workspace, ticket, title}]}`: the Task files without a live job; `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
@@ -1312,77 +1383,83 @@ own behaviour are only checked by hand. With `sf serve` running on a throwaway r
 `SF_CLAUDE` pointing at `dist/test/support/fake-claude.js` (or a real job you are willing to
 end), in a browser:
 
-1. Board: open the URL of `sf dashboard --open`: five columns with their counts; each job is in
-   the column of its state, with the pipeline bar, the line of who acts now and since when, and
-   the chips. The workspace filter keeps one workspace's cards. With more than ten finished jobs
-   Done shows ten and *Show all N*.
-2. Start: on a Planned card with a written Task file click Start: the dialog names the workspace,
-   the ticket and the base branch; Cancel sends nothing (`sf status` unchanged). Confirm: the line
-   at the bottom says the job started, and the card appears under Implementing, then moves to
-   Reviewing and Your turn as the job goes on, without a reload. A skeleton shows "waiting for the
-   plan" and no Start; Start on a ticket whose workspace already runs `SF_MAX_JOBS` jobs shows
-   `job_limit` as it comes.
-3. Task: click Task on a Planned card: the drawer shows the Task file as text, headings bold; a
-   line `<script>alert(1)</script>` written into a Task file shows as that text, nothing runs.
-   Archived → Task shows an archived file.
-   Check: on a Planned card click Check: the chip says `checking…`, then the verdict a few minutes
-   later without a reload; Task shows the check above the Task text, the paraphrase first. Edit the
-   Task file: the chip and the check say stale, and Start's dialog says "Task check: stale" and
-   starts once confirmed.
-4. Drawer: click a job card: the wide drawer opens on the right with the header, the stepper, the
-   next-action rail and the tabs; the URL ends in `#<workspace>/<ticket>`; reload: the drawer
-   opens on the same job. Copy checkout command puts `git checkout <branch>` on the clipboard. ✕, a click on the
-   board beside it and Escape close it (Escape in an open approve or abort dialog closes only
-   the dialog).
-5. Say: in the drawer of a job in `awaiting_review` type two lines (Enter adds a line and submits
+1. Board: open the URL of `sf dashboard --open` next to `docs/design/dashboard-v3/prototype-full.html`
+   of the branch `prototype-dashboard-v3`: the same top bar, columns and cards, in light and dark
+   (the OS scheme) and at phone width (below 760 px the columns stack with Your turn first). Five
+   columns with their counts; each job is in the column of its state; a running card has the Now
+   line and the tool calls, and its time moves every 15 s; a stopped one its reason, its code and
+   one button. The workspace filter keeps one workspace's cards. With more than eight finished
+   jobs Done shows eight and *Show all N*, which expands the column in place. The queue controls
+   and the Rules menu are not shown.
+2. Start: on a Queue card with a written Task file click Start: the dialog names the workspace,
+   the ticket and the base branch; Cancel sends nothing (`sf status` unchanged). Confirm: the toast
+   at the top says the job started and goes after 6 s, and the card appears under Implementing,
+   then moves to Reviewing and Your turn as the job goes on, without a reload. A skeleton shows
+   "waiting for the plan" and no Start; Start on a ticket whose workspace already runs
+   `SF_MAX_JOBS` jobs shows `job_limit` in the toast, which stays until × or Escape.
+3. Task: click a Queue card: the drawer shows the Task file as text, headings bold, and the URL
+   ends in `/ticket`; a line `<script>alert(1)</script>` written into a Task file shows as that
+   text, nothing runs. Escape closes it and the focus is back on the card. Archived → Task shows an
+   archived file.
+   Check: on a Queue card click Check: the note says `checking…`, then the verdict a few minutes
+   later without a reload; the Task drawer shows the check above the Task text, the paraphrase
+   first. Edit the Task file: the note and the check say stale, and Start's dialog says "Task check:
+   stale" and starts once confirmed.
+4. Job page: click a job card: the job opens as a full page with *← Board*, the key and the title,
+   then the job detail (the header, the pipeline, the next-action rail and the tabs); the URL ends
+   in `#<workspace>/<ticket>`; reload: the same page opens. Add `/changes` or `/mr` to the URL:
+   the Changes or MR tab is selected. Escape on `/changes` goes to the job's page, Escape again to
+   the board with the focus on the card; the browser's Back and Forward move between them. Copy
+   checkout command puts `git checkout <branch>` on the clipboard. Escape in an open approve or
+   abort dialog closes only the dialog.
+5. Keys: on the board `j` and `k` move the focus between the cards, Enter opens the focused one.
+6. Say: on the page of a job in `awaiting_review` type two lines (Enter adds a line and submits
    nothing), click Send: "Sent" and an empty box; while that turn runs, send another: "Queued";
    `sf watch` shows both prompts as typed.
-6. Abort: click Abort…; the dialog names the job and the branch and says the files stay; Cancel:
+7. Abort: click Abort…; the dialog names the job and the branch and says the files stay; Cancel:
    `sf status` is unchanged. Open it again: the discard box is unchecked; tick it: the button
    reads "Abort and discard the branch" in red; Cancel and reopen: unchecked again. Confirm a
    plain abort on a job you can lose: "Aborted; the branch … stays"; the card moves to Done.
-7. Approve: on a Your turn card in `ready_for_human_review` click Approve…: the drawer opens with
-   the approve dialog; confirm: "Pushed …" with the title and the merge request link to copy (or
-   the note to open it by hand); the card moves to Done.
-8. Retry review (a fake review scripted to fail): the job is under Your turn with the review
-   segment red and *Retry review* on its card; click it: the card moves to Reviewing.
-9. Switching: start a say or an approve and open another job before the answer: that job's
+8. Approve: on a Your turn card in `ready_for_human_review` click *Review the MR and push*: the
+   job's page opens with the approve dialog; confirm: "Pushed …" with the title and the merge
+   request link to copy (or the note to open it by hand); the card moves to Done.
+9. Retry review (a fake review scripted to fail): the job is under Your turn with "Claude review
+   could not run" in red and *Retry review* on its card; click it: the card moves to Reviewing.
+   A decision stop (`gate_rounds`, below) is never red.
+10. Switching: start a say or an approve and open another job before the answer: that job's
    controls, status and draft are untouched; open the first again: the outcome is there.
-10. Unknown outcome: with DevTools offline (or `sf serve` stopped) send a message: "outcome is
+11. Unknown outcome: with DevTools offline (or `sf serve` stopped) send a message: "outcome is
    unknown", the draft stays and Send, Approve… and Abort… stay off with a reason; the read fails
    and Refresh state appears; back online, click it: the state is current and nothing was
    re-sent. The same for Start: offline, confirm a Start: its outcome is unknown and Start stays
    off for that ticket until the board is read again; nothing is re-sent.
-11. Reconnect: stop `sf serve` with the page open: the header says reconnecting and no request is
-   re-sent; start it again and reopen the page with the new URL (the old token is 404).
-12. Setup: with an empty registry (`SF_CONFIG_DIR` pointing at an empty directory) the board says
+12. Reconnect: stop `sf serve` with the page open: the top bar shows "reconnecting" and no request
+   is re-sent; start it again and reopen the page with the new URL (the old token is 404).
+13. Setup: with an empty registry (`SF_CONFIG_DIR` pointing at an empty directory) the board says
    to add a workspace; Workspaces opens the drawer with the Add form; add a throwaway repository by
    its path (a wrong path shows the refusal in place). New ticket with a key, a title and two lines
    of request writes `.software-factory/<key>.md` as a skeleton (`## Status: waiting for the
-   Context owner`, no request text), and the ticket appears under Planned with "waiting for the
-   plan". Its Task drawer has *Open the conversation*: a new tab on chatgpt.com with your words
-   in the first message (press Enter if it stays there); the same URL is in the box and Copy puts
-   it on the clipboard. Once ChatGPT wrote the Task file, Start appears on the card. Remove on a
-   workspace with a live job is off with the reason. Nowhere on the page is there a Reviewer
-   line, a reviewer setup, Nudge, Send test event or Subscriptions.
-13. Tabs: Changes opens by default; Task shows the Task file with its Fix sections; Reviews shows
+   Context owner`, no request text): the dialog closes and the board scrolls to the new Queue card,
+   highlighted, with "waiting for the plan". Its Task drawer has *Open the conversation*: a new tab
+   on chatgpt.com with your words in the first message (press Enter if it stays there); the same
+   URL is in the box and Copy puts it on the clipboard. Once ChatGPT wrote the Task file, Start
+   appears on the card. Remove on a workspace with a live job is off with the reason. Nowhere on
+   the page is there a Reviewer line, a reviewer setup, Nudge, Send test event or Subscriptions.
+14. Tabs: Changes opens by default; Task shows the Task file with its Fix sections; Reviews shows
    both verdicts of every iteration side by side; MR says there is no text until MR preparation
    wrote it, then shows it, and Copy MR text puts the title, a blank line and the body on the
    clipboard (paste it into the MR form); Live log follows the job and its filters keep one source;
    the chosen tab stays when another job is opened. The facts' worktree path wraps inside the rail.
-14. Changes: the file list in the IntelliJ shape and order beside the Patch; click a row: the
+15. Changes: the file list in the IntelliJ shape and order beside the Patch; click a row: the
    Patch scrolls to that file and marks it; a binary file says the Patch omits it.
-15. Layout: narrower than 760 px the columns stack with Your turn first and the drawer takes the
-   whole width; between 760 and about 1200 px the board scrolls sideways inside the page; in the
-   OS dark scheme the pipeline colours, the chips and the dialogs stay readable; Tab reaches each
-   card, its action, the drawer's ✕, the tabs, Approve…, Abort…, the dialog's buttons, the
-   textarea and Send. Between about 760 and 1100 px the next-action panel sits above the tabs; on a
-   phone the stepper stacks.
-16. Accept and prepare MR (a fake Codex scripted to ask for fixes past `SF_GATE_MAX_ROUNDS=1`): the
-   job is under Your turn with the gate step red and `gate_rounds`; the rail offers *Accept and
-   prepare MR…*; its dialog lists the Codex items; Cancel sends nothing; confirm: the job goes to
-   MR preparation and Your turn, the state history shows the override, and the MR tab lists the
-   Codex items not applied.
+16. Layout: Tab reaches each card, its buttons, the job page's *← Board*, the tabs, Approve…,
+   Abort…, the dialog's buttons, the textarea and Send. Between about 760 and 1100 px the
+   next-action panel sits above the tabs; on a phone the pipeline stacks.
+17. Accept and prepare MR (a fake Codex scripted to ask for fixes past `SF_GATE_MAX_ROUNDS=1`): the
+   job is under Your turn with "Codex round limit reached", `gate_rounds` and *Decide N findings*;
+   the rail offers *Accept and prepare MR…*; its dialog lists the Codex items; Cancel sends nothing;
+   confirm: the job goes to MR preparation and Your turn, the state history shows the override, and
+   the MR tab lists the Codex items not applied.
 
 ## Workspace registry
 

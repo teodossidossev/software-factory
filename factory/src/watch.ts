@@ -222,7 +222,7 @@ function codexLines(event: Record<string, unknown>): string[] {
 }
 
 // The short input of a review tool use: the file or pattern it is about, else its JSON.
-function shortInput(input: unknown): string {
+export function shortInput(input: unknown): string {
   const fields = asRecord(input);
   const named = ['file_path', 'pattern', 'path'].map((key) => fields[key]).find((value) => typeof value === 'string');
   return oneLine(typeof named === 'string' ? named : JSON.stringify(input ?? {}), INPUT_CHARS);

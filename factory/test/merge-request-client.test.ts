@@ -2,7 +2,8 @@
 // test/support/fake-dom.ts: Create merge request…, Merge… and Refresh MR status in the job drawer's
 // next-action panel with their confirmations (the title, the target branch and the number), the
 // link, the actions off with the missing variable named, and the buttons and the link on the Your
-// turn and Done board cards. Script checks, not browser acceptance.
+// turn and Done board cards, whose confirmations open on the job's page (SF-077). Script checks,
+// not browser acceptance.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { type FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
@@ -58,7 +59,7 @@ async function show(page: Page, row: Job): Promise<void> {
 const posts = (page: Page, action: string): FetchRequest[] => page.requests.filter((request) => request.method === 'POST' && request.path === `api/jobs/app/T-1/${action}`);
 const state = (page: Page, id: string): [boolean, boolean] => [page.$(id).hidden, page.$(id).disabled];
 const card = (page: Page, key: string): FakeElement => ['you', 'done'].flatMap((column) => page.$(`list-${column}`).children as FakeElement[])
-  .find((item) => item.className?.startsWith('board-card') && item.dataset.key === key)!;
+  .find((item) => item.classList?.contains('card') && item.dataset.open === key)!;
 const cardButtons = (item: FakeElement): string[] => item.all().filter((element) => element.tagName === 'BUTTON' && element.className.startsWith('btn')).map((element) => element.textContent);
 const links = (item: FakeElement): FakeElement[] => item.all().filter((element) => element.tagName === 'A');
 
@@ -173,7 +174,7 @@ test('mr client: the actions off name the missing variable; from ready_for_human
   assert.equal(page.$('mr-line').textContent, 'Merge request #2 (open): javascript:alert(1)');
 });
 
-test('mr client: the board offers Create merge request… on Your turn and Done cards, Merge… and the link on a Done card; each opens its confirmation in the drawer', async () => {
+test('mr client: the board offers Create merge request… on Your turn and Done cards, Merge… and the link on a Done card; each opens its confirmation on the job page', async () => {
   const jobs = [
     job('T-1', 'pushed', { mr: { host: 'github', number: 1, url: URL_1, state: 'open' } }),
     job('T-2', 'ready_for_human_review'),
@@ -183,7 +184,7 @@ test('mr client: the board offers Create merge request… on Your turn and Done 
   const page = await open(jobs, '');
   assert.deepEqual(cardButtons(card(page, 'app/T-1')), ['Merge…']);
   assert.deepEqual(links(card(page, 'app/T-1')).map((element) => element.href), [URL_1]);
-  assert.deepEqual(cardButtons(card(page, 'app/T-2')), ['Approve…', 'Create merge request…']);
+  assert.deepEqual(cardButtons(card(page, 'app/T-2')), ['Review the MR and push', 'Create merge request…']);
   const off = card(page, 'app/T-3').all().find((element) => element.tagName === 'BUTTON' && element.textContent === 'Create merge request…')!;
   assert.deepEqual([off.disabled, off.getAttribute('title')], [true, 'the origin URL of the checkout names no GitHub or GitLab repository.']);
   assert.deepEqual(cardButtons(card(page, 'app/T-4')), []);
@@ -194,4 +195,5 @@ test('mr client: the board offers Create merge request… on Your turn and Done 
   page.streams.at(-1)!.emit('job', detail(jobs[0]!));
   await page.flush();
   assert.deepEqual([page.$('confirm').hidden, page.$('confirm-ok').textContent], [false, 'Merge #1 into main']);
+  assert.deepEqual([page.$('job').hidden, page.$('drawer').hidden, page.$('confirm').closest('#job') !== null], [false, true, true]);
 });

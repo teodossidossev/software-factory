@@ -1,6 +1,7 @@
 // The factory's MCP endpoint for the planner (SF-040): a loopback HTTP listener serving /mcp
 // through the SDK's stateless handler, with the Handbook as instructions and the planning tools
-// guide, read_file, search and write_task. No authentication: it listens on loopback only. Jobs
+// guide, read_file, search, write_task and task_check (the last Task check of the current Task
+// file, SF-054). No authentication: it listens on loopback only. Jobs
 // are started, reviewed and approved by the user (the dashboard, the CLI) and the reviewers,
 // never through this endpoint.
 import { readFile } from 'node:fs/promises';
@@ -16,6 +17,7 @@ import { handbookSection } from './prompts.js';
 import { resolveWorkspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { DEFAULT_PAGE_BYTES, MAX_FILE_BYTES, MAX_PAGE_BYTES, MAX_PATH_LENGTH, MIN_PAGE_BYTES, RepoFiles, RepoReadError } from './repo-files.js';
 import { DEFAULT_RESULTS, MAX_QUERY_CHARS, MAX_RESULTS, search } from './search.js';
+import { checkFile, checkFinding, recordVerdict, type TaskChecks } from './task-check.js';
 import { MAX_TASK_BYTES, TICKET_DESCRIPTION, TICKET_PATTERN, writeTask } from './task-file.js';
 
 export const SERVER_NAME = 'software-factory';
@@ -72,8 +74,11 @@ const workspaceName = z.string().regex(WORKSPACE_NAME_PATTERN).describe(`Registe
 const ticketKey = z.string().regex(TICKET_PATTERN).describe(`Ticket key, e.g. "PROJ-123": ${TICKET_DESCRIPTION}.`);
 const relativePath = (what: string) => z.string().min(1).max(MAX_PATH_LENGTH).describe(what);
 
+// The Task checks task_check reads (SF-054): the check of the current Task file.
+export type ServerChecks = Pick<TaskChecks, 'current'>;
+
 // execution: only its JobStore, for write_task's guard against replacing the Task file of a live job.
-function createMcpServer(handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>): McpServer {
+function createMcpServer(handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks: ServerChecks | undefined): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version }, { instructions: handbook.quickStart });
 
   server.registerTool(
@@ -198,6 +203,50 @@ function createMcpServer(handbook: Handbook, version: string, execution: Pick<Ex
     },
   );
 
+  server.registerTool(
+    'task_check',
+    {
+      title: 'Read the Task check',
+      description:
+        'Returns the last Task check of the current Task file .software-factory/<ticket>.md: a read-only Claude session ' +
+        'that read only the Task file and the repository (the user runs it: Check on the board, or sf check-task). ' +
+        'paraphrase is the checker\'s reading of the Task; findings are decision, contradiction, missing, overreach or ' +
+        'unclear, each blocker, major or nit; files are the files it expects to change; verdict is ready (no blocker or ' +
+        'major), not_ready, failed (error says why; never ready), or none when the current Task file has no check (a ' +
+        'check of an earlier version does not count). Rewrite the Task from the findings with write_task. Starts nothing.',
+      inputSchema: z.strictObject({ workspace: workspaceName, ticket: ticketKey }),
+      outputSchema: z.object({
+        verdict: z.enum(['none', 'ready', 'not_ready', 'failed']),
+        sha256: z.string(),
+        paraphrase: z.string().nullable(),
+        findings: z.array(checkFinding),
+        files: z.array(checkFile),
+        error: z.string().nullable(),
+        model: z.string().nullable(),
+        checked_at: z.string().nullable(),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ workspace, ticket }) => {
+      try {
+        if (checks === undefined) {
+          throw new FactoryError('check_unavailable', 'The Task check is not available.');
+        }
+        const { sha256, record } = await checks.current(workspace, ticket);
+        if (record === undefined) {
+          return toolResult({ verdict: 'none' as const, sha256, paraphrase: null, findings: [], files: [], error: null, model: null, checked_at: null });
+        }
+        return toolResult({
+          verdict: recordVerdict(record),
+          sha256, paraphrase: record.output?.paraphrase ?? null, findings: record.output?.findings ?? [], files: record.output?.files ?? [],
+          error: record.error, model: record.model, checked_at: record.ended_at,
+        });
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  );
+
   return server;
 }
 
@@ -219,8 +268,8 @@ function listen(server: HttpServer, port: number): Promise<AddressInfo> {
   });
 }
 
-export async function startServer(port: number, handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>): Promise<RunningServer> {
-  const mcpHandler = createMcpHandler(() => createMcpServer(handbook, version, execution));
+export async function startServer(port: number, handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks?: ServerChecks): Promise<RunningServer> {
+  const mcpHandler = createMcpHandler(() => createMcpServer(handbook, version, execution, checks));
   const nodeHandler = toNodeHandler(mcpHandler);
   const validateHost = localhostHostValidation();
   const validateOrigin = localhostOriginValidation();

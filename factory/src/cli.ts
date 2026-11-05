@@ -1,7 +1,8 @@
 // The sf command: `sf serve`, `sf up` (serve, the tunnel and the browser), `sf workspace
 // add|list|remove`, `sf start|say|review|approve|abort|reset` and `sf mr create|merge|status`
 // (through the socket of sf serve),
-// `sf status|watch|dashboard` (reading the state directory directly), `sf notify-test`, `sf info`
+// `sf status|watch|dashboard` (reading the state directory directly), `sf check-task` (the Task
+// check of SF-054, run here and stored in the state directory), `sf notify-test`, `sf info`
 // and `sf run`, the job's runner that sf serve starts (SF-042, src/runner.ts).
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { type ChildProcess, spawn } from 'node:child_process';
@@ -25,7 +26,8 @@ import { loadHandbook, packageVersion, PortInUseError, SERVER_NAME, startServer 
 import { Setup } from './setup.js';
 import { type StatusRow, statusRows } from './status.js';
 import { fileSummaryLines } from './patch.js';
-import { TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
+import { CheckStore, checkLines, checkSettings, refuseDraft, runTaskCheck, TaskChecks } from './task-check.js';
+import { readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { watchEvents } from './watch.js';
 
 const DEFAULT_PORT = 8787;
@@ -36,6 +38,7 @@ const USAGE = `Usage:
   sf workspace add <name> --read <path>                 Register a workspace: the local checkout (every job works in a worktree of it)
   sf workspace list                                     List registered workspaces
   sf workspace remove <name>                            Unregister a workspace
+  sf check-task <workspace> <ticket>                    Check the Task file before Start: a read-only Claude session reads it and the repository, and prints its paraphrase, its findings by severity and its verdict (stored by the Task file's sha256; it only advises)
   sf start <workspace> <ticket>                         Start the job for .software-factory/<ticket>.md in a worktree of its own (up to SF_MAX_JOBS per workspace)
   sf say <workspace> <ticket> <message...>              Send a message into the job's Implementer session
   sf review <workspace> <ticket>                        Retry a failed Claude review (needs_human with review_failed) of the last iteration
@@ -60,6 +63,7 @@ Notes:
   SINCE:   the last state change in local time (the stored times are UTC).
   ELAPSED: wall-clock time since the job was created, waiting included; stops at the last state change once pushed, aborted or failed.
   dashboard --open: Linux with xdg-open; waits for the launcher at most 10 s; on a launcher failure exits 1 and leaves the printed URL to open by hand.
+  check-task: exits 0 when the check ran (ready or not ready), 1 when it failed; SF_TASK_CHECK_MAX_TURNS (default 30) and SF_REVIEW_MODEL apply.
 Exit codes: 0 ok, 1 error, 2 usage.`;
 
 class UsageError extends Error {}
@@ -107,6 +111,9 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   // A finished job leaves with its Task file through the lock's scope, in the same acquisition as
   // the ticket action's checks: it is archived and a kept worktree removed.
   const setup = new Setup({ configDir: configDir(), jobs, exclusive: (work) => execution.exclusive(work) });
+  // The Task checks (SF-054): started from the dashboard, read by the Context owner's task_check; an ended
+  // check reaches every page.
+  const checks = new TaskChecks({ ...checkSettings(config, configDir()), resolve: (name) => resolveWorkspace(name), onSettled: () => dashboard?.refreshSetup() });
   const testHooks = process.env.SF_TEST_HOOKS === 'on';
   // The socket first: it refuses a second sf serve on the same state before recovery touches it.
   const socket = await listenSocket(config.stateDir, async ({ command, args }) => {
@@ -166,7 +173,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   let server;
   try {
     await execution.recover();
-    server = await startServer(port, handbook, await packageVersion(), execution);
+    server = await startServer(port, handbook, await packageVersion(), execution, checks);
   } catch (error) {
     await socket.close();
     throw error;
@@ -175,7 +182,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     if (dashboardOn()) {
       // The dashboard's actions (DashboardActions: start, approve, abort, say, retryReview,
       // acceptGate and archiveFinished) run on the same Execution as the socket commands.
-      dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, setup, { gate: config.gate.on });
+      dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, setup, { gate: config.gate.on, checks });
     } else {
       await removeToken(config.stateDir);
     }
@@ -511,6 +518,28 @@ async function run(args: string[]): Promise<void> {
   console.log(`${new Date().toISOString()} runner ${process.pid} for ${workspace}/${ticket} ended`);
 }
 
+// sf check-task <workspace> <ticket> (SF-054): one Task check in this process, without sf serve;
+// the record goes to the state directory, as from the dashboard's Check.
+async function checkTask(args: string[]): Promise<void> {
+  if (args.length !== 2) {
+    throw new UsageError('check-task needs <workspace> <ticket>.');
+  }
+  const [name, ticket] = checkJob(args, 'check-task');
+  const config = loadConfig();
+  const workspace = await resolveWorkspace(name);
+  const task = await readTask(workspace, ticket);
+  refuseDraft(ticket, task);
+  const abort = new AbortController();
+  process.once('SIGINT', () => abort.abort());
+  console.error(`Checking ${TASK_DIR}/${ticket}.md of ${name}: a read-only Claude session reads it and the repository; this takes a few minutes.`);
+  const record = await runTaskCheck(workspace, ticket, task, { ...checkSettings(config, configDir()), signal: abort.signal });
+  const path = await new CheckStore(config.stateDir).write(record);
+  console.log([...checkLines(record), '', `stored: ${path}`].join('\n'));
+  if (record.status === 'failed') {
+    process.exitCode = 1;
+  }
+}
+
 async function notifyTest(args: string[]): Promise<void> {
   if (args.length !== 0) {
     throw new UsageError('notify-test takes no arguments.');
@@ -744,6 +773,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'reset') {
     await reset(rest);
+    return;
+  }
+  if (command === 'check-task') {
+    await checkTask(rest);
     return;
   }
   if (command === 'notify-test') {

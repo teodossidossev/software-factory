@@ -72,6 +72,8 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
     SF_GATE: 'off',
     // The job steps of call() and refused() through the socket.
     SF_TEST_HOOKS: 'on',
+    // Temporary directories (the Task check's worktree, SF-054) where the test run makes its own.
+    ...(process.env.TMPDIR !== undefined ? { TMPDIR: process.env.TMPDIR } : {}),
     // The zone of the times sf prints: the test file's own (SF-049), else the machine's.
     ...(process.env.TZ !== undefined ? { TZ: process.env.TZ } : {}),
     ...env.extra,
@@ -123,6 +125,11 @@ export async function reviewLog(env: Env): Promise<Array<{ argv: string[]; promp
   return (await readFile(join(env.home, 'fake-review.log'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
 }
 
+// What the fake Claude's probes did (the Task check, SF-054): each call, the hooks' decision and
+// the output the session saw.
+export async function probeLog(env: Env): Promise<Array<{ tool: string; input: Record<string, unknown>; decision: 'allow' | 'deny'; output: string; hooks: number }>> {
+  return (await readFile(join(env.home, 'fake-probe.log'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+}
 // The fake Codex's run script, consumed in order.
 export async function codexScript(env: Env, runs: unknown[]): Promise<void> {
   await writeFile(join(env.home, 'fake-codex.json'), JSON.stringify({ runs }));

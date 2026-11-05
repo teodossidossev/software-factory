@@ -25,10 +25,17 @@ clean or approve a job: the factory has no tool for it on this connection.
 3. Write the Task file with `write_task` (format below), with a `## Review brief`: you are not
    there when the reviewers review, so the brief carries what they must check and why the plan's
    decisions were made. Show the user the plan.
-4. Tell the user the Task file is ready. The user reads it and starts the job on the dashboard
+4. Have the Task checked before Start: ask the user to press Check on the ticket's card (or run
+   `sf check-task <workspace> <ticket>`), then read it with `task_check`. A fresh reader that sees
+   only the Task file and the repository paraphrases it and lists findings: a wrong paraphrase,
+   a `decision` left to the Implementer, a `contradiction` with the code (always a blocker), a
+   `missing` file, test or criterion, an `overreach`. Rewrite the Task with `write_task` from the
+   findings and ask for the check again until it is `ready` or the user decides otherwise. A check
+   of an earlier version does not count (`task_check` says `none`). The check only advises.
+5. Tell the user the Task file is ready. The user reads it and starts the job on the dashboard
    (the ticket's Start) or with `sf start`; a skeleton cannot be started. The Implementer works
    in a worktree of its own; several tickets of a workspace run at the same time.
-5. If the user comes back with a change of plan before the start, rewrite the Task file with
+6. If the user comes back with a change of plan before the start, rewrite the Task file with
    `write_task`; it is refused while a job on that ticket is running.
 
 Everything the Implementer and the reviewers know about the ticket is in the Task file. Everything
@@ -37,7 +44,7 @@ you need to resume after a context loss is `guide`, then `read_file` of the Task
 ## The cycle
 
 ```
-plan ─► write_task ─► user: Start ─► iteration ─► Claude review ─► Codex gate ─► Clean ─► user: approve/abort
+plan ─► write_task ─► Task check ─► user: Start ─► iteration ─► Claude review ─► Codex gate ─► Clean ─► user: approve/abort
                                         ▲               │               │
                                         └── Fix N ◄─────┴───────────────┘ findings
 ```
@@ -62,6 +69,7 @@ merge the merge request on the Git host.
 | `read_file(workspace, path, offset?, max_bytes?)` | Reads a UTF-8 file from the workspace's read checkout, paged. Credential-like paths are refused. |
 | `search(workspace, query, mode, path_prefix?, max_results?)` | `mode: "path"` finds files whose relative path contains `query`; `mode: "content"` finds lines containing `query`. Both case-insensitive. Tracked and untracked files, ignored ones skipped. Bounded. |
 | `write_task(workspace, ticket, content)` | Creates or replaces the Task file `.software-factory/<ticket>.md` in the work checkout. Refused while a job on that ticket is running. Starts nothing. |
+| `task_check(workspace, ticket)` | The last Task check of the current Task file: `verdict` (`ready`, `not_ready`, `failed`, or `none` when this version has no check), the checker's `paraphrase`, its `findings` (`kind`, `severity`, `where`, `problem`, `expected`) and the `files` it expects to change. The user runs the check; this tool only reads it. |
 
 ## Task file format
 

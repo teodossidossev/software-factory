@@ -11,10 +11,16 @@
 // $HOME/fake-review.log, so the Implementer's script and log stay as they are. A review entry gives
 // the structured output, or a subtype or noOutput to fail, and an optional delay. Like the real CLI,
 // it refuses a --json-schema whose $schema is not draft-07 (SF-044): exit 1 before anything else.
+// A review entry's probes (the Task check, SF-054) are Read, Grep and Glob calls made after the
+// init: each is first put to the SDK's PreToolUse hooks (registered at initialize) through the
+// hook_callback control request, as the real CLI does; a denied one gets an error result, an
+// allowed one runs here on the real files (without honouring any ignore file: the worst case). Each
+// probe, its decision and its output go to $HOME/fake-probe.log.
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { matchesGlob } from '../../src/rules.js';
 import { createInterface } from 'node:readline';
 
 interface Turn {
@@ -44,6 +50,8 @@ interface Turn {
   errors?: string[];
   // Review runs only: the structured output of the result (default: a clean verdict), or none.
   output?: unknown;
+  // Review runs only (SF-054): tool calls put to the PreToolUse hooks, then run when allowed.
+  probes?: Array<{ tool: string; input: Record<string, unknown> }>;
   noOutput?: boolean;
 }
 
@@ -85,10 +93,102 @@ const out = (message: Record<string, unknown>): void => {
   process.stdout.write(`${JSON.stringify({ session_id: sessionId, uuid: randomUUID(), ...message })}\n`);
 };
 
+// The PreToolUse hook callbacks the SDK registered at initialize, and the answers awaited from it.
+let preToolUseHooks: string[] = [];
+const awaiting = new Map<string, (response: Record<string, unknown>) => void>();
+let requests = 0;
+
+function askHook(callbackId: string, tool: string, input: Record<string, unknown>, toolUseId: string): Promise<Record<string, unknown>> {
+  const requestId = `fake-hook-${(requests += 1)}`;
+  return new Promise((done) => {
+    awaiting.set(requestId, done);
+    out({
+      type: 'control_request', request_id: requestId,
+      request: {
+        subtype: 'hook_callback', callback_id: callbackId, tool_use_id: toolUseId,
+        input: { hook_event_name: 'PreToolUse', session_id: sessionId, transcript_path: '', cwd: process.cwd(), tool_name: tool, tool_input: input, tool_use_id: toolUseId },
+      },
+    });
+  });
+}
+
+// Every regular file under dir, symlinks not followed, .git skipped.
+function filesUnder(dir: string): string[] {
+  try {
+    return readdirSync(dir, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => join(entry.parentPath, entry.name))
+      .filter((path) => !relative(dir, path).split('/').includes('.git'));
+  } catch {
+    return [];
+  }
+}
+
+// Brace alternatives, innermost group first ("{/a/**,b}" -> /a/**, b).
+function expandBraces(pattern: string): string[] {
+  const group = /\{([^{}]*)\}/.exec(pattern);
+  if (group === null) {
+    return [pattern];
+  }
+  return group[1]!.split(',').flatMap((part) => expandBraces(pattern.slice(0, group.index) + part + pattern.slice(group.index + group[0].length)));
+}
+
+// Runs an allowed probe on the real files: Read the file, Grep lines with the pattern, Glob paths.
+// Paths are taken as Claude Code takes them: trimmed, ~ and ~/ expanded to the home, and Grep's
+// file_path standing in for path.
+function runProbe(tool: string, input: Record<string, unknown>): string {
+  const cwd = process.cwd();
+  const at = (value: unknown): string => {
+    const path = typeof value === 'string' ? value.trim() : '';
+    return path === '' ? cwd : path === '~' ? home : path.startsWith('~/') ? join(home, path.slice(2)) : resolve(cwd, path);
+  };
+  if (tool === 'Grep' && input.path === undefined && input.file_path !== undefined) {
+    input = { ...input, path: input.file_path };
+  }
+  try {
+    if (tool === 'Read') {
+      return readFileSync(at(input.file_path), 'utf8');
+    }
+    if (tool === 'Grep') {
+      const pattern = String(input.pattern);
+      return filesUnder(at(input.path)).flatMap((file) => readFileSync(file, 'utf8').split('\n').map((line, index) => [line, index] as const)
+        .filter(([line]) => line.includes(pattern)).map(([line, index]) => `${file}:${index + 1}:${line}`)).join('\n');
+    }
+    // Each brace alternative on its own, an absolute one from its own root: the widest reading.
+    const base = at(input.path);
+    return expandBraces(String(input.pattern)).flatMap((pattern) => filesUnder(isAbsolute(pattern) ? '/' + pattern.split('/').filter((part) => part !== '' && !/[*?[\]{}]/.test(part)).join('/') : base)
+      .filter((file) => matchesGlob(isAbsolute(pattern) ? file : relative(base, file), pattern))).join('\n');
+  } catch (error) {
+    return `error: ${(error as Error).message}`;
+  }
+}
+
+// The probes of a review run, each through the hooks first.
+async function runProbes(probes: Array<{ tool: string; input: Record<string, unknown> }>): Promise<void> {
+  for (const [index, probe] of probes.entries()) {
+    const id = `p${index}`;
+    out({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'tool_use', id, name: probe.tool, input: probe.input }] } });
+    let decision = 'allow';
+    let reason = '';
+    for (const callbackId of preToolUseHooks) {
+      const answer = await askHook(callbackId, probe.tool, probe.input, id);
+      const specific = answer.hookSpecificOutput as { permissionDecision?: string; permissionDecisionReason?: string } | undefined;
+      if (specific?.permissionDecision === 'deny') {
+        decision = 'deny';
+        reason = specific.permissionDecisionReason ?? '';
+        break;
+      }
+    }
+    const output = decision === 'deny' ? reason : runProbe(probe.tool, probe.input);
+    appendFileSync(join(home, 'fake-probe.log'), `${JSON.stringify({ tool: probe.tool, input: probe.input, decision, output, hooks: preToolUseHooks.length })}\n`);
+    out({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, is_error: decision === 'deny', content: output }] } });
+  }
+}
+
 function run(prompt: string): void {
   appendFileSync(join(home, `${name}.log`), `${JSON.stringify({ argv, prompt, sessionId, cwd: process.cwd(), env: Object.keys(process.env).sort() })}\n`);
   if (review) {
-    runReview();
+    void runReview();
     return;
   }
   if (turn.startupFailure !== undefined) {
@@ -137,7 +237,7 @@ function run(prompt: string): void {
 
 // A review: init, a Read of README.md and its result, one assistant message, and the result with
 // the structured output.
-function runReview(): void {
+async function runReview(): Promise<void> {
   out({
     type: 'system', subtype: 'init', permissionMode: option('permission-mode') ?? 'default', cwd: process.cwd(), tools: [], mcp_servers: [],
     model: 'fake-model', slash_commands: [], output_style: 'default', skills: [], plugins: [], apiKeySource: 'none', claude_code_version: '0.0.0-fake',
@@ -165,6 +265,7 @@ function runReview(): void {
     user({ tool_use_result: { content: literal } }, { type: 'tool_result', tool_use_id: 'w1', is_error: false, content: literal }, { type: 'tool_result', tool_use_id: 'w2', is_error: true, content: [{ type: 'text', text: literal }] });
     out({ type: 'system', subtype: 'notification', text: literal });
   }
+  await runProbes(turn.probes ?? []);
   out({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'text', text: 'Reviewed.' }] } });
   const subtype = turn.walk !== undefined ? 'error_during_execution' : (turn.subtype ?? 'success');
   out({
@@ -178,8 +279,19 @@ function runReview(): void {
 
 const lines = createInterface({ input: process.stdin });
 lines.on('line', (line) => {
-  const message = JSON.parse(line) as { type: string; request_id?: string; message?: { content: Array<{ text?: string }> } };
-  if (message.type === 'control_request') {
+  const message = JSON.parse(line) as {
+    type: string; request_id?: string; message?: { content: Array<{ text?: string }> };
+    request?: { subtype?: string; hooks?: { PreToolUse?: Array<{ hookCallbackIds?: string[] }> } };
+    response?: { request_id?: string; response?: Record<string, unknown> };
+  };
+  if (message.type === 'control_response') {
+    const done = awaiting.get(message.response?.request_id ?? '');
+    awaiting.delete(message.response?.request_id ?? '');
+    done?.(message.response?.response ?? {});
+  } else if (message.type === 'control_request') {
+    if (message.request?.subtype === 'initialize') {
+      preToolUseHooks = (message.request.hooks?.PreToolUse ?? []).flatMap((matcher) => matcher.hookCallbackIds ?? []);
+    }
     out({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id, response: {} } });
   } else if (message.type === 'user') {
     const prompt = (message.message?.content ?? []).map((part) => part.text ?? '').join('');

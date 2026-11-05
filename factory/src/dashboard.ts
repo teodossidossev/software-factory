@@ -8,7 +8,8 @@
 // to the Execution of `sf serve` (DashboardActions); nothing here changes a job by itself. The
 // start screen (SF-025) adds the workspaces and the tickets (DashboardSetup: the registry and the
 // Task files), the ChatGPT conversation that plans a ticket, and the User's start of a ticket
-// whose Task file is written (SF-040); the board (SF-046) adds the text of a Task file.
+// whose Task file is written (SF-040); the board (SF-046) adds the text of a Task file; the Task
+// check (SF-054) adds each ticket's last check, its start (Check) and its view.
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -24,6 +25,7 @@ import type { Job, JobState, JobStore } from './jobs.js';
 import { DECISIONS } from './ledger.js';
 import { WORKSPACE_NAME_PATTERN } from './registry.js';
 import type { Setup } from './setup.js';
+import type { CheckSummary, TaskChecks } from './task-check.js';
 import { TICKET_PATTERN } from './task-file.js';
 import { describeEvent, followLines } from './watch.js';
 
@@ -62,6 +64,9 @@ export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'review', 
 
 // The start screen's data and changes: the workspace registry and the Task files (src/setup.ts).
 export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'removeWorkspace' | 'tickets' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'archivedTickets' | 'taskText' | 'taskTitle'>;
+
+// The Task checks (SF-054): start one, a ticket's view and its board summary.
+export type DashboardChecks = Pick<TaskChecks, 'start' | 'view' | 'summary'>;
 
 // A dashboard without a start screen (in-process tests of the older endpoints).
 const NO_SETUP: DashboardSetup = {
@@ -111,6 +116,7 @@ const BODIES = {
   'ticket-restore': { shape: '{}', schema: z.strictObject({}) },
   'ticket-delete': { shape: '{}', schema: z.strictObject({}) },
   'ticket-start': { shape: '{}', schema: z.strictObject({}) },
+  'ticket-check': { shape: '{}', schema: z.strictObject({}) },
   'ticket-new': { shape: '{"workspace": string, "ticket": string, "title": string, "request": string}', schema: z.strictObject({ workspace: z.string(), ticket: z.string(), title: z.string(), request: z.string() }) },
 };
 type PostRoute = keyof typeof BODIES;
@@ -122,6 +128,8 @@ const ERROR_STATUS: Record<string, number> = {
   job_exists: 409, job_active: 409, job_limit: 409, task_draft: 409, checkout_dirty: 409, branch_exists: 409, branch_changed: 409, branch_missing: 409, worktree_exists: 409,
   worktree_missing: 409, sensitive_unacknowledged: 409, ticket_exists: 409, workspace_exists: 409, workspace_busy: 409,
   job_not_found: 404, workspace_not_found: 404, task_not_found: 404,
+  // The Task check (SF-054): one at a time per ticket.
+  check_running: 409,
   invalid_content: 400, invalid_ticket: 400, invalid_name: 400, workspace_invalid: 400,
   // The merge request (SF-048): the host's refusals and the actions being off are conflicts; a host
   // that failed or refused the token is a bad gateway.
@@ -133,6 +141,8 @@ export interface RunningDashboard {
   url: URL;
   // The state listener: refreshes every open page; never throws.
   onStateChange(job: Job, from: JobState | null): void;
+  // A ticket's data changed without a job (a Task check ended): every page gets the tickets again.
+  refreshSetup(): void;
   close(): Promise<void>;
 }
 
@@ -264,18 +274,30 @@ async function workspacesPayload(setup: DashboardSetup) {
   return { workspaces: await setup.workspaces() };
 }
 
-// The tickets without a live job, each with the ChatGPT conversation that plans it: the message
-// and the prefilled URL.
-async function ticketsPayload(setup: DashboardSetup) {
-  return {
-    tickets: (await setup.tickets()).map((row) => {
-      const message = ticketConversation(row.workspace, row.ticket, row.request ?? undefined);
-      const url = conversationUrl(message);
-      // A very long message does not fit a link; the page offers it to copy instead.
-      return { ...row, conversation: { message, url: url.length <= MAX_CONVERSATION_URL ? url : null } };
-    }),
-    archived: await setup.archivedTickets(),
-  };
+// A ticket's check summary for the board, or none when it cannot be read.
+async function checkOf(checks: DashboardChecks, workspace: string, ticket: string): Promise<CheckSummary | null> {
+  try {
+    return await checks.summary(workspace, ticket);
+  } catch (error) {
+    console.error(error);
+    return null;
+  }
+}
+
+// The tickets without a live job, each with the ChatGPT conversation that plans it (the message
+// and the prefilled URL) and, with the Task checks, its last check (SF-054).
+async function ticketsPayload(setup: DashboardSetup, checks: DashboardChecks | undefined) {
+  const tickets = [];
+  for (const row of await setup.tickets()) {
+    const message = ticketConversation(row.workspace, row.ticket, row.request ?? undefined);
+    const url = conversationUrl(message);
+    // A very long message does not fit a link; the page offers it to copy instead.
+    tickets.push({
+      ...row, conversation: { message, url: url.length <= MAX_CONVERSATION_URL ? url : null },
+      ...(checks !== undefined ? { check: await checkOf(checks, row.workspace, row.ticket) } : {}),
+    });
+  }
+  return { tickets, archived: await setup.archivedTickets() };
 }
 
 async function stateHistory(jobs: JobStore, workspace: string, ticket: string) {
@@ -372,6 +394,8 @@ type Target =
   | { kind: 'action'; action: DashboardAction; workspace: string | undefined; ticket: string | undefined }
   | { kind: 'workspace-remove'; name: string | undefined }
   | { kind: 'ticket-action'; action: 'archive' | 'restore' | 'delete' | 'start'; workspace: string | undefined; ticket: string | undefined }
+  // The Task check (SF-054): GET reads the ticket's last check, POST starts one.
+  | { kind: 'ticket-check'; workspace: string | undefined; ticket: string | undefined }
   | { kind: 'both'; route: 'workspace-add' | 'ticket-new' }
   | { kind: 'read' };
 
@@ -397,6 +421,9 @@ function targetOf(path: string[]): Target {
   }
   if (kind === 'tickets' && path.length === 5 && (c === 'archive' || c === 'restore' || c === 'delete' || c === 'start')) {
     return { kind: 'ticket-action', action: c, workspace: a, ticket: b };
+  }
+  if (kind === 'tickets' && path.length === 5 && c === 'check') {
+    return { kind: 'ticket-check', workspace: a, ticket: b };
   }
   return { kind: 'read' };
 }
@@ -463,9 +490,11 @@ interface Post {
   refreshJob?: [string, string];
 }
 
-// gate: whether the Codex gate is on (SF_GATE), shown in the job's pipeline.
+// gate: whether the Codex gate is on (SF_GATE), shown in the job's pipeline; checks: the Task
+// checks (SF-054), none without (the check routes answer 404, the tickets have no check).
 export async function startDashboard(
-  port: number, stateDir: string, jobs: JobStore, actions: DashboardActions, setup: DashboardSetup = NO_SETUP, { gate: gateOn = true }: { gate?: boolean } = {},
+  port: number, stateDir: string, jobs: JobStore, actions: DashboardActions, setup: DashboardSetup = NO_SETUP,
+  { gate: gateOn = true, checks }: { gate?: boolean; checks?: DashboardChecks } = {},
 ): Promise<RunningDashboard> {
   const files = new Map<string, { body: Buffer; type: string }>();
   for (const [path, { file, type }] of Object.entries(STATIC_FILES)) {
@@ -503,7 +532,7 @@ export async function startDashboard(
   // The start screen's data, sent to every page on connect and after every change.
   async function sendSetup(targets: Iterable<Stream>): Promise<void> {
     const workspaces = await workspacesPayload(setup);
-    const tickets = await ticketsPayload(setup);
+    const tickets = await ticketsPayload(setup, checks);
     for (const stream of targets) {
       send(stream, 'workspaces', workspaces);
       send(stream, 'tickets', tickets);
@@ -589,7 +618,7 @@ export async function startDashboard(
       return;
     }
     if (joined === 'api/tickets') {
-      body(res, 'application/json; charset=utf-8', JSON.stringify(await ticketsPayload(setup)));
+      body(res, 'application/json; charset=utf-8', JSON.stringify(await ticketsPayload(setup, checks)));
       return;
     }
     if (joined === 'api/stream') {
@@ -661,6 +690,41 @@ export async function startDashboard(
       return;
     }
     body(res, 'text/markdown; charset=utf-8', text);
+  }
+
+  // GET api/tickets/<ws>/<ticket>/check (SF-054): the ticket's last check as JSON, with whether it
+  // is stale (the Task file changed since) and running; check null when there is none. A missing
+  // workspace or Task file is an empty 404.
+  async function checkView(res: ServerResponse, key: [string, string]): Promise<void> {
+    if (checks === undefined) {
+      empty(res, 404);
+      return;
+    }
+    let view;
+    try {
+      view = await checks.view(...key);
+    } catch (error) {
+      if (error instanceof FactoryError && ERROR_STATUS[error.code] === 404) {
+        empty(res, 404);
+        return;
+      }
+      throw error;
+    }
+    if (view.current_sha256 === null && view.check === null) {
+      empty(res, 404);
+      return;
+    }
+    json(res, 200, view);
+  }
+
+  // POST api/tickets/<ws>/<ticket>/check: starts a check and answers at once; its end reaches every
+  // page through refreshSetup.
+  function checkPost(key: [string, string]): Post | undefined {
+    if (checks === undefined) {
+      return undefined;
+    }
+    const run = (): Promise<unknown> => checks.start(...key);
+    return { route: 'ticket-check', call: (data) => (BODIES['ticket-check'].schema.safeParse(data).success ? run : undefined), refreshSetup: true };
   }
 
   // The job action as the one Execution call it stands for.
@@ -738,7 +802,7 @@ export async function startDashboard(
     };
   }
 
-  function setupPost(target: Exclude<Target, { kind: 'read' | 'action' }>): Post | undefined {
+  function setupPost(target: Exclude<Target, { kind: 'read' | 'action' | 'ticket-check' }>): Post | undefined {
     if (target.kind === 'ticket-action') {
       const key = jobKey(target.workspace, target.ticket);
       if (key === undefined) {
@@ -899,6 +963,20 @@ export async function startDashboard(
       handlePost(req, res, post).catch(failed);
       return;
     }
+    if (what.kind === 'ticket-check') {
+      const key = jobKey(what.workspace, what.ticket);
+      if (req.method !== 'GET' && req.method !== 'POST') {
+        empty(res, 405, { allow: 'GET, POST' });
+        return;
+      }
+      const post = key === undefined || req.method === 'GET' ? undefined : checkPost(key);
+      if (key === undefined || (req.method === 'POST' && post === undefined)) {
+        empty(res, 404);
+        return;
+      }
+      (post !== undefined ? handlePost(req, res, post) : checkView(res, key)).catch(failed);
+      return;
+    }
     if (what.kind === 'both' && req.method === 'POST') {
       handlePost(req, res, setupPost(what)!).catch(failed);
       return;
@@ -959,6 +1037,9 @@ export async function startDashboard(
     url: dashboardUrl(address.port, tokenText),
     onStateChange(job) {
       refresh(job).catch((error: unknown) => console.error(error));
+    },
+    refreshSetup() {
+      sendSetup(streams).catch((error: unknown) => console.error(error));
     },
     async close() {
       for (const stream of streams) {

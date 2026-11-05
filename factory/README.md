@@ -4,9 +4,10 @@ The local factory process. It serves the planning tools to the Context owner (Ch
 client), runs the jobs and provides the `sf` command. How to work with it is in [HANDBOOK.md](HANDBOOK.md); the
 vocabulary is in [../CONTEXT.md](../CONTEXT.md).
 
-The MCP endpoint serves only the planning tools (`guide`, `read_file`, `search`, `write_task`):
-the Context owner reads the repository, discusses the ticket with the user and writes the Task file
-with its `## Review brief`. The user starts the job, with the Start button of the ticket on the
+The MCP endpoint serves only the planning tools (`guide`, `read_file`, `search`, `write_task`,
+`task_check`): the Context owner reads the repository, discusses the ticket with the user and
+writes the Task file with its `## Review brief`. Before Start, the Task check (section Task check)
+reads the Task file and the repository and says whether it is ready to build. The user starts the job, with the Start button of the ticket on the
 dashboard or with `sf start`. The Implementer runs as a headless Claude
 Agent SDK session (`@anthropic-ai/claude-agent-sdk`, pinned in `package.json`) in a worktree of
 the job, inside Claude Code's sandbox. At Clean the Implementer writes the merge request text
@@ -26,6 +27,7 @@ bin/sf workspace remove <name>
 bin/sf serve                      # foreground; Ctrl+C stops it; prints the dashboard URL
 bin/sf up [--no-open] [--no-tunnel]   # sf serve plus the tunnel (../scripts/sf-tunnel.sh run, output prefixed "tunnel | ") and the dashboard opened in the browser; Ctrl+C stops both; npm start at the repository root
 bin/sf dashboard [--open]         # the dashboard URL of the last sf serve start; --open opens it with xdg-open; works without sf serve
+bin/sf check-task <workspace> <ticket>  # the Task check (section Task check): paraphrase, findings by severity, verdict; stored by sha; works without sf serve
 bin/sf start <workspace> <ticket> # start the job in a worktree of its own (same as the dashboard's Start); needs sf serve
 bin/sf say <workspace> <ticket> <message...>   # a user message into the session; needs sf serve
 bin/sf review <workspace> <ticket>             # retry a failed Claude review (needs_human with review_failed); needs sf serve
@@ -45,7 +47,8 @@ bin/sf run <workspace> <ticket>                # the job's runner (section Jobs)
 npm run typecheck && npm test
 ```
 
-Exit codes: 0 ok, 1 error, 2 usage. `sf approve` exits 1 unless the branch was pushed; `sf mr
+Exit codes: 0 ok, 1 error, 2 usage. `sf check-task` exits 0 when the check ran (ready or not
+ready) and 1 when it failed. `sf approve` exits 1 unless the branch was pushed; `sf mr
 create` exits 1 when the push or the merge request failed (the branch may be pushed then: the
 output says so).
 
@@ -99,6 +102,7 @@ prints the message below the table). Both work without `sf serve`; they read the
 | `SF_REVIEW` | on | `off` runs no Claude review (nor the gate): a published iteration stays in `awaiting_review` until the user goes on with `sf say` or aborts. |
 | `SF_REVIEW_MODEL` | unset | Model of the Claude review, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
 | `SF_REVIEW_MAX_TURNS` | `60` | `maxTurns` of the Claude review. |
+| `SF_TASK_CHECK_MAX_TURNS` | `30` | `maxTurns` of the Task check (SF-054); its model is `SF_REVIEW_MODEL`. |
 | `SF_GATE` | `codex` | The gate after a clean Claude review (SF-039): `codex` runs the Codex CLI, `off` lets the Claude verdict decide. With `codex` and no executable found the gate is off, and `sf serve` prints one line saying so. |
 | `SF_CODEX` | `codex` on `PATH` | Absolute path of the Codex CLI executable. Pointing at nothing turns the gate off; it is not looked for on `PATH` then. |
 | `SF_CODEX_MODEL` | unset | Model of the gate, passed as `--model`; unset uses Codex's default (the user's `~/.codex/config.toml`). |
@@ -122,6 +126,77 @@ a longer one is refused at start with `socket_path_too_long`.
 
 The execution variables are read once when `sf serve` starts. `sf status` and `sf watch` read
 `SF_STATE_DIR` themselves; `sf start`, `sf say`, `sf review`, `sf accept`, `sf settle`, `sf approve`, `sf mr`, `sf abort` and `sf reset` use it to find the socket; `sf notify-test` reads the notification variables itself.
+
+## Task check
+
+The Task check (SF-054, `src/task-check.ts`) reads a Task file before Start, the way the
+Elephant–Goldfish model reviews a plan before anyone builds it: with a reader that sees only the
+document and the code. It only advises: Start is never refused for it.
+
+- **The run**: a fresh Agent SDK `query()` with the Claude review's session options (section Jobs,
+  the review): the tools `Read`, `Grep` and `Glob` only, the review's denied tools, sandbox and
+  filtered environment, `settingSources: ['project']`, no auto-memory, no instruction file above
+  the checkout; `maxTurns` `SF_TASK_CHECK_MAX_TURNS` (default 30), model `SF_REVIEW_MODEL`. Its
+  prompt is fixed instructions and the Task file, nothing else: not the Context owner's
+  conversation, the user's request, the jobs, their reviews or the ledger.
+- **What it can read** (the repository, nothing else):
+  - It runs in its own checkout: a detached worktree of the workspace's work checkout at the Task's
+    `base` (fetched from `origin` when there is one, as Start does: the code the Implementer starts
+    from), in a new directory under the system's temporary directory, removed when the check ends.
+    The worktree has no `.software-factory/` folder (the other Task files, the MR texts, the
+    archive are never committed). A base that cannot be checked out is a failed check.
+  - Every symbolic link in it whose target is outside the worktree (or does not resolve) is
+    replaced by a small file saying so before the session starts, so a search from the root that
+    follows links stays inside.
+  - A PreToolUse hook of the factory (`guardHooks`, SDK `hooks`) sees every tool call before it
+    runs and denies any that is not `Read`, `Grep` or `Glob`; any path it names (`file_path`,
+    `path` or `notebook_path`, whichever is given, and the `Glob` pattern up to its first glob
+    segment) that resolves (symlinks followed) outside the worktree or into a `.software-factory`
+    folder in it; a value Claude Code would trim or expand (`~`, `~/...`, surrounding spaces),
+    refused rather than guessed; and a pattern that climbs with `..`. A pattern's brace
+    alternatives (`{a,b}`, nested ones too) are expanded and each checked on its own (an absolute
+    one by its own prefix; any absolute one in Grep's `glob` filter is refused); braces that do
+    not pair, a backslash, an extglob or `|` (`@(a|b)`, `!(a)`, ...), more than 16 brace groups or
+    64 alternatives, or a value over 4096 characters refuse the call. The guard never throws: a
+    call it fails to check is denied (Claude Code would take a hook that throws as no decision). This
+    covers Grep and Glob, which Claude Code's `Read(...)` rules cover only on a best-effort basis.
+  - On top of that, `Read(//<dir>/**)` rules deny the work checkout's `.software-factory/` folder,
+    the state directory (jobs, ledgers, requests, checks) and the config directory.
+  - The stored check records the base `commit` it read.
+- **The output** (one zod definition, `checkOutput`, sent as the JSON schema): `paraphrase` first,
+  what the Task proposes in the checker's own words (3–8 sentences), written before any finding;
+  `findings`, each `{kind, severity, where, problem, expected}` with `kind` `decision` (a choice the
+  Implementer would have to make), `contradiction` (a claim about the code that the code
+  contradicts, with its `path:line`), `missing` (a file, test or acceptance criterion the goal
+  needs and the Task does not name), `overreach` (a part the goal does not need) or `unclear`, and
+  severity `blocker`, `major` or `nit` as for the reviews (SF-051); `files`, `{path, action:
+  create | modify | delete}`, the files the checker expects to change; `verdict`.
+- **The factory's rules**: a `contradiction` is always a blocker; when the Task has `scope:`
+  (SF-053), an expected file outside it (and outside `may_touch:`) is a `missing` major finding
+  and a scope entry no expected file matches an `overreach` nit, unless the checker named them
+  already; the verdict is `ready` with no blocker or major and `not_ready` otherwise, whatever the
+  checker wrote.
+- **Storage**: `<state>/checks/<ws>/<ticket>/<first 16 hex of the Task file's sha256>.json`: the
+  output, the model, the estimated cost and the times; never in the work checkout. A later check
+  of the same Task file replaces it. A check of another version of the Task file than the current
+  one is **stale**. A failed check (an error, a turn limit, no or an invalid output) is stored as
+  `failed` with its error, withheld or redacted like a failed review's (SF-045); it never counts
+  as ready.
+- **Where it runs and shows**: `sf check-task <workspace> <ticket>` runs one in its own process
+  (no `sf serve` needed) and prints the paraphrase, the findings by severity, the files and the
+  verdict, and where it stored the record (an open dashboard shows it at its next refresh). On the dashboard a Planned card has **Check** (`POST
+  api/tickets/<ws>/<ticket>/check`: answers at once, refused with `check_running` while one runs
+  or is being set up for the ticket (the ticket is reserved before anything else, so two requests
+  at once start one check) and with `task_draft` for a skeleton) and a chip with the last check (`not
+  checked`, `checking…`, `ready`, `not ready: N blocker, M major`, `check failed`, `· stale`); the
+  tickets of the stream carry the summary (`check`). `GET api/tickets/<ws>/<ticket>/check` is the
+  last check with `stale`, `running` and the current sha256; the Task drawer and the job's Task tab
+  show it above the Task text, the paraphrase above the findings. Start's confirmation adds "Task
+  check: not checked", "stale", "check failed" or "not ready: N blocker, M major" when that is the
+  case, and starts anyway once confirmed. The Context owner reads it with the read-only MCP tool
+  `task_check` (`{workspace, ticket}`): the check of the current Task file (`verdict` `ready`,
+  `not_ready` or `failed`, the paraphrase, findings and files), or `verdict: "none"` when the
+  current version has none, so ChatGPT can rewrite the Task from the findings; it cannot run one.
 
 ## Jobs
 
@@ -819,8 +894,9 @@ estimated cost ("est. $", not a charge). A Your turn card carries the one action
 review (sent at once, as the button in the drawer) or *Open the job*; the job's last outcome shows
 under it. A Planned card shows the ticket, its base and, after a failed or aborted job, that state
 as a mark that opens the job, and **Start** to run it (again) (a skeleton says "waiting for the
-plan" instead), **Task**, Archive and Delete…. Start asks first, naming the workspace, the ticket
-and the base branch, then sends `POST api/tickets/<ws>/<ticket>/start` once: `Execution.start`, the
+plan" instead), **Check** with the chip of the last Task check (section Task check), **Task**,
+Archive and Delete…. Start asks first, naming the workspace, the ticket and the base branch (and
+the Task check's note: not checked, stale, check failed or not ready: N blocker, M major), then sends `POST api/tickets/<ws>/<ticket>/start` once: `Execution.start`, the
 same call as `sf start`, with its refusals (`task_draft`, `job_limit`, `job_exists`,
 `branch_exists`, `checkout_dirty`, ...) shown as they come; the job's card appears under
 Implementing from the stream. An answer that does not settle the outcome (no answer, a body cut
@@ -1088,6 +1164,10 @@ end), in a browser:
 3. Task: click Task on a Planned card: the drawer shows the Task file as text, headings bold; a
    line `<script>alert(1)</script>` written into a Task file shows as that text, nothing runs.
    Archived → Task shows an archived file.
+   Check: on a Planned card click Check: the chip says `checking…`, then the verdict a few minutes
+   later without a reload; Task shows the check above the Task text, the paraphrase first. Edit the
+   Task file: the chip and the check say stale, and Start's dialog says "Task check: stale" and
+   starts once confirmed.
 4. Drawer: click a job card: the wide drawer opens on the right with the header, the stepper, the
    next-action rail and the tabs; the URL ends in `#<workspace>/<ticket>`; reload: the drawer
    opens on the same job. Copy checkout command puts `git checkout <branch>` on the clipboard. ✕, a click on the

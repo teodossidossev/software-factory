@@ -63,6 +63,18 @@ Context owner replaces it with the Task format through `write_task`; the factory
 Task file otherwise.
 _Avoid_: stub, placeholder task, request file
 
+**Task check**:
+The reading of a Task file before Start by a fresh read-only Claude session that sees only the
+Task file and the repository at the Task's base, in a checkout of its own: never the Context
+owner's conversation, the Jobs or the Ledger. It paraphrases the Task first, then lists findings (a decision left to the Implementer, a
+contradiction with the code, something missing, an overreach, an unclear passage), each with a
+Severity, and the files it expects to change. It is `ready` without a blocker or major finding,
+`not_ready` otherwise; a failed one is never ready. It is kept per version of the Task file, and
+one of an earlier version is stale. It only advises: Start stays the User's call. The User runs it
+(Check on the board, `sf check-task`); the Context owner reads it (`task_check`) and rewrites the
+Task from it.
+_Avoid_: plan review, lint, pre-review (for a Task check); Review (that is of an Iteration)
+
 **Fix section**:
 A `## Fix N` section appended to the Task file after a Review, by the factory from a verdict it
 acts on as `fix`: the blocker and major items, then the Nits as optional, each with its Ledger id.
@@ -115,7 +127,7 @@ Gate on, goes to the Gate. A failed Review hands the Job to the User.
 _Avoid_: code review session, audit
 
 **Severity**:
-The weight of a Review item: `blocker` (the change is wrong, unsafe or breaks the Task's
+The weight of a Review item, or of a Task check finding: `blocker` (the change is wrong, unsafe or breaks the Task's
 acceptance), `major` (a real defect or a Task requirement not met, but contained) or `nit`.
 
 **Nit**:

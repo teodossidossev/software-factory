@@ -8,8 +8,10 @@
 // Create merge request, Merge, Refresh MR status) go as POSTs to api/jobs/<ws>/<ticket>/<action>,
 // each one a deliberate click, confirmed for approve, abort, accept, create and merge, never
 // retried or replayed by the page. A Planned card starts its job (POST
-// api/tickets/<ws>/<ticket>/start, confirmed, never retried) and opens its Task text in the same
-// drawer, as do Workspaces, New ticket and Archived. Every value goes in through textContent; the
+// api/tickets/<ws>/<ticket>/start, confirmed, never retried; its confirmation says when the Task
+// is not checked, the check is stale or not ready), runs the Task check (SF-054: Check, POST
+// api/tickets/<ws>/<ticket>/check; it only advises) and opens its Task text with the last check in
+// the same drawer, as do Workspaces, New ticket and Archived. Every value goes in through textContent; the
 // hrefs are the server's ChatGPT URL, checked against its fixed prefix, and a merge request's
 // https URL from the Git host.
 'use strict';
@@ -639,6 +641,115 @@ async function showJobTask(detail) {
   if (state.key === key && state.jobTask === stamp) {
     $('job-task').replaceChildren(...renderReport(text));
   }
+  await showCheck('job-task-check', key, () => state.key === key && state.jobTask === stamp);
+}
+
+// ---------- Task check (SF-054) ----------
+
+// A check's verdict in words: ready, not ready with its counts, failed.
+function checkVerdictText(check) {
+  if (check.state === 'ready') {
+    return 'ready';
+  }
+  if (check.state === 'failed') {
+    return 'check failed';
+  }
+  return `not ready: ${check.blockers} blocker, ${check.majors} major`;
+}
+
+// The chip of a ticket's last check on its Planned card; none without the Task checks.
+function checkChip(check) {
+  if (check === null || typeof check !== 'object') {
+    return null;
+  }
+  if (check.running === true) {
+    return chip('checking…');
+  }
+  if (check.state === 'none') {
+    return chip('not checked');
+  }
+  const text = `${checkVerdictText(check)}${check.stale ? ' · stale' : ''}`;
+  return chip(text, check.stale ? '' : check.state === 'ready' ? 'chip-good' : 'chip-bad');
+}
+
+// The last check of a ticket, as the Task drawer and the job's Task tab show it: the stale mark and
+// the verdict, the paraphrase above the findings (by severity), then the expected files.
+function renderCheck(view) {
+  const box = [];
+  const record = view.check;
+  if (record === null) {
+    box.push(el('p', 'check-head', view.running ? 'Task check: running…' : 'Task check: not checked yet. Check on the ticket\'s card runs it; it only advises.'));
+    return box;
+  }
+  const output = record.output;
+  const counts = { blocker: 0, major: 0, nit: 0 };
+  for (const item of output?.findings ?? []) {
+    counts[item.severity] = (counts[item.severity] ?? 0) + 1;
+  }
+  const verdict = output === null ? 'check failed' : output.verdict === 'ready' ? 'ready' : `not ready: ${counts.blocker} blocker, ${counts.major} major`;
+  const head = el('p', 'check-head');
+  head.append(document.createTextNode(`Task check: ${verdict} · `), timeEl(record.ended_at), document.createTextNode(` · ${record.model ?? 'default model'}${view.running ? ' · a new check is running…' : ''}`));
+  box.push(head);
+  if (view.stale) {
+    box.push(el('p', 'check-stale', 'Stale: the Task file changed since this check.'));
+  }
+  if (output === null) {
+    box.push(el('p', 'check-error', record.error ?? 'The check failed.'));
+    return box;
+  }
+  box.push(el('h4', 'check-title', 'Paraphrase'), el('p', 'check-paraphrase', output.paraphrase));
+  box.push(el('h4', 'check-title', 'Findings'));
+  for (const severity of ['blocker', 'major', 'nit']) {
+    const items = output.findings.filter((item) => item.severity === severity);
+    if (items.length === 0) {
+      continue;
+    }
+    box.push(el('p', `check-severity s-${severity}`, `${severity} (${items.length})`));
+    const list = el('ul', 'check-findings');
+    list.append(...items.map((item) => {
+      const entry = el('li');
+      entry.append(el('span', 'check-kind', item.kind), document.createTextNode(' '), el('code', '', item.where), document.createTextNode(`: ${item.problem} Expected: ${item.expected}`));
+      return entry;
+    }));
+    box.push(list);
+  }
+  if (output.findings.length === 0) {
+    box.push(el('p', 'hint', 'None.'));
+  }
+  if (output.files.length > 0) {
+    box.push(el('h4', 'check-title', 'Files'));
+    const files = el('ul', 'check-files');
+    files.append(...output.files.map((file) => {
+      const entry = el('li');
+      entry.append(document.createTextNode(`${file.action} `), el('code', '', file.path));
+      return entry;
+    }));
+    box.push(files);
+  }
+  return box;
+}
+
+// Loads a ticket's last check into the container while current() holds; hidden when the factory
+// has none to show (no Task checks, no Task file).
+async function showCheck(id, key, current) {
+  let view = null;
+  try {
+    view = JSON.parse(await getText(`api/tickets/${jobPath(key)}/check`));
+  } catch {
+    view = null;
+  }
+  if (!current()) {
+    return;
+  }
+  $(id).hidden = view === null;
+  $(id).replaceChildren(...(view === null ? [] : renderCheck(view)));
+}
+
+// Check: one request per ticket at a time; the card shows the check running, then its verdict.
+async function checkTicket(row) {
+  const key = `${row.workspace}/${row.ticket}`;
+  await setupRequest(`check:${key}`, `api/tickets/${jobPath(key)}/check`, {}, 'ticket-action-status', () =>
+    ({ level: 'ok', text: `Checking ${key}: a read-only Claude session reads the Task file and the repository; the card shows the verdict when it ends. It only advises: Start stays yours.` }));
 }
 
 // ---------- Changes ----------
@@ -1881,6 +1992,10 @@ function ticketCard(row) {
     mark.addEventListener('click', () => openJob(key));
     chips.append(mark);
   }
+  const checked = row.draft ? null : checkChip(row.check);
+  if (checked !== null) {
+    chips.append(checked);
+  }
   body.append(chips);
   item.append(body);
   const foot = el('div', 'card-foot');
@@ -1893,6 +2008,14 @@ function ticketCard(row) {
     start.disabled = busy || state.startHolds.has(key);
     start.addEventListener('click', () => openTicketConfirm('start', row));
     foot.append(start);
+    if (row.check !== null && typeof row.check === 'object') {
+      const check = el('button', 'btn btn-sm', 'Check');
+      check.type = 'button';
+      check.title = 'A read-only Claude session reads the Task file and the repository and says whether it is ready; it only advises';
+      check.disabled = row.check.running === true || state.setupPending.has(`check:${key}`);
+      check.addEventListener('click', () => void checkTicket(row));
+      foot.append(check);
+    }
   }
   const task = el('button', 'btn btn-sm', 'Task');
   task.type = 'button';
@@ -2041,7 +2164,7 @@ function openWantedConfirm() {
 // The Task text in the drawer, as text: headings bold by a line rule, never HTML from the file.
 async function openTask(row, archived) {
   const key = `${row.workspace}/${row.ticket}`;
-  const task = { key, archived };
+  const task = { key, archived, checkStamp: checkStampOf(key) };
   showDrawer('task', `${row.workspace} · .software-factory/${archived ? 'archive/' : ''}${row.ticket}.md${typeof row.base === 'string' ? ` · base ${row.base}` : ''}`, `${row.ticket} · ${row.title}`);
   state.task = task;
   renderConversation(archived ? null : row);
@@ -2055,6 +2178,31 @@ async function openTask(row, archived) {
   if (state.task === task) {
     $('task-body').replaceChildren(...renderReport(text));
   }
+  if (archived || row.draft === true) {
+    $('task-check').hidden = true;
+    $('task-check').replaceChildren();
+  } else {
+    await showCheck('task-check', key, () => state.task === task);
+  }
+}
+
+// The open Task drawer shows the check again when the ticket's check changed (one started or ended).
+function refreshTaskCheck() {
+  const task = state.task;
+  if (task === null || task.archived) {
+    return;
+  }
+  const stamp = checkStampOf(task.key);
+  if (stamp !== null && task.checkStamp !== stamp) {
+    void showCheck('task-check', task.key, () => state.task === task);
+  }
+  task.checkStamp = stamp;
+}
+
+// What changes when a ticket's check starts, ends or goes stale; null without one on the board.
+function checkStampOf(key) {
+  const check = (state.tickets ?? []).find((entry) => keyOf(entry) === key)?.check;
+  return check !== null && typeof check === 'object' ? `${check.running}#${check.ended_at}#${check.stale}` : null;
 }
 
 // The ticket's ChatGPT conversation (the Context owner plans it there): the server's link, opened
@@ -2269,7 +2417,9 @@ function openTicketConfirm(action, row) {
   state.ticketConfirm = { action, key, row };
   if (action === 'start') {
     $('ticket-confirm-title').textContent = `Start ${row.ticket} in ${row.workspace}?`;
-    $('ticket-confirm-text').textContent = `Starts a job on .software-factory/${row.ticket}.md of workspace ${row.workspace}: a new branch from ${row.base} in its own worktree, where the Implementer runs iteration 1. Claude reviews it, the Codex gate checks it, and the branch comes back to you to approve.`;
+    // The Task check only advises (SF-054): its note is part of the text, Start stays on.
+    const note = typeof row.check?.start_note === 'string' ? ` Task check: ${row.check.start_note}.` : '';
+    $('ticket-confirm-text').textContent = `Starts a job on .software-factory/${row.ticket}.md of workspace ${row.workspace}: a new branch from ${row.base} in its own worktree, where the Implementer runs iteration 1. Claude reviews it, the Codex gate checks it, and the branch comes back to you to approve.${note}`;
     $('ticket-ok').textContent = 'Start the job';
     $('ticket-ok').className = 'btn btn-primary';
   } else {
@@ -2424,6 +2574,7 @@ function openStream() {
     state.tickets = data.tickets;
     state.archived = Array.isArray(data.archived) ? data.archived : [];
     renderSetup();
+    refreshTaskCheck();
   });
   source.addEventListener('job', (message) => {
     if (key === state.key) {

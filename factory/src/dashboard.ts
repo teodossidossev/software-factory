@@ -26,6 +26,7 @@ import { DECISIONS } from './ledger.js';
 import { WORKSPACE_NAME_PATTERN } from './registry.js';
 import type { Setup } from './setup.js';
 import type { CheckSummary, TaskChecks } from './task-check.js';
+import { turnLimitLine } from './turn-limit.js';
 import { taskSha256, TICKET_PATTERN } from './task-file.js';
 import { describeEvent, followLines } from './watch.js';
 
@@ -266,14 +267,15 @@ async function taskChangedOf(setup: DashboardSetup, job: Job): Promise<boolean |
 
 // mr: the merge request on the Git host (SF-048), null before one is opened; mr_host: whether the
 // merge request actions are on for the job's workspace; paused: what a pause interrupted (SF-067),
-// null unless paused; task_changed: taskChangedOf.
+// null unless paused; task_changed: taskChangedOf; turn_limit: the line of a chain that went on by
+// itself after a turn limit (SF-069), null without one.
 function jobSummary(job: Job, counts: { files: number; undeclared: number; deleted: number }, mrHost: MrHost, taskChanged: boolean | null) {
   return {
     workspace: job.workspace, ticket: job.ticket, branch: job.branch, base: job.base, state: job.state,
     iteration: job.iteration, mr_attempts: job.mr_attempts, updated_at: job.updated_at, created_at: job.created_at,
     error: job.error ?? null, worktree: job.worktree, prepared_commit: job.prepared_commit,
     fixes: job.fixes, gate_fixes: job.gate_fixes, gate_tokens: job.gate_tokens, ...counts,
-    mr: job.mr, mr_host: mrHost, paused: job.paused ?? null, task_changed: taskChanged,
+    mr: job.mr, mr_host: mrHost, paused: job.paused ?? null, task_changed: taskChanged, turn_limit: turnLimitLine(job) ?? null,
   };
 }
 

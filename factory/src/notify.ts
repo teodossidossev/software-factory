@@ -7,6 +7,7 @@ import { delimiter, join } from 'node:path';
 import { withoutHostTokens } from './forge.js';
 import type { Job, JobState, JobStore } from './jobs.js';
 import { now } from './jobs.js';
+import { turnLimitLine } from './turn-limit.js';
 
 const DESKTOP_TIMEOUT_MS = 5_000;
 const NTFY_TIMEOUT_MS = 10_000;
@@ -49,9 +50,12 @@ export function notifiedStates(config: NotifyConfig): readonly JobState[] {
 }
 
 // The notification for a job that reached state (or whose merge request was opened or merged);
-// lines: the MR title and link (or the merge request's) when pushed, the
+// extra: the MR title and link (or the merge request's) when pushed, the
 // sensitive, out-of-scope and deleted paths of the iteration (SF-024, SF-053).
-export function jobNotification(job: Job, lines: string[] = []): Notification {
+export function jobNotification(job: Job, extra: string[] = []): Notification {
+  // A chain that went on by itself after a turn limit (SF-069) says so in one line.
+  const turnLimit = turnLimitLine(job);
+  const lines = turnLimit !== undefined ? [turnLimit, ...extra] : extra;
   if (job.state === 'awaiting_review') {
     return {
       title: `${job.ticket}: ${job.state}`,

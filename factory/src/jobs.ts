@@ -77,6 +77,9 @@ const jobSchema = z.strictObject({
   task_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   // While paused (SF-067): the state the job was paused in, what was interrupted, and when.
   paused: z.strictObject({ from: z.enum(PAUSABLE_STATES), step: z.enum(PAUSE_STEPS).nullable(), at: timestamp }).optional(),
+  // The continuations the factory sent by itself in the Implementer's current chain of turns, after
+  // a turn limit (SF-069), and how many the chain may have; absent once a new chain starts.
+  turn_limit: z.strictObject({ continued: z.number().int().min(1), allowed: z.number().int().min(0) }).optional(),
   created_at: timestamp,
   // Time of the last state change.
   updated_at: timestamp,
@@ -237,6 +240,10 @@ export type EventRecord = { ts: string; iteration: number } & (
   | { type: 'interrupted'; step: PauseStep; reviewer?: string }
   // The Task file changed while the job was paused (SF-067): the sha256 the job had, and the new one.
   | { type: 'task_changed'; from: string | null; to: string }
+  // An Implementer turn ended at the turn limit while making progress, and the factory sent a
+  // continuation (SF-069): its number in the chain, the chain's allowance, the turn's maxTurns, the
+  // worktree's changed paths and the turn's tool calls.
+  | { type: 'turn_limit_continued'; continued: number; allowed: number; max_turns: number; changed_paths: number; tool_calls: number }
   // The merge request on the Git host (SF-048): opened, reused (already open for the branch),
   // merged by the factory, or found merged or closed on the host by sf mr status.
   // mr_state, not state: a record with state is a state change.

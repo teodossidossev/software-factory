@@ -28,6 +28,7 @@ import { type StatusRow, statusRows } from './status.js';
 import { fileSummaryLines } from './patch.js';
 import { CheckStore, checkLines, checkSettings, refuseDraft, runTaskCheck, TaskChecks } from './task-check.js';
 import { readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
+import { turnLimitLine } from './turn-limit.js';
 import { watchEvents } from './watch.js';
 
 const DEFAULT_PORT = 8787;
@@ -677,6 +678,14 @@ async function status(args: string[]): Promise<void> {
   if (args.length === 0) {
     const all = await jobs.list();
     console.log(all.length === 0 ? 'No jobs.' : table(await statusRows(jobs, all, now)));
+    // The jobs whose Implementer went on by itself after a turn limit (SF-069), one line each.
+    const turnLimits = all.flatMap((job) => {
+      const line = turnLimitLine(job);
+      return line === undefined ? [] : [`${job.workspace}/${job.ticket}: ${line}`];
+    });
+    if (turnLimits.length > 0) {
+      console.log(`\n${turnLimits.join('\n')}`);
+    }
     return;
   }
   if (args.length !== 2) {
@@ -690,6 +699,10 @@ async function status(args: string[]): Promise<void> {
   console.log(table(await statusRows(jobs, [job], now)));
   if (job.error !== undefined) {
     console.log(`\n${job.error.code}: ${job.error.message}`);
+  }
+  const turnLimit = turnLimitLine(job);
+  if (turnLimit !== undefined) {
+    console.log(`\n${turnLimit}`);
   }
   if (job.worktree !== null) {
     console.log(`\nworktree: ${job.worktree}`);

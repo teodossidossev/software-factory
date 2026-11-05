@@ -1220,6 +1220,7 @@ function eventSource(event) {
     case 'notify_failed':
     case 'placeholders_removed':
     case 'merge_request':
+    case 'turn_limit_continued':
       // The factory's own lines go with the state changes.
       return 'state';
     default:
@@ -2001,6 +2002,10 @@ function jobCard(job) {
   }
   if (job.state === 'paused' && job.task_changed === true) {
     open.append(el('span', 'card-note', 'Task file changed since the job started'));
+  }
+  // SF-069: the Implementer's turn went on by itself after the turn limit.
+  if (typeof job.turn_limit === 'string') {
+    open.append(el('span', 'card-note', job.turn_limit));
   }
   open.append(jobChips(job));
   open.addEventListener('click', () => openJob(key));

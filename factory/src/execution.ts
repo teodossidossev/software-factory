@@ -41,7 +41,8 @@ import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type
 import { changedBetween, type FixFiles, fixNumbers, guardSuggestions, offerMessage, runSimplify, SIMPLIFY_CODE, SIMPLIFY_TITLE, simplifyFix, type SimplifyInput, type SimplifyOutput, simplifyPrompt, type Suggestion } from './simplify.js';
 import { withLock } from './pid-lock.js';
 import { type Launch, type RunnerRequest, Runners, type RunnerWork } from './runner.js';
-import { type IdleOutcome, ImplementerSession } from './session.js';
+import { type IdleOutcome, ImplementerSession, type LimitAnswer, type LimitedTurn } from './session.js';
+import { CONTINUE_PROMPT, limitDecision, worktreeChanged, type WorktreeState, worktreeState } from './turn-limit.js';
 import { appendFix, isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskDiff, taskScope, taskSha256, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { addWorktree, deleteBranch, removeWorktree } from './worktree.js';
 
@@ -719,16 +720,26 @@ export class Execution implements RunnerWork {
     const cwd = job.worktree;
     const { workspace: name, ticket } = job;
     let iteration = job.iteration + 1;
+    // The worktree at the start of the turn running, for its turn limit (SF-069).
+    let start: WorktreeState | undefined;
     const session = new ImplementerSession(
       {
         cwd, maxTurns: this.#config.maxTurns, claudePath: this.#config.claudePath,
         sessionId: job.session_id ?? undefined, sandbox: this.#config.sandbox, model: this.#config.model,
+        turnLimitContinues: this.#config.turnLimitContinues,
       },
       {
-        prompt: async (prompt) => {
-          iteration = ((await this.jobs.read(name, ticket))?.iteration ?? 0) + 1;
+        prompt: async (prompt, continued) => {
+          const current = await this.jobs.read(name, ticket);
+          iteration = (current?.iteration ?? 0) + 1;
           await this.jobs.appendEvent(name, ticket, { ts: now(), iteration, prompt });
+          start = await this.#worktreeState(cwd, current);
+          // A prompt sent starts a new chain: the continuations of the last one no longer show.
+          if (continued === 0 && current?.turn_limit !== undefined) {
+            void this.#recordTurnLimit(name, ticket, undefined).catch(console.error);
+          }
         },
+        turnLimit: (turn) => this.#turnLimit(name, ticket, iteration, cwd, start, turn),
         message: async (message: SDKMessage) => {
           await this.jobs.appendEvent(name, ticket, { ts: now(), iteration, message });
           if (message.type === 'system' && message.subtype === 'init' && message.permissionMode === 'auto') {
@@ -742,6 +753,50 @@ export class Execution implements RunnerWork {
     );
     this.#live.set(key, { workspace, session, cwd });
     return session;
+  }
+
+  // The worktree's state for the turn limit; undefined (no change seen) when Git fails.
+  async #worktreeState(cwd: string, job: Job | undefined): Promise<WorktreeState | undefined> {
+    if (job?.base_commit === null || job?.base_commit === undefined) {
+      return undefined;
+    }
+    try {
+      return await worktreeState(cwd, job.base_commit);
+    } catch (error) {
+      console.error(error);
+      return undefined;
+    }
+  }
+
+  // A turn of the job ended at maxTurns (SF-069): go on with a continuation when the worktree
+  // changed since start and the turn was not repeating itself, and the chain has one left (the
+  // session's bound, turn.allowed); else the plain reason it stops. Never waits for the lock.
+  async #turnLimit(name: string, ticket: string, iteration: number, cwd: string, start: WorktreeState | undefined, turn: LimitedTurn): Promise<LimitAnswer> {
+    const end = await this.#worktreeState(cwd, await this.jobs.read(name, ticket));
+    const { allowed } = turn;
+    const decision = limitDecision({ maxTurns: this.#config.maxTurns, changed: worktreeChanged(start, end), calls: turn.calls, continued: turn.continued, allowed });
+    if (!decision.continue) {
+      return { stop: decision.message };
+    }
+    const continued = turn.continued + 1;
+    await this.jobs.appendEvent(name, ticket, {
+      ts: now(), iteration, type: 'turn_limit_continued', continued, allowed, max_turns: this.#config.maxTurns, changed_paths: end?.paths.length ?? 0, tool_calls: turn.calls.length,
+    });
+    void this.#recordTurnLimit(name, ticket, { continued, allowed }).catch(console.error);
+    return { prompt: CONTINUE_PROMPT };
+  }
+
+  // Writes the continuations of the job's current chain (undefined: a new chain began). Queued,
+  // not awaited by the session's hooks, as #recordSession.
+  #recordTurnLimit(workspace: string, ticket: string, turnLimit: Job['turn_limit']): Promise<void> {
+    return this.#locked(async () => {
+      const job = await this.jobs.read(workspace, ticket);
+      if (job === undefined || job.turn_limit?.continued === turnLimit?.continued) {
+        return;
+      }
+      const { turn_limit: _old, ...rest } = job;
+      await this.jobs.write(turnLimit === undefined ? rest : { ...rest, turn_limit: turnLimit });
+    });
   }
 
   #recordSession(workspace: string, ticket: string, sessionId: string): Promise<void> {

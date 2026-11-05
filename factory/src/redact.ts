@@ -25,7 +25,7 @@ const PUBLIC_NAMES = new Set([
   'SF_GATE_MAX_ROUNDS', 'SF_GATE_MAX_TOKENS', 'SF_GATE_TIMEOUT_MS', 'SF_HANDBOOK', 'SF_MAX_ITERATIONS', 'SF_MAX_JOBS',
   'SF_MAX_TURNS', 'SF_MODEL', 'SF_NOTIFY_ITERATIONS', 'SF_PORT', 'SF_REVIEW', 'SF_REVIEW_MAX_TURNS', 'SF_REVIEW_MODEL',
   'SF_SANDBOX', 'SF_SANDBOX_DOMAINS', 'SF_SENSITIVE_PATHS', 'SF_STATE_DIR', 'SF_TUNNEL_HEALTH', 'SF_TUNNEL_SCRIPT',
-  'SF_WORKTREE_ROOT',
+  'SF_TURN_LIMIT_CONTINUES', 'SF_WORKTREE_ROOT',
 ]);
 // LC_*, XDG_* and npm's package and lifecycle metadata (npm_config_* may hold a registry token).
 const PUBLIC_PREFIX = /^(?:LC_|XDG_|npm_package_|npm_lifecycle_)/;

@@ -12,6 +12,9 @@ export interface Config {
   checkAfterStartMin: number;
   checkAfterFixMin: number;
   maxTurns: number;
+  // Continuations the factory sends by itself after an Implementer turn ended at maxTurns while
+  // making progress, per chain of turns (SF-069, SF_TURN_LIMIT_CONTINUES); 0 turns them off.
+  turnLimitContinues: number;
   maxIterations: number;
   // Claude Code executable for the Implementer; undefined uses the SDK's bundled binary.
   claudePath: string | undefined;
@@ -163,6 +166,18 @@ function positiveInteger(env: NodeJS.ProcessEnv, name: string, fallback: number,
   return Number(raw);
 }
 
+// A whole number from 0 to max.
+function countSetting(env: NodeJS.ProcessEnv, name: string, fallback: number, max: number): number {
+  const raw = env[name];
+  if (raw === undefined || raw === '') {
+    return fallback;
+  }
+  if (!/^\d+$/.test(raw) || Number(raw) > max) {
+    throw new FactoryError('invalid_config', `${name} must be a whole number from 0 to ${max}, got "${raw}".`);
+  }
+  return Number(raw);
+}
+
 // An executable regular file.
 function executable(path: string): boolean {
   try {
@@ -208,6 +223,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     checkAfterStartMin: positiveInteger(env, 'SF_CHECK_AFTER_START_MIN', 15),
     checkAfterFixMin: positiveInteger(env, 'SF_CHECK_AFTER_FIX_MIN', 5),
     maxTurns: positiveInteger(env, 'SF_MAX_TURNS', 150),
+    turnLimitContinues: countSetting(env, 'SF_TURN_LIMIT_CONTINUES', 1, 10),
     maxIterations: positiveInteger(env, 'SF_MAX_ITERATIONS', 5),
     claudePath,
     sandbox: sandboxSettings(env),

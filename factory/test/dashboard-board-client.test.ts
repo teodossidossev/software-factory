@@ -374,3 +374,11 @@ test('board client: the ChatGPT reviewer is not shown anywhere', async () => {
   const text = [...COLUMNS.map((column) => page.$(`list-${column}`).textContent), page.$('detail').all().map((element) => element.textContent).join('')].join(' ');
   assert.doesNotMatch(text, /Reviewer|no reviewer|Nudge|test event|Subscriptions/);
 });
+
+test('board client: a job whose turn went on by itself after the turn limit says so in one line on its card (SF-069)', async () => {
+  const line = 'The Implementer reached the turn limit while making progress; the factory went on by itself (1 of 1).';
+  const page = await openBoard([job('J-1', 'working', { turn_limit: line }), job('J-2', 'working', { turn_limit: null })], []);
+  const notes = (key: string) => card(page, key).all().filter((element) => element.className === 'card-note').map((element) => element.textContent);
+  assert.deepEqual(notes('app/J-1'), [line]);
+  assert.deepEqual(notes('app/J-2'), []);
+});

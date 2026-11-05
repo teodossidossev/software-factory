@@ -9,6 +9,7 @@ import type { Job, JobState, JobStore } from './jobs.js';
 import { now } from './jobs.js';
 import { localTime } from './local-time.js';
 import { HANDOFF_OFF_CODE } from './registry.js';
+import { type CheckRecord, recordVerdict, severityCounts } from './task-check.js';
 import { turnLimitLine } from './turn-limit.js';
 
 const DESKTOP_TIMEOUT_MS = 5_000;
@@ -118,6 +119,39 @@ export function limitResetNotification(resumed: number, waiting: number): Notifi
   const jobs = (count: number): string => `${count} job${count === 1 ? '' : 's'}`;
   const parts = [...(resumed > 0 ? [`${jobs(resumed)} resumed`] : []), ...(waiting > 0 ? [`${jobs(waiting)} ${waiting === 1 ? 'waits' : 'wait'} for you`] : [])];
   return { title: 'Usage limit reset', body: `Usage limit reset: ${parts.join(', ')}`, priority: 'default', tags: 'hourglass' };
+}
+
+// The notification for an automatic Task check (SF-086) that ended not ready ("N blocker, M major ·
+// <workspace>", the counts as the board writes them) or failed (the first line of its error);
+// undefined for a ready one.
+export function taskCheckNotification(record: CheckRecord): Notification | undefined {
+  const verdict = recordVerdict(record);
+  if (verdict === 'ready') {
+    return undefined;
+  }
+  if (verdict === 'failed') {
+    return { title: `${record.ticket}: plan check failed`, body: (record.error ?? 'unknown error').split(/\r?\n/)[0]!, priority: 'default', tags: 'warning' };
+  }
+  const counts = severityCounts(record.output);
+  return { title: `${record.ticket}: plan not ready`, body: `${counts.blocker} blocker, ${counts.major} major · ${record.workspace}`, priority: 'default', tags: 'warning' };
+}
+
+// Sends the notification of an automatic Task check that ended not ready or failed; each failed
+// channel is logged, nothing is stored. Never rejects.
+export async function notifyTaskCheck(record: CheckRecord, config: NotifyConfig, send: typeof sendNotification = sendNotification): Promise<void> {
+  const notification = taskCheckNotification(record);
+  if (notification === undefined) {
+    return;
+  }
+  try {
+    for (const result of await send(notification, config)) {
+      if (result.status === 'failed') {
+        console.error(`${record.workspace}/${record.ticket}: plan-check notification via ${result.channel} failed: ${result.message}`);
+      }
+    }
+  } catch (error) {
+    console.error(error);
+  }
 }
 
 async function findExecutable(name: string, path: string | undefined): Promise<string | undefined> {

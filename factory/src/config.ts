@@ -42,6 +42,11 @@ export interface Config {
   simplify: boolean;
   // maxTurns of the Task check (SF-054, SF_TASK_CHECK_MAX_TURNS); its model is reviewModel.
   taskCheckMaxTurns: number;
+  // The automatic Task checks of sf serve (SF-086, SF_TASK_CHECK_AUTO): on by default; false keeps
+  // the check manual (Check on the board, sf check-task).
+  taskCheckAuto: boolean;
+  // The automatic checks that run at once over every workspace, 1-4 (SF_TASK_CHECK_PARALLEL).
+  taskCheckParallel: number;
   // The bytes of rule file content given to the agents at most (SF-059, SF_RULES_MAX_BYTES).
   rulesMaxBytes: number;
   // The Codex gate after a clean Claude review (SF-039): the executable, or why the gate is off.
@@ -225,6 +230,18 @@ export function rulesMaxBytes(env: NodeJS.ProcessEnv = process.env): number {
   return positiveInteger(env, 'SF_RULES_MAX_BYTES', DEFAULT_RULES_MAX_BYTES, 16 * 1024 * 1024);
 }
 
+// SF_TASK_CHECK_AUTO (SF-086): on (the default) or off.
+export function taskCheckAutoSetting(env: NodeJS.ProcessEnv = process.env): boolean {
+  const mode = env.SF_TASK_CHECK_AUTO || 'on';
+  if (mode !== 'on' && mode !== 'off') {
+    throw new FactoryError('invalid_config', `SF_TASK_CHECK_AUTO must be on or off, got "${mode}".`);
+  }
+  return mode === 'on';
+}
+
+// The most automatic Task checks at once (SF-086, SF_TASK_CHECK_PARALLEL).
+export const MAX_TASK_CHECK_PARALLEL = 4;
+
 // SF_HANDOFF: checkout (the default) or off.
 export function handoffSetting(env: NodeJS.ProcessEnv = process.env): Config['handoff'] {
   const mode = env.SF_HANDOFF || 'checkout';
@@ -270,6 +287,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     reviewMaxTurns: positiveInteger(env, 'SF_REVIEW_MAX_TURNS', 60),
     simplify: env.SF_SIMPLIFY !== 'off',
     taskCheckMaxTurns: positiveInteger(env, 'SF_TASK_CHECK_MAX_TURNS', 30),
+    taskCheckAuto: taskCheckAutoSetting(env),
+    taskCheckParallel: positiveInteger(env, 'SF_TASK_CHECK_PARALLEL', 1, MAX_TASK_CHECK_PARALLEL),
     rulesMaxBytes: rulesMaxBytes(env),
     gate: gateConfig(env),
     codexModel: env.SF_CODEX_MODEL || undefined,

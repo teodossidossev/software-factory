@@ -12,6 +12,9 @@
 // of queue.json's on_limit to each job whose reset has passed, in park order: resume-then-queue
 // resumes it, resume-only resumes it and holds the queue by hand, wait only marks it (the user
 // resumes) and holds the queue by hand.
+// With planCheck (SF-086) the scheduler starts a queued ticket only when the Task check of its
+// current Task file is ready, or its entry is forced (Start anyway); otherwise the entry stays in
+// place and its row says why.
 import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import * as z from 'zod/v4';
@@ -50,7 +53,8 @@ const queueSchema = z.strictObject({
   hold_reason: z.string().nullable(),
   // The rule at a usage limit's reset (SF-072); absent in a queue.json written before: the default.
   on_limit: z.enum(ON_LIMIT_RULES).default(DEFAULT_ON_LIMIT),
-  entries: z.array(z.strictObject({ workspace: workspaceName, ticket: ticketKey, queued_at: timestamp })),
+  // force (SF-086): Start anyway, whatever the plan check says; until the entry leaves the queue.
+  entries: z.array(z.strictObject({ workspace: workspaceName, ticket: ticketKey, queued_at: timestamp, force: z.literal(true).optional() })),
   // The scheduler's start that failed, per ticket (out of the queue): shown on its card.
   errors: z.array(z.strictObject({ workspace: workspaceName, ticket: ticketKey, code: z.string(), message: z.string(), at: timestamp })),
 });
@@ -117,14 +121,41 @@ export class QueueStore {
   }
 }
 
-// A queued ticket as the queue shows it: its 1-based position and the tickets it lands after that
-// are not merged yet (SF-084's states).
+// The Task check of a queued ticket's current Task file (SF-086): ready, not_ready, failed, checking
+// (pending or running) or none, with its blocker and major counts.
+export interface PlanCheck {
+  state: 'ready' | 'not_ready' | 'failed' | 'checking' | 'none';
+  blockers: number;
+  majors: number;
+}
+
+// Why the scheduler skips a queued ticket for its plan, as its card says it; null when ready.
+export function planReason(plan: PlanCheck): string | null {
+  switch (plan.state) {
+    case 'ready':
+      return null;
+    case 'not_ready':
+      return `plan not ready: ${plan.blockers} blocker, ${plan.majors} major`;
+    case 'failed':
+      return 'plan check failed';
+    case 'checking':
+      return 'plan being checked';
+    case 'none':
+      return 'plan not checked';
+  }
+}
+
+// A queued ticket as the queue shows it: its 1-based position, the tickets it lands after that are
+// not merged yet (SF-084's states), whether it is forced and why its plan holds it (SF-086: null
+// when the plan is ready, the entry forced, or the queue has no plan check).
 export interface QueueRow {
   workspace: string;
   ticket: string;
   position: number;
   queued_at: string;
   waits_for: DependencyRow[];
+  force: boolean;
+  plan_reason: string | null;
 }
 
 export interface QueueView {
@@ -140,7 +171,7 @@ export interface QueueView {
   limit_hold: { parked: number; resets_at: string | null } | null;
   entries: QueueRow[];
   errors: QueueError[];
-  // The first entry that waits for nothing, or null.
+  // The first entry that waits for nothing and whose plan does not hold it, or null.
   next: TicketRef | null;
 }
 
@@ -156,6 +187,11 @@ export interface RunQueueOptions {
   clock?: () => number;
   // Sends the one notification of a reset (SF-072; sf serve: sendNotification); never throws.
   notify?: (notification: Notification) => Promise<unknown>;
+  // The Task check of a queued ticket (SF-086); without it every plan counts as ready.
+  planCheck?: (workspace: string, ticket: string) => Promise<PlanCheck>;
+  // Called after a ticket was added (the dashboard, the CLI and MCP alike; sf serve: the automatic
+  // check of a ticket without one); never throws.
+  onAdded?: (workspace: string, ticket: string) => void;
 }
 
 type QueueExecution = Pick<Execution, 'start' | 'fetchBase' | 'limitReset'>;
@@ -178,10 +214,14 @@ export class RunQueue {
   readonly #recheckMs: number;
   readonly #clock: () => number;
   readonly #notify: (notification: Notification) => Promise<unknown>;
+  readonly #planCheck: ((workspace: string, ticket: string) => Promise<PlanCheck>) | undefined;
+  readonly #onAdded: (workspace: string, ticket: string) => void;
   // Every pass and every change, one at a time.
   #chain: Promise<unknown> = Promise.resolve();
   // A pass is queued on the chain and has not begun: a new event needs no second one.
   #passQueued: Promise<void> | undefined;
+  // The last work of each ticket under withTicket, by "<workspace>/<ticket>".
+  readonly #ticketLocks = new Map<string, Promise<void>>();
   #timer: NodeJS.Timeout | undefined;
   // The usage limit's reset timer (SF-072): at the earliest reset of the parked jobs.
   #resetTimer: NodeJS.Timeout | undefined;
@@ -197,6 +237,8 @@ export class RunQueue {
     this.#recheckMs = options.recheckMs ?? DEPENDENCY_RECHECK_MS;
     this.#clock = options.clock ?? Date.now;
     this.#notify = options.notify ?? (() => Promise.resolve());
+    this.#planCheck = options.planCheck;
+    this.#onAdded = options.onAdded ?? (() => {});
   }
 
   // Runs work after every pass and change asked for before it.
@@ -218,6 +260,23 @@ export class RunQueue {
       await this.#pass();
     }).catch((error: unknown) => console.error(error));
     return this.#passQueued;
+  }
+
+  // Runs work for a ticket after the work asked for it before (SF-086): the scheduler's last look
+  // at a ticket's plan and its start, and the factory's own writes of its Task file (write_task,
+  // the dashboard's Save), so no such write lands between the look and the job's claim. Work for
+  // other tickets runs meanwhile.
+  withTicket<T>(workspace: string, ticket: string, work: () => Promise<T>): Promise<T> {
+    const key = `${workspace}/${ticket}`;
+    const result = (this.#ticketLocks.get(key) ?? Promise.resolve()).then(work);
+    const tail = result.then(() => undefined, () => undefined);
+    this.#ticketLocks.set(key, tail);
+    void tail.then(() => {
+      if (this.#ticketLocks.get(key) === tail) {
+        this.#ticketLocks.delete(key);
+      }
+    });
+    return result;
   }
 
   // Settles once every pass and change asked for so far has ended (tests).
@@ -256,7 +315,7 @@ export class RunQueue {
   async add(workspace: string, ticket: string, at?: number): Promise<{ position: number }> {
     checkRef(workspace, ticket);
     const index = at === undefined ? undefined : checkPosition(at, 'at');
-    return this.#change(async (queue) => {
+    const added = this.#change(async (queue) => {
       if (queue.entries.some((entry) => sameTicket(entry, { workspace, ticket }))) {
         throw new FactoryError('already_queued', `${workspace}/${ticket} is already in the queue.`);
       }
@@ -273,6 +332,38 @@ export class RunQueue {
       queue.errors = queue.errors.filter((error) => !sameTicket(error, { workspace, ticket }));
       return { position: position + 1 };
     });
+    const result = await added;
+    try {
+      this.#onAdded(workspace, ticket);
+    } catch (error) {
+      console.error(error);
+    }
+    return result;
+  }
+
+  // Start anyway (SF-086): the queued ticket starts whatever its plan check says, for any version
+  // of its Task file, until it leaves the queue (not_queued otherwise).
+  async force(workspace: string, ticket: string): Promise<{ force: true }> {
+    checkRef(workspace, ticket);
+    return this.#change((queue) => {
+      queue.entries[queuedIndex(queue, workspace, ticket)]!.force = true;
+      return { force: true as const };
+    });
+  }
+
+  // Why the entry's plan holds it (null: it does not): forced, no plan check, or ready. A plan
+  // check that fails counts as not checked.
+  async #planHold(entry: QueueEntry): Promise<string | null> {
+    if (entry.force === true || this.#planCheck === undefined) {
+      return null;
+    }
+    const plan = await this.#planCheck(entry.workspace, entry.ticket).catch((error: unknown): PlanCheck => {
+      if (!(error instanceof FactoryError)) {
+        console.error(error);
+      }
+      return { state: 'none', blockers: 0, majors: 0 };
+    });
+    return planReason(plan);
   }
 
   // Takes a queued ticket out (not_queued otherwise).
@@ -355,10 +446,11 @@ export class RunQueue {
     for (const [index, entry] of queue.entries.entries()) {
       const info = await this.#taskInfo(entry);
       const waits = info === 'gone' ? [] : (await this.#setup.dependencyStates(info.refs, { fresh: false })).filter((row) => row.state !== 'merged');
-      if (next === null && info !== 'gone' && waits.length === 0) {
+      const hold = info === 'gone' ? null : await this.#planHold(entry);
+      if (next === null && info !== 'gone' && waits.length === 0 && hold === null) {
         next = { workspace: entry.workspace, ticket: entry.ticket };
       }
-      entries.push({ workspace: entry.workspace, ticket: entry.ticket, position: index + 1, queued_at: entry.queued_at, waits_for: waits });
+      entries.push({ workspace: entry.workspace, ticket: entry.ticket, position: index + 1, queued_at: entry.queued_at, waits_for: waits, force: entry.force === true, plan_reason: hold });
     }
     return { max_running: queue.max_running, running, held: queue.held, hold_reason: queue.hold_reason, on_limit: queue.on_limit, limit_hold: limitHold, entries, errors: queue.errors, next };
   }
@@ -373,8 +465,9 @@ export class RunQueue {
   // One pass: first the parked jobs whose usage limit reset (SF-072, #resets) and the reset timer;
   // then, unless held by hand or by a parked job, the entries whose Task file is gone or whose ticket
   // has a live job leave the queue (and so do the start errors of those tickets); then, while fewer
-  // jobs run than max_running, the first entry whose dependencies are all merged leaves queue.json
-  // and starts.
+  // jobs run than max_running, the first entry whose plan does not hold it (ready or forced, SF-086)
+  // and whose dependencies are all merged leaves queue.json and starts. An entry held by its plan
+  // stays in place; the end of a Task check asks for a pass.
   async #pass(): Promise<void> {
     clearTimeout(this.#timer);
     this.#timer = undefined;
@@ -423,12 +516,15 @@ export class RunQueue {
     // "<workspace> <base>" fetched in this pass (once each), and whether the fetch succeeded.
     const fetched = new Map<string, boolean>();
     let waiting = false;
+    // The entries whose plan held them at the last look, under the ticket's lock: not tried again
+    // in this pass.
+    const heldNow = new Set<QueueEntry>();
     while (running < queue.max_running && !this.#closed) {
       let chosen: QueueEntry | undefined;
       waiting = false;
       for (const entry of queue.entries) {
         const info = infos.get(`${entry.workspace}/${entry.ticket}`);
-        if (info === undefined || info === 'gone') {
+        if (info === undefined || info === 'gone' || heldNow.has(entry) || (await this.#planHold(entry)) !== null) {
           continue;
         }
         if (await this.#merged(info.refs, fetched)) {
@@ -440,31 +536,47 @@ export class RunQueue {
       if (chosen === undefined) {
         break;
       }
-      const index = queue.entries.indexOf(chosen);
-      queue.entries.splice(index, 1);
-      // Out of queue.json before the start: a restart in between never starts it twice.
-      await this.#store.write(queue);
-      changed = true;
-      try {
-        await this.#execution.start(chosen.workspace, chosen.ticket, { queued: true });
-      } catch (error) {
-        if (error instanceof FactoryError && error.code === 'job_limit') {
-          // A start by hand took the slot: the entry goes back where it was; the next pass goes on.
-          queue.entries.splice(index, 0, chosen);
-          await this.#store.write(queue);
-          break;
+      const entry = chosen;
+      // The last look at the plan and the start under the ticket's lock (withTicket): a write_task
+      // or a Save of the Task file lands before the look, which sees it, or after the job's claim,
+      // which refuses it (job_active). So the version started is the one found ready.
+      const outcome = await this.withTicket(entry.workspace, entry.ticket, async (): Promise<'held' | 'limit' | 'next'> => {
+        if ((await this.#planHold(entry)) !== null) {
+          return 'held';
         }
-        if (error instanceof FactoryError && error.code === 'job_exists') {
-          // Started by hand since the pass read the jobs: out of the queue without an error.
-          running = runningJobs(await this.#jobs.list()).length;
-          continue;
-        }
-        const failure = error instanceof FactoryError ? error : new FactoryError('start_failed', 'The start failed inside the factory.');
-        if (!(error instanceof FactoryError)) {
-          console.error(error);
-        }
-        queue.errors = [...queue.errors.filter((other) => !sameTicket(other, chosen)), { workspace: chosen.workspace, ticket: chosen.ticket, code: failure.code, message: failure.message, at: now() }];
+        const index = queue.entries.indexOf(entry);
+        queue.entries.splice(index, 1);
+        // Out of queue.json before the start: a restart in between never starts it twice.
         await this.#store.write(queue);
+        changed = true;
+        try {
+          await this.#execution.start(entry.workspace, entry.ticket, { queued: true });
+        } catch (error) {
+          if (error instanceof FactoryError && error.code === 'job_limit') {
+            // A start by hand took the slot: the entry goes back where it was; the next pass goes on.
+            queue.entries.splice(index, 0, entry);
+            await this.#store.write(queue);
+            return 'limit';
+          }
+          if (error instanceof FactoryError && error.code === 'job_exists') {
+            // Started by hand since the pass read the jobs: out of the queue without an error.
+            return 'next';
+          }
+          const failure = error instanceof FactoryError ? error : new FactoryError('start_failed', 'The start failed inside the factory.');
+          if (!(error instanceof FactoryError)) {
+            console.error(error);
+          }
+          queue.errors = [...queue.errors.filter((other) => !sameTicket(other, entry)), { workspace: entry.workspace, ticket: entry.ticket, code: failure.code, message: failure.message, at: now() }];
+          await this.#store.write(queue);
+        }
+        return 'next';
+      });
+      if (outcome === 'limit') {
+        break;
+      }
+      if (outcome === 'held') {
+        heldNow.add(entry);
+        continue;
       }
       running = runningJobs(await this.#jobs.list()).length;
     }

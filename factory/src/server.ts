@@ -1,8 +1,9 @@
 // The factory's MCP endpoint for the planner (SF-040): a loopback HTTP listener serving /mcp
 // through the SDK's stateless handler, with the Handbook as instructions and the planning tools
 // guide, read_file, search, write_task, task_check (the last Task check of the current Task
-// file, SF-054), queue_list and queue_add (the run queue, SF-071), and read_attachment (a ticket's
-// image as MCP image content, SF-064). No authentication: it
+// file, SF-054; checked automatically after write_task, SF-086), queue_list and queue_add (the
+// run queue, SF-071), and read_attachment (a ticket's image as MCP image content, SF-064). No
+// authentication: it
 // listens on loopback only. Jobs
 // are started, reviewed and approved by the user (the dashboard, the CLI) and the reviewers,
 // never through this endpoint.
@@ -23,7 +24,8 @@ import { resolveWorkspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } 
 import { DEFAULT_PAGE_BYTES, MAX_FILE_BYTES, MAX_PAGE_BYTES, MAX_PATH_LENGTH, MIN_PAGE_BYTES, RepoFiles, RepoReadError } from './repo-files.js';
 import { DEFAULT_RESULTS, MAX_QUERY_CHARS, MAX_RESULTS, search } from './search.js';
 import { checkFile, checkFinding, recordVerdict, type TaskChecks } from './task-check.js';
-import { MAX_TASK_BYTES, TICKET_DESCRIPTION, TICKET_PATTERN, writeTask } from './task-file.js';
+import { AUTO_CHECK_DELAY_MS, type AutoChecks } from './task-check-auto.js';
+import { isDraft, MAX_TASK_BYTES, TICKET_DESCRIPTION, TICKET_PATTERN, writeTask } from './task-file.js';
 import type { TicketHistory } from './ticket-history.js';
 
 export const SERVER_NAME = 'software-factory';
@@ -80,18 +82,31 @@ const workspaceName = z.string().regex(WORKSPACE_NAME_PATTERN).describe(`Registe
 const ticketKey = z.string().regex(TICKET_PATTERN).describe(`Ticket key, e.g. "PROJ-123": ${TICKET_DESCRIPTION}.`);
 const relativePath = (what: string) => z.string().min(1).max(MAX_PATH_LENGTH).describe(what);
 
-// The Task checks task_check reads (SF-054): the check of the current Task file.
-export type ServerChecks = Pick<TaskChecks, 'current'>;
+// The Task checks task_check reads (SF-054): the check of the current Task file, whether one runs,
+// and the stored checks (write_task's already_checked, SF-086).
+export type ServerChecks = Pick<TaskChecks, 'current' | 'isRunning' | 'store'>;
+
+// The automatic Task checks (SF-086): write_task triggers one; task_check says whether one is pending.
+export type ServerAutoChecks = Pick<AutoChecks, 'trigger' | 'isPending'>;
+
+// What write_task says of the automatic check of the Task file it wrote (SF-086).
+export const WRITE_CHECK_STATES = ['scheduled', 'off', 'already_checked', 'draft'] as const;
+export const CHECK_AFTER_SECONDS = AUTO_CHECK_DELAY_MS / 1000;
 
 // The run queue the Context owner reads and adds to (SF-071); it neither removes nor moves.
-export type ServerQueue = Pick<RunQueue, 'view' | 'add'>;
+// withTicket: write_task writes under the queue's lock of the ticket (SF-086).
+export type ServerQueue = Pick<RunQueue, 'view' | 'add' | 'withTicket'>;
 
 const dependencyRow = z.object({ workspace: z.string(), ticket: z.string(), state: z.enum(DEPENDENCY_STATES) });
 
 // execution: only its JobStore, for write_task's guard against replacing the Task file of a live job.
 // history: the tickets' history (SF-081), where write_task records "written"; none records nothing.
 // queue: the run queue (SF-071); without it queue_list and queue_add answer queue_unavailable.
-function createMcpServer(handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks: ServerChecks | undefined, history?: TicketHistory, queue?: ServerQueue): McpServer {
+// auto: the automatic Task checks (SF-086); without it write_task triggers none (check: off) and
+// task_check's pending is false.
+function createMcpServer(
+  handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks: ServerChecks | undefined, history?: TicketHistory, queue?: ServerQueue, auto?: ServerAutoChecks,
+): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version }, { instructions: handbook.quickStart });
 
   server.registerTool(
@@ -193,7 +208,10 @@ function createMcpServer(handbook: Handbook, version: string, execution: Pick<Ex
         'Creates or replaces the Task file .software-factory/<ticket>.md in the workspace\'s work checkout. content is ' +
         'Markdown starting with a front-matter block ("---" lines) containing ticket (equal to the ticket argument), ' +
         `title and base; at most ${MAX_TASK_BYTES} bytes. The folder is kept out of Git through .git/info/exclude. ` +
-        'Returns the checkout-relative path, created or replaced, byte count and sha256. Starts nothing.',
+        'Returns the checkout-relative path, created or replaced, byte count and sha256, and check: what happens to the ' +
+        `automatic Task check of what was written: scheduled (it starts after check_after_seconds, ${CHECK_AFTER_SECONDS}), off, ` +
+        'already_checked (this exact text has a check) or draft (a skeleton is not checked). An automatic Task check starts ' +
+        `${CHECK_AFTER_SECONDS} s after the write (unless SF_TASK_CHECK_AUTO=off); read it with task_check.`,
       inputSchema: z.strictObject({
         workspace: workspaceName,
         ticket: ticketKey,
@@ -204,13 +222,19 @@ function createMcpServer(handbook: Handbook, version: string, execution: Pick<Ex
         status: z.enum(['created', 'replaced']),
         bytes: z.number().int(),
         sha256: z.string(),
+        check: z.enum(WRITE_CHECK_STATES),
+        check_after_seconds: z.number().int().optional(),
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
     async ({ workspace, ticket, content }) => {
       try {
         const record = history === undefined ? undefined : (sha256: string) => history.append(workspace, ticket, { kind: 'written', by: 'context_owner', sha256 });
-        return toolResult({ ...(await writeTask(await resolveWorkspace(workspace), ticket, content, execution.jobs, { record })) });
+        const target = await resolveWorkspace(workspace);
+        const write = (): ReturnType<typeof writeTask> => writeTask(target, ticket, content, execution.jobs, { record });
+        // Never between the run queue's last look at the ticket's plan and its start (SF-086).
+        const written = await (queue === undefined ? write() : queue.withTicket(workspace, ticket, write));
+        return toolResult({ ...written, ...(await writeCheck(workspace, ticket, content, written.sha256)) });
       } catch (error) {
         return toolError(error);
       }
@@ -223,7 +247,9 @@ function createMcpServer(handbook: Handbook, version: string, execution: Pick<Ex
       title: 'Read the Task check',
       description:
         'Returns the last Task check of the current Task file .software-factory/<ticket>.md: a read-only Claude session ' +
-        'that read only the Task file and the repository (the user runs it: Check on the board, or sf check-task). ' +
+        'that read only the Task file and the repository (the factory runs it automatically after write_task, or the user ' +
+        'presses Check). running: a check of the ticket runs now; pending: an automatic check of it is scheduled and has ' +
+        'not started; call again until both are false. ' +
         'paraphrase is the checker\'s reading of the Task; findings are decision, contradiction, missing, overreach or ' +
         'unclear, each blocker, major or nit; files are the files it expects to change; verdict is ready (no blocker or ' +
         'major), not_ready, failed (error says why; never ready), or none when the current Task file has no check (a ' +
@@ -238,6 +264,8 @@ function createMcpServer(handbook: Handbook, version: string, execution: Pick<Ex
         error: z.string().nullable(),
         model: z.string().nullable(),
         checked_at: z.string().nullable(),
+        running: z.boolean(),
+        pending: z.boolean(),
       }),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
@@ -247,13 +275,15 @@ function createMcpServer(handbook: Handbook, version: string, execution: Pick<Ex
           throw new FactoryError('check_unavailable', 'The Task check is not available.');
         }
         const { sha256, record } = await checks.current(workspace, ticket);
+        const running = checks.isRunning(workspace, ticket);
+        const pending = auto?.isPending(workspace, ticket) ?? false;
         if (record === undefined) {
-          return toolResult({ verdict: 'none' as const, sha256, paraphrase: null, findings: [], files: [], error: null, model: null, checked_at: null });
+          return toolResult({ verdict: 'none' as const, sha256, paraphrase: null, findings: [], files: [], error: null, model: null, checked_at: null, running, pending });
         }
         return toolResult({
           verdict: recordVerdict(record),
           sha256, paraphrase: record.output?.paraphrase ?? null, findings: record.output?.findings ?? [], files: record.output?.files ?? [],
-          error: record.error, model: record.model, checked_at: record.ended_at,
+          error: record.error, model: record.model, checked_at: record.ended_at, running, pending,
         });
       } catch (error) {
         return toolError(error);
@@ -293,6 +323,22 @@ function createMcpServer(handbook: Handbook, version: string, execution: Pick<Ex
     },
   );
 
+  // The automatic check of a Task file write_task wrote: off without the automatic checks; else a
+  // skeleton is a draft, a text with a check record is already_checked, and any other is scheduled.
+  async function writeCheck(workspace: string, ticket: string, content: string, sha256: string): Promise<{ check: (typeof WRITE_CHECK_STATES)[number]; check_after_seconds?: number }> {
+    if (auto === undefined) {
+      return { check: 'off' };
+    }
+    if (isDraft(content)) {
+      return { check: 'draft' };
+    }
+    if (checks !== undefined && (await checks.store.read(workspace, ticket, sha256)) !== undefined) {
+      return { check: 'already_checked' };
+    }
+    auto.trigger(workspace, ticket);
+    return { check: 'scheduled', check_after_seconds: CHECK_AFTER_SECONDS };
+  }
+
   const queueOf = (): ServerQueue => {
     if (queue === undefined) {
       throw new FactoryError('queue_unavailable', 'The run queue is not available.');
@@ -322,7 +368,10 @@ function createMcpServer(handbook: Handbook, version: string, execution: Pick<Ex
     async () => {
       try {
         const { max_running, running, held, entries } = await queueOf().view();
-        return toolResult({ max_running, running, held, entries });
+        return toolResult({
+          max_running, running, held,
+          entries: entries.map(({ workspace, ticket, position, queued_at, waits_for }) => ({ workspace, ticket, position, queued_at, waits_for })),
+        });
       } catch (error) {
         return toolError(error);
       }
@@ -376,8 +425,10 @@ function listen(server: HttpServer, port: number): Promise<AddressInfo> {
   });
 }
 
-export async function startServer(port: number, handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks?: ServerChecks, history?: TicketHistory, queue?: ServerQueue): Promise<RunningServer> {
-  const mcpHandler = createMcpHandler(() => createMcpServer(handbook, version, execution, checks, history, queue));
+export async function startServer(
+  port: number, handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks?: ServerChecks, history?: TicketHistory, queue?: ServerQueue, auto?: ServerAutoChecks,
+): Promise<RunningServer> {
+  const mcpHandler = createMcpHandler(() => createMcpServer(handbook, version, execution, checks, history, queue, auto));
   const nodeHandler = toNodeHandler(mcpHandler);
   const validateHost = localhostHostValidation();
   const validateOrigin = localhostOriginValidation();

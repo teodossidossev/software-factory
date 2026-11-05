@@ -14,7 +14,7 @@ import { firstPrompt } from '../src/execution.js';
 import { factoryPrompt } from '../src/prompts.js';
 import { taskSha256 } from '../src/task-file.js';
 import {
-  call, codexLog, codexScript, type Env, fakeCodex, fakeLog, git, newEnv, newRepo, putRules, putTask, refused, reviewLog, reviewScript, runCli, script, serve, type Served, stop, task,
+  call, codexLog, codexScript, type Env, fakeCodex, fakeLog, git, newEnv, newRepo, putRules, putTask, readyCheck, refused, reviewLog, reviewScript, runCli, script, serve, type Served, stop, task,
   turnsStarted, waitFor,
 } from './support/harness.js';
 
@@ -285,6 +285,7 @@ test('A paused job survives an sf serve restart and is not counted toward the ru
     await turnsStarted(env, 1);
     assert.equal((await runCli(env, ['pause', 'app', 'P-1'])).code, 0);
     // max_running is 1 (SF_MAX_JOBS): the paused job holds no slot, so the queue starts P-2.
+    await readyCheck(env, repo, 'P-2');
     assert.equal((await runCli(env, ['queue', 'add', 'app', 'P-2'])).code, 0);
     await turnsStarted(env, 2);
   } finally {

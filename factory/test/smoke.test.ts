@@ -10,6 +10,7 @@ import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { quickStartSection } from '../src/server.js';
+import { CheckStore, taskSha256 } from '../src/task-check.js';
 
 const CLI = fileURLToPath(new URL('../src/cli.js', import.meta.url));
 const HANDBOOK = fileURLToPath(new URL('../../HANDBOOK.md', import.meta.url));
@@ -28,7 +29,8 @@ let repo: string;
 const running = new Set<ChildProcess>();
 
 function env(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  return { PATH: process.env.PATH, HOME: process.env.HOME, SF_CONFIG_DIR: configDir, SF_STATE_DIR: join(temp, 'state'), SF_PORT: '0', SF_DASHBOARD_PORT: '0', ...extra };
+  // No automatic Task check unless a test turns it on (SF-086).
+  return { PATH: process.env.PATH, HOME: process.env.HOME, SF_CONFIG_DIR: configDir, SF_STATE_DIR: join(temp, 'state'), SF_PORT: '0', SF_DASHBOARD_PORT: '0', SF_TASK_CHECK_AUTO: 'off', ...extra };
 }
 
 function runCli(args: string[], extra: Record<string, string> = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
@@ -292,6 +294,10 @@ test('write_task writes the Task file into the work checkout and refuses invalid
 
   const written = await call(client, 'write_task', { workspace: 'demo', ticket: 'DEMO-1', content: TASK });
   assert.deepEqual([written.path, written.status, written.bytes], ['.software-factory/DEMO-1.md', 'created', Buffer.byteLength(TASK)]);
+  // SF_TASK_CHECK_AUTO=off: no automatic check, nothing pending.
+  assert.equal(written.check, 'off');
+  assert.equal(written.check_after_seconds, undefined);
+  assert.deepEqual([(await call(client, 'task_check', { workspace: 'demo', ticket: 'DEMO-1' })).pending], [false]);
   const back = await call(client, 'read_file', { workspace: 'demo', path: '.software-factory/DEMO-1.md' });
   assert.deepEqual([back.text, back.sha256], [TASK, written.sha256]);
   assert.equal((await call(client, 'write_task', { workspace: 'demo', ticket: 'DEMO-1', content: TASK })).status, 'replaced');
@@ -366,6 +372,35 @@ test('read_attachment returns a ticket\'s image as MCP image content with one te
 
   await client.close();
   assert.equal(await stop(served, 'SIGTERM'), 0);
+});
+
+test('write_task with the automatic Task check (SF-086): scheduled after 60 s and pending in task_check, draft for a skeleton, already_checked for a text with a check', async () => {
+  // A check that fired would fail at once (no such executable), stored as failed and not notified.
+  const served = await serve({ SF_TASK_CHECK_AUTO: 'on', SF_CLAUDE: join(temp, 'no-such-claude'), SF_DESKTOP_NOTIFY: 'off' });
+  const client = await connect(served);
+  try {
+    const text = TASK.replace('Demo task', 'Automatic check');
+    const written = await call(client, 'write_task', { workspace: 'demo', ticket: 'DEMO-1', content: text });
+    assert.deepEqual([written.check, written.check_after_seconds], ['scheduled', 60]);
+    const read = await call(client, 'task_check', { workspace: 'demo', ticket: 'DEMO-1' });
+    assert.deepEqual([read.verdict, read.running, read.pending], ['none', false, true]);
+    const draft = `${text}\n## Status: waiting for the Context owner\n`;
+    assert.deepEqual((await call(client, 'write_task', { workspace: 'demo', ticket: 'DEMO-1', content: draft })).check, 'draft');
+    const checked = TASK.replace('Demo task', 'Checked before');
+    const at = new Date().toISOString();
+    await new CheckStore(join(temp, 'state')).write({
+      workspace: 'demo', ticket: 'DEMO-1', sha256: taskSha256(checked), commit: null, status: 'checked', output: { paraphrase: 'p', findings: [], files: [], verdict: 'ready' },
+      error: null, model: null, cost_usd: null, started_at: at, ended_at: at,
+    });
+    const again = await call(client, 'write_task', { workspace: 'demo', ticket: 'DEMO-1', content: checked });
+    assert.deepEqual([again.check, again.check_after_seconds], ['already_checked', undefined]);
+    assert.equal((await call(client, 'task_check', { workspace: 'demo', ticket: 'DEMO-1' })).verdict, 'ready');
+    // Back to the original Task for the tests after this one.
+    await call(client, 'write_task', { workspace: 'demo', ticket: 'DEMO-1', content: TASK });
+  } finally {
+    await client.close();
+    assert.equal(await stop(served, 'SIGTERM'), 0);
+  }
 });
 
 test('sf serve guards Host and Origin, reports a busy port and refuses an invalid registry', async () => {

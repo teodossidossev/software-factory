@@ -17,6 +17,7 @@ import { callSocket } from '../../src/ipc.js';
 import { JobStore } from '../../src/jobs.js';
 import { saveRegistry } from '../../src/registry.js';
 import { rulesBlock } from '../../src/rules-docs.js';
+import { CheckStore, taskSha256 } from '../../src/task-check.js';
 import { writeTask } from '../../src/task-file.js';
 
 export const CLI = fileURLToPath(new URL('../../src/cli.js', import.meta.url));
@@ -75,6 +76,8 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
     SF_SIMPLIFY: 'off',
     // No hand-over to the checkout unless the test turns it on (test/handoff.test.ts, SF-073).
     SF_HANDOFF: 'off',
+    // No automatic Task check unless the test turns it on (test/task-check-auto.test.ts, SF-086).
+    SF_TASK_CHECK_AUTO: 'off',
     // The job steps of call() and refused() through the socket.
     SF_TEST_HOOKS: 'on',
     // Temporary directories (the Task check's worktree, SF-054) where the test run makes its own.
@@ -195,6 +198,17 @@ export function task(ticket: string, title: string, base = 'main'): string {
 
 export async function putTask(env: Env, repo: string, ticket: string, title: string, base = 'main'): Promise<void> {
   await writeTask({ name: 'app', readCheckout: repo, workCheckout: repo }, ticket, task(ticket, title, base), new JobStore(env.state));
+}
+
+// A ready Task check of the ticket's current Task file in workspace app, stored as sf serve stores
+// one: the run queue starts only a ticket whose plan is ready (SF-086).
+export async function readyCheck(env: Env, repo: string, ticket: string): Promise<void> {
+  const text = await readFile(join(repo, '.software-factory', `${ticket}.md`), 'utf8');
+  const at = new Date().toISOString();
+  await new CheckStore(env.state).write({
+    workspace: 'app', ticket, sha256: taskSha256(text), commit: null, status: 'checked', output: { paraphrase: 'Ready.', findings: [], files: [], verdict: 'ready' },
+    error: null, model: null, cost_usd: null, started_at: at, ended_at: at,
+  });
 }
 
 export function runCli(env: Env, args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {

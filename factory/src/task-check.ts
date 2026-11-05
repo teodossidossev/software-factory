@@ -9,8 +9,9 @@
 // findings, the files it expects to change and a verdict. A check is stored by the sha256 of the Task file it read, under the state
 // directory, never in the work checkout. It only advises: nothing here starts, refuses or changes
 // a job.
-import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, unlink, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { renameSync, rmSync } from 'node:fs';
+import { mkdir, mkdtemp, open, readdir, readFile, realpath, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { HookCallback, SandboxSettings, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
@@ -182,6 +183,36 @@ export class CheckStore {
     await mkdir(this.#dir(record.workspace, record.ticket), { recursive: true, mode: 0o700 });
     await writeFileAtomic(path, Buffer.from(`${JSON.stringify(record, null, 2)}\n`));
     return path;
+  }
+
+  // The record of an automatic check (SF-086), unless signal aborts first: a complete temp file is
+  // written, then signal is looked at and the file renamed into place in one synchronous step, so a
+  // cancel either comes before the commit (nothing stored, the temp file goes) or after it (the run
+  // had ended). Returns the path, or undefined when cancelled.
+  async writeUnless(record: CheckRecord, signal: AbortSignal): Promise<string | undefined> {
+    const path = this.path(record.workspace, record.ticket, record.sha256);
+    if (signal.aborted) {
+      return undefined;
+    }
+    await mkdir(this.#dir(record.workspace, record.ticket), { recursive: true, mode: 0o700 });
+    const temp = `${path}.${randomUUID()}.tmp`;
+    try {
+      const handle = await open(temp, 'wx', 0o600);
+      try {
+        await handle.writeFile(`${JSON.stringify(record, null, 2)}\n`);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      // No await between the look at signal and the rename: no cancel can come in between.
+      if (signal.aborted) {
+        return undefined;
+      }
+      renameSync(temp, path);
+      return path;
+    } finally {
+      rmSync(temp, { force: true });
+    }
   }
 
   // The check of the Task file with this sha256, or undefined.
@@ -565,6 +596,12 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
         model: options.model ?? null, cost_usd: null, started_at: startedAt, ended_at: new Date().toISOString(),
       };
     }
+    if (options.signal?.aborted === true) {
+      return {
+        ...record, commit: checkout.commit, status: 'failed', output: null, error: 'The check was cancelled.',
+        model: options.model ?? null, cost_usd: null, started_at: startedAt, ended_at: new Date().toISOString(),
+      };
+    }
     const outcome = await runStructuredSession(checkPrompt(ticket, task, rules), {
       cwd, claudePath: options.claudePath, sandbox: options.sandbox, model: options.model, maxTurns: options.maxTurns,
       signal: options.signal ?? new AbortController().signal,
@@ -623,20 +660,36 @@ export function checkSettings(config: Config, configDir: string): Omit<CheckOpti
 
 export interface TaskChecksOptions extends Omit<CheckOptions, 'signal' | 'onMessage'> {
   resolve: (name: string) => Promise<Workspace>;
-  // Called when a check started by start() has been stored (or has failed to be).
+  // Called when a check started by start() or startAuto() has been stored (or has failed to be),
+  // or was cancelled.
   onSettled?: (workspace: string, ticket: string) => void;
 }
 
-// The checks of sf serve: one running per ticket at most, started from the dashboard; the views of
-// the dashboard and the Context owner's task_check tool.
+// Who hears of the checks of TaskChecks besides onSettled (SF-086: the automatic checks).
+export interface CheckObserver {
+  // A manual check of the ticket (start) was accepted and is about to run.
+  manualStart?: (workspace: string, ticket: string) => void;
+  // A check of the ticket, manual or automatic, has ended: it no longer counts as running.
+  ended?: (workspace: string, ticket: string) => void;
+}
+
+// The checks of sf serve: one running per ticket at most, started from the dashboard (start) or by
+// the automatic checks (startAuto, SF-086); the views of the dashboard and the Context owner's
+// task_check tool.
 export class TaskChecks {
   readonly store: CheckStore;
   readonly #options: TaskChecksOptions;
   readonly #running = new Set<string>();
+  readonly #observers: CheckObserver[] = [];
 
   constructor(options: TaskChecksOptions) {
     this.#options = options;
     this.store = new CheckStore(options.stateDir);
+  }
+
+  // Adds an observer of the checks (AutoChecks).
+  observe(observer: CheckObserver): void {
+    this.#observers.push(observer);
   }
 
   isRunning(workspace: string, ticket: string): boolean {
@@ -648,10 +701,27 @@ export class TaskChecks {
     return [...this.#running].some((key) => key.startsWith(`${workspace}/`));
   }
 
+  // The checks running or being set up, manual and automatic, over every workspace.
+  runningCount(): number {
+    return this.#running.size;
+  }
+
   // Starts a check of the current Task file and answers at once; the record is stored when it ends.
   // A draft, a missing Task file and a check already running or being set up for the ticket are
-  // refused.
+  // refused. The observers hear of it first: a pending automatic check of the ticket goes.
   async start(name: string, ticket: string): Promise<{ started: true; sha256: string }> {
+    const { started, sha256 } = await this.#launch(name, ticket, undefined);
+    return { started, sha256 };
+  }
+
+  // An automatic check (SF-086): as start, with signal passed to the check. A check cancelled
+  // through signal stores nothing. ended settles with the stored record, or undefined when the
+  // check was cancelled or could not be stored.
+  startAuto(name: string, ticket: string, signal: AbortSignal): Promise<{ started: true; sha256: string; ended: Promise<CheckRecord | undefined> }> {
+    return this.#launch(name, ticket, signal);
+  }
+
+  async #launch(name: string, ticket: string, signal: AbortSignal | undefined): Promise<{ started: true; sha256: string; ended: Promise<CheckRecord | undefined> }> {
     const key = `${name}/${ticket}`;
     if (this.#running.has(key)) {
       throw new FactoryError('check_running', `A Task check of ${key} is already running.`);
@@ -659,6 +729,11 @@ export class TaskChecks {
     // Reserved before the first await, so a second start meanwhile is check_running; released when
     // the setup fails or the check has ended.
     this.#running.add(key);
+    if (signal === undefined) {
+      for (const observer of this.#observers) {
+        observer.manualStart?.(name, ticket);
+      }
+    }
     let workspace: Workspace;
     let task: string;
     try {
@@ -666,17 +741,35 @@ export class TaskChecks {
       task = await readTask(workspace, ticket);
       refuseDraft(ticket, task);
     } catch (error) {
-      this.#running.delete(key);
+      this.#end(key, name, ticket, false);
       throw error;
     }
-    void runTaskCheck(workspace, ticket, task, this.#options)
-      .then((record) => this.store.write(record))
-      .catch((error: unknown) => console.error(error))
-      .finally(() => {
-        this.#running.delete(key);
-        this.#options.onSettled?.(name, ticket);
-      });
-    return { started: true, sha256: taskSha256(task) };
+    const ended = runTaskCheck(workspace, ticket, task, { ...this.#options, ...(signal !== undefined ? { signal } : {}) })
+      .then(async (record) => {
+        if (signal === undefined) {
+          await this.store.write(record);
+          return record;
+        }
+        // An automatic check: stored only when no cancel came before the commit.
+        return (await this.store.writeUnless(record, signal)) === undefined ? undefined : record;
+      })
+      .catch((error: unknown) => {
+        console.error(error);
+        return undefined;
+      })
+      .finally(() => this.#end(key, name, ticket, true));
+    return { started: true, sha256: taskSha256(task), ended };
+  }
+
+  // The ticket's check no longer runs: onSettled (when it ran) and the observers hear of it.
+  #end(key: string, name: string, ticket: string, ran: boolean): void {
+    this.#running.delete(key);
+    if (ran) {
+      this.#options.onSettled?.(name, ticket);
+    }
+    for (const observer of this.#observers) {
+      observer.ended?.(name, ticket);
+    }
   }
 
   async view(name: string, ticket: string): Promise<CheckView> {

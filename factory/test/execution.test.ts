@@ -14,7 +14,7 @@ import { QueueStore } from '../src/queue.js';
 import { resolveWorkspace } from '../src/registry.js';
 import { FACTORY_PROMPT_RULES, factoryPrompt } from '../src/prompts.js';
 import { taskSha256, writeTask } from '../src/task-file.js';
-import { call, FAKE, fakeLog, git, newEnv, newRepo, putRules, putTask, refused, runCli, script, serve, stop, task, temp, turnsStarted, waitFor } from './support/harness.js';
+import { call, FAKE, fakeLog, git, newEnv, newRepo, putRules, putTask, readyCheck, refused, runCli, script, serve, stop, task, temp, turnsStarted, waitFor } from './support/harness.js';
 
 const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid'];
 
@@ -297,6 +297,7 @@ test('parallel jobs: three jobs of a workspace run at once in their own worktree
   assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'P-1' })).state, 'working');
   assert.match((await runCli(env, ['say', 'app', 'P-1', 'also', 'this'])).stdout, /^state: working\nqueued: true$/m);
   // The run queue's limit (SF-071; SF_MAX_JOBS=3 its default) holds P-4 in the queue.
+  await readyCheck(env, repo, 'P-4');
   assert.equal((await runCli(env, ['queue', 'add', 'app', 'P-4'])).stdout, 'position: 1\n');
   assert.match((await runCli(env, ['queue', 'list'])).stdout, /^limit: 3 jobs at once\nrunning: 3\n[\s\S]*\n {2}1\. app\/P-4\n$/);
   await waitFor(served, 'P-2', 'awaiting_review', 1);

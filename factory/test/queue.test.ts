@@ -12,12 +12,12 @@ import type { Config } from '../src/config.js';
 import { FactoryError } from '../src/errors.js';
 import { type ExclusiveScope, Execution } from '../src/execution.js';
 import { type Job, type JobState, JobStore, LIMIT_RETRY_MS, now } from '../src/jobs.js';
-import { LIMIT_RESET_HOLD_REASON, QueueStore, RunQueue } from '../src/queue.js';
+import { LIMIT_RESET_HOLD_REASON, type PlanCheck, QueueStore, RunQueue, type RunQueueOptions } from '../src/queue.js';
 import { resolveWorkspace, saveRegistry } from '../src/registry.js';
 import { followJobs } from '../src/runner.js';
 import { Setup } from '../src/setup.js';
 import { writeTask } from '../src/task-file.js';
-import { call, type Env, FAKE, git, newEnv, newRepo, putTask, refused, runCli, script, serve, stop, task, temp, turnsStarted, waitFor } from './support/harness.js';
+import { call, type Env, FAKE, git, newEnv, newRepo, putTask, readyCheck, refused, runCli, script, serve, stop, task, temp, turnsStarted, waitFor } from './support/harness.js';
 
 const TIMEOUT = { timeout: 60_000 };
 
@@ -25,7 +25,7 @@ function config(env: Env): Config {
   return {
     stateDir: env.state, checkAfterStartMin: 15, checkAfterFixMin: 5, maxTurns: 10, turnLimitContinues: 1, maxIterations: 5, claudePath: FAKE,
     sandbox: undefined, model: undefined, worktreeRoot: join(env.state, 'worktrees'), maxJobs: 3, sensitivePaths: [],
-    review: false, reviewModel: undefined, reviewMaxTurns: 60, simplify: false, taskCheckMaxTurns: 30, rulesMaxBytes: 49152,
+    review: false, reviewModel: undefined, reviewMaxTurns: 60, simplify: false, taskCheckMaxTurns: 30, taskCheckAuto: false, taskCheckParallel: 1, rulesMaxBytes: 49152,
     gate: { on: false, reason: 'SF_GATE=off' }, codexModel: undefined, gateMaxRounds: 3, gateMaxTokens: 5_000_000, gateTimeoutMs: 900_000,
     forge: { githubToken: undefined, githubApi: 'https://api.github.com', gitlabToken: undefined, gitlabUrl: undefined }, handoff: 'off',
   };
@@ -112,7 +112,7 @@ interface World {
 }
 
 // Workspace app (a checkout cloned from a bare origin) and, with web, workspace web too.
-async function world(name: string, options: { web?: boolean; recheckMs?: number } = {}): Promise<World> {
+async function world(name: string, options: { web?: boolean; recheckMs?: number } & Pick<RunQueueOptions, 'planCheck' | 'onAdded'> = {}): Promise<World> {
   const env = await newEnv(name);
   const repo = await newRepo(env, `${name}-repo`, true);
   if (options.web === true) {
@@ -124,7 +124,10 @@ async function world(name: string, options: { web?: boolean; recheckMs?: number 
   const resolve = (workspace: string) => resolveWorkspace(workspace, env.config);
   const execution = new FakeExecution(jobs, new Execution(config(env), resolve));
   const setup = new Setup({ configDir: env.config, jobs, exclusive: (work) => work({} as ExclusiveScope) });
-  const make = (): RunQueue => new RunQueue(store, execution, setup, jobs, { resolve, ...(options.recheckMs !== undefined ? { recheckMs: options.recheckMs } : {}) });
+  const make = (): RunQueue => new RunQueue(store, execution, setup, jobs, {
+    resolve, ...(options.recheckMs !== undefined ? { recheckMs: options.recheckMs } : {}),
+    ...(options.planCheck !== undefined ? { planCheck: options.planCheck } : {}), ...(options.onAdded !== undefined ? { onAdded: options.onAdded } : {}),
+  });
   return { env, repo, origin: join(temp, `${name}-repo-origin.git`), jobs, store, execution, setup, queue: make(), again: make };
 }
 
@@ -179,6 +182,133 @@ test('the scheduler fills the free slots in queue order, across workspaces, and 
   assert.deepEqual(await queued(w), []);
   const view = await w.queue.view();
   assert.deepEqual([view.max_running, view.running, view.next, view.entries], [2, 2, null, []]);
+});
+
+test('SF-086: a queued ticket starts only when its plan is ready or it is forced; the others stay in place with the reason; force survives a restart, holds for any version, ends when the entry leaves', TIMEOUT, async () => {
+  const plans = new Map<string, PlanCheck>([
+    ['app/P-1', { state: 'not_ready', blockers: 2, majors: 1 }],
+    ['app/P-2', { state: 'failed', blockers: 0, majors: 0 }],
+    ['app/P-3', { state: 'checking', blockers: 0, majors: 0 }],
+    ['app/P-5', { state: 'ready', blockers: 0, majors: 0 }],
+  ]);
+  const added: string[] = [];
+  const w = await world('queue-plan', {
+    planCheck: async (workspace, ticket) => plans.get(`${workspace}/${ticket}`) ?? { state: 'none', blockers: 0, majors: 0 },
+    onAdded: (workspace, ticket) => added.push(`${workspace}/${ticket}`),
+  });
+  for (const ticket of ['P-1', 'P-2', 'P-3', 'P-4', 'P-5']) {
+    await plan(w, ticket);
+  }
+  await w.queue.limit(5);
+  await w.queue.hold();
+  for (const ticket of ['P-1', 'P-2', 'P-3', 'P-4', 'P-5']) {
+    await w.queue.add('app', ticket);
+  }
+  assert.deepEqual(added, ['app/P-1', 'app/P-2', 'app/P-3', 'app/P-4', 'app/P-5']);
+  const reasons = async (queue: RunQueue): Promise<Array<[string, string | null, boolean]>> => (await queue.view()).entries.map((row) => [row.ticket, row.plan_reason, row.force]);
+  assert.deepEqual(await reasons(w.queue), [
+    ['P-1', 'plan not ready: 2 blocker, 1 major', false], ['P-2', 'plan check failed', false], ['P-3', 'plan being checked', false], ['P-4', 'plan not checked', false], ['P-5', null, false],
+  ]);
+  assert.deepEqual((await w.queue.view()).next, { workspace: 'app', ticket: 'P-5' });
+  // Only the ready one starts, though every slot is free; the others keep their places.
+  await w.queue.release();
+  await w.queue.idle();
+  assert.deepEqual(w.execution.starts, ['app/P-5']);
+  assert.deepEqual(await queued(w), ['app/P-1', 'app/P-2', 'app/P-3', 'app/P-4']);
+  assert.equal((await w.queue.view()).next, null);
+  // Start anyway, while held: stored in queue.json; a restart keeps it, and a new Task file too.
+  await w.queue.hold();
+  assert.deepEqual(await w.queue.force('app', 'P-2'), { force: true });
+  await assert.rejects(w.queue.force('app', 'P-9'), { code: 'not_queued' });
+  await assert.rejects(w.queue.force('app', 'P-5'), { code: 'not_queued' });
+  assert.deepEqual((await w.store.read()).entries.map((entry) => entry.force ?? false), [false, true, false, false]);
+  await writeTask(await resolveWorkspace('app', w.env.config), 'P-2', task('P-2', 'Job P-2, rewritten'), w.jobs);
+  const again = w.again();
+  assert.deepEqual((await reasons(again))[1], ['P-2', null, true]);
+  await again.release();
+  await again.idle();
+  assert.deepEqual(w.execution.starts, ['app/P-5', 'app/P-2']);
+  // A check that ends ready: the next pass starts it.
+  plans.set('app/P-3', { state: 'ready', blockers: 0, majors: 0 });
+  await settle(again);
+  assert.deepEqual(w.execution.starts, ['app/P-5', 'app/P-2', 'app/P-3']);
+  // Forced, removed and added again: not forced any more.
+  await again.hold();
+  await again.force('app', 'P-4');
+  assert.deepEqual((await reasons(again)).find((row) => row[0] === 'P-4'), ['P-4', null, true]);
+  await again.remove('app', 'P-4');
+  await again.add('app', 'P-4');
+  assert.deepEqual((await reasons(again)).find((row) => row[0] === 'P-4'), ['P-4', 'plan not checked', false]);
+  // A plan check that throws counts as not checked.
+  const broken = new RunQueue(w.store, w.execution, w.setup, w.jobs, { resolve: (name) => resolveWorkspace(name, w.env.config), planCheck: async () => { throw new FactoryError('workspace_not_found', 'gone'); } });
+  assert.deepEqual((await reasons(broken)).map((row) => row[1]), ['plan not checked', 'plan not checked']);
+});
+
+test('SF-086: the plan is asked again just before the start: a Task file written while the pass looked at the dependencies holds the entry', TIMEOUT, async () => {
+  let asked = 0;
+  const w = await world('queue-plan-again', {
+    // Ready when the pass first looks, being checked when it asks again (a write_task meanwhile).
+    planCheck: async () => (asked++ % 2 === 0 ? { state: 'ready', blockers: 0, majors: 0 } : { state: 'checking', blockers: 0, majors: 0 }),
+  });
+  await plan(w, 'R-1');
+  await w.queue.hold();
+  await w.queue.add('app', 'R-1');
+  asked = 0;
+  await w.queue.release();
+  await w.queue.idle();
+  assert.deepEqual(w.execution.starts, []);
+  assert.deepEqual(await queued(w), ['app/R-1']);
+});
+
+test('Fix 1 R2: the last look at the plan and the start hold the ticket\'s lock: a write under it before the look holds the entry; one asked during the start waits for the job\'s claim', TIMEOUT, async () => {
+  // The plan is ready for the version "checked" only; a write makes it unchecked.
+  let version = 'checked';
+  const w = await world('queue-plan-lock', {
+    planCheck: async () => (version === 'checked' ? { state: 'ready', blockers: 0, majors: 0 } : { state: 'none', blockers: 0, majors: 0 }),
+  });
+  await plan(w, 'L-1');
+  await w.queue.hold();
+  await w.queue.add('app', 'L-1');
+  // A write_task under the lock, still writing when the pass reaches the start.
+  let finishWrite!: () => void;
+  const writeGate = new Promise<void>((resolve) => (finishWrite = resolve));
+  const write = w.queue.withTicket('app', 'L-1', async () => {
+    await writeGate;
+    version = 'rewritten';
+  });
+  const pass = w.queue.release();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.deepEqual(w.execution.starts, []);
+  finishWrite();
+  await write;
+  await pass;
+  await w.queue.idle();
+  // The last look saw the new version: not started, still queued, its reason shown.
+  assert.deepEqual(w.execution.starts, []);
+  assert.deepEqual(await queued(w), ['app/L-1']);
+  assert.equal((await w.queue.view()).entries[0]!.plan_reason, 'plan not checked');
+  // Checked again: the start runs under the lock, and a write asked meanwhile waits for it.
+  version = 'checked';
+  let finishStart!: () => void;
+  w.execution.hang = new Promise<void>((resolve) => (finishStart = resolve));
+  const started = settle(w.queue);
+  for (const deadline = Date.now() + 5_000; w.execution.starts.length === 0;) {
+    assert.ok(Date.now() < deadline, 'L-1 did not start');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  let wrote = false;
+  // The write runs once the start has ended: it sees the claimed job (write_task's guard refuses then).
+  const late = w.queue.withTicket('app', 'L-1', async () => {
+    wrote = true;
+    return (await w.jobs.read('app', 'L-1'))?.state;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(wrote, false);
+  finishStart();
+  await started;
+  assert.equal(await late, 'working');
+  // Another ticket's work never waits for it.
+  assert.equal(await w.queue.withTicket('app', 'L-2', async () => 'free'), 'free');
 });
 
 test('a limit change starts more at once; lowering it stops nothing and starts nothing until the count is below it', TIMEOUT, async () => {
@@ -710,6 +840,10 @@ test('sf serve: queue two tickets with limit 1, the second starts by itself once
   const repo = await newRepo(env, 'queue-serve-repo', true);
   for (const ticket of ['Q-1', 'Q-2', 'M-1', 'M-2']) {
     await putTask(env, repo, ticket, `Job ${ticket}`);
+  }
+  // The queue starts a ticket whose plan is ready (SF-086): Q-1 and Q-2 have a ready check.
+  for (const ticket of ['Q-1', 'Q-2']) {
+    await readyCheck(env, repo, ticket);
   }
   await writeTask({ name: 'app', readCheckout: repo, workCheckout: repo }, 'S-1', `${task('S-1', 'Skeleton')}\n## Status: waiting for the Context owner\n`, new JobStore(env.state));
   const mrText = (ticket: string): string => [

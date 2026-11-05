@@ -3876,7 +3876,9 @@ function checkNote(row) {
 // last job's mark opens that failed or aborted job. The first line: with the run queue (SF-071) a
 // queued card's position, then the key, the workspace chip and the plan-check chip (which opens the
 // planned ticket with the check's findings; under the title when the line has no room). Then the
-// dependency lines (SF-084), the queue's failed start, and the actions: Start (secondary in the
+// dependency lines (SF-084), the queue's failed start, why the queue does not start it for its plan
+// (SF-086: plan not ready, plan check failed, plan being checked, plan not checked; with Start
+// anyway, which forces the entry), and the actions: Start (secondary in the
 // Queue, confirmed; its title names what it waits for) or "waiting for the plan" for a skeleton,
 // with the run queue Add to queue / Remove from queue (not on a skeleton), Task, the ⋯ menu with
 // Check, Archive and Delete…, and on a queued card the hint of its drag and Alt+Up / Alt+Down.
@@ -3919,6 +3921,12 @@ function queueCard(row) {
     failed.title = row.queue_error.code;
     item.append(failed);
   }
+  const planHeld = queued && row.queue_force !== true && typeof row.queue_reason === 'string' && row.queue_reason !== '';
+  if (planHeld) {
+    const reason = el('div', 'waits qreason', row.queue_reason);
+    reason.title = 'The queue starts a ticket once the Task check of its current Task file is ready, or after Start anyway';
+    item.append(reason);
+  }
   const act = el('div', 'act');
   const busy = state.setupPending.has(`ticket:${key}`) || state.ticketConfirm !== null;
   if (row.draft) {
@@ -3933,8 +3941,14 @@ function queueCard(row) {
     if (state.queue !== null) {
       const toggle = button('btn small', queued ? 'Remove from queue' : 'Add to queue', { qtoggle: key });
       toggle.disabled = state.setupPending.has(`queue:${key}`);
-      toggle.title = queued ? 'Take the ticket out of the queue' : 'The factory starts it by itself when a slot is free and what it waits for is merged';
+      toggle.title = queued ? 'Take the ticket out of the queue' : 'The factory starts it by itself when a slot is free, what it waits for is merged and its plan check is ready';
       act.append(toggle);
+      if (planHeld) {
+        const force = button('btn small', 'Start anyway', { qforce: key });
+        force.disabled = state.setupPending.has(`queue:${key}`);
+        force.title = 'The queue starts it whatever its plan check says, until it leaves the queue';
+        act.append(force);
+      }
     }
   }
   const task = button('btn small', 'Task', { ticket: key });
@@ -4032,6 +4046,16 @@ function queueToggle(key) {
   const queued = Number.isInteger(row.queue_position);
   void setupRequest(`queue:${key}`, queued ? 'api/queue/remove' : 'api/queue/add', { workspace: row.workspace, ticket: row.ticket }, 'toast', (data) =>
     ({ level: 'ok', text: queued ? `${key} is out of the queue.` : `${key} is queued at position ${data?.position}.` }));
+}
+
+// Start anyway of a queued card (SF-086): the queue starts it whatever its plan check says.
+function queueForce(key) {
+  const row = ticketByKey(key);
+  if (row === null || state.queue === null || !Number.isInteger(row.queue_position)) {
+    return;
+  }
+  void setupRequest(`queue:${key}`, 'api/queue/force', { workspace: row.workspace, ticket: row.ticket }, 'toast', () =>
+    ({ level: 'ok', text: `${key} starts when a slot is free, whatever its plan check says.` }));
 }
 
 // One job more or fewer at once (the stepper), within 1-20.
@@ -4504,7 +4528,7 @@ function renderJobs() {
 // listeners).
 function onClick(event) {
   const target = typeof event.target?.closest === 'function'
-    ? event.target.closest('[data-tk],[data-tkimg],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],#limUp,#limDown,#rulesBtn,[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived')
+    ? event.target.closest('[data-tk],[data-tkimg],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],[data-qforce],#limUp,#limDown,#rulesBtn,[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived')
     : null;
   // An open ⋯ menu closes on any click but its own toggle (its items act, then it is closed).
   if (state.openMenu !== null && (target === null || target.dataset.menu === undefined)) {
@@ -4579,6 +4603,8 @@ function onClick(event) {
     queueAction(target.dataset.qact, target.dataset.key);
   } else if (target.dataset.qtoggle !== undefined) {
     queueToggle(target.dataset.qtoggle);
+  } else if (target.dataset.qforce !== undefined) {
+    queueForce(target.dataset.qforce);
   } else if (target.id === 'limUp' || target.id === 'limDown') {
     setLimit(target.id === 'limUp' ? 1 : -1);
   } else if (target.dataset.run !== undefined) {

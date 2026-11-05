@@ -106,9 +106,10 @@ export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'remove
 export type DashboardChecks = Pick<TaskChecks, 'start' | 'view' | 'summary'>;
 
 // The run queue (SF-071): its view for the tickets payload and the board's changes.
-// rule: the rule at a usage limit's reset (SF-072).
-export type DashboardQueue = Pick<RunQueue, 'view' | 'add' | 'remove' | 'move' | 'limit' | 'hold' | 'release' | 'rule'>;
-export const QUEUE_ACTIONS = ['add', 'remove', 'move', 'limit', 'hold', 'release', 'rule'] as const;
+// rule: the rule at a usage limit's reset (SF-072). force: the card's Start anyway (SF-086);
+// withTicket: Save writes under the queue's lock of the ticket (SF-086).
+export type DashboardQueue = Pick<RunQueue, 'view' | 'add' | 'remove' | 'move' | 'limit' | 'hold' | 'release' | 'rule' | 'force' | 'withTicket'>;
+export const QUEUE_ACTIONS = ['add', 'remove', 'move', 'limit', 'hold', 'release', 'rule', 'force'] as const;
 type QueueAction = (typeof QUEUE_ACTIONS)[number];
 
 // A dashboard without a start screen (in-process tests of the older endpoints).
@@ -210,6 +211,8 @@ const BODIES = {
   // The Rules menu (SF-072): the rule at a usage limit's reset; its values are the queue's own check
   // (invalid_rule).
   'queue-rule': { shape: '{"rule": string}', schema: z.strictObject({ rule: z.string() }) },
+  // Start anyway (SF-086): the queued ticket starts whatever its plan check says.
+  'queue-force': { shape: '{"workspace": string, "ticket": string}', schema: z.strictObject({ workspace: z.string(), ticket: z.string() }) },
 };
 type PostRoute = keyof typeof BODIES;
 
@@ -597,7 +600,8 @@ async function checkOf(checks: DashboardChecks, workspace: string, ticket: strin
 // The tickets without a live job, each with the ChatGPT conversation that plans it (the message
 // and the prefilled URL), the tickets it lands after with their states (SF-084), with the Task
 // checks its last check (SF-054), and its place in the run queue (SF-071: queue_position, 1-based or
-// null, and queue_error, the queue's failed start or null); job_lands_after: the same for the
+// null, and queue_error, the queue's failed start or null; SF-086: queue_reason, why its plan holds
+// it in the queue or null, and queue_force, whether Start anyway was given); job_lands_after: the same for the
 // tickets with a live job, for the job page's Waits for and the board's Needed by; queue: the run
 // queue's limit, running count, hold and next ticket (null without a queue).
 async function ticketsPayload(setup: DashboardSetup, checks: DashboardChecks | undefined, queue: DashboardQueue | undefined) {
@@ -606,10 +610,13 @@ async function ticketsPayload(setup: DashboardSetup, checks: DashboardChecks | u
   const tickets = [];
   for (const row of await setup.tickets()) {
     const failed = view?.errors.find(same(row));
+    const entry = view?.entries.find(same(row));
     tickets.push({
       ...(await ticketEntry(row, checks)),
-      queue_position: view?.entries.find(same(row))?.position ?? null,
+      queue_position: entry?.position ?? null,
       queue_error: failed === undefined ? null : { code: failed.code, message: failed.message },
+      queue_reason: entry?.plan_reason ?? null,
+      queue_force: entry?.force ?? false,
     });
   }
   return {
@@ -883,11 +890,21 @@ interface Post {
 // gate: whether the Codex gate is on (SF_GATE), shown in the job's pipeline; checks: the Task
 // checks (SF-054), none without (the check routes answer 404, the tickets have no check); queue:
 // the run queue (SF-071), none without (the queue routes answer 404, the tickets payload's queue is
-// null).
+// null); onWorkspacesChanged: called after a workspace was added or removed (SF-086: the automatic
+// checks read the registry again).
 export async function startDashboard(
   port: number, stateDir: string, jobs: JobStore, actions: DashboardActions, setup: DashboardSetup = NO_SETUP,
-  { gate: gateOn = true, checks, queue }: { gate?: boolean; checks?: DashboardChecks; queue?: DashboardQueue } = {},
+  { gate: gateOn = true, checks, queue, onWorkspacesChanged }: { gate?: boolean; checks?: DashboardChecks; queue?: DashboardQueue; onWorkspacesChanged?: () => void } = {},
 ): Promise<RunningDashboard> {
+  // The workspace change succeeded: the hook hears of it (a failing hook is logged).
+  const workspacesChanged = <T>(result: T): T => {
+    try {
+      onWorkspacesChanged?.();
+    } catch (error) {
+      console.error(error);
+    }
+    return result;
+  };
   const files = new Map<string, { body: Buffer; type: string }>();
   for (const [path, { file, type }] of Object.entries(STATIC_FILES)) {
     files.set(path, { body: await readFile(new URL(file, STATIC_DIR)), type });
@@ -1444,14 +1461,20 @@ export async function startDashboard(
   }
 
   // POST api/tickets/<ws>/<ticket>/task (SF-081): Save of the planned ticket page, through
-  // Setup.saveTask; the new version (and the check it made stale) reaches every page.
+  // Setup.saveTask; the new version (and the check it made stale) reaches every page. With the run
+  // queue, under its lock of the ticket (SF-086): never between its last look at the plan and the
+  // start.
   function taskPost([workspace, ticket]: [string, string]): Post {
     return {
       route: 'ticket-task',
       bodyLimit: MAX_TASK_BODY_BYTES,
       call: (data) => {
         const parsed = BODIES['ticket-task'].schema.safeParse(data);
-        return parsed.success ? () => setup.saveTask(workspace, ticket, parsed.data.content, parsed.data.sha256) : undefined;
+        if (!parsed.success) {
+          return undefined;
+        }
+        const save = (): ReturnType<DashboardSetup['saveTask']> => setup.saveTask(workspace, ticket, parsed.data.content, parsed.data.sha256);
+        return () => (queue === undefined ? save() : queue.withTicket(workspace, ticket, save));
       },
       refreshSetup: true,
     };
@@ -1502,14 +1525,14 @@ export async function startDashboard(
       if (name === undefined || !WORKSPACE_NAME_PATTERN.test(name)) {
         return undefined;
       }
-      return { route: 'workspace-remove', call: (data) => (BODIES['workspace-remove'].schema.safeParse(data).success ? () => setup.removeWorkspace(name) : undefined), refreshSetup: true };
+      return { route: 'workspace-remove', call: (data) => (BODIES['workspace-remove'].schema.safeParse(data).success ? () => setup.removeWorkspace(name).then(workspacesChanged) : undefined), refreshSetup: true };
     }
     if (target.route === 'workspace-add') {
       return {
         route: 'workspace-add',
         call: (data) => {
           const parsed = BODIES['workspace-add'].schema.safeParse(data);
-          return parsed.success ? () => setup.addWorkspace(parsed.data.name, parsed.data.path, parsed.data.handoff, parsed.data.color) : undefined;
+          return parsed.success ? () => setup.addWorkspace(parsed.data.name, parsed.data.path, parsed.data.handoff, parsed.data.color).then(workspacesChanged) : undefined;
         },
         refreshSetup: true,
       };
@@ -1534,6 +1557,7 @@ export async function startDashboard(
       hold: (data) => runQueue.hold(data.reason),
       release: () => runQueue.release(),
       rule: (data) => runQueue.rule(data.rule),
+      force: (data) => runQueue.force(data.workspace, data.ticket),
     };
     const route = `queue-${action}` as const;
     return {

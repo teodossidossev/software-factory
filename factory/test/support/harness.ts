@@ -128,7 +128,7 @@ export async function reviewLog(env: Env): Promise<Array<{ argv: string[]; promp
 }
 
 // What the fake Claude's probes did (the Task check, SF-054): each call, the hooks' decision and
-// the output the session saw.
+// the output the session saw; last, when the session had hooks, its StructuredOutput answer (SF-070).
 export async function probeLog(env: Env): Promise<Array<{ tool: string; input: Record<string, unknown>; decision: 'allow' | 'deny'; output: string; hooks: number }>> {
   return (await readFile(join(env.home, 'fake-probe.log'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
 }

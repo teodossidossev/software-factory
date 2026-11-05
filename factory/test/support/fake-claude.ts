@@ -15,7 +15,10 @@
 // init: each is first put to the SDK's PreToolUse hooks (registered at initialize) through the
 // hook_callback control request, as the real CLI does; a denied one gets an error result, an
 // allowed one runs here on the real files (without honouring any ignore file: the worst case). Each
-// probe, its decision and its output go to $HOME/fake-probe.log.
+// probe, its decision and its output go to $HOME/fake-probe.log. When hooks are registered, the
+// structured output is then given, as the real CLI gives it, by a StructuredOutput tool call put to
+// the hooks first (SF-070) and logged the same way; a denied one ends the run with the CLI's
+// error_max_structured_output_retries result, its error naming the hook's reason.
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -163,26 +166,37 @@ function runProbe(tool: string, input: Record<string, unknown>): string {
   }
 }
 
+// One tool call put to the hooks first, like the real CLI: the tool_use, each hook in turn until one
+// denies, the call's output (the denial's reason, or run(), when allowed), logged to fake-probe.log,
+// and its tool_result. Returns the reason of a denial, or undefined when every hook let it through.
+async function hookedCall(id: string, tool: string, input: Record<string, unknown>, run: () => string): Promise<string | undefined> {
+  out({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'tool_use', id, name: tool, input }] } });
+  let reason: string | undefined;
+  for (const callbackId of preToolUseHooks) {
+    const answer = await askHook(callbackId, tool, input, id);
+    const specific = answer.hookSpecificOutput as { permissionDecision?: string; permissionDecisionReason?: string } | undefined;
+    if (specific?.permissionDecision === 'deny') {
+      reason = specific.permissionDecisionReason ?? '';
+      break;
+    }
+  }
+  const output = reason ?? run();
+  appendFileSync(join(home, 'fake-probe.log'), `${JSON.stringify({ tool, input, decision: reason === undefined ? 'allow' : 'deny', output, hooks: preToolUseHooks.length })}\n`);
+  out({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, is_error: reason !== undefined, content: output }] } });
+  return reason;
+}
+
 // The probes of a review run, each through the hooks first.
 async function runProbes(probes: Array<{ tool: string; input: Record<string, unknown> }>): Promise<void> {
   for (const [index, probe] of probes.entries()) {
-    const id = `p${index}`;
-    out({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'tool_use', id, name: probe.tool, input: probe.input }] } });
-    let decision = 'allow';
-    let reason = '';
-    for (const callbackId of preToolUseHooks) {
-      const answer = await askHook(callbackId, probe.tool, probe.input, id);
-      const specific = answer.hookSpecificOutput as { permissionDecision?: string; permissionDecisionReason?: string } | undefined;
-      if (specific?.permissionDecision === 'deny') {
-        decision = 'deny';
-        reason = specific.permissionDecisionReason ?? '';
-        break;
-      }
-    }
-    const output = decision === 'deny' ? reason : runProbe(probe.tool, probe.input);
-    appendFileSync(join(home, 'fake-probe.log'), `${JSON.stringify({ tool: probe.tool, input: probe.input, decision, output, hooks: preToolUseHooks.length })}\n`);
-    out({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, is_error: decision === 'deny', content: output }] } });
+    await hookedCall(`p${index}`, probe.tool, probe.input, () => runProbe(probe.tool, probe.input));
   }
+}
+
+// The structured output as a StructuredOutput tool call, through the hooks first like a probe.
+// Returns the reason of a denial, or undefined when every hook let it through.
+function giveStructuredOutput(output: unknown): Promise<string | undefined> {
+  return hookedCall('so1', 'StructuredOutput', output as Record<string, unknown>, () => 'Structured output provided successfully');
 }
 
 function run(prompt: string): void {
@@ -268,6 +282,17 @@ async function runReview(): Promise<void> {
   await runProbes(turn.probes ?? []);
   out({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'text', text: 'Reviewed.' }] } });
   const subtype = turn.walk !== undefined ? 'error_during_execution' : (turn.subtype ?? 'success');
+  if (subtype === 'success' && turn.noOutput !== true && preToolUseHooks.length > 0) {
+    const reason = await giveStructuredOutput(turn.output ?? CLEAN);
+    if (reason !== undefined) {
+      out({
+        type: 'result', subtype: 'error_max_structured_output_retries', is_error: true, result: '', num_turns: 3, duration_ms: 2345, duration_api_ms: 2000,
+        total_cost_usd: turn.costTotal ?? 0.0456, usage: {}, modelUsage: {}, stop_reason: null, permission_denials: [],
+        errors: [`Failed to provide valid structured output after 5 attempts — last StructuredOutput error: PreToolUse:StructuredOutput hook error: ${reason}`],
+      });
+      return;
+    }
+  }
   out({
     type: 'result', subtype, is_error: subtype !== 'success', result: '', num_turns: 3, duration_ms: 2345, duration_api_ms: 2000,
     total_cost_usd: turn.costTotal ?? 0.0456, usage: {}, modelUsage: {}, stop_reason: null, permission_denials: [],

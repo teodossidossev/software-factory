@@ -151,7 +151,10 @@ document and the code. It only advises: Start is never refused for it.
     replaced by a small file saying so before the session starts, so a search from the root that
     follows links stays inside.
   - A PreToolUse hook of the factory (`guardHooks`, SDK `hooks`) sees every tool call before it
-    runs and denies any that is not `Read`, `Grep` or `Glob`; any path it names (`file_path`,
+    runs. It lets the SDK's `StructuredOutput` tool through unchecked (SF-070): the session gives
+    its answer (`outputFormat`) by calling it, and it carries that answer, not a file access; the
+    name is matched exactly, so no other tool passes as it. Any other tool but `Read`, `Grep` and
+    `Glob` is denied. Of these three, it denies any path it names (`file_path`,
     `path` or `notebook_path`, whichever is given, and the `Glob` pattern up to its first glob
     segment) that resolves (symlinks followed) outside the worktree or into a `.software-factory`
     folder in it; a value Claude Code would trim or expand (`~`, `~/...`, surrounding spaces),

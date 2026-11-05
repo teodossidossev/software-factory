@@ -2,9 +2,10 @@
 // and the repository only, and says whether an Implementer could build it without a design
 // decision of its own. It runs in a temporary detached worktree of the work checkout at the Task's
 // base (the code the Implementer starts from), which has no .software-factory folder, and a
-// PreToolUse hook refuses every Read, Grep or Glob that reaches outside that worktree. Its prompt holds the Task file and nothing of the Context owner's conversation, the
-// jobs or the ledger; its output is a paraphrase first, then findings, the files it expects to
-// change and a verdict. A check is stored by the sha256 of the Task file it read, under the state
+// PreToolUse hook refuses every Read, Grep or Glob that reaches outside that worktree and every other
+// tool but the SDK's StructuredOutput (SF-070). Its prompt holds the Task file and nothing of the
+// Context owner's conversation, the jobs or the ledger; its output is a paraphrase first, then
+// findings, the files it expects to change and a verdict. A check is stored by the sha256 of the Task file it read, under the state
 // directory, never in the work checkout. It only advises: nothing here starts, refuses or changes
 // a job.
 import { createHash } from 'node:crypto';
@@ -424,11 +425,19 @@ function toolTargets(tool: string, input: Record<string, unknown>): string[] | u
   return targets;
 }
 
-// Why a tool call of the check is refused, or undefined when every path it reads is inside root
-// (symlinks resolved) and outside a .software-factory folder there. root is the check's worktree,
-// a real path. Never throws: a call the guard fails to check is refused (Claude Code would take a
-// hook that throws as no decision and let the call through).
+// The SDK's tool through which the session gives its structured output (outputFormat): it carries
+// the answer, not a file access, so the guard lets it through unchecked, by this exact name only.
+const STRUCTURED_OUTPUT_TOOL = 'StructuredOutput';
+
+// Why a tool call of the check is refused, or undefined when it is the session's answer
+// (STRUCTURED_OUTPUT_TOOL) or every path it reads is inside root (symlinks resolved) and outside a
+// .software-factory folder there. root is the check's worktree, a real path. Never throws: a call
+// the guard fails to check is refused (Claude Code would take a hook that throws as no decision and
+// let the call through).
 export async function guardReason(root: string, tool: string, input: unknown): Promise<string | undefined> {
+  if (tool === STRUCTURED_OUTPUT_TOOL) {
+    return undefined;
+  }
   try {
     return await checkedReason(root, tool, input);
   } catch {

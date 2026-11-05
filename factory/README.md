@@ -5,7 +5,7 @@ client), runs the jobs and provides the `sf` command. How to work with it is in 
 vocabulary is in [../CONTEXT.md](../CONTEXT.md).
 
 The MCP endpoint serves only the planning tools (`guide`, `read_file`, `search`, `write_task`,
-`task_check`): the Context owner reads the repository, discusses the ticket with the user and
+`task_check`, and the run queue's `queue_list` and `queue_add`, section Run queue): the Context owner reads the repository, discusses the ticket with the user and
 writes the Task file with its `## Review brief`. Before Start, the Task check (section Task check)
 reads the Task file and the repository and says whether it is ready to build. The user starts the job, with the Start button of the ticket on the
 dashboard or with `sf start`. The Implementer runs as a headless Claude
@@ -28,7 +28,14 @@ bin/sf serve                      # foreground; Ctrl+C stops it; prints the dash
 bin/sf up [--no-open] [--no-tunnel]   # sf serve plus the tunnel (../scripts/sf-tunnel.sh run, output prefixed "tunnel | ") and the dashboard opened in the browser; Ctrl+C stops both; npm start at the repository root
 bin/sf dashboard [--open]         # the dashboard URL of the last sf serve start; --open opens it with xdg-open; works without sf serve
 bin/sf check-task <workspace> <ticket>  # the Task check (section Task check): paraphrase, findings by severity, verdict; stored by sha; works without sf serve
-bin/sf start <workspace> <ticket> # start the job in a worktree of its own (same as the dashboard's Start); needs sf serve
+bin/sf start <workspace> <ticket> # start the job in a worktree of its own (same as the dashboard's Start); a start by hand is never held by the run limit; needs sf serve
+bin/sf queue list                 # the run queue (section Run queue): the limit, the running count, held or not, the queued tickets in order with what each waits for, the next one, the starts that failed; needs sf serve
+bin/sf queue add <workspace> <ticket> [--at N]  # queue a planned ticket at position N (1-based; default the end); needs sf serve
+bin/sf queue remove <workspace> <ticket>        # take it out of the queue; needs sf serve
+bin/sf queue move <workspace> <ticket> <N>      # move a queued ticket to position N; needs sf serve
+bin/sf queue limit <N>            # run up to N jobs at once (1-20, every workspace); needs sf serve
+bin/sf queue hold [reason...]     # the queue starts nothing until release; needs sf serve
+bin/sf queue release              # needs sf serve
 bin/sf say <workspace> <ticket> <message...>   # a user message into the session; on a handed-over job it is Ask for changes (section Hand-over to your checkout); needs sf serve
 bin/sf review <workspace> <ticket>             # retry a failed Claude review (needs_human with review_failed); needs sf serve
 bin/sf accept <workspace> <ticket>             # accept a clean Claude review over a stopped gate (gate_rounds, gate_budget, gate_failed) or a ledger stop (review_churn, review_disputed) and prepare the MR, or skip the simplification pass's suggestions (simplify_offered); needs sf serve
@@ -98,7 +105,7 @@ prints the message below the table). Both work without `sf serve`; they read the
 | `SF_HANDBOOK` | `factory/HANDBOOK.md` | Handbook served as instructions (its `## Quick start` section) and by `guide`. |
 | `SF_STATE_DIR` | `${XDG_STATE_HOME:-~/.local/state}/software-factory` | Job state and the `sf.sock` socket. |
 | `SF_WORKTREE_ROOT` | `${SF_STATE_DIR}/worktrees` | Where every job's worktree is created: `<root>/<workspace>/<ticket>`; absolute. |
-| `SF_MAX_JOBS` | `3` | Live jobs per workspace; a further `start` is `job_limit`. |
+| `SF_MAX_JOBS` | `3` | The default of the run queue's limit `max_running` (section Run queue), within 1-20, while `queue.json` does not exist yet; `sf queue limit` and the board's stepper change the limit from then on. |
 | `SF_SENSITIVE_PATHS` | empty | Comma-separated globs added to the sensitive paths of `src/rules.ts`. |
 | `SF_CHECK_AFTER_START_MIN` | `15` | `check_after_minutes` in the result of a start and of the job's status during the first iteration. |
 | `SF_CHECK_AFTER_FIX_MIN` | `5` | `check_after_minutes` in the job's status during later iterations. |
@@ -135,7 +142,7 @@ The socket path `${SF_STATE_DIR}/sf.sock` must fit a Unix socket address (107 by
 a longer one is refused at start with `socket_path_too_long`.
 
 The execution variables are read once when `sf serve` starts. `sf status` and `sf watch` read
-`SF_STATE_DIR` themselves; `sf start`, `sf say`, `sf review`, `sf accept`, `sf simplify`, `sf settle`, `sf approve`, `sf mr`, `sf abort` and `sf reset` use it to find the socket; `sf notify-test` reads the notification variables itself.
+`SF_STATE_DIR` themselves; `sf start`, `sf queue`, `sf say`, `sf review`, `sf accept`, `sf simplify`, `sf settle`, `sf approve`, `sf mr`, `sf abort` and `sf reset` use it to find the socket; `sf notify-test` reads the notification variables itself.
 
 ## Task check
 
@@ -214,11 +221,9 @@ document and the code. It only advises: Start is never refused for it.
 
 ## Jobs
 
-One job per ticket; several jobs of a workspace at a time, up to `SF_MAX_JOBS` (default 3) in a
-live state (`starting`, `working`, `awaiting_review`, `needs_human`, `ready_for_human_review`,
-`preparing_mr`); `paused` (SF-067: nothing of the job runs), `handed_over` (SF-073: the job's changes
-wait in the user's checkout), `pushed`, `aborted` and `failed` free a slot. A further `start` is refused with
-`job_limit`, naming the live tickets. Every job works in a **worktree** of its own (SF-019,
+One job per ticket; several jobs of a workspace at a time. A start by hand (the board's Start,
+`sf start`) always goes; the run queue (SF-071, section Run queue) starts the queued tickets by
+itself while fewer than its limit `max_running` of jobs run in every workspace together. Every job works in a **worktree** of its own (SF-019,
 ADR-0004): `${SF_WORKTREE_ROOT:-<state dir>/worktrees}/<workspace>/<ticket>`, created from the
 workspace's checkout; the checkout itself (the user's IDE checkout) is never written by the
 factory beyond its Git refs (branches) and worktree registrations, except by the hand-over to it
@@ -762,7 +767,8 @@ SF-067. To change course without abort, reset and a branch deleted by hand.
   a session runs `/implement` again). A paused review round: the job is `awaiting_review` again and
   that round (the Claude review, the gate or the simplification pass) runs again on the same
   iteration; a message is refused then (`invalid_content`: resume, then `sf say`). A paused job
-  needs a free slot of `SF_MAX_JOBS` (`job_limit`) and its worktree (`worktree_missing`).
+  needs its worktree (`worktree_missing`); Resume is a start by hand, never held by the run queue's
+  limit (SF-071), and a paused job does not count as running.
 - **The Task file while paused.** The factory keeps the Task file as the Implementer was last given
   it, `task.md` in the job directory, and the sha256 of the version the job works from as
   `task_sha256` in `job.json`, both written at Start and at every later copy into the worktree (a Fix
@@ -781,8 +787,7 @@ SF-067. To change course without abort, reset and a branch deleted by hand.
   away and a *Keep the files* checkbox) takes a `paused`, `aborted`, `failed` or `needs_human` job.
   It starts the ticket again from its current Task file (its base and title: the branch name may
   change) as a new job on a fresh worktree and branch from the Task's base, after the checks of
-  `start` (`task_draft`, `job_limit` with the ticket's own job aside, a new branch name that exists:
-  `branch_exists`). The old job is retired as `sf reset` retires it (its runner stopped, its worktree
+  `start` (`task_draft`, a new branch name that exists: `branch_exists`; no run limit, SF-071). The old job is retired as `sf reset` retires it (its runner stopped, its worktree
   removed, its directory archived as `<ticket>.<timestamp>`; `archived` in the result). Its branch is
   deleted only when it has no commit beyond the job's base commit and was never pushed (checked
   before anything changes, and again in the Git lock that deletes it, once the runner has stopped): no merge
@@ -1077,7 +1082,7 @@ workspace whose checkout must not be switched to every job's branch, such as the
 where a coordinating session opens and merges the merge requests with `sf mr create` and
 `sf mr merge`.
 
-**The state `handed_over`** holds no `SF_MAX_JOBS` slot (nothing of the job runs) but is not
+**The state `handed_over`** does not count as running for the run queue (nothing of the job runs) but is not
 terminal: no new job of the ticket starts. It goes to `working` (Ask for changes),
 `ready_for_human_review` (Take it back), `pushed` (Approve, `sf mr create`, the user's push found,
 `sf handed-done`) and `aborted` (`sf abort` without `--discard`: the config is restored, the
@@ -1088,7 +1093,7 @@ first."); `mark_clean`, `sf pause` and `sf resume` with `invalid_state`. Every w
 while they still hold the factory's values. The prefilled message file goes when the job is pushed.
 
 **Ask for changes** (`sf say` on a handed-over job; the board's Send button reads Ask for changes):
-refused with `job_limit` without a free slot, and with `checkout_moved` ("Your checkout is not on
+the user's own, so never held by the run queue's limit (SF-071); refused with `checkout_moved` ("Your checkout is not on
 <branch>; switch back to it, or use Take it back.") when the checkout is on another branch; nothing
 changes then. In the job's runner, under the Git lock, before the turn: a snapshot of the checkout
 (a temporary index: `HEAD`, every change, every untracked file that is not ignored, without the
@@ -1102,7 +1107,7 @@ branch moves to the snapshot, the worktree is added on it and reset to B, so the
 commits are uncommitted changes there; the config is restored, `prepared_commit` dropped, and the
 Implementer gets the message. The next ready hands over again with the same rules.
 
-**Take it back** (`sf takeback`): refused with `job_limit` without a free slot, and with
+**Take it back** (`sf takeback`, to `ready_for_human_review`, which does not count as running): refused with
 `takeback_changed` ("Your checkout changed since the hand-over: <files>. Use Ask for changes to
 send your edits to the job, or undo them.") unless the checkout is on the branch at B and its
 snapshot is S, and with `handover_refused` when an ignored file, one of the user's own untracked
@@ -1217,6 +1222,62 @@ Every stored time is ISO 8601 UTC with `Z`. What the factory shows is local time
 `sf watch` and `SINCE` in `sf status` in the zone the `sf` process runs in (`TZ`), the dashboard
 in the browser's (`YYYY-MM-DD HH:MM:SS`, the stored UTC value on hover; `HH:MM` in the Stream).
 
+## Run queue
+
+SF-071. The planned tickets of every workspace form one **run queue**: an order of what runs next,
+a limit `max_running` of the jobs that run at once (1-20, every workspace together; default
+`SF_MAX_JOBS`, 3), and `sf serve` starting the next queued ticket by itself when a slot is free.
+It lives in `<state dir>/queue.json` (written atomically): `{"version": 1, "max_running": N,
+"held": false, "hold_reason": null, "entries": [{workspace, ticket, queued_at}], "errors":
+[{workspace, ticket, code, message, at}]}`. A missing file is an empty queue; an invalid one stops
+`sf serve` at its start (`queue_invalid`), as an invalid registry does.
+
+- **Running** is `starting`, `working`, `awaiting_review` or `preparing_mr` (`RUNNING_STATES` in
+  `src/jobs.ts`), whoever started the job. A paused job and the jobs that wait for the user
+  (`needs_human`, `ready_for_human_review`, `handed_over`) do not count.
+- **The limit gates only the queue's own starts.** A start by hand (the board's Start, `sf start`),
+  a restart, a resume, an Ask for changes and a take back always go; their jobs count when the
+  queue decides whether a slot is free. The user's answer to a job that waits (`sf say`, a Fix,
+  `sf settle`, `sf accept`) is not a start either and may take the count above the limit for a
+  while; the queue then starts nothing until it is below again. Lowering the limit stops no job.
+- **The scheduler** (`RunQueue` in `src/queue.ts`) runs a pass after the recovery at `sf serve`'s
+  start, on every job state change (`sf serve`'s own and the ones the runners write to disk, as a
+  job reaching `ready_for_human_review`), on every queue, limit or hold change, and every 5 minutes
+  while a slot is free and a queued ticket waits for a dependency. Passes and changes run one at a
+  time. A pass, unless the queue is held: the entries whose Task file is gone (deleted or archived)
+  or whose ticket has a live job (started by hand) leave the queue without an error; then, while
+  fewer than `max_running` jobs run, the first entry whose `lands_after` tickets are all **merged**
+  leaves `queue.json` (written before the start) and starts (`Execution.start` with `queued`,
+  which checks the count again under the Execution's lock: `job_limit`, "N jobs run (SF-1 working,
+  …); the limit is M."). The ticket leaves the queue before its start and a second job of a ticket
+  is refused (`job_exists`), so the queue never starts a ticket twice, across concurrent events and
+  restarts alike; `sf serve` stopping between the two leaves the ticket out of the queue without a
+  job. A start refused with `job_limit` (a start by hand took the slot) puts the entry back where it
+  was and ends the pass; any other refusal (`task_draft`, `invalid_content`, `branch_exists`, …)
+  leaves the ticket out of the queue with `{code, message, at}` in `errors`, shown on its card as
+  "Start failed: <message>"; adding it again clears it.
+- **`lands_after`** (SF-084's Task file key, `<ticket>` or `<workspace>/<ticket>`): an entry starts
+  only when every ticket it names is `merged` by SF-084's rule (section Dashboard, Dependencies);
+  `pushed`, `running`, `planned` and `missing` keep it in place and the next entry is tried. That
+  rule reads `origin/<base>` without fetching, so before it decides that an entry still waits (a
+  slot free), the queue fetches the dependency's base (`Execution.fetchBase`: `git fetch
+  --no-recurse-submodules origin <base>` in the workspace's checkout under its Git lock, once per
+  workspace and base in a pass) and asks again past the 30 s cache (`Setup.dependencyStates(refs,
+  {fresh: true})`); a failed fetch leaves the state as it was.
+- **Changes**: `sf queue add <ws> <ticket> [--at N]` (refused: `task_not_found`, `task_draft` for a
+  skeleton, `job_exists` for a ticket with a live job, `already_queued`; N beyond the end is the
+  end), `sf queue remove` and `sf queue move <ws> <ticket> <N>` (`not_queued` for a ticket not
+  queued), `sf queue limit <N>` (`invalid_limit` outside 1-20), `sf queue hold [reason…]` and
+  `sf queue release` (the hold and its reason survive a restart); `sf queue list` prints the limit,
+  the running count, the hold, the next ticket to start, the entries with what each waits for, and
+  the starts that failed. They go to `sf serve` over its socket, as `sf start` does. The board
+  posts the same changes (`api/queue/*`, section Dashboard) and the Context owner has `queue_list`
+  and `queue_add` (below); neither removes nor moves.
+- **MCP tools** for the Context owner: `queue_list({})` returns `{max_running, running, held,
+  entries: [{workspace, ticket, position, queued_at, waits_for}]}` (`waits_for`: the `lands_after`
+  tickets not merged yet, `[{workspace, ticket, state}]`); `queue_add({workspace, ticket, at?})`
+  returns `{position}`, with the refusals of `sf queue add`.
+
 ## Dashboard
 
 A page served by `sf serve` on a second loopback listener,
@@ -1243,11 +1304,15 @@ the same markup and keys). The top bar has the title, "N wait for you · M runni
 is `(N) Software Factory` while N > 0), the connection as a tag while the stream is not connected,
 the workspace filter (*All workspaces*, then one chip per workspace with its colour dot and name:
 a click keeps that workspace's cards and counts, a second click shows all again), *Archived* (with its count),
-*Workspaces* and *New ticket*. The queue controls ("Run up to N jobs at once", the queue status) and
-the Rules menu are there but hidden until SF-071 and SF-072 bring their routes. Five columns, each
-heading with its count: **Queue** (the Task files of every usable workspace whose ticket has no job,
-or whose last job is `failed` or `aborted`; until SF-071 it is today's Planned list, without an
-order), **Implementing** (`starting`, `working`), **Reviewing** (`awaiting_review`, that is the
+*Workspaces* and *New ticket*, and the run queue's controls (SF-071, section Run queue): "Run up
+to [− N +] jobs at once" (the stepper posts `api/queue/limit`, off at 1 and 20 and while a change
+is out) and the queue's status, "2 running · 1 slot free · next: SF-069" ("nothing ready" when no
+entry can start) or, held, "Queue held: <reason> · 2 running" in the warning colour. The Rules menu
+stays hidden until SF-072. Five columns, each heading with its count: **Queue** (the Task files of
+every usable workspace whose ticket has no job, or whose last job is `failed` or `aborted`: first
+the queued ones in the queue's order, each with its position, or "The queue is empty: add a ticket
+below.", then a "Not queued" divider and the other planned tickets; the heading counts the queued
+ones), **Implementing** (`starting`, `working`), **Reviewing** (`awaiting_review`, that is the
 Claude review or the Codex gate, and `preparing_mr`), **Your turn** (`needs_human`,
 `ready_for_human_review`, `handed_over`, `paused`) and **Done** (`pushed`, and `aborted` or `failed` when the
 ticket has no Queue card; the most recent first; the last eight, then *Show all N*, which shows the
@@ -1291,16 +1356,21 @@ failed`, a button that opens that job's page), the Task check's chip at the righ
 `check: ready`, `not ready: 1 blocker, 2 major`, `check failed`, each with ` · stale` when the Task
 file changed since, `not checked`, or `draft` for a skeleton; a click opens the planned ticket with
 the check's findings; on a card too narrow for it, it moves to its own line under the title) and
-the title, then **Start** (an outline button, as every Queue button: the only solid ones on the
-board are Your turn's) or "waiting for the plan" for a skeleton, **Task**, and **⋯**, a menu with
+the title, "Start failed: <message>" when the queue's start of it failed (SF-071), then **Start** (an outline button, as every Queue button: the only solid ones on the
+board are Your turn's) or "waiting for the plan" for a skeleton, **Add to queue** or **Remove from
+queue** (SF-071; not on a skeleton), **Task**, and **⋯**, a menu with
 **Check** (section Task check), Archive and Delete… (Escape or a click elsewhere closes it). A
 click on the card (or on **Task**, or on the check's chip) opens the planned ticket's page (below).
+A queued card is dragged to its new place (a drop on another queued card puts it before that one)
+or moved one place with Alt+Up and Alt+Down while focused (the hint "⠿ drag · Alt+↑↓"); each posts
+`api/queue/move` and the board shows the queue as the server sends it back.
 
 **Dependencies** (SF-084). A Task file's `lands_after: [<ticket>, <workspace>/<ticket>]` names
 the tickets it waits for. While one of them is not merged, the Queue card has a line **Waits for**
 with a chip per ticket: its key and its state, ✓ merged (the success colour), ⧗ pushed, running or
 planned (the warning colour), ✗ missing (the error colour), the state in words as the chip's
-title; Start's title then says "Waits for <keys>" (it still starts: SF-071 brings the order). A
+title; Start's title then says "Waits for <keys>" (Start by hand still starts it; the run queue
+starts it only once all are merged). A
 card whose dependencies are all merged shows nothing more. The card of a ticket others wait for
 (in any column) has **Needed by** with their keys. Hovering or focusing a card outlines its
 dependencies and dependents in the accent colour and dims the other cards; leaving the card, or
@@ -1328,7 +1398,7 @@ workspace's `color`; the page only reads it. Start asks first,
 naming the workspace, the ticket and the base branch (and the Task check's note: not checked,
 stale, check failed or not ready: N blocker, M major), then sends `POST
 api/tickets/<ws>/<ticket>/start` once: `Execution.start`, the same call as `sf start`, with its
-refusals (`task_draft`, `job_limit`, `job_exists`, `branch_exists`, `checkout_dirty`, ...) shown
+refusals (`task_draft`, `job_exists`, `branch_exists`, `checkout_dirty`, ...; never the run limit) shown
 as they come; the job's card appears under Implementing from the stream. An answer that does not
 settle the outcome (no answer, a body cut after the headers, a 2xx without a result, a 5xx without
 a factory code) is an unknown outcome: nothing is re-sent, and Start stays off for that ticket
@@ -1416,14 +1486,14 @@ on a job's page `s`, `c` and `m` switch to the Stream, Changes and Merge request
 `j` and `k` select an entry, `G` the last one and Enter opens or closes the selected one;
 Ctrl+Enter in the message box sends it; Escape closes an open confirmation, then goes back one
 level (Changes or Merge request to the job's Stream, the Stream or a planned ticket to the board)
-and the focus returns to the card that opened it. Alt+Up and Alt+Down move a queued card once
-SF-071 brings the queue.
+and the focus returns to the card that opened it. Alt+Up and Alt+Down move the focused queued card
+one place (SF-071).
 
 **The planned ticket page** (SF-081). A planned ticket opens as a full page with everything about
 its planning, read from `GET api/tickets/<ws>/<ticket>/page` (the tickets row with its
 conversation, `task: {text, sha256}`, `plan: {starts_from, files: [{path, sensitive}], scoped,
 waits_for: [{ticket, state, merged}]}`, `check` (the Task check's view, `null` without the Task
-checks), `history: [{ts, kind, by, text}]` and `queue: null` until SF-071; a ticket that is not in
+checks), `history: [{ts, kind, by, text}]` and `queue: null` (SF-071 leaves the queue out of this page); a ticket that is not in
 the tickets list is an empty 404, and the page goes back to the board). The header has *← Board*
 (Escape), the key, the workspace, the title and `draft` for a skeleton; *Open the ChatGPT
 conversation ↗* (the server's link only), **Check the plan** (*Check again* after a check,
@@ -1665,7 +1735,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, fixes, gate_fixes, gate_tokens, updated_at, created_at, error, and for the board (SF-046) `title` (of the Task file, or `null`), `cost_usd` (the estimate of the iterations and their Claude reviews, or `null`), `review` and `gate` (the last iteration's verdicts: `clean`, `fix`, `failed` or `null`) and `review_ended_at` (the end of that clean or fix Claude review, or `null`); `mr` (the merge request on the Git host or `null`) and `mr_host` (`{host, reason}`: `github`, `gitlab` or `null`, and why the merge request actions are off or `null`); for the v3 card (SF-077) `now` (`{who, what, ts}` of a running job: the Implementer's last tool call or the first line of its last text, read from at most the last 256 KB of `events.jsonl`; the Claude review or the Codex gate reviewing iteration N; the MR writer; else `null`), `tool_calls` (the Implementer's tool calls in the job, counted incrementally: only the bytes added since the last count are read) and `stop` (for `needs_human`, `{items, saves_lines}`: the suggestions of the last simplification pass and the lines they save, the ledger entries to settle (`escalated`, `review_disputed`), the open ones (`review_churn`) or the last gate's items (`gate_rounds`, `gate_budget`), none for other codes; `null` otherwise) |
 | `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override, simplify}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied} or {ts, event: "merge_request", action, number, url, state}], mr_title, ledger}`; `mr_title` is the MR text's first line or `null`; `ledger` is `ledger.json` as written (`[]` before the first Fix section, SF-052); `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null`, `simplify` its `simplify.json` (SF-055) or `null` |
 | `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem, handoff, color}]}`: the registry, the checkout's path, its non-terminal jobs, why the checkout cannot be used now or `null`, its own hand-over setting or `null`, and its colour on the board (SF-084: its `color`, else the one its name picks) |
-| `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, lands_after, conversation: {message, url}}], archived: [{workspace, ticket, title}], job_lands_after: [{workspace, ticket, lands_after}]}`: the Task files without a live job; `lands_after` the tickets its Task file waits for, `[{workspace, ticket, state}]` with `state` `merged`, `pushed`, `running`, `planned` or `missing` (SF-084, section Dashboard), and `job_lands_after` the same for the Task files with a live job; `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
+| `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, lands_after, conversation: {message, url}, queue_position, queue_error}], archived: [{workspace, ticket, title}], job_lands_after: [{workspace, ticket, lands_after}], queue: {max_running, running, held, hold_reason, next}}`: the Task files without a live job; `queue_position` its 1-based place in the run queue or `null`, `queue_error` the queue's failed start `{code, message}` or `null`, `queue` the run queue (`next`: `{workspace, ticket}` of the first entry that waits for nothing, or `null`; the whole `queue` is `null` without a run queue) (SF-071, section Run queue); `lands_after` the tickets its Task file waits for, `[{workspace, ticket, state}]` with `state` `merged`, `pushed`, `running`, `planned` or `missing` (SF-084, section Dashboard), and `job_lands_after` the same for the Task files with a live job; `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/patch` | the Patch, `text/x-diff` |
 | `api/jobs/<ws>/<ticket>/mr` | the MR text, `text/markdown`; 404 until there is one |
@@ -1689,14 +1759,19 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `POST api/jobs/<ws>/<ticket>/mr-create` | `{}` | `Execution.createMergeRequest(ws, ticket)` (`sf mr create`, SF-048): result `{state, branch, title?, link?, mr?: {host, number, url, state, reused}, error?}`; from `ready_for_human_review` it waits for the job's runner like approve; `409` for `invalid_state`, `runner_active`, `mr_token_missing`, `mr_host_unsupported`, `mr_text_missing`; `502` for `mr_auth_failed`, `mr_host_error`, `mr_host_unreachable` |
 | `POST api/jobs/<ws>/<ticket>/mr-save` | `{"title": string, "body": string, "branch"?: string, "base"?: string}` | `Execution.saveMr(ws, ticket, input)` (SF-080): the MR text saved, the prepared commit's message rewritten, the branch renamed and the base changed when given and different; result `{state, branch, base, edited, prepared_commit}`; `400 mr_text_invalid`, `409` for `invalid_state`, `runner_active`, `branch_changed`, `branch_locked`, `base_unrelated`, `mr_text_missing`; its body may be up to 6 × 64 KiB + 1 KiB (an MR text of 64 KiB, escaped); the pages that show the job get its detail |
 | `POST api/jobs/<ws>/<ticket>/mr-reset` | `{}` | `Execution.resetMr(ws, ticket)` (SF-080): the factory's text back and the commit message with it; result as `mr-save`; `409 invalid_state` "The MR text is already the factory's." |
-| `POST api/jobs/<ws>/<ticket>/handover`, `.../takeback`, `.../handed-done` | `{}` | `Execution.handover`, `takeback`, `handedDone` (`sf handover`, `sf takeback`, `sf handed-done`, SF-073); `409` for `invalid_state`, `runner_active`, `job_limit` and the hand-over's codes (section Hand-over to your checkout). `GET api/jobs/<ws>/<ticket>` of a `handed_over` job also starts `Execution.checkHandedOver` (at most once a minute), whose push reaches the page through the job's events |
+| `POST api/jobs/<ws>/<ticket>/handover`, `.../takeback`, `.../handed-done` | `{}` | `Execution.handover`, `takeback`, `handedDone` (`sf handover`, `sf takeback`, `sf handed-done`, SF-073); `409` for `invalid_state`, `runner_active` and the hand-over's codes (section Hand-over to your checkout). `GET api/jobs/<ws>/<ticket>` of a `handed_over` job also starts `Execution.checkHandedOver` (at most once a minute), whose push reaches the page through the job's events |
 | `POST api/jobs/<ws>/<ticket>/mr-merge` | `{}` | `Execution.mergeMergeRequest(ws, ticket)` (`sf mr merge`): result `{state, branch, mr}`; `409 mr_not_mergeable` with the host's reason, `409 mr_not_open`, and the codes above |
 | `POST api/jobs/<ws>/<ticket>/mr-status` | `{}` | `Execution.mergeRequestStatus(ws, ticket)` (`sf mr status`): result `{state, branch, mr, status: {number, url, state, draft, mergeable, reason?, checks?, merge_commit?}}`; every page gets the jobs again, and the pages that show the job its detail (a merge request merged or closed on the host shows so at once) |
 | `POST api/workspaces` | `{"name": string, "path": string, "handoff"?: "checkout" \| "off", "color"?: <palette name>}` | `Setup.addWorkspace`: the rules of `sf workspace add`; `color` one of `blue`, `teal`, `green`, `olive`, `orange`, `red`, `purple`, `grey` (SF-084), anything else `400 invalid_body`; result the workspace row |
 | `POST api/workspaces/<name>/remove` | `{}` | `Setup.removeWorkspace`; `409 workspace_busy` while the workspace has a live job; result `{removed}` |
 | `POST api/tickets` | `{"workspace", "ticket", "title", "request"}` | `Setup.createTicket`: the ticket skeleton through the Task file writer, the request kept for the conversation; result `{workspace, ticket, path, base}` |
-| `POST api/tickets/<ws>/<ticket>/start` | `{}` | `Execution.start(ws, ticket)` (`sf start`, SF-040, SF-046): the job's record, branch and worktree, then iteration 1; result `{branch, state, check_after_minutes, worktree}`; refusals as they come (`409 task_draft` for a skeleton, `409 job_exists`, `409 job_limit`, `409 branch_exists`, `404 task_not_found`, ...); every page gets the jobs, the workspaces and the tickets again |
+| `POST api/tickets/<ws>/<ticket>/start` | `{}` | `Execution.start(ws, ticket)` (`sf start`, SF-040, SF-046): the job's record, branch and worktree, then iteration 1; result `{branch, state, check_after_minutes, worktree}`; refusals as they come (`409 task_draft` for a skeleton, `409 job_exists`, `409 branch_exists`, `404 task_not_found`, ...; a start by hand is never held by the run limit); every page gets the jobs, the workspaces and the tickets again |
 | `POST api/tickets/<ws>/<ticket>/archive`, `.../restore`, `.../delete` | `{}` | `Setup.archiveTicket`, `restoreTicket`, `deleteTicket` (SF-027) |
+| `POST api/queue/add` | `{"workspace": string, "ticket": string, "at"?: integer >= 1}` | `RunQueue.add` (`sf queue add`, SF-071): result `{position}`; `404 task_not_found`, `409 task_draft`, `409 job_exists`, `409 already_queued` |
+| `POST api/queue/remove` | `{"workspace": string, "ticket": string}` | `RunQueue.remove` (`sf queue remove`); `409 not_queued` |
+| `POST api/queue/move` | `{"workspace": string, "ticket": string, "to": integer >= 1}` | `RunQueue.move` (`sf queue move`): result `{position}`; `409 not_queued` |
+| `POST api/queue/limit` | `{"max_running": number}` | `RunQueue.limit` (`sf queue limit`): result `{max_running}`; `400 invalid_limit` outside 1-20 or not whole |
+| `POST api/queue/hold`, `.../release` | `{"reason"?: string}`, `{}` | `RunQueue.hold`, `release` (`sf queue hold`, `release`) |
 
 The actions go to the same `Execution` as the socket commands, under its lock and guards; there
 is no second state machine and no other mutation endpoint. The setup
@@ -1722,11 +1797,12 @@ failed to discard (`result.error.code` `discard_failed`; the page says the disca
 and never that the branch or the files were removed) are `200` too; the page reads `result`.
 A `FactoryError` is `{"ok": false, "error": {"code", "message"}}` with its code and message kept,
 under `409` for `invalid_state`, `turn_running`, `rebase_in_progress`, `review_off`, `runner_active`, `job_exists`, `job_active`,
-`job_limit`, `task_draft`, `checkout_dirty`, `branch_exists`, `branch_changed`, `branch_missing`,
+`job_limit` (the run queue's own start, SF-071), `task_draft`, `checkout_dirty`, `branch_exists`, `branch_changed`, `branch_missing`,
 `worktree_exists`, `worktree_missing`, `sensitive_unacknowledged`, `ticket_exists`,
 `workspace_exists`, `workspace_busy`, `branch_locked` and `base_unrelated` (SF-080),
+`already_queued` and `not_queued` (SF-071),
 `404` for `job_not_found`, `workspace_not_found` and `task_not_found`, `400` for `invalid_content`, `invalid_ticket`, `invalid_name`,
-`workspace_invalid` and `mr_text_invalid` (SF-080), and `500` for any other code (a Git failure before the preparation, for
+`workspace_invalid`, `mr_text_invalid` (SF-080), `invalid_limit` and `invalid_position` (SF-071), and `500` for any other code (a Git failure before the preparation, for
 example; `runner_failed` and `runner_timeout` of a request the job's runner answers: say,
 review, accept). Any other failure is `500`
 with `internal_error` and a fixed message; the cause is logged, never the body or the token.
@@ -1885,14 +1961,18 @@ end), in a browser:
    Waits for with its chip; hovering it outlines that ticket's card and dims the rest; its chip
    scrolls to that card. Narrow the window: no Queue card overlaps the next column, keys do not
    wrap. With more than eight finished
-   jobs Done shows eight and *Show all N*, which expands the column in place. The queue controls
-   and the Rules menu are not shown.
+   jobs Done shows eight and *Show all N*, which expands the column in place. The run queue's
+   controls are shown ("Run up to N jobs at once" and its status); the Rules menu is not.
 2. Start: on a Queue card with a written Task file click Start: the dialog names the workspace,
    the ticket and the base branch; Cancel sends nothing (`sf status` unchanged). Confirm: the toast
    at the top says the job started and goes after 6 s, and the card appears under Implementing,
    then moves to Reviewing and Your turn as the job goes on, without a reload. A skeleton shows
-   "waiting for the plan" and no Start; Start on a ticket whose workspace already runs
-   `SF_MAX_JOBS` jobs shows `job_limit` in the toast, which stays until × or Escape.
+   "waiting for the plan" and no Start; a refused Start (a branch that exists: `branch_exists`)
+   shows the code and message in the toast, which stays until × or Escape. Run queue (SF-071):
+   set the limit to 1 with −; *Add to queue* on two written tickets: the first starts by itself, the
+   second waits ("1 running · 0 slots free"); drag the second above another queued card, or Alt+Up
+   on it: its position changes after the server's answer; once the first job is ready for review the
+   second starts by itself.
 3. Planned ticket page: click a Queue card: the page opens full width, the URL ends in `/ticket`;
    compare it with the prototype's planned ticket (`prototype-full.html`; its queue and images
    parts are not here), in light and dark. Preview shows the Task body as Markdown without the

@@ -27,6 +27,7 @@ import { Changes } from './changes.js';
 import { conversationUrl, MAX_CONVERSATION_URL, ticketConversation } from './conversation.js';
 import { FactoryError } from './errors.js';
 import type { Execution } from './execution.js';
+import type { RunQueue } from './queue.js';
 import { lineEntries, type StreamEntry, streamContext } from './job-stream.js';
 import { MAX_MR_TEXT_BYTES } from './mr.js';
 import type { Job, JobState, JobStore } from './jobs.js';
@@ -100,6 +101,11 @@ export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'remove
 
 // The Task checks (SF-054): start one, a ticket's view and its board summary.
 export type DashboardChecks = Pick<TaskChecks, 'start' | 'view' | 'summary'>;
+
+// The run queue (SF-071): its view for the tickets payload and the board's changes.
+export type DashboardQueue = Pick<RunQueue, 'view' | 'add' | 'remove' | 'move' | 'limit' | 'hold' | 'release'>;
+export const QUEUE_ACTIONS = ['add', 'remove', 'move', 'limit', 'hold', 'release'] as const;
+type QueueAction = (typeof QUEUE_ACTIONS)[number];
 
 // A dashboard without a start screen (in-process tests of the older endpoints).
 const NO_SETUP: DashboardSetup = {
@@ -176,6 +182,14 @@ const BODIES = {
   // Save of the planned ticket page (SF-081): the whole Task file and the sha256 of the version read.
   'ticket-task': { shape: '{"content": string, "sha256": string}', schema: z.strictObject({ content: z.string(), sha256: z.string() }) },
   'ticket-new': { shape: '{"workspace": string, "ticket": string, "title": string, "request": string}', schema: z.strictObject({ workspace: z.string(), ticket: z.string(), title: z.string(), request: z.string() }) },
+  // The run queue (SF-071): positions are 1-based; the limit's range is the queue's own check
+  // (invalid_limit).
+  'queue-add': { shape: '{"workspace": string, "ticket": string, "at"?: integer >= 1}', schema: z.strictObject({ workspace: z.string(), ticket: z.string(), at: z.number().int().min(1).optional() }) },
+  'queue-remove': { shape: '{"workspace": string, "ticket": string}', schema: z.strictObject({ workspace: z.string(), ticket: z.string() }) },
+  'queue-move': { shape: '{"workspace": string, "ticket": string, "to": integer >= 1}', schema: z.strictObject({ workspace: z.string(), ticket: z.string(), to: z.number().int().min(1) }) },
+  'queue-limit': { shape: '{"max_running": number}', schema: z.strictObject({ max_running: z.number() }) },
+  'queue-hold': { shape: '{"reason"?: string}', schema: z.strictObject({ reason: z.string().optional() }) },
+  'queue-release': { shape: '{}', schema: z.strictObject({}) },
 };
 type PostRoute = keyof typeof BODIES;
 
@@ -206,6 +220,8 @@ const ERROR_STATUS: Record<string, number> = {
   mr_text_invalid: 400, branch_locked: 409, base_unrelated: 409,
   // origin did not say where a handed-over branch is (SF-073).
   push_check_failed: 502,
+  // The run queue (SF-071).
+  already_queued: 409, not_queued: 409, invalid_limit: 400, invalid_position: 400,
 };
 
 export interface RunningDashboard {
@@ -555,15 +571,27 @@ async function checkOf(checks: DashboardChecks, workspace: string, ticket: strin
 }
 
 // The tickets without a live job, each with the ChatGPT conversation that plans it (the message
-// and the prefilled URL), the tickets it lands after with their states (SF-084) and, with the Task
-// checks, its last check (SF-054); job_lands_after: the same for the tickets with a live job, for
-// the job page's Waits for and the board's Needed by.
-async function ticketsPayload(setup: DashboardSetup, checks: DashboardChecks | undefined) {
+// and the prefilled URL), the tickets it lands after with their states (SF-084), with the Task
+// checks its last check (SF-054), and its place in the run queue (SF-071: queue_position, 1-based or
+// null, and queue_error, the queue's failed start or null); job_lands_after: the same for the
+// tickets with a live job, for the job page's Waits for and the board's Needed by; queue: the run
+// queue's limit, running count, hold and next ticket (null without a queue).
+async function ticketsPayload(setup: DashboardSetup, checks: DashboardChecks | undefined, queue: DashboardQueue | undefined) {
+  const view = queue === undefined ? undefined : await queue.view();
+  const same = (row: TicketRow) => (other: { workspace: string; ticket: string }): boolean => other.workspace === row.workspace && other.ticket === row.ticket;
   const tickets = [];
   for (const row of await setup.tickets()) {
-    tickets.push(await ticketEntry(row, checks));
+    const failed = view?.errors.find(same(row));
+    tickets.push({
+      ...(await ticketEntry(row, checks)),
+      queue_position: view?.entries.find(same(row))?.position ?? null,
+      queue_error: failed === undefined ? null : { code: failed.code, message: failed.message },
+    });
   }
-  return { tickets, archived: await setup.archivedTickets(), job_lands_after: await setup.jobDependencies() };
+  return {
+    tickets, archived: await setup.archivedTickets(), job_lands_after: await setup.jobDependencies(),
+    queue: view === undefined ? null : { max_running: view.max_running, running: view.running, held: view.held, hold_reason: view.hold_reason, next: view.next },
+  };
 }
 
 // A row of the tickets payload: the ticket, its conversation and, with the Task checks, its check.
@@ -702,6 +730,8 @@ type Target =
   // The Task file (SF-081): GET reads it, POST saves it.
   | { kind: 'ticket-task'; workspace: string | undefined; ticket: string | undefined }
   | { kind: 'both'; route: 'workspace-add' | 'ticket-new' }
+  // The run queue (SF-071): api/queue/<action>, POST only.
+  | { kind: 'queue'; action: QueueAction }
   | { kind: 'read' };
 
 function targetOf(path: string[]): Target {
@@ -732,6 +762,10 @@ function targetOf(path: string[]): Target {
   }
   if (kind === 'tickets' && path.length === 5 && c === 'task') {
     return { kind: 'ticket-task', workspace: a, ticket: b };
+  }
+  const queueAction = QUEUE_ACTIONS.find((known) => known === a);
+  if (kind === 'queue' && path.length === 3 && queueAction !== undefined) {
+    return { kind: 'queue', action: queueAction };
   }
   return { kind: 'read' };
 }
@@ -801,10 +835,12 @@ interface Post {
 }
 
 // gate: whether the Codex gate is on (SF_GATE), shown in the job's pipeline; checks: the Task
-// checks (SF-054), none without (the check routes answer 404, the tickets have no check).
+// checks (SF-054), none without (the check routes answer 404, the tickets have no check); queue:
+// the run queue (SF-071), none without (the queue routes answer 404, the tickets payload's queue is
+// null).
 export async function startDashboard(
   port: number, stateDir: string, jobs: JobStore, actions: DashboardActions, setup: DashboardSetup = NO_SETUP,
-  { gate: gateOn = true, checks }: { gate?: boolean; checks?: DashboardChecks } = {},
+  { gate: gateOn = true, checks, queue }: { gate?: boolean; checks?: DashboardChecks; queue?: DashboardQueue } = {},
 ): Promise<RunningDashboard> {
   const files = new Map<string, { body: Buffer; type: string }>();
   for (const [path, { file, type }] of Object.entries(STATIC_FILES)) {
@@ -846,7 +882,7 @@ export async function startDashboard(
   // The start screen's data, sent to every page on connect and after every change.
   async function sendSetup(targets: Iterable<Stream>): Promise<void> {
     const workspaces = await workspacesPayload(setup);
-    const tickets = await ticketsPayload(setup, checks);
+    const tickets = await ticketsPayload(setup, checks, queue);
     for (const stream of targets) {
       send(stream, 'workspaces', workspaces);
       send(stream, 'tickets', tickets);
@@ -947,7 +983,7 @@ export async function startDashboard(
       return;
     }
     if (joined === 'api/tickets') {
-      body(res, 'application/json; charset=utf-8', JSON.stringify(await ticketsPayload(setup, checks)));
+      body(res, 'application/json; charset=utf-8', JSON.stringify(await ticketsPayload(setup, checks, queue)));
       return;
     }
     if (joined === 'api/stream') {
@@ -1348,7 +1384,7 @@ export async function startDashboard(
     };
   }
 
-  function setupPost(target: Exclude<Target, { kind: 'read' | 'action' | 'ticket-check' | 'ticket-task' }>): Post | undefined {
+  function setupPost(target: Exclude<Target, { kind: 'read' | 'action' | 'ticket-check' | 'ticket-task' | 'queue' }>): Post | undefined {
     if (target.kind === 'ticket-action') {
       const key = jobKey(target.workspace, target.ticket);
       if (key === undefined) {
@@ -1388,6 +1424,27 @@ export async function startDashboard(
       call: (data) => {
         const parsed = BODIES['ticket-new'].schema.safeParse(data);
         return parsed.success ? () => setup.createTicket(parsed.data) : undefined;
+      },
+      refreshSetup: true,
+    };
+  }
+
+  // The run queue's changes (SF-071): each body to its one call; every page gets the tickets again.
+  function queuePost(action: QueueAction, runQueue: DashboardQueue): Post {
+    const calls: { [A in QueueAction]: (data: z.infer<(typeof BODIES)[`queue-${A}`]['schema']>) => Promise<unknown> } = {
+      add: (data) => runQueue.add(data.workspace, data.ticket, data.at),
+      remove: (data) => runQueue.remove(data.workspace, data.ticket),
+      move: (data) => runQueue.move(data.workspace, data.ticket, data.to),
+      limit: (data) => runQueue.limit(data.max_running),
+      hold: (data) => runQueue.hold(data.reason),
+      release: () => runQueue.release(),
+    };
+    const route = `queue-${action}` as const;
+    return {
+      route,
+      call: (data) => {
+        const parsed = BODIES[route].schema.safeParse(data);
+        return parsed.success ? () => (calls[action] as (body: unknown) => Promise<unknown>)(parsed.data) : undefined;
       },
       refreshSetup: true,
     };
@@ -1539,6 +1596,18 @@ export async function startDashboard(
         return;
       }
       route(req, res, path, target.searchParams).catch(failed);
+      return;
+    }
+    if (what.kind === 'queue') {
+      if (req.method !== 'POST') {
+        empty(res, 405, { allow: 'POST' });
+        return;
+      }
+      if (queue === undefined) {
+        empty(res, 404);
+        return;
+      }
+      handlePost(req, res, queuePost(what.action, queue)).catch(failed);
       return;
     }
     if (what.kind === 'both' && req.method === 'POST') {

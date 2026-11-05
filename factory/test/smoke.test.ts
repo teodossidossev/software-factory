@@ -214,13 +214,16 @@ test('sf serve gives the Quick start as instructions and the planning and execut
 
   const { tools } = await client.listTools();
   // SF-040: the planning tools only; jobs are started, reviewed and approved elsewhere. SF-054: the
-  // Context owner reads the Task check (task_check), it never runs one.
-  assert.deepEqual(tools.map((tool) => tool.name).sort(), ['guide', 'read_file', 'search', 'task_check', 'write_task']);
+  // Context owner reads the Task check (task_check), it never runs one. SF-071: it reads the run
+  // queue and adds to it (queue_list, queue_add); it neither removes nor moves.
+  assert.deepEqual(tools.map((tool) => tool.name).sort(), ['guide', 'queue_add', 'queue_list', 'read_file', 'search', 'task_check', 'write_task']);
   const annotations = Object.fromEntries(tools.map((tool) => [tool.name, tool.annotations]));
   assert.equal(annotations.task_check?.readOnlyHint, true);
   assert.equal(annotations.read_file?.readOnlyHint, true);
   assert.equal(annotations.search?.readOnlyHint, true);
   assert.equal(annotations.write_task?.readOnlyHint, false);
+  assert.equal(annotations.queue_list?.readOnlyHint, true);
+  assert.equal(annotations.queue_add?.readOnlyHint, false);
   assert.deepEqual(await call(client, 'guide', {}), { text: handbook });
 
   await client.close();

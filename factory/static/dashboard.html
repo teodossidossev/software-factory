@@ -14,8 +14,8 @@
       <h1>Software Factory</h1>
       <span class="summary" id="summary"></span>
       <span id="connection" class="tag" role="status">connecting</span>
-      <!-- Shown and wired by SF-071 -->
-      <div class="qctl" hidden>
+      <!-- The run queue (SF-071): shown when the tickets payload carries the queue -->
+      <div class="qctl" id="qctl" hidden>
         <span>Run up to</span>
         <span class="stepper"><button id="limDown" type="button" aria-label="One job fewer">−</button><output id="limVal"></output><button id="limUp" type="button" aria-label="One job more">+</button></span>
         <span>jobs at once</span>

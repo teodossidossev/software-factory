@@ -90,9 +90,19 @@ no Review, no Gate), and it keeps its Worktree, Branch, Implementer session, Ite
 events. A Review or Gate round it interrupted is thrown away, never a verdict. Resume goes on where
 it stopped: the same session continues the turn, or the interrupted round runs again on the same
 Iteration; a Task file changed meanwhile goes to the Implementer as its diff and to the Reviews as
-the new file. A Paused Job does not count toward SF_MAX_JOBS. Restart replaces it (or an aborted,
+the new file. A Paused Job does not count toward the run limit `max_running` of the Queue. Restart replaces it (or an aborted,
 failed or needs_human Job) with a new Job from the current Task file on a fresh Worktree and Branch.
 _Avoid_: suspended, on hold, stopped (for a Paused Job); aborted (that Job has ended)
+
+**Queue**:
+The one order of the planned Tickets of every Workspace that the factory starts by itself, and the
+run limit `max_running`: how many Jobs may run at once (starting, working, awaiting review or
+preparing the MR) in every Workspace together; the User sets it, `SF_MAX_JOBS` is only its
+default. When a slot is free, `sf serve` starts the first queued Ticket whose `lands_after`
+Tickets are all merged; it never starts one twice. The limit gates only these starts: a start by
+hand always goes, and its Job counts as running. The User adds, removes, reorders, holds and
+releases it (the board, `sf queue`); the Context owner reads it and adds to it.
+_Avoid_: backlog, schedule, planned list (for the Queue); slots per workspace
 
 **Worktree**:
 The Git worktree of one Job, created from the Workspace's checkout at start under the factory's

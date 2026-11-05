@@ -1,7 +1,8 @@
 // The sf command: `sf serve`, `sf up` (serve, the tunnel and the browser), `sf workspace
 // add|list|remove`, `sf start|say|review|approve|pause|resume|restart|abort|reset`,
 // `sf handover|takeback|handed-done` (SF-073) and
-// `sf mr create|merge|status` (through the socket of sf serve),
+// `sf mr create|merge|status` and `sf queue list|add|remove|move|limit|hold|release` (SF-071)
+// (through the socket of sf serve),
 // `sf status|watch|dashboard` (reading the state directory directly), `sf check-task` (the Task
 // check of SF-054, run here and stored in the state directory), `sf notify-test`, `sf info`
 // and `sf run`, the job's runner that sf serve starts (SF-042, src/runner.ts).
@@ -19,7 +20,8 @@ import { forgeSettings, withoutHostTokens } from './forge.js';
 import { codexVersion } from './gate.js';
 import { existsSync } from 'node:fs';
 import { callSocket, listenSocket, socketPath } from './ipc.js';
-import { type Job, JobStore } from './jobs.js';
+import { type Job, type JobState, JobStore } from './jobs.js';
+import { MAX_RUNNING, MIN_RUNNING, QueueStore, type QueueView, RunQueue } from './queue.js';
 import { followJobs, runJob } from './runner.js';
 import { jobNotification, notifyConfig, sendNotification, stateNotifier } from './notify.js';
 import { configDir, HANDOFF_MODES, ignoredWorkCheckouts, isHandoffMode, isWorkspaceColor, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_COLORS, workspaceColor, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN, type WorkspaceEntry } from './registry.js';
@@ -42,7 +44,14 @@ const USAGE = `Usage:
   sf workspace list                                     List registered workspaces, their hand-over setting and colour
   sf workspace remove <name>                            Unregister a workspace
   sf check-task <workspace> <ticket>                    Check the Task file before Start: a read-only Claude session reads it and the repository, and prints its paraphrase, its findings by severity and its verdict (stored by the Task file's sha256; it only advises)
-  sf start <workspace> <ticket>                         Start the job for .software-factory/<ticket>.md in a worktree of its own (up to SF_MAX_JOBS per workspace)
+  sf start <workspace> <ticket>                         Start the job for .software-factory/<ticket>.md in a worktree of its own
+  sf queue list                                         The run queue: the limit of jobs at once, the running count, held or not, and the queued tickets in order with what each waits for, and the starts that failed
+  sf queue add <workspace> <ticket> [--at N]            Queue a planned ticket at position N (1-based; default: the end); sf serve starts it by itself when a slot is free and its lands_after tickets are merged
+  sf queue remove <workspace> <ticket>                  Take a ticket out of the queue
+  sf queue move <workspace> <ticket> <N>                Move a queued ticket to position N
+  sf queue limit <N>                                    Run up to N jobs at once (1-20, every workspace; default SF_MAX_JOBS); gates only the queue's own starts, a start by hand always goes
+  sf queue hold [reason...]                             Hold the queue: it starts nothing until sf queue release
+  sf queue release                                      Release a held queue
   sf say <workspace> <ticket> <message...>              Send a message into the job's Implementer session; on a handed-over job: Ask for changes (your checkout's edits go back into the job first)
   sf review <workspace> <ticket>                        Retry a failed Claude review (needs_human with review_failed) of the last iteration
   sf accept <workspace> <ticket>                        Accept a clean Claude review over a stopped gate (needs_human with gate_rounds, gate_budget or gate_failed) or a ledger stop (review_churn, review_disputed) and prepare the MR; on simplify_offered: skip the suggestions (listed in the MR text)
@@ -108,13 +117,24 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   if (ignored.length > 0) {
     console.error(`warning: the work_checkout of workspace(s) ${ignored.join(', ')} is ignored since SF-019: every job works in a worktree of the checkout.`);
   }
+  // The run queue (SF-071): an invalid queue.json fails here, as an invalid registry does.
+  const queueStore = new QueueStore(config.stateDir, config.maxJobs);
+  await queueStore.read();
   const jobs = new JobStore(config.stateDir);
   const notify = stateNotifier(notifyConfig(), jobs);
-  // The dashboard starts after recovery; until then its listener is a no-op.
+  // The dashboard starts after recovery; until then its listener is a no-op. So does the run
+  // queue's scheduler: its first pass runs once recovery is done.
   let dashboard: RunningDashboard | undefined;
+  let scheduling = false;
+  const reschedule = (job: Job, from: JobState | null): void => {
+    if (scheduling && from !== job.state) {
+      void runQueue.schedule();
+    }
+  };
   const onStateChange: StateListener = (job, from, lines) => {
     notify(job, from, lines);
     dashboard?.onStateChange(job, from);
+    reschedule(job, from);
   };
   const execution = new Execution(config, (name) => resolveWorkspace(name), onStateChange, handbook.text);
   // The tickets' history (SF-081): New ticket and Save (Setup) and write_task (the MCP server)
@@ -124,6 +144,10 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   // A finished job leaves with its Task file through the lock's scope, in the same acquisition as
   // the ticket action's checks: it is archived and a kept worktree removed.
   const setup = new Setup({ configDir: configDir(), jobs, exclusive: (work) => execution.exclusive(work), history });
+  // The run queue's scheduler: a pass after recovery, on every job state change (sf serve's own and
+  // the runners', below), on every change of the queue; a pass that changed something refreshes
+  // every page.
+  const runQueue = new RunQueue(queueStore, execution, setup, jobs, { onChange: () => dashboard?.refreshSetup() });
   // The Task checks (SF-054): started from the dashboard, read by the Context owner's task_check; an ended
   // check reaches every page.
   // A check's worktree shares the checkout's Git directory: when the last check of the workspace
@@ -143,6 +167,13 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     // sf info: whether sf serve answers.
     if (command === 'ping') {
       return {};
+    }
+    if (command.startsWith('queue-')) {
+      const result = await queueCommand(runQueue, command.slice('queue-'.length), args);
+      if (command !== 'queue-list') {
+        dashboard?.refreshSetup();
+      }
+      return result;
     }
     const [workspace = '', ticket = '', ...words] = args;
     if (command === 'start' && words.length === 0) {
@@ -219,7 +250,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   let server;
   try {
     await execution.recover();
-    server = await startServer(port, handbook, await packageVersion(), execution, checks, history);
+    server = await startServer(port, handbook, await packageVersion(), execution, checks, history, runQueue);
   } catch (error) {
     await socket.close();
     throw error;
@@ -228,7 +259,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     if (dashboardOn()) {
       // The dashboard's actions (DashboardActions: start, approve, abort, say, retryReview,
       // acceptGate and archiveFinished) run on the same Execution as the socket commands.
-      dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, setup, { gate: config.gate.on, checks });
+      dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, setup, { gate: config.gate.on, checks, queue: runQueue });
     } else {
       await removeToken(config.stateDir);
     }
@@ -245,11 +276,15 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   // The runners write the state of their jobs; the dashboard hears of it from disk (SF-042). A job
   // that left working, awaiting_review or preparing_mr may free a hand-over that met the sandbox's config lock
   // (SF-085), and so may sf serve's start.
+  // The run queue hears of both: a runner's job that reached ready_for_human_review frees a slot.
   const followed = followJobs(jobs, (job, from) => {
     dashboard?.onStateChange(job, from);
     execution.afterJobChange(job, from).catch((error: unknown) => console.error(error));
+    reschedule(job, from);
   });
   execution.handOverLocked().catch((error: unknown) => console.error(error));
+  scheduling = true;
+  void runQueue.schedule();
 
   let stopping = false;
   const stop = (signal: NodeJS.Signals): void => {
@@ -260,6 +295,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     console.log(`${SERVER_NAME} received ${signal}, shutting down`);
     hooks.beforeStop?.();
     followed.close();
+    runQueue.close();
     Promise.all([server.close(), socket.close(), dashboard?.close()]).then(
       () => process.exit(0),
       (error: unknown) => {
@@ -487,6 +523,119 @@ async function viaServer(command: string, args: string[]): Promise<Record<string
   const show = (value: unknown): string => (typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value));
   console.log(Object.entries(result).map(([key, value]) => `${key}: ${show(value)}`).join('\n'));
   return result;
+}
+
+// sf queue's socket commands (SF-071), run by sf serve's run queue.
+function queueCommand(queue: RunQueue, command: string, args: string[]): Promise<unknown> {
+  const [workspace = '', ticket = ''] = args;
+  if (command === 'list' && args.length === 0) {
+    return queue.view();
+  }
+  if (command === 'add' && (args.length === 2 || args.length === 3)) {
+    return queue.add(workspace, ticket, args[2] === undefined ? undefined : Number(args[2]));
+  }
+  if (command === 'remove' && args.length === 2) {
+    return queue.remove(workspace, ticket);
+  }
+  if (command === 'move' && args.length === 3) {
+    return queue.move(workspace, ticket, Number(args[2]));
+  }
+  if (command === 'limit' && args.length === 1) {
+    return queue.limit(Number(args[0]));
+  }
+  if (command === 'hold') {
+    return queue.hold(args.join(' '));
+  }
+  if (command === 'release' && args.length === 0) {
+    return queue.release();
+  }
+  return Promise.reject(new FactoryError('bad_request', `Unknown command "queue-${command}".`));
+}
+
+// sf queue list: the limit, the running count, held or not, the entries in order with what each
+// waits for, the next one to start and the starts that failed.
+function queueLines(view: QueueView): string[] {
+  const ref = (row: { workspace: string; ticket: string }): string => `${row.workspace}/${row.ticket}`;
+  const lines = [
+    `limit: ${view.max_running} job${view.max_running === 1 ? '' : 's'} at once`,
+    `running: ${view.running}`,
+    `held: ${view.held ? `yes${view.hold_reason !== null ? ` (${view.hold_reason})` : ''}` : 'no'}`,
+    `next: ${view.next !== null ? ref(view.next) : 'nothing ready'}`,
+  ];
+  lines.push(view.entries.length === 0 ? 'queue: empty' : 'queue:');
+  for (const entry of view.entries) {
+    const waits = entry.waits_for.map((dep) => `${ref(dep)} (${dep.state})`).join(', ');
+    lines.push(`  ${entry.position}. ${ref(entry)}${waits !== '' ? `  waits for ${waits}` : ''}`);
+  }
+  if (view.errors.length > 0) {
+    lines.push('start failed:');
+    for (const error of view.errors) {
+      lines.push(`  ${ref(error)}  ${error.code}: ${error.message}`);
+    }
+  }
+  return lines;
+}
+
+// A 1-based position or a limit as typed: digits only.
+function wholeNumber(value: string | undefined, what: string): string {
+  if (value === undefined || !/^\d+$/.test(value)) {
+    throw new UsageError(`${what} must be a whole number.`);
+  }
+  return value;
+}
+
+// sf queue list|add|remove|move|limit|hold|release: the arguments checked here, the change in sf serve.
+async function queue(args: string[]): Promise<void> {
+  const [command, ...rest] = args;
+  if (command === 'list') {
+    if (rest.length !== 0) {
+      throw new UsageError('queue list takes no arguments.');
+    }
+    console.log(queueLines((await request('queue-list', [])) as unknown as QueueView).join('\n'));
+    return;
+  }
+  if (command === 'add') {
+    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, strict: true, options: { at: { type: 'string' } } });
+    if (positionals.length !== 2) {
+      throw new UsageError('queue add needs <workspace> <ticket> [--at N].');
+    }
+    const at = values.at === undefined ? [] : [wholeNumber(values.at, '--at')];
+    await viaServer('queue-add', [...checkJob(positionals, 'queue add'), ...at]);
+    return;
+  }
+  if (command === 'remove') {
+    if (rest.length !== 2) {
+      throw new UsageError('queue remove needs <workspace> <ticket>.');
+    }
+    await viaServer('queue-remove', checkJob(rest, 'queue remove'));
+    return;
+  }
+  if (command === 'move') {
+    if (rest.length !== 3) {
+      throw new UsageError('queue move needs <workspace> <ticket> <N>.');
+    }
+    await viaServer('queue-move', [...checkJob(rest, 'queue move'), wholeNumber(rest[2], 'N')]);
+    return;
+  }
+  if (command === 'limit') {
+    if (rest.length !== 1) {
+      throw new UsageError(`queue limit needs <N>, ${MIN_RUNNING} to ${MAX_RUNNING}.`);
+    }
+    await viaServer('queue-limit', [wholeNumber(rest[0], 'N')]);
+    return;
+  }
+  if (command === 'hold') {
+    await viaServer('queue-hold', rest);
+    return;
+  }
+  if (command === 'release') {
+    if (rest.length !== 0) {
+      throw new UsageError('queue release takes no arguments.');
+    }
+    await viaServer('queue-release', []);
+    return;
+  }
+  throw new UsageError(command === undefined ? 'a queue command is required.' : `unknown queue command "${command}".`);
 }
 
 async function approve(args: string[]): Promise<void> {
@@ -846,6 +995,10 @@ async function main(argv: string[]): Promise<void> {
       throw new UsageError('start needs <workspace> <ticket>.');
     }
     await viaServer('start', checkJob(rest, 'start'));
+    return;
+  }
+  if (command === 'queue') {
+    await queue(rest);
     return;
   }
   if (command === 'review') {

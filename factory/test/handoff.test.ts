@@ -139,9 +139,13 @@ test('automatic hand-over at ready: the checkout on the branch at B with the job
   assert.equal(await exists(worktreeOf(s.env, 'H-1')), false);
   assert.ok(!git(s.repo, 'worktree', 'list').includes(worktreeOf(s.env, 'H-1')));
   assert.match((await runCli(s.env, ['status', 'app', 'H-1'])).stdout, /\nin your checkout on H-1-hand-it-over\nMR title: feat\(H-1\): Hand it over\n/);
-  // No SF_MAX_JOBS slot is held: another job starts with SF_MAX_JOBS=1.
+  // handed_over is not running (SF-071): with the run limit 1 (SF_MAX_JOBS=1) the queue starts another job.
   await putTask(s.env, s.repo, 'H-2', 'Other');
-  assert.equal((await call(s.served, 'start', { workspace: 'app', ticket: 'H-2' })).state, 'working');
+  assert.equal((await runCli(s.env, ['queue', 'add', 'app', 'H-2'])).code, 0);
+  for (const deadline = Date.now() + 20_000; (await s.jobs.read('app', 'H-2')) === undefined;) {
+    assert.ok(Date.now() < deadline, 'H-2 did not start');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
   await waitFor(s.served, 'H-2', 'awaiting_review');
   await runCli(s.env, ['abort', 'app', 'H-2']);
 
@@ -290,7 +294,7 @@ test('a workspace with handoff "checkout" under SF_HANDOFF=off (SF-083): the job
   await stop(s.served);
 });
 
-test('Ask for changes: refused with job_limit without a free slot and with checkout_moved off the branch, nothing changed; then the user\'s edit and new file reach the worktree, refs/factory/<ticket>-ask holds them, the checkout is back on main without leftovers, and the next ready hands over again', async () => {
+test('Ask for changes: not held by the run limit while another job runs, refused with checkout_moved off the branch, nothing changed; then the user\'s edit and new file reach the worktree, refs/factory/<ticket>-ask holds them, the checkout is back on main without leftovers, and the next ready hands over again', async () => {
   const s = await setup('handask', { SF_MAX_JOBS: '1' });
   await script(s.env, [
     { write: { 'README.md': 'job readme\n', 'job.txt': 'job\n' }, text: 'iteration 1' },
@@ -307,16 +311,11 @@ test('Ask for changes: refused with job_limit without a free slot and with check
   const { base_commit: base } = await job(s, 'A-1');
   assert.deepEqual((await job(s, 'A-1')).handover!.untracked, ['mine.txt']);
 
-  // A job working holds the one slot: Ask for changes and Take it back are refused.
+  // A job runs and the run limit is 1 (SF_MAX_JOBS=1): Ask for changes is the user's own, so the
+  // limit does not hold it (SF-071); it goes on below while A-2 runs.
   await putTask(s.env, s.repo, 'A-2', 'Busy');
   await call(s.served, 'start', { workspace: 'app', ticket: 'A-2' });
   await turnsStarted(s.env, 3);
-  const limited = await refusedSocket(s, 'say', ['app', 'A-1', 'Please change']);
-  assert.equal(limited.code, 'job_limit');
-  assert.equal((await refusedSocket(s, 'takeback', ['app', 'A-1'])).code, 'job_limit');
-  assert.equal((await job(s, 'A-1')).state, 'handed_over');
-  await waitFor(s.served, 'A-2', 'awaiting_review');
-  await runCli(s.env, ['abort', 'app', 'A-2']);
 
   // The user's edits: a change to the job's README and a new file.
   await writeFile(join(s.repo, 'README.md'), 'job readme, edited by the user\n');
@@ -352,6 +351,9 @@ test('Ask for changes: refused with job_limit without a free slot and with check
   assert.equal(await exists(join(worktree, 'mine.txt')), false);
   const asking = await job(s, 'A-1');
   assert.deepEqual([asking.handover, asking.prepared_commit, asking.worktree], [undefined, null, worktree]);
+  assert.ok(['working', 'awaiting_review'].includes((await job(s, 'A-2')).state));
+  await waitFor(s.served, 'A-2', 'awaiting_review');
+  await runCli(s.env, ['abort', 'app', 'A-2']);
   await waitFor(s.served, 'A-1', 'awaiting_review', 2);
   const log = await fakeLog(s.env);
   assert.match(log.at(-1)!.prompt, /Keep my edit/);

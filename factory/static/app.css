@@ -595,3 +595,5 @@ pre.raw.doc .heading { font-weight: 700; }
 #stream .task-check .check-severity.s-major { color: var(--warn); }
 #stream .task-check :is(.check-findings, .check-files) { margin: 2px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 2px; }
 #stream .task-check .check-kind { font-weight: 600; }
+/* A queued card is dragged to its new place (SF-071). */
+.card[draggable="true"] { cursor: grab; }

@@ -1,4 +1,5 @@
-// The Dashboard's actions (approve, abort, say, review, archive, and the start of a ticket): the HTTP contract in process against
+// The Dashboard's actions (approve, abort, say, review, archive, the start of a ticket, and the run
+// queue's changes of SF-071): the HTTP contract in process against
 // startDashboard with a fake DashboardActions (methods per route, token, Origin, content type,
 // body bounds, strict JSON, error mapping, a pending and a disconnected approve), then end to
 // end through `sf serve`, where the same POSTs reach the real Execution and the fake Implementer.
@@ -12,7 +13,9 @@ import { ACTIONS, MAX_ACTION_BODY_BYTES } from '../src/dashboard.js';
 import { FactoryError } from '../src/errors.js';
 import { JobStore } from '../src/jobs.js';
 import { factoryPrompt } from '../src/prompts.js';
-import { act, CSP, fakeActions, fetchRaw, openStream, type Reply } from './support/dashboard-client.js';
+import type { DashboardQueue } from '../src/dashboard.js';
+import type { QueueView } from '../src/queue.js';
+import { act, CSP, fakeActions, fakeSetup, fetchRaw, openStream, type Reply, ticketRow, workspaceRow } from './support/dashboard-client.js';
 import { withDashboard } from './support/dashboard-state.js';
 import { call, fakeLog, git, newEnv, newRepo, putTask, refused, script, serve, stop, waitFor } from './support/harness.js';
 
@@ -457,8 +460,8 @@ test('dashboard ticket start (SF-040): POST only, the action checks, Execution.s
     assert.deepEqual(fake.calls, [['start', 'app', 'T-5']]);
     fake.answer = new FactoryError('task_draft', 'The Task file is still the skeleton.');
     assert.deepEqual(error(await act(base, path, {})), { status: 409, code: 'task_draft' });
-    fake.answer = new FactoryError('job_limit', 'Three jobs run in app.');
-    assert.deepEqual(error(await act(base, path, {})), { status: 409, code: 'job_limit' });
+    fake.answer = new FactoryError('job_exists', 'The job for app/T-5 is working.');
+    assert.deepEqual(error(await act(base, path, {})), { status: 409, code: 'job_exists' });
     assert.equal(fake.calls.length, 3);
 
     // The reviewer routes of the MCP Events era answer like any unknown path.
@@ -467,6 +470,94 @@ test('dashboard ticket start (SF-040): POST only, the action checks, Execution.s
       assert.deepEqual([reply.status, reply.headers.allow, reply.body], [405, 'GET', ''], gone);
     }
     assert.equal(fake.calls.length, 3);
+  });
+});
+
+// A run queue that records each change and answers with answer (thrown when it is an Error).
+function fakeQueue(view: QueueView): DashboardQueue & { calls: unknown[][]; answer: unknown } {
+  const fake = {
+    calls: [] as unknown[][],
+    answer: undefined as unknown,
+    view: async () => view,
+    change: async (name: string, ...args: unknown[]): Promise<any> => {
+      fake.calls.push([name, ...args]);
+      if (fake.answer instanceof Error) {
+        throw fake.answer;
+      }
+      return fake.answer ?? { done: name };
+    },
+    add: (workspace: string, ticket: string, at?: number) => fake.change('add', workspace, ticket, at),
+    remove: (workspace: string, ticket: string) => fake.change('remove', workspace, ticket),
+    move: (workspace: string, ticket: string, to: number) => fake.change('move', workspace, ticket, to),
+    limit: (max: number) => fake.change('limit', max),
+    hold: (reason?: string) => fake.change('hold', reason),
+    release: () => fake.change('release'),
+  };
+  return fake;
+}
+
+test('dashboard queue (SF-071): the six POST routes with strict bodies, one queue call each, its refusals mapped, the pages refreshed; the tickets payload carries the queue; none without a queue', async () => {
+  const view: QueueView = {
+    max_running: 2, running: 1, held: true, hold_reason: 'usage limit', errors: [{ workspace: 'web', ticket: 'W-1', code: 'branch_exists', message: 'The branch exists.', at: '2026-11-05T10:00:00.000Z' }],
+    entries: [{ workspace: 'app', ticket: 'T-5', position: 1, queued_at: '2026-11-05T09:00:00.000Z', waits_for: [] }], next: { workspace: 'app', ticket: 'T-5' },
+  };
+  const queue = fakeQueue(view);
+  const setup = fakeSetup([workspaceRow('app'), workspaceRow('web')], [ticketRow('app', 'T-5', 'Five', false), ticketRow('app', 'T-6', 'Six', false), ticketRow('web', 'W-1', 'Web', false, 'failed')]);
+  await withDashboard('dash-act-queue', fakeActions(), async (dashboard) => {
+    const base = dashboard.url;
+    // The tickets payload: the queue's state, each row's position and failed start.
+    const payload = JSON.parse((await fetchRaw(new URL('api/tickets', base))).body);
+    assert.deepEqual(payload.queue, { max_running: 2, running: 1, held: true, hold_reason: 'usage limit', next: { workspace: 'app', ticket: 'T-5' } });
+    assert.deepEqual(payload.tickets.map((row: Record<string, unknown>) => [row.ticket, row.queue_position, row.queue_error]), [
+      ['T-5', 1, null], ['T-6', null, null], ['W-1', null, { code: 'branch_exists', message: 'The branch exists.' }],
+    ]);
+    // POST only; an unknown action is no route.
+    for (const method of ['GET', 'PUT']) {
+      const reply = await act(base, 'api/queue/add', {}, { method });
+      assert.deepEqual([reply.status, reply.headers.allow, reply.body], [405, 'POST', ''], method);
+    }
+    assert.equal((await act(base, 'api/queue/clear', {})).status, 405);
+    assert.equal((await act(base, 'api/queue/add/x', {})).status, 405);
+    assert.equal((await act(base, 'api/queue/add', { workspace: 'app', ticket: 'T-5' }, { headers: { origin: 'http://evil.example' } })).status, 403);
+    // Strict bodies.
+    const bad: Array<[string, unknown]> = [
+      ['add', {}], ['add', { workspace: 'app', ticket: 'T-5', at: 0 }], ['add', { workspace: 'app', ticket: 'T-5', at: 1.5 }], ['add', { workspace: 'app', ticket: 'T-5', extra: 1 }],
+      ['remove', { workspace: 'app' }], ['move', { workspace: 'app', ticket: 'T-5' }], ['move', { workspace: 'app', ticket: 'T-5', to: '2' }],
+      ['limit', {}], ['limit', { max_running: '3' }], ['hold', { reason: null }], ['hold', { reason: 1 }], ['release', { now: true }],
+    ];
+    for (const [action, body] of bad) {
+      assert.deepEqual(error(await act(base, `api/queue/${action}`, body)), { status: 400, code: 'invalid_body' }, `${action} ${JSON.stringify(body)}`);
+    }
+    assert.deepEqual(queue.calls, []);
+    // One call each, the result as it comes; every page gets the tickets again.
+    const stream = await openStream(new URL('api/stream', base));
+    await stream.next('tickets');
+    const good: Array<[string, unknown]> = [
+      ['add', { workspace: 'app', ticket: 'T-6' }], ['add', { workspace: 'app', ticket: 'T-6', at: 2 }], ['remove', { workspace: 'app', ticket: 'T-5' }],
+      ['move', { workspace: 'app', ticket: 'T-6', to: 1 }], ['limit', { max_running: 5 }], ['hold', {}], ['hold', { reason: 'later' }], ['release', {}],
+    ];
+    for (const [action, body] of good) {
+      assert.deepEqual(result(await act(base, `api/queue/${action}`, body)), { done: action });
+      await stream.next('workspaces');
+      await stream.next('tickets');
+    }
+    assert.deepEqual(queue.calls, [
+      ['add', 'app', 'T-6', undefined], ['add', 'app', 'T-6', 2], ['remove', 'app', 'T-5'], ['move', 'app', 'T-6', 1], ['limit', 5], ['hold', undefined], ['hold', 'later'], ['release'],
+    ]);
+    stream.close();
+    // The queue's refusals.
+    const refusals: Array<[string, number]> = [
+      ['already_queued', 409], ['not_queued', 409], ['invalid_limit', 400], ['invalid_position', 400], ['task_not_found', 404], ['task_draft', 409], ['job_exists', 409],
+    ];
+    for (const [code, status] of refusals) {
+      queue.answer = new FactoryError(code, `The ${code} message.`);
+      const refused = await act(base, 'api/queue/limit', { max_running: 30 });
+      assert.deepEqual([refused.status, JSON.parse(refused.body)], [status, { ok: false, error: { code, message: `The ${code} message.` } }], code);
+    }
+  }, setup, { queue });
+  // Without a run queue the routes are not there.
+  await withDashboard('dash-act-no-queue', fakeActions(), async (dashboard) => {
+    assert.deepEqual([(await act(dashboard.url, 'api/queue/add', { workspace: 'app', ticket: 'T-5' })).status], [404]);
   });
 });
 

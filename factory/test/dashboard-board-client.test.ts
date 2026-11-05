@@ -4,7 +4,8 @@
 // every stop code, ready, paused, done), the iteration shown, the cost and the elapsed time, the
 // Queue card's Start with its confirmation, refusal and unknown outcome, the Queue card opening the
 // planned ticket's page (SF-081; the page itself is in dashboard-ticket-client.test.ts), the workspace filter, the job's full page and the routing by the URL hash, the keys, the
-// 15 s read of api/jobs, the toast, the queue controls hidden without SF-071, and no inline style or
+// 15 s read of api/jobs, the toast, the run queue (SF-071: the stepper, the status line, the queued cards, the
+// toggle, the failed start, drag and drop and Alt+Up/Down; hidden without a queue), and no inline style or
 // prototype-only part; SF-084: the dependency chips and their states, Needed by, the highlight, the
 // chip's focus, the cycle line, the workspace stripe and chip, the filter chips and the ⋯ menu. Script checks, not browser acceptance: the manual steps are in factory/README.md.
 import assert from 'node:assert/strict';
@@ -244,9 +245,9 @@ test('board client: Start asks first, naming the workspace, the ticket and the b
   page.$('ticket-ok').click();
   await page.flush();
   assert.equal(posts(page).length, 1);
-  posts(page)[0]!.respond(409, { ok: false, error: { code: 'job_limit', message: 'Workspace app has 2 live job(s); SF_MAX_JOBS is 2.' } });
+  posts(page)[0]!.respond(409, { ok: false, error: { code: 'branch_exists', message: 'The branch T-2-two already exists in the checkout.' } });
   await page.flush();
-  assert.equal(page.$('toast-text').textContent, 'job_limit: Workspace app has 2 live job(s); SF_MAX_JOBS is 2.');
+  assert.equal(page.$('toast-text').textContent, 'branch_exists: The branch T-2-two already exists in the checkout.');
   assert.deepEqual([page.$('toast').hidden, page.$('toast').className, page.$('toast').getAttribute('role')], [false, 'err', 'alert']);
   assert.equal(button(card(page, 'app/T-2'), 'Start')!.disabled, false);
   assert.equal(posts(page).length, 1);
@@ -734,9 +735,8 @@ test('board client: api/jobs is read again every 15 s only while a card runs and
   assert.equal(jobReads(page).length, before);
 });
 
-test('board client: without SF-071 the queue controls and the Rules menu stay hidden, whatever the data carries, and no queue route is called', async () => {
-  const page = await openBoard([job('T-1', 'working')], [ticket('app/T-2', { queued: true, position: 1 })]);
-  page.streams.at(-1)!.emit('jobs', { jobs: [job('T-1', 'working')], queue: { order: ['app/T-2'], limit: 3, rule: 'wait', held: true } });
+test('board client: without a run queue (the tickets payload has none) the queue controls stay hidden and no queue route is called; the Rules menu stays hidden with the queue too (SF-072)', async () => {
+  const page = await openBoard([job('T-1', 'working')], [ticket('app/T-2', { queue_position: 1, queue_error: null })]);
   assert.deepEqual(page.document.querySelectorAll('#rulesMenu input').map((input) => [input.type, input.name, input.value]),
     [['radio', 'rule', 'resume-then-queue'], ['radio', 'rule', 'resume-only'], ['radio', 'rule', 'wait']]);
   for (const selector of ['.qctl', '.menuwrap', '#rulesMenu']) {
@@ -744,6 +744,7 @@ test('board client: without SF-071 the queue controls and the Rules menu stay hi
   }
   assert.equal(page.document.querySelector('.qctl')!.closest('.topbar')!.tagName, 'HEADER');
   assert.equal(page.document.querySelectorAll('#qlist .pos, #qlist .waits, #qlist .qdiv, #qlist [draggable]').length, 0);
+  assert.equal(labels(card(page, 'app/T-2')).some((label) => /queue/.test(label)), false);
   for (const id of ['limUp', 'limDown', 'rulesBtn']) {
     page.$(id).click();
   }
@@ -752,8 +753,171 @@ test('board client: without SF-071 the queue controls and the Rules menu stay hi
   await page.flush();
   assert.deepEqual(page.requests.filter((request) => /queue|limit|rule/i.test(request.path)).map((request) => request.path), []);
   assert.deepEqual(keys(page, 'queue'), ['app/T-2']);
-  const source = await readFile(new URL('app.js', STATIC_DIR), 'utf8');
-  assert.doesNotMatch(source, /api\/queue|api\/rules|\/queue\b/);
+  // With the queue: its controls show; the Rules menu stays hidden.
+  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('app/T-2', { queue_position: 1, queue_error: null })], archived: [], queue: QUEUE });
+  assert.deepEqual([page.$('qctl').hidden, page.document.querySelector('.menuwrap')!.hidden, page.$('rulesMenu').hidden], [false, true, true]);
+});
+
+const QUEUE = { max_running: 2, running: 1, held: false, hold_reason: null, next: { workspace: 'app', ticket: 'T-3' } };
+// The Queue column's items: a card's key and position, or an item's class and text.
+const queueItems = (page: Page): string[][] => page.$('qlist').children.map((child) => {
+  const item = child as FakeElement;
+  return item.classList.contains('card') ? [item.dataset.ticket!, part(item, 'pos')?.textContent ?? '-', item.getAttribute('draggable') ?? '-', item.dataset.q ?? '-'] : [item.className, item.textContent];
+});
+
+async function openQueue(tickets: ReturnType<typeof ticket>[], queue: Record<string, unknown> = QUEUE): Promise<Page> {
+  const page = await openBoard([job('J-1', 'working')], tickets);
+  page.streams.at(-1)!.emit('tickets', { tickets, archived: [], queue });
+  await page.flush();
+  return page;
+}
+
+const queuedTickets = () => [
+  ticket('app/T-2', { queue_position: 2, queue_error: null }),
+  ticket('app/T-3', { queue_position: 1, queue_error: null }),
+  ticket('app/T-6', { queue_position: 3, queue_error: null }),
+  ticket('app/T-4', { queue_position: null, queue_error: { code: 'branch_exists', message: 'The branch T-4-x already exists.' } }),
+  ticket('app/T-5', { draft: true, queue_position: null, queue_error: null }),
+];
+
+test('board client (SF-071): the run queue in the top bar: Run up to N jobs at once with the stepper posting api/queue/limit, and the status line', async () => {
+  const page = await openQueue(queuedTickets());
+  assert.equal(page.$('qctl').hidden, false);
+  assert.match(page.$('qctl').textContent, /^Run up to−2\+jobs at once1 running · 1 slot free · next: T-3/);
+  assert.deepEqual([page.$('limVal').textContent, page.$('qstatus').className, page.$('qstatus').textContent], ['2', 'qstatus', '1 running · 1 slot free · next: T-3']);
+  // One job more: posted once, both buttons off until the answer; the board shows the server's value.
+  page.$('limUp').click();
+  page.$('limUp').click();
+  await page.flush();
+  assert.deepEqual(posts(page).map((request) => [request.path, request.body]), [['api/queue/limit', '{"max_running":3}']]);
+  assert.deepEqual([page.$('limUp').disabled, page.$('limDown').disabled], [true, true]);
+  posts(page)[0]!.respond(200, { ok: true, result: { max_running: 3 } });
+  await page.flush();
+  assert.deepEqual([page.$('limUp').disabled, page.$('limDown').disabled, page.$('limVal').textContent], [false, false, '2']);
+  assert.equal(page.$('toast-text').textContent, 'Run up to 3 jobs at once.');
+  page.$('limDown').click();
+  await page.flush();
+  assert.equal(posts(page)[1]!.body, '{"max_running":1}');
+  posts(page)[1]!.respond(400, { ok: false, error: { code: 'invalid_limit', message: 'The limit must be a whole number from 1 to 20.' } });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, 'invalid_limit: The limit must be a whole number from 1 to 20.');
+  // The range's ends: the stepper stops there.
+  const stream = page.streams.at(-1)!;
+  stream.emit('tickets', { tickets: queuedTickets(), archived: [], queue: { ...QUEUE, max_running: 1 } });
+  assert.deepEqual([page.$('limDown').disabled, page.$('limUp').disabled], [true, false]);
+  stream.emit('tickets', { tickets: queuedTickets(), archived: [], queue: { ...QUEUE, max_running: 20 } });
+  assert.deepEqual([page.$('limDown').disabled, page.$('limUp').disabled], [false, true]);
+  page.$('limUp').click();
+  assert.equal(posts(page).length, 2);
+  // Nothing ready, every slot taken, held with and without a reason.
+  stream.emit('tickets', { tickets: queuedTickets(), archived: [], queue: { ...QUEUE, running: 2, next: null } });
+  assert.equal(page.$('qstatus').textContent, '2 running · 0 slots free · next: nothing ready');
+  stream.emit('tickets', { tickets: queuedTickets(), archived: [], queue: { ...QUEUE, max_running: 4, running: 1 } });
+  assert.equal(page.$('qstatus').textContent, '1 running · 3 slots free · next: T-3');
+  stream.emit('tickets', { tickets: queuedTickets(), archived: [], queue: { ...QUEUE, held: true, hold_reason: 'usage limit' } });
+  assert.deepEqual([page.$('qstatus').className, page.$('qstatus').textContent], ['qstatus held', 'Queue held: usage limit · 1 running']);
+  stream.emit('tickets', { tickets: queuedTickets(), archived: [], queue: { ...QUEUE, held: true, hold_reason: null } });
+  assert.equal(page.$('qstatus').textContent, 'Queue held · 1 running');
+});
+
+test('board client (SF-071): the Queue column holds the queued cards in order with their position, "Not queued", then the other planned tickets; the toggle, the failed start', async () => {
+  const page = await openQueue(queuedTickets());
+  assert.deepEqual(queueItems(page), [
+    ['app/T-3', '1', 'true', '0'], ['app/T-2', '2', 'true', '1'], ['app/T-6', '3', 'true', '2'], ['qdiv', 'Not queued'], ['app/T-4', '-', '-', '-'], ['app/T-5', '-', '-', '-'],
+  ]);
+  assert.equal(page.$('count-queue').textContent, '3');
+  // The actions SF-084 left, the toggle after Start (none on a skeleton), and a queued card's hint.
+  const actions = (key: string): string[] => labels(card(page, key)).filter((label) => ['Start', 'Add to queue', 'Remove from queue', 'Task', '⋯', 'Check', 'Archive', 'Delete…'].includes(label));
+  assert.deepEqual(actions('app/T-3'), ['Start', 'Remove from queue', 'Task', '⋯', 'Archive', 'Delete…']);
+  assert.deepEqual(actions('app/T-4'), ['Start', 'Add to queue', 'Task', '⋯', 'Archive', 'Delete…']);
+  assert.deepEqual(actions('app/T-5'), ['Task', '⋯', 'Archive', 'Delete…']);
+  assert.equal(labels(card(page, 'app/T-5')).some((label) => /queue/.test(label)), false);
+  assert.equal(part(card(page, 'app/T-3'), 'qhint')!.textContent, '⠿ drag · Alt+↑↓');
+  assert.equal(part(card(page, 'app/T-4'), 'qhint'), undefined);
+  assert.equal(part(card(page, 'app/T-4'), 'waits')!.textContent, 'Start failed: The branch T-4-x already exists.');
+  assert.equal(part(card(page, 'app/T-3'), 'waits'), undefined);
+  // Add to queue: posted once; the card stays as the server last said until the tickets come again.
+  button(card(page, 'app/T-4'), 'Add to queue')!.click();
+  await page.flush();
+  assert.deepEqual(posts(page).map((request) => [request.path, request.body]), [['api/queue/add', '{"workspace":"app","ticket":"T-4"}']]);
+  assert.equal(button(card(page, 'app/T-4'), 'Add to queue')!.disabled, true);
+  assert.equal(page.$('ticket').hidden, true);
+  posts(page)[0]!.respond(200, { ok: true, result: { position: 4 } });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, 'app/T-4 is queued at position 4.');
+  assert.deepEqual(queueItems(page)[4], ['app/T-4', '-', '-', '-']);
+  button(card(page, 'app/T-2'), 'Remove from queue')!.click();
+  await page.flush();
+  assert.deepEqual([posts(page)[1]!.path, posts(page)[1]!.body], ['api/queue/remove', '{"workspace":"app","ticket":"T-2"}']);
+  posts(page)[1]!.respond(409, { ok: false, error: { code: 'not_queued', message: 'app/T-2 is not in the queue.' } });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, 'not_queued: app/T-2 is not in the queue.');
+  // An empty queue says so above "Not queued".
+  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('app/T-4', { queue_position: null, queue_error: null })], archived: [], queue: QUEUE });
+  assert.deepEqual(queueItems(page), [['empty', 'The queue is empty: add a ticket below.'], ['qdiv', 'Not queued'], ['app/T-4', '-', '-', '-']]);
+  assert.equal(page.$('count-queue').textContent, '0');
+});
+
+test('board client (SF-071): drag and drop and Alt+Up / Alt+Down post api/queue/move; a drop goes before the card it lands on', async () => {
+  const page = await openQueue(queuedTickets());
+  const drag = (key: string, name: string, extra: Record<string, unknown> = {}) => card(page, key).dispatch(name, extra);
+  const data: Record<string, string> = {};
+  const transfer = { effectAllowed: '', setData: (type: string, value: string) => (data[type] = value) };
+  // T-2 (2) dropped on T-3 (1): position 1.
+  drag('app/T-2', 'dragstart', { dataTransfer: transfer });
+  assert.deepEqual([card(page, 'app/T-2').classList.contains('dragging'), transfer.effectAllowed, data['text/plain']], [true, 'move', 'app/T-2']);
+  const over = drag('app/T-3', 'dragover');
+  assert.deepEqual([over.defaultPrevented, card(page, 'app/T-3').classList.contains('dropbefore')], [true, true]);
+  drag('app/T-6', 'dragover');
+  assert.deepEqual([card(page, 'app/T-3').classList.contains('dropbefore'), card(page, 'app/T-6').classList.contains('dropbefore')], [false, true]);
+  // Over a card out of the queue: no place to drop before.
+  drag('app/T-4', 'dragover');
+  assert.equal(page.document.querySelectorAll('.dropbefore').length, 0);
+  drag('app/T-3', 'dragover');
+  drag('app/T-3', 'drop');
+  await page.flush();
+  assert.deepEqual(posts(page).map((request) => [request.path, request.body]), [['api/queue/move', '{"workspace":"app","ticket":"T-2","to":1}']]);
+  assert.equal(page.document.querySelectorAll('.dragging, .dropbefore').length, 0);
+  posts(page)[0]!.respond(200, { ok: true, result: { position: 1 } });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, 'app/T-2 moved to position 1.');
+  // T-3 (1) dropped on T-6 (3): before T-6, position 2.
+  drag('app/T-3', 'dragstart');
+  drag('app/T-6', 'drop');
+  await page.flush();
+  assert.equal(posts(page)[1]!.body, '{"workspace":"app","ticket":"T-3","to":2}');
+  posts(page)[1]!.respond(200, { ok: true, result: { position: 2 } });
+  await page.flush();
+  // Dropped on itself or outside the queue, or a drag that ends: nothing is posted.
+  drag('app/T-3', 'dragstart');
+  drag('app/T-3', 'drop');
+  drag('app/T-6', 'dragstart');
+  drag('app/T-6', 'dragend');
+  drag('app/T-4', 'drop');
+  drag('app/T-4', 'dragstart');
+  drag('app/T-3', 'drop');
+  await page.flush();
+  assert.equal(posts(page).length, 2);
+  assert.equal(page.document.querySelectorAll('.dragging, .dropbefore').length, 0);
+  // Alt+Up / Alt+Down on a focused queued card: one place; not past either end, not on a card out of the queue.
+  card(page, 'app/T-2').focus();
+  assert.equal(page.key('ArrowUp', { altKey: true }).defaultPrevented, true);
+  await page.flush();
+  assert.equal(posts(page)[2]!.body, '{"workspace":"app","ticket":"T-2","to":1}');
+  posts(page)[2]!.respond(200, { ok: true, result: { position: 1 } });
+  await page.flush();
+  card(page, 'app/T-3').focus();
+  page.key('ArrowUp', { altKey: true });
+  card(page, 'app/T-6').focus();
+  page.key('ArrowDown', { altKey: true });
+  card(page, 'app/T-4').focus();
+  page.key('ArrowUp', { altKey: true });
+  await page.flush();
+  assert.equal(posts(page).length, 3);
+  card(page, 'app/T-3').focus();
+  page.key('ArrowDown', { altKey: true });
+  await page.flush();
+  assert.equal(posts(page)[3]!.body, '{"workspace":"app","ticket":"T-3","to":2}');
 });
 
 test('board client: no element of the page has an inline style and no prototype-only part exists; values go in as text', async () => {

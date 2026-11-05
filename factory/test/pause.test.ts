@@ -4,7 +4,7 @@
 // changed Task file (the diff in the message, the new sha256 recorded, the reviewers on the new
 // file). Restart: the archive, the branch deleted only when safe, the refusals for a branch with
 // commits and a pushed one, --keep-files. A paused job survives an sf serve restart and does not
-// count toward SF_MAX_JOBS.
+// count toward the run queue's limit max_running (SF-071); Resume, a start by hand, is never held by it.
 import assert from 'node:assert/strict';
 import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -271,7 +271,7 @@ test('Pause is refused while the MR is prepared and outside working and awaiting
   }
 });
 
-test('A paused job survives an sf serve restart and is not counted toward SF_MAX_JOBS; Resume needs a free slot', async () => {
+test('A paused job survives an sf serve restart and is not counted toward the run limit; Resume goes over the limit', async () => {
   const env = await newEnv('pause-slot', { SF_MAX_JOBS: '1' });
   const repo = await newRepo(env, 'pause-slot-repo', false);
   await putTask(env, repo, 'P-1', 'First');
@@ -282,22 +282,23 @@ test('A paused job survives an sf serve restart and is not counted toward SF_MAX
     await call(served, 'start', { workspace: 'app', ticket: 'P-1' });
     await turnsStarted(env, 1);
     assert.equal((await runCli(env, ['pause', 'app', 'P-1'])).code, 0);
-    await call(served, 'start', { workspace: 'app', ticket: 'P-2' });
+    // max_running is 1 (SF_MAX_JOBS): the paused job holds no slot, so the queue starts P-2.
+    assert.equal((await runCli(env, ['queue', 'add', 'app', 'P-2'])).code, 0);
+    await turnsStarted(env, 2);
   } finally {
     await stop(served);
   }
   served = await serve(env);
   try {
     assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'P-1' })).state, 'paused');
-    const refusal = await runCli(env, ['resume', 'app', 'P-1']);
-    assert.equal(refusal.code, 1);
-    assert.match(refusal.stderr, /SF_MAX_JOBS is 1\./);
-    assert.match((await runCli(env, ['status'])).stdout, /P-1\s.*paused/);
-    assert.equal((await runCli(env, ['abort', 'app', 'P-2'])).code, 0);
-    // The first turn never reported a session: Resume runs the task again.
+    assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'P-2' })).state, 'working');
+    assert.match((await runCli(env, ['queue', 'list'])).stdout, /^limit: 1 job at once\nrunning: 1\n/);
+    // P-2 runs and the limit is 1: Resume is the user's, never held by the limit. The first turn
+    // never reported a session: Resume runs the task again.
     const resumed = await runCli(env, ['resume', 'app', 'P-1']);
     assert.equal(resumed.code, 0, resumed.stderr);
     await waitFor(served, 'P-1', 'awaiting_review', 1);
+    assert.equal((await runCli(env, ['abort', 'app', 'P-2'])).code, 0);
     assert.match((await fakeLog(env)).at(-1)!.prompt, /^\/implement \.software-factory\/P-1\.md\n\nRules from the Software Factory:/);
   } finally {
     await stop(served);

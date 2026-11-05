@@ -52,9 +52,14 @@ Replaces the Checkout entry of 2026-11-01 (ADR-0001, now superseded by ADR-0004)
 
 - **Worktree.** Every job works in a Git worktree of the workspace's checkout, never in the
   User's IDE checkout. A workspace is one checkout; the separate work checkout is retired.
-- **Parallel jobs.** Up to `SF_MAX_JOBS` live jobs per workspace at a time, each with its own
-  session and worktree; one ChatGPT conversation per ticket, subscribed to that ticket only, and
-  removed by the factory after the job's last event (`pushed` or `aborted`).
+- **Parallel jobs.** Several jobs at a time, each with its own session and worktree; one ChatGPT
+  conversation per ticket, subscribed to that ticket only, and removed by the factory after the
+  job's last event (`pushed` or `aborted`). Rewritten 2026-11-05 (SF-071): the global run limit
+  `max_running` of the run queue (1-20, every workspace together, set by the user; `SF_MAX_JOBS`
+  only its default) replaces the per-workspace live-job limit. It counts the running jobs
+  (`starting`, `working`, `awaiting_review`, `preparing_mr`) and gates only the starts the queue
+  makes by itself: a start by hand (board, `sf start`), a restart, a resume, Ask for changes and a
+  take back always go, and the user's answer to a waiting job is not a start.
 - **Branch at Clean.** `mark_clean` runs the MR preparation (commit by the Git rules, rebase,
   verification) and removes the worktree; the branch, with one commit, is in the User's
   repository for human review. `approve` pushes it and nothing else.

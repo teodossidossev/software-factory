@@ -313,9 +313,9 @@ test('setup client: Start posts {} once for its ticket after the confirmation, k
   page.$('ticket-ok').click();
   await page.flush();
   assert.equal(posts(page)[1]!.path, 'api/tickets/app/T-7/start');
-  posts(page)[1]!.respond(409, { ok: false, error: { code: 'job_limit', message: 'Two jobs are live; finish or abort one first.' } });
+  posts(page)[1]!.respond(409, { ok: false, error: { code: 'job_exists', message: 'The job for app/T-7 is working.' } });
   await page.flush();
-  assert.equal(page.$('toast-text').textContent, 'job_limit: Two jobs are live; finish or abort one first.');
+  assert.equal(page.$('toast-text').textContent, 'job_exists: The job for app/T-7 is working.');
   start('app/T-6').click();
   page.$('ticket-ok').click();
   await page.flush();

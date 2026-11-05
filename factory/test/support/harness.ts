@@ -70,6 +70,8 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
     SF_REVIEW: 'off',
     // No gate unless the test turns it on (test/gate.test.ts).
     SF_GATE: 'off',
+    // No simplification pass unless the test turns it on (test/simplify.test.ts).
+    SF_SIMPLIFY: 'off',
     // The job steps of call() and refused() through the socket.
     SF_TEST_HOOKS: 'on',
     // Temporary directories (the Task check's worktree, SF-054) where the test run makes its own.

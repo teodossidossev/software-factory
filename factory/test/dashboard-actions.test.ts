@@ -538,3 +538,20 @@ test('dashboard settle (SF-052): POST {id, decision, note?} only, strictly parse
     assert.deepEqual(error(await act(base, path, { id: 'R1', decision: 'accept' })), { status: 409, code: 'invalid_state' });
   });
 });
+
+test('dashboard simplify (SF-055): POST {} only; Execution.simplify once per request, its refusals mapped', async () => {
+  const fake = fakeActions({ state: 'working', iteration: 3, check_after_minutes: 5 });
+  await withDashboard('dash-act-simplify', fake, async (dashboard) => {
+    const base = dashboard.url;
+    const path = 'api/jobs/app/T-1/simplify';
+    assert.deepEqual([(await act(base, path, {}, { method: 'GET' })).status], [405]);
+    for (const body of ['{"all":true}', 'null', '[]']) {
+      assert.deepEqual(error(await act(base, path, undefined, { body })), { status: 400, code: 'invalid_body' }, body);
+    }
+    assert.deepEqual(fake.calls, []);
+    assert.deepEqual(result(await act(base, path, {})), { state: 'working', iteration: 3, check_after_minutes: 5 });
+    assert.deepEqual(fake.calls, [['simplify', 'app', 'T-1']]);
+    fake.answer = new FactoryError('invalid_state', 'sf simplify needs needs_human with simplify_offered; the job is working.');
+    assert.deepEqual(error(await act(base, path, {})), { status: 409, code: 'invalid_state' });
+  });
+});

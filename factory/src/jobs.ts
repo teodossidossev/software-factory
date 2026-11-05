@@ -1,5 +1,5 @@
 // Job state on disk: <state dir>/jobs/<workspace>/<ticket>/ with job.json, events.jsonl and
-// iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-override.json} (plus the
+// iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-override.json,simplify.json} (plus the
 // gate's schema and output files), ledger.json (the findings ledger, SF-052) from the first Fix
 // section on, and from MR preparation on mr.md. Strictly parsed; every file but the event log
 // is replaced atomically. Knows nothing about Git or the Implementer session.
@@ -10,6 +10,7 @@ import { writeFileAtomic, writeFileAtomicWith } from './atomic.js';
 import { FactoryError } from './errors.js';
 import { type LedgerEntry, ledgerSchema } from './ledger.js';
 import type { ReviewItem } from './review.js';
+import type { Suggestion } from './simplify.js';
 
 export const JOB_STATES = [
   'starting',
@@ -54,6 +55,9 @@ const jobSchema = z.strictObject({
   gate_fixes: z.number().int().min(0).default(0),
   // Input plus output tokens of every gate run of the job; SF_GATE_MAX_TOKENS limits them.
   gate_tokens: z.number().int().min(0).default(0),
+  // The iteration the simplification pass started on (SF-055), written before it runs; absent before.
+  // Once set, the pass never runs again on the job, whatever became of that run.
+  simplify_iteration: z.number().int().min(1).optional(),
   session_id: z.string().min(1).nullable(),
   created_at: timestamp,
   // Time of the last state change.
@@ -160,6 +164,24 @@ export interface GateOverride {
   unapplied: Array<ReviewItem & { id?: string }> | string;
 }
 
+// iterations/NNN/simplify.json: the simplification pass after the deciding clean verdict of the
+// iteration (SF-055), or why it failed (redacted). suggestions: what it offers the user; dropped:
+// what the factory withheld because it names a fixed blocker entry of the ledger.
+export type SimplifyRecord =
+  | {
+      reviewer: string;
+      summary: string;
+      suggestions: Suggestion[];
+      dropped: Suggestion[];
+      cost_usd: number | null;
+      model: string | null;
+      started_at: string;
+      ended_at: string;
+      // When the user skipped the suggestions (sf accept on simplify_offered); absent otherwise.
+      skipped_at?: string;
+    }
+  | { reviewer: string; error: string; started_at: string; ended_at: string };
+
 export interface Iteration {
   report: string;
   patch: Buffer;
@@ -188,6 +210,10 @@ export type EventRecord = { ts: string; iteration: number } & (
   // The user accepted the iteration over the stopped gate (SF-047): the code it stopped with and
   // the number of Codex items not applied (0 when the gate failed or did not run).
   | { type: 'gate_overridden'; code: string; unapplied: number }
+  // The simplification pass (SF-055): its outcome (the suggestions offered, those the factory
+  // dropped, or its error), and the user's choice on the offer (simplify or skip).
+  | { type: 'simplify'; reviewer: string; suggestions: number; dropped: number; error?: string; ignored?: true }
+  | { type: 'simplify_chosen'; choice: 'simplify' | 'skip'; suggestions: number }
   // The merge request on the Git host (SF-048): opened, reused (already open for the branch),
   // merged by the factory, or found merged or closed on the host by sf mr status.
   // mr_state, not state: a record with state is a state change.
@@ -434,6 +460,17 @@ export class JobStore {
   // Replaced atomically; only under the job lock of the Execution.
   async writeLedger(workspace: string, ticket: string, ledger: LedgerEntry[]): Promise<void> {
     await writeFileAtomic(join(this.dir(workspace, ticket), 'ledger.json'), Buffer.from(`${JSON.stringify(ledgerSchema.parse(ledger), null, 2)}\n`));
+  }
+
+  // The outcome of the simplification pass on an iteration (SF-055), replaced atomically.
+  async writeSimplify(workspace: string, ticket: string, number: number, record: SimplifyRecord): Promise<void> {
+    await writeFileAtomic(join(this.iterationDir(workspace, ticket, number), 'simplify.json'), Buffer.from(`${JSON.stringify(record, null, 2)}\n`));
+  }
+
+  // The simplification pass of an iteration (SF-055); undefined when none ended there.
+  async readSimplify(workspace: string, ticket: string, number: number): Promise<SimplifyRecord | undefined> {
+    const text = await readOrMissing(join(this.iterationDir(workspace, ticket, number), 'simplify.json'));
+    return text === undefined ? undefined : (JSON.parse(text) as SimplifyRecord);
   }
 
   async writeGateOverride(workspace: string, ticket: string, number: number, override: GateOverride): Promise<void> {

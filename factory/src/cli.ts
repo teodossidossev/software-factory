@@ -42,7 +42,8 @@ const USAGE = `Usage:
   sf start <workspace> <ticket>                         Start the job for .software-factory/<ticket>.md in a worktree of its own (up to SF_MAX_JOBS per workspace)
   sf say <workspace> <ticket> <message...>              Send a message into the job's Implementer session
   sf review <workspace> <ticket>                        Retry a failed Claude review (needs_human with review_failed) of the last iteration
-  sf accept <workspace> <ticket>                        Accept a clean Claude review over a stopped gate (needs_human with gate_rounds, gate_budget or gate_failed) or a ledger stop (review_churn, review_disputed) and prepare the MR
+  sf accept <workspace> <ticket>                        Accept a clean Claude review over a stopped gate (needs_human with gate_rounds, gate_budget or gate_failed) or a ledger stop (review_churn, review_disputed) and prepare the MR; on simplify_offered: skip the suggestions (listed in the MR text)
+  sf simplify <workspace> <ticket>                      Apply the simplification pass's suggestions (needs_human with simplify_offered): one Fix section "Simplify", reviewed as usual; sf accept skips them
   sf settle <workspace> <ticket> <id> accept|fix [note...]  Settle an escalated or contested finding of the ledger (needs_human): accept the risk, or the Implementer must fix it; the job goes on once nothing is left to settle
   sf status [<workspace> <ticket>]                      Show one job or all jobs: state, iterations, estimated cost, elapsed time
   sf watch <workspace> <ticket> [--once]                Show the session live (Ctrl+C stops)
@@ -133,6 +134,9 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     }
     if (command === 'accept' && words.length === 0) {
       return execution.acceptGate(workspace, ticket);
+    }
+    if (command === 'simplify' && words.length === 0) {
+      return execution.simplify(workspace, ticket);
     }
     if (command === 'settle' && words.length >= 2 && (words[1] === 'accept' || words[1] === 'fix')) {
       return execution.settle(workspace, ticket, words[0]!, words[1], words.slice(2).join(' '));
@@ -749,6 +753,13 @@ async function main(argv: string[]): Promise<void> {
       throw new UsageError('accept needs <workspace> <ticket>.');
     }
     await viaServer('accept', checkJob(rest, 'accept'));
+    return;
+  }
+  if (command === 'simplify') {
+    if (rest.length !== 2) {
+      throw new UsageError('simplify needs <workspace> <ticket>.');
+    }
+    await viaServer('simplify', checkJob(rest, 'simplify'));
     return;
   }
   if (command === 'settle') {

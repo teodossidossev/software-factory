@@ -163,7 +163,7 @@ export function openStream(url: URL): Promise<Stream> {
 }
 
 export type Call = ['start', string, string] | ['approve', string, string] | ['abort', string, string, boolean] | ['say', string, string, string] | ['retryReview', string, string] | ['acceptGate', string, string] | ['settle', string, string, string, string, string] | ['archiveFinished', string, string]
-  | ['createMergeRequest', string, string] | ['mergeMergeRequest', string, string] | ['mergeRequestStatus', string, string];
+  | ['createMergeRequest', string, string] | ['mergeMergeRequest', string, string] | ['mergeRequestStatus', string, string] | ['simplify', string, string];
 
 export interface FakeActions extends DashboardActions {
   calls: Call[];
@@ -186,6 +186,7 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
     retryReview: (workspace, ticket) => reply(['retryReview', workspace, ticket]),
     acceptGate: (workspace, ticket) => reply(['acceptGate', workspace, ticket]),
     settle: (workspace, ticket, id, decision, note) => reply(['settle', workspace, ticket, id, decision, note ?? '']),
+    simplify: (workspace, ticket) => reply(['simplify', workspace, ticket]),
     archiveFinished: (workspace, ticket) => reply(['archiveFinished', workspace, ticket]),
     createMergeRequest: (workspace, ticket) => reply(['createMergeRequest', workspace, ticket]),
     mergeMergeRequest: (workspace, ticket) => reply(['mergeMergeRequest', workspace, ticket]),

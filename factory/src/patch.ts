@@ -115,6 +115,19 @@ export function changedFiles(patch: string): { files: ChangedFile[]; submodules:
   return { files, submodules };
 }
 
+// The Patch text per file, by the path changedFiles reads (SF-055: which files an iteration changed,
+// by comparing two iterations' Patches file by file).
+export function fileSections(patch: string): Map<string, string> {
+  const sections = new Map<string, string>();
+  for (const part of patch.split(/^(?=diff --git )/mu)) {
+    const [file] = part.startsWith('diff --git ') ? changedFiles(part).files : [];
+    if (file !== undefined) {
+      sections.set(file.path, (sections.get(file.path) ?? '') + part);
+    }
+  }
+  return sections;
+}
+
 // Appended to the Implementer's report by the factory. With the structured file list the
 // sensitive paths (declared or undeclared by may_touch), the paths outside the Task's scope and
 // the deleted paths come first, each under its own heading, so a reviewer never folds them into

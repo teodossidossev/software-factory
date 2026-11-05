@@ -27,7 +27,9 @@ export type RunnerRequest =
   | { kind: 'review' }
   | { kind: 'accept' }
   // The user's settlement of a ledger entry (SF-052).
-  | { kind: 'settle'; id: string; decision: Decision; note: string };
+  | { kind: 'settle'; id: string; decision: Decision; note: string }
+  // The user's Simplify on the offer of the simplification pass (SF-055).
+  | { kind: 'simplify' };
 
 export type RunnerReply = { ok: true; result: unknown } | { ok: false; error: { code: string; message: string } };
 

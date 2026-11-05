@@ -31,7 +31,8 @@ bin/sf check-task <workspace> <ticket>  # the Task check (section Task check): p
 bin/sf start <workspace> <ticket> # start the job in a worktree of its own (same as the dashboard's Start); needs sf serve
 bin/sf say <workspace> <ticket> <message...>   # a user message into the session; needs sf serve
 bin/sf review <workspace> <ticket>             # retry a failed Claude review (needs_human with review_failed); needs sf serve
-bin/sf accept <workspace> <ticket>             # accept a clean Claude review over a stopped gate (gate_rounds, gate_budget, gate_failed) or a ledger stop (review_churn, review_disputed) and prepare the MR; needs sf serve
+bin/sf accept <workspace> <ticket>             # accept a clean Claude review over a stopped gate (gate_rounds, gate_budget, gate_failed) or a ledger stop (review_churn, review_disputed) and prepare the MR, or skip the simplification pass's suggestions (simplify_offered); needs sf serve
+bin/sf simplify <workspace> <ticket>           # apply the simplification pass's suggestions (needs_human with simplify_offered): one Fix section "Simplify", reviewed as usual; needs sf serve
 bin/sf settle <workspace> <ticket> <id> accept|fix [note...]  # settle an escalated or contested finding of the ledger (needs_human); needs sf serve
 bin/sf status [<workspace> <ticket>]           # one job (with its worktree, sensitive, out-of-scope and deleted paths) or all jobs, with estimated cost and elapsed time; works without sf serve
 bin/sf watch <workspace> <ticket> [--once]     # the session live; works without sf serve
@@ -102,6 +103,7 @@ prints the message below the table). Both work without `sf serve`; they read the
 | `SF_REVIEW` | on | `off` runs no Claude review (nor the gate): a published iteration stays in `awaiting_review` until the user goes on with `sf say` or aborts. |
 | `SF_REVIEW_MODEL` | unset | Model of the Claude review, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
 | `SF_REVIEW_MAX_TURNS` | `60` | `maxTurns` of the Claude review. |
+| `SF_SIMPLIFY` | on | The simplification pass (SF-055) after the deciding clean verdict of a job with at least one Fix section; `off` goes straight to MR preparation. It uses `SF_REVIEW_MODEL` and `SF_REVIEW_MAX_TURNS`. |
 | `SF_TASK_CHECK_MAX_TURNS` | `30` | `maxTurns` of the Task check (SF-054); its model is `SF_REVIEW_MODEL`. |
 | `SF_GATE` | `codex` | The gate after a clean Claude review (SF-039): `codex` runs the Codex CLI, `off` lets the Claude verdict decide. With `codex` and no executable found the gate is off, and `sf serve` prints one line saying so. |
 | `SF_CODEX` | `codex` on `PATH` | Absolute path of the Codex CLI executable. Pointing at nothing turns the gate off; it is not looked for on `PATH` then. |
@@ -125,7 +127,7 @@ The socket path `${SF_STATE_DIR}/sf.sock` must fit a Unix socket address (107 by
 a longer one is refused at start with `socket_path_too_long`.
 
 The execution variables are read once when `sf serve` starts. `sf status` and `sf watch` read
-`SF_STATE_DIR` themselves; `sf start`, `sf say`, `sf review`, `sf accept`, `sf settle`, `sf approve`, `sf mr`, `sf abort` and `sf reset` use it to find the socket; `sf notify-test` reads the notification variables itself.
+`SF_STATE_DIR` themselves; `sf start`, `sf say`, `sf review`, `sf accept`, `sf simplify`, `sf settle`, `sf approve`, `sf mr`, `sf abort` and `sf reset` use it to find the socket; `sf notify-test` reads the notification variables itself.
 
 ## Task check
 
@@ -539,6 +541,51 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   `{status: "running" | "done" | "failed" | "off", verdict?, summary?, gate?}` (`running` also while the
   review is due; `failed` with the error as `summary`). After a clean Claude verdict with the gate
   on, `gate` is the gate's status in the same form (no `off`; absent with the gate off).
+- The **simplification pass** (SF-055, `src/simplify.ts`): reviewers add, nobody removes, so once
+  per job, after the deciding clean verdict (the gate's, or with the gate off the Claude review's;
+  clean as the factory acts on it, SF-051) of a job with `fixes` ≥ 1 (at `SF_MAX_ITERATIONS` too),
+  a fresh read-only Agent SDK
+  `query()` runs like the Claude review (its tools, the isolation of SF-050, the sandbox,
+  `SF_REVIEW_MODEL`, `SF_REVIEW_MAX_TURNS`; its messages go to `events.jsonl` as `review_message`
+  of reviewer `simplify`, redacted). `SF_SIMPLIFY=off` skips it. Its prompt holds the Task file
+  without its Fix sections (cut at the first `## Fix N` heading), the whole ledger, per Fix section
+  N the files iteration N+1 changed (its Patch compared file by file with iteration N's), and the
+  final Patch; it asks what in the change exists only to satisfy a review item and is not needed
+  for the Task's goal, its acceptance or a blocker or major ledger entry still valid, and forbids
+  touching what a `fixed` blocker entry needed (named by id, security above all). Its answer is
+  `{summary, suggestions: [{path, what, why, saves_lines, ledger_ids}]}`; the factory drops every
+  suggestion whose `ledger_ids` name a `fixed` blocker entry or whose path is the path of one (the
+  prompt names those paths too), whatever the pass says: the path check does not trust the pass's
+  `ledger_ids`. It stores
+  `iterations/NNN/simplify.json` (`{reviewer: "simplify", summary, suggestions, dropped, cost_usd,
+  model, started_at, ended_at}`, or `{reviewer, error, started_at, ended_at}` for a failed run, its
+  message redacted) and a `simplify` event (`{reviewer, suggestions, dropped, error?, ignored?}`; a
+  pass the job moved on from leaves only its event, `ignored`).
+  - No suggestion, or a failed run: the job goes on to MR preparation as before.
+  - Suggestions: `needs_human` with `simplify_offered`, the message listing them (within 2,000
+    characters, `stopMessage`). The user chooses:
+    - **Simplify**: `sf simplify <workspace> <ticket>`, or *Simplify…* on the dashboard (`POST
+      api/jobs/<ws>/<ticket>/simplify`), writes one Fix section `## Fix N: Simplify` with the
+      suggestions and runs the normal pipeline (the Implementer, the Claude review, the gate). It
+      counts in `fixes`, and it is written even at `SF_MAX_ITERATIONS` (the one Fix that may go
+      over the limit; the next reviewer fix after it stops with `iteration_limit` as usual). Each
+      suggestion becomes a ledger entry of reviewer `simplify`, `accepted_risk` with the note
+      "removed by the user's choice", asked in that Fix: the reviewers see it as the user's choice,
+      an item that reopens it, by its id or the same path and problem text, is dropped whatever its
+      severity (SF-052 rule 1), a defect the removal causes is a new item reviewed as usual, and the
+      MR's `### Review findings not fixed` leaves it out. An item the Implementer answers other than `fixed` becomes `left` with its note
+      (no longer the user's removal). Result `{state, iteration, check_after_minutes}`; a
+      `simplify_chosen` event (`choice: "simplify"`). Refused with `invalid_state` outside
+      `simplify_offered`, and once the ledger holds a Simplify.
+    - **Skip**: `sf accept` (*Accept and prepare MR…*), allowed for `simplify_offered`: MR
+      preparation with the paths both reviewers accepted; `simplify.json` gets `skipped_at`, a
+      `simplify_chosen` event (`choice: "skip"`), no `gate-override.json`. The suggestions go into
+      the MR text (below). Answering the offer with `sf say` is neither: nothing is listed.
+  - At most once per job: before the pass starts, the factory writes the iteration it runs on to the
+    job (`simplify_iteration` in `job.json`), and a job that has it never gets another pass, whether
+    that run ended, failed, was cancelled, or the job moved on (`sf say`) while it ran. A runner that
+    ended before the outcome applied is resumed: the stored `simplify.json` applies; one that ended
+    while the pass ran records it as failed ("interrupted") and goes on to MR preparation.
 - `sf say` queues a message as the next turn (in `working`, `awaiting_review`, `needs_human` or
   `ready_for_human_review`, where it reopens the worktree like the fix path); outside `working`
   the job goes back to `working` and publishes a new iteration at the end.
@@ -546,9 +593,11 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   (`permission_mode_mismatch`), an unavailable sandbox (`sandbox_unavailable`, with the SDK's
   message), a failed review (`review_failed`), a failed gate (`gate_failed`), the gate's round
   limit (`gate_rounds`) or token ceiling (`gate_budget`), the iteration limit, or the ledger
-  (`escalated`, `review_disputed`, `review_churn`) put the job in `needs_human`. After a gate code
-  or `review_disputed` / `review_churn`, `sf accept` (above) goes on to MR preparation; after a
-  ledger code `sf settle` settles a finding; otherwise `sf say` starts another iteration.
+  (`escalated`, `review_disputed`, `review_churn`), or the offer of the simplification pass
+  (`simplify_offered`) put the job in `needs_human`. After a gate code, `review_disputed` /
+  `review_churn` or `simplify_offered`, `sf accept` (above) goes on to MR preparation; after a
+  ledger code `sf settle` settles a finding; after `simplify_offered` `sf simplify` applies the
+  suggestions; otherwise `sf say` starts another iteration.
   When `sf serve` starts, a job found `working`, `preparing_mr` or `awaiting_review` whose runner is
   alive is left alone. Without a live runner, jobs found `working` become `needs_human`
   (`serve_restarted`) and keep their session for `sf say`; jobs found `preparing_mr` become
@@ -686,7 +735,10 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    factory writes `### Review findings not fixed` (SF-052, `withFindings`): every `accepted_risk`,
    `contested` and `left` entry of the ledger, one line each with its id
    (`- R7 [major, accepted risk] \`path\`: problem — <the user's note or the Implementer's>`), the
-   same way.
+   same way; the user's simplifications are not findings and stay out. When the user skipped the
+   simplification pass (SF-055), `### Simplifications not applied` lists its suggestions before it
+   (`withSimplifications`: the job's last `simplify.json`, when it has `skipped_at`; `- \`path\`: what Why: why (saves about N lines; added for R3)`), so they can become a
+   follow-up ticket.
    - `git reset -q --mixed <base_commit>` when the branch has commits on top of `base_commit` (a
      fix after Clean, or a retry after a commit). `HEAD` and the index go back to the base and the
      files stay, so the result is always one commit.
@@ -827,9 +879,9 @@ State layout under `${SF_STATE_DIR}`:
 ```
 sf.sock                                  # 0600, while sf serve runs; one JSON request/response per connection
 dashboard-token                          # 0600, the dashboard token of the last sf serve start
-jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, state, iteration, fixes, gate_fixes, gate_tokens, session_id, created_at, updated_at, error, mr ({host, number, url, state, merge_commit?} or null)
-jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "review" | "review_failed" | "review_message" | "gate_event" | "gate_overridden" | "merge_request" | ...}; what sf watch reads
-jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-override.json,gate-schema.json,gate-output.json,conflict-resolution.diff}
+jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, state, iteration, fixes, gate_fixes, gate_tokens, simplify_iteration (SF-055, absent until the simplification pass starts), session_id, created_at, updated_at, error, mr ({host, number, url, state, merge_commit?} or null)
+jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "review" | "review_failed" | "review_message" | "gate_event" | "gate_overridden" | "simplify" | "simplify_chosen" | "merge_request" | ...}; what sf watch reads
+jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-override.json,simplify.json,gate-schema.json,gate-output.json,conflict-resolution.diff}
 jobs/<workspace>/<ticket>/ledger.json    # the findings ledger (SF-052): one entry per review item of a Fix section, from the first one on
 worktrees/<workspace>/<ticket>/          # the job's worktree (SF_WORKTREE_ROOT), from start to Clean, abort or reset
 jobs/<workspace>/<ticket>/mr.md              # the MR text, once the branch is ready or after a conflict iteration
@@ -963,20 +1015,23 @@ dashboard redesign prototype (variant C, branch `prototype-dashboard-redesign`):
   "Codex asked for fixes more often than the round limit allows. Accept and prepare the MR, tell
   the Implementer what to do, or abort.", `gate_budget`, `gate_failed`, `iteration_limit`,
   `mr_conflict`, a failed push, `serve_restarted`, the ledger's `escalated`, `review_disputed` and
-  `review_churn` (SF-052: the one question with its answers), and a general sentence for any other
-  code.
+  `review_churn` (SF-052: the one question with its answers), `simplify_offered` (SF-055: Simplify
+  or Accept and prepare the MR without the suggestions; the stepper halts at MR preparation), and a
+  general sentence for any other code.
 - **Next action** (a right rail on a wide window, above the tabs below about 1100 px): who acts now
   and for how long (`Now · Implementer`, `Now · Claude review`, `Now · Codex gate`, `Now · Factory`,
   `Your turn`, `Finished`), what they do and what follows, and the actions that move the job on:
   *Approve…* (`ready_for_human_review`, and `needs_human` after a failed push), *Accept and prepare
-  MR…* (only for `gate_rounds`, `gate_budget`, `gate_failed`, `review_churn` and `review_disputed`
+  MR…* (only for `gate_rounds`, `gate_budget`, `gate_failed`, `review_churn`, `review_disputed` and `simplify_offered`
   with a clean Claude review of the last iteration; over a ledger stop its confirmation lists the
   ledger's open findings; the items the ledger dropped do not count against a clean review),
   *Findings to settle* (SF-052: in `needs_human` with `escalated`, `review_disputed` or
   `review_churn`, each escalated or
   contested entry with its question or contest, the reviewer's reason of a dispute, a note field
-  and *Accept risk* / *Must fix*, which post `settle`), *Retry review* (`needs_human` with
-  `review_failed`), *Abort…*, *Archive* for a
+  and *Accept risk* / *Must fix*, which post `settle`), *Simplify…* (SF-055: `needs_human` with
+  `simplify_offered`; its confirmation, and *Accept and prepare MR…*'s there, which reads *Skip and
+  prepare the MR*, list the suggestions of the iteration's `simplify.json`), *Retry review*
+  (`needs_human` with `review_failed`), *Abort…*, *Archive* for a
   finished job, and the message box to the Implementer (say). Under it the **facts**, stacked one
   per row: base, iteration (and MR attempts), Fix sections, gate rounds, gate tokens, the estimated
   cost ("est. $", not a charge; the iterations and their Claude reviews), the update time and the
@@ -1062,7 +1117,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | Path | Answer |
 |---|---|
 | `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, fixes, gate_fixes, gate_tokens, updated_at, created_at, error, and for the board (SF-046) `title` (of the Task file, or `null`), `cost_usd` (the estimate of the iterations and their Claude reviews, or `null`), `review` and `gate` (the last iteration's verdicts: `clean`, `fix`, `failed` or `null`) and `review_ended_at` (the end of that clean or fix Claude review, or `null`); `mr` (the merge request on the Git host or `null`) and `mr_host` (`{host, reason}`: `github`, `gitlab` or `null`, and why the merge request actions are off or `null`) |
-| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied} or {ts, event: "merge_request", action, number, url, state}], mr_title, ledger}`; `mr_title` is the MR text's first line or `null`; `ledger` is `ledger.json` as written (`[]` before the first Fix section, SF-052); `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null` |
+| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override, simplify}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied} or {ts, event: "merge_request", action, number, url, state}], mr_title, ledger}`; `mr_title` is the MR text's first line or `null`; `ledger` is `ledger.json` as written (`[]` before the first Fix section, SF-052); `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null`, `simplify` its `simplify.json` (SF-055) or `null` |
 | `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem}]}`: the registry, the checkout's path, its non-terminal jobs, and why the checkout cannot be used now or `null` |
 | `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, conversation: {message, url}}], archived: [{workspace, ticket, title}]}`: the Task files without a live job; `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
@@ -1078,7 +1133,8 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `POST api/jobs/<ws>/<ticket>/say` | `{"message": "<text>"}` | `Execution.say(ws, ticket, message)`; the text goes as it is (nothing trimmed or split); answered by the job's runner (SF-042), so `500 runner_failed` or `500 runner_timeout` can come back |
 | `POST api/jobs/<ws>/<ticket>/review` | `{}` | `Execution.retryReview(ws, ticket)` (`sf review`): the failed review of the last iteration runs again; result `{state, iteration}`; `409 invalid_state` unless the job is `needs_human` with `review_failed`, `409 review_off` with `SF_REVIEW=off`; answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
 | `POST api/jobs/<ws>/<ticket>/settle` | `{"id": string, "decision": "accept" \| "fix", "note"?: string}` | `Execution.settle(ws, ticket, id, decision, note)` (`sf settle`, SF-052): the settlement of an escalated or contested ledger entry; result `{state, id, status, waiting}`; `409 invalid_state` unless the job is `needs_human` and the entry escalated or contested; `400 invalid_content` for a bad id, decision or note; `500 ledger_invalid` when `ledger.json` cannot be read; answered by the job's runner |
-| `POST api/jobs/<ws>/<ticket>/accept` | `{}` | `Execution.acceptGate(ws, ticket)` (`sf accept`, SF-047): the override of the stopped gate, then MR preparation; result `{state, iteration, branch}`; `409 invalid_state` with the reason unless the job is `needs_human` with `gate_rounds`, `gate_budget`, `gate_failed`, `review_churn` or `review_disputed` and a clean Claude review of the last iteration; the MR preparation's refusals (`409 worktree_missing`, `409 turn_running`); answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
+| `POST api/jobs/<ws>/<ticket>/simplify` | `{}` | `Execution.simplify(ws, ticket)` (`sf simplify`, SF-055): the Fix section "Simplify" with the suggestions of the simplification pass and their ledger entries, then the next iteration; result `{state, iteration, check_after_minutes}`; `409 invalid_state` unless the job is `needs_human` with `simplify_offered` (and never a second time); `409 worktree_missing`; answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
+| `POST api/jobs/<ws>/<ticket>/accept` | `{}` | `Execution.acceptGate(ws, ticket)` (`sf accept`, SF-047): the override of the stopped gate, then MR preparation; result `{state, iteration, branch}`; `409 invalid_state` with the reason unless the job is `needs_human` with `gate_rounds`, `gate_budget`, `gate_failed`, `review_churn`, `review_disputed` or `simplify_offered` (Skip, SF-055) and a clean Claude review of the last iteration; the MR preparation's refusals (`409 worktree_missing`, `409 turn_running`); answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
 | `POST api/jobs/<ws>/<ticket>/mr-create` | `{}` | `Execution.createMergeRequest(ws, ticket)` (`sf mr create`, SF-048): result `{state, branch, title?, link?, mr?: {host, number, url, state, reused}, error?}`; from `ready_for_human_review` it waits for the job's runner like approve; `409` for `invalid_state`, `runner_active`, `mr_token_missing`, `mr_host_unsupported`, `mr_text_missing`; `502` for `mr_auth_failed`, `mr_host_error`, `mr_host_unreachable` |
 | `POST api/jobs/<ws>/<ticket>/mr-merge` | `{}` | `Execution.mergeMergeRequest(ws, ticket)` (`sf mr merge`): result `{state, branch, mr}`; `409 mr_not_mergeable` with the host's reason, `409 mr_not_open`, and the codes above |
 | `POST api/jobs/<ws>/<ticket>/mr-status` | `{}` | `Execution.mergeRequestStatus(ws, ticket)` (`sf mr status`): result `{state, branch, mr, status: {number, url, state, draft, mergeable, reason?, checks?, merge_commit?}}`; every page gets the jobs again, and the pages that show the job its detail (a merge request merged or closed on the host shows so at once) |

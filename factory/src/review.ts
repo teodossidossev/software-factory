@@ -73,7 +73,8 @@ export interface ReviewInput {
   ledger?: LedgerEntry[];
 }
 
-function cutBuffer(buffer: Buffer, maxBytes: number): string {
+// The buffer's first maxBytes bytes as text, never splitting a UTF-8 character.
+export function cutBuffer(buffer: Buffer, maxBytes: number): string {
   let end = maxBytes;
   while (end > 0 && (buffer[end]! & 0xc0) === 0x80) {
     end -= 1;

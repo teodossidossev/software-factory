@@ -63,6 +63,23 @@ The MR text lists the accepted risks, contests and nits left as `### Review find
 The known limit: the factory matches an accepted risk by its id or by the same path and problem
 text; a narrower variant in new words is kept out only by the reviewers' rule in the prompt.
 
+**Amended 2026-11-05 (SF-055): a pass after the reviewers.** Reviewers add; nobody removes (SF-045:
+the security rounds grew `src/redact.ts` to 436 lines and about 500 lines of tests, and no step
+asked whether all of it was needed). Like the intermediate zoom-out of the Elephant–Goldfish model,
+the factory runs one simplification pass per job after the deciding clean verdict, when the job had
+at least one Fix section (`SF_SIMPLIFY`, on by default): a fresh read-only Claude session like the
+review reads the Task file without its Fix sections, the final Patch, the ledger and the files each
+Fix changed, and names what exists only to satisfy a review item and is not needed for the Task's
+goal, its acceptance or a blocker or major finding still valid. It may never propose undoing what a
+`fixed` blocker needed: the prompt names those ids and paths, and the factory drops any suggestion
+that names one or is on the path of one, without trusting the ids the pass gives. It only suggests; the user decides. Simplify writes one Fix section "Simplify" that goes
+through the Claude review and the gate as usual, and records each suggestion in the ledger as the
+user's accepted choice, so a reviewer cannot ask for it back while a defect the removal causes is a
+new finding (or reopens the blocker it undid). Skip prepares the MR with the suggestions listed
+under `### Simplifications not applied`, for a follow-up ticket. A failed pass never stops the job,
+and the pass never runs twice on a job (the job records it before it starts), so it cannot become
+a loop of its own.
+
 ## Context
 
 ADR-0002 made the planning ChatGPT conversation the reviewer and woke it with a scheduled task;

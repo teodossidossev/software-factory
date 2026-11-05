@@ -57,10 +57,10 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 // sf start. Archive of a job card is archiveFinished (terminal only), never the any-state reset.
 // The merge request on the Git host (SF-048): mr-create, mr-merge and mr-status as sf mr create,
 // merge and status, and mergeRequestHost for whether they are on for a job's workspace.
-export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | 'say' | 'retryReview' | 'acceptGate' | 'settle' | 'archiveFinished'
+export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | 'say' | 'retryReview' | 'acceptGate' | 'settle' | 'simplify' | 'archiveFinished'
   | 'createMergeRequest' | 'mergeMergeRequest' | 'mergeRequestStatus' | 'mergeRequestHost'>;
-export type DashboardAction = 'approve' | 'abort' | 'say' | 'review' | 'accept' | 'settle' | 'archive' | 'mr-create' | 'mr-merge' | 'mr-status';
-export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'review', 'accept', 'settle', 'archive', 'mr-create', 'mr-merge', 'mr-status'];
+export type DashboardAction = 'approve' | 'abort' | 'say' | 'review' | 'accept' | 'settle' | 'simplify' | 'archive' | 'mr-create' | 'mr-merge' | 'mr-status';
+export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'review', 'accept', 'settle', 'simplify', 'archive', 'mr-create', 'mr-merge', 'mr-status'];
 
 // The start screen's data and changes: the workspace registry and the Task files (src/setup.ts).
 export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'removeWorkspace' | 'tickets' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'archivedTickets' | 'taskText' | 'taskTitle'>;
@@ -106,6 +106,7 @@ const BODIES = {
   review: { shape: '{}', schema: z.strictObject({}) },
   accept: { shape: '{}', schema: z.strictObject({}) },
   settle: { shape: '{"id": string, "decision": "accept" | "fix", "note"?: string}', schema: z.strictObject({ id: z.string(), decision: z.enum(DECISIONS), note: z.string().optional() }) },
+  simplify: { shape: '{}', schema: z.strictObject({}) },
   archive: { shape: '{}', schema: z.strictObject({}) },
   'mr-create': { shape: '{}', schema: z.strictObject({}) },
   'mr-merge': { shape: '{}', schema: z.strictObject({}) },
@@ -353,6 +354,8 @@ async function jobDetail(jobs: JobStore, job: Job, gate: boolean, actions: Dashb
         gate: (await jobs.readGate(job.workspace, job.ticket, number)) ?? null,
         // The user's override of the stopped gate (SF-047): gate-override.json; null when none.
         gate_override: (await jobs.readGateOverride(job.workspace, job.ticket, number)) ?? null,
+        // The simplification pass (SF-055): simplify.json as written; null when none ran.
+        simplify: (await jobs.readSimplify(job.workspace, job.ticket, number)) ?? null,
       });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -762,6 +765,11 @@ export async function startDashboard(
       // clean Claude review of the last iteration.
       const run = (): Promise<unknown> => actions.acceptGate(workspace, ticket);
       return { route: action, exists, call: (data) => (parse(BODIES.accept.schema, data) ? run : undefined) };
+    }
+    if (action === 'simplify') {
+      // sf simplify (SF-055): the Execution refuses any state but needs_human with simplify_offered.
+      const run = (): Promise<unknown> => actions.simplify(workspace, ticket);
+      return { route: action, exists, call: (data) => (parse(BODIES.simplify.schema, data) ? run : undefined) };
     }
     if (action === 'settle') {
       // sf settle (SF-052): the Execution refuses any state but needs_human, and any entry but an

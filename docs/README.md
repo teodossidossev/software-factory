@@ -5,7 +5,7 @@
 | [project/DECISIONS.md](project/DECISIONS.md) | Approved project decisions |
 | `design/` | Designs: SF-007, SF-009, SF-010 reviewer (history), SF-011, SF-036 (current) |
 | `adr/` | Architecture decision records since SF-011 |
-| `runbooks/` | [chatgpt-connection](runbooks/chatgpt-connection.md): the tunnel and the ChatGPT connector |
+| `runbooks/` | [chatgpt-connection](runbooks/chatgpt-connection.md): the tunnel and the ChatGPT connector; [coordinator](runbooks/coordinator.md): the user's rules for the coordinating session |
 | `tasks/` | Task definitions of SF-001 to SF-010, one or more per SF number |
 | `reports/` | Dated implementation reports. Historical: they are not updated to match later work |
 | [../factory/README.md](../factory/README.md) | The factory: commands, environment, jobs, dashboard |

@@ -1,4 +1,4 @@
-// Unit tests for the MR preparation rules: the commit header, the MR text and the commit body, the
+// Unit tests for the MR preparation rules: the commit header, the MR text and the commit message, the
 // merge request link, the factory's commit (paths, submodules, conflict markers), the push
 // protection, the Handbook section extraction, the MR and conflict prompts, the deny list and the
 // sandbox settings.
@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { sandboxSettings } from '../src/config.js';
-import { commitAndRebase, commitBody, commitPaths, continueRebase, filesWithMarkers, gitFailure, MAX_MR_TEXT_BYTES, mergeRequestLink, mrTextProblem, pushProtection, rebaseInProgress, submodulePaths, withNits } from '../src/mr.js';
+import { commitAndRebase, commitPaths, continueRebase, filesWithMarkers, gitFailure, MAX_MR_TEXT_BYTES, mergeRequestLink, mrMessage, mrTextProblem, pushProtection, rebaseInProgress, submodulePaths, withNits } from '../src/mr.js';
 import { conflictPrompt, FACTORY_PROMPT_RULES, handbookSection, mrPrompt } from '../src/prompts.js';
 import { COMMIT_TYPES, commitHeader, DENIED_TOOLS, headerProblem, testingProblem } from '../src/rules.js';
 import type { ReviewItem } from '../src/review.js';
@@ -125,12 +125,13 @@ test('withNits puts the factory\'s ### Nits not applied list at the end of ## Sp
   assert.equal(cut.split('\n').filter((line) => line.startsWith('- [nit]')).length + Number(rest[1]), 2000);
 });
 
-test('commitBody takes the non-empty lines of the ## Why section, at most five', () => {
-  assert.equal(commitBody(VALID_MR_TEXT), 'x');
-  const text = ['feat(T-1): Change', '', '## What', 'w', '## Why', '', 'one', '  ', 'two', 'three', 'four', 'five', 'six', '### Detail', '## How', 'h', ''].join('\n');
-  assert.equal(commitBody(text), 'one\ntwo\nthree\nfour\nfive');
-  assert.equal(commitBody(text.replace('## Why\n', '## Whyever\n')), '');
-  assert.equal(commitBody('feat(T-1): Change\r\n\r\n## Why\r\nBecause.\r\n## How\r\nh\r\n'), 'Because.');
+test('mrMessage splits the MR text into a title and the whole body, normalised', () => {
+  assert.deepEqual(mrMessage(VALID_MR_TEXT), { title: 'feat(T-1): Change the README', body: VALID_MR_TEXT.split('\n').slice(2, -1).join('\n') });
+  // CRLF becomes LF, trailing whitespace goes per line, blank lines around the body go; # lines stay.
+  const text = 'feat(T-1): Change  \r\n\r\n  \r\n## What \r\nTwo spaces  \r\n\r\n# Not a comment\t\r\n\r\n\r\n';
+  assert.deepEqual(mrMessage(text), { title: 'feat(T-1): Change', body: '## What\nTwo spaces\n\n# Not a comment' });
+  assert.deepEqual(mrMessage('feat(T-1): Change'), { title: 'feat(T-1): Change', body: '' });
+  assert.deepEqual(mrMessage('feat(T-1): Change\n\n \n'), { title: 'feat(T-1): Change', body: '' });
 });
 
 test('commitAndRebase makes one commit of the Patch paths without the submodule pointer; filesWithMarkers finds conflict markers', async () => {
@@ -165,9 +166,25 @@ test('commitAndRebase makes one commit of the Patch paths without the submodule 
     const mrText = VALID_MR_TEXT.replace('## Why\nx', '## Why\nThe README needed it.\nReaders asked.');
     assert.deepEqual(await commitAndRebase(repo, { baseCommit: base, targetCommit: base, mrText }), { kind: 'ready' });
     assert.equal(sh(repo, 'rev-list', '--count', `${base}..HEAD`), '1');
-    assert.equal(sh(repo, 'log', '-1', '--format=%B'), 'feat(T-1): Change the README\n\nThe README needed it.\nReaders asked.');
+    // The commit message is the whole MR text, every # heading kept, and no message file is left.
+    const message = mrMessage(mrText);
+    assert.equal(sh(repo, 'log', '-1', '--format=%B'), `${message.title}\n\n${message.body}`);
+    // The raw commit object: exactly that message and one final newline.
+    const raw = execFileSync('git', ['cat-file', 'commit', 'HEAD'], { cwd: repo, encoding: 'utf8' });
+    assert.equal(raw.slice(raw.indexOf('\n\n') + 2), `${message.title}\n\n${message.body}\n`);
+    assert.match(message.body, /^## What\nx\n## Why\nThe README needed it\.\nReaders asked\.\n## How\n[^]*\n## Checklist\n- \[x\] Branch name$/);
+    await assert.rejects(readFile(join(repo, '.git', 'factory-commit-msg')), { code: 'ENOENT' });
+    // Only the submodule's own commit and the ignored file are left; the message file is no change.
+    assert.equal(sh(repo, 'status', '--porcelain', '--untracked-files=all', '--ignored'), 'M sub\n!! debug.log');
     assert.equal(sh(repo, 'show', '--name-only', '--format=', 'HEAD'), 'f.txt\nnew.txt');
     assert.match(sh(repo, 'ls-tree', 'HEAD', 'sub'), new RegExp(`^160000 commit ${sh(repo, 'rev-parse', `${base}:sub`)}\tsub$`));
+    // A commit that fails (a signing program that fails) is mr_commit_failed; the message file goes too.
+    sh(repo, 'config', 'gpg.program', 'false');
+    sh(repo, 'config', 'commit.gpgsign', 'true');
+    const unsigned = await commitAndRebase(repo, { baseCommit: base, targetCommit: base, mrText });
+    assert.equal(unsigned.kind === 'failed' ? unsigned.failure.code : unsigned.kind, 'mr_commit_failed');
+    await assert.rejects(readFile(join(repo, '.git', 'factory-commit-msg')), { code: 'ENOENT' });
+    sh(repo, 'config', 'commit.gpgsign', 'false');
     // Nothing left to commit against the base: mr_empty.
     sh(repo, 'reset', '-q', '--hard', base);
     const empty = await commitAndRebase(repo, { baseCommit: base, targetCommit: base, mrText });
@@ -321,9 +338,10 @@ test('handbookSection extracts by heading and skips "## " lines inside fences; m
   const prompt = mrPrompt(input);
   assert.match(prompt, /^MR preparation for T-1 on branch T-1-x\. .*\nTarget: origin\/main at a{40}\.\n/);
   assert.ok(prompt.includes(rules) && prompt.endsWith(template));
-  // The MR text only: the factory commits, rebases and pushes; the commit body is ## Why.
+  // The MR text only: the factory commits, rebases and pushes; the commit message is the whole MR text.
   assert.match(prompt, /^Your only task in this turn: write the MR text to \.software-factory\/T-1\.mr\.md\. Its first line is the title, which is also the commit header by the Git rules below;/m);
-  assert.match(prompt, /^The factory commits, rebases and pushes, not you\. .*the body is the non-empty lines of the `## Why` section \(at most five.*Then it rebases that commit onto origin\/main\.$/m);
+  assert.match(prompt, /^The factory commits, rebases and pushes, not you\. It commits the reviewed change as one commit on this branch; the commit message is the whole MR text: the title as the header, then the body\. Then it rebases that commit onto origin\/main\.$/m);
+  assert.doesNotMatch(prompt, /## Why` section|at most five/);
   assert.match(prompt, /^Change no other file and run no Git command that changes the repository; those commands are denied\.$/m);
   assert.doesNotMatch(prompt, /git (add|commit|rebase) /);
   assert.match(prompt, /Do not edit \.software-factory\/T-1\.md;/);

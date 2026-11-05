@@ -79,7 +79,7 @@ export function mrPrompt(input: MrPromptInput): string {
   }
   lines.push(
     `Your only task in this turn: write the MR text to ${path}. Its first line is the title, which is also the commit header by the Git rules below; then a blank line; then the body by the MR template below.`,
-    `The factory commits, rebases and pushes, not you. It commits the reviewed change as one commit on this branch: the header is the title, the body is the non-empty lines of the \`## Why\` section (at most five, so keep it short and say why, not what). Then it rebases that commit onto ${targetRef}.`,
+    `The factory commits, rebases and pushes, not you. It commits the reviewed change as one commit on this branch; the commit message is the whole MR text: the title as the header, then the body. Then it rebases that commit onto ${targetRef}.`,
     `${MR_TESTING_RULE}.`,
     'Change no other file and run no Git command that changes the repository; those commands are denied.',
     `Do not edit ${TASK_DIR}/${ticket}.md; the Context owner owns it.`,

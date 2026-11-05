@@ -2,7 +2,7 @@
 // factory's commit and rebase at Clean, the conflict resolution around it, the push and the merge
 // request link. Git runs here outside the sandbox, so the repository's hooks are switched off.
 // The Execution drives them around the Implementer's turns; this module runs no turn.
-import { type FileHandle, lstat, readFile } from 'node:fs/promises';
+import { type FileHandle, lstat, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
@@ -10,7 +10,7 @@ import { changedPaths, writeResolutionPatch } from './patch.js';
 import { itemLine, type ReviewItem } from './review.js';
 import { type LedgerEntry, notFixed, notFixedLine } from './ledger.js';
 import { type Suggestion, suggestionLine } from './simplify.js';
-import { headerProblem, MR_REQUIRED_HEADINGS, sectionLines, testingProblem } from './rules.js';
+import { headerProblem, MR_REQUIRED_HEADINGS, testingProblem } from './rules.js';
 import { TASK_DIR } from './task-file.js';
 
 const FETCH_TIMEOUT_MS = 60_000;
@@ -19,8 +19,6 @@ const PUSH_TIMEOUT_MS = 120_000;
 const GIT_TIMEOUT_MS = 60_000;
 // Paths per Git call, well below the argv limit.
 const PATH_CHUNK = 200;
-// Lines of the MR text's ## Why section that become the commit body.
-const MAX_BODY_LINES = 5;
 export const MAX_MR_TEXT_BYTES = 64 * 1024;
 
 export interface MrFailure {
@@ -256,13 +254,18 @@ function withSubsection(text: string, heading: string, entries: string[], more: 
   return build(special.end < lines.length ? [...body, ''] : body);
 }
 
-// The commit body: the non-empty lines of the MR text's ## Why section, at most five.
-export function commitBody(text: string): string {
-  return sectionLines(text.split(/\r?\n/), '## Why')
-    .filter((line) => line.trim() !== '')
-    .slice(0, MAX_BODY_LINES)
-    .map((line) => line.trimEnd())
-    .join('\n');
+// The MR text as one message, for the factory's commit and for the forge's merge request alike:
+// the title is the first line, the body is the rest without the blank lines around it. CRLF
+// becomes LF and every line loses its trailing whitespace (a Markdown hard break is lost).
+export function mrMessage(text: string): { title: string; body: string } {
+  const [title = '', ...rest] = text.split(/\r?\n/).map((line) => line.trimEnd());
+  while (rest.length > 0 && rest[0] === '') {
+    rest.shift();
+  }
+  while (rest.length > 0 && rest.at(-1) === '') {
+    rest.pop();
+  }
+  return { title, body: rest.join('\n') };
 }
 
 // The subset of paths that are submodules: a directory in the worktree whose index entry has
@@ -335,10 +338,18 @@ export async function commitAndRebase(cwd: string, input: { baseCommit: string; 
   if (staged.code !== 1) {
     throw new Error(gitFailure(['diff'], staged));
   }
-  const title = mrText.split(/\r?\n/)[0]!;
-  const body = commitBody(mrText);
-  const commitArgs = ['commit', '-q', '-m', title, ...(body !== '' ? ['-m', body] : [])];
-  const committed = await factoryGit(cwd, commitArgs);
+  // The message is the whole MR text, through a file in the Git dir (never a change of the
+  // worktree; runGit has no stdin), kept verbatim so its # headings stay.
+  const { title, body } = mrMessage(mrText);
+  const messagePath = resolve(cwd, (await factoryGitOk(cwd, ['rev-parse', '--git-path', 'factory-commit-msg'])).trim());
+  const commitArgs = ['commit', '-q', '--cleanup=verbatim', '-F', messagePath];
+  let committed: Awaited<ReturnType<typeof runGit>>;
+  try {
+    await writeFile(messagePath, `${body === '' ? title : `${title}\n\n${body}`}\n`);
+    committed = await factoryGit(cwd, commitArgs);
+  } finally {
+    await rm(messagePath, { force: true });
+  }
   if (committed.code !== 0) {
     return { kind: 'failed', failure: { code: 'mr_commit_failed', message: `${gitFailure(commitArgs, committed)}.` } };
   }

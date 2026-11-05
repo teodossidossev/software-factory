@@ -1170,9 +1170,8 @@ jobs/<workspace>/<ticket>.<timestamp>/   # an archived earlier job
 change (`since` in `check` and `SINCE` in `sf status`).
 
 Every stored time is ISO 8601 UTC with `Z`. What the factory shows is local time (SF-049):
-`sf watch`, the dashboard's live log and `SINCE` in `sf status` in the zone the `sf` process runs
-in (`TZ`), the rest of the dashboard in the browser's (`YYYY-MM-DD HH:MM:SS`, the stored UTC value
-on hover).
+`sf watch` and `SINCE` in `sf status` in the zone the `sf` process runs in (`TZ`), the dashboard
+in the browser's (`YYYY-MM-DD HH:MM:SS`, the stored UTC value on hover; `HH:MM` in the Stream).
 
 ## Dashboard
 
@@ -1259,7 +1258,8 @@ and Reviewing.
 
 **The stop table.** A stop is a **decision** (the factory needs the user's choice; nothing failed:
 never red, never "Stopped") or an **error** (its reason in red). The card shows the reason and the
-button; the job's page (SF-078) says the sentence; one table, `STOPS` in `static/app.js`:
+button; the job's page (SF-078) says the sentence in its header, its stop block and its composer;
+one table, `STOPS` in `static/app.js`:
 
 | Code | Kind | Reason on the card | Button |
 |---|---|---|---|
@@ -1291,22 +1291,55 @@ button; the job's page (SF-078) says the sentence; one table, `STOPS` in `static
 N is the number of findings or suggestions the job waits on (`stop` of `api/jobs`); the card's
 second line says "N findings to decide", or "stopped at HH:MM" when there is none.
 
+On the job's page each stop says in its block what it waits on, and its composer offers what moves
+it on, the first one primary (every action is the API route the page already had, with its
+confirmation where it has one; *Tell it to go on* is a message, "Go on." when the box is empty):
+
+| Code | The stop block shows | The composer's actions |
+|---|---|---|
+| `simplify_offered` | each suggestion: its path, what, why and the lines it saves | Simplify, Skip (Accept and prepare MR without them: they are listed in the MR text), Send, Abort… |
+| `escalated` | each escalated finding with the Implementer's question, a note and *Accept risk* / *Must fix* (sent at once) | Send, Abort… |
+| `review_disputed` | each contested finding with the contest, its evidence and the reviewer's reason, a note and *Accept risk* / *Must fix* | Accept and prepare MR (with a clean Claude review), Send, Abort… |
+| `review_churn` | the open findings of the ledger (*Accept risk* / *Must fix* on those to settle) | Accept and prepare MR (with a clean Claude review), Send, Abort… |
+| `gate_rounds` | the last gate's findings (nothing to settle one by one: the API settles only escalated and contested ones) | Accept and prepare MR (with a clean Claude review), Send, Abort… |
+| `gate_budget` | the gate's tokens used | Accept and prepare MR (with a clean Claude review), Send, Abort… |
+| `iteration_limit` | the last verdicts' findings | Send, Restart…, Abort… |
+| `max_turns` | nothing | Tell it to go on, Abort… |
+| `gate_failed` | the gate's error | Accept and prepare MR (with a clean Claude review), Tell it to go on, Abort… |
+| `review_failed` | the review's error | Retry review, Abort… |
+| `serve_restarted` | nothing | Tell it to go on, Restart…, Abort… |
+| `mr_serve_restarted`, `mr_interrupted`, `publish_failed` | nothing | Tell it to go on, Abort… |
+| `session_failed` with the usage-limit message, `sandbox_unavailable` | the message | Tell it to go on, Abort… |
+| `session_failed`, `turn_failed`, `permission_mode_mismatch` | the whole message | Tell it to go on, Restart…, Abort… |
+| `mr_conflict` | the conflicting files | Tell it how (Send), Abort… |
+| `mr_text_missing`, `mr_text_invalid` | the rule it breaks | Send, Abort… |
+| `mr_empty` | nothing | Send, Abort… |
+| `mr_commit_failed`, `mr_rebase_failed`, `mr_failed` | the whole message | Tell it to go on, Abort… |
+| `worktree_remove_failed` | the worktree's path | Tell it to go on, Abort… |
+| `mr_push_failed` | the whole message | Push again (Approve, its confirmation), Abort… |
+| `mr_push_protected` | nothing | Abort… (renaming the branch comes with SF-080's Merge request screen) |
+| any other code | the whole message | Send, Abort… |
+
+A settled finding shows its decision ("Accepted risk", "Must fix") instead of the buttons.
+
 **Full pages.** One view shows at a time: the board, a job's page or a planned ticket's page; the
 URL hash says which, and the browser's Back and Forward move between them: `#<workspace>/<ticket>`
-is the job's page (today's job links keep working), `#<workspace>/<ticket>/changes` and `/mr` the
-same page with its Changes or MR tab selected (their own screens come with SF-079 and SF-080), and
-`#<workspace>/<ticket>/ticket` the planned ticket (until SF-081 the board with the ticket's Task
-drawer open). A hash for a job or ticket the board does not have shows the board. A click on a job
-card opens its page: a header with *← Board*, the key, the title, the state in a sentence, the
-iteration and the branch, and below it the job detail described below (SF-047, until SF-078
-replaces it); the stream follows that job. A job that leaves the board (its ticket archived or
-deleted) goes back to the board. **Keys** on the board: `j` and `k` move between the cards, Enter
-opens the focused card; on a page, Escape goes back one level (Changes or MR to the job's Stream,
-the Stream or a planned ticket to the board) and the focus returns to the card that opened it.
-Alt+Up and Alt+Down move a queued card once SF-071 brings the queue.
+is the job's page on its Stream (today's job links keep working), `#<workspace>/<ticket>/changes`
+and `/mr` the same page on its Changes or Merge request screen, and `#<workspace>/<ticket>/ticket`
+the planned ticket (until SF-081 the board with the ticket's Task drawer open). A hash for a job or
+ticket the board does not have shows the board. A click on a job card opens its page (below); the
+stream follows that job. A job that leaves the board (its ticket archived or deleted) goes back to
+the board. **Keys** on the board: `j` and `k` move between the cards, Enter opens the focused card;
+on a job's page `s`, `c` and `m` switch to the Stream, Changes and Merge request, and on the Stream
+`j` and `k` select an entry, `G` the last one and Enter opens or closes the selected one;
+Ctrl+Enter in the message box sends it; Escape closes an open confirmation, then goes back one
+level (Changes or Merge request to the job's Stream, the Stream or a planned ticket to the board)
+and the focus returns to the card that opened it. Alt+Up and Alt+Down move a queued card once
+SF-071 brings the queue.
 
 **Messages.** The board's messages (a start, a check, an archive, a restore or a delete, and their
-refusals) show in one toast at the top: an ok message goes after 6 s (not while the pointer is on
+refusals), and a short word for an action of the job's page that succeeded, show in one toast at
+the top: an ok message goes after 6 s (not while the pointer is on
 it), an error stays until closed; × and Escape close it; a new message replaces the old one. The
 messages of a form in the drawer stay under the form.
 
@@ -1350,83 +1383,95 @@ from a page, or a reload). The ChatGPT reviewer of SF-031 to SF-035 is gone with
 (SF-040): there is no Reviewer line, no "Set up the reviewer in ChatGPT", no Nudge, no Send test
 event and no Subscriptions.
 
-**The job detail (SF-047).** The job's page shows the job live under its header, in the shape the
-user chose from the dashboard redesign prototype (variant C, branch `prototype-dashboard-redesign`),
-until SF-078 replaces it with the v3 Stream:
+**The job's page (SF-078).** A job opens as a full page, the prototype's (`docs/design/dashboard-v3/`):
+a header, then the Stream with the composer pinned at the bottom.
 
-- **Header**: the ticket key, the state badge and the file badges (`N files`, `M sensitive` in red,
-  `K deleted`), the branch with *Copy checkout command* (`git checkout <branch>` on the clipboard,
-  or shown selected for Ctrl+C when the browser refuses it), and the **pipeline** (`.pipeline`):
-  Implement → Claude review → Codex gate → MR preparation → You. Each step is done (✓), current
-  (with since when: `since 10:05 (4 min)`; the gate from the end of the clean Claude review), halted
-  (red, with its error code) or to do; the gate step reads *off* when `SF_GATE` is off, and
-  *overridden by you* after `sf accept`. A halted job has a line with the code and a plain sentence
-  of what moves it on: `review_failed` "The Claude review could not run. Retry it.", `gate_rounds`
-  "Codex asked for fixes more often than the round limit allows. Accept and prepare the MR, tell
-  the Implementer what to do, or abort.", `gate_budget`, `gate_failed`, `iteration_limit`,
-  `mr_conflict`, a failed push, `serve_restarted`, the ledger's `escalated`, `review_disputed` and
-  `review_churn` (SF-052: the one question with its answers), `simplify_offered` (SF-055: Simplify
-  or Accept and prepare the MR without the suggestions; the stepper halts at MR preparation), and a
-  general sentence for any other code.
-- **Next action** (a right rail on a wide window, above the tabs below about 1100 px): who acts now
-  and for how long (`Now · Implementer`, `Now · Claude review`, `Now · Codex gate`, `Now · Factory`,
-  `Your turn`, `Finished`), what they do and what follows, and the actions that move the job on:
-  *Approve…* (`ready_for_human_review`, `handed_over`, and `needs_human` after a failed push), the
-  hand-over's *Hand over to my checkout* (`ready_for_human_review`, with the reason the automatic
-  hand-over did not happen), *I opened the MR myself* and *Take it back* (`handed_over`, SF-073;
-  the Send button of the message reads *Ask for changes* there), *Accept and prepare
-  MR…* (only for `gate_rounds`, `gate_budget`, `gate_failed`, `review_churn`, `review_disputed` and `simplify_offered`
-  with a clean Claude review of the last iteration; over a ledger stop its confirmation lists the
-  ledger's open findings; the items the ledger dropped do not count against a clean review),
-  *Findings to settle* (SF-052: in `needs_human` with `escalated`, `review_disputed` or
-  `review_churn`, each escalated or
-  contested entry with its question or contest, the reviewer's reason of a dispute, a note field
-  and *Accept risk* / *Must fix*, which post `settle`), *Simplify…* (SF-055: `needs_human` with
-  `simplify_offered`; its confirmation, and *Accept and prepare MR…*'s there, which reads *Skip and
-  prepare the MR*, list the suggestions of the iteration's `simplify.json`), *Retry review*
-  (`needs_human` with `review_failed`), *Abort…*, *Archive* for a
-  finished job, and the message box to the Implementer (say). Under it the **facts**, stacked one
-  per row: base, iteration (and MR attempts), Fix sections, gate rounds, gate tokens, the estimated
-  cost ("est. $", not a charge; the iterations and their Claude reviews), the update time and the
-  worktree path, wrapping inside the rail. Then the **state history** as a compact list: the time,
-  `from → to`, the error code (its message on hover), and the user's override of the gate.
-- **Flat tabs** (no tabs inside tabs; the selected one is kept when another job is opened):
-  **Task** (the Task file through `GET api/tickets/<ws>/<ticket>/task`, Fix sections included, as
-  text; read when the tab opens and again when a Fix section is written; the archived file when the
-  ticket was archived), **Changes** (the default: an iteration picker when there is more than one,
-  the meta line, the Implementer's Report, and the file list next to the Patch; see Files below),
-  **Reviews** (per iteration, newest first, the Claude verdict and the Codex verdict side by side:
-  the verdict with its cost or tokens, the summary, the numbered items, the accepted sensitive
-  paths, or why it failed, or *reviewing now…*, *after a clean Claude review*, *not run* or *off*;
-  an iteration accepted over the gate says so), **MR** (the MR text once there is one, else a note;
-  *Copy MR text* puts the title line, a blank line and the body on the clipboard, or shows the text
-  selected for Ctrl+C when the browser refuses; after `sf accept`, *Codex items not applied* under
-  it lists the items (path, problem, expected) or the gate's error, for a follow-up ticket) and
-  **Live log** (the event stream as `sf watch` prints it, with the filters All, Implementer, Claude
-  review, Codex and State: the `review |` and `codex |` lines of SF-045 and the reviewers' verdict
-  lines go to Claude review and Codex, the state changes, the override and the factory's own lines
-  (placeholders removed, a failed notification) to State, the session to Implementer; new lines follow the filter; follow keeps the newest line in view and scrolling up
-  switches it off).
+- **Header**: *← Board* (Escape), the key, the title and, while the job waits on a stop, its code
+  as a tag; the switch **Stream** (`s`), **Changes (N)** (`c`; N is the `files` of `api/jobs`, left
+  out when it is not a number) and **Merge request** (`m`; off with "No MR text yet: written at
+  Clean" until the MR text is written); then the sentence with the state's dot, "Iteration N" (with
+  "(running)" while the Implementer works on it; numbered as on the card), "$X so far (Claude,
+  est.)" ("$X (Claude, est.)" once it stopped running), "N min elapsed" (since the job's start: to
+  now while it runs, to its last update otherwise) and the branch, a button that copies `git
+  checkout <branch>` (or shows it selected for Ctrl+C when the browser refuses). The sentence: for
+  a stop, the stop table's; else "The Implementer is working on iteration N", "Claude and Codex are
+  reviewing iteration N", "Writing the MR text", "Reviews are clean and the MR text is written.
+  Push when you are happy", "Pushed at 14:05", "Aborted by you. The branch stays"; for a paused job
+  "Paused by you during iteration N" and what Resume and Restart do.
+- **Stream**: one chronological list of the job, from SF-082's entries: the page reads
+  `api/jobs/<ws>/<ticket>/stream?from=0`, then each `next` until `end`, and then follows the
+  stream's `entries` events from the last `next`; a reconnect resumes at the next line to read, and
+  an entry already shown is never shown twice. A separator comes before each prompt ("Iteration N",
+  with the *Fix N* tag, or "MR preparation"). Each entry has its local time, who (Implementer,
+  Claude review, Codex gate, MR writer, Factory, You, State; left out when the same author goes on)
+  and its body: the Implementer's text (clamped at 8 lines with *Show all N lines*); each tool call
+  as one line, its result after it (`Bash npm test → 12 lines`, red when it failed; a click or
+  Enter shows its Input and Output; a result joins its call by id, across pages and live, and one
+  whose call the page has not seen is dropped); the end of a turn; the user's messages; the
+  prompts (*prompt* shows the text; the implement prompt's *Task* shows the Task file and its last
+  Task check; the turn limit's continuation as "Continue where you stopped."; "with the Task file's
+  change" when the prompt carried one); each Fix section with its items as findings and *Show the
+  full prompt*; the Claude review's and the Codex gate's verdicts (clean or asks for fixes, the
+  count, the summary clamped with *Show the whole summary*, the findings with their ledger id or
+  `#n`, severity, path, problem and what is expected); the state changes (`from → to`); the end of
+  an iteration with its files, *Open these changes* (`c`) and its *Report*; the simplification
+  pass's suggestions; the factory's notes. Every path is a link to Changes at that file and
+  iteration. New entries are added at the end; the view follows them only when it was at the
+  bottom.
+- **The stop block**: the last `needs_human` state change, while the job waits on it: "Your
+  decision" (a decision) or "Stopped" (an error, in red), the reason and the code, the sentence,
+  and what the code needs (the second stop table above). An earlier stop stays in the Stream as a
+  plain block with its message.
+- **Composer**, at the bottom: the sentence in bold, the message box (with a hint per state; Enter
+  adds a line, Ctrl+Enter or Send sends) and the actions that apply now, the primary first; one that
+  is off says why in its title. `starting`, `working`, `awaiting_review`: Send, Pause, Abort…;
+  `preparing_mr`: Abort… only (no message is taken while the MR text is written); `paused`: Resume
+  (with the box's text when the Implementer's turn was paused), Restart…, Abort…;
+  `ready_for_human_review`: Approve… (primary), *Hand over to my checkout* (SF-073; the composer
+  says why the automatic hand-over did not happen, when it was refused), Create merge request (when
+  it can be created), Send, Abort…; `handed_over` (SF-073): Approve… (primary), *Ask for changes*
+  (the message, with the edits in the user's checkout), *I opened the MR myself*, *Take it back*,
+  Create merge request, Abort…; `needs_human`: the stop table; `pushed`: no message box, the merge request (`#N`, its
+  state and link) and its status last read, Create merge request (no merge request yet, or a closed
+  one), Merge… (an open one), Refresh MR status (any) and Archive; `aborted`, `failed`: no message
+  box, Restart… and Archive. A confirmation opens inline in the composer, before anything is sent;
+  under it the outcome line and the warning of an unknown outcome, with *Refresh state* when the
+  read after it failed.
+- **Changes** and **Merge request**: until SF-079 and SF-080 they show the old Changes view (the
+  iteration picker, the meta line, the Implementer's Report and the file list next to the Patch;
+  see Files below; a path link selects its iteration and marks its file) and the old MR view (the
+  MR text once there is one, else a note; *Copy MR text* puts the title line, a blank line and the
+  body on the clipboard, or shows the text selected for Ctrl+C when the browser refuses; after `sf
+  accept`, *Codex items not applied* lists the items or the gate's error, for a follow-up ticket).
+
+The old job detail of SF-047 is gone: its pipeline, next-action panel, facts, state history and
+Task, Reviews and Live log tabs are covered by the Stream (the state changes, the verdicts, the
+prompts and the implement prompt's Task) and the composer.
 
 The job's actions take the user's commands with the same meaning as in the terminal: approve (`sf
 approve`, the push of the branch prepared at Clean, with an explicit "as it is" choice for a tip
 edited by hand: `sf approve --as-is`), abort (`sf abort`, with an explicit discard choice that is
 unchecked every time a confirmation opens: `sf abort --discard`), say (`sf say`: a multiline
-message; Enter adds a line, only the Send button submits), Retry review (`sf review`, SF-044, sent
-at once without a confirmation) and Accept and prepare MR (`sf accept`, SF-047: its confirmation
+message; Enter adds a line, Send or Ctrl+Enter sends; *Tell it to go on* sends the box's text, or
+"Go on." when it is empty), Retry review (`sf review`, SF-044, sent at once without a
+confirmation), Simplify and settle (SF-055, SF-052), Pause, Resume and Restart (SF-067) and Accept
+and prepare MR (`sf accept`, SF-047: its confirmation
 names the job and lists the Codex items that will not be applied, path and problem, or the gate's
 error, so the user accepts them knowingly). The merge request (SF-048) has Create merge request
 (`sf mr create`; its confirmation shows the title, the host and the target branch, and from
 `ready_for_human_review` says the branch is pushed first), Merge (`sf mr merge`; its confirmation
-names the number and the target branch) and Refresh MR status (`sf mr status`) in the next-action
-panel, with the merge request's link; the Your turn cards offer Create merge request… next to
+names the number and the target branch) and Refresh MR status (`sf mr status`) in the composer,
+with the merge request's link; the Your turn cards offer Create merge request… next to
 their primary button, the Done cards of pushed jobs Create merge request… or Merge… and the link
 (each opens the job's page with its confirmation). Without the
 token for the workspace's host the buttons stay off and the reason names the missing variable.
-Approve stays for users who open merge requests themselves. Each is one deliberate click; approve, abort and accept ask for a confirmation that names the
-job, explains what follows (the push; the session ends and the worktree stays, or the worktree and
-the branch go with discard; MR preparation without the Codex items) and sends nothing when
-cancelled. The page enables
+Approve stays for users who open merge requests themselves. Each is one deliberate click;
+approve (and Push again), abort, restart, accept (and Skip), Simplify, Create merge request and
+Merge ask first, inline in the composer, with a confirmation that names the job, explains what
+follows (the push; the session ends and the worktree stays, or the worktree and the branch go with
+discard; MR preparation without the Codex items or the suggestions) and sends nothing when
+cancelled; Send, Tell it to go on, Pause, Resume, Retry review, settle, Refresh MR status and
+Archive go at once. The page enables
 a control from the state it shows (approve in `ready_for_human_review` and in `needs_human`
 after a failed push; abort in every non-terminal state; say in `working`, `awaiting_review`,
 `needs_human` and `ready_for_human_review`; accept after a gate code with a clean Claude review)
@@ -1441,7 +1486,7 @@ without JSON, and a 5xx with a factory code are definite. After an unknown outco
 and that job's controls stay off until a state read started after it succeeds (abort stays on while
 a preparation is known to run). A failed read says so and shows a Refresh state button; the next
 `job` event of the stream tries the read too. The read then lifts the hold but not the doubt: the
-page says to check the state and the event stream, in a line of its own that a definite answer
+page says to check the state and the Stream, in a line of its own that a definite answer
 does not replace, until the next action for the job starts; it sends nothing by itself. A read
 without an answer in 10 s counts as failed, and a confirmation that the hold makes unavailable
 closes. Start, approve and abort
@@ -1479,7 +1524,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `api/jobs/<ws>/<ticket>/mr` | the MR text, `text/markdown`; 404 until there is one |
 | `api/jobs/<ws>/<ticket>/stream?from=<line>` | the job's Stream (SF-082) for the v3 job page: `{entries, next, end}`, the entries of at most 2000 lines of `events.jsonl` from the 0-based `from` (default 0, at most 9 digits, else 404), in line order; `next` is the first line not read, `end` whether the file has no more lines (a `from` past the last line: `{entries: [], next: from, end: true}`; a job without `events.jsonl`: `{entries: [], next: 0, end: true}`). Each entry has `t`, `k` (`"<line>"`, or `"<line>.<n>"` when the line gives several), `ts`, `it` (the record's iteration, at least 1) and `who` (`implementer`, `claude`, `codex`, `you`, `factory` or `mr`). Types: `prompt` (`kind` `implement`, `fix` with `fix_n` and the `## Fix N` section of `task.md` as `fix`, `mr`, `conflict` or `continue`; `text` without the factory's rules block, `first`, `task_changed` when the Task-change note was cut from `text`), `user` (the user's message, `text`, `task_changed`), `text`, `tool` (`id`, `line`, `detail`: the input as JSON, at most 16384 characters), `tool_result` (`id`, `out`, `result` at most 16384 characters, `err`; never merged into its `tool`: the client joins them by `id`), `result` (`turns`, `ms`, `cost`), `state` (`from`, `to`, `code`, `msg`), `verdict` (`verdict`, `effective`, and `summary` and `items` with their ledger `id` only when the iteration's `review.json` or `gate.json` matches the record's verdict and item count), `changes` (after a published iteration: `files`, `paths` from `meta.json`), `simplify` (`suggestions`, `saves_lines`) and `note` (every other record, as one `sf watch` line without its time and prefix). An entry depends only on its line and the job's files when it is built (`src/job-stream.ts`); a live `verdict` can lack the ledger ids a later page load has |
 | `api/tickets/<ws>/<ticket>/task` | the ticket's Task file, `text/markdown`, read through the Task file reader (a regular file of valid Task content); `?archived=1` reads `.software-factory/archive/<ticket>.md` instead (any other `archived` value is 404); an unknown workspace or a missing file is an empty 404, a file the reader refuses its refusal (`400 invalid_content`) |
-| `api/stream?job=<ws>/<ticket>&from=<line>` | server-sent events: `jobs` (on connect and on every state change), `workspaces` and `tickets` (as the two endpoints, at the same times and after every setup action from a page), `job` (the job's detail, on connect and when it changes state), `event` (`{line, ts, iteration, type, text}` for every visible line of `events.jsonl` from the 0-based `from`, as `sf watch` formats it), `entries` (`{line, entries}`, the line's entries as `api/jobs/<ws>/<ticket>/stream` gives them, for every line from `from` that has entries, strictly in line order; a line whose build fails is logged and skipped); a comment every 15 s; at most 8 streams, then 503 |
+| `api/stream?job=<ws>/<ticket>&from=<line>` | server-sent events: `jobs` (on connect and on every state change), `workspaces` and `tickets` (as the two endpoints, at the same times and after every setup action from a page), `job` (the job's detail, on connect and when it changes state), `event` (`{line, ts, iteration, type, text}` for every visible line of `events.jsonl` from the 0-based `from`, as `sf watch` formats it; the page reads `entries` since SF-078), `entries` (`{line, entries}`, the line's entries as `api/jobs/<ws>/<ticket>/stream` gives them, for every line from `from` that has entries, strictly in line order; a line whose build fails is logged and skipped); a comment every 15 s; at most 8 streams, then 503 |
 
 | Method and path | JSON body | Calls |
 |---|---|---|
@@ -1536,7 +1581,7 @@ with `internal_error` and a fixed message; the cause is logged, never the body o
 When the page's approve request is cut, the push goes on and its outcome is recorded in the job;
 a second approve of a pushed job is refused (`invalid_state`).
 
-**Files (SF-024, SF-047).** The Changes tab shows the structured file list of the selected
+**Files (SF-024, SF-047).** The Changes screen shows the structured file list of the selected
 iteration next to its Patch, in the shape of IntelliJ's Changes list. One row per file, the file
 name first and its directory after it in a muted colour, the row coloured by status (added green,
 modified blue, deleted grey with the name struck through), labels `sensitive, undeclared` /
@@ -1548,9 +1593,7 @@ hunk headers muted, one block per file. A click on a row marks it and its block 
 diff to that file; a file the Patch omits (binary, or beyond the Patch size limit) says so above
 the Patch; an iteration published before the list existed says so instead of rows. On a narrow
 window the list goes above the Patch.
-The job's header carries badges: `N files`, and `M sensitive` (red) and
-`K deleted` (orange) when the last iteration has undeclared sensitive or deleted files (the board
-card shows the files and the sensitive ones as chips); the
+The job's header shows the count as *Changes (N)*; the
 `ready_for_human_review` job keeps the list of that iteration. The job detail's `iterations`
 carry `files` (the list, or `null`), and `api/jobs` rows `files`, `undeclared`, `deleted`
 counts, `worktree` and `prepared_commit`.
@@ -1558,8 +1601,8 @@ counts, `worktree` and `prepared_commit`.
 ### Checking the page by hand
 
 The automated checks run the page's script against a stand-in document
-(`test/support/fake-dom.ts`), not a browser: layout, focus, Enter in the textarea and the form's
-own behaviour are only checked by hand. With `sf serve` running on a throwaway repository and
+(`test/support/fake-dom.ts`), not a browser: layout, scrolling, focus, Enter in the textarea and
+the look in light and dark are only checked by hand. With `sf serve` running on a throwaway repository and
 `SF_CLAUDE` pointing at `dist/test/support/fake-claude.js` (or a real job you are willing to
 end), in a browser:
 
@@ -1585,21 +1628,25 @@ end), in a browser:
    later without a reload; the Task drawer shows the check above the Task text, the paraphrase
    first. Edit the Task file: the note and the check say stale, and Start's dialog says "Task check:
    stale" and starts once confirmed.
-4. Job page: click a job card: the job opens as a full page with *← Board*, the key and the title,
-   then the job detail (the header, the pipeline, the next-action rail and the tabs); the URL ends
-   in `#<workspace>/<ticket>`; reload: the same page opens. Add `/changes` or `/mr` to the URL:
-   the Changes or MR tab is selected. Escape on `/changes` goes to the job's page, Escape again to
-   the board with the focus on the card; the browser's Back and Forward move between them. Copy
-   checkout command puts `git checkout <branch>` on the clipboard. Escape in an open approve or
-   abort dialog closes only the dialog.
+4. Job page: click a job card: the job opens as a full page next to the prototype's job page
+   (`prototype-full.html`, SF-053, SF-054 and SF-040 there), in light and dark: the header (*←
+   Board*, the key, the title, the switch, the sentence with its dot, the iteration, the cost, the
+   elapsed time and the branch), the Stream and the composer at the bottom. The URL ends in
+   `#<workspace>/<ticket>`; reload: the same page opens, the Stream read again. `c`, `m` and `s`
+   switch the screens (`m` says "No MR text yet" before MR preparation); add `/changes` or `/mr` to
+   the URL: that screen opens. Escape on Changes goes to the Stream, Escape again to the board with
+   the focus on the card; the browser's Back and Forward move between them. A click on the branch
+   puts `git checkout <branch>` on the clipboard. Escape in an open confirmation closes only it.
+   List each difference from the prototype with its reason.
 5. Keys: on the board `j` and `k` move the focus between the cards, Enter opens the focused one.
 6. Say: on the page of a job in `awaiting_review` type two lines (Enter adds a line and submits
-   nothing), click Send: "Sent" and an empty box; while that turn runs, send another: "Queued";
-   `sf watch` shows both prompts as typed.
-7. Abort: click Abort…; the dialog names the job and the branch and says the files stay; Cancel:
-   `sf status` is unchanged. Open it again: the discard box is unchecked; tick it: the button
-   reads "Abort and discard the branch" in red; Cancel and reopen: unchecked again. Confirm a
-   plain abort on a job you can lose: "Aborted; the branch … stays"; the card moves to Done.
+   nothing), click Send: "Sent" and an empty box, and the message appears in the Stream; while
+   that turn runs, send another with Ctrl+Enter: "Queued"; `sf watch` shows both prompts as typed.
+7. Abort: click Abort…; the confirmation opens inside the composer, names the job and the branch
+   and says the files stay; Cancel: `sf status` is unchanged. Open it again: the discard box is
+   unchecked; tick it: the button reads "Abort and discard the branch"; Cancel and reopen:
+   unchecked again. Confirm a plain abort on a job you can lose: "Aborted; the branch … stays";
+   the card moves to Done.
 8. Approve: on a Your turn card in `ready_for_human_review` click *Review the MR and push*: the
    job's page opens with the approve dialog; confirm: "Pushed …" with the title and the merge
    request link to copy (or the note to open it by hand); the card moves to Done.
@@ -1625,21 +1672,31 @@ end), in a browser:
    URL is in the box and Copy puts it on the clipboard. Once ChatGPT wrote the Task file, Start
    appears on the card. Remove on a workspace with a live job is off with the reason. Nowhere on
    the page is there a Reviewer line, a reviewer setup, Nudge, Send test event or Subscriptions.
-14. Tabs: Changes opens by default; Task shows the Task file with its Fix sections; Reviews shows
-   both verdicts of every iteration side by side; MR says there is no text until MR preparation
-   wrote it, then shows it, and Copy MR text puts the title, a blank line and the body on the
-   clipboard (paste it into the MR form); Live log follows the job and its filters keep one source;
-   the chosen tab stays when another job is opened. The facts' worktree path wraps inside the rail.
+14. Stream: a running job's entries arrive live at the bottom and the view follows them while it is
+   at the bottom (scroll up: it stays where you are). Each tool call is one line with its result;
+   `j`, `k`, `G` and Enter select and open entries; long texts say *Show all N lines*; the implement
+   prompt's *Task* shows the Task file with its Fix sections and its Task check. A path in a
+   verdict opens Changes at that iteration with its file marked. Stop `sf serve` and start it again
+   (open the new URL): the Stream reads again and shows no entry twice. Merge request says there
+   is no text until MR preparation wrote it, then shows it, and Copy MR text puts the title, a
+   blank line and the body on the clipboard.
 15. Changes: the file list in the IntelliJ shape and order beside the Patch; click a row: the
    Patch scrolls to that file and marks it; a binary file says the Patch omits it.
-16. Layout: Tab reaches each card, its buttons, the job page's *← Board*, the tabs, Approve…,
-   Abort…, the dialog's buttons, the textarea and Send. Between about 760 and 1100 px the
-   next-action panel sits above the tabs; on a phone the pipeline stacks.
+16. Layout: Tab reaches each card, its buttons, the job page's *← Board*, the switch, the Stream's
+   toggles and path links, the composer's message box and buttons and a confirmation's buttons.
+   On a phone the header wraps and the composer's buttons go under the message box.
 17. Accept and prepare MR (a fake Codex scripted to ask for fixes past `SF_GATE_MAX_ROUNDS=1`): the
    job is under Your turn with "Codex round limit reached", `gate_rounds` and *Decide N findings*;
-   the rail offers *Accept and prepare MR…*; its dialog lists the Codex items; Cancel sends nothing;
-   confirm: the job goes to MR preparation and Your turn, the state history shows the override, and
-   the MR tab lists the Codex items not applied.
+   its page's stop block says "Your decision" (never red) with the last gate's findings, and the
+   composer offers *Accept and prepare MR* first; its confirmation lists the Codex items; Cancel
+   sends nothing; confirm: the job goes to MR preparation and Your turn, the Stream shows the state
+   changes, and Merge request lists the Codex items not applied.
+18. Simplification (a fake simplification pass scripted to suggest something): the stop block says
+   "Your decision" with each suggestion (its path, what, why and the lines it saves) and no error
+   marker anywhere; the composer offers Simplify and Skip, each with its confirmation listing the
+   suggestions. An escalated finding (a fake Implementer that escalates) shows its question, a
+   note field and *Accept risk* / *Must fix*: a click settles it at once and the entry then shows
+   the decision.
 
 ## Workspace registry
 

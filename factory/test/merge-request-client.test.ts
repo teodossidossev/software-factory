@@ -1,9 +1,9 @@
 // The merge request in static/app.js (SF-048), run under node:vm against the fake page of
-// test/support/fake-dom.ts: Create merge request…, Merge… and Refresh MR status in the job drawer's
-// next-action panel with their confirmations (the title, the target branch and the number), the
-// link, the actions off with the missing variable named, and the buttons and the link on the Your
-// turn and Done board cards, whose confirmations open on the job's page (SF-077). Script checks,
-// not browser acceptance.
+// test/support/fake-dom.ts: Create merge request, Merge… and Refresh MR status in the job page's
+// composer (SF-078) with their inline confirmations (the title, the target branch and the number),
+// the link, the actions off with the missing variable named in their title, and the buttons and the
+// link on the Your turn and Done board cards, whose confirmations open on the job's page (SF-077).
+// Script checks, not browser acceptance.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { type FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
@@ -57,7 +57,12 @@ async function show(page: Page, row: Job): Promise<void> {
 }
 
 const posts = (page: Page, action: string): FetchRequest[] => page.requests.filter((request) => request.method === 'POST' && request.path === `api/jobs/app/T-1/${action}`);
-const state = (page: Page, id: string): [boolean, boolean] => [page.$(id).hidden, page.$(id).disabled];
+// A composer button as [missing, disabled]: the composer shows only the actions that apply.
+const state = (page: Page, id: string): [boolean, boolean] => {
+  const node = page.document.getElementById(id);
+  return node === null ? [true, true] : [false, node.disabled];
+};
+const missing = (page: Page, id: string): boolean => page.document.getElementById(id) === null;
 const card = (page: Page, key: string): FakeElement => ['you', 'done'].flatMap((column) => page.$(`list-${column}`).children as FakeElement[])
   .find((item) => item.classList?.contains('card') && item.dataset.open === key)!;
 const cardButtons = (item: FakeElement): string[] => item.all().filter((element) => element.tagName === 'BUTTON' && element.className.startsWith('btn')).map((element) => element.textContent);
@@ -65,8 +70,8 @@ const links = (item: FakeElement): FakeElement[] => item.all().filter((element) 
 
 test('mr client: Create merge request… on a pushed job, confirmed with the title and the target; one POST; the outcome with the link', async () => {
   const page = await open([job('T-1', 'pushed')], '#app/T-1');
-  assert.deepEqual([state(page, 'mr-create-button'), page.$('mr-merge-button').hidden, page.$('mr-status-button').hidden, page.$('mr-line').hidden], [[false, false], true, true, true]);
-  assert.match(page.$('next-why').textContent, /^Create the merge request here \(feat\(T-1\): Demo\)/);
+  assert.deepEqual([state(page, 'mr-create-button'), missing(page, 'mr-merge-button'), missing(page, 'mr-status-button'), missing(page, 'mr-line')], [[false, false], true, true, true]);
+  assert.deepEqual(page.$('acts').children.map((button) => button.textContent), ['Create merge request', 'Archive']);
   page.$('mr-create-button').click();
   assert.equal(page.$('confirm-title').textContent, 'Create merge request app/T-1?');
   assert.equal(page.$('confirm-text').textContent, 'Opens a merge request on GitHub from T-1-demo into main, titled “feat(T-1): Demo”, with the rest of the MR text as its description. One already open for the branch is reused.');
@@ -83,12 +88,11 @@ test('mr client: Create merge request… on a pushed job, confirmed with the tit
   await page.flush();
   assert.equal(page.$('action-status').textContent, `Merge request #1 opened: ${URL_1}`);
 
-  // Opened: the link in the panel, Merge… and Refresh MR status instead of Create.
+  // Opened: the link in the composer, Merge… and Refresh MR status instead of Create.
   await show(page, job('T-1', 'pushed', { mr: { host: 'github', number: 1, url: URL_1, state: 'open' } }));
-  assert.equal(page.$('next-headline').textContent, 'Pushed T-1-demo; merge request #1 is open.');
   const link = links(page.$('mr-line'))[0]!;
   assert.deepEqual([page.$('mr-line').textContent, link.href, link.rel], [`Merge request #1 (open): ${URL_1}`, URL_1, 'noopener noreferrer']);
-  assert.deepEqual([page.$('mr-create-button').hidden, state(page, 'mr-merge-button'), state(page, 'mr-status-button')], [true, [false, false], [false, false]]);
+  assert.deepEqual([missing(page, 'mr-create-button'), state(page, 'mr-merge-button'), state(page, 'mr-status-button')], [true, [false, false], [false, false]]);
 });
 
 test('mr client: Merge… names the number and the target; the host\'s refusal is shown; Refresh MR status shows mergeable, the reason and the checks', async () => {
@@ -112,12 +116,12 @@ test('mr client: Merge… names the number and the target; the host\'s refusal i
   await page.flush();
   const said = 'On the host: #4 open, not mergeable: it has conflicts with main, checks: 1 passed, 1 failed.';
   assert.equal(page.$('action-status').textContent, said);
-  assert.deepEqual([page.$('mr-status-line').hidden, page.$('mr-status-line').textContent], [false, said]);
+  assert.equal(page.$('mr-status-line').textContent, said);
 
-  // Merged: no Create, no Merge; the headline says so.
+  // Merged: no Create, no Merge; the merge request line says so.
   await show(page, job('T-1', 'pushed', { mr: { host: 'github', number: 4, url: URL_1, state: 'merged', merge_commit: 'c'.repeat(40) } }));
-  assert.equal(page.$('next-headline').textContent, 'Merged merge request #4 into main.');
-  assert.deepEqual([page.$('mr-create-button').hidden, page.$('mr-merge-button').hidden, page.$('mr-status-button').hidden], [true, true, false]);
+  assert.equal(page.$('mr-line').textContent, `Merge request #4 (merged): ${URL_1}`);
+  assert.deepEqual([missing(page, 'mr-create-button'), missing(page, 'mr-merge-button'), missing(page, 'mr-status-button')], [true, true, false]);
 });
 
 test('mr client: the status line read before a merge never contradicts the merge request the job shows now', async () => {
@@ -127,17 +131,17 @@ test('mr client: the status line read before a merge never contradicts the merge
   await page.flush();
   posts(page, 'mr-status')[0]!.respond(200, { ok: true, result: { state: 'pushed', branch: 'T-1-demo', mr: opened.mr, status: { number: 5, url: URL_1, state: 'open', draft: false, mergeable: true, checks: '2 passed' } } });
   await page.flush();
-  assert.deepEqual([page.$('mr-status-line').hidden, page.$('mr-status-line').textContent], [false, 'On the host: #5 open, mergeable, checks: 2 passed.']);
+  assert.equal(page.$('mr-status-line').textContent, 'On the host: #5 open, mergeable, checks: 2 passed.');
   // Merged (here, on the host or from another page): the job's update arrives; the open status goes.
   await show(page, job('T-1', 'pushed', { mr: { host: 'github', number: 5, url: URL_1, state: 'merged' } }));
   assert.equal(page.$('mr-line').textContent, `Merge request #5 (merged): ${URL_1}`);
-  assert.deepEqual([page.$('mr-status-line').hidden, page.$('mr-status-line').textContent], [true, '']);
+  assert.equal(missing(page, 'mr-status-line'), true);
   // A later job update with the same merged state does not bring the old line back.
   await show(page, job('T-1', 'pushed', { mr: { host: 'github', number: 5, url: URL_1, state: 'merged' } }));
-  assert.equal(page.$('mr-status-line').hidden, true);
+  assert.equal(missing(page, 'mr-status-line'), true);
   // A new merge request (another number) never shows the old one's status either.
   await show(page, job('T-1', 'pushed', { mr: { host: 'github', number: 6, url: URL_1, state: 'open' } }));
-  assert.equal(page.$('mr-status-line').hidden, true);
+  assert.equal(missing(page, 'mr-status-line'), true);
 
   // A status that sees the merge before the job's update does: hidden while the job says open,
   // shown once the update records the merge.
@@ -147,15 +151,15 @@ test('mr client: the status line read before a merge never contradicts the merge
   posts(page, 'mr-status')[1]!.respond(200, { ok: true, result: { state: 'pushed', branch: 'T-1-demo', mr: { number: 6, state: 'merged' }, status: { number: 6, url: URL_1, state: 'merged', draft: false, mergeable: false, reason: 'it is merged' } } });
   await page.flush();
   await show(page, job('T-1', 'pushed', { mr: { host: 'github', number: 6, url: URL_1, state: 'open' } }));
-  assert.equal(page.$('mr-status-line').hidden, true);
+  assert.equal(missing(page, 'mr-status-line'), true);
   await show(page, job('T-1', 'pushed', { mr: { host: 'github', number: 6, url: URL_1, state: 'merged' } }));
-  assert.deepEqual([page.$('mr-status-line').hidden, page.$('mr-status-line').textContent], [false, 'On the host: #6 merged.']);
+  assert.equal(page.$('mr-status-line').textContent, 'On the host: #6 merged.');
 });
 
 test('mr client: the actions off name the missing variable; from ready_for_human_review Create pushes first; a link that is not https stays text', async () => {
   const page = await open([job('T-1', 'pushed', { mr_host: { host: 'github', reason: 'SF_GITHUB_TOKEN is not set in the environment file' } })], '#app/T-1');
   assert.deepEqual(state(page, 'mr-create-button'), [false, true]);
-  assert.match(page.$('action-reasons').textContent, /Create merge request: SF_GITHUB_TOKEN is not set in the environment file\./);
+  assert.equal(page.$('mr-create-button').getAttribute('title'), 'SF_GITHUB_TOKEN is not set in the environment file.');
   page.$('mr-create-button').click();
   assert.equal(page.$('confirm').hidden, true);
 

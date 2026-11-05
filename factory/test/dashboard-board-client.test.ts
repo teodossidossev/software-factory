@@ -460,15 +460,18 @@ test('board client: a stop card\'s button opens the job page at the message box,
   const page = await openBoard([turns, churn], []);
   button(card(page, 'app/M'), 'Tell it to go on')!.click();
   await page.flush();
-  assert.equal(page.document.activeElement === page.$('say-input'), false);
+  assert.equal(page.document.activeElement === page.$('msg'), false);
   page.streams.at(-1)!.emit('job', detail(turns));
-  assert.equal(page.document.activeElement, page.$('say-input'));
+  assert.equal(page.document.activeElement, page.$('msg'));
   (page.$('jhead').children[0] as FakeElement).click();
-  const scrolled = page.$('next-panel').scrolledIntoView;
+  // The stop block comes with the Stream: its needs_human state entry.
+  const stop = { k: '0', ts: minutesAgo(1), it: 1, who: 'factory', t: 'state', from: 'awaiting_review', to: 'needs_human', code: 'review_churn', msg: 'x' };
   button(card(page, 'app/C'), 'Decide 1 finding')!.click();
   await page.flush();
   page.streams.at(-1)!.emit('job', detail(churn));
-  assert.equal(page.$('next-panel').scrolledIntoView, scrolled + 1);
+  assert.equal(page.document.getElementById('stopblock'), null);
+  page.streams.at(-1)!.emit('entries', { line: 0, entries: [stop] });
+  assert.equal(page.$('stopblock').scrolledIntoView, 1);
 });
 
 test('board client: the job page says the sentence of the stop with the numbers of the job', async () => {
@@ -512,7 +515,7 @@ test('board client: the iteration is numbered from 1 and the same on the card an
     assert.match(part(card(page, `app/${row.ticket}`), 'meta')!.textContent, new RegExp(`^${text}(?: ·|$)`), row.ticket);
     card(page, `app/${row.ticket}`).click();
     await page.flush();
-    assert.ok(page.$('jhead').all().some((element) => element.textContent === text), row.ticket);
+    assert.ok(page.$('jhead').all().some((element) => new RegExp(`^${text}(?: \\(running\\))?$`).test(element.textContent)), row.ticket);
     page.key('Escape');
   }
 });
@@ -565,15 +568,17 @@ test('board client: a job card opens the job as a full page, following it on the
   card(page, 'app/T-1').click();
   await page.flush();
   assert.ok(onJobPage(page));
-  assert.deepEqual([page.$('drawer').hidden, page.$('detail').hidden], [true, true]);
+  assert.deepEqual([page.$('drawer').hidden, page.$('scrStream').hidden], [true, false]);
+  // The Stream is read first, then followed live from the next line.
+  assert.deepEqual(page.requests.filter((request) => request.path.includes('/stream')).map((request) => request.path), ['api/jobs/app/T-1/stream?from=0']);
   assert.equal(page.streams.at(-1)!.url, 'api/stream?job=app%2FT-1&from=0');
   assert.equal(page.location.hash, '#app/T-1');
-  // The header: ← Board, the key and the title; the job detail below it.
+  // The header: ← Board, the key and the title; the Stream and the composer below it.
   const head = page.$('jhead');
   assert.deepEqual([head.children[0]!.textContent, (head.children[0] as FakeElement).className], ['← Board', 'btn back']);
   assert.equal(head.children[1]!.textContent, 'T-1Title of T-1');
   page.streams.at(-1)!.emit('job', detail(job('T-1', 'working')));
-  assert.deepEqual([page.$('detail').hidden, page.$('job-ticket').textContent], [false, 'T-1']);
+  assert.match(page.$('composer-sentence').textContent, /^The Implementer is working on iteration 2\./);
   assert.equal(page.$('job').className, 'st-working');
   // ← Board: the board again, the stream follows no job, the focus on the card that opened it.
   (head.children[0] as FakeElement).click();
@@ -595,9 +600,14 @@ test('board client: a job card opens the job as a full page, following it on the
 test('board client: the hashes: #ws/T the job, /changes and /mr its tab, /ticket the planned ticket, an unknown one the board; Back and Forward move between them', async () => {
   const jobs = [job('T-1', 'working'), { ...job('T-9', 'pushed'), workspace: 'web' }];
   const tickets = [ticket('app/T-2'), ticket('app/T-1', { job: 'working' })];
-  const selected = (page: Page): string => page.$('job-tabs').querySelectorAll('button').find((tab) => tab.getAttribute('aria-selected') === 'true')!.dataset.tab!;
+  // The screen the header's switch selects, and the one shown.
+  const selected = (page: Page): string => {
+    const tab = page.$('jhead').querySelectorAll('[role="tab"]').find((element) => element.getAttribute('aria-selected') === 'true')!.dataset.goto!;
+    assert.deepEqual(['stream', 'changes', 'mr'].filter((screen) => !page.$(`scr${screen === 'mr' ? 'Mr' : screen[0]!.toUpperCase() + screen.slice(1)}`).hidden), [tab]);
+    return tab;
+  };
   for (const [hash, check] of [
-    ['#app/T-1', (page: Page) => assert.deepEqual([onJobPage(page), selected(page)], [true, 'changes'])],
+    ['#app/T-1', (page: Page) => assert.deepEqual([onJobPage(page), selected(page)], [true, 'stream'])],
     ['#app/T-1/changes', (page: Page) => assert.deepEqual([onJobPage(page), selected(page)], [true, 'changes'])],
     ['#app/T-1/mr', (page: Page) => assert.deepEqual([onJobPage(page), selected(page)], [true, 'mr'])],
     ['#web/T-9', (page: Page) => assert.equal(page.streams.at(-1)!.url, 'api/stream?job=web%2FT-9&from=0')],
@@ -609,8 +619,8 @@ test('board client: the hashes: #ws/T the job, /changes and /mr its tab, /ticket
   ] as const) {
     const page = await openBoard(jobs, tickets, [workspace('app'), workspace('web')], hash);
     check(page);
-    // The scr screens of SF-078 to SF-080 stay empty; section#ticket stays empty until SF-081.
-    assert.deepEqual(['scrStream', 'scrChanges', 'scrMr', 'ticket'].map((id) => page.$(id).children.length), [0, 0, 0, 0], hash);
+    // section#ticket stays empty until SF-081.
+    assert.equal(page.$('ticket').children.length, 0, hash);
   }
 
   const page = await openBoard(jobs, tickets, [workspace('app'), workspace('web')]);
@@ -622,7 +632,7 @@ test('board client: the hashes: #ws/T the job, /changes and /mr its tab, /ticket
   await visit('#app/T-1/mr');
   assert.deepEqual([onJobPage(page), selected(page)], [true, 'mr']);
   await visit('#app/T-1');
-  assert.deepEqual([onJobPage(page), selected(page)], [true, 'log']);
+  assert.deepEqual([onJobPage(page), selected(page)], [true, 'stream']);
   await visit('#app/T-2/ticket');
   assert.deepEqual([onJobPage(page), page.$('drawer').hidden, page.streams.at(-1)!.url], [false, false, 'api/stream?']);
   await visit('');
@@ -656,9 +666,9 @@ test('board client: Escape on a job screen goes to its Stream, from the Stream t
   page.$('drawer').dispatch('keydown', { key: 'Escape' });
   assert.deepEqual([page.$('drawer').hidden, page.location.hash, page.document.activeElement], [true, '#', card(page, 'app/T-2')]);
   // A key in a text field is not the board's.
-  page.$('say-input').focus();
+  page.$('msg').focus();
   page.key('j');
-  assert.equal(page.document.activeElement, page.$('say-input'));
+  assert.equal(page.document.activeElement, page.$('msg'));
 });
 
 test('board client: api/jobs is read again every 15 s only while a card runs and the page is visible', async () => {

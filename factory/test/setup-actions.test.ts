@@ -176,10 +176,10 @@ test('client: a Queue card has Archive and Delete…; delete asks first; the arc
   page.window.dispatch('hashchange');
   await page.flush();
   page.streams.at(-1)!.emit('job', { job: finished, iterations: [], mr: false, history: [] });
-  assert.deepEqual([page.$('job').hidden, page.$('detail').hidden], [false, false]);
+  assert.deepEqual([page.$('job').hidden, page.$('scrStream').hidden], [false, false]);
   page.streams.at(-1)!.emit('jobs', { jobs: [] });
   await page.flush();
-  assert.deepEqual([page.$('job').hidden, page.$('detail').hidden, page.$('board').hidden], [true, true, false]);
+  assert.deepEqual([page.$('job').hidden, page.$('board').hidden], [true, false]);
   assert.equal(page.$('drawer').hidden, true);
   assert.doesNotMatch(page.streams.at(-1)!.url, /job=/);
 });
@@ -211,8 +211,11 @@ test('dashboard: a finished job is archived from its card; a live one is refused
   await page.flush();
   const stream = page.streams.at(-1)!;
   stream.emit('job', { job: shape('aborted'), iterations: [], mr: false, history: [] });
-  assert.deepEqual([page.$('archive-job-button').hidden, page.$('approve-button').hidden, page.$('abort-button').hidden], [false, true, true]);
-  page.$('archive-job-button').click();
+  // The composer of a finished job: Restart… and Archive, no Approve or Abort.
+  const shown = (id: string): boolean => page.document.getElementById(id) !== null;
+  assert.deepEqual([shown('archive-button'), shown('approve-button'), shown('abort-button')], [true, false, false]);
+  assert.deepEqual(page.$('acts').children.map((button) => button.textContent), ['Restart…', 'Archive']);
+  page.$('archive-button').click();
   await page.flush();
   const post = page.requests.filter((request) => request.method === 'POST');
   assert.deepEqual([post.length, post[0]!.path, post[0]!.body], [1, 'api/jobs/app/T-1/archive', '{}']);
@@ -220,5 +223,5 @@ test('dashboard: a finished job is archived from its card; a live one is refused
   await page.flush();
   assert.equal(page.$('action-status').textContent, 'Archived: the job left the list (its history is in jobs/app/T-1.20261103T100000Z); the branch T-1-x is untouched.');
   stream.emit('job', { job: shape('working'), iterations: [], mr: false, history: [] });
-  assert.deepEqual([page.$('archive-job-button').hidden, page.$('abort-button').hidden], [true, false]);
+  assert.deepEqual([shown('archive-button'), shown('abort-button')], [false, true]);
 });

@@ -1,9 +1,10 @@
 // Behaviour of static/app.js, run under node:vm against the fake page of test/support/fake-dom.ts:
 // the action matrix per state, the confirmations (cancel, discard, double submission), the say
 // draft rules, the outcome texts and what happens when the selection changes while a request is
-// out. The job opens as its full page (the URL's #<ws>/<ticket> or its card, SF-077); the board
-// itself is tested in dashboard-board-client.test.ts, the job detail's views in
-// dashboard-job-client.test.ts. These are script checks, not browser acceptance: the manual steps
+// out. The job opens as its full page (the URL's #<ws>/<ticket> or its card, SF-077) and its actions
+// are the composer's buttons (SF-078); the board itself is tested in dashboard-board-client.test.ts,
+// the job page's header and screens in dashboard-job-client.test.ts, its Stream and composer in
+// dashboard-stream-client.test.ts. These are script checks, not browser acceptance: the manual steps
 // are in factory/README.md.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -21,6 +22,7 @@ interface JobShape {
   // The prepared branch tip (set for ready_for_human_review and a failed push) and the worktree.
   prepared_commit?: string | null;
   worktree?: string | null;
+  error?: { code: string; message: string } | null;
 }
 
 function job(shape: JobShape) {
@@ -28,7 +30,7 @@ function job(shape: JobShape) {
   return {
     workspace: shape.workspace, ticket: shape.ticket, branch: `${shape.ticket}-demo`, base: 'main', state: shape.state,
     iteration: shape.iteration ?? 1, mr_attempts: shape.mr_attempts ?? 0, updated_at: shape.updated_at ?? '2026-11-01T10:05:00.000Z',
-    created_at: '2026-11-01T10:00:00.000Z', error: null,
+    created_at: '2026-11-01T10:00:00.000Z', error: shape.error ?? null,
     prepared_commit: shape.prepared_commit !== undefined ? shape.prepared_commit : (prepared ? 'a'.repeat(40) : null),
     worktree: shape.worktree !== undefined ? shape.worktree : (prepared ? null : `/wt/${shape.ticket}`),
     files: 0, undeclared: 0, deleted: 0,
@@ -70,15 +72,36 @@ const posts = (page: Page): FetchRequest[] => page.requests.filter((request) => 
 const status = (page: Page): string => [page.$('action-status').textContent, page.$('action-doubt').textContent].filter((text) => text !== '').join('\n');
 const refreshes = (page: Page): FetchRequest[] => page.requests.filter((request) => request.method === 'GET' && request.path === 'api/jobs/app/T-1');
 
+// A button of the composer by its id: the composer shows only the actions that apply now, so one
+// it does not show reads as a hidden and disabled stand-in that no click reaches.
+function control(page: Page, id: string): FakeElement {
+  const node = page.document.getElementById(id);
+  if (node !== null) {
+    return node;
+  }
+  const missing = page.document.createElement('button');
+  missing.hidden = true;
+  missing.disabled = true;
+  return missing;
+}
+// Why a composer button is off: its title; "not shown" when the composer does not show it.
+const reasonOf = (page: Page, id: string): string => {
+  const node = page.document.getElementById(id);
+  return node === null ? 'not shown' : (node.getAttribute('title') ?? '');
+};
+const send = (page: Page): void => control(page, 'say-button').click();
+// The key in the job page's header.
+const headKey = (page: Page): string => ((page.$('jhead').children[1] as FakeElement).children[0] as FakeElement).textContent;
+
 async function sendDraft(page: Page, text: string): Promise<void> {
-  page.$('say-input').value = text;
-  page.$('say-input').dispatch('input');
-  page.$('say-form').dispatch('submit');
+  page.$('msg').value = text;
+  page.$('msg').dispatch('input');
+  send(page);
   await page.flush();
 }
 
-function assertControls(page: Page, label: string, approve: boolean, abort: boolean, send: boolean): void {
-  assert.deepEqual([!page.$('approve-button').disabled, !page.$('abort-button').disabled, !page.$('say-button').disabled], [approve, abort, send], label);
+function assertControls(page: Page, label: string, approve: boolean, abort: boolean, sendOn: boolean): void {
+  assert.deepEqual([!control(page, 'approve-button').disabled, !control(page, 'abort-button').disabled, !control(page, 'say-button').disabled], [approve, abort, sendOn], label);
 }
 
 // The card of a job on the board: a click opens the job's page.
@@ -94,70 +117,75 @@ async function selectJob(page: Page, key: string): Promise<void> {
 
 test('client: the controls follow the state matrix and the pending action', async () => {
   const page = await openPage();
-  const matrix: Array<[string, number, boolean, boolean, boolean, Partial<JobShape>?]> = [
-    // state, mr_attempts, approve on, abort on, say on
-    ['starting', 0, false, true, false],
-    ['working', 0, false, true, true],
-    ['awaiting_review', 0, false, true, true],
-    ['needs_human', 0, false, true, true],
-    ['needs_human', 1, false, true, true],
-    // A failed push: the branch is prepared and the worktree gone, so approve can retry.
-    ['needs_human', 1, true, true, true, { prepared_commit: 'b'.repeat(40), worktree: null }],
-    ['ready_for_human_review', 0, true, true, true],
-    ['preparing_mr', 1, false, true, false],
-    ['pushed', 1, false, false, false],
-    ['aborted', 0, false, false, false],
-    ['failed', 0, false, false, false],
+  const pushFailed = { code: 'mr_push_failed', message: 'rejected' };
+  const matrix: Array<[string, number, boolean, boolean, boolean, boolean, Partial<JobShape>?]> = [
+    // state, mr_attempts, approve on, abort on, message box on, Send on
+    ['starting', 0, false, true, false, false],
+    ['working', 0, false, true, true, true],
+    ['awaiting_review', 0, false, true, true, true],
+    ['needs_human', 0, false, true, true, true],
+    ['needs_human', 1, false, true, true, true],
+    // A failed push: Push again (approve) is off without a prepared branch...
+    ['needs_human', 1, false, true, true, false, { error: pushFailed }],
+    // ...and on with the branch prepared and the worktree gone.
+    ['needs_human', 1, true, true, true, false, { prepared_commit: 'b'.repeat(40), worktree: null, error: pushFailed }],
+    ['ready_for_human_review', 0, true, true, true, true],
+    ['preparing_mr', 1, false, true, false, false],
+    ['pushed', 1, false, false, false, false],
+    ['aborted', 0, false, false, false, false],
+    ['failed', 0, false, false, false, false],
   ];
   const stream = page.streams.at(-1)!;
-  for (const [state, attempts, approve, abort, say, extra] of matrix) {
+  for (const [state, attempts, approve, abort, box, say, extra] of matrix) {
     stream.emit('job', detail({ ...A, state, mr_attempts: attempts, ...(extra ?? {}) }));
-    page.$('say-input').value = 'draft';
-    page.$('say-input').dispatch('input');
-    const label = `${state}/${attempts}`;
-    assert.equal(!page.$('approve-button').disabled, approve, `approve ${label}`);
-    assert.equal(!page.$('abort-button').disabled, abort, `abort ${label}`);
-    assert.equal(!page.$('say-input').disabled, say, `say input ${label}`);
-    assert.equal(!page.$('say-button').disabled, say, `say button ${label}`);
-    const reasons = page.$('action-reasons').textContent;
-    assert.equal(reasons.includes('Approve:'), !approve, label);
-    assert.equal(reasons.includes('Abort:'), !abort, label);
-    assert.equal(page.$('say-reason').textContent !== '', !say, label);
+    page.$('msg').value = 'draft';
+    page.$('msg').dispatch('input');
+    const label = `${state}/${attempts}/${JSON.stringify(extra ?? {})}`;
+    assert.equal(!control(page, 'approve-button').disabled, approve, `approve ${label}`);
+    assert.equal(!control(page, 'abort-button').disabled, abort, `abort ${label}`);
+    assert.equal(!page.$('msg').disabled, box, `message box ${label}`);
+    assert.equal(!control(page, 'say-button').disabled, say, `say button ${label}`);
+    // An action off has its reason as its title, or is not shown.
+    assert.equal(reasonOf(page, 'approve-button') !== '', !approve, label);
+    assert.equal(reasonOf(page, 'abort-button') !== '', !abort, label);
+    assert.equal(reasonOf(page, 'say-button') !== '', !say, label);
   }
   // Send is off with an empty or blank draft.
   stream.emit('job', detail(A));
   for (const text of ['', '   \n\t']) {
-    page.$('say-input').value = text;
-    page.$('say-input').dispatch('input');
-    assert.equal(page.$('say-button').disabled, true, JSON.stringify(text));
+    page.$('msg').value = text;
+    page.$('msg').dispatch('input');
+    assert.equal(control(page, 'say-button').disabled, true, JSON.stringify(text));
   }
-  // The reasons name the rule for needs_human without a prepared branch, and for awaiting_review.
-  stream.emit('job', detail({ ...A, state: 'needs_human' }));
-  assert.match(page.$('action-reasons').textContent, /Approve: approve pushes a branch prepared at Clean; this job has none yet\./);
-  stream.emit('job', detail({ ...A, state: 'awaiting_review' }));
-  assert.match(page.$('action-reasons').textContent, /Approve: the reviewers have not reached Clean yet\./);
+  // The reason names the rule for a failed push without a prepared branch; Send off says why.
+  stream.emit('job', detail({ ...A, state: 'needs_human', error: { code: 'mr_push_failed', message: 'rejected' } }));
+  assert.equal(reasonOf(page, 'approve-button'), 'approve pushes a branch prepared at Clean; this job has none yet.');
+  stream.emit('job', detail(A));
+  page.$('msg').value = '';
+  page.$('msg').dispatch('input');
+  assert.equal(reasonOf(page, 'say-button'), 'write a message first.');
   // While approve is pending, approve is off with its own reason and abort stays on.
   stream.emit('job', detail(A));
-  page.$('approve-button').click();
+  control(page, 'approve-button').click();
   page.$('confirm-ok').click();
   await page.flush();
   assert.equal(posts(page).length, 1);
-  assert.equal(page.$('approve-button').disabled, true);
-  assert.match(page.$('action-reasons').textContent, /Approve: the push was requested/);
-  assert.equal(page.$('abort-button').disabled, false);
+  assert.equal(control(page, 'approve-button').disabled, true);
+  assert.match(reasonOf(page, 'approve-button'), /^the push was requested/);
+  assert.equal(control(page, 'abort-button').disabled, false);
   assert.match(status(page), /^Pushing the branch…/);
   assert.equal(page.$('action-status').className, 'status pending');
   // A state change meanwhile keeps the pending rule.
   stream.emit('job', detail({ ...A, state: 'preparing_mr', mr_attempts: 1 }));
-  assert.equal(page.$('approve-button').disabled, true);
-  assert.equal(page.$('abort-button').disabled, false);
-  assert.equal(page.$('say-input').disabled, true);
+  assert.equal(control(page, 'approve-button').disabled, true);
+  assert.equal(control(page, 'abort-button').disabled, false);
+  assert.equal(page.$('msg').disabled, true);
 });
 
 test('client: approve and abort need a confirmation that names the job; cancel sends nothing; one request per confirmation', async () => {
   const page = await openPage();
   assert.equal(page.$('confirm').hidden, true);
-  page.$('approve-button').click();
+  control(page, 'approve-button').click();
   assert.equal(page.$('confirm').hidden, false);
   assert.equal(page.$('confirm-title').textContent, 'Approve app/T-1?');
   assert.match(page.$('confirm-text').textContent, /Pushes branch T-1-demo to origin.*prepared at Clean, rebased onto main/);
@@ -167,18 +195,18 @@ test('client: approve and abort need a confirmation that names the job; cancel s
   assert.equal(page.$('confirm-ok').textContent, 'Approve: push the branch');
   assert.equal(page.document.activeElement, page.$('confirm-cancel'));
   // Both action buttons are off while the confirmation is open: no retargeting.
-  assert.equal(page.$('approve-button').disabled, true);
-  assert.equal(page.$('abort-button').disabled, true);
+  assert.equal(control(page, 'approve-button').disabled, true);
+  assert.equal(control(page, 'abort-button').disabled, true);
   page.$('confirm-cancel').click();
   assert.equal(page.$('confirm').hidden, true);
   assert.equal(posts(page).length, 0);
-  assert.equal(page.$('approve-button').disabled, false);
-  page.$('approve-button').click();
+  assert.equal(control(page, 'approve-button').disabled, false);
+  control(page, 'approve-button').click();
   page.$('confirm').dispatch('keydown', { key: 'Escape' });
   assert.equal(page.$('confirm').hidden, true);
   assert.equal(posts(page).length, 0);
 
-  page.$('approve-button').click();
+  control(page, 'approve-button').click();
   page.$('confirm-ok').click();
   page.$('confirm-ok').click();
   await page.flush();
@@ -187,7 +215,7 @@ test('client: approve and abort need a confirmation that names the job; cancel s
   assert.deepEqual([request!.path, request!.body, request!.headers['content-type']], ['api/jobs/app/T-1/approve', '{}', 'application/json']);
   assert.equal(page.$('confirm').hidden, true);
   // A second click while pending opens nothing and sends nothing.
-  page.$('approve-button').click();
+  control(page, 'approve-button').click();
   assert.equal(page.$('confirm').hidden, true);
   assert.equal(posts(page).length, 1);
 
@@ -199,7 +227,7 @@ test('client: approve and abort need a confirmation that names the job; cancel s
   assert.equal(status(page), 'Pushed T-1-demo. feat(T-1): Demo Merge request: https://example.invalid/compare/main...T-1-demo');
   assert.equal(page.$('action-status').all().length, 0);
   assert.ok(page.requests.slice(before).some((entry) => entry.method === 'GET' && entry.path === 'api/jobs/app/T-1'));
-  assert.equal(page.$('approve-button').disabled, false);
+  assert.equal(control(page, 'approve-button').disabled, false);
 
   // Every other outcome is reported as what it is, never as a success; nothing becomes an element.
   const outcomes: Array<[Record<string, unknown>, RegExp, string]> = [
@@ -209,7 +237,7 @@ test('client: approve and abort need a confirmation that names the job; cancel s
     [{ state: 'aborted', branch: 'T-1-demo' }, /^Not pushed: the job is aborted\./, 'warn'],
   ];
   for (const [result, expected, level] of outcomes) {
-    page.$('approve-button').click();
+    control(page, 'approve-button').click();
     page.$('confirm-ok').click();
     await page.flush();
     posts(page).at(-1)!.respond(200, { ok: true, result });
@@ -219,21 +247,21 @@ test('client: approve and abort need a confirmation that names the job; cancel s
     assert.equal(page.$('action-status').all().length, 0, JSON.stringify(result));
   }
   // A refusal shows its code and message; a network failure says the outcome is unknown.
-  page.$('approve-button').click();
+  control(page, 'approve-button').click();
   page.$('confirm-ok').click();
   await page.flush();
   posts(page).at(-1)!.respond(409, { ok: false, error: { code: 'turn_running', message: 'A turn of the Implementer is running; wait for it to end.' } });
   await page.flush();
   assert.equal(status(page), 'turn_running: A turn of the Implementer is running; wait for it to end.');
-  page.$('approve-button').click();
+  control(page, 'approve-button').click();
   page.$('confirm-ok').click();
   await page.flush();
   posts(page).at(-1)!.fail();
   await page.flush();
-  assert.match(status(page), /^The request failed \(Failed to fetch\)\. Its outcome is unknown: it may have taken effect\. The state below is current/);
+  assert.match(status(page), /^The request failed \(Failed to fetch\)\. Its outcome is unknown: it may have taken effect\. The state shown is current/);
   assert.equal(page.requests.at(-1)!.path, 'api/jobs/app/T-1');
   // An answer that is not the factory's JSON (a rotated token's empty 404) is a definite refusal.
-  page.$('approve-button').click();
+  control(page, 'approve-button').click();
   page.$('confirm-ok').click();
   await page.flush();
   posts(page).at(-1)!.respond(404, '');
@@ -243,7 +271,7 @@ test('client: approve and abort need a confirmation that names the job; cancel s
 
 test('client: abort keeps the files unless discard is explicitly checked; the choice resets on every confirmation', async () => {
   const page = await openPage();
-  page.$('abort-button').click();
+  control(page, 'abort-button').click();
   assert.equal(page.$('confirm-title').textContent, 'Abort app/T-1?');
   assert.match(page.$('confirm-text').textContent, /branch T-1-demo.*The branch and its worktree stay as they are\./);
   assert.equal(page.$('as-is-label').hidden, true);
@@ -253,14 +281,14 @@ test('client: abort keeps the files unless discard is explicitly checked; the ch
   page.$('discard').checked = true;
   page.$('discard').dispatch('change');
   assert.equal(page.$('confirm-ok').textContent, 'Abort and discard the branch');
-  assert.equal(page.$('confirm-ok').className, 'btn btn-danger');
+  assert.equal(page.$('confirm-ok').className, 'btn small danger');
   page.$('confirm-cancel').click();
   assert.equal(posts(page).length, 0);
 
   // Opened again: unchecked; the plain abort sends discard false.
-  page.$('abort-button').click();
+  control(page, 'abort-button').click();
   assert.equal(page.$('discard').checked, false);
-  assert.equal(page.$('confirm-ok').className, 'btn btn-primary');
+  assert.equal(page.$('confirm-ok').className, 'btn small danger');
   page.$('confirm-ok').click();
   await page.flush();
   assert.deepEqual([posts(page)[0]!.path, posts(page)[0]!.body], ['api/jobs/app/T-1/abort', '{"discard":false}']);
@@ -270,7 +298,7 @@ test('client: abort keeps the files unless discard is explicitly checked; the ch
 
   // The explicit discard sends true; its outcomes.
   page.streams.at(-1)!.emit('job', detail(A));
-  page.$('abort-button').click();
+  control(page, 'abort-button').click();
   page.$('discard').checked = true;
   page.$('discard').dispatch('change');
   page.$('confirm-ok').click();
@@ -280,7 +308,7 @@ test('client: abort keeps the files unless discard is explicitly checked; the ch
   await page.flush();
   assert.equal(status(page), 'Aborted; the branch T-1-demo, its worktree and its changes were removed.');
   page.streams.at(-1)!.emit('job', detail(A));
-  page.$('abort-button').click();
+  control(page, 'abort-button').click();
   page.$('discard').checked = true;
   page.$('confirm-ok').click();
   await page.flush();
@@ -291,7 +319,7 @@ test('client: abort keeps the files unless discard is explicitly checked; the ch
   assert.equal(page.$('action-status').className, 'status error');
   // A refusal of discard keeps the job and the draft choice visible as an error.
   page.streams.at(-1)!.emit('job', detail(A));
-  page.$('abort-button').click();
+  control(page, 'abort-button').click();
   page.$('discard').checked = true;
   page.$('confirm-ok').click();
   await page.flush();
@@ -302,18 +330,18 @@ test('client: abort keeps the files unless discard is explicitly checked; the ch
 
 test('client: say sends the exact draft once per submission, keeps it on errors, clears only what was sent', async () => {
   const page = await openPage();
-  const input = page.$('say-input');
+  const input = page.$('msg');
   const message = 'Please  keep "quotes",\nnew lines — ünïcödé 🚀 ';
   input.value = message;
   input.dispatch('input');
-  assert.equal(page.$('say-button').disabled, false);
-  page.$('say-form').dispatch('submit');
-  page.$('say-form').dispatch('submit');
+  assert.equal(control(page, 'say-button').disabled, false);
+  send(page);
+  send(page);
   await page.flush();
   assert.equal(posts(page).length, 1);
   assert.deepEqual([posts(page)[0]!.path, JSON.parse(posts(page)[0]!.body!)], ['api/jobs/app/T-1/say', { message }]);
-  assert.equal(page.$('say-button').disabled, true);
-  assert.match(page.$('say-reason').textContent, /the message is being sent/);
+  assert.equal(control(page, 'say-button').disabled, true);
+  assert.match(reasonOf(page, 'say-button'), /the message is being sent/);
   assert.equal(input.disabled, false);
   // Edited while the request is out: the acknowledgement must not wipe the edit.
   input.value = `${message}and more`;
@@ -322,27 +350,27 @@ test('client: say sends the exact draft once per submission, keeps it on errors,
   await page.flush();
   assert.match(status(page), /^Queued: the message runs after the current turn ends \(state working\); it has not run yet\./);
   assert.equal(input.value, `${message}and more`);
-  assert.equal(page.$('say-button').disabled, false);
+  assert.equal(control(page, 'say-button').disabled, false);
 
   // Sent unchanged: cleared on acknowledgement.
-  page.$('say-form').dispatch('submit');
+  send(page);
   await page.flush();
   posts(page)[1]!.respond(200, { ok: true, result: { state: 'working', queued: false } });
   await page.flush();
   assert.equal(status(page), 'Sent: the Implementer is working on it (state working).');
   assert.equal(input.value, '');
-  assert.equal(page.$('say-button').disabled, true);
+  assert.equal(control(page, 'say-button').disabled, true);
 
   // A refusal and a network failure keep the draft.
   input.value = 'again';
   input.dispatch('input');
-  page.$('say-form').dispatch('submit');
+  send(page);
   await page.flush();
   posts(page)[2]!.respond(400, { ok: false, error: { code: 'invalid_content', message: 'The message must be non-empty text.' } });
   await page.flush();
   assert.equal(status(page), 'invalid_content: The message must be non-empty text.');
   assert.equal(input.value, 'again');
-  page.$('say-form').dispatch('submit');
+  send(page);
   await page.flush();
   posts(page)[3]!.fail();
   await page.flush();
@@ -351,7 +379,7 @@ test('client: say sends the exact draft once per submission, keeps it on errors,
   // A blank draft is never sent.
   input.value = '  \n';
   input.dispatch('input');
-  page.$('say-form').dispatch('submit');
+  send(page);
   await page.flush();
   assert.equal(posts(page).length, 4);
   // A state that refuses say disables the input but the draft survives for later.
@@ -366,10 +394,10 @@ test('client: say sends the exact draft once per submission, keeps it on errors,
 
 test('client: switching jobs keeps drafts and outcomes per job, closes a confirmation and ignores late results and details', async () => {
   const page = await openPage();
-  const input = page.$('say-input');
+  const input = page.$('msg');
   input.value = 'for T-1';
   input.dispatch('input');
-  page.$('abort-button').click();
+  control(page, 'abort-button').click();
   assert.equal(page.$('confirm').hidden, false);
 
   // Select B: the confirmation closes with no request, the controls go off until B's detail
@@ -378,24 +406,24 @@ test('client: switching jobs keeps drafts and outcomes per job, closes a confirm
   assert.equal(page.$('confirm').hidden, true);
   assert.equal(posts(page).length, 0);
   assert.equal(input.value, '');
-  assert.equal(page.$('approve-button').disabled, true);
-  assert.equal(page.$('abort-button').disabled, true);
+  assert.equal(control(page, 'approve-button').disabled, true);
+  assert.equal(control(page, 'abort-button').disabled, true);
   assert.equal(input.disabled, true);
-  assert.match(page.$('action-reasons').textContent, /the job is loading/);
+  assert.deepEqual([page.$('acts').children.length, page.$('composer-sentence').textContent], [0, 'Loading the job…']);
   const streamB = page.streams.at(-1)!;
   assert.ok(streamB.url.includes('job=app%2FT-2'));
   streamB.emit('job', detail(B));
-  assert.equal(page.$('job-ticket').textContent, 'T-2');
-  assert.equal(page.$('approve-button').disabled, true);
-  assert.equal(page.$('abort-button').disabled, false);
+  assert.equal(headKey(page), 'T-2');
+  assert.equal(control(page, 'approve-button').disabled, true);
+  assert.equal(control(page, 'abort-button').disabled, false);
   assert.equal(input.disabled, false);
   // A late detail on A's old stream changes nothing.
   page.streams[0]!.emit('job', detail({ ...A, state: 'pushed' }));
-  assert.equal(page.$('job-ticket').textContent, 'T-2');
-  assert.equal(page.$('abort-button').disabled, false);
+  assert.equal(headKey(page), 'T-2');
+  assert.equal(control(page, 'abort-button').disabled, false);
 
   // Confirm abort on B, switch to A before confirming: nothing is sent.
-  page.$('abort-button').click();
+  control(page, 'abort-button').click();
   assert.equal(page.$('confirm-title').textContent, 'Abort app/T-2?');
   await selectJob(page, 'app/T-1');
   assert.equal(page.$('confirm').hidden, true);
@@ -403,7 +431,7 @@ test('client: switching jobs keeps drafts and outcomes per job, closes a confirm
   page.streams.at(-1)!.emit('job', detail(A));
 
   // Send for A, switch to B while it is out: the answer goes to A only.
-  page.$('say-form').dispatch('submit');
+  send(page);
   await page.flush();
   assert.equal(posts(page).length, 1);
   await selectJob(page, 'app/T-2');
@@ -415,16 +443,16 @@ test('client: switching jobs keeps drafts and outcomes per job, closes a confirm
   await page.flush();
   assert.equal(status(page), '');
   assert.equal(input.value, 'for T-2');
-  assert.equal(page.$('job-ticket').textContent, 'T-2');
+  assert.equal(headKey(page), 'T-2');
   // A's say was acknowledged, so A's draft is gone and A's outcome is shown when A comes back.
   await selectJob(page, 'app/T-1');
   assert.equal(input.value, '');
   assert.match(status(page), /^Queued:/);
   page.streams.at(-1)!.emit('job', detail(A));
-  assert.equal(page.$('say-button').disabled, true);
+  assert.equal(control(page, 'say-button').disabled, true);
 
   // An approve for A answered after switching to B leaves B's controls and status alone.
-  page.$('approve-button').click();
+  control(page, 'approve-button').click();
   page.$('confirm-ok').click();
   await page.flush();
   await selectJob(page, 'app/T-2');
@@ -432,8 +460,8 @@ test('client: switching jobs keeps drafts and outcomes per job, closes a confirm
   posts(page)[1]!.respond(200, { ok: true, result: { state: 'needs_human', branch: 'T-1-demo', error: { code: 'mr_push_failed', message: 'rejected' } } });
   await page.flush();
   assert.equal(status(page), '');
-  assert.equal(page.$('abort-button').disabled, false);
-  assert.equal(page.$('approve-button').disabled, true);
+  assert.equal(control(page, 'abort-button').disabled, false);
+  assert.equal(control(page, 'approve-button').disabled, true);
   await selectJob(page, 'app/T-1');
   assert.match(status(page), /^Not pushed: the push failed \(mr_push_failed: rejected\)/);
   // The refresh after the answer was for A; it never rendered into B.
@@ -443,7 +471,7 @@ test('client: switching jobs keeps drafts and outcomes per job, closes a confirm
 test('client: an action answer that cannot be read is an unknown outcome, not a refusal; only a 4xx without JSON is definite', async () => {
   const hold = { on: false };
   const page = await openPage(undefined, hold);
-  const input = page.$('say-input');
+  const input = page.$('msg');
   // HTTP 200 headers, then the body is cut: the message may have been delivered.
   await sendDraft(page, 'exactly once');
   posts(page)[0]!.failBody(200);
@@ -463,7 +491,7 @@ test('client: an action answer that cannot be read is an unknown outcome, not a 
     (request) => request.respond(500, { ok: false, error: { code: 'internal_error', message: 'The request failed inside the factory.' } }),
   ];
   for (const [index, answer] of unknown.entries()) {
-    page.$('say-form').dispatch('submit');
+    send(page);
     await page.flush();
     answer(posts(page)[index + 1]!);
     await page.flush();
@@ -480,13 +508,13 @@ test('client: an action answer that cannot be read is an unknown outcome, not a 
     (request: FetchRequest) => request.respond(500, { ok: false, error: { code: 'fetch_failed', message: 'nothing was done: git fetch failed.' } }),
   ];
   for (const answer of definite) {
-    page.$('say-form').dispatch('submit');
+    send(page);
     await page.flush();
     answer(posts(page).at(-1)!);
     await page.flush();
     assert.match(status(page), /nothing was done/);
     assert.equal(input.value, 'exactly once');
-    assert.equal(page.$('say-button').disabled, false);
+    assert.equal(control(page, 'say-button').disabled, false);
   }
 });
 
@@ -502,13 +530,13 @@ test('client: after an unknown outcome the controls wait for a current state; a 
   // The refresh is out: nothing can be sent or opened, the draft stays.
   assert.equal(refreshes(page).length, 1);
   assertControls(page, 'refreshing', false, false, false);
-  page.$('say-form').dispatch('submit');
-  page.$('approve-button').click();
+  send(page);
+  control(page, 'approve-button').click();
   await page.flush();
   assert.equal(posts(page).length, 1);
   assert.equal(page.$('confirm').hidden, true);
-  assert.equal(page.$('say-input').value, 'once');
-  assert.match(page.$('action-reasons').textContent, /outcome is unknown/);
+  assert.equal(page.$('msg').value, 'once');
+  assert.match(reasonOf(page, 'abort-button'), /outcome is unknown/);
   // The stream alone does not resolve it: a queued message changes no state.
   stream.emit('job', detail(A));
   assertControls(page, 'stream while refreshing', false, false, false);
@@ -524,7 +552,7 @@ test('client: after an unknown outcome the controls wait for a current state; a 
   await selectJob(page, 'app/T-2');
   assert.equal(page.$('refresh-button').hidden, true);
   page.streams.at(-1)!.emit('job', detail(B));
-  assert.equal(page.$('abort-button').disabled, false);
+  assert.equal(control(page, 'abort-button').disabled, false);
   assert.equal(status(page), '');
   await selectJob(page, 'app/T-1');
   assert.equal(page.$('refresh-button').hidden, false);
@@ -555,13 +583,13 @@ test('client: after an unknown outcome the controls wait for a current state; a 
   assert.equal(page.$('refresh-button').hidden, true);
   refreshes(page)[3]!.respond(200, detail({ ...A, state: 'working' }));
   await page.flush();
-  assert.equal(page.$('job-state').textContent, 'working');
+  assert.match(page.$('composer-sentence').textContent, /^The Implementer is working on iteration 2\./);
   assertControls(page, 'resolved', false, true, true);
-  assert.match(status(page), /outcome is unknown.*state below is current/s);
-  assert.equal(page.$('say-input').value, 'once');
+  assert.match(status(page), /outcome is unknown.*state shown is current/s);
+  assert.equal(page.$('msg').value, 'once');
   assert.equal(posts(page).length, 1);
   // A deliberate send is possible again.
-  page.$('say-form').dispatch('submit');
+  send(page);
   await page.flush();
   assert.equal(posts(page).length, 2);
 });
@@ -572,14 +600,14 @@ test('client: an unknown outcome keeps abort for a known preparation, closes a s
   const stream = page.streams.at(-1)!;
 
   // A plain refresh is out when the unknown outcome arrives; its late answer proves nothing.
-  page.$('approve-button').click();
+  control(page, 'approve-button').click();
   page.$('confirm-ok').click();
   await page.flush();
   posts(page)[0]!.respond(409, { ok: false, error: { code: 'turn_running', message: 'busy' } });
   await page.flush();
   assert.equal(refreshes(page).length, 1);
   await sendDraft(page, 'x');
-  page.$('abort-button').click();
+  control(page, 'abort-button').click();
   assert.equal(page.$('confirm').hidden, false);
   posts(page)[1]!.fail();
   await page.flush();
@@ -595,12 +623,12 @@ test('client: an unknown outcome keeps abort for a known preparation, closes a s
 
   // An approve is out and a say fails: approve stays pending, abort stays on, an open abort
   // confirmation stays, and it can be sent.
-  page.$('approve-button').click();
+  control(page, 'approve-button').click();
   page.$('confirm-ok').click();
   await page.flush();
-  page.$('say-form').dispatch('submit');
+  send(page);
   await page.flush();
-  page.$('abort-button').click();
+  control(page, 'abort-button').click();
   const approve = posts(page)[2]!;
   posts(page)[3]!.fail();
   await page.flush();
@@ -612,7 +640,7 @@ test('client: an unknown outcome keeps abort for a known preparation, closes a s
   approve.respond(200, { ok: true, result: { state: 'aborted', branch: 'T-1-demo' } });
   await page.flush();
   // The definite answer and the unknown outcome are both shown, before and after the refresh.
-  assert.match(status(page), /^Not pushed: the job is aborted[^]*outcome is unknown: the state below is being refreshed/);
+  assert.match(status(page), /^Not pushed: the job is aborted[^]*outcome is unknown: the state is being refreshed/);
   for (const request of refreshes(page)) {
     request.respond(200, detail({ ...A, state: 'aborted' }));
   }
@@ -627,7 +655,7 @@ test('client: an unknown outcome keeps abort for a known preparation, closes a s
   }
   await page.flush();
   const before = refreshes(page).length;
-  page.$('approve-button').click();
+  control(page, 'approve-button').click();
   page.$('confirm-ok').click();
   await page.flush();
   posts(page).at(-1)!.fail();
@@ -635,19 +663,19 @@ test('client: an unknown outcome keeps abort for a known preparation, closes a s
   assert.equal(refreshes(page).length, before + 1);
   assertControls(page, 'approve lost', false, false, false);
   stream.emit('job', detail({ ...A, state: 'preparing_mr', mr_attempts: 1 }));
-  assert.equal(page.$('abort-button').disabled, false);
-  assert.equal(page.$('approve-button').disabled, true);
+  assert.equal(control(page, 'abort-button').disabled, false);
+  assert.equal(control(page, 'approve-button').disabled, true);
 });
 
 test('client: the hold has no way around it: an open confirmation closes when it stops being allowed, a later unknown outcome keeps it, a hung read ends', async () => {
   const hold = { on: true };
   const page = await openPage(undefined, hold);
   // Approve out, abort confirmation open, a say fails: abort is kept for the preparation...
-  page.$('approve-button').click();
+  control(page, 'approve-button').click();
   page.$('confirm-ok').click();
   await page.flush();
   await sendDraft(page, 'x');
-  page.$('abort-button').click();
+  control(page, 'abort-button').click();
   posts(page)[1]!.fail();
   await page.flush();
   assert.equal(page.$('confirm').hidden, false);
@@ -664,14 +692,14 @@ test('client: the hold has no way around it: an open confirmation closes when it
   await page.flush();
 
   // A later unknown outcome overtakes the read of an earlier one.
-  page.$('approve-button').click();
+  control(page, 'approve-button').click();
   page.$('confirm-ok').click();
   await page.flush();
-  page.$('say-form').dispatch('submit');
+  send(page);
   await page.flush();
   posts(page)[3]!.fail();
   await page.flush();
-  page.$('abort-button').click();
+  control(page, 'abort-button').click();
   page.$('confirm-ok').click();
   await page.flush();
   posts(page)[4]!.fail();
@@ -679,11 +707,11 @@ test('client: the hold has no way around it: an open confirmation closes when it
   const [overtaken, current] = refreshes(page).slice(-2);
   overtaken!.respond(200, detail(A));
   await page.flush();
-  assert.equal(page.$('say-button').disabled, true);
-  assert.match(page.$('say-reason').textContent, /outcome is unknown/);
+  assert.equal(control(page, 'say-button').disabled, true);
+  assert.match(reasonOf(page, 'say-button'), /outcome is unknown/);
   current!.respond(200, detail(A));
   await page.flush();
-  assert.equal(page.$('say-button').disabled, false);
+  assert.equal(control(page, 'say-button').disabled, false);
 });
 
 test('client: a read that never answers becomes a failed refresh; the warning stays until the next action, whatever is answered meanwhile', async () => {
@@ -711,7 +739,7 @@ test('client: a read that never answers becomes a failed refresh; the warning st
 
   // The warning of the lifted hold stays; a new deliberate action starts clean.
   assert.match(status(page), /outcome is unknown/);
-  page.$('abort-button').click();
+  control(page, 'abort-button').click();
   page.$('discard').checked = true;
   page.$('confirm-ok').click();
   await page.flush();
@@ -726,29 +754,29 @@ const reviewPosts = (page: Page): FetchRequest[] => posts(page).filter((request)
 test('client: Retry review shows only in needs_human after a failed review; one request at a time; the outcome or the refusal as text', async () => {
   const page = await openPage();
   const stream = page.streams.at(-1)!;
-  const button = page.$('retry-review-button');
+  const button = (): FakeElement => control(page, 'review-button');
   const stuck = (code: string | null) => {
     const shown = detail({ ...A, state: 'needs_human' });
     return { ...shown, job: { ...shown.job, error: code === null ? null : { code, message: `The ${code} message.` } } };
   };
   // Hidden in every other state, and for needs_human with another cause.
-  assert.equal(button.hidden, true);
+  assert.equal(button().hidden, true);
   for (const shown of [stuck(null), stuck('iteration_limit'), detail({ ...A, state: 'awaiting_review' })]) {
     stream.emit('job', shown);
-    assert.equal(button.hidden, true, JSON.stringify(shown.job.error));
+    assert.equal(button().hidden, true, JSON.stringify(shown.job.error));
   }
   stream.emit('job', stuck('review_failed'));
-  assert.deepEqual([button.hidden, button.disabled], [false, false]);
-  assert.doesNotMatch(page.$('action-reasons').textContent, /Retry review/);
+  assert.deepEqual([button().hidden, button().disabled], [false, false]);
+  assert.equal(reasonOf(page, 'review-button'), '');
 
-  button.click();
+  button().click();
   await page.flush();
   const sent = reviewPosts(page)[0]!;
   assert.deepEqual([sent.path, sent.body, sent.headers['content-type']], ['api/jobs/app/T-1/review', '{}', 'application/json']);
   assert.equal(page.$('action-status').textContent, 'Restarting the review…');
-  assert.equal(button.disabled, true);
-  assert.match(page.$('action-reasons').textContent, /Retry review: the review is being restarted\./);
-  button.click();
+  assert.equal(button().disabled, true);
+  assert.equal(reasonOf(page, 'review-button'), 'the review is being restarted.');
+  button().click();
   await page.flush();
   assert.equal(reviewPosts(page).length, 1);
   sent.respond(200, { ok: true, result: { state: 'awaiting_review', iteration: 1 } });
@@ -756,11 +784,11 @@ test('client: Retry review shows only in needs_human after a failed review; one 
   assert.equal(page.$('action-status').textContent, 'The review of iteration 1 runs again (state awaiting_review).');
   assert.equal(page.$('action-status').className, 'status ok');
   stream.emit('job', detail({ ...A, state: 'awaiting_review' }));
-  assert.equal(button.hidden, true);
+  assert.equal(button().hidden, true);
 
   // A refusal is shown as it comes.
   stream.emit('job', stuck('review_failed'));
-  button.click();
+  button().click();
   await page.flush();
   reviewPosts(page)[1]!.respond(409, { ok: false, error: { code: 'review_off', message: 'The Claude review is off (SF_REVIEW=off); nothing would review the iteration.' } });
   await page.flush();
@@ -768,6 +796,6 @@ test('client: Retry review shows only in needs_human after a failed review; one 
   assert.equal(page.$('action-status').className, 'status error');
   // Nothing holds the button after a definite answer (the fake's refreshed detail is another state).
   stream.emit('job', stuck('review_failed'));
-  assert.deepEqual([button.hidden, button.disabled], [false, false]);
+  assert.deepEqual([button().hidden, button().disabled], [false, false]);
   assert.equal(reviewPosts(page).length, 2);
 });

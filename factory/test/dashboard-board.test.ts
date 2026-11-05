@@ -7,6 +7,7 @@ import { MAX_ACTION_BODY_BYTES } from '../src/dashboard.js';
 import { FactoryError } from '../src/errors.js';
 import { act, CSP, fakeActions, fakeSetup, fetchRaw, openStream, type Reply, ticketRow, workspaceRow } from './support/dashboard-client.js';
 import { withDashboard } from './support/dashboard-state.js';
+import { taskSha256 } from '../src/task-file.js';
 
 const error = (reply: Reply): { status: number; code: string } => ({ status: reply.status, code: JSON.parse(reply.body).error.code });
 
@@ -158,5 +159,37 @@ test('board jobs: every row carries the title of its Task file, the estimated co
     assert.deepEqual([jobs['T-1'].cost_usd, jobs['T-1'].review, jobs['T-1'].review_ended_at, jobs['T-1'].gate], [0.75, 'clean', '2026-11-01T10:06:00.000Z', null]);
     await store.jobs.writeGate('app', 'T-1', 1, { reviewer: 'codex', error: 'timed out', tokens: { input: 1, cached_input: 0, output: 1 }, started_at: '2026-11-01T10:06:00.000Z', ended_at: '2026-11-01T10:07:00.000Z' });
     assert.equal((await rows())['T-1'].gate, 'failed');
+  }, setup);
+});
+
+test('board jobs (SF-067): a paused job carries what the pause interrupted and whether its Task file changed; Pause, Resume and Restart reach the Execution', async () => {
+  const setup = fakeSetup([workspaceRow('app')]);
+  const text = '---\nticket: T-1\ntitle: One thing\nbase: main\n---\n';
+  setup.texts.set('app/T-1', text);
+  const fake = fakeActions({ state: 'paused' });
+  await withDashboard('dash-board-paused', fake, async (dashboard, store) => {
+    const row = async (): Promise<Record<string, any>> =>
+      (JSON.parse((await fetchRaw(new URL('api/jobs', dashboard.url))).body).jobs as Array<Record<string, any>>).find((job) => job.ticket === 'T-1')!;
+    assert.deepEqual([(await row()).paused, (await row()).task_changed], [null, null]);
+    const paused = { from: 'awaiting_review' as const, step: 'review' as const, at: '2026-11-01T10:06:00.000Z' };
+    await store.jobs.write({ ...store.job, state: 'paused', paused, task_sha256: taskSha256(text) });
+    assert.deepEqual([(await row()).paused, (await row()).task_changed], [paused, false]);
+    setup.texts.set('app/T-1', `${text}\nMore.\n`);
+    assert.equal((await row()).task_changed, true);
+    const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', dashboard.url))).body);
+    assert.deepEqual([detail.job.paused, detail.job.task_changed], [paused, true]);
+
+    for (const [action, body] of [['pause', {}], ['resume', {}], ['resume', { message: 'Go.' }], ['restart', {}], ['restart', { keep_files: true }]] as const) {
+      assert.equal((await act(dashboard.url, `api/jobs/app/T-1/${action}`, body)).status, 200, action);
+    }
+    for (const [action, body] of [['pause', { x: 1 }], ['resume', { message: 1 }], ['restart', { keep_files: 'yes' }]] as const) {
+      assert.equal((await act(dashboard.url, `api/jobs/app/T-1/${action}`, body)).status, 400, action);
+    }
+    assert.deepEqual(fake.calls, [
+      ['pause', 'app', 'T-1'], ['resumePaused', 'app', 'T-1', ''], ['resumePaused', 'app', 'T-1', 'Go.'], ['restart', 'app', 'T-1', false], ['restart', 'app', 'T-1', true],
+    ]);
+    fake.answer = new FactoryError('restart_refused', 'The restart was refused: the branch T-1-demo was pushed (origin/T-1-demo). Nothing was changed.');
+    const refused = await act(dashboard.url, 'api/jobs/app/T-1/restart', {});
+    assert.deepEqual([refused.status, JSON.parse(refused.body).error.code], [409, 'restart_refused']);
   }, setup);
 });

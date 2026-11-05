@@ -35,7 +35,7 @@ function resultText(content: unknown): string {
 export interface DescribedEvent {
   ts: string | null;
   iteration: number | null;
-  // "prompt", "state", "notify_failed", "placeholders_removed", "review", "review_failed" (Claude's or the gate's), "gate_overridden" (the user accepted over the stopped gate), "simplify" and "simplify_chosen" (SF-055), "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
+  // "prompt", "state", "notify_failed", "placeholders_removed", "review", "review_failed" (Claude's or the gate's), "gate_overridden" (the user accepted over the stopped gate), "simplify" and "simplify_chosen" (SF-055), "interrupted" and "task_changed" (SF-067), "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
   type: string;
   lines: string[];
 }
@@ -119,6 +119,14 @@ function recordLines(record: Record<string, unknown>): string[] {
   if (record.type === 'simplify_chosen') {
     const count = typeof record.suggestions === 'number' ? record.suggestions : 0;
     return [`${prefix} simplification ${record.choice === 'skip' ? 'skipped' : 'chosen'} by the user: ${count} ${count === 1 ? 'suggestion' : 'suggestions'}`];
+  }
+  // A step the user's Pause interrupted, and a Task file changed while paused (SF-067).
+  if (record.type === 'interrupted') {
+    const who = typeof record.reviewer === 'string' ? ` by ${record.reviewer}` : '';
+    return [`${prefix} ${String(record.step)}${who} interrupted by the pause (no verdict; it runs again on Resume)`];
+  }
+  if (record.type === 'task_changed') {
+    return [`${prefix} the Task file changed while the job was paused; the new one is in use`];
   }
   if (record.type === 'merge_request') {
     const verb = { created: 'opened', reused: 'already open, reused', merged: 'merged', updated: `found ${String(record.mr_state)} on the host` }[String(record.action)] ?? String(record.action);

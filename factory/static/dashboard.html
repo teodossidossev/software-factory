@@ -171,6 +171,9 @@
             <button id="accept-gate-button" type="button" class="btn btn-primary" hidden>Accept and prepare MR…</button>
             <button id="simplify-button" type="button" class="btn btn-primary" hidden>Simplify…</button>
             <button id="retry-review-button" type="button" class="btn btn-primary" hidden>Retry review</button>
+            <button id="pause-button" type="button" class="btn" hidden>Pause</button>
+            <button id="resume-button" type="button" class="btn btn-primary" hidden>Resume</button>
+            <button id="restart-button" type="button" class="btn" hidden>Restart…</button>
             <button id="abort-button" type="button" class="btn" disabled>Abort…</button>
             <button id="archive-job-button" type="button" class="btn" hidden>Archive</button>
             <button id="refresh-button" type="button" class="btn" hidden>Refresh state</button>
@@ -188,6 +191,10 @@
             <label id="discard-label" class="choice danger-text" hidden>
               <input id="discard" type="checkbox">
               Also discard: remove the worktree and the branch with all its changes (git worktree remove --force, git branch -D). Cannot be undone.
+            </label>
+            <label id="keep-files-label" class="choice" hidden>
+              <input id="keep-files" type="checkbox">
+              Keep the files: copy the old worktree's changed and new files into the new worktree before the first turn (the first prompt says so).
             </label>
             <label id="as-is-label" class="choice" hidden>
               <input id="as-is" type="checkbox">

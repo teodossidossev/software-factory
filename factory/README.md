@@ -40,6 +40,9 @@ bin/sf approve <workspace> <ticket> [--as-is]  # push the branch prepared at Cle
 bin/sf mr create <workspace> <ticket>          # open the job's merge request on GitHub or GitLab (or reuse the open one); from ready_for_human_review: approve, then open; needs sf serve
 bin/sf mr merge <workspace> <ticket>           # merge the job's open merge request through the host's API (refused with the host's reason); needs sf serve
 bin/sf mr status <workspace> <ticket>          # the merge request on the host: open, merged or closed, mergeable or why not, the checks; needs sf serve
+bin/sf pause <workspace> <ticket>              # stop a working job or one awaiting review at once (section Pause, Resume and Restart); worktree, branch, session and history stay; needs sf serve
+bin/sf resume <workspace> <ticket> [message...]   # go on with a paused job where it stopped; a Task file changed meanwhile goes with its diff; needs sf serve
+bin/sf restart <workspace> <ticket> [--keep-files] # start the ticket again from its current Task file on a fresh worktree and branch (paused, aborted, failed, needs_human); needs sf serve
 bin/sf abort <workspace> <ticket> [--discard]  # end the job; the worktree stays (its path printed); --discard removes the worktree and the branch; needs sf serve
 bin/sf reset <workspace> <ticket>              # end the session, remove the worktree and archive the job; the branch stays; needs sf serve
 bin/sf notify-test                             # one test notification on every channel; works without sf serve
@@ -207,7 +210,8 @@ document and the code. It only advises: Start is never refused for it.
 
 One job per ticket; several jobs of a workspace at a time, up to `SF_MAX_JOBS` (default 3) in a
 live state (`starting`, `working`, `awaiting_review`, `needs_human`, `ready_for_human_review`,
-`preparing_mr`); `pushed`, `aborted` and `failed` free a slot. A further `start` is refused with
+`preparing_mr`); `paused` (SF-067: nothing of the job runs), `pushed`, `aborted` and `failed` free a
+slot. A further `start` is refused with
 `job_limit`, naming the live tickets. Every job works in a **worktree** of its own (SF-019,
 ADR-0004): `${SF_WORKTREE_ROOT:-<state dir>/worktrees}/<workspace>/<ticket>`, created from the
 workspace's checkout; the checkout itself (the user's IDE checkout) is never written by the
@@ -616,6 +620,7 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   (`git worktree remove --force`, `git worktree prune`) and the branch (`git branch -D`); a
   failing step leaves `aborted` with `error.code` `discard_failed`. `--discard` is refused
   (`rebase_in_progress`) while a rebase or a Git lock is in progress in the worktree.
+- `sf pause`, `sf resume` and `sf restart`: section Pause, Resume and Restart below.
 - `sf reset` works in every state: it stops the job's runner (ending a live session), removes the worktree and archives the
   job directory as `start` archives a terminal job. The branch is not touched. When the workspace is
   no longer registered (or its checkout is gone), only the job record is archived and the result
@@ -703,6 +708,67 @@ as it does for an undeclared sensitive path, with its own ledger entry. A path t
 undeclared sensitive and out of scope raises both items, each with its own entry; naming it once in
 `accepted_sensitive` (or the user accepting it as a risk) settles both.
 The dashboard's file list marks such a path "out of scope".
+
+### Pause, Resume and Restart
+
+SF-067. To change course without abort, reset and a branch deleted by hand.
+
+- **Pause** (`sf pause`, the job's *Pause*, no confirmation) takes a `working` or `awaiting_review`
+  job. It stops the job's runner the way abort does (the SDK abort, then SIGTERM and SIGKILL of
+  the runner's process group, so no Claude Code and no Codex is left) and the job goes to
+  `paused`. The worktree, the branch, the Implementer's `session_id`, the iterations, the ledger
+  and the events stay. `job.json` records `paused`: the state it was paused in (`from`), what was
+  interrupted (`step`: `turn`, `review`, `gate`, `simplify`, or null when nothing ran, as while
+  awaiting review with `SF_REVIEW=off`) and when. A review, gate or simplification round that ran is
+  thrown away: no `review.json`, `gate.json` or `simplify.json` and no verdict event, only an
+  `interrupted` event (`sf watch`: "review by claude interrupted by the pause"); an interrupted
+  simplification pass does not use up its one run per job. `preparing_mr` is refused
+  (`invalid_state`, with the reason: the MR text, the commit and the rebase); so is any other state.
+  A step that ended on its own while the runner stopped leaves the job as it left it; one that had
+  just begun MR preparation hands the job over as `needs_human` (`mr_interrupted`; `sf say` goes on).
+- **Resume** (`sf resume [message...]`, the paused job's *Resume*, no confirmation) goes on where
+  the job stopped. A paused turn: the job is `working` again and the same Implementer session is
+  resumed with the message, or "Continue where you stopped." (a job whose first turn never reported
+  a session runs `/implement` again). A paused review round: the job is `awaiting_review` again and
+  that round (the Claude review, the gate or the simplification pass) runs again on the same
+  iteration; a message is refused then (`invalid_content`: resume, then `sf say`). A paused job
+  needs a free slot of `SF_MAX_JOBS` (`job_limit`) and its worktree (`worktree_missing`).
+- **The Task file while paused.** The factory keeps the Task file as the Implementer was last given
+  it, `task.md` in the job directory, and the sha256 of the version the job works from as
+  `task_sha256` in `job.json`, both written at Start and at every later copy into the worktree (a Fix
+  section, `sf say`, MR preparation). `write_task`
+  is allowed while the job is `paused` (refused, `job_active`, in the other live states). On Resume
+  a Task file that differs is copied into the worktree, its sha256 recorded in `job.json` at once
+  (a resumed turn and a resumed review round alike) and a `task_changed` event written; the
+  reviewers read the new one from then on. A resumed turn's message carries the unified diff (at
+  most 64 KiB; a longer one asks the Implementer to read the file again); after a resumed review
+  round `task.md` keeps the version the Implementer was last given, and the Implementer gets the
+  diff with its next prompt (the Fix section or `sf say`), taken before the factory appends its own
+  Fix section. The
+  board shows "Task file changed since the job started" on a paused job whose Task file differs
+  (`task_changed` in `api/jobs`).
+- **Restart** (`sf restart [--keep-files]`, the job's *Restart…*, confirmed with what is thrown
+  away and a *Keep the files* checkbox) takes a `paused`, `aborted`, `failed` or `needs_human` job.
+  It starts the ticket again from its current Task file (its base and title: the branch name may
+  change) as a new job on a fresh worktree and branch from the Task's base, after the checks of
+  `start` (`task_draft`, `job_limit` with the ticket's own job aside, a new branch name that exists:
+  `branch_exists`). The old job is retired as `sf reset` retires it (its runner stopped, its worktree
+  removed, its directory archived as `<ticket>.<timestamp>`; `archived` in the result). Its branch is
+  deleted only when it has no commit beyond the job's base commit and was never pushed (checked
+  before anything changes, and again in the Git lock that deletes it, once the runner has stopped): no merge
+  request, no upstream, no remote-tracking branch of that name, on none of the checkout's
+  configured remotes (`git ls-remote` of each, at most 30 s each: a push needs neither an upstream
+  nor a fetched remote-tracking branch). Otherwise the restart is refused before anything changes
+  (`restart_refused`, HTTP 409, with the reason: the commits, the remote, or a remote not
+  answering); push or delete the branch
+  by hand first. With `--keep-files` the old worktree's changed and new files (the Patch's paths
+  against its base: ignored and credential-like files left out; deleted files not repeated) are
+  saved under `<state dir>/tmp/`, copied into the new worktree before the first turn, and the first
+  prompt names them; `kept` in the result lists them. Once the old worktree is removed, a failure
+  (a branch delete that fails, `restart_failed`, or the new job failing to start) leaves the saved
+  files where the error says.
+- Notifications: `paused` is notified (default priority, "Paused during the <step>; Resume goes on
+  from there."). `sf status` shows `paused` like any state.
 
 ## MR preparation
 
@@ -858,7 +924,7 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
 
 ## Notifications
 
-On `ready_for_human_review`, `needs_human`, `pushed` and `failed` (iterations are silent unless
+On `ready_for_human_review`, `needs_human`, `paused`, `pushed` and `failed` (iterations are silent unless
 `SF_NOTIFY_ITERATIONS=on`, which adds `awaiting_review` with `Priority: default`, `Tags: eyes` and
 the body "Report and Patch of iteration N are ready for the reviewers") the
 factory sends a desktop notification (`notify-send --app-name="Software Factory" "<ticket>:
@@ -928,7 +994,7 @@ headers count their cards: **Planned** (the Task files of every usable workspace
 job, or whose last job is `failed` or `aborted`: skeletons and written tasks, with that state as a
 mark), **Implementing** (`starting`, `working`), **Reviewing** (`awaiting_review`, that is the
 Claude review or the Codex gate runs or is due, and `preparing_mr`), **Your turn** (`needs_human`,
-`ready_for_human_review`) and **Done** (`pushed`, and `aborted` or `failed` when the ticket has no
+`ready_for_human_review`, `paused`) and **Done** (`pushed`, and `aborted` or `failed` when the ticket has no
 Planned card, its Task file archived or deleted; the most recent first; the last ten, then *Show
 all*). A ticket shows in one column only (SF-057): a pushed one only under Done, a failed or aborted
 one only under Planned, one with an active job only in that job's column. The Done card of a pushed
@@ -946,8 +1012,13 @@ review · …`, `You · <error code> · …`, `Pushed · 2 h 5 min ago`), the er
 chips for the iteration, the files of the last iteration (and its undeclared sensitive ones) and the
 estimated cost ("est. $", not a charge). A Your turn card carries the one action that unblocks it:
 *Approve…* (the job opens with its approve confirmation), *Retry review* after a failed Claude
-review (sent at once, as the button in the drawer) or *Open the job*; the job's last outcome shows
-under it. A Planned card shows the ticket, its base and, after a failed or aborted job, that state
+review (sent at once, as the button in the drawer), *Resume* on a paused job (SF-067; sent at once;
+the card also says "Task file changed since the job started" when it did, and halts the pipeline
+bar where the pause stopped it) or *Open the job*; the job's last outcome shows under it. In the
+job's drawer, *Pause* shows on a working job or one in review (held, with the reason, while the MR
+is prepared), *Resume* on a paused one (a job paused during a turn sends the message written in the
+message box with it) and *Restart…* on a paused, aborted, failed or needs_human one; Restart asks
+first, saying what is thrown away, with *Keep the files* (section Pause, Resume and Restart). A Planned card shows the ticket, its base and, after a failed or aborted job, that state
 as a mark that opens the job, and **Start** to run it (again) (a skeleton says "waiting for the
 plan" instead), **Check** with the chip of the last Task check (section Task check), **Task**,
 Archive and Delete…. Start asks first, naming the workspace, the ticket and the base branch (and

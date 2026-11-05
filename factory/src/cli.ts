@@ -1,6 +1,6 @@
 // The sf command: `sf serve`, `sf up` (serve, the tunnel and the browser), `sf workspace
-// add|list|remove`, `sf start|say|review|approve|abort|reset` and `sf mr create|merge|status`
-// (through the socket of sf serve),
+// add|list|remove`, `sf start|say|review|approve|pause|resume|restart|abort|reset` and
+// `sf mr create|merge|status` (through the socket of sf serve),
 // `sf status|watch|dashboard` (reading the state directory directly), `sf check-task` (the Task
 // check of SF-054, run here and stored in the state directory), `sf notify-test`, `sf info`
 // and `sf run`, the job's runner that sf serve starts (SF-042, src/runner.ts).
@@ -51,6 +51,9 @@ const USAGE = `Usage:
   sf mr create <workspace> <ticket>                     Open the merge request of a pushed job on GitHub or GitLab (or reuse the open one); from ready_for_human_review: approve, then open it
   sf mr merge <workspace> <ticket>                      Merge the job's open merge request through the host's API; refused with the host's reason when it cannot be merged
   sf mr status <workspace> <ticket>                     The merge request's state on the host: open, merged or closed, mergeable or not, the checks
+  sf pause <workspace> <ticket>                         Pause a working job or one awaiting review: the turn, review or gate stops at once; worktree, branch, session and history stay
+  sf resume <workspace> <ticket> [message...]           Go on with a paused job where it stopped (the turn with the message, or "Continue where you stopped."; an interrupted review or gate runs again); a Task file changed meanwhile is handed on with its diff
+  sf restart <workspace> <ticket> [--keep-files]        Start the ticket again from its current Task file on a fresh worktree and branch (paused, aborted, failed or needs_human); the old job is archived, its branch deleted only without commits and never pushed; --keep-files copies the old worktree's changed and new files in first
   sf abort <workspace> <ticket> [--discard]             End the job; the worktree stays (its path is printed); --discard removes the worktree and the branch
   sf reset <workspace> <ticket>                         End the session, remove the worktree and archive the job; the branch is untouched
   sf notify-test                                        Send a test notification on every channel
@@ -149,6 +152,16 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     }
     if (command === 'reset' && words.length === 0) {
       return execution.reset(workspace, ticket);
+    }
+    // sf pause, resume and restart (SF-067).
+    if (command === 'pause' && words.length === 0) {
+      return execution.pause(workspace, ticket);
+    }
+    if (command === 'resume') {
+      return execution.resumePaused(workspace, ticket, words.join(' '));
+    }
+    if (command === 'restart' && (words.length === 0 || (words.length === 1 && words[0] === '--keep-files'))) {
+      return execution.restart(workspace, ticket, words.length === 1);
     }
     // sf mr create|merge|status (SF-048).
     if (command === 'mr-create' && words.length === 0) {
@@ -485,6 +498,16 @@ async function abort(args: string[]): Promise<void> {
   }
 }
 
+// sf restart <workspace> <ticket> [--keep-files] (SF-067), through the socket of sf serve.
+async function restart(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { 'keep-files': { type: 'boolean' } } });
+  if (positionals.length !== 2) {
+    throw new UsageError('restart needs <workspace> <ticket> [--keep-files].');
+  }
+  const result = await viaServer('restart', [...checkJob(positionals, 'restart'), ...(values['keep-files'] === true ? ['--keep-files'] : [])]);
+  console.log(result.branch_deleted === null ? 'The old job is archived; it had no branch to delete.' : 'The old job is archived and its branch deleted (no commits, never pushed).');
+}
+
 async function reset(args: string[]): Promise<void> {
   if (args.length !== 2) {
     throw new UsageError('reset needs <workspace> <ticket>.');
@@ -784,6 +807,24 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'reset') {
     await reset(rest);
+    return;
+  }
+  if (command === 'pause') {
+    if (rest.length !== 2) {
+      throw new UsageError('pause needs <workspace> <ticket>.');
+    }
+    await viaServer('pause', checkJob(rest, 'pause'));
+    return;
+  }
+  if (command === 'resume') {
+    if (rest.length < 2) {
+      throw new UsageError('resume needs <workspace> <ticket> [message...].');
+    }
+    await viaServer('resume', [...checkJob(rest.slice(0, 2), 'resume'), ...rest.slice(2)]);
+    return;
+  }
+  if (command === 'restart') {
+    await restart(rest);
     return;
   }
   if (command === 'check-task') {

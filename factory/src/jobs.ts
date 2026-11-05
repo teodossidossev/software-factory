@@ -1,7 +1,8 @@
 // Job state on disk: <state dir>/jobs/<workspace>/<ticket>/ with job.json, events.jsonl and
 // iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-override.json,simplify.json} (plus the
 // gate's schema and output files), ledger.json (the findings ledger, SF-052) from the first Fix
-// section on, and from MR preparation on mr.md. Strictly parsed; every file but the event log
+// section on, task.md (the Task file as the Implementer was last given it, SF-067), and from MR
+// preparation on mr.md. Strictly parsed; every file but the event log
 // is replaced atomically. Knows nothing about Git or the Implementer session.
 import { appendFile, type FileHandle, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -17,6 +18,8 @@ export const JOB_STATES = [
   'working',
   'awaiting_review',
   'needs_human',
+  // The user paused the job (SF-067): nothing runs; sf resume goes on where it stopped.
+  'paused',
   'ready_for_human_review',
   'preparing_mr',
   'pushed',
@@ -25,9 +28,18 @@ export const JOB_STATES = [
 ] as const;
 export type JobState = (typeof JOB_STATES)[number];
 // States that hold the machine's one job slot: every state in which the session may be alive.
+// paused is not one (SF-067): nothing of a paused job runs, and it does not count toward SF_MAX_JOBS.
 export const ACTIVE_STATES: readonly JobState[] = ['starting', 'working', 'awaiting_review', 'needs_human', 'ready_for_human_review', 'preparing_mr'];
 // States after which a new job for the same ticket may start.
 export const TERMINAL_STATES: readonly JobState[] = ['failed', 'aborted', 'pushed'];
+// The states sf pause takes (SF-067), and what was interrupted when the job was paused: the
+// Implementer's turn, or a round of the Claude review, the gate or the simplification pass (none
+// when nothing ran, as while awaiting review with the review off).
+export const PAUSABLE_STATES = ['working', 'awaiting_review'] as const;
+export const PAUSE_STEPS = ['turn', 'review', 'gate', 'simplify'] as const;
+export type PauseStep = (typeof PAUSE_STEPS)[number];
+// The states sf restart takes (SF-067): a job that waits for the user or has ended, not pushed.
+export const RESTARTABLE_STATES: readonly JobState[] = ['paused', 'aborted', 'failed', 'needs_human'];
 
 const timestamp = z.iso.datetime();
 const commit = z.string().regex(/^[0-9a-f]{40,64}$/);
@@ -59,6 +71,12 @@ const jobSchema = z.strictObject({
   // Once set, the pass never runs again on the job, whatever became of that run.
   simplify_iteration: z.number().int().min(1).optional(),
   session_id: z.string().min(1).nullable(),
+  // The sha256 of the Task file the job works from (SF-067): recorded at Start, at every later copy
+  // into the worktree and on a Resume that found the Task file changed; absent in a job started
+  // before. task.md keeps the version the Implementer was last given, which can be older.
+  task_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  // While paused (SF-067): the state the job was paused in, what was interrupted, and when.
+  paused: z.strictObject({ from: z.enum(PAUSABLE_STATES), step: z.enum(PAUSE_STEPS).nullable(), at: timestamp }).optional(),
   created_at: timestamp,
   // Time of the last state change.
   updated_at: timestamp,
@@ -214,6 +232,11 @@ export type EventRecord = { ts: string; iteration: number } & (
   // dropped, or its error), and the user's choice on the offer (simplify or skip).
   | { type: 'simplify'; reviewer: string; suggestions: number; dropped: number; error?: string; ignored?: true }
   | { type: 'simplify_chosen'; choice: 'simplify' | 'skip'; suggestions: number }
+  // A step the user's Pause interrupted (SF-067): the turn, or a round of a reviewer, thrown away
+  // and run again on Resume; never a verdict.
+  | { type: 'interrupted'; step: PauseStep; reviewer?: string }
+  // The Task file changed while the job was paused (SF-067): the sha256 the job had, and the new one.
+  | { type: 'task_changed'; from: string | null; to: string }
   // The merge request on the Git host (SF-048): opened, reused (already open for the branch),
   // merged by the factory, or found merged or closed on the host by sf mr status.
   // mr_state, not state: a record with state is a state change.
@@ -369,6 +392,16 @@ export class JobStore {
     const name = `${ticket}.${stamp}`;
     await rename(this.dir(workspace, ticket), join(this.root, workspace, name));
     return name;
+  }
+
+  // The Task file as the Implementer was last given it (SF-067); undefined in a job started before.
+  readTaskCopy(workspace: string, ticket: string): Promise<string | undefined> {
+    return readOrMissing(join(this.dir(workspace, ticket), 'task.md'));
+  }
+
+  // Replaced atomically, by #syncTask of the Execution only.
+  async writeTaskCopy(workspace: string, ticket: string, content: Buffer): Promise<void> {
+    await writeFileAtomic(join(this.dir(workspace, ticket), 'task.md'), content);
   }
 
   // The MR text once it exists (copied when the branch is ready, or at a conflict iteration).

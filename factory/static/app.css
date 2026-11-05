@@ -317,7 +317,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 }
 .badge.s-starting, .badge.s-working, .badge.s-preparing_mr { background: var(--s-working); }
 .badge.s-awaiting_review { background: var(--s-review); }
-.badge.s-needs_human { background: var(--s-human); }
+.badge.s-needs_human, .badge.s-paused { background: var(--s-human); }
 .badge.s-ready_for_human_review { background: var(--s-ready); }
 .badge.s-pushed { background: var(--s-pushed); }
 .badge.s-failed { background: var(--s-failed); }
@@ -575,6 +575,8 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+/* A paused job whose Task file changed (SF-067). */
+.card-note { font-size: 12px; color: var(--warn); background: var(--warn-bg); border-radius: var(--radius-sm); padding: 2px 6px; align-self: flex-start; }
 .card-wait { font-size: 12.5px; color: var(--muted); font-style: italic; }
 .card-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 10px 10px; }
 .board-card .status { margin: 0 10px 10px; padding: 6px 8px; font-size: 12px; }

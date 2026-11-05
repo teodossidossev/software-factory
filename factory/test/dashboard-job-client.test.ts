@@ -133,7 +133,7 @@ test('job client: the pipeline stepper for each state: done, current with since 
       /^mr_conflict The rebase onto main conflicts and the Implementer could not resolve it\. Tell it how, or abort\.$/],
     ['needs_human', { error: { code: 'mr_push_failed', message: 'x' }, prepared_commit: 'b'.repeat(40), worktree: null }, reviewed(CLEAN), ['done', 'done', 'done', 'done', 'halted'],
       /^mr_push_failed The push failed\. Fix the cause, then approve again\.$/],
-    ['failed', { error: { code: 'serve_restarted', message: 'x' } }, [], ['halted', 'todo', 'todo', 'todo', 'todo'], /^serve_restarted The job failed and cannot go on; archive it\.$/],
+    ['failed', { error: { code: 'serve_restarted', message: 'x' } }, [], ['halted', 'todo', 'todo', 'todo', 'todo'], /^serve_restarted The job failed and cannot go on; restart or archive it\.$/],
   ];
   for (const [state, extra, iterations, expected, sentence] of cases) {
     const label = `${state} ${JSON.stringify(extra.error ?? null)}`;
@@ -679,4 +679,66 @@ test('job client (SF-055): the offer of the simplification pass says what happen
   // Elsewhere hidden.
   await show(page, detail(job('working', { iteration: 2 })));
   assert.equal(simplify.hidden, true);
+});
+
+test('job client (SF-067): Pause on a working job; a paused one on Your turn with the Task file notice and Resume (with the message of a paused turn); Restart confirmed with Keep the files', async () => {
+  const page = await openJob(detail(job('working')));
+  const [pause, resume, restart] = ['pause-button', 'resume-button', 'restart-button'].map((id) => page.$(id));
+  assert.deepEqual([pause!.hidden, pause!.disabled, resume!.hidden, restart!.hidden], [false, false, true, true]);
+  // Pause goes at once, no confirmation.
+  pause!.click();
+  await page.flush();
+  assert.equal(page.$('confirm').hidden, true);
+  const paused = posts(page).filter((request) => request.path.endsWith('/pause'));
+  assert.deepEqual(paused.map((request) => [request.path, request.body]), [['api/jobs/app/T-1/pause', '{}']]);
+  paused[0]!.respond(200, { ok: true, result: { state: 'paused', branch: 'T-1-demo', step: 'turn' } });
+  await page.flush();
+  assert.equal(page.$('action-status').textContent, 'Paused during the turn: nothing of the job runs; the worktree, the branch T-1-demo and the session stay.');
+
+  // The paused job: on Your turn with the notice and Resume; the drawer says what was interrupted.
+  const row = job('paused', { paused: { from: 'working', step: 'turn', at: '2026-11-01T10:06:00.000Z' }, task_changed: true });
+  page.streams.at(-1)!.emit('jobs', { jobs: [row] });
+  await show(page, detail(row));
+  const item = (page.$('list-you').children as FakeElement[]).find((child) => child.dataset?.key === 'app/T-1')!;
+  assert.match(item.textContent, /Task file changed since the job started/);
+  assert.match(item.textContent, /You · paused/);
+  assert.match(page.$('next-headline').textContent, /^You paused the Implementer's turn on iteration 2\. Resume continues the same session \(with your message, if you write one below\); Restart starts the ticket again from its current Task file\.$/);
+  assert.match(page.$('next-why').textContent, /^Task file changed since the job started/);
+  assert.deepEqual([pause!.hidden, resume!.hidden, resume!.disabled, restart!.hidden, restart!.disabled], [true, false, false, false, false]);
+  assert.equal(page.$('say-input').disabled, false);
+  assert.equal(page.$('say-button').disabled, true);
+  page.$('say-input').value = 'Mind the new line.';
+  page.$('say-input').dispatch('input');
+  resume!.click();
+  await page.flush();
+  const resumed = posts(page).filter((request) => request.path.endsWith('/resume'));
+  assert.deepEqual(resumed.map((request) => [request.path, request.body]), [['api/jobs/app/T-1/resume', '{"message":"Mind the new line."}']]);
+  resumed[0]!.respond(200, { ok: true, result: { state: 'working', iteration: 1, step: 'turn', task_changed: true } });
+  await page.flush();
+  assert.equal(page.$('action-status').textContent, 'Resumed: the Implementer goes on with iteration 2. The changed Task file went with it.');
+  assert.equal(page.$('say-input').value, '');
+
+  // Restart: its confirmation says what is thrown away; Keep the files goes with the request.
+  await show(page, detail(job('aborted')));
+  assert.deepEqual([restart!.hidden, restart!.disabled, page.$('archive-job-button').hidden], [false, false, false]);
+  restart!.click();
+  assert.equal(page.$('confirm-title').textContent, 'Restart app/T-1?');
+  assert.match(page.$('confirm-text').textContent, /^Starts T-1 again from its current Task file, as a new job on a fresh worktree and branch from main\. Thrown away: .*the worktree \/wt\/T-1 with its uncommitted changes \(unless kept below\) and the branch T-1-demo, deleted only when it has no commit beyond the base and was never pushed/);
+  assert.equal(page.$('keep-files-label').hidden, false);
+  assert.equal(page.$('confirm-ok').textContent, 'Restart');
+  page.$('keep-files').checked = true;
+  page.$('keep-files').dispatch('change');
+  assert.equal(page.$('confirm-ok').textContent, 'Restart, keep the files');
+  page.$('confirm-ok').click();
+  await page.flush();
+  const restarted = posts(page).filter((request) => request.path.endsWith('/restart'));
+  assert.deepEqual(restarted.map((request) => [request.path, request.body]), [['api/jobs/app/T-1/restart', '{"keep_files":true}']]);
+  restarted[0]!.respond(200, { ok: true, result: { branch: 'T-1-demo', state: 'working', check_after_minutes: 5, worktree: '/wt/T-1', archived: 'jobs/app/T-1.20261101T100000Z', branch_deleted: 'T-1-demo', kept: ['a.txt'] } });
+  await page.flush();
+  assert.equal(page.$('action-status').textContent, 'Restarted on T-1-demo from the current Task file (the old job is in jobs/app/T-1.20261101T100000Z). The old branch T-1-demo was deleted. 1 file of the old worktree was copied in.');
+
+  // Pause is held while the MR is prepared, with the reason.
+  await show(page, detail(job('preparing_mr')));
+  assert.deepEqual([pause!.hidden, pause!.disabled], [false, true]);
+  assert.match(page.$('action-reasons').textContent, /Pause: the MR is being prepared/);
 });

@@ -3,8 +3,8 @@
 // sf serve leaves a working job alone. One runner per job, guarded by runner.pid in the job
 // directory (src/pid-lock.ts). sf serve talks to it only through files: each request is a JSON
 // file in queue/ (taken oldest first), the runner's answer to it a file of the same name in
-// replies/; abort and reset stop it with SIGTERM. The runner exits when nothing is left to run:
-// the job waits for a person or has ended. Its output goes to runner.log in the job directory.
+// replies/; abort, pause (SF-067), restart and reset stop it with SIGTERM. The runner exits when
+// nothing is left to run: the job waits for a person or has ended. Its output goes to runner.log in the job directory.
 import { type ChildProcess, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { closeSync, type FSWatcher, mkdirSync, openSync, watch } from 'node:fs';
@@ -29,7 +29,9 @@ export type RunnerRequest =
   // The user's settlement of a ledger entry (SF-052).
   | { kind: 'settle'; id: string; decision: Decision; note: string }
   // The user's Simplify on the offer of the simplification pass (SF-055).
-  | { kind: 'simplify' };
+  | { kind: 'simplify' }
+  // The user's Resume of a paused job (SF-067), with the message for the Implementer ('' for none).
+  | { kind: 'resume'; message: string };
 
 export type RunnerReply = { ok: true; result: unknown } | { ok: false; error: { code: string; message: string } };
 

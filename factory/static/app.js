@@ -20,9 +20,12 @@ const RECONNECT_MS = 3000;
 const READ_TIMEOUT_MS = 10000;
 const TERMINAL_STATES = ['pushed', 'aborted', 'failed'];
 const SAY_STATES = ['working', 'awaiting_review', 'needs_human', 'ready_for_human_review'];
+// Pause, Resume and Restart (SF-067): the states each takes.
+const PAUSE_STATES = ['working', 'awaiting_review'];
+const RESTART_STATES = ['paused', 'aborted', 'failed', 'needs_human'];
 const ACTION_LABELS = {
   approve: 'Approve', abort: 'Abort', say: 'Send', review: 'Retry review', accept: 'Accept and prepare MR', settle: 'Settle', simplify: 'Simplify', archive: 'Archive',
-  'mr-create': 'Create merge request', 'mr-merge': 'Merge', 'mr-status': 'Refresh MR status',
+  'mr-create': 'Create merge request', 'mr-merge': 'Merge', 'mr-status': 'Refresh MR status', pause: 'Pause', resume: 'Resume', restart: 'Restart',
 };
 const PENDING_REASONS = {
   accept: 'the override was requested; waiting for its outcome.',
@@ -36,6 +39,9 @@ const PENDING_REASONS = {
   'mr-create': 'the merge request was requested; waiting for its outcome.',
   'mr-merge': 'the merge was requested; waiting for its outcome.',
   'mr-status': 'the merge request is being read from the host.',
+  pause: 'the pause was requested; waiting for the job to stop.',
+  resume: 'the resume was requested; waiting for its outcome.',
+  restart: 'the restart was requested; waiting for its outcome.',
 };
 const PENDING_TEXT = {
   accept: 'Accepting over the gate…',
@@ -49,6 +55,9 @@ const PENDING_TEXT = {
   'mr-create': 'Opening the merge request…',
   'mr-merge': 'Merging the merge request…',
   'mr-status': 'Reading the merge request from the host…',
+  pause: 'Pausing: stopping the job…',
+  resume: 'Resuming the job…',
+  restart: 'Restarting the ticket…',
 };
 const $ = (id) => document.getElementById(id);
 // The views of the selected job, flat tabs, one panel each (#tab-<name>).
@@ -346,13 +355,30 @@ function standingOverride(detail) {
   return null;
 }
 
+// The notice of a paused job whose Task file changed since the Implementer was last given it (SF-067).
+const TASK_CHANGED = 'Task file changed since the job started: Resume hands the change to the Implementer and the reviewers.';
+
+// What a pause interrupted (SF-067) and what moves the job on.
+function pausedSentence(job) {
+  const step = job.paused?.step;
+  const what = step === 'turn' ? `the Implementer's turn on iteration ${job.iteration + 1}`
+    : step === 'review' ? `the Claude review of iteration ${job.iteration}`
+    : step === 'gate' ? `the Codex gate on iteration ${job.iteration}`
+    : step === 'simplify' ? `the simplification pass on iteration ${job.iteration}` : null;
+  const again = step === 'turn' ? 'Resume continues the same session (with your message, if you write one below)' : what !== null ? 'Resume runs it again' : 'Resume goes on';
+  return `${what !== null ? `You paused ${what}.` : 'You paused the job.'} ${again}; Restart starts the ticket again from its current Task file.`;
+}
+
 // A plain sentence for each code that stops a job: what happened and what moves it on.
 function haltSentence(detail) {
   const job = detail.job;
   const code = job.error?.code ?? '';
   const accept = gateAcceptable(detail) ? ' Accept and prepare the MR, tell the Implementer what to do, or abort.' : ' Tell the Implementer what to do, or abort.';
   if (job.state === 'failed') {
-    return 'The job failed and cannot go on; archive it.';
+    return 'The job failed and cannot go on; restart or archive it.';
+  }
+  if (job.state === 'paused') {
+    return pausedSentence(job);
   }
   switch (code) {
     case SIMPLIFY_CODE:
@@ -459,6 +485,8 @@ function nextAction(detail) {
       };
     case 'needs_human':
       return { who: 'Your turn', headline: haltSentence(detail), why: job.error ? `${job.error.code}: ${job.error.message}` : '' };
+    case 'paused':
+      return { who: 'Your turn', headline: pausedSentence(job), why: job.task_changed === true ? TASK_CHANGED : '' };
     case 'pushed':
       if (hasMr(job) && job.mr.state === 'merged') {
         return { who: 'Finished', headline: `Merged merge request #${job.mr.number} into ${job.base}.`, why: 'Archive the job to take it off the board.' };
@@ -1285,6 +1313,18 @@ function availability(action, job) {
   if (action === 'abort') {
     return TERMINAL_STATES.includes(job.state) ? `the job is already ${job.state}.` : '';
   }
+  if (action === 'pause') {
+    if (job.state === 'preparing_mr') {
+      return 'the MR is being prepared (commit, rebase); it cannot be paused now.';
+    }
+    return PAUSE_STATES.includes(job.state) ? '' : 'only while the Implementer works or the reviewers review.';
+  }
+  if (action === 'resume') {
+    return job.state === 'paused' ? '' : 'only for a paused job.';
+  }
+  if (action === 'restart') {
+    return RESTART_STATES.includes(job.state) ? '' : 'only for a paused, aborted, failed or needs_human job.';
+  }
   if (action === 'mr-create') {
     if (!canCreateMr(job)) {
       return hasMr(job) && job.state === 'pushed' ? `the merge request #${job.mr.number} is ${job.mr.state}.` : 'a merge request needs a pushed branch, or one ready to approve.';
@@ -1307,8 +1347,14 @@ function availability(action, job) {
     return state.detail !== null && keyOf(state.detail.job) === keyOf(job) && gateAcceptable(state.detail)
       ? '' : 'only after the gate or the ledger stopped the job, or the simplification pass offered suggestions, with a clean Claude review.';
   }
+  if (job.state === 'paused') {
+    return pausedTurn(job) ? 'the job is paused: Resume sends the message.' : 'the job is paused: Resume, then send the message.';
+  }
   return SAY_STATES.includes(job.state) ? '' : `messages need working, awaiting_review, needs_human or ready_for_human_review; the job is ${job.state}.`;
 }
+
+// A job paused during the Implementer's turn (SF-067): its Resume takes the message.
+const pausedTurn = (job) => job.state === 'paused' && job.paused?.from === 'working';
 
 function renderActions() {
   const job = state.detail?.job ?? null;
@@ -1342,6 +1388,16 @@ function renderActions() {
   if (acceptable && acceptReason !== '') {
     reasons.push(`${ACTION_LABELS.accept}: ${acceptReason}`);
   }
+  // Pause, Resume and Restart (SF-067): each shows where it applies; Restart is confirmed.
+  for (const action of ['pause', 'resume', 'restart']) {
+    const shown = job !== null && (action === 'pause' ? [...PAUSE_STATES, 'preparing_mr'] : action === 'resume' ? ['paused'] : RESTART_STATES).includes(job.state);
+    const reason = availability(action, job);
+    $(`${action}-button`).hidden = !shown;
+    $(`${action}-button`).disabled = !shown || reason !== '' || state.confirm !== null;
+    if (shown && reason !== '') {
+      reasons.push(`${ACTION_LABELS[action]}: ${reason}`);
+    }
+  }
   // Simplify shows only on the offer of the simplification pass (SF-055).
   const offered = job !== null && simplifiable(job);
   $('simplify-button').hidden = !offered;
@@ -1367,7 +1423,7 @@ function renderActions() {
   const input = $('say-input');
   const sayReason = availability('say', job);
   // The draft stays editable while a message is out; only sending waits.
-  input.disabled = job === null || !SAY_STATES.includes(job.state);
+  input.disabled = job === null || !(SAY_STATES.includes(job.state) || pausedTurn(job));
   $('say-button').disabled = sayReason !== '' || input.value.trim() === '';
   $('say-reason').textContent = sayReason === '' ? '' : `${ACTION_LABELS.say}: ${sayReason}`;
 }
@@ -1449,6 +1505,22 @@ function describeOutcome(action, result) {
       ? { level: 'ok', text: `Settled ${data.id}: ${status}. Still to settle: ${waiting.join(', ')}.` }
       : { level: 'ok', text: `Settled ${data.id}: ${status} (state ${data.state}).` };
   }
+  if (action === 'pause') {
+    return data.state === 'paused'
+      ? { level: 'ok', text: `Paused${data.step ? ` during the ${data.step}` : ''}: nothing of the job runs; the worktree, the branch ${data.branch} and the session stay.` }
+      : { level: 'warn', text: `Not paused: the step had ended as the job stopped; the job is ${data.state}.` };
+  }
+  if (action === 'resume') {
+    const changed = data.task_changed === true ? ' The changed Task file went with it.' : '';
+    return data.step === 'turn' || data.state === 'working'
+      ? { level: 'ok', text: `Resumed: the Implementer goes on with iteration ${Number(data.iteration) + 1}.${changed}` }
+      : { level: 'ok', text: `Resumed: ${data.step ? `the ${data.step} of iteration ${data.iteration} runs again` : `the job awaits review of iteration ${data.iteration}`}.${changed}` };
+  }
+  if (action === 'restart') {
+    const kept = Array.isArray(data.kept) && data.kept.length > 0 ? ` ${data.kept.length === 1 ? '1 file' : `${data.kept.length} files`} of the old worktree ${data.kept.length === 1 ? 'was' : 'were'} copied in.` : '';
+    const branch = typeof data.branch_deleted === 'string' ? ` The old branch ${data.branch_deleted} was deleted.` : '';
+    return { level: 'ok', text: `Restarted on ${data.branch} from the current Task file (the old job is in ${data.archived}).${branch}${kept}` };
+  }
   if (action === 'abort') {
     if (data.error) {
       return { level: 'error', text: `The job ended (${data.state}), but discard failed: ${detail} The discard may be partial: look at the branch ${data.branch} and the worktree by hand before relying on either.` };
@@ -1485,7 +1557,7 @@ async function run(action, key, body) {
       state.mrStatus.set(key, result.status);
     }
     // The sent draft goes; text edited meanwhile stays.
-    if (action === 'say' && state.drafts.get(key) === body.message) {
+    if ((action === 'say' || action === 'resume') && typeof body.message === 'string' && state.drafts.get(key) === body.message) {
       state.drafts.delete(key);
       if (key === state.key) {
         $('say-input').value = '';
@@ -1619,6 +1691,7 @@ function openConfirm(action) {
       : '',
     approve: `Pushes branch ${job.branch} to origin: the one commit the factory prepared at Clean, rebased onto ${job.base}. Nothing is committed or rebased now; a tip edited by hand is refused unless pushed as it is.`,
     abort: `Ends the job on branch ${job.branch}: the Implementer session stops and queued messages are dropped. The branch and its worktree stay as they are.`,
+    restart: `Starts ${job.ticket} again from its current Task file, as a new job on a fresh worktree and branch from ${job.base}. Thrown away: the Implementer session${job.state === 'paused' || job.state === 'needs_human' ? ' and its queued messages' : ''}, the worktree${typeof job.worktree === 'string' ? ` ${job.worktree}` : ''} with its uncommitted changes (unless kept below) and the branch ${job.branch}, deleted only when it has no commit beyond the base and was never pushed: otherwise nothing is touched and the restart is refused. The job's history is archived as sf reset does.`,
     simplify: `Writes one Fix section “Simplify” with the suggestions below into the Task file; the Implementer applies them and the Claude review and the gate review the result as usual. The suggestions are recorded in the ledger as your choice, so a reviewer cannot ask for them back. It runs once per job.`,
     accept: job.error?.code === SIMPLIFY_CODE
       ? `Skips the simplification: iteration ${job.iteration}, which the reviewers found clean, goes on to MR preparation as it is. The suggestions go into the MR text under “Simplifications not applied”, for a follow-up ticket.`
@@ -1632,6 +1705,8 @@ function openConfirm(action) {
   $('discard').checked = false;
   $('as-is').checked = false;
   $('discard-label').hidden = action !== 'abort';
+  $('keep-files').checked = false;
+  $('keep-files-label').hidden = action !== 'restart';
   $('as-is-label').hidden = action !== 'approve';
   $('confirm').hidden = false;
   renderConfirmButton();
@@ -1676,6 +1751,7 @@ function renderConfirmButton() {
     : confirm.action === 'mr-merge' ? `Merge #${job?.mr?.number} into ${job?.base}`
     : confirm.action === 'simplify' ? 'Simplify'
     : confirm.action === 'accept' ? (job?.error?.code === SIMPLIFY_CODE ? 'Skip and prepare the MR' : 'Accept and prepare the MR')
+    : confirm.action === 'restart' ? ($('keep-files').checked ? 'Restart, keep the files' : 'Restart')
     : confirm.action === 'approve' ? ($('as-is').checked ? 'Approve: push as it is' : 'Approve: push the branch') : discard ? 'Abort and discard the branch' : 'Abort, keep the worktree';
   ok.className = discard ? 'btn btn-danger' : 'btn btn-primary';
 }
@@ -1686,6 +1762,7 @@ function closeConfirm() {
   renderConfirmItems(null);
   $('discard').checked = false;
   $('as-is').checked = false;
+  $('keep-files').checked = false;
   renderActions();
 }
 
@@ -1696,12 +1773,13 @@ function submitConfirm() {
   }
   const discard = confirm.action === 'abort' && $('discard').checked;
   const asIs = confirm.action === 'approve' && $('as-is').checked;
+  const keepFiles = confirm.action === 'restart' && $('keep-files').checked;
   closeConfirm();
   // The target was captured when the confirmation opened; a selection changed since drops it.
   if (confirm.key !== state.key) {
     return;
   }
-  void run(confirm.action, confirm.key, confirm.action === 'abort' ? { discard } : asIs ? { as_is: true } : {});
+  void run(confirm.action, confirm.key, confirm.action === 'abort' ? { discard } : confirm.action === 'restart' ? { keep_files: keepFiles } : asIs ? { as_is: true } : {});
 }
 
 function sendSay() {
@@ -1722,7 +1800,7 @@ function sendSay() {
 const COLUMN_OF = {
   starting: 'implementing', working: 'implementing',
   awaiting_review: 'reviewing', preparing_mr: 'reviewing',
-  needs_human: 'you', ready_for_human_review: 'you',
+  needs_human: 'you', ready_for_human_review: 'you', paused: 'you',
   pushed: 'done', aborted: 'done', failed: 'done',
 };
 const COLUMNS = ['planned', 'implementing', 'reviewing', 'you', 'done'];
@@ -1766,6 +1844,15 @@ function haltedSegment(job) {
   return code.startsWith('mr_') ? 3 : 0;
 }
 
+// Where a paused job stopped (SF-067): the turn, the review, the gate or the simplification pass.
+function pausedSegment(job) {
+  const step = job.paused?.step;
+  if (step === 'turn' || job.paused?.from === 'working') {
+    return 0;
+  }
+  return step === 'simplify' ? 3 : step === 'gate' || job.review === 'clean' ? 2 : 1;
+}
+
 // The pipeline position of a job: the current segment (null when there is none), whether it is
 // halted there, and whether the whole pipeline is done (pushed). awaiting_review is the Claude
 // review until the last iteration has a clean one, then the Codex gate.
@@ -1783,6 +1870,9 @@ function pipeline(job) {
     case 'needs_human':
     case 'failed':
       return { segment: haltedSegment(job), halted: true, complete: false };
+    case 'paused':
+      // Held where the pause stopped it (SF-067).
+      return { segment: pausedSegment(job), halted: true, complete: false };
     case 'pushed':
       return { segment: null, halted: false, complete: true };
     default:
@@ -1854,6 +1944,8 @@ function nowLine(job) {
       const what = canApprove(job) ? 'approve' : reviewFailed(job) ? 'retry review' : (job.error?.code ?? 'decide');
       return `You · ${what} · ${waited}`;
     }
+    case 'paused':
+      return `You · paused · ${waited}`;
     default:
       return `${DONE_LABELS[job.state] ?? job.state} · ${waited} ago`;
   }
@@ -1907,6 +1999,9 @@ function jobCard(job) {
   if ((job.state === 'needs_human' || job.state === 'failed') && job.error !== null && typeof job.error === 'object') {
     open.append(el('span', 'card-error', `${job.error.code}: ${job.error.message}`));
   }
+  if (job.state === 'paused' && job.task_changed === true) {
+    open.append(el('span', 'card-note', 'Task file changed since the job started'));
+  }
   open.append(jobChips(job));
   open.addEventListener('click', () => openJob(key));
   item.append(open);
@@ -1926,6 +2021,16 @@ function yourTurn(job) {
     button = el('button', 'btn btn-sm btn-primary', 'Approve…');
     button.disabled = availability('approve', job) !== '';
     button.addEventListener('click', () => openJob(key, 'approve'));
+  } else if (job.state === 'paused') {
+    // Resume (SF-067) needs no confirmation; a message for the Implementer is written in the job.
+    button = el('button', 'btn btn-sm btn-primary', ACTION_LABELS.resume);
+    button.disabled = availability('resume', job) !== '';
+    button.addEventListener('click', () => {
+      const current = jobByKey(key);
+      if (current !== null && availability('resume', current) === '') {
+        void run('resume', key, {});
+      }
+    });
   } else if (reviewFailed(job)) {
     button = el('button', 'btn btn-sm btn-primary', ACTION_LABELS.review);
     button.disabled = availability('review', job) !== '';
@@ -2759,6 +2864,22 @@ function init() {
     }
   });
   $('abort-button').addEventListener('click', () => openConfirm('abort'));
+  // Pause and Resume go at once (SF-067); Restart is confirmed. Resume of a job paused during a
+  // turn takes the message written below, if any.
+  $('pause-button').addEventListener('click', () => {
+    const job = state.detail?.job ?? null;
+    if (job !== null && availability('pause', job) === '') {
+      void run('pause', keyOf(job), {});
+    }
+  });
+  $('resume-button').addEventListener('click', () => {
+    const job = state.detail?.job ?? null;
+    if (job !== null && availability('resume', job) === '') {
+      const message = $('say-input').value;
+      void run('resume', keyOf(job), pausedTurn(job) && message.trim() !== '' ? { message } : {});
+    }
+  });
+  $('restart-button').addEventListener('click', () => openConfirm('restart'));
   $('retry-review-button').addEventListener('click', () => {
     if (state.key !== null) {
       void run('review', state.key, {});
@@ -2774,6 +2895,7 @@ function init() {
   });
   $('discard').addEventListener('change', renderConfirmButton);
   $('as-is').addEventListener('change', renderConfirmButton);
+  $('keep-files').addEventListener('change', renderConfirmButton);
   $('accept-gate-button').addEventListener('click', () => openConfirm('accept'));
   $('simplify-button').addEventListener('click', () => openConfirm('simplify'));
   $('copy-checkout').addEventListener('click', () => {

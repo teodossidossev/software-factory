@@ -84,6 +84,16 @@ _Avoid_: findings, review request, feedback
 **Job**:
 One Ticket being implemented in one Workspace on one Branch. Identified by the Branch name.
 
+**Paused**:
+The state of a Job the User stopped with Pause: nothing of it runs (no Runner, no Implementer turn,
+no Review, no Gate), and it keeps its Worktree, Branch, Implementer session, Iterations, Ledger and
+events. A Review or Gate round it interrupted is thrown away, never a verdict. Resume goes on where
+it stopped: the same session continues the turn, or the interrupted round runs again on the same
+Iteration; a Task file changed meanwhile goes to the Implementer as its diff and to the Reviews as
+the new file. A Paused Job does not count toward SF_MAX_JOBS. Restart replaces it (or an aborted,
+failed or needs_human Job) with a new Job from the current Task file on a fresh Worktree and Branch.
+_Avoid_: suspended, on hold, stopped (for a Paused Job); aborted (that Job has ended)
+
 **Worktree**:
 The Git worktree of one Job, created from the Workspace's checkout at start under the factory's
 state directory, where the Implementer works. Removed at Clean (the Branch stays), at the end of

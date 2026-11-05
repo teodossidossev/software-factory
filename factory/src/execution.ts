@@ -3,8 +3,8 @@
 // review, SF-044), acceptGate (the user's override of a stopped gate, SF-047), approve (the push),
 // the merge request on the Git host (SF-048: createMergeRequest, mergeMergeRequest,
 // mergeRequestStatus), simplify (the user's choice on the offer of the simplification pass,
-// SF-055), abort, reset
-// (and the dashboard's terminal-only Archive), status and the restart rule. Owns the Implementer session of each job, which works in the
+// SF-055), pause, resume and restart (SF-067: resumePaused, restart), abort, reset
+// (and the dashboard's terminal-only Archive), status and the rule for a restart of sf serve. Owns the Implementer session of each job, which works in the
 // job's own worktree, and publishes an iteration (Report, Patch and the file list) when the
 // session goes idle; then the Claude review of that iteration runs (SF-038, src/review.ts), and
 // after a clean one the Codex gate (SF-039, src/gate.ts); the deciding verdict takes the path of
@@ -17,20 +17,20 @@
 // Since SF-042 each job's turns, reviews and gate run in the job's runner (src/runner.ts), a
 // detached `sf run` with an Execution of its own in runner mode: sf serve creates the job at start,
 // queues the requests that need a turn or a review (the first turn, say, a Fix section, Clean, the
-// retry of a review, the override of the gate) and waits for the runner's reply; abort and reset
-// stop the runner first. approve and the merge request stay in sf serve.
+// retry of a review, the override of the gate, the Resume of a paused job) and waits for the
+// runner's reply; abort, pause, restart and reset stop the runner first. approve and the merge request stay in sf serve.
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { copyFile, type FileHandle, mkdir, readFile, stat } from 'node:fs/promises';
-import { join, resolve as resolvePath, sep } from 'node:path';
+import { chmod, copyFile, type FileHandle, lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink } from 'node:fs/promises';
+import { dirname, join, resolve as resolvePath, sep } from 'node:path';
 import type { Config } from './config.js';
 import { FactoryError } from './errors.js';
 import { chooseForge, type Forge, type ForgeKind, forgeFor, type MergeRequestStatus } from './forge.js';
 import { runGit } from './git.js';
 import { GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from './gate.js';
-import { cutEvent, type FileChange, type GateOverride, type GateRecord, isActive, type Job, type JobMr, type JobState, JobStore, now, type ReviewRecord, type SimplifyRecord, TERMINAL_STATES } from './jobs.js';
+import { cutEvent, type FileChange, type GateOverride, type GateRecord, isActive, type Job, type JobMr, type JobState, JobStore, now, PAUSABLE_STATES, type PauseStep, RESTARTABLE_STATES, type ReviewRecord, type SimplifyRecord, TERMINAL_STATES } from './jobs.js';
 import { answerFix, applyVerdict, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, escalationMessage, headings, LEDGER_ID, type LedgerEntry, FACTORY_PROBLEMS, SCOPE_PROBLEM, SENSITIVE_PROBLEM, settle, SETTLE_CODES, unappliedEntries, unsettled, userFixItems } from './ledger.js';
 import { abortRebase, commitAndRebase, continueRebase, gitBusy, mergeRequestLink, originUrl, pushBranch, readMrText, rebaseInProgress, resolveTarget, unmergedPaths, withFindings, withNits, withSimplifications } from './mr.js';
-import { buildPatch, changedFilesSection, fileChanges, notificationLine, type Patch } from './patch.js';
+import { buildPatch, changedFilesSection, changedPaths, fileChanges, notificationLine, type Patch } from './patch.js';
 import { removeSandboxPlaceholders } from './placeholders.js';
 import { Redactor } from './redact.js';
 import { conflictPrompt, factoryPrompt, iterationCost, mrPrompt } from './prompts.js';
@@ -42,7 +42,7 @@ import { changedBetween, type FixFiles, fixNumbers, guardSuggestions, offerMessa
 import { withLock } from './pid-lock.js';
 import { type Launch, type RunnerRequest, Runners, type RunnerWork } from './runner.js';
 import { type IdleOutcome, ImplementerSession } from './session.js';
-import { appendFix, isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskScope, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
+import { appendFix, isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskDiff, taskScope, taskSha256, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { addWorktree, deleteBranch, removeWorktree } from './worktree.js';
 
 export const MAX_REPORT_BYTES = 64 * 1024;
@@ -155,6 +155,109 @@ async function exists(path: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+// What a Resume did (SF-067): the job's state and iteration, the step it went on with, and
+// whether the Task file had changed.
+export interface Resumed {
+  state: JobState;
+  iteration: number;
+  step: PauseStep | null;
+  task_changed: boolean;
+}
+
+// A job record claimed by start or restart (SF-067), before its worktree exists.
+interface Claimed {
+  workspace: Workspace;
+  ticket: string;
+  base: string;
+  branch: string;
+  worktree: string;
+}
+
+// The files sf restart --keep-files keeps (SF-067): their paths relative to the worktree, saved
+// under dir until the new worktree exists.
+interface Kept {
+  dir: string;
+  paths: string[];
+}
+
+// How many kept files the first prompt names.
+const MAX_KEPT_NAMED = 50;
+// How long sf restart waits for origin to say whether the old branch was pushed.
+const LS_REMOTE_TIMEOUT_MS = 30_000;
+
+// What the Implementer is told of a Task file that changed since it was last given it (SF-067:
+// on Resume, or the next Fix section or sf say after a review round resumed): its diff, or, when
+// none could be made, to read it again.
+export function changeNote(ticket: string, diff: string | undefined): string {
+  const path = `${TASK_DIR}/${ticket}.md`;
+  if (diff === undefined) {
+    return `The Task file ${path} changed since you were last given it (while the job was paused); the copy in your worktree is the new version. Read it again and act on what changed.`;
+  }
+  return [`The Task file ${path} changed since you were last given it (while the job was paused); the copy in your worktree is the new version. Act on the change:`, '', '````diff', diff, '````'].join('\n');
+}
+
+// The first prompt of a job: /implement of its Task file; after sf restart --keep-files (SF-067),
+// with the files kept from the previous job.
+export function firstPrompt(ticket: string, kept: string[]): string {
+  const command = `/implement ${TASK_DIR}/${ticket}.md`;
+  if (kept.length === 0) {
+    return command;
+  }
+  const more = kept.length > MAX_KEPT_NAMED ? `, and ${kept.length - MAX_KEPT_NAMED} more` : '';
+  return [
+    command,
+    '',
+    `This job restarts an earlier job of ${ticket}. The files that job had changed or added were copied into this worktree before this turn, uncommitted: ${kept.slice(0, MAX_KEPT_NAMED).join(', ')}${more}. They may predate the current Task file: keep what fits it, change or remove the rest.`,
+  ].join('\n');
+}
+
+// Copies one regular file (with its mode) or symbolic link from to to, creating its directory;
+// anything else, or a path that is gone (a deleted file), is skipped. Returns whether it copied.
+async function copyEntry(from: string, to: string): Promise<boolean> {
+  let info;
+  try {
+    info = await lstat(from);
+  } catch {
+    return false;
+  }
+  if (!info.isFile() && !info.isSymbolicLink()) {
+    return false;
+  }
+  await mkdir(dirname(to), { recursive: true, mode: 0o700 });
+  if (info.isSymbolicLink()) {
+    await rm(to, { force: true });
+    await symlink(await readlink(from), to);
+  } else {
+    await copyFile(from, to);
+    await chmod(to, info.mode & 0o777);
+  }
+  return true;
+}
+
+// Saves the worktree's changed and new files against baseCommit (the Patch's paths: ignored and
+// credential-like files left out) under dir; returns their paths.
+async function saveKept(worktree: string, baseCommit: string, dir: string): Promise<string[]> {
+  const { tracked, untracked } = await changedPaths(worktree, baseCommit);
+  const paths: string[] = [];
+  for (const path of [...tracked, ...untracked]) {
+    if (await copyEntry(join(worktree, path), join(dir, path))) {
+      paths.push(path);
+    }
+  }
+  return paths;
+}
+
+// Copies the kept files into the new worktree; one that cannot be copied is logged and skipped.
+async function copyKept(kept: Kept, worktree: string): Promise<void> {
+  for (const path of kept.paths) {
+    try {
+      await copyEntry(join(kept.dir, path), join(worktree, path));
+    } catch (error) {
+      console.error(error);
+    }
   }
 }
 
@@ -307,8 +410,9 @@ export class Execution implements RunnerWork {
 
   async #transition(job: Job, to: JobState, error?: { code: string; message: string }, lines?: string[]): Promise<Job> {
     const from = job.state;
-    const { error: _previous, ...rest } = job;
-    const next: Job = { ...rest, state: to, updated_at: now(), ...(error !== undefined ? { error } : {}) };
+    // What a pause interrupted is kept only while the job is paused (SF-067).
+    const { error: _previous, paused, ...rest } = job;
+    const next: Job = { ...rest, state: to, updated_at: now(), ...(error !== undefined ? { error } : {}), ...(to === 'paused' && paused !== undefined ? { paused } : {}) };
     await this.jobs.write(next);
     await this.jobs.appendEvent(job.workspace, job.ticket, {
       ts: next.updated_at,
@@ -343,7 +447,7 @@ export class Execution implements RunnerWork {
   }
 
   // At serve start (SF-042): a job in working, preparing_mr or awaiting_review whose runner is alive
-  // is left alone. Without a runner, a working job and an MR preparation need a person, an
+  // is left alone, and so is a paused one (SF-067). Without a runner, a working job and an MR preparation need a person, an
   // interrupted start failed, and a job awaiting review whose last iteration has no review, or a
   // clean review but no gate.json, or a clean gate.json and a simplification pass that never applied
   // (SF-055), gets a runner, which resumes it (resume: the review, the gate, the pass, or with the
@@ -418,36 +522,61 @@ export class Execution implements RunnerWork {
         throw new FactoryError('invalid_ticket', `ticket must be ${TICKET_DESCRIPTION}.`);
       }
       const workspace = await this.#resolve(workspaceName);
-      const content = await readTask(workspace, ticket);
-      if (isDraft(content)) {
-        throw new FactoryError('task_draft', `${TASK_DIR}/${ticket}.md is still the skeleton: the Context owner writes the Task with write_task first, then the user starts the job.`);
-      }
-      const fields = parseFrontMatter(content)!;
-      const base = fields.get('base')!;
-      const branch = branchName(ticket, fields.get('title')!);
-
+      const plan = await this.#plan(workspace, ticket);
       const existing = await this.jobs.read(workspace.name, ticket);
       if (existing !== undefined && !TERMINAL_STATES.includes(existing.state)) {
         throw new FactoryError('job_exists', `The job for ${workspace.name}/${ticket} is ${existing.state}.`);
       }
-      const live = (await this.jobs.list()).filter((job) => job.workspace === workspace.name && isActive(job));
-      if (live.length >= this.#config.maxJobs) {
-        throw new FactoryError('job_limit', `Workspace ${workspace.name} has ${live.length} live job(s) (${live.map((job) => `${job.ticket} ${job.state}`).join(', ')}); SF_MAX_JOBS is ${this.#config.maxJobs}.`);
-      }
+      await this.#checkSlot(workspace.name, ticket);
       if (existing !== undefined) {
         await this.jobs.archive(workspace.name, ticket);
       }
-      const created = now();
-      const worktree = this.#worktreePath(workspace.name, ticket);
-      const job: Job = {
-        workspace: workspace.name, ticket, branch, base, base_commit: null, state: 'starting', worktree, prepared_commit: null,
-        iteration: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, created_at: created, updated_at: created,
-      };
-      await this.jobs.write(job);
-      await this.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, state: { from: null, to: 'starting' } });
-      return { workspace, job, base, branch, worktree };
+      return this.#claim(workspace, ticket, plan);
     });
-    const { workspace, base, branch, worktree } = claimed;
+    return this.#launch(claimed);
+  }
+
+  // The base and the branch of a job from the ticket's Task file, which must not be a draft.
+  async #plan(workspace: Workspace, ticket: string): Promise<{ base: string; branch: string }> {
+    const content = await readTask(workspace, ticket);
+    if (isDraft(content)) {
+      throw new FactoryError('task_draft', `${TASK_DIR}/${ticket}.md is still the skeleton: the Context owner writes the Task with write_task first, then the user starts the job.`);
+    }
+    const fields = parseFrontMatter(content)!;
+    return { base: fields.get('base')!, branch: branchName(ticket, fields.get('title')!) };
+  }
+
+  // SF_MAX_JOBS: the live jobs of the workspace (a paused one is not, SF-067), the ticket's own
+  // aside, leave a slot; job_limit otherwise. Only under the lock.
+  async #checkSlot(workspaceName: string, ticket: string): Promise<void> {
+    const live = (await this.jobs.list()).filter((job) => job.workspace === workspaceName && job.ticket !== ticket && isActive(job));
+    if (live.length >= this.#config.maxJobs) {
+      throw new FactoryError('job_limit', `Workspace ${workspaceName} has ${live.length} live job(s) (${live.map((job) => `${job.ticket} ${job.state}`).join(', ')}); SF_MAX_JOBS is ${this.#config.maxJobs}.`);
+    }
+  }
+
+  // Writes the record of a new job in starting (the ticket's directory must be free). Only under
+  // the lock.
+  async #claim(workspace: Workspace, ticket: string, plan: { base: string; branch: string }): Promise<Claimed> {
+    const { base, branch } = plan;
+    const created = now();
+    const worktree = this.#worktreePath(workspace.name, ticket);
+    const job: Job = {
+      workspace: workspace.name, ticket, branch, base, base_commit: null, state: 'starting', worktree, prepared_commit: null,
+      iteration: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, created_at: created, updated_at: created,
+    };
+    await this.jobs.write(job);
+    await this.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, state: { from: null, to: 'starting' } });
+    return { workspace, ticket, base, branch, worktree };
+  }
+
+  // The claimed job's worktree, then its first turn. kept (sf restart --keep-files, SF-067): the
+  // files of the previous job, saved in a directory of their own, are copied into the worktree
+  // before the first turn, whose prompt names them; the directory goes once they are copied, and
+  // stays (named in the error) when the job could not start.
+  async #launch(claimed: Claimed, kept?: Kept): Promise<{ branch: string; state: JobState; check_after_minutes: number; worktree: string }> {
+    const { workspace, ticket, base, branch, worktree } = claimed;
+    const keptNote = kept !== undefined && kept.paths.length > 0 ? ` The files kept from the previous job are in ${kept.dir}.` : '';
     let baseCommit: string;
     try {
       baseCommit = await this.#gitLocked(workspace.name, () => this.#createWorktree(workspace.workCheckout, base, branch, worktree));
@@ -456,25 +585,31 @@ export class Execution implements RunnerWork {
       await this.#locked(async () => {
         const job = await this.jobs.read(workspace.name, ticket);
         if (job !== undefined && job.state === 'starting') {
-          await this.#transition({ ...job, worktree: null }, 'failed', { code: failure.code, message: failure.message });
+          await this.#transition({ ...job, worktree: null }, 'failed', { code: failure.code, message: `${failure.message}${keptNote}` });
         }
       });
-      throw failure;
+      throw new FactoryError(failure.code, `${failure.message}${keptNote}`);
     }
-    return this.#locked(async () => {
+    const result = await this.#locked(async () => {
       let job = await this.jobs.read(workspace.name, ticket);
       if (job === undefined || job.state !== 'starting') {
         await removeWorktree(workspace.workCheckout, worktree);
-        throw new FactoryError('job_ended', `The job for ${workspace.name}/${ticket} ended while it was starting.`);
+        throw new FactoryError('job_ended', `The job for ${workspace.name}/${ticket} ended while it was starting.${keptNote}`);
       }
       job = { ...job, base_commit: baseCommit };
       await this.jobs.write(job);
-      await this.#syncTask(workspace, job);
-      job = await this.#transition(job, 'working');
+      if (kept !== undefined) {
+        await copyKept(kept, worktree);
+      }
+      job = await this.#transition(await this.#syncTask(workspace, job), 'working');
       // The first turn runs in the job's runner.
-      await this.#serveRunners().queue(workspace.name, ticket, { kind: 'turn', prompt: factoryPrompt(`/implement ${TASK_DIR}/${ticket}.md`, ticket, job.iteration + 1) });
+      await this.#serveRunners().queue(workspace.name, ticket, { kind: 'turn', prompt: factoryPrompt(firstPrompt(ticket, kept?.paths ?? []), ticket, job.iteration + 1) });
       return { branch, state: job.state, check_after_minutes: this.#config.checkAfterStartMin, worktree };
     });
+    if (kept !== undefined) {
+      await rm(kept.dir, { recursive: true, force: true });
+    }
+    return result;
   }
 
   // Fetches the base when origin exists, checks the names, creates the branch and its worktree
@@ -496,14 +631,49 @@ export class Execution implements RunnerWork {
     return commit;
   }
 
-  // The Task file of the checkout, copied into the worktree before every Implementer turn.
-  async #syncTask(workspace: Workspace, job: Job): Promise<void> {
+  // The Task file of the checkout, copied into the worktree before every Implementer turn. The
+  // version copied is the one the Implementer was last given (SF-067): kept as task.md in the job
+  // directory, and recorded as the job's version (#recordTask). Returns the job.
+  async #syncTask(workspace: Workspace, job: Job): Promise<Job> {
+    const content = await this.#copyTask(workspace, job);
+    if (content === undefined) {
+      return job;
+    }
+    if ((await this.jobs.readTaskCopy(job.workspace, job.ticket)) !== content) {
+      await this.jobs.writeTaskCopy(job.workspace, job.ticket, Buffer.from(content, 'utf8'));
+    }
+    return this.#recordTask(job, content);
+  }
+
+  // The Task file's version the job works from (SF-067): its sha256 in job.json, written when it
+  // changed. Returns the job.
+  async #recordTask(job: Job, content: string): Promise<Job> {
+    const sha256 = taskSha256(content);
+    if (job.task_sha256 === sha256) {
+      return job;
+    }
+    const next: Job = { ...job, task_sha256: sha256 };
+    await this.jobs.write(next);
+    return next;
+  }
+
+  // Copies the checkout's Task file into the worktree, for the reviewers only (a review round on
+  // Resume, SF-067): what the Implementer was last given stays recorded, so its next prompt carries
+  // the change. Returns the text copied; undefined without a worktree.
+  async #copyTask(workspace: Workspace, job: Job): Promise<string | undefined> {
     if (job.worktree === null) {
-      return;
+      return undefined;
     }
     const dir = join(job.worktree, TASK_DIR);
     await mkdir(dir, { recursive: true, mode: 0o700 });
     await copyFile(join(workspace.workCheckout, TASK_DIR, `${job.ticket}.md`), join(dir, `${job.ticket}.md`));
+    return readFile(join(dir, `${job.ticket}.md`), 'utf8');
+  }
+
+  // The prompt of an Implementer turn, with the change of the Task file since the Implementer was
+  // last given it (SF-067: changed while paused) when there is one. change: #taskChange's.
+  #withChange(prompt: string, ticket: string, change: { diff: string | undefined } | undefined): string {
+    return change === undefined ? prompt : `${prompt}\n\n${changeNote(ticket, change.diff)}`;
   }
 
   // Removes the sandbox's placeholder files from the worktree; a failure is logged and the steps
@@ -1562,8 +1732,7 @@ export class Execution implements RunnerWork {
     });
     await onAccepted?.();
     const attempt = job.mr_attempts + 1;
-    const next = await this.#transition({ ...job, target_commit: target.commit, mr_attempts: attempt }, 'preparing_mr');
-    await this.#syncTask(workspace, next);
+    const next = await this.#syncTask(workspace, await this.#transition({ ...job, target_commit: target.commit, mr_attempts: attempt }, 'preparing_mr'));
     const prompt = mrPrompt({
       ticket, branch: job.branch, targetRef: target.ref, targetCommit: target.commit, attempt,
       previousError: retry ? job.error?.message : undefined, handbook: this.#handbook,
@@ -1818,6 +1987,276 @@ export class Execution implements RunnerWork {
     });
   }
 
+  // sf pause (SF-067): stops the job where it is, the way abort does (the runner stops, and with it
+  // the turn, the review, the gate or the simplification pass and their processes), and the job
+  // goes to paused with its worktree, branch, session, iterations, ledger and events. A review round
+  // that ran is thrown away, recorded as interrupted (never as a verdict), and runs again on Resume.
+  // A step that ended on its own as the runner stopped leaves the job as it left it; one that had
+  // begun MR preparation hands the job to the user (mr_interrupted).
+  pause(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; step: PauseStep | null }> {
+    return this.#locked(async () => {
+      const found = await this.#job(workspaceName, ticket);
+      if (found.state === 'preparing_mr') {
+        throw new FactoryError('invalid_state', 'The job is preparing the MR (the MR text, the commit and the rebase); it cannot be paused now. Wait until it waits for you, or abort it.');
+      }
+      if (!(PAUSABLE_STATES as readonly JobState[]).includes(found.state)) {
+        throw new FactoryError('invalid_state', `sf pause needs working or awaiting_review; the job is ${found.state}.`);
+      }
+      await this.#endSession(workspaceName, ticket);
+      // The job as its runner left it.
+      const job = await this.#job(workspaceName, ticket);
+      if (job.state === 'preparing_mr') {
+        const next = await this.#transition(job, 'needs_human', {
+          code: 'mr_interrupted',
+          message: 'The job was paused as its MR preparation began; go on with sf say (its iteration is reviewed again and a clean verdict prepares the branch again), or abort or reset the job.',
+        });
+        return { state: next.state, branch: next.branch, step: null };
+      }
+      if (job.state !== 'working' && job.state !== 'awaiting_review') {
+        return { state: job.state, branch: job.branch, step: null };
+      }
+      const from = job.state;
+      const iteration = from === 'working' ? job.iteration + 1 : job.iteration;
+      if (job.worktree !== null && (await exists(job.worktree))) {
+        await this.#clean(job, iteration, job.worktree);
+      }
+      const step = await this.#interruptedStep(job);
+      let paused: Job = { ...job, paused: { from, step, at: now() } };
+      if (step === 'simplify') {
+        // The pass runs again on Resume: its one run per job was not used up.
+        const { simplify_iteration: _started, ...rest } = paused;
+        paused = rest;
+      }
+      if (step !== null) {
+        const reviewer = { review: REVIEWER, gate: GATE_REVIEWER, simplify: SIMPLIFIER, turn: undefined }[step];
+        await this.jobs.appendEvent(workspaceName, ticket, { ts: now(), iteration, type: 'interrupted', step, ...(reviewer !== undefined ? { reviewer } : {}) });
+      }
+      const next = await this.#transition(paused, 'paused');
+      return { state: next.state, branch: next.branch, step };
+    });
+  }
+
+  // What a job in working or awaiting_review was doing: the turn, or the review round that runs or
+  // is due on its last iteration (the Claude review, the gate after a clean one, the simplification
+  // pass once started); null when none was (awaiting review with the review off).
+  async #interruptedStep(job: Job): Promise<PauseStep | null> {
+    const { workspace, ticket, iteration } = job;
+    if (job.state === 'working') {
+      return 'turn';
+    }
+    if (iteration === 0) {
+      return null;
+    }
+    const review = await this.jobs.readReview(workspace, ticket, iteration);
+    if (review === undefined) {
+      return this.#config.review ? 'review' : null;
+    }
+    if (!('verdict' in review) || actedVerdict(withoutDropped(review)) !== 'clean') {
+      return null;
+    }
+    const gate = await this.jobs.readGate(workspace, ticket, iteration);
+    if (gate === undefined && this.#config.gate.on) {
+      return 'gate';
+    }
+    if (gate !== undefined && (!('verdict' in gate) || actedVerdict(withoutDropped(gate)) !== 'clean')) {
+      return null;
+    }
+    return job.simplify_iteration === iteration && (await this.jobs.readSimplify(workspace, ticket, iteration)) === undefined ? 'simplify' : null;
+  }
+
+  // sf resume (SF-067): the paused job goes on where it stopped. A turn: the same Implementer session
+  // goes on with the message, or "Continue where you stopped."; a review round: it runs again on the
+  // same iteration (no message: sf say sends one after). When the Task file changed since the
+  // Implementer was last given it, the new one is copied into the worktree (the reviewers read it
+  // there), its sha256 recorded, and the turn's message carries its diff. A paused job needs a free
+  // slot of SF_MAX_JOBS to go on.
+  async resumePaused(workspaceName: string, ticket: string, message = ''): Promise<Resumed> {
+    const id = await this.#locked(async () => {
+      const job = await this.#job(workspaceName, ticket);
+      const request = { kind: 'resume' as const, message };
+      this.#check(job, request);
+      await this.#checkSlot(workspaceName, ticket);
+      return this.#serveRunners().queue(workspaceName, ticket, request);
+    });
+    return this.#serveRunners().reply(workspaceName, ticket, id) as Promise<Resumed>;
+  }
+
+  // sf resume needs a paused job; a message only when a turn was paused, and then plain text.
+  #checkResume(job: Job, message: string): void {
+    if (job.state !== 'paused') {
+      throw new FactoryError('invalid_state', `sf resume needs paused; the job is ${job.state}.`);
+    }
+    if (message.includes('\0')) {
+      throw new FactoryError('invalid_content', 'The message must be text.');
+    }
+    if (message.trim() !== '' && job.paused?.from !== 'working') {
+      throw new FactoryError('invalid_content', `The job was paused ${job.paused?.step != null ? `during the ${job.paused.step}, which runs again` : 'awaiting review'} on Resume; Resume takes no message then. Resume without one, then send it with sf say.`);
+    }
+  }
+
+  // The Resume in the runner.
+  #resumePaused(workspaceName: string, ticket: string, message: string): Promise<Resumed> {
+    return this.#locked(async () => {
+      const job = await this.#job(workspaceName, ticket);
+      this.#checkResume(job, message);
+      if (job.worktree === null || !(await exists(job.worktree))) {
+        throw new FactoryError('worktree_missing', `The worktree of ${workspaceName}/${ticket} is missing; sf restart the ticket.`);
+      }
+      const workspace = await this.#resolve(workspaceName);
+      const pause = job.paused ?? { from: 'working' as const, step: 'turn' as const };
+      const change = await this.#taskChange(workspace, job);
+      if (change !== undefined) {
+        await this.jobs.appendEvent(workspaceName, ticket, { ts: now(), iteration: job.iteration, type: 'task_changed', from: job.task_sha256 ?? null, to: change.sha256 });
+      }
+      let next: Job;
+      if (pause.from === 'working') {
+        next = await this.#transition(await this.#syncTask(workspace, job), 'working');
+        const first = message.trim() !== '' ? message : next.session_id === null && next.iteration === 0 ? `/implement ${TASK_DIR}/${ticket}.md` : 'Continue where you stopped.';
+        this.#session(next, workspace).send(factoryPrompt(this.#withChange(first, ticket, change), ticket, next.iteration + 1), DENIED_TOOLS);
+      } else {
+        // The reviewers read the new Task file in the worktree and its sha256 is recorded; task.md
+        // keeps what the Implementer was last given, so its next prompt (a Fix section, sf say)
+        // carries the diff.
+        const content = await this.#copyTask(workspace, job);
+        next = await this.#transition(content === undefined ? job : await this.#recordTask(job, content), 'awaiting_review');
+        await this.#pickUp(next);
+      }
+      return { state: next.state, iteration: next.iteration, step: pause.step, task_changed: change !== undefined };
+    });
+  }
+
+  // Whether the ticket's Task file changed since the Implementer was last given it (the job's copy,
+  // else the worktree's), and its diff; undefined when it did not, or when nothing tells.
+  async #taskChange(workspace: Workspace, job: Job): Promise<{ diff: string | undefined; sha256: string } | undefined> {
+    const current = await readTask(workspace, job.ticket);
+    const sha256 = taskSha256(current);
+    const before = (await this.jobs.readTaskCopy(job.workspace, job.ticket))
+      ?? (job.worktree !== null ? await readFile(join(job.worktree, TASK_DIR, `${job.ticket}.md`), 'utf8').catch(() => undefined) : undefined);
+    if (before === undefined) {
+      return job.task_sha256 !== undefined && job.task_sha256 !== sha256 ? { diff: undefined, sha256 } : undefined;
+    }
+    return before === current ? undefined : { diff: await taskDiff(job.ticket, before, current), sha256 };
+  }
+
+  // sf restart (SF-067): the ticket starts again from its current Task file, as a new job on a fresh
+  // worktree and branch from the Task's base, for a job that is paused, aborted, failed or needs the
+  // user. The old job is retired as reset does (its runner stopped, its worktree removed, its
+  // directory archived), and its branch deleted, only when it has no commit beyond the job's base
+  // and was never pushed; otherwise nothing is touched and the restart is refused with the reason
+  // (restart_refused). keepFiles: the old worktree's changed and new files go into the new worktree
+  // before the first turn, whose prompt says so.
+  async restart(workspaceName: string, ticket: string, keepFiles = false): Promise<{ branch: string; state: JobState; check_after_minutes: number; worktree: string; archived: string; branch_deleted: string | null; kept: string[] }> {
+    const { claimed, kept, archived, deleted } = await this.#locked(async () => {
+      const old = await this.#job(workspaceName, ticket);
+      if (!RESTARTABLE_STATES.includes(old.state)) {
+        throw new FactoryError('invalid_state', `sf restart needs paused, aborted, failed or needs_human; the job is ${old.state}.`);
+      }
+      const workspace = await this.#resolve(workspaceName);
+      const checkout = workspace.workCheckout;
+      const plan = await this.#plan(workspace, ticket);
+      await this.#checkSlot(workspaceName, ticket);
+      // Checked before anything changes, and again below, in the Git lock that deletes the branch,
+      // once the runner has stopped: nothing can add a commit between that check and the deletion.
+      const branchCheck = async (): Promise<boolean> => {
+        const oldExists = await this.#restartableBranch(checkout, old);
+        if (plan.branch !== old.branch && (await runGit(checkout, ['rev-parse', '--verify', '--quiet', `refs/heads/${plan.branch}`])).code === 0) {
+          throw new FactoryError('branch_exists', `The branch ${plan.branch} of the current Task file already exists in the checkout.`);
+        }
+        return oldExists;
+      };
+      await this.#gitLocked(workspaceName, branchCheck);
+      await this.#endSession(workspaceName, ticket);
+      const worktree = old.worktree ?? this.#worktreePath(workspaceName, ticket);
+      let saved: Kept | undefined;
+      if (keepFiles && old.base_commit !== null && (await exists(worktree))) {
+        await mkdir(join(this.#config.stateDir, 'tmp'), { recursive: true, mode: 0o700 });
+        const dir = await mkdtemp(join(this.#config.stateDir, 'tmp', `restart-${ticket}-`));
+        saved = { dir, paths: await saveKept(worktree, old.base_commit, dir) };
+      }
+      // Once the old worktree is gone, the saved files are the only copy: they stay on a failure.
+      let removed = false;
+      const keptNote = (): string => (removed && saved !== undefined && saved.paths.length > 0 ? ` The files kept from the old worktree are in ${saved.dir}.` : '');
+      try {
+        const { deleteOld, failure } = await this.#gitLocked(workspaceName, async () => {
+          const deleting = await branchCheck();
+          const notRemoved = await removeWorktree(checkout, worktree);
+          if (notRemoved !== undefined) {
+            return { deleteOld: deleting, failure: `${notRemoved} Nothing else was changed; the job is ${old.state}.` };
+          }
+          removed = true;
+          const notDeleted = deleting ? await deleteBranch(checkout, old.branch) : undefined;
+          return { deleteOld: deleting, failure: notDeleted === undefined ? undefined : `${notDeleted} The old worktree was removed; the branch and the job (${old.state}) are as they were.` };
+        });
+        if (failure !== undefined) {
+          throw new FactoryError('restart_failed', failure);
+        }
+        const name = await this.jobs.archive(workspaceName, ticket);
+        return { claimed: await this.#claim(workspace, ticket, plan), kept: saved, archived: `jobs/${workspaceName}/${name}`, deleted: deleteOld ? old.branch : null };
+      } catch (error) {
+        if (saved !== undefined && !removed) {
+          await rm(saved.dir, { recursive: true, force: true });
+        }
+        if (error instanceof FactoryError && keptNote() !== '') {
+          throw new FactoryError(error.code, `${error.message}${keptNote()}`);
+        }
+        throw error;
+      }
+    });
+    const started = await this.#launch(claimed, kept);
+    return { ...started, archived, branch_deleted: deleted, kept: kept?.paths ?? [] };
+  }
+
+  // Whether the old job's branch is to be deleted at restart: false when the checkout has no such
+  // branch; true when it has no commit beyond the job's base commit and was never pushed (no
+  // merge request, no upstream, no remote-tracking branch, on no configured remote); refused otherwise
+  // (restart_refused, with the reason). Only under the workspace's Git lock.
+  async #restartableBranch(checkout: string, job: Job): Promise<boolean> {
+    const ref = `refs/heads/${job.branch}`;
+    if ((await runGit(checkout, ['rev-parse', '--verify', '--quiet', ref])).code !== 0) {
+      return false;
+    }
+    const refuse = (reason: string): FactoryError => new FactoryError('restart_refused', `The restart was refused: ${reason}. Nothing was changed.`);
+    if (job.base_commit === null) {
+      throw refuse(`the branch ${job.branch} exists, but the job never created it (it has no base commit); rename or delete it by hand`);
+    }
+    const count = await runGit(checkout, ['rev-list', '--count', `${job.base_commit}..${ref}`]);
+    const commits = Number(count.stdout.toString('utf8').trim());
+    if (count.code !== 0 || !Number.isInteger(commits)) {
+      throw refuse(`the commits of ${job.branch} beyond the base could not be counted (${count.stderr.trim().slice(0, 300)})`);
+    }
+    if (commits > 0) {
+      throw refuse(`the branch ${job.branch} has ${commits} commit(s) beyond the base; push or delete it by hand first`);
+    }
+    if (job.mr !== null) {
+      throw refuse(`the branch ${job.branch} has a merge request (#${job.mr.number})`);
+    }
+    const upstream = await runGit(checkout, ['config', '--get', `branch.${job.branch}.remote`]);
+    if (upstream.code === 0 && upstream.stdout.toString('utf8').trim() !== '') {
+      throw refuse(`the branch ${job.branch} has an upstream (${upstream.stdout.toString('utf8').trim()}): it was pushed`);
+    }
+    const tracking = (await runGit(checkout, ['for-each-ref', '--format=%(refname)', 'refs/remotes/'])).stdout.toString('utf8').split('\n')
+      .filter((name) => name.endsWith(`/${job.branch}`));
+    if (tracking.length > 0) {
+      throw refuse(`the branch ${job.branch} was pushed (${tracking.map((name) => name.replace(/^refs\/remotes\//, '')).join(', ')})`);
+    }
+    // Every configured remote is asked (SF-067, R2): a push needs no upstream and no fetched
+    // remote-tracking branch. One that cannot answer refuses: the branch may be on it.
+    const remotes = await runGit(checkout, ['remote']);
+    if (remotes.code !== 0) {
+      throw refuse(`the remotes of the checkout could not be listed (${remotes.stderr.trim().slice(0, 300)})`);
+    }
+    for (const name of remotes.stdout.toString('utf8').split('\n').map((line) => line.trim()).filter((line) => line !== '')) {
+      const remote = await runGit(checkout, ['ls-remote', '--heads', name, ref], 64 * 1024, LS_REMOTE_TIMEOUT_MS);
+      if (remote.code !== 0) {
+        throw refuse(`the remote ${name} could not be asked whether ${job.branch} was pushed (${remote.code === null ? `no answer within ${LS_REMOTE_TIMEOUT_MS / 1000} s` : remote.stderr.trim().slice(0, 300)})`);
+      }
+      if (remote.stdout.toString('utf8').trim() !== '') {
+        throw refuse(`the branch ${job.branch} is on the remote ${name}: it was pushed`);
+      }
+    }
+    return true;
+  }
+
   // Stops the job's runner, which ends its session and cancels its review, whose outcome is then
   // never applied.
   async #endSession(workspace: string, ticket: string): Promise<void> {
@@ -2029,13 +2468,15 @@ export class Execution implements RunnerWork {
       job = await this.#reopen(job, workspace);
     }
     const fix = job.iteration;
+    // A change made while the job was paused, before the factory's own Fix section (SF-067).
+    const change = job.task_sha256 === undefined || job.worktree === null ? undefined : await this.#taskChange(workspace, job);
     await appendFix(workspace, ticket, fix, content, title);
     if (ledger !== undefined) {
       await this.jobs.writeLedger(workspaceName, ticket, ledger);
     }
-    await this.#syncTask(workspace, job);
+    job = await this.#syncTask(workspace, job);
     job = await this.#transition({ ...job, ...counts, fixes: job.fixes + 1 }, 'working');
-    this.#session(job, workspace).send(factoryPrompt(`/implement ${TASK_DIR}/${ticket}.md Fix ${fix}`, ticket, job.iteration + 1), DENIED_TOOLS);
+    this.#session(job, workspace).send(factoryPrompt(this.#withChange(`/implement ${TASK_DIR}/${ticket}.md Fix ${fix}`, ticket, change), ticket, job.iteration + 1), DENIED_TOOLS);
     return { iteration: job.iteration + 1, check_after_minutes: this.#config.checkAfterFixMin };
   }
 
@@ -2069,11 +2510,13 @@ export class Execution implements RunnerWork {
       }
       const session = this.#session(job, workspace);
       const queued = session.busy;
-      await this.#syncTask(workspace, job);
+      // A change made while the job was paused and not handed on yet (SF-067).
+      const change = job.task_sha256 === undefined ? undefined : await this.#taskChange(workspace, job);
+      job = await this.#syncTask(workspace, job);
       if (job.state !== 'working') {
         job = await this.#transition(job, 'working');
       }
-      session.send(factoryPrompt(message, ticket, job.iteration + 1), DENIED_TOOLS);
+      session.send(factoryPrompt(this.#withChange(message, ticket, change), ticket, job.iteration + 1), DENIED_TOOLS);
       return { state: job.state, queued };
     });
   }
@@ -2114,6 +2557,9 @@ export class Execution implements RunnerWork {
       case 'simplify':
         this.#checkSimplify(job);
         break;
+      case 'resume':
+        this.#checkResume(job, request.message);
+        break;
     }
   }
 
@@ -2144,6 +2590,8 @@ export class Execution implements RunnerWork {
         return this.#settle(workspace, ticket, request.id, request.decision, request.note);
       case 'simplify':
         return this.#applySimplify(workspace, ticket);
+      case 'resume':
+        return this.#resumePaused(workspace, ticket, request.message);
     }
   }
 
@@ -2155,20 +2603,29 @@ export class Execution implements RunnerWork {
     const { workspace, ticket } = this.#runnerJob();
     return this.#locked(async () => {
       const job = await this.jobs.read(workspace, ticket);
-      if (job === undefined || this.#reviews.has(`${workspace}/${ticket}`) || !(await this.#resumable(job))) {
-        return;
-      }
-      const review = await this.jobs.readReview(workspace, ticket, job.iteration);
-      const gate = await this.jobs.readGate(workspace, ticket, job.iteration);
-      if (review === undefined) {
-        this.#startReview(job);
-      } else if ('verdict' in review && gate !== undefined && 'verdict' in gate) {
-        // A clean gate whose simplification pass never applied (SF-055).
-        await this.#applying(job, () => this.#afterClean(job, [...new Set([...review.accepted_sensitive, ...gate.accepted_sensitive])]));
-      } else if ('verdict' in review) {
-        await this.#applying(job, () => this.#afterClaude(job, review));
+      if (job !== undefined) {
+        await this.#pickUp(job);
       }
     });
+  }
+
+  // The review round a job awaiting review has to run (the review, the gate, the simplification
+  // pass or its outcome), unless one runs already. Only under the lock.
+  async #pickUp(job: Job): Promise<void> {
+    const { workspace, ticket } = job;
+    if (this.#reviews.has(`${workspace}/${ticket}`) || !(await this.#resumable(job))) {
+      return;
+    }
+    const review = await this.jobs.readReview(workspace, ticket, job.iteration);
+    const gate = await this.jobs.readGate(workspace, ticket, job.iteration);
+    if (review === undefined) {
+      this.#startReview(job);
+    } else if ('verdict' in review && gate !== undefined && 'verdict' in gate) {
+      // A clean gate whose simplification pass never applied (SF-055).
+      await this.#applying(job, () => this.#afterClean(job, [...new Set([...review.accepted_sensitive, ...gate.accepted_sensitive])]));
+    } else if ('verdict' in review) {
+      await this.#applying(job, () => this.#afterClaude(job, review));
+    }
   }
 
   // Runner mode: no turn runs or waits, no review or gate runs, no state change is in progress.

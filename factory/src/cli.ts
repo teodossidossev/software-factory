@@ -122,7 +122,17 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   const setup = new Setup({ configDir: configDir(), jobs, exclusive: (work) => execution.exclusive(work) });
   // The Task checks (SF-054): started from the dashboard, read by the Context owner's task_check; an ended
   // check reaches every page.
-  const checks = new TaskChecks({ ...checkSettings(config, configDir()), resolve: (name) => resolveWorkspace(name), onSettled: () => dashboard?.refreshSetup() });
+  // A check's worktree shares the checkout's Git directory: when the last check of the workspace
+  // ended, the config lock its sandbox left goes unless a job runs there (SF-085).
+  const checks: TaskChecks = new TaskChecks({
+    ...checkSettings(config, configDir()), resolve: (name) => resolveWorkspace(name),
+    onSettled: (workspace, ticket) => {
+      dashboard?.refreshSetup();
+      if (!checks.runningIn(workspace)) {
+        void execution.afterTaskCheck(workspace, ticket);
+      }
+    },
+  });
   const testHooks = process.env.SF_TEST_HOOKS === 'on';
   // The socket first: it refuses a second sf serve on the same state before recovery touches it.
   const socket = await listenSocket(config.stateDir, async ({ command, args }) => {
@@ -228,8 +238,14 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   }
   console.log(`${SERVER_NAME} listening on ${server.url.href}`);
   console.log(`${SERVER_NAME} socket ${socket.path}`);
-  // The runners write the state of their jobs; the dashboard hears of it from disk (SF-042).
-  const followed = followJobs(jobs, (job, from) => dashboard?.onStateChange(job, from));
+  // The runners write the state of their jobs; the dashboard hears of it from disk (SF-042). A job
+  // that left working, awaiting_review or preparing_mr may free a hand-over that met the sandbox's config lock
+  // (SF-085), and so may sf serve's start.
+  const followed = followJobs(jobs, (job, from) => {
+    dashboard?.onStateChange(job, from);
+    execution.afterJobChange(job, from).catch((error: unknown) => console.error(error));
+  });
+  execution.handOverLocked().catch((error: unknown) => console.error(error));
 
   let stopping = false;
   const stop = (signal: NodeJS.Signals): void => {
@@ -606,6 +622,9 @@ async function checkTask(args: string[]): Promise<void> {
   const record = await runTaskCheck(workspace, ticket, task, { ...checkSettings(config, configDir()), signal: abort.signal });
   const path = await new CheckStore(config.stateDir).write(record);
   console.log([...checkLines(record), '', `stored: ${path}`].join('\n'));
+  // The check's worktree shared the checkout's Git directory: the config lock its sandbox left
+  // goes as after a check of sf serve's, unless a job of the workspace runs (SF-085).
+  await new Execution(config, (workspaceName) => resolveWorkspace(workspaceName)).afterTaskCheck(name, ticket);
   if (record.status === 'failed') {
     process.exitCode = 1;
   }

@@ -623,6 +623,11 @@ export class TaskChecks {
     return this.#running.has(`${workspace}/${ticket}`);
   }
 
+  // Whether a check of any ticket of the workspace runs or is being set up.
+  runningIn(workspace: string): boolean {
+    return [...this.#running].some((key) => key.startsWith(`${workspace}/`));
+  }
+
   // Starts a check of the current Task file and answers at once; the record is stored when it ends.
   // A draft, a missing Task file and a check already running or being set up for the ticket are
   // refused.

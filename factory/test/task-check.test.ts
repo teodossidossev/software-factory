@@ -7,10 +7,10 @@
 // task_check tool.
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdir, readdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { test } from 'node:test';
-import { JobStore } from '../src/jobs.js';
+import { type Job, JobStore } from '../src/jobs.js';
 import { readOnlySessionOptions, REVIEW_DENIED_TOOLS } from '../src/review.js';
 import {
   CHECK_SCHEMA, type CheckFinding, type CheckOutput, type CheckRecord, CheckStore, TaskChecks, checkDeniedRules, checkLines, checkOutput, checkPrompt, checkSummary,
@@ -470,4 +470,36 @@ test('the dashboard: Check runs one check at a time, the tickets carry its summa
   } finally {
     await stop(served);
   }
+});
+
+test('sf check-task (SF-085): the config lock the check\'s sandbox left goes once the check ended, an event in the ticket\'s job log; kept while a job of the workspace runs', async () => {
+  const { env, repo } = await checkEnv('check-lock', 'C-9', taskText('C-9'));
+  const jobs = new JobStore(env.state);
+  const created = new Date().toISOString();
+  const job: Job = {
+    workspace: 'app', ticket: 'C-9', branch: 'C-9-x', base: 'main', base_commit: null, target_commit: null, worktree: null, prepared_commit: null,
+    mr_attempts: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'working', iteration: 0, session_id: null, mr: null, created_at: created, updated_at: created,
+  };
+  const lock = join(repo, '.git', 'config.lock');
+  const staleLock = async (): Promise<void> => {
+    await writeFile(lock, '');
+    await chmod(lock, 0o444);
+  };
+  const removals = async (): Promise<unknown[]> => (await readFile(join(env.state, 'jobs', 'app', 'C-9', 'events.jsonl'), 'utf8').catch(() => ''))
+    .split('\n').filter((line) => line !== '').map((line) => JSON.parse(line)).filter((event) => event.type === 'sandbox_lock_removed').map((event) => event.path);
+  // A job of the workspace in working: its sandbox may be using the lock.
+  await jobs.write({ ...job, ticket: 'C-8', branch: 'C-8-x' });
+  await staleLock();
+  await reviewScript(env, [{ output: OUTPUT }, { output: OUTPUT }]);
+  const kept = await runCli(env, ['check-task', 'app', 'C-9']);
+  assert.equal(kept.code, 0, kept.stderr);
+  assert.ok(existsSync(lock));
+
+  // No job runs any more; the ticket's own job (not running) gets the event.
+  await jobs.write({ ...job, ticket: 'C-8', branch: 'C-8-x', state: 'aborted' });
+  await jobs.write({ ...job, state: 'ready_for_human_review' });
+  const removed = await runCli(env, ['check-task', 'app', 'C-9']);
+  assert.equal(removed.code, 0, removed.stderr);
+  assert.equal(existsSync(lock), false);
+  assert.deepEqual(await removals(), [lock]);
 });

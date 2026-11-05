@@ -34,6 +34,7 @@ import { abortRebase, commitAndRebase, continueRebase, gitBusy, mergeRequestLink
 import { buildPatch, changedFilesSection, changedPaths, fileChanges, notificationLine, type Patch } from './patch.js';
 import { removeSandboxPlaceholders } from './placeholders.js';
 import { Redactor } from './redact.js';
+import { checkoutGitDir, removeStaleSandboxLock, staleSandboxLock } from './sandbox-lock.js';
 import { conflictPrompt, factoryPrompt, iterationCost, mrPrompt } from './prompts.js';
 import { DENIED_TOOLS, type Marks, marksOf } from './rules.js';
 import type { Workspace } from './registry.js';
@@ -55,6 +56,24 @@ export const GATE_OVERRIDE_CODES: readonly string[] = ['gate_rounds', 'gate_budg
 export const LEDGER_ACCEPT_CODES: readonly string[] = ['review_churn', 'review_disputed'];
 // The offer of the simplification pass (SF-055): sf accept is its Skip.
 const ACCEPT_CODES: readonly string[] = [...GATE_OVERRIDE_CODES, ...LEDGER_ACCEPT_CODES, SIMPLIFY_CODE];
+// The states in which a job's sessions may run under Claude Code's sandbox, which binds the
+// workspace checkout's .git/config.lock into each sandboxed command (SF-085): the Implementer's
+// turns (working, and the MR text and conflict turns of preparing_mr) and the reviewers' sessions.
+const SANDBOXED_STATES: readonly JobState[] = ['working', 'awaiting_review', 'preparing_mr'];
+// The refusal of a hand-over or Take it back that met the sandbox's leftover config lock while
+// another job of the workspace ran, whose sandbox may be using it (SF-085); a hand-over refused so
+// runs by itself once none runs.
+const CONFIG_LOCKED_CODE = 'config_locked';
+const CONFIG_LOCKED = {
+  handover: 'Another job of this workspace is running; the hand-over runs when it ends.',
+  takeback: 'Another job of this workspace is running; Take it back when it ends.',
+} as const;
+// Whether a job of the workspace, other than the ticket except, is in one of the SANDBOXED_STATES.
+const sandboxesRunning = (jobs: Job[], workspace: string, except?: string): boolean =>
+  jobs.some((job) => job.workspace === workspace && job.ticket !== except && SANDBOXED_STATES.includes(job.state));
+// A job waiting in ready_for_human_review because its hand-over met the sandbox's leftover config
+// lock while another job of the workspace ran (SF-085).
+const lockedOut = (job: Job): boolean => job.state === 'ready_for_human_review' && job.handoff_skipped?.code === CONFIG_LOCKED_CODE;
 
 export interface CheckResult {
   state: JobState;
@@ -936,6 +955,8 @@ export class Execution implements RunnerWork {
       }
       // Before the Patch and before the MR commit, whatever the outcome of the turn.
       await this.#clean(job, job.iteration + 1, live.cwd);
+      // The turn's sandbox has ended (SF-085), before the hand-over at the end of MR preparation.
+      await this.#afterSession(job, job.iteration + 1);
       if (job.state === 'preparing_mr') {
         await this.#mrIdle(job, live, outcome);
         return;
@@ -1396,6 +1417,7 @@ export class Execution implements RunnerWork {
       outcome = { ...outcome, message: redactor.failure(outcome.message) };
     }
     const ended = outcome;
+    await this.#afterSession(job);
     await this.#locked(() => this.#reviewed(job, running, ended));
   }
 
@@ -1562,6 +1584,7 @@ export class Execution implements RunnerWork {
       outcome = { ...outcome, message: redactor.failure(outcome.message) };
     }
     const ended = outcome;
+    await this.#afterSession(job);
     await this.#locked(() => this.#gated(job, running, claude, ended));
   }
 
@@ -1745,6 +1768,7 @@ export class Execution implements RunnerWork {
       outcome = { ...outcome, message: redactor.failure(outcome.message) };
     }
     const ended = outcome;
+    await this.#afterSession(job);
     await this.#locked(() => this.#simplifyEnded(job, running, sensitive, ended));
   }
 
@@ -1872,10 +1896,13 @@ export class Execution implements RunnerWork {
       await this.jobs.write(current);
     };
     try {
-      const done = await this.#gitLocked(job.workspace, () => handOver({
-        checkout: workspace.workCheckout, worktree: job.worktree, ticket: job.ticket, branch: job.branch,
-        saved: job.prepared_commit!, base: job.base_commit!, message: `${content.title}\n\n${content.body}`, at: now(), record,
-      }));
+      const done = await this.#gitLocked(job.workspace, async () => {
+        await this.#freeConfig(job, workspace.workCheckout, 'handover');
+        return handOver({
+          checkout: workspace.workCheckout, worktree: job.worktree, ticket: job.ticket, branch: job.branch,
+          saved: job.prepared_commit!, base: job.base_commit!, message: `${content.title}\n\n${content.body}`, at: now(), record,
+        });
+      });
       const { handoff_skipped: _skipped, ...rest } = current;
       const next: Job = { ...rest, handover: done.handover, worktree: done.removeFailure === undefined ? null : job.worktree };
       await this.jobs.write(next);
@@ -1897,6 +1924,104 @@ export class Execution implements RunnerWork {
     }
   }
 
+  // The sandbox's leftover config lock in the workspace checkout's Git directory (SF-085): removed
+  // when it is stale (src/sandbox-lock.ts) and no job of the workspace other than the ticket except
+  // is in working, awaiting_review or preparing_mr (their sandboxes may be using it). removed: gone, with the
+  // event sandbox_lock_removed in log.job's log (in sf serve's output without log); busy: stale but
+  // kept for a running job; none: no stale lock. Only under the workspace's Git lock.
+  async #sandboxLock(workspace: string, checkout: string, except: string | undefined, log: { job: Job; iteration: number } | undefined): Promise<'removed' | 'busy' | 'none'> {
+    const gitDir = await checkoutGitDir(checkout);
+    if (!(await staleSandboxLock(gitDir))) {
+      return 'none';
+    }
+    if (sandboxesRunning(await this.jobs.list(), workspace, except)) {
+      return 'busy';
+    }
+    // Checked again right before the removal.
+    const path = await removeStaleSandboxLock(gitDir);
+    if (path === undefined) {
+      return 'none';
+    }
+    if (log !== undefined) {
+      await this.jobs.appendEvent(log.job.workspace, log.job.ticket, { ts: now(), iteration: log.iteration, type: 'sandbox_lock_removed', path });
+    } else {
+      console.log(`${workspace}: removed the sandbox's leftover ${path}`);
+    }
+    return 'removed';
+  }
+
+  // After a session of the job ended (an Implementer turn, the Claude review, the gate, the
+  // simplification pass; iteration: the one it worked on): the sandbox's leftover config lock goes,
+  // unless another job of the workspace runs. A failure is only logged; the job goes on.
+  #afterSession(job: Job, iteration = job.iteration): Promise<void> {
+    return this.#clearAfter(job.workspace, job.ticket, { job, iteration });
+  }
+
+  // #sandboxLock after a session ended, under the workspace's Git lock, only when a stale lock is
+  // there (most turns find none and take no lock). A failure is only logged.
+  async #clearAfter(workspace: string, except: string | undefined, log: { job: Job; iteration: number } | undefined): Promise<void> {
+    try {
+      const { workCheckout } = await this.#resolve(workspace);
+      if (!(await staleSandboxLock(await checkoutGitDir(workCheckout)))) {
+        return;
+      }
+      await this.#gitLocked(workspace, () => this.#sandboxLock(workspace, workCheckout, except, log));
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  // Right before a hand-over or Take it back, under the workspace's Git lock (SF-085): a stale
+  // sandbox lock goes; one kept for another running job refuses with config_locked and the action's
+  // message (CONFIG_LOCKED),
+  // before anything changes. A lock that is not stale stays: Git's own refusal tells of it.
+  async #freeConfig(job: Job, checkout: string, action: keyof typeof CONFIG_LOCKED): Promise<void> {
+    if ((await this.#sandboxLock(job.workspace, checkout, job.ticket, { job, iteration: job.iteration })) === 'busy') {
+      throw new FactoryError(CONFIG_LOCKED_CODE, CONFIG_LOCKED[action]);
+    }
+  }
+
+  // sf serve, when a Task check of the workspace ended and no other check of it runs (SF-085): the
+  // check's worktree shares the checkout's Git directory, so its sandbox may have left the lock;
+  // it goes unless a job of the workspace runs. The removal is logged in the ticket's job, if any.
+  async afterTaskCheck(workspaceName: string, ticket: string): Promise<void> {
+    const job = await this.jobs.read(workspaceName, ticket).catch(() => undefined);
+    await this.#clearAfter(workspaceName, undefined, job === undefined ? undefined : { job, iteration: job.iteration });
+  }
+
+  // sf serve, on each job change it sees (SF-085): when a job left the SANDBOXED_STATES (working,
+  // awaiting_review, preparing_mr; a move between two of them does not count), or one came to wait
+  // with config_locked, the workspace's jobs waiting with config_locked are handed over once none
+  // of its jobs is in one of those states. The retry changes a job only by
+  // the hand-over itself (handed_over) or by its handoff_skipped in the same state, neither of
+  // which brings it here again.
+  async afterJobChange(job: Job, from: JobState | null): Promise<void> {
+    const left = from !== null && SANDBOXED_STATES.includes(from) && !SANDBOXED_STATES.includes(job.state);
+    const waiting = from !== job.state && lockedOut(job);
+    if (left || waiting) {
+      await this.handOverLocked(job.workspace);
+    }
+  }
+
+  // sf serve (at start, and through afterJobChange): hands over the jobs waiting with config_locked
+  // of the workspace (of every workspace without one) in which no job is in the SANDBOXED_STATES. A refusal becomes the job's handoff_skipped; nothing is thrown.
+  async handOverLocked(workspace?: string): Promise<void> {
+    const all = await this.jobs.list();
+    for (const job of all.filter((one) => lockedOut(one) && (workspace === undefined || one.workspace === workspace))) {
+      if (sandboxesRunning(all, job.workspace)) {
+        continue;
+      }
+      try {
+        const outcome = await this.#handover(job.workspace, job.ticket, true);
+        if (outcome !== undefined) {
+          console.log(`${job.workspace}/${job.ticket}: handed over to the checkout now that no other job of the workspace runs`);
+        }
+      } catch (error) {
+        console.error(`${job.workspace}/${job.ticket}: the hand-over after config_locked failed: ${(error as Error).message}`);
+      }
+    }
+  }
+
   async #handoverNote(job: Job, note: string): Promise<void> {
     console.error(`${job.workspace}/${job.ticket}: ${note}`);
     await this.jobs.appendEvent(job.workspace, job.ticket, { ts: now(), iteration: job.iteration, type: 'handover', action: 'note', note });
@@ -1914,27 +2039,49 @@ export class Execution implements RunnerWork {
 
   // sf handover (SF-073): hands a job waiting in ready_for_human_review over to the checkout. A
   // refusal (checkout_dirty, checkout_busy, handover_refused, handover_mismatch) leaves the job as it
-  // was and is returned as the error.
+  // was and is returned as the error; config_locked (SF-085) becomes its handoff_skipped too, so
+  // the factory hands it over by itself once no other job of the workspace runs.
   handover(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string }> {
+    return this.#handover(workspaceName, ticket, false) as Promise<{ state: JobState; branch: string }>;
+  }
+
+  // retry: the factory's own hand-over of a job waiting with config_locked (handOverLocked): a job
+  // no longer waiting so is left alone, and a refusal becomes its handoff_skipped instead of an
+  // error; undefined then.
+  #handover(workspaceName: string, ticket: string, retry: boolean): Promise<{ state: JobState; branch: string } | undefined> {
     return this.#locked(async () => {
-      const check = (job: Job): void => {
+      const check = (job: Job): boolean => {
+        if (retry && !lockedOut(job)) {
+          return false;
+        }
         if (job.state !== 'ready_for_human_review') {
           throw new FactoryError('invalid_state', `sf handover needs ready_for_human_review; the job is ${job.state}.`);
         }
         if (job.prepared_commit === null || job.base_commit === null) {
           throw new FactoryError('invalid_state', `The job ${workspaceName}/${ticket} has no prepared commit to hand over.`);
         }
+        return true;
       };
-      check(await this.#job(workspaceName, ticket));
+      if (!check(await this.#job(workspaceName, ticket))) {
+        return undefined;
+      }
       await this.#settled(workspaceName, ticket);
       const job = await this.#job(workspaceName, ticket);
-      check(job);
+      if (!check(job)) {
+        return undefined;
+      }
       const workspace = await this.#resolve(workspaceName);
       const content = await this.#mrContent(job);
       const outcome = await this.#handOver(job, workspace, content);
       if (!outcome.ok) {
         if (outcome.error.code === 'handover_interrupted') {
           await this.#transition(outcome.job, 'needs_human', outcome.error);
+        } else if (retry || outcome.error.code === CONFIG_LOCKED_CODE) {
+          await this.jobs.write({ ...outcome.job, handoff_skipped: outcome.error });
+        }
+        if (retry) {
+          console.error(`${workspaceName}/${ticket}: not handed over: ${outcome.error.message} (${outcome.error.code})`);
+          return undefined;
         }
         throw new FactoryError(outcome.error.code, outcome.error.message);
       }
@@ -1955,7 +2102,11 @@ export class Execution implements RunnerWork {
       await this.#checkSlot(workspaceName, ticket);
       const workspace = await this.#resolve(workspaceName);
       const worktree = job.worktree ?? this.#worktreePath(workspaceName, ticket);
-      await this.#gitLocked(workspaceName, () => takeBack(workspace.workCheckout, worktree, ticket, handover));
+      await this.#gitLocked(workspaceName, async () => {
+        // The config is restored after the switch back: a lock kept for a running job refuses first.
+        await this.#freeConfig(job, workspace.workCheckout, 'takeback');
+        await takeBack(workspace.workCheckout, worktree, ticket, handover);
+      });
       const next = await this.#transition({ ...(await this.#endHandover(job)), worktree, prepared_commit: handover.saved }, 'ready_for_human_review');
       return { state: next.state, branch: next.branch, worktree };
     });
@@ -2746,6 +2897,12 @@ export class Execution implements RunnerWork {
     this.#live.delete(key);
     await live?.session.close();
     await this.#runners?.stop(workspace, ticket);
+    // The session stopped without an idle outcome (abort, pause, restart, reset): the sandbox's
+    // leftover config lock goes as after a turn's end, unless another job runs (SF-085).
+    const job = await this.jobs.read(workspace, ticket).catch(() => undefined);
+    if (job !== undefined) {
+      await this.#afterSession(job, job.state === 'working' || job.state === 'preparing_mr' ? job.iteration + 1 : job.iteration);
+    }
   }
 
   // The worktree and the branch go; the checkout is not touched.

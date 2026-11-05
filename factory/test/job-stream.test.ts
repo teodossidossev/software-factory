@@ -270,6 +270,7 @@ test('lineEntries: simplify with its suggestions and saves; notes with their who
     [{ type: 'review_failed', reviewer: 'claude', error: 'boom' }, 'claude', 'review by claude failed: boom'],
     [{ type: 'review_failed', reviewer: 'codex', error: 'exit 2' }, 'codex', 'review by codex failed: exit 2'],
     [{ type: 'placeholders_removed', paths: ['.bashrc'] }, 'factory', 'placeholders removed: .bashrc'],
+    [{ type: 'sandbox_lock_removed', path: '/repo/.git/config.lock' }, 'factory', 'removed the config lock the sandbox left: /repo/.git/config.lock'],
     [{ type: 'interrupted', step: 'review', reviewer: 'claude' }, 'factory', 'review by claude interrupted by the pause (no verdict; it runs again on Resume)'],
     [{ type: 'task_changed', from: null, to: 'a'.repeat(64) }, 'factory', 'the Task file changed while the job was paused; the new one is in use'],
     [{ type: 'merge_request', action: 'created', host: 'github', number: 4, url: 'https://x/4', mr_state: 'open' }, 'factory', 'merge request #4 opened: https://x/4'],

@@ -291,6 +291,13 @@ test('write_task writes the Task file into the work checkout and refuses invalid
   assert.deepEqual([back.text, back.sha256], [TASK, written.sha256]);
   assert.equal((await call(client, 'write_task', { workspace: 'demo', ticket: 'DEMO-1', content: TASK })).status, 'replaced');
   assert.match(await readFile(join(repo, '.git', 'info', 'exclude'), 'utf8'), /^\.software-factory\/$/m);
+  // SF-081: each write is recorded in the ticket's history as written by the Context owner, with the
+  // sha256 of the text; a refused write records nothing.
+  const recorded = async (): Promise<unknown[]> => (await readFile(join(temp, 'state', 'tickets', 'demo', 'DEMO-1', 'history.jsonl'), 'utf8')).trimEnd().split('\n').map((line) => {
+    const { kind, by, sha256 } = JSON.parse(line);
+    return [kind, by, sha256];
+  });
+  assert.deepEqual(await recorded(), [['written', 'context_owner', written.sha256], ['written', 'context_owner', written.sha256]]);
   const search = await call(client, 'search', { workspace: 'demo', query: 'DEMO-1', mode: 'path' });
   assert.deepEqual(search.matches, []);
 
@@ -306,6 +313,7 @@ test('write_task writes the Task file into the work checkout and refuses invalid
   ]) {
     assert.ok(['schema', 'protocol'].includes(await refusedCode(client, 'write_task', args)), JSON.stringify(args));
   }
+  assert.equal((await recorded()).length, 2);
 
   await client.close();
   assert.equal(await stop(served, 'SIGTERM'), 0);

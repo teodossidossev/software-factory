@@ -103,7 +103,7 @@
     </div>
   </section>
 
-  <!-- The planned ticket's page of SF-081; until it lands a planned ticket opens in the Task drawer. -->
+  <!-- The planned ticket's page (SF-081): app.js builds its header, the Task file and the plan in it. -->
   <section id="ticket" hidden aria-label="Planned ticket"></section>
 
   <div id="toast" hidden role="status"><span id="toast-text"></span><button id="toast-close" type="button" class="toast-x" aria-label="Close the message">×</button></div>
@@ -126,17 +126,8 @@
       <button id="drawer-close" type="button" class="btn" aria-label="Close">✕</button>
     </div>
 
+    <!-- An archived ticket's Task file; a planned ticket opens as its page (#ticket). -->
     <section id="task-panel" class="panel" hidden>
-      <div id="task-conversation" class="task-conversation" hidden>
-        <p id="task-conversation-hint" class="hint"></p>
-        <div class="row"><a id="task-conversation-link" class="btn btn-sm btn-primary" target="_blank" rel="noopener noreferrer" hidden>Open the conversation</a></div>
-        <div class="copy-box">
-          <textarea id="task-conversation-text" rows="2" readonly aria-label="The conversation link or its first message"></textarea>
-          <button id="task-conversation-copy" type="button" class="btn btn-sm">Copy</button>
-        </div>
-        <p id="conversation-copy-status" class="hint" role="status" aria-live="polite"></p>
-      </div>
-      <div id="task-check" class="task-check" hidden></div>
       <pre id="task-body" class="document"></pre>
     </section>
 

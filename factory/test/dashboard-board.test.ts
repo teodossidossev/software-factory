@@ -88,7 +88,7 @@ test('board start: POST only, the action checks, Execution.start once with the n
   }, setup);
 });
 
-test('board task: GET only, the Task file as text/markdown through the reader, the archive with ?archived=1; 404 for bad names and missing files', async () => {
+test('board task: GET reads the Task file as text/markdown through the reader, the archive with ?archived=1; 404 for bad names and missing files', async () => {
   const fake = fakeActions();
   const setup = fakeSetup([workspaceRow('app')], [ticketRow('app', 'T-5', 'Five', false)]);
   setup.texts.set('app/T-5', TASK);
@@ -126,10 +126,10 @@ test('board task: GET only, the Task file as text/markdown through the reader, t
     };
     const invalid = await fetchRaw(new URL('api/tickets/app/T-5/task', base));
     assert.deepEqual(error(invalid), { status: 400, code: 'invalid_content' });
-    // GET only.
-    for (const method of ['POST', 'PUT', 'DELETE', 'OPTIONS']) {
+    // GET reads; POST is the planned ticket page's Save (SF-081, dashboard-setup.test.ts); nothing else.
+    for (const method of ['PUT', 'DELETE', 'OPTIONS', 'PATCH']) {
       const other = await fetchRaw(new URL('api/tickets/app/T-5/task', base), { method, headers: { origin, 'content-type': 'application/json' }, body: '{}' });
-      assert.deepEqual([other.status, other.headers.allow, other.body], [405, 'GET', ''], method);
+      assert.deepEqual([other.status, other.headers.allow, other.body], [405, 'GET, POST', ''], method);
     }
     // The token.
     const token = base.pathname.split('/')[2]!;

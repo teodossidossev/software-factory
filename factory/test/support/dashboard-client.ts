@@ -9,6 +9,7 @@ import type { DashboardActions, DashboardSetup } from '../../src/dashboard.js';
 import { FactoryError } from '../../src/errors.js';
 import type { ArchivedRow, JobDependencies, TicketInput, TicketRow, WorkspaceRow } from '../../src/setup.js';
 import { type HandoffMode, type WorkspaceColor, workspaceColor } from '../../src/registry.js';
+import { taskSha256 } from '../../src/task-file.js';
 
 export const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'";
 
@@ -219,7 +220,7 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
   return fake;
 }
 
-export type SetupCall = ['addWorkspace', string, string] | ['addWorkspace', string, string, HandoffMode] | ['addWorkspace', string, string, HandoffMode | null, WorkspaceColor] | ['removeWorkspace', string] | ['createTicket', TicketInput]
+export type SetupCall = ['saveTask', string, string, string, string] | ['addWorkspace', string, string] | ['addWorkspace', string, string, HandoffMode] | ['addWorkspace', string, string, HandoffMode | null, WorkspaceColor] | ['removeWorkspace', string] | ['createTicket', TicketInput]
   | ['archiveTicket', string, string] | ['restoreTicket', string, string] | ['deleteTicket', string, string];
 
 export interface FakeSetup extends DashboardSetup {
@@ -229,6 +230,8 @@ export interface FakeSetup extends DashboardSetup {
   texts: Map<string, string>;
   // The taskText calls, in order: "<ws>/<ticket>" or "<ws>/archive/<ticket>".
   reads: string[];
+  // The modification time taskFile answers (SF-081).
+  mtime: string;
   calls: SetupCall[];
   // What the next change answers: a value, an error to throw, or a function.
   answer: unknown;
@@ -249,6 +252,7 @@ export function fakeSetup(workspaces: WorkspaceRow[] = [], tickets: TicketRow[] 
     rows: { workspaces, tickets, archived, jobDependencies: [] },
     texts: new Map(),
     reads: [],
+    mtime: '2026-11-05T09:00:00.000Z',
     calls: [],
     answer: undefined,
     taskText: async (workspace, ticket, archived = false) => {
@@ -259,6 +263,19 @@ export function fakeSetup(workspaces: WorkspaceRow[] = [], tickets: TicketRow[] 
         throw new FactoryError('task_not_found', `No Task file for ${key}.`);
       }
       return text;
+    },
+    // The planned ticket page (SF-081): the text as taskText reads it, its sha256 and mtime.
+    taskFile: async (workspace, ticket) => {
+      const text = await fake.taskText(workspace, ticket);
+      return { text, sha256: taskSha256(text), mtime: fake.mtime };
+    },
+    // Save (SF-081): recorded; by default the text is written over the active one, as the writer does.
+    saveTask: async (workspace, ticket, content, sha256) => {
+      const result = await reply(['saveTask', workspace, ticket, content, sha256], { path: `.software-factory/${ticket}.md`, status: 'replaced', bytes: Buffer.byteLength(content), sha256: taskSha256(content) });
+      if (fake.answer === undefined) {
+        fake.texts.set(`${workspace}/${ticket}`, content);
+      }
+      return result;
     },
     taskTitle: async (workspace, ticket) => /^title: (.*)$/m.exec(fake.texts.get(`${workspace}/${ticket}`) ?? '')?.[1] ?? null,
     workspaces: async () => fake.rows.workspaces,

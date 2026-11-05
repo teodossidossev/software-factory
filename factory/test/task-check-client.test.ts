@@ -1,9 +1,9 @@
 // The Task check in static/app.js (SF-054), under node:vm against the fake page of
 // test/support/fake-dom.ts: the Queue card's check note and Check (one POST, off while a check runs),
 // the Start confirmation's note (not checked, stale, not ready: N blocker, M major; none for a
-// ready check), and the last check in the Task drawer and behind the job's Task toggle (on the
-// implement prompt of its Stream, SF-078): the stale mark, the paraphrase above the findings, by
-// severity. Start stays on whatever the check says.
+// ready check), the last check in the planned ticket page's Plan check card (SF-081) and behind the
+// job's Task toggle (on the implement prompt of its Stream, SF-078): the stale mark, the paraphrase
+// and the findings. Start stays on whatever the check says.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { type FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
@@ -115,32 +115,45 @@ test('check client: Start\'s confirmation says not checked, stale or not ready: 
   assert.equal(posts(page).at(-1)!.path, 'api/tickets/app/T-2/start');
 });
 
-// The check box's lines, in order.
-const lines = (page: Page, id: string): string[] => (page.$(id).children as FakeElement[]).map((child) => child.textContent);
+// The planned ticket page's Plan check card (SF-081).
+const checkCard = (page: Page): FakeElement => page.$('ticket').querySelectorAll('.card2').find((box) => /^Plan check/.test(box.querySelector('h3')?.textContent ?? ''))!;
 
-test('check client: the Task drawer shows the last check above the Task text: the stale mark, the paraphrase above the findings by severity, the files', async () => {
-  const page = await openBoard([ticket('T-1', { check: summary({ state: 'not_ready', stale: true, blockers: 1, ended_at: VIEW.check.ended_at, start_note: 'stale' }) })]);
+test('check client: the planned ticket page shows the check in its Plan check card: the stale line, the findings with their kind in words, what the checker understood, the files; a check that ends is read again', async () => {
+  const row = ticket('T-1', { check: summary({ state: 'not_ready', stale: true, blockers: 1, ended_at: VIEW.check.ended_at, start_note: 'stale' }) });
+  const page = await openBoard([row]);
   card(page, 'app/T-1').click();
   await page.flush();
-  page.requests.find((request) => request.path === 'api/tickets/app/T-1/task')!.respond(200, '---\nticket: T-1\n---\n# T-1\n');
+  page.requests.find((request) => request.path === 'api/tickets/app/T-1/page')!.respond(200, {
+    ticket: row, task: { text: '---\nticket: T-1\ntitle: Ticket T-1\nbase: main\n---\n# T-1\n', sha256: 'b'.repeat(64) },
+    plan: { starts_from: 'main', files: [], scoped: false, waits_for: [] }, check: VIEW, history: [], queue: null,
+  });
   await page.flush();
-  page.requests.find((request) => request.path === 'api/tickets/app/T-1/check')!.respond(200, VIEW);
-  await page.flush();
-  assert.equal(page.$('task-check').hidden, false);
-  const shown = lines(page, 'task-check');
-  assert.match(shown[0]!, /^Task check: not ready: 1 blocker, 0 major · .* · fake-model$/);
-  assert.deepEqual(shown.slice(1), [
-    'Stale: the Task file changed since this check.', 'Paraphrase', 'The Task greets the reader.', 'Findings',
-    'blocker (1)', 'contradiction README.md:1: It says hello. Expected: Describe it as it is.', 'nit (1)', 'unclear ## Title: Vague. Expected: Name it.',
-    'Files', 'modify README.md',
+  const box = checkCard(page);
+  assert.equal(box.querySelector('h3')!.textContent, 'Plan check not readystale');
+  const paragraphs = box.querySelectorAll('p').map((node) => node.textContent);
+  assert.deepEqual(paragraphs, ['The plan changed after this check: check it again.', 'Not ready: 1 blocker, 0 majors.']);
+  // The findings in the checker's order: the number, the severity, the kind in words, where, the problem, what is expected.
+  assert.deepEqual(box.querySelectorAll('li.finding').map((item) => item.children.map((child) => child.textContent)), [
+    ['#1', 'nit', 'unclear', '## TitleVague.', 'Expected: Name it.'],
+    ['#2', 'blocker', 'contradicts itself', 'README.md:1It says hello.', 'Expected: Describe it as it is.'],
   ]);
-  // A check that ends reaches the open drawer: the check is read again.
+  assert.match(box.textContent, /What the checker understoodThe Task greets the reader\.Show all/);
+  assert.equal(box.querySelector('summary')!.textContent, 'Files the checker expects to change (1)');
+  assert.equal(box.querySelector('.chipx')!.textContent, '~ README.md');
+  assert.match(box.textContent, /· fake-model · \$0\.01/);
+  // The header's line and button say it too.
+  assert.match(page.$('ticket').querySelector('.t2')!.textContent, /Plan not ready: 1 blocker, 0 majors · the plan changed after this check/);
+  assert.equal(page.$('ticket').querySelectorAll('button').find((node) => node.dataset.tk === 'check')!.textContent, 'Check again');
+
+  // A check that ends while the page is open: the tickets refresh, the check is read again at once.
   page.streams.at(-1)!.emit('tickets', { tickets: [ticket('T-1', { check: summary({ state: 'ready', ended_at: '2026-11-05T11:00:00.000Z', start_note: null }) })], archived: [] });
   await page.flush();
-  assert.equal(page.requests.filter((request) => request.path === 'api/tickets/app/T-1/check').length, 2);
-  page.requests.filter((request) => request.path === 'api/tickets/app/T-1/check')[1]!.respond(200, { check: null, stale: false, running: false, current_sha256: 'b'.repeat(64) });
+  const reads = page.requests.filter((request) => request.path === 'api/tickets/app/T-1/check');
+  assert.equal(reads.length, 1);
+  reads[0]!.respond(200, { ...VIEW, stale: false, check: { ...VIEW.check, sha256: 'b'.repeat(64), ended_at: '2026-11-05T11:00:00.000Z', output: { ...VIEW.check.output, findings: [], verdict: 'ready' } } });
   await page.flush();
-  assert.match(lines(page, 'task-check')[0]!, /^Task check: not checked yet\./);
+  assert.deepEqual(checkCard(page).querySelectorAll('p').map((node) => node.textContent), ['Ready: an Implementer can build this plan without a design decision of its own.']);
+  assert.equal(checkCard(page).querySelector('h3')!.textContent, 'Plan check ready');
 });
 
 test('check client: the Task toggle of the job\'s implement prompt shows the last check, a failed one with its error', async () => {

@@ -12,7 +12,8 @@ import type { ExclusiveScope } from './execution.js';
 import { runGit } from './git.js';
 import { type Job, type JobState, type JobStore, TERMINAL_STATES } from './jobs.js';
 import { type HandoffMode, loadRegistry, type Registry, resolveWorkspace, saveRegistry, verifyCheckout, type Workspace, type WorkspaceColor, workspaceColor, type WorkspaceEntry, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
-import { ARCHIVE_DIR, DRAFT_MARKER, isDraft, landsAfter, MAX_TASK_BYTES, parseFrontMatter, readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN, type TicketRef, writeTask } from './task-file.js';
+import { ARCHIVE_DIR, DRAFT_MARKER, isDraft, landsAfter, MAX_TASK_BYTES, parseFrontMatter, readTask, TASK_DIR, taskSha256, TICKET_DESCRIPTION, TICKET_PATTERN, type TicketRef, writeTask, type WriteTaskResult } from './task-file.js';
+import type { TicketHistory } from './ticket-history.js';
 
 export const MAX_TITLE_CHARS = 200;
 export const MAX_REQUEST_BYTES = 64 * 1024;
@@ -105,6 +106,9 @@ export interface SetupOptions {
   exclusive: <T>(work: (scope: ExclusiveScope) => Promise<T>) => Promise<T>;
   // The clock of the merge check's cache (tests); Date.now by default.
   now?: () => number;
+  // The tickets' history (SF-081): New ticket records "created", Save "edited"; without it
+  // nothing is recorded.
+  history?: TicketHistory;
 }
 
 // What the dependency rule reads of a job, current or archived.
@@ -171,6 +175,7 @@ export class Setup {
   readonly #jobs: JobStore;
   readonly #exclusive: SetupOptions['exclusive'];
   readonly #now: () => number;
+  readonly #history: TicketHistory | undefined;
   // "<workspace>/<ticket>" -> the Git answer of branchMerged for the job's branch, and when.
   readonly #mergeChecks = new Map<string, { at: number; branch: string; merged: boolean }>();
 
@@ -179,6 +184,13 @@ export class Setup {
     this.#jobs = options.jobs;
     this.#exclusive = options.exclusive;
     this.#now = options.now ?? Date.now;
+    this.#history = options.history;
+  }
+
+  // The history record of a write by the User (SF-081), or none without a history.
+  #record(name: string, ticket: string, kind: 'created' | 'edited'): ((sha256: string) => Promise<void>) | undefined {
+    const history = this.#history;
+    return history === undefined ? undefined : (sha256) => history.append(name, ticket, { kind, by: 'you', sha256 });
   }
 
   async #liveJobs(): Promise<Map<string, number>> {
@@ -501,7 +513,8 @@ export class Setup {
 
   // Deletes the Task file and the MR text of the ticket, active or archived, and the stored
   // request; a finished job of the ticket is archived first (its history stays in the state
-  // directory). The same order and failure behaviour as archiveTicket.
+  // directory, and so does the ticket's history file of SF-081, on purpose). The same order and
+  // failure behaviour as archiveTicket.
   deleteTicket(name: string, ticket: string): Promise<{ workspace: string; ticket: string; deleted: string[]; jobArchived: boolean }> {
     return this.#exclusive(async (scope) => {
       const target = await this.#ticketTarget(name, ticket);
@@ -534,6 +547,31 @@ export class Setup {
       throw new FactoryError('invalid_ticket', `ticket must be ${TICKET_DESCRIPTION}.`);
     }
     return readTask(await resolveWorkspace(name, this.#configDir), ticket, archived);
+  }
+
+  // The planned ticket page's Task file (SF-081): its text through the Task file reader (as
+  // taskText), its sha256 (the version a Save starts from) and its modification time.
+  async taskFile(name: string, ticket: string): Promise<{ text: string; sha256: string; mtime: string }> {
+    const text = await this.taskText(name, ticket);
+    const workspace = await resolveWorkspace(name, this.#configDir);
+    const stats = await lstat(join(workspace.workCheckout, TASK_DIR, `${ticket}.md`));
+    return { text, sha256: taskSha256(text), mtime: stats.mtime.toISOString() };
+  }
+
+  // Save on the planned ticket page (SF-081): the whole Task file through the Task file writer (its
+  // validation, its refusal while a job of the ticket runs), only over the version the page read
+  // (sha256; another one is task_changed), recorded as "edited" by you.
+  saveTask(name: string, ticket: string, content: string, sha256: string): Promise<WriteTaskResult> {
+    return this.#exclusive(async () => {
+      if (!WORKSPACE_NAME_PATTERN.test(name)) {
+        throw new FactoryError('invalid_name', `workspace name must be ${WORKSPACE_NAME_DESCRIPTION}.`);
+      }
+      if (!TICKET_PATTERN.test(ticket)) {
+        throw new FactoryError('invalid_ticket', `ticket must be ${TICKET_DESCRIPTION}.`);
+      }
+      const workspace = await resolveWorkspace(name, this.#configDir);
+      return writeTask(workspace, ticket, content, this.#jobs, { expectedSha256: sha256, record: this.#record(name, ticket, 'edited') });
+    });
   }
 
   // The title of a ticket's Task file, read from the active file or, when it is not there, from
@@ -625,7 +663,7 @@ export class Setup {
         throw new FactoryError('ticket_exists', `${path} already exists in workspace "${name}"; the ticket is listed below.`);
       }
       const base = await defaultBranch(workspace.workCheckout);
-      await writeTask(workspace, ticket, draftContent(ticket, title, base), this.#jobs);
+      await writeTask(workspace, ticket, draftContent(ticket, title, base), this.#jobs, { record: this.#record(name, ticket, 'created') });
       await mkdir(dirname(this.#requestPath(name, ticket)), { recursive: true, mode: 0o700 });
       await writeFileAtomic(this.#requestPath(name, ticket), Buffer.from(request.replace(/\r\n/g, '\n'), 'utf8'));
       return { workspace: name, ticket, path, base };

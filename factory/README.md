@@ -203,8 +203,9 @@ document and the code. It only advises: Start is never refused for it.
   at once start one check) and with `task_draft` for a skeleton) and a note with the last check (`not
   checked`, `checking…`, `check: ready`, `not ready: N blocker, M major`, `check failed`, `· stale`); the
   tickets of the stream carry the summary (`check`). `GET api/tickets/<ws>/<ticket>/check` is the
-  last check with `stale`, `running` and the current sha256; the Task drawer and the job's Task tab
-  show it above the Task text, the paraphrase above the findings. Start's confirmation adds "Task
+  last check with `stale`, `running` and the current sha256; the planned ticket page shows it in its
+  Plan check card (section Dashboard, SF-081) and the job's Task tab above the Task text, the
+  paraphrase above the findings. Start's confirmation adds "Task
   check: not checked", "stale", "check failed" or "not ready: N blocker, M major" when that is the
   case, and starts anyway once confirmed. The Context owner reads it with the read-only MCP tool
   `task_check` (`{workspace, ticket}`): the check of the current Task file (`verdict` `ready`,
@@ -1280,7 +1281,7 @@ the check's findings; on a card too narrow for it, it moves to its own line unde
 the title, then **Start** (an outline button, as every Queue button: the only solid ones on the
 board are Your turn's) or "waiting for the plan" for a skeleton, **Task**, and **⋯**, a menu with
 **Check** (section Task check), Archive and Delete… (Escape or a click elsewhere closes it). A
-click on the card opens the planned ticket (its Task in the drawer until SF-081).
+click on the card (or on **Task**, or on the check's chip) opens the planned ticket's page (below).
 
 **Dependencies** (SF-084). A Task file's `lands_after: [<ticket>, <workspace>/<ticket>]` names
 the tickets it waits for. While one of them is not merged, the Queue card has a line **Waits for**
@@ -1394,7 +1395,7 @@ A settled finding shows its decision ("Accepted risk", "Must fix") instead of th
 URL hash says which, and the browser's Back and Forward move between them: `#<workspace>/<ticket>`
 is the job's page on its Stream (today's job links keep working), `#<workspace>/<ticket>/changes`
 and `/mr` the same page on its Changes or Merge request screen, and `#<workspace>/<ticket>/ticket`
-the planned ticket (until SF-081 the board with the ticket's Task drawer open). A hash for a job or
+the planned ticket's page (SF-081, below). A hash for a job or
 ticket the board does not have shows the board. A click on a job card opens its page (below); the
 stream follows that job. A job that leaves the board (its ticket archived or deleted) goes back to
 the board. **Keys** on the board: `j` and `k` move between the cards, Enter opens the focused card;
@@ -1405,6 +1406,70 @@ level (Changes or Merge request to the job's Stream, the Stream or a planned tic
 and the focus returns to the card that opened it. Alt+Up and Alt+Down move a queued card once
 SF-071 brings the queue.
 
+**The planned ticket page** (SF-081). A planned ticket opens as a full page with everything about
+its planning, read from `GET api/tickets/<ws>/<ticket>/page` (the tickets row with its
+conversation, `task: {text, sha256}`, `plan: {starts_from, files: [{path, sensitive}], scoped,
+waits_for: [{ticket, state, merged}]}`, `check` (the Task check's view, `null` without the Task
+checks), `history: [{ts, kind, by, text}]` and `queue: null` until SF-071; a ticket that is not in
+the tickets list is an empty 404, and the page goes back to the board). The header has *← Board*
+(Escape), the key, the workspace, the title and `draft` for a skeleton; *Open the ChatGPT
+conversation ↗* (the server's link only), **Check the plan** (*Check again* after a check,
+*Checking…* while one runs; today's `POST api/tickets/<ws>/<ticket>/check`) and **Start now**; its
+line says "waits for …" while a dependency is not merged, "Starts from <branch>" and the plan check
+in words. On the left the **Task file** (`.software-factory/<ticket>.md`): *Preview* (the default)
+renders the body without the front matter as Markdown (headings, lists and task lists, code
+fences, tables, `code`, bold, italic; DOM nodes, never HTML from the file, links only to http(s)
+URLs), *Edit* is the whole file, front matter included, with *Unsaved changes* and **Save**
+(Ctrl+S while editing). "edited by you" marks a file saved from the page.
+
+On the right the plan in plain words, read-only (the front matter is changed in the Task file
+itself), each card with a short help line:
+
+| Card | Front-matter key | What it means |
+| --- | --- | --- |
+| **Starts from** | `base` | The branch the job's branch is created from; a feature branch when the ticket needs work that is not merged yet. |
+| **Files it will change** | `scope` and `may_touch`, in one list | The files the job is expected to create, change or delete (one path or pattern per row). A change outside the list needs your OK before it can ship. 🔒 marks a `may_touch` entry: a sensitive file (build, CI, packages, credentials) the ticket may change on purpose. Without `scope`: "No list: the job may change any file, and nothing is checked." |
+| **Waits for** | `lands_after` | Each ticket with SF-084's state in words: ✓ merged, pushed, not merged yet, running, planned, not started, unknown ticket (another workspace's as `<workspace>/<ticket>`). Start now still starts it. |
+| **Plan check** | (the Task check) | "Ready: …", "Not ready: N blockers, M majors." with the findings (their kind in words: needs a decision, contradicts itself, something is missing, does more than asked, unclear), what the checker understood and the files it expects to change; "Not checked yet.", "Checking…", "The plan changed after this check: check it again."; the date, the model and the cost. It only advises. |
+| **Planning conversation** | | The link, the first message and its Copy. |
+| **History** | | What happened to the plan (below). |
+
+The check is read again (`GET api/tickets/<ws>/<ticket>/check`) on every tickets refresh of the
+stream, so a check that ends while the page is open shows at once. **Start now** asks with Start's
+confirmation of the Queue card (the check's note too) and adds the dependencies not merged yet
+("Waits for SF-071 (running), SF-072 (planned, not started): they are not merged yet."); it still
+starts once confirmed, and the page moves to the new job's Stream.
+
+**Save** posts `{"content": string, "sha256": string}` to `POST api/tickets/<ws>/<ticket>/task`:
+the whole file and the sha256 of the version the edit started from. It goes through the Task file
+writer of `write_task` (`Setup.saveTask`, under the Execution's lock): the same validation
+(front matter with `ticket`, `title` and `base`, at most 256 KB of UTF-8, `400 invalid_content`),
+its refusal while a job of the ticket runs (`409 job_active`), and, inside the writer's one queue,
+a check that the file on disk is still that version: another one (the Context owner's `write_task`
+meanwhile, or a Fix section) is refused with `409 task_changed` and never overwritten; the page
+keeps your text and offers **Reload**, which loads the file as it is (copy your changes first to
+keep them). The route takes a body up to `2 × 256 KB + 1 KB` (above the 128 KB of the other
+actions); a file of mostly non-ASCII or control characters can need more as JSON and is written
+with `write_task` instead. A save makes the last plan check stale.
+
+**History.** The factory records each write of a Task file in
+`<state dir>/tickets/<workspace>/<ticket>/history.jsonl`, append-only, one line `{ts, kind, by,
+sha256}` (the sha256 of the text written; a Fix section adds its number `fix`): `created` by `you`
+(New ticket), `written` by `context_owner` (`write_task`), `edited` by `you` (Save on the page),
+`fix_added` by `factory` (each `## Fix N`). The page's History merges them, newest first, with what
+the state directory already has: every Task check (`<state dir>/checks/…`) and every job of the
+ticket, current and archived (`<state dir>/jobs/<ws>/<ticket>/job.json` and
+`<ticket>.<stamp>/job.json`): "Created by you", "Plan written by the Context owner (ChatGPT)",
+"Edited by you", "Fix N added by the factory", "Checked: ready · $0.45", "Checked: not ready (2
+blockers, 1 major) · $0.48", "Check failed · $0.12", "Started as a job (ended: pushed)". When the
+Task file is not the version the last recorded write left, it says "Changed outside the factory"
+with the file's modification time. A ticket that may be older than the recording says once
+"Recorded since SF-081; earlier steps are known only from checks and jobs.": nothing recorded, a
+first record that is not `created` (a Task file written before SF-081 and first rewritten, saved or
+fixed since; a ticket the Context owner creates with `write_task` alone is marked too, as its line
+cannot tell them apart), or checks and jobs before the first record. Deleting a ticket keeps its history file, as the state directory keeps its
+jobs.
+
 **Messages.** The board's messages (a start, a check, an archive, a restore or a delete, and their
 refusals), and a short word for an action of the job's page that succeeded, show in one toast at
 the top: an ok message goes after 6 s (not while the pointer is on
@@ -1412,7 +1477,7 @@ it), an error stays until closed; × and Escape close it; a new message replaces
 messages of a form in the drawer stay under the form.
 
 **The drawer.** The drawer on the right is left for **Workspaces**, **New ticket**, **Archived**
-and a planned ticket's Task (the whole width on a phone); ✕, a click beside it or Escape closes it.
+and an archived ticket's Task (the whole width on a phone); ✕, a click beside it or Escape closes it.
 **Workspaces** lists the registry (name, path, live jobs, a
 problem such as a missing checkout) with Remove (off while the workspace has a live job; the
 registration only, nothing on disk changes) and an Add form: a name and the path of the local
@@ -1428,22 +1493,22 @@ explanation. The user's words are **not** written into it: they are kept in the 
 (`<state dir>/requests/<workspace>/<ticket>.md`) and become the first message of the ticket's
 conversation. An existing Task file is never replaced from the page (`409 ticket_exists`). Once
 the ticket is created the dialog closes and the board scrolls to the new Queue card and highlights
-it (its page, once SF-081 lands); a refusal keeps the dialog open with the error and the input.
+it (a click on it opens its page); a refusal keeps the dialog open with the error and the input.
 Nothing opens the ChatGPT tab by itself. **Archived** (with the count) lists the archived tickets
 with Task (the archived text), Restore and Delete…; Archive, Restore and Delete… are described
-under SF-027 (a finished job of the ticket leaves the board with them). The Task drawer shows the
-Task file (`GET api/tickets/<ws>/<ticket>/task`) as text: one line per line, Markdown headings bold
-by a line rule, never HTML from the file, with the last Task check above it. With no workspace, or
-no ticket and no job, a line above the board says where to begin.
+under SF-027 (a finished job of the ticket leaves the board with them). The archived Task drawer
+shows the file (`GET api/tickets/<ws>/<ticket>/task?archived=1`) as text: one line per line,
+Markdown headings bold by a line rule, never HTML from the file. With no workspace, or no ticket
+and no job, a line above the board says where to begin.
 
-The ticket's **conversation** in its Task drawer: *Open the conversation*, a link (`target=_blank`,
-opened only by the user's click, and the same URL in a box to copy) to `https://chatgpt.com/?q=`
-plus the message of `ticketConversation` URL-encoded. The message names the connector, `guide`, the
+The ticket's **conversation** on its page: *Open the ChatGPT conversation ↗*, a link
+(`target=_blank`, opened only by the user's click) to `https://chatgpt.com/?q=` plus the message of
+`ticketConversation` URL-encoded, and the first message with Copy. The message names the connector, `guide`, the
 ticket and the workspace, carries the user's words, and tells the Context owner to investigate
 (`read_file`, `search`), discuss, write the Task file over the skeleton with `write_task` with a
 `## Review brief`, and then tell the user it is ready: it only plans and never starts, reviews or
-approves a job; the user reads the Task file and presses Start on its Queue card. A message too
-long for a link (over 7500 characters of URL) is offered in the box to copy instead.
+approves a job; the user reads the Task file and presses Start. A message too long for a link
+(over 7500 characters of URL) has no link: the page offers it to copy.
 Whether ChatGPT sends a prefilled message by itself is up to ChatGPT, so the page says to press
 Enter if it is not. Only the server's ChatGPT URL becomes a link. A change made with `sf workspace
 add|remove` or `write_task` shows at the next refresh of the stream (a state change, an action
@@ -1733,14 +1798,21 @@ end), in a browser:
    then moves to Reviewing and Your turn as the job goes on, without a reload. A skeleton shows
    "waiting for the plan" and no Start; Start on a ticket whose workspace already runs
    `SF_MAX_JOBS` jobs shows `job_limit` in the toast, which stays until × or Escape.
-3. Task: click a Queue card: the drawer shows the Task file as text, headings bold, and the URL
-   ends in `/ticket`; a line `<script>alert(1)</script>` written into a Task file shows as that
-   text, nothing runs. Escape closes it and the focus is back on the card. Archived → Task shows an
-   archived file.
-   Check: on a Queue card click Check: the note says `checking…`, then the verdict a few minutes
-   later without a reload; the Task drawer shows the check above the Task text, the paraphrase
-   first. Edit the Task file: the note and the check say stale, and Start's dialog says "Task check:
-   stale" and starts once confirmed.
+3. Planned ticket page: click a Queue card: the page opens full width, the URL ends in `/ticket`;
+   compare it with the prototype's planned ticket (`prototype-full.html`; its queue and images
+   parts are not here), in light and dark. Preview shows the Task body as Markdown without the
+   front matter; a line `<script>alert(1)</script>` shows as that text, nothing runs; a link
+   `[x](javascript:alert(1))` is not a link. The right cards read in plain words (Starts from,
+   Files it will change with 🔒 on `may_touch` entries, Waits for, Plan check, Planning
+   conversation, History). Edit, change a line: "Unsaved changes", Ctrl+S saves, "edited by you"
+   and "Edited by you" in History. Edit again, then rewrite the file with `write_task` (or by
+   hand) and Save: "Not saved: the Task file changed…", Reload shows the new file; History says
+   "Changed outside the factory" for a change by hand. Escape goes back to the board, the focus on
+   the card. Archived → Task shows an archived file in the drawer.
+   Check: on the page click Check the plan (or Check in a card's ⋯ menu): "Checking…", then the
+   verdict a few minutes later without a reload. Save a change: the check says "The plan changed
+   after this check", and Start now's dialog says "Task check: stale" (and what the ticket waits
+   for) and starts once confirmed; the page moves to the job's Stream.
 4. Job page: click a job card: the job opens as a full page next to the prototype's job page
    (`prototype-full.html`, SF-053, SF-054 and SF-040 there), in light and dark: the header (*←
    Board*, the key, the title, the switch, the sentence with its dot, the iteration, the cost, the
@@ -1780,9 +1852,9 @@ end), in a browser:
    its path (a wrong path shows the refusal in place). New ticket with a key, a title and two lines
    of request writes `.software-factory/<key>.md` as a skeleton (`## Status: waiting for the
    Context owner`, no request text): the dialog closes and the board scrolls to the new Queue card,
-   highlighted, with "waiting for the plan". Its Task drawer has *Open the conversation*: a new tab
-   on chatgpt.com with your words in the first message (press Enter if it stays there); the same
-   URL is in the box and Copy puts it on the clipboard. Once ChatGPT wrote the Task file, Start
+   highlighted, with "waiting for the plan". Its page has *Open the ChatGPT conversation ↗*: a new
+   tab on chatgpt.com with your words in the first message (press Enter if it stays there); Copy
+   puts the first message on the clipboard; History says "Created by you". Once ChatGPT wrote the Task file, Start
    appears on the card. Remove on a workspace with a live job is off with the reason. Nowhere on
    the page is there a Reviewer line, a reviewer setup, Nudge, Send test event or Subscriptions.
 14. Stream: a running job's entries arrive live at the bottom and the view follows them while it is

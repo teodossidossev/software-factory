@@ -4,7 +4,9 @@
 // five columns Queue, Implementing, Reviewing, Your turn and Done, whose cards say who acts now, why
 // a job stopped (one table, STOPS) and carry one primary action only where the user acts, and the
 // full pages a card opens: a job's page at #<ws>/<ticket> (/changes, /mr) and a planned ticket's
-// page at #<ws>/<ticket>/ticket (its Task in the drawer until SF-081). The job's page (SF-078): its
+// page at #<ws>/<ticket>/ticket (SF-081: the Task file to preview, edit and save, the plan in plain
+// words, its check, the conversation and the history, read from api/tickets/<ws>/<ticket>/page). The
+// job's page (SF-078): its
 // header with the screen switch, and the Stream, one chronological list of the job's entries
 // (SF-082: read page by page from api/jobs/<ws>/<ticket>/stream, then live from the stream's entries
 // events), with its stop block and the composer pinned at the bottom; the Changes screen (SF-079):
@@ -155,6 +157,11 @@ const state = {
   // job_lands_after), and the Queue card whose ⋯ menu is open.
   jobLandsAfter: [],
   openMenu: null,
+  // The planned ticket page (SF-081): the ticket shown, its page payload, its check as last read,
+  // a read's error, the read under way, the editor (kept across redraws) and the Copy's outcome;
+  // the ticket whose Start answered before its job reached the board (the page moves to the job).
+  tk: { key: null, data: null, check: null, error: null, load: null, textarea: null, copied: null },
+  goAfterStart: null,
 };
 // The only URL the page links to: the ChatGPT composer prefilled by the server (the prefix of
 // src/conversation.ts).
@@ -370,7 +377,8 @@ function mrStatusText(status) {
 
 // ---------- Task check (SF-054) ----------
 
-// The last check of a ticket, as the Task drawer and the implement prompt's Task toggle show it:
+// The last check of a ticket, as the implement prompt's Task toggle shows it (the planned ticket
+// page has its own Plan check card, SF-081):
 // the stale mark and the verdict, the paraphrase above the findings (by severity), then the
 // expected files.
 function renderCheck(view) {
@@ -381,10 +389,7 @@ function renderCheck(view) {
     return box;
   }
   const output = record.output;
-  const counts = { blocker: 0, major: 0, nit: 0 };
-  for (const item of output?.findings ?? []) {
-    counts[item.severity] = (counts[item.severity] ?? 0) + 1;
-  }
+  const counts = tkCounts(output);
   const verdict = output === null ? 'check failed' : output.verdict === 'ready' ? 'ready' : `not ready: ${counts.blocker} blocker, ${counts.major} major`;
   const head = el('p', 'check-head');
   head.append(document.createTextNode(`Task check: ${verdict} · `), timeEl(record.ended_at), document.createTextNode(` · ${record.model ?? 'default model'}${view.running ? ' · a new check is running…' : ''}`));
@@ -436,17 +441,6 @@ async function readCheck(key) {
   } catch {
     return null;
   }
-}
-
-// Loads a ticket's last check into the container while current() holds; hidden when the factory
-// has none to show.
-async function showCheck(id, key, current) {
-  const view = await readCheck(key);
-  if (!current()) {
-    return;
-  }
-  $(id).hidden = view === null;
-  $(id).replaceChildren(...(view === null ? [] : renderCheck(view)));
 }
 
 // Check: one request per ticket at a time; the card shows the check running, then its verdict.
@@ -1829,7 +1823,7 @@ function toggle(key) {
 function keepFocus(container, work) {
   const active = document.activeElement;
   const data = active !== null && active !== undefined && container.contains(active) ? active.dataset ?? {} : {};
-  const name = ['act', 'goto', 'back', 'copyBranch'].find((key) => data[key] !== undefined);
+  const name = ['act', 'goto', 'back', 'copyBranch', 'tk', 'tktab'].find((key) => data[key] !== undefined);
   work();
   if (name !== undefined) {
     const attribute = name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
@@ -3248,7 +3242,7 @@ function checkNote(row) {
 }
 
 // A Queue card (the prototype's queueCard, without SF-071's queue): a click opens the planned
-// ticket (its Task drawer until SF-081); the last job's mark opens that failed or aborted job. The
+// ticket's page (SF-081); the last job's mark opens that failed or aborted job. The
 // first line: the key, the workspace chip and the plan-check chip (which opens the planned ticket
 // with the check's findings; under the title when the line has no room). Then the dependency lines
 // (SF-084) and the actions: Start (secondary in the Queue, confirmed; its title names what it waits
@@ -3419,7 +3413,7 @@ function renderBoard() {
 }
 
 // The new ticket's card, once the stream lists it (SF-066): scrolled to and focused once; it stays
-// highlighted until another ticket is created. Until SF-081 this stands for the ticket's page.
+// highlighted until another ticket is created.
 function showHighlight() {
   if (state.highlight === null || state.highlightShown || ui.screen !== 'board') {
     return;
@@ -3604,27 +3598,6 @@ function applyWantedFocus() {
   }
 }
 
-// Opens a planned ticket's page: until SF-081, the board with the ticket's Task drawer.
-function openTicket(key) {
-  const row = ticketByKey(key);
-  if (row === null) {
-    return;
-  }
-  if (ui.job !== null) {
-    leaveJob();
-  }
-  ui.screen = 'ticket';
-  ui.ticket = key;
-  ui.job = null;
-  ui.opener = key;
-  ui.pending = false;
-  $('job').hidden = true;
-  $('ticket').hidden = true;
-  $('board').hidden = false;
-  void openTask(row, false);
-  setHash();
-}
-
 // Back to the board, the focus on the card that opened the page.
 function back() {
   if (ui.job !== null) {
@@ -3682,6 +3655,7 @@ function route() {
 // The jobs changed (the stream, a read): the board and the open job's header, its composer and its
 // stop; a job page whose job left the board (its ticket archived or deleted) goes back to the board.
 function renderJobs() {
+  goToStarted();
   if (ui.job !== null && jobByKey(ui.job) === null) {
     back();
     return;
@@ -3695,10 +3669,11 @@ function renderJobs() {
 }
 
 // The delegated click listener of the top bar, the board, the cards, the job page (its header, the
-// Stream and the composer) and the toast (the drawer keeps its own listeners until SF-081).
+// Stream and the composer), the planned ticket page (SF-081) and the toast (the drawer keeps its own
+// listeners).
 function onClick(event) {
   const target = typeof event.target?.closest === 'function'
-    ? event.target.closest('[data-dep],[data-menu],[data-qact],[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-settle],[data-copy-branch],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived')
+    ? event.target.closest('[data-tk],[data-tktab],[data-dep],[data-menu],[data-qact],[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-settle],[data-copy-branch],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived')
     : null;
   // An open ⋯ menu closes on any click but its own toggle (its items act, then it is closed).
   if (state.openMenu !== null && (target === null || target.dataset.menu === undefined)) {
@@ -3706,6 +3681,14 @@ function onClick(event) {
   }
   // A link (a merge request's) goes where it points; it does not open the card around it.
   if (target === null || target.disabled || (typeof event.target.closest === 'function' && event.target.closest('a') !== null)) {
+    return;
+  }
+  if (target.dataset.tk !== undefined) {
+    tkAction(target.dataset.tk);
+    return;
+  }
+  if (target.dataset.tktab !== undefined) {
+    tkTab(target.dataset.tktab);
     return;
   }
   if (target.dataset.dep !== undefined) {
@@ -3797,6 +3780,14 @@ function onClick(event) {
 // a ledger entry.
 function onInput(event) {
   const target = event.target;
+  if (target?.id === 'tkText' && ui.screen === 'ticket') {
+    // The planned ticket page's editor: Unsaved changes and Save follow it.
+    const s = tkState(ui.ticket);
+    s.text = target.value;
+    const bar = $('ticket').querySelector('.edtabs');
+    bar?.replaceWith(tkTabs(ui.ticket, s));
+    return;
+  }
   if (target?.id === 'msg') {
     if (state.key !== null) {
       state.drafts.set(state.key, target.value);
@@ -3844,6 +3835,12 @@ function onKey(event) {
   if (target?.id === 'vdiv' && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
     event.preventDefault();
     dividerKey(event);
+    return;
+  }
+  // The planned ticket page (SF-081): Ctrl+S saves while editing.
+  if (ui.screen === 'ticket' && (event.ctrlKey || event.metaKey) && !event.altKey && (event.key === 's' || event.key === 'S') && TK[ui.ticket]?.tab === 'edit') {
+    event.preventDefault();
+    tkAction('save');
     return;
   }
   if (typeof target?.closest === 'function' && target.closest('textarea, input, select') !== null) {
@@ -3979,10 +3976,788 @@ function cardRun(action, key) {
   void run(action, key, {});
 }
 
-// ---------- The drawer: Workspaces, New ticket, Archived and a planned ticket's Task ----------
+// ---------- Markdown preview (the prototype's md and inl, as DOM nodes) ----------
 
-// The job opens as its page (#job); the drawer stays for the setup panels and, until SF-081, a
-// planned ticket's Task.
+// Inline Markdown as nodes: `code`, **bold**, *italic* and [text](http(s) link); anything else is
+// text. Never HTML from the text; a link opens only an http(s) URL, in a new tab.
+const INLINE = /`([^`\n]+)`|\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)|\*\*([^*\n]+)\*\*|(?<![*\w])\*([^*\n]+)\*(?!\w)/g;
+function inl(text) {
+  const value = String(text);
+  const nodes = [];
+  let at = 0;
+  for (const match of value.matchAll(INLINE)) {
+    if (match.index > at) {
+      nodes.push(document.createTextNode(value.slice(at, match.index)));
+    }
+    const [, code, label, href, bold, italic] = match;
+    if (code !== undefined) {
+      nodes.push(el('code', '', code));
+    } else if (label !== undefined) {
+      const link = el('a', '', label);
+      link.href = href;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      nodes.push(link);
+    } else if (bold !== undefined) {
+      nodes.push(el('b', '', bold));
+    } else {
+      nodes.push(el('i', '', italic));
+    }
+    at = match.index + match[0].length;
+  }
+  if (at < value.length) {
+    nodes.push(document.createTextNode(value.slice(at)));
+  }
+  return nodes;
+}
+
+// A Markdown text as a div.md: headings (# to ####), lists and task lists, code fences, tables
+// and paragraphs, their text through inl. mark(line, body) may give a list item a class.
+function md(text, mark) {
+  const lines = String(text).replace(/\r/g, '').split('\n');
+  const out = el('div', 'md');
+  let list = null;
+  let para = [];
+  const withText = (node, value) => {
+    node.append(...inl(value));
+    return node;
+  };
+  const flushP = () => {
+    if (para.length > 0) {
+      out.append(withText(el('p'), para.join(' ')));
+      para = [];
+    }
+  };
+  const closeL = () => {
+    list = null;
+  };
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (/^```/.test(line)) {
+      flushP();
+      closeL();
+      const buf = [];
+      i += 1;
+      while (i < lines.length && !/^```/.test(lines[i])) {
+        buf.push(lines[i]);
+        i += 1;
+      }
+      i += 1;
+      const pre = el('pre');
+      pre.append(el('code', '', buf.join('\n')));
+      out.append(pre);
+      continue;
+    }
+    const heading = /^(#{1,4}) (.*)$/.exec(line);
+    if (heading !== null) {
+      flushP();
+      closeL();
+      out.append(withText(el(`h${heading[1].length}`), heading[2]));
+      i += 1;
+      continue;
+    }
+    if (/^\s*\|/.test(line)) {
+      flushP();
+      closeL();
+      const rows = [];
+      while (i < lines.length && /^\s*\|/.test(lines[i])) {
+        rows.push(lines[i]);
+        i += 1;
+      }
+      const table = el('table');
+      rows.filter((row) => !/^\s*\|[\s:|-]+\|\s*$/.test(row)).forEach((row, index) => {
+        const tr = el('tr');
+        tr.append(...row.trim().replace(/^\||\|$/g, '').split('|').map((cell) => withText(el(index === 0 ? 'th' : 'td'), cell.trim())));
+        table.append(tr);
+      });
+      out.append(table);
+      continue;
+    }
+    const item = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/.exec(line);
+    if (item !== null) {
+      flushP();
+      const kind = /\d/.test(item[2]) ? 'OL' : 'UL';
+      if (list === null || list.tagName !== kind) {
+        list = el(kind.toLowerCase());
+        out.append(list);
+      }
+      let body = item[3];
+      i += 1;
+      while (i < lines.length && /^\s{2,}\S/.test(lines[i]) && !/^\s*([-*+]|\d+[.)])\s+/.test(lines[i])) {
+        body += ` ${lines[i].trim()}`;
+        i += 1;
+      }
+      const task = /^\[([ xX])\]\s+(.*)$/.exec(body);
+      const extra = typeof mark === 'function' ? mark(line, body) : '';
+      if (task !== null) {
+        const entry = el('li', `task${extra ? ` ${extra}` : ''}`);
+        const box = el('input');
+        box.type = 'checkbox';
+        box.disabled = true;
+        box.checked = task[1] !== ' ';
+        entry.append(box, document.createTextNode(' '), ...inl(task[2]));
+        list.append(entry);
+      } else {
+        list.append(withText(el('li', extra || ''), body));
+      }
+      continue;
+    }
+    if (line.trim() === '') {
+      flushP();
+      closeL();
+      i += 1;
+      continue;
+    }
+    closeL();
+    para.push(line);
+    i += 1;
+  }
+  flushP();
+  return out;
+}
+
+// The front matter of a Task file and its body (the prototype's fmParse): the page previews the body.
+function fmParse(text) {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
+  const fm = {};
+  if (match !== null) {
+    for (const line of match[1].split(/\r?\n/)) {
+      const kv = /^(\w+):\s*(.*)$/.exec(line);
+      if (kv !== null) {
+        fm[kv[1]] = kv[2].trim();
+      }
+    }
+  }
+  return { fm, body: match !== null ? text.slice(match[0].length) : text };
+}
+
+// ---------- The planned ticket page (SF-081, the prototype's renderTicket, tkState, tkHistory, tkAction) ----------
+
+// What the page keeps per ticket while the dashboard is open: the editor's text, the text and the
+// sha256 of the version it started from (Save sends it; another version on disk is task_changed),
+// the tab, whether the paraphrase is shown whole, whether this page saved it, and a conflict.
+const TK = {};
+// The words of a finding's kind and of a dependency's state (SF-084's states).
+const KIND_WORD = { decision: 'needs a decision', contradiction: 'contradicts itself', missing: 'something is missing', overreach: 'does more than asked', unclear: 'unclear' };
+const WAIT_WORD = { merged: 'merged', pushed: 'pushed, not merged yet', running: 'running', planned: 'planned, not started', missing: 'unknown ticket' };
+const waitWord = (stateName) => WAIT_WORD[stateName] ?? WAIT_WORD.missing;
+// The help line of each card of the page.
+const TK_HELP = {
+  base: 'The job\'s branch is created from this branch. A feature branch when this ticket needs work that is not merged yet.',
+  files: 'The files the job is expected to create, change or delete. A change to a file outside this list needs your OK before it can ship. 🔒 marks a sensitive file (build, CI, packages, credentials) the ticket is allowed to change.',
+  noList: 'No list: the job may change any file, and nothing is checked.',
+  lock: '🔒 marks a sensitive file (build, CI, packages, credentials) the ticket is allowed to change.',
+  waits: 'These tickets should be merged before this one starts; Start now still starts it.',
+  noWaits: 'Nothing: it can start now.',
+  check: 'A read-only Claude session reads only this plan and the code, and says whether an Implementer could build it without making a design decision of its own. About $0.50. It only advises.',
+  history: 'What happened to this plan.',
+};
+// "Nov 5, 14:03" of a timestamp, in the browser's time (the prototype's day); empty without one.
+const day = (ts) => (typeof ts === 'string' && !Number.isNaN(Date.parse(ts))
+  ? new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }) : '');
+
+// The page's state of a ticket (TK), made from the page's Task file the first time.
+function tkState(key) {
+  if (TK[key] === undefined) {
+    const task = state.tk.data?.task ?? { text: '', sha256: '' };
+    TK[key] = { text: task.text, saved: task.text, sha256: task.sha256, tab: 'preview', showPara: false, edited: false, conflict: false };
+  }
+  return TK[key];
+}
+
+// The page's History, newest first, as the factory recorded and read it (src/ticket-history.ts).
+function tkHistory() {
+  return Array.isArray(state.tk.data?.history) ? state.tk.data.history : [];
+}
+
+// The ticket's row: the board's, which the stream keeps current, else the page's.
+const tkRow = () => ticketByKey(ui.ticket) ?? state.tk.data?.ticket ?? null;
+const tkDirty = (s) => s.text !== s.saved;
+const tkChecking = (key, view) => state.setupPending.has(`check:${key}`) || view?.running === true;
+// The dependencies not merged yet, from the page's plan.
+const tkUnmerged = () => (state.tk.data?.plan?.waits_for ?? []).filter((dep) => dep.merged !== true);
+// The only link the page makes of the conversation: the server's ChatGPT URL.
+const tkConversationUrl = (row) => (typeof row?.conversation?.url === 'string' && row.conversation.url.startsWith(CHATGPT_PREFILL_URL) ? row.conversation.url : null);
+
+// Opens a planned ticket's page (the prototype's openTicket): the page is read from
+// api/tickets/<ws>/<ticket>/page; a ticket that is not planned any more goes back to the board.
+function openTicket(key) {
+  const row = ticketByKey(key);
+  if (row === null) {
+    return;
+  }
+  if (ui.job !== null) {
+    leaveJob();
+  }
+  if (state.drawer !== null) {
+    hideDrawer();
+  }
+  if (state.tk.key !== key) {
+    state.tk = { key, data: null, check: null, error: null, load: null, textarea: null, copied: null };
+  }
+  ui.screen = 'ticket';
+  ui.ticket = key;
+  ui.job = null;
+  ui.opener = key;
+  ui.pending = false;
+  $('job').hidden = true;
+  $('board').hidden = true;
+  $('ticket').hidden = false;
+  renderTicket();
+  setHash();
+  $('ticket').querySelector('[data-back]')?.focus();
+  void loadTicket(key, false);
+}
+
+// Reads the page's payload. The editor keeps unsaved changes and the version they started from;
+// without changes (or with reset, the conflict's Reload) it follows the file.
+async function loadTicket(key, reset) {
+  const load = {};
+  state.tk.load = load;
+  let response = null;
+  let data = null;
+  let failure = null;
+  try {
+    response = await fetch(`api/tickets/${jobPath(key)}/page`, { cache: 'no-store' });
+    data = response.ok ? await response.json() : null;
+  } catch (error) {
+    failure = error.message;
+  }
+  if (state.tk.load !== load || ui.screen !== 'ticket' || ui.ticket !== key) {
+    return;
+  }
+  state.tk.load = null;
+  if (response?.status === 404) {
+    // Not planned any more (started, archived or deleted elsewhere).
+    toast({ level: 'info', text: `${key} is not a planned ticket any more.` });
+    back();
+    return;
+  }
+  if (failure !== null || data === null || typeof data !== 'object' || typeof data.task?.text !== 'string') {
+    state.tk.error = failure !== null ? `The ticket could not be read (${failure}).` : `The ticket could not be read (HTTP ${response.status}).`;
+    renderTicket();
+    return;
+  }
+  state.tk.error = null;
+  state.tk.data = data;
+  state.tk.check = data.check ?? null;
+  const s = tkState(key);
+  if (reset || !tkDirty(s)) {
+    s.text = data.task.text;
+    s.saved = data.task.text;
+    s.sha256 = data.task.sha256;
+    s.conflict = false;
+  }
+  renderTicket();
+}
+
+// The tickets changed (the stream): the page follows its row (title, draft, check, dependencies),
+// reads the check again, so a check that ends while the page is open shows at once, and reads the
+// page again (a plan written meanwhile, its history; unsaved edits stay, with the version they
+// started from). A ticket that left the Queue goes back to the board, unless its start is on the
+// way to its job.
+function refreshTicket() {
+  if (ui.screen !== 'ticket' || state.tk.data === null) {
+    return;
+  }
+  const key = ui.ticket;
+  const row = ticketByKey(key);
+  if (row === null || !isPlanned(row)) {
+    if (state.goAfterStart !== key) {
+      back();
+    }
+    return;
+  }
+  for (const dep of state.tk.data.plan?.waits_for ?? []) {
+    const fresh = (row.lands_after ?? []).find((other) => (other.workspace === row.workspace ? other.ticket : keyOf(other)) === dep.ticket);
+    if (fresh !== undefined) {
+      dep.state = fresh.state;
+      dep.merged = fresh.state === 'merged';
+    }
+  }
+  state.tk.data.ticket = row;
+  renderTicket();
+  void tkReadCheck(key);
+  if (state.tk.load === null) {
+    void loadTicket(key, false);
+  }
+}
+
+// GET api/tickets/<ws>/<ticket>/check: the check as it is now (none without the Task checks).
+async function tkReadCheck(key) {
+  if (state.tk.data?.check === null) {
+    return;
+  }
+  const view = await readCheck(key);
+  if (view !== null && ui.screen === 'ticket' && ui.ticket === key && state.tk.data !== null) {
+    state.tk.check = view;
+    renderTicket();
+  }
+}
+
+// The counts of a check's findings by severity (the job's Task toggle counts with it too).
+function tkCounts(output) {
+  const counts = { blocker: 0, major: 0, nit: 0 };
+  for (const item of output?.findings ?? []) {
+    counts[item.severity] = (counts[item.severity] ?? 0) + 1;
+  }
+  return counts;
+}
+
+// The plan check in words, as the header's line says it; empty without the Task checks.
+function tkCheckWord(row, view) {
+  if (view === null) {
+    return '';
+  }
+  if (row.draft) {
+    return 'Plan not written yet';
+  }
+  if (tkChecking(keyOf(row), view)) {
+    return 'Checking the plan…';
+  }
+  const record = view.check;
+  if (record === null) {
+    return 'Plan not checked yet';
+  }
+  const output = record.output;
+  const counts = tkCounts(output);
+  const word = output === null || record.status === 'failed' ? 'Plan check failed'
+    : output.verdict === 'ready' ? 'Plan ready' : `Plan not ready: ${counted(counts.blocker, 'blocker')}, ${counted(counts.major, 'major')}`;
+  return `${word}${view.stale ? ' · the plan changed after this check' : ''}`;
+}
+
+// The header (the prototype's renderTicket header): ← Board, the key, the workspace, the title and
+// the draft tag; the conversation, Check the plan and Start now; the line with what it waits for,
+// where it starts from and the plan check in words.
+function tkHead(key, row, view) {
+  const backButton = button('btn back', '← Board ', { back: '' });
+  backButton.append(el('span', 'kbd', 'Esc'));
+  backButton.setAttribute('title', 'Back to the board (Esc)');
+  const t1 = el('div', 't1');
+  const title = el('span', 'title', row.title);
+  title.setAttribute('title', row.title);
+  t1.append(el('span', 'key', row.ticket), wsChip(row.workspace), title);
+  if (row.draft) {
+    t1.append(el('span', 'tag', 'draft'));
+  }
+  const tools = el('div', 'tools');
+  const url = tkConversationUrl(row);
+  if (url !== null) {
+    const link = el('a', 'btn linkbtn', 'Open the ChatGPT conversation ↗');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    tools.append(link);
+  }
+  if (view !== null) {
+    const checking = tkChecking(key, view);
+    const check = button('btn', checking ? 'Checking…' : view.check !== null ? 'Check again' : 'Check the plan', { tk: 'check' });
+    check.disabled = checking || row.draft;
+    check.setAttribute('title', row.draft ? 'The plan is not written yet' : 'A read-only Claude session reads the plan and the code and says whether it is ready; it only advises');
+    tools.append(check);
+  }
+  const open = tkUnmerged();
+  const start = button('btn primary', 'Start now', { tk: 'start' });
+  start.disabled = row.draft || state.setupPending.has(`ticket:${key}`) || state.startHolds.has(key) || state.ticketConfirm !== null;
+  if (row.draft) {
+    start.setAttribute('title', 'Waiting for the plan: the Context owner has not written the Task file yet');
+  } else if (open.length > 0) {
+    start.setAttribute('title', `Waits for ${open.map((dep) => dep.ticket).join(', ')}`);
+  }
+  tools.append(start);
+  const t2 = el('div', 't2');
+  if (open.length > 0) {
+    t2.append(el('span', 'sentence', `waits for ${open.map((dep) => dep.ticket).join(', ')}`));
+  }
+  t2.append(el('span', '', `Starts from ${state.tk.data?.plan?.starts_from ?? row.base}`));
+  const word = tkCheckWord(row, view);
+  if (word !== '') {
+    t2.append(el('span', '', word));
+  }
+  const head = el('header', 'jhead');
+  head.append(backButton, t1, tools, t2);
+  return head;
+}
+
+// The editor, kept across redraws so the caret and the scroll stay.
+function tkTextarea(key, s) {
+  let box = state.tk.textarea;
+  if (box === null || box === undefined) {
+    box = el('textarea', 'mdedit fld');
+    box.id = 'tkText';
+    box.setAttribute('aria-label', `The Task file of ${key}, front matter included`);
+    box.setAttribute('spellcheck', 'false');
+    state.tk.textarea = box;
+  }
+  if (box.value !== s.text) {
+    box.value = s.text;
+  }
+  return box;
+}
+
+// Edit | Preview, "Unsaved changes" and Save.
+function tkTabs(key, s) {
+  const bar = el('div', 'edtabs');
+  bar.setAttribute('role', 'tablist');
+  for (const [tab, text] of [['edit', 'Edit'], ['preview', 'Preview']]) {
+    const node = button(s.tab === tab ? 'on' : '', text, { tktab: tab });
+    node.setAttribute('role', 'tab');
+    node.setAttribute('aria-selected', String(s.tab === tab));
+    bar.append(node);
+  }
+  bar.append(el('span', 'grow'));
+  if (tkDirty(s)) {
+    bar.append(el('span', 'muted fs12 self-center', 'Unsaved changes'));
+  }
+  const saving = state.setupPending.has(`save:${key}`);
+  const save = button('btn small', saving ? 'Saving…' : 'Save', { tk: 'save' });
+  save.disabled = !tkDirty(s) || saving;
+  save.setAttribute('title', 'Write the Task file (Ctrl+S while editing)');
+  bar.append(save);
+  return bar;
+}
+
+// The left card: the Task file, previewed (the body, without the front matter) or edited whole.
+function tkFileCard(key, row, s) {
+  const card = el('div', 'card2');
+  const h3 = el('h3', '', 'Task file ');
+  h3.append(el('span', 'mono plain', `.software-factory/${row.ticket}.md`));
+  if (s.edited) {
+    h3.append(el('span', 'edited', 'edited by you'));
+  }
+  card.append(h3, tkTabs(key, s));
+  if (s.conflict) {
+    const conflict = el('div', 'notline bad');
+    conflict.append(el('span', 'err-text fs13', 'Not saved: the Task file changed since this page read it (the Context owner or the factory wrote it). Reload it to edit the current version; your changes here are replaced, so copy them first to keep them. '),
+      button('btn small', 'Reload', { tk: 'reload' }));
+    card.append(conflict);
+  }
+  card.append(s.tab === 'edit' ? tkTextarea(key, s) : md(fmParse(s.text).body));
+  return card;
+}
+
+// A read-only card of the plan: its title, its content and a short help line.
+function tkCard(title, help, ...content) {
+  const card = el('div', 'card2');
+  card.append(typeof title === 'string' ? el('h3', '', title) : title, ...content);
+  if (help !== null) {
+    card.append(el('span', 'hint', help));
+  }
+  return card;
+}
+
+// Files it will change: scope and may_touch in one list, one path or pattern per row, 🔒 on a
+// may_touch one.
+function tkFiles(plan) {
+  const nodes = [];
+  if (plan.files.length > 0) {
+    const list = el('ul', 'flist');
+    for (const file of plan.files) {
+      const item = el('li', 'mono', file.path);
+      if (file.sensitive) {
+        const lock = el('span', 'lock', '🔒');
+        lock.setAttribute('title', 'Sensitive file, on the list on purpose');
+        lock.setAttribute('aria-label', 'Sensitive file, on the list on purpose');
+        item.append(lock);
+      }
+      list.append(item);
+    }
+    nodes.push(list);
+  }
+  if (!plan.scoped) {
+    nodes.push(el('span', 'fs13', TK_HELP.noList));
+  }
+  return nodes;
+}
+
+// The Files card's help line: the list's meaning with a scope; without one, only the lock's, when
+// a may_touch row shows it.
+function tkFilesHelp(plan) {
+  if (plan.scoped) {
+    return TK_HELP.files;
+  }
+  return plan.files.some((file) => file.sensitive) ? TK_HELP.lock : null;
+}
+
+// Waits for: each ticket with its state in words, ✓ once merged.
+function tkWaits(plan) {
+  if (plan.waits_for.length === 0) {
+    return [el('span', 'fs13', TK_HELP.noWaits)];
+  }
+  return plan.waits_for.map((dep) => {
+    const row = el('div', 'dep');
+    row.append(el('span', dep.merged ? 'ok' : 'wait', dep.merged ? '✓' : '◷'), el('span', 'mono', dep.ticket), el('span', 'muted', waitWord(dep.state)));
+    return row;
+  });
+}
+
+// The Plan check card: the result in words, the findings with their kind in words, what the checker
+// understood (clamped) and the files it expects to change; the date, model and cost.
+function tkCheckCard(key, row, view, s) {
+  const record = view.check;
+  const output = record?.output ?? null;
+  const failed = record !== null && (output === null || record.status === 'failed');
+  const h3 = el('h3', '', 'Plan check ');
+  if (record === null) {
+    h3.append(el('span', 'tag', 'not checked'));
+  } else {
+    h3.append(failed ? el('span', 'verdict stop', 'failed') : output.verdict === 'ready' ? el('span', 'verdict clean', 'ready') : el('span', 'verdict fix', 'not ready'));
+    if (view.stale) {
+      const stale = el('span', 'tag', 'stale');
+      stale.setAttribute('title', 'The Task file changed after this check');
+      h3.append(stale);
+    }
+  }
+  const content = [];
+  const checking = tkChecking(key, view);
+  if (checking) {
+    content.push(el('p', 'fs13', 'Checking… a read-only session reads the plan and the code.'));
+  }
+  if (record === null) {
+    if (!checking) {
+      content.push(el('p', 'fs13', row.draft ? 'Not checked yet. The plan is checked once the Context owner has written it.' : 'Not checked yet.'));
+    }
+    return tkCard(h3, TK_HELP.check, ...content);
+  }
+  if (view.stale) {
+    content.push(el('p', 'fs13 err-text', 'The plan changed after this check: check it again.'));
+  }
+  if (failed) {
+    content.push(el('p', 'fs13', `The check failed: ${record.error ?? 'unknown error'}`));
+  } else {
+    const counts = tkCounts(output);
+    content.push(el('p', 'fs13', output.verdict === 'ready'
+      ? 'Ready: an Implementer can build this plan without a design decision of its own.'
+      : `Not ready: ${counted(counts.blocker, 'blocker')}, ${counted(counts.major, 'major')}.`));
+    if (output.findings.length > 0) {
+      const list = el('ul', 'findings');
+      output.findings.forEach((item, index) => {
+        const entry = el('li', 'finding');
+        const problem = el('div', 'problem');
+        problem.append(el('span', 'muted mono fs12', item.where ?? ''), el('br'), ...prose(item.problem));
+        entry.append(el('span', 'fid', `#${index + 1}`), el('span', `sev sev-${item.severity}`, item.severity), el('span', 'tag', KIND_WORD[item.kind] ?? item.kind), problem);
+        if (item.expected) {
+          const expected = el('div', 'expected', 'Expected: ');
+          expected.append(...prose(item.expected));
+          entry.append(expected);
+        }
+        list.append(entry);
+      });
+      content.push(list);
+    }
+    const understood = el('div');
+    understood.append(el('b', 'fs12', 'What the checker understood'), el('div', `prose para${s.showPara ? '' : ' clamped'}`, output.paraphrase),
+      button('linkish', s.showPara ? 'Show less' : 'Show all', { tk: 'para' }));
+    content.push(understood);
+    if (output.files.length > 0) {
+      const details = el('details');
+      details.append(el('summary', 'pointer fs13', `Files the checker expects to change (${output.files.length})`));
+      const chips = el('div', 'chipsx mt6');
+      chips.append(...output.files.map((file) => {
+        const chip = el('span', 'chipx', `${file.action === 'create' ? '+' : file.action === 'delete' ? '−' : '~'} ${file.path}`);
+        chip.setAttribute('title', file.action);
+        return chip;
+      }));
+      details.append(chips);
+      content.push(details);
+    }
+  }
+  content.push(el('span', 'muted fs12', `${day(record.ended_at)} · ${record.model ?? 'default model'} · ${money(record.cost_usd)}`));
+  return tkCard(h3, TK_HELP.check, ...content);
+}
+
+// Planning conversation: the link, the first message and its Copy.
+function tkConversation(row) {
+  const url = tkConversationUrl(row);
+  const message = typeof row.conversation?.message === 'string' ? row.conversation.message : '';
+  const content = [];
+  if (url !== null) {
+    const link = el('a', 'fs13', 'Open the ChatGPT conversation ↗');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    content.push(link);
+  } else {
+    content.push(el('span', 'fs13', 'The first message is too long for a link: copy it into a new ChatGPT conversation of this project.'));
+  }
+  const head = el('div', 'cmhead');
+  const status = el('span', 'muted fs12', state.tk.copied ?? '');
+  status.setAttribute('role', 'status');
+  head.append(el('b', 'fs12', 'First message'), button('btn small', 'Copy', { tk: 'copy' }), status);
+  const fallback = el('textarea', 'copy-fallback');
+  fallback.id = 'tk-copy-text';
+  fallback.readOnly = true;
+  fallback.hidden = true;
+  fallback.setAttribute('aria-label', 'The first message');
+  content.push(head, el('pre', 'cm', message), fallback);
+  return tkCard('Planning conversation', null, ...content);
+}
+
+// History: what the factory recorded and read, newest first.
+function tkHistoryCard() {
+  const list = el('ul', 'hist');
+  list.append(...tkHistory().map((entry) => {
+    const item = el('li');
+    const when = el('span', 't', day(entry.ts));
+    if (typeof entry.ts === 'string') {
+      when.setAttribute('title', entry.ts);
+    }
+    item.append(when, el('span', '', entry.text));
+    return item;
+  }));
+  return tkCard('History', TK_HELP.history, list);
+}
+
+// The page (the prototype's renderTicket, with the plain labels): the header, the Task file on the
+// left; on the right the plan in plain words, its check, the conversation and the history.
+function renderTicket() {
+  if (ui.screen !== 'ticket') {
+    return;
+  }
+  const key = ui.ticket;
+  const page = $('ticket');
+  const row = tkRow();
+  if (row === null) {
+    return;
+  }
+  const data = state.tk.data;
+  const box = state.tk.textarea;
+  const typing = box !== null && box !== undefined && document.activeElement === box;
+  const caret = typing && typeof box.selectionStart === 'number' ? [box.selectionStart, box.selectionEnd, box.scrollTop] : null;
+  const view = data === null ? null : state.tk.check;
+  const grid = el('div', 'grid');
+  if (data === null) {
+    const waiting = el('div', 'card2');
+    waiting.append(el('p', state.tk.error === null ? 'muted fs13' : 'err-text fs13', state.tk.error ?? 'Loading the ticket…'));
+    if (state.tk.error !== null) {
+      waiting.append(button('btn small', 'Try again', { tk: 'reload' }));
+    }
+    grid.append(waiting);
+  } else {
+    const s = tkState(key);
+    const plan = data.plan;
+    const side = el('div', 'stack');
+    side.append(
+      tkCard('Starts from', TK_HELP.base, el('span', 'mono fs13', plan.starts_from)),
+      tkCard('Files it will change', tkFilesHelp(plan), ...tkFiles(plan)),
+      tkCard('Waits for', plan.waits_for.length > 0 ? TK_HELP.waits : null, ...tkWaits(plan)),
+    );
+    if (view !== null) {
+      side.append(tkCheckCard(key, row, view, s));
+    }
+    side.append(tkConversation(row), tkHistoryCard());
+    grid.append(tkFileCard(key, row, s), side);
+  }
+  const form = el('div', 'form2');
+  form.append(grid);
+  const scroll = page.querySelector('.form2')?.scrollTop ?? 0;
+  keepFocus(page, () => page.replaceChildren(tkHead(key, row, view), form));
+  form.scrollTop = scroll;
+  if (typing) {
+    box.focus();
+    if (caret !== null && typeof box.setSelectionRange === 'function') {
+      box.setSelectionRange(caret[0], caret[1]);
+      box.scrollTop = caret[2];
+    }
+  }
+}
+
+// The page's actions (the prototype's tkAction): save, check, start, para (the paraphrase whole or
+// clamped), reload (the file as it is now) and copy (the first message).
+function tkAction(action) {
+  const key = ui.ticket;
+  const row = tkRow();
+  if (ui.screen !== 'ticket' || row === null) {
+    return;
+  }
+  if (action === 'save') {
+    void tkSave(key);
+  } else if (action === 'check') {
+    if (!row.draft && !tkChecking(key, state.tk.check)) {
+      void checkTicket(row);
+    }
+  } else if (action === 'start') {
+    if (!row.draft) {
+      const open = tkUnmerged();
+      // Start stays on: what it waits for is said in its confirmation.
+      const note = open.length === 0 ? '' : ` Waits for ${open.map((dep) => `${dep.ticket} (${waitWord(dep.state)})`).join(', ')}: ${open.length === 1 ? 'it is' : 'they are'} not merged yet.`;
+      openTicketConfirm('start', row, note);
+    }
+  } else if (action === 'para') {
+    const s = tkState(key);
+    s.showPara = !s.showPara;
+    renderTicket();
+  } else if (action === 'reload') {
+    state.tk.error = null;
+    renderTicket();
+    void loadTicket(key, true);
+  } else if (action === 'copy') {
+    const message = typeof row.conversation?.message === 'string' ? row.conversation.message : '';
+    copyValue(message, $('tk-copy-text'), (text) => {
+      state.tk.copied = text;
+      if (ui.screen === 'ticket' && ui.ticket === key) {
+        renderTicket();
+      }
+    });
+  }
+}
+
+// Edit | Preview: the editor gets the focus.
+function tkTab(tab) {
+  const s = tkState(ui.ticket);
+  s.tab = tab === 'edit' ? 'edit' : 'preview';
+  renderTicket();
+  if (s.tab === 'edit') {
+    state.tk.textarea?.focus();
+  }
+}
+
+// Save: the whole text over the version the editor started from, once at a time. A version written
+// meanwhile (task_changed) is never overwritten: the page offers to reload. A saved file makes the
+// last check stale; the page is read again for its history and its check.
+async function tkSave(key) {
+  const s = tkState(key);
+  const id = `save:${key}`;
+  if (!tkDirty(s) || state.setupPending.has(id)) {
+    return;
+  }
+  state.setupPending.add(id);
+  renderTicket();
+  const text = s.text;
+  let outcome;
+  let saved = false;
+  try {
+    const result = await post(`api/tickets/${jobPath(key)}/task`, { content: text, sha256: s.sha256 });
+    s.saved = text;
+    s.sha256 = typeof result?.sha256 === 'string' ? result.sha256 : s.sha256;
+    s.edited = true;
+    s.conflict = false;
+    saved = true;
+    const checked = state.tk.check !== null && state.tk.check.check !== null;
+    outcome = { level: 'ok', text: `Saved .software-factory/${key.slice(key.indexOf('/') + 1)}.md.${checked ? ' The last plan check is of the version before: check it again.' : ''}` };
+  } catch (error) {
+    if (error instanceof ActionError && error.code === 'task_changed') {
+      s.conflict = true;
+      outcome = { level: 'error', text: 'Not saved: the Task file changed since this page read it. Reload it to edit the current version.' };
+    } else if (error instanceof ActionError) {
+      outcome = { level: 'error', text: `${error.code}: ${error.message}` };
+    } else {
+      outcome = { level: 'error', text: `The save failed (${error.message}); it may have been written. Reload the page to see the file as it is.` };
+    }
+  }
+  state.setupPending.delete(id);
+  toast(outcome);
+  renderTicket();
+  if (saved && ui.screen === 'ticket' && ui.ticket === key) {
+    void loadTicket(key, false);
+  }
+}
+
+// ---------- The drawer: Workspaces, New ticket, Archived and an archived ticket's Task ----------
+
+// The job opens as its page (#job), a planned ticket as its page (#ticket, SF-081); the drawer stays
+// for the setup panels and an archived ticket's Task.
 const PANELS = { task: 'task-panel', workspaces: 'workspaces-panel', ticket: 'ticket-panel', archived: 'archived-panel' };
 
 function showDrawer(kind, kicker, title) {
@@ -4007,13 +4782,9 @@ function hideDrawer() {
   $('scrim').hidden = true;
 }
 
-// The drawer's ✕, its scrim and Escape: a planned ticket's page goes back to the board.
+// The drawer's ✕, its scrim and Escape.
 function closeDrawer() {
   if (state.drawer === null) {
-    return;
-  }
-  if (ui.screen === 'ticket') {
-    back();
     return;
   }
   hideDrawer();
@@ -4040,66 +4811,23 @@ function openWantedConfirm() {
   openConfirm(wanted.action);
 }
 
-// The Task text in the drawer, as text: headings bold by a line rule, never HTML from the file.
-async function openTask(row, archived) {
+// An archived ticket's Task text in the drawer, as text: headings bold by a line rule, never HTML
+// from the file. A planned ticket opens as its page (SF-081).
+async function openTask(row) {
   const key = `${row.workspace}/${row.ticket}`;
-  const task = { key, archived, checkStamp: checkStampOf(key) };
-  showDrawer('task', `${row.workspace} · .software-factory/${archived ? 'archive/' : ''}${row.ticket}.md${typeof row.base === 'string' ? ` · base ${row.base}` : ''}`, `${row.ticket} · ${row.title}`);
+  const task = { key };
+  showDrawer('task', `${row.workspace} · .software-factory/archive/${row.ticket}.md`, `${row.ticket} · ${row.title}`);
   state.task = task;
-  renderConversation(archived ? null : row);
   $('task-body').replaceChildren(document.createTextNode('Loading the Task file…'));
   let text;
   try {
-    text = await getText(`api/tickets/${jobPath(key)}/task${archived ? '?archived=1' : ''}`);
+    text = await getText(`api/tickets/${jobPath(key)}/task?archived=1`);
   } catch (error) {
     text = `Could not load the Task file: ${error.message}`;
   }
   if (state.task === task) {
     $('task-body').replaceChildren(...renderReport(text));
   }
-  if (archived || row.draft === true) {
-    $('task-check').hidden = true;
-    $('task-check').replaceChildren();
-  } else {
-    await showCheck('task-check', key, () => state.task === task);
-  }
-}
-
-// The open Task drawer shows the check again when the ticket's check changed (one started or ended).
-function refreshTaskCheck() {
-  const task = state.task;
-  if (task === null || task.archived) {
-    return;
-  }
-  const stamp = checkStampOf(task.key);
-  if (stamp !== null && task.checkStamp !== stamp) {
-    void showCheck('task-check', task.key, () => state.task === task);
-  }
-  task.checkStamp = stamp;
-}
-
-// What changes when a ticket's check starts, ends or goes stale; null without one on the board.
-function checkStampOf(key) {
-  const check = (state.tickets ?? []).find((entry) => keyOf(entry) === key)?.check;
-  return check !== null && typeof check === 'object' ? `${check.running}#${check.ended_at}#${check.stale}` : null;
-}
-
-// The ticket's ChatGPT conversation (the Context owner plans it there): the server's link, opened
-// by a click, and the same link to copy; or the first message to copy when it is too long.
-function renderConversation(row) {
-  const url = typeof row?.conversation?.url === 'string' && row.conversation.url.startsWith(CHATGPT_PREFILL_URL) ? row.conversation.url : null;
-  const message = typeof row?.conversation?.message === 'string' ? row.conversation.message : null;
-  const link = $('task-conversation-link');
-  $('task-conversation').hidden = url === null && message === null;
-  $('conversation-copy-status').textContent = '';
-  link.hidden = url === null;
-  link.href = url ?? '';
-  link.target = '_blank';
-  link.rel = 'noopener noreferrer';
-  $('task-conversation-text').value = url ?? message ?? '';
-  $('task-conversation-hint').textContent = url !== null
-    ? 'The conversation where the Context owner plans this ticket: the link opens ChatGPT in a new tab with the message in the composer; press Enter if it is not sent by itself. The same link, to copy:'
-    : 'The first message of the ticket\'s conversation is too long for a link: copy it and paste it into a new ChatGPT conversation of this project.';
 }
 
 function openWorkspaces() {
@@ -4123,6 +4851,7 @@ function renderSetup() {
   renderWorkspaces();
   renderArchived();
   renderBoard();
+  renderTicket();
 }
 
 function renderWorkspaces() {
@@ -4173,7 +4902,7 @@ function renderArchived() {
     const busy = state.setupPending.has(`ticket:${key}`) || state.ticketConfirm !== null;
     const task = el('button', 'btn btn-sm', 'Task');
     task.type = 'button';
-    task.addEventListener('click', () => void openTask(row, true));
+    task.addEventListener('click', () => void openTask(row));
     const restore = el('button', 'btn btn-sm', 'Restore');
     restore.type = 'button';
     restore.disabled = busy;
@@ -4186,23 +4915,6 @@ function renderArchived() {
     item.append(buttons);
     return item;
   }));
-}
-
-// Copies a field's text; without the clipboard the text is selected for Ctrl+C.
-function copyText(box, statusId) {
-  const done = (text) => {
-    $(statusId).textContent = text;
-  };
-  const select = () => {
-    box.focus();
-    box.select();
-    done('Selected: press Ctrl+C to copy.');
-  };
-  if (typeof navigator === 'undefined' || navigator.clipboard === undefined) {
-    select();
-    return;
-  }
-  navigator.clipboard.writeText(box.value).then(() => done('Copied.'), select);
 }
 
 // A status line of a form in the drawer, or the board's message ('toast').
@@ -4277,8 +4989,8 @@ async function submitTicket() {
   }
   const describe = (data) => ({ level: 'ok', text: `Ticket created: ${data.path} in ${data.workspace} (base ${data.base}), an empty skeleton in the Queue. Next: a click on its card opens the conversation; your words are its first message.` });
   const result = await setupRequest('ticket', 'api/tickets', { workspace, ticket, title, request }, 'ticket-status', describe);
-  // Created (SF-066): the dialog closes and the new ticket's card is highlighted (its page, once
-  // SF-081 lands); a failure keeps the dialog open with the error and the input.
+  // Created (SF-066): the dialog closes and the new ticket's card is highlighted (a click on it
+  // opens its page); a failure keeps the dialog open with the error and the input.
   if (result !== undefined) {
     $('ticket-key').value = '';
     $('ticket-title').value = '';
@@ -4308,8 +5020,8 @@ async function ticketAction(action, row) {
 }
 
 // Start and Delete ask first: Start names the workspace, the ticket and the base branch; Delete
-// cannot be undone.
-function openTicketConfirm(action, row) {
+// cannot be undone. extra: what the planned ticket page adds to Start's text (what it waits for).
+function openTicketConfirm(action, row, extra = '') {
   const key = `${row.workspace}/${row.ticket}`;
   if (state.ticketConfirm !== null) {
     return;
@@ -4319,7 +5031,7 @@ function openTicketConfirm(action, row) {
     $('ticket-confirm-title').textContent = `Start ${row.ticket} in ${row.workspace}?`;
     // The Task check only advises (SF-054): its note is part of the text, Start stays on.
     const note = typeof row.check?.start_note === 'string' ? ` Task check: ${row.check.start_note}.` : '';
-    $('ticket-confirm-text').textContent = `Starts a job on .software-factory/${row.ticket}.md of workspace ${row.workspace}: a new branch from ${row.base} in its own worktree, where the Implementer runs iteration 1. Claude reviews it, the Codex gate checks it, and the branch comes back to you to approve.${note}`;
+    $('ticket-confirm-text').textContent = `Starts a job on .software-factory/${row.ticket}.md of workspace ${row.workspace}: a new branch from ${row.base} in its own worktree, where the Implementer runs iteration 1. Claude reviews it, the Codex gate checks it, and the branch comes back to you to approve.${note}${extra}`;
     $('ticket-ok').textContent = 'Start the job';
     $('ticket-ok').className = 'btn btn-primary';
   } else {
@@ -4331,6 +5043,7 @@ function openTicketConfirm(action, row) {
   $('ticket-confirm').hidden = false;
   renderBoard();
   renderArchived();
+  renderTicket();
   $('ticket-cancel').focus();
 }
 
@@ -4339,6 +5052,7 @@ function closeTicketConfirm() {
   $('ticket-confirm').hidden = true;
   renderBoard();
   renderArchived();
+  renderTicket();
 }
 
 async function submitTicketConfirm() {
@@ -4365,8 +5079,14 @@ async function startTicket(row) {
   state.setupPending.add(id);
   setSetupStatus('toast', { level: 'pending', text: `Starting ${key}: creating the branch and its worktree…` });
   renderBoard();
+  renderTicket();
   let outcome;
   let unknown;
+  // Started from its planned ticket page (SF-081): the page goes to the new job's Stream, whether
+  // the stream brings the job before or after this answer.
+  if (ui.screen === 'ticket' && ui.ticket === key) {
+    state.goAfterStart = key;
+  }
   try {
     const result = await post(`api/tickets/${jobPath(key)}/start`, {});
     const data = result !== null && typeof result === 'object' ? result : {};
@@ -4379,12 +5099,32 @@ async function startTicket(row) {
     }
   }
   state.setupPending.delete(id);
+  if (outcome?.level !== 'ok' && state.goAfterStart === key) {
+    state.goAfterStart = null;
+  }
   if (unknown !== undefined) {
     await holdStart(key, unknown);
     return;
   }
   setSetupStatus('toast', outcome);
   renderBoard();
+  renderTicket();
+  goToStarted();
+}
+
+// The page of a ticket started from it moves to the job's Stream once the new job is on the board
+// (the stream's jobs event may come before or after Start's answer); an earlier failed or aborted
+// job of the ticket is not it.
+function goToStarted() {
+  const key = state.goAfterStart;
+  const job = key === null ? null : jobByKey(key);
+  if (job === null || TERMINAL_STATES.includes(job.state)) {
+    return;
+  }
+  state.goAfterStart = null;
+  if (ui.screen === 'ticket' && ui.ticket === key) {
+    go(key, 'stream');
+  }
 }
 
 // The start may have created the job: Start stays off for the ticket until api/jobs is read
@@ -4465,7 +5205,7 @@ function openStream() {
     if (ui.job !== null) {
       renderHead();
     }
-    refreshTaskCheck();
+    refreshTicket();
     if (ui.pending) {
       route();
     }
@@ -4569,7 +5309,6 @@ function init() {
       closeDrawer();
     }
   });
-  $('task-conversation-copy').addEventListener('click', () => copyText($('task-conversation-text'), 'conversation-copy-status'));
 
   // The job page: the composer's confirmation (its buttons go through the delegated listener),
   // the Merge request screen's Copy MR text and Refresh state of an unknown outcome.

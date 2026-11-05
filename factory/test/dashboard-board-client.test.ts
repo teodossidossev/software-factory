@@ -2,8 +2,8 @@
 // of test/support/fake-dom.ts: the five columns from the job states and the tickets, Done's last
 // eight, each card kind (the Now line and the tool calls, the reason and the one button of STOPS for
 // every stop code, ready, paused, done), the iteration shown, the cost and the elapsed time, the
-// Queue card's Start with its confirmation, refusal and unknown outcome, the planned ticket's Task as
-// text, the workspace filter, the job's full page and the routing by the URL hash, the keys, the
+// Queue card's Start with its confirmation, refusal and unknown outcome, the Queue card opening the
+// planned ticket's page (SF-081; the page itself is in dashboard-ticket-client.test.ts), the workspace filter, the job's full page and the routing by the URL hash, the keys, the
 // 15 s read of api/jobs, the toast, the queue controls hidden without SF-071, and no inline style or
 // prototype-only part; SF-084: the dependency chips and their states, Needed by, the highlight, the
 // chip's focus, the cycle line, the workspace stripe and chip, the filter chips and the ⋯ menu. Script checks, not browser acceptance: the manual steps are in factory/README.md.
@@ -204,15 +204,15 @@ test('board client: a Queue card: the check chip, Start (secondary), Task and th
   button(card(page, 'app/T-2'), 'Check')!.click();
   await page.flush();
   assert.deepEqual(posts(page).map((request) => request.path), ['api/tickets/app/T-3/archive', 'api/tickets/app/T-2/check']);
-  // A click on a button does not open the ticket; the check chip and Task do.
-  assert.equal(page.$('drawer').hidden, true);
+  // A click on a button does not open the ticket; the check chip and Task open its page (SF-081).
+  assert.equal(page.$('ticket').hidden, true);
   chip(card(page, 'app/T-2')).click();
   await page.flush();
-  assert.deepEqual([page.$('drawer').hidden, page.location.hash], [false, '#app/T-2/ticket']);
-  page.$('drawer-close').click();
+  assert.deepEqual([page.$('ticket').hidden, page.$('board').hidden, page.$('drawer').hidden, page.location.hash], [false, true, true, '#app/T-2/ticket']);
+  page.$('ticket').querySelector('[data-back]')!.click();
   button(card(page, 'app/T-3'), 'Task')!.click();
   await page.flush();
-  assert.deepEqual([page.$('drawer').hidden, page.location.hash], [false, '#app/T-3/ticket']);
+  assert.deepEqual([page.$('ticket').hidden, page.location.hash], [false, '#app/T-3/ticket']);
 });
 
 test('board client: Start asks first, naming the workspace, the ticket and the base; Cancel sends nothing; a refusal shows in the toast as it comes', async () => {
@@ -334,35 +334,21 @@ test('board client: a start whose answer is lost holds Start until the board is 
   assert.equal(posts(page).length, 2);
 });
 
-test('board client: a click on a Queue card opens the planned ticket: its Task text in the drawer as text, a <script> stays text and headings are bold', async () => {
+test('board client: a click on a Queue card opens the planned ticket as a full page (SF-081), read from its page route; ← Board goes back, the focus on the card; no drawer', async () => {
   const page = await openBoard([], [ticket('app/T-2', { base: 'develop' })]);
   card(page, 'app/T-2').click();
   await page.flush();
-  assert.deepEqual([page.$('drawer').hidden, page.$('task-panel').hidden, page.$('board').hidden, page.$('ticket').hidden], [false, false, false, true]);
-  assert.equal(page.location.hash, '#app/T-2/ticket');
-  assert.equal(page.$('drawer-title').textContent, 'T-2 · Ticket T-2');
-  assert.equal(page.$('drawer-kicker').textContent, 'app · .software-factory/T-2.md · base develop');
+  assert.deepEqual([page.$('drawer').hidden, page.$('board').hidden, page.$('ticket').hidden, page.location.hash], [true, true, false, '#app/T-2/ticket']);
   const read = page.requests.at(-1)!;
-  assert.deepEqual([read.method, read.path], ['GET', 'api/tickets/app/T-2/task']);
-  assert.equal(page.$('task-body').textContent, 'Loading the Task file…');
-  const text = '---\nticket: T-2\n---\n\n# T-2: <b>Two</b>\n\n<script>alert(1)</script>\n<img src=x onerror=alert(2)>';
-  read.respond(200, text);
-  await page.flush();
-  const lines = page.$('task-body').children as FakeElement[];
-  // One text span per line: the exact text, no element made from the file.
-  assert.equal(page.$('task-body').textContent, `${text.split('\n').join('\n')}\n`);
-  assert.ok(lines.every((line) => line.tagName === 'SPAN' && line.children.every((child) => child.nodeType === 3)));
-  assert.deepEqual(lines.filter((line) => line.className === 'heading').map((line) => line.textContent), ['# T-2: <b>Two</b>\n']);
-  assert.equal(page.$('task-body').all().some((element) => element.tagName === 'SCRIPT' || element.tagName === 'IMG' || element.tagName === 'B'), false);
-  // Closing goes back to the board, the focus on the card.
-  page.$('drawer-close').click();
-  assert.deepEqual([page.$('drawer').hidden, page.location.hash], [true, '#']);
+  assert.deepEqual([read.method, read.path], ['GET', 'api/tickets/app/T-2/page']);
+  assert.match(page.$('ticket').textContent, /Loading the ticket…/);
+  page.$('ticket').querySelector('[data-back]')!.click();
+  assert.deepEqual([page.$('ticket').hidden, page.$('board').hidden, page.location.hash], [true, false, '#']);
   assert.equal(page.document.activeElement, card(page, 'app/T-2'));
-  // A missing file says so.
-  card(page, 'app/T-2').click();
-  page.requests.at(-1)!.respond(404, '');
-  await page.flush();
-  assert.equal(page.$('task-body').textContent, 'Could not load the Task file: api/tickets/app/T-2/task: HTTP 404\n');
+  // The drawer's Task panel is the archived ticket's only: no conversation, no check in it.
+  for (const id of ['task-conversation', 'task-check']) {
+    assert.equal(page.document.getElementById(id), null, id);
+  }
 });
 
 test('board client: a card moves column on a jobs event; the workspace filter chips keep one workspace and give all back; every card shows its workspace', async () => {
@@ -646,16 +632,15 @@ test('board client: the hashes: #ws/T the job, /changes and /mr its tab, /ticket
     ['#app/T-1/changes', (page: Page) => assert.deepEqual([onJobPage(page), selected(page)], [true, 'changes'])],
     ['#app/T-1/mr', (page: Page) => assert.deepEqual([onJobPage(page), selected(page)], [true, 'mr'])],
     ['#web/T-9', (page: Page) => assert.equal(page.streams.at(-1)!.url, 'api/stream?job=web%2FT-9&from=0')],
-    ['#app/T-2/ticket', (page: Page) => assert.deepEqual([onJobPage(page), page.$('drawer').hidden, page.$('drawer-title').textContent, page.$('ticket').hidden], [false, false, 'T-2 · Ticket T-2', true])],
-    ['#app/NOPE', (page: Page) => assert.deepEqual([onJobPage(page), page.$('board').hidden, page.$('drawer').hidden], [false, false, true])],
-    ['#app/NOPE/ticket', (page: Page) => assert.deepEqual([onJobPage(page), page.$('drawer').hidden], [false, true])],
+    ['#app/T-2/ticket', (page: Page) => assert.deepEqual([onJobPage(page), page.$('ticket').hidden, page.$('board').hidden, page.requests.at(-1)!.path], [false, false, true, 'api/tickets/app/T-2/page'])],
+    ['#app/NOPE', (page: Page) => assert.deepEqual([onJobPage(page), page.$('board').hidden, page.$('ticket').hidden], [false, false, true])],
+    ['#app/NOPE/ticket', (page: Page) => assert.deepEqual([onJobPage(page), page.$('board').hidden, page.$('ticket').hidden], [false, false, true])],
     // A ticket with a live job has no planned page.
-    ['#app/T-1/ticket', (page: Page) => assert.deepEqual([onJobPage(page), page.$('drawer').hidden], [false, true])],
+    ['#app/T-1/ticket', (page: Page) => assert.deepEqual([onJobPage(page), page.$('board').hidden, page.$('ticket').hidden], [false, false, true])],
   ] as const) {
     const page = await openBoard(jobs, tickets, [workspace('app'), workspace('web')], hash);
     check(page);
-    // section#ticket stays empty until SF-081.
-    assert.equal(page.$('ticket').children.length, 0, hash);
+    assert.equal(page.$('drawer').hidden, true, hash);
   }
 
   const page = await openBoard(jobs, tickets, [workspace('app'), workspace('web')]);
@@ -669,9 +654,9 @@ test('board client: the hashes: #ws/T the job, /changes and /mr its tab, /ticket
   await visit('#app/T-1');
   assert.deepEqual([onJobPage(page), selected(page)], [true, 'stream']);
   await visit('#app/T-2/ticket');
-  assert.deepEqual([onJobPage(page), page.$('drawer').hidden, page.streams.at(-1)!.url], [false, false, 'api/stream?']);
+  assert.deepEqual([onJobPage(page), page.$('ticket').hidden, page.streams.at(-1)!.url], [false, false, 'api/stream?']);
   await visit('');
-  assert.deepEqual([onJobPage(page), page.$('drawer').hidden], [false, true]);
+  assert.deepEqual([onJobPage(page), page.$('ticket').hidden, page.$('board').hidden], [false, true, false]);
   // Opening a page is a new history entry.
   card(page, 'app/T-1').click();
   await page.flush();
@@ -696,10 +681,10 @@ test('board client: Escape on a job screen goes to its Stream, from the Stream t
   assert.equal(page.document.activeElement, card(page, 'app/T-2'));
   page.key('Enter');
   await page.flush();
-  assert.deepEqual([page.$('drawer').hidden, page.location.hash], [false, '#app/T-2/ticket']);
-  // The drawer's Escape closes it: the board again, the focus on the card.
-  page.$('drawer').dispatch('keydown', { key: 'Escape' });
-  assert.deepEqual([page.$('drawer').hidden, page.location.hash, page.document.activeElement], [true, '#', card(page, 'app/T-2')]);
+  assert.deepEqual([page.$('ticket').hidden, page.location.hash], [false, '#app/T-2/ticket']);
+  // Escape on the planned ticket page: the board again, the focus on the card.
+  page.key('Escape');
+  assert.deepEqual([page.$('ticket').hidden, page.location.hash, page.document.activeElement], [true, '#', card(page, 'app/T-2')]);
   // A key in a text field is not the board's.
   page.$('msg').focus();
   page.key('j');

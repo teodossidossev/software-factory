@@ -184,15 +184,58 @@ function serialized<T>(work: () => Promise<T>): Promise<T> {
   return next;
 }
 
-export function writeTask(workspace: Workspace, ticket: string, content: string, jobs: JobStore): Promise<WriteTaskResult> {
+// Records a write of the Task file in the ticket's history (SF-081), given the sha256 of the text
+// written; called inside the write's serialized section, so the history follows the file's order.
+export type RecordWrite = (sha256: string) => Promise<unknown>;
+
+// A failed history append does not undo or fail the write that happened: it is logged.
+async function recordWrite(record: RecordWrite | undefined, sha256: string): Promise<void> {
+  try {
+    await record?.(sha256);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+// expectedSha256 (the page's Save, SF-081): the sha256 of the version the edit started from; the
+// write is refused with task_changed when the file is another version now (or task_not_found when
+// it is gone), so a concurrent write is never overwritten unseen. record: see RecordWrite.
+export interface WriteTaskOptions {
+  expectedSha256?: string;
+  record?: RecordWrite;
+}
+
+export function writeTask(workspace: Workspace, ticket: string, content: string, jobs: JobStore, options: WriteTaskOptions = {}): Promise<WriteTaskResult> {
   return serialized(async () => {
     if (!TICKET_PATTERN.test(ticket)) {
       throw new FactoryError('invalid_ticket', `ticket must be ${TICKET_DESCRIPTION}.`);
     }
     const buffer = checkTaskContent(ticket, content);
     await refuseWhileJobRunning(workspace, ticket, jobs);
-    return writeTaskFile(workspace, ticket, buffer);
+    if (options.expectedSha256 !== undefined) {
+      const current = await readTaskRaw(workspace, ticket);
+      if (taskSha256(current) !== options.expectedSha256) {
+        throw new FactoryError('task_changed', `${TASK_DIR}/${ticket}.md changed since this version was read; reload it before saving.`);
+      }
+    }
+    const result = await writeTaskFile(workspace, ticket, buffer);
+    await recordWrite(options.record, result.sha256);
+    return result;
   });
+}
+
+// The Task file's text (or its archived copy's) as it is on disk, unvalidated; a missing file is
+// task_not_found, anything but a regular file forbidden_path.
+async function readTaskRaw(workspace: Workspace, ticket: string, archived = false): Promise<string> {
+  const path = archived ? `${TASK_DIR}/${ARCHIVE_DIR}/${ticket}.md` : `${TASK_DIR}/${ticket}.md`;
+  const stats = await lstatOrMissing(join(workspace.workCheckout, path));
+  if (stats === undefined) {
+    throw new FactoryError('task_not_found', `${path} does not exist in the work checkout of "${workspace.name}".`);
+  }
+  if (!stats.isFile()) {
+    throw new FactoryError('forbidden_path', `${path} is not a regular file.`);
+  }
+  return readFile(join(workspace.workCheckout, path), 'utf8');
 }
 
 // The sha256 of a Task file's text (SF-067): what a job records of the version it was given.
@@ -232,28 +275,21 @@ export async function taskDiff(ticket: string, before: string, after: string): P
 
 // Reads the Task file of the work checkout (or its archived copy) and returns its validated text.
 export async function readTask(workspace: Workspace, ticket: string, archived = false): Promise<string> {
-  const path = archived ? `${TASK_DIR}/${ARCHIVE_DIR}/${ticket}.md` : `${TASK_DIR}/${ticket}.md`;
-  const stats = await lstatOrMissing(join(workspace.workCheckout, path));
-  if (stats === undefined) {
-    throw new FactoryError('task_not_found', `${path} does not exist in the work checkout of "${workspace.name}".`);
-  }
-  if (!stats.isFile()) {
-    throw new FactoryError('forbidden_path', `${path} is not a regular file.`);
-  }
-  const content = await readFile(join(workspace.workCheckout, path), 'utf8');
+  const content = await readTaskRaw(workspace, ticket, archived);
   checkTaskContent(ticket, content);
   return content;
 }
 
 // Appends "## Fix N" to the Task file, keeping its existing content; returns the new text. A title
-// goes after the number: "## Fix N: <title>" (SF-055, Simplify).
-export function appendFix(workspace: Workspace, ticket: string, fix: number, content: string, title?: string): Promise<string> {
+// goes after the number: "## Fix N: <title>" (SF-055, Simplify). record: see RecordWrite.
+export function appendFix(workspace: Workspace, ticket: string, fix: number, content: string, title?: string, options: { record?: RecordWrite } = {}): Promise<string> {
   return serialized(async () => {
     if (content.includes('\0') || /\p{Surrogate}/u.test(content) || content.length === 0 || Buffer.byteLength(content, 'utf8') > MAX_FIX_BYTES) {
       throw new FactoryError('invalid_content', `content must be 1 to ${MAX_FIX_BYTES} bytes of well-formed UTF-8 without NUL characters.`);
     }
     const text = `${await readTask(workspace, ticket)}\n\n## Fix ${fix}${title !== undefined ? `: ${title}` : ''}\n\n${content}\n`;
-    await writeTaskFile(workspace, ticket, checkTaskContent(ticket, text));
+    const result = await writeTaskFile(workspace, ticket, checkTaskContent(ticket, text));
+    await recordWrite(options.record, result.sha256);
     return text;
   });
 }

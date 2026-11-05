@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
 import { FACTORY_PROMPT_RULES, factoryPrompt } from '../src/prompts.js';
-import { writeTask } from '../src/task-file.js';
+import { taskSha256, writeTask } from '../src/task-file.js';
 import { call, fakeLog, git, newEnv, newRepo, putTask, refused, runCli, script, serve, stop, task, temp, waitFor } from './support/harness.js';
 
 const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid'];
@@ -96,6 +96,10 @@ test('full cycle in a worktree: start, awaiting_review with Report, Patch and fi
   assert.deepEqual(fix, { iteration: 2, check_after_minutes: 5 });
   const taskText = await readFile(join(repo, '.software-factory', 'DEMO-1.md'), 'utf8');
   assert.equal(taskText, `${task('DEMO-1', 'Export as CSV!')}\n\n## Fix 1\n\n1. src/new.ts: export a value.\n`);
+  // SF-081: the Fix section is recorded in the ticket's history, by the factory, with its number and
+  // the sha256 of the text it left.
+  const fixRecord = JSON.parse((await readFile(join(env.state, 'tickets', 'app', 'DEMO-1', 'history.jsonl'), 'utf8')).trimEnd().split('\n').at(-1)!);
+  assert.deepEqual([fixRecord.kind, fixRecord.by, fixRecord.fix, fixRecord.sha256], ['fix_added', 'factory', 1, taskSha256(taskText)]);
   const second = await waitFor(served, 'DEMO-1', 'awaiting_review', 2);
   assert.match(second.report, /^# Report: DEMO-1, iteration 2\n/);
   assert.doesNotMatch(second.report, /Denied actions/);

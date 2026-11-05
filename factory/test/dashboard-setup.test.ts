@@ -5,15 +5,18 @@
 // `sf serve`: a workspace added from the page, a ticket draft, the Task file written by the
 // planner over MCP, and the User's start from the page.
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { MAX_ACTION_BODY_BYTES } from '../src/dashboard.js';
+import { MAX_ACTION_BODY_BYTES, MAX_TASK_BODY_BYTES, startDashboard } from '../src/dashboard.js';
 import { FactoryError } from '../src/errors.js';
 import { CHATGPT_PREFILL_URL, conversationUrl, ticketConversation } from '../src/conversation.js';
 import { JobStore } from '../src/jobs.js';
-import { loadRegistry } from '../src/registry.js';
-import { draftContent, type JobDependencies } from '../src/setup.js';
+import { loadRegistry, resolveWorkspace } from '../src/registry.js';
+import { draftContent, type JobDependencies, Setup } from '../src/setup.js';
+import { CheckStore, TaskChecks } from '../src/task-check.js';
+import { MAX_TASK_BYTES, taskSha256 } from '../src/task-file.js';
+import { TicketHistory } from '../src/ticket-history.js';
 import { act, CSP, fakeActions, fakeSetup, fetchRaw, openStream, type Reply, ticketRow, workspaceRow } from './support/dashboard-client.js';
 import { withDashboard } from './support/dashboard-state.js';
 import { call, newEnv, newRepo, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
@@ -187,6 +190,172 @@ test('dashboard setup: the action checks apply to the setup POSTs; exact argumen
     }
     stream.close();
   }, setup);
+});
+
+const PLAN = '---\nticket: T-2\ntitle: Planned\nbase: feature/x\nscope: [src/**, test/a.test.ts, package.json]\nmay_touch: [package.json, .github/**]\nlands_after: [T-1, T-3, T-4, T-5, T-6, web/W-1]\n---\n\n# T-2: Planned\n\nDo it.\n';
+
+test('dashboard ticket page (SF-081): the page payload of a skeleton and of a written plan, each dependency state, 404s and the method rules', async () => {
+  const fake = fakeActions();
+  const deps = [
+    { workspace: 'app', ticket: 'T-1', state: 'merged' }, { workspace: 'app', ticket: 'T-3', state: 'pushed' }, { workspace: 'app', ticket: 'T-4', state: 'running' },
+    { workspace: 'app', ticket: 'T-5', state: 'planned' }, { workspace: 'app', ticket: 'T-6', state: 'missing' }, { workspace: 'web', ticket: 'W-1', state: 'planned' },
+  ] as const;
+  const setup = fakeSetup([workspaceRow('app')], [ticketRow('app', 'T-1', 'Skeleton'), { ...ticketRow('app', 'T-2', 'Planned', false), base: 'feature/x', lands_after: [...deps] }]);
+  setup.texts.set('app/T-1', draftContent('T-1', 'Skeleton', 'main'));
+  setup.texts.set('app/T-2', PLAN);
+  await withDashboard('dash-ticket-page', fake, async (dashboard) => {
+    const base = dashboard.url;
+    const skeleton = JSON.parse((await fetchRaw(new URL('api/tickets/app/T-1/page', base))).body);
+    assert.deepEqual(Object.keys(skeleton), ['ticket', 'task', 'plan', 'check', 'history', 'queue']);
+    assert.deepEqual([skeleton.ticket.ticket, skeleton.ticket.draft, skeleton.ticket.conversation.message], ['T-1', true, ticketConversation('app', 'T-1')]);
+    assert.deepEqual(skeleton.task, { text: draftContent('T-1', 'Skeleton', 'main'), sha256: taskSha256(draftContent('T-1', 'Skeleton', 'main')) });
+    assert.deepEqual(skeleton.plan, { starts_from: 'main', files: [], scoped: false, waits_for: [] });
+    // Without the Task checks there is no check; the queue is SF-071's; nothing recorded, the
+    // fixture's job of T-1 read from the state directory.
+    assert.deepEqual([skeleton.check, skeleton.queue], [null, null]);
+    assert.deepEqual(skeleton.history.map((entry: { kind: string; text: string }) => [entry.kind, entry.text]), [
+      ['started', 'Started as a job (now: awaiting_review)'], ['note', 'Recorded since SF-081; earlier steps are known only from checks and jobs.'],
+    ]);
+
+    const planned = await fetchRaw(new URL('api/tickets/app/T-2/page', base));
+    assert.equal(planned.headers['content-type'], 'application/json; charset=utf-8');
+    assert.equal(planned.headers['content-security-policy'], CSP);
+    const page = JSON.parse(planned.body);
+    assert.deepEqual(page.plan, {
+      starts_from: 'feature/x',
+      files: [
+        { path: 'src/**', sensitive: false }, { path: 'test/a.test.ts', sensitive: false }, { path: 'package.json', sensitive: true }, { path: '.github/**', sensitive: true },
+      ],
+      scoped: true,
+      // SF-084's states, one per dependency; another workspace's ticket with its workspace.
+      waits_for: [
+        { ticket: 'T-1', state: 'merged', merged: true }, { ticket: 'T-3', state: 'pushed', merged: false }, { ticket: 'T-4', state: 'running', merged: false },
+        { ticket: 'T-5', state: 'planned', merged: false }, { ticket: 'T-6', state: 'missing', merged: false }, { ticket: 'web/W-1', state: 'planned', merged: false },
+      ],
+    });
+
+    // Not in the tickets list (a live job's ticket, an unknown one), bad names, a query, more
+    // segments: an empty 404; POST is not a route of the page.
+    const origin = `http://127.0.0.1:${base.port}`;
+    for (const path of ['api/tickets/app/T-9/page', 'api/tickets/web/T-2/page', 'api/tickets/App/T-2/page', 'api/tickets/app/..%2FT-2/page', 'api/tickets/app/T-2/page?x=1', 'api/tickets/app/T-2/page/x']) {
+      const missing = await fetchRaw(new URL(path, base));
+      assert.deepEqual([missing.status, missing.body], [404, ''], path);
+    }
+    const posted = await fetchRaw(new URL('api/tickets/app/T-2/page', base), { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: '{}' });
+    assert.deepEqual([posted.status, posted.headers.allow], [405, 'GET']);
+    // A Task file the reader refuses answers the refusal.
+    setup.texts.set('app/T-2', 'no front matter');
+    setup.taskFile = async () => {
+      throw new FactoryError('invalid_content', 'content must start with a front-matter block.');
+    };
+    assert.deepEqual(error(await fetchRaw(new URL('api/tickets/app/T-2/page', base))), { status: 400, code: 'invalid_content' });
+    assert.deepEqual(setup.calls, []);
+    assert.deepEqual(fake.calls, []);
+  }, setup);
+});
+
+test('dashboard ticket page (SF-081): Save posts the content and the sha256 read; the body checks, a body over 128 KB taken, the error mapping and the refresh', async () => {
+  const fake = fakeActions();
+  const setup = fakeSetup([workspaceRow('app')], [ticketRow('app', 'T-2', 'Planned', false)]);
+  setup.texts.set('app/T-2', PLAN);
+  await withDashboard('dash-ticket-save', fake, async (dashboard) => {
+    const base = dashboard.url;
+    const path = 'api/tickets/app/T-2/task';
+    const sha256 = taskSha256(PLAN);
+    assert.deepEqual(error(await act(base, path, { content: PLAN, sha256 }, { headers: { origin: 'http://localhost' } })), { status: 403, code: 'invalid_origin' });
+    assert.deepEqual(error(await act(base, path, { content: PLAN, sha256 }, { headers: { 'content-type': 'text/plain' } })), { status: 415, code: 'unsupported_media_type' });
+    assert.deepEqual(error(await act(base, path, undefined, { body: '{' })), { status: 400, code: 'invalid_json' });
+    for (const text of ['{}', `{"content":"x"}`, `{"sha256":"x"}`, `{"content":null,"sha256":"x"}`, `{"content":"x","sha256":"y","force":true}`, '[]', 'null']) {
+      const reply = await act(base, path, undefined, { body: text });
+      assert.deepEqual(error(reply), { status: 400, code: 'invalid_body' }, text);
+      assert.match(JSON.parse(reply.body).error.message, /\{"content": string, "sha256": string\}/);
+    }
+    assert.deepEqual(error(await act(base, path, undefined, { body: 'x'.repeat(MAX_TASK_BODY_BYTES + 1) })), { status: 413, code: 'body_too_large' });
+    assert.match(JSON.parse((await act(base, path, undefined, { body: 'x'.repeat(MAX_TASK_BODY_BYTES + 1) })).body).error.message, new RegExp(`at most ${MAX_TASK_BODY_BYTES} bytes`));
+    for (const name of ['App', '-app']) {
+      const reply = await act(base, `api/tickets/${name}/T-2/task`, { content: PLAN, sha256 });
+      assert.deepEqual([reply.status, reply.body], [404, '']);
+    }
+    assert.deepEqual(setup.calls, []);
+
+    const stream = await openStream(new URL('api/stream', base));
+    await stream.next('tickets');
+    // A Task file bigger than the job actions' 128 KB bound, within the Task file's own.
+    const big = `${PLAN}${'x'.repeat(MAX_ACTION_BODY_BYTES + 1024)}\n`;
+    assert.ok(Buffer.byteLength(big) < MAX_TASK_BYTES);
+    assert.deepEqual(result(await act(base, path, { content: big, sha256 })), { path: '.software-factory/T-2.md', status: 'replaced', bytes: Buffer.byteLength(big), sha256: taskSha256(big) });
+    assert.deepEqual(setup.calls, [['saveTask', 'app', 'T-2', big, sha256]]);
+    // The new version (and the stale check) reaches every page.
+    await stream.next('tickets');
+    stream.close();
+
+    for (const [code, status] of [['task_changed', 409], ['job_active', 409], ['invalid_content', 400], ['task_not_found', 404]] as const) {
+      setup.answer = new FactoryError(code, `The ${code} message.`);
+      const reply = await act(base, path, { content: PLAN, sha256 });
+      assert.deepEqual([reply.status, JSON.parse(reply.body)], [status, { ok: false, error: { code, message: `The ${code} message.` } }], code);
+    }
+    assert.deepEqual(fake.calls, []);
+  }, setup);
+});
+
+test('dashboard ticket page (SF-081) through the real Setup: the history and the check of the page, Save over the version read, a stale sha256, an invalid file and a running job refused', async () => {
+  const env = await newEnv('dash-ticket-real');
+  const repo = await newRepo(env, 'dash-ticket-real-repo', true);
+  await mkdir(env.state, { recursive: true });
+  const jobs = new JobStore(env.state);
+  const history = new TicketHistory(env.state);
+  let lock: Promise<unknown> = Promise.resolve();
+  const setup = new Setup({
+    configDir: env.config, jobs, history,
+    exclusive: (work) => {
+      const next = lock.catch(() => undefined).then(() => work({ retireFinished: async () => assert.fail('nothing is retired here') }));
+      lock = next;
+      return next;
+    },
+  });
+  const checks = new TaskChecks({ claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 1, stateDir: env.state, configDir: env.config, resolve: (name) => resolveWorkspace(name, env.config) });
+  const dashboard = await startDashboard(0, env.state, jobs, fakeActions(), setup, { checks });
+  try {
+    const base = dashboard.url;
+    const pageOf = async (): Promise<Record<string, any>> => JSON.parse((await fetchRaw(new URL('api/tickets/app/T-1/page', base))).body);
+    await setup.createTicket({ workspace: 'app', ticket: 'T-1', title: 'One', request: 'r' });
+    const skeleton = await pageOf();
+    assert.deepEqual(skeleton.history.map((entry: { text: string }) => entry.text), ['Created by you']);
+    assert.deepEqual([skeleton.check.check, skeleton.check.stale, skeleton.check.running], [null, false, false]);
+
+    // Save over the version read: written, recorded, the page shows the new version.
+    const plan = PLAN.replaceAll('T-2', 'T-1');
+    assert.equal(result(await act(base, 'api/tickets/app/T-1/task', { content: plan, sha256: skeleton.task.sha256 })).sha256, taskSha256(plan));
+    assert.equal(await readFile(join(repo, '.software-factory', 'T-1.md'), 'utf8'), plan);
+    const saved = await pageOf();
+    assert.deepEqual(saved.task, { text: plan, sha256: taskSha256(plan) });
+    assert.deepEqual(saved.history.map((entry: { text: string }) => entry.text), ['Edited by you', 'Created by you']);
+    // A checked plan: the check of this version; a save makes it stale.
+    await new CheckStore(env.state).write({
+      workspace: 'app', ticket: 'T-1', sha256: taskSha256(plan), commit: null, status: 'checked', error: null, model: 'm', cost_usd: 0.48,
+      started_at: '2099-01-01T00:00:00.000Z', ended_at: '2099-01-01T00:01:00.000Z', output: { paraphrase: 'p', verdict: 'ready', files: [], findings: [] },
+    });
+    const checked = await pageOf();
+    assert.deepEqual([checked.check.check.output.verdict, checked.check.stale], ['ready', false]);
+    assert.equal(checked.history[0].text, 'Checked: ready · $0.48');
+
+    // A stale sha256 (the skeleton's): refused, nothing written. An invalid file. A running job.
+    assert.deepEqual(error(await act(base, 'api/tickets/app/T-1/task', { content: `${plan}More.\n`, sha256: skeleton.task.sha256 })), { status: 409, code: 'task_changed' });
+    assert.deepEqual(error(await act(base, 'api/tickets/app/T-1/task', { content: 'no front matter', sha256: taskSha256(plan) })), { status: 400, code: 'invalid_content' });
+    const edited = `${plan}More.\n`;
+    assert.equal(result(await act(base, 'api/tickets/app/T-1/task', { content: edited, sha256: taskSha256(plan) })).sha256, taskSha256(edited));
+    assert.equal((await pageOf()).check.stale, true);
+    await jobs.write({
+      workspace: 'app', ticket: 'T-1', branch: 'T-1-x', base: 'main', base_commit: null, target_commit: null, worktree: null, prepared_commit: null, mr_attempts: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0,
+      state: 'working', iteration: 0, session_id: null, mr: null, created_at: '2026-11-05T10:00:00.000Z', updated_at: '2026-11-05T10:00:00.000Z',
+    });
+    assert.deepEqual(error(await act(base, 'api/tickets/app/T-1/task', { content: `${edited}Again.\n`, sha256: taskSha256(edited) })), { status: 409, code: 'job_active' });
+    assert.equal(await readFile(join(repo, '.software-factory', 'T-1.md'), 'utf8'), edited);
+    // A ticket with a live job is not in the tickets list: no page.
+    assert.equal((await fetchRaw(new URL('api/tickets/app/T-1/page', base))).status, 404);
+  } finally {
+    await dashboard.close();
+  }
 });
 
 test('dashboard setup end to end: a workspace from the page, a ticket draft, the Task file over MCP, the User starts the job from the page', async () => {

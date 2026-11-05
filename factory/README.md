@@ -31,7 +31,7 @@ bin/sf say <workspace> <ticket> <message...>   # a user message into the session
 bin/sf review <workspace> <ticket>             # retry a failed Claude review (needs_human with review_failed); needs sf serve
 bin/sf accept <workspace> <ticket>             # accept a clean Claude review over a stopped gate (gate_rounds, gate_budget, gate_failed) or a ledger stop (review_churn, review_disputed) and prepare the MR; needs sf serve
 bin/sf settle <workspace> <ticket> <id> accept|fix [note...]  # settle an escalated or contested finding of the ledger (needs_human); needs sf serve
-bin/sf status [<workspace> <ticket>]           # one job (with its worktree, sensitive and deleted paths) or all jobs, with estimated cost and elapsed time; works without sf serve
+bin/sf status [<workspace> <ticket>]           # one job (with its worktree, sensitive, out-of-scope and deleted paths) or all jobs, with estimated cost and elapsed time; works without sf serve
 bin/sf watch <workspace> <ticket> [--once]     # the session live; works without sf serve
 bin/sf approve <workspace> <ticket> [--as-is]  # push the branch prepared at Clean; --as-is pushes a tip edited by hand; needs sf serve
 bin/sf mr create <workspace> <ticket>          # open the job's merge request on GitHub or GitLab (or reuse the open one); from ready_for_human_review: approve, then open; needs sf serve
@@ -208,7 +208,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   `['user', 'project']`.
   Its prompt says what to verify and defines the item severities, then carries the Handbook's
   `## Review rules` verbatim, the Task file (with its `## Review brief` when there is one), the Report, the
-  sensitive and deleted paths of the iteration, the ledger's settled findings
+  marked paths of the iteration (`<marked_paths>`: sensitive, outside the Task's scope, deleted;
+  below), the ledger's settled findings
   (`<settled_findings>`, SF-052) and the Patch inline up to 256 KiB (beyond that, the
   first 256 KiB and a note to read the changed files). Its output is structured
   (`outputFormat: {type: "json_schema"}`), validated with zod: `{verdict: "clean" | "fix", summary,
@@ -227,8 +228,9 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   job is still `awaiting_review` at the same iteration; otherwise (an `sf say` or an abort came
   first) it is recorded and ignored. The factory decides how to act on a verdict, the same way for
   both reviewers (`decide` in `src/review.ts`, SF-051): it is a fix only when it has at least one
-  `blocker` or `major` item (whatever the verdict says), or when an undeclared sensitive path is not in
-  `accepted_sensitive` (that path is then a `major` item, whatever the reviewer said of it);
+  `blocker` or `major` item (whatever the verdict says), or when an undeclared sensitive path or a
+  path outside the Task's scope (SF-053) is not in `accepted_sensitive` (that path is then a
+  `major` item, whatever the reviewer said of it);
   otherwise it is clean, whatever the reviewer wrote, so a `fix` with nits only goes on as clean
   (Claude's to the gate, the gate's to MR preparation). Before that rule the ledger applies to the
   verdict (SF-052, below): dropped items, disputes and churn. A fix writes `## Fix N` (the summary as
@@ -422,7 +424,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
 - The gate runs outside the lock, like the review, and its verdict applies only while the job is
   still `awaiting_review` at the same iteration, by the same rule as Claude's (`decide`, SF-051).
   Clean (a `fix` with nits only too) runs the clean path with the union of both reviewers'
-  `accepted_sensitive`; an undeclared sensitive path the gate does not accept is a major fix item.
+  `accepted_sensitive`; an undeclared sensitive path or a path outside the Task's scope the gate
+  does not accept is a major fix item.
   A fix writes `## Fix N` (lead line `Review by Codex: <summary>`) and runs the next
   iteration, which Claude reviews again, and the gate again after a clean verdict. The job counts
   the gate's fixes in `gate_fixes`: at `SF_GATE_MAX_ROUNDS` the next one is not applied
@@ -448,8 +451,9 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   <branch>`): the next iteration's Patch is the whole change against the target, and the next
   Clean commits the whole change again as one commit.
 - The clean path runs the MR preparation (section below) and ends in `ready_for_human_review` with
-  the branch in the checkout. It takes `sensitive`, the undeclared sensitive paths of the reviewed
-  iteration the reviewers accept; any left out refuse it with `sensitive_unacknowledged`.
+  the branch in the checkout. It takes `sensitive`, the undeclared sensitive paths and the paths
+  outside the Task's scope of the reviewed iteration the reviewers accept; any left out refuse it
+  with `sensitive_unacknowledged`.
 - Every prompt the factory sends (the `/implement` line of a start and of the fix path, or the user's
   message of `sf say`) is followed by a blank line and `FACTORY_PROMPT_RULES` (`src/prompts.ts`):
   the factory's rules and the Report template, with the ticket and iteration filled in.
@@ -529,9 +533,13 @@ deeper or elsewhere stay. The Patch and the MR commit also skip an untracked fil
 the rule, in case the sandbox recreates one after the cleanup. A file the factory left in place
 does not match the rule, so it is a change of the Implementer's or the user's.
 
-### Sensitive paths
+### Marked paths
 
-`SENSITIVE_PATHS` in `src/rules.ts` (globs from the repository root: `*` and `?` inside one
+The factory marks three kinds of changed path in the structured file list (`files` of
+`meta.json`), the Report, the reviewers' prompt (`<marked_paths>`), `sf status`, the notifications
+and the dashboard's file list: sensitive, outside the Task's scope, and deleted.
+
+Sensitive. `SENSITIVE_PATHS` in `src/rules.ts` (globs from the repository root: `*` and `?` inside one
 segment, `**` across directories, `{a,b}` alternatives) names dependency manifests and lockfiles
 (`package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `pom.xml`, `build.gradle*`,
 `requirements*.txt`, `pyproject.toml`, `Pipfile*`, `go.mod`, `Cargo.toml`, `Gemfile*`,
@@ -545,11 +553,29 @@ segment, `**` across directories, `{a,b}` alternatives) names dependency manifes
 paths or globs the ticket is expected to change (`[a, b]` or `a, b`): a sensitive path matching it
 is `declared`, every other sensitive path `undeclared`. The Report's `## Changed files` lists the
 sensitive paths first under `### Sensitive` (each `declared` or `undeclared`, `deleted` when it
-is) and the deleted paths under `### Deleted`; `sf status <ws> <ticket>` prints `sensitive:` and
-`deleted:` lines; the `awaiting_review` (with `SF_NOTIFY_ITERATIONS=on`) and
-`ready_for_human_review` notifications carry the same two lines (the body holds three lines, so
-the ready notification shows the title and the sensitive line). `.env` files stay denied to the
-Implementer; listing them is a second net for files created by tools it runs.
+is), the paths outside the Task's scope under `### Outside the Task's scope` (below) and the
+deleted paths under `### Deleted`; `sf status <ws> <ticket>` prints `sensitive:`, `out of scope:`
+(only when the Task declares a scope) and `deleted:` lines; the `awaiting_review` (with
+`SF_NOTIFY_ITERATIONS=on`), `ready_for_human_review` and escalated `needs_human` notifications
+carry the same summaries on one line, separated by `; ` (`notificationLine` in `src/patch.ts`): the
+body holds three lines, so the ready notification shows the branch, the title and every marked-path
+summary, the out-of-scope one included. `.env` files stay denied to the Implementer; listing
+them is a second net for files created by tools it runs.
+
+Outside the Task's scope (SF-053). The Task file's front matter may declare `scope:`, in the forms
+of `may_touch` (`[a, b/**]` or `a, b`): the files the ticket is expected to create, modify or
+delete, tests and docs included. Each changed path gets `scope: "in" | "out" | "none"` in the file
+list (`fileChanges` in `src/patch.ts`, `scopeOf` in `src/rules.ts`, the same glob rules): `in` when
+`scope` or `may_touch` names it, `out` otherwise, `none` when the Task declares no scope (no field
+or an empty list: nothing is checked). A file list written before SF-053 reads as `none`. A path
+`out` of scope stays only when a reviewer names it in `accepted_sensitive` (the field keeps its
+name for stored records; its schema says "the undeclared sensitive or out-of-scope paths you
+accept, each justified in summary") and justifies it; otherwise the factory adds the major fix
+item `` `path`: Outside the Task's scope. Expected: Remove the change, or justify it in the Report. ``,
+as it does for an undeclared sensitive path, with its own ledger entry. A path that is both
+undeclared sensitive and out of scope raises both items, each with its own entry; naming it once in
+`accepted_sensitive` (or the user accepting it as a risk) settles both.
+The dashboard's file list marks such a path "out of scope".
 
 ## MR preparation
 
@@ -708,7 +734,8 @@ the body "Report and Patch of iteration N are ready for the reviewers") the
 factory sends a desktop notification (`notify-send --app-name="Software Factory" "<ticket>:
 <state>" <body>`, 5 s, when `notify-send` is on `PATH`) and, with `SF_NTFY_URL` set, one ntfy POST
 (10 s; headers `Title`, `Priority` high for `needs_human` and `failed`, `Tags`). The body has at most
-three lines: the branch, the error, or the MR title and link when pushed. Once the factory opens
+three lines: the branch, the error, or the MR title and link when pushed, and the marked paths of
+the iteration on one line. Once the factory opens
 or merges a merge request (SF-048), the title is `<ticket>: merge request #<n> opened` (or `merged`)
 and the body has its link. A failure never changes
 the job; it is appended to `events.jsonl` as `{type: "notify_failed", channel, message}` and shown

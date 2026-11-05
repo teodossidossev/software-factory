@@ -678,7 +678,7 @@ test('notifications: desktop and ntfy for the user\'s states, silent iterations,
   const [failure] = await failures();
   assert.equal(failure!.channel, 'ntfy');
   assert.match(String(failure!.message), /fetch failed|ECONNREFUSED/);
-  assert.deepEqual((await desktop())[1]!.slice(1), ['N-1: ready_for_human_review', 'branch: N-1-notify-me\nfeat(N-1): Notify me\nsensitive: package.json (undeclared)']);
+  assert.deepEqual((await desktop())[1]!.slice(1), ['N-1: ready_for_human_review', 'branch: N-1-notify-me\nfeat(N-1): Notify me\nsensitive: package.json (undeclared); deleted: none']);
   assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'N-1' })).state, 'ready_for_human_review');
   assert.match((await runCli(env, ['watch', 'app', 'N-1', '--once'])).stdout, /\[3\] notification via ntfy failed: /);
   const down = await runCli(env, ['notify-test']);
@@ -717,7 +717,7 @@ test('SF_NOTIFY_ITERATIONS=on notifies awaiting_review on ntfy with the iteratio
     if (expected === 1) {
       assert.deepEqual(
         [received[0]!.headers.title, received[0]!.headers.priority, received[0]!.headers.tags, received[0]!.body],
-        ['N-2: awaiting_review', 'default', 'eyes', 'Report and Patch of iteration 1 are ready for the reviewers\nsensitive: none\ndeleted: README.md'],
+        ['N-2: awaiting_review', 'default', 'eyes', 'Report and Patch of iteration 1 are ready for the reviewers\nsensitive: none; deleted: README.md'],
       );
     }
     await stop(served);

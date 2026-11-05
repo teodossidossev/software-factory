@@ -26,20 +26,20 @@ import { chooseForge, type Forge, type ForgeKind, forgeFor, type MergeRequestSta
 import { runGit } from './git.js';
 import { GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from './gate.js';
 import { cutEvent, type FileChange, type GateOverride, type GateRecord, isActive, type Job, type JobMr, type JobState, JobStore, now, type ReviewRecord, TERMINAL_STATES } from './jobs.js';
-import { answerFix, applyVerdict, type Applied, type Decision, DECISIONS, escalationMessage, headings, LEDGER_ID, type LedgerEntry, SENSITIVE_PROBLEM, settle, SETTLE_CODES, unappliedEntries, unsettled, userFixItems } from './ledger.js';
+import { answerFix, applyVerdict, type Applied, type Decision, DECISIONS, escalationMessage, headings, LEDGER_ID, type LedgerEntry, FACTORY_PROBLEMS, SCOPE_PROBLEM, SENSITIVE_PROBLEM, settle, SETTLE_CODES, unappliedEntries, unsettled, userFixItems } from './ledger.js';
 import { abortRebase, commitAndRebase, continueRebase, gitBusy, mergeRequestLink, originUrl, pushBranch, readMrText, rebaseInProgress, resolveTarget, unmergedPaths, withFindings, withNits } from './mr.js';
-import { buildPatch, changedFilesSection, fileChanges, fileSummaryLines, type Patch } from './patch.js';
+import { buildPatch, changedFilesSection, fileChanges, notificationLine, type Patch } from './patch.js';
 import { removeSandboxPlaceholders } from './placeholders.js';
 import { Redactor } from './redact.js';
 import { conflictPrompt, factoryPrompt, iterationCost, mrPrompt } from './prompts.js';
-import { DENIED_TOOLS, sensitivityOf } from './rules.js';
+import { DENIED_TOOLS, type Marks, marksOf } from './rules.js';
 import type { Workspace } from './registry.js';
 import { DEFAULT_PAGE_BYTES, MAX_PAGE_BYTES, MIN_PAGE_BYTES, type Page, pageBuffer } from './repo-files.js';
-import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, sensitiveItem, uniqueNits } from './review.js';
+import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, unacceptedItems, uniqueNits } from './review.js';
 import { withLock } from './pid-lock.js';
 import { type Launch, type RunnerRequest, Runners, type RunnerWork } from './runner.js';
 import { type IdleOutcome, ImplementerSession } from './session.js';
-import { appendFix, isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
+import { appendFix, isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskScope, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { addWorktree, deleteBranch, removeWorktree } from './worktree.js';
 
 export const MAX_REPORT_BYTES = 64 * 1024;
@@ -104,6 +104,16 @@ function mrFailure(error: unknown): { code: string; message: string } {
 }
 
 type Success = Extract<IdleOutcome, { ok: true }>;
+
+// The paths of the factory's fix items (src/review.ts, unacceptedItems) by kind, each with its
+// label: the undeclared sensitive paths, then the paths outside the Task's scope (SF-053).
+function markedGroups(items: ReviewItem[]): Array<{ label: string; paths: string[] }> {
+  return [
+    { label: 'undeclared sensitive path(s)', problem: SENSITIVE_PROBLEM },
+    { label: "path(s) outside the Task's scope", problem: SCOPE_PROBLEM },
+  ].map(({ label, problem }) => ({ label, paths: items.filter((item) => item.problem === problem).map((item) => item.path) }))
+    .filter((group) => group.paths.length > 0);
+}
 
 // A review record without the items the ledger dropped (SF-052), compared as written.
 function withoutDropped(record: { items: ReviewItem[]; dropped?: ReviewItem[] }): { items: ReviewItem[] } {
@@ -578,10 +588,10 @@ export class Execution implements RunnerWork {
         // item stops the job before the review.
         const escalated = await this.#answerFix(published, live.cwd, outcome.text);
         if (escalated.length > 0) {
-          await this.#transition(published, 'needs_human', { code: 'escalated', message: escalationMessage(escalated) }, fileSummaryLines(changes));
+          await this.#transition(published, 'needs_human', { code: 'escalated', message: escalationMessage(escalated) }, [notificationLine(changes)]);
           return;
         }
-        this.#startReview(await this.#transition(published, 'awaiting_review', undefined, fileSummaryLines(changes)));
+        this.#startReview(await this.#transition(published, 'awaiting_review', undefined, [notificationLine(changes)]));
       } catch (error) {
         console.error(error);
         await this.#transition(job, 'needs_human', { code: 'publish_failed', message: 'The Report and Patch could not be published.' });
@@ -625,15 +635,19 @@ export class Execution implements RunnerWork {
     return answered.escalated;
   }
 
-  // The sensitivity rule of a job: the Task file's may_touch plus SF_SENSITIVE_PATHS.
-  async #sensitivity(workspace: Workspace, ticket: string): Promise<(path: string) => FileChange['sensitive']> {
+  // The marks rule of a job: the Task file's may_touch plus SF_SENSITIVE_PATHS for the
+  // sensitivity, and its scope plus may_touch for the scope (SF-053).
+  async #marks(workspace: Workspace, ticket: string): Promise<(path: string) => Marks> {
     let declared: string[] = [];
+    let scope: string[] | undefined;
     try {
-      declared = mayTouch(parseFrontMatter(await readTask(workspace, ticket)) ?? new Map());
+      const fields = parseFrontMatter(await readTask(workspace, ticket)) ?? new Map<string, string>();
+      declared = mayTouch(fields);
+      scope = taskScope(fields);
     } catch (error) {
       console.error(error);
     }
-    return (path) => sensitivityOf(path, declared, this.#config.sensitivePaths);
+    return marksOf(declared, scope, this.#config.sensitivePaths);
   }
 
   // Writes the next iteration (Report, Patch and the file list) and returns the job with its
@@ -643,7 +657,7 @@ export class Execution implements RunnerWork {
     const number = job.iteration + 1;
     const total = outcome.result.total_cost_usd ?? null;
     const previousTotal = number > 1 ? ((await this.jobs.readMeta(workspaceName, ticket, number - 1)).cost_usd_total ?? null) : null;
-    const changes = await fileChanges(live.cwd, job.base_commit!, built.files, await this.#sensitivity(live.workspace, ticket));
+    const changes = await fileChanges(live.cwd, job.base_commit!, built.files, await this.#marks(live.workspace, ticket));
     const sections = [outcome.text.trim() || '(The Implementer wrote no report text.)', ...extraSections, changedFilesSection(built.files, built.truncated, changes)];
     if (outcome.denials.length > 0) {
       sections.push(['## Denied actions', '', ...outcome.denials.map((tool) => `- ${tool}`)].join('\n'));
@@ -755,7 +769,7 @@ export class Execution implements RunnerWork {
       `The rebase onto ${targetRef} (${targetCommit}) had conflicts in ${files.join(', ')}, resolved by the Implementer. The Patch is now against the target.`,
     ].join('\n');
     const { job: published, changes } = await this.#publish(rebased, live, outcome, await buildPatch(cwd, targetCommit), [note]);
-    this.#startReview(await this.#transition(published, 'awaiting_review', undefined, fileSummaryLines(changes)));
+    this.#startReview(await this.#transition(published, 'awaiting_review', undefined, [notificationLine(changes)]));
   }
 
   // Starts the Claude review of the job's last iteration; it runs outside the lock. A review still
@@ -850,7 +864,7 @@ export class Execution implements RunnerWork {
       }
       const unaccepted = await this.#unaccepted(job, review.accepted_sensitive);
       if (unaccepted.length > 0) {
-        throw new FactoryError('invalid_state', `sf accept needs a clean Claude review of the last iteration (${job.iteration}); it does not accept the undeclared sensitive path(s) ${unaccepted.map((item) => item.path).join(', ')}.`);
+        throw new FactoryError('invalid_state', `sf accept needs a clean Claude review of the last iteration (${job.iteration}); it does not accept the ${markedGroups(unaccepted).map((group) => `${group.label} ${group.paths.join(', ')}`).join(' and the ')}.`);
       }
       const gate = await this.jobs.readGate(workspaceName, ticket, job.iteration);
       const unapplied = LEDGER_ACCEPT_CODES.includes(code)
@@ -1030,19 +1044,18 @@ export class Execution implements RunnerWork {
     await this.#applying(job, () => this.#afterClaude(job, outcome.output));
   }
 
-  // The undeclared sensitive paths of the job's last iteration not in accepted, nor accepted by the
-  // user as a risk (SF-052), as fix items.
+  // The undeclared sensitive paths and the paths outside the Task's scope (SF-053) of the job's
+  // last iteration not in accepted, nor accepted by the user as a risk (SF-052), as fix items.
   async #unaccepted(job: Job, accepted: string[]): Promise<ReviewItem[]> {
-    const byUser = await this.#sensitiveAcceptedByUser(job);
-    return ((await this.#lastFiles(job)) ?? [])
-      .filter((change) => change.sensitive === 'undeclared' && !accepted.includes(change.path) && !byUser.includes(change.path))
-      .map((change) => sensitiveItem(change.path));
+    const byUser = await this.#markedAcceptedByUser(job);
+    return unacceptedItems((await this.#lastFiles(job)) ?? [], [...accepted, ...byUser]);
   }
 
-  // The undeclared sensitive paths whose ledger entry the user settled as an accepted risk.
-  async #sensitiveAcceptedByUser(job: Job): Promise<string[]> {
+  // The marked paths (undeclared sensitive, outside the Task's scope) whose ledger entry the user
+  // settled as an accepted risk.
+  async #markedAcceptedByUser(job: Job): Promise<string[]> {
     return (await this.jobs.readLedger(job.workspace, job.ticket))
-      .filter((entry) => entry.status === 'accepted_risk' && entry.problem === SENSITIVE_PROBLEM)
+      .filter((entry) => entry.status === 'accepted_risk' && FACTORY_PROBLEMS.includes(entry.problem))
       .map((entry) => entry.path);
   }
 
@@ -1053,8 +1066,9 @@ export class Execution implements RunnerWork {
   }
 
   // The Claude verdict as the factory acts on it (decide, SF-051): fix (a blocker or major item, or
-  // an undeclared sensitive path it does not accept) is the next Fix section; clean (a fix with
-  // nits only too) starts the gate, or with the gate off runs Clean. Only under the lock.
+  // an undeclared sensitive path or a path outside the Task's scope it does not accept) is the
+  // next Fix section; clean (a fix with nits only too) starts the gate, or with the gate off runs
+  // Clean. Only under the lock.
   // The ledger applies first (SF-052, #applyLedger): a dropped item never counts, a dispute or
   // churn hands the job to the user.
   async #afterClaude(job: Job, output: ReviewOutput): Promise<void> {
@@ -1167,8 +1181,8 @@ export class Execution implements RunnerWork {
   // gate.json and the event are written, and the verdict applies only while the job still awaits
   // review of the same iteration, as the factory acts on it (decide, SF-051): clean (a fix with nits
   // only too) runs Clean with the paths both reviewers accepted, fix (a blocker or major item, or an
-  // undeclared sensitive path the gate does not accept) is the next Fix section unless the gate's
-  // rounds are used up.
+  // undeclared sensitive path or a path outside the Task's scope the gate does not accept) is the
+  // next Fix section unless the gate's rounds are used up.
   async #gated(gated: Job, running: RunningReview, claude: ReviewOutput, outcome: GateOutcome): Promise<void> {
     const { workspace: name, ticket, iteration } = gated;
     const key = `${name}/${ticket}`;
@@ -1247,7 +1261,7 @@ export class Execution implements RunnerWork {
       return;
     }
     this.#live.delete(`${job.workspace}/${job.ticket}`);
-    const lines = [title, ...fileSummaryLines((await this.#lastFiles(job)) ?? [])];
+    const lines = [title, notificationLine((await this.#lastFiles(job)) ?? [])];
     await this.#transition({ ...job, base_commit: job.target_commit, prepared_commit: tip, worktree: null }, 'ready_for_human_review', undefined, lines);
     console.log(`${job.workspace}/${job.ticket}: branch ${job.branch} ready (${title})`);
   }
@@ -1263,11 +1277,11 @@ export class Execution implements RunnerWork {
     }
   }
 
-  // Clean (the deciding clean verdict): every undeclared sensitive path of the reviewed iteration must be
-  // acknowledged; then the target is resolved and the MR text turn runs in the worktree. When it
-  // ends the factory commits and rebases (#mrIdle), and the job ends in ready_for_human_review with
-  // the branch in the checkout. Also the retry after a failed preparation (needs_human with
-  // mr_attempts > 0).
+  // Clean (the deciding clean verdict): every undeclared sensitive path and every path outside the
+  // Task's scope of the reviewed iteration must be acknowledged; then the target is resolved and
+  // the MR text turn runs in the worktree. When it ends the factory commits and rebases (#mrIdle),
+  // and the job ends in ready_for_human_review with the branch in the checkout. Also the retry
+  // after a failed preparation (needs_human with mr_attempts > 0).
   markClean(workspaceName: string, ticket: string, sensitive: string[] = []): Promise<{ state: JobState; iteration: number; branch: string }> {
     return this.#request(workspaceName, ticket, { kind: 'clean', sensitive }) as Promise<{ state: JobState; iteration: number; branch: string }>;
   }
@@ -1288,12 +1302,10 @@ export class Execution implements RunnerWork {
   async #prepareMr(job: Job, sensitive: string[], override?: GateOverride): Promise<{ state: JobState; iteration: number; branch: string }> {
     const { workspace: workspaceName, ticket } = job;
     const retry = this.#checkPrepareMr(job, override);
-    const byUser = await this.#sensitiveAcceptedByUser(job);
-    const unacknowledged = ((await this.#lastFiles(job)) ?? [])
-      .filter((change) => change.sensitive === 'undeclared' && !sensitive.includes(change.path) && !byUser.includes(change.path))
-      .map((change) => change.path);
+    const unacknowledged = markedGroups(await this.#unaccepted(job, sensitive));
     if (unacknowledged.length > 0) {
-      throw new FactoryError('sensitive_unacknowledged', `Undeclared sensitive path(s) in the reviewed iteration: ${unacknowledged.join(', ')}. Each must be named in the accepted sensitive paths with the reason it is needed; otherwise it is a fix item.`);
+      const lines = unacknowledged.map((group) => `${group.label.charAt(0).toUpperCase()}${group.label.slice(1)} in the reviewed iteration: ${group.paths.join(', ')}.`);
+      throw new FactoryError('sensitive_unacknowledged', `${lines.join(' ')} Each must be named in the accepted sensitive paths with the reason it is needed; otherwise it is a fix item.`);
     }
     if (job.worktree === null || !(await exists(job.worktree))) {
       throw new FactoryError('worktree_missing', `The worktree of ${workspaceName}/${ticket} is missing; sf reset the ticket and start again.`);

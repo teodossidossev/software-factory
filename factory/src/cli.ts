@@ -638,7 +638,8 @@ async function status(args: string[]): Promise<void> {
   if (job.worktree !== null) {
     console.log(`\nworktree: ${job.worktree}`);
   }
-  // The sensitive and the deleted paths of the last published iteration (SF-024).
+  // The marked paths (sensitive, outside the Task's scope, deleted) of the last published
+  // iteration (SF-024, SF-053).
   if (job.iteration > 0) {
     try {
       const files = (await jobs.readMeta(workspace, ticket, job.iteration)).files ?? [];

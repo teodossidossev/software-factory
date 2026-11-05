@@ -166,11 +166,37 @@ export function matchesGlob(path: string, glob: string): boolean {
 
 export type Sensitivity = 'declared' | 'undeclared' | 'no';
 
+// Whether one of the paths or globs names path.
+const names = (globs: readonly string[], path: string): boolean => globs.some((glob) => glob === path || matchesGlob(path, glob));
+
 // Whether a path is sensitive (SENSITIVE_PATHS plus extra globs) and, when it is, whether the
 // Task file declared it with may_touch (paths or globs).
 export function sensitivityOf(path: string, mayTouch: readonly string[], extra: readonly string[] = []): Sensitivity {
   if (![...SENSITIVE_PATHS, ...extra].some((glob) => matchesGlob(path, glob))) {
     return 'no';
   }
-  return mayTouch.some((glob) => glob === path || matchesGlob(path, glob)) ? 'declared' : 'undeclared';
+  return names(mayTouch, path) ? 'declared' : 'undeclared';
+}
+
+export type Scope = 'in' | 'out' | 'none';
+
+// Whether a path is in the Task's file scope (SF-053): its scope or its may_touch (paths or globs)
+// names it; none when the Task declares no scope.
+export function scopeOf(path: string, scope: readonly string[] | undefined, mayTouch: readonly string[]): Scope {
+  if (scope === undefined) {
+    return 'none';
+  }
+  return names(scope, path) || names(mayTouch, path) ? 'in' : 'out';
+}
+
+// The marks of a changed path: whether it is sensitive, whether it is in the Task's scope.
+export interface Marks {
+  sensitive: Sensitivity;
+  scope: Scope;
+}
+
+// The marks rule of a Task: its may_touch and scope (undefined: none declared), and the extra
+// sensitive globs (SF_SENSITIVE_PATHS).
+export function marksOf(mayTouch: readonly string[], scope: readonly string[] | undefined, extra: readonly string[] = []): (path: string) => Marks {
+  return (path) => ({ sensitive: sensitivityOf(path, mayTouch, extra), scope: scopeOf(path, scope, mayTouch) });
 }

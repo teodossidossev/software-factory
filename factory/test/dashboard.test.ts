@@ -266,7 +266,7 @@ test('dashboard end to end: a fake cycle, the stream across mark_clean (the bran
     assert.deepEqual([mr.status, mr.body], [200, mrText('feat(T-1): Change the README')]);
     // The file list of the iteration comes with the detail.
     const withFiles = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body);
-    assert.deepEqual(withFiles.iterations[0].files, [{ path: 'README.md', status: 'modified', sensitive: 'no', additions: 1, deletions: 1 }]);
+    assert.deepEqual(withFiles.iterations[0].files, [{ path: 'README.md', status: 'modified', sensitive: 'no', scope: 'none', additions: 1, deletions: 1 }]);
 
     const approved = await runCli(env, ['approve', 'app', 'T-1']);
     assert.equal(approved.code, 0, approved.stdout + approved.stderr);

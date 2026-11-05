@@ -50,7 +50,7 @@ export function notifiedStates(config: NotifyConfig): readonly JobState[] {
 
 // The notification for a job that reached state (or whose merge request was opened or merged);
 // lines: the MR title and link (or the merge request's) when pushed, the
-// sensitive and deleted paths of the iteration (SF-024).
+// sensitive, out-of-scope and deleted paths of the iteration (SF-024, SF-053).
 export function jobNotification(job: Job, lines: string[] = []): Notification {
   if (job.state === 'awaiting_review') {
     return {

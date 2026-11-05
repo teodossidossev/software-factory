@@ -266,6 +266,25 @@ test('job client: the tabs are flat; the selected one is kept across jobs; the T
   assert.equal(gets(page, 'api/tickets/app/T-2/task').length, 1);
 });
 
+// SF-053: a file outside the Task's scope carries an "out of scope" mark; the summary counts them.
+test("job client: a file outside the Task's scope is marked out of scope in the file list and counted in the summary", async () => {
+  const files = [
+    { path: 'src/a.ts', status: 'added', sensitive: 'no', scope: 'in', additions: 1, deletions: 0 },
+    { path: 'notes.txt', status: 'added', sensitive: 'no', scope: 'out', additions: 1, deletions: 0 },
+    { path: '.editorconfig', status: 'added', sensitive: 'undeclared', scope: 'out', additions: 1, deletions: 0 },
+    { path: 'old.ts', status: 'modified', sensitive: 'no', scope: 'none', additions: 1, deletions: 1 },
+  ];
+  const shown = detail(job('awaiting_review', { iteration: 1, files: 4, undeclared: 1 }), { iterations: [iteration(1, { changed_files: 4, files })] });
+  const page = await openJob(shown, (path) => (path.endsWith('/report') ? 'Done.' : path.endsWith('/patch') ? '' : undefined));
+  assert.equal(page.$('files-summary').textContent, 'Files 4 · 1 sensitive undeclared · 2 out of scope');
+  const rows = elements(page, 'files-list').filter((item) => item.className !== 'file-group').map((item) => item.children[0] as FakeElement);
+  const marks = (path: string): string[] => rows.find((row) => row.dataset.path === path)!.all().filter((element) => element.className.startsWith('file-label ')).map((element) => element.textContent);
+  assert.deepEqual(marks('notes.txt'), ['out of scope']);
+  assert.deepEqual(marks('.editorconfig'), ['sensitive, undeclared', 'out of scope']);
+  assert.deepEqual(marks('src/a.ts'), []);
+  assert.deepEqual(marks('old.ts'), []);
+});
+
 // The Changes tab: the iteration picker, the Report, the file list (SF-024's order and marks) next
 // to the Patch; a file click marks and scrolls its diff.
 test('job client: Changes shows the Report, the files with their marks next to the Patch; a file click scrolls to its diff', async () => {

@@ -2,8 +2,10 @@
 // SF_SENSITIVE_PATHS and may_touch, the Report section and the notification lines.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { changedFilesSection, fileSummaryLines } from '../src/patch.js';
-import { globToRegExp, matchesGlob, SENSITIVE_PATHS, sensitivityOf } from '../src/rules.js';
+import type { Job } from '../src/jobs.js';
+import { jobNotification } from '../src/notify.js';
+import { changedFilesSection, fileSummaryLines, notificationLine } from '../src/patch.js';
+import { globToRegExp, matchesGlob, SENSITIVE_PATHS, scopeOf, sensitivityOf } from '../src/rules.js';
 import { mayTouch, parseFrontMatter } from '../src/task-file.js';
 
 test('globToRegExp: * and ? stay inside a segment, ** crosses directories, {a,b} alternates, the rest is literal', () => {
@@ -57,14 +59,65 @@ test('mayTouch reads the front matter list in both forms', () => {
 test('changedFilesSection lists sensitive and deleted paths first; fileSummaryLines names them or says none', () => {
   const files = [{ path: 'src/a.ts', added: 1, removed: 0 }, { path: 'package.json', added: 1, removed: 1 }, { path: 'src/old.ts', added: 0, removed: 3 }];
   const changes = [
-    { path: 'src/a.ts', status: 'added' as const, sensitive: 'no' as const, additions: 1, deletions: 0 },
-    { path: 'package.json', status: 'modified' as const, sensitive: 'declared' as const, additions: 1, deletions: 1 },
-    { path: 'src/old.ts', status: 'deleted' as const, sensitive: 'no' as const, additions: 0, deletions: 3 },
-    { path: 'package-lock.json', status: 'deleted' as const, sensitive: 'undeclared' as const, additions: 0, deletions: 9 },
+    { path: 'src/a.ts', status: 'added' as const, sensitive: 'no' as const, scope: 'none' as const, additions: 1, deletions: 0 },
+    { path: 'package.json', status: 'modified' as const, sensitive: 'declared' as const, scope: 'none' as const, additions: 1, deletions: 1 },
+    { path: 'src/old.ts', status: 'deleted' as const, sensitive: 'no' as const, scope: 'none' as const, additions: 0, deletions: 3 },
+    { path: 'package-lock.json', status: 'deleted' as const, sensitive: 'undeclared' as const, scope: 'none' as const, additions: 0, deletions: 9 },
   ];
   const section = changedFilesSection(files, false, changes);
   assert.match(section, /^## Changed files\n\n### Sensitive\n\n- package\.json \(declared\)\n- package-lock\.json \(undeclared, deleted\)\n\n### Deleted\n\n- src\/old\.ts\n- package-lock\.json\n\n\| Path \| Added \| Removed \|\n/);
   assert.equal(changedFilesSection(files, false, []), changedFilesSection(files, false));
   assert.deepEqual(fileSummaryLines(changes), ['sensitive: package.json, package-lock.json (undeclared)', 'deleted: src/old.ts, package-lock.json']);
   assert.deepEqual(fileSummaryLines([]), ['sensitive: none', 'deleted: none']);
+});
+
+test('scopeOf: none without a scope; in when the scope or may_touch names the path (paths or globs); out otherwise (SF-053)', () => {
+  assert.equal(scopeOf('src/a.ts', undefined, []), 'none');
+  assert.equal(scopeOf('src/a.ts', undefined, ['src/**']), 'none');
+  assert.equal(scopeOf('src/a.ts', ['src/a.ts'], []), 'in');
+  assert.equal(scopeOf('test/deep/a.test.ts', ['src/a.ts', 'test/**'], []), 'in');
+  assert.equal(scopeOf('src/b.ts', ['src/a.ts'], []), 'out');
+  assert.equal(scopeOf('package.json', ['src/**'], ['package.json']), 'in');
+  assert.equal(scopeOf('.github/workflows/ci.yml', ['src/**'], ['.github/**']), 'in');
+  assert.equal(scopeOf('README.md', ['src/*'], ['package.json']), 'out');
+});
+
+test("changedFilesSection lists the paths outside the Task's scope under their own heading; fileSummaryLines adds an out of scope line only with a scope (SF-053)", () => {
+  const files = [{ path: 'src/a.ts', added: 1, removed: 0 }, { path: 'package.json', added: 1, removed: 1 }, { path: 'docs/x.md', added: 2, removed: 0 }, { path: 'src/old.ts', added: 0, removed: 3 }];
+  const changes = [
+    { path: 'src/a.ts', status: 'added' as const, sensitive: 'no' as const, scope: 'in' as const, additions: 1, deletions: 0 },
+    { path: 'package.json', status: 'modified' as const, sensitive: 'undeclared' as const, scope: 'out' as const, additions: 1, deletions: 1 },
+    { path: 'docs/x.md', status: 'added' as const, sensitive: 'no' as const, scope: 'out' as const, additions: 2, deletions: 0 },
+    { path: 'src/old.ts', status: 'deleted' as const, sensitive: 'no' as const, scope: 'out' as const, additions: 0, deletions: 3 },
+  ];
+  assert.match(changedFilesSection(files, false, changes), new RegExp([
+    '^## Changed files', '', '### Sensitive', '', '- package\\.json \\(undeclared\\)', '',
+    "### Outside the Task's scope", '', '- package\\.json', '- docs/x\\.md', '- src/old\\.ts \\(deleted\\)', '',
+    '### Deleted', '', '- src/old\\.ts', '', '\\| Path \\| Added \\| Removed \\|\\n',
+  ].join('\\n')));
+  assert.deepEqual(fileSummaryLines(changes), ['sensitive: package.json (undeclared)', 'out of scope: package.json, docs/x.md, src/old.ts', 'deleted: src/old.ts']);
+  const inScope = changes.map((change) => ({ ...change, scope: 'in' as const }));
+  assert.doesNotMatch(changedFilesSection(files, false, inScope), /Outside/);
+  assert.deepEqual(fileSummaryLines(inScope), ['sensitive: package.json (undeclared)', 'out of scope: none', 'deleted: src/old.ts']);
+  const none = changes.map((change) => ({ ...change, scope: 'none' as const }));
+  assert.doesNotMatch(changedFilesSection(files, false, none), /Outside/);
+  assert.deepEqual(fileSummaryLines(none), ['sensitive: package.json (undeclared)', 'deleted: src/old.ts']);
+});
+
+test("notificationLine puts the marked-path summaries on one line, so a ready or awaiting_review notification keeps the out of scope summary within its three lines (SF-053)", () => {
+  const changes = [
+    { path: 'package.json', status: 'modified' as const, sensitive: 'undeclared' as const, scope: 'out' as const, additions: 1, deletions: 1 },
+    { path: 'notes.txt', status: 'added' as const, sensitive: 'no' as const, scope: 'out' as const, additions: 1, deletions: 0 },
+    { path: 'src/old.ts', status: 'deleted' as const, sensitive: 'no' as const, scope: 'in' as const, additions: 0, deletions: 3 },
+  ];
+  const line = 'sensitive: package.json (undeclared); out of scope: package.json, notes.txt; deleted: src/old.ts';
+  assert.equal(notificationLine(changes), line);
+  assert.equal(notificationLine([]), 'sensitive: none; deleted: none');
+  const job: Job = {
+    workspace: 'app', ticket: 'T-1', branch: 'T-1-x', base: 'main', base_commit: null, target_commit: null, worktree: null, prepared_commit: null,
+    mr_attempts: 1, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'ready_for_human_review', iteration: 1, session_id: null, created_at: '2026-11-04T10:00:00.000Z',
+    updated_at: '2026-11-04T10:00:00.000Z', mr: null,
+  };
+  assert.equal(jobNotification(job, ['feat(T-1): X', line]).body, `branch: T-1-x\nfeat(T-1): X\n${line}`);
+  assert.equal(jobNotification({ ...job, state: 'awaiting_review' }, [line]).body, `Report and Patch of iteration 1 are ready for the reviewers\n${line}`);
 });

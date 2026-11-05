@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { answerFix, applyVerdict, escalationMessage, type EvidenceContext, findEvidence, headings, type LedgerEntry, reportRows, settle, settledLines, unappliedEntries, unsettled, userFixItems } from '../src/ledger.js';
 import { FINDINGS_HEADING, NITS_HEADING, withFindings, withNits } from '../src/mr.js';
 import { GATE_SCHEMA } from '../src/gate.js';
-import { fixContent, REVIEW_SCHEMA, type ReviewItem, reviewOutput, reviewPrompt } from '../src/review.js';
+import { fixContent, REVIEW_SCHEMA, type ReviewItem, reviewOutput, reviewPrompt, scopeItem, sensitiveItem } from '../src/review.js';
 
 const item = (path: string, problem: string, severity: ReviewItem['severity'] = 'major', extra: Partial<ReviewItem> = {}): ReviewItem => ({ path, problem, expected: 'Better.', severity, ...extra });
 
@@ -354,4 +354,29 @@ test('a stop over many findings keeps its question whole: the id list and the fa
   assert.ok(escalated.length <= 2000, String(escalated.length));
   assert.match(escalated, /^The Implementer escalated R1, R2, R3, R4, R5, R6, R7, R8, R9, R10 and 50 more: only you know the answer\. /);
   assert.match(escalated, /Settle each: accept the risk or must fix \(sf settle <workspace> <ticket> <id> accept\|fix \[note\]\); then the review runs, or the Fix you decided\.$/);
+});
+
+test("a path outside the Task's scope keeps its own entry, apart from a sensitive one of the same path: raised again under its id, fixed once no longer raised, its reason names the scope (SF-053)", () => {
+  const outside = scopeItem('notes.txt');
+  const first = applyVerdict({ ledger: [], items: [], extra: [outside, sensitiveItem('package.json')], reviewer: 'claude', iteration: 1 });
+  assert.deepEqual(first.kind === 'fix' && first.items.map((fixItem) => [fixItem.id, fixItem.item.path, fixItem.item.problem]), [
+    ['R1', 'notes.txt', "Outside the Task's scope."], ['R2', 'package.json', 'Undeclared sensitive path.'],
+  ]);
+  // A path that is both raises two items, each with its own entry.
+  const both = applyVerdict({ ledger: [], items: [], extra: [sensitiveItem('.editorconfig'), scopeItem('.editorconfig')], reviewer: 'claude', iteration: 1 });
+  assert.deepEqual(both.kind === 'fix' && both.items.map((fixItem) => [fixItem.id, fixItem.item.problem]), [['R1', 'Undeclared sensitive path.'], ['R2', "Outside the Task's scope."]]);
+  assert.equal(both.ledger.length, 2);
+  // Raised again: the same entry. A sensitive entry of the same path is another finding.
+  const ledger = [...first.ledger, entry('R3', 'open', { path: 'notes.txt', problem: 'Undeclared sensitive path.' })];
+  const again = applyVerdict({ ledger, items: [], extra: [outside], reviewer: 'codex', iteration: 2 });
+  assert.deepEqual(again.kind === 'fix' && again.items.map((fixItem) => fixItem.id), ['R1']);
+  assert.deepEqual(again.ledger.map((e) => [e.id, e.status]), [['R1', 'open'], ['R2', 'fixed'], ['R3', 'fixed']]);
+  // No longer raised (accepted, or the change is gone): fixed.
+  const accepted = applyVerdict({ ledger: again.ledger, items: [], extra: [], reviewer: 'claude', iteration: 3 });
+  assert.equal(accepted.kind, 'clean');
+  assert.deepEqual(accepted.ledger.map((e) => e.status), ['fixed', 'fixed', 'fixed']);
+  // A contested one the reviewer still does not accept: its reason names the scope.
+  const contested = [entry('R1', 'contested', { path: 'notes.txt', problem: "Outside the Task's scope.", response: 'The README cites it.', evidence: 'a.ts:1' })];
+  const disputed = applyVerdict({ ledger: contested, items: [], extra: [outside], reviewer: 'codex', iteration: 2 });
+  assert.match(disputed.kind === 'stop' ? disputed.message : '', /Codex reopens it: Codex does not accept the path outside the Task's scope notes\.txt \(it is not in its accepted_sensitive\)\./);
 });

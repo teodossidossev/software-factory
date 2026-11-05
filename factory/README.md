@@ -1024,6 +1024,34 @@ notification, `sf status` and the board, next to Hand over to my checkout); it i
 hand-over and whenever the job leaves `ready_for_human_review`. By hand: `sf handover` from
 `ready_for_human_review`; a refusal answers its code and leaves the job as it was.
 
+**The sandbox's config lock** (SF-085). Claude Code's sandbox protects `.git/config` by binding an
+empty, read-only `.git/config.lock` into every sandboxed command; it creates that file in the
+checkout's Git directory (the one holding its config, shared by the job's worktrees) and never
+removes it, so Git refuses every config write there afterwards: the hand-over's `commit.template`
+and `commit.cleanup`, and the user's own `git config`. The factory takes the lock for the sandbox's
+leftover only when it is a regular file, empty, without any write permission bit, and open in no
+process (no `/proc/*/fd` link to it; on other platforms than Linux, never). That check fails
+closed: without a readable `/proc`, or when the descriptors of a process of the factory's user or
+of the lock's owner cannot be read (for any reason but the process having ended), the lock counts
+as open. Processes of other users are skipped: an unprivileged user can never read their
+descriptors, and neither the sandbox nor Git runs as them. It removes such a lock,
+under the workspace's Git lock, after every Implementer turn, Claude review, gate run and
+simplification pass of a job, after a job's session is stopped (abort, pause, restart, reset),
+after the last running Task check of the workspace in `sf serve` ends and after `sf check-task`,
+and right before a hand-over or Take it back, but only while no other job of the workspace is in
+`working`, `awaiting_review` or `preparing_mr` (the states in which its Implementer turns and
+reviewers run: their sandboxes may be using it; the open-file check does not see the sandbox's bind
+mount). Each removal is the event `sandbox_lock_removed {path}` in the job's log (after a Task
+check, the ticket's job's, if it has one). When a hand-over meets such a lock while another job
+runs, it is refused before anything changes with `config_locked` ("Another job of this workspace is
+running; the hand-over runs when it ends."), which becomes the job's `handoff_skipped` (for `sf
+handover` too); Take it back is refused with `config_locked` as well. `sf serve` hands a job waiting
+with `config_locked` over by itself when the last job of its workspace leaves those three states
+(a move from one of them to another does not count; and at its start, when none runs); a refusal then becomes the job's
+`handoff_skipped`, and the job stays where it is, so the retry cannot repeat itself. A lock that is
+not the sandbox's leftover (not empty, writable, or open) is never touched: the hand-over refuses
+with `handover_failed` and Git's message ("could not lock config file ... File exists").
+
 **Per workspace** (SF-083). A workspace's `handoff` in `workspaces.json` (`"checkout"` or `"off"`;
 `sf workspace add --handoff`, the dashboard's workspace form) wins over `SF_HANDOFF` for its jobs;
 without it `SF_HANDOFF` applies (default `checkout`). The registry is read when the job is ready, so
@@ -1117,6 +1145,8 @@ exists.
 | `checkout_busy` | a rebase, merge, cherry-pick or revert is in progress in the checkout |
 | `handover_refused` | a file is in the way of the hand-over (or of the switch back at Ask for changes), or Git refused the switch |
 | `handover_mismatch` | after the hand-over the checkout did not hold the job's commit; it was put back |
+| `handover_failed` | a Git command of the hand-over failed (Git's message), such as a config lock that is not the sandbox's leftover |
+| `config_locked` | the sandbox's leftover config lock is in the checkout while another job of the workspace runs; the hand-over runs when it ends (SF-085) |
 | `checkout_changing` | a file changed during Ask for changes; try again |
 | `checkout_moved` | the checkout is not on the job's branch |
 | `takeback_changed` | the checkout changed since the hand-over |

@@ -671,3 +671,162 @@ test('recover() of a hand-over it cannot undo safely: needs_human handover_inter
   assert.equal((await fakeLog(env)).at(-1)!.cwd, worktree);
   await stop(served);
 });
+
+// The config lock Claude Code's sandbox leaves in the checkout's Git directory (SF-085): empty and
+// read-only, as the sandbox makes it; a held lock is not empty.
+async function sandboxLock(repo: string, content = ''): Promise<string> {
+  const path = join(repo, '.git', 'config.lock');
+  await writeFile(path, content);
+  await chmod(path, content === '' ? 0o444 : 0o644);
+  return path;
+}
+
+// The sandbox_lock_removed events of the job's log.
+async function lockEvents(s: Setup, ticket: string): Promise<Array<Record<string, unknown>>> {
+  const text = await readFile(join(s.jobs.dir('app', ticket), 'events.jsonl'), 'utf8');
+  return text.trim().split('\n').map((line) => JSON.parse(line)).filter((record) => record.type === 'sandbox_lock_removed');
+}
+
+test('the sandbox\'s leftover config lock (SF-085): removed when a job\'s turn ends and no other job runs, an event in its log; kept while another job of the workspace awaits review', async () => {
+  const s = await setup('lockturn', { SF_HANDOFF: 'off' });
+  await script(s.env, [{ write: { 'README.md': 'one\n' }, text: 'iteration 1' }, { write: { 'two.txt': 'two\n' }, text: 'the other job' }]);
+  const lock = await sandboxLock(s.repo);
+  await putTask(s.env, s.repo, 'L-1', 'First');
+  await call(s.served, 'start', { workspace: 'app', ticket: 'L-1' });
+  await waitFor(s.served, 'L-1', 'awaiting_review');
+  assert.equal(await exists(lock), false);
+  assert.deepEqual((await lockEvents(s, 'L-1')).map((event) => [event.path, event.iteration]), [[lock, 1]]);
+
+  // L-1 awaits review: its sandbox may be using the lock, so L-2's turn end leaves it.
+  await sandboxLock(s.repo);
+  await putTask(s.env, s.repo, 'L-2', 'Second');
+  await call(s.served, 'start', { workspace: 'app', ticket: 'L-2' });
+  await waitFor(s.served, 'L-2', 'awaiting_review');
+  assert.equal(await exists(lock), true);
+  assert.deepEqual(await lockEvents(s, 'L-2'), []);
+  await stop(s.served);
+});
+
+test('sf handover and Take it back meet a stale sandbox lock (SF-085): it is removed and they succeed; a lock that is not stale is never touched and the hand-over refuses with Git\'s message', async () => {
+  const s = await setup('lockhand', { SF_HANDOFF: 'off' });
+  await script(s.env, [{ write: { 'README.md': 'locked\n' }, text: 'iteration 1' }, mrTurn('M-1')]);
+  await toClean(s, 'M-1');
+  await waitFor(s.served, 'M-1', 'ready_for_human_review');
+
+  // A lock in use (not empty): untouched, handover_failed with Git's message, nothing changed.
+  const held = await sandboxLock(s.repo, 'held\n');
+  const refusedHeld = await runCli(s.env, ['handover', 'app', 'M-1']);
+  assert.equal(refusedHeld.code, 1);
+  assert.match(refusedHeld.stderr, /git config failed: error: could not lock config file .*: File exists/);
+  assert.equal(await readFile(held, 'utf8'), 'held\n');
+  assert.deepEqual([(await job(s, 'M-1')).state, head(s.repo), status(s.repo)], ['ready_for_human_review', 'refs/heads/main', '']);
+  await rm(held);
+
+  const lock = await sandboxLock(s.repo);
+  const handed = await runCli(s.env, ['handover', 'app', 'M-1']);
+  assert.equal(handed.code, 0, handed.stdout + handed.stderr);
+  assert.equal(await exists(lock), false);
+  assert.equal(head(s.repo), 'refs/heads/M-1-hand-it-over');
+  assert.equal(config(s.repo, 'commit.cleanup'), 'scissors');
+  assert.equal((await lockEvents(s, 'M-1')).length, 1);
+
+  await sandboxLock(s.repo);
+  const taken = await runCli(s.env, ['takeback', 'app', 'M-1']);
+  assert.equal(taken.code, 0, taken.stdout + taken.stderr);
+  assert.equal(await exists(lock), false);
+  assert.deepEqual([head(s.repo), config(s.repo, 'commit.template'), config(s.repo, 'commit.cleanup')], ['refs/heads/main', null, null]);
+  assert.equal((await lockEvents(s, 'M-1')).length, 2);
+  await stop(s.served);
+});
+
+test('a hand-over that meets a stale sandbox lock while another job of the workspace works (SF-085): config_locked, the lock and the checkout untouched; when that job leaves working the lock goes and the factory hands over by itself', async () => {
+  const s = await setup('lockbusy');
+  await script(s.env, [
+    { write: { 'README.md': 'waits\n' }, text: 'iteration 1' },
+    { delayMs: 60_000, write: { 'busy.txt': 'b\n' }, text: 'the busy job' },
+    mrTurn('N-1'),
+  ]);
+  await putTask(s.env, s.repo, 'N-1', 'Hand it over');
+  await putTask(s.env, s.repo, 'N-2', 'Busy');
+  await call(s.served, 'start', { workspace: 'app', ticket: 'N-1' });
+  await waitFor(s.served, 'N-1', 'awaiting_review');
+  await call(s.served, 'start', { workspace: 'app', ticket: 'N-2' });
+  await turnsStarted(s.env, 2);
+  const lock = await sandboxLock(s.repo);
+  await call(s.served, 'mark_clean', { workspace: 'app', ticket: 'N-1' });
+  await waitFor(s.served, 'N-1', 'ready_for_human_review');
+  const ready = await job(s, 'N-1');
+  assert.deepEqual(ready.handoff_skipped, { code: 'config_locked', message: 'Another job of this workspace is running; the hand-over runs when it ends.' });
+  assert.equal(await exists(lock), true);
+  assert.deepEqual([head(s.repo), status(s.repo), config(s.repo, 'commit.template')], ['refs/heads/main', '', null]);
+  assert.deepEqual(await lockEvents(s, 'N-1'), []);
+  assert.match((await runCli(s.env, ['status', 'app', 'N-1'])).stdout, /not handed over to your checkout: Another job of this workspace is running; the hand-over runs when it ends\. \(config_locked\)/);
+
+  // N-2 leaves working: N-1 is handed over without anyone asking.
+  const aborted = await runCli(s.env, ['abort', 'app', 'N-2']);
+  assert.equal(aborted.code, 0, aborted.stdout + aborted.stderr);
+  const handed = await waitState(s, 'N-1', 'handed_over');
+  assert.equal(handed.state, 'handed_over');
+  assert.equal(await exists(lock), false);
+  assert.equal(head(s.repo), 'refs/heads/N-1-hand-it-over');
+  assert.equal(config(s.repo, 'commit.cleanup'), 'scissors');
+  assert.equal((await job(s, 'N-1')).handoff_skipped, undefined);
+  // The abort of N-2 ended the last running session: the lock went then, logged in N-2's log.
+  assert.deepEqual((await lockEvents(s, 'N-2')).map((event) => event.path), [lock]);
+  assert.deepEqual(await lockEvents(s, 'N-1'), []);
+  await stop(s.served);
+});
+
+test('the sandbox\'s leftover config lock (SF-085) is kept while another job of the workspace is in preparing_mr, whose MR turn runs under the sandbox; removed once it has left', async () => {
+  const s = await setup('lockmr', { SF_HANDOFF: 'off' });
+  await script(s.env, [
+    { write: { 'README.md': 'preparing\n' }, text: 'iteration 1' },
+    { delayMs: 60_000, ...mrTurn('R-1') },
+    { write: { 'other.txt': 'o\n' }, text: 'the other job' },
+    { write: { 'more.txt': 'm\n' }, text: 'the other job again' },
+  ]);
+  await toClean(s, 'R-1');
+  await turnsStarted(s.env, 2);
+  assert.equal((await job(s, 'R-1')).state, 'preparing_mr');
+  const lock = await sandboxLock(s.repo);
+  await putTask(s.env, s.repo, 'R-2', 'Other');
+  await call(s.served, 'start', { workspace: 'app', ticket: 'R-2' });
+  await waitFor(s.served, 'R-2', 'awaiting_review');
+  assert.equal(await exists(lock), true);
+  assert.deepEqual(await lockEvents(s, 'R-2'), []);
+
+  // R-1 leaves preparing_mr: R-2's next turn end removes the lock.
+  const aborted = await runCli(s.env, ['abort', 'app', 'R-1']);
+  assert.equal(aborted.code, 0, aborted.stdout + aborted.stderr);
+  const said = await runCli(s.env, ['say', 'app', 'R-2', 'one more']);
+  assert.equal(said.code, 0, said.stdout + said.stderr);
+  await waitFor(s.served, 'R-2', 'awaiting_review', 2);
+  assert.equal(await exists(lock), false);
+  assert.deepEqual((await lockEvents(s, 'R-2')).map((event) => [event.path, event.iteration]), [[lock, 2]]);
+  await stop(s.served);
+});
+
+test('an Implementer session stopped by abort or pause (SF-085): the stale sandbox lock is kept while another job of the workspace works, removed once none runs, an event in the stopped job\'s log', async () => {
+  const s = await setup('lockstop', { SF_HANDOFF: 'off' });
+  await script(s.env, [{ delayMs: 60_000, write: { 'a.txt': 'a\n' } }, { delayMs: 60_000, write: { 'b.txt': 'b\n' } }]);
+  await putTask(s.env, s.repo, 'U-1', 'Aborted');
+  await putTask(s.env, s.repo, 'U-2', 'Paused');
+  await call(s.served, 'start', { workspace: 'app', ticket: 'U-1' });
+  await call(s.served, 'start', { workspace: 'app', ticket: 'U-2' });
+  await turnsStarted(s.env, 2);
+  const lock = await sandboxLock(s.repo);
+
+  // U-2 still works: the abort of U-1 leaves the lock.
+  const aborted = await runCli(s.env, ['abort', 'app', 'U-1']);
+  assert.equal(aborted.code, 0, aborted.stdout + aborted.stderr);
+  assert.equal(await exists(lock), true);
+  assert.deepEqual(await lockEvents(s, 'U-1'), []);
+
+  // The pause stops the last running session: the lock goes.
+  const paused = await runCli(s.env, ['pause', 'app', 'U-2']);
+  assert.equal(paused.code, 0, paused.stdout + paused.stderr);
+  assert.equal((await job(s, 'U-2')).state, 'paused');
+  assert.equal(await exists(lock), false);
+  assert.deepEqual((await lockEvents(s, 'U-2')).map((event) => [event.path, event.iteration]), [[lock, 1]]);
+  await stop(s.served);
+});

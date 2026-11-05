@@ -288,6 +288,9 @@ export type EventRecord = { ts: string; iteration: number } & (
   // The user's own push of a handed-over branch, found on origin (SF-073): the commit, and whether
   // its tree is the job's commit's (null when the commit is not known locally).
   | { type: 'handover_pushed'; commit: string; same_tree: boolean | null }
+  // The factory removed the config lock Claude Code's sandbox left in the workspace checkout's Git
+  // directory (SF-085, src/sandbox-lock.ts): its path.
+  | { type: 'sandbox_lock_removed'; path: string }
 );
 
 // The bound of one reviewer event or message in events.jsonl (SF-045), in bytes of its JSON.

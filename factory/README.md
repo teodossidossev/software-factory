@@ -29,7 +29,7 @@ bin/sf up [--no-open] [--no-tunnel]   # sf serve plus the tunnel (../scripts/sf-
 bin/sf dashboard [--open]         # the dashboard URL of the last sf serve start; --open opens it with xdg-open; works without sf serve
 bin/sf check-task <workspace> <ticket>  # the Task check (section Task check): paraphrase, findings by severity, verdict; stored by sha; works without sf serve
 bin/sf start <workspace> <ticket> # start the job in a worktree of its own (same as the dashboard's Start); needs sf serve
-bin/sf say <workspace> <ticket> <message...>   # a user message into the session; needs sf serve
+bin/sf say <workspace> <ticket> <message...>   # a user message into the session; on a handed-over job it is Ask for changes (section Hand-over to your checkout); needs sf serve
 bin/sf review <workspace> <ticket>             # retry a failed Claude review (needs_human with review_failed); needs sf serve
 bin/sf accept <workspace> <ticket>             # accept a clean Claude review over a stopped gate (gate_rounds, gate_budget, gate_failed) or a ledger stop (review_churn, review_disputed) and prepare the MR, or skip the simplification pass's suggestions (simplify_offered); needs sf serve
 bin/sf simplify <workspace> <ticket>           # apply the simplification pass's suggestions (needs_human with simplify_offered): one Fix section "Simplify", reviewed as usual; needs sf serve
@@ -43,6 +43,9 @@ bin/sf mr status <workspace> <ticket>          # the merge request on the host: 
 bin/sf pause <workspace> <ticket>              # stop a working job or one awaiting review at once (section Pause, Resume and Restart); worktree, branch, session and history stay; needs sf serve
 bin/sf resume <workspace> <ticket> [message...]   # go on with a paused job where it stopped; a Task file changed meanwhile goes with its diff; needs sf serve
 bin/sf restart <workspace> <ticket> [--keep-files] # start the ticket again from its current Task file on a fresh worktree and branch (paused, aborted, failed, needs_human); needs sf serve
+bin/sf handover <workspace> <ticket>           # Hand over to my checkout: the job's branch in the workspace's checkout with its changes as Local Changes (ready_for_human_review); needs sf serve
+bin/sf takeback <workspace> <ticket>           # Take it back: the branch back from your checkout into the job (handed_over); needs sf serve
+bin/sf handed-done <workspace> <ticket>        # I opened the MR myself: pushed once origin has the branch with your changes (handed_over); needs sf serve
 bin/sf abort <workspace> <ticket> [--discard]  # end the job; the worktree stays (its path printed); --discard removes the worktree and the branch; needs sf serve
 bin/sf reset <workspace> <ticket>              # end the session, remove the worktree and archive the job; the branch stays; needs sf serve
 bin/sf notify-test                             # one test notification on every channel; works without sf serve
@@ -107,6 +110,7 @@ prints the message below the table). Both work without `sf serve`; they read the
 | `SF_REVIEW` | on | `off` runs no Claude review (nor the gate): a published iteration stays in `awaiting_review` until the user goes on with `sf say` or aborts. |
 | `SF_REVIEW_MODEL` | unset | Model of the Claude review, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
 | `SF_REVIEW_MAX_TURNS` | `60` | `maxTurns` of the Claude review. |
+| `SF_HANDOFF` | `checkout` | The hand-over at ready for review (SF-073, section Hand-over to your checkout): `checkout` checks the job's branch out in the workspace's checkout with its changes as Local Changes; `off` leaves the job in `ready_for_human_review` with its worktree. Anything else refuses to start (`invalid_config`). |
 | `SF_SIMPLIFY` | on | The simplification pass (SF-055) after the deciding clean verdict of a job with at least one Fix section; `off` goes straight to MR preparation. It uses `SF_REVIEW_MODEL` and `SF_REVIEW_MAX_TURNS`. |
 | `SF_TASK_CHECK_MAX_TURNS` | `30` | `maxTurns` of the Task check (SF-054); its model is `SF_REVIEW_MODEL`. |
 | `SF_GATE` | `codex` | The gate after a clean Claude review (SF-039): `codex` runs the Codex CLI, `off` lets the Claude verdict decide. With `codex` and no executable found the gate is off, and `sf serve` prints one line saying so. |
@@ -211,12 +215,13 @@ document and the code. It only advises: Start is never refused for it.
 
 One job per ticket; several jobs of a workspace at a time, up to `SF_MAX_JOBS` (default 3) in a
 live state (`starting`, `working`, `awaiting_review`, `needs_human`, `ready_for_human_review`,
-`preparing_mr`); `paused` (SF-067: nothing of the job runs), `pushed`, `aborted` and `failed` free a
-slot. A further `start` is refused with
+`preparing_mr`); `paused` (SF-067: nothing of the job runs), `handed_over` (SF-073: the job's changes
+wait in the user's checkout), `pushed`, `aborted` and `failed` free a slot. A further `start` is refused with
 `job_limit`, naming the live tickets. Every job works in a **worktree** of its own (SF-019,
 ADR-0004): `${SF_WORKTREE_ROOT:-<state dir>/worktrees}/<workspace>/<ticket>`, created from the
 workspace's checkout; the checkout itself (the user's IDE checkout) is never written by the
-factory beyond its Git refs (branches) and worktree registrations.
+factory beyond its Git refs (branches) and worktree registrations, except by the hand-over to it
+and back (SF-073, section Hand-over to your checkout).
 
 The job operations below are the Execution's (`src/execution.ts`): the user starts a job (the
 dashboard's Start, `sf start`), the reviewers' verdicts take the fix and the clean paths, and the
@@ -798,8 +803,10 @@ SF-067. To change course without abort, reset and a branch deleted by hand.
 
 MR preparation runs on the deciding clean verdict (the clean path, from `awaiting_review`, or as
 the retry from `needs_human` after a failed preparation, `mr_attempts > 0`); never while a turn runs.
-It ends in `ready_for_human_review` with the branch, holding exactly one commit, in the user's
-checkout, and the worktree removed. `sf approve` then pushes that commit and nothing else.
+It ends with the branch holding exactly one commit: handed over to the user's checkout
+(`handed_over`, section Hand-over to your checkout) or, with `SF_HANDOFF=off` or when the hand-over
+was refused, in `ready_for_human_review`. The worktree stays until the hand-over or the push (SF-073).
+`sf approve` then pushes that commit and nothing else.
 The Implementer only writes the MR text. The factory commits and rebases itself, outside the
 sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's placeholders.
 
@@ -890,19 +897,24 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    | `mr_commit_failed` | `git commit` failed, for example without a Git identity (stderr in the message) |
    | `mr_rebase_failed` | `git rebase` failed without conflicts; it was aborted |
    | `mr_conflict` | the conflict turn failed or left markers, or the rebase did not continue; it was aborted. When the continue failed, the resolution is kept in `iterations/NNN/conflict-resolution.diff` (named in the message) |
-   | `worktree_remove_failed` | the branch is prepared but the worktree could not be removed |
    | `mr_failed`, `mr_serve_restarted` | the factory failed, or `sf serve` restarted, during preparation |
 
    A failed MR text turn keeps its own code (for example `turn_failed` or `sandbox_unavailable`).
    Fix with `sf say` (its iteration is reviewed again, and a clean verdict prepares again) or by
    hand in the worktree followed by an `sf say`.
 6. Ready: the MR text, with the nits, is copied to `mr.md`, `base_commit` and `target_commit` become the target,
-   `prepared_commit` the branch tip, the worktree is removed (`git worktree remove --force`,
-   `git worktree prune`; `worktree` becomes null) and the job is `ready_for_human_review`,
-   notified with the MR title and the file lines. `git checkout <branch>` in the checkout then
-   gives the user the change.
-7. `sf approve` (or the dashboard's Approve): allowed in `ready_for_human_review`, and in
-   `needs_human` after a failed push. It refuses when the branch tip is not `prepared_commit`
+   `prepared_commit` the branch tip, and the worktree stays (SF-073). With `SF_HANDOFF=checkout`
+   the factory hands the job over to the checkout at once (`handed_over`); otherwise, or when the
+   hand-over is refused (`handoff_skipped`), the job is `ready_for_human_review`. Either is
+   notified with the MR title and the file lines.
+7. `sf approve` (or the dashboard's Approve): allowed in `ready_for_human_review`, in
+   `handed_over` (section Hand-over to your checkout), and in `needs_human` after a failed push
+   (the worktree is kept then; such a job is not the retry of MR preparation). After the push the
+   worktree is removed (`git worktree remove --force`, `git worktree prune`; `worktree` becomes
+   null); a failed removal does not fail the push: the job keeps the path, the event log gets a
+   note, and the next action that needs it gone removes it. `sf say` or a Fix section on a job
+   with a prepared commit drops it (`prepared_commit` null) before the turn, so a stale commit is
+   never pushed. It refuses when the branch tip is not `prepared_commit`
    (`branch_changed`, with both hashes: the user edited the branch by hand), unless `--as-is`
    (`as_is` on the dashboard) pushes the tip as it is; `branch_missing` when the branch is gone.
    Then `git push origin <branch>:<branch>` with the protection below (120 s); `pushed` with the
@@ -953,9 +965,157 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    refused `SF_GITHUB_API` or `SF_GITLAB_URL` is named in its message with any credentials, query
    or fragment replaced by `[redacted]`.
 
+## Hand-over to your checkout
+
+SF-073, `src/handoff.ts`. When the factory says a job is ready for review, its changes are already
+on its branch in the workspace's checkout (the one open in the IDE), so the user can read, run,
+debug and change them there, push from the IDE, or ask the Implementer for changes. One name per
+action, the same on the board and in the CLI:
+
+| Board button | Command | Who may use it |
+|---|---|---|
+| Hand over to my checkout | `sf handover <ws> <ticket>` | `ready_for_human_review` |
+| Ask for changes | `sf say <ws> <ticket> <message>` | `handed_over` (and today's states) |
+| Take it back | `sf takeback <ws> <ticket>` | `handed_over` |
+| I opened the MR myself | `sf handed-done <ws> <ticket>` | `handed_over` |
+| Approve | `sf approve <ws> <ticket>` | `handed_over` too |
+
+The board shows "In your checkout on <branch>" for a `handed_over` job, `sf status` and the
+notification "in your checkout on <branch>" with the MR title and the file lines.
+
+**The hand-over** runs under the workspace's Git lock, with S the job's commit (`prepared_commit`)
+and B the target commit it used (`base_commit`), never the local branch named by the base:
+
+1. Refused when the checkout has changes to tracked files (`checkout_dirty`: "<ticket>: ready, but
+   your checkout has changes; hand it over when you are ready") or a rebase, merge, cherry-pick or
+   revert in progress (`checkout_busy`).
+2. Refused (`handover_refused`, "These files in your checkout are in the way: <paths>.") when
+   anything, ignored or not, exists in the checkout at a path S adds to the checkout's `HEAD`
+   (`git switch` would overwrite an ignored file there silently). Nothing has changed yet.
+3. `git update-ref refs/factory/<ticket> S`: the job's commit is saved.
+4. The checkout's branch (or detached commit), its untracked files that are not ignored (the
+   user's own: never touched, never in the job) and its local `commit.template` and
+   `commit.cleanup` are recorded on the job as `handover`, with `step: "handing_over"`.
+5. The worktree lets go of the branch (`git switch --detach`, files untouched).
+6. `git switch <branch>` in the checkout; Git's refusal is `handover_refused` with its text, and
+   step 5 is undone.
+7. `git reset -q --mixed B`: the branch at the base, the job's files as Local Changes.
+8. `git add -N` of the files S adds, so the IDE lists them.
+9. `git diff --quiet S` must hold; otherwise everything is put back (`handover_mismatch`).
+10. The MR text's title and body go to `.git/factory/<ticket>.commit-msg`; `commit.template` points
+    at it and `commit.cleanup` is `scissors`, so a commit from the command line keeps the `#`
+    headings.
+11. The worktree is removed (a failure is a note in the event log; the job keeps the path).
+12. The job is `handed_over` with `handover: {branch, saved, base, previous, untracked, template,
+    cleanup, at, checked_at, step: null}`.
+
+Every step keeps the working tree, or refuses, or is a Git command that refuses to overwrite, after
+step 2 made sure nothing sits where the job adds a file. An undo that fails is
+`handover_interrupted` (`needs_human`), naming where the branch, the saved ref and the worktree are;
+the record keeps its step, so `recover()` repairs it when `sf serve` starts. A checkout already on
+the job's branch is refused (`handover_refused`).
+
+**When it runs.** With `SF_HANDOFF=checkout` (the default) at the end of MR preparation: the job
+goes from `preparing_mr` to `handed_over` with one notification. A refusal leaves it in
+`ready_for_human_review` with the refusal as `handoff_skipped: {code, message}` (in the
+notification, `sf status` and the board, next to Hand over to my checkout); it is cleared on a
+hand-over and whenever the job leaves `ready_for_human_review`. By hand: `sf handover` from
+`ready_for_human_review`; a refusal answers its code and leaves the job as it was.
+
+**The state `handed_over`** holds no `SF_MAX_JOBS` slot (nothing of the job runs) but is not
+terminal: no new job of the ticket starts. It goes to `working` (Ask for changes),
+`ready_for_human_review` (Take it back), `pushed` (Approve, `sf mr create`, the user's push found,
+`sf handed-done`) and `aborted` (`sf abort` without `--discard`: the config is restored, the
+checkout and the branch stay as they are). `sf fix`, `sf abort --discard`, `sf reset` and `sf
+restart` are refused with `handed_over` ("<ticket> is in your checkout on <branch>; take it back
+first."); `mark_clean`, `sf pause` and `sf resume` with `invalid_state`. Every way out puts
+`commit.template` and `commit.cleanup` back to what they were (unset when they were unset), only
+while they still hold the factory's values. The prefilled message file goes when the job is pushed.
+
+**Ask for changes** (`sf say` on a handed-over job; the board's Send button reads Ask for changes):
+refused with `job_limit` without a free slot, and with `checkout_moved` ("Your checkout is not on
+<branch>; switch back to it, or use Take it back.") when the checkout is on another branch; nothing
+changes then. In the job's runner, under the Git lock, before the turn: a snapshot of the checkout
+(a temporary index: `HEAD`, every change, every untracked file that is not ignored, without the
+user's own files from before and without new files under `.software-factory/`) becomes the commit
+`refs/factory/<ticket>-ask` on the branch's tip; a second snapshot that differs is
+`checkout_changing` (try again). Then `git switch --discard-changes` back to what the checkout was
+on (everything it discards is in the snapshot), and the untracked files the switch left are
+deleted, each only while its content is its blob in the snapshot (a changed one stays and is named
+in the event log), so the checkout is clean and the next hand-over finds nothing in the way. The
+branch moves to the snapshot, the worktree is added on it and reset to B, so the user's edits and
+commits are uncommitted changes there; the config is restored, `prepared_commit` dropped, and the
+Implementer gets the message. The next ready hands over again with the same rules.
+
+**Take it back** (`sf takeback`): refused with `job_limit` without a free slot, and with
+`takeback_changed` ("Your checkout changed since the hand-over: <files>. Use Ask for changes to
+send your edits to the job, or undo them.") unless the checkout is on the branch at B and its
+snapshot is S, and with `handover_refused` when an ignored file, one of the user's own untracked
+files from before or a Task file sits where the switch back would write (as at Ask for changes).
+Then `git reset -q --mixed S`, `git switch` back, the config restored, the worktree
+on the branch again, and the job in `ready_for_human_review` with `prepared_commit` S. A switch
+back that fails is undone and refused with `takeback_switch_failed`: the checkout and the branch
+are as before.
+
+**Approve on a handed-over job** (`sf approve`, the board's Approve, `sf mr create`) reads the
+branch's tip T in the checkout: T is B (the user did not commit): `git push origin
+refs/factory/<ticket>:refs/heads/<branch>`, then the branch moves to S in the checkout (only while
+it is still at B), so the IDE shows only the user's own edits: "Pushed the factory's commit <S>."
+plus "Your uncommitted changes (<n> files) were not pushed." when there are some. T descends from
+B: the branch is pushed as it is, "Pushed your commit <T> (<subject>)."; `--as-is` is not needed.
+Otherwise `branch_changed` ("The tip of <branch> does not descend from the job's base <B>; push it
+yourself or take it back."). A failed push keeps the job `handed_over` with `error` set and changes
+nothing else; Approve again, push from the IDE, or take it back.
+
+**The user's own push.** The board's job detail asks origin, without waiting and at most once a
+minute (`handover.checked_at`), `git ls-remote origin refs/heads/<branch>` (20 s). A commit R there
+that is known locally, is not B and descends from B moves the job to `pushed` with
+`prepared_commit` R and the event `handover_pushed {commit, same_tree}` (whether R's tree is S's).
+Errors change nothing and are logged. `sf handed-done` (I opened the MR myself) runs the same
+check on demand: `not_pushed` ("The branch <branch> is not on origin with your changes; push it
+first.") when the branch is missing, at B or not descending from B; a commit not known locally
+still counts (`same_tree: null`).
+
+**Interrupted** (`recover()` when `sf serve` starts, for a job with `handover.step` set and no
+live runner): `handing_over` is undone when it is safe (the checkout on the branch with exactly S,
+or still on what it was on); the job goes to `ready_for_human_review` with `handoff_skipped`
+`handover_interrupted` and its worktree on the branch; otherwise nothing in the checkout changes
+and the job is `needs_human` with `handover_interrupted`. `asking` is finished from the snapshot
+without the turn: `needs_human` with `ask_interrupted` ("sf serve restarted during Ask for changes;
+your edits are in the job's worktree; use sf say to go on."). Take it back, I opened the MR myself,
+the push check and abort of a handed-over job wait for the job's runner like approve
+(`runner_active`).
+
+**No turn while the checkout holds the branch.** Before every Implementer turn (`sf say`, a Fix
+section, Clean) the factory checks that the user's checkout is not on the job's branch and that the
+job's worktree is on it; a detached worktree (a hand-over cut off, a worktree that could not be
+removed) is switched back to the branch, which Git refuses while another checkout has it. Otherwise
+the turn is refused with `branch_in_checkout` and nothing changes: switch the checkout to another
+branch, then try again.
+
+**Saved refs.** `refs/factory/<ticket>` and `refs/factory/<ticket>-ask` are deleted when `sf serve`
+starts, once their job is `pushed` or `aborted` for more than 7 days, or when no job of that ticket
+exists.
+
+| Code | Meaning |
+|---|---|
+| `checkout_dirty` | the checkout has changes to tracked files |
+| `checkout_busy` | a rebase, merge, cherry-pick or revert is in progress in the checkout |
+| `handover_refused` | a file is in the way of the hand-over (or of the switch back at Ask for changes), or Git refused the switch |
+| `handover_mismatch` | after the hand-over the checkout did not hold the job's commit; it was put back |
+| `checkout_changing` | a file changed during Ask for changes; try again |
+| `checkout_moved` | the checkout is not on the job's branch |
+| `takeback_changed` | the checkout changed since the hand-over |
+| `takeback_switch_failed` | the switch back failed; the checkout is as before |
+| `not_pushed` | origin does not have the branch with the user's changes |
+| `handed_over` | the job is in the user's checkout; take it back first |
+| `handover_interrupted` | a hand-over was cut off or could not be undone |
+| `ask_interrupted` | an Ask for changes was cut off; the edits are in the worktree |
+| `branch_in_checkout` | a turn was refused: the job's branch is checked out in the user's checkout, or its worktree cannot be put back on the branch |
+
 ## Notifications
 
-On `ready_for_human_review`, `needs_human`, `paused`, `pushed` and `failed` (iterations are silent unless
+On `ready_for_human_review`, `handed_over`, `needs_human`, `paused`, `pushed` and `failed` (iterations are silent unless
 `SF_NOTIFY_ITERATIONS=on`, which adds `awaiting_review` with `Priority: default`, `Tags: eyes` and
 the body "Report and Patch of iteration N are ready for the reviewers") the
 factory sends a desktop notification (`notify-send --app-name="Software Factory" "<ticket>:
@@ -1031,7 +1191,7 @@ heading with its count: **Queue** (the Task files of every usable workspace whos
 or whose last job is `failed` or `aborted`; until SF-071 it is today's Planned list, without an
 order), **Implementing** (`starting`, `working`), **Reviewing** (`awaiting_review`, that is the
 Claude review or the Codex gate, and `preparing_mr`), **Your turn** (`needs_human`,
-`ready_for_human_review`, `paused`) and **Done** (`pushed`, and `aborted` or `failed` when the
+`ready_for_human_review`, `handed_over`, `paused`) and **Done** (`pushed`, and `aborted` or `failed` when the
 ticket has no Queue card; the most recent first; the last eight, then *Show all N*, which shows the
 rest in place and becomes *Show the last 8*). A ticket shows in one column only (SF-057): a pushed
 one only under Done, a failed or aborted one only in the Queue, one with an active job only in that
@@ -1052,8 +1212,9 @@ primary button of the board: on `needs_human` the reason in plain words and the 
 table below (it opens the job's page at the stop, *Retry review* is sent at once, *Push again*
 opens the Approve confirmation), with *Create merge request…* beside it when the branch is
 prepared; on `ready_for_human_review` "Ready to push: reviews clean, MR text written" with *Review
-the MR and push* (the job's page with the Approve confirmation open) and *Create merge request…*;
-on `paused` "Paused by you" with *Resume* (sent at once; SF-067: "Task file changed since the job
+the MR and push* (the job's page with the Approve confirmation open) and *Create merge request…*,
+and the reason when the automatic hand-over was refused (SF-073); on `handed_over` "In your
+checkout on <branch>" with the same buttons; on `paused` "Paused by you" with *Resume* (sent at once; SF-067: "Task file changed since the job
 started" when it did). The job's last outcome shows under them. A **Done** card says "Pushed · 2
 iterations · 14:05" (Aborted, Failed); a pushed one keeps its merge request (`#N state` with the
 link), *Create merge request…* or *Merge…* and, while its Task file is active, *Archive ticket*;
@@ -1196,7 +1357,10 @@ until SF-078 replaces it with the v3 Stream:
 - **Next action** (a right rail on a wide window, above the tabs below about 1100 px): who acts now
   and for how long (`Now · Implementer`, `Now · Claude review`, `Now · Codex gate`, `Now · Factory`,
   `Your turn`, `Finished`), what they do and what follows, and the actions that move the job on:
-  *Approve…* (`ready_for_human_review`, and `needs_human` after a failed push), *Accept and prepare
+  *Approve…* (`ready_for_human_review`, `handed_over`, and `needs_human` after a failed push), the
+  hand-over's *Hand over to my checkout* (`ready_for_human_review`, with the reason the automatic
+  hand-over did not happen), *I opened the MR myself* and *Take it back* (`handed_over`, SF-073;
+  the Send button of the message reads *Ask for changes* there), *Accept and prepare
   MR…* (only for `gate_rounds`, `gate_budget`, `gate_failed`, `review_churn`, `review_disputed` and `simplify_offered`
   with a clean Claude review of the last iteration; over a ledger stop its confirmation lists the
   ledger's open findings; the items the ledger dropped do not count against a clean review),
@@ -1313,6 +1477,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `POST api/jobs/<ws>/<ticket>/simplify` | `{}` | `Execution.simplify(ws, ticket)` (`sf simplify`, SF-055): the Fix section "Simplify" with the suggestions of the simplification pass and their ledger entries, then the next iteration; result `{state, iteration, check_after_minutes}`; `409 invalid_state` unless the job is `needs_human` with `simplify_offered` (and never a second time); `409 worktree_missing`; answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
 | `POST api/jobs/<ws>/<ticket>/accept` | `{}` | `Execution.acceptGate(ws, ticket)` (`sf accept`, SF-047): the override of the stopped gate, then MR preparation; result `{state, iteration, branch}`; `409 invalid_state` with the reason unless the job is `needs_human` with `gate_rounds`, `gate_budget`, `gate_failed`, `review_churn`, `review_disputed` or `simplify_offered` (Skip, SF-055) and a clean Claude review of the last iteration; the MR preparation's refusals (`409 worktree_missing`, `409 turn_running`); answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
 | `POST api/jobs/<ws>/<ticket>/mr-create` | `{}` | `Execution.createMergeRequest(ws, ticket)` (`sf mr create`, SF-048): result `{state, branch, title?, link?, mr?: {host, number, url, state, reused}, error?}`; from `ready_for_human_review` it waits for the job's runner like approve; `409` for `invalid_state`, `runner_active`, `mr_token_missing`, `mr_host_unsupported`, `mr_text_missing`; `502` for `mr_auth_failed`, `mr_host_error`, `mr_host_unreachable` |
+| `POST api/jobs/<ws>/<ticket>/handover`, `.../takeback`, `.../handed-done` | `{}` | `Execution.handover`, `takeback`, `handedDone` (`sf handover`, `sf takeback`, `sf handed-done`, SF-073); `409` for `invalid_state`, `runner_active`, `job_limit` and the hand-over's codes (section Hand-over to your checkout). `GET api/jobs/<ws>/<ticket>` of a `handed_over` job also starts `Execution.checkHandedOver` (at most once a minute), whose push reaches the page through the job's events |
 | `POST api/jobs/<ws>/<ticket>/mr-merge` | `{}` | `Execution.mergeMergeRequest(ws, ticket)` (`sf mr merge`): result `{state, branch, mr}`; `409 mr_not_mergeable` with the host's reason, `409 mr_not_open`, and the codes above |
 | `POST api/jobs/<ws>/<ticket>/mr-status` | `{}` | `Execution.mergeRequestStatus(ws, ticket)` (`sf mr status`): result `{state, branch, mr, status: {number, url, state, draft, mergeable, reason?, checks?, merge_commit?}}`; every page gets the jobs again, and the pages that show the job its detail (a merge request merged or closed on the host shows so at once) |
 | `POST api/workspaces` | `{"name": string, "path": string}` | `Setup.addWorkspace`: the rules of `sf workspace add`; result the workspace row |

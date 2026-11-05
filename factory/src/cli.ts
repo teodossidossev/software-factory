@@ -1,5 +1,6 @@
 // The sf command: `sf serve`, `sf up` (serve, the tunnel and the browser), `sf workspace
-// add|list|remove`, `sf start|say|review|approve|pause|resume|restart|abort|reset` and
+// add|list|remove`, `sf start|say|review|approve|pause|resume|restart|abort|reset`,
+// `sf handover|takeback|handed-done` (SF-073) and
 // `sf mr create|merge|status` (through the socket of sf serve),
 // `sf status|watch|dashboard` (reading the state directory directly), `sf check-task` (the Task
 // check of SF-054, run here and stored in the state directory), `sf notify-test`, `sf info`
@@ -24,7 +25,7 @@ import { jobNotification, notifyConfig, sendNotification, stateNotifier } from '
 import { configDir, ignoredWorkCheckouts, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { loadHandbook, packageVersion, PortInUseError, SERVER_NAME, startServer } from './server.js';
 import { Setup } from './setup.js';
-import { type StatusRow, statusRows } from './status.js';
+import { handoverLines, type StatusRow, statusRows } from './status.js';
 import { fileSummaryLines } from './patch.js';
 import { CheckStore, checkLines, checkSettings, refuseDraft, runTaskCheck, TaskChecks } from './task-check.js';
 import { readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
@@ -41,7 +42,7 @@ const USAGE = `Usage:
   sf workspace remove <name>                            Unregister a workspace
   sf check-task <workspace> <ticket>                    Check the Task file before Start: a read-only Claude session reads it and the repository, and prints its paraphrase, its findings by severity and its verdict (stored by the Task file's sha256; it only advises)
   sf start <workspace> <ticket>                         Start the job for .software-factory/<ticket>.md in a worktree of its own (up to SF_MAX_JOBS per workspace)
-  sf say <workspace> <ticket> <message...>              Send a message into the job's Implementer session
+  sf say <workspace> <ticket> <message...>              Send a message into the job's Implementer session; on a handed-over job: Ask for changes (your checkout's edits go back into the job first)
   sf review <workspace> <ticket>                        Retry a failed Claude review (needs_human with review_failed) of the last iteration
   sf accept <workspace> <ticket>                        Accept a clean Claude review over a stopped gate (needs_human with gate_rounds, gate_budget or gate_failed) or a ledger stop (review_churn, review_disputed) and prepare the MR; on simplify_offered: skip the suggestions (listed in the MR text)
   sf simplify <workspace> <ticket>                      Apply the simplification pass's suggestions (needs_human with simplify_offered): one Fix section "Simplify", reviewed as usual; sf accept skips them
@@ -55,6 +56,9 @@ const USAGE = `Usage:
   sf pause <workspace> <ticket>                         Pause a working job or one awaiting review: the turn, review or gate stops at once; worktree, branch, session and history stay
   sf resume <workspace> <ticket> [message...]           Go on with a paused job where it stopped (the turn with the message, or "Continue where you stopped."; an interrupted review or gate runs again); a Task file changed meanwhile is handed on with its diff
   sf restart <workspace> <ticket> [--keep-files]        Start the ticket again from its current Task file on a fresh worktree and branch (paused, aborted, failed or needs_human); the old job is archived, its branch deleted only without commits and never pushed; --keep-files copies the old worktree's changed and new files in first
+  sf handover <workspace> <ticket>                      Hand over to my checkout: the job's branch in the workspace's checkout at its base, the job's changes as Local Changes, the commit message prefilled (ready_for_human_review; automatic with SF_HANDOFF=checkout)
+  sf takeback <workspace> <ticket>                      Take it back: the branch back from your checkout into the job (handed_over), only while your checkout is as the factory left it
+  sf handed-done <workspace> <ticket>                   I opened the MR myself: the job is pushed once origin has the branch with your changes (handed_over)
   sf abort <workspace> <ticket> [--discard]             End the job; the worktree stays (its path is printed); --discard removes the worktree and the branch
   sf reset <workspace> <ticket>                         End the session, remove the worktree and archive the job; the branch is untouched
   sf notify-test                                        Send a test notification on every channel
@@ -163,6 +167,16 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     }
     if (command === 'restart' && (words.length === 0 || (words.length === 1 && words[0] === '--keep-files'))) {
       return execution.restart(workspace, ticket, words.length === 1);
+    }
+    // sf handover, takeback and handed-done (SF-073).
+    if (command === 'handover' && words.length === 0) {
+      return execution.handover(workspace, ticket);
+    }
+    if (command === 'takeback' && words.length === 0) {
+      return execution.takeback(workspace, ticket);
+    }
+    if (command === 'handed-done' && words.length === 0) {
+      return execution.handedDone(workspace, ticket);
     }
     // sf mr create|merge|status (SF-048).
     if (command === 'mr-create' && words.length === 0) {
@@ -432,7 +446,7 @@ async function approve(args: string[]): Promise<void> {
     throw new UsageError('approve needs <workspace> <ticket> [--as-is].');
   }
   const result = await viaServer('approve', [...checkJob(positionals, 'approve'), ...(values['as-is'] === true ? ['--as-is'] : [])]);
-  if (result.state === 'needs_human') {
+  if (result.state === 'needs_human' || (result.state === 'handed_over' && result.error !== undefined)) {
     console.log('The push failed; fix it and run sf approve again.');
   } else if (result.state === 'pushed' && result.link === undefined) {
     console.log('No merge request link: the origin URL could not be parsed. Open the merge request for the branch above.');
@@ -704,6 +718,11 @@ async function status(args: string[]): Promise<void> {
   if (turnLimit !== undefined) {
     console.log(`\n${turnLimit}`);
   }
+  // The job in the user's checkout, or why it is not (SF-073).
+  const handover = handoverLines(job, (await jobs.readMrText(workspace, ticket))?.split(/\r?\n/)[0]);
+  if (handover.length > 0) {
+    console.log(`\n${handover.join('\n')}`);
+  }
   if (job.worktree !== null) {
     console.log(`\nworktree: ${job.worktree}`);
   }
@@ -838,6 +857,13 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'restart') {
     await restart(rest);
+    return;
+  }
+  if (command === 'handover' || command === 'takeback' || command === 'handed-done') {
+    if (rest.length !== 2) {
+      throw new UsageError(`${command} needs <workspace> <ticket>.`);
+    }
+    await viaServer(command, checkJob(rest, command));
     return;
   }
   if (command === 'check-task') {

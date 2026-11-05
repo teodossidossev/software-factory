@@ -21,10 +21,11 @@ function gitEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-// timeoutMs, when given, stops Git with SIGTERM; the result then has code null.
-export function runGit(cwd: string, args: string[], maxBytes = 1024 * 1024, timeoutMs?: number): Promise<GitResult> {
+// timeoutMs, when given, stops Git with SIGTERM; the result then has code null. env: variables
+// added to the minimal environment (SF-073: GIT_INDEX_FILE for a snapshot in a temporary index).
+export function runGit(cwd: string, args: string[], maxBytes = 1024 * 1024, timeoutMs?: number, env: Record<string, string> = {}): Promise<GitResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn('git', args, { cwd, env: gitEnv(), stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, killSignal: 'SIGTERM' });
+    const child = spawn('git', args, { cwd, env: { ...gitEnv(), ...env }, stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, killSignal: 'SIGTERM' });
     const chunks: Buffer[] = [];
     let length = 0;
     let truncated = false;

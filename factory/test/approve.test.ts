@@ -90,9 +90,9 @@ test('mark_clean: the MR turn writes the MR text only; the factory commits once 
   assert.equal((await call(served, 'mark_clean', { workspace: 'app', ticket: 'T-1' })).state, 'preparing_mr');
   const ready = await waitFor(served, 'T-1', 'ready_for_human_review', 1);
   assert.equal(ready.mr, mrText('feat(T-1): Change the README'));
-  // The worktree is gone; the branch has one commit on top of the moved main in the checkout,
-  // with the whole MR text as its message (every # heading kept) and the user's identity.
-  assert.equal(await exists(worktree), false);
+  // The worktree stays until the push (SF-073); the branch has one commit on top of the moved
+  // main, with the whole MR text as its message (every # heading kept) and the user's identity.
+  assert.equal(await exists(worktree), true);
   assert.equal(git(repo, 'rev-list', '--count', `${upstream}..${branch}`).trim(), '1');
   assert.equal(git(repo, 'rev-parse', `${branch}~1`).trim(), upstream);
   const message = mrMessage(mrText('feat(T-1): Change the README'));
@@ -105,7 +105,7 @@ test('mark_clean: the MR turn writes the MR text only; the factory commits once 
   assert.equal(await readFile(join(jobDir, 'mr.md'), 'utf8'), ready.mr);
   let job = (await jobs.read('app', 'T-1'))!;
   const prepared = git(repo, 'rev-parse', branch).trim();
-  assert.deepEqual([job.target_commit, job.base_commit, job.prepared_commit, job.worktree, job.mr_attempts, job.iteration], [upstream, upstream, prepared, null, 1, 1]);
+  assert.deepEqual([job.target_commit, job.base_commit, job.prepared_commit, job.worktree, job.mr_attempts, job.iteration], [upstream, upstream, prepared, worktree, 1, 1]);
   assert.equal(await exists(join(jobDir, 'mr-snapshot.json')), false);
   assert.equal(git(repo, 'for-each-ref', 'refs/sf/'), '');
 
@@ -126,7 +126,9 @@ test('mark_clean: the MR turn writes the MR text only; the factory commits once 
   const done = await call(served, 'check', { workspace: 'app', ticket: 'T-1' });
   assert.deepEqual([done.state, done.error, done.mr], ['pushed', undefined, ready.mr]);
   job = (await jobs.read('app', 'T-1'))!;
-  assert.deepEqual([job.prepared_commit, job.mr_attempts], [edited, 1]);
+  assert.deepEqual([job.prepared_commit, job.mr_attempts, job.worktree], [edited, 1, null]);
+  // The push removed the worktree.
+  assert.equal(await exists(worktree), false);
 
   // The MR turn: the MR prompt with the target of this Clean, and the full deny list (git commit
   // included); sandbox on; every turn in the worktree and the same session.
@@ -246,7 +248,7 @@ test('mark_clean after a fix asked in ready_for_human_review: still one commit, 
   assert.equal(git(repo, 'show', '--name-only', '--format=', branch).trim(), 'a.txt\nc.txt');
   const job = (await jobs.read('app', 'D-1'))!;
   assert.notEqual(job.prepared_commit, prepared);
-  assert.deepEqual([job.worktree, job.mr_attempts], [null, 2]);
+  assert.deepEqual([job.worktree, job.mr_attempts], [worktree, 2]);
 
   const pushed = await approve(env, 'D-1');
   assert.equal(pushed.code, 0, pushed.stdout + pushed.stderr);
@@ -341,7 +343,7 @@ test('mark_clean: the target moved in the same hunk; a conflict turn that leaves
   await waitFor(served, 'M-2', 'ready_for_human_review', 2);
   assert.equal(git(repo, 'rev-list', '--count', `${upstream}..M-2-edit-line-nine`).trim(), '1');
   job = (await jobs.read('app', 'M-2'))!;
-  assert.deepEqual([job.iteration, job.mr_attempts, job.worktree], [2, 3, null]);
+  assert.deepEqual([job.iteration, job.mr_attempts, job.worktree], [2, 3, worktree]);
   log = await fakeLog(env);
   assert.equal(log.length, 6);
   const pushed = await approve(env, 'M-2');

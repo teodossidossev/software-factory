@@ -19,13 +19,18 @@
 const RECONNECT_MS = 3000;
 const READ_TIMEOUT_MS = 10000;
 const TERMINAL_STATES = ['pushed', 'aborted', 'failed'];
-const SAY_STATES = ['working', 'awaiting_review', 'needs_human', 'ready_for_human_review'];
+const SAY_STATES = ['working', 'awaiting_review', 'needs_human', 'ready_for_human_review', 'handed_over'];
+// The hand-over to the user's checkout (SF-073): the buttons of the job, each with the state it takes.
+const HANDOVER_ACTIONS = [['handover', 'ready_for_human_review'], ['handed-done', 'handed_over'], ['takeback', 'handed_over']];
+// Their buttons by action, made once the page loads (init).
+const handoverButtons = {};
 // Pause, Resume and Restart (SF-067): the states each takes.
 const PAUSE_STATES = ['working', 'awaiting_review'];
 const RESTART_STATES = ['paused', 'aborted', 'failed', 'needs_human'];
 const ACTION_LABELS = {
   approve: 'Approve', abort: 'Abort', say: 'Send', review: 'Retry review', accept: 'Accept and prepare MR', settle: 'Settle', simplify: 'Simplify', archive: 'Archive',
   'mr-create': 'Create merge request', 'mr-merge': 'Merge', 'mr-status': 'Refresh MR status', pause: 'Pause', resume: 'Resume', restart: 'Restart',
+  handover: 'Hand over to my checkout', takeback: 'Take it back', 'handed-done': 'I opened the MR myself',
 };
 const PENDING_REASONS = {
   accept: 'the override was requested; waiting for its outcome.',
@@ -42,6 +47,9 @@ const PENDING_REASONS = {
   pause: 'the pause was requested; waiting for the job to stop.',
   resume: 'the resume was requested; waiting for its outcome.',
   restart: 'the restart was requested; waiting for its outcome.',
+  handover: 'the hand-over was requested; waiting for its outcome.',
+  takeback: 'Take it back was requested; waiting for its outcome.',
+  'handed-done': 'origin is being asked for your push.',
 };
 const PENDING_TEXT = {
   accept: 'Accepting over the gate…',
@@ -58,6 +66,9 @@ const PENDING_TEXT = {
   pause: 'Pausing: stopping the job…',
   resume: 'Resuming the job…',
   restart: 'Restarting the ticket…',
+  handover: 'Handing the branch over to your checkout…',
+  takeback: 'Taking the branch back from your checkout…',
+  'handed-done': 'Asking origin for your push…',
 };
 const $ = (id) => document.getElementById(id);
 // The views of the selected job, flat tabs, one panel each (#tab-<name>).
@@ -496,7 +507,12 @@ function nextAction(detail) {
     case 'ready_for_human_review':
       return {
         who: 'Your turn', headline: 'The branch is ready: approve to push it, or create the merge request (push and open it), or abort.',
-        why: `Branch ${job.branch}: one commit on ${job.base}.${typeof detail.mr_title === 'string' ? ` Merge request title: ${detail.mr_title}` : ''}`,
+        why: `${skippedNote(job)}Branch ${job.branch}: one commit on ${job.base}.${typeof detail.mr_title === 'string' ? ` Merge request title: ${detail.mr_title}` : ''}`,
+      };
+    case 'handed_over':
+      return {
+        who: 'Your turn', headline: `${checkoutLine(job)}.`,
+        why: `Read, run and change it there. Approve pushes it; Ask for changes sends your edits and your message to the Implementer; Take it back returns it to the factory.${typeof detail.mr_title === 'string' ? ` Merge request title: ${detail.mr_title}` : ''}${job.error ? ` ${job.error.code}: ${job.error.message}` : ''}`,
       };
     case 'needs_human':
       return { who: 'Your turn', headline: haltSentence(detail), why: job.error ? `${job.error.code}: ${job.error.message}` : '' };
@@ -592,7 +608,7 @@ function renderFacts(detail) {
     // An estimate of the API-equivalent price, not a charge: the session usually runs on a Claude plan.
     ['Estimated cost', costs.length > 0 ? `est. $${costs.reduce((sum, cost) => sum + cost, 0).toFixed(4)}` : 'n/a'],
     ['Updated', timeEl(job.updated_at)],
-    ['Worktree', typeof job.worktree === 'string' ? job.worktree : (job.state === 'ready_for_human_review' ? 'none: the branch is in the checkout' : 'none')],
+    ['Worktree', typeof job.worktree === 'string' ? job.worktree : 'none'],
   ];
   $('job-facts').replaceChildren(...rows.map(([term, value]) => {
     const row = el('div');
@@ -1339,10 +1355,14 @@ function availability(action, job) {
     return state.detail !== null && keyOf(state.detail.job) === keyOf(job) && gateAcceptable(state.detail)
       ? '' : 'only after the gate or the ledger stopped the job, or the simplification pass offered suggestions, with a clean Claude review.';
   }
+  const handover = HANDOVER_ACTIONS.find(([name]) => name === action);
+  if (handover !== undefined) {
+    return job.state === handover[1] ? '' : `only when the job is ${handover[1]}; it is ${job.state}.`;
+  }
   if (job.state === 'paused') {
     return pausedTurn(job) ? 'the job is paused: Resume sends the message.' : 'the job is paused: Resume, then send the message.';
   }
-  return SAY_STATES.includes(job.state) ? '' : `messages need working, awaiting_review, needs_human or ready_for_human_review; the job is ${job.state}.`;
+  return SAY_STATES.includes(job.state) ? '' : `messages need working, awaiting_review, needs_human, ready_for_human_review or handed_over; the job is ${job.state}.`;
 }
 
 // A job paused during the Implementer's turn (SF-067): its Resume takes the message.
@@ -1390,6 +1410,20 @@ function renderActions() {
       reasons.push(`${ACTION_LABELS[action]}: ${reason}`);
     }
   }
+  // The hand-over (SF-073): each button shows in the state it takes.
+  for (const [action, wanted] of HANDOVER_ACTIONS) {
+    const button = handoverButtons[action];
+    if (button === undefined) {
+      continue;
+    }
+    const shown = job !== null && job.state === wanted;
+    const reason = availability(action, job);
+    button.hidden = !shown;
+    button.disabled = !shown || reason !== '' || state.confirm !== null;
+    if (shown && reason !== '') {
+      reasons.push(`${ACTION_LABELS[action]}: ${reason}`);
+    }
+  }
   // Simplify shows only on the offer of the simplification pass (SF-055).
   const offered = job !== null && simplifiable(job);
   $('simplify-button').hidden = !offered;
@@ -1417,6 +1451,8 @@ function renderActions() {
   // The draft stays editable while a message is out; only sending waits.
   input.disabled = job === null || !(SAY_STATES.includes(job.state) || pausedTurn(job));
   $('say-button').disabled = sayReason !== '' || input.value.trim() === '';
+  // On a handed-over job the message is Ask for changes (SF-073): the checkout's edits go with it.
+  $('say-button').textContent = job !== null && job.state === 'handed_over' ? 'Ask for changes' : 'Send';
   $('say-reason').textContent = sayReason === '' ? '' : `${ACTION_LABELS.say}: ${sayReason}`;
 }
 
@@ -1448,15 +1484,24 @@ function describeOutcome(action, result) {
   }
   if (action === 'approve') {
     if (data.state === 'pushed') {
-      const text = `Pushed ${data.branch}.${data.title ? ` ${data.title}` : ''}`;
+      const text = `Pushed ${data.branch}.${data.title ? ` ${data.title}` : ''}${typeof data.message === 'string' ? ` ${data.message}` : ''}`;
       return typeof data.link === 'string'
         ? { level: 'ok', text: `${text} Merge request:`, link: data.link }
         : { level: 'ok', text: `${text} No merge request link: the origin URL could not be parsed. Open the merge request for branch ${data.branch} by hand.` };
     }
-    if (data.state === 'needs_human') {
+    if (data.state === 'needs_human' || (data.state === 'handed_over' && data.error)) {
       return { level: 'error', text: `Not pushed: the push failed (${detail || 'no details'}). Fix it, then approve again.` };
     }
     return { level: 'warn', text: `Not pushed: the job is ${data.state}${detail ? ` (${detail})` : ''}.` };
+  }
+  if (action === 'handover') {
+    return { level: 'ok', text: `Handed over: ${data.branch} is checked out in your checkout with the job's changes as Local Changes and the commit message prefilled.` };
+  }
+  if (action === 'takeback') {
+    return { level: 'ok', text: `Taken back: your checkout is back where it was; ${data.branch} waits for you to approve (state ${data.state}).` };
+  }
+  if (action === 'handed-done') {
+    return { level: 'ok', text: `Pushed by you: ${data.branch} is on origin${typeof data.commit === 'string' ? ` at ${data.commit.slice(0, 12)}` : ''}; the job is ${data.state}.` };
   }
   if (action === 'mr-create') {
     if (data.mr !== null && typeof data.mr === 'object') {
@@ -1467,7 +1512,7 @@ function describeOutcome(action, result) {
     if (data.state === 'pushed' && data.error) {
       return { level: 'error', text: `Pushed ${data.branch}, but the merge request was not opened (${detail}). Fix it, then create the merge request again.` };
     }
-    if (data.state === 'needs_human') {
+    if (data.state === 'needs_human' || (data.state === 'handed_over' && data.error)) {
       return { level: 'error', text: `Not pushed: the push failed (${detail || 'no details'}). Fix it, then try again.` };
     }
     return { level: 'warn', text: `No merge request: the job is ${data.state}${detail ? ` (${detail})` : ''}.` };
@@ -1681,7 +1726,9 @@ function openConfirm(action) {
     'mr-merge': hasMr(job)
       ? `Merges merge request #${job.mr.number} (${job.branch}) into ${job.base} on ${host} through its API, as a merge commit. Nothing is pushed or forced; the host refuses a merge request it cannot merge (conflicts, failing required checks, a draft) and says why.`
       : '',
-    approve: `Pushes branch ${job.branch} to origin: the one commit the factory prepared at Clean, rebased onto ${job.base}. Nothing is committed or rebased now; a tip edited by hand is refused unless pushed as it is.`,
+    approve: job.state === 'handed_over'
+      ? `Pushes branch ${job.branch} to origin from your checkout: the factory's commit when you did not commit on the branch, else your commits on the job's base. Your uncommitted changes stay in your checkout and are not pushed.`
+      : `Pushes branch ${job.branch} to origin: the one commit the factory prepared at Clean, rebased onto ${job.base}. Nothing is committed or rebased now; a tip edited by hand is refused unless pushed as it is.`,
     abort: `Ends the job on branch ${job.branch}: the Implementer session stops and queued messages are dropped. The branch and its worktree stay as they are.`,
     restart: `Starts ${job.ticket} again from its current Task file, as a new job on a fresh worktree and branch from ${job.base}. Thrown away: the Implementer session${job.state === 'paused' || job.state === 'needs_human' ? ' and its queued messages' : ''}, the worktree${typeof job.worktree === 'string' ? ` ${job.worktree}` : ''} with its uncommitted changes (unless kept below) and the branch ${job.branch}, deleted only when it has no commit beyond the base and was never pushed: otherwise nothing is touched and the restart is refused. The job's history is archived as sf reset does.`,
     simplify: `Writes one Fix section “Simplify” with the suggestions below into the Task file; the Implementer applies them and the Claude review and the gate review the result as usual. The suggestions are recorded in the ledger as your choice, so a reviewer cannot ask for them back. It runs once per job.`,
@@ -1792,7 +1839,7 @@ function sendSay() {
 const COLUMN_OF = {
   starting: 'implementing', working: 'implementing',
   awaiting_review: 'reviewing', preparing_mr: 'reviewing',
-  needs_human: 'you', ready_for_human_review: 'you', paused: 'you',
+  needs_human: 'you', ready_for_human_review: 'you', handed_over: 'you', paused: 'you',
   pushed: 'done', aborted: 'done', failed: 'done',
 };
 const COLUMNS = ['queue', 'implementing', 'reviewing', 'you', 'done'];
@@ -1813,7 +1860,12 @@ const TOAST_MS = 6000;
 
 // The job can be pushed: the branch prepared at Clean is ready, or its push failed and approve
 // tries again.
-const canApprove = (job) => job.state === 'ready_for_human_review' || (job.state === 'needs_human' && typeof job.prepared_commit === 'string' && job.worktree === null);
+const canApprove = (job) => job.state === 'ready_for_human_review' || job.state === 'handed_over' || (job.state === 'needs_human' && typeof job.prepared_commit === 'string');
+
+// The hand-over (SF-073): the line of a job in the user's checkout, and why a job ready for review
+// was not handed over ('' when it was not refused).
+const checkoutLine = (job) => `In your checkout on ${job.branch}`;
+const skippedNote = (job) => (job.handoff_skipped !== null && typeof job.handoff_skipped === 'object' ? `Not handed over to your checkout: ${job.handoff_skipped.message} ` : '');
 
 // The merge request on the Git host (SF-048): the job has one; Create merge request applies to a
 // branch ready to approve (push, then open) and to a pushed one without an open or merged one;
@@ -1866,6 +1918,7 @@ function pipeline(job) {
     case 'preparing_mr':
       return { segment: 3, halted: false, complete: false };
     case 'ready_for_human_review':
+    case 'handed_over':
       return { segment: 4, halted: false, complete: false };
     case 'needs_human':
     case 'failed':
@@ -2082,6 +2135,9 @@ function sentence(job) {
       return stopEntry(job).sentence(job).replace(/\.$/, '');
     case 'ready_for_human_review':
       return 'Reviews are clean and the MR text is written. Push when you are happy';
+    case 'handed_over':
+      // SF-073: the branch waits in the user's checkout.
+      return checkoutLine(job);
     case 'pushed':
       return `Pushed at ${clock(job.updated_at)}`;
     case 'aborted':
@@ -2167,7 +2223,12 @@ function jobCard(job) {
     const n = stopCount(job);
     item.append(reason, el('div', 'meta', `Iteration ${shownIteration(job)} · ${n ? `${counted(n, 'finding')} to decide` : `stopped at ${clock(job.updated_at)}`}`), ...yourTurn(job));
   } else if (job.state === 'ready_for_human_review') {
-    item.append(el('div', 'reason ready', 'Ready to push: reviews clean, MR text written'), el('div', 'meta', `Iteration ${shownIteration(job)}`), ...yourTurn(job));
+    // SF-073: why the automatic hand-over did not happen, when it was refused.
+    const skipped = skippedNote(job) === '' ? [] : [el('div', 'meta note', skippedNote(job).trim())];
+    item.append(el('div', 'reason ready', 'Ready to push: reviews clean, MR text written'), el('div', 'meta', `Iteration ${shownIteration(job)}`), ...skipped, ...yourTurn(job));
+  } else if (job.state === 'handed_over') {
+    // SF-073: the job's changes wait in the user's checkout.
+    item.append(el('div', 'reason ready', checkoutLine(job)), el('div', 'meta', `Iteration ${shownIteration(job)}`), ...yourTurn(job));
   } else if (job.state === 'paused') {
     item.append(el('div', 'reason', 'Paused by you'), el('div', 'meta', `Iteration ${shownIteration(job)}`));
     if (job.task_changed === true) {
@@ -2198,7 +2259,7 @@ function yourTurn(job) {
   const key = keyOf(job);
   const act = el('div', 'act');
   let primary;
-  if (job.state === 'ready_for_human_review') {
+  if (job.state === 'ready_for_human_review' || job.state === 'handed_over') {
     primary = button('btn primary small', 'Review the MR and push', { open: key, confirm: 'approve' });
     primary.disabled = availability('approve', job) !== '';
   } else if (job.state === 'paused') {
@@ -3417,6 +3478,25 @@ function init() {
     }
   });
   $('restart-button').addEventListener('click', () => openConfirm('restart'));
+  // The hand-over buttons (SF-073), after the job's other actions; each goes at once.
+  const handoverRow = el('div', 'row next-actions');
+  handoverRow.id = 'handover-actions';
+  for (const [action] of HANDOVER_ACTIONS) {
+    const button = el('button', action === 'handover' ? 'btn btn-primary' : 'btn', ACTION_LABELS[action]);
+    button.type = 'button';
+    button.id = `${action}-button`;
+    button.hidden = true;
+    button.dataset.action = action;
+    button.addEventListener('click', () => {
+      const job = state.detail?.job ?? null;
+      if (job !== null && availability(action, job) === '') {
+        void run(action, keyOf(job), {});
+      }
+    });
+    handoverButtons[action] = button;
+    handoverRow.append(button);
+  }
+  $('next-panel').append(handoverRow);
   $('retry-review-button').addEventListener('click', () => {
     if (state.key !== null) {
       void run('review', state.key, {});

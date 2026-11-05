@@ -27,7 +27,8 @@ import { FactoryError } from './errors.js';
 import { chooseForge, type Forge, type ForgeKind, forgeFor, type MergeRequestStatus } from './forge.js';
 import { runGit } from './git.js';
 import { GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from './gate.js';
-import { cutEvent, type FileChange, type GateOverride, type GateRecord, isActive, type Job, type JobMr, type JobState, JobStore, now, PAUSABLE_STATES, type PauseStep, RESTARTABLE_STATES, type ReviewRecord, type SimplifyRecord, TERMINAL_STATES } from './jobs.js';
+import { askForChanges, attachWorktree, checkBranchFree, commitMessagePath, finishAsk, handOver, isAncestor, remoteBranch, type RemoteBranch, restoreConfig, savedRef, settleAfterPush, subjectOf, takeBack, undoHandover } from './handoff.js';
+import { cutEvent, type FileChange, type GateOverride, type GateRecord, type Handover, isActive, type Job, type JobMr, type JobState, JobStore, now, PAUSABLE_STATES, type PauseStep, RESTARTABLE_STATES, type ReviewRecord, type SimplifyRecord, TERMINAL_STATES } from './jobs.js';
 import { answerFix, applyVerdict, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, escalationMessage, headings, LEDGER_ID, type LedgerEntry, FACTORY_PROBLEMS, SCOPE_PROBLEM, SENSITIVE_PROBLEM, settle, SETTLE_CODES, unappliedEntries, unsettled, userFixItems } from './ledger.js';
 import { abortRebase, commitAndRebase, continueRebase, gitBusy, mergeRequestLink, mrMessage, originUrl, pushBranch, readMrText, rebaseInProgress, resolveTarget, unmergedPaths, withFindings, withNits, withSimplifications } from './mr.js';
 import { buildPatch, changedFilesSection, changedPaths, fileChanges, notificationLine, type Patch } from './patch.js';
@@ -91,6 +92,8 @@ export interface MrOutcome {
   link?: string;
   // The merge request opened (or reused) on the Git host (SF-048).
   mr?: JobMr & { reused: boolean };
+  // What was pushed of a handed-over job (SF-073): the factory's commit or the user's.
+  message?: string;
 }
 
 // The merge request's title and body, from the MR text.
@@ -124,6 +127,27 @@ function markedGroups(items: ReviewItem[]): Array<{ label: string; paths: string
 function withoutDropped(record: { items: ReviewItem[]; dropped?: ReviewItem[] }): { items: ReviewItem[] } {
   const dropped = new Set((record.dropped ?? []).map((item) => JSON.stringify(item)));
   return { items: record.items.filter((item) => !dropped.has(JSON.stringify(item))) };
+}
+
+// The refusal of an action a handed-over job does not take before Take it back (SF-073).
+function handedOverError(job: Job): FactoryError {
+  return new FactoryError('handed_over', `${job.ticket} is in your checkout on ${job.branch}; take it back first.`);
+}
+
+// The refusal of the actions that need the branch back from the user's checkout (SF-073): a
+// handed-over job, or one whose hand-over step was cut off and waits for recover().
+function checkNotInCheckout(job: Job): void {
+  if (job.state === 'handed_over') {
+    throw handedOverError(job);
+  }
+  if (job.handover !== undefined && job.handover.step !== null) {
+    throw cutOffError(job, job.handover.step);
+  }
+}
+
+// The refusal of an action on a job whose hand-over step was cut off (SF-073): recover() repairs it.
+function cutOffError(job: Job, step: string): FactoryError {
+  return new FactoryError('invalid_state', `A step of the hand-over of ${job.workspace}/${job.ticket} (${step}) was cut off; sf serve repairs it when it starts again.`);
 }
 
 // Branch slug: the title lowercased, runs of other characters than a-z and 0-9 as "-", trimmed,
@@ -186,6 +210,8 @@ interface Kept {
 
 // How many kept files the first prompt names.
 const MAX_KEPT_NAMED = 50;
+// How long the saved refs of a pushed or aborted job stay (SF-073).
+const SAVED_REF_DAYS = 7;
 // How long sf restart waits for origin to say whether the old branch was pushed.
 const LS_REMOTE_TIMEOUT_MS = 30_000;
 
@@ -411,9 +437,15 @@ export class Execution implements RunnerWork {
 
   async #transition(job: Job, to: JobState, error?: { code: string; message: string }, lines?: string[]): Promise<Job> {
     const from = job.state;
-    // What a pause interrupted is kept only while the job is paused (SF-067).
-    const { error: _previous, paused, ...rest } = job;
-    const next: Job = { ...rest, state: to, updated_at: now(), ...(error !== undefined ? { error } : {}), ...(to === 'paused' && paused !== undefined ? { paused } : {}) };
+    // What a pause interrupted is kept only while the job is paused (SF-067); why the hand-over did
+    // not happen only while ready_for_human_review, and the hand-over only while handed_over, unless
+    // one of its steps was cut off (SF-073: recover() repairs it).
+    const { error: _previous, paused, handoff_skipped: skipped, handover, ...rest } = job;
+    const next: Job = {
+      ...rest, state: to, updated_at: now(), ...(error !== undefined ? { error } : {}), ...(to === 'paused' && paused !== undefined ? { paused } : {}),
+      ...(to === 'ready_for_human_review' && skipped !== undefined ? { handoff_skipped: skipped } : {}),
+      ...(handover !== undefined && (to === 'handed_over' || handover.step !== null) ? { handover } : {}),
+    };
     await this.jobs.write(next);
     await this.jobs.appendEvent(job.workspace, job.ticket, {
       ts: next.updated_at,
@@ -457,6 +489,14 @@ export class Execution implements RunnerWork {
     return this.#locked(async () => {
       const runners = this.#serveRunners();
       for (const job of await this.jobs.list()) {
+        // A step of the hand-over cut off (SF-073), before the job's generic handling; left alone
+        // while its runner still runs it.
+        if (job.handover !== undefined && job.handover.step !== null) {
+          if ((await runners.owner(job.workspace, job.ticket)) === undefined) {
+            await this.#repairHandover(job, job.handover).catch((error: unknown) => console.error(error));
+          }
+          continue;
+        }
         if (['working', 'preparing_mr', 'awaiting_review'].includes(job.state) && (await runners.owner(job.workspace, job.ticket)) !== undefined) {
           continue;
         }
@@ -472,7 +512,80 @@ export class Execution implements RunnerWork {
           await this.#transition(job, 'failed', { code: 'serve_restarted', message: 'sf serve restarted while the job was starting.' });
         }
       }
+      await this.#cleanSavedRefs().catch((error: unknown) => console.error(error));
     });
+  }
+
+  // A hand-over or an Ask for changes that sf serve's restart cut off (SF-073). handing_over is
+  // undone when it is safe (the checkout on the branch holding exactly the job's commit, or still on
+  // what it was on): the job waits in ready_for_human_review with its worktree, handoff_skipped
+  // handover_interrupted; otherwise nothing in the checkout changes and the job needs the user.
+  // asking is finished from the snapshot without the turn (needs_human, ask_interrupted). Only under
+  // the lock.
+  async #repairHandover(job: Job, handover: Handover): Promise<void> {
+    const workspace = await this.#resolve(job.workspace);
+    const checkout = workspace.workCheckout;
+    const worktree = job.worktree ?? this.#worktreePath(job.workspace, job.ticket);
+    const { ticket, branch } = job;
+    if (handover.step === 'asking') {
+      let message = 'sf serve restarted during Ask for changes; your edits are in the job\'s worktree; use sf say to go on.';
+      try {
+        const { kept } = await this.#gitLocked(job.workspace, () => finishAsk(checkout, worktree, ticket, handover));
+        if (kept.length > 0) {
+          await this.#handoverNote(job, `Ask for changes left these files in your checkout, changed after the snapshot: ${kept.join(', ')}.`);
+        }
+      } catch (error) {
+        message = `sf serve restarted during Ask for changes and it could not be finished (${(error as Error).message.slice(0, 300)}); your checkout is saved as refs/factory/${ticket}-ask.`;
+      }
+      await this.#transition({ ...(await this.#endHandover(job)), worktree, prepared_commit: null }, 'needs_human', { code: 'ask_interrupted', message });
+      return;
+    }
+    const undone = await this.#gitLocked(job.workspace, () => undoHandover(checkout, worktree, ticket, handover)).catch((error: unknown) => {
+      console.error(error);
+      return false;
+    });
+    if (!undone) {
+      // Not the checkout's files: the factory's commit.template and commit.cleanup go anyway.
+      await this.#gitLocked(job.workspace, () => restoreConfig(checkout, ticket, handover)).catch((error: unknown) => console.error(error));
+    }
+    const ended = await this.#endHandover(job);
+    if (undone) {
+      const skipped = { code: 'handover_interrupted', message: `${ticket}: sf serve restarted during the hand-over, which was undone; hand it over again when you are ready.` };
+      await this.#transition({ ...ended, worktree, handoff_skipped: skipped }, 'ready_for_human_review');
+      return;
+    }
+    await this.#transition(ended, 'needs_human', {
+      code: 'handover_interrupted',
+      message: `sf serve restarted during the hand-over of ${ticket} and your checkout is not as the factory left it, so nothing was changed there: the branch ${branch} may be checked out in your checkout, the job's commit is saved as refs/factory/${ticket}, and the job's worktree may be detached or gone.`,
+    });
+  }
+
+  // The saved refs of the hand-over (refs/factory/<ticket>, refs/factory/<ticket>-ask, SF-073) go once
+  // every job they may belong to is pushed or aborted for more than 7 days, or does not exist.
+  async #cleanSavedRefs(): Promise<void> {
+    const jobs = new Map((await this.jobs.list()).map((job) => [`${job.workspace}/${job.ticket}`, job]));
+    const gone = (workspace: string, ticket: string): boolean => {
+      const job = jobs.get(`${workspace}/${ticket}`);
+      return job === undefined || (['pushed', 'aborted'].includes(job.state) && Date.now() - Date.parse(job.updated_at) > SAVED_REF_DAYS * 24 * 3600 * 1000);
+    };
+    for (const name of await this.jobs.workspaceNames()) {
+      let workspace: Workspace;
+      try {
+        workspace = await this.#resolve(name);
+      } catch {
+        continue;
+      }
+      await this.#gitLocked(name, async () => {
+        const listed = await runGit(workspace.workCheckout, ['for-each-ref', '--format=%(refname)', 'refs/factory/']);
+        for (const ref of listed.stdout.toString('utf8').split('\n').filter((line) => line.startsWith('refs/factory/'))) {
+          const short = ref.slice('refs/factory/'.length);
+          const owners = short.endsWith('-ask') ? [short, short.slice(0, -'-ask'.length)] : [short];
+          if (owners.every((ticket) => gone(name, ticket))) {
+            await runGit(workspace.workCheckout, ['update-ref', '-d', ref]);
+          }
+        }
+      });
+    }
   }
 
   // A job awaiting review that has something to resume: its last iteration has no review (with the
@@ -1712,21 +1825,260 @@ export class Execution implements RunnerWork {
     });
   }
 
-  // The branch holds the one commit on top of the target: the worktree goes (the branch stays in
-  // the checkout for the IDE) and the user takes over.
+  // The branch holds the one commit on top of the target. With SF_HANDOFF=checkout (SF-073) the
+  // factory hands it over to the workspace's checkout at once (handed_over); a refusal leaves it in
+  // ready_for_human_review with the reason (handoff_skipped). The worktree stays until the hand-over
+  // or the push.
   async #ready(job: Job, live: Live, mrText: string): Promise<void> {
     const cwd = live.cwd;
     const tip = (await runGit(cwd, ['rev-parse', '--verify', `refs/heads/${job.branch}`])).stdout.toString('utf8').trim();
-    const { title } = mrMessage(mrText);
-    const failure = await this.#gitLocked(job.workspace, () => removeWorktree(live.workspace.workCheckout, cwd));
-    if (failure !== undefined) {
-      await this.#transition(job, 'needs_human', { code: 'worktree_remove_failed', message: `${failure} The branch ${job.branch} is prepared; remove the worktree by hand, then go on with sf say (its iteration is reviewed again and a clean verdict prepares the branch again), or abort or reset the job.` });
-      return;
-    }
+    const content = mrMessage(mrText);
     this.#live.delete(`${job.workspace}/${job.ticket}`);
-    const lines = [title, notificationLine((await this.#lastFiles(job)) ?? [])];
-    await this.#transition({ ...job, base_commit: job.target_commit, prepared_commit: tip, worktree: null }, 'ready_for_human_review', undefined, lines);
-    console.log(`${job.workspace}/${job.ticket}: branch ${job.branch} ready (${title})`);
+    const lines = [content.title, notificationLine((await this.#lastFiles(job)) ?? [])];
+    let ready: Job = { ...job, base_commit: job.target_commit, prepared_commit: tip };
+    if (this.#config.handoff === 'checkout') {
+      const outcome = await this.#handOver(ready, live.workspace, content);
+      if (outcome.ok) {
+        await this.#transition(outcome.job, 'handed_over', undefined, lines);
+        console.log(`${job.workspace}/${job.ticket}: branch ${job.branch} ready (${content.title}), in the checkout`);
+        return;
+      }
+      if (outcome.error.code === 'handover_interrupted') {
+        await this.#transition(outcome.job, 'needs_human', outcome.error);
+        return;
+      }
+      ready = { ...outcome.job, handoff_skipped: outcome.error };
+    }
+    await this.#transition(ready, 'ready_for_human_review', undefined, lines);
+    console.log(`${job.workspace}/${job.ticket}: branch ${job.branch} ready (${content.title})`);
+  }
+
+  // The hand-over of a prepared job to the workspace's checkout (SF-073, src/handoff.ts), under the
+  // workspace's Git lock: the record with step handing_over is written before the checkout changes.
+  // ok: the job to move to handed_over (its worktree gone, or kept when it could not be removed);
+  // else the refusal and the job as written (without the record). Only under the lock.
+  async #handOver(job: Job, workspace: Workspace, content: MrContent): Promise<{ ok: true; job: Job } | { ok: false; job: Job; error: { code: string; message: string } }> {
+    let current = job;
+    const record = async (handover: Handover): Promise<void> => {
+      current = { ...current, handover };
+      await this.jobs.write(current);
+    };
+    try {
+      const done = await this.#gitLocked(job.workspace, () => handOver({
+        checkout: workspace.workCheckout, worktree: job.worktree, ticket: job.ticket, branch: job.branch,
+        saved: job.prepared_commit!, base: job.base_commit!, message: `${content.title}\n\n${content.body}`, at: now(), record,
+      }));
+      const { handoff_skipped: _skipped, ...rest } = current;
+      const next: Job = { ...rest, handover: done.handover, worktree: done.removeFailure === undefined ? null : job.worktree };
+      await this.jobs.write(next);
+      await this.jobs.appendEvent(job.workspace, job.ticket, { ts: now(), iteration: job.iteration, type: 'handover', action: 'handed_over', handover: done.handover });
+      if (done.removeFailure !== undefined) {
+        await this.#handoverNote(next, `The worktree could not be removed after the hand-over: ${done.removeFailure}`);
+      }
+      return { ok: true, job: next };
+    } catch (error) {
+      const failure = error instanceof FactoryError ? { code: error.code, message: error.message } : mrFailure(error);
+      // An undo that failed keeps the record with its step: recover() repairs it when sf serve
+      // starts, or tells where things are.
+      if (failure.code === 'handover_interrupted') {
+        return { ok: false, job: current, error: failure };
+      }
+      const { handover: _record, ...rest } = current;
+      await this.jobs.write(rest);
+      return { ok: false, job: rest, error: failure };
+    }
+  }
+
+  async #handoverNote(job: Job, note: string): Promise<void> {
+    console.error(`${job.workspace}/${job.ticket}: ${note}`);
+    await this.jobs.appendEvent(job.workspace, job.ticket, { ts: now(), iteration: job.iteration, type: 'handover', action: 'note', note });
+  }
+
+  // The hand-over ended (Ask for changes, Take it back, the push, abort): the record goes into the
+  // event log; the job is returned without it.
+  async #endHandover(job: Job): Promise<Job> {
+    const { handover, ...rest } = job;
+    if (handover !== undefined) {
+      await this.jobs.appendEvent(job.workspace, job.ticket, { ts: now(), iteration: job.iteration, type: 'handover', action: 'ended', handover });
+    }
+    return rest;
+  }
+
+  // sf handover (SF-073): hands a job waiting in ready_for_human_review over to the checkout. A
+  // refusal (checkout_dirty, checkout_busy, handover_refused, handover_mismatch) leaves the job as it
+  // was and is returned as the error.
+  handover(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string }> {
+    return this.#locked(async () => {
+      const check = (job: Job): void => {
+        if (job.state !== 'ready_for_human_review') {
+          throw new FactoryError('invalid_state', `sf handover needs ready_for_human_review; the job is ${job.state}.`);
+        }
+        if (job.prepared_commit === null || job.base_commit === null) {
+          throw new FactoryError('invalid_state', `The job ${workspaceName}/${ticket} has no prepared commit to hand over.`);
+        }
+      };
+      check(await this.#job(workspaceName, ticket));
+      await this.#settled(workspaceName, ticket);
+      const job = await this.#job(workspaceName, ticket);
+      check(job);
+      const workspace = await this.#resolve(workspaceName);
+      const content = await this.#mrContent(job);
+      const outcome = await this.#handOver(job, workspace, content);
+      if (!outcome.ok) {
+        if (outcome.error.code === 'handover_interrupted') {
+          await this.#transition(outcome.job, 'needs_human', outcome.error);
+        }
+        throw new FactoryError(outcome.error.code, outcome.error.message);
+      }
+      const next = await this.#transition(outcome.job, 'handed_over', undefined, [content.title, notificationLine((await this.#lastFiles(job)) ?? [])]);
+      return { state: next.state, branch: next.branch };
+    });
+  }
+
+  // sf takeback (SF-073): the job back from the checkout into ready_for_human_review, only while
+  // the checkout is as the factory left it (takeback_changed otherwise); it holds an SF_MAX_JOBS
+  // slot again (job_limit).
+  takeback(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; worktree: string }> {
+    return this.#locked(async () => {
+      this.#checkHandedOver(await this.#job(workspaceName, ticket), 'sf takeback');
+      await this.#settled(workspaceName, ticket);
+      const job = await this.#job(workspaceName, ticket);
+      const handover = this.#checkHandedOver(job, 'sf takeback');
+      await this.#checkSlot(workspaceName, ticket);
+      const workspace = await this.#resolve(workspaceName);
+      const worktree = job.worktree ?? this.#worktreePath(workspaceName, ticket);
+      await this.#gitLocked(workspaceName, () => takeBack(workspace.workCheckout, worktree, ticket, handover));
+      const next = await this.#transition({ ...(await this.#endHandover(job)), worktree, prepared_commit: handover.saved }, 'ready_for_human_review');
+      return { state: next.state, branch: next.branch, worktree };
+    });
+  }
+
+  // A handed-over job with no step of the hand-over in progress, and its record; invalid_state otherwise.
+  #checkHandedOver(job: Job, command: string): Handover {
+    if (job.state !== 'handed_over' || job.handover === undefined) {
+      throw new FactoryError('invalid_state', `${command} needs handed_over; the job is ${job.state}.`);
+    }
+    if (job.handover.step !== null) {
+      throw cutOffError(job, job.handover.step);
+    }
+    return job.handover;
+  }
+
+  // sf handed-done (SF-073): the user opened the merge request from the checkout; origin must have
+  // the branch beyond the base (not_pushed otherwise), and the job goes to pushed.
+  handedDone(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; commit?: string; same_tree?: boolean | null }> {
+    return this.#pushCheck(workspaceName, ticket, true);
+  }
+
+  // The check for the user's own push of a handed-over branch (SF-073): origin is asked where the
+  // branch is, outside the lock; a branch pushed beyond the base moves the job to pushed. Errors
+  // change nothing and are logged. minIntervalMs: none when origin was asked as recently (the
+  // dashboard's job detail, every 60 s at most).
+  async checkHandedOver(workspaceName: string, ticket: string, minIntervalMs = 0): Promise<{ state: JobState; branch: string; commit?: string; same_tree?: boolean | null }> {
+    try {
+      return await this.#pushCheck(workspaceName, ticket, false, minIntervalMs);
+    } catch (error) {
+      console.error(error);
+      const job = await this.jobs.read(workspaceName, ticket);
+      return { state: job?.state ?? 'handed_over', branch: job?.branch ?? '' };
+    }
+  }
+
+  async #pushCheck(workspaceName: string, ticket: string, done: boolean, minIntervalMs = 0): Promise<{ state: JobState; branch: string; commit?: string; same_tree?: boolean | null }> {
+    const asked = await this.#locked(async () => {
+      const job = await this.#job(workspaceName, ticket);
+      if (!done && (job.state !== 'handed_over' || job.handover === undefined || job.handover.step !== null)) {
+        return { job };
+      }
+      this.#checkHandedOver(job, 'sf handed-done');
+      const checked = job.handover!.checked_at;
+      if (!done && checked !== null && Date.now() - Date.parse(checked) < minIntervalMs) {
+        return { job };
+      }
+      await this.#settled(workspaceName, ticket);
+      // Only the background check counts toward its interval; sf handed-done asks on demand.
+      if (done) {
+        return { job, handover: job.handover! };
+      }
+      const next: Job = { ...job, handover: { ...job.handover!, checked_at: now() } };
+      await this.jobs.write(next);
+      return { job: next, handover: next.handover! };
+    });
+    if (asked.handover === undefined) {
+      return { state: asked.job.state, branch: asked.job.branch };
+    }
+    const workspace = await this.#resolve(workspaceName);
+    const remote = await remoteBranch(workspace.workCheckout, ticket, asked.handover);
+    return this.#locked(async () => {
+      const job = await this.#job(workspaceName, ticket);
+      // The job moved on (or was handed over again) while origin answered.
+      if (job.state !== 'handed_over' || job.handover?.at !== asked.handover.at || job.handover.step !== null) {
+        if (done) {
+          throw new FactoryError('invalid_state', `The job changed while origin was asked; it is ${job.state}.`);
+        }
+        return { state: job.state, branch: job.branch };
+      }
+      await this.#settled(workspaceName, ticket);
+      const pushed = this.#pushedCommit(job, remote, done);
+      if (pushed === undefined) {
+        return { state: job.state, branch: job.branch };
+      }
+      await this.jobs.appendEvent(workspaceName, ticket, { ts: now(), iteration: job.iteration, type: 'handover_pushed', commit: pushed.commit, same_tree: pushed.same_tree });
+      const next = await this.#pushedByUser(job, workspace, pushed.commit);
+      return { state: next.state, branch: next.branch, commit: pushed.commit, same_tree: pushed.same_tree };
+    });
+  }
+
+  // The commit origin has that counts as the user's push, or undefined; with done (sf
+  // handed-done), not_pushed instead of undefined, and an unknown commit counts (same_tree null).
+  #pushedCommit(job: Job, remote: RemoteBranch, done: boolean): { commit: string; same_tree: boolean | null } | undefined {
+    if (remote.kind === 'pushed') {
+      return { commit: remote.commit, same_tree: remote.same_tree };
+    }
+    if (remote.kind === 'unknown' && done) {
+      return { commit: remote.commit, same_tree: null };
+    }
+    if (!done) {
+      return undefined;
+    }
+    if (remote.kind === 'unrelated') {
+      throw new FactoryError('not_pushed', `The branch ${job.branch} on origin (${remote.commit.slice(0, 12)}) does not descend from the job's base ${job.handover!.base.slice(0, 12)}; push your changes to it first.`);
+    }
+    throw new FactoryError('not_pushed', `The branch ${job.branch} is not on origin with your changes; push it first.`);
+  }
+
+  // A handed-over job the user pushed: the config and the prefilled commit message go, a worktree
+  // left over goes, and the job is pushed with the pushed commit. Only under the lock.
+  async #pushedByUser(job: Job, workspace: Workspace, commit: string): Promise<Job> {
+    const ended = await this.#leaveCheckout(job, workspace, true);
+    const title = mrMessage((await this.jobs.readMrText(job.workspace, job.ticket)) ?? '').title;
+    return this.#transition({ ...ended, prepared_commit: commit }, 'pushed', undefined, [title]);
+  }
+
+  // A handed-over job leaves the checkout (the push, abort): the factory's commit.template and
+  // commit.cleanup go back, with pushed the prefilled message file and a worktree left over too.
+  // Returns the job without the hand-over record.
+  async #leaveCheckout(job: Job, workspace: Workspace, pushed: boolean): Promise<Job> {
+    const checkout = workspace.workCheckout;
+    let worktree = job.worktree;
+    if (job.handover !== undefined) {
+      const handover = job.handover;
+      await this.#gitLocked(job.workspace, async () => {
+        await restoreConfig(checkout, job.ticket, handover);
+        if (pushed) {
+          await rm(await commitMessagePath(checkout, job.ticket), { force: true });
+        }
+      });
+    }
+    if (pushed && worktree !== null) {
+      const failure = await this.#gitLocked(job.workspace, () => removeWorktree(checkout, worktree!));
+      if (failure === undefined) {
+        worktree = null;
+      } else {
+        await this.#handoverNote(job, `The worktree could not be removed after the push: ${failure}`);
+      }
+    }
+    return { ...(await this.#endHandover(job)), worktree };
   }
 
   async #lastFiles(job: Job): Promise<FileChange[] | undefined> {
@@ -1752,7 +2104,8 @@ export class Execution implements RunnerWork {
   // Whether MR preparation may start: awaiting_review, the retry after a failed preparation, or the
   // user's Accept (acceptGate, which checked the state); returns whether it is the retry.
   #checkPrepareMr(job: Job, accepted = false): boolean {
-    const retry = !accepted && job.state === 'needs_human' && job.mr_attempts > 0 && job.worktree !== null;
+    // A prepared commit means the preparation ended (a failed push): not a retry (SF-073).
+    const retry = !accepted && job.state === 'needs_human' && job.mr_attempts > 0 && job.worktree !== null && job.prepared_commit === null;
     if (!(job.state === 'awaiting_review' || retry || accepted)) {
       throw new FactoryError('invalid_state', `mark_clean needs awaiting_review (or needs_human after an MR preparation); the job is ${job.state}.`);
     }
@@ -1783,6 +2136,8 @@ export class Execution implements RunnerWork {
     const target = await this.#gitLocked(workspaceName, async () => {
       // A rebase left in progress when sf serve restarted during a conflict turn.
       await abortRebase(cwd);
+      // No turn while the user's checkout holds the branch (SF-073).
+      await checkBranchFree(workspace.workCheckout, cwd, job.branch, ticket);
       return resolveTarget(workspace.workCheckout, job.base);
     });
     await onAccepted?.();
@@ -1820,13 +2175,17 @@ export class Execution implements RunnerWork {
     }
   }
 
-  // The job's prepared branch can be pushed: ready_for_human_review, or needs_human after a push
-  // that failed.
+  // The job's prepared branch can be pushed: ready_for_human_review, handed_over (SF-073), or
+  // needs_human after a push that failed (the worktree is kept until the push).
   #approvable(job: Job): boolean {
-    return job.state === 'ready_for_human_review' || (job.state === 'needs_human' && job.prepared_commit !== null && job.worktree === null);
+    return job.state === 'ready_for_human_review' || job.state === 'handed_over' || (job.state === 'needs_human' && job.prepared_commit !== null);
   }
 
   #checkApprovable(job: Job, command: string): void {
+    // A cut-off step of the hand-over is repaired first (SF-073).
+    if (job.handover !== undefined && job.handover.step !== null) {
+      throw cutOffError(job, job.handover.step);
+    }
     if (!this.#approvable(job)) {
       throw new FactoryError('invalid_state', `${command} needs ready_for_human_review (the branch prepared at Clean); the job is ${job.state}.`);
     }
@@ -1844,13 +2203,40 @@ export class Execution implements RunnerWork {
     if (tipResult.code !== 0 || tip === '') {
       throw new FactoryError('branch_missing', `The branch ${job.branch} no longer exists in the checkout.`);
     }
-    if (tip !== job.prepared_commit && !asIs) {
+    const plan = job.state === 'handed_over' ? await this.#handedOverPush(job, checkout, tip) : { commit: tip, source: undefined, message: undefined };
+    if (job.state !== 'handed_over' && tip !== job.prepared_commit && !asIs) {
       throw new FactoryError('branch_changed', `The tip of ${job.branch} is ${tip.slice(0, 12)}, not the prepared ${(job.prepared_commit ?? '').slice(0, 12)}: it was edited by hand. Approve with --as-is to push it as it is.`);
     }
-    const pushFailure = await this.#gitLocked(workspaceName, () => pushBranch(checkout, job.branch, job.base));
+    const pushFailure = await this.#gitLocked(workspaceName, () => pushBranch(checkout, job.branch, job.base, plan.source));
     if (pushFailure !== undefined) {
+      if (job.state === 'handed_over') {
+        // The checkout, the record, the saved ref and the config stay; Approve can be retried.
+        const kept: Job = { ...job, error: pushFailure };
+        await this.jobs.write(kept);
+        this.#announce(kept, []);
+        return { state: kept.state, branch: kept.branch, error: pushFailure };
+      }
       const next = await this.#transition(job, 'needs_human', pushFailure);
       return { state: next.state, branch: next.branch, error: pushFailure };
+    }
+    let message = plan.message;
+    let after: Job = job;
+    if (job.state === 'handed_over') {
+      const handover = job.handover!;
+      if (plan.source !== undefined) {
+        const changed = await this.#gitLocked(workspaceName, () => settleAfterPush(checkout, handover));
+        message = `Pushed the factory's commit ${handover.saved.slice(0, 12)}.${changed !== undefined && changed > 0 ? ` Your uncommitted changes (${changed} files) were not pushed.` : ''}`;
+      }
+      after = await this.#leaveCheckout(job, workspace, true);
+    } else if (job.worktree !== null) {
+      // The worktree stays until the push (SF-073); a failure keeps its path for the next action.
+      const worktree = job.worktree;
+      const failure = await this.#gitLocked(workspaceName, () => removeWorktree(checkout, worktree));
+      if (failure === undefined) {
+        after = { ...job, worktree: null };
+      } else {
+        await this.#handoverNote(job, `The worktree could not be removed after the push: ${failure}`);
+      }
     }
     const mrText = (await this.jobs.readMrText(workspaceName, ticket)) ?? '';
     const { title } = mrMessage(mrText);
@@ -1867,7 +2253,7 @@ export class Execution implements RunnerWork {
     }
     const mr = opened === undefined ? job.mr : { host: opened.host, number: opened.number, url: opened.url, state: opened.state };
     const lines = [title, ...(opened !== undefined ? [`Merge request #${opened.number}: ${opened.url}`] : link !== undefined ? [link] : [])];
-    const pushed = await this.#transition({ ...job, prepared_commit: tip, mr }, 'pushed', undefined, lines);
+    const pushed = await this.#transition({ ...after, prepared_commit: plan.commit, mr }, 'pushed', undefined, lines);
     if (opened !== undefined) {
       await this.#mrEvent(pushed, opened.reused ? 'reused' : 'created');
     }
@@ -1875,8 +2261,22 @@ export class Execution implements RunnerWork {
     console.log(`${job.workspace}/${job.ticket}: pushed ${job.branch}\n  ${title}${link !== undefined ? `\n  ${link}` : ''}`);
     return {
       state: pushed.state, branch: pushed.branch, ...(title !== '' ? { title } : {}), ...(link !== undefined ? { link } : {}),
-      ...(opened !== undefined ? { mr: opened } : {}), ...(failure !== undefined ? { error: failure } : {}),
+      ...(opened !== undefined ? { mr: opened } : {}), ...(failure !== undefined ? { error: failure } : {}), ...(message !== undefined ? { message } : {}),
     };
+  }
+
+  // What Approve pushes of a handed-over job (SF-073), from the branch's tip T in the checkout: the
+  // saved commit when the user did not commit (T is B), the user's commits when they descend from
+  // B, else branch_changed.
+  async #handedOverPush(job: Job, checkout: string, tip: string): Promise<{ commit: string; source: string | undefined; message: string | undefined }> {
+    const handover = this.#checkHandedOver(job, 'approve');
+    if (tip === handover.base) {
+      return { commit: handover.saved, source: savedRef(job.ticket), message: undefined };
+    }
+    if (await isAncestor(checkout, handover.base, tip)) {
+      return { commit: tip, source: undefined, message: `Pushed your commit ${tip.slice(0, 12)} (${await subjectOf(checkout, tip)}).` };
+    }
+    throw new FactoryError('branch_changed', `The tip of ${job.branch} does not descend from the job's base ${handover.base.slice(0, 12)}; push it yourself or take it back.`);
   }
 
   // The MR text as the merge request's title and body: the same message as the job's commit (mrMessage).
@@ -1933,6 +2333,9 @@ export class Execution implements RunnerWork {
       }
       const job = await this.#job(workspaceName, ticket);
       const combined = this.#approvable(job);
+      if (combined) {
+        this.#checkApprovable(job, 'sf mr create');
+      }
       if (!(job.state === 'pushed' || combined)) {
         throw new FactoryError('invalid_state', `sf mr create needs pushed, or ready_for_human_review (approve, then the merge request); the job is ${job.state}.`);
       }
@@ -2021,6 +2424,13 @@ export class Execution implements RunnerWork {
       if (TERMINAL_STATES.includes(found.state)) {
         throw new FactoryError('invalid_state', `The job is already ${found.state}.`);
       }
+      if (discard) {
+        checkNotInCheckout(found);
+      }
+      if (found.state === 'handed_over') {
+        // The checkout holds the branch (SF-073): no runner may be running.
+        await this.#settled(workspaceName, ticket);
+      }
       const workspace = await this.#resolve(workspaceName);
       const existing = async (job: Job): Promise<string | null> => (job.worktree !== null && (await exists(job.worktree)) ? job.worktree : null);
       const before = await existing(found);
@@ -2028,13 +2438,20 @@ export class Execution implements RunnerWork {
         throw new FactoryError('rebase_in_progress', 'A rebase or a Git lock is in progress in the worktree; discard would lose it. Finish or abort it first, or abort without --discard.');
       }
       await this.#endSession(workspaceName, ticket);
-      // The job as its runner left it.
-      const job = await this.#job(workspaceName, ticket);
+      // The job as its runner left it; one it handed over meanwhile keeps the checkout as it is.
+      let job = await this.#job(workspaceName, ticket);
+      if (discard) {
+        checkNotInCheckout(job);
+      }
+      if (job.state === 'handed_over') {
+        job = await this.#leaveCheckout(job, workspace, false);
+      }
       const worktree = await existing(job);
       if (worktree !== null) {
         await this.#clean(job, job.iteration, worktree);
       }
-      const failure = discard ? await this.#gitLocked(workspaceName, () => this.#discard(workspace.workCheckout, job, worktree)) : undefined;
+      const ending = job;
+      const failure = discard ? await this.#gitLocked(workspaceName, () => this.#discard(workspace.workCheckout, ending, worktree)) : undefined;
       const kept = discard && failure === undefined ? null : worktree;
       const next = await this.#transition({ ...job, worktree: kept }, 'aborted', failure);
       return { state: next.state, branch: next.branch, discarded: discard && failure === undefined, worktree: kept, ...(failure !== undefined ? { error: failure } : {}) };
@@ -2202,6 +2619,7 @@ export class Execution implements RunnerWork {
   async restart(workspaceName: string, ticket: string, keepFiles = false): Promise<{ branch: string; state: JobState; check_after_minutes: number; worktree: string; archived: string; branch_deleted: string | null; kept: string[] }> {
     const { claimed, kept, archived, deleted } = await this.#locked(async () => {
       const old = await this.#job(workspaceName, ticket);
+      checkNotInCheckout(old);
       if (!RESTARTABLE_STATES.includes(old.state)) {
         throw new FactoryError('invalid_state', `sf restart needs paused, aborted, failed or needs_human; the job is ${old.state}.`);
       }
@@ -2342,7 +2760,11 @@ export class Execution implements RunnerWork {
   // A job whose workspace is no longer registered (or whose checkout is gone) is still archived:
   // only the Git clean-up of the checkout is skipped, and the result says so.
   reset(workspaceName: string, ticket: string): Promise<Retired> {
-    return this.#locked(async () => this.#retire(await this.#job(workspaceName, ticket)));
+    return this.#locked(async () => {
+      const job = await this.#job(workspaceName, ticket);
+      checkNotInCheckout(job);
+      return this.#retire(job);
+    });
   }
 
   // The dashboard's Archive of a job card: reset, for a finished job only. The state is checked
@@ -2474,14 +2896,12 @@ export class Execution implements RunnerWork {
     return job.state === 'awaiting_review' ? { status: 'running' } : undefined;
   }
 
-  // After Clean the worktree is gone: a further fix or message recreates it from the branch, and
-  // the next Clean commits the whole change again as one commit.
+  // After Clean the branch holds the one commit: a further fix or message works on in the worktree,
+  // which is kept until the push (SF-073), or recreates it from the branch when it is gone; the next
+  // Clean commits the whole change again as one commit.
   async #reopen(job: Job, workspace: Workspace): Promise<Job> {
-    const worktree = this.#worktreePath(job.workspace, job.ticket);
-    await this.#gitLocked(job.workspace, async () => {
-      await mkdir(join(worktree, '..'), { recursive: true, mode: 0o700 });
-      await addWorktree(workspace.workCheckout, worktree, job.branch, { create: false });
-    });
+    const worktree = job.worktree ?? this.#worktreePath(job.workspace, job.ticket);
+    await this.#gitLocked(job.workspace, () => attachWorktree(workspace.workCheckout, worktree, job.branch));
     const next: Job = { ...job, worktree, prepared_commit: null };
     await this.jobs.write(next);
     return next;
@@ -2493,6 +2913,7 @@ export class Execution implements RunnerWork {
 
   // A Fix section needs a job awaiting review or in human review.
   #checkFix(job: Job): void {
+    checkNotInCheckout(job);
     if (job.state !== 'awaiting_review' && job.state !== 'ready_for_human_review') {
       throw new FactoryError('invalid_state', `request_fix needs awaiting_review or ready_for_human_review; the job is ${job.state}.`);
     }
@@ -2518,6 +2939,9 @@ export class Execution implements RunnerWork {
       throw new FactoryError('iteration_limit', `${message}; the job needs the user.`);
     }
     const workspace = await this.#resolve(workspaceName);
+    // No turn while the user's checkout holds the branch (SF-073); nothing is written before.
+    const free = job;
+    await this.#gitLocked(workspaceName, () => checkBranchFree(workspace.workCheckout, free.worktree, free.branch, ticket));
     if (job.state === 'ready_for_human_review') {
       job = await this.#reopen(job, workspace);
     }
@@ -2529,7 +2953,8 @@ export class Execution implements RunnerWork {
       await this.jobs.writeLedger(workspaceName, ticket, ledger);
     }
     job = await this.#syncTask(workspace, job);
-    job = await this.#transition({ ...job, ...counts, fixes: job.fixes + 1 }, 'working');
+    // A commit prepared before this turn is never pushed (SF-073).
+    job = await this.#transition({ ...job, ...counts, fixes: job.fixes + 1, prepared_commit: null }, 'working');
     this.#session(job, workspace).send(factoryPrompt(this.#withChange(`/implement ${TASK_DIR}/${ticket}.md Fix ${fix}`, ticket, change), ticket, job.iteration + 1), DENIED_TOOLS);
     return { iteration: job.iteration + 1, check_after_minutes: this.#config.checkAfterFixMin };
   }
@@ -2542,8 +2967,15 @@ export class Execution implements RunnerWork {
 
   // sf say needs a job with a session to go on with and a non-empty text message.
   #checkSay(job: Job, message: string): void {
-    if (!['working', 'awaiting_review', 'needs_human', 'ready_for_human_review'].includes(job.state)) {
-      throw new FactoryError('invalid_state', `sf say needs working, awaiting_review, needs_human or ready_for_human_review; the job is ${job.state}.`);
+    // A step of the hand-over that was cut off is repaired by recover() first (SF-073).
+    if (job.handover !== undefined && job.handover.step !== null) {
+      throw cutOffError(job, job.handover.step);
+    }
+    if (!['working', 'awaiting_review', 'needs_human', 'ready_for_human_review', 'handed_over'].includes(job.state)) {
+      throw new FactoryError('invalid_state', `sf say needs working, awaiting_review, needs_human, ready_for_human_review or handed_over; the job is ${job.state}.`);
+    }
+    if (job.state === 'handed_over') {
+      this.#checkHandedOver(job, 'sf say');
     }
     if (message.trim() === '' || message.includes('\0')) {
       throw new FactoryError('invalid_content', 'The message must be non-empty text.');
@@ -2556,8 +2988,21 @@ export class Execution implements RunnerWork {
       let job = await this.#job(workspaceName, ticket);
       this.#checkSay(job, message);
       const workspace = this.#live.get(`${workspaceName}/${ticket}`)?.workspace ?? (await this.#resolve(workspaceName));
+      if (job.state === 'handed_over') {
+        // Ask for changes (SF-073): a free slot, then the checkout's state back into the job.
+        await this.#checkSlot(workspaceName, ticket);
+        job = await this.#askForChanges(job, workspace);
+      }
+      // No turn while the user's checkout holds the branch (SF-073), before anything else is written.
+      const free = job;
+      await this.#gitLocked(workspaceName, () => checkBranchFree(workspace.workCheckout, free.worktree, free.branch, ticket));
       if (job.state === 'ready_for_human_review') {
         job = await this.#reopen(job, workspace);
+      }
+      // A commit prepared before this turn is never pushed (SF-073).
+      if (job.prepared_commit !== null) {
+        job = { ...job, prepared_commit: null };
+        await this.jobs.write(job);
       }
       if (job.worktree === null || !(await exists(job.worktree))) {
         throw new FactoryError('worktree_missing', `The worktree of ${workspaceName}/${ticket} is missing; sf reset the ticket and start again.`);
@@ -2575,13 +3020,59 @@ export class Execution implements RunnerWork {
     });
   }
 
+  // Ask for changes on a handed-over job (SF-073), in the runner before the turn, under the
+  // workspace's Git lock: the checkout's state goes into refs/factory/<ticket>-ask and the job's
+  // worktree, and the checkout gives the branch back. A refusal before the switch (checkout_moved,
+  // checkout_busy, checkout_changing, handover_refused) leaves everything as it was; a failure after
+  // it is finished from the snapshot once more, else the job needs the user (ask_interrupted) and
+  // recover() finishes it. Returns the job without the record, with its worktree. Only under the lock.
+  async #askForChanges(job: Job, workspace: Workspace): Promise<Job> {
+    const handover = this.#checkHandedOver(job, 'sf say');
+    const checkout = workspace.workCheckout;
+    const worktree = job.worktree ?? this.#worktreePath(job.workspace, job.ticket);
+    let current = job;
+    const record = async (next: Handover): Promise<void> => {
+      current = { ...current, handover: next };
+      await this.jobs.write(current);
+    };
+    let kept: string[];
+    try {
+      ({ kept } = await this.#gitLocked(job.workspace, () => askForChanges({ checkout, worktree, ticket: job.ticket, handover, record })));
+    } catch (error) {
+      const recorded = current.handover;
+      if (recorded?.step !== 'asking' || (error instanceof FactoryError && error.code === 'checkout_changing')) {
+        if (recorded?.step === 'asking') {
+          await this.jobs.write({ ...current, handover });
+        }
+        throw error;
+      }
+      try {
+        ({ kept } = await this.#gitLocked(job.workspace, () => finishAsk(checkout, worktree, job.ticket, recorded)));
+      } catch (again) {
+        console.error(again);
+        const message = `Ask for changes failed after your checkout was saved as refs/factory/${job.ticket}-ask (${(error as Error).message.slice(0, 300)}); sf serve finishes it when it starts again.`;
+        await this.#transition({ ...current, prepared_commit: null }, 'needs_human', { code: 'ask_interrupted', message });
+        throw new FactoryError('ask_interrupted', message);
+      }
+    }
+    if (kept.length > 0) {
+      await this.#handoverNote(current, `Ask for changes left these files in your checkout, changed after the snapshot: ${kept.join(', ')}.`);
+    }
+    return { ...(await this.#endHandover(current)), worktree, prepared_commit: null };
+  }
+
   // sf serve's side of a request: under the lock (so approve, abort and reset see it queued), the
   // state is checked first, so a request the runner would refuse starts no runner, and the request
   // is queued; then the runner's reply, outside the lock, is the result. The runner checks again
   // when it applies the request.
   async #request(workspaceName: string, ticket: string, request: Exclude<RunnerRequest, { kind: 'turn' }>): Promise<unknown> {
     const id = await this.#locked(async () => {
-      this.#check(await this.#job(workspaceName, ticket), request);
+      const job = await this.#job(workspaceName, ticket);
+      this.#check(job, request);
+      // Ask for changes takes a slot of SF_MAX_JOBS again (SF-073), as Resume does.
+      if (request.kind === 'say' && job.state === 'handed_over') {
+        await this.#checkSlot(workspaceName, ticket);
+      }
       return this.#serveRunners().queue(workspaceName, ticket, request);
     });
     return this.#serveRunners().reply(workspaceName, ticket, id);

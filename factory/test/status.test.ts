@@ -5,7 +5,8 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { type IterationMeta, type Job, JobStore } from '../src/jobs.js';
-import { elapsedSeconds, formatCost, formatElapsed, formatSince, statusRows } from '../src/status.js';
+import { jobNotification, NOTIFIED_STATES } from '../src/notify.js';
+import { elapsedSeconds, formatCost, formatElapsed, formatSince, handoverLines, statusRows } from '../src/status.js';
 import { newEnv, runCli, temp } from './support/harness.js';
 
 // SINCE prints the local time of the sf process (SF-049); the zone is set, not the machine's.
@@ -181,4 +182,33 @@ test('sf help documents the EST_USD (an estimate) and ELAPSED columns and dashbo
   assert.doesNotMatch(help.stdout, /COST_USD/);
   assert.match(help.stdout, /ELAPSED: wall-clock time since the job was created, waiting included; stops at the last state change once pushed, aborted or failed/);
   assert.match(help.stdout, /dashboard --open: Linux with xdg-open; waits for the launcher at most 10 s; on a launcher failure exits 1 and leaves the printed URL to open by hand/);
+});
+
+test('sf status and the notification of a handed-over job (SF-073): in your checkout on the branch with the MR title and the file lines; a skipped hand-over carries its message', async () => {
+  const commit = 'a'.repeat(40);
+  const handed: Job = {
+    ...base, state: 'handed_over', prepared_commit: commit,
+    handover: { branch: 'T-1-demo', saved: commit, base: 'b'.repeat(40), previous: { branch: 'main' }, untracked: [], template: null, cleanup: null, at: CREATED, checked_at: null, step: null },
+  };
+  assert.deepEqual(handoverLines(handed, 'feat(T-1): Demo'), ['in your checkout on T-1-demo', 'MR title: feat(T-1): Demo']);
+  assert.deepEqual(handoverLines(handed, undefined), ['in your checkout on T-1-demo']);
+  const skipped: Job = { ...base, state: 'ready_for_human_review', handoff_skipped: { code: 'checkout_dirty', message: 'T-1: ready, but your checkout has changes; hand it over when you are ready' } };
+  assert.deepEqual(handoverLines(skipped, 'feat(T-1): Demo'), ['not handed over to your checkout: T-1: ready, but your checkout has changes; hand it over when you are ready (checkout_dirty); sf handover hands it over']);
+  assert.deepEqual(handoverLines({ ...base, state: 'ready_for_human_review' }, 'x'), []);
+
+  assert.ok(NOTIFIED_STATES.includes('handed_over'));
+  const note = jobNotification(handed, ['feat(T-1): Demo', '2 files']);
+  assert.deepEqual([note.title, note.body, note.priority], ['T-1: in your checkout', 'in your checkout on T-1-demo\nfeat(T-1): Demo\n2 files', 'default']);
+  const skippedNote = jobNotification(skipped, ['feat(T-1): Demo', '2 files']);
+  assert.equal(skippedNote.body, 'branch: T-1-demo\nT-1: ready, but your checkout has changes; hand it over when you are ready\nfeat(T-1): Demo');
+
+  // sf status of one job prints the line, without sf serve.
+  const env = await newEnv('status-handed');
+  const jobs = new JobStore(env.state);
+  await jobs.write({ ...handed, ticket: 'T-9' });
+  await jobs.writeMrText('app', 'T-9', 'feat(T-9): Demo\n\n## What\nx\n');
+  const one = await runCli(env, ['status', 'app', 'T-9']);
+  assert.equal(one.code, 0, one.stderr);
+  assert.match(one.stdout, /\nin your checkout on T-1-demo\nMR title: feat\(T-9\): Demo\n/);
+  assert.match(one.stdout, /handed_over/);
 });

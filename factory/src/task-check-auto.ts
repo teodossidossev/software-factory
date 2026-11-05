@@ -17,7 +17,7 @@ import { FactoryError } from './errors.js';
 import { type Job, type JobStore, TERMINAL_STATES } from './jobs.js';
 import type { PlanCheck } from './queue.js';
 import type { Workspace } from './registry.js';
-import { type CheckRecord, recordVerdict, severityCounts, type TaskChecks, taskSha256 } from './task-check.js';
+import { type CheckRecord, currentCheckSha256, recordVerdict, severityCounts, type TaskChecks } from './task-check.js';
 import { isDraft, readTask, TASK_DIR, TICKET_PATTERN } from './task-file.js';
 
 // The time from a ticket's last trigger to its check.
@@ -154,8 +154,10 @@ export class AutoChecks {
       return;
     }
     try {
-      const task = await readTask(await this.#resolve(workspace), ticket);
-      if ((await this.#checks.store.read(workspace, ticket, taskSha256(task))) !== undefined) {
+      const resolved = await this.#resolve(workspace);
+      const task = await readTask(resolved, ticket);
+      // Found by the check sha256 (SF-065): the text and its referenced images.
+      if ((await this.#checks.store.read(workspace, ticket, await currentCheckSha256(resolved, ticket, task))) !== undefined) {
         return;
       }
     } catch (error) {
@@ -312,15 +314,18 @@ export class AutoChecks {
   // any status yet, and whose ticket has no running job (a paused one does not count).
   async #shouldRun(workspace: string, ticket: string): Promise<boolean> {
     let task: string;
+    let resolved: Workspace;
     try {
-      task = await readTask(await this.#resolve(workspace), ticket);
+      resolved = await this.#resolve(workspace);
+      task = await readTask(resolved, ticket);
     } catch (error) {
       if (error instanceof FactoryError) {
         return false;
       }
       throw error;
     }
-    if (isDraft(task) || (await this.#checks.store.read(workspace, ticket, taskSha256(task))) !== undefined) {
+    // Found by the check sha256 (SF-065): the text and its referenced images.
+    if (isDraft(task) || (await this.#checks.store.read(workspace, ticket, await currentCheckSha256(resolved, ticket, task))) !== undefined) {
       return false;
     }
     const job = await this.#jobs.read(workspace, ticket);

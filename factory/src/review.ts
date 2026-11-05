@@ -5,6 +5,7 @@
 import { dirname, resolve } from 'node:path';
 import { type Options, query, type SandboxSettings, type SDKMessage, type SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
 import * as z from 'zod/v4';
+import { type ImageRef, promptInput } from './attachments.js';
 import type { FileChange } from './jobs.js';
 import { type FixItem, fixItemLine, LEDGER_REF, type LedgerEntry, SCOPE_PROBLEM, SENSITIVE_PROBLEM, settledLines } from './ledger.js';
 import { handbookSection } from './prompts.js';
@@ -173,6 +174,9 @@ export interface ReviewOptions {
   // Every SDK message of the session, in order, awaited before the next one (SF-045); a failing
   // call changes nothing of the outcome.
   onMessage?: (message: SDKMessage) => Promise<void>;
+  // The Task's images (SF-065): their image blocks follow the prompt in the session's user message,
+  // each after a line naming it, as for the Implementer.
+  images?: ImageRef[] | undefined;
 }
 
 // The instruction files the CLI loads as project instructions from a directory, with
@@ -266,8 +270,10 @@ export async function runStructuredSession<T>(prompt: string, options: ReviewOpt
   const onAbort = (): void => abortController.abort();
   options.signal.addEventListener('abort', onAbort, { once: true });
   let result: SDKResultMessage | undefined;
+  let input: Awaited<ReturnType<typeof promptInput>> | undefined;
   try {
-    const messages = query({ prompt, options: readOnlySessionOptions(options, abortController, session.schema, session.deny, session.hooks) });
+    input = await promptInput(prompt, options.images);
+    const messages = query({ prompt: input.prompt, options: readOnlySessionOptions(options, abortController, session.schema, session.deny, session.hooks) });
     for await (const message of messages) {
       await options.onMessage?.(message).catch((error: unknown) => console.error(error));
       if (message.type === 'system' && message.subtype === 'init' && typeof message.model === 'string' && message.model !== '') {
@@ -275,11 +281,13 @@ export async function runStructuredSession<T>(prompt: string, options: ReviewOpt
       }
       if (message.type === 'result') {
         result = message;
+        input.done();
       }
     }
   } catch (error) {
     return failed(`The ${noun} session failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
+    input?.done();
     options.signal.removeEventListener('abort', onAbort);
     // Ends the child process when the session stopped early.
     abortController.abort();

@@ -22,8 +22,10 @@
 // An Implementer turn can make a list of tool calls (each a tool_use and its tool_result) and can
 // end like the real CLI at its turn limit (SF-069): the error_max_turns result with the CLI's
 // error text, then exit code 1, on which the SDK throws "Claude Code returned an error result".
+// A user message with a block that is not text (the images of SF-065) is logged with its blocks too:
+// each text block's text, each image block's media type, size and sha256 (never its bytes).
 import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { matchesGlob } from '../../src/rules.js';
@@ -207,8 +209,11 @@ function giveStructuredOutput(output: unknown): Promise<string | undefined> {
   return hookedCall('so1', 'StructuredOutput', output as Record<string, unknown>, () => 'Structured output provided successfully');
 }
 
-function run(prompt: string): void {
-  appendFileSync(join(home, `${name}.log`), `${JSON.stringify({ argv, prompt, sessionId, cwd: process.cwd(), env: Object.keys(process.env).sort() })}\n`);
+// What the log keeps of a user message's blocks.
+type LoggedBlock = { type: 'text'; text: string } | { type: 'image'; media_type: string; bytes: number; sha256: string } | { type: string };
+
+function run(prompt: string, blocks?: LoggedBlock[]): void {
+  appendFileSync(join(home, `${name}.log`), `${JSON.stringify({ argv, prompt, sessionId, cwd: process.cwd(), env: Object.keys(process.env).sort(), ...(blocks !== undefined ? { blocks } : {}) })}\n`);
   if (review) {
     void runReview();
     return;
@@ -327,7 +332,7 @@ async function runReview(): Promise<void> {
 const lines = createInterface({ input: process.stdin });
 lines.on('line', (line) => {
   const message = JSON.parse(line) as {
-    type: string; request_id?: string; message?: { content: Array<{ text?: string }> };
+    type: string; request_id?: string; message?: { content: Array<{ type?: string; text?: string; source?: { media_type?: string; data?: string } }> };
     request?: { subtype?: string; hooks?: { PreToolUse?: Array<{ hookCallbackIds?: string[] }> } };
     response?: { request_id?: string; response?: Record<string, unknown> };
   };
@@ -341,8 +346,21 @@ lines.on('line', (line) => {
     }
     out({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id, response: {} } });
   } else if (message.type === 'user') {
-    const prompt = (message.message?.content ?? []).map((part) => part.text ?? '').join('');
-    setTimeout(() => run(prompt), turn.delayMs ?? 0);
+    const content = message.message?.content ?? [];
+    const prompt = content.map((part) => part.text ?? '').join('');
+    const blocks = content.some((part) => part.type !== 'text')
+      ? content.map((part): LoggedBlock => {
+        if (part.type === 'text') {
+          return { type: 'text', text: part.text ?? '' };
+        }
+        if (part.type === 'image') {
+          const data = Buffer.from(part.source?.data ?? '', 'base64');
+          return { type: 'image', media_type: part.source?.media_type ?? '', bytes: data.length, sha256: createHash('sha256').update(data).digest('hex') };
+        }
+        return { type: String(part.type) };
+      })
+      : undefined;
+    setTimeout(() => run(prompt, blocks), turn.delayMs ?? 0);
   }
 });
 lines.on('close', () => setTimeout(() => process.exit(0), (turn.delayMs ?? 0) + 50));

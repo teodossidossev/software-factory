@@ -6,11 +6,13 @@
 // commits and a pushed one, --keep-files. A paused job survives an sf serve restart and does not
 // count toward the run queue's limit max_running (SF-071); Resume, a start by hand, is never held by it.
 import assert from 'node:assert/strict';
-import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { createHash } from 'node:crypto';
+import { addAttachment, removeAttachment } from '../src/attachments.js';
 import { JobStore } from '../src/jobs.js';
-import { firstPrompt } from '../src/execution.js';
+import { firstPrompt, imagesChangedNote } from '../src/execution.js';
 import { factoryPrompt } from '../src/prompts.js';
 import { taskSha256 } from '../src/task-file.js';
 import {
@@ -623,6 +625,101 @@ test('Usage limit in the gate (SF-072): Codex\'s limit parks the job (provider c
   }
 });
 
+// The images of the SF-065 tests.
+const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('png-body')]);
+const PNG2 = Buffer.concat([PNG, Buffer.from('-second')]);
+const PNG3 = Buffer.concat([PNG, Buffer.from('-third')]);
+const GIF = Buffer.from('GIF89a-gif-body');
+const sha = (data: Buffer): string => createHash('sha256').update(data).digest('hex');
+
+test('images (SF-065): a Resume finds an image changed while paused (the text unchanged), refuses an unusable one, copies the new one and names it; Restart and a Resume before the first turn give the blocks again', async () => {
+  const env = await newEnv('pause-images');
+  const repo = await newRepo(env, 'pause-images-repo', false);
+  const workspace = { name: 'app', readCheckout: repo, workCheckout: repo };
+  const jobs = new JobStore(env.state);
+  await putTask(env, repo, 'P-1', 'Images');
+  await addAttachment(workspace, 'P-1', PNG, jobs);
+  const text = `${task('P-1', 'Images')}\nSee ![the error](P-1/1.png).\n`;
+  await writeFile(join(repo, '.software-factory', 'P-1.md'), text);
+  await script(env, [
+    { write: { 'a.txt': 'a\n' } },
+    { delayMs: LONG, write: { 'never.txt': 'x\n' } },
+    { write: { 'b.txt': 'b\n' }, text: 'Went on.' },
+    // The restarted job's first turn; restarted again, a first turn that never reports a session,
+    // then the Resume's.
+    { write: { 'c.txt': 'c\n' } },
+    { delayMs: LONG },
+    { write: { 'd.txt': 'd\n' } },
+  ]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'P-1' });
+    await waitFor(served, 'P-1', 'awaiting_review', 1);
+    assert.equal((await runCli(env, ['say', 'app', 'P-1', 'Go', 'on'])).code, 0);
+    await turnsStarted(env, 2);
+    assert.equal((await runCli(env, ['pause', 'app', 'P-1'])).code, 0);
+    await nothingRuns(env, served);
+
+    // An image that cannot be used refuses the Resume; the job stays paused, its copies as they were.
+    await writeFile(join(repo, '.software-factory', 'P-1', '1.png'), GIF);
+    const refusal = await runCli(env, ['resume', 'app', 'P-1']);
+    assert.equal(refusal.code, 1);
+    assert.match(refusal.stderr, /P-1\/1\.png: not the image its name says/);
+    assert.equal((await jobs.read('app', 'P-1'))!.state, 'paused');
+    assert.deepEqual(await readFile(join(jobDir(env, 'P-1'), 'attachments', '1.png')), PNG);
+
+    // The image changes while paused, the Task text does not: Resume copies it and names it.
+    await removeAttachment(workspace, 'P-1', '1.png', jobs);
+    await addAttachment(workspace, 'P-1', PNG2, jobs, '1.png');
+    const resumed = await runCli(env, ['resume', 'app', 'P-1']);
+    assert.equal(resumed.code, 0, resumed.stderr);
+    assert.match(resumed.stdout, /^task_changed: false$/m);
+    await waitFor(served, 'P-1', 'awaiting_review', 2);
+    const record = { name: '1.png', type: 'image/png', bytes: PNG2.length, sha256: sha(PNG2) };
+    assert.deepEqual((await jobs.read('app', 'P-1'))!.attachments, [record]);
+    assert.deepEqual(await readFile(join(jobDir(env, 'P-1'), 'attachments', '1.png')), PNG2);
+    assert.deepEqual(await readFile(join(worktreeOf(env, 'P-1'), '.software-factory', 'P-1', '1.png')), PNG2);
+    const imagesLine = { dir: join(worktreeOf(env, 'P-1'), '.software-factory', 'P-1'), names: ['1.png'] };
+    let log = await fakeLog(env);
+    // The same session goes on: the line and the folder, no blocks.
+    assert.equal(log.at(-1)!.prompt, factoryPrompt(`Continue where you stopped.\n\n${imagesChangedNote(['1.png'])}`, 'P-1', 2, imagesLine));
+    assert.equal(log.at(-1)!.blocks, undefined);
+    const attachments = (await eventsOf(env, 'P-1')).filter((event) => event.type === 'attachments').map((event) => event.images);
+    assert.deepEqual(attachments, [[{ ...record, bytes: PNG.length, sha256: sha(PNG) }], [record]]);
+
+    // Restart is refused while an image cannot be used, and nothing changes.
+    assert.equal((await runCli(env, ['abort', 'app', 'P-1'])).code, 0);
+    await rm(join(repo, '.software-factory', 'P-1', '1.png'));
+    const early = await runCli(env, ['restart', 'app', 'P-1']);
+    assert.equal(early.code, 1);
+    assert.match(early.stderr, /P-1\/1\.png: missing/);
+    assert.equal((await jobs.read('app', 'P-1'))!.state, 'aborted');
+    await addAttachment(workspace, 'P-1', PNG3, jobs, '1.png');
+    assert.equal((await runCli(env, ['restart', 'app', 'P-1'])).code, 0);
+    await waitFor(served, 'P-1', 'awaiting_review', 1);
+    const block = { type: 'image', media_type: 'image/png', bytes: PNG3.length, sha256: sha(PNG3) };
+    const blocks = [
+      { type: 'text', text: factoryPrompt(firstPrompt('P-1', []), 'P-1', 1, imagesLine) },
+      { type: 'text', text: 'Image P-1/1.png ("the error"), referenced in the Task file:' },
+      block,
+    ];
+    assert.deepEqual((await fakeLog(env)).at(-1)!.blocks, blocks);
+    assert.deepEqual((await jobs.read('app', 'P-1'))!.attachments, [{ ...record, bytes: PNG3.length, sha256: sha(PNG3) }]);
+
+    // Paused before its first turn reported a session: the Resume sends /implement with the blocks again.
+    assert.equal((await runCli(env, ['abort', 'app', 'P-1'])).code, 0);
+    assert.equal((await runCli(env, ['restart', 'app', 'P-1'])).code, 0);
+    await turnsStarted(env, 5);
+    assert.equal((await runCli(env, ['pause', 'app', 'P-1'])).code, 0);
+    assert.equal((await runCli(env, ['resume', 'app', 'P-1'])).code, 0);
+    await waitFor(served, 'P-1', 'awaiting_review', 1);
+    log = await fakeLog(env);
+    assert.deepEqual(log.at(-1)!.blocks, blocks);
+  } finally {
+    await stop(served);
+  }
+});
+
 test('Usage limit in the simplification pass (SF-072): parked with no simplify.json and no simplify event; resumed, the pass runs again, then MR preparation; an MR turn that hits the limit stops in needs_human', async () => {
   const env = await newEnv('limit-simplify', { SF_REVIEW: 'on', SF_SIMPLIFY: 'on' });
   const repo = await newRepo(env, 'limit-simplify-repo', false);
@@ -687,6 +784,42 @@ test('Usage limit (SF-072): a parked job survives an sf serve restart; the queue
     assert.equal((await fakeLog(env)).at(-1)!.prompt.split('\n')[0], 'Continue where you stopped.');
   } finally {
     await runCli(env, ['abort', 'app', 'L-1']);
+    await stop(served);
+  }
+});
+
+test('images (SF-065): a job paused outside working gets the new set on Resume with no prompt; the reviewers get it', async () => {
+  const env = await newEnv('pause-images-review', { SF_REVIEW: 'on' });
+  const repo = await newRepo(env, 'pause-images-review-repo', false);
+  const workspace = { name: 'app', readCheckout: repo, workCheckout: repo };
+  const jobs = new JobStore(env.state);
+  await putTask(env, repo, 'P-1', 'Review images');
+  await addAttachment(workspace, 'P-1', PNG, jobs);
+  await writeFile(join(repo, '.software-factory', 'P-1.md'), `${task('P-1', 'Review images')}\nSee ![shot](P-1/1.png).\n`);
+  await script(env, [{ write: { 'a.txt': 'a\n' } }, { write: { '.software-factory/P-1.mr.md': mrText('feat(P-1): Review images') }, text: 'prepared' }]);
+  await reviewScript(env, [{ delayMs: LONG, output: CLEAN }, { output: CLEAN }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'P-1' });
+    await waitFor(served, 'P-1', 'awaiting_review', 1);
+    await until('the review to start', async () => (await count(env, 'fake-review')) >= 1);
+    assert.equal((await runCli(env, ['pause', 'app', 'P-1'])).code, 0);
+    await nothingRuns(env, served);
+    await removeAttachment(workspace, 'P-1', '1.png', jobs);
+    await addAttachment(workspace, 'P-1', PNG2, jobs, '1.png');
+    assert.equal((await runCli(env, ['resume', 'app', 'P-1'])).code, 0);
+    await waitFor(served, 'P-1', 'ready_for_human_review', 1);
+    const reviews = await reviewLog(env);
+    assert.equal(reviews.length, 1);
+    assert.deepEqual(reviews[0]!.blocks?.slice(1), [
+      { type: 'text', text: 'Image P-1/1.png ("shot"), referenced in the Task file:' },
+      { type: 'image', media_type: 'image/png', bytes: PNG2.length, sha256: sha(PNG2) },
+    ]);
+    // No Implementer prompt on that Resume: the first turn and the MR text turn only.
+    const log = await fakeLog(env);
+    assert.equal(log.length, 2);
+    assert.doesNotMatch(log[1]!.prompt, /images changed/);
+  } finally {
     await stop(served);
   }
 });

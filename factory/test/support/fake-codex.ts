@@ -6,7 +6,9 @@
 // prints JSONL events (a reasoning item, a command started and completed, lines that are not JSON objects,
 // an agent message, optionally one above the 16 KiB bound of SF-045) ending in turn.completed with
 // a usage, or simulates a failure: an exit code, no output, an invalid output, an error event, a
-// delay (for timeouts and aborts).
+// delay (for timeouts and aborts). Each --image file (SF-065) is logged by its path and the sha256
+// of its bytes when the run starts ("missing" when it cannot be read).
+import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -64,7 +66,14 @@ process.stdin.on('data', (chunk: Buffer) => {
   prompt += chunk.toString('utf8');
 });
 process.stdin.on('end', () => {
-  appendFileSync(join(home, 'fake-codex.log'), `${JSON.stringify({ argv, cwd: process.cwd(), prompt, env: Object.keys(process.env).sort(), pid: process.pid })}\n`);
+  const images = argv.flatMap((arg, index) => (arg === '--image' && index + 1 < argv.length ? [argv[index + 1]!] : [])).map((path) => {
+    try {
+      return { path, sha256: createHash('sha256').update(readFileSync(path)).digest('hex') };
+    } catch {
+      return { path, sha256: 'missing' };
+    }
+  });
+  appendFileSync(join(home, 'fake-codex.log'), `${JSON.stringify({ argv, cwd: process.cwd(), prompt, env: Object.keys(process.env).sort(), pid: process.pid, images })}\n`);
   setTimeout(answer, run.delayMs ?? 0);
 });
 

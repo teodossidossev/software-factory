@@ -6,13 +6,14 @@
 // accepts (the fake refuses one it would not) and the retry of a failed review (SF-044).
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
 import { handbookSection } from '../src/prompts.js';
 import type { FileChange } from '../src/jobs.js';
-import { actedVerdict, decide, fixContent, REVIEW_DENIED_TOOLS, REVIEW_SCHEMA, type ReviewItem, reviewPrompt, reviewSessionOptions, scopeItem, sensitiveItem, unacceptedItems, uniqueNits } from '../src/review.js';
+import { actedVerdict, decide, fixContent, REVIEW_DENIED_TOOLS, REVIEW_SCHEMA, type ReviewItem, reviewPrompt, reviewSessionOptions, runReview, scopeItem, sensitiveItem, unacceptedItems, uniqueNits } from '../src/review.js';
 import { loadHandbook } from '../src/server.js';
 import { writeTask } from '../src/task-file.js';
 import { act, fetchRaw } from './support/dashboard-client.js';
@@ -642,4 +643,37 @@ test('retry a failed review: sf review and the dashboard put the job back to awa
   } finally {
     await stop(served);
   }
+});
+
+test('runReview with images (SF-065): the session\'s user message is the review prompt, then each image named and its block, in order; without images the prompt alone', async () => {
+  const env = await newEnv('review-images');
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('png-body')]);
+  const gif = Buffer.from('GIF89a-gif-body');
+  await writeFile(join(env.home, '1.png'), png);
+  await writeFile(join(env.home, 'form.gif'), gif);
+  const clean = { verdict: 'clean', summary: 'Right.', items: [], accepted_sensitive: [] };
+  await reviewScript(env, [{ output: clean }, { output: clean }]);
+  const images = [
+    { ticket: 'T-1', name: 'form.gif', alt: 'the form', type: 'image/gif' as const, path: join(env.home, 'form.gif') },
+    { ticket: 'T-1', name: '1.png', alt: '', type: 'image/png' as const, path: join(env.home, '1.png') },
+  ];
+  const home = process.env.HOME;
+  process.env.HOME = env.home;
+  try {
+    const options = { cwd: env.home, claudePath: FAKE, sandbox: undefined, model: undefined, maxTurns: 3, signal: new AbortController().signal };
+    assert.equal((await runReview('Review this.', { ...options, images })).ok, true);
+    assert.equal((await runReview('Review this.', options)).ok, true);
+  } finally {
+    process.env.HOME = home;
+  }
+  const sha = (data: Buffer): string => createHash('sha256').update(data).digest('hex');
+  const [withImages, without] = await reviewLog(env);
+  assert.deepEqual(withImages!.blocks, [
+    { type: 'text', text: 'Review this.' },
+    { type: 'text', text: 'Image T-1/form.gif ("the form"), referenced in the Task file:' },
+    { type: 'image', media_type: 'image/gif', bytes: gif.length, sha256: sha(gif) },
+    { type: 'text', text: 'Image T-1/1.png (""), referenced in the Task file:' },
+    { type: 'image', media_type: 'image/png', bytes: png.length, sha256: sha(png) },
+  ]);
+  assert.deepEqual([without!.prompt, without!.blocks], ['Review this.', undefined]);
 });

@@ -14,6 +14,17 @@ test('factoryPrompt puts the prompt first, then a blank line and the rules with 
   assert.doesNotMatch(prompt, /<ticket>|<N>/);
 });
 
+test('factoryPrompt with images (SF-065): one line names their folder and names before the rules; without images the prompt is as before', () => {
+  const plain = factoryPrompt('/implement .software-factory/PROJ-1.md', 'PROJ-1', 1);
+  assert.equal(factoryPrompt('/implement .software-factory/PROJ-1.md', 'PROJ-1', 1, { dir: '/w/.software-factory/PROJ-1', names: [] }), plain);
+  const prompt = factoryPrompt('/implement .software-factory/PROJ-1.md', 'PROJ-1', 1, { dir: '/w/.software-factory/PROJ-1', names: ['1.png', '2.png'] });
+  assert.equal(prompt, [
+    '/implement .software-factory/PROJ-1.md', '',
+    "The Task's images are in /w/.software-factory/PROJ-1: 1.png, 2.png. Read them when you need them.", '',
+    FACTORY_PROMPT_RULES.replaceAll('<ticket>', 'PROJ-1').replace('<N>', '1'),
+  ].join('\n'));
+});
+
 test('iterationCost is the SDK total minus the previous total, or the total for a first iteration or new session', () => {
   assert.equal(iterationCost(0.5, null), 0.5);
   assert.equal(iterationCost(0.7084, 0.6656), 0.0428);

@@ -75,6 +75,14 @@ one of an earlier version is stale. It only advises: Start stays the User's call
 Task from it.
 _Avoid_: plan review, lint, pre-review (for a Task check); Review (that is of an Iteration)
 
+**Attachment**:
+An image of a Ticket (PNG, JPEG, WebP or GIF) kept next to its Task file in
+`.software-factory/<ticket>/`. Only the Attachments the Task file refers to as
+`![alt](<ticket>/<name>)` count for a Job: it copies them at Start, Restart and Resume and gives
+the same set, from its own copy, to the Implementer, the Reviews and the Gate; the Task check sees
+them too.
+_Avoid_: screenshot file, asset, upload (for an Attachment)
+
 **Fix section**:
 A `## Fix N` section appended to the Task file after a Review, by the factory from a verdict it
 acts on as `fix`: the blocker and major items, then the Nits as optional, each with its Ledger id.

@@ -16,9 +16,17 @@ export const FACTORY_PROMPT_RULES = `Rules from the Software Factory:
   ## Fix N items (only when answering a Fix section: one row per item, by its id: | R7 | fixed / contested / escalated / left | <evidence or note> |)
 - Answer each Fix item: fixed; contested only with evidence a reviewer can check without you (a path:line in the worktree, a test name, or a §section of the Task file), else it reads as open; escalated only when it turns on something only the user knows, outside the repository and the Task file (the note is the question); left for nits only.`;
 
+// The line of factoryPrompt that names the Task's images (SF-065); the job stream recognises it.
+export function imagesLine(dir: string, names: readonly string[]): string {
+  return `The Task's images are in ${dir}: ${names.join(', ')}. Read them when you need them.`;
+}
+
 // first: the command or the user's message; iteration: the number of the iteration to be published.
-export function factoryPrompt(first: string, ticket: string, iteration: number): string {
-  return `${first}\n\n${FACTORY_PROMPT_RULES.replaceAll('<ticket>', ticket).replace('<N>', String(iteration))}`;
+// images: the job's images (SF-065), dir the absolute path of their folder in the worktree; with
+// any, one line names them before the rules.
+export function factoryPrompt(first: string, ticket: string, iteration: number, images?: { dir: string; names: string[] }): string {
+  const line = images !== undefined && images.names.length > 0 ? `${imagesLine(images.dir, images.names)}\n\n` : '';
+  return `${first}\n\n${line}${FACTORY_PROMPT_RULES.replaceAll('<ticket>', ticket).replace('<N>', String(iteration))}`;
 }
 
 // This iteration's cost from the SDK's cumulative session total; a total below the previous one

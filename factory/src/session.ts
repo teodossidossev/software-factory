@@ -8,6 +8,7 @@
 // the turn stops. Every prompt sent starts a chain; the driver sends at most turnLimitContinues
 // continuations per chain, whatever the hook answers.
 import { query, type SandboxSettings, type SDKMessage, type SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
+import { type ImageRef, promptInput } from './attachments.js';
 
 // Markers a running Claude Code session sets for its children; a session inheriting them acts as
 // a child and may not save its transcript.
@@ -55,6 +56,8 @@ export interface SessionOptions {
 interface Queued {
   prompt: string;
   disallowedTools: string[];
+  // The image blocks sent after the prompt text (SF-065); a continuation has none.
+  images?: ImageRef[] | undefined;
   // Continuations sent before this prompt in its chain: 0 for a prompt sent, n for the nth continuation.
   continued: number;
 }
@@ -93,8 +96,9 @@ export type IdleOutcome =
 export interface SessionHooks {
   // Every SDK message, in order; awaited before the next one is handled.
   message(message: SDKMessage): Promise<void>;
-  // A prompt is about to be sent as a turn; continued: as in Queued (0 starts a chain).
-  prompt(prompt: string, continued: number): Promise<void>;
+  // A prompt is about to be sent as a turn; continued: as in Queued (0 starts a chain); images: the
+  // image blocks that go with it, if any.
+  prompt(prompt: string, continued: number, images?: ImageRef[]): Promise<void>;
   // A turn ended at maxTurns; without this hook it fails with max_turns as any failed turn.
   turnLimit?(turn: LimitedTurn): Promise<LimitAnswer>;
   // The queue is empty after one or more turns.
@@ -175,11 +179,13 @@ export class ImplementerSession {
     return this.#running;
   }
 
-  send(prompt: string, disallowedTools: string[]): void {
+  // images: sent after the prompt text in the same user message (SF-065); without any, the prompt
+  // goes to query() as the string.
+  send(prompt: string, disallowedTools: string[], images?: ImageRef[]): void {
     if (this.#closed) {
       throw new Error('The session is closed.');
     }
-    this.#queue.push({ prompt, disallowedTools, continued: 0 });
+    this.#queue.push({ prompt, disallowedTools, continued: 0, ...(images !== undefined && images.length > 0 ? { images } : {}) });
     if (!this.#running) {
       this.#running = true;
       this.#drained = this.#drain();
@@ -256,17 +262,18 @@ export class ImplementerSession {
   }
 
   async #turn(next: Queued): Promise<TurnResult> {
-    const { prompt, disallowedTools } = next;
+    const { prompt, disallowedTools, images } = next;
     this.#calls = [];
-    await this.#hooks.prompt(prompt, next.continued);
+    await this.#hooks.prompt(prompt, next.continued, images);
     // Closed while the hook ran (it reads the worktree, SF-069): no turn starts.
     if (this.#closed) {
       throw new TurnError('closed', 'The session was closed before the turn started.');
     }
     const abortController = new AbortController();
     this.#abort = abortController;
+    const input = await promptInput(prompt, images);
     const turn = query({
-      prompt,
+      prompt: input.prompt,
       options: {
         abortController,
         cwd: this.#options.cwd,
@@ -297,6 +304,7 @@ export class ImplementerSession {
         this.#calls.push(...toolCalls(message));
         if (message.type === 'result') {
           result = message;
+          input.done();
         }
       }
     } catch (error) {
@@ -307,6 +315,7 @@ export class ImplementerSession {
       }
       throw error;
     } finally {
+      input.done();
       // Ends the child process when the turn stopped early (a mismatch or an error).
       abortController.abort();
     }

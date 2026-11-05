@@ -13,6 +13,10 @@ const RULES_MARK = '\n\nRules from the Software Factory:';
 // changeNote (src/execution.ts), appended after the prompt with a blank line.
 const CHANGE_NOTE = /(?:^|\n\n)The Task file \S+ changed since you were last given it/u;
 const KEPT_FILES = '\n\nThis job restarts an earlier job of ';
+// The images line of factoryPrompt (src/prompts.ts) and the Resume's note of changed images
+// (src/execution.ts), SF-065: each after a blank line, the images line last before the rules.
+const IMAGES_LINE = /\n\nThe Task's images are in .+: .+\. Read them when you need them\.$/u;
+const IMAGES_CHANGED = /\n\nThe Task's images changed while the job was paused: .+\.$/u;
 const CONTINUE = 'Continue where you stopped.';
 
 export type Who = 'implementer' | 'claude' | 'codex' | 'you' | 'factory' | 'mr';
@@ -35,8 +39,9 @@ export interface SimplifySuggestion {
 }
 
 type Body =
-  | { t: 'prompt'; kind: PromptKind; text: string; first: string; task_changed: boolean; fix_n?: number; fix?: string }
-  | { t: 'user'; text: string; task_changed: boolean }
+  // images: the names of the image blocks sent with the prompt (SF-065).
+  | { t: 'prompt'; kind: PromptKind; text: string; first: string; task_changed: boolean; fix_n?: number; fix?: string; images?: string[] }
+  | { t: 'user'; text: string; task_changed: boolean; images?: string[] }
   | { t: 'text'; text: string }
   | { t: 'tool'; id: string; line: string; detail: string }
   | { t: 'tool_result'; id: string; out: string; result: string; err: boolean }
@@ -148,19 +153,23 @@ function fixSection(task: string | undefined, fix: number): string {
   return start < 0 ? '' : lines.slice(start).join('\n').trim();
 }
 
-async function promptEntry(prompt: string, ctx: StreamContext): Promise<Draft> {
+async function promptEntry(prompt: string, ctx: StreamContext, sent: unknown): Promise<Draft> {
   const rules = prompt.indexOf(RULES_MARK);
-  let text = rules < 0 ? prompt : prompt.slice(0, rules);
+  let text = (rules < 0 ? prompt : prompt.slice(0, rules)).replace(IMAGES_LINE, '');
+  // The note of changed images is cut too; task_changed stays the Task text's (SF-065).
+  text = text.replace(IMAGES_CHANGED, '');
   const note = CHANGE_NOTE.exec(text);
   const taskChanged = note !== null;
   if (note !== null) {
     text = text.slice(0, note.index);
   }
+  const names = Array.isArray(sent) ? sent.map((image) => asRecord(image).name).filter((name): name is string => typeof name === 'string') : [];
+  const images = names.length > 0 ? { images: names } : {};
   const first = text.split('\n')[0]!;
   const implement = /^\/implement \S+$/u.test(first);
   const fix = /^\/implement \S+ Fix (\d+)$/u.exec(first);
   const rest = text.slice(first.length);
-  const base = { t: 'prompt' as const, text, first, task_changed: taskChanged };
+  const base = { t: 'prompt' as const, text, first, task_changed: taskChanged, ...images };
   if (implement && (rest === '' || rest.startsWith(KEPT_FILES))) {
     return { ...base, who: 'factory', kind: 'implement' };
   }
@@ -177,7 +186,7 @@ async function promptEntry(prompt: string, ctx: StreamContext): Promise<Draft> {
   if (text === CONTINUE) {
     return { ...base, who: 'factory', kind: 'continue' };
   }
-  return { t: 'user', who: 'you', text, task_changed: taskChanged };
+  return { t: 'user', who: 'you', text, task_changed: taskChanged, ...images };
 }
 
 // The entries of one SDK message: of the Implementer, or of a Claude session in a review_message.
@@ -304,7 +313,7 @@ function noteEntry(raw: string, who: Who): Draft[] {
 
 async function drafts(raw: string, record: Record<string, unknown>, it: number, ctx: StreamContext): Promise<Draft[]> {
   if (typeof record.prompt === 'string') {
-    return [await promptEntry(record.prompt, ctx)];
+    return [await promptEntry(record.prompt, ctx, record.images)];
   }
   if (record.state !== undefined) {
     const state = asRecord(record.state);

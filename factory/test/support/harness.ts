@@ -119,7 +119,10 @@ export async function turnsStarted(env: Env, count: number): Promise<void> {
   }
 }
 
-export async function fakeLog(env: Env): Promise<Array<{ argv: string[]; prompt: string; sessionId: string; cwd: string; env: string[] }>> {
+// A user message's blocks as the fake logs them (SF-065): only when one is not text.
+export type LoggedBlock = { type: 'text'; text: string } | { type: 'image'; media_type: string; bytes: number; sha256: string };
+
+export async function fakeLog(env: Env): Promise<Array<{ argv: string[]; prompt: string; sessionId: string; cwd: string; env: string[]; blocks?: LoggedBlock[] }>> {
   return (await readFile(join(env.home, 'fake-claude.log'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
 }
 
@@ -129,7 +132,7 @@ export async function reviewScript(env: Env, reviews: unknown[]): Promise<void> 
   await rm(join(env.home, 'fake-review.count'), { force: true });
 }
 
-export async function reviewLog(env: Env): Promise<Array<{ argv: string[]; prompt: string; sessionId: string; cwd: string; env: string[] }>> {
+export async function reviewLog(env: Env): Promise<Array<{ argv: string[]; prompt: string; sessionId: string; cwd: string; env: string[]; blocks?: LoggedBlock[] }>> {
   return (await readFile(join(env.home, 'fake-review.log'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
 }
 
@@ -145,7 +148,7 @@ export async function codexScript(env: Env, runs: unknown[]): Promise<void> {
 }
 
 // What the fake Codex logged of each run.
-export async function codexLog(env: Env): Promise<Array<{ argv: string[]; cwd: string; prompt: string; env: string[]; pid: number }>> {
+export async function codexLog(env: Env): Promise<Array<{ argv: string[]; cwd: string; prompt: string; env: string[]; pid: number; images: Array<{ path: string; sha256: string }> }>> {
   return (await readFile(join(env.home, 'fake-codex.log'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
 }
 

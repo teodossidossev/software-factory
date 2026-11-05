@@ -287,3 +287,35 @@ test('job client (SF-072): a job waiting for limits offers Resume now and Abort�
   await page.flush();
   assert.equal(posted().at(-1)!.body, '{}');
 });
+
+test('job client (SF-087): fetch_failed offers Retry first and posts it once; mr_failed offers Retry before Tell it to go on, not after a conflict turn; mr_push_failed keeps Push again', async () => {
+  const fetchFailed = job('needs_human', { error: { code: 'fetch_failed', message: 'git fetch origin main failed.' } });
+  const page = await openJob(detail(fetchFailed));
+  const acts = (): FakeElement[] => page.$('acts').children as FakeElement[];
+  const labels = (): string[] => acts().map((node) => node.textContent);
+  const posted = (): FetchRequest[] => page.requests.filter((request) => request.method === 'POST' && request.path === 'api/jobs/app/T-1/retry');
+  assert.deepEqual(acts().map((node) => [node.textContent, node.className]), [['Retry', 'btn primary'], ['Abort…', 'btn danger']]);
+  acts()[0]!.click();
+  acts()[0]!.click();
+  await page.flush();
+  assert.deepEqual(posted().map((request) => request.body), ['{}']);
+  posted()[0]!.respond(200, { ok: true, result: { state: 'preparing_mr', iteration: 1, branch: 'T-1-demo' } });
+  await page.flush();
+  assert.equal(page.$('action-status').textContent, 'MR preparation runs again (state preparing_mr).');
+
+  // mr_rebase_failed (an alias of mr_failed): Retry, then Tell it to go on; after a conflict turn no Retry.
+  const rebase = job('needs_human', { error: { code: 'mr_rebase_failed', message: 'git rebase failed.' } });
+  page.streams.at(-1)!.emit('jobs', { jobs: [rebase] });
+  await show(page, detail(rebase));
+  assert.deepEqual(labels(), ['Retry', 'Tell it to go on', 'Abort…']);
+  const conflicted = job('needs_human', { error: { code: 'mr_failed', message: 'MR preparation failed inside the factory: boom' }, mr_conflict_turn: true });
+  page.streams.at(-1)!.emit('jobs', { jobs: [conflicted] });
+  await show(page, detail(conflicted));
+  assert.deepEqual(labels(), ['Tell it to go on', 'Abort…']);
+
+  // A failed push keeps Push again (Approve), with no Retry.
+  const push = job('needs_human', { error: { code: 'mr_push_failed', message: 'git push origin T-1-demo failed: offline' }, prepared_commit: 'a'.repeat(40) });
+  page.streams.at(-1)!.emit('jobs', { jobs: [push] });
+  await show(page, detail(push));
+  assert.deepEqual(labels(), ['Push again', 'Abort…']);
+});

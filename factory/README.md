@@ -45,6 +45,7 @@ bin/sf queue on-limit resume-then-queue|resume-only|wait  # what the queue does 
 bin/sf queue force <workspace> <ticket>        # Start anyway: the queued ticket starts whatever its Task check says; needs sf serve
 bin/sf say <workspace> <ticket> <message...>   # a user message into the session; on a handed-over job it is Ask for changes (section Hand-over to your checkout); needs sf serve
 bin/sf review <workspace> <ticket>             # retry a failed Claude review (needs_human with review_failed); needs sf serve
+bin/sf retry <workspace> <ticket>              # retry a transient MR preparation failure (fetch_failed, mr_serve_restarted, mr_interrupted, mr_commit_failed, mr_rebase_failed, mr_failed) without a new review; on mr_push_failed: push again; needs sf serve
 bin/sf accept <workspace> <ticket>             # accept a clean Claude review over a stopped gate (gate_rounds, gate_budget, gate_failed) or a ledger stop (review_churn, review_disputed) and prepare the MR, or skip the simplification pass's suggestions (simplify_offered); needs sf serve
 bin/sf simplify <workspace> <ticket>           # apply the simplification pass's suggestions (needs_human with simplify_offered): one Fix section "Simplify", reviewed as usual; needs sf serve
 bin/sf settle <workspace> <ticket> <id> accept|fix [note...]  # settle an escalated or contested finding of the ledger (needs_human); needs sf serve
@@ -142,7 +143,7 @@ prints the message below the table). Both work without `sf serve`; they read the
 | `SF_NOTIFY_ITERATIONS` | off | `on` also notifies `awaiting_review` (each published iteration). |
 | `SF_NTFY_URL` | unset | Full ntfy topic URL, e.g. `https://ntfy.sh/<topic>`; unset disables ntfy. |
 | `SF_NTFY_TOKEN` | unset | Sent as `Authorization: Bearer <token>` to a server that needs it. |
-| `SF_GITHUB_TOKEN` | unset | The GitHub token of the merge request actions (SF-048): a fine-grained token with Pull requests read/write and Contents read on the repository (Checks read too for the checks in `sf mr status`). Sent only as `Authorization: Bearer <token>` to `https://api.github.com`. Unset turns the actions off for workspaces on `github.com`, saying so. |
+| `SF_GITHUB_TOKEN` | unset | The GitHub token of the merge request actions (SF-048): a fine-grained token on the repository with Pull requests read and write, Contents read and write (write for `sf mr merge`), Checks read for `sf mr status`. Sent only as `Authorization: Bearer <token>` to `https://api.github.com`. Unset turns the actions off for workspaces on `github.com`, saying so. |
 | `SF_GITLAB_TOKEN` | unset | The GitLab token (scope `api`) of the merge request actions, sent only as `Authorization: Bearer <token>` to the GitLab API of the workspace's origin host. Unset turns the actions off for GitLab workspaces. |
 | `SF_GITLAB_URL` | `https://<host>/api/v4` | The GitLab API base when it differs (another port or path; `http` only on loopback, so the token never travels in cleartext: any other `http` URL is refused at start). Set, the GitLab token goes to this URL only, and only for workspaces whose origin is on its host name; other hosts are refused (`mr_host_unsupported`). |
 | `SF_GITHUB_API` | `https://api.github.com` | Tests only: the fake GitHub on loopback (`127.0.0.1`, `localhost` or `[::1]`); any other host is refused at start. |
@@ -152,7 +153,7 @@ The socket path `${SF_STATE_DIR}/sf.sock` must fit a Unix socket address (107 by
 a longer one is refused at start with `socket_path_too_long`.
 
 The execution variables are read once when `sf serve` starts. `sf status` and `sf watch` read
-`SF_STATE_DIR` themselves; `sf start`, `sf queue`, `sf say`, `sf review`, `sf accept`, `sf simplify`, `sf settle`, `sf approve`, `sf mr`, `sf abort` and `sf reset` use it to find the socket; `sf notify-test` reads the notification variables itself.
+`SF_STATE_DIR` themselves; `sf start`, `sf queue`, `sf say`, `sf review`, `sf retry`, `sf accept`, `sf simplify`, `sf settle`, `sf approve`, `sf mr`, `sf abort` and `sf reset` use it to find the socket; `sf notify-test` reads the notification variables itself.
 
 ## Task check
 
@@ -473,7 +474,7 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   runner for a job whose last runner was killed or crashed, what that runner left behind (its
   process group: Claude Code, Codex) is ended.
 - `sf serve`, the dashboard and the CLI read the state from disk and talk to the runner only
-  through files: `start`, `sf say`, a Fix section, Clean, `sf review`, `sf accept` and `sf settle` write a request
+  through files: `start`, `sf say`, a Fix section, Clean, `sf review`, `sf retry`, `sf accept` and `sf settle` write a request
   into `queue/` of the job directory (the state is checked first, so a refused request starts no
   runner), start a runner when none runs, and wait for the runner's answer in `replies/` (at most
   120 s: `runner_timeout`; a runner that ends without answering, or that is started three times
@@ -985,7 +986,7 @@ SF-067. To change course without abort, reset and a branch deleted by hand.
   simplification pass does not use up its one run per job. `preparing_mr` is refused
   (`invalid_state`, with the reason: the MR text, the commit and the rebase); so is any other state.
   A step that ended on its own while the runner stopped leaves the job as it left it; one that had
-  just begun MR preparation hands the job over as `needs_human` (`mr_interrupted`; `sf say` goes on).
+  just begun MR preparation hands the job over as `needs_human` (`mr_interrupted`; `sf retry` prepares the MR again without a new review, `sf say` goes on with one).
 - **Resume** (`sf resume [message...]`, the paused job's *Resume*, no confirmation) goes on where
   the job stopped. A paused turn: the job is `working` again and the same Implementer session is
   resumed with the message, or "Continue where you stopped." (a job whose first turn never reported
@@ -1082,7 +1083,7 @@ SF-072. When a session hits the plan's usage limit ("You've hit your 5-hour limi
 ## MR preparation
 
 MR preparation runs on the deciding clean verdict (the clean path, from `awaiting_review`, or as
-the retry from `needs_human` after a failed preparation, `mr_attempts > 0`); never while a turn runs.
+the retry from `needs_human` after a failed preparation, `mr_attempts > 0`, or `sf retry` after a transient stop, below); never while a turn runs.
 It ends with the branch holding exactly one commit: handed over to the user's checkout
 (`handed_over`, section Hand-over to your checkout) or, with hand-over off (the workspace's
 `handoff`, else `SF_HANDOFF`) or when the hand-over was refused, in `ready_for_human_review`.
@@ -1183,6 +1184,27 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    A failed MR text turn keeps its own code (for example `turn_failed` or `sandbox_unavailable`).
    Fix with `sf say` (its iteration is reviewed again, and a clean verdict prepares again) or by
    hand in the worktree followed by an `sf say`.
+
+   **Retry** (SF-087): a transient stop after the deciding clean verdict and before the branch is
+   prepared needs no new review. `sf retry <workspace> <ticket>`, or Retry on the dashboard, runs
+   MR preparation again from step 1 (the fetch, `preparing_mr` with `mr_attempts + 1`, the MR text
+   turn, the commit and the rebase), with no fix turn, no Claude review, no gate and no
+   simplification pass. It takes `needs_human` with `fetch_failed` (the fetch of step 1),
+   `mr_serve_restarted`, `mr_interrupted` (paused as MR preparation began), `mr_commit_failed`,
+   `mr_rebase_failed` or `mr_failed` (`MR_RETRY_CODES` in `src/execution.ts`), with the worktree,
+   no `prepared_commit` and a clean Claude review of the last iteration; anything else is
+   `invalid_state` naming the state and code. The accepted sensitive paths are the clean path's:
+   those of the last iteration's `review.json`, plus its `gate.json`'s when the gate's verdict is
+   clean, or the review's alone after a gate override. The MR text turn names the previous error
+   only when an MR text turn ran before (`mr_attempts > 0`). A conflict turn makes a job not
+   retryable: its resolution is applied before the job goes back to review, so a stop in between
+   leaves code no reviewer saw. `job.json`'s `mr_conflict_turn` is set before the conflict prompt
+   and cleared when the resolved iteration goes back to `awaiting_review` (and when MR preparation
+   starts); while it is set Retry is refused ("tell the Implementer to go on"). So a stop after a
+   clean verdict on the resolved iteration is retryable again. A retry that fails again stops the job with the new code; nothing is retried by
+   itself. The other codes (`mr_conflict`, `mr_text_missing`, `mr_text_invalid`, `mr_empty`,
+   `mr_push_protected`, a failed MR text turn) need the Implementer: `sf say`. On `mr_push_failed`
+   `sf retry` is `sf approve` (without `--as-is`, step 7): the push again.
 6. Ready: the MR text, with the nits, is copied to `mr.md` (an MR text the user saved on the Merge
    request screen stays, below), `base_commit` and `target_commit` become the target,
    `prepared_commit` the branch tip, and the worktree stays (SF-073). With hand-over on (the
@@ -1481,7 +1503,7 @@ State layout under `${SF_STATE_DIR}`:
 ```
 sf.sock                                  # 0600, while sf serve runs; one JSON request/response per connection
 dashboard-token                          # 0600, the dashboard token of the last sf serve start
-jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, state, iteration, fixes, gate_fixes, gate_tokens, simplify_iteration (SF-055, absent until the simplification pass starts), session_id, created_at, updated_at, error, mr ({host, number, url, state, merge_commit?} or null)
+jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, mr_conflict_turn (SF-087: the MR preparation in progress ran a conflict turn; no Retry then), state, iteration, fixes, gate_fixes, gate_tokens, simplify_iteration (SF-055, absent until the simplification pass starts), session_id, created_at, updated_at, error, mr ({host, number, url, state, merge_commit?} or null)
 jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "review" | "review_failed" | "review_message" | "gate_event" | "gate_overridden" | "simplify" | "simplify_chosen" | "merge_request" | "mr_edited" | ...}; what sf watch reads
 jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-override.json,simplify.json,gate-schema.json,gate-output.json,conflict-resolution.diff}
 jobs/<workspace>/<ticket>/ledger.json    # the findings ledger (SF-052): one entry per review item of a Fix section, from the first one on
@@ -1637,7 +1659,7 @@ iteration with the Implementer's tool calls. While a card runs and the page is v
 reads `api/jobs` again every 15 s so this line and the time move; nothing else is polled, and the
 board is drawn again every minute for the other cards' times. A **Your turn** card carries the one
 primary button of the board: on `needs_human` the reason in plain words and the button of the stop
-table below (it opens the job's page at the stop, *Retry review* is sent at once, *Push again*
+table below (it opens the job's page at the stop, *Retry review* and *Retry* are sent at once, *Push again*
 opens the Approve confirmation), with *Create merge request…* beside it when the branch is
 prepared; on `ready_for_human_review` "Ready to push: reviews clean, MR text written" with *Review
 the MR and push* (the job's page with the Approve confirmation open) and *Create merge request…*,
@@ -1732,7 +1754,7 @@ one table, `STOPS` in `static/app.js`:
 | `gate_failed` | error | Codex gate gave no verdict | Decide |
 | `review_failed` | error | Claude review could not run | Retry review |
 | `serve_restarted` | error | Interrupted by a restart | Tell it to go on |
-| `mr_serve_restarted`, `mr_interrupted` | error | MR preparation interrupted | Tell it to go on |
+| `mr_serve_restarted`, `mr_interrupted` | error | MR preparation interrupted | Retry (Tell it to go on after a conflict turn) |
 | `session_failed` with the usage-limit message (a job stopped before SF-072; an MR preparation still stops so) | error | Usage limit reached | Tell it to go on |
 | `session_failed`, `turn_failed`, `permission_mode_mismatch` | error | Implementer session failed | Tell it to go on |
 | `sandbox_unavailable` | error | Sandbox unavailable | Tell it to go on |
@@ -1740,7 +1762,8 @@ one table, `STOPS` in `static/app.js`:
 | `mr_conflict` | error | Rebase conflict | Tell it how |
 | `mr_text_missing`, `mr_text_invalid` | error | MR text missing or invalid | Tell it to fix it |
 | `mr_empty` | error | Nothing to commit | Tell it what is missing |
-| `mr_commit_failed`, `mr_rebase_failed`, `mr_failed` | error | MR preparation failed | Tell it to go on |
+| `mr_commit_failed`, `mr_rebase_failed`, `mr_failed` | error | MR preparation failed | Retry (Tell it to go on after a conflict turn) |
+| `fetch_failed` | error | Fetch failed | Retry (Tell it to go on after a conflict turn) |
 | `worktree_remove_failed` | error | Worktree not removed | Tell it to go on |
 | `mr_push_failed` | error | Push failed | Push again |
 | `mr_push_protected` | error | Push refused | Open the job |
@@ -1766,13 +1789,15 @@ confirmation where it has one; *Tell it to go on* is a message, "Go on." when th
 | `gate_failed` | the gate's error | Accept and prepare MR (with a clean Claude review), Tell it to go on, Abort… |
 | `review_failed` | the review's error | Retry review, Abort… |
 | `serve_restarted` | nothing | Tell it to go on, Restart…, Abort… |
-| `mr_serve_restarted`, `mr_interrupted`, `publish_failed` | nothing | Tell it to go on, Abort… |
+| `mr_serve_restarted`, `mr_interrupted` | nothing | Retry (MR preparation again without a new review, SF-087), Tell it to go on (the iteration is reviewed again), Abort…; after a conflict turn (`mr_conflict_turn`) no Retry |
+| `publish_failed` | nothing | Tell it to go on, Abort… |
 | `session_failed` with the usage-limit message (before SF-072, and MR preparation), `sandbox_unavailable` | the message | Tell it to go on, Abort… |
 | `session_failed`, `turn_failed`, `permission_mode_mismatch` | the whole message | Tell it to go on, Restart…, Abort… |
 | `mr_conflict` | the conflicting files | Tell it how (Send), Abort… |
 | `mr_text_missing`, `mr_text_invalid` | the rule it breaks | Send, Abort… |
 | `mr_empty` | nothing | Send, Abort… |
-| `mr_commit_failed`, `mr_rebase_failed`, `mr_failed` | the whole message | Tell it to go on, Abort… |
+| `mr_commit_failed`, `mr_rebase_failed`, `mr_failed` | the whole message | Retry, Tell it to go on, Abort…; after a conflict turn no Retry |
+| `fetch_failed` | the whole message | Retry, Abort…; after a conflict turn Tell it to go on, Abort… |
 | `worktree_remove_failed` | the worktree's path | Tell it to go on, Abort… |
 | `mr_push_failed` | the whole message | Push again (Approve, its confirmation), Abort… |
 | `mr_push_protected` | nothing | the Merge request screen (rename the branch, change the base, SF-080), then Approve; Abort… |
@@ -1982,7 +2007,9 @@ edited by hand: `sf approve --as-is`), abort (`sf abort`, with an explicit disca
 unchecked every time a confirmation opens: `sf abort --discard`), say (`sf say`: a multiline
 message; Enter adds a line, Send or Ctrl+Enter sends; *Tell it to go on* sends the box's text, or
 "Go on." when it is empty), Retry review (`sf review`, SF-044, sent at once without a
-confirmation), Simplify and settle (SF-055, SF-052), Pause, Resume and Restart (SF-067) and Accept
+confirmation), Retry (`sf retry`, SF-087, sent at once: MR preparation again without a new review,
+on `fetch_failed`, `mr_serve_restarted`, `mr_interrupted`, `mr_commit_failed`, `mr_rebase_failed`
+and `mr_failed` without a conflict turn), Simplify and settle (SF-055, SF-052), Pause, Resume and Restart (SF-067) and Accept
 and prepare MR (`sf accept`, SF-047: its confirmation
 names the job and lists the Codex items that will not be applied, path and problem, or the gate's
 error, so the user accepts them knowingly). The merge request (SF-048) has Create merge request
@@ -1998,7 +2025,7 @@ approve (and Push again), abort, restart, accept (and Skip), Simplify, Create me
 Merge ask first, inline in the composer, with a confirmation that names the job, explains what
 follows (the push; the session ends and the worktree stays, or the worktree and the branch go with
 discard; MR preparation without the Codex items or the suggestions) and sends nothing when
-cancelled; Send, Tell it to go on, Pause, Resume, Retry review, settle, Refresh MR status and
+cancelled; Send, Tell it to go on, Pause, Resume, Retry review, Retry, settle, Refresh MR status and
 Archive go at once. The page enables
 a control from the state it shows (approve in `ready_for_human_review` and in `needs_human`
 after a failed push; abort in every non-terminal state; say in `working`, `awaiting_review`,
@@ -2064,6 +2091,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `POST api/jobs/<ws>/<ticket>/approve` | `{"as_is"?: boolean}` | `Execution.approve(ws, ticket, as_is)`: the push of the prepared branch; `as_is` pushes a tip edited by hand; it waits up to 10 s for the job's runner to end and is refused with `409 runner_active` while the runner runs or a request (`sf say`, a fix) waits for it (SF-042) |
 | `POST api/jobs/<ws>/<ticket>/abort` | `{"discard": false}`; `discard` optional, default false | `Execution.abort(ws, ticket, discard)` |
 | `POST api/jobs/<ws>/<ticket>/say` | `{"message": "<text>"}` | `Execution.say(ws, ticket, message)`; the text goes as it is (nothing trimmed or split); answered by the job's runner (SF-042), so `500 runner_failed` or `500 runner_timeout` can come back |
+| `POST api/jobs/<ws>/<ticket>/retry` | `{}` | `Execution.retryMr(ws, ticket)` (`sf retry`, SF-087): MR preparation runs again without a new review; result `{state, iteration, branch}`; on `mr_push_failed` it is `approve` without `as_is` and its result; `409 invalid_state` unless the job is `needs_human` with one of `MR_RETRY_CODES`, its worktree, no prepared commit and no conflict turn; answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
 | `POST api/jobs/<ws>/<ticket>/review` | `{}` | `Execution.retryReview(ws, ticket)` (`sf review`): the failed review of the last iteration runs again; result `{state, iteration}`; `409 invalid_state` unless the job is `needs_human` with `review_failed`, `409 review_off` with `SF_REVIEW=off`; answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
 | `POST api/jobs/<ws>/<ticket>/settle` | `{"id": string, "decision": "accept" \| "fix", "note"?: string}` | `Execution.settle(ws, ticket, id, decision, note)` (`sf settle`, SF-052): the settlement of an escalated or contested ledger entry; result `{state, id, status, waiting}`; `409 invalid_state` unless the job is `needs_human` and the entry escalated or contested; `400 invalid_content` for a bad id, decision or note; `500 ledger_invalid` when `ledger.json` cannot be read; answered by the job's runner |
 | `POST api/jobs/<ws>/<ticket>/simplify` | `{}` | `Execution.simplify(ws, ticket)` (`sf simplify`, SF-055): the Fix section "Simplify" with the suggestions of the simplification pass and their ledger entries, then the next iteration; result `{state, iteration, check_after_minutes}`; `409 invalid_state` unless the job is `needs_human` with `simplify_offered` (and never a second time); `409 worktree_missing`; answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |

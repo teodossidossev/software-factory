@@ -167,7 +167,7 @@ export function openStream(url: URL): Promise<Stream> {
   });
 }
 
-export type Call = ['start', string, string] | ['approve', string, string] | ['abort', string, string, boolean] | ['say', string, string, string] | ['retryReview', string, string] | ['acceptGate', string, string] | ['settle', string, string, string, string, string] | ['archiveFinished', string, string]
+export type Call = ['start', string, string] | ['approve', string, string] | ['abort', string, string, boolean] | ['say', string, string, string] | ['retryReview', string, string] | ['retryMr', string, string] | ['acceptGate', string, string] | ['settle', string, string, string, string, string] | ['archiveFinished', string, string]
   | ['createMergeRequest', string, string] | ['mergeMergeRequest', string, string] | ['mergeRequestStatus', string, string] | ['simplify', string, string]
   | ['pause', string, string] | ['resumePaused', string, string, string] | ['restart', string, string, boolean]
   | ['handover', string, string] | ['takeback', string, string] | ['handedDone', string, string] | ['checkHandedOver', string, string, number]
@@ -194,6 +194,7 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
     abort: (workspace, ticket, discard) => reply(['abort', workspace, ticket, discard]),
     say: (workspace, ticket, message) => reply(['say', workspace, ticket, message]),
     retryReview: (workspace, ticket) => reply(['retryReview', workspace, ticket]),
+    retryMr: (workspace, ticket) => reply(['retryMr', workspace, ticket]),
     acceptGate: (workspace, ticket) => reply(['acceptGate', workspace, ticket]),
     settle: (workspace, ticket, id, decision, note) => reply(['settle', workspace, ticket, id, decision, note ?? '']),
     simplify: (workspace, ticket) => reply(['simplify', workspace, ticket]),

@@ -99,7 +99,7 @@ test('dashboard: jobs, job detail, report, patch and mr endpoints; bad names are
     assert.equal(list.headers['content-type'], 'application/json; charset=utf-8');
     const { jobs: all } = JSON.parse(list.body);
     assert.deepEqual(all.map((job: Job) => [job.ticket, job.state]), [['T-0', 'failed'], ['T-1', 'awaiting_review']]);
-    assert.deepEqual(Object.keys(all[1]).sort(), ['base', 'branch', 'cost_usd', 'created_at', 'deleted', 'error', 'files', 'fixes', 'gate', 'gate_fixes', 'gate_tokens', 'handoff_skipped', 'handover', 'iteration', 'limit', 'mr', 'mr_attempts', 'mr_host', 'now', 'paused', 'prepared_commit', 'review', 'review_ended_at', 'state', 'stop', 'task_changed', 'ticket', 'title', 'tool_calls', 'turn_limit', 'undeclared', 'updated_at', 'workspace', 'worktree']);
+    assert.deepEqual(Object.keys(all[1]).sort(), ['base', 'branch', 'cost_usd', 'created_at', 'deleted', 'error', 'files', 'fixes', 'gate', 'gate_fixes', 'gate_tokens', 'handoff_skipped', 'handover', 'iteration', 'limit', 'mr', 'mr_attempts', 'mr_conflict_turn', 'mr_host', 'now', 'paused', 'prepared_commit', 'review', 'review_ended_at', 'state', 'stop', 'task_changed', 'ticket', 'title', 'tool_calls', 'turn_limit', 'undeclared', 'updated_at', 'workspace', 'worktree']);
     assert.deepEqual(all[0].error, { code: 'start_failed', message: 'Git failed.' });
 
     const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body);
@@ -463,7 +463,7 @@ test('dashboard (SF-079): the changes route lists the iterations and the files o
   const jobs = new JobStore(state);
   const job: Job = {
     workspace: 'web', ticket: 'W-1', branch: 'W-1-demo', base: 'main', base_commit: base, target_commit: null,
-    worktree: null, prepared_commit: null, mr_attempts: 0, fixes: 1, gate_fixes: 0, gate_tokens: 0, state: 'awaiting_review', iteration: 2, session_id: 's1', mr: null,
+    worktree: null, prepared_commit: null, mr_attempts: 0, mr_conflict_turn: false, fixes: 1, gate_fixes: 0, gate_tokens: 0, state: 'awaiting_review', iteration: 2, session_id: 's1', mr: null,
     created_at: '2026-11-01T10:00:00.000Z', updated_at: '2026-11-01T10:05:00.000Z',
   };
   await jobs.write(job);

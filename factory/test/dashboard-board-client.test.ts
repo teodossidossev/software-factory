@@ -425,8 +425,9 @@ const STOP_CARDS: Array<[string, 'decision' | 'error', string, string, Record<st
   ['gate_failed', 'error', 'Codex gate gave no verdict', 'Decide'],
   ['review_failed', 'error', 'Claude review could not run', 'Retry review'],
   ['serve_restarted', 'error', 'Interrupted by a restart', 'Tell it to go on'],
-  ['mr_serve_restarted', 'error', 'MR preparation interrupted', 'Tell it to go on'],
-  ['mr_interrupted', 'error', 'MR preparation interrupted', 'Tell it to go on'],
+  ['mr_serve_restarted', 'error', 'MR preparation interrupted', 'Retry'],
+  ['mr_interrupted', 'error', 'MR preparation interrupted', 'Retry'],
+  ['mr_serve_restarted', 'error', 'MR preparation interrupted', 'Tell it to go on', { mr_conflict_turn: true }],
   ['session_failed', 'error', 'Usage limit reached', 'Tell it to go on', { error: { code: 'session_failed', message: "You've hit your weekly limit · resets 3am (Europe/Sofia)" } }],
   ['session_failed', 'error', 'Implementer session failed', 'Tell it to go on'],
   ['turn_failed', 'error', 'Implementer session failed', 'Tell it to go on'],
@@ -437,9 +438,11 @@ const STOP_CARDS: Array<[string, 'decision' | 'error', string, string, Record<st
   ['mr_text_missing', 'error', 'MR text missing or invalid', 'Tell it to fix it'],
   ['mr_text_invalid', 'error', 'MR text missing or invalid', 'Tell it to fix it'],
   ['mr_empty', 'error', 'Nothing to commit', 'Tell it what is missing'],
-  ['mr_commit_failed', 'error', 'MR preparation failed', 'Tell it to go on'],
-  ['mr_rebase_failed', 'error', 'MR preparation failed', 'Tell it to go on'],
-  ['mr_failed', 'error', 'MR preparation failed', 'Tell it to go on'],
+  ['mr_commit_failed', 'error', 'MR preparation failed', 'Retry'],
+  ['mr_rebase_failed', 'error', 'MR preparation failed', 'Retry'],
+  ['mr_failed', 'error', 'MR preparation failed', 'Retry'],
+  ['mr_failed', 'error', 'MR preparation failed', 'Tell it to go on', { mr_conflict_turn: true }],
+  ['fetch_failed', 'error', 'Fetch failed', 'Retry'],
   ['worktree_remove_failed', 'error', 'Worktree not removed', 'Tell it to go on'],
   ['mr_push_failed', 'error', 'Push failed', 'Push again', { prepared_commit: 'b'.repeat(40), worktree: null }],
   ['mr_push_protected', 'error', 'Push refused', 'Open the job'],
@@ -1211,4 +1214,30 @@ test('board client (SF-072): the Rules menu opens from the top bar with the queu
   assert.equal(page.$('rulesMenu').hidden, false);
   page.$('summary').click();
   assert.equal(page.$('rulesMenu').hidden, true);
+});
+
+test('board client (SF-087): a Your turn card of fetch_failed, mr_serve_restarted or mr_failed posts Retry at once, once; after a conflict turn it opens the job instead; mr_push_failed keeps Push again', async () => {
+  const fetchFailed = job('T-1', 'needs_human', { error: { code: 'fetch_failed', message: 'git fetch origin main failed.' } });
+  const interrupted = job('T-2', 'needs_human', { error: { code: 'mr_interrupted', message: 'paused' } });
+  const conflicted = job('T-3', 'needs_human', { error: { code: 'mr_failed', message: 'boom' }, mr_conflict_turn: true });
+  const push = job('T-4', 'needs_human', { error: { code: 'mr_push_failed', message: 'offline' }, prepared_commit: 'a'.repeat(40) });
+  const page = await openBoard([fetchFailed, interrupted, conflicted, push], []);
+  assert.equal(part(card(page, 'app/T-1'), 'reason')!.textContent, 'Fetch failed');
+  assert.deepEqual(labels(card(page, 'app/T-1')), ['Retry']);
+  assert.deepEqual(labels(card(page, 'app/T-2')), ['Retry']);
+  assert.deepEqual(labels(card(page, 'app/T-3')), ['Tell it to go on']);
+  assert.equal(button(card(page, 'app/T-3'), 'Tell it to go on')!.dataset.run, undefined);
+  assert.equal(labels(card(page, 'app/T-4'))[0], 'Push again');
+
+  button(card(page, 'app/T-1'), 'Retry')!.click();
+  await page.flush();
+  assert.deepEqual(posts(page).map((request) => [request.path, request.body]), [['api/jobs/app/T-1/retry', '{}']]);
+  assert.equal(button(card(page, 'app/T-1'), 'Retry')!.disabled, true);
+  button(card(page, 'app/T-1'), 'Retry')!.click();
+  await page.flush();
+  assert.equal(posts(page).length, 1);
+  posts(page)[0]!.respond(200, { ok: true, result: { state: 'preparing_mr', iteration: 2, branch: 'T-1-x' } });
+  await page.flush();
+  assert.match(card(page, 'app/T-1').textContent, /MR preparation runs again \(state preparing_mr\)\./);
+  assert.equal(onJobPage(page), false);
 });

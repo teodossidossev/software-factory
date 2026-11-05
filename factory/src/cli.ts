@@ -1,5 +1,5 @@
 // The sf command: `sf serve`, `sf up` (serve, the tunnel and the browser), `sf workspace
-// add|list|remove`, `sf start|say|review|approve|pause|resume|restart|abort|reset`,
+// add|list|remove`, `sf start|say|review|retry|approve|pause|resume|restart|abort|reset`,
 // `sf handover|takeback|handed-done` (SF-073) and
 // `sf mr create|merge|status` and `sf queue list|add|remove|move|limit|hold|release` (SF-071)
 // and `sf queue on-limit` (SF-072) and `sf queue force` (SF-086)
@@ -68,6 +68,7 @@ const USAGE = `Usage:
   sf queue force <workspace> <ticket>                   Start anyway: the queued ticket starts whatever its Task check says, until it leaves the queue
   sf say <workspace> <ticket> <message...>              Send a message into the job's Implementer session; on a handed-over job: Ask for changes (your checkout's edits go back into the job first)
   sf review <workspace> <ticket>                        Retry a failed Claude review (needs_human with review_failed) of the last iteration
+  sf retry <workspace> <ticket>                         Retry a transient MR preparation failure (fetch_failed, mr_serve_restarted, mr_interrupted, mr_commit_failed, mr_rebase_failed, mr_failed) without a new review; on mr_push_failed: push again
   sf accept <workspace> <ticket>                        Accept a clean Claude review over a stopped gate (needs_human with gate_rounds, gate_budget or gate_failed) or a ledger stop (review_churn, review_disputed) and prepare the MR; on simplify_offered: skip the suggestions (listed in the MR text)
   sf simplify <workspace> <ticket>                      Apply the simplification pass's suggestions (needs_human with simplify_offered): one Fix section "Simplify", reviewed as usual; sf accept skips them
   sf settle <workspace> <ticket> <id> accept|fix [note...]  Settle an escalated or contested finding of the ledger (needs_human): accept the risk, or the Implementer must fix it; the job goes on once nothing is left to settle
@@ -229,6 +230,9 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     }
     if (command === 'review' && words.length === 0) {
       return execution.retryReview(workspace, ticket);
+    }
+    if (command === 'retry' && words.length === 0) {
+      return execution.retryMr(workspace, ticket);
     }
     if (command === 'accept' && words.length === 0) {
       return execution.acceptGate(workspace, ticket);
@@ -728,6 +732,24 @@ async function approve(args: string[]): Promise<void> {
   }
 }
 
+// sf retry (SF-087): MR preparation again, shown as sf review shows its outcome; on mr_push_failed
+// the push again, shown and ended as sf approve (exit 1 unless pushed).
+async function retry(args: string[]): Promise<void> {
+  if (args.length !== 2) {
+    throw new UsageError('retry needs <workspace> <ticket>.');
+  }
+  const result = await viaServer('retry', checkJob(args, 'retry'));
+  if ('iteration' in result) {
+    return;
+  }
+  if (result.state !== 'pushed') {
+    console.log('The push failed; fix it and run sf retry again.');
+    process.exitCode = 1;
+  } else if (result.link === undefined) {
+    console.log('No merge request link: the origin URL could not be parsed. Open the merge request for the branch above.');
+  }
+}
+
 // sf mr create|merge|status <workspace> <ticket> (SF-048), through the socket of sf serve.
 async function mergeRequest(args: string[]): Promise<void> {
   const [sub, ...rest] = args;
@@ -908,7 +930,7 @@ async function notifyTest(args: string[]): Promise<void> {
   const now = new Date().toISOString();
   const job: Job = {
     workspace: 'test', ticket: 'SF-TEST', branch: 'SF-TEST-notification', base: 'main', base_commit: null, worktree: null, prepared_commit: null,
-    target_commit: null, mr_attempts: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'pushed', iteration: 0, session_id: null, mr: null, created_at: now, updated_at: now,
+    target_commit: null, mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'pushed', iteration: 0, session_id: null, mr: null, created_at: now, updated_at: now,
   };
   const results = await sendNotification(jobNotification(job, ['A test notification from sf notify-test']), notifyConfig());
   for (const result of results) {
@@ -1165,6 +1187,10 @@ async function main(argv: string[]): Promise<void> {
       throw new UsageError('review needs <workspace> <ticket>.');
     }
     await viaServer('review', checkJob(rest, 'review'));
+    return;
+  }
+  if (command === 'retry') {
+    await retry(rest);
     return;
   }
   if (command === 'accept') {

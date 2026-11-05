@@ -498,7 +498,7 @@ test('sf check-task (SF-085): the config lock the check\'s sandbox left goes onc
   const created = new Date().toISOString();
   const job: Job = {
     workspace: 'app', ticket: 'C-9', branch: 'C-9-x', base: 'main', base_commit: null, target_commit: null, worktree: null, prepared_commit: null,
-    mr_attempts: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'working', iteration: 0, session_id: null, mr: null, created_at: created, updated_at: created,
+    mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'working', iteration: 0, session_id: null, mr: null, created_at: created, updated_at: created,
   };
   const lock = join(repo, '.git', 'config.lock');
   const staleLock = async (): Promise<void> => {

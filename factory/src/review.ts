@@ -71,6 +71,8 @@ export interface ReviewInput {
   handbook: string;
   // The job's findings ledger (SF-052); its settled entries are sent.
   ledger?: LedgerEntry[];
+  // The job's <rules> block (SF-059, src/rules-docs.ts); absent or '' when it has none.
+  rules?: string;
 }
 
 // The buffer's first maxBytes bytes as text, never splitting a UTF-8 character.
@@ -106,10 +108,12 @@ export function reviewPrompt(input: ReviewInput): string {
 }
 
 // The rules of every reviewer (the Claude review and the gate, src/gate.ts), the Handbook's review
-// rules and the material of the iteration: the Task file, the Report, the marked paths (sensitive,
-// outside the Task's scope, deleted) and the Patch, inline up to MAX_REVIEW_PATCH_BYTES.
+// rules and the material of the iteration: the job's coding rules when it has them (SF-059), the
+// Task file, the Report, the marked paths (sensitive, outside the Task's scope, deleted) and the
+// Patch, inline up to MAX_REVIEW_PATCH_BYTES.
 export function reviewBody(input: ReviewInput): string[] {
   const { ticket } = input;
+  const rules = input.rules ?? '';
   const cut = input.patch.length > MAX_REVIEW_PATCH_BYTES;
   const notes: string[] = [];
   if (cut) {
@@ -122,6 +126,7 @@ export function reviewBody(input: ReviewInput): string[] {
     '',
     '- Verify the claims of the Report against the files. Do not trust them.',
     `- Review the change against the Task file (${TASK_DIR}/${ticket}.md, below), its \`## Review brief\` section when it has one, and the repository standards: AGENTS.md, CLAUDE.md and the docs you find.`,
+    ...(rules !== '' ? ['- A review item that is a rule violation names the rule\'s file (and heading) in `problem`.'] : []),
     '- Follow the review rules below (the Handbook\'s).',
     '- Give every item a severity:',
     ...SEVERITIES.map((severity) => `  - \`${severity}\`: ${SEVERITY_DEFINITIONS[severity]}.`),
@@ -132,6 +137,7 @@ export function reviewBody(input: ReviewInput): string[] {
     '',
     handbookSection(input.handbook, '## Review rules'),
     '',
+    ...(rules !== '' ? [rules.trimEnd(), ''] : []),
     `<task_file path="${TASK_DIR}/${ticket}.md">`,
     input.task.trimEnd(),
     '</task_file>',

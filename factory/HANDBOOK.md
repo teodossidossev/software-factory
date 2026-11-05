@@ -120,6 +120,9 @@ and "Needed by" on the cards of the tickets waited for; a cycle is shown as an e
 queue starts a queued ticket only when every ticket of its `lands_after` is merged (pushed is not
 enough); a start by hand does not wait for them. Entries that are not a valid ticket name are ignored.
 
+Coding rules reach the Implementer, the reviewers and the Task check without you: `AGENTS.md` and
+the Markdown files it links to, and the user's own rules files; reference them by path, never copy them into the Task.
+
 Always write a `## Review brief`. The reviewers read it with the rest of the Task file; the
 Implementer sees it too, so it states checks and reasons, not instructions. The `## Fix N`
 sections are the factory's; never write one.

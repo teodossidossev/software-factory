@@ -28,6 +28,7 @@ bin/sf serve                      # foreground; Ctrl+C stops it; prints the dash
 bin/sf up [--no-open] [--no-tunnel]   # sf serve plus the tunnel (../scripts/sf-tunnel.sh run, output prefixed "tunnel | ") and the dashboard opened in the browser; Ctrl+C stops both; npm start at the repository root
 bin/sf dashboard [--open]         # the dashboard URL of the last sf serve start; --open opens it with xdg-open; works without sf serve
 bin/sf check-task <workspace> <ticket>  # the Task check (section Task check): paraphrase, findings by severity, verdict; stored by sha; works without sf serve
+bin/sf rules <workspace> [ticket] # the coding rules the agents would be given (section Coding rules): paths, sources, sizes, the files left out; never their text; works without sf serve
 bin/sf start <workspace> <ticket> # start the job in a worktree of its own (same as the dashboard's Start); a start by hand is never held by the run limit; needs sf serve
 bin/sf queue list                 # the run queue (section Run queue): the limit, the running count, held or not, the queued tickets in order with what each waits for, the next one, the starts that failed; needs sf serve
 bin/sf queue add <workspace> <ticket> [--at N]  # queue a planned ticket at position N (1-based; default the end); needs sf serve
@@ -120,6 +121,7 @@ prints the message below the table). Both work without `sf serve`; they read the
 | `SF_HANDOFF` | `checkout` | The hand-over at ready for review (SF-073, section Hand-over to your checkout): `checkout` checks the job's branch out in the workspace's checkout with its changes as Local Changes; `off` leaves the job in `ready_for_human_review` with its worktree. A workspace's own `handoff` in `workspaces.json` wins over it (SF-083). Anything else refuses to start (`invalid_config`). |
 | `SF_SIMPLIFY` | on | The simplification pass (SF-055) after the deciding clean verdict of a job with at least one Fix section; `off` goes straight to MR preparation. It uses `SF_REVIEW_MODEL` and `SF_REVIEW_MAX_TURNS`. |
 | `SF_TASK_CHECK_MAX_TURNS` | `30` | `maxTurns` of the Task check (SF-054); its model is `SF_REVIEW_MODEL`. |
+| `SF_RULES_MAX_BYTES` | `49152` (48 KiB) | The bytes of rule file content the agents are given at most (SF-059, section Coding rules); the headings and the fixed sentence do not count. A positive integer up to 16 MiB. |
 | `SF_GATE` | `codex` | The gate after a clean Claude review (SF-039): `codex` runs the Codex CLI, `off` lets the Claude verdict decide. With `codex` and no executable found the gate is off, and `sf serve` prints one line saying so. |
 | `SF_CODEX` | `codex` on `PATH` | Absolute path of the Codex CLI executable. Pointing at nothing turns the gate off; it is not looked for on `PATH` then. |
 | `SF_CODEX_MODEL` | unset | Model of the gate, passed as `--model`; unset uses Codex's default (the user's `~/.codex/config.toml`). |
@@ -154,8 +156,9 @@ document and the code. It only advises: Start is never refused for it.
   the review): the tools `Read`, `Grep` and `Glob` only, the review's denied tools, sandbox and
   filtered environment, `settingSources: ['project']`, no auto-memory, no instruction file above
   the checkout; `maxTurns` `SF_TASK_CHECK_MAX_TURNS` (default 30), model `SF_REVIEW_MODEL`. Its
-  prompt is fixed instructions and the Task file, nothing else: not the Context owner's
-  conversation, the user's request, the jobs, their reviews or the ledger.
+  prompt is fixed instructions, the coding rules read at the commit of its checkout (SF-059,
+  section Coding rules) and the Task file, nothing else: not the Context owner's conversation, the
+  user's request, the jobs, their reviews or the ledger.
 - **What it can read** (the repository, nothing else):
   - It runs in its own checkout: a detached worktree of the workspace's work checkout at the Task's
     `base` (fetched from `origin` when there is one, as Start does: the code the Implementer starts
@@ -218,6 +221,62 @@ document and the code. It only advises: Start is never refused for it.
   `task_check` (`{workspace, ticket}`): the check of the current Task file (`verdict` `ready`,
   `not_ready` or `failed`, the paraphrase, findings and files), or `verdict: "none"` when the
   current version has none, so ChatGPT can rewrite the Task from the findings; it cannot run one.
+
+## Coding rules
+
+Repositories keep their coding rules in `AGENTS.md` and the documents it links to; the user keeps
+rules of their own outside the repository. The factory hands the agents these documents as they
+are (SF-059, `src/rules-docs.ts`): no rule format, no checks of its own. The repository's rules win
+over the user's when they disagree; neither changes the factory's own rules (Git, the Task file,
+the Report, the Fix sections, the tools).
+
+- **What is collected**, in this order:
+  1. **Repository**: the instruction file at the root (`AGENTS.md`, else `CLAUDE.md`, else
+     `.github/copilot-instructions.md`), then, for `AGENTS.md` only, every Markdown file it links
+     to: one hop, in link order, once each. A link is an inline `[text](path)` or a reference link
+     `[text][ref]` with `[ref]: path`, outside fenced code blocks (an image `![alt](path)` is not
+     one), read from the whole of `AGENTS.md` whatever its size; the `#fragment` and `?query` are
+     stripped and the path resolved from `AGENTS.md`'s directory. Only a target ending in `.md`
+     that is a regular file at the commit counts: URLs, absolute paths, paths that leave the
+     repository and symbolic links are ignored. An instruction file must be a regular file too: an
+     `AGENTS.md` that is a symbolic link is passed over for the next one. Everything is read from Git at a commit
+     (`ls-tree`, `cat-file`), never from a working tree.
+  2. **Workspace**: `<config dir>/rules/<workspace>.md`, if it exists.
+  3. **Global**: `<config dir>/rules/global.md`, if it exists (once, for a workspace named `global`).
+- **`rules_skip`**: a workspace's globs in `workspaces.json` (section Workspace registry) leave
+  repository files out (the instruction file or a linked one; never the user's rules files). The
+  software-factory workspace skips `docs/runbooks/coordinator.md`, the coordinating session's
+  runbook its `AGENTS.md` points to.
+- **Budget**: at most `SF_RULES_MAX_BYTES` (default 48 KiB) of file content; the headings and the
+  sentence do not count. Files are taken whole in order; the first that does not fit and every
+  later one are named in a closing line `Not included, read them if relevant: …`.
+- **The block**: `<rules>`, the sentence "These are the repository's and the user's coding rules:
+  …", each file under `### <source>: <path>` (`repository` with its repository path, `workspace`
+  as `rules/<workspace>.md`, `global` as `rules/global.md`), the closing line when files were left
+  out, `</rules>`. No rule file found: no block, and every prompt is as before.
+- **When**: once at Start (and at Restart), at the job's first base commit. The block is stored as
+  `<job dir>/rules.md` and its list (the commit, the budget, each file given with its source, size
+  and sha256, the files left out and the ones `rules_skip` skipped) as `<job dir>/rules.json`;
+  every later prompt reuses that copy, after a rebase or an `sf serve` restart too, so a job cannot
+  change the rules it is judged by. Each published iteration copies `rules.json` to
+  `iterations/NNN/rules.json`. A job started before SF-059 has no `rules.md`: no block, no copy.
+  When the rules cannot be collected or stored (an unreadable rules file, say), the job fails with
+  `rules_failed` before any Implementer session, its worktree kept; fix the cause, then
+  `sf restart` the ticket.
+- **Where it goes**:
+  - the prompt that opens an Implementer session: Start and Restart send `/implement <Task file>`,
+    a blank line, the block (then the kept-files note of `--keep-files`); a Resume without a
+    session yet sends the same first prompt without a message, or the block, a blank line and the
+    message (or "Continue where you stopped."). Later turns in the session do not repeat it;
+  - every Claude review and Codex gate prompt (`reviewBody`), before the Task file, with the line
+    "A review item that is a rule violation names the rule's file (and heading) in `problem`";
+  - the Task check's prompt (section Task check), collected at the commit of its checkout.
+- **`sf rules <workspace> [ticket]`** lists the files that would be given (paths, sources, sizes,
+  the files left out by the budget and by `rules_skip`), never their text. For a ticket whose job
+  has started it prints the job's stored `rules.json`, the rules its prompts carry whatever the
+  rules files and `SF_RULES_MAX_BYTES` say today (or says the job has none: started before SF-059,
+  or failed with `rules_failed`); otherwise it reads them at the Task file's `base` (fetched from
+  `origin` as Start does), and, without a ticket, at the checkout's `HEAD`.
 
 ## Jobs
 
@@ -2088,7 +2147,7 @@ screen (`POST api/workspaces`):
 {
   "workspaces": {
     "my-app": { "read_checkout": "/abs/path" },
-    "software-factory": { "read_checkout": "/abs/path2", "handoff": "off", "color": "teal" }
+    "software-factory": { "read_checkout": "/abs/path2", "handoff": "off", "color": "teal", "rules_skip": ["docs/runbooks/coordinator.md"] }
   }
 }
 ```
@@ -2110,7 +2169,8 @@ with the same name and path and `--handoff` (the other fields stay). The optiona
 invalid) is the workspace's colour on the board; without it the dashboard picks one by the name.
 `sf workspace add --color <name>` (an invalid name is refused with the list) and the dashboard's
 workspace form set it; `sf workspace add` again with the same name and path and `--color` changes
-it; `sf workspace list` shows it.
+it; `sf workspace list` shows it. The optional `rules_skip` (SF-059: a list of globs) names the
+repository rule files not given to the agents (section Coding rules); edit the file to set it.
 
 ## History
 

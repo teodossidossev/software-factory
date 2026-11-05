@@ -16,7 +16,7 @@ import { actedVerdict, decide, fixContent, REVIEW_DENIED_TOOLS, REVIEW_SCHEMA, t
 import { loadHandbook } from '../src/server.js';
 import { writeTask } from '../src/task-file.js';
 import { act, fetchRaw } from './support/dashboard-client.js';
-import { call, type Env, FAKE, fakeLog, git, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor } from './support/harness.js';
+import { call, type Env, FAKE, fakeLog, git, newEnv, newRepo, putRules, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor } from './support/harness.js';
 
 const FIX = {
   verdict: 'fix',
@@ -197,6 +197,45 @@ test('clean with an undeclared sensitive path it does not accept becomes a fix; 
   } finally {
     await stop(served);
   }
+});
+
+test('coding rules (SF-059): every review prompt gives the job\'s <rules> block before the Task file and asks that a rule violation name the rule\'s file', async () => {
+  const env = await newEnv('review-rules', { SF_REVIEW: 'on' });
+  const repo = await newRepo(env, 'review-rules-repo', false);
+  const block = await putRules(env, repo);
+  await putTask(env, repo, 'R-9', 'Follow the rules');
+  await script(env, [
+    { write: { 'README.md': 'hello world\n', 'docs/style.md': 'No rules any more.\n' }, text: 'Report of iteration 1' },
+    { write: { 'README.md': 'hello reader\n' }, text: 'Report of iteration 2\n\n| R1 | fixed | The reader is greeted. |' },
+    { write: { '.software-factory/R-9.mr.md': mrText('feat(R-9): Follow the rules') }, text: 'prepared' },
+  ]);
+  await reviewScript(env, [{ output: FIX }, { output: CLEAN }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'R-9' });
+    await waitFor(served, 'R-9', 'ready_for_human_review', 2);
+    const reviews = await reviewLog(env);
+    assert.equal(reviews.length, 2);
+    for (const entry of reviews) {
+      // The rules as at the base commit, though the job rewrote docs/style.md in its worktree.
+      assert.ok(entry.prompt.includes(`\n${block}\n\n<task_file path=".software-factory/R-9.md">\n`), entry.prompt);
+      assert.match(entry.prompt, /\n- Review the change against the Task file [^\n]*\n- A review item that is a rule violation names the rule's file \(and heading\) in `problem`\.\n- Follow the review rules below/);
+    }
+    const turns = await fakeLog(env);
+    assert.ok(turns[0]!.prompt.startsWith(`/implement .software-factory/R-9.md\n\n${block}\n`));
+    assert.ok(!turns[1]!.prompt.includes('<rules>'));
+  } finally {
+    await stop(served);
+  }
+});
+
+test('the review prompt without rules is as before: no <rules> block, no rule-violation line', async () => {
+  const input = { ticket: 'R-1', iteration: 1, task: 't', report: 'r', patch: Buffer.from('p'), patchTruncated: false, files: [], handbook: (await loadHandbook()).text };
+  const before = reviewPrompt(input);
+  assert.equal(reviewPrompt({ ...input, rules: '' }), before);
+  assert.ok(!before.includes('<rules>') && !before.includes('rule violation'));
+  const withRules = reviewPrompt({ ...input, rules: '<rules>\nR\n</rules>' });
+  assert.equal(withRules.replace('- A review item that is a rule violation names the rule\'s file (and heading) in `problem`.\n', '').replace('<rules>\nR\n</rules>\n\n', ''), before);
 });
 
 // SF-051: the severity of review items.

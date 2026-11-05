@@ -315,7 +315,7 @@ test('dashboard ticket page (SF-081) through the real Setup: the history and the
       return next;
     },
   });
-  const checks = new TaskChecks({ claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 1, stateDir: env.state, configDir: env.config, resolve: (name) => resolveWorkspace(name, env.config) });
+  const checks = new TaskChecks({ claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 1, rulesMaxBytes: 49152, stateDir: env.state, configDir: env.config, resolve: (name) => resolveWorkspace(name, env.config) });
   const dashboard = await startDashboard(0, env.state, jobs, fakeActions(), setup, { checks });
   try {
     const base = dashboard.url;

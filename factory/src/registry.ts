@@ -3,7 +3,8 @@
 // path is verified at use time: it must be the root of a non-bare Git work tree. Since SF-019 a
 // workspace is one checkout: the Implementer works in a worktree of it, so a separate work
 // checkout (`work_checkout`) is read for compatibility and ignored. A workspace's optional `handoff`
-// (SF-083) wins over SF_HANDOFF for its jobs; its optional `color` (SF-084) marks its cards on the board.
+// (SF-083) wins over SF_HANDOFF for its jobs; its optional `color` (SF-084) marks its cards on the board;
+// its optional `rules_skip` (SF-059) names the repository rule files not given to the agents.
 import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -60,6 +61,7 @@ const registrySchema = z.strictObject({
     z.string().regex(WORKSPACE_NAME_PATTERN),
     z.strictObject({
       read_checkout: absolutePath, work_checkout: absolutePath.optional(), handoff: z.enum(HANDOFF_MODES).optional(), color: z.enum(WORKSPACE_COLORS).optional(),
+      rules_skip: z.array(z.string().min(1)).optional(),
     }),
   ),
 });
@@ -76,6 +78,8 @@ export interface Workspace {
   workCheckout: string;
   // The workspace's own hand-over setting (SF-083); absent: SF_HANDOFF applies.
   handoff?: HandoffMode;
+  // The repository rule files not given to the agents (SF-059), as globs.
+  rulesSkip?: string[];
 }
 
 // The entries whose ignored work_checkout differs from the checkout, for one warning at start.
@@ -147,7 +151,10 @@ export async function resolveWorkspace(name: string, dir = configDir()): Promise
   }
   try {
     const checkout = await verifyCheckout(entry.read_checkout, 'checkout');
-    return { name, readCheckout: checkout, workCheckout: checkout, ...(entry.handoff !== undefined ? { handoff: entry.handoff } : {}) };
+    return {
+      name, readCheckout: checkout, workCheckout: checkout, ...(entry.handoff !== undefined ? { handoff: entry.handoff } : {}),
+      ...(entry.rules_skip !== undefined ? { rulesSkip: entry.rules_skip } : {}),
+    };
   } catch (error) {
     if (error instanceof FactoryError) {
       throw new FactoryError(error.code, `Workspace "${name}": ${error.message}`);

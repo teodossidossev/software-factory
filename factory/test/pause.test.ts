@@ -10,9 +10,11 @@ import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
+import { firstPrompt } from '../src/execution.js';
+import { factoryPrompt } from '../src/prompts.js';
 import { taskSha256 } from '../src/task-file.js';
 import {
-  call, codexLog, codexScript, type Env, fakeCodex, fakeLog, git, newEnv, newRepo, putTask, refused, reviewLog, reviewScript, runCli, script, serve, type Served, stop, task,
+  call, codexLog, codexScript, type Env, fakeCodex, fakeLog, git, newEnv, newRepo, putRules, putTask, refused, reviewLog, reviewScript, runCli, script, serve, type Served, stop, task,
   turnsStarted, waitFor,
 } from './support/harness.js';
 
@@ -359,6 +361,44 @@ test('Restart: a new job from the current Task file on a fresh branch; the old j
     await waitFor(served, 'R-1', 'awaiting_review', 1);
     assert.match((await fakeLog(env)).at(-1)!.prompt, /^\/implement \.software-factory\/R-1\.md\n\nRules from the Software Factory:/);
     assert.equal(await exists(join(worktreeOf(env, 'R-1'), 'a.txt')), false);
+  } finally {
+    await stop(served);
+  }
+});
+
+test('coding rules (SF-059): a Resume that opens a new session gives the <rules> block first (the first prompt without a message), a Restart gives it in its first prompt', async () => {
+  const env = await newEnv('pause-rules');
+  const repo = await newRepo(env, 'pause-rules-repo', false);
+  const block = await putRules(env, repo);
+  await putTask(env, repo, 'P-1', 'With a message');
+  await putTask(env, repo, 'P-2', 'Without a message');
+  await script(env, [{ delayMs: LONG }, { write: { 'a.txt': 'a\n' } }, { delayMs: LONG }, { write: { 'b.txt': 'b\n' } }, { write: { 'c.txt': 'c\n' } }]);
+  const served = await serve(env);
+  try {
+    // The first turns never report a session: each Resume opens a new one.
+    await call(served, 'start', { workspace: 'app', ticket: 'P-1' });
+    await turnsStarted(env, 1);
+    assert.equal((await runCli(env, ['pause', 'app', 'P-1'])).code, 0);
+    assert.equal((await runCli(env, ['resume', 'app', 'P-1', 'go', 'on'])).code, 0);
+    await waitFor(served, 'P-1', 'awaiting_review', 1);
+    assert.equal((await fakeLog(env)).at(-1)!.prompt, factoryPrompt(`${block}\n\ngo on`, 'P-1', 1));
+
+    await call(served, 'start', { workspace: 'app', ticket: 'P-2' });
+    await turnsStarted(env, 3);
+    assert.equal((await runCli(env, ['pause', 'app', 'P-2'])).code, 0);
+    assert.equal((await runCli(env, ['resume', 'app', 'P-2'])).code, 0);
+    await waitFor(served, 'P-2', 'awaiting_review', 1);
+    const log = await fakeLog(env);
+    assert.equal(log.at(-1)!.prompt, factoryPrompt(firstPrompt('P-2', [], block), 'P-2', 1));
+    assert.ok(log.at(-1)!.prompt.startsWith(`/implement .software-factory/P-2.md\n\n${block}\n\nRules from the Software Factory:`));
+
+    // Restart collects the rules again, at the new job's base commit.
+    assert.equal((await runCli(env, ['abort', 'app', 'P-2'])).code, 0);
+    await writeFile(join(env.config, 'rules', 'global.md'), 'Global rule.\n');
+    assert.equal((await runCli(env, ['restart', 'app', 'P-2'])).code, 0);
+    await waitFor(served, 'P-2', 'awaiting_review', 1);
+    const restarted = (await fakeLog(env)).at(-1)!.prompt;
+    assert.ok(restarted.startsWith(`/implement .software-factory/P-2.md\n\n${block.replace('</rules>', '\n### global: rules/global.md\n\nGlobal rule.\n</rules>')}\n\nRules from the Software Factory:`), restarted);
   } finally {
     await stop(served);
   }

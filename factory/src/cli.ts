@@ -4,7 +4,8 @@
 // `sf mr create|merge|status` and `sf queue list|add|remove|move|limit|hold|release` (SF-071)
 // (through the socket of sf serve),
 // `sf status|watch|dashboard` (reading the state directory directly), `sf check-task` (the Task
-// check of SF-054, run here and stored in the state directory), `sf notify-test`, `sf info`
+// check of SF-054, run here and stored in the state directory), `sf rules` (the coding rules of
+// SF-059, read here), `sf notify-test`, `sf info`
 // and `sf run`, the job's runner that sf serve starts (SF-042, src/runner.ts).
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { type ChildProcess, spawn } from 'node:child_process';
@@ -12,7 +13,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { openInBrowser } from './browser.js';
-import { envFilePath, gateConfig, handoffSetting, loadConfig, loadEnvFile, stateDir } from './config.js';
+import { envFilePath, gateConfig, handoffSetting, loadConfig, loadEnvFile, rulesMaxBytes, stateDir } from './config.js';
 import { DEFAULT_DASHBOARD_PORT, dashboardUrl, readToken, removeToken, type RunningDashboard, startDashboard } from './dashboard.js';
 import { FactoryError } from './errors.js';
 import { Execution, type StateListener } from './execution.js';
@@ -31,7 +32,10 @@ import { handoverLines, type StatusRow, statusRows } from './status.js';
 import { fileSummaryLines } from './patch.js';
 import { CheckStore, checkLines, checkSettings, refuseDraft, runTaskCheck, TaskChecks } from './task-check.js';
 import { TicketHistory } from './ticket-history.js';
-import { readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
+import { parseFrontMatter, readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
+import { runGit } from './git.js';
+import { resolveTarget } from './mr.js';
+import { collectRules, readJobRulesList, rulesLines } from './rules-docs.js';
 import { turnLimitLine } from './turn-limit.js';
 import { watchEvents } from './watch.js';
 
@@ -44,6 +48,7 @@ const USAGE = `Usage:
   sf workspace list                                     List registered workspaces, their hand-over setting and colour
   sf workspace remove <name>                            Unregister a workspace
   sf check-task <workspace> <ticket>                    Check the Task file before Start: a read-only Claude session reads it and the repository, and prints its paraphrase, its findings by severity and its verdict (stored by the Task file's sha256; it only advises)
+  sf rules <workspace> [ticket]                         List the coding rules the agents would be given (AGENTS.md and the Markdown files it links to, the user's rules files): paths, sources, sizes and the files left out, without their text; a started job's stored list, else read at the Task file's base, else at the checkout's HEAD
   sf start <workspace> <ticket>                         Start the job for .software-factory/<ticket>.md in a worktree of its own
   sf queue list                                         The run queue: the limit of jobs at once, the running count, held or not, and the queued tickets in order with what each waits for, and the starts that failed
   sf queue add <workspace> <ticket> [--at N]            Queue a planned ticket at position N (1-based; default: the end); sf serve starts it by itself when a slot is free and its lands_after tickets are merged
@@ -758,6 +763,50 @@ async function run(args: string[]): Promise<void> {
   console.log(`${new Date().toISOString()} runner ${process.pid} for ${workspace}/${ticket} ended`);
 }
 
+// sf rules <workspace> [ticket] (SF-059): the coding rules that would be given, without their
+// text. A ticket whose job has its rules stored: the job's own list (rules.json), as its prompts
+// carry them; a job with a base commit and nothing stored: none (it started without them). Else
+// read at the Task file's base (fetched as Start does), and at the checkout's HEAD without a ticket.
+async function rules(args: string[]): Promise<void> {
+  if (args.length < 1 || args.length > 2) {
+    throw new UsageError('rules needs <workspace> [ticket].');
+  }
+  const name = checkName(args[0]);
+  const ticket = args.length === 2 ? checkJob(args, 'rules')[1] : undefined;
+  const maxBytes = rulesMaxBytes();
+  const workspace = await resolveWorkspace(name);
+  const checkout = workspace.workCheckout;
+  let commit: string;
+  if (ticket === undefined) {
+    const head = await runGit(checkout, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']);
+    if (head.code !== 0) {
+      throw new FactoryError('base_not_found', `The checkout of ${name} has no HEAD commit.`);
+    }
+    commit = head.stdout.toString('utf8').trim();
+  } else {
+    const jobs = new JobStore(stateDir());
+    const job = await jobs.read(name, ticket);
+    if (job?.base_commit != null) {
+      const stored = await readJobRulesList(jobs.dir(name, ticket));
+      if (stored !== undefined) {
+        console.log([...rulesLines(name, stored), "Stored at the job's Start: the rules its prompts carry."].join('\n'));
+      } else if (job.error?.code === 'rules_failed') {
+        console.log(`The job of ${name}/${ticket} failed at Start: ${job.error.message}`);
+      } else {
+        console.log(`The job of ${name}/${ticket} has no stored rules (it started before SF-059): its prompts carry no <rules> block.`);
+      }
+      return;
+    }
+    const base = parseFrontMatter(await readTask(workspace, ticket))?.get('base') ?? '';
+    if (base === '' || base.startsWith('-') || (await runGit(checkout, ['check-ref-format', '--branch', base])).code !== 0) {
+      throw new FactoryError('base_not_found', `The base "${base}" is not a valid branch name.`);
+    }
+    commit = (await resolveTarget(checkout, base)).commit;
+  }
+  const { list } = await collectRules(checkout, commit, { workspace: name, skip: workspace.rulesSkip ?? [], configDir: configDir(), maxBytes });
+  console.log(rulesLines(name, list).join('\n'));
+}
+
 // sf check-task <workspace> <ticket> (SF-054): one Task check in this process, without sf serve;
 // the record goes to the state directory, as from the dashboard's Check.
 async function checkTask(args: string[]): Promise<void> {
@@ -1073,6 +1122,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'check-task') {
     await checkTask(rest);
+    return;
+  }
+  if (command === 'rules') {
+    await rules(rest);
     return;
   }
   if (command === 'notify-test') {

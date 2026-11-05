@@ -38,7 +38,7 @@ const RESTART_STATES = ['paused', 'waiting_limit', 'aborted', 'failed', 'needs_h
 // The rule at a usage limit's reset (SF-072), as the Rules menu names them.
 const ON_LIMIT_RULES = ['resume-then-queue', 'resume-only', 'wait'];
 const ACTION_LABELS = {
-  approve: 'Approve', abort: 'Abort', say: 'Send', review: 'Retry review', accept: 'Accept and prepare MR', settle: 'Settle', simplify: 'Simplify', archive: 'Archive',
+  approve: 'Approve', abort: 'Abort', say: 'Send', review: 'Retry review', retry: 'Retry', accept: 'Accept and prepare MR', settle: 'Settle', simplify: 'Simplify', archive: 'Archive',
   'mr-create': 'Create merge request', 'mr-merge': 'Merge', 'mr-status': 'Refresh MR status', pause: 'Pause', resume: 'Resume', restart: 'Restart',
   handover: 'Hand over to my checkout', takeback: 'Take it back', 'handed-done': 'I opened the MR myself',
   'review-mr': 'Review the MR and push',
@@ -51,6 +51,7 @@ const PENDING_REASONS = {
   abort: 'abort was requested; waiting for its outcome.',
   say: 'the message is being sent.',
   review: 'the review is being restarted.',
+  retry: 'the MR preparation is being started again.',
   archive: 'the job is being archived.',
   'mr-create': 'the merge request was requested; waiting for its outcome.',
   'mr-merge': 'the merge was requested; waiting for its outcome.',
@@ -70,6 +71,7 @@ const PENDING_TEXT = {
   abort: 'Abort requested; waiting for the job to end.',
   say: 'Sending the message…',
   review: 'Restarting the review…',
+  retry: 'Preparing the MR again…',
   archive: 'Archiving the job…',
   'mr-create': 'Opening the merge request…',
   'mr-merge': 'Merging the merge request…',
@@ -91,6 +93,9 @@ const SIMPLIFY_CODE = 'simplify_offered';
 const ACCEPT_CODES = [...GATE_CODES, ...LEDGER_CODES, SIMPLIFY_CODE];
 // The stops whose findings the user settles here (Accept risk, Must fix).
 const SETTLE_STOPS = ['escalated', ...LEDGER_CODES];
+// The entries of STOPS (aliases included) whose Retry runs MR preparation again without a new
+// review (SF-087): MR_RETRY_CODES of factory/src/execution.ts.
+const RETRY_STOPS = ['fetch_failed', 'mr_serve_restarted', 'mr_failed'];
 
 const state = {
   jobs: [],
@@ -2485,6 +2490,7 @@ const mrAvailable = () => shownDetail()?.mr === true;
 
 const SEND = { a: 'say', l: 'Send' };
 const GO_ON = { a: 'goon', l: 'Tell it to go on' };
+const RETRY = { a: 'retry', l: 'Retry' };
 const ABORT = { a: 'abort', l: 'Abort…', d: true };
 const RESTART = { a: 'restart', l: 'Restart…' };
 const ARCHIVE = { a: 'archive', l: 'Archive' };
@@ -2515,11 +2521,15 @@ function stopActions(job, detail) {
     case 'serve_restarted':
     case 'session_failed':
       return [GO_ON, RESTART, ABORT];
-    case 'max_turns':
+    case 'fetch_failed':
+      // A conflict turn ran in this MR preparation (SF-087): no Retry, its iteration is reviewed again.
+      return retryable(job) ? [RETRY, ABORT] : [GO_ON, ABORT];
     case 'mr_serve_restarted':
+    case 'mr_failed':
+      return retryable(job) ? [RETRY, GO_ON, ABORT] : [GO_ON, ABORT];
+    case 'max_turns':
     case 'sandbox_unavailable':
     case 'publish_failed':
-    case 'mr_failed':
     case 'worktree_remove_failed':
       return [GO_ON, ABORT];
     case 'mr_conflict':
@@ -2688,6 +2698,10 @@ function renderDetail(detail) {
 
 // The job waits for the user after a failed Claude review: Retry review runs it again.
 const reviewFailed = (job) => job.state === 'needs_human' && job.error?.code === 'review_failed';
+// A transient stop of MR preparation that Retry takes on (SF-087); never after a conflict turn,
+// whose resolution no reviewer saw.
+const retryable = (job) => job.state === 'needs_human' && typeof job.error?.code === 'string'
+  && RETRY_STOPS.includes(STOP_ALIASES[job.error.code] ?? job.error.code) && job.mr_conflict_turn !== true;
 
 const preparationKnown = (job) => job.state === 'preparing_mr' || state.pending.has(pendingId('approve', keyOf(job)));
 
@@ -2758,6 +2772,9 @@ function availability(action, job) {
   }
   if (action === 'review') {
     return reviewFailed(job) ? '' : 'only after a failed review.';
+  }
+  if (action === 'retry') {
+    return retryable(job) ? '' : 'only after a transient MR preparation failure.';
   }
   if (action === 'simplify') {
     return simplifiable(job) ? '' : 'only when the simplification pass offers suggestions (simplify_offered).';
@@ -2855,6 +2872,9 @@ function describeOutcome(action, result) {
   }
   if (action === 'review') {
     return { level: 'ok', text: `The review of iteration ${data.iteration} runs again (state ${data.state}).` };
+  }
+  if (action === 'retry') {
+    return { level: 'ok', text: `MR preparation runs again (state ${data.state}).` };
   }
   if (action === 'accept') {
     return { level: 'ok', text: `Accepted over the gate: the factory prepares the MR of iteration ${data.iteration} (state ${data.state}).` };
@@ -3197,7 +3217,7 @@ function act(action) {
     if (availability('resume', job) === '') {
       void run('resume', key, pausedTurn(job) && message.trim() !== '' ? { message } : {});
     }
-  } else if (['pause', 'review', 'mr-status', 'archive', ...HANDOVER_ACTIONS.map(([name]) => name)].includes(action) && availability(action, job) === '') {
+  } else if (['pause', 'review', 'retry', 'mr-status', 'archive', ...HANDOVER_ACTIONS.map(([name]) => name)].includes(action) && availability(action, job) === '') {
     void run(action, key, {});
   }
 }
@@ -3346,8 +3366,10 @@ const STOPS = {
     sentence: (job) => `sf serve restarted while iteration ${shownIteration(job)} ran. Tell the Implementer to go on.`,
   },
   mr_serve_restarted: {
-    kind: 'error', reason: 'MR preparation interrupted', button: () => 'Tell it to go on',
-    sentence: () => 'The MR preparation was interrupted. Tell the Implementer to go on: the iteration is reviewed again and the MR is prepared again.',
+    kind: 'error', reason: 'MR preparation interrupted', button: (job) => (retryable(job) ? 'Retry' : 'Tell it to go on'),
+    sentence: (job) => (retryable(job)
+      ? 'The MR preparation was interrupted. Retry prepares the MR again without a new review; Tell it to go on reviews the iteration again.'
+      : 'The MR preparation was interrupted. Tell the Implementer to go on: the iteration is reviewed again and the MR is prepared again.'),
   },
   // session_failed with the usage-limit message.
   usage_limit: {
@@ -3379,8 +3401,14 @@ const STOPS = {
     sentence: (job) => `The reviewed change has nothing to commit against ${job.base}. Tell the Implementer what is missing, or abort.`,
   },
   mr_failed: {
-    kind: 'error', reason: 'MR preparation failed', button: () => 'Tell it to go on',
-    sentence: (job) => `The MR preparation failed${said(job)}. Tell the Implementer to go on (the iteration is reviewed again), or abort.`,
+    kind: 'error', reason: 'MR preparation failed', button: (job) => (retryable(job) ? 'Retry' : 'Tell it to go on'),
+    sentence: (job) => (retryable(job)
+      ? `The MR preparation failed${said(job)}. Retry prepares the MR again without a new review; Tell it to go on reviews the iteration again.`
+      : `The MR preparation failed${said(job)}. Tell the Implementer to go on (the iteration is reviewed again), or abort.`),
+  },
+  fetch_failed: {
+    kind: 'error', reason: 'Fetch failed', button: (job) => (retryable(job) ? 'Retry' : 'Tell it to go on'),
+    sentence: (job) => `Git could not fetch ${job.base} from origin after the clean review. ${retryable(job) ? 'Retry when the network is back.' : 'Tell the Implementer to go on when the network is back (the iteration is reviewed again).'}`,
   },
   worktree_remove_failed: {
     kind: 'error', reason: 'Worktree not removed', button: () => 'Tell it to go on',
@@ -3764,7 +3792,7 @@ function jobCard(job) {
 
 // The one primary action of a Your turn card, and the job's last outcome. It opens the job's page
 // at the stop or the message box (a handed-over branch with the Approve confirmation, a branch
-// ready for review on its Merge request screen, SF-080), except Retry review and Resume, which go
+// ready for review on its Merge request screen, SF-080), except Retry review, Retry (SF-087) and Resume, which go
 // at once; a prepared branch also offers Create merge request….
 function yourTurn(job) {
   const key = keyOf(job);
@@ -3783,6 +3811,10 @@ function yourTurn(job) {
   } else if (reviewFailed(job)) {
     primary = button('btn primary small', ACTION_LABELS.review, { run: 'review', key });
     primary.disabled = availability('review', job) !== '';
+  } else if (retryable(job)) {
+    // Retry of a transient MR preparation failure (SF-087), posted at once.
+    primary = button('btn primary small', ACTION_LABELS.retry, { run: 'retry', key });
+    primary.disabled = availability('retry', job) !== '';
   } else {
     const stop = stopEntry(job);
     const data = { open: key };
@@ -4909,10 +4941,10 @@ function queueAction(action, key) {
   }
 }
 
-// Retry review and Resume of a Your turn card: posted at once, once.
+// Retry review, Retry and Resume of a Your turn card: posted at once, once.
 function cardRun(action, key) {
   const job = jobByKey(key);
-  if (job === null || availability(action, job) !== '' || (action === 'review' && !reviewFailed(job))) {
+  if (job === null || availability(action, job) !== '' || (action === 'review' && !reviewFailed(job)) || (action === 'retry' && !retryable(job))) {
     return;
   }
   void run(action, key, {});

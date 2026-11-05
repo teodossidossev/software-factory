@@ -33,7 +33,10 @@ export type RunnerRequest =
   // The user's Simplify on the offer of the simplification pass (SF-055).
   | { kind: 'simplify' }
   // The user's Resume of a paused job (SF-067), with the message for the Implementer ('' for none).
-  | { kind: 'resume'; message: string };
+  | { kind: 'resume'; message: string }
+  // The user's Retry of a transient MR preparation failure (SF-087): MR preparation runs again,
+  // without a new review.
+  | { kind: 'retry' };
 
 export type RunnerReply = { ok: true; result: unknown } | { ok: false; error: { code: string; message: string } };
 

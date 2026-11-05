@@ -596,6 +596,32 @@ test('dashboard review: POST only, the action checks, Execution.retryReview once
   });
 });
 
+test('dashboard retry (SF-087): POST only, the action checks, Execution.retryMr once per request, 200 with its result, 409 on its refusals', async () => {
+  const fake = fakeActions({ state: 'preparing_mr', iteration: 1, branch: 'T-1-demo' });
+  await withDashboard('dash-act-retry', fake, async (dashboard) => {
+    const base = dashboard.url;
+    const path = 'api/jobs/app/T-1/retry';
+    for (const method of ['GET', 'PUT']) {
+      const reply = await act(base, path, {}, { method });
+      assert.deepEqual([reply.status, reply.headers.allow, reply.body], [405, 'POST', ''], method);
+    }
+    assert.deepEqual(error(await act(base, path, {}, { headers: { origin: '' } })), { status: 403, code: 'invalid_origin' });
+    for (const body of ['{"sensitive":[]}', '[]', 'null']) {
+      assert.deepEqual(error(await act(base, path, undefined, { body })), { status: 400, code: 'invalid_body' }, body);
+    }
+    assert.deepEqual([(await act(base, 'api/jobs/app/T-9/retry', {})).status], [404]);
+    assert.deepEqual(fake.calls, []);
+
+    const reply = await act(base, path, {});
+    assert.equal(reply.status, 200);
+    assert.deepEqual(result(reply), { state: 'preparing_mr', iteration: 1, branch: 'T-1-demo' });
+    assert.deepEqual(fake.calls, [['retryMr', 'app', 'T-1']]);
+    fake.answer = new FactoryError('invalid_state', 'The MR preparation ran a conflict turn whose changes no reviewer saw; tell the Implementer to go on (the iteration is reviewed again).');
+    assert.deepEqual(error(await act(base, path, {})), { status: 409, code: 'invalid_state' });
+    assert.equal(fake.calls.length, 2);
+  });
+});
+
 test('dashboard accept (SF-047): POST only, the action checks, Execution.acceptGate once per request, its refusals mapped', async () => {
   const fake = fakeActions({ state: 'preparing_mr', iteration: 3, branch: 'T-1-demo' });
   await withDashboard('dash-act-accept', fake, async (dashboard) => {

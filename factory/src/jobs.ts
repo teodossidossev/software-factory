@@ -100,6 +100,11 @@ const jobSchema = z.strictObject({
   prepared_commit: commit.nullable().default(null),
   // Number of MR preparation turns started.
   mr_attempts: z.number().int().min(0).default(0),
+  // Whether the MR preparation in progress ran a conflict turn (SF-087): set before the conflict
+  // prompt is sent, cleared when the resolved iteration goes back to review and when MR preparation
+  // starts. Its resolution is applied before the job goes back to review, so a stop in between
+  // leaves code no reviewer saw: no Retry then.
+  mr_conflict_turn: z.boolean().default(false),
   state: z.enum(JOB_STATES),
   // Number of published iterations.
   iteration: z.number().int().min(0),

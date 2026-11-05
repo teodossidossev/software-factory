@@ -73,7 +73,8 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 };
 
 // The User's actions, bound by `sf serve` to its one Execution: the same methods, guards and
-// results as the socket commands of sf start, sf approve, sf abort, sf say and sf review. A job is
+// results as the socket commands of sf start, sf approve, sf abort, sf say, sf review and sf retry
+// (SF-087: retryMr, the Retry of a transient MR preparation failure). A job is
 // started from its ticket on the start screen once the Task file is written (SF-040), or with
 // sf start. Archive of a job card is archiveFinished (terminal only), never the any-state reset.
 // The merge request on the Git host (SF-048): mr-create, mr-merge and mr-status as sf mr create,
@@ -83,13 +84,13 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 // takeback and handed-done, and checkHandedOver, the check for the user's own push that the job's
 // detail starts. The Merge request screen (SF-080): mergeRequestView (GET mr-view), saveMr and
 // resetMr (POST mr-save and mr-reset).
-export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | 'say' | 'retryReview' | 'acceptGate' | 'settle' | 'simplify' | 'archiveFinished'
+export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | 'say' | 'retryReview' | 'retryMr' | 'acceptGate' | 'settle' | 'simplify' | 'archiveFinished'
   | 'createMergeRequest' | 'mergeMergeRequest' | 'mergeRequestStatus' | 'mergeRequestHost' | 'pause' | 'resumePaused' | 'restart'
   | 'handover' | 'takeback' | 'handedDone' | 'checkHandedOver' | 'mergeRequestView' | 'saveMr' | 'resetMr'>;
-export type DashboardAction = 'approve' | 'abort' | 'say' | 'review' | 'accept' | 'settle' | 'simplify' | 'archive' | 'mr-create' | 'mr-merge' | 'mr-status' | 'pause' | 'resume' | 'restart'
+export type DashboardAction = 'approve' | 'abort' | 'say' | 'review' | 'retry' | 'accept' | 'settle' | 'simplify' | 'archive' | 'mr-create' | 'mr-merge' | 'mr-status' | 'pause' | 'resume' | 'restart'
   | 'handover' | 'takeback' | 'handed-done' | 'mr-save' | 'mr-reset';
 export const ACTIONS: DashboardAction[] = [
-  'approve', 'abort', 'say', 'review', 'accept', 'settle', 'simplify', 'archive', 'mr-create', 'mr-merge', 'mr-status', 'pause', 'resume', 'restart', 'handover', 'takeback', 'handed-done',
+  'approve', 'abort', 'say', 'review', 'retry', 'accept', 'settle', 'simplify', 'archive', 'mr-create', 'mr-merge', 'mr-status', 'pause', 'resume', 'restart', 'handover', 'takeback', 'handed-done',
   'mr-save', 'mr-reset',
 ];
 // How often the job's detail asks origin for the user's push of a handed-over branch (SF-073).
@@ -164,6 +165,7 @@ const BODIES = {
   abort: { shape: '{"discard"?: boolean}', schema: z.strictObject({ discard: z.boolean().optional() }) },
   say: { shape: '{"message": string}', schema: z.strictObject({ message: z.string() }) },
   review: { shape: '{}', schema: z.strictObject({}) },
+  retry: { shape: '{}', schema: z.strictObject({}) },
   accept: { shape: '{}', schema: z.strictObject({}) },
   settle: { shape: '{"id": string, "decision": "accept" | "fix", "note"?: string}', schema: z.strictObject({ id: z.string(), decision: z.enum(DECISIONS), note: z.string().optional() }) },
   simplify: { shape: '{}', schema: z.strictObject({}) },
@@ -377,11 +379,11 @@ async function taskChangedOf(setup: DashboardSetup, job: Job): Promise<boolean |
 // (provider, resets_at, reset_seen), null otherwise; task_changed: taskChangedOf; turn_limit: the line of a chain that went on by
 // itself after a turn limit (SF-069), null without one; handover: the job in the user's checkout
 // (SF-073), null otherwise; handoff_skipped: why the automatic hand-over did not happen, null
-// otherwise.
+// otherwise; mr_conflict_turn: the MR preparation ran a conflict turn, so no Retry (SF-087).
 function jobSummary(job: Job, counts: { files: number; undeclared: number; deleted: number }, mrHost: MrHost, taskChanged: boolean | null) {
   return {
     workspace: job.workspace, ticket: job.ticket, branch: job.branch, base: job.base, state: job.state,
-    iteration: job.iteration, mr_attempts: job.mr_attempts, updated_at: job.updated_at, created_at: job.created_at,
+    iteration: job.iteration, mr_attempts: job.mr_attempts, mr_conflict_turn: job.mr_conflict_turn, updated_at: job.updated_at, created_at: job.created_at,
     error: job.error ?? null, worktree: job.worktree, prepared_commit: job.prepared_commit,
     fixes: job.fixes, gate_fixes: job.gate_fixes, gate_tokens: job.gate_tokens, ...counts,
     mr: job.mr, mr_host: mrHost, paused: job.paused ?? null, limit: job.limit ?? null, task_changed: taskChanged, turn_limit: turnLimitLine(job) ?? null,
@@ -1363,6 +1365,12 @@ export async function startDashboard(
       // sf review: the Execution refuses any state but needs_human with review_failed.
       const run = (): Promise<unknown> => actions.retryReview(workspace, ticket);
       return { route: action, exists, call: (data) => (parse(BODIES.review.schema, data) ? run : undefined) };
+    }
+    if (action === 'retry') {
+      // sf retry (SF-087): the Execution refuses any job but one a transient MR preparation failure
+      // stopped; on mr_push_failed it pushes again.
+      const run = (): Promise<unknown> => actions.retryMr(workspace, ticket);
+      return { route: action, exists, call: (data) => (parse(BODIES.retry.schema, data) ? run : undefined) };
     }
     if (action === 'accept') {
       // sf accept: the Execution refuses any state but needs_human after the gate stopped, with a

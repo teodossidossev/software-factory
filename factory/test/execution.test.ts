@@ -359,7 +359,7 @@ test('the queue\'s own start counts the running jobs of every workspace against 
   const at = new Date().toISOString();
   const record = (workspace: string, ticket: string, state: JobState): Job => ({
     workspace, ticket, branch: `${ticket}-b`, base: 'main', base_commit: null, state, worktree: null, prepared_commit: null,
-    iteration: 1, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, created_at: at, updated_at: at,
+    iteration: 1, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, mr_conflict_turn: false, created_at: at, updated_at: at,
   });
   for (const [workspace, ticket, state] of [['app', 'X-1', 'working'], ['web', 'X-2', 'awaiting_review'], ['app', 'X-3', 'paused'], ['app', 'X-4', 'needs_human'], ['app', 'X-5', 'ready_for_human_review'], ['app', 'X-6', 'pushed']] as const) {
     await jobs.write(record(workspace, ticket, state));
@@ -383,7 +383,7 @@ test('usage limit (SF-072): a parked job counts against max_running for the queu
   const at = new Date(Date.now() - 60_000).toISOString();
   const record = (ticket: string, state: JobState, parkedAt = at): Job => ({
     workspace: 'app', ticket, branch: `${ticket}-b`, base: 'main', base_commit: null, state, worktree: null, prepared_commit: null,
-    iteration: 1, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, created_at: at, updated_at: at,
+    iteration: 1, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, mr_conflict_turn: false, created_at: at, updated_at: at,
     ...(state === 'waiting_limit' ? { paused: { from: 'working' as const, step: 'turn' as const, at: parkedAt }, limit: { provider: 'claude' as const, resets_at: at } } : {}),
   });
   await jobs.write(record('L-1', 'waiting_limit'));

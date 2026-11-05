@@ -1,6 +1,7 @@
 // The job lifecycle: start, check, requestFix, markClean (the MR preparation and the branch,
 // SF-019, committed and rebased by the factory, SF-037), say, retryReview (the retry of a failed
-// review, SF-044), acceptGate (the user's override of a stopped gate, SF-047), approve (the push),
+// review, SF-044), acceptGate (the user's override of a stopped gate, SF-047), retryMr (the Retry of a
+// transient MR preparation failure, without a new review, SF-087), approve (the push),
 // the merge request on the Git host (SF-048: createMergeRequest, mergeMergeRequest,
 // mergeRequestStatus), simplify (the user's choice on the offer of the simplification pass,
 // SF-055), pause, resume and restart (SF-067: resumePaused, restart), the park of a job whose session
@@ -20,7 +21,7 @@
 // Since SF-042 each job's turns, reviews and gate run in the job's runner (src/runner.ts), a
 // detached `sf run` with an Execution of its own in runner mode: sf serve creates the job at start,
 // queues the requests that need a turn or a review (the first turn, say, a Fix section, Clean, the
-// retry of a review, the override of the gate, the Resume of a paused job) and waits for the
+// retry of a review, the override of the gate, the Retry of MR preparation, the Resume of a paused job) and waits for the
 // runner's reply; abort, pause, restart and reset stop the runner first. approve and the merge request stay in sf serve.
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { createReadStream } from 'node:fs';
@@ -135,6 +136,10 @@ interface MrContent {
   body: string;
 }
 
+// The needs_human codes of a transient stop of MR preparation after the deciding clean verdict and
+// before the branch is prepared (SF-087): sf retry runs MR preparation again, without a new review.
+// Not after a conflict turn (mr_conflict_turn): its resolution is code no reviewer saw.
+export const MR_RETRY_CODES: readonly string[] = ['fetch_failed', 'mr_serve_restarted', 'mr_interrupted', 'mr_commit_failed', 'mr_rebase_failed', 'mr_failed'];
 // The Merge request screen (SF-080): the needs_human codes of a push that failed or was refused,
 // in which the MR text stays editable (the prepared commit and its worktree are kept until the push).
 const MR_PUSH_CODES: readonly string[] = ['mr_push_failed', 'mr_push_protected'];
@@ -830,7 +835,7 @@ export class Execution implements RunnerWork {
     const worktree = this.#worktreePath(workspace.name, ticket);
     const job: Job = {
       workspace: workspace.name, ticket, branch, base, base_commit: null, state: 'starting', worktree, prepared_commit: null,
-      iteration: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, created_at: created, updated_at: created,
+      iteration: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, mr_conflict_turn: false, created_at: created, updated_at: created,
     };
     await this.jobs.write(job);
     await this.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, state: { from: null, to: 'starting' } });
@@ -1289,8 +1294,10 @@ export class Execution implements RunnerWork {
   // the branch tip, remove the worktree and hand the job to the user.
   async #mrIdle(job: Job, live: Live, outcome: IdleOutcome): Promise<void> {
     const cwd = live.cwd;
+    // The job as last written: with mr_conflict_turn once the conflict turn is under way.
+    let current = job;
     const needsHuman = async (code: string, message: string): Promise<void> => {
-      await this.#transition(job, 'needs_human', { code, message });
+      await this.#transition(current, 'needs_human', { code, message });
     };
     try {
       if (await rebaseInProgress(cwd)) {
@@ -1335,6 +1342,9 @@ export class Execution implements RunnerWork {
         // The job stays preparing_mr while the Implementer resolves the conflicts.
         const targetRef = live.mr?.targetRef ?? job.base;
         live.mr = { targetRef, conflicts: prepared.files };
+        // From here a stop may leave a resolution no reviewer saw: no Retry (SF-087).
+        current = { ...job, mr_conflict_turn: true };
+        await this.jobs.write(current);
         live.session.send(conflictPrompt({ ticket: job.ticket, targetRef, targetCommit, files: prepared.files }), DENIED_TOOLS);
         return;
       }
@@ -1385,7 +1395,9 @@ export class Execution implements RunnerWork {
       await this.#transition(job, 'needs_human', failure);
       return;
     }
-    const rebased: Job = { ...job, base_commit: targetCommit, target_commit: targetCommit };
+    // The resolution goes back to review with this transition: the conflict turn's window ends
+    // (SF-087), so a later stop of MR preparation after a clean verdict on it may be retried.
+    const rebased: Job = { ...job, base_commit: targetCommit, target_commit: targetCommit, mr_conflict_turn: false };
     const note = [
       '## MR preparation',
       '',
@@ -1496,7 +1508,7 @@ export class Execution implements RunnerWork {
         // No gate override: the gate was clean.
         const record = await this.jobs.readSimplify(workspaceName, ticket, job.iteration);
         const sensitive = [...new Set([...review.accepted_sensitive, ...(gate !== undefined && 'verdict' in gate ? gate.accepted_sensitive : [])])];
-        return this.#prepareMr(job, sensitive, async () => {
+        return this.#prepareMr(job, sensitive, { onAccepted: async () => {
           const at = now();
           if (record !== undefined && 'suggestions' in record) {
             await this.jobs.writeSimplify(workspaceName, ticket, job.iteration, { ...record, skipped_at: at });
@@ -1504,19 +1516,19 @@ export class Execution implements RunnerWork {
           await this.jobs.appendEvent(workspaceName, ticket, {
             ts: at, iteration: job.iteration, type: 'simplify_chosen', choice: 'skip', suggestions: record !== undefined && 'suggestions' in record ? record.suggestions.length : 0,
           });
-        });
+        } });
       }
       const unapplied = LEDGER_ACCEPT_CODES.includes(code)
         ? await this.#ledgerUnapplied(job, gate)
         : gate === undefined ? [] : 'verdict' in gate ? gate.items : gate.error;
       const override: GateOverride = { at: now(), code, unapplied };
-      return this.#prepareMr(job, review.accepted_sensitive, async () => {
+      return this.#prepareMr(job, review.accepted_sensitive, { onAccepted: async () => {
         await this.jobs.writeGateOverride(workspaceName, ticket, job.iteration, override);
         await this.jobs.appendEvent(workspaceName, ticket, {
           ts: override.at, iteration: job.iteration, type: 'gate_overridden', code: override.code,
           unapplied: Array.isArray(override.unapplied) ? override.unapplied.length : 0,
         });
-      });
+      } });
     });
   }
 
@@ -2535,12 +2547,83 @@ export class Execution implements RunnerWork {
     return retry;
   }
 
+  // The user's Retry (sf retry, the dashboard's Retry; SF-087): a job that a transient failure
+  // stopped in MR preparation after the deciding clean verdict prepares the MR again, with no fix
+  // turn, no review, no gate and no simplification pass. On mr_push_failed it is approve without
+  // --as-is: the push again, in sf serve.
+  async retryMr(workspaceName: string, ticket: string): Promise<MrOutcome | { state: JobState; iteration: number; branch: string }> {
+    const job = await this.#job(workspaceName, ticket);
+    if (job.state === 'needs_human' && job.error?.code === 'mr_push_failed') {
+      return this.approve(workspaceName, ticket, false);
+    }
+    return this.#request(workspaceName, ticket, { kind: 'retry' }) as Promise<{ state: JobState; iteration: number; branch: string }>;
+  }
+
+  // sf retry needs needs_human with one of MR_RETRY_CODES, the worktree, no prepared commit and no
+  // conflict turn since MR preparation began. No turn ran since: any turn leaves needs_human.
+  #checkRetryMr(job: Job): void {
+    if (job.handover !== undefined && job.handover.step !== null) {
+      throw cutOffError(job, job.handover.step);
+    }
+    const code = job.error?.code;
+    const what = `the job is ${job.state}${code !== undefined ? ` (${code})` : ''}`;
+    if (job.state !== 'needs_human' || code === undefined || !MR_RETRY_CODES.includes(code)) {
+      throw new FactoryError('invalid_state', `sf retry needs needs_human after a transient MR preparation failure (${MR_RETRY_CODES.join(', ')}) or a failed push (mr_push_failed); ${what}.`);
+    }
+    if (job.mr_conflict_turn) {
+      throw new FactoryError('invalid_state', 'The MR preparation ran a conflict turn whose changes no reviewer saw; tell the Implementer to go on (the iteration is reviewed again).');
+    }
+    if (job.worktree === null || job.prepared_commit !== null) {
+      throw new FactoryError('invalid_state', `sf retry needs the job's worktree and no prepared commit; ${what}${job.worktree === null ? ', without a worktree' : ', with a prepared commit'}.`);
+    }
+  }
+
+  // The Retry in the runner: MR preparation with the paths the clean path accepted. Those of the
+  // last iteration's Claude review, and of its gate when the gate's verdict was clean (as #pickUp
+  // builds them); after a gate override, the review's alone (as acceptGate passes them).
+  #retryMr(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; branch: string }> {
+    return this.#locked(async () => {
+      const job = await this.#job(workspaceName, ticket);
+      this.#checkRetryMr(job);
+      if (!(await exists(job.worktree!))) {
+        throw new FactoryError('invalid_state', `sf retry needs the job's worktree; the job is ${job.state} (${job.error!.code}) and its worktree ${job.worktree} is missing.`);
+      }
+      const review = job.iteration > 0 ? await this.jobs.readReview(workspaceName, ticket, job.iteration) : undefined;
+      if (review === undefined || !('verdict' in review) || actedVerdict(withoutDropped(review)) !== 'clean') {
+        throw new FactoryError('invalid_state', `sf retry needs a clean Claude review of the last iteration (${job.iteration}); tell the Implementer to go on.`);
+      }
+      const gate = await this.jobs.readGate(workspaceName, ticket, job.iteration);
+      const overridden = (await this.jobs.readGateOverride(workspaceName, ticket, job.iteration)) !== undefined;
+      const gateAccepted = !overridden && gate !== undefined && 'verdict' in gate && actedVerdict(withoutDropped(gate)) === 'clean' ? gate.accepted_sensitive : [];
+      try {
+        return await this.#prepareMr(job, [...new Set([...review.accepted_sensitive, ...gateAccepted])], { retry: true });
+      } catch (error) {
+        // A transient failure again (the fetch) stops the job again with its code, so it can be
+        // retried once more; any other refusal leaves the job as it was.
+        if (error instanceof FactoryError && MR_RETRY_CODES.includes(error.code)) {
+          await this.#transition(job, 'needs_human', { code: error.code, message: error.message });
+        }
+        throw error;
+      }
+    });
+  }
+
   // The work of mark_clean, also run for a clean verdict of the review. Only under the lock.
   // With onAccepted (acceptGate, which checked the state), the user's Accept is recorded by it once
   // every check has passed, before the job moves on: the gate override, or the Skip (SF-055).
-  async #prepareMr(job: Job, sensitive: string[], onAccepted?: () => Promise<void>): Promise<{ state: JobState; iteration: number; branch: string }> {
+  // With retry (sf retry, SF-087, which passes the clean path's accepted paths), the state is
+  // #checkRetryMr's; the Implementer is told the previous error only when an MR text turn ran.
+  async #prepareMr(job: Job, sensitive: string[], options: { onAccepted?: () => Promise<void>; retry?: boolean } = {}): Promise<{ state: JobState; iteration: number; branch: string }> {
     const { workspace: workspaceName, ticket } = job;
-    const retry = this.#checkPrepareMr(job, onAccepted !== undefined);
+    const { onAccepted } = options;
+    // Whether the MR text turn is told the previous error: an earlier MR text turn ran.
+    let afterTextTurn: boolean;
+    if (options.retry === true) {
+      this.#checkRetryMr(job);
+      afterTextTurn = job.mr_attempts > 0;
+    } else {
+      afterTextTurn = this.#checkPrepareMr(job, onAccepted !== undefined);
+    }
     const unacknowledged = markedGroups(await this.#unaccepted(job, sensitive));
     if (unacknowledged.length > 0) {
       const lines = unacknowledged.map((group) => `${group.label.charAt(0).toUpperCase()}${group.label.slice(1)} in the reviewed iteration: ${group.paths.join(', ')}.`);
@@ -2565,10 +2648,10 @@ export class Execution implements RunnerWork {
     });
     await onAccepted?.();
     const attempt = job.mr_attempts + 1;
-    const next = await this.#syncTask(workspace, await this.#transition({ ...job, target_commit: target.commit, mr_attempts: attempt }, 'preparing_mr'));
+    const next = await this.#syncTask(workspace, await this.#transition({ ...job, target_commit: target.commit, mr_attempts: attempt, mr_conflict_turn: false }, 'preparing_mr'));
     const prompt = mrPrompt({
       ticket, branch: job.branch, targetRef: target.ref, targetCommit: target.commit, attempt,
-      previousError: retry ? job.error?.message : undefined, handbook: this.#handbook,
+      previousError: afterTextTurn ? job.error?.message : undefined, handbook: this.#handbook,
     });
     const session = this.#session(next, workspace);
     this.#live.get(key)!.mr = { targetRef: target.ref };
@@ -3935,6 +4018,9 @@ export class Execution implements RunnerWork {
       case 'review':
         this.#checkRetryReview(job);
         break;
+      case 'retry':
+        this.#checkRetryMr(job);
+        break;
       case 'accept':
         this.#checkAcceptGate(job);
         break;
@@ -3971,6 +4057,8 @@ export class Execution implements RunnerWork {
         return this.#locked(async () => this.#prepareMr(await this.#job(workspace, ticket), request.sensitive));
       case 'review':
         return this.#retryReview(workspace, ticket);
+      case 'retry':
+        return this.#retryMr(workspace, ticket);
       case 'accept':
         return this.#acceptGate(workspace, ticket);
       case 'settle':

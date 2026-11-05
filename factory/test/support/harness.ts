@@ -14,7 +14,7 @@ import { after, before } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { callSocket } from '../../src/ipc.js';
-import { JobStore } from '../../src/jobs.js';
+import { JobStore, refusedTransitions } from '../../src/jobs.js';
 import { saveRegistry } from '../../src/registry.js';
 import { rulesBlock } from '../../src/rules-docs.js';
 import { CheckStore, taskSha256 } from '../../src/task-check.js';
@@ -30,6 +30,17 @@ export let temp: string;
 // The fake Codex executable (test/support/fake-codex.ts behind a shell wrapper), for SF_CODEX.
 export let fakeCodex: string;
 const running = new Set<ChildProcess>();
+// Everything the sf processes of this test file wrote to stdout and stderr (SF-088): the after hook
+// fails on a refused state change in it.
+const outputs: Array<{ command: string; text: string }> = [];
+
+// Keeps every byte the child writes to stdout and stderr in outputs.
+function collect(child: ChildProcess, args: string[]): void {
+  const output = { command: `sf ${args.join(' ')}`, text: '' };
+  outputs.push(output);
+  child.stdout?.on('data', (chunk: Buffer) => (output.text += chunk.toString('utf8')));
+  child.stderr?.on('data', (chunk: Buffer) => (output.text += chunk.toString('utf8')));
+}
 
 export interface Env {
   config: string;
@@ -217,6 +228,7 @@ export async function readyCheck(env: Env, repo: string, ticket: string): Promis
 export function runCli(env: Env, args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [CLI, ...args], { env: processEnv(env), stdio: ['ignore', 'pipe', 'pipe'] });
+    collect(child, args);
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString('utf8')));
@@ -228,6 +240,7 @@ export function runCli(env: Env, args: string[]): Promise<{ code: number | null;
 // args: the sf command line (`serve`, or `up` with its options).
 export async function serve(env: Env, args: string[] = ['serve']): Promise<Served> {
   const child = spawn(process.execPath, [CLI, ...args], { env: processEnv(env), stdio: ['ignore', 'pipe', 'pipe'] });
+  collect(child, args);
   running.add(child);
   child.once('exit', () => running.delete(child));
   let dashboard: URL | undefined;
@@ -340,6 +353,22 @@ export async function runnerPids(dir: string): Promise<number[]> {
   return pids;
 }
 
+// The refused state changes (SF-088) of this test file: the lines illegal_transition: of every sf
+// process it ran and of every runner.log under dir (the runners' output), and the refusals of this
+// process (the in-process Executions).
+async function illegalTransitions(dir: string): Promise<string[]> {
+  const texts = outputs.map((output) => ({ source: output.command, text: output.text }));
+  for (const entry of await readdir(dir, { recursive: true, withFileTypes: true }).catch(() => [])) {
+    if (entry.isFile() && entry.name === 'runner.log') {
+      const path = join(entry.parentPath, entry.name);
+      texts.push({ source: path, text: await readFile(path, 'utf8').catch(() => '') });
+    }
+  }
+  const lines = texts.flatMap(({ source, text }) => text.split('\n').filter((line) => line.startsWith('illegal_transition:')).map((line) => `${source}: ${line}`));
+  const refusals = refusedTransitions().map((row) => `this process: illegal_transition: ${row.from} -> ${row.to} by ${row.action}`);
+  return [...lines, ...refusals];
+}
+
 after(async () => {
   for (const child of running) {
     child.kill('SIGKILL');
@@ -351,6 +380,11 @@ after(async () => {
       process.kill(pid, 'SIGKILL');
     }
   }
+  // Before the temp directory goes: the runners' logs are in it.
+  const illegal = await illegalTransitions(temp);
   await rm(temp, { recursive: true, force: true });
+  if (illegal.length > 0) {
+    throw new assert.AssertionError({ message: `State changes outside JOB_TRANSITIONS (src/jobs.ts):\n${illegal.join('\n')}` });
+  }
 });
 

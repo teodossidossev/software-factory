@@ -934,6 +934,88 @@ deeper or elsewhere stay. The Patch and the MR commit also skip an untracked fil
 the rule, in case the sandbox recreates one after the cleanup. A file the factory left in place
 does not match the rule, so it is a change of the Implementer's or the user's.
 
+### Job states
+
+Every state change a job may make, by the step of `src/execution.ts` that makes it (SF-088):
+`JOB_TRANSITIONS` in `src/jobs.ts`, checked before each change is written; any other is refused
+with `illegal_transition`.
+
+<!-- transitions:start -->
+| From | To | Action |
+|---|---|---|
+| (new) | `starting` | `create` |
+| `starting` | `working` | `launch` |
+| `starting` | `aborted` | `abort` |
+| `starting` | `failed` | `launch` |
+| `starting` | `failed` | `recover` |
+| `working` | `awaiting_review` | `publish` |
+| `working` | `needs_human` | `recover` |
+| `working` | `needs_human` | `repair_handover` |
+| `working` | `needs_human` | `publish` |
+| `working` | `paused` | `pause` |
+| `working` | `waiting_limit` | `park` |
+| `working` | `aborted` | `abort` |
+| `awaiting_review` | `working` | `fix` |
+| `awaiting_review` | `working` | `say` |
+| `awaiting_review` | `needs_human` | `repair_handover` |
+| `awaiting_review` | `needs_human` | `verdict` |
+| `awaiting_review` | `needs_human` | `fix` |
+| `awaiting_review` | `paused` | `pause` |
+| `awaiting_review` | `waiting_limit` | `park` |
+| `awaiting_review` | `preparing_mr` | `prepare_mr` |
+| `awaiting_review` | `aborted` | `abort` |
+| `needs_human` | `working` | `fix` |
+| `needs_human` | `working` | `say` |
+| `needs_human` | `awaiting_review` | `review_retry` |
+| `needs_human` | `awaiting_review` | `go_on` |
+| `needs_human` | `needs_human` | `repair_handover` |
+| `needs_human` | `needs_human` | `mr_retry` |
+| `needs_human` | `needs_human` | `push` |
+| `needs_human` | `needs_human` | `fix` |
+| `needs_human` | `ready_for_human_review` | `repair_handover` |
+| `needs_human` | `preparing_mr` | `prepare_mr` |
+| `needs_human` | `pushed` | `push` |
+| `needs_human` | `aborted` | `abort` |
+| `paused` | `working` | `resume` |
+| `paused` | `awaiting_review` | `resume` |
+| `paused` | `needs_human` | `repair_handover` |
+| `paused` | `aborted` | `abort` |
+| `waiting_limit` | `working` | `resume` |
+| `waiting_limit` | `awaiting_review` | `resume` |
+| `waiting_limit` | `needs_human` | `repair_handover` |
+| `waiting_limit` | `needs_human` | `limit_reset` |
+| `waiting_limit` | `aborted` | `abort` |
+| `ready_for_human_review` | `working` | `fix` |
+| `ready_for_human_review` | `working` | `say` |
+| `ready_for_human_review` | `needs_human` | `repair_handover` |
+| `ready_for_human_review` | `needs_human` | `hand_over` |
+| `ready_for_human_review` | `needs_human` | `push` |
+| `ready_for_human_review` | `needs_human` | `fix` |
+| `ready_for_human_review` | `ready_for_human_review` | `repair_handover` |
+| `ready_for_human_review` | `handed_over` | `hand_over` |
+| `ready_for_human_review` | `pushed` | `push` |
+| `ready_for_human_review` | `aborted` | `abort` |
+| `handed_over` | `working` | `say` |
+| `handed_over` | `needs_human` | `repair_handover` |
+| `handed_over` | `needs_human` | `ask_for_changes` |
+| `handed_over` | `ready_for_human_review` | `take_back` |
+| `handed_over` | `pushed` | `push` |
+| `handed_over` | `pushed` | `pushed_by_user` |
+| `handed_over` | `aborted` | `abort` |
+| `preparing_mr` | `awaiting_review` | `mr_turn_end` |
+| `preparing_mr` | `needs_human` | `recover` |
+| `preparing_mr` | `needs_human` | `repair_handover` |
+| `preparing_mr` | `needs_human` | `mr_turn_end` |
+| `preparing_mr` | `needs_human` | `ready` |
+| `preparing_mr` | `needs_human` | `pause` |
+| `preparing_mr` | `ready_for_human_review` | `repair_handover` |
+| `preparing_mr` | `ready_for_human_review` | `ready` |
+| `preparing_mr` | `handed_over` | `ready` |
+| `preparing_mr` | `aborted` | `abort` |
+| `aborted` | `needs_human` | `repair_handover` |
+| `aborted` | `ready_for_human_review` | `repair_handover` |
+<!-- transitions:end -->
+
 ### Marked paths
 
 The factory marks three kinds of changed path in the structured file list (`files` of

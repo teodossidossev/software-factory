@@ -3,6 +3,10 @@
 // queued and run in order. When the queue is empty the driver reports the outcome of the turns
 // since it was last idle. Each prompt carries its own deny list; the driver does not know why.
 // It knows nothing about jobs, Git or MCP.
+// A turn that ends at maxTurns (SF-069) is put to the turnLimit hook: it answers with a
+// continuation, which runs next in the same session with the same deny list, or with the reason
+// the turn stops. Every prompt sent starts a chain; the driver sends at most turnLimitContinues
+// continuations per chain, whatever the hook answers.
 import { query, type SandboxSettings, type SDKMessage, type SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
 
 // Markers a running Claude Code session sets for its children; a session inheriting them acts as
@@ -44,12 +48,34 @@ export interface SessionOptions {
   sandbox?: SandboxSettings | undefined;
   // The model option of query(); undefined leaves the user's Claude Code default.
   model?: string | undefined;
+  // Continuations after a turn limit per chain (SF_TURN_LIMIT_CONTINUES); default 0.
+  turnLimitContinues?: number | undefined;
 }
 
 interface Queued {
   prompt: string;
   disallowedTools: string[];
+  // Continuations sent before this prompt in its chain: 0 for a prompt sent, n for the nth continuation.
+  continued: number;
 }
+
+// One tool call of the main thread of a turn, as the model made it.
+export interface ToolCall {
+  name: string;
+  input: unknown;
+}
+
+// A turn that ended at maxTurns: its tool calls in order, the continuations its chain already
+// had, and how many the chain may have (turnLimitContinues); one more runs only while
+// continued < allowed.
+export interface LimitedTurn {
+  calls: ToolCall[];
+  continued: number;
+  allowed: number;
+}
+
+// The hook's answer: the continuation to send (taken only when allowed), or why the turn stops.
+export type LimitAnswer = { prompt: string } | { stop: string };
 
 export type IdleOutcome =
   | {
@@ -67,10 +93,18 @@ export type IdleOutcome =
 export interface SessionHooks {
   // Every SDK message, in order; awaited before the next one is handled.
   message(message: SDKMessage): Promise<void>;
-  // A prompt is about to be sent as a turn.
-  prompt(prompt: string): Promise<void>;
+  // A prompt is about to be sent as a turn; continued: as in Queued (0 starts a chain).
+  prompt(prompt: string, continued: number): Promise<void>;
+  // A turn ended at maxTurns; without this hook it fails with max_turns as any failed turn.
+  turnLimit?(turn: LimitedTurn): Promise<LimitAnswer>;
   // The queue is empty after one or more turns.
   idle(outcome: IdleOutcome): Promise<void>;
+}
+
+interface TurnResult {
+  text: string;
+  denials: string[];
+  result: SDKResultMessage;
 }
 
 class TurnError extends Error {
@@ -81,6 +115,23 @@ class TurnError extends Error {
     super(message);
   }
 }
+
+// The tool calls of an assistant message of the main thread (a subagent's are its own).
+function toolCalls(message: SDKMessage): ToolCall[] {
+  if (message.type !== 'assistant' || message.parent_tool_use_id !== null) {
+    return [];
+  }
+  const content = message.message.content as unknown;
+  if (!Array.isArray(content)) {
+    return [];
+  }
+  return content
+    .filter((block): block is { type: 'tool_use'; name: string; input: unknown } => block?.type === 'tool_use' && typeof block.name === 'string')
+    .map((block) => ({ name: block.name, input: block.input }));
+}
+
+// The SDK's max-turns error: a result with error_max_turns, or the error it throws after it.
+const MAX_TURNS_TEXT = /maximum number of turns/i;
 
 function assistantText(message: SDKMessage): string {
   if (message.type !== 'assistant') {
@@ -105,6 +156,8 @@ export class ImplementerSession {
   #running = false;
   #closed = false;
   #abort: AbortController | undefined;
+  // The tool calls of the turn running (or last run).
+  #calls: ToolCall[] = [];
   #drained: Promise<void> = Promise.resolve();
 
   constructor(options: SessionOptions, hooks: SessionHooks) {
@@ -126,7 +179,7 @@ export class ImplementerSession {
     if (this.#closed) {
       throw new Error('The session is closed.');
     }
-    this.#queue.push({ prompt, disallowedTools });
+    this.#queue.push({ prompt, disallowedTools, continued: 0 });
     if (!this.#running) {
       this.#running = true;
       this.#drained = this.#drain();
@@ -147,9 +200,25 @@ export class ImplementerSession {
     const denials: string[] = [];
     let outcome: IdleOutcome | undefined;
     try {
-      while (this.#queue.length > 0) {
+      while (this.#queue.length > 0 && !this.#closed) {
         const next = this.#queue.shift()!;
-        const turn = await this.#turn(next.prompt, next.disallowedTools);
+        let turn: TurnResult;
+        try {
+          turn = await this.#turn(next);
+        } catch (error) {
+          if (!(error instanceof TurnError) || error.code !== 'max_turns') {
+            throw error;
+          }
+          const continuation = await this.#continuation(next);
+          if (typeof continuation === 'string') {
+            throw new TurnError('max_turns', continuation);
+          }
+          if (continuation === undefined || this.#closed) {
+            throw error;
+          }
+          this.#queue.unshift(continuation);
+          continue;
+        }
         denials.push(...turn.denials);
         outcome = { ok: true, sessionId: this.#sessionId!, text: turn.text, denials, startedAt, result: turn.result };
       }
@@ -171,8 +240,29 @@ export class ImplementerSession {
     }
   }
 
-  async #turn(prompt: string, disallowedTools: string[]): Promise<{ text: string; denials: string[]; result: SDKResultMessage }> {
-    await this.#hooks.prompt(prompt);
+  // After a turn that ended at maxTurns: the continuation of its chain, the hook's reason to stop,
+  // or undefined without the hook (the SDK's error stands). Bounded here: never more than
+  // turnLimitContinues continuations per chain, whatever the hook answers.
+  async #continuation(turn: Queued): Promise<Queued | string | undefined> {
+    if (this.#hooks.turnLimit === undefined) {
+      return undefined;
+    }
+    const allowed = this.#options.turnLimitContinues ?? 0;
+    const answer = await this.#hooks.turnLimit({ calls: [...this.#calls], continued: turn.continued, allowed });
+    if ('stop' in answer) {
+      return answer.stop;
+    }
+    return turn.continued < allowed ? { prompt: answer.prompt, disallowedTools: turn.disallowedTools, continued: turn.continued + 1 } : undefined;
+  }
+
+  async #turn(next: Queued): Promise<TurnResult> {
+    const { prompt, disallowedTools } = next;
+    this.#calls = [];
+    await this.#hooks.prompt(prompt, next.continued);
+    // Closed while the hook ran (it reads the worktree, SF-069): no turn starts.
+    if (this.#closed) {
+      throw new TurnError('closed', 'The session was closed before the turn started.');
+    }
     const abortController = new AbortController();
     this.#abort = abortController;
     const turn = query({
@@ -204,10 +294,18 @@ export class ImplementerSession {
           this.#sessionId = message.session_id;
         }
         text = assistantText(message) || text;
+        this.#calls.push(...toolCalls(message));
         if (message.type === 'result') {
           result = message;
         }
       }
+    } catch (error) {
+      // The SDK throws after the CLI's error_max_turns result: the turn limit, not a failed session.
+      const message = error instanceof Error ? error.message : String(error);
+      if (!(error instanceof TurnError) && (result?.subtype === 'error_max_turns' || MAX_TURNS_TEXT.test(message))) {
+        throw new TurnError('max_turns', `The turn ended with error_max_turns: ${message}`);
+      }
+      throw error;
     } finally {
       // Ends the child process when the turn stopped early (a mismatch or an error).
       abortController.abort();

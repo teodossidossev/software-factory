@@ -1,5 +1,6 @@
 // Runs Git with a fixed argv, no shell, a minimal environment and a bounded output.
 import { spawn } from 'node:child_process';
+import type { Hash } from 'node:crypto';
 
 export interface GitResult {
   code: number | null;
@@ -57,6 +58,24 @@ export function runGitToFile(cwd: string, args: string[], fd: number): Promise<{
   return new Promise((resolve, reject) => {
     const child = spawn('git', args, { cwd, env: gitEnv(), stdio: ['ignore', fd, 'pipe'] });
     let stderr = '';
+    child.stderr!.on('data', (chunk: Buffer) => {
+      if (stderr.length < 4096) {
+        stderr += chunk.toString('utf8');
+      }
+    });
+    child.once('error', reject);
+    child.once('close', (code) => resolve({ code, stderr }));
+  });
+}
+
+// Runs Git and feeds its whole stdout into hash, unbounded and never held in memory (SF-069).
+export function runGitToHash(cwd: string, args: string[], hash: Hash): Promise<{ code: number | null; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', args, { cwd, env: gitEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    child.stdout!.on('data', (chunk: Buffer) => {
+      hash.update(chunk);
+    });
     child.stderr!.on('data', (chunk: Buffer) => {
       if (stderr.length < 4096) {
         stderr += chunk.toString('utf8');

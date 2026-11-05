@@ -1,7 +1,8 @@
 // The Patch of an iteration: the work checkout against the base commit, tracked changes plus
 // untracked files, without touching the index. .software-factory/, ignored and credential-like
 // paths and sandbox placeholders (src/placeholders.ts) are left out; the result is valid UTF-8 and at most MAX_PATCH_BYTES.
-import { runGit, runGitToFile } from './git.js';
+import { createHash } from 'node:crypto';
+import { runGit, runGitToFile, runGitToHash } from './git.js';
 import type { ChangedFile, FileChange } from './jobs.js';
 import { isPlaceholder } from './placeholders.js';
 import { isForbidden } from './repo-files.js';
@@ -245,6 +246,28 @@ export async function buildPatch(cwd: string, baseCommit: string): Promise<Patch
   }
   const { patch, truncated } = assemblePatch(parts);
   return { patch, truncated, ...changedFiles(patch.toString('utf8')) };
+}
+
+// The whole Patch against baseCommit as a sha256, never cut at MAX_PATCH_BYTES, with the paths it
+// covers, sorted (the turn limit's progress test, SF-069): the paths and filters of buildPatch,
+// binary content included, streamed through the hash. buildPatch stays the bounded one for display.
+export async function patchDigest(cwd: string, baseCommit: string): Promise<{ paths: string[]; hash: string }> {
+  const { tracked, untracked } = await changedPaths(cwd, baseCommit);
+  const hash = createHash('sha256');
+  const diff = async (args: string[], okCodes: number[]): Promise<void> => {
+    const result = await runGitToHash(cwd, ['diff', ...DIFF_FLAGS, '--binary', ...args], hash);
+    if (result.code === null || !okCodes.includes(result.code)) {
+      throw new Error(`git diff failed (${result.code}): ${result.stderr.trim()}`);
+    }
+  };
+  if (tracked.length > 0) {
+    await diff([baseCommit, '--', ...tracked.map((path) => `:(literal)${path}`)], [0]);
+  }
+  for (const path of untracked) {
+    // Exit code 1 means "differences found", which is always the case here.
+    await diff(['--no-index', '--', '/dev/null', path], [0, 1]);
+  }
+  return { paths: [...tracked, ...untracked].sort(), hash: hash.digest('hex') };
 }
 
 // Writes the working tree against commit to the open file fd as a patch `git apply` takes, binary

@@ -100,6 +100,7 @@ prints the message below the table). Both work without `sf serve`; they read the
 | `SF_CHECK_AFTER_START_MIN` | `15` | `check_after_minutes` in the result of a start and of the job's status during the first iteration. |
 | `SF_CHECK_AFTER_FIX_MIN` | `5` | `check_after_minutes` in the job's status during later iterations. |
 | `SF_MAX_TURNS` | `150` | `maxTurns` of every Implementer turn. |
+| `SF_TURN_LIMIT_CONTINUES` | `1` | Continuations the factory sends by itself, per chain of Implementer turns, after a turn that reached `SF_MAX_TURNS` while making progress (SF-069, below); `0` to `10`, `0` stops at the first limit. |
 | `SF_MAX_ITERATIONS` | `5` | Fix sections a job may get (the reviewers', counted in the job's `fixes`); the next Fix is refused (`iteration_limit`, job `needs_human`). An `sf say` turn does not count. |
 | `SF_CLAUDE` | bundled binary | Absolute path of the Claude Code executable (`pathToClaudeCodeExecutable`). |
 | `SF_MODEL` | unset | Model of every Implementer turn, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
@@ -596,6 +597,29 @@ ended. A restart of `sf serve` therefore leaves a working job working.
 - `sf say` queues a message as the next turn (in `working`, `awaiting_review`, `needs_human` or
   `ready_for_human_review`, where it reopens the worktree like the fix path); outside `working`
   the job goes back to `working` and publishes a new iteration at the end.
+- **The turn limit** (SF-069, `src/turn-limit.ts`). An Implementer turn that reaches `SF_MAX_TURNS`
+  (the SDK's `error_max_turns`) goes on by itself when it made progress: the worktree changed
+  during the turn (its changed paths or the hash of its whole Patch, binary content included and
+  never cut at the Patch's 2 MB display limit, differ from the turn's start; taken at the start of
+  every turn, continuations too) and the turn was not repeating itself (among its
+  last 20 tool calls, no call with the same tool and the same input appears more than 3 times). The
+  factory then sends one continuation into the same session, with the same deny list: "You reached
+  the turn limit of this turn. Continue where you stopped; do not redo finished work." It records
+  `{ts, iteration, type: "turn_limit_continued", continued, allowed, max_turns, changed_paths,
+  tool_calls}` in `events.jsonl` and the chain's count in `job.json` (`turn_limit: {continued,
+  allowed}`). A chain gets at most `SF_TURN_LIMIT_CONTINUES` continuations (default 1), bounded by
+  the session driver whatever the progress test says; every prompt the factory or the user sends
+  (the first turn, a Fix section, `sf say`, Resume, MR preparation) starts a new chain and clears
+  the count. `sf status`, `sf watch`, the notifications and the board's card show the continuation
+  as one line ("The Implementer reached the turn limit while making progress; the factory went on
+  by itself (1 of 1)."). Otherwise the job stops in `needs_human` with code `max_turns` and one of:
+  - "The Implementer used all <N> steps of this turn without changing files."
+  - "The Implementer used all <N> steps of this turn and was repeating `<tool> <input>`." (with
+    "without changing files and was repeating" when both hold)
+  - "The Implementer used all <N> steps of this turn twice in a row; it may need a smaller task or
+    a higher SF_MAX_TURNS." (with `SF_TURN_LIMIT_CONTINUES=0`: "… of this turn; it may need …").
+
+  The Claude review's, the gate's and the Task check's turn limits are not affected.
 - A failed turn, a session that does not report permission mode `auto`
   (`permission_mode_mismatch`), an unavailable sandbox (`sandbox_unavailable`, with the SDK's
   message), a failed review (`review_failed`), a failed gate (`gate_failed`), the gate's round

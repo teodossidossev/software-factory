@@ -19,6 +19,9 @@
 // structured output is then given, as the real CLI gives it, by a StructuredOutput tool call put to
 // the hooks first (SF-070) and logged the same way; a denied one ends the run with the CLI's
 // error_max_structured_output_retries result, its error naming the hook's reason.
+// An Implementer turn can make a list of tool calls (each a tool_use and its tool_result) and can
+// end like the real CLI at its turn limit (SF-069): the error_max_turns result with the CLI's
+// error text, then exit code 1, on which the SDK throws "Claude Code returned an error result".
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -56,6 +59,10 @@ interface Turn {
   // Review runs only (SF-054): tool calls put to the PreToolUse hooks, then run when allowed.
   probes?: Array<{ tool: string; input: Record<string, unknown> }>;
   noOutput?: boolean;
+  // Implementer runs only (SF-069): tool calls made after the writes, each with a tool_result.
+  calls?: Array<{ tool: string; input: Record<string, unknown> }>;
+  // Implementer runs only (SF-069): the turn ends at the turn limit (--max-turns) instead of a success.
+  maxTurns?: boolean;
 }
 
 const CLEAN = { verdict: 'clean', summary: 'Looks right.', items: [], accepted_sensitive: [] };
@@ -237,6 +244,20 @@ function run(prompt: string): void {
   if (turn.tool === true) {
     out({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'npm test', description: 'Run the tests' } }] } });
     out({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', is_error: false, content: 'ok 1 tests\npassed' }] } });
+  }
+  for (const [index, call] of (turn.calls ?? []).entries()) {
+    out({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'tool_use', id: `c${index}`, name: call.tool, input: call.input }] } });
+    out({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `c${index}`, is_error: false, content: 'done' }] } });
+  }
+  if (turn.maxTurns === true) {
+    const limit = option('max-turns') ?? '?';
+    out({
+      type: 'result', subtype: 'error_max_turns', is_error: true, num_turns: Number(limit), duration_ms: 1234, duration_api_ms: 1000,
+      total_cost_usd: turn.costTotal ?? 0.0123, usage: {}, modelUsage: {}, stop_reason: null, permission_denials: [],
+      errors: [`Reached maximum number of turns (${limit})`],
+    });
+    setTimeout(() => process.exit(1), 20);
+    return;
   }
   const text = turn.text ?? `Report for: ${prompt}`;
   out({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'text', text }] } });

@@ -1,6 +1,6 @@
 // The worktree of a job (SF-019): created from the workspace's checkout at start, recreated from
 // the branch after Clean when a reviewer asks for another fix, and removed at Clean, at
-// the end of the job and by reset. Every Git call runs through runGit; nothing here knows about
+// the end of the job and by reset. The Task check (SF-054) reads a detached one at the base. Every Git call runs through runGit; nothing here knows about
 // jobs or sessions.
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -38,6 +38,19 @@ export async function addWorktree(checkout: string, path: string, branch: string
   if (result.code !== 0) {
     throw new FactoryError('start_failed', `git worktree add failed: ${result.stderr.trim().slice(0, 500)}`);
   }
+  await updateSubmodules(path);
+}
+
+// `git worktree add --detach` at path of commit, submodules included (the Task check, SF-054).
+export async function addDetachedWorktree(checkout: string, path: string, commit: string): Promise<void> {
+  const result = await runGit(checkout, ['worktree', 'add', '--detach', path, commit]);
+  if (result.code !== 0) {
+    throw new FactoryError('start_failed', `git worktree add failed: ${result.stderr.trim().slice(0, 500)}`);
+  }
+  await updateSubmodules(path);
+}
+
+async function updateSubmodules(path: string): Promise<void> {
   if (await exists(join(path, '.gitmodules'))) {
     const submodules = await runGit(path, ['submodule', 'update', '--init', '--recursive'], 1024 * 1024, SUBMODULE_TIMEOUT_MS);
     if (submodules.code !== 0) {

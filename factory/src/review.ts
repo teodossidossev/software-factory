@@ -194,6 +194,16 @@ export function outsideInstructionFiles(cwd: string): string[] {
 // auto-memory of the project, which the CLI loads whatever the setting sources; claudeMdExcludes
 // leaves out the instruction files above the worktree.
 export function reviewSessionOptions(options: Omit<ReviewOptions, 'onMessage' | 'signal'>, abortController: AbortController): Options {
+  return readOnlySessionOptions(options, abortController, REVIEW_SCHEMA);
+}
+
+// The options of every read-only session with a structured output (the review, the Task check of
+// SF-054): REVIEW_TOOLS only, REVIEW_DENIED_TOOLS plus deny, the given output schema, and the
+// given hooks (the Task check's path guard).
+export function readOnlySessionOptions(
+  options: Omit<ReviewOptions, 'onMessage' | 'signal'>, abortController: AbortController, schema: Record<string, unknown>, deny: readonly string[] = [],
+  hooks?: Options['hooks'],
+): Options {
   return {
     abortController,
     cwd: options.cwd,
@@ -201,14 +211,15 @@ export function reviewSessionOptions(options: Omit<ReviewOptions, 'onMessage' | 
     settingSources: ['project'],
     settings: { claudeMdExcludes: outsideInstructionFiles(options.cwd) },
     tools: REVIEW_TOOLS,
-    disallowedTools: REVIEW_DENIED_TOOLS,
-    outputFormat: { type: 'json_schema', schema: REVIEW_SCHEMA },
+    disallowedTools: [...REVIEW_DENIED_TOOLS, ...deny],
+    outputFormat: { type: 'json_schema', schema },
     maxTurns: options.maxTurns,
     // A known startup failure (such as an unavailable sandbox) then ends with a result message.
     env: { ...sessionEnvironment(), CLAUDE_CODE_STARTUP_FAILURE_RESULTS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
     ...(options.sandbox !== undefined ? { sandbox: options.sandbox } : {}),
     ...(options.model !== undefined ? { model: options.model } : {}),
     ...(options.claudePath !== undefined ? { pathToClaudeCodeExecutable: options.claudePath } : {}),
+    ...(hooks !== undefined ? { hooks } : {}),
   };
 }
 
@@ -220,48 +231,80 @@ export function issues(error: z.ZodError): string {
   return error.issues.map((issue) => `${issue.path.map(String).join('.') || '(root)'}: ${issue.message}`).join('; ');
 }
 
-// Runs one review session. Never throws: an error, a turn that is not a success, or a missing or
-// invalid structured output is a failed outcome. Nothing is retried.
-export async function runReview(prompt: string, options: ReviewOptions): Promise<ReviewOutcome> {
+// A read-only session with a structured output: its schema, the zod definition that validates
+// the output, what the failure messages call the session ("review") and its output ("verdict"),
+// the permission rules denied on top of REVIEW_DENIED_TOOLS, and the session's hooks.
+export interface StructuredSession<T> {
+  schema: Record<string, unknown>;
+  output: z.ZodType<T>;
+  noun: string;
+  outputNoun: string;
+  deny?: readonly string[];
+  hooks?: Options['hooks'];
+}
+
+// model: what the session's init message names, or null when it named none.
+export type StructuredOutcome<T> =
+  | { ok: true; output: T; costUsd: number | null; model: string | null; startedAt: string; endedAt: string }
+  | { ok: false; message: string; model: string | null; startedAt: string; endedAt: string };
+
+// Runs one read-only session. Never throws: an error, a turn that is not a success, or a missing
+// or invalid structured output is a failed outcome. Nothing is retried.
+export async function runStructuredSession<T>(prompt: string, options: ReviewOptions, session: StructuredSession<T>): Promise<StructuredOutcome<T>> {
+  const { noun } = session;
   const startedAt = new Date().toISOString();
-  const failed = (message: string): ReviewOutcome => ({ ok: false, message: message.slice(0, 1000), startedAt, endedAt: new Date().toISOString() });
+  let model: string | null = null;
+  const failed = (message: string): StructuredOutcome<T> => ({ ok: false, message: message.slice(0, 1000), model, startedAt, endedAt: new Date().toISOString() });
   const abortController = new AbortController();
   const onAbort = (): void => abortController.abort();
   options.signal.addEventListener('abort', onAbort, { once: true });
   let result: SDKResultMessage | undefined;
   try {
-    const session = query({ prompt, options: reviewSessionOptions(options, abortController) });
-    for await (const message of session) {
+    const messages = query({ prompt, options: readOnlySessionOptions(options, abortController, session.schema, session.deny, session.hooks) });
+    for await (const message of messages) {
       await options.onMessage?.(message).catch((error: unknown) => console.error(error));
+      if (message.type === 'system' && message.subtype === 'init' && typeof message.model === 'string' && message.model !== '') {
+        model = message.model;
+      }
       if (message.type === 'result') {
         result = message;
       }
     }
   } catch (error) {
-    return failed(`The review session failed: ${error instanceof Error ? error.message : String(error)}`);
+    return failed(`The ${noun} session failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     options.signal.removeEventListener('abort', onAbort);
     // Ends the child process when the session stopped early.
     abortController.abort();
   }
   if (result === undefined) {
-    return failed('The review ended without a result.');
+    return failed(`The ${noun} ended without a result.`);
   }
   if (result.subtype !== 'success' || result.is_error) {
     const detail = result.subtype === 'success' ? result.result : result.errors.join('; ');
-    return failed(`The review ended with ${result.subtype}: ${detail}`.trim());
+    return failed(`The ${noun} ended with ${result.subtype}: ${detail}`.trim());
   }
   if (result.structured_output === undefined || result.structured_output === null) {
-    return failed('The review returned no structured output.');
+    return failed(`The ${noun} returned no structured output.`);
   }
-  const parsed = reviewOutput.safeParse(result.structured_output);
+  const parsed = session.output.safeParse(result.structured_output);
   if (!parsed.success) {
-    return failed(`The review returned an invalid verdict: ${issues(parsed.error)}`);
+    return failed(`The ${noun} returned an invalid ${session.outputNoun}: ${issues(parsed.error)}`);
   }
-  if (parsed.data.verdict === 'fix' && parsed.data.items.length === 0) {
-    return failed('The review returned fix without items.');
+  return { ok: true, output: parsed.data, costUsd: result.total_cost_usd ?? null, model, startedAt, endedAt: new Date().toISOString() };
+}
+
+// Runs one review session; never throws (runStructuredSession). A fix without items fails too.
+export async function runReview(prompt: string, options: ReviewOptions): Promise<ReviewOutcome> {
+  const outcome = await runStructuredSession(prompt, options, { schema: REVIEW_SCHEMA, output: reviewOutput, noun: 'review', outputNoun: 'verdict' });
+  const { startedAt, endedAt } = outcome;
+  if (!outcome.ok) {
+    return { ok: false, message: outcome.message, startedAt, endedAt };
   }
-  return { ok: true, output: parsed.data, costUsd: result.total_cost_usd ?? null, startedAt, endedAt: new Date().toISOString() };
+  if (outcome.output.verdict === 'fix' && outcome.output.items.length === 0) {
+    return { ok: false, message: 'The review returned fix without items.', startedAt, endedAt };
+  }
+  return { ok: true, output: outcome.output, costUsd: outcome.costUsd, startedAt, endedAt };
 }
 
 // Text on one line: every run of whitespace a single space.

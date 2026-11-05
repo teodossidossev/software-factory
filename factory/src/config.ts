@@ -32,6 +32,8 @@ export interface Config {
   reviewModel: string | undefined;
   // maxTurns of the review (SF_REVIEW_MAX_TURNS).
   reviewMaxTurns: number;
+  // maxTurns of the Task check (SF-054, SF_TASK_CHECK_MAX_TURNS); its model is reviewModel.
+  taskCheckMaxTurns: number;
   // The Codex gate after a clean Claude review (SF-039): the executable, or why the gate is off.
   gate: Gate;
   // The model of the gate (SF_CODEX_MODEL, passed as --model); undefined uses Codex's default.
@@ -213,6 +215,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     review: env.SF_REVIEW !== 'off',
     reviewModel: env.SF_REVIEW_MODEL || undefined,
     reviewMaxTurns: positiveInteger(env, 'SF_REVIEW_MAX_TURNS', 60),
+    taskCheckMaxTurns: positiveInteger(env, 'SF_TASK_CHECK_MAX_TURNS', 30),
     gate: gateConfig(env),
     codexModel: env.SF_CODEX_MODEL || undefined,
     gateMaxRounds: positiveInteger(env, 'SF_GATE_MAX_ROUNDS', 5),

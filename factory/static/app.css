@@ -704,3 +704,16 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 
 /* The job drawer is wide; on a phone every drawer takes the whole width. */
 .drawer.wide { width: min(1280px, 100vw); }
+
+/* The Task check (SF-054): above the Task text, the paraphrase before the findings. */
+.task-check { margin: 0 0 12px; padding: 8px 12px; border: 1px solid var(--border); border-left-width: 4px; border-radius: var(--radius-sm); overflow-wrap: anywhere; }
+.task-check p { margin: 0 0 4px; }
+.task-check .check-head { font-weight: 600; }
+.task-check .check-stale { color: var(--warn); font-weight: 600; }
+.task-check .check-error { color: var(--del); }
+.task-check .check-title { margin: 8px 0 4px; font-size: 13px; }
+.task-check .check-severity { margin-top: 6px; font-weight: 600; }
+.task-check .check-severity.s-blocker { color: var(--del); }
+.task-check .check-severity.s-major { color: var(--warn); }
+.task-check .check-findings, .task-check .check-files { margin: 2px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 2px; }
+.task-check .check-kind { font-weight: 600; }

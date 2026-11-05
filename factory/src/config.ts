@@ -5,7 +5,8 @@ import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { FactoryError } from './errors.js';
 import { type ForgeSettings, forgeSettings } from './forge.js';
-import { configDir } from './registry.js';
+import type { Job } from './jobs.js';
+import { configDir, HANDOFF_OFF_CODE, type HandoffMode } from './registry.js';
 
 export interface Config {
   stateDir: string;
@@ -54,7 +55,7 @@ export interface Config {
   forge: ForgeSettings;
   // SF_HANDOFF (SF-073): checkout, the default, hands a job ready for review over to the
   // workspace's checkout on its branch; off leaves it in ready_for_human_review.
-  handoff: 'checkout' | 'off';
+  handoff: HandoffMode;
 }
 
 // The gate: on with its Codex executable, or off with why (missing: no executable was found).
@@ -223,6 +224,19 @@ export function handoffSetting(env: NodeJS.ProcessEnv = process.env): Config['ha
     throw new FactoryError('invalid_config', `SF_HANDOFF must be checkout or off, got "${mode}".`);
   }
   return mode;
+}
+
+// Whether a job of a workspace is handed over at ready (SF-083): the workspace's handoff in
+// workspaces.json wins over SF_HANDOFF. undefined: hand it over; else the notice that names the
+// setting which turned it off (the job's handoff_skipped, shown by sf status and the dashboard).
+export function handoffOffNotice(own: HandoffMode | undefined, global: HandoffMode, ticket: string): NonNullable<Job['handoff_skipped']> | undefined {
+  if ((own ?? global) === 'checkout') {
+    return undefined;
+  }
+  return {
+    code: HANDOFF_OFF_CODE,
+    message: own === 'off' ? `${ticket}: ready; hand-over off for this workspace (handoff "off" in workspaces.json)` : `${ticket}: ready; hand-over off (SF_HANDOFF=off)`,
+  };
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {

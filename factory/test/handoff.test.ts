@@ -1,14 +1,17 @@
 // End-to-end tests of the hand-over to the user's checkout (SF-073) on real repositories: a work
 // checkout cloned from a bare origin, the job's worktree, the fake Claude Code as the Implementer.
-// SF_HANDOFF=checkout here (the harness turns it off for every other test).
+// SF_HANDOFF=checkout here (the harness turns it off for every other test); a workspace's own
+// handoff in workspaces.json wins over it (SF-083).
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { handoffOffNotice } from '../src/config.js';
 import { type Job, JobStore } from '../src/jobs.js';
 import { mrMessage } from '../src/mr.js';
+import { saveRegistry } from '../src/registry.js';
 import { call, fakeLog, git, newEnv, newRepo, putTask, refused, runCli, script, serve, type Served, stop, temp, turnsStarted, waitFor } from './support/harness.js';
 
 type Env = Awaited<ReturnType<typeof newEnv>>;
@@ -236,13 +239,54 @@ test('SF_HANDOFF=off: ready_for_human_review with the worktree; Approve pushes a
   await toClean(s, 'O-1');
   await waitFor(s.served, 'O-1', 'ready_for_human_review');
   const ready = await job(s, 'O-1');
-  assert.deepEqual([ready.worktree, ready.handoff_skipped, ready.handover], [worktreeOf(s.env, 'O-1'), undefined, undefined]);
+  // A workspace without its own handoff follows SF_HANDOFF, and the notice names it (SF-083).
+  assert.deepEqual([ready.worktree, ready.handoff_skipped, ready.handover], [worktreeOf(s.env, 'O-1'), { code: 'handoff_off', message: 'O-1: ready; hand-over off (SF_HANDOFF=off)' }, undefined]);
   assert.equal(head(s.repo), 'refs/heads/main');
   const pushed = await runCli(s.env, ['approve', 'app', 'O-1']);
   assert.equal(pushed.code, 0, pushed.stdout + pushed.stderr);
   assert.equal(remoteTip(s.origin, 'O-1-hand-it-over'), ready.prepared_commit);
   assert.equal(await exists(worktreeOf(s.env, 'O-1')), false);
   assert.equal((await job(s, 'O-1')).worktree, null);
+  await stop(s.served);
+});
+
+test('handoffOffNotice (SF-083): the workspace\'s handoff wins over SF_HANDOFF; without it SF_HANDOFF decides; off names the setting that decided', () => {
+  const workspaceOff = { code: 'handoff_off', message: 'T-1: ready; hand-over off for this workspace (handoff "off" in workspaces.json)' };
+  const globalOff = { code: 'handoff_off', message: 'T-1: ready; hand-over off (SF_HANDOFF=off)' };
+  assert.deepEqual(handoffOffNotice('off', 'checkout', 'T-1'), workspaceOff);
+  assert.deepEqual(handoffOffNotice('off', 'off', 'T-1'), workspaceOff);
+  assert.equal(handoffOffNotice('checkout', 'off', 'T-1'), undefined);
+  assert.equal(handoffOffNotice('checkout', 'checkout', 'T-1'), undefined);
+  assert.equal(handoffOffNotice(undefined, 'checkout', 'T-1'), undefined);
+  assert.deepEqual(handoffOffNotice(undefined, 'off', 'T-1'), globalOff);
+});
+
+test('a workspace with handoff "off" under SF_HANDOFF=checkout (SF-083), set while sf serve runs: the job stays in ready_for_human_review with its worktree, the checkout untouched, and sf status names the workspace\'s setting', async () => {
+  const s = await setup('ws-handoff-off');
+  await saveRegistry({ workspaces: { app: { read_checkout: s.repo, handoff: 'off' } } }, s.env.config);
+  await script(s.env, [{ write: { 'README.md': 'workspace off\n' }, text: 'iteration 1' }, mrTurn('P-1')]);
+  await toClean(s, 'P-1');
+  await waitFor(s.served, 'P-1', 'ready_for_human_review');
+  const ready = await job(s, 'P-1');
+  assert.deepEqual(
+    [ready.worktree, ready.handoff_skipped, ready.handover],
+    [worktreeOf(s.env, 'P-1'), { code: 'handoff_off', message: 'P-1: ready; hand-over off for this workspace (handoff "off" in workspaces.json)' }, undefined],
+  );
+  assert.deepEqual([head(s.repo), status(s.repo), git(s.repo, 'for-each-ref', 'refs/factory/')], ['refs/heads/main', '', '']);
+  const shown = await runCli(s.env, ['status', 'app', 'P-1']);
+  assert.equal(shown.code, 0, shown.stdout + shown.stderr);
+  assert.match(shown.stdout, /not handed over to your checkout: P-1: ready; hand-over off for this workspace \(handoff "off" in workspaces\.json\) \(handoff_off\); sf handover hands it over/);
+  await stop(s.served);
+});
+
+test('a workspace with handoff "checkout" under SF_HANDOFF=off (SF-083): the job is handed over to its checkout', async () => {
+  const s = await setup('ws-handoff-on', { SF_HANDOFF: 'off' });
+  await saveRegistry({ workspaces: { app: { read_checkout: s.repo, handoff: 'checkout' } } }, s.env.config);
+  await script(s.env, [{ write: { 'README.md': 'workspace on\n' }, text: 'iteration 1' }, mrTurn('Q-1')]);
+  await toClean(s, 'Q-1');
+  await waitFor(s.served, 'Q-1', 'handed_over');
+  const handed = await job(s, 'Q-1');
+  assert.deepEqual([handed.handoff_skipped, handed.worktree, head(s.repo)], [undefined, null, 'refs/heads/Q-1-hand-it-over']);
   await stop(s.served);
 });
 

@@ -7,6 +7,7 @@ import { delimiter, join } from 'node:path';
 import { withoutHostTokens } from './forge.js';
 import type { Job, JobState, JobStore } from './jobs.js';
 import { now } from './jobs.js';
+import { HANDOFF_OFF_CODE } from './registry.js';
 import { turnLimitLine } from './turn-limit.js';
 
 const DESKTOP_TIMEOUT_MS = 5_000;
@@ -83,8 +84,9 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
       tags: 'eyes',
     };
   }
-  // Why the automatic hand-over did not happen (SF-073).
-  const skipped = job.state === 'ready_for_human_review' && job.handoff_skipped !== undefined ? [job.handoff_skipped.message] : [];
+  // Why the automatic hand-over did not happen (SF-073); not when hand-over is off (SF-083): a
+  // setting the user chose is not news, and the files line stays in the body.
+  const skipped = job.state === 'ready_for_human_review' && job.handoff_skipped !== undefined && job.handoff_skipped.code !== HANDOFF_OFF_CODE ? [job.handoff_skipped.message] : [];
   const body = [`branch: ${job.branch}`, ...(job.error !== undefined ? [`${job.error.code}: ${job.error.message}`] : []), ...skipped, ...lines].slice(0, 3);
   // A pushed job's merge request on the Git host (SF-048) names the title once it is opened or merged.
   const mr = job.state === 'pushed' && job.mr !== null && job.mr !== undefined ? job.mr : undefined;

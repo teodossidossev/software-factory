@@ -119,5 +119,8 @@ test("notificationLine puts the marked-path summaries on one line, so a ready or
     updated_at: '2026-11-04T10:00:00.000Z', mr: null,
   };
   assert.equal(jobNotification(job, ['feat(T-1): X', line]).body, `branch: T-1-x\nfeat(T-1): X\n${line}`);
+  // Hand-over off (SF-083) is a setting, not news: the title and the files line stay; a refusal is named.
+  assert.equal(jobNotification({ ...job, handoff_skipped: { code: 'handoff_off', message: 'T-1: ready; hand-over off for this workspace (handoff "off" in workspaces.json)' } }, ['feat(T-1): X', line]).body, `branch: T-1-x\nfeat(T-1): X\n${line}`);
+  assert.equal(jobNotification({ ...job, handoff_skipped: { code: 'checkout_dirty', message: 'T-1: ready, but your checkout has changes' } }, ['feat(T-1): X', line]).body, 'branch: T-1-x\nT-1: ready, but your checkout has changes\nfeat(T-1): X');
   assert.equal(jobNotification({ ...job, state: 'awaiting_review' }, [line]).body, `Report and Patch of iteration 1 are ready for the reviewers\n${line}`);
 });

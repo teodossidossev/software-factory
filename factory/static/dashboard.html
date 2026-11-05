@@ -253,6 +253,15 @@
           <input id="workspace-path" type="text" autocomplete="off" spellcheck="false" placeholder="/home/me/projects/my-app">
           <p class="hint">Typed or pasted: the page cannot browse this machine's disk. Every job works in a worktree created from this checkout.</p>
         </div>
+        <div class="field">
+          <label for="workspace-handoff">Hand-over</label>
+          <select id="workspace-handoff">
+            <option value="" selected>As SF_HANDOFF</option>
+            <option value="checkout">checkout: hand each finished job over to this checkout</option>
+            <option value="off">off: finished jobs wait in Ready for review</option>
+          </select>
+          <p class="hint">This workspace's own setting wins over SF_HANDOFF; it is the handoff key in workspaces.json.</p>
+        </div>
         <div class="row">
           <button id="workspace-add" type="submit" class="btn">Add workspace</button>
         </div>

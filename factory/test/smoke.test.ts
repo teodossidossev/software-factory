@@ -155,7 +155,18 @@ test('sf workspace add, list and remove manage the registry with the documented 
   assert.equal((await runCli(['workspace', 'add', 'demo', '--read', repo])).code, 1);
   const registry = JSON.parse(await readFile(join(configDir, 'workspaces.json'), 'utf8'));
   assert.deepEqual(registry, { workspaces: { demo: { read_checkout: repo } } });
-  assert.match((await runCli(['workspace', 'list'])).stdout, /^demo\n {2}checkout: /);
+  assert.match((await runCli(['workspace', 'list'])).stdout, /^demo\n {2}checkout: .*\n {2}hand-over: (checkout|off) \(SF_HANDOFF\)$/m);
+
+  // --handoff (SF-083): the workspace's own hand-over setting, checkout or off; it wins over SF_HANDOFF.
+  const wrong = await runCli(['workspace', 'add', 'own', '--read', repo, '--handoff', 'on']);
+  assert.equal(wrong.code, 2);
+  assert.match(wrong.stderr, /--handoff must be checkout or off, got "on"/);
+  const own = await runCli(['workspace', 'add', 'own', '--read', repo, '--handoff', 'off']);
+  assert.equal(own.code, 0, own.stderr);
+  assert.match(own.stdout, /hand-over: off \(this workspace\)/);
+  assert.deepEqual(JSON.parse(await readFile(join(configDir, 'workspaces.json'), 'utf8')).workspaces.own, { read_checkout: repo, handoff: 'off' });
+  assert.match((await runCli(['workspace', 'list'])).stdout, /^own\n {2}checkout: .*\n {2}hand-over: off \(this workspace\)$/m);
+  assert.equal((await runCli(['workspace', 'remove', 'own'])).code, 0);
 
   // --work is retired (SF-019): every job works in a worktree of the checkout.
   const broken = join(temp, 'broken');

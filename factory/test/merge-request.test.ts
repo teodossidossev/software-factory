@@ -11,6 +11,7 @@ import { test } from 'node:test';
 import { ACTIONS } from '../src/dashboard.js';
 import { FactoryError } from '../src/errors.js';
 import { type Job, JobStore } from '../src/jobs.js';
+import { mrMessage } from '../src/mr.js';
 import { jobNotification } from '../src/notify.js';
 import { describeEvent } from '../src/watch.js';
 import { act, fakeActions, fetchRaw, openStream } from './support/dashboard-client.js';
@@ -101,8 +102,11 @@ test('sf mr create from ready_for_human_review pushes, then opens the pull reque
     ].join('\n'));
     assert.equal(execFileSync('git', ['--git-dir', origin, 'log', '-1', '--format=%s', 'T-1-change-readme'], { encoding: 'utf8' }).trim(), TITLE);
     assert.deepEqual(fake.requests.map((r) => `${r.method} ${r.path.split('?')[0]}`), ['GET /repos/acme/app/pulls', 'POST /repos/acme/app/pulls']);
-    // Title: the MR text's first line; body: the rest.
-    assert.deepEqual(fake.requests[1]!.body, { title: TITLE, head: 'T-1-change-readme', base: 'main', body: mrText(TITLE).split('\n').slice(2).join('\n') });
+    // Title and body: mrMessage of the MR text, the same as the pushed commit's message.
+    assert.deepEqual(fake.requests[1]!.body, { title: TITLE, head: 'T-1-change-readme', base: 'main', body: mrMessage(mrText(TITLE)).body });
+    const sent = fake.requests[1]!.body as { title: string; body: string };
+    const pushed = execFileSync('git', ['--git-dir', origin, 'cat-file', 'commit', 'refs/heads/T-1-change-readme'], { encoding: 'utf8' });
+    assert.equal(pushed.slice(pushed.indexOf('\n\n') + 2), `${sent.title}\n\n${sent.body}\n`);
     const jobs = new JobStore(env.state);
     let job = (await jobs.read('app', 'T-1'))!;
     assert.deepEqual([job.state, job.mr], ['pushed', { host: 'github', number: 1, url: 'https://github.com/acme/app/pull/1', state: 'open' }]);
@@ -230,7 +234,7 @@ test('sf mr against GitLab: SF_GITLAB_URL for the origin\'s host; create with th
     const created = await runCli(env, ['mr', 'create', 'app', 'T-1']);
     assert.equal(created.code, 0, created.stderr);
     assert.match(created.stdout, new RegExp(`^merge request: #1 opened\\nurl: ${fake.url}/group/app/-/merge_requests/1$`, 'm'));
-    assert.deepEqual(fake.requests[1]!.body, { source_branch: 'T-1-change-readme', target_branch: 'main', title: TITLE, description: mrText(TITLE).split('\n').slice(2).join('\n') });
+    assert.deepEqual(fake.requests[1]!.body, { source_branch: 'T-1-change-readme', target_branch: 'main', title: TITLE, description: mrMessage(mrText(TITLE)).body });
     const merged = await runCli(env, ['mr', 'merge', 'app', 'T-1']);
     assert.equal(merged.code, 0, merged.stderr);
     assert.ok(fake.requests.some((r) => r.method === 'PUT' && r.path === '/api/v4/projects/group%2Fapp/merge_requests/1/merge'));

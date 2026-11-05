@@ -10,7 +10,7 @@ import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
 import { loadHandbook } from '../src/server.js';
-import { pushBranch } from '../src/mr.js';
+import { mrMessage, pushBranch } from '../src/mr.js';
 import { conflictPrompt, mrPrompt } from '../src/prompts.js';
 import { call, fakeLog, git, newEnv, newRepo, putTask, refused, runCli, script, serve, stop, temp, turnsStarted, waitFor } from './support/harness.js';
 
@@ -24,8 +24,6 @@ function mrText(header: string): string {
     '## Checklist', '- [x] Branch name', '- [x] Target branch', '',
   ].join('\n');
 }
-// The commit body the factory takes from mrText's ## Why section.
-const BODY = 'The ticket asks for it.\nReaders need the new line.';
 
 // Pushes a commit adding path to origin/main from a separate clone.
 function moveOrigin(origin: string, path: string): string {
@@ -71,7 +69,7 @@ async function rebasing(worktree: string): Promise<boolean> {
 
 const denied = (entry: { argv: string[] }): string => entry.argv.find((arg) => arg.startsWith('--disallowedTools='))!;
 
-test('mark_clean: the MR turn writes the MR text only; the factory commits once on top of the moved target with the ## Why body; approve refuses a hand-edited tip and pushes with --as-is', async () => {
+test('mark_clean: the MR turn writes the MR text only; the factory commits once on top of the moved target with the whole MR text as its message; approve refuses a hand-edited tip and pushes with --as-is', async () => {
   const env = await newEnv('approve', { SF_SANDBOX_DOMAINS: 'pypi.org' });
   const repo = await newRepo(env, 'approve-repo', true);
   const origin = join(temp, 'approve-repo-origin.git');
@@ -93,11 +91,13 @@ test('mark_clean: the MR turn writes the MR text only; the factory commits once 
   const ready = await waitFor(served, 'T-1', 'ready_for_human_review', 1);
   assert.equal(ready.mr, mrText('feat(T-1): Change the README'));
   // The worktree is gone; the branch has one commit on top of the moved main in the checkout,
-  // with the title as subject, the ## Why lines as body and the user's identity.
+  // with the whole MR text as its message (every # heading kept) and the user's identity.
   assert.equal(await exists(worktree), false);
   assert.equal(git(repo, 'rev-list', '--count', `${upstream}..${branch}`).trim(), '1');
   assert.equal(git(repo, 'rev-parse', `${branch}~1`).trim(), upstream);
-  assert.equal(git(repo, 'log', '-1', '--format=%s%n%n%b', branch).trim(), `feat(T-1): Change the README\n\n${BODY}`);
+  const message = mrMessage(mrText('feat(T-1): Change the README'));
+  assert.equal(git(repo, 'log', '-1', '--format=%B', branch).replace(/\n+$/, ''), `${message.title}\n\n${message.body}`);
+  assert.match(message.body, /^## What\n[^]*\n## Why\nThe ticket asks for it\.\n\nReaders need the new line\.\n## How\n[^]*\n## Checklist\n- \[x\] Branch name\n- \[x\] Target branch$/);
   assert.equal(git(repo, 'log', '-1', '--format=%an <%ae>', branch).trim(), 'Test User <test@example.invalid>');
   // Only the reviewed change: no ignored file, no .software-factory/.
   assert.equal(git(repo, 'show', '--name-only', '--format=', branch).trim(), 'README.md');

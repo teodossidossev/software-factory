@@ -29,7 +29,7 @@ import { runGit } from './git.js';
 import { GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from './gate.js';
 import { cutEvent, type FileChange, type GateOverride, type GateRecord, isActive, type Job, type JobMr, type JobState, JobStore, now, PAUSABLE_STATES, type PauseStep, RESTARTABLE_STATES, type ReviewRecord, type SimplifyRecord, TERMINAL_STATES } from './jobs.js';
 import { answerFix, applyVerdict, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, escalationMessage, headings, LEDGER_ID, type LedgerEntry, FACTORY_PROBLEMS, SCOPE_PROBLEM, SENSITIVE_PROBLEM, settle, SETTLE_CODES, unappliedEntries, unsettled, userFixItems } from './ledger.js';
-import { abortRebase, commitAndRebase, continueRebase, gitBusy, mergeRequestLink, originUrl, pushBranch, readMrText, rebaseInProgress, resolveTarget, unmergedPaths, withFindings, withNits, withSimplifications } from './mr.js';
+import { abortRebase, commitAndRebase, continueRebase, gitBusy, mergeRequestLink, mrMessage, originUrl, pushBranch, readMrText, rebaseInProgress, resolveTarget, unmergedPaths, withFindings, withNits, withSimplifications } from './mr.js';
 import { buildPatch, changedFilesSection, changedPaths, fileChanges, notificationLine, type Patch } from './patch.js';
 import { removeSandboxPlaceholders } from './placeholders.js';
 import { Redactor } from './redact.js';
@@ -1717,7 +1717,7 @@ export class Execution implements RunnerWork {
   async #ready(job: Job, live: Live, mrText: string): Promise<void> {
     const cwd = live.cwd;
     const tip = (await runGit(cwd, ['rev-parse', '--verify', `refs/heads/${job.branch}`])).stdout.toString('utf8').trim();
-    const title = mrText.split(/\r?\n/)[0]!;
+    const { title } = mrMessage(mrText);
     const failure = await this.#gitLocked(job.workspace, () => removeWorktree(live.workspace.workCheckout, cwd));
     if (failure !== undefined) {
       await this.#transition(job, 'needs_human', { code: 'worktree_remove_failed', message: `${failure} The branch ${job.branch} is prepared; remove the worktree by hand, then go on with sf say (its iteration is reviewed again and a clean verdict prepares the branch again), or abort or reset the job.` });
@@ -1853,7 +1853,7 @@ export class Execution implements RunnerWork {
       return { state: next.state, branch: next.branch, error: pushFailure };
     }
     const mrText = (await this.jobs.readMrText(workspaceName, ticket)) ?? '';
-    const title = mrText.split(/\r?\n/)[0] ?? '';
+    const { title } = mrMessage(mrText);
     const url = await originUrl(checkout);
     const link = url === undefined ? undefined : mergeRequestLink(url, job.base, job.branch);
     let opened: (JobMr & { reused: boolean }) | undefined;
@@ -1879,14 +1879,13 @@ export class Execution implements RunnerWork {
     };
   }
 
-  // The MR text as the merge request's title (its first line) and body (the rest).
+  // The MR text as the merge request's title and body: the same message as the job's commit (mrMessage).
   async #mrContent(job: Job): Promise<MrContent> {
     const text = await this.jobs.readMrText(job.workspace, job.ticket);
     if (text === undefined || text.trim() === '') {
       throw new FactoryError('mr_text_missing', `The job ${job.workspace}/${job.ticket} has no MR text to open a merge request with.`);
     }
-    const [title = '', ...rest] = text.split(/\r?\n/);
-    return { title, body: rest.join('\n').replace(/^\s*\n/, '') };
+    return mrMessage(text);
   }
 
   // The Forge of the job's workspace (its checkout's origin); refused when the job's merge request

@@ -811,11 +811,11 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    (`src/prompts.ts`). The prompt names the target and, on a retry, the previous error. It asks
    for `.software-factory/<ticket>.mr.md` only: the first line is the title, which is also the
    commit header; a blank line; the body by the MR template. It says that the factory commits,
-   rebases and pushes, and that the commit body is taken from the `## Why` section. It states
-   `MR_TESTING_RULE` (`src/rules.ts`): `## Testing` lists only what was run in this job, with its
-   result, and anything not run goes on a line starting with `Not checked:`, saying who can run
-   it. It asks for a short report (`# Report: <ticket>, MR preparation <attempt>`, `## Done`,
-   `## Open questions`) and ends with the Handbook's `## Git rules` and `## MR template` verbatim.
+   rebases and pushes, and that the commit message is the whole MR text: the title as the header,
+   then the body. It states `MR_TESTING_RULE` (`src/rules.ts`): `## Testing` lists only what was
+   run in this job, with its result, and anything not run goes on a line starting with
+   `Not checked:`, saying who can run it. It asks for a short report (`# Report: <ticket>, MR
+   preparation <attempt>`, `## Done`, `## Open questions`) and ends with the Handbook's `## Git rules` and `## MR template` verbatim.
 3. When that turn ends, the factory checks the MR text, then works in the worktree under the
    workspace's Git lock. Every Git call runs with `-c core.hooksPath=/dev/null`, so no repository
    hook runs outside the sandbox, and with a 60 s timeout.
@@ -840,8 +840,15 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
      directory whose index entry has mode 160000). The Git rules forbid changing a submodule
      pointer; the Patch already reports one.
    - `git add --all -- <paths>`, 200 paths per call. An empty index diff is `mr_empty`.
-   - `git commit -q -m <title> -m <body>`: the body is the non-empty lines of the MR text's
-     `## Why` section, at most five. The identity and the signing configuration are the user's
+   - `git commit -q --cleanup=verbatim -F <file>`: the commit message is the whole MR text, the
+     factory's subsections included, normalised by `mrMessage` (`src/mr.ts`): CRLF becomes LF,
+     every line loses its trailing whitespace, the title is the first line and the body the rest
+     without the blank lines around it; the message is the title, a blank line and the body (the
+     title alone when the body is empty). The file is `git rev-parse --git-path
+     factory-commit-msg`, inside the Git dir, so it is never a change of the worktree, and is
+     deleted after the commit, also when it fails (`mr_commit_failed`). `--cleanup=verbatim` keeps
+     the lines that start with `#`, the MR text's headings. The forge's merge request uses the
+     same `mrMessage` title and body. The identity and the signing configuration are the user's
      Git configuration.
    - `git rebase -q <target commit>`, unless the target is already an ancestor of `HEAD`.
 4. A rebase that stops on conflicts (unmerged paths in `git diff --name-only --diff-filter=U`)
@@ -910,9 +917,9 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    | `mr_push_failed` | `git push origin <branch>:<branch>` failed (120 s; stderr in the message) |
 
 8. `sf mr create` (or the dashboard's Create merge request, SF-048): for a `pushed` job, opens a
-   pull request (GitHub) or merge request (GitLab) from the branch into the base, titled with the
-   MR text's first line, the rest of the MR text as the body; one already open for the branch is
-   reused, never duplicated. From `ready_for_human_review` (or `needs_human` after a failed push)
+   pull request (GitHub) or merge request (GitLab) from the branch into the base, with the title
+   and the body of `mrMessage`, the same as the commit's message; one already open for the branch
+   is reused, never duplicated. From `ready_for_human_review` (or `needs_human` after a failed push)
    it is approve and then the merge request, in one action; the host and the token are checked
    before anything is pushed. The host is chosen from the checkout's `origin` URL (as for the
    compare link): `github.com` is GitHub, any other host GitLab (except hosts known not to be

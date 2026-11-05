@@ -196,11 +196,11 @@ with every iteration. The Context owner does not review.
   `<type>` is one of `feat`, `fix`, `chore`, `refactor`, `docs`, `test`, `perf`, `build`,
   `ci`, `style`, `revert`, chosen from what the Task file asks for; `<ticket>` is the Jira
   issue (always present in a factory job). At most 72 characters, no trailing period.
-  A blank line, then a body of one to five lines that says why, not what: the diff says
-  what. No trailers unless the repository's AGENTS.md asks for them.
+  A blank line, then the body: the whole MR body (the MR template below). No trailers unless
+  the repository's AGENTS.md asks for them.
 - Commits are made only in MR preparation, which runs at Clean (the reviewers' clean verdict),
   and only by the factory. The Implementer writes the MR text; the factory makes the one commit
-  from it: the title is the header, the `## Why` section is the body. Iterations commit nothing.
+  from it: the title is the header, the whole MR body is the body. Iterations commit nothing.
   The user's approve pushes the prepared commit.
 - The factory always rebases onto the target branch in MR preparation, so the merge request can
   be fast-forwarded. On a conflict the Implementer resolves the listed files by editing them
@@ -220,9 +220,10 @@ with every iteration. The Context owner does not review.
 
 ## MR template
 
-The first line is the MR title: the commit header. Then a blank line and this body, every
-heading kept in this order. "Screenshots" and "Browser support verified" apply to user
-interface changes; write `N/A` otherwise. A checklist box is ticked only for what was done.
+The MR text is also the commit message, so it is written for both. The first line is the MR
+title: the commit header. Then a blank line and this body, every heading kept in this order.
+"Screenshots" and "Browser support verified" apply to user interface changes; write `N/A`
+otherwise. A checklist box is ticked only for what was done.
 
 ```markdown
 <type>(<ticket>): <summary, the commit header>

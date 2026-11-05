@@ -13,7 +13,7 @@
 // requestFix or markClean; a clean one first runs the simplification pass (SF-055, src/simplify.ts)
 // when the job had review fixes. The user starts and approves (the dashboard, the CLI); no MCP tool
 // reaches these methods since SF-040. Every state change goes through #transition, the seam for
-// notifications.
+// notifications and for the table of allowed changes (JOB_TRANSITIONS in src/jobs.ts, SF-088).
 // Several jobs of one workspace run at the same time; the run queue (SF-071, src/queue.ts) limits
 // only the starts it makes itself to max_running running jobs of every workspace (a start by hand
 // always goes). The Git operations on the shared checkout are serialized per workspace, across
@@ -35,7 +35,7 @@ import { chooseForge, type Forge, type ForgeKind, forgeFor, type MergeRequestSta
 import { runGit } from './git.js';
 import { GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from './gate.js';
 import { askForChanges, attachWorktree, checkBranchFree, commitMessagePath, finishAsk, handOver, isAncestor, remoteBranch, type RemoteBranch, restoreConfig, savedRef, settleAfterPush, subjectOf, takeBack, undoHandover } from './handoff.js';
-import { cutEvent, type FileChange, type GateOverride, type GateRecord, type Handover, type Job, type JobMr, type JobState, JobStore, LIMIT_RETRY_MS, now, PAUSABLE_STATES, type PauseStep, RESTARTABLE_STATES, RESUMABLE_STATES, type ReviewRecord, type SimplifyRecord, TERMINAL_STATES } from './jobs.js';
+import { checkTransition, cutEvent, type FileChange, type GateOverride, type GateRecord, type Handover, type Job, type JobAction, type JobMr, type JobState, JobStore, LIMIT_RETRY_MS, now, PAUSABLE_STATES, type PauseStep, RESTARTABLE_STATES, RESUMABLE_STATES, type ReviewRecord, type SimplifyRecord, TERMINAL_STATES } from './jobs.js';
 import { answerFix, applyVerdict, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, escalationMessage, headings, LEDGER_ID, type LedgerEntry, FACTORY_PROBLEMS, SCOPE_PROBLEM, SENSITIVE_PROBLEM, settle, SETTLE_CODES, unappliedEntries, unsettled, userFixItems } from './ledger.js';
 import {
   abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitBusy, gitFailure, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl,
@@ -562,7 +562,11 @@ export class Execution implements RunnerWork {
     return next;
   }
 
-  async #transition(job: Job, to: JobState, error?: { code: string; message: string }, lines?: string[]): Promise<Job> {
+  // Every state change after the first: refused (illegal_transition) before anything is written
+  // unless JOB_TRANSITIONS allows it (SF-088). action: the step that changes the state, a literal
+  // at every call site.
+  async #transition(job: Job, to: JobState, action: JobAction, error?: { code: string; message: string }, lines?: string[]): Promise<Job> {
+    checkTransition(job.state, to, action);
     const from = job.state;
     // What a pause interrupted is kept only while the job is paused (SF-067) or parked on a usage
     // limit (SF-072, with the limit); why the hand-over did not happen only while
@@ -620,31 +624,41 @@ export class Execution implements RunnerWork {
     return this.#locked(async () => {
       const runners = this.#serveRunners();
       for (const job of await this.jobs.list()) {
-        // A step of the hand-over cut off (SF-073), before the job's generic handling; left alone
-        // while its runner still runs it.
-        if (job.handover !== undefined && job.handover.step !== null) {
-          if ((await runners.owner(job.workspace, job.ticket)) === undefined) {
-            await this.#repairHandover(job, job.handover).catch((error: unknown) => console.error(error));
-          }
-          continue;
-        }
-        if (['working', 'preparing_mr', 'awaiting_review'].includes(job.state) && (await runners.owner(job.workspace, job.ticket)) !== undefined) {
-          continue;
-        }
-        if (job.state === 'awaiting_review') {
-          if (await this.#resumable(job)) {
-            await runners.ensure(job.workspace, job.ticket);
-          }
-        } else if (job.state === 'working') {
-          await this.#transition(job, 'needs_human', { code: 'serve_restarted', message: 'sf serve restarted and the runner of the job had ended while the iteration ran; use sf say to continue.' });
-        } else if (job.state === 'preparing_mr') {
-          await this.#transition(job, 'needs_human', { code: 'mr_serve_restarted', message: 'sf serve restarted and the runner of the job had ended during MR preparation; go on with sf say (its iteration is reviewed again and a clean verdict prepares the branch again), or abort or reset the job.' });
-        } else if (job.state === 'starting') {
-          await this.#transition(job, 'failed', { code: 'serve_restarted', message: 'sf serve restarted while the job was starting.' });
-        }
+        // One job's error is logged and the others are recovered all the same (SF-088: an illegal
+        // state change of one job cannot stop sf serve's start).
+        await this.#recoverJob(runners, job).catch((error: unknown) => console.error(error));
       }
       await this.#cleanSavedRefs().catch((error: unknown) => console.error(error));
     });
+  }
+
+  // recover() for one job. Only under the lock.
+  async #recoverJob(runners: Runners, job: Job): Promise<void> {
+    // A step of the hand-over cut off (SF-073), before the job's generic handling; left alone
+    // while its runner still runs it.
+    if (job.handover !== undefined && job.handover.step !== null) {
+      if ((await runners.owner(job.workspace, job.ticket)) === undefined) {
+        await this.#repairHandover(job, job.handover).catch((error: unknown) => console.error(error));
+      }
+      return;
+    }
+    if (['working', 'preparing_mr', 'awaiting_review'].includes(job.state) && (await runners.owner(job.workspace, job.ticket)) !== undefined) {
+      return;
+    }
+    if (job.state === 'awaiting_review') {
+      if (await this.#resumable(job)) {
+        await runners.ensure(job.workspace, job.ticket);
+      }
+    } else if (job.state === 'working') {
+      // from: working (the branch above)
+      await this.#transition(job, 'needs_human', 'recover', { code: 'serve_restarted', message: 'sf serve restarted and the runner of the job had ended while the iteration ran; use sf say to continue.' });
+    } else if (job.state === 'preparing_mr') {
+      // from: preparing_mr (the branch above)
+      await this.#transition(job, 'needs_human', 'recover', { code: 'mr_serve_restarted', message: 'sf serve restarted and the runner of the job had ended during MR preparation; go on with sf say (its iteration is reviewed again and a clean verdict prepares the branch again), or abort or reset the job.' });
+    } else if (job.state === 'starting') {
+      // from: starting (the branch above)
+      await this.#transition(job, 'failed', 'recover', { code: 'serve_restarted', message: 'sf serve restarted while the job was starting.' });
+    }
   }
 
   // A hand-over or an Ask for changes that sf serve's restart cut off (SF-073). handing_over is
@@ -668,7 +682,8 @@ export class Execution implements RunnerWork {
       } catch (error) {
         message = `sf serve restarted during Ask for changes and it could not be finished (${(error as Error).message.slice(0, 300)}); your checkout is saved as refs/factory/${ticket}-ask.`;
       }
-      await this.#transition({ ...(await this.#endHandover(job)), worktree, prepared_commit: null }, 'needs_human', { code: 'ask_interrupted', message });
+      // from: handed_over (asking cut off), or any later state still carrying the step but starting, failed and pushed (JOB_TRANSITIONS)
+      await this.#transition({ ...(await this.#endHandover(job)), worktree, prepared_commit: null }, 'needs_human', 'repair_handover', { code: 'ask_interrupted', message });
       return;
     }
     const undone = await this.#gitLocked(job.workspace, () => undoHandover(checkout, worktree, ticket, handover)).catch((error: unknown) => {
@@ -682,10 +697,12 @@ export class Execution implements RunnerWork {
     const ended = await this.#endHandover(job);
     if (undone) {
       const skipped = { code: 'handover_interrupted', message: `${ticket}: sf serve restarted during the hand-over, which was undone; hand it over again when you are ready.` };
-      await this.#transition({ ...ended, worktree, handoff_skipped: skipped }, 'ready_for_human_review');
+      // from: preparing_mr and ready_for_human_review (handing_over cut off), or needs_human and aborted still carrying the cut-off step
+      await this.#transition({ ...ended, worktree, handoff_skipped: skipped }, 'ready_for_human_review', 'repair_handover');
       return;
     }
-    await this.#transition(ended, 'needs_human', {
+    // from: preparing_mr and ready_for_human_review (handing_over cut off), handed_over (asking), or any later state still carrying the step but starting, failed and pushed (JOB_TRANSITIONS)
+    await this.#transition(ended, 'needs_human', 'repair_handover', {
       code: 'handover_interrupted',
       message: `sf serve restarted during the hand-over of ${ticket} and your checkout is not as the factory left it, so nothing was changed there: the branch ${branch} may be checked out in your checkout, the job's commit is saved as refs/factory/${ticket}, and the job's worktree may be detached or gone.`,
     });
@@ -837,6 +854,7 @@ export class Execution implements RunnerWork {
       workspace: workspace.name, ticket, branch, base, base_commit: null, state: 'starting', worktree, prepared_commit: null,
       iteration: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, mr_conflict_turn: false, created_at: created, updated_at: created,
     };
+    checkTransition(null, 'starting', 'create');
     await this.jobs.write(job);
     await this.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, state: { from: null, to: 'starting' } });
     return { workspace, ticket, base, branch, worktree, images };
@@ -857,7 +875,8 @@ export class Execution implements RunnerWork {
       await this.#locked(async () => {
         const job = await this.jobs.read(workspace.name, ticket);
         if (job !== undefined && job.state === 'starting') {
-          await this.#transition({ ...job, worktree: null }, 'failed', { code: failure.code, message: `${failure.message}${keptNote}` });
+          // from: starting (the guard above)
+          await this.#transition({ ...job, worktree: null }, 'failed', 'launch', { code: failure.code, message: `${failure.message}${keptNote}` });
         }
       });
       throw new FactoryError(failure.code, `${failure.message}${keptNote}`);
@@ -881,14 +900,16 @@ export class Execution implements RunnerWork {
           console.error(error);
         }
         const message = `${failure.message} Fix it, then sf restart the ticket.${keptNote}`;
-        await this.#transition(job, 'failed', { code: failure.code, message });
+        // from: starting (checked when the job was read above)
+        await this.#transition(job, 'failed', 'launch', { code: failure.code, message });
         throw new FactoryError(failure.code, message);
       }
       if (kept !== undefined) {
         await copyKept(kept, worktree);
       }
       job = await this.#storeImages(job, claimed.images);
-      job = await this.#transition(await this.#syncTask(workspace, job), 'working');
+      // from: starting (checked when the job was read above)
+      job = await this.#transition(await this.#syncTask(workspace, job), 'working', 'launch');
       // The first turn runs in the job's runner, with the images' blocks.
       const prompt = factoryPrompt(firstPrompt(ticket, kept?.paths ?? [], rules), ticket, job.iteration + 1, this.#imagesLine(job));
       const images = this.#imageRefs(job, (await this.jobs.readTaskCopy(workspace.name, ticket)) ?? '');
@@ -1182,7 +1203,8 @@ export class Execution implements RunnerWork {
           await this.#park(job, 'turn', limit);
           return;
         }
-        await this.#transition(job, 'needs_human', { code: outcome.code, message: outcome.message });
+        // from: working (#idle: preparing_mr went to #mrIdle)
+        await this.#transition(job, 'needs_human', 'publish', { code: outcome.code, message: outcome.message });
         return;
       }
       try {
@@ -1191,13 +1213,16 @@ export class Execution implements RunnerWork {
         // item stops the job before the review.
         const escalated = await this.#answerFix(published, live.cwd, outcome.text);
         if (escalated.length > 0) {
-          await this.#transition(published, 'needs_human', { code: 'escalated', message: escalationMessage(escalated) }, [notificationLine(changes)]);
+          // from: working (#idle: preparing_mr went to #mrIdle)
+          await this.#transition(published, 'needs_human', 'publish', { code: 'escalated', message: escalationMessage(escalated) }, [notificationLine(changes)]);
           return;
         }
-        this.#startReview(await this.#transition(published, 'awaiting_review', undefined, [notificationLine(changes)]));
+        // from: working (#idle: preparing_mr went to #mrIdle)
+        this.#startReview(await this.#transition(published, 'awaiting_review', 'publish', undefined, [notificationLine(changes)]));
       } catch (error) {
         console.error(error);
-        await this.#transition(job, 'needs_human', { code: 'publish_failed', message: 'The Report and Patch could not be published.' });
+        // from: working (#idle: preparing_mr went to #mrIdle)
+        await this.#transition(job, 'needs_human', 'publish', { code: 'publish_failed', message: 'The Report and Patch could not be published.' });
       }
     });
   }
@@ -1297,7 +1322,8 @@ export class Execution implements RunnerWork {
     // The job as last written: with mr_conflict_turn once the conflict turn is under way.
     let current = job;
     const needsHuman = async (code: string, message: string): Promise<void> => {
-      await this.#transition(current, 'needs_human', { code, message });
+      // from: preparing_mr (#idle calls #mrIdle only then)
+      await this.#transition(current, 'needs_human', 'mr_turn_end', { code, message });
     };
     try {
       if (await rebaseInProgress(cwd)) {
@@ -1385,14 +1411,16 @@ export class Execution implements RunnerWork {
     if (!outcome.ok) {
       await this.#gitLocked(job.workspace, () => abortRebase(cwd));
       const message = `The rebase had conflicts in ${files.join(', ')}; the conflict turn failed (${outcome.code}: ${outcome.message}). The rebase was aborted.`;
-      await this.#transition(job, 'needs_human', { code: 'mr_conflict', message: message.slice(0, 1000) });
+      // from: preparing_mr (#mrIdle, from #idle)
+      await this.#transition(job, 'needs_human', 'mr_turn_end', { code: 'mr_conflict', message: message.slice(0, 1000) });
       return;
     }
     // A continue that fails keeps the resolution next to the iteration being rebased.
     const save = (write: (handle: FileHandle) => Promise<void>): Promise<string> => this.jobs.writeConflictResolution(job.workspace, job.ticket, job.iteration, write);
     const failure = await this.#gitLocked(job.workspace, () => continueRebase(cwd, { files, targetCommit, save }));
     if (failure !== undefined) {
-      await this.#transition(job, 'needs_human', failure);
+      // from: preparing_mr (#mrIdle, from #idle)
+      await this.#transition(job, 'needs_human', 'mr_turn_end', failure);
       return;
     }
     // The resolution goes back to review with this transition: the conflict turn's window ends
@@ -1404,7 +1432,8 @@ export class Execution implements RunnerWork {
       `The rebase onto ${targetRef} (${targetCommit}) had conflicts in ${files.join(', ')}, resolved by the Implementer. The Patch is now against the target.`,
     ].join('\n');
     const { job: published, changes } = await this.#publish(rebased, live, outcome, await buildPatch(cwd, targetCommit), [note]);
-    this.#startReview(await this.#transition(published, 'awaiting_review', undefined, [notificationLine(changes)]));
+    // from: preparing_mr (#mrIdle, from #idle)
+    this.#startReview(await this.#transition(published, 'awaiting_review', 'mr_turn_end', undefined, [notificationLine(changes)]));
   }
 
   // Starts the Claude review of the job's last iteration; it runs outside the lock. A review still
@@ -1447,7 +1476,8 @@ export class Execution implements RunnerWork {
         throw new FactoryError('worktree_missing', `The worktree of ${workspaceName}/${ticket} is missing; sf reset the ticket and start again.`);
       }
       await this.jobs.removeReview(workspaceName, ticket, job.iteration);
-      const next = await this.#transition(job, 'awaiting_review');
+      // from: needs_human (#checkRetryReview)
+      const next = await this.#transition(job, 'awaiting_review', 'review_retry');
       this.#startReview(next);
       return { state: next.state, iteration: next.iteration };
     });
@@ -1605,10 +1635,12 @@ export class Execution implements RunnerWork {
     const gate = job.error?.code === 'escalated' ? undefined : await this.jobs.readGate(workspaceName, ticket, iteration);
     await this.jobs.removeGate(workspaceName, ticket, iteration);
     if (gate !== undefined && 'verdict' in gate && review !== undefined && 'verdict' in review) {
-      await this.#startGate(await this.#transition(job, 'awaiting_review'), review);
+      // from: needs_human (#checkSettle)
+      await this.#startGate(await this.#transition(job, 'awaiting_review', 'go_on'), review);
     } else {
       await this.jobs.removeReview(workspaceName, ticket, iteration);
-      this.#startReview(await this.#transition(job, 'awaiting_review'));
+      // from: needs_human (#checkSettle)
+      this.#startReview(await this.#transition(job, 'awaiting_review', 'go_on'));
     }
     return (await this.#job(workspaceName, ticket)).state;
   }
@@ -1706,7 +1738,8 @@ export class Execution implements RunnerWork {
       return;
     }
     if (!outcome.ok) {
-      await this.#transition(job, 'needs_human', { code: 'review_failed', message: outcome.message });
+      // from: awaiting_review (current)
+      await this.#transition(job, 'needs_human', 'verdict', { code: 'review_failed', message: outcome.message });
       return;
     }
     await this.#applying(job, () => this.#afterClaude(job, outcome.output));
@@ -1743,7 +1776,8 @@ export class Execution implements RunnerWork {
     const { summary, accepted_sensitive: accepted } = output;
     const applied = await this.#applyLedger(job, REVIEWER, output);
     if (applied.kind === 'stop') {
-      await this.#transition(job, 'needs_human', { code: applied.code, message: applied.message });
+      // from: awaiting_review (#reviewed current, #pickUp through #resumable)
+      await this.#transition(job, 'needs_human', 'verdict', { code: applied.code, message: applied.message });
     } else if (applied.kind === 'fix') {
       await this.#fix(job, fixContent(summary, applied.items), { ledger: applied.ledger });
     } else if (this.#config.gate.on) {
@@ -1789,7 +1823,8 @@ export class Execution implements RunnerWork {
       const latest = await this.jobs.read(job.workspace, job.ticket);
       if (latest?.state === 'awaiting_review') {
         const code = error instanceof FactoryError ? error.code : 'review_failed';
-        await this.#transition(latest, 'needs_human', { code, message: `The review's verdict could not be applied: ${(error as Error).message}`.slice(0, 1000) });
+        // from: awaiting_review (the guard above)
+        await this.#transition(latest, 'needs_human', 'verdict', { code, message: `The review's verdict could not be applied: ${(error as Error).message}`.slice(0, 1000) });
       }
     }
   }
@@ -1798,7 +1833,8 @@ export class Execution implements RunnerWork {
   // runs used up SF_GATE_MAX_TOKENS goes to the user instead. Only under the lock.
   async #startGate(job: Job, claude: ReviewOutput): Promise<void> {
     if (job.gate_tokens >= this.#config.gateMaxTokens) {
-      await this.#transition(job, 'needs_human', {
+      // from: awaiting_review (#afterClaude, and #goOn after its transition)
+      await this.#transition(job, 'needs_human', 'verdict', {
         code: 'gate_budget',
         message: `The gate runs of this job used ${job.gate_tokens} tokens, the limit of SF_GATE_MAX_TOKENS (${this.#config.gateMaxTokens}); the user decides how to go on.`,
       });
@@ -1895,11 +1931,13 @@ export class Execution implements RunnerWork {
       return;
     }
     if (!outcome.ok) {
-      await this.#transition(job, 'needs_human', { code: 'gate_failed', message: outcome.message });
+      // from: awaiting_review (current)
+      await this.#transition(job, 'needs_human', 'verdict', { code: 'gate_failed', message: outcome.message });
       return;
     }
     if (job.gate_tokens > this.#config.gateMaxTokens) {
-      await this.#transition(job, 'needs_human', {
+      // from: awaiting_review (current)
+      await this.#transition(job, 'needs_human', 'verdict', {
         code: 'gate_budget',
         message: `The gate runs of this job used ${job.gate_tokens} tokens, over the limit of SF_GATE_MAX_TOKENS (${this.#config.gateMaxTokens}); the gate's verdict (${outcome.output.verdict}) was not applied.`,
       });
@@ -1910,13 +1948,15 @@ export class Execution implements RunnerWork {
     // job to the user.
     const applied = await this.#applyLedger(job, GATE_REVIEWER, outcome.output);
     if (applied.kind === 'stop') {
-      await this.#transition(job, 'needs_human', { code: applied.code, message: applied.message });
+      // from: awaiting_review (current)
+      await this.#transition(job, 'needs_human', 'verdict', { code: applied.code, message: applied.message });
       return;
     }
     const fixing = applied.kind === 'fix';
     if (fixing && job.gate_fixes >= this.#config.gateMaxRounds) {
       const message = `The gate asked for a fix ${job.gate_fixes + 1} times, over the limit of SF_GATE_MAX_ROUNDS (${this.#config.gateMaxRounds}); the fix was not applied. Claude: ${oneLine(claude.summary)} Codex: ${oneLine(summary)}`;
-      await this.#transition(job, 'needs_human', { code: 'gate_rounds', message: message.slice(0, 2000) });
+      // from: awaiting_review (current)
+      await this.#transition(job, 'needs_human', 'verdict', { code: 'gate_rounds', message: message.slice(0, 2000) });
       return;
     }
     const decided = job;
@@ -2086,7 +2126,8 @@ export class Execution implements RunnerWork {
       await this.#prepareMr(job, sensitive);
       return;
     }
-    await this.#transition(job, 'needs_human', { code: SIMPLIFY_CODE, message: offerMessage(record.suggestions) });
+    // from: awaiting_review (#afterClean from #afterClaude, #gated and #pickUp; #simplifyEnded current)
+    await this.#transition(job, 'needs_human', 'verdict', { code: SIMPLIFY_CODE, message: offerMessage(record.suggestions) });
   }
 
   // The user's Simplify on the offer (sf simplify, the dashboard's Simplify, SF-055): one Fix section
@@ -2148,17 +2189,20 @@ export class Execution implements RunnerWork {
     } else {
       const outcome = await this.#handOver(ready, live.workspace, content);
       if (outcome.ok) {
-        await this.#transition(outcome.job, 'handed_over', undefined, lines);
+        // from: preparing_mr (#mrIdle; #handOver writes the job in the same state)
+        await this.#transition(outcome.job, 'handed_over', 'ready', undefined, lines);
         console.log(`${job.workspace}/${job.ticket}: branch ${job.branch} ready (${content.title}), in the checkout`);
         return;
       }
       if (outcome.error.code === 'handover_interrupted') {
-        await this.#transition(outcome.job, 'needs_human', outcome.error);
+        // from: preparing_mr (#mrIdle; #handOver writes the job in the same state)
+        await this.#transition(outcome.job, 'needs_human', 'ready', outcome.error);
         return;
       }
       ready = { ...outcome.job, handoff_skipped: outcome.error };
     }
-    await this.#transition(ready, 'ready_for_human_review', undefined, lines);
+    // from: preparing_mr (#mrIdle; #handOver writes the job in the same state)
+    await this.#transition(ready, 'ready_for_human_review', 'ready', undefined, lines);
     console.log(`${job.workspace}/${job.ticket}: branch ${job.branch} ready (${content.title})`);
   }
 
@@ -2352,7 +2396,8 @@ export class Execution implements RunnerWork {
       const outcome = await this.#handOver(job, workspace, content);
       if (!outcome.ok) {
         if (outcome.error.code === 'handover_interrupted') {
-          await this.#transition(outcome.job, 'needs_human', outcome.error);
+          // from: ready_for_human_review (check above; #handOver keeps the state)
+          await this.#transition(outcome.job, 'needs_human', 'hand_over', outcome.error);
         } else if (retry || outcome.error.code === CONFIG_LOCKED_CODE) {
           await this.jobs.write({ ...outcome.job, handoff_skipped: outcome.error });
         }
@@ -2362,7 +2407,8 @@ export class Execution implements RunnerWork {
         }
         throw new FactoryError(outcome.error.code, outcome.error.message);
       }
-      const next = await this.#transition(outcome.job, 'handed_over', undefined, [content.title, notificationLine((await this.#lastFiles(job)) ?? [])]);
+      // from: ready_for_human_review (check above; #handOver keeps the state)
+      const next = await this.#transition(outcome.job, 'handed_over', 'hand_over', undefined, [content.title, notificationLine((await this.#lastFiles(job)) ?? [])]);
       return { state: next.state, branch: next.branch };
     });
   }
@@ -2383,7 +2429,8 @@ export class Execution implements RunnerWork {
         await this.#freeConfig(job, workspace.workCheckout, 'takeback');
         await takeBack(workspace.workCheckout, worktree, ticket, handover);
       });
-      const next = await this.#transition({ ...(await this.#endHandover(job)), worktree, prepared_commit: handover.saved }, 'ready_for_human_review');
+      // from: handed_over (#checkHandedOver)
+      const next = await this.#transition({ ...(await this.#endHandover(job)), worktree, prepared_commit: handover.saved }, 'ready_for_human_review', 'take_back');
       return { state: next.state, branch: next.branch, worktree };
     });
   }
@@ -2487,7 +2534,8 @@ export class Execution implements RunnerWork {
   async #pushedByUser(job: Job, workspace: Workspace, commit: string): Promise<Job> {
     const ended = await this.#leaveCheckout(job, workspace, true);
     const title = mrMessage((await this.jobs.readMrText(job.workspace, job.ticket)) ?? '').title;
-    return this.#transition({ ...ended, prepared_commit: commit }, 'pushed', undefined, [title]);
+    // from: handed_over (#pushCheck: #checkHandedOver, checked again under the lock)
+    return this.#transition({ ...ended, prepared_commit: commit }, 'pushed', 'pushed_by_user', undefined, [title]);
   }
 
   // A handed-over job leaves the checkout (the push, abort): the factory's commit.template and
@@ -2601,7 +2649,8 @@ export class Execution implements RunnerWork {
         // A transient failure again (the fetch) stops the job again with its code, so it can be
         // retried once more; any other refusal leaves the job as it was.
         if (error instanceof FactoryError && MR_RETRY_CODES.includes(error.code)) {
-          await this.#transition(job, 'needs_human', { code: error.code, message: error.message });
+          // from: needs_human (#checkRetryMr)
+          await this.#transition(job, 'needs_human', 'mr_retry', { code: error.code, message: error.message });
         }
         throw error;
       }
@@ -2648,7 +2697,8 @@ export class Execution implements RunnerWork {
     });
     await onAccepted?.();
     const attempt = job.mr_attempts + 1;
-    const next = await this.#syncTask(workspace, await this.#transition({ ...job, target_commit: target.commit, mr_attempts: attempt, mr_conflict_turn: false }, 'preparing_mr'));
+    // from: awaiting_review, or needs_human: the retry and Accept or Skip (#checkPrepareMr, #checkAcceptGate), the Retry (#checkRetryMr)
+    const next = await this.#syncTask(workspace, await this.#transition({ ...job, target_commit: target.commit, mr_attempts: attempt, mr_conflict_turn: false }, 'preparing_mr', 'prepare_mr'));
     const prompt = mrPrompt({
       ticket, branch: job.branch, targetRef: target.ref, targetCommit: target.commit, attempt,
       previousError: afterTextTurn ? job.error?.message : undefined, handbook: this.#handbook,
@@ -2727,7 +2777,8 @@ export class Execution implements RunnerWork {
         this.#announce(kept, []);
         return { state: kept.state, branch: kept.branch, error: pushFailure };
       }
-      const next = await this.#transition(job, 'needs_human', pushFailure);
+      // from: ready_for_human_review, needs_human (#approvable; handed_over keeps its state above)
+      const next = await this.#transition(job, 'needs_human', 'push', pushFailure);
       return { state: next.state, branch: next.branch, error: pushFailure };
     }
     let message = plan.message;
@@ -2764,7 +2815,8 @@ export class Execution implements RunnerWork {
     }
     const mr = opened === undefined ? job.mr : { host: opened.host, number: opened.number, url: opened.url, state: opened.state };
     const lines = [title, ...(opened !== undefined ? [`Merge request #${opened.number}: ${opened.url}`] : link !== undefined ? [link] : [])];
-    const pushed = await this.#transition({ ...after, prepared_commit: plan.commit, mr }, 'pushed', undefined, lines);
+    // from: ready_for_human_review, handed_over, needs_human (#approvable)
+    const pushed = await this.#transition({ ...after, prepared_commit: plan.commit, mr }, 'pushed', 'push', undefined, lines);
     if (opened !== undefined) {
       await this.#mrEvent(pushed, opened.reused ? 'reused' : 'created');
     }
@@ -3276,7 +3328,8 @@ export class Execution implements RunnerWork {
       const ending = job;
       const failure = discard ? await this.#gitLocked(workspaceName, () => this.#discard(workspace.workCheckout, ending, worktree)) : undefined;
       const kept = discard && failure === undefined ? null : worktree;
-      const next = await this.#transition({ ...job, worktree: kept }, 'aborted', failure);
+      // from: every state not in TERMINAL_STATES
+      const next = await this.#transition({ ...job, worktree: kept }, 'aborted', 'abort', failure);
       return { state: next.state, branch: next.branch, discarded: discard && failure === undefined, worktree: kept, ...(failure !== undefined ? { error: failure } : {}) };
     });
   }
@@ -3300,7 +3353,8 @@ export class Execution implements RunnerWork {
       // The job as its runner left it.
       const job = await this.#job(workspaceName, ticket);
       if (job.state === 'preparing_mr') {
-        const next = await this.#transition(job, 'needs_human', {
+        // from: preparing_mr (the guard above)
+        const next = await this.#transition(job, 'needs_human', 'pause', {
           code: 'mr_interrupted',
           message: 'The job was paused as its MR preparation began; go on with sf say (its iteration is reviewed again and a clean verdict prepares the branch again), or abort or reset the job.',
         });
@@ -3325,7 +3379,8 @@ export class Execution implements RunnerWork {
         const reviewer = { review: REVIEWER, gate: GATE_REVIEWER, simplify: SIMPLIFIER, turn: undefined }[step];
         await this.jobs.appendEvent(workspaceName, ticket, { ts: now(), iteration, type: 'interrupted', step, ...(reviewer !== undefined ? { reviewer } : {}) });
       }
-      const next = await this.#transition(paused, 'paused');
+      // from: working, awaiting_review (the guard above)
+      const next = await this.#transition(paused, 'paused', 'pause');
       return { state: next.state, branch: next.branch, step };
     });
   }
@@ -3345,7 +3400,8 @@ export class Execution implements RunnerWork {
     const parked: Job = { ...(step === 'simplify' ? withoutPass : job), paused: { from, step, at }, limit: { provider: limit.provider, resets_at: resetsAt } };
     const reviewer = { review: REVIEWER, gate: GATE_REVIEWER, simplify: SIMPLIFIER, turn: undefined }[step];
     await this.jobs.appendEvent(job.workspace, job.ticket, { ts: at, iteration, type: 'interrupted', step, ...(reviewer !== undefined ? { reviewer } : {}) });
-    await this.#transition(parked, 'waiting_limit');
+    // from: working (#idle), awaiting_review (#reviewed, #gated, #simplifyEnded: current)
+    await this.#transition(parked, 'waiting_limit', 'park');
   }
 
   // The run queue's step for a parked job whose limit reset (SF-072), in sf serve. The job is read
@@ -3361,7 +3417,8 @@ export class Execution implements RunnerWork {
       const failure = error instanceof FactoryError ? { code: error.code, message: error.message } : { code: 'resume_failed', message: `The resume after the usage limit failed: ${(error as Error).message}`.slice(0, 1000) };
       const job = await this.jobs.read(workspaceName, ticket);
       if (job?.state === 'waiting_limit' && job.paused?.at === parkedAt) {
-        await this.#transition(job, 'needs_human', failure);
+        // from: waiting_limit (the guard above)
+        await this.#transition(job, 'needs_human', 'limit_reset', failure);
       }
       return 'failed';
     };
@@ -3477,7 +3534,8 @@ export class Execution implements RunnerWork {
       }
       let next: Job;
       if (pause.from === 'working') {
-        next = await this.#transition(await this.#syncTask(workspace, current), 'working');
+        // from: paused, waiting_limit (#checkResume)
+        next = await this.#transition(await this.#syncTask(workspace, current), 'working', 'resume');
         const first = await this.#resumePrompt(next, message);
         // Only the order changed: every image is named.
         const names = imagesChanged === undefined ? [] : imagesChanged.length > 0 ? imagesChanged : records.map((image) => image.name);
@@ -3490,7 +3548,8 @@ export class Execution implements RunnerWork {
         // keeps what the Implementer was last given, so its next prompt (a Fix section, sf say)
         // carries the diff. They get the job's images as they are now.
         const content = await this.#copyTask(workspace, current);
-        next = await this.#transition(content === undefined ? current : await this.#recordTask(current, content), 'awaiting_review');
+        // from: paused, waiting_limit (#checkResume)
+        next = await this.#transition(content === undefined ? current : await this.#recordTask(current, content), 'awaiting_review', 'resume');
         await this.#pickUp(next);
       }
       return { state: next.state, iteration: next.iteration, step: pause.step, task_changed: change !== undefined };
@@ -3858,7 +3917,8 @@ export class Execution implements RunnerWork {
     }
     if (!overLimit && job.fixes >= this.#config.maxIterations) {
       const message = `${job.fixes} Fix sections were written, the limit of SF_MAX_ITERATIONS`;
-      await this.#transition(job, 'needs_human', { code: 'iteration_limit', message: `${message}; the user decides how to go on.` });
+      // from: awaiting_review, ready_for_human_review (#checkFix), needs_human (fromStop)
+      await this.#transition(job, 'needs_human', 'fix', { code: 'iteration_limit', message: `${message}; the user decides how to go on.` });
       throw new FactoryError('iteration_limit', `${message}; the job needs the user.`);
     }
     const workspace = await this.#resolve(workspaceName);
@@ -3877,7 +3937,8 @@ export class Execution implements RunnerWork {
     }
     job = await this.#syncTask(workspace, job);
     // A commit prepared before this turn is never pushed (SF-073).
-    job = await this.#transition({ ...job, ...counts, fixes: job.fixes + 1, prepared_commit: null }, 'working');
+    // from: awaiting_review, ready_for_human_review (#checkFix), needs_human (fromStop)
+    job = await this.#transition({ ...job, ...counts, fixes: job.fixes + 1, prepared_commit: null }, 'working', 'fix');
     this.#session(job, workspace).send(factoryPrompt(this.#withChange(`/implement ${TASK_DIR}/${ticket}.md Fix ${fix}`, ticket, change), ticket, job.iteration + 1, this.#imagesLine(job)), DENIED_TOOLS);
     return { iteration: job.iteration + 1, check_after_minutes: this.#config.checkAfterFixMin };
   }
@@ -3940,7 +4001,8 @@ export class Execution implements RunnerWork {
       const change = job.task_sha256 === undefined ? undefined : await this.#taskChange(workspace, job);
       job = await this.#syncTask(workspace, job);
       if (job.state !== 'working') {
-        job = await this.#transition(job, 'working');
+        // from: awaiting_review, needs_human, ready_for_human_review, handed_over (#checkSay; working changes no state)
+        job = await this.#transition(job, 'working', 'say');
       }
       session.send(factoryPrompt(this.#withChange(message, ticket, change), ticket, job.iteration + 1, this.#imagesLine(job)), DENIED_TOOLS);
       return { state: job.state, queued };
@@ -3978,7 +4040,8 @@ export class Execution implements RunnerWork {
       } catch (again) {
         console.error(again);
         const message = `Ask for changes failed after your checkout was saved as refs/factory/${job.ticket}-ask (${(error as Error).message.slice(0, 300)}); sf serve finishes it when it starts again.`;
-        await this.#transition({ ...current, prepared_commit: null }, 'needs_human', { code: 'ask_interrupted', message });
+        // from: handed_over (#checkHandedOver)
+        await this.#transition({ ...current, prepared_commit: null }, 'needs_human', 'ask_for_changes', { code: 'ask_interrupted', message });
         throw new FactoryError('ask_interrupted', message);
       }
     }

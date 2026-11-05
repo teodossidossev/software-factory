@@ -59,6 +59,122 @@ export const RESUMABLE_STATES: readonly JobState[] = ['paused', 'waiting_limit']
 // tries it again (SF-072).
 export const LIMIT_RETRY_MS = 30 * 60_000;
 
+// The steps of src/execution.ts that change a job's state (SF-088), each named after the step, not
+// after the error code: every needs_human stop of one step shares its action. The order is the
+// order of the README's table.
+export const JOB_ACTIONS = [
+  'create',
+  'launch',
+  'recover',
+  'repair_handover',
+  'publish',
+  'mr_turn_end',
+  'review_retry',
+  'go_on',
+  'verdict',
+  'prepare_mr',
+  // The Retry's own stop when MR preparation fails again before it began (SF-087, #retryMr).
+  'mr_retry',
+  'ready',
+  'hand_over',
+  'take_back',
+  'push',
+  'pushed_by_user',
+  'abort',
+  'pause',
+  'resume',
+  'park',
+  'limit_reset',
+  'fix',
+  'say',
+  'ask_for_changes',
+] as const;
+export type JobAction = (typeof JOB_ACTIONS)[number];
+
+// One allowed state change: from null only for the new record (create).
+export interface JobTransition {
+  readonly from: JobState | null;
+  readonly to: JobState;
+  readonly action: JobAction;
+}
+
+// The rows of action: every state of from to every state of to.
+function rows(action: JobAction, from: readonly (JobState | null)[], to: readonly JobState[]): JobTransition[] {
+  return from.flatMap((one) => to.map((target) => ({ from: one, to: target, action })));
+}
+
+// Every allowed state change (SF-088): #transition and #claim in src/execution.ts refuse any other.
+// Each call site there names its from states in a comment, derived from its guards.
+export const JOB_TRANSITIONS: readonly JobTransition[] = Object.freeze([
+  ...rows('create', [null], ['starting']),
+  ...rows('launch', ['starting'], ['working', 'failed']),
+  ...rows('recover', ['working', 'preparing_mr'], ['needs_human']),
+  ...rows('recover', ['starting'], ['failed']),
+  // A cut-off step of the hand-over (handover.step) stays on the job through every later change
+  // until recover() repairs it. handing_over is cut off in preparing_mr or ready_for_human_review,
+  // and goes on only to needs_human (handover_interrupted, with a prepared commit) and aborted.
+  // asking is cut off in handed_over and goes on to needs_human (ask_interrupted, without a prepared
+  // commit), which the retry of MR preparation (#checkPrepareMr) takes on, and from there to any
+  // state but a new job's starting, failed and pushed (approve refuses a cut-off step).
+  ...rows('repair_handover', JOB_STATES.filter((state) => !['starting', 'failed', 'pushed'].includes(state)), ['needs_human']),
+  ...rows('repair_handover', ['needs_human', 'ready_for_human_review', 'preparing_mr', 'aborted'], ['ready_for_human_review']),
+  ...rows('publish', ['working'], ['awaiting_review', 'needs_human']),
+  ...rows('mr_turn_end', ['preparing_mr'], ['awaiting_review', 'needs_human']),
+  ...rows('review_retry', ['needs_human'], ['awaiting_review']),
+  ...rows('go_on', ['needs_human'], ['awaiting_review']),
+  ...rows('verdict', ['awaiting_review'], ['needs_human']),
+  ...rows('prepare_mr', ['awaiting_review', 'needs_human'], ['preparing_mr']),
+  ...rows('mr_retry', ['needs_human'], ['needs_human']),
+  ...rows('ready', ['preparing_mr'], ['needs_human', 'ready_for_human_review', 'handed_over']),
+  ...rows('hand_over', ['ready_for_human_review'], ['needs_human', 'handed_over']),
+  ...rows('take_back', ['handed_over'], ['ready_for_human_review']),
+  ...rows('push', ['needs_human', 'ready_for_human_review', 'handed_over'], ['pushed']),
+  ...rows('push', ['needs_human', 'ready_for_human_review'], ['needs_human']),
+  ...rows('pushed_by_user', ['handed_over'], ['pushed']),
+  ...rows('abort', JOB_STATES.filter((state) => !TERMINAL_STATES.includes(state)), ['aborted']),
+  ...rows('pause', ['working', 'awaiting_review'], ['paused']),
+  ...rows('pause', ['preparing_mr'], ['needs_human']),
+  ...rows('resume', ['paused', 'waiting_limit'], ['working', 'awaiting_review']),
+  ...rows('park', ['working', 'awaiting_review'], ['waiting_limit']),
+  ...rows('limit_reset', ['waiting_limit'], ['needs_human']),
+  ...rows('fix', ['awaiting_review', 'needs_human', 'ready_for_human_review'], ['working', 'needs_human']),
+  ...rows('say', ['awaiting_review', 'needs_human', 'ready_for_human_review', 'handed_over'], ['working']),
+  ...rows('ask_for_changes', ['handed_over'], ['needs_human']),
+].map((row) => Object.freeze(row)));
+
+// Every refusal of checkTransition in this process; nothing clears it (the test harness reads it).
+const refusals: JobTransition[] = [];
+
+// The refusals of checkTransition in this process, for the tests (SF-088).
+export function refusedTransitions(): JobTransition[] {
+  return refusals.map((row) => ({ ...row }));
+}
+
+// Refuses (illegal_transition) a state change that is not a row of JOB_TRANSITIONS, a bug of the
+// factory: the refusal is recorded and written to stderr as one line, so a test sees it even where
+// the error is caught.
+export function checkTransition(from: JobState | null, to: JobState, action: JobAction): void {
+  if (JOB_TRANSITIONS.some((row) => row.from === from && row.to === to && row.action === action)) {
+    return;
+  }
+  refusals.push({ from, to, action });
+  process.stderr.write(`illegal_transition: ${from} -> ${to} by ${action}\n`);
+  throw new FactoryError('illegal_transition', `${from} -> ${to} by ${action} is not an allowed state change.`);
+}
+
+// JOB_TRANSITIONS as the README's Markdown table: the new record first, then by from, to (both in
+// JOB_STATES order) and action (JOB_ACTIONS order).
+export function renderTransitions(): string {
+  const order = (state: JobState | null): number => (state === null ? -1 : JOB_STATES.indexOf(state));
+  const sorted = [...JOB_TRANSITIONS].sort((a, b) =>
+    order(a.from) - order(b.from) || order(a.to) - order(b.to) || JOB_ACTIONS.indexOf(a.action) - JOB_ACTIONS.indexOf(b.action));
+  const lines = ['| From | To | Action |', '|---|---|---|'];
+  for (const row of sorted) {
+    lines.push(`| ${row.from === null ? '(new)' : `\`${row.from}\``} | \`${row.to}\` | \`${row.action}\` |`);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
 const timestamp = z.iso.datetime();
 const commit = z.string().regex(/^[0-9a-f]{40,64}$/);
 

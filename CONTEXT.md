@@ -91,6 +91,7 @@ _Avoid_: findings, review request, feedback
 
 **Job**:
 One Ticket being implemented in one Workspace on one Branch. Identified by the Branch name.
+Its allowed state changes are the table `JOB_TRANSITIONS` in `factory/src/jobs.ts`.
 
 **Paused**:
 The state of a Job the User stopped with Pause: nothing of it runs (no Runner, no Implementer turn,

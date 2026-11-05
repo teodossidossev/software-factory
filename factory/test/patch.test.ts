@@ -1,4 +1,5 @@
-// Unit tests for the branch slug, the Patch assembly and the changed-file table.
+// Unit tests for the branch slug, the Patch assembly, the changed-file table and the marks of the
+// structured file list (sensitivity, the Task's scope).
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
@@ -6,7 +7,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { branchName, slugify } from '../src/execution.js';
-import { assemblePatch, buildPatch, changedFiles, changedFilesSection } from '../src/patch.js';
+import { JobStore } from '../src/jobs.js';
+import { assemblePatch, buildPatch, changedFiles, changedFilesSection, fileChanges } from '../src/patch.js';
+import { marksOf } from '../src/rules.js';
 
 let temp: string;
 
@@ -148,4 +151,54 @@ test('buildPatch covers tracked and untracked files, skips ignored, forbidden an
   }
   assert.equal(git(repo, 'diff', '--cached', '--name-only'), indexBefore);
   assert.equal(git(repo, 'ls-files', '--others', '--exclude-standard').includes('src/new.ts'), true);
+});
+
+test("fileChanges marks each path against the Task's scope: in by scope or may_touch, out otherwise, none without a scope (SF-053)", async () => {
+  const repo = join(temp, 'scope-repo');
+  await mkdir(join(repo, 'src'), { recursive: true });
+  git(repo, 'init', '-q', '-b', 'main');
+  await writeFile(join(repo, 'package.json'), '{}\n');
+  await writeFile(join(repo, 'README.md'), 'one\n');
+  await writeFile(join(repo, 'src', 'old.ts'), 'old\n');
+  git(repo, 'add', '.');
+  git(repo, 'commit', '-q', '-m', 'base');
+  const base = git(repo, 'rev-parse', 'HEAD').trim();
+  await writeFile(join(repo, 'package.json'), '{"name":"x"}\n');
+  await writeFile(join(repo, 'README.md'), 'two\n');
+  await rm(join(repo, 'src', 'old.ts'));
+  await mkdir(join(repo, 'test'));
+  await writeFile(join(repo, 'src', 'a.ts'), 'a\n');
+  await writeFile(join(repo, 'test', 'a.test.ts'), 't\n');
+  const built = await buildPatch(repo, base);
+  const marks = async (mayTouch: string[], scope: string[] | undefined): Promise<string[][]> =>
+    (await fileChanges(repo, base, built.files, marksOf(mayTouch, scope))).map((change) => [change.path, change.status, change.sensitive, change.scope]);
+
+  // may_touch counts as in scope; the deleted file is outside it.
+  assert.deepEqual(await marks(['package.json'], ['src/a.ts', 'test/**', 'README.md']), [
+    ['README.md', 'modified', 'no', 'in'], ['package.json', 'modified', 'declared', 'in'], ['src/old.ts', 'deleted', 'no', 'out'],
+    ['src/a.ts', 'added', 'no', 'in'], ['test/a.test.ts', 'added', 'no', 'in'],
+  ]);
+  assert.deepEqual(await marks([], ['src/**']), [
+    ['README.md', 'modified', 'no', 'out'], ['package.json', 'modified', 'undeclared', 'out'], ['src/old.ts', 'deleted', 'no', 'in'],
+    ['src/a.ts', 'added', 'no', 'in'], ['test/a.test.ts', 'added', 'no', 'out'],
+  ]);
+  // No scope, no check.
+  assert.deepEqual((await marks(['package.json'], undefined)).map((row) => row[3]), ['none', 'none', 'none', 'none', 'none']);
+});
+
+test('a file list written before SF-053 reads with every file\'s scope none', async () => {
+  const jobs = new JobStore(join(temp, 'old-state'));
+  const meta = {
+    iteration: 1, started_at: '2026-11-01T12:00:00.000Z', ended_at: '2026-11-01T12:05:00.000Z', denials: [], changed_files: [], patch_truncated: false,
+    submodule_changed: [], cost_usd: null, cost_usd_total: null,
+    files: [{ path: 'src/a.ts', status: 'added', sensitive: 'no', additions: 1, deletions: 0 }, { path: 'b.ts', status: 'modified', sensitive: 'no', scope: 'out', additions: 1, deletions: 1 }],
+  };
+  const dir = jobs.iterationDir('app', 'T-1', 1);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, 'meta.json'), JSON.stringify(meta));
+  const read = await jobs.readMeta('app', 'T-1', 1);
+  assert.deepEqual(read.files!.map((change) => [change.path, change.scope]), [['src/a.ts', 'none'], ['b.ts', 'out']]);
+  // Without a file list (before SF-024) it stays absent.
+  await writeFile(join(dir, 'meta.json'), JSON.stringify({ ...meta, files: undefined }));
+  assert.equal((await jobs.readMeta('app', 'T-1', 1)).files, undefined);
 });

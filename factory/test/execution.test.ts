@@ -88,8 +88,8 @@ test('full cycle in a worktree: start, awaiting_review with Report, Patch and fi
   assert.deepEqual(meta.changed_files, [{ path: 'README.md', added: 1, removed: 1 }, { path: 'src/new.ts', added: 1, removed: 0 }]);
   // The structured file list (SF-024): status, sensitivity and counts.
   assert.deepEqual(meta.files, [
-    { path: 'README.md', status: 'modified', sensitive: 'no', additions: 1, deletions: 1 },
-    { path: 'src/new.ts', status: 'added', sensitive: 'no', additions: 1, deletions: 0 },
+    { path: 'README.md', status: 'modified', sensitive: 'no', scope: 'none', additions: 1, deletions: 1 },
+    { path: 'src/new.ts', status: 'added', sensitive: 'no', scope: 'none', additions: 1, deletions: 0 },
   ]);
 
   const fix = await call(served, 'request_fix', { workspace: 'app', ticket: 'DEMO-1', content: '1. src/new.ts: export a value.' });
@@ -393,6 +393,31 @@ test('sandbox placeholders: the Patch leaves them out, they are removed from the
   await assert.rejects(stat(worktree), { code: 'ENOENT' });
   assert.equal(git(repo, 'status', '--porcelain', '--untracked-files=all').replace(/^\?\? \.software-factory\/.*\n/gm, ''), '');
   assert.equal(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'main');
+  await stop(served);
+});
+
+test("the Task's scope (SF-053): mark_clean needs the paths outside it acknowledged, with the undeclared sensitive ones; the Report and sf status name them", async () => {
+  const env = await newEnv('scope');
+  const repo = await newRepo(env, 'scope-repo', true);
+  const content = `---\nticket: O-2\ntitle: Scoped change\nbase: main\nscope: [README.md, src/**]\n---\n\n# O-2: Scoped change\n\nChange things.\n`;
+  await writeTask({ name: 'app', readCheckout: repo, workCheckout: repo }, 'O-2', content, new JobStore(env.state));
+  await script(env, [
+    { write: { 'README.md': 'x\n', 'src/a.ts': 'a\n', 'notes.txt': 'n\n', '.editorconfig': 'root = true\n' }, text: 'iteration 1' },
+    { write: { '.software-factory/O-2.mr.md': mrText('feat(O-2): Scoped change') }, text: 'prepared' },
+  ]);
+  const served = await serve(env);
+  await call(served, 'start', { workspace: 'app', ticket: 'O-2' });
+  const first = await waitFor(served, 'O-2', 'awaiting_review', 1);
+  // .editorconfig is undeclared sensitive and out of scope: listed under both headings.
+  assert.match(first.report, /\n## Changed files\n\n### Sensitive\n\n- \.editorconfig \(undeclared\)\n\n### Outside the Task's scope\n\n- \.editorconfig\n- notes\.txt\n\n\| Path/);
+  const one = await runCli(env, ['status', 'app', 'O-2']);
+  assert.match(one.stdout, /\nsensitive: \.editorconfig \(undeclared\)\nout of scope: \.editorconfig, notes\.txt\ndeleted: none\n$/);
+  const unacknowledged = await refused(served, 'mark_clean', { workspace: 'app', ticket: 'O-2' });
+  assert.equal(unacknowledged.code, 'sensitive_unacknowledged');
+  assert.equal(unacknowledged.message, "Undeclared sensitive path(s) in the reviewed iteration: .editorconfig. Path(s) outside the Task's scope in the reviewed iteration: .editorconfig, notes.txt. Each must be named in the accepted sensitive paths with the reason it is needed; otherwise it is a fix item.");
+  assert.equal((await refused(served, 'mark_clean', { workspace: 'app', ticket: 'O-2', sensitive: ['.editorconfig'] })).message, "Path(s) outside the Task's scope in the reviewed iteration: notes.txt. Each must be named in the accepted sensitive paths with the reason it is needed; otherwise it is a fix item.");
+  assert.equal((await call(served, 'mark_clean', { workspace: 'app', ticket: 'O-2', sensitive: ['.editorconfig', 'notes.txt'] })).state, 'preparing_mr');
+  await waitFor(served, 'O-2', 'ready_for_human_review', 1);
   await stop(served);
 });
 

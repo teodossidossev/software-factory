@@ -71,12 +71,17 @@ ticket: PROJ-123
 title: Short title of the subtask
 base: master          # branch to start from; a feature branch if this depends on unmerged work
 may_touch: [package.json, .github/**]   # optional: sensitive paths or globs this ticket is expected to change
+scope: [src/export/**, test/export.test.ts, README.md]   # optional: every file this ticket is expected to create, modify or delete
 ---
 
 # PROJ-123: Short title
 
 <The task: what to build, where, the decisions made in planning, acceptance criteria,
 what is out of scope. Reference repository standards by path instead of restating them.>
+
+## Files
+
+<Each file the ticket changes, as Create / Modify / Delete, tests and docs included.>
 
 ## Review brief
 
@@ -86,6 +91,12 @@ what is out of scope. Reference repository standards by path instead of restatin
 
 <Written by the factory from a reviewer's fix verdict: each item states file, what is wrong, what is expected.>
 ```
+
+`scope:` (paths or globs, in the forms of `may_touch`: `[a, b/**]` or `a, b`) is the Task's file
+boundary: the files of the `## Files` list, tests and docs included. A path in `may_touch` is in
+scope too. When the Task declares a scope, every changed path outside it is marked "outside the
+Task's scope" in the Report and for the reviewers, and stays only when a reviewer accepts it with
+a reason tied to the Task; otherwise it is a major fix item. Without `scope:` nothing is checked.
 
 Always write a `## Review brief`. The reviewers read it with the rest of the Task file; the
 Implementer sees it too, so it states checks and reasons, not instructions. The `## Fix N`
@@ -164,6 +175,9 @@ with every iteration. The Context owner does not review.
 - An undeclared sensitive path (one the Task file's `may_touch` does not name) stays only when
   the change needs it and the verdict says why; otherwise it is a major fix item, whatever
   severity the reviewer gives it.
+- A path outside the Task's scope (one neither its `scope` nor its `may_touch` names) needs a
+  reason tied to the Task: the verdict names it in `accepted_sensitive` and says why in its
+  summary; otherwise it is a major fix item, whatever severity the reviewer gives it.
 - Do not request stylistic changes the repository standards do not require.
 
 ## Git rules

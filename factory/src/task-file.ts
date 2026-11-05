@@ -48,11 +48,24 @@ export function parseFrontMatter(content: string): Map<string, string> | undefin
   return fields;
 }
 
-// The paths or globs the Task file declares it is expected to change: `may_touch:` in the front
-// matter, as "[a, b]" or "a, b" (comma or whitespace separated).
-export function mayTouch(fields: Map<string, string>): string[] {
-  const raw = (fields.get('may_touch') ?? '').trim().replace(/^\[|\]$/g, '');
+// A front matter list of paths or globs, as "[a, b]" or "a, b" (comma or whitespace separated).
+function pathList(fields: Map<string, string>, key: string): string[] {
+  const raw = (fields.get(key) ?? '').trim().replace(/^\[|\]$/g, '');
   return raw.split(/[,\s]+/).map((entry) => entry.trim().replace(/^(["'])(.*)\1$/, '$2')).filter((entry) => entry !== '');
+}
+
+// The sensitive paths or globs the Task file declares it is expected to change: `may_touch:` in
+// the front matter.
+export function mayTouch(fields: Map<string, string>): string[] {
+  return pathList(fields, 'may_touch');
+}
+
+// The file scope of the Task (SF-053): `scope:` in the front matter, in the forms of may_touch, the
+// files the ticket is expected to create, modify or delete, tests and docs included. Undefined when
+// the Task declares none (no field, or an empty list): then nothing is checked.
+export function taskScope(fields: Map<string, string>): string[] | undefined {
+  const scope = pathList(fields, 'scope');
+  return scope.length > 0 ? scope : undefined;
 }
 
 // The skeleton of a ticket created from the dashboard (SF-028), and the draft of SF-025: the

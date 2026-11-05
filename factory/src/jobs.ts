@@ -79,12 +79,15 @@ export interface ChangedFile {
 }
 
 // One file of an iteration (SF-024): its status against the base, whether it is a sensitive
-// path and whether the Task file declared it, and its line counts.
+// path and whether the Task file declared it, whether it is in the Task's file scope (SF-053),
+// and its line counts.
 export interface FileChange {
   path: string;
   status: 'added' | 'modified' | 'deleted' | 'renamed';
   from?: string;
   sensitive: 'declared' | 'undeclared' | 'no';
+  // none when the Task declares no scope; a record written before SF-053 reads as none.
+  scope: 'in' | 'out' | 'none';
   additions: number;
   deletions: number;
 }
@@ -366,7 +369,9 @@ export class JobStore {
 
   async readMeta(workspace: string, ticket: string, number: number): Promise<IterationMeta> {
     const dir = join(this.dir(workspace, ticket), 'iterations', String(number).padStart(3, '0'));
-    return JSON.parse(await readFile(join(dir, 'meta.json'), 'utf8')) as IterationMeta;
+    const meta = JSON.parse(await readFile(join(dir, 'meta.json'), 'utf8')) as IterationMeta;
+    // A file list written before SF-053 has no scope: none.
+    return meta.files === undefined ? meta : { ...meta, files: meta.files.map((change) => ({ ...change, scope: change.scope ?? 'none' })) };
   }
 
   // The directory of one published iteration.

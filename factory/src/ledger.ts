@@ -62,10 +62,15 @@ export interface FixItem {
 }
 
 // The problem of the factory's item for an undeclared sensitive path a reviewer did not accept
-// (src/review.ts, sensitiveItem). Such an entry is settled by the reviewers' acceptance of the
-// path, not by the Report: the factory raises it again each round while it stands.
+// (src/review.ts, sensitiveItem), and of its item for a path outside the Task's scope (SF-053,
+// scopeItem). Such an entry is settled by the reviewers' acceptance of the path, not by the
+// Report: the factory raises it again each round while it stands.
 export const SENSITIVE_PROBLEM = 'Undeclared sensitive path.';
-const isSensitive = (entry: { problem: string }): boolean => entry.problem === SENSITIVE_PROBLEM;
+export const SCOPE_PROBLEM = "Outside the Task's scope.";
+export const FACTORY_PROBLEMS: readonly string[] = [SENSITIVE_PROBLEM, SCOPE_PROBLEM];
+const isFactory = (entry: { problem: string }): boolean => FACTORY_PROBLEMS.includes(entry.problem);
+// The key of a factory item or entry: its path and problem.
+const factoryKey = (entry: { path: string; problem: string }): string => `${entry.problem}\n${entry.path}`;
 
 const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
 const blocks = (entry: { severity: Severity }): boolean => entry.severity !== 'nit';
@@ -235,7 +240,8 @@ export interface VerdictInput {
   ledger: LedgerEntry[];
   // The reviewer's items.
   items: ReviewItem[];
-  // The factory's own blocking items (the undeclared sensitive paths not accepted).
+  // The factory's own blocking items (the undeclared sensitive paths and the paths outside the
+  // Task's scope not accepted).
   extra: ReviewItem[];
   reviewer: string;
   // The reviewed iteration; a fix is Fix <iteration>.
@@ -308,18 +314,18 @@ export function applyVerdict(input: VerdictInput): Applied {
     return named ?? ledger.find((candidate) => candidate.status === 'accepted_risk' && sameText(candidate, item));
   };
   const name = reviewerName(input.reviewer);
-  // The factory's own items (undeclared sensitive paths not accepted) go through the rules like the
-  // reviewer's: one whose path has an entry reopens it. They stay out of rule 4 (no caused_by) and
-  // keep their own reason.
+  // The factory's own items (undeclared sensitive paths and paths outside the Task's scope not
+  // accepted) go through the rules like the reviewer's: one whose path has an entry of the same
+  // problem reopens it. They stay out of rule 4 (no caused_by) and keep their own reason.
   const factoryItems = new Set<ReviewItem>();
   const extras = input.extra.map((raised) => {
-    const entry = ledger.find((candidate) => isSensitive(candidate) && candidate.path === raised.path);
+    const entry = ledger.find((candidate) => factoryKey(candidate) === factoryKey(raised));
     const reopening = entry === undefined ? raised : { ...raised, reopens: entry.id };
     factoryItems.add(reopening);
     return reopening;
   });
   const reasonFor = (item: ReviewItem): string => (factoryItems.has(item)
-    ? `${name} does not accept the undeclared sensitive path ${oneLine(item.path)} (it is not in its accepted_sensitive).`
+    ? `${name} does not accept the ${item.problem === SCOPE_PROBLEM ? "path outside the Task's scope" : 'undeclared sensitive path'} ${oneLine(item.path)} (it is not in its accepted_sensitive).`
     : reasonOf(item));
 
   // 1. The user decided: an accepted risk is never raised again, whatever its severity.
@@ -395,10 +401,10 @@ export function applyVerdict(input: VerdictInput): Applied {
   }
 
   // 5. The verdict as before, with the ledger's open blocking entries and the user's fixes. An
-  // open sensitive-path entry whose path is no longer raised is fixed.
-  const raised = new Set(input.extra.map((extra) => extra.path));
+  // open entry of the factory's whose path is no longer raised (with the same problem) is fixed.
+  const raised = new Set(input.extra.map(factoryKey));
   for (const entry of ledger) {
-    if (isSensitive(entry) && entry.status === 'open' && !raised.has(entry.path) && !carried.has(entry.id)) {
+    if (isFactory(entry) && entry.status === 'open' && !raised.has(factoryKey(entry)) && !carried.has(entry.id)) {
       Object.assign(entry, { status: 'fixed', response: 'The reviewer accepted the path, or the change no longer has it.' });
     }
   }
@@ -418,7 +424,7 @@ export function applyVerdict(input: VerdictInput): Applied {
   if (blocking.length === 0 && pending.filter((entry) => entry.status === 'user_fix' || blocks(entry)).length === 0) {
     return { kind: 'clean', ledger, dropped };
   }
-  // The id of an item that reopened an entry (step 3) or raises a sensitive path again, or a new one.
+  // The id of an item that reopened an entry (step 3) or raises a factory item again, or a new one.
   const fixItem = (item: ReviewItem): FixItem => {
     const id = [...carried].find(([, carriedItem]) => carriedItem === item)?.[0];
     return id !== undefined ? { id, item } : assign(item);

@@ -11,8 +11,10 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
 import { handbookSection } from '../src/prompts.js';
-import { actedVerdict, decide, fixContent, REVIEW_DENIED_TOOLS, REVIEW_SCHEMA, type ReviewItem, reviewPrompt, reviewSessionOptions, sensitiveItem, uniqueNits } from '../src/review.js';
+import type { FileChange } from '../src/jobs.js';
+import { actedVerdict, decide, fixContent, REVIEW_DENIED_TOOLS, REVIEW_SCHEMA, type ReviewItem, reviewPrompt, reviewSessionOptions, scopeItem, sensitiveItem, unacceptedItems, uniqueNits } from '../src/review.js';
 import { loadHandbook } from '../src/server.js';
+import { writeTask } from '../src/task-file.js';
 import { act, fetchRaw } from './support/dashboard-client.js';
 import { call, type Env, FAKE, fakeLog, git, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor } from './support/harness.js';
 
@@ -126,7 +128,7 @@ test('fix, then clean: the Fix section from the items, the next iteration, Clean
     assert.ok(first!.includes(handbookSection((await loadHandbook()).text, '## Review rules')));
     assert.ok(first!.includes(`<task_file path=".software-factory/R-1.md">\n${task('R-1', 'Greet the reader').trimEnd()}\n</task_file>`));
     assert.ok(first!.includes('<report>\nReport of iteration 1\n'));
-    assert.ok(first!.includes('<sensitive_and_deleted_paths>\nNone.\n</sensitive_and_deleted_paths>'));
+    assert.ok(first!.includes('<marked_paths>\nNone.\n</marked_paths>'));
     assert.match(first!, /<patch>\ndiff --git a\/README\.md b\/README\.md\n[\s\S]*\n\+hello world\n<\/patch>$/);
     assert.match(second!, /^Code review of iteration 2 of ticket R-1\. /);
     assert.ok(second!.includes(`${FIX_SECTION.trimEnd()}\n</task_file>`));
@@ -188,7 +190,7 @@ test('clean with an undeclared sensitive path it does not accept becomes a fix; 
       '\n\n## Fix 1\n\nReview by Claude: The greeting is right.\n\n1. [R1, major] `package.json`: Undeclared sensitive path. Expected: Remove it, or justify it in the Report.\n',
     ));
     const [first] = await reviewLog(env);
-    assert.ok(first!.prompt.includes('<sensitive_and_deleted_paths>\n- sensitive, undeclared: package.json\n</sensitive_and_deleted_paths>'));
+    assert.ok(first!.prompt.includes('<marked_paths>\n- sensitive, undeclared: package.json\n</marked_paths>'));
     assert.equal(git(repo, 'show', '--name-only', '--format=', 'S-1-add-a-script').trim(), 'a.txt\npackage.json');
     // The review's own verdict is what the event records, with the one acted on when it differs.
     assert.deepEqual((await eventsOf(env, 'S-1')).filter((record) => record.type === 'review').map((record) => [record.iteration, record.verdict, record.effective]), [[1, 'clean', 'fix'], [2, 'clean', undefined]]);
@@ -234,6 +236,78 @@ test('the verdict rule: fix only with a blocker or major item or an unaccepted s
   ].join('\n'));
   // Deduplicated by path and problem text across both reviewers.
   assert.deepEqual(uniqueNits([{ items: [...nits, major('a.txt', 'Wording.')] }, { items: [nit('a.txt', ' Wording. ', 'Other.'), nit('a.txt', 'Other.')] }]), [...nits, nit('a.txt', 'Other.')]);
+});
+
+// SF-053: the Task's file scope.
+const change = (path: string, marks: Partial<FileChange> = {}): FileChange => ({ path, status: 'added', sensitive: 'no', scope: 'in', additions: 1, deletions: 0, ...marks });
+
+test("the scope rule: a path outside the Task's scope not accepted is a major fix item; accepted, or with no scope, it is none; one that is also undeclared sensitive raises both items, and one acceptance settles both", () => {
+  const files = [
+    change('src/a.ts'), change('docs/x.md', { scope: 'out' }), change('package.json', { sensitive: 'undeclared', scope: 'out' }),
+    change('old.ts', { status: 'deleted', scope: 'out' }), change('b.ts', { scope: 'none' }),
+  ];
+  const outside = scopeItem('docs/x.md');
+  assert.deepEqual(outside, { path: 'docs/x.md', problem: "Outside the Task's scope.", expected: 'Remove the change, or justify it in the Report.', severity: 'major' });
+  assert.deepEqual(unacceptedItems(files, []), [sensitiveItem('package.json'), outside, scopeItem('package.json'), scopeItem('old.ts')]);
+  assert.deepEqual(unacceptedItems(files, ['docs/x.md', 'package.json']), [scopeItem('old.ts')]);
+  assert.deepEqual(unacceptedItems(files, ['docs/x.md', 'package.json', 'old.ts']), []);
+  assert.deepEqual(unacceptedItems(files.map((file) => ({ ...file, scope: 'none' as const })), []), [sensitiveItem('package.json')]);
+  const nits = [nit('a.txt', 'Wording.')];
+  assert.deepEqual(decide({ items: nits }, [outside]), { verdict: 'fix', items: [outside, ...nits] });
+  assert.equal(fixContent('Clean.', [{ id: 'R1', item: outside }]), "Review by Claude: Clean.\n\n1. [R1, major] `docs/x.md`: Outside the Task's scope. Expected: Remove the change, or justify it in the Report.");
+});
+
+test("the review prompt marks the paths outside the Task's scope in <marked_paths>, the rule asks for a reason tied to the Task, and the schema names them in accepted_sensitive", async () => {
+  const files = [change('src/a.ts'), change('docs/x.md', { scope: 'out' }), change('package.json', { sensitive: 'declared' }), change('old.ts', { status: 'deleted', scope: 'out' })];
+  const prompt = reviewPrompt({ ticket: 'R-1', iteration: 1, task: 't', report: 'r', patch: Buffer.from('p'), patchTruncated: false, files, handbook: (await loadHandbook()).text });
+  assert.ok(prompt.includes([
+    '<marked_paths>', '- sensitive, declared by may_touch: package.json', "- outside the Task's scope: docs/x.md", "- outside the Task's scope: old.ts", '- deleted: old.ts', '</marked_paths>',
+  ].join('\n')), prompt);
+  assert.ok(prompt.includes("- An undeclared sensitive path, or a path outside the Task's scope, stays only when you name it in accepted_sensitive and justify it in summary; otherwise it becomes a major fix item, whatever severity you give it. Accept a path outside the scope only for a reason tied to the Task."));
+  const none = reviewPrompt({ ticket: 'R-1', iteration: 1, task: 't', report: 'r', patch: Buffer.from('p'), patchTruncated: false, files: [change('b.ts', { scope: 'none' })], handbook: (await loadHandbook()).text });
+  assert.ok(none.includes('<marked_paths>\nNone.\n</marked_paths>'));
+  const properties = REVIEW_SCHEMA.properties as Record<string, { description?: string }>;
+  assert.equal(properties.accepted_sensitive?.description, 'The undeclared sensitive or out-of-scope paths you accept, each justified in summary.');
+});
+
+test("a path outside the Task's scope the review does not accept becomes a major fix item; accepted and justified, Clean passes it on; may_touch counts as in scope", async () => {
+  const env = await newEnv('review-scope', { SF_REVIEW: 'on' });
+  const repo = await newRepo(env, 'review-scope-repo', false);
+  const content = '---\nticket: O-1\ntitle: Greet the reader\nbase: main\nmay_touch: [package.json]\nscope: [README.md, test/**]\n---\n\n# O-1: Greet the reader\n\nChange the README.\n';
+  await writeTask({ name: 'app', readCheckout: repo, workCheckout: repo }, 'O-1', content, new JobStore(env.state));
+  await script(env, [
+    { write: { 'README.md': 'hello reader\n', 'test/readme.test.ts': 't\n', 'package.json': '{}\n', 'notes.txt': 'n\n' }, text: 'iteration 1' },
+    { text: 'notes.txt holds the wording the README cites.' },
+    { write: { '.software-factory/O-1.mr.md': mrText('feat(O-1): Greet the reader') }, text: 'prepared' },
+  ]);
+  const accepted = { ...CLEAN, summary: 'notes.txt is accepted: the README cites it.', accepted_sensitive: ['notes.txt'] };
+  await reviewScript(env, [{ output: CLEAN }, { output: accepted }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'O-1' });
+    const ready = await waitFor(served, 'O-1', 'ready_for_human_review', 2);
+    assert.equal(ready.review.summary, accepted.summary);
+    assert.ok((await taskFile(repo, 'O-1')).endsWith(
+      "\n\n## Fix 1\n\nReview by Claude: The greeting is right.\n\n1. [R1, major] `notes.txt`: Outside the Task's scope. Expected: Remove the change, or justify it in the Report.\n",
+    ));
+    const store = new JobStore(env.state);
+    const meta = await store.readMeta('app', 'O-1', 1);
+    assert.deepEqual(meta.files!.map((file) => [file.path, file.sensitive, file.scope]), [
+      ['README.md', 'no', 'in'], ['notes.txt', 'no', 'out'], ['package.json', 'declared', 'in'], ['test/readme.test.ts', 'no', 'in'],
+    ]);
+    const report = (await store.readIteration('app', 'O-1', 1)).report;
+    assert.match(report, /\n### Outside the Task's scope\n\n- notes\.txt\n\n/);
+    const [first] = await reviewLog(env);
+    assert.ok(first!.prompt.includes("<marked_paths>\n- sensitive, declared by may_touch: package.json\n- outside the Task's scope: notes.txt\n</marked_paths>"), first!.prompt);
+    const one = await runCli(env, ['status', 'app', 'O-1']);
+    assert.match(one.stdout, /\nsensitive: package\.json\nout of scope: notes\.txt\ndeleted: none\n$/);
+    // Accepted: the ledger entry is settled as fixed, and the branch holds the path.
+    assert.deepEqual((await store.readLedger('app', 'O-1')).map((entry) => [entry.id, entry.problem, entry.status]), [['R1', "Outside the Task's scope.", 'fixed']]);
+    assert.equal(git(repo, 'show', '--name-only', '--format=', 'O-1-greet-the-reader').trim(), 'README.md\nnotes.txt\npackage.json\ntest/readme.test.ts');
+    assert.deepEqual((await eventsOf(env, 'O-1')).filter((record) => record.type === 'review').map((record) => [record.iteration, record.verdict, record.effective]), [[1, 'clean', 'fix'], [2, 'clean', undefined]]);
+  } finally {
+    await stop(served);
+  }
 });
 
 test('a review or gate stored before severity existed reads with every item major', async () => {

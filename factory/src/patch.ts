@@ -5,7 +5,7 @@ import { runGit, runGitToFile } from './git.js';
 import type { ChangedFile, FileChange } from './jobs.js';
 import { isPlaceholder } from './placeholders.js';
 import { isForbidden } from './repo-files.js';
-import { type Sensitivity, sensitivityOf } from './rules.js';
+import { type Marks, sensitivityOf } from './rules.js';
 import { TASK_DIR } from './task-file.js';
 
 export const MAX_PATCH_BYTES = 2 * 1024 * 1024;
@@ -116,14 +116,19 @@ export function changedFiles(patch: string): { files: ChangedFile[]; submodules:
 }
 
 // Appended to the Implementer's report by the factory. With the structured file list the
-// sensitive paths (declared or undeclared by may_touch) and the deleted paths come first, each
-// under its own heading, so a reviewer never folds them into the rest.
+// sensitive paths (declared or undeclared by may_touch), the paths outside the Task's scope and
+// the deleted paths come first, each under its own heading, so a reviewer never folds them into
+// the rest.
 export function changedFilesSection(files: ChangedFile[], truncated: boolean, changes: FileChange[] = []): string {
   const lines = ['## Changed files', ''];
   const sensitive = changes.filter((change) => change.sensitive !== 'no');
+  const outside = changes.filter((change) => change.scope === 'out');
   const deleted = changes.filter((change) => change.status === 'deleted');
   if (sensitive.length > 0) {
     lines.push('### Sensitive', '', ...sensitive.map((change) => `- ${change.path} (${change.sensitive}${change.status === 'deleted' ? ', deleted' : ''})`), '');
+  }
+  if (outside.length > 0) {
+    lines.push("### Outside the Task's scope", '', ...outside.map((change) => `- ${change.path}${change.status === 'deleted' ? ' (deleted)' : ''}`), '');
   }
   if (deleted.length > 0) {
     lines.push('### Deleted', '', ...deleted.map((change) => `- ${change.path}`), '');
@@ -145,20 +150,31 @@ export function changedFilesSection(files: ChangedFile[], truncated: boolean, ch
   return lines.join('\n');
 }
 
-// The sensitive and the deleted paths of an iteration as the notification lines carry them.
+// The sensitive, the out-of-scope (only when the Task declares a scope) and the deleted paths of
+// an iteration as sf status prints them.
 export function fileSummaryLines(changes: FileChange[]): string[] {
+  const list = (paths: string[]): string => (paths.length === 0 ? 'none' : paths.join(', '));
   const sensitive = changes.filter((change) => change.sensitive !== 'no').map((change) => `${change.path}${change.sensitive === 'undeclared' ? ' (undeclared)' : ''}`);
+  const scoped = changes.some((change) => change.scope !== 'none');
+  const outside = changes.filter((change) => change.scope === 'out').map((change) => change.path);
   const deleted = changes.filter((change) => change.status === 'deleted').map((change) => change.path);
-  return [`sensitive: ${sensitive.length === 0 ? 'none' : sensitive.join(', ')}`, `deleted: ${deleted.length === 0 ? 'none' : deleted.join(', ')}`];
+  return [`sensitive: ${list(sensitive)}`, ...(scoped ? [`out of scope: ${list(outside)}`] : []), `deleted: ${list(deleted)}`];
+}
+
+// The same summaries on one line, as the notifications carry them: a body holds three lines, so
+// with the branch and the MR title before it none of the marked paths is cut (SF-053).
+export function notificationLine(changes: FileChange[]): string {
+  return fileSummaryLines(changes).join('; ');
 }
 
 const STATUS_LETTERS: Record<string, FileChange['status']> = { A: 'added', M: 'modified', D: 'deleted', T: 'modified' };
 
 // The structured file list of an iteration (SF-024): the status of every changed tracked file
 // (`git diff --name-status`) and every untracked file as added, the line counts from the Patch
-// table (0 for a file the Patch omits), and the sensitivity from the rules and may_touch.
+// table (0 for a file the Patch omits), and the marks of each path (marksOf): the sensitivity from
+// the rules and may_touch, and the scope from the Task's scope and may_touch (SF-053).
 export async function fileChanges(
-  cwd: string, baseCommit: string, counted: ChangedFile[], sensitivity: (path: string) => Sensitivity,
+  cwd: string, baseCommit: string, counted: ChangedFile[], marks: (path: string) => Marks,
 ): Promise<FileChange[]> {
   const { tracked, untracked } = await changedPaths(cwd, baseCommit);
   const statuses = new Map<string, FileChange['status']>();
@@ -173,7 +189,7 @@ export async function fileChanges(
   for (const path of [...tracked, ...untracked]) {
     const file = counts.get(path);
     changes.push({
-      path, status: statuses.get(path) ?? 'added', sensitive: sensitivity(path),
+      path, status: statuses.get(path) ?? 'added', ...marks(path),
       additions: file?.added ?? 0, deletions: file?.removed ?? 0,
     });
   }

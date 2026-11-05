@@ -11,6 +11,7 @@ import { test } from 'node:test';
 import { GATE_SCHEMA, gateArgs } from '../src/gate.js';
 import { WITHHELD } from '../src/redact.js';
 import { JobStore } from '../src/jobs.js';
+import { writeTask } from '../src/task-file.js';
 import { fetchRaw } from './support/dashboard-client.js';
 import {
   call, codexLog, codexScript, type Env, fakeCodex, fakeLog, git, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor,
@@ -487,6 +488,39 @@ test('severity: a gate fix with nits only is still a fix when it leaves an undec
     assert.deepEqual((await eventsOf(env, 'G-11')).filter((record) => record.type === 'review').map((record) => [record.iteration, record.reviewer, record.verdict, record.effective]), [
       [1, 'claude', 'clean', undefined], [1, 'codex', 'fix', undefined], [2, 'claude', 'clean', undefined], [2, 'codex', 'clean', undefined],
     ]);
+  } finally {
+    await stop(served);
+  }
+});
+
+test("scope (SF-053): a gate that does not accept a path outside the Task's scope makes it a major fix item; accepted by both, Clean passes it on; the gate's prompt marks it", async () => {
+  const env = await newEnv('gate-scope', gateEnv());
+  const repo = await newRepo(env, 'gate-scope-repo', false);
+  const content = '---\nticket: G-12\ntitle: Greet the reader\nbase: main\nscope: README.md\n---\n\n# G-12: Greet the reader\n\nChange the README.\n';
+  await writeTask({ name: 'app', readCheckout: repo, workCheckout: repo }, 'G-12', content, new JobStore(env.state));
+  await script(env, [
+    { write: { 'README.md': 'hello reader\n', 'notes.txt': 'n\n' }, text: 'iteration 1' },
+    { text: 'notes.txt holds the wording the README cites.' },
+    { write: { '.software-factory/G-12.mr.md': mrText('feat(G-12): Greet the reader') }, text: 'prepared' },
+  ]);
+  const accepted = { ...CLAUDE_CLEAN, summary: 'notes.txt is cited by the README.', accepted_sensitive: ['notes.txt'] };
+  await reviewScript(env, [{ output: accepted }, { output: accepted }]);
+  await codexScript(env, [{ output: GATE_CLEAN }, { output: { ...GATE_CLEAN, accepted_sensitive: ['notes.txt'] } }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'G-12' });
+    await waitFor(served, 'G-12', 'ready_for_human_review', 2);
+    assert.ok((await taskFile(repo, 'G-12')).endsWith([
+      '## Fix 1', '', 'Review by Codex: Codex found it right.', '',
+      "1. [R1, major] `notes.txt`: Outside the Task's scope. Expected: Remove the change, or justify it in the Report.", '',
+    ].join('\n')));
+    const [first] = await codexLog(env);
+    assert.ok(first!.prompt.includes("<marked_paths>\n- outside the Task's scope: notes.txt\n</marked_paths>"), first!.prompt);
+    assert.equal((await new JobStore(env.state).read('app', 'G-12'))!.gate_fixes, 1);
+    assert.deepEqual((await eventsOf(env, 'G-12')).filter((record) => record.type === 'review').map((record) => [record.iteration, record.reviewer, record.verdict, record.effective]), [
+      [1, 'claude', 'clean', undefined], [1, 'codex', 'clean', 'fix'], [2, 'claude', 'clean', undefined], [2, 'codex', 'clean', undefined],
+    ]);
+    assert.equal(git(repo, 'show', '--name-only', '--format=', 'G-12-greet-the-reader').trim(), 'README.md\nnotes.txt');
   } finally {
     await stop(served);
   }

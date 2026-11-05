@@ -444,6 +444,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 .file-row .file-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; padding: 1px 6px; border-radius: 4px; background: var(--panel-2); color: var(--muted); }
 .file-row .file-label.undeclared { background: var(--del-bg); color: var(--del); }
 .file-row .file-label.declared { background: var(--warn-bg); color: var(--warn); }
+.file-row .file-label.out-of-scope { background: var(--warn-bg); color: var(--warn); }
 .file-row .file-label.deleted { background: var(--panel-2); color: var(--muted); }
 .file-row .file-counts { font-family: var(--mono); font-size: 12px; }
 .file-row .file-counts .add { color: var(--add); }

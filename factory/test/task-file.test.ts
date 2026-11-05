@@ -8,7 +8,7 @@ import { after, before, test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
 import { JobStore } from '../src/jobs.js';
 import type { Workspace } from '../src/registry.js';
-import { checkTaskContent, MAX_TASK_BYTES, writeTask } from '../src/task-file.js';
+import { checkTaskContent, MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskScope, writeTask } from '../src/task-file.js';
 
 const VALID = '---\nticket: PROJ-1\ntitle: Export as CSV\nbase: master\n---\n\n# PROJ-1: Export as CSV\n';
 
@@ -113,4 +113,17 @@ test('writeTask refuses bad tickets and symlinks on the way', async () => {
   await symlink(join(elsewhere, 'target.md'), join(linked.workCheckout, '.software-factory', 'PROJ-1.md'));
   await assert.rejects(writeTask(linked, 'PROJ-1', VALID, jobs), { code: 'forbidden_path' });
   assert.equal(await readFile(join(elsewhere, 'target.md'), 'utf8'), 'keep');
+});
+
+test('taskScope reads scope: in the forms of may_touch; no field or an empty list declares none (SF-053)', () => {
+  const fields = (text: string) => parseFrontMatter(`---\nticket: T-1\ntitle: t\nbase: main\n${text}\n---\n`)!;
+  assert.deepEqual(taskScope(fields('scope: [src/a.ts, test/**]')), ['src/a.ts', 'test/**']);
+  assert.deepEqual(taskScope(fields('scope: src/a.ts, "docs/*.md"  # the files of the ticket')), ['src/a.ts', 'docs/*.md']);
+  assert.deepEqual(taskScope(fields('scope: src/a.ts README.md')), ['src/a.ts', 'README.md']);
+  assert.equal(taskScope(fields('may_touch: [package.json]')), undefined);
+  assert.equal(taskScope(fields('scope:')), undefined);
+  assert.equal(taskScope(fields('scope: []')), undefined);
+  // Parsed next to may_touch, independently.
+  const both = fields('may_touch: [package.json]\nscope: [src/**]');
+  assert.deepEqual([mayTouch(both), taskScope(both)], [['package.json'], ['src/**']]);
 });

@@ -804,10 +804,14 @@ function renderFiles(meta) {
   $('no-files').hidden = files !== null && files.length > 0;
   $('no-files').textContent = files === null ? 'This iteration was published before the file list existed; the Report lists its files.' : 'No files changed.';
   const undeclared = (files ?? []).filter((file) => file.sensitive === 'undeclared').length;
+  const outside = (files ?? []).filter((file) => file.scope === 'out').length;
   const deleted = (files ?? []).filter((file) => file.status === 'deleted').length;
   const parts = [`Files ${(files ?? []).length}`];
   if (undeclared > 0) {
     parts.push(`${undeclared} sensitive undeclared`);
+  }
+  if (outside > 0) {
+    parts.push(`${outside} out of scope`);
   }
   if (deleted > 0) {
     parts.push(`${deleted} deleted`);
@@ -841,6 +845,10 @@ function fileRow(meta, file) {
   const labels = el('span', 'file-labels');
   if (file.sensitive !== 'no') {
     labels.append(el('span', `file-label ${file.sensitive}`, `sensitive, ${file.sensitive}`));
+  }
+  // Outside the Task's scope (SF-053); a file of a list without scope has none.
+  if (file.scope === 'out') {
+    labels.append(el('span', 'file-label out-of-scope', 'out of scope'));
   }
   if (file.status === 'deleted') {
     labels.append(el('span', 'file-label deleted', 'deleted'));

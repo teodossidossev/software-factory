@@ -1,12 +1,12 @@
 // The Claude review of one published iteration (SF-038): a fresh, read-only Agent SDK query() in
-// the job's worktree, with the Task file, the Report, the Patch and the sensitive and deleted paths
-// in its prompt and a structured verdict as its output. Knows nothing about job states; the
-// Execution applies the verdict.
+// the job's worktree, with the Task file, the Report, the Patch and the marked paths (sensitive,
+// outside the Task's scope, deleted) in its prompt and a structured verdict as its output. Knows
+// nothing about job states; the Execution applies the verdict.
 import { dirname, resolve } from 'node:path';
 import { type Options, query, type SandboxSettings, type SDKMessage, type SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
 import * as z from 'zod/v4';
 import type { FileChange } from './jobs.js';
-import { type FixItem, fixItemLine, LEDGER_REF, type LedgerEntry, SENSITIVE_PROBLEM, settledLines } from './ledger.js';
+import { type FixItem, fixItemLine, LEDGER_REF, type LedgerEntry, SCOPE_PROBLEM, SENSITIVE_PROBLEM, settledLines } from './ledger.js';
 import { handbookSection } from './prompts.js';
 import { ENV_FILE_RULES } from './rules.js';
 import { sessionEnvironment } from './session.js';
@@ -41,9 +41,10 @@ const reviewItem = z.strictObject({
 });
 export const reviewOutput = z.strictObject({
   verdict: z.enum(['clean', 'fix']),
-  summary: z.string().describe('Why, including every undeclared sensitive path accepted.'),
+  summary: z.string().describe('Why, including every undeclared sensitive or out-of-scope path accepted.'),
   items: z.array(reviewItem),
-  accepted_sensitive: z.array(z.string()).describe('The undeclared sensitive paths you accept, each justified in summary.'),
+  // The name stays for stored records; it holds the out-of-scope paths accepted too (SF-053).
+  accepted_sensitive: z.array(z.string()).describe('The undeclared sensitive or out-of-scope paths you accept, each justified in summary.'),
 });
 // An item as the reviewers give it and the records keep it: reopens and caused_by may be absent
 // (verdicts and records before SF-052).
@@ -87,6 +88,7 @@ function pathLines(files: FileChange[] | undefined): string[] {
   const lines = [
     ...files.filter((change) => change.sensitive === 'undeclared').map((change) => `- sensitive, undeclared: ${change.path}`),
     ...files.filter((change) => change.sensitive === 'declared').map((change) => `- sensitive, declared by may_touch: ${change.path}`),
+    ...files.filter((change) => change.scope === 'out').map((change) => `- outside the Task's scope: ${change.path}`),
     ...files.filter((change) => change.status === 'deleted').map((change) => `- deleted: ${change.path}`),
   ];
   return lines.length > 0 ? lines : ['None.'];
@@ -103,8 +105,8 @@ export function reviewPrompt(input: ReviewInput): string {
 }
 
 // The rules of every reviewer (the Claude review and the gate, src/gate.ts), the Handbook's review
-// rules and the material of the iteration: the Task file, the Report, the sensitive and deleted
-// paths and the Patch, inline up to MAX_REVIEW_PATCH_BYTES.
+// rules and the material of the iteration: the Task file, the Report, the marked paths (sensitive,
+// outside the Task's scope, deleted) and the Patch, inline up to MAX_REVIEW_PATCH_BYTES.
 export function reviewBody(input: ReviewInput): string[] {
   const { ticket } = input;
   const cut = input.patch.length > MAX_REVIEW_PATCH_BYTES;
@@ -123,7 +125,7 @@ export function reviewBody(input: ReviewInput): string[] {
     '- Give every item a severity:',
     ...SEVERITIES.map((severity) => `  - \`${severity}\`: ${SEVERITY_DEFINITIONS[severity]}.`),
     '- Return `fix` with concrete items (path, what is wrong, what is expected, severity) when at least one item is a blocker or major; otherwise `clean`, with any nits as its items. The factory acts on the items, whatever the verdict says: a blocker or major item makes a fix, and a `fix` with nits only counts as `clean`. Nits are recorded, never block, and the Implementer may leave them.',
-    '- An undeclared sensitive path stays only when you name it in accepted_sensitive and justify it in summary; otherwise it becomes a major fix item, whatever severity you give it.',
+    '- An undeclared sensitive path, or a path outside the Task\'s scope, stays only when you name it in accepted_sensitive and justify it in summary; otherwise it becomes a major fix item, whatever severity you give it. Accept a path outside the scope only for a reason tied to the Task.',
     '- The settled findings below (<settled_findings>) are the ledger\'s entries already settled: fixed, contested with evidence, escalated, left (a nit), accepted by the user (accepted_risk) or to be fixed by the user\'s decision (user_fix). Do not raise a settled finding again, nor a narrower variant of it. Raise it only when the settlement is wrong by evidence in the worktree; then set `reopens` to its id and say why in problem. An item that reopens an accepted risk is dropped: the user decided.',
     '- Set `caused_by` to the id of the fix whose change caused the item. `reopens` and `caused_by` are each a ledger id or "".',
     '',
@@ -137,9 +139,9 @@ export function reviewBody(input: ReviewInput): string[] {
     input.report.trimEnd(),
     '</report>',
     '',
-    '<sensitive_and_deleted_paths>',
+    '<marked_paths>',
     ...pathLines(input.files),
-    '</sensitive_and_deleted_paths>',
+    '</marked_paths>',
     '',
     '<settled_findings>',
     ...settledLines(input.ledger ?? []),
@@ -290,6 +292,23 @@ export function sensitiveItem(path: string): ReviewItem {
   return { path, problem: SENSITIVE_PROBLEM, expected: 'Remove it, or justify it in the Report.', severity: 'major' };
 }
 
+// The fix item of a path outside the Task's scope a verdict did not accept (SF-053): always major.
+export function scopeItem(path: string): ReviewItem {
+  return { path, problem: SCOPE_PROBLEM, expected: 'Remove the change, or justify it in the Report.', severity: 'major' };
+}
+
+// The factory's fix items for the marked paths of an iteration a verdict did not accept: an
+// undeclared sensitive path not in accepted, then a path outside the Task's scope not in accepted.
+// A path that is both raises both items, each with its own ledger entry; accepted is by path, so
+// one acceptance settles both.
+export function unacceptedItems(files: FileChange[], accepted: readonly string[]): ReviewItem[] {
+  const open = files.filter((change) => !accepted.includes(change.path));
+  return [
+    ...open.filter((change) => change.sensitive === 'undeclared').map((change) => sensitiveItem(change.path)),
+    ...open.filter((change) => change.scope === 'out').map((change) => scopeItem(change.path)),
+  ];
+}
+
 // The items that block: blocker and major.
 export const blocking = (items: ReviewItem[]): ReviewItem[] => items.filter((item) => item.severity !== 'nit');
 // The items that never block.
@@ -305,9 +324,10 @@ export function actedVerdict(output: { items: ReviewItem[] }): Verdict {
 }
 
 // The verdict the factory acts on, for both reviewers (SF-051): fix when the reviewer gave a
-// blocker or major item, or when an undeclared sensitive path is not accepted (unaccepted, always
-// major); clean otherwise, whatever the reviewer wrote. The items of a fix are the blocking ones
-// (the reviewer's, then the unaccepted paths), then the reviewer's nits; none for clean.
+// blocker or major item, or when an undeclared sensitive path or a path outside the Task's scope
+// is not accepted (unaccepted, always major); clean otherwise, whatever the reviewer wrote. The
+// items of a fix are the blocking ones (the reviewer's, then the unaccepted paths), then the
+// reviewer's nits; none for clean.
 export function decide(output: { items: ReviewItem[] }, unaccepted: ReviewItem[]): { verdict: Verdict; items: ReviewItem[] } {
   const own = blocking(output.items);
   if (own.length === 0 && unaccepted.length === 0) {

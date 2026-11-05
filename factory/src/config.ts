@@ -32,6 +32,9 @@ export interface Config {
   reviewModel: string | undefined;
   // maxTurns of the review (SF_REVIEW_MAX_TURNS).
   reviewMaxTurns: number;
+  // The simplification pass after the deciding clean verdict of a job with review fixes (SF-055);
+  // false with SF_SIMPLIFY=off. Its model and maxTurns are the review's.
+  simplify: boolean;
   // maxTurns of the Task check (SF-054, SF_TASK_CHECK_MAX_TURNS); its model is reviewModel.
   taskCheckMaxTurns: number;
   // The Codex gate after a clean Claude review (SF-039): the executable, or why the gate is off.
@@ -215,6 +218,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     review: env.SF_REVIEW !== 'off',
     reviewModel: env.SF_REVIEW_MODEL || undefined,
     reviewMaxTurns: positiveInteger(env, 'SF_REVIEW_MAX_TURNS', 60),
+    simplify: env.SF_SIMPLIFY !== 'off',
     taskCheckMaxTurns: positiveInteger(env, 'SF_TASK_CHECK_MAX_TURNS', 30),
     gate: gateConfig(env),
     codexModel: env.SF_CODEX_MODEL || undefined,

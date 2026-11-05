@@ -183,13 +183,14 @@ export async function readTask(workspace: Workspace, ticket: string, archived = 
   return content;
 }
 
-// Appends "## Fix N" to the Task file, keeping its existing content; returns the new text.
-export function appendFix(workspace: Workspace, ticket: string, fix: number, content: string): Promise<string> {
+// Appends "## Fix N" to the Task file, keeping its existing content; returns the new text. A title
+// goes after the number: "## Fix N: <title>" (SF-055, Simplify).
+export function appendFix(workspace: Workspace, ticket: string, fix: number, content: string, title?: string): Promise<string> {
   return serialized(async () => {
     if (content.includes('\0') || /\p{Surrogate}/u.test(content) || content.length === 0 || Buffer.byteLength(content, 'utf8') > MAX_FIX_BYTES) {
       throw new FactoryError('invalid_content', `content must be 1 to ${MAX_FIX_BYTES} bytes of well-formed UTF-8 without NUL characters.`);
     }
-    const text = `${await readTask(workspace, ticket)}\n\n## Fix ${fix}\n\n${content}\n`;
+    const text = `${await readTask(workspace, ticket)}\n\n## Fix ${fix}${title !== undefined ? `: ${title}` : ''}\n\n${content}\n`;
     await writeTaskFile(workspace, ticket, checkTaskContent(ticket, text));
     return text;
   });

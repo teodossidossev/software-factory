@@ -179,7 +179,15 @@ _Avoid_: OpenAI reviewer, second opinion
 **Clean**:
 The deciding Review's (the Gate's when it is on) verdict, as the factory acts on it, that the
 Patch needs no further Fix section (no blocker or major item), with every undeclared Sensitive path acknowledged. It starts MR
-preparation; it accepts nothing and pushes nothing.
+preparation (after the Simplification pass, when one runs); it accepts nothing and pushes nothing.
+
+**Simplification pass**:
+One read-only Claude session per Job, after the deciding Clean verdict of a Job that had a Fix
+section: it names what the review fixes added that the Task does not need, never what a fixed
+blocker finding needed. Its suggestions go to the User: Simplify (one Fix section "Simplify",
+reviewed as usual, the suggestions recorded in the Ledger as the User's choice) or Skip (MR
+preparation, the suggestions listed in the MR text). It runs at most once per Job.
+_Avoid_: cleanup review, zoom-out, third reviewer
 
 **Human review**:
 The User reading the Branch in the IDE after Clean. It ends with approve, a further fix, or abort.

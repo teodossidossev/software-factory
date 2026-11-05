@@ -2,12 +2,14 @@
 // SF-019, committed and rebased by the factory, SF-037), say, retryReview (the retry of a failed
 // review, SF-044), acceptGate (the user's override of a stopped gate, SF-047), approve (the push),
 // the merge request on the Git host (SF-048: createMergeRequest, mergeMergeRequest,
-// mergeRequestStatus), abort, reset
+// mergeRequestStatus), simplify (the user's choice on the offer of the simplification pass,
+// SF-055), abort, reset
 // (and the dashboard's terminal-only Archive), status and the restart rule. Owns the Implementer session of each job, which works in the
 // job's own worktree, and publishes an iteration (Report, Patch and the file list) when the
 // session goes idle; then the Claude review of that iteration runs (SF-038, src/review.ts), and
 // after a clean one the Codex gate (SF-039, src/gate.ts); the deciding verdict takes the path of
-// requestFix or markClean. The user starts and approves (the dashboard, the CLI); no MCP tool
+// requestFix or markClean; a clean one first runs the simplification pass (SF-055, src/simplify.ts)
+// when the job had review fixes. The user starts and approves (the dashboard, the CLI); no MCP tool
 // reaches these methods since SF-040. Every state change goes through #transition, the seam for
 // notifications.
 // Several jobs of one workspace run at the same time, up to SF_MAX_JOBS; the Git operations on
@@ -25,9 +27,9 @@ import { FactoryError } from './errors.js';
 import { chooseForge, type Forge, type ForgeKind, forgeFor, type MergeRequestStatus } from './forge.js';
 import { runGit } from './git.js';
 import { GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from './gate.js';
-import { cutEvent, type FileChange, type GateOverride, type GateRecord, isActive, type Job, type JobMr, type JobState, JobStore, now, type ReviewRecord, TERMINAL_STATES } from './jobs.js';
-import { answerFix, applyVerdict, type Applied, type Decision, DECISIONS, escalationMessage, headings, LEDGER_ID, type LedgerEntry, FACTORY_PROBLEMS, SCOPE_PROBLEM, SENSITIVE_PROBLEM, settle, SETTLE_CODES, unappliedEntries, unsettled, userFixItems } from './ledger.js';
-import { abortRebase, commitAndRebase, continueRebase, gitBusy, mergeRequestLink, originUrl, pushBranch, readMrText, rebaseInProgress, resolveTarget, unmergedPaths, withFindings, withNits } from './mr.js';
+import { cutEvent, type FileChange, type GateOverride, type GateRecord, isActive, type Job, type JobMr, type JobState, JobStore, now, type ReviewRecord, type SimplifyRecord, TERMINAL_STATES } from './jobs.js';
+import { answerFix, applyVerdict, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, escalationMessage, headings, LEDGER_ID, type LedgerEntry, FACTORY_PROBLEMS, SCOPE_PROBLEM, SENSITIVE_PROBLEM, settle, SETTLE_CODES, unappliedEntries, unsettled, userFixItems } from './ledger.js';
+import { abortRebase, commitAndRebase, continueRebase, gitBusy, mergeRequestLink, originUrl, pushBranch, readMrText, rebaseInProgress, resolveTarget, unmergedPaths, withFindings, withNits, withSimplifications } from './mr.js';
 import { buildPatch, changedFilesSection, fileChanges, notificationLine, type Patch } from './patch.js';
 import { removeSandboxPlaceholders } from './placeholders.js';
 import { Redactor } from './redact.js';
@@ -35,7 +37,8 @@ import { conflictPrompt, factoryPrompt, iterationCost, mrPrompt } from './prompt
 import { DENIED_TOOLS, type Marks, marksOf } from './rules.js';
 import type { Workspace } from './registry.js';
 import { DEFAULT_PAGE_BYTES, MAX_PAGE_BYTES, MIN_PAGE_BYTES, type Page, pageBuffer } from './repo-files.js';
-import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, unacceptedItems, uniqueNits } from './review.js';
+import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, type StructuredOutcome, unacceptedItems, uniqueNits } from './review.js';
+import { changedBetween, type FixFiles, fixNumbers, guardSuggestions, offerMessage, runSimplify, SIMPLIFY_CODE, SIMPLIFY_TITLE, simplifyFix, type SimplifyInput, type SimplifyOutput, simplifyPrompt, type Suggestion } from './simplify.js';
 import { withLock } from './pid-lock.js';
 import { type Launch, type RunnerRequest, Runners, type RunnerWork } from './runner.js';
 import { type IdleOutcome, ImplementerSession } from './session.js';
@@ -48,7 +51,8 @@ const MAX_SLUG = 40;
 export const GATE_OVERRIDE_CODES: readonly string[] = ['gate_rounds', 'gate_budget', 'gate_failed'];
 // The ledger's stops (SF-052) that sf accept takes on as well, with a clean Claude review.
 export const LEDGER_ACCEPT_CODES: readonly string[] = ['review_churn', 'review_disputed'];
-const ACCEPT_CODES: readonly string[] = [...GATE_OVERRIDE_CODES, ...LEDGER_ACCEPT_CODES];
+// The offer of the simplification pass (SF-055): sf accept is its Skip.
+const ACCEPT_CODES: readonly string[] = [...GATE_OVERRIDE_CODES, ...LEDGER_ACCEPT_CODES, SIMPLIFY_CODE];
 
 export interface CheckResult {
   state: JobState;
@@ -180,12 +184,22 @@ interface Live {
   mr?: { targetRef: string; conflicts?: string[] };
 }
 
-// A review in progress, Claude's or the gate's (one at a time per job): the iteration it reviews
-// and what cancels it.
+// A review in progress, Claude's, the gate's or the simplification pass (one at a time per job):
+// the iteration it reviews and what cancels it.
 interface RunningReview {
-  reviewer: typeof REVIEWER | typeof GATE_REVIEWER;
+  reviewer: typeof REVIEWER | typeof GATE_REVIEWER | typeof SIMPLIFIER;
   iteration: number;
   controller: AbortController;
+}
+
+// The options of a Fix section (#fix).
+interface FixOptions {
+  // What else the Fix counts for (the gate's gate_fixes).
+  counts?: Partial<Pick<Job, 'gate_fixes'>>;
+  ledger?: LedgerEntry[];
+  fromStop?: boolean;
+  title?: string;
+  overLimit?: boolean;
 }
 
 export interface ExecutionOptions {
@@ -331,8 +345,9 @@ export class Execution implements RunnerWork {
   // At serve start (SF-042): a job in working, preparing_mr or awaiting_review whose runner is alive
   // is left alone. Without a runner, a working job and an MR preparation need a person, an
   // interrupted start failed, and a job awaiting review whose last iteration has no review, or a
-  // clean review but no gate.json, gets a runner, which resumes it (resume: the review, the gate,
-  // or with the gate off now, Clean).
+  // clean review but no gate.json, or a clean gate.json and a simplification pass that never applied
+  // (SF-055), gets a runner, which resumes it (resume: the review, the gate, the pass, or with the
+  // gate off now, Clean).
   recover(): Promise<void> {
     return this.#locked(async () => {
       const runners = this.#serveRunners();
@@ -356,7 +371,8 @@ export class Execution implements RunnerWork {
   }
 
   // A job awaiting review that has something to resume: its last iteration has no review (with the
-  // review on), or one acted on as clean (SF-051: a fix with nits only is) and no gate.json.
+  // review on), or one acted on as clean (SF-051: a fix with nits only is) and no gate.json, or a
+  // clean gate.json too and a simplification pass that never applied (SF-055).
   async #resumable(job: Job): Promise<boolean> {
     if (job.state !== 'awaiting_review' || job.iteration === 0) {
       return false;
@@ -366,7 +382,15 @@ export class Execution implements RunnerWork {
       return this.#config.review;
     }
     // Items the ledger dropped (they reopened an accepted risk, SF-052) never count, as in acceptGate.
-    return 'verdict' in review && actedVerdict(withoutDropped(review)) === 'clean' && (await this.jobs.readGate(job.workspace, job.ticket, job.iteration)) === undefined;
+    if (!('verdict' in review) || actedVerdict(withoutDropped(review)) !== 'clean') {
+      return false;
+    }
+    const gate = await this.jobs.readGate(job.workspace, job.ticket, job.iteration);
+    if (gate === undefined) {
+      return true;
+    }
+    // A clean gate whose outcome never applied (the pass, its record or MR preparation; SF-055).
+    return 'verdict' in gate && actedVerdict(withoutDropped(gate)) === 'clean';
   }
 
   // sf serve's runners; runner mode has none and never reaches the calls that need them.
@@ -708,7 +732,10 @@ export class Execution implements RunnerWork {
       // The nits of the reviewed iteration go into the MR text by the factory's hand (SF-051).
       // So do the ledger's findings not fixed: accepted risks, contests and nits left (SF-052).
       const withNitsText = withNits(written.text, await this.#nitsAtClean(job), job.iteration);
-      const mrText = { text: withFindings(withNitsText, await this.jobs.readLedger(job.workspace, job.ticket)) };
+      // And the suggestions of the simplification pass the user skipped (SF-055).
+      const skipped = await this.#skippedSimplifications(job);
+      const withSkipped = skipped === undefined ? withNitsText : withSimplifications(withNitsText, skipped.suggestions, skipped.iteration);
+      const mrText = { text: withFindings(withSkipped, await this.jobs.readLedger(job.workspace, job.ticket)) };
       const targetCommit = job.target_commit!;
       const prepared = await this.#gitLocked(job.workspace, () => commitAndRebase(cwd, { baseCommit: job.base_commit!, targetCommit, mrText: mrText.text }));
       if (prepared.kind === 'failed') {
@@ -832,7 +859,7 @@ export class Execution implements RunnerWork {
   #checkAcceptGate(job: Job): string {
     const code = job.error?.code;
     if (job.state !== 'needs_human' || code === undefined || !ACCEPT_CODES.includes(code)) {
-      throw new FactoryError('invalid_state', `sf accept needs needs_human after the gate or the ledger stopped the job (${ACCEPT_CODES.join(', ')}); the job is ${job.state}${code !== undefined ? ` (${code})` : ''}.`);
+      throw new FactoryError('invalid_state', `sf accept needs needs_human after the gate or the ledger stopped the job, or the simplification pass offered suggestions (${ACCEPT_CODES.join(', ')}); the job is ${job.state}${code !== undefined ? ` (${code})` : ''}.`);
     }
     return code;
   }
@@ -867,11 +894,33 @@ export class Execution implements RunnerWork {
         throw new FactoryError('invalid_state', `sf accept needs a clean Claude review of the last iteration (${job.iteration}); it does not accept the ${markedGroups(unaccepted).map((group) => `${group.label} ${group.paths.join(', ')}`).join(' and the ')}.`);
       }
       const gate = await this.jobs.readGate(workspaceName, ticket, job.iteration);
+      if (code === SIMPLIFY_CODE) {
+        // Skip (SF-055): MR preparation as after the clean gate, with the paths both reviewers
+        // accepted; simplify.json is marked skipped, so the suggestions go into the MR text (#mrIdle).
+        // No gate override: the gate was clean.
+        const record = await this.jobs.readSimplify(workspaceName, ticket, job.iteration);
+        const sensitive = [...new Set([...review.accepted_sensitive, ...(gate !== undefined && 'verdict' in gate ? gate.accepted_sensitive : [])])];
+        return this.#prepareMr(job, sensitive, async () => {
+          const at = now();
+          if (record !== undefined && 'suggestions' in record) {
+            await this.jobs.writeSimplify(workspaceName, ticket, job.iteration, { ...record, skipped_at: at });
+          }
+          await this.jobs.appendEvent(workspaceName, ticket, {
+            ts: at, iteration: job.iteration, type: 'simplify_chosen', choice: 'skip', suggestions: record !== undefined && 'suggestions' in record ? record.suggestions.length : 0,
+          });
+        });
+      }
       const unapplied = LEDGER_ACCEPT_CODES.includes(code)
         ? await this.#ledgerUnapplied(job, gate)
         : gate === undefined ? [] : 'verdict' in gate ? gate.items : gate.error;
       const override: GateOverride = { at: now(), code, unapplied };
-      return this.#prepareMr(job, review.accepted_sensitive, override);
+      return this.#prepareMr(job, review.accepted_sensitive, async () => {
+        await this.jobs.writeGateOverride(workspaceName, ticket, job.iteration, override);
+        await this.jobs.appendEvent(workspaceName, ticket, {
+          ts: override.at, iteration: job.iteration, type: 'gate_overridden', code: override.code,
+          unapplied: Array.isArray(override.unapplied) ? override.unapplied.length : 0,
+        });
+      });
     });
   }
 
@@ -932,7 +981,7 @@ export class Execution implements RunnerWork {
       // The lead line names the user's decisions only; open entries carried along keep their ids.
       const decided = fix.items.filter((item) => item.userNote !== undefined).map((item) => item.id).join(', ');
       try {
-        await this.#fix(job, fixContent(`The user settled the stop (${job.error?.code}): ${decided} to fix.`, fix.items, 'the user'), {}, fix.ledger, true);
+        await this.#fix(job, fixContent(`The user settled the stop (${job.error?.code}): ${decided} to fix.`, fix.items, 'the user'), { ledger: fix.ledger, fromStop: true });
       } catch (error) {
         if (error instanceof FactoryError && error.code === 'iteration_limit') {
           return 'needs_human';
@@ -975,11 +1024,12 @@ export class Execution implements RunnerWork {
   // Appends one message of a running review (review_message) or one Codex event of a running gate
   // (gate_event), already redacted (src/redact.ts), to the job's events.jsonl, cut to its bound
   // (SF-045).
-  #appendLive(job: Job, type: 'review_message' | 'gate_event', raw: unknown): Promise<void> {
+  // reviewer: whose session a review_message is (the simplification pass's too, SF-055).
+  #appendLive(job: Job, type: 'review_message' | 'gate_event', raw: unknown, reviewer: string = REVIEWER): Promise<void> {
     const { value, truncated } = cutEvent(raw);
     const cut = truncated ? { truncated: true as const } : {};
     return this.jobs.appendEvent(job.workspace, job.ticket, type === 'review_message'
-      ? { ts: now(), iteration: job.iteration, type, reviewer: REVIEWER, message: value, ...cut }
+      ? { ts: now(), iteration: job.iteration, type, reviewer, message: value, ...cut }
       : { ts: now(), iteration: job.iteration, type, reviewer: GATE_REVIEWER, event: value, ...cut });
   }
 
@@ -1077,11 +1127,11 @@ export class Execution implements RunnerWork {
     if (applied.kind === 'stop') {
       await this.#transition(job, 'needs_human', { code: applied.code, message: applied.message });
     } else if (applied.kind === 'fix') {
-      await this.#fix(job, fixContent(summary, applied.items), {}, applied.ledger);
+      await this.#fix(job, fixContent(summary, applied.items), { ledger: applied.ledger });
     } else if (this.#config.gate.on) {
       await this.#startGate(job, output);
     } else {
-      await this.#prepareMr(job, accepted);
+      await this.#afterClean(job, accepted);
     }
   }
 
@@ -1242,10 +1292,198 @@ export class Execution implements RunnerWork {
     const decided = job;
     await this.#applying(decided, async () => {
       if (applied.kind === 'fix') {
-        await this.#fix(decided, fixContent(summary, applied.items, 'Codex'), { gate_fixes: decided.gate_fixes + 1 }, applied.ledger);
+        await this.#fix(decided, fixContent(summary, applied.items, 'Codex'), { counts: { gate_fixes: decided.gate_fixes + 1 }, ledger: applied.ledger });
       } else {
-        await this.#prepareMr(decided, [...new Set([...claude.accepted_sensitive, ...accepted])]);
+        await this.#afterClean(decided, [...new Set([...claude.accepted_sensitive, ...accepted])]);
       }
+    });
+  }
+
+  // After the deciding clean verdict (SF-055): the simplification pass when it is due, else MR
+  // preparation with the accepted paths (sensitive). A pass that already ended on this iteration
+  // (its runner stopped before the outcome applied) applies its record; one that started on it and
+  // never ended (its runner stopped while it ran) is recorded as failed and goes on, as a failed
+  // run does. Only under the lock.
+  async #afterClean(job: Job, sensitive: string[]): Promise<void> {
+    const { workspace, ticket, iteration } = job;
+    const record = await this.jobs.readSimplify(workspace, ticket, iteration);
+    if (record !== undefined) {
+      await this.#offerSimplify(job, record, sensitive);
+    } else if (job.simplify_iteration === iteration) {
+      const at = now();
+      const error = 'The simplification pass was interrupted (its runner ended while it ran); it runs once per job.';
+      await this.jobs.writeSimplify(workspace, ticket, iteration, { reviewer: SIMPLIFIER, error, started_at: at, ended_at: at });
+      await this.jobs.appendEvent(workspace, ticket, { ts: at, iteration, type: 'simplify', reviewer: SIMPLIFIER, suggestions: 0, dropped: 0, error });
+      await this.#prepareMr(job, sensitive);
+    } else if (this.#simplifyDue(job)) {
+      await this.#startSimplify(job, sensitive);
+    } else {
+      await this.#prepareMr(job, sensitive);
+    }
+  }
+
+  // Whether the simplification pass runs on the job (SF-055): SF_SIMPLIFY on, at least one Fix
+  // section written (at SF_MAX_ITERATIONS too: Simplify may go over it), and never before: the job's
+  // simplify_iteration, written before a pass starts, is still absent. So it runs at most once per job,
+  // whether that run ended, failed, was interrupted or the job moved on.
+  #simplifyDue(job: Job): boolean {
+    return this.#config.simplify && job.fixes >= 1 && job.simplify_iteration === undefined;
+  }
+
+  // The suggestions the user skipped (SF-055), with the iteration the pass ran on: the simplify.json
+  // marked skipped_at by sf accept. A Simplify, or an answer by sf say, leaves none.
+  async #skippedSimplifications(job: Job): Promise<{ suggestions: Suggestion[]; iteration: number } | undefined> {
+    for (let number = job.iteration; number >= 1; number -= 1) {
+      const record = await this.jobs.readSimplify(job.workspace, job.ticket, number);
+      if (record !== undefined) {
+        return 'suggestions' in record && record.skipped_at !== undefined ? { suggestions: record.suggestions, iteration: number } : undefined;
+      }
+    }
+    return undefined;
+  }
+
+  // Starts the simplification pass after the deciding clean verdict: the job's simplify_iteration is
+  // written first, so the pass is used up before it runs. It runs outside the lock, as the reviews
+  // do, and stops with them (abort, reset). Only under the lock.
+  async #startSimplify(current: Job, sensitive: string[]): Promise<void> {
+    this.#runnerJob();
+    if (this.#stopping) {
+      return;
+    }
+    const job: Job = { ...current, simplify_iteration: current.iteration };
+    await this.jobs.write(job);
+    const key = `${job.workspace}/${job.ticket}`;
+    this.#reviews.get(key)?.controller.abort();
+    const running: RunningReview = { reviewer: SIMPLIFIER, iteration: job.iteration, controller: new AbortController() };
+    this.#reviews.set(key, running);
+    this.#runSimplifyPass(job, running, sensitive).catch((error: unknown) => console.error(error));
+  }
+
+  // The material of the pass: the Task file in the worktree, the final Patch, the ledger and, per
+  // Fix section N, the files iteration N+1 changed against iteration N (their Patches compared).
+  async #simplifyInput(job: Job, worktree: string): Promise<SimplifyInput> {
+    const { workspace, ticket, iteration } = job;
+    const { patch } = await this.jobs.readIteration(workspace, ticket, iteration);
+    const meta = await this.jobs.readMeta(workspace, ticket, iteration);
+    const task = await readFile(join(worktree, TASK_DIR, `${ticket}.md`), 'utf8');
+    const fixes: FixFiles[] = [];
+    for (const fix of fixNumbers(task)) {
+      let files: string[] | undefined;
+      if (fix >= 1 && fix + 1 <= iteration) {
+        try {
+          const before = (await this.jobs.readIteration(workspace, ticket, fix)).patch.toString('utf8');
+          const after = (await this.jobs.readIteration(workspace, ticket, fix + 1)).patch.toString('utf8');
+          files = changedBetween(before, after);
+        } catch {
+          files = undefined;
+        }
+      }
+      fixes.push({ fix, files });
+    }
+    return { ticket, iteration, task, patch, patchTruncated: meta.patch_truncated, ledger: await this.jobs.readLedger(workspace, ticket), fixes };
+  }
+
+  // Runs the pass (the review's session settings: SF_REVIEW_MODEL, SF_REVIEW_MAX_TURNS, the
+  // sandbox), then applies its outcome under the lock. Its messages go to events.jsonl redacted, as
+  // the review's; a failure message is redacted before it is recorded.
+  async #runSimplifyPass(job: Job, running: RunningReview, sensitive: string[]): Promise<void> {
+    let outcome: StructuredOutcome<SimplifyOutput>;
+    const redactor = new Redactor({ cwd: job.worktree ?? '' });
+    try {
+      if (job.worktree === null) {
+        throw new Error('the job has no worktree');
+      }
+      const prompt = simplifyPrompt(await this.#simplifyInput(job, job.worktree));
+      outcome = await runSimplify(prompt, {
+        cwd: job.worktree, claudePath: this.#config.claudePath, sandbox: this.#config.sandbox, model: this.#config.reviewModel,
+        maxTurns: this.#config.reviewMaxTurns, signal: running.controller.signal,
+        onMessage: (message) => this.#appendLive(job, 'review_message', redactor.reviewMessage(message), SIMPLIFIER),
+      });
+    } catch (error) {
+      const at = now();
+      outcome = { ok: false, message: `The simplification pass could not start: ${(error as Error).message}`.slice(0, 1000), model: null, startedAt: at, endedAt: at };
+    }
+    if (!outcome.ok) {
+      outcome = { ...outcome, message: redactor.failure(outcome.message) };
+    }
+    const ended = outcome;
+    await this.#locked(() => this.#simplifyEnded(job, running, sensitive, ended));
+  }
+
+  // The end of the pass. A cancelled one leaves no trace; one the job moved on from leaves only its
+  // event (ignored); either way the job's simplify_iteration keeps any later pass from running. Otherwise simplify.json (the suggestions the
+  // ledger guard kept, and those it dropped) and the event are written and the outcome applies.
+  async #simplifyEnded(started: Job, running: RunningReview, sensitive: string[], outcome: StructuredOutcome<SimplifyOutput>): Promise<void> {
+    const { workspace, ticket, iteration } = started;
+    const key = `${workspace}/${ticket}`;
+    if (this.#reviews.get(key) !== running || running.controller.signal.aborted) {
+      return;
+    }
+    this.#reviews.delete(key);
+    const job = await this.jobs.read(workspace, ticket);
+    if (job === undefined || job.created_at !== started.created_at) {
+      return;
+    }
+    const current = job.state === 'awaiting_review' && job.iteration === iteration;
+    const guarded = outcome.ok ? guardSuggestions(outcome.output.suggestions, await this.jobs.readLedger(workspace, ticket)) : undefined;
+    await this.jobs.appendEvent(workspace, ticket, {
+      ts: now(), iteration, type: 'simplify', reviewer: SIMPLIFIER, suggestions: guarded?.kept.length ?? 0, dropped: guarded?.dropped.length ?? 0,
+      ...(outcome.ok ? {} : { error: outcome.message }), ...(current ? {} : { ignored: true as const }),
+    });
+    if (!current) {
+      return;
+    }
+    const record: SimplifyRecord = outcome.ok
+      ? { reviewer: SIMPLIFIER, summary: outcome.output.summary, suggestions: guarded!.kept, dropped: guarded!.dropped, cost_usd: outcome.costUsd, model: outcome.model, started_at: outcome.startedAt, ended_at: outcome.endedAt }
+      : { reviewer: SIMPLIFIER, error: outcome.message, started_at: outcome.startedAt, ended_at: outcome.endedAt };
+    await this.jobs.writeSimplify(workspace, ticket, iteration, record);
+    await this.#applying(job, () => this.#offerSimplify(job, record, sensitive));
+  }
+
+  // The outcome of the pass: suggestions are offered to the user (needs_human, simplify_offered);
+  // none, or a failed run, goes on to MR preparation. Only under the lock.
+  async #offerSimplify(job: Job, record: SimplifyRecord, sensitive: string[]): Promise<void> {
+    if (!('suggestions' in record) || record.suggestions.length === 0) {
+      await this.#prepareMr(job, sensitive);
+      return;
+    }
+    await this.#transition(job, 'needs_human', { code: SIMPLIFY_CODE, message: offerMessage(record.suggestions) });
+  }
+
+  // The user's Simplify on the offer (sf simplify, the dashboard's Simplify, SF-055): one Fix section
+  // "Simplify" with the suggestions, each recorded in the ledger as accepted_risk of reviewer
+  // simplify, and the normal pipeline (the Implementer, the Claude review, the gate). Never twice.
+  simplify(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; check_after_minutes: number }> {
+    return this.#request(workspaceName, ticket, { kind: 'simplify' }) as Promise<{ state: JobState; iteration: number; check_after_minutes: number }>;
+  }
+
+  // sf simplify needs needs_human with simplify_offered.
+  #checkSimplify(job: Job): void {
+    if (job.state !== 'needs_human' || job.error?.code !== SIMPLIFY_CODE) {
+      throw new FactoryError('invalid_state', `sf simplify needs needs_human with ${SIMPLIFY_CODE}; the job is ${job.state}${job.error !== undefined ? ` (${job.error.code})` : ''}.`);
+    }
+  }
+
+  // The Simplify in the runner.
+  #applySimplify(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; check_after_minutes: number }> {
+    return this.#locked(async () => {
+      const job = await this.#job(workspaceName, ticket);
+      this.#checkSimplify(job);
+      const ledger = await this.jobs.readLedger(workspaceName, ticket);
+      if (ledger.some(isSimplification)) {
+        throw new FactoryError('invalid_state', 'The simplification was applied on this job already; it runs once per job.');
+      }
+      const record = await this.jobs.readSimplify(workspaceName, ticket, job.iteration);
+      if (record === undefined || !('suggestions' in record) || record.suggestions.length === 0) {
+        throw new FactoryError('invalid_state', `Iteration ${job.iteration} has no suggestion of the simplification pass.`);
+      }
+      if (job.worktree === null || !(await exists(job.worktree))) {
+        throw new FactoryError('worktree_missing', `The worktree of ${workspaceName}/${ticket} is missing; sf reset the ticket and start again.`);
+      }
+      const fix = simplifyFix(ledger, record.summary, record.suggestions, job.iteration, now());
+      const result = await this.#fix(job, fix.content, { ledger: fix.ledger, fromStop: true, title: SIMPLIFY_TITLE, overLimit: true });
+      await this.jobs.appendEvent(workspaceName, ticket, { ts: now(), iteration: job.iteration, type: 'simplify_chosen', choice: 'simplify', suggestions: record.suggestions.length });
+      return { state: 'working', ...result };
     });
   }
 
@@ -1287,21 +1525,21 @@ export class Execution implements RunnerWork {
   }
 
   // Whether MR preparation may start: awaiting_review, the retry after a failed preparation, or the
-  // override of a stopped gate (acceptGate, which checked the state); returns whether it is the retry.
-  #checkPrepareMr(job: Job, override?: GateOverride): boolean {
-    const retry = override === undefined && job.state === 'needs_human' && job.mr_attempts > 0 && job.worktree !== null;
-    if (!(job.state === 'awaiting_review' || retry || override !== undefined)) {
+  // user's Accept (acceptGate, which checked the state); returns whether it is the retry.
+  #checkPrepareMr(job: Job, accepted = false): boolean {
+    const retry = !accepted && job.state === 'needs_human' && job.mr_attempts > 0 && job.worktree !== null;
+    if (!(job.state === 'awaiting_review' || retry || accepted)) {
       throw new FactoryError('invalid_state', `mark_clean needs awaiting_review (or needs_human after an MR preparation); the job is ${job.state}.`);
     }
     return retry;
   }
 
   // The work of mark_clean, also run for a clean verdict of the review. Only under the lock.
-  // With override (acceptGate, which checked the state), the override is recorded once every
-  // check has passed, before the job moves on.
-  async #prepareMr(job: Job, sensitive: string[], override?: GateOverride): Promise<{ state: JobState; iteration: number; branch: string }> {
+  // With onAccepted (acceptGate, which checked the state), the user's Accept is recorded by it once
+  // every check has passed, before the job moves on: the gate override, or the Skip (SF-055).
+  async #prepareMr(job: Job, sensitive: string[], onAccepted?: () => Promise<void>): Promise<{ state: JobState; iteration: number; branch: string }> {
     const { workspace: workspaceName, ticket } = job;
-    const retry = this.#checkPrepareMr(job, override);
+    const retry = this.#checkPrepareMr(job, onAccepted !== undefined);
     const unacknowledged = markedGroups(await this.#unaccepted(job, sensitive));
     if (unacknowledged.length > 0) {
       const lines = unacknowledged.map((group) => `${group.label.charAt(0).toUpperCase()}${group.label.slice(1)} in the reviewed iteration: ${group.paths.join(', ')}.`);
@@ -1322,13 +1560,7 @@ export class Execution implements RunnerWork {
       await abortRebase(cwd);
       return resolveTarget(workspace.workCheckout, job.base);
     });
-    if (override !== undefined) {
-      await this.jobs.writeGateOverride(workspaceName, ticket, job.iteration, override);
-      await this.jobs.appendEvent(workspaceName, ticket, {
-        ts: override.at, iteration: job.iteration, type: 'gate_overridden', code: override.code,
-        unapplied: Array.isArray(override.unapplied) ? override.unapplied.length : 0,
-      });
-    }
+    await onAccepted?.();
     const attempt = job.mr_attempts + 1;
     const next = await this.#transition({ ...job, target_commit: target.commit, mr_attempts: attempt }, 'preparing_mr');
     await this.#syncTask(workspace, next);
@@ -1777,14 +2009,17 @@ export class Execution implements RunnerWork {
   // the next iteration. SF_MAX_ITERATIONS limits the Fix sections; an sf say turn does not count.
   // counts: what else the Fix counts for (the gate's gate_fixes). Only under the lock.
   // ledger: the findings ledger with the section's items (SF-052), written once the section is.
-  // afterSettle: the Fix of the user's settlement, from needs_human.
-  async #fix(current: Job, content: string, counts: Partial<Pick<Job, 'gate_fixes'>> = {}, ledger?: LedgerEntry[], afterSettle = false): Promise<{ iteration: number; check_after_minutes: number }> {
+  // fromStop: the Fix of the user's settlement or Simplify (SF-055), from needs_human.
+  // title: the section's title after its number (## Fix N: Simplify).
+  // overLimit: written even at SF_MAX_ITERATIONS (Simplify, once per job).
+  async #fix(current: Job, content: string, options: FixOptions = {}): Promise<{ iteration: number; check_after_minutes: number }> {
+    const { counts = {}, ledger, fromStop = false, title, overLimit = false } = options;
     let job = current;
     const { workspace: workspaceName, ticket } = job;
-    if (!(afterSettle && job.state === 'needs_human')) {
+    if (!(fromStop && job.state === 'needs_human')) {
       this.#checkFix(job);
     }
-    if (job.fixes >= this.#config.maxIterations) {
+    if (!overLimit && job.fixes >= this.#config.maxIterations) {
       const message = `${job.fixes} Fix sections were written, the limit of SF_MAX_ITERATIONS`;
       await this.#transition(job, 'needs_human', { code: 'iteration_limit', message: `${message}; the user decides how to go on.` });
       throw new FactoryError('iteration_limit', `${message}; the job needs the user.`);
@@ -1794,7 +2029,7 @@ export class Execution implements RunnerWork {
       job = await this.#reopen(job, workspace);
     }
     const fix = job.iteration;
-    await appendFix(workspace, ticket, fix, content);
+    await appendFix(workspace, ticket, fix, content, title);
     if (ledger !== undefined) {
       await this.jobs.writeLedger(workspaceName, ticket, ledger);
     }
@@ -1876,6 +2111,9 @@ export class Execution implements RunnerWork {
       case 'settle':
         this.#checkSettle(job, request.id, request.decision, request.note);
         break;
+      case 'simplify':
+        this.#checkSimplify(job);
+        break;
     }
   }
 
@@ -1904,12 +2142,15 @@ export class Execution implements RunnerWork {
         return this.#acceptGate(workspace, ticket);
       case 'settle':
         return this.#settle(workspace, ticket, request.id, request.decision, request.note);
+      case 'simplify':
+        return this.#applySimplify(workspace, ticket);
     }
   }
 
   // Runner mode: what the job was doing when its last runner ended. A job awaiting review whose
   // last iteration has no review gets one; one whose review is clean and has no gate.json gets its
-  // gate (or, with the gate off now, Clean).
+  // gate (or, with the gate off now, Clean); one with a clean gate.json too gets its simplification
+  // pass, or its outcome (SF-055).
   resume(): Promise<void> {
     const { workspace, ticket } = this.#runnerJob();
     return this.#locked(async () => {
@@ -1918,8 +2159,12 @@ export class Execution implements RunnerWork {
         return;
       }
       const review = await this.jobs.readReview(workspace, ticket, job.iteration);
+      const gate = await this.jobs.readGate(workspace, ticket, job.iteration);
       if (review === undefined) {
         this.#startReview(job);
+      } else if ('verdict' in review && gate !== undefined && 'verdict' in gate) {
+        // A clean gate whose simplification pass never applied (SF-055).
+        await this.#applying(job, () => this.#afterClean(job, [...new Set([...review.accepted_sensitive, ...gate.accepted_sensitive])]));
       } else if ('verdict' in review) {
         await this.#applying(job, () => this.#afterClaude(job, review));
       }

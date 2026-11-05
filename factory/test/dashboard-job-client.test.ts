@@ -642,3 +642,41 @@ test('job client (SF-052): a ledger stop says what happened; escalated and conte
   assert.equal(page.$('confirm-items-title').textContent, 'Open findings of the ledger that will not be applied (1):');
   assert.deepEqual(texts(page.$('confirm-items-list')), ['R1 README.md: Problem of R1.']);
 });
+
+test('job client (SF-055): the offer of the simplification pass says what happened; Simplify and Skip (Accept) list the suggestions; Simplify sends one request', async () => {
+  const suggestion = { path: 'guard.txt', what: 'The second guard.', why: 'The first one covers it.', saves_lines: 3, ledger_ids: ['R1'] };
+  const record = { reviewer: 'simplify', summary: 'One guard too many.', suggestions: [suggestion], dropped: [], cost_usd: 0.1, model: null, ...times };
+  const offered = detail(job('needs_human', { iteration: 2, fixes: 1, error: { code: 'simplify_offered', message: 'The simplification pass found 1 thing.' } }), {
+    iterations: [iteration(1, { review: CLAUDE_FIX }), iteration(2, { review: CLEAN, gate: { ...GATE_FIX, verdict: 'clean', items: [] }, simplify: record })],
+  });
+  const page = await openJob(offered);
+  assert.match(page.$('job-halt').textContent, /the simplification pass found things the review fixes added that the Task does not need\. Simplify .* or Accept and prepare the MR without them/);
+  const simplify = page.$('simplify-button');
+  const accept = page.$('accept-gate-button');
+  assert.deepEqual([simplify.hidden, simplify.disabled, accept.hidden, accept.disabled], [false, false, false, false]);
+
+  // Skip: Accept's confirmation says the suggestions go into the MR text, and lists them.
+  accept.click();
+  assert.match(page.$('confirm-text').textContent, /^Skips the simplification: iteration 2.*“Simplifications not applied”/);
+  assert.equal(page.$('confirm-items-title').textContent, 'Suggestions of the simplification pass (1):');
+  assert.deepEqual(texts(page.$('confirm-items-list')), ['guard.txt: The second guard. Why: The first one covers it. (about 3 lines)']);
+  assert.equal(page.$('confirm-ok').textContent, 'Skip and prepare the MR');
+  page.$('confirm-cancel').click();
+
+  // Simplify: its own confirmation, then one POST of {}.
+  simplify.click();
+  assert.equal(page.$('confirm-title').textContent, 'Simplify app/T-1?');
+  assert.match(page.$('confirm-text').textContent, /^Writes one Fix section “Simplify” with the suggestions below/);
+  assert.equal(page.$('confirm-ok').textContent, 'Simplify');
+  page.$('confirm-ok').click();
+  await page.flush();
+  const sent = posts(page).filter((request) => request.path.endsWith('/simplify'));
+  assert.deepEqual(sent.map((request) => [request.path, request.body]), [['api/jobs/app/T-1/simplify', '{}']]);
+  sent[0]!.respond(200, { ok: true, result: { state: 'working', iteration: 3, check_after_minutes: 5 } });
+  await page.flush();
+  assert.equal(page.$('action-status').textContent, 'Simplify: the Implementer applies the suggestions in iteration 3 (state working).');
+
+  // Elsewhere hidden.
+  await show(page, detail(job('working', { iteration: 2 })));
+  assert.equal(simplify.hidden, true);
+});

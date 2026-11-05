@@ -89,7 +89,7 @@ export function fixItemLine({ id, item, userNote }: FixItem): string {
 }
 
 // The number of the next id: one above the highest in the ledger.
-function nextNumber(ledger: LedgerEntry[]): number {
+export function nextNumber(ledger: LedgerEntry[]): number {
   return ledger.reduce((max, entry) => Math.max(max, Number(entry.id.slice(1))), 0) + 1;
 }
 
@@ -205,11 +205,17 @@ export async function answerFix(ledger: LedgerEntry[], report: string, fix: numb
   const rows = new Map(reportRows(report).map((row) => [row.id, row]));
   const result: LedgerEntry[] = [];
   for (const entry of ledger) {
+    const row = rows.get(entry.id);
+    // A simplification (SF-055) the Implementer did not apply is no longer the user's removal: left,
+    // with the Implementer's note, so the reviewers may judge it again.
+    if (entry.asked === fix && isSimplification(entry) && entry.status === 'accepted_risk' && row !== undefined && row.answer !== 'fixed') {
+      result.push({ ...entry, status: 'left', response: row.note, settled: null });
+      continue;
+    }
     if (entry.asked !== fix || !['open', 'user_fix'].includes(entry.status)) {
       result.push(entry);
       continue;
     }
-    const row = rows.get(entry.id);
     const open = { ...entry, status: 'open' as const, response: row?.note ?? '', evidence: '' };
     if (row === undefined) {
       result.push(open);
@@ -270,8 +276,8 @@ function idList(ids: string[]): string {
 // to answer, the one question) joined by spaces. The tail is fixed text and always kept whole; the
 // lead is capped at 300 characters (its ids by idList). The facts get the room left: as many as fit
 // at MIN_FACT characters or more, each shortened to an equal share, the rest counted in a last line
-// ("… and N more <noun>: see ledger.json."). Nothing is cut from the assembled message.
-function stopMessage(lead: string, facts: string[], tail: string, noun = 'findings'): string {
+// ("… and N more <noun>: see <where>."). Nothing is cut from the assembled message.
+export function stopMessage(lead: string, facts: string[], tail: string, noun = 'findings', where = 'ledger.json'): string {
   const whole = [lead, ...facts, tail].join(' ');
   if (whole.length <= MAX_STOP_MESSAGE) {
     return whole;
@@ -280,7 +286,7 @@ function stopMessage(lead: string, facts: string[], tail: string, noun = 'findin
   const room = MAX_STOP_MESSAGE - head.length - tail.length - 2;
   for (let count = facts.length; count >= 0; count -= 1) {
     const rest = facts.length - count;
-    const more = rest > 0 ? [`… and ${rest} more ${noun}: see ledger.json.`] : [];
+    const more = rest > 0 ? [`… and ${rest} more ${noun}: see ${where}.`] : [];
     const free = room - more.reduce((total, line) => total + line.length + 1, 0) - count;
     const share = count === 0 ? 0 : Math.floor(free / count);
     if (count === 0 || share >= MIN_FACT) {
@@ -328,7 +334,8 @@ export function applyVerdict(input: VerdictInput): Applied {
     ? `${name} does not accept the ${item.problem === SCOPE_PROBLEM ? "path outside the Task's scope" : 'undeclared sensitive path'} ${oneLine(item.path)} (it is not in its accepted_sensitive).`
     : reasonOf(item));
 
-  // 1. The user decided: an accepted risk is never raised again, whatever its severity.
+  // 1. The user decided: an accepted risk is never raised again, whatever its severity (the user's
+  // simplifications too, SF-055: an independent defect their removal causes comes without reopens).
   const all = [...input.items, ...extras];
   const dropped = all.filter((item) => target(item)?.status === 'accepted_risk');
   const items = all.filter((item) => target(item)?.status !== 'accepted_risk');
@@ -495,6 +502,11 @@ export function escalationMessage(escalated: LedgerEntry[]): string {
   return stopMessage(`The Implementer escalated ${idList(escalated.map((entry) => entry.id))}: only you know the answer.`, questions, 'Settle each: accept the risk or must fix (sf settle <workspace> <ticket> <id> accept|fix [note]); then the review runs, or the Fix you decided.');
 }
 
+// The reviewer of the entries the user's Simplify recorded (SF-055): one per suggestion of the
+// simplification pass, accepted_risk, so a reviewer item that reopens one is dropped (rule 1).
+export const SIMPLIFIER = 'simplify';
+export const isSimplification = (entry: LedgerEntry): boolean => entry.reviewer === SIMPLIFIER;
+
 // The settled entries for the reviewers (every entry that is not open), one line each.
 export function settledLines(ledger: LedgerEntry[]): string[] {
   const settled = ledger.filter((entry) => entry.status !== 'open');
@@ -502,6 +514,9 @@ export function settledLines(ledger: LedgerEntry[]): string[] {
     return ['None.'];
   }
   return settled.map((entry) => {
+    if (isSimplification(entry) && entry.status === 'accepted_risk') {
+      return `- ${entry.id} · simplified by the user's choice · \`${oneLine(entry.path)}\`: ${oneLine(entry.problem)} Do not ask to bring it back; a defect its removal causes is a new item, or reopens the entry whose fix the removal undid.`;
+    }
     const parts = [`- ${entry.id} · ${entry.status} · ${entry.severity} · \`${oneLine(entry.path)}\`: ${oneLine(entry.problem)}`];
     if (oneLine(entry.response) !== '') {
       parts.push(`Response: ${oneLine(entry.response)}`);
@@ -517,8 +532,9 @@ export function settledLines(ledger: LedgerEntry[]): string[] {
 }
 
 // The entries the MR text lists as not fixed: accepted risks, contests and nits left.
+// The user's simplifications (SF-055) are not findings and stay out.
 export function notFixed(ledger: LedgerEntry[]): LedgerEntry[] {
-  return ledger.filter((entry) => entry.status === 'accepted_risk' || entry.status === 'contested' || entry.status === 'left');
+  return ledger.filter((entry) => !isSimplification(entry) && (entry.status === 'accepted_risk' || entry.status === 'contested' || entry.status === 'left'));
 }
 
 const STATUS_WORDS: Partial<Record<LedgerStatus, string>> = { accepted_risk: 'accepted risk', contested: 'contested', left: 'left' };

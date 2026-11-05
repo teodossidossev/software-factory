@@ -21,12 +21,13 @@ const READ_TIMEOUT_MS = 10000;
 const TERMINAL_STATES = ['pushed', 'aborted', 'failed'];
 const SAY_STATES = ['working', 'awaiting_review', 'needs_human', 'ready_for_human_review'];
 const ACTION_LABELS = {
-  approve: 'Approve', abort: 'Abort', say: 'Send', review: 'Retry review', accept: 'Accept and prepare MR', settle: 'Settle', archive: 'Archive',
+  approve: 'Approve', abort: 'Abort', say: 'Send', review: 'Retry review', accept: 'Accept and prepare MR', settle: 'Settle', simplify: 'Simplify', archive: 'Archive',
   'mr-create': 'Create merge request', 'mr-merge': 'Merge', 'mr-status': 'Refresh MR status',
 };
 const PENDING_REASONS = {
   accept: 'the override was requested; waiting for its outcome.',
   settle: 'a settlement was requested; waiting for its outcome.',
+  simplify: 'the simplification was requested; waiting for its outcome.',
   approve: 'the push was requested; waiting for its outcome.',
   abort: 'abort was requested; waiting for its outcome.',
   say: 'the message is being sent.',
@@ -39,6 +40,7 @@ const PENDING_REASONS = {
 const PENDING_TEXT = {
   accept: 'Accepting over the gate…',
   settle: 'Settling the finding…',
+  simplify: 'Writing the Simplify Fix section…',
   approve: 'Pushing the branch…',
   abort: 'Abort requested; waiting for the job to end.',
   say: 'Sending the message…',
@@ -57,7 +59,9 @@ const STEPS = ['Implement', 'Claude review', 'Codex gate', 'MR preparation', 'Yo
 const GATE_CODES = ['gate_rounds', 'gate_budget', 'gate_failed'];
 // The ledger's stops (SF-052) that Accept and prepare MR takes on as well.
 const LEDGER_CODES = ['review_churn', 'review_disputed'];
-const ACCEPT_CODES = [...GATE_CODES, ...LEDGER_CODES];
+// The offer of the simplification pass (SF-055): Simplify applies it, Accept and prepare MR skips it.
+const SIMPLIFY_CODE = 'simplify_offered';
+const ACCEPT_CODES = [...GATE_CODES, ...LEDGER_CODES, SIMPLIFY_CODE];
 // The stops whose findings the user settles here (Accept risk, Must fix).
 const SETTLE_STOPS = ['escalated', ...LEDGER_CODES];
 // The Live log's filters: who a line comes from.
@@ -274,6 +278,16 @@ function ledgerOpen(detail) {
   return (detail.ledger ?? []).filter((entry) => entry.status === 'open' || entry.status === 'user_fix' || (entry.status === 'contested' && entry.dispute !== null));
 }
 
+// The job waits on the offer of the simplification pass (SF-055).
+const simplifiable = (job) => job !== null && job !== undefined && job.state === 'needs_human' && job.error?.code === SIMPLIFY_CODE;
+
+// The suggestions the simplification pass offers on the job's last iteration (SF-055), for the
+// confirmations of Simplify and of Accept (Skip).
+function offeredSuggestions(detail) {
+  const record = iterationOf(detail, detail?.job?.iteration)?.simplify ?? null;
+  return { items: Array.isArray(record?.suggestions) ? record.suggestions : [], suggestions: true };
+}
+
 // The ledger's findings the user settles while the job waits (SF-052): escalated entries and
 // contests, each with Accept risk and Must fix.
 function settleable(detail) {
@@ -341,6 +355,8 @@ function haltSentence(detail) {
     return 'The job failed and cannot go on; archive it.';
   }
   switch (code) {
+    case SIMPLIFY_CODE:
+      return 'The reviewers found the change clean, and the simplification pass found things the review fixes added that the Task does not need. Simplify (one more Fix section, reviewed as usual), or Accept and prepare the MR without them (they are listed in the MR text).';
     case 'escalated':
       return 'The Implementer escalated a question only you can answer. Settle each finding below: Accept risk or Must fix; then the job goes on.';
     case 'review_disputed':
@@ -1284,9 +1300,12 @@ function availability(action, job) {
   if (action === 'review') {
     return reviewFailed(job) ? '' : 'only after a failed review.';
   }
+  if (action === 'simplify') {
+    return simplifiable(job) ? '' : 'only when the simplification pass offers suggestions (simplify_offered).';
+  }
   if (action === 'accept') {
     return state.detail !== null && keyOf(state.detail.job) === keyOf(job) && gateAcceptable(state.detail)
-      ? '' : 'only after the gate stopped the job (gate_rounds, gate_budget or gate_failed) with a clean Claude review.';
+      ? '' : 'only after the gate or the ledger stopped the job, or the simplification pass offered suggestions, with a clean Claude review.';
   }
   return SAY_STATES.includes(job.state) ? '' : `messages need working, awaiting_review, needs_human or ready_for_human_review; the job is ${job.state}.`;
 }
@@ -1323,6 +1342,10 @@ function renderActions() {
   if (acceptable && acceptReason !== '') {
     reasons.push(`${ACTION_LABELS.accept}: ${acceptReason}`);
   }
+  // Simplify shows only on the offer of the simplification pass (SF-055).
+  const offered = job !== null && simplifiable(job);
+  $('simplify-button').hidden = !offered;
+  $('simplify-button').disabled = !offered || availability('simplify', job) !== '' || state.confirm !== null;
   // The merge request on the Git host (SF-048): each button shows where it applies; while the
   // actions are off (a token missing), the reason names the variable.
   for (const [action, shown] of [['mr-create', job !== null && canCreateMr(job)], ['mr-merge', job !== null && canMerge(job)], ['mr-status', job !== null && hasMr(job)]]) {
@@ -1415,6 +1438,9 @@ function describeOutcome(action, result) {
   }
   if (action === 'accept') {
     return { level: 'ok', text: `Accepted over the gate: the factory prepares the MR of iteration ${data.iteration} (state ${data.state}).` };
+  }
+  if (action === 'simplify') {
+    return { level: 'ok', text: `Simplify: the Implementer applies the suggestions in iteration ${data.iteration} (state ${data.state}).` };
   }
   if (action === 'settle') {
     const status = data.status === 'accepted_risk' ? 'accepted as a risk' : data.status === 'user_fix' ? 'to be fixed' : data.status;
@@ -1593,12 +1619,16 @@ function openConfirm(action) {
       : '',
     approve: `Pushes branch ${job.branch} to origin: the one commit the factory prepared at Clean, rebased onto ${job.base}. Nothing is committed or rebased now; a tip edited by hand is refused unless pushed as it is.`,
     abort: `Ends the job on branch ${job.branch}: the Implementer session stops and queued messages are dropped. The branch and its worktree stay as they are.`,
-    accept: LEDGER_CODES.includes(job.error?.code)
+    simplify: `Writes one Fix section “Simplify” with the suggestions below into the Task file; the Implementer applies them and the Claude review and the gate review the result as usual. The suggestions are recorded in the ledger as your choice, so a reviewer cannot ask for them back. It runs once per job.`,
+    accept: job.error?.code === SIMPLIFY_CODE
+      ? `Skips the simplification: iteration ${job.iteration}, which the reviewers found clean, goes on to MR preparation as it is. The suggestions go into the MR text under “Simplifications not applied”, for a follow-up ticket.`
+      : LEDGER_CODES.includes(job.error?.code)
       ? `Accepts iteration ${job.iteration}, which Claude reviewed clean, over the ledger's stop (${job.error?.code}). The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. The open findings are not applied; the override is recorded in the job's history.`
       : `Overrides the Codex gate (${job.error?.code}): iteration ${job.iteration}, which Claude reviewed clean, goes on as after a clean gate. The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. The override is recorded in the job's history.`,
   };
   $('confirm-text').textContent = texts[action];
-  renderConfirmItems(action === 'accept' ? gateLeftovers(state.detail) : null);
+  renderConfirmItems(action === 'simplify' || (action === 'accept' && job.error?.code === SIMPLIFY_CODE) ? offeredSuggestions(state.detail)
+    : action === 'accept' ? gateLeftovers(state.detail) : null);
   $('discard').checked = false;
   $('as-is').checked = false;
   $('discard-label').hidden = action !== 'abort';
@@ -1614,6 +1644,15 @@ function renderConfirmItems(leftovers) {
   $('confirm-items').hidden = leftovers === null;
   if (leftovers === null) {
     $('confirm-items-list').replaceChildren();
+    return;
+  }
+  if (leftovers.suggestions === true) {
+    $('confirm-items-title').textContent = `Suggestions of the simplification pass (${leftovers.items.length}):`;
+    $('confirm-items-list').replaceChildren(...leftovers.items.map((item) => {
+      const entry = el('li');
+      entry.append(el('code', '', item.path), document.createTextNode(`: ${item.what} Why: ${item.why} (about ${item.saves_lines} lines)`));
+      return entry;
+    }));
     return;
   }
   $('confirm-items-title').textContent = leftovers.ledger === true
@@ -1635,7 +1674,8 @@ function renderConfirmButton() {
   const job = state.detail?.job;
   ok.textContent = confirm.action === 'mr-create' ? 'Create the merge request'
     : confirm.action === 'mr-merge' ? `Merge #${job?.mr?.number} into ${job?.base}`
-    : confirm.action === 'accept' ? 'Accept and prepare the MR'
+    : confirm.action === 'simplify' ? 'Simplify'
+    : confirm.action === 'accept' ? (job?.error?.code === SIMPLIFY_CODE ? 'Skip and prepare the MR' : 'Accept and prepare the MR')
     : confirm.action === 'approve' ? ($('as-is').checked ? 'Approve: push as it is' : 'Approve: push the branch') : discard ? 'Abort and discard the branch' : 'Abort, keep the worktree';
   ok.className = discard ? 'btn btn-danger' : 'btn btn-primary';
 }
@@ -1715,6 +1755,10 @@ function haltedSegment(job) {
   }
   if (code.startsWith('gate_')) {
     return 2;
+  }
+  // The simplification pass runs after the gate, before MR preparation (SF-055).
+  if (code === SIMPLIFY_CODE) {
+    return 3;
   }
   if (canApprove(job)) {
     return 4;
@@ -2731,6 +2775,7 @@ function init() {
   $('discard').addEventListener('change', renderConfirmButton);
   $('as-is').addEventListener('change', renderConfirmButton);
   $('accept-gate-button').addEventListener('click', () => openConfirm('accept'));
+  $('simplify-button').addEventListener('click', () => openConfirm('simplify'));
   $('copy-checkout').addEventListener('click', () => {
     const job = state.detail?.job;
     if (job) {

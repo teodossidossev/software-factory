@@ -35,7 +35,7 @@ function resultText(content: unknown): string {
 export interface DescribedEvent {
   ts: string | null;
   iteration: number | null;
-  // "prompt", "state", "notify_failed", "placeholders_removed", "review", "review_failed" (Claude's or the gate's), "gate_overridden" (the user accepted over the stopped gate), "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
+  // "prompt", "state", "notify_failed", "placeholders_removed", "review", "review_failed" (Claude's or the gate's), "gate_overridden" (the user accepted over the stopped gate), "simplify" and "simplify_chosen" (SF-055), "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
   type: string;
   lines: string[];
 }
@@ -105,6 +105,20 @@ function recordLines(record: Record<string, unknown>): string[] {
   if (record.type === 'gate_overridden') {
     const count = typeof record.unapplied === 'number' ? record.unapplied : 0;
     return [`${prefix} gate overridden by the user (${String(record.code)}): ${count} Codex ${count === 1 ? 'item' : 'items'} not applied`];
+  }
+  // The simplification pass (SF-055): its outcome, and the user's choice on its offer.
+  if (record.type === 'simplify') {
+    const ignored = record.ignored === true ? ' (ignored: the job had moved on)' : '';
+    if (typeof record.error === 'string') {
+      return [`${prefix} simplification pass failed: ${oneLine(record.error)}${ignored}`];
+    }
+    const count = typeof record.suggestions === 'number' ? record.suggestions : 0;
+    const dropped = typeof record.dropped === 'number' && record.dropped > 0 ? `, ${record.dropped} dropped (they would undo a fixed blocker)` : '';
+    return [`${prefix} simplification pass: ${count} ${count === 1 ? 'suggestion' : 'suggestions'}${dropped}${ignored}`];
+  }
+  if (record.type === 'simplify_chosen') {
+    const count = typeof record.suggestions === 'number' ? record.suggestions : 0;
+    return [`${prefix} simplification ${record.choice === 'skip' ? 'skipped' : 'chosen'} by the user: ${count} ${count === 1 ? 'suggestion' : 'suggestions'}`];
   }
   if (record.type === 'merge_request') {
     const verb = { created: 'opened', reused: 'already open, reused', merged: 'merged', updated: `found ${String(record.mr_state)} on the host` }[String(record.action)] ?? String(record.action);

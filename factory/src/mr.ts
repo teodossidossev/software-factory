@@ -9,6 +9,7 @@ import { runGit } from './git.js';
 import { changedPaths, writeResolutionPatch } from './patch.js';
 import { itemLine, type ReviewItem } from './review.js';
 import { type LedgerEntry, notFixed, notFixedLine } from './ledger.js';
+import { type Suggestion, suggestionLine } from './simplify.js';
 import { headerProblem, MR_REQUIRED_HEADINGS, sectionLines, testingProblem } from './rules.js';
 import { TASK_DIR } from './task-file.js';
 
@@ -202,6 +203,15 @@ export const FINDINGS_HEADING = '### Review findings not fixed';
 // `### Review findings not fixed` subsection of `## Special things to note` (withSubsection).
 export function withFindings(text: string, ledger: LedgerEntry[]): string {
   return withSubsection(text, FINDINGS_HEADING, notFixed(ledger).map(notFixedLine), (rest) => `- … and ${rest} more: see ledger.json of the job.`);
+}
+
+export const SIMPLIFY_HEADING = '### Simplifications not applied';
+
+// The MR text with the suggestions of the simplification pass the user skipped (SF-055), one line
+// each, as a `### Simplifications not applied` subsection of `## Special things to note`
+// (withSubsection), so they can become a follow-up ticket.
+export function withSimplifications(text: string, suggestions: Suggestion[], iteration: number): string {
+  return withSubsection(text, SIMPLIFY_HEADING, suggestions.map((item) => `- ${suggestionLine(item)}`), (rest) => `- … and ${rest} more: see simplify.json of iteration ${iteration}.`);
 }
 
 // The MR text with a subsection the factory writes (heading) at the end of `## Special things

@@ -10,11 +10,11 @@ import { describeEvent, limitStateText, shortInput } from './watch.js';
 // The bound of a tool's input and a tool's result in an entry, in characters.
 export const DETAIL_CHARS = 16384;
 const RULES_MARK = '\n\nRules from the Software Factory:';
-// changeNote (src/execution.ts), appended after the prompt with a blank line.
+// changeNote (src/execution/shared.ts), appended after the prompt with a blank line.
 const CHANGE_NOTE = /(?:^|\n\n)The Task file \S+ changed since you were last given it/u;
 const KEPT_FILES = '\n\nThis job restarts an earlier job of ';
 // The images line of factoryPrompt (src/prompts.ts) and the Resume's note of changed images
-// (src/execution.ts), SF-065: each after a blank line, the images line last before the rules.
+// (src/execution/control.ts), SF-065: each after a blank line, the images line last before the rules.
 const IMAGES_LINE = /\n\nThe Task's images are in .+: .+\. Read them when you need them\.$/u;
 const IMAGES_CHANGED = /\n\nThe Task's images changed while the job was paused: .+\.$/u;
 const CONTINUE = 'Continue where you stopped.';
@@ -279,9 +279,9 @@ async function verdictEntry(record: Record<string, unknown>, it: number, ctx: St
   return { ...entry, summary: file.summary, items };
 }
 
-// The `changes` entry after a state change that ends a publish (#publish then #transition in
-// src/execution.ts: the work and the conflict paths, or an escalation from the Fix table); the
-// retry paths start from needs_human and publish nothing.
+// The `changes` entry after a state change that ends a publish (publish then transition: the work
+// path in src/execution/turns.ts, the conflict path in src/execution/mr-steps.ts, or an escalation
+// from the Fix table); the retry paths start from needs_human and publish nothing.
 async function changesEntry(state: { from: unknown; to: unknown; code: string | null }, it: number, ctx: StreamContext): Promise<Draft[]> {
   const published = (state.to === 'awaiting_review' && (state.from === 'working' || state.from === 'preparing_mr'))
     || (state.to === 'needs_human' && state.code === 'escalated' && state.from === 'working');

@@ -463,9 +463,11 @@ workspace's checkout; the checkout itself (the user's IDE checkout) is never wri
 factory beyond its Git refs (branches) and worktree registrations, except by the hand-over to it
 and back (SF-073, section Hand-over to your checkout).
 
-The job operations below are the Execution's (`src/execution.ts`): the user starts a job (the
-dashboard's Start, `sf start`), the reviewers' verdicts take the fix and the clean paths, and the
-user goes on with `sf say`, approve, abort or reset. None of them is an MCP tool.
+The job operations below are the Execution's (`src/execution.ts`, a thin coordinator over its parts
+in `src/execution/`: `start.ts`, `turns.ts`, `reviews.ts`, `mr-steps.ts`, `handover-steps.ts`,
+`control.ts`, `status.ts`): the user starts a job (the dashboard's Start, `sf start`), the
+reviewers' verdicts take the fix and the clean paths, and the user goes on with `sf say`, approve,
+abort or reset. None of them is an MCP tool.
 
 **Each job runs in its own process** (SF-042, `src/runner.ts`). `sf serve` creates the job at
 `start`; the job's turns, its reviews and its gate run in the job's **runner**, `sf run <workspace>
@@ -936,9 +938,9 @@ does not match the rule, so it is a change of the Implementer's or the user's.
 
 ### Job states
 
-Every state change a job may make, by the step of `src/execution.ts` that makes it (SF-088):
-`JOB_TRANSITIONS` in `src/jobs.ts`, checked before each change is written; any other is refused
-with `illegal_transition`.
+Every state change a job may make, by the step of `src/execution/` (the parts of `src/execution.ts`)
+that makes it (SF-088): `JOB_TRANSITIONS` in `src/jobs.ts`, checked before each change is written;
+any other is refused with `illegal_transition`.
 
 <!-- transitions:start -->
 | From | To | Action |
@@ -1281,7 +1283,7 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    turn, the commit and the rebase), with no fix turn, no Claude review, no gate and no
    simplification pass. It takes `needs_human` with `fetch_failed` (the fetch of step 1),
    `mr_serve_restarted`, `mr_interrupted` (paused as MR preparation began), `mr_commit_failed`,
-   `mr_rebase_failed` or `mr_failed` (`MR_RETRY_CODES` in `src/execution.ts`), with the worktree,
+   `mr_rebase_failed` or `mr_failed` (`MR_RETRY_CODES` in `src/execution/shared.ts`), with the worktree,
    no `prepared_commit` and a clean Claude review of the last iteration; anything else is
    `invalid_state` naming the state and code. The accepted sensitive paths are the clean path's:
    those of the last iteration's `review.json`, plus its `gate.json`'s when the gate's verdict is

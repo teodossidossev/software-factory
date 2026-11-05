@@ -23,6 +23,7 @@ import { writeFileAtomic } from './atomic.js';
 import { conversationUrl, MAX_CONVERSATION_URL, ticketConversation } from './conversation.js';
 import { FactoryError } from './errors.js';
 import type { Execution } from './execution.js';
+import { lineEntries, type StreamEntry, streamContext } from './job-stream.js';
 import type { Job, JobState, JobStore } from './jobs.js';
 import { DECISIONS, unsettled } from './ledger.js';
 import { WORKSPACE_NAME_PATTERN } from './registry.js';
@@ -35,6 +36,8 @@ import { describeEvent, followLines, shortInput } from './watch.js';
 export const DEFAULT_DASHBOARD_PORT = 8788;
 export const TOKEN_FILE = 'dashboard-token';
 export const MAX_STREAMS = 8;
+// The events.jsonl lines of one page of the job's Stream (SF-082).
+export const STREAM_PAGE_LINES = 2000;
 // The raw body of an action request, in bytes: a transport bound, not a lifecycle rule.
 export const MAX_ACTION_BODY_BYTES = 128 * 1024;
 const LOOPBACK_HOST = '127.0.0.1';
@@ -792,11 +795,26 @@ export async function startDashboard(
       send(stream, 'job', await jobDetail(jobs, job, gateOn, actions, setup));
     }
     const start = Number(from);
+    const [workspaceName, ticketName] = key;
+    // The job's Stream (SF-082): each line's entries, built asynchronously but sent strictly in
+    // line order on one promise chain; the job's files are read fresh for each line.
+    let entries: Promise<void> = Promise.resolve();
     try {
       await followLines(jobs.eventsPath(...key), true, (raw, line) => {
         const event = line >= start ? describeEvent(raw) : undefined;
         if (event !== undefined && event.lines.length > 0) {
           send(stream, 'event', { line, ts: event.ts, iteration: event.iteration, type: event.type, text: event.lines.join('\n') });
+        }
+        if (line >= start) {
+          entries = entries.then(async () => {
+            if (stream.abort.signal.aborted) {
+              return;
+            }
+            const built = await lineEntries(raw, line, streamContext(jobs, workspaceName, ticketName));
+            if (built.length > 0) {
+              send(stream, 'entries', { line, entries: built });
+            }
+          }).catch((error: unknown) => console.error(error));
         }
       }, stream.abort.signal);
     } catch (error) {
@@ -850,6 +868,15 @@ export async function startDashboard(
       body(res, 'application/json; charset=utf-8', JSON.stringify(await jobDetail(jobs, job, gateOn, actions, setup)));
       return;
     }
+    if (tail.length === 1 && tail[0] === 'stream') {
+      const from = query.get('from') ?? '0';
+      if (!/^\d{1,9}$/.test(from)) {
+        empty(res, 404);
+        return;
+      }
+      json(res, 200, await streamPage(...key, Number(from)));
+      return;
+    }
     if (tail.length === 1 && tail[0] === 'mr') {
       const text = await jobs.readMrText(...key);
       if (text === undefined) {
@@ -871,6 +898,37 @@ export async function startDashboard(
       return;
     }
     empty(res, 404);
+  }
+
+  // GET api/jobs/<ws>/<ticket>/stream?from=<line> (SF-082): the entries of at most STREAM_PAGE_LINES
+  // lines of events.jsonl from the 0-based from, in line order; next is the first line not read, end
+  // whether the file has no more lines. The job's files are read once for the page.
+  async function streamPage(workspace: string, ticket: string, from: number): Promise<{ entries: StreamEntry[]; next: number; end: boolean }> {
+    const lines: Array<[string, number]> = [];
+    let end = true;
+    const stop = new AbortController();
+    try {
+      await followLines(jobs.eventsPath(workspace, ticket), false, (raw, line) => {
+        if (line >= from + STREAM_PAGE_LINES) {
+          end = false;
+          stop.abort();
+        } else if (line >= from) {
+          lines.push([raw, line]);
+        }
+      }, stop.signal);
+    } catch (error) {
+      // A job without events.jsonl has no entries yet.
+      if (!(error instanceof FactoryError)) {
+        throw error;
+      }
+      return { entries: [], next: 0, end: true };
+    }
+    const ctx = streamContext(jobs, workspace, ticket);
+    const entries: StreamEntry[] = [];
+    for (const [raw, line] of lines) {
+      entries.push(...(await lineEntries(raw, line, ctx)));
+    }
+    return { entries, next: from + lines.length, end };
   }
 
   // GET api/tickets/<ws>/<ticket>/task[?archived=1]: the Task file through the Task file reader,

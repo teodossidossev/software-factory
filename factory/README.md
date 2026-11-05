@@ -130,7 +130,7 @@ prints the message below the table). Both work without `sf serve`; they read the
 | `SF_TASK_CHECK_MAX_TURNS` | `30` | `maxTurns` of the Task check (SF-054); its model is `SF_REVIEW_MODEL`. |
 | `SF_TASK_CHECK_AUTO` | `on` | The automatic Task check of `sf serve` (SF-086, section Task check): `on` checks a written Task file 60 s after its last change; `off` keeps the check manual (Check on the board, `sf check-task`). Empty is the default; anything else refuses to start (`invalid_config`). |
 | `SF_TASK_CHECK_PARALLEL` | `1` | The automatic Task checks that run at once over every workspace, 1 to 4 (SF-086); a manual Check counts toward it but never waits. Anything else refuses to start (`invalid_config`). |
-| `SF_RULES_MAX_BYTES` | `49152` (48 KiB) | The bytes of rule file content the agents are given at most (SF-059, section Coding rules); the headings and the fixed sentence do not count. A positive integer up to 16 MiB. |
+| `SF_RULES_MAX_BYTES` | `49152` (48 KiB) | The bytes of rule file content the agents are given at most (SF-059, section Coding rules); the headings and the fixed sentence do not count. The user's rules files are taken first, and one over the budget is cut to it (SF-093). A positive integer up to 16 MiB. |
 | `SF_GATE` | `codex` | The gate after a clean Claude review (SF-039): `codex` runs the Codex CLI, `off` lets the Claude verdict decide. With `codex` and no executable found the gate is off, and `sf serve` prints one line saying so. |
 | `SF_CODEX` | `codex` on `PATH` | Absolute path of the Codex CLI executable. Pointing at nothing turns the gate off; it is not looked for on `PATH` then. |
 | `SF_CODEX_MODEL` | unset | Model of the gate, passed as `--model`; unset uses Codex's default (the user's `~/.codex/config.toml`). |
@@ -298,9 +298,17 @@ the Report, the Fix sections, the tools).
   repository files out (the instruction file or a linked one; never the user's rules files). The
   software-factory workspace skips `docs/runbooks/coordinator.md`, the coordinating session's
   runbook its `AGENTS.md` points to.
-- **Budget**: at most `SF_RULES_MAX_BYTES` (default 48 KiB) of file content; the headings and the
-  sentence do not count. Files are taken whole in order; the first that does not fit and every
-  later one are named in a closing line `Not included, read them if relevant: …`.
+- **Budget** (SF-093): at most `SF_RULES_MAX_BYTES` (default 48 KiB) of file content; the headings,
+  the sentence and the cut lines do not count. The user's rules files are taken first, so
+  repository files never push them out: the workspace's whole when it fits the budget, else cut to
+  it; then the global one whole when it fits what is left, else cut to what is left, else (nothing
+  left) left out. Then the repository's files in link order: each is taken whole when it fits what
+  is left, else left out, and the next one is still tried; a repository file is never cut. A cut
+  file ends at the last full UTF-8 character under the limit and is followed by the line
+  `[cut at the budget: N of M bytes given]`; `rules.json` gives its cut size and sha256 and its full
+  size as `cut_from`, and `sf rules` ends its line with `(cut from M bytes)`. The files left out
+  are named in a closing line `Not included, read them if relevant: …`. The block keeps the order
+  repository, workspace, global.
 - **The block**: `<rules>`, the sentence "These are the repository's and the user's coding rules:
   …", each file under `### <source>: <path>` (`repository` with its repository path, `workspace`
   as `rules/<workspace>.md`, `global` as `rules/global.md`), the closing line when files were left

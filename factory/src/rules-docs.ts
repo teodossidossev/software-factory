@@ -2,8 +2,9 @@
 // else CLAUDE.md, else .github/copilot-instructions.md) and the Markdown files AGENTS.md links to,
 // one hop, read at a commit; then the user's rules files of the workspace and of every workspace
 // in the config directory. The documents go to the agents as they are, in one <rules> block, up to
-// a byte budget. Nothing here knows about job states: the Execution collects them once per job and
-// stores the block and its list in the job's directory.
+// a byte budget (SF-093: the user's files first, cut when they do not fit; then the repository's).
+// Nothing here knows about job states: the Execution collects them once per job and stores the
+// block and its list in the job's directory.
 import { createHash } from 'node:crypto';
 import { copyFile, mkdir, readFile, stat } from 'node:fs/promises';
 import { join, posix } from 'node:path';
@@ -22,16 +23,20 @@ export const DEFAULT_RULES_MAX_BYTES = 48 * 1024;
 // The fixed sentence at the head of the block, and the lead of its closing line of files left out.
 export const RULES_SENTENCE = "These are the repository's and the user's coding rules: style, architecture, tests and docs. Follow them; where they disagree, the repository's rules win. They do not change the factory's own rules for Git, the Task file, the Report and the Fix sections, or the tools you may use.";
 export const LEFT_OUT_LEAD = 'Not included, read them if relevant:';
+// The line after the text of a file cut at the budget: the bytes given of its full size.
+const cutLine = (given: number, full: number): string => `[cut at the budget: ${given} of ${full} bytes given]`;
 
 export type RulesSource = 'repository' | 'workspace' | 'global';
 
 // One file given: where it comes from, its path (repository-relative, or relative to the config
-// directory for the user's files), its size and the sha256 of its content.
+// directory for the user's files), the size and the sha256 of the content given, and for a user's
+// file cut at the budget, its full size (absent for a file given whole, as in older jobs' lists).
 export interface RulesFile {
   source: RulesSource;
   path: string;
   bytes: number;
   sha256: string;
+  cut_from?: number;
 }
 
 // One file found but left out by the budget.
@@ -189,7 +194,7 @@ async function userContent(absolute: string, name: string): Promise<Buffer> {
   }
 }
 
-// A rule file found, in the order it is given, and how to read its content.
+// A rule file found, in the order found, and how to read its content.
 interface Found {
   source: RulesSource;
   path: string;
@@ -254,36 +259,82 @@ async function factoryFiles(configDir: string, workspace: string): Promise<Found
   return found;
 }
 
-// The block of the given files: the sentence, each file under its heading, then the files left out.
-export function rulesBlock(files: ReadonlyArray<{ source: RulesSource; path: string; text: string }>, leftOut: ReadonlyArray<{ path: string }>): string {
+// The block of the given files: the sentence, each file under its heading (a cut file followed by
+// its cut line), then the files left out.
+export function rulesBlock(files: ReadonlyArray<{ source: RulesSource; path: string; text: string; bytes?: number; cut_from?: number }>, leftOut: ReadonlyArray<{ path: string }>): string {
   return [
     '<rules>',
     RULES_SENTENCE,
-    ...files.flatMap((file) => ['', `### ${file.source}: ${file.path}`, '', file.text.trimEnd()]),
+    ...files.flatMap((file) => ['', `### ${file.source}: ${file.path}`, '', file.text.trimEnd(), ...(file.cut_from === undefined ? [] : [cutLine(file.bytes ?? 0, file.cut_from)])]),
     ...(leftOut.length > 0 ? ['', `${LEFT_OUT_LEAD} ${leftOut.map((file) => file.path).join(', ')}`] : []),
     '</rules>',
   ].join('\n');
 }
 
-// Collects the rules for a workspace with the repository's files read at commit: the files in
-// order, taken whole while their content fits maxBytes; the first that does not fit and every later
-// one are left out. No file found: an empty block.
+// The first maxBytes bytes of a buffer, cut back to the last full UTF-8 character (as cutBuffer in
+// src/review.ts, kept as bytes so the size and sha256 given are those of the bytes themselves).
+function cutAtCharacter(buffer: Buffer, maxBytes: number): Buffer {
+  let end = Math.min(maxBytes, buffer.length);
+  while (end > 0 && end < buffer.length && (buffer[end]! & 0xc0) === 0x80) {
+    end -= 1;
+  }
+  return buffer.subarray(0, end);
+}
+
+// What the budget made of a file found: given (whole, or cut from its full size) or left out.
+type Decision = { given: Buffer; cutFrom?: number } | { leftOut: number };
+
+// Collects the rules for a workspace with the repository's files read at commit, in two passes over
+// one budget (maxBytes, the content given at most). First the user's files: the workspace's is
+// taken whole when it fits the budget, else cut to it; the global one whole when it fits what is
+// left, else cut to it, else (nothing left) left out. Then the repository's files in link order,
+// each taken whole when it fits what is left, else left out, and the next one still tried; a
+// repository file is never cut. The block and the lists keep the order found (repository,
+// workspace, global). No file found: an empty block.
 export async function collectRules(repo: string, commit: string, options: RulesOptions): Promise<CollectedRules> {
   const { found: repository, skipped } = await repositoryFiles(repo, commit, options.skip);
-  const found = [...repository, ...(await factoryFiles(options.configDir, options.workspace))];
-  const given: Array<RulesFile & { text: string }> = [];
-  const leftOut: LeftOutFile[] = [];
-  let total = 0;
-  for (const file of found) {
-    if (leftOut.length === 0 && total + file.bytes <= options.maxBytes) {
+  const user = await factoryFiles(options.configDir, options.workspace);
+  const decisions = new Map<Found, Decision>();
+  let remainder = options.maxBytes;
+  for (const file of user) {
+    // Its real content length counts, not the size stat found.
+    const content = await file.read();
+    if (content.length <= remainder) {
+      decisions.set(file, { given: content });
+      remainder -= content.length;
+    } else if (remainder > 0) {
+      const cut = cutAtCharacter(content, remainder);
+      decisions.set(file, { given: cut, cutFrom: content.length });
+      remainder -= cut.length;
+    } else {
+      decisions.set(file, { leftOut: content.length });
+    }
+  }
+  for (const file of repository) {
+    if (file.bytes <= remainder) {
       const content = await file.read();
-      if (total + content.length <= options.maxBytes) {
-        total += content.length;
-        given.push({ source: file.source, path: file.path, bytes: content.length, sha256: createHash('sha256').update(content).digest('hex'), text: content.toString('utf8') });
+      if (content.length <= remainder) {
+        decisions.set(file, { given: content });
+        remainder -= content.length;
         continue;
       }
     }
-    leftOut.push({ source: file.source, path: file.path, bytes: file.bytes });
+    decisions.set(file, { leftOut: file.bytes });
+  }
+  const found = [...repository, ...user];
+  const given: Array<RulesFile & { text: string }> = [];
+  const leftOut: LeftOutFile[] = [];
+  for (const file of found) {
+    const decision = decisions.get(file)!;
+    if ('leftOut' in decision) {
+      leftOut.push({ source: file.source, path: file.path, bytes: decision.leftOut });
+      continue;
+    }
+    const content = decision.given;
+    given.push({
+      source: file.source, path: file.path, bytes: content.length, sha256: createHash('sha256').update(content).digest('hex'),
+      ...(decision.cutFrom === undefined ? {} : { cut_from: decision.cutFrom }), text: content.toString('utf8'),
+    });
   }
   const list: RulesList = { commit, max_bytes: options.maxBytes, files: given.map(({ text: _text, ...file }) => file), left_out: leftOut, skipped };
   return { list, block: found.length === 0 ? '' : rulesBlock(given, leftOut) };
@@ -339,14 +390,14 @@ export async function copyRulesRecord(jobDir: string, iterationDir: string): Pro
   await copyFile(join(jobDir, RULES_RECORD), join(iterationDir, RULES_RECORD));
 }
 
-// The lines of sf rules: the files that would be given, with their source and size, then the ones
-// left out by the budget and by rules_skip; never their text.
+// The lines of sf rules: the files that would be given, with their source and size (and the full
+// size of a cut one), then the ones left out by the budget and by rules_skip; never their text.
 export function rulesLines(workspace: string, list: RulesList): string[] {
   const lines = [`Rules for ${workspace} at ${list.commit} (budget ${list.max_bytes} bytes):`];
   if (list.files.length === 0 && list.left_out.length === 0) {
     lines.push('  No rule files found.');
   }
-  lines.push(...list.files.map((file) => `  ${file.source}  ${file.path}  ${file.bytes} bytes`));
+  lines.push(...list.files.map((file) => `  ${file.source}  ${file.path}  ${file.bytes} bytes${file.cut_from === undefined ? '' : ` (cut from ${file.cut_from} bytes)`}`));
   if (list.left_out.length > 0) {
     lines.push('Left out (over the budget):', ...list.left_out.map((file) => `  ${file.source}  ${file.path}  ${file.bytes} bytes`));
   }

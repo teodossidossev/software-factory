@@ -466,8 +466,8 @@ test('sf rules (SF-059): the rule files that would be given, without their text:
   const atBase = await runCli(['rules', 'rules-demo', 'T-1'], { SF_RULES_MAX_BYTES: '100' });
   assert.equal(atBase.code, 0, atBase.stderr);
   assert.equal(atBase.stdout, [
-    `Rules for rules-demo at ${second} (budget 100 bytes):`, '  repository  AGENTS.md  79 bytes', '  repository  docs/style.md  18 bytes',
-    'Left out (over the budget):', '  repository  docs/new.md  4 bytes', '  global  rules/global.md  7 bytes',
+    `Rules for rules-demo at ${second} (budget 100 bytes):`, '  repository  AGENTS.md  79 bytes', '  repository  docs/new.md  4 bytes', '  global  rules/global.md  7 bytes',
+    'Left out (over the budget):', '  repository  docs/style.md  18 bytes',
     'Skipped by rules_skip:', '  repository  docs/runbook.md', '',
   ].join('\n'));
   assert.ok(!atBase.stdout.includes('SECRET-STYLE-TEXT'));

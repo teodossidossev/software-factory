@@ -1,0 +1,1507 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Factory Job Stream</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: the board keeps its five columns; a job opens as a full page: sticky head, one stream, composer pinned at the bottom.
+   Tokens follow the live dashboard's app.css so the prototype reads as the same tool. */
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --panel-2: #f7f8fa; --fg: #1f2328; --muted: #636c76;
+  --border: #d8dde3; --border-strong: #c3cad2; --accent: #2b6cb0; --accent-fg: #ffffff; --selected: #e8f0fb;
+  --add: #1a7f37; --add-bg: #e6f4ea; --del: #b42318; --del-bg: #fdecea; --warn: #9a6700; --warn-bg: #fff4d6; --hunk: #6f42c1;
+  --s-working: #2b6cb0; --s-review: #b7791f; --s-human: #c05621; --s-ready: #2f855a; --s-ended: #718096; --s-failed: #c53030;
+  --a-impl: #2b6cb0; --a-claude: #b7791f; --a-codex: #6f42c1; --a-you: #2f855a; --a-factory: #718096;
+  --proto: #b42318; --proto-bg: #fdecea; --bar: #1f2328; --bar-fg: #f4f5f7;
+  --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --radius: 8px; --radius-sm: 6px; --control: 32px; --shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --tree-w: 320px; --vcs-mod: #2f6ad0; --vcs-add: #3d8a33; --vcs-del: #8c8c8c; --wbg-add: #b7e4c0; --wbg-del: #f5c1bd;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #141619; --panel: #1d2024; --panel-2: #23272c; --fg: #e6e8eb; --muted: #9aa3ad; --border: #343a41; --border-strong: #454c55;
+  --accent: #6fa8ff; --accent-fg: #0b1220; --selected: #26354a; --add: #56d364; --add-bg: #1b3524; --del: #ff7b72; --del-bg: #3d1f1f;
+  --warn: #e3b341; --warn-bg: #3b2f12; --hunk: #b392f0; --s-working: #6fa8ff; --s-review: #e3b341; --s-human: #f0883e; --s-ready: #56d364;
+  --s-ended: #9aa3ad; --s-failed: #ff7b72; --a-impl: #6fa8ff; --a-claude: #e3b341; --a-codex: #b392f0; --a-you: #56d364; --a-factory: #9aa3ad;
+  --proto: #ff7b72; --proto-bg: #3d1f1f; --bar: #e6e8eb; --bar-fg: #141619; --shadow: none; --vcs-mod: #6c9ef8; --vcs-add: #73bd79; --vcs-del: #8f9399; --wbg-add: #2c5d36; --wbg-del: #6b2b2b; color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #141619; --panel: #1d2024; --panel-2: #23272c; --fg: #e6e8eb; --muted: #9aa3ad; --border: #343a41; --border-strong: #454c55;
+  --accent: #6fa8ff; --accent-fg: #0b1220; --selected: #26354a; --add: #56d364; --add-bg: #1b3524; --del: #ff7b72; --del-bg: #3d1f1f;
+  --warn: #e3b341; --warn-bg: #3b2f12; --hunk: #b392f0; --s-working: #6fa8ff; --s-review: #e3b341; --s-human: #f0883e; --s-ready: #56d364;
+  --s-ended: #9aa3ad; --s-failed: #ff7b72; --a-impl: #6fa8ff; --a-claude: #e3b341; --a-codex: #b392f0; --a-you: #56d364; --a-factory: #9aa3ad;
+  --proto: #ff7b72; --proto-bg: #3d1f1f; --bar: #e6e8eb; --bar-fg: #141619; --shadow: none; --vcs-mod: #6c9ef8; --vcs-add: #73bd79; --vcs-del: #8f9399; --wbg-add: #2c5d36; --wbg-del: #6b2b2b; color-scheme: dark; }
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 var(--sans); }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--panel); }
+button { font: inherit; color: inherit; }
+code, pre, .mono { font-family: var(--mono); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+.btn { height: var(--control); padding: 0 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--panel); cursor: pointer; white-space: nowrap; font-size: 13px; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 600; }
+.btn.danger { color: var(--del); }
+.btn.small { height: 26px; padding: 0 8px; font-size: 12px; }
+.btn[disabled] { opacity: .5; cursor: not-allowed; }
+.kbd { font: 11px var(--mono); border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; color: var(--muted); }
+.tag { font: 11px var(--mono); color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; white-space: nowrap; }
+.proto-badge { font: 700 10px/1 var(--sans); letter-spacing: .08em; color: var(--proto); background: var(--proto-bg); border: 1px solid var(--proto); border-radius: 4px; padding: 3px 6px; }
+.muted { color: var(--muted); }
+
+/* Board */
+#board { padding-block: 0 72px; }
+.topbar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
+  padding-block: 10px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.topbar h1 { font-size: 16px; margin: 0; display: flex; gap: 8px; align-items: center; }
+.topbar .summary { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.topbar .ws { margin-left: auto; font-size: 12px; }
+.cols { display: grid; grid-template-columns: repeat(5, minmax(220px, 1fr)); gap: 12px; padding-block: 16px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); overflow-x: auto; align-items: start; }
+.col { min-width: 0; }
+.col h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; display: flex; gap: 6px; align-items: baseline; }
+.col h2 .n { font-variant-numeric: tabular-nums; }
+.col.you h2 { color: var(--s-human); }
+.col ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.col .empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; display: grid; gap: 4px; box-shadow: var(--shadow); cursor: pointer; }
+.card:hover, .card:focus-visible { border-color: var(--accent); }
+.card.static { cursor: default; }
+.card.static:hover { border-color: var(--border); }
+.card .row1 { display: flex; gap: 8px; align-items: baseline; font-size: 12px; }
+.card .key { font: 600 12px var(--mono); }
+.card .money { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.card .title { font-weight: 600; line-height: 1.35; text-wrap: balance; }
+.card .now { font-size: 12px; display: flex; gap: 6px; align-items: baseline; min-width: 0; }
+.card .now b { color: var(--a-impl); white-space: nowrap; }
+.card .now span { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.card .reason { font-size: 13px; font-weight: 600; color: var(--s-human); display: flex; gap: 6px; flex-wrap: wrap; align-items: baseline; }
+.card .reason.ready { color: var(--s-ready); }
+.card .meta { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.card .act { margin-top: 4px; display: flex; gap: 8px; }
+.card .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--s-working); display: inline-block; animation: pulse 1.6s infinite; flex: none; align-self: center; }
+@keyframes pulse { 50% { opacity: .3; } }
+@media (max-width: 760px) {
+  .cols { grid-template-columns: minmax(0, 1fr); overflow-x: visible; }
+  .col.you { order: -2; } .col.impl, .col.rev { order: -1; }
+}
+
+/* Job view: a full page */
+#job { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--bg); z-index: 6;
+  padding-top: env(safe-area-inset-top, 0px); padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px)); }
+.jhead { background: var(--panel); border-bottom: 1px solid var(--border); padding-block: 10px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 4px 16px; align-items: center; }
+.jhead .back { grid-row: span 2; }
+.jhead .t1 { display: flex; gap: 10px; align-items: baseline; min-width: 0; }
+.jhead .t1 .key { font: 600 13px var(--mono); }
+.jhead .t1 .title { font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jhead .t2 { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; color: var(--muted); align-items: center; font-variant-numeric: tabular-nums; }
+.jhead .sentence { color: var(--fg); font-weight: 600; display: inline-flex; gap: 6px; align-items: center; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--s-ended); }
+.st-working .dot, .st-starting .dot { background: var(--s-working); animation: pulse 1.6s infinite; }
+.st-awaiting_review .dot, .st-preparing_mr .dot { background: var(--s-review); }
+.st-needs_human .dot { background: var(--s-human); }
+.st-ready_for_human_review .dot, .st-pushed .dot { background: var(--s-ready); }
+.jhead .tools { grid-row: span 2; display: flex; gap: 8px; align-items: center; }
+.scr { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.streamwrap { flex: 1; overflow-y: auto; min-height: 0; padding-block: 8px 24px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+@media (max-width: 760px) { .jhead { grid-template-columns: minmax(0, 1fr) auto; } .jhead .back { grid-row: auto; } .jhead .t1 { grid-column: 1 / -1; order: 3; } .jhead .t2 { grid-column: 1 / -1; order: 4; } .jhead .tools { grid-row: auto; grid-column: 1 / -1; order: 5; } }
+
+/* Stream */
+#stream { list-style: none; margin: 0 auto; padding: 0; max-width: 1180px; font-size: 13px; }
+.sep { position: sticky; top: -8px; z-index: 2; background: var(--bg); display: flex; align-items: center; gap: 10px; margin-top: 14px; padding: 6px 0; font-weight: 600; font-size: 13px; }
+.sep::after { content: ""; flex: 1; border-top: 1px solid var(--border-strong); }
+.sep .tag { font-weight: 400; }
+.e { display: grid; grid-template-columns: 44px 104px minmax(0, 1fr); gap: 0 10px; padding: 1px 6px; border-radius: 4px; border-left: 2px solid transparent; }
+.e.sel { background: var(--selected); border-left-color: var(--accent); }
+.e > .ts { color: var(--muted); font: 11px/20px var(--mono); font-variant-numeric: tabular-nums; }
+.e > .who { font-size: 12px; line-height: 20px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.e > .who.cont { visibility: hidden; }
+.who-implementer > .who { color: var(--a-impl); } .who-claude > .who { color: var(--a-claude); } .who-codex > .who { color: var(--a-codex); }
+.who-you > .who { color: var(--a-you); } .who-factory > .who, .who-mr > .who, .who-proto > .who { color: var(--a-factory); }
+.e > .body { min-width: 0; line-height: 20px; }
+.e-tool .line { all: unset; cursor: pointer; display: block; font: 12.5px/20px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
+.e-tool .line::before { content: "▸ "; color: var(--muted); }
+.e-tool.open .line::before { content: "▾ "; }
+.e-tool .line .verb { font-weight: 600; }
+.e-tool .line .out { color: var(--muted); }
+.e-tool .line .out.bad { color: var(--del); }
+.e-tool.err .line { color: var(--del); }
+.who-codex.e-tool .line, .who-claude.e-tool .line { opacity: .9; }
+.more { margin: 4px 0 8px; display: grid; gap: 6px; }
+.more pre, pre.raw { margin: 0; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; font-size: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+.more .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.e-text .prose { white-space: pre-wrap; word-break: break-word; padding: 2px 0; }
+.e-text.clamp .prose { max-height: 160px; overflow: hidden; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
+.prose code { background: var(--panel-2); border: 1px solid var(--border); border-radius: 3px; padding: 0 3px; font-size: 12px; }
+.prose .h { font-weight: 700; }
+.linkish { all: unset; cursor: pointer; color: var(--accent); font-size: 12px; }
+.linkish:hover { text-decoration: underline; }
+.e-result .body, .e-note .body { color: var(--muted); font-size: 12px; }
+.e-state .body { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; color: var(--muted); font-size: 12.5px; }
+.e-state .body b { color: var(--fg); font-weight: 600; }
+.block { border: 1px solid var(--border); background: var(--panel); border-radius: var(--radius); padding: 10px 12px; margin: 6px 0; display: grid; gap: 6px; }
+.block .bh { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; font-weight: 600; }
+.verdict { font: 600 11px var(--sans); text-transform: uppercase; letter-spacing: .05em; border-radius: 4px; padding: 1px 6px; }
+.verdict.clean { color: var(--add); background: var(--add-bg); }
+.verdict.fix { color: var(--warn); background: var(--warn-bg); }
+.verdict.stop { color: var(--del); background: var(--del-bg); }
+.block .summary { white-space: pre-wrap; font-size: 13px; }
+.block.clamp .summary { max-height: 84px; overflow: hidden; -webkit-mask-image: linear-gradient(#000 60%, transparent); mask-image: linear-gradient(#000 60%, transparent); }
+.findings { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.finding { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 2px 8px; align-items: baseline; border-top: 1px solid var(--border); padding-top: 6px; }
+.finding .fid { font: 700 12px var(--mono); }
+.finding .path { font: 12px var(--mono); color: var(--accent); cursor: pointer; overflow-wrap: anywhere; }
+.finding .problem, .finding .expected, .finding .decide { grid-column: 2 / -1; }
+.finding .problem { font-size: 13px; }
+.finding .expected { font-size: 12px; color: var(--muted); }
+.finding .decide { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 2px; }
+.finding .decided { font-size: 12px; font-weight: 600; }
+.sev { font: 600 11px var(--sans); border-radius: 999px; padding: 0 7px; white-space: nowrap; }
+.sev-blocker { color: var(--del); background: var(--del-bg); }
+.sev-major { color: var(--warn); background: var(--warn-bg); }
+.sev-minor, .sev-nit, .sev-note { color: var(--muted); background: var(--panel-2); border: 1px solid var(--border); }
+.block.stop { border-color: var(--s-human); border-width: 2px; }
+.block.fixsec { border-style: dashed; }
+.block.you { border-color: var(--a-you); }
+.block.sim { border-style: dashed; border-color: var(--proto); }
+.simtag { font: 600 10px var(--sans); color: var(--proto); letter-spacing: .06em; text-transform: uppercase; }
+.inline-diff { margin-top: 6px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.inline-diff .dhead { top: 22px; }
+.inline-diff .diff { border: 0; }
+.inline-diff .dl { white-space: pre-wrap; min-width: 0; word-break: break-all; }
+
+/* Diffs: no diff box scrolls on its own; its pane does */
+.diff { font: 12px/1.45 var(--mono); background: var(--panel); }
+.diff .dl { white-space: pre; padding: 0 10px; min-width: max-content; }
+.diff .add { background: var(--add-bg); color: var(--add); }
+.diff .del { background: var(--del-bg); color: var(--del); }
+.diff .hunk { color: var(--hunk); background: var(--panel-2); }
+.diff .meta { color: var(--muted); padding-block: 4px; }
+.diff .cutline { color: var(--proto); padding: 4px 10px; font-style: italic; }
+.dhead { position: sticky; top: 0; left: 0; z-index: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 13px; }
+.dhead .dpath { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.dhead .dpath b { font-family: var(--mono); font-size: 12.5px; }
+.dhead .dpath .muted { font-family: var(--mono); font-size: 12px; }
+.dhead .sp { flex: 1; }
+.dhead .pos { font-size: 12px; font-variant-numeric: tabular-nums; }
+.n .a, .dhead .a { color: var(--add); } .n .r, .dhead .r { color: var(--del); }
+
+/* File rows: one line each, name bold, folder muted and middle-truncated, counts right */
+.files { list-style: none; margin: 0; padding: 0; }
+.frow { all: unset; box-sizing: border-box; cursor: pointer; display: flex; align-items: baseline; gap: 8px; width: 100%; padding: 3px 12px; font: 12px/1.6 var(--mono); white-space: nowrap; }
+.frow:hover { background: var(--panel-2); }
+.frow:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.frow.on { background: var(--selected); box-shadow: inset 2px 0 var(--accent); }
+.frow .stl { width: 1.2em; flex: none; font-weight: 700; color: var(--muted); text-align: center; }
+.frow .st-added { color: var(--add); } .frow .st-deleted { color: var(--del); }
+.frow .fname { font-weight: 700; flex: 0 1 auto; min-width: 0; max-width: 60%; overflow: hidden; text-overflow: ellipsis; }
+.frow .fdir { color: var(--muted); flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.frow .n { flex: none; margin-left: auto; font-variant-numeric: tabular-nums; text-align: right; min-width: 7ch; }
+.fb { font: 600 10px var(--sans); border-radius: 999px; padding: 0 6px; flex: none; }
+.fb.warn { color: var(--warn); background: var(--warn-bg); }
+.files/* Screen switch in the job header */
+.switch { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; }
+.switch button { all: unset; cursor: pointer; padding: 0 12px; height: 30px; display: inline-flex; gap: 6px; align-items: center; font-size: 13px; border-right: 1px solid var(--border-strong); white-space: nowrap; }
+.switch button:last-child { border-right: 0; }
+.switch button.on { background: var(--selected); color: var(--accent); font-weight: 600; }
+.switch button[aria-disabled="true"] { color: var(--muted); }
+.switch button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.pathlink { all: unset; cursor: pointer; font: 12px var(--mono); color: var(--accent); overflow-wrap: anywhere; }
+.pathlink:hover { text-decoration: underline; }
+.pathlink .d { color: var(--muted); }
+.flinks { display: flex; flex-wrap: wrap; gap: 2px 14px; }
+
+/* Changes screen: tree | divider | diff */
+#scrChanges { display: grid; grid-template-columns: var(--tree-w) 6px minmax(0, 1fr); }
+#scrChanges[hidden] { display: none; }
+.tree { display: flex; flex-direction: column; min-height: 0; background: var(--panel); border-right: 1px solid var(--border); }
+.tree .tb { display: grid; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border); flex: none; }
+.tree .tb .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 12px; }
+.tree .sum { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tree .sum b { color: var(--fg); }
+.ffq { font: 13px var(--sans); height: 28px; padding: 0 8px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--bg); color: var(--fg); min-width: 0; width: 100%; }
+.seg2 { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; }
+.seg2 button { all: unset; cursor: pointer; padding: 0 8px; line-height: 24px; font-size: 12px; white-space: nowrap; }
+.seg2 button.on { background: var(--fg); color: var(--bg); }
+.seg2 button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tlist { list-style: none; margin: 0; padding: 4px 0; overflow-y: auto; flex: 1; min-height: 0; }
+.trow { all: unset; box-sizing: border-box; cursor: pointer; display: flex; align-items: center; gap: 6px; width: 100%; padding: 1px 10px 1px calc(10px + var(--d, 0) * 16px); font: 12.5px/22px var(--mono); white-space: nowrap; }
+.trow:hover { background: var(--panel-2); }
+.trow.sel { background: var(--selected); }
+.tlist:focus-within .trow.sel { box-shadow: inset 2px 0 var(--accent); }
+.trow .tw { width: 12px; flex: none; color: var(--muted); text-align: center; }
+.trow .ic { flex: none; width: 14px; text-align: center; color: var(--muted); }
+.trow .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.trow .dn { color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 1 1 0; }
+.trow .cnt { margin-left: auto; color: var(--muted); font-size: 11px; flex: none; font-variant-numeric: tabular-nums; }
+.trow .cnt .a { color: var(--add); } .trow .cnt .r { color: var(--del); }
+.trow .lt { flex: none; font-size: 10px; font-weight: 700; width: 12px; text-align: center; }
+.vcs-modified .nm, .vcs-modified .lt { color: var(--vcs-mod); }
+.vcs-added .nm, .vcs-added .lt { color: var(--vcs-add); }
+.vcs-deleted .nm { color: var(--vcs-del); text-decoration: line-through; }
+.vcs-deleted .lt { color: var(--vcs-del); }
+.trow.dir .nm { color: var(--fg); }
+.vdiv { cursor: col-resize; background: var(--border); touch-action: none; }
+.vdiv:hover, .vdiv.drag, .vdiv:focus-visible { background: var(--accent); outline: none; }
+.dpane { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); }
+.dtool { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--border); flex: none; font-size: 13px; }
+.dtool .dpath { font: 600 12.5px var(--mono); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46ch; }
+.dtool .sp { flex: 1; }
+.dtool select { font: 12.5px var(--sans); height: 28px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--panel); color: var(--fg); padding: 0 6px; }
+.dtool label { display: inline-flex; gap: 4px; align-items: center; font-size: 12.5px; white-space: nowrap; }
+.dbody { flex: 1; min-height: 0; overflow: auto; }
+.dempty { padding: 24px; color: var(--muted); }
+.dfile { font: 12px/18px var(--mono); }
+.dfile .r { display: grid; grid-template-columns: 5ch minmax(0, 1fr) 5ch minmax(0, 1fr); }
+.dfile.uni .r { grid-template-columns: 5ch 5ch 2ch minmax(0, 1fr); }
+.dfile .ln { color: var(--muted); text-align: right; padding-right: 8px; user-select: none; background: var(--panel-2); font-size: 11px; }
+.dfile .c { white-space: pre-wrap; word-break: break-all; padding: 0 8px; min-width: 0; }
+.dfile .c + .ln { border-left: 1px solid var(--border); }
+.dfile .sg { color: var(--muted); text-align: center; user-select: none; }
+.dfile .c.del, .dfile .r.del .c { background: var(--del-bg); }
+.dfile .c.add, .dfile .r.add .c { background: var(--add-bg); }
+.dfile .c.void { background: repeating-linear-gradient(135deg, transparent 0 4px, var(--panel-2) 4px 8px); }
+.dfile .w-del { background: var(--wbg-del); border-radius: 2px; }
+.dfile .w-add { background: var(--wbg-add); border-radius: 2px; }
+.dfile .fold { all: unset; cursor: pointer; display: block; text-align: center; color: var(--accent); background: var(--panel-2); border-block: 1px solid var(--border); font: 12px/22px var(--sans); }
+.dfile .fold:hover { text-decoration: underline; }
+.dnote { padding: 6px 12px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); }
+@media (max-width: 760px) {
+  #scrChanges { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(140px, 38%) minmax(0, 1fr); }
+  .vdiv { display: none; }
+  .dfile:not(.uni) .r { grid-template-columns: 4ch minmax(0, 1fr) 4ch minmax(0, 1fr); }
+}
+
+/* MR screen and ticket page share this two-column form layout */
+.form2 { flex: 1; min-height: 0; overflow-y: auto; padding-block: 16px 24px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.form2 .grid { max-width: 1280px; margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
+@media (max-width: 980px) { .form2 .grid { grid-template-columns: minmax(0, 1fr); } }
+.card2 { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; display: grid; gap: 8px; min-width: 0; }
+.card2 h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0; display: flex; gap: 8px; align-items: baseline; }
+.fld { display: grid; gap: 4px; }
+.fld label { font-size: 12px; font-weight: 600; }
+.fld input, .fld textarea { font: 13px var(--sans); padding: 6px 8px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--bg); color: var(--fg); min-width: 0; width: 100%; }
+.fld input.mono, .fld textarea { font-family: var(--mono); font-size: 12.5px; }
+.fld input[disabled] { color: var(--muted); }
+.fld .hint { font-size: 12px; color: var(--muted); }
+.fld .bad { font-size: 12px; color: var(--del); }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+@media (max-width: 600px) { .row2 { grid-template-columns: 1fr; } }
+.edtabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); }
+.edtabs button { all: unset; cursor: pointer; padding: 4px 12px; font-size: 13px; border-bottom: 2px solid transparent; }
+.edtabs button.on { border-bottom-color: var(--accent); font-weight: 600; }
+.edtabs button:focus-visible { outline: 2px solid var(--accent); }
+.mdedit { min-height: 420px; resize: vertical; line-height: 1.5; }
+.md { font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; }
+.md h1, .md h2, .md h3, .md h4 { margin: 14px 0 6px; } .md h1 { font-size: 20px; } .md h2 { font-size: 16px; border-bottom: 1px solid var(--border); padding-bottom: 4px; } .md h3 { font-size: 14px; }
+.md p { margin: 6px 0; } .md ul, .md ol { margin: 4px 0; padding-left: 22px; }
+.md code { font: 12px var(--mono); background: var(--panel-2); border: 1px solid var(--border); border-radius: 3px; padding: 0 3px; }
+.md pre { background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; white-space: pre-wrap; font: 12px/1.45 var(--mono); }
+.md pre code { border: 0; background: none; padding: 0; }
+.md table { border-collapse: collapse; font-size: 13px; display: block; overflow-x: auto; }
+.md td, .md th { border: 1px solid var(--border); padding: 3px 8px; }
+.md .flag { background: var(--warn-bg); color: var(--warn); border-radius: 3px; }
+.md .notchk { background: var(--warn-bg); border-radius: 3px; }
+.md li.task { list-style: none; margin-left: -18px; }
+.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: 13px; }
+.checks li { display: flex; gap: 6px; align-items: baseline; }
+.checks .ok { color: var(--add); } .checks .no { color: var(--del); }
+.kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; font-size: 13px; }
+.kv dt { color: var(--muted); } .kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+pre.cm { margin: 0; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px; font: 12px/1.45 var(--mono); white-space: pre-wrap; }
+.notline { background: var(--warn-bg); color: var(--fg); border-left: 3px solid var(--warn); padding: 3px 8px; font-size: 12.5px; border-radius: 3px; }
+.mrbar { flex: none; background: var(--panel); border-top: 1px solid var(--border); padding-block: 10px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.mrbar .sp { flex: 1; }
+.edited { font: 600 11px var(--sans); color: var(--a-you); border: 1px solid var(--a-you); border-radius: 999px; padding: 0 7px; }
+.chipx { font: 12px var(--mono); border: 1px solid var(--border-strong); border-radius: 999px; padding: 0 8px; background: var(--panel-2); }
+.chipsx { display: flex; flex-wrap: wrap; gap: 4px; }
+.thumbs { display: flex; flex-wrap: wrap; gap: 8px; }
+.thumbs img { width: 96px; height: 72px; object-fit: cover; border-radius: var(--radius-sm); border: 1px solid var(--border); }
+.drop { border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); padding: 12px; text-align: center; color: var(--muted); font-size: 12.5px; }
+.drop.over { border-color: var(--accent); background: var(--selected); }
+.hist { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: 12.5px; }
+.hist li { display: grid; grid-template-columns: 11ch minmax(0, 1fr); gap: 8px; }
+.hist .t { color: var(--muted); font-variant-numeric: tabular-nums; }
+.dep { display: flex; gap: 8px; align-items: baseline; font-size: 13px; }
+.dep .ok { color: var(--add); } .dep .wait { color: var(--warn); }
+#ticket { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--bg); z-index: 6; padding-top: env(safe-area-inset-top, 0px); padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px)); }
+
+/* Board: queue, concurrency, rules menu */
+.qctl { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
+.stepper { display: inline-flex; align-items: center; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; }
+.stepper button { all: unset; cursor: pointer; width: 26px; text-align: center; line-height: 26px; }
+.stepper button:hover { background: var(--panel-2); }
+.stepper button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.stepper output { min-width: 2ch; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums; }
+.qstatus { color: var(--muted); font-size: 13px; }
+.qstatus.held { color: var(--warn); font-weight: 600; }
+.menuwrap { position: relative; }
+.menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 12; width: min(360px, calc(100vw - 32px)); background: var(--panel); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: 0 12px 40px rgba(0,0,0,.2); padding: 12px; display: grid; gap: 8px; font-size: 13px; }
+.menu label { display: flex; gap: 8px; align-items: baseline; cursor: pointer; }
+.card .pos { font: 700 11px var(--mono); color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 0 4px; }
+.card.dragging { opacity: .4; }
+.card.dropbefore { box-shadow: 0 -3px 0 var(--accent); }
+.qdiv { list-style: none; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); display: flex; gap: 8px; align-items: center; padding: 4px 0; }
+.qdiv::after { content: ""; flex: 1; border-top: 1px dashed var(--border-strong); }
+.card .waits { font-size: 12px; color: var(--warn); }
+.card .parked { font-size: 12px; font-weight: 600; color: var(--warn); }
+.card .act .linkish { margin-left: auto; }
+/* Composer */
+.composer { background: var(--panel); border-top: 1px solid var(--border); padding-block: 10px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 8px; }
+.composer .cs { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-size: 13px; }
+.composer .cs b { font-weight: 600; }
+.composer .crow { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
+.composer textarea { flex: 1 1 320px; min-width: 0; min-height: 40px; max-height: 160px; resize: vertical; font: 13px/1.45 var(--sans); padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--bg); color: var(--fg); }
+.composer .acts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.confirm { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--del); }
+
+/* Floating variant bar */
+.vbar { position: fixed; z-index: 30; left: 50%; transform: translateX(-50%); bottom: calc(8px + env(safe-area-inset-bottom, 0px)); display: flex; gap: 10px; align-items: center; background: var(--bar); color: var(--bar-fg);
+  border-radius: 999px; padding: 6px 8px 6px 12px; box-shadow: 0 8px 30px rgba(0,0,0,.3); max-width: calc(100vw - 24px); font-size: 12px; }
+.vbar .seg { display: flex; gap: 2px; background: color-mix(in srgb, var(--bar-fg) 14%, transparent); border-radius: 999px; padding: 2px; }
+.vbar .seg button { all: unset; cursor: pointer; padding: 3px 10px; border-radius: 999px; font-weight: 600; white-space: nowrap; }
+.vbar .seg button.on { background: var(--bar-fg); color: var(--bar); }
+.vbar .vdesc { max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .85; }
+.vbar select { font: inherit; background: transparent; color: inherit; border: 1px solid color-mix(in srgb, var(--bar-fg) 40%, transparent); border-radius: 999px; padding: 2px 8px; max-width: 240px; }
+.vbar select option { color: #1f2328; background: #fff; }
+.vbar .sbtn { all: unset; cursor: pointer; border: 1px solid color-mix(in srgb, var(--bar-fg) 40%, transparent); border-radius: 999px; padding: 2px 10px; white-space: nowrap; }
+@media (max-width: 900px) { .vbar .vdesc { display: none; } }
+@media (max-width: 520px) { .vbar .seg button .nm { display: none; } .vbar select { max-width: 120px; } }
+#statePanel { position: fixed; z-index: 31; right: max(16px, env(safe-area-inset-right, 0px)); bottom: calc(60px + env(safe-area-inset-bottom, 0px)); width: min(420px, calc(100vw - 32px)); max-height: 60%; overflow: auto;
+  background: var(--panel); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: 0 12px 40px rgba(0,0,0,.25); padding: 10px 12px; font-size: 12px; }
+#statePanel pre { margin: 6px 0 0; font-size: 11.5px; white-space: pre-wrap; }
+#toast { position: fixed; z-index: 40; top: calc(12px + env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%); background: var(--bar); color: var(--bar-fg); padding: 6px 14px; border-radius: 999px; font-size: 13px; box-shadow: 0 6px 20px rgba(0,0,0,.25); max-width: calc(100vw - 32px); }
+</style>
+<div id="board">
+  <header class="topbar">
+    <h1>Software Factory <span class="proto-badge" title="A throwaway prototype: real data snapshot, every action is simulated">PROTOTYPE</span></h1>
+    <span class="summary" id="summary"></span>
+    <div class="qctl" style="margin-left:auto">
+      <span>Run up to</span>
+      <span class="stepper"><button id="limDown" aria-label="One job fewer">−</button><output id="limVal">2</output><button id="limUp" aria-label="One job more">+</button></span>
+      <span>jobs at once</span>
+      <span class="qstatus" id="qstatus"></span>
+      <div class="menuwrap"><button class="btn small" id="rulesBtn" aria-expanded="false">Rules ▾</button><div class="menu" id="rulesMenu" hidden></div></div>
+    </div>
+  </header>
+  <div class="cols" id="cols"></div>
+</div>
+
+<section id="job" hidden aria-label="Job">
+  <header class="jhead" id="jhead"></header>
+  <div class="scr" id="scrStream">
+    <div class="streamwrap" id="streamwrap" tabindex="-1"><ol id="stream"></ol></div>
+    <div class="composer" id="composer"></div>
+  </div>
+  <div class="scr" id="scrChanges" hidden></div>
+  <div class="scr" id="scrMr" hidden></div>
+</section>
+
+<section id="ticket" hidden aria-label="Planned ticket"></section>
+
+<nav class="vbar" aria-label="Prototype controls">
+  <span class="proto-badge">PROTOTYPE</span>
+  <select id="scenario" aria-label="Scenario">
+    <option value="wait">Scenario: jobs wait for you</option>
+    <option value="snap">Scenario: snapshot as taken</option>
+    <option value="limit">Scenario: usage limit hit</option>
+  </select>
+  <span id="simBtns" style="display:flex;gap:6px"></span>
+  <button class="sbtn" id="stateBtn" aria-expanded="false">State</button>
+</nav>
+<div id="statePanel" hidden></div>
+<div id="toast" hidden role="status"></div>
+<script>
+'use strict';
+// Real-data snapshot of the software-factory workspace (read-only GETs, job files and git show), home path as ~, secrets redacted.
+const SNAP = null; // Real-data snapshot omitted here (1.2 MB). The full prototype with data is on the branch prototype-dashboard-v3, docs/design/dashboard-v3/prototype-full.html.
+const PLAN = null; // omitted, see prototype-full.html
+const MRDATA = null; // omitted, see prototype-full.html
+const VERSIONS_B64 = ''; // omitted, see prototype-full.html
+// ---- helpers
+const NOW = Date.parse(SNAP.taken_at);
+const $ = (s, r = document) => r.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const hm = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+const day = (ts) => new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+const dur = (ms) => { const m = Math.max(0, Math.round(ms / 60000)); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`; };
+const money = (v) => (v == null ? '—' : '$' + v.toFixed(2));
+const mtok = (n) => (n ? (n / 1e6).toFixed(2) + ' M' : '—');
+const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch { /* none */ } } };
+const splitPath = (p) => { const i = p.lastIndexOf('/'); return i < 0 ? ['', p] : [p.slice(0, i), p.slice(i + 1)]; };
+
+const WHO = { implementer: 'Implementer', claude: 'Claude review', codex: 'Codex gate', mr: 'MR writer', factory: 'Factory', you: 'You', proto: 'Prototype' };
+const STATE_WORD = { starting: 'Starting', working: 'Implementing', awaiting_review: 'In review', preparing_mr: 'Writing the MR', needs_human: 'Waiting for you', ready_for_human_review: 'Ready for you', pushed: 'Pushed', aborted: 'Aborted', failed: 'Failed', parked: 'Waiting for limits' };
+const REASON = { gate_rounds: 'Codex round limit reached', gate_budget: 'Codex token budget used up', gate_failed: 'Codex gate gave no verdict', iteration_limit: 'Fix round limit reached', review_churn: 'Fixes keep making findings', escalated: 'Question for you', review_disputed: 'A reviewer disputes a contest', review_failed: 'Claude review could not run', serve_restarted: 'Interrupted by a restart', mr_conflict: 'Rebase conflict' };
+const RUNNING = ['starting', 'working', 'awaiting_review', 'preparing_mr', 'parked'];
+const PLANMAP = Object.fromEntries(PLAN.map((p) => [p.ticket, p]));
+
+// ---- Fix-section ids for the Codex findings (Fix n answers the gate of iteration n)
+function fixItems(text) {
+  const out = [];
+  for (const m of (text || '').matchAll(/^\d+\. \[(R\d+), (\w+)\] `?([^`:\n]+)`?: ([\s\S]*?)(?=^\d+\. \[R|(?![\s\S]))/gm)) out.push({ id: m[1], severity: m[2], path: m[3], problem: m[4].trim() });
+  return out;
+}
+function idsFor(src) {
+  const map = {};
+  for (const e of src.stream) if (e.t === 'prompt' && e.fix_n) map[e.fix_n] = fixItems(e.fix).map((x) => x.id);
+  return map;
+}
+
+// ---- jobs: one in-memory job per ticket, rebuilt for a scenario
+let scenario = 'wait';
+const jobs = {};
+let seq = 0;
+function baseJob(t, src) {
+  return { ticket: t, title: src.job.title, branch: src.job.branch, base: src.job.base || 'main', created_at: src.job.created_at, state: src.job.state, code: src.job.error?.code ?? null,
+    iteration: src.job.iteration, stream: [], decisions: {}, paused: false, live: src.job.state === 'working', src, scenarioNote: null, mr: null };
+}
+function buildJob(t) {
+  const src = SNAP.jobs[t];
+  const ids = idsFor(src);
+  const stream = src.stream.map((e, i) => ({ ...e, k: `${t}:${i}` }));
+  for (const e of stream) if (e.t === 'verdict' && e.who === 'codex' && ids[e.it]) e.items = e.items.map((x, i) => ({ ...x, id: ids[e.it][i] }));
+  const j = baseJob(t, src);
+  j.stream = stream;
+  if (scenario === 'wait' && t === 'SF-053') {
+    const i = stream.findIndex((e) => e.t === 'state' && e.to === 'ready_for_human_review');
+    j.stream = stream.slice(0, i + 1); j.state = 'ready_for_human_review'; j.iteration = 2;
+    j.scenarioNote = `Shown as it really was at ${hm(stream[i].ts)}: ready for you, before you pushed it.`;
+  }
+  if (scenario === 'wait' && t === 'SF-054') {
+    const i = stream.findIndex((e) => e.t === 'verdict' && e.who === 'codex' && e.it === 2);
+    j.stream = stream.slice(0, i + 1); j.state = 'needs_human'; j.code = 'gate_rounds'; j.iteration = 2; j.resumeAt = i + 1;
+    j.stream.push({ t: 'state', k: `${t}:stop`, ts: stream[i].ts, it: 2, from: 'awaiting_review', to: 'needs_human', code: 'gate_rounds', sim: true,
+      msg: 'Simulated stop: this scenario sets the Codex round limit to 2. In reality the job went on to Fix 2.' });
+    j.scenarioNote = 'Real data up to the Codex verdict of iteration 2; the stop after it is simulated.';
+  }
+  if (scenario === 'wait' && t === 'SF-040') {
+    const i = stream.findIndex((e) => e.t === 'state' && e.to === 'needs_human');
+    j.stream = stream.slice(0, i + 1); j.state = 'needs_human'; j.code = stream[i].code; j.iteration = 1; j.stopIt = stream[i].it; j.resumeAt = i + 1;
+    j.scenarioNote = `Shown as it really was at ${hm(stream[i].ts)}: stopped because sf serve restarted. 53 files by the end.`;
+  }
+  if (scenario === 'limit' && t === 'SF-055') {
+    j.state = 'parked'; j.live = true;
+    j.stream.push({ t: 'state', k: `${t}:park`, ts: new Date(NOW).toISOString(), it: j.iteration + 1, from: 'working', to: 'parked', sim: true, msg: 'Usage limit reached: the job is parked and resumes when the limit resets at 03:00.' });
+    j.scenarioNote = 'Simulated: the Claude usage limit was hit during this run.';
+  }
+  return j;
+}
+// A job the queue started inside the prototype.
+function simJob(t) {
+  const p = PLANMAP[t];
+  const ts = new Date(Math.max(NOW, ...Object.values(jobs).map((x) => Date.parse(last(x).ts))) + 60000).toISOString();
+  const src = { job: { title: p.title, branch: `${t}-${p.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40)}`, base: p.base, created_at: ts, state: 'working', iteration: 0 }, stream: [], iterations: [], ledger: [], live_files: [] };
+  const j = baseJob(t, src);
+  j.sim = true; j.live = true;
+  j.stream = [
+    { t: 'state', k: `${t}:s0`, ts, it: 0, from: null, to: 'starting', sim: true, msg: 'Started by the queue.' },
+    { t: 'state', k: `${t}:s1`, ts, it: 0, from: 'starting', to: 'working', sim: true },
+    { t: 'prompt', k: `${t}:s2`, ts, it: 1, kind: 'implement', first: `/implement .software-factory/${t}.md`, text: `/implement .software-factory/${t}.md\n\n(prototype: the real prompt carries the factory's rules)` },
+    { t: 'sim', k: `${t}:s3`, ts, it: 1, who: 'proto', text: 'A queued job: the Implementer would start reading the Task file here.' },
+  ];
+  return j;
+}
+const last = (j) => j.stream[j.stream.length - 1];
+const endTs = (j) => (j.live && RUNNING.includes(j.state) ? Math.max(NOW, Date.parse(last(j).ts)) : Date.parse(last(j).ts));
+function costOf(j) {
+  let impl = 0, rev = 0;
+  for (const e of j.stream) if (e.t === 'result' && e.cost != null) { if (e.who === 'claude') rev += e.cost; else impl = Math.max(impl, e.cost); }
+  return impl + rev;
+}
+const FINDING_CODES = ['gate_rounds', 'gate_budget', 'gate_failed', 'escalated', 'review_disputed', 'review_churn'];
+function openFindings(j) {
+  if (j.state !== 'needs_human' || !FINDING_CODES.includes(j.code)) return [];
+  const v = [...j.stream].reverse().find((e) => e.t === 'verdict' && e.who === 'codex');
+  return v ? v.items : [];
+}
+function runningIteration(j) { return ['working', 'starting', 'parked'].includes(j.state) ? j.iteration + 1 : j.state === 'needs_human' ? Math.max(j.iteration, j.stopIt || 0) : j.iteration; }
+function nowLine(j) {
+  if (j.state === 'parked') return { who: 'Parked', what: 'waiting for the usage limit to reset at 03:00' };
+  if (j.state === 'awaiting_review') { const v = [...j.stream].reverse().find((e) => e.t === 'verdict'); return { who: v && v.who === 'claude' && v.it === j.iteration ? 'Codex gate' : 'Claude review', what: 'reviewing iteration ' + j.iteration }; }
+  const e = [...j.stream].reverse().find((x) => x.t === 'tool' || x.t === 'text');
+  if (!e) return { who: 'Implementer', what: 'starting' };
+  return { who: WHO[e.who] || 'Implementer', what: e.t === 'tool' ? e.line : e.text.split('\n')[0] };
+}
+function sentence(j) {
+  const it = runningIteration(j);
+  switch (j.state) {
+    case 'working': return j.paused ? `Paused by you during iteration ${it}` : `The Implementer is working on iteration ${it}`;
+    case 'parked': return 'Waiting for limits: resumes when the usage limit resets at 03:00';
+    case 'awaiting_review': return `Claude and Codex are reviewing iteration ${it}`;
+    case 'preparing_mr': return 'Writing the MR text';
+    case 'needs_human': { const n = openFindings(j).length; return n ? `${REASON[j.code] || 'Stopped'}: ${n} finding${n === 1 ? '' : 's'} to decide` : `${REASON[j.code] || 'Stopped'}: tell the Implementer to go on, or abort`; }
+    case 'ready_for_human_review': return 'Reviews are clean and the MR text is written. Push when you are happy';
+    case 'pushed': return `Pushed at ${hm(last(j).ts)}`;
+    case 'aborted': return 'Aborted by you. The branch stays';
+    default: return STATE_WORD[j.state] || j.state;
+  }
+}
+
+// ---- the run queue (simulated)
+const Q = { order: [], off: [], limit: 2, rule: 'resume-then-queue', held: false, released: true };
+function initQueue() {
+  const planned = PLAN.filter((p) => !jobs[p.ticket] && !SNAP.board_jobs.some((b) => b.ticket === p.ticket)).map((p) => p.ticket);
+  const first = ['SF-066', 'SF-059', 'SF-060', 'SF-064', 'SF-069'].filter((t) => planned.includes(t));
+  Q.order = first; Q.off = planned.filter((t) => !first.includes(t));
+  Q.held = scenario === 'limit';
+}
+function stateOfTicket(t) {
+  if (jobs[t]) return jobs[t].state;
+  const b = SNAP.board_jobs.find((x) => x.ticket === t) || SNAP.done.find((x) => x.ticket === t);
+  if (b) return b.state;
+  if (PLANMAP[t]) return 'planned';
+  return 'unknown';
+}
+const depDone = (t) => stateOfTicket(t) === 'pushed';
+const waitsFor = (t) => (PLANMAP[t]?.deps || []).filter((d) => !depDone(d));
+function runningCount() {
+  return Object.values(jobs).filter((j) => RUNNING.includes(j.state)).length + SNAP.board_jobs.filter((b) => !jobs[b.ticket] && RUNNING.includes(b.state)).length;
+}
+const nextQueued = () => Q.order.find((t) => !waitsFor(t).length);
+function autostart() {
+  if (Q.held) return;
+  let n;
+  while (runningCount() < Q.limit && (n = nextQueued())) {
+    Q.order = Q.order.filter((x) => x !== n);
+    jobs[n] = simJob(n);
+    toast(`Simulated: the queue started ${n}`);
+  }
+}
+// ---- board
+const RULES = [['resume-then-queue', 'Resume parked jobs, then go on with the queue'], ['resume-only', 'Resume parked jobs only'], ['wait', 'Wait for me']];
+function boardEntries() {
+  const cols = { impl: [], rev: [], you: [], done: [] };
+  const COL = { starting: 'impl', working: 'impl', parked: 'impl', awaiting_review: 'rev', preparing_mr: 'rev', needs_human: 'you', ready_for_human_review: 'you', pushed: 'done', aborted: null, failed: null };
+  for (const j of Object.values(jobs)) if (COL[j.state]) cols[COL[j.state]].push({ kind: 'job', j });
+  for (const b of SNAP.board_jobs) if (!jobs[b.ticket] && COL[b.state]) cols[COL[b.state]].push({ kind: 'old', b });
+  for (const d of SNAP.done) if (d.state === 'pushed' && !jobs[d.ticket] && !SNAP.board_jobs.some((b) => b.ticket === d.ticket)) cols.done.push({ kind: 'old', b: d });
+  cols.done.sort((a, b) => Date.parse((b.j ? last(b.j).ts : b.b.updated_at)) - Date.parse((a.j ? last(a.j).ts : a.b.updated_at)));
+  return cols;
+}
+function jobCard(j) {
+  const cost = costOf(j), el = dur(endTs(j) - Date.parse(j.created_at));
+  const head = `<div class="row1"><span class="key">${j.ticket}</span>${j.state === 'needs_human' && j.code ? `<span class="tag" title="error code">${esc(j.code)}</span>` : ''}${j.sim ? '<span class="simtag">sim</span>' : ''}<span class="money">${money(cost)}${j.live ? ' so far' : ''} · ${el}</span></div><div class="title">${esc(j.title)}</div>`;
+  let mid = '', act = '';
+  if (j.state === 'parked') {
+    mid = `<div class="parked">Waiting for limits · resets at 03:00</div><div class="meta">Iteration ${runningIteration(j)} · parked, holds its slot</div>`;
+    if (!Q.held && Q.rule === 'wait') act = `<div class="act"><button class="btn primary small" data-resume="${j.ticket}">Resume</button></div>`;
+  } else if (RUNNING.includes(j.state)) {
+    const n = nowLine(j);
+    mid = `<div class="now"><i class="pulse"></i><b>Now: ${esc(n.who)}</b><span title="${esc(n.what)}">${esc(n.what)}</span></div><div class="meta">Iteration ${runningIteration(j)}${j.paused ? ' · paused' : ''} · ${j.stream.filter((e) => e.t === 'tool').length} tool calls</div>`;
+  } else if (j.state === 'needs_human') {
+    const n = openFindings(j).length;
+    if (n) { mid = `<div class="reason">${esc(REASON[j.code] || 'Stopped')}</div><div class="meta">Iteration ${runningIteration(j)} · ${n} finding${n === 1 ? '' : 's'} to decide</div>`; act = `<div class="act"><button class="btn primary small" data-open="${j.ticket}" data-focus="stop">Decide ${n} finding${n === 1 ? '' : 's'}</button></div>`; }
+    else { mid = `<div class="reason">${esc(REASON[j.code] || 'Stopped')}</div><div class="meta">Iteration ${runningIteration(j)} · stopped at ${hm(last(j).ts)}</div>`; act = `<div class="act"><button class="btn primary small" data-open="${j.ticket}" data-focus="composer">Tell it to go on</button></div>`; }
+  } else if (j.state === 'ready_for_human_review') {
+    mid = `<div class="reason ready">Ready to push: reviews clean, MR text written</div><div class="meta">Iteration ${j.iteration}</div>`;
+    act = `<div class="act"><button class="btn primary small" data-open="${j.ticket}" data-screen="mr">Review the MR and push</button></div>`;
+  } else {
+    mid = `<div class="meta">${STATE_WORD[j.state]} · ${j.iteration} iteration${j.iteration === 1 ? '' : 's'} · ${hm(last(j).ts)}</div>`;
+  }
+  return `<li class="card" tabindex="0" data-open="${j.ticket}">${head}${mid}${act}</li>`;
+}
+function oldCard(b) {
+  if (RUNNING.includes(b.state)) return `<li class="card static" tabindex="0" title="Started after this snapshot's job data was read; no stream in this prototype"><div class="row1"><span class="key">${b.ticket}</span><span class="money">${money(b.cost_usd)} · ${dur(NOW - Date.parse(b.created_at))}</span></div><div class="title">${esc(b.title)}</div><div class="now"><i class="pulse"></i><b>Now: ${b.state === 'awaiting_review' ? 'review' : 'Implementer'}</b><span>(no stream in this prototype)</span></div><div class="meta">Iteration ${(b.iteration || 0) + (['working', 'starting'].includes(b.state) ? 1 : 0)}</div></li>`;
+  const el = b.updated_at && b.created_at ? ' · ' + dur(Date.parse(b.updated_at) - Date.parse(b.created_at)) : '';
+  return `<li class="card static" tabindex="0" title="Only SF-040, SF-053, SF-054 and SF-055 have their stream in this prototype"><div class="row1"><span class="key">${b.ticket}</span><span class="money">${money(b.cost_usd)}${el}</span></div><div class="title">${esc(b.title)}</div><div class="meta">${STATE_WORD[b.state] || b.state} · ${b.iteration} iteration${b.iteration === 1 ? '' : 's'}</div></li>`;
+}
+function checkNote(p) {
+  const c = p.check || {};
+  if (p.draft) return 'draft';
+  if (c.state === 'not_ready') return `not ready: ${c.blockers} blocker, ${c.majors} major`;
+  if (c.state === 'ready') return 'check: ready';
+  return 'not checked';
+}
+function queueCard(t, i) {
+  const p = PLANMAP[t];
+  const w = waitsFor(t);
+  const queued = i != null;
+  return `<li class="card" tabindex="0" data-ticket="${t}"${queued ? ` draggable="true" data-q="${i}"` : ''}><div class="row1">${queued ? `<span class="pos" title="Position in the queue">${i + 1}</span>` : ''}<span class="key">${t}</span><span class="money">${esc(checkNote(p))}</span></div><div class="title">${esc(p.title)}</div>${w.length ? `<div class="waits">waits for ${w.join(', ')}</div>` : ''}<div class="act"><button class="btn small" data-qtoggle="${t}">${queued ? 'Remove from queue' : 'Add to queue'}</button>${queued ? '<span class="muted" style="font-size:11px;margin-left:auto" title="Drag, or Alt+Up / Alt+Down">⠿ drag · Alt+↑↓</span>' : ''}</div></li>`;
+}
+function renderBoard() {
+  const c = boardEntries();
+  const run = runningCount(), wait = c.you.length;
+  $('#summary').textContent = `Snapshot ${new Date(NOW).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })} · ${wait} wait${wait === 1 ? 's' : ''} for you`;
+  document.title = (wait ? `(${wait}) ` : '') + 'Factory Job Stream';
+  $('#limVal').textContent = Q.limit;
+  const free = Math.max(0, Q.limit - run), nx = nextQueued();
+  const qs = $('#qstatus');
+  qs.className = 'qstatus' + (Q.held ? ' held' : '');
+  qs.textContent = Q.held ? `Queue held: usage limit, resets at 03:00 · ${run} running` : `${run} running · ${free} slot${free === 1 ? '' : 's'} free · next: ${nx || 'nothing ready'}`;
+  const col = (key, name, html, n) => `<section class="col ${key}"><h2>${name} <span class="n">${n}</span></h2><ul${key === 'queue' ? ' id="qlist"' : ''}>${html}</ul></section>`;
+  const list = (arr, empty) => (arr.length ? arr.map((x) => (x.kind === 'job' ? jobCard(x.j) : oldCard(x.b))).join('') : `<li class="empty">${empty}</li>`);
+  const qhtml = (Q.order.length ? Q.order.map((t, i) => queueCard(t, i)).join('') : '<li class="empty">The queue is empty: add a ticket below.</li>') + `<li class="qdiv">Not queued</li>` + Q.off.map((t) => queueCard(t, null)).join('');
+  $('#cols').innerHTML = col('queue', 'Queue', qhtml, Q.order.length) + col('impl', 'Implementing', list(c.impl, 'Nothing is being implemented.'), c.impl.length) + col('rev', 'Reviewing', list(c.rev, 'Nothing is in review.'), c.rev.length)
+    + col('you', 'Your turn', list(c.you, 'Nothing waits for you.'), c.you.length) + col('done', 'Done', list(c.done.slice(0, 8), 'No finished job.'), c.done.length);
+  renderSimBtns();
+}
+function renderRules() {
+  const m = $('#rulesMenu');
+  m.innerHTML = `<b>When the usage limit resets</b>${RULES.map(([v, l]) => `<label><input type="radio" name="rule" value="${v}" id="rule-${v}"${Q.rule === v ? ' checked' : ''}> ${l}</label>`).join('')}<span class="muted" style="font-size:12px">Simulated: the setting lives only on this page.</span>`;
+}
+function renderSimBtns() {
+  const parked = Object.values(jobs).some((j) => j.state === 'parked');
+  const running = Object.values(jobs).filter((j) => ['working', 'starting', 'awaiting_review', 'preparing_mr'].includes(j.state));
+  $('#simBtns').innerHTML = (Q.held || parked ? '<button class="sbtn" data-sim-act="reset">Limit resets now</button>' : '')
+    + (running.length ? `<button class="sbtn" data-sim-act="finish" title="Moves ${running[0].ticket} to Your turn, as if its reviews came back clean">Finish ${running[0].ticket}</button>` : '');
+}
+function simAct(a) {
+  if (a === 'finish') {
+    const j = Object.values(jobs).find((x) => ['working', 'starting', 'awaiting_review', 'preparing_mr'].includes(x.state));
+    push(j, { t: 'sim', who: 'proto', text: 'Simulated: the iteration ended and both reviews came back clean; the MR text is written.' });
+    setState(j, 'ready_for_human_review'); j.live = false;
+    if (!j.iteration) j.iteration = 1;
+    toast(`Simulated: ${j.ticket} finished and waits for you`);
+  } else if (a === 'reset') {
+    Q.held = false;
+    for (const j of Object.values(jobs)) if (j.state === 'parked' && Q.rule !== 'wait') { setState(j, 'working', null, 'The usage limit reset: resumed.'); }
+    if (Q.rule === 'resume-only' || Q.rule === 'wait') { Q.held = true; Q.released = false; }
+    toast(Q.rule === 'resume-then-queue' ? 'Simulated: limit reset; parked jobs resumed, the queue goes on' : Q.rule === 'resume-only' ? 'Simulated: limit reset; parked jobs resumed, the queue stays held' : 'Simulated: limit reset; nothing resumes until you say so');
+  }
+  autostart(); rerender();
+}
+function rerender() { renderBoard(); if (ui.screen !== 'board' && ui.job && jobs[ui.job]) renderJobScreen(); renderState(); }
+
+// queue: drag and drop, keyboard reordering, toggles
+function moveQueued(t, to) {
+  const from = Q.order.indexOf(t); if (from < 0) return;
+  to = Math.max(0, Math.min(Q.order.length - 1, to));
+  Q.order.splice(from, 1); Q.order.splice(to, 0, t);
+  renderBoard(); renderState();
+  document.querySelector(`.card[data-ticket="${t}"]`)?.focus();
+}
+document.addEventListener('dragstart', (ev) => { const c = ev.target.closest?.('.card[data-q]'); if (!c) return; ui.drag = c.dataset.ticket; c.classList.add('dragging'); ev.dataTransfer.effectAllowed = 'move'; try { ev.dataTransfer.setData('text/plain', ui.drag); } catch { /* none */ } });
+document.addEventListener('dragover', (ev) => { if (!ui.drag) return; const c = ev.target.closest?.('#qlist .card[data-q]'); document.querySelectorAll('.dropbefore').forEach((x) => x.classList.remove('dropbefore')); if (c) { ev.preventDefault(); c.classList.add('dropbefore'); } else if (ev.target.closest?.('#qlist')) ev.preventDefault(); });
+document.addEventListener('drop', (ev) => { if (!ui.drag) return; ev.preventDefault(); const c = ev.target.closest?.('#qlist .card[data-q]'); const t = ui.drag; ui.drag = null; if (c && c.dataset.ticket !== t) { const to = Number(c.dataset.q); const from = Q.order.indexOf(t); moveQueued(t, from < to ? to - 1 : to); toast(`Simulated: ${t} moved to position ${Q.order.indexOf(t) + 1}`); } else renderBoard(); });
+document.addEventListener('dragend', () => { ui.drag = null; document.querySelectorAll('.dragging,.dropbefore').forEach((x) => x.classList.remove('dragging', 'dropbefore')); });
+function qtoggle(t) {
+  if (Q.order.includes(t)) { Q.order = Q.order.filter((x) => x !== t); Q.off.unshift(t); toast(`Simulated: ${t} removed from the queue`); }
+  else { Q.off = Q.off.filter((x) => x !== t); Q.order.push(t); toast(`Simulated: ${t} added to the queue at position ${Q.order.length}`); }
+  autostart(); renderBoard(); renderState();
+}
+// ---- UI state
+const ui = { screen: 'board', job: null, ticket: null, sel: -1, open: new Set(), confirm: null, statePanel: false, drag: null,
+  cx: { view: 'all', sel: null, q: '', flat: false, collapsed: new Set(), mode: 'side', collapse: true, unfolded: new Set() } };
+
+// ---- stream
+function prose(text) {
+  return esc(text).replace(/`([^`\n]+)`/g, '<code>$1</code>').replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>').replace(/^(#{1,4} .*)$/gm, '<span class="h">$1</span>');
+}
+function toolLine(e) {
+  const m = e.line.match(/^(\S+) (.*?)(?:  → (.*))?$/s) || [null, e.line, '', ''];
+  const out = m[3] ? ` <span class="out${/failed|error|exit [1-9]/.test(m[3]) ? ' bad' : ''}">→ ${esc(m[3])}</span>` : '';
+  return `<span class="verb">${esc(m[1])}</span> ${esc(m[2])}${out}`;
+}
+const pathLink = (p, it) => { const [d, n] = splitPath(p); return `<button class="pathlink" data-cfile="${esc(p)}" data-cit="${it ?? ''}" title="Open ${esc(p)} in Changes${it ? ' at iteration ' + it : ''}">${d ? `<span class="d">${esc(d)}/</span>` : ''}${esc(n)}</button>`; };
+function findingHtml(x, i, j, live, it) {
+  const d = j.decisions[x.id];
+  let decide = '';
+  if (live) decide = d ? `<div class="decide"><span class="decided">${d === 'accept' ? 'Accepted: ship as is' : 'Must fix'}</span><button class="linkish" data-undo="${x.id}">change</button></div>`
+    : `<div class="decide"><button class="btn small" data-decide="accept" data-id="${x.id}">Accept (ship as is)</button><button class="btn small" data-decide="fix" data-id="${x.id}">Must fix</button></div>`;
+  return `<li class="finding"><span class="fid">${esc(x.id || '#' + (i + 1))}</span><span class="sev sev-${esc(x.severity)}">${esc(x.severity)}</span>${pathLink(x.path, it)}<div class="problem">${prose(x.problem)}</div>${x.expected ? `<div class="expected">Expected: ${prose(x.expected)}</div>` : ''}${decide}</li>`;
+}
+function changesEntry(e, j) {
+  const set = VER.ready ? changeSet(j, e.it) : null;
+  const meta = j.src.iterations.find((x) => x.n === e.it);
+  const total = meta ? meta.files.length : 0;
+  if (!set) return `<div class="block"><div class="bh">Iteration ${e.it} ended: ${total} files changed in all</div><button class="linkish" data-changes="${e.it}">Open Changes</button></div>`;
+  const shown = set.slice(0, 14);
+  return `<div class="block"><div class="bh">Iteration ${e.it} ended: ${set.length} file${set.length === 1 ? '' : 's'} changed in this iteration <span class="muted" style="font-weight:400">${total} in all since ${esc(j.base)}</span><span style="flex:1"></span><button class="btn small" data-changes="${e.it}">Open these changes <span class="kbd">c</span></button></div>
+    <div class="flinks">${shown.map((f) => pathLink(f.path, e.it)).join('')}${set.length > shown.length ? `<button class="linkish" data-changes="${e.it}">and ${set.length - shown.length} more</button>` : ''}</div></div>`;
+}
+const STATE_TEXT = (e) => {
+  if (e.to === 'awaiting_review') return 'The Implementer finished; the reviews start';
+  if (e.to === 'working' && e.from === 'awaiting_review') return 'Codex asked for fixes; back to the Implementer';
+  if (e.to === 'working' && e.from === 'parked') return 'Resumed after the usage limit reset';
+  if (e.to === 'working') return 'The Implementer starts';
+  if (e.to === 'preparing_mr') return 'Both reviews clean; the MR text is being written';
+  if (e.to === 'ready_for_human_review') return 'Ready for you';
+  if (e.to === 'pushed') return 'Pushed';
+  if (e.to === 'parked') return 'Parked: usage limit reached';
+  return STATE_WORD[e.to] || e.to;
+};
+function entryHtml(e, j, prevWho, isLiveStop) {
+  const open = ui.open.has(e.k);
+  const who = e.who || 'factory';
+  const label = e.t === 'state' ? 'State' : e.t === 'prompt' ? 'Factory' : WHO[who] || who;
+  const cont = prevWho === label && ['tool', 'text', 'result'].includes(e.t);
+  const start = `<li class="e e-${e.t} who-${who}${open ? ' open' : ''}${e.err ? ' err' : ''}${e.t === 'text' && !open && e.text.split('\n').length > 8 ? ' clamp' : ''}" data-k="${e.k}"><span class="ts">${hm(e.ts)}</span><span class="who${cont ? ' cont' : ''}">${esc(label)}</span><div class="body">`;
+  let body = '';
+  switch (e.t) {
+    case 'tool':
+      body = `<button class="line" data-toggle="${e.k}" title="${esc(e.line)}">${toolLine(e)}</button>${open ? `<div class="more"><span class="lbl">Input</span><pre>${esc(e.detail)}</pre>${e.result ? `<span class="lbl">Output</span><pre>${esc(e.result)}</pre>` : ''}</div>` : ''}`;
+      break;
+    case 'text': {
+      const n = e.text.split('\n').length;
+      body = `<div class="prose">${who === 'codex' && /^\[withheld/.test(e.text) ? '<span class="muted">(message withheld by the factory)</span>' : prose(e.text)}</div>${n > 8 ? `<button class="linkish" data-toggle="${e.k}">${open ? 'Show less' : `Show all ${n} lines`}</button>` : ''}`;
+      break;
+    }
+    case 'result': body = `Turn ended · ${e.turns} turns${e.ms ? ' · ' + dur(e.ms) : ''} · session ${money(e.cost)}`; break;
+    case 'note': body = esc(e.text); break;
+    case 'state':
+      if (e.to === 'needs_human') {
+        const items = openFindings(j);
+        const decided = items.filter((x) => j.decisions[x.id]).length;
+        body = `<div class="block stop${e.sim ? ' sim' : ''}" id="stopblock"><div class="bh"><span class="verdict stop">Stopped</span>${esc(REASON[e.code] || 'Needs you')} <span class="tag">${esc(e.code)}</span>${e.sim ? '<span class="simtag">simulated</span>' : ''}</div><div class="muted">${esc(e.msg)}</div>${isLiveStop && !items.length ? '<div>Nothing to decide here: tell the Implementer to go on (below), or abort.</div>' : ''}${isLiveStop && items.length ? `<div>Decide each finding. ${decided}/${items.length} decided. When all are decided the job goes on: any Must fix sends a Fix section to the Implementer; all accepted prepares the MR.</div><ul class="findings">${items.map((x, i) => findingHtml(x, i, j, true, e.it)).join('')}</ul>` : ''}</div>`;
+      } else body = `<b>${esc(STATE_TEXT(e))}</b><span class="tag">${esc(e.from || '–')} → ${esc(e.to)}</span>${e.sim ? '<span class="simtag">simulated</span>' : ''}${e.msg ? `<span>${esc(e.msg)}</span>` : ''}`;
+      break;
+    case 'prompt':
+      if (e.kind === 'fix') {
+        const items = fixItems(e.fix);
+        const intro = (e.fix || '').split(/\n\d+\. \[R/)[0].trim();
+        body = `<div class="block fixsec"><div class="bh">Fix ${e.fix_n} sent to the Implementer <span class="muted" style="font-weight:400">${items.length} item${items.length === 1 ? '' : 's'}</span></div><div class="summary">${prose(intro)}</div><ul class="findings">${items.map((x, i) => findingHtml(x, i, j, false, e.fix_n)).join('')}</ul><button class="linkish" data-toggle="${e.k}">${open ? 'Hide the full prompt' : 'Show the full prompt'}</button>${open ? `<pre class="raw">${esc(e.text)}</pre>` : ''}</div>`;
+      } else {
+        body = `<div><b>${e.kind === 'mr' ? 'MR preparation started' : 'The Implementer got the Task file'}</b> <span class="mono muted" style="font-size:12px">${esc(e.first)}</span> <button class="linkish" data-toggle="${e.k}">${open ? 'hide prompt' : 'prompt'}</button></div>${open ? `<pre class="raw">${esc(e.text)}</pre>` : ''}`;
+      }
+      break;
+    case 'verdict': {
+      const n = e.items.length;
+      const v = e.verdict === 'clean' ? 'clean' : 'fix';
+      body = `<div class="block${open ? '' : ' clamp'}"><div class="bh">${e.who === 'claude' ? 'Claude review' : 'Codex gate'} · iteration ${e.it} <span class="verdict ${v}">${e.verdict === 'clean' ? 'clean' : 'asks for fixes'}</span><span class="muted" style="font-weight:400">${n ? `${n} ${e.who === 'claude' ? 'note' : 'finding'}${n === 1 ? '' : 's'}` : 'no findings'}</span></div><div class="summary">${prose(e.summary)}</div><button class="linkish" data-toggle="${e.k}">${open ? 'Show less' : 'Show the whole summary'}</button>${n ? `<ul class="findings">${e.items.map((x, i) => findingHtml(x, i, j, false, e.it)).join('')}</ul>` : ''}</div>`;
+      break;
+    }
+    case 'changes': body = changesEntry(e, j); break;
+    case 'user': body = `<div class="block you"><div class="prose">${prose(e.text)}</div></div>`; break;
+    case 'sim': body = `<span class="simtag">(prototype)</span> ${esc(e.text)}`; break;
+  }
+  return { html: start + body + '</div></li>', label };
+}
+function renderStream() {
+  const j = jobs[ui.job];
+  let html = '', prev = null;
+  const stopIdx = j.state === 'needs_human' ? j.stream.map((e) => e.t === 'state' && e.to === 'needs_human').lastIndexOf(true) : -1;
+  if (j.scenarioNote) html += `<li class="sep"><span class="simtag">scenario</span> <span style="font-weight:400">${esc(j.scenarioNote)}</span></li>`;
+  j.stream.forEach((e, i) => {
+    if (e.t === 'prompt') { html += `<li class="sep">${e.kind === 'mr' ? 'MR preparation' : `Iteration ${e.it}`}${e.kind === 'fix' ? ` <span class="tag">Fix ${e.fix_n}</span>` : ''}</li>`; prev = null; }
+    if (e.t === 'text' && e.who === 'codex' && e.text.trim().startsWith('{')) return;
+    const r = entryHtml(e, j, prev, i === stopIdx);
+    html += r.html; prev = r.label;
+  });
+  $('#stream').innerHTML = html;
+  markSel(false);
+}
+function entries() { return [...document.querySelectorAll('#stream > li.e')]; }
+function markSel(scroll) {
+  const es = entries();
+  es.forEach((x) => x.classList.remove('sel'));
+  if (ui.sel >= 0 && es[ui.sel]) { es[ui.sel].classList.add('sel'); if (scroll) es[ui.sel].scrollIntoView({ block: 'nearest' }); }
+}
+function keepScroll(fn) { const w = $('#streamwrap'); const top = w.scrollTop; fn(); w.scrollTop = top; }
+function toggle(k) { if (ui.open.has(k)) ui.open.delete(k); else ui.open.add(k); keepScroll(renderStream); renderState(); }
+
+// ---- composer and actions (all simulated)
+function actionsFor(j) {
+  switch (j.state) {
+    case 'working': case 'starting': return [{ a: 'send', l: 'Send', p: true }, { a: j.paused ? 'resume' : 'pause', l: j.paused ? 'Resume' : 'Pause' }, { a: 'abort', l: 'Abort…', d: true }];
+    case 'parked': return [{ a: 'send', l: 'Send', p: true }, { a: 'abort', l: 'Abort…', d: true }];
+    case 'awaiting_review': return [{ a: 'send', l: 'Send', p: true }, { a: 'nudge', l: 'Nudge the reviewer' }, { a: 'abort', l: 'Abort…', d: true }];
+    case 'needs_human': if (!openFindings(j).length) return [{ a: 'goon', l: 'Tell it to go on', p: true }, { a: 'send', l: 'Send' }, { a: 'abort', l: 'Abort…', d: true }];
+    { const all = openFindings(j).every((x) => j.decisions[x.id]); return [{ a: 'continue', l: 'Continue with my decisions', p: true, dis: !all, why: all ? '' : 'Decide every finding first' }, { a: 'override', l: 'Override the gate and prepare MR' }, { a: 'send', l: 'Send' }, { a: 'abort', l: 'Abort…', d: true }]; }
+    case 'ready_for_human_review': return [{ a: 'open-mr', l: 'Review the MR and push', p: true }, { a: 'send', l: 'Send' }, { a: 'abort', l: 'Abort…', d: true }];
+    default: return [];
+  }
+}
+function renderComposer() {
+  const j = jobs[ui.job];
+  const c = $('#composer');
+  const acts = actionsFor(j);
+  if (!acts.length) { c.innerHTML = `<div class="cs"><b>${esc(sentence(j))}.</b> <span class="muted">Nothing to do here; the message box is hidden on a finished job.</span><button class="btn small" data-back>← Back to the board</button></div>`; return; }
+  const ph = { working: 'Message the Implementer; it reads it at its next step (Ctrl+Enter sends)', parked: 'Message the job; it reads it when it resumes', awaiting_review: 'Message the job; the Implementer reads it when the reviews end', needs_human: 'Or tell the Implementer what to do instead', ready_for_human_review: 'Ask the Implementer for a last change before you push' }[j.state] || 'Message';
+  const draft = $('#msg')?.value ?? '';
+  const confirm = ui.confirm === 'abort' ? `<div class="confirm">Abort ${j.ticket}? The branch stays and the ticket goes back to the queue's Not queued list. <button class="btn small danger" data-act="abort-yes">Abort the job</button><button class="btn small" data-act="abort-no">Keep it</button></div>` : '';
+  c.innerHTML = `<div class="cs"><span class="simtag">simulated</span><b>${esc(sentence(j))}.</b><span class="muted">Actions below change only this page.</span></div>${confirm}
+  <div class="crow"><textarea id="msg" rows="2" placeholder="${esc(ph)}">${esc(draft)}</textarea><div class="acts">${acts.map((x) => `<button class="btn${x.p ? ' primary' : ''}${x.d ? ' danger' : ''}" data-act="${x.a}"${x.dis ? ' disabled' : ''} title="${esc(x.why || '')}">${esc(x.l)}</button>`).join('')}</div></div>`;
+}
+function toast(t) { const el = $('#toast'); el.textContent = t; el.hidden = false; clearTimeout(toast.h); toast.h = setTimeout(() => (el.hidden = true), 2800); }
+function push(j, e) { j.stream.push({ ts: new Date(Math.max(Date.parse(last(j).ts), NOW) + (++seq) * 1000).toISOString(), it: j.iteration, k: `${j.ticket}:sim${seq}`, ...e }); }
+function setState(j, to, code = null, msg = '') { push(j, { t: 'state', from: j.state, to, code, sim: true, msg }); j.state = to; j.code = code; }
+function replay(j, why) {
+  const rest = j.src.stream.slice(j.resumeAt); const end = rest.findIndex((e) => e.t === 'changes');
+  const add = rest.slice(0, end + 1).map((e, i) => ({ ...e, k: `${j.ticket}:${j.resumeAt + i}` }));
+  const it = add[add.length - 1].it;
+  push(j, { t: 'sim', who: 'proto', text: `${why} What follows is what really happened next in this job, replayed from the snapshot up to the end of iteration ${it}.` });
+  j.stream.push(...add); j.iteration = it; j.resumeAt = null; j.state = 'awaiting_review'; j.code = null;
+  push(j, { t: 'sim', who: 'proto', text: `The reviews of iteration ${it} would run now.` });
+}
+function act(a) {
+  const j = jobs[ui.job];
+  const msg = $('#msg');
+  const text = msg ? msg.value.trim() : '';
+  if (a === 'send') {
+    if (!text) { toast('Write a message first'); msg?.focus(); return; }
+    push(j, { t: 'user', who: 'you', text });
+    const reply = { working: 'The Implementer reads this at its next step and answers here, in this stream.', parked: 'Queued: the Implementer reads it when the job resumes.', awaiting_review: 'Queued: the Implementer gets it when the reviews end.', needs_human: 'The Implementer would take this as its direction and start the next iteration.', ready_for_human_review: 'The Implementer would make the change; the reviews run again before you can push.' }[j.state];
+    push(j, { t: 'sim', who: 'proto', text: reply });
+    msg.value = ''; toast('Simulated: message added to the stream');
+  } else if (a === 'pause') { j.paused = true; push(j, { t: 'sim', who: 'proto', text: 'Paused: the Implementer stops after its current tool call.' }); toast('Simulated: paused'); }
+  else if (a === 'resume') { j.paused = false; push(j, { t: 'sim', who: 'proto', text: 'Resumed.' }); toast('Simulated: resumed'); }
+  else if (a === 'nudge') { push(j, { t: 'sim', who: 'proto', text: 'Nudged the reviewer: it restarts the review of this iteration.' }); toast('Simulated: reviewer nudged'); }
+  else if (a === 'abort') { ui.confirm = 'abort'; renderComposer(); renderState(); return; }
+  else if (a === 'abort-no') { ui.confirm = null; }
+  else if (a === 'abort-yes') { ui.confirm = null; setState(j, 'aborted', null, 'Aborted from the job page. The branch stays.'); j.live = false; if (PLANMAP[j.ticket] && !Q.off.includes(j.ticket)) Q.off.unshift(j.ticket); toast('Simulated: aborted; the ticket is back under Not queued'); }
+  else if (a === 'override') { setState(j, 'preparing_mr', null, 'You overrode the gate.'); push(j, { t: 'sim', who: 'proto', text: 'The MR writer prepares the MR text (skipped here).' }); setState(j, 'ready_for_human_review'); toast('Simulated: gate overridden, MR prepared'); }
+  else if (a === 'goon') { push(j, { t: 'user', who: 'you', text: text || 'Go on.' }); if (msg) msg.value = ''; if (j.resumeAt) replay(j, 'Sent.'); else { j.state = 'working'; j.code = null; } toast('Simulated: the Implementer goes on'); }
+  else if (a === 'continue') {
+    const items = openFindings(j);
+    const fix = items.filter((x) => j.decisions[x.id] === 'fix').map((x) => x.id);
+    push(j, { t: 'user', who: 'you', text: items.map((x) => `${x.id}: ${j.decisions[x.id] === 'fix' ? 'must fix' : 'accepted, ship as is'}`).join('\n') });
+    if (fix.length) { if (j.resumeAt) replay(j, `Fix sent with ${fix.join(', ')}.`); else { j.state = 'working'; j.code = null; push(j, { t: 'sim', who: 'proto', text: `Fix sent with ${fix.join(', ')}; the Implementer starts the next iteration.` }); } toast('Simulated: Fix sent to the Implementer'); }
+    else { setState(j, 'preparing_mr', null, 'All findings accepted.'); setState(j, 'ready_for_human_review'); toast('Simulated: all accepted, MR prepared'); }
+    j.decisions = {};
+  } else if (a === 'open-mr') { return go(j.ticket, 'mr'); }
+  else if (a === 'push-mr' || a === 'push') {
+    setState(j, 'pushed', null, a === 'push-mr' ? `Pushed ${j.branch} and opened a merge request on GitHub (nothing left this page).` : `Pushed ${j.branch} (nothing left this page).`);
+    j.live = false; toast(a === 'push-mr' ? 'Simulated: pushed and MR opened' : 'Simulated: pushed');
+  }
+  autostart();
+  renderJobScreen(); renderBoard(); renderState();
+  if (ui.screen === 'stream') { const w = $('#streamwrap'); w.scrollTop = w.scrollHeight; }
+}
+// ---- file versions (gzip, decoded once in the browser)
+const VER = { ready: false, jobs: {}, texts: [] };
+async function loadVersions() {
+  try {
+    const bin = Uint8Array.from(atob(VERSIONS_B64), (c) => c.charCodeAt(0));
+    const txt = await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+    Object.assign(VER, JSON.parse(txt), { ready: true });
+  } catch (e) { VER.error = String(e); }
+  if (ui.job) renderJobScreen();
+}
+function itersOf(j) { const v = VER.jobs[j.ticket]; return v ? v.iters.filter((x) => x.n <= j.iteration) : []; }
+function changeSet(j, view) {
+  const V = VER.jobs[j.ticket]; const its = itersOf(j);
+  if (!V || !its.length) return [];
+  let from, to;
+  if (view === 'all' || view == null) { from = V.base; to = its[its.length - 1].files; }
+  else { const i = its.findIndex((x) => x.n === view); if (i < 0) return changeSet(j, 'all'); to = its[i].files; from = i ? its[i - 1].files : V.base; }
+  return Object.keys(to).filter((p) => from[p] !== to[p]).sort().map((p) => ({ path: p, a: from[p], b: to[p], status: from[p] === -1 ? 'added' : to[p] === -1 ? 'deleted' : 'modified' }));
+}
+function changeCount(j) { return VER.ready ? changeSet(j, 'all').length : (j.src.iterations.find((x) => x.n === j.iteration)?.files.length ?? 0); }
+const linesOf = (id) => { if (id === -1) return []; const t = VER.texts[id]; const ls = t.split('\n'); if (ls.length && ls[ls.length - 1] === '') ls.pop(); return ls; };
+
+// ---- line diff (Myers, with common prefix and suffix trimmed first)
+const DCACHE = new Map();
+function myers(A, B) {
+  const N = A.length, M = B.length;
+  if (!N) return B.map((_, j) => ['+', -1, j]);
+  if (!M) return A.map((_, i) => ['-', i, -1]);
+  const max = N + M, off = max, V = new Int32Array(2 * max + 2), trace = [];
+  for (let d = 0; d <= max; d++) {
+    if (d > 2500) return [...A.map((_, i) => ['-', i, -1]), ...B.map((_, j) => ['+', -1, j])];
+    trace.push(V.slice(off - d - 1, off + d + 2));
+    for (let k = -d; k <= d; k += 2) {
+      let x = (k === -d || (k !== d && V[off + k - 1] < V[off + k + 1])) ? V[off + k + 1] : V[off + k - 1] + 1;
+      let y = x - k;
+      while (x < N && y < M && A[x] === B[y]) { x++; y++; }
+      V[off + k] = x;
+      if (x >= N && y >= M) {
+        const ops = []; let cx = N, cy = M;
+        for (let dd = d; dd >= 0; dd--) {
+          const v = trace[dd], at = (kk) => v[kk + dd + 1];
+          const kk = cx - cy;
+          const pk = (kk === -dd || (kk !== dd && at(kk - 1) < at(kk + 1))) ? kk + 1 : kk - 1;
+          const px = dd === 0 ? 0 : at(pk), py = px - pk;
+          while (cx > px && cy > py) { ops.push(['=', cx - 1, cy - 1]); cx--; cy--; }
+          if (dd > 0) { if (cx === px) ops.push(['+', -1, cy - 1]); else ops.push(['-', cx - 1, -1]); }
+          cx = px; cy = py;
+        }
+        return ops.reverse();
+      }
+    }
+  }
+  return [];
+}
+function getDiff(f) {
+  const key = f.a + '|' + f.b;
+  if (DCACHE.has(key)) return DCACHE.get(key);
+  const A = linesOf(f.a), B = linesOf(f.b);
+  let s = 0; while (s < A.length && s < B.length && A[s] === B[s]) s++;
+  let ea = A.length, eb = B.length; while (ea > s && eb > s && A[ea - 1] === B[eb - 1]) { ea--; eb--; }
+  const mid = myers(A.slice(s, ea), B.slice(s, eb)).map(([t, i, j]) => [t, i < 0 ? -1 : i + s, j < 0 ? -1 : j + s]);
+  const ops = [];
+  for (let i = 0; i < s; i++) ops.push(['=', i, i]);
+  ops.push(...mid);
+  for (let i = 0; i < A.length - ea; i++) ops.push(['=', ea + i, eb + i]);
+  const d = { ops, A, B, add: ops.filter((o) => o[0] === '+').length, del: ops.filter((o) => o[0] === '-').length };
+  DCACHE.set(key, d);
+  return d;
+}
+function wordHl(a, b) {
+  let p = 0; while (p < a.length && p < b.length && a[p] === b[p]) p++;
+  let s = 0; while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+  const wrap = (t, cls) => { const m = t.slice(p, t.length - s); return esc(t.slice(0, p)) + (m ? `<span class="${cls}">${esc(m)}</span>` : '') + esc(t.slice(t.length - s)); };
+  return [wrap(a, 'w-del'), wrap(b, 'w-add')];
+}
+function diffHtml(f) {
+  const d = getDiff(f); const { A, B, ops } = d;
+  const side = ui.cx.mode === 'side', C = 3;
+  const segs = [];
+  for (let i = 0; i < ops.length;) {
+    if (ops[i][0] === '=') { const s = { t: 'eq', rows: [] }; while (i < ops.length && ops[i][0] === '=') { s.rows.push(ops[i]); i++; } segs.push(s); }
+    else { const s = { t: 'chg', dels: [], adds: [] }; while (i < ops.length && ops[i][0] !== '=') { if (ops[i][0] === '-') s.dels.push(ops[i][1]); else s.adds.push(ops[i][2]); i++; } segs.push(s); }
+  }
+  const eq = (o) => side ? `<div class="r"><span class="ln">${o[1] + 1}</span><span class="c">${esc(A[o[1]])}</span><span class="ln">${o[2] + 1}</span><span class="c">${esc(B[o[2]])}</span></div>`
+    : `<div class="r"><span class="ln">${o[1] + 1}</span><span class="ln">${o[2] + 1}</span><span class="sg"></span><span class="c">${esc(A[o[1]])}</span></div>`;
+  let html = '';
+  segs.forEach((s, si) => {
+    if (s.t === 'eq') {
+      const fid = `${f.path}|${ui.cx.view}|${si}`;
+      const head = si === 0 ? 0 : C, tail = si === segs.length - 1 ? 0 : C;
+      if (ui.cx.collapse && !ui.cx.unfolded.has(fid) && s.rows.length > head + tail + 2) {
+        html += s.rows.slice(0, head).map(eq).join('') + `<button class="fold" data-fold="${esc(fid)}">⋯ ${s.rows.length - head - tail} unchanged lines</button>` + s.rows.slice(s.rows.length - tail).map(eq).join('');
+      } else html += s.rows.map(eq).join('');
+      return;
+    }
+    const n = Math.max(s.dels.length, s.adds.length);
+    const pair = (k) => { const ai = s.dels[k], bi = s.adds[k]; return ai != null && bi != null && s.dels.length === s.adds.length ? wordHl(A[ai], B[bi]) : [ai != null ? esc(A[ai]) : '', bi != null ? esc(B[bi]) : '']; };
+    if (side) {
+      for (let k = 0; k < n; k++) { const ai = s.dels[k], bi = s.adds[k]; const [ah, bh] = pair(k);
+        html += `<div class="r"><span class="ln">${ai != null ? ai + 1 : ''}</span><span class="c ${ai != null ? 'del' : 'void'}">${ah}</span><span class="ln">${bi != null ? bi + 1 : ''}</span><span class="c ${bi != null ? 'add' : 'void'}">${bh}</span></div>`; }
+    } else {
+      const hs = Array.from({ length: n }, (_, k) => pair(k));
+      s.dels.forEach((ai, k) => { html += `<div class="r del"><span class="ln">${ai + 1}</span><span class="ln"></span><span class="sg">−</span><span class="c">${hs[k][0]}</span></div>`; });
+      s.adds.forEach((bi, k) => { html += `<div class="r add"><span class="ln"></span><span class="ln">${bi + 1}</span><span class="sg">+</span><span class="c">${hs[k][1]}</span></div>`; });
+    }
+  });
+  if (!ops.length) html = '<div class="dempty">Empty file.</div>';
+  return `<div class="dfile${side ? '' : ' uni'}">${html}</div>`;
+}
+
+// ---- the tree
+function visibleFiles(j) { const all = changeSet(j, ui.cx.view); const q = ui.cx.q.toLowerCase(); return { all, files: q ? all.filter((f) => f.path.toLowerCase().includes(q)) : all }; }
+function treeRows(files) {
+  if (ui.cx.flat) return files.map((f) => ({ id: 'f:' + f.path, type: 'file', f, depth: 0 }));
+  const root = { dirs: new Map(), files: [] };
+  for (const f of files) { const parts = f.path.split('/'); let n = root; for (const p of parts.slice(0, -1)) { if (!n.dirs.has(p)) n.dirs.set(p, { dirs: new Map(), files: [] }); n = n.dirs.get(p); } n.files.push(f); }
+  const count = (n) => n.files.length + [...n.dirs.values()].reduce((s, c) => s + count(c), 0);
+  const out = [];
+  const walk = (node, prefix, depth, parent) => {
+    for (const [name, child] of [...node.dirs].sort((a, b) => a[0].localeCompare(b[0]))) {
+      let nm = name, c = child, full = prefix + name;
+      while (c.files.length === 0 && c.dirs.size === 1) { const [n2, c2] = [...c.dirs][0]; nm += '/' + n2; full += '/' + n2; c = c2; }
+      const id = 'd:' + full;
+      out.push({ id, type: 'dir', path: full, name: nm, depth, count: count(c), parent, open: !ui.cx.collapsed.has(full) });
+      if (!ui.cx.collapsed.has(full)) walk(c, full + '/', depth + 1, id);
+    }
+    for (const f of [...node.files].sort((a, b) => a.path.localeCompare(b.path))) out.push({ id: 'f:' + f.path, type: 'file', f, depth, parent });
+  };
+  walk(root, '', 0, null);
+  return out;
+}
+const LETTER = { modified: 'M', added: 'A', deleted: 'D' };
+function rowHtml(r) {
+  const cur = ui.cx.cursor === r.id;
+  if (r.type === 'dir') return `<li role="none"><button class="trow dir${cur ? ' sel' : ''}" role="treeitem" aria-expanded="${r.open}" data-trow="${esc(r.id)}" style="--d:${r.depth}" tabindex="${cur ? 0 : -1}"><span class="tw">${r.open ? '▾' : '▸'}</span><span class="ic">▤</span><span class="nm">${esc(r.name)}</span><span class="cnt">${r.count}</span></button></li>`;
+  const f = r.f, d = getDiff(f), [dir, name] = splitPath(f.path);
+  return `<li role="none"><button class="trow vcs-${f.status}${cur ? ' sel' : ''}" role="treeitem" data-trow="${esc(r.id)}" style="--d:${r.depth}" tabindex="${cur ? 0 : -1}" title="${esc(f.path)} (${f.status})"><span class="tw"></span><span class="lt">${LETTER[f.status]}</span><span class="nm">${esc(name)}</span>${ui.cx.flat ? `<span class="dn">${esc(dir)}</span>` : ''}<span class="cnt"><span class="a">+${d.add}</span> <span class="r">−${d.del}</span></span></button></li>`;
+}
+function renderTree(focus) {
+  const j = jobs[ui.job];
+  const { all, files } = visibleFiles(j);
+  const rows = treeRows(files);
+  ui.cx.rows = rows;
+  if (!rows.some((r) => r.id === ui.cx.cursor)) ui.cx.cursor = ui.cx.sel && rows.some((r) => r.id === 'f:' + ui.cx.sel) ? 'f:' + ui.cx.sel : rows.find((r) => r.type === 'file')?.id ?? rows[0]?.id ?? null;
+  const n = (s) => all.filter((f) => f.status === s).length;
+  let add = 0, del = 0; for (const f of all) { const d = getDiff(f); add += d.add; del += d.del; }
+  $('#cxsum').innerHTML = `<b>${all.length} files</b>: ${n('modified')} modified, ${n('added')} added, ${n('deleted')} deleted · <span style="color:var(--add)">+${add}</span> <span style="color:var(--del)">−${del}</span>${files.length !== all.length ? ` · ${files.length} match` : ''}`;
+  $('#tlist').innerHTML = rows.length ? rows.map(rowHtml).join('') : '<li class="dempty">No file matches the filter.</li>';
+  const el = document.querySelector(`#tlist [data-trow="${CSS.escape(ui.cx.cursor || '')}"]`);
+  if (el) { el.scrollIntoView({ block: 'nearest' }); if (focus) el.focus(); }
+}
+function iterLabel(j, v) { return v === 'all' ? `All changes (final${j.iteration ? ', after iteration ' + itersOf(j).slice(-1)[0]?.n : ''})` : `Iteration ${v}${v > 1 ? ` (Fix ${v - 1})` : ''}`; }
+function renderDiffPane() {
+  const j = jobs[ui.job];
+  const { files } = visibleFiles(j);
+  const f = files.find((x) => x.path === ui.cx.sel) || null;
+  const idx = f ? files.indexOf(f) : -1;
+  const its = itersOf(j);
+  $('#dtool').innerHTML = `<button class="btn small" data-fstep="-1" title="Previous file (Shift+F7 or p)" ${idx <= 0 ? 'disabled' : ''}>◀ <span class="kbd">⇧F7</span></button><button class="btn small" data-fstep="1" title="Next file (F7 or n)" ${idx < 0 || idx >= files.length - 1 ? 'disabled' : ''}><span class="kbd">F7</span> ▶</button>
+    <span class="dpath" title="${esc(f?.path || '')}">${f ? esc(f.path) : 'No file selected'}</span>${f ? `<span class="muted" style="font-size:12px">${idx + 1}/${files.length} · ${f.status}</span>` : ''}<span class="sp"></span>
+    <select id="cxview" aria-label="Which changes">${['all', ...its.map((x) => x.n)].map((v) => `<option value="${v}"${ui.cx.view === v ? ' selected' : ''}>${esc(iterLabel(j, v))}</option>`).join('')}</select>
+    <span class="seg2" role="group" aria-label="Diff layout"><button data-mode="side" class="${ui.cx.mode === 'side' ? 'on' : ''}">Side-by-side</button><button data-mode="uni" class="${ui.cx.mode === 'uni' ? 'on' : ''}">Unified</button></span>
+    <label><input type="checkbox" id="cxcollapse"${ui.cx.collapse ? ' checked' : ''}> Collapse unchanged</label>`;
+  const body = $('#dbody');
+  if (!f) { body.innerHTML = '<div class="dempty">Select a file on the left.</div>'; return; }
+  const head = f.status === 'deleted' ? '<div class="dnote">Deleted file: the old content, all removed.</div>' : f.status === 'added' ? '<div class="dnote">New file: all added.</div>' : '';
+  body.innerHTML = head + (f.status === 'modified' && ui.cx.mode === 'side' ? '<div class="dnote" style="display:flex;justify-content:space-between"><span>Before (' + (ui.cx.view === 'all' || ui.cx.view === 1 ? esc(j.base) : 'iteration ' + (ui.cx.view - 1)) + ')</span><span>After (' + (ui.cx.view === 'all' ? 'iteration ' + its.slice(-1)[0].n : 'iteration ' + ui.cx.view) + ')</span></div>' : '') + diffHtml(f);
+  body.scrollTop = 0;
+}
+function renderChanges(focusTree) {
+  const j = jobs[ui.job]; const el = $('#scrChanges');
+  if (!VER.ready) { el.innerHTML = `<div class="dempty" style="grid-column:1/-1">${VER.error ? 'This browser could not unpack the file versions: ' + esc(VER.error) : 'Unpacking the file versions…'}</div>`; return; }
+  const its = itersOf(j);
+  if (!its.length) { el.innerHTML = `<div class="dempty" style="grid-column:1/-1">No iteration has ended yet. The changes appear here when the Implementer finishes iteration ${runningIteration(j) || 1}; until then its edits are in the stream.</div>`; return; }
+  if (ui.cx.view !== 'all' && !its.some((x) => x.n === ui.cx.view)) ui.cx.view = 'all';
+  if (!el.querySelector('#tlist')) {
+    el.innerHTML = `<div class="tree"><div class="tb"><input id="cxq" class="ffq" type="search" placeholder="Filter files (/)" aria-label="Filter files"><div class="row"><span class="seg2" role="group" aria-label="Tree layout"><button data-flat="0">Group by directory</button><button data-flat="1">Flat list</button></span></div><div class="sum" id="cxsum"></div></div><ul class="tlist" id="tlist" role="tree" aria-label="Changed files"></ul></div>
+      <div class="vdiv" id="vdiv" role="separator" aria-orientation="vertical" aria-label="Resize the file tree" tabindex="0"></div>
+      <div class="dpane"><div class="dtool" id="dtool"></div><div class="dbody" id="dbody" tabindex="-1"></div></div>`;
+  }
+  $('#cxq').value = ui.cx.q;
+  el.querySelectorAll('[data-flat]').forEach((b) => b.classList.toggle('on', (b.dataset.flat === '1') === ui.cx.flat));
+  const { files } = visibleFiles(j);
+  if (!ui.cx.sel || !files.some((f) => f.path === ui.cx.sel)) ui.cx.sel = files[0]?.path ?? null;
+  ui.cx.cursor = ui.cx.sel ? 'f:' + ui.cx.sel : ui.cx.cursor;
+  renderTree(focusTree); renderDiffPane();
+}
+function selectRow(id, focus) {
+  ui.cx.cursor = id;
+  if (id && id.startsWith('f:')) { const p = id.slice(2); if (p !== ui.cx.sel) { ui.cx.sel = p; renderDiffPane(); } }
+  renderTree(focus); renderState();
+}
+function treeKey(ev) {
+  const rows = ui.cx.rows || []; const i = rows.findIndex((r) => r.id === ui.cx.cursor); const r = rows[i];
+  if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') { ev.preventDefault(); const n = rows[Math.max(0, Math.min(rows.length - 1, i + (ev.key === 'ArrowDown' ? 1 : -1)))]; if (n) selectRow(n.id, true); return true; }
+  if (!r) return false;
+  if (ev.key === 'ArrowLeft') { ev.preventDefault(); if (r.type === 'dir' && r.open) { ui.cx.collapsed.add(r.path); renderTree(true); } else if (r.parent) selectRow(r.parent, true); return true; }
+  if (ev.key === 'ArrowRight') { ev.preventDefault(); if (r.type === 'dir' && !r.open) { ui.cx.collapsed.delete(r.path); renderTree(true); } else if (r.type === 'dir') { const n = rows[i + 1]; if (n) selectRow(n.id, true); } return true; }
+  if (ev.key === 'Enter') { ev.preventDefault(); if (r.type === 'dir') { if (r.open) ui.cx.collapsed.add(r.path); else ui.cx.collapsed.delete(r.path); renderTree(true); } else { selectRow(r.id, false); $('#dbody').focus(); } return true; }
+  return false;
+}
+function fileStep(d) {
+  const { files } = visibleFiles(jobs[ui.job]);
+  const i = files.findIndex((f) => f.path === ui.cx.sel); const n = files[i + d];
+  if (!n) return toast(d > 0 ? 'Last file' : 'First file');
+  for (const r of (ui.cx.rows || [])) if (r.type === 'dir' && n.path.startsWith(r.path + '/')) ui.cx.collapsed.delete(r.path);
+  selectRow('f:' + n.path, false);
+}
+// Open the Changes screen on a file, at an iteration when that file changed in it.
+function openChanges(path, it) {
+  const j = jobs[ui.job];
+  ui.cx.q = '';
+  let view = it ? Number(it) : 'all';
+  if (VER.ready && path && view !== 'all' && !changeSet(j, view).some((f) => f.path === path)) view = 'all';
+  if (VER.ready && !itersOf(j).some((x) => x.n === view)) view = 'all';
+  ui.cx.view = view; if (path) { ui.cx.sel = path; for (const p of [...ui.cx.collapsed]) if (path.startsWith(p + '/')) ui.cx.collapsed.delete(p); }
+  go(j.ticket, 'changes');
+}
+// ---- Markdown preview (headings, lists, task lists, code fences, tables, inline code, bold, links)
+function inl(t) {
+  return esc(t).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/(^|[^*\w])\*([^*\n]+)\*(?!\w)/g, '$1<i>$2</i>')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+}
+function md(text, mark) {
+  const L = text.replace(/\r/g, '').split('\n');
+  let out = '', i = 0, list = null, para = [];
+  const flushP = () => { if (para.length) { out += `<p>${para.map(inl).join(' ')}</p>`; para = []; } };
+  const closeL = () => { if (list) { out += `</${list}>`; list = null; } };
+  while (i < L.length) {
+    const l = L[i];
+    if (/^```/.test(l)) { flushP(); closeL(); const buf = []; i++; while (i < L.length && !/^```/.test(L[i])) buf.push(L[i++]); i++; out += `<pre><code>${esc(buf.join('\n'))}</code></pre>`; continue; }
+    const h = l.match(/^(#{1,4}) (.*)$/);
+    if (h) { flushP(); closeL(); out += `<h${h[1].length}>${inl(h[2])}</h${h[1].length}>`; i++; continue; }
+    if (/^\s*\|/.test(l)) { flushP(); closeL(); const rows = []; while (i < L.length && /^\s*\|/.test(L[i])) rows.push(L[i++]); out += '<table>' + rows.filter((r) => !/^\s*\|[\s:|-]+\|\s*$/.test(r)).map((r, ri) => '<tr>' + r.trim().replace(/^\||\|$/g, '').split('|').map((c) => (ri === 0 ? `<th>${inl(c.trim())}</th>` : `<td>${inl(c.trim())}</td>`)).join('') + '</tr>').join('') + '</table>'; continue; }
+    const li = l.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+    if (li) {
+      flushP();
+      const kind = /\d/.test(li[2]) ? 'ol' : 'ul';
+      if (list !== kind) { closeL(); out += `<${kind}>`; list = kind; }
+      let body = li[3]; i++;
+      while (i < L.length && /^\s{2,}\S/.test(L[i]) && !/^\s*([-*+]|\d+[.)])\s+/.test(L[i])) body += ' ' + L[i++].trim();
+      const task = body.match(/^\[([ xX])\]\s+(.*)$/);
+      const cls = mark ? mark(l, body) : '';
+      out += task ? `<li class="task${cls ? ' ' + cls : ''}"><input type="checkbox" disabled${task[1] !== ' ' ? ' checked' : ''}> ${inl(task[2])}</li>` : `<li${cls ? ` class="${cls}"` : ''}>${inl(body)}</li>`;
+      continue;
+    }
+    if (!l.trim()) { flushP(); closeL(); i++; continue; }
+    closeL(); para.push(l); i++;
+  }
+  flushP(); closeL();
+  return `<div class="md">${out}</div>`;
+}
+
+// ---- MR rules (from factory/src/rules.ts and mr.ts)
+const MR_HEADINGS = ['## What', '## Why', '## How', '## Why the change', '## Special things to note', '## Change outline', '## Testing', '## Checklist'];
+const COMMIT_TYPES = ['feat', 'fix', 'chore', 'refactor', 'docs', 'test', 'perf', 'build', 'ci', 'style', 'revert'];
+const MANUAL_CLAIM = /^\s*(?:(?:[-*+]|\d+[.)])\s+)?(?:\[[ xX]\]\s+)?[*_]*(?:by hand\b|manual)/iu;
+function section(text, heading) {
+  const L = text.split('\n'); const s = L.findIndex((l) => l.trimEnd() === heading); if (s < 0) return [];
+  const out = []; let fenced = false;
+  for (const l of L.slice(s + 1)) { if (l.startsWith('```')) fenced = !fenced; else if (!fenced && /^#{1,2} /.test(l)) break; out.push(l); }
+  return out;
+}
+function mrProblems(j, m) {
+  const p = [];
+  const t = m.title.trim();
+  if (!t) p.push({ f: 'title', msg: 'The title is required.' });
+  else if ([...t].length > 72) p.push({ f: 'title', msg: `The title has ${[...t].length} characters, more than 72.` });
+  else if (t.endsWith('.')) p.push({ f: 'title', msg: 'The title ends with a period.' });
+  else if (!new RegExp(`^(?:${COMMIT_TYPES.join('|')})\\(${j.ticket}\\): \\S`).test(t)) p.push({ f: 'title', msg: `The title must read "<type>(${j.ticket}): <summary>", with <type> one of ${COMMIT_TYPES.join(', ')}.` });
+  if (!m.branch.trim()) p.push({ f: 'branch', msg: 'The branch is required.' });
+  if (!m.base.trim()) p.push({ f: 'base', msg: 'The base branch is required.' });
+  const missing = MR_HEADINGS.filter((h) => !m.body.split('\n').some((l) => l.trimEnd() === h));
+  if (missing.length) p.push({ f: 'body', msg: `Missing heading${missing.length > 1 ? 's' : ''}: ${missing.join(', ')}.` });
+  const claim = section(m.body, '## Testing').find((l) => MANUAL_CLAIM.test(l) && !/not/iu.test(l));
+  if (claim) p.push({ f: 'body', msg: `SF-058: the ## Testing line "${claim.trim().slice(0, 90)}" reads as a check that was run. Anything not run goes on a line starting with "Not checked:".` });
+  return p;
+}
+const commitBody = (body) => section(body, '## Why').map((l) => l.trim()).filter(Boolean).slice(0, 5).join('\n');
+function mrState(j) {
+  if (j.mr) return j.mr;
+  const raw = MRDATA.mr[j.ticket]; if (!raw) return null;
+  const lines = raw.split('\n'); const title = lines[0].trim(); const body = lines.slice(1).join('\n').replace(/^\n+/, '');
+  const f = { title, body, branch: j.branch, base: j.base };
+  j.mr = { factory: f, ...f, saved: { ...f }, tab: 'edit', showChanges: false };
+  return j.mr;
+}
+const mrAvailable = (j) => ['ready_for_human_review', 'pushed'].includes(j.state) && !!MRDATA.mr[j.ticket];
+const mrEdited = (m) => ['title', 'body', 'branch', 'base'].some((k) => m.saved[k] !== m.factory[k]);
+const mrDirty = (m) => ['title', 'body', 'branch', 'base'].some((k) => m[k] !== m.saved[k]);
+function textDiffHtml(a, b) {
+  const A = a.split('\n'), B = b.split('\n');
+  const ops = myers(A, B);
+  const rows = ops.map(([t, i, k]) => t === '=' ? `<div class="r"><span class="ln">${i + 1}</span><span class="ln">${k + 1}</span><span class="sg"></span><span class="c">${esc(A[i])}</span></div>`
+    : t === '-' ? `<div class="r del"><span class="ln">${i + 1}</span><span class="ln"></span><span class="sg">−</span><span class="c">${esc(A[i])}</span></div>` : `<div class="r add"><span class="ln"></span><span class="ln">${k + 1}</span><span class="sg">+</span><span class="c">${esc(B[k])}</span></div>`);
+  return `<div class="dfile uni" style="border:1px solid var(--border);border-radius:6px">${ops.every((o) => o[0] === '=') ? '<div class="dempty">No difference.</div>' : rows.join('')}</div>`;
+}
+function renderMr() {
+  const j = jobs[ui.job]; const el = $('#scrMr');
+  if (!mrAvailable(j)) {
+    el.innerHTML = `<div class="dempty">${MRDATA.mr[j.ticket] || ['working', 'starting', 'awaiting_review', 'needs_human', 'parked', 'preparing_mr'].includes(j.state) ? 'No MR text yet: written at Clean, when both reviews pass.' : 'This prototype has no MR text for this job.'}</div>`;
+    return;
+  }
+  const m = mrState(j); const ro = j.state === 'pushed';
+  el.innerHTML = `<div class="form2"><div class="grid">
+    <div style="display:grid;gap:12px;min-width:0">
+      <div class="card2"><h3>Merge request <span class="simtag">(prototype)</span>${ro ? '<span class="tag">read-only: pushed</span>' : ''}<span id="mrEdited"></span></h3>
+        <div class="row2"><div class="fld"><label for="mrBranch">Branch</label><input id="mrBranch" class="mono" value="${esc(m.branch)}"${ro || j.pushedOnce ? ' disabled' : ''}><span class="hint">${ro || j.pushedOnce ? 'Fixed after the first push.' : 'Editable until the first push.'}</span><span class="bad" data-err="branch"></span></div>
+        <div class="fld"><label for="mrBase">Base branch</label><input id="mrBase" class="mono" value="${esc(m.base)}"${ro ? ' disabled' : ''}><span class="hint">The MR targets this branch, e.g. main or master.</span><span class="bad" data-err="base"></span></div></div>
+        <div class="fld"><label for="mrTitle">MR title</label><input id="mrTitle" class="mono" value="${esc(m.title)}"${ro ? ' disabled' : ''}><span class="hint">One line, the commit header too: &lt;type&gt;(${j.ticket}): &lt;summary&gt;, at most 72 characters.</span><span class="bad" data-err="title"></span></div>
+        <div class="fld"><label>Description</label>
+          <div class="edtabs" role="tablist"><button role="tab" data-mrtab="edit" class="${m.tab === 'edit' ? 'on' : ''}" aria-selected="${m.tab === 'edit'}">Edit</button><button role="tab" data-mrtab="preview" class="${m.tab === 'preview' ? 'on' : ''}" aria-selected="${m.tab === 'preview'}">Preview</button>${mrEdited(m) ? `<button data-mrdiff class="${m.showChanges ? 'on' : ''}">Show changes against the factory's text</button>` : ''}</div>
+          ${m.showChanges && mrEdited(m) ? textDiffHtml(m.factory.body, m.saved.body) : m.tab === 'edit' ? `<textarea id="mrBody" class="mdedit"${ro ? ' disabled' : ''}>${esc(m.body)}</textarea>` : `<div class="card2" id="mrPreview">${md(m.body, mdMark)}</div>`}
+          <span class="bad" data-err="body"></span></div>
+      </div>
+    </div>
+    <div style="display:grid;gap:12px;min-width:0" id="mrSide"></div>
+  </div></div>
+  <div class="mrbar" id="mrBar"></div>`;
+  renderMrChecks();
+}
+function mdMark(raw) {
+  if (/^\s*(?:[-*+]\s+)?not checked:/i.test(raw)) return 'notchk';
+  if (MANUAL_CLAIM.test(raw) && !/not/i.test(raw)) return 'flag';
+  return '';
+}
+function renderMrChecks() {
+  const j = jobs[ui.job]; const m = mrState(j); if (!m) return; const ro = j.state === 'pushed';
+  const probs = mrProblems(j, m);
+  document.querySelectorAll('#scrMr [data-err]').forEach((s) => { s.textContent = probs.filter((p) => p.f === s.dataset.err).map((p) => p.msg).join(' '); });
+  $('#mrEdited').innerHTML = mrEdited(m) ? ' <span class="edited">edited by you</span>' : '';
+  const testing = section(m.body, '## Testing');
+  const notChecked = testing.filter((l) => /^\s*(?:[-*+]\s+)?not checked:/i.test(l));
+  const flagged = testing.filter((l) => MANUAL_CLAIM.test(l) && !/not/i.test(l));
+  const lastV = (who) => [...j.stream].reverse().find((e) => e.t === 'verdict' && e.who === who);
+  const cv = lastV('claude'), gv = lastV('codex');
+  const fixes = j.stream.filter((e) => e.t === 'prompt' && e.kind === 'fix').length;
+  const n = changeCount(j);
+  $('#mrSide').innerHTML = `
+    <div class="card2"><h3>Commit message <span class="muted" style="text-transform:none;letter-spacing:0">read-only</span></h3><pre class="cm">${esc(m.title)}\n\n${esc(commitBody(m.body) || '(no ## Why lines)')}</pre><span class="hint muted" style="font-size:12px">The header is the title; the body is the ## Why lines (at most five).</span></div>
+    <div class="card2"><h3>Carries</h3><dl class="kv"><dt>Files</dt><dd>${n} changed · <button class="linkish" data-goto="changes">Open Changes <span class="kbd">c</span></button></dd>
+      <dt>Claude</dt><dd>${cv ? `${cv.verdict === 'clean' ? 'clean' : 'asked for fixes'} at iteration ${cv.it}` : '—'}</dd>
+      <dt>Codex</dt><dd>${gv ? `${gv.verdict === 'clean' ? 'clean' : 'asked for fixes'} at iteration ${gv.it}` : '—'} · ${mtok(j.src.job.gate_tokens)} tokens</dd>
+      <dt>Fix rounds</dt><dd>${fixes}</dd><dt>Target</dt><dd>${esc(MRDATA.forge.host)} ${esc(MRDATA.forge.repo)}<br><span class="mono" style="font-size:12px">${esc(m.base)} ← ${esc(m.branch)}</span></dd></dl></div>
+    <div class="card2"><h3>Not checked</h3>${notChecked.length ? notChecked.map((l) => `<div class="notline">${inl(l.replace(/^\s*[-*+]\s+/, ''))}</div>`).join('') : '<span class="muted" style="font-size:13px">No "Not checked:" line in ## Testing.</span>'}${flagged.map((l) => `<div class="notline" style="border-left-color:var(--del)"><b>SF-058:</b> ${inl(l.replace(/^\s*[-*+]\s+/, ''))}</div>`).join('')}</div>
+    <div class="card2"><h3>Checks</h3><ul class="checks">${[['Title follows the commit header rule', !probs.some((p) => p.f === 'title')], ['Branch and base are set', !probs.some((p) => p.f === 'branch' || p.f === 'base')], ['All required headings are present', !probs.some((p) => p.msg.startsWith('Missing'))], ['## Testing claims no manual check as run (SF-058)', !probs.some((p) => p.msg.startsWith('SF-058'))]].map(([l, ok]) => `<li><span class="${ok ? 'ok' : 'no'}">${ok ? '✓' : '✕'}</span>${l}</li>`).join('')}</ul></div>`;
+  const dirty = mrDirty(m);
+  $('#mrBar').innerHTML = ro ? `<span class="simtag">(prototype)</span><b>Pushed at ${hm(last(j).ts)}.</b><span class="muted">The MR text is read-only now.</span><span class="sp"></span><button class="btn" data-goto="stream">Back to the stream</button>`
+    : `<span class="simtag">(prototype)</span>${dirty ? '<b>Unsaved changes</b>' : mrEdited(m) ? '<span class="muted">Saved, edited by you</span>' : '<span class="muted">The factory\'s text</span>'}${probs.length ? `<span style="color:var(--del)">${probs.length} problem${probs.length > 1 ? 's' : ''} to fix before pushing</span>` : ''}<span class="sp"></span>
+      <button class="btn" data-mr="save"${dirty ? '' : ' disabled'}>Save <span class="kbd">Ctrl+S</span></button><button class="btn" data-mr="reset"${mrEdited(m) || dirty ? '' : ' disabled'}>Reset to factory text</button><button class="btn" data-mr="push"${probs.length ? ' disabled' : ''}>Push branch only</button><button class="btn primary" data-mr="push-mr"${probs.length ? ' disabled title="Fix the problems first"' : ''}>Push and open MR ↗</button>`;
+}
+function mrAction(a) {
+  const j = jobs[ui.job]; const m = mrState(j);
+  if (a === 'save') { m.saved = { title: m.title, body: m.body, branch: m.branch, base: m.base }; toast('Simulated: MR text saved, marked as edited by you'); renderMr(); }
+  else if (a === 'reset') { Object.assign(m, m.factory); m.saved = { ...m.factory }; m.showChanges = false; toast('Simulated: back to the factory\'s text'); renderMr(); }
+  else if (a === 'push' || a === 'push-mr') {
+    if (mrDirty(m)) m.saved = { title: m.title, body: m.body, branch: m.branch, base: m.base };
+    j.branch = m.branch; j.base = m.base; j.pushedOnce = true;
+    act(a);
+  }
+  renderState();
+}
+// ---- planned ticket page
+const TK = {};
+function fmParse(text) {
+  const m = text.match(/^---\n([\s\S]*?)\n---\n?/);
+  const fm = {}; if (m) for (const l of m[1].split('\n')) { const kv = l.match(/^(\w+):\s*(.*)$/); if (kv) fm[kv[1]] = kv[2].trim(); }
+  return { fm, body: m ? text.slice(m[0].length) : text };
+}
+const listOf = (v) => (v || '').replace(/^\[|\]$/g, '').split(',').map((s) => s.trim()).filter(Boolean);
+function tkState(t) {
+  if (TK[t]) return TK[t];
+  const p = PLANMAP[t]; const { fm } = fmParse(p.task || '');
+  TK[t] = { text: p.task || '', saved: p.task || '', tab: 'preview', fm: { base: fm.base || p.base, scope: listOf(fm.scope).join(', '), may_touch: listOf(fm.may_touch).join(', '), lands_after: listOf(fm.lands_after).join(', ') },
+    stale: false, checking: false, images: [], hist: [], showPara: false };
+  return TK[t];
+}
+function tkHistory(t) {
+  const p = PLANMAP[t]; const s = tkState(t); const h = [];
+  if (p.task_mtime) h.push([p.task_mtime, 'Task file written or last edited (in the repository)']);
+  if (p.check_record) h.push([p.check_record.ended_at, `Task check: ${p.check_record.output?.verdict === 'ready' ? 'ready' : 'not ready'} · ${p.check?.blockers ?? 0} blocker, ${p.check?.majors ?? 0} major, ${p.check?.nits ?? 0} nit · ${money(p.check_record.cost_usd)}`]);
+  h.push(...s.hist);
+  return h.sort((a, b) => Date.parse(b[0]) - Date.parse(a[0]));
+}
+function renderTicket() {
+  const t = ui.ticket; const p = PLANMAP[t]; const s = tkState(t); const el = $('#ticket');
+  const qpos = Q.order.indexOf(t);
+  const w = waitsFor(t);
+  const deps = [...new Set([...p.deps, ...listOf(s.fm.lands_after)])];
+  const c = p.check || {}; const rec = p.check_record; const out = rec?.output;
+  const verdict = out ? (out.verdict === 'ready' ? '<span class="verdict clean">ready</span>' : '<span class="verdict fix">not ready</span>') : '<span class="tag">not checked</span>';
+  const dirty = s.text !== s.saved || s.fmDirty;
+  el.innerHTML = `<header class="jhead"><button class="btn back" data-back title="Back to the board (Esc)">← Board <span class="kbd">Esc</span></button>
+    <div class="t1"><span class="key">${t}</span><span class="title">${esc(p.title)}</span>${p.draft ? '<span class="tag">draft</span>' : ''}</div>
+    <div class="tools"><a class="btn" style="display:inline-flex;align-items:center;text-decoration:none" href="${esc(p.conversation.url)}" target="_blank" rel="noopener">Open the ChatGPT conversation ↗</a><button class="btn" data-tk="check"${s.checking ? ' disabled' : ''}>${s.checking ? 'Checking…' : out ? 'Check again' : 'Check'}</button><button class="btn primary" data-tk="start"${w.length ? ` title="Waits for ${w.join(', ')}"` : ''}>Start now</button></div>
+    <div class="t2"><span class="sentence">${qpos >= 0 ? `Queued, position ${qpos + 1} of ${Q.order.length}` : 'Not queued'}${w.length ? ` · waits for ${w.join(', ')}` : ''}</span><span>base ${esc(s.fm.base)}</span><span>${esc(checkNote(p))}${s.stale ? ' · stale' : ''}</span></div></header>
+  <div class="form2"><div class="grid">
+    <div class="card2" style="min-width:0"><h3>Task file <span class="mono" style="text-transform:none;letter-spacing:0">.software-factory/${t}.md</span>${s.saved !== p.task ? '<span class="edited">edited by you</span>' : ''}<span class="simtag">(prototype)</span></h3>
+      <div class="edtabs" role="tablist"><button role="tab" data-tktab="edit" class="${s.tab === 'edit' ? 'on' : ''}">Edit</button><button role="tab" data-tktab="preview" class="${s.tab === 'preview' ? 'on' : ''}">Preview</button><span style="flex:1"></span>${dirty ? '<span class="muted" style="font-size:12px;align-self:center">Unsaved changes</span>' : ''}<button class="btn small" data-tk="save"${dirty ? '' : ' disabled'}>Save</button></div>
+      ${s.tab === 'edit' ? `<textarea id="tkText" class="mdedit fld" style="font:12.5px/1.5 var(--mono);padding:8px;border:1px solid var(--border-strong);border-radius:6px;background:var(--bg);color:var(--fg);width:100%;min-height:560px">${esc(s.text)}</textarea>` : md(fmParse(s.text).body)}
+    </div>
+    <div style="display:grid;gap:12px;min-width:0">
+      <div class="card2"><h3>Front matter</h3>
+        <div class="fld"><label for="fmBase">base</label><input id="fmBase" class="mono" value="${esc(s.fm.base)}"></div>
+        <div class="fld"><label for="fmScope">scope</label><input id="fmScope" class="mono" value="${esc(s.fm.scope)}" placeholder="none: the job may touch any file"><span class="hint">Paths and globs, comma separated. A changed path outside it needs your acceptance.</span></div>
+        <div class="fld"><label for="fmMay">may_touch</label><input id="fmMay" class="mono" value="${esc(s.fm.may_touch)}" placeholder="none"></div>
+        <div class="fld"><label for="fmLands">lands_after</label><input id="fmLands" class="mono" value="${esc(s.fm.lands_after)}" placeholder="none"></div>
+        <span class="hint muted" style="font-size:12px">Saved into the Task file with Save (simulated).</span></div>
+      <div class="card2"><h3>Task check ${verdict}${s.stale ? '<span class="tag" title="The Task file changed after this check">stale</span>' : ''}</h3>
+        ${out ? `<div style="font-size:13px">${c.blockers ?? 0} blocker · ${c.majors ?? 0} major · ${c.nits ?? 0} nit <span class="muted">· ${day(rec.ended_at)} · ${esc(rec.model)} · ${money(rec.cost_usd)}</span></div>
+        <div><b style="font-size:12px">What the checker understood</b><div class="prose" style="font-size:13px;white-space:pre-wrap;${s.showPara ? '' : 'max-height:120px;overflow:hidden;-webkit-mask-image:linear-gradient(#000 60%,transparent);mask-image:linear-gradient(#000 60%,transparent)'}">${esc(out.paraphrase)}</div><button class="linkish" data-tk="para">${s.showPara ? 'Show less' : 'Show all'}</button></div>
+        <ul class="findings">${out.findings.map((f, i) => `<li class="finding"><span class="fid">#${i + 1}</span><span class="sev sev-${esc(f.severity)}">${esc(f.severity)}</span><span class="tag">${esc(f.kind)}</span><div class="problem"><span class="muted mono" style="font-size:12px">${esc(f.where || '')}</span><br>${prose(f.problem)}</div>${f.expected ? `<div class="expected">Expected: ${prose(f.expected)}</div>` : ''}</li>`).join('')}</ul>
+        ${out.files?.length ? `<details><summary style="cursor:pointer;font-size:13px">Files the checker expects to change (${out.files.length})</summary><div class="chipsx" style="margin-top:6px">${out.files.map((f) => `<span class="chipx" title="${esc(f.action)}">${f.action === 'create' ? '+' : f.action === 'delete' ? '−' : '~'} ${esc(f.path)}</span>`).join('')}</div></details>` : ''}`
+        : `<span class="muted" style="font-size:13px">${s.checking ? 'A read-only Claude session is reading the Task file and the repository…' : 'Not checked yet. A check is a read-only Claude session (about $0.50) that reads only the Task file and the code.'}</span>`}</div>
+      <div class="card2"><h3>Planning conversation</h3><a href="${esc(p.conversation.url)}" target="_blank" rel="noopener" style="font-size:13px">Open the ChatGPT conversation ↗</a><b style="font-size:12px">First message</b><pre class="cm">${esc(p.conversation.message)}</pre></div>
+      <div class="card2"><h3>Images <span class="simtag">(prototype)</span></h3><div class="thumbs">${s.images.map((u, i) => `<img src="${u}" alt="Attached image ${i + 1}">`).join('')}</div>
+        <div class="drop" id="tkDrop">Paste an image here (Ctrl+V), drop one, or <label style="color:var(--accent);cursor:pointer"><input type="file" id="tkFile" accept="image/*" multiple hidden>choose a file</label>. It stays on this page only.</div></div>
+      <div class="card2"><h3>Lands after</h3>${deps.length ? deps.map((d) => { const st = stateOfTicket(d); const ok = st === 'pushed'; return `<div class="dep"><span class="${ok ? 'ok' : 'wait'}">${ok ? '✓' : '◷'}</span><span class="mono">${d}</span><span class="muted">${ok ? 'pushed' : st === 'planned' ? 'planned, not started' : st === 'unknown' ? 'not in this snapshot' : STATE_WORD[st] || st}</span></div>`; }).join('') + `<span class="muted" style="font-size:12px">The queue skips this ticket until each one is merged (pushed counts as merged in this prototype).</span>` : '<span class="muted" style="font-size:13px">No dependency.</span>'}</div>
+      <div class="card2"><h3>History</h3><ul class="hist">${tkHistory(t).map(([ts, txt]) => `<li><span class="t">${day(ts)}</span><span>${esc(txt)}</span></li>`).join('')}</ul></div>
+    </div></div></div>`;
+}
+function tkAction(a) {
+  const t = ui.ticket; const s = tkState(t); const now = () => new Date(Math.max(Date.now(), NOW)).toISOString();
+  if (a === 'save') {
+    const { body } = fmParse(s.text);
+    const fm = ['---', `ticket: ${t}`, `title: ${PLANMAP[t].title}`, `base: ${s.fm.base}`];
+    if (s.fm.scope) fm.push(`scope: [${s.fm.scope}]`); if (s.fm.may_touch) fm.push(`may_touch: [${s.fm.may_touch}]`); if (s.fm.lands_after) fm.push(`lands_after: [${s.fm.lands_after}]`);
+    s.text = fm.join('\n') + '\n---\n' + body; s.saved = s.text; s.fmDirty = false; s.stale = !!PLANMAP[t].check_record; s.hist.push([now(), 'You edited the Task file (prototype)']);
+    toast('Simulated: Task file saved'); renderTicket();
+  } else if (a === 'check') {
+    s.checking = true; renderTicket();
+    setTimeout(() => { s.checking = false; s.stale = false; s.hist.push([now(), PLANMAP[t].check_record ? 'Task check ran again (prototype: same result shown)' : 'Task check requested (prototype: no result for this ticket)']); if (ui.screen === 'ticket' && ui.ticket === t) renderTicket(); toast('Simulated: check finished'); }, 1400);
+  } else if (a === 'start') {
+    Q.order = Q.order.filter((x) => x !== t); Q.off = Q.off.filter((x) => x !== t);
+    jobs[t] = simJob(t); toast(`Simulated: ${t} started`); go(t, 'stream'); return;
+  } else if (a === 'para') { s.showPara = !s.showPara; renderTicket(); }
+  renderState();
+}
+function addImages(files) {
+  const s = tkState(ui.ticket); let n = 0;
+  for (const f of files) if (f.type.startsWith('image/')) { s.images.push(URL.createObjectURL(f)); n++; }
+  if (n) { s.hist.push([new Date(Math.max(Date.now(), NOW)).toISOString(), `You attached ${n} image${n > 1 ? 's' : ''} (prototype)`]); toast(`Simulated: ${n} image${n > 1 ? 's' : ''} attached`); renderTicket(); }
+}
+// ---- job header with the screen switch
+function renderHead() {
+  const j = jobs[ui.job];
+  const n = changeCount(j), mrOk = mrAvailable(j);
+  $('#job').className = `st-${j.state}`;
+  $('#jhead').innerHTML = `<button class="btn back" data-back title="Back to the board">← Board</button>
+  <div class="t1"><span class="key">${j.ticket}</span><span class="title" title="${esc(j.title)}">${esc(j.title)}</span>${j.code && j.state === 'needs_human' ? `<span class="tag">${esc(j.code)}</span>` : ''}${j.sim ? '<span class="simtag">simulated job</span>' : ''}</div>
+  <div class="tools"><div class="switch" role="tablist" aria-label="Job screens">
+    <button role="tab" data-goto="stream" class="${ui.screen === 'stream' ? 'on' : ''}" aria-selected="${ui.screen === 'stream'}">Stream</button>
+    <button role="tab" data-goto="changes" class="${ui.screen === 'changes' ? 'on' : ''}" aria-selected="${ui.screen === 'changes'}">Changes (${n}) <span class="kbd">c</span></button>
+    <button role="tab" data-goto="mr" class="${ui.screen === 'mr' ? 'on' : ''}" aria-selected="${ui.screen === 'mr'}" aria-disabled="${!mrOk}" title="${mrOk ? 'The merge request text' : 'No MR text yet: written at Clean'}">Merge request <span class="kbd">m</span></button></div></div>
+  <div class="t2"><span class="sentence"><span class="dot"></span>${esc(sentence(j))}</span><span>Iteration ${runningIteration(j)}${['working', 'starting'].includes(j.state) ? ' (running)' : ''}</span><span>${money(costOf(j))}${j.live ? ' so far' : ''} (Claude, est.)</span><span>${dur(endTs(j) - Date.parse(j.created_at))} elapsed</span><span class="mono" style="font-size:12px">${esc(j.branch)}</span></div>`;
+}
+function renderJobScreen() {
+  if (!ui.job || !jobs[ui.job] || !['stream', 'changes', 'mr'].includes(ui.screen)) return;
+  renderHead();
+  $('#scrStream').hidden = ui.screen !== 'stream'; $('#scrChanges').hidden = ui.screen !== 'changes'; $('#scrMr').hidden = ui.screen !== 'mr';
+  if (ui.screen === 'stream') { keepScroll(renderStream); renderComposer(); }
+  else if (ui.screen === 'changes') renderChanges();
+  else renderMr();
+}
+
+// ---- the prototype's own state readout
+function renderState() {
+  const p = $('#statePanel');
+  p.hidden = !ui.statePanel;
+  $('#stateBtn').setAttribute('aria-expanded', String(ui.statePanel));
+  if (!ui.statePanel) return;
+  const s = { scenario, screen: ui.screen, queue: { limit: Q.limit, running: runningCount(), held: Q.held, order: Q.order, not_queued: Q.off.length, next: nextQueued() || null, limit_rule: Q.rule } };
+  const j = ui.job ? jobs[ui.job] : null;
+  if (j && ui.screen !== 'board' && ui.screen !== 'ticket') {
+    Object.assign(s, { ticket: j.ticket, state: j.state, code: j.code, iteration: runningIteration(j), completed_iterations: j.iteration, decisions: j.decisions, open_findings: openFindings(j).map((x) => x.id), actions_now: actionsFor(j).map((x) => x.l + (x.dis ? ' (disabled)' : '')), stream_entries: j.stream.length, selected_entry: ui.sel });
+    if (ui.screen === 'changes') s.changes = { view: ui.cx.view, file: ui.cx.sel, cursor: ui.cx.cursor, filter: ui.cx.q, layout: ui.cx.flat ? 'flat' : 'tree', diff: ui.cx.mode === 'side' ? 'side-by-side' : 'unified', collapse_unchanged: ui.cx.collapse, versions_loaded: VER.ready };
+    if (ui.screen === 'mr') { const m = mrState(j); s.mr = m ? { title: m.title, branch: m.branch, base: m.base, unsaved: mrDirty(m), edited_by_you: mrEdited(m), problems: mrProblems(j, m).map((x) => x.msg), tab: m.tab } : 'no MR text yet'; }
+  }
+  if (ui.screen === 'ticket') { const t = tkState(ui.ticket); s.ticket = { key: ui.ticket, front_matter: t.fm, unsaved: t.text !== t.saved, stale_check: t.stale, images: t.images.length, waits_for: waitsFor(ui.ticket), queue_position: Q.order.indexOf(ui.ticket) + 1 || null }; }
+  if (ui.screen === 'board') s.jobs = Object.fromEntries(Object.values(jobs).map((x) => [x.ticket, x.state + (x.code ? ` (${x.code})` : '')]));
+  p.innerHTML = `<b>Prototype state</b> <span class="muted">refreshed after every action</span><pre>${esc(JSON.stringify(s, null, 1))}</pre>`;
+}
+
+// ---- navigation: board, then a job's Stream / Changes / Merge request, or a planned ticket's page
+function setHash() {
+  const h = ui.screen === 'board' ? '' : ui.screen === 'ticket' ? `${ui.ticket}-ticket` : ui.screen === 'stream' ? ui.job : `${ui.job}-${ui.screen}`;
+  if (location.hash.slice(1) !== h) history.replaceState(null, '', h ? '#' + h : location.pathname + location.search);
+}
+function go(t, screen, focus) {
+  if (screen === 'mr' && jobs[t] && !mrAvailable(jobs[t])) { toast('No MR text yet: written at Clean'); if (ui.job === t && ui.screen !== 'board') return; screen = 'stream'; }
+  const fresh = ui.job !== t;
+  if (fresh) { ui.sel = -1; ui.open.clear(); ui.confirm = null; ui.cx = { ...ui.cx, view: screen === 'changes' ? ui.cx.view : 'all', sel: screen === 'changes' ? ui.cx.sel : null, q: '', collapsed: new Set(), unfolded: new Set(), cursor: null }; }
+  ui.job = t; ui.screen = screen; ui.opener = t;
+  $('#board').hidden = true; $('#ticket').hidden = true; $('#job').hidden = false;
+  if (screen !== 'changes') $('#scrChanges').innerHTML = '';
+  renderJobScreen(); renderState(); setHash();
+  if (screen === 'stream') {
+    const w = $('#streamwrap');
+    if (focus === 'stop' && $('#stopblock')) $('#stopblock').scrollIntoView({ block: 'center' });
+    else if (fresh || focus) w.scrollTop = w.scrollHeight;
+    if (focus === 'composer') $('#composer .btn.primary')?.focus(); else w.focus({ preventScroll: true });
+  } else if (screen === 'changes') document.querySelector('#tlist .trow.sel')?.focus();
+}
+function openTicket(t) {
+  ui.screen = 'ticket'; ui.ticket = t; ui.job = null; ui.opener = t;
+  $('#board').hidden = true; $('#job').hidden = true; $('#ticket').hidden = false;
+  renderTicket(); renderState(); setHash();
+}
+function back() {
+  ui.screen = 'board'; ui.job = null; ui.ticket = null;
+  $('#job').hidden = true; $('#ticket').hidden = true; $('#board').hidden = false;
+  renderBoard(); renderState(); setHash();
+  document.querySelector(`.card[data-open="${ui.opener}"], .card[data-ticket="${ui.opener}"]`)?.focus();
+}
+
+// ---- events
+document.addEventListener('click', (ev) => {
+  const t = ev.target.closest('[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-mrtab],[data-mrdiff],[data-mr],[data-tktab],[data-tk],[data-qtoggle],[data-resume],[data-sim-act],[data-open],[data-ticket],[data-back],[data-toggle],[data-act],[data-decide],[data-undo],#stateBtn,#rulesBtn,#limUp,#limDown,#stream li.e');
+  if (!t) { if (!ev.target.closest('.menuwrap')) { $('#rulesMenu').hidden = true; $('#rulesBtn').setAttribute('aria-expanded', 'false'); } return; }
+  if (t.id === 'stateBtn') { ui.statePanel = !ui.statePanel; return renderState(); }
+  if (t.id === 'rulesBtn') { const m = $('#rulesMenu'); m.hidden = !m.hidden; t.setAttribute('aria-expanded', String(!m.hidden)); renderRules(); return; }
+  if (t.id === 'limUp' || t.id === 'limDown') { Q.limit = Math.max(1, Math.min(8, Q.limit + (t.id === 'limUp' ? 1 : -1))); autostart(); renderBoard(); renderState(); toast(`Simulated: run up to ${Q.limit} job${Q.limit > 1 ? 's' : ''} at once`); return; }
+  if (t.dataset.simAct) return simAct(t.dataset.simAct);
+  if (t.dataset.qtoggle) { ev.stopPropagation(); return qtoggle(t.dataset.qtoggle); }
+  if (t.dataset.resume) { const j = jobs[t.dataset.resume]; setState(j, 'working', null, 'Resumed by you.'); Q.held = false; autostart(); return rerender(); }
+  if (t.dataset.goto) { if (t.dataset.goto === 'changes') return openChanges(null, null); return go(ui.job, t.dataset.goto); }
+  if (t.dataset.cfile != null) return openChanges(t.dataset.cfile, t.dataset.cit || null);
+  if (t.dataset.changes) { ui.cx.sel = null; return openChanges(null, t.dataset.changes); }
+  if (t.dataset.fstep) return fileStep(Number(t.dataset.fstep));
+  if (t.dataset.trow) { const r = (ui.cx.rows || []).find((x) => x.id === t.dataset.trow); if (r?.type === 'dir' && ui.cx.cursor === r.id) { if (r.open) ui.cx.collapsed.add(r.path); else ui.cx.collapsed.delete(r.path); } return selectRow(t.dataset.trow, true); }
+  if (t.dataset.fold) { ui.cx.unfolded.add(t.dataset.fold); const b = $('#dbody'); const top = b.scrollTop; renderDiffPane(); b.scrollTop = top; return; }
+  if (t.dataset.mode) { ui.cx.mode = t.dataset.mode; store.set('sf-proto-mode', ui.cx.mode); renderDiffPane(); return renderState(); }
+  if (t.dataset.flat) { ui.cx.flat = t.dataset.flat === '1'; renderChanges(); return renderState(); }
+  if (t.dataset.mrtab) { mrState(jobs[ui.job]).tab = t.dataset.mrtab; mrState(jobs[ui.job]).showChanges = false; renderMr(); return renderState(); }
+  if (t.hasAttribute('data-mrdiff')) { const m = mrState(jobs[ui.job]); m.showChanges = !m.showChanges; renderMr(); return; }
+  if (t.dataset.mr) return mrAction(t.dataset.mr);
+  if (t.dataset.tktab) { tkState(ui.ticket).tab = t.dataset.tktab; renderTicket(); return; }
+  if (t.dataset.tk) return tkAction(t.dataset.tk);
+  if (t.dataset.open) { if (t.tagName === 'LI' && t.classList.contains('static')) return; return go(t.dataset.open, t.dataset.screen || 'stream', t.dataset.focus); }
+  if (t.dataset.ticket) return openTicket(t.dataset.ticket);
+  if (t.hasAttribute('data-back')) return back();
+  if (t.dataset.toggle) return toggle(t.dataset.toggle);
+  if (t.dataset.act) return act(t.dataset.act);
+  if (t.dataset.decide) { const j = jobs[ui.job]; j.decisions[t.dataset.id] = t.dataset.decide; keepScroll(renderStream); renderComposer(); renderBoard(); renderHead(); renderState(); toast(`Simulated: ${t.dataset.id} ${t.dataset.decide === 'fix' ? 'must be fixed' : 'accepted'}`); return; }
+  if (t.dataset.undo) { delete jobs[ui.job].decisions[t.dataset.undo]; keepScroll(renderStream); renderComposer(); renderState(); return; }
+  if (t.matches('#stream li.e')) { ui.sel = entries().indexOf(t); markSel(false); renderState(); }
+});
+document.addEventListener('input', (ev) => {
+  const id = ev.target.id;
+  if (id === 'cxq') { ui.cx.q = ev.target.value; renderTree(false); const { files } = visibleFiles(jobs[ui.job]); if (!files.some((f) => f.path === ui.cx.sel)) { ui.cx.sel = files[0]?.path ?? null; } renderDiffPane(); return renderState(); }
+  if (['mrTitle', 'mrBody', 'mrBranch', 'mrBase'].includes(id)) { const m = mrState(jobs[ui.job]); m[{ mrTitle: 'title', mrBody: 'body', mrBranch: 'branch', mrBase: 'base' }[id]] = ev.target.value; renderMrChecks(); return renderState(); }
+  if (id === 'tkText') { const s = tkState(ui.ticket); s.text = ev.target.value; const bar = $('#ticket [data-tk="save"]'); if (bar) bar.disabled = s.text === s.saved && !s.fmDirty; return; }
+  if (['fmBase', 'fmScope', 'fmMay', 'fmLands'].includes(id)) { const s = tkState(ui.ticket); s.fm[{ fmBase: 'base', fmScope: 'scope', fmMay: 'may_touch', fmLands: 'lands_after' }[id]] = ev.target.value; s.fmDirty = true; const b = $('#ticket [data-tk="save"]'); if (b) b.disabled = false; }
+});
+document.addEventListener('change', (ev) => {
+  if (ev.target.id === 'cxview') { ui.cx.view = ev.target.value === 'all' ? 'all' : Number(ev.target.value); renderChanges(); renderHead(); return renderState(); }
+  if (ev.target.id === 'cxcollapse') { ui.cx.collapse = ev.target.checked; renderDiffPane(); return renderState(); }
+  if (ev.target.name === 'rule') { Q.rule = ev.target.value; toast('Simulated: rule saved'); renderBoard(); return renderState(); }
+  if (ev.target.id === 'tkFile') addImages(ev.target.files);
+  if (ev.target.id === 'scenario') { scenario = ev.target.value; boot(); toast({ wait: 'Scenario: SF-053 ready (real moment), SF-040 stopped by a restart (real), SF-054 stopped by the round limit (simulated)', snap: 'Scenario: every job as it was when the snapshot was taken', limit: 'Scenario: the usage limit was hit; SF-055 is parked and the queue is held' }[scenario]); }
+});
+document.addEventListener('paste', (ev) => { if (ui.screen === 'ticket' && ev.clipboardData?.files?.length) { ev.preventDefault(); addImages(ev.clipboardData.files); } });
+document.addEventListener('dragover', (ev) => { const d = ev.target.closest?.('#tkDrop'); if (d) { ev.preventDefault(); d.classList.add('over'); } });
+document.addEventListener('drop', (ev) => { const d = ev.target.closest?.('#tkDrop'); if (d) { ev.preventDefault(); addImages(ev.dataTransfer.files); } });
+document.addEventListener('keydown', (ev) => {
+  const typing = ev.target.closest('textarea, input, select');
+  if ((ev.ctrlKey || ev.metaKey) && ev.key === 's' && ui.screen === 'mr') { ev.preventDefault(); return mrAction('save'); }
+  if (typing) {
+    if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey) && ev.target.id === 'msg') { ev.preventDefault(); act('send'); }
+    if (ev.key === 'Escape') ev.target.blur();
+    if (ev.target.id === 'cxq' && (ev.key === 'ArrowDown' || ev.key === 'Enter')) { ev.preventDefault(); document.querySelector('#tlist .trow.sel')?.focus(); }
+    return;
+  }
+  if (ev.altKey && ui.screen === 'board' && (ev.key === 'ArrowUp' || ev.key === 'ArrowDown')) { const c = document.activeElement?.closest?.('.card[data-q]'); if (c) { ev.preventDefault(); moveQueued(c.dataset.ticket, Q.order.indexOf(c.dataset.ticket) + (ev.key === 'ArrowUp' ? -1 : 1)); } return; }
+  if (ev.key === 'F7') { if (ui.screen === 'changes') { ev.preventDefault(); fileStep(ev.shiftKey ? -1 : 1); } return; }
+  if (ev.altKey || ev.ctrlKey || ev.metaKey) return;
+  if (ui.screen === 'board') {
+    const cards = [...document.querySelectorAll('#cols .card')];
+    const i = cards.indexOf(document.activeElement);
+    if (ev.key === 'j' || ev.key === 'k') { ev.preventDefault(); cards[Math.min(cards.length - 1, Math.max(0, i + (ev.key === 'j' ? 1 : -1)))]?.focus(); }
+    if (ev.key === 'Enter' && document.activeElement?.classList.contains('card')) { const a = document.activeElement; if (a.dataset.open) go(a.dataset.open, 'stream'); else if (a.dataset.ticket) openTicket(a.dataset.ticket); }
+    return;
+  }
+  if (ev.key === 'Escape') {
+    ev.preventDefault();
+    if (!$('#rulesMenu').hidden) { $('#rulesMenu').hidden = true; return; }
+    if (ui.screen === 'stream' && ui.confirm) { ui.confirm = null; renderComposer(); return renderState(); }
+    if (ui.screen === 'changes' || ui.screen === 'mr') return go(ui.job, 'stream');
+    return back();
+  }
+  if (ui.screen === 'ticket') return;
+  if (ev.key === 'c' && ui.screen !== 'changes') { ev.preventDefault(); return openChanges(ui.cx.sel, null); }
+  if (ev.key === 'm' && ui.screen !== 'mr') { ev.preventDefault(); return go(ui.job, 'mr'); }
+  if (ev.key === 's' && ui.screen !== 'stream') { ev.preventDefault(); return go(ui.job, 'stream'); }
+  if (ui.screen === 'changes') {
+    if (ev.key === '/') { ev.preventDefault(); return $('#cxq')?.focus(); }
+    if (ev.key === 'n' || ev.key === 'p') { ev.preventDefault(); return fileStep(ev.key === 'n' ? 1 : -1); }
+    if (ev.target.closest('#dbody') && (ev.key === 'ArrowUp' || ev.key === 'ArrowDown')) return;
+    if (treeKey(ev)) return;
+    return;
+  }
+  if (ui.screen !== 'stream') return;
+  const es = entries();
+  if (ev.key === 'j' || ev.key === 'k') { ev.preventDefault(); ui.sel = ui.sel < 0 ? (ev.key === 'j' ? 0 : es.length - 1) : Math.min(es.length - 1, Math.max(0, ui.sel + (ev.key === 'j' ? 1 : -1))); markSel(true); return renderState(); }
+  if (ev.key === 'G') { ui.sel = es.length - 1; markSel(true); return; }
+  if (ev.key === 'Enter' && ui.sel >= 0 && document.activeElement?.tagName !== 'BUTTON') { const li = es[ui.sel]; if (li?.querySelector('[data-toggle]')) { ev.preventDefault(); const keep = ui.sel; toggle(li.dataset.k); ui.sel = keep; markSel(true); } }
+});
+// resizable file tree
+(() => {
+  document.addEventListener('pointerdown', (ev) => {
+    const d = ev.target.closest?.('#vdiv'); if (!d) return;
+    d.setPointerCapture(ev.pointerId); d.classList.add('drag');
+    const move = (e) => { const r = $('#scrChanges').getBoundingClientRect(); document.documentElement.style.setProperty('--tree-w', Math.max(200, Math.min(r.width - 360, e.clientX - r.left)) + 'px'); };
+    const up = () => { d.classList.remove('drag'); d.removeEventListener('pointermove', move); d.removeEventListener('pointerup', up); };
+    d.addEventListener('pointermove', move); d.addEventListener('pointerup', up);
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.target.id !== 'vdiv' || (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight')) return;
+    ev.preventDefault(); ev.stopImmediatePropagation();
+    const w = $('.tree').getBoundingClientRect().width; document.documentElement.style.setProperty('--tree-w', Math.max(200, w + (ev.key === 'ArrowLeft' ? -32 : 32)) + 'px');
+  }, true);
+})();
+function route() {
+  const m = location.hash.slice(1).match(/^(SF-\d+)(?:-(changes|mr|ticket))?$/);
+  if (!m) { if (ui.screen !== 'board') back(); return; }
+  if (m[2] === 'ticket' && PLANMAP[m[1]]) { if (ui.screen !== 'ticket' || ui.ticket !== m[1]) openTicket(m[1]); return; }
+  if (jobs[m[1]]) { const s = m[2] || 'stream'; if (ui.job !== m[1] || ui.screen !== s) { if (s === 'changes') { ui.job = m[1]; openChanges(null, null); } else go(m[1], s); } }
+}
+window.addEventListener('hashchange', route);
+
+// ---- boot
+function boot() {
+  for (const k of Object.keys(jobs)) delete jobs[k];
+  for (const t of Object.keys(SNAP.jobs)) jobs[t] = buildJob(t);
+  for (const k of Object.keys(TK)) delete TK[k];
+  initQueue();
+  const mode = store.get('sf-proto-mode'); if (mode === 'side' || mode === 'uni') ui.cx.mode = mode;
+  if (ui.screen === 'ticket' && ui.ticket) openTicket(ui.ticket);
+  else if (ui.job && jobs[ui.job] && ui.screen !== 'board') go(ui.job, ui.screen === 'mr' && !mrAvailable(jobs[ui.job]) ? 'stream' : ui.screen);
+  else { ui.screen = 'board'; ui.job = null; renderBoard(); renderState(); }
+  renderBoard();
+}
+boot();
+route();
+loadVersions();
+</script>
+
+</body></html>

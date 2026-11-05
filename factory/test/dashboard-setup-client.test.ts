@@ -2,7 +2,7 @@
 // page of test/support/fake-dom.ts: Workspaces and New ticket in the drawer from the header, the
 // workspace form and list, the new-ticket form, in a ticket's Task drawer the conversation link
 // (a click, never automatic) and its copy box, and the Start of a ticket whose Task file is
-// written, on its Planned card (SF-040).
+// written, on its Queue card (SF-040, SF-077: a click on the card opens its Task).
 // Script checks, not browser acceptance: the manual steps are in factory/README.md.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -189,18 +189,28 @@ test('setup client: the new-ticket form posts the exact fields, clears on succes
   assert.equal(page.$('ticket-status').textContent, 'ticket_exists: .software-factory/W-7.md already exists in workspace "web"; the ticket is listed below.');
   assert.equal(page.$('ticket-create').disabled, false);
   assert.equal(page.$('ticket-request').value, request);
+  // Created (SF-066): the dialog closes, the message goes to the toast, and the new ticket's card is
+  // scrolled to and highlighted once the stream lists it; nothing else opens.
+  page.$('open-new-ticket').click();
+  assert.equal(page.$('drawer').hidden, false);
   page.$('ticket-form').dispatch('submit');
   await page.flush();
   posts(page)[1]!.respond(200, { ok: true, result: { workspace: 'web', ticket: 'W-7', path: '.software-factory/W-7.md', base: 'develop' } });
   await page.flush();
-  assert.equal(page.$('ticket-status').textContent, 'Ticket created: .software-factory/W-7.md in web (base develop), an empty skeleton under Planned. Next: its Task button opens the conversation; your words are its first message.');
+  assert.equal(page.$('drawer').hidden, true);
+  assert.equal(page.$('ticket-status').textContent, '');
+  assert.equal(page.$('toast-text').textContent, 'Ticket created: .software-factory/W-7.md in web (base develop), an empty skeleton in the Queue. Next: a click on its card opens the conversation; your words are its first message.');
   assert.deepEqual([page.$('ticket-key').value, page.$('ticket-title').value, page.$('ticket-request').value, page.$('ticket-workspace').value], ['', '', '', 'web']);
+  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('web/W-7')], archived: [] });
+  const card = items(page, 'qlist').find((item) => item.dataset.ticket === 'web/W-7')!;
+  assert.deepEqual([card.className, card.scrolledIntoView, page.document.activeElement === card], ['card hl', 1, true]);
+  assert.equal(page.location.hash, '');
+  assert.deepEqual(page.requests.filter((request) => request.path.startsWith('http')), []);
 });
 
-// The Task drawer of a Planned card.
+// The Task drawer of a Queue card: a click on the card.
 async function openTaskOf(page: Page, key: string): Promise<void> {
-  const card = items(page, 'list-planned').find((item) => item.dataset.key === key)!;
-  buttons(card).find((button) => button.textContent === 'Task')!.click();
+  items(page, 'qlist').find((item) => item.dataset.ticket === key)!.click();
   await page.flush();
 }
 
@@ -211,7 +221,7 @@ test('setup client: the Task drawer offers the ticket\'s conversation, a click a
     ticket('app/T-7', { conversation: { message: 'x', url: 'javascript:alert(1)' } }),
   ], { writeText: async (text) => void written.push(text) });
   // No reviewer line anywhere on the board (SF-040 removes the ChatGPT reviewer).
-  assert.doesNotMatch(page.$('list-planned').textContent, /Reviewer/);
+  assert.doesNotMatch(page.$('qlist').textContent, /Reviewer/);
   await openTaskOf(page, 'app/T-5');
   assert.equal(page.$('task-conversation').hidden, false);
   const open = page.$('task-conversation-link');
@@ -251,7 +261,7 @@ test('setup client: a message too long for a link is offered to copy; an archive
 test('setup client: Start posts {} once for its ticket after the confirmation, keeps only that ticket\'s buttons off while out, and reports the job or the refusal', async () => {
   const rows = [ticket('app/T-6', { draft: false }), ticket('app/T-7', { draft: false, job: 'aborted' })];
   const page = await openPage([], [workspace('app')], rows);
-  const card = (key: string): FakeElement => items(page, 'list-planned').find((item) => item.dataset.key === key)!;
+  const card = (key: string): FakeElement => items(page, 'qlist').find((item) => item.dataset.ticket === key)!;
   const start = (key: string): FakeElement => buttons(card(key)).find((button) => button.textContent === 'Start')!;
   start('app/T-6').click();
   page.$('ticket-ok').click();
@@ -259,14 +269,14 @@ test('setup client: Start posts {} once for its ticket after the confirmation, k
   await page.flush();
   assert.equal(posts(page).length, 1);
   assert.deepEqual([posts(page)[0]!.path, posts(page)[0]!.body, posts(page)[0]!.headers['content-type']], ['api/tickets/app/T-6/start', '{}', 'application/json']);
-  assert.match(page.$('ticket-action-status').textContent, /^Starting app\/T-6/);
-  // The ticket's action buttons are off while its request is out (Task, a read, stays on);
-  // another ticket's are not.
-  assert.ok(buttons(card('app/T-6')).filter((button) => button.textContent !== 'Task').every((button) => button.disabled));
+  assert.match(page.$('toast-text').textContent, /^Starting app\/T-6/);
+  // The ticket's action buttons are off while its request is out (a click on the card, a read,
+  // still opens its Task); another ticket's are not.
+  assert.ok(buttons(card('app/T-6')).every((button) => button.disabled));
   assert.equal(start('app/T-7').disabled, false);
   posts(page)[0]!.respond(200, { ok: true, result: { workspace: 'app', ticket: 'T-6', branch: 'T-6-demo', state: 'starting' } });
   await page.flush();
-  assert.equal(page.$('ticket-action-status').textContent, 'Started app/T-6: branch T-6-demo, starting. The Implementer runs iteration 1.');
+  assert.equal(page.$('toast-text').textContent, 'Started app/T-6: branch T-6-demo, starting. The Implementer runs iteration 1.');
   assert.equal(start('app/T-6').disabled, false);
 
   // A refusal is the code and the message; nothing is retried.
@@ -276,13 +286,13 @@ test('setup client: Start posts {} once for its ticket after the confirmation, k
   assert.equal(posts(page)[1]!.path, 'api/tickets/app/T-7/start');
   posts(page)[1]!.respond(409, { ok: false, error: { code: 'job_limit', message: 'Two jobs are live; finish or abort one first.' } });
   await page.flush();
-  assert.equal(page.$('ticket-action-status').textContent, 'job_limit: Two jobs are live; finish or abort one first.');
+  assert.equal(page.$('toast-text').textContent, 'job_limit: Two jobs are live; finish or abort one first.');
   start('app/T-6').click();
   page.$('ticket-ok').click();
   await page.flush();
   posts(page)[2]!.respond(409, { ok: false, error: { code: 'task_draft', message: '.software-factory/T-6.md is still the skeleton; the conversation writes it first.' } });
   await page.flush();
-  assert.equal(page.$('ticket-action-status').textContent, 'task_draft: .software-factory/T-6.md is still the skeleton; the conversation writes it first.');
+  assert.equal(page.$('toast-text').textContent, 'task_draft: .software-factory/T-6.md is still the skeleton; the conversation writes it first.');
   assert.equal(start('app/T-6').disabled, false);
   assert.equal(posts(page).length, 3);
 });

@@ -1,8 +1,8 @@
 // Behaviour of static/app.js, run under node:vm against the fake page of test/support/fake-dom.ts:
 // the action matrix per state, the confirmations (cancel, discard, double submission), the say
 // draft rules, the outcome texts and what happens when the selection changes while a request is
-// out. The job opens in the board's drawer (the URL's #<ws>/<ticket> or its card); the board
-// itself is tested in dashboard-board-client.test.ts, the drawer's views in
+// out. The job opens as its full page (the URL's #<ws>/<ticket> or its card, SF-077); the board
+// itself is tested in dashboard-board-client.test.ts, the job detail's views in
 // dashboard-job-client.test.ts. These are script checks, not browser acceptance: the manual steps
 // are in factory/README.md.
 import assert from 'node:assert/strict';
@@ -53,7 +53,7 @@ async function openPage(states: Record<string, JobShape> = { 'app/T-1': A, 'app/
     const match = /^api\/jobs\/([^/]+)\/([^/]+)$/.exec(path);
     return match && !hold.on ? detail(states[`${match[1]}/${match[2]}`]!) : undefined;
   });
-  // The job in the URL opens in the drawer once the jobs are loaded.
+  // The job in the URL opens as its page once the jobs are loaded.
   page.location.hash = '#app/T-1';
   page.document.dispatch('DOMContentLoaded');
   await page.flush();
@@ -81,10 +81,10 @@ function assertControls(page: Page, label: string, approve: boolean, abort: bool
   assert.deepEqual([!page.$('approve-button').disabled, !page.$('abort-button').disabled, !page.$('say-button').disabled], [approve, abort, send], label);
 }
 
-// The card of a job on the board: the button that opens it in the drawer.
+// The card of a job on the board: a click opens the job's page.
 function jobButton(page: Page, key: string) {
   const all = ['implementing', 'reviewing', 'you', 'done'].flatMap((column) => page.$(`list-${column}`).all());
-  return all.find((element) => element.tagName === 'BUTTON' && element.dataset.key === key)!;
+  return all.find((element) => element.tagName === 'LI' && element.dataset.open === key)!;
 }
 
 async function selectJob(page: Page, key: string): Promise<void> {

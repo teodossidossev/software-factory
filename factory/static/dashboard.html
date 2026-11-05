@@ -9,139 +9,44 @@
   <script src="app.js" defer></script>
 </head>
 <body>
-  <header class="topbar">
-    <div class="topbar-title">
+  <div id="board">
+    <header class="topbar">
       <h1>Software Factory</h1>
-      <span id="connection" class="connection">connecting</span>
-    </div>
-    <nav class="row topbar-actions" aria-label="Setup">
-      <button id="open-archived" type="button" class="link-button">Archived <span id="archived-count"></span></button>
-      <button id="open-workspaces" type="button" class="btn">Workspaces</button>
-      <button id="open-new-ticket" type="button" class="btn btn-primary">New ticket</button>
-    </nav>
-  </header>
-  <main class="page">
-    <div id="workspace-filter" class="filter" role="group" aria-label="Workspace"></div>
-    <p id="board-hint" class="hint" hidden></p>
-    <div id="board" class="board">
-      <section class="col" aria-labelledby="col-planned-title">
-        <div class="col-head"><h2 id="col-planned-title">Planned</h2><span id="count-planned" class="count"></span></div>
-        <ul id="list-planned" class="col-list"></ul>
-      </section>
-      <section class="col" aria-labelledby="col-implementing-title">
-        <div class="col-head"><h2 id="col-implementing-title">Implementing</h2><span id="count-implementing" class="count"></span></div>
-        <ul id="list-implementing" class="col-list"></ul>
-      </section>
-      <section class="col" aria-labelledby="col-reviewing-title">
-        <div class="col-head"><h2 id="col-reviewing-title">Reviewing</h2><span id="count-reviewing" class="count"></span></div>
-        <ul id="list-reviewing" class="col-list"></ul>
-      </section>
-      <section class="col col-you" aria-labelledby="col-you-title">
-        <div class="col-head"><h2 id="col-you-title">Your turn</h2><span id="count-you" class="count"></span></div>
-        <ul id="list-you" class="col-list"></ul>
-      </section>
-      <section class="col" aria-labelledby="col-done-title">
-        <div class="col-head"><h2 id="col-done-title">Done</h2><span id="count-done" class="count"></span></div>
-        <ul id="list-done" class="col-list"></ul>
-        <button id="done-all" type="button" class="link-button" hidden></button>
-      </section>
-    </div>
-  </main>
-
-  <div id="ticket-action-status" class="status toast" role="status" aria-live="polite" title="Click to dismiss"></div>
-  <div id="ticket-confirm" class="confirm modal" role="dialog" aria-modal="true" aria-labelledby="ticket-confirm-title" aria-describedby="ticket-confirm-text" hidden>
-    <h4 id="ticket-confirm-title"></h4>
-    <p id="ticket-confirm-text"></p>
-    <div class="row">
-      <button id="ticket-ok" type="button" class="btn btn-danger">Delete the ticket</button>
-      <button id="ticket-cancel" type="button" class="btn">Cancel</button>
+      <span class="summary" id="summary"></span>
+      <span id="connection" class="tag" role="status">connecting</span>
+      <!-- Shown and wired by SF-071 -->
+      <div class="qctl" hidden>
+        <span>Run up to</span>
+        <span class="stepper"><button id="limDown" type="button" aria-label="One job fewer">−</button><output id="limVal"></output><button id="limUp" type="button" aria-label="One job more">+</button></span>
+        <span>jobs at once</span>
+        <span class="qstatus" id="qstatus"></span>
+        <!-- Shown and wired by SF-072 -->
+        <div class="menuwrap" hidden><button class="btn small" id="rulesBtn" type="button" aria-expanded="false">Rules ▾</button><div class="menu" id="rulesMenu" hidden><b>When the usage limit resets</b><label><input type="radio" name="rule" value="resume-then-queue" id="rule-resume-then-queue"> Resume parked jobs, then go on with the queue</label><label><input type="radio" name="rule" value="resume-only" id="rule-resume-only"> Resume parked jobs only</label><label><input type="radio" name="rule" value="wait" id="rule-wait"> Wait for me</label></div></div>
+      </div>
+      <nav class="ws" aria-label="Setup">
+        <span id="workspace-filter" class="seg2" role="group" aria-label="Workspace"></span>
+        <button id="open-archived" type="button" class="btn small">Archived <span id="archived-count"></span></button>
+        <button id="open-workspaces" type="button" class="btn small">Workspaces</button>
+        <button id="open-new-ticket" type="button" class="btn small primary">New ticket</button>
+      </nav>
+    </header>
+    <p id="board-hint" class="bhint" hidden></p>
+    <div class="cols" id="cols">
+      <section class="col queue" aria-labelledby="col-queue-title"><h2 id="col-queue-title">Queue <span class="n" id="count-queue"></span></h2><ul id="qlist"></ul></section>
+      <section class="col impl" aria-labelledby="col-implementing-title"><h2 id="col-implementing-title">Implementing <span class="n" id="count-implementing"></span></h2><ul id="list-implementing"></ul></section>
+      <section class="col rev" aria-labelledby="col-reviewing-title"><h2 id="col-reviewing-title">Reviewing <span class="n" id="count-reviewing"></span></h2><ul id="list-reviewing"></ul></section>
+      <section class="col you" aria-labelledby="col-you-title"><h2 id="col-you-title">Your turn <span class="n" id="count-you"></span></h2><ul id="list-you"></ul></section>
+      <section class="col done" aria-labelledby="col-done-title"><h2 id="col-done-title">Done <span class="n" id="count-done"></span></h2><ul id="list-done"></ul><button id="done-all" type="button" class="linkish" hidden></button></section>
     </div>
   </div>
 
-  <div id="scrim" class="scrim" hidden></div>
-  <aside id="drawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1" hidden>
-    <div class="drawer-head">
-      <div class="drawer-heading">
-        <p id="drawer-kicker" class="drawer-kicker"></p>
-        <h2 id="drawer-title"></h2>
-      </div>
-      <button id="drawer-close" type="button" class="btn" aria-label="Close">✕</button>
-    </div>
-
-    <section id="task-panel" class="panel" hidden>
-      <div id="task-conversation" class="task-conversation" hidden>
-        <p id="task-conversation-hint" class="hint"></p>
-        <div class="row"><a id="task-conversation-link" class="btn btn-sm btn-primary" target="_blank" rel="noopener noreferrer" hidden>Open the conversation</a></div>
-        <div class="copy-box">
-          <textarea id="task-conversation-text" rows="2" readonly aria-label="The conversation link or its first message"></textarea>
-          <button id="task-conversation-copy" type="button" class="btn btn-sm">Copy</button>
-        </div>
-        <p id="conversation-copy-status" class="hint" role="status" aria-live="polite"></p>
-      </div>
-      <div id="task-check" class="task-check" hidden></div>
-      <pre id="task-body" class="document"></pre>
-    </section>
-
-    <section id="workspaces-panel" class="panel" hidden>
-      <p id="no-workspaces" class="hint" hidden>No workspace yet. Add the local checkout of the repository to work in.</p>
-      <ul id="workspace-list" class="cards"></ul>
-      <form id="workspace-form" class="form">
-        <h3 class="section-title">Add a workspace</h3>
-        <div class="field">
-          <label for="workspace-name">Name</label>
-          <input id="workspace-name" type="text" autocomplete="off" spellcheck="false" placeholder="my-app">
-        </div>
-        <div class="field">
-          <label for="workspace-path">Path of the local checkout</label>
-          <input id="workspace-path" type="text" autocomplete="off" spellcheck="false" placeholder="/home/me/projects/my-app">
-          <p class="hint">Typed or pasted: the page cannot browse this machine's disk. Every job works in a worktree created from this checkout.</p>
-        </div>
-        <div class="row">
-          <button id="workspace-add" type="submit" class="btn">Add workspace</button>
-        </div>
-        <div id="workspace-status" class="status" role="status" aria-live="polite"></div>
-      </form>
-    </section>
-
-    <section id="ticket-panel" class="panel" hidden>
-      <form id="ticket-form" class="form">
-        <div class="field-row">
-          <div class="field">
-            <label for="ticket-workspace">Workspace</label>
-            <select id="ticket-workspace"></select>
-          </div>
-          <div class="field">
-            <label for="ticket-key">Ticket key</label>
-            <input id="ticket-key" type="text" autocomplete="off" spellcheck="false" placeholder="PROJ-123">
-          </div>
-        </div>
-        <div class="field">
-          <label for="ticket-title">Title</label>
-          <input id="ticket-title" type="text" autocomplete="off" placeholder="One line">
-        </div>
-        <div class="field">
-          <label for="ticket-request">What you want, in your words</label>
-          <textarea id="ticket-request" rows="5"></textarea>
-          <p class="hint">Not written into the Task file: these words open the conversation, where ChatGPT investigates, discusses it with you and writes the Task file. Once it is written, you start the job on the board, with Start on its Planned card.</p>
-        </div>
-        <fieldset class="owner">
-          <legend>Context owner</legend>
-          <label class="choice"><input id="owner-chatgpt" type="radio" name="owner" value="chatgpt" checked> ChatGPT, in the browser</label>
-          <label class="choice is-off"><input id="owner-claude" type="radio" name="owner" value="claude" disabled> Claude Code (SF-023)</label>
-        </fieldset>
-        <div class="row">
-          <button id="ticket-create" type="submit" class="btn btn-primary">Create the ticket</button>
-        </div>
-        <div id="ticket-status" class="status" role="status" aria-live="polite"></div>
-      </form>
-    </section>
-
-    <section id="archived-panel" class="panel" hidden>
-      <p id="no-archived" class="hint">No archived ticket.</p>
-      <ul id="archived-list" class="cards"></ul>
-    </section>
-
-    <section id="detail" class="detail" hidden>
+  <section id="job" hidden aria-label="Job">
+    <header class="jhead" id="jhead"></header>
+    <!-- The screens of SF-078 (Stream), SF-079 (Changes) and SF-080 (Merge request); until they land the job detail below shows the job. -->
+    <div class="scr" id="scrStream" hidden></div>
+    <div class="scr" id="scrChanges" hidden></div>
+    <div class="scr" id="scrMr" hidden></div>
+    <div id="detail" class="detail" hidden>
       <header class="jd-head">
         <div class="jd-title">
           <h3 id="job-ticket" class="mono"></h3>
@@ -154,7 +59,7 @@
           <span id="checkout-copy-status" class="hint" role="status" aria-live="polite"></span>
         </div>
         <textarea id="checkout-text" class="copy-fallback" rows="1" readonly aria-label="The checkout command" hidden></textarea>
-        <ol id="job-stepper" class="stepper" aria-label="Pipeline"></ol>
+        <ol id="job-stepper" class="pipeline" aria-label="Pipeline"></ol>
         <p id="job-halt" class="halt" hidden></p>
       </header>
 
@@ -294,6 +199,103 @@
           <div id="events" class="events" tabindex="0"></div>
         </div>
       </div>
+    </div>
+  </section>
+
+  <!-- The planned ticket's page of SF-081; until it lands a planned ticket opens in the Task drawer. -->
+  <section id="ticket" hidden aria-label="Planned ticket"></section>
+
+  <div id="toast" hidden role="status"><span id="toast-text"></span><button id="toast-close" type="button" class="toast-x" aria-label="Close the message">×</button></div>
+  <div id="ticket-confirm" class="confirm modal" role="dialog" aria-modal="true" aria-labelledby="ticket-confirm-title" aria-describedby="ticket-confirm-text" hidden>
+    <h4 id="ticket-confirm-title"></h4>
+    <p id="ticket-confirm-text"></p>
+    <div class="row">
+      <button id="ticket-ok" type="button" class="btn btn-danger">Delete the ticket</button>
+      <button id="ticket-cancel" type="button" class="btn">Cancel</button>
+    </div>
+  </div>
+
+  <div id="scrim" class="scrim" hidden></div>
+  <aside id="drawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1" hidden>
+    <div class="drawer-head">
+      <div class="drawer-heading">
+        <p id="drawer-kicker" class="drawer-kicker"></p>
+        <h2 id="drawer-title"></h2>
+      </div>
+      <button id="drawer-close" type="button" class="btn" aria-label="Close">✕</button>
+    </div>
+
+    <section id="task-panel" class="panel" hidden>
+      <div id="task-conversation" class="task-conversation" hidden>
+        <p id="task-conversation-hint" class="hint"></p>
+        <div class="row"><a id="task-conversation-link" class="btn btn-sm btn-primary" target="_blank" rel="noopener noreferrer" hidden>Open the conversation</a></div>
+        <div class="copy-box">
+          <textarea id="task-conversation-text" rows="2" readonly aria-label="The conversation link or its first message"></textarea>
+          <button id="task-conversation-copy" type="button" class="btn btn-sm">Copy</button>
+        </div>
+        <p id="conversation-copy-status" class="hint" role="status" aria-live="polite"></p>
+      </div>
+      <div id="task-check" class="task-check" hidden></div>
+      <pre id="task-body" class="document"></pre>
+    </section>
+
+    <section id="workspaces-panel" class="panel" hidden>
+      <p id="no-workspaces" class="hint" hidden>No workspace yet. Add the local checkout of the repository to work in.</p>
+      <ul id="workspace-list" class="cards"></ul>
+      <form id="workspace-form" class="form">
+        <h3 class="section-title">Add a workspace</h3>
+        <div class="field">
+          <label for="workspace-name">Name</label>
+          <input id="workspace-name" type="text" autocomplete="off" spellcheck="false" placeholder="my-app">
+        </div>
+        <div class="field">
+          <label for="workspace-path">Path of the local checkout</label>
+          <input id="workspace-path" type="text" autocomplete="off" spellcheck="false" placeholder="/home/me/projects/my-app">
+          <p class="hint">Typed or pasted: the page cannot browse this machine's disk. Every job works in a worktree created from this checkout.</p>
+        </div>
+        <div class="row">
+          <button id="workspace-add" type="submit" class="btn">Add workspace</button>
+        </div>
+        <div id="workspace-status" class="status" role="status" aria-live="polite"></div>
+      </form>
+    </section>
+
+    <section id="ticket-panel" class="panel" hidden>
+      <form id="ticket-form" class="form">
+        <div class="field-row">
+          <div class="field">
+            <label for="ticket-workspace">Workspace</label>
+            <select id="ticket-workspace"></select>
+          </div>
+          <div class="field">
+            <label for="ticket-key">Ticket key</label>
+            <input id="ticket-key" type="text" autocomplete="off" spellcheck="false" placeholder="PROJ-123">
+          </div>
+        </div>
+        <div class="field">
+          <label for="ticket-title">Title</label>
+          <input id="ticket-title" type="text" autocomplete="off" placeholder="One line">
+        </div>
+        <div class="field">
+          <label for="ticket-request">What you want, in your words</label>
+          <textarea id="ticket-request" rows="5"></textarea>
+          <p class="hint">Not written into the Task file: these words open the conversation, where ChatGPT investigates, discusses it with you and writes the Task file. Once it is written, you start the job on the board, with Start on its Queue card.</p>
+        </div>
+        <fieldset class="owner">
+          <legend>Context owner</legend>
+          <label class="choice"><input id="owner-chatgpt" type="radio" name="owner" value="chatgpt" checked> ChatGPT, in the browser</label>
+          <label class="choice is-off"><input id="owner-claude" type="radio" name="owner" value="claude" disabled> Claude Code (SF-023)</label>
+        </fieldset>
+        <div class="row">
+          <button id="ticket-create" type="submit" class="btn btn-primary">Create the ticket</button>
+        </div>
+        <div id="ticket-status" class="status" role="status" aria-live="polite"></div>
+      </form>
+    </section>
+
+    <section id="archived-panel" class="panel" hidden>
+      <p id="no-archived" class="hint">No archived ticket.</p>
+      <ul id="archived-list" class="cards"></ul>
     </section>
   </aside>
 </body>

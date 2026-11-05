@@ -1,19 +1,19 @@
-// Software Factory dashboard: the board (SF-046). Five columns from the stream's jobs and
-// tickets: Planned (the Task files without a job, or whose last job failed or was aborted),
-// Implementing, Reviewing, Your turn and Done, each card with the pipeline bar, who acts now and since when, and on Your turn the one
-// action that unblocks it. A job card opens the job in a wide drawer (SF-047), at the URL hash
-// #<ws>/<ticket>: its header with the pipeline stepper, the next-action panel with the facts and
-// the state history, and the flat tabs Task, Changes, Reviews, MR and Live log. Its approve,
-// abort, say, Retry review, Accept and prepare MR, and the merge request on the Git host (SF-048:
-// Create merge request, Merge, Refresh MR status) go as POSTs to api/jobs/<ws>/<ticket>/<action>,
-// each one a deliberate click, confirmed for approve, abort, accept, create and merge, never
-// retried or replayed by the page. A Planned card starts its job (POST
-// api/tickets/<ws>/<ticket>/start, confirmed, never retried; its confirmation says when the Task
-// is not checked, the check is stale or not ready), runs the Task check (SF-054: Check, POST
-// api/tickets/<ws>/<ticket>/check; it only advises) and opens its Task text with the last check in
-// the same drawer, as do Workspaces, New ticket and Archived. Every value goes in through textContent; the
-// hrefs are the server's ChatGPT URL, checked against its fixed prefix, and a merge request's
-// https URL from the Git host.
+// Software Factory dashboard v3 (SF-077), the port of docs/design/dashboard-v3/prototype.html: the
+// top bar (the summary, the connection, the workspace filter, Archived, Workspaces and New ticket;
+// the queue controls and the Rules menu stay hidden until SF-071 and SF-072), the board's five
+// columns Queue, Implementing, Reviewing, Your turn and Done, whose cards say who acts now, why a
+// job stopped (one table, STOPS) and carry one primary action only where the user acts, and the
+// full pages a card opens: a job's page at #<ws>/<ticket> (/changes, /mr), with the job detail of
+// SF-047 inside it until SF-078, and a planned ticket's page at #<ws>/<ticket>/ticket (its Task in
+// the drawer until SF-081). The board's messages go to the toast. The job's approve, abort, say,
+// Retry review, Accept and prepare MR, Pause, Resume, Restart and the merge request on the Git host
+// (SF-048) go as POSTs to api/jobs/<ws>/<ticket>/<action>, each one a deliberate click, confirmed
+// where it pushes, ends, overrides or merges, never retried or replayed by the page. A Queue card
+// starts its job (POST api/tickets/<ws>/<ticket>/start, confirmed, never retried; its confirmation
+// says when the Task is not checked, the check is stale or not ready) and runs the Task check
+// (SF-054: Check, POST api/tickets/<ws>/<ticket>/check; it only advises). Every value goes in
+// through textContent; the hrefs are the server's ChatGPT URL, checked against its fixed prefix,
+// and a merge request's https URL from the Git host.
 'use strict';
 
 const RECONNECT_MS = 3000;
@@ -78,7 +78,7 @@ const LOG_FILTERS = [['all', 'All'], ['implementer', 'Implementer'], ['claude', 
 
 const state = {
   jobs: [],
-  key: null, // "<ws>/<ticket>" of the job open in the drawer
+  key: null, // "<ws>/<ticket>" of the job open on its page
   detail: null,
   iteration: null, // the iteration selected in Changes
   // The selected job tab; kept across jobs.
@@ -112,9 +112,9 @@ const state = {
   setupPending: new Set(),
   ticketConfirm: null,
   // The board: the workspace filter ('' for every workspace), whether Done shows every job, what
-  // the drawer shows (null, 'job', 'task', 'workspaces', 'ticket' or 'archived'), the Task shown
-  // in it, the confirmation a card asked the job drawer to open, and the tickets whose start has
-  // an unknown outcome (Start stays off for them until the board is read again).
+  // the drawer shows (null, 'task', 'workspaces', 'ticket' or 'archived'), the Task shown in it,
+  // the confirmation a card asked the job page to open, and the tickets whose start has an
+  // unknown outcome (Start stays off for them until the board is read again).
   filter: '',
   doneAll: false,
   drawer: null,
@@ -123,6 +123,19 @@ const state = {
   startHolds: new Map(),
   // The last merge request status read from the host, per job (SF-048).
   mrStatus: new Map(),
+  // The board v3 (SF-077): the timer of the next read of api/jobs while a card runs and the count
+  // of the stream's jobs events (a read they overtook is dropped); the toast's
+  // timer, its message's level and whether the pointer is on it; the new ticket whose card is
+  // highlighted, and whether it was scrolled to.
+  refresh: null,
+  jobsSeen: 0,
+  toastTimer: null,
+  toastLevel: null,
+  toastHover: false,
+  highlight: null,
+  highlightShown: false,
+  // Where the job page's focus goes once its detail is shown (a card's button): 'composer', 'stop' or null.
+  wantFocus: null,
 };
 // The only URL the page links to: the ChatGPT composer prefilled by the server (the prefix of
 // src/conversation.ts).
@@ -208,10 +221,12 @@ async function post(path, body) {
   throw new Error(`HTTP ${response.status}${error.code ? ` ${error.code}` : ''}, no result`);
 }
 
+// The connection, a tag in the top bar while the stream is not connected.
 function setConnection(text, kind) {
   const node = $('connection');
   node.textContent = text;
-  node.className = `connection ${kind}`;
+  node.className = `tag ${kind}`;
+  node.hidden = kind === 'live';
 }
 
 // The file badges of a job (SF-024): the count of the last iteration, and warnings for undeclared
@@ -690,32 +705,6 @@ async function showJobTask(detail) {
 
 // ---------- Task check (SF-054) ----------
 
-// A check's verdict in words: ready, not ready with its counts, failed.
-function checkVerdictText(check) {
-  if (check.state === 'ready') {
-    return 'ready';
-  }
-  if (check.state === 'failed') {
-    return 'check failed';
-  }
-  return `not ready: ${check.blockers} blocker, ${check.majors} major`;
-}
-
-// The chip of a ticket's last check on its Planned card; none without the Task checks.
-function checkChip(check) {
-  if (check === null || typeof check !== 'object') {
-    return null;
-  }
-  if (check.running === true) {
-    return chip('checking…');
-  }
-  if (check.state === 'none') {
-    return chip('not checked');
-  }
-  const text = `${checkVerdictText(check)}${check.stale ? ' · stale' : ''}`;
-  return chip(text, check.stale ? '' : check.state === 'ready' ? 'chip-good' : 'chip-bad');
-}
-
 // The last check of a ticket, as the Task drawer and the job's Task tab show it: the stale mark and
 // the verdict, the paraphrase above the findings (by severity), then the expected files.
 function renderCheck(view) {
@@ -792,7 +781,7 @@ async function showCheck(id, key, current) {
 // Check: one request per ticket at a time; the card shows the check running, then its verdict.
 async function checkTicket(row) {
   const key = `${row.workspace}/${row.ticket}`;
-  await setupRequest(`check:${key}`, `api/tickets/${jobPath(key)}/check`, {}, 'ticket-action-status', () =>
+  await setupRequest(`check:${key}`, `api/tickets/${jobPath(key)}/check`, {}, 'toast', () =>
     ({ level: 'ok', text: `Checking ${key}: a read-only Claude session reads the Task file and the repository; the card shows the verdict when it ends. It only advises: Start stays yours.` }));
 }
 
@@ -1271,8 +1260,10 @@ function renderDetail(detail) {
   showTab();
   void showMr();
   renderActions();
-  // Approve… on a Your turn card opens its confirmation once the job is shown.
+  // Approve… on a Your turn card opens its confirmation once the job is shown, and a card's button
+  // its stop or its message box.
   openWantedConfirm();
+  applyWantedFocus();
 }
 
 // The job waits for the user after a failed Claude review: Retry review runs it again.
@@ -1793,24 +1784,32 @@ function sendSay() {
 }
 
 
-// ---------- The board ----------
+// ---------- The board (SF-077: the v3 board of docs/design/dashboard-v3/prototype.html) ----------
 
-// The column of each job state; the tickets without a live job are Planned. One column per
-// ticket (SF-057): a ticket whose last job failed or was aborted is Planned (to start again), not
-// also Done; a pushed one is only Done.
+// The column of each job state; the tickets without a live job are in the Queue. One column per
+// ticket (SF-057): a ticket whose last job failed or was aborted is in the Queue (to start again),
+// not also in Done; a pushed one is only in Done.
 const COLUMN_OF = {
   starting: 'implementing', working: 'implementing',
   awaiting_review: 'reviewing', preparing_mr: 'reviewing',
   needs_human: 'you', ready_for_human_review: 'you', paused: 'you',
   pushed: 'done', aborted: 'done', failed: 'done',
 };
-const COLUMNS = ['planned', 'implementing', 'reviewing', 'you', 'done'];
+const COLUMNS = ['queue', 'implementing', 'reviewing', 'you', 'done'];
+// The list of each column: #qlist as the prototype's Queue, #list-<column> for the others.
+const LIST_OF = { queue: 'qlist', implementing: 'list-implementing', reviewing: 'list-reviewing', you: 'list-you', done: 'list-done' };
+// Without SF-071's queue the Queue is today's Planned column, with its empty text.
 const EMPTY_TEXT = { planned: 'No ticket waits to start.', implementing: 'Nothing is being implemented.', reviewing: 'Nothing is in review.', you: 'Nothing waits for you.', done: 'No finished job.' };
 // Done shows the most recent jobs; "Show all" shows the rest.
-const DONE_LIMIT = 10;
-const SEGMENTS = ['Implement', 'Claude review', 'Codex gate', 'MR', 'You'];
+const DONE_LIMIT = 8;
 const DONE_LABELS = { pushed: 'Pushed', aborted: 'Aborted', failed: 'Failed' };
 const RESTARTABLE = ['failed', 'aborted'];
+// The states of a running card: the Now line, the tool calls, the cost "so far".
+const RUNNING = ['starting', 'working', 'awaiting_review', 'preparing_mr'];
+// While a card runs and the page is visible, api/jobs is read again this often.
+const REFRESH_MS = 15000;
+// An ok or info message of the toast goes after this long, unless the pointer is on it.
+const TOAST_MS = 6000;
 
 // The job can be pushed: the branch prepared at Clean is ready, or its push failed and approve
 // tries again.
@@ -1894,23 +1893,6 @@ function segmentStatus(flow, index) {
   return flow.halted ? 'halted' : 'current';
 }
 
-// Five segments, the current one marked and a halted one red; the words in the label.
-function pipelineBar(job) {
-  const flow = pipeline(job);
-  const bar = el('span', 'pipe');
-  const where = flow.segment === null ? (flow.complete ? 'complete' : 'stopped') : `${SEGMENTS[flow.segment]}${flow.halted ? ', halted' : ''}`;
-  bar.setAttribute('role', 'img');
-  bar.setAttribute('aria-label', `Pipeline: ${where}`);
-  bar.append(...SEGMENTS.map((name, index) => {
-    const status = segmentStatus(flow, index);
-    const segment = el('i', `seg ${status}`);
-    segment.dataset.status = status;
-    segment.setAttribute('title', `${name}: ${status}`);
-    return segment;
-  }));
-  return bar;
-}
-
 // How long ago ts was, in words: "< 1 min", "4 min", "2 h 5 min", "3 d".
 function since(ts) {
   const ms = Date.now() - Date.parse(ts);
@@ -1928,190 +1910,372 @@ function since(ts) {
   return hours < 24 ? `${hours} h ${minutes % 60} min` : `${Math.floor(hours / 24)} d`;
 }
 
-// Who acts now and since when: "Codex gate · 4 min", "You · approve · 2 min", "Pushed · 1 h ago".
-function nowLine(job) {
-  const waited = since(job.updated_at);
+// A duration as the prototype writes it: "14 min", "1 h 4 min".
+const dur = (ms) => {
+  const m = Math.max(0, Math.round(ms / 60000));
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
+};
+// An estimated cost (the jobs payload's cost_usd): "$1.23", or "—" without one.
+const money = (value) => (typeof value === 'number' ? `$${value.toFixed(2)}` : '—');
+const firstLine = (text) => (typeof text === 'string' ? text.split('\n')[0].trim() : '');
+const counted = (n, word, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
+
+// The iteration a job shows, numbered from 1, the same on its card and on its page (SF-078 uses it
+// too): the one under way while the Implementer works on it (starting, working, paused in its
+// turn, stopped by its session), else the last one published; never 0.
+const SESSION_CODES = ['serve_restarted', 'session_failed', 'turn_failed', 'max_turns', 'sandbox_unavailable', 'permission_mode_mismatch', 'publish_failed'];
+function shownIteration(job) {
+  const underWay = job.state === 'starting' || job.state === 'working' || (job.state === 'paused' && job.paused?.step === 'turn')
+    || (job.state === 'needs_human' && SESSION_CODES.includes(job.error?.code));
+  return Math.max(1, underWay ? job.iteration + 1 : job.iteration);
+}
+
+// The number of things a stopped job waits on (the jobs payload's stop.items); null when not known.
+const stopCount = (job) => (Array.isArray(job.stop?.items) ? job.stop.items.length : null);
+// The first line of the job's error message, after ": ", or nothing.
+const said = (job) => (firstLine(job.error?.message) === '' ? '' : `: ${firstLine(job.error.message).replace(/\.$/, '')}`);
+// A failed session that hit the Claude usage limit ("You've hit your … limit · resets 3am (Europe/Sofia)").
+const usageLimited = (job) => job.error?.code === 'session_failed' && /hit your .*limit/i.test(firstLine(job.error?.message));
+const resetTime = (job) => /resets\s+(.+)$/i.exec(firstLine(job.error?.message))?.[1] ?? null;
+
+// The stop codes (SF-077): one table for the cards and the job page (SF-078 uses it for the job
+// header, the stop block and the composer). A decision (the factory needs the user's choice;
+// nothing failed) never shows as an error; an error does. Each entry: its kind, the card's reason,
+// the sentence (with the job's numbers, or the words without one that is not known) and the
+// card's button. N, M, X and T come from the job; the codes of factory/src.
+const STOPS = {
+  simplify_offered: {
+    kind: 'decision', reason: 'Simplification offered', button: () => 'Simplify or skip',
+    sentence: (job) => (stopCount(job) !== null && typeof job.stop?.saves_lines === 'number'
+      ? `The simplification pass suggests ${counted(stopCount(job), 'change')} (saves about ${counted(job.stop.saves_lines, 'line')}). Simplify or skip.`
+      : 'The simplification pass suggests changes. Simplify or skip.'),
+  },
+  escalated: {
+    kind: 'decision', reason: 'Question for you',
+    button: (job) => (stopCount(job) ? `Answer ${counted(stopCount(job), 'question')}` : 'Answer the questions'),
+    sentence: (job) => `The Implementer asks you about ${stopCount(job) ? counted(stopCount(job), 'finding') : 'findings'}. Answer each: Accept risk or Must fix.`,
+  },
+  review_disputed: {
+    kind: 'decision', reason: 'A reviewer disputes a contest',
+    button: (job) => (stopCount(job) ? `Settle ${counted(stopCount(job), 'finding')}` : 'Settle the findings'),
+    sentence: (job) => `A reviewer reopened ${stopCount(job) ? counted(stopCount(job), 'finding') : 'findings'} the Implementer contested. Settle each: Accept risk or Must fix.`,
+  },
+  review_churn: {
+    kind: 'decision', reason: 'Fixes keep making findings',
+    button: (job) => (stopCount(job) ? `Decide ${counted(stopCount(job), 'finding')}` : 'Decide the findings'),
+    sentence: (job) => `The fixes keep making new findings${stopCount(job) !== null ? ` (${stopCount(job)} open)` : ''}. Accept the change as it is, or tell the Implementer what to fix.`,
+  },
+  gate_rounds: {
+    kind: 'decision', reason: 'Codex round limit reached',
+    button: (job) => (stopCount(job) ? `Decide ${counted(stopCount(job), 'finding')}` : 'Decide the findings'),
+    sentence: (job) => `${typeof job.gate_fixes === 'number' ? `Codex asked for fixes ${counted(job.gate_fixes, 'time')}, the limit.` : 'Codex asked for fixes as often as the limit allows.'} Accept the change without its ${stopCount(job) !== null ? counted(stopCount(job), 'open finding') : 'open findings'}, or tell the Implementer what to fix.`,
+  },
+  gate_budget: {
+    kind: 'decision', reason: 'Codex token budget used up', button: () => 'Decide',
+    sentence: () => "The Codex gate used its token budget for this job. Accept the change with Claude's clean review, or tell the Implementer what to do.",
+  },
+  iteration_limit: {
+    kind: 'decision', reason: 'Fix round limit reached', button: () => 'Give a direction',
+    sentence: (job) => `${typeof job.fixes === 'number' ? `The reviewers asked for fixes ${counted(job.fixes, 'time')}, the limit.` : 'The reviewers asked for fixes as often as the limit allows.'} Give the Implementer a direction, or abort.`,
+  },
+  max_turns: {
+    kind: 'decision', reason: 'Turn limit reached', button: () => 'Tell it to go on',
+    sentence: (job) => `The Implementer used all its turns on iteration ${shownIteration(job)}. Tell it to go on.`,
+  },
+  gate_failed: {
+    kind: 'error', reason: 'Codex gate gave no verdict', button: () => 'Decide',
+    sentence: () => "The Codex gate stopped without a verdict. Accept with Claude's clean review, or tell the Implementer to go on.",
+  },
+  review_failed: {
+    kind: 'error', reason: 'Claude review could not run', button: () => 'Retry review',
+    sentence: (job) => `The Claude review of iteration ${shownIteration(job)} could not run. Retry it.`,
+  },
+  serve_restarted: {
+    kind: 'error', reason: 'Interrupted by a restart', button: () => 'Tell it to go on',
+    sentence: (job) => `sf serve restarted while iteration ${shownIteration(job)} ran. Tell the Implementer to go on.`,
+  },
+  mr_serve_restarted: {
+    kind: 'error', reason: 'MR preparation interrupted', button: () => 'Tell it to go on',
+    sentence: () => 'The MR preparation was interrupted. Tell the Implementer to go on: the iteration is reviewed again and the MR is prepared again.',
+  },
+  // session_failed with the usage-limit message.
+  usage_limit: {
+    kind: 'error', reason: 'Usage limit reached', button: () => 'Tell it to go on',
+    sentence: (job) => `The Claude usage limit was reached${resetTime(job) !== null ? `; it resets at ${resetTime(job)}` : ''}. Tell the Implementer to go on after that.`,
+  },
+  session_failed: {
+    kind: 'error', reason: 'Implementer session failed', button: () => 'Tell it to go on',
+    sentence: (job) => `The Implementer's session failed${said(job)}. Tell it to go on, or restart.`,
+  },
+  sandbox_unavailable: {
+    kind: 'error', reason: 'Sandbox unavailable', button: () => 'Tell it to go on',
+    sentence: (job) => `The Implementer's sandbox could not start${said(job)}. Fix it on this machine, then tell it to go on.`,
+  },
+  publish_failed: {
+    kind: 'error', reason: 'Iteration not published', button: () => 'Tell it to go on',
+    sentence: (job) => `The factory could not publish the Report and Patch of iteration ${shownIteration(job)}. Tell it to go on to try again.`,
+  },
+  mr_conflict: {
+    kind: 'error', reason: 'Rebase conflict', button: () => 'Tell it how',
+    sentence: (job) => `The rebase onto ${job.base} conflicts and the Implementer could not resolve it. Tell it how, or abort.`,
+  },
+  mr_text_missing: {
+    kind: 'error', reason: 'MR text missing or invalid', button: () => 'Tell it to fix it',
+    sentence: (job) => `The Implementer's MR text is missing or breaks a rule${said(job)}. Tell it to write it again.`,
+  },
+  mr_empty: {
+    kind: 'error', reason: 'Nothing to commit', button: () => 'Tell it what is missing',
+    sentence: (job) => `The reviewed change has nothing to commit against ${job.base}. Tell the Implementer what is missing, or abort.`,
+  },
+  mr_failed: {
+    kind: 'error', reason: 'MR preparation failed', button: () => 'Tell it to go on',
+    sentence: (job) => `The MR preparation failed${said(job)}. Tell the Implementer to go on (the iteration is reviewed again), or abort.`,
+  },
+  worktree_remove_failed: {
+    kind: 'error', reason: 'Worktree not removed', button: () => 'Tell it to go on',
+    sentence: (job) => `The branch is prepared, but its worktree could not be removed${said(job)}. Remove it by hand, then tell the Implementer to go on.`,
+  },
+  mr_push_failed: {
+    kind: 'error', reason: 'Push failed', button: () => 'Push again',
+    sentence: (job) => `The push of ${job.branch} failed${said(job)}. Fix the cause, then push again.`,
+  },
+  mr_push_protected: {
+    kind: 'error', reason: 'Push refused', button: () => 'Open the job',
+    sentence: (job) => `The factory never pushes to ${job.branch}. Rename the branch on the Merge request screen, or abort.`,
+  },
+  // Any other code.
+  other: {
+    kind: 'error', reason: 'Stopped', button: () => 'Open the job',
+    sentence: (job) => `The job stopped${said(job)}. Tell the Implementer what to do, or abort.`,
+  },
+};
+// The codes that share an entry of STOPS.
+const STOP_ALIASES = {
+  mr_interrupted: 'mr_serve_restarted', turn_failed: 'session_failed', permission_mode_mismatch: 'session_failed',
+  mr_text_invalid: 'mr_text_missing', mr_commit_failed: 'mr_failed', mr_rebase_failed: 'mr_failed',
+};
+
+// The entry of STOPS for a stopped job.
+function stopEntry(job) {
+  if (usageLimited(job)) {
+    return STOPS.usage_limit;
+  }
+  const code = typeof job.error?.code === 'string' ? job.error.code : '';
+  return Object.hasOwn(STOPS, STOP_ALIASES[code] ?? code) ? STOPS[STOP_ALIASES[code] ?? code] : STOPS.other;
+}
+
+// The sentence of a job's state, as the job page's header says it.
+function sentence(job) {
+  const it = shownIteration(job);
   switch (job.state) {
     case 'starting':
+      return 'The worktree is being created and the Implementer starts';
     case 'working':
-      return `Implementer · ${waited}`;
-    case 'awaiting_review':
-      return job.review === 'clean' ? `Codex gate · ${since(job.review_ended_at ?? job.updated_at)}` : `Claude review · ${waited}`;
-    case 'preparing_mr':
-      return `MR preparation · ${waited}`;
-    case 'ready_for_human_review':
-      return `You · approve · ${waited}`;
-    case 'needs_human': {
-      const what = canApprove(job) ? 'approve' : reviewFailed(job) ? 'retry review' : (job.error?.code ?? 'decide');
-      return `You · ${what} · ${waited}`;
-    }
+      return `The Implementer is working on iteration ${it}`;
     case 'paused':
-      return `You · paused · ${waited}`;
+      return `Paused by you during iteration ${it}`;
+    case 'awaiting_review':
+      return `Claude and Codex are reviewing iteration ${it}`;
+    case 'preparing_mr':
+      return 'Writing the MR text';
+    case 'needs_human':
+      return stopEntry(job).sentence(job).replace(/\.$/, '');
+    case 'ready_for_human_review':
+      return 'Reviews are clean and the MR text is written. Push when you are happy';
+    case 'pushed':
+      return `Pushed at ${clock(job.updated_at)}`;
+    case 'aborted':
+      return 'Aborted by you. The branch stays';
     default:
-      return `${DONE_LABELS[job.state] ?? job.state} · ${waited} ago`;
+      return DONE_LABELS[job.state] ?? job.state;
   }
 }
 
-function chip(text, className = '') {
-  return el('span', `chip ${className}`.trim(), text);
-}
-
-// Iteration count, file count and estimated cost.
-function jobChips(job) {
-  const chips = el('span', 'chips');
-  chips.append(chip(`iteration ${job.iteration}`));
-  if (typeof job.files === 'number' && job.files > 0) {
-    chips.append(chip(`${job.files} file${job.files === 1 ? '' : 's'}`));
+// Who acts now on a running job and what it does: the jobs payload's now, or what the state says
+// while the log has nothing yet.
+function nowLine(job) {
+  if (job.now !== null && typeof job.now === 'object' && typeof job.now.who === 'string') {
+    return { who: job.now.who, what: String(job.now.what ?? '') };
   }
-  if (typeof job.undeclared === 'number' && job.undeclared > 0) {
-    chips.append(chip(`${job.undeclared} sensitive`, 'chip-bad'));
+  if (job.state === 'awaiting_review') {
+    return { who: job.review === 'clean' ? 'Codex gate' : 'Claude review', what: `reviewing iteration ${job.iteration}` };
   }
-  if (typeof job.cost_usd === 'number') {
-    const cost = chip(`est. $${job.cost_usd.toFixed(2)}`);
-    cost.setAttribute('title', 'An estimate of the API-equivalent price, not a charge');
-    chips.append(cost);
+  if (job.state === 'preparing_mr') {
+    return { who: 'MR writer', what: 'writing the MR text' };
   }
-  return chips;
-}
-
-function cardHead(ticket, workspace, title) {
-  const head = el('span', 'card-key');
-  head.append(el('span', 'mono', ticket), el('span', 'card-ws', workspace));
-  return [head, el('span', 'card-title', title)];
+  return { who: 'Implementer', what: 'starting' };
 }
 
 const jobByKey = (key) => state.jobs.find((job) => keyOf(job) === key) ?? null;
+const ticketByKey = (key) => (state.tickets ?? []).find((row) => keyOf(row) === key) ?? null;
 const titleOf = (job) => (typeof job.title === 'string' && job.title !== '' ? job.title : job.branch);
 
-// A job card: a button that opens the job, and on Your turn the action that unblocks it with
-// that job's last outcome.
+// A button with its data-* attributes, for the delegated click listener.
+function button(className, text, data = {}) {
+  const node = el('button', className, text);
+  node.type = 'button';
+  for (const [name, value] of Object.entries(data)) {
+    node.dataset[name] = value;
+  }
+  return node;
+}
+
+// What the cards need of the board as a whole: whether it shows more than one workspace.
+const board = { multi: false };
+
+// The first line of a job card: the key, the workspace when the board shows more than one, the
+// code of a stopped job, and the money: the cost so far and the time since the start while it
+// runs, the cost and the time it took when it does not.
+function cardRow(job) {
+  const row = el('div', 'row1');
+  row.append(el('span', 'key', job.ticket));
+  if (board.multi) {
+    row.append(el('span', 'tag', job.workspace));
+  }
+  if (job.state === 'needs_human' && typeof job.error?.code === 'string') {
+    const code = el('span', 'tag', job.error.code);
+    code.setAttribute('title', 'error code');
+    row.append(code);
+  }
+  const running = RUNNING.includes(job.state);
+  const end = running ? Date.now() : Date.parse(job.updated_at);
+  row.append(el('span', 'money', `${money(job.cost_usd)}${running ? ' so far' : ''} · ${dur(end - Date.parse(job.created_at))}`));
+  return row;
+}
+
+// A job card (the prototype's jobCard): a click opens the job's page; one primary action only where
+// the user acts (Your turn); a pushed card keeps its merge request and Archive ticket.
 function jobCard(job) {
   const key = keyOf(job);
-  const item = el('li', 'board-card');
-  item.dataset.key = key;
-  const open = el('button', 'card-open');
-  open.type = 'button';
-  open.dataset.key = key;
-  open.setAttribute('aria-current', String(state.drawer === 'job' && state.key === key));
-  open.append(...cardHead(job.ticket, job.workspace, titleOf(job)));
-  const now = el('span', 'card-now');
-  now.append(pipelineBar(job), el('span', 'card-who', nowLine(job)));
-  open.append(now);
-  if ((job.state === 'needs_human' || job.state === 'failed') && job.error !== null && typeof job.error === 'object') {
-    open.append(el('span', 'card-error', `${job.error.code}: ${job.error.message}`));
-  }
-  if (job.state === 'paused' && job.task_changed === true) {
-    open.append(el('span', 'card-note', 'Task file changed since the job started'));
+  const item = el('li', 'card');
+  item.setAttribute('tabindex', '0');
+  item.dataset.open = key;
+  item.append(cardRow(job), el('div', 'title', titleOf(job)));
+  if (RUNNING.includes(job.state)) {
+    const now = nowLine(job);
+    const line = el('div', 'now');
+    const what = el('span', '', now.what);
+    what.setAttribute('title', now.what);
+    line.append(el('i', 'pulse'), el('b', '', `Now: ${now.who}`), what);
+    item.append(line, el('div', 'meta', `Iteration ${shownIteration(job)} · ${counted(typeof job.tool_calls === 'number' ? job.tool_calls : 0, 'tool call')}`));
+  } else if (job.state === 'needs_human') {
+    const stop = stopEntry(job);
+    const reason = el('div', stop.kind === 'error' ? 'reason err' : 'reason', stop.reason);
+    if (typeof job.error?.message === 'string') {
+      reason.setAttribute('title', job.error.message);
+    }
+    const n = stopCount(job);
+    item.append(reason, el('div', 'meta', `Iteration ${shownIteration(job)} · ${n ? `${counted(n, 'finding')} to decide` : `stopped at ${clock(job.updated_at)}`}`), ...yourTurn(job));
+  } else if (job.state === 'ready_for_human_review') {
+    item.append(el('div', 'reason ready', 'Ready to push: reviews clean, MR text written'), el('div', 'meta', `Iteration ${shownIteration(job)}`), ...yourTurn(job));
+  } else if (job.state === 'paused') {
+    item.append(el('div', 'reason', 'Paused by you'), el('div', 'meta', `Iteration ${shownIteration(job)}`));
+    if (job.task_changed === true) {
+      item.append(el('div', 'meta note', 'Task file changed since the job started'));
+    }
+    item.append(...yourTurn(job));
+  } else {
+    const meta = el('div', 'meta', `${DONE_LABELS[job.state] ?? job.state} · ${counted(job.iteration, 'iteration')} · ${clock(job.updated_at)}`);
+    if (typeof job.error?.message === 'string') {
+      meta.setAttribute('title', `${job.error.code}: ${job.error.message}`);
+    }
+    item.append(meta);
+    if (job.state === 'pushed') {
+      item.append(...pushedFoot(job));
+    }
   }
   // SF-069: the Implementer's turn went on by itself after the turn limit.
   if (typeof job.turn_limit === 'string') {
-    open.append(el('span', 'card-note', job.turn_limit));
-  }
-  open.append(jobChips(job));
-  open.addEventListener('click', () => openJob(key));
-  item.append(open);
-  if (COLUMN_OF[job.state] === 'you') {
-    item.append(...yourTurn(job));
-  } else if (job.state === 'pushed') {
-    item.append(...pushedFoot(job));
+    item.append(el('div', 'meta note', job.turn_limit));
   }
   return item;
 }
 
+// The one primary action of a Your turn card, and the job's last outcome. It opens the job's page
+// at the stop or the message box (with the Approve confirmation for a branch to push), except
+// Retry review and Resume, which go at once; a prepared branch also offers Create merge request….
 function yourTurn(job) {
   const key = keyOf(job);
-  const foot = el('div', 'card-foot');
-  let button;
-  if (canApprove(job)) {
-    button = el('button', 'btn btn-sm btn-primary', 'Approve…');
-    button.disabled = availability('approve', job) !== '';
-    button.addEventListener('click', () => openJob(key, 'approve'));
+  const act = el('div', 'act');
+  let primary;
+  if (job.state === 'ready_for_human_review') {
+    primary = button('btn primary small', 'Review the MR and push', { open: key, confirm: 'approve' });
+    primary.disabled = availability('approve', job) !== '';
   } else if (job.state === 'paused') {
     // Resume (SF-067) needs no confirmation; a message for the Implementer is written in the job.
-    button = el('button', 'btn btn-sm btn-primary', ACTION_LABELS.resume);
-    button.disabled = availability('resume', job) !== '';
-    button.addEventListener('click', () => {
-      const current = jobByKey(key);
-      if (current !== null && availability('resume', current) === '') {
-        void run('resume', key, {});
-      }
-    });
+    primary = button('btn primary small', ACTION_LABELS.resume, { run: 'resume', key });
+    primary.disabled = availability('resume', job) !== '';
   } else if (reviewFailed(job)) {
-    button = el('button', 'btn btn-sm btn-primary', ACTION_LABELS.review);
-    button.disabled = availability('review', job) !== '';
-    button.addEventListener('click', () => {
-      const current = jobByKey(key);
-      if (current !== null && reviewFailed(current) && availability('review', current) === '') {
-        void run('review', key, {});
-      }
-    });
+    primary = button('btn primary small', ACTION_LABELS.review, { run: 'review', key });
+    primary.disabled = availability('review', job) !== '';
   } else {
-    button = el('button', 'btn btn-sm', 'Open the job');
-    button.addEventListener('click', () => openJob(key));
+    const stop = stopEntry(job);
+    const data = { open: key };
+    if (job.error?.code === 'mr_push_failed' && canApprove(job)) {
+      data.confirm = 'approve';
+    } else {
+      data.focus = stop.kind === 'decision' && stopCount(job) ? 'stop' : 'composer';
+    }
+    primary = button('btn primary small', stop.button(job), data);
   }
-  button.type = 'button';
-  foot.append(button);
+  act.append(primary);
   if (canApprove(job)) {
-    foot.append(mrCardButton(job, 'mr-create'));
+    act.append(mrCardButton(job, 'mr-create'));
   }
-  const parts = [foot];
+  return [act, ...cardOutcome(key, true)];
+}
+
+// The job's last outcome on its card, and the warning of an unknown one.
+function cardOutcome(key, doubts) {
+  const parts = [];
   const outcome = state.outcomes.get(key) ?? null;
   if (outcome !== null) {
-    parts.push(el('p', `status ${outcome.level}`, outcome.text));
+    parts.push(el('div', `outcome ${outcome.level}`, outcome.text));
   }
-  const doubt = state.doubts.get(key);
+  const doubt = doubts ? state.doubts.get(key) : undefined;
   if (doubt !== undefined && doubt !== '') {
-    parts.push(el('p', 'status error', doubt));
+    parts.push(el('div', 'outcome error', doubt));
   }
   return parts;
 }
 
-// A board card's Create merge request… or Merge…: opens the job with that confirmation; off with
+// A card's Create merge request… or Merge…: opens the job's page with that confirmation; off with
 // the reason as its title while the action is unavailable.
 function mrCardButton(job, action) {
-  const key = keyOf(job);
-  const button = el('button', 'btn btn-sm', `${ACTION_LABELS[action]}…`);
-  button.type = 'button';
+  const node = button('btn small', `${ACTION_LABELS[action]}…`, { open: keyOf(job), confirm: action });
   const reason = availability(action, job);
-  button.disabled = reason !== '';
+  node.disabled = reason !== '';
   if (reason !== '') {
-    button.setAttribute('title', reason);
+    node.setAttribute('title', reason);
   }
-  button.addEventListener('click', () => openJob(key, action));
-  return button;
+  return node;
 }
 
 // A pushed job on Done (SF-048): its merge request with the link, Create merge request… or
 // Merge… where they apply, Archive ticket while its Task file is active (SF-057: the ticket has
-// no Planned card then), and the job's last outcome.
+// no Queue card then), and the job's last outcome. Never a primary button.
 function pushedFoot(job) {
   const key = keyOf(job);
   const parts = [];
-  const row = (state.tickets ?? []).find((ticket) => keyOf(ticket) === key) ?? null;
+  const row = ticketByKey(key);
   if (hasMr(job)) {
-    const line = el('p', 'card-mr card-foot');
+    const line = el('div', 'meta');
     line.append(document.createTextNode(`#${job.mr.number} ${job.mr.state} `), mrLink(job.mr));
     parts.push(line);
   }
   const actions = [canCreateMr(job) ? 'mr-create' : null, canMerge(job) ? 'mr-merge' : null].filter((action) => action !== null);
   if (actions.length > 0 || row !== null) {
-    const foot = el('div', 'card-foot');
-    foot.append(...actions.map((action) => mrCardButton(job, action)));
+    const act = el('div', 'act');
+    act.append(...actions.map((action) => mrCardButton(job, action)));
     if (row !== null) {
-      const archive = el('button', 'btn btn-sm', 'Archive ticket');
-      archive.type = 'button';
+      const archive = button('btn small', 'Archive ticket', { qact: 'archive', key });
       archive.disabled = state.setupPending.has(`ticket:${key}`) || state.ticketConfirm !== null;
       archive.title = 'Move the Task file to .software-factory/archive/; the finished job leaves the board';
-      archive.addEventListener('click', () => void ticketAction('archive', row));
-      foot.append(archive);
+      act.append(archive);
     }
-    parts.push(foot);
+    parts.push(act);
   }
-  const outcome = state.outcomes.get(key) ?? null;
-  if (outcome !== null) {
-    parts.push(el('p', `status ${outcome.level}`, outcome.text));
-  }
-  return parts;
+  return [...parts, ...cardOutcome(key, false)];
 }
 
 // The state of a ticket's last job: the jobs list (read from the stream) before the tickets list,
@@ -2120,76 +2284,81 @@ function lastJobState(row) {
   return jobByKey(keyOf(row))?.state ?? row.job ?? null;
 }
 
-// One column per ticket (SF-057): a ticket is Planned without a job or after a failed or aborted
-// one; any other job (active, or pushed) keeps it in that job's column only.
+// One column per ticket (SF-057): a ticket is in the Queue without a job or after a failed or
+// aborted one; any other job (active, or pushed) keeps it in that job's column only.
 function isPlanned(row) {
   const last = lastJobState(row);
   return last === null || RESTARTABLE.includes(last);
 }
 
-// A Planned card: the ticket, its last job (failed or aborted; the mark opens that job), Start (or
-// "waiting for the plan" for a skeleton), Task, Archive and Delete….
-function ticketCard(row) {
+// The Task check of a Queue card in words (SF-054): checking…, check: ready, not ready: N blocker,
+// M major, check failed (each with " · stale" once the Task file changed since), not checked; a
+// skeleton is a draft.
+function checkNote(row) {
+  if (row.draft) {
+    return 'draft';
+  }
+  const check = row.check;
+  if (check !== null && typeof check === 'object' && check.running === true) {
+    return 'checking…';
+  }
+  if (check === null || typeof check !== 'object' || check.state === 'none') {
+    return 'not checked';
+  }
+  const text = check.state === 'ready' ? 'check: ready' : check.state === 'failed' ? 'check failed' : `not ready: ${check.blockers} blocker, ${check.majors} major`;
+  return `${text}${check.stale ? ' · stale' : ''}`;
+}
+
+// A Queue card (the prototype's queueCard, without SF-071's queue): a click opens the planned
+// ticket (its Task drawer until SF-081); the last job's mark opens that failed or aborted job;
+// Start (confirmed) or "waiting for the plan" for a skeleton, Check, Archive and Delete….
+function queueCard(row) {
   const key = keyOf(row);
-  const item = el('li', 'board-card planned');
-  item.dataset.key = key;
-  const body = el('div', 'card-body');
-  body.append(...cardHead(row.ticket, row.workspace, row.title));
-  const chips = el('span', 'chips');
-  chips.append(chip(`from ${row.base}`));
+  const item = el('li', state.highlight === key ? 'card hl' : 'card');
+  item.setAttribute('tabindex', '0');
+  item.dataset.ticket = key;
+  const head = el('div', 'row1');
+  head.append(el('span', 'key', row.ticket));
+  if (board.multi) {
+    head.append(el('span', 'tag', row.workspace));
+  }
   const last = lastJobState(row);
   if (last !== null) {
-    const mark = el('button', `chip chip-button${last === 'failed' ? ' chip-bad' : ''}`, `last job ${last}`);
-    mark.type = 'button';
+    const mark = button('tag', `last job ${last}`, { open: key });
     mark.title = 'Open the last job';
     mark.disabled = jobByKey(key) === null; // only from the tickets list: nothing to open yet
-    mark.addEventListener('click', () => openJob(key));
-    chips.append(mark);
+    head.append(mark);
   }
-  const checked = row.draft ? null : checkChip(row.check);
-  if (checked !== null) {
-    chips.append(checked);
-  }
-  body.append(chips);
-  item.append(body);
-  const foot = el('div', 'card-foot');
+  head.append(el('span', 'money', checkNote(row)));
+  item.append(head, el('div', 'title', row.title));
+  const act = el('div', 'act');
   const busy = state.setupPending.has(`ticket:${key}`) || state.ticketConfirm !== null;
   if (row.draft) {
-    foot.append(el('span', 'card-wait', 'waiting for the plan'));
+    act.append(el('span', 'muted', 'waiting for the plan'));
   } else {
-    const start = el('button', 'btn btn-sm btn-primary', 'Start');
-    start.type = 'button';
+    const start = button('btn primary small', 'Start', { qact: 'start', key });
     start.disabled = busy || state.startHolds.has(key);
-    start.addEventListener('click', () => openTicketConfirm('start', row));
-    foot.append(start);
+    act.append(start);
     if (row.check !== null && typeof row.check === 'object') {
-      const check = el('button', 'btn btn-sm', 'Check');
-      check.type = 'button';
+      const check = button('btn small', 'Check', { qact: 'check', key });
       check.title = 'A read-only Claude session reads the Task file and the repository and says whether it is ready; it only advises';
       check.disabled = row.check.running === true || state.setupPending.has(`check:${key}`);
-      check.addEventListener('click', () => void checkTicket(row));
-      foot.append(check);
+      act.append(check);
     }
   }
-  const task = el('button', 'btn btn-sm', 'Task');
-  task.type = 'button';
-  task.addEventListener('click', () => void openTask(row, false));
-  const archive = el('button', 'btn btn-sm', 'Archive');
-  archive.type = 'button';
+  const archive = button('btn small', 'Archive', { qact: 'archive', key });
   archive.disabled = busy;
   archive.title = 'Move the Task file to .software-factory/archive/; a finished job of the ticket leaves the board';
-  archive.addEventListener('click', () => void ticketAction('archive', row));
-  const remove = el('button', 'btn btn-sm btn-ghost-danger', 'Delete…');
-  remove.type = 'button';
+  const remove = button('btn small danger', 'Delete…', { qact: 'delete', key });
   remove.disabled = busy;
-  remove.addEventListener('click', () => openTicketConfirm('delete', row));
-  foot.append(task, archive, remove);
-  item.append(foot);
+  act.append(archive, remove);
+  item.append(act);
   return item;
 }
 
 const visible = (workspace) => state.filter === '' || workspace === state.filter;
 
+// The workspace filter in the top bar: All and one button per workspace.
 function renderFilter() {
   const names = (state.workspaces ?? []).map((row) => row.name);
   if (state.filter !== '' && state.workspaces !== null && !names.includes(state.filter)) {
@@ -2198,41 +2367,46 @@ function renderFilter() {
   const node = $('workspace-filter');
   node.hidden = names.length === 0;
   node.replaceChildren(...[['', 'All workspaces'], ...names.map((name) => [name, name])].map(([name, label]) => {
-    const button = el('button', 'filter-button', label);
-    button.type = 'button';
-    button.setAttribute('aria-pressed', String(state.filter === name));
-    button.addEventListener('click', () => {
-      state.filter = name;
-      renderBoard();
-    });
-    return button;
+    const filter = button(state.filter === name ? 'on' : '', label, { ws: name });
+    filter.setAttribute('aria-pressed', String(state.filter === name));
+    return filter;
   }));
 }
 
+// The board (the prototype's renderBoard): the top bar's summary and the five columns. The focus
+// stays on the card it was on.
 function renderBoard() {
   renderFilter();
+  const active = document.activeElement;
+  const focused = active !== null && active !== undefined && $('cols').contains(active) && active.classList?.contains('card')
+    ? (active.dataset.open !== undefined ? `[data-open="${active.dataset.open}"]` : `[data-ticket="${active.dataset.ticket}"]`) : null;
   const byUpdate = (a, b) => b.updated_at.localeCompare(a.updated_at);
   const jobs = state.jobs.filter((job) => visible(job.workspace)).sort(byUpdate);
-  // A failed or aborted job whose ticket is Planned is not also in Done.
+  // A failed or aborted job whose ticket is in the Queue is not also in Done.
   const planned = (state.tickets ?? []).filter((row) => visible(row.workspace) && isPlanned(row));
   const plannedKeys = new Set(planned.map(keyOf));
-  const lists = { planned, implementing: [], reviewing: [], you: [], done: [] };
+  const lists = { queue: planned, implementing: [], reviewing: [], you: [], done: [] };
   for (const job of jobs) {
     if (RESTARTABLE.includes(job.state) && plannedKeys.has(keyOf(job))) {
       continue;
     }
     lists[COLUMN_OF[job.state] ?? 'done'].push(job);
   }
+  board.multi = new Set([...planned, ...jobs].map((entry) => entry.workspace)).size > 1;
   for (const column of COLUMNS) {
     const entries = lists[column];
     $(`count-${column}`).textContent = String(entries.length);
     const shown = column === 'done' && !state.doneAll ? entries.slice(0, DONE_LIMIT) : entries;
-    const cards = shown.map(column === 'planned' ? ticketCard : jobCard);
-    $(`list-${column}`).replaceChildren(...(cards.length > 0 ? cards : [el('li', 'col-empty', EMPTY_TEXT[column])]));
+    const cards = shown.map(column === 'queue' ? queueCard : jobCard);
+    $(LIST_OF[column]).replaceChildren(...(cards.length > 0 ? cards : [el('li', 'empty', EMPTY_TEXT[column === 'queue' ? 'planned' : column])]));
   }
   const more = $('done-all');
   more.hidden = lists.done.length <= DONE_LIMIT;
   more.textContent = state.doneAll ? `Show the last ${DONE_LIMIT}` : `Show all ${lists.done.length}`;
+  const wait = lists.you.length;
+  const running = jobs.filter((job) => RUNNING.includes(job.state)).length;
+  $('summary').textContent = `${wait} wait${wait === 1 ? 's' : ''} for you · ${running} running`;
+  document.title = `${wait > 0 ? `(${wait}) ` : ''}Software Factory`;
   $('archived-count').textContent = `(${state.archived.length})`;
   let hint = '';
   if (state.workspaces !== null && state.workspaces.length === 0) {
@@ -2242,16 +2416,373 @@ function renderBoard() {
   }
   $('board-hint').textContent = hint;
   $('board-hint').hidden = hint === '';
+  if (focused !== null) {
+    document.querySelector(`#cols .card${focused}`)?.focus();
+  }
+  showHighlight();
+  scheduleRefresh();
 }
 
-// ---------- The drawer ----------
+// The new ticket's card, once the stream lists it (SF-066): scrolled to and focused once; it stays
+// highlighted until another ticket is created. Until SF-081 this stands for the ticket's page.
+function showHighlight() {
+  if (state.highlight === null || state.highlightShown || ui.screen !== 'board') {
+    return;
+  }
+  const card = document.querySelector(`#qlist .card[data-ticket="${state.highlight}"]`);
+  if (card !== null) {
+    state.highlightShown = true;
+    card.scrollIntoView({ block: 'nearest' });
+    card.focus();
+  }
+}
 
-const PANELS = { job: 'detail', task: 'task-panel', workspaces: 'workspaces-panel', ticket: 'ticket-panel', archived: 'archived-panel' };
+// While a card runs and the page is visible, api/jobs is read again every REFRESH_MS, so the Now
+// line and the elapsed time move: one timer, one read at a time; nothing else is polled.
+const anyRunning = () => state.jobs.some((job) => visible(job.workspace) && RUNNING.includes(job.state));
+function scheduleRefresh() {
+  if (state.refresh !== null || !anyRunning() || document.visibilityState === 'hidden') {
+    return;
+  }
+  state.refresh = setTimeout(() => {
+    if (document.visibilityState === 'hidden' || !anyRunning()) {
+      state.refresh = null;
+      return;
+    }
+    // A jobs event of the stream during the read is newer than its answer.
+    const seen = state.jobsSeen;
+    getText('api/jobs').then((text) => {
+      if (state.jobsSeen === seen) {
+        state.jobs = JSON.parse(text).jobs;
+      }
+    }, () => undefined).finally(() => {
+      state.refresh = null;
+      renderJobs();
+    });
+  }, REFRESH_MS);
+}
 
-function showDrawer(kind, kicker, title) {
-  if (state.drawer === 'job' && kind !== 'job') {
+// ---------- The toast (SF-068): the board's messages ----------
+
+// One message at a time, a new one replacing the old: ok and info go after TOAST_MS (not while
+// the pointer is on it), errors stay until closed; × and Escape close it.
+function toast(outcome) {
+  const node = $('toast');
+  clearTimeout(state.toastTimer);
+  state.toastTimer = null;
+  state.toastLevel = outcome?.level ?? null;
+  if (outcome === null) {
+    node.hidden = true;
+    $('toast-text').textContent = '';
+    return;
+  }
+  const alert = outcome.level === 'error' || outcome.level === 'warn';
+  node.setAttribute('role', alert ? 'alert' : 'status');
+  node.className = alert ? 'err' : '';
+  $('toast-text').textContent = outcome.text;
+  node.hidden = false;
+  armToast();
+}
+
+function armToast() {
+  if ((state.toastLevel === 'ok' || state.toastLevel === 'info') && !state.toastHover && state.toastTimer === null) {
+    state.toastTimer = setTimeout(() => toast(null), TOAST_MS);
+  }
+}
+
+// ---------- The job page and the routing (the prototype's go, back, openTicket, route, setHash) ----------
+
+// The view shown: 'board', a job's 'stream', 'changes' or 'mr' (ui.job is its key "<ws>/<ticket>"),
+// or a planned ticket's page 'ticket' (ui.ticket); ui.opener is the key of the card that opened
+// it; pending: the hash names a job or ticket not loaded yet.
+const ui = { screen: 'board', job: null, ticket: null, opener: null, pending: false };
+// The tab of the moved job detail each job screen selects; the Stream keeps the tab chosen.
+const SCREEN_TAB = { changes: 'changes', mr: 'mr' };
+
+// The URL hash of the view: #<ws>/<ticket> (the Stream), #<ws>/<ticket>/changes, /mr, /ticket;
+// a new one is a new history entry, so Back and Forward move between them.
+function setHash() {
+  const h = ui.screen === 'board' ? '' : ui.screen === 'ticket' ? `${ui.ticket}/ticket` : ui.screen === 'stream' ? ui.job : `${ui.job}/${ui.screen}`;
+  if (decodeURIComponent(location.hash.slice(1)) !== h) {
+    history.pushState(null, '', `#${h}`);
+  }
+}
+
+// The job page's header (SF-078 adds its switch and facts): ← Board, the key and the title, the
+// sentence, the iteration and the branch.
+function renderHead() {
+  const job = ui.job === null ? null : (jobByKey(ui.job) ?? (state.detail !== null && keyOf(state.detail.job) === ui.job ? state.detail.job : null));
+  if (job === null) {
+    return;
+  }
+  $('job').className = `st-${job.state}`;
+  const backButton = button('btn back', '← Board', { back: '' });
+  backButton.title = 'Back to the board';
+  const t1 = el('div', 't1');
+  const title = el('span', 'title', titleOf(job));
+  title.setAttribute('title', titleOf(job));
+  t1.append(el('span', 'key', job.ticket), title);
+  if (job.state === 'needs_human' && typeof job.error?.code === 'string') {
+    t1.append(el('span', 'tag', job.error.code));
+  }
+  const t2 = el('div', 't2');
+  const line = el('span', 'sentence');
+  line.append(el('span', 'dot'), document.createTextNode(sentence(job)));
+  t2.append(line, el('span', '', `Iteration ${shownIteration(job)}`), el('span', 'mono fs12', job.branch));
+  $('jhead').replaceChildren(backButton, t1, t2);
+}
+
+// Opens a job's page on a screen; focus 'stop' or 'composer' is where its card's action points;
+// confirm ('approve', 'mr-create', 'mr-merge') opens that confirmation once its detail is shown.
+function go(key, screen = 'stream', focus = undefined, confirm = undefined) {
+  if (jobByKey(key) === null) {
+    return;
+  }
+  if (state.drawer !== null) {
+    hideDrawer();
+  }
+  const from = ui.screen;
+  ui.screen = screen;
+  ui.job = key;
+  ui.ticket = null;
+  ui.opener = key;
+  ui.pending = false;
+  $('board').hidden = true;
+  $('ticket').hidden = true;
+  $('job').hidden = false;
+  if (SCREEN_TAB[screen] !== undefined) {
+    selectTab(SCREEN_TAB[screen]);
+  } else if (SCREEN_TAB[from] !== undefined && SCREEN_TAB[state.tab] !== undefined) {
+    // From Changes or Merge request back to the Stream: the Live log is the old page's stream.
+    selectTab('log');
+  }
+  state.wantConfirm = confirm === undefined ? null : { action: confirm, key };
+  select(key);
+  renderHead();
+  setHash();
+  openWantedConfirm();
+  state.wantFocus = focus ?? null;
+  applyWantedFocus();
+}
+
+// Where a card's button points once the job's detail is shown: the message box ('composer') or
+// the next action with the stop's findings ('stop').
+function applyWantedFocus() {
+  const focus = state.wantFocus;
+  if (focus === null || state.detail === null || keyOf(state.detail.job) !== ui.job) {
+    return;
+  }
+  state.wantFocus = null;
+  if (focus === 'composer' && !$('say-input').disabled) {
+    $('say-input').focus();
+  } else {
+    $('next-panel').scrollIntoView({ block: 'center' });
+  }
+}
+
+// Opens a planned ticket's page: until SF-081, the board with the ticket's Task drawer.
+function openTicket(key) {
+  const row = ticketByKey(key);
+  if (row === null) {
+    return;
+  }
+  if (ui.job !== null) {
     leaveJob();
   }
+  ui.screen = 'ticket';
+  ui.ticket = key;
+  ui.job = null;
+  ui.opener = key;
+  ui.pending = false;
+  $('job').hidden = true;
+  $('ticket').hidden = true;
+  $('board').hidden = false;
+  void openTask(row, false);
+  setHash();
+}
+
+// Back to the board, the focus on the card that opened the page.
+function back() {
+  if (ui.job !== null) {
+    leaveJob();
+  }
+  if (state.drawer !== null) {
+    hideDrawer();
+  }
+  ui.screen = 'board';
+  ui.job = null;
+  ui.ticket = null;
+  $('job').hidden = true;
+  $('ticket').hidden = true;
+  $('board').hidden = false;
+  renderBoard();
+  setHash();
+  if (ui.opener !== null) {
+    document.querySelector(`#cols .card[data-open="${ui.opener}"], #cols .card[data-ticket="${ui.opener}"]`)?.focus();
+  }
+}
+
+// The view of the URL hash (on load and on every hashchange). A hash of a job or ticket the board
+// does not have shows the board; it is tried again when the jobs and tickets first arrive.
+function route() {
+  const match = /^([^/]+\/[^/]+?)(?:\/(changes|mr|ticket))?$/.exec(decodeURIComponent(location.hash.slice(1)));
+  if (match === null) {
+    ui.pending = false;
+    if (ui.screen !== 'board') {
+      back();
+    }
+    return;
+  }
+  const [, key, sub] = match;
+  if (sub === 'ticket') {
+    const row = ticketByKey(key);
+    if (row !== null && isPlanned(row)) {
+      if (ui.screen !== 'ticket' || ui.ticket !== key) {
+        openTicket(key);
+      }
+      return;
+    }
+  } else if (jobByKey(key) !== null) {
+    const screen = sub ?? 'stream';
+    if (ui.job !== key || ui.screen !== screen) {
+      go(key, screen);
+    }
+    return;
+  }
+  ui.pending = state.tickets === null;
+  if (ui.screen !== 'board') {
+    back();
+  }
+}
+
+// The jobs changed (the stream, a read): the board and the open job's header; a job page whose job
+// left the board (its ticket archived or deleted) goes back to the board.
+function renderJobs() {
+  if (ui.job !== null && jobByKey(ui.job) === null) {
+    back();
+    return;
+  }
+  renderBoard();
+  renderHead();
+}
+
+// The delegated click listener of the top bar, the board, the cards, the job page's header and
+// the toast (the moved job detail and the drawer keep their own listeners until SF-078 and SF-081).
+function onClick(event) {
+  const target = typeof event.target?.closest === 'function'
+    ? event.target.closest('[data-qact],[data-run],[data-open],[data-ticket],[data-back],[data-ws],#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived')
+    : null;
+  // A link (a merge request's) goes where it points; it does not open the card around it.
+  if (target === null || target.disabled || (typeof event.target.closest === 'function' && event.target.closest('a') !== null)) {
+    return;
+  }
+  if (target.id === 'done-all') {
+    state.doneAll = !state.doneAll;
+    renderBoard();
+  } else if (target.id === 'toast-close') {
+    toast(null);
+  } else if (target.id === 'open-workspaces') {
+    openWorkspaces();
+  } else if (target.id === 'open-new-ticket') {
+    openNewTicket();
+  } else if (target.id === 'open-archived') {
+    openArchived();
+  } else if (target.hasAttribute('data-ws')) {
+    state.filter = target.dataset.ws;
+    renderBoard();
+  } else if (target.dataset.qact !== undefined) {
+    queueAction(target.dataset.qact, target.dataset.key);
+  } else if (target.dataset.run !== undefined) {
+    cardRun(target.dataset.run, target.dataset.key);
+  } else if (target.dataset.open !== undefined) {
+    go(target.dataset.open, target.dataset.screen ?? 'stream', target.dataset.focus, target.dataset.confirm);
+  } else if (target.dataset.ticket !== undefined) {
+    openTicket(target.dataset.ticket);
+  } else if (target.hasAttribute('data-back')) {
+    back();
+  }
+}
+
+// The delegated keys: j and k move between the board's cards, Enter opens the focused one; Escape
+// on a job or ticket page goes back one level (a screen of the job to its Stream, the Stream to the
+// board) and closes the toast first. Alt+Up and Alt+Down move a queued card with SF-071's queue.
+function onKey(event) {
+  if (event.defaultPrevented) {
+    return;
+  }
+  const target = event.target;
+  if (typeof target?.closest === 'function' && target.closest('textarea, input, select') !== null) {
+    if (event.key === 'Escape' && ui.screen !== 'board') {
+      target.blur();
+    }
+    return;
+  }
+  if (event.key === 'Escape' && !$('toast').hidden) {
+    event.preventDefault();
+    toast(null);
+    return;
+  }
+  // The drawer and the ticket confirmation handle their own keys.
+  if (state.drawer !== null || state.ticketConfirm !== null || event.altKey || event.ctrlKey || event.metaKey) {
+    return;
+  }
+  if (ui.screen === 'board') {
+    const cards = [...document.querySelectorAll('#cols .card')];
+    const at = cards.indexOf(document.activeElement);
+    if (event.key === 'j' || event.key === 'k') {
+      event.preventDefault();
+      cards[Math.min(cards.length - 1, Math.max(0, at + (event.key === 'j' ? 1 : -1)))]?.focus();
+    } else if (event.key === 'Enter' && document.activeElement?.classList?.contains('card')) {
+      const card = document.activeElement;
+      if (card.dataset.open !== undefined) {
+        go(card.dataset.open, 'stream');
+      } else if (card.dataset.ticket !== undefined) {
+        openTicket(card.dataset.ticket);
+      }
+    }
+    return;
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    if (ui.screen === 'changes' || ui.screen === 'mr') {
+      go(ui.job, 'stream');
+    } else {
+      back();
+    }
+  }
+}
+
+// The buttons of a Queue card (and Archive ticket of a pushed card).
+function queueAction(action, key) {
+  const row = ticketByKey(key);
+  if (row === null) {
+    return;
+  }
+  if (action === 'start' || action === 'delete') {
+    openTicketConfirm(action, row);
+  } else if (action === 'check') {
+    void checkTicket(row);
+  } else if (action === 'archive') {
+    void ticketAction('archive', row);
+  }
+}
+
+// Retry review and Resume of a Your turn card: posted at once, once.
+function cardRun(action, key) {
+  const job = jobByKey(key);
+  if (job === null || availability(action, job) !== '' || (action === 'review' && !reviewFailed(job))) {
+    return;
+  }
+  void run(action, key, {});
+}
+
+// ---------- The drawer: Workspaces, New ticket, Archived and a planned ticket's Task ----------
+
+// The job opens as its page (#job); the drawer stays for the setup panels and, until SF-081, a
+// planned ticket's Task.
+const PANELS = { task: 'task-panel', workspaces: 'workspaces-panel', ticket: 'ticket-panel', archived: 'archived-panel' };
+
+function showDrawer(kind, kicker, title) {
   state.drawer = kind;
   if (kind !== 'task') {
     state.task = null;
@@ -2259,8 +2790,6 @@ function showDrawer(kind, kicker, title) {
   for (const [name, id] of Object.entries(PANELS)) {
     $(id).hidden = name !== kind;
   }
-  // The job takes a wide drawer; the rest a narrow one.
-  $('drawer').className = kind === 'job' ? 'drawer wide' : 'drawer';
   $('drawer-kicker').textContent = kicker;
   $('drawer-title').textContent = title;
   $('drawer').hidden = false;
@@ -2268,42 +2797,34 @@ function showDrawer(kind, kicker, title) {
   $('drawer-close').focus();
 }
 
-function closeDrawer() {
-  if (state.drawer === null) {
-    return;
-  }
-  if (state.drawer === 'job') {
-    leaveJob();
-  }
+function hideDrawer() {
   state.drawer = null;
   state.task = null;
   $('drawer').hidden = true;
   $('scrim').hidden = true;
+}
+
+// The drawer's ✕, its scrim and Escape: a planned ticket's page goes back to the board.
+function closeDrawer() {
+  if (state.drawer === null) {
+    return;
+  }
+  if (ui.screen === 'ticket') {
+    back();
+    return;
+  }
+  hideDrawer();
   renderBoard();
 }
 
-// The job drawer closes: no job is followed any more; drafts and outcomes stay with their jobs.
+// The job page closes: no job is followed any more; drafts and outcomes stay with their jobs.
 function leaveJob() {
   closeConfirm();
   state.key = null;
   state.detail = null;
   state.wantConfirm = null;
   $('detail').hidden = true;
-  history.replaceState(null, '', '#');
   openStream();
-}
-
-// Opens a job in the drawer; confirm ('approve') opens that confirmation once its detail is shown.
-function openJob(key, confirm = null) {
-  const job = jobByKey(key);
-  if (job === null) {
-    return;
-  }
-  showDrawer('job', `${job.workspace} · ${job.branch}`, `${job.ticket} · ${titleOf(job)}`);
-  state.wantConfirm = confirm === null ? null : { action: confirm, key };
-  select(key);
-  openWantedConfirm();
-  renderBoard();
 }
 
 function openWantedConfirm() {
@@ -2476,10 +2997,14 @@ function copyText(box, statusId) {
   navigator.clipboard.writeText(box.value).then(() => done('Copied.'), select);
 }
 
+// A status line of a form in the drawer, or the board's message ('toast').
 function setSetupStatus(id, outcome) {
+  if (id === 'toast') {
+    toast(outcome);
+    return;
+  }
   const node = $(id);
-  const base = id === 'ticket-action-status' ? 'status toast' : 'status';
-  node.className = outcome === null ? base : `${base} ${outcome.level}`;
+  node.className = outcome === null ? 'status' : `status ${outcome.level}`;
   node.textContent = outcome === null ? '' : outcome.text;
 }
 
@@ -2536,12 +3061,19 @@ async function submitTicket() {
     setSetupStatus('ticket-status', { level: 'error', text: 'The workspace, the ticket key, the title and the request are all needed.' });
     return;
   }
-  const result = await setupRequest('ticket', 'api/tickets', { workspace, ticket, title, request }, 'ticket-status', (data) =>
-    ({ level: 'ok', text: `Ticket created: ${data.path} in ${data.workspace} (base ${data.base}), an empty skeleton under Planned. Next: its Task button opens the conversation; your words are its first message.` }));
+  const describe = (data) => ({ level: 'ok', text: `Ticket created: ${data.path} in ${data.workspace} (base ${data.base}), an empty skeleton in the Queue. Next: a click on its card opens the conversation; your words are its first message.` });
+  const result = await setupRequest('ticket', 'api/tickets', { workspace, ticket, title, request }, 'ticket-status', describe);
+  // Created (SF-066): the dialog closes and the new ticket's card is highlighted (its page, once
+  // SF-081 lands); a failure keeps the dialog open with the error and the input.
   if (result !== undefined) {
     $('ticket-key').value = '';
     $('ticket-title').value = '';
     $('ticket-request').value = '';
+    setSetupStatus('ticket-status', null);
+    state.highlight = `${result.workspace ?? workspace}/${result.ticket ?? ticket}`;
+    state.highlightShown = false;
+    closeDrawer();
+    toast(describe(result));
   }
 }
 
@@ -2558,7 +3090,7 @@ async function ticketAction(action, row) {
     restore: (data) => `Restored ${key}: ${data.path}.`,
     delete: (data) => `Deleted ${key}: ${Array.isArray(data.deleted) ? data.deleted.join(', ') : ''}.${data.jobArchived ? ' Its finished job left the board.' : ''}`,
   };
-  await setupRequest(id, `api/tickets/${jobPath(key)}/${action}`, {}, 'ticket-action-status', (data) => ({ level: 'ok', text: texts[action](data ?? {}) }));
+  await setupRequest(id, `api/tickets/${jobPath(key)}/${action}`, {}, 'toast', (data) => ({ level: 'ok', text: texts[action](data ?? {}) }));
 }
 
 // Start and Delete ask first: Start names the workspace, the ticket and the base branch; Delete
@@ -2617,7 +3149,7 @@ async function startTicket(row) {
     return;
   }
   state.setupPending.add(id);
-  setSetupStatus('ticket-action-status', { level: 'pending', text: `Starting ${key}: creating the branch and its worktree…` });
+  setSetupStatus('toast', { level: 'pending', text: `Starting ${key}: creating the branch and its worktree…` });
   renderBoard();
   let outcome;
   let unknown;
@@ -2637,7 +3169,7 @@ async function startTicket(row) {
     await holdStart(key, unknown);
     return;
   }
-  setSetupStatus('ticket-action-status', outcome);
+  setSetupStatus('toast', outcome);
   renderBoard();
 }
 
@@ -2648,7 +3180,7 @@ async function holdStart(key, reason) {
   const hold = { reason, failed: false };
   state.startHolds.set(key, hold);
   const lead = `The start of ${key} failed (${reason}). Its outcome is unknown: the job may have started`;
-  setSetupStatus('ticket-action-status', { level: 'error', text: `${lead}; the board is being read again.` });
+  setSetupStatus('toast', { level: 'error', text: `${lead}; the board is being read again.` });
   renderBoard();
   let jobs;
   try {
@@ -2656,7 +3188,7 @@ async function holdStart(key, reason) {
   } catch (error) {
     if (state.startHolds.get(key) === hold) {
       hold.failed = true;
-      setSetupStatus('ticket-action-status', { level: 'error', text: `${lead}, and the board could not be read (${error.message}). Start stays off for ${key} until the page reconnects; check the board before starting again.` });
+      setSetupStatus('toast', { level: 'error', text: `${lead}, and the board could not be read (${error.message}). Start stays off for ${key} until the page reconnects; check the board before starting again.` });
     }
     return;
   }
@@ -2665,7 +3197,7 @@ async function holdStart(key, reason) {
   }
   state.startHolds.delete(key);
   state.jobs = jobs;
-  setSetupStatus('ticket-action-status', { level: 'error', text: `${lead}. The board is current: check it before starting again.` });
+  setSetupStatus('toast', { level: 'error', text: `${lead}. The board is current: check it before starting again.` });
   renderBoard();
 }
 
@@ -2706,18 +3238,17 @@ function openStream() {
   source.addEventListener('open', () => setConnection('live', 'live'));
   source.addEventListener('jobs', (message) => {
     state.jobs = JSON.parse(message.data).jobs;
+    state.jobsSeen += 1;
     // A start whose board read failed is settled by this one.
     for (const [ticket, hold] of state.startHolds) {
       if (hold.failed) {
         state.startHolds.delete(ticket);
       }
     }
-    if (state.key !== null && jobByKey(state.key) === null) {
-      // The open job left the board (its ticket was archived or deleted).
-      closeDrawer();
-      return;
+    renderJobs();
+    if (ui.pending) {
+      route();
     }
-    renderBoard();
   });
   source.addEventListener('workspaces', (message) => {
     state.workspaces = JSON.parse(message.data).workspaces;
@@ -2729,10 +3260,14 @@ function openStream() {
     state.archived = Array.isArray(data.archived) ? data.archived : [];
     renderSetup();
     refreshTaskCheck();
+    if (ui.pending) {
+      route();
+    }
   });
   source.addEventListener('job', (message) => {
     if (key === state.key) {
       renderDetail(JSON.parse(message.data));
+      renderHead();
       // The stream is back: try the read that failed, on its own or after a reconnect.
       if (state.unresolved.get(key)?.failed === true) {
         void settleUnknown(key);
@@ -2788,7 +3323,6 @@ function select(key) {
   renderOutcome(state.outcomes.get(key) ?? null);
   $('action-doubt').textContent = state.doubts.get(key) ?? '';
   renderActions();
-  history.replaceState(null, '', `#${key}`);
   openStream();
 }
 
@@ -2822,17 +3356,25 @@ function init() {
       events.scrollTop = events.scrollHeight;
     }
   });
-  window.addEventListener('hashchange', () => {
-    const key = decodeURIComponent(location.hash.slice(1));
-    if (key !== '' && key !== state.key && jobByKey(key) !== null) {
-      openJob(key);
-    }
+  // Back and Forward of the browser, and a link to a job or ticket.
+  window.addEventListener('hashchange', route);
+
+  // The new parts (the top bar, the board, the cards, the routing, the keys, the toast): one
+  // delegated listener each.
+  document.addEventListener('click', onClick);
+  document.addEventListener('keydown', onKey);
+  document.addEventListener('visibilitychange', scheduleRefresh);
+  $('toast').addEventListener('mouseenter', () => {
+    state.toastHover = true;
+    clearTimeout(state.toastTimer);
+    state.toastTimer = null;
+  });
+  $('toast').addEventListener('mouseleave', () => {
+    state.toastHover = false;
+    armToast();
   });
 
-  // The board and its drawer.
-  $('open-workspaces').addEventListener('click', openWorkspaces);
-  $('open-new-ticket').addEventListener('click', openNewTicket);
-  $('open-archived').addEventListener('click', openArchived);
+  // The drawer.
   $('drawer-close').addEventListener('click', closeDrawer);
   $('scrim').addEventListener('click', closeDrawer);
   $('drawer').addEventListener('keydown', (event) => {
@@ -2841,19 +3383,9 @@ function init() {
       closeDrawer();
     }
   });
-  $('done-all').addEventListener('click', () => {
-    state.doneAll = !state.doneAll;
-    renderBoard();
-  });
   $('task-conversation-copy').addEventListener('click', () => copyText($('task-conversation-text'), 'conversation-copy-status'));
-  // The ticket actions' line stays until it is clicked away (or the next action replaces it).
-  $('ticket-action-status').addEventListener('click', () => {
-    if (!$('ticket-action-status').className.includes('pending')) {
-      setSetupStatus('ticket-action-status', null);
-    }
-  });
 
-  // The job in the drawer.
+  // The job detail, moved into the job page until SF-078.
   $('approve-button').addEventListener('click', () => openConfirm('approve'));
   $('mr-create-button').addEventListener('click', () => openConfirm('mr-create'));
   $('mr-merge-button').addEventListener('click', () => openConfirm('mr-merge'));
@@ -2962,10 +3494,8 @@ function load() {
   getText('api/jobs').then((text) => {
     state.jobs = JSON.parse(text).jobs;
     renderBoard();
-    const wanted = decodeURIComponent(location.hash.slice(1));
-    if (wanted !== '' && jobByKey(wanted) !== null) {
-      openJob(wanted);
-    } else {
+    route();
+    if (ui.job === null) {
       openStream();
     }
   }, () => {

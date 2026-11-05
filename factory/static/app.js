@@ -158,6 +158,10 @@ const state = {
   // job_lands_after), and the Queue card whose ⋯ menu is open.
   jobLandsAfter: [],
   openMenu: null,
+  // SF-071: the run queue as the tickets payload sends it ({max_running, running, held,
+  // hold_reason, next}; null without one) and the queued card being dragged.
+  queue: null,
+  drag: null,
   // The planned ticket page (SF-081): the ticket shown, its page payload, its check as last read,
   // a read's error, the read under way, the editor (kept across redraws) and the Copy's outcome;
   // the ticket whose Start answered before its job reached the board (the page moves to the job).
@@ -3165,6 +3169,10 @@ const COLUMNS = ['queue', 'implementing', 'reviewing', 'you', 'done'];
 const LIST_OF = { queue: 'qlist', implementing: 'list-implementing', reviewing: 'list-reviewing', you: 'list-you', done: 'list-done' };
 // Without SF-071's queue the Queue is today's Planned column, with its empty text.
 const EMPTY_TEXT = { planned: 'No ticket waits to start.', implementing: 'Nothing is being implemented.', reviewing: 'Nothing is in review.', you: 'Nothing waits for you.', done: 'No finished job.' };
+// The run queue (SF-071): the Queue column's text without a queued ticket, and the limit's range.
+const QUEUE_EMPTY = 'The queue is empty: add a ticket below.';
+const LIMIT_MIN = 1;
+const LIMIT_MAX = 20;
 // Done shows the most recent jobs; "Show all" shows the rest.
 const DONE_LIMIT = 8;
 const DONE_LABELS = { pushed: 'Pushed', aborted: 'Aborted', failed: 'Failed' };
@@ -3797,13 +3805,14 @@ function checkNote(row) {
   return `${text}${check.stale ? ' · stale' : ''}`;
 }
 
-// A Queue card (the prototype's queueCard, without SF-071's queue): a click opens the planned
-// ticket's page (SF-081); the last job's mark opens that failed or aborted job. The
-// first line: the key, the workspace chip and the plan-check chip (which opens the planned ticket
-// with the check's findings; under the title when the line has no room). Then the dependency lines
-// (SF-084) and the actions: Start (secondary in the Queue, confirmed; its title names what it waits
-// for) or "waiting for the plan" for a skeleton, Task, and the ⋯ menu with Check, Archive and
-// Delete….
+// A Queue card (the prototype's queueCard): a click opens the planned ticket's page (SF-081); the
+// last job's mark opens that failed or aborted job. The first line: with the run queue (SF-071) a
+// queued card's position, then the key, the workspace chip and the plan-check chip (which opens the
+// planned ticket with the check's findings; under the title when the line has no room). Then the
+// dependency lines (SF-084), the queue's failed start, and the actions: Start (secondary in the
+// Queue, confirmed; its title names what it waits for) or "waiting for the plan" for a skeleton,
+// with the run queue Add to queue / Remove from queue (not on a skeleton), Task, the ⋯ menu with
+// Check, Archive and Delete…, and on a queued card the hint of its drag and Alt+Up / Alt+Down.
 function queueCard(row) {
   const key = keyOf(row);
   const item = boardCard(key, row.workspace);
@@ -3811,7 +3820,15 @@ function queueCard(row) {
     item.classList.add('hl');
   }
   item.dataset.ticket = key;
+  const queued = state.queue !== null && Number.isInteger(row.queue_position);
   const head = el('div', 'row1');
+  if (queued) {
+    item.setAttribute('draggable', 'true');
+    item.dataset.q = String(row.queue_position - 1);
+    const pos = el('span', 'pos', String(row.queue_position));
+    pos.title = 'Position in the queue';
+    head.append(pos);
+  }
   head.append(el('span', 'key', row.ticket), wsChip(row.workspace));
   const last = lastJobState(row);
   if (last !== null) {
@@ -3830,6 +3847,11 @@ function queueCard(row) {
   item.append(head, el('div', 'title', row.title), noteChip('tag cnote below'));
   const { lines, open } = dependencyLines(key, board.graph, 'div');
   item.append(...lines);
+  if (state.queue !== null && row.queue_error !== null && typeof row.queue_error === 'object') {
+    const failed = el('div', 'waits', `Start failed: ${row.queue_error.message}`);
+    failed.title = row.queue_error.code;
+    item.append(failed);
+  }
   const act = el('div', 'act');
   const busy = state.setupPending.has(`ticket:${key}`) || state.ticketConfirm !== null;
   if (row.draft) {
@@ -3841,12 +3863,138 @@ function queueCard(row) {
       start.setAttribute('title', `Waits for ${open.map((other) => depLabel(other, row.workspace)).join(', ')}`);
     }
     act.append(start);
+    if (state.queue !== null) {
+      const toggle = button('btn small', queued ? 'Remove from queue' : 'Add to queue', { qtoggle: key });
+      toggle.disabled = state.setupPending.has(`queue:${key}`);
+      toggle.title = queued ? 'Take the ticket out of the queue' : 'The factory starts it by itself when a slot is free and what it waits for is merged';
+      act.append(toggle);
+    }
   }
   const task = button('btn small', 'Task', { ticket: key });
   task.setAttribute('title', 'The Task file and its check');
   act.append(task, ...cardMenu(row, busy));
+  if (queued) {
+    const hint = el('span', 'muted qhint', '⠿ drag · Alt+↑↓');
+    hint.title = 'Drag, or Alt+Up / Alt+Down';
+    act.append(hint);
+  }
   item.append(act);
   return item;
+}
+
+// The top bar's run queue (SF-071): Run up to N jobs at once with its stepper, and the status line
+// (the running count, the free slots and the next ticket, or the hold); hidden without the queue.
+function renderQueueBar() {
+  const bar = $('qctl');
+  const queue = state.queue;
+  bar.hidden = queue === null;
+  if (queue === null) {
+    return;
+  }
+  const busy = state.setupPending.has('queue:limit');
+  $('limVal').textContent = String(queue.max_running);
+  $('limDown').disabled = busy || queue.max_running <= LIMIT_MIN;
+  $('limUp').disabled = busy || queue.max_running >= LIMIT_MAX;
+  const status = $('qstatus');
+  status.className = queue.held ? 'qstatus held' : 'qstatus';
+  const free = Math.max(0, queue.max_running - queue.running);
+  status.textContent = queue.held
+    ? `Queue held${queue.hold_reason ? `: ${queue.hold_reason}` : ''} · ${queue.running} running`
+    : `${queue.running} running · ${free} slot${free === 1 ? '' : 's'} free · next: ${queue.next?.ticket ?? 'nothing ready'}`;
+}
+
+// The queued tickets of every workspace, in their order.
+const queuedRows = () => (state.tickets ?? []).filter((row) => Number.isInteger(row.queue_position)).sort((a, b) => a.queue_position - b.queue_position);
+
+// Add to queue / Remove from queue of a card: posted once; the board shows the server's queue.
+function queueToggle(key) {
+  const row = ticketByKey(key);
+  if (row === null || state.queue === null) {
+    return;
+  }
+  const queued = Number.isInteger(row.queue_position);
+  void setupRequest(`queue:${key}`, queued ? 'api/queue/remove' : 'api/queue/add', { workspace: row.workspace, ticket: row.ticket }, 'toast', (data) =>
+    ({ level: 'ok', text: queued ? `${key} is out of the queue.` : `${key} is queued at position ${data?.position}.` }));
+}
+
+// One job more or fewer at once (the stepper), within 1-20.
+function setLimit(delta) {
+  const queue = state.queue;
+  const next = queue === null ? NaN : queue.max_running + delta;
+  if (!(next >= LIMIT_MIN && next <= LIMIT_MAX)) {
+    return;
+  }
+  void setupRequest('queue:limit', 'api/queue/limit', { max_running: next }, 'toast', (data) =>
+    ({ level: 'ok', text: `Run up to ${data?.max_running} job${data?.max_running === 1 ? '' : 's'} at once.` }));
+}
+
+// A queued ticket to position to (1-based), by a drop or Alt+Up / Alt+Down; nothing outside the queue.
+function moveQueued(key, to) {
+  const row = ticketByKey(key);
+  const count = queuedRows().length;
+  if (row === null || state.queue === null || !Number.isInteger(row.queue_position) || to < 1 || to > count || to === row.queue_position) {
+    renderBoard();
+    return;
+  }
+  void setupRequest(`queue:${key}`, 'api/queue/move', { workspace: row.workspace, ticket: row.ticket, to }, 'toast', (data) =>
+    ({ level: 'ok', text: `${key} moved to position ${data?.position}.` }));
+}
+
+// Drag and drop in the queue (the prototype's): a queued card dropped on another goes before it.
+const clearDrop = () => document.querySelectorAll('.dragging, .dropbefore').forEach((node) => node.classList.remove('dragging', 'dropbefore'));
+function onDragStart(event) {
+  const item = event.target?.closest?.('#qlist .card[data-q]');
+  if (!item) {
+    return;
+  }
+  state.drag = item.dataset.ticket;
+  item.classList.add('dragging');
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move';
+    try {
+      event.dataTransfer.setData('text/plain', state.drag);
+    } catch {
+      // Some browsers refuse data here; the drag goes on without it.
+    }
+  }
+}
+// Over a queued card: the drop place shows before it; anywhere in the queue the drop is allowed.
+function onDragOver(event) {
+  if (state.drag === null) {
+    return;
+  }
+  const item = event.target?.closest?.('#qlist .card[data-q]');
+  document.querySelectorAll('.dropbefore').forEach((node) => node.classList.remove('dropbefore'));
+  if (item) {
+    event.preventDefault();
+    item.classList.add('dropbefore');
+  } else if (event.target?.closest?.('#qlist')) {
+    event.preventDefault();
+  }
+}
+// The drop: api/queue/move to the place before the card it lands on; elsewhere nothing moves.
+function onDrop(event) {
+  if (state.drag === null) {
+    return;
+  }
+  event.preventDefault();
+  const item = event.target?.closest?.('#qlist .card[data-q]');
+  const key = state.drag;
+  state.drag = null;
+  clearDrop();
+  const row = ticketByKey(key);
+  if (item && item.dataset.ticket !== key && row !== null && Number.isInteger(row.queue_position)) {
+    const from = row.queue_position - 1;
+    const to = Number(item.dataset.q);
+    moveQueued(key, (from < to ? to - 1 : to) + 1);
+  } else {
+    renderBoard();
+  }
+}
+// A drag that ends without a drop.
+function onDragEnd() {
+  state.drag = null;
+  clearDrop();
 }
 
 // A Queue card's ⋯ menu: Check (with the Task checks, not for a skeleton), Archive and Delete…,
@@ -3926,7 +4074,10 @@ function renderBoard() {
   // A failed or aborted job whose ticket is in the Queue is not also in Done.
   const planned = (state.tickets ?? []).filter((row) => visible(row.workspace) && isPlanned(row));
   const plannedKeys = new Set(planned.map(keyOf));
-  const lists = { queue: planned, implementing: [], reviewing: [], you: [], done: [] };
+  // With the run queue (SF-071) the queued tickets come first, in their order.
+  const inQueue = (row) => state.queue !== null && Number.isInteger(row.queue_position);
+  const queued = planned.filter(inQueue).sort((a, b) => a.queue_position - b.queue_position);
+  const lists = { queue: [...queued, ...planned.filter((row) => !inQueue(row))], implementing: [], reviewing: [], you: [], done: [] };
   for (const job of jobs) {
     if (RESTARTABLE.includes(job.state) && plannedKeys.has(keyOf(job))) {
       continue;
@@ -3939,11 +4090,18 @@ function renderBoard() {
   }
   for (const column of COLUMNS) {
     const entries = lists[column];
-    $(`count-${column}`).textContent = String(entries.length);
+    $(`count-${column}`).textContent = String(column === 'queue' && state.queue !== null ? queued.length : entries.length);
     const shown = column === 'done' && !state.doneAll ? entries.slice(0, DONE_LIMIT) : entries;
     const cards = shown.map(column === 'queue' ? queueCard : jobCard);
+    if (column === 'queue' && state.queue !== null) {
+      // The queued cards (or the queue's empty text), "Not queued", then the other planned tickets.
+      const divider = el('li', 'qdiv', 'Not queued');
+      $(LIST_OF[column]).replaceChildren(...(queued.length > 0 ? cards.slice(0, queued.length) : [el('li', 'empty', QUEUE_EMPTY)]), divider, ...cards.slice(queued.length));
+      continue;
+    }
     $(LIST_OF[column]).replaceChildren(...(cards.length > 0 ? cards : [el('li', 'empty', EMPTY_TEXT[column === 'queue' ? 'planned' : column])]));
   }
+  renderQueueBar();
   const more = $('done-all');
   more.hidden = lists.done.length <= DONE_LIMIT;
   more.textContent = state.doneAll ? `Show the last ${DONE_LIMIT}` : `Show all ${lists.done.length}`;
@@ -4229,7 +4387,7 @@ function renderJobs() {
 // listeners).
 function onClick(event) {
   const target = typeof event.target?.closest === 'function'
-    ? event.target.closest('[data-tk],[data-tktab],[data-dep],[data-menu],[data-qact],[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived')
+    ? event.target.closest('[data-tk],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],#limUp,#limDown,[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived')
     : null;
   // An open ⋯ menu closes on any click but its own toggle (its items act, then it is closed).
   if (state.openMenu !== null && (target === null || target.dataset.menu === undefined)) {
@@ -4290,6 +4448,10 @@ function onClick(event) {
     renderBoard();
   } else if (target.dataset.qact !== undefined) {
     queueAction(target.dataset.qact, target.dataset.key);
+  } else if (target.dataset.qtoggle !== undefined) {
+    queueToggle(target.dataset.qtoggle);
+  } else if (target.id === 'limUp' || target.id === 'limDown') {
+    setLimit(target.id === 'limUp' ? 1 : -1);
   } else if (target.dataset.run !== undefined) {
     cardRun(target.dataset.run, target.dataset.key);
   } else if (target.dataset.open !== undefined) {
@@ -4456,7 +4618,20 @@ function onKey(event) {
     return;
   }
   // The drawer and the ticket confirmation handle their own keys.
-  if (state.drawer !== null || state.ticketConfirm !== null || event.altKey || event.ctrlKey || event.metaKey) {
+  if (state.drawer !== null || state.ticketConfirm !== null) {
+    return;
+  }
+  // SF-071: Alt+Up / Alt+Down move the focused queued card one place.
+  if (ui.screen === 'board' && event.altKey && !event.ctrlKey && !event.metaKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+    const item = document.activeElement?.closest?.('#qlist .card[data-q]');
+    const row = item ? ticketByKey(item.dataset.ticket) : null;
+    if (row !== null && Number.isInteger(row.queue_position)) {
+      event.preventDefault();
+      moveQueued(keyOf(row), row.queue_position + (event.key === 'ArrowUp' ? -1 : 1));
+    }
+    return;
+  }
+  if (event.altKey || event.ctrlKey || event.metaKey) {
     return;
   }
   if (ui.screen === 'board' && event.key === 'Escape' && (state.openMenu !== null || ui.related !== null)) {
@@ -5789,6 +5964,7 @@ function openStream() {
     state.tickets = data.tickets;
     state.archived = Array.isArray(data.archived) ? data.archived : [];
     state.jobLandsAfter = Array.isArray(data.job_lands_after) ? data.job_lands_after : [];
+    state.queue = data.queue !== null && typeof data.queue === 'object' ? data.queue : null;
     renderSetup();
     if (ui.job !== null) {
       renderHead();
@@ -5861,6 +6037,10 @@ function init() {
   // delegated listener each.
   document.addEventListener('click', onClick);
   document.addEventListener('keydown', onKey);
+  document.addEventListener('dragstart', onDragStart);
+  document.addEventListener('dragover', onDragOver);
+  document.addEventListener('drop', onDrop);
+  document.addEventListener('dragend', onDragEnd);
   document.addEventListener('mouseover', onCardHover);
   document.addEventListener('focusin', onCardHover);
   document.addEventListener('focusout', onCardBlur);

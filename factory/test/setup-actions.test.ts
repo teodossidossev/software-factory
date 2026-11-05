@@ -137,15 +137,21 @@ test('client: a Queue card has Archive and Delete…; delete asks first; the arc
   stream.emit('open');
   stream.emit('jobs', { jobs: [finished] });
   stream.emit('workspaces', { workspaces: [workspaceRow('app')] });
-  stream.emit('tickets', { tickets: [{ ...ticketRow('app', 'T-1', 'One', false, 'failed'), conversation: { message: 'm', url: 'https://chatgpt.com/?q=m' } }], archived: [{ workspace: 'app', ticket: 'T-0', title: 'Zero' }] });
+  // With the run queue (SF-071): T-1 is not queued, below "Not queued".
+  const queue = { max_running: 3, running: 0, held: false, hold_reason: null, next: null };
+  stream.emit('tickets', {
+    tickets: [{ ...ticketRow('app', 'T-1', 'One', false, 'failed'), conversation: { message: 'm', url: 'https://chatgpt.com/?q=m' }, queue_position: null, queue_error: null }],
+    archived: [{ workspace: 'app', ticket: 'T-0', title: 'Zero' }], queue,
+  });
   await page.flush();
-  const card = page.$('qlist').children[0] as FakeElement;
-  const buttons = card.all().filter((element) => element.tagName === 'BUTTON');
-  // SF-084: the check chip (twice: first line, or under the title when narrow), Task, and the ⋯ menu.
-  assert.deepEqual(buttons.map((button) => button.textContent), ['last job failed', 'not checked', 'not checked', 'Start', 'Task', '⋯', 'Archive', 'Delete…']);
+  const queueCard = (): FakeElement => page.$('qlist').children.find((child) => (child as FakeElement).dataset?.ticket === 'app/T-1') as FakeElement;
+  const buttons = queueCard().all().filter((element) => element.tagName === 'BUTTON');
+  // SF-084: the check chip (twice: first line, or under the title when narrow), Task, and the ⋯ menu;
+  // SF-071: the queue toggle after Start.
+  assert.deepEqual(buttons.map((button) => button.textContent), ['last job failed', 'not checked', 'not checked', 'Start', 'Add to queue', 'Task', '⋯', 'Archive', 'Delete…']);
   // Archive: one request, the outcome in the toast.
   buttons.find((button) => button.textContent === 'Archive')!.click();
-  (page.$('qlist').children[0] as FakeElement).all().find((element) => element.textContent === 'Archive')!.click();
+  queueCard().all().find((element) => element.textContent === 'Archive')!.click();
   await page.flush();
   const posts = (): typeof page.requests => page.requests.filter((request) => request.method === 'POST');
   assert.deepEqual([posts().length, posts()[0]!.path, posts()[0]!.body], [1, 'api/tickets/app/T-1/archive', '{}']);
@@ -153,14 +159,14 @@ test('client: a Queue card has Archive and Delete…; delete asks first; the arc
   await page.flush();
   assert.equal(page.$('toast-text').textContent, 'Archived app/T-1: .software-factory/archive/T-1.md. Its finished job left the board.');
   // Delete… asks first; Cancel sends nothing; Confirm deletes.
-  (page.$('qlist').children[0] as FakeElement).all().find((element) => element.textContent === 'Delete…')!.click();
+  queueCard().all().find((element) => element.textContent === 'Delete…')!.click();
   assert.equal(page.$('ticket-confirm').hidden, false);
   assert.equal(page.$('ticket-confirm-title').textContent, 'Delete app/T-1?');
   assert.match(page.$('ticket-confirm-text').textContent, /Cannot be undone; Archive keeps the file instead\./);
   assert.deepEqual([page.$('ticket-ok').textContent, page.$('ticket-ok').className], ['Delete the ticket', 'btn btn-danger']);
   page.$('ticket-cancel').click();
   assert.equal(posts().length, 1);
-  (page.$('qlist').children[0] as FakeElement).all().find((element) => element.textContent === 'Delete…')!.click();
+  queueCard().all().find((element) => element.textContent === 'Delete…')!.click();
   page.$('ticket-ok').click();
   await page.flush();
   assert.deepEqual([posts().length, posts()[1]!.path], [2, 'api/tickets/app/T-1/delete']);

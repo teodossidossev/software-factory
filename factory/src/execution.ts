@@ -12,8 +12,10 @@
 // when the job had review fixes. The user starts and approves (the dashboard, the CLI); no MCP tool
 // reaches these methods since SF-040. Every state change goes through #transition, the seam for
 // notifications.
-// Several jobs of one workspace run at the same time, up to SF_MAX_JOBS; the Git operations on
-// the shared checkout are serialized per workspace, across processes.
+// Several jobs of one workspace run at the same time; the run queue (SF-071, src/queue.ts) limits
+// only the starts it makes itself to max_running running jobs of every workspace (a start by hand
+// always goes). The Git operations on the shared checkout are serialized per workspace, across
+// processes.
 // Since SF-042 each job's turns, reviews and gate run in the job's runner (src/runner.ts), a
 // detached `sf run` with an Execution of its own in runner mode: sf serve creates the job at start,
 // queues the requests that need a turn or a review (the first turn, say, a Fix section, Clean, the
@@ -30,7 +32,7 @@ import { chooseForge, type Forge, type ForgeKind, forgeFor, type MergeRequestSta
 import { runGit } from './git.js';
 import { GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from './gate.js';
 import { askForChanges, attachWorktree, checkBranchFree, commitMessagePath, finishAsk, handOver, isAncestor, remoteBranch, type RemoteBranch, restoreConfig, savedRef, settleAfterPush, subjectOf, takeBack, undoHandover } from './handoff.js';
-import { cutEvent, type FileChange, type GateOverride, type GateRecord, type Handover, isActive, type Job, type JobMr, type JobState, JobStore, now, PAUSABLE_STATES, type PauseStep, RESTARTABLE_STATES, type ReviewRecord, type SimplifyRecord, TERMINAL_STATES } from './jobs.js';
+import { cutEvent, type FileChange, type GateOverride, type GateRecord, type Handover, type Job, type JobMr, type JobState, JobStore, now, PAUSABLE_STATES, type PauseStep, RESTARTABLE_STATES, type ReviewRecord, type SimplifyRecord, TERMINAL_STATES } from './jobs.js';
 import { answerFix, applyVerdict, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, escalationMessage, headings, LEDGER_ID, type LedgerEntry, FACTORY_PROBLEMS, SCOPE_PROBLEM, SENSITIVE_PROBLEM, settle, SETTLE_CODES, unappliedEntries, unsettled, userFixItems } from './ledger.js';
 import {
   abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitBusy, gitFailure, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl,
@@ -48,6 +50,7 @@ import { DEFAULT_PAGE_BYTES, MAX_PAGE_BYTES, MIN_PAGE_BYTES, type Page, pageBuff
 import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, type StructuredOutcome, unacceptedItems, uniqueNits } from './review.js';
 import { changedBetween, type FixFiles, fixNumbers, guardSuggestions, offerMessage, runSimplify, SIMPLIFY_CODE, SIMPLIFY_TITLE, simplifyFix, type SimplifyInput, type SimplifyOutput, simplifyPrompt, type Suggestion } from './simplify.js';
 import { withLock } from './pid-lock.js';
+import { QueueStore, runningJobs } from './queue.js';
 import { type Launch, type RunnerRequest, Runners, type RunnerWork } from './runner.js';
 import { type IdleOutcome, ImplementerSession, type LimitAnswer, type LimitedTurn } from './session.js';
 import { CONTINUE_PROMPT, limitDecision, worktreeChanged, type WorktreeState, worktreeState } from './turn-limit.js';
@@ -317,6 +320,8 @@ const MAX_KEPT_NAMED = 50;
 const SAVED_REF_DAYS = 7;
 // How long sf restart waits for origin to say whether the old branch was pushed.
 const LS_REMOTE_TIMEOUT_MS = 30_000;
+// The run queue's fetch of a base (fetchBase), as the fetch of a start.
+const FETCH_TIMEOUT_MS = 60_000;
 
 // What the Implementer is told of a Task file that changed since it was last given it (SF-067:
 // on Resume, or the next Fix section or sf say after a review round resumed): its diff, or, when
@@ -735,8 +740,9 @@ export class Execution implements RunnerWork {
 
   // Creates the job record and its worktree, then runs the first iteration. The validation and
   // the record are under the lock, the fetch and the worktree creation under the workspace's Git
-  // lock only, so a long fetch holds no other job.
-  async start(workspaceName: string, ticket: string): Promise<{ branch: string; state: JobState; check_after_minutes: number; worktree: string }> {
+  // lock only, so a long fetch holds no other job. queued: the run queue's own start (SF-071),
+  // refused with job_limit unless fewer than max_running jobs run; a start by hand has no limit.
+  async start(workspaceName: string, ticket: string, { queued = false }: { queued?: boolean } = {}): Promise<{ branch: string; state: JobState; check_after_minutes: number; worktree: string }> {
     const claimed = await this.#locked(async () => {
       if (!TICKET_PATTERN.test(ticket)) {
         throw new FactoryError('invalid_ticket', `ticket must be ${TICKET_DESCRIPTION}.`);
@@ -747,7 +753,9 @@ export class Execution implements RunnerWork {
       if (existing !== undefined && !TERMINAL_STATES.includes(existing.state)) {
         throw new FactoryError('job_exists', `The job for ${workspace.name}/${ticket} is ${existing.state}.`);
       }
-      await this.#checkSlot(workspace.name, ticket);
+      if (queued) {
+        await this.#checkSlot(workspace.name, ticket);
+      }
       if (existing !== undefined) {
         await this.jobs.archive(workspace.name, ticket);
       }
@@ -766,13 +774,34 @@ export class Execution implements RunnerWork {
     return { base: fields.get('base')!, branch: branchName(ticket, fields.get('title')!) };
   }
 
-  // SF_MAX_JOBS: the live jobs of the workspace (a paused one is not, SF-067), the ticket's own
-  // aside, leave a slot; job_limit otherwise. Only under the lock.
+  // The run queue's limit (SF-071): the running jobs of every workspace (RUNNING_STATES), the
+  // ticket's own aside, are fewer than max_running of queue.json; job_limit otherwise. Only the
+  // queue's own start runs it, only under the lock.
   async #checkSlot(workspaceName: string, ticket: string): Promise<void> {
-    const live = (await this.jobs.list()).filter((job) => job.workspace === workspaceName && job.ticket !== ticket && isActive(job));
-    if (live.length >= this.#config.maxJobs) {
-      throw new FactoryError('job_limit', `Workspace ${workspaceName} has ${live.length} live job(s) (${live.map((job) => `${job.ticket} ${job.state}`).join(', ')}); SF_MAX_JOBS is ${this.#config.maxJobs}.`);
+    const { max_running: limit } = await new QueueStore(this.#config.stateDir, this.#config.maxJobs).read();
+    const running = runningJobs(await this.jobs.list()).filter((job) => !(job.workspace === workspaceName && job.ticket === ticket));
+    if (running.length >= limit) {
+      throw new FactoryError('job_limit', `${running.length} job${running.length === 1 ? '' : 's'} run (${running.map((job) => `${job.ticket} ${job.state}`).join(', ')}); the limit is ${limit}.`);
     }
+  }
+
+  // git fetch of the base from origin in the workspace's checkout (SF-071: the run queue, before it
+  // checks again whether a ticket it waits for is merged), under the workspace's Git lock; nothing
+  // without an origin. fetch_failed when Git fails.
+  async fetchBase(workspaceName: string, base: string): Promise<void> {
+    const workspace = await this.#resolve(workspaceName);
+    if (base.startsWith('-') || (await runGit(workspace.workCheckout, ['check-ref-format', '--branch', base])).code !== 0) {
+      throw new FactoryError('base_not_found', `The base "${base}" is not a valid branch name.`);
+    }
+    await this.#gitLocked(workspaceName, async () => {
+      if (!(await runGit(workspace.workCheckout, ['remote'])).stdout.toString('utf8').split('\n').includes('origin')) {
+        return;
+      }
+      const fetch = await runGit(workspace.workCheckout, ['fetch', '--no-recurse-submodules', 'origin', base], 1024 * 1024, FETCH_TIMEOUT_MS);
+      if (fetch.code !== 0) {
+        throw new FactoryError('fetch_failed', fetch.code === null ? `git fetch origin ${base} did not finish in time.` : `git fetch origin ${base} failed.`);
+      }
+    });
   }
 
   // Writes the record of a new job in starting (the ticket's directory must be free). Only under
@@ -2198,15 +2227,14 @@ export class Execution implements RunnerWork {
   }
 
   // sf takeback (SF-073): the job back from the checkout into ready_for_human_review, only while
-  // the checkout is as the factory left it (takeback_changed otherwise); it holds an SF_MAX_JOBS
-  // slot again (job_limit).
+  // the checkout is as the factory left it (takeback_changed otherwise). ready_for_human_review is
+  // not running (SF-071): no limit applies.
   takeback(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; worktree: string }> {
     return this.#locked(async () => {
       this.#checkHandedOver(await this.#job(workspaceName, ticket), 'sf takeback');
       await this.#settled(workspaceName, ticket);
       const job = await this.#job(workspaceName, ticket);
       const handover = this.#checkHandedOver(job, 'sf takeback');
-      await this.#checkSlot(workspaceName, ticket);
       const workspace = await this.#resolve(workspaceName);
       const worktree = job.worktree ?? this.#worktreePath(workspaceName, ticket);
       await this.#gitLocked(workspaceName, async () => {
@@ -3122,14 +3150,13 @@ export class Execution implements RunnerWork {
   // goes on with the message, or "Continue where you stopped."; a review round: it runs again on the
   // same iteration (no message: sf say sends one after). When the Task file changed since the
   // Implementer was last given it, the new one is copied into the worktree (the reviewers read it
-  // there), its sha256 recorded, and the turn's message carries its diff. A paused job needs a free
-  // slot of SF_MAX_JOBS to go on.
+  // there), its sha256 recorded, and the turn's message carries its diff. A start by hand: the run
+  // queue's limit does not apply (SF-071).
   async resumePaused(workspaceName: string, ticket: string, message = ''): Promise<Resumed> {
     const id = await this.#locked(async () => {
       const job = await this.#job(workspaceName, ticket);
       const request = { kind: 'resume' as const, message };
       this.#check(job, request);
-      await this.#checkSlot(workspaceName, ticket);
       return this.#serveRunners().queue(workspaceName, ticket, request);
     });
     return this.#serveRunners().reply(workspaceName, ticket, id) as Promise<Resumed>;
@@ -3209,7 +3236,6 @@ export class Execution implements RunnerWork {
       const workspace = await this.#resolve(workspaceName);
       const checkout = workspace.workCheckout;
       const plan = await this.#plan(workspace, ticket);
-      await this.#checkSlot(workspaceName, ticket);
       // Checked before anything changes, and again below, in the Git lock that deletes the branch,
       // once the runner has stopped: nothing can add a commit between that check and the deletion.
       const branchCheck = async (): Promise<boolean> => {
@@ -3578,8 +3604,8 @@ export class Execution implements RunnerWork {
       this.#checkSay(job, message);
       const workspace = this.#live.get(`${workspaceName}/${ticket}`)?.workspace ?? (await this.#resolve(workspaceName));
       if (job.state === 'handed_over') {
-        // Ask for changes (SF-073): a free slot, then the checkout's state back into the job.
-        await this.#checkSlot(workspaceName, ticket);
+        // Ask for changes (SF-073): the checkout's state back into the job; by hand, so the run
+        // queue's limit does not apply (SF-071).
         job = await this.#askForChanges(job, workspace);
       }
       // No turn while the user's checkout holds the branch (SF-073), before anything else is written.
@@ -3658,10 +3684,8 @@ export class Execution implements RunnerWork {
     const id = await this.#locked(async () => {
       const job = await this.#job(workspaceName, ticket);
       this.#check(job, request);
-      // Ask for changes takes a slot of SF_MAX_JOBS again (SF-073), as Resume does.
-      if (request.kind === 'say' && job.state === 'handed_over') {
-        await this.#checkSlot(workspaceName, ticket);
-      }
+      // Ask for changes (SF-073) and every other answer of the user is not a new start: the run
+      // queue's limit does not apply (SF-071).
       return this.#serveRunners().queue(workspaceName, ticket, request);
     });
     return this.#serveRunners().reply(workspaceName, ticket, id);

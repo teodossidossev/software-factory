@@ -69,7 +69,7 @@ test('board start: POST only, the action checks, Execution.start once with the n
 
     // Refused: the Execution's codes and messages as they come, each once.
     const refusals: Array<[string, number]> = [
-      ['task_draft', 409], ['job_limit', 409], ['job_exists', 409], ['branch_exists', 409], ['checkout_dirty', 409],
+      ['task_draft', 409], ['job_exists', 409], ['branch_exists', 409], ['checkout_dirty', 409],
       ['task_not_found', 404], ['workspace_not_found', 404], ['invalid_content', 400], ['start_failed', 500],
     ];
     for (const [code, status] of refusals) {

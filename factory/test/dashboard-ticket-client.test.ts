@@ -333,9 +333,9 @@ test('ticket client: Start now asks with today\'s confirmation, the check\'s not
   action(refused, 'start').click();
   refused.$('ticket-ok').click();
   await refused.flush();
-  posts(refused)[0]!.respond(409, { ok: false, error: { code: 'job_limit', message: 'Workspace app has 3 live jobs.' } });
+  posts(refused)[0]!.respond(409, { ok: false, error: { code: 'branch_exists', message: 'The branch T-1-one already exists.' } });
   await refused.flush();
-  assert.deepEqual([refused.location.hash, refused.$('toast-text').textContent], ['#app/T-1/ticket', 'job_limit: Workspace app has 3 live jobs.']);
+  assert.deepEqual([refused.location.hash, refused.$('toast-text').textContent], ['#app/T-1/ticket', 'branch_exists: The branch T-1-one already exists.']);
 });
 
 test('ticket client: #ws/T/ticket opens the page and Escape goes back to the board; a ticket gone from the Queue or a 404 goes back too', async () => {

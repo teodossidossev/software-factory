@@ -1,7 +1,8 @@
 // The factory's MCP endpoint for the planner (SF-040): a loopback HTTP listener serving /mcp
 // through the SDK's stateless handler, with the Handbook as instructions and the planning tools
-// guide, read_file, search, write_task and task_check (the last Task check of the current Task
-// file, SF-054). No authentication: it listens on loopback only. Jobs
+// guide, read_file, search, write_task, task_check (the last Task check of the current Task
+// file, SF-054), and queue_list and queue_add (the run queue, SF-071). No authentication: it
+// listens on loopback only. Jobs
 // are started, reviewed and approved by the user (the dashboard, the CLI) and the reviewers,
 // never through this endpoint.
 import { readFile } from 'node:fs/promises';
@@ -13,6 +14,8 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { FactoryError } from './errors.js';
 import type { Execution } from './execution.js';
+import type { RunQueue } from './queue.js';
+import { DEPENDENCY_STATES } from './setup.js';
 import { handbookSection } from './prompts.js';
 import { resolveWorkspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { DEFAULT_PAGE_BYTES, MAX_FILE_BYTES, MAX_PAGE_BYTES, MAX_PATH_LENGTH, MIN_PAGE_BYTES, RepoFiles, RepoReadError } from './repo-files.js';
@@ -78,9 +81,15 @@ const relativePath = (what: string) => z.string().min(1).max(MAX_PATH_LENGTH).de
 // The Task checks task_check reads (SF-054): the check of the current Task file.
 export type ServerChecks = Pick<TaskChecks, 'current'>;
 
+// The run queue the Context owner reads and adds to (SF-071); it neither removes nor moves.
+export type ServerQueue = Pick<RunQueue, 'view' | 'add'>;
+
+const dependencyRow = z.object({ workspace: z.string(), ticket: z.string(), state: z.enum(DEPENDENCY_STATES) });
+
 // execution: only its JobStore, for write_task's guard against replacing the Task file of a live job.
 // history: the tickets' history (SF-081), where write_task records "written"; none records nothing.
-function createMcpServer(handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks: ServerChecks | undefined, history?: TicketHistory): McpServer {
+// queue: the run queue (SF-071); without it queue_list and queue_add answer queue_unavailable.
+function createMcpServer(handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks: ServerChecks | undefined, history?: TicketHistory, queue?: ServerQueue): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version }, { instructions: handbook.quickStart });
 
   server.registerTool(
@@ -250,6 +259,68 @@ function createMcpServer(handbook: Handbook, version: string, execution: Pick<Ex
     },
   );
 
+  const queueOf = (): ServerQueue => {
+    if (queue === undefined) {
+      throw new FactoryError('queue_unavailable', 'The run queue is not available.');
+    }
+    return queue;
+  };
+
+  server.registerTool(
+    'queue_list',
+    {
+      title: 'Read the run queue',
+      description:
+        'Returns the run queue of every workspace: max_running (how many jobs run at once at most; the queue starts the ' +
+        'next ticket by itself when a slot is free), running (the jobs running now, started by hand too), held (the queue ' +
+        'starts nothing while true), and the queued tickets in order, each with its 1-based position, when it was queued, ' +
+        'and waits_for: the tickets of its lands_after that are not merged yet, with their states (the queue starts a ticket ' +
+        'only once all are merged). Starts nothing.',
+      inputSchema: z.strictObject({}),
+      outputSchema: z.object({
+        max_running: z.number().int(),
+        running: z.number().int(),
+        held: z.boolean(),
+        entries: z.array(z.object({ workspace: z.string(), ticket: z.string(), position: z.number().int(), queued_at: z.string(), waits_for: z.array(dependencyRow) })),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async () => {
+      try {
+        const { max_running, running, held, entries } = await queueOf().view();
+        return toolResult({ max_running, running, held, entries });
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'queue_add',
+    {
+      title: 'Add a ticket to the run queue',
+      description:
+        'Adds a planned ticket to the run queue at position at (1-based; default and beyond the end: the end); the factory ' +
+        'starts it by itself when a slot is free and every ticket of its lands_after is merged. Returns its position. ' +
+        'Refused: no Task file (task_not_found), a skeleton (task_draft), a ticket with a live job (job_exists), a ticket ' +
+        'already queued (already_queued). The user removes and reorders on the dashboard.',
+      inputSchema: z.strictObject({
+        workspace: workspaceName,
+        ticket: ticketKey,
+        at: z.number().int().min(1).optional().describe('1-based position; default: the end.'),
+      }),
+      outputSchema: z.object({ position: z.number().int() }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ workspace, ticket, at }) => {
+      try {
+        return toolResult({ ...(await queueOf().add(workspace, ticket, at)) });
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  );
+
   return server;
 }
 
@@ -271,8 +342,8 @@ function listen(server: HttpServer, port: number): Promise<AddressInfo> {
   });
 }
 
-export async function startServer(port: number, handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks?: ServerChecks, history?: TicketHistory): Promise<RunningServer> {
-  const mcpHandler = createMcpHandler(() => createMcpServer(handbook, version, execution, checks, history));
+export async function startServer(port: number, handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks?: ServerChecks, history?: TicketHistory, queue?: ServerQueue): Promise<RunningServer> {
+  const mcpHandler = createMcpHandler(() => createMcpServer(handbook, version, execution, checks, history, queue));
   const nodeHandler = toNodeHandler(mcpHandler);
   const validateHost = localhostHostValidation();
   const validateOrigin = localhostOriginValidation();

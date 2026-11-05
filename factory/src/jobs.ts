@@ -31,10 +31,13 @@ export const JOB_STATES = [
   'failed',
 ] as const;
 export type JobState = (typeof JOB_STATES)[number];
-// States that hold the machine's one job slot: every state in which the session may be alive.
-// paused is not one (SF-067): nothing of a paused job runs, and it does not count toward SF_MAX_JOBS;
-// nor is handed_over (SF-073): the job's changes wait in the user's checkout.
+// Every state in which the session may be alive. paused is not one (SF-067): nothing of a paused
+// job runs; nor is handed_over (SF-073): the job's changes wait in the user's checkout.
 export const ACTIVE_STATES: readonly JobState[] = ['starting', 'working', 'awaiting_review', 'needs_human', 'ready_for_human_review', 'preparing_mr'];
+// The states that count as running against the run queue's limit max_running (SF-071), across
+// every workspace: the job works or is reviewed. A paused job and one that waits for the user
+// (needs_human, ready_for_human_review, handed_over) do not count.
+export const RUNNING_STATES: readonly JobState[] = ['starting', 'working', 'awaiting_review', 'preparing_mr'];
 // States after which a new job for the same ticket may start.
 export const TERMINAL_STATES: readonly JobState[] = ['failed', 'aborted', 'pushed'];
 // The states sf pause takes (SF-067), and what was interrupted when the job was paused: the

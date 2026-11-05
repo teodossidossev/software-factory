@@ -43,7 +43,8 @@ async function openBoard(tickets: ReturnType<typeof ticket>[], get: (path: strin
   stream.emit('open');
   stream.emit('jobs', { jobs });
   stream.emit('workspaces', { workspaces: [{ name: 'app', path: '/srv/app', liveJobs: 0, problem: null }] });
-  stream.emit('tickets', { tickets, archived: [] });
+  // With the run queue (SF-071): the cards sit below "Not queued", each with Add to queue.
+  stream.emit('tickets', { tickets: tickets.map((row) => ({ queue_position: null, queue_error: null, ...row })), archived: [], queue: { max_running: 3, running: 0, held: false, hold_reason: null, next: null } });
   await page.flush();
   return page;
 }
@@ -71,6 +72,8 @@ test('check client: the card\'s check note and Check: one POST, off while the ch
     ['not checked', 'not ready: 2 blocker, 1 major', 'check: ready · stale', 'checking…', 'draft', 'not checked', 'check: ready', 'check failed', 'not ready: 1 blocker, 0 major · stale']);
   assert.deepEqual(['T-1', 'T-4'].map((name) => button(card(page, `app/${name}`), 'Check')!.disabled), [false, true]);
   assert.deepEqual(['T-5', 'T-6'].map((name) => button(card(page, `app/${name}`), 'Check')), [undefined, undefined]);
+  // The queue toggle is on every card but the skeleton's.
+  assert.deepEqual(['T-1', 'T-5'].map((name) => button(card(page, `app/${name}`), 'Add to queue') !== undefined), [true, false]);
 
   button(card(page, 'app/T-1'), 'Check')!.click();
   await page.flush();

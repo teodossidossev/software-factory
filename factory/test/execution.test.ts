@@ -7,10 +7,14 @@ import assert from 'node:assert/strict';
 import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { JobStore } from '../src/jobs.js';
+import { loadConfig } from '../src/config.js';
+import { Execution } from '../src/execution.js';
+import { type Job, type JobState, JobStore } from '../src/jobs.js';
+import { QueueStore } from '../src/queue.js';
+import { resolveWorkspace } from '../src/registry.js';
 import { FACTORY_PROMPT_RULES, factoryPrompt } from '../src/prompts.js';
 import { taskSha256, writeTask } from '../src/task-file.js';
-import { call, fakeLog, git, newEnv, newRepo, putTask, refused, runCli, script, serve, stop, task, temp, waitFor } from './support/harness.js';
+import { call, FAKE, fakeLog, git, newEnv, newRepo, putTask, refused, runCli, script, serve, stop, task, temp, turnsStarted, waitFor } from './support/harness.js';
 
 const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid'];
 
@@ -189,7 +193,7 @@ test('full cycle in a worktree: start, awaiting_review with Report, Patch and fi
   assert.match((await runCli(env, ['status', 'app', 'DEMO-1'])).stdout, /pushed/);
 });
 
-test('parallel jobs: three jobs of a workspace run at once in their own worktrees, a fourth is job_limit, say and check answer while a turn runs, the checkout is never touched', async () => {
+test('parallel jobs: three jobs of a workspace run at once in their own worktrees, a fourth queued waits for the run limit and starts by itself when one ends, say and check answer while a turn runs, the checkout is never touched', async () => {
   const env = await newEnv('parallel', { SF_MAX_JOBS: '3' });
   const repo = await newRepo(env, 'parallel-repo', true);
   for (const ticket of ['P-1', 'P-2', 'P-3', 'P-4']) {
@@ -197,7 +201,7 @@ test('parallel jobs: three jobs of a workspace run at once in their own worktree
   }
   // Each job's first turn: P-1 is slow, so the others start while it runs.
   await script(env, [
-    { delayMs: 2500, write: { 'one.txt': '1\n' }, text: 'one' },
+    { delayMs: 6000, write: { 'one.txt': '1\n' }, text: 'one' },
     { write: { 'two.txt': '2\n' }, text: 'two' },
     { write: { 'three.txt': '3\n' }, text: 'three' },
     { text: 'one after say' },
@@ -208,12 +212,14 @@ test('parallel jobs: three jobs of a workspace run at once in their own worktree
   await call(served, 'start', { workspace: 'app', ticket: 'P-1' });
   await call(served, 'start', { workspace: 'app', ticket: 'P-2' });
   await call(served, 'start', { workspace: 'app', ticket: 'P-3' });
-  const limit = await refused(served, 'start', { workspace: 'app', ticket: 'P-4' });
-  assert.equal(limit.code, 'job_limit');
-  assert.match(limit.message, /Workspace app has 3 live job\(s\) \(P-1 working, P-2 \w+, P-3 \w+\); SF_MAX_JOBS is 3\./);
+  // The three first turns have their scripted turn before P-1's say takes the fourth.
+  await turnsStarted(env, 3);
   // While P-1's turn runs: check and say on it answer, the other jobs finish.
   assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'P-1' })).state, 'working');
   assert.match((await runCli(env, ['say', 'app', 'P-1', 'also', 'this'])).stdout, /^state: working\nqueued: true$/m);
+  // The run queue's limit (SF-071; SF_MAX_JOBS=3 its default) holds P-4 in the queue.
+  assert.equal((await runCli(env, ['queue', 'add', 'app', 'P-4'])).stdout, 'position: 1\n');
+  assert.match((await runCli(env, ['queue', 'list'])).stdout, /^limit: 3 jobs at once\nrunning: 3\n[\s\S]*\n {2}1\. app\/P-4\n$/);
   await waitFor(served, 'P-2', 'awaiting_review', 1);
   await waitFor(served, 'P-3', 'awaiting_review', 1);
   assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'P-1' })).state, 'working');
@@ -234,7 +240,14 @@ test('parallel jobs: three jobs of a workspace run at once in their own worktree
   assert.match(aborted.stdout, new RegExp(`^state: aborted\\nbranch: P-3-job-p-3\\ndiscarded: false\\nworktree: ${worktree('P-3')}\\nThe branch and its worktree are left as they are: ${worktree('P-3')}$`, 'm'));
   assert.ok((await stat(join(worktree('P-3'), 'three.txt'))).isFile());
   assert.equal(git(repo, 'branch', '--list', 'P-3-job-p-3').replace(/^[+* ]+/, '').trim(), 'P-3-job-p-3');
-  assert.equal((await call(served, 'start', { workspace: 'app', ticket: 'P-4' })).state, 'working');
+  // The slot P-3 freed: the queue starts P-4 by itself.
+  const jobs = new JobStore(env.state);
+  for (const deadline = Date.now() + 20_000; (await jobs.read('app', 'P-4')) === undefined;) {
+    assert.ok(Date.now() < deadline, 'P-4 did not start');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.notEqual((await jobs.read('app', 'P-4'))!.state, 'failed');
+  assert.match((await runCli(env, ['queue', 'list'])).stdout, /\nqueue: empty\n$/);
   // A stale worktree directory of a ticket makes the next start worktree_exists; reset removes it.
   assert.equal((await runCli(env, ['reset', 'app', 'P-3'])).code, 0);
   assert.equal((await runCli(env, ['abort', 'app', 'P-2'])).code, 0);
@@ -246,6 +259,30 @@ test('parallel jobs: three jobs of a workspace run at once in their own worktree
   assert.equal((await call(served, 'check', { workspace: 'app', ticket: 'P-3' })).state, 'failed');
   await rm(worktree('P-3'), { recursive: true });
   await stop(served);
+});
+
+test('the queue\'s own start counts the running jobs of every workspace against max_running (job_limit); a paused job and the jobs that wait for the user do not count', async () => {
+  const env = await newEnv('queued-limit');
+  const repo = await newRepo(env, 'queued-limit-repo', false);
+  await putTask(env, repo, 'L-1', 'Limited');
+  const jobs = new JobStore(env.state);
+  const at = new Date().toISOString();
+  const record = (workspace: string, ticket: string, state: JobState): Job => ({
+    workspace, ticket, branch: `${ticket}-b`, base: 'main', base_commit: null, state, worktree: null, prepared_commit: null,
+    iteration: 1, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, created_at: at, updated_at: at,
+  });
+  for (const [workspace, ticket, state] of [['app', 'X-1', 'working'], ['web', 'X-2', 'awaiting_review'], ['app', 'X-3', 'paused'], ['app', 'X-4', 'needs_human'], ['app', 'X-5', 'ready_for_human_review'], ['app', 'X-6', 'pushed']] as const) {
+    await jobs.write(record(workspace, ticket, state));
+  }
+  const store = new QueueStore(env.state, 3);
+  await store.write({ ...(await store.read()), max_running: 2 });
+  const config = loadConfig({ SF_STATE_DIR: env.state, SF_CLAUDE: FAKE });
+  const execution = new Execution(config, (name) => resolveWorkspace(name, env.config));
+  await assert.rejects(execution.start('app', 'L-1', { queued: true }), { code: 'job_limit', message: '2 jobs run (X-1 working, X-2 awaiting_review); the limit is 2.' });
+  assert.equal(await jobs.read('app', 'L-1'), undefined);
+  await jobs.write(record('web', 'X-2', 'starting'));
+  await store.write({ ...(await store.read()), max_running: 1 });
+  await assert.rejects(execution.start('app', 'L-1', { queued: true }), { code: 'job_limit', message: '2 jobs run (X-1 working, X-2 starting); the limit is 1.' });
 });
 
 test('queue and limits: say during a turn, iteration_limit, base_not_found, branch_exists, abort --discard removes the worktree and the branch', async () => {

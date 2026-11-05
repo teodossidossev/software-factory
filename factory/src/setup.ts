@@ -337,9 +337,24 @@ export class Setup {
     return rows;
   }
 
+  // The states of the tickets refs names (SF-071: the run queue's merged check), in their order;
+  // fresh: the Git answer of whether a pushed job is merged is asked again, not taken from the
+  // MERGE_CHECK_TTL_MS cache (and the cache gets the new answer).
+  dependencyStates(refs: TicketRef[], { fresh }: { fresh: boolean }): Promise<DependencyRow[]> {
+    return this.#dependencyStates(fresh)(refs);
+  }
+
+  // The base of the ticket's last job, live or archived (the branch it is merged into), or
+  // undefined without one: where the run queue fetches before it checks again whether the ticket is
+  // merged (SF-071).
+  async lastJobBase(ref: TicketRef): Promise<string | undefined> {
+    const current = await this.#jobs.read(ref.workspace, ref.ticket).catch(() => undefined);
+    return (current ?? (await this.#lastArchivedJob(ref)))?.base;
+  }
+
   // The states of tickets, each worked out once per call of the returned function's owner (one
-  // payload), the registry read once.
-  #dependencyStates(): (refs: TicketRef[]) => Promise<DependencyRow[]> {
+  // payload), the registry read once. fresh: see dependencyStates.
+  #dependencyStates(fresh = false): (refs: TicketRef[]) => Promise<DependencyRow[]> {
     const known = new Map<string, Promise<DependencyState>>();
     let registry: Promise<Registry> | undefined;
     return async (refs) => {
@@ -348,7 +363,7 @@ export class Setup {
         const key = `${ref.workspace}/${ref.ticket}`;
         if (!known.has(key)) {
           registry ??= loadRegistry(this.#configDir);
-          known.set(key, registry.then((loaded) => this.#dependencyState(ref, Object.hasOwn(loaded.workspaces, ref.workspace) ? loaded.workspaces[ref.workspace] : undefined)));
+          known.set(key, registry.then((loaded) => this.#dependencyState(ref, Object.hasOwn(loaded.workspaces, ref.workspace) ? loaded.workspaces[ref.workspace] : undefined, fresh)));
         }
         rows.push({ ...ref, state: await known.get(key)! });
       }
@@ -357,8 +372,8 @@ export class Setup {
   }
 
   // The dependency rule (DependencyState) for one ticket; entry: its workspace's registration, if
-  // any. A job record that cannot be read counts as none.
-  async #dependencyState(ref: TicketRef, entry: WorkspaceEntry | undefined): Promise<DependencyState> {
+  // any. A job record that cannot be read counts as none. fresh: see dependencyStates.
+  async #dependencyState(ref: TicketRef, entry: WorkspaceEntry | undefined, fresh: boolean): Promise<DependencyState> {
     const current = await this.#jobs.read(ref.workspace, ref.ticket).catch(() => undefined);
     if (current !== undefined && !TERMINAL_STATES.includes(current.state)) {
       return 'running';
@@ -368,7 +383,7 @@ export class Setup {
     const archived = dir !== undefined && !active && (await isFile(join(dir, ARCHIVE_DIR, `${ref.ticket}.md`)));
     const last: JobFacts | undefined = current ?? (await this.#lastArchivedJob(ref));
     if (last?.state === 'pushed') {
-      if (await this.#merged(ref, last, entry)) {
+      if (await this.#merged(ref, last, entry, fresh)) {
         return 'merged';
       }
       // An archived Task file whose job was not merged counts as planned (the Task's rule).
@@ -407,8 +422,8 @@ export class Setup {
 
   // Merged: the merge request state the factory recorded (SF-048) decides when there is one (merged
   // or not: open and closed are not merged); only without one does Git decide, its answer kept
-  // MERGE_CHECK_TTL_MS per ticket.
-  async #merged(ref: TicketRef, job: JobFacts, entry: WorkspaceEntry | undefined): Promise<boolean> {
+  // MERGE_CHECK_TTL_MS per ticket (fresh: asked again).
+  async #merged(ref: TicketRef, job: JobFacts, entry: WorkspaceEntry | undefined, fresh: boolean): Promise<boolean> {
     if (job.mr !== null) {
       return job.mr.state === 'merged';
     }
@@ -418,7 +433,7 @@ export class Setup {
     const key = `${ref.workspace}/${ref.ticket}`;
     const now = this.#now();
     const cached = this.#mergeChecks.get(key);
-    if (cached !== undefined && cached.branch === job.branch && now - cached.at < MERGE_CHECK_TTL_MS) {
+    if (!fresh && cached !== undefined && cached.branch === job.branch && now - cached.at < MERGE_CHECK_TTL_MS) {
       return cached.merged;
     }
     const merged = await branchMerged(entry.read_checkout, job);

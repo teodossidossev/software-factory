@@ -285,9 +285,9 @@ test('setup client: Start posts {} once for its ticket after the confirmation, k
   assert.equal(posts(page).length, 1);
   assert.deepEqual([posts(page)[0]!.path, posts(page)[0]!.body, posts(page)[0]!.headers['content-type']], ['api/tickets/app/T-6/start', '{}', 'application/json']);
   assert.match(page.$('toast-text').textContent, /^Starting app\/T-6/);
-  // The ticket's action buttons are off while its request is out (a click on the card, a read,
-  // still opens its Task); another ticket's are not.
-  assert.ok(buttons(card('app/T-6')).every((button) => button.disabled));
+  // The ticket's action buttons are off while its request is out (a click on the card, the check
+  // chip and Task, reads, still open its Task; ⋯ still opens the menu); another ticket's are not.
+  assert.deepEqual(buttons(card('app/T-6')).filter((button) => !button.disabled).map((button) => button.textContent), ['not checked', 'not checked', 'Task', '⋯']);
   assert.equal(start('app/T-7').disabled, false);
   posts(page)[0]!.respond(200, { ok: true, result: { workspace: 'app', ticket: 'T-6', branch: 'T-6-demo', state: 'starting' } });
   await page.flush();

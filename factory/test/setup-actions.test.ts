@@ -141,9 +141,10 @@ test('client: a Queue card has Archive and Delete…; delete asks first; the arc
   await page.flush();
   const card = page.$('qlist').children[0] as FakeElement;
   const buttons = card.all().filter((element) => element.tagName === 'BUTTON');
-  assert.deepEqual(buttons.map((button) => button.textContent), ['last job failed', 'Start', 'Archive', 'Delete…']);
+  // SF-084: the check chip (twice: first line, or under the title when narrow), Task, and the ⋯ menu.
+  assert.deepEqual(buttons.map((button) => button.textContent), ['last job failed', 'not checked', 'not checked', 'Start', 'Task', '⋯', 'Archive', 'Delete…']);
   // Archive: one request, the outcome in the toast.
-  buttons[2]!.click();
+  buttons.find((button) => button.textContent === 'Archive')!.click();
   (page.$('qlist').children[0] as FakeElement).all().find((element) => element.textContent === 'Archive')!.click();
   await page.flush();
   const posts = (): typeof page.requests => page.requests.filter((request) => request.method === 'POST');

@@ -22,7 +22,7 @@ import { callSocket, listenSocket, socketPath } from './ipc.js';
 import { type Job, JobStore } from './jobs.js';
 import { followJobs, runJob } from './runner.js';
 import { jobNotification, notifyConfig, sendNotification, stateNotifier } from './notify.js';
-import { configDir, HANDOFF_MODES, ignoredWorkCheckouts, isHandoffMode, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN, type WorkspaceEntry } from './registry.js';
+import { configDir, HANDOFF_MODES, ignoredWorkCheckouts, isHandoffMode, isWorkspaceColor, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_COLORS, workspaceColor, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN, type WorkspaceEntry } from './registry.js';
 import { loadHandbook, packageVersion, PortInUseError, SERVER_NAME, startServer } from './server.js';
 import { Setup } from './setup.js';
 import { handoverLines, type StatusRow, statusRows } from './status.js';
@@ -37,8 +37,8 @@ const USAGE = `Usage:
   sf serve                                              Serve the MCP tools on 127.0.0.1:\${SF_PORT:-${DEFAULT_PORT}}/mcp and the dashboard
   sf up [--no-open] [--no-tunnel]                       sf serve plus the planning tunnel for ChatGPT (scripts/sf-tunnel.sh run) in one terminal, and open the dashboard; Ctrl+C stops both
   sf dashboard [--open] [--rotate]                      Print the dashboard URL; --open also opens it (xdg-open); --rotate removes the token so the next sf serve makes a new one
-  sf workspace add <name> --read <path> [--handoff checkout|off]  Register a workspace: the local checkout (every job works in a worktree of it); --handoff: its own hand-over setting, over SF_HANDOFF
-  sf workspace list                                     List registered workspaces and their hand-over setting
+  sf workspace add <name> --read <path> [--handoff checkout|off] [--color <name>]  Register a workspace: the local checkout (every job works in a worktree of it); --handoff: its own hand-over setting, over SF_HANDOFF; --color: its colour on the board (blue, teal, green, olive, orange, red, purple or grey; default: by its name). Again with the same path: changes the --handoff and --color given
+  sf workspace list                                     List registered workspaces, their hand-over setting and colour
   sf workspace remove <name>                            Unregister a workspace
   sf check-task <workspace> <ticket>                    Check the Task file before Start: a read-only Claude session reads it and the repository, and prints its paraphrase, its findings by severity and its verdict (stored by the Task file's sha256; it only advises)
   sf start <workspace> <ticket>                         Start the job for .software-factory/<ticket>.md in a worktree of its own (up to SF_MAX_JOBS per workspace)
@@ -350,6 +350,11 @@ function handoffLabel(entry: WorkspaceEntry): string {
   }
 }
 
+// The workspace's colour on the board (SF-084): its own, else the one its name picks.
+function colorLabel(name: string, entry: WorkspaceEntry): string {
+  return entry.color !== undefined ? entry.color : `${workspaceColor(name)} (by its name)`;
+}
+
 function checkName(name: string | undefined): string {
   if (name === undefined) {
     throw new UsageError('a workspace name is required.');
@@ -374,7 +379,7 @@ async function workspace(args: string[]): Promise<void> {
     args: rest,
     allowPositionals: true,
     strict: true,
-    options: command === 'add' ? { read: { type: 'string' }, work: { type: 'string' }, handoff: { type: 'string' } } : {},
+    options: command === 'add' ? { read: { type: 'string' }, work: { type: 'string' }, handoff: { type: 'string' }, color: { type: 'string' } } : {},
   });
   if (command === 'list') {
     if (positionals.length > 0) {
@@ -385,7 +390,7 @@ async function workspace(args: string[]): Promise<void> {
       console.log('No workspaces registered.');
     }
     for (const [name, entry] of entries) {
-      console.log(`${name}\n  checkout: ${entry.read_checkout}\n  hand-over: ${handoffLabel(entry)}`);
+      console.log(`${name}\n  checkout: ${entry.read_checkout}\n  hand-over: ${handoffLabel(entry)}\n  colour: ${colorLabel(name, entry)}`);
     }
     return;
   }
@@ -405,14 +410,21 @@ async function workspace(args: string[]): Promise<void> {
     if (handoff !== undefined && !isHandoffMode(handoff)) {
       throw new UsageError(`--handoff must be ${HANDOFF_MODES.join(' or ')}, got "${String(handoff)}".`);
     }
-    const registry = await loadRegistry();
-    if (Object.hasOwn(registry.workspaces, name)) {
-      throw new FactoryError('workspace_exists', `workspace "${name}" is already registered; remove it first.`);
+    const color = values.color;
+    if (color !== undefined && !isWorkspaceColor(color)) {
+      throw new UsageError(`--color must be one of ${WORKSPACE_COLORS.join(', ')}, got "${String(color)}".`);
     }
-    const entry: WorkspaceEntry = { read_checkout: await checkout(read, '--read'), ...(handoff !== undefined ? { handoff } : {}) };
+    const registry = await loadRegistry();
+    const real = await checkout(read, '--read');
+    // Registered: the same checkout with --handoff or --color changes those (SF-084), the rest stays.
+    const existing = Object.hasOwn(registry.workspaces, name) ? registry.workspaces[name] : undefined;
+    if (existing !== undefined && (existing.read_checkout !== real || (handoff === undefined && color === undefined))) {
+      throw new FactoryError('workspace_exists', `workspace "${name}" is already registered; remove it first, or give the same --read with --handoff or --color to change those.`);
+    }
+    const entry: WorkspaceEntry = { ...existing, read_checkout: real, ...(handoff !== undefined ? { handoff } : {}), ...(color !== undefined ? { color } : {}) };
     registry.workspaces[name] = entry;
     await saveRegistry(registry);
-    console.log(`Registered workspace "${name}" (checkout: ${entry.read_checkout}; hand-over: ${handoffLabel(entry)}).`);
+    console.log(`${existing === undefined ? 'Registered' : 'Updated'} workspace "${name}" (checkout: ${entry.read_checkout}; hand-over: ${handoffLabel(entry)}; colour: ${colorLabel(name, entry)}).`);
     return;
   }
   if (command === 'remove') {

@@ -9,7 +9,7 @@ import { writeFileAtomic } from './atomic.js';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
 import { TERMINAL_STATES, type JobStore } from './jobs.js';
-import type { Workspace } from './registry.js';
+import { type Workspace, WORKSPACE_NAME_PATTERN } from './registry.js';
 
 export const TICKET_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 export const TICKET_DESCRIPTION = '1-64 characters of A-Z, a-z, 0-9, ".", "_" and "-", starting with a letter or digit';
@@ -67,6 +67,31 @@ export function mayTouch(fields: Map<string, string>): string[] {
 export function taskScope(fields: Map<string, string>): string[] | undefined {
   const scope = pathList(fields, 'scope');
   return scope.length > 0 ? scope : undefined;
+}
+
+// A ticket this one lands after (SF-084): its workspace and its name.
+export interface TicketRef {
+  workspace: string;
+  ticket: string;
+}
+
+// The tickets the Task waits for (SF-084): `lands_after:` in the front matter, in the forms of
+// may_touch, each entry `<ticket>` (in workspace, this Task's own) or `<workspace>/<ticket>`.
+// Entries that name no valid workspace or ticket are dropped (they could not be looked up safely),
+// and each ticket is listed once.
+export function landsAfter(fields: Map<string, string>, workspace: string): TicketRef[] {
+  const refs: TicketRef[] = [];
+  for (const entry of pathList(fields, 'lands_after')) {
+    const parts = entry.split('/');
+    const ref = parts.length === 1 ? { workspace, ticket: parts[0]! } : parts.length === 2 ? { workspace: parts[0]!, ticket: parts[1]! } : undefined;
+    if (ref === undefined || !WORKSPACE_NAME_PATTERN.test(ref.workspace) || !TICKET_PATTERN.test(ref.ticket)) {
+      continue;
+    }
+    if (!refs.some((other) => other.workspace === ref.workspace && other.ticket === ref.ticket)) {
+      refs.push(ref);
+    }
+  }
+  return refs;
 }
 
 // The skeleton of a ticket created from the dashboard (SF-028), and the draft of SF-025: the

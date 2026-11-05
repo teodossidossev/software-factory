@@ -13,7 +13,7 @@ import { FactoryError } from '../src/errors.js';
 import { CHATGPT_PREFILL_URL, conversationUrl, ticketConversation } from '../src/conversation.js';
 import { JobStore } from '../src/jobs.js';
 import { loadRegistry } from '../src/registry.js';
-import { draftContent } from '../src/setup.js';
+import { draftContent, type JobDependencies } from '../src/setup.js';
 import { act, CSP, fakeActions, fakeSetup, fetchRaw, openStream, type Reply, ticketRow, workspaceRow } from './support/dashboard-client.js';
 import { withDashboard } from './support/dashboard-state.js';
 import { call, newEnv, newRepo, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
@@ -36,13 +36,24 @@ test('dashboard setup: the reads, the method rules per path and the token; nothi
     assert.equal(workspaces.status, 200);
     assert.equal(workspaces.headers['content-type'], 'application/json; charset=utf-8');
     assert.equal(workspaces.headers['content-security-policy'], CSP);
-    assert.deepEqual(JSON.parse(workspaces.body), { workspaces: [{ name: 'app', path: '/srv/app', liveJobs: 1, problem: null, handoff: null }, { name: 'web', path: '/srv/web', liveJobs: 0, problem: null, handoff: null }] });
+    assert.deepEqual(JSON.parse(workspaces.body), { workspaces: [{ name: 'app', path: '/srv/app', liveJobs: 1, problem: null, handoff: null, color: 'teal' }, { name: 'web', path: '/srv/web', liveJobs: 0, problem: null, handoff: null, color: 'purple' }] });
 
     const tickets = await fetchRaw(new URL('api/tickets', base));
     assert.equal(tickets.status, 200);
     const rows = JSON.parse(tickets.body).tickets;
-    assert.deepEqual(Object.keys(rows[0]).sort(), ['base', 'conversation', 'draft', 'job', 'request', 'ticket', 'title', 'workspace']);
+    assert.deepEqual(Object.keys(rows[0]).sort(), ['base', 'conversation', 'draft', 'job', 'lands_after', 'request', 'ticket', 'title', 'workspace']);
     assert.deepEqual([rows[1].draft, rows[1].job], [false, 'pushed']);
+    // SF-084: each ticket's lands_after as the setup lists it, and the live jobs' as job_lands_after.
+    assert.deepEqual(rows[0].lands_after, []);
+    assert.deepEqual(JSON.parse(tickets.body).job_lands_after, []);
+    const waits: JobDependencies[] = [{ workspace: 'app', ticket: 'T-9', lands_after: [{ workspace: 'web', ticket: 'W-1', state: 'running' }] }];
+    setup.rows.jobDependencies = waits;
+    const listed = setup.rows.tickets;
+    setup.rows.tickets = [{ ...listed[0]!, lands_after: [{ workspace: 'app', ticket: 'T-9', state: 'missing' }] }, ...listed.slice(1)];
+    const again = JSON.parse((await fetchRaw(new URL('api/tickets', base))).body);
+    assert.deepEqual([again.tickets[0].lands_after, again.job_lands_after], [[{ workspace: 'app', ticket: 'T-9', state: 'missing' }], waits]);
+    setup.rows.tickets = listed;
+    setup.rows.jobDependencies = [];
     // The conversation: the message names the connector, guide, the draft, write_task with the
     // Review brief, and the hand-back to the User, who starts on the dashboard; ChatGPT only plans.
     const message = rows[0].conversation.message as string;
@@ -131,13 +142,22 @@ test('dashboard setup: the action checks apply to the setup POSTs; exact argumen
     const stream = await openStream(new URL('api/stream', base));
     assert.deepEqual((await stream.next('workspaces')).workspaces.map((row: { name: string }) => row.name), ['app']);
     assert.equal((await stream.next('tickets')).tickets[0].ticket, 'T-5');
-    assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'web', path: '/srv/web' })), { name: 'web', path: '/srv/web', liveJobs: 0, problem: null, handoff: null });
+    assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'web', path: '/srv/web' })), { name: 'web', path: '/srv/web', liveJobs: 0, problem: null, handoff: null, color: 'purple' });
     assert.deepEqual(setup.calls.at(-1), ['addWorkspace', 'web', '/srv/web']);
     await stream.next('workspaces');
     await stream.next('tickets');
     // The workspace's own hand-over setting (SF-083).
-    assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'web', path: '/srv/web', handoff: 'off' })), { name: 'web', path: '/srv/web', liveJobs: 0, problem: null, handoff: 'off' });
+    assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'web', path: '/srv/web', handoff: 'off' })), { name: 'web', path: '/srv/web', liveJobs: 0, problem: null, handoff: 'off', color: 'purple' });
     assert.deepEqual(setup.calls.at(-1), ['addWorkspace', 'web', '/srv/web', 'off']);
+    await stream.next('workspaces');
+    await stream.next('tickets');
+    // The workspace's colour on the board (SF-084): one of the palette; anything else is a 400.
+    assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'web', path: '/srv/web', color: 'olive' })), { name: 'web', path: '/srv/web', liveJobs: 0, problem: null, handoff: null, color: 'olive' });
+    assert.deepEqual(setup.calls.at(-1), ['addWorkspace', 'web', '/srv/web', null, 'olive']);
+    const pink = await act(base, 'api/workspaces', { name: 'web', path: '/srv/web', color: 'pink' });
+    assert.equal(pink.status, 400);
+    assert.match(JSON.parse(pink.body).error.message, /"color"\?: "blue" \| "teal" \| "green" \| "olive" \| "orange" \| "red" \| "purple" \| "grey"/);
+    assert.deepEqual(setup.calls.at(-1), ['addWorkspace', 'web', '/srv/web', null, 'olive']);
     setup.rows.workspaces = [...setup.rows.workspaces, workspaceRow('web')];
     await stream.next('workspaces');
     await stream.next('tickets');
@@ -186,8 +206,8 @@ test('dashboard setup end to end: a workspace from the page, a ticket draft, the
     // Add: the CLI's rules and texts, then the registry the CLI reads.
     const missing = await act(base, 'api/workspaces', { name: 'app', path: join(temp, 'nowhere') });
     assert.deepEqual(JSON.parse(missing.body), { ok: false, error: { code: 'workspace_invalid', message: 'The path does not exist.' } });
-    assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'app', path: repo, handoff: 'off' })), { name: 'app', path: repo, liveJobs: 0, problem: null, handoff: 'off' });
-    assert.deepEqual((await stream.next('workspaces')).workspaces, [{ name: 'app', path: repo, liveJobs: 0, problem: null, handoff: 'off' }]);
+    assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'app', path: repo, handoff: 'off' })), { name: 'app', path: repo, liveJobs: 0, problem: null, handoff: 'off', color: 'teal' });
+    assert.deepEqual((await stream.next('workspaces')).workspaces, [{ name: 'app', path: repo, liveJobs: 0, problem: null, handoff: 'off', color: 'teal' }]);
     assert.deepEqual((await loadRegistry(env.config)).workspaces, { app: { read_checkout: repo, handoff: 'off' } });
     const listed = await runCli(env, ['workspace', 'list']);
     assert.match(listed.stdout, new RegExp(`^app\\n  checkout: ${repo}\\n  hand-over: off \\(this workspace\\)$`, 'm'));

@@ -10,7 +10,7 @@ import { FactoryError } from '../src/errors.js';
 import type { ExclusiveScope } from '../src/execution.js';
 import { type Job, JobStore } from '../src/jobs.js';
 import { loadRegistry, saveRegistry } from '../src/registry.js';
-import { defaultBranch, draftContent, DRAFT_MARKER, DRAFT_NOTE, isDraft, MAX_REQUEST_BYTES, Setup } from '../src/setup.js';
+import { defaultBranch, draftContent, DRAFT_MARKER, DRAFT_NOTE, isDraft, MAX_REQUEST_BYTES, MERGE_CHECK_TTL_MS, Setup } from '../src/setup.js';
 import { git, newEnv, newRepo, putTask, temp } from './support/harness.js';
 
 // These tests have no finished job to retire: a call would be a bug.
@@ -18,10 +18,10 @@ const NO_RETIREMENT: ExclusiveScope = {
   retireFinished: async () => assert.fail('no job is retired here'),
 };
 
-function setupOf(config: string, jobs: JobStore): Setup {
+function setupOf(config: string, jobs: JobStore, now?: () => number): Setup {
   let lock: Promise<unknown> = Promise.resolve();
   return new Setup({
-    configDir: config, jobs,
+    configDir: config, jobs, ...(now !== undefined ? { now } : {}),
     exclusive: (work) => {
       const next = lock.catch(() => undefined).then(() => work(NO_RETIREMENT));
       lock = next;
@@ -63,7 +63,7 @@ test('setup: workspaces, add with the CLI rules, remove and its live-job guard',
   const repo = await newRepo(env, 'setup-ws-repo', true);
   const jobs = new JobStore(env.state);
   const setup = setupOf(env.config, jobs);
-  assert.deepEqual(await setup.workspaces(), [{ name: 'app', path: repo, liveJobs: 0, problem: null, handoff: null }]);
+  assert.deepEqual(await setup.workspaces(), [{ name: 'app', path: repo, liveJobs: 0, problem: null, handoff: null, color: 'teal' }]);
 
   // The CLI's rules: the name pattern, an absolute path, an existing Git work tree root, no duplicate.
   assert.match(await refused(setup.addWorkspace('Bad', repo), 'invalid_name'), /workspace name must be/);
@@ -79,14 +79,19 @@ test('setup: workspaces, add with the CLI rules, remove and its live-job guard',
   // Added: the real path, read and work alike, and the CLI's registry sees it.
   const second = await newRepo({ ...env, config: join(temp, 'setup-ws-other') }, 'setup-ws-second', false);
   const added = await setup.addWorkspace('second', `${second}/`);
-  assert.deepEqual(added, { name: 'second', path: second, liveJobs: 0, problem: null, handoff: null });
+  assert.deepEqual(added, { name: 'second', path: second, liveJobs: 0, problem: null, handoff: null, color: 'orange' });
   assert.deepEqual((await loadRegistry(env.config)).workspaces.second, { read_checkout: second });
   assert.deepEqual((await setup.workspaces()).map((row) => row.name), ['app', 'second']);
   // The workspace's own hand-over setting (SF-083): stored in the registry and shown in the row.
   const third = await newRepo({ ...env, config: join(temp, 'setup-ws-third-config') }, 'setup-ws-third', false);
-  assert.deepEqual(await setup.addWorkspace('third', third, 'off'), { name: 'third', path: third, liveJobs: 0, problem: null, handoff: 'off' });
+  assert.deepEqual(await setup.addWorkspace('third', third, 'off'), { name: 'third', path: third, liveJobs: 0, problem: null, handoff: 'off', color: 'olive' });
   assert.deepEqual((await loadRegistry(env.config)).workspaces.third, { read_checkout: third, handoff: 'off' });
   assert.deepEqual((await setup.workspaces()).map((row) => [row.name, row.handoff]), [['app', null], ['second', null], ['third', 'off']]);
+  await setup.removeWorkspace('third');
+  // Its colour on the board (SF-084): stored when given, else the hash of the name.
+  assert.equal((await setup.addWorkspace('third', third, undefined, 'grey')).color, 'grey');
+  assert.deepEqual((await loadRegistry(env.config)).workspaces.third, { read_checkout: third, color: 'grey' });
+  assert.deepEqual((await setup.workspaces()).map((row) => [row.name, row.color]), [['app', 'teal'], ['second', 'orange'], ['third', 'grey']]);
   await setup.removeWorkspace('third');
 
   // Live jobs are counted; a workspace with a live job cannot be removed; a missing checkout is a problem, not a failure.
@@ -122,7 +127,7 @@ test('setup: tickets lists the Task files without a live job; createTicket write
   // The Task directory is excluded from Git, as write_task does it.
   assert.match(await readFile(join(repo, '.git', 'info', 'exclude'), 'utf8'), /^\.software-factory\/$/m);
   assert.equal(git(repo, 'status', '--porcelain'), '');
-  assert.deepEqual(await setup.tickets(), [{ workspace: 'app', ticket: 'T-1', title: 'Add a thing', base: 'main', draft: true, request: 'Please add\nthe thing.', job: null }]);
+  assert.deepEqual(await setup.tickets(), [{ workspace: 'app', ticket: 'T-1', title: 'Add a thing', base: 'main', draft: true, request: 'Please add\nthe thing.', job: null, lands_after: [] }]);
 
   // Refused: an existing ticket (never replaced), bad names, an empty or oversized title or request, an unknown workspace.
   assert.match(await refused(setup.createTicket({ workspace: 'app', ticket: 'T-1', title: 'Again', request: 'x' }), 'ticket_exists'), /already exists in workspace "app"/);
@@ -151,8 +156,8 @@ test('setup: tickets lists the Task files without a live job; createTicket write
   await writeFile(join(repo, '.software-factory', 'T-5.md'), '---\nticket: T-9\ntitle: Other\nbase: main\n---\n');
   await writeFile(join(repo, '.software-factory', '.T-6.md'), '---\nticket: .T-6\ntitle: Hidden\nbase: main\n---\n');
   assert.deepEqual(await setup.tickets(), [
-    { workspace: 'app', ticket: 'T-1', title: 'Add a thing', base: 'main', draft: true, request: 'Please add\nthe thing.', job: null },
-    { workspace: 'app', ticket: 'T-3', title: 'Third', base: 'main', draft: false, request: null, job: 'pushed' },
+    { workspace: 'app', ticket: 'T-1', title: 'Add a thing', base: 'main', draft: true, request: 'Please add\nthe thing.', job: null, lands_after: [] },
+    { workspace: 'app', ticket: 'T-3', title: 'Third', base: 'main', draft: false, request: null, job: 'pushed', lands_after: [] },
   ]);
   await refused(setup.createTicket({ workspace: 'app', ticket: 'T-2', title: 't', request: 'r' }), 'ticket_exists');
 
@@ -197,4 +202,128 @@ test('setup: taskText reads the Task file or its archived copy through the reade
   for (const [workspace, ticket] of [['App', 'T-1'], ['app', '../T-1'], ['other', 'T-1'], ['app', 'T-3']]) {
     assert.equal(await setup.taskTitle(workspace!, ticket!), null, `${workspace}/${ticket}`);
   }
+});
+
+// A Task file with lands_after, written as the Context owner would (raw, into .software-factory/).
+async function putLanding(repo: string, ticket: string, landsAfter: string, archived = false): Promise<void> {
+  const dir = join(repo, '.software-factory', ...(archived ? ['archive'] : []));
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, `${ticket}.md`), `---\nticket: ${ticket}\ntitle: Title ${ticket}\nbase: main\nlands_after: [${landsAfter}]\n---\n\n# ${ticket}\n`);
+}
+
+// A commit on a new branch of the checkout, back on main after; its sha.
+function branchWithCommit(repo: string, branch: string): string {
+  git(repo, 'checkout', '-q', '-b', branch);
+  git(repo, 'commit', '-q', '--allow-empty', '-m', `work of ${branch}`);
+  const sha = git(repo, 'rev-parse', 'HEAD').trim();
+  git(repo, 'checkout', '-q', 'main');
+  return sha;
+}
+
+test('setup (SF-084): lands_after with each dependency state from the jobs, the merge request and Git; another workspace; missing; a cycle; the Git answer cached 30 s', async () => {
+  const env = await newEnv('setup-deps');
+  const repo = await newRepo(env, 'setup-deps-app', true);
+  const web = await newRepo({ ...env, config: join(temp, 'setup-deps-web-config') }, 'setup-deps-web', true);
+  await saveRegistry({ workspaces: { app: { read_checkout: repo }, web: { read_checkout: web } } }, env.config);
+  const jobs = new JobStore(env.state);
+  let clock = 1_000_000;
+  const setup = setupOf(env.config, jobs, () => clock);
+
+  // MERGED: pushed, no merge request recorded, its branch merged into origin/main (Git decides).
+  branchWithCommit(repo, 'MERGED-x');
+  git(repo, 'push', '-q', 'origin', 'MERGED-x:main');
+  git(repo, 'fetch', '-q', 'origin');
+  git(repo, 'merge', '-q', '--ff-only', 'origin/main');
+  await jobs.write({ ...jobOf('app', 'MERGED', 'pushed'), branch: 'MERGED-x' });
+  // RECORDED: pushed, the merge request recorded merged; no branch anywhere.
+  await jobs.write({ ...jobOf('app', 'RECORDED', 'pushed'), branch: 'gone-x', mr: { host: 'github', number: 7, url: 'https://example.test/7', state: 'merged' } });
+  // PUSHED: pushed, no merge request recorded, its branch not in origin/main (Git decides).
+  branchWithCommit(repo, 'PUSHED-x');
+  await jobs.write({ ...jobOf('app', 'PUSHED', 'pushed'), branch: 'PUSHED-x' });
+  // OPEN and CLOSED: pushed, the merge request recorded open or closed: a known state, not merged,
+  // even with the branch in origin/main (Git is not asked).
+  for (const [ticket, mrState, number] of [['OPEN', 'open', 8], ['CLOSED', 'closed', 9]] as const) {
+    branchWithCommit(repo, `${ticket}-x`);
+    git(repo, 'push', '-q', 'origin', `${ticket}-x:main`);
+    git(repo, 'fetch', '-q', 'origin');
+    git(repo, 'merge', '-q', '--ff-only', 'origin/main');
+    await jobs.write({ ...jobOf('app', ticket, 'pushed'), branch: `${ticket}-x`, mr: { host: 'github', number, url: `https://example.test/${number}`, state: mrState } });
+  }
+  // MOVED: pushed, the commit it pushed not merged; the local branch since reset onto main does not count.
+  const pushedTip = branchWithCommit(repo, 'MOVED-x');
+  git(repo, 'branch', '-q', '-f', 'MOVED-x', 'main');
+  await jobs.write({ ...jobOf('app', 'MOVED', 'pushed'), branch: 'MOVED-x', prepared_commit: pushedTip });
+  // RUNNING: a live job (with a Task file that lands after LOOP-A).
+  await putLanding(repo, 'RUNNING', 'LOOP-A');
+  await jobs.write(jobOf('app', 'RUNNING', 'awaiting_review'));
+  // PLANNED: a Task file, a failed job. OLD: only an archived Task file, its job archived aborted.
+  await putLanding(repo, 'PLANNED', '');
+  await jobs.write(jobOf('app', 'PLANNED', 'failed'));
+  await putLanding(repo, 'OLD', '', true);
+  await jobs.write(jobOf('app', 'OLD', 'aborted'));
+  await jobs.archive('app', 'OLD');
+  // ARCHIVED: no Task file; its last job, archived, pushed and recorded merged (an older archived one aborted).
+  await jobs.write(jobOf('app', 'ARCHIVED', 'aborted'));
+  await jobs.archive('app', 'ARCHIVED');
+  await new Promise((done) => setTimeout(done, 1100));
+  await jobs.write({ ...jobOf('app', 'ARCHIVED', 'pushed'), mr: { host: 'gitlab', number: 2, url: 'https://example.test/2', state: 'merged' } });
+  await jobs.archive('app', 'ARCHIVED');
+  // SHELVED: its Task file archived with its job, pushed and not merged (no merge request, the
+  // branch not in origin/main): planned, as an archived Task file whose job was not merged.
+  // ABANDONED: the same job without any Task file: pushed.
+  for (const ticket of ['SHELVED', 'ABANDONED']) {
+    await jobs.write({ ...jobOf('app', ticket, 'pushed'), branch: `${ticket}-x`, prepared_commit: branchWithCommit(repo, `${ticket}-x`) });
+    await jobs.archive('app', ticket);
+  }
+  await putLanding(repo, 'SHELVED', '', true);
+  // web/W-1: planned in the other workspace.
+  await putLanding(web, 'W-1', '');
+
+  await putLanding(repo, 'MAIN', 'MERGED, RECORDED, PUSHED, OPEN, CLOSED, MOVED, RUNNING, PLANNED, OLD, ARCHIVED, SHELVED, ABANDONED, web/W-1, NOWHERE, ghost/G-1, app/MERGED');
+  // A cycle of two: listed with its states, no recursion.
+  await putLanding(repo, 'LOOP-A', 'LOOP-B');
+  await putLanding(repo, 'LOOP-B', 'LOOP-A');
+
+  const rows = await setup.tickets();
+  assert.deepEqual(rows.map((row) => `${row.workspace}/${row.ticket}`), ['app/LOOP-A', 'app/LOOP-B', 'app/MAIN', 'app/PLANNED', 'web/W-1']);
+  const main = rows.find((row) => row.ticket === 'MAIN')!;
+  assert.deepEqual(main.lands_after, [
+    { workspace: 'app', ticket: 'MERGED', state: 'merged' },
+    { workspace: 'app', ticket: 'RECORDED', state: 'merged' },
+    { workspace: 'app', ticket: 'PUSHED', state: 'pushed' },
+    { workspace: 'app', ticket: 'OPEN', state: 'pushed' },
+    { workspace: 'app', ticket: 'CLOSED', state: 'pushed' },
+    { workspace: 'app', ticket: 'MOVED', state: 'pushed' },
+    { workspace: 'app', ticket: 'RUNNING', state: 'running' },
+    { workspace: 'app', ticket: 'PLANNED', state: 'planned' },
+    { workspace: 'app', ticket: 'OLD', state: 'planned' },
+    { workspace: 'app', ticket: 'ARCHIVED', state: 'merged' },
+    { workspace: 'app', ticket: 'SHELVED', state: 'planned' },
+    { workspace: 'app', ticket: 'ABANDONED', state: 'pushed' },
+    { workspace: 'web', ticket: 'W-1', state: 'planned' },
+    { workspace: 'app', ticket: 'NOWHERE', state: 'missing' },
+    { workspace: 'ghost', ticket: 'G-1', state: 'missing' },
+  ]);
+  assert.deepEqual(rows.find((row) => row.ticket === 'LOOP-A')!.lands_after, [{ workspace: 'app', ticket: 'LOOP-B', state: 'planned' }]);
+  assert.deepEqual(rows.find((row) => row.ticket === 'LOOP-B')!.lands_after, [{ workspace: 'app', ticket: 'LOOP-A', state: 'planned' }]);
+  assert.deepEqual(rows.find((row) => row.ticket === 'PLANNED')!.lands_after, []);
+  // The live job's Task file: the job page's Waits for.
+  assert.deepEqual(await setup.jobDependencies(), [{ workspace: 'app', ticket: 'RUNNING', lands_after: [{ workspace: 'app', ticket: 'LOOP-A', state: 'planned' }] }]);
+
+  // PUSHED gets merged on the host: Git's answer is kept for 30 s per ticket, then asked again.
+  git(repo, 'checkout', '-q', '-b', 'host-merge', 'origin/main');
+  git(repo, 'merge', '-q', '--no-ff', '-m', 'Merge PUSHED-x', 'PUSHED-x');
+  git(repo, 'push', '-q', 'origin', 'host-merge:main');
+  git(repo, 'checkout', '-q', 'main');
+  git(repo, 'fetch', '-q', 'origin');
+  const stateOf = async (ticket: string) => (await setup.tickets()).find((row) => row.ticket === 'MAIN')!.lands_after.find((dep) => dep.ticket === ticket)!.state;
+  clock += MERGE_CHECK_TTL_MS - 1;
+  assert.equal(await stateOf('PUSHED'), 'pushed');
+  clock += 1;
+  assert.equal(await stateOf('PUSHED'), 'merged');
+  // A job state change is seen at once (no cache beyond Git's answer): RUNNING pushed, not merged.
+  await jobs.write({ ...jobOf('app', 'RUNNING', 'pushed'), branch: 'RUNNING-x', prepared_commit: branchWithCommit(repo, 'RUNNING-x') });
+  git(repo, 'branch', '-q', '-D', 'RUNNING-x');
+  assert.equal(await stateOf('RUNNING'), 'pushed');
+  assert.deepEqual(await setup.jobDependencies(), []);
 });

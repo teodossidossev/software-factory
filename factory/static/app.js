@@ -154,6 +154,10 @@ const state = {
   highlightShown: false,
   // Where the job page's focus goes once its detail is shown (a card's button): 'composer', 'stop' or null.
   wantFocus: null,
+  // SF-084: the tickets the live jobs' Task files land after (the tickets payload's
+  // job_lands_after), and the Queue card whose ⋯ menu is open.
+  jobLandsAfter: [],
+  openMenu: null,
 };
 // The only URL the page links to: the ChatGPT composer prefilled by the server (the prefix of
 // src/conversation.ts).
@@ -1598,7 +1602,7 @@ function renderHead() {
   const t1 = el('div', 't1');
   const title = el('span', 'title', titleOf(job));
   title.setAttribute('title', titleOf(job));
-  t1.append(el('span', 'key', job.ticket), title);
+  t1.append(el('span', 'key', job.ticket), wsChip(job.workspace), title);
   if (job.state === 'needs_human' && typeof job.error?.code === 'string') {
     t1.append(el('span', 'tag', job.error.code));
   }
@@ -1628,6 +1632,8 @@ function renderHead() {
   const end = running ? Date.now() : Date.parse(job.updated_at);
   t2.append(line, el('span', '', `Iteration ${shownIteration(job)}${job.state === 'working' || job.state === 'starting' ? ' (running)' : ''}`),
     el('span', '', `${money(job.cost_usd)}${running ? ' so far' : ''} (Claude, est.)`), el('span', '', `${dur(end - Date.parse(job.created_at))} elapsed`), branch);
+  // SF-084: what the ticket waits for, who waits for it, and a cycle it is part of.
+  t2.append(...dependencyLines(keyOf(job), dependencyGraph(), 'span').lines);
   keepFocus($('jhead'), () => $('jhead').replaceChildren(backButton, t1, tools, t2));
 }
 
@@ -2610,18 +2616,199 @@ function button(className, text, data = {}) {
   return node;
 }
 
-// What the cards need of the board as a whole: whether it shows more than one workspace.
-const board = { multi: false };
+// What the cards need of the board as a whole: the dependency graph (SF-084).
+const board = { graph: { deps: new Map(), needed: new Map() } };
 
-// The first line of a job card: the key, the workspace when the board shows more than one, the
-// code of a stopped job, and the money: the cost so far and the time since the start while it
+// ---------- Workspaces and dependencies on the board (SF-084) ----------
+
+// The workspace palette: the --ws-<name> tokens of app.css. The server sends each workspace's
+// colour (its own, else the one its name picks); the page only reads it.
+const WS_COLORS = ['blue', 'teal', 'green', 'olive', 'orange', 'red', 'purple', 'grey'];
+// The longest workspace name a chip shows whole; a longer one is shortened in the middle.
+const WS_NAME_CHARS = 16;
+
+// The colour class of a workspace ("ws-teal"), or '' when the registry does not list it.
+function wsClass(name) {
+  const color = (state.workspaces ?? []).find((row) => row.name === name)?.color;
+  return WS_COLORS.includes(color) ? `ws-${color}` : '';
+}
+
+// A long workspace name shortened in the middle: "very-long…ace-name"; the full name is the title.
+const shortName = (name) => (name.length <= WS_NAME_CHARS ? name : `${name.slice(0, 7)}…${name.slice(-(WS_NAME_CHARS - 8))}`);
+
+// The workspace's colour dot (decoration: the name always goes with it).
+function wsDot(name) {
+  const dot = el('i', `wsdot ${wsClass(name)}`.trim());
+  dot.setAttribute('aria-hidden', 'true');
+  return dot;
+}
+
+// The workspace chip of a card's first line and the job page header: the dot and the name.
+function wsChip(name) {
+  const chip = el('span', `wschip ${wsClass(name)}`.trim());
+  chip.setAttribute('title', `Workspace ${name}`);
+  chip.append(wsDot(name), el('span', 'wsname', shortName(name)));
+  return chip;
+}
+
+// A dependency's state as a mark and in words (the mark is never the only signal: the title and
+// the label say it).
+const DEP_MARK = { merged: '✓', pushed: '⧗', running: '⧗', planned: '⧗', missing: '✗' };
+const DEP_WORD = { merged: 'merged', pushed: 'pushed, not merged yet', running: 'running', planned: 'planned, not started', missing: 'no Task file and no job' };
+const depState = (dep) => (Object.hasOwn(DEP_MARK, dep.state) ? dep.state : 'missing');
+// The key a card shows for another ticket: the ticket alone in the same workspace.
+const depLabel = (key, workspace) => (key.startsWith(`${workspace}/`) ? key.slice(workspace.length + 1) : key);
+
+// The dependency graph: "<ws>/<ticket>" -> its lands_after rows (the tickets of the Queue and the
+// Done cards with a Task file, and the live jobs' Task files), and the reverse: who waits for it.
+function dependencyGraph() {
+  const deps = new Map();
+  for (const row of [...(state.tickets ?? []), ...state.jobLandsAfter]) {
+    if (Array.isArray(row.lands_after) && row.lands_after.length > 0) {
+      deps.set(keyOf(row), row.lands_after);
+    }
+  }
+  const needed = new Map();
+  for (const [key, rows] of deps) {
+    for (const dep of rows) {
+      const target = keyOf(dep);
+      needed.set(target, [...(needed.get(target) ?? []), key]);
+    }
+  }
+  return { deps, needed };
+}
+
+// The shortest cycle through key ("A → B → A" as keys), or null: a breadth-first walk over what
+// key waits for, each ticket visited once, so a loop of any length ends.
+function cycleThrough(key, deps) {
+  const parent = new Map([[key, null]]);
+  const queue = [key];
+  while (queue.length > 0) {
+    const at = queue.shift();
+    for (const dep of deps.get(at) ?? []) {
+      const next = keyOf(dep);
+      if (next === key) {
+        const path = [];
+        for (let step = at; step !== null; step = parent.get(step)) {
+          path.unshift(step);
+        }
+        return [...path, key];
+      }
+      if (!parent.has(next)) {
+        parent.set(next, at);
+        queue.push(next);
+      }
+    }
+  }
+  return null;
+}
+
+// A chip of another ticket: a click scrolls to its card and focuses it.
+function depChip(key, workspace, stateName) {
+  const label = depLabel(key, workspace);
+  const chip = button(stateName === undefined ? 'dchip' : `dchip dep-${stateName}`, undefined, { dep: key });
+  if (stateName !== undefined) {
+    chip.append(el('span', 'mk', DEP_MARK[stateName]), document.createTextNode(' '));
+  }
+  chip.append(document.createTextNode(label));
+  chip.setAttribute('title', stateName === undefined ? `${key}: show its card` : `${key}: ${DEP_WORD[stateName]}`);
+  return chip;
+}
+
+// The dependency lines of a card or the job page header, each null when it does not apply: Waits
+// for (only while one is not merged), Needed by, and a cycle in the error colour; lines: those that
+// apply, in that order; open: the keys not merged yet, for Start's title.
+function dependencyLines(key, graph, className) {
+  const workspace = key.slice(0, key.indexOf('/'));
+  const deps = graph.deps.get(key) ?? [];
+  const open = deps.filter((dep) => depState(dep) !== 'merged').map(keyOf);
+  let waits = null;
+  if (open.length > 0) {
+    waits = el(className, 'deps waits');
+    waits.append(el('span', 'lbl', 'Waits for'), ...deps.map((dep) => depChip(keyOf(dep), workspace, depState(dep))));
+  }
+  const dependents = graph.needed.get(key) ?? [];
+  let needed = null;
+  if (dependents.length > 0) {
+    needed = el(className, 'deps needed');
+    needed.append(el('span', 'lbl', 'Needed by'), ...dependents.map((other) => depChip(other, workspace)));
+  }
+  const path = deps.length > 0 ? cycleThrough(key, graph.deps) : null;
+  const cycle = path === null ? null : el(className, 'deps cycle', `Dependency cycle: ${path.map((step) => depLabel(step, workspace)).join(' → ')}`);
+  return { waits, needed, cycle, lines: [waits, needed, cycle].filter((line) => line !== null), open };
+}
+
+// The card of a ticket on the board, or null.
+const cardOf = (key) => [...document.querySelectorAll('#cols .card')].find((card) => card.dataset.key === key) ?? null;
+
+// A chip's click: the board with that ticket's card scrolled to and focused; a filter or Done's
+// limit that hides it is lifted; a ticket without a card says so.
+function showCard(key) {
+  if (ui.screen !== 'board') {
+    back();
+  }
+  let card = cardOf(key);
+  if (card === null && (state.filter !== '' || !state.doneAll)) {
+    state.filter = '';
+    state.doneAll = true;
+    renderBoard();
+    card = cardOf(key);
+  }
+  if (card === null) {
+    toast({ level: 'info', text: `${key} has no card on the board: no Task file and no job.` });
+    return;
+  }
+  card.scrollIntoView({ block: 'nearest' });
+  card.focus();
+  relate(key);
+}
+
+// Hovering or focusing a card shows its dependencies and dependents (outlined) and dims the other
+// cards; null clears it. Only a card with either relates.
+function relate(key) {
+  if (ui.related === key) {
+    return;
+  }
+  ui.related = key;
+  showRelated();
+}
+
+// Applies ui.related to the cards drawn: rel on its dependencies and dependents, dim on the rest
+// (nothing when it has neither); called on a change and after every drawing of the board.
+function showRelated() {
+  const graph = board.graph;
+  const key = ui.related;
+  const related = new Set(key === null ? [] : [...(graph.deps.get(key) ?? []).map(keyOf), ...(graph.needed.get(key) ?? [])]);
+  const on = related.size > 0;
+  for (const card of document.querySelectorAll('#cols .card')) {
+    card.classList.toggle('rel', on && related.has(card.dataset.key));
+    card.classList.toggle('dim', on && card.dataset.key !== key && !related.has(card.dataset.key));
+  }
+}
+
+// The card under the pointer or with the focus (mouseover, focusin), none outside the cards.
+function onCardHover(event) {
+  if (ui.screen !== 'board') {
+    return;
+  }
+  const card = typeof event.target?.closest === 'function' ? event.target.closest('#cols .card') : null;
+  relate(card === null ? null : card.dataset.key);
+}
+
+// The focus left the cards (focusout to outside one).
+function onCardBlur(event) {
+  const next = event.relatedTarget;
+  if (next === null || next === undefined || typeof next.closest !== 'function' || next.closest('#cols .card') === null) {
+    relate(null);
+  }
+}
+
+// The first line of a job card: the key, the workspace chip (SF-084), the code of a stopped job,
+// and the money: the cost so far (none before there is one) and the time since the start while it
 // runs, the cost and the time it took when it does not.
 function cardRow(job) {
   const row = el('div', 'row1');
-  row.append(el('span', 'key', job.ticket));
-  if (board.multi) {
-    row.append(el('span', 'tag', job.workspace));
-  }
+  row.append(el('span', 'key', job.ticket), wsChip(job.workspace));
   if (job.state === 'needs_human' && typeof job.error?.code === 'string') {
     const code = el('span', 'tag', job.error.code);
     code.setAttribute('title', 'error code');
@@ -2629,16 +2816,24 @@ function cardRow(job) {
   }
   const running = RUNNING.includes(job.state);
   const end = running ? Date.now() : Date.parse(job.updated_at);
-  row.append(el('span', 'money', `${money(job.cost_usd)}${running ? ' so far' : ''} · ${dur(end - Date.parse(job.created_at))}`));
+  const cost = running && typeof job.cost_usd !== 'number' ? '' : `${money(job.cost_usd)}${running ? ' so far' : ''} · `;
+  row.append(el('span', 'money', `${cost}${dur(end - Date.parse(job.created_at))}`));
   return row;
+}
+
+// Every card (SF-084): its key for the dependency highlight and its workspace's colour stripe.
+function boardCard(key, workspace) {
+  const item = el('li', `card ${wsClass(workspace)}`.trim());
+  item.setAttribute('tabindex', '0');
+  item.dataset.key = key;
+  return item;
 }
 
 // A job card (the prototype's jobCard): a click opens the job's page; one primary action only where
 // the user acts (Your turn); a pushed card keeps its merge request and Archive ticket.
 function jobCard(job) {
   const key = keyOf(job);
-  const item = el('li', 'card');
-  item.setAttribute('tabindex', '0');
+  const item = boardCard(key, job.workspace);
   item.dataset.open = key;
   item.append(cardRow(job), el('div', 'title', titleOf(job)));
   if (RUNNING.includes(job.state)) {
@@ -2683,6 +2878,9 @@ function jobCard(job) {
   if (typeof job.turn_limit === 'string') {
     item.append(el('div', 'meta note', job.turn_limit));
   }
+  // SF-084: who waits for this ticket, and a cycle it is part of.
+  const { needed, cycle } = dependencyLines(key, board.graph, 'div');
+  item.append(...[needed, cycle].filter((line) => line !== null));
   return item;
 }
 
@@ -2805,18 +3003,21 @@ function checkNote(row) {
 }
 
 // A Queue card (the prototype's queueCard, without SF-071's queue): a click opens the planned
-// ticket (its Task drawer until SF-081); the last job's mark opens that failed or aborted job;
-// Start (confirmed) or "waiting for the plan" for a skeleton, Check, Archive and Delete….
+// ticket (its Task drawer until SF-081); the last job's mark opens that failed or aborted job. The
+// first line: the key, the workspace chip and the plan-check chip (which opens the planned ticket
+// with the check's findings; under the title when the line has no room). Then the dependency lines
+// (SF-084) and the actions: Start (secondary in the Queue, confirmed; its title names what it waits
+// for) or "waiting for the plan" for a skeleton, Task, and the ⋯ menu with Check, Archive and
+// Delete….
 function queueCard(row) {
   const key = keyOf(row);
-  const item = el('li', state.highlight === key ? 'card hl' : 'card');
-  item.setAttribute('tabindex', '0');
+  const item = boardCard(key, row.workspace);
+  if (state.highlight === key) {
+    item.classList.add('hl');
+  }
   item.dataset.ticket = key;
   const head = el('div', 'row1');
-  head.append(el('span', 'key', row.ticket));
-  if (board.multi) {
-    head.append(el('span', 'tag', row.workspace));
-  }
+  head.append(el('span', 'key', row.ticket), wsChip(row.workspace));
   const last = lastJobState(row);
   if (last !== null) {
     const mark = button('tag', `last job ${last}`, { open: key });
@@ -2824,36 +3025,82 @@ function queueCard(row) {
     mark.disabled = jobByKey(key) === null; // only from the tickets list: nothing to open yet
     head.append(mark);
   }
-  head.append(el('span', 'money', checkNote(row)));
-  item.append(head, el('div', 'title', row.title));
+  const note = checkNote(row);
+  const noteChip = (className) => {
+    const chip = button(className, note, { ticket: key });
+    chip.setAttribute('title', `${note}: open the ticket${row.check !== null && typeof row.check === 'object' && row.check.state !== 'none' ? ' and the check\'s findings' : ''}`);
+    return chip;
+  };
+  head.append(noteChip('tag cnote'));
+  item.append(head, el('div', 'title', row.title), noteChip('tag cnote below'));
+  const { lines, open } = dependencyLines(key, board.graph, 'div');
+  item.append(...lines);
   const act = el('div', 'act');
   const busy = state.setupPending.has(`ticket:${key}`) || state.ticketConfirm !== null;
   if (row.draft) {
     act.append(el('span', 'muted', 'waiting for the plan'));
   } else {
-    const start = button('btn primary small', 'Start', { qact: 'start', key });
+    const start = button('btn small', 'Start', { qact: 'start', key });
     start.disabled = busy || state.startHolds.has(key);
-    act.append(start);
-    if (row.check !== null && typeof row.check === 'object') {
-      const check = button('btn small', 'Check', { qact: 'check', key });
-      check.title = 'A read-only Claude session reads the Task file and the repository and says whether it is ready; it only advises';
-      check.disabled = row.check.running === true || state.setupPending.has(`check:${key}`);
-      act.append(check);
+    if (open.length > 0) {
+      start.setAttribute('title', `Waits for ${open.map((other) => depLabel(other, row.workspace)).join(', ')}`);
     }
+    act.append(start);
+  }
+  const task = button('btn small', 'Task', { ticket: key });
+  task.setAttribute('title', 'The Task file and its check');
+  act.append(task, ...cardMenu(row, busy));
+  item.append(act);
+  return item;
+}
+
+// A Queue card's ⋯ menu: Check (with the Task checks, not for a skeleton), Archive and Delete…,
+// shown while it is open (one card's at a time; a click elsewhere or Escape closes it).
+function cardMenu(row, busy) {
+  const key = keyOf(row);
+  const open = state.openMenu === key;
+  const toggle = button('btn small more', '⋯', { menu: key });
+  toggle.setAttribute('aria-label', `More actions for ${row.ticket}`);
+  toggle.setAttribute('aria-haspopup', 'menu');
+  toggle.setAttribute('aria-expanded', String(open));
+  const menu = el('div', 'cmenu');
+  menu.setAttribute('role', 'menu');
+  menu.hidden = !open;
+  const asItem = (node) => {
+    node.setAttribute('role', 'menuitem');
+    return node;
+  };
+  if (!row.draft && row.check !== null && typeof row.check === 'object') {
+    const check = button('btn small', 'Check', { qact: 'check', key });
+    check.title = 'A read-only Claude session reads the Task file and the repository and says whether it is ready; it only advises';
+    check.disabled = row.check.running === true || state.setupPending.has(`check:${key}`);
+    menu.append(asItem(check));
   }
   const archive = button('btn small', 'Archive', { qact: 'archive', key });
   archive.disabled = busy;
   archive.title = 'Move the Task file to .software-factory/archive/; a finished job of the ticket leaves the board';
   const remove = button('btn small danger', 'Delete…', { qact: 'delete', key });
   remove.disabled = busy;
-  act.append(archive, remove);
-  item.append(act);
-  return item;
+  menu.append(asItem(archive), asItem(remove));
+  return [toggle, menu];
+}
+
+// Opens or closes a Queue card's ⋯ menu; the board is drawn again with the focus where it was.
+function setCardMenu(key) {
+  if (state.openMenu === key) {
+    return;
+  }
+  state.openMenu = key;
+  renderBoard();
+  if (key !== null) {
+    cardOf(key)?.querySelector('.cmenu button:not([disabled])')?.focus();
+  }
 }
 
 const visible = (workspace) => state.filter === '' || workspace === state.filter;
 
-// The workspace filter in the top bar: All and one button per workspace.
+// The workspace filter in the top bar: All and one chip per workspace, its colour dot and its name
+// (SF-084).
 function renderFilter() {
   const names = (state.workspaces ?? []).map((row) => row.name);
   if (state.filter !== '' && state.workspaces !== null && !names.includes(state.filter)) {
@@ -2862,7 +3109,11 @@ function renderFilter() {
   const node = $('workspace-filter');
   node.hidden = names.length === 0;
   node.replaceChildren(...[['', 'All workspaces'], ...names.map((name) => [name, name])].map(([name, label]) => {
-    const filter = button(state.filter === name ? 'on' : '', label, { ws: name });
+    const filter = button(state.filter === name ? 'on' : '', name === '' ? label : undefined, { ws: name });
+    if (name !== '') {
+      filter.append(wsDot(name), el('span', 'wsname', shortName(name)));
+      filter.setAttribute('title', state.filter === name ? 'Show every workspace' : `Show workspace ${name} only`);
+    }
     filter.setAttribute('aria-pressed', String(state.filter === name));
     return filter;
   }));
@@ -2887,7 +3138,10 @@ function renderBoard() {
     }
     lists[COLUMN_OF[job.state] ?? 'done'].push(job);
   }
-  board.multi = new Set([...planned, ...jobs].map((entry) => entry.workspace)).size > 1;
+  board.graph = dependencyGraph();
+  if (state.openMenu !== null && !planned.some((row) => keyOf(row) === state.openMenu)) {
+    state.openMenu = null;
+  }
   for (const column of COLUMNS) {
     const entries = lists[column];
     $(`count-${column}`).textContent = String(entries.length);
@@ -2914,6 +3168,7 @@ function renderBoard() {
   if (focused !== null) {
     document.querySelector(`#cols .card${focused}`)?.focus();
   }
+  showRelated();
   showHighlight();
   scheduleRefresh();
 }
@@ -2991,7 +3246,8 @@ function armToast() {
 // or a planned ticket's page 'ticket' (ui.ticket); ui.opener is the key of the card that opened
 // it; pending: the hash names a job or ticket not loaded yet. On the Stream: sel, the selected
 // entry (j, k, G), and open, the toggles open.
-const ui = { screen: 'board', job: null, ticket: null, opener: null, pending: false, sel: -1, open: new Set() };
+// related: the card whose dependencies and dependents the board shows (SF-084), or null.
+const ui = { screen: 'board', job: null, ticket: null, opener: null, pending: false, sel: -1, open: new Set(), related: null };
 
 // The URL hash of the view: #<ws>/<ticket> (the Stream), #<ws>/<ticket>/changes, /mr, /ticket;
 // a new one is a new history entry, so Back and Forward move between them.
@@ -3182,10 +3438,22 @@ function renderJobs() {
 // Stream and the composer) and the toast (the drawer keeps its own listeners until SF-081).
 function onClick(event) {
   const target = typeof event.target?.closest === 'function'
-    ? event.target.closest('[data-qact],[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-toggle],[data-act],[data-settle],[data-copy-branch],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived')
+    ? event.target.closest('[data-dep],[data-menu],[data-qact],[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-toggle],[data-act],[data-settle],[data-copy-branch],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived')
     : null;
+  // An open ⋯ menu closes on any click but its own toggle (its items act, then it is closed).
+  if (state.openMenu !== null && (target === null || target.dataset.menu === undefined)) {
+    setCardMenu(null);
+  }
   // A link (a merge request's) goes where it points; it does not open the card around it.
   if (target === null || target.disabled || (typeof event.target.closest === 'function' && event.target.closest('a') !== null)) {
+    return;
+  }
+  if (target.dataset.dep !== undefined) {
+    showCard(target.dataset.dep);
+    return;
+  }
+  if (target.dataset.menu !== undefined) {
+    setCardMenu(state.openMenu === target.dataset.menu ? null : target.dataset.menu);
     return;
   }
   if (target.id === 'done-all') {
@@ -3200,7 +3468,8 @@ function onClick(event) {
   } else if (target.id === 'open-archived') {
     openArchived();
   } else if (target.hasAttribute('data-ws')) {
-    state.filter = target.dataset.ws;
+    // A workspace's chip again: back to all.
+    state.filter = state.filter === target.dataset.ws ? '' : target.dataset.ws;
     renderBoard();
   } else if (target.dataset.qact !== undefined) {
     queueAction(target.dataset.qact, target.dataset.key);
@@ -3280,6 +3549,18 @@ function onKey(event) {
   }
   // The drawer and the ticket confirmation handle their own keys.
   if (state.drawer !== null || state.ticketConfirm !== null || event.altKey || event.ctrlKey || event.metaKey) {
+    return;
+  }
+  if (ui.screen === 'board' && event.key === 'Escape' && (state.openMenu !== null || ui.related !== null)) {
+    // SF-084: Escape closes a card's ⋯ menu (the focus back on its toggle), else clears the highlight.
+    event.preventDefault();
+    const menu = state.openMenu;
+    if (menu !== null) {
+      setCardMenu(null);
+      cardOf(menu)?.querySelector('[data-menu]')?.focus();
+    } else {
+      relate(null);
+    }
     return;
   }
   if (ui.screen === 'board') {
@@ -3516,7 +3797,9 @@ function renderWorkspaces() {
   $('no-workspaces').hidden = state.workspaces === null || rows.length > 0;
   $('workspace-list').replaceChildren(...rows.map((row) => {
     const item = el('li');
-    item.append(el('div', 'ws-name', row.name));
+    const name = el('div', 'ws-name');
+    name.append(wsDot(row.name), document.createTextNode(row.name));
+    item.append(name);
     item.append(el('div', 'ws-path', row.path));
     if (row.problem) {
       item.append(el('div', 'ws-problem', row.problem));
@@ -3627,18 +3910,21 @@ async function setupRequest(what, path, body, statusId, describe) {
 async function submitWorkspace() {
   const name = $('workspace-name').value.trim();
   const path = $('workspace-path').value.trim();
-  // The workspace's own hand-over setting (SF-083); empty: SF_HANDOFF applies.
+  // The workspace's own hand-over setting (SF-083); empty: SF_HANDOFF applies. Its colour on the
+  // board (SF-084); empty: the server picks one by its name.
   const handoff = $('workspace-handoff').value;
+  const color = $('workspace-color').value;
   if (name === '' || path === '') {
     setSetupStatus('workspace-status', { level: 'error', text: 'A name and the path of the local checkout are needed.' });
     return;
   }
-  const result = await setupRequest('workspace', 'api/workspaces', { name, path, ...(handoff !== '' ? { handoff } : {}) }, 'workspace-status', (data) =>
+  const result = await setupRequest('workspace', 'api/workspaces', { name, path, ...(handoff !== '' ? { handoff } : {}), ...(color !== '' ? { color } : {}) }, 'workspace-status', (data) =>
     ({ level: 'ok', text: `Registered ${data.name} (${data.path}). Next: New ticket.` }));
   if (result !== undefined) {
     $('workspace-name').value = '';
     $('workspace-path').value = '';
     $('workspace-handoff').value = '';
+    $('workspace-color').value = '';
   }
 }
 
@@ -3841,7 +4127,11 @@ function openStream() {
     const data = JSON.parse(message.data);
     state.tickets = data.tickets;
     state.archived = Array.isArray(data.archived) ? data.archived : [];
+    state.jobLandsAfter = Array.isArray(data.job_lands_after) ? data.job_lands_after : [];
     renderSetup();
+    if (ui.job !== null) {
+      renderHead();
+    }
     refreshTaskCheck();
     if (ui.pending) {
       route();
@@ -3917,6 +4207,10 @@ function init() {
   // delegated listener each.
   document.addEventListener('click', onClick);
   document.addEventListener('keydown', onKey);
+  document.addEventListener('mouseover', onCardHover);
+  document.addEventListener('focusin', onCardHover);
+  document.addEventListener('focusout', onCardBlur);
+  $('cols').addEventListener('mouseleave', () => relate(null));
   document.addEventListener('input', onInput);
   document.addEventListener('visibilitychange', scheduleRefresh);
   $('toast').addEventListener('mouseenter', () => {

@@ -51,7 +51,8 @@ async function openBoard(tickets: ReturnType<typeof ticket>[], get: (path: strin
 const card = (page: Page, key: string): FakeElement => page.$('qlist').children.find((child) => (child as FakeElement).dataset?.ticket === key) as FakeElement;
 const button = (item: FakeElement, label: string): FakeElement | undefined => item.all().find((element) => element.tagName === 'BUTTON' && element.textContent === label);
 // The check note on the card's right side (SF-077).
-const note = (item: FakeElement): string => item.all().find((element) => element.className === 'money')!.textContent;
+// The plan-check chip of the card's first line (SF-084: a button that opens the ticket).
+const note = (item: FakeElement): string => item.all().find((element) => element.className === 'tag cnote')!.textContent;
 const posts = (page: Page): FetchRequest[] => page.requests.filter((request) => request.method === 'POST');
 
 test('check client: the card\'s check note and Check: one POST, off while the check runs; none for a draft or without the Task checks', async () => {

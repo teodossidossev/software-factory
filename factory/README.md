@@ -21,7 +21,7 @@ gate (section Jobs); their fix verdicts become the next Fix section without anyo
 
 ```sh
 npm install && npm run build      # once, inside factory/
-bin/sf workspace add <name> --read <path>   # the local checkout; every job works in a worktree of it (--work is retired)
+bin/sf workspace add <name> --read <path> [--handoff checkout|off] [--color <name>]   # the local checkout; every job works in a worktree of it (--work is retired); --color: its colour on the board; again with the same path: changes --handoff/--color
 bin/sf workspace list
 bin/sf workspace remove <name>
 bin/sf serve                      # foreground; Ctrl+C stops it; prints the dashboard URL
@@ -1197,7 +1197,8 @@ On another platform `--open` is refused (`open_unsupported`); plain `sf dashboar
 (`docs/design/dashboard-v3/`, ported from its prototype: the same CSS, light and dark by the system,
 the same markup and keys). The top bar has the title, "N wait for you · M running" (the page title
 is `(N) Software Factory` while N > 0), the connection as a tag while the stream is not connected,
-the workspace filter (all workspaces or one, its cards and counts), *Archived* (with its count),
+the workspace filter (*All workspaces*, then one chip per workspace with its colour dot and name:
+a click keeps that workspace's cards and counts, a second click shows all again), *Archived* (with its count),
 *Workspaces* and *New ticket*. The queue controls ("Run up to N jobs at once", the queue status) and
 the Rules menu are there but hidden until SF-071 and SF-072 bring their routes. Five columns, each
 heading with its count: **Queue** (the Task files of every usable workspace whose ticket has no job,
@@ -1210,11 +1211,15 @@ rest in place and becomes *Show the last 8*). A ticket shows in one column only 
 one only under Done, a failed or aborted one only in the Queue, one with an active job only in that
 job's column. An empty column says so.
 
-Each **card** has a first line with the ticket key, the workspace when the board shows more than
-one, the stop code as a tag on a `needs_human` job, and the money at the right: the estimated cost
+Each **card** has a 4 px stripe on its left in its workspace's colour (SF-084) and a first line
+with the ticket key (never wrapped), the workspace chip (the colour dot and the workspace's name,
+shortened in the middle when long, the full name as its title: the colour is never the only sign),
+the stop code as a tag on a `needs_human` job, and the money at the right: the estimated cost
 of its iterations and Claude reviews ("$1.23", not a charge) and the time since the job was
-created, "so far" while it runs (`$1.23 so far · 14 min`), or the time it took (`$1.23 · 1 h 4
-min`); then the title of its Task file (the branch without one). A **running** card (`starting`,
+created, "so far" while it runs (`$1.23 so far · 14 min`; only the time while there is no cost
+yet), or the time it took (`$1.23 · 1 h 4 min`); then the title of its Task file (the branch
+without one). A card never grows wider than its column: long text wraps or is cut with an ellipsis
+and its full text as the title. A **running** card (`starting`,
 `working`, `awaiting_review`, `preparing_mr`) says who acts now and what: "Now: Implementer" with
 its last tool call (`Read factory/src/jobs.ts`) or the first line of its last text, "Now: Claude
 review" or "Now: Codex gate" reviewing iteration N, "Now: MR writer" writing the MR text, and the
@@ -1237,12 +1242,45 @@ turn that went on by itself after the turn limit stays on the card. The iteratio
 on it (`starting`, `working`, paused in its turn, stopped by its session), else the last one
 published.
 
-A **Queue card** shows the ticket key, the mark of its last job (`last job failed`, a button that
-opens that job's page), the Task check's note at the right (`checking…`, `check: ready`, `not
-ready: 1 blocker, 2 major`, `check failed`, each with ` · stale` when the Task file changed since,
-`not checked`, or `draft` for a skeleton) and the title, then **Start** (the only primary button)
-or "waiting for the plan" for a skeleton, **Check** (section Task check), Archive and Delete…. A
-click on the card opens the planned ticket (its Task in the drawer until SF-081). Start asks first,
+A **Queue card** shows the ticket key, the workspace chip, the mark of its last job (`last job
+failed`, a button that opens that job's page), the Task check's chip at the right (`checking…`,
+`check: ready`, `not ready: 1 blocker, 2 major`, `check failed`, each with ` · stale` when the Task
+file changed since, `not checked`, or `draft` for a skeleton; a click opens the planned ticket with
+the check's findings; on a card too narrow for it, it moves to its own line under the title) and
+the title, then **Start** (an outline button, as every Queue button: the only solid ones on the
+board are Your turn's) or "waiting for the plan" for a skeleton, **Task**, and **⋯**, a menu with
+**Check** (section Task check), Archive and Delete… (Escape or a click elsewhere closes it). A
+click on the card opens the planned ticket (its Task in the drawer until SF-081).
+
+**Dependencies** (SF-084). A Task file's `lands_after: [<ticket>, <workspace>/<ticket>]` names
+the tickets it waits for. While one of them is not merged, the Queue card has a line **Waits for**
+with a chip per ticket: its key and its state, ✓ merged (the success colour), ⧗ pushed, running or
+planned (the warning colour), ✗ missing (the error colour), the state in words as the chip's
+title; Start's title then says "Waits for <keys>" (it still starts: SF-071 brings the order). A
+card whose dependencies are all merged shows nothing more. The card of a ticket others wait for
+(in any column) has **Needed by** with their keys. Hovering or focusing a card outlines its
+dependencies and dependents in the accent colour and dims the other cards; leaving the card, or
+Escape, clears it. A chip's click scrolls to that card and focuses it (lifting a workspace filter
+or Done's limit that hides it; a ticket without a card says so in the toast). A cycle (A waits for
+B, B for A, at any length) shows on each of its cards as "Dependency cycle: A → B → A" in the error
+colour. The job page header shows the workspace chip, Waits for and Needed by the same way. The
+state is the server's, one rule, worked out when the tickets payload is built: **merged** when the
+ticket's last job (live or archived) is `pushed` and its merge request is recorded `merged`, or,
+only when no merge request state is recorded, its branch tip (origin's branch, else the prepared
+commit, else the local branch) is an ancestor
+of `origin/<base>` in the workspace's checkout (`git merge-base --is-ancestor`, no fetch; the
+answer kept 30 s per ticket; a merge request recorded `open` or `closed` is not merged: run `sf mr
+status` to record a merge done on the host); **pushed** when pushed but not merged by that rule (its Task file active, or none); **running**
+while it has a live job in any other state; **planned** with a Task file (active, or archived with a
+job not merged, a pushed one included) and no live job; **missing** otherwise. `api/tickets` (and the stream's `tickets`
+event) gives each ticket `lands_after: [{workspace, ticket, state}]` and, for the tickets with a
+live job, `job_lands_after: [{workspace, ticket, lands_after}]`.
+
+**Workspace colours** (SF-084). Each workspace has a colour of the palette blue, teal, green,
+olive, orange, red, purple and grey (`--ws-<name>` in `static/app.css`, a light and a dark value,
+each at least 4:1 against the page's backgrounds): its `color` in `workspaces.json`, else the
+entry at (the sum of the UTF-16 code units of its name) mod 8. `api/workspaces` gives each
+workspace's `color`; the page only reads it. Start asks first,
 naming the workspace, the ticket and the base branch (and the Task check's note: not checked,
 stale, check failed or not ready: N blocker, M major), then sends `POST
 api/tickets/<ws>/<ticket>/start` once: `Execution.start`, the same call as `sf start`, with its
@@ -1517,8 +1555,8 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 |---|---|
 | `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, fixes, gate_fixes, gate_tokens, updated_at, created_at, error, and for the board (SF-046) `title` (of the Task file, or `null`), `cost_usd` (the estimate of the iterations and their Claude reviews, or `null`), `review` and `gate` (the last iteration's verdicts: `clean`, `fix`, `failed` or `null`) and `review_ended_at` (the end of that clean or fix Claude review, or `null`); `mr` (the merge request on the Git host or `null`) and `mr_host` (`{host, reason}`: `github`, `gitlab` or `null`, and why the merge request actions are off or `null`); for the v3 card (SF-077) `now` (`{who, what, ts}` of a running job: the Implementer's last tool call or the first line of its last text, read from at most the last 256 KB of `events.jsonl`; the Claude review or the Codex gate reviewing iteration N; the MR writer; else `null`), `tool_calls` (the Implementer's tool calls in the job, counted incrementally: only the bytes added since the last count are read) and `stop` (for `needs_human`, `{items, saves_lines}`: the suggestions of the last simplification pass and the lines they save, the ledger entries to settle (`escalated`, `review_disputed`), the open ones (`review_churn`) or the last gate's items (`gate_rounds`, `gate_budget`), none for other codes; `null` otherwise) |
 | `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override, simplify}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied} or {ts, event: "merge_request", action, number, url, state}], mr_title, ledger}`; `mr_title` is the MR text's first line or `null`; `ledger` is `ledger.json` as written (`[]` before the first Fix section, SF-052); `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null`, `simplify` its `simplify.json` (SF-055) or `null` |
-| `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem}]}`: the registry, the checkout's path, its non-terminal jobs, and why the checkout cannot be used now or `null` |
-| `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, conversation: {message, url}}], archived: [{workspace, ticket, title}]}`: the Task files without a live job; `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
+| `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem, handoff, color}]}`: the registry, the checkout's path, its non-terminal jobs, why the checkout cannot be used now or `null`, its own hand-over setting or `null`, and its colour on the board (SF-084: its `color`, else the one its name picks) |
+| `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, lands_after, conversation: {message, url}}], archived: [{workspace, ticket, title}], job_lands_after: [{workspace, ticket, lands_after}]}`: the Task files without a live job; `lands_after` the tickets its Task file waits for, `[{workspace, ticket, state}]` with `state` `merged`, `pushed`, `running`, `planned` or `missing` (SF-084, section Dashboard), and `job_lands_after` the same for the Task files with a live job; `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/patch` | the Patch, `text/x-diff` |
 | `api/jobs/<ws>/<ticket>/mr` | the MR text, `text/markdown`; 404 until there is one |
@@ -1539,7 +1577,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `POST api/jobs/<ws>/<ticket>/handover`, `.../takeback`, `.../handed-done` | `{}` | `Execution.handover`, `takeback`, `handedDone` (`sf handover`, `sf takeback`, `sf handed-done`, SF-073); `409` for `invalid_state`, `runner_active`, `job_limit` and the hand-over's codes (section Hand-over to your checkout). `GET api/jobs/<ws>/<ticket>` of a `handed_over` job also starts `Execution.checkHandedOver` (at most once a minute), whose push reaches the page through the job's events |
 | `POST api/jobs/<ws>/<ticket>/mr-merge` | `{}` | `Execution.mergeMergeRequest(ws, ticket)` (`sf mr merge`): result `{state, branch, mr}`; `409 mr_not_mergeable` with the host's reason, `409 mr_not_open`, and the codes above |
 | `POST api/jobs/<ws>/<ticket>/mr-status` | `{}` | `Execution.mergeRequestStatus(ws, ticket)` (`sf mr status`): result `{state, branch, mr, status: {number, url, state, draft, mergeable, reason?, checks?, merge_commit?}}`; every page gets the jobs again, and the pages that show the job its detail (a merge request merged or closed on the host shows so at once) |
-| `POST api/workspaces` | `{"name": string, "path": string}` | `Setup.addWorkspace`: the rules of `sf workspace add`; result the workspace row |
+| `POST api/workspaces` | `{"name": string, "path": string, "handoff"?: "checkout" \| "off", "color"?: <palette name>}` | `Setup.addWorkspace`: the rules of `sf workspace add`; `color` one of `blue`, `teal`, `green`, `olive`, `orange`, `red`, `purple`, `grey` (SF-084), anything else `400 invalid_body`; result the workspace row |
 | `POST api/workspaces/<name>/remove` | `{}` | `Setup.removeWorkspace`; `409 workspace_busy` while the workspace has a live job; result `{removed}` |
 | `POST api/tickets` | `{"workspace", "ticket", "title", "request"}` | `Setup.createTicket`: the ticket skeleton through the Task file writer, the request kept for the conversation; result `{workspace, ticket, path, base}` |
 | `POST api/tickets/<ws>/<ticket>/start` | `{}` | `Execution.start(ws, ticket)` (`sf start`, SF-040, SF-046): the job's record, branch and worktree, then iteration 1; result `{branch, state, check_after_minutes, worktree}`; refusals as they come (`409 task_draft` for a skeleton, `409 job_exists`, `409 job_limit`, `409 branch_exists`, `404 task_not_found`, ...); every page gets the jobs, the workspaces and the tickets again |
@@ -1611,7 +1649,12 @@ end), in a browser:
    (the OS scheme) and at phone width (below 760 px the columns stack with Your turn first). Five
    columns with their counts; each job is in the column of its state; a running card has the Now
    line and the tool calls, and its time moves every 15 s; a stopped one its reason, its code and
-   one button. The workspace filter keeps one workspace's cards. With more than eight finished
+   one button. The workspace filter keeps one workspace's cards, its chips with the workspaces'
+   colour dots; two workspaces' cards differ at a glance by their stripes, and each card names its
+   workspace. Dependencies: a Queue card whose Task file has `lands_after:` an open ticket shows
+   Waits for with its chip; hovering it outlines that ticket's card and dims the rest; its chip
+   scrolls to that card. Narrow the window: no Queue card overlaps the next column, keys do not
+   wrap. With more than eight finished
    jobs Done shows eight and *Show all N*, which expands the column in place. The queue controls
    and the Rules menu are not shown.
 2. Start: on a Queue card with a written Task file click Start: the dialog names the workspace,
@@ -1707,7 +1750,7 @@ screen (`POST api/workspaces`):
 {
   "workspaces": {
     "my-app": { "read_checkout": "/abs/path" },
-    "software-factory": { "read_checkout": "/abs/path2", "handoff": "off" }
+    "software-factory": { "read_checkout": "/abs/path2", "handoff": "off", "color": "teal" }
   }
 }
 ```
@@ -1723,7 +1766,13 @@ workspace's own hand-over setting and wins over `SF_HANDOFF` (SF-083, section Ha
 checkout); `sf workspace add --handoff checkout|off` and the dashboard's workspace form set it.
 `sf workspace list` and `sf info` show the setting that applies (the workspace's, or `SF_HANDOFF`
 with the shell's value); the form's list shows the workspace's own or "as SF_HANDOFF". To change it
-for a registered workspace, edit the file: it is read at each use.
+for a registered workspace, edit the file (it is read at each use) or run `sf workspace add` again
+with the same name and path and `--handoff` (the other fields stay). The optional `color` (SF-084:
+`blue`, `teal`, `green`, `olive`, `orange`, `red`, `purple` or `grey`; any other value makes the file
+invalid) is the workspace's colour on the board; without it the dashboard picks one by the name.
+`sf workspace add --color <name>` (an invalid name is refused with the list) and the dashboard's
+workspace form set it; `sf workspace add` again with the same name and path and `--color` changes
+it; `sf workspace list` shows it.
 
 ## History
 

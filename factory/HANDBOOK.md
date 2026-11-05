@@ -80,6 +80,7 @@ title: Short title of the subtask
 base: master          # branch to start from; a feature branch if this depends on unmerged work
 may_touch: [package.json, .github/**]   # optional: sensitive paths or globs this ticket is expected to change
 scope: [src/export/**, test/export.test.ts, README.md]   # optional: every file this ticket is expected to create, modify or delete
+lands_after: [PROJ-120, web/WEB-7]   # optional: the tickets this one waits for; another workspace's as <workspace>/<ticket>
 ---
 
 # PROJ-123: Short title
@@ -105,6 +106,12 @@ boundary: the files of the `## Files` list, tests and docs included. A path in `
 scope too. When the Task declares a scope, every changed path outside it is marked "outside the
 Task's scope" in the Report and for the reviewers, and stays only when a reviewer accepts it with
 a reason tied to the Task; otherwise it is a major fix item. Without `scope:` nothing is checked.
+
+`lands_after:` (in the same list forms) names the tickets this one waits for: `<ticket>` in the
+same workspace, `<workspace>/<ticket>` in another. The dashboard shows them on the Queue card and
+the job page as "Waits for" with each one's state (merged, pushed, running, planned or missing),
+and "Needed by" on the cards of the tickets waited for; a cycle is shown as an error. It does not
+start or hold back a job by itself. Entries that are not a valid ticket name are ignored.
 
 Always write a `## Review brief`. The reviewers read it with the rest of the Task file; the
 Implementer sees it too, so it states checks and reasons, not instructions. The `## Fix N`

@@ -26,7 +26,7 @@ import type { Execution } from './execution.js';
 import { lineEntries, type StreamEntry, streamContext } from './job-stream.js';
 import type { Job, JobState, JobStore } from './jobs.js';
 import { DECISIONS, unsettled } from './ledger.js';
-import { HANDOFF_MODES, WORKSPACE_NAME_PATTERN } from './registry.js';
+import { HANDOFF_MODES, WORKSPACE_COLORS, WORKSPACE_NAME_PATTERN } from './registry.js';
 import type { Setup } from './setup.js';
 import type { CheckSummary, TaskChecks } from './task-check.js';
 import { turnLimitLine } from './turn-limit.js';
@@ -77,7 +77,8 @@ export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'review', 
 const PUSH_CHECK_INTERVAL_MS = 60_000;
 
 // The start screen's data and changes: the workspace registry and the Task files (src/setup.ts).
-export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'removeWorkspace' | 'tickets' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'archivedTickets' | 'taskText' | 'taskTitle'>;
+// jobDependencies: the tickets a live job's Task file lands after (SF-084).
+export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'removeWorkspace' | 'tickets' | 'jobDependencies' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'archivedTickets' | 'taskText' | 'taskTitle'>;
 
 // The Task checks (SF-054): start one, a ticket's view and its board summary.
 export type DashboardChecks = Pick<TaskChecks, 'start' | 'view' | 'summary'>;
@@ -86,6 +87,7 @@ export type DashboardChecks = Pick<TaskChecks, 'start' | 'view' | 'summary'>;
 const NO_SETUP: DashboardSetup = {
   workspaces: async () => [],
   tickets: async () => [],
+  jobDependencies: async () => [],
   archivedTickets: async () => [],
   taskTitle: async () => null,
   taskText: async () => {
@@ -131,7 +133,10 @@ const BODIES = {
   handover: { shape: '{}', schema: z.strictObject({}) },
   takeback: { shape: '{}', schema: z.strictObject({}) },
   'handed-done': { shape: '{}', schema: z.strictObject({}) },
-  'workspace-add': { shape: '{"name": string, "path": string, "handoff"?: "checkout" | "off"}', schema: z.strictObject({ name: z.string(), path: z.string(), handoff: z.enum(HANDOFF_MODES).optional() }) },
+  'workspace-add': {
+    shape: `{"name": string, "path": string, "handoff"?: "checkout" | "off", "color"?: ${WORKSPACE_COLORS.map((color) => `"${color}"`).join(' | ')}}`,
+    schema: z.strictObject({ name: z.string(), path: z.string(), handoff: z.enum(HANDOFF_MODES).optional(), color: z.enum(WORKSPACE_COLORS).optional() }),
+  },
   'workspace-remove': { shape: '{}', schema: z.strictObject({}) },
   'ticket-archive': { shape: '{}', schema: z.strictObject({}) },
   'ticket-restore': { shape: '{}', schema: z.strictObject({}) },
@@ -512,7 +517,9 @@ async function checkOf(checks: DashboardChecks, workspace: string, ticket: strin
 }
 
 // The tickets without a live job, each with the ChatGPT conversation that plans it (the message
-// and the prefilled URL) and, with the Task checks, its last check (SF-054).
+// and the prefilled URL), the tickets it lands after with their states (SF-084) and, with the Task
+// checks, its last check (SF-054); job_lands_after: the same for the tickets with a live job, for
+// the job page's Waits for and the board's Needed by.
 async function ticketsPayload(setup: DashboardSetup, checks: DashboardChecks | undefined) {
   const tickets = [];
   for (const row of await setup.tickets()) {
@@ -524,7 +531,7 @@ async function ticketsPayload(setup: DashboardSetup, checks: DashboardChecks | u
       ...(checks !== undefined ? { check: await checkOf(checks, row.workspace, row.ticket) } : {}),
     });
   }
-  return { tickets, archived: await setup.archivedTickets() };
+  return { tickets, archived: await setup.archivedTickets(), job_lands_after: await setup.jobDependencies() };
 }
 
 async function stateHistory(jobs: JobStore, workspace: string, ticket: string) {
@@ -1160,7 +1167,7 @@ export async function startDashboard(
         route: 'workspace-add',
         call: (data) => {
           const parsed = BODIES['workspace-add'].schema.safeParse(data);
-          return parsed.success ? () => setup.addWorkspace(parsed.data.name, parsed.data.path, parsed.data.handoff) : undefined;
+          return parsed.success ? () => setup.addWorkspace(parsed.data.name, parsed.data.path, parsed.data.handoff, parsed.data.color) : undefined;
         },
         refreshSetup: true,
       };

@@ -5,10 +5,12 @@
 // Queue card's Start with its confirmation, refusal and unknown outcome, the planned ticket's Task as
 // text, the workspace filter, the job's full page and the routing by the URL hash, the keys, the
 // 15 s read of api/jobs, the toast, the queue controls hidden without SF-071, and no inline style or
-// prototype-only part. Script checks, not browser acceptance: the manual steps are in factory/README.md.
+// prototype-only part; SF-084: the dependency chips and their states, Needed by, the highlight, the
+// chip's focus, the cycle line, the workspace stripe and chip, the filter chips and the ⋯ menu. Script checks, not browser acceptance: the manual steps are in factory/README.md.
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
+import { type WorkspaceColor, workspaceColor } from '../src/registry.js';
 import { type FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
 
 const STATIC_DIR = new URL('../../static/', import.meta.url);
@@ -36,7 +38,8 @@ function ticket(key: string, extra: Record<string, unknown> = {}) {
   return { workspace, ticket: name, title: `Ticket ${name}`, base: 'main', draft: false, request: null, job: null, conversation: { message: 'm', url: null }, ...extra };
 }
 
-const workspace = (name: string) => ({ name, path: `/srv/${name}`, liveJobs: 0, problem: null });
+// The colour as the server sends it (SF-084): the configured one, else the hash of the name.
+const workspace = (name: string, color?: WorkspaceColor) => ({ name, path: `/srv/${name}`, liveJobs: 0, problem: null, handoff: null, color: workspaceColor(name, color) });
 
 type Job = ReturnType<typeof job>;
 
@@ -158,33 +161,58 @@ test('board client: one column per ticket: a pushed one only in Done, a failed o
   assert.deepEqual(keys(page, 'done').sort(), ['app/F-1', 'app/P-1', 'app/X-1']);
 });
 
-test('board client: a Queue card: the check note, Start (the one primary), Check, Archive and Delete…; a skeleton waits for the plan', async () => {
+test('board client: a Queue card: the check chip, Start (secondary), Task and the ⋯ menu with Check, Archive and Delete…; a skeleton waits for the plan', async () => {
   const check = (extra: Record<string, unknown> = {}) => ({ state: 'none', stale: false, running: false, blockers: 0, majors: 0, nits: 0, ended_at: null, start_note: 'not checked', ...extra });
   const page = await openBoard([], [
     ticket('app/T-1', { draft: true, check: check() }), ticket('app/T-2', { check: check({ state: 'ready', start_note: null }) }), ticket('app/T-3'),
   ]);
+  const chip = (item: FakeElement) => part(item, 'cnote')!;
   const skeleton = card(page, 'app/T-1');
-  assert.equal(part(skeleton, 'money')!.textContent, 'draft');
+  assert.equal(chip(skeleton).textContent, 'draft');
   assert.match(part(skeleton, 'act')!.textContent, /^waiting for the plan/);
-  assert.deepEqual(labels(skeleton), ['Archive', 'Delete…']);
+  // The check note twice: on the first line, and under the title for a card too narrow (CSS).
+  assert.deepEqual(labels(skeleton), ['draft', 'draft', 'Task', '⋯', 'Archive', 'Delete…']);
   const ready = card(page, 'app/T-2');
-  assert.equal(part(ready, 'money')!.textContent, 'check: ready');
+  assert.equal(chip(ready).textContent, 'check: ready');
   assert.deepEqual(buttons(ready).map((element) => [element.textContent, element.className]), [
-    ['Start', 'btn primary small'], ['Check', 'btn small'], ['Archive', 'btn small'], ['Delete…', 'btn small danger'],
+    ['check: ready', 'tag cnote'], ['check: ready', 'tag cnote below'], ['Start', 'btn small'], ['Task', 'btn small'], ['⋯', 'btn small more'],
+    ['Check', 'btn small'], ['Archive', 'btn small'], ['Delete…', 'btn small danger'],
   ]);
+  // In the Queue no button is primary (SF-084): the only solid ones are Your turn's.
+  assert.deepEqual(['app/T-1', 'app/T-2', 'app/T-3'].map((key) => buttons(card(page, key)).filter((element) => element.classList.contains('primary')).length), [0, 0, 0]);
   // Without the Task checks there is no Check.
-  assert.deepEqual([part(card(page, 'app/T-3'), 'money')!.textContent, labels(card(page, 'app/T-3'))], ['not checked', ['Start', 'Archive', 'Delete…']]);
+  assert.deepEqual([chip(card(page, 'app/T-3')).textContent, labels(card(page, 'app/T-3'))], ['not checked', ['not checked', 'not checked', 'Start', 'Task', '⋯', 'Archive', 'Delete…']]);
+  // The ⋯ menu is closed until its button opens it; a click elsewhere or Escape closes it.
+  const menu = () => part(card(page, 'app/T-3'), 'cmenu')!;
+  const toggle = () => button(card(page, 'app/T-3'), '⋯')!;
+  assert.deepEqual([menu().hidden, menu().getAttribute('role'), toggle().getAttribute('aria-expanded'), toggle().getAttribute('aria-haspopup')], [true, 'menu', 'false', 'menu']);
+  toggle().click();
+  assert.deepEqual([menu().hidden, toggle().getAttribute('aria-expanded'), page.document.activeElement?.textContent], [false, 'true', 'Archive']);
+  assert.equal(part(card(page, 'app/T-2'), 'cmenu')!.hidden, true);
+  page.key('Escape');
+  assert.deepEqual([menu().hidden, page.document.activeElement], [true, toggle()]);
+  toggle().click();
+  page.$('summary').click();
+  assert.equal(menu().hidden, true);
   // Archive and Delete… go through the confirmation and the routes of today.
+  toggle().click();
   button(card(page, 'app/T-3'), 'Delete…')!.click();
-  assert.deepEqual([page.$('ticket-confirm').hidden, page.$('ticket-confirm-title').textContent], [false, 'Delete app/T-3?']);
+  assert.deepEqual([page.$('ticket-confirm').hidden, page.$('ticket-confirm-title').textContent, menu().hidden], [false, 'Delete app/T-3?', true]);
   page.$('ticket-cancel').click();
   button(card(page, 'app/T-3'), 'Archive')!.click();
   await page.flush();
   button(card(page, 'app/T-2'), 'Check')!.click();
   await page.flush();
   assert.deepEqual(posts(page).map((request) => request.path), ['api/tickets/app/T-3/archive', 'api/tickets/app/T-2/check']);
-  // A click on a button does not open the ticket.
+  // A click on a button does not open the ticket; the check chip and Task do.
   assert.equal(page.$('drawer').hidden, true);
+  chip(card(page, 'app/T-2')).click();
+  await page.flush();
+  assert.deepEqual([page.$('drawer').hidden, page.location.hash], [false, '#app/T-2/ticket']);
+  page.$('drawer-close').click();
+  button(card(page, 'app/T-3'), 'Task')!.click();
+  await page.flush();
+  assert.deepEqual([page.$('drawer').hidden, page.location.hash], [false, '#app/T-3/ticket']);
 });
 
 test('board client: Start asks first, naming the workspace, the ticket and the base; Cancel sends nothing; a refusal shows in the toast as it comes', async () => {
@@ -337,24 +365,30 @@ test('board client: a click on a Queue card opens the planned ticket: its Task t
   assert.equal(page.$('task-body').textContent, 'Could not load the Task file: api/tickets/app/T-2/task: HTTP 404\n');
 });
 
-test('board client: a card moves column on a jobs event; the workspace filter keeps one workspace; the workspace shows on cards only with more than one', async () => {
+test('board client: a card moves column on a jobs event; the workspace filter chips keep one workspace and give all back; every card shows its workspace', async () => {
   const page = await openBoard([job('T-1', 'working'), { ...job('W-1', 'working'), workspace: 'web' }], [ticket('web/W-2')], [workspace('app'), workspace('web')]);
   const stream = page.streams.at(-1)!;
   assert.deepEqual(keys(page, 'implementing').sort(), ['app/T-1', 'web/W-1']);
-  assert.deepEqual(card(page, 'web/W-1').all().filter((element) => element.className === 'tag').map((element) => element.textContent), ['web']);
+  assert.equal(part(card(page, 'web/W-1'), 'wschip')!.textContent, 'web');
   stream.emit('jobs', { jobs: [job('T-1', 'awaiting_review'), { ...job('W-1', 'working'), workspace: 'web' }] });
   assert.deepEqual([keys(page, 'implementing'), keys(page, 'reviewing')], [['web/W-1'], ['app/T-1']]);
   stream.emit('jobs', { jobs: [job('T-1', 'ready_for_human_review'), { ...job('W-1', 'working'), workspace: 'web' }] });
   assert.deepEqual([keys(page, 'reviewing'), keys(page, 'you')], [[], ['app/T-1']]);
   assert.equal(page.$('count-you').textContent, '1');
 
-  // The filter: All and one button per workspace; one workspace keeps its cards and counts.
-  const filters = page.$('workspace-filter').children as FakeElement[];
-  assert.deepEqual(filters.map((element) => [element.textContent, element.getAttribute('aria-pressed'), element.className]), [['All workspaces', 'true', 'on'], ['app', 'false', ''], ['web', 'false', '']]);
-  filters[2]!.click();
+  // The filter: All and one chip per workspace (its dot and name); one workspace keeps its cards and counts.
+  const filters = () => page.$('workspace-filter').children as FakeElement[];
+  assert.deepEqual(filters().map((element) => [element.textContent, element.getAttribute('aria-pressed'), element.className]), [['All workspaces', 'true', 'on'], ['app', 'false', ''], ['web', 'false', '']]);
+  assert.deepEqual(filters().slice(1).map((element) => (element.children[0] as FakeElement).className), ['wsdot ws-teal', 'wsdot ws-purple']);
+  filters()[2]!.click();
   assert.deepEqual([keys(page, 'queue'), keys(page, 'implementing'), keys(page, 'you')], [['web/W-2'], ['web/W-1'], []]);
   assert.equal(page.$('count-you').textContent, '0');
-  assert.deepEqual(card(page, 'web/W-1').all().filter((element) => element.className === 'tag').map((element) => element.textContent), []);
+  // The workspace shows on every card, even when the board shows one workspace (SF-084).
+  assert.equal(part(card(page, 'web/W-1'), 'wschip')!.textContent, 'web');
+  // The same chip again: every workspace.
+  filters()[2]!.click();
+  assert.deepEqual([keys(page, 'you'), filters()[0]!.getAttribute('aria-pressed')], [['app/T-1'], 'true']);
+  filters()[2]!.click();
   // A removed workspace drops its filter.
   stream.emit('workspaces', { workspaces: [workspace('app')] });
   assert.deepEqual(keys(page, 'you'), ['app/T-1']);
@@ -379,7 +413,8 @@ test('board client: a running card: the Now line and the tool calls, the cost so
   assert.equal(part(card(page, 'app/W'), 'money')!.textContent, '$1.23 so far · 14 min');
   assert.deepEqual(now('app/C'), ['I,B,SPAN', 'Now: Codex gatereviewing iteration 2', 'reviewing iteration 2']);
   assert.equal(part(card(page, 'app/C'), 'meta')!.textContent, 'Iteration 2 · 1 tool call');
-  assert.equal(part(card(page, 'app/C'), 'money')!.textContent, '— so far · 1 h 4 min');
+  // No cost yet: nothing about it until one exists (SF-084), only the time.
+  assert.equal(part(card(page, 'app/C'), 'money')!.textContent, '1 h 4 min');
   // Before the log has a step: who the state says.
   assert.deepEqual(now('app/S'), ['I,B,SPAN', 'Now: Implementerstarting', 'starting']);
   assert.equal(part(card(page, 'app/S'), 'meta')!.textContent, 'Iteration 1 · 0 tool calls');
@@ -576,7 +611,7 @@ test('board client: a job card opens the job as a full page, following it on the
   // The header: ← Board, the key and the title; the Stream and the composer below it.
   const head = page.$('jhead');
   assert.deepEqual([head.children[0]!.textContent, (head.children[0] as FakeElement).className], ['← Board', 'btn back']);
-  assert.equal(head.children[1]!.textContent, 'T-1Title of T-1');
+  assert.equal(head.children[1]!.textContent, 'T-1appTitle of T-1');
   page.streams.at(-1)!.emit('job', detail(job('T-1', 'working')));
   assert.match(page.$('composer-sentence').textContent, /^The Implementer is working on iteration 2\./);
   assert.equal(page.$('job').className, 'st-working');
@@ -767,4 +802,155 @@ test('board client: a job whose turn went on by itself after the turn limit says
   const notes = (key: string) => card(page, key).all().filter((element) => element.classList.contains('note')).map((element) => element.textContent);
   assert.deepEqual(notes('app/J-1'), [line]);
   assert.deepEqual(notes('app/J-2'), []);
+});
+
+// SF-084: the dependencies of the tickets, as the server sends them in the tickets payload.
+const dep = (key: string, state: string) => {
+  const [workspace, name] = key.split('/') as [string, string];
+  return { workspace, ticket: name, state };
+};
+const lineOf = (item: FakeElement, className: string): FakeElement | undefined => item.all().find((element) => element.classList.contains('deps') && element.classList.contains(className));
+const chips = (line: FakeElement | undefined): Array<[string, string]> => (line === undefined ? [] : line.all().filter((element) => element.classList.contains('dchip')).map((element) => [element.textContent, element.className]));
+
+test('board client (SF-084): Waits for with a chip per dependency and its state mark; nothing once all are merged; Start says what it waits for; Needed by on the cards waited for', async () => {
+  const page = await openBoard([job('B-1', 'working'), job('M-1', 'pushed')], [
+    ticket('app/Q-1', { lands_after: [dep('app/M-1', 'merged'), dep('app/B-1', 'running'), dep('app/P-1', 'pushed'), dep('app/N-1', 'planned'), dep('web/X-1', 'missing')] }),
+    ticket('app/Q-2', { lands_after: [dep('app/M-1', 'merged')] }),
+    ticket('app/N-1'),
+    ticket('app/Q-3'),
+  ], [workspace('app'), workspace('web')]);
+  const waits = lineOf(card(page, 'app/Q-1'), 'waits')!;
+  assert.equal(waits.children[0] instanceof Object && (waits.children[0] as FakeElement).textContent, 'Waits for');
+  assert.deepEqual(chips(waits), [
+    ['✓ M-1', 'dchip dep-merged'], ['⧗ B-1', 'dchip dep-running'], ['⧗ P-1', 'dchip dep-pushed'], ['⧗ N-1', 'dchip dep-planned'], ['✗ web/X-1', 'dchip dep-missing'],
+  ]);
+  // Never colour alone: the mark, and the state in words as the chip's title.
+  assert.deepEqual(waits.all().filter((element) => element.classList.contains('dchip')).map((element) => element.getAttribute('title')),
+    ['app/M-1: merged', 'app/B-1: running', 'app/P-1: pushed, not merged yet', 'app/N-1: planned, not started', 'web/X-1: no Task file and no job']);
+  const start = button(card(page, 'app/Q-1'), 'Start')!;
+  assert.deepEqual([start.className, start.getAttribute('title')], ['btn small', 'Waits for B-1, P-1, N-1, web/X-1']);
+  // All merged: nothing extra, Start as on any card.
+  assert.equal(lineOf(card(page, 'app/Q-2'), 'waits'), undefined);
+  assert.equal(button(card(page, 'app/Q-2'), 'Start')!.getAttribute('title'), null);
+  assert.equal(lineOf(card(page, 'app/Q-3'), 'waits'), undefined);
+  // Needed by: on the Queue card, the running job's and the Done card of the tickets waited for.
+  assert.deepEqual(chips(lineOf(card(page, 'app/N-1'), 'needed')), [['Q-1', 'dchip']]);
+  assert.equal(lineOf(card(page, 'app/N-1'), 'needed')!.children[0] instanceof Object && (lineOf(card(page, 'app/N-1'), 'needed')!.children[0] as FakeElement).textContent, 'Needed by');
+  assert.deepEqual(chips(lineOf(card(page, 'app/B-1'), 'needed')), [['Q-1', 'dchip']]);
+  assert.deepEqual(chips(lineOf(card(page, 'app/M-1'), 'needed')), [['Q-1', 'dchip'], ['Q-2', 'dchip']]);
+  assert.equal(lineOf(card(page, 'app/Q-3'), 'needed'), undefined);
+  // A live job's Task file (job_lands_after) counts for Needed by too.
+  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('app/Q-3')], archived: [], job_lands_after: [{ workspace: 'app', ticket: 'B-1', lands_after: [dep('app/Q-3', 'planned')] }] });
+  assert.deepEqual(chips(lineOf(card(page, 'app/Q-3'), 'needed')), [['B-1', 'dchip']]);
+  assert.equal(lineOf(card(page, 'app/B-1'), 'waits'), undefined);
+});
+
+test('board client (SF-084): hovering or focusing a card outlines its dependencies and dependents and dims the rest; leaving or Escape clears it', async () => {
+  const page = await openBoard([job('B-1', 'working'), job('D-1', 'pushed')], [
+    ticket('app/Q-1', { lands_after: [dep('app/B-1', 'running')] }),
+    ticket('app/Q-2', { lands_after: [dep('app/Q-1', 'planned')] }),
+    ticket('app/Q-3'),
+  ]);
+  const marks = () => ['app/Q-1', 'app/Q-2', 'app/Q-3', 'app/B-1', 'app/D-1'].map((key) => {
+    const item = card(page, key);
+    return item.classList.contains('rel') ? 'rel' : item.classList.contains('dim') ? 'dim' : '';
+  });
+  assert.deepEqual(marks(), ['', '', '', '', '']);
+  part(card(page, 'app/Q-1'), 'title')!.dispatch('mouseover');
+  assert.deepEqual(marks(), ['', 'rel', 'dim', 'rel', 'dim']);
+  // Kept across a new rendering of the board.
+  page.streams.at(-1)!.emit('jobs', { jobs: [job('B-1', 'working'), job('D-1', 'pushed')] });
+  assert.deepEqual(marks(), ['', 'rel', 'dim', 'rel', 'dim']);
+  // Off the cards: cleared; a card without dependencies or dependents dims nothing.
+  page.$('summary').dispatch('mouseover');
+  assert.deepEqual(marks(), ['', '', '', '', '']);
+  card(page, 'app/Q-3').dispatch('mouseover');
+  assert.deepEqual(marks(), ['', '', '', '', '']);
+  // The focus does it too; Escape clears it; the pointer leaving the columns clears it.
+  card(page, 'app/B-1').focus();
+  card(page, 'app/B-1').dispatch('focusin');
+  assert.deepEqual(marks(), ['rel', 'dim', 'dim', '', 'dim']);
+  page.key('Escape');
+  assert.deepEqual(marks(), ['', '', '', '', '']);
+  card(page, 'app/Q-2').dispatch('focusin');
+  assert.deepEqual(marks(), ['rel', '', 'dim', 'dim', 'dim']);
+  card(page, 'app/Q-2').dispatch('focusout', { relatedTarget: page.$('summary') });
+  assert.deepEqual(marks(), ['', '', '', '', '']);
+  card(page, 'app/Q-2').dispatch('mouseover');
+  page.$('cols').dispatch('mouseleave');
+  assert.deepEqual(marks(), ['', '', '', '', '']);
+});
+
+test('board client (SF-084): a chip scrolls to its card and focuses it, lifting a filter that hides it; a ticket without a card says so; the click opens nothing', async () => {
+  const page = await openBoard([{ ...job('W-1', 'working'), workspace: 'web' }], [
+    ticket('app/Q-1', { lands_after: [dep('web/W-1', 'running'), dep('app/GONE', 'missing')] }),
+    ticket('app/Q-2'),
+  ], [workspace('app'), workspace('web')]);
+  const chip = (text: string) => lineOf(card(page, 'app/Q-1'), 'waits')!.all().find((element) => element.classList.contains('dchip') && element.textContent.endsWith(text))!;
+  chip('web/W-1').click();
+  await page.flush();
+  const target = card(page, 'web/W-1');
+  assert.deepEqual([page.document.activeElement, target.scrolledIntoView, page.location.hash, page.$('drawer').hidden], [target, 1, '', true]);
+  // Its card outlined with the others dimmed.
+  assert.deepEqual([card(page, 'app/Q-1').classList.contains('rel'), card(page, 'app/Q-2').classList.contains('dim')], [true, true]);
+  // Filtered out: the filter goes back to every workspace.
+  page.$('workspace-filter').children.map((child) => child as FakeElement).find((element) => element.textContent === 'app')!.click();
+  assert.deepEqual(keys(page, 'implementing'), []);
+  chip('web/W-1').click();
+  assert.deepEqual([keys(page, 'implementing'), page.document.activeElement], [['web/W-1'], card(page, 'web/W-1')]);
+  // No card: the toast says so.
+  chip('GONE').click();
+  assert.equal(page.$('toast-text').textContent, 'app/GONE has no card on the board: no Task file and no job.');
+  // Needed by's chip goes the other way.
+  lineOf(card(page, 'web/W-1'), 'needed')!.all().find((element) => element.classList.contains('dchip'))!.click();
+  assert.equal(page.document.activeElement, card(page, 'app/Q-1'));
+});
+
+test('board client (SF-084): a dependency cycle of any length shows on each of its cards in the error colour, without hanging', async () => {
+  const page = await openBoard([], [
+    ticket('app/A', { lands_after: [dep('app/B', 'planned')] }),
+    ticket('app/B', { lands_after: [dep('app/C', 'planned')] }),
+    ticket('app/C', { lands_after: [dep('app/A', 'planned'), dep('web/W', 'planned')] }),
+    ticket('app/S', { lands_after: [dep('app/S', 'planned')] }),
+    ticket('app/D', { lands_after: [dep('app/A', 'planned')] }),
+    ticket('web/W'),
+  ], [workspace('app'), workspace('web')]);
+  const cycle = (key: string) => lineOf(card(page, key), 'cycle')?.textContent;
+  assert.deepEqual(['app/A', 'app/B', 'app/C', 'app/S', 'app/D', 'web/W'].map(cycle),
+    ['Dependency cycle: A → B → C → A', 'Dependency cycle: B → C → A → B', 'Dependency cycle: C → A → B → C', 'Dependency cycle: S → S', undefined, undefined]);
+});
+
+test('board client (SF-084): each card has its workspace stripe and chip; the configured colour wins over the hash; a long name is shortened in the middle', async () => {
+  const long = 'customer-portal-frontend-app';
+  const page = await openBoard([job('T-1', 'working'), { ...job('L-1', 'needs_human'), workspace: long }], [ticket('web/W-1'), ticket(`${long}/L-2`)],
+    [workspace('app'), workspace('web', 'orange'), workspace(long)]);
+  assert.deepEqual(['app/T-1', 'web/W-1'].map((key) => card(page, key).className), ['card ws-teal', 'card ws-orange']);
+  const chip = part(card(page, 'web/W-1'), 'wschip')!;
+  assert.deepEqual([chip.className, chip.textContent, chip.getAttribute('title'), (chip.children[0] as FakeElement).className], ['wschip ws-orange', 'web', 'Workspace web', 'wsdot ws-orange']);
+  // The hash of the name, as the server sends it, when none is configured: a+p+p = 321, 321 mod 8 = 1.
+  assert.equal(part(card(page, 'app/T-1'), 'wschip')!.className, 'wschip ws-teal');
+  for (const key of [`${long}/L-1`, `${long}/L-2`]) {
+    const item = part(card(page, key), 'wschip')!;
+    assert.deepEqual([item.textContent, item.getAttribute('title')], ['custome…tend-app', `Workspace ${long}`]);
+  }
+  // A workspace the registry no longer lists: no colour class, the name still there.
+  page.streams.at(-1)!.emit('workspaces', { workspaces: [workspace('app')] });
+  assert.deepEqual([card(page, 'web/W-1').className, part(card(page, 'web/W-1'), 'wschip')!.textContent], ['card', 'web']);
+});
+
+test('board client (SF-084): the job page header shows the workspace chip in its colour, Waits for and Needed by', async () => {
+  const page = await openBoard([job('T-1', 'working')], [ticket('app/Q-1', { lands_after: [dep('app/T-1', 'running')] }), ticket('app/M-1')], [workspace('app', 'red')], '#app/T-1');
+  page.streams.at(-1)!.emit('tickets', {
+    tickets: [ticket('app/Q-1', { lands_after: [dep('app/T-1', 'running')] }), ticket('app/M-1')], archived: [],
+    job_lands_after: [{ workspace: 'app', ticket: 'T-1', lands_after: [dep('app/M-1', 'planned')] }],
+  });
+  await page.flush();
+  assert.ok(onJobPage(page));
+  const head = page.$('jhead');
+  assert.equal(part(head, 'wschip')!.className, 'wschip ws-red');
+  assert.deepEqual([chips(lineOf(head, 'waits')), chips(lineOf(head, 'needed'))], [[['⧗ M-1', 'dchip dep-planned']], [['Q-1', 'dchip']]]);
+  // A chip goes back to the board, to that card.
+  lineOf(head, 'needed')!.all().find((element) => element.classList.contains('dchip'))!.click();
+  await page.flush();
+  assert.deepEqual([onJobPage(page), page.document.activeElement], [false, card(page, 'app/Q-1')]);
 });

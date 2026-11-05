@@ -17,19 +17,24 @@
   --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
   --radius: 8px; --radius-sm: 6px; --control: 32px; --shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
   --tree-w: 320px; --vcs-mod: #2f6ad0; --vcs-add: #3d8a33; --vcs-del: #8c8c8c; --wbg-add: #b7e4c0; --wbg-del: #f5c1bd;
+  /* SF-084: the workspace palette (stripe and dot, at least 4:1 against --bg, --panel and --panel-2;
+     blue and red apart from --accent and --del, so a stripe never reads as a highlight or an error). */
+  --ws-blue: #3451b2; --ws-teal: #0f766e; --ws-green: #2f855a; --ws-olive: #6b7a12; --ws-orange: #c05621; --ws-red: #c53030; --ws-purple: #6f42c1; --ws-grey: #5f6b7a;
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
   --bg: #141619; --panel: #1d2024; --panel-2: #23272c; --fg: #e6e8eb; --muted: #9aa3ad; --border: #343a41; --border-strong: #454c55;
   --accent: #6fa8ff; --accent-fg: #0b1220; --selected: #26354a; --add: #56d364; --add-bg: #1b3524; --del: #ff7b72; --del-bg: #3d1f1f;
   --warn: #e3b341; --warn-bg: #3b2f12; --hunk: #b392f0; --s-working: #6fa8ff; --s-review: #e3b341; --s-human: #f0883e; --s-ready: #56d364;
   --s-ended: #9aa3ad; --s-failed: #ff7b72; --a-impl: #6fa8ff; --a-claude: #e3b341; --a-codex: #b392f0; --a-you: #56d364; --a-factory: #9aa3ad;
-  --proto: #ff7b72; --bar: #e6e8eb; --bar-fg: #141619; --shadow: none; --vcs-mod: #6c9ef8; --vcs-add: #73bd79; --vcs-del: #8f9399; --wbg-add: #2c5d36; --wbg-del: #6b2b2b; color-scheme: dark; } }
+  --proto: #ff7b72; --bar: #e6e8eb; --bar-fg: #141619; --shadow: none; --vcs-mod: #6c9ef8; --vcs-add: #73bd79; --vcs-del: #8f9399; --wbg-add: #2c5d36; --wbg-del: #6b2b2b; color-scheme: dark;
+  --ws-blue: #8da2fb; --ws-teal: #2cc5b4; --ws-green: #56d364; --ws-olive: #b8c74a; --ws-orange: #f0883e; --ws-red: #f47067; --ws-purple: #b392f0; --ws-grey: #a3acb7; } }
 :root[data-theme="dark"] {
   --bg: #141619; --panel: #1d2024; --panel-2: #23272c; --fg: #e6e8eb; --muted: #9aa3ad; --border: #343a41; --border-strong: #454c55;
   --accent: #6fa8ff; --accent-fg: #0b1220; --selected: #26354a; --add: #56d364; --add-bg: #1b3524; --del: #ff7b72; --del-bg: #3d1f1f;
   --warn: #e3b341; --warn-bg: #3b2f12; --hunk: #b392f0; --s-working: #6fa8ff; --s-review: #e3b341; --s-human: #f0883e; --s-ready: #56d364;
   --s-ended: #9aa3ad; --s-failed: #ff7b72; --a-impl: #6fa8ff; --a-claude: #e3b341; --a-codex: #b392f0; --a-you: #56d364; --a-factory: #9aa3ad;
-  --proto: #ff7b72; --bar: #e6e8eb; --bar-fg: #141619; --shadow: none; --vcs-mod: #6c9ef8; --vcs-add: #73bd79; --vcs-del: #8f9399; --wbg-add: #2c5d36; --wbg-del: #6b2b2b; color-scheme: dark; }
+  --proto: #ff7b72; --bar: #e6e8eb; --bar-fg: #141619; --shadow: none; --vcs-mod: #6c9ef8; --vcs-add: #73bd79; --vcs-del: #8f9399; --wbg-add: #2c5d36; --wbg-del: #6b2b2b; color-scheme: dark;
+  --ws-blue: #8da2fb; --ws-teal: #2cc5b4; --ws-green: #56d364; --ws-olive: #b8c74a; --ws-orange: #f0883e; --ws-red: #f47067; --ws-purple: #b392f0; --ws-grey: #a3acb7; }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 var(--sans); }
@@ -416,6 +421,52 @@ button.tag:hover { border-color: var(--accent); }
 .card.hl { border-color: var(--accent); box-shadow: 0 0 0 3px var(--selected); }
 .card .act { flex-wrap: wrap; align-items: center; }
 .jhead .t1 .tag { font-weight: 400; }
+
+/* SF-084: workspaces and dependencies on the board, and the cards that fit their column (the
+   prototype's .card with min-width: 0, a key that never wraps, the workspace chip and the check note
+   truncated with the full text as their title, the note under the title when the first line has no
+   room). Each workspace's colour: a 4px stripe on its cards, a dot beside its name (never colour
+   alone). A card's ⋯ menu holds Check, Archive and Delete…. Hovering or focusing a card outlines its
+   dependencies and dependents and dims the rest. */
+.ws-blue { --ws: var(--ws-blue); } .ws-teal { --ws: var(--ws-teal); } .ws-green { --ws: var(--ws-green); } .ws-olive { --ws: var(--ws-olive); }
+.ws-orange { --ws: var(--ws-orange); } .ws-red { --ws: var(--ws-red); } .ws-purple { --ws: var(--ws-purple); } .ws-grey { --ws: var(--ws-grey); }
+.col ul { grid-template-columns: minmax(0, 1fr); }
+.col ul > li { min-width: 0; }
+.card { min-width: 0; border-left: 4px solid var(--ws, var(--border-strong)); container-type: inline-size; }
+.card:hover, .card:focus-visible, .card.hl { border-left-color: var(--ws, var(--accent)); }
+.card .row1 { min-width: 0; }
+.card .row1 .key { white-space: nowrap; flex: none; }
+.card .row1 .tag { flex: none; }
+.wschip { display: inline-flex; align-items: center; gap: 4px; min-width: 0; font: 11px var(--mono); color: var(--muted); }
+.card .row1 .wschip { flex: 0 1 auto; overflow: hidden; }
+.wschip .wsname, .seg2 .wsname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wsdot { width: 8px; height: 8px; border-radius: 50%; background: var(--ws, var(--s-ended)); display: inline-block; flex: none; }
+.seg2 button[data-ws] { display: inline-flex; align-items: center; gap: 5px; max-width: 200px; }
+.ws-name .wsdot { margin-right: 6px; }
+.jhead .t1 .wschip { flex: 0 1 auto; max-width: 30%; }
+.card .cnote { margin-left: auto; min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.card .cnote.below { display: none; justify-self: start; max-width: 100%; margin-left: 0; }
+@container (max-width: 340px) {
+  .card .row1 .cnote { display: none; }
+  .card .cnote.below { display: block; }
+}
+.card .title { overflow-wrap: anywhere; }
+.deps { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: baseline; font-size: 12px; min-width: 0; }
+.deps .lbl { color: var(--muted); }
+.dchip { font: 11px var(--mono); color: var(--fg); border: 1px solid var(--border-strong); border-radius: 999px; padding: 0 7px; background: var(--panel-2); cursor: pointer; white-space: nowrap; }
+.dchip:hover { border-color: var(--accent); }
+.dchip .mk { font-weight: 700; }
+.dchip.dep-merged .mk { color: var(--add); }
+.dchip.dep-pushed .mk, .dchip.dep-running .mk, .dchip.dep-planned .mk { color: var(--warn); }
+.dchip.dep-missing .mk { color: var(--del); }
+.deps.cycle { color: var(--del); font-weight: 600; overflow-wrap: anywhere; }
+.jhead .t2 .deps { font-size: 12px; }
+.card.rel { border-color: var(--accent); border-left-color: var(--ws, var(--accent)); box-shadow: 0 0 0 2px var(--accent); }
+.card.dim { opacity: .45; }
+.card .act { position: relative; }
+.card .act .more { margin-left: auto; }
+.cmenu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 12; min-width: 140px; display: grid; gap: 4px; padding: 6px; background: var(--panel); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: 0 12px 40px rgba(0,0,0,.2); }
+.cmenu .btn { text-align: left; }
 .jhead .t2 .branch { all: unset; cursor: pointer; font: 12px var(--mono); }
 .jhead .t2 .branch:hover { color: var(--accent); text-decoration: underline; }
 .jhead .t2 .branch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

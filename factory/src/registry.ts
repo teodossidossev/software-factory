@@ -3,7 +3,7 @@
 // path is verified at use time: it must be the root of a non-bare Git work tree. Since SF-019 a
 // workspace is one checkout: the Implementer works in a worktree of it, so a separate work
 // checkout (`work_checkout`) is read for compatibility and ignored. A workspace's optional `handoff`
-// (SF-083) wins over SF_HANDOFF for its jobs.
+// (SF-083) wins over SF_HANDOFF for its jobs; its optional `color` (SF-084) marks its cards on the board.
 import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -33,10 +33,34 @@ export function isHandoffMode(value: unknown): value is HandoffMode {
   return (HANDOFF_MODES as readonly unknown[]).includes(value);
 }
 
+// The workspace colours (SF-084): the board's palette, each a light and a dark token --ws-<name> in
+// static/app.css. A workspace's optional `color` picks one; without it, workspaceColor hashes the name.
+export const WORKSPACE_COLORS = ['blue', 'teal', 'green', 'olive', 'orange', 'red', 'purple', 'grey'] as const;
+export type WorkspaceColor = (typeof WORKSPACE_COLORS)[number];
+
+export function isWorkspaceColor(value: unknown): value is WorkspaceColor {
+  return (WORKSPACE_COLORS as readonly unknown[]).includes(value);
+}
+
+// The colour of a workspace: its configured one, else the palette entry at the sum of the UTF-16
+// code units of its name mod the palette's size (stable across starts and machines).
+export function workspaceColor(name: string, color?: WorkspaceColor): WorkspaceColor {
+  if (color !== undefined) {
+    return color;
+  }
+  let sum = 0;
+  for (let index = 0; index < name.length; index += 1) {
+    sum += name.charCodeAt(index);
+  }
+  return WORKSPACE_COLORS[sum % WORKSPACE_COLORS.length]!;
+}
+
 const registrySchema = z.strictObject({
   workspaces: z.record(
     z.string().regex(WORKSPACE_NAME_PATTERN),
-    z.strictObject({ read_checkout: absolutePath, work_checkout: absolutePath.optional(), handoff: z.enum(HANDOFF_MODES).optional() }),
+    z.strictObject({
+      read_checkout: absolutePath, work_checkout: absolutePath.optional(), handoff: z.enum(HANDOFF_MODES).optional(), color: z.enum(WORKSPACE_COLORS).optional(),
+    }),
   ),
 });
 

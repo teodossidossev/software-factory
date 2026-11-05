@@ -95,7 +95,7 @@ test('job client: the hash opens the job as its full page on the Stream; a hash 
   const page = await openJob(detail(job('working')), () => undefined, undefined, [other]);
   assert.deepEqual([page.$('job').hidden, page.$('board').hidden, page.$('drawer').hidden], [false, true, true]);
   assert.deepEqual(shownScreens(page), ['scrStream']);
-  assert.deepEqual([t1(page).textContent, page.location.hash], ['T-1Demo', '#app/T-1']);
+  assert.deepEqual([t1(page).textContent, page.location.hash], ['T-1appDemo', '#app/T-1']);
   assert.equal(page.streams.at(-1)!.url, 'api/stream?job=app%2FT-1&from=0');
   // No element of the old job detail is left.
   for (const id of ['detail', 'job-tabs', 'job-stepper', 'next-panel', 'job-facts', 'history', 'events', 'ledger-panel', 'say-form', 'action-reasons', 'job-task']) {
@@ -106,7 +106,7 @@ test('job client: the hash opens the job as its full page on the Stream; a hash 
   page.window.dispatch('hashchange');
   await page.flush();
   assert.equal(page.streams.at(-1)!.url, 'api/stream?job=app%2FT-2&from=0');
-  assert.equal(t1(page).textContent, 'T-2Other');
+  assert.equal(t1(page).textContent, 'T-2appOther');
 
   (page.$('jhead').children[0] as FakeElement).click();
   assert.deepEqual([page.$('job').hidden, page.$('board').hidden, page.location.hash], [true, false, '#']);

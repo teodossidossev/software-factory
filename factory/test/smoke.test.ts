@@ -168,6 +168,27 @@ test('sf workspace add, list and remove manage the registry with the documented 
   assert.match((await runCli(['workspace', 'list'])).stdout, /^own\n {2}checkout: .*\n {2}hand-over: off \(this workspace\)$/m);
   assert.equal((await runCli(['workspace', 'remove', 'own'])).code, 0);
 
+  // --color (SF-084): one of the palette, refused with the list otherwise; without it the name picks
+  // one; the same name and checkout again with --color or --handoff changes them and keeps the rest.
+  const pink = await runCli(['workspace', 'add', 'tinted', '--read', repo, '--color', 'pink']);
+  assert.equal(pink.code, 2);
+  assert.match(pink.stderr, /--color must be one of blue, teal, green, olive, orange, red, purple, grey, got "pink"/);
+  const tinted = await runCli(['workspace', 'add', 'tinted', '--read', repo, '--color', 'teal', '--handoff', 'off']);
+  assert.equal(tinted.code, 0, tinted.stderr);
+  assert.match(tinted.stdout, /Registered workspace "tinted" .*colour: teal\)/);
+  assert.deepEqual(JSON.parse(await readFile(join(configDir, 'workspaces.json'), 'utf8')).workspaces.tinted, { read_checkout: repo, handoff: 'off', color: 'teal' });
+  const recolored = await runCli(['workspace', 'add', 'tinted', '--read', repo, '--color', 'orange']);
+  assert.equal(recolored.code, 0, recolored.stderr);
+  assert.match(recolored.stdout, /Updated workspace "tinted" .*hand-over: off \(this workspace\); colour: orange\)/);
+  assert.deepEqual(JSON.parse(await readFile(join(configDir, 'workspaces.json'), 'utf8')).workspaces.tinted, { read_checkout: repo, handoff: 'off', color: 'orange' });
+  assert.match((await runCli(['workspace', 'list'])).stdout, /^tinted\n {2}checkout: .*\n {2}hand-over: off \(this workspace\)\n {2}colour: orange$/m);
+  // demo has none: d+e+m+o = 100+101+109+111 = 421, 421 mod 8 = 5: red.
+  assert.match((await runCli(['workspace', 'list'])).stdout, /^demo\n(?: {2}.*\n){2} {2}colour: red \(by its name\)$/m);
+  // Another checkout under a registered name stays refused.
+  const elsewhere = await runCli(['workspace', 'add', 'tinted', '--read', join(repo, 'src'), '--color', 'red']);
+  assert.equal(elsewhere.code, 1);
+  assert.equal((await runCli(['workspace', 'remove', 'tinted'])).code, 0);
+
   // --work is retired (SF-019): every job works in a worktree of the checkout.
   const broken = join(temp, 'broken');
   execFileSync('git', ['init', '-q', broken]);

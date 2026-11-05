@@ -8,7 +8,7 @@ import { after, before, test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
 import { JobStore } from '../src/jobs.js';
 import type { Workspace } from '../src/registry.js';
-import { checkTaskContent, MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskScope, writeTask } from '../src/task-file.js';
+import { checkTaskContent, landsAfter, MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskScope, writeTask } from '../src/task-file.js';
 
 const VALID = '---\nticket: PROJ-1\ntitle: Export as CSV\nbase: master\n---\n\n# PROJ-1: Export as CSV\n';
 
@@ -126,4 +126,14 @@ test('taskScope reads scope: in the forms of may_touch; no field or an empty lis
   // Parsed next to may_touch, independently.
   const both = fields('may_touch: [package.json]\nscope: [src/**]');
   assert.deepEqual([mayTouch(both), taskScope(both)], [['package.json'], ['src/**']]);
+});
+
+test('landsAfter (SF-084) reads lands_after: in the list forms of may_touch; a ticket of another workspace is <workspace>/<ticket>', () => {
+  const fields = (text: string) => parseFrontMatter(`---\nticket: T-1\ntitle: t\nbase: main\n${text}\n---\n`)!;
+  assert.deepEqual(landsAfter(fields('lands_after: [SF-078, web/W-2]'), 'app'), [{ workspace: 'app', ticket: 'SF-078' }, { workspace: 'web', ticket: 'W-2' }]);
+  assert.deepEqual(landsAfter(fields('lands_after: SF-078 "SF-079"  # both first'), 'app'), [{ workspace: 'app', ticket: 'SF-078' }, { workspace: 'app', ticket: 'SF-079' }]);
+  assert.deepEqual(landsAfter(fields('scope: [src/**]'), 'app'), []);
+  assert.deepEqual(landsAfter(fields('lands_after: []'), 'app'), []);
+  // Duplicates once; names that are no ticket or workspace (paths, empty parts) are dropped.
+  assert.deepEqual(landsAfter(fields('lands_after: [A-1, app/A-1, A-1, ../x, Web/W-1, a/b/c, /A-2, web/, .hidden]'), 'app'), [{ workspace: 'app', ticket: 'A-1' }]);
 });

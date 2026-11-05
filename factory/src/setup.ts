@@ -10,9 +10,9 @@ import { writeFileAtomic } from './atomic.js';
 import { FactoryError } from './errors.js';
 import type { ExclusiveScope } from './execution.js';
 import { runGit } from './git.js';
-import { type JobState, type JobStore, TERMINAL_STATES } from './jobs.js';
-import { type HandoffMode, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, type Workspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
-import { ARCHIVE_DIR, DRAFT_MARKER, isDraft, MAX_TASK_BYTES, parseFrontMatter, readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN, writeTask } from './task-file.js';
+import { type Job, type JobState, type JobStore, TERMINAL_STATES } from './jobs.js';
+import { type HandoffMode, loadRegistry, type Registry, resolveWorkspace, saveRegistry, verifyCheckout, type Workspace, type WorkspaceColor, workspaceColor, type WorkspaceEntry, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
+import { ARCHIVE_DIR, DRAFT_MARKER, isDraft, landsAfter, MAX_TASK_BYTES, parseFrontMatter, readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN, type TicketRef, writeTask } from './task-file.js';
 
 export const MAX_TITLE_CHARS = 200;
 export const MAX_REQUEST_BYTES = 64 * 1024;
@@ -31,6 +31,36 @@ export interface WorkspaceRow {
   problem: string | null;
   // The workspace's own hand-over setting (SF-083), or null: SF_HANDOFF applies.
   handoff: HandoffMode | null;
+  // The workspace's colour on the board (SF-084): its configured color, else the hash of its name.
+  color: WorkspaceColor;
+}
+
+// The state of a ticket another one lands after (SF-084), one rule for the board and the job page:
+// merged: its last job (live or archived) is pushed and merged into its base (the merge request
+// state the factory recorded, else Git: the branch tip is an ancestor of origin/<base> in the
+// workspace's checkout, only when no merge request state is recorded); pushed: pushed, not merged
+// by that rule, its Task file active or gone; running: a live job in any other state; planned: a
+// Task file (active or archived) and no live job, its job not merged (an archived Task file with a
+// pushed job not merged too); missing: none of these.
+export const DEPENDENCY_STATES = ['merged', 'pushed', 'running', 'planned', 'missing'] as const;
+export type DependencyState = (typeof DEPENDENCY_STATES)[number];
+
+export interface DependencyRow {
+  workspace: string;
+  ticket: string;
+  state: DependencyState;
+}
+
+// The Git answer of whether a pushed job's branch is merged is kept this long per ticket, so the
+// payload, built on every state change and page connect, runs no Git command beyond it.
+export const MERGE_CHECK_TTL_MS = 30_000;
+
+// A live job's Task file and the tickets it lands after (SF-084): the job page's Waits for, and the
+// board's Needed by of the tickets it waits for.
+export interface JobDependencies {
+  workspace: string;
+  ticket: string;
+  lands_after: DependencyRow[];
 }
 
 export interface TicketRow {
@@ -44,6 +74,8 @@ export interface TicketRow {
   request: string | null;
   // The state of the ticket's last job when it ended, or null without a job.
   job: JobState | null;
+  // The tickets it lands after (SF-084), with their states, in the order of the Task file.
+  lands_after: DependencyRow[];
 }
 
 // An archived Task file: .software-factory/archive/<ticket>.md (SF-027).
@@ -71,6 +103,43 @@ export interface SetupOptions {
   // directory) and its worktree, if one was kept, is removed. sf serve binds it to
   // Execution.exclusive.
   exclusive: <T>(work: (scope: ExclusiveScope) => Promise<T>) => Promise<T>;
+  // The clock of the merge check's cache (tests); Date.now by default.
+  now?: () => number;
+}
+
+// What the dependency rule reads of a job, current or archived.
+interface JobFacts {
+  state: string;
+  branch: string;
+  base: string;
+  prepared_commit: string | null;
+  mr: { state: string } | null;
+}
+
+// An archived job directory of the ticket: <ticket>.<YYYYMMDDTHHMMSSZ> (JobStore.archive).
+const ARCHIVED_JOB_STAMP = /^\d{8}T\d{6}Z$/;
+
+// The commit a ref names in the checkout, or undefined.
+async function commitOf(checkout: string, ref: string): Promise<string | undefined> {
+  const result = await runGit(checkout, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+  const sha = result.stdout.toString('utf8').trim();
+  return result.code === 0 && /^[0-9a-f]{40,64}$/.test(sha) ? sha : undefined;
+}
+
+// Whether a pushed job's branch is merged into its base by Git: its tip (origin's branch, else the
+// commit the factory prepared and pushed, else the local branch, which the user may have moved) is
+// an ancestor of origin/<base> as the checkout last fetched it. No fetch: the checkout's own view of
+// origin.
+async function branchMerged(checkout: string, job: JobFacts): Promise<boolean> {
+  try {
+    const tip = (await commitOf(checkout, `refs/remotes/origin/${job.branch}`)) ?? job.prepared_commit ?? (await commitOf(checkout, `refs/heads/${job.branch}`));
+    if (tip === undefined) {
+      return false;
+    }
+    return (await runGit(checkout, ['merge-base', '--is-ancestor', tip, `refs/remotes/origin/${job.base}`])).code === 0;
+  } catch {
+    return false;
+  }
 }
 
 async function isFile(path: string): Promise<boolean> {
@@ -101,11 +170,15 @@ export class Setup {
   readonly #configDir: string;
   readonly #jobs: JobStore;
   readonly #exclusive: SetupOptions['exclusive'];
+  readonly #now: () => number;
+  // "<workspace>/<ticket>" -> the Git answer of branchMerged for the job's branch, and when.
+  readonly #mergeChecks = new Map<string, { at: number; branch: string; merged: boolean }>();
 
   constructor(options: SetupOptions) {
     this.#configDir = options.configDir;
     this.#jobs = options.jobs;
     this.#exclusive = options.exclusive;
+    this.#now = options.now ?? Date.now;
   }
 
   async #liveJobs(): Promise<Map<string, number>> {
@@ -130,16 +203,17 @@ export class Setup {
       } catch (error) {
         problem = error instanceof FactoryError ? error.message : 'The checkout could not be verified.';
       }
-      rows.push({ name, path: entry.read_checkout, liveJobs: live.get(name) ?? 0, problem, handoff: entry.handoff ?? null });
+      rows.push({ name, path: entry.read_checkout, liveJobs: live.get(name) ?? 0, problem, handoff: entry.handoff ?? null, color: workspaceColor(name, entry.color) });
     }
     return rows;
   }
 
-  // The same rules as `sf workspace add <name> --read <path> [--handoff ...]`: the name pattern, an
-  // absolute path that is the root of a non-bare Git work tree, a name not registered yet. Until
-  // SF-019 the work checkout is the read checkout. handoff: the workspace's own hand-over setting
-  // (SF-083); undefined: SF_HANDOFF applies.
-  addWorkspace(name: string, path: string, handoff?: HandoffMode): Promise<WorkspaceRow> {
+  // The same rules as `sf workspace add <name> --read <path> [--handoff ...] [--color ...]`: the name
+  // pattern, an absolute path that is the root of a non-bare Git work tree, a name not registered
+  // yet. Until SF-019 the work checkout is the read checkout. handoff: the workspace's own hand-over
+  // setting (SF-083); undefined: SF_HANDOFF applies. color: its colour on the board (SF-084);
+  // undefined: the hash of its name.
+  addWorkspace(name: string, path: string, handoff?: HandoffMode, color?: WorkspaceColor): Promise<WorkspaceRow> {
     return this.#exclusive(async () => {
       if (!WORKSPACE_NAME_PATTERN.test(name)) {
         throw new FactoryError('invalid_name', `workspace name must be ${WORKSPACE_NAME_DESCRIPTION}.`);
@@ -152,9 +226,9 @@ export class Setup {
         throw new FactoryError('workspace_exists', `workspace "${name}" is already registered; remove it first.`);
       }
       const real = await verifyCheckout(path, 'path');
-      registry.workspaces[name] = { read_checkout: real, ...(handoff !== undefined ? { handoff } : {}) };
+      registry.workspaces[name] = { read_checkout: real, ...(handoff !== undefined ? { handoff } : {}), ...(color !== undefined ? { color } : {}) };
       await saveRegistry(registry, this.#configDir);
-      return { name, path: real, liveJobs: 0, problem: null, handoff: handoff ?? null };
+      return { name, path: real, liveJobs: 0, problem: null, handoff: handoff ?? null, color: workspaceColor(name, color) };
     });
   }
 
@@ -178,12 +252,12 @@ export class Setup {
     });
   }
 
-  // The Task files of every usable workspace whose ticket has no live job, sorted by workspace
-  // and ticket. A file that is not a Task file (no front matter, another ticket, no title) is
-  // skipped, as `start` would refuse it anyway.
-  async tickets(): Promise<TicketRow[]> {
+  // The Task files of every usable workspace, sorted by workspace and ticket, each with its fields,
+  // its text and its job. A file that is not a Task file (no front matter, another ticket, no
+  // title) is skipped, as `start` would refuse it anyway.
+  async #taskFiles(): Promise<Array<{ name: string; ticket: string; fields: Map<string, string>; content: string; job: Job | undefined }>> {
     const { workspaces } = await loadRegistry(this.#configDir);
-    const rows: TicketRow[] = [];
+    const files = [];
     for (const name of Object.keys(workspaces).sort()) {
       let workspace: Workspace;
       try {
@@ -214,14 +288,130 @@ export class Setup {
         if (fields === undefined || fields.get('ticket') !== ticket || !fields.get('title') || !fields.get('base')) {
           continue;
         }
-        const job = await this.#jobs.read(name, ticket);
-        if (job !== undefined && !TERMINAL_STATES.includes(job.state)) {
-          continue;
-        }
-        rows.push({ workspace: name, ticket, title: fields.get('title')!, base: fields.get('base')!, draft: isDraft(content), request: await this.#readRequest(name, ticket), job: job?.state ?? null });
+        files.push({ name, ticket, fields, content, job: await this.#jobs.read(name, ticket) });
+      }
+    }
+    return files;
+  }
+
+  // The Task files whose ticket has no live job, sorted by workspace and ticket, each with the
+  // tickets it lands after and their states (SF-084).
+  async tickets(): Promise<TicketRow[]> {
+    const states = this.#dependencyStates();
+    const rows: TicketRow[] = [];
+    for (const { name, ticket, fields, content, job } of await this.#taskFiles()) {
+      if (job !== undefined && !TERMINAL_STATES.includes(job.state)) {
+        continue;
+      }
+      rows.push({
+        workspace: name, ticket, title: fields.get('title')!, base: fields.get('base')!, draft: isDraft(content), request: await this.#readRequest(name, ticket), job: job?.state ?? null,
+        lands_after: await states(landsAfter(fields, name)),
+      });
+    }
+    return rows;
+  }
+
+  // The Task files whose ticket has a live job and lands after another ticket (SF-084), with the
+  // states of those tickets.
+  async jobDependencies(): Promise<JobDependencies[]> {
+    const states = this.#dependencyStates();
+    const rows: JobDependencies[] = [];
+    for (const { name, ticket, fields, job } of await this.#taskFiles()) {
+      const refs = landsAfter(fields, name);
+      if (job !== undefined && !TERMINAL_STATES.includes(job.state) && refs.length > 0) {
+        rows.push({ workspace: name, ticket, lands_after: await states(refs) });
       }
     }
     return rows;
+  }
+
+  // The states of tickets, each worked out once per call of the returned function's owner (one
+  // payload), the registry read once.
+  #dependencyStates(): (refs: TicketRef[]) => Promise<DependencyRow[]> {
+    const known = new Map<string, Promise<DependencyState>>();
+    let registry: Promise<Registry> | undefined;
+    return async (refs) => {
+      const rows: DependencyRow[] = [];
+      for (const ref of refs) {
+        const key = `${ref.workspace}/${ref.ticket}`;
+        if (!known.has(key)) {
+          registry ??= loadRegistry(this.#configDir);
+          known.set(key, registry.then((loaded) => this.#dependencyState(ref, Object.hasOwn(loaded.workspaces, ref.workspace) ? loaded.workspaces[ref.workspace] : undefined)));
+        }
+        rows.push({ ...ref, state: await known.get(key)! });
+      }
+      return rows;
+    };
+  }
+
+  // The dependency rule (DependencyState) for one ticket; entry: its workspace's registration, if
+  // any. A job record that cannot be read counts as none.
+  async #dependencyState(ref: TicketRef, entry: WorkspaceEntry | undefined): Promise<DependencyState> {
+    const current = await this.#jobs.read(ref.workspace, ref.ticket).catch(() => undefined);
+    if (current !== undefined && !TERMINAL_STATES.includes(current.state)) {
+      return 'running';
+    }
+    const dir = entry === undefined ? undefined : join(entry.read_checkout, TASK_DIR);
+    const active = dir !== undefined && (await isFile(join(dir, `${ref.ticket}.md`)));
+    const archived = dir !== undefined && !active && (await isFile(join(dir, ARCHIVE_DIR, `${ref.ticket}.md`)));
+    const last: JobFacts | undefined = current ?? (await this.#lastArchivedJob(ref));
+    if (last?.state === 'pushed') {
+      if (await this.#merged(ref, last, entry)) {
+        return 'merged';
+      }
+      // An archived Task file whose job was not merged counts as planned (the Task's rule).
+      return archived ? 'planned' : 'pushed';
+    }
+    return active || archived ? 'planned' : 'missing';
+  }
+
+  // The newest archived job of the ticket (JobStore.archive's <ticket>.<stamp> directories), or
+  // undefined.
+  async #lastArchivedJob(ref: TicketRef): Promise<JobFacts | undefined> {
+    let names: string[];
+    try {
+      names = await readdir(join(this.#jobs.root, ref.workspace));
+    } catch {
+      return undefined;
+    }
+    const prefix = `${ref.ticket}.`;
+    const archived = names.filter((name) => name.startsWith(prefix) && ARCHIVED_JOB_STAMP.test(name.slice(prefix.length))).sort();
+    for (const name of archived.reverse()) {
+      try {
+        const data = JSON.parse(await readFile(join(this.#jobs.root, ref.workspace, name, 'job.json'), 'utf8')) as Record<string, unknown>;
+        const mr = data.mr as Record<string, unknown> | null | undefined;
+        if (data.workspace === ref.workspace && data.ticket === ref.ticket && typeof data.state === 'string' && typeof data.branch === 'string' && typeof data.base === 'string') {
+          return {
+            state: data.state, branch: data.branch, base: data.base, prepared_commit: typeof data.prepared_commit === 'string' ? data.prepared_commit : null,
+            mr: mr !== null && typeof mr === 'object' && typeof mr.state === 'string' ? { state: mr.state } : null,
+          };
+        }
+      } catch {
+        // Not a readable job record: the one before it.
+      }
+    }
+    return undefined;
+  }
+
+  // Merged: the merge request state the factory recorded (SF-048) decides when there is one (merged
+  // or not: open and closed are not merged); only without one does Git decide, its answer kept
+  // MERGE_CHECK_TTL_MS per ticket.
+  async #merged(ref: TicketRef, job: JobFacts, entry: WorkspaceEntry | undefined): Promise<boolean> {
+    if (job.mr !== null) {
+      return job.mr.state === 'merged';
+    }
+    if (entry === undefined) {
+      return false;
+    }
+    const key = `${ref.workspace}/${ref.ticket}`;
+    const now = this.#now();
+    const cached = this.#mergeChecks.get(key);
+    if (cached !== undefined && cached.branch === job.branch && now - cached.at < MERGE_CHECK_TTL_MS) {
+      return cached.merged;
+    }
+    const merged = await branchMerged(entry.read_checkout, job);
+    this.#mergeChecks.set(key, { at: now, branch: job.branch, merged });
+    return merged;
   }
 
   // The User's words of New ticket live in the state directory, next to the jobs, never in the

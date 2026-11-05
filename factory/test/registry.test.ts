@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
-import { configDir, loadRegistry, parseRegistry, resolveWorkspace, saveRegistry } from '../src/registry.js';
+import { configDir, loadRegistry, parseRegistry, resolveWorkspace, saveRegistry, WORKSPACE_COLORS, workspaceColor } from '../src/registry.js';
 
 let temp: string;
 let repo: string;
@@ -61,6 +61,26 @@ test('parseRegistry (SF-083): a workspace may set handoff to checkout or off; an
     invalid(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', handoff } } }));
   }
   assert.throws(() => parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', handoff: 'on' } } })), /workspaces\.app\.handoff/);
+});
+
+test('parseRegistry (SF-084): a workspace may set color to one of the palette names; anything else is refused', () => {
+  assert.deepEqual([...WORKSPACE_COLORS], ['blue', 'teal', 'green', 'olive', 'orange', 'red', 'purple', 'grey']);
+  for (const color of WORKSPACE_COLORS) {
+    assert.deepEqual(parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', color } } })).workspaces.app, { read_checkout: '/srv/app', color });
+  }
+  for (const color of ['', 'Blue', 'gray', 'pink', '#2b6cb0', null, 1]) {
+    invalid(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', color } } }));
+  }
+  assert.throws(() => parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', color: 'pink' } } })), /workspaces\.app\.color/);
+});
+
+test('workspaceColor (SF-084): the configured colour, else the palette entry at the sum of the name\'s UTF-16 code units mod 8', () => {
+  assert.equal(workspaceColor('app', 'red'), 'red');
+  // a=97, p=112, p=112: 321 mod 8 = 1.
+  assert.equal(workspaceColor('app'), 'teal');
+  // w=119, e=101, b=98: 318 mod 8 = 6.
+  assert.equal(workspaceColor('web'), 'purple');
+  assert.equal(workspaceColor('web'), workspaceColor('web'));
 });
 
 test('configDir honours SF_CONFIG_DIR, then XDG_CONFIG_HOME, then ~/.config', () => {

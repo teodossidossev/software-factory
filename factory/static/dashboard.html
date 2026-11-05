@@ -185,6 +185,21 @@
           </select>
           <p class="hint">This workspace's own setting wins over SF_HANDOFF; it is the handoff key in workspaces.json.</p>
         </div>
+        <div class="field">
+          <label for="workspace-color">Colour on the board</label>
+          <select id="workspace-color">
+            <option value="" selected>By its name</option>
+            <option value="blue">blue</option>
+            <option value="teal">teal</option>
+            <option value="green">green</option>
+            <option value="olive">olive</option>
+            <option value="orange">orange</option>
+            <option value="red">red</option>
+            <option value="purple">purple</option>
+            <option value="grey">grey</option>
+          </select>
+          <p class="hint">The stripe and the dot of its cards; the color key in workspaces.json. Without it, the name picks one.</p>
+        </div>
         <div class="row">
           <button id="workspace-add" type="submit" class="btn">Add workspace</button>
         </div>

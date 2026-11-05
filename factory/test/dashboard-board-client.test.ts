@@ -858,6 +858,36 @@ test('board client (SF-071): the Queue column holds the queued cards in order wi
   assert.equal(page.$('count-queue').textContent, '0');
 });
 
+test('board client (SF-086): a queued card held by its plan says why, with Start anyway posting api/queue/force once; none when ready, forced or not queued', async () => {
+  const page = await openQueue([
+    ticket('app/T-3', { queue_position: 1, queue_error: null, queue_reason: 'plan not ready: 2 blocker, 1 major', queue_force: false }),
+    ticket('app/T-2', { queue_position: 2, queue_error: null, queue_reason: 'plan being checked', queue_force: false }),
+    ticket('app/T-6', { queue_position: 3, queue_error: null, queue_reason: null, queue_force: false }),
+    ticket('app/T-7', { queue_position: 4, queue_error: null, queue_reason: null, queue_force: true }),
+    ticket('app/T-4', { queue_position: null, queue_error: null, queue_reason: null, queue_force: false }),
+  ]);
+  const reason = (key: string): string | undefined => part(card(page, key), 'qreason')?.textContent;
+  assert.deepEqual(['app/T-3', 'app/T-2', 'app/T-6', 'app/T-7', 'app/T-4'].map(reason), ['plan not ready: 2 blocker, 1 major', 'plan being checked', undefined, undefined, undefined]);
+  assert.deepEqual(['app/T-3', 'app/T-2', 'app/T-6', 'app/T-7', 'app/T-4'].map((key) => button(card(page, key), 'Start anyway') !== undefined), [true, true, false, false, false]);
+  button(card(page, 'app/T-3'), 'Start anyway')!.click();
+  button(card(page, 'app/T-3'), 'Start anyway')!.click();
+  await page.flush();
+  assert.deepEqual(posts(page).map((request) => [request.path, request.body]), [['api/queue/force', '{"workspace":"app","ticket":"T-3"}']]);
+  assert.equal(button(card(page, 'app/T-3'), 'Start anyway')!.disabled, true);
+  posts(page)[0]!.respond(200, { ok: true, result: { force: true } });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, 'app/T-3 starts when a slot is free, whatever its plan check says.');
+  button(card(page, 'app/T-2'), 'Start anyway')!.click();
+  await page.flush();
+  posts(page)[1]!.respond(409, { ok: false, error: { code: 'not_queued', message: 'app/T-2 is not in the queue.' } });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, 'not_queued: app/T-2 is not in the queue.');
+  // The server's next tickets: forced, the line and the button go.
+  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('app/T-3', { queue_position: 1, queue_error: null, queue_reason: 'plan not ready: 2 blocker, 1 major', queue_force: true })], archived: [], queue: QUEUE });
+  await page.flush();
+  assert.deepEqual([reason('app/T-3'), button(card(page, 'app/T-3'), 'Start anyway')], [undefined, undefined]);
+});
+
 test('board client (SF-071): drag and drop and Alt+Up / Alt+Down post api/queue/move; a drop goes before the card it lands on', async () => {
   const page = await openQueue(queuedTickets());
   const drag = (key: string, name: string, extra: Record<string, unknown> = {}) => card(page, key).dispatch(name, extra);

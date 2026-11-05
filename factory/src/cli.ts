@@ -2,7 +2,7 @@
 // add|list|remove`, `sf start|say|review|approve|pause|resume|restart|abort|reset`,
 // `sf handover|takeback|handed-done` (SF-073) and
 // `sf mr create|merge|status` and `sf queue list|add|remove|move|limit|hold|release` (SF-071)
-// and `sf queue on-limit` (SF-072)
+// and `sf queue on-limit` (SF-072) and `sf queue force` (SF-086)
 // (through the socket of sf serve),
 // `sf status|watch|dashboard` (reading the state directory directly), `sf check-task` (the Task
 // check of SF-054, run here and stored in the state directory), `sf rules` (the coding rules of
@@ -28,13 +28,14 @@ import { type Job, type JobState, JobStore } from './jobs.js';
 import { localTime } from './local-time.js';
 import { MAX_RUNNING, MIN_RUNNING, ON_LIMIT_RULES, QueueStore, type QueueView, RunQueue } from './queue.js';
 import { followJobs, runJob } from './runner.js';
-import { jobNotification, notifyConfig, sendNotification, stateNotifier } from './notify.js';
+import { jobNotification, notifyConfig, notifyTaskCheck, sendNotification, stateNotifier } from './notify.js';
 import { configDir, HANDOFF_MODES, ignoredWorkCheckouts, isHandoffMode, isWorkspaceColor, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_COLORS, workspaceColor, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN, type WorkspaceEntry } from './registry.js';
 import { loadHandbook, packageVersion, PortInUseError, SERVER_NAME, startServer } from './server.js';
 import { Setup } from './setup.js';
 import { handoverLines, limitLine, type StatusRow, statusRows } from './status.js';
 import { fileSummaryLines } from './patch.js';
 import { CheckStore, checkLines, checkSettings, refuseDraft, runTaskCheck, TaskChecks } from './task-check.js';
+import { AutoChecks, planCheck } from './task-check-auto.js';
 import { TicketHistory } from './ticket-history.js';
 import { parseFrontMatter, readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { runGit } from './git.js';
@@ -51,19 +52,20 @@ const USAGE = `Usage:
   sf workspace add <name> --read <path> [--handoff checkout|off] [--color <name>]  Register a workspace: the local checkout (every job works in a worktree of it); --handoff: its own hand-over setting, over SF_HANDOFF; --color: its colour on the board (blue, teal, green, olive, orange, red, purple or grey; default: by its name). Again with the same path: changes the --handoff and --color given
   sf workspace list                                     List registered workspaces, their hand-over setting and colour
   sf workspace remove <name>                            Unregister a workspace
-  sf check-task <workspace> <ticket>                    Check the Task file before Start: a read-only Claude session reads it and the repository, and prints its paraphrase, its findings by severity and its verdict (stored by the Task file's sha256; it only advises)
+  sf check-task <workspace> <ticket>                    Check the Task file before Start: a read-only Claude session reads it and the repository, and prints its paraphrase, its findings by severity and its verdict (stored by the Task file's sha256; it only advises). sf serve checks a written Task file by itself 60 s after its last change (SF_TASK_CHECK_AUTO)
   sf rules <workspace> [ticket]                         List the coding rules the agents would be given (AGENTS.md and the Markdown files it links to, the user's rules files): paths, sources, sizes and the files left out, without their text; a started job's stored list, else read at the Task file's base, else at the checkout's HEAD
   sf attach <workspace> <ticket> <file> [name]          Attach an image (PNG, JPEG, WebP or GIF by its bytes, at most 5 MB, 10 per ticket) to the ticket: .software-factory/<ticket>/<name> next to its Task file; name: default the next number (1.png, 2.png, ...); refused while a job of the ticket runs (paused aside); no sf serve needed
   sf attach <workspace> <ticket> --remove <name>        Remove an image of the ticket, under the same guard
   sf start <workspace> <ticket>                         Start the job for .software-factory/<ticket>.md in a worktree of its own
   sf queue list                                         The run queue: the limit of jobs at once, the running count, held or not (by hand, or by a job parked on a usage limit), the rule at a limit's reset, and the queued tickets in order with what each waits for, and the starts that failed
-  sf queue add <workspace> <ticket> [--at N]            Queue a planned ticket at position N (1-based; default: the end); sf serve starts it by itself when a slot is free and its lands_after tickets are merged
+  sf queue add <workspace> <ticket> [--at N]            Queue a planned ticket at position N (1-based; default: the end); sf serve starts it by itself when a slot is free, its lands_after tickets are merged and the Task check of its current Task file is ready
   sf queue remove <workspace> <ticket>                  Take a ticket out of the queue
   sf queue move <workspace> <ticket> <N>                Move a queued ticket to position N
   sf queue limit <N>                                    Run up to N jobs at once (1-20, every workspace; default SF_MAX_JOBS); gates only the queue's own starts, a start by hand always goes
   sf queue hold [reason...]                             Hold the queue: it starts nothing until sf queue release
   sf queue release                                      Release a held queue (a job parked on a usage limit still holds it until it goes on)
   sf queue on-limit resume-then-queue|resume-only|wait  What happens when a usage limit resets: resume the parked jobs, then start queued tickets again (default); resume them and hold the queue; or hold the queue and let you resume them
+  sf queue force <workspace> <ticket>                   Start anyway: the queued ticket starts whatever its Task check says, until it leaves the queue
   sf say <workspace> <ticket> <message...>              Send a message into the job's Implementer session; on a handed-over job: Ask for changes (your checkout's edits go back into the job first)
   sf review <workspace> <ticket>                        Retry a failed Claude review (needs_human with review_failed) of the last iteration
   sf accept <workspace> <ticket>                        Accept a clean Claude review over a stopped gate (needs_human with gate_rounds, gate_budget or gate_failed) or a ledger stop (review_churn, review_disputed) and prepare the MR; on simplify_offered: skip the suggestions (listed in the MR text)
@@ -94,7 +96,7 @@ Notes:
   SINCE:   the last state change in local time (the stored times are UTC).
   ELAPSED: wall-clock time since the job was created, waiting included; stops at the last state change once pushed, aborted or failed.
   dashboard --open: Linux with xdg-open; waits for the launcher at most 10 s; on a launcher failure exits 1 and leaves the printed URL to open by hand.
-  check-task: exits 0 when the check ran (ready or not ready), 1 when it failed; SF_TASK_CHECK_MAX_TURNS (default 30) and SF_REVIEW_MODEL apply.
+  check-task: exits 0 when the check ran (ready or not ready), 1 when it failed; SF_TASK_CHECK_MAX_TURNS (default 30) and SF_REVIEW_MODEL apply. It runs in its own process, outside SF_TASK_CHECK_PARALLEL.
 Exit codes: 0 ok, 1 error, 2 usage.`;
 
 class UsageError extends Error {}
@@ -143,7 +145,11 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
       void runQueue.schedule();
     }
   };
+  // A job of the ticket that runs (non-terminal, not paused) cancels its automatic Task checks
+  // (SF-086): no check runs on a Task file a job is using.
+  let autoChecks: AutoChecks | undefined;
   const onStateChange: StateListener = (job, from, lines) => {
+    autoChecks?.jobChanged(job);
     notify(job, from, lines);
     dashboard?.onStateChange(job, from);
     reschedule(job, from);
@@ -160,10 +166,13 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   // the runners', below), on every change of the queue; a pass that changed something refreshes
   // every page.
   // At a usage limit's reset (SF-072) it resumes the parked jobs (or marks them, under wait) and sends
-  // one notification.
+  // one notification. With the automatic checks (SF-086) the queue starts a ticket only when its plan
+  // is ready or forced, and a ticket added without a check gets one.
   const runQueue = new RunQueue(queueStore, execution, setup, jobs, {
     onChange: () => dashboard?.refreshSetup(),
     notify: (notification) => sendNotification(notification, notifyConfig()),
+    planCheck: (workspace, ticket) => planCheck(checks, autoChecks, workspace, ticket),
+    onAdded: (workspace, ticket) => void autoChecks?.triggerIfUnchecked(workspace, ticket),
   });
   // The Task checks (SF-054): started from the dashboard, read by the Context owner's task_check; an ended
   // check reaches every page.
@@ -176,8 +185,27 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
       if (!checks.runningIn(workspace)) {
         void execution.afterTaskCheck(workspace, ticket);
       }
+      // A queued ticket may be ready now (SF-086).
+      void runQueue.schedule();
     },
   });
+  // The automatic Task checks (SF-086), unless SF_TASK_CHECK_AUTO=off: write_task, the watcher of
+  // every workspace's .software-factory folder and the run queue trigger them; a check that ends not
+  // ready or failed is notified like a job.
+  if (config.taskCheckAuto) {
+    const notifySettings = notifyConfig();
+    // Tests only (SF_TEST_HOOKS=on): a shorter time from the last trigger to the check.
+    const testDelay = process.env.SF_TEST_HOOKS === 'on' && /^\d+$/.test(process.env.SF_TEST_TASK_CHECK_DELAY_MS ?? '') ? Number(process.env.SF_TEST_TASK_CHECK_DELAY_MS) : undefined;
+    autoChecks = new AutoChecks({
+      checks, jobs, resolve: (name) => resolveWorkspace(name), parallel: config.taskCheckParallel,
+      ...(testDelay !== undefined ? { delayMs: testDelay } : {}),
+      workspaces: async () => Object.entries((await loadRegistry()).workspaces).map(([name, entry]) => ({ name, workCheckout: entry.read_checkout })),
+      onCheckEnded: (record) => {
+        dashboard?.refreshSetup();
+        void notifyTaskCheck(record, notifySettings);
+      },
+    });
+  }
   const testHooks = process.env.SF_TEST_HOOKS === 'on';
   // The socket first: it refuses a second sf serve on the same state before recovery touches it.
   const socket = await listenSocket(config.stateDir, async ({ command, args }) => {
@@ -267,7 +295,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   let server;
   try {
     await execution.recover();
-    server = await startServer(port, handbook, await packageVersion(), execution, checks, history, runQueue);
+    server = await startServer(port, handbook, await packageVersion(), execution, checks, history, runQueue, autoChecks);
   } catch (error) {
     await socket.close();
     throw error;
@@ -276,7 +304,9 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     if (dashboardOn()) {
       // The dashboard's actions (DashboardActions: start, approve, abort, say, retryReview,
       // acceptGate and archiveFinished) run on the same Execution as the socket commands.
-      dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, setup, { gate: config.gate.on, checks, queue: runQueue });
+      dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, setup, {
+        gate: config.gate.on, checks, queue: runQueue, onWorkspacesChanged: () => void autoChecks?.rereadWorkspaces(),
+      });
     } else {
       await removeToken(config.stateDir);
     }
@@ -295,6 +325,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   // (SF-085), and so may sf serve's start.
   // The run queue hears of both: a runner's job that reached ready_for_human_review frees a slot.
   const followed = followJobs(jobs, (job, from) => {
+    autoChecks?.jobChanged(job);
     dashboard?.onStateChange(job, from);
     execution.afterJobChange(job, from).catch((error: unknown) => console.error(error));
     reschedule(job, from);
@@ -302,6 +333,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   execution.handOverLocked().catch((error: unknown) => console.error(error));
   scheduling = true;
   void runQueue.schedule();
+  await autoChecks?.start();
 
   let stopping = false;
   const stop = (signal: NodeJS.Signals): void => {
@@ -313,6 +345,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     hooks.beforeStop?.();
     followed.close();
     runQueue.close();
+    autoChecks?.close();
     Promise.all([server.close(), socket.close(), dashboard?.close()]).then(
       () => process.exit(0),
       (error: unknown) => {
@@ -569,6 +602,9 @@ function queueCommand(queue: RunQueue, command: string, args: string[]): Promise
   if (command === 'on-limit' && args.length === 1) {
     return queue.rule(args[0]!);
   }
+  if (command === 'force' && args.length === 2) {
+    return queue.force(workspace, ticket);
+  }
   return Promise.reject(new FactoryError('bad_request', `Unknown command "queue-${command}".`));
 }
 
@@ -588,7 +624,8 @@ function queueLines(view: QueueView): string[] {
   lines.push(view.entries.length === 0 ? 'queue: empty' : 'queue:');
   for (const entry of view.entries) {
     const waits = entry.waits_for.map((dep) => `${ref(dep)} (${dep.state})`).join(', ');
-    lines.push(`  ${entry.position}. ${ref(entry)}${waits !== '' ? `  waits for ${waits}` : ''}`);
+    const plan = entry.force ? '  forced (Start anyway)' : entry.plan_reason !== null ? `  ${entry.plan_reason}` : '';
+    lines.push(`  ${entry.position}. ${ref(entry)}${waits !== '' ? `  waits for ${waits}` : ''}${plan}`);
   }
   if (view.errors.length > 0) {
     lines.push('start failed:');
@@ -607,7 +644,7 @@ function wholeNumber(value: string | undefined, what: string): string {
   return value;
 }
 
-// sf queue list|add|remove|move|limit|hold|release|on-limit: the arguments checked here, the change in sf serve.
+// sf queue list|add|remove|move|limit|hold|release|on-limit|force: the arguments checked here, the change in sf serve.
 async function queue(args: string[]): Promise<void> {
   const [command, ...rest] = args;
   if (command === 'list') {
@@ -663,6 +700,13 @@ async function queue(args: string[]): Promise<void> {
       throw new UsageError(`queue on-limit needs one of ${ON_LIMIT_RULES.join(', ')}.`);
     }
     await viaServer('queue-on-limit', rest);
+    return;
+  }
+  if (command === 'force') {
+    if (rest.length !== 2) {
+      throw new UsageError('queue force needs <workspace> <ticket>.');
+    }
+    await viaServer('queue-force', checkJob(rest, 'queue force'));
     return;
   }
   throw new UsageError(command === undefined ? 'a queue command is required.' : `unknown queue command "${command}".`);

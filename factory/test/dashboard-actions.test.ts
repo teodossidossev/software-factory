@@ -493,14 +493,19 @@ function fakeQueue(view: QueueView): DashboardQueue & { calls: unknown[][]; answ
     hold: (reason?: string) => fake.change('hold', reason),
     release: () => fake.change('release'),
     rule: (rule: string) => fake.change('rule', rule),
+    force: (workspace: string, ticket: string) => fake.change('force', workspace, ticket),
+    withTicket: <T>(_workspace: string, _ticket: string, work: () => Promise<T>): Promise<T> => work(),
   };
   return fake;
 }
 
-test('dashboard queue (SF-071): the six POST routes with strict bodies, one queue call each, its refusals mapped, the pages refreshed; the tickets payload carries the queue; none without a queue', async () => {
+test('dashboard queue (SF-071, SF-072, SF-086): the eight POST routes with strict bodies, one queue call each, its refusals mapped, the pages refreshed; the tickets payload carries the queue and the plan reason; none without a queue', async () => {
   const view: QueueView = {
     max_running: 2, running: 1, held: true, hold_reason: 'usage limit', on_limit: 'resume-then-queue', limit_hold: null, errors: [{ workspace: 'web', ticket: 'W-1', code: 'branch_exists', message: 'The branch exists.', at: '2026-11-05T10:00:00.000Z' }],
-    entries: [{ workspace: 'app', ticket: 'T-5', position: 1, queued_at: '2026-11-05T09:00:00.000Z', waits_for: [] }], next: { workspace: 'app', ticket: 'T-5' },
+    entries: [
+      { workspace: 'app', ticket: 'T-5', position: 1, queued_at: '2026-11-05T09:00:00.000Z', waits_for: [], force: false, plan_reason: 'plan not ready: 1 blocker, 0 major' },
+      { workspace: 'app', ticket: 'T-6', position: 2, queued_at: '2026-11-05T09:01:00.000Z', waits_for: [], force: true, plan_reason: null },
+    ], next: { workspace: 'app', ticket: 'T-6' },
   };
   const queue = fakeQueue(view);
   const setup = fakeSetup([workspaceRow('app'), workspaceRow('web')], [ticketRow('app', 'T-5', 'Five', false), ticketRow('app', 'T-6', 'Six', false), ticketRow('web', 'W-1', 'Web', false, 'failed')]);
@@ -508,9 +513,9 @@ test('dashboard queue (SF-071): the six POST routes with strict bodies, one queu
     const base = dashboard.url;
     // The tickets payload: the queue's state, each row's position and failed start.
     const payload = JSON.parse((await fetchRaw(new URL('api/tickets', base))).body);
-    assert.deepEqual(payload.queue, { max_running: 2, running: 1, held: true, hold_reason: 'usage limit', next: { workspace: 'app', ticket: 'T-5' }, on_limit: 'resume-then-queue', limit_hold: null });
-    assert.deepEqual(payload.tickets.map((row: Record<string, unknown>) => [row.ticket, row.queue_position, row.queue_error]), [
-      ['T-5', 1, null], ['T-6', null, null], ['W-1', null, { code: 'branch_exists', message: 'The branch exists.' }],
+    assert.deepEqual(payload.queue, { max_running: 2, running: 1, held: true, hold_reason: 'usage limit', next: { workspace: 'app', ticket: 'T-6' }, on_limit: 'resume-then-queue', limit_hold: null });
+    assert.deepEqual(payload.tickets.map((row: Record<string, unknown>) => [row.ticket, row.queue_position, row.queue_error, row.queue_reason, row.queue_force]), [
+      ['T-5', 1, null, 'plan not ready: 1 blocker, 0 major', false], ['T-6', 2, null, null, true], ['W-1', null, { code: 'branch_exists', message: 'The branch exists.' }, null, false],
     ]);
     // POST only; an unknown action is no route.
     for (const method of ['GET', 'PUT']) {
@@ -525,6 +530,7 @@ test('dashboard queue (SF-071): the six POST routes with strict bodies, one queu
       ['add', {}], ['add', { workspace: 'app', ticket: 'T-5', at: 0 }], ['add', { workspace: 'app', ticket: 'T-5', at: 1.5 }], ['add', { workspace: 'app', ticket: 'T-5', extra: 1 }],
       ['remove', { workspace: 'app' }], ['move', { workspace: 'app', ticket: 'T-5' }], ['move', { workspace: 'app', ticket: 'T-5', to: '2' }],
       ['limit', {}], ['limit', { max_running: '3' }], ['hold', { reason: null }], ['hold', { reason: 1 }], ['release', { now: true }],
+      ['force', { workspace: 'app' }], ['force', { workspace: 'app', ticket: 'T-5', force: true }],
     ];
     for (const [action, body] of bad) {
       assert.deepEqual(error(await act(base, `api/queue/${action}`, body)), { status: 400, code: 'invalid_body' }, `${action} ${JSON.stringify(body)}`);
@@ -536,6 +542,7 @@ test('dashboard queue (SF-071): the six POST routes with strict bodies, one queu
     const good: Array<[string, unknown]> = [
       ['add', { workspace: 'app', ticket: 'T-6' }], ['add', { workspace: 'app', ticket: 'T-6', at: 2 }], ['remove', { workspace: 'app', ticket: 'T-5' }],
       ['move', { workspace: 'app', ticket: 'T-6', to: 1 }], ['limit', { max_running: 5 }], ['hold', {}], ['hold', { reason: 'later' }], ['release', {}],
+      ['force', { workspace: 'app', ticket: 'T-5' }],
     ];
     for (const [action, body] of good) {
       assert.deepEqual(result(await act(base, `api/queue/${action}`, body)), { done: action });
@@ -544,6 +551,7 @@ test('dashboard queue (SF-071): the six POST routes with strict bodies, one queu
     }
     assert.deepEqual(queue.calls, [
       ['add', 'app', 'T-6', undefined], ['add', 'app', 'T-6', 2], ['remove', 'app', 'T-5'], ['move', 'app', 'T-6', 1], ['limit', 5], ['hold', undefined], ['hold', 'later'], ['release'],
+      ['force', 'app', 'T-5'],
     ]);
     stream.close();
     // The queue's refusals.

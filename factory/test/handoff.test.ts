@@ -12,7 +12,7 @@ import { handoffOffNotice } from '../src/config.js';
 import { type Job, JobStore } from '../src/jobs.js';
 import { mrMessage } from '../src/mr.js';
 import { saveRegistry } from '../src/registry.js';
-import { call, fakeLog, git, newEnv, newRepo, putTask, refused, runCli, script, serve, type Served, stop, temp, turnsStarted, waitFor } from './support/harness.js';
+import { call, fakeLog, git, newEnv, newRepo, putTask, readyCheck, refused, runCli, script, serve, type Served, stop, temp, turnsStarted, waitFor } from './support/harness.js';
 
 type Env = Awaited<ReturnType<typeof newEnv>>;
 
@@ -141,6 +141,7 @@ test('automatic hand-over at ready: the checkout on the branch at B with the job
   assert.match((await runCli(s.env, ['status', 'app', 'H-1'])).stdout, /\nin your checkout on H-1-hand-it-over\nMR title: feat\(H-1\): Hand it over\n/);
   // handed_over is not running (SF-071): with the run limit 1 (SF_MAX_JOBS=1) the queue starts another job.
   await putTask(s.env, s.repo, 'H-2', 'Other');
+  await readyCheck(s.env, s.repo, 'H-2');
   assert.equal((await runCli(s.env, ['queue', 'add', 'app', 'H-2'])).code, 0);
   for (const deadline = Date.now() + 20_000; (await s.jobs.read('app', 'H-2')) === undefined;) {
     assert.ok(Date.now() < deadline, 'H-2 did not start');

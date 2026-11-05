@@ -12,12 +12,14 @@ import type { ArchivedRow, JobDependencies, TicketInput, TicketRow, WorkspaceRow
 import { type HandoffMode, type WorkspaceColor, workspaceColor } from '../../src/registry.js';
 import { taskSha256 } from '../../src/task-file.js';
 
-export const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'";
+export const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:";
 
 export interface Reply {
   status: number;
   headers: IncomingMessage['headers'];
   body: string;
+  // The body's bytes as they came (an image, SF-064).
+  raw: Buffer;
 }
 
 export interface RawOptions {
@@ -39,12 +41,12 @@ export function fetchRaw(url: URL | string, options: RawOptions = {}): Promise<R
     }
     let settled = false;
     const req = request(target, { method: options.method ?? 'GET', headers }, (res) => {
-      let body = '';
-      res.setEncoding('utf8');
-      res.on('data', (chunk: string) => (body += chunk));
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer) => chunks.push(chunk));
       res.on('end', () => {
         settled = true;
-        resolve({ status: res.statusCode ?? 0, headers: res.headers, body });
+        const raw = Buffer.concat(chunks);
+        resolve({ status: res.statusCode ?? 0, headers: res.headers, body: raw.toString('utf8'), raw });
       });
     });
     // A server that answers (413) before the body is complete resets the connection while the
@@ -236,7 +238,9 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
 }
 
 export type SetupCall = ['saveTask', string, string, string, string] | ['addWorkspace', string, string] | ['addWorkspace', string, string, HandoffMode] | ['addWorkspace', string, string, HandoffMode | null, WorkspaceColor] | ['removeWorkspace', string] | ['createTicket', TicketInput]
-  | ['archiveTicket', string, string] | ['restoreTicket', string, string] | ['deleteTicket', string, string];
+  | ['archiveTicket', string, string] | ['restoreTicket', string, string] | ['deleteTicket', string, string]
+  // A ticket's images (SF-064): the upload's bytes as hex and its name (null without one).
+  | ['addAttachment', string, string, string, string | null] | ['removeAttachment', string, string, string];
 
 export interface FakeSetup extends DashboardSetup {
   rows: { workspaces: WorkspaceRow[]; tickets: TicketRow[]; archived: ArchivedRow[]; jobDependencies: JobDependencies[] };
@@ -250,6 +254,9 @@ export interface FakeSetup extends DashboardSetup {
   calls: SetupCall[];
   // What the next change answers: a value, an error to throw, or a function.
   answer: unknown;
+  // The images readAttachment serves (SF-064), by "<ws>/<ticket>/<name>"; a missing one is
+  // attachment_missing.
+  images: Map<string, { type: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'; data: Buffer }>;
 }
 
 export function workspaceRow(name: string, path = `/srv/${name}`, liveJobs = 0, handoff: WorkspaceRow['handoff'] = null): WorkspaceRow {
@@ -257,7 +264,7 @@ export function workspaceRow(name: string, path = `/srv/${name}`, liveJobs = 0, 
 }
 
 export function ticketRow(workspace: string, ticket: string, title = `Ticket ${ticket}`, draft = true, job: TicketRow['job'] = null): TicketRow {
-  return { workspace, ticket, title, base: 'main', draft, request: null, job, lands_after: [] };
+  return { workspace, ticket, title, base: 'main', draft, request: null, job, lands_after: [], attachments: [] };
 }
 
 // Lists rows and records every change; the change answers with `answer` (thrown when it is an
@@ -270,6 +277,16 @@ export function fakeSetup(workspaces: WorkspaceRow[] = [], tickets: TicketRow[] 
     mtime: '2026-11-05T09:00:00.000Z',
     calls: [],
     answer: undefined,
+    images: new Map(),
+    addAttachment: (workspace, ticket, data, name) => reply(['addAttachment', workspace, ticket, Buffer.from(data).toString('hex'), name ?? null], { name: name ?? '1.png', bytes: data.byteLength, type: 'image/png' }),
+    removeAttachment: (workspace, ticket, name) => reply(['removeAttachment', workspace, ticket, name], { name }),
+    readAttachment: async (workspace, ticket, name) => {
+      const image = fake.images.get(`${workspace}/${ticket}/${name}`);
+      if (image === undefined) {
+        throw new FactoryError('attachment_missing', `.software-factory/${ticket}/${name} does not exist.`);
+      }
+      return { name, bytes: image.data.byteLength, type: image.type, data: image.data };
+    },
     taskText: async (workspace, ticket, archived = false) => {
       const key = archived ? `${workspace}/archive/${ticket}` : `${workspace}/${ticket}`;
       fake.reads.push(key);

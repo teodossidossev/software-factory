@@ -1,7 +1,8 @@
 // The factory's MCP endpoint for the planner (SF-040): a loopback HTTP listener serving /mcp
 // through the SDK's stateless handler, with the Handbook as instructions and the planning tools
 // guide, read_file, search, write_task, task_check (the last Task check of the current Task
-// file, SF-054), and queue_list and queue_add (the run queue, SF-071). No authentication: it
+// file, SF-054), queue_list and queue_add (the run queue, SF-071), and read_attachment (a ticket's
+// image as MCP image content, SF-064). No authentication: it
 // listens on loopback only. Jobs
 // are started, reviewed and approved by the user (the dashboard, the CLI) and the reviewers,
 // never through this endpoint.
@@ -12,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { localhostHostValidation, localhostOriginValidation, toNodeHandler } from '@modelcontextprotocol/node';
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
+import { ATTACHMENT_NAME_PATTERN, MAX_ATTACHMENT_BYTES, readAttachment } from './attachments.js';
 import { FactoryError } from './errors.js';
 import type { Execution } from './execution.js';
 import type { RunQueue } from './queue.js';
@@ -253,6 +255,38 @@ function createMcpServer(handbook: Handbook, version: string, execution: Pick<Ex
           sha256, paraphrase: record.output?.paraphrase ?? null, findings: record.output?.findings ?? [], files: record.output?.files ?? [],
           error: record.error, model: record.model, checked_at: record.ended_at,
         });
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'read_attachment',
+    {
+      title: 'Read an image of a ticket',
+      description:
+        'Returns one image the user attached to the ticket (.software-factory/<ticket>/<name> in the work checkout) as ' +
+        'image content, with one text line of its name, type and size. The first message of the ticket\'s conversation ' +
+        `names its images. PNG, JPEG, WebP or GIF, at most ${MAX_ATTACHMENT_BYTES} bytes. In the Task file, refer to an ` +
+        'image the Task needs as ![what it shows](<ticket>/<name>). Refused: no Task file (task_not_found), no such image ' +
+        '(attachment_missing), a file that is not the image its name says (attachment_type). Starts nothing.',
+      inputSchema: z.strictObject({
+        workspace: workspaceName,
+        ticket: ticketKey,
+        name: z.string().regex(ATTACHMENT_NAME_PATTERN).describe('The image\'s file name, e.g. "1.png".'),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ workspace, ticket, name }) => {
+      try {
+        const image = await readAttachment(await resolveWorkspace(workspace), ticket, name);
+        return {
+          content: [
+            { type: 'image' as const, data: image.data.toString('base64'), mimeType: image.type },
+            { type: 'text' as const, text: `${image.name}: ${image.type}, ${image.bytes} bytes` },
+          ],
+        };
       } catch (error) {
         return toolError(error);
       }

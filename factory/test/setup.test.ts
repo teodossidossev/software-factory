@@ -3,7 +3,7 @@
 // list (drafts, finished jobs, skipped files) and the ticket draft (exact content, the base from
 // origin/HEAD, refusals).
 import assert from 'node:assert/strict';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
@@ -129,7 +129,7 @@ test('setup: tickets lists the Task files without a live job; createTicket write
   // The Task directory is excluded from Git, as write_task does it.
   assert.match(await readFile(join(repo, '.git', 'info', 'exclude'), 'utf8'), /^\.software-factory\/$/m);
   assert.equal(git(repo, 'status', '--porcelain'), '');
-  assert.deepEqual(await setup.tickets(), [{ workspace: 'app', ticket: 'T-1', title: 'Add a thing', base: 'main', draft: true, request: 'Please add\nthe thing.', job: null, lands_after: [] }]);
+  assert.deepEqual(await setup.tickets(), [{ workspace: 'app', ticket: 'T-1', title: 'Add a thing', base: 'main', draft: true, request: 'Please add\nthe thing.', job: null, lands_after: [], attachments: [] }]);
 
   // Refused: an existing ticket (never replaced), bad names, an empty or oversized title or request, an unknown workspace.
   assert.match(await refused(setup.createTicket({ workspace: 'app', ticket: 'T-1', title: 'Again', request: 'x' }), 'ticket_exists'), /already exists in workspace "app"/);
@@ -158,8 +158,8 @@ test('setup: tickets lists the Task files without a live job; createTicket write
   await writeFile(join(repo, '.software-factory', 'T-5.md'), '---\nticket: T-9\ntitle: Other\nbase: main\n---\n');
   await writeFile(join(repo, '.software-factory', '.T-6.md'), '---\nticket: .T-6\ntitle: Hidden\nbase: main\n---\n');
   assert.deepEqual(await setup.tickets(), [
-    { workspace: 'app', ticket: 'T-1', title: 'Add a thing', base: 'main', draft: true, request: 'Please add\nthe thing.', job: null, lands_after: [] },
-    { workspace: 'app', ticket: 'T-3', title: 'Third', base: 'main', draft: false, request: null, job: 'pushed', lands_after: [] },
+    { workspace: 'app', ticket: 'T-1', title: 'Add a thing', base: 'main', draft: true, request: 'Please add\nthe thing.', job: null, lands_after: [], attachments: [] },
+    { workspace: 'app', ticket: 'T-3', title: 'Third', base: 'main', draft: false, request: null, job: 'pushed', lands_after: [], attachments: [] },
   ]);
   await refused(setup.createTicket({ workspace: 'app', ticket: 'T-2', title: 't', request: 'r' }), 'ticket_exists');
 
@@ -369,4 +369,73 @@ test('setup (SF-084): lands_after with each dependency state from the jobs, the 
   git(repo, 'branch', '-q', '-D', 'RUNNING-x');
   assert.equal(await stateOf('RUNNING'), 'pushed');
   assert.deepEqual(await setup.jobDependencies(), []);
+});
+
+test('setup (SF-064): the images folder moves with archive and restore, goes with delete; restore over an existing folder is refused; a new ticket starts without images', async () => {
+  const env = await newEnv('setup-images');
+  const repo = await newRepo(env, 'setup-images-repo', false);
+  const jobs = new JobStore(env.state);
+  const setup = setupOf(env.config, jobs);
+  const dir = join(repo, '.software-factory');
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]);
+  await setup.createTicket({ workspace: 'app', ticket: 'T-1', title: 'One', request: 'r' });
+  assert.deepEqual(await setup.addAttachment('app', 'T-1', PNG), { name: '1.png', bytes: PNG.length, type: 'image/png' });
+  assert.deepEqual((await setup.tickets())[0]!.attachments, [{ name: '1.png', bytes: PNG.length, type: 'image/png' }]);
+  assert.deepEqual((await setup.readAttachment('app', 'T-1', '1.png')).data, PNG);
+
+  // Archive: the folder follows the Task file and replaces an older archived one; the reference resolves next to it.
+  await mkdir(join(dir, 'archive', 'T-1'), { recursive: true });
+  await writeFile(join(dir, 'archive', 'T-1', 'old.png'), PNG);
+  await setup.archiveTicket('app', 'T-1');
+  assert.deepEqual(await readdir(join(dir, 'archive', 'T-1')), ['1.png']);
+  assert.equal(await readFile(join(dir, 'archive', 'T-1.md'), 'utf8').then(() => true), true);
+  await assert.rejects(readdir(join(dir, 'T-1')), { code: 'ENOENT' });
+  // An archived ticket's images cannot be changed.
+  await refused(setup.addAttachment('app', 'T-1', PNG), 'task_not_found');
+
+  // Restore: refused while .software-factory/T-1/ exists, before anything moves; then the folder comes back.
+  await mkdir(join(dir, 'T-1'));
+  assert.match(await refused(setup.restoreTicket('app', 'T-1'), 'ticket_exists'), /T-1\/ already exists/);
+  assert.deepEqual([await readdir(join(dir, 'archive', 'T-1')), (await readdir(join(dir, 'archive'))).includes('T-1.md')], [['1.png'], true]);
+  await rm(join(dir, 'T-1'), { recursive: true });
+  await setup.restoreTicket('app', 'T-1');
+  assert.deepEqual(await readdir(join(dir, 'T-1')), ['1.png']);
+  assert.deepEqual((await readdir(join(dir, 'archive'))).sort(), []);
+
+  // Archive again without images: the older archived images go with the older archived Task file.
+  await rm(join(dir, 'T-1'), { recursive: true });
+  await setup.archiveTicket('app', 'T-1');
+  await assert.rejects(readdir(join(dir, 'archive', 'T-1')), { code: 'ENOENT' });
+  await setup.restoreTicket('app', 'T-1');
+  await setup.addAttachment('app', 'T-1', PNG);
+
+  // Delete: the active folder and an archived one go with the Task files.
+  await mkdir(join(dir, 'archive', 'T-1'), { recursive: true });
+  await writeFile(join(dir, 'archive', 'T-1', '2.png'), PNG);
+  const deleted = await setup.deleteTicket('app', 'T-1');
+  assert.deepEqual(deleted.deleted, ['.software-factory/T-1.md', '.software-factory/T-1/', '.software-factory/archive/T-1/']);
+  await assert.rejects(readdir(join(dir, 'T-1')), { code: 'ENOENT' });
+  await assert.rejects(readdir(join(dir, 'archive', 'T-1')), { code: 'ENOENT' });
+
+  // A new ticket with the key of a deleted one (or of a Task file removed by hand) starts without images.
+  await mkdir(join(dir, 'T-1'));
+  await writeFile(join(dir, 'T-1', '1.png'), PNG);
+  await setup.createTicket({ workspace: 'app', ticket: 'T-1', title: 'Again', request: 'r' });
+  assert.deepEqual((await setup.tickets())[0]!.attachments, []);
+  await assert.rejects(readdir(join(dir, 'T-1')), { code: 'ENOENT' });
+
+  // The ticket "archive" (a valid key, the archive folder's name) has no images: creating, archiving
+  // and deleting it never touch the archive folder.
+  await mkdir(join(dir, 'archive', 'KEEP'), { recursive: true });
+  await setup.createTicket({ workspace: 'app', ticket: 'archive', title: 'A', request: 'r' });
+  await refused(setup.addAttachment('app', 'archive', PNG), 'invalid_ticket');
+  await setup.archiveTicket('app', 'archive');
+  await setup.deleteTicket('app', 'archive');
+  assert.deepEqual(await readdir(join(dir, 'archive')), ['KEEP']);
+
+  // The guard holds through the setup.
+  await jobs.write(jobOf('app', 'T-1', 'working'));
+  await refused(setup.addAttachment('app', 'T-1', PNG), 'job_active');
+  await refused(setup.removeAttachment('app', 'T-1', '1.png'), 'job_active');
+  await refused(setup.addAttachment('App', 'T-1', PNG), 'invalid_name');
 });

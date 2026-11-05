@@ -2,7 +2,9 @@
 // page of test/support/fake-dom.ts: Workspaces and New ticket in the drawer from the header, the
 // workspace form and list, the new-ticket form, on the planned ticket page (SF-081) the
 // conversation link (a click, never automatic) and the first message's Copy, an archived Task in
-// the drawer, and the Start of a ticket whose Task file is written, on its Queue card (SF-040).
+// the drawer, and the Start of a ticket whose Task file is written, on its Queue card (SF-040);
+// New ticket's images (SF-064): paste and drop, the thumbnails and ×, the uploads after Create and
+// a failed one.
 // Script checks, not browser acceptance: the manual steps are in factory/README.md.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -324,4 +326,206 @@ test('setup client: Start posts {} once for its ticket after the confirmation, k
   assert.equal(page.$('toast-text').textContent, 'task_draft: .software-factory/T-6.md is still the skeleton; the conversation writes it first.');
   assert.equal(start('app/T-6').disabled, false);
   assert.equal(posts(page).length, 3);
+});
+
+// New ticket's images (SF-064): the bytes each type is told by.
+const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
+const GIF = new TextEncoder().encode('GIF89a-body');
+const files = (...list: File[]) => ({ files: list, types: list.length > 0 ? ['Files'] : ['text/plain'] });
+const thumbs = (page: Page): Array<[string, string, string]> => page.$('ticket-images').querySelectorAll('figure').map((figure) => [figure.querySelector('img')!.src, figure.querySelector('img')!.alt, figure.querySelector('.mono')!.textContent]);
+
+test('setup client: New ticket takes pasted and dropped images, names them by paste order and real type, keeps text paste, and uploads each after the ticket is created', async () => {
+  const page = await openPage([], [workspace('app')], []);
+  page.$('open-new-ticket').click();
+  assert.equal(page.$('ticket-images').hidden, true);
+  assert.match(page.$('ticket-drop').textContent, /^Paste a screenshot anywhere in this form \(Ctrl\+V\) or drop images here\./);
+
+  // A text paste into "What you want" goes on as usual: nothing is taken.
+  const text = page.$('ticket-request').dispatch('paste', { clipboardData: files() });
+  await page.flush();
+  assert.equal(text.defaultPrevented, false);
+  assert.deepEqual([page.$('ticket-images').hidden, thumbs(page)], [true, []]);
+
+  // Cells copied from a spreadsheet carry text and a picture of them: a paste into a text field stays text.
+  const cells = page.$('ticket-request').dispatch('paste', { clipboardData: { files: [new File([PNG], 'cells.png')], types: ['text/plain', 'Files'] } });
+  await page.flush();
+  assert.deepEqual([cells.defaultPrevented, thumbs(page)], [false, []]);
+
+  // An image pasted into the request, or anywhere in the form: a thumbnail from a blob: URL.
+  const pasted = page.$('ticket-request').dispatch('paste', { clipboardData: files(new File([PNG], 'image.png', { type: 'image/png' })) });
+  assert.equal(pasted.defaultPrevented, true);
+  // A JPEG whose name says .png gets the extension of its real type; a non-image is refused.
+  page.$('ticket-title').dispatch('paste', { clipboardData: files(new File([JPEG], 'photo.png', { type: 'image/png' }), new File(['plain text'], 'fake.png', { type: 'image/png' })) });
+  await page.flush();
+  assert.deepEqual(thumbs(page), [['blob:fake/1', 'Pasted image 1.png', '1.png'], ['blob:fake/2', 'Pasted image 2.jpg', '2.jpg']]);
+  assert.equal(page.$('ticket-status').textContent, 'Not added: fake.png (not a PNG, JPEG, WebP or GIF image).');
+  // A drop on the form adds too.
+  const over = page.$('ticket-drop').dispatch('dragover', { dataTransfer: { files: [], types: ['Files'] } });
+  assert.deepEqual([over.defaultPrevented, page.$('ticket-drop').classList.contains('over')], [true, true]);
+  const drop = page.$('ticket-drop').dispatch('drop', { dataTransfer: files(new File([GIF], 'anim.gif', { type: 'image/gif' })) });
+  await page.flush();
+  assert.deepEqual([drop.defaultPrevented, page.$('ticket-drop').classList.contains('over')], [true, false]);
+  assert.deepEqual(thumbs(page).map((row) => row[2]), ['1.png', '2.jpg', '3.gif']);
+  // × removes one; the names stay in paste order.
+  page.$('ticket-images').querySelectorAll('button').find((node) => node.getAttribute('aria-label') === 'Remove 2.jpg')!.click();
+  assert.deepEqual(thumbs(page).map((row) => row[2]), ['1.png', '2.gif']);
+  assert.deepEqual(page.revokedUrls, ['blob:fake/2']);
+
+  // Create: api/tickets as before (JSON, unchanged), then each image in order under its shown name.
+  page.$('ticket-workspace').value = 'app';
+  page.$('ticket-key').value = 'T-1';
+  page.$('ticket-title').value = 'One';
+  page.$('ticket-request').value = 'See the screenshots.';
+  page.$('ticket-form').dispatch('submit');
+  await page.flush();
+  assert.deepEqual([posts(page)[0]!.path, posts(page)[0]!.headers['content-type'], JSON.parse(posts(page)[0]!.body!)], ['api/tickets', 'application/json', { workspace: 'app', ticket: 'T-1', title: 'One', request: 'See the screenshots.' }]);
+  posts(page)[0]!.respond(200, { ok: true, result: { workspace: 'app', ticket: 'T-1', path: '.software-factory/T-1.md', base: 'main' } });
+  await page.flush();
+  assert.equal(page.$('ticket-status').textContent, 'Ticket created; attaching 2 images…');
+  assert.equal(page.$('ticket-create').disabled, true);
+  const first = posts(page)[1]!;
+  assert.deepEqual([first.path, first.headers['content-type'], first.body], ['api/tickets/app/T-1/attachments?name=1.png', 'application/octet-stream', undefined]);
+  assert.deepEqual(new Uint8Array(await first.blob!.arrayBuffer()), PNG);
+  assert.equal(posts(page).length, 2);
+  // An image pasted while the uploads run is not sent with this ticket, and stays in the form.
+  page.$('ticket-form').dispatch('paste', { clipboardData: files(new File([JPEG], 'late.jpg')) });
+  await page.flush();
+  first.respond(200, { ok: true, result: { name: '1.png', bytes: PNG.length, type: 'image/png' } });
+  await page.flush();
+  const second = posts(page)[2]!;
+  assert.equal(second.path, 'api/tickets/app/T-1/attachments?name=2.gif');
+  assert.deepEqual(new Uint8Array(await second.blob!.arrayBuffer()), GIF);
+  second.respond(200, { ok: true, result: { name: '2.gif', bytes: GIF.length, type: 'image/gif' } });
+  await page.flush();
+  assert.equal(page.$('drawer').hidden, true);
+  assert.match(page.$('toast-text').textContent, /^Ticket created: \.software-factory\/T-1\.md in app .* 2 images attached\.$/);
+  assert.equal(posts(page).length, 3);
+  assert.deepEqual([thumbs(page), page.$('ticket-create').disabled], [[['blob:fake/4', 'Pasted image 1.jpg', '1.jpg']], false]);
+  assert.deepEqual(page.revokedUrls.sort(), ['blob:fake/1', 'blob:fake/2', 'blob:fake/3']);
+});
+
+test('setup client: an image upload that fails after the ticket was created keeps the ticket, and the form says which and why', async () => {
+  const page = await openPage([], [workspace('app')], []);
+  page.$('open-new-ticket').click();
+  page.$('ticket-form').dispatch('paste', { clipboardData: files(new File([PNG], 'a.png'), new File([JPEG], 'b.jpg')) });
+  await page.flush();
+  page.$('ticket-workspace').value = 'app';
+  page.$('ticket-key').value = 'T-2';
+  page.$('ticket-title').value = 'Two';
+  page.$('ticket-request').value = 'r';
+  page.$('ticket-form').dispatch('submit');
+  await page.flush();
+  posts(page)[0]!.respond(200, { ok: true, result: { workspace: 'app', ticket: 'T-2', path: '.software-factory/T-2.md', base: 'main' } });
+  await page.flush();
+  posts(page)[1]!.respond(400, { ok: false, error: { code: 'attachment_type', message: 'Only PNG, JPEG, WebP and GIF images can be attached.' } });
+  await page.flush();
+  posts(page)[2]!.respond(200, { ok: true, result: { name: '2.jpg', bytes: JPEG.length, type: 'image/jpeg' } });
+  await page.flush();
+  // The drawer stays open with what failed; the ticket's fields and the images are cleared, and its card is highlighted.
+  assert.equal(page.$('drawer').hidden, false);
+  assert.equal(page.$('ticket-status').textContent,
+    'Ticket created: .software-factory/T-2.md in app. Not attached: 1.png (attachment_type: Only PNG, JPEG, WebP and GIF images can be attached.). Add it on the ticket\'s page: paste or drop on its Images card.');
+  assert.deepEqual([page.$('ticket-key').value, page.$('ticket-images').hidden, page.$('ticket-create').disabled], ['', true, false]);
+  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('app/T-2')], archived: [] });
+  assert.equal(items(page, 'qlist').find((item) => item.dataset.ticket === 'app/T-2')!.className, 'card hl');
+  // A refused ticket uploads nothing.
+  page.$('ticket-form').dispatch('paste', { clipboardData: files(new File([PNG], 'c.png')) });
+  await page.flush();
+  page.$('ticket-key').value = 'T-2';
+  page.$('ticket-title').value = 'Again';
+  page.$('ticket-request').value = 'r';
+  page.$('ticket-form').dispatch('submit');
+  await page.flush();
+  posts(page)[3]!.respond(409, { ok: false, error: { code: 'ticket_exists', message: 'exists' } });
+  await page.flush();
+  assert.equal(posts(page).length, 4);
+  assert.deepEqual(thumbs(page).map((row) => row[2]), ['1.png']);
+});
+
+test('setup client: Create waits for images still being read, so each one pasted before Create goes up with this ticket (Fix 3, R2)', async () => {
+  const page = await openPage([], [workspace('app')], []);
+  page.$('open-new-ticket').click();
+  page.$('ticket-workspace').value = 'app';
+  page.$('ticket-key').value = 'T-3';
+  page.$('ticket-title').value = 'Three';
+  page.$('ticket-request').value = 'r';
+  // Pasted, then Create at once: the image's bytes are still being read (released by the test) when Create is pressed.
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  class SlowFile extends File {
+    override slice(...args: Parameters<File['slice']>): Blob {
+      const part = super.slice(...args);
+      return { arrayBuffer: async () => (await gate, part.arrayBuffer()) } as unknown as Blob;
+    }
+  }
+  page.$('ticket-form').dispatch('paste', { clipboardData: files(new SlowFile([PNG], 'shot.png')) });
+  page.$('ticket-form').dispatch('submit');
+  await page.flush();
+  // Nothing is created while the image is read.
+  assert.equal(posts(page).length, 0);
+  release();
+  await page.flush();
+  assert.equal(posts(page)[0]!.path, 'api/tickets');
+  posts(page)[0]!.respond(200, { ok: true, result: { workspace: 'app', ticket: 'T-3', path: '.software-factory/T-3.md', base: 'main' } });
+  await page.flush();
+  assert.equal(posts(page)[1]!.path, 'api/tickets/app/T-3/attachments?name=1.png');
+  posts(page)[1]!.respond(200, { ok: true, result: { name: '1.png', bytes: PNG.length, type: 'image/png' } });
+  await page.flush();
+  assert.deepEqual([page.$('drawer').hidden, thumbs(page)], [true, []]);
+  assert.match(page.$('toast-text').textContent, /1 image attached\.$/);
+
+  // An image refused while Create waits: nothing is created; the form says why, and Create again goes on without it.
+  page.$('open-new-ticket').click();
+  page.$('ticket-key').value = 'T-4';
+  page.$('ticket-title').value = 'Four';
+  page.$('ticket-request').value = 'r';
+  page.$('ticket-form').dispatch('paste', { clipboardData: files(new File(['plain text'], 'notes.png')) });
+  page.$('ticket-form').dispatch('submit');
+  await page.flush();
+  assert.equal(posts(page).length, 2);
+  assert.equal(page.$('ticket-status').textContent, 'Not added: notes.png (not a PNG, JPEG, WebP or GIF image).');
+  page.$('ticket-form').dispatch('submit');
+  await page.flush();
+  assert.deepEqual([posts(page).length, posts(page)[2]!.path], [3, 'api/tickets']);
+});
+
+test('setup client: Create uploads the images of the moment it was pressed; one pasted while the ticket is being created stays for the next ticket (Fix 4, R2)', async () => {
+  const page = await openPage([], [workspace('app')], []);
+  page.$('open-new-ticket').click();
+  page.$('ticket-form').dispatch('paste', { clipboardData: files(new File([PNG], 'first.png')) });
+  await page.flush();
+  page.$('ticket-workspace').value = 'app';
+  page.$('ticket-key').value = 'T-5';
+  page.$('ticket-title').value = 'Five';
+  page.$('ticket-request').value = 'r';
+  page.$('ticket-form').dispatch('submit');
+  await page.flush();
+  assert.equal(posts(page)[0]!.path, 'api/tickets');
+  // The create answer is late; an image pasted meanwhile is not part of this ticket, and × is off for the one being sent.
+  assert.equal(page.$('ticket-images').querySelector('button')!.disabled, true);
+  page.$('ticket-form').dispatch('paste', { clipboardData: files(new File([GIF], 'later.gif')) });
+  await page.flush();
+  assert.deepEqual(thumbs(page).map((row) => row[2]), ['1.png', '2.gif']);
+  posts(page)[0]!.respond(200, { ok: true, result: { workspace: 'app', ticket: 'T-5', path: '.software-factory/T-5.md', base: 'main' } });
+  await page.flush();
+  assert.equal(posts(page)[1]!.path, 'api/tickets/app/T-5/attachments?name=1.png');
+  posts(page)[1]!.respond(200, { ok: true, result: { name: '1.png', bytes: PNG.length, type: 'image/png' } });
+  await page.flush();
+  assert.equal(posts(page).length, 2);
+  assert.match(page.$('toast-text').textContent, /1 image attached\.$/);
+  // The later image stays staged, first now, for the next ticket.
+  assert.deepEqual(thumbs(page).map((row) => row[2]), ['1.gif']);
+  assert.deepEqual(new Uint8Array(await page.objectUrls.get(thumbs(page)[0]![0])!.arrayBuffer()), GIF);
+
+  // A refused create keeps every image, and × is on again.
+  page.$('open-new-ticket').click();
+  page.$('ticket-key').value = 'T-5';
+  page.$('ticket-title').value = 'Again';
+  page.$('ticket-request').value = 'r';
+  page.$('ticket-form').dispatch('submit');
+  await page.flush();
+  posts(page)[2]!.respond(409, { ok: false, error: { code: 'ticket_exists', message: 'exists' } });
+  await page.flush();
+  assert.deepEqual([thumbs(page).map((row) => row[2]), page.$('ticket-images').querySelector('button')!.disabled, posts(page).length], [['1.gif'], false, 3]);
 });

@@ -4,11 +4,11 @@
 // words with the findings' kinds, Edit | Preview with the Markdown preview (DOM nodes, only http(s)
 // links), Save with the version read and the conflict's Reload, Ctrl+S, Start with its confirmation
 // and the move to the job, the history, the hash and Escape, a ticket that is gone, and no inline
-// style or prototype-only part. Script checks, not browser acceptance: the manual steps are in
+// style or prototype-only part; the Images card (SF-064): thumbnails, paste, drop, × and Copy image. Script checks, not browser acceptance: the manual steps are in
 // factory/README.md.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { type FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
+import { CANVAS_PNG, type FakeClipboard, type FakeClipboardItem, type FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
 
 const STATIC_DIR = new URL('../../static/', import.meta.url);
 process.env.TZ = 'Europe/Sofia';
@@ -49,7 +49,7 @@ function job(name: string, state: string) {
 }
 
 // The board with the tickets, then the ticket's page opened by the hash and answered with data.
-async function openTicketPage(rows: ReturnType<typeof ticket>[], data: unknown, jobs: unknown[] = [], clipboard?: { writeText(text: string): Promise<void> }): Promise<Page> {
+async function openTicketPage(rows: ReturnType<typeof ticket>[], data: unknown, jobs: unknown[] = [], clipboard?: FakeClipboard): Promise<Page> {
   const page = await loadPage(STATIC_DIR, (path) => (path === 'api/jobs' ? { jobs } : undefined), clipboard);
   page.location.hash = `#app/${rows[0]!.ticket}/ticket`;
   page.document.dispatch('DOMContentLoaded');
@@ -120,8 +120,8 @@ test('ticket client: the header, Starts from, Files it will change with the lock
   ]);
   assert.deepEqual(history.querySelectorAll('ul.hist li').map((item) => item.children[0]!.textContent), ['Nov 5, 12:00', 'Nov 4, 11:00', '']);
   assert.equal(hint(history), 'What happened to this plan.');
-  // No Images card (SF-064) and no queue buttons (SF-071).
-  assert.equal(cardOf(page, /^Images/), undefined);
+  // The Images card (SF-064) without images says so; no queue buttons (SF-071).
+  assert.equal(cardOf(page, /^Images$/).querySelector('.muted')!.textContent, 'No image yet.');
   assert.ok(!root(page).querySelectorAll('button').some((node) => /queue/i.test(node.textContent)));
 });
 
@@ -381,5 +381,123 @@ test('ticket client: no element of the page has an inline style, no prototype-on
   assert.equal(elements.some((node) => ['SCRIPT', 'IMG', 'IFRAME'].includes(node.tagName)), false);
   assert.match(head(page).querySelector('.title')!.textContent, /^<img src=x onerror=alert\(1\)>$/);
   assert.doesNotMatch(root(page).textContent, /\(prototype\)|[Ss]imulated|PROTOTYPE/);
-  assert.equal(elements.some((node) => node.classList.contains('simtag') || node.classList.contains('drop') || node.classList.contains('thumbs')), false);
+  assert.equal(elements.some((node) => node.classList.contains('simtag')), false);
+  // The prototype's file picker of the Images card is left out (SF-064: paste and drop only).
+  assert.equal(elements.some((node) => node.tagName === 'INPUT' && node.type === 'file'), false);
+  assert.doesNotMatch(root(page).textContent, /choose a file|stays on this page only/);
+});
+
+// The Images card (SF-064).
+const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 7, 7]);
+const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 7, 7]);
+const IMAGES = [{ name: '1.png', bytes: PNG.length, type: 'image/png' }, { name: '2.jpg', bytes: JPEG.length, type: 'image/jpeg' }];
+const imagesCard = (page: Page): FakeElement => cardOf(page, /^Images$/);
+const imageButton = (page: Page, label: string, name: string): FakeElement => imagesCard(page).querySelectorAll('button').find((node) => node.dataset.name === name && (node.textContent === label || node.getAttribute('aria-label') === `${label} ${name}`))!;
+
+test('ticket client: the Images card shows each image to open whole, takes pasted and dropped files one upload each, keeps text paste, and removes with ×', async () => {
+  const row = ticket('T-1', { attachments: IMAGES });
+  const page = await openTicketPage([row], payload(row));
+  const card = imagesCard(page);
+  const figures = card.querySelectorAll('figure.thumb');
+  assert.deepEqual(figures.map((figure) => {
+    const link = figure.querySelector('a')!;
+    const img = link.querySelector('img')!;
+    return [link.href, link.target, link.rel, img.src, img.alt, figure.querySelector('.mono')!.textContent];
+  }), [
+    ['api/tickets/app/T-1/attachments/1.png', '_blank', 'noopener noreferrer', 'api/tickets/app/T-1/attachments/1.png', 'Image 1.png', '1.png'],
+    ['api/tickets/app/T-1/attachments/2.jpg', '_blank', 'noopener noreferrer', 'api/tickets/app/T-1/attachments/2.jpg', 'Image 2.jpg', '2.jpg'],
+  ]);
+  assert.equal(page.$('tkDrop').textContent, 'Paste an image here (Ctrl+V) or drop one.');
+  assert.match(hint(card)!, /at most 5 MB each and 10 per ticket\. .*read_attachment.*!\[what it shows\]\(T-1\/<name>\)/);
+
+  // A text paste into the Task file editor goes on as usual.
+  root(page).querySelectorAll('button').find((node) => node.dataset.tktab === 'edit')!.click();
+  const editor = root(page).querySelector('textarea')!;
+  assert.ok(editor !== null);
+  const text = editor.dispatch('paste', { clipboardData: { files: [], types: ['text/plain'] } });
+  await page.flush();
+  assert.equal(text.defaultPrevented, false);
+  // Cells copied from a spreadsheet (text and a picture of them) pasted into the editor stay text.
+  const cells = editor.dispatch('paste', { clipboardData: { files: [new File([PNG], 'cells.png')], types: ['text/plain', 'Files'] } });
+  await page.flush();
+  assert.equal(cells.defaultPrevented, false);
+  assert.equal(posts(page).length, 0);
+
+  // A pasted image anywhere on the page: uploaded at once, without a name, as raw bytes.
+  const pasted = editor.dispatch('paste', { clipboardData: { files: [new File([PNG], 'image.png', { type: 'image/png' })], types: ['Files'] } });
+  assert.equal(pasted.defaultPrevented, true);
+  await page.flush();
+  assert.equal(page.$('tkDrop').textContent, 'Attaching 1 image…');
+  const upload = posts(page)[0]!;
+  assert.deepEqual([upload.path, upload.headers['content-type'], upload.body], ['api/tickets/app/T-1/attachments', 'application/octet-stream', undefined]);
+  assert.deepEqual(new Uint8Array(await upload.blob!.arrayBuffer()), PNG);
+  upload.respond(200, { ok: true, result: { name: '3.png', bytes: PNG.length, type: 'image/png' } });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, 'Attached 3.png.');
+  assert.equal(page.$('tkDrop').textContent, 'Paste an image here (Ctrl+V) or drop one.');
+  // The stream brings the new image to the card.
+  page.streams.at(-1)!.emit('tickets', { tickets: [{ ...row, attachments: [...IMAGES, { name: '3.png', bytes: PNG.length, type: 'image/png' }] }], archived: [] });
+  await page.flush();
+  assert.deepEqual(imagesCard(page).querySelectorAll('figure .mono').map((node) => node.textContent), ['1.png', '2.jpg', '3.png']);
+
+  // A drop of two files on the area: one upload each, in order; a refusal is said with its reason.
+  const over = page.$('tkDrop').dispatch('dragover', { dataTransfer: { files: [], types: ['Files'] } });
+  assert.deepEqual([over.defaultPrevented, page.$('tkDrop').classList.contains('over')], [true, true]);
+  const dropped = page.$('tkDrop').dispatch('drop', { dataTransfer: { files: [new File([JPEG], 'a.jpg'), new File(['text'], 'notes.png')], types: ['Files'] } });
+  assert.equal(dropped.defaultPrevented, true);
+  await page.flush();
+  posts(page)[1]!.respond(200, { ok: true, result: { name: '4.jpg', bytes: JPEG.length, type: 'image/jpeg' } });
+  await page.flush();
+  assert.equal(posts(page)[2]!.path, 'api/tickets/app/T-1/attachments');
+  posts(page)[2]!.respond(400, { ok: false, error: { code: 'attachment_type', message: 'Only PNG, JPEG, WebP and GIF images can be attached.' } });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, 'Attached 4.jpg. Not attached: notes.png (attachment_type: Only PNG, JPEG, WebP and GIF images can be attached.).');
+
+  // ×: POST .../attachments/<name>/remove with {}.
+  imageButton(page, 'Remove', '1.png').click();
+  await page.flush();
+  assert.deepEqual([posts(page)[3]!.path, JSON.parse(posts(page)[3]!.body!)], ['api/tickets/app/T-1/attachments/1.png/remove', {}]);
+  assert.equal(imageButton(page, 'Remove', '1.png').disabled, true);
+  posts(page)[3]!.respond(200, { ok: true, result: { name: '1.png' } });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, 'Removed 1.png.');
+  imageButton(page, 'Remove', '2.jpg').click();
+  await page.flush();
+  posts(page)[4]!.respond(409, { ok: false, error: { code: 'job_active', message: 'The job for app/T-1 is working; its images cannot be changed now.' } });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, 'job_active: The job for app/T-1 is working; its images cannot be changed now.');
+  // No file picker anywhere on the card.
+  assert.equal(imagesCard(page).all().some((node) => node.tagName === 'INPUT'), false);
+});
+
+test('ticket client: Copy image puts a PNG on the clipboard as it is, draws JPEG on a canvas as PNG, and says so without a clipboard for images', async () => {
+  const written: FakeClipboardItem[][] = [];
+  const clipboard: FakeClipboard = { writeText: async () => undefined, write: async (items) => void written.push(items) };
+  const row = ticket('T-1', { attachments: IMAGES });
+  const page = await openTicketPage([row], payload(row), [], clipboard);
+  const pngBlob = new Blob([PNG], { type: 'image/png' });
+  imageButton(page, 'Copy image', '1.png').click();
+  await page.flush();
+  page.requests.find((request) => request.path === 'api/tickets/app/T-1/attachments/1.png')!.respond(200, pngBlob);
+  await page.flush();
+  assert.deepEqual([...written[0]!].map((item) => item.types), [['image/png']]);
+  assert.equal(await written[0]![0]!.getType('image/png'), pngBlob);
+  assert.equal(imagesCard(page).querySelector('[role=status]')!.textContent, 'Copied 1.png.');
+
+  imageButton(page, 'Copy image', '2.jpg').click();
+  await page.flush();
+  page.requests.find((request) => request.path === 'api/tickets/app/T-1/attachments/2.jpg')!.respond(200, new Blob([JPEG], { type: 'image/jpeg' }));
+  await page.flush();
+  const drawn = await written[1]![0]!.getType('image/png');
+  assert.equal(drawn.type, 'image/png');
+  const bytes = Buffer.from(await drawn.arrayBuffer());
+  assert.deepEqual([bytes.subarray(0, CANVAS_PNG.length), bytes.subarray(CANVAS_PNG.length).toString()], [CANVAS_PNG, '4x3:1']);
+  assert.equal(imagesCard(page).querySelector('[role=status]')!.textContent, 'Copied 2.jpg.');
+
+  // A browser without clipboard.write: the card says to open the image and copy it there.
+  const plain = await openTicketPage([row], payload(row));
+  imageButton(plain, 'Copy image', '1.png').click();
+  await plain.flush();
+  assert.equal(imagesCard(plain).querySelector('[role=status]')!.textContent, 'This browser cannot put an image on the clipboard: open 1.png and copy it there.');
+  assert.equal(plain.requests.some((request) => request.path.includes('/attachments/')), false);
 });

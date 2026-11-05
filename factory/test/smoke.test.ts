@@ -215,8 +215,9 @@ test('sf serve gives the Quick start as instructions and the planning and execut
   const { tools } = await client.listTools();
   // SF-040: the planning tools only; jobs are started, reviewed and approved elsewhere. SF-054: the
   // Context owner reads the Task check (task_check), it never runs one. SF-071: it reads the run
-  // queue and adds to it (queue_list, queue_add); it neither removes nor moves.
-  assert.deepEqual(tools.map((tool) => tool.name).sort(), ['guide', 'queue_add', 'queue_list', 'read_file', 'search', 'task_check', 'write_task']);
+  // queue and adds to it (queue_list, queue_add); it neither removes nor moves. SF-064: it reads a
+  // ticket's images (read_attachment).
+  assert.deepEqual(tools.map((tool) => tool.name).sort(), ['guide', 'queue_add', 'queue_list', 'read_attachment', 'read_file', 'search', 'task_check', 'write_task']);
   const annotations = Object.fromEntries(tools.map((tool) => [tool.name, tool.annotations]));
   assert.equal(annotations.task_check?.readOnlyHint, true);
   assert.equal(annotations.read_file?.readOnlyHint, true);
@@ -224,6 +225,7 @@ test('sf serve gives the Quick start as instructions and the planning and execut
   assert.equal(annotations.write_task?.readOnlyHint, false);
   assert.equal(annotations.queue_list?.readOnlyHint, true);
   assert.equal(annotations.queue_add?.readOnlyHint, false);
+  assert.equal(annotations.read_attachment?.readOnlyHint, true);
   assert.deepEqual(await call(client, 'guide', {}), { text: handbook });
 
   await client.close();
@@ -317,6 +319,50 @@ test('write_task writes the Task file into the work checkout and refuses invalid
     assert.ok(['schema', 'protocol'].includes(await refusedCode(client, 'write_task', args)), JSON.stringify(args));
   }
   assert.equal((await recorded()).length, 2);
+
+  await client.close();
+  assert.equal(await stop(served, 'SIGTERM'), 0);
+});
+
+test('read_attachment returns a ticket\'s image as MCP image content with one text line, and refuses with the attachments\' codes', async () => {
+  const served = await serve();
+  const client = await connect(served);
+  const ticket = 'DEMO-7';
+  const content = TASK.replaceAll('DEMO-1', ticket);
+  await call(client, 'write_task', { workspace: 'demo', ticket, content });
+  const dir = join(repo, '.software-factory', ticket);
+  await mkdir(dir, { recursive: true });
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('pixels')]);
+  const gif = Buffer.from('GIF89a-frames');
+  await writeFile(join(dir, '1.png'), png);
+  await writeFile(join(dir, 'anim.gif'), gif);
+  await writeFile(join(dir, 'fake.png'), 'not an image');
+
+  const read = await client.callTool({ name: 'read_attachment', arguments: { workspace: 'demo', ticket, name: '1.png' } });
+  assert.equal(read.isError ?? false, false, JSON.stringify(read.content));
+  assert.deepEqual(read.content, [
+    { type: 'image', data: png.toString('base64'), mimeType: 'image/png' },
+    { type: 'text', text: `1.png: image/png, ${png.length} bytes` },
+  ]);
+  const animated = await client.callTool({ name: 'read_attachment', arguments: { workspace: 'demo', ticket, name: 'anim.gif' } });
+  assert.deepEqual((animated.content as Array<Record<string, unknown>>)[0], { type: 'image', data: gif.toString('base64'), mimeType: 'image/gif' });
+
+  // The Task file may now refer to it; a reference to an image the ticket does not have is refused.
+  await call(client, 'write_task', { workspace: 'demo', ticket, content: `${content}
+![the screen](${ticket}/1.png)
+` });
+  assert.equal(await refusedCode(client, 'write_task', { workspace: 'demo', ticket, content: `${content}
+![gone](${ticket}/2.png)
+` }), 'attachment_missing');
+
+  assert.equal(await refusedCode(client, 'read_attachment', { workspace: 'demo', ticket, name: '2.png' }), 'attachment_missing');
+  assert.equal(await refusedCode(client, 'read_attachment', { workspace: 'demo', ticket, name: 'fake.png' }), 'attachment_type');
+  assert.equal(await refusedCode(client, 'read_attachment', { workspace: 'demo', ticket: 'DEMO-404', name: '1.png' }), 'task_not_found');
+  assert.equal(await refusedCode(client, 'read_attachment', { workspace: 'demo', ticket: 'archive', name: '1.png' }), 'invalid_ticket');
+  assert.equal(await refusedCode(client, 'read_attachment', { workspace: 'missing', ticket, name: '1.png' }), 'workspace_not_found');
+  for (const name of ['../DEMO-7.md', 'a/1.png', '/etc/passwd', '1.txt', '1.PNG']) {
+    assert.ok(['schema', 'protocol'].includes(await refusedCode(client, 'read_attachment', { workspace: 'demo', ticket, name })), name);
+  }
 
   await client.close();
   assert.equal(await stop(served, 'SIGTERM'), 0);

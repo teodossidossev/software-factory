@@ -5,7 +5,8 @@ client), runs the jobs and provides the `sf` command. How to work with it is in 
 vocabulary is in [../CONTEXT.md](../CONTEXT.md).
 
 The MCP endpoint serves only the planning tools (`guide`, `read_file`, `search`, `write_task`,
-`task_check`, and the run queue's `queue_list` and `queue_add`, section Run queue): the Context owner reads the repository, discusses the ticket with the user and
+`task_check`, `read_attachment` (a ticket's image, section Ticket images), and the run queue's
+`queue_list` and `queue_add`, section Run queue): the Context owner reads the repository, discusses the ticket with the user and
 writes the Task file with its `## Review brief`. Before Start, the Task check (section Task check)
 reads the Task file and the repository and says whether it is ready to build. The user starts the job, with the Start button of the ticket on the
 dashboard or with `sf start`. The Implementer runs as a headless Claude
@@ -29,6 +30,8 @@ bin/sf up [--no-open] [--no-tunnel]   # sf serve plus the tunnel (../scripts/sf-
 bin/sf dashboard [--open]         # the dashboard URL of the last sf serve start; --open opens it with xdg-open; works without sf serve
 bin/sf check-task <workspace> <ticket>  # the Task check (section Task check): paraphrase, findings by severity, verdict; stored by sha; works without sf serve
 bin/sf rules <workspace> [ticket] # the coding rules the agents would be given (section Coding rules): paths, sources, sizes, the files left out; never their text; works without sf serve
+bin/sf attach <workspace> <ticket> <file> [name]   # attach an image to the ticket (section Ticket images): .software-factory/<ticket>/<name>, name by default the next number; works without sf serve
+bin/sf attach <workspace> <ticket> --remove <name>  # remove one; refused while a job of the ticket runs (paused aside)
 bin/sf start <workspace> <ticket> # start the job in a worktree of its own (same as the dashboard's Start); a start by hand is never held by the run limit; needs sf serve
 bin/sf queue list                 # the run queue (section Run queue): the limit, the running count, held or not, the queued tickets in order with what each waits for, the next one, the starts that failed; needs sf serve
 bin/sf queue add <workspace> <ticket> [--at N]  # queue a planned ticket at position N (1-based; default the end); needs sf serve
@@ -277,6 +280,74 @@ the Report, the Fix sections, the tools).
   rules files and `SF_RULES_MAX_BYTES` say today (or says the job has none: started before SF-059,
   or failed with `rules_failed`); otherwise it reads them at the Task file's `base` (fetched from
   `origin` as Start does), and, without a ticket, at the checkout's `HEAD`.
+
+## Ticket images
+
+SF-064. The user explains a ticket with screenshots: pasted from the clipboard (Ctrl+V / Cmd+V)
+into New ticket or onto the planned ticket's page, dropped there as files, or added with
+`sf attach`. They live next to the Task file, in `.software-factory/<ticket>/` of the work
+checkout (out of Git with the folder), and ChatGPT reads them with `read_attachment` while it
+writes the Task file. The Task file refers to an image with plain Markdown, the path relative to
+the Task file: `![the login form](<ticket>/1.png)`; only the images the Task file refers to count
+for the job (handing them to the Implementer and the reviewers is SF-065).
+
+One set of rules (`src/attachments.ts`) for the dashboard, the CLI and MCP:
+
+- **Type** from the first bytes only: PNG, JPEG, WebP or GIF; anything else (a text file renamed
+  `.png`, an SVG, a PDF) is `attachment_type` (400).
+- **Limits**: at most 5 MB (`5 * 1024 * 1024` bytes) each, `attachment_too_large` (413), and 10 per
+  ticket, `attachment_limit` (409).
+- **Names**: `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.(png|jpg|webp|gif)$` with the extension of the
+  detected type (`jpg` for JPEG), else `invalid_name` (400): no `/`, no `..`, nothing outside the
+  ticket's folder. A name that exists is refused, never replaced. Without a name, the next number:
+  the highest number in the folder + 1 (`1.png`, `2.png`, …; a gap after a removal is not reused;
+  numbers of any length a name allows count, and a successor too long for a name is `invalid_name`).
+- **Listing and counting**: only the regular files whose names match the pattern and whose bytes
+  are the type their extension says; anything else in the folder (a link, a directory, a text
+  file) is ignored, and is never served.
+- **The Task file** `.software-factory/<ticket>.md` must exist to add, remove, list or read
+  (`task_not_found`, 404): an archived ticket's images cannot be changed. The ticket `archive` (the
+  archive folder's name) and a key ending in `.md` cannot have images (`invalid_ticket`).
+- **Guard**: `write_task`'s rule: adding or removing is refused with `job_active` (409) while a job
+  of the ticket is in a non-terminal state other than paused. Reading goes on.
+
+`write_task` (and the page's Save) refuses with `attachment_missing` (400) a Task file whose image
+reference `![…](<ticket>/<name>)` (outside fenced code blocks; the target is the text after `(` up
+to the first space or `)`, as written) names an image the ticket does not have; other targets (a
+URL, `./…`, another ticket's) are not checked, and neither is a Fix section.
+
+**Archive, restore, delete** (`src/setup.ts`): Archive moves `.software-factory/<ticket>/` to
+`.software-factory/archive/<ticket>/` after the Task file, replacing an older archived folder, so a
+reference in `archive/<ticket>.md` still resolves next to it; Restore moves it back after the Task
+file and is refused with `ticket_exists` before anything moves while `.software-factory/<ticket>/`
+exists; Delete removes both folders with the Task files. A new ticket starts without images (a
+folder left behind by a Task file removed by hand goes when New ticket writes the skeleton).
+
+**`read_attachment(workspace, ticket, name)`** returns the image as MCP image content
+(`{type: "image", data, mimeType}`) and one text line `<name>: <type>, <bytes> bytes`. Whether
+ChatGPT's connector shows MCP image content to the model is checked live (SF-064 Step 1); until
+then the page's **Copy image** puts an image on the clipboard to paste into ChatGPT by hand. The
+ticket's first message names its images and how to read and refer to them: "The ticket has
+images: 1.png, 2.png. Read each with read_attachment (workspace "<ws>", ticket "<ticket>", name). In
+the Task file, refer to the images the Task needs as ![what it shows](<ticket>/<name>)." The
+tickets payload follows the folder on each refresh, so the link and the message do too.
+
+**`sf attach <workspace> <ticket> <file> [name]`** copies a file into the folder under the same rules
+(a file over 5 MB is refused unread); `--remove <name>` removes one. Both work on the files
+directly, without `sf serve`, with the same guard.
+
+**On the dashboard** (section Dashboard): New ticket takes images pasted anywhere in its form or
+dropped on it, shows each as a thumbnail (`blob:` URLs, so the CSP's `img-src` is `'self' blob:`)
+named `1.png`, `2.png`, … in paste order with its real type's extension, with ×; "Create the ticket"
+posts `api/tickets` as before, then uploads each image in order under that name. When an upload
+fails the ticket stays created, and the form says which images failed and why, to be added on the
+ticket's page. The planned ticket page's **Images** card shows each image (a click opens it whole
+in a new tab), × to remove it and **Copy image** (`navigator.clipboard.write` with an `image/png`
+item; JPEG, WebP and GIF are drawn on a canvas and copied as PNG), and the area "Paste an image
+here (Ctrl+V) or drop one.": a paste anywhere on the page while it is shown, or a drop of one or
+more files on the area, uploads each at once without a name. A text paste (into the Task file
+editor, the request) goes on as usual: only clipboard files are taken. There is no file picker
+(the prototype's "choose a file" is left out: the user said none is needed).
 
 ## Jobs
 
@@ -1574,6 +1645,7 @@ itself), each card with a short help line:
 | **Waits for** | `lands_after` | Each ticket with SF-084's state in words: ✓ merged, pushed, not merged yet, running, planned, not started, unknown ticket (another workspace's as `<workspace>/<ticket>`). Start now still starts it. |
 | **Plan check** | (the Task check) | "Ready: …", "Not ready: N blockers, M majors." with the findings (their kind in words: needs a decision, contradicts itself, something is missing, does more than asked, unclear), what the checker understood and the files it expects to change; "Not checked yet.", "Checking…", "The plan changed after this check: check it again."; the date, the model and the cost. It only advises. |
 | **Planning conversation** | | The link, the first message and its Copy. |
+| **Images** | | The ticket's images (SF-064, section Ticket images): each opens whole in a new tab, with **Copy image** and ×; "Paste an image here (Ctrl+V) or drop one." |
 | **History** | | What happened to the plan (below). |
 
 The check is read again (`GET api/tickets/<ws>/<ticket>/check`) on every tickets refresh of the
@@ -1633,7 +1705,8 @@ file writer: the front matter (`ticket`, `title`, `base` = the branch `origin/HE
 `main`), `# <ticket>: <title>` and `## Status: waiting for the Context owner` with one line of
 explanation. The user's words are **not** written into it: they are kept in the state directory
 (`<state dir>/requests/<workspace>/<ticket>.md`) and become the first message of the ticket's
-conversation. An existing Task file is never replaced from the page (`409 ticket_exists`). Once
+conversation. Images pasted or dropped into the form are uploaded after the ticket is created
+(SF-064, section Ticket images). An existing Task file is never replaced from the page (`409 ticket_exists`). Once
 the ticket is created the dialog closes and the board scrolls to the new Queue card and highlights
 it (a click on it opens its page); a refusal keeps the dialog open with the error and the input.
 Nothing opens the ChatGPT tab by itself. **Archived** (with the count) lists the archived tickets
@@ -1649,7 +1722,8 @@ The ticket's **conversation** on its page: *Open the ChatGPT conversation ↗*, 
 ticket and the workspace, carries the user's words, and tells the Context owner to investigate
 (`read_file`, `search`), discuss, write the Task file over the skeleton with `write_task` with a
 `## Review brief`, and then tell the user it is ready: it only plans and never starts, reviews or
-approves a job; the user reads the Task file and presses Start. A message too long for a link
+approves a job; the user reads the Task file and presses Start. A ticket with images gets the
+sentence of section Ticket images before the last one. A message too long for a link
 (over 7500 characters of URL) has no link: the page offers it to copy.
 Whether ChatGPT sends a prefilled message by itself is up to ChatGPT, so the page says to press
 Enter if it is not. Only the server's ChatGPT URL becomes a link. A change made with `sf workspace
@@ -1782,7 +1856,7 @@ retargets a request, and an answer that arrives for another job changes nothing 
 
 The page is plain HTML, CSS and JavaScript from `static/`, with no external resources, under
 `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self';
-img-src 'self'` and `Cache-Control: no-store`; every value is rendered as text.
+img-src 'self' blob:` (`blob:` for New ticket's thumbnails before upload, SF-064) and `Cache-Control: no-store`; every value is rendered as text.
 
 Endpoints under `/d/<token>/`. The read endpoints are GET only (anything else `405` with
 `Allow: GET`); the action endpoints are POST only (anything else `405` with `Allow: POST`; GET,
@@ -1794,7 +1868,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, fixes, gate_fixes, gate_tokens, updated_at, created_at, error, and for the board (SF-046) `title` (of the Task file, or `null`), `cost_usd` (the estimate of the iterations and their Claude reviews, or `null`), `review` and `gate` (the last iteration's verdicts: `clean`, `fix`, `failed` or `null`) and `review_ended_at` (the end of that clean or fix Claude review, or `null`); `mr` (the merge request on the Git host or `null`) and `mr_host` (`{host, reason}`: `github`, `gitlab` or `null`, and why the merge request actions are off or `null`); for the v3 card (SF-077) `now` (`{who, what, ts}` of a running job: the Implementer's last tool call or the first line of its last text, read from at most the last 256 KB of `events.jsonl`; the Claude review or the Codex gate reviewing iteration N; the MR writer; else `null`), `tool_calls` (the Implementer's tool calls in the job, counted incrementally: only the bytes added since the last count are read) and `stop` (for `needs_human`, `{items, saves_lines}`: the suggestions of the last simplification pass and the lines they save, the ledger entries to settle (`escalated`, `review_disputed`), the open ones (`review_churn`) or the last gate's items (`gate_rounds`, `gate_budget`), none for other codes; `null` otherwise) |
 | `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override, simplify}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied} or {ts, event: "merge_request", action, number, url, state}], mr_title, ledger}`; `mr_title` is the MR text's first line or `null`; `ledger` is `ledger.json` as written (`[]` before the first Fix section, SF-052); `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null`, `simplify` its `simplify.json` (SF-055) or `null` |
 | `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem, handoff, color}]}`: the registry, the checkout's path, its non-terminal jobs, why the checkout cannot be used now or `null`, its own hand-over setting or `null`, and its colour on the board (SF-084: its `color`, else the one its name picks) |
-| `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, lands_after, conversation: {message, url}, queue_position, queue_error}], archived: [{workspace, ticket, title}], job_lands_after: [{workspace, ticket, lands_after}], queue: {max_running, running, held, hold_reason, next}}`: the Task files without a live job; `queue_position` its 1-based place in the run queue or `null`, `queue_error` the queue's failed start `{code, message}` or `null`, `queue` the run queue (`next`: `{workspace, ticket}` of the first entry that waits for nothing, or `null`; the whole `queue` is `null` without a run queue) (SF-071, section Run queue); `lands_after` the tickets its Task file waits for, `[{workspace, ticket, state}]` with `state` `merged`, `pushed`, `running`, `planned` or `missing` (SF-084, section Dashboard), and `job_lands_after` the same for the Task files with a live job; `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
+| `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, lands_after, attachments, conversation: {message, url}, queue_position, queue_error}], archived: [{workspace, ticket, title}], job_lands_after: [{workspace, ticket, lands_after}], queue: {max_running, running, held, hold_reason, next}}`: the Task files without a live job; `queue_position` its 1-based place in the run queue or `null`, `queue_error` the queue's failed start `{code, message}` or `null`, `queue` the run queue (`next`: `{workspace, ticket}` of the first entry that waits for nothing, or `null`; the whole `queue` is `null` without a run queue) (SF-071, section Run queue); `lands_after` the tickets its Task file waits for, `[{workspace, ticket, state}]` with `state` `merged`, `pushed`, `running`, `planned` or `missing` (SF-084, section Dashboard), and `job_lands_after` the same for the Task files with a live job; `attachments` its images `[{name, bytes, type}]` (SF-064, section Ticket images); `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/patch` | the Patch, `text/x-diff` |
 | `api/jobs/<ws>/<ticket>/mr` | the MR text, `text/markdown`; 404 until there is one |
@@ -1804,6 +1878,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `api/jobs/<ws>/<ticket>/file?at=base\|<N>&path=<path>` | one side of one file (SF-079): `{kind: "text", text}`, `{kind: "absent"}`, `{kind: "binary", bytes}` (the blob's size, `null` at an iteration whose Patch holds no content), `{kind: "too_large", bytes}` above 1 MiB, or `{kind: "unavailable", reason}`; `at=base` takes `&of=<N>`, the iteration whose base is meant (the last one when left out). Only a path of a `changes` list of a view that shows that side is served (for `at=base&of=N` the list of `from=base&to=N`; for `at=N` those of `from=base&to=N`, `from=N−1&to=N` and `from=N&to=N+1`); any other path, `..`, `.software-factory/`, an iteration not published or another parameter is an empty 404 |
 | `api/jobs/<ws>/<ticket>/stream?from=<line>` | the job's Stream (SF-082) for the v3 job page: `{entries, next, end}`, the entries of at most 2000 lines of `events.jsonl` from the 0-based `from` (default 0, at most 9 digits, else 404), in line order; `next` is the first line not read, `end` whether the file has no more lines (a `from` past the last line: `{entries: [], next: from, end: true}`; a job without `events.jsonl`: `{entries: [], next: 0, end: true}`). Each entry has `t`, `k` (`"<line>"`, or `"<line>.<n>"` when the line gives several), `ts`, `it` (the record's iteration, at least 1) and `who` (`implementer`, `claude`, `codex`, `you`, `factory` or `mr`). Types: `prompt` (`kind` `implement`, `fix` with `fix_n` and the `## Fix N` section of `task.md` as `fix`, `mr`, `conflict` or `continue`; `text` without the factory's rules block, `first`, `task_changed` when the Task-change note was cut from `text`), `user` (the user's message, `text`, `task_changed`), `text`, `tool` (`id`, `line`, `detail`: the input as JSON, at most 16384 characters), `tool_result` (`id`, `out`, `result` at most 16384 characters, `err`; never merged into its `tool`: the client joins them by `id`), `result` (`turns`, `ms`, `cost`), `state` (`from`, `to`, `code`, `msg`), `verdict` (`verdict`, `effective`, and `summary` and `items` with their ledger `id` only when the iteration's `review.json` or `gate.json` matches the record's verdict and item count), `changes` (after a published iteration: `files`, `paths` from `meta.json`), `simplify` (`suggestions`, `saves_lines`) and `note` (every other record, as one `sf watch` line without its time and prefix). An entry depends only on its line and the job's files when it is built (`src/job-stream.ts`); a live `verdict` can lack the ledger ids a later page load has |
 | `api/tickets/<ws>/<ticket>/task` | the ticket's Task file, `text/markdown`, read through the Task file reader (a regular file of valid Task content); `?archived=1` reads `.software-factory/archive/<ticket>.md` instead (any other `archived` value is 404); an unknown workspace or a missing file is an empty 404, a file the reader refuses its refusal (`400 invalid_content`) |
+| `api/tickets/<ws>/<ticket>/attachments/<name>` | one image of the ticket (SF-064), with the content type its bytes tell and `x-content-type-options: nosniff`; a missing workspace, Task file or image (or any query) is an empty 404, a bad name `400 invalid_name`, a file that is not the image its name says `400 attachment_type` |
 | `api/stream?job=<ws>/<ticket>&from=<line>` | server-sent events: `jobs` (on connect and on every state change), `workspaces` and `tickets` (as the two endpoints, at the same times and after every setup action from a page), `job` (the job's detail, on connect and when it changes state), `event` (`{line, ts, iteration, type, text}` for every visible line of `events.jsonl` from the 0-based `from`, as `sf watch` formats it; the page reads `entries` since SF-078), `entries` (`{line, entries}`, the line's entries as `api/jobs/<ws>/<ticket>/stream` gives them, for every line from `from` that has entries, strictly in line order; a line whose build fails is logged and skipped); a comment every 15 s; at most 8 streams, then 503 |
 
 | Method and path | JSON body | Calls |
@@ -1825,7 +1900,9 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `POST api/workspaces/<name>/remove` | `{}` | `Setup.removeWorkspace`; `409 workspace_busy` while the workspace has a live job; result `{removed}` |
 | `POST api/tickets` | `{"workspace", "ticket", "title", "request"}` | `Setup.createTicket`: the ticket skeleton through the Task file writer, the request kept for the conversation; result `{workspace, ticket, path, base}` |
 | `POST api/tickets/<ws>/<ticket>/start` | `{}` | `Execution.start(ws, ticket)` (`sf start`, SF-040, SF-046): the job's record, branch and worktree, then iteration 1; result `{branch, state, check_after_minutes, worktree}`; refusals as they come (`409 task_draft` for a skeleton, `409 job_exists`, `409 branch_exists`, `404 task_not_found`, ...; a start by hand is never held by the run limit); every page gets the jobs, the workspaces and the tickets again |
-| `POST api/tickets/<ws>/<ticket>/archive`, `.../restore`, `.../delete` | `{}` | `Setup.archiveTicket`, `restoreTicket`, `deleteTicket` (SF-027) |
+| `POST api/tickets/<ws>/<ticket>/archive`, `.../restore`, `.../delete` | `{}` | `Setup.archiveTicket`, `restoreTicket`, `deleteTicket` (SF-027); the ticket's images folder with them (SF-064) |
+| `POST api/tickets/<ws>/<ticket>/attachments?name=<name>` | the image's raw bytes, `Content-Type: application/octet-stream` (not JSON), at most 5 MB | `Setup.addAttachment` (SF-064, section Ticket images): `name` optional (the next number when left out; another query key or a second `name` is an empty 404); result `{name, bytes, type}`; `400 attachment_type`, `400 invalid_name`, `413 attachment_too_large` (also a body over 5 MB, checked against `Content-Length` and while reading), `409 attachment_limit`, `409 job_active`, `404 task_not_found`; every page gets the tickets again |
+| `POST api/tickets/<ws>/<ticket>/attachments/<name>/remove` | `{}` | `Setup.removeAttachment` (SF-064): result `{name}`; `400 attachment_missing`, `400 invalid_name`, `409 job_active`; there is no DELETE method |
 | `POST api/queue/add` | `{"workspace": string, "ticket": string, "at"?: integer >= 1}` | `RunQueue.add` (`sf queue add`, SF-071): result `{position}`; `404 task_not_found`, `409 task_draft`, `409 job_exists`, `409 already_queued` |
 | `POST api/queue/remove` | `{"workspace": string, "ticket": string}` | `RunQueue.remove` (`sf queue remove`); `409 not_queued` |
 | `POST api/queue/move` | `{"workspace": string, "ticket": string, "to": integer >= 1}` | `RunQueue.move` (`sf queue move`): result `{position}`; `409 not_queued` |
@@ -1841,7 +1918,8 @@ token, an `Origin` equal to the page's exact origin (`http://127.0.0.1:<port>` w
 port; a missing Origin, another loopback address or port and the MCP origin are refused with
 `403 invalid_origin`; a `null` or foreign Origin is already refused, `403`, by the loopback
 Origin check every request passes), `Content-Type: application/json` (a `charset=utf-8`
-parameter is accepted; anything else `415 unsupported_media_type`) and a body of at most 128 KiB
+parameter is accepted; anything else `415 unsupported_media_type`; an image upload takes
+`application/octet-stream` instead, SF-064) and a body of at most 128 KiB
 (`413 body_too_large`, checked against `Content-Length` and while reading; nothing is truncated)
 that is UTF-8 JSON (`400 invalid_json`) of exactly the shape above: an object with the listed keys
 of the listed types, no other key, no null, no array (`400 invalid_body`). Invalid names and
@@ -1859,9 +1937,10 @@ under `409` for `invalid_state`, `turn_running`, `rebase_in_progress`, `review_o
 `job_limit` (the run queue's own start, SF-071), `task_draft`, `checkout_dirty`, `branch_exists`, `branch_changed`, `branch_missing`,
 `worktree_exists`, `worktree_missing`, `sensitive_unacknowledged`, `ticket_exists`,
 `workspace_exists`, `workspace_busy`, `branch_locked` and `base_unrelated` (SF-080),
-`already_queued` and `not_queued` (SF-071),
+`already_queued` and `not_queued` (SF-071), `attachment_limit` (SF-064),
+`413` for `attachment_too_large` (SF-064),
 `404` for `job_not_found`, `workspace_not_found` and `task_not_found`, `400` for `invalid_content`, `invalid_ticket`, `invalid_name`,
-`workspace_invalid`, `mr_text_invalid` (SF-080), `invalid_limit` and `invalid_position` (SF-071), and `500` for any other code (a Git failure before the preparation, for
+`workspace_invalid`, `mr_text_invalid` (SF-080), `invalid_limit` and `invalid_position` (SF-071), `attachment_type` and `attachment_missing` (SF-064), and `500` for any other code (a Git failure before the preparation, for
 example; `runner_failed` and `runner_timeout` of a request the job's runner answers: say,
 review, accept). Any other failure is `500`
 with `internal_error` and a fixed message; the cause is logged, never the body or the token.
@@ -2033,8 +2112,8 @@ end), in a browser:
    on it: its position changes after the server's answer; once the first job is ready for review the
    second starts by itself.
 3. Planned ticket page: click a Queue card: the page opens full width, the URL ends in `/ticket`;
-   compare it with the prototype's planned ticket (`prototype-full.html`; its queue and images
-   parts are not here), in light and dark. Preview shows the Task body as Markdown without the
+   compare it with the prototype's planned ticket (`prototype-full.html`; its queue part is not
+   here, and its Images card has no "choose a file", SF-064), in light and dark. Preview shows the Task body as Markdown without the
    front matter; a line `<script>alert(1)</script>` shows as that text, nothing runs; a link
    `[x](javascript:alert(1))` is not a link. The right cards read in plain words (Starts from,
    Files it will change with 🔒 on `may_touch` entries, Waits for, Plan check, Planning
@@ -2043,6 +2122,14 @@ end), in a browser:
    hand) and Save: "Not saved: the Task file changed…", Reload shows the new file; History says
    "Changed outside the factory" for a change by hand. Escape goes back to the board, the focus on
    the card. Archived → Task shows an archived file in the drawer.
+   Images (SF-064): take a screenshot and press Ctrl+V on the page (not in a text field): it
+   uploads, the toast says "Attached 1.png.", and the Images card shows it; a click opens it whole
+   in a new tab. Drop a JPEG and a text file renamed `.png` on the area: the JPEG is attached, the
+   text file refused with `attachment_type`. Paste text into the Task file editor: it goes in as
+   text. Copy image, then paste into a ChatGPT conversation: the image arrives (a JPEG as PNG). ×
+   removes one. In New ticket paste two screenshots into "What you want": two thumbnails `1.png`,
+   `2.png` with ×; Create: `.software-factory/<ticket>/1.png` and `2.png` exist, and the ticket's
+   first message names them.
    Check: on the page click Check the plan (or Check in a card's ⋯ menu): "Checking…", then the
    verdict a few minutes later without a reload. Save a change: the check says "The plan changed
    after this check", and Start now's dialog says "Task check: stale" (and what the ticket waits

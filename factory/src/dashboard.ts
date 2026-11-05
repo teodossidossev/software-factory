@@ -14,7 +14,8 @@
 // and the findings a stopped job waits on. The Changes screen (SF-079) reads the file lists and the
 // file versions of the iterations (src/changes.ts), read-only. The planned ticket page (SF-081)
 // reads a ticket's Task file, its plan in plain words, its check and its history in one payload,
-// and saves the Task file (only over the version it read).
+// and saves the Task file (only over the version it read). A ticket's images (SF-064) are uploaded
+// as raw bytes, served and removed through the attachments module's rules (src/attachments.ts).
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { open, readFile, rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -22,6 +23,7 @@ import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { localhostHostValidation, localhostOriginValidation } from '@modelcontextprotocol/node';
 import * as z from 'zod/v4';
+import { MAX_ATTACHMENT_BYTES } from './attachments.js';
 import { writeFileAtomic } from './atomic.js';
 import { Changes } from './changes.js';
 import { conversationUrl, MAX_CONVERSATION_URL, ticketConversation } from './conversation.js';
@@ -61,7 +63,7 @@ const STATIC_DIR = new URL('../../static/', import.meta.url);
 const SECURITY_HEADERS = {
   'cache-control': 'no-store',
   'x-content-type-options': 'nosniff',
-  'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'",
+  'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:",
   'referrer-policy': 'no-referrer',
 };
 const STATIC_FILES: Record<string, { file: string; type: string }> = {
@@ -95,9 +97,10 @@ const PUSH_CHECK_INTERVAL_MS = 60_000;
 
 // The start screen's data and changes: the workspace registry and the Task files (src/setup.ts).
 // jobDependencies: the tickets a live job's Task file lands after (SF-084). taskFile and saveTask:
-// the planned ticket page's Task file and its Save (SF-081).
+// the planned ticket page's Task file and its Save (SF-081). addAttachment, removeAttachment and
+// readAttachment: a ticket's images (SF-064).
 export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'removeWorkspace' | 'tickets' | 'jobDependencies' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'archivedTickets' | 'taskText' | 'taskTitle'
-  | 'taskFile' | 'saveTask'>;
+  | 'taskFile' | 'saveTask' | 'addAttachment' | 'removeAttachment' | 'readAttachment'>;
 
 // The Task checks (SF-054): start one, a ticket's view and its board summary.
 export type DashboardChecks = Pick<TaskChecks, 'start' | 'view' | 'summary'>;
@@ -141,6 +144,15 @@ const NO_SETUP: DashboardSetup = {
   createTicket: async () => {
     throw new FactoryError('setup_unavailable', 'The start screen is not available.');
   },
+  addAttachment: async () => {
+    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
+  },
+  removeAttachment: async () => {
+    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
+  },
+  readAttachment: async () => {
+    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
+  },
 };
 
 // The request body of each POST route, strict: unknown keys, null, arrays and wrong types are
@@ -181,6 +193,10 @@ const BODIES = {
   'ticket-check': { shape: '{}', schema: z.strictObject({}) },
   // Save of the planned ticket page (SF-081): the whole Task file and the sha256 of the version read.
   'ticket-task': { shape: '{"content": string, "sha256": string}', schema: z.strictObject({ content: z.string(), sha256: z.string() }) },
+  // A ticket's images (SF-064): the upload's body is the image's raw bytes (Content-Type:
+  // application/octet-stream), not JSON; removing one takes {}.
+  'ticket-attachment-add': { shape: 'the image\'s bytes', schema: z.instanceof(Buffer) },
+  'ticket-attachment-remove': { shape: '{}', schema: z.strictObject({}) },
   'ticket-new': { shape: '{"workspace": string, "ticket": string, "title": string, "request": string}', schema: z.strictObject({ workspace: z.string(), ticket: z.string(), title: z.string(), request: z.string() }) },
   // The run queue (SF-071): positions are 1-based; the limit's range is the queue's own check
   // (invalid_limit).
@@ -222,6 +238,9 @@ const ERROR_STATUS: Record<string, number> = {
   push_check_failed: 502,
   // The run queue (SF-071).
   already_queued: 409, not_queued: 409, invalid_limit: 400, invalid_position: 400,
+  // A ticket's images (SF-064): not an image, too large, too many, and a Task file that refers to
+  // one the ticket does not have (also an image to remove that is not there).
+  attachment_type: 400, attachment_too_large: 413, attachment_limit: 409, attachment_missing: 400,
 };
 
 export interface RunningDashboard {
@@ -596,7 +615,7 @@ async function ticketsPayload(setup: DashboardSetup, checks: DashboardChecks | u
 
 // A row of the tickets payload: the ticket, its conversation and, with the Task checks, its check.
 async function ticketEntry(row: TicketRow, checks: DashboardChecks | undefined) {
-  const message = ticketConversation(row.workspace, row.ticket, row.request ?? undefined);
+  const message = ticketConversation(row.workspace, row.ticket, row.request ?? undefined, row.attachments.map((attachment) => attachment.name));
   const url = conversationUrl(message);
   // A very long message does not fit a link; the page offers it to copy instead.
   return {
@@ -729,6 +748,11 @@ type Target =
   | { kind: 'ticket-check'; workspace: string | undefined; ticket: string | undefined }
   // The Task file (SF-081): GET reads it, POST saves it.
   | { kind: 'ticket-task'; workspace: string | undefined; ticket: string | undefined }
+  // A ticket's images (SF-064): POST api/tickets/<ws>/<ticket>/attachments uploads one (name: the
+  // name to give it, or undefined), POST .../attachments/<name>/remove removes one; GET
+  // .../attachments/<name> is a read.
+  | { kind: 'ticket-attachment-add'; workspace: string | undefined; ticket: string | undefined }
+  | { kind: 'ticket-attachment-remove'; workspace: string | undefined; ticket: string | undefined; name: string | undefined }
   | { kind: 'both'; route: 'workspace-add' | 'ticket-new' }
   // The run queue (SF-071): api/queue/<action>, POST only.
   | { kind: 'queue'; action: QueueAction }
@@ -763,6 +787,12 @@ function targetOf(path: string[]): Target {
   if (kind === 'tickets' && path.length === 5 && c === 'task') {
     return { kind: 'ticket-task', workspace: a, ticket: b };
   }
+  if (kind === 'tickets' && path.length === 5 && c === 'attachments') {
+    return { kind: 'ticket-attachment-add', workspace: a, ticket: b };
+  }
+  if (kind === 'tickets' && path.length === 7 && c === 'attachments' && path[6] === 'remove') {
+    return { kind: 'ticket-attachment-remove', workspace: a, ticket: b, name: path[5] };
+  }
   const queueAction = QUEUE_ACTIONS.find((known) => known === a);
   if (kind === 'queue' && path.length === 3 && queueAction !== undefined) {
     return { kind: 'queue', action: queueAction };
@@ -777,6 +807,11 @@ function isJsonContentType(header: string | undefined): boolean {
   }
   const [type, ...params] = header.split(';').map((part) => part.trim().toLowerCase());
   return type === 'application/json' && params.every((param) => param === '' || /^charset="?utf-?8"?$/.test(param));
+}
+
+// application/octet-stream, without parameters: the raw bytes of an image upload (SF-064).
+function isOctetStream(header: string | undefined): boolean {
+  return header !== undefined && header.trim().toLowerCase() === 'application/octet-stream';
 }
 
 // The whole body up to limit bytes, counted while streaming and against Content-Length first.
@@ -826,6 +861,10 @@ interface Post {
   call: (data: unknown) => (() => Promise<unknown>) | undefined;
   // The raw body's bound in bytes; MAX_ACTION_BODY_BYTES by default.
   bodyLimit?: number;
+  // The body is the raw bytes of an image (SF-064), not JSON: Content-Type
+  // application/octet-stream, call gets the Buffer, and a body over the bound is
+  // attachment_too_large.
+  bytes?: boolean;
   refreshSetup?: boolean;
   // The action may end a job too (archive, delete): every page gets the jobs again.
   refreshJobs?: boolean;
@@ -993,6 +1032,10 @@ export async function startDashboard(
     const [, kind, ...rest] = path;
     if (kind === 'tickets' && rest.length === 3 && rest[2] === 'page') {
       await ticketPage(res, rest, query);
+      return;
+    }
+    if (kind === 'tickets' && rest.length === 4 && rest[2] === 'attachments') {
+      await attachmentFile(res, rest, query);
       return;
     }
     if (kind === 'tickets') {
@@ -1208,6 +1251,29 @@ export async function startDashboard(
     body(res, 'text/markdown; charset=utf-8', text);
   }
 
+  // GET api/tickets/<ws>/<ticket>/attachments/<name> (SF-064): one image of the ticket with the
+  // type told by its bytes and nosniff. A missing ticket, workspace, Task file or image is an empty
+  // 404; anything the attachments module refuses answers its refusal.
+  async function attachmentFile(res: ServerResponse, rest: string[], query: URLSearchParams): Promise<void> {
+    const key = jobKey(rest[0], rest[1]);
+    if (key === undefined || [...query.keys()].length > 0) {
+      empty(res, 404);
+      return;
+    }
+    let image;
+    try {
+      image = await setup.readAttachment(...key, rest[3]!);
+    } catch (error) {
+      if (error instanceof FactoryError && error.code === 'attachment_missing') {
+        empty(res, 404);
+        return;
+      }
+      refuseRead(res, error);
+      return;
+    }
+    res.writeHead(200, { 'content-type': image.type, 'x-content-type-options': 'nosniff' }).end(image.data);
+  }
+
   // GET api/tickets/<ws>/<ticket>/check (SF-054): the ticket's last check as JSON, with whether it
   // is stale (the Task file changed since) and running; check null when there is none. A missing
   // workspace or Task file is an empty 404.
@@ -1384,7 +1450,29 @@ export async function startDashboard(
     };
   }
 
-  function setupPost(target: Exclude<Target, { kind: 'read' | 'action' | 'ticket-check' | 'ticket-task' | 'queue' }>): Post | undefined {
+  // POST api/tickets/<ws>/<ticket>/attachments[?name=<name>] (SF-064): one image as raw bytes, at
+  // most MAX_ATTACHMENT_BYTES; the next number when name is left out. The ticket's new images reach
+  // every page (its row, its conversation).
+  function attachmentAddPost([workspace, ticket]: [string, string], name: string | undefined): Post {
+    return {
+      route: 'ticket-attachment-add',
+      bytes: true,
+      bodyLimit: MAX_ATTACHMENT_BYTES,
+      call: (data) => (data instanceof Buffer ? () => setup.addAttachment(workspace, ticket, data, name) : undefined),
+      refreshSetup: true,
+    };
+  }
+
+  // POST api/tickets/<ws>/<ticket>/attachments/<name>/remove (SF-064) with {}.
+  function attachmentRemovePost([workspace, ticket]: [string, string], name: string): Post {
+    return {
+      route: 'ticket-attachment-remove',
+      call: (data) => (BODIES['ticket-attachment-remove'].schema.safeParse(data).success ? () => setup.removeAttachment(workspace, ticket, name) : undefined),
+      refreshSetup: true,
+    };
+  }
+
+  function setupPost(target: Exclude<Target, { kind: 'read' | 'action' | 'ticket-check' | 'ticket-task' | 'queue' | 'ticket-attachment-add' | 'ticket-attachment-remove' }>): Post | undefined {
     if (target.kind === 'ticket-action') {
       const key = jobKey(target.workspace, target.ticket);
       if (key === undefined) {
@@ -1464,8 +1552,8 @@ export async function startDashboard(
       fail(403, 'invalid_origin', `Actions need the Origin ${origin}.`);
       return;
     }
-    if (!isJsonContentType(req.headers['content-type'])) {
-      fail(415, 'unsupported_media_type', 'Actions need Content-Type: application/json.');
+    if (post.bytes === true ? !isOctetStream(req.headers['content-type']) : !isJsonContentType(req.headers['content-type'])) {
+      fail(415, 'unsupported_media_type', post.bytes === true ? 'An image upload needs Content-Type: application/octet-stream.' : 'Actions need Content-Type: application/json.');
       return;
     }
     if (post.exists !== undefined && !(await post.exists())) {
@@ -1478,15 +1566,21 @@ export async function startDashboard(
       return;
     }
     if (raw === 'too_large') {
-      fail(413, 'body_too_large', `The body must be at most ${limit} bytes.`, { connection: 'close' });
+      if (post.bytes === true) {
+        fail(413, 'attachment_too_large', `An image must be at most ${limit} bytes (5 MB).`, { connection: 'close' });
+      } else {
+        fail(413, 'body_too_large', `The body must be at most ${limit} bytes.`, { connection: 'close' });
+      }
       return;
     }
-    let data: unknown;
-    try {
-      data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw));
-    } catch {
-      fail(400, 'invalid_json', 'The body must be UTF-8 JSON.');
-      return;
+    let data: unknown = raw;
+    if (post.bytes !== true) {
+      try {
+        data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw));
+      } catch {
+        fail(400, 'invalid_json', 'The body must be UTF-8 JSON.');
+        return;
+      }
     }
     const run = post.call(data);
     if (run === undefined) {
@@ -1596,6 +1690,26 @@ export async function startDashboard(
         return;
       }
       route(req, res, path, target.searchParams).catch(failed);
+      return;
+    }
+    if (what.kind === 'ticket-attachment-add' || what.kind === 'ticket-attachment-remove') {
+      if (req.method !== 'POST') {
+        empty(res, 405, { allow: 'POST' });
+        return;
+      }
+      const key = jobKey(what.workspace, what.ticket);
+      const query = target.searchParams;
+      let post: Post | undefined;
+      if (key !== undefined && what.kind === 'ticket-attachment-add' && [...query.keys()].every((name) => name === 'name') && query.getAll('name').length <= 1) {
+        post = attachmentAddPost(key, query.get('name') ?? undefined);
+      } else if (key !== undefined && what.kind === 'ticket-attachment-remove' && what.name !== undefined && [...query.keys()].length === 0) {
+        post = attachmentRemovePost(key, what.name);
+      }
+      if (post === undefined) {
+        empty(res, 404);
+        return;
+      }
+      handlePost(req, res, post).catch(failed);
       return;
     }
     if (what.kind === 'queue') {

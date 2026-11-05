@@ -182,3 +182,28 @@ test('writeTask and appendFix (SF-081) record the sha256 of the text written; a 
   await assert.rejects(writeTask(workspace, 'PROJ-1', 'no front matter', jobs, { record: async (sha) => void recorded.push(sha) }), isCode('invalid_content'));
   assert.equal(recorded.length, 1);
 });
+
+test('writeTask (SF-064): every image reference into the ticket\'s folder must name an attachment; code blocks, other targets and appendFix are not checked', async () => {
+  const workspace = await newWorkspace('refs');
+  const head = '---\nticket: PROJ-1\ntitle: T\nbase: master\n---\n\n';
+  await writeTask(workspace, 'PROJ-1', `${head}No image yet.\n`, jobs);
+  const missing = `${head}![the login](PROJ-1/1.png) and ![b](PROJ-1/2.png) and ![a](PROJ-1/1.png)\n`;
+  await assert.rejects(writeTask(workspace, 'PROJ-1', missing, jobs), (error: unknown) => {
+    assert.ok(error instanceof FactoryError && error.code === 'attachment_missing', String(error));
+    assert.match(error.message, /images PROJ-1 does not have: 1\.png, 2\.png\./);
+    return true;
+  });
+  assert.equal(await readFile(join(workspace.workCheckout, '.software-factory', 'PROJ-1.md'), 'utf8'), `${head}No image yet.\n`);
+
+  // With the image in the folder the reference passes; one inside a fenced code block, another
+  // ticket's, an URL and "./" are not attachments of this ticket.
+  await mkdir(join(workspace.workCheckout, '.software-factory', 'PROJ-1'));
+  await writeFile(join(workspace.workCheckout, '.software-factory', 'PROJ-1', '1.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  const ok = `${head}![the login](PROJ-1/1.png)\n\n\`\`\`md\n![example](PROJ-1/9.png)\n\`\`\`\n\n![x](PROJ-2/1.png) ![y](https://example.com/a.png) ![z](./PROJ-1/9.png)\n`;
+  assert.equal((await writeTask(workspace, 'PROJ-1', ok, jobs)).status, 'replaced');
+  // A file of the right name that is not the image its name says is no attachment.
+  await writeFile(join(workspace.workCheckout, '.software-factory', 'PROJ-1', '3.png'), 'text');
+  await assert.rejects(writeTask(workspace, 'PROJ-1', `${ok}![t](PROJ-1/3.png)\n`, jobs), (error: unknown) => error instanceof FactoryError && error.code === 'attachment_missing');
+  // appendFix is not checked.
+  assert.match(await appendFix(workspace, 'PROJ-1', 1, '![gone](PROJ-1/7.png)'), /## Fix 1\n\n!\[gone\]\(PROJ-1\/7\.png\)/);
+});

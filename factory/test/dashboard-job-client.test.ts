@@ -580,3 +580,46 @@ test('job client: the Live log tells the Implementer, the Claude review, Codex a
   stream.emit('event', { line: 11, ts: '2026-11-01T10:07:00.000Z', iteration: 1, type: 'assistant', text: '10:07:00 [1] Even more.' });
   assert.equal(events.scrollTop, 100);
 });
+
+test('job client (SF-052): a ledger stop says what happened; escalated and contested findings get Accept risk and Must fix with a note; Accept over review_churn lists the open findings', async () => {
+  const ledgerEntry = (id: string, status: string, extra: Record<string, unknown> = {}) => ({
+    id, iteration: 1, reviewer: 'claude', severity: 'major', path: 'README.md', problem: `Problem of ${id}.`, expected: 'Better.', status,
+    response: '', evidence: '', reopened: 0, asked: 1, caused_by: '', dispute: null, settled: null, ...extra,
+  });
+  const escalated = detail(job('needs_human', { iteration: 2, error: { code: 'escalated', message: 'R1: which language?' } }), {
+    iterations: [iteration(1, { review: CLAUDE_FIX }), iteration(2)],
+  });
+  const ledger = [ledgerEntry('R1', 'escalated', { response: 'Which language?' }), ledgerEntry('R2', 'fixed')];
+  const page = await openJob({ ...escalated, ledger } as Detail);
+  assert.match(page.$('job-halt').textContent, /escalated a question only you can answer\. Settle each finding below/);
+  assert.equal(page.$('ledger-panel').hidden, false);
+  const [item] = elements(page, 'ledger-list');
+  assert.equal(elements(page, 'ledger-list').length, 1);
+  assert.equal((item!.children[0] as FakeElement).textContent, 'R1 · escalated · major · README.md: Problem of R1.');
+  assert.equal((item!.children[1] as FakeElement).textContent, 'The Implementer asks: Which language?');
+  const note = item!.querySelectorAll('input')[0]!;
+  const [accept, fix] = item!.querySelectorAll('button');
+  assert.deepEqual([accept!.textContent, fix!.textContent], ['Accept risk', 'Must fix']);
+  note.value = 'English only.';
+  fix!.click();
+  await page.flush();
+  const sent = posts(page).at(-1)!;
+  assert.deepEqual([sent.path, JSON.parse(sent.body!)], ['api/jobs/app/T-1/settle', { id: 'R1', decision: 'fix', note: 'English only.' }]);
+  sent.respond(200, { ok: true, result: { state: 'working', id: 'R1', status: 'user_fix', waiting: [] } });
+  await page.flush();
+  assert.equal(page.$('action-status').textContent, 'Settled R1: to be fixed (state working).');
+
+  // A dispute shows both positions; review_churn and review_disputed offer Accept with the open findings.
+  const disputed = ledgerEntry('R1', 'contested', { response: 'Done at README.md:1.', evidence: 'README.md:1', dispute: { reviewer: 'codex', iteration: 2, reason: 'Still wrong.' } });
+  await show(page, { ...detail(job('needs_human', { iteration: 2, error: { code: 'review_disputed', message: 'x' } }), { iterations: [iteration(1, { review: CLEAN, gate: GATE_FIX }), iteration(2, { review: CLEAN, gate: GATE_FIX })] }), ledger: [disputed] } as Detail);
+  assert.match(page.$('job-halt').textContent, /disputes the Implementer's contest of a finding\. Accept and prepare the MR, settle the finding below/);
+  assert.deepEqual(texts(elements(page, 'ledger-list')[0]!).slice(1, 3), ['The Implementer contests it: Done at README.md:1. Evidence: README.md:1', 'Codex reopens it: Still wrong.']);
+  await show(page, { ...detail(job('needs_human', { iteration: 2, error: { code: 'review_churn', message: 'x' } }), { iterations: [iteration(2, { review: CLEAN, gate: GATE_FIX })] }), ledger: [ledgerEntry('R1', 'open')] } as Detail);
+  assert.match(page.$('job-halt').textContent, /The fixes keep making new findings\. Accept and prepare the MR, continue/);
+  assert.equal(page.$('ledger-panel').hidden, true);
+  assert.equal(page.$('accept-gate-button').hidden, false);
+  page.$('accept-gate-button').click();
+  assert.match(page.$('confirm-text').textContent, /over the ledger's stop \(review_churn\)/);
+  assert.equal(page.$('confirm-items-title').textContent, 'Open findings of the ledger that will not be applied (1):');
+  assert.deepEqual(texts(page.$('confirm-items-list')), ['R1 README.md: Problem of R1.']);
+});

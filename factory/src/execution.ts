@@ -19,14 +19,15 @@
 // stop the runner first. approve and the merge request stay in sf serve.
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { copyFile, type FileHandle, mkdir, readFile, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve as resolvePath, sep } from 'node:path';
 import type { Config } from './config.js';
 import { FactoryError } from './errors.js';
 import { chooseForge, type Forge, type ForgeKind, forgeFor, type MergeRequestStatus } from './forge.js';
 import { runGit } from './git.js';
 import { GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from './gate.js';
 import { cutEvent, type FileChange, type GateOverride, type GateRecord, isActive, type Job, type JobMr, type JobState, JobStore, now, type ReviewRecord, TERMINAL_STATES } from './jobs.js';
-import { abortRebase, commitAndRebase, continueRebase, gitBusy, mergeRequestLink, originUrl, pushBranch, readMrText, rebaseInProgress, resolveTarget, unmergedPaths, withNits } from './mr.js';
+import { answerFix, applyVerdict, type Applied, type Decision, DECISIONS, escalationMessage, headings, LEDGER_ID, type LedgerEntry, SENSITIVE_PROBLEM, settle, SETTLE_CODES, unappliedEntries, unsettled, userFixItems } from './ledger.js';
+import { abortRebase, commitAndRebase, continueRebase, gitBusy, mergeRequestLink, originUrl, pushBranch, readMrText, rebaseInProgress, resolveTarget, unmergedPaths, withFindings, withNits } from './mr.js';
 import { buildPatch, changedFilesSection, fileChanges, fileSummaryLines, type Patch } from './patch.js';
 import { removeSandboxPlaceholders } from './placeholders.js';
 import { Redactor } from './redact.js';
@@ -45,6 +46,9 @@ export const MAX_REPORT_BYTES = 64 * 1024;
 const MAX_SLUG = 40;
 // The codes of a job the gate handed to the user, which sf accept may take on to MR preparation.
 export const GATE_OVERRIDE_CODES: readonly string[] = ['gate_rounds', 'gate_budget', 'gate_failed'];
+// The ledger's stops (SF-052) that sf accept takes on as well, with a clean Claude review.
+export const LEDGER_ACCEPT_CODES: readonly string[] = ['review_churn', 'review_disputed'];
+const ACCEPT_CODES: readonly string[] = [...GATE_OVERRIDE_CODES, ...LEDGER_ACCEPT_CODES];
 
 export interface CheckResult {
   state: JobState;
@@ -100,6 +104,12 @@ function mrFailure(error: unknown): { code: string; message: string } {
 }
 
 type Success = Extract<IdleOutcome, { ok: true }>;
+
+// A review record without the items the ledger dropped (SF-052), compared as written.
+function withoutDropped(record: { items: ReviewItem[]; dropped?: ReviewItem[] }): { items: ReviewItem[] } {
+  const dropped = new Set((record.dropped ?? []).map((item) => JSON.stringify(item)));
+  return { items: record.items.filter((item) => !dropped.has(JSON.stringify(item))) };
+}
 
 // Branch slug: the title lowercased, runs of other characters than a-z and 0-9 as "-", trimmed,
 // at most 40 characters.
@@ -345,7 +355,8 @@ export class Execution implements RunnerWork {
     if (review === undefined) {
       return this.#config.review;
     }
-    return 'verdict' in review && actedVerdict(review) === 'clean' && (await this.jobs.readGate(job.workspace, job.ticket, job.iteration)) === undefined;
+    // Items the ledger dropped (they reopened an accepted risk, SF-052) never count, as in acceptGate.
+    return 'verdict' in review && actedVerdict(withoutDropped(review)) === 'clean' && (await this.jobs.readGate(job.workspace, job.ticket, job.iteration)) === undefined;
   }
 
   // sf serve's runners; runner mode has none and never reaches the calls that need them.
@@ -563,12 +574,55 @@ export class Execution implements RunnerWork {
       }
       try {
         const { job: published, changes } = await this.#publish(job, live, outcome, await buildPatch(live.cwd, job.base_commit!), []);
+        // The Report's answers to the last Fix section go into the ledger (SF-052); an escalated
+        // item stops the job before the review.
+        const escalated = await this.#answerFix(published, live.cwd, outcome.text);
+        if (escalated.length > 0) {
+          await this.#transition(published, 'needs_human', { code: 'escalated', message: escalationMessage(escalated) }, fileSummaryLines(changes));
+          return;
+        }
         this.#startReview(await this.#transition(published, 'awaiting_review', undefined, fileSummaryLines(changes)));
       } catch (error) {
         console.error(error);
         await this.#transition(job, 'needs_human', { code: 'publish_failed', message: 'The Report and Patch could not be published.' });
       }
     });
+  }
+
+  // The ledger after the Report of the job's last iteration (SF-052): the entries the Fix section it
+  // answers listed take the Implementer's answers; returns the entries it escalated. Nothing before
+  // the first Fix section. Only under the lock.
+  async #answerFix(job: Job, cwd: string, report: string): Promise<LedgerEntry[]> {
+    const ledger = await this.jobs.readLedger(job.workspace, job.ticket);
+    const fix = job.iteration - 1;
+    if (!ledger.some((entry) => entry.asked === fix)) {
+      return [];
+    }
+    let task = '';
+    try {
+      task = await readFile(join(cwd, TASK_DIR, `${job.ticket}.md`), 'utf8');
+    } catch (error) {
+      console.error(error);
+    }
+    const root = resolvePath(cwd);
+    const lines = async (path: string): Promise<number | undefined> => {
+      const file = resolvePath(root, path);
+      if (!file.startsWith(`${root}${sep}`)) {
+        return undefined;
+      }
+      try {
+        const text = await readFile(file, 'utf8');
+        return text.split('\n').length - (text.endsWith('\n') ? 1 : 0);
+      } catch {
+        return undefined;
+      }
+    };
+    // A test's name counts when a test file of the worktree (tracked or new) holds it.
+    const testNamed = async (name: string): Promise<boolean> =>
+      (await runGit(cwd, ['grep', '--untracked', '-q', '-F', '-e', name, '--', '*test*', '*spec*'])).code === 0;
+    const answered = await answerFix(ledger, report, fix, { lines, testNamed, sections: headings(task) });
+    await this.jobs.writeLedger(job.workspace, job.ticket, answered.ledger);
+    return answered.escalated;
   }
 
   // The sensitivity rule of a job: the Task file's may_touch plus SF_SENSITIVE_PATHS.
@@ -638,7 +692,9 @@ export class Execution implements RunnerWork {
         return;
       }
       // The nits of the reviewed iteration go into the MR text by the factory's hand (SF-051).
-      const mrText = { text: withNits(written.text, await this.#nitsAtClean(job), job.iteration) };
+      // So do the ledger's findings not fixed: accepted risks, contests and nits left (SF-052).
+      const withNitsText = withNits(written.text, await this.#nitsAtClean(job), job.iteration);
+      const mrText = { text: withFindings(withNitsText, await this.jobs.readLedger(job.workspace, job.ticket)) };
       const targetCommit = job.target_commit!;
       const prepared = await this.#gitLocked(job.workspace, () => commitAndRebase(cwd, { baseCommit: job.base_commit!, targetCommit, mrText: mrText.text }));
       if (prepared.kind === 'failed') {
@@ -757,13 +813,28 @@ export class Execution implements RunnerWork {
     return this.#request(workspaceName, ticket, { kind: 'accept' }) as Promise<{ state: JobState; iteration: number; branch: string }>;
   }
 
-  // The code the gate stopped with; invalid_state unless it is one sf accept takes on.
+  // The code the gate (or the ledger, SF-052) stopped with; invalid_state unless it is one sf
+  // accept takes on.
   #checkAcceptGate(job: Job): string {
     const code = job.error?.code;
-    if (job.state !== 'needs_human' || code === undefined || !GATE_OVERRIDE_CODES.includes(code)) {
-      throw new FactoryError('invalid_state', `sf accept needs needs_human after the gate stopped (${GATE_OVERRIDE_CODES.join(', ')}); the job is ${job.state}${code !== undefined ? ` (${code})` : ''}.`);
+    if (job.state !== 'needs_human' || code === undefined || !ACCEPT_CODES.includes(code)) {
+      throw new FactoryError('invalid_state', `sf accept needs needs_human after the gate or the ledger stopped the job (${ACCEPT_CODES.join(', ')}); the job is ${job.state}${code !== undefined ? ` (${code})` : ''}.`);
     }
     return code;
+  }
+
+  // What an Accept over a ledger stop (review_churn, review_disputed) goes without: the ledger's
+  // open findings with their ids, and the items of the iteration's gate that neither reopen one of
+  // them nor were dropped.
+  async #ledgerUnapplied(job: Job, gate: GateRecord | undefined): Promise<Array<ReviewItem & { id?: string }>> {
+    const ledger = await this.jobs.readLedger(job.workspace, job.ticket);
+    const open = unappliedEntries(ledger);
+    const ids = new Set(open.map((entry) => entry.id));
+    const accepted = new Set(ledger.filter((entry) => entry.status === 'accepted_risk').map((entry) => entry.id));
+    const rest = gate !== undefined && 'verdict' in gate
+      ? gate.items.filter((item) => !ids.has(item.reopens ?? '') && !accepted.has(item.reopens ?? ''))
+      : [];
+    return [...open, ...rest];
   }
 
   // The override in the runner.
@@ -772,7 +843,8 @@ export class Execution implements RunnerWork {
       const job = await this.#job(workspaceName, ticket);
       const code = this.#checkAcceptGate(job);
       const review = job.iteration > 0 ? await this.jobs.readReview(workspaceName, ticket, job.iteration) : undefined;
-      if (review === undefined || !('verdict' in review) || actedVerdict(review) !== 'clean') {
+      // Items the ledger dropped (they reopened an accepted risk, SF-052) never count.
+      if (review === undefined || !('verdict' in review) || actedVerdict(withoutDropped(review)) !== 'clean') {
         const what = review === undefined ? 'has none' : !('verdict' in review) ? 'failed' : review.verdict === 'fix' ? 'says fix' : 'says clean with a blocker or major item';
         throw new FactoryError('invalid_state', `sf accept needs a clean Claude review of the last iteration (${job.iteration}); it ${what}.`);
       }
@@ -781,10 +853,93 @@ export class Execution implements RunnerWork {
         throw new FactoryError('invalid_state', `sf accept needs a clean Claude review of the last iteration (${job.iteration}); it does not accept the undeclared sensitive path(s) ${unaccepted.map((item) => item.path).join(', ')}.`);
       }
       const gate = await this.jobs.readGate(workspaceName, ticket, job.iteration);
-      const unapplied = gate === undefined ? [] : 'verdict' in gate ? gate.items : gate.error;
+      const unapplied = LEDGER_ACCEPT_CODES.includes(code)
+        ? await this.#ledgerUnapplied(job, gate)
+        : gate === undefined ? [] : 'verdict' in gate ? gate.items : gate.error;
       const override: GateOverride = { at: now(), code, unapplied };
       return this.#prepareMr(job, review.accepted_sensitive, override);
     });
+  }
+
+  // The user's settlement of an escalated or contested ledger entry (SF-052: sf settle, the
+  // dashboard's Accept risk and Must fix) while the job is needs_human: accept makes it
+  // accepted_risk, fix user_fix. Once an escalated or review_disputed stop has no escalated entry
+  // and no disputed contest left, the job goes on by itself: a Fix section with the fixes the user
+  // decided, or else the review that was stopped runs again. After review_churn the settlement is
+  // only recorded; sf say goes on.
+  settle(workspaceName: string, ticket: string, id: string, decision: Decision, note = ''): Promise<{ state: JobState; id: string; status: string; waiting: string[] }> {
+    return this.#request(workspaceName, ticket, { kind: 'settle', id, decision, note }) as Promise<{ state: JobState; id: string; status: string; waiting: string[] }>;
+  }
+
+  // sf settle needs needs_human, a ledger id, accept or fix, and a note of plain text; the entry
+  // itself is checked against the ledger in the runner.
+  #checkSettle(job: Job, id: string, decision: string, note: string): void {
+    if (job.state !== 'needs_human') {
+      throw new FactoryError('invalid_state', `sf settle needs needs_human; the job is ${job.state}.`);
+    }
+    if (!LEDGER_ID.test(id)) {
+      throw new FactoryError('invalid_content', 'id must be a ledger id such as R7.');
+    }
+    if (!(DECISIONS as readonly string[]).includes(decision)) {
+      throw new FactoryError('invalid_content', 'decision must be accept or fix.');
+    }
+    if (note.includes('\0') || note.length > 2000) {
+      throw new FactoryError('invalid_content', 'note must be text of at most 2000 characters.');
+    }
+  }
+
+  // The settlement in the runner.
+  #settle(workspaceName: string, ticket: string, id: string, decision: Decision, note: string): Promise<{ state: JobState; id: string; status: string; waiting: string[] }> {
+    return this.#locked(async () => {
+      const job = await this.#job(workspaceName, ticket);
+      this.#checkSettle(job, id, decision, note);
+      const ledger = settle(await this.jobs.readLedger(workspaceName, ticket), id, decision, note, now());
+      if (typeof ledger === 'string') {
+        throw new FactoryError('invalid_state', ledger);
+      }
+      await this.jobs.writeLedger(workspaceName, ticket, ledger);
+      const status = ledger.find((entry) => entry.id === id)!.status;
+      const waiting = unsettled(ledger).map((entry) => entry.id);
+      const code = job.error?.code;
+      if (waiting.length > 0 || code === undefined || !SETTLE_CODES.includes(code)) {
+        return { state: job.state, id, status, waiting };
+      }
+      return { state: await this.#goOn(job, ledger), id, status, waiting };
+    });
+  }
+
+  // The job a ledger stop held goes on (SF-052): a Fix section when the user decided a fix (with the
+  // open blocker and major entries), otherwise the review that was stopped runs again: the gate
+  // when it stopped the job, else the Claude review. Only under the lock.
+  async #goOn(job: Job, ledger: LedgerEntry[]): Promise<JobState> {
+    const { workspace: workspaceName, ticket, iteration } = job;
+    const fix = userFixItems(ledger, iteration);
+    if (fix.items.length > 0) {
+      // The lead line names the user's decisions only; open entries carried along keep their ids.
+      const decided = fix.items.filter((item) => item.userNote !== undefined).map((item) => item.id).join(', ');
+      try {
+        await this.#fix(job, fixContent(`The user settled the stop (${job.error?.code}): ${decided} to fix.`, fix.items, 'the user'), {}, fix.ledger, true);
+      } catch (error) {
+        if (error instanceof FactoryError && error.code === 'iteration_limit') {
+          return 'needs_human';
+        }
+        throw error;
+      }
+      return 'working';
+    }
+    if (job.worktree === null || !(await exists(job.worktree))) {
+      throw new FactoryError('worktree_missing', `The worktree of ${workspaceName}/${ticket} is missing; sf reset the ticket and start again.`);
+    }
+    const review = await this.jobs.readReview(workspaceName, ticket, iteration);
+    const gate = job.error?.code === 'escalated' ? undefined : await this.jobs.readGate(workspaceName, ticket, iteration);
+    await this.jobs.removeGate(workspaceName, ticket, iteration);
+    if (gate !== undefined && 'verdict' in gate && review !== undefined && 'verdict' in review) {
+      await this.#startGate(await this.#transition(job, 'awaiting_review'), review);
+    } else {
+      await this.jobs.removeReview(workspaceName, ticket, iteration);
+      this.#startReview(await this.#transition(job, 'awaiting_review'));
+    }
+    return (await this.#job(workspaceName, ticket)).state;
   }
 
   #cancelReview(key: string): void {
@@ -799,7 +954,7 @@ export class Execution implements RunnerWork {
     const meta = await this.jobs.readMeta(name, ticket, iteration);
     return {
       ticket, iteration, report, patch, patchTruncated: meta.patch_truncated, files: meta.files, handbook: this.#handbook,
-      task: await readFile(join(worktree, TASK_DIR, `${ticket}.md`), 'utf8'),
+      task: await readFile(join(worktree, TASK_DIR, `${ticket}.md`), 'utf8'), ledger: await this.jobs.readLedger(name, ticket),
     };
   }
 
@@ -875,11 +1030,20 @@ export class Execution implements RunnerWork {
     await this.#applying(job, () => this.#afterClaude(job, outcome.output));
   }
 
-  // The undeclared sensitive paths of the job's last iteration not in accepted, as fix items.
+  // The undeclared sensitive paths of the job's last iteration not in accepted, nor accepted by the
+  // user as a risk (SF-052), as fix items.
   async #unaccepted(job: Job, accepted: string[]): Promise<ReviewItem[]> {
+    const byUser = await this.#sensitiveAcceptedByUser(job);
     return ((await this.#lastFiles(job)) ?? [])
-      .filter((change) => change.sensitive === 'undeclared' && !accepted.includes(change.path))
+      .filter((change) => change.sensitive === 'undeclared' && !accepted.includes(change.path) && !byUser.includes(change.path))
       .map((change) => sensitiveItem(change.path));
+  }
+
+  // The undeclared sensitive paths whose ledger entry the user settled as an accepted risk.
+  async #sensitiveAcceptedByUser(job: Job): Promise<string[]> {
+    return (await this.jobs.readLedger(job.workspace, job.ticket))
+      .filter((entry) => entry.status === 'accepted_risk' && entry.problem === SENSITIVE_PROBLEM)
+      .map((entry) => entry.path);
   }
 
   // The reviewer's verdict for the event, with the one the factory acts on (decide) when it differs.
@@ -891,16 +1055,42 @@ export class Execution implements RunnerWork {
   // The Claude verdict as the factory acts on it (decide, SF-051): fix (a blocker or major item, or
   // an undeclared sensitive path it does not accept) is the next Fix section; clean (a fix with
   // nits only too) starts the gate, or with the gate off runs Clean. Only under the lock.
+  // The ledger applies first (SF-052, #applyLedger): a dropped item never counts, a dispute or
+  // churn hands the job to the user.
   async #afterClaude(job: Job, output: ReviewOutput): Promise<void> {
     const { summary, accepted_sensitive: accepted } = output;
-    const decision = decide(output, await this.#unaccepted(job, accepted));
-    if (decision.verdict === 'fix') {
-      await this.#fix(job, fixContent(summary, decision.items));
+    const applied = await this.#applyLedger(job, REVIEWER, output);
+    if (applied.kind === 'stop') {
+      await this.#transition(job, 'needs_human', { code: applied.code, message: applied.message });
+    } else if (applied.kind === 'fix') {
+      await this.#fix(job, fixContent(summary, applied.items), {}, applied.ledger);
     } else if (this.#config.gate.on) {
       await this.#startGate(job, output);
     } else {
       await this.#prepareMr(job, accepted);
     }
+  }
+
+  // The ledger applied to a reviewer's verdict on the job's last iteration (SF-052, applyVerdict):
+  // the items that reopen an accepted risk are recorded as dropped in review.json or gate.json,
+  // and the ledger is written unless the verdict is a fix (#fix writes it with its Fix section).
+  // Only under the lock.
+  async #applyLedger(job: Job, reviewer: typeof REVIEWER | typeof GATE_REVIEWER, output: ReviewOutput): Promise<Applied> {
+    const { workspace, ticket, iteration } = job;
+    const applied = applyVerdict({
+      ledger: await this.jobs.readLedger(workspace, ticket), items: output.items, extra: await this.#unaccepted(job, output.accepted_sensitive), reviewer, iteration,
+    });
+    if (applied.dropped.length > 0) {
+      const record = reviewer === REVIEWER ? await this.jobs.readReview(workspace, ticket, iteration) : await this.jobs.readGate(workspace, ticket, iteration);
+      if (record !== undefined && 'verdict' in record) {
+        const marked = { ...record, dropped: applied.dropped };
+        await (reviewer === REVIEWER ? this.jobs.writeReview(workspace, ticket, iteration, marked as ReviewRecord) : this.jobs.writeGate(workspace, ticket, iteration, marked as GateRecord));
+      }
+    }
+    if (applied.kind !== 'fix') {
+      await this.jobs.writeLedger(workspace, ticket, applied.ledger);
+    }
+    return applied;
   }
 
   // Applies a verdict (work) to a job awaiting review; a failure to apply it hands the job to the
@@ -1022,8 +1212,14 @@ export class Execution implements RunnerWork {
       return;
     }
     const { summary, accepted_sensitive: accepted } = outcome.output;
-    const decision = decide(outcome.output, await this.#unaccepted(job, accepted));
-    const fixing = decision.verdict === 'fix';
+    // The ledger applies first (SF-052): a dropped item never counts, a dispute or churn hands the
+    // job to the user.
+    const applied = await this.#applyLedger(job, GATE_REVIEWER, outcome.output);
+    if (applied.kind === 'stop') {
+      await this.#transition(job, 'needs_human', { code: applied.code, message: applied.message });
+      return;
+    }
+    const fixing = applied.kind === 'fix';
     if (fixing && job.gate_fixes >= this.#config.gateMaxRounds) {
       const message = `The gate asked for a fix ${job.gate_fixes + 1} times, over the limit of SF_GATE_MAX_ROUNDS (${this.#config.gateMaxRounds}); the fix was not applied. Claude: ${oneLine(claude.summary)} Codex: ${oneLine(summary)}`;
       await this.#transition(job, 'needs_human', { code: 'gate_rounds', message: message.slice(0, 2000) });
@@ -1031,8 +1227,8 @@ export class Execution implements RunnerWork {
     }
     const decided = job;
     await this.#applying(decided, async () => {
-      if (fixing) {
-        await this.#fix(decided, fixContent(summary, decision.items, 'Codex'), { gate_fixes: decided.gate_fixes + 1 });
+      if (applied.kind === 'fix') {
+        await this.#fix(decided, fixContent(summary, applied.items, 'Codex'), { gate_fixes: decided.gate_fixes + 1 }, applied.ledger);
       } else {
         await this.#prepareMr(decided, [...new Set([...claude.accepted_sensitive, ...accepted])]);
       }
@@ -1092,8 +1288,9 @@ export class Execution implements RunnerWork {
   async #prepareMr(job: Job, sensitive: string[], override?: GateOverride): Promise<{ state: JobState; iteration: number; branch: string }> {
     const { workspace: workspaceName, ticket } = job;
     const retry = this.#checkPrepareMr(job, override);
+    const byUser = await this.#sensitiveAcceptedByUser(job);
     const unacknowledged = ((await this.#lastFiles(job)) ?? [])
-      .filter((change) => change.sensitive === 'undeclared' && !sensitive.includes(change.path))
+      .filter((change) => change.sensitive === 'undeclared' && !sensitive.includes(change.path) && !byUser.includes(change.path))
       .map((change) => change.path);
     if (unacknowledged.length > 0) {
       throw new FactoryError('sensitive_unacknowledged', `Undeclared sensitive path(s) in the reviewed iteration: ${unacknowledged.join(', ')}. Each must be named in the accepted sensitive paths with the reason it is needed; otherwise it is a fix item.`);
@@ -1511,7 +1708,8 @@ export class Execution implements RunnerWork {
         return { status: 'failed', summary: record.error };
       }
       const done: CheckResult['review'] = { status: 'done', verdict: record.verdict, summary: record.summary };
-      const gate = actedVerdict(record) === 'clean' ? await this.#gateStatus(job, running) : undefined;
+      // Acted on as clean, the ledger's dropped items aside (as in #resumable): the gate follows.
+      const gate = actedVerdict(withoutDropped(record)) === 'clean' ? await this.#gateStatus(job, running) : undefined;
       return gate !== undefined ? { ...done, gate } : done;
     }
     if (running?.reviewer === REVIEWER && running.iteration === job.iteration) {
@@ -1566,10 +1764,14 @@ export class Execution implements RunnerWork {
   // The work of request_fix, also run for a fix verdict of the review: appends ## Fix N and starts
   // the next iteration. SF_MAX_ITERATIONS limits the Fix sections; an sf say turn does not count.
   // counts: what else the Fix counts for (the gate's gate_fixes). Only under the lock.
-  async #fix(current: Job, content: string, counts: Partial<Pick<Job, 'gate_fixes'>> = {}): Promise<{ iteration: number; check_after_minutes: number }> {
+  // ledger: the findings ledger with the section's items (SF-052), written once the section is.
+  // afterSettle: the Fix of the user's settlement, from needs_human.
+  async #fix(current: Job, content: string, counts: Partial<Pick<Job, 'gate_fixes'>> = {}, ledger?: LedgerEntry[], afterSettle = false): Promise<{ iteration: number; check_after_minutes: number }> {
     let job = current;
     const { workspace: workspaceName, ticket } = job;
-    this.#checkFix(job);
+    if (!(afterSettle && job.state === 'needs_human')) {
+      this.#checkFix(job);
+    }
     if (job.fixes >= this.#config.maxIterations) {
       const message = `${job.fixes} Fix sections were written, the limit of SF_MAX_ITERATIONS`;
       await this.#transition(job, 'needs_human', { code: 'iteration_limit', message: `${message}; the user decides how to go on.` });
@@ -1581,6 +1783,9 @@ export class Execution implements RunnerWork {
     }
     const fix = job.iteration;
     await appendFix(workspace, ticket, fix, content);
+    if (ledger !== undefined) {
+      await this.jobs.writeLedger(workspaceName, ticket, ledger);
+    }
     await this.#syncTask(workspace, job);
     job = await this.#transition({ ...job, ...counts, fixes: job.fixes + 1 }, 'working');
     this.#session(job, workspace).send(factoryPrompt(`/implement ${TASK_DIR}/${ticket}.md Fix ${fix}`, ticket, job.iteration + 1), DENIED_TOOLS);
@@ -1656,6 +1861,9 @@ export class Execution implements RunnerWork {
       case 'accept':
         this.#checkAcceptGate(job);
         break;
+      case 'settle':
+        this.#checkSettle(job, request.id, request.decision, request.note);
+        break;
     }
   }
 
@@ -1682,6 +1890,8 @@ export class Execution implements RunnerWork {
         return this.#retryReview(workspace, ticket);
       case 'accept':
         return this.#acceptGate(workspace, ticket);
+      case 'settle':
+        return this.#settle(workspace, ticket, request.id, request.decision, request.note);
     }
   }
 

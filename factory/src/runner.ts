@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { writeFileAtomic } from './atomic.js';
 import { FactoryError } from './errors.js';
 import type { Job, JobState, JobStore } from './jobs.js';
+import type { Decision } from './ledger.js';
 import { isAlive, liveOwner, staleOwner, tryLock } from './pid-lock.js';
 
 // What sf serve asks of a job's runner. turn: the first turn of a started job (its prompt), sent
@@ -24,7 +25,9 @@ export type RunnerRequest =
   | { kind: 'fix'; content: string }
   | { kind: 'clean'; sensitive: string[] }
   | { kind: 'review' }
-  | { kind: 'accept' };
+  | { kind: 'accept' }
+  // The user's settlement of a ledger entry (SF-052).
+  | { kind: 'settle'; id: string; decision: Decision; note: string };
 
 export type RunnerReply = { ok: true; result: unknown } | { ok: false; error: { code: string; message: string } };
 

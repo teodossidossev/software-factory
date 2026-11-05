@@ -43,6 +43,26 @@ in fix rounds with ever narrower items, each a Fix section whatever its weight. 
 in a fix round they follow the blocking items as optional, and those of the iteration that reaches
 Clean go into the MR text as `### Nits not applied`, written by the factory.
 
+**Amended 2026-11-05 (SF-052): how the review loop ends.** Every round is a fresh reviewer, so each
+round samples new items, and a loop that ends only at zero items may never end (SF-045: five gate
+rounds, about 2.4M tokens, ever narrower variants of one risk). The loop now keeps a ledger of
+findings (`ledger.json`): every item of a Fix section gets an id, and the Implementer answers each
+one `fixed`, `contested` (only with evidence a reviewer can check: a `path:line`, a test, a
+`§section`; otherwise it stays open), `escalated` (a question only the user can answer, which stops
+the job before the review) or `left` (nits only). The reviewers see every settled finding and may
+not raise it again, nor a narrower variant; they reopen one only with evidence, by its id. The
+factory, not the reviewer, applies the ledger to a fix verdict: an item that reopens a risk the user
+accepted is dropped; one that reopens a contest goes to the user as a dispute (`review_disputed`);
+a fix reopened a second time, or a round whose every blocking item was caused by earlier fixes, is
+churn (`review_churn`). Each stop asks the user one question: accept and prepare the MR (with a
+clean Claude review; the open findings are recorded as not applied), continue (`sf settle`, `sf
+say`), or go back to planning. The loop ends at one clean gate, or at the user's decision; the
+"two consecutive clean rounds" of the Elephant–Goldfish model is not adopted, since a gate round
+costs hundreds of thousands of tokens and its verdict decides. `SF_GATE_MAX_ROUNDS` stays the cap.
+The MR text lists the accepted risks, contests and nits left as `### Review findings not fixed`.
+The known limit: the factory matches an accepted risk by its id or by the same path and problem
+text; a narrower variant in new words is kept out only by the reviewers' rule in the prompt.
+
 ## Context
 
 ADR-0002 made the planning ChatGPT conversation the reviewer and woke it with a scheduled task;

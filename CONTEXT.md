@@ -65,8 +65,8 @@ _Avoid_: stub, placeholder task, request file
 
 **Fix section**:
 A `## Fix N` section appended to the Task file after a Review, by the factory from a verdict it
-acts on as `fix`: the blocker and major items, then the Nits as optional. Appending one is the
-request for the next Iteration.
+acts on as `fix`: the blocker and major items, then the Nits as optional, each with its Ledger id.
+Appending one is the request for the next Iteration.
 _Avoid_: findings, review request, feedback
 
 **Job**:
@@ -123,6 +123,39 @@ A Review item of Severity `nit`: style, naming, wording, a narrower variant of a
 accepted, a nice-to-have. A Nit never blocks; the Nits of the Iteration that reaches Clean go into
 the MR text as `### Nits not applied`.
 _Avoid_: minor, suggestion (for a Nit)
+
+**Ledger**:
+The Job's record of every Review item that went into a Fix section (`ledger.json`), each with an
+id (`R1`, `R2`, …), its Severity and how it stands: open, fixed, contested, escalated, left (a Nit
+not done), accepted by the User as a risk, or to be fixed by the User's decision. The Implementer
+answers each item by its id in the Report; the factory reads the answers, shows the Reviews every
+Settled finding and applies the Ledger to their verdicts.
+_Avoid_: findings list, issue tracker
+
+**Settled finding**:
+A Ledger entry that is not open. A Review does not raise it again, nor a narrower variant of it; it
+reopens one only when the settlement is wrong by evidence in the Worktree, naming its id. An item
+that reopens a risk the User accepted is dropped.
+_Avoid_: closed item, resolved finding
+
+**Contest**:
+The Implementer's answer that an item is wrong, with evidence a Review can check without it: a
+`path:line` in the Worktree, a test, or a section of the Task file. A wish to contest is not
+evidence: without it the item stays open. A Review that reopens a Contest makes it a dispute, which
+the User settles.
+_Avoid_: rejection, pushback
+
+**Escalation**:
+The Implementer's answer that an item turns on something only the User knows (outside the
+repository and the Task file), with the question. It stops the Job before the Review; the User
+settles each one, accepting the risk or deciding the fix.
+_Avoid_: question to the reviewer, blocker
+
+**Churn**:
+A review loop that no longer converges: a fix reopened a second time, or a round whose every
+blocker and major item was caused by earlier fixes. It stops the Job with one question to the
+User: accept and prepare the MR, continue, or go back to planning.
+_Avoid_: loop, ping-pong
 
 **Gate**:
 The second, deciding Review of an Iteration that a Claude Review found clean, run by the Codex CLI

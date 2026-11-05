@@ -8,6 +8,7 @@ import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
 import { changedPaths, writeResolutionPatch } from './patch.js';
 import { itemLine, type ReviewItem } from './review.js';
+import { type LedgerEntry, notFixed, notFixedLine } from './ledger.js';
 import { headerProblem, MR_REQUIRED_HEADINGS, sectionLines, testingProblem } from './rules.js';
 import { TASK_DIR } from './task-file.js';
 
@@ -189,20 +190,33 @@ function sectionRange(lines: string[], heading: string, from: number, to: number
 }
 
 // The MR text with the factory's list of the nits not applied (SF-051): a `### Nits not applied`
-// subsection at the end of `## Special things to note`, one line per nit, replacing any such
-// subsection already there (the model's, or an earlier preparation's). A lone `- None.` there
-// goes. Without nits only the old subsection goes; without either the text stays as it is. The
-// list is cut, with a closing line that counts the rest, so the text stays within
-// MAX_MR_TEXT_BYTES.
+// subsection at the end of `## Special things to note`, one line per nit (withSubsection).
 export function withNits(text: string, nits: ReviewItem[], iteration: number): string {
-  const nitLines = nits.map((item) => `- ${itemLine(item)}`);
+  return withSubsection(text, NITS_HEADING, nits.map((item) => `- ${itemLine(item)}`), (rest) => `- … and ${rest} more: see review.json and gate.json of iteration ${iteration}.`);
+}
+
+export const FINDINGS_HEADING = '### Review findings not fixed';
+
+// The MR text with the factory's list of the review findings not fixed (SF-052): every
+// accepted_risk, contested and left entry of the ledger, one line each with its id, as a
+// `### Review findings not fixed` subsection of `## Special things to note` (withSubsection).
+export function withFindings(text: string, ledger: LedgerEntry[]): string {
+  return withSubsection(text, FINDINGS_HEADING, notFixed(ledger).map(notFixedLine), (rest) => `- … and ${rest} more: see ledger.json of the job.`);
+}
+
+// The MR text with a subsection the factory writes (heading) at the end of `## Special things
+// to note`, one line per entry, replacing any such subsection already there (the model's, or an
+// earlier preparation's). A lone `- None.` there goes. Without entries only the old subsection
+// goes; without either the text stays as it is. The list is cut, with a closing line (more) that
+// counts the rest, so the text stays within MAX_MR_TEXT_BYTES.
+function withSubsection(text: string, heading: string, entries: string[], more: (rest: number) => string): string {
   const lines = text.split('\n');
   const special = sectionRange(lines, SPECIAL_HEADING, 0, lines.length, /^#{1,2} /u);
   if (special === undefined) {
     return text;
   }
-  const old = sectionRange(lines, NITS_HEADING, special.start + 1, special.end, /^#{1,3} /u);
-  if (nitLines.length === 0 && old === undefined) {
+  const old = sectionRange(lines, heading, special.start + 1, special.end, /^#{1,3} /u);
+  if (entries.length === 0 && old === undefined) {
     return text;
   }
   let body = lines.slice(special.start + 1, special.end);
@@ -213,7 +227,7 @@ export function withNits(text: string, nits: ReviewItem[], iteration: number): s
     body.pop();
   }
   const build = (section: string[]): string => [...lines.slice(0, special.start + 1), ...section, ...lines.slice(special.end)].join('\n');
-  if (nitLines.length === 0) {
+  if (entries.length === 0) {
     return build(special.end < lines.length ? [...body, ''] : body);
   }
   const content = body.filter((line) => line.trim() !== '');
@@ -221,10 +235,10 @@ export function withNits(text: string, nits: ReviewItem[], iteration: number): s
     body = body.filter((line) => line.trim() === '');
   }
   const lead = body.some((line) => line.trim() !== '') ? [...body, ''] : body;
-  for (let shown = nitLines.length; shown >= 0; shown -= 1) {
-    const rest = nitLines.length - shown;
-    const list = [...nitLines.slice(0, shown), ...(rest > 0 ? [`- … and ${rest} more: see review.json and gate.json of iteration ${iteration}.`] : [])];
-    const result = build([...lead, NITS_HEADING, ...list, ...(special.end < lines.length ? [''] : [])]);
+  for (let shown = entries.length; shown >= 0; shown -= 1) {
+    const rest = entries.length - shown;
+    const list = [...entries.slice(0, shown), ...(rest > 0 ? [more(rest)] : [])];
+    const result = build([...lead, heading, ...list, ...(special.end < lines.length ? [''] : [])]);
     if (Buffer.byteLength(result, 'utf8') <= MAX_MR_TEXT_BYTES) {
       return result;
     }

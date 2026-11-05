@@ -303,29 +303,38 @@ test('stream client: j and k select an entry, G the last; Enter and a click togg
 });
 
 test('stream client: a path link opens Changes at its file and iteration; Open these changes and c open Changes; a changes entry shows its Report', async () => {
-  const patch = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-x\n+y\n';
   const shown = detail(job('awaiting_review', { iteration: 2 }), { iterations: [iteration(1), iteration(2)] });
-  const get = (path: string): unknown => (path.endsWith('/patch') ? patch : path.endsWith('/report') ? `# Report of ${path.split('/')[5]}` : undefined);
+  const listed = (paths: string[]) => ({ files: paths.map((path) => ({ path, status: 'modified', additions: 1, deletions: 1, binary: false, unavailable: false })), more: false });
+  const lists: Record<string, unknown> = {
+    'api/jobs/app/T-1/changes': { base: { ref: 'main', commit: 'b'.repeat(40) }, iterations: [1, 2].map((n) => ({ n, ended_at: at(n), truncated: false, base_commit: 'b'.repeat(40) })) },
+    'api/jobs/app/T-1/changes?from=base&to=1': listed(['README.md', 'src/a.ts']),
+    'api/jobs/app/T-1/changes?from=1&to=2': listed(['README.md']),
+    'api/jobs/app/T-1/changes?from=base&to=2': listed(['README.md', 'src/a.ts']),
+  };
+  const get = (path: string): unknown => lists[path] ?? (path.includes('/file?') ? { kind: 'text', text: 'x\n' } : path.endsWith('/report') ? `# Report of ${path.split('/')[5]}` : undefined);
   const page = await withEntries(job('awaiting_review', { iteration: 2 }), shown, STREAM, get);
   // The Report of the changes entry, behind its toggle.
   buttonIn(entryOf(page, '6.1'), 'Report').click();
   await page.flush();
   assert.equal(byClass(entryOf(page, '6.1'), 'raw')[0]!.textContent, '# Report of 1\n');
   assert.ok(buttonIn(entryOf(page, '6.1'), 'Hide the Report') !== undefined);
-  // The link of src/a.ts in the verdict of iteration 1.
+  // The link of src/a.ts in the verdict of iteration 1: Iteration 1 at that file.
   byClass(entryOf(page, '7'), 'pathlink')[0]!.click();
   await page.flush();
+  const shownFile = (): string => page.$('dtool').querySelector('.dpath')!.textContent;
   assert.deepEqual([page.$('scrChanges').hidden, page.$('scrStream').hidden, page.location.hash], [false, true, '#app/T-1/changes']);
-  assert.deepEqual(page.$('iteration-picker').querySelectorAll('button').map((button) => button.getAttribute('aria-pressed')), ['true', 'false']);
-  assert.deepEqual(page.$('files-list').querySelectorAll('button').map((row) => [row.dataset.path, row.getAttribute('aria-current')]), [['src/a.ts', 'true'], ['README.md', 'false']]);
-  const blocks = (page.$('patch-body').children as FakeElement[]);
-  assert.deepEqual(blocks.map((block) => [block.dataset.path, block.getAttribute('aria-current'), block.scrolledIntoView]), [['src/a.ts', 'true', 1], ['README.md', 'false', 0]]);
-  // s back to the Stream; Open these changes: Changes at that iteration, no file marked.
+  assert.deepEqual([page.$('cxview').value, shownFile()], ['1', 'src/a.ts']);
+  assert.deepEqual(page.$('tlist').querySelectorAll('.trow.sel').map((row) => row.dataset.trow), ['f:src/a.ts']);
+  // s back to the Stream; Open these changes: Changes at that iteration, its first file.
   page.key('s');
   buttonIn(entryOf(page, '6.1'), 'Open these changes c').click();
   await page.flush();
-  assert.equal(page.$('scrChanges').hidden, false);
-  assert.ok(page.$('files-list').querySelectorAll('button').every((row) => row.getAttribute('aria-current') === 'false'));
+  assert.deepEqual([page.$('scrChanges').hidden, page.$('cxview').value, shownFile()], [false, '1', 'README.md']);
+  // c from the Stream: All changes at the file shown last.
+  page.key('s');
+  page.key('c');
+  await page.flush();
+  assert.deepEqual([page.$('cxview').value, shownFile()], ['all', 'README.md']);
 });
 
 test("stream client: the implement prompt's Task toggle shows the Task text and the Task check result, read once", async () => {

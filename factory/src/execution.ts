@@ -1060,6 +1060,7 @@ export class Execution implements RunnerWork {
         cost_usd: iterationCost(total, previousTotal),
         cost_usd_total: total,
         duration_ms: outcome.result.duration_ms ?? null,
+        base_commit: job.base_commit!,
       },
     });
     return { job: { ...job, iteration: number }, changes };

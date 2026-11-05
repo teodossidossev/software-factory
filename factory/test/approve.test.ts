@@ -85,6 +85,7 @@ test('mark_clean: the MR turn writes the MR text only; the factory commits once 
   const worktree = worktreeOf(env, 'T-1');
   const jobs = new JobStore(env.state);
   const original = (await jobs.read('app', 'T-1'))!.base_commit!;
+  assert.equal((await jobs.readMeta('app', 'T-1', 1)).base_commit, original);
   const upstream = moveOrigin(origin, 'other.txt');
 
   assert.equal((await call(served, 'mark_clean', { workspace: 'app', ticket: 'T-1' })).state, 'preparing_mr');
@@ -316,6 +317,7 @@ test('mark_clean: the target moved in the same hunk; a conflict turn that leaves
   await waitFor(served, 'M-2', 'awaiting_review', 1);
   const worktree = worktreeOf(env, 'M-2');
   const jobs = new JobStore(env.state);
+  const original = (await jobs.read('app', 'M-2'))!.base_commit!;
   const upstream = pushToOrigin(origin, { 'lines.txt': lines({ 9: '9 upstream' }) }, 'upstream line nine');
 
   await call(served, 'mark_clean', { workspace: 'app', ticket: 'M-2' });
@@ -334,6 +336,9 @@ test('mark_clean: the target moved in the same hunk; a conflict turn that leaves
   assert.match(second.patch.text, /^-9 upstream\n\+9 change and upstream$/m);
   let job = (await jobs.read('app', 'M-2'))!;
   assert.deepEqual([job.base_commit, job.target_commit, job.worktree, job.mr_attempts], [upstream, upstream, worktree, 2]);
+  // Each iteration's meta.json records the base its Patch is against (SF-079): the conflict
+  // iteration's is the target.
+  assert.deepEqual([(await jobs.readMeta('app', 'M-2', 1)).base_commit, (await jobs.readMeta('app', 'M-2', 2)).base_commit], [original, upstream]);
   assert.equal(git(worktree, 'rev-parse', 'HEAD~1').trim(), upstream);
   assert.equal(git(worktree, 'show', '--name-only', '--format=', 'HEAD').trim(), 'lines.txt\nnotes.txt');
   assert.equal(await rebasing(worktree), false);

@@ -2,16 +2,20 @@
 // the job's Stream route and entries event (SF-082), the stream limit, disconnects; the test
 // process must exit by itself afterwards) and end to end through `sf serve` with the fake
 // Implementer (a real cycle, approve, SF_DASHBOARD=off, sf dashboard). The actions (approve,
-// abort, say, review, archive) are in dashboard-actions.test.ts.
+// abort, say, review, archive) are in dashboard-actions.test.ts. The Changes routes (SF-079): the
+// iterations, the file lists of a view and one side of a file, with their guards.
 import assert from 'node:assert/strict';
-import { appendFile, readdir, readFile, readlink, stat, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { appendFile, mkdir, readdir, readFile, readlink, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { MAX_STREAMS, startDashboard, STREAM_PAGE_LINES, TOKEN_FILE } from '../src/dashboard.js';
-import type { EventRecord, Job } from '../src/jobs.js';
+import { type EventRecord, type Job, JobStore } from '../src/jobs.js';
+import { buildPatch, fileChanges } from '../src/patch.js';
+import { saveRegistry } from '../src/registry.js';
 import { CSP, fakeActions, fetchRaw, openStream, type Stream } from './support/dashboard-client.js';
 import { withDashboard } from './support/dashboard-state.js';
-import { call, newEnv, newRepo, putTask, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
+import { call, git, newEnv, newRepo, putTask, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
 
 // The live log prints the local time of the sf process (SF-049); Sofia is UTC+2 in November.
 process.env.TZ = 'Europe/Sofia';
@@ -437,4 +441,92 @@ test('dashboard (SF-082): the live stream sends the entries of each line from fr
       stream.close();
     }
   });
+});
+
+test('dashboard (SF-079): the changes route lists the iterations and the files of a view; the file route serves one side of a listed file; every other pair, path or query is an empty 404', async () => {
+  // A workspace with a job of two iterations: a.txt changed in both, b.txt added in the second.
+  const repo = join(temp, 'dash-changes-repo');
+  await mkdir(repo, { recursive: true });
+  git(repo, 'init', '-q', '-b', 'main');
+  await writeFile(join(repo, 'a.txt'), 'one\n');
+  await writeFile(join(repo, 'keep.txt'), 'keep\n');
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '-q', '-m', 'base');
+  const base = git(repo, 'rev-parse', 'HEAD').trim();
+  process.env.SF_CONFIG_DIR = join(temp, 'dash-changes-config');
+  await saveRegistry({ workspaces: { web: { read_checkout: repo } } }, process.env.SF_CONFIG_DIR);
+  const work = join(temp, 'dash-changes-work');
+  execFileSync('git', ['clone', '-q', repo, work]);
+  const state = join(temp, 'dash-changes-state');
+  await mkdir(state, { recursive: true });
+  const jobs = new JobStore(state);
+  const job: Job = {
+    workspace: 'web', ticket: 'W-1', branch: 'W-1-demo', base: 'main', base_commit: base, target_commit: null,
+    worktree: null, prepared_commit: null, mr_attempts: 0, fixes: 1, gate_fixes: 0, gate_tokens: 0, state: 'awaiting_review', iteration: 2, session_id: 's1', mr: null,
+    created_at: '2026-11-01T10:00:00.000Z', updated_at: '2026-11-01T10:05:00.000Z',
+  };
+  await jobs.write(job);
+  for (const [n, files] of [[1, { 'a.txt': 'two\n' }], [2, { 'a.txt': 'three\n', 'b.txt': 'b\n' }]] as const) {
+    for (const [path, text] of Object.entries(files)) {
+      await writeFile(join(work, path), text);
+    }
+    const built = await buildPatch(work, base);
+    await jobs.writeIteration('web', 'W-1', {
+      report: 'r\n', patch: built.patch,
+      meta: {
+        iteration: n, started_at: '2026-11-01T10:00:00.000Z', ended_at: `2026-11-01T10:0${n}:00.000Z`, denials: [], changed_files: built.files,
+        files: await fileChanges(work, base, built.files, () => ({ sensitive: 'no', scope: 'none' })), patch_truncated: false, submodule_changed: [],
+        cost_usd: null, cost_usd_total: null, duration_ms: null, base_commit: base,
+      },
+    });
+  }
+  const dashboard = await startDashboard(0, state, jobs, fakeActions());
+  try {
+    const read = async (path: string): Promise<{ status: number; body: string; type: string | undefined }> => {
+      const reply = await fetchRaw(new URL(path, dashboard.url));
+      return { status: reply.status, body: reply.body, type: reply.headers['content-type'] };
+    };
+    const ok = async (path: string): Promise<unknown> => {
+      const reply = await read(path);
+      assert.deepEqual([reply.status, reply.type], [200, 'application/json; charset=utf-8'], path);
+      return JSON.parse(reply.body);
+    };
+    const file = (path: string, status: string, additions: number, deletions: number) => ({ path, status, additions, deletions, binary: false, unavailable: false });
+
+    assert.deepEqual(await ok('api/jobs/web/W-1/changes'), {
+      base: { ref: 'main', commit: base },
+      iterations: [{ n: 1, ended_at: '2026-11-01T10:01:00.000Z', truncated: false, base_commit: base }, { n: 2, ended_at: '2026-11-01T10:02:00.000Z', truncated: false, base_commit: base }],
+    });
+    assert.deepEqual(await ok('api/jobs/web/W-1/changes?from=base&to=2'), { files: [file('a.txt', 'modified', 1, 1), file('b.txt', 'added', 1, 0)], more: false });
+    assert.deepEqual(await ok('api/jobs/web/W-1/changes?to=1&from=base'), { files: [file('a.txt', 'modified', 1, 1)], more: false });
+    assert.deepEqual(await ok('api/jobs/web/W-1/changes?from=1&to=2'), { files: [file('a.txt', 'modified', 1, 1), file('b.txt', 'added', 1, 0)], more: false });
+    assert.deepEqual(await ok('api/jobs/web/W-1/file?at=base&path=a.txt'), { kind: 'text', text: 'one\n' });
+    assert.deepEqual(await ok('api/jobs/web/W-1/file?at=base&of=1&path=a.txt'), { kind: 'text', text: 'one\n' });
+    assert.deepEqual(await ok('api/jobs/web/W-1/file?at=1&path=a.txt'), { kind: 'text', text: 'two\n' });
+    assert.deepEqual(await ok('api/jobs/web/W-1/file?at=2&path=a.txt'), { kind: 'text', text: 'three\n' });
+    assert.deepEqual(await ok('api/jobs/web/W-1/file?at=base&path=b.txt'), { kind: 'absent' });
+    // b.txt is in the list of iteration 2 against 1, a view that shows iteration 1.
+    assert.deepEqual(await ok('api/jobs/web/W-1/file?path=b.txt&at=1'), { kind: 'absent' });
+
+    for (const path of [
+      // Pairs that are no view, an iteration not published, malformed numbers, a half pair, other parameters.
+      'changes?from=1&to=1', 'changes?from=2&to=1', 'changes?from=0&to=1', 'changes?from=base&to=3', 'changes?from=base&to=0', 'changes?from=base&to=01',
+      'changes?from=base', 'changes?to=2', 'changes?from=base&to=2&x=1', 'changes?from=base&from=base&to=2', 'changes?from=1&to=2&to=2', 'changes?x=1', 'changes/x',
+      // Paths of no list, outside the tree or of the Task directory; iterations not published; of beside a number; missing parts.
+      'file?at=base&path=keep.txt', 'file?at=1&path=keep.txt', 'file?at=base&of=1&path=b.txt', 'file?at=1&path=../a.txt', 'file?at=1&path=%2Fa.txt',
+      'file?at=1&path=.software-factory/W-1.md', 'file?at=3&path=a.txt', 'file?at=0&path=a.txt', 'file?at=base&of=3&path=a.txt', 'file?at=base&of=x&path=a.txt',
+      'file?at=1&of=1&path=a.txt', 'file?at=1', 'file?path=a.txt', 'file?at=1&path=a.txt&path=b.txt', 'file?at=1&path=a.txt&x=1', 'file/x',
+    ]) {
+      assert.deepEqual(await read(`api/jobs/web/W-1/${path}`), { status: 404, body: '', type: undefined }, path);
+    }
+    // A job that does not exist, a bad name.
+    for (const path of ['api/jobs/web/W-9/changes', 'api/jobs/web/..%2FW-1/changes', 'api/jobs/nope/W-1/file?at=1&path=a.txt']) {
+      assert.deepEqual((await read(path)).status, 404, path);
+    }
+    // Read-only: a POST is not allowed.
+    const posted = await fetchRaw(new URL('api/jobs/web/W-1/changes', dashboard.url), { method: 'POST', headers: { origin: `http://127.0.0.1:${dashboard.url.port}` } });
+    assert.notEqual(posted.status, 200);
+  } finally {
+    await dashboard.close();
+  }
 });

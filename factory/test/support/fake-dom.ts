@@ -643,8 +643,12 @@ export const EMPTY_STREAM_PAGE = /^api\/jobs\/[^/]+\/[^/]+\/stream\?from=(\d+)$/
 // Builds the document from the page's HTML, runs app.js in a fresh context against it and returns
 // the handles. Fetches are answered by the test, through requests[i].respond, unless autoGet
 // answers a GET (undefined leaves it pending; a Stream page it leaves undefined is an empty last
-// page). Without a clipboard, navigator has none (as in a context where the browser refuses it).
-export async function loadPage(staticDir: URL, autoGet: (path: string) => unknown, clipboard?: { writeText(text: string): Promise<void> }): Promise<Page> {
+// page). Without a clipboard, navigator has none (as in a context where the browser refuses it);
+// globals adds names to the page's context (a localStorage), none by default.
+export async function loadPage(
+  staticDir: URL, autoGet: (path: string) => unknown, clipboard?: { writeText(text: string): Promise<void> },
+  globals: Record<string, unknown> = {},
+): Promise<Page> {
   const html = await readFile(new URL('dashboard.html', staticDir), 'utf8');
   const source = await readFile(new URL('app.js', staticDir), 'utf8');
   const document = new FakeDocument();
@@ -720,7 +724,7 @@ export async function loadPage(staticDir: URL, autoGet: (path: string) => unknow
     }
   };
   const navigator = clipboard === undefined ? {} : { clipboard };
-  const context = createContext({ document, window, location, history, navigator, fetch, EventSource: FakeEventSource, setTimeout: fakeSetTimeout, clearTimeout: fakeClearTimeout, URLSearchParams, console });
+  const context = createContext({ document, window, location, history, navigator, fetch, EventSource: FakeEventSource, setTimeout: fakeSetTimeout, clearTimeout: fakeClearTimeout, URLSearchParams, console, ...globals });
   runInContext(source, context, { filename: 'app.js' });
   return {
     document,

@@ -28,6 +28,7 @@ import { conversationUrl, MAX_CONVERSATION_URL, ticketConversation } from './con
 import { FactoryError } from './errors.js';
 import type { Execution } from './execution.js';
 import { lineEntries, type StreamEntry, streamContext } from './job-stream.js';
+import { MAX_MR_TEXT_BYTES } from './mr.js';
 import type { Job, JobState, JobStore } from './jobs.js';
 import { DECISIONS, unsettled } from './ledger.js';
 import { HANDOFF_MODES, WORKSPACE_COLORS, WORKSPACE_NAME_PATTERN } from './registry.js';
@@ -45,6 +46,8 @@ export const MAX_STREAMS = 8;
 export const STREAM_PAGE_LINES = 2000;
 // The raw body of an action request, in bytes: a transport bound, not a lifecycle rule.
 export const MAX_ACTION_BODY_BYTES = 128 * 1024;
+// mr-save (SF-080): an MR text of MAX_MR_TEXT_BYTES, every character JSON-escaped at worst.
+const MAX_MR_BODY_BYTES = 6 * MAX_MR_TEXT_BYTES + 1024;
 // The raw body of the planned ticket page's Save (SF-081): a whole Task file as a JSON string, whose
 // escapes can take up to twice its bytes; the content's own size is checked by the Task file writer.
 // A file of mostly non-ASCII or control characters can need more and is written with write_task.
@@ -75,13 +78,17 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 // Pause, Resume and Restart (SF-067) as sf pause, resume and restart.
 // The hand-over to the user's checkout (SF-073): handover, takeback and handed-done as sf handover,
 // takeback and handed-done, and checkHandedOver, the check for the user's own push that the job's
-// detail starts.
+// detail starts. The Merge request screen (SF-080): mergeRequestView (GET mr-view), saveMr and
+// resetMr (POST mr-save and mr-reset).
 export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | 'say' | 'retryReview' | 'acceptGate' | 'settle' | 'simplify' | 'archiveFinished'
   | 'createMergeRequest' | 'mergeMergeRequest' | 'mergeRequestStatus' | 'mergeRequestHost' | 'pause' | 'resumePaused' | 'restart'
-  | 'handover' | 'takeback' | 'handedDone' | 'checkHandedOver'>;
+  | 'handover' | 'takeback' | 'handedDone' | 'checkHandedOver' | 'mergeRequestView' | 'saveMr' | 'resetMr'>;
 export type DashboardAction = 'approve' | 'abort' | 'say' | 'review' | 'accept' | 'settle' | 'simplify' | 'archive' | 'mr-create' | 'mr-merge' | 'mr-status' | 'pause' | 'resume' | 'restart'
-  | 'handover' | 'takeback' | 'handed-done';
-export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'review', 'accept', 'settle', 'simplify', 'archive', 'mr-create', 'mr-merge', 'mr-status', 'pause', 'resume', 'restart', 'handover', 'takeback', 'handed-done'];
+  | 'handover' | 'takeback' | 'handed-done' | 'mr-save' | 'mr-reset';
+export const ACTIONS: DashboardAction[] = [
+  'approve', 'abort', 'say', 'review', 'accept', 'settle', 'simplify', 'archive', 'mr-create', 'mr-merge', 'mr-status', 'pause', 'resume', 'restart', 'handover', 'takeback', 'handed-done',
+  'mr-save', 'mr-reset',
+];
 // How often the job's detail asks origin for the user's push of a handed-over branch (SF-073).
 const PUSH_CHECK_INTERVAL_MS = 60_000;
 
@@ -150,6 +157,12 @@ const BODIES = {
   handover: { shape: '{}', schema: z.strictObject({}) },
   takeback: { shape: '{}', schema: z.strictObject({}) },
   'handed-done': { shape: '{}', schema: z.strictObject({}) },
+  // The Merge request screen (SF-080): the MR title and text, and the branch and the base when they change.
+  'mr-save': {
+    shape: '{"title": string, "body": string, "branch"?: string, "base"?: string}',
+    schema: z.strictObject({ title: z.string(), body: z.string(), branch: z.string().optional(), base: z.string().optional() }),
+  },
+  'mr-reset': { shape: '{}', schema: z.strictObject({}) },
   'workspace-add': {
     shape: `{"name": string, "path": string, "handoff"?: "checkout" | "off", "color"?: ${WORKSPACE_COLORS.map((color) => `"${color}"`).join(' | ')}}`,
     schema: z.strictObject({ name: z.string(), path: z.string(), handoff: z.enum(HANDOFF_MODES).optional(), color: z.enum(WORKSPACE_COLORS).optional() }),
@@ -188,6 +201,9 @@ const ERROR_STATUS: Record<string, number> = {
   // that failed or refused the token is a bad gateway.
   mr_not_mergeable: 409, mr_not_open: 409, mr_token_missing: 409, mr_host_unsupported: 409, mr_host_changed: 409, mr_text_missing: 409,
   mr_auth_failed: 502, mr_host_error: 502, mr_host_unreachable: 502,
+  // The Merge request screen (SF-080): a text that breaks the rules (also approve's, while the MR
+  // text is invalid or not the prepared commit's message), a rename or a base change refused.
+  mr_text_invalid: 400, branch_locked: 409, base_unrelated: 409,
   // origin did not say where a handed-over branch is (SF-073).
   push_check_failed: 502,
 };
@@ -981,6 +997,22 @@ export async function startDashboard(
       body(res, 'text/markdown; charset=utf-8', text);
       return;
     }
+    if (tail.length === 1 && tail[0] === 'mr-view' && [...query.keys()].length === 0) {
+      // The Merge request screen (SF-080); an empty 404 without MR text.
+      let view;
+      try {
+        view = await actions.mergeRequestView(...key);
+      } catch (error) {
+        refuseRead(res, error);
+        return;
+      }
+      if (view === undefined) {
+        empty(res, 404);
+        return;
+      }
+      json(res, 200, view);
+      return;
+    }
     if (tail.length === 1 && (tail[0] === 'changes' || tail[0] === 'file')) {
       const data = tail[0] === 'changes' ? await changesOf(job, query) : await fileOf(job, query);
       if (data === undefined) {
@@ -1271,6 +1303,20 @@ export async function startDashboard(
       const method = methods[action].bind(actions);
       const run = (): Promise<unknown> => method(workspace, ticket);
       return { route: action, exists, call: (data) => (parse(BODIES[action].schema, data) ? run : undefined) };
+    }
+    if (action === 'mr-save' || action === 'mr-reset') {
+      // The Merge request screen (SF-080): the Execution refuses any state but ready_for_human_review
+      // and needs_human after a failed push; the job's detail reaches every page that shows it.
+      return {
+        route: action, exists, bodyLimit: MAX_MR_BODY_BYTES, refreshJob: [workspace, ticket],
+        call: (data) => {
+          if (action === 'mr-reset') {
+            return parse(BODIES['mr-reset'].schema, data) ? () => actions.resetMr(workspace, ticket) : undefined;
+          }
+          const parsed = parse(BODIES['mr-save'].schema, data);
+          return parsed ? () => actions.saveMr(workspace, ticket, parsed) : undefined;
+        },
+      };
     }
     if (action === 'archive') {
       // A finished job leaves the Jobs list as with sf reset (the history is archived, a kept

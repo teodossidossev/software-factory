@@ -904,12 +904,24 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    A failed MR text turn keeps its own code (for example `turn_failed` or `sandbox_unavailable`).
    Fix with `sf say` (its iteration is reviewed again, and a clean verdict prepares again) or by
    hand in the worktree followed by an `sf say`.
-6. Ready: the MR text, with the nits, is copied to `mr.md`, `base_commit` and `target_commit` become the target,
+6. Ready: the MR text, with the nits, is copied to `mr.md` (an MR text the user saved on the Merge
+   request screen stays, below), `base_commit` and `target_commit` become the target,
    `prepared_commit` the branch tip, and the worktree stays (SF-073). With hand-over on (the
    workspace's `handoff`, else `SF_HANDOFF`, SF-083) the factory hands the job over to the checkout
    at once (`handed_over`); otherwise, or when the hand-over is refused, the job is
    `ready_for_human_review` with `handoff_skipped` saying why. Either is
    notified with the MR title and the file lines.
+
+   **A new Clean after the user edited the MR text** (SF-080: the user saved their own text, then
+   asked for changes or a fix round ran): the user's text stays the MR text. When `mr-factory.md`
+   exists and `mr.md` differs from it, Clean writes the new factory text to `mr-factory.md` only,
+   commits with the user's text (`mrMessage` of `mr.md`) and records `{type: "mr_edited", action:
+   "factory_new"}` ("Clean wrote a new MR text; yours is kept. Compare or reset on the Merge
+   request screen."). A user text that fails the rules is kept in `mr.md`, but the commit is made
+   with the factory's text; approve and `sf mr create` then refuse with `mr_text_invalid` until a
+   valid text is saved or the text is reset. Without an edit Clean writes `mr.md` and deletes
+   `mr-factory.md`. The notification, the hand-over's prefilled message and the ready line carry
+   the text the commit was made with.
 7. `sf approve` (or the dashboard's Approve): allowed in `ready_for_human_review`, in
    `handed_over` (section Hand-over to your checkout), and in `needs_human` after a failed push
    (the worktree is kept then; such a job is not the retry of MR preparation). After the push the
@@ -1185,11 +1197,12 @@ State layout under `${SF_STATE_DIR}`:
 sf.sock                                  # 0600, while sf serve runs; one JSON request/response per connection
 dashboard-token                          # 0600, the dashboard token of the last sf serve start
 jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, state, iteration, fixes, gate_fixes, gate_tokens, simplify_iteration (SF-055, absent until the simplification pass starts), session_id, created_at, updated_at, error, mr ({host, number, url, state, merge_commit?} or null)
-jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "review" | "review_failed" | "review_message" | "gate_event" | "gate_overridden" | "simplify" | "simplify_chosen" | "merge_request" | ...}; what sf watch reads
+jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "review" | "review_failed" | "review_message" | "gate_event" | "gate_overridden" | "simplify" | "simplify_chosen" | "merge_request" | "mr_edited" | ...}; what sf watch reads
 jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-override.json,simplify.json,gate-schema.json,gate-output.json,conflict-resolution.diff}
 jobs/<workspace>/<ticket>/ledger.json    # the findings ledger (SF-052): one entry per review item of a Fix section, from the first one on
 worktrees/<workspace>/<ticket>/          # the job's worktree (SF_WORKTREE_ROOT), from start to Clean, abort or reset
 jobs/<workspace>/<ticket>/mr.md              # the MR text, once the branch is ready or after a conflict iteration
+jobs/<workspace>/<ticket>/mr-factory.md      # the factory's MR text, once the user saved their own (SF-080)
 jobs/<workspace>/<ticket>/runner.pid     # the pid of the job's runner (sf run) while it runs (SF-042)
 jobs/<workspace>/<ticket>/queue/, replies/   # sf serve's requests to the runner, one JSON file each, and the runner's answers
 jobs/<workspace>/<ticket>/runner.log     # the output of the job's runners
@@ -1386,7 +1399,7 @@ confirmation where it has one; *Tell it to go on* is a message, "Go on." when th
 | `mr_commit_failed`, `mr_rebase_failed`, `mr_failed` | the whole message | Tell it to go on, Abort… |
 | `worktree_remove_failed` | the worktree's path | Tell it to go on, Abort… |
 | `mr_push_failed` | the whole message | Push again (Approve, its confirmation), Abort… |
-| `mr_push_protected` | nothing | Abort… (renaming the branch comes with SF-080's Merge request screen) |
+| `mr_push_protected` | nothing | the Merge request screen (rename the branch, change the base, SF-080), then Approve; Abort… |
 | any other code | the whole message | Send, Abort… |
 
 A settled finding shows its decision ("Accepted risk", "Must fix") instead of the buttons.
@@ -1560,7 +1573,8 @@ a header, then the Stream with the composer pinned at the bottom.
   is off says why in its title. `starting`, `working`, `awaiting_review`: Send, Pause, Abort…;
   `preparing_mr`: Abort… only (no message is taken while the MR text is written); `paused`: Resume
   (with the box's text when the Implementer's turn was paused), Restart…, Abort…;
-  `ready_for_human_review`: Approve… (primary), *Hand over to my checkout* (SF-073; the composer
+  `ready_for_human_review`: *Review the MR and push* (primary, SF-080: it opens the Merge request
+  screen), Approve…, *Hand over to my checkout* (SF-073; the composer
   says why the automatic hand-over did not happen, when it was refused), Create merge request (when
   it can be created), Send, Abort…; `handed_over` (SF-073): Approve… (primary), *Ask for changes*
   (the message, with the edits in the user's checkout), *I opened the MR myself*, *Take it back*,
@@ -1572,10 +1586,10 @@ a header, then the Stream with the composer pinned at the bottom.
   read after it failed.
 - **Changes** (SF-079): the file tree on the left and the diff of the selected file on the right,
   as IntelliJ shows them; see Changes below.
-- **Merge request**: until SF-080 it shows the old MR view (the MR text once there is one, else a
-  note; *Copy MR text* puts the title line, a blank line and the body on the clipboard, or shows
-  the text selected for Ctrl+C when the browser refuses; after `sf accept`, *Codex items not
-  applied* lists the items or the gate's error, for a follow-up ticket).
+- **Merge request** (SF-080): the branch, the base, the MR title and text, editable before the
+  push, with the commit message, what the change carries and the checks; see Merge request screen
+  below. Before Clean it says "No MR text yet: written at Clean, when both reviews pass." and the
+  switch's tab is disabled (`m` says why).
 
 The old job detail of SF-047 is gone: its pipeline, next-action panel, facts, state history and
 Task, Reviews and Live log tabs are covered by the Stream (the state changes, the verdicts, the
@@ -1655,6 +1669,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/patch` | the Patch, `text/x-diff` |
 | `api/jobs/<ws>/<ticket>/mr` | the MR text, `text/markdown`; 404 until there is one |
+| `api/jobs/<ws>/<ticket>/mr-view` | the Merge request screen (SF-080), `Execution.mergeRequestView`: `{title, body, factory: {title, body}, edited, edited_at, factory_new_at, branch, base, branch_editable, branch_reason, base_editable, base_reason, problems: [{field, message}], pushed, pushed_at, editable, readonly_reason, target: {host, repository}, rules: {commit_types, max_header_chars, required_headings, manual_claim: {source, flags}}, commit: {title, body} \| null, commit_differs}`; `branch_editable` and `base_editable` come from the job only (not pushed, not handed over, no merge request), `editable` is the screen's state, and the page disables the fields while either says no; an empty 404 without MR text or with a query. No network call (section Merge request screen) |
 | `api/jobs/<ws>/<ticket>/changes` | the Changes screen's iterations (SF-079): `{base: {ref, commit}, iterations: [{n, ended_at, truncated, base_commit}]}`; `base.ref` is the job's base branch, `base.commit` the last published iteration's base; an iteration's `base_commit` is `null` when it is not known (section Changes) |
 | `api/jobs/<ws>/<ticket>/changes?from=base\|<N>&to=<N>` | the files of a view: `{files: [{path, status, additions, deletions, binary, unavailable}], more}`, `status` `added`, `modified` or `deleted`, sorted by path, at most 3000 files (`more: true` beyond). Only two pairs: `from=base` with a published `to` (the base of iteration `to` against `to`) and `from=<to − 1>` with `to` ≥ 2; any other pair, a half pair or another parameter is an empty 404 |
 | `api/jobs/<ws>/<ticket>/file?at=base\|<N>&path=<path>` | one side of one file (SF-079): `{kind: "text", text}`, `{kind: "absent"}`, `{kind: "binary", bytes}` (the blob's size, `null` at an iteration whose Patch holds no content), `{kind: "too_large", bytes}` above 1 MiB, or `{kind: "unavailable", reason}`; `at=base` takes `&of=<N>`, the iteration whose base is meant (the last one when left out). Only a path of a `changes` list of a view that shows that side is served (for `at=base&of=N` the list of `from=base&to=N`; for `at=N` those of `from=base&to=N`, `from=N−1&to=N` and `from=N&to=N+1`); any other path, `..`, `.software-factory/`, an iteration not published or another parameter is an empty 404 |
@@ -1672,6 +1687,8 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `POST api/jobs/<ws>/<ticket>/simplify` | `{}` | `Execution.simplify(ws, ticket)` (`sf simplify`, SF-055): the Fix section "Simplify" with the suggestions of the simplification pass and their ledger entries, then the next iteration; result `{state, iteration, check_after_minutes}`; `409 invalid_state` unless the job is `needs_human` with `simplify_offered` (and never a second time); `409 worktree_missing`; answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
 | `POST api/jobs/<ws>/<ticket>/accept` | `{}` | `Execution.acceptGate(ws, ticket)` (`sf accept`, SF-047): the override of the stopped gate, then MR preparation; result `{state, iteration, branch}`; `409 invalid_state` with the reason unless the job is `needs_human` with `gate_rounds`, `gate_budget`, `gate_failed`, `review_churn`, `review_disputed` or `simplify_offered` (Skip, SF-055) and a clean Claude review of the last iteration; the MR preparation's refusals (`409 worktree_missing`, `409 turn_running`); answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
 | `POST api/jobs/<ws>/<ticket>/mr-create` | `{}` | `Execution.createMergeRequest(ws, ticket)` (`sf mr create`, SF-048): result `{state, branch, title?, link?, mr?: {host, number, url, state, reused}, error?}`; from `ready_for_human_review` it waits for the job's runner like approve; `409` for `invalid_state`, `runner_active`, `mr_token_missing`, `mr_host_unsupported`, `mr_text_missing`; `502` for `mr_auth_failed`, `mr_host_error`, `mr_host_unreachable` |
+| `POST api/jobs/<ws>/<ticket>/mr-save` | `{"title": string, "body": string, "branch"?: string, "base"?: string}` | `Execution.saveMr(ws, ticket, input)` (SF-080): the MR text saved, the prepared commit's message rewritten, the branch renamed and the base changed when given and different; result `{state, branch, base, edited, prepared_commit}`; `400 mr_text_invalid`, `409` for `invalid_state`, `runner_active`, `branch_changed`, `branch_locked`, `base_unrelated`, `mr_text_missing`; its body may be up to 6 × 64 KiB + 1 KiB (an MR text of 64 KiB, escaped); the pages that show the job get its detail |
+| `POST api/jobs/<ws>/<ticket>/mr-reset` | `{}` | `Execution.resetMr(ws, ticket)` (SF-080): the factory's text back and the commit message with it; result as `mr-save`; `409 invalid_state` "The MR text is already the factory's." |
 | `POST api/jobs/<ws>/<ticket>/handover`, `.../takeback`, `.../handed-done` | `{}` | `Execution.handover`, `takeback`, `handedDone` (`sf handover`, `sf takeback`, `sf handed-done`, SF-073); `409` for `invalid_state`, `runner_active`, `job_limit` and the hand-over's codes (section Hand-over to your checkout). `GET api/jobs/<ws>/<ticket>` of a `handed_over` job also starts `Execution.checkHandedOver` (at most once a minute), whose push reaches the page through the job's events |
 | `POST api/jobs/<ws>/<ticket>/mr-merge` | `{}` | `Execution.mergeMergeRequest(ws, ticket)` (`sf mr merge`): result `{state, branch, mr}`; `409 mr_not_mergeable` with the host's reason, `409 mr_not_open`, and the codes above |
 | `POST api/jobs/<ws>/<ticket>/mr-status` | `{}` | `Execution.mergeRequestStatus(ws, ticket)` (`sf mr status`): result `{state, branch, mr, status: {number, url, state, draft, mergeable, reason?, checks?, merge_commit?}}`; every page gets the jobs again, and the pages that show the job its detail (a merge request merged or closed on the host shows so at once) |
@@ -1707,9 +1724,9 @@ A `FactoryError` is `{"ok": false, "error": {"code", "message"}}` with its code 
 under `409` for `invalid_state`, `turn_running`, `rebase_in_progress`, `review_off`, `runner_active`, `job_exists`, `job_active`,
 `job_limit`, `task_draft`, `checkout_dirty`, `branch_exists`, `branch_changed`, `branch_missing`,
 `worktree_exists`, `worktree_missing`, `sensitive_unacknowledged`, `ticket_exists`,
-`workspace_exists` and `workspace_busy`,
-`404` for `job_not_found`, `workspace_not_found` and `task_not_found`, `400` for `invalid_content`, `invalid_ticket`, `invalid_name` and
-`workspace_invalid`, and `500` for any other code (a Git failure before the preparation, for
+`workspace_exists`, `workspace_busy`, `branch_locked` and `base_unrelated` (SF-080),
+`404` for `job_not_found`, `workspace_not_found` and `task_not_found`, `400` for `invalid_content`, `invalid_ticket`, `invalid_name`,
+`workspace_invalid` and `mr_text_invalid` (SF-080), and `500` for any other code (a Git failure before the preparation, for
 example; `runner_failed` and `runner_timeout` of a request the job's runner answers: say,
 review, accept). Any other failure is `500`
 with `internal_error` and a fixed message; the cause is logged, never the body or the token.
@@ -1770,6 +1787,84 @@ apply makes every file of that iteration unavailable with Git's message; so does
 missing or not a Git work tree. The lists drop every path a Patch never contains
 (`.software-factory/` and credential-like paths), also among the upstream changes between two
 bases. The results are cached in memory, 16 per job.
+
+### Merge request screen
+
+The job page's Merge request screen (SF-080, the prototype's `renderMr`, `renderMrChecks` and
+`mrAction`) shows the job's MR text once Clean wrote it (`mr.md`), read from
+`api/jobs/<ws>/<ticket>/mr-view`.
+
+- **Form.** *Branch* ("Editable until the first push." or why it is fixed), *Base branch*, *MR
+  title* (the commit header too: `<type>(<ticket>): <summary>`, at most 72 characters) and
+  *Description* with Edit | Preview. Preview renders the Markdown as nodes (headings, paragraphs,
+  lists, task lists with disabled boxes, code fences, tables, inline code, bold, italics, and
+  links only to `http:` and `https:`, opened in a new tab); raw HTML shows as text. A "Not
+  checked:" line is marked, so is a manual check claimed as run (SF-058). "edited by you" when the
+  saved text is not the factory's, with *Show changes against the factory's text* (a line diff).
+  After a new Clean that kept the user's text: "The factory wrote a new text (time). Compare ·
+  Reset to factory text".
+- **Side panel.** *Commit message* (read-only: the title, a blank line and the whole body; the
+  prepared commit's own message with "differs from the MR text: save or reset" while it is not the
+  MR text), *Carries* (files with *Open Changes*, the last Claude and Codex verdicts with their
+  iteration, the Codex tokens, the fix rounds, the target host and repository and `base ← branch`),
+  *Not checked* (the `## Testing` lines starting with "Not checked:" and each line SF-058 flags),
+  *Checks* (✓/✕: the title rule, branch and base set, the required headings, no manual check
+  claimed as run) and, after an override of the gate, *Codex items not applied*.
+- **Checks.** The page checks the draft as it is typed with the values of the rules `mr-view`
+  sends from `src/rules.ts` (the commit types, the header length, the required headings and the
+  manual-claim pattern; the page builds the header pattern from them), each problem on its field; without unsaved changes the
+  server's list of the saved text is shown. The factory checks again at Save, and its answer wins:
+  a refusal shows in the bar and the view is read again.
+- **Bar.** "Unsaved changes", "Saved, edited by you" or "The factory's text", the problem count,
+  *Save* (Ctrl+S), *Reset to factory text*, *Push branch only* (approve; `branch_changed` offers
+  *Push it as it is*) and *Push and open MR ↗* (one `mr-create`: the push, then the merge request;
+  never one after a failed push; hidden with its reason next to Push branch only while the
+  workspace's merge request actions are off). The push buttons are off while there are problems; with
+  unsaved changes a push saves first and pushes only when the save succeeded. Switching screens
+  keeps the draft; leaving the page with it unsaved asks first.
+
+**When it can be edited.** In `ready_for_human_review`, and in `needs_human` after a failed or
+refused push (`mr_push_failed`, `mr_push_protected`). Read-only otherwise, with a line saying why:
+pushed ("Pushed at HH:MM. The MR text is read-only now." and *Back to the stream*), handed over
+("The branch is in your checkout. Take it back to edit the MR text."; the push buttons stay), any
+other state ("The MR text can be edited when the job waits for your review.").
+
+**Save** (`POST mr-save`) and **Reset** (`POST mr-reset`) run as approve does: under the
+Execution's lock, after the job's runner has ended (`runner_active` while a request such as a fix
+runs), the state checked before and after. Every check comes first; a refusal changes nothing.
+
+- The text is composed as the commit message is written (the title, a blank line, the body and a
+  final newline) and must pass the factory's own rules (`mrTextProblem`: the title rule, the
+  required headings, SF-058, at most 64 KiB), else `400 mr_text_invalid`. The first save keeps the
+  factory's text as `mr-factory.md` next to `mr.md`; `edited` means the two differ.
+- **Commit message.** When the saved text differs from the prepared commit's message, the factory
+  rewrites it before any push, in the job's worktree under the workspace's Git lock: `git commit
+  --amend --only --cleanup=verbatim -F <file in the Git dir>`, hooks off. The tree, the author and
+  the author date stay; the user's `commit.gpgSign` applies as at Clean; `prepared_commit` becomes
+  the new tip. A branch tip that is not `prepared_commit` (edited by hand) is `409 branch_changed`;
+  a worktree that is gone `409 invalid_state`. Approve never amends: after the push the text is
+  read-only.
+- **Branch rename**, only before the first push: the job not pushed, not handed over, without a
+  merge request; the branch not on origin (`git ls-remote`, 15 s; an origin that cannot be asked
+  refuses with "Could not check origin for <branch>: …") and checked out in no worktree but the
+  job's own (the user's checkout included). The new name passes `git check-ref-format --branch`,
+  exists neither locally nor on origin, is not `main`, `master` or the base. `git branch -m` in the
+  checkout; the job's worktree follows. Otherwise `409 branch_locked` with the reason.
+- **Base change**, only before the push: the branch is not on origin (`git ls-remote`, 15 s: a
+  push that failed may still have reached it; such a branch refuses with `base_unrelated`, an origin
+  that cannot be asked with `branch_locked`), and the new base exists on origin and contains the commit
+  the change was rebased onto at Clean (`target_commit`; `git fetch origin refs/heads/<new>` and
+  `git merge-base --is-ancestor`), else `409 base_unrelated` ("The change was prepared on <base>;
+  restart the job with base <new> instead."). The commit is not rebased.
+- **Reset** restores the title and text only (`mr-factory.md` back as `mr.md`, the commit message
+  with it); branch and base stay as saved. Refused (`409 invalid_state`) when the text already is
+  the factory's.
+- Each save and reset appends `{ts, iteration, type: "mr_edited", action: "saved" | "reset",
+  branch?, base?}` ("You edited the MR text", "You reset the MR text to the factory's"), shown in
+  the Stream as the user's note; `factory_new` (section MR preparation) as the factory's.
+- **Before a push**, approve and `sf mr create` refuse with `mr_text_invalid` while `mr.md` fails
+  the rules or is not the message of the commit the push would carry (`prepared_commit`; in
+  `handed_over` the saved one); a handed-over push of the user's own commits is not checked.
 
 ### Checking the page by hand
 
@@ -1833,8 +1928,10 @@ end), in a browser:
    unchecked again. Confirm a plain abort on a job you can lose: "Aborted; the branch … stays";
    the card moves to Done.
 8. Approve: on a Your turn card in `ready_for_human_review` click *Review the MR and push*: the
-   job's page opens with the approve dialog; confirm: "Pushed …" with the title and the merge
-   request link to copy (or the note to open it by hand); the card moves to Done.
+   job's Merge request screen opens (no dialog); *Push branch only*: "Pushed …" with the title and
+   the merge request link (or the note to open it by hand); the card moves to Done. In the
+   composer *Approve…* still opens the approve dialog; on a `handed_over` card *Review the MR and
+   push* opens the job's page with it.
 9. Retry review (a fake review scripted to fail): the job is under Your turn with "Claude review
    could not run" in red and *Retry review* on its card; click it: the card moves to Reviewing.
    A decision stop (`gate_rounds`, below) is never red.
@@ -1876,6 +1973,16 @@ end), in a browser:
    layout chosen stays. A binary file, a file above 1 MiB and, on a job whose Patch was cut, a
    file after the cut say so instead of a diff. List each difference from the prototype with its
    reason.
+15a. Merge request: open the Merge request screen of a real job ready for review next to
+   `prototype-full.html` (branch `prototype-dashboard-v3`, SF-053 there) and compare, in light and
+   dark: the form, the side panel and the bar. Edit the title (a period at the end: its line and
+   the count show, the push buttons go off), the text (Preview: the Markdown, a "Not checked:"
+   line marked; `<script>` and a `javascript:` link stay text), press Ctrl+S: "Saved, edited by
+   you", "edited by you", `git log -1 --format=%B <branch>` shows the new message, the tree and
+   the author unchanged; *Show changes against the factory's text*; *Reset to factory text*.
+   Change the branch before the push (and to `main`: refused with the reason); switch to the
+   Stream and back: the draft stays; reload with unsaved changes: the browser asks. List each
+   difference from the prototype with its reason.
 16. Layout: Tab reaches each card, its buttons, the job page's *← Board*, the switch, the Stream's
    toggles and path links, the composer's message box and buttons and a confirmation's buttons.
    On a phone the header wraps and the composer's buttons go under the message box.

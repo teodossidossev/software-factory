@@ -41,16 +41,22 @@ export function sectionLines(lines: string[], heading: string): string[] {
 // rule; testingProblem refuses the line that most often breaks it.
 export const MR_TESTING_RULE = '`## Testing` lists only what was run in this job, with its result; anything not run (manual steps, live checks, browsers) goes on a line starting with `Not checked:`, saying who can run it';
 // A line that starts, after any list marker, checkbox or emphasis, with "By hand" or "Manual".
-const MANUAL_CLAIM = /^\s*(?:(?:[-*+]|\d+[.)])\s+)?(?:\[[ xX]\]\s+)?[*_]*(?:by hand\b|manual)/iu;
+// Exported for the Merge request screen (SF-080), which checks the text live with the same rule.
+export const MANUAL_CLAIM = /^\s*(?:(?:[-*+]|\d+[.)])\s+)?(?:\[[ xX]\]\s+)?[*_]*(?:by hand\b|manual)/iu;
 
 // Why the MR text's ## Testing section claims a manual step as run, or undefined: a line there
 // that starts with "By hand" or "Manual" must also contain "not".
 export function testingProblem(lines: string[]): string | undefined {
-  const claim = sectionLines(lines, '## Testing').find((line) => MANUAL_CLAIM.test(line) && !/not/iu.test(line));
+  const claim = manualClaim(lines);
   if (claim === undefined) {
     return undefined;
   }
   return `its ## Testing line "${claim.trim().slice(0, 100)}" reads as a check that was run; ${MR_TESTING_RULE}`;
+}
+
+// The first ## Testing line that claims a manual step as run (testingProblem), or undefined.
+export function manualClaim(lines: string[]): string | undefined {
+  return sectionLines(lines, '## Testing').find((line) => MANUAL_CLAIM.test(line) && !/not/iu.test(line));
 }
 
 function escapeRegExp(text: string): string {

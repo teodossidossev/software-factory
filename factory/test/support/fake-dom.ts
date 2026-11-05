@@ -607,7 +607,7 @@ export interface Page {
   location: { hash: string; pathname: string; search: string };
   // The URLs history.pushState was given, in order.
   pushed: string[];
-  window: { dispatch(name: string): void };
+  window: { dispatch(name: string, event?: Record<string, unknown>): Record<string, unknown> };
 }
 
 export class FakeEventSource {
@@ -688,10 +688,13 @@ export async function loadPage(
     addEventListener: (name: string, listener: (event: Record<string, unknown>) => void): void => {
       windowListeners.set(name, [...(windowListeners.get(name) ?? []), listener]);
     },
-    dispatch: (name: string): void => {
+    // The event the listeners get (an empty one by default) is returned, so a test can read what
+    // they set on it (beforeunload's returnValue).
+    dispatch: (name: string, event: Record<string, unknown> = {}): Record<string, unknown> => {
       for (const listener of windowListeners.get(name) ?? []) {
-        listener({});
+        listener(event);
       }
+      return event;
     },
   };
   const pushed: string[] = [];

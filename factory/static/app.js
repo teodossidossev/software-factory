@@ -11,8 +11,9 @@
 // (SF-082: read page by page from api/jobs/<ws>/<ticket>/stream, then live from the stream's entries
 // events), with its stop block and the composer pinned at the bottom; the Changes screen (SF-079):
 // the file tree and the side-by-side or unified diff of an iteration's files, read from
-// api/jobs/<ws>/<ticket>/changes and /file; the Merge request screen shows the old MR view until
-// SF-080. The board's messages go to the toast. The job's actions (approve, abort, say, Retry review, Accept and prepare MR, Simplify,
+// api/jobs/<ws>/<ticket>/changes and /file; the Merge request screen (SF-080): the branch, the base,
+// the MR title and text to edit, preview, save (api/jobs/<ws>/<ticket>/mr-view, mr-save and
+// mr-reset) and push. The board's messages go to the toast. The job's actions (approve, abort, say, Retry review, Accept and prepare MR, Simplify,
 // settle, Pause, Resume, Restart, archive and the merge request on the Git host, SF-048) go as POSTs
 // to api/jobs/<ws>/<ticket>/<action>, each one a deliberate click, confirmed inline where it pushes,
 // ends, overrides or merges, never retried or replayed by the page. A Queue card starts its job
@@ -36,6 +37,7 @@ const ACTION_LABELS = {
   approve: 'Approve', abort: 'Abort', say: 'Send', review: 'Retry review', accept: 'Accept and prepare MR', settle: 'Settle', simplify: 'Simplify', archive: 'Archive',
   'mr-create': 'Create merge request', 'mr-merge': 'Merge', 'mr-status': 'Refresh MR status', pause: 'Pause', resume: 'Resume', restart: 'Restart',
   handover: 'Hand over to my checkout', takeback: 'Take it back', 'handed-done': 'I opened the MR myself',
+  'review-mr': 'Review the MR and push',
 };
 const PENDING_REASONS = {
   accept: 'the override was requested; waiting for its outcome.',
@@ -92,10 +94,9 @@ const state = {
   detail: null,
   cache: new Map(), // "<n>/<view>" -> text, for the selected job
   // The Changes screen's data of the selected job (SF-079, cxData); the implement prompt's Task
-  // (its stamp, the Task text and its check); the MR text loaded.
+  // (its stamp, the Task text and its check).
   cx: cxData(),
   taskView: null,
-  mrText: null,
   source: null,
   retry: null,
   // The Stream (SF-078): the next line of events.jsonl to read (the last page's next, then each
@@ -986,54 +987,597 @@ function itemEntry(item, expected = true) {
   return entry;
 }
 
-// ---------- The Merge request screen: the old MR view until SF-080 ----------
+// ---------- The Merge request screen (SF-080: the prototype's renderMr, renderMrChecks and mrAction) ----------
 
-// The MR text as it is copied: the title line, a blank line and the body.
-function mrCopyText(text) {
-  const lines = text.replace(/\r\n/g, '\n').split('\n');
-  const body = lines.slice(1).join('\n').replace(/^(\s*\n)+/, '').trimEnd();
-  return body === '' ? lines[0] : `${lines[0]}\n\n${body}`;
+// Per job ("<ws>/<ticket>"): the mr-view last read (the server's) and its signature, the draft
+// (title, body, branch, base; kept across screens), the saved values the draft is compared with,
+// the factory's text, the tab (Edit or Preview), whether the diff against the factory's text is
+// shown, the bar's outcome, the action under way, whether "Push it as it is" is offered, the read
+// under way and its error.
+const MR = new Map();
+function mrState(key) {
+  if (!MR.has(key)) {
+    MR.set(key, {
+      view: null, sig: null, title: '', body: '', branch: '', base: '', saved: { title: '', body: '', branch: '', base: '' }, factory: { title: '', body: '' },
+      tab: 'edit', showChanges: false, outcome: null, busy: null, offerAsIs: false, load: null, error: null,
+    });
+  }
+  return MR.get(key);
+}
+const MR_FIELDS = ['title', 'body', 'branch', 'base'];
+const mrEdited = (m) => m.view !== null && m.view.edited === true;
+const mrDirty = (m) => m.view !== null && MR_FIELDS.some((k) => m[k] !== m.saved[k]);
+// The lines of a level-2 section of a text, as the factory reads them (src/rules.ts sectionLines).
+function section(text, heading) {
+  const lines = text.replace(/\r/g, '').split('\n');
+  const start = lines.findIndex((line) => line.trimEnd() === heading);
+  if (start < 0) {
+    return [];
+  }
+  const out = [];
+  let fenced = false;
+  for (const line of lines.slice(start + 1)) {
+    if (line.startsWith('```')) {
+      fenced = !fenced;
+    } else if (!fenced && /^#{1,2} /.test(line)) {
+      break;
+    }
+    out.push(line);
+  }
+  return out;
+}
+// The rules come with mr-view (src/rules.ts); the page keeps no copy of them.
+const manualClaim = (rules) => new RegExp(rules.manual_claim.source, rules.manual_claim.flags);
+const NOT_CHECKED = /^\s*(?:[-*+]\s+)?not checked:/i;
+const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// Every problem of the draft, each with its field, in the server's words (src/mr.ts mrProblems).
+function mrProblems(j, m) {
+  const rules = m.view.rules;
+  const p = [];
+  const t = m.title;
+  const length = [...t].length;
+  const header = new RegExp(`^(?=.{1,${rules.max_header_chars}}$)(${rules.commit_types.join('|')})\\(${escapeRe(j.ticket)}\\): \\S.*(?<!\\.)$`, 'u');
+  if (!header.test(t)) {
+    p.push({
+      field: 'title',
+      message: t.trim() === '' ? 'The title is required.'
+        : length > rules.max_header_chars ? `The title has ${length} characters, more than ${rules.max_header_chars}.`
+          : t.endsWith('.') ? 'The title ends with a period.'
+            : `The title must read "<type>(${j.ticket}): <summary>", with <type> one of ${rules.commit_types.join(', ')}.`,
+    });
+  }
+  if (m.branch.trim() === '') {
+    p.push({ field: 'branch', message: 'The branch is required.' });
+  }
+  if (m.base.trim() === '') {
+    p.push({ field: 'base', message: 'The base branch is required.' });
+  }
+  const lines = m.body.replace(/\r/g, '').split('\n');
+  for (const heading of rules.required_headings.filter((h) => !lines.some((line) => line.trimEnd() === h))) {
+    p.push({ field: 'body', message: `Missing heading: ${heading}.` });
+  }
+  const claim = section(m.body, '## Testing').find((line) => manualClaim(rules).test(line) && !/not/iu.test(line));
+  if (claim !== undefined) {
+    p.push({ field: 'body', message: `SF-058: the ## Testing line "${claim.trim().slice(0, 90)}" reads as a check that was run. Anything not run goes on a line starting with "Not checked:".` });
+  }
+  return p;
+}
+// The problems shown: the draft's while it has unsaved changes, else the server's list of the saved text.
+const mrShownProblems = (j, m) => (mrDirty(m) ? mrProblems(j, m) : m.view.problems);
+
+// The mark of a Preview list line (md's mark): a "Not checked:" line, a manual check claimed as run
+// (SF-058).
+function mdMark(raw) {
+  const m = state.key === null ? undefined : MR.get(state.key);
+  if (NOT_CHECKED.test(raw)) {
+    return 'notchk';
+  }
+  if (m?.view && manualClaim(m.view.rules).test(raw) && !/not/i.test(raw)) {
+    return 'flag';
+  }
+  return '';
 }
 
-async function showMr() {
-  const key = state.key;
-  renderUnapplied(state.detail);
-  if (!state.detail?.mr) {
-    state.mrText = null;
-    $('mr-panel').hidden = true;
-    $('no-mr').hidden = false;
-    return;
+// The line diff of two texts (myers), unified, drawn as the Changes screen draws one; "No
+// difference." when they are the same.
+function textDiffHtml(a, b) {
+  const A = a.split('\n');
+  const B = b.split('\n');
+  const ops = myers(A, B);
+  const ln = (n) => el('span', 'ln', n === null ? '' : String(n));
+  const row = (cls, ...cells) => {
+    const r = el('div', cls);
+    r.append(...cells);
+    return r;
+  };
+  const node = el('div', 'dfile uni boxed');
+  if (ops.every((op) => op[0] === '=')) {
+    node.append(el('div', 'dempty', 'No difference.'));
+    return node;
   }
-  let text;
-  let failure = null;
+  node.append(...ops.map(([t, i, k]) => (t === '=' ? row('r', ln(i + 1), ln(k + 1), el('span', 'sg'), el('span', 'c', A[i]))
+    : t === '-' ? row('r del', ln(i + 1), ln(null), el('span', 'sg', '−'), el('span', 'c', A[i]))
+      : row('r add', ln(null), ln(k + 1), el('span', 'sg', '+'), el('span', 'c', B[k])))));
+  return node;
+}
+// A title and body as the commit message: the title, a blank line and the body.
+const messageOf = (message) => (message.body === '' ? message.title : `${message.title}\n\n${message.body}`);
+
+// Reads the job's mr-view. adopt: 'all' puts the saved values in the draft (after a save), 'text'
+// the title and the text only (after a reset); without it the draft follows the view only while it
+// has no unsaved change. An answer that an even later read overtook is dropped.
+async function loadMr(key, adopt = null) {
+  const m = mrState(key);
+  const token = {};
+  m.load = token;
+  let view;
   try {
-    text = await getText(`api/jobs/${jobPath(key)}/mr`);
+    view = JSON.parse(await getText(`api/jobs/${jobPath(key)}/mr-view`));
   } catch (error) {
-    failure = error;
-  }
-  if (key !== state.key) {
+    if (m.load === token) {
+      m.load = null;
+      m.error = error.message;
+      if (key === state.key && ui.screen === 'mr') {
+        renderMr();
+      }
+    }
     return;
   }
-  state.mrText = failure === null ? text : null;
-  $('mr-body').replaceChildren(...renderReport(failure === null ? text : `Could not load: ${failure.message}`));
-  $('mr-copy').disabled = failure !== null;
-  $('mr-panel').hidden = false;
-  $('no-mr').hidden = true;
+  if (m.load !== token) {
+    return;
+  }
+  m.load = null;
+  m.error = null;
+  const dirty = mrDirty(m);
+  const sig = JSON.stringify(view);
+  const changed = sig !== m.sig;
+  m.view = view;
+  m.sig = sig;
+  m.saved = { title: view.title, body: view.body, branch: view.branch, base: view.base };
+  m.factory = view.factory;
+  for (const k of MR_FIELDS) {
+    if (adopt === 'all' || !dirty || (adopt === 'text' && (k === 'title' || k === 'body'))) {
+      m[k] = m.saved[k];
+    }
+  }
+  if (!mrEdited(m)) {
+    m.showChanges = false;
+  }
+  if (key !== state.key || ui.screen !== 'mr') {
+    return;
+  }
+  if (changed || adopt !== null) {
+    renderMr();
+  } else {
+    renderMrChecks();
+  }
 }
 
-// The Codex items the user accepted the change without (SF-047), for a follow-up ticket.
-function renderUnapplied(detail) {
-  const override = detail === null ? null : standingOverride(detail);
-  $('mr-unapplied').hidden = override === null;
-  if (override === null) {
-    $('mr-unapplied-list').replaceChildren();
+// The screen of the selected job: the empty line without MR text, else its last view at once (the
+// form kept when it is already drawn, so a refresh of the job does not take the typing away) and a
+// fresh read.
+function showMr() {
+  const key = state.key;
+  if (key === null || !mrAvailable()) {
+    $('scrMr').replaceChildren(el('div', 'dempty', 'No MR text yet: written at Clean, when both reviews pass.'));
     return;
   }
-  const items = Array.isArray(override.unapplied) ? override.unapplied : [];
-  $('mr-unapplied-note').textContent = typeof override.unapplied === 'string'
-    ? `You accepted the change over the gate (${override.code}); the gate failed: ${override.unapplied}`
-    : `You accepted the change over the gate (${override.code}); ${items.length === 0 ? 'the gate left no item.' : 'these could go into a follow-up ticket:'}`;
-  $('mr-unapplied-list').replaceChildren(...items.map((item) => itemEntry(item)));
+  if ($('mrBar') !== null && $('scrMr').dataset.key === key) {
+    renderMrChecks();
+  } else {
+    renderMr();
+  }
+  void loadMr(key);
+}
+
+// The field that had the focus keeps it (and its selection) across a redraw.
+function keepField(work) {
+  const active = document.activeElement;
+  const id = active?.id;
+  const start = active?.selectionStart;
+  const end = active?.selectionEnd;
+  work();
+  const again = typeof id === 'string' && id !== '' ? $(id) : null;
+  if (again !== null && again !== active) {
+    again.focus();
+    if (typeof start === 'number' && typeof again.setSelectionRange === 'function') {
+      again.setSelectionRange(start, end);
+    }
+  }
+}
+
+// A field of the form: its label, the control, the hint and its .bad line.
+function mrField(label, control, hint, err) {
+  const field = el('div', 'fld');
+  const name = el('label', '', label);
+  name.setAttribute('for', control.id);
+  const bad = el('span', 'bad');
+  bad.dataset.err = err;
+  field.append(name, control, el('span', 'hint', hint), bad);
+  return field;
+}
+// A one-line field of the form, monospaced, without spell checking.
+function mrInput(id, value, disabled) {
+  const input = el('input', 'mono');
+  input.id = id;
+  input.type = 'text';
+  input.value = value;
+  input.disabled = disabled;
+  input.setAttribute('spellcheck', 'false');
+  return input;
+}
+
+// The screen (the prototype's renderMr): the form on the left, the side panel and the bar drawn by
+// renderMrChecks; the empty line without MR text, a reading line until mr-view answers.
+function renderMr() {
+  const key = state.key;
+  const detail = state.detail;
+  const node = $('scrMr');
+  if (key === null || detail === null || keyOf(detail.job) !== key) {
+    return;
+  }
+  if (!mrAvailable()) {
+    node.replaceChildren(el('div', 'dempty', 'No MR text yet: written at Clean, when both reviews pass.'));
+    return;
+  }
+  const j = detail.job;
+  const m = mrState(key);
+  if (m.view === null) {
+    node.replaceChildren(el('div', 'dempty', m.error !== null ? `Could not read the MR text: ${m.error}` : 'Reading the MR text…'));
+    return;
+  }
+  const v = m.view;
+  const ro = !v.editable;
+  const card = el('div', 'card2');
+  const h3 = el('h3', '', 'Merge request');
+  if (v.pushed) {
+    h3.append(el('span', 'tag', 'read-only: pushed'));
+  }
+  const editedTag = el('span');
+  editedTag.id = 'mrEdited';
+  h3.append(editedTag);
+  card.append(h3);
+  if (typeof v.factory_new_at === 'string') {
+    const line = el('div', 'notline');
+    line.id = 'mrFactoryNew';
+    line.append(document.createTextNode(`The factory wrote a new text (${clock(v.factory_new_at)}). `), button('linkish', 'Compare', { mrdiff: 'on' }), document.createTextNode(' · '));
+    const reset = button('linkish', 'Reset to factory text', { mr: 'reset' });
+    reset.disabled = ro;
+    line.append(reset);
+    card.append(line);
+  }
+  const row = el('div', 'row2');
+  row.append(
+    // branch_editable and base_editable come from the job only; a read-only screen disables them too.
+    mrField('Branch', mrInput('mrBranch', m.branch, ro || !v.branch_editable), v.branch_editable ? 'Editable until the first push.' : v.branch_reason ?? 'Fixed after the first push.', 'branch'),
+    mrField('Base branch', mrInput('mrBase', m.base, ro || !v.base_editable), `The MR targets this branch, e.g. main or master.${v.base_editable || v.base_reason === null ? '' : ` ${v.base_reason}`}`, 'base'),
+  );
+  card.append(row, mrField('MR title', mrInput('mrTitle', m.title, ro), `One line, the commit header too: <type>(${j.ticket}): <summary>, at most ${v.rules.max_header_chars} characters.`, 'title'));
+  const desc = el('div', 'fld');
+  const tabs = el('div', 'edtabs');
+  tabs.setAttribute('role', 'tablist');
+  for (const [tab, text] of [['edit', 'Edit'], ['preview', 'Preview']]) {
+    const t = button(m.tab === tab && !m.showChanges ? 'on' : '', text, { mrtab: tab });
+    t.setAttribute('role', 'tab');
+    t.setAttribute('aria-selected', String(m.tab === tab && !m.showChanges));
+    tabs.append(t);
+  }
+  if (mrEdited(m)) {
+    const diff = button(m.showChanges ? 'on' : '', "Show changes against the factory's text", { mrdiff: 'toggle' });
+    diff.setAttribute('aria-pressed', String(m.showChanges));
+    tabs.append(diff);
+  }
+  let content;
+  if (m.showChanges && mrEdited(m)) {
+    content = textDiffHtml(messageOf(m.factory), messageOf(m.saved));
+  } else if (m.tab === 'edit') {
+    content = el('textarea', 'mdedit');
+    content.id = 'mrBody';
+    content.value = m.body;
+    content.disabled = ro;
+    content.setAttribute('aria-label', 'Description');
+  } else {
+    content = el('div', 'card2');
+    content.id = 'mrPreview';
+    content.append(md(m.body, mdMark));
+  }
+  const bad = el('span', 'bad');
+  bad.dataset.err = 'body';
+  desc.append(el('label', '', 'Description'), tabs, content, bad);
+  card.append(desc);
+  const left = el('div', 'stack');
+  left.append(card);
+  const side = el('div', 'stack');
+  side.id = 'mrSide';
+  const grid = el('div', 'grid');
+  grid.append(left, side);
+  const form = el('div', 'form2');
+  form.append(grid);
+  const bar = el('div', 'mrbar');
+  bar.id = 'mrBar';
+  node.dataset.key = key;
+  keepField(() => node.replaceChildren(form, bar));
+  renderMrChecks();
+}
+
+// The last verdict of a reviewer ('review': Claude, 'gate': Codex) over the job's iterations.
+function lastVerdict(detail, kind) {
+  for (const iteration of [...detail.iterations].reverse()) {
+    const verdict = verdictOf(iteration[kind]);
+    if (verdict === 'clean' || verdict === 'fix') {
+      return `${verdict === 'clean' ? 'clean' : 'asked for fixes'} at iteration ${iteration.number}`;
+    }
+  }
+  return '—';
+}
+
+// A card of the side panel: its title and content.
+function mrCard(title, ...content) {
+  const card = el('div', 'card2');
+  card.append(typeof title === 'string' ? el('h3', '', title) : title, ...content);
+  return card;
+}
+
+// What follows the draft as it is typed: the .bad lines, "edited by you", the side panel and the bar.
+function renderMrChecks() {
+  const key = state.key;
+  const detail = state.detail;
+  const m = key === null ? undefined : MR.get(key);
+  if (!m?.view || detail === null || keyOf(detail.job) !== key || $('mrBar') === null) {
+    return;
+  }
+  const j = detail.job;
+  const v = m.view;
+  const probs = mrShownProblems(j, m);
+  document.querySelectorAll('#scrMr [data-err]').forEach((s) => {
+    s.textContent = probs.filter((p) => p.field === s.dataset.err).map((p) => p.message).join(' ');
+  });
+  $('mrEdited').replaceChildren(...(mrEdited(m) ? [el('span', 'edited', 'edited by you')] : []));
+
+  // Commit message: the title, a blank line and the whole body; the prepared commit's own while it
+  // is not the MR text (a new Clean committed the factory's).
+  const commitTitle = el('h3', '', 'Commit message ');
+  commitTitle.append(el('span', 'muted plain', 'read-only'));
+  const commit = mrCard(commitTitle);
+  if (v.commit_differs && v.commit !== null) {
+    commit.append(el('pre', 'cm', messageOf(v.commit)), el('span', 'err-text fs12', 'differs from the MR text: save or reset'));
+  } else {
+    commit.append(el('pre', 'cm', messageOf({ title: m.title, body: m.body })));
+  }
+  commit.append(el('span', 'hint', 'The commit message is the MR title and text. The factory amends the commit before the push when you change the text.'));
+
+  const kv = el('dl', 'kv');
+  const files = el('dd', '', `${typeof j.files === 'number' ? j.files : 0} changed · `);
+  const open = button('linkish', 'Open Changes ', { goto: 'changes' });
+  open.append(el('span', 'kbd', 'c'));
+  files.append(open);
+  const host = v.target.host === 'github' ? 'GitHub' : v.target.host === 'gitlab' ? 'GitLab' : v.target.host;
+  const target = el('dd', '', [host, v.target.repository].filter((part) => typeof part === 'string' && part !== '').join(' ') || 'origin on no known Git host');
+  target.append(el('br'), el('span', 'mono fs12', `${m.base} ← ${m.branch}`));
+  kv.append(el('dt', '', 'Files'), files, el('dt', '', 'Claude'), el('dd', '', lastVerdict(detail, 'review')),
+    el('dt', '', 'Codex'), el('dd', '', `${lastVerdict(detail, 'gate')} · ${typeof j.gate_tokens === 'number' ? j.gate_tokens.toLocaleString('en-US') : 0} tokens`),
+    el('dt', '', 'Fix rounds'), el('dd', '', String(j.fixes ?? 0)), el('dt', '', 'Target'), target);
+
+  const testing = section(m.body, '## Testing');
+  const claim = manualClaim(v.rules);
+  const notChecked = testing.filter((line) => NOT_CHECKED.test(line));
+  const flagged = testing.filter((line) => claim.test(line) && !/not/i.test(line));
+  const notCard = mrCard('Not checked');
+  if (notChecked.length === 0) {
+    notCard.append(el('span', 'muted fs13', 'No "Not checked:" line in ## Testing.'));
+  }
+  for (const line of notChecked) {
+    const n = el('div', 'notline');
+    n.append(...inl(line.replace(/^\s*[-*+]\s+/, '')));
+    notCard.append(n);
+  }
+  for (const line of flagged) {
+    const n = el('div', 'notline bad');
+    n.append(el('b', '', 'SF-058:'), document.createTextNode(' '), ...inl(line.replace(/^\s*[-*+]\s+/, '')));
+    notCard.append(n);
+  }
+
+  const checks = el('ul', 'checks');
+  for (const [label, ok] of [
+    ['Title follows the commit header rule', !probs.some((p) => p.field === 'title')],
+    ['Branch and base are set', !probs.some((p) => p.field === 'branch' || p.field === 'base')],
+    ['All required headings are present', !probs.some((p) => p.message.startsWith('Missing heading'))],
+    ['## Testing claims no manual check as run (SF-058)', !probs.some((p) => p.message.startsWith('SF-058'))],
+  ]) {
+    const item = el('li');
+    item.append(el('span', ok ? 'ok' : 'no', ok ? '✓' : '✕'), document.createTextNode(label));
+    checks.append(item);
+  }
+  const cards = [commit, mrCard('Carries', kv), notCard, mrCard('Checks', checks)];
+  // The Codex items the user accepted the change without (SF-047), for a follow-up ticket.
+  const override = standingOverride(detail);
+  if (override !== null) {
+    const items = Array.isArray(override.unapplied) ? override.unapplied : [];
+    const list = el('ol', 'review-items');
+    list.append(...items.map((item) => itemEntry(item)));
+    cards.push(mrCard('Codex items not applied', el('span', 'hint', typeof override.unapplied === 'string'
+      ? `You accepted the change over the gate (${override.code}); the gate failed: ${override.unapplied}`
+      : `You accepted the change over the gate (${override.code}); ${items.length === 0 ? 'the gate left no item.' : 'these could go into a follow-up ticket:'}`), list));
+  }
+  $('mrSide').replaceChildren(...cards);
+  keepField(() => $('mrBar').replaceChildren(...mrBar(j, m, probs)));
+}
+
+// The bar: the state text, the problem count and the buttons; pushed: when, and Back to the stream;
+// read-only: why, and the push buttons of a handed-over job.
+function mrBar(j, m, probs) {
+  const v = m.view;
+  const back = button('btn', 'Back to the stream', { goto: 'stream' });
+  if (v.pushed) {
+    return [el('b', '', `Pushed at ${clock(v.pushed_at) || '—'}.`), el('span', 'muted', 'The MR text is read-only now.'), el('span', 'sp'), back];
+  }
+  const handed = j.state === 'handed_over';
+  if (!v.editable && !handed) {
+    return [el('span', 'muted', v.readonly_reason ?? ''), el('span', 'sp'), back];
+  }
+  const dirty = mrDirty(m);
+  const busy = m.busy !== null;
+  const nodes = [];
+  if (m.outcome !== null) {
+    nodes.push(el('span', m.outcome.level === 'error' ? 'err-text' : 'muted', m.outcome.text));
+  } else if (!v.editable) {
+    nodes.push(el('span', 'muted', v.readonly_reason ?? ''));
+  } else {
+    nodes.push(dirty ? el('b', '', 'Unsaved changes') : mrEdited(m) ? el('span', 'muted', 'Saved, edited by you') : el('span', 'muted', "The factory's text"));
+  }
+  if (probs.length > 0) {
+    nodes.push(el('span', 'err-text', `${counted(probs.length, 'problem')} to fix before pushing`));
+  }
+  nodes.push(el('span', 'sp'));
+  if (v.editable) {
+    const save = button('btn', 'Save ', { mr: 'save' });
+    save.append(el('span', 'kbd', 'Ctrl+S'));
+    save.disabled = !dirty || busy;
+    const reset = button('btn', 'Reset to factory text', { mr: 'reset' });
+    reset.disabled = !(mrEdited(m) || m.title !== m.saved.title || m.body !== m.saved.body) || busy;
+    nodes.push(save, reset);
+  }
+  const why = (action) => (probs.length > 0 ? 'Fix the problems first' : busy ? 'Wait for the save to end' : availability(action, j));
+  const push = button('btn', 'Push branch only', { mr: 'push' });
+  push.disabled = why('approve') !== '';
+  if (push.disabled) {
+    push.setAttribute('title', why('approve'));
+  }
+  nodes.push(push);
+  if (m.offerAsIs) {
+    const asIs = button('btn', 'Push it as it is', { mr: 'push-as-is' });
+    asIs.disabled = busy || availability('approve', j) !== '';
+    nodes.push(asIs);
+  }
+  const off = mrOff(j);
+  if (off !== '') {
+    nodes.push(el('span', 'muted fs12', `Push and open MR is off: ${off}`));
+  } else {
+    const open = button('btn primary', 'Push and open MR ↗', { mr: 'push-mr' });
+    open.disabled = why('mr-create') !== '';
+    if (open.disabled) {
+      open.setAttribute('title', why('mr-create'));
+    }
+    nodes.push(open);
+  }
+  return nodes;
+}
+
+// Save: the draft (with the branch and the base when they changed); true when the factory saved
+// it. A refusal is the bar's state text; the view is read again either way.
+async function mrSave(key) {
+  const m = mrState(key);
+  if (m.view === null || !m.view.editable || m.busy !== null || !mrDirty(m)) {
+    return false;
+  }
+  m.busy = 'save';
+  m.outcome = { level: 'pending', text: 'Saving…' };
+  renderMrChecks();
+  const body = {
+    title: m.title, body: m.body,
+    ...(m.branch !== m.saved.branch ? { branch: m.branch } : {}), ...(m.base !== m.saved.base ? { base: m.base } : {}),
+  };
+  let saved = false;
+  try {
+    await post(`api/jobs/${jobPath(key)}/mr-save`, body);
+    saved = true;
+    m.outcome = null;
+  } catch (error) {
+    m.outcome = error instanceof ActionError
+      ? { level: 'error', text: `Not saved: ${error.code}: ${error.message}` }
+      : { level: 'error', text: `The save failed (${error.message}); it may have been written. The MR text is read again.` };
+  }
+  m.busy = null;
+  if (saved && key === ui.job) {
+    toast({ level: 'ok', text: 'MR text saved' });
+  }
+  await loadMr(key, saved ? 'all' : null);
+  renderMrChecks();
+  return saved;
+}
+
+// Reset to factory text: the factory's title and text back (branch and base stay as saved); a draft
+// that only differs from the saved text goes back to it without a request.
+async function mrReset(key) {
+  const m = mrState(key);
+  if (m.view === null || !m.view.editable || m.busy !== null) {
+    return;
+  }
+  if (!mrEdited(m)) {
+    m.title = m.saved.title;
+    m.body = m.saved.body;
+    m.outcome = null;
+    renderMr();
+    return;
+  }
+  m.busy = 'reset';
+  m.outcome = { level: 'pending', text: 'Resetting…' };
+  renderMrChecks();
+  let done = false;
+  try {
+    await post(`api/jobs/${jobPath(key)}/mr-reset`, {});
+    done = true;
+    m.outcome = null;
+    m.showChanges = false;
+  } catch (error) {
+    m.outcome = { level: 'error', text: error instanceof ActionError ? `Not reset: ${error.code}: ${error.message}` : `The reset failed (${error.message}); it may have been done. The MR text is read again.` };
+  }
+  m.busy = null;
+  if (done && key === ui.job) {
+    toast({ level: 'ok', text: "Back to the factory's text" });
+  }
+  await loadMr(key, done ? 'text' : null);
+  renderMrChecks();
+}
+
+// Push branch only (approve) and Push and open MR (one mr-create: the push, then the merge request;
+// the factory never opens one after a failed push). With unsaved changes the save goes first, and
+// the push only once it succeeded. A tip edited by hand (branch_changed) offers Push it as it is.
+async function mrPush(key, action, asIs = false) {
+  const m = mrState(key);
+  const job = state.detail?.job ?? null;
+  if (job === null || keyOf(job) !== key || m.view === null || m.busy !== null || mrShownProblems(job, m).length > 0) {
+    return;
+  }
+  if (m.view.editable && mrDirty(m) && !(await mrSave(key))) {
+    return;
+  }
+  if (availability(action, state.detail?.job ?? job) !== '') {
+    return;
+  }
+  m.offerAsIs = false;
+  m.outcome = { level: 'pending', text: PENDING_TEXT[action] };
+  renderMrChecks();
+  await run(action, key, asIs ? { as_is: true } : {});
+  const outcome = state.outcomes.get(key) ?? null;
+  m.outcome = outcome === null ? null : { level: outcome.level, text: typeof outcome.link === 'string' ? `${outcome.text} ${outcome.link}` : outcome.text };
+  m.offerAsIs = !asIs && outcome?.level === 'error' && outcome.text.startsWith('branch_changed:');
+  renderMrChecks();
+}
+
+// A button of the bar (and Ctrl+S): save, reset, push, push-as-is or push-mr.
+function mrAction(a) {
+  const key = state.key;
+  if (key === null || ui.screen !== 'mr') {
+    return;
+  }
+  if (a === 'save') {
+    void mrSave(key);
+  } else if (a === 'reset') {
+    void mrReset(key);
+  } else if (a === 'push' || a === 'push-as-is') {
+    void mrPush(key, 'approve', a === 'push-as-is');
+  } else if (a === 'push-mr') {
+    void mrPush(key, 'mr-create');
+  }
+}
+
+// Leaving the page with an unsaved MR text asks first (the browser's "leave the page?").
+function onBeforeUnload(event) {
+  if ([...MR.values()].some((m) => mrDirty(m))) {
+    event.preventDefault?.();
+    event.returnValue = '';
+  }
 }
 
 // Copies text; without the clipboard it shows the text in box, selected for Ctrl+C. say tells the
@@ -1860,6 +2404,7 @@ function renderHead() {
     tab.append(el('span', 'kbd', key));
     if (screen === 'mr') {
       tab.setAttribute('aria-disabled', String(!mrOk));
+      tab.disabled = !mrOk;
       tab.setAttribute('title', mrOk ? 'The merge request text' : 'No MR text yet: written at Clean');
     }
     switcher.append(tab);
@@ -1953,7 +2498,8 @@ function actionsFor(job, detail) {
       list = [{ a: 'resume', l: 'Resume' }, RESTART, ABORT];
       break;
     case 'ready_for_human_review':
-      list = [{ a: 'approve', l: 'Approve…' }, { a: 'handover', l: ACTION_LABELS.handover }, ...(canCreateMr(job) ? [{ a: 'mr-create', l: 'Create merge request' }] : []), SEND, ABORT];
+      // SF-080: the Merge request screen first; Approve… stays.
+      list = [{ a: 'review-mr', l: ACTION_LABELS['review-mr'] }, { a: 'approve', l: 'Approve…' }, { a: 'handover', l: ACTION_LABELS.handover }, ...(canCreateMr(job) ? [{ a: 'mr-create', l: 'Create merge request' }] : []), SEND, ABORT];
       break;
     case 'handed_over':
       // SF-073: the branch waits in the user's checkout; the message is Ask for changes (the
@@ -2072,7 +2618,7 @@ function renderDetail(detail) {
       cxIndex();
     }
   } else if (ui.screen === 'mr') {
-    void showMr();
+    showMr();
   }
   renderComposer();
   refreshStop();
@@ -2092,6 +2638,10 @@ const preparationKnown = (job) => job.state === 'preparing_mr' || state.pending.
 function availability(action, job) {
   if (job === null) {
     return 'the job is loading.';
+  }
+  // Review the MR and push only opens the Merge request screen (SF-080).
+  if (action === 'review-mr') {
+    return mrAvailable() ? '' : 'no MR text yet: written at Clean.';
   }
   if (state.pending.has(pendingId(action, keyOf(job)))) {
     return PENDING_REASONS[action];
@@ -2576,6 +3126,8 @@ function act(action) {
   const key = keyOf(job);
   if (action === 'say' || action === 'goon') {
     sendSay(action === 'goon');
+  } else if (action === 'review-mr') {
+    go(key, 'mr');
   } else if (['abort', 'restart', 'approve', 'accept', 'simplify', 'mr-create', 'mr-merge'].includes(action)) {
     openConfirm(action);
   } else if (action === 'resume') {
@@ -3124,13 +3676,17 @@ function jobCard(job) {
 }
 
 // The one primary action of a Your turn card, and the job's last outcome. It opens the job's page
-// at the stop or the message box (with the Approve confirmation for a branch to push), except
-// Retry review and Resume, which go at once; a prepared branch also offers Create merge request….
+// at the stop or the message box (a handed-over branch with the Approve confirmation, a branch
+// ready for review on its Merge request screen, SF-080), except Retry review and Resume, which go
+// at once; a prepared branch also offers Create merge request….
 function yourTurn(job) {
   const key = keyOf(job);
   const act = el('div', 'act');
   let primary;
-  if (job.state === 'ready_for_human_review' || job.state === 'handed_over') {
+  if (job.state === 'ready_for_human_review') {
+    // SF-080: the job's Merge request screen, where the text is reviewed, saved and pushed.
+    primary = button('btn primary small', 'Review the MR and push', { open: key, screen: 'mr' });
+  } else if (job.state === 'handed_over') {
     primary = button('btn primary small', 'Review the MR and push', { open: key, confirm: 'approve' });
     primary.disabled = availability('approve', job) !== '';
   } else if (job.state === 'paused') {
@@ -3517,7 +4073,7 @@ function renderJobScreen() {
   if (ui.screen === 'changes') {
     renderChanges();
   } else if (ui.screen === 'mr') {
-    void showMr();
+    showMr();
   }
 }
 
@@ -3673,7 +4229,7 @@ function renderJobs() {
 // listeners).
 function onClick(event) {
   const target = typeof event.target?.closest === 'function'
-    ? event.target.closest('[data-tk],[data-tktab],[data-dep],[data-menu],[data-qact],[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-settle],[data-copy-branch],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived')
+    ? event.target.closest('[data-tk],[data-tktab],[data-dep],[data-menu],[data-qact],[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived')
     : null;
   // An open ⋯ menu closes on any click but its own toggle (its items act, then it is closed).
   if (state.openMenu !== null && (target === null || target.dataset.menu === undefined)) {
@@ -3685,6 +4241,24 @@ function onClick(event) {
   }
   if (target.dataset.tk !== undefined) {
     tkAction(target.dataset.tk);
+    return;
+  }
+  // The Merge request screen (SF-080): its bar, Edit | Preview, and the diff against the factory's text.
+  if (target.dataset.mr !== undefined) {
+    mrAction(target.dataset.mr);
+    return;
+  }
+  if (target.dataset.mrtab !== undefined || target.dataset.mrdiff !== undefined) {
+    const m = state.key === null ? undefined : MR.get(state.key);
+    if (m?.view) {
+      if (target.dataset.mrtab !== undefined) {
+        m.tab = target.dataset.mrtab === 'preview' ? 'preview' : 'edit';
+        m.showChanges = false;
+      } else {
+        m.showChanges = target.dataset.mrdiff === 'on' ? true : !m.showChanges;
+      }
+      renderMr();
+    }
     return;
   }
   if (target.dataset.tktab !== undefined) {
@@ -3788,6 +4362,14 @@ function onInput(event) {
     bar?.replaceWith(tkTabs(ui.ticket, s));
     return;
   }
+  if (['mrTitle', 'mrBranch', 'mrBase', 'mrBody'].includes(target?.id) && ui.screen === 'mr' && state.key !== null) {
+    // The Merge request screen (SF-080): the draft, and the checks, the side panel and the bar after it.
+    const m = mrState(state.key);
+    m[{ mrTitle: 'title', mrBranch: 'branch', mrBase: 'base', mrBody: 'body' }[target.id]] = target.value;
+    m.outcome = null;
+    renderMrChecks();
+    return;
+  }
   if (target?.id === 'msg') {
     if (state.key !== null) {
       state.drafts.set(state.key, target.value);
@@ -3835,6 +4417,12 @@ function onKey(event) {
   if (target?.id === 'vdiv' && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
     event.preventDefault();
     dividerKey(event);
+    return;
+  }
+  // The Merge request screen (SF-080): Ctrl+S saves, in a field or not.
+  if (ui.screen === 'mr' && (event.ctrlKey || event.metaKey) && !event.altKey && (event.key === 's' || event.key === 'S')) {
+    event.preventDefault();
+    mrAction('save');
     return;
   }
   // The planned ticket page (SF-081): Ctrl+S saves while editing.
@@ -5248,18 +5836,14 @@ function select(key) {
   state.cache = new Map();
   state.cx = cxData();
   state.taskView = null;
-  state.mrText = null;
   state.lastLine = 0;
   state.entries = [];
   state.seen = new Set();
   state.stopSig = null;
   renderStream();
   $('scrChanges').replaceChildren();
-  $('mr-panel').hidden = true;
-  $('mr-unapplied').hidden = true;
+  $('scrMr').replaceChildren();
   $('checkout-text').hidden = true;
-  $('mr-copy-text').hidden = true;
-  $('mr-copy-status').textContent = '';
   // The controls go off until this job's detail arrives; its draft and last outcome come back.
   closeConfirm();
   $('msg').value = state.drafts.get(key) ?? '';
@@ -5310,8 +5894,8 @@ function init() {
     }
   });
 
-  // The job page: the composer's confirmation (its buttons go through the delegated listener),
-  // the Merge request screen's Copy MR text and Refresh state of an unknown outcome.
+  // The job page: the composer's confirmation (its buttons go through the delegated listener) and
+  // Refresh state of an unknown outcome; the browser's "leave the page?" over an unsaved MR text.
   $('confirm-ok').addEventListener('click', submitConfirm);
   $('confirm-cancel').addEventListener('click', closeConfirm);
   $('confirm').addEventListener('keydown', (event) => {
@@ -5323,13 +5907,7 @@ function init() {
   $('discard').addEventListener('change', renderConfirmButton);
   $('as-is').addEventListener('change', renderConfirmButton);
   $('keep-files').addEventListener('change', renderConfirmButton);
-  $('mr-copy').addEventListener('click', () => {
-    if (typeof state.mrText === 'string') {
-      copyValue(mrCopyText(state.mrText), $('mr-copy-text'), (text) => {
-        $('mr-copy-status').textContent = text;
-      });
-    }
-  });
+  window.addEventListener('beforeunload', onBeforeUnload);
   $('refresh-button').addEventListener('click', () => void settleUnknown(state.key));
 
   // Setup and the ticket actions.

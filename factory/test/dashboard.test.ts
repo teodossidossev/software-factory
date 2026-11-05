@@ -10,10 +10,11 @@ import { appendFile, mkdir, readdir, readFile, readlink, stat, writeFile } from 
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { MAX_STREAMS, startDashboard, STREAM_PAGE_LINES, TOKEN_FILE } from '../src/dashboard.js';
+import { FactoryError } from '../src/errors.js';
 import { type EventRecord, type Job, JobStore } from '../src/jobs.js';
 import { buildPatch, fileChanges } from '../src/patch.js';
 import { saveRegistry } from '../src/registry.js';
-import { CSP, fakeActions, fetchRaw, openStream, type Stream } from './support/dashboard-client.js';
+import { act, CSP, fakeActions, fetchRaw, openStream, type Stream } from './support/dashboard-client.js';
 import { withDashboard } from './support/dashboard-state.js';
 import { call, git, newEnv, newRepo, putTask, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
 
@@ -529,4 +530,54 @@ test('dashboard (SF-079): the changes route lists the iterations and the files o
   } finally {
     await dashboard.close();
   }
+});
+
+test('dashboard (SF-080): mr-view reads the Execution\'s view (an empty 404 without MR text); mr-save and mr-reset take strict bodies, call it once, map its refusals and send the job\'s detail to the pages that show it', async () => {
+  const fake = fakeActions({ state: 'ready_for_human_review', branch: 'T-1-demo', base: 'main', edited: true, prepared_commit: 'b'.repeat(40) });
+  await withDashboard('dash-mr-screen', fake, async (dashboard) => {
+    const base = dashboard.url;
+    const view = await fetchRaw(new URL('api/jobs/app/T-1/mr-view', base));
+    assert.deepEqual([view.status, view.body], [404, '']);
+    assert.deepEqual(fake.calls, [['mergeRequestView', 'app', 'T-1']]);
+    fake.mrView = { title: 'feat(T-1): Demo', body: '## What\nIt.', edited: false, problems: [{ field: 'body', message: 'Missing heading: ## Why.' }] };
+    const shown = await fetchRaw(new URL('api/jobs/app/T-1/mr-view', base));
+    assert.deepEqual([shown.status, shown.headers['content-type'], JSON.parse(shown.body)], [200, 'application/json; charset=utf-8', fake.mrView]);
+    fake.calls.length = 0;
+    for (const path of ['api/jobs/app/T-9/mr-view', 'api/jobs/app/T-1/mr-view?x=1', 'api/jobs/app/T-1/mr-view/x']) {
+      assert.deepEqual([(await fetchRaw(new URL(path, base))).status], [404], path);
+    }
+    assert.deepEqual(fake.calls, []);
+
+    const stream = await openStream(new URL('api/stream?job=app/T-1', base));
+    await stream.next('job');
+    const input = { title: 'feat(T-1): Demo', body: '## What\nIt.' };
+    const saved = await act(base, 'api/jobs/app/T-1/mr-save', input);
+    assert.deepEqual([saved.status, JSON.parse(saved.body).result.edited], [200, true]);
+    assert.deepEqual(fake.calls, [['saveMr', 'app', 'T-1', input]]);
+    assert.equal((await stream.next('job')).job.ticket, 'T-1');
+    const moved = { ...input, branch: 'T-1-other', base: 'release' };
+    assert.equal((await act(base, 'api/jobs/app/T-1/mr-save', moved)).status, 200);
+    // An MR text near its 64 KiB bound passes, past the other actions' body limit once escaped.
+    const long = { title: 'feat(T-1): Demo', body: '"\n'.repeat(32 * 1024) };
+    assert.ok(Buffer.byteLength(JSON.stringify(long)) > 128 * 1024);
+    assert.equal((await act(base, 'api/jobs/app/T-1/mr-save', long)).status, 200);
+    assert.equal((await act(base, 'api/jobs/app/T-1/mr-reset', {})).status, 200);
+    assert.deepEqual(fake.calls.slice(1).map((call) => call[0] === 'saveMr' ? call[3] : call), [moved, long, ['resetMr', 'app', 'T-1']]);
+    fake.calls.length = 0;
+
+    for (const text of ['{}', '{"title":"x"}', '{"body":"x"}', '{"title":1,"body":""}', '{"title":"x","body":"y","extra":1}', '{"title":"x","body":"y","branch":null}', '{"title":"x","body":"y","base":2}', '[]', 'null']) {
+      const reply = await act(base, 'api/jobs/app/T-1/mr-save', undefined, { body: text });
+      assert.deepEqual([reply.status, JSON.parse(reply.body).error], [400, { code: 'invalid_body', message: 'mr-save expects {"title": string, "body": string, "branch"?: string, "base"?: string}; no other keys, no null.' }], text);
+    }
+    assert.equal((await act(base, 'api/jobs/app/T-1/mr-reset', undefined, { body: '{"x":1}' })).status, 400);
+    assert.deepEqual(fake.calls, []);
+
+    for (const [code, status] of [['mr_text_invalid', 400], ['branch_locked', 409], ['base_unrelated', 409], ['branch_changed', 409], ['invalid_state', 409], ['runner_active', 409]] as const) {
+      fake.answer = new FactoryError(code, `refused: ${code}`);
+      for (const [path, body] of [['mr-save', input], ['mr-reset', {}]] as const) {
+        const reply = await act(base, `api/jobs/app/T-1/${path}`, body);
+        assert.deepEqual([reply.status, JSON.parse(reply.body).error], [status, { code, message: `refused: ${code}` }], `${path} ${code}`);
+      }
+    }
+  });
 });

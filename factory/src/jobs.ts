@@ -2,7 +2,7 @@
 // iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-override.json,simplify.json} (plus the
 // gate's schema and output files, and tree, SF-079), ledger.json (the findings ledger, SF-052) from
 // the first Fix section on, task.md (the Task file as the Implementer was last given it, SF-067),
-// from MR preparation on mr.md, and objects/ (SF-079). Strictly parsed; every file but the event
+// from MR preparation on mr.md (and mr-factory.md once the user edited it, SF-080), and objects/ (SF-079). Strictly parsed; every file but the event
 // log is replaced atomically. Knows nothing about the Implementer session, nor about Git: tree and
 // objects/ are only named here, src/changes.ts writes them.
 import { appendFile, type FileHandle, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
@@ -294,6 +294,10 @@ export type EventRecord = { ts: string; iteration: number } & (
   // The factory removed the config lock Claude Code's sandbox left in the workspace checkout's Git
   // directory (SF-085, src/sandbox-lock.ts): its path.
   | { type: 'sandbox_lock_removed'; path: string }
+  // The MR text (SF-080): the user saved their own or reset it to the factory's (with the branch
+  // and base the save set, when it changed them), or a new Clean wrote a new factory text and kept
+  // the user's.
+  | { type: 'mr_edited'; action: 'saved' | 'reset' | 'factory_new'; branch?: string; base?: string }
 );
 
 // The bound of one reviewer event or message in events.jsonl (SF-045), in bytes of its JSON.
@@ -469,6 +473,21 @@ export class JobStore {
 
   async writeMrText(workspace: string, ticket: string, text: string): Promise<void> {
     await writeFileAtomic(join(this.dir(workspace, ticket), 'mr.md'), Buffer.from(text, 'utf8'));
+  }
+
+  // The factory's MR text, kept next to mr.md once the user saved their own (SF-080); undefined
+  // while the MR text was never edited.
+  readMrFactoryText(workspace: string, ticket: string): Promise<string | undefined> {
+    return readOrMissing(join(this.dir(workspace, ticket), 'mr-factory.md'));
+  }
+
+  async writeMrFactoryText(workspace: string, ticket: string, text: string): Promise<void> {
+    await writeFileAtomic(join(this.dir(workspace, ticket), 'mr-factory.md'), Buffer.from(text, 'utf8'));
+  }
+
+  // At a Clean without an edit (SF-080): the factory's text is mr.md again.
+  async removeMrFactoryText(workspace: string, ticket: string): Promise<void> {
+    await rm(join(this.dir(workspace, ticket), 'mr-factory.md'), { force: true });
   }
 
   async appendEvent(workspace: string, ticket: string, record: EventRecord): Promise<void> {

@@ -20,7 +20,9 @@
 // retry of a review, the override of the gate, the Resume of a paused job) and waits for the
 // runner's reply; abort, pause, restart and reset stop the runner first. approve and the merge request stay in sf serve.
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { chmod, copyFile, type FileHandle, lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { chmod, copyFile, type FileHandle, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, symlink } from 'node:fs/promises';
+import { createInterface } from 'node:readline';
 import { dirname, join, resolve as resolvePath, sep } from 'node:path';
 import { type Config, handoffOffNotice } from './config.js';
 import { FactoryError } from './errors.js';
@@ -30,13 +32,17 @@ import { GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from '
 import { askForChanges, attachWorktree, checkBranchFree, commitMessagePath, finishAsk, handOver, isAncestor, remoteBranch, type RemoteBranch, restoreConfig, savedRef, settleAfterPush, subjectOf, takeBack, undoHandover } from './handoff.js';
 import { cutEvent, type FileChange, type GateOverride, type GateRecord, type Handover, isActive, type Job, type JobMr, type JobState, JobStore, now, PAUSABLE_STATES, type PauseStep, RESTARTABLE_STATES, type ReviewRecord, type SimplifyRecord, TERMINAL_STATES } from './jobs.js';
 import { answerFix, applyVerdict, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, escalationMessage, headings, LEDGER_ID, type LedgerEntry, FACTORY_PROBLEMS, SCOPE_PROBLEM, SENSITIVE_PROBLEM, settle, SETTLE_CODES, unappliedEntries, unsettled, userFixItems } from './ledger.js';
-import { abortRebase, commitAndRebase, continueRebase, gitBusy, mergeRequestLink, mrMessage, originUrl, pushBranch, readMrText, rebaseInProgress, resolveTarget, unmergedPaths, withFindings, withNits, withSimplifications } from './mr.js';
+import {
+  abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitBusy, gitFailure, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl,
+  parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, validBranchName, withFindings, withNits,
+  withSimplifications, worktreesOn,
+} from './mr.js';
 import { buildPatch, changedFilesSection, changedPaths, fileChanges, notificationLine, type Patch } from './patch.js';
 import { removeSandboxPlaceholders } from './placeholders.js';
 import { Redactor } from './redact.js';
 import { checkoutGitDir, removeStaleSandboxLock, staleSandboxLock } from './sandbox-lock.js';
 import { conflictPrompt, factoryPrompt, iterationCost, mrPrompt } from './prompts.js';
-import { DENIED_TOOLS, type Marks, marksOf } from './rules.js';
+import { COMMIT_TYPES, DENIED_TOOLS, MANUAL_CLAIM, type Marks, marksOf, MAX_HEADER_CHARS, MR_REQUIRED_HEADINGS } from './rules.js';
 import type { Workspace } from './registry.js';
 import { DEFAULT_PAGE_BYTES, MAX_PAGE_BYTES, MIN_PAGE_BYTES, type Page, pageBuffer } from './repo-files.js';
 import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, type StructuredOutcome, unacceptedItems, uniqueNits } from './review.js';
@@ -120,6 +126,83 @@ export interface MrOutcome {
 interface MrContent {
   title: string;
   body: string;
+}
+
+// The Merge request screen (SF-080): the needs_human codes of a push that failed or was refused,
+// in which the MR text stays editable (the prepared commit and its worktree are kept until the push).
+const MR_PUSH_CODES: readonly string[] = ['mr_push_failed', 'mr_push_protected'];
+const MR_READONLY = {
+  pushed: 'The MR text is read-only now.',
+  handed_over: 'The branch is in your checkout. Take it back to edit the MR text.',
+  other: 'The MR text can be edited when the job waits for your review.',
+} as const;
+// Why the branch and the base are fixed: from the job only (pushed, handed over, a merge request).
+const FIELD_FIXED = {
+  pushed: 'Fixed after the first push.',
+  handed_over: 'The branch is in your checkout.',
+} as const;
+
+// A Save of the Merge request screen (SF-080): the title, the body and, when they change, the
+// branch and the base.
+export interface MrInput {
+  title: string;
+  body: string;
+  branch?: string;
+  base?: string;
+}
+
+// The Merge request screen's view of a job's MR text (SF-080, GET mr-view).
+export interface MrView {
+  title: string;
+  body: string;
+  factory: { title: string; body: string };
+  edited: boolean;
+  edited_at: string | null;
+  factory_new_at: string | null;
+  branch: string;
+  base: string;
+  branch_editable: boolean;
+  branch_reason: string | null;
+  base_editable: boolean;
+  base_reason: string | null;
+  problems: Array<{ field: 'title' | 'body' | 'branch' | 'base'; message: string }>;
+  pushed: boolean;
+  pushed_at: string | null;
+  editable: boolean;
+  readonly_reason: string | null;
+  target: { host: string | null; repository: string | null };
+  rules: { commit_types: string[]; max_header_chars: number; required_headings: string[]; manual_claim: { source: string; flags: string } };
+  commit: { title: string; body: string } | null;
+  commit_differs: boolean;
+}
+
+// What a Save or Reset of the MR text left (SF-080).
+export interface MrSaved {
+  state: JobState;
+  branch: string;
+  base: string;
+  edited: boolean;
+  prepared_commit: string | null;
+}
+
+// Whether the MR text is the user's (SF-080): mr-factory.md exists and its message is not mr.md's.
+function editedText(factory: string | undefined, text: string | undefined): boolean {
+  return factory !== undefined && text !== undefined && !sameMessage(mrMessage(factory), mrMessage(text));
+}
+
+// "10:05" of a timestamp, in the local time of sf serve.
+function hhmm(ts: string): string {
+  const date = new Date(ts);
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+// Whether two paths name the same directory (a worktree Git lists, the job's), symlinks resolved.
+async function samePath(a: string, b: string | null): Promise<boolean> {
+  if (b === null) {
+    return false;
+  }
+  const real = (path: string): Promise<string> => realpath(path).catch(() => resolvePath(path));
+  return (await real(a)) === (await real(b));
 }
 
 // An error as an outcome's {code, message}; anything but a FactoryError is logged and kept generic.
@@ -1099,14 +1182,25 @@ export class Execution implements RunnerWork {
       // And the suggestions of the simplification pass the user skipped (SF-055).
       const skipped = await this.#skippedSimplifications(job);
       const withSkipped = skipped === undefined ? withNitsText : withSimplifications(withNitsText, skipped.suggestions, skipped.iteration);
-      const mrText = { text: withFindings(withSkipped, await this.jobs.readLedger(job.workspace, job.ticket)) };
+      const factoryText = withFindings(withSkipped, await this.jobs.readLedger(job.workspace, job.ticket));
+      // The user's own MR text, saved on the Merge request screen (SF-080), stays the MR text: the
+      // commit is made with it, unless it fails the rules; then with the factory's new text, and the
+      // screen shows the problem (approve refuses until it is saved valid or reset).
+      const userText = await this.#userMrText(job);
+      const mrText = { text: userText !== undefined && mrTextProblem(job.ticket, userText) === undefined ? userText : factoryText };
       const targetCommit = job.target_commit!;
       const prepared = await this.#gitLocked(job.workspace, () => commitAndRebase(cwd, { baseCommit: job.base_commit!, targetCommit, mrText: mrText.text }));
       if (prepared.kind === 'failed') {
         await needsHuman(prepared.failure.code, prepared.failure.message);
         return;
       }
-      await this.jobs.writeMrText(job.workspace, job.ticket, mrText.text);
+      if (userText !== undefined) {
+        await this.jobs.writeMrFactoryText(job.workspace, job.ticket, factoryText);
+        await this.jobs.appendEvent(job.workspace, job.ticket, { ts: now(), iteration: job.iteration, type: 'mr_edited', action: 'factory_new' });
+      } else {
+        await this.jobs.writeMrText(job.workspace, job.ticket, factoryText);
+        await this.jobs.removeMrFactoryText(job.workspace, job.ticket);
+      }
       if (prepared.kind === 'conflict') {
         // The job stays preparing_mr while the Implementer resolves the conflicts.
         const targetRef = live.mr?.targetRef ?? job.base;
@@ -1119,6 +1213,14 @@ export class Execution implements RunnerWork {
       console.error(error);
       await needsHuman('mr_failed', `MR preparation failed inside the factory: ${(error as Error).message}`.slice(0, 1000));
     }
+  }
+
+  // The MR text the user saved (SF-080): mr.md when mr-factory.md exists and differs from it;
+  // undefined when the text was never edited or is the factory's again.
+  async #userMrText(job: Job): Promise<string | undefined> {
+    const factory = await this.jobs.readMrFactoryText(job.workspace, job.ticket);
+    const text = await this.jobs.readMrText(job.workspace, job.ticket);
+    return editedText(factory, text) ? text : undefined;
   }
 
   // The nits of the job's last iteration (SF-051): those of its Claude review and of its gate,
@@ -2371,6 +2473,11 @@ export class Execution implements RunnerWork {
     if (job.state !== 'handed_over' && tip !== job.prepared_commit && !asIs) {
       throw new FactoryError('branch_changed', `The tip of ${job.branch} is ${tip.slice(0, 12)}, not the prepared ${(job.prepared_commit ?? '').slice(0, 12)}: it was edited by hand. Approve with --as-is to push it as it is.`);
     }
+    // The MR text the push and the merge request carry (SF-080); a handed-over branch the user
+    // pushes with their own commits carries theirs.
+    if (!(job.state === 'handed_over' && plan.source === undefined)) {
+      await this.#checkMrText(job, checkout, job.state === 'handed_over' ? job.handover!.saved : job.prepared_commit);
+    }
     const pushFailure = await this.#gitLocked(workspaceName, () => pushBranch(checkout, job.branch, job.base, plan.source));
     if (pushFailure !== undefined) {
       if (job.state === 'handed_over') {
@@ -2519,6 +2626,318 @@ export class Execution implements RunnerWork {
       this.#announce(next, [content.title, `Merge request #${opened.number}: ${opened.url}`]);
       return { state: next.state, branch: next.branch, title: content.title, mr: opened };
     });
+  }
+
+  // The Merge request screen (SF-080): the job's MR text as mrMessage reads mr.md, the factory's
+  // (mr-factory.md, or the same without one), whether and when the user edited it, the branch and
+  // the base and whether each can change, every problem of the saved text, the state of the screen
+  // (editable, or why not), the target (the workspace's Git host and the repository of its origin),
+  // the rules the page checks with, and the message of the commit the push would carry. Undefined
+  // without mr.md. No network call: the origin is checked only at Save.
+  async mergeRequestView(workspaceName: string, ticket: string): Promise<MrView | undefined> {
+    const job = await this.#job(workspaceName, ticket);
+    const text = await this.jobs.readMrText(workspaceName, ticket);
+    if (text === undefined) {
+      return undefined;
+    }
+    const factoryText = await this.jobs.readMrFactoryText(workspaceName, ticket);
+    const message = mrMessage(text);
+    const factory = factoryText === undefined ? message : mrMessage(factoryText);
+    const edited = editedText(factoryText, text);
+    const events = await this.#mrEvents(job);
+    const editable = this.#mrEditable(job);
+    const pushed = job.state === 'pushed';
+    // From the job only (not pushed, not handed over, no merge request); the screen's own state
+    // (editable) is separate, and the page disables the fields while it is read-only.
+    const fixed = pushed || job.mr !== null ? 'pushed' : job.state === 'handed_over' ? 'handed_over' : undefined;
+    let readonly: string | null = null;
+    if (pushed) {
+      readonly = `${events.pushed_at !== null ? `Pushed at ${hhmm(events.pushed_at)}. ` : ''}${MR_READONLY.pushed}`;
+    } else if (!editable) {
+      readonly = job.state === 'handed_over' ? MR_READONLY.handed_over : MR_READONLY.other;
+    }
+    let checkout: string | undefined;
+    try {
+      checkout = (await this.#resolve(workspaceName)).workCheckout;
+    } catch (error) {
+      if (!(error instanceof FactoryError)) {
+        throw error;
+      }
+    }
+    const sha = job.state === 'handed_over' ? job.handover?.saved ?? null : job.prepared_commit;
+    const commit = checkout === undefined || sha === null ? undefined : await commitMessage(checkout, sha);
+    const url = checkout === undefined ? undefined : await originUrl(checkout);
+    return {
+      title: message.title, body: message.body, factory, edited,
+      edited_at: edited ? events.saved_at : null,
+      factory_new_at: events.factory_new_at,
+      branch: job.branch, base: job.base,
+      branch_editable: fixed === undefined, branch_reason: fixed === undefined ? null : FIELD_FIXED[fixed],
+      base_editable: fixed === undefined, base_reason: fixed === undefined ? null : FIELD_FIXED[fixed],
+      problems: mrProblems(ticket, message, job.branch, job.base),
+      pushed, pushed_at: events.pushed_at, editable, readonly_reason: readonly,
+      target: { host: (await this.mergeRequestHost(workspaceName)).host, repository: (url === undefined ? undefined : parseOrigin(url)?.path) ?? null },
+      rules: {
+        commit_types: [...COMMIT_TYPES], max_header_chars: MAX_HEADER_CHARS, required_headings: [...MR_REQUIRED_HEADINGS],
+        manual_claim: { source: MANUAL_CLAIM.source, flags: MANUAL_CLAIM.flags },
+      },
+      commit: commit ?? null,
+      commit_differs: commit !== undefined && !sameMessage(commit, message),
+    };
+  }
+
+  // From the job's events (SF-080): the last save that is not undone by a reset after it, the
+  // last factory_new after the last save or reset, and the last change to pushed.
+  async #mrEvents(job: Job): Promise<{ saved_at: string | null; factory_new_at: string | null; pushed_at: string | null }> {
+    const found = { saved_at: null as string | null, factory_new_at: null as string | null, pushed_at: null as string | null };
+    let stream;
+    try {
+      stream = createReadStream(this.jobs.eventsPath(job.workspace, job.ticket), { encoding: 'utf8' });
+      for await (const line of createInterface({ input: stream, crlfDelay: Infinity })) {
+        if (!line.includes('"mr_edited"') && !line.includes('"pushed"')) {
+          continue;
+        }
+        let record: Record<string, unknown>;
+        try {
+          record = JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        const ts = typeof record.ts === 'string' ? record.ts : null;
+        if (record.type === 'mr_edited') {
+          if (record.action === 'factory_new') {
+            found.factory_new_at = ts;
+          } else {
+            found.saved_at = record.action === 'saved' ? ts : null;
+            found.factory_new_at = null;
+          }
+        } else if (typeof record.state === 'object' && record.state !== null && (record.state as { to?: unknown }).to === 'pushed') {
+          found.pushed_at = ts;
+        }
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+    } finally {
+      stream?.destroy();
+    }
+    return found;
+  }
+
+  // The MR text can be edited (SF-080): ready_for_human_review, or needs_human after a push that
+  // failed or was refused (the prepared commit and its worktree are kept until the push).
+  #mrEditable(job: Job): boolean {
+    return job.state === 'ready_for_human_review' || (job.state === 'needs_human' && job.prepared_commit !== null && MR_PUSH_CODES.includes(job.error?.code ?? ''));
+  }
+
+  // Refuses (invalid_state) a Save or Reset in a state that does not take it, or while a step of the
+  // hand-over is cut off.
+  #checkMrEditable(job: Job, command: string): void {
+    if (job.handover !== undefined && job.handover.step !== null) {
+      throw cutOffError(job, job.handover.step);
+    }
+    if (!this.#mrEditable(job)) {
+      throw new FactoryError('invalid_state', `${command} needs ready_for_human_review, or needs_human after a failed push; the job is ${job.state}.`);
+    }
+  }
+
+  // Save of the Merge request screen (SF-080), as approve runs: refused at once in a state it
+  // does not take, then once the runner has ended (runner_active while a request runs), checked
+  // again. The text is composed as mr.md is written (messageText of mrMessage) and must pass
+  // mrTextProblem as the factory's does; the branch and the base, when they change, are checked
+  // (#checkRename, #checkBase); the prepared commit's message is rewritten when it differs. Every
+  // check comes first: a refusal changes nothing. The first save keeps the factory's text as
+  // mr-factory.md.
+  saveMr(workspaceName: string, ticket: string, input: MrInput): Promise<MrSaved> {
+    return this.#locked(async () => {
+      this.#checkMrEditable(await this.#job(workspaceName, ticket), 'Save');
+      await this.#settled(workspaceName, ticket);
+      const job = await this.#job(workspaceName, ticket);
+      this.#checkMrEditable(job, 'Save');
+      const current = await this.jobs.readMrText(workspaceName, ticket);
+      if (current === undefined) {
+        throw new FactoryError('mr_text_missing', `The job ${workspaceName}/${ticket} has no MR text yet.`);
+      }
+      if (/[\r\n]/.test(input.title)) {
+        throw new FactoryError('mr_text_invalid', 'The MR title must be one line.');
+      }
+      const message = mrMessage(messageText({ title: input.title, body: input.body }));
+      const text = messageText(message);
+      const problem = mrTextProblem(ticket, text);
+      if (problem !== undefined) {
+        throw new FactoryError('mr_text_invalid', `The MR text is invalid: ${problem}.`);
+      }
+      const saved = await this.#applyMr(job, message, input.branch ?? job.branch, input.base ?? job.base);
+      if ((await this.jobs.readMrFactoryText(workspaceName, ticket)) === undefined) {
+        await this.jobs.writeMrFactoryText(workspaceName, ticket, current);
+      }
+      await this.jobs.writeMrText(workspaceName, ticket, text);
+      return this.#mrApplied(saved, 'saved', job);
+    });
+  }
+
+  // Reset to factory text (SF-080): mr-factory.md back as mr.md (it stays), and the commit message
+  // rewritten as a save does; branch and base stay. Refused when the text already is the factory's.
+  resetMr(workspaceName: string, ticket: string): Promise<MrSaved> {
+    return this.#locked(async () => {
+      this.#checkMrEditable(await this.#job(workspaceName, ticket), 'Reset');
+      await this.#settled(workspaceName, ticket);
+      const job = await this.#job(workspaceName, ticket);
+      this.#checkMrEditable(job, 'Reset');
+      const factory = await this.jobs.readMrFactoryText(workspaceName, ticket);
+      const current = await this.jobs.readMrText(workspaceName, ticket);
+      if (factory === undefined || !editedText(factory, current)) {
+        throw new FactoryError('invalid_state', "The MR text is already the factory's.");
+      }
+      const saved = await this.#applyMr(job, mrMessage(factory), job.branch, job.base);
+      await this.jobs.writeMrText(workspaceName, ticket, factory);
+      return this.#mrApplied(saved, 'reset', job);
+    });
+  }
+
+  // The job record and the mr_edited event after a save or a reset.
+  async #mrApplied(job: Job, action: 'saved' | 'reset', before: Job): Promise<MrSaved> {
+    await this.jobs.write(job);
+    await this.jobs.appendEvent(job.workspace, job.ticket, {
+      ts: now(), iteration: job.iteration, type: 'mr_edited', action,
+      ...(job.branch !== before.branch ? { branch: job.branch } : {}), ...(job.base !== before.base ? { base: job.base } : {}),
+    });
+    const edited = editedText(await this.jobs.readMrFactoryText(job.workspace, job.ticket), await this.jobs.readMrText(job.workspace, job.ticket));
+    return { state: job.state, branch: job.branch, base: job.base, edited, prepared_commit: job.prepared_commit };
+  }
+
+  // Under the workspace's Git lock: the rename and the base change checked, the prepared commit
+  // checked when its message must change (the worktree there, the branch's tip and the worktree's
+  // HEAD the prepared commit); then the message rewritten and the branch renamed. A rename that
+  // fails puts the prepared commit back (branch_locked): a refusal changes nothing. Returns the job
+  // as it is to be written (not written here).
+  async #applyMr(job: Job, message: MrContent, branch: string, base: string): Promise<Job> {
+    const checkout = (await this.#resolve(job.workspace)).workCheckout;
+    return this.#gitLocked(job.workspace, async () => {
+      const renaming = branch !== job.branch;
+      if (renaming) {
+        await this.#checkRename(job, checkout, branch, base);
+      }
+      if (base !== job.base) {
+        await this.#checkBase(job, checkout, branch, base);
+      }
+      const prepared = job.prepared_commit;
+      const commit = prepared === null ? undefined : await commitMessage(checkout, prepared);
+      const rewrite = prepared !== null && (commit === undefined || !sameMessage(commit, message));
+      const worktree = job.worktree;
+      if (rewrite) {
+        if (worktree === null || !(await exists(worktree))) {
+          throw new FactoryError('invalid_state', "The job's worktree is gone; the commit message cannot be changed.");
+        }
+        const tip = (await runGit(checkout, ['rev-parse', '--verify', '--quiet', `refs/heads/${job.branch}`])).stdout.toString('utf8').trim();
+        const head = (await runGit(worktree, ['symbolic-ref', '-q', 'HEAD'])).stdout.toString('utf8').trim();
+        if (tip !== prepared || head !== `refs/heads/${job.branch}`) {
+          throw new FactoryError('branch_changed', `The tip of ${job.branch} is ${tip === '' ? 'missing' : tip.slice(0, 12)}, not the prepared ${prepared.slice(0, 12)}${head !== `refs/heads/${job.branch}` ? ", or the job's worktree is not on it" : ''}: it was edited by hand. The commit message cannot be changed; push it as it is or restart the job.`);
+        }
+      }
+      // Applied: the message, then the rename.
+      const next: Job = { ...job, prepared_commit: rewrite ? await rewriteMessage(worktree!, message) : prepared, base };
+      if (!renaming) {
+        return next;
+      }
+      const args = ['branch', '-m', job.branch, branch];
+      const renamed = await runGit(checkout, args);
+      if (renamed.code !== 0) {
+        if (rewrite) {
+          // The branch is still the worktree's HEAD: --soft moves it back, the index and files stay.
+          await runGit(worktree!, ['reset', '-q', '--soft', prepared]);
+        }
+        throw new FactoryError('branch_locked', `The branch cannot be renamed to ${branch}: ${gitFailure(args, renamed)}.`);
+      }
+      return { ...next, branch };
+    });
+  }
+
+  // A rename before the first push (SF-080): the job not pushed, handed over or with a merge
+  // request; a valid name that is neither protected nor the base, that exists neither in the
+  // checkout nor on origin; the branch never pushed (not on origin) and checked out in no worktree
+  // but the job's own, the user's checkout included. Otherwise branch_locked with the reason.
+  async #checkRename(job: Job, checkout: string, branch: string, base: string): Promise<void> {
+    const refuse = (why: string): FactoryError => new FactoryError('branch_locked', `The branch cannot be renamed to ${branch}: ${why}.`);
+    if (job.state === 'pushed' || job.state === 'handed_over' || job.mr !== null) {
+      throw refuse(`${job.branch} is fixed after the first push`);
+    }
+    if (!(await validBranchName(checkout, branch))) {
+      throw refuse('it is not a valid branch name');
+    }
+    if (PROTECTED_BRANCHES.includes(branch) || branch === base) {
+      throw refuse(`nothing is pushed to main, master or the base branch (${base}) directly`);
+    }
+    if ((await runGit(checkout, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])).code === 0) {
+      throw refuse('a branch of that name exists in the checkout');
+    }
+    const others: string[] = [];
+    for (const path of await worktreesOn(checkout, job.branch)) {
+      if (!(await samePath(path, job.worktree))) {
+        others.push(path);
+      }
+    }
+    if (others.length > 0) {
+      throw refuse(`${job.branch} is checked out in ${others.join(', ')}`);
+    }
+    const onOrigin = await branchesOnOrigin(checkout, [job.branch, branch]);
+    if (onOrigin.has(job.branch)) {
+      throw refuse(`${job.branch} is already on origin; it is fixed after the first push`);
+    }
+    if (onOrigin.has(branch)) {
+      throw refuse('a branch of that name exists on origin');
+    }
+  }
+
+  // A base change before the push (SF-080): the job's branch has never reached origin (a failed
+  // push may have; git ls-remote), and the new base exists on origin and contains the commit the
+  // change was rebased onto at Clean, so the merge request carries only the job's commit;
+  // otherwise base_unrelated. The commit is not rebased.
+  async #checkBase(job: Job, checkout: string, branch: string, base: string): Promise<void> {
+    const unrelated = new FactoryError('base_unrelated', `The change was prepared on ${job.base}; restart the job with base ${base} instead.`);
+    if (job.state === 'pushed' || job.state === 'handed_over' || job.mr !== null) {
+      throw new FactoryError('base_unrelated', `The base is fixed after the push; ${job.branch} was pushed for ${job.base}.`);
+    }
+    if (base === branch || !(await validBranchName(checkout, base))) {
+      throw new FactoryError('base_unrelated', `"${base}" cannot be the base of ${branch}.`);
+    }
+    if (job.target_commit === null) {
+      throw unrelated;
+    }
+    // A push that failed may still have reached origin (the connection dropped after the remote took
+    // the branch): the branch on origin means pushed, whatever the job's state says. An origin that
+    // cannot be asked refuses too (branch_locked, "Could not check origin for <branch>: …").
+    if ((await branchesOnOrigin(checkout, [job.branch])).has(job.branch)) {
+      throw new FactoryError('base_unrelated', `The base is fixed after the push; ${job.branch} is already on origin for ${job.base}.`);
+    }
+    const args = ['fetch', '--no-recurse-submodules', 'origin', `refs/heads/${base}`];
+    const fetched = await runGit(checkout, args, 1024 * 1024, 60_000);
+    if (fetched.code !== 0) {
+      throw new FactoryError('base_unrelated', /couldn't find remote ref/i.test(fetched.stderr) ? `The base ${base} does not exist on origin.` : `${gitFailure(args, fetched)}.`);
+    }
+    if ((await runGit(checkout, ['merge-base', '--is-ancestor', job.target_commit, 'FETCH_HEAD'])).code !== 0) {
+      throw unrelated;
+    }
+  }
+
+  // Before a push (SF-080): the MR text is valid and is the message of the commit the push would
+  // carry (the prepared commit; in handed_over, the saved one), else mr_text_invalid naming the
+  // problem. Saving a valid text or Reset clears it. Not for a handed-over branch the user pushes
+  // with their own commits.
+  async #checkMrText(job: Job, checkout: string, commit: string | null): Promise<void> {
+    const text = await this.jobs.readMrText(job.workspace, job.ticket);
+    if (text === undefined) {
+      return;
+    }
+    const problem = mrTextProblem(job.ticket, text);
+    if (problem !== undefined) {
+      throw new FactoryError('mr_text_invalid', `The MR text is invalid: ${problem}. Save a valid text, or reset it to the factory's, on the Merge request screen.`);
+    }
+    const message = commit === null ? undefined : await commitMessage(checkout, commit);
+    if (message !== undefined && !sameMessage(message, mrMessage(text))) {
+      throw new FactoryError('mr_text_invalid', `The MR text differs from the message of the prepared commit ${commit!.slice(0, 12)}, which the push would carry: save the text or reset it on the Merge request screen.`);
+    }
   }
 
   // sf mr merge (SF-048): merges the job's open merge request through the host's API (no push, no

@@ -331,6 +331,10 @@ async function drafts(raw: string, record: Record<string, unknown>, it: number, 
   if (record.type === 'gate_event') {
     return codexEntries(asRecord(record.event)) ?? noteEntry(raw, 'codex');
   }
+  // The MR text (SF-080): the user's save or reset; a new Clean that kept the user's text.
+  if (record.type === 'mr_edited') {
+    return noteEntry(raw, record.action === 'factory_new' ? 'factory' : 'you');
+  }
   if (record.type === undefined && record.message !== undefined) {
     const message = asRecord(record.message);
     return message.type === 'system' ? noteEntry(raw, 'factory') : messageEntries(message, 'implementer');

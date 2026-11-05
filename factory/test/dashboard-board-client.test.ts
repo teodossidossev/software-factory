@@ -541,10 +541,11 @@ test('board client: the iteration is numbered from 1 and the same on the card an
   }
 });
 
-test('board client: the ready card offers Review the MR and push (Approve confirmation on the job page) and Create merge request…; the paused card Resume; Retry review posts once', async () => {
+test('board client: the ready card offers Review the MR and push (the job\'s Merge request screen, no confirmation; SF-080) and Create merge request…; a handed-over card the Approve confirmation; the paused card Resume; Retry review posts once', async () => {
   const failed = job('T-3', 'needs_human', { error: { code: 'review_failed', message: 'overloaded' } });
   const paused = job('T-4', 'paused', { paused: { from: 'working', step: 'turn', at: minutesAgo(1) }, task_changed: true });
-  const page = await openBoard([job('T-1', 'ready_for_human_review'), failed, paused], []);
+  const handed = job('T-5', 'handed_over', { prepared_commit: 'a'.repeat(40) });
+  const page = await openBoard([job('T-1', 'ready_for_human_review'), failed, paused, handed], []);
   const ready = card(page, 'app/T-1');
   assert.deepEqual([part(ready, 'reason')!.className, part(ready, 'reason')!.textContent], ['reason ready', 'Ready to push: reviews clean, MR text written']);
   assert.deepEqual(buttons(ready).map((element) => [element.textContent, element.className]), [['Review the MR and push', 'btn primary small'], ['Create merge request…', 'btn small']]);
@@ -552,17 +553,28 @@ test('board client: the ready card offers Review the MR and push (Approve confir
   assert.match(card(page, 'app/T-4').textContent, /Task file changed since the job started/);
   assert.deepEqual(labels(card(page, 'app/T-4')), ['Resume']);
 
+  assert.deepEqual([button(ready, 'Review the MR and push')!.dataset.screen, button(ready, 'Review the MR and push')!.dataset.confirm], ['mr', undefined]);
   button(ready, 'Review the MR and push')!.click();
   await page.flush();
-  assert.ok(onJobPage(page));
-  // The detail arrives (the GET of the stream's first job event): the confirmation opens on it.
-  page.streams.at(-1)!.emit('job', detail(job('T-1', 'ready_for_human_review')));
-  assert.equal(page.$('confirm').hidden, false);
-  assert.equal(page.$('confirm-title').textContent, 'Approve app/T-1?');
+  assert.deepEqual([onJobPage(page), page.location.hash, page.$('scrMr').hidden], [true, '#app/T-1/mr', false]);
+  // The detail arrives: no confirmation opens; nothing is posted.
+  page.streams.at(-1)!.emit('job', { ...detail(job('T-1', 'ready_for_human_review')), mr: true });
+  await page.flush();
+  assert.equal(page.$('confirm').hidden, true);
   assert.equal(posts(page).length, 0);
-  page.$('confirm-cancel').click();
   (page.$('jhead').children[0] as FakeElement).click();
   assert.equal(onJobPage(page), false);
+
+  // In handed_over the card stays as it was: the job's page with the Approve confirmation.
+  const handedButton = button(card(page, 'app/T-5'), 'Review the MR and push')!;
+  assert.deepEqual([handedButton.dataset.screen, handedButton.dataset.confirm], [undefined, 'approve']);
+  handedButton.click();
+  await page.flush();
+  page.streams.at(-1)!.emit('job', detail(handed));
+  assert.deepEqual([page.location.hash, page.$('confirm').hidden, page.$('confirm-title').textContent], ['#app/T-5', false, 'Approve app/T-5?']);
+  page.$('confirm-cancel').click();
+  (page.$('jhead').children[0] as FakeElement).click();
+  assert.equal(posts(page).length, 0);
 
   button(card(page, 'app/T-3'), 'Retry review')!.click();
   await page.flush();

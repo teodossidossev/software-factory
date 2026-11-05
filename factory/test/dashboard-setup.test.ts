@@ -3,11 +3,14 @@
 // Task route is in dashboard-board.test.ts), with the action checks of SF-018, against fake setup
 // and actions in process; the stream's workspaces and tickets events; then end to end through
 // `sf serve`: a workspace added from the page, a ticket draft, the Task file written by the
-// planner over MCP, and the User's start from the page.
+// planner over MCP, and the User's start from the page. A ticket's images (SF-064): the upload, the
+// type by the magic bytes, the limits, the names and the removal through the real Setup, the image
+// served with its type, the guard, the payload's attachments and the first message that names them.
 import assert from 'node:assert/strict';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { MAX_ATTACHMENT_BYTES } from '../src/attachments.js';
 import { MAX_ACTION_BODY_BYTES, MAX_TASK_BODY_BYTES, startDashboard } from '../src/dashboard.js';
 import { FactoryError } from '../src/errors.js';
 import { CHATGPT_PREFILL_URL, conversationUrl, ticketConversation } from '../src/conversation.js';
@@ -44,7 +47,7 @@ test('dashboard setup: the reads, the method rules per path and the token; nothi
     const tickets = await fetchRaw(new URL('api/tickets', base));
     assert.equal(tickets.status, 200);
     const rows = JSON.parse(tickets.body).tickets;
-    assert.deepEqual(Object.keys(rows[0]).sort(), ['base', 'conversation', 'draft', 'job', 'lands_after', 'queue_error', 'queue_position', 'request', 'ticket', 'title', 'workspace']);
+    assert.deepEqual(Object.keys(rows[0]).sort(), ['attachments', 'base', 'conversation', 'draft', 'job', 'lands_after', 'queue_error', 'queue_position', 'request', 'ticket', 'title', 'workspace']);
     // SF-071: without a run queue, no ticket is queued and the payload's queue is null.
     assert.deepEqual([rows[0].queue_position, rows[0].queue_error, JSON.parse(tickets.body).queue], [null, null, null]);
     assert.deepEqual([rows[1].draft, rows[1].job], [false, 'pushed']);
@@ -358,6 +361,128 @@ test('dashboard ticket page (SF-081) through the real Setup: the history and the
   } finally {
     await dashboard.close();
   }
+});
+
+test('dashboard images (SF-064) through the real Setup: upload by bytes, the type, size, count and name rules, the image served, removal, the guard, the payload and the first message', async () => {
+  const env = await newEnv('dash-images');
+  const repo = await newRepo(env, 'dash-images-repo', true);
+  await mkdir(env.state, { recursive: true });
+  const jobs = new JobStore(env.state);
+  let lock: Promise<unknown> = Promise.resolve();
+  const setup = new Setup({
+    configDir: env.config, jobs,
+    exclusive: (work) => {
+      const next = lock.catch(() => undefined).then(() => work({ retireFinished: async () => assert.fail('nothing is retired here') }));
+      lock = next;
+      return next;
+    },
+  });
+  const dashboard = await startDashboard(0, env.state, jobs, fakeActions(), setup);
+  const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('png')]);
+  const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
+  try {
+    const base = dashboard.url;
+    const origin = `http://127.0.0.1:${base.port}`;
+    const upload = (path: string, body: Buffer, headers: Record<string, string> = {}): Promise<Reply> =>
+      fetchRaw(new URL(path, base), { method: 'POST', headers: { origin, 'content-type': 'application/octet-stream', ...headers }, body });
+    const dir = join(repo, '.software-factory', 'T-1');
+    // No Task file: task_not_found (404).
+    assert.deepEqual(error(await upload('api/tickets/app/T-1/attachments', PNG)), { status: 404, code: 'task_not_found' });
+    await setup.createTicket({ workspace: 'app', ticket: 'T-1', title: 'One', request: 'See the screenshot.' });
+
+    // Uploads: without a name the next number, with one as given; the answer {name, bytes, type}.
+    assert.deepEqual(result(await upload('api/tickets/app/T-1/attachments', PNG)), { name: '1.png', bytes: PNG.length, type: 'image/png' });
+    assert.deepEqual(result(await upload('api/tickets/app/T-1/attachments?name=2.jpg', JPEG)), { name: '2.jpg', bytes: JPEG.length, type: 'image/jpeg' });
+    assert.deepEqual(await readFile(join(dir, '1.png')), PNG);
+    // A non-image renamed .png, a name with another extension, names that leave the folder.
+    assert.deepEqual(error(await upload('api/tickets/app/T-1/attachments?name=fake.png', Buffer.from('not an image'))), { status: 400, code: 'attachment_type' });
+    assert.deepEqual(error(await upload('api/tickets/app/T-1/attachments?name=x.jpg', PNG)), { status: 400, code: 'invalid_name' });
+    for (const name of ['../T-1.md', '..%2FT-1.png', 'a/b.png', '%2Fetc%2Fx.png', '.x.png']) {
+      assert.deepEqual(error(await upload(`api/tickets/app/T-1/attachments?name=${name}`, PNG)), { status: 400, code: 'invalid_name' }, name);
+    }
+    // At most 5 MB: the body's bound answers attachment_too_large (413), declared or streamed.
+    const big = Buffer.concat([PNG, Buffer.alloc(MAX_ATTACHMENT_BYTES)]);
+    assert.deepEqual(error(await upload('api/tickets/app/T-1/attachments', big)), { status: 413, code: 'attachment_too_large' });
+    assert.deepEqual(error(await fetchRaw(new URL('api/tickets/app/T-1/attachments', base), { method: 'POST', headers: { origin, 'content-type': 'application/octet-stream' }, body: big, chunk: 1024 * 1024 })), { status: 413, code: 'attachment_too_large' });
+    // The transport checks: Origin, the content type (not JSON), the method, the query, the names in the path.
+    assert.deepEqual(error(await upload('api/tickets/app/T-1/attachments', PNG, { origin: 'http://127.0.0.1:1' })), { status: 403, code: 'invalid_origin' });
+    assert.deepEqual(error(await upload('api/tickets/app/T-1/attachments', PNG, { 'content-type': 'application/json' })), { status: 415, code: 'unsupported_media_type' });
+    assert.deepEqual(error(await upload('api/tickets/app/T-1/attachments', PNG, { 'content-type': 'image/png' })), { status: 415, code: 'unsupported_media_type' });
+    assert.equal((await fetchRaw(new URL('api/tickets/app/T-1/attachments', base))).status, 405);
+    assert.equal((await upload('api/tickets/app/T-1/attachments?name=a.png&name=b.png', PNG)).status, 404);
+    assert.equal((await upload('api/tickets/app/T-1/attachments?other=1', PNG)).status, 404);
+    assert.equal((await upload('api/tickets/App/T-1/attachments', PNG)).status, 404);
+    assert.deepEqual(error(await upload('api/tickets/app/archive/attachments', PNG)), { status: 400, code: 'invalid_ticket' });
+    assert.deepEqual((await readdir(dir)).sort(), ['1.png', '2.jpg']);
+
+    // Served with the type its bytes tell and nosniff; a missing one, a bad name.
+    const served = await fetchRaw(new URL('api/tickets/app/T-1/attachments/2.jpg', base));
+    assert.deepEqual([served.status, served.headers['content-type'], served.headers['x-content-type-options'], served.raw], [200, 'image/jpeg', 'nosniff', JPEG]);
+    assert.equal(served.headers['content-security-policy'], CSP);
+    assert.equal((await fetchRaw(new URL('api/tickets/app/T-1/attachments/9.png', base))).status, 404);
+    assert.equal((await fetchRaw(new URL('api/tickets/app/T-1/attachments/1.png?x=1', base))).status, 404);
+    assert.equal((await fetchRaw(new URL('api/tickets/app/T-9/attachments/1.png', base))).status, 404);
+    assert.deepEqual(error(await fetchRaw(new URL('api/tickets/app/T-1/attachments/1.txt', base))), { status: 400, code: 'invalid_name' });
+    await writeFile(join(dir, '5.png'), 'renamed text');
+    assert.deepEqual(error(await fetchRaw(new URL('api/tickets/app/T-1/attachments/5.png', base))), { status: 400, code: 'attachment_type' });
+
+    // The payload lists the images (the renamed text file is none) and the first message names them.
+    const row = JSON.parse((await fetchRaw(new URL('api/tickets', base))).body).tickets[0];
+    assert.deepEqual(row.attachments, [{ name: '1.png', bytes: PNG.length, type: 'image/png' }, { name: '2.jpg', bytes: JPEG.length, type: 'image/jpeg' }]);
+    assert.equal(row.conversation.message, ticketConversation('app', 'T-1', 'See the screenshot.', ['1.png', '2.jpg']));
+    assert.ok(row.conversation.message.includes('The ticket has images: 1.png, 2.jpg. Read each with read_attachment (workspace "app", ticket "T-1", name). In the Task file, refer to the images the Task needs as ![what it shows](T-1/<name>). You only plan'));
+
+    // At most 10 per ticket: attachment_limit (409).
+    for (let index = 0; index < 8; index += 1) {
+      result(await upload('api/tickets/app/T-1/attachments', PNG));
+    }
+    assert.deepEqual(error(await upload('api/tickets/app/T-1/attachments', PNG)), { status: 409, code: 'attachment_limit' });
+
+    // Remove: POST with {}; a missing one is attachment_missing; the body is checked.
+    assert.deepEqual(result(await act(base, 'api/tickets/app/T-1/attachments/1.png/remove', {})), { name: '1.png' });
+    assert.deepEqual(error(await act(base, 'api/tickets/app/T-1/attachments/1.png/remove', {})), { status: 400, code: 'attachment_missing' });
+    assert.deepEqual(error(await act(base, 'api/tickets/app/T-1/attachments/2.jpg/remove', { name: 'x' })), { status: 400, code: 'invalid_body' });
+    assert.deepEqual(error(await act(base, 'api/tickets/app/T-1/attachments/..png/remove', {})), { status: 400, code: 'invalid_name' });
+    assert.equal((await fetchRaw(new URL('api/tickets/app/T-1/attachments/2.jpg/remove', base))).status, 405);
+    // The gap is not reused: after 5.png (the renamed text) the uploads were 6.png to 13.png.
+    assert.equal(result(await upload('api/tickets/app/T-1/attachments', PNG)).name, '14.png');
+
+    // The guard: a running job refuses both, a paused one does not.
+    const jobOf = (state: 'working' | 'paused') => ({
+      workspace: 'app', ticket: 'T-1', branch: 'T-1-x', base: 'main', base_commit: null, target_commit: null, worktree: null, prepared_commit: null, mr_attempts: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0,
+      state, iteration: 0, session_id: null, mr: null, created_at: '2026-11-05T10:00:00.000Z', updated_at: '2026-11-05T10:00:00.000Z',
+    });
+    await jobs.write(jobOf('working'));
+    assert.deepEqual(error(await act(base, 'api/tickets/app/T-1/attachments/2.jpg/remove', {})), { status: 409, code: 'job_active' });
+    assert.deepEqual(error(await upload('api/tickets/app/T-1/attachments', PNG)), { status: 409, code: 'job_active' });
+    await jobs.write(jobOf('paused'));
+    assert.deepEqual(result(await act(base, 'api/tickets/app/T-1/attachments/2.jpg/remove', {})), { name: '2.jpg' });
+  } finally {
+    await dashboard.close();
+  }
+});
+
+test('dashboard images (SF-064): the upload reaches the setup with its bytes and name, and the pages refresh', async () => {
+  const setup = fakeSetup([workspaceRow('app')], [ticketRow('app', 'T-1')]);
+  await withDashboard('dash-images-fake', fakeActions(), async (dashboard) => {
+    const base = dashboard.url;
+    const stream = await openStream(new URL('api/stream', base));
+    try {
+      await stream.next('tickets');
+      const origin = `http://127.0.0.1:${base.port}`;
+      const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+      const reply = await fetchRaw(new URL('api/tickets/app/T-1/attachments?name=1.png', base), { method: 'POST', headers: { origin, 'content-type': 'application/octet-stream' }, body: bytes });
+      assert.equal(reply.status, 200, reply.body);
+      assert.deepEqual(setup.calls.at(-1), ['addAttachment', 'app', 'T-1', bytes.toString('hex'), '1.png']);
+      await stream.next('tickets');
+      await fetchRaw(new URL('api/tickets/app/T-1/attachments', base), { method: 'POST', headers: { origin, 'content-type': 'application/octet-stream' }, body: bytes });
+      assert.deepEqual(setup.calls.at(-1), ['addAttachment', 'app', 'T-1', bytes.toString('hex'), null]);
+      assert.equal((await act(base, 'api/tickets/app/T-1/attachments/1.png/remove', {})).status, 200);
+      assert.deepEqual(setup.calls.at(-1), ['removeAttachment', 'app', 'T-1', '1.png']);
+    } finally {
+      stream.close();
+    }
+  }, setup);
 });
 
 test('dashboard setup end to end: a workspace from the page, a ticket draft, the Task file over MCP, the User starts the job from the page', async () => {

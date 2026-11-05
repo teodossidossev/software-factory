@@ -3,8 +3,11 @@
 // the properties the script uses (parentNode, closest, matches, dataset, classList,
 // style.setProperty, querySelector and querySelectorAll with tag, id, class and attribute
 // selectors), events that bubble to the document (so the page's delegated listeners get them),
-// document.visibilityState, a scripted fetch, a scripted EventSource, timers that fire only when the
-// test says so and, when the test gives one, a clipboard. It is not a browser: layout, focus order,
+// document.visibilityState, a scripted fetch (a Blob body sent or answered too), a scripted
+// EventSource, timers that fire only when the test says so and, when the test gives one, a
+// clipboard; for a ticket's images (SF-064) Node's Blob and File (with arrayBuffer), paste and drop
+// events with clipboardData / dataTransfer files (the test's dispatch gives them), URL.createObjectURL,
+// ClipboardItem, createImageBitmap and a canvas whose toBlob gives a PNG. It is not a browser: layout, focus order,
 // CSS and default actions (Enter in a textarea, a form's own submission) are out of its reach; the
 // manual browser steps in factory/README.md cover those.
 import { readFile } from 'node:fs/promises';
@@ -84,6 +87,12 @@ export class FakeElement {
   clientHeight = 0;
   // How often scrollIntoView was called.
   scrolledIntoView = 0;
+  // An image's source, and a canvas's size and what was drawn on it (SF-064).
+  src = '';
+  alt = '';
+  width = 0;
+  height = 0;
+  readonly drawn: unknown[] = [];
   children: FakeNode[] = [];
   parentNode: FakeElement | null = null;
   dataset: Record<string, string> = {};
@@ -262,6 +271,17 @@ export class FakeElement {
       }
     }
     return full;
+  }
+
+  // A canvas's 2D context: drawImage records what it draws.
+  getContext(kind: string): { drawImage(image: unknown, ...rest: unknown[]): void } | null {
+    return kind === '2d' ? { drawImage: (image) => void this.drawn.push(image) } : null;
+  }
+
+  // A canvas's PNG, a little later as a browser gives it: the bytes name its size and what was drawn.
+  toBlob(callback: (blob: Blob | null) => void, type = 'image/png'): void {
+    const bytes = Buffer.concat([CANVAS_PNG, Buffer.from(`${this.width}x${this.height}:${this.drawn.length}`)]);
+    setImmediate(() => callback(new Blob([bytes], { type })));
   }
 
   // Like a browser: a disabled control gets no click.
@@ -576,12 +596,18 @@ export function parseHtml(document: FakeDocument, html: string): void {
   }
 }
 
+// The first bytes of the PNG a fake canvas's toBlob gives.
+export const CANVAS_PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
 export interface FetchRequest {
   path: string;
   method: string;
   headers: Record<string, string>;
+  // A text body; a Blob or File body (an image upload, SF-064) is in blob instead.
   body: string | undefined;
-  // Answers the request with a status and a body (an object is sent as JSON).
+  blob: Blob | undefined;
+  // Answers the request with a status and a body (an object is sent as JSON; a Blob as it is, its
+  // type the content type).
   respond(status: number, body: unknown): void;
   // Fails the request as a network error does.
   fail(message?: string): void;
@@ -608,6 +634,32 @@ export interface Page {
   // The URLs history.pushState was given, in order.
   pushed: string[];
   window: { dispatch(name: string, event?: Record<string, unknown>): Record<string, unknown> };
+  // URL.createObjectURL's URLs (blob:fake/1, ...) with their Blobs, and the ones revoked (SF-064).
+  objectUrls: Map<string, Blob>;
+  revokedUrls: string[];
+}
+
+// The page's clipboard: text, and with write the ClipboardItems (SF-064's Copy image).
+export interface FakeClipboard {
+  writeText(text: string): Promise<void>;
+  write?(items: FakeClipboardItem[]): Promise<void>;
+}
+
+// A ClipboardItem as the page builds it: each type with its Blob or the promise of one.
+export class FakeClipboardItem {
+  readonly items: Record<string, Blob | Promise<Blob>>;
+
+  constructor(items: Record<string, Blob | Promise<Blob>>) {
+    this.items = items;
+  }
+
+  get types(): string[] {
+    return Object.keys(this.items);
+  }
+
+  async getType(type: string): Promise<Blob> {
+    return this.items[type]!;
+  }
 }
 
 export class FakeEventSource {
@@ -646,7 +698,7 @@ export const EMPTY_STREAM_PAGE = /^api\/jobs\/[^/]+\/[^/]+\/stream\?from=(\d+)$/
 // page). Without a clipboard, navigator has none (as in a context where the browser refuses it);
 // globals adds names to the page's context (a localStorage), none by default.
 export async function loadPage(
-  staticDir: URL, autoGet: (path: string) => unknown, clipboard?: { writeText(text: string): Promise<void> },
+  staticDir: URL, autoGet: (path: string) => unknown, clipboard?: FakeClipboard,
   globals: Record<string, unknown> = {},
 ): Promise<Page> {
   const html = await readFile(new URL('dashboard.html', staticDir), 'utf8');
@@ -654,21 +706,26 @@ export async function loadPage(
   const document = new FakeDocument();
   parseHtml(document, html);
   const requests: FetchRequest[] = [];
-  const fetch = (path: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<unknown> =>
+  const fetch = (path: string, init: { method?: string; headers?: Record<string, string>; body?: string | Blob } = {}): Promise<unknown> =>
     new Promise((resolve, reject) => {
       const answer = (status: number, body: unknown): void => {
+        if (body instanceof Blob) {
+          resolve({ ok: status < 400, status, text: async () => body.text(), json: async () => JSON.parse(await body.text()), blob: async () => body });
+          return;
+        }
         const text = typeof body === 'string' ? body : JSON.stringify(body);
-        resolve({ ok: status < 400, status, text: async () => text, json: async () => JSON.parse(text) });
+        resolve({ ok: status < 400, status, text: async () => text, json: async () => JSON.parse(text), blob: async () => new Blob([text]) });
       };
       const request: FetchRequest = {
-        path, method: init.method ?? 'GET', headers: init.headers ?? {}, body: init.body,
+        path, method: init.method ?? 'GET', headers: init.headers ?? {},
+        body: typeof init.body === 'string' ? init.body : undefined, blob: init.body instanceof Blob ? init.body : undefined,
         respond: answer,
         fail: (message = 'Failed to fetch') => reject(new TypeError(message)),
         failBody: (status, message = 'network error') => {
           const cut = async (): Promise<never> => {
             throw new TypeError(message);
           };
-          resolve({ ok: status < 400, status, text: cut, json: cut });
+          resolve({ ok: status < 400, status, text: cut, json: cut, blob: cut });
         },
       };
       requests.push(request);
@@ -727,7 +784,22 @@ export async function loadPage(
     }
   };
   const navigator = clipboard === undefined ? {} : { clipboard };
-  const context = createContext({ document, window, location, history, navigator, fetch, EventSource: FakeEventSource, setTimeout: fakeSetTimeout, clearTimeout: fakeClearTimeout, URLSearchParams, console, ...globals });
+  const objectUrls = new Map<string, Blob>();
+  const revokedUrls: string[] = [];
+  const objectUrl = {
+    createObjectURL: (blob: Blob): string => {
+      const url = `blob:fake/${objectUrls.size + 1}`;
+      objectUrls.set(url, blob);
+      return url;
+    },
+    revokeObjectURL: (url: string): void => void revokedUrls.push(url),
+  };
+  // A bitmap of the image: its size, and the Blob it was made of.
+  const createImageBitmap = async (blob: Blob): Promise<{ width: number; height: number; blob: Blob }> => ({ width: 4, height: 3, blob });
+  const context = createContext({
+    document, window, location, history, navigator, fetch, EventSource: FakeEventSource, setTimeout: fakeSetTimeout, clearTimeout: fakeClearTimeout, URLSearchParams, console,
+    Blob, File, URL: objectUrl, ClipboardItem: FakeClipboardItem, createImageBitmap, ...globals,
+  });
   runInContext(source, context, { filename: 'app.js' });
   return {
     document,
@@ -757,5 +829,7 @@ export async function loadPage(
     location,
     pushed,
     window,
+    objectUrls,
+    revokedUrls,
   };
 }

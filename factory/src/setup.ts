@@ -6,6 +6,7 @@
 // here.
 import { lstat, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
+import { addAttachment, type Attachment, canHaveAttachments, listAttachments, readAttachment, removeAttachment } from './attachments.js';
 import { writeFileAtomic } from './atomic.js';
 import { FactoryError } from './errors.js';
 import type { ExclusiveScope } from './execution.js';
@@ -77,6 +78,8 @@ export interface TicketRow {
   job: JobState | null;
   // The tickets it lands after (SF-084), with their states, in the order of the Task file.
   lands_after: DependencyRow[];
+  // Its images (SF-064): .software-factory/<ticket>/, as listAttachments sees them.
+  attachments: Attachment[];
 }
 
 // An archived Task file: .software-factory/archive/<ticket>.md (SF-027).
@@ -149,6 +152,36 @@ async function branchMerged(checkout: string, job: JobFacts): Promise<boolean> {
 async function isFile(path: string): Promise<boolean> {
   try {
     return (await lstat(path)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+// A ticket's images for its row (SF-064); none when they cannot be listed (the row still shows).
+async function attachmentsOf(workspace: Workspace, ticket: string): Promise<Attachment[]> {
+  if (!canHaveAttachments(ticket)) {
+    return [];
+  }
+  try {
+    return await listAttachments(workspace, ticket);
+  } catch (error) {
+    console.error(error);
+    return [];
+  }
+}
+
+async function isDirectory(path: string): Promise<boolean> {
+  try {
+    return (await lstat(path)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
   } catch {
     return false;
   }
@@ -267,7 +300,7 @@ export class Setup {
   // The Task files of every usable workspace, sorted by workspace and ticket, each with its fields,
   // its text and its job. A file that is not a Task file (no front matter, another ticket, no
   // title) is skipped, as `start` would refuse it anyway.
-  async #taskFiles(): Promise<Array<{ name: string; ticket: string; fields: Map<string, string>; content: string; job: Job | undefined }>> {
+  async #taskFiles(): Promise<Array<{ name: string; workspace: Workspace; ticket: string; fields: Map<string, string>; content: string; job: Job | undefined }>> {
     const { workspaces } = await loadRegistry(this.#configDir);
     const files = [];
     for (const name of Object.keys(workspaces).sort()) {
@@ -300,7 +333,7 @@ export class Setup {
         if (fields === undefined || fields.get('ticket') !== ticket || !fields.get('title') || !fields.get('base')) {
           continue;
         }
-        files.push({ name, ticket, fields, content, job: await this.#jobs.read(name, ticket) });
+        files.push({ name, workspace, ticket, fields, content, job: await this.#jobs.read(name, ticket) });
       }
     }
     return files;
@@ -311,13 +344,13 @@ export class Setup {
   async tickets(): Promise<TicketRow[]> {
     const states = this.#dependencyStates();
     const rows: TicketRow[] = [];
-    for (const { name, ticket, fields, content, job } of await this.#taskFiles()) {
+    for (const { name, workspace, ticket, fields, content, job } of await this.#taskFiles()) {
       if (job !== undefined && !TERMINAL_STATES.includes(job.state)) {
         continue;
       }
       rows.push({
         workspace: name, ticket, title: fields.get('title')!, base: fields.get('base')!, draft: isDraft(content), request: await this.#readRequest(name, ticket), job: job?.state ?? null,
-        lands_after: await states(landsAfter(fields, name)),
+        lands_after: await states(landsAfter(fields, name)), attachments: await attachmentsOf(workspace, ticket),
       });
     }
     return rows;
@@ -441,6 +474,31 @@ export class Setup {
     return merged;
   }
 
+  // The workspace of an attachment action (SF-064), with its name checked; the ticket's rules are
+  // the attachments module's.
+  async #attachmentWorkspace(name: string): Promise<Workspace> {
+    if (!WORKSPACE_NAME_PATTERN.test(name)) {
+      throw new FactoryError('invalid_name', `workspace name must be ${WORKSPACE_NAME_DESCRIPTION}.`);
+    }
+    return resolveWorkspace(name, this.#configDir);
+  }
+
+  // Adds one image to the ticket (SF-064) under file, or the next number; under the Execution's
+  // lock, so a job cannot start between the guard and the write.
+  addAttachment(name: string, ticket: string, data: Uint8Array, file?: string): Promise<Attachment> {
+    return this.#exclusive(async () => addAttachment(await this.#attachmentWorkspace(name), ticket, data, this.#jobs, file));
+  }
+
+  // Removes one image of the ticket (SF-064), under the same lock and guard.
+  removeAttachment(name: string, ticket: string, file: string): Promise<{ name: string }> {
+    return this.#exclusive(async () => removeAttachment(await this.#attachmentWorkspace(name), ticket, file, this.#jobs));
+  }
+
+  // One image of the ticket with its bytes (SF-064).
+  async readAttachment(name: string, ticket: string, file: string): Promise<Attachment & { data: Buffer }> {
+    return readAttachment(await this.#attachmentWorkspace(name), ticket, file);
+  }
+
   // The User's words of New ticket live in the state directory, next to the jobs, never in the
   // repository: <state dir>/requests/<workspace>/<ticket>.md.
   #requestPath(name: string, ticket: string): string {
@@ -483,7 +541,8 @@ export class Setup {
   }
 
   // Moves <ticket>.md (and <ticket>.mr.md) into .software-factory/archive/, replacing an older
-  // archived copy; a finished job of the ticket is archived first. All under one lock acquisition:
+  // archived copy, then the ticket's images (SF-064: the folder <ticket>/, replacing an older
+  // archive/<ticket>/); a finished job of the ticket is archived first. All under one lock acquisition:
   // check, retire the job, then move the files. A failed retirement moves nothing; a file
   // operation that fails after it leaves the job archived and the files as far as they got.
   archiveTicket(name: string, ticket: string): Promise<{ workspace: string; ticket: string; path: string; jobArchived: boolean }> {
@@ -503,11 +562,19 @@ export class Setup {
       for (const file of files) {
         await rename(join(target.dir, file), join(target.dir, ARCHIVE_DIR, file));
       }
+      // The older archived images go with the older archived Task file, images or not now.
+      if (canHaveAttachments(ticket)) {
+        await rm(join(target.dir, ARCHIVE_DIR, ticket), { recursive: true, force: true });
+        if (await isDirectory(join(target.dir, ticket))) {
+          await rename(join(target.dir, ticket), join(target.dir, ARCHIVE_DIR, ticket));
+        }
+      }
       return { workspace: name, ticket, path: `${TASK_DIR}/${ARCHIVE_DIR}/${ticket}.md`, jobArchived };
     });
   }
 
-  // Moves an archived Task file (and its MR text) back; refused when the ticket has a Task file.
+  // Moves an archived Task file (and its MR text) back, then its images (SF-064); refused when the
+  // ticket has a Task file or an images folder.
   restoreTicket(name: string, ticket: string): Promise<{ workspace: string; ticket: string; path: string }> {
     return this.#exclusive(async () => {
       const { dir } = await this.#ticketTarget(name, ticket);
@@ -517,17 +584,24 @@ export class Setup {
       if (!(await isFile(join(dir, ARCHIVE_DIR, `${ticket}.md`)))) {
         throw new FactoryError('task_not_found', `${TASK_DIR}/${ARCHIVE_DIR}/${ticket}.md does not exist in workspace "${name}".`);
       }
+      const hasImages = canHaveAttachments(ticket);
+      if (hasImages && (await exists(join(dir, ticket)))) {
+        throw new FactoryError('ticket_exists', `${TASK_DIR}/${ticket}/ already exists in workspace "${name}"; remove it first.`);
+      }
       for (const file of [`${ticket}.md`, `${ticket}.mr.md`]) {
         if (await isFile(join(dir, ARCHIVE_DIR, file))) {
           await rename(join(dir, ARCHIVE_DIR, file), join(dir, file));
         }
       }
+      if (hasImages && (await isDirectory(join(dir, ARCHIVE_DIR, ticket)))) {
+        await rename(join(dir, ARCHIVE_DIR, ticket), join(dir, ticket));
+      }
       return { workspace: name, ticket, path: `${TASK_DIR}/${ticket}.md` };
     });
   }
 
-  // Deletes the Task file and the MR text of the ticket, active or archived, and the stored
-  // request; a finished job of the ticket is archived first (its history stays in the state
+  // Deletes the Task file and the MR text of the ticket, active or archived, its images (SF-064:
+  // <ticket>/ and archive/<ticket>/) and the stored request; a finished job of the ticket is archived first (its history stays in the state
   // directory, and so does the ticket's history file of SF-081, on purpose). The same order and
   // failure behaviour as archiveTicket.
   deleteTicket(name: string, ticket: string): Promise<{ workspace: string; ticket: string; deleted: string[]; jobArchived: boolean }> {
@@ -543,9 +617,21 @@ export class Setup {
       if (!found.some((path) => path.endsWith(`${ticket}.md`) && !path.endsWith('.mr.md'))) {
         throw new FactoryError('task_not_found', `There is no Task file for ${ticket} in workspace "${name}".`);
       }
+      const folders: string[] = [];
+      if (canHaveAttachments(ticket)) {
+        for (const folder of [ticket, `${ARCHIVE_DIR}/${ticket}`]) {
+          if (await isDirectory(join(target.dir, folder))) {
+            folders.push(folder);
+          }
+        }
+      }
       const jobArchived = await this.#retire(scope, name, ticket, target.jobEnded);
       for (const path of found) {
         await rm(join(target.dir, path));
+      }
+      for (const folder of folders) {
+        await rm(join(target.dir, folder), { recursive: true, force: true });
+        found.push(`${folder}/`);
       }
       await rm(this.#requestPath(name, ticket), { force: true });
       return { workspace: name, ticket, deleted: found.map((path) => `${TASK_DIR}/${path}`), jobArchived };
@@ -679,6 +765,11 @@ export class Setup {
       }
       const base = await defaultBranch(workspace.workCheckout);
       await writeTask(workspace, ticket, draftContent(ticket, title, base), this.#jobs, { record: this.#record(name, ticket, 'created') });
+      // A new ticket starts without images (SF-064): a folder left behind by a Task file removed by
+      // hand goes, once the skeleton is written (the writer's guard has passed).
+      if (canHaveAttachments(ticket)) {
+        await rm(join(workspace.workCheckout, TASK_DIR, ticket), { recursive: true, force: true });
+      }
       await mkdir(dirname(this.#requestPath(name, ticket)), { recursive: true, mode: 0o700 });
       await writeFileAtomic(this.#requestPath(name, ticket), Buffer.from(request.replace(/\r\n/g, '\n'), 'utf8'));
       return { workspace: name, ticket, path, base };

@@ -9,9 +9,11 @@
 // and `sf run`, the job's runner that sf serve starts (SF-042, src/runner.ts).
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { type ChildProcess, spawn } from 'node:child_process';
-import { resolve } from 'node:path';
+import { basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { open } from 'node:fs/promises';
+import { addAttachment, checkSize, removeAttachment } from './attachments.js';
 import { openInBrowser } from './browser.js';
 import { envFilePath, gateConfig, handoffSetting, loadConfig, loadEnvFile, rulesMaxBytes, stateDir } from './config.js';
 import { DEFAULT_DASHBOARD_PORT, dashboardUrl, readToken, removeToken, type RunningDashboard, startDashboard } from './dashboard.js';
@@ -49,6 +51,8 @@ const USAGE = `Usage:
   sf workspace remove <name>                            Unregister a workspace
   sf check-task <workspace> <ticket>                    Check the Task file before Start: a read-only Claude session reads it and the repository, and prints its paraphrase, its findings by severity and its verdict (stored by the Task file's sha256; it only advises)
   sf rules <workspace> [ticket]                         List the coding rules the agents would be given (AGENTS.md and the Markdown files it links to, the user's rules files): paths, sources, sizes and the files left out, without their text; a started job's stored list, else read at the Task file's base, else at the checkout's HEAD
+  sf attach <workspace> <ticket> <file> [name]          Attach an image (PNG, JPEG, WebP or GIF by its bytes, at most 5 MB, 10 per ticket) to the ticket: .software-factory/<ticket>/<name> next to its Task file; name: default the next number (1.png, 2.png, ...); refused while a job of the ticket runs (paused aside); no sf serve needed
+  sf attach <workspace> <ticket> --remove <name>        Remove an image of the ticket, under the same guard
   sf start <workspace> <ticket>                         Start the job for .software-factory/<ticket>.md in a worktree of its own
   sf queue list                                         The run queue: the limit of jobs at once, the running count, held or not, and the queued tickets in order with what each waits for, and the starts that failed
   sf queue add <workspace> <ticket> [--at N]            Queue a planned ticket at position N (1-based; default: the end); sf serve starts it by itself when a slot is free and its lands_after tickets are merged
@@ -1007,6 +1011,40 @@ async function watch(args: string[]): Promise<void> {
   await watchEvents(jobs.eventsPath(workspace, ticket), values.once !== true, (line) => console.log(line), abort.signal);
 }
 
+// sf attach (SF-064): the attachments module's rules on the files directly, without sf serve.
+async function attach(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { remove: { type: 'string' } } });
+  if (values.remove !== undefined ? positionals.length !== 2 : positionals.length < 3 || positionals.length > 4) {
+    throw new UsageError('attach needs <workspace> <ticket> <file> [name], or <workspace> <ticket> --remove <name>.');
+  }
+  const [name, ticket] = checkJob(positionals, 'attach');
+  const workspace = await resolveWorkspace(name);
+  const jobs = new JobStore(stateDir());
+  if (values.remove !== undefined) {
+    const removed = await removeAttachment(workspace, ticket, values.remove, jobs);
+    console.log(`Removed ${TASK_DIR}/${ticket}/${removed.name}.`);
+    return;
+  }
+  const path = positionals[2]!;
+  let data: Buffer;
+  const handle = await open(path, 'r').catch((error: NodeJS.ErrnoException) => {
+    throw new FactoryError('file_unreadable', `${basename(path)} cannot be read (${error.code ?? 'error'}).`);
+  });
+  try {
+    const stats = await handle.stat();
+    if (!stats.isFile()) {
+      throw new FactoryError('file_unreadable', `${basename(path)} is not a regular file.`);
+    }
+    // Never read more than the limit allows: a larger file is refused unread.
+    checkSize(stats.size);
+    data = await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+  const added = await addAttachment(workspace, ticket, data, jobs, positionals[3]);
+  console.log(`Attached ${TASK_DIR}/${ticket}/${added.name} (${added.type}, ${added.bytes} bytes).`);
+}
+
 async function dashboardCommand(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { open: { type: 'boolean' }, rotate: { type: 'boolean' } } });
   if (positionals.length !== 0) {
@@ -1048,6 +1086,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'queue') {
     await queue(rest);
+    return;
+  }
+  if (command === 'attach') {
+    await attach(rest);
     return;
   }
   if (command === 'review') {

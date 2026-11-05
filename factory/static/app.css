@@ -324,6 +324,10 @@ pre.cm { margin: 0; background: var(--panel-2); border: 1px solid var(--border);
 .thumbs img { width: 96px; height: 72px; object-fit: cover; border-radius: var(--radius-sm); border: 1px solid var(--border); }
 .drop { border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); padding: 12px; text-align: center; color: var(--muted); font-size: 12.5px; }
 .drop.over { border-color: var(--accent); background: var(--selected); }
+/* A ticket's images (SF-064): each thumbnail with its name, Copy image and × under it. */
+.thumb { margin: 0; display: grid; gap: 4px; justify-items: start; }
+.thumb-open { display: block; line-height: 0; }
+.thumb-bar { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .hist { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: 12.5px; }
 .hist li { display: grid; grid-template-columns: 11ch minmax(0, 1fr); gap: 8px; }
 .hist .t { color: var(--muted); font-variant-numeric: tabular-nums; }

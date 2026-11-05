@@ -165,8 +165,11 @@ const state = {
   // The planned ticket page (SF-081): the ticket shown, its page payload, its check as last read,
   // a read's error, the read under way, the editor (kept across redraws) and the Copy's outcome;
   // the ticket whose Start answered before its job reached the board (the page moves to the job).
-  tk: { key: null, data: null, check: null, error: null, load: null, textarea: null, copied: null },
+  tk: { key: null, data: null, check: null, error: null, load: null, textarea: null, copied: null, imageStatus: null, uploading: 0 },
   goAfterStart: null,
+  // New ticket's images (SF-064), in paste order: each file, the extension of its real type and its
+  // blob: URL for the thumbnail.
+  newImages: [],
 };
 // The only URL the page links to: the ChatGPT composer prefilled by the server (the prefix of
 // src/conversation.ts).
@@ -228,9 +231,20 @@ class ActionError extends Error {
 // Anything else (no answer, a body cut or unreadable after the headers, a 2xx without a result,
 // an internal failure) throws a plain Error: the action may have run.
 async function post(path, body) {
-  const response = await fetch(path, {
+  return answerOf(await fetch(path, {
     method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
-  });
+  }));
+}
+
+// An image upload (SF-064): the file's raw bytes as the body, with the same answer as post.
+async function postBytes(path, file) {
+  return answerOf(await fetch(path, {
+    method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/octet-stream' }, body: file,
+  }));
+}
+
+// The result of an action's answer, or its refusal (see post).
+async function answerOf(response) {
   const refused = response.status >= 400 && response.status < 500;
   let data;
   try {
@@ -4387,7 +4401,7 @@ function renderJobs() {
 // listeners).
 function onClick(event) {
   const target = typeof event.target?.closest === 'function'
-    ? event.target.closest('[data-tk],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],#limUp,#limDown,[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived')
+    ? event.target.closest('[data-tk],[data-tkimg],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],#limUp,#limDown,[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived')
     : null;
   // An open ⋯ menu closes on any click but its own toggle (its items act, then it is closed).
   if (state.openMenu !== null && (target === null || target.dataset.menu === undefined)) {
@@ -4399,6 +4413,10 @@ function onClick(event) {
   }
   if (target.dataset.tk !== undefined) {
     tkAction(target.dataset.tk);
+    return;
+  }
+  if (target.dataset.tkimg !== undefined) {
+    tkImageAction(target.dataset.tkimg, target.dataset.name);
     return;
   }
   // The Merge request screen (SF-080): its bar, Edit | Preview, and the diff against the factory's text.
@@ -4915,6 +4933,7 @@ const TK_HELP = {
   noWaits: 'Nothing: it can start now.',
   check: 'A read-only Claude session reads only this plan and the code, and says whether an Implementer could build it without making a design decision of its own. About $0.50. It only advises.',
   history: 'What happened to this plan.',
+  images: (ticket) => `Screenshots for the plan: PNG, JPEG, WebP or GIF, at most 5 MB each and 10 per ticket. ChatGPT reads them with read_attachment; the Task file refers to one as ![what it shows](${ticket}/<name>).`,
 };
 // "Nov 5, 14:03" of a timestamp, in the browser's time (the prototype's day); empty without one.
 const day = (ts) => (typeof ts === 'string' && !Number.isNaN(Date.parse(ts))
@@ -4957,7 +4976,7 @@ function openTicket(key) {
     hideDrawer();
   }
   if (state.tk.key !== key) {
-    state.tk = { key, data: null, check: null, error: null, load: null, textarea: null, copied: null };
+    state.tk = { key, data: null, check: null, error: null, load: null, textarea: null, copied: null, imageStatus: null, uploading: 0 };
   }
   ui.screen = 'ticket';
   ui.ticket = key;
@@ -5409,7 +5428,7 @@ function renderTicket() {
     if (view !== null) {
       side.append(tkCheckCard(key, row, view, s));
     }
-    side.append(tkConversation(row), tkHistoryCard());
+    side.append(tkConversation(row), tkImagesCard(key, row), tkHistoryCard());
     grid.append(tkFileCard(key, row, s), side);
   }
   const form = el('div', 'form2');
@@ -5515,6 +5534,397 @@ async function tkSave(key) {
   if (saved && ui.screen === 'ticket' && ui.ticket === key) {
     void loadTicket(key, false);
   }
+}
+
+// ---------- A ticket's images (SF-064): the planned ticket page's Images card and New ticket ----------
+
+// The server's rules (src/attachments.ts), checked here too so the page says at once why an image
+// is not taken; the server checks every upload again.
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_IMAGES = 10;
+
+// The extension of an image from its first bytes (PNG, JPEG, WebP, GIF), as the server tells it;
+// null for anything else.
+function sniffImage(bytes) {
+  const at = (offset, values) => values.every((value, index) => bytes[offset + index] === value);
+  const word = (offset, text) => at(offset, [...text].map((char) => char.charCodeAt(0)));
+  if (at(0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) {
+    return 'png';
+  }
+  if (at(0, [0xff, 0xd8, 0xff])) {
+    return 'jpg';
+  }
+  if (word(0, 'GIF87a') || word(0, 'GIF89a')) {
+    return 'gif';
+  }
+  return word(0, 'RIFF') && word(8, 'WEBP') ? 'webp' : null;
+}
+
+async function imageExtension(file) {
+  return sniffImage(new Uint8Array(await file.slice(0, 12).arrayBuffer()));
+}
+
+// The files of a paste (clipboardData) or a drop (dataTransfer), never its text: a text paste
+// finds none and goes on as usual.
+function eventFiles(data) {
+  if (data === null || data === undefined) {
+    return [];
+  }
+  const files = Array.from(data.files ?? []);
+  if (files.length > 0) {
+    return files;
+  }
+  return Array.from(data.items ?? []).filter((item) => item.kind === 'file').map((item) => item.getAsFile()).filter((file) => file !== null && file !== undefined);
+}
+
+// A paste into a text field that carries text too (cells copied from a spreadsheet or a word
+// processor come with a picture of them) stays a text paste; a screenshot has no text.
+function pastesText(event) {
+  const tag = event.target?.tagName;
+  return (tag === 'TEXTAREA' || tag === 'INPUT') && Array.from(event.clipboardData?.types ?? []).includes('text/plain');
+}
+
+// Whether a drag carries files.
+const dragsFiles = (data) => Array.from(data?.types ?? []).includes('Files');
+const fileLabel = (file) => (typeof file.name === 'string' && file.name !== '' ? file.name : 'the image');
+const refusalText = (error) => (error instanceof ActionError ? `${error.code}: ${error.message}` : `${error.message}; it may have been attached`);
+const attachmentPath = (key, name) => `api/tickets/${jobPath(key)}/attachments/${encodeURIComponent(name)}`;
+
+// Images: the ticket's images from its row (the stream keeps it current), each opening whole in a
+// new tab, with Copy image and ×, then the drop area; a paste anywhere on the page lands there too.
+// No file picker (the user's decision).
+function tkImagesCard(key, row) {
+  const images = Array.isArray(row.attachments) ? row.attachments : [];
+  const content = [];
+  if (images.length > 0) {
+    const thumbs = el('div', 'thumbs');
+    for (const image of images) {
+      const url = attachmentPath(key, image.name);
+      const link = el('a', 'thumb-open');
+      link.href = url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.setAttribute('title', `Open ${image.name} in a new tab`);
+      const img = el('img');
+      img.src = url;
+      img.alt = `Image ${image.name}`;
+      link.append(img);
+      const busy = state.setupPending.has(`image:${key}/${image.name}`);
+      const copy = button('btn small', 'Copy image', { tkimg: 'copy', name: image.name });
+      const remove = button('btn small', '×', { tkimg: 'remove', name: image.name });
+      remove.setAttribute('aria-label', `Remove ${image.name}`);
+      remove.setAttribute('title', `Remove ${image.name}`);
+      remove.disabled = busy;
+      const bar = el('div', 'thumb-bar');
+      bar.append(el('span', 'mono fs12', image.name), copy, remove);
+      const item = el('figure', 'thumb');
+      item.append(link, bar);
+      thumbs.append(item);
+    }
+    content.push(thumbs);
+  } else {
+    content.push(el('span', 'muted fs13', 'No image yet.'));
+  }
+  const uploading = state.tk.uploading;
+  const drop = el('div', 'drop', uploading > 0 ? `Attaching ${counted(uploading, 'image')}…` : 'Paste an image here (Ctrl+V) or drop one.');
+  drop.id = 'tkDrop';
+  const status = el('span', 'muted fs12', state.tk.imageStatus ?? '');
+  status.setAttribute('role', 'status');
+  content.push(drop, status);
+  return tkCard('Images', TK_HELP.images(row.ticket), ...content);
+}
+
+function tkImageAction(action, name) {
+  const key = ui.ticket;
+  if (ui.screen !== 'ticket' || typeof name !== 'string') {
+    return;
+  }
+  if (action === 'remove') {
+    void tkRemoveImage(key, name);
+  } else if (action === 'copy') {
+    void tkCopyImage(key, name);
+  }
+}
+
+// Each image goes up at once, in order and without a name: the server tells its type and numbers
+// it. The outcome is a toast; the new images reach the card through the stream.
+let tkUploads = Promise.resolve();
+function tkAddImages(key, files) {
+  if (files.length === 0) {
+    return tkUploads;
+  }
+  state.tk.uploading += files.length;
+  renderTicket();
+  tkUploads = tkUploads.then(() => tkUpload(key, files)).catch((error) => console.error(error));
+  return tkUploads;
+}
+
+async function tkUpload(key, files) {
+  const done = [];
+  const failed = [];
+  for (const file of files) {
+    if (file.size > MAX_IMAGE_BYTES) {
+      failed.push(`${fileLabel(file)} (larger than 5 MB)`);
+    } else {
+      try {
+        const result = await postBytes(`api/tickets/${jobPath(key)}/attachments`, file);
+        done.push(typeof result?.name === 'string' ? result.name : fileLabel(file));
+      } catch (error) {
+        failed.push(`${fileLabel(file)} (${refusalText(error)})`);
+      }
+    }
+    if (state.tk.key === key) {
+      state.tk.uploading = Math.max(0, state.tk.uploading - 1);
+    }
+  }
+  const attached = done.length > 0 ? `Attached ${done.join(', ')}.` : '';
+  toast(failed.length === 0 ? { level: 'ok', text: attached } : { level: 'error', text: `${attached}${attached !== '' ? ' ' : ''}Not attached: ${failed.join('; ')}.` });
+  renderTicket();
+}
+
+async function tkRemoveImage(key, name) {
+  const id = `image:${key}/${name}`;
+  if (state.setupPending.has(id)) {
+    return;
+  }
+  state.setupPending.add(id);
+  renderTicket();
+  let outcome;
+  try {
+    await post(`${attachmentPath(key, name)}/remove`, {});
+    outcome = { level: 'ok', text: `Removed ${name}.` };
+  } catch (error) {
+    outcome = { level: 'error', text: error instanceof ActionError ? `${error.code}: ${error.message}` : `The removal failed (${error.message}); it may have happened.` };
+  }
+  state.setupPending.delete(id);
+  toast(outcome);
+  renderTicket();
+}
+
+// JPEG, WebP and GIF go on the clipboard as PNG, the image type browsers take there: drawn on a
+// canvas.
+async function asPng(blob) {
+  if (blob.type === 'image/png') {
+    return blob;
+  }
+  const bitmap = await createImageBitmap(blob);
+  const canvas = document.createElement('canvas');
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  canvas.getContext('2d').drawImage(bitmap, 0, 0);
+  return new Promise((resolve, reject) => canvas.toBlob((png) => (png ? resolve(png) : reject(new Error('the image could not be drawn'))), 'image/png'));
+}
+
+// Copy image: the image on the clipboard as PNG, so it can be pasted into ChatGPT by hand. The
+// ClipboardItem gets the PNG as a promise, so the copy stays within the click.
+async function tkCopyImage(key, name) {
+  const say = (text) => {
+    state.tk.imageStatus = text;
+    if (ui.screen === 'ticket' && ui.ticket === key) {
+      renderTicket();
+    }
+  };
+  if (typeof navigator === 'undefined' || typeof navigator.clipboard?.write !== 'function' || typeof ClipboardItem !== 'function') {
+    say(`This browser cannot put an image on the clipboard: open ${name} and copy it there.`);
+    return;
+  }
+  const png = (async () => {
+    const response = await fetch(attachmentPath(key, name), { cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    return asPng(await response.blob());
+  })();
+  png.catch(() => undefined);
+  try {
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]);
+    say(`Copied ${name}.`);
+  } catch (error) {
+    say(`${name} was not copied (${error.message}): open it and copy it there.`);
+  }
+}
+
+// The page's paste and drop: only files are taken (a text paste into the editor goes on as
+// usual); New ticket's form, in the drawer, has its own.
+function onPagePaste(event) {
+  if (ui.screen !== 'ticket' || state.drawer !== null || event.defaultPrevented || state.tk.data === null || pastesText(event)) {
+    return;
+  }
+  const files = eventFiles(event.clipboardData);
+  if (files.length > 0) {
+    event.preventDefault();
+    void tkAddImages(ui.ticket, files);
+  }
+}
+
+const dropArea = (event) => (ui.screen === 'ticket' && typeof event.target?.closest === 'function' ? event.target.closest('#tkDrop') : null);
+
+function onPageDrag(event) {
+  const drop = dropArea(event);
+  if (drop !== null && dragsFiles(event.dataTransfer)) {
+    event.preventDefault();
+    drop.classList.toggle('over', event.type === 'dragover');
+  }
+}
+
+function onPageDrop(event) {
+  const drop = dropArea(event);
+  if (drop !== null) {
+    event.preventDefault();
+    drop.classList.remove('over');
+    void tkAddImages(ui.ticket, eventFiles(event.dataTransfer));
+  }
+}
+
+// New ticket's images: pasted anywhere in the form or dropped on it, shown from blob: URLs and
+// named 1.png, 2.png, … in paste order with the extension of their real type; uploaded once the
+// ticket is created (submitTicket).
+const newImageName = (index) => `${index + 1}.${state.newImages[index].ext}`;
+let newImagesQueue = Promise.resolve();
+// The pastes and drops still being read, and what they refused since none was (Create waits for
+// them: Fix 3).
+let newImagesReading = 0;
+let newImagesRefused = [];
+
+function addNewImages(files) {
+  if (newImagesReading === 0) {
+    newImagesRefused = [];
+  }
+  newImagesReading += 1;
+  newImagesQueue = newImagesQueue.then(async () => {
+    const refused = [];
+    for (const file of files) {
+      if (state.newImages.length >= MAX_IMAGES) {
+        refused.push(`${fileLabel(file)} (at most ${MAX_IMAGES} images per ticket)`);
+        continue;
+      }
+      if (file.size > MAX_IMAGE_BYTES) {
+        refused.push(`${fileLabel(file)} (larger than 5 MB)`);
+        continue;
+      }
+      const ext = await imageExtension(file).catch(() => null);
+      if (ext === null) {
+        refused.push(`${fileLabel(file)} (not a PNG, JPEG, WebP or GIF image)`);
+        continue;
+      }
+      state.newImages.push({ file, ext, url: URL.createObjectURL(file) });
+    }
+    renderNewImages();
+    newImagesRefused.push(...refused);
+    setSetupStatus('ticket-status', refused.length > 0 ? { level: 'error', text: `Not added: ${refused.join('; ')}.` } : null);
+  }).catch((error) => console.error(error)).finally(() => {
+    newImagesReading -= 1;
+  });
+  return newImagesQueue;
+}
+
+// Create waits for the images still being read, so each one pasted before it goes up with this
+// ticket. True when one was refused meanwhile: the form says which, and Create is not sent (a second
+// Create goes on without it).
+async function newImagesSettled() {
+  if (newImagesReading === 0) {
+    return false;
+  }
+  state.setupPending.add('ticket-images');
+  setSetupStatus('ticket-status', { level: 'pending', text: 'Reading the pasted images…' });
+  renderSetup();
+  while (newImagesReading > 0) {
+    await newImagesQueue;
+  }
+  state.setupPending.delete('ticket-images');
+  renderSetup();
+  if (newImagesRefused.length > 0) {
+    setSetupStatus('ticket-status', { level: 'error', text: `Not added: ${newImagesRefused.join('; ')}.` });
+    newImagesRefused = [];
+    return true;
+  }
+  setSetupStatus('ticket-status', null);
+  return false;
+}
+
+function removeNewImage(index) {
+  const [image] = state.newImages.splice(index, 1);
+  if (image !== undefined) {
+    URL.revokeObjectURL(image.url);
+  }
+  renderNewImages();
+}
+
+function renderNewImages() {
+  const list = $('ticket-images');
+  list.replaceChildren(...state.newImages.map((image, index) => {
+    const name = newImageName(index);
+    const img = el('img');
+    img.src = image.url;
+    img.alt = `Pasted image ${name}`;
+    const remove = button('btn small', '×', { newimg: String(index) });
+    remove.setAttribute('aria-label', `Remove ${name}`);
+    remove.setAttribute('title', `Remove ${name}`);
+    remove.disabled = newImagesSending.has(image);
+    const bar = el('div', 'thumb-bar');
+    bar.append(el('span', 'mono fs12', name), remove);
+    const item = el('figure', 'thumb');
+    item.append(img, bar);
+    return item;
+  }));
+  list.hidden = state.newImages.length === 0;
+}
+
+function onFormPaste(event) {
+  if (pastesText(event)) {
+    return;
+  }
+  const files = eventFiles(event.clipboardData);
+  if (files.length > 0) {
+    event.preventDefault();
+    void addNewImages(files);
+  }
+}
+
+function onFormDrag(event) {
+  if (dragsFiles(event.dataTransfer)) {
+    event.preventDefault();
+    $('ticket-drop').classList.toggle('over', event.type === 'dragover');
+  }
+}
+
+function onFormDrop(event) {
+  if (dragsFiles(event.dataTransfer) || eventFiles(event.dataTransfer).length > 0) {
+    event.preventDefault();
+    $('ticket-drop').classList.remove('over');
+    void addNewImages(eventFiles(event.dataTransfer));
+  }
+}
+
+// After "Create the ticket": each image in order under the name it showed. A failed upload leaves
+// the ticket created; what failed and why is returned for the form to say.
+// The images Create was pressed with (Fix 4), each with the name it showed then; the form keeps
+// them in place, × off, until they are uploaded or the create is refused.
+let newImagesSending = new Set();
+
+function snapshotNewImages() {
+  const images = state.newImages.map((image, index) => ({ image, name: newImageName(index), file: image.file }));
+  newImagesSending = new Set(images.map((entry) => entry.image));
+  renderNewImages();
+  return images;
+}
+
+function releaseNewImages() {
+  newImagesSending = new Set();
+  renderNewImages();
+}
+
+// images: snapshotNewImages's list, taken before the ticket was created.
+async function uploadNewImages(key, images) {
+  const failed = [];
+  for (const image of images) {
+    try {
+      await postBytes(`api/tickets/${jobPath(key)}/attachments?name=${encodeURIComponent(image.name)}`, image.file);
+    } catch (error) {
+      failed.push(`${image.name} (${refusalText(error)})`);
+    }
+  }
+  return { count: images.length, failed, sent: images.map((entry) => entry.image) };
 }
 
 // ---------- The drawer: Workspaces, New ticket, Archived and an archived ticket's Task ----------
@@ -5651,7 +6061,7 @@ function renderWorkspaces() {
   }));
   select.value = rows.some((row) => row.name === chosen) ? chosen : (rows[0]?.name ?? '');
   select.disabled = rows.length === 0;
-  $('ticket-create').disabled = rows.length === 0 || state.setupPending.has('ticket');
+  $('ticket-create').disabled = rows.length === 0 || state.setupPending.has('ticket') || state.setupPending.has('ticket-images');
 }
 
 function renderArchived() {
@@ -5750,19 +6160,52 @@ async function submitTicket() {
     setSetupStatus('ticket-status', { level: 'error', text: 'The workspace, the ticket key, the title and the request are all needed.' });
     return;
   }
+  if (state.setupPending.has('ticket-images') || (await newImagesSettled())) {
+    return;
+  }
   const describe = (data) => ({ level: 'ok', text: `Ticket created: ${data.path} in ${data.workspace} (base ${data.base}), an empty skeleton in the Queue. Next: a click on its card opens the conversation; your words are its first message.` });
+  // The images go with this ticket as they are now; one pasted while it is being created stays for
+  // the next ticket (Fix 4).
+  const sending = snapshotNewImages();
   const result = await setupRequest('ticket', 'api/tickets', { workspace, ticket, title, request }, 'ticket-status', describe);
+  if (result === undefined) {
+    releaseNewImages();
+  }
   // Created (SF-066): the dialog closes and the new ticket's card is highlighted (a click on it
-  // opens its page); a failure keeps the dialog open with the error and the input.
+  // opens its page); a failure keeps the dialog open with the error and the input. Then its images
+  // go up (SF-064); one that fails leaves the ticket created, and the form stays open saying which
+  // and why.
   if (result !== undefined) {
     $('ticket-key').value = '';
     $('ticket-title').value = '';
     $('ticket-request').value = '';
-    setSetupStatus('ticket-status', null);
-    state.highlight = `${result.workspace ?? workspace}/${result.ticket ?? ticket}`;
+    const key = `${result.workspace ?? workspace}/${result.ticket ?? ticket}`;
+    state.highlight = key;
     state.highlightShown = false;
+    let uploaded = { count: 0, failed: [] };
+    if (sending.length > 0) {
+      state.setupPending.add('ticket-images');
+      setSetupStatus('ticket-status', { level: 'pending', text: `Ticket created; attaching ${counted(sending.length, 'image')}…` });
+      renderSetup();
+      uploaded = await uploadNewImages(key, sending);
+      state.setupPending.delete('ticket-images');
+      // Only the images sent leave the form; one pasted meanwhile stays for the next ticket.
+      for (const image of uploaded.sent) {
+        URL.revokeObjectURL(image.url);
+      }
+      state.newImages = state.newImages.filter((image) => !uploaded.sent.includes(image));
+      renderSetup();
+    }
+    releaseNewImages();
+    if (uploaded.failed.length > 0) {
+      setSetupStatus('ticket-status', { level: 'error', text: `Ticket created: ${result.path} in ${result.workspace ?? workspace}. Not attached: ${uploaded.failed.join('; ')}. Add ${uploaded.failed.length === 1 ? 'it' : 'them'} on the ticket's page: paste or drop on its Images card.` });
+      renderBoard();
+      return;
+    }
+    setSetupStatus('ticket-status', null);
     closeDrawer();
-    toast(describe(result));
+    const outcome = describe(result);
+    toast(uploaded.count > 0 ? { ...outcome, text: `${outcome.text} ${counted(uploaded.count, 'image')} attached.` } : outcome);
   }
 }
 
@@ -6099,6 +6542,22 @@ function init() {
     event.preventDefault();
     void submitTicket();
   });
+  // A ticket's images (SF-064): New ticket's paste, drop and ×; the planned ticket page's paste and
+  // drop.
+  $('ticket-form').addEventListener('paste', onFormPaste);
+  $('ticket-form').addEventListener('dragover', onFormDrag);
+  $('ticket-form').addEventListener('dragleave', onFormDrag);
+  $('ticket-form').addEventListener('drop', onFormDrop);
+  $('ticket-images').addEventListener('click', (event) => {
+    const target = typeof event.target?.closest === 'function' ? event.target.closest('[data-newimg]') : null;
+    if (target !== null && !target.disabled) {
+      removeNewImage(Number(target.dataset.newimg));
+    }
+  });
+  document.addEventListener('paste', onPagePaste);
+  document.addEventListener('dragover', onPageDrag);
+  document.addEventListener('dragleave', onPageDrag);
+  document.addEventListener('drop', onPageDrop);
   $('ticket-ok').addEventListener('click', () => void submitTicketConfirm());
   $('ticket-cancel').addEventListener('click', closeTicketConfirm);
   $('ticket-confirm').addEventListener('keydown', (event) => {

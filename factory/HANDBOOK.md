@@ -17,7 +17,8 @@ queue (`queue_list`) and add a written ticket to it (`queue_add`) when the user 
    workspace and what they want in their own words, and `.software-factory/<ticket>.md` is an
    empty skeleton (front matter and a `## Status: waiting for the Context owner` line). Their
    words are the start of the discussion, not the task: investigate, ask, agree on the solution
-   with the user, then write the whole Task file over the skeleton with `write_task`.
+   with the user, then write the whole Task file over the skeleton with `write_task`. When the
+   first message names the ticket's images, read each with `read_attachment`.
 1. Plan with the user. Read the application repository with `read_file` and `search` on the
    workspace's read checkout: AGENTS.md, coding and documentation standards, project documentation.
    Respect them in the plan.
@@ -72,7 +73,8 @@ merge the merge request on the Git host.
 | `guide` | Returns this handbook. |
 | `read_file(workspace, path, offset?, max_bytes?)` | Reads a UTF-8 file from the workspace's read checkout, paged. Credential-like paths are refused. |
 | `search(workspace, query, mode, path_prefix?, max_results?)` | `mode: "path"` finds files whose relative path contains `query`; `mode: "content"` finds lines containing `query`. Both case-insensitive. Tracked and untracked files, ignored ones skipped. Bounded. |
-| `write_task(workspace, ticket, content)` | Creates or replaces the Task file `.software-factory/<ticket>.md` in the work checkout. Refused while a job on that ticket is running. Starts nothing. |
+| `write_task(workspace, ticket, content)` | Creates or replaces the Task file `.software-factory/<ticket>.md` in the work checkout. Refused while a job on that ticket is running, and with `attachment_missing` when an image reference `![…](<ticket>/<name>)` names an image the ticket does not have. Starts nothing. |
+| `read_attachment(workspace, ticket, name)` | Returns one image the user attached to the ticket (`.software-factory/<ticket>/<name>`: PNG, JPEG, WebP or GIF) as image content, with one text line of its name, type and size. The first message of the ticket's conversation names its images. Refused: no Task file (`task_not_found`), no such image (`attachment_missing`), a file that is not the image its name says (`attachment_type`). |
 | `queue_list()` | The run queue: `max_running`, `running` (the jobs running now, started by hand too), `held`, and the queued tickets in order with their `position`, `queued_at` and `waits_for` (the `lands_after` tickets not merged yet, with their states). |
 | `queue_add(workspace, ticket, at?)` | Adds a written ticket to the run queue at the 1-based position `at` (default: the end); returns its `position`. Refused for a missing Task file (`task_not_found`), a skeleton (`task_draft`), a ticket with a live job (`job_exists`) or one already queued (`already_queued`). The user removes and reorders. |
 | `task_check(workspace, ticket)` | The last Task check of the current Task file: `verdict` (`ready`, `not_ready`, `failed`, or `none` when this version has no check), the checker's `paraphrase`, its `findings` (`kind`, `severity`, `where`, `problem`, `expected`) and the `files` it expects to change. The user runs the check; this tool only reads it. |
@@ -122,6 +124,14 @@ enough); a start by hand does not wait for them. Entries that are not a valid ti
 
 Coding rules reach the Implementer, the reviewers and the Task check without you: `AGENTS.md` and
 the Markdown files it links to, and the user's own rules files; reference them by path, never copy them into the Task.
+
+The user can attach images to a ticket (screenshots, pasted on the dashboard or added with
+`sf attach`): they live in `.software-factory/<ticket>/` next to the Task file, at most 10 of
+PNG, JPEG, WebP or GIF, 5 MB each. Read them with `read_attachment`. In the Task file, refer to an
+image the Task needs with plain Markdown, the path relative to the Task file:
+`![the login form after the error](PROJ-123/1.png)`. Only the images the Task file refers to count
+for the job. `write_task` refuses a reference (outside fenced code blocks) to an image the ticket
+does not have; other image targets (a URL) are not attachments and are not checked.
 
 Always write a `## Review brief`. The reviewers read it with the rest of the Task file; the
 Implementer sees it too, so it states checks and reasons, not instructions. The `## Fix N`

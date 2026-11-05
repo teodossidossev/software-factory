@@ -5,6 +5,7 @@ import { constants } from 'node:fs';
 import { lstat, mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { missingAttachments } from './attachments.js';
 import { writeFileAtomic } from './atomic.js';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
@@ -131,10 +132,12 @@ export const MAX_FIX_BYTES = 64 * 1024;
 
 // write_task is refused while a job for the ticket exists in a non-terminal state, paused aside
 // (SF-067): the Task file changes while the job is paused, and Resume hands the change on.
-export async function refuseWhileJobRunning(workspace: Workspace, ticket: string, jobs: JobStore): Promise<void> {
+// The same guard keeps a ticket's images (SF-064) unchanged; what: what the refusal says cannot be
+// done.
+export async function refuseWhileJobRunning(workspace: Workspace, ticket: string, jobs: JobStore, what = 'the Task file cannot be replaced now'): Promise<void> {
   const job = await jobs.read(workspace.name, ticket);
   if (job !== undefined && !TERMINAL_STATES.includes(job.state) && job.state !== 'paused') {
-    throw new FactoryError('job_active', `The job for ${workspace.name}/${ticket} is ${job.state}; the Task file cannot be replaced now.`);
+    throw new FactoryError('job_active', `The job for ${workspace.name}/${ticket} is ${job.state}; ${what}.`);
   }
 }
 
@@ -212,6 +215,11 @@ export function writeTask(workspace: Workspace, ticket: string, content: string,
     }
     const buffer = checkTaskContent(ticket, content);
     await refuseWhileJobRunning(workspace, ticket, jobs);
+    // Every image the Task file refers to in the ticket's folder (SF-064) must be there.
+    const missing = await missingAttachments(workspace, ticket, content);
+    if (missing.length > 0) {
+      throw new FactoryError('attachment_missing', `The Task file refers to images ${ticket} does not have: ${missing.join(', ')}. Refer only to the attachments of ${TASK_DIR}/${ticket}/.`);
+    }
     if (options.expectedSha256 !== undefined) {
       const current = await readTaskRaw(workspace, ticket);
       if (taskSha256(current) !== options.expectedSha256) {

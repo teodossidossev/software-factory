@@ -1,5 +1,6 @@
 // Unit tests of the coding rules (SF-059): the links of AGENTS.md, the paths they may name, the
-// collection at a commit (instruction file, linked files, the user's rules files), the budget and
+// collection at a commit (instruction file, linked files, the user's rules files), the budget
+// (SF-093: the user's files first and cut when over it, repository files skipped one by one) and
 // its closing line, rules_skip with this repository's layout, and the job's copies.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -171,35 +172,106 @@ test('collectRules: the workspace\'s rules file, then the global one, after the 
   assert.deepEqual((await collectRules(repo, commit, options(odd))).list.files.map((file) => file.path), ['AGENTS.md']);
 });
 
-test('the budget: files taken whole in order; the first that does not fit and every later one are left out and named in the closing line', async () => {
+// The content given never exceeds the budget.
+function assertWithinBudget(list: { max_bytes: number; files: ReadonlyArray<{ bytes: number }> }): void {
+  assert.ok(list.files.reduce((sum, file) => sum + file.bytes, 0) <= list.max_bytes, `over the budget of ${list.max_bytes}`);
+}
+
+test("the budget: the user's files first, then the repository's in link order, each taken whole when it fits what is left, else left out while the next is still tried", async () => {
   const { repo, commit } = await repoWith('budget', { 'AGENTS.md': 'See [a](a.md), [big](big.md), [c](c.md).\n', 'a.md': 'A'.repeat(10), 'big.md': 'B'.repeat(100), 'c.md': 'C' });
   const config = await configWith('budget', { 'rules/global.md': 'G' });
   const agentsBytes = Buffer.byteLength('See [a](a.md), [big](big.md), [c](c.md).\n');
-  const { list, block } = await collectRules(repo, commit, options(config, { maxBytes: agentsBytes + 10 + 50 }));
-  assert.deepEqual(list.files.map((file) => file.path), ['AGENTS.md', 'a.md']);
-  assert.deepEqual(list.left_out, [{ source: 'repository', path: 'big.md', bytes: 100 }, { source: 'repository', path: 'c.md', bytes: 1 }, { source: 'global', path: 'rules/global.md', bytes: 1 }]);
-  assert.match(block, new RegExp(`\\n\\n${LEFT_OUT_LEAD} big\\.md, c\\.md, rules/global\\.md\\n</rules>$`));
-  assert.doesNotMatch(block, /BBBB|\nC\n|\nG\n/);
+  assert.equal(agentsBytes, 41);
+  const { list, block } = await collectRules(repo, commit, options(config, { maxBytes: agentsBytes + 60 }));
+  assert.deepEqual(list.files.map((file) => file.path), ['AGENTS.md', 'a.md', 'c.md', 'rules/global.md']);
+  assert.deepEqual(list.left_out, [{ source: 'repository', path: 'big.md', bytes: 100 }]);
+  assert.match(block, /### repository: AGENTS\.md\n[^]*### repository: a\.md\n[^]*### repository: c\.md\n\nC\n\n### global: rules\/global\.md\n\nG\n/);
+  assert.match(block, new RegExp(`\\n\\n${LEFT_OUT_LEAD} big\\.md\\n</rules>$`));
+  assert.doesNotMatch(block, /BBBB/);
+  assertWithinBudget(list);
   // Exactly at the budget, everything fits.
   const exact = await collectRules(repo, commit, options(config, { maxBytes: agentsBytes + 10 + 100 + 1 + 1 }));
   assert.deepEqual([exact.list.files.length, exact.list.left_out], [5, []]);
   assert.doesNotMatch(exact.block, /Not included/);
-  // A first file over the budget: only the sentence and the closing line.
+  // A budget the user's file fills: only it, then the closing line naming every repository file.
   const none = await collectRules(repo, commit, options(config, { maxBytes: 1 }));
-  assert.deepEqual(none.list.files, []);
-  assert.equal(none.block, `<rules>\n${RULES_SENTENCE}\n\n${LEFT_OUT_LEAD} AGENTS.md, a.md, big.md, c.md, rules/global.md\n</rules>`);
+  assert.deepEqual(none.list.files.map((file) => file.path), ['rules/global.md']);
+  assert.deepEqual(none.list.left_out.map((file) => file.path), ['AGENTS.md', 'a.md', 'big.md', 'c.md']);
+  assert.equal(none.block, `<rules>\n${RULES_SENTENCE}\n\n### global: rules/global.md\n\nG\n\n${LEFT_OUT_LEAD} AGENTS.md, a.md, big.md, c.md\n</rules>`);
+  assertWithinBudget(none.list);
 });
 
-test('a large AGENTS.md is read whole for its links: a link past 4 MiB still counts, and is left out by the budget with AGENTS.md', async () => {
+test('a large AGENTS.md is read whole for its links: a link past 4 MiB still counts, and is given while AGENTS.md is left out by the budget', async () => {
   const agents = `${'x'.repeat(5 * 1024 * 1024)}\n\nSee [late](docs/late.md).\n`;
   const { repo, commit } = await repoWith('large', { 'AGENTS.md': agents, 'docs/late.md': 'Late rule\n' });
   const config = await configWith('large');
   const { list, block } = await collectRules(repo, commit, options(config));
-  assert.deepEqual(list.files, []);
-  assert.deepEqual(list.left_out, [{ source: 'repository', path: 'AGENTS.md', bytes: Buffer.byteLength(agents) }, { source: 'repository', path: 'docs/late.md', bytes: 10 }]);
-  assert.match(block, /\nNot included, read them if relevant: AGENTS\.md, docs\/late\.md\n<\/rules>$/);
+  assert.deepEqual(list.files.map((file) => [file.path, file.bytes]), [['docs/late.md', 10]]);
+  assert.deepEqual(list.left_out, [{ source: 'repository', path: 'AGENTS.md', bytes: Buffer.byteLength(agents) }]);
+  assert.match(block, /### repository: docs\/late\.md\n\nLate rule\n\nNot included, read them if relevant: AGENTS\.md\n<\/rules>$/);
   const all = await collectRules(repo, commit, options(config, { maxBytes: 16 * 1024 * 1024 }));
   assert.deepEqual(all.list.files.map((file) => file.path), ['AGENTS.md', 'docs/late.md']);
+});
+
+test('a big repository file between small ones does not push out the small ones after it', async () => {
+  const { repo, commit } = await repoWith('between', { 'AGENTS.md': 'See [one](docs/one.md), [e2e](docs/e2e.md), [two](docs/two.md), [three](docs/three.md).\n', 'docs/one.md': 'One\n', 'docs/e2e.md': 'E'.repeat(60 * 1024), 'docs/two.md': 'Two\n', 'docs/three.md': 'Three\n' });
+  const config = await configWith('between', { 'rules/app.md': 'Mine\n' });
+  const { list, block } = await collectRules(repo, commit, options(config));
+  assert.deepEqual(list.files.map((file) => file.path), ['AGENTS.md', 'docs/one.md', 'docs/two.md', 'docs/three.md', 'rules/app.md']);
+  assert.deepEqual(list.left_out, [{ source: 'repository', path: 'docs/e2e.md', bytes: 60 * 1024 }]);
+  assert.match(block, /\nOne\n\n### repository: docs\/two\.md\n\nTwo\n\n### repository: docs\/three\.md\n\nThree\n\n### workspace: rules\/app\.md\n\nMine\n\nNot included, read them if relevant: docs\/e2e\.md\n<\/rules>$/);
+  assertWithinBudget(list);
+});
+
+test("the workspace's and the global rules are given even when the repository's files alone exceed the budget", async () => {
+  const agents = `See [big](big.md).${'.'.repeat(11)}\n`;
+  const { repo, commit } = await repoWith('reserved', { 'AGENTS.md': agents, 'big.md': 'B'.repeat(200) });
+  const config = await configWith('reserved', { 'rules/app.md': 'W'.repeat(10), 'rules/global.md': 'G'.repeat(5) });
+  const { list, block } = await collectRules(repo, commit, options(config, { maxBytes: 50 }));
+  assert.equal(Buffer.byteLength(agents), 30);
+  assert.deepEqual(list.files.map((file) => [file.source, file.path, file.bytes]), [['repository', 'AGENTS.md', 30], ['workspace', 'rules/app.md', 10], ['global', 'rules/global.md', 5]]);
+  assert.deepEqual(list.left_out, [{ source: 'repository', path: 'big.md', bytes: 200 }]);
+  assert.match(block, /### repository: AGENTS\.md\n[^]*### workspace: rules\/app\.md\n\nW{10}\n\n### global: rules\/global\.md\n\nG{5}\n\nNot included, read them if relevant: big\.md\n<\/rules>$/);
+  assertWithinBudget(list);
+  // A budget the user's files fill: no repository file at all.
+  const full = await collectRules(repo, commit, options(config, { maxBytes: 15 }));
+  assert.deepEqual(full.list.files.map((file) => file.path), ['rules/app.md', 'rules/global.md']);
+  assert.deepEqual(full.list.left_out.map((file) => file.path), ['AGENTS.md', 'big.md']);
+  assertWithinBudget(full.list);
+});
+
+test("a user's file over what is left is cut at the last full UTF-8 character, with its closing line; the global one is left out when nothing is left", async () => {
+  const { repo, commit } = await repoWith('cut', { 'AGENTS.md': 'Repo rule\n' });
+  // The euro sign (3 bytes) spans bytes 8 to 10, across the budget of 10: the cut keeps 8 bytes.
+  const workspace = 'abcdefgh\u20acxyz';
+  const config = await configWith('cut', { 'rules/app.md': workspace, 'rules/global.md': 'GGGG' });
+  const { list, block } = await collectRules(repo, commit, options(config, { maxBytes: 10 }));
+  assert.deepEqual(list.files, [
+    { source: 'workspace', path: 'rules/app.md', bytes: 8, sha256: sha256('abcdefgh'), cut_from: 14 },
+    { source: 'global', path: 'rules/global.md', bytes: 2, sha256: sha256('GG'), cut_from: 4 },
+  ]);
+  assert.deepEqual(list.left_out, [{ source: 'repository', path: 'AGENTS.md', bytes: 10 }]);
+  assert.equal(block, [
+    '<rules>', RULES_SENTENCE,
+    '', '### workspace: rules/app.md', '', 'abcdefgh', '[cut at the budget: 8 of 14 bytes given]',
+    '', '### global: rules/global.md', '', 'GG', '[cut at the budget: 2 of 4 bytes given]',
+    '', `${LEFT_OUT_LEAD} AGENTS.md`, '</rules>',
+  ].join('\n'));
+  assertWithinBudget(list);
+  // A workspace file cut exactly at the budget leaves nothing: the global one is left out, with its full size.
+  const filled = await configWith('filled', { 'rules/app.md': 'W'.repeat(30), 'rules/global.md': 'G' });
+  const cut = await collectRules(repo, commit, options(filled, { maxBytes: 10 }));
+  assert.deepEqual(cut.list.files, [{ source: 'workspace', path: 'rules/app.md', bytes: 10, sha256: sha256('W'.repeat(10)), cut_from: 30 }]);
+  assert.deepEqual(cut.list.left_out, [{ source: 'repository', path: 'AGENTS.md', bytes: 10 }, { source: 'global', path: 'rules/global.md', bytes: 1 }]);
+  assert.match(cut.block, /\nW{10}\n\[cut at the budget: 10 of 30 bytes given\]\n\nNot included, read them if relevant: AGENTS\.md, rules\/global\.md\n<\/rules>$/);
+  assertWithinBudget(cut.list);
+  // Files given whole carry no cut_from.
+  const whole = await collectRules(repo, commit, options(filled));
+  assert.ok(whole.list.files.every((file) => !('cut_from' in file)));
+  // rules_skip and the budget together: still within it.
+  const skipped = await collectRules(repo, commit, options(filled, { maxBytes: 10, skip: ['AGENTS.md'] }));
+  assert.deepEqual(skipped.list.skipped, ['AGENTS.md']);
+  assertWithinBudget(skipped.list);
 });
 
 test('no rule files: no block', async () => {
@@ -251,6 +323,10 @@ test('rulesBlock and rulesLines: the headings and sentence; sf rules lists paths
     'Skipped by rules_skip:', '  repository  docs/x.md',
   ]);
   assert.deepEqual(rulesLines('app', { commit: 'abc', max_bytes: 100, files: [], left_out: [], skipped: [] }), ['Rules for app at abc (budget 100 bytes):', '  No rule files found.']);
+  // A cut file: its given size, then the full one.
+  assert.deepEqual(rulesLines('app', { commit: 'abc', max_bytes: 100, files: [{ source: 'workspace', path: 'rules/app.md', bytes: 100, sha256: 'f'.repeat(64), cut_from: 250 }], left_out: [], skipped: [] }), [
+    'Rules for app at abc (budget 100 bytes):', '  workspace  rules/app.md  100 bytes (cut from 250 bytes)',
+  ]);
 });
 
 test('an unreadable rules file fails the collection with its config-relative path, never the absolute one', async (t) => {

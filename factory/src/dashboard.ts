@@ -12,7 +12,9 @@
 // check (SF-054) adds each ticket's last check, its start (Check) and its view. The board v3
 // (SF-077) adds to each job row what its card shows: who acts now, the Implementer's tool calls
 // and the findings a stopped job waits on. The Changes screen (SF-079) reads the file lists and the
-// file versions of the iterations (src/changes.ts), read-only.
+// file versions of the iterations (src/changes.ts), read-only. The planned ticket page (SF-081)
+// reads a ticket's Task file, its plan in plain words, its check and its history in one payload,
+// and saves the Task file (only over the version it read).
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { open, readFile, rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -29,10 +31,11 @@ import { lineEntries, type StreamEntry, streamContext } from './job-stream.js';
 import type { Job, JobState, JobStore } from './jobs.js';
 import { DECISIONS, unsettled } from './ledger.js';
 import { HANDOFF_MODES, WORKSPACE_COLORS, WORKSPACE_NAME_PATTERN } from './registry.js';
-import type { Setup } from './setup.js';
+import type { Setup, TicketRow } from './setup.js';
 import type { CheckSummary, TaskChecks } from './task-check.js';
 import { turnLimitLine } from './turn-limit.js';
-import { taskSha256, TICKET_PATTERN } from './task-file.js';
+import { MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskScope, taskSha256, TICKET_PATTERN } from './task-file.js';
+import { TicketHistory } from './ticket-history.js';
 import { describeEvent, followLines, shortInput } from './watch.js';
 
 export const DEFAULT_DASHBOARD_PORT = 8788;
@@ -42,6 +45,10 @@ export const MAX_STREAMS = 8;
 export const STREAM_PAGE_LINES = 2000;
 // The raw body of an action request, in bytes: a transport bound, not a lifecycle rule.
 export const MAX_ACTION_BODY_BYTES = 128 * 1024;
+// The raw body of the planned ticket page's Save (SF-081): a whole Task file as a JSON string, whose
+// escapes can take up to twice its bytes; the content's own size is checked by the Task file writer.
+// A file of mostly non-ASCII or control characters can need more and is written with write_task.
+export const MAX_TASK_BODY_BYTES = 2 * MAX_TASK_BYTES + 1024;
 const LOOPBACK_HOST = '127.0.0.1';
 const KEEP_ALIVE_MS = 15_000;
 const TOKEN_PATTERN = /^[0-9a-f]{64}$/;
@@ -79,8 +86,10 @@ export const ACTIONS: DashboardAction[] = ['approve', 'abort', 'say', 'review', 
 const PUSH_CHECK_INTERVAL_MS = 60_000;
 
 // The start screen's data and changes: the workspace registry and the Task files (src/setup.ts).
-// jobDependencies: the tickets a live job's Task file lands after (SF-084).
-export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'removeWorkspace' | 'tickets' | 'jobDependencies' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'archivedTickets' | 'taskText' | 'taskTitle'>;
+// jobDependencies: the tickets a live job's Task file lands after (SF-084). taskFile and saveTask:
+// the planned ticket page's Task file and its Save (SF-081).
+export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'removeWorkspace' | 'tickets' | 'jobDependencies' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'archivedTickets' | 'taskText' | 'taskTitle'
+  | 'taskFile' | 'saveTask'>;
 
 // The Task checks (SF-054): start one, a ticket's view and its board summary.
 export type DashboardChecks = Pick<TaskChecks, 'start' | 'view' | 'summary'>;
@@ -93,6 +102,12 @@ const NO_SETUP: DashboardSetup = {
   archivedTickets: async () => [],
   taskTitle: async () => null,
   taskText: async () => {
+    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
+  },
+  taskFile: async () => {
+    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
+  },
+  saveTask: async () => {
     throw new FactoryError('setup_unavailable', 'The start screen is not available.');
   },
   archiveTicket: async () => {
@@ -145,6 +160,8 @@ const BODIES = {
   'ticket-delete': { shape: '{}', schema: z.strictObject({}) },
   'ticket-start': { shape: '{}', schema: z.strictObject({}) },
   'ticket-check': { shape: '{}', schema: z.strictObject({}) },
+  // Save of the planned ticket page (SF-081): the whole Task file and the sha256 of the version read.
+  'ticket-task': { shape: '{"content": string, "sha256": string}', schema: z.strictObject({ content: z.string(), sha256: z.string() }) },
   'ticket-new': { shape: '{"workspace": string, "ticket": string, "title": string, "request": string}', schema: z.strictObject({ workspace: z.string(), ticket: z.string(), title: z.string(), request: z.string() }) },
 };
 type PostRoute = keyof typeof BODIES;
@@ -156,6 +173,9 @@ const ERROR_STATUS: Record<string, number> = {
   job_exists: 409, job_active: 409, job_limit: 409, task_draft: 409, checkout_dirty: 409, branch_exists: 409, branch_changed: 409, branch_missing: 409, worktree_exists: 409,
   worktree_missing: 409, sensitive_unacknowledged: 409, ticket_exists: 409, workspace_exists: 409, workspace_busy: 409,
   job_not_found: 404, workspace_not_found: 404, task_not_found: 404,
+  // Save of the planned ticket page (SF-081): the Task file is another version than the one read.
+  // Not the job view's task_changed field (SF-067).
+  task_changed: 409,
   // The Task check (SF-054): one at a time per ticket.
   check_running: 409,
   // A Restart that would delete a branch with commits or a pushed one (SF-067).
@@ -525,15 +545,39 @@ async function checkOf(checks: DashboardChecks, workspace: string, ticket: strin
 async function ticketsPayload(setup: DashboardSetup, checks: DashboardChecks | undefined) {
   const tickets = [];
   for (const row of await setup.tickets()) {
-    const message = ticketConversation(row.workspace, row.ticket, row.request ?? undefined);
-    const url = conversationUrl(message);
-    // A very long message does not fit a link; the page offers it to copy instead.
-    tickets.push({
-      ...row, conversation: { message, url: url.length <= MAX_CONVERSATION_URL ? url : null },
-      ...(checks !== undefined ? { check: await checkOf(checks, row.workspace, row.ticket) } : {}),
-    });
+    tickets.push(await ticketEntry(row, checks));
   }
   return { tickets, archived: await setup.archivedTickets(), job_lands_after: await setup.jobDependencies() };
+}
+
+// A row of the tickets payload: the ticket, its conversation and, with the Task checks, its check.
+async function ticketEntry(row: TicketRow, checks: DashboardChecks | undefined) {
+  const message = ticketConversation(row.workspace, row.ticket, row.request ?? undefined);
+  const url = conversationUrl(message);
+  // A very long message does not fit a link; the page offers it to copy instead.
+  return {
+    ...row, conversation: { message, url: url.length <= MAX_CONVERSATION_URL ? url : null },
+    ...(checks !== undefined ? { check: await checkOf(checks, row.workspace, row.ticket) } : {}),
+  };
+}
+
+// The planned ticket page's plan in plain words (SF-081), from the Task file's front matter as the
+// jobs read it: the branch it starts from, the files it will change (scope, then may_touch, each
+// path once, a may_touch one marked sensitive), whether there is a scope, and the tickets it waits
+// for with SF-084's state of each, from the tickets row (a ticket of another workspace as
+// <workspace>/<ticket>).
+function planOf(text: string, row: TicketRow) {
+  const fields = parseFrontMatter(text) ?? new Map<string, string>();
+  const scope = taskScope(fields);
+  const sensitive = mayTouch(fields);
+  const files: Array<{ path: string; sensitive: boolean }> = [];
+  for (const path of [...(scope ?? []), ...sensitive]) {
+    if (!files.some((file) => file.path === path)) {
+      files.push({ path, sensitive: sensitive.includes(path) });
+    }
+  }
+  const waits = row.lands_after.map((dep) => ({ ticket: dep.workspace === row.workspace ? dep.ticket : `${dep.workspace}/${dep.ticket}`, state: dep.state, merged: dep.state === 'merged' }));
+  return { starts_from: fields.get('base') ?? row.base, files, scoped: scope !== undefined, waits_for: waits };
 }
 
 async function stateHistory(jobs: JobStore, workspace: string, ticket: string) {
@@ -639,6 +683,8 @@ type Target =
   | { kind: 'ticket-action'; action: 'archive' | 'restore' | 'delete' | 'start'; workspace: string | undefined; ticket: string | undefined }
   // The Task check (SF-054): GET reads the ticket's last check, POST starts one.
   | { kind: 'ticket-check'; workspace: string | undefined; ticket: string | undefined }
+  // The Task file (SF-081): GET reads it, POST saves it.
+  | { kind: 'ticket-task'; workspace: string | undefined; ticket: string | undefined }
   | { kind: 'both'; route: 'workspace-add' | 'ticket-new' }
   | { kind: 'read' };
 
@@ -667,6 +713,9 @@ function targetOf(path: string[]): Target {
   }
   if (kind === 'tickets' && path.length === 5 && c === 'check') {
     return { kind: 'ticket-check', workspace: a, ticket: b };
+  }
+  if (kind === 'tickets' && path.length === 5 && c === 'task') {
+    return { kind: 'ticket-task', workspace: a, ticket: b };
   }
   return { kind: 'read' };
 }
@@ -725,6 +774,8 @@ interface Post {
   // A check before the body is read; false answers an empty 404.
   exists?: () => Promise<boolean>;
   call: (data: unknown) => (() => Promise<unknown>) | undefined;
+  // The raw body's bound in bytes; MAX_ACTION_BODY_BYTES by default.
+  bodyLimit?: number;
   refreshSetup?: boolean;
   // The action may end a job too (archive, delete): every page gets the jobs again.
   refreshJobs?: boolean;
@@ -755,6 +806,8 @@ export async function startDashboard(
   const streams = new Set<Stream>();
   const toolCalls = new ToolCallCounter();
   const changes = new Changes(jobs);
+  // The tickets' history (SF-081), read for the planned ticket page.
+  const history = new TicketHistory(stateDir);
   const validateHost = localhostHostValidation();
   const validateOrigin = localhostOriginValidation();
   // The exact origin of the page, known once the listener has its port.
@@ -886,6 +939,10 @@ export async function startDashboard(
       return;
     }
     const [, kind, ...rest] = path;
+    if (kind === 'tickets' && rest.length === 3 && rest[2] === 'page') {
+      await ticketPage(res, rest, query);
+      return;
+    }
     if (kind === 'tickets') {
       await taskText(res, rest, query);
       return;
@@ -1013,6 +1070,56 @@ export async function startDashboard(
     return { entries, next: from + lines.length, end };
   }
 
+  // A read of a Task file the reader refused: an empty 404 for a missing ticket, workspace or file,
+  // as for the other reads, else the refusal; anything but a FactoryError is thrown on.
+  function refuseRead(res: ServerResponse, error: unknown): void {
+    if (!(error instanceof FactoryError)) {
+      throw error;
+    }
+    const status = ERROR_STATUS[error.code] ?? 500;
+    if (status === 404) {
+      empty(res, 404);
+    } else {
+      json(res, status, { ok: false, error: { code: error.code, message: error.message } });
+    }
+  }
+
+  // GET api/tickets/<ws>/<ticket>/page (SF-081): the planned ticket page in one payload: the tickets
+  // row with its conversation, the Task file and its sha256 (the version a Save starts from), the
+  // plan in plain words, the last check (null without the Task checks), the history, newest first,
+  // and queue null (SF-071 adds it). A ticket that is not in the tickets list is an empty 404.
+  async function ticketPage(res: ServerResponse, rest: string[], query: URLSearchParams): Promise<void> {
+    const key = jobKey(rest[0], rest[1]);
+    const row = key === undefined || [...query.keys()].length > 0 ? undefined : (await setup.tickets()).find((entry) => entry.workspace === key[0] && entry.ticket === key[1]);
+    if (key === undefined || row === undefined) {
+      empty(res, 404);
+      return;
+    }
+    let file;
+    try {
+      file = await setup.taskFile(...key);
+    } catch (error) {
+      refuseRead(res, error);
+      return;
+    }
+    let check = null;
+    if (checks !== undefined) {
+      try {
+        check = await checks.view(...key);
+      } catch (error) {
+        console.error(error);
+      }
+    }
+    json(res, 200, {
+      ticket: await ticketEntry(row, checks),
+      task: { text: file.text, sha256: file.sha256 },
+      plan: planOf(file.text, row),
+      check,
+      history: await history.timeline(...key, { sha256: file.sha256, mtime: file.mtime }),
+      queue: null,
+    });
+  }
+
   // GET api/tickets/<ws>/<ticket>/task[?archived=1]: the Task file through the Task file reader,
   // as text/markdown. A missing ticket, workspace or file is an empty 404, as for the other reads;
   // a file the reader refuses (not a Task file, not a regular file) answers its refusal.
@@ -1027,15 +1134,7 @@ export async function startDashboard(
     try {
       text = await setup.taskText(...key, archived === '1');
     } catch (error) {
-      if (!(error instanceof FactoryError)) {
-        throw error;
-      }
-      const status = ERROR_STATUS[error.code] ?? 500;
-      if (status === 404) {
-        empty(res, 404);
-      } else {
-        json(res, status, { ok: false, error: { code: error.code, message: error.message } });
-      }
+      refuseRead(res, error);
       return;
     }
     body(res, 'text/markdown; charset=utf-8', text);
@@ -1189,7 +1288,21 @@ export async function startDashboard(
     };
   }
 
-  function setupPost(target: Exclude<Target, { kind: 'read' | 'action' | 'ticket-check' }>): Post | undefined {
+  // POST api/tickets/<ws>/<ticket>/task (SF-081): Save of the planned ticket page, through
+  // Setup.saveTask; the new version (and the check it made stale) reaches every page.
+  function taskPost([workspace, ticket]: [string, string]): Post {
+    return {
+      route: 'ticket-task',
+      bodyLimit: MAX_TASK_BODY_BYTES,
+      call: (data) => {
+        const parsed = BODIES['ticket-task'].schema.safeParse(data);
+        return parsed.success ? () => setup.saveTask(workspace, ticket, parsed.data.content, parsed.data.sha256) : undefined;
+      },
+      refreshSetup: true,
+    };
+  }
+
+  function setupPost(target: Exclude<Target, { kind: 'read' | 'action' | 'ticket-check' | 'ticket-task' }>): Post | undefined {
     if (target.kind === 'ticket-action') {
       const key = jobKey(target.workspace, target.ticket);
       if (key === undefined) {
@@ -1256,12 +1369,13 @@ export async function startDashboard(
       empty(res, 404);
       return;
     }
-    const raw = await readBody(req, MAX_ACTION_BODY_BYTES);
+    const limit = post.bodyLimit ?? MAX_ACTION_BODY_BYTES;
+    const raw = await readBody(req, limit);
     if (raw === 'interrupted') {
       return;
     }
     if (raw === 'too_large') {
-      fail(413, 'body_too_large', `The body must be at most ${MAX_ACTION_BODY_BYTES} bytes.`, { connection: 'close' });
+      fail(413, 'body_too_large', `The body must be at most ${limit} bytes.`, { connection: 'close' });
       return;
     }
     let data: unknown;
@@ -1362,6 +1476,23 @@ export async function startDashboard(
         return;
       }
       (post !== undefined ? handlePost(req, res, post) : checkView(res, key)).catch(failed);
+      return;
+    }
+    if (what.kind === 'ticket-task') {
+      const key = jobKey(what.workspace, what.ticket);
+      if (req.method !== 'GET' && req.method !== 'POST') {
+        empty(res, 405, { allow: 'GET, POST' });
+        return;
+      }
+      if (req.method === 'POST') {
+        if (key === undefined) {
+          empty(res, 404);
+          return;
+        }
+        handlePost(req, res, taskPost(key)).catch(failed);
+        return;
+      }
+      route(req, res, path, target.searchParams).catch(failed);
       return;
     }
     if (what.kind === 'both' && req.method === 'POST') {

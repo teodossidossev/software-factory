@@ -46,6 +46,7 @@ import { type Launch, type RunnerRequest, Runners, type RunnerWork } from './run
 import { type IdleOutcome, ImplementerSession, type LimitAnswer, type LimitedTurn } from './session.js';
 import { CONTINUE_PROMPT, limitDecision, worktreeChanged, type WorktreeState, worktreeState } from './turn-limit.js';
 import { appendFix, isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskDiff, taskScope, taskSha256, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
+import { TicketHistory } from './ticket-history.js';
 import { addWorktree, deleteBranch, removeWorktree } from './worktree.js';
 
 export const MAX_REPORT_BYTES = 64 * 1024;
@@ -362,6 +363,8 @@ export interface ExecutionOptions {
 export class Execution implements RunnerWork {
   readonly jobs: JobStore;
   readonly #config: Config;
+  // The tickets' history (SF-081): each Fix section the factory appends is recorded as fix_added.
+  readonly #history: TicketHistory;
   readonly #resolve: (name: string) => Promise<Workspace>;
   readonly #onStateChange: StateListener;
   readonly #handbook: string;
@@ -385,6 +388,7 @@ export class Execution implements RunnerWork {
   constructor(config: Config, resolve: (name: string) => Promise<Workspace>, onStateChange: StateListener = () => {}, handbook = '', options: ExecutionOptions = {}) {
     this.#config = config;
     this.jobs = new JobStore(config.stateDir);
+    this.#history = new TicketHistory(config.stateDir);
     this.#resolve = resolve;
     this.#onStateChange = onStateChange;
     this.#handbook = handbook;
@@ -3114,7 +3118,7 @@ export class Execution implements RunnerWork {
     const fix = job.iteration;
     // A change made while the job was paused, before the factory's own Fix section (SF-067).
     const change = job.task_sha256 === undefined || job.worktree === null ? undefined : await this.#taskChange(workspace, job);
-    await appendFix(workspace, ticket, fix, content, title);
+    await appendFix(workspace, ticket, fix, content, title, { record: (sha256) => this.#history.append(workspaceName, ticket, { kind: 'fix_added', by: 'factory', sha256, fix }) });
     if (ledger !== undefined) {
       await this.jobs.writeLedger(workspaceName, ticket, ledger);
     }

@@ -394,6 +394,13 @@ textarea.mdedit.fld { font: 12.5px/1.5 var(--mono); padding: 8px; border: 1px so
 .pointer { cursor: pointer; }
 .mt6 { margin-top: 6px; }
 .pick { color: var(--accent); cursor: pointer; }
+/* The planned ticket page (SF-081), where the prototype's raw fields became read-only cards with a
+   help line: the help line, the list of files with the lock of a sensitive one, the row of the
+   first message with its Copy. */
+.card2 > .hint { font-size: 12px; color: var(--muted); }
+.flist { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; font-size: 12.5px; overflow-wrap: anywhere; }
+.flist .lock { margin-left: 6px; cursor: help; }
+.cmhead { display: flex; gap: 8px; align-items: center; }
 
 /* The live page's own pieces, which the prototype does not show, in its style: the hidden
    attribute (the prototype page's first style element), the connection, the workspace filter and
@@ -554,9 +561,6 @@ pre.raw.doc .heading { font-weight: 700; }
 #drawer :is(.ws-name, .ticket-name) { font-weight: 600; overflow-wrap: anywhere; }
 #drawer .ws-path { font-family: var(--mono); font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
 #drawer .ws-problem { color: var(--del); font-size: 13px; overflow-wrap: anywhere; }
-#drawer .copy-box { display: flex; gap: 8px; align-items: flex-start; }
-#drawer .copy-box :is(input, textarea) { flex: 1; min-width: 0; min-height: 28px; padding: 4px 8px; background: var(--panel); font: 12.5px/1.4 var(--mono); }
-#drawer .copy-box textarea { resize: vertical; }
 
 /* Documents: the Task text and the MR text. */
 :is(#drawer, .olddetail) .document { margin: 0; max-height: 70vh; overflow: auto; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel-2); font: 13px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -573,7 +577,6 @@ pre.raw.doc .heading { font-weight: 700; }
 #drawer .drawer-heading h2 { overflow-wrap: anywhere; }
 #drawer .drawer-kicker { font: 12.5px/1.4 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
 #drawer .panel { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-#drawer .task-conversation { padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel); display: flex; flex-direction: column; gap: 8px; }
 @media (max-width: 760px) {
   #drawer { padding: 12px 12px 48px; }
 }
@@ -582,15 +585,15 @@ pre.raw.doc .heading { font-weight: 700; }
 .olddetail .unapplied { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--warn); border-radius: var(--radius-sm); background: var(--warn-bg); overflow-wrap: anywhere; }
 .olddetail .unapplied ol { margin: 0; padding-left: 24px; }
 
-/* The Task check (SF-054): above the Task text, the paraphrase before the findings. */
-:is(#drawer, #stream) .task-check { margin: 0 0 12px; padding: 8px 12px; border: 1px solid var(--border); border-left-width: 4px; border-radius: var(--radius-sm); overflow-wrap: anywhere; }
-:is(#drawer, #stream) .task-check p { margin: 0 0 4px; }
-:is(#drawer, #stream) .task-check .check-head { font-weight: 600; }
-:is(#drawer, #stream) .task-check .check-stale { color: var(--warn); font-weight: 600; }
-:is(#drawer, #stream) .task-check .check-error { color: var(--del); }
-:is(#drawer, #stream) .task-check .check-title { margin: 8px 0 4px; font-size: 13px; }
-:is(#drawer, #stream) .task-check .check-severity { margin-top: 6px; font-weight: 600; }
-:is(#drawer, #stream) .task-check .check-severity.s-blocker { color: var(--del); }
-:is(#drawer, #stream) .task-check .check-severity.s-major { color: var(--warn); }
-:is(#drawer, #stream) .task-check :is(.check-findings, .check-files) { margin: 2px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 2px; }
-:is(#drawer, #stream) .task-check .check-kind { font-weight: 600; }
+/* The Task check (SF-054) behind the implement prompt's Task toggle: the paraphrase before the findings. */
+#stream .task-check { margin: 0 0 12px; padding: 8px 12px; border: 1px solid var(--border); border-left-width: 4px; border-radius: var(--radius-sm); overflow-wrap: anywhere; }
+#stream .task-check p { margin: 0 0 4px; }
+#stream .task-check .check-head { font-weight: 600; }
+#stream .task-check .check-stale { color: var(--warn); font-weight: 600; }
+#stream .task-check .check-error { color: var(--del); }
+#stream .task-check .check-title { margin: 8px 0 4px; font-size: 13px; }
+#stream .task-check .check-severity { margin-top: 6px; font-weight: 600; }
+#stream .task-check .check-severity.s-blocker { color: var(--del); }
+#stream .task-check .check-severity.s-major { color: var(--warn); }
+#stream .task-check :is(.check-findings, .check-files) { margin: 2px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 2px; }
+#stream .task-check .check-kind { font-weight: 600; }

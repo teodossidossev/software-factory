@@ -1,8 +1,8 @@
 // Behaviour of the setup in static/app.js (SF-025, SF-046), run under node:vm against the fake
 // page of test/support/fake-dom.ts: Workspaces and New ticket in the drawer from the header, the
-// workspace form and list, the new-ticket form, in a ticket's Task drawer the conversation link
-// (a click, never automatic) and its copy box, and the Start of a ticket whose Task file is
-// written, on its Queue card (SF-040, SF-077: a click on the card opens its Task).
+// workspace form and list, the new-ticket form, on the planned ticket page (SF-081) the
+// conversation link (a click, never automatic) and the first message's Copy, an archived Task in
+// the drawer, and the Start of a ticket whose Task file is written, on its Queue card (SF-040).
 // Script checks, not browser acceptance: the manual steps are in factory/README.md.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -223,53 +223,67 @@ test('setup client: the new-ticket form posts the exact fields, clears on succes
   assert.deepEqual(page.requests.filter((request) => request.path.startsWith('http')), []);
 });
 
-// The Task drawer of a Queue card: a click on the card.
-async function openTaskOf(page: Page, key: string): Promise<void> {
+// The planned ticket page of a Queue card (SF-081): a click on the card, its page answered from
+// the card's row.
+async function openTaskOf(page: Page, key: string, row: ReturnType<typeof ticket>): Promise<void> {
   items(page, 'qlist').find((item) => item.dataset.ticket === key)!.click();
+  await page.flush();
+  const text = `---\nticket: ${row.ticket}\ntitle: ${row.title}\nbase: main\n---\n`;
+  page.requests.find((request) => request.path === `api/tickets/${key}/page`)!.respond(200, {
+    ticket: row, task: { text, sha256: 'a'.repeat(64) }, plan: { starts_from: 'main', files: [], scoped: false, waits_for: [] }, check: null, history: [], queue: null,
+  });
   await page.flush();
 }
 
-test('setup client: the Task drawer offers the ticket\'s conversation, a click away, and its copy box; only the server\'s ChatGPT URL becomes a link', async () => {
+// The page's Planning conversation card.
+const conversationCard = (page: Page): FakeElement => page.$('ticket').querySelectorAll('.card2').find((card) => card.querySelector('h3')?.textContent === 'Planning conversation')!;
+
+test('setup client: the planned ticket page offers the ticket\'s conversation, a click away, and its first message to copy; only the server\'s ChatGPT URL becomes a link', async () => {
   const written: string[] = [];
-  const page = await openPage([], [workspace('app')], [
-    ticket('app/T-5'),
-    ticket('app/T-7', { conversation: { message: 'x', url: 'javascript:alert(1)' } }),
-  ], { writeText: async (text) => void written.push(text) });
+  const rows = [ticket('app/T-5'), ticket('app/T-7', { conversation: { message: 'x', url: 'javascript:alert(1)' } })];
+  const page = await openPage([], [workspace('app')], rows, { writeText: async (text) => void written.push(text) });
   // No reviewer line anywhere on the board (SF-040 removes the ChatGPT reviewer).
   assert.doesNotMatch(page.$('qlist').textContent, /Reviewer/);
-  await openTaskOf(page, 'app/T-5');
-  assert.equal(page.$('task-conversation').hidden, false);
-  const open = page.$('task-conversation-link');
-  assert.deepEqual([open.hidden, open.href, open.target, open.rel], [false, `${PREFIX}${encodeURIComponent('Use the Software Factory connector for T-5.')}`, '_blank', 'noopener noreferrer']);
-  assert.equal(page.$('task-conversation-text').value, open.href);
-  assert.match(page.$('task-conversation-hint').textContent, /press Enter if it is not sent by itself/);
-  // Nothing opened by itself: no request but the Task text, no navigation.
+  await openTaskOf(page, 'app/T-5', rows[0]!);
+  const url = `${PREFIX}${encodeURIComponent('Use the Software Factory connector for T-5.')}`;
+  const card = conversationCard(page);
+  const open = link(card)!;
+  assert.deepEqual([open.textContent, open.href, open.target, open.rel], ['Open the ChatGPT conversation ↗', url, '_blank', 'noopener noreferrer']);
+  // The header's link too.
+  const head = link(page.$('ticket').querySelector('header.jhead')!)!;
+  assert.deepEqual([head.className, head.href, head.target, head.rel], ['btn linkbtn', url, '_blank', 'noopener noreferrer']);
+  assert.equal(card.querySelector('pre.cm')!.textContent, 'Use the Software Factory connector for T-5.');
+  // Nothing opened by itself: no request but the page, no navigation.
   assert.deepEqual(page.requests.filter((request) => request.path.startsWith('http')), []);
-  page.$('task-conversation-copy').click();
+  buttons(card).find((button) => button.textContent === 'Copy')!.click();
   await page.flush();
-  assert.deepEqual(written, [open.href]);
-  assert.equal(page.$('conversation-copy-status').textContent, 'Copied.');
-  // A URL that is not the ChatGPT prefill is not linked; the message is offered to copy as text.
-  await openTaskOf(page, 'app/T-7');
-  assert.equal(page.$('conversation-copy-status').textContent, '');
-  assert.deepEqual([page.$('task-conversation-link').hidden, page.$('task-conversation-link').href], [true, '']);
-  assert.equal(page.$('task-conversation-text').value, 'x');
+  assert.deepEqual(written, ['Use the Software Factory connector for T-5.']);
+  assert.match(conversationCard(page).textContent, /Copied\./);
+  // A URL that is not the ChatGPT prefill is not linked anywhere on the page.
+  page.$('ticket').querySelector('[data-back]')!.click();
+  await openTaskOf(page, 'app/T-7', rows[1]!);
+  assert.deepEqual(page.$('ticket').all().filter((element) => element.tagName === 'A').map((element) => element.href), []);
+  assert.equal(conversationCard(page).querySelector('pre.cm')!.textContent, 'x');
 });
 
-test('setup client: a message too long for a link is offered to copy; an archived Task has no conversation', async () => {
+test('setup client: a message too long for a link is offered to copy; an archived Task opens in the drawer, without a conversation', async () => {
   const long = 'x'.repeat(9000);
-  const page = await openPage([], [workspace('app')], [ticket('app/T-8', { conversation: { message: long, url: null } })]);
-  await openTaskOf(page, 'app/T-8');
-  assert.equal(page.$('task-conversation-link').hidden, true);
-  assert.equal(page.$('task-conversation-text').value, long);
-  assert.match(page.$('task-conversation-hint').textContent, /too long for a link: copy it and paste it into a new ChatGPT conversation/);
+  const row = ticket('app/T-8', { conversation: { message: long, url: null } });
+  const page = await openPage([], [workspace('app')], [row]);
+  await openTaskOf(page, 'app/T-8', row);
+  const card = conversationCard(page);
+  assert.equal(link(card), undefined);
+  assert.match(card.textContent, /too long for a link: copy it into a new ChatGPT conversation of this project/);
+  assert.equal(card.querySelector('pre.cm')!.textContent, long);
+  page.$('ticket').querySelector('[data-back]')!.click();
   page.streams.at(-1)!.emit('tickets', { tickets: [], archived: [{ workspace: 'app', ticket: 'T-4', title: 'Four' }] });
   page.$('open-archived').click();
-  const [row] = items(page, 'archived-list');
-  buttons(row!).find((button) => button.textContent === 'Task')!.click();
+  const [entry] = items(page, 'archived-list');
+  buttons(entry!).find((button) => button.textContent === 'Task')!.click();
   await page.flush();
-  assert.equal(page.$('task-conversation').hidden, true);
   assert.equal(page.requests.at(-1)!.path, 'api/tickets/app/T-4/task?archived=1');
+  assert.deepEqual([page.$('task-panel').hidden, page.$('drawer-kicker').textContent], [false, 'app · .software-factory/archive/T-4.md']);
+  assert.equal(page.$('task-panel').all().some((element) => element.tagName === 'A' || element.tagName === 'TEXTAREA'), false);
   assert.equal(posts(page).length, 0);
 });
 

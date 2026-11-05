@@ -8,7 +8,7 @@ import { after, before, test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
 import { JobStore } from '../src/jobs.js';
 import type { Workspace } from '../src/registry.js';
-import { checkTaskContent, landsAfter, MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskScope, writeTask } from '../src/task-file.js';
+import { appendFix, checkTaskContent, landsAfter, MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskScope, taskSha256, writeTask } from '../src/task-file.js';
 
 const VALID = '---\nticket: PROJ-1\ntitle: Export as CSV\nbase: master\n---\n\n# PROJ-1: Export as CSV\n';
 
@@ -136,4 +136,49 @@ test('landsAfter (SF-084) reads lands_after: in the list forms of may_touch; a t
   assert.deepEqual(landsAfter(fields('lands_after: []'), 'app'), []);
   // Duplicates once; names that are no ticket or workspace (paths, empty parts) are dropped.
   assert.deepEqual(landsAfter(fields('lands_after: [A-1, app/A-1, A-1, ../x, Web/W-1, a/b/c, /A-2, web/, .hidden]'), 'app'), [{ workspace: 'app', ticket: 'A-1' }]);
+});
+
+const isCode = (code: string) => (error: unknown): boolean => error instanceof FactoryError && error.code === code;
+
+test('writeTask with expectedSha256 (SF-081): the version read is replaced; a stale one is refused with task_changed and nothing is written', async () => {
+  const workspace = await newWorkspace('expected');
+  const path = join(workspace.workCheckout, '.software-factory', 'PROJ-1.md');
+  await assert.rejects(writeTask(workspace, 'PROJ-1', VALID, jobs, { expectedSha256: taskSha256(VALID) }), isCode('task_not_found'));
+  await writeTask(workspace, 'PROJ-1', VALID, jobs);
+  const edited = `${VALID}\nEdited.\n`;
+  const recorded: string[] = [];
+  const result = await writeTask(workspace, 'PROJ-1', edited, jobs, { expectedSha256: taskSha256(VALID), record: async (sha) => void recorded.push(sha) });
+  assert.equal(await readFile(path, 'utf8'), edited);
+  assert.deepEqual(recorded, [taskSha256(edited)]);
+  assert.equal(result.sha256, taskSha256(edited));
+
+  // The page still holds VALID's sha256: the file is another version now.
+  await assert.rejects(writeTask(workspace, 'PROJ-1', `${VALID}\nMine.\n`, jobs, { expectedSha256: taskSha256(VALID), record: async (sha) => void recorded.push(sha) }), isCode('task_changed'));
+  assert.equal(await readFile(path, 'utf8'), edited);
+  assert.equal(recorded.length, 1);
+});
+
+test('writeTask (SF-081): two concurrent saves from the same version: one wins, the other gets task_changed', async () => {
+  const workspace = await newWorkspace('concurrent');
+  await writeTask(workspace, 'PROJ-1', VALID, jobs);
+  const expectedSha256 = taskSha256(VALID);
+  const results = await Promise.allSettled([
+    writeTask(workspace, 'PROJ-1', `${VALID}\nA\n`, jobs, { expectedSha256 }),
+    writeTask(workspace, 'PROJ-1', `${VALID}\nB\n`, jobs, { expectedSha256 }),
+  ]);
+  assert.deepEqual(results.map((result) => result.status), ['fulfilled', 'rejected']);
+  assert.ok(isCode('task_changed')((results[1] as PromiseRejectedResult).reason));
+  assert.equal(await readFile(join(workspace.workCheckout, '.software-factory', 'PROJ-1.md'), 'utf8'), `${VALID}\nA\n`);
+});
+
+test('writeTask and appendFix (SF-081) record the sha256 of the text written; a failing record does not fail the write', async () => {
+  const workspace = await newWorkspace('record');
+  const recorded: string[] = [];
+  await writeTask(workspace, 'PROJ-1', VALID, jobs, { record: async () => { throw new Error('disk full'); } });
+  const text = await appendFix(workspace, 'PROJ-1', 1, '1. [R1, major] Fix it.', undefined, { record: async (sha) => void recorded.push(sha) });
+  assert.deepEqual(recorded, [taskSha256(text)]);
+  assert.equal(await readFile(join(workspace.workCheckout, '.software-factory', 'PROJ-1.md'), 'utf8'), text);
+  // A refused write records nothing.
+  await assert.rejects(writeTask(workspace, 'PROJ-1', 'no front matter', jobs, { record: async (sha) => void recorded.push(sha) }), isCode('invalid_content'));
+  assert.equal(recorded.length, 1);
 });

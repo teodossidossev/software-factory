@@ -19,6 +19,7 @@ import { DEFAULT_PAGE_BYTES, MAX_FILE_BYTES, MAX_PAGE_BYTES, MAX_PATH_LENGTH, MI
 import { DEFAULT_RESULTS, MAX_QUERY_CHARS, MAX_RESULTS, search } from './search.js';
 import { checkFile, checkFinding, recordVerdict, type TaskChecks } from './task-check.js';
 import { MAX_TASK_BYTES, TICKET_DESCRIPTION, TICKET_PATTERN, writeTask } from './task-file.js';
+import type { TicketHistory } from './ticket-history.js';
 
 export const SERVER_NAME = 'software-factory';
 const LOOPBACK_HOST = '127.0.0.1';
@@ -78,7 +79,8 @@ const relativePath = (what: string) => z.string().min(1).max(MAX_PATH_LENGTH).de
 export type ServerChecks = Pick<TaskChecks, 'current'>;
 
 // execution: only its JobStore, for write_task's guard against replacing the Task file of a live job.
-function createMcpServer(handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks: ServerChecks | undefined): McpServer {
+// history: the tickets' history (SF-081), where write_task records "written"; none records nothing.
+function createMcpServer(handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks: ServerChecks | undefined, history?: TicketHistory): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version }, { instructions: handbook.quickStart });
 
   server.registerTool(
@@ -196,7 +198,8 @@ function createMcpServer(handbook: Handbook, version: string, execution: Pick<Ex
     },
     async ({ workspace, ticket, content }) => {
       try {
-        return toolResult({ ...(await writeTask(await resolveWorkspace(workspace), ticket, content, execution.jobs)) });
+        const record = history === undefined ? undefined : (sha256: string) => history.append(workspace, ticket, { kind: 'written', by: 'context_owner', sha256 });
+        return toolResult({ ...(await writeTask(await resolveWorkspace(workspace), ticket, content, execution.jobs, { record })) });
       } catch (error) {
         return toolError(error);
       }
@@ -268,8 +271,8 @@ function listen(server: HttpServer, port: number): Promise<AddressInfo> {
   });
 }
 
-export async function startServer(port: number, handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks?: ServerChecks): Promise<RunningServer> {
-  const mcpHandler = createMcpHandler(() => createMcpServer(handbook, version, execution, checks));
+export async function startServer(port: number, handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks?: ServerChecks, history?: TicketHistory): Promise<RunningServer> {
+  const mcpHandler = createMcpHandler(() => createMcpServer(handbook, version, execution, checks, history));
   const nodeHandler = toNodeHandler(mcpHandler);
   const validateHost = localhostHostValidation();
   const validateOrigin = localhostOriginValidation();

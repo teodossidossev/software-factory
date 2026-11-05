@@ -28,6 +28,7 @@ import { Setup } from './setup.js';
 import { handoverLines, type StatusRow, statusRows } from './status.js';
 import { fileSummaryLines } from './patch.js';
 import { CheckStore, checkLines, checkSettings, refuseDraft, runTaskCheck, TaskChecks } from './task-check.js';
+import { TicketHistory } from './ticket-history.js';
 import { readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { turnLimitLine } from './turn-limit.js';
 import { watchEvents } from './watch.js';
@@ -116,10 +117,13 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     dashboard?.onStateChange(job, from);
   };
   const execution = new Execution(config, (name) => resolveWorkspace(name), onStateChange, handbook.text);
+  // The tickets' history (SF-081): New ticket and Save (Setup) and write_task (the MCP server)
+  // record the Task file's writes; Execution records its Fix sections itself.
+  const history = new TicketHistory(config.stateDir);
   // The start screen of the dashboard: the registry and the Task files, under the Execution's lock.
   // A finished job leaves with its Task file through the lock's scope, in the same acquisition as
   // the ticket action's checks: it is archived and a kept worktree removed.
-  const setup = new Setup({ configDir: configDir(), jobs, exclusive: (work) => execution.exclusive(work) });
+  const setup = new Setup({ configDir: configDir(), jobs, exclusive: (work) => execution.exclusive(work), history });
   // The Task checks (SF-054): started from the dashboard, read by the Context owner's task_check; an ended
   // check reaches every page.
   // A check's worktree shares the checkout's Git directory: when the last check of the workspace
@@ -215,7 +219,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   let server;
   try {
     await execution.recover();
-    server = await startServer(port, handbook, await packageVersion(), execution, checks);
+    server = await startServer(port, handbook, await packageVersion(), execution, checks, history);
   } catch (error) {
     await socket.close();
     throw error;

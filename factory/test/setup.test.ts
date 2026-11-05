@@ -11,6 +11,8 @@ import type { ExclusiveScope } from '../src/execution.js';
 import { type Job, JobStore } from '../src/jobs.js';
 import { loadRegistry, saveRegistry } from '../src/registry.js';
 import { defaultBranch, draftContent, DRAFT_MARKER, DRAFT_NOTE, isDraft, MAX_REQUEST_BYTES, MERGE_CHECK_TTL_MS, Setup } from '../src/setup.js';
+import { taskSha256 } from '../src/task-file.js';
+import { TicketHistory } from '../src/ticket-history.js';
 import { git, newEnv, newRepo, putTask, temp } from './support/harness.js';
 
 // These tests have no finished job to retire: a call would be a bug.
@@ -18,10 +20,10 @@ const NO_RETIREMENT: ExclusiveScope = {
   retireFinished: async () => assert.fail('no job is retired here'),
 };
 
-function setupOf(config: string, jobs: JobStore, now?: () => number): Setup {
+function setupOf(config: string, jobs: JobStore, now?: () => number, history?: TicketHistory): Setup {
   let lock: Promise<unknown> = Promise.resolve();
   return new Setup({
-    configDir: config, jobs, ...(now !== undefined ? { now } : {}),
+    configDir: config, jobs, ...(now !== undefined ? { now } : {}), ...(history !== undefined ? { history } : {}),
     exclusive: (work) => {
       const next = lock.catch(() => undefined).then(() => work(NO_RETIREMENT));
       lock = next;
@@ -202,6 +204,47 @@ test('setup: taskText reads the Task file or its archived copy through the reade
   for (const [workspace, ticket] of [['App', 'T-1'], ['app', '../T-1'], ['other', 'T-1'], ['app', 'T-3']]) {
     assert.equal(await setup.taskTitle(workspace!, ticket!), null, `${workspace}/${ticket}`);
   }
+});
+
+test('setup (SF-081): createTicket records "created" by you; saveTask writes over the version read only, records "edited", and keeps the writer\'s refusals', async () => {
+  const env = await newEnv('setup-save-task');
+  const repo = await newRepo(env, 'setup-save-task-repo', true);
+  const jobs = new JobStore(env.state);
+  const history = new TicketHistory(env.state);
+  const setup = setupOf(env.config, jobs, undefined, history);
+  await setup.createTicket({ workspace: 'app', ticket: 'T-1', title: 'One', request: 'r' });
+  const path = join(repo, '.software-factory', 'T-1.md');
+  const skeleton = await readFile(path, 'utf8');
+  assert.deepEqual((await history.read('app', 'T-1')).map((event) => [event.kind, event.by, event.sha256]), [['created', 'you', taskSha256(skeleton)]]);
+
+  // taskFile: the text, its sha256 and the file's modification time.
+  const file = await setup.taskFile('app', 'T-1');
+  assert.deepEqual([file.text, file.sha256], [skeleton, taskSha256(skeleton)]);
+  assert.ok(!Number.isNaN(Date.parse(file.mtime)));
+
+  const plan = '---\nticket: T-1\ntitle: One\nbase: main\nscope: [src/**]\n---\n\n# T-1: One\n\nDo it.\n';
+  const saved = await setup.saveTask('app', 'T-1', plan, file.sha256);
+  assert.deepEqual(saved, { path: '.software-factory/T-1.md', status: 'replaced', bytes: Buffer.byteLength(plan), sha256: taskSha256(plan) });
+  assert.equal(await readFile(path, 'utf8'), plan);
+  assert.deepEqual((await history.read('app', 'T-1')).map((event) => [event.kind, event.by, event.sha256]), [['created', 'you', taskSha256(skeleton)], ['edited', 'you', taskSha256(plan)]]);
+
+  // The page's version is not the file's any more (write_task wrote meanwhile): refused, unchanged.
+  assert.match(await refused(setup.saveTask('app', 'T-1', `${plan}More.\n`, file.sha256), 'task_changed'), /changed since this version was read/);
+  // The writer's own refusals: not a Task file of the ticket, a job running on it, bad names, an unknown workspace, a gone file.
+  await refused(setup.saveTask('app', 'T-1', '---\nticket: T-2\ntitle: x\nbase: main\n---\n', taskSha256(plan)), 'invalid_content');
+  await jobs.write(jobOf('app', 'T-1', 'working'));
+  await refused(setup.saveTask('app', 'T-1', `${plan}More.\n`, taskSha256(plan)), 'job_active');
+  await refused(setup.saveTask('App', 'T-1', plan, taskSha256(plan)), 'invalid_name');
+  await refused(setup.saveTask('app', '../T-1', plan, taskSha256(plan)), 'invalid_ticket');
+  await refused(setup.saveTask('other', 'T-1', plan, taskSha256(plan)), 'workspace_not_found');
+  await refused(setup.saveTask('app', 'T-9', '---\nticket: T-9\ntitle: x\nbase: main\n---\n', taskSha256(plan)), 'task_not_found');
+  assert.equal(await readFile(path, 'utf8'), plan);
+  assert.equal((await history.read('app', 'T-1')).length, 2);
+
+  // Without a history nothing is recorded.
+  const plain = setupOf(env.config, jobs);
+  await plain.createTicket({ workspace: 'app', ticket: 'T-2', title: 'Two', request: 'r' });
+  assert.deepEqual(await history.read('app', 'T-2'), []);
 });
 
 // A Task file with lands_after, written as the Context owner would (raw, into .software-factory/).

@@ -18,7 +18,7 @@ import {
 } from '../src/task-check.js';
 import { writeTask } from '../src/task-file.js';
 import { act, fetchRaw } from './support/dashboard-client.js';
-import { type Env, git, newEnv, newRepo, probeLog, reviewLog, reviewScript, runCli, serve, stop, temp } from './support/harness.js';
+import { type Env, git, newEnv, newRepo, probeLog, putRules, reviewLog, reviewScript, runCli, serve, stop, temp } from './support/harness.js';
 
 const finding = (severity: CheckFinding['severity'], kind: CheckFinding['kind'] = 'decision', where = '## Behaviour'): CheckFinding =>
   ({ kind, severity, where, problem: `A ${severity} problem.`, expected: 'Say which.' });
@@ -102,9 +102,13 @@ test('the prompt holds the instructions and the Task file, nothing else', () => 
   }
   // The paraphrase is asked first.
   assert.ok(prompt.indexOf('write paraphrase') < prompt.indexOf('Readiness, the Zero-Decision Rule'));
-  for (const absent of ['<report>', '<patch>', '<settled_findings>', 'ledger', 'conversation', 'ChatGPT']) {
+  for (const absent of ['<report>', '<patch>', '<settled_findings>', 'ledger', 'conversation', 'ChatGPT', '<rules>']) {
     assert.ok(!prompt.includes(absent), absent);
   }
+  // SF-059: the coding rules, when there are some, right before the Task file; none: as before.
+  assert.equal(checkPrompt('C-1', task, ''), prompt);
+  const withRules = checkPrompt('C-1', task, '<rules>\nR\n</rules>');
+  assert.equal(withRules, prompt.replace('\n<task_file', '\n<rules>\nR\n</rules>\n\n<task_file'));
 });
 
 test('the session is the review\'s, read-only, and may not read the .software-factory folder, the state or the config', () => {
@@ -126,7 +130,7 @@ test('one check per ticket: a second start while the first is still being set up
   await mkdir(join(repo, '.software-factory'), { recursive: true });
   await writeFile(join(repo, '.software-factory', 'C-9.md'), '---\nticket: C-9\ntitle: Draft\nbase: main\n---\n\n## Status: waiting for the Context owner\n');
   const checks = new TaskChecks({
-    resolve: () => gate, claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 1,
+    resolve: () => gate, claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 1, rulesMaxBytes: 49152,
     stateDir: join(temp, 'concurrent-state'), configDir: join(temp, 'concurrent-config'),
   });
   const first = checks.start('app', 'C-9');
@@ -297,6 +301,20 @@ test('sf check-task: the read-only session in the work checkout, its prompt the 
   // Usage and refusals.
   assert.equal((await runCli(env, ['check-task', 'app'])).code, 2);
   assert.match((await runCli(env, ['check-task', 'app', 'C-404'])).stderr, /does not exist/);
+});
+
+test('sf check-task with coding rules (SF-059): the prompt gives the <rules> block read at the commit of the check\'s checkout', async () => {
+  const content = taskText('C-9');
+  const { env, repo } = await checkEnv('check-rules', 'C-9', content);
+  const block = await putRules(env, repo);
+  // Not committed: not at the base the check reads.
+  await writeFile(join(repo, 'AGENTS.md'), 'Uncommitted rules.\n');
+  await reviewScript(env, [{ output: OUTPUT }]);
+  const run = await runCli(env, ['check-task', 'app', 'C-9']);
+  assert.equal(run.code, 0, run.stderr);
+  const [entry] = await reviewLog(env);
+  assert.equal(entry!.prompt, checkPrompt('C-9', content, block));
+  assert.ok(!entry!.prompt.includes('Uncommitted rules.'));
 });
 
 test('a failed check is stored as failed with its redacted error, exits 1 and never counts as ready', async () => {

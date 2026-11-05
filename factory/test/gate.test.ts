@@ -14,7 +14,7 @@ import { JobStore } from '../src/jobs.js';
 import { writeTask } from '../src/task-file.js';
 import { fetchRaw } from './support/dashboard-client.js';
 import {
-  call, codexLog, codexScript, type Env, fakeCodex, fakeLog, git, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor,
+  call, codexLog, codexScript, type Env, fakeCodex, fakeLog, git, newEnv, newRepo, putRules, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor,
 } from './support/harness.js';
 
 const CLAUDE_CLEAN = { verdict: 'clean', summary: 'Claude found it right.', items: [], accepted_sensitive: [] };
@@ -159,6 +159,8 @@ test('clean: Claude, then the gate in a read-only Codex in the worktree, then Cl
     assert.ok(run!.prompt.includes(`<task_file path=".software-factory/G-1.md">\n${task('G-1', 'Greet the reader').trimEnd()}\n</task_file>`));
     assert.ok(run!.prompt.includes('<report>\nReport of iteration 1\n'));
     assert.match(run!.prompt, /<patch>\ndiff --git a\/README\.md b\/README\.md\n[\s\S]*\n\+hello reader\n<\/patch>$/);
+    // SF-059: a repository without rule files: no block.
+    assert.ok(!run!.prompt.includes('<rules>') && !run!.prompt.includes('rule violation'));
 
     // gate.json, the tokens, the events, sf watch, sf info and the dashboard.
     assert.equal(job.gate_tokens, 1234);
@@ -203,6 +205,30 @@ test('clean: Claude, then the gate in a read-only Codex in the worktree, then Cl
     assert.match((await runCli(env, ['info'])).stdout, new RegExp(`^gate {10}codex codex-cli 0\\.0\\.0-fake \\(${fakeCodex.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)$`, 'm'));
     const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/G-1', served.dashboard!))).body);
     assert.deepEqual([detail.iterations[0].review.reviewer, detail.iterations[0].gate.reviewer, detail.iterations[0].gate.verdict], ['claude', 'codex', 'clean']);
+  } finally {
+    await stop(served);
+  }
+});
+
+test('coding rules (SF-059): the gate prompt gives the job\'s <rules> block before the Task file and asks that a rule violation name the rule\'s file', async () => {
+  const env = await newEnv('gate-rules', gateEnv());
+  const repo = await newRepo(env, 'gate-rules-repo', false);
+  const block = await putRules(env, repo);
+  await putTask(env, repo, 'G-9', 'Follow the rules');
+  await script(env, [
+    { write: { 'README.md': 'hello reader\n' }, text: 'Report of iteration 1' },
+    { write: { '.software-factory/G-9.mr.md': mrText('feat(G-9): Follow the rules') }, text: 'prepared' },
+  ]);
+  await reviewScript(env, [{ output: CLAUDE_CLEAN }]);
+  await codexScript(env, [{ output: GATE_CLEAN }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'G-9' });
+    await waitFor(served, 'G-9', 'ready_for_human_review', 1);
+    const [run] = await codexLog(env);
+    assert.ok(run!.prompt.includes(`\n${block}\n\n<task_file path=".software-factory/G-9.md">\n`), run!.prompt);
+    assert.match(run!.prompt, /\n- Review the change against the Task file [^\n]*\n- A review item that is a rule violation names the rule's file \(and heading\) in `problem`\.\n/);
+    assert.ok((await reviewLog(env))[0]!.prompt.includes(`\n${block}\n\n<task_file`));
   } finally {
     await stop(served);
   }

@@ -14,7 +14,7 @@ import { QueueStore } from '../src/queue.js';
 import { resolveWorkspace } from '../src/registry.js';
 import { FACTORY_PROMPT_RULES, factoryPrompt } from '../src/prompts.js';
 import { taskSha256, writeTask } from '../src/task-file.js';
-import { call, FAKE, fakeLog, git, newEnv, newRepo, putTask, refused, runCli, script, serve, stop, task, temp, turnsStarted, waitFor } from './support/harness.js';
+import { call, FAKE, fakeLog, git, newEnv, newRepo, putRules, putTask, refused, runCli, script, serve, stop, task, temp, turnsStarted, waitFor } from './support/harness.js';
 
 const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid'];
 
@@ -86,6 +86,9 @@ test('full cycle in a worktree: start, awaiting_review with Report, Patch and fi
   assert.equal(treeState(repo), before);
   const jobDir = join(env.state, 'jobs', 'app', 'DEMO-1');
   const meta = JSON.parse(await readFile(join(jobDir, 'iterations', '001', 'meta.json'), 'utf8'));
+  // SF-059: a repository without rule files gives no block (the prompts below are today's) and an empty list.
+  assert.equal(await readFile(join(jobDir, 'rules.md'), 'utf8'), '');
+  assert.deepEqual(JSON.parse(await readFile(join(jobDir, 'iterations', '001', 'rules.json'), 'utf8')).files, []);
   assert.deepEqual([meta.iteration, meta.denials, meta.patch_truncated, meta.submodule_changed, meta.cost_usd, meta.cost_usd_total], [1, ['Bash'], false, [], 0.0123, 0.0123]);
   // The branch tracks nothing, so a later push cannot go to origin/main by accident.
   assert.throws(() => git(repo, 'config', '--get', 'branch.DEMO-1-export-as-csv.remote'));
@@ -191,6 +194,82 @@ test('full cycle in a worktree: start, awaiting_review with Report, Patch and fi
   await stop(served);
   await assert.rejects(stat(join(env.state, 'sf.sock')), { code: 'ENOENT' });
   assert.match((await runCli(env, ['status', 'app', 'DEMO-1'])).stdout, /pushed/);
+});
+
+test('coding rules (SF-059): the first prompt gives the <rules> block after /implement, a later turn does not; rules.md and rules.json once at Start, at the base commit, copied into each iteration; without rules.md a job gets none', async () => {
+  const env = await newEnv('exec-rules');
+  const repo = await newRepo(env, 'exec-rules-repo', true);
+  const block = await putRules(env, repo);
+  const base = git(repo, 'rev-parse', 'origin/main').trim();
+  await putTask(env, repo, 'K-1', 'Follow the rules');
+  const jobDir = join(env.state, 'jobs', 'app', 'K-1');
+  await script(env, [
+    // The job edits a rule in its worktree: the rules it was given stay as at the base commit.
+    { write: { 'README.md': 'hello rules\n', 'docs/style.md': '# Style\n\nAnything goes.\n' }, text: 'Report of iteration 1' },
+    { write: { 'README.md': 'hello again\n' }, text: 'Report of iteration 2' },
+    { write: { 'README.md': 'hello three\n' }, text: 'Report of iteration 3' },
+  ]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'K-1' });
+    await waitFor(served, 'K-1', 'awaiting_review', 1);
+    assert.equal(await readFile(join(jobDir, 'rules.md'), 'utf8'), block);
+    const list = JSON.parse(await readFile(join(jobDir, 'rules.json'), 'utf8'));
+    assert.deepEqual([list.commit, list.max_bytes, list.left_out, list.skipped], [base, 48 * 1024, [], []]);
+    assert.deepEqual(list.files.map((file: { source: string; path: string }) => `${file.source}: ${file.path}`), ['repository: AGENTS.md', 'repository: docs/style.md', 'workspace: rules/app.md']);
+    assert.deepEqual(JSON.parse(await readFile(join(jobDir, 'iterations', '001', 'rules.json'), 'utf8')), list);
+    await call(served, 'request_fix', { workspace: 'app', ticket: 'K-1', content: '1. README.md: again.' });
+    await waitFor(served, 'K-1', 'awaiting_review', 2);
+    assert.deepEqual(JSON.parse(await readFile(join(jobDir, 'iterations', '002', 'rules.json'), 'utf8')), list);
+    // A job started before SF-059 has no rules.md: no block, no iterations/NNN/rules.json.
+    await rm(join(jobDir, 'rules.md'));
+    await call(served, 'request_fix', { workspace: 'app', ticket: 'K-1', content: '1. README.md: once more.' });
+    await waitFor(served, 'K-1', 'awaiting_review', 3);
+    await assert.rejects(stat(join(jobDir, 'iterations', '003', 'rules.json')), { code: 'ENOENT' });
+    const log = await fakeLog(env);
+    assert.deepEqual(log.map((entry) => entry.prompt), [
+      factoryPrompt(`/implement .software-factory/K-1.md\n\n${block}`, 'K-1', 1),
+      factoryPrompt('/implement .software-factory/K-1.md Fix 1', 'K-1', 2),
+      factoryPrompt('/implement .software-factory/K-1.md Fix 2', 'K-1', 3),
+    ]);
+    assert.ok(log[0]!.prompt.includes('\n\n### repository: docs/style.md\n\n# Style\n\nName things plainly.\n'));
+  } finally {
+    await stop(served);
+  }
+});
+
+test('coding rules (SF-059): a Start whose rules cannot be collected fails without an Implementer session; once fixed, sf restart starts it with them', async (t) => {
+  if (process.getuid?.() === 0) {
+    t.skip('root reads any file');
+    return;
+  }
+  const env = await newEnv('exec-rules-failed');
+  const repo = await newRepo(env, 'exec-rules-failed-repo', false);
+  const block = await putRules(env, repo);
+  await putTask(env, repo, 'K-2', 'Rules or nothing');
+  await script(env, [{ write: { 'README.md': 'hello rules\n' }, text: 'Report of iteration 1' }]);
+  const ownRules = join(env.config, 'rules', 'app.md');
+  await chmod(ownRules, 0o000);
+  const served = await serve(env);
+  try {
+    const failure = await refused(served, 'start', { workspace: 'app', ticket: 'K-2' });
+    assert.deepEqual(failure, { code: 'rules_failed', message: 'The rules file rules/app.md could not be read (EACCES). Fix it, then sf restart the ticket.' });
+    const job = (await new JobStore(env.state).read('app', 'K-2'))!;
+    assert.deepEqual([job.state, job.error?.code], ['failed', 'rules_failed']);
+    await assert.rejects(stat(join(env.state, 'jobs', 'app', 'K-2', 'rules.md')), { code: 'ENOENT' });
+    await assert.rejects(stat(join(env.home, 'fake-claude.log')), { code: 'ENOENT' });
+    const listed = await runCli(env, ['rules', 'app', 'K-2']);
+    assert.equal(listed.stdout, `The job of app/K-2 failed at Start: ${failure.message}\n`);
+
+    await chmod(ownRules, 0o600);
+    const restarted = await runCli(env, ['restart', 'app', 'K-2']);
+    assert.equal(restarted.code, 0, restarted.stderr);
+    await waitFor(served, 'K-2', 'awaiting_review', 1);
+    assert.equal((await fakeLog(env))[0]!.prompt, factoryPrompt(`/implement .software-factory/K-2.md\n\n${block}`, 'K-2', 1));
+  } finally {
+    await chmod(ownRules, 0o600);
+    await stop(served);
+  }
 });
 
 test('parallel jobs: three jobs of a workspace run at once in their own worktrees, a fourth queued waits for the run limit and starts by itself when one ends, say and check answer while a turn runs, the checkout is never touched', async () => {

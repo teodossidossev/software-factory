@@ -7,6 +7,7 @@ import { FactoryError } from './errors.js';
 import { type ForgeSettings, forgeSettings } from './forge.js';
 import type { Job } from './jobs.js';
 import { configDir, HANDOFF_OFF_CODE, type HandoffMode } from './registry.js';
+import { DEFAULT_RULES_MAX_BYTES } from './rules-docs.js';
 
 export interface Config {
   stateDir: string;
@@ -41,6 +42,8 @@ export interface Config {
   simplify: boolean;
   // maxTurns of the Task check (SF-054, SF_TASK_CHECK_MAX_TURNS); its model is reviewModel.
   taskCheckMaxTurns: number;
+  // The bytes of rule file content given to the agents at most (SF-059, SF_RULES_MAX_BYTES).
+  rulesMaxBytes: number;
   // The Codex gate after a clean Claude review (SF-039): the executable, or why the gate is off.
   gate: Gate;
   // The model of the gate (SF_CODEX_MODEL, passed as --model); undefined uses Codex's default.
@@ -217,6 +220,11 @@ export function gateConfig(env: NodeJS.ProcessEnv = process.env): Gate {
   return { on: false, reason: 'no codex on PATH; set SF_CODEX', missing: true };
 }
 
+// SF_RULES_MAX_BYTES (SF-059): the bytes of rule file content the agents are given at most.
+export function rulesMaxBytes(env: NodeJS.ProcessEnv = process.env): number {
+  return positiveInteger(env, 'SF_RULES_MAX_BYTES', DEFAULT_RULES_MAX_BYTES, 16 * 1024 * 1024);
+}
+
 // SF_HANDOFF: checkout (the default) or off.
 export function handoffSetting(env: NodeJS.ProcessEnv = process.env): Config['handoff'] {
   const mode = env.SF_HANDOFF || 'checkout';
@@ -262,6 +270,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     reviewMaxTurns: positiveInteger(env, 'SF_REVIEW_MAX_TURNS', 60),
     simplify: env.SF_SIMPLIFY !== 'off',
     taskCheckMaxTurns: positiveInteger(env, 'SF_TASK_CHECK_MAX_TURNS', 30),
+    rulesMaxBytes: rulesMaxBytes(env),
     gate: gateConfig(env),
     codexModel: env.SF_CODEX_MODEL || undefined,
     gateMaxRounds: positiveInteger(env, 'SF_GATE_MAX_ROUNDS', 5),

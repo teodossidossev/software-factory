@@ -3,8 +3,9 @@
 // decision of its own. It runs in a temporary detached worktree of the work checkout at the Task's
 // base (the code the Implementer starts from), which has no .software-factory folder, and a
 // PreToolUse hook refuses every Read, Grep or Glob that reaches outside that worktree and every other
-// tool but the SDK's StructuredOutput (SF-070). Its prompt holds the Task file and nothing of the
-// Context owner's conversation, the jobs or the ledger; its output is a paraphrase first, then
+// tool but the SDK's StructuredOutput (SF-070). Its prompt holds the repository's and the user's
+// coding rules read at the checkout's commit (SF-059, src/rules-docs.ts) and the Task file, and
+// nothing of the Context owner's conversation, the jobs or the ledger; its output is a paraphrase first, then
 // findings, the files it expects to change and a verdict. A check is stored by the sha256 of the Task file it read, under the state
 // directory, never in the work checkout. It only advises: nothing here starts, refuses or changes
 // a job.
@@ -22,6 +23,7 @@ import { runGit } from './git.js';
 import { resolveTarget } from './mr.js';
 import type { Workspace } from './registry.js';
 import { runStructuredSession, SEVERITIES, SEVERITY_DEFINITIONS, type Severity } from './review.js';
+import { collectRules } from './rules-docs.js';
 import { matchesGlob, scopeOf } from './rules.js';
 import { isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskScope, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { addDetachedWorktree, removeWorktree } from './worktree.js';
@@ -111,9 +113,9 @@ export function settleCheck(task: string, output: CheckOutput): CheckOutput {
   return { paraphrase: output.paraphrase, findings, files: output.files, verdict: checkVerdict(findings) };
 }
 
-// The prompt of the check: what it is and how to answer, then the Task file. Nothing else: no
-// conversation, job, review or ledger.
-export function checkPrompt(ticket: string, task: string): string {
+// The prompt of the check: what it is and how to answer, the <rules> block when there is one
+// (SF-059), then the Task file. Nothing else: no conversation, job, review or ledger.
+export function checkPrompt(ticket: string, task: string, rules = ''): string {
   return [
     `Readiness check of the Task file of ticket ${ticket}, before an Implementer builds it. You check; you change nothing.`,
     'The current directory is a checkout of the repository the Task is about, at the Task\'s base: the code the Implementer starts from. Your tools are Read, Grep and Glob, inside this directory only; nothing else is available. The Task file below is all you get of the plan.',
@@ -127,6 +129,7 @@ export function checkPrompt(ticket: string, task: string): string {
     '- files: every file you expect the change to create, modify or delete, tests and docs included. When the front matter has `scope:`, a file you expect outside it is `missing`, and a scope entry no expected file needs is `overreach`.',
     '- verdict: `ready` when no finding is a blocker or major; `not_ready` otherwise. The factory applies this rule to your findings, whatever you write.',
     '',
+    ...(rules !== '' ? [rules.trimEnd(), ''] : []),
     `<task_file path="${TASK_DIR}/${ticket}.md">`,
     task.trimEnd(),
     '</task_file>',
@@ -289,6 +292,8 @@ export interface CheckOptions {
   model: string | undefined;
   // SF_TASK_CHECK_MAX_TURNS.
   maxTurns: number;
+  // SF_RULES_MAX_BYTES (SF-059).
+  rulesMaxBytes: number;
   // The factory's state and config directories: off limits to the checker, with the work
   // checkout's .software-factory folder (the other Task files, the MR texts, the archive).
   stateDir: string;
@@ -548,7 +553,19 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
   try {
     const cwd = checkout.root;
     const redactor = new Redactor({ cwd });
-    const outcome = await runStructuredSession(checkPrompt(ticket, task), {
+    let rules: string;
+    try {
+      rules = (await collectRules(workspace.workCheckout, checkout.commit, {
+        workspace: workspace.name, skip: workspace.rulesSkip ?? [], configDir: options.configDir, maxBytes: options.rulesMaxBytes,
+      })).block;
+    } catch (error) {
+      const message = `The check could not collect the coding rules: ${error instanceof Error ? error.message : String(error)}`;
+      return {
+        ...record, commit: checkout.commit, status: 'failed', output: null, error: redactor.failure(message.slice(0, 1000)),
+        model: options.model ?? null, cost_usd: null, started_at: startedAt, ended_at: new Date().toISOString(),
+      };
+    }
+    const outcome = await runStructuredSession(checkPrompt(ticket, task, rules), {
       cwd, claudePath: options.claudePath, sandbox: options.sandbox, model: options.model, maxTurns: options.maxTurns,
       signal: options.signal ?? new AbortController().signal,
       // Every message passes the redactor, so a failure after a withheld read is withheld too.
@@ -598,7 +615,10 @@ export interface CheckView {
 // The check settings of a loaded Config: the review's executable, sandbox and model, the check's
 // turn limit and the directories off limits.
 export function checkSettings(config: Config, configDir: string): Omit<CheckOptions, 'signal' | 'onMessage'> {
-  return { claudePath: config.claudePath, sandbox: config.sandbox, model: config.reviewModel, maxTurns: config.taskCheckMaxTurns, stateDir: config.stateDir, configDir };
+  return {
+    claudePath: config.claudePath, sandbox: config.sandbox, model: config.reviewModel, maxTurns: config.taskCheckMaxTurns, rulesMaxBytes: config.rulesMaxBytes,
+    stateDir: config.stateDir, configDir,
+  };
 }
 
 export interface TaskChecksOptions extends Omit<CheckOptions, 'signal' | 'onMessage'> {

@@ -347,3 +347,74 @@ test('sf serve guards Host and Origin, reports a busy port and refuses an invali
   assert.equal(longState.code, 1);
   assert.match(longState.stderr, /longer than 107 bytes; use a shorter SF_STATE_DIR/);
 });
+
+test('sf rules (SF-059): the rule files that would be given, without their text: at the checkout\'s HEAD, the Task file\'s base, or the job\'s base commit', async () => {
+  const rulesRepo = join(temp, 'rules-repo');
+  const gitIn = (...args: string[]): string => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { cwd: rulesRepo, encoding: 'utf8' });
+  await mkdir(join(rulesRepo, 'docs'), { recursive: true });
+  execFileSync('git', ['init', '-q', '-b', 'main', rulesRepo]);
+  await writeFile(join(rulesRepo, 'AGENTS.md'), 'See [style](docs/style.md) and [runbook](docs/runbook.md).\n');
+  await writeFile(join(rulesRepo, 'docs', 'style.md'), 'SECRET-STYLE-TEXT\n');
+  await writeFile(join(rulesRepo, 'docs', 'runbook.md'), 'Runbook\n');
+  gitIn('add', '-A');
+  gitIn('commit', '-q', '-m', 'rules');
+  const first = gitIn('rev-parse', 'HEAD').trim();
+  await writeFile(join(rulesRepo, 'AGENTS.md'), 'See [style](docs/style.md), [runbook](docs/runbook.md) and [new](docs/new.md).\n');
+  await writeFile(join(rulesRepo, 'docs', 'new.md'), 'New\n');
+  gitIn('add', '-A');
+  gitIn('commit', '-q', '-m', 'more rules');
+  const second = gitIn('rev-parse', 'HEAD').trim();
+  // HEAD on another branch than the Task's base.
+  gitIn('checkout', '-q', '-b', 'other');
+  await writeFile(join(rulesRepo, 'AGENTS.md'), 'Only the HEAD.\n');
+  gitIn('commit', '-q', '-am', 'other rules');
+  const head = gitIn('rev-parse', 'HEAD').trim();
+  assert.equal((await runCli(['workspace', 'add', 'rules-demo', '--read', rulesRepo])).code, 0);
+  const registry = JSON.parse(await readFile(join(configDir, 'workspaces.json'), 'utf8'));
+  registry.workspaces['rules-demo'].rules_skip = ['docs/runbook.md'];
+  await writeFile(join(configDir, 'workspaces.json'), JSON.stringify(registry));
+  await mkdir(join(configDir, 'rules'), { recursive: true });
+  await writeFile(join(configDir, 'rules', 'global.md'), 'Global\n');
+
+  const atHead = await runCli(['rules', 'rules-demo'], { SF_RULES_MAX_BYTES: '200' });
+  assert.equal(atHead.code, 0, atHead.stderr);
+  assert.equal(atHead.stdout, `Rules for rules-demo at ${head} (budget 200 bytes):\n  repository  AGENTS.md  15 bytes\n  global  rules/global.md  7 bytes\n`);
+
+  await mkdir(join(rulesRepo, '.software-factory'));
+  await writeFile(join(rulesRepo, '.software-factory', 'T-1.md'), '---\nticket: T-1\ntitle: Rules\nbase: main\n---\n\n# T-1: Rules\n\nx\n');
+  const atBase = await runCli(['rules', 'rules-demo', 'T-1'], { SF_RULES_MAX_BYTES: '100' });
+  assert.equal(atBase.code, 0, atBase.stderr);
+  assert.equal(atBase.stdout, [
+    `Rules for rules-demo at ${second} (budget 100 bytes):`, '  repository  AGENTS.md  79 bytes', '  repository  docs/style.md  18 bytes',
+    'Left out (over the budget):', '  repository  docs/new.md  4 bytes', '  global  rules/global.md  7 bytes',
+    'Skipped by rules_skip:', '  repository  docs/runbook.md', '',
+  ].join('\n'));
+  assert.ok(!atBase.stdout.includes('SECRET-STYLE-TEXT'));
+
+  const { JobStore } = await import('../src/jobs.js');
+  const now = new Date().toISOString();
+  await new JobStore(join(temp, 'state')).write({
+    workspace: 'rules-demo', ticket: 'T-1', branch: 'T-1-rules', base: 'main', base_commit: first, worktree: null, prepared_commit: null,
+    target_commit: null, mr_attempts: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'aborted', iteration: 0, session_id: null, mr: null, created_at: now, updated_at: now,
+  });
+  // A job started before SF-059: nothing stored, no rules in its prompts.
+  const before = await runCli(['rules', 'rules-demo', 'T-1']);
+  assert.equal(before.code, 0, before.stderr);
+  assert.equal(before.stdout, 'The job of rules-demo/T-1 has no stored rules (it started before SF-059): its prompts carry no <rules> block.\n');
+  // A job with stored rules: its own list, whatever the rules files and the budget say today.
+  const { collectRules, writeJobRules } = await import('../src/rules-docs.js');
+  const jobDir = join(temp, 'state', 'jobs', 'rules-demo', 'T-1');
+  await writeJobRules(jobDir, await collectRules(rulesRepo, first, { workspace: 'rules-demo', skip: ['docs/runbook.md'], configDir, maxBytes: 49152 }));
+  await rm(join(configDir, 'rules', 'global.md'));
+  const atJob = await runCli(['rules', 'rules-demo', 'T-1'], { SF_RULES_MAX_BYTES: '10' });
+  assert.equal(atJob.code, 0, atJob.stderr);
+  assert.equal(atJob.stdout, [
+    `Rules for rules-demo at ${first} (budget 49152 bytes):`, '  repository  AGENTS.md  59 bytes', '  repository  docs/style.md  18 bytes', '  global  rules/global.md  7 bytes',
+    'Skipped by rules_skip:', '  repository  docs/runbook.md', "Stored at the job's Start: the rules its prompts carry.", '',
+  ].join('\n'));
+
+  assert.equal((await runCli(['rules'])).code, 2);
+  assert.equal((await runCli(['rules', 'rules-demo', 'T-1', 'x'])).code, 2);
+  assert.equal((await runCli(['rules', 'rules-demo'], { SF_RULES_MAX_BYTES: '0' })).code, 1);
+  assert.equal((await runCli(['rules', 'nope'])).code, 1);
+});

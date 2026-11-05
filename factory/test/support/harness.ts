@@ -16,6 +16,7 @@ import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/cli
 import { callSocket } from '../../src/ipc.js';
 import { JobStore } from '../../src/jobs.js';
 import { saveRegistry } from '../../src/registry.js';
+import { rulesBlock } from '../../src/rules-docs.js';
 import { writeTask } from '../../src/task-file.js';
 
 export const CLI = fileURLToPath(new URL('../../src/cli.js', import.meta.url));
@@ -163,6 +164,29 @@ export async function newRepo(env: Env, name: string, withOrigin: boolean): Prom
   }
   await saveRegistry({ workspaces: { app: { read_checkout: repo, work_checkout: repo } } }, env.config);
   return repo;
+}
+
+// SF-059: coding rules for the workspace "app": AGENTS.md linking docs/style.md, committed on main
+// (and pushed when the checkout has an origin), and the workspace's rules file in the config
+// directory. Returns the <rules> block the agents are given.
+export async function putRules(env: Env, repo: string): Promise<string> {
+  const files = { 'AGENTS.md': '# Agents\n\nFollow [the style](docs/style.md#naming).\n', 'docs/style.md': '# Style\n\nName things plainly.\n' };
+  await mkdir(join(repo, 'docs'), { recursive: true });
+  for (const [path, content] of Object.entries(files)) {
+    await writeFile(join(repo, path), content);
+  }
+  git(repo, 'add', ...Object.keys(files));
+  git(repo, 'commit', '-q', '-m', 'coding rules');
+  if (git(repo, 'remote').split('\n').includes('origin')) {
+    git(repo, 'push', '-q', 'origin', 'main');
+  }
+  const own = 'Mine: no abbreviations.\n';
+  await mkdir(join(env.config, 'rules'), { recursive: true });
+  await writeFile(join(env.config, 'rules', 'app.md'), own);
+  return rulesBlock([
+    ...Object.entries(files).map(([path, text]) => ({ source: 'repository' as const, path, text })),
+    { source: 'workspace' as const, path: 'rules/app.md', text: own },
+  ], []);
 }
 
 export function task(ticket: string, title: string, base = 'main'): string {

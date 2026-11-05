@@ -45,7 +45,8 @@ import { Redactor } from './redact.js';
 import { checkoutGitDir, removeStaleSandboxLock, staleSandboxLock } from './sandbox-lock.js';
 import { conflictPrompt, factoryPrompt, iterationCost, mrPrompt } from './prompts.js';
 import { COMMIT_TYPES, DENIED_TOOLS, MANUAL_CLAIM, type Marks, marksOf, MAX_HEADER_CHARS, MR_REQUIRED_HEADINGS } from './rules.js';
-import type { Workspace } from './registry.js';
+import { configDir, type Workspace } from './registry.js';
+import { collectRules, copyRulesRecord, readJobRules, writeJobRules } from './rules-docs.js';
 import { DEFAULT_PAGE_BYTES, MAX_PAGE_BYTES, MIN_PAGE_BYTES, type Page, pageBuffer } from './repo-files.js';
 import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, type StructuredOutcome, unacceptedItems, uniqueNits } from './review.js';
 import { changedBetween, type FixFiles, fixNumbers, guardSuggestions, offerMessage, runSimplify, SIMPLIFY_CODE, SIMPLIFY_TITLE, simplifyFix, type SimplifyInput, type SimplifyOutput, simplifyPrompt, type Suggestion } from './simplify.js';
@@ -334,10 +335,10 @@ export function changeNote(ticket: string, diff: string | undefined): string {
   return [`The Task file ${path} changed since you were last given it (while the job was paused); the copy in your worktree is the new version. Act on the change:`, '', '````diff', diff, '````'].join('\n');
 }
 
-// The first prompt of a job: /implement of its Task file; after sf restart --keep-files (SF-067),
-// with the files kept from the previous job.
-export function firstPrompt(ticket: string, kept: string[]): string {
-  const command = `/implement ${TASK_DIR}/${ticket}.md`;
+// The first prompt of a job: /implement of its Task file, then the job's <rules> block when it has
+// one (SF-059); after sf restart --keep-files (SF-067), with the files kept from the previous job.
+export function firstPrompt(ticket: string, kept: string[], rules = ''): string {
+  const command = [`/implement ${TASK_DIR}/${ticket}.md`, ...(rules !== '' ? ['', rules.trimEnd()] : [])].join('\n');
   if (kept.length === 0) {
     return command;
   }
@@ -847,18 +848,43 @@ export class Execution implements RunnerWork {
       }
       job = { ...job, base_commit: baseCommit };
       await this.jobs.write(job);
+      let rules: string;
+      try {
+        rules = await this.#collectJobRules(workspace, ticket, baseCommit);
+      } catch (error) {
+        // No Implementer session without the rules: the job fails with its worktree, which
+        // sf restart removes once the cause is fixed.
+        const failure = error instanceof FactoryError ? error : new FactoryError('rules_failed', 'The coding rules could not be collected or stored.');
+        if (!(error instanceof FactoryError)) {
+          console.error(error);
+        }
+        const message = `${failure.message} Fix it, then sf restart the ticket.${keptNote}`;
+        await this.#transition(job, 'failed', { code: failure.code, message });
+        throw new FactoryError(failure.code, message);
+      }
       if (kept !== undefined) {
         await copyKept(kept, worktree);
       }
       job = await this.#transition(await this.#syncTask(workspace, job), 'working');
       // The first turn runs in the job's runner.
-      await this.#serveRunners().queue(workspace.name, ticket, { kind: 'turn', prompt: factoryPrompt(firstPrompt(ticket, kept?.paths ?? []), ticket, job.iteration + 1) });
+      await this.#serveRunners().queue(workspace.name, ticket, { kind: 'turn', prompt: factoryPrompt(firstPrompt(ticket, kept?.paths ?? [], rules), ticket, job.iteration + 1) });
       return { branch, state: job.state, check_after_minutes: this.#config.checkAfterStartMin, worktree };
     });
     if (kept !== undefined) {
       await rm(kept.dir, { recursive: true, force: true });
     }
     return result;
+  }
+
+  // The job's coding rules (SF-059), collected once at its first base commit and stored in its
+  // directory (rules.md, rules.json) for every later prompt; the block, '' when none were found.
+  // Throws when they cannot be collected or stored: the job does not start without them.
+  async #collectJobRules(workspace: Workspace, ticket: string, baseCommit: string): Promise<string> {
+    const collected = await collectRules(workspace.workCheckout, baseCommit, {
+      workspace: workspace.name, skip: workspace.rulesSkip ?? [], configDir: configDir(), maxBytes: this.#config.rulesMaxBytes,
+    });
+    await writeJobRules(this.jobs.dir(workspace.name, ticket), collected);
+    return collected.block;
   }
 
   // Fetches the base when origin exists, checks the names, creates the branch and its worktree
@@ -1161,6 +1187,8 @@ export class Execution implements RunnerWork {
     if (outcome.denials.length > 0) {
       sections.push(['## Denied actions', '', ...outcome.denials.map((tool) => `- ${tool}`)].join('\n'));
     }
+    // The rules the iteration was given (SF-059), before the Report that marks it complete.
+    await copyRulesRecord(this.jobs.dir(workspaceName, ticket), this.jobs.iterationDir(workspaceName, ticket, number));
     await this.jobs.writeIteration(workspaceName, ticket, {
       report: `${sections.join('\n\n')}\n`,
       patch: built.patch,
@@ -1513,6 +1541,7 @@ export class Execution implements RunnerWork {
     return {
       ticket, iteration, report, patch, patchTruncated: meta.patch_truncated, files: meta.files, handbook: this.#handbook,
       task: await readFile(join(worktree, TASK_DIR, `${ticket}.md`), 'utf8'), ledger: await this.jobs.readLedger(name, ticket),
+      rules: await readJobRules(this.jobs.dir(name, ticket)),
     };
   }
 
@@ -3192,7 +3221,7 @@ export class Execution implements RunnerWork {
       let next: Job;
       if (pause.from === 'working') {
         next = await this.#transition(await this.#syncTask(workspace, job), 'working');
-        const first = message.trim() !== '' ? message : next.session_id === null && next.iteration === 0 ? `/implement ${TASK_DIR}/${ticket}.md` : 'Continue where you stopped.';
+        const first = await this.#resumePrompt(next, message);
         this.#session(next, workspace).send(factoryPrompt(this.#withChange(first, ticket, change), ticket, next.iteration + 1), DENIED_TOOLS);
       } else {
         // The reviewers read the new Task file in the worktree and its sha256 is recorded; task.md
@@ -3204,6 +3233,21 @@ export class Execution implements RunnerWork {
       }
       return { state: next.state, iteration: next.iteration, step: pause.step, task_changed: change !== undefined };
     });
+  }
+
+  // The first prompt of a Resume from working: the message, else "Continue where you stopped.". A
+  // Resume that opens a new Implementer session (no session_id yet) gives the job's <rules> block
+  // (SF-059) first: with iteration 0 and no message, the job's first prompt.
+  async #resumePrompt(job: Job, message: string): Promise<string> {
+    const text = message.trim() !== '' ? message : 'Continue where you stopped.';
+    if (job.session_id !== null) {
+      return text;
+    }
+    const rules = await readJobRules(this.jobs.dir(job.workspace, job.ticket));
+    if (message.trim() === '' && job.iteration === 0) {
+      return firstPrompt(job.ticket, [], rules);
+    }
+    return rules === '' ? text : `${rules.trimEnd()}\n\n${text}`;
   }
 
   // Whether the ticket's Task file changed since the Implementer was last given it (the job's copy,

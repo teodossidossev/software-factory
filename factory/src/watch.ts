@@ -35,7 +35,7 @@ function resultText(content: unknown): string {
 export interface DescribedEvent {
   ts: string | null;
   iteration: number | null;
-  // "prompt", "state", "notify_failed", "placeholders_removed", "review", "review_failed" (Claude's or the gate's), "gate_overridden" (the user accepted over the stopped gate), "simplify" and "simplify_chosen" (SF-055), "interrupted" and "task_changed" (SF-067), "turn_limit_continued" (SF-069), "sandbox_lock_removed" (SF-085), "mr_edited" (SF-080), "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
+  // "prompt", "state", "notify_failed", "placeholders_removed", "review", "review_failed" (Claude's or the gate's), "gate_overridden" (the user accepted over the stopped gate), "simplify" and "simplify_chosen" (SF-055), "interrupted" and "task_changed" (SF-067), "attachments" (SF-065), "turn_limit_continued" (SF-069), "sandbox_lock_removed" (SF-085), "mr_edited" (SF-080), "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
   type: string;
   lines: string[];
 }
@@ -81,6 +81,12 @@ export function limitStateText(from: unknown, to: unknown): string | undefined {
     return 'Resumed after the usage limit reset';
   }
   return undefined;
+}
+
+// One image of an attachments event (SF-065): its name, type and size.
+function asImage(value: unknown): string {
+  const image = (typeof value === 'object' && value !== null ? value : {}) as Record<string, unknown>;
+  return `${String(image.name)} (${String(image.type)}, ${String(image.bytes)} bytes)`;
 }
 
 function recordLines(record: Record<string, unknown>): string[] {
@@ -141,6 +147,11 @@ function recordLines(record: Record<string, unknown>): string[] {
   if (record.type === 'interrupted') {
     const who = typeof record.reviewer === 'string' ? ` by ${record.reviewer}` : '';
     return [`${prefix} ${String(record.step)}${who} interrupted by the pause (no verdict; it runs again on Resume)`];
+  }
+  // The job's images, resolved and copied (SF-065).
+  if (record.type === 'attachments') {
+    const images = Array.isArray(record.images) ? record.images.map((image) => asImage(image)) : [];
+    return [`${prefix} attachments: ${images.length === 0 ? 'none' : images.join(', ')}`];
   }
   if (record.type === 'task_changed') {
     return [`${prefix} the Task file changed while the job was paused; the new one is in use`];

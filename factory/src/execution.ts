@@ -27,6 +27,7 @@ import { createReadStream } from 'node:fs';
 import { chmod, copyFile, type FileHandle, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, symlink } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { dirname, join, resolve as resolvePath, sep } from 'node:path';
+import { changedImages, type ImageRef, imageRefs, jobAttachment, type JobAttachment, type ResolvedImage, resolveTaskImages, sameImages, withoutImageData, writeImages } from './attachments.js';
 import { type Config, handoffOffNotice } from './config.js';
 import { FactoryError } from './errors.js';
 import { chooseForge, type Forge, type ForgeKind, forgeFor, type MergeRequestStatus } from './forge.js';
@@ -308,6 +309,13 @@ interface Claimed {
   base: string;
   branch: string;
   worktree: string;
+  // The images the Task file refers to (SF-065), read when the start was accepted.
+  images: ResolvedImage[];
+}
+
+// The line of a Resume's prompt when the Task's images changed while the job was paused (SF-065).
+export function imagesChangedNote(names: readonly string[]): string {
+  return `The Task's images changed while the job was paused: ${names.join(', ')}.`;
 }
 
 // The files sf restart --keep-files keeps (SF-067): their paths relative to the worktree, saved
@@ -756,6 +764,8 @@ export class Execution implements RunnerWork {
       }
       const workspace = await this.#resolve(workspaceName);
       const plan = await this.#plan(workspace, ticket);
+      // Every image the Task file refers to must be usable (SF-065): attachment_invalid otherwise.
+      const images = await resolveTaskImages(workspace.workCheckout, ticket, plan.content);
       const existing = await this.jobs.read(workspace.name, ticket);
       if (existing !== undefined && !TERMINAL_STATES.includes(existing.state)) {
         throw new FactoryError('job_exists', `The job for ${workspace.name}/${ticket} is ${existing.state}.`);
@@ -766,19 +776,20 @@ export class Execution implements RunnerWork {
       if (existing !== undefined) {
         await this.jobs.archive(workspace.name, ticket);
       }
-      return this.#claim(workspace, ticket, plan);
+      return this.#claim(workspace, ticket, plan, images);
     });
     return this.#launch(claimed);
   }
 
-  // The base and the branch of a job from the ticket's Task file, which must not be a draft.
-  async #plan(workspace: Workspace, ticket: string): Promise<{ base: string; branch: string }> {
+  // The base and the branch of a job from the ticket's Task file, which must not be a draft, and the
+  // Task text they were read from.
+  async #plan(workspace: Workspace, ticket: string): Promise<{ base: string; branch: string; content: string }> {
     const content = await readTask(workspace, ticket);
     if (isDraft(content)) {
       throw new FactoryError('task_draft', `${TASK_DIR}/${ticket}.md is still the skeleton: the Context owner writes the Task with write_task first, then the user starts the job.`);
     }
     const fields = parseFrontMatter(content)!;
-    return { base: fields.get('base')!, branch: branchName(ticket, fields.get('title')!) };
+    return { base: fields.get('base')!, branch: branchName(ticket, fields.get('title')!), content };
   }
 
   // The run queue's limit (SF-071): the running jobs of every workspace (RUNNING_STATES), the
@@ -813,7 +824,7 @@ export class Execution implements RunnerWork {
 
   // Writes the record of a new job in starting (the ticket's directory must be free). Only under
   // the lock.
-  async #claim(workspace: Workspace, ticket: string, plan: { base: string; branch: string }): Promise<Claimed> {
+  async #claim(workspace: Workspace, ticket: string, plan: { base: string; branch: string }, images: ResolvedImage[]): Promise<Claimed> {
     const { base, branch } = plan;
     const created = now();
     const worktree = this.#worktreePath(workspace.name, ticket);
@@ -823,7 +834,7 @@ export class Execution implements RunnerWork {
     };
     await this.jobs.write(job);
     await this.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, state: { from: null, to: 'starting' } });
-    return { workspace, ticket, base, branch, worktree };
+    return { workspace, ticket, base, branch, worktree, images };
   }
 
   // The claimed job's worktree, then its first turn. kept (sf restart --keep-files, SF-067): the
@@ -871,9 +882,12 @@ export class Execution implements RunnerWork {
       if (kept !== undefined) {
         await copyKept(kept, worktree);
       }
+      job = await this.#storeImages(job, claimed.images);
       job = await this.#transition(await this.#syncTask(workspace, job), 'working');
-      // The first turn runs in the job's runner.
-      await this.#serveRunners().queue(workspace.name, ticket, { kind: 'turn', prompt: factoryPrompt(firstPrompt(ticket, kept?.paths ?? [], rules), ticket, job.iteration + 1) });
+      // The first turn runs in the job's runner, with the images' blocks.
+      const prompt = factoryPrompt(firstPrompt(ticket, kept?.paths ?? [], rules), ticket, job.iteration + 1, this.#imagesLine(job));
+      const images = this.#imageRefs(job, (await this.jobs.readTaskCopy(workspace.name, ticket)) ?? '');
+      await this.#serveRunners().queue(workspace.name, ticket, { kind: 'turn', prompt, ...(images.length > 0 ? { images } : {}) });
       return { branch, state: job.state, check_after_minutes: this.#config.checkAfterStartMin, worktree };
     });
     if (kept !== undefined) {
@@ -957,6 +971,47 @@ export class Execution implements RunnerWork {
     return change === undefined ? prompt : `${prompt}\n\n${changeNote(ticket, change.diff)}`;
   }
 
+  // The job's images (SF-065): copied into its directory (attachments/, the copy its agents are
+  // given) and into the worktree's .software-factory/<ticket>/ (kept out of Git as the Task file
+  // there), each replacing the copy before; recorded in job.json (absent with none) and logged with
+  // an attachments event. A job that had none and gets none is left as it is. Returns the job.
+  async #storeImages(job: Job, images: ResolvedImage[]): Promise<Job> {
+    const { workspace, ticket } = job;
+    if (images.length === 0 && job.attachments === undefined) {
+      return job;
+    }
+    const dirs = [this.jobs.attachmentsDir(workspace, ticket), ...(job.worktree !== null ? [join(job.worktree, TASK_DIR, ticket)] : [])];
+    for (const dir of dirs) {
+      if (images.length > 0) {
+        await writeImages(dir, images);
+      } else {
+        await rm(dir, { recursive: true, force: true });
+      }
+    }
+    const records = images.map(jobAttachment);
+    const { attachments: _before, ...rest } = job;
+    const next: Job = records.length > 0 ? { ...rest, attachments: records } : rest;
+    await this.jobs.write(next);
+    await this.jobs.appendEvent(workspace, ticket, { ts: now(), iteration: job.iteration, type: 'attachments', images: records });
+    return next;
+  }
+
+  // The images line of the job's prompts (SF-065): their folder in the worktree and their names;
+  // undefined without images.
+  #imagesLine(job: Job): { dir: string; names: string[] } | undefined {
+    const attachments = job.attachments ?? [];
+    if (attachments.length === 0 || job.worktree === null) {
+      return undefined;
+    }
+    return { dir: join(job.worktree, TASK_DIR, job.ticket), names: attachments.map((image) => image.name) };
+  }
+
+  // The job's images as prompt images (SF-065): the job's own copy, with the alt texts of the Task
+  // text given (the one the agent reads); [] without images.
+  #imageRefs(job: Job, task: string): ImageRef[] {
+    return imageRefs(job.ticket, this.jobs.attachmentsDir(job.workspace, job.ticket), job.attachments ?? [], task);
+  }
+
   // Removes the sandbox's placeholder files from the worktree; a failure is logged and the steps
   // that follow (Patch, MR commit) still skip them.
   async #removePlaceholders(cwd: string): Promise<string[]> {
@@ -1009,10 +1064,15 @@ export class Execution implements RunnerWork {
         turnLimitContinues: this.#config.turnLimitContinues,
       },
       {
-        prompt: async (prompt, continued) => {
+        prompt: async (prompt, continued, images) => {
           const current = await this.jobs.read(name, ticket);
           iteration = (current?.iteration ?? 0) + 1;
-          await this.jobs.appendEvent(name, ticket, { ts: now(), iteration, prompt });
+          // The images by name, type and size only, never their bytes (SF-065).
+          const sent = images === undefined ? undefined : await Promise.all(images.map(async (image) => ({
+            name: image.name, type: image.type,
+            bytes: current?.attachments?.find((record) => record.name === image.name)?.bytes ?? (await stat(image.path).then((info) => info.size, () => 0)),
+          })));
+          await this.jobs.appendEvent(name, ticket, { ts: now(), iteration, prompt, ...(sent !== undefined ? { images: sent } : {}) });
           start = await this.#worktreeState(cwd, current);
           // A prompt sent starts a new chain: the continuations of the last one no longer show.
           if (continued === 0 && current?.turn_limit !== undefined) {
@@ -1021,7 +1081,8 @@ export class Execution implements RunnerWork {
         },
         turnLimit: (turn) => this.#turnLimit(name, ticket, iteration, cwd, start, turn),
         message: async (message: SDKMessage) => {
-          await this.jobs.appendEvent(name, ticket, { ts: now(), iteration, message });
+          // No image bytes in events.jsonl (SF-065): a Read of an image returns them.
+          await this.jobs.appendEvent(name, ticket, { ts: now(), iteration, message: withoutImageData(message) });
           if (message.type === 'system' && message.subtype === 'init' && message.permissionMode === 'auto') {
             // Queued, not awaited: the session must never wait for the lock (abort holds it while
             // it closes the session).
@@ -1562,7 +1623,7 @@ export class Execution implements RunnerWork {
   // (SF-045).
   // reviewer: whose session a review_message is (the simplification pass's too, SF-055).
   #appendLive(job: Job, type: 'review_message' | 'gate_event', raw: unknown, reviewer: string = REVIEWER): Promise<void> {
-    const { value, truncated } = cutEvent(raw);
+    const { value, truncated } = cutEvent(withoutImageData(raw));
     const cut = truncated ? { truncated: true as const } : {};
     return this.jobs.appendEvent(job.workspace, job.ticket, type === 'review_message'
       ? { ts: now(), iteration: job.iteration, type, reviewer, message: value, ...cut }
@@ -1577,10 +1638,10 @@ export class Execution implements RunnerWork {
       if (job.worktree === null) {
         throw new Error('the job has no worktree');
       }
-      const prompt = reviewPrompt(await this.#reviewInput(job, job.worktree));
-      outcome = await runReview(prompt, {
+      const input = await this.#reviewInput(job, job.worktree);
+      outcome = await runReview(reviewPrompt(input), {
         cwd: job.worktree, claudePath: this.#config.claudePath, sandbox: this.#config.sandbox, model: this.#config.reviewModel,
-        maxTurns: this.#config.reviewMaxTurns, signal: running.controller.signal,
+        maxTurns: this.#config.reviewMaxTurns, signal: running.controller.signal, images: this.#imageRefs(job, input.task),
         // The session live in events.jsonl (SF-045).
         onMessage: (message) => this.#appendLive(job, 'review_message', redactor.reviewMessage(message)),
       });
@@ -1752,9 +1813,10 @@ export class Execution implements RunnerWork {
       if (job.worktree === null || job.base_commit === null || !gate.on) {
         throw new Error('the job has no worktree or base commit');
       }
-      const prompt = gatePrompt({ ...(await this.#reviewInput(job, job.worktree)), baseCommit: job.base_commit });
-      outcome = await runGate(prompt, {
+      const input = await this.#reviewInput(job, job.worktree);
+      outcome = await runGate(gatePrompt({ ...input, baseCommit: job.base_commit }), {
         codexPath: gate.codexPath, cwd: job.worktree, dir: this.jobs.iterationDir(name, ticket, iteration), model: this.#config.codexModel,
+        images: this.#imageRefs(job, input.task).map((image) => image.path),
         timeoutMs: this.#config.gateTimeoutMs, signal: running.controller.signal,
         // The run live in events.jsonl (SF-045).
         onEvent: (event) => this.#appendLive(job, 'gate_event', redactor.codexEvent(event)),
@@ -1949,10 +2011,10 @@ export class Execution implements RunnerWork {
       if (job.worktree === null) {
         throw new Error('the job has no worktree');
       }
-      const prompt = simplifyPrompt(await this.#simplifyInput(job, job.worktree));
-      outcome = await runSimplify(prompt, {
+      const input = await this.#simplifyInput(job, job.worktree);
+      outcome = await runSimplify(simplifyPrompt(input), {
         cwd: job.worktree, claudePath: this.#config.claudePath, sandbox: this.#config.sandbox, model: this.#config.reviewModel,
-        maxTurns: this.#config.reviewMaxTurns, signal: running.controller.signal,
+        maxTurns: this.#config.reviewMaxTurns, signal: running.controller.signal, images: this.#imageRefs(job, input.task),
         onMessage: (message) => this.#appendLive(job, 'review_message', redactor.reviewMessage(message), SIMPLIFIER),
       });
     } catch (error) {
@@ -3315,21 +3377,37 @@ export class Execution implements RunnerWork {
       }
       const workspace = await this.#resolve(workspaceName);
       const pause = job.paused ?? { from: 'working' as const, step: 'turn' as const };
+      // The images the Task file refers to now (SF-065), from the folder: an image changed while
+      // paused is found even when the text did not change; one that cannot be used refuses the
+      // Resume before anything changes (the job stays paused).
+      const images = await resolveTaskImages(workspace.workCheckout, ticket, await readTask(workspace, ticket));
+      const before: JobAttachment[] = job.attachments ?? [];
+      const records = images.map(jobAttachment);
+      const imagesChanged = sameImages(before, records) ? undefined : changedImages(before, records);
       const change = await this.#taskChange(workspace, job);
       if (change !== undefined) {
         await this.jobs.appendEvent(workspaceName, ticket, { ts: now(), iteration: job.iteration, type: 'task_changed', from: job.task_sha256 ?? null, to: change.sha256 });
       }
+      let current = job;
+      if (imagesChanged !== undefined) {
+        current = await this.#storeImages(job, images);
+      }
       let next: Job;
       if (pause.from === 'working') {
-        next = await this.#transition(await this.#syncTask(workspace, job), 'working');
+        next = await this.#transition(await this.#syncTask(workspace, current), 'working');
         const first = await this.#resumePrompt(next, message);
-        this.#session(next, workspace).send(factoryPrompt(this.#withChange(first, ticket, change), ticket, next.iteration + 1), DENIED_TOOLS);
+        // Only the order changed: every image is named.
+        const names = imagesChanged === undefined ? [] : imagesChanged.length > 0 ? imagesChanged : records.map((image) => image.name);
+        const text = names.length > 0 ? `${this.#withChange(first, ticket, change)}\n\n${imagesChangedNote(names)}` : this.#withChange(first, ticket, change);
+        // A new Implementer session has not seen the images: its first prompt carries their blocks.
+        const blocks = next.session_id === null ? this.#imageRefs(next, (await this.jobs.readTaskCopy(workspaceName, ticket)) ?? '') : [];
+        this.#session(next, workspace).send(factoryPrompt(text, ticket, next.iteration + 1, this.#imagesLine(next)), DENIED_TOOLS, blocks);
       } else {
         // The reviewers read the new Task file in the worktree and its sha256 is recorded; task.md
         // keeps what the Implementer was last given, so its next prompt (a Fix section, sf say)
-        // carries the diff.
-        const content = await this.#copyTask(workspace, job);
-        next = await this.#transition(content === undefined ? job : await this.#recordTask(job, content), 'awaiting_review');
+        // carries the diff. They get the job's images as they are now.
+        const content = await this.#copyTask(workspace, current);
+        next = await this.#transition(content === undefined ? current : await this.#recordTask(current, content), 'awaiting_review');
         await this.#pickUp(next);
       }
       return { state: next.state, iteration: next.iteration, step: pause.step, task_changed: change !== undefined };
@@ -3381,6 +3459,8 @@ export class Execution implements RunnerWork {
       const workspace = await this.#resolve(workspaceName);
       const checkout = workspace.workCheckout;
       const plan = await this.#plan(workspace, ticket);
+      // Every image the Task file refers to must be usable (SF-065), before anything changes.
+      const images = await resolveTaskImages(checkout, ticket, plan.content);
       // Checked before anything changes, and again below, in the Git lock that deletes the branch,
       // once the runner has stopped: nothing can add a commit between that check and the deletion.
       const branchCheck = async (): Promise<boolean> => {
@@ -3417,7 +3497,7 @@ export class Execution implements RunnerWork {
           throw new FactoryError('restart_failed', failure);
         }
         const name = await this.jobs.archive(workspaceName, ticket);
-        return { claimed: await this.#claim(workspace, ticket, plan), kept: saved, archived: `jobs/${workspaceName}/${name}`, deleted: deleteOld ? old.branch : null };
+        return { claimed: await this.#claim(workspace, ticket, plan, images), kept: saved, archived: `jobs/${workspaceName}/${name}`, deleted: deleteOld ? old.branch : null };
       } catch (error) {
         if (saved !== undefined && !removed) {
           await rm(saved.dir, { recursive: true, force: true });
@@ -3715,7 +3795,7 @@ export class Execution implements RunnerWork {
     job = await this.#syncTask(workspace, job);
     // A commit prepared before this turn is never pushed (SF-073).
     job = await this.#transition({ ...job, ...counts, fixes: job.fixes + 1, prepared_commit: null }, 'working');
-    this.#session(job, workspace).send(factoryPrompt(this.#withChange(`/implement ${TASK_DIR}/${ticket}.md Fix ${fix}`, ticket, change), ticket, job.iteration + 1), DENIED_TOOLS);
+    this.#session(job, workspace).send(factoryPrompt(this.#withChange(`/implement ${TASK_DIR}/${ticket}.md Fix ${fix}`, ticket, change), ticket, job.iteration + 1, this.#imagesLine(job)), DENIED_TOOLS);
     return { iteration: job.iteration + 1, check_after_minutes: this.#config.checkAfterFixMin };
   }
 
@@ -3779,7 +3859,7 @@ export class Execution implements RunnerWork {
       if (job.state !== 'working') {
         job = await this.#transition(job, 'working');
       }
-      session.send(factoryPrompt(this.#withChange(message, ticket, change), ticket, job.iteration + 1), DENIED_TOOLS);
+      session.send(factoryPrompt(this.#withChange(message, ticket, change), ticket, job.iteration + 1, this.#imagesLine(job)), DENIED_TOOLS);
       return { state: job.state, queued };
     });
   }
@@ -3880,7 +3960,7 @@ export class Execution implements RunnerWork {
           if (job.state !== 'working') {
             throw new FactoryError('invalid_state', `The first turn needs working; the job is ${job.state}.`);
           }
-          this.#session(job, await this.#resolve(workspace)).send(request.prompt, DENIED_TOOLS);
+          this.#session(job, await this.#resolve(workspace)).send(request.prompt, DENIED_TOOLS, request.images);
           return {};
         });
       case 'say':

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { changeNote, firstPrompt } from '../src/execution.js';
+import { changeNote, firstPrompt, imagesChangedNote } from '../src/execution.js';
 import { DETAIL_CHARS, lineEntries, type StreamContext, streamContext, type StreamEntry } from '../src/job-stream.js';
 import { type GateRecord, type IterationMeta, JobStore, type ReviewRecord, type SimplifyRecord } from '../src/jobs.js';
 import type { LedgerEntry } from '../src/ledger.js';
@@ -96,6 +96,24 @@ test('lineEntries: prompt kinds by the first line; the rules block never in text
     assert.ok(!JSON.stringify(entry).includes('Rules from the Software Factory'), entry.k);
     assert.ok(!JSON.stringify(entry).includes(FACTORY_PROMPT_RULES.split('\n')[1]!));
   }
+});
+
+test('lineEntries (SF-065): the images line and the changed-images note are cut from the text; the prompt still has its kind, the image names come from the record', async () => {
+  const images = { dir: '/w/.software-factory/T-1', names: ['1.png', 'form.gif'] };
+  const sent = [{ name: '1.png', type: 'image/png', bytes: 12 }, { name: 'form.gif', type: 'image/gif', bytes: 34 }];
+  const implement = await one({ prompt: factoryPrompt(firstPrompt('T-1', []), 'T-1', 1, images), images: sent });
+  assert.deepEqual(implement, {
+    t: 'prompt', who: 'factory', kind: 'implement', text: '/implement .software-factory/T-1.md', first: '/implement .software-factory/T-1.md',
+    task_changed: false, images: ['1.png', 'form.gif'], k: '7', ts: TS, it: 2,
+  });
+  const task = '# T-1\n\n## Fix 1\n\n1. [R1, major] a.ts: one.\n';
+  const fix = await one({ prompt: factoryPrompt('/implement .software-factory/T-1.md Fix 1', 'T-1', 2, images) }, { task });
+  assert.deepEqual([fix.kind, fix.fix_n, fix.text, fix.images], ['fix', 1, '/implement .software-factory/T-1.md Fix 1', undefined]);
+  // A Resume after the images changed: the continue prompt; task_changed stays the Task text's.
+  const resumed = await one({ prompt: factoryPrompt(`Continue where you stopped.\n\n${imagesChangedNote(['1.png'])}`, 'T-1', 2, images) });
+  assert.deepEqual([resumed.kind, resumed.text, resumed.task_changed], ['continue', 'Continue where you stopped.', false]);
+  const both = await one({ prompt: factoryPrompt(`hello\n\n${changeNote('T-1', undefined)}\n\n${imagesChangedNote(['1.png'])}`, 'T-1', 2, images), images: sent });
+  assert.deepEqual([both.t, both.text, both.task_changed, both.images], ['user', 'hello', true, ['1.png', 'form.gif']]);
 });
 
 test('lineEntries: text of the Implementer, the Claude review and Codex; Codex JSON output dropped; several entries keyed by block', async () => {

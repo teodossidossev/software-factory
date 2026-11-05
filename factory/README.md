@@ -336,7 +336,7 @@ into New ticket or onto the planned ticket's page, dropped there as files, or ad
 checkout (out of Git with the folder), and ChatGPT reads them with `read_attachment` while it
 writes the Task file. The Task file refers to an image with plain Markdown, the path relative to
 the Task file: `![the login form](<ticket>/1.png)`; only the images the Task file refers to count
-for the job (handing them to the Implementer and the reviewers is SF-065).
+for the job, and every agent of the job sees them (section The job's images, SF-065).
 
 One set of rules (`src/attachments.ts`) for the dashboard, the CLI and MCP:
 
@@ -360,8 +360,10 @@ One set of rules (`src/attachments.ts`) for the dashboard, the CLI and MCP:
 
 `write_task` (and the page's Save) refuses with `attachment_missing` (400) a Task file whose image
 reference `![…](<ticket>/<name>)` (outside fenced code blocks; the target is the text after `(` up
-to the first space or `)`, as written) names an image the ticket does not have; other targets (a
-URL, `./…`, another ticket's) are not checked, and neither is a Fix section.
+to the first space or `)`, as written; `<name>` matching the name pattern) names an image the
+ticket does not have. It checks exactly the references a job counts (section The job's images):
+other targets (a URL, `./…`, another ticket's, a nested path, `..`, an invalid name) are not
+checked, and neither is a Fix section.
 
 **Archive, restore, delete** (`src/setup.ts`): Archive moves `.software-factory/<ticket>/` to
 `.software-factory/archive/<ticket>/` after the Task file, replacing an older archived folder, so a
@@ -395,6 +397,52 @@ here (Ctrl+V) or drop one.": a paste anywhere on the page while it is shown, or 
 more files on the area, uploads each at once without a name. A text paste (into the Task file
 editor, the request) goes on as usual: only clipboard files are taken. There is no file picker
 (the prototype's "choose a file" is left out: the user said none is needed).
+
+### The job's images
+
+SF-065. The agents of a job see the images its Task file refers to without having to open a file.
+
+- **What counts**: exactly a Markdown image `![alt](<ticket>/<name>)` outside fenced code blocks
+  whose `<name>` matches the name pattern above. `./…`, nested paths, another ticket's folder,
+  `..`, URLs, `<img>` tags and references in code fences are no attachments: ignored, not refused.
+  An image referenced several times counts once, at its first reference; the images go in the
+  order of their first references, with the alt text of that reference.
+- **Start, Restart and every Resume** resolve them from the work checkout's folder. A missing
+  file, a wrong type, a file over 5 MB or more than 10 images refuse with `attachment_invalid`
+  (409), naming each image and why; a refused Resume leaves the job paused. The images are copied
+  twice: into the job directory (`jobs/<ws>/<ticket>/attachments/`, the job's own copy, which the
+  factory reads for the image blocks, the gate and the hashes) and into the worktree's
+  `.software-factory/<ticket>/` (out of Git like the worktree's Task file). Later edits of the
+  checkout's folder change nothing for a running job. `job.json` gets `attachments: [{name, type,
+  bytes, sha256}]` (left out without a reference) and the event `{type: "attachments", images:
+  [...]}` is appended (`sf watch`: `attachments: 1.png (image/png, 12345 bytes), …`). A Resume
+  compares the hashes with the folder, so an image changed while paused is found even when the
+  text did not change; on a difference it copies again, records the new set and appends the event.
+  Paused in `working`, its prompt gets "The Task's images changed while the job was paused:
+  <names>."; paused outside `working`, no prompt is sent and the reviewers get the new set. Fix,
+  `sf say` and MR preparation keep the job's copy; the dashboard's "Task changed" flag stays
+  text-only.
+- **The Implementer**: every prompt that goes through the factory's rules block (the first turn,
+  Resume, Fix N, `sf say`) gets one line before the rules: "The Task's images are in
+  <worktree>/.software-factory/<ticket>/: 1.png, 2.png. Read them when you need them." The first
+  prompt (Start, Restart, and a Resume that opens a new session) is sent as one user message: the
+  prompt text as before (`/implement .software-factory/<ticket>.md` first), then per image a line
+  `Image <ticket>/<name> ("<alt>"), referenced in the Task file:` and its image block (base64, its
+  media type). The Task text is not inlined: the Implementer reads it through `/implement`.
+  Continuations after a turn limit, the MR text turn and the conflict turn are unchanged.
+- **The reviewers**: the Claude review and the simplification pass get the same image blocks after
+  their prompt; the Codex gate gets `--image <path in the job's copy>` per image, before `--cd`.
+- **The Task check** gets them as blocks too, read by the factory from the checkout's folder (the
+  check's session may not read `.software-factory/`); a missing or unusable one stores a failed
+  check naming it, and no session runs. A check is stored and found by `taskCheckSha256`: the
+  Task text's sha256 without a reference, otherwise the sha256 of the text, a newline and the
+  sorted `<name>:<sha256>` lines of the referenced images (`<name>:missing` for one that cannot
+  be read; an archived Task file's images are read from `archive/<ticket>/`), so a changed image
+  makes the check stale. `write_task`'s sha256 and `job.json`'s `task_sha256` stay text-only.
+- **Logs**: the `prompt` event records the image names, types and sizes (`images`), never the
+  bytes; image data in a logged SDK message (a Read of an image) is replaced by a note of its
+  length. The Stream shows "Images: 1.png, 2.png" under the prompt. A Task file without a
+  reference behaves exactly as before: the same first prompt, gate argv and check sha256, no event.
 
 ## Jobs
 

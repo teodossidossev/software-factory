@@ -610,3 +610,13 @@ test('dashboard api/queue/rule (SF-072): POST {"rule"} sets the rule at a usage 
   }, fakeSetup(), { queue });
   queue.close();
 });
+
+test('dashboard (SF-065): attachment_invalid (a Start, Restart or Resume whose Task file refers to an image that cannot be used) is a 409 with its message', async () => {
+  const fake = fakeActions({ branch: 'T-5-demo', state: 'starting', check_after_minutes: 15, worktree: '/w/app/T-5' });
+  await withDashboard('dash-attachment-invalid', fake, async (dashboard) => {
+    const message = 'The Task file refers to images that cannot be used: T-5/1.png: missing.';
+    fake.answer = new FactoryError('attachment_invalid', message);
+    const reply = await act(dashboard.url, 'api/tickets/app/T-5/start', {});
+    assert.deepEqual([reply.status, JSON.parse(reply.body).error], [409, { code: 'attachment_invalid', message }]);
+  });
+});

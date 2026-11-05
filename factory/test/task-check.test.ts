@@ -6,15 +6,17 @@
 // check, the dashboard's Check, its endpoint and the tickets' summary, and the Context owner's
 // task_check tool.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, readdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readdir, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { addAttachment } from '../src/attachments.js';
 import { basename, join } from 'node:path';
 import { test } from 'node:test';
 import { type Job, JobStore } from '../src/jobs.js';
 import { readOnlySessionOptions, REVIEW_DENIED_TOOLS } from '../src/review.js';
 import {
   CHECK_SCHEMA, type CheckFinding, type CheckOutput, type CheckRecord, CheckStore, TaskChecks, checkDeniedRules, checkLines, checkOutput, checkPrompt, checkSummary,
-  checkVerdict, cutOutsideLinks, guardReason, OUTSIDE_LINK_NOTE, scopeFindings, settleCheck, startNote, taskSha256,
+  checkVerdict, cutOutsideLinks, guardReason, OUTSIDE_LINK_NOTE, scopeFindings, settleCheck, startNote, taskCheckSha256, taskSha256,
 } from '../src/task-check.js';
 import { writeTask } from '../src/task-file.js';
 import { act, fetchRaw } from './support/dashboard-client.js';
@@ -520,4 +522,76 @@ test('sf check-task (SF-085): the config lock the check\'s sandbox left goes onc
   assert.equal(removed.code, 0, removed.stderr);
   assert.equal(existsSync(lock), false);
   assert.deepEqual(await removals(), [lock]);
+});
+
+// The images of the SF-065 tests.
+const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('png-body')]);
+const sha = (data: Buffer | string): string => createHash('sha256').update(data).digest('hex');
+
+test('taskCheckSha256 (SF-065): the text\'s sha256 without images; with them the text, a newline and the sorted name:sha256 lines', () => {
+  const text = taskText('C-1');
+  assert.equal(taskCheckSha256(text, []), taskSha256(text));
+  const images = [{ name: '2.png', sha256: 'b'.repeat(64) }, { name: '1.png', sha256: 'a'.repeat(64) }];
+  const expected = sha(`${text}\n1.png:${'a'.repeat(64)}\n2.png:${'b'.repeat(64)}`);
+  assert.equal(taskCheckSha256(text, images), expected);
+  assert.equal(taskCheckSha256(text, [...images].reverse()), expected);
+  assert.notEqual(taskCheckSha256(text, [images[0]!, { name: '1.png', sha256: 'c'.repeat(64) }]), expected);
+  assert.equal(taskCheckSha256(text, [{ name: '1.png', sha256: 'missing' }]), sha(`${text}\n1.png:missing`));
+});
+
+test('the Task check with images (SF-065): the factory gives the referenced images as blocks; a changed image makes the check stale; a missing one fails the check without a session; archived, the images come from archive/', async () => {
+  const env = await newEnv('check-images', { SF_REVIEW_MODEL: 'fake-checker', SF_TASK_CHECK_MAX_TURNS: '9' });
+  const repo = await newRepo(env, 'check-images-repo', false);
+  const workspace = { name: 'app', readCheckout: repo, workCheckout: repo };
+  const jobs = new JobStore(env.state);
+  await writeTask(workspace, 'C-10', taskText('C-10'), jobs);
+  await addAttachment(workspace, 'C-10', PNG, jobs);
+  await addAttachment(workspace, 'C-10', PNG, jobs, 'unused.png');
+  const content = taskText('C-10', '', 'Greet the reader as in ![the mockup](C-10/1.png).');
+  await writeTask(workspace, 'C-10', content, jobs);
+  await reviewScript(env, [{ output: OUTPUT }]);
+
+  const run = await runCli(env, ['check-task', 'app', 'C-10']);
+  assert.equal(run.code, 0, run.stderr);
+  const [entry] = await reviewLog(env);
+  assert.deepEqual(entry!.blocks, [
+    { type: 'text', text: checkPrompt('C-10', content) },
+    { type: 'text', text: 'Image C-10/1.png ("the mockup"), referenced in the Task file:' },
+    { type: 'image', media_type: 'image/png', bytes: PNG.length, sha256: sha(PNG) },
+  ]);
+  const checkSha = taskCheckSha256(content, [{ name: '1.png', sha256: sha(PNG) }]);
+  assert.notEqual(checkSha, taskSha256(content));
+  const store = new CheckStore(env.state);
+  assert.equal((await store.read('app', 'C-10', checkSha))?.status, 'checked');
+  const checks = new TaskChecks({
+    resolve: async () => workspace, claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 1, rulesMaxBytes: 49152, stateDir: env.state, configDir: env.config,
+  });
+  assert.deepEqual([(await checks.view('app', 'C-10')).stale, (await checks.view('app', 'C-10')).current_sha256], [false, checkSha]);
+  assert.equal((await checks.current('app', 'C-10')).record?.sha256, checkSha);
+
+  // The image changes, the text does not: the check is stale, task_check has none for this version.
+  const other = Buffer.concat([PNG, Buffer.from('-changed')]);
+  await writeFile(join(repo, '.software-factory', 'C-10', '1.png'), other);
+  assert.equal((await checks.view('app', 'C-10')).stale, true);
+  assert.equal((await checks.current('app', 'C-10')).record, undefined);
+
+  // A missing image: a failed check naming it, stored under name:missing; no session runs.
+  await rm(join(repo, '.software-factory', 'C-10', '1.png'));
+  const failed = await runCli(env, ['check-task', 'app', 'C-10']);
+  assert.equal(failed.code, 1);
+  assert.match(failed.stdout, /Check failed: The Task file refers to images that cannot be used: C-10\/1\.png: missing\./);
+  assert.equal((await reviewLog(env)).length, 1);
+  const missingSha = taskCheckSha256(content, [{ name: '1.png', sha256: 'missing' }]);
+  assert.deepEqual([(await store.read('app', 'C-10', missingSha))?.status, (await checks.view('app', 'C-10')).stale], ['failed', false]);
+
+  // Archived with its images: the hash reads archive/C-10/, and the first check is current again.
+  await writeFile(join(repo, '.software-factory', 'C-10', '1.png'), PNG);
+  await mkdir(join(repo, '.software-factory', 'archive'), { recursive: true });
+  await rename(join(repo, '.software-factory', 'C-10.md'), join(repo, '.software-factory', 'archive', 'C-10.md'));
+  await rename(join(repo, '.software-factory', 'C-10'), join(repo, '.software-factory', 'archive', 'C-10'));
+  const archived = await checks.view('app', 'C-10');
+  assert.equal(archived.current_sha256, checkSha);
+  // A referenced image missing from the archive enters as missing; the view never throws.
+  await rm(join(repo, '.software-factory', 'archive', 'C-10', '1.png'));
+  assert.equal((await checks.view('app', 'C-10')).current_sha256, missingSha);
 });

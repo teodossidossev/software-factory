@@ -205,6 +205,20 @@ test('stream client: each entry type in order, with the separators, the local ti
   assert.ok(page.$('stream').all().every((element) => element.getAttribute('style') === null));
 });
 
+test('stream client (SF-065): a prompt sent with images shows their names as one muted line under it; a prompt without images shows none', async () => {
+  const entries: Entry[] = [
+    state('0', null, 'starting'), state('1', 'starting', 'working'),
+    { ...IMPLEMENT, images: ['1.png', 'form.gif'] },
+    { k: '3', ts: at(3), it: 1, who: 'you', t: 'user', text: 'Look again.', task_changed: true, images: ['1.png'] },
+    { k: '4', ts: at(4), it: 1, who: 'factory', t: 'prompt', kind: 'continue', text: 'Continue where you stopped.', first: 'Continue where you stopped.', task_changed: false },
+  ];
+  const page = await withEntries(job('working', { iteration: 1 }), detail(job('working', { iteration: 1 })), entries);
+  const images = (k: string): string[] => entryOf(page, k).all().filter((element) => element.className === 'muted fs12' && element.textContent.startsWith('Images:')).map((element) => element.textContent);
+  assert.deepEqual(images('2'), ['Images: 1.png, form.gif']);
+  assert.deepEqual(images('3'), ['Images: 1.png']);
+  assert.deepEqual(images('4'), []);
+});
+
 test('stream client: the pages are read from line 0 until the end, then the live stream from the last next; a tool_result joins its tool by id in the same page, the next page and live', async () => {
   const pages = {
     0: { entries: [tool('0.0', 'a', 'Read a.ts'), result('0.1', 'a', '3 lines'), tool('1', 'b', 'Bash make')], next: 2, end: false },

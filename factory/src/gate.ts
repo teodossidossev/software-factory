@@ -75,6 +75,8 @@ export interface GateOptions {
   // Every JSONL event of stdout that parses, in order, as it arrives (SF-045); runGate waits for
   // the calls before it returns, and a failing call changes nothing of the outcome.
   onEvent?: (event: unknown) => Promise<void>;
+  // The Task's images (SF-065): absolute paths of the job's copy, one --image each.
+  images?: readonly string[] | undefined;
 }
 
 export type GateOutcome = { tokens: GateTokens; startedAt: string; endedAt: string } & (
@@ -87,11 +89,14 @@ export const noTokens = (): GateTokens => ({ input: 0, cached_input: 0, output: 
 
 // The argv of `codex exec`; the prompt goes to stdin ("-"). The user's Codex memories stay out
 // (SF-050): the memories feature off, and no memories injected should a later Codex read them
-// without it. The user's global AGENTS.md has no documented switch and still loads.
-export function gateArgs(options: Pick<GateOptions, 'cwd' | 'dir' | 'model'>): string[] {
+// without it. The user's global AGENTS.md has no documented switch and still loads. The Task's
+// images (SF-065) go before --cd, so each --image is followed by another option, never by the
+// final "-" (--image takes several values).
+export function gateArgs(options: Pick<GateOptions, 'cwd' | 'dir' | 'model' | 'images'>): string[] {
   return [
     'exec', '--ephemeral', '--sandbox', 'read-only',
     '--disable', 'memories', '-c', 'memories.use_memories=false',
+    ...(options.images ?? []).flatMap((path) => ['--image', path]),
     '--cd', options.cwd,
     '--output-schema', join(options.dir, GATE_SCHEMA_FILE), '--output-last-message', join(options.dir, GATE_OUTPUT_FILE), '--json',
     ...(options.model !== undefined ? ['--model', options.model] : []),

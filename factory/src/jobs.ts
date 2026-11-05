@@ -117,6 +117,14 @@ const jobSchema = z.strictObject({
   // into the worktree and on a Resume that found the Task file changed; absent in a job started
   // before. task.md keeps the version the Implementer was last given, which can be older.
   task_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  // The images the Task file refers to (SF-065), as resolved at Start, Restart or the last Resume and
+  // copied into attachments/ of the job directory; absent when it refers to none.
+  attachments: z.array(z.strictObject({
+    name: z.string().min(1),
+    type: z.enum(['image/png', 'image/jpeg', 'image/webp', 'image/gif']),
+    bytes: z.number().int().min(0),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  })).optional(),
   // While paused (SF-067) or waiting_limit (SF-072): the state the job was paused in, what was
   // interrupted, and when.
   paused: z.strictObject({ from: z.enum(PAUSABLE_STATES), step: z.enum(PAUSE_STEPS).nullable(), at: timestamp }).optional(),
@@ -272,7 +280,9 @@ export interface Iteration {
 // removed placeholders, or a review's outcome, Codex event or Claude message.
 export type EventRecord = { ts: string; iteration: number } & (
   | { message: unknown }
-  | { prompt: string }
+  // A prompt sent to the Implementer, with the names, types and sizes of its image blocks (SF-065),
+  // never their bytes.
+  | { prompt: string; images?: Array<{ name: string; type: string; bytes: number }> }
   | { state: { from: JobState | null; to: JobState; error?: { code: string; message: string } } }
   | { type: 'notify_failed'; channel: string; message: string }
   // Sandbox placeholders the factory removed from the work checkout (src/placeholders.ts).
@@ -298,6 +308,9 @@ export type EventRecord = { ts: string; iteration: number } & (
   // and run again on Resume; never a verdict.
   // A usage limit (SF-072) interrupts the same way: the job parks in waiting_limit.
   | { type: 'interrupted'; step: PauseStep; reviewer?: string }
+  // The images of the job (SF-065), resolved and copied at Start, Restart or a Resume that found them
+  // changed: name, type, size and sha256 of each, never their bytes.
+  | { type: 'attachments'; images: Array<{ name: string; type: string; bytes: number; sha256: string }> }
   // The Task file changed while the job was paused (SF-067): the sha256 the job had, and the new one.
   | { type: 'task_changed'; from: string | null; to: string }
   // An Implementer turn ended at the turn limit while making progress, and the factory sent a
@@ -410,6 +423,11 @@ export class JobStore {
   // workspace and ticket are validated names (registry and Task file patterns), never paths.
   dir(workspace: string, ticket: string): string {
     return join(this.root, workspace, ticket);
+  }
+
+  // The job's own copy of the Task file's images (SF-065): what its agents are given.
+  attachmentsDir(workspace: string, ticket: string): string {
+    return join(this.dir(workspace, ticket), 'attachments');
   }
 
   eventsPath(workspace: string, ticket: string): string {

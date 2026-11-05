@@ -1824,9 +1824,20 @@ async function loadTaskView() {
   }
 }
 
+// The images sent with a prompt (SF-065), as one muted line; none without.
+function imagesLine(entry) {
+  return Array.isArray(entry.images) && entry.images.length > 0 ? [el('div', 'muted fs12', `Images: ${entry.images.join(', ')}`)] : [];
+}
+
 // A prompt: the Fix section with its items, or a line with the prompt behind a toggle (and the Task
-// behind another for the implement prompt); "Continue where you stopped." as a factory line.
+// behind another for the implement prompt); "Continue where you stopped." as a factory line; the
+// images sent with it under it.
 function promptBody(entry, open) {
+  return [...promptNodes(entry, open), ...imagesLine(entry)];
+}
+
+// The prompt itself, without the images line.
+function promptNodes(entry, open) {
   const changed = entry.task_changed === true ? [document.createTextNode(' '), el('span', 'muted fs12', "with the Task file's change")] : [];
   if (entry.kind === 'continue') {
     const line = el('div', '', 'Continue where you stopped.');
@@ -2134,6 +2145,7 @@ function entryBody(entry, open) {
       if (entry.task_changed === true) {
         block.append(el('span', 'muted fs12', "with the Task file's change"));
       }
+      block.append(...imagesLine(entry));
       return [block];
     }
     default:

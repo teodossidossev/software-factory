@@ -4,17 +4,22 @@
 // every job works in a worktree of the checkout, Clean prepares the branch, and several jobs of a
 // workspace run at once.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { addAttachment } from '../src/attachments.js';
 import { loadConfig } from '../src/config.js';
-import { Execution } from '../src/execution.js';
+import { Execution, firstPrompt } from '../src/execution.js';
 import { type Job, type JobState, JobStore } from '../src/jobs.js';
 import { QueueStore } from '../src/queue.js';
 import { resolveWorkspace } from '../src/registry.js';
 import { FACTORY_PROMPT_RULES, factoryPrompt } from '../src/prompts.js';
 import { taskSha256, writeTask } from '../src/task-file.js';
-import { call, FAKE, fakeLog, git, newEnv, newRepo, putRules, putTask, readyCheck, refused, runCli, script, serve, stop, task, temp, turnsStarted, waitFor } from './support/harness.js';
+import {
+  call, codexLog, codexScript, FAKE, fakeCodex, fakeLog, git, newEnv, newRepo, putRules, putTask, readyCheck, refused, reviewLog, reviewScript, runCli, script, serve, stop, task, temp, turnsStarted,
+  waitFor,
+} from './support/harness.js';
 
 const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid'];
 
@@ -135,6 +140,11 @@ test('full cycle in a worktree: start, awaiting_review with Report, Patch and fi
     assert.ok(!log[0]!.env.includes(name), name);
   }
   let job = JSON.parse(await readFile(join(jobDir, 'job.json'), 'utf8'));
+  // SF-065: a Task file without an image reference gives no image block, no attachments record and
+  // no attachments event.
+  assert.ok(log.every((entry) => entry.blocks === undefined));
+  assert.equal(job.attachments, undefined);
+  assert.doesNotMatch(await readFile(join(jobDir, 'events.jsonl'), 'utf8'), /"attachments"|"images"/);
   assert.equal(job.session_id, log[0]!.sessionId);
   assert.equal(job.worktree, worktree);
 
@@ -626,4 +636,112 @@ test('sensitive paths (SF-024): declared by may_touch or not, deleted files, mar
   await waitFor(served, 'S-1', 'ready_for_human_review', 1);
   assert.equal(git(repo, 'show', '--name-status', '--format=', 'S-1-touch-files').trim().split('\n').sort().join(','), 'A\t.github/workflows/ci.yml,A\tdocs/dep.lock,A\tsrc/a.ts,D\tpackage-lock.json,D\tsrc/old.ts,M\tpackage.json');
   await stop(served);
+});
+
+// The bytes of the images of the SF-065 tests: told by their first bytes, as the factory reads them.
+const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('png-body')]);
+const GIF = Buffer.from('GIF89a-gif-body');
+const sha = (data: Buffer): string => createHash('sha256').update(data).digest('hex');
+
+test('images (SF-065): Start refuses an unusable image; the job copies the referenced ones; the first turn, the reviews, the simplification pass and the gate get the same set from the job\'s copy, never its bytes in a log', async () => {
+  const env = await newEnv('images', { SF_REVIEW: 'on', SF_GATE: 'codex', SF_CODEX: fakeCodex, SF_SIMPLIFY: 'on' });
+  const repo = await newRepo(env, 'images-repo', false);
+  const workspace = { name: 'app', readCheckout: repo, workCheckout: repo };
+  const jobs = new JobStore(env.state);
+  await putTask(env, repo, 'D-1', 'Show the images');
+  await addAttachment(workspace, 'D-1', PNG, jobs);
+  await addAttachment(workspace, 'D-1', GIF, jobs, 'form.gif');
+  await addAttachment(workspace, 'D-1', PNG, jobs, 'unused.png');
+  const text = [
+    task('D-1', 'Show the images').trimEnd(), '',
+    'The form: ![the form](D-1/form.gif). The error: ![one](D-1/1.png), again ![](D-1/1.png).',
+    'Not attachments: ![dot](./D-1/unused.png) <img src="D-1/unused.png"> ![url](https://example.invalid/D-1/unused.png)',
+    '```', '![in code](D-1/unused.png)', '```', '',
+  ].join('\n');
+  await writeTask(workspace, 'D-1', text, jobs);
+  const MAJOR = { path: 'README.md', problem: 'It greets the world.', expected: 'It greets the reader.', severity: 'major' };
+  await script(env, [
+    { write: { 'README.md': 'hello world\n' }, text: 'Report of iteration 1' },
+    { write: { 'README.md': 'hello reader\n' }, text: '| R1 | fixed | README.md:1 |' },
+    { write: { '.software-factory/D-1.mr.md': mrText('feat(D-1): Show the images') }, text: 'prepared' },
+  ]);
+  const clean = { verdict: 'clean', summary: 'Right.', items: [], accepted_sensitive: [] };
+  await reviewScript(env, [{ output: { verdict: 'fix', summary: 'Wrong greeting.', items: [MAJOR], accepted_sensitive: [] } }, { output: clean }, { output: { summary: 'Nothing to simplify.', suggestions: [] } }]);
+  await codexScript(env, [{ output: clean }]);
+  const served = await serve(env);
+  try {
+    // A referenced image that is missing refuses the start; nothing is created.
+    await rm(join(repo, '.software-factory', 'D-1', '1.png'));
+    const refusal = await refused(served, 'start', { workspace: 'app', ticket: 'D-1' });
+    assert.equal(refusal.code, 'attachment_invalid');
+    assert.match(refusal.message, /D-1\/1\.png: missing/);
+    assert.equal(await jobs.read('app', 'D-1'), undefined);
+    await addAttachment(workspace, 'D-1', PNG, jobs, '1.png');
+
+    await call(served, 'start', { workspace: 'app', ticket: 'D-1' });
+    const worktree = join(env.state, 'worktrees', 'app', 'D-1');
+    const jobDir = jobs.dir('app', 'D-1');
+    const records = [
+      { name: 'form.gif', type: 'image/gif', bytes: GIF.length, sha256: sha(GIF) },
+      { name: '1.png', type: 'image/png', bytes: PNG.length, sha256: sha(PNG) },
+    ];
+    assert.deepEqual((await jobs.read('app', 'D-1'))!.attachments, records);
+    // Two copies: the job's own and the worktree's; only the referenced images.
+    for (const dir of [join(jobDir, 'attachments'), join(worktree, '.software-factory', 'D-1')]) {
+      assert.deepEqual((await readdir(dir)).sort(), ['1.png', 'form.gif']);
+      assert.deepEqual(await readFile(join(dir, 'form.gif')), GIF);
+    }
+    assert.equal(git(worktree, 'status', '--porcelain'), '');
+    // An edit of the work checkout's folder after Start changes nothing the job's agents get.
+    const other = Buffer.concat([PNG, Buffer.from('-changed')]);
+    await writeFile(join(repo, '.software-factory', 'D-1', '1.png'), other);
+
+    await waitFor(served, 'D-1', 'ready_for_human_review', 2);
+    const dir = join(worktree, '.software-factory', 'D-1');
+    const imagesLine = { dir, names: ['form.gif', '1.png'] };
+    const log = await fakeLog(env);
+    // The first turn: the prompt text as before with the images line, then each image named and its block.
+    assert.deepEqual(log[0]!.blocks, [
+      { type: 'text', text: factoryPrompt(firstPrompt('D-1', []), 'D-1', 1, imagesLine) },
+      { type: 'text', text: 'Image D-1/form.gif ("the form"), referenced in the Task file:' },
+      { type: 'image', media_type: 'image/gif', bytes: GIF.length, sha256: sha(GIF) },
+      { type: 'text', text: 'Image D-1/1.png ("one"), referenced in the Task file:' },
+      { type: 'image', media_type: 'image/png', bytes: PNG.length, sha256: sha(PNG) },
+    ]);
+    assert.ok(log[0]!.prompt.startsWith('/implement .software-factory/D-1.md\n\nThe Task\'s images are in '), log[0]!.prompt);
+    // A Fix prompt names the folder; no blocks. The MR text turn is as before.
+    assert.equal(log[1]!.prompt, factoryPrompt('/implement .software-factory/D-1.md Fix 1', 'D-1', 2, imagesLine));
+    assert.equal(log[1]!.blocks, undefined);
+    assert.doesNotMatch(log[2]!.prompt, /The Task's images/);
+    assert.equal(log[2]!.blocks, undefined);
+
+    // Both reviews and the simplification pass: the review prompt, then the same images, from the job's copy.
+    const reviews = await reviewLog(env);
+    assert.equal(reviews.length, 3);
+    for (const review of reviews) {
+      assert.equal(review.blocks?.[0]?.type, 'text');
+      assert.deepEqual(review.blocks?.slice(1), log[0]!.blocks!.slice(1));
+    }
+    assert.match(reviews[2]!.prompt, /simplif/i);
+    // The gate: --image per image of the job's copy, before --cd.
+    const [gate] = await codexLog(env);
+    const copy = join(jobDir, 'attachments');
+    assert.deepEqual(gate!.images, [{ path: join(copy, 'form.gif'), sha256: sha(GIF) }, { path: join(copy, '1.png'), sha256: sha(PNG) }]);
+    const cd = gate!.argv.indexOf('--cd');
+    assert.deepEqual(gate!.argv.slice(cd - 4, cd), ['--image', join(copy, 'form.gif'), '--image', join(copy, '1.png')]);
+
+    // The events: one attachments record, the first prompt's image names, types and sizes; no bytes.
+    const raw = await readFile(join(jobDir, 'events.jsonl'), 'utf8');
+    const events = raw.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+    assert.deepEqual(events.filter((record) => record.type === 'attachments').map((record) => record.images), [records]);
+    const prompts = events.filter((record) => typeof record.prompt === 'string');
+    assert.deepEqual(prompts[0]!.images, records.map(({ name, type, bytes }) => ({ name, type, bytes })));
+    assert.ok(prompts.slice(1).every((record) => record.images === undefined));
+    for (const data of [PNG, GIF, other]) {
+      assert.ok(!raw.includes(data.toString('base64')), 'no image bytes in events.jsonl');
+    }
+    assert.match((await runCli(env, ['watch', 'app', 'D-1', '--once'])).stdout, /\[0\] attachments: form\.gif \(image\/gif, 15 bytes\), 1\.png \(image\/png, 16 bytes\)/);
+  } finally {
+    await stop(served);
+  }
 });

@@ -17,6 +17,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { HookCallback, SandboxSettings, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import * as z from 'zod/v4';
 import { writeFileAtomic } from './atomic.js';
+import { attachmentReferences, imageHashes, type ImageRef, type ResolvedImage, resolveImages, writeImages } from './attachments.js';
 import type { Config } from './config.js';
 import { FactoryError } from './errors.js';
 import { Redactor } from './redact.js';
@@ -26,7 +27,7 @@ import type { Workspace } from './registry.js';
 import { runStructuredSession, SEVERITIES, SEVERITY_DEFINITIONS, type Severity } from './review.js';
 import { collectRules } from './rules-docs.js';
 import { matchesGlob, scopeOf } from './rules.js';
-import { isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskScope, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
+import { ARCHIVE_DIR, isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskScope, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { addDetachedWorktree, removeWorktree } from './worktree.js';
 
 export const FINDING_KINDS = ['decision', 'contradiction', 'missing', 'overreach', 'unclear'] as const;
@@ -139,6 +140,28 @@ export function checkPrompt(ticket: string, task: string, rules = ''): string {
 
 // The sha256 of a Task file's text (UTF-8), as write_task reports it.
 export const taskSha256 = (task: string): string => createHash('sha256').update(task, 'utf8').digest('hex');
+// The sha256 a check of a Task file is stored and found by (SF-065): taskSha256 of the text when
+// it refers to no image; otherwise the sha256 of the text, a newline and the sorted
+// "<name>:<sha256>" lines of its referenced images ("<name>:missing" for one that cannot be read),
+// so a changed image makes the check stale.
+export function taskCheckSha256(task: string, images: ReadonlyArray<{ name: string; sha256: string }>): string {
+  if (images.length === 0) {
+    return taskSha256(task);
+  }
+  const lines = images.map((image) => `${image.name}:${image.sha256}`).sort();
+  return createHash('sha256').update(`${task}\n${lines.join('\n')}`, 'utf8').digest('hex');
+}
+
+// The folder of a ticket's images in the work checkout; under archive/ for an archived Task file.
+const imagesDir = (workspace: Workspace, ticket: string, archived = false): string =>
+  join(workspace.workCheckout, TASK_DIR, ...(archived ? [ARCHIVE_DIR] : []), ticket);
+
+// taskCheckSha256 of a Task text with its referenced images as they are in the folder now.
+export async function currentCheckSha256(workspace: Workspace, ticket: string, task: string, archived = false): Promise<string> {
+  const references = attachmentReferences(ticket, task);
+  return taskCheckSha256(task, references.length === 0 ? [] : await imageHashes(imagesDir(workspace, ticket, archived), references));
+}
+
 // The name of a check's file: the first 16 hex of the Task file's sha256.
 export const checkId = (sha256: string): string => sha256.slice(0, 16);
 
@@ -569,8 +592,21 @@ async function checkCheckout(checkout: string, task: string): Promise<{ root: st
 // base. Never throws: a checkout that cannot be made or a failed session is a failed record, its
 // error redacted like a failed review's (SF-045). The worktree is removed afterwards.
 export async function runTaskCheck(workspace: Workspace, ticket: string, task: string, options: CheckOptions): Promise<CheckRecord> {
-  const record = { workspace: workspace.name, ticket, sha256: taskSha256(task) };
   const startedAt = new Date().toISOString();
+  // The referenced images, read by the factory from the work checkout's folder (SF-065): the
+  // session may not read .software-factory/. One that cannot be used fails the check; no session runs.
+  const references = attachmentReferences(ticket, task);
+  let images: ResolvedImage[];
+  try {
+    images = references.length === 0 ? [] : await resolveImages(imagesDir(workspace, ticket), ticket, references);
+  } catch (error) {
+    const message = error instanceof FactoryError ? error.message : 'The Task file\'s images could not be read.';
+    return {
+      workspace: workspace.name, ticket, sha256: await currentCheckSha256(workspace, ticket, task), commit: null, status: 'failed', output: null,
+      error: message, model: options.model ?? null, cost_usd: null, started_at: startedAt, ended_at: new Date().toISOString(),
+    };
+  }
+  const record = { workspace: workspace.name, ticket, sha256: taskCheckSha256(task, images) };
   let checkout: Awaited<ReturnType<typeof checkCheckout>>;
   try {
     checkout = await checkCheckout(workspace.workCheckout, task);
@@ -583,6 +619,13 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
   }
   try {
     const cwd = checkout.root;
+    // The images as they were read and hashed, next to the check's checkout (removed with it), so
+    // the session sees exactly the bytes its sha256 names.
+    const imageDir = join(dirname(checkout.root), 'images');
+    if (images.length > 0) {
+      await writeImages(imageDir, images);
+    }
+    const refs: ImageRef[] = images.map(({ name, alt, type }) => ({ ticket, name, alt, type, path: join(imageDir, name) }));
     const redactor = new Redactor({ cwd });
     let rules: string;
     try {
@@ -604,7 +647,7 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
     }
     const outcome = await runStructuredSession(checkPrompt(ticket, task, rules), {
       cwd, claudePath: options.claudePath, sandbox: options.sandbox, model: options.model, maxTurns: options.maxTurns,
-      signal: options.signal ?? new AbortController().signal,
+      signal: options.signal ?? new AbortController().signal, images: refs,
       // Every message passes the redactor, so a failure after a withheld read is withheld too.
       onMessage: async (message) => {
         redactor.reviewMessage(message);
@@ -624,13 +667,13 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
   }
 }
 
-// The current Task file of a ticket and its sha256; the archived copy when the file was archived;
-// undefined when there is neither.
+// The current Task file of a ticket and its check sha256 (taskCheckSha256); the archived copy, with
+// the images under archive/, when the file was archived; undefined when there is neither.
 async function currentTask(workspace: Workspace, ticket: string): Promise<{ text: string; sha256: string } | undefined> {
   for (const archived of [false, true]) {
     try {
       const text = await readTask(workspace, ticket, archived);
-      return { text, sha256: taskSha256(text) };
+      return { text, sha256: await currentCheckSha256(workspace, ticket, text, archived) };
     } catch (error) {
       if (!(error instanceof FactoryError) || error.code !== 'task_not_found') {
         throw error;
@@ -758,7 +801,7 @@ export class TaskChecks {
         return undefined;
       })
       .finally(() => this.#end(key, name, ticket, true));
-    return { started: true, sha256: taskSha256(task), ended };
+    return { started: true, sha256: await currentCheckSha256(workspace, ticket, task), ended };
   }
 
   // The ticket's check no longer runs: onSettled (when it ran) and the observers hear of it.
@@ -785,11 +828,12 @@ export class TaskChecks {
     return checkSummary(view.check ?? undefined, view.current_sha256 ?? undefined, view.running);
   }
 
-  // The sha256 of the current Task file and its check, for task_check; record undefined when this
-  // version has none.
+  // The check sha256 of the current Task file (taskCheckSha256) and its check, for task_check;
+  // record undefined when this version has none.
   async current(name: string, ticket: string): Promise<{ sha256: string; record: CheckRecord | undefined }> {
     const workspace = await this.#options.resolve(name);
-    const sha256 = taskSha256(await readTask(workspace, ticket));
+    const task = await readTask(workspace, ticket);
+    const sha256 = await currentCheckSha256(workspace, ticket, task);
     return { sha256, record: await this.store.read(name, ticket, sha256) };
   }
 }

@@ -138,3 +138,11 @@ test('the park on a usage limit and the resume from it (SF-072): their own lines
   assert.deepEqual(formatEvent(state('waiting_limit', 'aborted')), ['10:11:12 [1] state waiting_limit -> aborted']);
   assert.deepEqual(formatEvent(state('waiting_limit', 'needs_human', { error: { code: 'worktree_missing', message: 'gone' } })), ['10:11:12 [1] state waiting_limit -> needs_human (worktree_missing: gone)']);
 });
+
+test('the job\'s images (SF-065): one attachments line with each name, type and size; none when the set became empty', () => {
+  const images = [{ name: '1.png', type: 'image/png', bytes: 12345, sha256: 'a'.repeat(64) }, { name: 'form.gif', type: 'image/gif', bytes: 99, sha256: 'b'.repeat(64) }];
+  assert.deepEqual(describeEvent(JSON.stringify({ ts: TS, iteration: 0, type: 'attachments', images })), {
+    ts: TS, iteration: 0, type: 'attachments', lines: ['10:11:12 [0] attachments: 1.png (image/png, 12345 bytes), form.gif (image/gif, 99 bytes)'],
+  });
+  assert.deepEqual(formatEvent(JSON.stringify({ ts: TS, iteration: 3, type: 'attachments', images: [] })), ['10:11:12 [3] attachments: none']);
+});

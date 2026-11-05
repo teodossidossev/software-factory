@@ -12,15 +12,17 @@ import { mkdir, readdir, readFile, rm } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writeFileAtomic } from './atomic.js';
+import type { ImageRef } from './attachments.js';
 import { FactoryError } from './errors.js';
 import type { Job, JobState, JobStore } from './jobs.js';
 import type { Decision } from './ledger.js';
 import { isAlive, liveOwner, staleOwner, tryLock } from './pid-lock.js';
 
-// What sf serve asks of a job's runner. turn: the first turn of a started job (its prompt), sent
-// without a reply being awaited; the others are the user's and the reviewers' requests.
+// What sf serve asks of a job's runner. turn: the first turn of a started job (its prompt, and the
+// image blocks that go with it, SF-065), sent without a reply being awaited; the others are the
+// user's and the reviewers' requests.
 export type RunnerRequest =
-  | { kind: 'turn'; prompt: string }
+  | { kind: 'turn'; prompt: string; images?: ImageRef[] }
   | { kind: 'say'; message: string }
   | { kind: 'fix'; content: string }
   | { kind: 'clean'; sensitive: string[] }

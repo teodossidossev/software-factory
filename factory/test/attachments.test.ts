@@ -3,12 +3,17 @@
 // nothing outside the ticket's folder, the next number with no gap reused), the Task file required,
 // the archive and ".md" tickets refused, the write_task guard (a running job refuses, a paused one
 // does not), what the listing ignores, reading, removing, the image targets of a Task file, and
-// `sf attach` with a name, without one and --remove.
+// `sf attach` with a name, without one and --remove. SF-065: the references a job counts, their
+// resolution and its refusals, the copies, the image blocks of a prompt and the log without bytes.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { addAttachment, imageTargets, listAttachments, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, missingAttachments, readAttachment, removeAttachment, sniffExtension } from '../src/attachments.js';
+import {
+  addAttachment, attachmentReferences, changedImages, imageContent, imageHashes, imageRefs, imageTargets, listAttachments, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS,
+  missingAttachments, promptInput, readAttachment, removeAttachment, resolveTaskImages, sameImages, sniffExtension, withoutImageData, writeImages,
+} from '../src/attachments.js';
 import { FactoryError } from '../src/errors.js';
 import { type Job, JobStore } from '../src/jobs.js';
 import type { Workspace } from '../src/registry.js';
@@ -195,6 +200,18 @@ test('attachments: the image targets of a Task file outside fenced code, and the
   assert.deepEqual(await missingAttachments(workspace, 'T-2', '![a](T-2/1.png)'), ['1.png']);
 });
 
+test('write_task checks only the references a job counts (SF-065): "..", nested paths and invalid names are ignored, not refused', async () => {
+  const { workspace, repo, jobs } = await workspaceWithTask('att-write-ignored');
+  await addAttachment(workspace, 'T-1', PNG, jobs);
+  const ignored = '![up](T-1/../other.png) ![nested](T-1/sub/2.png) ![hidden](T-1/.hidden.png) ![ext](T-1/3.bmp) ![none](T-1/)';
+  assert.deepEqual(await missingAttachments(workspace, 'T-1', ignored), []);
+  assert.deepEqual(await missingAttachments(workspace, 'T-1', `${ignored} ![missing](T-1/4.png) ![here](T-1/1.png) ![again](T-1/4.png)`), ['4.png']);
+  const content = `${task('T-1', 'One')}\n${ignored} and ![the error](T-1/1.png).\n`;
+  await writeTask(workspace, 'T-1', content, jobs);
+  assert.equal(await readFile(join(repo, '.software-factory', 'T-1.md'), 'utf8'), content);
+  await refused(writeTask(workspace, 'T-1', `${content}![gone](T-1/4.png)\n`, jobs), 'attachment_missing');
+});
+
 test('sf attach: a file with a name and without one, the rules, --remove, the usage', async () => {
   const env = await newEnv('att-cli');
   const repo = await newRepo(env, 'att-cli-repo', false);
@@ -238,4 +255,113 @@ test('sf attach: a file with a name and without one, the rules, --remove, the us
     assert.match(usage.stderr, /attach needs <workspace> <ticket> <file> \[name\]/);
   }
   assert.match((await runCli(env, ['--help'])).stdout, /sf attach <workspace> <ticket> <file> \[name\]/);
+});
+
+const sha = (data: Buffer): string => createHash('sha256').update(data).digest('hex');
+
+test('attachment references (SF-065): only <ticket>/<name> with a valid name outside code fences, each once at its first reference, in order', () => {
+  const text = [
+    '---', 'ticket: T-1', '---',
+    '![second first](T-1/2.png) ![one](T-1/1.png) ![again](T-1/2.png)',
+    '![dot](./T-1/3.png) ![nested](T-1/sub/4.png) ![other](T-2/5.png) ![up](T-1/../T-1/6.png) ![url](https://x.test/T-1/7.png)',
+    '<img src="T-1/8.png"> ![bad name](T-1/.hidden.png) ![wrong ext](T-1/9.bmp)',
+    '```', '![in code](T-1/10.png)', '```', '![last](T-1/11.jpg)',
+  ].join('\n');
+  assert.deepEqual(attachmentReferences('T-1', text), [{ name: '2.png', alt: 'second first' }, { name: '1.png', alt: 'one' }, { name: '11.jpg', alt: 'last' }]);
+  assert.deepEqual(attachmentReferences('T-1', 'No image here.'), []);
+});
+
+test('resolving the referenced images (SF-065): types and hashes in order; a missing file, a wrong type, one over the limit, a link and too many are attachment_invalid with every name', async () => {
+  const { workspace, repo, jobs } = await workspaceWithTask('att-resolve');
+  await addAttachment(workspace, 'T-1', PNG, jobs);
+  await addAttachment(workspace, 'T-1', JPEG, jobs);
+  const dir = join(repo, '.software-factory', 'T-1');
+  const images = await resolveTaskImages(repo, 'T-1', '![b](T-1/2.jpg) ![a](T-1/1.png) ![b again](T-1/2.jpg)');
+  assert.deepEqual(images.map(({ data: _data, ...rest }) => rest), [
+    { name: '2.jpg', alt: 'b', type: 'image/jpeg', bytes: JPEG.length, sha256: sha(JPEG) },
+    { name: '1.png', alt: 'a', type: 'image/png', bytes: PNG.length, sha256: sha(PNG) },
+  ]);
+  assert.deepEqual(await resolveTaskImages(repo, 'T-1', 'No reference; ![x](T-1/sub/9.png) is none.'), []);
+
+  await writeFile(join(dir, '3.png'), GIF);
+  await writeFile(join(dir, '4.gif'), Buffer.concat([GIF, Buffer.alloc(MAX_ATTACHMENT_BYTES)]));
+  await symlink(join(dir, '1.png'), join(dir, '5.png'));
+  const message = await refused(resolveTaskImages(repo, 'T-1', '![](T-1/1.png) ![](T-1/9.png) ![](T-1/3.png) ![](T-1/4.gif) ![](T-1/5.png)'), 'attachment_invalid');
+  assert.match(message, /T-1\/9\.png: missing/);
+  assert.match(message, /T-1\/3\.png: not the image its name says/);
+  assert.match(message, /T-1\/4\.gif: over 5242880 bytes/);
+  assert.match(message, /T-1\/5\.png: not a regular file/);
+  assert.doesNotMatch(message, /1\.png:/);
+
+  for (let index = 10; index < 21; index += 1) {
+    await writeFile(join(dir, `${index}.png`), PNG);
+  }
+  const eleven = Array.from({ length: 11 }, (_, index) => `![](T-1/${index + 10}.png)`).join(' ');
+  assert.match(await refused(resolveTaskImages(repo, 'T-1', eleven), 'attachment_invalid'), /11 images are referenced; a ticket has at most 10/);
+});
+
+test('the job\'s copies, the set comparisons and the prompt images (SF-065)', async () => {
+  const { workspace, repo, jobs, env } = await workspaceWithTask('att-copies');
+  await addAttachment(workspace, 'T-1', PNG, jobs);
+  await addAttachment(workspace, 'T-1', GIF, jobs, 'shot.gif');
+  const images = await resolveTaskImages(repo, 'T-1', '![first](T-1/shot.gif) ![](T-1/1.png)');
+  const copy = join(env.state, 'copy');
+  await mkdir(copy, { recursive: true });
+  await writeFile(join(copy, 'old.png'), PNG);
+  await writeImages(copy, images);
+  assert.deepEqual((await readdir(copy)).sort(), ['1.png', 'shot.gif']);
+  assert.deepEqual(await readFile(join(copy, 'shot.gif')), GIF);
+
+  const records = images.map(({ name, type, bytes, sha256 }) => ({ name, type, bytes, sha256 }));
+  assert.ok(sameImages(records, records));
+  assert.ok(!sameImages(records, [...records].reverse()));
+  const changed = [{ ...records[0]!, sha256: sha(JPEG) }];
+  assert.deepEqual(changedImages(records, changed), ['shot.gif', '1.png']);
+  assert.deepEqual(changedImages([], records), ['shot.gif', '1.png']);
+
+  const refs = imageRefs('T-1', copy, records, 'Now ![the shot](T-1/shot.gif) only.');
+  assert.deepEqual(refs, [
+    { ticket: 'T-1', name: 'shot.gif', alt: 'the shot', type: 'image/gif', path: join(copy, 'shot.gif') },
+    { ticket: 'T-1', name: '1.png', alt: '', type: 'image/png', path: join(copy, '1.png') },
+  ]);
+  const content = await imageContent('/implement x', refs);
+  assert.deepEqual(content, [
+    { type: 'text', text: '/implement x' },
+    { type: 'text', text: 'Image T-1/shot.gif ("the shot"), referenced in the Task file:' },
+    { type: 'image', source: { type: 'base64', media_type: 'image/gif', data: GIF.toString('base64') } },
+    { type: 'text', text: 'Image T-1/1.png (""), referenced in the Task file:' },
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG.toString('base64') } },
+  ]);
+
+  // Without images the prompt is the string; with them one user message, open until done().
+  assert.equal((await promptInput('plain', [])).prompt, 'plain');
+  const input = await promptInput('/implement x', refs);
+  const iterator = (input.prompt as AsyncIterable<unknown>)[Symbol.asyncIterator]();
+  const first = await iterator.next();
+  assert.deepEqual(first.value, { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
+  let ended = false;
+  const next = iterator.next().then((result) => {
+    ended = result.done === true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(ended, false);
+  input.done();
+  await next;
+  assert.equal(ended, true);
+  await rm(join(copy, '1.png'));
+  await assert.rejects(promptInput('x', refs), /ENOENT/);
+});
+
+test('no image bytes in a logged value, and the check hashes of the referenced images (SF-065)', async () => {
+  const data = PNG.toString('base64');
+  const message = { type: 'user', message: { content: [{ type: 'tool_result', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data } }, { type: 'text', text: 'ok' }] }] } };
+  const logged = JSON.stringify(withoutImageData(message));
+  assert.ok(!logged.includes(data));
+  assert.match(logged, /\[\d+ base64 characters omitted\]/);
+  assert.match(logged, /"text":"ok"/);
+
+  const { workspace, repo, jobs } = await workspaceWithTask('att-hashes');
+  await addAttachment(workspace, 'T-1', PNG, jobs);
+  const dir = join(repo, '.software-factory', 'T-1');
+  assert.deepEqual(await imageHashes(dir, [{ name: '1.png', alt: '' }, { name: '2.png', alt: '' }]), [{ name: '1.png', sha256: sha(PNG) }, { name: '2.png', sha256: 'missing' }]);
 });

@@ -246,8 +246,9 @@ const ERROR_STATUS: Record<string, number> = {
   // The run queue (SF-071).
   already_queued: 409, not_queued: 409, invalid_limit: 400, invalid_position: 400, invalid_rule: 400,
   // A ticket's images (SF-064): not an image, too large, too many, and a Task file that refers to
-  // one the ticket does not have (also an image to remove that is not there).
-  attachment_type: 400, attachment_too_large: 413, attachment_limit: 409, attachment_missing: 400,
+  // one the ticket does not have (also an image to remove that is not there); a Start, Restart or
+  // Resume whose Task file refers to images that cannot be used (SF-065).
+  attachment_type: 400, attachment_too_large: 413, attachment_limit: 409, attachment_missing: 400, attachment_invalid: 409,
 };
 
 export interface RunningDashboard {

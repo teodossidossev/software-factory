@@ -3,10 +3,13 @@
 // blocker, the Fix section and ledger entries of Simplify, the offer message, how the ledger shows the
 // simplifications to the reviewers and leaves them out of the MR's findings, the MR section of Skip.
 import assert from 'node:assert/strict';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { answerFix, applyVerdict, type LedgerEntry, notFixed, settledLines } from '../src/ledger.js';
 import { SIMPLIFY_HEADING, withSimplifications } from '../src/mr.js';
-import { changedBetween, fixNumbers, guardSuggestions, offerMessage, SIMPLIFY_SCHEMA, simplifyFix, simplifyOutput, simplifyPrompt, type Suggestion, withoutFixSections } from '../src/simplify.js';
+import { changedBetween, fixNumbers, guardSuggestions, offerMessage, runSimplify, SIMPLIFY_SCHEMA, simplifyFix, simplifyOutput, simplifyPrompt, type Suggestion, withoutFixSections } from '../src/simplify.js';
+import { FAKE, newEnv, reviewLog, reviewScript } from './support/harness.js';
 
 const TASK = ['---', 'ticket: S-1', '---', '', '# S-1: Greet', '', '## Acceptance', '', 'It greets.', '', '```', '## Fix 9 in a fence', '```', ''].join('\n');
 const WITH_FIXES = `${TASK}\n\n## Fix 1\n\nReview by Claude: guard it.\n\n## Fix 2: Simplify\n\nSimplify, by the user's choice.\n`;
@@ -134,5 +137,27 @@ test('a simplification the Implementer leaves is left with its note, no longer t
   assert.deepEqual(answered.ledger.slice(1).map((found) => [found.id, found.status, found.response, found.settled === null]), [
     ['R2', 'left', 'The guard is needed after all.', true],
     ['R3', 'accepted_risk', "removed by the user's choice", false],
+  ]);
+});
+
+test('runSimplify with images (SF-065): the pass gets the same image blocks after its prompt as the review', async () => {
+  const env = await newEnv('simplify-images');
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('png-body')]);
+  await writeFile(join(env.home, '1.png'), png);
+  await reviewScript(env, [{ output: { summary: 'Nothing to simplify.', suggestions: [] } }]);
+  const home = process.env.HOME;
+  process.env.HOME = env.home;
+  try {
+    const outcome = await runSimplify('Simplify this.', {
+      cwd: env.home, claudePath: FAKE, sandbox: undefined, model: undefined, maxTurns: 3, signal: new AbortController().signal,
+      images: [{ ticket: 'T-1', name: '1.png', alt: 'the error', type: 'image/png', path: join(env.home, '1.png') }],
+    });
+    assert.equal(outcome.ok, true);
+  } finally {
+    process.env.HOME = home;
+  }
+  const [entry] = await reviewLog(env);
+  assert.deepEqual(entry!.blocks?.map((block) => (block.type === 'image' ? `image ${block.media_type} ${block.bytes}` : block.text)), [
+    'Simplify this.', 'Image T-1/1.png ("the error"), referenced in the Task file:', `image image/png ${png.length}`,
   ]);
 });

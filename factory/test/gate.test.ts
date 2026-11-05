@@ -108,6 +108,20 @@ test('the strict schema: no $schema, every object has additionalProperties false
   assert.deepEqual(gateArgs({ cwd: '/w', dir: '/d', model: 'm' }).slice(-3), ['--model', 'm', '-']);
 });
 
+test('gateArgs (SF-065): one --image per image before --cd, never right before the final "-"; without images the argv is as before', () => {
+  const plain = gateArgs({ cwd: '/w', dir: '/d', model: undefined });
+  assert.deepEqual(gateArgs({ cwd: '/w', dir: '/d', model: undefined, images: [] }), plain);
+  assert.deepEqual(plain, [
+    'exec', '--ephemeral', '--sandbox', 'read-only', '--disable', 'memories', '-c', 'memories.use_memories=false',
+    '--cd', '/w', '--output-schema', '/d/gate-schema.json', '--output-last-message', '/d/gate-output.json', '--json', '-',
+  ]);
+  assert.deepEqual(gateArgs({ cwd: '/w', dir: '/d', model: undefined, images: ['/j/attachments/1.png', '/j/attachments/2.gif'] }), [
+    'exec', '--ephemeral', '--sandbox', 'read-only', '--disable', 'memories', '-c', 'memories.use_memories=false',
+    '--image', '/j/attachments/1.png', '--image', '/j/attachments/2.gif',
+    '--cd', '/w', '--output-schema', '/d/gate-schema.json', '--output-last-message', '/d/gate-output.json', '--json', '-',
+  ]);
+});
+
 test('the gate runs without the user\'s Codex memories: the feature off and no memories injected', () => {
   const args = gateArgs({ cwd: '/w', dir: '/d', model: undefined });
   const pairs = args.slice(0, -1).map((arg, index) => `${arg} ${args[index + 1]}`);

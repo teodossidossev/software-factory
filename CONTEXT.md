@@ -210,11 +210,25 @@ _Avoid_: loop, ping-pong
 The second, deciding Review of an Iteration that a Claude Review found clean, run by the Codex CLI
 on the User's ChatGPT plan in a read-only sandbox in the Worktree. Its verdict, acted on by the
 same rule as the Review's, is Clean or the next Fix section; it is limited in rounds and tokens per Job, and off when no Codex
-is found. A failed Gate hands the Job to the User.
+is found. Its Gate level decides whether it runs on an Iteration. A failed Gate hands the Job to
+the User.
 _Avoid_: OpenAI reviewer, second opinion
 
+**Gate level**:
+How much of the Gate an Iteration's clean Claude Review gets, decided once per Iteration from the
+risk of the Job's whole change at that Iteration: `full` (the Gate's rounds, for a change that
+touches a Sensitive path, a `may_touch` path, a security-relevant or agents' instructions file, is
+large or cannot be known), `light` (one round: the Gate runs only until it has asked for one fix)
+or `none` (documentation only: no Gate). A Gate the level skips goes to Clean as with the Gate off.
+_Avoid_: risk score, gate mode
+
+**Gate yield**:
+What the Gate's items were worth: the share of a Job's Gate items (each Ledger entry once, Nits
+included) whose entry ended `fixed`, as `sf metrics` shows it per Job and in total.
+_Avoid_: gate score, hit rate
+
 **Clean**:
-The deciding Review's (the Gate's when it is on) verdict, as the factory acts on it, that the
+The deciding Review's (the Gate's when it runs at the Iteration's Gate level) verdict, as the factory acts on it, that the
 Patch needs no further Fix section (no blocker or major item), with every undeclared Sensitive path acknowledged. It starts MR
 preparation (after the Simplification pass, when one runs); it accepts nothing and pushes nothing.
 

@@ -70,7 +70,7 @@ async function refusal(env: Env, ticket: string): Promise<{ code: string; messag
 }
 
 test('fetch_failed after the clean verdict: sf retry prepares the MR with only the MR text turn, no review, no gate and no Fix section, with the paths both reviewers accepted', async () => {
-  const env = await newEnv('retry-fetch', { SF_REVIEW: 'on', SF_GATE: 'codex', SF_CODEX: fakeCodex });
+  const env = await newEnv('retry-fetch', { SF_REVIEW: 'on', SF_GATE: 'codex', SF_GATE_LEVEL: 'full', SF_CODEX: fakeCodex });
   const repo = await newRepo(env, 'retry-fetch-repo', true);
   const origin = join(temp, 'retry-fetch-repo-origin.git');
   await putTask(env, repo, 'F-1', 'Fetch fails');

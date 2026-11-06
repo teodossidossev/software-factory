@@ -1,19 +1,20 @@
 // The review and gate pipeline (SF-089, from src/execution.ts): the Claude review of an iteration
-// (SF-038), the Codex gate (SF-039), the ledger of findings (settle, SF-052), the user's retry of a
-// failed review (SF-044) and override of a stopped gate (SF-047), and the simplification pass after
-// a clean verdict (SF-055).
+// (SF-038), the Codex gate (SF-039) at the iteration's gate level (SF-092), the ledger of findings
+// (settle, SF-052), the user's retry of a failed review (SF-044) and override of a stopped gate
+// (SF-047), and the simplification pass after a clean verdict (SF-055).
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { type ImageRef, imageRefs } from '../attachments.js';
 import { FactoryError } from '../errors.js';
+import { gateDecision } from '../gate-level.js';
 import { GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from '../gate.js';
-import { type GateOverride, type GateRecord, type Job, type JobState, now, type ReviewRecord, type SimplifyRecord } from '../jobs.js';
+import { type GateOverride, type GateRecord, type IterationMeta, type Job, type JobState, now, type ReviewRecord, type SimplifyRecord } from '../jobs.js';
 import { applyVerdict, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, LEDGER_ID, FACTORY_PROBLEMS, settle, SETTLE_CODES, unappliedEntries, unsettled } from '../ledger.js';
 import { Redactor } from '../redact.js';
 import { readJobRules } from '../rules-docs.js';
 import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, type StructuredOutcome, unacceptedItems } from '../review.js';
 import { changedBetween, type FixFiles, fixNumbers, guardSuggestions, offerMessage, runSimplify, SIMPLIFY_CODE, SIMPLIFY_TITLE, simplifyFix, type SimplifyInput, type SimplifyOutput, simplifyPrompt, type Suggestion } from '../simplify.js';
-import { TASK_DIR } from '../task-file.js';
+import { mayTouch, parseFrontMatter, readTask, TASK_DIR } from '../task-file.js';
 import { type UsageLimit, usageLimit } from '../usage-limit.js';
 import { exists, GATE_OVERRIDE_CODES, LEDGER_ACCEPT_CODES, markedGroups, type RunningReview, withoutDropped } from './shared.js';
 import type { Core } from './core.js';
@@ -325,10 +326,53 @@ export class ReviewsPart {
       await this.core.transition(job, 'needs_human', 'verdict', { code: applied.code, message: applied.message });
     } else if (applied.kind === 'fix') {
       await this.core.parts.turns.fix(job, fixContent(summary, applied.items), { ledger: applied.ledger });
-    } else if (this.core.config.gate.on) {
+    } else if (this.core.config.gate.on && (await this.#gateRuns(job))) {
       await this.startGate(job, output);
     } else {
+      // The gate off, or skipped by the iteration's gate level (SF-092): the same way to Clean.
       await this.afterClean(job, accepted);
+    }
+  }
+
+  // Whether the gate runs on the job's last iteration, by its gate level (SF-092,
+  // src/gate-level.ts): decided once per iteration, before the gate's budget check, so a gate that
+  // does not run never stops on gate_budget. A decision already recorded in gate-level.json (the
+  // job picked up again after a pause, a park or a restart of sf serve) is used as it is; otherwise
+  // the level is decided from the job's change at the iteration (its meta.json files) and the
+  // Task's may_touch, and recorded with its gate_level event. Only under the lock.
+  async #gateRuns(job: Job): Promise<boolean> {
+    const { workspace, ticket, iteration } = job;
+    const recorded = await this.core.jobs.readGateLevel(workspace, ticket, iteration);
+    if (recorded !== undefined) {
+      return recorded.ran;
+    }
+    let meta: IterationMeta | undefined;
+    try {
+      meta = await this.core.jobs.readMeta(workspace, ticket, iteration);
+    } catch (error) {
+      // No file list: the level cannot be known, so it is full.
+      console.error(error);
+    }
+    const { config } = this.core;
+    const decision = gateDecision({
+      files: meta?.files, patchTruncated: meta?.patch_truncated === true, mayTouch: await this.#mayTouch(job), setting: config.gateLevel, fullPaths: config.gateFullPaths,
+      sensitivePaths: config.sensitivePaths,
+    }, job.gate_fixes);
+    const at = now();
+    await this.core.jobs.writeGateLevel(workspace, ticket, iteration, { ...decision, at });
+    await this.core.jobs.appendEvent(workspace, ticket, { ts: at, iteration, type: 'gate_level', level: decision.level, ran: decision.ran, reasons: decision.reasons });
+    return decision.ran;
+  }
+
+  // The may_touch of the Task file in the work checkout, as the marks of the job's files read it
+  // (never the worktree's copy, which the Implementer could edit); undefined when it cannot be read
+  // (the level is then full).
+  async #mayTouch(job: Job): Promise<string[] | undefined> {
+    try {
+      return mayTouch(parseFrontMatter(await readTask(await this.core.resolve(job.workspace), job.ticket)) ?? new Map<string, string>());
+    } catch (error) {
+      console.error(error);
+      return undefined;
     }
   }
 
@@ -374,8 +418,9 @@ export class ReviewsPart {
     }
   }
 
-  // Starts the gate after a clean Claude verdict (claude); it runs outside the lock. A job whose gate
-  // runs used up SF_GATE_MAX_TOKENS goes to the user instead. Only under the lock.
+  // Starts the gate after a clean Claude verdict (claude) whose gate level runs it (SF-092); it runs
+  // outside the lock. A job whose gate runs used up SF_GATE_MAX_TOKENS goes to the user instead.
+  // Only under the lock.
   async startGate(job: Job, claude: ReviewOutput): Promise<void> {
     if (job.gate_tokens >= this.core.config.gateMaxTokens) {
       // from: awaiting_review (afterClaude, and goOn after its transition)

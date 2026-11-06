@@ -644,7 +644,7 @@ const GIF = Buffer.from('GIF89a-gif-body');
 const sha = (data: Buffer): string => createHash('sha256').update(data).digest('hex');
 
 test('images (SF-065): Start refuses an unusable image; the job copies the referenced ones; the first turn, the reviews, the simplification pass and the gate get the same set from the job\'s copy, never its bytes in a log', async () => {
-  const env = await newEnv('images', { SF_REVIEW: 'on', SF_GATE: 'codex', SF_CODEX: fakeCodex, SF_SIMPLIFY: 'on' });
+  const env = await newEnv('images', { SF_REVIEW: 'on', SF_GATE: 'codex', SF_GATE_LEVEL: 'full', SF_CODEX: fakeCodex, SF_SIMPLIFY: 'on' });
   const repo = await newRepo(env, 'images-repo', false);
   const workspace = { name: 'app', readCheckout: repo, workCheckout: repo };
   const jobs = new JobStore(env.state);

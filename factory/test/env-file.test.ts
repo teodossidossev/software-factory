@@ -51,3 +51,18 @@ test('sf info: works without sf serve, reads the env file and reports the state'
   assert.doesNotMatch(shown.stdout, /subscriptions|auth /);
   assert.equal((await runCli(env, ['info', 'extra'])).code, 2);
 });
+
+test('sf info: the gate level row (SF-092) after the gate row, whatever the gate: auto, full, or invalid with the message', async () => {
+  for (const [name, extra, row] of [
+    ['info-level-auto', {}, /^gate level {4}auto$/m],
+    ['info-level-full', { SF_GATE_LEVEL: 'full' }, /^gate level {4}full$/m],
+    ['info-level-invalid', { SF_GATE_LEVEL: 'light' }, /^gate level {4}invalid: SF_GATE_LEVEL must be auto or full, got "light"\.$/m],
+  ] as const) {
+    const env = await newEnv(name, { SF_TUNNEL_HEALTH: '127.0.0.1:1', ...extra });
+    const shown = await runCli(env, ['info']);
+    assert.equal(shown.code, 0, shown.stderr);
+    assert.match(shown.stdout, row);
+    // Right after the gate row, which stays as it was.
+    assert.match(shown.stdout, /^gate {10}off \(SF_GATE=off\)\ngate level {4}/m);
+  }
+});

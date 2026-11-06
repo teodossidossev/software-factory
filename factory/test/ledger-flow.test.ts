@@ -190,7 +190,7 @@ test('a contested undeclared sensitive path the review still does not accept is 
 });
 
 test('dispute: the Implementer contests R1 with evidence, the gate reopens it (review_disputed with both positions); Accept prepares the MR with R1 unapplied and listed as contested', async () => {
-  const env = await newEnv('ledger-dispute', { SF_REVIEW: 'on', SF_GATE: 'codex', SF_CODEX: fakeCodex });
+  const env = await newEnv('ledger-dispute', { SF_REVIEW: 'on', SF_GATE: 'codex', SF_GATE_LEVEL: 'full', SF_CODEX: fakeCodex });
   const repo = await newRepo(env, 'ledger-dispute-repo', false);
   await putTask(env, repo, 'L-3', 'Greet the reader');
   await script(env, [
@@ -228,7 +228,7 @@ test('dispute: the Implementer contests R1 with evidence, the gate reopens it (r
 });
 
 test('churn: every blocking item caused by a fix stops the job (review_churn) for either reviewer; Accept needs a clean Claude review; sf reset clears the ledger', async () => {
-  const env = await newEnv('ledger-churn', { SF_REVIEW: 'on', SF_GATE: 'codex', SF_CODEX: fakeCodex });
+  const env = await newEnv('ledger-churn', { SF_REVIEW: 'on', SF_GATE: 'codex', SF_GATE_LEVEL: 'full', SF_CODEX: fakeCodex });
   const repo = await newRepo(env, 'ledger-churn-repo', false);
   await putTask(env, repo, 'L-4', 'Churn by Claude');
   await putTask(env, repo, 'L-5', 'Churn by Codex');
@@ -275,7 +275,7 @@ test('churn: every blocking item caused by a fix stops the job (review_churn) fo
 });
 
 test('recovery: a Claude blocker that reopens an accepted risk is dropped; the runner dies before the gate has a verdict; the restarted sf serve resumes into the gate', async () => {
-  const env = await newEnv('ledger-resume-dropped', { SF_REVIEW: 'on', SF_GATE: 'codex', SF_CODEX: fakeCodex });
+  const env = await newEnv('ledger-resume-dropped', { SF_REVIEW: 'on', SF_GATE: 'codex', SF_GATE_LEVEL: 'full', SF_CODEX: fakeCodex });
   const repo = await newRepo(env, 'ledger-resume-dropped-repo', false);
   await putTask(env, repo, 'L-8', 'Greet the reader');
   await script(env, [

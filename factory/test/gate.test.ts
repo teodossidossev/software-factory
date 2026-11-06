@@ -8,6 +8,8 @@ import assert from 'node:assert/strict';
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { gateFullPaths, loadConfig, sensitivePaths } from '../src/config.js';
+import type { FactoryError } from '../src/errors.js';
 import { GATE_SCHEMA, gateArgs } from '../src/gate.js';
 import { WITHHELD } from '../src/redact.js';
 import { JobStore } from '../src/jobs.js';
@@ -35,7 +37,7 @@ function mrText(header: string): string {
   ].join('\n');
 }
 
-const gateEnv = (extra: Record<string, string> = {}): Record<string, string> => ({ SF_REVIEW: 'on', SF_GATE: 'codex', SF_CODEX: fakeCodex, ...extra });
+const gateEnv = (extra: Record<string, string> = {}): Record<string, string> => ({ SF_REVIEW: 'on', SF_GATE: 'codex', SF_GATE_LEVEL: 'full', SF_CODEX: fakeCodex, ...extra });
 const taskFile = (repo: string, ticket: string): Promise<string> => readFile(join(repo, '.software-factory', `${ticket}.md`), 'utf8');
 const worktreeOf = (env: Env, ticket: string): string => join(env.state, 'worktrees', 'app', ticket);
 const iterationDir = (env: Env, ticket: string, number: number): string => join(env.state, 'jobs', 'app', ticket, 'iterations', String(number).padStart(3, '0'));
@@ -120,6 +122,22 @@ test('gateArgs (SF-065): one --image per image before --cd, never right before t
     '--image', '/j/attachments/1.png', '--image', '/j/attachments/2.gif',
     '--cd', '/w', '--output-schema', '/d/gate-schema.json', '--output-last-message', '/d/gate-output.json', '--json', '-',
   ]);
+});
+
+test('the gate level settings (SF-092): SF_GATE_LEVEL auto (default, also empty) or full, anything else invalid_config; SF_GATE_FULL_PATHS as SF_SENSITIVE_PATHS', () => {
+  const base = { HOME: '/nonexistent-home', SF_GATE: 'off' };
+  assert.deepEqual([loadConfig(base).gateLevel, loadConfig(base).gateFullPaths], ['auto', []]);
+  assert.equal(loadConfig({ ...base, SF_GATE_LEVEL: '' }).gateLevel, 'auto');
+  assert.equal(loadConfig({ ...base, SF_GATE_LEVEL: 'auto' }).gateLevel, 'auto');
+  assert.equal(loadConfig({ ...base, SF_GATE_LEVEL: 'full' }).gateLevel, 'full');
+  for (const value of ['light', 'none', 'FULL', 'off']) {
+    assert.throws(() => loadConfig({ ...base, SF_GATE_LEVEL: value }), (error: FactoryError) => error.code === 'invalid_config' && error.message.includes(`"${value}"`), value);
+  }
+  const globs = ' lib/billing/** , ,src/pay*.ts ';
+  assert.deepEqual(gateFullPaths({ SF_GATE_FULL_PATHS: globs }), ['lib/billing/**', 'src/pay*.ts']);
+  assert.deepEqual(gateFullPaths({ SF_GATE_FULL_PATHS: globs }), sensitivePaths({ SF_SENSITIVE_PATHS: globs }));
+  assert.deepEqual(loadConfig({ ...base, SF_GATE_FULL_PATHS: globs }).gateFullPaths, ['lib/billing/**', 'src/pay*.ts']);
+  assert.deepEqual(gateFullPaths({}), []);
 });
 
 test('the gate runs without the user\'s Codex memories: the feature off and no memories injected', () => {
@@ -768,6 +786,9 @@ test('gate off: SF_GATE=off, and SF_CODEX pointing at nothing (one line at sf se
       assert.deepEqual(ready.review, { status: 'done', verdict: 'clean', summary: 'Looks right.' });
       assert.equal(await exists(join(env.home, 'fake-codex.log')), false);
       assert.equal(await exists(join(iterationDir(env, 'O-1', 1), 'gate.json')), false);
+      // No gate level either (SF-092).
+      assert.equal(await exists(join(iterationDir(env, 'O-1', 1), 'gate-level.json')), false);
+      assert.equal((await eventsOf(env, 'O-1')).filter((record) => record.type === 'gate_level').length, 0);
       assert.match((await runCli(env, ['info'])).stdout, info);
     } finally {
       await stop(served);

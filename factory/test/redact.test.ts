@@ -45,6 +45,11 @@ test('environment values become [redacted:NAME] in every string, as whole values
     { type: 'item.completed', item: { type: 'agent_message', text: 'The key is [redacted:OPENAI_API_KEY].' } });
 });
 
+test('the gate level settings (SF-092) are public: their values, full and globs, stay in reviewer prose', () => {
+  const settings = new Redactor({ cwd: WORKTREE, env: { SF_GATE_LEVEL: 'full', SF_GATE_FULL_PATHS: 'lib/billing/**', SF_NTFY_TOKEN: 'tk1' }, home: '/home/alice' });
+  assert.equal(settings.text('The full gate reviewed lib/billing/** and tk1.'), 'The full gate reviewed lib/billing/** and [redacted:SF_NTFY_TOKEN].');
+});
+
 test('keys by their form: provider keys, tokens, JWTs, HTTP credentials, URL credentials, assignments, JSON and TOML fields, private keys', () => {
   const cases: Array<[string, string]> = [
     ['sk-proj-AbCdEfGhIjKlMnOpQrStUv12', '[redacted]'],

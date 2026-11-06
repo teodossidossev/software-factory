@@ -35,7 +35,7 @@ function resultText(content: unknown): string {
 export interface DescribedEvent {
   ts: string | null;
   iteration: number | null;
-  // "prompt", "state", "notify_failed", "placeholders_removed", "review", "review_failed" (Claude's or the gate's), "gate_overridden" (the user accepted over the stopped gate), "simplify" and "simplify_chosen" (SF-055), "interrupted" and "task_changed" (SF-067), "attachments" (SF-065), "turn_limit_continued" (SF-069), "sandbox_lock_removed" (SF-085), "mr_edited" (SF-080), "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
+  // "prompt", "state", "notify_failed", "placeholders_removed", "review", "review_failed" (Claude's or the gate's), "gate_overridden" (the user accepted over the stopped gate), "gate_level" (SF-092), "simplify" and "simplify_chosen" (SF-055), "interrupted" and "task_changed" (SF-067), "attachments" (SF-065), "turn_limit_continued" (SF-069), "sandbox_lock_removed" (SF-085), "mr_edited" (SF-080), "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
   type: string;
   lines: string[];
 }
@@ -124,6 +124,11 @@ function recordLines(record: Record<string, unknown>): string[] {
     // The verdict the factory acted on, when it is not the reviewer's (SF-051).
     const effective = record.effective === 'clean' || record.effective === 'fix' ? `, acted on as ${record.effective}` : '';
     return [`${prefix} review by ${String(record.reviewer)}: ${String(record.verdict)}${items}${effective}${ignored}`];
+  }
+  // The gate level of the iteration (SF-092): whether the gate runs, and why.
+  if (record.type === 'gate_level') {
+    const reasons = Array.isArray(record.reasons) ? record.reasons.map(String).join('; ') : '';
+    return [`${prefix} Codex gate: ${String(record.level)}, ${record.ran === true ? 'runs' : 'skipped'} (${oneLine(reasons)})`];
   }
   if (record.type === 'gate_overridden') {
     const count = typeof record.unapplied === 'number' ? record.unapplied : 0;

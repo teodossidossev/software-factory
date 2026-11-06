@@ -3,7 +3,7 @@
 import { stat } from 'node:fs/promises';
 import { FactoryError } from '../errors.js';
 import { GATE_REVIEWER } from '../gate.js';
-import type { Job, JobMr, JobState, PauseStep } from '../jobs.js';
+import type { Job, JobMr, JobState, JobStore, PauseStep } from '../jobs.js';
 import { SIMPLIFIER, SCOPE_PROBLEM, SENSITIVE_PROBLEM } from '../ledger.js';
 import type { Workspace } from '../registry.js';
 import type { Page } from '../repo-files.js';
@@ -178,6 +178,17 @@ export async function exists(path: string): Promise<boolean> {
   try {
     await stat(path);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+// Whether the job's last iteration skipped the gate by its gate level (SF-092): its gate-level.json
+// says ran: false. Then the gate counts as absent, as with the gate off (the gate's status, the step
+// a pause interrupts). A file that cannot be read counts as no decision.
+export async function gateSkipped(jobs: JobStore, job: Job): Promise<boolean> {
+  try {
+    return (await jobs.readGateLevel(job.workspace, job.ticket, job.iteration))?.ran === false;
   } catch {
     return false;
   }

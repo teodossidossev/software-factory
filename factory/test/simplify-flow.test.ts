@@ -10,7 +10,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
 import { SIMPLIFY_HEADING } from '../src/mr.js';
-import { call, codexLog, codexScript, fakeCodex, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, waitFor } from './support/harness.js';
+import { REVIEW_DENIED_TOOLS } from '../src/review.js';
+import { assertPathDenials, call, codexLog, codexScript, fakeCodex, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, waitFor } from './support/harness.js';
 
 const ITEM = { path: 'README.md', problem: 'It greets anyone.', expected: 'Check the reader first.', severity: 'blocker' };
 const FIX = { verdict: 'fix', summary: 'Unchecked.', items: [ITEM], accepted_sensitive: [] };
@@ -162,6 +163,9 @@ test('suggestions: simplify_offered; Simplify writes "Fix 2: Simplify" and the l
     const log = await reviewLog(env);
     assert.equal(log.length, 4);
     assert.match(log[3]!.prompt, /- R2 · simplified by the user's choice · `guard\.txt`: The second guard\./);
+    // The pass (the third session) got the path denials (SF-100) on top of the review's deny list.
+    assert.match(log[2]!.prompt, /simplif/i);
+    assertPathDenials(log[2]!.argv, env, join(env.state, 'worktrees', 'app', 'S-5'), REVIEW_DENIED_TOOLS);
     assert.equal(await exists(join(jobs.iterationDir('app', 'S-5', 3), 'simplify.json')), false);
     const job = (await jobs.read('app', 'S-5'))!;
     assert.equal(job.fixes, 2);

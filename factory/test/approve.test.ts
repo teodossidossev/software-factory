@@ -12,7 +12,8 @@ import { JobStore } from '../src/jobs.js';
 import { loadHandbook } from '../src/server.js';
 import { mrMessage, pushBranch } from '../src/mr.js';
 import { conflictPrompt, mrPrompt } from '../src/prompts.js';
-import { call, fakeLog, git, newEnv, newRepo, putTask, refused, runCli, script, serve, stop, temp, turnsStarted, waitFor } from './support/harness.js';
+import { DENIED_TOOLS } from '../src/rules.js';
+import { assertPathDenials, call, fakeLog, git, newEnv, newRepo, putTask, refused, runCli, script, serve, stop, temp, turnsStarted, waitFor } from './support/harness.js';
 
 const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid'];
 
@@ -147,10 +148,21 @@ test('mark_clean: the MR turn writes the MR text only; the factory commits once 
   assert.equal(denied(log[1]!), denied(log[0]!));
   assert.ok(log[1]!.argv.includes(`--resume=${log[0]!.sessionId}`));
   const settings = JSON.parse(log[0]!.argv[log[0]!.argv.indexOf('--settings') + 1]!);
-  assert.deepEqual(settings.sandbox, {
-    enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true,
+  // The sandbox, with the session's path denials (SF-100) in its filesystem lists.
+  const { filesystem, ...sandbox } = settings.sandbox;
+  assert.deepEqual(sandbox, {
+    enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false,
     network: { allowedDomains: ['registry.npmjs.org', 'pypi.org'], allowLocalBinding: true, allowAllUnixSockets: true },
   });
+  // Filesystem isolation pinned on over the user's settings (SF-100).
+  assert.deepEqual(Object.keys(filesystem).sort(), ['denyRead', 'denyWrite', 'disabled']);
+  assert.equal(filesystem.disabled, false);
+  // Every turn (the MR turn too): DENIED_TOOLS, then the same path denials, built once by the session.
+  for (const entry of log) {
+    assertPathDenials(entry.argv, env, worktree, DENIED_TOOLS);
+  }
+  assert.ok(filesystem.denyRead.includes(join(env.state, 'sf.sock')) && filesystem.denyRead.includes(join(env.state, 'dashboard-token')), filesystem.denyRead.join(', '));
+  assert.ok(!filesystem.denyRead.includes(join(env.state, 'worktrees')), filesystem.denyRead.join(', '));
   assert.ok(log.every((entry) => !entry.argv.some((arg) => arg === '--model' || arg.startsWith('--model='))));
   // pushed is terminal: approve again is refused; the checkout stayed on main throughout.
   assert.equal((await approve(env, 'T-1')).code, 1);
@@ -589,6 +601,8 @@ test('SF_SANDBOX=off passes no sandbox to the Implementer; SF_MODEL arrives as -
   const [entry] = await fakeLog(env);
   const index = entry!.argv.indexOf('--settings');
   assert.ok(index < 0 || JSON.parse(entry!.argv[index + 1]!).sandbox === undefined);
+  // The path denials for the tools still apply without the sandbox (SF-100).
+  assertPathDenials(entry!.argv, env, worktreeOf(env, 'S-1'), DENIED_TOOLS, false);
   // The SDK passes it inline (--model=<value>) or as two arguments.
   const separate = entry!.argv.indexOf('--model');
   const model = entry!.argv.find((arg) => arg.startsWith('--model='))?.slice('--model='.length) ?? (separate >= 0 ? entry!.argv[separate + 1] : undefined);

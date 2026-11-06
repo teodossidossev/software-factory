@@ -190,7 +190,7 @@ unknown workspace prints no rows and zero totals.
 | `SF_GATE_FULL_PATHS` | empty | Comma-separated globs (as `SF_SENSITIVE_PATHS`) whose changed paths make an iteration's gate level `full`. |
 | `SF_SMOKE_MODEL` | `haiku` | The model of `sf smoke`'s job (section Live smoke test): its `SF_MODEL` and `SF_REVIEW_MODEL` (Implementer, Claude review, Task check). |
 | `SF_SMOKE_CODEX_MODEL` | unset | The gate's model in `sf smoke`, its `SF_CODEX_MODEL`; unset uses Codex's default. |
-| `SF_SANDBOX` | on | `off` runs the Implementer, the reviews, the simplification pass and the Task check without Claude Code's sandbox. |
+| `SF_SANDBOX` | on | `off` runs the Implementer, the reviews, the simplification pass and the Task check without Claude Code's sandbox. The path denials for the tools (SF-100) still apply; those for Bash go with the sandbox. |
 | `SF_SANDBOX_DOMAINS` | empty | Comma-separated extra hosts sandboxed commands may reach, besides `registry.npmjs.org`. |
 | `SF_DESKTOP_NOTIFY` | on | `off` disables the desktop notification. |
 | `SF_NOTIFY_ITERATIONS` | off | `on` also notifies `awaiting_review` (each published iteration). |
@@ -220,9 +220,11 @@ sf smoke [--keep] [--timeout-min N] [--budget-usd N]
 
 - **Where.** One temporary directory (`mkdtemp` under the OS temp dir; its path is the first output
   line) holds everything: `origin.git`, a bare repository (the only remote: no GitHub or GitLab);
-  `work`, its clone on `main` with `greeting.txt` ("hello") and the Task file
-  `.software-factory/SMOKE-1.md` ("Add a second greeting line"), committed as `sf-smoke` and
-  pushed; and the `state`, `config` and `worktrees` of the run. It needs no `sf serve` of yours
+  `work`, its clone on `main` with `greeting.txt` ("hello"), the sandbox probe `probe.mjs` and
+  the Task file `.software-factory/SMOKE-1.md` ("Add a second greeting line", plus running the
+  probe; `smokeTask(probe)`), committed as `sf-smoke` and pushed; and the `state`, `config` and
+  `worktrees` of the run. `config` holds a canary `auth.env` (one line `SF_CANARY=<random>`,
+  never loaded: the children's `SF_ENV_FILE` is an empty file). It needs no `sf serve` of yours
   and never touches your state, config, workspaces, checkouts or remotes.
 - **How.** Every step is a child `sf` process with its own `sf serve` on free ports
   (`SF_PORT=0`, `SF_DASHBOARD_PORT=0`): `sf workspace add smoke`, `sf check-task`, `sf start`,
@@ -237,16 +239,30 @@ sf smoke [--keep] [--timeout-min N] [--budget-usd N]
 - **Models.** `SF_SMOKE_MODEL` (default `haiku`) is the Claude model of the Implementer, the
   review and the Task check; `SF_SMOKE_CODEX_MODEL` (default unset: Codex's own default) the gate's.
 - **Steps.** Setup, Task check (PASS when the check ran, ready or not ready: the verdict is in the
-  detail), Start, Implementer turn (iteration 1 published), Claude review (a `review.json` with a
+  detail), Start, Implementer turn (iteration 1 published), Sandbox (SF-100, below), Claude review (a `review.json` with a
   verdict), Codex gate (a `gate.json` with a verdict; with the gate off it fails with `sf info`'s
   reason and the job still goes on), MR text (ready for review with an `mr.md` that passes the MR
   rules), Approve (the job `pushed` and `origin.git` has its branch at the prepared commit),
   Dashboard (the page and six API answers), Cleanup (an active job aborted, then `sf reset`: a reset once asked of `sf serve` runs to its end, so the abort comes first whatever the moment of a signal; `sf serve` stopped, what is left
   of every process group the run started, its own and the job runners', ended, a Task check
-  worktree a stopped `sf check-task` left in the OS temp dir removed, the directory removed;
+  worktree a stopped `sf check-task` left in the OS temp dir (`sf-task-checks-<uid>/check-*/repo`)
+  removed (the shared `sf-task-checks-<uid>` parent stays), the directory removed;
   `--keep` keeps it). Each PASS is decided from what the factory wrote. A FAIL skips
   every later step up to Dashboard (but the gate off); a job that stops fails the step it was on
   with its error code and message. Cleanup always runs.
+- **Sandbox** (SF-100). The Task has the Implementer run `node probe.mjs <the run's paths>` in its
+  sandbox and keep the output in `probe.json` (in the Task's `scope`; its Review brief says it is
+  the expected probe output). The probe tries to read the canary `auth.env` (given its SHA-256
+  only), read the run's `dashboard-token`, list its `jobs/`, `connect()` to its `sf.sock`, list
+  `~/.ssh` when it exists, and whether `SSH_AUTH_SOCK` is set; it writes only `{name, outcome,
+  code}` per probe (`refused`, `allowed` or `absent`, the error code), never anything it read. As
+  the sandbox may hide a denied file as empty, a folder as an empty listing, or answer `ENOENT`, a
+  probe is `allowed` only when it sees what access would show (the canary's content, a non-empty
+  token, the smoke's workspace in `jobs/`, a connection, a non-empty `~/.ssh`). Once iteration 1 is
+  published the step reads `probe.json` from the job's worktree: PASS only when it exists and every
+  probe is `refused` (`absent` for a missing `~/.ssh` and an unset `SSH_AUTH_SOCK`); a missing or
+  unreadable file fails it. With `SF_SANDBOX=off` the step is SKIP (`sandbox off`), which counts as
+  a pass: the last line then reads `smoke: PASS (sandbox not checked), cost …`.
 - **Budget.** `--timeout-min` (default 20) counts from Setup to the end of Dashboard;
   `--budget-usd` (default 2) bounds the cost read from the run's state: the `cost_usd` of the
   published iterations and their reviews plus the Task check's (an estimate of the
@@ -262,7 +278,7 @@ sf smoke [--keep] [--timeout-min N] [--budget-usd N]
 - **Cost to expect.** One small Task file read, one one-line change, one review, one gate run and
   one MR text: with `haiku` a small fraction of the default 2 USD (it usually runs on your Claude
   plan; the gate's tokens on your Codex plan) and a few minutes. The last line says what this run
-  cost: `smoke: PASS, cost <USD>, gate <N> tokens`, or `smoke: FAIL (<n> of 10 steps), ...`.
+  cost: `smoke: PASS, cost <USD>, gate <N> tokens`, or `smoke: FAIL (<n> of 11 steps), ...`.
 - **Output.** One line per step as it ends, then the table (step, PASS / FAIL / SKIP, seconds,
   detail: cost in USD for the Claude steps, tokens for the gate), then the last line. Exit 0 when
   every step passed, 1 otherwise, 2 for a usage error.
@@ -321,7 +337,12 @@ runs it by itself after each change of a Task file (below); the user can always 
 - **What it can read** (the repository, nothing else):
   - It runs in its own checkout: a detached worktree of the workspace's work checkout at the Task's
     `base` (fetched from `origin` when there is one, as Start does: the code the Implementer starts
-    from), in a new directory under the system's temporary directory, removed when the check ends.
+    from), in a new directory `check-*` under `<system temp>/sf-task-checks-<uid>/` (SF-100),
+    removed when the check ends. That parent is made by `sf serve` at its start and by a check when
+    it is missing, mode 0700; an existing one must be a real directory (not a link) of the
+    factory's user, a wider mode is narrowed to 0700; otherwise `sf serve` logs one warning and
+    keeps running, and every Task check fails with `task_check_dir_unsafe`. Every other session
+    denies that parent (section Jobs, the path denials).
     The worktree has no `.software-factory/` folder (the other Task files, the MR texts, the
     archive are never committed). A base that cannot be checked out is a failed check.
   - Every symbolic link in it whose target is outside the worktree (or does not resolve) is
@@ -343,7 +364,8 @@ runs it by itself after each change of a Task file (below); the user can always 
     call it fails to check is denied (Claude Code would take a hook that throws as no decision). This
     covers Grep and Glob, which Claude Code's `Read(...)` rules cover only on a best-effort basis.
   - On top of that, `Read(//<dir>/**)` rules deny the work checkout's `.software-factory/` folder,
-    the state directory (jobs, ledgers, requests, checks) and the config directory.
+    the state directory (jobs, ledgers, requests, checks) and the config directory, and the path
+    denials of every session (SF-100, section Jobs) apply too, but the Task checks' parent.
   - The stored check records the base `commit` it read.
 - **The output** (one zod definition, `checkOutput`, sent as the JSON schema): `paraphrase` first,
   what the Task proposes in the checker's own words (3–8 sentences), written before any finding;
@@ -1017,7 +1039,10 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   The Claude review's, the gate's and the Task check's turn limits are not affected.
 - A failed turn, a session that does not report permission mode `auto`
   (`permission_mode_mismatch`), an unavailable sandbox (`sandbox_unavailable`, with the SDK's
-  message), a failed review (`review_failed`), a failed gate (`gate_failed`), the gate's round
+  message), a session the factory refused to start (SF-100: `user_settings_weaken_sandbox` from the
+  Implementer, the review or the simplification pass, `path_denial_unrepresentable` from the
+  Implementer; the dashboard shows them as any other code, Stopped with the whole message, and
+  *Tell it to go on* continues once the cause is fixed), a failed review (`review_failed`), a failed gate (`gate_failed`), the gate's round
   limit (`gate_rounds`) or token ceiling (`gate_budget`), the iteration limit, or the ledger
   (`escalated`, `review_disputed`, `review_churn`), or the offer of the simplification pass
   (`simplify_offered`) put the job in `needs_human`. After a gate code, `review_disputed` /
@@ -1061,13 +1086,69 @@ Every turn runs with `cwd` = the job's worktree, `permissionMode: "auto"`, `sett
 "project"]`, a deny list from `src/rules.ts` (mutating Git commands, `sudo`, `EnterWorktree`, `.git/**`
 edits, `.env` files; the same for every turn, MR preparation included), a filtered environment (no
 `SF_*`, no inherited Claude Code session markers) and, unless `SF_SANDBOX=off`, the sandbox
-`{enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, network: {allowedDomains:
+`{enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false, filesystem: {disabled: false}, network: {allowedDomains:
 ["registry.npmjs.org", ...SF_SANDBOX_DOMAINS], allowLocalBinding: true, allowAllUnixSockets: true}}`.
 Local binding and Unix sockets are allowed so that the repository's own tests, which start servers on
 loopback and on Unix sockets, run inside the sandbox. The factory's own `fetch`, commit, rebase and `push` run outside
 the Implementer, so the Git host is not needed there; a repository whose checks need other hosts
 (another package registry, a test service) lists them in `SF_SANDBOX_DOMAINS`. Nothing is written
-under `~/.claude`.
+under `~/.claude`. No session gets `SSH_AUTH_SOCK` (SF-100), and neither does the Codex gate: the
+factory fetches and pushes itself. On Linux the sandbox can allow every Unix socket or none
+(`allowUnixSockets` is macOS only), so all stay allowed for the repositories' tests; `sf.sock` is
+in a denied path. No command runs outside the sandbox (`allowUnsandboxedCommands: false`, SF-100):
+Claude Code ignores a command's `dangerouslyDisableSandbox`, and a project's `.claude/settings.json`
+(which the Implementer can write in its worktree) can neither switch the sandbox off nor widen it,
+so the path denials below hold for every Bash command. A repository whose checks cannot run inside
+the sandbox needs `SF_SANDBOX=off`.
+
+**The path denials** (SF-100, `src/sandbox-denials.ts`). Every session the factory starts (the
+Implementer and its MR turns, the Claude review, the simplification pass, the Task check) gets deny
+rules for what it never needs, built per session when it starts (the Implementer's by its first
+turn, cached on the session; again for every session the factory creates: a new job, a restart, a
+recovered job) from the config, the registry and the session's own working directory. Denied for
+reading and writing:
+
+- the config directory (`SF_CONFIG_DIR`, else `$XDG_CONFIG_HOME/software-factory`, else
+  `~/.config/software-factory`), the env file it loads (`SF_ENV_FILE` wherever it is), and the
+  literal `~/.config/software-factory`;
+- every entry of the state directory but `worktrees/` (`sf.sock`, `dashboard-token`, `mcp-token`,
+  `jobs/`, `checks/`, `queue.json`, the logs; the directory itself stays listable); in the worktree
+  root every other workspace's folder and, in the own workspace's, every other ticket's worktree;
+- the tunnel client's profile (`$TUNNEL_CLIENT_PROFILE_DIR`, else
+  `${XDG_CONFIG_HOME:-~/.config}/tunnel-client`);
+- `~/.ssh`, `~/.codex`, `~/.aws`, `~/.config/gh`, `~/.git-credentials`, `~/.netrc`, `~/.npmrc` and
+  Claude Code's login `~/.claude/.credentials.json`;
+- the Task checks' parent `<system temp>/sf-task-checks-<uid>/` (not for a Task check, which runs in it);
+- every other registered workspace's checkout (not one that is, or holds, the own checkout).
+
+Denied for writing only: Claude Code's user settings and global config (`$CLAUDE_CONFIG_DIR/settings.json`
+and `$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude/settings.json` and `~/.claude.json`), which a
+session's next query loads: from there `sandbox.filesystem.disabled`, `allowRead` and hooks are
+honoured, and user-scope MCP servers run outside the sandbox. They are denied for the tools even
+while missing (so they cannot be created), for Bash when they exist. On top, the factory's own
+`--settings` pin `sandbox.filesystem.disabled: false`, which outranks the user settings. And the running factory's own installation (the Git top-level of its module
+directory, else the nearest directory above it with a `package.json` named `software-factory`),
+unless it is, or holds, the session's own checkout (the factory developing itself). The session's
+own worktree and checkout (its `.git` included) stay as they were. A path that does not exist when
+the denials are built is left out everywhere, so the sandbox never leaves a placeholder for it; one
+gone since (another job's worktree removed at its push) is left out of each later query. Paths are
+absolute, each also by its real path when that differs. Enforcement: for the tools, permission deny
+rules added to the session's `disallowedTools` (`Read(//<path>)`, `Edit(//<path>)`, `Write(//<path>)`,
+plus `<path>/**` for a directory; the Implementer's go on top of every prompt's deny list); for
+Bash, the sandbox's `filesystem.denyRead` and `filesystem.denyWrite` (the installed Agent SDK's
+`SandboxSettings`). With `SF_SANDBOX=off` the tool rules still apply; the Bash ones go with the
+sandbox. The SDK hands `disallowedTools` to the CLI as one comma-joined argument, which the CLI
+splits at commas and spaces outside a rule's parentheses (up to the next `)`, escaped or not): a
+comma in a path is kept whole, but a path the CLI would cut (a space or comma after a `)` in it)
+cannot be denied for the tools, so the session is refused (`path_denial_unrepresentable`: the
+Implementer's turn fails, a review or a Task check fails to start) rather than started without it.
+Before the Implementer, the review and the simplification pass start, the factory reads the user
+settings Claude Code loads (`$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`):
+`sandbox.enabled` false, `sandbox.filesystem.disabled` true, an `allowRead` or `allowWrite` entry
+that is, holds or lies inside a path denied for reading or writing (paths matched as the denials
+are), or a file that cannot be read as a JSON object stop the session before it starts, and the job
+goes to `needs_human` with `user_settings_weaken_sandbox`, naming the key and the path; a missing
+file is fine. What each session can still reach, and the limits: [the trust model](../docs/guide/trust-model.md).
 
 The sandbox (bubblewrap) needs a mount point for every path it masks. When such a path does not
 exist in the worktree it creates it as a zero-byte file with mode 0444 and leaves it there:

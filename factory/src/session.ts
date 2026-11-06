@@ -9,6 +9,7 @@
 // continuations per chain, whatever the hook answers.
 import { query, type SandboxSettings, type SDKMessage, type SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
 import { type ImageRef, promptInput } from './attachments.js';
+import { type PathDenials, withSandboxDenials } from './sandbox-denials.js';
 
 // Markers a running Claude Code session sets for its children; a session inheriting them acts as
 // a child and may not save its transcript.
@@ -24,7 +25,9 @@ const CLAUDE_SESSION_MARKERS = new Set([
   'CLAUDE_PID',
   'CLAUDE_EFFORT',
 ]);
-const KEPT_NAMES = new Set(['PATH', 'HOME', 'LANG', 'LANGUAGE', 'TERM', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TZ', 'SSH_AUTH_SOCK']);
+// No SSH_AUTH_SOCK (SF-100): the factory fetches and pushes itself, outside the sandbox, so no
+// session needs the user's SSH agent.
+const KEPT_NAMES = new Set(['PATH', 'HOME', 'LANG', 'LANGUAGE', 'TERM', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TZ']);
 const KEPT_PATTERN = /^(LC_\w+|XDG_\w+|(HTTPS?|ALL|NO)_PROXY|(https?|all|no)_proxy|ANTHROPIC_\w+|CLAUDE_\w+|AWS_\w+|GOOGLE_\w+|CLOUD_ML_\w+)$/;
 
 // The child's environment: the basics, proxies and the Anthropic/Claude (and cloud provider) auth
@@ -51,6 +54,10 @@ export interface SessionOptions {
   model?: string | undefined;
   // Continuations after a turn limit per chain (SF_TURN_LIMIT_CONTINUES); default 0.
   turnLimitContinues?: number | undefined;
+  // Builds the session's path denials (SF-100, src/sandbox-denials.ts): called once, by the first
+  // turn before its query(); its tools go on top of every prompt's deny list and its sandbox lists
+  // into the sandbox settings of every query. A failure fails that turn.
+  pathDenials?: (() => Promise<PathDenials>) | undefined;
 }
 
 interface Queued {
@@ -163,6 +170,8 @@ export class ImplementerSession {
   // The tool calls of the turn running (or last run).
   #calls: ToolCall[] = [];
   #drained: Promise<void> = Promise.resolve();
+  // The path denials, once the first turn has built them.
+  #denials: PathDenials | undefined;
 
   constructor(options: SessionOptions, hooks: SessionHooks) {
     this.#options = options;
@@ -269,6 +278,21 @@ export class ImplementerSession {
     if (this.#closed) {
       throw new TurnError('closed', 'The session was closed before the turn started.');
     }
+    if (this.#denials === undefined && this.#options.pathDenials !== undefined) {
+      try {
+        this.#denials = await this.#options.pathDenials();
+      } catch (error) {
+        // A refusal with its own code (such as user_settings_weaken_sandbox) keeps it for the job.
+        const code = (error as { code?: unknown }).code;
+        throw new TurnError(typeof code === 'string' && /^[a-z][a-z_]*$/.test(code) ? code : 'session_failed', error instanceof Error ? error.message : String(error));
+      }
+      // Closed while they were built (an abort): no turn starts.
+      if (this.#closed) {
+        throw new TurnError('closed', 'The session was closed before the turn started.');
+      }
+    }
+    const denials = this.#denials;
+    const sandbox = withSandboxDenials(this.#options.sandbox, denials?.sandbox);
     const abortController = new AbortController();
     this.#abort = abortController;
     const input = await promptInput(prompt, images);
@@ -279,12 +303,12 @@ export class ImplementerSession {
         cwd: this.#options.cwd,
         permissionMode: 'auto',
         settingSources: ['user', 'project'],
-        disallowedTools,
+        disallowedTools: [...disallowedTools, ...(denials?.tools ?? [])],
         maxTurns: this.#options.maxTurns,
         // A known startup failure (such as an unavailable sandbox) then ends with a result message.
         env: { ...sessionEnvironment(), CLAUDE_CODE_STARTUP_FAILURE_RESULTS: '1' },
         ...(this.#sessionId !== undefined ? { resume: this.#sessionId } : {}),
-        ...(this.#options.sandbox !== undefined ? { sandbox: this.#options.sandbox } : {}),
+        ...(sandbox !== undefined ? { sandbox } : {}),
         ...(this.#options.model !== undefined ? { model: this.#options.model } : {}),
         ...(this.#options.claudePath !== undefined ? { pathToClaudeCodeExecutable: this.#options.claudePath } : {}),
       },

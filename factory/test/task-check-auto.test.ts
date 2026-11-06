@@ -438,7 +438,7 @@ async function realChecks(name: string): Promise<{ checks: TaskChecks; dir: stri
       await gate;
       return { name: 'app', readCheckout: dir, workCheckout: dir };
     },
-    claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 1, rulesMaxBytes: 49152, stateDir: join(dir, 'state'), configDir: join(dir, 'config'),
+    claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 1, rulesMaxBytes: 49152, stateDir: join(dir, 'state'), configDir: join(dir, 'config'), worktreeRoot: join(dir, 'worktrees'),
     onSettled: (workspace, ticket) => settled.push(`${workspace}/${ticket}`),
   });
   return { checks, dir, release: () => open(), block, settled };

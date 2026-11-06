@@ -17,6 +17,7 @@ import { DENIED_TOOLS, type Marks, marksOf } from '../rules.js';
 import type { Workspace } from '../registry.js';
 import { copyRulesRecord } from '../rules-docs.js';
 import { fixContent } from '../review.js';
+import { pathDenials } from '../sandbox-denials.js';
 import { type IdleOutcome, ImplementerSession, type LimitAnswer, type LimitedTurn } from '../session.js';
 import { CONTINUE_PROMPT, limitDecision, worktreeChanged, type WorktreeState, worktreeState } from '../turn-limit.js';
 import { appendFix, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskScope } from '../task-file.js';
@@ -87,6 +88,10 @@ export class TurnsPart {
         cwd, maxTurns: this.core.config.maxTurns, claudePath: this.core.config.claudePath,
         sessionId: job.session_id ?? undefined, sandbox: this.core.config.sandbox, model: this.core.config.model,
         turnLimitContinues: this.core.config.turnLimitContinues,
+        // Built by the session's first turn, again for every session the factory creates (SF-100).
+        pathDenials: () => pathDenials({
+          session: 'job', workspace: name, checkout: workspace.workCheckout, worktree: cwd, stateDir: this.core.config.stateDir, worktreeRoot: this.core.config.worktreeRoot,
+        }),
       },
       {
         prompt: async (prompt, continued, images) => {

@@ -209,15 +209,18 @@ with `sf watch` or the job's Stream).
    needs no `sf serve` of yours. Your settings are not passed on, except `SF_CLAUDE`, `SF_CODEX`,
    `SF_GATE`, `SF_SANDBOX`, `SF_SANDBOX_DOMAINS` and `SF_GATE_TIMEOUT_MS`.
 
-   - **Steps**: Setup, Task check, Start, Implementer turn, Claude review, Codex gate, MR text,
+   - **Steps**: Setup, Task check, Start, Implementer turn, Sandbox, Claude review, Codex gate, MR text,
      Approve (the push to the throwaway `origin`), Dashboard (the page and six API answers),
      Cleanup. One line per step as it ends, then a table, then the last line.
-   - **PASS** means every one of the ten steps passed, each decided from what the factory wrote:
-     the Task check ran (ready or not), the job started, iteration 1 was published, the Claude
+   - **PASS** means every one of the eleven steps passed, each decided from what the factory wrote:
+     the Task check ran (ready or not), the job started, iteration 1 was published, the
+     Implementer's sandbox refused every probe of the run's secrets and control paths
+     ([the trust model](trust-model.md)), the Claude
      review and the Codex gate each gave a verdict, the MR text passes the MR rules, the branch is
      on `origin` at the prepared commit, and the dashboard answered with its token. The last line
-     is `smoke: PASS, cost <USD>, gate <N> tokens`; exit code 0.
-   - **FAIL** names the step and the reason (`smoke: FAIL (<n> of 10 steps), …`, exit 1); the later
+     is `smoke: PASS, cost <USD>, gate <N> tokens`; exit code 0. With `SF_SANDBOX=off` the Sandbox
+     step is skipped and the last line says `smoke: PASS (sandbox not checked), …`.
+   - **FAIL** names the step and the reason (`smoke: FAIL (<n> of 11 steps), …`, exit 1); the later
      steps are skipped, Cleanup always runs. A missing Codex fails the gate step but the run goes
      on.
    - **What it costs**: the Claude model is `SF_SMOKE_MODEL` (default `haiku`), with small limits;

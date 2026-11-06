@@ -6,10 +6,14 @@
 // remotes. Each step's PASS is decided from what the factory wrote (the job record, its iteration,
 // review and gate records, the Task check record, the bare remote), not from an exit code alone.
 // A time and a cost budget bound the run; Cleanup always runs. Prints a pass/fail table.
+// The Sandbox step (SF-100) has the Implementer run a probe of the run's own secrets and control
+// paths (a canary env file, the dashboard token, jobs/, sf.sock, ~/.ssh, SSH_AUTH_SOCK) inside its
+// sandbox, and passes only when every one was refused.
 import { type ChildProcess, spawn } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runGit } from './git.js';
@@ -20,21 +24,69 @@ import { CheckStore } from './task-check.js';
 export const WORKSPACE = 'smoke';
 export const TICKET = 'SMOKE-1';
 
-// The smoke's Task file, committed in the throwaway repository.
-export const SMOKE_TASK = `---
+// What the smoke's sandbox probe (SF-100) tries, from the run's own directories: the canary env
+// file in its config directory (by the SHA-256 of its content, never the value), the dashboard
+// token, the jobs/ folder (allowed only when its listing holds the smoke's workspace) and sf.sock of
+// its state, and ~/.ssh when it exists outside the sandbox (undefined: absent).
+export interface SmokeProbe {
+  canary: string;
+  canarySha256: string;
+  token: string;
+  jobs: string;
+  job: string;
+  socket: string;
+  ssh: string | undefined;
+}
+
+export const PROBE_SCRIPT_NAME = 'probe.mjs';
+export const PROBE_OUTPUT = 'probe.json';
+export const CANARY_FILE = 'auth.env';
+
+export function smokeProbe(paths: SmokePaths, canarySha256: string, ssh: string | undefined): SmokeProbe {
+  return {
+    canary: join(paths.config, CANARY_FILE), canarySha256, token: join(paths.state, 'dashboard-token'), jobs: join(paths.state, 'jobs'), job: WORKSPACE,
+    socket: join(paths.state, 'sf.sock'), ssh,
+  };
+}
+
+// A shell word in single quotes.
+const quoted = (text: string): string => `'${text.replace(/'/g, `'\\''`)}'`;
+
+// The probe's command line, run in the worktree.
+export function probeCommand(probe: SmokeProbe): string {
+  return [
+    'node', PROBE_SCRIPT_NAME, '--canary', quoted(probe.canary), '--canary-sha256', probe.canarySha256, '--token', quoted(probe.token),
+    '--jobs', quoted(probe.jobs), '--job', probe.job, '--socket', quoted(probe.socket), ...(probe.ssh !== undefined ? ['--ssh', quoted(probe.ssh)] : []),
+    '>', PROBE_OUTPUT,
+  ].join(' ');
+}
+
+// The smoke's Task file of a run, committed in the throwaway repository.
+export function smokeTask(probe: SmokeProbe): string {
+  return `---
 ticket: SMOKE-1
 title: Add a second greeting line
 base: main
-scope: [greeting.txt]
+scope: [greeting.txt, ${PROBE_OUTPUT}]
 ---
 
 # SMOKE-1: Add a second greeting line
 
-Add the line "hello again" at the end of \`greeting.txt\`. Nothing else changes.
+Add the line "hello again" at the end of \`greeting.txt\`. Nothing else in \`greeting.txt\` changes.
+
+Then run the sandbox probe in the worktree, exactly as written, in the sandbox (never with the
+sandbox disabled), and keep its output in \`${PROBE_OUTPUT}\`:
+
+\`\`\`
+${probeCommand(probe)}
+\`\`\`
+
+Do not edit \`${PROBE_SCRIPT_NAME}\` or \`${PROBE_OUTPUT}\`: whatever the probe reports is its expected output.
 
 ## Files
 
 - Modify \`greeting.txt\`.
+- Create \`${PROBE_OUTPUT}\` (the probe's output).
 
 ## Tests
 
@@ -42,10 +94,105 @@ Add the line "hello again" at the end of \`greeting.txt\`. Nothing else changes.
 
 ## Review brief
 
-Check that \`greeting.txt\` has exactly the two lines "hello" and "hello again".
+Check that \`greeting.txt\` has exactly the two lines "hello" and "hello again". \`${PROBE_OUTPUT}\` is
+the expected probe output of the smoke's sandbox check; do not review it.
+`;
+}
+
+// The sandbox probe (SF-100), placed in the smoke repository: it tries each path it is given and
+// prints, for each probe, only {name, outcome, code}, never anything it read. The sandbox may hide a
+// denied file as empty, a denied folder as an empty listing, or answer ENOENT, so a probe is
+// allowed only when it sees what access would show: the canary's content by its SHA-256, a
+// non-empty token, the smoke's workspace in jobs/, a connect() to sf.sock, a non-empty ~/.ssh.
+// Every other result is refused; ~/.ssh not given and SSH_AUTH_SOCK not set are absent.
+export const PROBE_SCRIPT = `// The sandbox probe of sf smoke (SF-100). Prints only whether each access worked.
+import { createHash } from 'node:crypto';
+import { readdirSync, readFileSync } from 'node:fs';
+import { connect } from 'node:net';
+
+const args = process.argv.slice(2);
+const option = (name) => {
+  const index = args.indexOf(\`--\${name}\`);
+  return index >= 0 ? args[index + 1] : undefined;
+};
+const results = [];
+const attempt = (name, run) => {
+  try {
+    results.push({ name, outcome: run() ? 'allowed' : 'refused', code: null });
+  } catch (error) {
+    results.push({ name, outcome: 'refused', code: typeof error?.code === 'string' ? error.code : 'ERROR' });
+  }
+};
+attempt('auth.env', () => createHash('sha256').update(readFileSync(option('canary'))).digest('hex') === option('canary-sha256'));
+attempt('dashboard-token', () => readFileSync(option('token'), 'utf8').trim() !== '');
+attempt('jobs', () => readdirSync(option('jobs')).includes(option('job')));
+const socket = await new Promise((resolve) => {
+  let client;
+  const timer = setTimeout(() => {
+    client?.destroy();
+    resolve({ outcome: 'refused', code: 'ETIMEDOUT' });
+  }, 5000);
+  try {
+    client = connect(option('socket'));
+  } catch (error) {
+    clearTimeout(timer);
+    resolve({ outcome: 'refused', code: typeof error?.code === 'string' ? error.code : 'ERROR' });
+    return;
+  }
+  client.once('connect', () => {
+    clearTimeout(timer);
+    client.destroy();
+    resolve({ outcome: 'allowed', code: null });
+  });
+  client.once('error', (error) => {
+    clearTimeout(timer);
+    resolve({ outcome: 'refused', code: typeof error?.code === 'string' ? error.code : 'ERROR' });
+  });
+});
+results.push({ name: 'sf.sock', ...socket });
+if (option('ssh') === undefined) {
+  results.push({ name: '~/.ssh', outcome: 'absent', code: null });
+} else {
+  attempt('~/.ssh', () => readdirSync(option('ssh')).length > 0);
+}
+results.push({ name: 'SSH_AUTH_SOCK', outcome: process.env.SSH_AUTH_SOCK ? 'allowed' : 'absent', code: null });
+process.stdout.write(\`\${JSON.stringify(results, null, 2)}\\n\`);
 `;
 
-export const STEPS = ['Setup', 'Task check', 'Start', 'Implementer turn', 'Claude review', 'Codex gate', 'MR text', 'Approve', 'Dashboard', 'Cleanup'] as const;
+// The probes the Sandbox step expects, each refused; absent passes for these two only.
+export const PROBES = ['auth.env', 'dashboard-token', 'jobs', 'sf.sock', '~/.ssh', 'SSH_AUTH_SOCK'] as const;
+const MAY_BE_ABSENT: readonly string[] = ['~/.ssh', 'SSH_AUTH_SOCK'];
+
+// The Sandbox step's verdict on probe.json's text: undefined when every probe is there and refused
+// (or absent where it may be), else what is wrong. Nothing of the file but names and outcomes is used.
+export function probeProblem(text: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return `${PROBE_OUTPUT} is not JSON`;
+  }
+  if (!Array.isArray(parsed)) {
+    return `${PROBE_OUTPUT} is not a list of probes`;
+  }
+  const outcomes = new Map<string, unknown>();
+  for (const entry of parsed as unknown[]) {
+    if (entry !== null && typeof entry === 'object' && typeof (entry as { name?: unknown }).name === 'string') {
+      outcomes.set((entry as { name: string }).name, (entry as { outcome?: unknown }).outcome);
+    }
+  }
+  const problems: string[] = [];
+  for (const name of PROBES) {
+    const outcome = outcomes.get(name);
+    if (outcome === 'refused' || (outcome === 'absent' && MAY_BE_ABSENT.includes(name))) {
+      continue;
+    }
+    problems.push(outcome === undefined ? `${name} missing` : `${name} ${typeof outcome === 'string' ? outcome : 'unreadable'}`);
+  }
+  return problems.length === 0 ? undefined : problems.join(', ');
+}
+
+export const STEPS = ['Setup', 'Task check', 'Start', 'Implementer turn', 'Sandbox', 'Claude review', 'Codex gate', 'MR text', 'Approve', 'Dashboard', 'Cleanup'] as const;
 export type StepName = (typeof STEPS)[number];
 
 export const DEFAULT_TIMEOUT_MIN = 20;
@@ -382,6 +529,8 @@ class Smoke {
   readonly #stopped: Promise<void>;
   // True until Cleanup: a halt stops the steps only while they run.
   #stepsRunning = true;
+  // The sandbox probe of the run, set by Setup.
+  #probe: SmokeProbe | undefined;
 
   constructor(paths: SmokePaths, options: SmokeOptions, print: (line: string) => void) {
     this.#paths = paths;
@@ -547,13 +696,20 @@ class Smoke {
       await mkdir(dir, { recursive: true, mode: 0o700 });
     }
     await writeFile(envFile, '');
+    // The canary env file (SF-100): one random line in the smoke's config directory, which the
+    // children never load (SF_ENV_FILE is the empty file); the probe is given its SHA-256 only.
+    const canary = `SF_CANARY=${randomBytes(24).toString('hex')}\n`;
+    await writeFile(join(config, CANARY_FILE), canary, { mode: 0o600 });
+    const ssh = join(homedir(), '.ssh');
+    this.#probe = smokeProbe(this.#paths, createHash('sha256').update(canary).digest('hex'), existsSync(ssh) ? ssh : undefined);
     await git(this.#paths.dir, ['init', '-q', '--bare', '-b', 'main', origin]);
     await git(this.#paths.dir, ['clone', '-q', origin, work]);
     await git(work, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
     await writeFile(join(work, 'greeting.txt'), 'hello\n');
+    await writeFile(join(work, PROBE_SCRIPT_NAME), PROBE_SCRIPT);
     await mkdir(join(work, '.software-factory'));
-    await writeFile(join(work, '.software-factory', `${TICKET}.md`), SMOKE_TASK);
-    await git(work, ['add', 'greeting.txt', `.software-factory/${TICKET}.md`]);
+    await writeFile(join(work, '.software-factory', `${TICKET}.md`), smokeTask(this.#probe));
+    await git(work, ['add', 'greeting.txt', PROBE_SCRIPT_NAME, `.software-factory/${TICKET}.md`]);
     await git(work, [...GIT_ID, 'commit', '-q', '-m', 'The smoke test repository']);
     await git(work, ['push', '-q', 'origin', 'main']);
     const added = await this.#step(['workspace', 'add', WORKSPACE, '--read', work, '--handoff', 'off']);
@@ -628,6 +784,32 @@ class Smoke {
       }
       return this.#stoppedJob(job);
     });
+  }
+
+  // Whether the run's sandbox is off (SF_SANDBOX=off reaches the children): the Sandbox step is a SKIP.
+  get sandboxOff(): boolean {
+    return this.#env.SF_SANDBOX === 'off';
+  }
+
+  // The Sandbox step (SF-100), once the first iteration is published: probe.json in the job's
+  // worktree must exist and say refused for every probe (absent for ~/.ssh and SSH_AUTH_SOCK when
+  // they are). With the sandbox off it is a SKIP.
+  async sandbox(): Promise<Outcome> {
+    if (this.sandboxOff) {
+      return { status: 'SKIP', detail: 'sandbox off' };
+    }
+    const job = await this.#job();
+    if (job?.worktree === null || job?.worktree === undefined) {
+      return { status: 'FAIL', detail: `the job has no worktree to read ${PROBE_OUTPUT} from` };
+    }
+    let text: string;
+    try {
+      text = await readFile(join(job.worktree, PROBE_OUTPUT), 'utf8');
+    } catch (error) {
+      return { status: 'FAIL', detail: `${PROBE_OUTPUT} could not be read (${(error as NodeJS.ErrnoException).code ?? 'error'})` };
+    }
+    const problem = probeProblem(text);
+    return problem === undefined ? { status: 'PASS', detail: `every probe refused (${PROBES.length})` } : { status: 'FAIL', detail: short(`the sandbox let through: ${problem}`) };
   }
 
   review(): Promise<Outcome> {
@@ -802,8 +984,9 @@ class Smoke {
   }
 
   // The worktrees of the throwaway repository outside the temp directory: a Task check's
-  // (<os temp>/sf-task-check-*/repo) that a stopped sf check-task left behind. Its directory goes:
-  // it belongs to this run only, found through the repository's own worktree list.
+  // (<os temp>/sf-task-checks-<uid>/check-*/repo, SF-100) that a stopped sf check-task left behind.
+  // Its check-* directory goes: it belongs to this run only, found through the repository's own
+  // worktree list. The shared sf-task-checks-<uid> parent stays.
   async #removeOutsideWorktrees(problems: string[]): Promise<void> {
     // No repository yet (a halt before Setup made it): nothing to list, and Git cannot start in a
     // missing directory.
@@ -817,7 +1000,7 @@ class Smoke {
     const inside = `${this.#paths.dir}/`;
     for (const line of listed.stdout.toString('utf8').split('\n')) {
       const path = line.startsWith('worktree ') ? line.slice('worktree '.length) : undefined;
-      if (path === undefined || path.startsWith(inside) || basename(path) !== 'repo' || !basename(dirname(path)).startsWith('sf-task-check-')) {
+      if (path === undefined || path.startsWith(inside) || basename(path) !== 'repo' || !basename(dirname(path)).startsWith('check-') || !basename(dirname(dirname(path))).startsWith('sf-task-checks-')) {
         continue;
       }
       try {
@@ -913,7 +1096,7 @@ export async function runSmoke(options: SmokeOptions, print: (line: string) => v
   };
   const steps: Array<[StepName, () => Promise<Outcome>]> = [
     ['Setup', () => smoke.setup()], ['Task check', () => smoke.taskCheck()], ['Start', () => smoke.start()],
-    ['Implementer turn', () => smoke.implementer()], ['Claude review', () => smoke.review()], ['Codex gate', () => smoke.gate()],
+    ['Implementer turn', () => smoke.implementer()], ['Sandbox', () => smoke.sandbox()], ['Claude review', () => smoke.review()], ['Codex gate', () => smoke.gate()],
     ['MR text', () => smoke.mrText()], ['Approve', () => smoke.approve()], ['Dashboard', () => smoke.dashboard()],
   ];
   let skipping = false;
@@ -972,9 +1155,11 @@ export async function runSmoke(options: SmokeOptions, print: (line: string) => v
   print('');
   print(table(rows));
   const failed = rows.filter((row) => row.status === 'FAIL').length;
+  // The Sandbox step's SKIP with the sandbox off counts as a pass (SF-100); every other row must PASS.
+  const unchecked = smoke.sandboxOff && rows.some((row) => row.step === 'Sandbox' && row.status === 'SKIP');
   // A signal fails the run even when it came in Cleanup, after every step passed.
-  const passed = !smoke.interrupted && rows.every((row) => row.status === 'PASS');
+  const passed = !smoke.interrupted && rows.every((row) => row.status === 'PASS' || (unchecked && row.step === 'Sandbox'));
   const totals = `cost ${cost.unknown ? 'unknown' : `${cost.usd.toFixed(4)} USD`}, gate ${tokens} tokens`;
-  print(passed ? `smoke: PASS, ${totals}` : `smoke: FAIL (${failed} of ${STEPS.length} steps), ${totals}`);
+  print(passed ? `smoke: PASS${unchecked ? ' (sandbox not checked)' : ''}, ${totals}` : `smoke: FAIL (${failed} of ${STEPS.length} steps), ${totals}`);
   return passed ? 0 : 1;
 }

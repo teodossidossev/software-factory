@@ -8,9 +8,9 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, readdir, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { addAttachment } from '../src/attachments.js';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { type Job, JobStore } from '../src/jobs.js';
 import { readOnlySessionOptions, REVIEW_DENIED_TOOLS } from '../src/review.js';
@@ -20,7 +20,7 @@ import {
 } from '../src/task-check.js';
 import { writeTask } from '../src/task-file.js';
 import { act, fetchRaw } from './support/dashboard-client.js';
-import { type Env, git, newEnv, newRepo, probeLog, putRules, reviewLog, reviewScript, runCli, serve, stop, temp } from './support/harness.js';
+import { assertPathDenials, type Env, git, newEnv, newRepo, probeLog, putRules, reviewLog, reviewScript, runCli, serve, stop, temp } from './support/harness.js';
 
 const finding = (severity: CheckFinding['severity'], kind: CheckFinding['kind'] = 'decision', where = '## Behaviour'): CheckFinding =>
   ({ kind, severity, where, problem: `A ${severity} problem.`, expected: 'Say which.' });
@@ -133,7 +133,7 @@ test('one check per ticket: a second start while the first is still being set up
   await writeFile(join(repo, '.software-factory', 'C-9.md'), '---\nticket: C-9\ntitle: Draft\nbase: main\n---\n\n## Status: waiting for the Context owner\n');
   const checks = new TaskChecks({
     resolve: () => gate, claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 1, rulesMaxBytes: 49152,
-    stateDir: join(temp, 'concurrent-state'), configDir: join(temp, 'concurrent-config'),
+    stateDir: join(temp, 'concurrent-state'), configDir: join(temp, 'concurrent-config'), worktreeRoot: join(temp, 'concurrent-worktrees'),
   });
   const first = checks.start('app', 'C-9');
   const second = checks.start('app', 'C-9');
@@ -273,11 +273,20 @@ test('sf check-task: the read-only session in the work checkout, its prompt the 
   assert.notEqual(entry!.cwd, repo);
   assert.equal(basename(entry!.cwd), 'repo');
   assert.equal(existsSync(entry!.cwd), false);
+  // Under the Task checks' parent directory (SF-100): <tmp>/sf-task-checks-<uid>/check-*/repo, 0700.
+  assert.match(basename(dirname(entry!.cwd)), /^check-/);
+  const parent = dirname(dirname(entry!.cwd));
+  assert.equal(basename(parent), `sf-task-checks-${process.getuid!()}`);
+  assert.equal((await stat(parent)).mode & 0o777, 0o700);
+  assert.equal(existsSync(dirname(entry!.cwd)), false);
   assert.deepEqual(git(repo, 'worktree', 'list', '--porcelain').split('\n').filter((line) => line.startsWith('worktree ')), [`worktree ${repo}`]);
   assert.equal(entry!.prompt, checkPrompt('C-2', content));
   assert.ok(!entry!.prompt.includes('secret request words') && !entry!.prompt.includes('ledger words'));
   assert.equal(option(entry!.argv, 'tools'), 'Read,Grep,Glob');
-  assert.deepEqual(option(entry!.argv, 'disallowedTools')!.split(','), [...REVIEW_DENIED_TOOLS, ...checkDeniedRules(repo, env.state, env.config)]);
+  // The path denials (SF-100) on top of checkDeniedRules, but the Task checks' parent it runs in.
+  const extra = assertPathDenials(entry!.argv, env, entry!.cwd, [...REVIEW_DENIED_TOOLS, ...checkDeniedRules(repo, env.state, env.config)]);
+  assert.ok(extra.includes(`Read(/${join(env.state, 'requests')}/**)`), extra.join(', '));
+  assert.ok(!extra.some((rule) => rule.includes('sf-task-checks-')), extra.join(', '));
   assert.deepEqual(JSON.parse(option(entry!.argv, 'json-schema')!), CHECK_SCHEMA);
   assert.deepEqual([option(entry!.argv, 'max-turns'), option(entry!.argv, 'model'), option(entry!.argv, 'setting-sources')], ['9', 'fake-checker', 'project']);
 
@@ -564,7 +573,7 @@ test('the Task check with images (SF-065): the factory gives the referenced imag
   const store = new CheckStore(env.state);
   assert.equal((await store.read('app', 'C-10', checkSha))?.status, 'checked');
   const checks = new TaskChecks({
-    resolve: async () => workspace, claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 1, rulesMaxBytes: 49152, stateDir: env.state, configDir: env.config,
+    resolve: async () => workspace, claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 1, rulesMaxBytes: 49152, stateDir: env.state, configDir: env.config, worktreeRoot: join(env.state, 'worktrees'),
   });
   assert.deepEqual([(await checks.view('app', 'C-10')).stale, (await checks.view('app', 'C-10')).current_sha256], [false, checkSha]);
   assert.equal((await checks.current('app', 'C-10')).record?.sha256, checkSha);

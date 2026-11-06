@@ -77,7 +77,10 @@ export type Gate = { on: true; codexPath: string } | { on: false; reason: string
 // Domains sandboxed commands may reach: the npm registry and SF_SANDBOX_DOMAINS (comma-separated).
 // The factory's own fetch and push run outside the sandbox, so the Git host is not needed. Binding
 // local ports and every Unix socket is allowed, so the repository's own tests can start servers on
-// loopback and on Unix sockets.
+// loopback and on Unix sockets. No command runs outside the sandbox (SF-100): with
+// allowUnsandboxedCommands false the CLI ignores dangerouslyDisableSandbox, and a project's
+// .claude/settings.json (which the Implementer can write in its worktree) can neither switch the
+// sandbox off nor widen it, so the path denials hold for Bash.
 export function sandboxSettings(env: NodeJS.ProcessEnv = process.env): SandboxSettings | undefined {
   if (env.SF_SANDBOX === 'off') {
     return undefined;
@@ -92,6 +95,10 @@ export function sandboxSettings(env: NodeJS.ProcessEnv = process.env): SandboxSe
     enabled: true,
     failIfUnavailable: true,
     autoAllowBashIfSandboxed: true,
+    allowUnsandboxedCommands: false,
+    // The flag settings outrank the user's: filesystem isolation, which carries the path denials,
+    // stays on whatever ~/.claude/settings.json says (SF-100).
+    filesystem: { disabled: false },
     network: { allowedDomains: [...new Set(['registry.npmjs.org', ...extra])], allowLocalBinding: true, allowAllUnixSockets: true },
   };
 }

@@ -371,7 +371,7 @@ test('the deny list of every turn, MR preparation included, denies every mutatin
 
 test('sandboxSettings allows the npm registry plus SF_SANDBOX_DOMAINS, local binding and Unix sockets, and SF_SANDBOX=off disables it', () => {
   assert.deepEqual(sandboxSettings({}), {
-    enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true,
+    enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false, filesystem: { disabled: false },
     network: { allowedDomains: ['registry.npmjs.org'], allowLocalBinding: true, allowAllUnixSockets: true },
   });
   assert.deepEqual(sandboxSettings({ SF_SANDBOX_DOMAINS: ' pypi.org, *.example.com ,,registry.npmjs.org' })!.network, {

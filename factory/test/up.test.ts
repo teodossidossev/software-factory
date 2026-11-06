@@ -20,7 +20,8 @@ interface Up {
   out(): string;
   err(): string;
   dashboard: string;
-  // Waits until the condition holds (5 s), reading the output so far.
+  // Waits until the condition holds (15 s: sf serve's start under the whole suite's load), reading
+  // the output so far.
   until(condition: () => boolean, what: string): Promise<void>;
   stop(signal?: NodeJS.Signals): Promise<number | null>;
 }
@@ -33,7 +34,7 @@ async function spawnUp(env: Env, args: string[]): Promise<Up> {
   child.stdout.on('data', (chunk: Buffer) => (out += chunk.toString('utf8')));
   child.stderr.on('data', (chunk: Buffer) => (err += chunk.toString('utf8')));
   const until = async (condition: () => boolean, what: string): Promise<void> => {
-    const deadline = Date.now() + 5_000;
+    const deadline = Date.now() + 15_000;
     while (!condition()) {
       assert.ok(Date.now() < deadline, `timed out waiting for ${what}:\n${out}\n${err}`);
       assert.equal(child.exitCode, null, `sf up exited with ${child.exitCode}:\n${out}\n${err}`);
@@ -80,7 +81,7 @@ test('sf up: serve, the tunnel child with prefixed output, the dashboard opened 
     assert.doesNotMatch(up.out(), /auth: /);
     await up.until(() => up.err().includes('tunnel | sf-tunnel: ok: fake tunnel up') && up.err().includes('tunnel | fake warning'), 'the tunnel lines');
     assert.match(await readFile(tunnel.log, 'utf8'), /^args run$/m);
-    const deadline = Date.now() + 5_000;
+    const deadline = Date.now() + 15_000;
     while ((await launcher.calls()).length === 0 && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }

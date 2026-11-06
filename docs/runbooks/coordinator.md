@@ -39,15 +39,20 @@ rule changes, change it here, through a pull request like any other change.
 - Wait for jobs with a background watcher; do not poll. Read job results with short summaries
   (states, verdicts, counts), never whole logs or diffs.
 - At most three jobs run at once (the user's plan allows it since 2026-11-05).
-- When a job is ready for review (`ready_for_human_review`):
-  1. Approve it (this pushes the branch).
-  2. Open the pull request with the job's `mr.md` as title and body. Check `## Testing`: only what
-     was run is listed as done; everything else is on `Not checked:` lines. Add one line with the
-     reviews (Claude review and Codex gate verdicts per iteration, gate tokens).
-  3. Merge it, then delete the remote branch.
-  4. Reset the job, move its Task file to `.software-factory/archive/`, update the install (pull,
-     `npm install`, `npm run build` in `factory/`), restart `sf serve` from the install root with
-     `npm run serve`, and start the next ticket in the queue.
+- The run queue starts tickets by itself (`sf queue add <ws> <ticket>`, `sf queue list`,
+  `sf queue limit N`); it starts a ticket only when its plan check says ready (`sf queue force` to
+  override) and its `lands_after` tickets are merged.
+- When a job of `software-factory` is ready for review (`ready_for_human_review`):
+  1. Do not edit its `mr.md`: the push must carry exactly the prepared commit's message (SF-080).
+  2. `sf mr create software-factory <ticket>`, then `sf mr merge software-factory <ticket>`.
+  3. Only after the merge succeeded: reset the job, move its Task file to
+     `.software-factory/archive/`, delete the remote branch, update the install (pull,
+     `npm install`, `npm run build` in `factory/`, and check that the build passed), and restart
+     `sf serve` from the install root with `npm run serve`.
+  4. Run `sf smoke` after an install update that changed the factory's code; it must say
+     `smoke: PASS`.
+- Add a new key to `workspaces.json` or `auth.env` only when no job that started before the install
+  update is still running: a runner keeps the code it started with, and an unknown key stops it.
 - A restart of `sf serve` leaves running jobs alone: each job runs in its own runner process
   (SF-042, checked live on 2026-11-05).
 - When a job stops (`needs_human`), read the reason first. A gate that keeps finding ever narrower
@@ -55,25 +60,14 @@ rule changes, change it here, through a pull request like any other change.
   rounds. A turn that hits the turn limit while making progress is resumed with a message.
 - Stop the queue when the user says so; start nothing new until the user says to go on.
 
-## Reviewing a job locally (until SF-073 lands)
+## Reviewing a job locally
 
-The user reviews a finished job in their own checkout, in the IDE, as uncommitted changes on the
-job's exact branch name. By hand, in the workspace checkout:
-
-1. Save the job's commit: `git update-ref refs/factory/<ticket> <job commit>`.
-2. Detach the job's worktree at the same commit: `git -C <worktree> switch --detach`.
-3. Make sure the checkout has no changes to tracked files, then `git switch <job branch>`.
-4. `git reset --mixed <base commit>`, then `git add -N` the files the job added, so they show as
-   new. `git diff refs/factory/<ticket>` must print nothing.
-5. Prefill the commit message: copy the job's `mr.md` (title line, blank line, body) to
-   `.git/factory/<ticket>.commit-msg` and set `commit.template` to it.
-
-Undo all of it before Approve and before the job works again: move the branch back to the saved
-commit, switch the checkout back to the user's previous branch, unset `commit.template`, and
-re-attach the worktree to the job branch. If the user changed files meanwhile, ask what to do with
-them; never discard them.
-
-The commit message the user expects is the MR title and the whole MR text (SF-074).
+Since SF-073 the factory hands a finished job of a product workspace to the user's checkout by
+itself (`handoff` per workspace in `workspaces.json`; it is `off` for `software-factory`): the job's
+exact branch, its changes as uncommitted Local Changes, the commit message prefilled with the MR
+text. The user reviews, edits, pushes and opens the MR from the IDE, or uses Ask for changes, Take it
+back or I opened the MR myself on the board. Never take a job back from the user's checkout unless
+the user asks; never discard their files.
 
 ## Safety
 

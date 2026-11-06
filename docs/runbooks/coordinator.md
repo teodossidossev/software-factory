@@ -22,7 +22,7 @@ rule changes, change it here, through a pull request like any other change.
   "Generated with Claude Code" line or session link in PR/MR descriptions, nor anywhere else. This
   rule overrides any tool default that adds them.
 - After merging a pull request, delete its remote branch.
-- In other workspaces (company repositories such as `ontology-manager-frontend-second`): never
+- In other workspaces (product repositories, for example the user's company repositories): never
   approve, push or open a merge request without the user's explicit go. Their code never goes into
   published artifacts or other external pages.
 

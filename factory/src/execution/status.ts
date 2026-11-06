@@ -5,7 +5,7 @@ import { GATE_REVIEWER } from '../gate.js';
 import type { FileChange, Job } from '../jobs.js';
 import { DEFAULT_PAGE_BYTES, MAX_PAGE_BYTES, MIN_PAGE_BYTES, pageBuffer } from '../repo-files.js';
 import { actedVerdict, REVIEWER } from '../review.js';
-import { type CheckResult, MAX_REPORT_BYTES, type ReviewStatus, type RunningReview, withoutDropped } from './shared.js';
+import { type CheckResult, gateSkipped, MAX_REPORT_BYTES, type ReviewStatus, type RunningReview, withoutDropped } from './shared.js';
 import type { Core } from './core.js';
 
 function cutUtf8(text: string, maxBytes: number): string {
@@ -107,13 +107,14 @@ export class StatusPart {
   }
 
   // The gate's status for check, after a clean Claude verdict: like the review's, undefined with the
-  // gate off and when none will run.
+  // gate off, skipped by the iteration's gate level, and when none will run.
   async #gateStatus(job: Job, running: RunningReview | undefined): Promise<ReviewStatus | undefined> {
     const record = await this.core.jobs.readGate(job.workspace, job.ticket, job.iteration);
     if (record !== undefined) {
       return 'verdict' in record ? { status: 'done', verdict: record.verdict, summary: record.summary } : { status: 'failed', summary: record.error };
     }
-    if (!this.core.config.gate.on) {
+    // Off, or skipped by the iteration's gate level (SF-092): no gate will run.
+    if (!this.core.config.gate.on || (await gateSkipped(this.core.jobs, job))) {
       return undefined;
     }
     if (running?.reviewer === GATE_REVIEWER && running.iteration === job.iteration) {

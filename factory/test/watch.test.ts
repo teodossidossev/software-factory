@@ -130,6 +130,15 @@ test('the MR text (SF-080): the user\'s save and reset, with a branch or base th
   assert.deepEqual(formatEvent(edited({ action: 'factory_new' })), ['10:11:12 [2] Clean wrote a new MR text; yours is kept. Compare or reset on the Merge request screen.']);
 });
 
+test('the gate level (SF-092): Codex gate: <level>, runs or skipped, with its reasons', () => {
+  const level = (extra: Record<string, unknown>): string => JSON.stringify({ ts: TS, iteration: 2, type: 'gate_level', ...extra });
+  assert.deepEqual(describeEvent(level({ level: 'light', ran: false, reasons: ['light: the gate already asked for a fix'] })), {
+    ts: TS, iteration: 2, type: 'gate_level', lines: ['10:11:12 [2] Codex gate: light, skipped (light: the gate already asked for a fix)'],
+  });
+  assert.deepEqual(formatEvent(level({ level: 'full', ran: true, reasons: ['sensitive: package.json', 'size: 512 lines'] })), ['10:11:12 [2] Codex gate: full, runs (sensitive: package.json; size: 512 lines)']);
+  assert.deepEqual(formatEvent(level({ level: 'none', ran: false, reasons: ['docs only'] })), ['10:11:12 [2] Codex gate: none, skipped (docs only)']);
+});
+
 test('the park on a usage limit and the resume from it (SF-072): their own lines; the other changes of waiting_limit as state changes', () => {
   const state = (from: string, to: string, extra: Record<string, unknown> = {}): string => JSON.stringify({ ts: TS, iteration: 1, state: { from, to, ...extra } });
   assert.deepEqual(describeEvent(state('working', 'waiting_limit')), { ts: TS, iteration: 1, type: 'state', lines: ['10:11:12 [1] Parked: usage limit reached'] });

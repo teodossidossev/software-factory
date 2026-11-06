@@ -218,7 +218,7 @@ test('Pause during the Claude review: the round is thrown away and recorded as i
 });
 
 test('Pause during the gate kills Codex and records no verdict; Resume runs the gate again on the same iteration, not the Claude review', async () => {
-  const env = await newEnv('pause-gate', { SF_REVIEW: 'on', SF_GATE: 'codex', SF_CODEX: fakeCodex });
+  const env = await newEnv('pause-gate', { SF_REVIEW: 'on', SF_GATE: 'codex', SF_GATE_LEVEL: 'full', SF_CODEX: fakeCodex });
   const repo = await newRepo(env, 'pause-gate-repo', false);
   await putTask(env, repo, 'P-1', 'Gate');
   await script(env, [{ write: { 'a.txt': 'a\n' } }, { write: { '.software-factory/P-1.mr.md': mrText('feat(P-1): Gate') }, text: 'prepared' }]);
@@ -592,7 +592,7 @@ test('Usage limit in the Claude review (SF-072): parked with no review.json and 
 });
 
 test('Usage limit in the gate (SF-072): Codex\'s limit parks the job (provider codex, no gate.json); the run queue resumes it by itself at the reset and the gate runs again', async () => {
-  const env = await newEnv('limit-gate', { SF_REVIEW: 'on', SF_GATE: 'codex', SF_CODEX: fakeCodex });
+  const env = await newEnv('limit-gate', { SF_REVIEW: 'on', SF_GATE: 'codex', SF_GATE_LEVEL: 'full', SF_CODEX: fakeCodex });
   const repo = await newRepo(env, 'limit-gate-repo', false);
   await putTask(env, repo, 'L-1', 'Gate');
   await script(env, [{ write: { 'a.txt': 'a\n' } }, { write: { '.software-factory/L-1.mr.md': mrText('feat(L-1): Gate') }, text: 'prepared' }]);

@@ -64,7 +64,8 @@ bin/sf handed-done <workspace> <ticket>        # I opened the MR myself: pushed 
 bin/sf abort <workspace> <ticket> [--discard]  # end the job; the worktree stays (its path printed); --discard removes the worktree and the branch; needs sf serve
 bin/sf reset <workspace> <ticket>              # end the session, remove the worktree and archive the job; the branch stays; needs sf serve
 bin/sf notify-test                             # one test notification on every channel; works without sf serve
-bin/sf info                                    # version, directories, settings (gate: codex <version or path> | off (<reason>)), sf serve and tunnel state, workspaces, jobs; works without sf serve
+bin/sf info                                    # version, directories, settings (gate: codex <version or path> | off (<reason>); gate level: auto | full | invalid: <message>), sf serve and tunnel state, workspaces, jobs; works without sf serve
+bin/sf metrics [<workspace>] [--since YYYY-MM-DD] [--json]  # the Codex gate per job, current and archived: levels, runs, tokens, items by outcome, yield; then the totals (section sf metrics); works without sf serve
 bin/sf run <workspace> <ticket>                # the job's runner (section Jobs); sf serve starts it detached, one per job; refused (runner_running) while the job has one
 npm run typecheck && npm test
 ```
@@ -100,6 +101,43 @@ prints the message below the table). Both work without `sf serve`; they read the
 - `ELAPSED` is wall-clock time since `created_at` as `HH:MM:SS` (hours go beyond 23), including
   waiting for review, for the user and for MR preparation. For a job in `pushed`, `aborted` or
   `failed` it ends at `updated_at` and stops growing; for every other state it ends now.
+
+### sf metrics
+
+What the Codex gate cost and what its items were worth (SF-092): one row per job directory of the
+workspace (or of every workspace), current and archived (`<ticket>.<stamp>`, shown as
+`<ticket> (archived)`), sorted by workspace, start date and directory. It reads `job.json`, each
+iteration's `gate.json` and `gate-level.json`, and `ledger.json`, without `sf serve`. `--since
+YYYY-MM-DD` leaves out jobs created before that day (UTC); `--json` prints `{jobs: [...], totals:
+{...}}` with the same fields. An invalid date, an unknown option or an extra argument exits 2; an
+unknown workspace prints no rows and zero totals.
+
+- `STARTED` the day the job was created, `STATE` its state, `ITER` its published iterations.
+- `LEVELS` the gate level of each iteration (section Jobs, gate level): `F` full, `L` light that
+  ran, `l` light skipped, `-` none, `·` no gate decision (a Claude fix verdict, `SF_GATE=off`, a job
+  older than SF-092), `?` a `gate.json` or `gate-level.json` that cannot be read or parsed.
+- `RUNS` every `gate.json` of the job, failed runs included; `TOKENS` the job's `gate_tokens`.
+- `FIXED`, `CONTESTED`, `ACCEPTED`, `NIT`, `OPEN`: the gate's items by outcome. Each item of every
+  `gate.json` with a verdict, counted once per ledger entry (an item raised again counts once); an
+  item with no entry counts once per occurrence. Its entry is found as the Stream finds it: the
+  gate's entry of the same iteration, path and problem, else the one its `reopens` names (Claude's
+  too: the gate raised it again), else none. The severity is the entry's, else the item's. The first
+  rule that matches wins: `nit` (severity nit, whatever its status); `fixed` (entry `fixed` or
+  `user_fix`); `contested`; `accepted` (`accepted_risk`, or `left` on a blocker or major); `open`
+  (any other case: `open`, `escalated`, no entry, a job that ended before). An item that reopens an
+  entry leaves the newer problem text in the ledger, so an earlier item of that entry may no longer
+  match and counts as `open` (an accepted limit).
+- `YIELD` the gate's yield: `FIXED` over all its items, nits included, as a percentage; `-` when
+  the gate had no items.
+- Then the totals: jobs, gate runs, gate tokens, items by outcome, the yield over all items, the
+  share of iterations at each level (the iterations with no decision, or `?`, left out), and the
+  unreadable records.
+- Unreadable files never stop it; each counts once in `unreadable records`. A job whose `job.json`
+  cannot be read or parsed is left out of the rows; an invalid `ledger.json` makes each of the job's
+  items `open`; an iteration whose `gate.json` or `gate-level.json` cannot be read shows `?` and
+  adds no runs or items. `sf reset` archives the gate's records with the job, so they still count.
+  The gate run before a ledger stop's go-on is replaced by the new one (`gate.json` is removed
+  first): that iteration counts one run.
 
 ## Environment
 
@@ -137,6 +175,8 @@ prints the message below the table). Both work without `sf serve`; they read the
 | `SF_GATE_MAX_ROUNDS` | `5` | Fix verdicts of the gate per job (the job's `gate_fixes`); the next one is not applied (`gate_rounds`, job `needs_human`). |
 | `SF_GATE_MAX_TOKENS` | `5000000` | Input plus output tokens of all gate runs of a job (the job's `gate_tokens`); a gate does not start at the limit, and a run that goes over it is not applied (`gate_budget`, job `needs_human`). |
 | `SF_GATE_TIMEOUT_MS` | `900000` | How long one gate run may take; then SIGTERM, and SIGKILL 5 s later (`gate_failed`). |
+| `SF_GATE_LEVEL` | `auto` | The gate level of each iteration (SF-092, section Jobs): `auto` by the risk of the job's change (`full`, `light` or `none`); `full` runs the gate at every clean Claude verdict, as before SF-092. Empty is the default; anything else refuses to start (`invalid_config`). |
+| `SF_GATE_FULL_PATHS` | empty | Comma-separated globs (as `SF_SENSITIVE_PATHS`) whose changed paths make an iteration's gate level `full`. |
 | `SF_SANDBOX` | on | `off` runs the Implementer and the review without Claude Code's sandbox. |
 | `SF_SANDBOX_DOMAINS` | empty | Comma-separated extra hosts sandboxed commands may reach, besides `registry.npmjs.org`. |
 | `SF_DESKTOP_NOTIFY` | on | `off` disables the desktop notification. |
@@ -768,6 +808,41 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   Codex `error` event is `needs_human` with `gate_failed` (the exit code or signal and the last
   error line); nothing is retried. `sf abort` and `sf reset` kill a running gate; its outcome is
   then never applied. `sf serve` kills a running gate when it stops.
+- The **gate level** (SF-092, `src/gate-level.ts`): at each clean Claude verdict with the gate
+  on, before the gate's budget check, the iteration gets a level from the job's whole change at
+  that iteration (its `meta.json` `files`):
+  - `full` (the gate's rounds, up to `SF_GATE_MAX_ROUNDS`) when `SF_GATE_LEVEL=full`; or a changed
+    path (a rename's old path too, by `SENSITIVE_PATHS` and `SF_SENSITIVE_PATHS`) is sensitive
+    (`declared` or `undeclared`, section Marked paths), named by the Task's `may_touch` (read from
+    the Task file in the work checkout, as the marks are; one that cannot be read is `full`),
+    security-relevant (one of its words is in `SECURITY_WORDS`: `auth`, `oauth`, `token(s)`,
+    `secret(s)`, `credential(s)`, `password(s)`, `crypto`, `cipher`, `sandbox`, `permission(s)`,
+    `redact`, `session(s)`, `login`, `signing`, `signature`, `jwt`, `cert(s)`; the words of a path
+    are split on `/`, `.`, `-`, `_` and camelCase boundaries, lowercased: so `src/authToken.ts` is,
+    `src/author.ts` is not), matched by `SF_GATE_FULL_PATHS`, or a `CLAUDE.md` or `AGENTS.md` at any
+    depth; or the change is large (more than 400 added plus deleted lines, or more than 12 files);
+    or the level cannot be known (no `files` in `meta.json`, or `patch_truncated`).
+  - `none` when every changed path is documentation (a `.md` file at any depth, or anything under
+    the root's `docs/`) and no `full` rule matches; an empty change is `light`.
+  - `light` otherwise: one round. The gate runs only while the job's `gate_fixes` is 0; once it has
+    asked for a fix, a later `light` iteration skips it: the Claude review checks the fixes of the
+    gate's items through the ledger, and Claude's clean verdict decides, as with `SF_GATE=off`.
+  - `none` and a skipped `light` go to the clean path as the gate-off path does (the
+    simplification pass, MR preparation, Claude's `accepted_sensitive`), and never stop on
+    `gate_budget`. The level is decided again at each clean Claude verdict: a fix that adds a
+    sensitive file makes the next gate `full`. `SF_GATE=off` decides no level.
+  - The decision is recorded once per iteration in `iterations/NNN/gate-level.json` `{level,
+    reasons, ran, files, lines, at}` (strictly parsed, `gate_level_invalid` otherwise; `files` and
+    `lines` are the change's file count and added plus deleted lines, `null` without `files` in
+    `meta.json`) and one event `{type: "gate_level", level, ran, reasons}`, whose line is `Codex
+    gate: <level>, runs|skipped (<reasons joined by "; ">)`, for example `Codex gate: full, runs
+    (sensitive: package.json; size: 512 lines)`, `Codex gate: light, skipped (light: the gate
+    already asked for a fix)`, `Codex gate: none, skipped (docs only)`. A job picked up again (after
+    a pause, a park or a restart of `sf serve`) uses the recorded level and writes nothing again.
+  - With `ran: false` the gate counts as absent, as with the gate off: `check` shows no gate
+    status, and a pause during the simplification pass is the step `simplify`. The dashboard's
+    "now" line may still say the gate reviews the iteration then (an accepted limit, as with the
+    gate off).
 - Every gate run that ends is kept in `iterations/NNN/gate.json`: `{reviewer: "codex", verdict,
   summary, items, accepted_sensitive, dropped?, model?, tokens: {input, cached_input, output},
   started_at, ended_at}` (`dropped` as in `review.json`), or `{reviewer, error, model?, tokens, started_at, ended_at}` when it failed (`model`
@@ -795,7 +870,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   SDK's cumulative total for the session). `check` also returns `review` for the last iteration:
   `{status: "running" | "done" | "failed" | "off", verdict?, summary?, gate?}` (`running` also while the
   review is due; `failed` with the error as `summary`). After a clean Claude verdict with the gate
-  on, `gate` is the gate's status in the same form (no `off`; absent with the gate off).
+  on, `gate` is the gate's status in the same form (no `off`; absent with the gate off and when the
+  iteration's gate level skipped it, SF-092).
 - The **simplification pass** (SF-055, `src/simplify.ts`): reviewers add, nobody removes, so once
   per job, after the deciding clean verdict (the gate's, or with the gate off the Claude review's;
   clean as the factory acts on it, SF-051) of a job with `fixes` ≥ 1 (at `SF_MAX_ITERATIONS` too),
@@ -1596,8 +1672,8 @@ State layout under `${SF_STATE_DIR}`:
 sf.sock                                  # 0600, while sf serve runs; one JSON request/response per connection
 dashboard-token                          # 0600, the dashboard token of the last sf serve start
 jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, mr_conflict_turn (SF-087: the MR preparation in progress ran a conflict turn; no Retry then), state, iteration, fixes, gate_fixes, gate_tokens, simplify_iteration (SF-055, absent until the simplification pass starts), session_id, created_at, updated_at, error, mr ({host, number, url, state, merge_commit?} or null)
-jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "review" | "review_failed" | "review_message" | "gate_event" | "gate_overridden" | "simplify" | "simplify_chosen" | "merge_request" | "mr_edited" | ...}; what sf watch reads
-jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-override.json,simplify.json,gate-schema.json,gate-output.json,conflict-resolution.diff}
+jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "review" | "review_failed" | "review_message" | "gate_event" | "gate_overridden" | "gate_level" | "simplify" | "simplify_chosen" | "merge_request" | "mr_edited" | ...}; what sf watch reads
+jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-level.json,gate-override.json,simplify.json,gate-schema.json,gate-output.json,conflict-resolution.diff}
 jobs/<workspace>/<ticket>/ledger.json    # the findings ledger (SF-052): one entry per review item of a Fix section, from the first one on
 worktrees/<workspace>/<ticket>/          # the job's worktree (SF_WORKTREE_ROOT), from start to Clean, abort or reset
 jobs/<workspace>/<ticket>/mr.md              # the MR text, once the branch is ready or after a conflict iteration

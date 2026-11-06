@@ -1,5 +1,5 @@
 // Job state on disk: <state dir>/jobs/<workspace>/<ticket>/ with job.json, events.jsonl and
-// iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-override.json,simplify.json} (plus the
+// iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-level.json,gate-override.json,simplify.json} (plus the
 // gate's schema and output files, and tree, SF-079), ledger.json (the findings ledger, SF-052) from
 // the first Fix section on, task.md (the Task file as the Implementer was last given it, SF-067),
 // from MR preparation on mr.md (and mr-factory.md once the user edited it, SF-080), and objects/ (SF-079). Strictly parsed; every file but the event
@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import * as z from 'zod/v4';
 import { writeFileAtomic, writeFileAtomicWith } from './atomic.js';
 import { FactoryError } from './errors.js';
+import { GATE_LEVELS, type GateLevel } from './gate-level.js';
 import { type LedgerEntry, ledgerSchema } from './ledger.js';
 import type { ReviewItem } from './review.js';
 import type { Suggestion } from './simplify.js';
@@ -373,6 +374,31 @@ export interface GateOverride {
   unapplied: Array<ReviewItem & { id?: string }> | string;
 }
 
+// iterations/NNN/gate-level.json (SF-092): the gate level of the iteration, decided once at its
+// clean Claude verdict (src/gate-level.ts): the level, the rules that decided it, whether the gate
+// ran, and the change's counts of files and of added plus deleted lines (null when the iteration's
+// meta.json has no file list). Strictly parsed.
+export const gateLevelSchema = z.strictObject({
+  level: z.enum(GATE_LEVELS),
+  reasons: z.array(z.string()).min(1),
+  ran: z.boolean(),
+  files: z.number().int().min(0).nullable(),
+  lines: z.number().int().min(0).nullable(),
+  at: z.string(),
+});
+export type GateLevelRecord = z.output<typeof gateLevelSchema>;
+
+// One job directory of a workspace (SF-092, listAll): current (<ticket>) or archived
+// (<ticket>.<stamp>), with its job.json parsed, or why it could not be.
+export interface JobDir {
+  workspace: string;
+  // The directory's name: what the other read methods take as the ticket.
+  name: string;
+  archived: boolean;
+  job: Job | undefined;
+  error?: string;
+}
+
 // iterations/NNN/simplify.json: the simplification pass after the deciding clean verdict of the
 // iteration (SF-055), or why it failed (redacted). suggestions: what it offers the user; dropped:
 // what the factory withheld because it names a fixed blocker entry of the ledger.
@@ -421,6 +447,8 @@ export type EventRecord = { ts: string; iteration: number } & (
   // The user accepted the iteration over the stopped gate (SF-047): the code it stopped with and
   // the number of Codex items not applied (0 when the gate failed or did not run).
   | { type: 'gate_overridden'; code: string; unapplied: number }
+  // The gate level of the iteration (SF-092): the level, whether the gate runs, and why.
+  | { type: 'gate_level'; level: GateLevel; ran: boolean; reasons: string[] }
   // The simplification pass (SF-055): its outcome (the suggestions offered, those the factory
   // dropped, or its error), and the user's choice on the offer (simplify or skip).
   | { type: 'simplify'; reviewer: string; suggestions: number; dropped: number; error?: string; ignored?: true }
@@ -533,6 +561,9 @@ async function readOrMissing(path: string): Promise<string | undefined> {
   }
 }
 
+// The name archive() gives a job directory: <ticket>.<stamp>.
+const ARCHIVED_NAME = /\.\d{8}T\d{6}Z$/;
+
 export class JobStore {
   readonly root: string;
 
@@ -609,6 +640,35 @@ export class JobStore {
       }
     }
     return jobs.sort((a, b) => `${a.workspace}/${a.ticket}`.localeCompare(`${b.workspace}/${b.ticket}`));
+  }
+
+  // Every job directory of every workspace, current and archived (SF-092, sf metrics), sorted by
+  // workspace and name. job.json is parsed with jobSchema but not checked against the directory's
+  // name (an archived job's ticket is not its directory's name); a file that cannot be read or
+  // parsed gives the error instead.
+  async listAll(): Promise<JobDir[]> {
+    const dirs: JobDir[] = [];
+    for (const workspace of await this.#entries(this.root)) {
+      for (const name of await this.#entries(join(this.root, workspace))) {
+        // Archived: a job.json naming another ticket, or without one the archive's name
+        // <ticket>.<stamp>.
+        const dir: JobDir = { workspace, name, archived: ARCHIVED_NAME.test(name), job: undefined };
+        try {
+          const text = await readOrMissing(join(this.root, workspace, name, 'job.json'));
+          const parsed = text === undefined ? undefined : jobSchema.safeParse(JSON.parse(text));
+          if (parsed?.success === true) {
+            dir.job = parsed.data;
+            dir.archived = parsed.data.ticket !== name;
+          } else {
+            dir.error = text === undefined ? 'job.json is missing' : 'job.json is invalid';
+          }
+        } catch (error) {
+          dir.error = error instanceof SyntaxError ? 'job.json is not valid JSON' : (error as Error).message;
+        }
+        dirs.push(dir);
+      }
+    }
+    return dirs;
   }
 
   // Moves the job directory to <ticket>.<timestamp> next to it and returns that name.
@@ -770,6 +830,31 @@ export class JobStore {
     }
     const override = JSON.parse(text) as GateOverride;
     return Array.isArray(override.unapplied) ? { ...override, unapplied: majorUnlessSet(override.unapplied) } : override;
+  }
+
+  // The gate level of an iteration (SF-092); undefined when none was decided there. Strictly parsed:
+  // gate_level_invalid for a file that is not valid JSON or does not match the schema.
+  async readGateLevel(workspace: string, ticket: string, number: number): Promise<GateLevelRecord | undefined> {
+    const text = await readOrMissing(join(this.iterationDir(workspace, ticket, number), 'gate-level.json'));
+    if (text === undefined) {
+      return undefined;
+    }
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new FactoryError('gate_level_invalid', `gate-level.json of ${workspace}/${ticket} iteration ${number} is not valid JSON.`);
+    }
+    const parsed = gateLevelSchema.safeParse(data);
+    if (!parsed.success) {
+      throw new FactoryError('gate_level_invalid', `gate-level.json of ${workspace}/${ticket} iteration ${number} is invalid.`);
+    }
+    return parsed.data;
+  }
+
+  // Written once per iteration, at its clean Claude verdict; parsed with the schema first.
+  async writeGateLevel(workspace: string, ticket: string, number: number, record: GateLevelRecord): Promise<void> {
+    await writeFileAtomic(join(this.iterationDir(workspace, ticket, number), 'gate-level.json'), Buffer.from(`${JSON.stringify(gateLevelSchema.parse(record), null, 2)}\n`));
   }
 
   // The gate's review of an iteration; undefined while none ended (or with the gate off).

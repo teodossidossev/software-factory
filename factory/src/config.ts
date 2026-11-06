@@ -59,6 +59,11 @@ export interface Config {
   gateMaxTokens: number;
   // How long one gate run may take (SF_GATE_TIMEOUT_MS).
   gateTimeoutMs: number;
+  // The gate level (SF-092, SF_GATE_LEVEL): auto by the risk of each iteration's change
+  // (src/gate-level.ts), or full for every iteration.
+  gateLevel: 'auto' | 'full';
+  // Extra path globs that make an iteration full (SF_GATE_FULL_PATHS).
+  gateFullPaths: string[];
   // The Git hosts' tokens and API bases for the merge requests (SF-048).
   forge: ForgeSettings;
   // SF_HANDOFF (SF-073): checkout, the default, hands a job ready for review over to the
@@ -109,8 +114,27 @@ export function worktreeRoot(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 // Comma-separated globs; empty entries are dropped.
+function globList(raw: string | undefined): string[] {
+  return (raw ?? '').split(',').map((pattern) => pattern.trim()).filter((pattern) => pattern !== '');
+}
+
+// SF_SENSITIVE_PATHS: globs added to the sensitive paths of src/rules.ts.
 export function sensitivePaths(env: NodeJS.ProcessEnv = process.env): string[] {
-  return (env.SF_SENSITIVE_PATHS ?? '').split(',').map((pattern) => pattern.trim()).filter((pattern) => pattern !== '');
+  return globList(env.SF_SENSITIVE_PATHS);
+}
+
+// SF_GATE_FULL_PATHS (SF-092): globs that make an iteration's gate level full, as SF_SENSITIVE_PATHS.
+export function gateFullPaths(env: NodeJS.ProcessEnv = process.env): string[] {
+  return globList(env.SF_GATE_FULL_PATHS);
+}
+
+// SF_GATE_LEVEL (SF-092): auto (the default) or full.
+export function gateLevelSetting(env: NodeJS.ProcessEnv = process.env): Config['gateLevel'] {
+  const mode = env.SF_GATE_LEVEL || 'auto';
+  if (mode !== 'auto' && mode !== 'full') {
+    throw new FactoryError('invalid_config', `SF_GATE_LEVEL must be auto or full, got "${mode}".`);
+  }
+  return mode;
 }
 
 // The environment file every sf command reads before anything else: SF_ENV_FILE, or
@@ -295,6 +319,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     gateMaxRounds: positiveInteger(env, 'SF_GATE_MAX_ROUNDS', 5),
     gateMaxTokens: positiveInteger(env, 'SF_GATE_MAX_TOKENS', 5_000_000, 1_000_000_000),
     gateTimeoutMs: positiveInteger(env, 'SF_GATE_TIMEOUT_MS', 900_000, 86_400_000),
+    gateLevel: gateLevelSetting(env),
+    gateFullPaths: gateFullPaths(env),
     forge: forgeSettings(env),
     handoff: handoffSetting(env),
   };

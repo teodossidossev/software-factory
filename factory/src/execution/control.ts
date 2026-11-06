@@ -19,7 +19,7 @@ import type { RunnerRequest } from '../runner.js';
 import { readTask, TASK_DIR, taskDiff, taskSha256 } from '../task-file.js';
 import type { UsageLimit } from '../usage-limit.js';
 import { deleteBranch, removeWorktree } from '../worktree.js';
-import { checkNotInCheckout, type ExclusiveScope, exists, firstPrompt, imagesChangedNote, type Resumed, type Retired, withoutDropped } from './shared.js';
+import { checkNotInCheckout, type ExclusiveScope, exists, firstPrompt, gateSkipped, imagesChangedNote, type Resumed, type Retired, withoutDropped } from './shared.js';
 import type { Core } from './core.js';
 
 export class ControlPart {
@@ -265,7 +265,8 @@ export class ControlPart {
       return null;
     }
     const gate = await this.core.jobs.readGate(workspace, ticket, iteration);
-    if (gate === undefined && this.core.config.gate.on) {
+    // A gate the iteration's gate level skipped (SF-092) counts as absent, as with the gate off.
+    if (gate === undefined && this.core.config.gate.on && !(await gateSkipped(this.core.jobs, job))) {
       return 'gate';
     }
     if (gate !== undefined && (!('verdict' in gate) || actedVerdict(withoutDropped(gate)) !== 'clean')) {

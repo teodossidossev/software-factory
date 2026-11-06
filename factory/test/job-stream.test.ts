@@ -299,6 +299,8 @@ test('lineEntries: simplify with its suggestions and saves; notes with their who
     [{ type: 'merge_request', action: 'created', host: 'github', number: 4, url: 'https://x/4', mr_state: 'open' }, 'factory', 'merge request #4 opened: https://x/4'],
     [{ type: 'gate_overridden', code: 'gate_rounds', unapplied: 2 }, 'factory', 'gate overridden by the user (gate_rounds): 2 Codex items not applied'],
     [{ type: 'simplify_chosen', choice: 'skip', suggestions: 2 }, 'factory', 'simplification skipped by the user: 2 suggestions'],
+    // The gate level (SF-092): the watch line as a note of the factory.
+    [{ type: 'gate_level', level: 'none', ran: false, reasons: ['docs only'] }, 'factory', 'Codex gate: none, skipped (docs only)'],
     [{ type: 'notify_failed', channel: 'ntfy', message: 'down' }, 'factory', 'notification via ntfy failed: down'],
     [{ message: { type: 'system', subtype: 'init', session_id: 's1', permissionMode: 'default', model: 'opus' } }, 'factory', 'session s1 (permission mode default, model opus)'],
     [{ type: 'gate_event', reviewer: 'codex', event: { type: 'item.completed', item: { id: 'r', type: 'reasoning', text: 'Thinking\nmore' } } }, 'codex', 'reasoning: Thinking'],

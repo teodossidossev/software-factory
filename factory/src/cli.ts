@@ -6,7 +6,8 @@
 // (through the socket of sf serve),
 // `sf status|watch|dashboard` (reading the state directory directly), `sf check-task` (the Task
 // check of SF-054, run here and stored in the state directory), `sf rules` (the coding rules of
-// SF-059, read here), `sf notify-test`, `sf info`
+// SF-059, read here), `sf notify-test`, `sf info`, `sf metrics` (the gate's cost and yield, SF-092,
+// reading the state directory directly)
 // and `sf run`, the job's runner that sf serve starts (SF-042, src/runner.ts).
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { type ChildProcess, spawn } from 'node:child_process';
@@ -16,7 +17,7 @@ import { parseArgs } from 'node:util';
 import { open } from 'node:fs/promises';
 import { addAttachment, checkSize, removeAttachment } from './attachments.js';
 import { openInBrowser } from './browser.js';
-import { envFilePath, gateConfig, handoffSetting, loadConfig, loadEnvFile, rulesMaxBytes, stateDir } from './config.js';
+import { envFilePath, gateConfig, gateLevelSetting, handoffSetting, loadConfig, loadEnvFile, rulesMaxBytes, stateDir } from './config.js';
 import { DEFAULT_DASHBOARD_PORT, dashboardUrl, readToken, removeToken, type RunningDashboard, startDashboard } from './dashboard.js';
 import { FactoryError } from './errors.js';
 import { Execution, type StateListener } from './execution.js';
@@ -26,6 +27,7 @@ import { existsSync } from 'node:fs';
 import { callSocket, listenSocket, socketPath } from './ipc.js';
 import { type Job, type JobState, JobStore } from './jobs.js';
 import { localTime } from './local-time.js';
+import { collectMetrics, metricsLines } from './metrics.js';
 import { MAX_RUNNING, MIN_RUNNING, ON_LIMIT_RULES, QueueStore, type QueueView, RunQueue } from './queue.js';
 import { followJobs, runJob } from './runner.js';
 import { jobNotification, notifyConfig, notifyTaskCheck, sendNotification, stateNotifier } from './notify.js';
@@ -88,6 +90,7 @@ const USAGE = `Usage:
   sf reset <workspace> <ticket>                         End the session, remove the worktree and archive the job; the branch is untouched
   sf notify-test                                        Send a test notification on every channel
   sf info                                               Version, directories, settings, whether sf serve and the tunnel run, workspaces, jobs
+  sf metrics [<workspace>] [--since YYYY-MM-DD] [--json]  The Codex gate per job, current and archived: gate levels per iteration (F full, L light, l light skipped, - none, · no decision, ? unreadable), runs, tokens, items by outcome and the yield (fixed over all items), then the totals; no sf serve needed
   sf run <workspace> <ticket>                           The job's runner: its turns, reviews and gate, detached from sf serve (sf serve starts it; one per job)
 
 Notes:
@@ -973,6 +976,12 @@ async function info(args: string[]): Promise<void> {
   } else if (gate !== undefined) {
     row('gate', `off (${gate.reason})`);
   }
+  // The gate level (SF-092), whatever the gate's state.
+  try {
+    row('gate level', gateLevelSetting());
+  } catch (error) {
+    row('gate level', `invalid: ${(error as Error).message}`);
+  }
   const notify = notifyConfig();
   row('notify', `ntfy ${notify.ntfyUrl === undefined ? 'off' : 'on'}, desktop ${notify.desktop ? 'on' : 'off'}, iterations ${notify.iterations ? 'on' : 'off'}`);
   // Whether the tokens are set, never their values; SF_GITLAB_URL as checked by forgeSettings (no
@@ -1163,6 +1172,20 @@ async function dashboardCommand(args: string[]): Promise<void> {
   }
 }
 
+// `sf metrics` (SF-092): the gate's runs, tokens, items and yield per job and in total.
+async function metrics(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { since: { type: 'string' }, json: { type: 'boolean' } } });
+  if (positionals.length > 1) {
+    throw new UsageError(`unexpected argument "${positionals[1]}".`);
+  }
+  const since = values.since;
+  if (since !== undefined && (!/^\d{4}-\d{2}-\d{2}$/.test(since) || Number.isNaN(Date.parse(since)) || new Date(since).toISOString().slice(0, 10) !== since)) {
+    throw new UsageError(`--since must be a date YYYY-MM-DD, got "${since}".`);
+  }
+  const result = await collectMetrics(new JobStore(stateDir()), { workspace: positionals[0], since });
+  console.log(values.json === true ? JSON.stringify(result, null, 2) : metricsLines(result).join('\n'));
+}
+
 async function main(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
   // SF_* settings from the environment file (auth.env), for every command alike.
@@ -1270,6 +1293,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'info') {
     await info(rest);
+    return;
+  }
+  if (command === 'metrics') {
+    await metrics(rest);
     return;
   }
   if (command === 'say') {

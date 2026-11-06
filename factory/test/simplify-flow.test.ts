@@ -179,7 +179,7 @@ test('suggestions: simplify_offered; Simplify writes "Fix 2: Simplify" and the l
 });
 
 test('gate on, Skip: the pass runs after the clean gate; sf accept prepares the MR with "Simplifications not applied"', async () => {
-  const env = await newEnv('simplify-skip', { SF_REVIEW: 'on', SF_SIMPLIFY: 'on', SF_GATE: 'codex', SF_CODEX: fakeCodex });
+  const env = await newEnv('simplify-skip', { SF_REVIEW: 'on', SF_SIMPLIFY: 'on', SF_GATE: 'codex', SF_GATE_LEVEL: 'full', SF_CODEX: fakeCodex });
   const repo = await newRepo(env, 'simplify-skip-repo', false);
   await putTask(env, repo, 'S-6', 'Greet the reader');
   await script(env, turns('S-6'));

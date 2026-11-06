@@ -104,9 +104,10 @@ export function gateArgs(options: Pick<GateOptions, 'cwd' | 'dir' | 'model' | 'i
   ];
 }
 
-// The factory's environment without its own SF_* settings.
+// The factory's environment without its own SF_* settings and without the user's SSH agent
+// (SF-100): the gate never pushes.
 export function gateEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  return Object.fromEntries(Object.entries(env).filter(([name, value]) => value !== undefined && !name.startsWith('SF_')));
+  return Object.fromEntries(Object.entries(env).filter(([name, value]) => value !== undefined && !name.startsWith('SF_') && name !== 'SSH_AUTH_SOCK'));
 }
 
 // One JSONL line of `codex exec --json` as an event object; undefined for a line that does not

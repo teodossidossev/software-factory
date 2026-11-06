@@ -17,7 +17,7 @@ import { actedVerdict, decide, fixContent, REVIEW_DENIED_TOOLS, REVIEW_SCHEMA, t
 import { loadHandbook } from '../src/server.js';
 import { writeTask } from '../src/task-file.js';
 import { act, fetchRaw } from './support/dashboard-client.js';
-import { call, type Env, FAKE, fakeLog, git, newEnv, newRepo, putRules, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor } from './support/harness.js';
+import { assertPathDenials, call, type Env, FAKE, fakeLog, git, newEnv, newRepo, putRules, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor } from './support/harness.js';
 
 const FIX = {
   verdict: 'fix',
@@ -109,7 +109,8 @@ test('fix, then clean: the Fix section from the items, the next iteration, Clean
     for (const entry of reviews) {
       assert.equal(entry.cwd, worktreeOf(env, 'R-1'));
       assert.equal(option(entry.argv, 'tools'), 'Read,Grep,Glob');
-      assert.deepEqual(option(entry.argv, 'disallowedTools')!.split(','), REVIEW_DENIED_TOOLS);
+      // REVIEW_DENIED_TOOLS, then the path denials (SF-100): the factory's state and config, not the worktree.
+      assertPathDenials(entry.argv, env, worktreeOf(env, 'R-1'), REVIEW_DENIED_TOOLS);
       assert.deepEqual(JSON.parse(option(entry.argv, 'json-schema')!), REVIEW_SCHEMA);
       assert.deepEqual([option(entry.argv, 'max-turns'), option(entry.argv, 'model'), option(entry.argv, 'permission-mode')], ['7', 'fake-reviewer', 'auto']);
       assert.ok(!entry.argv.some((arg) => arg.startsWith('--resume')), entry.argv.join(' '));

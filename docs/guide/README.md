@@ -44,6 +44,8 @@ Read the first four pages once, in order; the rest when you need them.
    troubleshooting, the tests.
 9. [Ways of working](ways-of-working.md): end-to-end recipes, alone, with the queue, with a
    coordinating session, with ChatGPT, in a team.
+10. [The trust model](trust-model.md): what each agent session can and cannot reach, what the
+    factory does outside the sandbox, and the limits.
 
 ## I want to …
 
@@ -68,6 +70,7 @@ Read the first four pages once, in order; the rest when you need them.
 | update the factory without breaking running jobs | [Operations: updating](operations.md#updating-the-factory) |
 | fix "port in use", a lost dashboard URL or an expired login | [Operations: troubleshooting](operations.md#troubleshooting) |
 | set the factory up for colleagues | [Ways of working: a team](ways-of-working.md#5-a-team) |
+| know what an agent can read on my machine | [The trust model](trust-model.md) |
 
 ## The other documents
 

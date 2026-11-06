@@ -37,6 +37,7 @@ import { loadHandbook, packageVersion, PortInUseError, SERVER_NAME, startServer 
 import { Setup } from './setup.js';
 import { handoverLines, limitLine, type StatusRow, statusRows } from './status.js';
 import { fileSummaryLines } from './patch.js';
+import { prepareTaskChecksDir } from './sandbox-denials.js';
 import { CheckStore, checkLines, checkSettings, refuseDraft, runTaskCheck, TaskChecks } from './task-check.js';
 import { AutoChecks, planCheck } from './task-check-auto.js';
 import { TicketHistory } from './ticket-history.js';
@@ -138,6 +139,9 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   if (ignored.length > 0) {
     console.error(`warning: the work_checkout of workspace(s) ${ignored.join(', ')} is ignored since SF-019: every job works in a worktree of the checkout.`);
   }
+  // The Task checks' parent directory (SF-100), which every other session denies: made now; an unsafe
+  // one (a link, another owner) is one warning, and every Task check then fails with task_check_dir_unsafe.
+  await prepareTaskChecksDir().catch((error: unknown) => console.error(`warning: ${error instanceof Error ? error.message : String(error)}`));
   // The run queue (SF-071): an invalid queue.json fails here, as an invalid registry does.
   const queueStore = new QueueStore(config.stateDir, config.maxJobs);
   await queueStore.read();

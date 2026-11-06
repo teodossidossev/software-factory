@@ -13,6 +13,7 @@ import { applyVerdict, isSimplification, SIMPLIFIER, type Applied, type Decision
 import { Redactor } from '../redact.js';
 import { readJobRules } from '../rules-docs.js';
 import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, type StructuredOutcome, unacceptedItems } from '../review.js';
+import { type PathDenials, pathDenials, USER_SETTINGS_WEAKEN_SANDBOX } from '../sandbox-denials.js';
 import { changedBetween, type FixFiles, fixNumbers, guardSuggestions, offerMessage, runSimplify, SIMPLIFY_CODE, SIMPLIFY_TITLE, simplifyFix, type SimplifyInput, type SimplifyOutput, simplifyPrompt, type Suggestion } from '../simplify.js';
 import { mayTouch, parseFrontMatter, readTask, TASK_DIR } from '../task-file.js';
 import { type UsageLimit, usageLimit } from '../usage-limit.js';
@@ -21,6 +22,11 @@ import type { Core } from './core.js';
 
 // The offer of the simplification pass (SF-055): sf accept is its Skip.
 const ACCEPT_CODES: readonly string[] = [...GATE_OVERRIDE_CODES, ...LEDGER_ACCEPT_CODES, SIMPLIFY_CODE];
+
+// The code of a session the factory refused to start because the user settings weaken the sandbox
+// (SF-100); undefined for any other failure.
+const refusalCode = (error: unknown): string | undefined =>
+  error instanceof FactoryError && error.code === USER_SETTINGS_WEAKEN_SANDBOX ? error.code : undefined;
 
 export class ReviewsPart {
   readonly core: Core;
@@ -208,6 +214,14 @@ export class ReviewsPart {
     });
   }
 
+  // The path denials of a review or simplification session in the job's worktree (SF-100), built
+  // before each session.
+  async #pathDenials(job: Job, worktree: string): Promise<PathDenials> {
+    const { config } = this.core;
+    const workspace = await this.core.resolve(job.workspace);
+    return pathDenials({ session: 'job', workspace: job.workspace, checkout: workspace.workCheckout, worktree, stateDir: config.stateDir, worktreeRoot: config.worktreeRoot });
+  }
+
   // The material of a review of the job's last iteration, the Task file read in the worktree.
   async #reviewInput(job: Job, worktree: string): Promise<ReviewInput> {
     const { workspace: name, ticket, iteration } = job;
@@ -223,39 +237,46 @@ export class ReviewsPart {
   // Runs the review session, then applies its outcome under the lock.
   async #review(job: Job, running: RunningReview): Promise<void> {
     let outcome: ReviewOutcome;
+    // The code a session refused before it started stops the job with (user_settings_weaken_sandbox).
+    let stop: string | undefined;
     const redactor = new Redactor({ cwd: job.worktree ?? '' });
     try {
       if (job.worktree === null) {
         throw new Error('the job has no worktree');
       }
       const input = await this.#reviewInput(job, job.worktree);
+      const denials = await this.#pathDenials(job, job.worktree);
       outcome = await runReview(reviewPrompt(input), {
         cwd: job.worktree, claudePath: this.core.config.claudePath, sandbox: this.core.config.sandbox, model: this.core.config.reviewModel,
+        deny: denials.tools, filesystem: denials.sandbox,
         maxTurns: this.core.config.reviewMaxTurns, signal: running.controller.signal, images: this.imageRefs(job, input.task),
         // The session live in events.jsonl (SF-045).
         onMessage: (message) => this.core.appendLive(job, 'review_message', redactor.reviewMessage(message)),
       });
     } catch (error) {
       const at = now();
+      stop = refusalCode(error);
       outcome = { ok: false, message: `The review could not start: ${(error as Error).message}`.slice(0, 1000), startedAt: at, endedAt: at };
     }
     // A usage limit (SF-072) is read from the message as the session wrote it, before redaction.
     const limit = outcome.ok ? undefined : usageLimit(outcome.message, new Date(), 'claude');
     // The failure message goes to review.json, the event and the job's error: withheld or redacted
-    // like the session's prose (src/redact.ts, failure).
-    if (!outcome.ok) {
+    // like the session's prose (src/redact.ts, failure); a refusal is the factory's own text, which
+    // names the settings file and the key for the user (no session ran).
+    if (!outcome.ok && stop === undefined) {
       outcome = { ...outcome, message: redactor.failure(outcome.message) };
     }
     const ended = outcome;
     await this.core.afterSession(job);
-    await this.core.locked(() => this.#reviewed(job, running, ended, limit));
+    await this.core.locked(() => this.#reviewed(job, running, ended, limit, stop));
   }
 
   // The end of a review. A cancelled one leaves no trace. One that hit a usage limit (limit) while
   // the job still awaits review of the same iteration parks the job (SF-072) and writes nothing of
   // the round. Otherwise review.json and the event are written; the verdict applies only while the
   // job still awaits review of the same iteration.
-  async #reviewed(reviewed: Job, running: RunningReview, outcome: ReviewOutcome, limit?: UsageLimit): Promise<void> {
+  // stop: the code of a session refused before it started, for the job's error instead of review_failed.
+  async #reviewed(reviewed: Job, running: RunningReview, outcome: ReviewOutcome, limit?: UsageLimit, stop?: string): Promise<void> {
     const { workspace: name, ticket, iteration } = reviewed;
     const key = `${name}/${ticket}`;
     if (this.core.reviews.get(key) !== running || running.controller.signal.aborted) {
@@ -285,7 +306,7 @@ export class ReviewsPart {
     }
     if (!outcome.ok) {
       // from: awaiting_review (current)
-      await this.core.transition(job, 'needs_human', 'verdict', { code: 'review_failed', message: outcome.message });
+      await this.core.transition(job, 'needs_human', 'verdict', { code: stop ?? 'review_failed', message: outcome.message });
       return;
     }
     await this.applying(job, () => this.afterClaude(job, outcome.output));
@@ -648,29 +669,33 @@ export class ReviewsPart {
   // the review's; a failure message is redacted before it is recorded.
   async #runSimplifyPass(job: Job, running: RunningReview, sensitive: string[]): Promise<void> {
     let outcome: StructuredOutcome<SimplifyOutput>;
+    let stop: string | undefined;
     const redactor = new Redactor({ cwd: job.worktree ?? '' });
     try {
       if (job.worktree === null) {
         throw new Error('the job has no worktree');
       }
       const input = await this.#simplifyInput(job, job.worktree);
+      const denials = await this.#pathDenials(job, job.worktree);
       outcome = await runSimplify(simplifyPrompt(input), {
         cwd: job.worktree, claudePath: this.core.config.claudePath, sandbox: this.core.config.sandbox, model: this.core.config.reviewModel,
+        deny: denials.tools, filesystem: denials.sandbox,
         maxTurns: this.core.config.reviewMaxTurns, signal: running.controller.signal, images: this.imageRefs(job, input.task),
         onMessage: (message) => this.core.appendLive(job, 'review_message', redactor.reviewMessage(message), SIMPLIFIER),
       });
     } catch (error) {
       const at = now();
+      stop = refusalCode(error);
       outcome = { ok: false, message: `The simplification pass could not start: ${(error as Error).message}`.slice(0, 1000), model: null, startedAt: at, endedAt: at };
     }
     // A usage limit of the plan (SF-072), read before redaction.
     const limit = outcome.ok ? undefined : usageLimit(outcome.message, new Date(), 'claude');
-    if (!outcome.ok) {
+    if (!outcome.ok && stop === undefined) {
       outcome = { ...outcome, message: redactor.failure(outcome.message) };
     }
     const ended = outcome;
     await this.core.afterSession(job);
-    await this.core.locked(() => this.#simplifyEnded(job, running, sensitive, ended, limit));
+    await this.core.locked(() => this.#simplifyEnded(job, running, sensitive, ended, limit, stop));
   }
 
   // The end of the pass. A cancelled one leaves no trace; one the job moved on from leaves only its
@@ -678,7 +703,8 @@ export class ReviewsPart {
   // ledger guard kept, and those it dropped) and the event are written and the outcome applies. A
   // pass that hit a usage limit (limit) while the job is still current parks the job instead
   // (SF-072): no simplify.json, no event, and the pass runs again on Resume.
-  async #simplifyEnded(started: Job, running: RunningReview, sensitive: string[], outcome: StructuredOutcome<SimplifyOutput>, limit?: UsageLimit): Promise<void> {
+  // stop: the code of a pass refused before it started: the job stops with it instead of going on.
+  async #simplifyEnded(started: Job, running: RunningReview, sensitive: string[], outcome: StructuredOutcome<SimplifyOutput>, limit?: UsageLimit, stop?: string): Promise<void> {
     const { workspace, ticket, iteration } = started;
     const key = `${workspace}/${ticket}`;
     if (this.core.reviews.get(key) !== running || running.controller.signal.aborted) {
@@ -706,6 +732,11 @@ export class ReviewsPart {
       ? { reviewer: SIMPLIFIER, summary: outcome.output.summary, suggestions: guarded!.kept, dropped: guarded!.dropped, cost_usd: outcome.costUsd, model: outcome.model, started_at: outcome.startedAt, ended_at: outcome.endedAt }
       : { reviewer: SIMPLIFIER, error: outcome.message, started_at: outcome.startedAt, ended_at: outcome.endedAt };
     await this.core.jobs.writeSimplify(workspace, ticket, iteration, record);
+    if (stop !== undefined && !outcome.ok) {
+      // from: awaiting_review (current)
+      await this.core.transition(job, 'needs_human', 'verdict', { code: stop, message: outcome.message });
+      return;
+    }
     await this.applying(job, () => this.#offerSimplify(job, record, sensitive));
   }
 

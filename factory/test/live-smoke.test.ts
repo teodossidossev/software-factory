@@ -3,12 +3,15 @@
 // SF_STATE_DIR and SF_CONFIG_DIR (with an env file holding a Git host token), which the smoke must
 // leave untouched. Plus the child environment, the option parsing and the redaction of its settings.
 import assert from 'node:assert/strict';
-import { type ChildProcess, spawn } from 'node:child_process';
+import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { createServer } from 'node:net';
+import { basename, join } from 'node:path';
 import { test } from 'node:test';
-import { childEnv, PASSED_SETTINGS, positiveDecimal, ProcessGroups, runSmoke, SMOKE_TASK, smokePaths, STEPS, terminate, trackRunnerLock } from '../src/live-smoke.js';
+import { childEnv, PASSED_SETTINGS, positiveDecimal, PROBE_SCRIPT, PROBES, probeCommand, probeProblem, ProcessGroups, runSmoke, smokePaths, smokeProbe, smokeTask, STEPS, terminate, trackRunnerLock } from '../src/live-smoke.js';
+import { taskChecksDir } from '../src/sandbox-denials.js';
 import { Redactor } from '../src/redact.js';
 import { CLI, codexLog, codexScript, type Env, FAKE, fakeCodex, fakeLog, git, newEnv, processEnv, reviewLog, reviewScript, script, temp } from './support/harness.js';
 
@@ -26,9 +29,15 @@ function mrText(header: string): string {
   ].join('\n');
 }
 
-// The turns of a clean run: the Implementer's change, then the MR text at Clean.
+// The sandbox probe's output (SF-100) as the fake Implementer writes it: every probe refused, or
+// one of them with another outcome.
+function probeOutput(changed: Record<string, string> = {}): string {
+  return `${JSON.stringify(PROBES.map((name) => ({ name, outcome: changed[name] ?? 'refused', code: changed[name] === undefined ? 'EACCES' : null })), null, 2)}\n`;
+}
+
+// The turns of a clean run: the Implementer's change and the probe's output, then the MR text at Clean.
 const CLEAN_TURNS = [
-  { write: { 'greeting.txt': 'hello\nhello again\n' }, text: '# Report: SMOKE-1, iteration 1\n\n## Done\nAdded the line.' },
+  { write: { 'greeting.txt': 'hello\nhello again\n', 'probe.json': probeOutput() }, text: '# Report: SMOKE-1, iteration 1\n\n## Done\nAdded the line.' },
   { write: { [MR_PATH]: mrText('feat(SMOKE-1): Add a second greeting line') }, text: 'prepared' },
 ];
 
@@ -79,6 +88,16 @@ async function smoke(name: string, args: string[], setup: (env: Env) => Promise<
 
 const statuses = (ran: Ran): string[] => STEPS.map((step) => ran.rows.get(step)?.status ?? 'missing');
 
+// What a run leaves in its TMPDIR: at most the Task checks' shared parent directory (SF-100, made by
+// sf serve and the checks, kept for the next run), empty.
+async function onlyChecksDir(tmp: string): Promise<void> {
+  const left = await readdir(tmp);
+  assert.deepEqual(left.filter((name) => name !== basename(taskChecksDir(tmp))), []);
+  if (left.length > 0) {
+    assert.deepEqual(await readdir(taskChecksDir(tmp)), []);
+  }
+}
+
 // The user's state and config of the test: no state directory, the config only the env file.
 async function untouched(ran: Ran): Promise<void> {
   assert.equal(existsSync(ran.env.state), false, 'the user\'s state directory was created');
@@ -104,7 +123,7 @@ test('a clean run: every step PASS, exit 0, the temp directory gone, the user\'s
   assert.match(ran.rows.get('Approve')!.detail, new RegExp(`^${BRANCH} at [0-9a-f]{12} on origin\\.git$`));
   // The table: a header and one row per step.
   assert.match(ran.stdout, /\nSTEP +RESULT +SECONDS +DETAIL\n/);
-  assert.deepEqual(await readdir(ran.tmp), []);
+  await onlyChecksDir(ran.tmp);
   await untouched(ran);
 
   // The child environment: the smoke's directories (the job's worktree under its SF_WORKTREE_ROOT,
@@ -143,7 +162,16 @@ test('--keep keeps the directory and prints it; the bare remote has the job\'s b
     assert.equal(git(join(ran.dir, 'origin.git'), 'rev-parse', BRANCH).trim(), job.prepared_commit);
     assert.equal(git(join(ran.dir, 'origin.git'), 'show', `${BRANCH}:greeting.txt`), 'hello\nhello again\n');
     // The repository the smoke made: main with the greeting and the Task file, by sf-smoke.
-    assert.equal(git(join(ran.dir, 'origin.git'), 'show', 'main:.software-factory/SMOKE-1.md'), SMOKE_TASK);
+    // The Task of the run: its probe of the run's own paths, the canary by its SHA-256 only.
+    const canary = await readFile(join(ran.dir, 'config', 'auth.env'), 'utf8');
+    assert.match(canary, /^SF_CANARY=[0-9a-f]{48}\n$/);
+    const probe = smokeProbe(smokePaths(ran.dir), createHash('sha256').update(canary).digest('hex'), undefined);
+    const task = git(join(ran.dir, 'origin.git'), 'show', 'main:.software-factory/SMOKE-1.md');
+    assert.equal(task, smokeTask(probe));
+    assert.ok(task.includes(probeCommand(probe)));
+    assert.ok(!task.includes(canary.trim()) && !ran.stdout.includes(canary.trim()));
+    assert.equal(git(join(ran.dir, 'origin.git'), 'show', 'main:probe.mjs'), PROBE_SCRIPT);
+    assert.equal(git(join(ran.dir, 'origin.git'), 'show', `${BRANCH}:probe.json`), probeOutput());
     assert.equal(git(join(ran.dir, 'origin.git'), 'log', '-1', '--format=%an <%ae>', 'main').trim(), 'sf-smoke <sf-smoke@localhost>');
     await untouched(ran);
   } finally {
@@ -158,23 +186,106 @@ test('a review session that fails: the Claude review step FAILs with review_fail
     await codexScript(env, [{}]);
   });
   assert.equal(ran.code, 1, ran.stdout + ran.stderr);
-  assert.deepEqual(statuses(ran), ['PASS', 'PASS', 'PASS', 'PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
+  assert.deepEqual(statuses(ran), ['PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
   assert.match(ran.rows.get('Claude review')!.detail, /^needs_human: review_failed: /);
   // Cleanup aborts the active job before its reset.
   assert.match(ran.stdout, /^Dashboard: SKIP[^\n]*\njob aborted \(sf abort smoke SMOKE-1\)\nCleanup: PASS/m);
-  assert.match(ran.stdout, /\nsmoke: FAIL \(1 of 10 steps\), cost \d+\.\d{4} USD, gate 0 tokens\n$/);
+  assert.match(ran.stdout, /\nsmoke: FAIL \(1 of 11 steps\), cost \d+\.\d{4} USD, gate 0 tokens\n$/);
   assert.equal((await codexLog(ran.env).catch(() => [])).length, 0);
-  assert.deepEqual(await readdir(ran.tmp), []);
+  await onlyChecksDir(ran.tmp);
   await untouched(ran);
 });
 
 test('the gate off: the Codex gate step FAILs with sf info\'s reason, the job still goes on to the push and the dashboard, the run ends as FAIL', async () => {
   const ran = await smoke('smoke-gate-off', [], cleanScripts, { SF_GATE: 'off' });
   assert.equal(ran.code, 1, ran.stdout + ran.stderr);
-  assert.deepEqual(statuses(ran), ['PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'FAIL', 'PASS', 'PASS', 'PASS', 'PASS'], ran.stdout);
+  assert.deepEqual(statuses(ran), ['PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'FAIL', 'PASS', 'PASS', 'PASS', 'PASS'], ran.stdout);
   assert.equal(ran.rows.get('Codex gate')!.detail, 'the gate is off (SF_GATE=off)');
-  assert.match(ran.stdout, /\nsmoke: FAIL \(1 of 10 steps\), cost \d+\.\d{4} USD, gate 0 tokens\n$/);
-  assert.deepEqual(await readdir(ran.tmp), []);
+  assert.match(ran.stdout, /\nsmoke: FAIL \(1 of 11 steps\), cost \d+\.\d{4} USD, gate 0 tokens\n$/);
+  await onlyChecksDir(ran.tmp);
+});
+
+test('a probe the sandbox let through: the Sandbox step FAILs naming it, the later steps SKIP, Cleanup PASS, exit 1', async () => {
+  const ran = await smoke('smoke-sandbox-allowed', [], async (env) => {
+    await script(env, [{ ...CLEAN_TURNS[0], write: { ...CLEAN_TURNS[0]!.write, 'probe.json': probeOutput({ 'sf.sock': 'allowed' }) } }]);
+    await reviewScript(env, [{ output: CHECK_READY }, { output: CLAUDE_CLEAN }]);
+    await codexScript(env, [{}]);
+  });
+  assert.equal(ran.code, 1, ran.stdout + ran.stderr);
+  assert.deepEqual(statuses(ran), ['PASS', 'PASS', 'PASS', 'PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
+  assert.equal(ran.rows.get('Sandbox')!.detail, 'the sandbox let through: sf.sock allowed');
+  assert.match(ran.stdout, /\nsmoke: FAIL \(1 of 11 steps\), /);
+  await onlyChecksDir(ran.tmp);
+});
+
+test('no probe.json in the worktree: the Sandbox step FAILs', async () => {
+  const ran = await smoke('smoke-sandbox-missing', [], async (env) => {
+    await script(env, [{ ...CLEAN_TURNS[0], write: { 'greeting.txt': 'hello\nhello again\n' } }]);
+    await reviewScript(env, [{ output: CHECK_READY }, { output: CLAUDE_CLEAN }]);
+  });
+  assert.equal(ran.code, 1, ran.stdout + ran.stderr);
+  assert.deepEqual(statuses(ran), ['PASS', 'PASS', 'PASS', 'PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
+  assert.equal(ran.rows.get('Sandbox')!.detail, 'probe.json could not be read (ENOENT)');
+});
+
+test('SF_SANDBOX=off: the Sandbox step is a SKIP that counts as a pass, the last line says the sandbox was not checked, exit 0', async () => {
+  const ran = await smoke('smoke-sandbox-off', [], cleanScripts, { SF_SANDBOX: 'off' });
+  assert.equal(ran.code, 0, ran.stdout + ran.stderr);
+  assert.deepEqual(statuses(ran), STEPS.map((step) => (step === 'Sandbox' ? 'SKIP' : 'PASS')), ran.stdout);
+  assert.equal(ran.rows.get('Sandbox')!.detail, 'sandbox off');
+  assert.match(ran.stdout, /\nsmoke: PASS \(sandbox not checked\), cost \d+\.\d{4} USD, gate 1100 tokens\n$/);
+});
+
+test('probeProblem: every probe refused passes, absent only for ~/.ssh and SSH_AUTH_SOCK; anything else names the probe', () => {
+  assert.equal(probeProblem(probeOutput()), undefined);
+  assert.equal(probeProblem(probeOutput({ '~/.ssh': 'absent', SSH_AUTH_SOCK: 'absent' })), undefined);
+  assert.equal(probeProblem(probeOutput({ 'auth.env': 'allowed', SSH_AUTH_SOCK: 'allowed' })), 'auth.env allowed, SSH_AUTH_SOCK allowed');
+  assert.equal(probeProblem(probeOutput({ jobs: 'absent' })), 'jobs absent');
+  assert.equal(probeProblem(JSON.stringify([{ name: 'auth.env', outcome: 'refused' }])), 'dashboard-token missing, jobs missing, sf.sock missing, ~/.ssh missing, SSH_AUTH_SOCK missing');
+  assert.equal(probeProblem('not json'), 'probe.json is not JSON');
+  assert.equal(probeProblem('{}'), 'probe.json is not a list of probes');
+});
+
+test('the probe script: allowed only for what access shows (the canary by its SHA-256, a token, the job in jobs/, a connect, a non-empty ~/.ssh); refused for a hidden or missing path; never prints what it read', async () => {
+  const dir = join(temp, 'probe-script');
+  await rm(dir, { recursive: true, force: true });
+  await mkdir(join(dir, 'state', 'jobs', 'smoke'), { recursive: true });
+  await mkdir(join(dir, 'ssh'));
+  await writeFile(join(dir, 'probe.mjs'), PROBE_SCRIPT);
+  const canary = 'SF_CANARY=0123456789abcdef\n';
+  await writeFile(join(dir, 'auth.env'), canary);
+  await writeFile(join(dir, 'state', 'dashboard-token'), 'token-value\n');
+  await writeFile(join(dir, 'ssh', 'id_test'), 'key');
+  const socket = join(dir, 'state', 'sf.sock');
+  const server = createServer((connection) => connection.end());
+  await new Promise<void>((resolve) => server.listen(socket, resolve));
+  const run = (probe: Parameters<typeof probeCommand>[0], env: NodeJS.ProcessEnv): string =>
+    execFileSync('sh', ['-c', probeCommand(probe).replace(/ > probe\.json$/, '')], { cwd: dir, env, encoding: 'utf8' });
+  const sha = createHash('sha256').update(canary).digest('hex');
+  try {
+    const open = { canary: join(dir, 'auth.env'), canarySha256: sha, token: join(dir, 'state', 'dashboard-token'), jobs: join(dir, 'state', 'jobs'), job: 'smoke', socket, ssh: join(dir, 'ssh') };
+    const allowed = run(open, { PATH: process.env.PATH, SSH_AUTH_SOCK: '/x' });
+    assert.deepEqual(JSON.parse(allowed), [
+      { name: 'auth.env', outcome: 'allowed', code: null }, { name: 'dashboard-token', outcome: 'allowed', code: null }, { name: 'jobs', outcome: 'allowed', code: null },
+      { name: 'sf.sock', outcome: 'allowed', code: null }, { name: '~/.ssh', outcome: 'allowed', code: null }, { name: 'SSH_AUTH_SOCK', outcome: 'allowed', code: null },
+    ]);
+    assert.ok(!allowed.includes('SF_CANARY') && !allowed.includes('token-value'));
+    // What a sandbox shows for a denied path: an empty file, an empty folder, nothing at all.
+    await writeFile(join(dir, 'empty'), '');
+    await mkdir(join(dir, 'none'), { recursive: true });
+    const hidden = { ...open, canary: join(dir, 'empty'), token: join(dir, 'empty'), jobs: join(dir, 'none'), socket: join(dir, 'missing.sock'), ssh: join(dir, 'none') };
+    assert.deepEqual(JSON.parse(run(hidden, { PATH: process.env.PATH })), [
+      { name: 'auth.env', outcome: 'refused', code: null }, { name: 'dashboard-token', outcome: 'refused', code: null }, { name: 'jobs', outcome: 'refused', code: null },
+      { name: 'sf.sock', outcome: 'refused', code: 'ENOENT' }, { name: '~/.ssh', outcome: 'refused', code: null }, { name: 'SSH_AUTH_SOCK', outcome: 'absent', code: null },
+    ]);
+    const gone = { ...hidden, canary: join(dir, 'missing'), ssh: undefined };
+    const result = JSON.parse(run(gone, { PATH: process.env.PATH })) as Array<{ name: string; outcome: string; code: string | null }>;
+    assert.deepEqual(result[0], { name: 'auth.env', outcome: 'refused', code: 'ENOENT' });
+    assert.deepEqual(result[4], { name: '~/.ssh', outcome: 'absent', code: null });
+    assert.equal(probeProblem(JSON.stringify(result)), undefined);
+  } finally {
+    server.close();
+  }
 });
 
 // The time budget of the tests that halt a step on it: the steps before that step (Setup alone in
@@ -189,7 +300,7 @@ test('a time budget of a fraction of a minute with a slow turn: the step running
   });
   try {
     assert.equal(ran.code, 1, ran.stdout + ran.stderr);
-    assert.deepEqual(statuses(ran), ['PASS', 'PASS', 'PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
+    assert.deepEqual(statuses(ran), ['PASS', 'PASS', 'PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
     assert.equal(ran.rows.get('Implementer turn')!.detail, 'time budget');
     assert.match(ran.stdout, /\njob aborted \(sf abort smoke SMOKE-1\)\n/);
     assert.match(ran.rows.get('Cleanup')!.detail, /^job reset, sf serve stopped, kept /);
@@ -224,12 +335,12 @@ test('a halt during sf check-task ends its whole process group: the Task check\'
     await reviewScript(env, [{ output: CHECK_READY, delayMs: 60_000 }]);
   });
   assert.equal(ran.code, 1, ran.stdout + ran.stderr);
-  assert.deepEqual(statuses(ran), ['PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
+  assert.deepEqual(statuses(ran), ['PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
   assert.equal(ran.rows.get('Task check')!.detail, 'time budget');
   // The fake review started (it counts its run first) and was ended with the group.
   assert.equal(await readFile(join(ran.env.home, 'fake-review.count'), 'utf8'), '1');
   assert.deepEqual(await processesOf(ran.env.home), []);
-  assert.deepEqual(await readdir(ran.tmp), []);
+  await onlyChecksDir(ran.tmp);
 });
 
 test('a halt waits for the running child sf command\'s whole group, SIGKILL included, before the step ends and the job would be aborted', async () => {
@@ -243,7 +354,7 @@ test('a halt waits for the running child sf command\'s whole group, SIGKILL incl
   }, {}, undefined, (env) => ({ SF_CLAUDE: join(env.home, 'stubborn-claude') }));
   try {
     assert.equal(ran.code, 1, ran.stdout + ran.stderr);
-    assert.deepEqual(statuses(ran), ['PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
+    assert.deepEqual(statuses(ran), ['PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
     assert.equal(ran.rows.get('Task check')!.detail, 'time budget');
     // The group was stopped, SIGKILL after 15 s included, before the step's row: the step took the
     // budget's rest plus the escalation.
@@ -251,7 +362,7 @@ test('a halt waits for the running child sf command\'s whole group, SIGKILL incl
     const seconds = Number(/\nTask check: FAIL \((\d+\.\d) s\)/.exec(ran.stdout)![1]);
     assert.ok(seconds >= 15, `the step ended after ${seconds} s, before the SIGKILL`);
     assert.deepEqual(await processesOf(ran.env.home), []);
-    assert.deepEqual(await readdir(ran.tmp), []);
+    await onlyChecksDir(ran.tmp);
   } finally {
     // Never leave the stubborn loop behind, even when an assertion failed.
     for (const line of await processesOf(ran.env.home)) {
@@ -272,12 +383,12 @@ test('SIGTERM during the run: the step running FAILs with "interrupted (SIGTERM)
     }
   });
   assert.equal(ran.code, 1, ran.stdout + ran.stderr);
-  assert.deepEqual(statuses(ran), ['PASS', 'PASS', 'PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
+  assert.deepEqual(statuses(ran), ['PASS', 'PASS', 'PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
   assert.equal(ran.rows.get('Implementer turn')!.detail, 'interrupted (SIGTERM)');
   assert.match(ran.stdout, /\njob aborted \(sf abort smoke SMOKE-1\)\n/);
   assert.equal(ran.rows.get('Cleanup')!.detail, 'job reset, sf serve stopped, directory removed');
   assert.deepEqual(await processesOf(ran.env.home), []);
-  assert.deepEqual(await readdir(ran.tmp), []);
+  await onlyChecksDir(ran.tmp);
   await untouched(ran);
 });
 
@@ -296,7 +407,7 @@ test('a signal in Cleanup: the active job is aborted before its reset, Cleanup g
   });
   try {
     assert.equal(ran.code, 1, ran.stdout + ran.stderr);
-    assert.deepEqual(statuses(ran), ['PASS', 'PASS', 'PASS', 'PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
+    assert.deepEqual(statuses(ran), ['PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
     assert.match(ran.rows.get('Claude review')!.detail, /review_failed/);
     // The signal came after the steps: the job aborted in Cleanup, then reset.
     assert.match(ran.stdout, /^Dashboard: SKIP[^\n]*\njob aborted \(sf abort smoke SMOKE-1\)\nCleanup: PASS/m);
@@ -351,7 +462,7 @@ test('the first signal while Cleanup\'s sf reset runs: the job was aborted befor
   try {
     assert.notEqual(caught, undefined, `Cleanup's sf reset was not seen running:\n${ran.stdout}`);
     assert.equal(ran.code, 1, ran.stdout + ran.stderr);
-    assert.deepEqual(statuses(ran), ['PASS', 'PASS', 'PASS', 'PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
+    assert.deepEqual(statuses(ran), ['PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
     assert.match(ran.stdout, /^Dashboard: SKIP[^\n]*\njob aborted \(sf abort smoke SMOKE-1\)\nCleanup: PASS/m);
     assert.match(ran.rows.get('Cleanup')!.detail, /^job reset, sf serve stopped, kept /);
     const archived = (await readdir(join(ran.dir, 'state', 'jobs', 'smoke'))).filter((name) => name.startsWith('SMOKE-1.'));
@@ -497,11 +608,11 @@ test('a budget exceeded after the monitor\'s last poll still fails the run: the 
   const output = lines.join('\n');
   assert.equal(code, 1, output);
   const status = (step: string): string | undefined => new RegExp(`^${step}: (PASS|FAIL|SKIP)`, 'm').exec(output)?.[1];
-  assert.deepEqual(STEPS.map(status), ['PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'PASS'], output);
+  assert.deepEqual(STEPS.map(status), ['PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'PASS'], output);
   assert.match(output, /^Codex gate: FAIL \(0\.0 s\) cost budget$/m);
   assert.match(output, /^job aborted \(sf abort smoke SMOKE-1\)$/m);
-  assert.match(output, /^smoke: FAIL \(1 of 10 steps\), cost 0\.1035 USD/m);
-  assert.deepEqual(await readdir(tmp), []);
+  assert.match(output, /^smoke: FAIL \(1 of 11 steps\), cost 0\.1035 USD/m);
+  await onlyChecksDir(tmp);
 });
 
 test('a signal while the temporary directory is being made: the run still ends through Cleanup, the directory removed, exit 1', async () => {
@@ -535,8 +646,8 @@ test('a signal while the temporary directory is being made: the run still ends t
   assert.match(lines[0]!, /\/sf-smoke-[^/]+$/);
   assert.match(output, /^Setup: FAIL \(0\.0 s\) interrupted \(SIGTERM\)$/m);
   assert.match(output, /^Cleanup: PASS \(\d+\.\d s\) no job to reset, directory removed$/m);
-  assert.match(output, /^smoke: FAIL \(1 of 10 steps\)/m);
-  assert.deepEqual(await readdir(tmp), []);
+  assert.match(output, /^smoke: FAIL \(1 of 11 steps\)/m);
+  await onlyChecksDir(tmp);
   // Its handlers are gone with the run.
   assert.deepEqual(process.listeners('SIGTERM'), before);
 });

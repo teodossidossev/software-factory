@@ -16,6 +16,7 @@ import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/cli
 import { callSocket } from '../../src/ipc.js';
 import { JobStore, refusedTransitions } from '../../src/jobs.js';
 import { saveRegistry } from '../../src/registry.js';
+import { cliRuleList } from '../../src/sandbox-denials.js';
 import { rulesBlock } from '../../src/rules-docs.js';
 import { CheckStore, taskSha256 } from '../../src/task-check.js';
 import { writeTask } from '../../src/task-file.js';
@@ -388,3 +389,35 @@ after(async () => {
   }
 });
 
+
+// The path denials (SF-100) a logged Claude session got, checked from its argv: the deny rules in
+// --disallowedTools after the session's own (given), and the sandbox's filesystem lists in --settings
+// (required unless sandboxed is false: SF_SANDBOX=off). Always present: the state's jobs/ folder and
+// the config directory, for reading and writing, absolute; never the session's own directory (own).
+// Returns the extra rules.
+export function assertPathDenials(argv: string[], env: Env, own: string, given: readonly string[] = [], sandboxed = true): string[] {
+  const inline = argv.find((arg) => arg.startsWith('--disallowedTools='))?.slice('--disallowedTools='.length) ?? '';
+  // Read as the installed CLI reads it: a comma inside a rule's parentheses does not split it.
+  const rules = cliRuleList([inline]);
+  assert.deepEqual(rules.slice(0, given.length), [...given]);
+  const extra = rules.slice(given.length);
+  const jobs = join(env.state, 'jobs');
+  for (const rule of [`Read(/${jobs})`, `Read(/${jobs}/**)`, `Edit(/${jobs}/**)`, `Write(/${jobs}/**)`, `Read(/${env.config})`, `Read(/${env.config}/**)`]) {
+    assert.ok(extra.includes(rule), `${rule} not in ${extra.join(', ')}`);
+  }
+  assert.ok(extra.every((rule) => /^(Read|Edit|Write)\(\/\/.+\)$/.test(rule)), extra.join(', '));
+  const paths = extra.map((rule) => rule.replace(/^\w+\(\//, '').replace(/(\/\*\*)?\)$/, ''));
+  assert.ok(!paths.some((path) => path === own || own.startsWith(`${path}/`)), `the own ${own} is denied: ${extra.join(', ')}`);
+  const at = argv.indexOf('--settings');
+  const sandbox = at < 0 ? undefined : (JSON.parse(argv[at + 1]!) as { sandbox?: { filesystem?: { denyRead?: string[]; denyWrite?: string[] } } }).sandbox;
+  assert.equal(sandbox !== undefined, sandboxed, `a sandbox was ${sandboxed ? 'expected' : 'not expected'}: ${argv.join(' ')}`);
+  if (sandbox !== undefined) {
+    assert.ok(sandbox.filesystem?.denyRead !== undefined && sandbox.filesystem.denyWrite !== undefined, JSON.stringify(sandbox));
+    for (const list of [sandbox.filesystem.denyRead, sandbox.filesystem.denyWrite]) {
+      assert.ok(list.includes(jobs) && list.includes(env.config), list.join(', '));
+      assert.ok(list.every((path) => path.startsWith('/')), list.join(', '));
+      assert.ok(!list.some((path) => path === own || own.startsWith(`${path}/`)), `the own ${own} is denied: ${list.join(', ')}`);
+    }
+  }
+  return extra;
+}

@@ -10,6 +10,7 @@ import type { FileChange } from './jobs.js';
 import { type FixItem, fixItemLine, LEDGER_REF, type LedgerEntry, SCOPE_PROBLEM, SENSITIVE_PROBLEM, settledLines } from './ledger.js';
 import { handbookSection } from './prompts.js';
 import { ENV_FILE_RULES } from './rules.js';
+import { type SandboxDenials, withSandboxDenials } from './sandbox-denials.js';
 import { sessionEnvironment } from './session.js';
 import { TASK_DIR } from './task-file.js';
 
@@ -177,6 +178,10 @@ export interface ReviewOptions {
   // The Task's images (SF-065): their image blocks follow the prompt in the session's user message,
   // each after a line naming it, as for the Implementer.
   images?: ImageRef[] | undefined;
+  // The session's path denials (SF-100, src/sandbox-denials.ts): permission rules denied on top of
+  // the session's own, and the sandbox's filesystem deny lists merged into sandbox.
+  deny?: string[] | undefined;
+  filesystem?: SandboxDenials | undefined;
 }
 
 // The instruction files the CLI loads as project instructions from a directory, with
@@ -209,12 +214,13 @@ export function reviewSessionOptions(options: Omit<ReviewOptions, 'onMessage' | 
 }
 
 // The options of every read-only session with a structured output (the review, the Task check of
-// SF-054): REVIEW_TOOLS only, REVIEW_DENIED_TOOLS plus deny, the given output schema, and the
-// given hooks (the Task check's path guard).
+// SF-054): REVIEW_TOOLS only, REVIEW_DENIED_TOOLS plus deny plus the options' path denials
+// (SF-100), the given output schema, and the given hooks (the Task check's path guard).
 export function readOnlySessionOptions(
   options: Omit<ReviewOptions, 'onMessage' | 'signal'>, abortController: AbortController, schema: Record<string, unknown>, deny: readonly string[] = [],
   hooks?: Options['hooks'],
 ): Options {
+  const sandbox = withSandboxDenials(options.sandbox, options.filesystem);
   return {
     abortController,
     cwd: options.cwd,
@@ -222,12 +228,12 @@ export function readOnlySessionOptions(
     settingSources: ['project'],
     settings: { claudeMdExcludes: outsideInstructionFiles(options.cwd) },
     tools: REVIEW_TOOLS,
-    disallowedTools: [...REVIEW_DENIED_TOOLS, ...deny],
+    disallowedTools: [...REVIEW_DENIED_TOOLS, ...deny, ...(options.deny ?? [])],
     outputFormat: { type: 'json_schema', schema },
     maxTurns: options.maxTurns,
     // A known startup failure (such as an unavailable sandbox) then ends with a result message.
     env: { ...sessionEnvironment(), CLAUDE_CODE_STARTUP_FAILURE_RESULTS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
-    ...(options.sandbox !== undefined ? { sandbox: options.sandbox } : {}),
+    ...(sandbox !== undefined ? { sandbox } : {}),
     ...(options.model !== undefined ? { model: options.model } : {}),
     ...(options.claudePath !== undefined ? { pathToClaudeCodeExecutable: options.claudePath } : {}),
     ...(hooks !== undefined ? { hooks } : {}),

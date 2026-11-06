@@ -290,7 +290,8 @@ test('parallel jobs: three jobs of a workspace run at once in their own worktree
   }
   // Each job's first turn: P-1 is slow, so the others start while it runs.
   await script(env, [
-    { delayMs: 6000, write: { 'one.txt': '1\n' }, text: 'one' },
+    // Long enough for P-2 and P-3 to start and publish, and the check, say and queue calls, while it runs.
+    { delayMs: 9000, write: { 'one.txt': '1\n' }, text: 'one' },
     { write: { 'two.txt': '2\n' }, text: 'two' },
     { write: { 'three.txt': '3\n' }, text: 'three' },
     { text: 'one after say' },

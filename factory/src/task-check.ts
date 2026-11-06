@@ -12,7 +12,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { renameSync, rmSync } from 'node:fs';
 import { mkdir, mkdtemp, open, readdir, readFile, realpath, rm, unlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { HookCallback, SandboxSettings, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import * as z from 'zod/v4';
@@ -27,6 +26,7 @@ import type { Workspace } from './registry.js';
 import { runStructuredSession, SEVERITIES, SEVERITY_DEFINITIONS, type Severity } from './review.js';
 import { collectRules } from './rules-docs.js';
 import { matchesGlob, scopeOf } from './rules.js';
+import { absoluteRule, pathDenials, prepareTaskChecksDir, TASK_CHECK_DIR_UNSAFE } from './sandbox-denials.js';
 import { ARCHIVE_DIR, isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskScope, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { addDetachedWorktree, removeWorktree } from './worktree.js';
 
@@ -352,13 +352,12 @@ export interface CheckOptions {
   // checkout's .software-factory folder (the other Task files, the MR texts, the archive).
   stateDir: string;
   configDir: string;
+  // The worktree root (SF_WORKTREE_ROOT): every job's worktree is off limits too (SF-100).
+  worktreeRoot: string;
   signal?: AbortSignal;
   // Every SDK message of the session, in order; a failing call changes nothing of the outcome.
   onMessage?: (message: SDKMessage) => Promise<void>;
 }
-
-// A path as a permission rule pattern from the filesystem root ("//abs/path"), matching itself only.
-const absoluteRule = (path: string): string => `/${path.replace(/[\\*?[\]{}()!]/g, '\\$&')}`;
 
 // Read rules on top of the guard (defence in depth): the work checkout's .software-factory folder
 // (the other Task files, the MR texts, the archive), the factory's state (jobs, ledgers, requests,
@@ -559,15 +558,17 @@ export async function cutOutsideLinks(root: string): Promise<string[]> {
 }
 
 // The check's checkout: a detached worktree of the work checkout at the Task's base (fetched from
-// origin when there is one, as Start does), in a new temporary directory, with its symbolic links
-// out of it cut (cutOutsideLinks). remove() takes it away and prunes its registration.
+// origin when there is one, as Start does), in a new directory check-* under the Task checks' parent
+// directory (SF-100: <tmp>/sf-task-checks-<uid>, which every other session denies; an unsafe one
+// fails the check with task_check_dir_unsafe), with its symbolic links out of it cut
+// (cutOutsideLinks). remove() takes it away and prunes its registration.
 async function checkCheckout(checkout: string, task: string): Promise<{ root: string; commit: string; remove: () => Promise<void> }> {
   const base = parseFrontMatter(task)?.get('base') ?? '';
   if (base === '' || base.startsWith('-') || (await runGit(checkout, ['check-ref-format', '--branch', base])).code !== 0) {
     throw new FactoryError('base_not_found', `The base "${base}" is not a valid branch name.`);
   }
   const { commit } = await resolveTarget(checkout, base);
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'sf-task-check-')));
+  const dir = await realpath(await mkdtemp(join(await prepareTaskChecksDir(), 'check-')));
   const root = join(dir, 'repo');
   const remove = async (): Promise<void> => {
     const failure = await removeWorktree(checkout, root);
@@ -611,7 +612,8 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
   try {
     checkout = await checkCheckout(workspace.workCheckout, task);
   } catch (error) {
-    const message = `The check could not prepare its checkout: ${error instanceof Error ? error.message : String(error)}`;
+    const unsafe = error instanceof FactoryError && error.code === TASK_CHECK_DIR_UNSAFE ? `${TASK_CHECK_DIR_UNSAFE}: ` : '';
+    const message = `${unsafe}The check could not prepare its checkout: ${error instanceof Error ? error.message : String(error)}`;
     return {
       ...record, commit: null, status: 'failed', output: null, error: new Redactor({ cwd: workspace.workCheckout }).failure(message.slice(0, 1000)),
       model: options.model ?? null, cost_usd: null, started_at: startedAt, ended_at: new Date().toISOString(),
@@ -645,8 +647,22 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
         model: options.model ?? null, cost_usd: null, started_at: startedAt, ended_at: new Date().toISOString(),
       };
     }
+    // The paths off limits to every session (SF-100), but the Task checks' parent directory the check
+    // runs in: on top of checkDeniedRules for the tools, and for the sandbox.
+    let denials: Awaited<ReturnType<typeof pathDenials>>;
+    try {
+      denials = await pathDenials({
+        session: 'task_check', workspace: workspace.name, checkout: workspace.workCheckout, stateDir: options.stateDir, worktreeRoot: options.worktreeRoot, configDir: options.configDir,
+      });
+    } catch (error) {
+      const message = `The check could not build its path denials: ${error instanceof Error ? error.message : String(error)}`;
+      return {
+        ...record, commit: checkout.commit, status: 'failed', output: null, error: redactor.failure(message.slice(0, 1000)),
+        model: options.model ?? null, cost_usd: null, started_at: startedAt, ended_at: new Date().toISOString(),
+      };
+    }
     const outcome = await runStructuredSession(checkPrompt(ticket, task, rules), {
-      cwd, claudePath: options.claudePath, sandbox: options.sandbox, model: options.model, maxTurns: options.maxTurns,
+      cwd, claudePath: options.claudePath, sandbox: options.sandbox, model: options.model, maxTurns: options.maxTurns, filesystem: denials.sandbox,
       signal: options.signal ?? new AbortController().signal, images: refs,
       // Every message passes the redactor, so a failure after a withheld read is withheld too.
       onMessage: async (message) => {
@@ -655,7 +671,7 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
       },
     }, {
       schema: CHECK_SCHEMA, output: checkOutput, noun: 'check', outputNoun: 'output',
-      deny: checkDeniedRules(workspace.workCheckout, options.stateDir, options.configDir), hooks: guardHooks(cwd),
+      deny: [...checkDeniedRules(workspace.workCheckout, options.stateDir, options.configDir), ...denials.tools], hooks: guardHooks(cwd),
     });
     const base = { ...record, commit: checkout.commit, model: outcome.model ?? options.model ?? null, started_at: startedAt, ended_at: outcome.endedAt };
     if (!outcome.ok) {
@@ -697,7 +713,7 @@ export interface CheckView {
 export function checkSettings(config: Config, configDir: string): Omit<CheckOptions, 'signal' | 'onMessage'> {
   return {
     claudePath: config.claudePath, sandbox: config.sandbox, model: config.reviewModel, maxTurns: config.taskCheckMaxTurns, rulesMaxBytes: config.rulesMaxBytes,
-    stateDir: config.stateDir, configDir,
+    stateDir: config.stateDir, configDir, worktreeRoot: config.worktreeRoot,
   };
 }
 

@@ -112,7 +112,7 @@ effect and says only whether each token is set.
 
 | Key | Default | Allowed | Meaning |
 | --- | --- | --- | --- |
-| `SF_SANDBOX` | on | `off` | `off` runs the Implementer, the reviews, the simplification pass and the Task check without Claude Code's sandbox. Leave it on. |
+| `SF_SANDBOX` | on | `off` | `off` runs the Implementer, the reviews, the simplification pass and the Task check without Claude Code's sandbox: the path denials then hold for the tools only, not for commands ([the trust model](trust-model.md)). Leave it on. |
 | `SF_SANDBOX_DOMAINS` | empty | comma-separated host names, `*.` allowed in front | Extra hosts sandboxed commands may reach besides `registry.npmjs.org`, for example a private registry your tests need: `npm.example.com,*.pkg.example.com`. |
 | `SF_SENSITIVE_PATHS` | empty | comma-separated globs | Paths added to the built-in sensitive paths (manifests, lockfiles, CI, IDE and agent files, root dotfiles). A sensitive path the Task's `may_touch` does not name must be accepted by a reviewer. |
 

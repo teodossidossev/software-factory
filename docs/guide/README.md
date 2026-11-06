@@ -41,7 +41,7 @@ Read the first four pages once, in order; the rest when you need them.
    merge request, the MR text.
 7. [When a job stops](when-a-job-stops.md): every reason a job stops for you and what to do.
 8. [Operations](operations.md): updating, status and metrics, logs, cleaning, backup,
-   troubleshooting, the tests.
+   troubleshooting, the tests, CI.
 9. [Ways of working](ways-of-working.md): end-to-end recipes, alone, with the queue, with a
    coordinating session, with ChatGPT, in a team.
 

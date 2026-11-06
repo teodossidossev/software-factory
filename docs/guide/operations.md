@@ -1,7 +1,7 @@
 # Operations
 
 This page covers keeping the factory running: updating it, reading its status and metrics, logs,
-cleaning up old jobs and worktrees, backup, troubleshooting, and its tests.
+cleaning up old jobs and worktrees, backup, troubleshooting, its tests, and CI.
 
 ## Updating the factory
 
@@ -188,5 +188,42 @@ SF_BROWSER_HEADED=1 npm run test:browser   # with a visible window
 
 A failing browser test saves a screenshot under `factory/dist/test-results/`. And the live check
 with the real Claude Code, Codex and Git is `sf smoke` ([Install](install.md#check-that-it-works)).
+
+## CI
+
+GitHub Actions runs the tests above on GitHub-hosted runners
+([`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)): on every pull request to `main`,
+on every push to `main` (a merge too), and by hand from the Actions tab (*Run workflow*). One job,
+`CI / test`, on `ubuntu-latest` with Node 24, in `factory/`: `npm ci`, `npm run build`,
+`npm run typecheck`, `npm test`. It stops after 30 minutes. The browser tests and `sf smoke` do
+not run in CI.
+
+A new push to a pull request cancels that pull request's run still in progress. A run on `main`
+is never cancelled once it runs; at most one more waits behind it, and a newer merge replaces the
+waiting one (GitHub's concurrency rule), so the newest `main` is always tested. Two pull requests
+that pass alone can still break `main` together: the run on `main` after the second merge is the
+one that shows it.
+
+The job has a read-only token (`permissions: contents: read`), uses no secrets, and pins its
+actions (`actions/checkout`, `actions/setup-node`) to a full commit SHA. A pull request from a fork
+runs with the same read-only token and no secrets: the workflow uses `pull_request`, never
+`pull_request_target`. To move a pin, take the commit SHA of the action's release tag on GitHub
+and keep the version in the comment after it.
+
+**Reading a failed run.** A pull request's checks link to its run; the README's badge (the status
+of `main`) links to the list of runs, newest first. Open the run, the `test` job, and the first red
+step:
+
+| Red step | What it means | Reproduce locally (in `factory/`) |
+| --- | --- | --- |
+| Install | `package-lock.json` does not match `package.json`, or the registry failed | `npm ci`; if it says the lock file is out of sync, `npm install` and commit `package-lock.json`. A registry error: *Re-run jobs* |
+| Build | a TypeScript compile or type error (often two merged changes that pass alone): `tsc` checks the types as it builds | `npm run build` |
+| Typecheck | rare after a green Build, which runs the same `tsc` on the same files; `--noEmit` reports the same errors | `npm run typecheck` |
+| Test | a failing test; the log shows `not ok` with the test's name and its assertion | `npm test`, or `node --test dist/test/<file>.test.js` after a build |
+| the job was cancelled | a newer push to the same pull request, a newer merge to `main` that replaced a waiting run, or the 30-minute limit | nothing for a newer push or merge; a timeout is a hang outside a test (a single test fails by itself after 2 minutes, `--test-timeout`): look at the last step's last line |
+
+A test that passes locally and fails in CI often depends on the machine: a tool on your `PATH`,
+your Git configuration, a locale or a timing. The tests must need no model, no network and no
+setup beyond `npm ci`.
 
 Next: [Ways of working](ways-of-working.md).

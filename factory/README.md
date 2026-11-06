@@ -2704,6 +2704,14 @@ end), in a browser:
    note field and *Accept risk* / *Must fix*: a click settles it at once and the entry then shows
    the decision.
 
+## CI
+
+`.github/workflows/ci.yml` (SF-098) runs `npm ci`, `npm run build`, `npm run typecheck` and
+`npm test` in `factory/` on GitHub-hosted runners, on every pull request to `main` and every push
+to `main`, with a read-only token and no secrets; the browser tests do not run there. What it runs,
+why it is safe for pull requests from forks, and how to read a failed run: the guide,
+[Operations](../docs/guide/operations.md#ci).
+
 ## Workspace registry
 
 `<config dir>/workspaces.json`, written by `sf workspace add|remove` and by the dashboard's start

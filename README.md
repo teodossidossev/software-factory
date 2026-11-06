@@ -1,5 +1,7 @@
 # Software Factory
 
+[![CI](https://github.com/teodossidossev/software-factory/actions/workflows/ci.yml/badge.svg)](https://github.com/teodossidossev/software-factory/actions/workflows/ci.yml)
+
 A local tool that takes a planned ticket through Claude Code without you having to watch it. You
 plan the ticket into a Task file (with ChatGPT, with Claude Code, on the dashboard or by hand);
 the factory runs Claude Code headless in a Git worktree of its own, has every iteration reviewed by
@@ -48,6 +50,9 @@ npm run status         # the jobs
 npm run sf -- <cmd>    # any sf command, e.g. npm run sf -- queue list
 npm test               # the test suite; npm run typecheck, npm run build
 ```
+
+CI runs the build, the typecheck and the test suite on every pull request and on `main`
+([CI](docs/guide/operations.md#ci)).
 
 ## Documentation
 

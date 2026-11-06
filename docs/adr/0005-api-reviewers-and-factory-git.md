@@ -91,7 +91,7 @@ the Patch and stopped twice in one ticket. The value it carried is a reviewer tr
 company than the Implementer's; that value does not need the ChatGPT web conversation.
 
 MR preparation was a turn of the Implementer inside the sandbox. On the first ticket of another
-repository (GWP-3862) `git rebase` could not unlink the sandbox's `.gitmodules` placeholder, the
+repository (a product ticket) `git rebase` could not unlink the sandbox's `.gitmodules` placeholder, the
 repair was denied, and the job ended at the iteration limit. The snapshot ref and the three-way
 diff check existed only to verify Git work a model had done.
 

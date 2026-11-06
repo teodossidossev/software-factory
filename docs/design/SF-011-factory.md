@@ -1,5 +1,7 @@
 # SF-011 design: the factory, rebuilt around the Idle gap
 
+Historical: the current behaviour is specified in factory/README.md.
+
 Status: agreed design, 2026-11-01. Nothing implemented yet. Vocabulary: `CONTEXT.md`. Decisions:
 `docs/adr/0001` to `0003`. This replaces the SF-009/SF-010 direction (OpenClaw transport, file-based
 supervisor, MCP Events, Keycloak) and the deferred reproducible-setup proposal.

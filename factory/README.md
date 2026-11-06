@@ -28,7 +28,7 @@ bin/sf workspace list
 bin/sf workspace remove <name>
 bin/sf serve                      # foreground; Ctrl+C stops it; prints the dashboard URL
 bin/sf up [--no-open] [--no-tunnel]   # sf serve plus the tunnel (../scripts/sf-tunnel.sh run, output prefixed "tunnel | ") and the dashboard opened in the browser; Ctrl+C stops both; npm start at the repository root
-bin/sf dashboard [--open]         # the dashboard URL of the last sf serve start; --open opens it with xdg-open; works without sf serve
+bin/sf dashboard [--open] [--rotate]  # the dashboard URL of the last sf serve start; --open opens it with xdg-open; --rotate removes the token so the next sf serve makes a new one; works without sf serve
 bin/sf check-task <workspace> <ticket>  # the Task check (section Task check): paraphrase, findings by severity, verdict; stored by sha; works without sf serve
 bin/sf rules <workspace> [ticket] # the coding rules the agents would be given (section Coding rules): paths, sources, sizes, the files left out; never their text; works without sf serve
 bin/sf attach <workspace> <ticket> <file> [name]   # attach an image to the ticket (section Ticket images): .software-factory/<ticket>/<name>, name by default the next number; works without sf serve
@@ -57,7 +57,7 @@ bin/sf mr merge <workspace> <ticket>           # merge the job's open merge requ
 bin/sf mr status <workspace> <ticket>          # the merge request on the host: open, merged or closed, mergeable or why not, the checks; needs sf serve
 bin/sf pause <workspace> <ticket>              # stop a working job or one awaiting review at once (section Pause, Resume and Restart); worktree, branch, session and history stay; needs sf serve
 bin/sf resume <workspace> <ticket> [message...]   # go on with a paused job where it stopped; a Task file changed meanwhile goes with its diff; needs sf serve
-bin/sf restart <workspace> <ticket> [--keep-files] # start the ticket again from its current Task file on a fresh worktree and branch (paused, aborted, failed, needs_human); needs sf serve
+bin/sf restart <workspace> <ticket> [--keep-files] # start the ticket again from its current Task file on a fresh worktree and branch (paused, waiting_limit, aborted, failed, needs_human); needs sf serve
 bin/sf handover <workspace> <ticket>           # Hand over to my checkout: the job's branch in the workspace's checkout with its changes as Local Changes (ready_for_human_review); needs sf serve
 bin/sf takeback <workspace> <ticket>           # Take it back: the branch back from your checkout into the job (handed_over); needs sf serve
 bin/sf handed-done <workspace> <ticket>        # I opened the MR myself: pushed once origin has the branch with your changes (handed_over); needs sf serve
@@ -147,10 +147,10 @@ unknown workspace prints no rows and zero totals.
 | Variable | Default | Meaning |
 |---|---|---|
 | `SF_PORT` | `8787` | Port of `http://127.0.0.1:<port>/mcp` (loopback only, Host and Origin checked). |
-| `SF_ENV_FILE` | `~/.config/software-factory/auth.env` (a historical name) | Environment file every `sf` command reads first: `KEY=VALUE` lines, `#` comments, optional `export`, quotes allowed; a variable already set in the environment wins; a missing file is fine. Empty value: no file. The repository root's `npm run serve` relies on it. |
+| `SF_ENV_FILE` | `<config dir>/auth.env`, by default `~/.config/software-factory/auth.env` (a historical name) | Environment file every `sf` command reads first: `KEY=VALUE` lines, `#` comments, optional `export`, quotes allowed; a variable already set in the environment wins; a missing file is fine. Empty value: no file. The repository root's `npm run serve` relies on it. |
 | `SF_DASHBOARD` | on | `off` starts no dashboard listener (and removes an old `dashboard-token`). |
 | `SF_DASHBOARD_PORT` | `8788` | Port of the dashboard, `http://127.0.0.1:<port>/d/<token>/` (loopback only, Host and Origin checked). |
-| `SF_CONFIG_DIR` | `${XDG_CONFIG_HOME:-~/.config}/software-factory` | Directory of the workspace registry. |
+| `SF_CONFIG_DIR` | `${XDG_CONFIG_HOME:-~/.config}/software-factory` | Directory of the workspace registry, the default `auth.env` and the `rules/` files. |
 | `SF_HANDBOOK` | `factory/HANDBOOK.md` | Handbook served as instructions (its `## Quick start` section) and by `guide`. |
 | `SF_STATE_DIR` | `${XDG_STATE_HOME:-~/.local/state}/software-factory` | Job state and the `sf.sock` socket. |
 | `SF_WORKTREE_ROOT` | `${SF_STATE_DIR}/worktrees` | Where every job's worktree is created: `<root>/<workspace>/<ticket>`; absolute. |
@@ -182,7 +182,7 @@ unknown workspace prints no rows and zero totals.
 | `SF_GATE_FULL_PATHS` | empty | Comma-separated globs (as `SF_SENSITIVE_PATHS`) whose changed paths make an iteration's gate level `full`. |
 | `SF_SMOKE_MODEL` | `haiku` | The model of `sf smoke`'s job (section Live smoke test): its `SF_MODEL` and `SF_REVIEW_MODEL` (Implementer, Claude review, Task check). |
 | `SF_SMOKE_CODEX_MODEL` | unset | The gate's model in `sf smoke`, its `SF_CODEX_MODEL`; unset uses Codex's default. |
-| `SF_SANDBOX` | on | `off` runs the Implementer and the review without Claude Code's sandbox. |
+| `SF_SANDBOX` | on | `off` runs the Implementer, the reviews, the simplification pass and the Task check without Claude Code's sandbox. |
 | `SF_SANDBOX_DOMAINS` | empty | Comma-separated extra hosts sandboxed commands may reach, besides `registry.npmjs.org`. |
 | `SF_DESKTOP_NOTIFY` | on | `off` disables the desktop notification. |
 | `SF_NOTIFY_ITERATIONS` | off | `on` also notifies `awaiting_review` (each published iteration). |

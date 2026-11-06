@@ -1,8 +1,7 @@
 # Runbook: ChatGPT and the local factory through the Secure MCP Tunnel
 
 Verified with tunnel-client **v0.0.18** (`0.0.18+274a5588`) on Linux x86_64 and Node v24.17.0.
-The first real ChatGPT probe passed on 2026-10-25 (`docs/reports/SF-002-report.md`, task
-`docs/tasks/SF-002-connect-chatgpt.md`). SF-011 moved the endpoint from the old bridge to the
+The first real ChatGPT probe passed on 2026-10-25 (SF-002). SF-011 moved the endpoint from the old bridge to the
 factory; the tunnel, the profile and the connector did not change. Since SF-040 ChatGPT only plans
 through it: it reads the repository, discusses the ticket with the user and writes the Task file;
 the user starts the job on the dashboard, and the factory's own reviewers review it.
@@ -25,8 +24,9 @@ Credentials sit on two layers:
 - **Transport.** Only tunnel-client uses the runtime key (a `file:` reference in the profile).
 - **MCP.** No authentication: ChatGPT is set to *No authentication*. The factory listens on
   loopback only, checks Host and Origin, and is reachable only through the private tunnel
-  (ADR-0002). Its tools only plan (`guide`, `read_file`, `search`, `write_task`); nothing reached
-  through them starts, reviews or approves a job.
+  (ADR-0005). Its tools only plan: `guide`, `read_file`, `search`, `write_task`, `task_check`,
+  `read_attachment`, `queue_list` and `queue_add`. Nothing reached through them starts, reviews or
+  approves a job; `queue_add` only puts a written ticket in the run queue.
 
 ## Files and locations
 
@@ -87,12 +87,10 @@ Never paste a key, password or cookie into a chat.
 
 ## Running locally
 
-Two terminals, one per process.
-
 One terminal does for both: `npm start` at the repository root (`sf up`) runs the factory, the
 tunnel (`scripts/sf-tunnel.sh run`, its lines prefixed `tunnel | `) and opens the dashboard;
 Ctrl+C stops both. When the profile or the key is missing it says so in one line and runs
-without the tunnel. The two halves separately:
+without the tunnel. The two halves separately, in two terminals:
 
 **Factory (terminal 1):**
 
@@ -131,8 +129,8 @@ The connector is created once and stays the same.
 3. Connection: **Tunnel**. Choose the tunnel or enter the `tunnel_id`.
 4. Authentication: **No authentication**. The runtime key is **not** entered here.
 5. Read the warning, choose **I understand and want to continue**, then **Create as a plugin**.
-6. In the plugin details check that the tools are `guide`, `read_file`, `search` and
-   `write_task`. Then press **Install**.
+6. In the plugin details check that the tools are `guide`, `read_file`, `search`, `write_task`,
+   `task_check`, `read_attachment`, `queue_list` and `queue_add`. Then press **Install**.
 
 After a change to the tools (or after switching the endpoint from the old bridge to the factory):
 restart `sf serve`, open the existing **Software Factory** plugin at https://chatgpt.com/plugins
@@ -143,13 +141,14 @@ chat; an old conversation does not pick up new tools by itself.
 
 From the dashboard (`npm start` at the repository root opens it; SF-025, SF-028): under **New
 ticket** write the ticket key, a title and what you want in your words; the page creates an empty
-skeleton of the Task file and keeps your words for the conversation. Under **Tickets** press
-**Open the conversation**: a new tab opens ChatGPT with the whole first message in the composer
+skeleton of the Task file and keeps your words for the conversation. Its card appears in the
+**Queue** column; a click opens the ticket's page, where **Open the ChatGPT conversation ↗** opens
+ChatGPT in a new tab with the whole first message in the composer
 (the connector, `guide`, your words, the instruction to investigate, discuss, write the Task
 file with `write_task` with a `## Review brief`, and then tell you it is ready); press Enter if it
 is not sent by itself. Discuss with ChatGPT there; when it says the Task file is ready, read it
-and press **Start** on the ticket's row in the dashboard (or run `bin/sf start <workspace>
-<ticket>`). The manual path, step by step:
+and press **Start** on the ticket's Queue card (or **Start now** on its page, or run
+`bin/sf start <workspace> <ticket>`), or add it to the queue. The manual path, step by step:
 
 1. Open a Work chat, type `@` and choose **Software Factory**.
 2. The first call is `guide`. It returns the Handbook (`factory/HANDBOOK.md`): the cycle, the
@@ -161,7 +160,8 @@ and press **Start** on the ticket's row in the dashboard (or run `bin/sf start <
    fresh Claude review and the Codex gate review each iteration and turn their findings into Fix
    sections, and you approve or abort at the end. ChatGPT is not involved after planning.
 
-`write_task` is the only write action; ChatGPT may ask for confirmation.
+`write_task` (the Task file) and `queue_add` (a written ticket into the run queue) are the only
+write actions; ChatGPT may ask for confirmation.
 
 ## Diagnostics
 
@@ -175,6 +175,7 @@ and press **Start** on the ticket's row in the dashboard (or run `bin/sf start <
 - **The tunnel is not visible in ChatGPT.** Check the associations to the workspace and the Use
   permission.
 - **403 from the factory.** A Host or Origin header that is not loopback; see `factory/README.md`.
-- **Old tools in ChatGPT.** Press **Refresh** on the plugin and open a new chat. After SF-040 the
-  list holds only `guide`, `read_file`, `search` and `write_task`, and the plugin's
+- **Old tools in ChatGPT.** Press **Refresh** on the plugin and open a new chat. The list holds
+  only the eight planning tools above (`guide`, `read_file`, `search`, `write_task`, `task_check`,
+  `read_attachment`, `queue_list`, `queue_add`), and the plugin's
   Authentication must be *No authentication* (edit it, or create the plugin again).

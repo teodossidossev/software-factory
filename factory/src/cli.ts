@@ -7,7 +7,8 @@
 // `sf status|watch|dashboard` (reading the state directory directly), `sf check-task` (the Task
 // check of SF-054, run here and stored in the state directory), `sf rules` (the coding rules of
 // SF-059, read here), `sf notify-test`, `sf info`, `sf metrics` (the gate's cost and yield, SF-092,
-// reading the state directory directly)
+// reading the state directory directly), `sf smoke` (the live smoke test of SF-090,
+// src/live-smoke.ts: its own sf processes on a throwaway repository and state)
 // and `sf run`, the job's runner that sf serve starts (SF-042, src/runner.ts).
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { type ChildProcess, spawn } from 'node:child_process';
@@ -45,6 +46,7 @@ import { resolveTarget } from './mr.js';
 import { collectRules, readJobRulesList, rulesLines } from './rules-docs.js';
 import { turnLimitLine } from './turn-limit.js';
 import { watchEvents } from './watch.js';
+import { DEFAULT_BUDGET_USD, DEFAULT_TIMEOUT_MIN, positiveDecimal, runSmoke } from './live-smoke.js';
 
 const DEFAULT_PORT = 8787;
 const USAGE = `Usage:
@@ -91,6 +93,7 @@ const USAGE = `Usage:
   sf notify-test                                        Send a test notification on every channel
   sf info                                               Version, directories, settings, whether sf serve and the tunnel run, workspaces, jobs
   sf metrics [<workspace>] [--since YYYY-MM-DD] [--json]  The Codex gate per job, current and archived: gate levels per iteration (F full, L light, l light skipped, - none, · no decision, ? unreadable), runs, tokens, items by outcome and the yield (fixed over all items), then the totals; no sf serve needed
+  sf smoke [--keep] [--timeout-min N] [--budget-usd N]  The live smoke test: one tiny real job (Claude Code, Codex, Git) from Task check to push, on a throwaway repository with a local bare remote, its own sf serve and state in one temporary directory (never yours); prints a pass/fail table. Models: SF_SMOKE_MODEL (default haiku), SF_SMOKE_CODEX_MODEL (default: Codex's); budget: --timeout-min (default ${DEFAULT_TIMEOUT_MIN}) and --budget-usd (default ${DEFAULT_BUDGET_USD}), positive numbers; --keep keeps the directory
   sf run <workspace> <ticket>                           The job's runner: its turns, reviews and gate, detached from sf serve (sf serve starts it; one per job)
 
 Notes:
@@ -926,6 +929,32 @@ async function checkTask(args: string[]): Promise<void> {
   }
 }
 
+// sf smoke [--keep] [--timeout-min N] [--budget-usd N] (SF-090): the options checked here, the run
+// in src/live-smoke.ts. Returns the exit code: 0 when every step passed, 1 otherwise.
+async function smoke(args: string[]): Promise<number> {
+  const { values, positionals } = parseArgs({
+    args, allowPositionals: true, strict: true,
+    options: { keep: { type: 'boolean' }, 'timeout-min': { type: 'string' }, 'budget-usd': { type: 'string' } },
+  });
+  if (positionals.length !== 0) {
+    throw new UsageError('smoke takes no arguments (only --keep, --timeout-min N and --budget-usd N).');
+  }
+  const decimal = (name: 'timeout-min' | 'budget-usd', fallback: number): number => {
+    const raw = values[name];
+    if (raw === undefined) {
+      return fallback;
+    }
+    const value = positiveDecimal(raw);
+    if (value === undefined) {
+      throw new UsageError(`--${name} must be a positive number (for example 0.05), got "${raw}".`);
+    }
+    return value;
+  };
+  const timeoutMin = decimal('timeout-min', DEFAULT_TIMEOUT_MIN);
+  const budgetUsd = decimal('budget-usd', DEFAULT_BUDGET_USD);
+  return runSmoke({ keep: values.keep === true, timeoutMin, budgetUsd });
+}
+
 async function notifyTest(args: string[]): Promise<void> {
   if (args.length !== 0) {
     throw new UsageError('notify-test takes no arguments.');
@@ -1298,6 +1327,10 @@ async function main(argv: string[]): Promise<void> {
   if (command === 'metrics') {
     await metrics(rest);
     return;
+  }
+  if (command === 'smoke') {
+    // Its children are stopped and its directory gone; nothing is left to wait for.
+    process.exit(await smoke(rest));
   }
   if (command === 'say') {
     checkJob(rest, 'say');

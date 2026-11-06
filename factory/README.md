@@ -66,6 +66,7 @@ bin/sf reset <workspace> <ticket>              # end the session, remove the wor
 bin/sf notify-test                             # one test notification on every channel; works without sf serve
 bin/sf info                                    # version, directories, settings (gate: codex <version or path> | off (<reason>); gate level: auto | full | invalid: <message>), sf serve and tunnel state, workspaces, jobs; works without sf serve
 bin/sf metrics [<workspace>] [--since YYYY-MM-DD] [--json]  # the Codex gate per job, current and archived: levels, runs, tokens, items by outcome, yield; then the totals (section sf metrics); works without sf serve
+bin/sf smoke [--keep] [--timeout-min N] [--budget-usd N]  # the live smoke test (section Live smoke test): one tiny real job from Task check to push on a throwaway repository and state; a pass/fail table; works without sf serve and never touches yours
 bin/sf run <workspace> <ticket>                # the job's runner (section Jobs); sf serve starts it detached, one per job; refused (runner_running) while the job has one
 npm run typecheck && npm test
 npm run browsers                               # once: Playwright's Chromium for the browser tests (npm install downloads no browser)
@@ -73,9 +74,9 @@ npm run test:browser                           # the dashboard's browser tests (
 ```
 
 Exit codes: 0 ok, 1 error, 2 usage. `sf check-task` exits 0 when the check ran (ready or not
-ready) and 1 when it failed. `sf approve` exits 1 unless the branch was pushed; `sf mr
-create` exits 1 when the push or the merge request failed (the branch may be pushed then: the
-output says so).
+ready) and 1 when it failed. `sf smoke` exits 0 when every step passed, 1 otherwise. `sf approve`
+exits 1 unless the branch was pushed; `sf mr create` exits 1 when the push or the merge request
+failed (the branch may be pushed then: the output says so).
 
 `sf up` is `sf serve` in the same process, then the tunnel as a child process (`SF_TUNNEL_SCRIPT`
 names another script) and the dashboard through `xdg-open` once serve listens. When the script is
@@ -179,6 +180,8 @@ unknown workspace prints no rows and zero totals.
 | `SF_GATE_TIMEOUT_MS` | `900000` | How long one gate run may take; then SIGTERM, and SIGKILL 5 s later (`gate_failed`). |
 | `SF_GATE_LEVEL` | `auto` | The gate level of each iteration (SF-092, section Jobs): `auto` by the risk of the job's change (`full`, `light` or `none`); `full` runs the gate at every clean Claude verdict, as before SF-092. Empty is the default; anything else refuses to start (`invalid_config`). |
 | `SF_GATE_FULL_PATHS` | empty | Comma-separated globs (as `SF_SENSITIVE_PATHS`) whose changed paths make an iteration's gate level `full`. |
+| `SF_SMOKE_MODEL` | `haiku` | The model of `sf smoke`'s job (section Live smoke test): its `SF_MODEL` and `SF_REVIEW_MODEL` (Implementer, Claude review, Task check). |
+| `SF_SMOKE_CODEX_MODEL` | unset | The gate's model in `sf smoke`, its `SF_CODEX_MODEL`; unset uses Codex's default. |
 | `SF_SANDBOX` | on | `off` runs the Implementer and the review without Claude Code's sandbox. |
 | `SF_SANDBOX_DOMAINS` | empty | Comma-separated extra hosts sandboxed commands may reach, besides `registry.npmjs.org`. |
 | `SF_DESKTOP_NOTIFY` | on | `off` disables the desktop notification. |
@@ -195,7 +198,66 @@ The socket path `${SF_STATE_DIR}/sf.sock` must fit a Unix socket address (107 by
 a longer one is refused at start with `socket_path_too_long`.
 
 The execution variables are read once when `sf serve` starts. `sf status` and `sf watch` read
-`SF_STATE_DIR` themselves; `sf start`, `sf queue`, `sf say`, `sf review`, `sf retry`, `sf accept`, `sf simplify`, `sf settle`, `sf approve`, `sf mr`, `sf abort` and `sf reset` use it to find the socket; `sf notify-test` reads the notification variables itself.
+`SF_STATE_DIR` themselves; `sf start`, `sf queue`, `sf say`, `sf review`, `sf retry`, `sf accept`, `sf simplify`, `sf settle`, `sf approve`, `sf mr`, `sf abort` and `sf reset` use it to find the socket; `sf notify-test` reads the notification variables itself; `sf smoke` reads `SF_SMOKE_MODEL` and `SF_SMOKE_CODEX_MODEL` itself and gives its own children their settings (section Live smoke test).
+
+## Live smoke test
+
+`sf smoke` (SF-090, `src/live-smoke.ts`) runs one tiny real job from start to push against the
+real Claude Code, the real Codex CLI and real Git: what the tests' fakes cannot show (a fault such
+as SF-054's StructuredOutput that never came through the hook). Run it after every install update.
+
+```
+sf smoke [--keep] [--timeout-min N] [--budget-usd N]
+```
+
+- **Where.** One temporary directory (`mkdtemp` under the OS temp dir; its path is the first output
+  line) holds everything: `origin.git`, a bare repository (the only remote: no GitHub or GitLab);
+  `work`, its clone on `main` with `greeting.txt` ("hello") and the Task file
+  `.software-factory/SMOKE-1.md` ("Add a second greeting line"), committed as `sf-smoke` and
+  pushed; and the `state`, `config` and `worktrees` of the run. It needs no `sf serve` of yours
+  and never touches your state, config, workspaces, checkouts or remotes.
+- **How.** Every step is a child `sf` process with its own `sf serve` on free ports
+  (`SF_PORT=0`, `SF_DASHBOARD_PORT=0`): `sf workspace add smoke`, `sf check-task`, `sf start`,
+  `sf approve`, the dashboard's page and API with its token, `sf reset`. The children get your
+  environment (with your env file) without any `SF_*` variable but `SF_CLAUDE`, `SF_CODEX`,
+  `SF_GATE`, `SF_SANDBOX`, `SF_SANDBOX_DOMAINS` and `SF_GATE_TIMEOUT_MS`, so the smoke runs what
+  the factory runs; no notification, Git host token or other setting of yours reaches them, and
+  their `SF_ENV_FILE` is an empty file. On top: the run's directories, the review on, the
+  dashboard on, hand-over, simplification and desktop notification off, and small limits
+  (`SF_MAX_TURNS=40`, `SF_REVIEW_MAX_TURNS=30`, `SF_TASK_CHECK_MAX_TURNS=30`,
+  `SF_MAX_ITERATIONS=2`, `SF_GATE_MAX_ROUNDS=1`, `SF_GATE_MAX_TOKENS=400000`).
+- **Models.** `SF_SMOKE_MODEL` (default `haiku`) is the Claude model of the Implementer, the
+  review and the Task check; `SF_SMOKE_CODEX_MODEL` (default unset: Codex's own default) the gate's.
+- **Steps.** Setup, Task check (PASS when the check ran, ready or not ready: the verdict is in the
+  detail), Start, Implementer turn (iteration 1 published), Claude review (a `review.json` with a
+  verdict), Codex gate (a `gate.json` with a verdict; with the gate off it fails with `sf info`'s
+  reason and the job still goes on), MR text (ready for review with an `mr.md` that passes the MR
+  rules), Approve (the job `pushed` and `origin.git` has its branch at the prepared commit),
+  Dashboard (the page and six API answers), Cleanup (an active job aborted, then `sf reset`: a reset once asked of `sf serve` runs to its end, so the abort comes first whatever the moment of a signal; `sf serve` stopped, what is left
+  of every process group the run started, its own and the job runners', ended, a Task check
+  worktree a stopped `sf check-task` left in the OS temp dir removed, the directory removed;
+  `--keep` keeps it). Each PASS is decided from what the factory wrote. A FAIL skips
+  every later step up to Dashboard (but the gate off); a job that stops fails the step it was on
+  with its error code and message. Cleanup always runs.
+- **Budget.** `--timeout-min` (default 20) counts from Setup to the end of Dashboard;
+  `--budget-usd` (default 2) bounds the cost read from the run's state: the `cost_usd` of the
+  published iterations and their reviews plus the Task check's (an estimate of the
+  API-equivalent price, as `EST_USD`; a null cost counts 0 and the total says `unknown`). Both
+  take a positive decimal number such as `0.05`. Over either, the running child `sf` command's
+  process group (it and the Claude Code or Codex it started) gets SIGTERM (SIGKILL after 15 s);
+  once the whole group has ended (a `stopped sf <command> and its process group` line), the job
+  is aborted, the step fails with `time budget` or
+  `cost budget` and the rest is skipped. Ctrl+C or SIGTERM does the same (`interrupted`), exit 1; one that comes during Cleanup lets
+  Cleanup finish (a second one stops Cleanup's running child `sf` command). A process group is signalled only while a process the smoke saw in it (same
+  pid, same start time in `/proc`; for a job runner, the start time its `runner.pid` lock holds) is
+  still in it, so a group id reused after the group ended is never hit.
+- **Cost to expect.** One small Task file read, one one-line change, one review, one gate run and
+  one MR text: with `haiku` a small fraction of the default 2 USD (it usually runs on your Claude
+  plan; the gate's tokens on your Codex plan) and a few minutes. The last line says what this run
+  cost: `smoke: PASS, cost <USD>, gate <N> tokens`, or `smoke: FAIL (<n> of 10 steps), ...`.
+- **Output.** One line per step as it ends, then the table (step, PASS / FAIL / SKIP, seconds,
+  detail: cost in USD for the Claude steps, tokens for the gate), then the last line. Exit 0 when
+  every step passed, 1 otherwise, 2 for a usage error.
 
 ## Task check
 

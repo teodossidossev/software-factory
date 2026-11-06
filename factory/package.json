@@ -14,7 +14,9 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc",
     "start": "node dist/src/cli.js serve",
-    "test": "npm run build && node --test dist/test/*.test.js"
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "browsers": "playwright install chromium",
+    "test:browser": "npm run build && node scripts/check-browser.mjs && node --test dist/test/browser/*.test.js"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.316",
@@ -25,6 +27,7 @@
   "devDependencies": {
     "@modelcontextprotocol/client": "2.4.0",
     "@types/node": "24.19.2",
+    "playwright": "1.65.0",
     "typescript": "7.0.2"
   }
 }

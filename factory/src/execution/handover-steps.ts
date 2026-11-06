@@ -10,7 +10,7 @@ import { askForChanges, commitMessagePath, finishAsk, handOver, remoteBranch, ty
 import { type Handover, type Job, type JobState, now } from '../jobs.js';
 import { mrMessage } from '../mr.js';
 import { notificationLine } from '../patch.js';
-import { checkoutGitDir, removeStaleSandboxLock, staleSandboxLock } from '../sandbox-lock.js';
+import { checkoutGitDir, type LockScan, removeStaleSandboxLock, staleSandboxLock } from '../sandbox-lock.js';
 import type { Workspace } from '../registry.js';
 import { removeWorktree } from '../worktree.js';
 import { cutOffError, type MrContent, mrFailure } from './shared.js';
@@ -167,6 +167,11 @@ export class HandoverPart {
     }
   }
 
+  // Where the lock check looks: the Execution's lockProc (tests only, SF-105), else the real /proc.
+  #scan(): LockScan {
+    return this.core.lockProc === undefined ? {} : { proc: this.core.lockProc };
+  }
+
   // The sandbox's leftover config lock in the workspace checkout's Git directory (SF-085): removed
   // when it is stale (src/sandbox-lock.ts) and no job of the workspace other than the ticket except
   // is in working, awaiting_review or preparing_mr (their sandboxes may be using it). removed: gone, with the
@@ -174,14 +179,14 @@ export class HandoverPart {
   // kept for a running job; none: no stale lock. Only under the workspace's Git lock.
   async #sandboxLock(workspace: string, checkout: string, except: string | undefined, log: { job: Job; iteration: number } | undefined): Promise<'removed' | 'busy' | 'none'> {
     const gitDir = await checkoutGitDir(checkout);
-    if (!(await staleSandboxLock(gitDir))) {
+    if (!(await staleSandboxLock(gitDir, this.#scan()))) {
       return 'none';
     }
     if (sandboxesRunning(await this.core.jobs.list(), workspace, except)) {
       return 'busy';
     }
     // Checked again right before the removal.
-    const path = await removeStaleSandboxLock(gitDir);
+    const path = await removeStaleSandboxLock(gitDir, this.#scan());
     if (path === undefined) {
       return 'none';
     }
@@ -198,7 +203,7 @@ export class HandoverPart {
   async clearAfter(workspace: string, except: string | undefined, log: { job: Job; iteration: number } | undefined): Promise<void> {
     try {
       const { workCheckout } = await this.core.resolve(workspace);
-      if (!(await staleSandboxLock(await checkoutGitDir(workCheckout)))) {
+      if (!(await staleSandboxLock(await checkoutGitDir(workCheckout), this.#scan()))) {
         return;
       }
       await this.core.gitLocked(workspace, () => this.#sandboxLock(workspace, workCheckout, except, log));

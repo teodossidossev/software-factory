@@ -169,7 +169,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     dashboard?.onStateChange(job, from);
     reschedule(job, from);
   };
-  const execution = new Execution(config, (name) => resolveWorkspace(name), onStateChange, handbook.text);
+  const execution = new Execution(config, (name) => resolveWorkspace(name), onStateChange, handbook.text, testLockProc());
   // The tickets' history (SF-081): New ticket and Save (Setup) and write_task (the MCP server)
   // record the Task file's writes; Execution records its Fix sections itself.
   const history = new TicketHistory(config.stateDir);
@@ -859,6 +859,15 @@ async function reset(args: string[]): Promise<void> {
     : 'The worktree is removed; the branch is untouched.');
 }
 
+// Tests only (SF_TEST_HOOKS=on, SF-105): SF_TEST_PROC_DIR, a /proc of the test's own that the
+// sandbox's config lock check scans instead of the real one, so that the machine's other processes
+// cannot keep a test's lock. sf serve, its runners (sf run inherits the environment) and sf
+// check-task read it; without SF_TEST_HOOKS=on it is ignored.
+function testLockProc(): { lockProc?: string } {
+  const dir = process.env.SF_TEST_PROC_DIR;
+  return process.env.SF_TEST_HOOKS === 'on' && dir !== undefined && dir !== '' ? { lockProc: dir } : {};
+}
+
 // `sf run <workspace> <ticket>` (SF-042): the job's runner, started detached by sf serve. Runs the
 // queued requests, the turns, the reviews and the gate of the job, notifies like sf serve, and
 // ends when nothing is left to run; runner_running when the job has a runner already.
@@ -880,7 +889,7 @@ async function run(args: string[]): Promise<void> {
     sending.add(sent);
     void sent.finally(() => sending.delete(sent));
   };
-  const execution = new Execution(config, (name) => resolveWorkspace(name), onStateChange, handbook.text, { runner: { workspace, ticket } });
+  const execution = new Execution(config, (name) => resolveWorkspace(name), onStateChange, handbook.text, { runner: { workspace, ticket }, ...testLockProc() });
   console.log(`${new Date().toISOString()} runner ${process.pid} for ${workspace}/${ticket} started`);
   await runJob(jobs.dir(workspace, ticket), execution, { settle: async () => void (await Promise.allSettled([...sending])) });
   console.log(`${new Date().toISOString()} runner ${process.pid} for ${workspace}/${ticket} ended`);
@@ -949,7 +958,7 @@ async function checkTask(args: string[]): Promise<void> {
   console.log([...checkLines(record), '', `stored: ${path}`].join('\n'));
   // The check's worktree shared the checkout's Git directory: the config lock its sandbox left
   // goes as after a check of sf serve's, unless a job of the workspace runs (SF-085).
-  await new Execution(config, (workspaceName) => resolveWorkspace(workspaceName)).afterTaskCheck(name, ticket);
+  await new Execution(config, (workspaceName) => resolveWorkspace(workspaceName), undefined, undefined, testLockProc()).afterTaskCheck(name, ticket);
   if (record.status === 'failed') {
     process.exitCode = 1;
   }

@@ -20,7 +20,7 @@ import {
 } from '../src/task-check.js';
 import { writeTask } from '../src/task-file.js';
 import { act, fetchRaw } from './support/dashboard-client.js';
-import { assertPathDenials, type Env, git, newEnv, newRepo, probeLog, putRules, reviewLog, reviewScript, runCli, serve, stop, temp } from './support/harness.js';
+import { assertPathDenials, type Env, git, holdOpen, newEnv, newRepo, probeLog, putRules, reviewLog, reviewScript, runCli, serve, stop, temp } from './support/harness.js';
 
 const finding = (severity: CheckFinding['severity'], kind: CheckFinding['kind'] = 'decision', where = '## Behaviour'): CheckFinding =>
   ({ kind, severity, where, problem: `A ${severity} problem.`, expected: 'Say which.' });
@@ -519,14 +519,23 @@ test('sf check-task (SF-085): the config lock the check\'s sandbox left goes onc
   // A job of the workspace in working: its sandbox may be using the lock.
   await jobs.write({ ...job, ticket: 'C-8', branch: 'C-8-x' });
   await staleLock();
-  await reviewScript(env, [{ output: OUTPUT }, { output: OUTPUT }]);
+  await reviewScript(env, [{ output: OUTPUT }, { output: OUTPUT }, { output: OUTPUT }]);
   const kept = await runCli(env, ['check-task', 'app', 'C-9']);
   assert.equal(kept.code, 0, kept.stderr);
   assert.ok(existsSync(lock));
 
-  // No job runs any more; the ticket's own job (not running) gets the event.
+  // No job runs any more, but a process has the lock open (sf check-task scans the test's fake
+  // /proc, SF-105): kept.
   await jobs.write({ ...job, ticket: 'C-8', branch: 'C-8-x', state: 'aborted' });
   await jobs.write({ ...job, state: 'ready_for_human_review' });
+  const release = await holdOpen(env, lock);
+  const held = await runCli(env, ['check-task', 'app', 'C-9']);
+  assert.equal(held.code, 0, held.stderr);
+  assert.ok(existsSync(lock));
+  assert.deepEqual(await removals(), []);
+
+  // Nobody holds it any more; the ticket's own job (not running) gets the event.
+  await release();
   const removed = await runCli(env, ['check-task', 'app', 'C-9']);
   assert.equal(removed.code, 0, removed.stderr);
   assert.equal(existsSync(lock), false);

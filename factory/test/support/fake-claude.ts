@@ -9,7 +9,9 @@
 // A run with --json-schema is a review (SF-038): its script comes from $HOME/fake-review.json
 // ({"reviews": [...]}, consumed through $HOME/fake-review.count) and it logs to
 // $HOME/fake-review.log, so the Implementer's script and log stay as they are. A review entry gives
-// the structured output, or a subtype or noOutput to fail, and an optional delay. Like the real CLI,
+// the structured output, or a subtype or noOutput to fail, and an optional delay. Any run can also
+// wait for a file the test creates (waitFile, SF-105), to run only once what the test waits on has
+// happened. Like the real CLI,
 // it refuses a --json-schema whose $schema is not draft-07 (SF-044): exit 1 before anything else.
 // A review entry's probes (the Task check, SF-054) are Read, Grep and Glob calls made after the
 // init: each is first put to the SDK's PreToolUse hooks (registered at initialize) through the
@@ -36,6 +38,9 @@ interface Turn {
   write?: Record<string, string>;
   tool?: boolean;
   delayMs?: number;
+  // A file under HOME the turn waits for (after delayMs) before it runs (SF-105): the test creates it
+  // once what it waits on happened, so the order does not hang on a fixed delay under load.
+  waitFile?: string;
   permissionMode?: string;
   denials?: string[];
   subtype?: string;
@@ -360,7 +365,14 @@ lines.on('line', (line) => {
         return { type: String(part.type) };
       })
       : undefined;
-    setTimeout(() => run(prompt, blocks), turn.delayMs ?? 0);
+    setTimeout(() => void released().then(() => run(prompt, blocks)), turn.delayMs ?? 0);
   }
 });
-lines.on('close', () => setTimeout(() => process.exit(0), (turn.delayMs ?? 0) + 50));
+
+// Resolves once the turn's waitFile exists (at once without one).
+async function released(): Promise<void> {
+  while (turn.waitFile !== undefined && !existsSync(join(home, turn.waitFile))) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+lines.on('close', () => setTimeout(() => void released().then(() => setTimeout(() => process.exit(0), 50)), turn.delayMs ?? 0));

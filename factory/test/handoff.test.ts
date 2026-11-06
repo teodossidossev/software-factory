@@ -12,7 +12,7 @@ import { handoffOffNotice } from '../src/config.js';
 import { type Job, JobStore } from '../src/jobs.js';
 import { mrMessage } from '../src/mr.js';
 import { saveRegistry } from '../src/registry.js';
-import { call, fakeLog, git, newEnv, newRepo, putTask, readyCheck, refused, runCli, script, serve, type Served, stop, temp, turnsStarted, waitFor } from './support/harness.js';
+import { call, fakeLog, git, holdOpen, newEnv, newRepo, putTask, readyCheck, refused, runCli, script, serve, type Served, stop, temp, turnsStarted, waitFor } from './support/harness.js';
 
 type Env = Awaited<ReturnType<typeof newEnv>>;
 
@@ -690,15 +690,29 @@ async function lockEvents(s: Setup, ticket: string): Promise<Array<Record<string
   return text.trim().split('\n').map((line) => JSON.parse(line)).filter((record) => record.type === 'sandbox_lock_removed');
 }
 
-test('the sandbox\'s leftover config lock (SF-085): removed when a job\'s turn ends and no other job runs, an event in its log; kept while another job of the workspace awaits review', async () => {
+test('the sandbox\'s leftover config lock (SF-085): kept at a job\'s turn end while a process has it open; removed when a job\'s turn ends, nobody holds it and no other job runs, an event in its log; kept while another job of the workspace awaits review', async () => {
   const s = await setup('lockturn', { SF_HANDOFF: 'off' });
-  await script(s.env, [{ write: { 'README.md': 'one\n' }, text: 'iteration 1' }, { write: { 'two.txt': 'two\n' }, text: 'the other job' }]);
+  await script(s.env, [
+    { write: { 'README.md': 'one\n' }, text: 'iteration 1' },
+    { write: { 'README.md': 'one more\n' }, text: 'iteration 2' },
+    { write: { 'two.txt': 'two\n' }, text: 'the other job' },
+  ]);
   const lock = await sandboxLock(s.repo);
+  // A process has the lock open (the job's runner scans the test's fake /proc, SF-105): kept.
+  const release = await holdOpen(s.env, lock);
   await putTask(s.env, s.repo, 'L-1', 'First');
   await call(s.served, 'start', { workspace: 'app', ticket: 'L-1' });
   await waitFor(s.served, 'L-1', 'awaiting_review');
+  assert.equal(await exists(lock), true);
+  assert.deepEqual(await lockEvents(s, 'L-1'), []);
+
+  // Nobody holds it any more: the next turn end removes it.
+  await release();
+  const said = await runCli(s.env, ['say', 'app', 'L-1', 'one more']);
+  assert.equal(said.code, 0, said.stdout + said.stderr);
+  await waitFor(s.served, 'L-1', 'awaiting_review', 2);
   assert.equal(await exists(lock), false);
-  assert.deepEqual((await lockEvents(s, 'L-1')).map((event) => [event.path, event.iteration]), [[lock, 1]]);
+  assert.deepEqual((await lockEvents(s, 'L-1')).map((event) => [event.path, event.iteration]), [[lock, 2]]);
 
   // L-1 awaits review: its sandbox may be using the lock, so L-2's turn end leaves it.
   await sandboxLock(s.repo);
@@ -710,7 +724,7 @@ test('the sandbox\'s leftover config lock (SF-085): removed when a job\'s turn e
   await stop(s.served);
 });
 
-test('sf handover and Take it back meet a stale sandbox lock (SF-085): it is removed and they succeed; a lock that is not stale is never touched and the hand-over refuses with Git\'s message', async () => {
+test('sf handover and Take it back meet a stale sandbox lock (SF-085): it is removed and they succeed; a lock that is not stale (not empty, or open in a process) is never touched and the hand-over refuses with Git\'s message', async () => {
   const s = await setup('lockhand', { SF_HANDOFF: 'off' });
   await script(s.env, [{ write: { 'README.md': 'locked\n' }, text: 'iteration 1' }, mrTurn('M-1')]);
   await toClean(s, 'M-1');
@@ -725,7 +739,18 @@ test('sf handover and Take it back meet a stale sandbox lock (SF-085): it is rem
   assert.deepEqual([(await job(s, 'M-1')).state, head(s.repo), status(s.repo)], ['ready_for_human_review', 'refs/heads/main', '']);
   await rm(held);
 
+  // A stale-looking lock a process has open (sf serve scans the test's fake /proc, SF-105): not
+  // stale, untouched, the same refusal.
   const lock = await sandboxLock(s.repo);
+  const release = await holdOpen(s.env, lock);
+  const refusedOpen = await runCli(s.env, ['handover', 'app', 'M-1']);
+  assert.equal(refusedOpen.code, 1);
+  assert.match(refusedOpen.stderr, /git config failed: error: could not lock config file .*: File exists/);
+  assert.equal(await exists(lock), true);
+  assert.deepEqual([(await job(s, 'M-1')).state, head(s.repo), status(s.repo)], ['ready_for_human_review', 'refs/heads/main', '']);
+  assert.deepEqual(await lockEvents(s, 'M-1'), []);
+  await release();
+
   const handed = await runCli(s.env, ['handover', 'app', 'M-1']);
   assert.equal(handed.code, 0, handed.stdout + handed.stderr);
   assert.equal(await exists(lock), false);

@@ -20,8 +20,10 @@ export async function checkoutGitDir(checkout: string): Promise<string> {
   return resolve(checkout, dir);
 }
 
-// Where the open-file check looks (tests give their own): the /proc directory, and the users
-// whose processes it must be able to see into.
+// Where the open-file check looks: the /proc directory, and the users whose processes it must be
+// able to see into. Production always scans the real /proc; tests inject proc, a fake /proc tree of
+// their own (directly, or through SF_TEST_PROC_DIR under SF_TEST_HOOKS=on, SF-105), so that the
+// machine's other processes (factory jobs in their sandboxes) cannot decide a test's lock.
 export interface LockScan {
   platform?: NodeJS.Platform;
   proc?: string;

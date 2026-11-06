@@ -68,6 +68,8 @@ bin/sf info                                    # version, directories, settings 
 bin/sf metrics [<workspace>] [--since YYYY-MM-DD] [--json]  # the Codex gate per job, current and archived: levels, runs, tokens, items by outcome, yield; then the totals (section sf metrics); works without sf serve
 bin/sf run <workspace> <ticket>                # the job's runner (section Jobs); sf serve starts it detached, one per job; refused (runner_running) while the job has one
 npm run typecheck && npm test
+npm run browsers                               # once: Playwright's Chromium for the browser tests (npm install downloads no browser)
+npm run test:browser                           # the dashboard's browser tests (section Browser tests); not part of npm test
 ```
 
 Exit codes: 0 ok, 1 error, 2 usage. `sf check-task` exits 0 when the check ran (ready or not
@@ -2456,11 +2458,38 @@ runs), the state checked before and after. Every check comes first; a refusal ch
   the rules or is not the message of the commit the push would carry (`prepared_commit`; in
   `handed_over` the saved one); a handed-over push of the user's own commits is not checked.
 
+### Browser tests
+
+`npm test` runs the page's script against a stand-in document (`test/support/fake-dom.ts`). The
+browser tests (SF-091, `test/browser/`) open the dashboard in a real Chromium through Playwright, so
+they see what the stand-in cannot: CSS, layout, focus, real key and drag events and the browser's
+own behaviour. They are separate from `npm test`, which neither runs them nor needs a browser:
+
+```
+npm run browsers       # once per machine: playwright install chromium (Chromium only)
+npm run test:browser   # build, check that Chromium is installed, then node --test dist/test/browser/*.test.js
+```
+
+Without the browser, `npm run test:browser` stops before any test with `No browser: run npm run
+browsers` (`scripts/check-browser.mjs`). The tests need no network and no `sf serve`: each test
+starts the dashboard in-process on a free loopback port over a state directory of its own (six jobs
+in the states the tests need, the planned tickets SF-T1 to SF-T4 with their queue and history),
+with fake actions, setup and run queue that record each call and answer as the real ones do, and a
+temporary Git repository registered under a temporary `SF_CONFIG_DIR` (your registry is never
+read). They cover the board (columns and cards by state, a stop that is a decision, a dependency
+chip, no console error or failed request while it loads), the run queue's controls (the stepper,
+Add to queue and Remove from queue, Alt+Up and Alt+Down, drag and drop), the job page (Stream,
+Changes with its tree's keys, Merge request with Ctrl+S), the planned ticket page (the Task file,
+Edit and Save, Ctrl+S, the history), Escape and Ctrl+Enter in the composer, light and dark with a
+contrast of at least 4.5:1, and a 390 x 844 window. A failing test saves a screenshot to
+`dist/test-results/<file>-<test name>.png` and prints its path. They run headless;
+`SF_BROWSER_HEADED=1 npm run test:browser` shows the window. A check that fails because of a defect
+in the factory's own code is kept and marked as a node:test todo until the defect is fixed.
+
 ### Checking the page by hand
 
-The automated checks run the page's script against a stand-in document
-(`test/support/fake-dom.ts`), not a browser: layout, scrolling, focus, Enter in the textarea and
-the look in light and dark are only checked by hand. With `sf serve` running on a throwaway repository and
+The browser tests above check part of the page in a real browser; the rest (scrolling, the look
+against the prototype, the flows below) is still checked by hand. With `sf serve` running on a throwaway repository and
 `SF_CLAUDE` pointing at `dist/test/support/fake-claude.js` (or a real job you are willing to
 end), in a browser:
 

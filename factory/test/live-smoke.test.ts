@@ -177,8 +177,13 @@ test('the gate off: the Codex gate step FAILs with sf info\'s reason, the job st
   assert.deepEqual(await readdir(ran.tmp), []);
 });
 
+// The time budget of the tests that halt a step on it: the steps before that step (Setup alone in
+// two of them) must fit in it under the whole suite's load, where Setup has taken over 6 s; the
+// halted step's fake answers only after a minute.
+const HALT_BUDGET_MIN = '0.5';
+
 test('a time budget of a fraction of a minute with a slow turn: the step running FAILs with "time budget", the rest SKIP, the job aborted, cleanup done', async () => {
-  const ran = await smoke('smoke-time', ['--timeout-min', '0.2', '--keep'], async (env) => {
+  const ran = await smoke('smoke-time', ['--timeout-min', HALT_BUDGET_MIN, '--keep'], async (env) => {
     await script(env, [{ ...CLEAN_TURNS[0], delayMs: 60_000 }]);
     await reviewScript(env, [{ output: CHECK_READY }]);
   });
@@ -214,7 +219,7 @@ async function processesOf(home: string): Promise<string[]> {
 }
 
 test('a halt during sf check-task ends its whole process group: the Task check\'s Claude Code does not outlive the stopped sf, nothing of the run is left', async () => {
-  const ran = await smoke('smoke-group', ['--timeout-min', '0.1'], async (env) => {
+  const ran = await smoke('smoke-group', ['--timeout-min', HALT_BUDGET_MIN], async (env) => {
     // The check's session would answer only after a minute, and lingers that long once its sf is gone.
     await reviewScript(env, [{ output: CHECK_READY, delayMs: 60_000 }]);
   });
@@ -228,7 +233,7 @@ test('a halt during sf check-task ends its whole process group: the Task check\'
 });
 
 test('a halt waits for the running child sf command\'s whole group, SIGKILL included, before the step ends and the job would be aborted', async () => {
-  const ran = await smoke('smoke-stubborn', ['--timeout-min', '0.1'], async (env) => {
+  const ran = await smoke('smoke-stubborn', ['--timeout-min', HALT_BUDGET_MIN], async (env) => {
     // Claude Code that leaves a process ignoring SIGTERM in the group of sf check-task: only the
     // SIGKILL after 15 s ends it.
     const wrapper = join(env.home, 'stubborn-claude');
@@ -241,7 +246,7 @@ test('a halt waits for the running child sf command\'s whole group, SIGKILL incl
     assert.deepEqual(statuses(ran), ['PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
     assert.equal(ran.rows.get('Task check')!.detail, 'time budget');
     // The group was stopped, SIGKILL after 15 s included, before the step's row: the step took the
-    // budget (6 s) plus the escalation.
+    // budget's rest plus the escalation.
     assert.match(ran.stdout, /\nstopped sf check-task and its process group\nTask check: FAIL \((\d+\.\d) s\) time budget\n/);
     const seconds = Number(/\nTask check: FAIL \((\d+\.\d) s\)/.exec(ran.stdout)![1]);
     assert.ok(seconds >= 15, `the step ended after ${seconds} s, before the SIGKILL`);

@@ -112,7 +112,8 @@ test('staleSandboxLock fails closed on /proc: a descriptor link to the lock, an 
   assert.equal(await removeStaleSandboxLock(dir, { proc: join(proc, 'missing') }), undefined);
   assert.equal(await exists(path), true);
 
-  // An fd directory of the factory's own user that cannot be read (as for a non-dumpable process).
+  // An fd directory of the factory's own user that cannot be read (as for a non-dumpable process),
+  // without a comm to tell it is not Git.
   if (process.getuid?.() !== 0) {
     const hidden = await fakeProc();
     await mkdir(join(hidden, '300', 'fd'), { recursive: true });
@@ -123,6 +124,50 @@ test('staleSandboxLock fails closed on /proc: a descriptor link to the lock, an 
       assert.equal(await exists(path), true);
     } finally {
       await chmod(join(hidden, '300', 'fd'), 0o700);
+    }
+  }
+});
+
+// A pid directory of the factory's own user whose fd directory cannot be read, as for a
+// non-dumpable process (ssh-agent, sd-pam), with its comm: readable, or unreadable too (a non-Git
+// name, so that only the failed read can make it count).
+async function hiddenProcess(proc: string, pid: string, comm: { readable: string } | 'unreadable'): Promise<() => Promise<void>> {
+  const dir = join(proc, pid);
+  await mkdir(join(dir, 'fd'), { recursive: true });
+  await writeFile(join(dir, 'comm'), comm === 'unreadable' ? 'ssh-agent\n' : comm.readable);
+  if (comm === 'unreadable') {
+    await chmod(join(dir, 'comm'), 0o000);
+  }
+  await chmod(join(dir, 'fd'), 0o000);
+  return async () => {
+    await chmod(join(dir, 'fd'), 0o700);
+    await chmod(join(dir, 'comm'), 0o600);
+  };
+}
+
+test('staleSandboxLock on a desktop: an unreadable process of the factory\'s user keeps the lock only when it may be Git (its comm is git or git-*, or cannot be read)', { skip: process.getuid?.() === 0 ? 'root reads every directory' : false }, async () => {
+  const dir = await gitDir();
+  const path = await lock(dir, '', 0o444);
+
+  // Non-dumpable processes that are not Git (a desktop always has some): stale, and removed.
+  const desktop = await fakeProc();
+  const restore = [await hiddenProcess(desktop, '400', { readable: 'ssh-agent\n' }), await hiddenProcess(desktop, '401', { readable: '(sd-pam)\n' }), await hiddenProcess(desktop, '402', { readable: 'gitk\n' })];
+  try {
+    assert.equal(await staleSandboxLock(dir, { proc: desktop }), true);
+    // An unreadable Git process, or one whose comm cannot be read either: kept. (One without a comm
+    // file: the test above, pid 300.)
+    for (const [pid, comm] of [['500', { readable: 'git\n' }], ['501', { readable: 'git-remote-http\n' }], ['502', 'unreadable']] as const) {
+      const gitProc = await fakeProc();
+      restore.push(await hiddenProcess(gitProc, '400', { readable: 'ssh-agent\n' }), await hiddenProcess(gitProc, pid, comm));
+      assert.equal(await staleSandboxLock(dir, { proc: gitProc }), false, `comm ${JSON.stringify(comm)}`);
+      assert.equal(await removeStaleSandboxLock(dir, { proc: gitProc }), undefined);
+      assert.equal(await exists(path), true);
+    }
+    assert.equal(await removeStaleSandboxLock(dir, { proc: desktop }), path);
+    assert.equal(await exists(path), false);
+  } finally {
+    for (const undo of restore) {
+      await undo();
     }
   }
 });

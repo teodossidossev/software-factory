@@ -86,7 +86,11 @@ test('abort stops the runner: the turn ends unpublished, the lock goes, and so d
   const env = await newEnv('runner-abort');
   const repo = await newRepo(env, 'runner-abort-repo', false);
   await putTask(env, repo, 'B-1', 'Abort');
-  await script(env, [{ delayMs: 4000, write: { 'late.txt': 'never\n' } }]);
+  // The turn would write late.txt LATE_MS after its prompt. On abort the SDK closes Claude Code's
+  // stdin and sends it SIGTERM only 2 s later, and the abort itself takes seconds under the whole
+  // suite's load: a turn shorter than both writes before it ends.
+  const LATE_MS = 15_000;
+  await script(env, [{ delayMs: LATE_MS, write: { 'late.txt': 'never\n' } }]);
   const served = await serve(env);
   try {
     await call(served, 'start', { workspace: 'app', ticket: 'B-1' });
@@ -99,7 +103,8 @@ test('abort stops the runner: the turn ends unpublished, the lock goes, and so d
     assert.equal(alive(pid), false);
     assert.throws(() => process.kill(-pid, 0), { code: 'ESRCH' });
     assert.equal(await exists(lockOf(env.state, 'B-1')), false);
-    await new Promise((resolve) => setTimeout(resolve, 4500));
+    // Past the time the turn would have written, had it gone on: its prompt came before the abort.
+    await new Promise((resolve) => setTimeout(resolve, LATE_MS + 500));
     assert.equal(await exists(join(env.state, 'worktrees', 'app', 'B-1', 'late.txt')), false);
     const job = await call(served, 'check', { workspace: 'app', ticket: 'B-1' });
     assert.deepEqual([job.state, job.iteration], ['aborted', 0]);

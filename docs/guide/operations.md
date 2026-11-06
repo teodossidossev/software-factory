@@ -107,8 +107,37 @@ says the gate costs more than it finds: consider `SF_GATE_LEVEL=auto` (the defau
 | Task checks | `checks/my-app/APP-12/<sha>.json` |
 | A plan's history | `tickets/my-app/APP-12/history.jsonl` |
 | Failed notifications | `notify_failed` lines in the job's `events.jsonl` |
+| The morning digests and their mirrors | `digest/<id>.json`; `digest/mirrors/<workspace>.json` (the last good fetch and the last error) |
 
 Secrets and environment values are redacted in the logged reviewer and gate messages.
+
+## The morning digest
+
+Once a day after `digest.at` (`workspaces.json`, default 08:00, weekdays only by default), `sf
+serve` makes the morning digest of the workspaces that are followed (`digest.track`) or have My
+daily on (`digest.my_work`). The dashboard's **Digest** (in the header) shows it; **Generate now**
+makes one at once, and so does `sf digest --now` (it prints the record's path and the cost); `sf
+digest` prints the latest one's period and counts. A scheduled digest sends one notification with
+counts only.
+
+What it reads: for each such workspace, a bare mirror of its own under
+`<state dir>/digest/mirrors/`, cloned once from the origin URL of your checkout (with your
+checkout's objects as a reference, then dissociated) and fetched from origin on every digest; your
+checkout's local branches are fetched into the mirror's `refs/sf-local/heads/`. It reads your
+checkout's `origin` URL and `user.email`, and its README.md for the description.
+
+What it never touches: your checkouts. No pull, no checkout, no fetch in them; their refs, index and
+files stay as they are. The digest's texts (your company's code and commit messages) stay on this
+machine: the state directory and the token-protected dashboard; they go only to the model, as every
+job's work does. The notification carries counts only.
+
+A fetch that fails (no network, no credentials: Git never asks, `ssh` runs in batch mode) is not
+fatal: the digest uses the mirror's older data and says "data as of" the last good fetch. A model
+call that fails twice leaves a digest with the Git data and the error. The records go after 60 days;
+delete `digest/mirrors/` to make the mirrors be cloned again.
+
+Cost: one model session per digest, about $0.30 with Sonnet for three repositories (the prototype's
+measure); the page and `sf digest --now` show each digest's cost.
 
 ## Cleaning old jobs and worktrees
 
@@ -137,7 +166,7 @@ Secrets and environment values are redacted in the logged reviewer and gate mess
 | --- | --- |
 | `~/.config/software-factory/` | `workspaces.json`, `auth.env` (holds your tokens: keep the backup private), `rules/`, `tunnel-runtime.key` |
 | `.software-factory/` in each workspace's checkout | the Task files, their images, the archived tickets: they are **not in Git** |
-| `~/.local/state/software-factory/` | the jobs' history, `queue.json`, the Task checks, the tickets' history, the dashboard token; worth keeping, not needed to start again (leave out `worktrees/` and `sf.sock`) |
+| `~/.local/state/software-factory/` | the jobs' history, `queue.json`, the Task checks, the tickets' history, the morning digests, the dashboard token; worth keeping, not needed to start again (leave out `worktrees/`, `digest/mirrors/` and `sf.sock`) |
 
 Copy them while no job runs, or stop `sf serve` first. A restored state directory needs the same
 workspaces and checkouts.

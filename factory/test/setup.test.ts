@@ -65,7 +65,7 @@ test('setup: workspaces, add with the CLI rules, remove and its live-job guard',
   const repo = await newRepo(env, 'setup-ws-repo', true);
   const jobs = new JobStore(env.state);
   const setup = setupOf(env.config, jobs);
-  assert.deepEqual(await setup.workspaces(), [{ name: 'app', path: repo, liveJobs: 0, problem: null, handoff: null, color: 'teal' }]);
+  assert.deepEqual(await setup.workspaces(), [{ name: 'app', path: repo, liveJobs: 0, problem: null, handoff: null, color: 'teal', app: 'app', description: null, derived_description: 'hello', digest: { track: false, my_work: false } }]);
 
   // The CLI's rules: the name pattern, an absolute path, an existing Git work tree root, no duplicate.
   assert.match(await refused(setup.addWorkspace('Bad', repo), 'invalid_name'), /workspace name must be/);
@@ -81,17 +81,17 @@ test('setup: workspaces, add with the CLI rules, remove and its live-job guard',
   // Added: the real path, read and work alike, and the CLI's registry sees it.
   const second = await newRepo({ ...env, config: join(temp, 'setup-ws-other') }, 'setup-ws-second', false);
   const added = await setup.addWorkspace('second', `${second}/`);
-  assert.deepEqual(added, { name: 'second', path: second, liveJobs: 0, problem: null, handoff: null, color: 'orange' });
+  assert.deepEqual(added, { name: 'second', path: second, liveJobs: 0, problem: null, handoff: null, color: 'orange', app: 'second', description: null, derived_description: 'hello', digest: { track: false, my_work: false } });
   assert.deepEqual((await loadRegistry(env.config)).workspaces.second, { read_checkout: second });
   assert.deepEqual((await setup.workspaces()).map((row) => row.name), ['app', 'second']);
   // The workspace's own hand-over setting (SF-083): stored in the registry and shown in the row.
   const third = await newRepo({ ...env, config: join(temp, 'setup-ws-third-config') }, 'setup-ws-third', false);
-  assert.deepEqual(await setup.addWorkspace('third', third, 'off'), { name: 'third', path: third, liveJobs: 0, problem: null, handoff: 'off', color: 'olive' });
+  assert.deepEqual(await setup.addWorkspace('third', third, { handoff: 'off' }), { name: 'third', path: third, liveJobs: 0, problem: null, handoff: 'off', color: 'olive', app: 'third', description: null, derived_description: 'hello', digest: { track: false, my_work: false } });
   assert.deepEqual((await loadRegistry(env.config)).workspaces.third, { read_checkout: third, handoff: 'off' });
   assert.deepEqual((await setup.workspaces()).map((row) => [row.name, row.handoff]), [['app', null], ['second', null], ['third', 'off']]);
   await setup.removeWorkspace('third');
   // Its colour on the board (SF-084): stored when given, else the hash of the name.
-  assert.equal((await setup.addWorkspace('third', third, undefined, 'grey')).color, 'grey');
+  assert.equal((await setup.addWorkspace('third', third, { color: 'grey' })).color, 'grey');
   assert.deepEqual((await loadRegistry(env.config)).workspaces.third, { read_checkout: third, color: 'grey' });
   assert.deepEqual((await setup.workspaces()).map((row) => [row.name, row.color]), [['app', 'teal'], ['second', 'orange'], ['third', 'grey']]);
   await setup.removeWorkspace('third');
@@ -111,6 +111,63 @@ test('setup: workspaces, add with the CLI rules, remove and its live-job guard',
   await saveRegistry({ workspaces: { app: { read_checkout: repo, work_checkout: repo }, lost: { read_checkout: second, work_checkout: second } } }, env.config);
   const rows = await setup.workspaces();
   assert.deepEqual(rows.map((row) => [row.name, row.problem]), [['app', null], ['lost', 'The checkout does not exist.']]);
+});
+
+test('setup (SF-103): add with the digest fields; edit keeps the name and the keys the form does not show, writes atomically, validates the path; a path change with a live job is workspace_busy', async () => {
+  const env = await newEnv('setup-edit');
+  const repo = await newRepo(env, 'setup-edit-repo', true);
+  const jobs = new JobStore(env.state);
+  const setup = setupOf(env.config, jobs);
+  const web = await newRepo({ ...env, config: join(temp, 'setup-edit-web-config') }, 'setup-edit-web', false);
+  const added = await setup.addWorkspace('web', web, { description: '  The shop\'s web front end. ', app: ' shop ', digest: { track: true, my_work: false } });
+  assert.deepEqual([added.app, added.description, added.derived_description, added.digest], ['shop', 'The shop\'s web front end.', 'hello', { track: true, my_work: false }]);
+  assert.deepEqual((await loadRegistry(env.config)).workspaces.web, { read_checkout: web, description: 'The shop\'s web front end.', app: 'shop', digest: { track: true, my_work: false } });
+  assert.match(await refused(setup.addWorkspace('long', web, { app: 'x'.repeat(65) }), 'workspace_invalid'), /app must be at most 64/);
+
+  // Keys the form does not show stay; "" removes description and app, default and auto the handoff and color.
+  const registry = await loadRegistry(env.config);
+  registry.workspaces.app = { ...registry.workspaces.app!, rules_skip: ['docs/**'], handoff: 'off', color: 'red' };
+  await saveRegistry(registry, env.config);
+  const edit = { path: repo, description: 'The shop\'s backend.', app: 'shop', handoff: 'default' as const, color: 'auto' as const, digest: { track: true, my_work: true } };
+  const row = await setup.editWorkspace('app', edit);
+  assert.deepEqual(row, { name: 'app', path: repo, liveJobs: 0, problem: null, handoff: null, color: 'teal', app: 'shop', description: 'The shop\'s backend.', derived_description: 'hello', digest: { track: true, my_work: true } });
+  assert.deepEqual((await loadRegistry(env.config)).workspaces.app, { read_checkout: repo, work_checkout: repo, rules_skip: ['docs/**'], description: 'The shop\'s backend.', app: 'shop', digest: { track: true, my_work: true } });
+  await setup.editWorkspace('app', { ...edit, description: '', app: '', handoff: 'checkout', color: 'green', digest: { track: false, my_work: false } });
+  assert.deepEqual((await loadRegistry(env.config)).workspaces.app, { read_checkout: repo, work_checkout: repo, rules_skip: ['docs/**'], handoff: 'checkout', color: 'green' });
+  // No temp file left beside workspaces.json.
+  assert.deepEqual((await readdir(env.config)).filter((name) => name.startsWith('.')), []);
+
+  // Refusals: a bad path, an unknown or invalid name; nothing written.
+  const before = await readFile(join(env.config, 'workspaces.json'), 'utf8');
+  assert.equal(await refused(setup.editWorkspace('app', { ...edit, path: join(temp, 'missing') }), 'workspace_invalid'), 'The path does not exist.');
+  assert.equal(await refused(setup.editWorkspace('app', { ...edit, path: 'relative' }), 'workspace_invalid'), 'The path must be absolute.');
+  await refused(setup.editWorkspace('nope', edit), 'workspace_not_found');
+  await refused(setup.editWorkspace('Nope', edit), 'invalid_name');
+  assert.equal(await readFile(join(env.config, 'workspaces.json'), 'utf8'), before);
+
+  // A live job: the path cannot change, the other fields can.
+  await jobs.write(jobOf('app', 'A-1', 'working'));
+  assert.match(await refused(setup.editWorkspace('app', { ...edit, path: web }), 'workspace_busy'), /has a live job \(A-1 working\)/);
+  assert.equal((await setup.editWorkspace('app', { ...edit, path: `${repo}/`, description: 'Still the backend.' })).description, 'Still the backend.');
+  assert.equal((await loadRegistry(env.config)).workspaces.app!.read_checkout, repo);
+  await jobs.write(jobOf('app', 'A-1', 'aborted'));
+  assert.equal((await setup.editWorkspace('app', { ...edit, path: web })).path, web);
+});
+
+test('setup (SF-103): the payload\'s settings and saveDigestSettings: validated, the model kept', async () => {
+  const env = await newEnv('setup-digest');
+  await newRepo(env, 'setup-digest-repo', false);
+  const jobs = new JobStore(env.state);
+  const setup = new Setup({ configDir: env.config, jobs, exclusive: (work) => work(NO_RETIREMENT), handoffDefault: 'off' });
+  assert.deepEqual(await setup.workspaceSettings(), { handoff_default: 'off', digest: { at: '08:00', weekdays_only: true, language: 'English' } });
+  const registry = await loadRegistry(env.config);
+  await saveRegistry({ ...registry, digest: { model: 'opus' } }, env.config);
+  assert.deepEqual(await setup.saveDigestSettings({ at: '07:30', weekdays_only: false, language: ' Deutsch ' }), { at: '07:30', weekdays_only: false, language: 'Deutsch' });
+  assert.deepEqual((await loadRegistry(env.config)).digest, { model: 'opus', at: '07:30', weekdays_only: false, language: 'Deutsch' });
+  for (const bad of [{ at: '7:30', language: 'English' }, { at: '24:00', language: 'English' }, { at: '08:00', language: ' ' }, { at: '08:00', language: 'x'.repeat(41) }]) {
+    await refused(setup.saveDigestSettings({ ...bad, weekdays_only: true }), 'invalid_digest_settings');
+  }
+  assert.deepEqual((await setup.workspaceSettings()).digest, { at: '07:30', weekdays_only: false, language: 'Deutsch' });
 });
 
 test('setup: tickets lists the Task files without a live job; createTicket writes the draft once', async () => {

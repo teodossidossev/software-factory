@@ -122,6 +122,52 @@ test('dashboard: the ticket action routes are POST only with the action checks, 
   }, setup);
 });
 
+test('dashboard (SF-103): workspace-edit and digest-settings are POST only with strict bodies, dispatch exactly, map the errors and refresh the setup', async () => {
+  const setup = fakeSetup([workspaceRow('app')]);
+  await withDashboard('dash-workspace-edit', fakeActions(), async (dashboard) => {
+    const base = dashboard.url;
+    const edit = { path: '/srv/app', description: 'The backend.', app: 'shop', handoff: 'default', color: 'auto', digest: { track: true, my_work: false } };
+    for (const path of ['api/workspaces/app/edit', 'api/digest-settings']) {
+      for (const method of ['GET', 'PUT']) {
+        const reply = await act(base, path, {}, { method });
+        assert.deepEqual([reply.status, reply.headers.allow], [405, 'POST'], `${method} ${path}`);
+      }
+      assert.deepEqual(error(await act(base, path, {}, { headers: { origin: `http://localhost:${base.port}` } })), { status: 403, code: 'invalid_origin' });
+    }
+    assert.equal((await act(base, 'api/workspaces/App/edit', edit)).status, 404);
+    const bad: unknown[] = [
+      {}, { ...edit, name: 'other' }, { ...edit, handoff: 'on' }, { ...edit, handoff: null }, { ...edit, color: 'pink' }, { ...edit, description: undefined },
+      { ...edit, digest: { track: true } }, { ...edit, digest: { track: true, my_work: false, extra: 1 } }, { ...edit, work_checkout: '/x' }, [],
+    ];
+    for (const body of bad) {
+      assert.deepEqual(error(await act(base, 'api/workspaces/app/edit', body)), { status: 400, code: 'invalid_body' }, JSON.stringify(body));
+    }
+    for (const body of [{}, { at: '08:00', weekdays_only: true }, { at: '08:00', weekdays_only: 'yes', language: 'English' }, { at: '08:00', weekdays_only: true, language: 'English', model: 'opus' }]) {
+      assert.deepEqual(error(await act(base, 'api/digest-settings', body)), { status: 400, code: 'invalid_body' }, JSON.stringify(body));
+    }
+    assert.deepEqual(setup.calls, []);
+
+    const stream = await openStream(new URL('api/stream', base));
+    const first = await stream.next('workspaces');
+    assert.deepEqual([first.handoff_default, first.digest], ['checkout', { at: '08:00', weekdays_only: true, language: 'English' }]);
+    const edited = JSON.parse((await act(base, 'api/workspaces/app/edit', edit)).body).result;
+    assert.deepEqual([edited.app, edited.description, edited.digest], ['shop', 'The backend.', { track: true, my_work: false }]);
+    assert.deepEqual(setup.calls.at(-1), ['editWorkspace', 'app', edit]);
+    await stream.next('workspaces');
+    const settings = { at: '07:30', weekdays_only: false, language: 'Deutsch' };
+    assert.deepEqual(JSON.parse((await act(base, 'api/digest-settings', settings)).body).result, settings);
+    assert.deepEqual(setup.calls.at(-1), ['saveDigestSettings', settings]);
+    await stream.next('workspaces');
+    for (const [code, status] of [['workspace_busy', 409], ['workspace_invalid', 400], ['workspace_not_found', 404]] as const) {
+      setup.answer = new FactoryError(code, `The ${code} message.`);
+      assert.deepEqual(error(await act(base, 'api/workspaces/app/edit', edit)), { status, code });
+    }
+    setup.answer = new FactoryError('invalid_digest_settings', 'The time must be HH:MM.');
+    assert.deepEqual(error(await act(base, 'api/digest-settings', settings)), { status: 400, code: 'invalid_digest_settings' });
+    stream.close();
+  }, setup);
+});
+
 test('client: a Queue card has Archive and Delete…; delete asks first; the archived list restores and deletes; an open job that leaves the board closes its page', async () => {
   const STATIC_DIR = new URL('../../static/', import.meta.url);
   // A failed job: its ticket is in the Queue (a pushed one is only on Done, SF-057).

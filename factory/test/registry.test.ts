@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
-import { configDir, loadRegistry, parseRegistry, resolveWorkspace, saveRegistry, WORKSPACE_COLORS, workspaceColor } from '../src/registry.js';
+import { configDir, digestSettings, editedEntry, loadRegistry, parseRegistry, resolveWorkspace, saveRegistry, WORKSPACE_COLORS, workspaceApp, workspaceColor, workspaceDigest } from '../src/registry.js';
 
 let temp: string;
 let repo: string;
@@ -72,6 +72,38 @@ test('parseRegistry (SF-084): a workspace may set color to one of the palette na
     invalid(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', color } } }));
   }
   assert.throws(() => parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', color: 'pink' } } })), /workspaces\.app\.color/);
+});
+
+test('parseRegistry (SF-103): description, app and digest per workspace, the top-level digest settings with defaults; unknown keys still refused', () => {
+  const text = JSON.stringify({
+    workspaces: { api: { read_checkout: '/srv/api', description: 'The shop backend.', app: 'shop', digest: { track: true, my_work: false } }, web: { read_checkout: '/srv/web' } },
+    digest: { at: '07:15', weekdays_only: false, model: 'opus', language: 'Deutsch' },
+  });
+  const registry = parseRegistry(text);
+  assert.deepEqual(registry.workspaces.api, { read_checkout: '/srv/api', description: 'The shop backend.', app: 'shop', digest: { track: true, my_work: false } });
+  assert.deepEqual(digestSettings(registry), { at: '07:15', weekdays_only: false, model: 'opus', language: 'Deutsch' });
+  assert.deepEqual(digestSettings(parseRegistry('{"workspaces":{}}')), { at: '08:00', weekdays_only: true, model: 'sonnet', language: 'English' });
+  assert.deepEqual([workspaceApp('api', registry.workspaces.api!), workspaceApp('web', registry.workspaces.web!)], ['shop', 'web']);
+  assert.deepEqual(workspaceDigest(registry.workspaces.web!), { track: false, my_work: false });
+  for (const bad of [
+    { workspaces: { app: { read_checkout: '/srv/app', digest: { track: true, follow: true } } } },
+    { workspaces: { app: { read_checkout: '/srv/app', digest: { track: 'yes' } } } },
+    { workspaces: { app: { read_checkout: '/srv/app', app: '' } } },
+    { workspaces: { app: { read_checkout: '/srv/app', tags: [] } } },
+    { workspaces: {}, digest: { at: '8:00' } },
+    { workspaces: {}, digest: { at: '08:00', email: 'x' } },
+    { workspaces: {}, extra: 1 },
+  ]) {
+    invalid(JSON.stringify(bad));
+  }
+});
+
+test('editedEntry (SF-103): the form\'s fields replace the entry\'s; work_checkout and rules_skip stay', () => {
+  const entry = { read_checkout: '/srv/a', work_checkout: '/srv/a', rules_skip: ['x/**'], handoff: 'off' as const, color: 'red' as const, description: 'old', app: 'old' };
+  assert.deepEqual(editedEntry(entry, { read_checkout: '/srv/b', description: '', app: '', handoff: 'default', color: 'auto', digest: { track: false, my_work: false } }), { read_checkout: '/srv/b', work_checkout: '/srv/a', rules_skip: ['x/**'] });
+  assert.deepEqual(editedEntry(entry, { read_checkout: '/srv/a', description: ' New. ', app: 'shop', handoff: 'checkout', color: 'blue', digest: { track: false, my_work: true } }), {
+    read_checkout: '/srv/a', work_checkout: '/srv/a', rules_skip: ['x/**'], handoff: 'checkout', color: 'blue', description: 'New.', app: 'shop', digest: { track: false, my_work: true },
+  });
 });
 
 test('workspaceColor (SF-084): the configured colour, else the palette entry at the sum of the name\'s UTF-16 code units mod 8', () => {

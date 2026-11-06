@@ -9,7 +9,8 @@
 // SF-059, read here), `sf notify-test`, `sf info`, `sf metrics` (the gate's cost and yield, SF-092,
 // reading the state directory directly), `sf smoke` (the live smoke test of SF-090,
 // src/live-smoke.ts: its own sf processes on a throwaway repository and state)
-// and `sf run`, the job's runner that sf serve starts (SF-042, src/runner.ts).
+// and `sf run`, the job's runner that sf serve starts (SF-042, src/runner.ts), and `sf digest
+// [--now]` (the morning digest of SF-103, through the socket of sf serve).
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { type ChildProcess, spawn } from 'node:child_process';
 import { basename, resolve } from 'node:path';
@@ -19,6 +20,8 @@ import { open } from 'node:fs/promises';
 import { addAttachment, checkSize, removeAttachment } from './attachments.js';
 import { openInBrowser } from './browser.js';
 import { envFilePath, gateConfig, gateLevelSetting, handoffSetting, loadConfig, loadEnvFile, rulesMaxBytes, stateDir } from './config.js';
+import { Digests } from './digest-run.js';
+import { DigestSchedule } from './digest-schedule.js';
 import { DEFAULT_DASHBOARD_PORT, dashboardUrl, readToken, removeToken, type RunningDashboard, startDashboard } from './dashboard.js';
 import { FactoryError } from './errors.js';
 import { Execution, type StateListener } from './execution.js';
@@ -91,6 +94,7 @@ const USAGE = `Usage:
   sf handed-done <workspace> <ticket>                   I opened the MR myself: the job is pushed once origin has the branch with your changes (handed_over)
   sf abort <workspace> <ticket> [--discard]             End the job; the worktree stays (its path is printed); --discard removes the worktree and the branch
   sf reset <workspace> <ticket>                         End the session, remove the worktree and archive the job; the branch is untouched
+  sf digest [--now]                                     The morning digest of the followed workspaces (sf serve makes one a day at digest.at in workspaces.json): without --now, the latest digest's period and counts; --now makes one at once and prints the path of its record and its cost
   sf notify-test                                        Send a test notification on every channel
   sf info                                               Version, directories, settings, whether sf serve and the tunnel run, workspaces, jobs
   sf metrics [<workspace>] [--since YYYY-MM-DD] [--json]  The Codex gate per job, current and archived: gate levels per iteration (F full, L light, l light skipped, - none, · no decision, ? unreadable), runs, tokens, items by outcome and the yield (fixed over all items), then the totals; no sf serve needed
@@ -172,7 +176,14 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   // The start screen of the dashboard: the registry and the Task files, under the Execution's lock.
   // A finished job leaves with its Task file through the lock's scope, in the same acquisition as
   // the ticket action's checks: it is archived and a kept worktree removed.
-  const setup = new Setup({ configDir: configDir(), jobs, exclusive: (work) => execution.exclusive(work), history });
+  const setup = new Setup({ configDir: configDir(), jobs, exclusive: (work) => execution.exclusive(work), history, handoffDefault: config.handoff });
+  // The morning digest (SF-103): one a day by the timer, Generate now on the dashboard, sf digest
+  // --now through the socket; a scheduled one is notified with its counts.
+  const digests = new Digests({
+    stateDir: config.stateDir, configDir: configDir(), claudePath: config.claudePath,
+    notify: (notification) => sendNotification(notification, notifyConfig()),
+  });
+  const digestSchedule = new DigestSchedule({ digests, configDir: configDir() });
   // The run queue's scheduler: a pass after recovery, on every job state change (sf serve's own and
   // the runners', below), on every change of the queue; a pass that changed something refreshes
   // every page.
@@ -223,6 +234,15 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     // sf info: whether sf serve answers.
     if (command === 'ping') {
       return {};
+    }
+    // sf digest --now and sf digest (SF-103).
+    if (command === 'digest-run' && args.length === 0) {
+      const { id, path, cost_usd } = await digests.run('manual');
+      return { id, path, cost_usd };
+    }
+    if (command === 'digest-latest' && args.length === 0) {
+      const latest = await digests.latest();
+      return latest === undefined ? { digest: null } : { digest: latest.id, period: latest.period, counts: latest.counts, error: latest.error };
     }
     if (command.startsWith('queue-')) {
       const result = await queueCommand(runQueue, command.slice('queue-'.length), args);
@@ -319,7 +339,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
       // The dashboard's actions (DashboardActions: start, approve, abort, say, retryReview,
       // acceptGate and archiveFinished) run on the same Execution as the socket commands.
       dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, setup, {
-        gate: config.gate.on, checks, queue: runQueue, onWorkspacesChanged: () => void autoChecks?.rereadWorkspaces(),
+        gate: config.gate.on, checks, queue: runQueue, onWorkspacesChanged: () => void autoChecks?.rereadWorkspaces(), digests,
       });
     } else {
       await removeToken(config.stateDir);
@@ -348,6 +368,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   scheduling = true;
   void runQueue.schedule();
   await autoChecks?.start();
+  digestSchedule.start();
 
   let stopping = false;
   const stop = (signal: NodeJS.Signals): void => {
@@ -360,6 +381,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     followed.close();
     runQueue.close();
     autoChecks?.close();
+    digestSchedule.close();
     Promise.all([server.close(), socket.close(), dashboard?.close()]).then(
       () => process.exit(0),
       (error: unknown) => {
@@ -959,6 +981,32 @@ async function smoke(args: string[]): Promise<number> {
   return runSmoke({ keep: values.keep === true, timeoutMin, budgetUsd });
 }
 
+// sf digest [--now] (SF-103), through the socket of sf serve.
+async function digest(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { now: { type: 'boolean' } } });
+  if (positionals.length > 0) {
+    throw new UsageError('digest takes no arguments but --now.');
+  }
+  if (values.now === true) {
+    const result = await request('digest-run', []);
+    console.log(`digest: ${String(result.path)}\ncost: ${typeof result.cost_usd === 'number' ? `$${result.cost_usd.toFixed(4)}` : 'unknown'}`);
+    return;
+  }
+  const result = await request('digest-latest', []);
+  if (result.digest === null) {
+    console.log('No digest yet: sf digest --now makes one.');
+    return;
+  }
+  const period = result.period as { from: string; to: string };
+  const counts = result.counts as { landed: number; live_branches: number; impact: number };
+  console.log([
+    `digest: ${String(result.digest)}`,
+    `period: ${localTime(period.from) ?? period.from} to ${localTime(period.to) ?? period.to}`,
+    `landed: ${counts.landed}`, `live branches: ${counts.live_branches}`, `mine need attention: ${counts.impact}`,
+    ...(typeof result.error === 'string' ? [`model: failed (${result.error}); the Git data is shown`] : []),
+  ].join('\n'));
+}
+
 async function notifyTest(args: string[]): Promise<void> {
   if (args.length !== 0) {
     throw new UsageError('notify-test takes no arguments.');
@@ -1322,6 +1370,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'notify-test') {
     await notifyTest(rest);
+    return;
+  }
+  if (command === 'digest') {
+    await digest(rest);
     return;
   }
   if (command === 'info') {

@@ -28,13 +28,14 @@ import { writeFileAtomic } from './atomic.js';
 import { Changes } from './changes.js';
 import { conversationUrl, MAX_CONVERSATION_URL, ticketConversation } from './conversation.js';
 import { FactoryError } from './errors.js';
+import type { Digests } from './digest-run.js';
 import type { Execution } from './execution.js';
 import type { RunQueue } from './queue.js';
 import { lineEntries, type StreamEntry, streamContext } from './job-stream.js';
 import { MAX_MR_TEXT_BYTES } from './mr.js';
 import type { Job, JobState, JobStore } from './jobs.js';
 import { DECISIONS, unsettled } from './ledger.js';
-import { HANDOFF_MODES, WORKSPACE_COLORS, WORKSPACE_NAME_PATTERN } from './registry.js';
+import { DIGEST_DEFAULTS, HANDOFF_MODES, WORKSPACE_COLORS, WORKSPACE_NAME_PATTERN } from './registry.js';
 import type { Setup, TicketRow } from './setup.js';
 import type { CheckSummary, TaskChecks } from './task-check.js';
 import { turnLimitLine } from './turn-limit.js';
@@ -100,8 +101,13 @@ const PUSH_CHECK_INTERVAL_MS = 60_000;
 // jobDependencies: the tickets a live job's Task file lands after (SF-084). taskFile and saveTask:
 // the planned ticket page's Task file and its Save (SF-081). addAttachment, removeAttachment and
 // readAttachment: a ticket's images (SF-064).
-export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'removeWorkspace' | 'tickets' | 'jobDependencies' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'archivedTickets' | 'taskText' | 'taskTitle'
+// editWorkspace, workspaceSettings and saveDigestSettings: the Workspaces dialog's Edit, the
+// payload's settings and the Morning digest section (SF-103).
+export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'editWorkspace' | 'workspaceSettings' | 'saveDigestSettings' | 'removeWorkspace' | 'tickets' | 'jobDependencies' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'archivedTickets' | 'taskText' | 'taskTitle'
   | 'taskFile' | 'saveTask' | 'addAttachment' | 'removeAttachment' | 'readAttachment'>;
+
+// The morning digest (SF-103): the list, one record, a manual run.
+export type DashboardDigests = Pick<Digests, 'list' | 'read' | 'start'>;
 
 // The Task checks (SF-054): start one, a ticket's view and its board summary.
 export type DashboardChecks = Pick<TaskChecks, 'start' | 'view' | 'summary'>;
@@ -116,6 +122,7 @@ type QueueAction = (typeof QUEUE_ACTIONS)[number];
 // A dashboard without a start screen (in-process tests of the older endpoints).
 const NO_SETUP: DashboardSetup = {
   workspaces: async () => [],
+  workspaceSettings: async () => ({ handoff_default: 'checkout', digest: { at: DIGEST_DEFAULTS.at, weekdays_only: DIGEST_DEFAULTS.weekdays_only, language: DIGEST_DEFAULTS.language } }),
   tickets: async () => [],
   jobDependencies: async () => [],
   archivedTickets: async () => [],
@@ -142,6 +149,12 @@ const NO_SETUP: DashboardSetup = {
     throw new FactoryError('setup_unavailable', 'The start screen is not available.');
   },
   removeWorkspace: async () => {
+    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
+  },
+  editWorkspace: async () => {
+    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
+  },
+  saveDigestSettings: async () => {
     throw new FactoryError('setup_unavailable', 'The start screen is not available.');
   },
   createTicket: async () => {
@@ -186,9 +199,28 @@ const BODIES = {
   },
   'mr-reset': { shape: '{}', schema: z.strictObject({}) },
   'workspace-add': {
-    shape: `{"name": string, "path": string, "handoff"?: "checkout" | "off", "color"?: ${WORKSPACE_COLORS.map((color) => `"${color}"`).join(' | ')}}`,
-    schema: z.strictObject({ name: z.string(), path: z.string(), handoff: z.enum(HANDOFF_MODES).optional(), color: z.enum(WORKSPACE_COLORS).optional() }),
+    shape: `{"name": string, "path": string, "handoff"?: "checkout" | "off", "color"?: ${WORKSPACE_COLORS.map((color) => `"${color}"`).join(' | ')}, "description"?: string, "app"?: string, "digest"?: {"track": boolean, "my_work": boolean}}`,
+    schema: z.strictObject({
+      name: z.string(), path: z.string(), handoff: z.enum(HANDOFF_MODES).optional(), color: z.enum(WORKSPACE_COLORS).optional(),
+      description: z.string().optional(), app: z.string().optional(), digest: z.strictObject({ track: z.boolean(), my_work: z.boolean() }).optional(),
+    }),
   },
+  // Edit of a workspace (SF-103): every field of the form; "" removes description and app,
+  // "default" the handoff, "auto" the color.
+  'workspace-edit': {
+    shape: `{"path": string, "description": string, "app": string, "handoff": "default" | "checkout" | "off", "color": "auto" | ${WORKSPACE_COLORS.map((color) => `"${color}"`).join(' | ')}, "digest": {"track": boolean, "my_work": boolean}}`,
+    schema: z.strictObject({
+      path: z.string(), description: z.string(), app: z.string(), handoff: z.enum(['default', ...HANDOFF_MODES]), color: z.enum(['auto', ...WORKSPACE_COLORS]),
+      digest: z.strictObject({ track: z.boolean(), my_work: z.boolean() }),
+    }),
+  },
+  // The Morning digest section of the Setup (SF-103).
+  'digest-settings': {
+    shape: '{"at": "HH:MM", "weekdays_only": boolean, "language": string}',
+    schema: z.strictObject({ at: z.string(), weekdays_only: z.boolean(), language: z.string() }),
+  },
+  // Generate now on the Digest page (SF-103).
+  'digest-run': { shape: '{}', schema: z.strictObject({}) },
   'workspace-remove': { shape: '{}', schema: z.strictObject({}) },
   'ticket-archive': { shape: '{}', schema: z.strictObject({}) },
   'ticket-restore': { shape: '{}', schema: z.strictObject({}) },
@@ -245,6 +277,8 @@ const ERROR_STATUS: Record<string, number> = {
   mr_text_invalid: 400, branch_locked: 409, base_unrelated: 409,
   // origin did not say where a handed-over branch is (SF-073).
   push_check_failed: 502,
+  // The morning digest (SF-103): one run at a time; its settings.
+  digest_running: 409, invalid_digest_settings: 400,
   // The run queue (SF-071).
   already_queued: 409, not_queued: 409, invalid_limit: 400, invalid_position: 400, invalid_rule: 400,
   // A ticket's images (SF-064): not an image, too large, too many, and a Task file that refers to
@@ -586,8 +620,9 @@ async function jobsPayload(jobs: JobStore, setup: DashboardSetup, actions: Dashb
   return { jobs: list };
 }
 
+// The workspaces and, since SF-103, the hand-over default and the morning digest's settings.
 async function workspacesPayload(setup: DashboardSetup) {
-  return { workspaces: await setup.workspaces() };
+  return { workspaces: await setup.workspaces(), ...(await setup.workspaceSettings()) };
 }
 
 // A ticket's check summary for the board, or none when it cannot be read.
@@ -760,6 +795,11 @@ function jobKey(workspace: string | undefined, ticket: string | undefined): [str
 type Target =
   | { kind: 'action'; action: DashboardAction; workspace: string | undefined; ticket: string | undefined }
   | { kind: 'workspace-remove'; name: string | undefined }
+  // The Workspaces dialog's Edit and the Morning digest section (SF-103), POST only.
+  | { kind: 'workspace-edit'; name: string | undefined }
+  | { kind: 'digest-settings' }
+  // Generate now (SF-103): POST api/digests/run.
+  | { kind: 'digest-run' }
   | { kind: 'ticket-action'; action: 'archive' | 'restore' | 'delete' | 'start'; workspace: string | undefined; ticket: string | undefined }
   // The Task check (SF-054): GET reads the ticket's last check, POST starts one.
   | { kind: 'ticket-check'; workspace: string | undefined; ticket: string | undefined }
@@ -791,6 +831,15 @@ function targetOf(path: string[]): Target {
   }
   if (kind === 'workspaces' && path.length === 4 && b === 'remove' && c === undefined) {
     return { kind: 'workspace-remove', name: a };
+  }
+  if (kind === 'workspaces' && path.length === 4 && b === 'edit') {
+    return { kind: 'workspace-edit', name: a };
+  }
+  if (kind === 'digest-settings' && path.length === 2) {
+    return { kind: 'digest-settings' };
+  }
+  if (kind === 'digests' && path.length === 3 && a === 'run') {
+    return { kind: 'digest-run' };
   }
   if (kind === 'tickets' && path.length === 2) {
     return { kind: 'both', route: 'ticket-new' };
@@ -893,11 +942,12 @@ interface Post {
 // gate: whether the Codex gate is on (SF_GATE), shown in the job's pipeline; checks: the Task
 // checks (SF-054), none without (the check routes answer 404, the tickets have no check); queue:
 // the run queue (SF-071), none without (the queue routes answer 404, the tickets payload's queue is
-// null); onWorkspacesChanged: called after a workspace was added or removed (SF-086: the automatic
-// checks read the registry again).
+// null); onWorkspacesChanged: called after a workspace was added, edited or removed (SF-086: the
+// automatic checks read the registry again); digests: the morning digest (SF-103), none without (the
+// digest routes answer 404).
 export async function startDashboard(
   port: number, stateDir: string, jobs: JobStore, actions: DashboardActions, setup: DashboardSetup = NO_SETUP,
-  { gate: gateOn = true, checks, queue, onWorkspacesChanged }: { gate?: boolean; checks?: DashboardChecks; queue?: DashboardQueue; onWorkspacesChanged?: () => void } = {},
+  { gate: gateOn = true, checks, queue, onWorkspacesChanged, digests }: { gate?: boolean; checks?: DashboardChecks; queue?: DashboardQueue; onWorkspacesChanged?: () => void; digests?: DashboardDigests } = {},
 ): Promise<RunningDashboard> {
   // The workspace change succeeded: the hook hears of it (a failing hook is logged).
   const workspacesChanged = <T>(result: T): T => {
@@ -1057,6 +1107,20 @@ export async function startDashboard(
       return;
     }
     const [, kind, ...rest] = path;
+    // The morning digest (SF-103): the list, newest first, and one stored record.
+    if (kind === 'digests' && digests !== undefined && [...query.keys()].length === 0 && rest.length <= 1) {
+      if (rest.length === 0) {
+        json(res, 200, await digests.list());
+        return;
+      }
+      const record = await digests.read(rest[0]!);
+      if (record === undefined) {
+        empty(res, 404);
+        return;
+      }
+      json(res, 200, record);
+      return;
+    }
     if (kind === 'tickets' && rest.length === 3 && rest[2] === 'page') {
       await ticketPage(res, rest, query);
       return;
@@ -1512,6 +1576,37 @@ export async function startDashboard(
   }
 
   function setupPost(target: Exclude<Target, { kind: 'read' | 'action' | 'ticket-check' | 'ticket-task' | 'queue' | 'ticket-attachment-add' | 'ticket-attachment-remove' }>): Post | undefined {
+    if (target.kind === 'workspace-edit') {
+      const name = target.name;
+      if (name === undefined || !WORKSPACE_NAME_PATTERN.test(name)) {
+        return undefined;
+      }
+      return {
+        route: 'workspace-edit',
+        call: (data) => {
+          const parsed = BODIES['workspace-edit'].schema.safeParse(data);
+          return parsed.success ? () => setup.editWorkspace(name, parsed.data).then(workspacesChanged) : undefined;
+        },
+        refreshSetup: true,
+      };
+    }
+    if (target.kind === 'digest-settings') {
+      return {
+        route: 'digest-settings',
+        call: (data) => {
+          const parsed = BODIES['digest-settings'].schema.safeParse(data);
+          return parsed.success ? () => setup.saveDigestSettings(parsed.data) : undefined;
+        },
+        refreshSetup: true,
+      };
+    }
+    if (target.kind === 'digest-run') {
+      const run = digests;
+      if (run === undefined) {
+        return undefined;
+      }
+      return { route: 'digest-run', call: (data) => (BODIES['digest-run'].schema.safeParse(data).success ? async () => run.start('manual') : undefined) };
+    }
     if (target.kind === 'ticket-action') {
       const key = jobKey(target.workspace, target.ticket);
       if (key === undefined) {
@@ -1541,7 +1636,11 @@ export async function startDashboard(
         route: 'workspace-add',
         call: (data) => {
           const parsed = BODIES['workspace-add'].schema.safeParse(data);
-          return parsed.success ? () => setup.addWorkspace(parsed.data.name, parsed.data.path, parsed.data.handoff, parsed.data.color).then(workspacesChanged) : undefined;
+          if (!parsed.success) {
+            return undefined;
+          }
+          const { name, path, ...options } = parsed.data;
+          return () => setup.addWorkspace(name, path, options).then(workspacesChanged);
         },
         refreshSetup: true,
       };
@@ -1683,7 +1782,7 @@ export async function startDashboard(
       }
     };
     const what = targetOf(path);
-    if (what.kind === 'action' || what.kind === 'workspace-remove' || what.kind === 'ticket-action') {
+    if (what.kind === 'action' || what.kind === 'workspace-remove' || what.kind === 'ticket-action' || what.kind === 'workspace-edit' || what.kind === 'digest-settings' || what.kind === 'digest-run') {
       if (req.method !== 'POST') {
         empty(res, 405, { allow: 'POST' });
         return;

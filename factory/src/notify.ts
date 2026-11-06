@@ -154,6 +154,11 @@ export async function notifyTaskCheck(record: CheckRecord, config: NotifyConfig,
   }
 }
 
+// The notification of a scheduled morning digest (SF-103): counts only, never a name, subject or code.
+export function digestNotification(counts: { landed: number; impact: number }): Notification {
+  return { title: 'Morning digest ready', body: `Morning digest ready: ${counts.landed} landed, ${counts.impact} of mine need attention`, priority: 'default', tags: 'newspaper' };
+}
+
 async function findExecutable(name: string, path: string | undefined): Promise<string | undefined> {
   for (const dir of (path ?? '').split(delimiter).filter((entry) => entry !== '')) {
     try {

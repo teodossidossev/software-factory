@@ -13,7 +13,7 @@ import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
 import { handbookSection } from '../src/prompts.js';
 import type { FileChange } from '../src/jobs.js';
-import { actedVerdict, decide, fixContent, REVIEW_DENIED_TOOLS, REVIEW_SCHEMA, type ReviewItem, reviewPrompt, reviewSessionOptions, runReview, scopeItem, sensitiveItem, unacceptedItems, uniqueNits } from '../src/review.js';
+import { actedVerdict, decide, fixContent, readOnlySessionOptions, REVIEW_DENIED_TOOLS, REVIEW_SCHEMA, REVIEW_TOOLS, type ReviewItem, reviewPrompt, reviewSessionOptions, runReview, scopeItem, sensitiveItem, unacceptedItems, uniqueNits } from '../src/review.js';
 import { loadHandbook } from '../src/server.js';
 import { writeTask } from '../src/task-file.js';
 import { act, fetchRaw } from './support/dashboard-client.js';
@@ -73,6 +73,16 @@ test('the review session sees the repository\'s settings and instructions only: 
   // A glob character in a directory name is matched literally.
   const special = reviewSessionOptions({ cwd: '/srv/a (b)/w', claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 7, }, abortController);
   assert.ok((special.settings as { claudeMdExcludes: string[] }).claudeMdExcludes.includes('/srv/a \\(b\\)/CLAUDE.md'));
+});
+
+test('the options of runStructuredSession: without tools and settingSources, REVIEW_TOOLS and [\'project\'] as before; the morning digest\'s none (SF-103)', () => {
+  const base = { cwd: '/srv/app', claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 3 };
+  const defaults = readOnlySessionOptions(base, new AbortController(), REVIEW_SCHEMA);
+  assert.deepEqual(defaults.tools, REVIEW_TOOLS);
+  assert.deepEqual(defaults.settingSources, ['project']);
+  const none = readOnlySessionOptions({ ...base, tools: [], settingSources: [] }, new AbortController(), REVIEW_SCHEMA);
+  assert.deepEqual([none.tools, none.settingSources], [[], []]);
+  assert.deepEqual(none.outputFormat, { type: 'json_schema', schema: REVIEW_SCHEMA });
 });
 
 test('fix, then clean: the Fix section from the items, the next iteration, Clean; the read-only argv, the prompt, review.json, check, sf watch, sf status and the dashboard', async () => {

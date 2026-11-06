@@ -25,6 +25,7 @@
       </div>
       <nav class="ws" aria-label="Setup">
         <span id="workspace-filter" class="seg2" role="group" aria-label="Workspace"></span>
+        <button id="open-digest" type="button" class="btn small">Digest</button>
         <button id="open-archived" type="button" class="btn small">Archived <span id="archived-count"></span></button>
         <button id="open-workspaces" type="button" class="btn small">Workspaces</button>
         <button id="open-new-ticket" type="button" class="btn small primary">New ticket</button>
@@ -89,6 +90,9 @@
   <!-- The planned ticket's page (SF-081): app.js builds its header, the Task file and the plan in it. -->
   <section id="ticket" hidden aria-label="Planned ticket"></section>
 
+  <!-- The morning digest (SF-103): the stored digests, Repositories and My daily. -->
+  <section id="digest" hidden aria-label="Morning digest"></section>
+
   <div id="toast" hidden role="status"><span id="toast-text"></span><button id="toast-close" type="button" class="toast-x" aria-label="Close the message">×</button></div>
   <div id="ticket-confirm" class="confirm modal" role="dialog" aria-modal="true" aria-labelledby="ticket-confirm-title" aria-describedby="ticket-confirm-text" hidden>
     <h4 id="ticket-confirm-title"></h4>
@@ -129,18 +133,37 @@
           <p class="hint">Typed or pasted: the page cannot browse this machine's disk. Every job works in a worktree created from this checkout.</p>
         </div>
         <div class="field">
-          <label for="workspace-handoff">Hand-over</label>
-          <select id="workspace-handoff">
-            <option value="" selected>As SF_HANDOFF</option>
-            <option value="checkout">checkout: hand each finished job over to this checkout</option>
-            <option value="off">off: finished jobs wait in Ready for review</option>
-          </select>
-          <p class="hint">This workspace's own setting wins over SF_HANDOFF; it is the handoff key in workspaces.json.</p>
+          <label for="workspace-description">Description</label>
+          <textarea id="workspace-description" rows="2"></textarea>
+          <p class="hint">Optional: what the repository is, for the morning digest. Without it, the digest reads the first paragraph of the repository's README.md; the Git data wins where they disagree.</p>
         </div>
         <div class="field">
-          <label for="workspace-color">Colour on the board</label>
+          <label for="workspace-app">App</label>
+          <input id="workspace-app" type="text" autocomplete="off" spellcheck="false" list="workspace-apps">
+          <datalist id="workspace-apps"></datalist>
+          <p class="hint">Workspaces with the same app share one daily, such as a backend and its frontend. Empty: the workspace is its own project.</p>
+        </div>
+        <div class="field">
+          <label class="choice"><input id="workspace-track" type="checkbox"> Morning digest: follow this repository</label>
+          <p class="hint">What landed on its main branch and its live branches go into the morning digest. The digest fetches into a mirror of its own; your checkout is never changed.</p>
+        </div>
+        <div class="field">
+          <label class="choice"><input id="workspace-mywork" type="checkbox"> My daily: my commits here go into the daily of its app</label>
+          <p class="hint">Your commits of yesterday and today and your open branches here make the stand-up draft of its app.</p>
+        </div>
+        <div class="field">
+          <label for="workspace-handoff">When a job is ready, hand it over to my checkout</label>
+          <select id="workspace-handoff">
+            <option value="" selected>Default</option>
+            <option value="checkout">Yes</option>
+            <option value="off">No</option>
+          </select>
+          <p class="hint">Yes: a finished job's branch and changes are put into this checkout for your review. No: it waits in Ready for review. Default follows SF_HANDOFF.</p>
+        </div>
+        <div class="field">
+          <label for="workspace-color">Colour of its cards on the board</label>
           <select id="workspace-color">
-            <option value="" selected>By its name</option>
+            <option value="" selected>Automatic (from the name)</option>
             <option value="blue">blue</option>
             <option value="teal">teal</option>
             <option value="green">green</option>
@@ -150,12 +173,34 @@
             <option value="purple">purple</option>
             <option value="grey">grey</option>
           </select>
-          <p class="hint">The stripe and the dot of its cards; the color key in workspaces.json. Without it, the name picks one.</p>
+          <p class="hint">The stripe and the dot of its cards.</p>
         </div>
         <div class="row">
           <button id="workspace-add" type="submit" class="btn">Add workspace</button>
         </div>
         <div id="workspace-status" class="status" role="status" aria-live="polite"></div>
+      </form>
+      <!-- The morning digest's schedule and language (SF-103); its model only in workspaces.json. -->
+      <form id="digest-form" class="form">
+        <h3 class="section-title">Morning digest</h3>
+        <div class="field">
+          <label for="digest-at">Time</label>
+          <input id="digest-at" type="time" required>
+          <p class="hint">sf serve makes one digest a day after this time (local time) for the workspaces above that are followed or have My daily on; a machine that slept through it makes it on waking.</p>
+        </div>
+        <div class="field">
+          <label class="choice"><input id="digest-weekdays" type="checkbox"> Weekdays only</label>
+          <p class="hint">No digest on Saturday and Sunday; Monday's covers the weekend.</p>
+        </div>
+        <div class="field">
+          <label for="digest-language">Language</label>
+          <input id="digest-language" type="text" autocomplete="off" placeholder="English">
+          <p class="hint">The language of the digest's text. The model is set in workspaces.json (digest.model).</p>
+        </div>
+        <div class="row">
+          <button id="digest-save" type="submit" class="btn">Save</button>
+        </div>
+        <div id="digest-status" class="status" role="status" aria-live="polite"></div>
       </form>
     </section>
 

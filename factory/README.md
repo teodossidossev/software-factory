@@ -73,6 +73,14 @@ npm run browsers                               # once: Playwright's Chromium for
 npm run test:browser                           # the dashboard's browser tests (section Browser tests); not part of npm test
 ```
 
+Tests (SF-097): `npm run typecheck` checks the types without writing anything; `npm test` builds,
+then runs every compiled test with `node --test --test-timeout=120000 dist/test/*.test.js`, so a
+test that hangs fails after 2 minutes instead of holding the suite (a test may set a shorter
+timeout of its own). `npm run build` removes
+`dist/` first (`scripts/clean.mjs`), so only the current sources are compiled and no compiled test
+of a deleted source runs. `npm test` and `npm run test:browser` both build first. At the repository
+root, `npm run build`, `npm run typecheck` and `npm test` run the same scripts in `factory/`.
+
 Exit codes: 0 ok, 1 error, 2 usage. `sf check-task` exits 0 when the check ran (ready or not
 ready) and 1 when it failed. `sf smoke` exits 0 when every step passed, 1 otherwise. `sf approve`
 exits 1 unless the branch was pushed; `sf mr create` exits 1 when the push or the merge request
@@ -1579,10 +1587,13 @@ leftover only when it is a regular file, empty, without any write permission bit
 process (no `/proc/*/fd` link to it; on other platforms than Linux, never). That check fails
 closed: without a readable `/proc`, or when the descriptors of a process of the factory's user or
 of the lock's owner cannot be read (for any reason but the process having ended), the lock counts
-as open. Processes of other users are skipped: an unprivileged user can never read their
-descriptors, and neither the sandbox nor Git runs as them. It removes such a lock,
-under the workspace's Git lock, after every Implementer turn, Claude review, gate run and
-simplification pass of a job, after a job's session is stopped (abort, pause, restart, reset),
+as open, with one exception (SF-097): a process whose `fd` directory stays unreadable after a few
+looks (a non-dumpable process: a desktop always has some, such as `ssh-agent` and `sd-pam`) counts
+only when it may be Git, that is when its `/proc/<pid>/comm` (readable even then) is `git` or
+starts with `git-`, or cannot be read either. Processes of other users are skipped: an unprivileged
+user can never read their descriptors, and neither the sandbox nor Git runs as them. It removes
+such a lock, under the workspace's Git lock, after every Implementer turn, Claude review, gate run
+and simplification pass of a job, after a job's session is stopped (abort, pause, restart, reset),
 after the last running Task check of the workspace in `sf serve` ends and after `sf check-task`,
 and right before a hand-over or Take it back, but only while no other job of the workspace is in
 `working`, `awaiting_review` or `preparing_mr` (the states in which its Implementer turns and

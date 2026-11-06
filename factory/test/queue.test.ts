@@ -20,6 +20,9 @@ import { writeTask } from '../src/task-file.js';
 import { call, type Env, FAKE, git, newEnv, newRepo, putTask, readyCheck, refused, runCli, script, serve, stop, task, temp, turnsStarted, waitFor } from './support/harness.js';
 
 const TIMEOUT = { timeout: 60_000 };
+// The end-to-end test below makes some 25 sf CLI calls, three sf serve starts, six turns and four
+// aborts: about 30 s alone, over 60 s under the whole suite's load. Its guard is npm test's.
+const END_TO_END_TIMEOUT = { timeout: 120_000 };
 
 function config(env: Env): Config {
   return {
@@ -835,7 +838,7 @@ async function started(env: Env, ticket: string): Promise<void> {
 // sf serve end to end: the queue's own start is limited, a start by hand, a resume or sf say on a
 // needs_human job never; the job a runner takes to ready_for_human_review frees the slot (the
 // coordinator's acceptance check); the queue and its limit survive a restart.
-test('sf serve: queue two tickets with limit 1, the second starts by itself once the first is ready for review; starts by hand and sf say go over the limit', TIMEOUT, async () => {
+test('sf serve: queue two tickets with limit 1, the second starts by itself once the first is ready for review; starts by hand and sf say go over the limit', END_TO_END_TIMEOUT, async () => {
   const env = await newEnv('queue-serve');
   const repo = await newRepo(env, 'queue-serve-repo', true);
   for (const ticket of ['Q-1', 'Q-2', 'M-1', 'M-2']) {

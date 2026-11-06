@@ -12,9 +12,9 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "tsc",
+    "build": "node scripts/clean.mjs && tsc",
     "start": "node dist/src/cli.js serve",
-    "test": "npm run build && node --test dist/test/*.test.js",
+    "test": "npm run build && node --test --test-timeout=120000 dist/test/*.test.js",
     "browsers": "playwright install chromium",
     "test:browser": "npm run build && node scripts/check-browser.mjs && node --test dist/test/browser/*.test.js"
   },

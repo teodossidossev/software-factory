@@ -1,5 +1,7 @@
 # SF-036 design: API reviewers and factory-owned Git
 
+Historical: the current behaviour is specified in factory/README.md.
+
 Status: agreed 2026-11-04. Decision: [ADR-0005](../adr/0005-api-reviewers-and-factory-git.md).
 Vocabulary: `CONTEXT.md`. Replaces the reviewer and MR preparation parts of
 [SF-011](SF-011-factory.md); the rest of SF-011 and ADR-0004 stands.

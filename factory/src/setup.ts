@@ -4,7 +4,7 @@
 // registry file, validation and Task file reader and writer as `sf workspace add` and
 // `write_task`, so the CLI and the page agree; a job is started through the Execution, never from
 // here.
-import { lstat, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readFile, realpath, rename, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 import { addAttachment, type Attachment, canHaveAttachments, listAttachments, readAttachment, removeAttachment } from './attachments.js';
 import { writeFileAtomic } from './atomic.js';
@@ -12,7 +12,11 @@ import { FactoryError } from './errors.js';
 import type { ExclusiveScope } from './execution.js';
 import { runGit } from './git.js';
 import { type Job, type JobState, type JobStore, TERMINAL_STATES } from './jobs.js';
-import { type HandoffMode, loadRegistry, type Registry, resolveWorkspace, saveRegistry, verifyCheckout, type Workspace, type WorkspaceColor, workspaceColor, type WorkspaceEntry, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
+import { derivedDescription } from './digest.js';
+import {
+  checkWorkspaceText, DIGEST_TIME_PATTERN, type DigestSettings, digestSettings, editedEntry, type HandoffMode, loadRegistry, MAX_LANGUAGE_CHARS, type Registry, resolveWorkspace, saveRegistry, verifyCheckout,
+  type Workspace, workspaceApp, type WorkspaceColor, workspaceColor, workspaceDigest, type WorkspaceEdit, type WorkspaceEntry, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN,
+} from './registry.js';
 import { ARCHIVE_DIR, DRAFT_MARKER, isDraft, landsAfter, MAX_TASK_BYTES, parseFrontMatter, readTask, TASK_DIR, taskSha256, TICKET_DESCRIPTION, TICKET_PATTERN, type TicketRef, writeTask, type WriteTaskResult } from './task-file.js';
 import type { TicketHistory } from './ticket-history.js';
 
@@ -35,6 +39,29 @@ export interface WorkspaceRow {
   handoff: HandoffMode | null;
   // The workspace's colour on the board (SF-084): its configured color, else the hash of its name.
   color: WorkspaceColor;
+  // The morning digest (SF-103): its app (its own, else its name), its own description or null, the
+  // description derived from the repository (the edit form's placeholder) or null, and its switches.
+  app: string;
+  description: string | null;
+  derived_description: string | null;
+  digest: { track: boolean; my_work: boolean };
+}
+
+// The workspaces payload's settings (SF-103): the hand-over default (SF_HANDOFF) and the morning
+// digest's time, weekdays only and language (its model only in workspaces.json).
+export interface WorkspaceSettings {
+  handoff_default: HandoffMode;
+  digest: Omit<DigestSettings, 'model'>;
+}
+
+// Add workspace's optional fields (SF-083, SF-084, SF-103); absent: SF_HANDOFF applies, the colour
+// by the name, no description, the name as the app, both digest switches off.
+export interface AddWorkspaceOptions {
+  handoff?: HandoffMode;
+  color?: WorkspaceColor;
+  description?: string;
+  app?: string;
+  digest?: { track: boolean; my_work: boolean };
 }
 
 // The state of a ticket another one lands after (SF-084), one rule for the board and the job page:
@@ -112,6 +139,8 @@ export interface SetupOptions {
   // The tickets' history (SF-081): New ticket records "created", Save "edited"; without it
   // nothing is recorded.
   history?: TicketHistory;
+  // SF_HANDOFF (SF-103: the workspaces payload's handoff_default); checkout by default.
+  handoffDefault?: HandoffMode;
 }
 
 // What the dependency rule reads of a job, current or archived.
@@ -203,12 +232,21 @@ export async function defaultBranch(checkout: string): Promise<string> {
   return result.code === 0 && match !== null ? match[1]! : 'main';
 }
 
+// A workspace's row of the Setup (the page shows the path as registered).
+function rowOf(name: string, entry: WorkspaceEntry, liveJobs: number, problem: string | null, derived: string | null): WorkspaceRow {
+  return {
+    name, path: entry.read_checkout, liveJobs, problem, handoff: entry.handoff ?? null, color: workspaceColor(name, entry.color),
+    app: workspaceApp(name, entry), description: entry.description ?? null, derived_description: derived, digest: workspaceDigest(entry),
+  };
+}
+
 export class Setup {
   readonly #configDir: string;
   readonly #jobs: JobStore;
   readonly #exclusive: SetupOptions['exclusive'];
   readonly #now: () => number;
   readonly #history: TicketHistory | undefined;
+  readonly #handoffDefault: HandoffMode;
   // "<workspace>/<ticket>" -> the Git answer of branchMerged for the job's branch, and when.
   readonly #mergeChecks = new Map<string, { at: number; branch: string; merged: boolean }>();
 
@@ -218,6 +256,7 @@ export class Setup {
     this.#exclusive = options.exclusive;
     this.#now = options.now ?? Date.now;
     this.#history = options.history;
+    this.#handoffDefault = options.handoffDefault ?? 'checkout';
   }
 
   // The history record of a write by the User (SF-081), or none without a history.
@@ -243,22 +282,29 @@ export class Setup {
     for (const name of Object.keys(workspaces).sort()) {
       const entry = workspaces[name]!;
       let problem: string | null = null;
+      let derived: string | null = null;
       try {
-        await verifyCheckout(entry.read_checkout, 'checkout');
+        derived = await derivedDescription(await verifyCheckout(entry.read_checkout, 'checkout'));
       } catch (error) {
         problem = error instanceof FactoryError ? error.message : 'The checkout could not be verified.';
       }
-      rows.push({ name, path: entry.read_checkout, liveJobs: live.get(name) ?? 0, problem, handoff: entry.handoff ?? null, color: workspaceColor(name, entry.color) });
+      rows.push(rowOf(name, entry, live.get(name) ?? 0, problem, derived));
     }
     return rows;
+  }
+
+  // The workspaces payload's settings (SF-103).
+  async workspaceSettings(): Promise<WorkspaceSettings> {
+    const { model: _model, ...digest } = digestSettings(await loadRegistry(this.#configDir));
+    return { handoff_default: this.#handoffDefault, digest };
   }
 
   // The same rules as `sf workspace add <name> --read <path> [--handoff ...] [--color ...]`: the name
   // pattern, an absolute path that is the root of a non-bare Git work tree, a name not registered
   // yet. Until SF-019 the work checkout is the read checkout. handoff: the workspace's own hand-over
   // setting (SF-083); undefined: SF_HANDOFF applies. color: its colour on the board (SF-084);
-  // undefined: the hash of its name.
-  addWorkspace(name: string, path: string, handoff?: HandoffMode, color?: WorkspaceColor): Promise<WorkspaceRow> {
+  // undefined: the hash of its name. description, app and digest (SF-103): the morning digest's.
+  addWorkspace(name: string, path: string, options: AddWorkspaceOptions = {}): Promise<WorkspaceRow> {
     return this.#exclusive(async () => {
       if (!WORKSPACE_NAME_PATTERN.test(name)) {
         throw new FactoryError('invalid_name', `workspace name must be ${WORKSPACE_NAME_DESCRIPTION}.`);
@@ -266,14 +312,73 @@ export class Setup {
       if (!isAbsolute(path) || path.includes('\0')) {
         throw new FactoryError('workspace_invalid', 'The path must be absolute.');
       }
+      checkWorkspaceText(options.description ?? '', options.app ?? '');
       const registry = await loadRegistry(this.#configDir);
       if (Object.hasOwn(registry.workspaces, name)) {
         throw new FactoryError('workspace_exists', `workspace "${name}" is already registered; remove it first.`);
       }
       const real = await verifyCheckout(path, 'path');
-      registry.workspaces[name] = { read_checkout: real, ...(handoff !== undefined ? { handoff } : {}), ...(color !== undefined ? { color } : {}) };
+      const entry = editedEntry({ read_checkout: real }, {
+        read_checkout: real, description: options.description ?? '', app: options.app ?? '', handoff: options.handoff ?? 'default', color: options.color ?? 'auto',
+        digest: options.digest ?? { track: false, my_work: false },
+      });
+      registry.workspaces[name] = entry;
       await saveRegistry(registry, this.#configDir);
-      return { name, path: real, liveJobs: 0, problem: null, handoff: handoff ?? null, color: workspaceColor(name, color) };
+      return rowOf(name, entry, 0, null, await derivedDescription(real));
+    });
+  }
+
+  // Edit of an existing workspace (SF-103): the form's fields replace the entry's (src/registry.ts
+  // editedEntry); work_checkout and rules_skip stay. The path is validated as Add does; changing it
+  // is refused while the workspace has a live job (workspace_busy), the other fields change at any
+  // time. The name cannot change.
+  editWorkspace(name: string, edit: Omit<WorkspaceEdit, 'read_checkout'> & { path: string }): Promise<WorkspaceRow> {
+    return this.#exclusive(async () => {
+      if (!WORKSPACE_NAME_PATTERN.test(name)) {
+        throw new FactoryError('invalid_name', `workspace name must be ${WORKSPACE_NAME_DESCRIPTION}.`);
+      }
+      const registry = await loadRegistry(this.#configDir);
+      if (!Object.hasOwn(registry.workspaces, name)) {
+        throw new FactoryError('workspace_not_found', `workspace "${name}" is not registered.`);
+      }
+      const entry = registry.workspaces[name]!;
+      if (!isAbsolute(edit.path) || edit.path.includes('\0')) {
+        throw new FactoryError('workspace_invalid', 'The path must be absolute.');
+      }
+      checkWorkspaceText(edit.description, edit.app);
+      const real = await verifyCheckout(edit.path, 'path');
+      const current = await realpath(entry.read_checkout).catch(() => entry.read_checkout);
+      if (real !== current && real !== entry.read_checkout) {
+        const live = (await this.#jobs.list()).filter((job) => job.workspace === name && !TERMINAL_STATES.includes(job.state));
+        if (live.length > 0) {
+          throw new FactoryError('workspace_busy', `workspace "${name}" has a live job (${live.map((job) => `${job.ticket} ${job.state}`).join(', ')}); its checkout path cannot change until it is finished or aborted.`);
+        }
+      }
+      const { path: _path, ...fields } = edit;
+      const edited = editedEntry(entry, { ...fields, read_checkout: real === current ? entry.read_checkout : real });
+      registry.workspaces[name] = edited;
+      await saveRegistry(registry, this.#configDir);
+      const live = (await this.#liveJobs()).get(name) ?? 0;
+      return rowOf(name, edited, live, null, await derivedDescription(real));
+    });
+  }
+
+  // The morning digest's settings of the Setup (SF-103): the time (HH:MM), weekdays only and the
+  // language; the model stays as workspaces.json has it.
+  saveDigestSettings(input: { at: string; weekdays_only: boolean; language: string }): Promise<WorkspaceSettings['digest']> {
+    return this.#exclusive(async () => {
+      if (!DIGEST_TIME_PATTERN.test(input.at)) {
+        throw new FactoryError('invalid_digest_settings', 'The time must be HH:MM, from 00:00 to 23:59.');
+      }
+      const language = input.language.trim();
+      if (language === '' || language.length > MAX_LANGUAGE_CHARS) {
+        throw new FactoryError('invalid_digest_settings', `The language must be 1 to ${MAX_LANGUAGE_CHARS} characters.`);
+      }
+      const registry: Registry = await loadRegistry(this.#configDir);
+      registry.digest = { ...registry.digest, at: input.at, weekdays_only: input.weekdays_only, language };
+      await saveRegistry(registry, this.#configDir);
+      const { model: _model, ...digest } = digestSettings(registry);
+      return digest;
     });
   }
 

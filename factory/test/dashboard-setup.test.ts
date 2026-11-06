@@ -42,7 +42,11 @@ test('dashboard setup: the reads, the method rules per path and the token; nothi
     assert.equal(workspaces.status, 200);
     assert.equal(workspaces.headers['content-type'], 'application/json; charset=utf-8');
     assert.equal(workspaces.headers['content-security-policy'], CSP);
-    assert.deepEqual(JSON.parse(workspaces.body), { workspaces: [{ name: 'app', path: '/srv/app', liveJobs: 1, problem: null, handoff: null, color: 'teal' }, { name: 'web', path: '/srv/web', liveJobs: 0, problem: null, handoff: null, color: 'purple' }] });
+    // SF-103: the hand-over default and the morning digest's settings at the top level; each row its app, description, derived description and switches.
+    assert.deepEqual(JSON.parse(workspaces.body), {
+      workspaces: [{ name: 'app', path: '/srv/app', liveJobs: 1, problem: null, handoff: null, color: 'teal', app: 'app', description: null, derived_description: null, digest: { track: false, my_work: false } }, { name: 'web', path: '/srv/web', liveJobs: 0, problem: null, handoff: null, color: 'purple', app: 'web', description: null, derived_description: null, digest: { track: false, my_work: false } }],
+      handoff_default: 'checkout', digest: { at: '08:00', weekdays_only: true, language: 'English' },
+    });
 
     const tickets = await fetchRaw(new URL('api/tickets', base));
     assert.equal(tickets.status, 200);
@@ -150,22 +154,31 @@ test('dashboard setup: the action checks apply to the setup POSTs; exact argumen
     const stream = await openStream(new URL('api/stream', base));
     assert.deepEqual((await stream.next('workspaces')).workspaces.map((row: { name: string }) => row.name), ['app']);
     assert.equal((await stream.next('tickets')).tickets[0].ticket, 'T-5');
-    assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'web', path: '/srv/web' })), { name: 'web', path: '/srv/web', liveJobs: 0, problem: null, handoff: null, color: 'purple' });
+    assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'web', path: '/srv/web' })), { name: 'web', path: '/srv/web', liveJobs: 0, problem: null, handoff: null, color: 'purple', app: 'web', description: null, derived_description: null, digest: { track: false, my_work: false } });
     assert.deepEqual(setup.calls.at(-1), ['addWorkspace', 'web', '/srv/web']);
     await stream.next('workspaces');
     await stream.next('tickets');
     // The workspace's own hand-over setting (SF-083).
-    assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'web', path: '/srv/web', handoff: 'off' })), { name: 'web', path: '/srv/web', liveJobs: 0, problem: null, handoff: 'off', color: 'purple' });
-    assert.deepEqual(setup.calls.at(-1), ['addWorkspace', 'web', '/srv/web', 'off']);
+    assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'web', path: '/srv/web', handoff: 'off' })), { name: 'web', path: '/srv/web', liveJobs: 0, problem: null, handoff: 'off', color: 'purple', app: 'web', description: null, derived_description: null, digest: { track: false, my_work: false } });
+    assert.deepEqual(setup.calls.at(-1), ['addWorkspace', 'web', '/srv/web', { handoff: 'off' }]);
     await stream.next('workspaces');
     await stream.next('tickets');
     // The workspace's colour on the board (SF-084): one of the palette; anything else is a 400.
-    assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'web', path: '/srv/web', color: 'olive' })), { name: 'web', path: '/srv/web', liveJobs: 0, problem: null, handoff: null, color: 'olive' });
-    assert.deepEqual(setup.calls.at(-1), ['addWorkspace', 'web', '/srv/web', null, 'olive']);
+    assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'web', path: '/srv/web', color: 'olive' })), { name: 'web', path: '/srv/web', liveJobs: 0, problem: null, handoff: null, color: 'olive', app: 'web', description: null, derived_description: null, digest: { track: false, my_work: false } });
+    assert.deepEqual(setup.calls.at(-1), ['addWorkspace', 'web', '/srv/web', { color: 'olive' }]);
     const pink = await act(base, 'api/workspaces', { name: 'web', path: '/srv/web', color: 'pink' });
     assert.equal(pink.status, 400);
     assert.match(JSON.parse(pink.body).error.message, /"color"\?: "blue" \| "teal" \| "green" \| "olive" \| "orange" \| "red" \| "purple" \| "grey"/);
-    assert.deepEqual(setup.calls.at(-1), ['addWorkspace', 'web', '/srv/web', null, 'olive']);
+    assert.deepEqual(setup.calls.at(-1), ['addWorkspace', 'web', '/srv/web', { color: 'olive' }]);
+    // The morning digest's fields (SF-103): description, app and digest, all optional.
+    const digestFields = { description: 'The web front end.', app: 'shop', digest: { track: true, my_work: true } };
+    assert.equal(result(await act(base, 'api/workspaces', { name: 'web', path: '/srv/web', ...digestFields })).name, 'web');
+    assert.deepEqual(setup.calls.at(-1), ['addWorkspace', 'web', '/srv/web', digestFields]);
+    for (const extra of [{ digest: { track: true } }, { app: 1 }, { digest: null }]) {
+      assert.deepEqual(error(await act(base, 'api/workspaces', { name: 'web', path: '/srv/web', ...extra })), { status: 400, code: 'invalid_body' }, JSON.stringify(extra));
+    }
+    await stream.next('workspaces');
+    await stream.next('tickets');
     setup.rows.workspaces = [...setup.rows.workspaces, workspaceRow('web')];
     await stream.next('workspaces');
     await stream.next('tickets');
@@ -494,7 +507,7 @@ test('dashboard setup end to end: a workspace from the page, a ticket draft, the
   const served = await serve(env);
   try {
     const base = served.dashboard!;
-    assert.deepEqual(JSON.parse((await fetchRaw(new URL('api/workspaces', base))).body), { workspaces: [] });
+    assert.deepEqual(JSON.parse((await fetchRaw(new URL('api/workspaces', base))).body), { workspaces: [], handoff_default: 'off', digest: { at: '08:00', weekdays_only: true, language: 'English' } });
     const stream = await openStream(new URL('api/stream', base));
     assert.deepEqual((await stream.next('workspaces')).workspaces, []);
     assert.deepEqual((await stream.next('tickets')).tickets, []);
@@ -502,8 +515,9 @@ test('dashboard setup end to end: a workspace from the page, a ticket draft, the
     // Add: the CLI's rules and texts, then the registry the CLI reads.
     const missing = await act(base, 'api/workspaces', { name: 'app', path: join(temp, 'nowhere') });
     assert.deepEqual(JSON.parse(missing.body), { ok: false, error: { code: 'workspace_invalid', message: 'The path does not exist.' } });
-    assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'app', path: repo, handoff: 'off' })), { name: 'app', path: repo, liveJobs: 0, problem: null, handoff: 'off', color: 'teal' });
-    assert.deepEqual((await stream.next('workspaces')).workspaces, [{ name: 'app', path: repo, liveJobs: 0, problem: null, handoff: 'off', color: 'teal' }]);
+    const row = { name: 'app', path: repo, liveJobs: 0, problem: null, handoff: 'off', color: 'teal', app: 'app', description: null, derived_description: 'hello', digest: { track: false, my_work: false } };
+    assert.deepEqual(result(await act(base, 'api/workspaces', { name: 'app', path: repo, handoff: 'off' })), row);
+    assert.deepEqual((await stream.next('workspaces')).workspaces, [row]);
     assert.deepEqual((await loadRegistry(env.config)).workspaces, { app: { read_checkout: repo, handoff: 'off' } });
     const listed = await runCli(env, ['workspace', 'list']);
     assert.match(listed.stdout, new RegExp(`^app\\n  checkout: ${repo}\\n  hand-over: off \\(this workspace\\)$`, 'm'));

@@ -179,6 +179,13 @@ const state = {
   // New ticket's images (SF-064), in paste order: each file, the extension of its real type and its
   // blob: URL for the thumbnail.
   newImages: [],
+  // SF-103: the workspaces payload's settings ({handoff_default, digest}), the workspace whose card
+  // is open as the Edit form and that form (kept across redraws), and whether the Morning digest
+  // section has unsaved values.
+  wsSettings: { handoff_default: null, digest: null },
+  wsEdit: null,
+  wsEditForm: null,
+  digestDirty: false,
 };
 // The only URL the page links to: the ChatGPT composer prefilled by the server (the prefix of
 // src/conversation.ts).
@@ -4397,7 +4404,7 @@ const ui = {
 // The URL hash of the view: #<ws>/<ticket> (the Stream), #<ws>/<ticket>/changes, /mr, /ticket;
 // a new one is a new history entry, so Back and Forward move between them.
 function setHash() {
-  const h = ui.screen === 'board' ? '' : ui.screen === 'ticket' ? `${ui.ticket}/ticket` : ui.screen === 'stream' ? ui.job : `${ui.job}/${ui.screen}`;
+  const h = ui.screen === 'board' ? '' : ui.screen === 'digest' ? (dg.id === null ? 'digest' : `digest/${dg.id}`) : ui.screen === 'ticket' ? `${ui.ticket}/ticket` : ui.screen === 'stream' ? ui.job : `${ui.job}/${ui.screen}`;
   if (decodeURIComponent(location.hash.slice(1)) !== h) {
     history.pushState(null, '', `#${h}`);
   }
@@ -4453,6 +4460,8 @@ function go(key, screen = 'stream', focus = undefined, confirm = undefined) {
   ui.pending = false;
   $('board').hidden = true;
   $('ticket').hidden = true;
+  $('digest').hidden = true;
+  leaveDigest();
   $('job').hidden = false;
   state.wantConfirm = confirm === undefined ? null : { action: confirm, key };
   select(key);
@@ -4510,6 +4519,8 @@ function back() {
   ui.ticket = null;
   $('job').hidden = true;
   $('ticket').hidden = true;
+  $('digest').hidden = true;
+  leaveDigest();
   $('board').hidden = false;
   renderBoard();
   setHash();
@@ -4521,6 +4532,15 @@ function back() {
 // The view of the URL hash (on load and on every hashchange). A hash of a job or ticket the board
 // does not have shows the board; it is tried again when the jobs and tickets first arrive.
 function route() {
+  // The morning digest (SF-103): #digest, the newest, or #digest/<id>.
+  const digest = /^digest(?:\/([0-9A-Za-z-]+))?$/.exec(decodeURIComponent(location.hash.slice(1)));
+  if (digest !== null) {
+    const id = digest[1] ?? null;
+    if (ui.screen !== 'digest' || dg.id !== id) {
+      openDigest(id);
+    }
+    return;
+  }
   const match = /^([^/]+\/[^/]+?)(?:\/(changes|mr|ticket))?$/.exec(decodeURIComponent(location.hash.slice(1)));
   if (match === null) {
     ui.pending = false;
@@ -4572,7 +4592,7 @@ function renderJobs() {
 // listeners).
 function onClick(event) {
   const target = typeof event.target?.closest === 'function'
-    ? event.target.closest('[data-tk],[data-tkimg],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],[data-qforce],#limUp,#limDown,#rulesBtn,[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived')
+    ? event.target.closest('[data-tk],[data-tkimg],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],[data-qforce],#limUp,#limDown,#rulesBtn,[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived,#open-digest')
     : null;
   // An open ⋯ menu closes on any click but its own toggle (its items act, then it is closed).
   if (state.openMenu !== null && (target === null || target.dataset.menu === undefined)) {
@@ -4639,6 +4659,8 @@ function onClick(event) {
     openNewTicket();
   } else if (target.id === 'open-archived') {
     openArchived();
+  } else if (target.id === 'open-digest') {
+    openDigest(null);
   } else if (target.hasAttribute('data-ws')) {
     // A workspace's chip again: back to all.
     state.filter = state.filter === target.dataset.ws ? '' : target.dataset.ws;
@@ -5178,6 +5200,8 @@ function openTicket(key) {
   ui.pending = false;
   $('job').hidden = true;
   $('board').hidden = true;
+  $('digest').hidden = true;
+  leaveDigest();
   $('ticket').hidden = false;
   renderTicket();
   setHash();
@@ -6120,6 +6144,460 @@ async function uploadNewImages(key, images) {
   return { count: images.length, failed, sent: images.map((entry) => entry.image) };
 }
 
+// ---------- The morning digest (SF-103) ----------
+
+// The Digest page (#digest, #digest/<id>): the list as last read ({running, digests}, newest first),
+// the digest shown (its id; null: the newest) and its record, a read's error, the tab ('repos' or
+// 'daily'), the poll's timer while a run goes, the ids known when a run was seen starting (the new
+// one opens when it appears), Generate now's request, the Copy outcome per app, and the read under way.
+const DIGEST_POLL_MS = 10000;
+const dg = { list: null, id: null, record: null, error: null, tab: 'repos', poll: null, known: null, starting: false, copied: new Map(), load: 0 };
+
+function openDigest(id) {
+  if (ui.job !== null) {
+    leaveJob();
+  }
+  if (state.drawer !== null) {
+    hideDrawer();
+  }
+  ui.screen = 'digest';
+  ui.job = null;
+  ui.ticket = null;
+  ui.pending = false;
+  dg.id = id;
+  dg.error = null;
+  if (id === null || dg.record?.id !== id) {
+    dg.record = id === null && dg.list !== null && dg.record?.id === dg.list.digests[0]?.id ? dg.record : null;
+  }
+  $('board').hidden = true;
+  $('job').hidden = true;
+  $('ticket').hidden = true;
+  $('digest').hidden = false;
+  renderDigest();
+  setHash();
+  $('digest').querySelector('[data-back]')?.focus();
+  void loadDigests();
+}
+
+// The page closes: no more polling.
+function leaveDigest() {
+  clearTimeout(dg.poll);
+  dg.poll = null;
+}
+
+async function getJson(path) {
+  return JSON.parse(await getText(path));
+}
+
+// Reads the list, then the digest shown; while a run goes, again every 10 s, and a digest that
+// appears meanwhile opens.
+async function loadDigests() {
+  dg.load += 1;
+  const load = dg.load;
+  clearTimeout(dg.poll);
+  dg.poll = null;
+  let list;
+  try {
+    list = await getJson('api/digests');
+  } catch (error) {
+    if (load === dg.load && ui.screen === 'digest') {
+      dg.error = `The digests could not be read (${error.message}).`;
+      renderDigest();
+    }
+    return;
+  }
+  if (load !== dg.load || ui.screen !== 'digest') {
+    return;
+  }
+  dg.list = list;
+  dg.error = null;
+  if (list.running && dg.known === null) {
+    dg.known = new Set(list.digests.map((digest) => digest.id));
+  }
+  if (dg.known !== null) {
+    const fresh = list.digests.find((digest) => !dg.known.has(digest.id));
+    if (fresh !== undefined) {
+      dg.known = null;
+      dg.id = fresh.id;
+      dg.record = null;
+      setHash();
+    } else if (!list.running) {
+      dg.known = null;
+    }
+  }
+  if (list.running) {
+    dg.poll = setTimeout(() => void loadDigests(), DIGEST_POLL_MS);
+  }
+  const id = dg.id ?? list.digests[0]?.id ?? null;
+  if (id !== null && dg.record?.id !== id) {
+    renderDigest();
+    try {
+      const record = await getJson(`api/digests/${encodeURIComponent(id)}`);
+      if (load === dg.load && ui.screen === 'digest') {
+        dg.record = record;
+      }
+    } catch {
+      if (load === dg.load && ui.screen === 'digest') {
+        dg.record = null;
+        dg.error = `The digest ${id} could not be read: it may be gone (digests are kept 60 days).`;
+      }
+    }
+  }
+  if (load === dg.load) {
+    renderDigest();
+  }
+}
+
+// Generate now: one manual run, never sent twice; the page polls until its digest appears.
+async function generateNow() {
+  if (dg.starting || dg.list?.running === true) {
+    return;
+  }
+  dg.starting = true;
+  dg.known = new Set((dg.list?.digests ?? []).map((digest) => digest.id));
+  renderDigest();
+  try {
+    await post('api/digests/run', {});
+    toast({ level: 'info', text: 'Generating the digest; this page opens it when it is ready.' });
+  } catch (error) {
+    if (error instanceof ActionError && error.code === 'digest_running') {
+      toast({ level: 'info', text: 'A digest is being generated already; this page opens it when it is ready.' });
+    } else {
+      dg.known = null;
+      toast({ level: 'error', text: error instanceof ActionError ? `${error.code}: ${error.message}` : `The request failed (${error.message}); it may have started. The page reads the list again.` });
+    }
+  }
+  dg.starting = false;
+  await loadDigests();
+}
+
+const dgTime = (ts) => localTime(ts).slice(0, 16);
+const dgCost = (cost) => (typeof cost === 'number' ? `$${cost.toFixed(2)}` : 'cost unknown');
+
+function renderDigest() {
+  if (ui.screen !== 'digest') {
+    return;
+  }
+  const page = $('digest');
+  const list = dg.list;
+  const record = dg.record;
+  const running = list?.running === true || dg.starting;
+  const backButton = button('btn back', '← Board ', { back: '' });
+  backButton.append(el('span', 'kbd', 'Esc'));
+  backButton.setAttribute('title', 'Back to the board (Esc)');
+  const t1 = el('div', 't1');
+  t1.append(el('span', 'title', 'Morning digest'));
+  const tools = el('div', 'tools');
+  if (list !== null && list.digests.length > 0) {
+    const pick = el('select', 'dg-pick');
+    pick.setAttribute('aria-label', 'Earlier digests');
+    for (const digest of list.digests) {
+      const option = el('option', '', `${dgTime(digest.ended_at)} · ${digest.trigger}`);
+      option.value = digest.id;
+      pick.append(option);
+    }
+    pick.value = record?.id ?? dg.id ?? list.digests[0].id;
+    pick.addEventListener('change', () => openDigest(pick.value === list.digests[0].id ? null : pick.value));
+    tools.append(pick);
+  }
+  const generate = el('button', 'btn primary', running ? 'Generating…' : 'Generate now');
+  generate.type = 'button';
+  generate.dataset.dg = 'generate';
+  generate.disabled = running;
+  generate.setAttribute('title', 'Make a digest now from the latest Git data; it does not replace the day\'s scheduled one');
+  generate.addEventListener('click', () => void generateNow());
+  tools.append(generate);
+  const t2 = el('div', 't2');
+  if (record !== null) {
+    t2.append(el('span', 'dg-period', `since ${dgTime(record.period.from)} · generated ${dgTime(record.ended_at)}`), el('span', 'dg-cost', dgCost(record.cost_usd)));
+  }
+  const head = el('header', 'jhead');
+  head.append(backButton, t1, tools, t2);
+  const body = el('div', 'dg-body');
+  if (running) {
+    body.append(el('p', 'notline', 'Generating a digest… This page opens it when it is ready.'));
+  }
+  if (dg.error !== null) {
+    body.append(el('p', 'err-text fs13', dg.error));
+  }
+  if (list === null) {
+    body.append(el('p', 'muted fs13', dg.error === null ? 'Loading the digests…' : ''));
+  } else if (list.digests.length === 0) {
+    const empty = el('div', 'card2 dg-empty');
+    empty.append(el('h3', '', 'No digest yet'), el('p', 'fs13', 'Generate now makes one from the followed workspaces. sf serve makes one every day at the time set in Workspaces → Morning digest, when a workspace is followed or has My daily on.'));
+    body.append(empty);
+  } else if (record === null) {
+    body.append(el('p', 'muted fs13', dg.error === null ? 'Loading the digest…' : ''));
+  } else {
+    const tabs = el('div', 'edtabs dg-tabs');
+    tabs.setAttribute('role', 'tablist');
+    for (const [tab, text] of [['repos', 'Repositories'], ['daily', 'My daily']]) {
+      const node = el('button', dg.tab === tab ? 'on' : '', text);
+      node.type = 'button';
+      node.setAttribute('role', 'tab');
+      node.setAttribute('aria-selected', String(dg.tab === tab));
+      node.dataset.dgtab = tab;
+      node.addEventListener('click', () => {
+        dg.tab = tab;
+        renderDigest();
+      });
+      tabs.append(node);
+    }
+    body.append(tabs);
+    if (record.error !== null && record.error !== undefined) {
+      body.append(el('p', 'notline bad', `The model call failed (${record.error}); the Git data is shown without its summary.`));
+    }
+    for (const note of record.notes ?? []) {
+      body.append(el('p', 'notline', note));
+    }
+    body.append(...(dg.tab === 'daily' ? dgDaily(record) : dgRepos(record)));
+  }
+  const scroll = page.querySelector('.form2')?.scrollTop ?? 0;
+  const wrap = el('div', 'form2');
+  wrap.append(body);
+  keepFocus(page, () => page.replaceChildren(head, wrap));
+  wrap.scrollTop = scroll;
+}
+
+function dgList(items, className = 'dg-items') {
+  if (items.length === 0) {
+    return el('p', 'muted fs13', 'None.');
+  }
+  const list = el('ul', className);
+  list.append(...items.map((item) => el('li', '', item)));
+  return list;
+}
+
+function dgSection(title, ...content) {
+  const section = el('section', 'dg-sec');
+  section.append(el('h4', '', title), ...content);
+  return section;
+}
+
+// The Repositories tab: "One ticket across the app", then a card per followed workspace.
+function dgRepos(record) {
+  const nodes = [];
+  const cross = record.output?.cross_repo ?? [];
+  if (cross.length > 0) {
+    nodes.push(dgCross(cross, record));
+  }
+  const followed = record.workspaces.filter((workspace) => workspace.track);
+  if (followed.length === 0) {
+    const empty = el('div', 'card2 dg-empty');
+    empty.append(el('p', 'fs13', 'No workspace is followed in this digest. Workspaces → Edit → "Morning digest: follow this repository".'));
+    nodes.push(empty);
+  }
+  for (const workspace of followed) {
+    nodes.push(dgRepoCard(workspace, record.output?.repos?.find((repo) => repo.name === workspace.name) ?? null, record));
+  }
+  return nodes;
+}
+
+function dgCross(rows, record) {
+  const names = record.workspaces.map((workspace) => workspace.name).filter((name) => rows.some((row) => Object.hasOwn(row.by_workspace ?? {}, name)));
+  const card = el('div', 'card2 dg-cross');
+  card.append(el('h3', '', 'One ticket across the app'));
+  const scroller = el('div', 'dg-scroll');
+  const table = el('table', 'dgx');
+  const headRow = el('tr');
+  headRow.append(el('th', '', 'Ticket'), ...names.map((name) => el('th', '', name)), el('th', '', 'For me'));
+  const thead = el('thead');
+  thead.append(headRow);
+  const tbody = el('tbody');
+  for (const row of rows) {
+    const line = el('tr');
+    const ticket = el('td', 'mono');
+    ticket.append(el('span', 'chipx', row.ticket));
+    line.append(ticket, ...names.map((name) => el('td', '', row.by_workspace?.[name] ?? '—')), el('td', row.for_me ? 'dg-forme' : 'muted', row.for_me || '—'));
+    tbody.append(line);
+  }
+  table.append(thead, tbody);
+  scroller.append(table);
+  card.append(scroller);
+  return card;
+}
+
+function dgRepoCard(workspace, repo, record) {
+  const card = el('article', 'card2 dg-repo');
+  card.dataset.ws = workspace.name;
+  const title = el('h3', 'dg-title');
+  title.append(wsDot(workspace.name), el('span', 'dg-name', workspace.name));
+  if (workspace.app !== workspace.name) {
+    title.append(el('span', 'chipx', workspace.app));
+  }
+  card.append(title);
+  if (workspace.fetch?.message) {
+    card.append(el('p', 'notline', workspace.fetch.message));
+  }
+  for (const note of workspace.fetch?.notes ?? []) {
+    card.append(el('p', 'notline', note));
+  }
+  if (workspace.error) {
+    card.append(el('p', 'err-text fs13', workspace.error));
+  }
+  const git = workspace.git;
+  if (git === null || git === undefined) {
+    card.append(el('p', 'muted fs13', 'No Git data for this workspace in this digest.'));
+    return card;
+  }
+  for (const note of git.notes ?? []) {
+    card.append(el('p', 'notline', note));
+  }
+  if (repo?.headline) {
+    card.append(el('p', 'dg-headline', repo.headline));
+  }
+  const impact = repo?.impact_on_me ?? [];
+  if (impact.length > 0) {
+    const box = el('div', 'dg-impact');
+    box.append(el('h4', '', 'Effect on my work'), dgList(impact));
+    card.append(box);
+  }
+  // Landed: the last 24 hours of the period shown, the earlier ones folded away.
+  const recent = Date.parse(record.period.to) - 86400000;
+  const entries = git.landed.map((entry) => dgLanded(entry, repo));
+  const shown = entries.filter((_, index) => Date.parse(git.landed[index].date) >= recent);
+  const earlier = entries.filter((_, index) => Date.parse(git.landed[index].date) < recent);
+  const landed = [];
+  if (git.landed.length === 0) {
+    landed.push(el('p', 'muted fs13', 'Nothing landed in the period.'));
+  }
+  if (shown.length > 0) {
+    const list = el('ul', 'dg-landed');
+    list.append(...shown);
+    landed.push(list);
+  }
+  if (earlier.length > 0) {
+    const fold = el('details', 'dg-fold');
+    const list = el('ul', 'dg-landed');
+    list.append(...earlier);
+    fold.append(el('summary', '', `Earlier in the period (${earlier.length})`), list);
+    landed.push(fold);
+  }
+  card.append(dgSection(`Landed on ${git.main}`, ...landed));
+  const branches = git.branches.filter((branch) => !branch.landed);
+  card.append(dgSection('Live branches', ...(branches.length === 0 ? [el('p', 'muted fs13', 'No live branch.')] : [dgBranches(branches, repo)])));
+  return card;
+}
+
+function dgLanded(entry, repo) {
+  const item = el('li', entry.mine ? 'dg-entry mine' : 'dg-entry');
+  const meta = el('div', 'dg-meta');
+  meta.append(el('span', 'mono', dgTime(entry.date).slice(5)), el('span', 'dg-who', entry.author));
+  if (entry.mine) {
+    meta.append(el('span', 'tag', 'mine'));
+  }
+  const what = el('div', 'dg-what');
+  if (entry.ticket) {
+    what.append(el('span', 'chipx', entry.ticket));
+  }
+  const problem = repo?.merged?.find((merged) => merged.sha === entry.sha || entry.full_sha?.startsWith(merged.sha))?.problem;
+  what.append(el('span', '', problem ?? entry.subject));
+  item.append(meta, what);
+  if (problem !== undefined) {
+    item.append(el('div', 'muted fs12 dg-subject', entry.subject));
+  }
+  const where = el('div', 'muted fs12 dg-where');
+  where.append(el('span', 'mono', entry.sha), el('span', '', entry.dirs.join(', ')), el('span', '', entry.stat));
+  item.append(where);
+  return item;
+}
+
+function dgBranches(branches, repo) {
+  const list = el('ul', 'dg-branches');
+  for (const branch of branches) {
+    const item = el('li', branch.mine ? 'dg-entry mine' : 'dg-entry');
+    const meta = el('div', 'dg-meta');
+    meta.append(el('span', 'mono dg-ref', branch.name));
+    if (branch.local) {
+      meta.append(el('span', 'tag', 'local'));
+    }
+    if (branch.mine) {
+      meta.append(el('span', 'tag', 'mine'));
+    }
+    meta.append(el('span', 'dg-who', branch.author));
+    const counts = el('span', 'mono dg-counts');
+    counts.append(el('span', 'plus', `+${branch.ahead}`), document.createTextNode('/'), el('span', branch.behind > 10 ? 'minus dg-behind' : 'minus', `−${branch.behind}`));
+    if (branch.behind > 10) {
+      counts.setAttribute('title', `${branch.behind} commits behind ${'the main branch'}: a rebase is due`);
+    }
+    meta.append(counts, el('span', 'muted', branch.age_days === 0 ? 'today' : `${branch.age_days} d`));
+    if (branch.local_only > 0) {
+      meta.append(el('span', 'muted', `${branch.local_only} local only`));
+    }
+    item.append(meta);
+    const what = repo?.branches?.find((entry) => entry.ref === branch.name)?.what;
+    item.append(el('div', 'dg-what', what ?? branch.subject));
+    if (branch.mine && (branch.overlap ?? []).length > 0) {
+      item.append(el('div', 'fs12 dg-overlap', `Shares with main: ${branch.overlap.join(', ')}`));
+    }
+    list.append(item);
+  }
+  return list;
+}
+
+// My daily: a card per app, its four sections, the commits it was made from and Copy.
+function dgDaily(record) {
+  const sources = record.daily_sources ?? [];
+  const dailies = record.output?.dailies ?? sources.map((source) => ({ app: source.app, workspaces: source.workspaces, yesterday: [], problems: [], plan: [], next: [] }));
+  if (dailies.length === 0) {
+    const empty = el('div', 'card2 dg-empty');
+    empty.append(el('p', 'fs13', 'No daily in this digest: no workspace has My daily on (Workspaces → Edit), or you have no commits or open branches there in the two days.'));
+    return [empty];
+  }
+  return dailies.map((daily) => {
+    const card = el('article', 'card2 dg-daily');
+    card.dataset.app = daily.app;
+    const title = el('h3', 'dg-title');
+    title.append(el('span', 'dg-name', daily.app), ...daily.workspaces.map((name) => wsChip(name)));
+    card.append(title);
+    card.append(
+      dgSection('Yesterday', dgList(daily.yesterday)), dgSection('Problems', dgList(daily.problems)),
+      dgSection('Plan', dgList(daily.plan)), dgSection('Today', dgList(daily.next)),
+    );
+    const commits = sources.find((source) => source.app === daily.app)?.commits ?? [];
+    const fold = el('details', 'dg-fold');
+    const list = el('ul', 'dg-commits');
+    list.append(...commits.map((commit) => {
+      const item = el('li', 'fs12');
+      item.append(el('span', 'mono', commit.sha), document.createTextNode(` ${commit.subject} `), el('span', 'muted', `${commit.workspace} · ${commit.ref} · ${dgTime(commit.date).slice(5)}`));
+      return item;
+    }));
+    fold.append(el('summary', '', `The commits it was made from (${commits.length})`), list);
+    card.append(fold);
+    const row = el('div', 'dg-copyrow');
+    const copy = el('button', 'btn small', 'Copy');
+    copy.type = 'button';
+    copy.dataset.dg = 'copy';
+    copy.addEventListener('click', () => void copyDaily(daily));
+    row.append(copy);
+    const copied = dg.copied.get(daily.app);
+    if (copied !== undefined) {
+      row.append(el('span', copied.ok ? 'muted fs12' : 'err-text fs12', copied.text));
+    }
+    card.append(row);
+    return card;
+  });
+}
+
+// The daily as plain text: "Yesterday:", "Problems:", "Plan:", "Today:", each with "- " items.
+function dailyText(daily) {
+  const part = (title, items) => [`${title}:`, ...items.map((item) => `- ${item}`)];
+  return [...part('Yesterday', daily.yesterday), ...part('Problems', daily.problems), ...part('Plan', daily.plan), ...part('Today', daily.next)].join('\n');
+}
+
+async function copyDaily(daily) {
+  try {
+    if (typeof navigator.clipboard?.writeText !== 'function') {
+      throw new Error('the browser gives no clipboard here');
+    }
+    await navigator.clipboard.writeText(dailyText(daily));
+    dg.copied.set(daily.app, { ok: true, text: 'Copied.' });
+  } catch (error) {
+    dg.copied.set(daily.app, { ok: false, text: `Copy failed: ${error.message}` });
+  }
+  renderDigest();
+}
+
 // ---------- The drawer: Workspaces, New ticket, Archived and an archived ticket's Task ----------
 
 // The job opens as its page (#job), a planned ticket as its page (#ticket, SF-081); the drawer stays
@@ -6223,26 +6701,66 @@ function renderSetup() {
 function renderWorkspaces() {
   const rows = state.workspaces ?? [];
   $('no-workspaces').hidden = state.workspaces === null || rows.length > 0;
+  if (state.wsEdit !== null && !rows.some((row) => row.name === state.wsEdit)) {
+    state.wsEdit = null;
+    state.wsEditForm = null;
+  }
   $('workspace-list').replaceChildren(...rows.map((row) => {
     const item = el('li');
+    if (state.wsEdit === row.name && state.wsEditForm !== null) {
+      // The Edit form (SF-103), kept across redraws so what is typed stays.
+      item.append(state.wsEditForm);
+      return item;
+    }
     const name = el('div', 'ws-name');
     name.append(wsDot(row.name), document.createTextNode(row.name));
+    // Its app (SF-103), when it is not the workspace itself.
+    if (typeof row.app === 'string' && row.app !== row.name) {
+      name.append(el('span', 'chipx ws-app', row.app));
+    }
     item.append(name);
     item.append(el('div', 'ws-path', row.path));
     if (row.problem) {
       item.append(el('div', 'ws-problem', row.problem));
     }
+    if (typeof row.description === 'string' && row.description !== '') {
+      item.append(el('div', 'ws-description', row.description));
+    } else if (typeof row.derived_description === 'string' && row.derived_description !== '') {
+      item.append(el('div', 'ws-description hint', `${row.derived_description} (from the repository)`));
+    }
     // The workspace's own hand-over setting (SF-083), or SF_HANDOFF's.
     item.append(el('div', 'ws-handoff hint', row.handoff === 'checkout' || row.handoff === 'off' ? `Hand-over: ${row.handoff} (this workspace)` : 'Hand-over: as SF_HANDOFF'));
+    const digest = row.digest ?? { track: false, my_work: false };
+    item.append(el('div', 'ws-digest hint', `Morning digest: ${digest.track ? 'on' : 'off'} · My daily: ${digest.my_work ? 'on' : 'off'}`));
     const line = el('div', 'row');
+    const edit = el('button', 'btn btn-sm', 'Edit');
+    edit.type = 'button';
+    edit.disabled = state.setupPending.has('workspace') || state.wsEdit !== null;
+    edit.addEventListener('click', () => openWorkspaceEdit(row));
     const remove = el('button', 'btn btn-sm', 'Remove');
     remove.type = 'button';
     remove.disabled = state.setupPending.has('workspace') || row.liveJobs > 0;
     remove.addEventListener('click', () => void removeWorkspace(row.name));
-    line.append(remove, el('span', 'hint', row.liveJobs > 0 ? `${row.liveJobs} live job${row.liveJobs === 1 ? '' : 's'}: finish or abort them first.` : 'The registration only; nothing on disk changes.'));
+    line.append(edit, remove, el('span', 'hint', row.liveJobs > 0 ? `${row.liveJobs} live job${row.liveJobs === 1 ? '' : 's'}: finish or abort them first.` : 'The registration only; nothing on disk changes.'));
     item.append(line);
     return item;
   }));
+  // The existing apps, the App field's suggestions (SF-103).
+  const apps = [...new Set(rows.map((row) => row.app).filter((app) => typeof app === 'string' && app !== ''))].sort();
+  $('workspace-apps').replaceChildren(...apps.map((app) => {
+    const option = el('option');
+    option.value = app;
+    return option;
+  }));
+  // Default's words: what SF_HANDOFF says now.
+  const handoffDefault = handoffDefaultText();
+  for (const select of [$('workspace-handoff'), state.wsEditForm?.querySelector('[data-wsf="handoff"]')]) {
+    const first = select?.children?.[0];
+    if (first !== undefined && first !== null) {
+      first.textContent = handoffDefault;
+    }
+  }
+  renderDigestSettings();
   // The workspace choice of the form keeps its value while the options are replaced; the
   // board's filter is the default.
   const select = $('ticket-workspace');
@@ -6318,24 +6836,230 @@ async function setupRequest(what, path, body, statusId, describe) {
   return outcome.level === 'ok' ? result : undefined;
 }
 
+// "Default (now: yes, from SF_HANDOFF)": the hand-over field's first option (SF-103).
+function handoffDefaultText() {
+  const now = state.wsSettings.handoff_default;
+  return now === 'checkout' || now === 'off' ? `Default (now: ${now === 'checkout' ? 'yes' : 'no'}, from SF_HANDOFF)` : 'Default (from SF_HANDOFF)';
+}
+
+// The colour the workspace sets itself, or 'auto': the row's colour when it is not the one its name
+// picks (the sum of the name's UTF-16 code units mod the palette's size, src/registry.ts).
+function ownColor(row) {
+  let sum = 0;
+  for (let index = 0; index < row.name.length; index += 1) {
+    sum += row.name.charCodeAt(index);
+  }
+  return WS_COLORS.includes(row.color) && row.color !== WS_COLORS[sum % WS_COLORS.length] ? row.color : 'auto';
+}
+
+// A field of the Edit form: its label, the control and the help text under it, each on its own line.
+function wsField(label, control, help) {
+  const field = el('div', 'field');
+  if (control.type === 'checkbox') {
+    const choice = el('label', 'choice');
+    choice.append(control, document.createTextNode(` ${label}`));
+    field.append(choice);
+  } else {
+    const id = `wsf-${control.dataset.wsf}`;
+    control.id = id;
+    const text = el('label', '', label);
+    text.setAttribute('for', id);
+    field.append(text, control);
+  }
+  if (help !== '') {
+    field.append(el('p', 'hint', help));
+  }
+  return field;
+}
+
+function wsSelect(key, options, value) {
+  const select = el('select');
+  select.dataset.wsf = key;
+  for (const [optionValue, text] of options) {
+    const option = el('option', '', text);
+    option.value = optionValue;
+    select.append(option);
+  }
+  select.value = value;
+  return select;
+}
+
+// Edit (SF-103): the card becomes the form: the checkout's path, Description (its placeholder the
+// repository's own description), App (the existing apps as suggestions), Hand-over, Colour and the
+// two digest switches. Save posts every field; Cancel changes nothing. The name stays.
+function openWorkspaceEdit(row) {
+  const form = el('form', 'form ws-edit');
+  form.dataset.ws = row.name;
+  const title = el('div', 'ws-name');
+  title.append(wsDot(row.name), document.createTextNode(`Edit ${row.name}`));
+  const path = el('input');
+  path.dataset.wsf = 'path';
+  path.type = 'text';
+  path.value = row.path;
+  path.setAttribute('autocomplete', 'off');
+  path.setAttribute('spellcheck', 'false');
+  const description = el('textarea');
+  description.dataset.wsf = 'description';
+  description.rows = 2;
+  description.value = row.description ?? '';
+  description.placeholder = row.derived_description ?? '';
+  const app = el('input');
+  app.dataset.wsf = 'app';
+  app.type = 'text';
+  app.value = row.app === row.name ? '' : (row.app ?? '');
+  app.placeholder = row.name;
+  app.setAttribute('list', 'workspace-apps');
+  app.setAttribute('autocomplete', 'off');
+  const handoff = wsSelect('handoff', [['default', handoffDefaultText()], ['checkout', 'Yes'], ['off', 'No']], row.handoff ?? 'default');
+  const color = wsSelect('color', [['auto', 'Automatic (from the name)'], ...WS_COLORS.map((name) => [name, name])], ownColor(row));
+  const track = el('input');
+  track.type = 'checkbox';
+  track.dataset.wsf = 'track';
+  track.checked = row.digest?.track === true;
+  const mine = el('input');
+  mine.type = 'checkbox';
+  mine.dataset.wsf = 'my_work';
+  mine.checked = row.digest?.my_work === true;
+  const buttons = el('div', 'row');
+  const save = el('button', 'btn btn-sm btn-primary', 'Save');
+  save.type = 'submit';
+  save.dataset.wsf = 'save';
+  const cancel = el('button', 'btn btn-sm', 'Cancel');
+  cancel.type = 'button';
+  cancel.dataset.wsf = 'cancel';
+  cancel.addEventListener('click', closeWorkspaceEdit);
+  buttons.append(save, cancel);
+  const status = el('div', 'status');
+  status.dataset.wsf = 'status';
+  status.setAttribute('role', 'status');
+  form.append(
+    title,
+    wsField('Path of the local checkout', path, 'Changing it is refused while the workspace has a live job.'),
+    wsField('Description', description, 'Optional. Empty: the repository\'s own description (shown greyed) is used.'),
+    wsField('App', app, 'Workspaces with the same app share one daily. Empty: its own name.'),
+    wsField('When a job is ready, hand it over to my checkout', handoff, ''),
+    wsField('Colour of its cards on the board', color, ''),
+    wsField('Morning digest: follow this repository', track, ''),
+    wsField('My daily: my commits here go into the daily of its app', mine, ''),
+    buttons, status,
+  );
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void submitWorkspaceEdit(row.name);
+  });
+  form.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeWorkspaceEdit();
+    }
+  });
+  state.wsEdit = row.name;
+  state.wsEditForm = form;
+  renderWorkspaces();
+  path.focus();
+}
+
+function closeWorkspaceEdit() {
+  state.wsEdit = null;
+  state.wsEditForm = null;
+  renderWorkspaces();
+}
+
+async function submitWorkspaceEdit(name) {
+  const form = state.wsEditForm;
+  if (form === null || state.wsEdit !== name) {
+    return;
+  }
+  const field = (key) => form.querySelector(`[data-wsf="${key}"]`);
+  const status = field('status');
+  const path = field('path').value.trim();
+  if (path === '') {
+    status.className = 'status error';
+    status.textContent = 'The path of the local checkout is needed.';
+    return;
+  }
+  const body = {
+    path, description: field('description').value, app: field('app').value, handoff: field('handoff').value, color: field('color').value,
+    digest: { track: field('track').checked === true, my_work: field('my_work').checked === true },
+  };
+  if (state.setupPending.has('workspace')) {
+    return;
+  }
+  state.setupPending.add('workspace');
+  field('save').disabled = true;
+  status.className = 'status pending';
+  status.textContent = 'Saving…';
+  let outcome = null;
+  try {
+    await post(`api/workspaces/${encodeURIComponent(name)}/edit`, body);
+  } catch (error) {
+    outcome = error instanceof ActionError ? `${error.code}: ${error.message}` : `The request failed (${error.message}); it may have taken effect. Reload the page to see the current state.`;
+  }
+  state.setupPending.delete('workspace');
+  field('save').disabled = false;
+  if (outcome === null) {
+    closeWorkspaceEdit();
+    setSetupStatus('workspace-status', { level: 'ok', text: `Saved ${name}.` });
+    return;
+  }
+  status.className = 'status error';
+  status.textContent = outcome;
+  renderSetup();
+}
+
+// The Morning digest section (SF-103): the stored settings, unless values are typed and not saved.
+function renderDigestSettings() {
+  const settings = state.wsSettings.digest;
+  if (settings === null || state.digestDirty || state.setupPending.has('digest')) {
+    return;
+  }
+  $('digest-at').value = settings.at;
+  $('digest-weekdays').checked = settings.weekdays_only === true;
+  $('digest-language').value = settings.language;
+}
+
+async function submitDigestSettings() {
+  const at = $('digest-at').value;
+  const language = $('digest-language').value.trim();
+  if (!/^\d\d:\d\d$/.test(at) || language === '') {
+    setSetupStatus('digest-status', { level: 'error', text: 'A time (HH:MM) and a language are needed.' });
+    return;
+  }
+  const result = await setupRequest('digest', 'api/digest-settings', { at, weekdays_only: $('digest-weekdays').checked === true, language }, 'digest-status', (data) =>
+    ({ level: 'ok', text: `Saved: ${data.at}${data.weekdays_only ? ' on weekdays' : ' every day'}, in ${data.language}. sf serve uses it at its next check.` }));
+  if (result !== undefined) {
+    state.digestDirty = false;
+  }
+}
+
 async function submitWorkspace() {
   const name = $('workspace-name').value.trim();
   const path = $('workspace-path').value.trim();
   // The workspace's own hand-over setting (SF-083); empty: SF_HANDOFF applies. Its colour on the
-  // board (SF-084); empty: the server picks one by its name.
+  // board (SF-084); empty: the server picks one by its name. Its description, app and digest
+  // switches (SF-103); empty or off: none, its name, off.
   const handoff = $('workspace-handoff').value;
   const color = $('workspace-color').value;
+  const description = $('workspace-description').value.trim();
+  const app = $('workspace-app').value.trim();
+  const track = $('workspace-track').checked === true;
+  const myWork = $('workspace-mywork').checked === true;
   if (name === '' || path === '') {
     setSetupStatus('workspace-status', { level: 'error', text: 'A name and the path of the local checkout are needed.' });
     return;
   }
-  const result = await setupRequest('workspace', 'api/workspaces', { name, path, ...(handoff !== '' ? { handoff } : {}), ...(color !== '' ? { color } : {}) }, 'workspace-status', (data) =>
+  const body = {
+    name, path, ...(handoff !== '' ? { handoff } : {}), ...(color !== '' ? { color } : {}), ...(description !== '' ? { description } : {}), ...(app !== '' ? { app } : {}),
+    ...(track || myWork ? { digest: { track, my_work: myWork } } : {}),
+  };
+  const result = await setupRequest('workspace', 'api/workspaces', body, 'workspace-status', (data) =>
     ({ level: 'ok', text: `Registered ${data.name} (${data.path}). Next: New ticket.` }));
   if (result !== undefined) {
-    $('workspace-name').value = '';
-    $('workspace-path').value = '';
-    $('workspace-handoff').value = '';
-    $('workspace-color').value = '';
+    for (const id of ['workspace-name', 'workspace-path', 'workspace-handoff', 'workspace-color', 'workspace-description', 'workspace-app']) {
+      $(id).value = '';
+    }
+    $('workspace-track').checked = false;
+    $('workspace-mywork').checked = false;
   }
 }
 
@@ -6592,7 +7316,10 @@ function openStream() {
     }
   });
   source.addEventListener('workspaces', (message) => {
-    state.workspaces = JSON.parse(message.data).workspaces;
+    const data = JSON.parse(message.data);
+    state.workspaces = data.workspaces;
+    // SF-103: the hand-over default and the morning digest's settings.
+    state.wsSettings = { handoff_default: data.handoff_default ?? null, digest: data.digest ?? null };
     renderSetup();
   });
   source.addEventListener('tickets', (message) => {
@@ -6735,6 +7462,15 @@ function init() {
     event.preventDefault();
     void submitTicket();
   });
+  // The Morning digest section (SF-103): typed values stay until saved.
+  $('digest-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    void submitDigestSettings();
+  });
+  for (const id of ['digest-at', 'digest-weekdays', 'digest-language']) {
+    $(id).addEventListener('input', () => (state.digestDirty = true));
+    $(id).addEventListener('change', () => (state.digestDirty = true));
+  }
   // A ticket's images (SF-064): New ticket's paste, drop and ×; the planned ticket page's paste and
   // drop.
   $('ticket-form').addEventListener('paste', onFormPaste);

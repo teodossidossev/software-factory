@@ -8,8 +8,8 @@ import { get, request, type IncomingMessage } from 'node:http';
 import type { DashboardActions, DashboardSetup } from '../../src/dashboard.js';
 import { FactoryError } from '../../src/errors.js';
 import type { MrInput } from '../../src/execution.js';
-import type { ArchivedRow, JobDependencies, TicketInput, TicketRow, WorkspaceRow } from '../../src/setup.js';
-import { type HandoffMode, type WorkspaceColor, workspaceColor } from '../../src/registry.js';
+import type { AddWorkspaceOptions, ArchivedRow, JobDependencies, TicketInput, TicketRow, WorkspaceRow } from '../../src/setup.js';
+import { type WorkspaceEdit, workspaceColor } from '../../src/registry.js';
 import { taskSha256 } from '../../src/task-file.js';
 
 export const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:";
@@ -238,7 +238,9 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
   return fake;
 }
 
-export type SetupCall = ['saveTask', string, string, string, string] | ['addWorkspace', string, string] | ['addWorkspace', string, string, HandoffMode] | ['addWorkspace', string, string, HandoffMode | null, WorkspaceColor] | ['removeWorkspace', string] | ['createTicket', TicketInput]
+export type SetupCall = ['saveTask', string, string, string, string] | ['addWorkspace', string, string] | ['addWorkspace', string, string, AddWorkspaceOptions] | ['removeWorkspace', string] | ['createTicket', TicketInput]
+  // The Workspaces dialog's Edit and the Morning digest section (SF-103).
+  | ['editWorkspace', string, Omit<WorkspaceEdit, 'read_checkout'> & { path: string }] | ['saveDigestSettings', { at: string; weekdays_only: boolean; language: string }]
   | ['archiveTicket', string, string] | ['restoreTicket', string, string] | ['deleteTicket', string, string]
   // A ticket's images (SF-064): the upload's bytes as hex and its name (null without one).
   | ['addAttachment', string, string, string, string | null] | ['removeAttachment', string, string, string];
@@ -253,6 +255,8 @@ export interface FakeSetup extends DashboardSetup {
   // The modification time taskFile answers (SF-081).
   mtime: string;
   calls: SetupCall[];
+  // The workspaces payload's settings (SF-103).
+  settings: Awaited<ReturnType<DashboardSetup['workspaceSettings']>>;
   // What the next change answers: a value, an error to throw, or a function.
   answer: unknown;
   // The images readAttachment serves (SF-064), by "<ws>/<ticket>/<name>"; a missing one is
@@ -261,7 +265,7 @@ export interface FakeSetup extends DashboardSetup {
 }
 
 export function workspaceRow(name: string, path = `/srv/${name}`, liveJobs = 0, handoff: WorkspaceRow['handoff'] = null): WorkspaceRow {
-  return { name, path, liveJobs, problem: null, handoff, color: workspaceColor(name) };
+  return { name, path, liveJobs, problem: null, handoff, color: workspaceColor(name), app: name, description: null, derived_description: null, digest: { track: false, my_work: false } };
 }
 
 export function ticketRow(workspace: string, ticket: string, title = `Ticket ${ticket}`, draft = true, job: TicketRow['job'] = null): TicketRow {
@@ -277,6 +281,7 @@ export function fakeSetup(workspaces: WorkspaceRow[] = [], tickets: TicketRow[] 
     reads: [],
     mtime: '2026-11-05T09:00:00.000Z',
     calls: [],
+    settings: { handoff_default: 'checkout', digest: { at: '08:00', weekdays_only: true, language: 'English' } },
     answer: undefined,
     images: new Map(),
     addAttachment: (workspace, ticket, data, name) => reply(['addAttachment', workspace, ticket, Buffer.from(data).toString('hex'), name ?? null], { name: name ?? '1.png', bytes: data.byteLength, type: 'image/png' }),
@@ -318,10 +323,13 @@ export function fakeSetup(workspaces: WorkspaceRow[] = [], tickets: TicketRow[] 
     archiveTicket: (workspace, ticket) => reply(['archiveTicket', workspace, ticket], { workspace, ticket, path: `.software-factory/archive/${ticket}.md`, jobArchived: false }),
     restoreTicket: (workspace, ticket) => reply(['restoreTicket', workspace, ticket], { workspace, ticket, path: `.software-factory/${ticket}.md` }),
     deleteTicket: (workspace, ticket) => reply(['deleteTicket', workspace, ticket], { workspace, ticket, deleted: [`.software-factory/${ticket}.md`], jobArchived: false }),
-    addWorkspace: (name, path, handoff, color) => reply(
-      color !== undefined ? ['addWorkspace', name, path, handoff ?? null, color] : handoff === undefined ? ['addWorkspace', name, path] : ['addWorkspace', name, path, handoff],
-      { ...workspaceRow(name, path, 0, handoff ?? null), color: workspaceColor(name, color) },
+    addWorkspace: (name, path, options = {}) => reply(
+      Object.keys(options).length === 0 ? ['addWorkspace', name, path] : ['addWorkspace', name, path, options],
+      { ...workspaceRow(name, path, 0, options.handoff ?? null), color: workspaceColor(name, options.color) },
     ),
+    editWorkspace: (name, edit) => reply(['editWorkspace', name, edit], { ...workspaceRow(name, edit.path), description: edit.description === '' ? null : edit.description, app: edit.app === '' ? name : edit.app, digest: edit.digest }),
+    workspaceSettings: async () => fake.settings,
+    saveDigestSettings: (input) => reply(['saveDigestSettings', input], { ...input }),
     removeWorkspace: (name) => reply(['removeWorkspace', name], { removed: name }),
     createTicket: (input) => reply(['createTicket', input], { workspace: input.workspace, ticket: input.ticket, path: `.software-factory/${input.ticket}.md`, base: 'main' }),
   };

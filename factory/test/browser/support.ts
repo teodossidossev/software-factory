@@ -17,13 +17,15 @@ import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { type Browser, chromium, type Page, type Request } from 'playwright';
-import { type DashboardActions, type DashboardQueue, type DashboardSetup, type RunningDashboard, startDashboard } from '../../src/dashboard.js';
+import { type DashboardActions, type DashboardDigests, type DashboardQueue, type DashboardSetup, type RunningDashboard, startDashboard } from '../../src/dashboard.js';
+import { digestCounts, type DigestRecord } from '../../src/digest-run.js';
 import { FactoryError } from '../../src/errors.js';
 import { type EventRecord, type Job, type JobState, JobStore, TERMINAL_STATES } from '../../src/jobs.js';
 import { messageText, mrMessage, mrProblems, mrTextProblem } from '../../src/mr.js';
 import { buildPatch, fileChanges } from '../../src/patch.js';
 import { MAX_RUNNING, MIN_RUNNING, runningJobs } from '../../src/queue.js';
-import { saveRegistry, workspaceColor } from '../../src/registry.js';
+import { saveRegistry, type WorkspaceColor, workspaceColor } from '../../src/registry.js';
+import type { WorkspaceRow, WorkspaceSettings } from '../../src/setup.js';
 import { COMMIT_TYPES, MANUAL_CLAIM, MAX_HEADER_CHARS, MR_REQUIRED_HEADINGS } from '../../src/rules.js';
 import { DRAFT_MARKER, isDraft, taskSha256 } from '../../src/task-file.js';
 import { TicketHistory } from '../../src/ticket-history.js';
@@ -208,9 +210,37 @@ export class FakeSetup implements DashboardSetup {
     return rows;
   }
 
-  async workspaces() {
+  // The fixture's one workspace as the Setup's Edit leaves it (SF-103).
+  workspace: { path: string; description: string | null; app: string; handoff: 'checkout' | 'off' | null; color: WorkspaceColor | null; digest: { track: boolean; my_work: boolean } } | undefined;
+
+  async workspaces(): Promise<WorkspaceRow[]> {
     const live = (await this.#jobs.list()).filter(isLive).length;
-    return [{ name: WS, path: this.#repo, liveJobs: live, problem: null, handoff: null, color: workspaceColor(WS) }];
+    const own = this.workspace ?? { path: this.#repo, description: null, app: WS, handoff: null, color: null, digest: { track: false, my_work: false } };
+    return [{
+      name: WS, path: own.path, liveJobs: live, problem: null, handoff: own.handoff, color: workspaceColor(WS, own.color ?? undefined), app: own.app, description: own.description,
+      derived_description: 'The app of the browser tests.', digest: own.digest,
+    }];
+  }
+
+  async workspaceSettings(): Promise<WorkspaceSettings> {
+    return { handoff_default: 'off', digest: { at: '08:00', weekdays_only: true, language: 'English' } };
+  }
+
+  // As Setup.editWorkspace, without Git: the fields replace the workspace's.
+  async editWorkspace(name: string, edit: Parameters<DashboardSetup['editWorkspace']>[1]): Promise<WorkspaceRow> {
+    this.#record('editWorkspace', name, edit);
+    if (name !== WS) {
+      refuse('workspace_not_found', `workspace "${name}" is not registered.`);
+    }
+    this.workspace = {
+      path: edit.path, description: edit.description.trim() === '' ? null : edit.description.trim(), app: edit.app.trim() === '' ? WS : edit.app.trim(),
+      handoff: edit.handoff === 'default' ? null : edit.handoff, color: edit.color === 'auto' ? null : edit.color, digest: edit.digest,
+    };
+    return (await this.workspaces())[0]!;
+  }
+
+  async saveDigestSettings(): Promise<never> {
+    return refuse('setup_unavailable', 'Not in the browser fixture.');
   }
 
   async tickets() {
@@ -303,6 +333,34 @@ export class FakeSetup implements DashboardSetup {
 
   async readAttachment(): Promise<never> {
     return refuse('attachment_missing', 'The ticket has no images.');
+  }
+}
+
+// The morning digest's stored records (SF-103), as Digests lists and reads them; Generate now is
+// recorded and marks a run as going (digest_running for a second one).
+export class FakeDigests implements DashboardDigests {
+  readonly records: DigestRecord[] = [];
+  readonly starts: string[] = [];
+  running = false;
+
+  async list() {
+    const digests = [...this.records].sort((a, b) => b.started_at.localeCompare(a.started_at)).map((record) => ({
+      id: record.id, trigger: record.trigger, period: record.period, ended_at: record.ended_at, counts: digestCounts(record.workspaces), cost_usd: record.cost_usd, error: record.error,
+    }));
+    return { running: this.running, digests };
+  }
+
+  async read(id: string) {
+    return this.records.find((record) => record.id === id);
+  }
+
+  start(trigger: 'scheduled' | 'manual'): { started: true } {
+    this.starts.push(trigger);
+    if (this.running) {
+      refuse('digest_running', 'A digest is running.');
+    }
+    this.running = true;
+    return { started: true };
   }
 }
 
@@ -631,6 +689,7 @@ export interface Fixture {
   actions: FakeActions;
   setup: FakeSetup;
   queue: FakeQueue;
+  digests: FakeDigests;
   // Console errors, page errors, failed requests and responses of 400 and more, since the page opened.
   problems: string[];
   // Opens the page at the hash (the board without one) and waits until the stream has delivered
@@ -655,7 +714,8 @@ export function browserTest(name: string, fn: (fx: Fixture) => Promise<void>, op
     const setup = new FakeSetup(jobs, once.repo);
     const queue = new FakeQueue(jobs, setup);
     const actions = new FakeActions(jobs);
-    const dashboard = await startDashboard(0, state, jobs, actions.bind(), setup, { queue });
+    const digests = new FakeDigests();
+    const dashboard = await startDashboard(0, state, jobs, actions.bind(), setup, { queue, digests });
     const context = await once.browser.newContext({ viewport: { width: 1400, height: 900 } });
     const page = await context.newPage();
     const url = dashboard.url.href;
@@ -673,7 +733,7 @@ export function browserTest(name: string, fn: (fx: Fixture) => Promise<void>, op
       }
     });
     const fx: Fixture = {
-      page, dashboard, url, state, jobs, actions, setup, queue, problems,
+      page, dashboard, url, state, jobs, actions, setup, queue, digests, problems,
       async open(hash = '') {
         await page.goto(`${url}${hash === '' ? '' : `#${hash}`}`);
         await page.waitForFunction(() => document.getElementById('connection')?.textContent === 'live');

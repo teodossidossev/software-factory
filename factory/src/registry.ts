@@ -4,7 +4,10 @@
 // workspace is one checkout: the Implementer works in a worktree of it, so a separate work
 // checkout (`work_checkout`) is read for compatibility and ignored. A workspace's optional `handoff`
 // (SF-083) wins over SF_HANDOFF for its jobs; its optional `color` (SF-084) marks its cards on the board;
-// its optional `rules_skip` (SF-059) names the repository rule files not given to the agents.
+// its optional `rules_skip` (SF-059) names the repository rule files not given to the agents. Since
+// SF-103 a workspace has an optional `description`, `app` (workspaces of one app share one daily) and
+// `digest: {track, my_work}`, and the registry an optional top-level `digest` (the morning digest's
+// time, weekdays only, model and language).
 import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -56,18 +59,101 @@ export function workspaceColor(name: string, color?: WorkspaceColor): WorkspaceC
   return WORKSPACE_COLORS[sum % WORKSPACE_COLORS.length]!;
 }
 
+// The morning digest (SF-103): a workspace's description and app, at most this long.
+export const MAX_DESCRIPTION_CHARS = 2000;
+export const MAX_APP_CHARS = 64;
+// "HH:MM", 00:00 to 23:59.
+export const DIGEST_TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+export const MAX_LANGUAGE_CHARS = 40;
+
+// A workspace's digest switches (SF-103): track, followed in the morning digest; my_work, my commits
+// here go into the daily of its app. Absent: false.
+const workspaceDigestSchema = z.strictObject({ track: z.boolean().optional(), my_work: z.boolean().optional() });
+
+const digestSettingsSchema = z.strictObject({
+  at: z.string().regex(DIGEST_TIME_PATTERN, 'must be HH:MM (00:00 to 23:59)').optional(),
+  weekdays_only: z.boolean().optional(),
+  model: z.string().min(1).optional(),
+  language: z.string().trim().min(1).max(MAX_LANGUAGE_CHARS).optional(),
+});
+
 const registrySchema = z.strictObject({
   workspaces: z.record(
     z.string().regex(WORKSPACE_NAME_PATTERN),
     z.strictObject({
       read_checkout: absolutePath, work_checkout: absolutePath.optional(), handoff: z.enum(HANDOFF_MODES).optional(), color: z.enum(WORKSPACE_COLORS).optional(),
       rules_skip: z.array(z.string().min(1)).optional(),
+      description: z.string().max(MAX_DESCRIPTION_CHARS).optional(),
+      app: z.string().trim().min(1).max(MAX_APP_CHARS).optional(),
+      digest: workspaceDigestSchema.optional(),
     }),
   ),
+  digest: digestSettingsSchema.optional(),
 });
 
 export type Registry = z.infer<typeof registrySchema>;
 export type WorkspaceEntry = Registry['workspaces'][string];
+
+// The morning digest's settings with their defaults (SF-103).
+export interface DigestSettings {
+  at: string;
+  weekdays_only: boolean;
+  model: string;
+  language: string;
+}
+export const DIGEST_DEFAULTS: DigestSettings = { at: '08:00', weekdays_only: true, model: 'sonnet', language: 'English' };
+
+export function digestSettings(registry: Registry): DigestSettings {
+  return { ...DIGEST_DEFAULTS, ...registry.digest };
+}
+
+// A workspace's digest switches, absent ones false.
+export function workspaceDigest(entry: WorkspaceEntry): { track: boolean; my_work: boolean } {
+  return { track: entry.digest?.track === true, my_work: entry.digest?.my_work === true };
+}
+
+// A workspace's app: its own, else its name (one repository, one project).
+export function workspaceApp(name: string, entry: WorkspaceEntry): string {
+  return entry.app ?? name;
+}
+
+// What the Setup's Edit replaces (SF-103); "" removes description and app, 'default' the handoff
+// key, 'auto' the color key, and digest with both false the digest key. work_checkout and
+// rules_skip stay as they are.
+export interface WorkspaceEdit {
+  read_checkout: string;
+  description: string;
+  app: string;
+  handoff: HandoffMode | 'default';
+  color: WorkspaceColor | 'auto';
+  digest: { track: boolean; my_work: boolean };
+}
+
+export function editedEntry(entry: WorkspaceEntry, edit: WorkspaceEdit): WorkspaceEntry {
+  const { read_checkout: _read, description: _description, app: _app, handoff: _handoff, color: _color, digest: _digest, ...kept } = entry;
+  const description = edit.description.trim();
+  const app = edit.app.trim();
+  return {
+    ...kept,
+    read_checkout: edit.read_checkout,
+    ...(edit.handoff !== 'default' ? { handoff: edit.handoff } : {}),
+    ...(edit.color !== 'auto' ? { color: edit.color } : {}),
+    ...(description !== '' ? { description } : {}),
+    ...(app !== '' ? { app } : {}),
+    ...(edit.digest.track || edit.digest.my_work ? { digest: { track: edit.digest.track, my_work: edit.digest.my_work } } : {}),
+  };
+}
+
+// The workspace's fields as the registry would hold them: refused with workspace_invalid when
+// the description or the app is too long.
+export function checkWorkspaceText(description: string, app: string): void {
+  if (description.trim().length > MAX_DESCRIPTION_CHARS) {
+    throw new FactoryError('workspace_invalid', `The description must be at most ${MAX_DESCRIPTION_CHARS} characters.`);
+  }
+  if (app.trim().length > MAX_APP_CHARS) {
+    throw new FactoryError('workspace_invalid', `The app must be at most ${MAX_APP_CHARS} characters.`);
+  }
+}
 
 export interface Workspace {
   name: string;

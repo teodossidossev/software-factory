@@ -230,7 +230,8 @@ The full table with every detail is in the reference,
 strict: an unknown key, at the top or in an entry, makes the whole file invalid, and `sf serve`
 refuses to start (`registry_invalid`).
 
-The top level is exactly `{"workspaces": {<name>: <entry>}}`. A **name** is 1 to 64 characters of
+The top level is `{"workspaces": {<name>: <entry>}}` and, optionally, the morning digest's
+`"digest"` settings (below). A **name** is 1 to 64 characters of
 `a-z`, `0-9` and `-`, starting and ending with a letter or digit.
 
 | Field | Required | Allowed | Meaning |
@@ -240,6 +241,20 @@ The top level is exactly `{"workspaces": {<name>: <entry>}}`. A **name** is 1 to
 | `handoff` | no | `"checkout"` or `"off"` | The workspace's own hand-over setting; wins over `SF_HANDOFF`. Use `off` for a checkout that must not be switched to every job's branch. |
 | `color` | no | `blue`, `teal`, `green`, `olive`, `orange`, `red`, `purple`, `grey` | The workspace's colour on the board. Without it, one is picked from the name. |
 | `rules_skip` | no | a list of paths or globs | Repository rule files not given to the agents ([Coding rules](#coding-rules)). Only by editing the file. |
+| `description` | no | text, at most 2,000 characters | What the repository is, for the morning digest. Without it the digest reads the first paragraph of the repository's `README.md` (else its `package.json`'s `description`). When it and the Git data disagree, the data wins. |
+| `app` | no | text, 1 to 64 characters | Workspaces with the same app share one daily and are compared in "One ticket across the app" (a backend and its frontend). Without it the workspace is its own app. |
+| `digest` | no | `{"track": true/false, "my_work": true/false}` | `track`: follow the repository in the morning digest. `my_work`: your commits here go into the daily of its app. Absent: both off. |
+
+The top-level `digest` sets the morning digest; every key is optional:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `at` | `"08:00"` | The local time (`HH:MM`) after which `sf serve` makes the day's digest. |
+| `weekdays_only` | `true` | No digest on Saturday and Sunday; Monday's covers the weekend. |
+| `model` | `"sonnet"` | The model of the digest's session. Only by editing the file. |
+| `language` | `"English"` | The language of the digest's text (1 to 40 characters). |
+
+`sf serve` rereads the file at every check (once a minute), so a change applies without a restart.
 
 A full example for two workspaces that the parser accepts (write your real home directory instead
 of `/home/you`):
@@ -256,9 +271,13 @@ of `/home/you`):
     "my-api": {
       "read_checkout": "/home/you/work/my-api",
       "handoff": "off",
-      "color": "teal"
+      "color": "teal",
+      "app": "my-shop",
+      "description": "The shop's backend: orders and payments.",
+      "digest": { "track": true, "my_work": true }
     }
-  }
+  },
+  "digest": { "at": "07:30", "weekdays_only": true, "model": "sonnet", "language": "English" }
 }
 ```
 
@@ -273,8 +292,11 @@ sf workspace list
 `sf workspace add` resolves the path (so `~` and relative paths work there). Run it again with the
 same name and path and `--handoff` or `--color` to change those fields; without them it says
 `workspace_exists`. `sf workspace remove my-api` removes the registration only (nothing on disk
-changes). On the dashboard, the Workspaces drawer adds a workspace (an absolute path; it cannot
-change an existing one) and removes one that has no live job.
+changes). On the dashboard, the Workspaces drawer adds a workspace (an absolute path), edits one
+(**Edit** on its card: the path, the description, the app, the hand-over, the colour and the two
+digest switches; the name stays, and the path cannot change while the workspace has a live job), and
+removes one that has no live job. Its **Morning digest** section sets `at`, `weekdays_only` and
+`language`. The CLI has no flags for the digest's fields: use the drawer or edit the file.
 
 ## Coding rules
 

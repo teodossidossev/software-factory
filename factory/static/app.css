@@ -603,3 +603,48 @@ pre.raw.doc .heading { font-weight: 700; }
 #stream .task-check .check-kind { font-weight: 600; }
 /* A queued card is dragged to its new place (SF-071). */
 .card[draggable="true"] { cursor: grab; }
+
+/* The morning digest (SF-103): a full page like the planned ticket's, the Repositories and My daily
+   tabs, the cards of the followed workspaces and the dailies; the workspace card's app, description
+   and digest line, and its Edit form in the drawer. */
+#digest { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--bg); z-index: 6; padding-top: env(safe-area-inset-top, 0px); padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px)); }
+#digest .jhead .t1 .title { font-size: 16px; font-weight: 600; }
+.dg-pick { font: 13px var(--sans); height: 30px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--panel); color: var(--fg); padding: 0 6px; max-width: 220px; }
+.dg-body { max-width: 1100px; margin: 0 auto; display: grid; gap: 14px; min-width: 0; }
+.dg-tabs { margin-bottom: 2px; }
+.dg-title { text-transform: none !important; letter-spacing: 0 !important; font-size: 14px !important; color: var(--fg) !important; flex-wrap: wrap; align-items: center !important; }
+.dg-title .dg-name { font-weight: 600; }
+.dg-headline { margin: 0; font-size: 14px; }
+.dg-impact { background: var(--warn-bg); border-left: 3px solid var(--warn); border-radius: var(--radius-sm); padding: 8px 12px; }
+.dg-sec h4, .dg-impact h4 { margin: 0 0 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.dg-impact h4 { color: var(--warn); }
+.dg-items { margin: 0; padding-left: 18px; font-size: 13px; }
+.dg-landed, .dg-branches, .dg-commits { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.dg-entry { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 10px; background: var(--panel-2); display: grid; gap: 2px; min-width: 0; }
+.dg-entry.mine { border-left: 3px solid var(--accent); }
+.dg-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; font-size: 12px; color: var(--muted); }
+.dg-meta .dg-who { color: var(--fg); }
+.dg-ref { color: var(--fg); overflow-wrap: anywhere; }
+.dg-what { display: flex; gap: 6px; align-items: baseline; font-size: 13px; flex-wrap: wrap; }
+.dg-where { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.dg-subject { overflow-wrap: anywhere; }
+.dg-counts .plus { color: var(--add); }
+.dg-counts .minus { color: var(--muted); }
+.dg-counts .dg-behind { color: var(--warn); font-weight: 600; }
+.dg-overlap { color: var(--warn); overflow-wrap: anywhere; }
+.dg-fold summary { cursor: pointer; font-size: 12.5px; color: var(--accent); margin-top: 4px; }
+.dg-fold[open] summary { margin-bottom: 6px; }
+.dg-scroll { overflow-x: auto; }
+.dgx { border-collapse: collapse; width: 100%; font-size: 13px; }
+.dgx th, .dgx td { text-align: left; vertical-align: top; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.dgx th { font-size: 12px; color: var(--muted); font-weight: 600; }
+.dgx .dg-forme { font-weight: 600; }
+.dg-copyrow { display: flex; gap: 10px; align-items: center; }
+.dg-empty p { margin: 0; }
+#drawer .ws-app { margin-left: 8px; font-weight: 400; }
+#drawer .ws-description { font-size: 13px; overflow-wrap: anywhere; }
+#drawer input[type="time"] { min-height: var(--control); padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--panel); color: inherit; font: inherit; width: 9em; }
+@media (max-width: 760px) {
+  .dg-pick { max-width: 160px; }
+  .dg-body { gap: 10px; }
+}

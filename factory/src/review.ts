@@ -3,7 +3,7 @@
 // outside the Task's scope, deleted) in its prompt and a structured verdict as its output. Knows
 // nothing about job states; the Execution applies the verdict.
 import { dirname, resolve } from 'node:path';
-import { type Options, query, type SandboxSettings, type SDKMessage, type SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
+import { type Options, query, type SandboxSettings, type SDKMessage, type SDKResultMessage, type SettingSource } from '@anthropic-ai/claude-agent-sdk';
 import * as z from 'zod/v4';
 import { type ImageRef, promptInput } from './attachments.js';
 import type { FileChange } from './jobs.js';
@@ -182,6 +182,12 @@ export interface ReviewOptions {
   // the session's own, and the sandbox's filesystem deny lists merged into sandbox.
   deny?: string[] | undefined;
   filesystem?: SandboxDenials | undefined;
+  // The session's tools; REVIEW_TOOLS by default. [] (the morning digest, SF-103): none but the
+  // SDK's structured-output tool.
+  tools?: string[];
+  // The settings and instruction files loaded; ['project'] by default. [] (the morning digest):
+  // none, so no CLAUDE.md, AGENTS.md or user settings.
+  settingSources?: SettingSource[];
 }
 
 // The instruction files the CLI loads as project instructions from a directory, with
@@ -214,8 +220,9 @@ export function reviewSessionOptions(options: Omit<ReviewOptions, 'onMessage' | 
 }
 
 // The options of every read-only session with a structured output (the review, the Task check of
-// SF-054): REVIEW_TOOLS only, REVIEW_DENIED_TOOLS plus deny plus the options' path denials
-// (SF-100), the given output schema, and the given hooks (the Task check's path guard).
+// SF-054, the morning digest of SF-103): REVIEW_TOOLS only (or the given tools), REVIEW_DENIED_TOOLS
+// plus deny plus the options' path denials (SF-100), the given output schema, and the given hooks
+// (the Task check's path guard).
 export function readOnlySessionOptions(
   options: Omit<ReviewOptions, 'onMessage' | 'signal'>, abortController: AbortController, schema: Record<string, unknown>, deny: readonly string[] = [],
   hooks?: Options['hooks'],
@@ -225,9 +232,9 @@ export function readOnlySessionOptions(
     abortController,
     cwd: options.cwd,
     permissionMode: 'auto',
-    settingSources: ['project'],
+    settingSources: options.settingSources ?? ['project'],
     settings: { claudeMdExcludes: outsideInstructionFiles(options.cwd) },
-    tools: REVIEW_TOOLS,
+    tools: options.tools ?? REVIEW_TOOLS,
     disallowedTools: [...REVIEW_DENIED_TOOLS, ...deny, ...(options.deny ?? [])],
     outputFormat: { type: 'json_schema', schema },
     maxTurns: options.maxTurns,

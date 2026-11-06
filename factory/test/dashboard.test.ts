@@ -15,6 +15,7 @@ import { type EventRecord, type Job, JobStore } from '../src/jobs.js';
 import { buildPatch, fileChanges } from '../src/patch.js';
 import { saveRegistry } from '../src/registry.js';
 import { act, CSP, fakeActions, fetchRaw, openStream, type Stream } from './support/dashboard-client.js';
+import type { DashboardDigests } from '../src/dashboard.js';
 import { withDashboard } from './support/dashboard-state.js';
 import { call, git, newEnv, newRepo, putTask, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
 
@@ -89,6 +90,50 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
     const post = await fetchRaw(new URL('api/jobs', base), { method: 'POST' });
     assert.deepEqual([post.status, post.body, post.headers.allow], [405, '', 'GET']);
     assert.equal((await fetchRaw(base, { host: `attacker.example:${base.port}` })).status, 403);
+  });
+});
+
+test('dashboard (SF-103): the digest list and one digest, a manual run and digest_running; 404 without digests', async () => {
+  const summary = { id: '20261106T060000Z-scheduled', trigger: 'scheduled' as const, period: { from: '2026-11-05T06:00:00.000Z', to: '2026-11-06T06:00:00.000Z' }, ended_at: '2026-11-06T06:02:00.000Z', counts: { landed: 3, live_branches: 2, impact: 1 }, cost_usd: 0.3, error: null };
+  const record = { ...summary, started_at: '2026-11-06T06:00:00.000Z', workspaces: [] };
+  let running = false;
+  const starts: string[] = [];
+  const digests = {
+    list: async () => ({ running, digests: [summary] }),
+    read: async (id: string) => (id === summary.id ? record : undefined),
+    start: (trigger: 'scheduled' | 'manual') => {
+      starts.push(trigger);
+      if (running) {
+        throw new FactoryError('digest_running', 'A digest (manual) is running; it is not started twice.');
+      }
+      running = true;
+      return { started: true as const };
+    },
+  } as unknown as DashboardDigests;
+  await withDashboard('dash-digests', fakeActions(), async (dashboard) => {
+    const base = dashboard.url;
+    const list = await fetchRaw(new URL('api/digests', base));
+    assert.deepEqual([list.status, list.headers['content-type'], list.headers['content-security-policy']], [200, 'application/json; charset=utf-8', CSP]);
+    assert.deepEqual(JSON.parse(list.body), { running: false, digests: [summary] });
+    assert.deepEqual(JSON.parse((await fetchRaw(new URL(`api/digests/${summary.id}`, base))).body), record);
+    for (const path of ['api/digests/20261106T060000Z-manual', 'api/digests/../x', `api/digests/${summary.id}/more`, 'api/digests?x=1']) {
+      assert.equal((await fetchRaw(new URL(path, base))).status, 404, path);
+    }
+    assert.equal((await act(base, 'api/digests', {})).status, 405);
+    const get = await act(base, 'api/digests/run', {}, { method: 'GET' });
+    assert.deepEqual([get.status, get.headers.allow], [405, 'POST']);
+    assert.deepEqual(JSON.parse((await act(base, 'api/digests/run', undefined, { body: '{"now":true}' })).body).error.code, 'invalid_body');
+    assert.equal((await act(base, 'api/digests/run', {}, { headers: { origin: `http://localhost:${base.port}` } })).status, 403);
+    assert.deepEqual(starts, []);
+    assert.deepEqual(JSON.parse((await act(base, 'api/digests/run', {})).body), { ok: true, result: { started: true } });
+    assert.equal(JSON.parse((await fetchRaw(new URL('api/digests', base))).body).running, true);
+    const busy = await act(base, 'api/digests/run', {});
+    assert.deepEqual([busy.status, JSON.parse(busy.body).error.code], [409, 'digest_running']);
+    assert.deepEqual(starts, ['manual', 'manual']);
+  }, undefined, { digests });
+  await withDashboard('dash-no-digests', fakeActions(), async (dashboard) => {
+    assert.equal((await fetchRaw(new URL('api/digests', dashboard.url))).status, 404);
+    assert.equal((await act(dashboard.url, 'api/digests/run', {})).status, 404);
   });
 });
 

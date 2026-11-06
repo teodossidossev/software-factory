@@ -2,7 +2,7 @@
 // published iteration and its events, T-0 failed) and a running Dashboard over it.
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { type DashboardActions, type DashboardQueue, type DashboardSetup, type RunningDashboard, startDashboard } from '../../src/dashboard.js';
+import { type DashboardActions, type DashboardDigests, type DashboardQueue, type DashboardSetup, type RunningDashboard, startDashboard } from '../../src/dashboard.js';
 import { type EventRecord, type Job, type JobState, JobStore } from '../../src/jobs.js';
 import { temp } from './harness.js';
 
@@ -51,7 +51,7 @@ export async function withDashboard(
   actions: DashboardActions,
   work: (dashboard: RunningDashboard, store: Fixture) => Promise<void>,
   setup?: DashboardSetup,
-  options: { queue?: DashboardQueue } = {},
+  options: { queue?: DashboardQueue; digests?: DashboardDigests } = {},
 ): Promise<void> {
   const store = await fixture(name);
   const dashboard = await startDashboard(0, store.state, store.jobs, actions, setup, options);

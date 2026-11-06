@@ -61,6 +61,7 @@ async function openPage(jobs: ReturnType<typeof job>[], workspaces: ReturnType<t
 const posts = (page: Page): FetchRequest[] => page.requests.filter((request) => request.method === 'POST');
 const items = (page: Page, id: string): FakeElement[] => page.$(id).children.filter((child): child is FakeElement => (child as FakeElement).tagName === 'LI');
 const buttons = (item: FakeElement): FakeElement[] => item.all().filter((element) => element.tagName === 'BUTTON');
+const named = (item: FakeElement, text: string): FakeElement => buttons(item).find((button) => button.textContent === text)!;
 const link = (item: FakeElement): FakeElement | undefined => item.all().find((element) => element.tagName === 'A');
 
 test('setup client: Workspaces and New ticket open in the drawer from the header; the lists, the forms and the board hint follow the stream', async () => {
@@ -104,11 +105,11 @@ test('setup client: Workspaces and New ticket open in the drawer from the header
   const [app, web] = items(busy, 'workspace-list');
   assert.equal((app!.children[0] as FakeElement).textContent, 'app');
   assert.equal((app!.children[1] as FakeElement).textContent, '/srv/app');
-  assert.equal(buttons(app!)[0]!.disabled, true);
+  assert.equal(named(app!, 'Remove').disabled, true);
   assert.match(app!.textContent, /1 live job: finish or abort them first\./);
   assert.equal((web!.children[2] as FakeElement).className, 'ws-problem');
   assert.equal((web!.children[2] as FakeElement).textContent, 'The work checkout does not exist.');
-  assert.equal(buttons(web!)[0]!.disabled, false);
+  assert.equal(named(web!, 'Remove').disabled, false);
   // The hand-over setting (SF-083): the workspace's own, or SF_HANDOFF's.
   assert.equal(app!.querySelector('.ws-handoff')!.textContent, 'Hand-over: as SF_HANDOFF');
   busy.streams.at(-1)!.emit('workspaces', { workspaces: [workspace('app', 0, null, 'off')] });
@@ -159,14 +160,14 @@ test('setup client: the workspace form posts once, reports the answer, clears on
 
   // Remove: the name in the path, the answer as text.
   page.streams.at(-1)!.emit('workspaces', { workspaces: [workspace('app')] });
-  buttons(items(page, 'workspace-list')[0]!)[0]!.click();
+  named(items(page, 'workspace-list')[0]!, 'Remove').click();
   await page.flush();
   assert.deepEqual([posts(page)[3]!.path, posts(page)[3]!.body], ['api/workspaces/app/remove', '{}']);
   posts(page)[3]!.respond(200, { ok: true, result: { removed: 'app' } });
   await page.flush();
   assert.equal(page.$('workspace-status').textContent, 'Removed app from the registry; the checkout and its files are untouched.');
   page.streams.at(-1)!.emit('workspaces', { workspaces: [workspace('app', 1)] });
-  buttons(items(page, 'workspace-list')[0]!)[0]!.click();
+  named(items(page, 'workspace-list')[0]!, 'Remove').click();
   await page.flush();
   assert.equal(posts(page).length, 4);
 
@@ -180,6 +181,124 @@ test('setup client: the workspace form posts once, reports the answer, clears on
   posts(page)[4]!.respond(200, { ok: true, result: workspace('own', 0, null, 'off') });
   await page.flush();
   assert.deepEqual([page.$('workspace-name').value, page.$('workspace-path').value, page.$('workspace-handoff').value], ['', '', '']);
+});
+
+// A workspace row as the server sends it since SF-103.
+const row103 = (name: string, extra: Record<string, unknown> = {}) => ({
+  ...workspace(name), color: 'teal', app: name, description: null, derived_description: `The ${name} from its README.`, digest: { track: false, my_work: false }, ...extra,
+});
+
+test('setup client (SF-103): the card shows the app, the description and the digest switches; Add sends the new fields; Default names SF_HANDOFF\'s value', async () => {
+  const page = await openPage([], [], []);
+  const stream = page.streams.at(-1)!;
+  stream.emit('workspaces', {
+    workspaces: [row103('api', { app: 'shop', description: 'The shop backend.', digest: { track: true, my_work: false } }), row103('web', { app: 'shop' }), row103('tools')],
+    handoff_default: 'off', digest: { at: '07:45', weekdays_only: false, language: 'Deutsch' },
+  });
+  await page.flush();
+  const [api, web, tools] = items(page, 'workspace-list');
+  assert.equal(api!.querySelector('.ws-app')!.textContent, 'shop');
+  assert.equal(api!.querySelector('.ws-description')!.textContent, 'The shop backend.');
+  assert.equal(api!.querySelector('.ws-digest')!.textContent, 'Morning digest: on · My daily: off');
+  assert.equal(web!.querySelector('.ws-description')!.textContent, 'The web from its README. (from the repository)');
+  assert.equal(tools!.querySelector('.ws-app'), null);
+  assert.equal(tools!.querySelector('.ws-digest')!.textContent, 'Morning digest: off · My daily: off');
+  // The App suggestions: the existing apps, once each.
+  assert.deepEqual(page.$('workspace-apps').children.map((option) => (option as FakeElement).value), ['shop', 'tools']);
+  assert.equal((page.$('workspace-handoff').children[0] as FakeElement).textContent, 'Default (now: no, from SF_HANDOFF)');
+  assert.deepEqual([page.$('digest-at').value, page.$('digest-weekdays').checked, page.$('digest-language').value], ['07:45', false, 'Deutsch']);
+
+  page.$('workspace-name').value = 'mobile';
+  page.$('workspace-path').value = '/srv/mobile';
+  page.$('workspace-description').value = ' The app for phones. ';
+  page.$('workspace-app').value = 'shop';
+  page.$('workspace-mywork').checked = true;
+  page.$('workspace-form').dispatch('submit');
+  await page.flush();
+  assert.deepEqual(JSON.parse(posts(page)[0]!.body!), { name: 'mobile', path: '/srv/mobile', description: 'The app for phones.', app: 'shop', digest: { track: false, my_work: true } });
+  posts(page)[0]!.respond(200, { ok: true, result: { name: 'mobile', path: '/srv/mobile' } });
+  await page.flush();
+  assert.deepEqual([page.$('workspace-description').value, page.$('workspace-app').value, page.$('workspace-mywork').checked], ['', '', false]);
+});
+
+test('setup client (SF-103): Edit opens the card as a form with every field, Save posts them all once, Cancel changes nothing; a refusal stays in the form', async () => {
+  const page = await openPage([], [], []);
+  const stream = page.streams.at(-1)!;
+  const rows = [row103('api', { app: 'shop', description: 'The shop backend.', handoff: 'off', color: 'red', digest: { track: true, my_work: false } }), row103('web', { color: 'purple' })];
+  stream.emit('workspaces', { workspaces: rows, handoff_default: 'checkout', digest: { at: '08:00', weekdays_only: true, language: 'English' } });
+  await page.flush();
+  named(items(page, 'workspace-list')[0]!, 'Edit').click();
+  await page.flush();
+  const form = (): FakeElement => items(page, 'workspace-list')[0]!.querySelector('form')!;
+  const field = (key: string): FakeElement => form().querySelector(`[data-wsf="${key}"]`)!;
+  assert.deepEqual([field('path').value, field('description').value, (field('description') as unknown as Record<string, unknown>).placeholder, field('app').value, field('handoff').value, field('color').value, field('track').checked, field('my_work').checked],
+    ['/srv/api', 'The shop backend.', 'The api from its README.', 'shop', 'off', 'red', true, false]);
+  assert.equal((field('handoff').children[0] as FakeElement).textContent, 'Default (now: yes, from SF_HANDOFF)');
+  // Labels in plain words, each with its own line.
+  assert.match(form().textContent, /Path of the local checkout[\s\S]*Description[\s\S]*App[\s\S]*When a job is ready, hand it over to my checkout[\s\S]*Colour of its cards on the board[\s\S]*Morning digest: follow this repository[\s\S]*My daily: my commits here go into the daily of its app/);
+  // The other card's Edit is off while one is open; a redraw keeps what is typed.
+  assert.equal(named(items(page, 'workspace-list')[1]!, 'Edit').disabled, true);
+  field('description').value = '';
+  field('app').value = 'store';
+  stream.emit('workspaces', { workspaces: rows, handoff_default: 'checkout', digest: { at: '08:00', weekdays_only: true, language: 'English' } });
+  await page.flush();
+  assert.equal(field('app').value, 'store');
+  // Cancel: no request, the card again.
+  named(form(), 'Cancel').click();
+  await page.flush();
+  assert.equal(items(page, 'workspace-list')[0]!.querySelector('form'), null);
+  assert.equal(posts(page).length, 0);
+  // Save: every field, once.
+  named(items(page, 'workspace-list')[0]!, 'Edit').click();
+  field('path').value = ' /srv/api2 ';
+  field('description').value = '';
+  field('handoff').value = 'default';
+  field('color').value = 'auto';
+  field('my_work').checked = true;
+  form().dispatch('submit');
+  form().dispatch('submit');
+  await page.flush();
+  assert.equal(posts(page).length, 1);
+  assert.equal(posts(page)[0]!.path, 'api/workspaces/api/edit');
+  assert.deepEqual(JSON.parse(posts(page)[0]!.body!), { path: '/srv/api2', description: '', app: 'shop', handoff: 'default', color: 'auto', digest: { track: true, my_work: true } });
+  posts(page)[0]!.respond(409, { ok: false, error: { code: 'workspace_busy', message: 'workspace "api" has a live job (A-1 working).' } });
+  await page.flush();
+  assert.equal(field('status').textContent, 'workspace_busy: workspace "api" has a live job (A-1 working).');
+  assert.equal(field('path').value, ' /srv/api2 ');
+  form().dispatch('submit');
+  await page.flush();
+  posts(page)[1]!.respond(200, { ok: true, result: rows[0] });
+  await page.flush();
+  assert.equal(items(page, 'workspace-list')[0]!.querySelector('form'), null);
+  assert.equal(page.$('workspace-status').textContent, 'Saved api.');
+  // A colour that is the one its name picks shows as Automatic.
+  named(items(page, 'workspace-list')[1]!, 'Edit').click();
+  assert.equal(items(page, 'workspace-list')[1]!.querySelector('[data-wsf="color"]')!.value, 'auto');
+});
+
+test('setup client (SF-103): the Morning digest section saves the time, weekdays only and the language; typed values stay over a redraw', async () => {
+  const page = await openPage([], [], []);
+  const stream = page.streams.at(-1)!;
+  stream.emit('workspaces', { workspaces: [row103('app')], handoff_default: 'checkout', digest: { at: '08:00', weekdays_only: true, language: 'English' } });
+  await page.flush();
+  page.$('digest-at').value = '06:30';
+  page.$('digest-at').dispatch('input');
+  page.$('digest-weekdays').checked = false;
+  page.$('digest-language').value = ' Български ';
+  stream.emit('workspaces', { workspaces: [row103('app')], handoff_default: 'checkout', digest: { at: '08:00', weekdays_only: true, language: 'English' } });
+  await page.flush();
+  assert.equal(page.$('digest-at').value, '06:30');
+  page.$('digest-form').dispatch('submit');
+  await page.flush();
+  assert.deepEqual([posts(page)[0]!.path, JSON.parse(posts(page)[0]!.body!)], ['api/digest-settings', { at: '06:30', weekdays_only: false, language: 'Български' }]);
+  posts(page)[0]!.respond(200, { ok: true, result: { at: '06:30', weekdays_only: false, language: 'Български' } });
+  await page.flush();
+  assert.equal(page.$('digest-status').textContent, 'Saved: 06:30 every day, in Български. sf serve uses it at its next check.');
+  page.$('digest-language').value = '';
+  page.$('digest-form').dispatch('submit');
+  await page.flush();
+  assert.equal(posts(page).length, 1);
+  assert.equal(page.$('digest-status').textContent, 'A time (HH:MM) and a language are needed.');
 });
 
 test('setup client: the new-ticket form posts the exact fields, clears on success, keeps them on a refusal', async () => {

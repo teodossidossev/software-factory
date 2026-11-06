@@ -130,3 +130,27 @@ export function conflictPrompt(input: ConflictPromptInput): string {
     '  ## Open questions   ("None." when there are none)',
   ].join('\n');
 }
+
+// The prompt of the morning digest (SF-103): the rules, today's date and the Git data of every
+// workspace as JSON (src/digest-run.ts builds it, capped at 150,000 characters). The model has no
+// tools but the structured output.
+export function digestPrompt(today: string, language: string, data: unknown): string {
+  return [
+    'You write the user\'s morning digest of their repositories and a draft of their stand-up ("my daily"), from the Git data below only. You have no tools besides the structured output.',
+    '',
+    'Rules:',
+    '- Facts only from the data. Mark a guess with "likely". Problems and plans are suggestions, never facts.',
+    `- Short, plain sentences in ${language}, one fact per sentence. Identifiers (branch names, ticket keys, file paths, commit SHAs, people's names) stay as they are.`,
+    '- When a workspace\'s description and its Git data disagree, the data wins.',
+    '- "I", "me" and "mine" are the user: the entries with mine: true.',
+    '- repos: one per workspace with followed: true, in the order of the data, with its name. headline: one or two sentences: what happened and where the work is heading. merged: one per landed entry, its sha as given, problem: the problem it solves, in one sentence. branches: one per live branch that has not landed, ref: its name, what: what is going on there, in one sentence. impact_on_me: the concrete effects on my branches and tickets (files shared with what landed, from overlap and hit_by; a rebase needed, from behind; the same ticket in another workspace of the same app); [] when there are none.',
+    '- cross_repo: only between workspaces of the same app (see apps), at most 6, the most relevant for me first. ticket: one ticket key, or two keys of one feature joined by " + ". by_workspace: one short sentence per workspace of the app, keyed by its name. for_me: what it means for me, "" when nothing. [] when no ticket spans two workspaces of one app.',
+    '- dailies: one per entry of daily (an app where I have commits or open branches), with its app and workspaces as given. yesterday: what I worked on yesterday (the commits dated in daily_days.yesterday). problems: the problems visible in Git (suggestions). plan: how I would likely address them (suggestions). next: what I continue with today.',
+    '',
+    `Today: ${today}.`,
+    '',
+    '<git_data>',
+    JSON.stringify(data),
+    '</git_data>',
+  ].join('\n');
+}

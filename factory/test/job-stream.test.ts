@@ -5,11 +5,12 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { changeNote, firstPrompt, imagesChangedNote } from '../src/execution.js';
-import { DETAIL_CHARS, lineEntries, type StreamContext, streamContext, type StreamEntry } from '../src/job-stream.js';
+import { DETAIL_CHARS, jobUserMessages, lineEntries, type StreamContext, streamContext, type StreamEntry } from '../src/job-stream.js';
 import { type GateRecord, type IterationMeta, JobStore, type ReviewRecord, type SimplifyRecord } from '../src/jobs.js';
 import type { LedgerEntry } from '../src/ledger.js';
 import { FACTORY_PROMPT_RULES, factoryPrompt } from '../src/prompts.js';
 import type { ReviewItem } from '../src/review.js';
+import { CONTINUE_PROMPT } from '../src/turn-limit.js';
 import { temp } from './support/harness.js';
 
 const TS = '2026-11-05T10:11:12.000Z';
@@ -92,7 +93,24 @@ test('lineEntries: prompt kinds by the first line; the rules block never in text
   // A user message that only looks like a command is the user's.
   assert.equal((await one({ prompt: '/implement .software-factory/T-1.md\n\nand more' })).t, 'user');
 
-  for (const entry of [implement, kept, fix, mr, conflict, resumed, said, fixChanged]) {
+  // SF-112: the first prompt with the job's rules (and kept files) is the factory's, the block cut;
+  // a Resume's leading rules block is cut; the turn-limit continuation is the factory's.
+  const ruled = await one({ prompt: factoryPrompt(firstPrompt('T-1', [], '<rules>\nR\n</rules>'), 'T-1', 1) });
+  assert.deepEqual([ruled.t, ruled.who, ruled.kind, ruled.text], ['prompt', 'factory', 'implement', '/implement .software-factory/T-1.md']);
+  const ruledKept = await one({ prompt: factoryPrompt(firstPrompt('T-1', ['a.ts', 'b.ts'], '<rules>\nR\n</rules>'), 'T-1', 1) });
+  assert.equal(ruledKept.kind, 'implement');
+  assert.ok(ruledKept.text.startsWith('/implement .software-factory/T-1.md\n\nThis job restarts an earlier job of T-1.'), ruledKept.text);
+  assert.ok(!ruledKept.text.includes('<rules>'));
+  const ruledSaid = await one({ prompt: factoryPrompt('<rules>\nR\n</rules>\n\nPlease merge the rows.', 'T-1', 2) });
+  assert.deepEqual([ruledSaid.t, ruledSaid.who, ruledSaid.text], ['user', 'you', 'Please merge the rows.']);
+  const ruledContinue = await one({ prompt: factoryPrompt('<rules>\nR\n</rules>\n\nContinue where you stopped.', 'T-1', 2) });
+  assert.deepEqual([ruledContinue.t, ruledContinue.kind], ['prompt', 'continue']);
+  const limit = await one({ prompt: CONTINUE_PROMPT });
+  assert.deepEqual([limit.t, limit.who, limit.kind], ['prompt', 'factory', 'continue']);
+  // After the cut, a rest that is neither empty nor the kept files stays the user's.
+  assert.equal((await one({ prompt: '/implement .software-factory/T-1.md\n\n<rules>\nR\n</rules>\n\nand more' })).t, 'user');
+
+  for (const entry of [implement, kept, fix, mr, conflict, resumed, said, fixChanged, ruled, ruledKept, ruledSaid, ruledContinue, limit]) {
     assert.ok(!JSON.stringify(entry).includes('Rules from the Software Factory'), entry.k);
     assert.ok(!JSON.stringify(entry).includes(FACTORY_PROMPT_RULES.split('\n')[1]!));
   }
@@ -326,6 +344,25 @@ test('lineEntries: simplify with its suggestions and saves; notes with their who
   assert.deepEqual(await lineEntries('not json', 0, fakeContext()), []);
   assert.deepEqual(await lineEntries('[1]', 0, fakeContext()), []);
   assert.deepEqual(await lineEntries('null', 0, fakeContext()), []);
+});
+
+test("jobUserMessages: the user's messages of events.jsonl, oldest first; none without the file", async () => {
+  const state = join(temp, 'job-stream-user-messages');
+  await mkdir(state, { recursive: true });
+  const jobs = new JobStore(state);
+  await mkdir(jobs.dir('app', 'T-1'), { recursive: true });
+  const at = (n: number): string => `2026-11-07T10:0${n}:00.000Z`;
+  await jobs.appendEvent('app', 'T-1', { ts: at(1), iteration: 1, prompt: factoryPrompt(firstPrompt('T-1', [], '<rules>\nR\n</rules>'), 'T-1', 1) });
+  await jobs.appendEvent('app', 'T-1', { ts: at(2), iteration: 2, prompt: factoryPrompt('Please merge the rows.', 'T-1', 2) });
+  await jobs.appendEvent('app', 'T-1', { ts: at(3), iteration: 3, prompt: factoryPrompt('/implement .software-factory/T-1.md Fix 1', 'T-1', 3) });
+  await jobs.appendEvent('app', 'T-1', { ts: at(4), iteration: 3, prompt: factoryPrompt(`Also drop the count.\n\n${changeNote('T-1', '-a\n+b')}`, 'T-1', 3) });
+  await jobs.appendEvent('app', 'T-1', { ts: at(5), iteration: 3, message: { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'prompt' }] } } });
+  await jobs.appendEvent('app', 'T-1', { ts: at(6), iteration: 3, prompt: CONTINUE_PROMPT });
+  assert.deepEqual(await jobUserMessages(jobs, 'app', 'T-1'), [
+    { iteration: 2, at: at(2), text: 'Please merge the rows.' },
+    { iteration: 3, at: at(4), text: 'Also drop the count.' },
+  ]);
+  assert.deepEqual(await jobUserMessages(jobs, 'app', 'T-2'), []);
 });
 
 test('streamContext: reads through the JobStore, caches within one context, a missing meta.json is undefined', async () => {

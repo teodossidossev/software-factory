@@ -95,7 +95,7 @@ test('the Report table: each answer, a contest without evidence reads as open, u
   assert.equal((await answerFix([entry('R1', 'open')], '| R1 | escalated | |', 1, context)).ledger[0]!.status, 'open');
 });
 
-test('evidence: a path:line within a file of the worktree, a test file or a quoted test name, a §section of the Task file', async () => {
+test("evidence: a path:line within a file of the worktree, a test file or a quoted test name, a §section of the Task file, a quote of the user's message", async () => {
   assert.equal(await findEvidence('see a.ts:10', context), 'a.ts:10');
   assert.equal(await findEvidence('see a.ts:11, b.ts:1, /etc/passwd:1, ../a.ts:1', context), '');
   assert.equal(await findEvidence('covered by test/a.test.ts', context), 'test/a.test.ts');
@@ -105,6 +105,20 @@ test('evidence: a path:line within a file of the worktree, a test file or a quot
   // A quoted text no test file holds is a wish, not a test.
   assert.equal(await findEvidence('This tests nothing, I "disagree"', context), '');
   assert.deepEqual(headings('# T\n```\n## not\n```\n## Behaviour\ntext\n### Fix 1 items'), ['T', 'Behaviour', 'Fix 1 items']);
+
+  // SF-112: a quote of the user's own message to the job, case and spacing aside, at least 8 characters.
+  const said: EvidenceContext = { ...context, userMessages: ['Please merge the anonymous rows into one row.'] };
+  assert.equal(await findEvidence('contested: user message "merge the anonymous rows"', said), 'user message "merge the anonymous rows"');
+  assert.equal(await findEvidence("as the user's message `Merge  the ANONYMOUS rows` asked", said), 'user message "Merge the ANONYMOUS rows"');
+  assert.equal(await findEvidence('contested: user message "split the rows apart"', said), '');
+  assert.equal(await findEvidence('contested: user message "merge t"', said), '');
+  assert.equal(await findEvidence('contested: user message "merge the anonymous rows"', context), '');
+  // A long quote is recorded cut to 200 characters.
+  const long = `${'word '.repeat(60)}end`;
+  const quoted = await findEvidence(`user message "${long}"`, { ...context, userMessages: [long] });
+  assert.equal(quoted, `user message "${long.slice(0, 199)}…"`);
+  const answered = await answerFix([entry('R1', 'open')], '| R1 | contested | user message "merge the anonymous rows" |', 1, said);
+  assert.deepEqual([answered.ledger[0]!.status, answered.ledger[0]!.evidence], ['contested', 'user message "merge the anonymous rows"']);
 });
 
 for (const reviewer of REVIEWERS) {

@@ -140,6 +140,10 @@ sf say my-app APP-12 "Use the date helper in src/util/date.ts instead of a new o
 - In `preparing_mr` no message is taken; in `waiting_limit` it is refused (use Resume with a
   message); a paused job takes a message with Resume.
 - *Tell it to go on* (on stops) sends the box's text, or "Go on." when it is empty.
+- Your messages (Send, Ask for changes, a Resume's message) are your decisions for the reviewers:
+  both see every message up to the iteration they review. Where one differs from the Task file it
+  wins, so a reviewer does not flag what you asked for. When a reviewer still raises it, the
+  Implementer contests the item by quoting your message instead of asking you again.
 
 ## Pause, resume, restart, abort, reset
 

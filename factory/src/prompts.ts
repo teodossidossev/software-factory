@@ -14,7 +14,7 @@ export const FACTORY_PROMPT_RULES = `Rules from the Software Factory:
   ## Checks      (each command run with its result; "not run" and why, when not run)
   ## Open questions   ("None." when there are none)
   ## Fix N items (only when answering a Fix section: one row per item, by its id: | R7 | fixed / contested / escalated / left | <evidence or note> |)
-- Answer each Fix item: fixed; contested only with evidence a reviewer can check without you (a path:line in the worktree, a test name, or a §section of the Task file), else it reads as open; escalated only when it turns on something only the user knows, outside the repository and the Task file (the note is the question); left for nits only.`;
+- Answer each Fix item: fixed; contested only with evidence a reviewer can check without you (a path:line in the worktree, a test name, a §section of the Task file, or the user's own message to this job quoted as: user message "<its exact words, at least 8 characters>"), else it reads as open; escalated only when it turns on something only the user knows, outside the repository and the Task file (the note is the question); left for nits only. An item that conflicts with the Task file only because the user's message asked for what you did is contested with that message, never escalated.`;
 
 // The line of factoryPrompt that names the Task's images (SF-065); the job stream recognises it.
 export function imagesLine(dir: string, names: readonly string[]): string {

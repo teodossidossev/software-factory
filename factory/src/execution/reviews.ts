@@ -8,6 +8,7 @@ import { type ImageRef, imageRefs } from '../attachments.js';
 import { FactoryError } from '../errors.js';
 import { gateDecision } from '../gate-level.js';
 import { GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from '../gate.js';
+import { jobUserMessages } from '../job-stream.js';
 import { type GateOverride, type GateRecord, type IterationMeta, type Job, type JobState, now, type ReviewRecord, type SimplifyRecord } from '../jobs.js';
 import { applyVerdict, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, LEDGER_ID, FACTORY_PROBLEMS, settle, SETTLE_CODES, unappliedEntries, unsettled } from '../ledger.js';
 import { Redactor } from '../redact.js';
@@ -231,6 +232,8 @@ export class ReviewsPart {
       ticket, iteration, report, patch, patchTruncated: meta.patch_truncated, files: meta.files, handbook: this.core.handbook,
       task: await readFile(join(worktree, TASK_DIR, `${ticket}.md`), 'utf8'), ledger: await this.core.jobs.readLedger(name, ticket),
       rules: await readJobRules(this.core.jobs.dir(name, ticket)),
+      // Every message sent up to and including the reviewed iteration (SF-112).
+      userMessages: (await jobUserMessages(this.core.jobs, name, ticket)).filter((m) => m.iteration <= iteration),
     };
   }
 

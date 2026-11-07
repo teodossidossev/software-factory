@@ -100,19 +100,26 @@ export interface EvidenceContext {
   // Whether a test file of the worktree holds the text (a test's name).
   testNamed(name: string): Promise<boolean>;
   sections: string[];
+  // The texts of the user's own messages to the job (SF-112); absent means none.
+  userMessages?: readonly string[];
 }
 
 const PATH_LINE = /(?<![\w/.-])((?:[\w@.-]+\/)*[\w@-][\w@.-]*\.\w+):(\d+)(?:-\d+)?/gu;
 const TEST_FILE = /(?<![\w/.-])((?:[\w@.-]+\/)*(?:[\w@.-]*[._-](?:test|spec)\.\w+|test_[\w.-]+\.\w+))(?![\w/:.-])/giu;
 const TEST_NAME = /\btests?\b[^"'`\n]{0,40}["'`]([^"'`\n]{3,})["'`]/giu;
 const SECTION = /§\s*([^|§\n]+)/gu;
+// A quote of the user's own message to the job (SF-112), in double quotes or backticks.
+const USER_MESSAGE = /\buser(?:'s)? message\b[^"`\n]{0,40}["`]([^"`\n]{8,})["`]/giu;
+// The longest quote of a user's message recorded as evidence, in characters.
+const MAX_QUOTE_CHARS = 200;
 
 const insideWorktree = (path: string): boolean => !path.startsWith('/') && !path.split('/').includes('..');
 
 // The evidence in a contest's note a reviewer can check without the Implementer: a path:line of a
 // file in the worktree (the line within it), a test file in the worktree or a quoted test name a
-// test file of the worktree holds, a §section of the Task file; joined with "; ", "" when there is
-// none. A wish to contest is not evidence.
+// test file of the worktree holds, a §section of the Task file, a quote of the user's own message
+// to the job (SF-112) that message holds, case and spacing aside; joined with "; ", "" when there
+// is none. A wish to contest is not evidence.
 export async function findEvidence(note: string, context: EvidenceContext): Promise<string> {
   const found: string[] = [];
   for (const match of note.matchAll(PATH_LINE)) {
@@ -142,7 +149,27 @@ export async function findEvidence(note: string, context: EvidenceContext): Prom
       found.push(`§${heading}`);
     }
   }
+  const messages = (context.userMessages ?? []).map((text) => oneLine(text).toLowerCase());
+  for (const match of note.matchAll(USER_MESSAGE)) {
+    const quote = oneLine(match[1]!);
+    if (quote !== '' && messages.some((text) => text.includes(quote.toLowerCase()))) {
+      found.push(`user message "${cutQuote(quote)}"`);
+    }
+  }
   return [...new Set(found)].join('; ');
+}
+
+// A quote cut to MAX_QUOTE_CHARS, the last one "…", without splitting a surrogate pair.
+function cutQuote(quote: string): string {
+  if (quote.length <= MAX_QUOTE_CHARS) {
+    return quote;
+  }
+  let end = MAX_QUOTE_CHARS - 1;
+  const code = quote.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) {
+    end -= 1;
+  }
+  return `${quote.slice(0, end)}…`;
 }
 
 // The headings of a Markdown text (the Task file), without their #s, outside code fences.

@@ -13,7 +13,7 @@ import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
 import { handbookSection } from '../src/prompts.js';
 import type { FileChange } from '../src/jobs.js';
-import { actedVerdict, decide, fixContent, readOnlySessionOptions, REVIEW_DENIED_TOOLS, REVIEW_SCHEMA, REVIEW_TOOLS, type ReviewItem, reviewPrompt, reviewSessionOptions, runReview, scopeItem, sensitiveItem, unacceptedItems, uniqueNits } from '../src/review.js';
+import { actedVerdict, decide, fixContent, MAX_USER_DECISIONS_CHARS, MAX_USER_MESSAGE_CHARS, readOnlySessionOptions, REVIEW_DENIED_TOOLS, REVIEW_SCHEMA, REVIEW_TOOLS, type ReviewItem, reviewPrompt, reviewSessionOptions, runReview, scopeItem, sensitiveItem, unacceptedItems, uniqueNits, userDecisionLines } from '../src/review.js';
 import { loadHandbook } from '../src/server.js';
 import { writeTask } from '../src/task-file.js';
 import { act, fetchRaw } from './support/dashboard-client.js';
@@ -231,7 +231,7 @@ test('coding rules (SF-059): every review prompt gives the job\'s <rules> block 
     for (const entry of reviews) {
       // The rules as at the base commit, though the job rewrote docs/style.md in its worktree.
       assert.ok(entry.prompt.includes(`\n${block}\n\n<task_file path=".software-factory/R-9.md">\n`), entry.prompt);
-      assert.match(entry.prompt, /\n- Review the change against the Task file [^\n]*\n- A review item that is a rule violation names the rule's file \(and heading\) in `problem`\.\n- Follow the review rules below/);
+      assert.match(entry.prompt, /\n- Review the change against the Task file [^\n]*\n- A review item that is a rule violation names the rule's file \(and heading\) in `problem`\.\n- The user's messages to the job \(<user_decisions>, below\)[^\n]*\n- Follow the review rules below/);
     }
     const turns = await fakeLog(env);
     assert.ok(turns[0]!.prompt.startsWith(`/implement .software-factory/R-9.md\n\n${block}\n`));
@@ -248,6 +248,88 @@ test('the review prompt without rules is as before: no <rules> block, no rule-vi
   assert.ok(!before.includes('<rules>') && !before.includes('rule violation'));
   const withRules = reviewPrompt({ ...input, rules: '<rules>\nR\n</rules>' });
   assert.equal(withRules.replace('- A review item that is a rule violation names the rule\'s file (and heading) in `problem`.\n', '').replace('<rules>\nR\n</rules>\n\n', ''), before);
+});
+
+// SF-112: the user's messages to the job reach the reviewers as decisions.
+const DECISION_BULLET = "- The user's messages to the job (<user_decisions>, below) are the user's decisions: where one and the Task file disagree, the message wins, and a later message wins over an earlier one. A change that does what a message asked is not an item, nor is a Task requirement the message replaced; a message the change does not follow is one, citing the message in problem.";
+
+test("the review prompt carries the user's messages in <user_decisions> after the Task file; None. without them; the rule bullet", async () => {
+  const input = { ticket: 'R-1', iteration: 3, task: 't\n', report: 'r', patch: Buffer.from('p'), patchTruncated: false, files: [], handbook: (await loadHandbook()).text };
+  const userMessages = [
+    { iteration: 2, at: '2026-11-07T10:11:12.000Z', text: 'merge the undescribed anonymous expressions into one row\n\n' },
+    { iteration: 3, at: null, text: 'and drop the count' },
+  ];
+  const prompt = reviewPrompt({ ...input, userMessages });
+  const section = [
+    '<user_decisions>',
+    '<user_message iteration="2" at="2026-11-07T10:11:12.000Z">', 'merge the undescribed anonymous expressions into one row', '</user_message>',
+    '<user_message iteration="3">', 'and drop the count', '</user_message>',
+    '</user_decisions>',
+  ].join('\n');
+  assert.ok(prompt.includes(`\n</task_file>\n\n${section}\n\n<report>\n`), prompt);
+  const none = reviewPrompt(input);
+  assert.equal(reviewPrompt({ ...input, userMessages: [] }), none);
+  assert.ok(none.includes('\n</task_file>\n\n<user_decisions>\nNone.\n</user_decisions>\n\n<report>\n'), none);
+  for (const text of [prompt, none, reviewPrompt({ ...input, rules: '<rules>\nR\n</rules>' })]) {
+    assert.match(text, /\n- Review the change against the Task file [^\n]*\n(?:- A review item that is a rule violation [^\n]*\n)?([^\n]*)\n- Follow the review rules below/);
+    assert.equal(/\n- Review the change against the Task file [^\n]*\n(?:- A review item that is a rule violation [^\n]*\n)?([^\n]*)\n/.exec(text)![1], DECISION_BULLET);
+  }
+});
+
+test('the cap of <user_decisions>', () => {
+  assert.equal(MAX_USER_MESSAGE_CHARS, 4000);
+  assert.equal(MAX_USER_DECISIONS_CHARS, 16000);
+  const long = userDecisionLines([{ iteration: 1, at: null, text: 'x'.repeat(5000) }]);
+  assert.equal(long.length, 3);
+  assert.equal(long[1]!.length, 4000);
+  assert.ok(long[1]!.endsWith('…'));
+  // A cut never splits a surrogate pair.
+  const emoji = userDecisionLines([{ iteration: 1, at: null, text: `${'x'.repeat(3998)}😀😀` }])[1]!;
+  assert.equal(emoji, `${'x'.repeat(3998)}…`);
+  const five = userDecisionLines([1, 2, 3, 4, 5].map((n) => ({ iteration: n, at: null, text: String(n).repeat(4000) })));
+  assert.equal(five[0], "(1 earlier message is left out; the job's Stream has them.)");
+  assert.deepEqual(five.filter((line) => line.startsWith('<user_message ')), [2, 3, 4, 5].map((n) => `<user_message iteration="${n}">`));
+  // The first message that does not fit ends the walk, though an older, shorter one would fit.
+  const sizes = [5, 4000, 4000, 4000, 4000, 3990];
+  const walk = userDecisionLines(sizes.map((size, n) => ({ iteration: n + 1, at: null, text: 'z'.repeat(size) })));
+  assert.equal(walk[0], "(2 earlier messages are left out; the job's Stream has them.)");
+  assert.deepEqual(walk.filter((line) => line.startsWith('<user_message ')), [3, 4, 5, 6].map((n) => `<user_message iteration="${n}">`));
+  // The newest alone, cut, however long.
+  const alone = userDecisionLines([{ iteration: 1, at: null, text: 'y'.repeat(20000) }]);
+  assert.deepEqual([alone.length, alone[1]!.length, alone[1]!.endsWith('…')], [3, 4000, true]);
+  assert.deepEqual(userDecisionLines([]), ['None.']);
+});
+
+test("an sf say message reaches the next review in <user_decisions>; the first prompt with the job's rules is not a user message", async () => {
+  const env = await newEnv('review-decisions', { SF_REVIEW: 'on' });
+  const repo = await newRepo(env, 'review-decisions-repo', false);
+  const block = await putRules(env, repo);
+  await putTask(env, repo, 'D-1', 'Decide');
+  await script(env, [
+    { write: { 'README.md': 'hello reader\n' }, text: 'Report of iteration 1' },
+    { write: { '.software-factory/D-1.mr.md': mrText('feat(D-1): Decide') }, text: 'prepared' },
+    { write: { 'README.md': 'hello all readers\n' }, text: 'Report of iteration 2' },
+    { write: { '.software-factory/D-1.mr.md': mrText('feat(D-1): Decide') }, text: 'prepared again' },
+  ]);
+  await reviewScript(env, [{ output: CLEAN }, { output: CLEAN }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'D-1' });
+    await waitFor(served, 'D-1', 'ready_for_human_review', 1);
+    const said = await runCli(env, ['say', 'app', 'D-1', 'merge', 'the', 'rows', 'into', 'one']);
+    assert.equal(said.code, 0, said.stderr);
+    await waitFor(served, 'D-1', 'ready_for_human_review', 2);
+    const turns = await fakeLog(env);
+    assert.ok(turns[0]!.prompt.startsWith(`/implement .software-factory/D-1.md\n\n${block}\n`));
+    const reviews = await reviewLog(env);
+    assert.equal(reviews.length, 2);
+    assert.ok(reviews[0]!.prompt.includes('<user_decisions>\nNone.\n</user_decisions>'), reviews[0]!.prompt);
+    const messages = reviews[1]!.prompt.match(/<user_message [^>]*>\n[^\n]*\n<\/user_message>/g);
+    assert.equal(messages?.length, 1, reviews[1]!.prompt);
+    assert.match(messages![0]!, /^<user_message iteration="2" at="\d{4}-\d\d-\d\dT[^"]+">\nmerge the rows into one\n<\/user_message>$/);
+  } finally {
+    await stop(served);
+  }
 });
 
 // SF-051: the severity of review items.

@@ -9,6 +9,7 @@ import { withoutImageData } from '../attachments.js';
 import { FactoryError } from '../errors.js';
 import { runGit } from '../git.js';
 import { attachWorktree, checkBranchFree } from '../handoff.js';
+import { jobUserMessages } from '../job-stream.js';
 import { type FileChange, type Job, type JobState, now } from '../jobs.js';
 import { answerFix, escalationMessage, headings, type LedgerEntry, userFixItems } from '../ledger.js';
 import { buildPatch, changedFilesSection, fileChanges, notificationLine, type Patch } from '../patch.js';
@@ -267,7 +268,9 @@ export class TurnsPart {
     // A test's name counts when a test file of the worktree (tracked or new) holds it.
     const testNamed = async (name: string): Promise<boolean> =>
       (await runGit(cwd, ['grep', '--untracked', '-q', '-F', '-e', name, '--', '*test*', '*spec*'])).code === 0;
-    const answered = await answerFix(ledger, report, fix, { lines, testNamed, sections: headings(task) });
+    // The user's own messages up to this iteration: a contest may quote one (SF-112).
+    const userMessages = (await jobUserMessages(this.core.jobs, job.workspace, job.ticket)).filter((m) => m.iteration <= job.iteration).map((m) => m.text);
+    const answered = await answerFix(ledger, report, fix, { lines, testNamed, sections: headings(task), userMessages });
     await this.core.jobs.writeLedger(job.workspace, job.ticket, answered.ledger);
     return answered.escalated;
   }

@@ -183,6 +183,25 @@ export class FakeElement {
     this.parentNode = null;
   }
 
+  // Puts the nodes right before or after this element in its parent, as a browser's before and
+  // after do (SF-107 moves #msg and #action-status into the hand-over panel and back).
+  before(...nodes: Array<FakeNode | string>): void {
+    this.insertBeside(nodes, 0);
+  }
+
+  after(...nodes: Array<FakeNode | string>): void {
+    this.insertBeside(nodes, 1);
+  }
+
+  private insertBeside(nodes: Array<FakeNode | string>, offset: number): void {
+    const parent = this.parentNode;
+    if (parent === null) {
+      return;
+    }
+    const adopted = nodes.map((node) => parent.adopt(node));
+    parent.children.splice(parent.children.indexOf(this) + offset, 0, ...adopted);
+  }
+
   remove(): void {
     if (this.parentNode !== null) {
       this.parentNode.children = this.parentNode.children.filter((other) => other !== this);

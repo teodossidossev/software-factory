@@ -130,6 +130,8 @@ const state = {
   unresolved: new Map(),
   doubts: new Map(),
   confirm: null,
+  // The hand-over panel's More menu is open (SF-107).
+  handoverMenu: false,
   // The registry, the tickets without a live job and the archived ones (null until the stream
   // sends them), the requests out for the setup forms and the ticket actions, and the open
   // confirmation of a ticket's start or delete.
@@ -2497,7 +2499,7 @@ function toggle(key) {
 function keepFocus(container, work) {
   const active = document.activeElement;
   const data = active !== null && active !== undefined && container.contains(active) ? active.dataset ?? {} : {};
-  const name = ['act', 'goto', 'back', 'copyBranch', 'tk', 'tktab'].find((key) => data[key] !== undefined);
+  const name = ['act', 'goto', 'back', 'copyBranch', 'tk', 'tktab', 'homenu'].find((key) => data[key] !== undefined);
   work();
   if (name !== undefined) {
     const attribute = name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
@@ -2641,11 +2643,9 @@ function actionsFor(job, detail) {
       list = [{ a: 'review-mr', l: ACTION_LABELS['review-mr'] }, { a: 'approve', l: 'Approve…' }, { a: 'handover', l: ACTION_LABELS.handover }, ...(canCreateMr(job) ? [{ a: 'mr-create', l: 'Create merge request' }] : []), SEND, ABORT];
       break;
     case 'handed_over':
-      // SF-073: the branch waits in the user's checkout; the message is Ask for changes (the
-      // checkout's edits go with it).
-      list = [{ a: 'approve', l: 'Approve…' }, { a: 'say', l: 'Ask for changes' }, { a: 'handed-done', l: ACTION_LABELS['handed-done'] }, { a: 'takeback', l: ACTION_LABELS.takeback },
-        ...(canCreateMr(job) ? [{ a: 'mr-create', l: 'Create merge request' }] : []), ABORT];
-      break;
+      // SF-073: the branch waits in the user's checkout. Its actions are in the hand-over panel
+      // (SF-107, renderHandoverPanel); the bar's row stays empty.
+      return [];
     case 'needs_human':
       list = stopActions(job, detail);
       break;
@@ -2668,12 +2668,13 @@ const PLACEHOLDER = {
   awaiting_review: 'Message the job; the Implementer reads it when the reviews end',
   needs_human: 'Or tell the Implementer what to do instead',
   ready_for_human_review: 'Ask the Implementer for a last change before you push',
-  handed_over: 'Ask the Implementer for changes; the edits in your checkout go with it',
+  handed_over: 'What should the Implementer change? Your edits in the checkout go with the message.',
   preparing_mr: 'The factory takes no message while it writes the MR text',
 };
 
 // The composer: the sentence in bold (and the merge request of a pushed job), the inline
-// confirmation, the message box and the actions; a disabled action has its reason as its title.
+// confirmation, the message box and the actions; a disabled action has its reason as its title. A
+// handed-over job has its hand-over panel instead of the message box and the actions (SF-107).
 function renderComposer() {
   const job = state.detail?.job ?? null;
   // A confirmation opened before the doubt is not one the user could open now.
@@ -2684,6 +2685,7 @@ function renderComposer() {
   const msg = $('msg');
   $('refresh-button').hidden = state.unresolved.get(state.key)?.failed !== true;
   if (job === null) {
+    placeHandoverPanel(null);
     $('composer-sentence').replaceChildren(el('span', 'muted', 'Loading the job…'));
     $('acts').replaceChildren();
     msg.disabled = true;
@@ -2697,9 +2699,6 @@ function renderComposer() {
   // The hand-over (SF-073): why a job ready for review was not handed over; what a handed-over one takes.
   if (job.state === 'ready_for_human_review' && skippedNote(job) !== '') {
     cs.push(el('span', 'muted', skippedNote(job).trim()));
-  }
-  if (job.state === 'handed_over') {
-    cs.push(el('span', 'muted', `Read, run and change it there. Approve pushes it; Ask for changes sends your edits and your message to the Implementer; Take it back returns it to the factory.${job.error ? ` ${job.error.code}: ${job.error.message}` : ''}`));
   }
   if (hasMr(job)) {
     const line = el('span', 'mr-line');
@@ -2725,23 +2724,190 @@ function renderComposer() {
   const resumeWord = job.state === 'waiting_limit' ? 'Resume now' : 'Resume';
   msg.placeholder = RESUME_STATES.includes(job.state) ? (pausedTurn(job) ? `${resumeWord} sends this to the Implementer, if you write one` : `${resumeWord}, then message the Implementer`)
     : PLACEHOLDER[job.state] ?? 'Message';
-  const buttons = actionsFor(job, state.detail).map((action) => {
-    const node = button(`btn${action.p ? ' primary' : ''}${action.d ? ' danger' : ''}`, action.l, { act: action.a });
-    node.id = `${action.a}-button`;
-    let reason = availability(action.a === 'goon' ? 'say' : action.a, job);
-    if (reason === '' && state.confirm !== null) {
-      reason = 'a confirmation is open: confirm or cancel it first.';
-    }
-    if (reason === '' && action.a === 'say' && msg.value.trim() === '') {
-      reason = 'write a message first.';
-    }
-    node.disabled = reason !== '';
-    if (reason !== '') {
-      node.setAttribute('title', reason);
-    }
-    return node;
-  });
+  const buttons = actionsFor(job, state.detail).map((action) => actionButton(job, action.a, action.l, `btn${action.p ? ' primary' : ''}${action.d ? ' danger' : ''}`));
   keepFocus($('acts'), () => $('acts').replaceChildren(...buttons));
+  if (job.state === 'handed_over') {
+    renderHandoverPanel(job, state.detail);
+  } else {
+    placeHandoverPanel(null);
+  }
+}
+
+// One action's button of the composer, disabled with its reason as its title: the action's
+// availability, an open confirmation, an empty message box for a message.
+function actionButton(job, action, label, className) {
+  const node = button(className, label, { act: action });
+  node.id = `${action}-button`;
+  let reason = availability(action === 'goon' ? 'say' : action, job);
+  if (reason === '' && state.confirm !== null) {
+    reason = 'a confirmation is open: confirm or cancel it first.';
+  }
+  if (reason === '' && action === 'say' && $('msg').value.trim() === '') {
+    reason = 'write a message first.';
+  }
+  node.disabled = reason !== '';
+  if (reason !== '') {
+    node.setAttribute('title', reason);
+  }
+  return node;
+}
+
+// ---------- The hand-over panel (SF-107: the two ways to finish a handed-over job) ----------
+
+// Puts the hand-over panel in the composer for the job's key, or takes it away (key null): the
+// panel goes right after #confirm and .crow is hidden; #msg (the Ask box) and #action-status (the
+// outcome) move into it, and back to their places (#msg before #acts in .crow, #action-status right
+// after .crow) when it goes. A new panel, or one taken away, draws the outcome again in its form.
+// Returns the panel (null when taken away).
+function placeHandoverPanel(key) {
+  const composer = $('composer');
+  const crow = composer.querySelector('.crow');
+  const msg = $('msg');
+  const status = $('action-status');
+  let panel = $('handover-panel');
+  if (panel !== null && panel.dataset.key !== key) {
+    // Out of the panel first: a removed panel's elements are no longer in the document.
+    $('acts').before(msg);
+    crow.after(status);
+    panel.remove();
+    panel = null;
+    state.handoverMenu = false;
+    crow.hidden = false;
+    if (key === null) {
+      renderOutcome(state.outcomes.get(state.key) ?? null);
+    }
+  }
+  if (key === null || panel !== null) {
+    return panel;
+  }
+  panel = el('div', 'handover');
+  panel.id = 'handover-panel';
+  panel.dataset.key = key;
+  panel.setAttribute('role', 'group');
+  panel.setAttribute('aria-labelledby', 'handover-title');
+  const ask = el('div', 'ho-ask');
+  ask.append(msg, el('div', 'ho-askrow'));
+  panel.append(el('div', 'ho-top'), ask, status);
+  $('confirm').after(panel);
+  crow.hidden = true;
+  renderOutcome(state.outcomes.get(state.key) ?? null);
+  return panel;
+}
+
+// The last iteration of the detail, or null without one.
+const lastIteration = (detail) => (detail?.iterations ?? []).reduce((last, iteration) => (last === null || iteration.number > last.number ? iteration : last), null);
+
+// The panel of a handed-over job, drawn again on each call (the focus kept): its stop, if any; the
+// heading with the More menu; the facts; the two paths (I push it myself, The factory pushes it);
+// Ask for changes with the moved #msg.
+function renderHandoverPanel(job, detail) {
+  const panel = placeHandoverPanel(keyOf(job));
+  const top = panel.querySelector('.ho-top');
+  const parts = [];
+  if (job.error) {
+    parts.push(el('div', 'ho-error', `${job.error.code}: ${job.error.message}`));
+  }
+  const head = el('div', 'ho-head');
+  const title = el('b', '', 'It is in your checkout. How do you finish it?');
+  title.id = 'handover-title';
+  head.append(title, handoverMenu(job));
+  parts.push(head, handoverFacts(job, detail));
+  const viaMr = mrOff(job) === '';
+  const paths = el('div', 'ho-paths');
+  paths.append(
+    handoverPath('I push it myself', ['Review and run it in the IDE.', 'Commit (the message is prefilled with the MR text) and push.', 'Open the MR on the forge.'],
+      actionButton(job, 'handed-done', 'I opened the MR', 'btn primary')),
+    handoverPath('The factory pushes it', ['Review it in the IDE.', 'The factory pushes its commit (or your own commits, if you committed); your uncommitted edits stay in your checkout and are not pushed.',
+      ...(viaMr ? ['Then it opens the MR.'] : [])],
+    viaMr ? actionButton(job, 'mr-create', 'Push and open the MR…', 'btn primary') : actionButton(job, 'approve', 'Push…', 'btn primary')),
+  );
+  parts.push(paths);
+  keepFocus(top, () => top.replaceChildren(...parts));
+  const row = panel.querySelector('.ho-askrow');
+  keepFocus(row, () => row.replaceChildren(actionButton(job, 'say', 'Ask for changes', 'btn'), el('span', 'muted', "The job takes your checkout's edits back and works on your message.")));
+}
+
+// One path of the panel: its title, its steps and its button.
+function handoverPath(title, steps, action) {
+  const box = el('section', 'ho-path');
+  const list = el('ol');
+  list.append(...steps.map((step) => el('li', '', step)));
+  box.append(el('b', '', title), list, action);
+  return box;
+}
+
+// The facts line: the branch, since when it is in the checkout, the last iteration's files and
+// their lines (when it has a file list), and the accepted risks as chips (simplifications aside,
+// as notFixed of src/ledger.ts).
+function handoverFacts(job, detail) {
+  const facts = el('div', 'ho-facts');
+  facts.append(el('span', 'mono', job.branch));
+  const since = clock(job.handover?.at);
+  if (since !== '') {
+    facts.append(el('span', '', `In your checkout since ${since}`));
+  }
+  const files = lastIteration(detail)?.files;
+  if (Array.isArray(files)) {
+    const sum = (field) => files.reduce((total, file) => total + (Number(file[field]) || 0), 0);
+    facts.append(el('span', '', `${files.length} ${files.length === 1 ? 'file' : 'files'}, +${sum('additions')} −${sum('deletions')} as Local Changes`));
+  }
+  const risks = (detail?.ledger ?? []).filter((entry) => entry.status === 'accepted_risk' && entry.reviewer !== 'simplify');
+  if (risks.length > 0) {
+    const line = el('span', 'ho-risks', 'Accepted risks:');
+    for (const entry of risks) {
+      const chip = el('span', 'ho-chip', entry.id);
+      chip.setAttribute('title', entry.problem ?? '');
+      line.append(chip);
+    }
+    facts.append(line);
+  }
+  return facts;
+}
+
+// The More ▾ menu: Take it back (with what it does) and, after a separator, Abort the job….
+function handoverMenu(job) {
+  const wrap = el('div', 'ho-more');
+  const toggle = button('btn small', 'More ▾', { homenu: '' });
+  toggle.setAttribute('aria-haspopup', 'menu');
+  toggle.setAttribute('aria-expanded', String(state.handoverMenu));
+  const menu = el('div', 'ho-menu');
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-label', 'More');
+  menu.hidden = !state.handoverMenu;
+  const takeback = actionButton(job, 'takeback', 'Take it back', 'ho-item');
+  takeback.append(el('span', 'muted', 'Your checkout returns to how it was; the job stays ready.'));
+  const separator = el('div', 'ho-sep');
+  separator.setAttribute('role', 'separator');
+  const abort = actionButton(job, 'abort', 'Abort the job…', 'ho-item danger');
+  for (const item of [takeback, abort]) {
+    item.setAttribute('role', 'menuitem');
+  }
+  menu.append(takeback, separator, abort);
+  wrap.append(toggle, menu);
+  return wrap;
+}
+
+// Opens or closes the More menu; an opened one focuses its first item.
+function setHandoverMenu(open) {
+  if (state.handoverMenu === open) {
+    return;
+  }
+  state.handoverMenu = open;
+  renderComposer();
+  if (open) {
+    [...($('handover-panel')?.querySelectorAll('.ho-menu [role="menuitem"]') ?? [])].find((item) => !item.disabled)?.focus();
+  }
+}
+
+// Arrow Down and Up move between the open menu's items (from its toggle too).
+function handoverMenuKey(event) {
+  const items = [...($('handover-panel')?.querySelectorAll('.ho-menu [role="menuitem"]') ?? [])].filter((item) => !item.disabled);
+  if (items.length === 0) {
+    return;
+  }
+  const at = items.indexOf(document.activeElement);
+  const step = event.key === 'ArrowDown' ? 1 : -1;
+  items[at < 0 ? (step === 1 ? 0 : items.length - 1) : (at + step + items.length) % items.length].focus();
 }
 
 // ---------- The job's detail and its actions ----------
@@ -2872,6 +3038,8 @@ function availability(action, job) {
 // Resume takes the message.
 const pausedTurn = (job) => RESUME_STATES.includes(job.state) && job.paused?.from === 'working';
 
+// The outcome line. On a handed-over job's panel (SF-107) it has a × to dismiss it, and an outcome
+// from before the hand-over is a muted note "Earlier, at …" with Dismiss, never a current line.
 function renderOutcome(outcome) {
   const node = $('action-status');
   if (outcome === null) {
@@ -2879,12 +3047,41 @@ function renderOutcome(outcome) {
     node.replaceChildren();
     return;
   }
-  node.className = `status ${outcome.level}`;
   // The link too is inert text, to copy; nothing on this page is clickable data.
-  node.replaceChildren(document.createTextNode(typeof outcome.link === 'string' ? `${outcome.text} ${outcome.link}` : outcome.text));
+  const text = typeof outcome.link === 'string' ? `${outcome.text} ${outcome.link}` : outcome.text;
+  const job = state.detail !== null && keyOf(state.detail.job) === state.key ? state.detail.job : null;
+  if (job?.state !== 'handed_over') {
+    node.className = `status ${outcome.level}`;
+    node.replaceChildren(document.createTextNode(text));
+    return;
+  }
+  const handedAt = Date.parse(job.handover?.at ?? '');
+  if (typeof outcome.at === 'string' && Date.parse(outcome.at) < handedAt) {
+    node.className = 'status earlier';
+    node.replaceChildren(el('span', 'muted', `Earlier, at ${clock(outcome.at)} (before the hand-over): ${text}`), button('btn small', 'Dismiss', { dismiss: '' }));
+    return;
+  }
+  node.className = `status ${outcome.level} dismissable`;
+  const close = button('ho-x', '×', { dismiss: '' });
+  close.setAttribute('aria-label', 'Dismiss');
+  close.setAttribute('title', 'Dismiss');
+  node.replaceChildren(el('span', '', text), close);
 }
 
+// Dismissing the outcome of the shown job (the hand-over panel's × or Dismiss): it leaves the
+// page's memory, so it does not come back while the page is open.
+function dismissOutcome() {
+  if (state.key !== null) {
+    state.outcomes.delete(state.key);
+  }
+  renderOutcome(null);
+}
+
+// The outcome of a job, stamped with when it was set (SF-107: one from before a hand-over is not current).
 function setOutcome(key, outcome) {
+  if (outcome !== null) {
+    outcome.at = new Date().toISOString();
+  }
   state.outcomes.set(key, outcome);
   if (key === state.key) {
     renderOutcome(outcome);
@@ -4657,7 +4854,7 @@ function renderJobs() {
 // listeners).
 function onClick(event) {
   const target = typeof event.target?.closest === 'function'
-    ? event.target.closest('[data-tk],[data-tkimg],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],[data-qforce],#limUp,#limDown,#rulesBtn,[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived,#open-digest')
+    ? event.target.closest('[data-tk],[data-tkimg],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],[data-qforce],#limUp,#limDown,#rulesBtn,[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-homenu],[data-dismiss],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived,#open-digest')
     : null;
   // An open ⋯ menu closes on any click but its own toggle (its items act, then it is closed).
   if (state.openMenu !== null && (target === null || target.dataset.menu === undefined)) {
@@ -4669,6 +4866,19 @@ function onClick(event) {
   }
   if (target?.id === 'rulesBtn') {
     toggleRules();
+    return;
+  }
+  // The hand-over panel's More menu (SF-107) closes on a choice and on a click outside it.
+  if (state.handoverMenu && typeof event.target?.closest === 'function' && event.target.closest('[data-homenu]') === null
+    && (event.target.closest('.ho-menu') === null || event.target.closest('[role="menuitem"]') !== null)) {
+    setHandoverMenu(false);
+  }
+  if (target?.dataset.homenu !== undefined) {
+    setHandoverMenu(!state.handoverMenu);
+    return;
+  }
+  if (target?.dataset.dismiss !== undefined) {
+    dismissOutcome();
     return;
   }
   // A link (a merge request's) goes where it points; it does not open the card around it.
@@ -4872,6 +5082,19 @@ function onKey(event) {
     event.preventDefault();
     closeRules();
     $('rulesBtn').focus();
+    return;
+  }
+  // The hand-over panel's More menu (SF-107): Escape closes it only (the page stays), the focus back
+  // on More; Arrow Down and Up move between its items.
+  if (state.handoverMenu && event.key === 'Escape') {
+    event.preventDefault();
+    setHandoverMenu(false);
+    $('handover-panel')?.querySelector('[data-homenu]')?.focus();
+    return;
+  }
+  if (state.handoverMenu && (event.key === 'ArrowDown' || event.key === 'ArrowUp') && typeof target?.closest === 'function' && target.closest('.ho-more') !== null) {
+    event.preventDefault();
+    handoverMenuKey(event);
     return;
   }
   if (target?.id === 'vdiv' && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {

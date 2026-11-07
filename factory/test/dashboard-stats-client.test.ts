@@ -53,7 +53,7 @@ function payload(extra: Record<string, unknown> = {}) {
       cost_complete: false, codex_tokens: 1100, claude: { blocker: 1, major: 2, nit: 3 }, codex: { blocker: 0, major: 1, nit: 0 }, time_to_ready_s: null,
     }],
     warnings: [
-      { kind: 'job_cost', text: 'T-1 cost $12.40, more than twice the usual $4.10 (median of the last 30 finished jobs of app).', at: '2026-11-07T10:00:00.000Z', target: { kind: 'job', workspace: 'app', ticket: 'T-1', archived: false } },
+      { kind: 'job_unusual', text: 'T-1: cost $12.40 (usual $4.10) — compared with the last 30 finished jobs of app.', at: '2026-11-07T10:00:00.000Z', target: { kind: 'job', workspace: 'app', ticket: 'T-1', archived: false } },
       { kind: 'stage_failing', text: 'The plan check failed 3 times in a row, last on P-1 on 2026-11-06 at 14:02.', at: '2026-11-06T12:02:00.000Z', target: { kind: 'ticket', workspace: 'app', ticket: 'P-1' } },
       { kind: 'stage_failing', text: 'The digest failed 3 times in a row, last the digest of 2026-11-06 at 08:00.', at: '2026-11-06T06:00:00.000Z', target: { kind: 'digest', id: '20261106T060000Z-scheduled' } },
       { kind: 'review_churn', text: 'C-1: review churn, finding R4 was reopened 3 times.', at: '2026-11-05T10:00:00.000Z', target: { kind: 'job', workspace: 'app', ticket: 'C-1', archived: true } },
@@ -164,7 +164,8 @@ test('stats client: the warnings come first with their links (job, ticket, diges
   assert.match(rows[3]!.textContent, /reopened 3 times\.\(archived\)$/);
   assert.equal(rows[4]!.textContent, '2026-11-04 cost $38.20, more than twice the usual $11.00 (median of the 30 days before).');
   assert.equal(first!.querySelector('details summary')!.textContent, 'How warnings are found');
-  assert.equal(first!.querySelectorAll('details li').length, 6);
+  assert.equal(first!.querySelectorAll('details li').length, 8);
+  assert.equal(first!.querySelectorAll('button').some((node) => node.textContent.startsWith('Show all')), false);
   assert.deepEqual(sections(page).map((section) => section.querySelector('h3')!.textContent),
     ['Warnings (5)', 'Now', 'Does a second model pay?', 'Review stages', 'Spend', 'Load', 'Jobs (1)']);
   assert.deepEqual(sectionOf(page, /^Now$/).querySelectorAll('.st-tile').map((tile) => tile.textContent), ['Running2', 'Waiting for you1', 'Paused0', 'Queued—']);
@@ -172,6 +173,24 @@ test('stats client: the warnings come first with their links (job, ticket, diges
   const none = await openStats(payload({ warnings: [] }));
   assert.equal(sections(none)[0]!.querySelector('h3')!.textContent, 'Warnings (0)');
   assert.match(sections(none)[0]!.textContent, /No warnings: nothing is far from the usual\./);
+});
+
+test('stats client: 10 of 12 warnings are listed, "Show all 12" shows the other 2 in place; the heading has the full count', async () => {
+  const warnings = Array.from({ length: 12 }, (_, index) => ({
+    kind: 'review_churn', text: `W-${index + 1}: review churn, finding R1 was reopened 3 times.`, at: '2026-11-05T10:00:00.000Z', target: null,
+  }));
+  const page = await openStats(payload({ warnings }));
+  const [first] = sections(page);
+  assert.equal(first!.querySelector('h3')!.textContent, 'Warnings (12)');
+  const texts = () => first!.querySelectorAll('.st-warn li').map((row) => row.textContent.slice(0, 4));
+  assert.deepEqual(texts(), ['W-1:', 'W-2:', 'W-3:', 'W-4:', 'W-5:', 'W-6:', 'W-7:', 'W-8:', 'W-9:', 'W-10']);
+  const more = first!.querySelectorAll('button').find((node) => node.textContent === 'Show all 12')!;
+  assert.ok(more);
+  more.click();
+  assert.equal(texts().length, 12);
+  assert.deepEqual(texts().slice(10), ['W-11', 'W-12']);
+  assert.equal(first!.querySelectorAll('button').some((node) => node.textContent === 'Show all 12'), false);
+  assert.equal(first!.querySelector('h3')!.textContent, 'Warnings (12)');
 });
 
 test('stats client: the second-opinion numbers and percentages with their cases; no iteration with both reviews', async () => {

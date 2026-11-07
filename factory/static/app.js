@@ -7082,19 +7082,23 @@ async function copyDaily(daily) {
 // The Stats page (#stats): the period (7, 30 or 90 days) and the workspace chosen (null: all), the
 // payload as last read, a read's error, the read under way, and the charts shown as tables. In page
 // memory only; read on open, on a change and on Refresh, never on a timer.
-const st = { days: 30, workspace: null, data: null, error: null, load: 0, tables: new Set() };
+const st = { days: 30, workspace: null, data: null, error: null, load: 0, tables: new Set(), warningsAll: false };
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const ST_ROLES = { implementer: 'Implementer', claude_review: 'Claude review', simplify: 'Simplification', codex_gate: 'Codex gate', task_check: 'Plan check', digest: 'Digest', explanation: 'Explanations' };
 const ST_COST_ROLES = ['implementer', 'claude_review', 'simplify', 'task_check', 'digest', 'explanation'];
 const ST_STAGES = { claude_review: 'Claude review', codex_gate: 'Codex gate', task_check: 'Plan check' };
 const ST_SEVERITIES = [{ key: 'blocker', name: 'Blocker' }, { key: 'major', name: 'Major' }, { key: 'nit', name: 'Nit' }];
 const ST_DAY_CHARTS = ['cost-day', 'tokens-day', 'started-day'];
+// The warnings listed before "Show all N".
+const ST_WARNINGS_SHOWN = 10;
 // The rules of the warnings (src/stats.ts), one plain sentence each.
 const ST_RULES = [
-  'A job costs more than twice the median of the last 30 finished jobs of its workspace, and at least $1 (with at least 5 such jobs).',
-  'A job takes more than twice the median iterations of those jobs, and at least 4.',
-  'A job uses more than twice the median Codex gate tokens of those jobs.',
+  'A job costs more than three times the median of the last 30 finished jobs of its workspace, and at least $5 (with at least 5 such jobs).',
+  'A job uses more than three times the median Codex gate tokens of those jobs.',
+  'A job takes more than three times the median iterations of those jobs, and at least 5.',
+  'A job gives one line, which lists each of these measures it is unusual on.',
   'A finding of a job was reopened twice or more, or the job stopped with review churn or a disputed review.',
+  'The job and review-churn warnings are only of the jobs updated in the last 7 days, whatever the period.',
   'The last 3 runs of a stage (Claude review, Codex gate, simplification, plan check, digest, explanation) all failed.',
   'A day costs more than twice the median of the days with a cost among the 30 days before (with at least 7 such days), and at least $5.',
 ];
@@ -7392,15 +7396,27 @@ function stWarnings(data) {
     section.append(el('p', 'muted fs13', 'No warnings: nothing is far from the usual.'));
   } else {
     const list = el('ul', 'st-warn');
-    for (const warning of data.warnings) {
-      const item = el('li');
-      item.append(el('span', 'st-warn-text', warning.text));
+    const item = (warning) => {
+      const row = el('li');
+      row.append(el('span', 'st-warn-text', warning.text));
       if (warning.target !== null) {
-        item.append(stLink(warning.target, 'Open'));
+        row.append(stLink(warning.target, 'Open'));
       }
-      list.append(item);
-    }
+      return row;
+    };
+    const shown = st.warningsAll ? data.warnings.length : ST_WARNINGS_SHOWN;
+    list.append(...data.warnings.slice(0, shown).map(item));
     section.append(list);
+    if (data.warnings.length > shown) {
+      // The rest in place; the page remembers it until it is reloaded.
+      const more = button('btn small', `Show all ${data.warnings.length}`, { st: 'warnings-all' });
+      more.addEventListener('click', () => {
+        st.warningsAll = true;
+        list.append(...data.warnings.slice(shown).map(item));
+        more.remove();
+      });
+      section.append(more);
+    }
   }
   const how = el('details', 'st-how');
   how.append(el('summary', '', 'How warnings are found'));

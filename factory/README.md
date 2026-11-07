@@ -2938,10 +2938,12 @@ chip, no console error or failed request while it loads), the run queue's contro
 Add to queue and Remove from queue, Alt+Up and Alt+Down, drag and drop), the job page (Stream,
 Changes with its tree's keys, Merge request with Ctrl+S), the planned ticket page (the Task file,
 Edit and Save, Ctrl+S, the history), Escape and Ctrl+Enter in the composer, light and dark with a
-contrast of at least 4.5:1, and a 390 x 844 window. A failing test saves a screenshot to
-`dist/test-results/<file>-<test name>.png` and prints its path. They run headless;
-`SF_BROWSER_HEADED=1 npm run test:browser` shows the window. A check that fails because of a defect
-in the factory's own code is kept and marked as a node:test todo until the defect is fixed.
+contrast of at least 4.5:1, and a 390 x 844 window, and the job page's Stream at 600, 1200 and
+2000 px (full width, long tool rows cut with an ellipsis, long outputs wrapped, no sideways
+scroll). A failing test saves a screenshot to `dist/test-results/<file>-<test name>.png` and prints
+its path. They run headless; `SF_BROWSER_HEADED=1 npm run test:browser` shows the window. A check
+that fails because of a defect in the factory's own code is kept and marked as a node:test todo
+until the defect is fixed.
 
 ### Checking the page by hand
 

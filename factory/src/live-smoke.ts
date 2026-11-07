@@ -1035,10 +1035,13 @@ class Smoke {
   }
 
   // The Gate sandbox step (SF-125), once the job's worktree and jobs/ exist: the canary env file and
-  // jobs/ exist outside the wrapper, and inside the gate's wrapper (gateWrapperFor, as the factory
-  // builds it for this job) a listing of the worktree works, while both `cat <canary>` and
-  // `ls <jobs>` fail (ENOENT counts: the tmpfs hiding them is the denial); a command that exits 0
-  // fails the step, whatever it printed. No Codex runs. With the sandbox off it is a SKIP.
+  // the job's job.json under jobs/ exist outside the wrapper, and inside the gate's wrapper
+  // (gateWrapperFor, as the factory builds it for this job) a listing of the worktree works, while
+  // both `cat <canary>` and `cat <jobs>/<workspace>/<ticket>/job.json` fail (ENOENT counts: the tmpfs
+  // hiding them is the denial); a command that exits 0 fails the step, whatever it printed. Not
+  // `ls <jobs>` (SF-134): the read-write bind of the iteration's directory leaves the empty folders
+  // above it inside the tmpfs, so jobs/ lists, holding nothing else. No Codex runs. With the sandbox
+  // off it is a SKIP.
   async gateSandbox(): Promise<Outcome> {
     if (this.sandboxOff) {
       return { status: 'SKIP', detail: 'sandbox off' };
@@ -1052,8 +1055,9 @@ class Smoke {
     if (canary === undefined) {
       return { status: 'FAIL', detail: `the canary env file ${probe.canary} is missing outside the wrapper` };
     }
-    if (!existsSync(probe.jobs)) {
-      return { status: 'FAIL', detail: `${probe.jobs} is missing outside the wrapper` };
+    const jobFile = join(probe.jobs, WORKSPACE, TICKET, 'job.json');
+    if (!existsSync(jobFile)) {
+      return { status: 'FAIL', detail: `${jobFile} is missing outside the wrapper` };
     }
     const bwrap = findBwrap(this.#env);
     if (process.platform !== 'linux' || bwrap === undefined) {
@@ -1074,11 +1078,11 @@ class Smoke {
       return { status: 'FAIL', detail: short(`the wrapper did not run: ${control.stderr.trim() || `exit ${control.code ?? 'by a signal'}`}`) };
     }
     const read = await inside(['cat', probe.canary]);
-    const listed = await inside(['ls', probe.jobs]);
+    const listed = await inside(['cat', jobFile]);
     this.#checkStop();
     const problems = [
       ...(read.code === 0 ? ['cat of the canary env file exited 0'] : []),
-      ...(listed.code === 0 ? ['ls of jobs/ exited 0'] : []),
+      ...(listed.code === 0 ? ['cat of the job\'s job.json under jobs/ exited 0'] : []),
     ];
     return problems.length === 0
       ? { status: 'PASS', detail: 'the canary env file and jobs/ hidden inside the gate\'s wrapper' }

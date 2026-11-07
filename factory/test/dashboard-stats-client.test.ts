@@ -1,9 +1,9 @@
 // The Stats page in static/app.js (SF-117), run under node:vm against the fake page of
 // test/support/fake-dom.ts: #stats and the Stats button, the period and workspace reads (an older
-// answer ignored), the warnings first with their links, the second opinion, the stage and role
-// tables, the Table toggle, the SVG charts (createElementNS, class attributes, no style attribute),
-// the all-zero chart's box, leaving a job page or the drawer, the loading, error and empty states,
-// Escape, and the other pages hiding #stats. Script checks, not browser acceptance: the layout is
+// answer ignored), the warnings first with their links, the second opinion, the Claude review
+// on/off table (SF-132), the stage and role tables, the Table toggle, the SVG charts
+// (createElementNS, class attributes, no style attribute), the all-zero chart's box, leaving a job
+// page or the drawer, the loading, error and empty states, Escape, and the other pages hiding #stats. Script checks, not browser acceptance: the layout is
 // test/browser/stats-page.test.ts.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -48,6 +48,11 @@ function payload(extra: Record<string, unknown> = {}) {
       codex_after_claude: { iterations: 4, caught: 1, findings: 2, fixed: 1, cases: [{ workspace: 'app', ticket: 'T-1', dir: 'T-1', archived: false, iteration: 2, findings: 2, fixed: 1 }] },
       claude_after_codex: { iterations: 3, caught: 2, findings: 2, fixed: 0, cases: [{ workspace: 'app', ticket: 'C-1', dir: 'C-1.20261101T100000Z', archived: true, iteration: 3, findings: 1, fixed: 0 }] },
     },
+    arms: [
+      { arm: 'on', jobs: 3, delivered: 2, aborted: 1, cost_usd: 5, cost_complete: false, usd_per_delivered: 2.5, median_iterations: 3, codex_findings: 2, codex_findings_per_job: 2 / 3 },
+      { arm: 'off', jobs: 1, delivered: 0, aborted: 0, cost_usd: 3, cost_complete: true, usd_per_delivered: null, median_iterations: null, codex_findings: 1, codex_findings_per_job: 1 },
+    ],
+    simplify: { offered: 2, taken: 1, skipped: 1 },
     jobs: [{
       workspace: 'app', ticket: 'T-1', dir: 'T-1', archived: false, title: 'Demo', state: 'needs_human', created_at: '2026-11-06T08:00:00.000Z', iterations: 2, cost_usd: 1.5,
       cost_complete: false, codex_tokens: 1100, claude: { blocker: 1, major: 2, nit: 3 }, codex: { blocker: 0, major: 1, nit: 0 }, time_to_ready_s: null,
@@ -168,7 +173,7 @@ test('stats client: the warnings come first with their links (job, ticket, diges
   assert.equal(first!.querySelectorAll('details li').length, 8);
   assert.equal(first!.querySelectorAll('button').some((node) => node.textContent.startsWith('Show all')), false);
   assert.deepEqual(sections(page).map((section) => section.querySelector('h3')!.textContent),
-    ['Warnings (5)', 'Now', 'Does a second model pay?', 'Review stages', 'Spend', 'Load', 'Jobs (1)']);
+    ['Warnings (5)', 'Now', 'Does a second model pay?', 'Claude review on/off', 'Review stages', 'Spend', 'Load', 'Jobs (1)']);
   assert.deepEqual(sectionOf(page, /^Now$/).querySelectorAll('.st-tile').map((tile) => tile.textContent), ['Running2', 'Waiting for you1', 'Paused0', 'Queued—']);
 
   const none = await openStats(payload({ warnings: [] }));
@@ -213,6 +218,23 @@ test('stats client: the second-opinion numbers and percentages with their cases;
     ['No iteration in this period had both reviews.', 'No iteration in this period had both reviews.']);
 });
 
+test('stats client: the Claude review on/off table (SF-132) after the second opinion, an incomplete cost "at least", its note; with no job in either arm the empty text', async () => {
+  const page = await openStats();
+  const arms = sectionOf(page, /^Claude review on\/off$/);
+  assert.deepEqual(rowTexts(tableAfter(arms)), [
+    ['Claude review', 'Jobs', 'Delivered', 'Aborted', 'Cost', 'Per delivered', 'Median iterations', 'Codex findings', 'Per job'],
+    ['On', '3', '2', '1', 'at least $5.00', 'at least $2.50', '3', '2', '0.7'],
+    ['Off', '1', '0', '0', '$3.00', '—', '—', '1', '1'],
+  ]);
+  assert.equal(arms.querySelector('p')!.textContent, 'Jobs started before the experiment are in neither arm.');
+
+  const empty = (arm: string) => ({ arm, jobs: 0, delivered: 0, aborted: 0, cost_usd: 0, cost_complete: true, usd_per_delivered: null, median_iterations: null, codex_findings: 0, codex_findings_per_job: null });
+  const none = await openStats(payload({ arms: [empty('on'), empty('off')] }));
+  const noArms = sectionOf(none, /^Claude review on\/off$/);
+  assert.equal(noArms.querySelector('table'), null);
+  assert.deepEqual(noArms.querySelectorAll('p').map((p) => p.textContent), ['No jobs of the experiment yet.']);
+});
+
 test('stats client: the stage table, the by-role table with "not recorded" and "at least"; the Table toggle swaps a chart for its numbers and back', async () => {
   const page = await openStats();
   const stages = sectionOf(page, /^Review stages$/);
@@ -229,7 +251,8 @@ test('stats client: the stage table, the by-role table with "not recorded" and "
     ['Role', 'Cost', 'Tokens', 'Runs'],
     ['Implementer', 'at least $1.20', '340k in · 950 out', '3'],
     ['Claude review', '$0.30', '1k in · 10 out', '2'],
-    ['Simplification', '$0.00', '0 in · 0 out', '0'],
+    // SF-132: the simplification's offers and the user's choices.
+    ['Simplification', '$0.00', '0 in · 0 out', '0 · offered 2 · taken 1 · skipped 1'],
     ['Codex gate', 'tokens only', '1k in (0 cached) · 100 out', '1'],
   ]);
   assert.deepEqual(rowTexts(tableAfter(spend)).slice(5).map((row) => row[2]), ['not recorded', 'not recorded', 'not recorded']);

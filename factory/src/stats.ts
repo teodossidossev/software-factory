@@ -1,8 +1,9 @@
 // The Stats page (SF-117): the factory's numbers over 7, 30 or 90 local days, computed from the
 // state directory and only read from it. What each review stage found and what of it was fixed,
 // how often the Codex gate caught what the Claude review passed (and the other way round), the
-// cost and the tokens per day, workspace and role, the jobs running and waiting now, and the
-// warnings when a job, a stage or a day is far from the usual. The payload holds numbers, times,
+// cost and the tokens per day, workspace and role, the jobs running and waiting now, the Claude
+// review experiment's two arms and the simplification's offers taken (SF-132), and the warnings
+// when a job, a stage or a day is far from the usual. The payload holds numbers, times,
 // workspace names, tickets, job directory names, states, Task titles and the warnings' own
 // sentences; never a review's text, a prompt, a message or a setting.
 //
@@ -157,6 +158,38 @@ export interface JobRow {
   plan_checks: number;
   plan_check_usd: number;
   plan_check_usd_complete: boolean;
+  // From job.json (SF-131): whether the Claude review ran on the job; null for a job started
+  // before.
+  claude_review: boolean | null;
+}
+
+// One arm of the Claude review experiment (SF-132): the jobs started in the period whose
+// claude_review is true (on) or false (off).
+export interface ArmRow {
+  arm: 'on' | 'off';
+  jobs: number;
+  // In pushed or handed_over.
+  delivered: number;
+  aborted: number;
+  // The sum of its jobs' JobRow.cost_usd; false when one of them is incomplete.
+  cost_usd: number;
+  cost_complete: boolean;
+  // null with none delivered.
+  usd_per_delivered: number | null;
+  // Of the delivered jobs; null with none.
+  median_iterations: number | null;
+  // The Codex gate's blockers and majors of its jobs (JobRow.codex).
+  codex_findings: number;
+  // null with no job.
+  codex_findings_per_job: number | null;
+}
+
+// The simplification pass in the period (SF-132): the records with a suggestion, and the user's
+// choices.
+export interface SimplifyCounts {
+  offered: number;
+  taken: number;
+  skipped: number;
 }
 
 export type WarningKind = 'job_unusual' | 'review_churn' | 'stage_failing' | 'cost_spike';
@@ -204,6 +237,9 @@ export interface StatsPayload {
   by_workspace: WorkspaceRow[];
   stages: StageRow[];
   second_opinion: { codex_after_claude: SecondOpinion; claude_after_codex: SecondOpinion };
+  // On, then off; a job without claude_review is in neither.
+  arms: ArmRow[];
+  simplify: SimplifyCounts;
   jobs: JobRow[];
   warnings: StatsWarning[];
   notes: StatsNotes;
@@ -223,7 +259,8 @@ const WAITING_STATES: readonly JobState[] = ['needs_human', 'ready_for_human_rev
 const READY_STATES: readonly string[] = ['ready_for_human_review', 'handed_over'];
 const CHURN_CODES: readonly string[] = ['review_churn', 'review_disputed'];
 // Only the event lines with one of these are parsed.
-const EVENT_MARKS = ['"type":"result"', '"type":"review"', '"type":"review_failed"', '"state":{'];
+const EVENT_MARKS = ['"type":"result"', '"type":"review"', '"type":"review_failed"', '"type":"simplify_chosen"', '"state":{'];
+const DELIVERED_STATES: readonly JobState[] = ['pushed', 'handed_over'];
 const CHECK_FILE = /^[0-9a-f]{16}\.json$/;
 const READ_CHUNK = 1024 * 1024;
 
@@ -309,20 +346,22 @@ interface JobSummary {
   gateRuns: Array<{ at: string; tokens: GateTokens }>;
   reviews: Map<number, VerdictSummary>;
   gates: Map<number, VerdictSummary>;
-  simplifies: Array<{ at: string; failed: boolean }>;
+  // Every simplify.json: failed, or how many suggestions it offered.
+  simplifies: Array<{ at: string; failed: boolean; suggestions: number }>;
   explanation: { at: string; failed: boolean } | null;
   // The ledger entry reopened most (at least twice), or null.
   churn: { id: string; reopened: number } | null;
   unreadable: number;
 }
 
-// What the event log adds: tokens by role and day, the reviewers' runs, the first ready line and
-// the ledger stops.
+// What the event log adds: tokens by role and day, the reviewers' runs, the first ready line, the
+// ledger stops and the user's simplification choices.
 interface EventSums {
   tokens: Map<string, ClaudeTokens>;
   runs: Array<{ ts: string; reviewer: string; failed: boolean }>;
   ready: string | null;
   stops: Array<{ ts: string; code: string }>;
+  chosen: Array<{ ts: string; choice: 'simplify' | 'skip' }>;
 }
 
 interface EventsCache {
@@ -355,9 +394,9 @@ interface JobData {
   events: EventSums | null;
 }
 
-const emptySums = (): EventSums => ({ tokens: new Map(), runs: [], ready: null, stops: [] });
+const emptySums = (): EventSums => ({ tokens: new Map(), runs: [], ready: null, stops: [], chosen: [] });
 const copySums = (sums: EventSums): EventSums => ({
-  tokens: new Map([...sums.tokens].map(([key, value]) => [key, { ...value }])), runs: [...sums.runs], ready: sums.ready, stops: [...sums.stops],
+  tokens: new Map([...sums.tokens].map(([key, value]) => [key, { ...value }])), runs: [...sums.runs], ready: sums.ready, stops: [...sums.stops], chosen: [...sums.chosen],
 });
 const tokenKey = (role: string, day: string): string => `${role}\n${day}`;
 
@@ -414,6 +453,12 @@ function addLine(sums: EventSums, line: string): void {
   }
   if ((record.type === 'review' || record.type === 'review_failed') && typeof record.reviewer === 'string' && record.ignored !== true) {
     sums.runs.push({ ts, reviewer: record.reviewer, failed: record.type === 'review_failed' });
+    return;
+  }
+  if (record.type === 'simplify_chosen') {
+    if (record.choice === 'simplify' || record.choice === 'skip') {
+      sums.chosen.push({ ts, choice: record.choice });
+    }
     return;
   }
   if (record.type === undefined && isObject(record.state) && typeof record.state.to === 'string') {
@@ -599,7 +644,8 @@ export class Stats {
       if (simplify !== undefined) {
         if (isObject(simplify) && typeof simplify.ended_at === 'string') {
           const succeeded = 'summary' in simplify;
-          summary.simplifies.push({ at: simplify.ended_at, failed: !succeeded });
+          const suggestions = succeeded && Array.isArray(simplify.suggestions) ? simplify.suggestions.length : 0;
+          summary.simplifies.push({ at: simplify.ended_at, failed: !succeeded, suggestions });
           if (succeeded) {
             summary.costs.push({ role: 'simplify', at: simplify.ended_at, cost: costOf((simplify as { cost_usd?: unknown }).cost_usd) });
           }
@@ -891,6 +937,7 @@ export class Stats {
     const totals: StatsPayload['totals'] = {
       cost_usd: 0, codex_tokens: noGateTokens(), jobs_started: 0, jobs_finished: { total: 0, pushed: 0, aborted: 0, failed: 0 }, median_time_to_ready_s: null, median_iterations: null,
     };
+    const simplify: SimplifyCounts = { offered: 0, taken: 0, skipped: 0 };
     const readyTimes: number[] = [];
     const pushedIterations: number[] = [];
     const jobRows: Array<JobRow & { data: JobData }> = [];
@@ -1011,6 +1058,14 @@ export class Stats {
         }
       }
 
+      // The simplification: the passes that offered a suggestion, and the user's choices.
+      simplify.offered += summary.simplifies.filter((run) => run.suggestions > 0 && inPeriod(run.at)).length;
+      for (const chosen of events?.chosen ?? []) {
+        if (inPeriod(chosen.ts)) {
+          simplify[chosen.choice === 'simplify' ? 'taken' : 'skipped'] += 1;
+        }
+      }
+
       // Per job: in the period when created or changed in it, or not finished.
       if (inPeriod(job.created_at) || inPeriod(job.updated_at) || !isTerminal(job.state)) {
         const claude = noFindings();
@@ -1025,7 +1080,8 @@ export class Stats {
           workspace: dir.workspace, ticket: job.ticket, dir: dir.name, archived: dir.archived, title: summary.title, state: job.state, created_at: job.created_at,
           iterations: job.iteration, cost_usd: summary.costs.reduce((total, cost) => total + (cost.cost ?? 0), 0), cost_complete: summary.costs.every((cost) => cost.cost !== null),
           codex_tokens: job.gate_tokens, claude, codex, time_to_ready_s: timeToReady,
-          ...(planChecks.get(`${dir.workspace}/${job.ticket}`) ?? { plan_checks: 0, plan_check_usd: 0, plan_check_usd_complete: true }), data,
+          ...(planChecks.get(`${dir.workspace}/${job.ticket}`) ?? { plan_checks: 0, plan_check_usd: 0, plan_check_usd_complete: true }),
+          claude_review: job.claude_review ?? null, data,
         });
       }
     }
@@ -1106,6 +1162,8 @@ export class Stats {
       })),
       stages: [stages.claude_review, stages.codex_gate, stages.task_check],
       second_opinion: { codex_after_claude: secondOpinion(codexAfterClaude), claude_after_codex: secondOpinion(claudeAfterCodex) },
+      arms: armRows(jobRows, inPeriod),
+      simplify,
       jobs: jobRows.sort((a, b) => b.cost_usd - a.cost_usd || b.created_at.localeCompare(a.created_at)).slice(0, MAX_JOB_ROWS).map(({ data: _data, ...row }) => row),
       warnings,
       notes,
@@ -1134,6 +1192,22 @@ async function readCheck(path: string, workspace: string, ticket: string): Promi
     }
   }
   return { workspace, ticket, sha256: record.sha256, status: record.status, findings, cost: costOf(record.cost_usd), started_at: record.started_at, ended_at: record.ended_at };
+}
+
+// The arms of the Claude review experiment (SF-132), on then off: the job rows started in the
+// period with claude_review true or false, before the job list is cut to MAX_JOB_ROWS.
+function armRows(rows: readonly JobRow[], inPeriod: (ts: unknown) => boolean): ArmRow[] {
+  return (['on', 'off'] as const).map((arm): ArmRow => {
+    const jobs = rows.filter((row) => row.claude_review === (arm === 'on') && inPeriod(row.created_at));
+    const delivered = jobs.filter((row) => DELIVERED_STATES.includes(row.state));
+    const cost = jobs.reduce((total, row) => total + row.cost_usd, 0);
+    const findings = jobs.reduce((total, row) => total + row.codex.blocker + row.codex.major, 0);
+    return {
+      arm, jobs: jobs.length, delivered: delivered.length, aborted: jobs.filter((row) => row.state === 'aborted').length,
+      cost_usd: cost, cost_complete: jobs.every((row) => row.cost_complete), usd_per_delivered: delivered.length === 0 ? null : cost / delivered.length,
+      median_iterations: median(delivered.map((row) => row.iterations)), codex_findings: findings, codex_findings_per_job: jobs.length === 0 ? null : findings / jobs.length,
+    };
+  });
 }
 
 // The ticket a warning names, '' for a day or a digest.

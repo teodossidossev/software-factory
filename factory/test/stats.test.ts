@@ -2,7 +2,8 @@
 // with a fixed now (2026-11-07 14:00 local, the 7-day period 2026-11-01 to 2026-11-07): costs and
 // tokens by role on their record's local day, the review stages with failures from the events,
 // the plan check's revisions, the second opinion, the warnings with their texts and targets, now,
-// time to ready, the workspace filter, the limits and the caches, and no review text in the payload.
+// time to ready, the workspace filter, the limits and the caches, the Claude review arms and the
+// simplification counts (SF-132), and no review text in the payload.
 import assert from 'node:assert/strict';
 import { appendFile, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -501,4 +502,65 @@ test('plan checks per job and per ticket (SF-130): each job row counts every rec
   // In the period: app/P-1 (two), app/P-2 (two) and web/P-1; the October one is not.
   assert.deepEqual([stage(payload, 'task_check').tickets, stage(payload, 'task_check').runs, stage(payload, 'task_check').failed], [3, 4, 1]);
   assert.deepEqual([stage(payload, 'claude_review').tickets, stage(payload, 'codex_gate').tickets], [null, null]);
+});
+
+test('arms (SF-132): the jobs started in the period by claude_review true and false, one without it in neither; delivered, aborted, cost as the job rows sum it, per delivered, median iterations, Codex findings', async () => {
+  const env = await newEnv('stats-arms');
+  const jobs = new JobStore(env.state);
+  // On: pushed (2 iterations, a blocker, a major and a nit of the gate), aborted with an unknown cost, handed over (4 iterations).
+  await makeJob(jobs, 'app', 'ON-1', [{ ended: on('2026-11-05'), cost: 1 }, { ended: on('2026-11-05'), cost: 2 }], { claude_review: true, state: 'pushed' });
+  await jobs.writeGate('app', 'ON-1', 1, gate([item('a', 'A.', 'blocker'), item('b', 'B.', 'major'), item('c', 'C.', 'nit')], on('2026-11-05')));
+  await makeJob(jobs, 'app', 'ON-2', [{ ended: on('2026-11-05'), cost: null }], { claude_review: true, state: 'aborted' });
+  await makeJob(jobs, 'app', 'ON-3', Array.from({ length: 4 }, () => ({ ended: on('2026-11-06'), cost: 0.5 })), { claude_review: true, state: 'handed_over' });
+  // Off: still working, a major of the gate; one started before the period is in no arm.
+  await makeJob(jobs, 'app', 'OFF-1', [{ ended: on('2026-11-06'), cost: 3 }], { claude_review: false });
+  await jobs.writeGate('app', 'OFF-1', 1, gate([item('d', 'D.', 'major')], on('2026-11-06')));
+  await makeJob(jobs, 'app', 'OFF-0', [{ ended: on('2026-11-02'), cost: 7 }], { claude_review: false, created_at: on('2026-10-20') });
+  // Started before SF-131: no claude_review, in neither arm.
+  await makeJob(jobs, 'app', 'OLD-1', [{ ended: on('2026-11-05'), cost: 10 }], { state: 'pushed' });
+  await jobs.writeGate('app', 'OLD-1', 1, gate([item('e', 'E.', 'blocker')], on('2026-11-05')));
+
+  const payload = await stats(env.state, jobs).compute({ days: 7, workspace: null });
+  const row = (ticket: string) => payload.jobs.find((one) => one.ticket === ticket)!;
+  assert.deepEqual(['ON-1', 'OFF-1', 'OLD-1'].map((ticket) => row(ticket).claude_review), [true, false, null]);
+  assert.deepEqual(payload.arms, [
+    { arm: 'on', jobs: 3, delivered: 2, aborted: 1, cost_usd: 5, cost_complete: false, usd_per_delivered: 2.5, median_iterations: 3, codex_findings: 2, codex_findings_per_job: 2 / 3 },
+    { arm: 'off', jobs: 1, delivered: 0, aborted: 0, cost_usd: 3, cost_complete: true, usd_per_delivered: null, median_iterations: null, codex_findings: 1, codex_findings_per_job: 1 },
+  ]);
+  // The arm cost is the sum of its jobs' cost_usd.
+  assert.equal(payload.arms[0]!.cost_usd, ['ON-1', 'ON-2', 'ON-3'].reduce((total, ticket) => total + row(ticket).cost_usd, 0));
+
+  // No job of the experiment: both rows, empty.
+  const none = await newEnv('stats-arms-none');
+  const oldJobs = new JobStore(none.state);
+  await makeJob(oldJobs, 'app', 'OLD-1', [{ ended: on('2026-11-05'), cost: 10 }], { state: 'pushed' });
+  const empty = await stats(none.state, oldJobs).compute({ days: 7, workspace: null });
+  assert.deepEqual(empty.arms.map((arm) => [arm.arm, arm.jobs, arm.cost_usd, arm.cost_complete, arm.usd_per_delivered, arm.median_iterations, arm.codex_findings_per_job]), [
+    ['on', 0, 0, true, null, null, null], ['off', 0, 0, true, null, null, null],
+  ]);
+});
+
+test('simplify (SF-132): offered counts the period\'s simplification records with a suggestion; taken and skipped the period\'s simplify_chosen lines', async () => {
+  const env = await newEnv('stats-simplify');
+  const jobs = new JobStore(env.state);
+  const offer = (path: string) => ({ path, what: 'W.', why: 'Y.', saves_lines: 3, ledger_ids: [] });
+  const record = (ended: string, suggestions: ReturnType<typeof offer>[], dropped: ReturnType<typeof offer>[] = []) =>
+    ({ reviewer: 'simplify', summary: 'S.', suggestions, dropped, cost_usd: 0.1, model: null, started_at: ended, ended_at: ended });
+  for (const ticket of ['S-1', 'S-2', 'S-3', 'S-4', 'S-5']) {
+    await makeJob(jobs, 'app', ticket, [{ ended: on('2026-11-05'), cost: 1 }]);
+  }
+  // Offered: S-1 and S-2; not: no suggestion (only a dropped one), a failed pass, one before the period.
+  await jobs.writeSimplify('app', 'S-1', 1, record(on('2026-11-05'), [offer('a'), offer('b')]));
+  await jobs.writeSimplify('app', 'S-2', 1, record(on('2026-11-06'), [offer('c')]));
+  await jobs.writeSimplify('app', 'S-3', 1, record(on('2026-11-06'), [], [offer('d')]));
+  await jobs.writeSimplify('app', 'S-4', 1, { reviewer: 'simplify', error: 'exit 1', started_at: on('2026-11-06'), ended_at: on('2026-11-06') });
+  await jobs.writeSimplify('app', 'S-5', 1, record(on('2026-10-20'), [offer('e')]));
+  await event(jobs, 'app', 'S-1', { ts: on('2026-11-05'), type: 'simplify_chosen', choice: 'simplify', suggestions: 2 });
+  await event(jobs, 'app', 'S-2', { ts: on('2026-11-06'), type: 'simplify_chosen', choice: 'skip', suggestions: 1 });
+  await event(jobs, 'app', 'S-5', { ts: on('2026-10-20'), type: 'simplify_chosen', choice: 'skip', suggestions: 1 });
+
+  const payload = await stats(env.state, jobs).compute({ days: 7, workspace: null });
+  assert.deepEqual(payload.simplify, { offered: 2, taken: 1, skipped: 1 });
+  const month = await stats(env.state, jobs).compute({ days: 30, workspace: null });
+  assert.deepEqual(month.simplify, { offered: 3, taken: 1, skipped: 2 });
 });

@@ -1714,8 +1714,16 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    `Not checked:`, saying who can run it. It asks for a short report (`# Report: <ticket>, MR
    preparation <attempt>`, `## Done`, `## Open questions`) and ends with the Handbook's `## Git rules` and `## MR template` verbatim.
 3. When that turn ends, the factory checks the MR text, then works in the worktree under the
-   workspace's Git lock. Every Git call runs with `-c core.hooksPath=/dev/null`, so no repository
-   hook runs outside the sandbox, and with a 60 s timeout.
+   workspace's Git lock. Every Git call runs with a 60 s timeout and, like every Git call of the
+   factory (SF-124: `runGit` and its siblings in `src/git.ts`, the only module that starts `git`),
+   with `-c core.hooksPath=/dev/null -c core.fsmonitor=false`, so no repository hook and no
+   fsmonitor runs outside the sandbox. No argument or environment variable switches that off.
+   `test/git.test.ts` scans every other file of `src/` for `spawn`, `spawnSync`, `execFile`,
+   `execFileSync`, `exec` and `execSync` calls: a literal command `git` fails, and a computed
+   command must be on its reviewed `COMPUTED` list (`deps.spawn` and a RegExp's `.exec(` aside).
+   Beyond the Task's rules it also counts a template literal whose command word is a `${}`
+   expression as computed, and fails a process function imported from `child_process` under
+   another name.
    Before the commit, the factory writes the nits of the iteration that reached Clean into the MR
    text (SF-051): those of its `review.json` and `gate.json`, deduplicated by path and problem
    text, as a `### Nits not applied` list (`- [nit] \`path\`: problem Expected: expected`) at the
@@ -1841,6 +1849,23 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    never pushed. It refuses when the branch tip is not `prepared_commit`
    (`branch_changed`, with both hashes: the user edited the branch by hand), unless `--as-is`
    (`as_is` on the dashboard) pushes the tip as it is; `branch_missing` when the branch is gone.
+   Then the job's Git LFS objects (SF-124), which used to go through the repository's `pre-push`
+   hook (`git lfs pre-push`), a hook the factory never runs: the paths the job changed
+   (`git diff --name-only --no-renames --diff-filter=AMT`) between the merge base of the pushed
+   commit and `origin/<base>` (the local `<base>` without it) and that commit, so upstream commits
+   never count; among them those whose `filter` attribute is `lfs` in the pushed commit
+   (`git check-attr --source`, not the checkout's working tree; a Git before 2.40 counts every
+   changed path once a `.gitattributes` of the commit names `filter=lfs`). With such a path the
+   factory runs `git lfs push origin <ref>` (10 min) before the branch, and refuses, nothing
+   pushed, with `mr_push_failed` when git-lfs is not installed ("the job changes Git LFS files and
+   git-lfs is not installed") or when the job changed `.lfsconfig` ("the job changed .lfsconfig;
+   push it yourself after checking it": it could send the objects and your credentials to another
+   host). git-lfs reads `.lfsconfig` in the checkout, not in the pushed commit (the working tree's
+   file, else the index's, else `HEAD`'s), and the checkout may hold another job's files (a
+   hand-over), so the push is refused the same way when that file is neither the one of
+   `origin/<base>` (the local `<base>` without it) nor the one of the merge base ("the checkout's
+   .lfsconfig is not the one of <base>; push it yourself after checking it"). A failed `git lfs push` is `mr_push_failed` with git-lfs's text. Without LFS paths in the
+   range nothing of this runs.
    Then `git push origin <branch>:<branch>` with the protection below (120 s); `pushed` with the
    title and the merge request link (GitHub's compare page for `github.com`, GitLab's new merge
    request form otherwise; only the branch when the `origin` URL cannot be parsed). A failed
@@ -1850,7 +1875,7 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    | Code | Meaning |
    |---|---|
    | `mr_push_protected` | the branch is `main`, `master` or the job's base: nothing is pushed there directly, every change goes through a merge request |
-   | `mr_push_failed` | `git push origin <branch>:<branch>` failed (120 s; stderr in the message) |
+   | `mr_push_failed` | `git push origin <branch>:<branch>` failed (120 s; stderr in the message), or the job's Git LFS objects could not be pushed: git-lfs missing, `.lfsconfig` changed by the job or not the base's in the checkout, `git lfs push` failed |
 
 8. `sf mr create` (or the dashboard's Create merge request, SF-048): for a `pushed` job, opens a
    pull request (GitHub) or merge request (GitLab) from the branch into the base, with the title

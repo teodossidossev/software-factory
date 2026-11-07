@@ -31,9 +31,10 @@ const LS_REMOTE_TIMEOUT_MS = 20_000;
 const short = (commit: string): string => commit.slice(0, 12);
 
 // Every Git call of the hand-over runs without the repository's hooks: a job's branch may change a
-// versioned hooks directory, and these calls run outside the sandbox (as MR preparation's do).
+// versioned hooks directory, and these calls run outside the sandbox. runGit (git.ts) switches
+// them off for every factory Git call.
 function git(cwd: string, args: string[], maxBytes = 1024 * 1024, timeoutMs?: number, env: Record<string, string> = {}): Promise<GitResult> {
-  return runGit(cwd, ['-c', 'core.hooksPath=/dev/null', ...args], maxBytes, timeoutMs, env);
+  return runGit(cwd, args, maxBytes, timeoutMs, env);
 }
 
 // A failed Git call as a FactoryError with Git's text.

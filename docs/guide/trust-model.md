@@ -68,6 +68,17 @@ the merge request on the Git host, the hand-over to your checkout, the notificat
 are open to an agent; the agent only writes files in its worktree, and the factory decides what
 to commit.
 
+No Git call of the factory runs the repository's hooks or its fsmonitor: every one starts in one
+place (`factory/src/git.ts`) with `-c core.hooksPath=/dev/null -c core.fsmonitor=false`, and no
+argument or environment variable switches that off. A hook such as a `pre-push`, or a
+`core.hooksPath` such as `.husky` that resolves into files a job wrote, would otherwise run code an
+agent wrote, outside the sandbox. Your own Git commands in your checkout still run your hooks.
+Git LFS objects, which a `pre-push` hook (`git lfs pre-push`) used to send, are pushed explicitly
+with `git lfs push` before the branch, and only when the job changed LFS files; a job that changed
+`.lfsconfig` is not pushed (that file could send the objects and your credentials elsewhere), nor
+is any job while the `.lfsconfig` git-lfs reads in your checkout (where another job may be handed
+over) is not the base branch's.
+
 ## The limits
 
 - **Built once per session.** A worktree or state entry created after a session started stays

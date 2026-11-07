@@ -1,6 +1,45 @@
-// Runs Git with a fixed argv, no shell, a minimal environment and a bounded output.
+// Runs Git with a fixed argv, no shell, a minimal environment and a bounded output. The only
+// module that starts a `git` process (SF-124; test/git.test.ts scans src/ for any other).
 import { spawn } from 'node:child_process';
 import type { Hash } from 'node:crypto';
+
+// Put before every caller's arguments, with no way to leave it out (SF-124): the factory runs Git
+// as the user, outside the sandbox, so neither the repository's hooks (a core.hooksPath such as
+// .husky resolves into files a job wrote) nor an fsmonitor program ever runs from here.
+export const GIT_SAFETY_ARGS: readonly string[] = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
+
+// The one value of each GIT_SAFETY_ARGS key a caller may repeat (live-smoke.ts's wrapper does).
+const SAFE_VALUES: ReadonlyMap<string, string> = new Map([['core.hookspath', '/dev/null'], ['core.fsmonitor', 'false']]);
+
+// The argv of a factory Git call: GIT_SAFETY_ARGS, then the caller's. A caller's own -c or
+// --config-env would come later and win, so one that sets core.hooksPath or core.fsmonitor to
+// anything else throws. Every argument is checked, not only those before the command (an option
+// such as -C <dir> takes a value): a later `-c <name>` (`switch -c`) is refused only when it
+// names one of those keys.
+function gitArgs(args: string[]): string[] {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    let setting: string | undefined;
+    let fromEnv = false;
+    if (arg === '-c' || arg === '--config-env') {
+      setting = args[index + 1];
+      fromEnv = arg === '--config-env';
+    } else if (arg.startsWith('--config-env=')) {
+      setting = arg.slice('--config-env='.length);
+      fromEnv = true;
+    }
+    if (setting === undefined) {
+      continue;
+    }
+    const at = setting.indexOf('=');
+    const key = (at < 0 ? setting : setting.slice(0, at)).toLowerCase();
+    const safe = SAFE_VALUES.get(key);
+    if (safe !== undefined && (fromEnv || at < 0 || setting.slice(at + 1) !== safe)) {
+      throw new Error(`refusing a factory Git call that sets ${key}: hooks and fsmonitor stay off (SF-124)`);
+    }
+  }
+  return [...GIT_SAFETY_ARGS, ...args];
+}
 
 export interface GitResult {
   code: number | null;
@@ -23,14 +62,24 @@ function gitEnv(): NodeJS.ProcessEnv {
 
 // timeoutMs, when given, stops Git with SIGTERM; the result then has code null. env: variables
 // added to the minimal environment (SF-073: GIT_INDEX_FILE for a snapshot in a temporary index).
-export function runGit(cwd: string, args: string[], maxBytes = 1024 * 1024, timeoutMs?: number, env: Record<string, string> = {}): Promise<GitResult> {
+// input, when given, is Git's whole stdin (SF-124: `check-attr --stdin`); stdin is closed otherwise.
+export function runGit(
+  cwd: string, args: string[], maxBytes = 1024 * 1024, timeoutMs?: number, env: Record<string, string> = {}, input?: string,
+): Promise<GitResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn('git', args, { cwd, env: { ...gitEnv(), ...env }, stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, killSignal: 'SIGTERM' });
+    const child = spawn('git', gitArgs(args), {
+      cwd, env: { ...gitEnv(), ...env }, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'], timeout: timeoutMs, killSignal: 'SIGTERM',
+    });
+    if (input !== undefined) {
+      // Git may exit before it reads it all; its exit code tells, not the broken pipe.
+      child.stdin!.on('error', () => {});
+      child.stdin!.end(input);
+    }
     const chunks: Buffer[] = [];
     let length = 0;
     let truncated = false;
     let stderr = '';
-    child.stdout.on('data', (chunk: Buffer) => {
+    child.stdout!.on('data', (chunk: Buffer) => {
       if (truncated) {
         return;
       }
@@ -42,7 +91,7 @@ export function runGit(cwd: string, args: string[], maxBytes = 1024 * 1024, time
         child.kill('SIGTERM');
       }
     });
-    child.stderr.on('data', (chunk: Buffer) => {
+    child.stderr!.on('data', (chunk: Buffer) => {
       if (stderr.length < 4096) {
         stderr += chunk.toString('utf8');
       }
@@ -57,7 +106,7 @@ export function runGit(cwd: string, args: string[], maxBytes = 1024 * 1024, time
 // Runs Git with its stdout written to the open file fd (no limit, nothing held in memory).
 export function runGitToFile(cwd: string, args: string[], fd: number): Promise<{ code: number | null; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn('git', args, { cwd, env: gitEnv(), stdio: ['ignore', fd, 'pipe'] });
+    const child = spawn('git', gitArgs(args), { cwd, env: gitEnv(), stdio: ['ignore', fd, 'pipe'] });
     let stderr = '';
     child.stderr!.on('data', (chunk: Buffer) => {
       if (stderr.length < 4096) {
@@ -72,7 +121,7 @@ export function runGitToFile(cwd: string, args: string[], fd: number): Promise<{
 // Runs Git and feeds its whole stdout into hash, unbounded and never held in memory (SF-069).
 export function runGitToHash(cwd: string, args: string[], hash: Hash): Promise<{ code: number | null; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn('git', args, { cwd, env: gitEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('git', gitArgs(args), { cwd, env: gitEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
     let stderr = '';
     child.stdout!.on('data', (chunk: Buffer) => {
       hash.update(chunk);
@@ -96,7 +145,7 @@ export function streamGitRecords(
   cwd: string, args: string[], separator: number, onRecord: (record: string) => void, timeoutMs?: number, env: Record<string, string> = {},
 ): Promise<{ code: number | null; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn('git', args, { cwd, env: { ...gitEnv(), ...env }, stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, killSignal: 'SIGTERM' });
+    const child = spawn('git', gitArgs(args), { cwd, env: { ...gitEnv(), ...env }, stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, killSignal: 'SIGTERM' });
     let rest: Buffer = Buffer.alloc(0);
     let stderr = '';
     let failed: unknown;

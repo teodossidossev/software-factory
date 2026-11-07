@@ -5,16 +5,14 @@
 // choices and a recommendation, stored in <job dir>/explanation.json for the stop it explains. It
 // never acts: it writes no job file but its own, and the user still answers with the stop's own
 // buttons and commands. A usage-limit stop explains itself and gets none.
-import { createReadStream } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createInterface } from 'node:readline';
 import * as z from 'zod/v4';
 import { writeFileAtomic } from './atomic.js';
 import { MAX_MODEL_INPUT_CHARS } from './digest.js';
 import { digestSessionOptions } from './digest-run.js';
-import { lineEntries, streamContext } from './job-stream.js';
+import { jobUserMessages } from './job-stream.js';
 import type { Job, JobStore, ReviewRecord } from './jobs.js';
 import { type LedgerEntry, unsettled } from './ledger.js';
 import { explainPrompt } from './prompts.js';
@@ -292,31 +290,10 @@ export function reportSections(report: string | undefined): { done: string; open
 }
 
 // The user's own messages to the job in its last two iterations: the prompts the job's Stream shows
-// as the user's (lineEntries, who: 'you'), the factory's rules block already cut, oldest first.
+// as the user's (jobUserMessages), the factory's rules block already cut, oldest first.
 export async function userMessages(jobs: JobStore, job: Job): Promise<ExplainInput['your_messages']> {
   const from = Math.max(1, job.iteration - 1);
-  const ctx = streamContext(jobs, job.workspace, job.ticket);
-  const messages: ExplainInput['your_messages'] = [];
-  let line = -1;
-  try {
-    const lines = createInterface({ input: createReadStream(jobs.eventsPath(job.workspace, job.ticket), 'utf8'), crlfDelay: Infinity });
-    for await (const raw of lines) {
-      line += 1;
-      if (!raw.includes('"prompt"')) {
-        continue;
-      }
-      for (const entry of await lineEntries(raw, line, ctx)) {
-        if (entry.t === 'user' && entry.who === 'you' && entry.it >= from) {
-          messages.push({ iteration: entry.it, at: entry.ts, text: entry.text });
-        }
-      }
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw error;
-    }
-  }
-  return messages;
+  return (await jobUserMessages(jobs, job.workspace, job.ticket)).filter((m) => m.iteration >= from);
 }
 
 // The model's input for the job's stop, read now (the answers too).

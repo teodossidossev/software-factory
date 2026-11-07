@@ -335,3 +335,34 @@ test('recovery: a Claude blocker that reopens an accepted risk is dropped; the r
     await stop(served);
   }
 });
+
+test("a contest with the user's message: the Implementer cites the message, the entry is contested, the next review sees it settled", async () => {
+  const env = await newEnv('ledger-user-message', { SF_REVIEW: 'on' });
+  const repo = await newRepo(env, 'ledger-user-message-repo', false);
+  await putTask(env, repo, 'L-9', 'Greet the reader');
+  await script(env, [
+    { write: { 'README.md': 'hello reader\n' }, text: 'Report of iteration 1' },
+    { write: { '.software-factory/L-9.mr.md': mrText('feat(L-9): Greet the reader') }, text: 'prepared' },
+    { write: { 'README.md': 'hello world\n' }, text: 'Report of iteration 2' },
+    { write: { 'a.txt': 'a\n' }, text: '## Fix 2 items\n| R1 | contested | Done as the user message "greet the world again" asked. |' },
+    { write: { '.software-factory/L-9.mr.md': mrText('feat(L-9): Greet the reader') }, text: 'prepared again' },
+  ]);
+  await reviewScript(env, [{ output: CLEAN }, { output: FIX }, { output: CLEAN }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'L-9' });
+    await waitFor(served, 'L-9', 'ready_for_human_review', 1);
+    const said = await runCli(env, ['say', 'app', 'L-9', 'Please', 'greet', 'the', 'world', 'again.']);
+    assert.equal(said.code, 0, said.stderr);
+    await waitFor(served, 'L-9', 'ready_for_human_review', 3);
+    const [entry] = await new JobStore(env.state).readLedger('app', 'L-9');
+    assert.deepEqual([entry!.id, entry!.status, entry!.evidence], ['R1', 'contested', 'user message "greet the world again"']);
+    const reviews = await reviewLog(env);
+    assert.equal(reviews.length, 3);
+    const third = reviews[2]!.prompt;
+    assert.match(third, /<settled_findings>\n- R1 · contested · major · `README\.md`: It greets the world\. Response: [^\n]* Evidence: user message "greet the world again"\n<\/settled_findings>/);
+    assert.match(third, /<user_decisions>\n<user_message iteration="2" at="[^"]+">\nPlease greet the world again\.\n<\/user_message>\n<\/user_decisions>/);
+  } finally {
+    await stop(served);
+  }
+});

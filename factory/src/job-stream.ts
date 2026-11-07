@@ -3,8 +3,11 @@
 // and the job's files at the time of the build, never on other lines, so the paged route and the
 // live event give the same entries (but for the ledger ids of a live verdict, written after its
 // review record). The builder never joins a tool and its result: the client does, by id.
+import { createReadStream } from 'node:fs';
+import { createInterface } from 'node:readline';
 import type { GateRecord, IterationMeta, JobStore, ReviewRecord, SimplifyRecord } from './jobs.js';
 import type { LedgerEntry } from './ledger.js';
+import { CONTINUE_PROMPT } from './turn-limit.js';
 import { describeEvent, limitStateText, shortInput } from './watch.js';
 
 // The bound of a tool's input and a tool's result in an entry, in characters.
@@ -18,6 +21,12 @@ const KEPT_FILES = '\n\nThis job restarts an earlier job of ';
 const IMAGES_LINE = /\n\nThe Task's images are in .+: .+\. Read them when you need them\.$/u;
 const IMAGES_CHANGED = /\n\nThe Task's images changed while the job was paused: .+\.$/u;
 const CONTINUE = 'Continue where you stopped.';
+// The job's <rules> block (SF-059) in the first prompt, after the /implement line and a blank line
+// (firstPrompt, src/execution/shared.ts), and before a Resume's message in a new session
+// (#resumePrompt, src/execution/control.ts): each up to the first line that is exactly </rules>
+// followed by a blank line or by the end.
+const FIRST_RULES = /^\n\n<rules>\n[\s\S]*?\n<\/rules>(?=\n\n|$)/u;
+const LEADING_RULES = /^<rules>\n[\s\S]*?\n<\/rules>(?:\n\n|$)/u;
 
 export type Who = 'implementer' | 'claude' | 'codex' | 'you' | 'factory' | 'mr';
 export type PromptKind = 'implement' | 'fix' | 'mr' | 'conflict' | 'continue';
@@ -163,6 +172,7 @@ async function promptEntry(prompt: string, ctx: StreamContext, sent: unknown): P
   if (note !== null) {
     text = text.slice(0, note.index);
   }
+  text = text.replace(LEADING_RULES, '');
   const names = Array.isArray(sent) ? sent.map((image) => asRecord(image).name).filter((name): name is string => typeof name === 'string') : [];
   const images = names.length > 0 ? { images: names } : {};
   const first = text.split('\n')[0]!;
@@ -170,8 +180,12 @@ async function promptEntry(prompt: string, ctx: StreamContext, sent: unknown): P
   const fix = /^\/implement \S+ Fix (\d+)$/u.exec(first);
   const rest = text.slice(first.length);
   const base = { t: 'prompt' as const, text, first, task_changed: taskChanged, ...images };
-  if (implement && (rest === '' || rest.startsWith(KEPT_FILES))) {
-    return { ...base, who: 'factory', kind: 'implement' };
+  if (implement) {
+    // The first prompt of a job with rules: the block is cut, the rest decides as without it.
+    const left = rest.startsWith('\n\n<rules>\n') ? rest.replace(FIRST_RULES, '') : rest;
+    if (left === '' || left.startsWith(KEPT_FILES)) {
+      return { ...base, text: `${first}${left}`, who: 'factory', kind: 'implement' };
+    }
   }
   if (fix !== null && rest === '') {
     const number = Number(fix[1]);
@@ -183,7 +197,7 @@ async function promptEntry(prompt: string, ctx: StreamContext, sent: unknown): P
   if (text.startsWith("The factory's rebase of ")) {
     return { ...base, who: 'factory', kind: 'conflict' };
   }
-  if (text === CONTINUE) {
+  if (text === CONTINUE || text === CONTINUE_PROMPT) {
     return { ...base, who: 'factory', kind: 'continue' };
   }
   return { t: 'user', who: 'you', text, task_changed: taskChanged, ...images };
@@ -370,4 +384,40 @@ export async function lineEntries(raw: string, line: number, ctx: StreamContext)
   const ts = typeof record.ts === 'string' ? record.ts : null;
   const entries = await drafts(raw, record, it, ctx);
   return entries.map((entry, index) => ({ ...entry, k: entries.length === 1 ? String(line) : `${line}.${index}`, ts, it }));
+}
+
+// One of the user's own messages to the job (SF-112): a prompt the Stream shows as the user's.
+// iteration: the iteration the turn publishes; at: the record's ts.
+export interface UserMessage {
+  iteration: number;
+  at: string | null;
+  text: string;
+}
+
+// The user's own messages to the job, oldest first: the prompts of events.jsonl that lineEntries
+// gives as who: 'you', the factory's rules block, images lines and Task-change note already cut.
+// None when the job has no events.jsonl.
+export async function jobUserMessages(jobs: JobStore, workspace: string, ticket: string): Promise<UserMessage[]> {
+  const ctx = streamContext(jobs, workspace, ticket);
+  const messages: UserMessage[] = [];
+  let line = -1;
+  try {
+    const lines = createInterface({ input: createReadStream(jobs.eventsPath(workspace, ticket), 'utf8'), crlfDelay: Infinity });
+    for await (const raw of lines) {
+      line += 1;
+      if (!raw.includes('"prompt"')) {
+        continue;
+      }
+      for (const entry of await lineEntries(raw, line, ctx)) {
+        if (entry.t === 'user' && entry.who === 'you') {
+          messages.push({ iteration: entry.it, at: entry.ts, text: entry.text });
+        }
+      }
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  return messages;
 }

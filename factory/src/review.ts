@@ -6,6 +6,7 @@ import { dirname, resolve } from 'node:path';
 import { type Options, query, type SandboxSettings, type SDKMessage, type SDKResultMessage, type SettingSource } from '@anthropic-ai/claude-agent-sdk';
 import * as z from 'zod/v4';
 import { type ImageRef, promptInput } from './attachments.js';
+import type { UserMessage } from './job-stream.js';
 import type { FileChange } from './jobs.js';
 import { type FixItem, fixItemLine, LEDGER_REF, type LedgerEntry, SCOPE_PROBLEM, SENSITIVE_PROBLEM, settledLines } from './ledger.js';
 import { handbookSection } from './prompts.js';
@@ -21,6 +22,9 @@ export const MAX_REVIEW_PATCH_BYTES = 256 * 1024;
 export const REVIEW_TOOLS = ['Read', 'Grep', 'Glob'];
 // Denied as well, should a tool outside REVIEW_TOOLS still be offered.
 export const REVIEW_DENIED_TOOLS = ['Bash', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task', 'Agent', ...ENV_FILE_RULES];
+// The caps of <user_decisions> (SF-112), in characters: one message's text, and all the texts sent.
+export const MAX_USER_MESSAGE_CHARS = 4000;
+export const MAX_USER_DECISIONS_CHARS = 16000;
 
 // The weight of a review item (SF-051). Only blocker and major items make a fix; nits never block.
 export const SEVERITIES = ['blocker', 'major', 'nit'] as const;
@@ -75,6 +79,9 @@ export interface ReviewInput {
   ledger?: LedgerEntry[];
   // The job's <rules> block (SF-059, src/rules-docs.ts); absent or '' when it has none.
   rules?: string;
+  // The user's own messages to the job up to the reviewed iteration (SF-112), oldest first; absent
+  // or [] when there are none.
+  userMessages?: UserMessage[];
 }
 
 // The buffer's first maxBytes bytes as text, never splitting a UTF-8 character.
@@ -84,6 +91,44 @@ export function cutBuffer(buffer: Buffer, maxBytes: number): string {
     end -= 1;
   }
   return buffer.subarray(0, end).toString('utf8');
+}
+
+// A text cut to at most limit characters, the last one "…", without splitting a surrogate pair (as
+// cut in src/job-stream.ts).
+function cutText(text: string, limit: number): string {
+  if (text.length <= limit) {
+    return text;
+  }
+  let end = limit - 1;
+  const code = text.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) {
+    end -= 1;
+  }
+  return `${text.slice(0, end)}…`;
+}
+
+// The lines inside <user_decisions> (SF-112): one <user_message> per message, oldest first, each
+// text cut to MAX_USER_MESSAGE_CHARS; the newest messages whose texts fit in
+// MAX_USER_DECISIONS_CHARS (the newest always), after a line counting the older ones left out;
+// "None." without messages.
+export function userDecisionLines(messages: UserMessage[]): string[] {
+  if (messages.length === 0) {
+    return ['None.'];
+  }
+  const texts = messages.map((message) => cutText(message.text.trimEnd(), MAX_USER_MESSAGE_CHARS));
+  // The newest is always kept; then older ones while they fit, up to the first that does not.
+  let first = texts.length - 1;
+  let size = texts[first]!.length;
+  while (first > 0 && size + texts[first - 1]!.length <= MAX_USER_DECISIONS_CHARS) {
+    first -= 1;
+    size += texts[first]!.length;
+  }
+  const lines = first === 0 ? [] : [`(${first} earlier ${first === 1 ? 'message is' : 'messages are'} left out; the job's Stream has them.)`];
+  for (let index = first; index < messages.length; index += 1) {
+    const { iteration, at } = messages[index]!;
+    lines.push(`<user_message iteration="${iteration}"${at !== null ? ` at="${at}"` : ''}>`, texts[index]!, '</user_message>');
+  }
+  return lines;
 }
 
 function pathLines(files: FileChange[] | undefined): string[] {
@@ -111,8 +156,8 @@ export function reviewPrompt(input: ReviewInput): string {
 
 // The rules of every reviewer (the Claude review and the gate, src/gate.ts), the Handbook's review
 // rules and the material of the iteration: the job's coding rules when it has them (SF-059), the
-// Task file, the Report, the marked paths (sensitive, outside the Task's scope, deleted) and the
-// Patch, inline up to MAX_REVIEW_PATCH_BYTES.
+// Task file, the user's messages to the job (SF-112), the Report, the marked paths (sensitive,
+// outside the Task's scope, deleted) and the Patch, inline up to MAX_REVIEW_PATCH_BYTES.
 export function reviewBody(input: ReviewInput): string[] {
   const { ticket } = input;
   const rules = input.rules ?? '';
@@ -129,6 +174,7 @@ export function reviewBody(input: ReviewInput): string[] {
     '- Verify the claims of the Report against the files. Do not trust them.',
     `- Review the change against the Task file (${TASK_DIR}/${ticket}.md, below), its \`## Review brief\` section when it has one, and the repository standards: AGENTS.md, CLAUDE.md and the docs you find.`,
     ...(rules !== '' ? ['- A review item that is a rule violation names the rule\'s file (and heading) in `problem`.'] : []),
+    '- The user\'s messages to the job (<user_decisions>, below) are the user\'s decisions: where one and the Task file disagree, the message wins, and a later message wins over an earlier one. A change that does what a message asked is not an item, nor is a Task requirement the message replaced; a message the change does not follow is one, citing the message in problem.',
     '- Follow the review rules below (the Handbook\'s).',
     '- Give every item a severity:',
     ...SEVERITIES.map((severity) => `  - \`${severity}\`: ${SEVERITY_DEFINITIONS[severity]}.`),
@@ -143,6 +189,10 @@ export function reviewBody(input: ReviewInput): string[] {
     `<task_file path="${TASK_DIR}/${ticket}.md">`,
     input.task.trimEnd(),
     '</task_file>',
+    '',
+    '<user_decisions>',
+    ...userDecisionLines(input.userMessages ?? []),
+    '</user_decisions>',
     '',
     '<report>',
     input.report.trimEnd(),

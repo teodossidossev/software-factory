@@ -193,10 +193,14 @@ Every Fix item has a ledger id (`1. [R7, major] ...`); answer each one by its id
 
 - `fixed`: done.
 - `contested`: the item is wrong, with evidence a reviewer can check without you: a `path:line` in
-  the worktree, a test name, or a `§section` of the Task file. A wish to contest is not evidence;
-  a contest without it reads as `open`.
+  the worktree, a test name, a `§section` of the Task file, or the user's own message to this job
+  quoted as `user message "<exact words>"` (at least 8 characters, which the factory finds in that
+  message). A wish to contest is not evidence; a contest without it reads as `open`. An item that
+  conflicts with the Task file only because the user's message asked for what you did is
+  contested with that message.
 - `escalated`: the item turns on something only the user knows (outside the repository and the
-  Task file); the note is the question. The job stops for the user before the review.
+  Task file); the note is the question. The job stops for the user before the review. An item
+  the user's message already decided is not escalated: contest it with the message.
 - `left`: a nit not done. For a blocker or major it reads as `open`.
 
 A row the factory cannot read leaves its item `open`; an open blocker or major comes back in the
@@ -212,6 +216,11 @@ with every iteration. The Context owner does not review.
   scenario, real data) goes into the verdict's summary, it is no reason to hold the verdict.
 - Review the Patch against the Task file, its `## Review brief`, the plan and the repository
   standards. The Report says what was checked; verify claims against the Patch, do not trust them.
+- The user's own messages to the job (`<user_decisions>` in the prompt, each with its
+  iteration, verbatim) are the user's decisions. Where a message and the Task file disagree,
+  the message wins; a later message wins over an earlier one. Following a message is not an
+  item, nor is a Task requirement or acceptance criterion the message replaced; not doing what
+  a message asked is one. A message that decides nothing (such as "Go on.") changes nothing.
 - A `fix` lists concrete items: path, what is wrong, what is expected, severity. No restating of
   the whole task.
 - Every item has a severity:

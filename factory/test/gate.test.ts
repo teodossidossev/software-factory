@@ -10,9 +10,11 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { gateFullPaths, loadConfig, sensitivePaths } from '../src/config.js';
 import type { FactoryError } from '../src/errors.js';
-import { GATE_SCHEMA, gateArgs } from '../src/gate.js';
+import { GATE_SCHEMA, gateArgs, gatePrompt } from '../src/gate.js';
 import { WITHHELD } from '../src/redact.js';
 import { JobStore } from '../src/jobs.js';
+import { reviewPrompt } from '../src/review.js';
+import { loadHandbook } from '../src/server.js';
 import { writeTask } from '../src/task-file.js';
 import { fetchRaw } from './support/dashboard-client.js';
 import {
@@ -894,4 +896,20 @@ test('sf accept (SF-047): a failed gate is accepted with its error as what goes 
   } finally {
     await stop(served);
   }
+});
+
+test('the gate prompt carries <user_decisions> as the review does', async () => {
+  const input = {
+    ticket: 'G-1', iteration: 2, task: 't', report: 'r', patch: Buffer.from('p'), patchTruncated: false, files: [], handbook: (await loadHandbook()).text,
+    userMessages: [{ iteration: 2, at: '2026-11-07T10:11:12.000Z', text: 'merge the rows into one' }],
+  };
+  const gate = gatePrompt({ ...input, baseCommit: 'abc' });
+  const review = reviewPrompt(input);
+  const section = '\n<user_decisions>\n<user_message iteration="2" at="2026-11-07T10:11:12.000Z">\nmerge the rows into one\n</user_message>\n</user_decisions>\n';
+  const bullet = "\n- The user's messages to the job (<user_decisions>, below) are the user's decisions:";
+  for (const prompt of [gate, review]) {
+    assert.ok(prompt.includes(section) && prompt.includes(bullet), prompt);
+  }
+  // The same body after each reviewer's own preamble.
+  assert.equal(gate.slice(gate.indexOf('\n\n- Verify the claims')), review.slice(review.indexOf('\n\n- Verify the claims')));
 });

@@ -38,7 +38,8 @@ function treeState(repo: string): string {
 }
 
 test('full cycle in a worktree: start, awaiting_review with Report, Patch and files, request_fix, Clean prepares the branch, approve pushes; the checkout is untouched', async () => {
-  const env = await newEnv('cycle', { CLAUDE_CODE_SESSION_ID: 'outer', CLAUDE_CODE_CHILD_SESSION: '1', ANTHROPIC_API_KEY: 'test-key' });
+  // SF_SMOKE_PROBE_ALLOW (SF-104) set by the user: a real install's state directory ignores it.
+  const env = await newEnv('cycle', { CLAUDE_CODE_SESSION_ID: 'outer', CLAUDE_CODE_CHILD_SESSION: '1', ANTHROPIC_API_KEY: 'test-key', SF_SMOKE_PROBE_ALLOW: 'node probe.mjs > probe.json' });
   const repo = await newRepo(env, 'cycle-repo', true);
   await putTask(env, repo, 'DEMO-1', 'Export as CSV!');
   await script(env, [
@@ -133,6 +134,11 @@ test('full cycle in a worktree: start, awaiting_review with Report, Patch and fi
   assert.ok(log[1]!.argv.includes(`--resume=${log[0]!.sessionId}`));
   for (const flag of ['--permission-mode=auto', '--setting-sources=user,project', '--max-turns=150']) {
     assert.ok(log[1]!.argv.includes(flag), flag);
+  }
+  // A real job's query() options carry no allowedTools (SF-104), and its mode is auto.
+  for (const entry of log) {
+    assert.ok(entry.argv.includes('--permission-mode=auto'));
+    assert.deepEqual(entry.argv.filter((arg) => arg.startsWith('--allowedTools')), []);
   }
   assert.ok(log[0]!.argv.some((arg) => arg.startsWith('--disallowedTools=') && arg.includes('Bash(git commit:*)') && arg.includes('Read(**/.env)')));
   assert.ok(log[0]!.env.includes('ANTHROPIC_API_KEY'));
@@ -507,6 +513,43 @@ test('permission_mode_mismatch ends in needs_human; a restart turns working jobs
   assert.equal(log[1]!.prompt, factoryPrompt('please continue', 'M-1', 1));
   assert.ok(log[1]!.argv.includes('--resume=kept-session'));
   await stop(served);
+});
+
+test('the smoke\'s probe allow (SF-104): an sf serve whose state directory is laid out as sf smoke makes it gives the Implementer exactly Bash(<command>) in allowedTools; the mode stays auto, and the sandbox and the path denials equal a real job\'s for the same paths', async () => {
+  const command = "node probe.mjs --canary '/x/config/auth.env' --job smoke > probe.json";
+  // <TMPDIR>/sf-smoke-<suffix>/state, as sf smoke makes it; the sandbox on, as in a real job.
+  const env = await newEnv('sf-smoke-exec', { TMPDIR: temp, SF_SMOKE_PROBE_ALLOW: command });
+  const repo = await newRepo(env, 'sf-smoke-exec-repo', true);
+  await putTask(env, repo, 'P-1', 'Probe');
+  await script(env, [{ text: '# Report: P-1, iteration 1' }, { text: '# Report: P-1, iteration 2' }]);
+  // The ticket history, which request_fix creates, exists for both turns: the same paths to deny
+  // (a missing path is left out of the denials).
+  await mkdir(join(env.state, 'tickets'), { recursive: true });
+  let served = await serve(env);
+  await call(served, 'start', { workspace: 'app', ticket: 'P-1' });
+  await waitFor(served, 'P-1', 'awaiting_review', 1);
+  await stop(served);
+  // The same job's next turn from an sf serve without the setting: a real job's options, same paths.
+  delete env.extra!.SF_SMOKE_PROBE_ALLOW;
+  served = await serve(env);
+  await call(served, 'request_fix', { workspace: 'app', ticket: 'P-1', content: '1. Again.' });
+  await waitFor(served, 'P-1', 'awaiting_review', 2);
+  await stop(served);
+
+  const [smoke, real] = await fakeLog(env);
+  const allowed = (argv: string[]): string[] => argv.filter((arg) => arg.startsWith('--allowedTools'));
+  assert.deepEqual(allowed(smoke!.argv), [`--allowedTools=Bash(${command})`]);
+  assert.deepEqual(allowed(real!.argv), []);
+  for (const entry of [smoke!, real!]) {
+    assert.ok(entry.argv.includes('--permission-mode=auto'));
+  }
+  const sandbox = (argv: string[]): Record<string, unknown> => (JSON.parse(argv[argv.indexOf('--settings') + 1]!) as { sandbox: Record<string, unknown> }).sandbox;
+  const denied = (argv: string[]): string | undefined => argv.find((arg) => arg.startsWith('--disallowedTools='));
+  assert.deepEqual(sandbox(smoke!.argv), sandbox(real!.argv));
+  assert.deepEqual([sandbox(smoke!.argv).enabled, sandbox(smoke!.argv).allowUnsandboxedCommands], [true, false]);
+  assert.ok((sandbox(smoke!.argv).filesystem as { denyRead: string[] }).denyRead.length > 0);
+  assert.equal(denied(smoke!.argv), denied(real!.argv));
+  assert.ok(denied(smoke!.argv)?.includes('Bash(git commit:*)'));
 });
 
 // The placeholders bubblewrap left in a real job's work checkout on 2026-11-02.

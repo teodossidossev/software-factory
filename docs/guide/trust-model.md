@@ -98,6 +98,8 @@ to commit.
 
 `sf smoke` has a `Sandbox` step: the job's Implementer runs a probe of the run's own canary env
 file, dashboard token, `jobs/`, `sf.sock`, `~/.ssh` and `SSH_AUTH_SOCK` inside its sandbox, and the
-step passes only when every one was refused. See [Install: check that it works](install.md#check-that-it-works).
+step passes only when every one was refused. Only the smoke lets that one probe command past the
+permission check (an exact allow rule, for its own temporary state only), so the sandbox, the same
+as a real job's, is what refuses it; real jobs keep every permission check. See [Install: check that it works](install.md#check-that-it-works).
 
 Back to the [guide](README.md).

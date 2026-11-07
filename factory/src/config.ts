@@ -1,8 +1,8 @@
 // Execution configuration, read once when `sf serve` starts.
 import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
-import { accessSync, constants, readFileSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { delimiter, isAbsolute, join, resolve } from 'node:path';
+import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { FactoryError } from './errors.js';
 import { type ForgeSettings, forgeSettings } from './forge.js';
 import type { Job } from './jobs.js';
@@ -69,6 +69,9 @@ export interface Config {
   // SF_HANDOFF (SF-073): checkout, the default, hands a job ready for review over to the
   // workspace's checkout on its branch; off leaves it in ready_for_human_review.
   handoff: HandoffMode;
+  // The smoke's sandbox probe command (SF-104, SF_SMOKE_PROBE_ALLOW), allowed past the permission
+  // check of the Implementer; undefined everywhere but in sf smoke's own state (smokeProbeAllow).
+  smokeProbeAllow: string | undefined;
 }
 
 // The gate: on with its Codex executable, or off with why (missing: no executable was found).
@@ -108,6 +111,30 @@ export function stateDir(env: NodeJS.ProcessEnv = process.env): string {
     return env.SF_STATE_DIR;
   }
   return join(env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'software-factory');
+}
+
+// The state directory sf smoke makes for its run (SF-104): <tmpdir>/sf-smoke-<suffix>/state.
+const SMOKE_DIR = /^sf-smoke-[^/]+$/;
+
+// SF_SMOKE_PROBE_ALLOW (SF-104): the smoke's probe command, which the Implementer may run without
+// the permission check (the sandbox still holds it). Honoured only when the state directory is
+// the one sf smoke made for its run, both sides resolved (a symlinked tmpdir still matches); a
+// real install's state directory never is, and any realpath error ignores it. Empty is unset.
+export function smokeProbeAllow(env: NodeJS.ProcessEnv, dir: string): string | undefined {
+  const command = env.SF_SMOKE_PROBE_ALLOW;
+  if (command === undefined || command === '') {
+    return undefined;
+  }
+  let real: string;
+  let tmp: string;
+  try {
+    real = realpathSync(dir);
+    tmp = realpathSync(tmpdir());
+  } catch {
+    return undefined;
+  }
+  const name = basename(dirname(real));
+  return SMOKE_DIR.test(name) && real === join(tmp, name, 'state') ? command : undefined;
 }
 
 export function worktreeRoot(env: NodeJS.ProcessEnv = process.env): string {
@@ -330,5 +357,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     gateFullPaths: gateFullPaths(env),
     forge: forgeSettings(env),
     handoff: handoffSetting(env),
+    smokeProbeAllow: smokeProbeAllow(env, stateDir(env)),
   };
 }

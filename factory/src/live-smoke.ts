@@ -8,7 +8,8 @@
 // A time and a cost budget bound the run; Cleanup always runs. Prints a pass/fail table.
 // The Sandbox step (SF-100) has the Implementer run a probe of the run's own secrets and control
 // paths (a canary env file, the dashboard token, jobs/, sf.sock, ~/.ssh, SSH_AUTH_SOCK) inside its
-// sandbox, and passes only when every one was refused.
+// sandbox, and passes only when every one was refused. Only the smoke lets that one command past
+// the permission check (SF-104, SF_SMOKE_PROBE_ALLOW); its sandbox stays a real job's.
 import { type ChildProcess, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
@@ -163,6 +164,71 @@ process.stdout.write(\`\${JSON.stringify(results, null, 2)}\\n\`);
 export const PROBES = ['auth.env', 'dashboard-token', 'jobs', 'sf.sock', '~/.ssh', 'SSH_AUTH_SOCK'] as const;
 const MAY_BE_ABSENT: readonly string[] = ['~/.ssh', 'SSH_AUTH_SOCK'];
 
+// The text of the auto mode classifier's refusal in a tool_result (SF-104).
+export const CLASSIFIER_DENIAL = 'denied by the Claude Code auto mode classifier';
+const PROBE_RESULT_CHARS = 200;
+
+// The text of a tool_result's content: a string, or its text blocks.
+function resultText(content: unknown): string {
+  if (typeof content === 'string') {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return '';
+  }
+  return content.filter((block): block is { type: 'text'; text: string } => block?.type === 'text' && typeof block.text === 'string').map((block) => block.text).join('\n');
+}
+
+// Why probe.json is missing, from the job's events.jsonl text (SF-104): the probe call is the last
+// Bash tool_use of the Implementer's main thread whose command runs the probe, its result the
+// tool_result with its id. undefined when the call ran without an error result; a line that is not
+// JSON is skipped.
+export function probeCallProblem(events: string): string | undefined {
+  type Block = { type?: unknown; id?: unknown; name?: unknown; input?: { command?: unknown }; tool_use_id?: unknown; is_error?: unknown; content?: unknown };
+  let call: string | undefined;
+  const results = new Map<string, Block>();
+  for (const line of events.split('\n')) {
+    let record: { type?: unknown; message?: { type?: unknown; parent_tool_use_id?: unknown; message?: { content?: unknown } } };
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    // The Implementer's SDK messages only: a reviewer's are records with a type.
+    if (record === null || typeof record !== 'object' || record.type !== undefined || record.message === null || typeof record.message !== 'object') {
+      continue;
+    }
+    const message = record.message;
+    const content = message.message?.content;
+    if (!Array.isArray(content)) {
+      continue;
+    }
+    for (const block of content as Block[]) {
+      if (message.type === 'assistant' && message.parent_tool_use_id === null && block?.type === 'tool_use' && block.name === 'Bash'
+        && typeof block.id === 'string' && typeof block.input?.command === 'string' && block.input.command.includes(`node ${PROBE_SCRIPT_NAME}`)) {
+        call = block.id;
+      } else if (message.type === 'user' && block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+        results.set(block.tool_use_id, block);
+      }
+    }
+  }
+  if (call === undefined) {
+    return 'the Implementer did not run the probe';
+  }
+  const result = results.get(call);
+  if (result === undefined) {
+    return undefined;
+  }
+  const text = resultText(result.content);
+  if (text.includes(CLASSIFIER_DENIAL)) {
+    return 'the permission classifier refused the probe before the sandbox; the sandbox was not exercised';
+  }
+  if (result.is_error === true) {
+    return `the probe failed: ${(text.trim().split('\n')[0] ?? '').slice(0, PROBE_RESULT_CHARS)}`;
+  }
+  return undefined;
+}
+
 // The Sandbox step's verdict on probe.json's text: undefined when every probe is there and refused
 // (or absent where it may be), else what is wrong. Nothing of the file but names and outcomes is used.
 export function probeProblem(text: string): string | undefined {
@@ -269,8 +335,10 @@ export function smokePaths(dir: string): SmokePaths {
 // The environment of every child sf process: env (the smoke's own, which already holds the user's
 // env file) without its SF_* variables but PASSED_SETTINGS, then the smoke's directories, ports
 // and settings on top. So no notification, Git host token, test hook or other user setting reaches
-// the child, and SF_ENV_FILE (an empty file) adds nothing.
-export function childEnv(env: NodeJS.ProcessEnv, paths: SmokePaths): NodeJS.ProcessEnv {
+// the child, and SF_ENV_FILE (an empty file) adds nothing. With the run's probe (SF-104),
+// SF_SMOKE_PROBE_ALLOW is its command: sf serve then allows that exact command past the permission
+// check (config.ts, smokeProbeAllow, honoured only for the smoke's own state directory).
+export function childEnv(env: NodeJS.ProcessEnv, paths: SmokePaths, probe?: SmokeProbe): NodeJS.ProcessEnv {
   const child: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(env)) {
     if (value !== undefined && (!name.startsWith('SF_') || PASSED_SETTINGS.includes(name))) {
@@ -287,6 +355,7 @@ export function childEnv(env: NodeJS.ProcessEnv, paths: SmokePaths): NodeJS.Proc
     ...(env.SF_SMOKE_CODEX_MODEL ? { SF_CODEX_MODEL: env.SF_SMOKE_CODEX_MODEL } : {}),
     SF_MAX_TURNS: '40', SF_REVIEW_MAX_TURNS: '30', SF_TASK_CHECK_MAX_TURNS: '30', SF_MAX_ITERATIONS: String(MAX_ITERATIONS),
     SF_GATE_MAX_ROUNDS: '1', SF_GATE_MAX_TOKENS: '400000',
+    ...(probe !== undefined ? { SF_SMOKE_PROBE_ALLOW: probeCommand(probe) } : {}),
   };
 }
 
@@ -503,7 +572,7 @@ class StopError extends Error {}
 
 class Smoke {
   readonly #paths: SmokePaths;
-  readonly #env: NodeJS.ProcessEnv;
+  #env: NodeJS.ProcessEnv;
   readonly #jobs: JobStore;
   readonly #options: SmokeOptions;
   readonly #print: (line: string) => void;
@@ -702,6 +771,8 @@ class Smoke {
     await writeFile(join(config, CANARY_FILE), canary, { mode: 0o600 });
     const ssh = join(homedir(), '.ssh');
     this.#probe = smokeProbe(this.#paths, createHash('sha256').update(canary).digest('hex'), existsSync(ssh) ? ssh : undefined);
+    // Every later child sf command, sf serve and its runners too, gets the probe's allow (SF-104).
+    this.#env = childEnv(process.env, this.#paths, this.#probe);
     await git(this.#paths.dir, ['init', '-q', '--bare', '-b', 'main', origin]);
     await git(this.#paths.dir, ['clone', '-q', origin, work]);
     await git(work, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
@@ -806,7 +877,9 @@ class Smoke {
     try {
       text = await readFile(join(job.worktree, PROBE_OUTPUT), 'utf8');
     } catch (error) {
-      return { status: 'FAIL', detail: `${PROBE_OUTPUT} could not be read (${(error as NodeJS.ErrnoException).code ?? 'error'})` };
+      // Why there is none, from the Implementer's own probe call (SF-104).
+      const events = await readFile(this.#jobs.eventsPath(WORKSPACE, TICKET), 'utf8').catch(() => '');
+      return { status: 'FAIL', detail: short(probeCallProblem(events) ?? `${PROBE_OUTPUT} could not be read (${(error as NodeJS.ErrnoException).code ?? 'error'})`) };
     }
     const problem = probeProblem(text);
     return problem === undefined ? { status: 'PASS', detail: `every probe refused (${PROBES.length})` } : { status: 'FAIL', detail: short(`the sandbox let through: ${problem}`) };

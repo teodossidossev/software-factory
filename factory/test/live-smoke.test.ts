@@ -10,7 +10,7 @@ import { chmod, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises
 import { createServer } from 'node:net';
 import { basename, join } from 'node:path';
 import { test } from 'node:test';
-import { childEnv, PASSED_SETTINGS, positiveDecimal, PROBE_SCRIPT, PROBES, probeCommand, probeProblem, ProcessGroups, runSmoke, smokePaths, smokeProbe, smokeTask, STEPS, terminate, trackRunnerLock } from '../src/live-smoke.js';
+import { CLASSIFIER_DENIAL, childEnv, PASSED_SETTINGS, positiveDecimal, PROBE_SCRIPT, PROBES, probeCallProblem, probeCommand, probeProblem, ProcessGroups, runSmoke, smokePaths, smokeProbe, smokeTask, STEPS, terminate, trackRunnerLock } from '../src/live-smoke.js';
 import { taskChecksDir } from '../src/sandbox-denials.js';
 import { Redactor } from '../src/redact.js';
 import { CLI, codexLog, codexScript, type Env, FAKE, fakeCodex, fakeLog, git, newEnv, processEnv, reviewLog, reviewScript, script, temp } from './support/harness.js';
@@ -173,6 +173,11 @@ test('--keep keeps the directory and prints it; the bare remote has the job\'s b
     assert.equal(git(join(ran.dir, 'origin.git'), 'show', 'main:probe.mjs'), PROBE_SCRIPT);
     assert.equal(git(join(ran.dir, 'origin.git'), 'show', `${BRANCH}:probe.json`), probeOutput());
     assert.equal(git(join(ran.dir, 'origin.git'), 'log', '-1', '--format=%an <%ae>', 'main').trim(), 'sf-smoke <sf-smoke@localhost>');
+    // SF-104: the Implementer had the probe command, exactly, past the permission check, in mode auto.
+    for (const entry of await fakeLog(ran.env)) {
+      assert.deepEqual(entry.argv.filter((arg) => arg.startsWith('--allowedTools')), [`--allowedTools=Bash(${probeCommand(probe)})`]);
+      assert.ok(entry.argv.includes('--permission-mode=auto'));
+    }
     await untouched(ran);
   } finally {
     await rm(ran.dir, { recursive: true, force: true });
@@ -225,7 +230,52 @@ test('no probe.json in the worktree: the Sandbox step FAILs', async () => {
   });
   assert.equal(ran.code, 1, ran.stdout + ran.stderr);
   assert.deepEqual(statuses(ran), ['PASS', 'PASS', 'PASS', 'PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
+  assert.equal(ran.rows.get('Sandbox')!.detail, 'the Implementer did not run the probe');
+});
+
+test('the probe ran without an error but left no probe.json: the Sandbox step FAILs, saying it could not be read', async () => {
+  const ran = await smoke('smoke-sandbox-ran', [], async (env) => {
+    await script(env, [{ ...CLEAN_TURNS[0], write: { 'greeting.txt': 'hello\nhello again\n' }, calls: [{ tool: 'Bash', input: { command: 'node probe.mjs --job smoke' } }] }]);
+    await reviewScript(env, [{ output: CHECK_READY }, { output: CLAUDE_CLEAN }]);
+  });
+  assert.equal(ran.code, 1, ran.stdout + ran.stderr);
   assert.equal(ran.rows.get('Sandbox')!.detail, 'probe.json could not be read (ENOENT)');
+});
+
+// One events.jsonl line of the Implementer: an SDK message of its main thread (or of a subagent's).
+const implementerEvent = (type: 'assistant' | 'user', content: unknown[], parent: string | null = null): string =>
+  JSON.stringify({ ts: '2026-11-07T00:00:00.000Z', iteration: 1, message: { type, parent_tool_use_id: parent, message: { role: type, content } } });
+const bash = (id: string, command: string): unknown => ({ type: 'tool_use', id, name: 'Bash', input: { command, description: 'x' } });
+const result = (id: string, content: unknown, isError = false): unknown => ({ type: 'tool_result', tool_use_id: id, is_error: isError, content });
+
+test('why probe.json is missing (SF-104), from the job\'s events: no probe call, the classifier\'s refusal, another error, or none', () => {
+  const probe = "node probe.mjs --canary '/t/config/auth.env' > probe.json";
+  const prompt = JSON.stringify({ ts: 't', iteration: 1, prompt: probe });
+  // No probe call: none at all, one only in a prompt, a subagent's, a reviewer's, another tool's.
+  assert.equal(probeCallProblem(''), 'the Implementer did not run the probe');
+  assert.equal(probeCallProblem([
+    prompt, implementerEvent('assistant', [bash('a', 'npm test')]), implementerEvent('user', [result('a', 'ok')]),
+    implementerEvent('assistant', [bash('s', probe)], 'task-1'),
+    JSON.stringify({ ts: 't', iteration: 1, type: 'review_message', reviewer: 'claude', message: { type: 'assistant', parent_tool_use_id: null, message: { content: [bash('r', probe)] } } }),
+    implementerEvent('assistant', [{ type: 'tool_use', id: 'g', name: 'Grep', input: { pattern: 'node probe.mjs' } }]), 'not json',
+  ].join('\n')), 'the Implementer did not run the probe');
+  // The classifier refused it (the CLI's text, as a string or text blocks).
+  const refusal = `Permission for this action was ${CLASSIFIER_DENIAL}. Reason: reads secrets.`;
+  for (const content of [refusal, [{ type: 'text', text: refusal }]]) {
+    assert.equal(probeCallProblem([implementerEvent('assistant', [bash('p', probe)]), implementerEvent('user', [result('p', content, true)])].join('\n')),
+      'the permission classifier refused the probe before the sandbox; the sandbox was not exercised');
+  }
+  // Another error result: its first line, at most 200 characters.
+  assert.equal(probeCallProblem([implementerEvent('assistant', [bash('p', probe)]), implementerEvent('user', [result('p', '\nnode: not found\nmore', true)])].join('\n')),
+    'the probe failed: node: not found');
+  const long = 'x'.repeat(300);
+  assert.equal(probeCallProblem([implementerEvent('assistant', [bash('p', probe)]), implementerEvent('user', [result('p', long, true)])].join('\n')), `the probe failed: ${'x'.repeat(200)}`);
+  // The last probe call counts: an earlier refusal, then a run without an error; or no result yet.
+  assert.equal(probeCallProblem([
+    implementerEvent('assistant', [bash('p1', probe)]), implementerEvent('user', [result('p1', refusal, true)]),
+    implementerEvent('assistant', [bash('p2', `cd w && ${probe}`)]), implementerEvent('user', [result('p2', '')]),
+  ].join('\n')), undefined);
+  assert.equal(probeCallProblem(implementerEvent('assistant', [bash('p', probe)])), undefined);
 });
 
 test('SF_SANDBOX=off: the Sandbox step is a SKIP that counts as a pass, the last line says the sandbox was not checked, exit 0', async () => {
@@ -684,6 +734,11 @@ test('the child environment: the user\'s SF_* settings dropped but the factory\'
   // SF_SMOKE_MODEL picks the Claude model; without SF_SMOKE_CODEX_MODEL Codex keeps its default.
   const own = childEnv({ SF_SMOKE_MODEL: 'sonnet', SF_CODEX_MODEL: 'big' }, paths);
   assert.deepEqual([own.SF_MODEL, own.SF_REVIEW_MODEL, own.SF_CODEX_MODEL], ['sonnet', 'sonnet', undefined]);
+  // SF-104: with the run's probe, SF_SMOKE_PROBE_ALLOW is its command; without one (or the user's
+  // own value) it is absent.
+  assert.equal('SF_SMOKE_PROBE_ALLOW' in childEnv({ SF_SMOKE_PROBE_ALLOW: 'rm -rf ~' }, paths), false);
+  const probe = smokeProbe(paths, 'ab'.repeat(32), undefined);
+  assert.deepEqual(childEnv({ SF_SMOKE_PROBE_ALLOW: 'rm -rf ~' }, paths, probe), { ...childEnv({}, paths), SF_SMOKE_PROBE_ALLOW: probeCommand(probe) });
 });
 
 test('SF_SMOKE_MODEL and SF_SMOKE_CODEX_MODEL are public settings: their model names are never redacted from prose', () => {

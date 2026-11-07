@@ -88,6 +88,8 @@ export class TurnsPart {
         cwd, maxTurns: this.core.config.maxTurns, claudePath: this.core.config.claudePath,
         sessionId: job.session_id ?? undefined, sandbox: this.core.config.sandbox, model: this.core.config.model,
         turnLimitContinues: this.core.config.turnLimitContinues,
+        // sf smoke's probe only (SF-104): undefined for every real job's state directory.
+        allowCommands: this.core.config.smokeProbeAllow !== undefined ? [this.core.config.smokeProbeAllow] : undefined,
         // Built by the session's first turn, again for every session the factory creates (SF-100).
         pathDenials: () => pathDenials({
           session: 'job', workspace: name, checkout: workspace.workCheckout, worktree: cwd, stateDir: this.core.config.stateDir, worktreeRoot: this.core.config.worktreeRoot,

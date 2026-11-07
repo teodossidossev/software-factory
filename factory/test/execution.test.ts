@@ -15,6 +15,7 @@ import { type Job, type JobState, JobStore } from '../src/jobs.js';
 import { QueueStore } from '../src/queue.js';
 import { resolveWorkspace } from '../src/registry.js';
 import { FACTORY_PROMPT_RULES, factoryPrompt } from '../src/prompts.js';
+import { SMOKE_PROBE_RULE, SMOKE_TOOLS, sessionAllowedTools } from '../src/session.js';
 import { taskSha256, writeTask } from '../src/task-file.js';
 import {
   call, codexLog, codexScript, FAKE, fakeCodex, fakeLog, git, newEnv, newRepo, putRules, putTask, readyCheck, refused, reviewLog, reviewScript, runCli, script, serve, stop, task, temp, turnsStarted,
@@ -515,7 +516,7 @@ test('permission_mode_mismatch ends in needs_human; a restart turns working jobs
   await stop(served);
 });
 
-test('the smoke\'s session (SF-104, SF-109): an sf serve whose state directory is laid out as sf smoke makes it runs the Implementer in dontAsk with exactly Bash(<command>) and the file tools in allowedTools; a real job stays in auto without allowedTools, and the sandbox, the path denials, the setting sources and the disallowed tools are equal for the same paths', async () => {
+test('the smoke\'s session (SF-104, SF-109, SF-110): an sf serve whose state directory is laid out as sf smoke makes it runs the Implementer in dontAsk with exactly Bash(node probe.mjs:*) and the file tools in allowedTools; a real job stays in auto without allowedTools, and the sandbox, the path denials, the setting sources and the disallowed tools are equal for the same paths', async () => {
   const command = "node probe.mjs --canary '/x/config/auth.env' --job smoke > probe.json";
   // <TMPDIR>/sf-smoke-<suffix>/state, as sf smoke makes it; the sandbox on, as in a real job.
   const env = await newEnv('sf-smoke-exec', { TMPDIR: temp, SF_SMOKE_PROBE_ALLOW: command });
@@ -538,7 +539,7 @@ test('the smoke\'s session (SF-104, SF-109): an sf serve whose state directory i
 
   const [smoke, real] = await fakeLog(env);
   const allowed = (argv: string[]): string[] => argv.filter((arg) => arg.startsWith('--allowedTools'));
-  assert.deepEqual(allowed(smoke!.argv), [`--allowedTools=Bash(${command}),Read,Edit,Write,Glob,Grep,TodoWrite`]);
+  assert.deepEqual(allowed(smoke!.argv), ['--allowedTools=Bash(node probe.mjs:*),Read,Edit,Write,Glob,Grep,TodoWrite']);
   assert.deepEqual(allowed(real!.argv), []);
   const mode = (argv: string[]): string[] => argv.filter((arg) => arg.startsWith('--permission-mode'));
   assert.deepEqual(mode(smoke!.argv), ['--permission-mode=dontAsk']);
@@ -555,6 +556,19 @@ test('the smoke\'s session (SF-104, SF-109): an sf serve whose state directory i
   assert.ok((sandbox(smoke!.argv).filesystem as { denyRead: string[] }).denyRead.length > 0);
   assert.equal(denied(smoke!.argv), denied(real!.argv));
   assert.ok(denied(smoke!.argv)?.includes('Bash(git commit:*)'));
+});
+
+test('the allowedTools of a session (SF-104, SF-109, SF-110): a smoke session with the probe has exactly the prefix rule and the file tools; a real job none; allowCommands without smokeMode the exact rules', () => {
+  const command = "node probe.mjs --canary '/x/config/auth.env' > probe.json";
+  assert.equal(SMOKE_PROBE_RULE, 'Bash(node probe.mjs:*)');
+  assert.deepEqual(sessionAllowedTools({ allowCommands: [command], smokeMode: true }), [SMOKE_PROBE_RULE, ...SMOKE_TOOLS]);
+  assert.deepEqual(sessionAllowedTools({ allowCommands: [command, 'node probe.mjs --job smoke'], smokeMode: true }), [SMOKE_PROBE_RULE, ...SMOKE_TOOLS]);
+  assert.deepEqual(sessionAllowedTools({ allowCommands: undefined, smokeMode: false }), []);
+  assert.deepEqual(sessionAllowedTools({}), []);
+  assert.deepEqual(sessionAllowedTools({ allowCommands: [command], smokeMode: false }), [`Bash(${command})`]);
+  assert.deepEqual(sessionAllowedTools({ allowCommands: [command] }), [`Bash(${command})`]);
+  // A smoke session without a command: the file tools only, no probe rule.
+  assert.deepEqual(sessionAllowedTools({ smokeMode: true }), [...SMOKE_TOOLS]);
 });
 
 test('the init assertion (SF-109): a smoke session reporting auto and a real one reporting dontAsk fail with permission_mode_mismatch; each reporting its own mode records the session id', async () => {

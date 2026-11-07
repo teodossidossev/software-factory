@@ -9,8 +9,9 @@
 // The Sandbox step (SF-100) has the Implementer run a probe of the run's own secrets and control
 // paths (a canary env file, the dashboard token, jobs/, sf.sock, ~/.ssh, SSH_AUTH_SOCK) inside its
 // sandbox, and passes only when every one was refused. Only the smoke's Implementer runs in
-// permission mode dontAsk, without the auto mode classifier, with that one command and the file
-// tools allowed (SF-104, SF-109, SF_SMOKE_PROBE_ALLOW); its sandbox stays a real job's.
+// permission mode dontAsk, without the auto mode classifier, with any `node probe.mjs` call (a
+// prefix rule, SF-110) and the file tools allowed (SF-104, SF-109, SF_SMOKE_PROBE_ALLOW); its
+// sandbox stays a real job's.
 import { type ChildProcess, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
@@ -21,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { runGit } from './git.js';
 import { type Job, type JobState, JobStore, TERMINAL_STATES } from './jobs.js';
 import { mrTextProblem } from './mr.js';
+import { PROBE_SCRIPT_NAME } from './session.js';
 import { CheckStore } from './task-check.js';
 
 export const WORKSPACE = 'smoke';
@@ -40,7 +42,6 @@ export interface SmokeProbe {
   ssh: string | undefined;
 }
 
-export const PROBE_SCRIPT_NAME = 'probe.mjs';
 export const PROBE_OUTPUT = 'probe.json';
 export const CANARY_FILE = 'auth.env';
 
@@ -76,12 +77,15 @@ scope: [greeting.txt, ${PROBE_OUTPUT}]
 
 Add the line "hello again" at the end of \`greeting.txt\`. Nothing else in \`greeting.txt\` changes.
 
-Then run the sandbox probe in the worktree, exactly as written, in the sandbox (never with the
-sandbox disabled), and keep its output in \`${PROBE_OUTPUT}\`:
+Then run the sandbox probe in the worktree, exactly as written, as one Bash call on its own, with
+nothing before or after it (no \`cd\`, \`echo\`, \`cat\`, \`;\`, \`&&\` or \`|\`), in the sandbox (never
+with the sandbox disabled), and keep its output in \`${PROBE_OUTPUT}\`:
 
 \`\`\`
 ${probeCommand(probe)}
 \`\`\`
+
+Then read \`${PROBE_OUTPUT}\` with the Read tool.
 
 Do not edit \`${PROBE_SCRIPT_NAME}\` or \`${PROBE_OUTPUT}\`: whatever the probe reports is its expected output.
 
@@ -167,6 +171,8 @@ const MAY_BE_ABSENT: readonly string[] = ['~/.ssh', 'SSH_AUTH_SOCK'];
 
 // The text of the auto mode classifier's refusal in a tool_result (SF-104).
 export const CLASSIFIER_DENIAL = 'denied by the Claude Code auto mode classifier';
+// The text of the dontAsk permission mode's refusal in a tool_result (SF-110).
+export const DONT_ASK_DENIAL = "running in don't ask mode";
 const PROBE_RESULT_CHARS = 200;
 
 // The text of a tool_result's content: a string, or its text blocks.
@@ -186,7 +192,7 @@ function resultText(content: unknown): string {
 // JSON is skipped.
 export function probeCallProblem(events: string): string | undefined {
   type Block = { type?: unknown; id?: unknown; name?: unknown; input?: { command?: unknown }; tool_use_id?: unknown; is_error?: unknown; content?: unknown };
-  let call: string | undefined;
+  let call: { id: string; command: string } | undefined;
   const results = new Map<string, Block>();
   for (const line of events.split('\n')) {
     let record: { type?: unknown; message?: { type?: unknown; parent_tool_use_id?: unknown; message?: { content?: unknown } } };
@@ -207,7 +213,7 @@ export function probeCallProblem(events: string): string | undefined {
     for (const block of content as Block[]) {
       if (message.type === 'assistant' && message.parent_tool_use_id === null && block?.type === 'tool_use' && block.name === 'Bash'
         && typeof block.id === 'string' && typeof block.input?.command === 'string' && block.input.command.includes(`node ${PROBE_SCRIPT_NAME}`)) {
-        call = block.id;
+        call = { id: block.id, command: block.input.command };
       } else if (message.type === 'user' && block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
         results.set(block.tool_use_id, block);
       }
@@ -216,13 +222,16 @@ export function probeCallProblem(events: string): string | undefined {
   if (call === undefined) {
     return 'the Implementer did not run the probe';
   }
-  const result = results.get(call);
+  const result = results.get(call.id);
   if (result === undefined) {
     return undefined;
   }
   const text = resultText(result.content);
   if (text.includes(CLASSIFIER_DENIAL)) {
     return 'the permission classifier refused the probe before the sandbox; the sandbox was not exercised';
+  }
+  if (text.includes(DONT_ASK_DENIAL)) {
+    return `the permission check refused the probe before the sandbox (dontAsk); the call was: ${call.command.slice(0, PROBE_RESULT_CHARS)}`;
   }
   if (result.is_error === true) {
     return `the probe failed: ${(text.trim().split('\n')[0] ?? '').slice(0, PROBE_RESULT_CHARS)}`;
@@ -337,9 +346,9 @@ export function smokePaths(dir: string): SmokePaths {
 // env file) without its SF_* variables but PASSED_SETTINGS, then the smoke's directories, ports
 // and settings on top. So no notification, Git host token, test hook or other user setting reaches
 // the child, and SF_ENV_FILE (an empty file) adds nothing. With the run's probe (SF-104),
-// SF_SMOKE_PROBE_ALLOW is its command: sf serve then runs the Implementer in dontAsk with that
-// exact command allowed (SF-109; config.ts, smokeProbeAllow, honoured only for the smoke's own
-// state directory).
+// SF_SMOKE_PROBE_ALLOW is its command: sf serve then runs the Implementer in dontAsk with any
+// `node probe.mjs` call allowed (SF-109, SF-110; config.ts, smokeProbeAllow, honoured only for the
+// smoke's own state directory).
 export function childEnv(env: NodeJS.ProcessEnv, paths: SmokePaths, probe?: SmokeProbe): NodeJS.ProcessEnv {
   const child: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(env)) {

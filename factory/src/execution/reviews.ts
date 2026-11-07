@@ -21,8 +21,9 @@ import { type UsageLimit, usageLimit } from '../usage-limit.js';
 import { exists, GATE_OVERRIDE_CODES, LEDGER_ACCEPT_CODES, markedGroups, type RunningReview, withoutDropped } from './shared.js';
 import type { Core } from './core.js';
 
-// The offer of the simplification pass (SF-055): sf accept is its Skip.
-const ACCEPT_CODES: readonly string[] = [...GATE_OVERRIDE_CODES, ...LEDGER_ACCEPT_CODES, SIMPLIFY_CODE];
+// The Fix round limit (SF-115) is accepted as the ledger stops are; the offer of the simplification
+// pass (SF-055): sf accept is its Skip.
+const ACCEPT_CODES: readonly string[] = [...GATE_OVERRIDE_CODES, ...LEDGER_ACCEPT_CODES, 'iteration_limit', SIMPLIFY_CODE];
 
 // The code of a session the factory refused to start because the user settings weaken the sandbox
 // (SF-100); undefined for any other failure.
@@ -90,27 +91,29 @@ export class ReviewsPart {
   }
 
   // The user's override of a stopped gate (sf accept, the dashboard's Accept and prepare MR): a job
-  // the gate handed over (needs_human with gate_rounds, gate_budget or gate_failed) whose last
-  // iteration has a clean Claude review goes on as after a clean gate, to MR preparation with the
-  // paths Claude accepted. The override is recorded first: gate-override.json with the Codex
-  // items not applied (or the gate's error) and a gate_overridden event.
+  // the gate handed over (needs_human with gate_rounds, gate_budget or gate_failed), or the ledger
+  // or the Fix round limit (iteration_limit, SF-115) stopped, whose last iteration has a clean
+  // Claude review goes on as after a clean gate, to MR preparation with the paths Claude accepted.
+  // The override is recorded first: gate-override.json with what goes unapplied (the Codex items,
+  // the gate's error, or the ledger's open findings) and a gate_overridden event.
   acceptGate(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; branch: string }> {
     return this.core.parts.control.request(workspaceName, ticket, { kind: 'accept' }) as Promise<{ state: JobState; iteration: number; branch: string }>;
   }
 
-  // The code the gate (or the ledger, SF-052) stopped with; invalid_state unless it is one sf
-  // accept takes on.
+  // The code the gate (or the ledger, SF-052, or the Fix round limit, SF-115) stopped with;
+  // invalid_state unless it is one sf accept takes on.
   checkAcceptGate(job: Job): string {
     const code = job.error?.code;
     if (job.state !== 'needs_human' || code === undefined || !ACCEPT_CODES.includes(code)) {
-      throw new FactoryError('invalid_state', `sf accept needs needs_human after the gate or the ledger stopped the job, or the simplification pass offered suggestions (${ACCEPT_CODES.join(', ')}); the job is ${job.state}${code !== undefined ? ` (${code})` : ''}.`);
+      throw new FactoryError('invalid_state', `sf accept needs needs_human after the gate or the ledger stopped the job or at the Fix round limit, or when the simplification pass offered suggestions (${ACCEPT_CODES.join(', ')}); the job is ${job.state}${code !== undefined ? ` (${code})` : ''}.`);
     }
     return code;
   }
 
-  // What an Accept over a ledger stop (review_churn, review_disputed) goes without: the ledger's
-  // open findings with their ids, and the items of the iteration's gate that neither reopen one of
-  // them nor were dropped.
+  // What an Accept over a ledger stop (review_churn, review_disputed) or the Fix round limit
+  // (iteration_limit, SF-115) goes without: the ledger's open findings with their ids, and the
+  // items of the iteration's gate that neither reopen one of them nor were dropped (a refused
+  // gate fix at the limit wrote no ledger entries, so its items come from gate.json).
   async #ledgerUnapplied(job: Job, gate: GateRecord | undefined): Promise<Array<ReviewItem & { id?: string }>> {
     const ledger = await this.core.jobs.readLedger(job.workspace, job.ticket);
     const open = unappliedEntries(ledger);
@@ -154,7 +157,7 @@ export class ReviewsPart {
           });
         } });
       }
-      const unapplied = LEDGER_ACCEPT_CODES.includes(code)
+      const unapplied = LEDGER_ACCEPT_CODES.includes(code) || code === 'iteration_limit'
         ? await this.#ledgerUnapplied(job, gate)
         : gate === undefined ? [] : 'verdict' in gate ? gate.items : gate.error;
       const override: GateOverride = { at: now(), code, unapplied };

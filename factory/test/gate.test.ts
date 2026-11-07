@@ -856,8 +856,58 @@ test('sf accept (SF-047): after gate_rounds with a clean Claude review the job g
     // Refused in any other state.
     const again = await runCli(env, ['accept', 'app', 'G-8']);
     assert.equal(again.code, 1);
-    assert.match(again.stderr, /^sf: sf accept needs needs_human after the gate or the ledger stopped the job, or the simplification pass offered suggestions \(gate_rounds, gate_budget, gate_failed, review_churn, review_disputed, simplify_offered\); the job is ready_for_human_review/);
+    assert.match(again.stderr, /^sf: sf accept needs needs_human after the gate or the ledger stopped the job or at the Fix round limit, or when the simplification pass offered suggestions \(gate_rounds, gate_budget, gate_failed, review_churn, review_disputed, iteration_limit, simplify_offered\); the job is ready_for_human_review/);
     assert.equal((await runCli(env, ['accept', 'app'])).code, 2);
+  } finally {
+    await stop(served);
+  }
+});
+
+test('sf accept (SF-115): at iteration_limit with a clean Claude review the job goes on to MR preparation; the override records iteration_limit and the Codex items; refused with a fix review', async () => {
+  const env = await newEnv('limit-accept', gateEnv({ SF_MAX_ITERATIONS: '1' }));
+  const repo = await newRepo(env, 'limit-accept-repo', false);
+  await putTask(env, repo, 'G-15', 'Accept at the Fix round limit');
+  const another = { ...GATE_FIX, summary: 'Another problem.', items: [{ path: 'a.txt', problem: 'Another problem.', expected: 'Solved.', severity: 'major' }] };
+  await script(env, [
+    { write: { 'a.txt': '1\n' } },
+    { write: { 'a.txt': '2\n' }, text: '| R1 | fixed | Done. |' },
+    { write: { '.software-factory/G-15.mr.md': mrText('feat(G-15): Accept at the Fix round limit') }, text: 'prepared' },
+  ]);
+  await reviewScript(env, [{ output: CLAUDE_CLEAN }, { output: CLAUDE_CLEAN }]);
+  await codexScript(env, [{ output: GATE_FIX }, { output: another }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'G-15' });
+    const limited = await waitFor(served, 'G-15', 'needs_human', 2);
+    assert.deepEqual(limited.error, {
+      code: 'iteration_limit',
+      message: "1 Fix sections were written, the limit of SF_MAX_ITERATIONS; the user decides how to go on: sf accept takes iteration 2 as it is when Claude's review of it is clean (the open findings go unapplied), sf say gives a direction.",
+    });
+
+    // Refused without a clean Claude review of the last iteration: nothing recorded, nothing moves.
+    const reviewPath = join(iterationDir(env, 'G-15', 2), 'review.json');
+    const review = await readFile(reviewPath, 'utf8');
+    await writeFile(reviewPath, JSON.stringify({ ...JSON.parse(review), verdict: 'fix', items: [{ path: 'a.txt', problem: 'Wrong.', expected: 'Right.', severity: 'major' }] }));
+    const notClean = await runCli(env, ['accept', 'app', 'G-15']);
+    assert.equal(notClean.code, 1);
+    assert.match(notClean.stderr, /^sf: sf accept needs a clean Claude review of the last iteration \(2\); it says fix/);
+    assert.equal(await exists(join(iterationDir(env, 'G-15', 2), 'gate-override.json')), false);
+    assert.equal((await new JobStore(env.state).read('app', 'G-15'))!.state, 'needs_human');
+    await writeFile(reviewPath, review);
+
+    const accepted = await runCli(env, ['accept', 'app', 'G-15']);
+    assert.equal(accepted.code, 0, accepted.stderr);
+    assert.match(accepted.stdout, /^state: preparing_mr$/m);
+    const ready = await waitFor(served, 'G-15', 'ready_for_human_review', 2);
+    assert.equal(git(repo, 'show', `${ready.branch}:a.txt`), '2\n');
+
+    const override = JSON.parse(await readFile(join(iterationDir(env, 'G-15', 2), 'gate-override.json'), 'utf8'));
+    assert.match(override.at, /^\d{4}-\d\d-\d\dT/);
+    assert.deepEqual({ ...override, at: undefined }, { at: undefined, code: 'iteration_limit', unapplied: another.items.map((item) => ({ ...item, reopens: '', caused_by: '' })) });
+    const events = await eventsOf(env, 'G-15');
+    const index = events.findIndex((record) => record.type === 'gate_overridden');
+    assert.deepEqual({ ...events[index], ts: undefined }, { ts: undefined, iteration: 2, type: 'gate_overridden', code: 'iteration_limit', unapplied: 1 });
+    assert.deepEqual((events[index + 1]!.state as { from: string; to: string }), { from: 'needs_human', to: 'preparing_mr' });
   } finally {
     await stop(served);
   }
@@ -881,10 +931,10 @@ test('sf accept (SF-047): a failed gate is accepted with its error as what goes 
     const store = new JobStore(env.state);
     // Another code of needs_human is refused.
     const job = (await store.read('app', 'G-9'))!;
-    await store.write({ ...job, error: { code: 'iteration_limit', message: 'x' } });
+    await store.write({ ...job, error: { code: 'max_turns', message: 'x' } });
     const refused = await runCli(env, ['accept', 'app', 'G-9']);
     assert.equal(refused.code, 1);
-    assert.match(refused.stderr, /^sf: sf accept needs needs_human.*the job is needs_human \(iteration_limit\)/);
+    assert.match(refused.stderr, /^sf: sf accept needs needs_human.*the job is needs_human \(max_turns\)/);
     await store.write(job);
 
     assert.equal((await runCli(env, ['accept', 'app', 'G-9'])).code, 0);

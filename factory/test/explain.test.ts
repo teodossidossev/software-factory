@@ -423,6 +423,8 @@ test('stopAnswers: Accept only when the gate is acceptable (review_churn, gate s
   assert.deepEqual(commands(stopped('fetch_failed')), [['Retry', 'sf retry app T-1'], ...ALWAYS]);
   assert.deepEqual(commands(stopped('simplify_offered')), [['Simplify', 'sf simplify app T-1'], ['Skip', 'sf accept app T-1'], ...ALWAYS]);
   assert.deepEqual(commands(stopped('review_failed')), [['Retry review', 'sf review app T-1'], ...ALWAYS]);
+  assert.deepEqual(commands(stopped('iteration_limit'), { review: CLEAN_REVIEW }), [['Accept and prepare MR', 'sf accept app T-1'], ['Restart', 'sf restart app T-1'], ...ALWAYS]);
+  assert.deepEqual(commands(stopped('iteration_limit'), { review: FIX_REVIEW }), [['Restart', 'sf restart app T-1'], ...ALWAYS]);
   assert.deepEqual(commands(stopped('iteration_limit')), [['Restart', 'sf restart app T-1'], ...ALWAYS]);
   assert.deepEqual(commands(stopped('mr_push_failed')), [['Push again', 'sf approve app T-1'], ...ALWAYS]);
   assert.deepEqual(commands(stopped('mr_conflict')), [['Tell it how', 'sf say app T-1 "<message>"'], ...ALWAYS]);

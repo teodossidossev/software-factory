@@ -128,7 +128,7 @@ export const STOP_ALIASES: Readonly<Record<string, string>> = {
 const resolved = (code: string): string => (Object.hasOwn(STOP_ALIASES, code) ? STOP_ALIASES[code]! : code);
 const GATE_CODES = ['gate_rounds', 'gate_budget', 'gate_failed'];
 const LEDGER_CODES = ['review_churn', 'review_disputed'];
-const ACCEPT_CODES = [...GATE_CODES, ...LEDGER_CODES, 'simplify_offered'];
+const ACCEPT_CODES = [...GATE_CODES, ...LEDGER_CODES, 'iteration_limit', 'simplify_offered'];
 const RETRY_STOPS = ['fetch_failed', 'mr_serve_restarted', 'mr_failed'];
 
 // The ledger entries a ledger stop is about (the stop panel's, dashboard.ts stopOf): the unsettled
@@ -150,8 +150,8 @@ function actedClean(review: ReviewRecord | undefined): boolean {
   return review.items.every((item) => item.severity === 'nit' || dropped.has(JSON.stringify(item)));
 }
 
-// Accept and prepare the MR applies (the dashboard's gateAcceptable): a gate or ledger stop over a
-// clean Claude review of the job's last iteration.
+// Accept and prepare the MR applies (the dashboard's gateAcceptable): a gate or ledger stop, or the
+// Fix round limit (SF-115), over a clean Claude review of the job's last iteration.
 export function gateAcceptable(job: Job, review: ReviewRecord | undefined): boolean {
   return job.state === 'needs_human' && ACCEPT_CODES.includes(job.error?.code ?? '') && actedClean(review);
 }
@@ -198,7 +198,7 @@ export function stopAnswers(job: Job, facts: StopFacts, now = new Date()): StopA
         actions = accept;
         break;
       case 'iteration_limit':
-        actions = [restart];
+        actions = [...accept, restart];
         break;
       case 'gate_failed':
         actions = [...accept, goOn];

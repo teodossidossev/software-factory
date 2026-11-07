@@ -49,7 +49,7 @@ bin/sf queue force <workspace> <ticket>        # Start anyway: the queued ticket
 bin/sf say <workspace> <ticket> <message...>   # a user message into the session; on a handed-over job it is Ask for changes (section Hand-over to your checkout); needs sf serve
 bin/sf review <workspace> <ticket>             # retry a failed Claude review (needs_human with review_failed); needs sf serve
 bin/sf retry <workspace> <ticket>              # retry a transient MR preparation failure (fetch_failed, mr_serve_restarted, mr_interrupted, mr_commit_failed, mr_rebase_failed, mr_failed) without a new review; on mr_push_failed: push again; needs sf serve
-bin/sf accept <workspace> <ticket>             # accept a clean Claude review over a stopped gate (gate_rounds, gate_budget, gate_failed) or a ledger stop (review_churn, review_disputed) and prepare the MR, or skip the simplification pass's suggestions (simplify_offered); needs sf serve
+bin/sf accept <workspace> <ticket>             # accept a clean Claude review over a stopped gate (gate_rounds, gate_budget, gate_failed) or a ledger stop (review_churn, review_disputed) or the Fix round limit (iteration_limit) and prepare the MR, or skip the simplification pass's suggestions (simplify_offered); needs sf serve
 bin/sf simplify <workspace> <ticket>           # apply the simplification pass's suggestions (needs_human with simplify_offered): one Fix section "Simplify", reviewed as usual; needs sf serve
 bin/sf settle <workspace> <ticket> <id> accept|fix [note...]  # settle an escalated or contested finding of the ledger (needs_human); needs sf serve
 bin/sf status [<workspace> <ticket>]           # one job (with its worktree, sensitive, out-of-scope and deleted paths) or all jobs, with estimated cost and elapsed time; works without sf serve
@@ -221,7 +221,7 @@ started by the run queue as before.
 | `SF_CHECK_AFTER_FIX_MIN` | `5` | `check_after_minutes` in the job's status during later iterations. |
 | `SF_MAX_TURNS` | `150` | `maxTurns` of every Implementer turn. |
 | `SF_TURN_LIMIT_CONTINUES` | `1` | Continuations the factory sends by itself, per chain of Implementer turns, after a turn that reached `SF_MAX_TURNS` while making progress (SF-069, below); `0` to `10`, `0` stops at the first limit. |
-| `SF_MAX_ITERATIONS` | `5` | Fix sections a job may get (the reviewers', counted in the job's `fixes`); the next Fix is refused (`iteration_limit`, job `needs_human`). An `sf say` turn does not count. |
+| `SF_MAX_ITERATIONS` | `5` | Fix sections a job may get (the reviewers', counted in the job's `fixes`); the next Fix is refused (`iteration_limit`, job `needs_human`), which can be accepted with a clean Claude review. An `sf say` turn does not count. |
 | `SF_CLAUDE` | bundled binary | Absolute path of the Claude Code executable (`pathToClaudeCodeExecutable`). |
 | `SF_MODEL` | unset | Model of every Implementer turn, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
 | `SF_REVIEW` | on | `off` runs no Claude review (nor the gate): a published iteration stays in `awaiting_review` until the user goes on with `sf say` or aborts. |
@@ -1060,7 +1060,10 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   stay visible for a follow-up ticket. Since SF-052 it also takes on the ledger's stops
   `review_churn` and `review_disputed` (below), with the same clean Claude review; `unapplied` is
   then the ledger's open findings (open entries, fixes the user decided, disputed contests), each
-  with its `id`, plus the items of the iteration's gate that reopen none of them.
+  with its `id`, plus the items of the iteration's gate that reopen none of them. Since SF-115 it
+  also takes on the Fix round limit `iteration_limit`, with the same clean Claude review; `unapplied`
+  is then as for the ledger stops (a refused gate fix is not in the ledger, so its items come from
+  the iteration's `gate.json`).
 - The **findings ledger** (SF-052, `src/ledger.ts`): `jobs/<ws>/<ticket>/ledger.json`, one entry per
   review item that went into a Fix section: `{id, iteration, reviewer, severity, path, problem,
   expected, status, response, evidence, reopened, asked, caused_by, dispute, settled}`. `id` is
@@ -1204,7 +1207,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   by codex: clean`, `review by codex: fix (2 items)`, `review by codex: fix (2 items), acted on as
   clean`, `review by codex failed: <error>`.
 - The job counts its Fix sections in `fixes` (the reviewers'). Once it reaches
-  `SF_MAX_ITERATIONS`, the next Fix is refused: `needs_human` with `iteration_limit`. An `sf say`
+  `SF_MAX_ITERATIONS`, the next Fix is refused: `needs_human` with `iteration_limit`. With a clean
+  Claude review of the last iteration the stop can be accepted (`sf accept`, SF-115). An `sf say`
   turn publishes an iteration but writes no Fix section, so it does not count.
 - The fix path appends `## Fix N` to the Task file of the checkout, copies it into the worktree
   and runs `/implement .software-factory/<ticket>.md Fix N` in the same session (`resume`). From
@@ -1306,9 +1310,10 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   limit (`gate_rounds`) or token ceiling (`gate_budget`), the iteration limit, or the ledger
   (`escalated`, `review_disputed`, `review_churn`), or the offer of the simplification pass
   (`simplify_offered`) put the job in `needs_human`. After a gate code, `review_disputed` /
-  `review_churn` or `simplify_offered`, `sf accept` (above) goes on to MR preparation; after a
-  ledger code `sf settle` settles a finding; after `simplify_offered` `sf simplify` applies the
-  suggestions; otherwise `sf say` starts another iteration.
+  `review_churn`, the iteration limit (`iteration_limit`, SF-115) or `simplify_offered`,
+  `sf accept` (above) goes on to MR preparation when Claude's review of the last iteration is
+  clean; after a ledger code `sf settle` settles a finding; after `simplify_offered` `sf simplify`
+  applies the suggestions; otherwise `sf say` starts another iteration.
   When `sf serve` starts, a job found `working`, `preparing_mr` or `awaiting_review` whose runner is
   alive is left alone. Without a live runner, jobs found `working` become `needs_human`
   (`serve_restarted`) and keep their session for `sf say`; jobs found `preparing_mr` become
@@ -2401,7 +2406,7 @@ confirmation where it has one; *Tell it to go on* is a message, "Go on." when th
 | `review_churn` | the open findings of the ledger (*Accept risk* / *Must fix* on those to settle) | Accept and prepare MR (with a clean Claude review), Send, Abort… |
 | `gate_rounds` | the last gate's findings (nothing to settle one by one: the API settles only escalated and contested ones) | Accept and prepare MR (with a clean Claude review), Send, Abort… |
 | `gate_budget` | the gate's tokens used | Accept and prepare MR (with a clean Claude review), Send, Abort… |
-| `iteration_limit` | the last verdicts' findings | Send, Restart…, Abort… |
+| `iteration_limit` | the last verdicts' findings | Accept and prepare MR (with a clean Claude review), Send, Restart…, Abort… |
 | `max_turns` | nothing | Tell it to go on, Abort… |
 | `gate_failed` | the gate's error | Accept and prepare MR (with a clean Claude review), Tell it to go on, Abort… |
 | `review_failed` | the review's error | Retry review, Abort… |
@@ -2714,7 +2719,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `POST api/jobs/<ws>/<ticket>/review` | `{}` | `Execution.retryReview(ws, ticket)` (`sf review`): the failed review of the last iteration runs again; result `{state, iteration}`; `409 invalid_state` unless the job is `needs_human` with `review_failed`, `409 review_off` with `SF_REVIEW=off`; answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
 | `POST api/jobs/<ws>/<ticket>/settle` | `{"id": string, "decision": "accept" \| "fix", "note"?: string}` | `Execution.settle(ws, ticket, id, decision, note)` (`sf settle`, SF-052): the settlement of an escalated or contested ledger entry; result `{state, id, status, waiting}`; `409 invalid_state` unless the job is `needs_human` and the entry escalated or contested; `400 invalid_content` for a bad id, decision or note; `500 ledger_invalid` when `ledger.json` cannot be read; answered by the job's runner |
 | `POST api/jobs/<ws>/<ticket>/simplify` | `{}` | `Execution.simplify(ws, ticket)` (`sf simplify`, SF-055): the Fix section "Simplify" with the suggestions of the simplification pass and their ledger entries, then the next iteration; result `{state, iteration, check_after_minutes}`; `409 invalid_state` unless the job is `needs_human` with `simplify_offered` (and never a second time); `409 worktree_missing`; answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
-| `POST api/jobs/<ws>/<ticket>/accept` | `{}` | `Execution.acceptGate(ws, ticket)` (`sf accept`, SF-047): the override of the stopped gate, then MR preparation; result `{state, iteration, branch}`; `409 invalid_state` with the reason unless the job is `needs_human` with `gate_rounds`, `gate_budget`, `gate_failed`, `review_churn`, `review_disputed` or `simplify_offered` (Skip, SF-055) and a clean Claude review of the last iteration; the MR preparation's refusals (`409 worktree_missing`, `409 turn_running`); answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
+| `POST api/jobs/<ws>/<ticket>/accept` | `{}` | `Execution.acceptGate(ws, ticket)` (`sf accept`, SF-047): the override of the stopped gate, then MR preparation; result `{state, iteration, branch}`; `409 invalid_state` with the reason unless the job is `needs_human` with `gate_rounds`, `gate_budget`, `gate_failed`, `review_churn`, `review_disputed`, `iteration_limit` (SF-115) or `simplify_offered` (Skip, SF-055) and a clean Claude review of the last iteration; the MR preparation's refusals (`409 worktree_missing`, `409 turn_running`); answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
 | `POST api/jobs/<ws>/<ticket>/mr-create` | `{}` | `Execution.createMergeRequest(ws, ticket)` (`sf mr create`, SF-048): result `{state, branch, title?, link?, mr?: {host, number, url, state, reused}, error?}`; from `ready_for_human_review` it waits for the job's runner like approve; `409` for `invalid_state`, `runner_active`, `mr_token_missing`, `mr_host_unsupported`, `mr_text_missing`; `502` for `mr_auth_failed`, `mr_host_error`, `mr_host_unreachable` |
 | `POST api/jobs/<ws>/<ticket>/mr-save` | `{"title": string, "body": string, "branch"?: string, "base"?: string}` | `Execution.saveMr(ws, ticket, input)` (SF-080): the MR text saved, the prepared commit's message rewritten, the branch renamed and the base changed when given and different; result `{state, branch, base, edited, prepared_commit}`; `400 mr_text_invalid`, `409` for `invalid_state`, `runner_active`, `branch_changed`, `branch_locked`, `base_unrelated`, `mr_text_missing`; its body may be up to 6 × 64 KiB + 1 KiB (an MR text of 64 KiB, escaped); the pages that show the job get its detail |
 | `POST api/jobs/<ws>/<ticket>/mr-reset` | `{}` | `Execution.resetMr(ws, ticket)` (SF-080): the factory's text back and the commit message with it; result as `mr-save`; `409 invalid_state` "The MR text is already the factory's." |

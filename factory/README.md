@@ -306,7 +306,16 @@ sf smoke [--keep] [--timeout-min N] [--budget-usd N]
   token, the smoke's workspace in `jobs/`, a connection, a non-empty `~/.ssh`). Once iteration 1 is
   published the step reads `probe.json` from the job's worktree: PASS only when it exists and every
   probe is `refused` (`absent` for a missing `~/.ssh` and an unset `SSH_AUTH_SOCK`); a missing or
-  unreadable file fails it. With `SF_SANDBOX=off` the step is SKIP (`sandbox off`), which counts as
+  unreadable file fails it, with the reason the step finds in the job's `events.jsonl` (SF-104):
+  the Implementer did not run the probe, the permission classifier refused it before the sandbox
+  (the sandbox was not exercised), the probe failed (the first line of its error), or else
+  `probe.json could not be read`. The step proves the **sandbox** holds even when the permission
+  check lets a command through, so only the smoke lets its probe past that check: it gives its
+  `sf serve` `SF_SMOKE_PROBE_ALLOW` (the probe's command line), and the Implementer gets one exact
+  allow rule `Bash(<that command>)` on top, still in permission mode `auto`, with exactly a real
+  job's sandbox and path denials. `src/config.ts` honours the setting only when the state directory
+  is the one the smoke made, `<tmpdir>/sf-smoke-*/state` (both resolved); a real install's state
+  directory never is, so a real job never gets the rule, even with the variable set. With `SF_SANDBOX=off` the step is SKIP (`sandbox off`), which counts as
   a pass: the last line then reads `smoke: PASS (sandbox not checked), cost …`.
 - **Budget.** `--timeout-min` (default 20) counts from Setup to the end of Dashboard;
   `--budget-usd` (default 2) bounds the cost read from the run's state: the `cost_usd` of the

@@ -58,6 +58,10 @@ export interface SessionOptions {
   // turn before its query(); its tools go on top of every prompt's deny list and its sandbox lists
   // into the sandbox settings of every query. A failure fails that turn.
   pathDenials?: (() => Promise<PathDenials>) | undefined;
+  // Commands allowed past the permission check (SF-104): one exact allowedTools rule
+  // Bash(<command>) each, never a prefix rule. Only sf smoke's probe gets one (config.ts,
+  // smokeProbeAllow); the mode stays auto and the sandbox holds the command as any other.
+  allowCommands?: string[] | undefined;
 }
 
 interface Queued {
@@ -304,6 +308,7 @@ export class ImplementerSession {
         permissionMode: 'auto',
         settingSources: ['user', 'project'],
         disallowedTools: [...disallowedTools, ...(denials?.tools ?? [])],
+        ...(this.#options.allowCommands !== undefined && this.#options.allowCommands.length > 0 ? { allowedTools: this.#options.allowCommands.map((command) => `Bash(${command})`) } : {}),
         maxTurns: this.#options.maxTurns,
         // A known startup failure (such as an unavailable sandbox) then ends with a result message.
         env: { ...sessionEnvironment(), CLAUDE_CODE_STARTUP_FAILURE_RESULTS: '1' },

@@ -515,7 +515,7 @@ test('permission_mode_mismatch ends in needs_human; a restart turns working jobs
   await stop(served);
 });
 
-test('the smoke\'s probe allow (SF-104): an sf serve whose state directory is laid out as sf smoke makes it gives the Implementer exactly Bash(<command>) in allowedTools; the mode stays auto, and the sandbox and the path denials equal a real job\'s for the same paths', async () => {
+test('the smoke\'s session (SF-104, SF-109): an sf serve whose state directory is laid out as sf smoke makes it runs the Implementer in dontAsk with exactly Bash(<command>) and the file tools in allowedTools; a real job stays in auto without allowedTools, and the sandbox, the path denials, the setting sources and the disallowed tools are equal for the same paths', async () => {
   const command = "node probe.mjs --canary '/x/config/auth.env' --job smoke > probe.json";
   // <TMPDIR>/sf-smoke-<suffix>/state, as sf smoke makes it; the sandbox on, as in a real job.
   const env = await newEnv('sf-smoke-exec', { TMPDIR: temp, SF_SMOKE_PROBE_ALLOW: command });
@@ -538,11 +538,16 @@ test('the smoke\'s probe allow (SF-104): an sf serve whose state directory is la
 
   const [smoke, real] = await fakeLog(env);
   const allowed = (argv: string[]): string[] => argv.filter((arg) => arg.startsWith('--allowedTools'));
-  assert.deepEqual(allowed(smoke!.argv), [`--allowedTools=Bash(${command})`]);
+  assert.deepEqual(allowed(smoke!.argv), [`--allowedTools=Bash(${command}),Read,Edit,Write,Glob,Grep,TodoWrite`]);
   assert.deepEqual(allowed(real!.argv), []);
-  for (const entry of [smoke!, real!]) {
-    assert.ok(entry.argv.includes('--permission-mode=auto'));
-  }
+  const mode = (argv: string[]): string[] => argv.filter((arg) => arg.startsWith('--permission-mode'));
+  assert.deepEqual(mode(smoke!.argv), ['--permission-mode=dontAsk']);
+  assert.deepEqual(mode(real!.argv), ['--permission-mode=auto']);
+  // Everything else of the two sessions' argv is the same, but the real turn's resume.
+  const rest = (argv: string[]): string[] => argv.filter((arg) => !/^--(allowedTools|permission-mode|resume)\b/.test(arg));
+  assert.deepEqual(rest(smoke!.argv), rest(real!.argv));
+  assert.ok(smoke!.argv.includes('--setting-sources=user,project'));
+  assert.ok(real!.argv.includes(`--resume=${smoke!.sessionId}`));
   const sandbox = (argv: string[]): Record<string, unknown> => (JSON.parse(argv[argv.indexOf('--settings') + 1]!) as { sandbox: Record<string, unknown> }).sandbox;
   const denied = (argv: string[]): string | undefined => argv.find((arg) => arg.startsWith('--disallowedTools='));
   assert.deepEqual(sandbox(smoke!.argv), sandbox(real!.argv));
@@ -550,6 +555,36 @@ test('the smoke\'s probe allow (SF-104): an sf serve whose state directory is la
   assert.ok((sandbox(smoke!.argv).filesystem as { denyRead: string[] }).denyRead.length > 0);
   assert.equal(denied(smoke!.argv), denied(real!.argv));
   assert.ok(denied(smoke!.argv)?.includes('Bash(git commit:*)'));
+});
+
+test('the init assertion (SF-109): a smoke session reporting auto and a real one reporting dontAsk fail with permission_mode_mismatch; each reporting its own mode records the session id', async () => {
+  const command = 'node probe.mjs --job smoke > probe.json';
+  const cases: Array<{ name: string; extra: Record<string, string>; reported: string; expected: string }> = [
+    { name: 'sf-smoke-mode-a', extra: { TMPDIR: temp, SF_SMOKE_PROBE_ALLOW: command }, reported: 'auto', expected: 'dontAsk' },
+    { name: 'mode-real-a', extra: {}, reported: 'dontAsk', expected: 'auto' },
+    { name: 'sf-smoke-mode-b', extra: { TMPDIR: temp, SF_SMOKE_PROBE_ALLOW: command }, reported: 'dontAsk', expected: 'dontAsk' },
+    { name: 'mode-real-b', extra: {}, reported: 'auto', expected: 'auto' },
+  ];
+  for (const { name, extra, reported, expected } of cases) {
+    const env = await newEnv(name, extra);
+    const repo = await newRepo(env, `${name}-repo`, false);
+    await putTask(env, repo, 'M-1', 'Mode');
+    await script(env, [{ permissionMode: reported, text: '# Report: M-1, iteration 1' }]);
+    const served = await serve(env);
+    await call(served, 'start', { workspace: 'app', ticket: 'M-1' });
+    const job = await waitFor(served, 'M-1', reported === expected ? 'awaiting_review' : 'needs_human', reported === expected ? 1 : undefined);
+    const [entry] = await fakeLog(env);
+    assert.ok(entry!.argv.includes(`--permission-mode=${expected}`), name);
+    const recorded = (await new JobStore(env.state).read('app', 'M-1'))!.session_id ?? null;
+    if (reported === expected) {
+      assert.equal(recorded, entry!.sessionId, name);
+    } else {
+      assert.equal(job.error.code, 'permission_mode_mismatch', name);
+      assert.match(job.error.message, new RegExp(`"${reported}" instead of "${expected}"`), name);
+      assert.equal(recorded, null, name);
+    }
+    await stop(served);
+  }
 });
 
 // The placeholders bubblewrap left in a real job's work checkout on 2026-11-02.

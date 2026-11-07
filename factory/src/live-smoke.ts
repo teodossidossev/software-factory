@@ -8,8 +8,9 @@
 // A time and a cost budget bound the run; Cleanup always runs. Prints a pass/fail table.
 // The Sandbox step (SF-100) has the Implementer run a probe of the run's own secrets and control
 // paths (a canary env file, the dashboard token, jobs/, sf.sock, ~/.ssh, SSH_AUTH_SOCK) inside its
-// sandbox, and passes only when every one was refused. Only the smoke lets that one command past
-// the permission check (SF-104, SF_SMOKE_PROBE_ALLOW); its sandbox stays a real job's.
+// sandbox, and passes only when every one was refused. Only the smoke's Implementer runs in
+// permission mode dontAsk, without the auto mode classifier, with that one command and the file
+// tools allowed (SF-104, SF-109, SF_SMOKE_PROBE_ALLOW); its sandbox stays a real job's.
 import { type ChildProcess, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
@@ -336,8 +337,9 @@ export function smokePaths(dir: string): SmokePaths {
 // env file) without its SF_* variables but PASSED_SETTINGS, then the smoke's directories, ports
 // and settings on top. So no notification, Git host token, test hook or other user setting reaches
 // the child, and SF_ENV_FILE (an empty file) adds nothing. With the run's probe (SF-104),
-// SF_SMOKE_PROBE_ALLOW is its command: sf serve then allows that exact command past the permission
-// check (config.ts, smokeProbeAllow, honoured only for the smoke's own state directory).
+// SF_SMOKE_PROBE_ALLOW is its command: sf serve then runs the Implementer in dontAsk with that
+// exact command allowed (SF-109; config.ts, smokeProbeAllow, honoured only for the smoke's own
+// state directory).
 export function childEnv(env: NodeJS.ProcessEnv, paths: SmokePaths, probe?: SmokeProbe): NodeJS.ProcessEnv {
   const child: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(env)) {
@@ -771,7 +773,8 @@ class Smoke {
     await writeFile(join(config, CANARY_FILE), canary, { mode: 0o600 });
     const ssh = join(homedir(), '.ssh');
     this.#probe = smokeProbe(this.#paths, createHash('sha256').update(canary).digest('hex'), existsSync(ssh) ? ssh : undefined);
-    // Every later child sf command, sf serve and its runners too, gets the probe's allow (SF-104).
+    // Every later child sf command, sf serve and its runners too, gets the probe's allow (SF-104),
+    // which selects the dontAsk session (SF-109).
     this.#env = childEnv(process.env, this.#paths, this.#probe);
     await git(this.#paths.dir, ['init', '-q', '--bare', '-b', 'main', origin]);
     await git(this.#paths.dir, ['clone', '-q', origin, work]);

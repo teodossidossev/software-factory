@@ -98,8 +98,14 @@ to commit.
 
 `sf smoke` has a `Sandbox` step: the job's Implementer runs a probe of the run's own canary env
 file, dashboard token, `jobs/`, `sf.sock`, `~/.ssh` and `SSH_AUTH_SOCK` inside its sandbox, and the
-step passes only when every one was refused. Only the smoke lets that one probe command past the
-permission check (an exact allow rule, for its own temporary state only), so the sandbox, the same
-as a real job's, is what refuses it; real jobs keep every permission check. See [Install: check that it works](install.md#check-that-it-works).
+step passes only when every one was refused. So that the probe reaches the sandbox, only the
+smoke's Implementer runs in permission mode `dontAsk`, without the auto mode classifier, for its
+own temporary state only: it may run the exact probe command and the file tools its ticket needs
+(`Read`, `Edit`, `Write`, `Glob`, `Grep`, `TodoWrite`), and any other tool call is denied, not
+asked. That mode also approves any Bash command that runs in the sandbox and the allow rules of
+the Claude Code settings it loads, with no classifier. This is safe there: every such command runs
+in the same sandbox with the same path denials as a real job's, the smoke works in its own
+temporary directory on canary data, and that sandbox is what the step checks. Real jobs keep mode
+`auto` and the classifier, with no extra allow rule. See [Install: check that it works](install.md#check-that-it-works).
 
 Back to the [guide](README.md).

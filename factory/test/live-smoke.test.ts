@@ -10,7 +10,7 @@ import { chmod, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises
 import { createServer } from 'node:net';
 import { basename, join } from 'node:path';
 import { test } from 'node:test';
-import { CLASSIFIER_DENIAL, childEnv, PASSED_SETTINGS, positiveDecimal, PROBE_SCRIPT, PROBES, probeCallProblem, probeCommand, probeProblem, ProcessGroups, runSmoke, smokePaths, smokeProbe, smokeTask, STEPS, terminate, trackRunnerLock } from '../src/live-smoke.js';
+import { CLASSIFIER_DENIAL, childEnv, DONT_ASK_DENIAL, PASSED_SETTINGS, positiveDecimal, PROBE_SCRIPT, PROBES, probeCallProblem, probeCommand, probeProblem, ProcessGroups, runSmoke, smokePaths, smokeProbe, smokeTask, STEPS, terminate, trackRunnerLock } from '../src/live-smoke.js';
 import { taskChecksDir } from '../src/sandbox-denials.js';
 import { Redactor } from '../src/redact.js';
 import { CLI, codexLog, codexScript, type Env, FAKE, fakeCodex, fakeLog, git, newEnv, processEnv, reviewLog, reviewScript, script, temp } from './support/harness.js';
@@ -169,14 +169,17 @@ test('--keep keeps the directory and prints it; the bare remote has the job\'s b
     const task = git(join(ran.dir, 'origin.git'), 'show', 'main:.software-factory/SMOKE-1.md');
     assert.equal(task, smokeTask(probe));
     assert.ok(task.includes(probeCommand(probe)));
+    // SF-110: the probe as one Bash call on its own, then probe.json read with the Read tool.
+    assert.ok(task.replace(/\s+/g, ' ').includes('as one Bash call on its own, with nothing before or after it (no `cd`, `echo`, `cat`, `;`, `&&` or `|`)'));
+    assert.ok(task.includes('Then read `probe.json` with the Read tool.'));
     assert.ok(!task.includes(canary.trim()) && !ran.stdout.includes(canary.trim()));
     assert.equal(git(join(ran.dir, 'origin.git'), 'show', 'main:probe.mjs'), PROBE_SCRIPT);
     assert.equal(git(join(ran.dir, 'origin.git'), 'show', `${BRANCH}:probe.json`), probeOutput());
     assert.equal(git(join(ran.dir, 'origin.git'), 'log', '-1', '--format=%an <%ae>', 'main').trim(), 'sf-smoke <sf-smoke@localhost>');
-    // SF-104, SF-109: the Implementer ran in dontAsk, with the probe command, exactly, and the
+    // SF-104, SF-109, SF-110: the Implementer ran in dontAsk, with the probe's prefix rule and the
     // file tools of the ticket allowed.
     for (const entry of await fakeLog(ran.env)) {
-      assert.deepEqual(entry.argv.filter((arg) => arg.startsWith('--allowedTools')), [`--allowedTools=Bash(${probeCommand(probe)}),Read,Edit,Write,Glob,Grep,TodoWrite`]);
+      assert.deepEqual(entry.argv.filter((arg) => arg.startsWith('--allowedTools')), ['--allowedTools=Bash(node probe.mjs:*),Read,Edit,Write,Glob,Grep,TodoWrite']);
       assert.deepEqual(entry.argv.filter((arg) => arg.startsWith('--permission-mode')), ['--permission-mode=dontAsk']);
     }
     await untouched(ran);
@@ -249,7 +252,7 @@ const implementerEvent = (type: 'assistant' | 'user', content: unknown[], parent
 const bash = (id: string, command: string): unknown => ({ type: 'tool_use', id, name: 'Bash', input: { command, description: 'x' } });
 const result = (id: string, content: unknown, isError = false): unknown => ({ type: 'tool_result', tool_use_id: id, is_error: isError, content });
 
-test('why probe.json is missing (SF-104), from the job\'s events: no probe call, the classifier\'s refusal, another error, or none', () => {
+test('why probe.json is missing (SF-104, SF-110), from the job\'s events: no probe call, the classifier\'s refusal, dontAsk\'s refusal, another error, or none', () => {
   const probe = "node probe.mjs --canary '/t/config/auth.env' > probe.json";
   const prompt = JSON.stringify({ ts: 't', iteration: 1, prompt: probe });
   // No probe call: none at all, one only in a prompt, a subagent's, a reviewer's, another tool's.
@@ -266,6 +269,15 @@ test('why probe.json is missing (SF-104), from the job\'s events: no probe call,
     assert.equal(probeCallProblem([implementerEvent('assistant', [bash('p', probe)]), implementerEvent('user', [result('p', content, true)])].join('\n')),
       'the permission classifier refused the probe before the sandbox; the sandbox was not exercised');
   }
+  // dontAsk refused it (SF-110): the call's command, at most 200 characters.
+  const added = `${probe} --ssh '/${'d'.repeat(200)}'; echo "exit=$?"; cat probe.json`;
+  const dontAsk = `Permission to use Bash has been denied because Claude Code is ${DONT_ASK_DENIAL}.`;
+  for (const content of [dontAsk, [{ type: 'text', text: dontAsk }]]) {
+    assert.equal(probeCallProblem([implementerEvent('assistant', [bash('p', added)]), implementerEvent('user', [result('p', content, true)])].join('\n')),
+      `the permission check refused the probe before the sandbox (dontAsk); the call was: ${added.slice(0, 200)}`);
+  }
+  assert.equal(probeCallProblem([implementerEvent('assistant', [bash('p', probe)]), implementerEvent('user', [result('p', dontAsk, true)])].join('\n')),
+    `the permission check refused the probe before the sandbox (dontAsk); the call was: ${probe}`);
   // Another error result: its first line, at most 200 characters.
   assert.equal(probeCallProblem([implementerEvent('assistant', [bash('p', probe)]), implementerEvent('user', [result('p', '\nnode: not found\nmore', true)])].join('\n')),
     'the probe failed: node: not found');

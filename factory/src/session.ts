@@ -59,12 +59,15 @@ export interface SessionOptions {
   // into the sandbox settings of every query. A failure fails that turn.
   pathDenials?: (() => Promise<PathDenials>) | undefined;
   // Commands allowed past the permission check (SF-104): one exact allowedTools rule
-  // Bash(<command>) each, never a prefix rule. Only sf smoke's probe gets one (config.ts,
+  // Bash(<command>) each, never a prefix rule, but in a smoke session (smokeMode), which gets the
+  // one prefix rule SMOKE_PROBE_RULE instead (SF-110). Only sf smoke's probe sets it (config.ts,
   // smokeProbeAllow); the sandbox holds the command as any other.
   allowCommands?: string[] | undefined;
   // sf smoke's session only (SF-109; turns.ts sets it exactly when config.smokeProbeAllow is set):
   // permission mode dontAsk, without the auto mode classifier, so the probe reaches the sandbox,
-  // with SMOKE_TOOLS allowed besides allowCommands. dontAsk also approves any Bash command the
+  // with SMOKE_TOOLS allowed and, given allowCommands, the prefix rule SMOKE_PROBE_RULE in place of
+  // the exact rules (SF-110): the only session with a prefix rule, so the Implementer adding to the
+  // probe's command line still reaches the sandbox. dontAsk also approves any Bash command the
   // sandbox runs and the allow rules of the settings loaded; the sandbox, the path denials and every
   // other option stay a real job's. Without it (every real job): auto, the classifier.
   smokeMode?: boolean | undefined;
@@ -73,16 +76,25 @@ export interface SessionOptions {
 // The file tools the smoke's ticket needs (SF-109), allowed in its dontAsk session.
 export const SMOKE_TOOLS = ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'TodoWrite'] as const;
 
+// The smoke's sandbox probe script (SF-100), in the root of its repository (live-smoke.ts).
+export const PROBE_SCRIPT_NAME = 'probe.mjs';
+// The allow rule of the probe in a smoke session (SF-110): any `node probe.mjs …` call.
+export const SMOKE_PROBE_RULE = `Bash(node ${PROBE_SCRIPT_NAME}:*)`;
+
 // The permission mode of a session (SF-109): dontAsk for the smoke's, auto for every other.
 function sessionPermissionMode(smokeMode: boolean | undefined): 'auto' | 'dontAsk' {
   return smokeMode === true ? 'dontAsk' : 'auto';
 }
 
-// The allowedTools of a session's query(): none for a real job; the exact Bash rules of
-// allowCommands, and in a smoke session also SMOKE_TOOLS.
-function allowedTools(options: SessionOptions): string[] {
-  const commands = (options.allowCommands ?? []).map((command) => `Bash(${command})`);
-  return options.smokeMode === true ? [...commands, ...SMOKE_TOOLS] : commands;
+// The allowedTools of a session's query(): none for a real job; in a smoke session
+// SMOKE_PROBE_RULE when allowCommands is set (SF-110), and SMOKE_TOOLS; else the exact Bash rules of
+// allowCommands.
+export function sessionAllowedTools(options: Pick<SessionOptions, 'allowCommands' | 'smokeMode'>): string[] {
+  const commands = options.allowCommands ?? [];
+  if (options.smokeMode === true) {
+    return [...(commands.length > 0 ? [SMOKE_PROBE_RULE] : []), ...SMOKE_TOOLS];
+  }
+  return commands.map((command) => `Bash(${command})`);
 }
 
 interface Queued {
@@ -327,7 +339,7 @@ export class ImplementerSession {
     this.#abort = abortController;
     const input = await promptInput(prompt, images);
     const mode = this.permissionMode;
-    const allowed = allowedTools(this.#options);
+    const allowed = sessionAllowedTools(this.#options);
     const turn = query({
       prompt: input.prompt,
       options: {

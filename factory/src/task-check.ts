@@ -760,6 +760,15 @@ export class TaskChecks {
     return [...this.#running].some((key) => key.startsWith(`${workspace}/`));
   }
 
+  // The checks running or being set up, manual and automatic, by workspace and ticket (SF-101: sf
+  // serve's serve-busy). Read-only: a copy.
+  running(): Array<{ workspace: string; ticket: string }> {
+    return [...this.#running].map((key) => {
+      const slash = key.indexOf('/');
+      return { workspace: key.slice(0, slash), ticket: key.slice(slash + 1) };
+    });
+  }
+
   // The checks running or being set up, manual and automatic, over every workspace.
   runningCount(): number {
     return this.#running.size;

@@ -10,10 +10,12 @@
 // reading the state directory directly), `sf smoke` (the live smoke test of SF-090,
 // src/live-smoke.ts: its own sf processes on a throwaway repository and state)
 // and `sf run`, the job's runner that sf serve starts (SF-042, src/runner.ts), and `sf digest
-// [--now]` (the morning digest of SF-103, through the socket of sf serve).
+// [--now]` (the morning digest of SF-103, through the socket of sf serve), `sf service` (sf serve
+// as a systemd user service, SF-101, src/service.ts) and `sf update` (the install updated, drained
+// first, SF-101, src/update.ts).
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { type ChildProcess, spawn } from 'node:child_process';
-import { basename, dirname, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { open, readFile, realpath } from 'node:fs/promises';
@@ -49,12 +51,17 @@ import { CheckStore, checkLines, checkSettings, refuseDraft, runTaskCheck, TaskC
 import { AutoChecks, planCheck } from './task-check-auto.js';
 import { TicketHistory } from './ticket-history.js';
 import { parseFrontMatter, readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
-import { runGit } from './git.js';
+import { gitToplevel, runGit } from './git.js';
 import { resolveTarget } from './mr.js';
 import { collectRules, readJobRulesList, rulesLines } from './rules-docs.js';
 import { turnLimitLine } from './turn-limit.js';
 import { watchEvents } from './watch.js';
 import { DEFAULT_BUDGET_USD, DEFAULT_TIMEOUT_MIN, positiveDecimal, runSmoke } from './live-smoke.js';
+import { serviceCommand, updateService } from './service.js';
+import { checkStateVersion } from './state-version.js';
+import {
+  MARKER_POLL_MS, markerAtServeStart, markerLines, MarkerWatch, putMarkerBack, readSkippedChecks, recordSkippedCheck, refuseWhileUpdating, removeSkippedChecks, runCommand, runUpdate, updateMarked,
+} from './update.js';
 
 const DEFAULT_PORT = 8787;
 const USAGE = `Usage:
@@ -107,6 +114,8 @@ const USAGE = `Usage:
   sf metrics [<workspace>] [--since YYYY-MM-DD] [--json]  The Codex gate per job, current and archived: gate levels per iteration (F full, L light, l light skipped, - none, · no decision, ? unreadable), runs, tokens, items by outcome and the yield (fixed over all items), then the totals; no sf serve needed
   sf smoke [--keep] [--timeout-min N] [--budget-usd N]  The live smoke test: one tiny real job (Claude Code, Codex, Git) from Task check to push, on a throwaway repository with a local bare remote, its own sf serve and state in one temporary directory (never yours); prints a pass/fail table. Models: SF_SMOKE_MODEL (default haiku), SF_SMOKE_CODEX_MODEL (default: Codex's); budget: --timeout-min (default ${DEFAULT_TIMEOUT_MIN}) and --budget-usd (default ${DEFAULT_BUDGET_USD}), positive numbers; --keep keeps the directory
   sf run <workspace> <ticket>                           The job's runner: its turns, reviews and gate, detached from sf serve (sf serve starts it; one per job)
+  sf service install|uninstall|status                   sf serve as a systemd user service (software-factory.service in ~/.config/systemd/user, KillMode=process: running jobs outlive a stop or restart); install writes and enables it (refused while an sf serve started by hand answers); logs: journalctl --user -u software-factory
+  sf update [--check|--abandon] [--no-smoke]            Update the factory's Git install to origin/main: drains first (pauses the running jobs, waits for their runners to end), pulls, npm ci when the lockfile changed, builds and typechecks, restarts the service, resumes the jobs it paused and runs sf smoke; a failed step rolls back to the start commit. --check: how far behind, changes nothing; --abandon: remove the updating marker of an interrupted update and resume its jobs
 
 Notes:
   EST_USD: an estimate of the API-equivalent price, not a charge (the session usually runs on your Claude plan):
@@ -119,6 +128,10 @@ Notes:
 Exit codes: 0 ok, 1 error, 2 usage.`;
 
 class UsageError extends Error {}
+
+// The socket commands that still answer while the factory is being updated (SF-101): pause (the
+// update's own tool), mr-status (it starts nothing) and the reads.
+const OPEN_WHILE_UPDATING: ReadonlySet<string> = new Set(['ping', 'queue-list', 'serve-busy', 'digest-latest', 'mcp-port', 'pause', 'mr-status', 'check']);
 
 function parsePort(name: 'SF_PORT' | 'SF_DASHBOARD_PORT', fallback: number): number {
   const raw = process.env[name];
@@ -202,6 +215,8 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     notify: (notification) => sendNotification(notification, notifyConfig()),
     planCheck: (workspace, ticket) => planCheck(checks, autoChecks, workspace, ticket),
     onAdded: (workspace, ticket) => void autoChecks?.triggerIfUnchecked(workspace, ticket),
+    // The updating marker (SF-101): no start and no limit reset while sf update drains or builds.
+    updating: () => updateMarked(config.stateDir),
   });
   // The Task checks (SF-054): started from the dashboard, read by the Context owner's task_check; an ended
   // check reaches every page.
@@ -233,6 +248,8 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
         dashboard?.refreshSetup();
         void notifyTaskCheck(record, notifySettings);
       },
+      // The updating marker (SF-101): a check due meanwhile is recorded for the catch-up.
+      update: { updating: () => updateMarked(config.stateDir), skipped: (workspace, ticket) => recordSkippedCheck(config.stateDir, { workspace, ticket }) },
     });
   }
   const testHooks = process.env.SF_TEST_HOOKS === 'on';
@@ -240,9 +257,18 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   let boundMcpPort: number | undefined;
   // The socket first: it refuses a second sf serve on the same state before recovery touches it.
   const socket = await listenSocket(config.stateDir, async ({ command, args }) => {
+    // The updating marker's gate (SF-101): while sf update drains or builds, every command that
+    // changes something is refused before it does; pause, mr-status and the reads still answer.
+    if (!OPEN_WHILE_UPDATING.has(command)) {
+      refuseWhileUpdating(config.stateDir);
+    }
     // sf info: whether sf serve answers.
     if (command === 'ping') {
       return {};
+    }
+    // sf update's drain (SF-101): the Task checks and the hand-over operations running here now.
+    if (command === 'serve-busy' && args.length === 0) {
+      return { checks: checks.running(), handovers: execution.handoversRunning() };
     }
     // sf digest --now and sf digest (SF-103).
     if (command === 'digest-run' && args.length === 0) {
@@ -343,16 +369,25 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     throw new FactoryError('bad_request', `Unknown command "${command}".`);
   });
   let server;
+  // The updating marker at the start (SF-101): the jobs of a finished (restart_pending) or dead
+  // (draining) update to resume, the marker removed already; or a marker that stays, under which
+  // recovery repairs the states but starts no runner.
+  // A start that fails after it took the marker puts it back, so the next sf serve resumes the jobs.
+  let atStart: Awaited<ReturnType<typeof markerAtServeStart>> | undefined;
   try {
+    // The state format (SF-101): a newer one is refused (state_too_new) before anything reads it.
+    await checkStateVersion(config.stateDir);
     // The MCP token (SF-099): made on the first start; an invalid file stops the start.
     const narrowed = await ensureMcpToken(config.stateDir);
     if (narrowed !== undefined) {
       console.error(`warning: ${narrowed}`);
     }
-    await execution.recover();
+    atStart = await markerAtServeStart(config.stateDir);
+    await execution.recover({ startRunners: !atStart.gated });
     server = await startServer(port, config.stateDir, handbook, await packageVersion(), execution, checks, history, runQueue, autoChecks);
     boundMcpPort = server.port;
   } catch (error) {
+    await putMarkerBack(config.stateDir, atStart?.taken).catch((putError: unknown) => console.error(putError));
     await socket.close();
     throw error;
   }
@@ -367,6 +402,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
       await removeToken(config.stateDir);
     }
   } catch (error) {
+    await putMarkerBack(config.stateDir, atStart.taken).catch((putError: unknown) => console.error(putError));
     await Promise.all([server.close(), socket.close()]);
     throw error;
   }
@@ -391,6 +427,26 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   void runQueue.schedule();
   await autoChecks?.start();
   digestSchedule.start();
+  // The updating marker while sf serve runs (SF-101): its poll; the catch-up once the marker is gone
+  // (what the gates held back), the resume of the jobs of an update that finished or died.
+  const catchUp = async (): Promise<void> => {
+    await execution.ensureResumable().catch((error: unknown) => console.error(error));
+    await runQueue.schedule();
+    await execution.handOverLocked().catch((error: unknown) => console.error(error));
+    for (const { workspace, ticket } of await readSkippedChecks(config.stateDir)) {
+      await autoChecks?.triggerIfUnchecked(workspace, ticket);
+    }
+    await removeSkippedChecks(config.stateDir);
+  };
+  const markerWatch = new MarkerWatch(config.stateDir, atStart.gated, {
+    resume: ({ workspace, ticket }) => execution.resumePaused(workspace, ticket),
+    catchUp,
+  }, testHooks && /^\d+$/.test(process.env.SF_TEST_MARKER_POLL_MS ?? '') ? Number(process.env.SF_TEST_MARKER_POLL_MS) : MARKER_POLL_MS);
+  if (atStart.resume !== undefined) {
+    markerWatch.finish(atStart.resume).catch((error: unknown) => console.error(error)).finally(() => markerWatch.start());
+  } else {
+    markerWatch.start();
+  }
 
   let stopping = false;
   const stop = (signal: NodeJS.Signals): void => {
@@ -401,6 +457,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     console.log(`${SERVER_NAME} received ${signal}, shutting down`);
     hooks.beforeStop?.();
     followed.close();
+    markerWatch.close();
     runQueue.close();
     autoChecks?.close();
     digestSchedule.close();
@@ -900,6 +957,8 @@ async function run(args: string[]): Promise<void> {
   }
   const [workspace, ticket] = checkJob(args, 'run');
   const config = loadConfig();
+  // The state format (SF-101): a runner refuses a newer one (state_too_new).
+  await checkStateVersion(config.stateDir);
   const handbook = await loadHandbook();
   const jobs = new JobStore(config.stateDir);
   if ((await jobs.read(workspace, ticket)) === undefined) {
@@ -970,6 +1029,8 @@ async function checkTask(args: string[]): Promise<void> {
   }
   const [name, ticket] = checkJob(args, 'check-task');
   const config = loadConfig();
+  // It runs in this process, past sf serve's gates (SF-101).
+  refuseWhileUpdating(config.stateDir);
   const workspace = await resolveWorkspace(name);
   const task = await readTask(workspace, ticket);
   refuseDraft(ticket, task);
@@ -1158,7 +1219,12 @@ async function status(args: string[]): Promise<void> {
   const jobs = new JobStore(stateDir());
   // One clock reading for every row.
   const now = new Date();
+  // The updating marker (SF-101), its phase, and what to do when the update was interrupted.
+  const update = await markerLines(stateDir());
   if (args.length === 0) {
+    if (update.length > 0) {
+      console.log(`${update.join('\n')}\n`);
+    }
     const all = await jobs.list();
     console.log(all.length === 0 ? 'No jobs.' : table(await statusRows(jobs, all, now)));
     // The jobs whose Implementer went on by itself after a turn limit (SF-069), one line each.
@@ -1176,6 +1242,9 @@ async function status(args: string[]): Promise<void> {
   const job = await jobs.read(workspace, ticket);
   if (job === undefined) {
     throw new FactoryError('job_not_found', `There is no job for ${workspace}/${ticket}.`);
+  }
+  if (update.length > 0) {
+    console.log(`${update.join('\n')}\n`);
   }
   console.log(table(await statusRows(jobs, [job], now)));
   if (job.error !== undefined) {
@@ -1236,6 +1305,8 @@ async function attach(args: string[]): Promise<void> {
     throw new UsageError('attach needs <workspace> <ticket> <file> [name], or <workspace> <ticket> --remove <name>.');
   }
   const [name, ticket] = checkJob(positionals, 'attach');
+  // It changes the ticket's files in this process, past sf serve's gates (SF-101).
+  refuseWhileUpdating(stateDir());
   const workspace = await resolveWorkspace(name);
   const jobs = new JobStore(stateDir());
   if (values.remove !== undefined) {
@@ -1445,10 +1516,78 @@ async function metrics(args: string[]): Promise<void> {
   console.log(values.json === true ? JSON.stringify(result, null, 2) : metricsLines(result).join('\n'));
 }
 
+// Whether an sf serve answers on the state directory's socket.
+async function serveAnswers(): Promise<boolean> {
+  try {
+    return (await callSocket(stateDir(), { command: 'ping', args: [] })).ok;
+  } catch {
+    return false;
+  }
+}
+
+// The environment of the shell that ran sf, without what auth.env added (SF-101: sf service).
+function shellEnv(fromEnvFile: readonly string[]): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(process.env).filter(([name]) => !fromEnvFile.includes(name)));
+}
+
+// sf service install|uninstall|status (SF-101).
+async function service(args: string[], fromEnvFile: readonly string[]): Promise<void> {
+  const [command] = args;
+  if (args.length !== 1 || (command !== 'install' && command !== 'uninstall' && command !== 'status')) {
+    throw new UsageError('service needs install, uninstall or status.');
+  }
+  await serviceCommand(command, { env: shellEnv(fromEnvFile), fromEnvFile, serveAnswers });
+}
+
+// This package's root (factory/): dist/src/cli.js is two levels below it.
+const PACKAGE_ROOT = fileURLToPath(new URL('../..', import.meta.url));
+
+// sf update [--check|--abandon] [--no-smoke] (SF-101): the install is the Git top level of this
+// package's root; npm runs in the package.
+async function update(args: string[], fromEnvFile: readonly string[]): Promise<void> {
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { check: { type: 'boolean' }, abandon: { type: 'boolean' }, 'no-smoke': { type: 'boolean' } } });
+  if (positionals.length !== 0 || (values.check === true && values.abandon === true)) {
+    throw new UsageError('update takes no arguments, and --check or --abandon at most (with --no-smoke).');
+  }
+  const install = await gitToplevel(PACKAGE_ROOT);
+  if (install === undefined) {
+    throw new FactoryError('install_not_git', 'install_not_git: this factory is not in a Git clone; sf update updates a Git install only.');
+  }
+  const packageDir = relative(install, await realpath(PACKAGE_ROOT));
+  const state = stateDir();
+  const sf = join(install, packageDir, 'bin', 'sf');
+  process.exitCode = await runUpdate({
+    stateDir: state, install, packageDir,
+    mode: values.check === true ? 'check' : values.abandon === true ? 'abandon' : 'update',
+    smoke: values['no-smoke'] !== true,
+    server: { answers: serveAnswers, request: (command, commandArgs) => callSocket(state, { command, args: commandArgs }) },
+    service: updateService({ env: shellEnv(fromEnvFile), serveAnswers }),
+    npm: (npmArgs, cwd) => runCommand('npm', npmArgs, cwd),
+    // The new code's smoke, in a process of its own.
+    runSmoke: () => new Promise((resolve) => {
+      const child = spawn(sf, ['smoke'], { stdio: 'inherit' });
+      child.once('error', (error) => {
+        console.error(`sf: sf smoke could not start: ${error.message}`);
+        resolve(false);
+      });
+      child.once('close', (code) => resolve(code === 0));
+    }),
+    print: (line) => console.log(line),
+  });
+}
+
 async function main(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
   // SF_* settings from the environment file (auth.env), for every command alike.
-  loadEnvFile();
+  const fromEnvFile = loadEnvFile();
+  if (command === 'service') {
+    await service(rest, fromEnvFile);
+    return;
+  }
+  if (command === 'update') {
+    await update(rest, fromEnvFile);
+    return;
+  }
   if (command === 'start') {
     if (rest.length !== 2) {
       throw new UsageError('start needs <workspace> <ticket>.');

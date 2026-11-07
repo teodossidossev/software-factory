@@ -41,6 +41,8 @@ Then check the install end to end with `npm run sf -- smoke` ([what it does](doc
 ```sh
 npm start              # sf up: sf serve, the ChatGPT tunnel (when set up) and the dashboard
 npm run serve          # sf serve alone; stopping it leaves running jobs running
+npm run sf -- service install   # or run sf serve as a systemd user service (logs: journalctl --user -u software-factory)
+npm run sf -- update   # update the install to origin/main: drains the running jobs, builds, restarts, resumes them
 npm run tunnel         # the ChatGPT tunnel alone
 npm run dashboard      # open the dashboard
 npm run info           # version, settings, sf serve and tunnel state, workspaces, jobs

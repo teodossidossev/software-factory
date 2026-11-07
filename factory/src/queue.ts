@@ -192,6 +192,10 @@ export interface RunQueueOptions {
   // Called after a ticket was added (the dashboard, the CLI and MCP alike; sf serve: the automatic
   // check of a ticket without one); never throws.
   onAdded?: (workspace: string, ticket: string) => void;
+  // The updating marker (SF-101): while it is true a pass starts no queued ticket and calls no
+  // limitReset; the reset timer is armed again as always, so a parked job stays in waiting_limit.
+  // Checked at the start of a pass and again right before each start and each limitReset.
+  updating?: () => boolean;
 }
 
 type QueueExecution = Pick<Execution, 'start' | 'fetchBase' | 'limitReset'>;
@@ -216,6 +220,7 @@ export class RunQueue {
   readonly #notify: (notification: Notification) => Promise<unknown>;
   readonly #planCheck: ((workspace: string, ticket: string) => Promise<PlanCheck>) | undefined;
   readonly #onAdded: (workspace: string, ticket: string) => void;
+  readonly #updating: () => boolean;
   // Every pass and every change, one at a time.
   #chain: Promise<unknown> = Promise.resolve();
   // A pass is queued on the chain and has not begun: a new event needs no second one.
@@ -239,6 +244,7 @@ export class RunQueue {
     this.#notify = options.notify ?? (() => Promise.resolve());
     this.#planCheck = options.planCheck;
     this.#onAdded = options.onAdded ?? (() => {});
+    this.#updating = options.updating ?? (() => false);
   }
 
   // Runs work after every pass and change asked for before it.
@@ -477,7 +483,8 @@ export class RunQueue {
     let changed = await this.#resets();
     const queue = await this.#store.read();
     const jobs = await this.#jobs.list();
-    if (queue.held || parkedJobs(jobs).length > 0 || this.#closed) {
+    // While the factory is being updated (SF-101) nothing starts; the catch-up asks for a pass.
+    if (queue.held || parkedJobs(jobs).length > 0 || this.#closed || this.#updating()) {
       if (changed) {
         this.#onChange();
       }
@@ -540,7 +547,11 @@ export class RunQueue {
       // The last look at the plan and the start under the ticket's lock (withTicket): a write_task
       // or a Save of the Task file lands before the look, which sees it, or after the job's claim,
       // which refuses it (job_active). So the version started is the one found ready.
-      const outcome = await this.withTicket(entry.workspace, entry.ticket, async (): Promise<'held' | 'limit' | 'next'> => {
+      const outcome = await this.withTicket(entry.workspace, entry.ticket, async (): Promise<'held' | 'limit' | 'next' | 'updating'> => {
+        // The merged check may have fetched for seconds: the marker is looked at again.
+        if (this.#updating()) {
+          return 'updating';
+        }
         if ((await this.#planHold(entry)) !== null) {
           return 'held';
         }
@@ -571,7 +582,7 @@ export class RunQueue {
         }
         return 'next';
       });
-      if (outcome === 'limit') {
+      if (outcome === 'limit' || outcome === 'updating') {
         break;
       }
       if (outcome === 'held') {
@@ -602,7 +613,8 @@ export class RunQueue {
     let resumed = 0;
     let waiting = 0;
     for (const job of due) {
-      if (this.#closed) {
+      // Under the updating marker (SF-101) no reset is applied; the timer below is armed again.
+      if (this.#closed || this.#updating()) {
         break;
       }
       let outcome: Awaited<ReturnType<QueueExecution['limitReset']>>;

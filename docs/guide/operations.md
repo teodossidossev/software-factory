@@ -8,9 +8,48 @@ cleaning up old jobs and worktrees, backup, troubleshooting, and its tests.
 `sf serve` and each job's runner (`sf run`) are separate processes. A runner keeps the code it
 loaded when it started until it exits; it exits when its job waits for you or has ended, and the
 next runner of that job (when you answer it) loads whatever build is on disk then. Restarting
-`sf serve` leaves running jobs running. There is no version check between them.
+`sf serve` leaves running jobs running. Both check the state's format at start (`state-version` in
+the state directory): a factory older than the state it finds refuses to start with
+`state_too_new` ([State format version](../../factory/README.md#state-format-version)).
+
+**From a second clone used only to run it** ([Install (b)](install.md#b-a-second-clone-used-only-to-run-the-factory)):
+
+```sh
+sf update --check    # how many commits behind origin/main, and the newest; changes nothing
+sf update            # drain, pull, build, restart, resume, smoke
+```
+
+`sf update` refuses an install with uncommitted changes, one not on `main` and one that cannot
+fast-forward (`install_not_clean`, `install_not_on_main`, `install_diverged`) before it touches any
+job. Then it writes the `updating` marker and drains: while the marker exists `sf serve` refuses
+every command and dashboard action that changes something (`update_in_progress`; Pause, the merge
+request's status and the reads still answer), and the run queue, the automatic Task checks and the
+hand-over after `config_locked` wait. It pauses every job in `working` or `awaiting_review` (a job
+it could not pause is named, with the state it reached), waits until every job is idle and no
+runner is left, then pulls, runs `npm ci` when the lockfile changed, builds and typechecks, with
+the output in `update.log` in the state directory. A failed step resets the install to the commit
+it started from, rebuilds it and resumes the paused jobs on the old code (`update_failed`). A good
+build restarts the service; the new `sf serve` resumes the jobs the update paused (jobs you had
+paused stay paused) and catches up on what the marker held back; then `sf update` runs `sf smoke`
+(`--no-smoke` skips it). The whole behaviour: [Updating the install](../../factory/README.md#updating-the-install).
+
+- **The drain did not settle in 10 minutes** (`drain_timeout`): it names the jobs, checks or
+  hand-overs that held it, resumes the jobs it paused and pulls nothing. Run it again later.
+- **Without the service** (an `sf serve` you started by hand): after the build it tells you to
+  restart `sf serve`; the new one finishes the update. Until then the gates stay.
+- **Without a running `sf serve`**: it refuses with `jobs_running` while a job's runner still runs
+  (start `sf serve`, then update), and otherwise updates directly.
+- **An interrupted update** (`sf status` says `update interrupted`, or `sf update` says
+  `update_interrupted`): the install may be half way. Check it (`git status`, `git log -1` in the
+  clone, `npm run build` in `factory/`), then `sf update --abandon`, which removes the marker and
+  resumes the jobs the update paused. An update that died while it drained is taken over by the
+  running `sf serve` by itself.
+- **The new `sf serve` did not start** (`serve_not_started`): `journalctl --user -u
+  software-factory`; the first `sf serve` that starts resumes the paused jobs.
 
 **From the clone you develop in** ([Install (a)](install.md#a-from-the-clone-you-develop-in)):
+`sf update` works there too when the clone is clean and on `main`; while you develop on a branch,
+update by hand:
 
 ```sh
 cd ~/work/software-factory
@@ -20,26 +59,16 @@ npm run setup        # npm ci and the build in factory/
 npm start
 ```
 
-**From a second clone used only to run it** ([Install (b)](install.md#b-a-second-clone-used-only-to-run-the-factory)):
-
-```sh
-cd ~/.local/lib/software-factory
-git pull
-cd factory && npm install && npm run build && cd ..   # check that the build passed
-# stop sf serve, then from the clone's root:
-npm run serve
-```
-
 Then:
 
-- Run `sf smoke` after an update that changed the factory's code; it must end with `smoke: PASS`.
 - **Add a new key** to `workspaces.json` (or a new setting to `auth.env`) only when no job that
   started before the update is still running: an older runner reads `workspaces.json`,
   `job.json` and `queue.json` with its own strict schema, and a key it does not know stops it.
+  After `sf update` no older runner is left.
 - A changed setting in `auth.env` applies to `sf serve` once it restarts, and to each runner that
   starts after that; a runner already running keeps its settings.
-- Building into a clone while a job's next runner starts can load a mix of old and new files; update
-  between tickets, or use the second clone.
+- Building into a clone by hand while a job's next runner starts can load a mix of old and new
+  files; `sf update` drains first for that reason.
 
 ## sf status
 
@@ -98,7 +127,8 @@ says the gate costs more than it finds: consider `SF_GATE_LEVEL=auto` (the defau
 
 | What | Where |
 | --- | --- |
-| `sf serve` itself (start, the gate's state, plan-check notification failures, warnings) | its terminal (stdout and stderr) |
+| `sf serve` itself (start, the gate's state, plan-check notification failures, warnings) | its terminal (stdout and stderr); as the service, `journalctl --user -u software-factory` |
+| `sf update`'s pull, `npm ci`, build and typecheck | `update.log` in the state directory |
 | Everything a job did: prompts, the Implementer's messages and tool calls, the reviewers' messages, verdicts, state changes, notes | `~/.local/state/software-factory/jobs/my-app/APP-12/events.jsonl`; read it with `sf watch my-app APP-12` or the job's Stream |
 | A job's runner process (crashes, stack traces) | `jobs/my-app/APP-12/runner.log` |
 | Each iteration's Report, Patch, file list, review and gate records | `jobs/my-app/APP-12/iterations/NNN/` (`report.md`, `patch.diff`, `meta.json`, `review.json`, `gate.json`, `gate-level.json`) |
@@ -183,7 +213,12 @@ workspaces and checkouts.
 | `invalid_mcp_token` at `sf serve`'s start, or `mcp: every request is refused: …` in its log | `mcp-token` in the state directory is not a valid token or cannot be read | `sf mcp-url --rotate` writes a new one; then restart the tunnel and update other MCP clients |
 | `Port 8788 … Set SF_DASHBOARD_PORT to a free port.` | the dashboard port is taken | as above, or `SF_DASHBOARD_PORT=8798` |
 | `Another sf serve is already listening on the socket.` (`serve_running`) | a second `sf serve` on the same state directory | use the running one; run only one `sf serve` per state directory |
-| `sf serve is not running.` | a command that needs `sf serve` (`start`, `say`, `queue`, `approve`, …) | start it (`npm start` or `npm run serve`) |
+| `sf serve is not running.` | a command that needs `sf serve` (`start`, `say`, `queue`, `approve`, …) | start it (`npm start` or `npm run serve`, or `systemctl --user start software-factory`) |
+| `update_in_progress` | `sf update` is draining or building; or its build is done and waits for `sf serve` to restart (`sf status` shows the phase) | wait for it to end; restart `sf serve` when it says so |
+| `update_interrupted`, or `update interrupted` in `sf status` | an `sf update` ended while building, or its rollback failed (`rollback_failed`) | check the install (`git status`, `npm run build` in `factory/`), then `sf update --abandon` |
+| `state_too_new` at `sf serve`'s or a runner's start | the state was written by a newer factory than the one starting | update the factory (`sf update`) |
+| `serve_running` from `sf service install` | an `sf serve` you started by hand answers | stop it (its jobs keep running), then `sf service install` again |
+| `systemd_unavailable` | no systemd user services on this machine | run `sf serve` (`npm run serve`) as before |
 | `socket_path_too_long` | `SF_STATE_DIR` is too deep for a Unix socket (107 bytes) | use a shorter state directory |
 | `sf serve` refuses to start with `registry_invalid` or `queue_invalid` | `workspaces.json` or `queue.json` has a key or value the strict parser does not accept | fix the file by the message (see [Configuration](configuration.md#the-workspace-registry-workspacesjson)) |
 | every `sf` command says `invalid_env_file` | a line in `auth.env` is not `KEY=VALUE` | fix that line |

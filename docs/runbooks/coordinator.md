@@ -46,15 +46,16 @@ rule changes, change it here, through a pull request like any other change.
   1. Do not edit its `mr.md`: the push must carry exactly the prepared commit's message (SF-080).
   2. `sf mr create software-factory <ticket>`, then `sf mr merge software-factory <ticket>`.
   3. Only after the merge succeeded: reset the job, move its Task file to
-     `.software-factory/archive/`, delete the remote branch, update the install (pull,
-     `npm install`, `npm run build` in `factory/`, and check that the build passed), and restart
-     `sf serve` from the install root with `npm run serve`.
-  4. Run `sf smoke` after an install update that changed the factory's code; it must say
-     `smoke: PASS`.
+     `.software-factory/archive/`, delete the remote branch, then `sf update`, which drains the
+     running jobs, pulls, builds, typechecks, restarts the service and runs `sf smoke` (it must
+     say `smoke: PASS`); a failed build rolls back by itself and says `update_failed`. Then run
+     the full test suite (`npm test` in `factory/` of the coordinator's checkout of `main`) in the
+     background; if it fails, hold the queue (`sf queue hold`) and tell the user.
 - Add a new key to `workspaces.json` or `auth.env` only when no job that started before the install
   update is still running: a runner keeps the code it started with, and an unknown key stops it.
 - A restart of `sf serve` leaves running jobs alone: each job runs in its own runner process
-  (SF-042, checked live on 2026-11-05).
+  (SF-042, checked live on 2026-11-05). `sf serve` runs as the systemd user service
+  (`sf service status`; logs: `journalctl --user -u software-factory`).
 - When a job stops (`needs_human`), read the reason first. A gate that keeps finding ever narrower
   items is churn: send the one item worth fixing as a message, then Accept; do not pay for more
   rounds. A turn that hits the turn limit while making progress is resumed with a message.

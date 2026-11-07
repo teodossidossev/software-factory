@@ -244,16 +244,16 @@ async function references(jobs: JobStore, workspace: string, count: number, iter
   }
 }
 
-test('warnings: a job far above the usual cost, iterations and gate tokens with 5 reference jobs, not with 4, not under $1 or 4 iterations; review churn by reopened and by a stop line; failing plan checks and digests; their texts, targets and order', async () => {
+test('warnings: a job far above the usual cost, iterations and gate tokens with 5 reference jobs in one line, not with 4, not under $5 or 5 iterations; review churn by reopened and by a stop line; failing plan checks and digests; their texts, targets and order', async () => {
   const env = await newEnv('stats-warnings');
   const jobs = new JobStore(env.state);
   await references(jobs, 'ref', 5, 2, 1, 600_000);
-  await makeJob(jobs, 'ref', 'X-1', Array.from({ length: 5 }, () => ({ ended: on('2026-11-06'), cost: 1 })), { gate_tokens: 2_100_000, updated_at: on('2026-11-06', '15:00') });
+  await makeJob(jobs, 'ref', 'X-1', Array.from({ length: 7 }, () => ({ ended: on('2026-11-06'), cost: 1 })), { gate_tokens: 2_100_000, updated_at: on('2026-11-06', '15:00') });
   await references(jobs, 'few', 4, 2, 1, 600_000);
   await makeJob(jobs, 'few', 'Y-1', Array.from({ length: 5 }, () => ({ ended: on('2026-11-06'), cost: 1 })), { gate_tokens: 2_100_000 });
-  // Twice the usual, but under $1 and under 4 iterations.
+  // Four times the usual, but under $5 and under 5 iterations.
   await references(jobs, 'cheap', 5, 1, 0.125, 0);
-  await makeJob(jobs, 'cheap', 'Z-1', Array.from({ length: 3 }, () => ({ ended: on('2026-11-06'), cost: 0.25 })), { gate_tokens: 10 });
+  await makeJob(jobs, 'cheap', 'Z-1', Array.from({ length: 4 }, () => ({ ended: on('2026-11-06'), cost: 0.25 })), { gate_tokens: 10 });
 
   // Review churn: R4 and R10 reopened 3 times (the lowest id wins), on an archived job; a churn stop line.
   await makeJob(jobs, 'churn', 'C-1', [], { state: 'aborted', updated_at: on('2026-11-05', '09:00') });
@@ -273,12 +273,12 @@ test('warnings: a job far above the usual cost, iterations and gate tokens with 
   }
 
   const payload = await stats(env.state, jobs).compute({ days: 7, workspace: null });
-  const of = '(median of the last 5 finished jobs of ref)';
   const x1 = { kind: 'job', workspace: 'ref', ticket: 'X-1', archived: false };
   assert.deepEqual(payload.warnings, [
-    { kind: 'job_cost', text: `X-1 cost $5.00, more than twice the usual $2.00 ${of}.`, at: on('2026-11-06', '15:00'), target: x1 },
-    { kind: 'job_iterations', text: `X-1 took 5 iterations, more than twice the usual 2 ${of}.`, at: on('2026-11-06', '15:00'), target: x1 },
-    { kind: 'job_codex_tokens', text: `X-1 used 2.1M Codex gate tokens, more than twice the usual 600k ${of}.`, at: on('2026-11-06', '15:00'), target: x1 },
+    {
+      kind: 'job_unusual', text: 'X-1: cost $7.00 (usual $2.00); 2.1M Codex gate tokens (usual 600k); 7 iterations (usual 2) — compared with the last 5 finished jobs of ref.',
+      at: on('2026-11-06', '15:00'), target: x1,
+    },
     { kind: 'review_churn', text: 'D-1 stopped with review_churn on 2026-11-06 at 14:02.', at: on('2026-11-06', '14:02'), target: { kind: 'job', workspace: 'churn', ticket: 'D-1', archived: false } },
     { kind: 'stage_failing', text: 'The plan check failed 3 times in a row, last on P-1 on 2026-11-06 at 10:00.', at: on('2026-11-06', '10:00'), target: { kind: 'ticket', workspace: 'plan', ticket: 'P-1' } },
     { kind: 'stage_failing', text: 'The digest failed 3 times in a row, last the digest of 2026-11-06 at 08:00.', at: on('2026-11-06', '08:00'), target: { kind: 'digest', id: digestId } },
@@ -287,8 +287,76 @@ test('warnings: a job far above the usual cost, iterations and gate tokens with 
   assert.ok(payload.jobs.some((row) => row.dir === archived && row.archived));
   // With a workspace chosen, the digests are left out.
   const ref = await stats(env.state, jobs).compute({ days: 7, workspace: 'ref' });
-  assert.deepEqual(ref.warnings.map((warning) => warning.kind), ['job_cost', 'job_iterations', 'job_codex_tokens']);
+  assert.deepEqual(ref.warnings.map((warning) => warning.kind), ['job_unusual']);
   assert.equal(ref.notes.digest_excluded, true);
+});
+
+// A job still working, iterations of cost each, last updated at updated.
+const unusual = (jobs: JobStore, workspace: string, ticket: string, iterations: number, cost: number, updated: string, gateTokens = 0): Promise<void> =>
+  makeJob(jobs, workspace, ticket, Array.from({ length: iterations }, () => ({ ended: updated, cost })), { gate_tokens: gateTokens, updated_at: updated });
+
+test('job_unusual: above three times the usual with the floors $5 and 5 iterations; one line per job, only its unusual measures', async () => {
+  const env = await newEnv('stats-unusual');
+  const jobs = new JobStore(env.state);
+  // The usual: $2 and 1 iteration.
+  await references(jobs, 'cost', 5, 1, 2, 0);
+  await unusual(jobs, 'cost', 'J-1', 1, 5, on('2026-11-06', '10:00'));
+  await unusual(jobs, 'cost', 'J-2', 1, 7, on('2026-11-06', '11:00'));
+  // 3.5 times the usual $1.125 at $4: under the floor.
+  await references(jobs, 'small', 5, 1, 1.125, 0);
+  await unusual(jobs, 'small', 'J-3', 1, 4, on('2026-11-06', '12:00'));
+  // Only the tokens: the usual is 600k and $1.
+  await references(jobs, 'tokens', 5, 1, 1, 600_000);
+  await unusual(jobs, 'tokens', 'T-1', 1, 1, on('2026-11-06', '13:00'), 2_100_000);
+  // The usual 1 iteration at no cost: 5 iterations warn, 4 do not.
+  await references(jobs, 'iter', 5, 1, 0, 0);
+  await unusual(jobs, 'iter', 'I-5', 5, 0, on('2026-11-06', '14:00'));
+  await unusual(jobs, 'iter', 'I-4', 4, 0, on('2026-11-06', '15:00'));
+
+  const payload = await stats(env.state, jobs).compute({ days: 7, workspace: null });
+  const target = (workspace: string, ticket: string) => ({ kind: 'job', workspace, ticket, archived: false });
+  assert.deepEqual(payload.warnings, [
+    { kind: 'job_unusual', text: 'I-5: 5 iterations (usual 1) — compared with the last 5 finished jobs of iter.', at: on('2026-11-06', '14:00'), target: target('iter', 'I-5') },
+    { kind: 'job_unusual', text: 'T-1: 2.1M Codex gate tokens (usual 600k) — compared with the last 5 finished jobs of tokens.', at: on('2026-11-06', '13:00'), target: target('tokens', 'T-1') },
+    { kind: 'job_unusual', text: 'J-2: cost $7.00 (usual $2.00) — compared with the last 5 finished jobs of cost.', at: on('2026-11-06', '11:00'), target: target('cost', 'J-2') },
+  ]);
+});
+
+test('recent only: job and review-churn warnings for jobs updated on the last 7 local days, whatever the period, the stop line from those days too; newest first, ties by ticket; the charts still the period\'s', async () => {
+  const env = await newEnv('stats-recent');
+  const jobs = new JobStore(env.state);
+  await references(jobs, 'ref', 5, 1, 1, 0);
+  // 7 iterations at $1: above three times the usual $1 and 1 iteration. The first of the 7 local
+  // days warns, the day before it and a job 8 days old do not.
+  await unusual(jobs, 'ref', 'B-7', 7, 1, on('2026-11-01', '00:05'));
+  await unusual(jobs, 'ref', 'B-8', 7, 1, on('2026-10-31', '23:55'));
+  await unusual(jobs, 'ref', 'O-8', 7, 1, on('2026-10-30'));
+  // Review churn: 8 days old none, 6 days old one (two at the same time, by ticket).
+  for (const [ticket, updated] of [['C-8', on('2026-10-30')], ['E-2', on('2026-11-01', '12:00')], ['E-1', on('2026-11-01', '12:00')]] as const) {
+    await makeJob(jobs, 'churn', ticket, [], { state: 'aborted', updated_at: updated });
+    await jobs.writeLedger('churn', ticket, [entry('R1', 1, 'claude', 'a', 'A.', 'major', 'fixed', 3)]);
+  }
+  // A stop line: 20 days old on a job updated yesterday none; on a job 8 days old none.
+  await makeJob(jobs, 'churn', 'S-1', [], { state: 'needs_human', updated_at: on('2026-11-06') });
+  await event(jobs, 'churn', 'S-1', { ts: on('2026-10-18'), state: { from: 'awaiting_review', to: 'needs_human', error: { code: 'review_churn', message: 'x' } } });
+  await makeJob(jobs, 'churn', 'S-8', [], { state: 'needs_human', updated_at: on('2026-10-30') });
+  await event(jobs, 'churn', 'S-8', { ts: on('2026-10-30'), state: { from: 'awaiting_review', to: 'needs_human', error: { code: 'review_disputed', message: 'x' } } });
+
+  const churn = (ticket: string) => ({
+    kind: 'review_churn', text: `${ticket}: review churn, finding R1 was reopened 3 times.`, at: on('2026-11-01', '12:00'), target: { kind: 'job', workspace: 'churn', ticket, archived: false },
+  });
+  const expected = [churn('E-1'), churn('E-2'), {
+    kind: 'job_unusual', text: 'B-7: cost $7.00 (usual $1.00); 7 iterations (usual 1) — compared with the last 5 finished jobs of ref.',
+    at: on('2026-11-01', '00:05'), target: { kind: 'job', workspace: 'ref', ticket: 'B-7', archived: false },
+  }];
+  for (const days of [7, 30, 90] as const) {
+    const payload = await stats(env.state, jobs).compute({ days, workspace: null });
+    assert.deepEqual(payload.warnings, expected, `${days} days`);
+  }
+  // The 30-day period still counts the old jobs.
+  const month = await stats(env.state, jobs).compute({ days: 30, workspace: null });
+  assert.equal(dayRow(month, '2026-10-30').cost.implementer, 7);
+  assert.ok(month.jobs.some((row) => row.ticket === 'O-8'));
 });
 
 test('cost_spike: a day above twice the median of the cost days before, with 7 such days, naming the job of the most cost; not with 6', async () => {

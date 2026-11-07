@@ -2965,15 +2965,21 @@ and the warnings' own sentences: never a review's text, a prompt, a message or a
 A day is the local day (the time zone of `sf serve`) of each record's own time, not of its job's
 start; the period is the chosen number of days ending today. The sections, in order:
 
-- **Warnings**, with a link to the job, the planned ticket or the digest each names (an archived
-  job has none), and the rules under "How warnings are found":
-  - a job far above the usual: its reference is the last 30 finished jobs (pushed, aborted, failed;
-    by their last change) of its workspace, itself left out, and there is no warning with fewer
-    than 5 of them. **Cost**: more than twice their median cost and at least $1. **Iterations**:
-    more than twice their median and at least 4. **Codex gate tokens**: more than twice their
-    median, when that median is above 0.
+- **Warnings**, newest first, the first 10 and then "Show all N" for the rest, with a link to the
+  job, the planned ticket or the digest each names (an archived job has none), and the rules under
+  "How warnings are found". The job and review-churn warnings are only of the jobs last updated on
+  the last 7 local days ending today, whatever the period: a warning is about what needs attention
+  now.
+  - **a job far above the usual**: its reference is the last 30 finished jobs (pushed, aborted,
+    failed; by their last change) of its workspace, itself left out, and there is no warning with
+    fewer than 5 of them. **Cost**: more than three times their median cost and at least $5.
+    **Codex gate tokens**: more than three times their median, when that median is above 0.
+    **Iterations**: more than three times their median and at least 5. A job gives one warning
+    that lists the measures it is unusual on, in that order: `T-1: cost $18.07 (usual $7.46);
+    2.8M Codex gate tokens (usual 582k); 7 iterations (usual 2) — compared with the last 30
+    finished jobs of app.`
   - **review churn**: a ledger entry reopened twice or more (the one reopened most, the lowest id
-    on a tie), or else a stop with `review_churn` or `review_disputed` in the period.
+    on a tie), or else a stop with `review_churn` or `review_disputed` on one of those 7 days.
   - **a stage failing**: the 3 newest runs of the Claude review, the Codex gate, the
     simplification, the plan check, the digest or the explanation all failed, the newest in the
     period.

@@ -36,6 +36,14 @@ export const STATS_CACHE_MS = 10_000;
 // workspace, and there is no warning with fewer than MIN_REFERENCE_JOBS of them.
 export const REFERENCE_JOBS = 30;
 export const MIN_REFERENCE_JOBS = 5;
+// A job is unusual on a measure above JOB_FACTOR times its reference's median, and on its cost
+// or iterations only from these floors.
+export const JOB_FACTOR = 3;
+const JOB_MIN_COST_USD = 5;
+const JOB_MIN_ITERATIONS = 5;
+// The job and review-churn warnings concern only the jobs last updated on the WARN_RECENT_DAYS
+// local days ending today, whatever the period.
+export const WARN_RECENT_DAYS = 7;
 // A stage whose FAILING_RUNS newest runs all failed is a warning.
 export const FAILING_RUNS = 3;
 
@@ -144,7 +152,7 @@ export interface JobRow {
   time_to_ready_s: number | null;
 }
 
-export type WarningKind = 'job_cost' | 'job_iterations' | 'job_codex_tokens' | 'review_churn' | 'stage_failing' | 'cost_spike';
+export type WarningKind = 'job_unusual' | 'review_churn' | 'stage_failing' | 'cost_spike';
 
 export type WarningTarget =
   | { kind: 'job'; workspace: string; ticket: string; archived: boolean }
@@ -754,6 +762,8 @@ export class Stats {
       const day = dayOf(ts);
       return day !== undefined && day >= from && day <= to;
     };
+    const recentDays = new Set(localDays(now, WARN_RECENT_DAYS));
+    const recent = (ts: unknown): boolean => recentDays.has(dayOf(ts) ?? '');
     const chosen = (name: string): boolean => workspace === null || name === workspace;
     const notes: StatsNotes = { truncated: 0, unreadable: 0, events_skipped: 0, digest_excluded: workspace !== null };
 
@@ -1040,10 +1050,10 @@ export class Stats {
     });
 
     const warnings = [
-      ...jobWarnings(read, jobRows, inPeriod),
+      ...jobWarnings(read, jobRows, recent),
       ...stageWarnings(read, checkRecords, digests, inPeriod),
       ...spikeWarnings(periodDays, rows, windowCost, jobDayCost),
-    ].sort((a, b) => b.at.localeCompare(a.at));
+    ].sort((a, b) => b.at.localeCompare(a.at) || warningTicket(a).localeCompare(warningTicket(b)));
 
     // Now: the current job directories and the run queue.
     const current = dirs.filter((dir): dir is ReadableDir => !dir.archived && dir.job !== undefined && chosen(dir.workspace)).map((dir) => dir.job.state);
@@ -1104,10 +1114,14 @@ async function readCheck(path: string, workspace: string, ticket: string): Promi
   return { workspace, ticket, sha256: record.sha256, status: record.status, findings, cost: costOf(record.cost_usd), started_at: record.started_at, ended_at: record.ended_at };
 }
 
+// The ticket a warning names, '' for a day or a digest.
+const warningTicket = (warning: StatsWarning): string => (warning.target !== null && warning.target.kind !== 'digest' ? warning.target.ticket : '');
 const jobTarget = (data: JobData): WarningTarget => ({ kind: 'job', workspace: data.dir.workspace, ticket: data.job.ticket, archived: data.dir.archived });
 
-// The warnings of a job far above the usual and of review churn.
-function jobWarnings(read: readonly JobData[], rows: ReadonlyArray<JobRow & { data: JobData }>, inPeriod: (ts: unknown) => boolean): StatsWarning[] {
+// The warnings of a job far above the usual (one per job, its unusual measures in one text) and
+// of review churn, both only for jobs last updated on a recent day: the stop form also takes its
+// stop line from those days.
+function jobWarnings(read: readonly JobData[], rows: ReadonlyArray<JobRow & { data: JobData }>, recent: (ts: unknown) => boolean): StatsWarning[] {
   const warnings: StatsWarning[] = [];
   const finished = read.filter((data) => isTerminal(data.job.state)).sort((a, b) => b.job.updated_at.localeCompare(a.job.updated_at));
   const costs = new Map(rows.map((row) => [row.data, row.cost_usd]));
@@ -1116,21 +1130,27 @@ function jobWarnings(read: readonly JobData[], rows: ReadonlyArray<JobRow & { da
     const { data } = row;
     const { ticket } = data.job;
     const at = data.job.updated_at;
+    if (!recent(at)) {
+      continue;
+    }
     const reference = finished.filter((other) => other !== data && other.dir.workspace === data.dir.workspace).slice(0, REFERENCE_JOBS);
     if (reference.length >= MIN_REFERENCE_JOBS) {
-      const of = `(median of the last ${reference.length} finished jobs of ${data.dir.workspace})`;
+      const measures: string[] = [];
       const usualCost = median(reference.map(costOfJob))!;
-      if (row.cost_usd > 2 * usualCost && row.cost_usd >= 1) {
-        warnings.push({ kind: 'job_cost', text: `${ticket} cost ${money(row.cost_usd)}, more than twice the usual ${money(usualCost)} ${of}.`, at, target: jobTarget(data) });
-      }
-      const usualIterations = median(reference.map((other) => other.job.iteration))!;
-      if (row.iterations > 2 * usualIterations && row.iterations >= 4) {
-        warnings.push({ kind: 'job_iterations', text: `${ticket} took ${row.iterations} iterations, more than twice the usual ${countText(usualIterations)} ${of}.`, at, target: jobTarget(data) });
+      if (row.cost_usd > JOB_FACTOR * usualCost && row.cost_usd >= JOB_MIN_COST_USD) {
+        measures.push(`cost ${money(row.cost_usd)} (usual ${money(usualCost)})`);
       }
       const usualTokens = median(reference.map((other) => other.job.gate_tokens))!;
-      if (usualTokens > 0 && row.codex_tokens > 2 * usualTokens) {
+      if (usualTokens > 0 && row.codex_tokens > JOB_FACTOR * usualTokens) {
+        measures.push(`${tokenText(row.codex_tokens)} Codex gate tokens (usual ${tokenText(usualTokens)})`);
+      }
+      const usualIterations = median(reference.map((other) => other.job.iteration))!;
+      if (row.iterations > JOB_FACTOR * usualIterations && row.iterations >= JOB_MIN_ITERATIONS) {
+        measures.push(`${row.iterations} iterations (usual ${countText(usualIterations)})`);
+      }
+      if (measures.length > 0) {
         warnings.push({
-          kind: 'job_codex_tokens', text: `${ticket} used ${tokenText(row.codex_tokens)} Codex gate tokens, more than twice the usual ${tokenText(usualTokens)} ${of}.`, at, target: jobTarget(data),
+          kind: 'job_unusual', text: `${ticket}: ${measures.join('; ')} — compared with the last ${reference.length} finished jobs of ${data.dir.workspace}.`, at, target: jobTarget(data),
         });
       }
     }
@@ -1139,7 +1159,7 @@ function jobWarnings(read: readonly JobData[], rows: ReadonlyArray<JobRow & { da
       warnings.push({ kind: 'review_churn', text: `${ticket}: review churn, finding ${churn.id} was reopened ${churn.reopened} times.`, at, target: jobTarget(data) });
       continue;
     }
-    const stop = (data.events?.stops ?? []).filter((line) => inPeriod(line.ts)).at(-1);
+    const stop = (data.events?.stops ?? []).filter((line) => recent(line.ts)).at(-1);
     if (stop !== undefined) {
       warnings.push({ kind: 'review_churn', text: `${ticket} stopped with ${stop.code} ${onAt(stop.ts)}.`, at: stop.ts, target: jobTarget(data) });
     }

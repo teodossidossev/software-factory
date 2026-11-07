@@ -863,7 +863,7 @@ test('sf accept (SF-047): after gate_rounds with a clean Claude review the job g
   }
 });
 
-test('sf accept (SF-115): at iteration_limit with a clean Claude review the job goes on to MR preparation; the override records iteration_limit and the Codex items; refused with a fix review', async () => {
+test('sf accept (SF-115, SF-131): at iteration_limit the job goes on to MR preparation whatever the last verdict; the refused Codex fix is an open ledger entry, which the override records and the MR text lists', async () => {
   const env = await newEnv('limit-accept', gateEnv({ SF_MAX_ITERATIONS: '1' }));
   const repo = await newRepo(env, 'limit-accept-repo', false);
   await putTask(env, repo, 'G-15', 'Accept at the Fix round limit');
@@ -881,19 +881,15 @@ test('sf accept (SF-115): at iteration_limit with a clean Claude review the job 
     const limited = await waitFor(served, 'G-15', 'needs_human', 2);
     assert.deepEqual(limited.error, {
       code: 'iteration_limit',
-      message: "1 Fix sections were written, the limit of SF_MAX_ITERATIONS; the user decides how to go on: sf accept takes iteration 2 as it is when Claude's review of it is clean (the open findings go unapplied), sf say gives a direction.",
+      message: '1 Fix sections were written, the limit of SF_MAX_ITERATIONS; 1 open blocker or major findings; the user decides how to go on: sf accept takes iteration 2 as it is (the open findings go unapplied and are listed in the MR text), sf say gives a direction.',
     });
+    // The refused verdict's item is an open ledger entry with its id.
+    const ledger = JSON.parse(await readFile(join(env.state, 'jobs', 'app', 'G-15', 'ledger.json'), 'utf8')) as Array<{ id: string; status: string; problem: string }>;
+    assert.deepEqual(ledger.map((entry) => [entry.id, entry.status, entry.problem]), [['R1', 'fixed', GATE_FIX.items[0]!.problem], ['R2', 'open', 'Another problem.']]);
 
-    // Refused without a clean Claude review of the last iteration: nothing recorded, nothing moves.
+    // A fix verdict of Claude's on the last iteration does not refuse it (SF-131).
     const reviewPath = join(iterationDir(env, 'G-15', 2), 'review.json');
-    const review = await readFile(reviewPath, 'utf8');
-    await writeFile(reviewPath, JSON.stringify({ ...JSON.parse(review), verdict: 'fix', items: [{ path: 'a.txt', problem: 'Wrong.', expected: 'Right.', severity: 'major' }] }));
-    const notClean = await runCli(env, ['accept', 'app', 'G-15']);
-    assert.equal(notClean.code, 1);
-    assert.match(notClean.stderr, /^sf: sf accept needs a clean Claude review of the last iteration \(2\); it says fix/);
-    assert.equal(await exists(join(iterationDir(env, 'G-15', 2), 'gate-override.json')), false);
-    assert.equal((await new JobStore(env.state).read('app', 'G-15'))!.state, 'needs_human');
-    await writeFile(reviewPath, review);
+    await writeFile(reviewPath, JSON.stringify({ ...JSON.parse(await readFile(reviewPath, 'utf8')), verdict: 'fix', items: [{ path: 'a.txt', problem: 'Wrong.', expected: 'Right.', severity: 'major' }] }));
 
     const accepted = await runCli(env, ['accept', 'app', 'G-15']);
     assert.equal(accepted.code, 0, accepted.stderr);
@@ -903,10 +899,12 @@ test('sf accept (SF-115): at iteration_limit with a clean Claude review the job 
 
     const override = JSON.parse(await readFile(join(iterationDir(env, 'G-15', 2), 'gate-override.json'), 'utf8'));
     assert.match(override.at, /^\d{4}-\d\d-\d\dT/);
-    assert.deepEqual({ ...override, at: undefined }, { at: undefined, code: 'iteration_limit', unapplied: another.items.map((item) => ({ ...item, reopens: '', caused_by: '' })) });
+    assert.deepEqual({ ...override, at: undefined }, { at: undefined, code: 'iteration_limit', unapplied: another.items.map((item) => ({ id: 'R2', path: item.path, problem: item.problem, expected: item.expected, severity: item.severity })) });
     const events = await eventsOf(env, 'G-15');
     const index = events.findIndex((record) => record.type === 'gate_overridden');
     assert.deepEqual({ ...events[index], ts: undefined }, { ts: undefined, iteration: 2, type: 'gate_overridden', code: 'iteration_limit', unapplied: 1 });
+    const mr = await readFile(join(env.state, 'jobs', 'app', 'G-15', 'mr.md'), 'utf8');
+    assert.match(mr, /### Accepted over a stop\n- The user accepted iteration 2 over iteration_limit\.\n- R2 \[major\] `a\.txt`: Another problem\. Expected: Solved\./);
     assert.deepEqual((events[index + 1]!.state as { from: string; to: string }), { from: 'needs_human', to: 'preparing_mr' });
   } finally {
     await stop(served);

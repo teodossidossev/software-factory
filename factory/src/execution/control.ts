@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { changedImages, jobAttachment, type JobAttachment, resolveTaskImages, sameImages } from '../attachments.js';
 import { FactoryError } from '../errors.js';
 import { GATE_REVIEWER } from '../gate.js';
-import { type Job, type JobState, LIMIT_RETRY_MS, now, PAUSABLE_STATES, type PauseStep, RESUMABLE_STATES, TERMINAL_STATES } from '../jobs.js';
+import { claudeReviews, type Job, type JobState, LIMIT_RETRY_MS, now, PAUSABLE_STATES, type PauseStep, RESUMABLE_STATES, TERMINAL_STATES } from '../jobs.js';
 import { SIMPLIFIER } from '../ledger.js';
 import { gitBusy } from '../mr.js';
 import { factoryPrompt } from '../prompts.js';
@@ -248,7 +248,8 @@ export class ControlPart {
 
   // What a job in working or awaiting_review was doing: the turn, or the review round that runs or
   // is due on its last iteration (the Claude review, the gate after a clean one, the simplification
-  // pass once started); null when none was (awaiting review with the review off).
+  // pass once started); null when none was (awaiting review with the review off). Without the Claude
+  // review (SF-131) the gate is the review: due while its gate.json is missing.
   async #interruptedStep(job: Job): Promise<PauseStep | null> {
     const { workspace, ticket, iteration } = job;
     if (job.state === 'working') {
@@ -257,17 +258,23 @@ export class ControlPart {
     if (iteration === 0) {
       return null;
     }
-    const review = await this.core.jobs.readReview(workspace, ticket, iteration);
-    if (review === undefined) {
-      return this.core.config.review ? 'review' : null;
-    }
-    if (!('verdict' in review) || actedVerdict(withoutDropped(review)) !== 'clean') {
-      return null;
-    }
     const gate = await this.core.jobs.readGate(workspace, ticket, iteration);
-    // A gate the iteration's gate level skipped (SF-092) counts as absent, as with the gate off.
-    if (gate === undefined && this.core.config.gate.on && !(await gateSkipped(this.core.jobs, job))) {
-      return 'gate';
+    if (!claudeReviews(job)) {
+      if (gate === undefined) {
+        return this.core.config.review ? 'gate' : null;
+      }
+    } else {
+      const review = await this.core.jobs.readReview(workspace, ticket, iteration);
+      if (review === undefined) {
+        return this.core.config.review ? 'review' : null;
+      }
+      if (!('verdict' in review) || actedVerdict(withoutDropped(review)) !== 'clean') {
+        return null;
+      }
+      // A gate the iteration's gate level skipped (SF-092) counts as absent, as with the gate off.
+      if (gate === undefined && this.core.config.gate.on && !(await gateSkipped(this.core.jobs, job))) {
+        return 'gate';
+      }
     }
     if (gate !== undefined && (!('verdict' in gate) || actedVerdict(withoutDropped(gate)) !== 'clean')) {
       return null;
@@ -561,7 +568,8 @@ export class ControlPart {
   // Runner mode: what the job was doing when its last runner ended. A job awaiting review whose
   // last iteration has no review gets one; one whose review is clean and has no gate.json gets its
   // gate (or, with the gate off now, Clean); one with a clean gate.json too gets its simplification
-  // pass, or its outcome (SF-055).
+  // pass, or its outcome (SF-055). Without the Claude review (SF-131): no gate.json gets the gate, a
+  // clean one its outcome.
   resume(): Promise<void> {
     const { workspace, ticket } = this.core.runnerJob();
     return this.core.locked(async () => {
@@ -579,10 +587,20 @@ export class ControlPart {
     if (this.core.reviews.has(`${workspace}/${ticket}`) || !(await this.core.parts.start.resumable(job))) {
       return;
     }
-    const review = await this.core.jobs.readReview(workspace, ticket, job.iteration);
     const gate = await this.core.jobs.readGate(workspace, ticket, job.iteration);
+    if (!claudeReviews(job)) {
+      if (gate === undefined) {
+        // startReview starts the gate (SF-131).
+        await this.core.parts.reviews.startReview(job);
+      } else if ('verdict' in gate) {
+        // A clean gate (resumable) whose outcome never applied.
+        await this.core.parts.reviews.applying(job, () => this.core.parts.reviews.afterClean(job, gate.accepted_sensitive));
+      }
+      return;
+    }
+    const review = await this.core.jobs.readReview(workspace, ticket, job.iteration);
     if (review === undefined) {
-      this.core.parts.reviews.startReview(job);
+      await this.core.parts.reviews.startReview(job);
     } else if ('verdict' in review && gate !== undefined && 'verdict' in gate) {
       // A clean gate whose simplification pass never applied (SF-055).
       await this.core.parts.reviews.applying(job, () => this.core.parts.reviews.afterClean(job, [...new Set([...review.accepted_sensitive, ...gate.accepted_sensitive])]));

@@ -34,7 +34,7 @@ import type { RunQueue } from './queue.js';
 import { currentExplanation, ledgerStopEntries } from './explain.js';
 import { lineEntries, type StreamEntry, streamContext } from './job-stream.js';
 import { MAX_MR_TEXT_BYTES } from './mr.js';
-import type { Job, JobState, JobStore } from './jobs.js';
+import { claudeReviews, type Job, type JobState, type JobStore } from './jobs.js';
 import { DECISIONS } from './ledger.js';
 import { DIGEST_DEFAULTS, HANDOFF_MODES, WORKSPACE_COLORS, WORKSPACE_NAME_PATTERN } from './registry.js';
 import type { Setup, TicketRow } from './setup.js';
@@ -469,7 +469,8 @@ async function taskChangedOf(setup: DashboardSetup, job: Job): Promise<boolean |
 // (provider, resets_at, reset_seen), null otherwise; task_changed: taskChangedOf; turn_limit: the line of a chain that went on by
 // itself after a turn limit (SF-069), null without one; handover: the job in the user's checkout
 // (SF-073), null otherwise; handoff_skipped: why the automatic hand-over did not happen, null
-// otherwise; mr_conflict_turn: the MR preparation ran a conflict turn, so no Retry (SF-087).
+// otherwise; mr_conflict_turn: the MR preparation ran a conflict turn, so no Retry (SF-087);
+// claude_review: whether the Claude review runs on the job (SF-131; absent in job.json: true).
 function jobSummary(job: Job, counts: { files: number; undeclared: number; deleted: number }, mrHost: MrHost, taskChanged: boolean | null) {
   return {
     workspace: job.workspace, ticket: job.ticket, branch: job.branch, base: job.base, state: job.state,
@@ -477,7 +478,7 @@ function jobSummary(job: Job, counts: { files: number; undeclared: number; delet
     error: job.error ?? null, worktree: job.worktree, prepared_commit: job.prepared_commit,
     fixes: job.fixes, gate_fixes: job.gate_fixes, gate_tokens: job.gate_tokens, ...counts,
     mr: job.mr, mr_host: mrHost, paused: job.paused ?? null, limit: job.limit ?? null, task_changed: taskChanged, turn_limit: turnLimitLine(job) ?? null,
-    handover: job.handover ?? null, handoff_skipped: job.handoff_skipped ?? null,
+    handover: job.handover ?? null, handoff_skipped: job.handoff_skipped ?? null, claude_review: claudeReviews(job),
   };
 }
 
@@ -552,14 +553,18 @@ function lastImplementerStep(lines: string[]): NowLine | null {
 }
 
 // Who acts now on a running job and what it does (SF-077): the Implementer's last step, the
-// reviewer of the last iteration (Codex once Claude's review of it is clean), the MR writer; null
-// for a job that is not running, or an Implementer with no step in the tail yet.
+// reviewer of the last iteration (Codex once Claude's review of it is clean, or from the start
+// without the Claude review, SF-131), the MR writer; null for a job that is not running, or an
+// Implementer with no step in the tail yet.
 async function nowOf(jobs: JobStore, job: Job, facts: { review: Verdict; review_ended_at: string | null }): Promise<NowLine | null> {
   switch (job.state) {
     case 'starting':
     case 'working':
       return lastImplementerStep(await tailLines(jobs.eventsPath(job.workspace, job.ticket), NOW_TAIL_BYTES));
     case 'awaiting_review':
+      if (!claudeReviews(job)) {
+        return { who: 'Codex gate', what: `reviewing iteration ${job.iteration}`, ts: job.updated_at };
+      }
       return facts.review === 'clean'
         ? { who: 'Codex gate', what: `reviewing iteration ${job.iteration}`, ts: facts.review_ended_at }
         : { who: 'Claude review', what: `reviewing iteration ${job.iteration}`, ts: job.updated_at };
@@ -1531,8 +1536,8 @@ export async function startDashboard(
       return { route: action, exists, call: (data) => (parse(BODIES.retry.schema, data) ? run : undefined) };
     }
     if (action === 'accept') {
-      // sf accept: the Execution refuses any state but needs_human after the gate stopped, with a
-      // clean Claude review of the last iteration.
+      // sf accept: the Execution refuses any state but needs_human after a stop it takes on (the
+      // gate's, the ledger's, the Fix round limit), with the checks of acceptGateInRunner.
       const run = (): Promise<unknown> => actions.acceptGate(workspace, ticket);
       return { route: action, exists, call: (data) => (parse(BODIES.accept.schema, data) ? run : undefined) };
     }

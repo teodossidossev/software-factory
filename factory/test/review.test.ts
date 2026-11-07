@@ -637,7 +637,8 @@ test('SF_MAX_ITERATIONS=1 counts Fix sections: an sf say turn and one Fix are al
     const said = await runCli(env, ['say', 'app', 'L-1', 'also', 'this']);
     assert.equal(said.code, 0, said.stderr);
     const limited = await waitFor(served, 'L-1', 'needs_human', 3);
-    assert.deepEqual(limited.error, { code: 'iteration_limit', message: '1 Fix sections were written, the limit of SF_MAX_ITERATIONS; the user decides how to go on: sf accept takes iteration 3 as it is when Claude\'s review of it is clean (the open findings go unapplied), sf say gives a direction.' });
+    // The new message (SF-131): the open blocker and major findings counted, the refused Fix's among them.
+    assert.deepEqual(limited.error, { code: 'iteration_limit', message: '1 Fix sections were written, the limit of SF_MAX_ITERATIONS; 2 open blocker or major findings; the user decides how to go on: sf accept takes iteration 3 as it is (the open findings go unapplied and are listed in the MR text), sf say gives a direction.' });
     const text = await taskFile(repo, 'L-1');
     assert.deepEqual(text.match(/^## Fix \d+$/gm), ['## Fix 2']);
     assert.equal((await new JobStore(env.state).read('app', 'L-1'))!.fixes, 1);

@@ -49,7 +49,7 @@ bin/sf queue force <workspace> <ticket>        # Start anyway: the queued ticket
 bin/sf say <workspace> <ticket> <message...>   # a user message into the session; on a handed-over job it is Ask for changes (section Hand-over to your checkout); needs sf serve
 bin/sf review <workspace> <ticket>             # retry a failed Claude review (needs_human with review_failed); needs sf serve
 bin/sf retry <workspace> <ticket>              # retry a transient MR preparation failure (fetch_failed, mr_serve_restarted, mr_interrupted, mr_commit_failed, mr_rebase_failed, mr_failed) or a stop of the guard (guard_hit, guard_terms_invalid, guard_failed) without a new review; on mr_push_failed: push again; needs sf serve
-bin/sf accept <workspace> <ticket>             # accept a clean Claude review over a stopped gate (gate_rounds, gate_budget, gate_failed) or a ledger stop (review_churn, review_disputed) or the Fix round limit (iteration_limit) and prepare the MR, or skip the simplification pass's suggestions (simplify_offered); needs sf serve
+bin/sf accept <workspace> <ticket>             # accept the last iteration over a stopped gate (gate_rounds, gate_budget, gate_failed) or a ledger stop (review_churn, review_disputed), with a clean Claude review or none on the job, or at the Fix round limit (iteration_limit) whatever the last verdict, and prepare the MR; or skip the simplification pass's suggestions (simplify_offered); needs sf serve
 bin/sf simplify <workspace> <ticket>           # apply the simplification pass's suggestions (needs_human with simplify_offered): one Fix section "Simplify", reviewed as usual; needs sf serve
 bin/sf settle <workspace> <ticket> <id> accept|fix [note...]  # settle an escalated or contested finding of the ledger (needs_human); needs sf serve
 bin/sf status [<workspace> <ticket>]           # one job (with its worktree, sensitive, out-of-scope and deleted paths) or all jobs, with estimated cost and elapsed time; works without sf serve
@@ -228,10 +228,11 @@ started by the run queue as before.
 | `SF_CHECK_AFTER_FIX_MIN` | `5` | `check_after_minutes` in the job's status during later iterations. |
 | `SF_MAX_TURNS` | `150` | `maxTurns` of every Implementer turn. |
 | `SF_TURN_LIMIT_CONTINUES` | `1` | Continuations the factory sends by itself, per chain of Implementer turns, after a turn that reached `SF_MAX_TURNS` while making progress (SF-069, below); `0` to `10`, `0` stops at the first limit. |
-| `SF_MAX_ITERATIONS` | `5` | Fix sections a job may get (the reviewers', counted in the job's `fixes`); the next Fix is refused (`iteration_limit`, job `needs_human`), which can be accepted with a clean Claude review. An `sf say` turn does not count. |
+| `SF_MAX_ITERATIONS` | `3` | Fix sections a job may get (the reviewers', counted in the job's `fixes`); the next Fix is refused (`iteration_limit`, job `needs_human`): its items become open ledger entries, and the stop can be accepted whatever the last verdict (SF-131), with the open findings listed in the MR text. An `sf say` turn does not count. |
 | `SF_CLAUDE` | bundled binary | Absolute path of the Claude Code executable (`pathToClaudeCodeExecutable`). |
 | `SF_MODEL` | unset | Model of every Implementer turn, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
 | `SF_REVIEW` | on | `off` runs no Claude review (nor the gate): a published iteration stays in `awaiting_review` until the user goes on with `sf say` or aborts. |
+| `SF_CLAUDE_REVIEW` | `ticket` | Which jobs get the Claude review (SF-131): `ticket` only those whose Task file says `review: claude`; `always` every job but those that say `review: codex`; any other value is `invalid_config`. Decided at Start; without it the Codex gate is the job's only review. With the gate off (`SF_GATE=off`, or no Codex), Claude reviews every job. |
 | `SF_REVIEW_MODEL` | unset | Model of the Claude review, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
 | `SF_REVIEW_MAX_TURNS` | `60` | `maxTurns` of the Claude review. |
 | `SF_HANDOFF` | `checkout` | The hand-over at ready for review (SF-073, section Hand-over to your checkout): `checkout` checks the job's branch out in the workspace's checkout with its changes as Local Changes; `off` leaves the job in `ready_for_human_review` with its worktree. A workspace's own `handoff` in `workspaces.json` wins over it (SF-083). Anything else refuses to start (`invalid_config`). |
@@ -548,7 +549,8 @@ records, the marker, anything under the state directory that an older or newer f
 raise `STATE_VERSION` in `src/state-version.ts` and add a migration to `MIGRATIONS` that turns the
 state of the previous version into the new one (`{ from: N, run(stateDir) }`), with a test. Each
 step's number is written once it ran, so a failed migration starts again from the step that
-failed. An older factory then refuses the new state instead of misreading it.
+failed. An older factory then refuses the new state instead of misreading it. Version 2 (SF-131):
+`job.json` may hold `claude_review`; its migration from 1 changes nothing.
 
 ## Task check
 
@@ -945,6 +947,19 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   (`files` in `meta.json`, SF-024: `path`, `status` added/modified/deleted, `sensitive`
   declared/undeclared/no, `additions`, `deletions`). The job goes to `awaiting_review`, and the
   Claude review of the iteration starts (below).
+- The **review setting** (SF-131): at Start the factory decides once whether the job gets the
+  Claude review and stores it as `claude_review` in `job.json`, with a `review_setup` event that
+  gives the reason (`claudeReviewDecision` in `src/config.ts`): with the gate off, always; else the
+  Task file's `review: claude` or `review: codex`; else `SF_CLAUDE_REVIEW` (`ticket`: no, `always`:
+  yes). A job without the field (started before) counts as `true`. With `claude_review` false the
+  gate is the review: `startReview` starts the gate (at level `full`, `gate_level` reasons `no
+  Claude review`), its prompt says it is the only reviewer, its fix verdict is the next Fix section
+  (`SF_GATE_MAX_ROUNDS` does not apply; `SF_MAX_ITERATIONS` does), its clean verdict goes to Clean
+  with its accepted paths, and no `review.json` is written. The last `gate.json` then decides
+  everywhere the Claude review would: the resume of a runner and of a pause, a go-on after a
+  settlement, `sf check` (`review: {status: 'off', gate: …}`), sf accept and sf retry (the gate's
+  accepted paths), the stop's answers and the dashboard (the reviewer is the Codex gate, the
+  Claude row reads off).
 - The **review** (SF-038, `src/review.ts`) runs on every published iteration, after an Implementer
   turn and after the conflict re-publication of MR preparation, unless `SF_REVIEW=off`. It is a
   fresh Agent SDK `query()` (never `resume`) in the worktree, read-only: the tools `Read`, `Grep`
@@ -1101,9 +1116,15 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   `review_churn` and `review_disputed` (below), with the same clean Claude review; `unapplied` is
   then the ledger's open findings (open entries, fixes the user decided, disputed contests), each
   with its `id`, plus the items of the iteration's gate that reopen none of them. Since SF-115 it
-  also takes on the Fix round limit `iteration_limit`, with the same clean Claude review; `unapplied`
-  is then as for the ledger stops (a refused gate fix is not in the ledger, so its items come from
-  the iteration's `gate.json`).
+  also takes on the Fix round limit `iteration_limit`; since SF-131 whatever the last verdict, and
+  `unapplied` is then the ledger's entries with status `open` alone (the refused Fix wrote its items
+  there; fixes the user decided and disputed contests are not taken).
+  Since SF-131 a job without the Claude review needs no clean review for any of these stops, and
+  MR preparation goes on with the last `gate.json`'s accepted paths (a marked path they leave is
+  still refused, `sensitive_unacknowledged`). For such a job, and at `iteration_limit` for every
+  job, MR preparation lists the override in the MR text: a `### Accepted over a stop` subsection of `## Special things to note` with the code, what went
+  unapplied (the ledger entries already listed as not fixed aside) and, for a job without the
+  Claude review over `gate_failed` or `gate_budget`, `No reviewer passed iteration N.`
 - The **findings ledger** (SF-052, `src/ledger.ts`): `jobs/<ws>/<ticket>/ledger.json`, one entry per
   review item that went into a Fix section: `{id, iteration, reviewer, severity, path, problem,
   expected, status, response, evidence, reopened, asked, caused_by, dispute, settled}`. `id` is
@@ -1247,9 +1268,12 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   by codex: clean`, `review by codex: fix (2 items)`, `review by codex: fix (2 items), acted on as
   clean`, `review by codex failed: <error>`.
 - The job counts its Fix sections in `fixes` (the reviewers'). Once it reaches
-  `SF_MAX_ITERATIONS`, the next Fix is refused: `needs_human` with `iteration_limit`. With a clean
-  Claude review of the last iteration the stop can be accepted (`sf accept`, SF-115). An `sf say`
-  turn publishes an iteration but writes no Fix section, so it does not count.
+  `SF_MAX_ITERATIONS` (default 3, SF-131), the next Fix is refused: `needs_human` with
+  `iteration_limit`. The ledger it was given is written first, so the refused verdict's items are
+  open entries with ids; the stop's message counts the open blocker and major findings, and the
+  stop panel lists them (`ledgerStopEntries`). The stop can be accepted whatever the last verdict
+  (`sf accept`, SF-115, SF-131). An `sf say` turn publishes an iteration but writes no Fix section,
+  so it does not count.
 - The fix path appends `## Fix N` to the Task file of the checkout, copies it into the worktree
   and runs `/implement .software-factory/<ticket>.md Fix N` in the same session (`resume`). From
   `ready_for_human_review` it first reopens a worktree from the branch (`git worktree add <path>
@@ -2624,7 +2648,7 @@ confirmation where it has one; *Tell it to go on* is a message, "Go on." when th
 | `review_churn` | the open findings of the ledger (*Accept risk* / *Must fix* on those to settle) | Accept and prepare MR (with a clean Claude review), Send, Abort… |
 | `gate_rounds` | the last gate's findings (nothing to settle one by one: the API settles only escalated and contested ones) | Accept and prepare MR (with a clean Claude review), Send, Abort… |
 | `gate_budget` | the gate's tokens used | Accept and prepare MR (with a clean Claude review), Send, Abort… |
-| `iteration_limit` | the last verdicts' findings | Accept and prepare MR (with a clean Claude review), Send, Restart…, Abort… |
+| `iteration_limit` | the open blocker and major ledger entries | Accept and prepare MR (whatever the last verdict), Send, Restart…, Abort… |
 | `max_turns` | nothing | Tell it to go on, Abort… |
 | `gate_failed` | the gate's error | Accept and prepare MR (with a clean Claude review), Tell it to go on, Abort… |
 | `review_failed` | the review's error | Retry review, Abort… |
@@ -2937,7 +2961,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `POST api/jobs/<ws>/<ticket>/review` | `{}` | `Execution.retryReview(ws, ticket)` (`sf review`): the failed review of the last iteration runs again; result `{state, iteration}`; `409 invalid_state` unless the job is `needs_human` with `review_failed`, `409 review_off` with `SF_REVIEW=off`; answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
 | `POST api/jobs/<ws>/<ticket>/settle` | `{"id": string, "decision": "accept" \| "fix", "note"?: string}` | `Execution.settle(ws, ticket, id, decision, note)` (`sf settle`, SF-052): the settlement of an escalated or contested ledger entry; result `{state, id, status, waiting}`; `409 invalid_state` unless the job is `needs_human` and the entry escalated or contested; `400 invalid_content` for a bad id, decision or note; `500 ledger_invalid` when `ledger.json` cannot be read; answered by the job's runner |
 | `POST api/jobs/<ws>/<ticket>/simplify` | `{}` | `Execution.simplify(ws, ticket)` (`sf simplify`, SF-055): the Fix section "Simplify" with the suggestions of the simplification pass and their ledger entries, then the next iteration; result `{state, iteration, check_after_minutes}`; `409 invalid_state` unless the job is `needs_human` with `simplify_offered` (and never a second time); `409 worktree_missing`; answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
-| `POST api/jobs/<ws>/<ticket>/accept` | `{}` | `Execution.acceptGate(ws, ticket)` (`sf accept`, SF-047): the override of the stopped gate, then MR preparation; result `{state, iteration, branch}`; `409 invalid_state` with the reason unless the job is `needs_human` with `gate_rounds`, `gate_budget`, `gate_failed`, `review_churn`, `review_disputed`, `iteration_limit` (SF-115) or `simplify_offered` (Skip, SF-055) and a clean Claude review of the last iteration; the MR preparation's refusals (`409 worktree_missing`, `409 turn_running`); answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
+| `POST api/jobs/<ws>/<ticket>/accept` | `{}` | `Execution.acceptGate(ws, ticket)` (`sf accept`, SF-047): the override of the stopped gate, then MR preparation; result `{state, iteration, branch}`; `409 invalid_state` with the reason unless the job is `needs_human` with `gate_rounds`, `gate_budget`, `gate_failed`, `review_churn`, `review_disputed`, `iteration_limit` (SF-115) or `simplify_offered` (Skip, SF-055) and a clean Claude review of the last iteration (none needed at `iteration_limit`, nor for a job without the Claude review, SF-131); the MR preparation's refusals (`409 worktree_missing`, `409 turn_running`); answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
 | `POST api/jobs/<ws>/<ticket>/mr-create` | `{}` | `Execution.createMergeRequest(ws, ticket)` (`sf mr create`, SF-048): result `{state, branch, title?, link?, mr?: {host, number, url, state, reused}, error?}`; from `ready_for_human_review` it waits for the job's runner like approve; `409` for `invalid_state`, `runner_active`, `mr_token_missing`, `mr_host_unsupported`, `mr_text_missing`; `502` for `mr_auth_failed`, `mr_host_error`, `mr_host_unreachable` |
 | `POST api/jobs/<ws>/<ticket>/mr-save` | `{"title": string, "body": string, "branch"?: string, "base"?: string}` | `Execution.saveMr(ws, ticket, input)` (SF-080): the MR text saved, the prepared commit's message rewritten, the branch renamed and the base changed when given and different; result `{state, branch, base, edited, prepared_commit}`; `400 mr_text_invalid`, `409` for `invalid_state`, `runner_active`, `branch_changed`, `branch_locked`, `base_unrelated`, `mr_text_missing`; its body may be up to 6 × 64 KiB + 1 KiB (an MR text of 64 KiB, escaped); the pages that show the job get its detail |
 | `POST api/jobs/<ws>/<ticket>/mr-reset` | `{}` | `Execution.resetMr(ws, ticket)` (SF-080): the factory's text back and the commit message with it; result as `mr-save`; `409 invalid_state` "The MR text is already the factory's." |

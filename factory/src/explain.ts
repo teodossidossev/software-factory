@@ -13,7 +13,7 @@ import { writeFileAtomic } from './atomic.js';
 import { MAX_MODEL_INPUT_CHARS } from './digest.js';
 import { digestSessionOptions } from './digest-run.js';
 import { jobUserMessages } from './job-stream.js';
-import type { Job, JobStore, ReviewRecord } from './jobs.js';
+import { claudeReviews, type Job, type JobStore, type ReviewRecord } from './jobs.js';
 import { type LedgerEntry, unsettled } from './ledger.js';
 import { explainPrompt } from './prompts.js';
 import { configDir as defaultConfigDir, explainSettings, type ExplainSettings, loadRegistry } from './registry.js';
@@ -132,10 +132,14 @@ const ACCEPT_CODES = [...GATE_CODES, ...LEDGER_CODES, 'iteration_limit', 'simpli
 const RETRY_STOPS = ['fetch_failed', 'mr_serve_restarted', 'mr_failed'];
 
 // The ledger entries a ledger stop is about (the stop panel's, dashboard.ts stopOf): the unsettled
-// ones (escalated, review_disputed), the open ones (review_churn); null for any other stop.
+// ones (escalated, review_disputed), the open ones (review_churn), the open blocker and major ones
+// (iteration_limit, SF-131: what an Accept leaves unapplied); null for any other stop.
 export function ledgerStopEntries(code: string, ledger: LedgerEntry[]): LedgerEntry[] | null {
   if (code === 'escalated' || code === 'review_disputed') {
     return unsettled(ledger);
+  }
+  if (code === 'iteration_limit') {
+    return ledger.filter((entry) => entry.status === 'open' && entry.severity !== 'nit');
   }
   return code === 'review_churn' ? ledger.filter((entry) => entry.status === 'open') : null;
 }
@@ -150,10 +154,15 @@ function actedClean(review: ReviewRecord | undefined): boolean {
   return review.items.every((item) => item.severity === 'nit' || dropped.has(JSON.stringify(item)));
 }
 
-// Accept and prepare the MR applies (the dashboard's gateAcceptable): a gate or ledger stop, or the
-// Fix round limit (SF-115), over a clean Claude review of the job's last iteration.
+// Accept and prepare the MR applies (the dashboard's gateAcceptable): a gate or ledger stop over a
+// clean Claude review of the job's last iteration, or over none without the Claude review (SF-131:
+// the gate is the review); the Fix round limit (SF-115) whatever the last verdict (SF-131).
 export function gateAcceptable(job: Job, review: ReviewRecord | undefined): boolean {
-  return job.state === 'needs_human' && ACCEPT_CODES.includes(job.error?.code ?? '') && actedClean(review);
+  const code = job.error?.code ?? '';
+  if (job.state !== 'needs_human' || !ACCEPT_CODES.includes(code)) {
+    return false;
+  }
+  return code === 'iteration_limit' || !claudeReviews(job) || actedClean(review);
 }
 
 // Retry applies (the dashboard's retryable): a transient stop of MR preparation, never after a conflict turn.
@@ -166,7 +175,8 @@ export interface StopAnswer {
   command: string;
 }
 
-// What stopAnswers reads of the job: its ledger and the Claude review of its last iteration.
+// What stopAnswers reads of the job: its ledger and the Claude review of its last iteration (none
+// without the Claude review, SF-131).
 export interface StopFacts {
   ledger: LedgerEntry[];
   review: ReviewRecord | undefined;
@@ -299,7 +309,7 @@ export async function userMessages(jobs: JobStore, job: Job): Promise<ExplainInp
 // The model's input for the job's stop, read now (the answers too).
 export async function explainInput(jobs: JobStore, job: Job, now = new Date()): Promise<ExplainInput> {
   const ledger = await jobs.readLedger(job.workspace, job.ticket);
-  const review = job.iteration >= 1 ? await jobs.readReview(job.workspace, job.ticket, job.iteration) : undefined;
+  const review = job.iteration >= 1 && claudeReviews(job) ? await jobs.readReview(job.workspace, job.ticket, job.iteration) : undefined;
   let report: string | undefined;
   if (job.iteration >= 1) {
     report = await jobs.readIteration(job.workspace, job.ticket, job.iteration).then(({ report: text }) => text, () => undefined);

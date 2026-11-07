@@ -10,7 +10,7 @@ import { FactoryError } from '../errors.js';
 import { runGit } from '../git.js';
 import { attachWorktree, checkBranchFree } from '../handoff.js';
 import { jobUserMessages } from '../job-stream.js';
-import { type FileChange, type Job, type JobState, now } from '../jobs.js';
+import { claudeReviews, type FileChange, type Job, type JobState, now } from '../jobs.js';
 import { answerFix, escalationMessage, headings, type LedgerEntry, userFixItems } from '../ledger.js';
 import { buildPatch, changedFilesSection, fileChanges, notificationLine, type Patch } from '../patch.js';
 import { factoryPrompt, iterationCost } from '../prompts.js';
@@ -28,6 +28,12 @@ import { changeNote, checkNotInCheckout, cutOffError, exists, type Live } from '
 import type { Core } from './core.js';
 
 type Success = Extract<IdleOutcome, { ok: true }>;
+
+// The stop at the Fix round limit (SF-115, SF-131): fixes Fix sections written, open the open
+// blocker and major findings, iteration the one an Accept takes.
+export function iterationLimitMessage(fixes: number, open: number, iteration: number): string {
+  return `${fixes} Fix sections were written, the limit of SF_MAX_ITERATIONS; ${open} open blocker or major findings; the user decides how to go on: sf accept takes iteration ${iteration} as it is (the open findings go unapplied and are listed in the MR text), sf say gives a direction.`;
+}
 
 // The options of a Fix section (fix).
 interface FixOptions {
@@ -228,7 +234,7 @@ export class TurnsPart {
           return;
         }
         // from: working (#idle: preparing_mr went to mrIdle)
-        this.core.parts.reviews.startReview(await this.core.transition(published, 'awaiting_review', 'publish', undefined, [notificationLine(changes)]));
+        await this.core.parts.reviews.startReview(await this.core.transition(published, 'awaiting_review', 'publish', undefined, [notificationLine(changes)]));
       } catch (error) {
         console.error(error);
         // from: working (#idle: preparing_mr went to mrIdle)
@@ -327,7 +333,8 @@ export class TurnsPart {
 
   // The job a ledger stop held goes on (SF-052): a Fix section when the user decided a fix (with the
   // open blocker and major entries), otherwise the review that was stopped runs again: the gate
-  // when it stopped the job, else the Claude review. Only under the lock.
+  // when it stopped the job, else the Claude review; without the Claude review (SF-131) always the
+  // gate, which startReview starts. Only under the lock.
   async goOn(job: Job, ledger: LedgerEntry[]): Promise<JobState> {
     const { workspace: workspaceName, ticket, iteration } = job;
     const fix = userFixItems(ledger, iteration);
@@ -347,16 +354,19 @@ export class TurnsPart {
     if (job.worktree === null || !(await exists(job.worktree))) {
       throw new FactoryError('worktree_missing', `The worktree of ${workspaceName}/${ticket} is missing; sf reset the ticket and start again.`);
     }
-    const review = await this.core.jobs.readReview(workspaceName, ticket, iteration);
+    const review = claudeReviews(job) ? await this.core.jobs.readReview(workspaceName, ticket, iteration) : undefined;
     const gate = job.error?.code === 'escalated' ? undefined : await this.core.jobs.readGate(workspaceName, ticket, iteration);
     await this.core.jobs.removeGate(workspaceName, ticket, iteration);
-    if (gate !== undefined && 'verdict' in gate && review !== undefined && 'verdict' in review) {
+    if (!claudeReviews(job)) {
+      // from: needs_human (checkSettle)
+      await this.core.parts.reviews.startReview(await this.core.transition(job, 'awaiting_review', 'go_on'));
+    } else if (gate !== undefined && 'verdict' in gate && review !== undefined && 'verdict' in review) {
       // from: needs_human (checkSettle)
       await this.core.parts.reviews.startGate(await this.core.transition(job, 'awaiting_review', 'go_on'), review);
     } else {
       await this.core.jobs.removeReview(workspaceName, ticket, iteration);
       // from: needs_human (checkSettle)
-      this.core.parts.reviews.startReview(await this.core.transition(job, 'awaiting_review', 'go_on'));
+      await this.core.parts.reviews.startReview(await this.core.transition(job, 'awaiting_review', 'go_on'));
     }
     return (await this.core.job(workspaceName, ticket)).state;
   }
@@ -399,9 +409,15 @@ export class TurnsPart {
       this.checkFix(job);
     }
     if (!overLimit && job.fixes >= this.core.config.maxIterations) {
+      // The refused verdict's items become open ledger entries with ids (SF-131): the stop lists
+      // them, and an Accept leaves them unapplied in the MR text.
+      if (ledger !== undefined) {
+        await this.core.jobs.writeLedger(workspaceName, ticket, ledger);
+      }
+      const open = (ledger ?? (await this.core.jobs.readLedger(workspaceName, ticket))).filter((entry) => entry.status === 'open' && entry.severity !== 'nit').length;
       const message = `${job.fixes} Fix sections were written, the limit of SF_MAX_ITERATIONS`;
       // from: awaiting_review, ready_for_human_review (checkFix), needs_human (fromStop)
-      await this.core.transition(job, 'needs_human', 'fix', { code: 'iteration_limit', message: `${message}; the user decides how to go on: sf accept takes iteration ${job.iteration} as it is when Claude's review of it is clean (the open findings go unapplied), sf say gives a direction.` });
+      await this.core.transition(job, 'needs_human', 'fix', { code: 'iteration_limit', message: iterationLimitMessage(job.fixes, open, job.iteration) });
       throw new FactoryError('iteration_limit', `${message}; the job needs the user.`);
     }
     const workspace = await this.core.resolve(workspaceName);

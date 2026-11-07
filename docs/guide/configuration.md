@@ -72,7 +72,7 @@ effect and says only whether each token is set.
 | --- | --- | --- | --- |
 | `SF_MAX_TURNS` | `150` | positive integer | Steps (tool calls and answers) of one Implementer turn. A big ticket may need more, for example `SF_MAX_TURNS=300`. |
 | `SF_TURN_LIMIT_CONTINUES` | `1` | `0` to `10` | How many times the factory says "continue" by itself, per chain of turns, after a turn used all its steps while still changing files. `0` stops at the first limit (`max_turns`). |
-| `SF_MAX_ITERATIONS` | `5` | positive integer | Fix sections a job may get from the reviewers. The next one stops the job (`iteration_limit`). With a clean Claude review you may Accept instead. Your own messages do not count. |
+| `SF_MAX_ITERATIONS` | `3` | positive integer | Fix sections a job may get from the reviewers. The next one stops the job (`iteration_limit`): you may Accept the iteration as it is, whatever the last verdict, with its open findings listed in the MR text. Your own messages do not count. |
 | `SF_CHECK_AFTER_START_MIN` | `15` | positive integer | `check_after_minutes` the job status reports during the first iteration (a hint for a polling client; the dashboard does not need it). |
 | `SF_CHECK_AFTER_FIX_MIN` | `5` | positive integer | The same hint for later iterations. |
 
@@ -81,6 +81,7 @@ effect and says only whether each token is set.
 | Key | Default | Allowed | Meaning |
 | --- | --- | --- | --- |
 | `SF_REVIEW` | on | `off` | `off` runs no Claude review and no gate: an iteration waits in `awaiting_review` until you send a message or abort. |
+| `SF_CLAUDE_REVIEW` | `ticket` | `ticket`, `always`, empty | `ticket`: the Claude review runs only on tickets whose Task file says `review: claude`; the Codex gate alone reviews the others. `always`: every ticket but those that say `review: codex`. Decided when a job starts. With the gate off, Claude reviews every job. |
 | `SF_REVIEW_MAX_TURNS` | `60` | positive integer | Steps of a Claude review; the simplification pass uses it too. |
 | `SF_SIMPLIFY` | on | `off` | The simplification pass after a clean verdict of a job that had fix rounds. `off` goes straight to MR preparation. |
 | `SF_TASK_CHECK_AUTO` | `on` | `on`, `off`, empty | `on`: `sf serve` checks a written Task file 60 s after its last change. `off`: only Check on the board and `sf check-task`. |
@@ -91,9 +92,9 @@ effect and says only whether each token is set.
 
 | Key | Default | Allowed | Meaning |
 | --- | --- | --- | --- |
-| `SF_GATE` | `codex` | `codex`, `off`, empty | `codex` runs the Codex CLI after a clean Claude review; `off` lets the Claude verdict decide. With `codex` and no Codex found, the gate is off and `sf serve` prints `gate: off (…); the Claude review decides`. |
+| `SF_GATE` | `codex` | `codex`, `off`, empty | `codex` runs the Codex CLI after a clean Claude review, or alone on a job without the Claude review (`SF_CLAUDE_REVIEW`); `off` lets the Claude verdict decide, on every job. With `codex` and no Codex found, the gate is off and `sf serve` prints `gate: off (…); the Claude review decides`. |
 | `SF_CODEX` | `codex` on `PATH` | absolute path | The Codex executable. A relative path is refused (`invalid_config`); a path that is not an executable file turns the gate off (`PATH` is then not searched). |
-| `SF_GATE_MAX_ROUNDS` | `5` | positive integer | Fix verdicts of the gate per job; the next one stops the job (`gate_rounds`). |
+| `SF_GATE_MAX_ROUNDS` | `5` | positive integer | Fix verdicts of the gate per job after a clean Claude review; the next one stops the job (`gate_rounds`). On a job without the Claude review, `SF_MAX_ITERATIONS` limits the rounds instead. |
 | `SF_GATE_MAX_TOKENS` | `5000000` | 1 to 1000000000 | Input plus output tokens of all gate runs of a job; at the ceiling the job stops (`gate_budget`). |
 | `SF_GATE_TIMEOUT_MS` | `900000` (15 min) | 1 to 86400000 | How long one gate run may take; then it is killed (`gate_failed`). |
 | `SF_GATE_LEVEL` | `auto` | `auto`, `full`, empty | `auto` picks `full`, `light` (one round) or `none` (documentation only) from the risk of the change; `full` runs the gate on every clean Claude verdict. |

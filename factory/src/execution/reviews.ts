@@ -9,8 +9,8 @@ import { FactoryError } from '../errors.js';
 import { gateDecision } from '../gate-level.js';
 import { GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from '../gate.js';
 import { jobUserMessages } from '../job-stream.js';
-import { type GateOverride, type GateRecord, type IterationMeta, type Job, type JobState, now, type ReviewRecord, type SimplifyRecord } from '../jobs.js';
-import { applyVerdict, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, LEDGER_ID, FACTORY_PROBLEMS, settle, SETTLE_CODES, unappliedEntries, unsettled } from '../ledger.js';
+import { claudeReviews, type GateOverride, type GateRecord, type IterationMeta, type Job, type JobState, now, type ReviewRecord, type SimplifyRecord } from '../jobs.js';
+import { applyVerdict, entryItem, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, LEDGER_ID, FACTORY_PROBLEMS, settle, SETTLE_CODES, unappliedEntries, unsettled } from '../ledger.js';
 import { Redactor } from '../redact.js';
 import { readJobRules } from '../rules-docs.js';
 import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, type StructuredOutcome, unacceptedItems } from '../review.js';
@@ -43,11 +43,19 @@ export class ReviewsPart {
     return imageRefs(job.ticket, this.core.jobs.attachmentsDir(job.workspace, job.ticket), job.attachments ?? [], task);
   }
 
-  // Starts the Claude review of the job's last iteration; it runs outside the lock. A review still
-  // running for the job is cancelled. Nothing with SF_REVIEW=off.
-  startReview(job: Job): void {
+  // Starts the review of the job's last iteration; it runs outside the lock. A review still running
+  // for the job is cancelled. Nothing with SF_REVIEW=off. A job without the Claude review (SF-131,
+  // claude_review false) gets the gate instead, which is then its review: every caller (the publish,
+  // the go-on after a settlement, the end of a conflict turn, the pick-up of a runner) goes through
+  // here. Only under the lock.
+  async startReview(job: Job): Promise<void> {
     this.core.runnerJob();
     if (!this.core.config.review || this.core.stopping) {
+      return;
+    }
+    if (!claudeReviews(job)) {
+      await this.#gateRuns(job);
+      await this.startGate(job);
       return;
     }
     const key = `${job.workspace}/${job.ticket}`;
@@ -85,17 +93,22 @@ export class ReviewsPart {
       await this.core.jobs.removeReview(workspaceName, ticket, job.iteration);
       // from: needs_human (checkRetryReview)
       const next = await this.core.transition(job, 'awaiting_review', 'review_retry');
-      this.startReview(next);
-      return { state: next.state, iteration: next.iteration };
+      await this.startReview(next);
+      // The job as the start left it: a gate over its budget hands it to the user at once.
+      const started = await this.core.job(workspaceName, ticket);
+      return { state: started.state, iteration: started.iteration };
     });
   }
 
   // The user's override of a stopped gate (sf accept, the dashboard's Accept and prepare MR): a job
   // the gate handed over (needs_human with gate_rounds, gate_budget or gate_failed), or the ledger
-  // or the Fix round limit (iteration_limit, SF-115) stopped, whose last iteration has a clean
-  // Claude review goes on as after a clean gate, to MR preparation with the paths Claude accepted.
-  // The override is recorded first: gate-override.json with what goes unapplied (the Codex items,
-  // the gate's error, or the ledger's open findings) and a gate_overridden event.
+  // or the Fix round limit (iteration_limit, SF-115) stopped, goes on as after a clean gate, to MR
+  // preparation with the accepted paths. With the Claude review on, its last iteration needs a
+  // clean Claude review, except at the Fix round limit (SF-131: whatever the last verdict), and the
+  // paths are the review's accepted_sensitive; with it off (SF-131) no clean review is needed, and
+  // the paths are the last gate.json's. The override is recorded first: gate-override.json with what
+  // goes unapplied (the Codex items, the gate's error, or the ledger's open findings) and a
+  // gate_overridden event; MR preparation lists it in the MR text.
   acceptGate(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; branch: string }> {
     return this.core.parts.control.request(workspaceName, ticket, { kind: 'accept' }) as Promise<{ state: JobState; iteration: number; branch: string }>;
   }
@@ -111,11 +124,15 @@ export class ReviewsPart {
   }
 
   // What an Accept over a ledger stop (review_churn, review_disputed) or the Fix round limit
-  // (iteration_limit, SF-115) goes without: the ledger's open findings with their ids, and the
-  // items of the iteration's gate that neither reopen one of them nor were dropped (a refused
-  // gate fix at the limit wrote no ledger entries, so its items come from gate.json).
-  async #ledgerUnapplied(job: Job, gate: GateRecord | undefined): Promise<Array<ReviewItem & { id?: string }>> {
+  // (iteration_limit, SF-115) goes without: the ledger's open findings with their ids, and, after a
+  // ledger stop, the items of the iteration's gate that neither reopen one of them nor were dropped.
+  // At the limit the ledger's open entries alone (SF-131): the refused Fix wrote its items there as
+  // open; the fixes the user decided and the disputed contests are not taken.
+  async #ledgerUnapplied(job: Job, gate: GateRecord | undefined, code: string): Promise<Array<ReviewItem & { id?: string }>> {
     const ledger = await this.core.jobs.readLedger(job.workspace, job.ticket);
+    if (code === 'iteration_limit') {
+      return ledger.filter((entry) => entry.status === 'open').map((entry) => ({ id: entry.id, ...entryItem(entry) }));
+    }
     const open = unappliedEntries(ledger);
     const ids = new Set(open.map((entry) => entry.id));
     const accepted = new Set(ledger.filter((entry) => entry.status === 'accepted_risk').map((entry) => entry.id));
@@ -130,23 +147,33 @@ export class ReviewsPart {
     return this.core.locked(async () => {
       const job = await this.core.job(workspaceName, ticket);
       const code = this.checkAcceptGate(job);
-      const review = job.iteration > 0 ? await this.core.jobs.readReview(workspaceName, ticket, job.iteration) : undefined;
-      // Items the ledger dropped (they reopened an accepted risk, SF-052) never count.
-      if (review === undefined || !('verdict' in review) || actedVerdict(withoutDropped(review)) !== 'clean') {
-        const what = review === undefined ? 'has none' : !('verdict' in review) ? 'failed' : review.verdict === 'fix' ? 'says fix' : 'says clean with a blocker or major item';
-        throw new FactoryError('invalid_state', `sf accept needs a clean Claude review of the last iteration (${job.iteration}); it ${what}.`);
+      const gate = job.iteration > 0 ? await this.core.jobs.readGate(workspaceName, ticket, job.iteration) : undefined;
+      const gateAccepted = gate !== undefined && 'verdict' in gate ? gate.accepted_sensitive : [];
+      // The paths the deciding review accepted: Claude's (whatever its verdict at the Fix round
+      // limit), or with the Claude review off the last gate.json's (SF-131). prepareMr refuses the
+      // marked paths they leave (sensitive_unacknowledged).
+      let accepted = gateAccepted;
+      if (claudeReviews(job)) {
+        const review = job.iteration > 0 ? await this.core.jobs.readReview(workspaceName, ticket, job.iteration) : undefined;
+        // Items the ledger dropped (they reopened an accepted risk, SF-052) never count.
+        if (code !== 'iteration_limit') {
+          if (review === undefined || !('verdict' in review) || actedVerdict(withoutDropped(review)) !== 'clean') {
+            const what = review === undefined ? 'has none' : !('verdict' in review) ? 'failed' : review.verdict === 'fix' ? 'says fix' : 'says clean with a blocker or major item';
+            throw new FactoryError('invalid_state', `sf accept needs a clean Claude review of the last iteration (${job.iteration}); it ${what}.`);
+          }
+          const unaccepted = await this.unaccepted(job, review.accepted_sensitive);
+          if (unaccepted.length > 0) {
+            throw new FactoryError('invalid_state', `sf accept needs a clean Claude review of the last iteration (${job.iteration}); it does not accept the ${markedGroups(unaccepted).map((group) => `${group.label} ${group.paths.join(', ')}`).join(' and the ')}.`);
+          }
+        }
+        accepted = review !== undefined && 'verdict' in review ? review.accepted_sensitive : [];
       }
-      const unaccepted = await this.unaccepted(job, review.accepted_sensitive);
-      if (unaccepted.length > 0) {
-        throw new FactoryError('invalid_state', `sf accept needs a clean Claude review of the last iteration (${job.iteration}); it does not accept the ${markedGroups(unaccepted).map((group) => `${group.label} ${group.paths.join(', ')}`).join(' and the ')}.`);
-      }
-      const gate = await this.core.jobs.readGate(workspaceName, ticket, job.iteration);
       if (code === SIMPLIFY_CODE) {
         // Skip (SF-055): MR preparation as after the clean gate, with the paths both reviewers
         // accepted; simplify.json is marked skipped, so the suggestions go into the MR text (mrIdle).
         // No gate override: the gate was clean.
         const record = await this.core.jobs.readSimplify(workspaceName, ticket, job.iteration);
-        const sensitive = [...new Set([...review.accepted_sensitive, ...(gate !== undefined && 'verdict' in gate ? gate.accepted_sensitive : [])])];
+        const sensitive = [...new Set([...accepted, ...gateAccepted])];
         return this.core.parts.mr.prepareMr(job, sensitive, { onAccepted: async () => {
           const at = now();
           if (record !== undefined && 'suggestions' in record) {
@@ -158,10 +185,10 @@ export class ReviewsPart {
         } });
       }
       const unapplied = LEDGER_ACCEPT_CODES.includes(code) || code === 'iteration_limit'
-        ? await this.#ledgerUnapplied(job, gate)
+        ? await this.#ledgerUnapplied(job, gate, code)
         : gate === undefined ? [] : 'verdict' in gate ? gate.items : gate.error;
       const override: GateOverride = { at: now(), code, unapplied };
-      return this.core.parts.mr.prepareMr(job, review.accepted_sensitive, { onAccepted: async () => {
+      return this.core.parts.mr.prepareMr(job, accepted, { onAccepted: async () => {
         await this.core.jobs.writeGateOverride(workspaceName, ticket, job.iteration, override);
         await this.core.jobs.appendEvent(workspaceName, ticket, {
           ts: override.at, iteration: job.iteration, type: 'gate_overridden', code: override.code,
@@ -373,6 +400,14 @@ export class ReviewsPart {
     if (recorded !== undefined) {
       return recorded.ran;
     }
+    if (!claudeReviews(job)) {
+      // The gate is the job's only review (SF-131): it always runs, at level full.
+      const at = now();
+      const reasons = ['no Claude review'];
+      await this.core.jobs.writeGateLevel(workspace, ticket, iteration, { level: 'full', ran: true, reasons, files: null, lines: null, at });
+      await this.core.jobs.appendEvent(workspace, ticket, { ts: at, iteration, type: 'gate_level', level: 'full', ran: true, reasons });
+      return true;
+    }
     let meta: IterationMeta | undefined;
     try {
       meta = await this.core.jobs.readMeta(workspace, ticket, iteration);
@@ -445,10 +480,10 @@ export class ReviewsPart {
     }
   }
 
-  // Starts the gate after a clean Claude verdict (claude) whose gate level runs it (SF-092); it runs
-  // outside the lock. A job whose gate runs used up SF_GATE_MAX_TOKENS goes to the user instead.
-  // Only under the lock.
-  async startGate(job: Job, claude: ReviewOutput): Promise<void> {
+  // Starts the gate after a clean Claude verdict (claude) whose gate level runs it (SF-092), or
+  // without one as the job's only review (SF-131: claude undefined); it runs outside the lock. A job
+  // whose gate runs used up SF_GATE_MAX_TOKENS goes to the user instead. Only under the lock.
+  async startGate(job: Job, claude?: ReviewOutput): Promise<void> {
     if (job.gate_tokens >= this.core.config.gateMaxTokens) {
       // from: awaiting_review (afterClaude, and goOn after its transition)
       await this.core.transition(job, 'needs_human', 'verdict', {
@@ -469,17 +504,20 @@ export class ReviewsPart {
   }
 
   // Runs the gate, then applies its outcome under the lock.
-  async #gate(job: Job, running: RunningReview, claude: ReviewOutput): Promise<void> {
+  async #gate(job: Job, running: RunningReview, claude: ReviewOutput | undefined): Promise<void> {
     const { workspace: name, ticket, iteration } = job;
     const gate = this.core.config.gate;
     let outcome: GateOutcome;
     const redactor = new Redactor({ cwd: job.worktree ?? '' });
     try {
-      if (job.worktree === null || job.base_commit === null || !gate.on) {
+      if (!gate.on) {
+        throw new Error(`the gate is off (${gate.reason})`);
+      }
+      if (job.worktree === null || job.base_commit === null) {
         throw new Error('the job has no worktree or base commit');
       }
       const input = await this.#reviewInput(job, job.worktree);
-      outcome = await runGate(gatePrompt({ ...input, baseCommit: job.base_commit }), {
+      outcome = await runGate(gatePrompt({ ...input, baseCommit: job.base_commit, onlyReviewer: claude === undefined }), {
         codexPath: gate.codexPath, cwd: job.worktree, dir: this.core.jobs.iterationDir(name, ticket, iteration), model: this.core.config.codexModel,
         images: this.imageRefs(job, input.task).map((image) => image.path),
         timeoutMs: this.core.config.gateTimeoutMs, signal: running.controller.signal,
@@ -507,10 +545,11 @@ export class ReviewsPart {
   // review of the same iteration, as the factory acts on it (decide, SF-051): clean (a fix with nits
   // only too) runs Clean with the paths both reviewers accepted, fix (a blocker or major item, or an
   // undeclared sensitive path or a path outside the Task's scope the gate does not accept) is the
-  // next Fix section unless the gate's rounds are used up. A run that hit a usage limit (limit) while
-  // the job still awaits review of the same iteration parks the job (SF-072): no gate.json, no event,
-  // no tokens charged.
-  async #gated(gated: Job, running: RunningReview, claude: ReviewOutput, outcome: GateOutcome, limit?: UsageLimit): Promise<void> {
+  // next Fix section unless the gate's rounds are used up. Without a Claude review (claude undefined,
+  // SF-131) the paths are the gate's alone and SF_GATE_MAX_ROUNDS does not apply: SF_MAX_ITERATIONS
+  // limits the rounds. A run that hit a usage limit (limit) while the job still awaits review of the
+  // same iteration parks the job (SF-072): no gate.json, no event, no tokens charged.
+  async #gated(gated: Job, running: RunningReview, claude: ReviewOutput | undefined, outcome: GateOutcome, limit?: UsageLimit): Promise<void> {
     const { workspace: name, ticket, iteration } = gated;
     const key = `${name}/${ticket}`;
     if (this.core.reviews.get(key) !== running || running.controller.signal.aborted) {
@@ -570,7 +609,7 @@ export class ReviewsPart {
       return;
     }
     const fixing = applied.kind === 'fix';
-    if (fixing && job.gate_fixes >= this.core.config.gateMaxRounds) {
+    if (fixing && claude !== undefined && job.gate_fixes >= this.core.config.gateMaxRounds) {
       const message = `The gate asked for a fix ${job.gate_fixes + 1} times, over the limit of SF_GATE_MAX_ROUNDS (${this.core.config.gateMaxRounds}); the fix was not applied. Claude: ${oneLine(claude.summary)} Codex: ${oneLine(summary)}`;
       // from: awaiting_review (current)
       await this.core.transition(job, 'needs_human', 'verdict', { code: 'gate_rounds', message: message.slice(0, 2000) });
@@ -581,7 +620,7 @@ export class ReviewsPart {
       if (applied.kind === 'fix') {
         await this.core.parts.turns.fix(decided, fixContent(summary, applied.items, 'Codex'), { counts: { gate_fixes: decided.gate_fixes + 1 }, ledger: applied.ledger });
       } else {
-        await this.afterClean(decided, [...new Set([...claude.accepted_sensitive, ...accepted])]);
+        await this.afterClean(decided, claude === undefined ? accepted : [...new Set([...claude.accepted_sensitive, ...accepted])]);
       }
     });
   }

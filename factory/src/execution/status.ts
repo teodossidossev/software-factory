@@ -2,7 +2,7 @@
 // the gate of the last iteration, paged) and status.
 import { FactoryError } from '../errors.js';
 import { GATE_REVIEWER } from '../gate.js';
-import type { FileChange, Job } from '../jobs.js';
+import { claudeReviews, type FileChange, type Job } from '../jobs.js';
 import { DEFAULT_PAGE_BYTES, MAX_PAGE_BYTES, MIN_PAGE_BYTES, pageBuffer } from '../repo-files.js';
 import { actedVerdict, REVIEWER } from '../review.js';
 import { type CheckResult, gateSkipped, MAX_REPORT_BYTES, type ReviewStatus, type RunningReview, withoutDropped } from './shared.js';
@@ -82,11 +82,16 @@ export class StatusPart {
   // The review of the last published iteration: its record once it ended, running while it runs or
   // is due, off with SF_REVIEW=off; undefined before the first iteration and when none will run.
   // After a Claude verdict acted on as clean, gate is the gate's the same way; absent with the gate off.
+  // Without the Claude review (SF-131): off, with the gate's status as gate.
   async #reviewStatus(job: Job): Promise<CheckResult['review']> {
     if (job.iteration === 0) {
       return undefined;
     }
     const running = this.core.reviews.get(`${job.workspace}/${job.ticket}`);
+    if (!claudeReviews(job)) {
+      const gate = this.core.config.review ? await this.#gateStatus(job, running) : undefined;
+      return gate !== undefined ? { status: 'off', gate } : { status: 'off' };
+    }
     const record = await this.core.jobs.readReview(job.workspace, job.ticket, job.iteration);
     if (record !== undefined) {
       if (!('verdict' in record)) {

@@ -6,7 +6,8 @@ import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { loadConfig, smokeProbeAllow, stateDir } from '../src/config.js';
+import { claudeReviewDecision, loadConfig, smokeProbeAllow, stateDir } from '../src/config.js';
+import { FactoryError } from '../src/errors.js';
 
 const COMMAND = "node probe.mjs --canary '/t/sf-smoke-x/config/auth.env' > probe.json";
 
@@ -94,4 +95,33 @@ test('SF_SMOKE_PROBE_ALLOW: ignored for the default state directory, SF_STATE_DI
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('SF_CLAUDE_REVIEW and SF_MAX_ITERATIONS (SF-131): defaults ticket and 3; always is read; any other value is invalid_config', () => {
+  const base = { HOME: '/home/u', SF_STATE_DIR: '/tmp/sf-config-test-state' };
+  const defaults = loadConfig(base);
+  assert.equal(defaults.claudeReview, 'ticket');
+  assert.equal(defaults.maxIterations, 3);
+  assert.equal(loadConfig({ ...base, SF_CLAUDE_REVIEW: '' }).claudeReview, 'ticket');
+  assert.equal(loadConfig({ ...base, SF_CLAUDE_REVIEW: 'always' }).claudeReview, 'always');
+  assert.equal(loadConfig({ ...base, SF_MAX_ITERATIONS: '5' }).maxIterations, 5);
+  for (const value of ['Always', 'claude', 'off']) {
+    assert.throws(() => loadConfig({ ...base, SF_CLAUDE_REVIEW: value }), (error: unknown) => {
+      assert.ok(error instanceof FactoryError);
+      assert.equal(error.code, 'invalid_config');
+      assert.equal(error.message, `SF_CLAUDE_REVIEW must be ticket or always, got "${value}".`);
+      return true;
+    });
+  }
+});
+
+test('the Claude review of a job (SF-131, claudeReviewDecision): the gate off means Claude; then the Task file\'s review; then the setting, absent counting as always', () => {
+  const on = { on: true as const, codexPath: '/bin/codex' };
+  const off = { on: false as const, reason: 'SF_GATE=off' };
+  assert.deepEqual(claudeReviewDecision({ claudeReview: 'ticket', gate: on }, undefined), { claude_review: false, reason: 'SF_CLAUDE_REVIEW=ticket' });
+  assert.deepEqual(claudeReviewDecision({ claudeReview: 'ticket', gate: on }, 'claude'), { claude_review: true, reason: 'the Task file says review: claude' });
+  assert.deepEqual(claudeReviewDecision({ claudeReview: 'always', gate: on }, undefined), { claude_review: true, reason: 'SF_CLAUDE_REVIEW=always' });
+  assert.deepEqual(claudeReviewDecision({ claudeReview: 'always', gate: on }, 'codex'), { claude_review: false, reason: 'the Task file says review: codex' });
+  assert.deepEqual(claudeReviewDecision({ gate: on }, undefined), { claude_review: true, reason: 'SF_CLAUDE_REVIEW=always' });
+  assert.deepEqual(claudeReviewDecision({ claudeReview: 'ticket', gate: off }, 'codex'), { claude_review: true, reason: 'the gate is off (SF_GATE=off)' });
 });

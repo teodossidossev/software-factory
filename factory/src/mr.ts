@@ -8,7 +8,7 @@ import { join, resolve } from 'node:path';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
 import { changedPaths, writeResolutionPatch } from './patch.js';
-import { itemLine, type ReviewItem } from './review.js';
+import { itemLine, oneLine, type ReviewItem } from './review.js';
 import { type LedgerEntry, notFixed, notFixedLine } from './ledger.js';
 import { type Suggestion, suggestionLine } from './simplify.js';
 import { COMMIT_TYPES, headerProblem, manualClaim, MAX_HEADER_CHARS, MR_REQUIRED_HEADINGS, testingProblem } from './rules.js';
@@ -206,6 +206,20 @@ export const FINDINGS_HEADING = '### Review findings not fixed';
 // `### Review findings not fixed` subsection of `## Special things to note` (withSubsection).
 export function withFindings(text: string, ledger: LedgerEntry[]): string {
   return withSubsection(text, FINDINGS_HEADING, notFixed(ledger).map(notFixedLine), (rest) => `- … and ${rest} more: see ledger.json of the job.`);
+}
+
+export const ACCEPTED_HEADING = '### Accepted over a stop';
+
+// The MR text with the user's Accept over a stop (SF-131): a `### Accepted over a stop` subsection
+// of `## Special things to note` (withSubsection) with the stop's code, "No reviewer passed iteration
+// N." when no reviewer did (noReviewer), and what went unapplied: one line per finding, or the
+// gate's error.
+export function withAccepted(text: string, accepted: { code: string; unapplied: Array<ReviewItem & { id?: string }> | string }, iteration: number, noReviewer: boolean): string {
+  const lead = [`- The user accepted iteration ${iteration} over ${accepted.code}.`, ...(noReviewer ? [`- No reviewer passed iteration ${iteration}.`] : [])];
+  const unapplied = typeof accepted.unapplied === 'string'
+    ? [`- The gate failed: ${oneLine(accepted.unapplied)}`]
+    : accepted.unapplied.map((item) => `- ${item.id !== undefined ? `${item.id} ` : ''}${itemLine(item)}`);
+  return withSubsection(text, ACCEPTED_HEADING, [...lead, ...unapplied], (rest) => `- … and ${rest} more: see gate-override.json of iteration ${iteration}.`);
 }
 
 export const SIMPLIFY_HEADING = '### Simplifications not applied';

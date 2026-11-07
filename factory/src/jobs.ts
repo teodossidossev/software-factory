@@ -234,6 +234,10 @@ const jobSchema = z.strictObject({
   // The iteration the simplification pass started on (SF-055), written before it runs; absent before.
   // Once set, the pass never runs again on the job, whatever became of that run.
   simplify_iteration: z.number().int().min(1).optional(),
+  // Whether the Claude review runs on the job (SF-131), decided at Start (SF_CLAUDE_REVIEW, the Task
+  // file's review, the gate) and never changed after; false: the Codex gate is the review. Absent in
+  // a job started before: true (claudeReviews).
+  claude_review: z.boolean().optional(),
   session_id: z.string().min(1).nullable(),
   // The sha256 of the Task file the job works from (SF-067): recorded at Start, at every later copy
   // into the worktree and on a Resume that found the Task file changed; absent in a job started
@@ -448,6 +452,8 @@ export type EventRecord = { ts: string; iteration: number } & (
   // The user accepted the iteration over the stopped gate (SF-047): the code it stopped with and
   // the number of Codex items not applied (0 when the gate failed or did not run).
   | { type: 'gate_overridden'; code: string; unapplied: number }
+  // Whether the Claude review runs on the job (SF-131), decided at Start, and why.
+  | { type: 'review_setup'; claude_review: boolean; reason: string }
   // The gate level of the iteration (SF-092): the level, whether the gate runs, and why.
   | { type: 'gate_level'; level: GateLevel; ran: boolean; reasons: string[] }
   // The simplification pass (SF-055): its outcome (the suggestions offered, those the factory
@@ -531,6 +537,12 @@ export function cutEvent(value: unknown): { value: unknown; truncated: boolean }
   }
   const type = (value as { type?: unknown } | null)?.type;
   return { value: typeof type === 'string' ? { type: cutString(type, 64) } : null, truncated: true };
+}
+
+// Whether the Claude review runs on the job (SF-131): its claude_review, true when absent (a job
+// started before). False: the Codex gate is the review, and its last gate.json decides.
+export function claudeReviews(job: Pick<Job, 'claude_review'>): boolean {
+  return job.claude_review !== false;
 }
 
 export function isActive(job: Job): boolean {

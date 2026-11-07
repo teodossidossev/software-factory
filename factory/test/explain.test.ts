@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   capExplainInput, currentExplanation, EXPLAIN_SCHEMA, type ExplainInput, type ExplainModel, type ExplainOutput, Explainer, explanationLines, explanationPath,
-  type ExplanationRecord, MAX_EXPLANATION_WORDS, outputProblem, readExplanation, stopAnswers, taskGoal,
+  type ExplanationRecord, ledgerStopEntries, MAX_EXPLANATION_WORDS, outputProblem, readExplanation, stopAnswers, taskGoal,
 } from '../src/explain.js';
 import { type Job, JobStore, type ReviewRecord } from '../src/jobs.js';
 import type { LedgerEntry } from '../src/ledger.js';
@@ -423,12 +423,33 @@ test('stopAnswers: Accept only when the gate is acceptable (review_churn, gate s
   assert.deepEqual(commands(stopped('fetch_failed')), [['Retry', 'sf retry app T-1'], ...ALWAYS]);
   assert.deepEqual(commands(stopped('simplify_offered')), [['Simplify', 'sf simplify app T-1'], ['Skip', 'sf accept app T-1'], ...ALWAYS]);
   assert.deepEqual(commands(stopped('review_failed')), [['Retry review', 'sf review app T-1'], ...ALWAYS]);
-  assert.deepEqual(commands(stopped('iteration_limit'), { review: CLEAN_REVIEW }), [['Accept and prepare MR', 'sf accept app T-1'], ['Restart', 'sf restart app T-1'], ...ALWAYS]);
-  assert.deepEqual(commands(stopped('iteration_limit'), { review: FIX_REVIEW }), [['Restart', 'sf restart app T-1'], ...ALWAYS]);
-  assert.deepEqual(commands(stopped('iteration_limit')), [['Restart', 'sf restart app T-1'], ...ALWAYS]);
   assert.deepEqual(commands(stopped('mr_push_failed')), [['Push again', 'sf approve app T-1'], ...ALWAYS]);
   assert.deepEqual(commands(stopped('mr_conflict')), [['Tell it how', 'sf say app T-1 "<message>"'], ...ALWAYS]);
   assert.deepEqual(commands(stopped('mr_text_invalid')), ALWAYS);
+});
+
+test('stopAnswers (SF-131): at iteration_limit Accept whatever the last verdict, in both arms; without the Claude review Accept over every gate and ledger stop with no review; with it, a clean review still needed', () => {
+  const limit = [['Accept and prepare MR', 'sf accept app T-1'], ['Restart', 'sf restart app T-1'], ...ALWAYS];
+  for (const review of [CLEAN_REVIEW, FIX_REVIEW, undefined]) {
+    assert.deepEqual(commands(stopped('iteration_limit'), { review }), limit);
+    assert.deepEqual(commands(stopped('iteration_limit', { claude_review: false })), limit);
+  }
+  const accept = ['Accept and prepare MR', 'sf accept app T-1'];
+  for (const code of ['review_churn', 'review_disputed', 'gate_rounds', 'gate_budget']) {
+    assert.deepEqual(commands(stopped(code, { claude_review: false }))[0], accept, code);
+    // A job started before (no claude_review) is the Claude arm: no Accept without a clean review.
+    assert.notDeepEqual(commands(stopped(code))[0], accept, code);
+    assert.notDeepEqual(commands(stopped(code, { claude_review: true }), { review: FIX_REVIEW })[0], accept, code);
+  }
+  assert.deepEqual(commands(stopped('gate_failed', { claude_review: false })), [accept, ['Tell it to go on', 'sf say app T-1 "Go on."'], ...ALWAYS]);
+  assert.deepEqual(commands(stopped('simplify_offered', { claude_review: false })), [['Simplify', 'sf simplify app T-1'], ['Skip', 'sf accept app T-1'], ...ALWAYS]);
+});
+
+test('ledgerStopEntries (SF-131): at iteration_limit the open blocker and major entries, nits and settled ones aside', () => {
+  const ledger = [entry('R1', 'fixed'), entry('R2', 'open'), entry('R3', 'open', { severity: 'nit' }), entry('R4', 'open', { severity: 'blocker' }), entry('R5', 'accepted_risk')];
+  assert.deepEqual(ledgerStopEntries('iteration_limit', ledger)?.map((item) => item.id), ['R2', 'R4']);
+  assert.deepEqual(ledgerStopEntries('review_churn', ledger)?.map((item) => item.id), ['R2', 'R3', 'R4']);
+  assert.equal(ledgerStopEntries('gate_rounds', ledger), null);
 });
 
 // ---------- The cap ----------

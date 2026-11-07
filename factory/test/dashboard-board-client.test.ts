@@ -388,6 +388,17 @@ test('board client: a card moves column on a jobs event; the workspace filter ch
   assert.deepEqual(keys(page, 'you'), ['app/T-1']);
 });
 
+test('board client (SF-131): a card awaiting review without its Now line names the reviewer: the Codex gate for a job without the Claude review, else Claude until its review is clean', async () => {
+  const gateOnly = job('G', 'awaiting_review', { now: null, iteration: 1, claude_review: false, review: null });
+  const claude = job('K', 'awaiting_review', { now: null, iteration: 1, claude_review: true, review: null });
+  const before = job('B', 'awaiting_review', { now: null, iteration: 1, review: 'clean' });
+  const page = await openBoard([gateOnly, claude, before], []);
+  const now = (key: string): string => part(card(page, key), 'now')!.textContent;
+  assert.equal(now('app/G'), 'Now: Codex gatereviewing iteration 1');
+  assert.equal(now('app/K'), 'Now: Claude reviewreviewing iteration 1');
+  assert.equal(now('app/B'), 'Now: Codex gatereviewing iteration 1');
+});
+
 test('board client: a running card: the Now line and the tool calls, the cost so far and the time since the start; a finished one the cost and the time it took', async () => {
   const running = job('W', 'working', {
     created_at: minutesAgo(14), cost_usd: 1.234, tool_calls: 14, iteration: 1,
@@ -512,7 +523,7 @@ test('board client: the job page says the sentence of the stop with the numbers 
     [{ error: { code: 'simplify_offered', message: 'x' } }, 'The simplification pass suggests changes. Simplify or skip'],
     [{ error: { code: 'escalated', message: 'x' }, stop: { items: [{}, {}], saves_lines: null } }, 'The Implementer asks you about 2 findings. Answer each: Accept risk or Must fix'],
     [{ error: { code: 'gate_rounds', message: 'x' }, gate_fixes: 3, stop: { items: [{}, {}], saves_lines: null } }, 'Codex asked for fixes 3 times, the limit. Accept the change without its 2 open findings, or tell the Implementer what to fix'],
-    [{ error: { code: 'iteration_limit', message: 'x' }, fixes: 5 }, 'The reviewers asked for fixes 5 times, the limit. With a clean Claude review, accept the change without its open findings; otherwise give the Implementer a direction, or abort'],
+    [{ error: { code: 'iteration_limit', message: 'x' }, fixes: 5 }, 'The reviewers asked for fixes 5 times, the limit. Accept the change with its open findings listed in the MR text, give the Implementer a direction, or abort'],
     [{ error: { code: 'max_turns', message: 'x' }, iteration: 2 }, 'The Implementer used all its turns on iteration 3. Tell it to go on'],
     [{ error: { code: 'review_failed', message: 'x' }, iteration: 2 }, 'The Claude review of iteration 2 could not run. Retry it'],
     [{ error: { code: 'session_failed', message: "You've hit your limit · resets 3am (Europe/Sofia)" } }, 'The Claude usage limit was reached; it resets at 3am (Europe/Sofia). Tell the Implementer to go on after that'],

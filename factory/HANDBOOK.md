@@ -57,21 +57,27 @@ you need to resume after a context loss is `guide`, then `read_file` of the Task
 ## The cycle
 
 ```
-plan ─► write_task ─► Task check ─► user: Start ─► iteration ─► Claude review ─► Codex gate ─► Clean ─► user: approve/abort
-                                        ▲               │               │
-                                        └── Fix N ◄─────┴───────────────┘ findings
+plan ─► write_task ─► Task check ─► user: Start ─► iteration ─► (Claude review) ─► Codex gate ─► Clean ─► user: approve/abort
+                                        ▲               │                 │
+                                        └── Fix N ◄─────┴─────────────────┘ findings
 ```
+
+The Claude review runs only on tickets that ask for it (`review: claude`, below), unless the user
+set `SF_CLAUDE_REVIEW=always`; otherwise the Codex gate is the only reviewer.
 
 Limits: the run queue starts its tickets while fewer than its limit `max_running` of jobs run in
 every workspace together (1-20, the user sets it; `SF_MAX_JOBS`, default 3, is only its default); a
-start by hand is never held by it; each job in its own worktree; after five
-Fix sections the next one is refused and the job goes to `needs_human` (a user message does not
-count); the Implementer session stays alive until the user decides.
+start by hand is never held by it; each job in its own worktree; after three Fix sections
+(`SF_MAX_ITERATIONS`) the next one is refused and the job goes to `needs_human` (a user message
+does not count): its findings stay open in the ledger, and the user may accept the iteration as it
+is, with them listed in the MR text, or give a direction; the Implementer session stays alive
+until the user decides.
 
-The factory reviews every published iteration: a fresh, read-only Claude session in the job's
-worktree, with the Task file (its `## Review brief` too), the Report, the Patch and the review
-rules below. A `fix` verdict becomes the next `## Fix N`, written by the factory, and the next
-iteration starts; after a `clean` verdict Codex (the gate) gives the deciding verdict before Clean.
+The factory reviews every published iteration: Codex (the gate) in the job's worktree, read-only,
+with the Task file (its `## Review brief` too), the Report, the Patch and the review rules below.
+On a ticket with the Claude review, a fresh, read-only Claude session reviews first, and the gate
+gives the deciding verdict after a `clean` one. A `fix` verdict becomes the next `## Fix N`,
+written by the factory, and the next iteration starts; the deciding `clean` verdict goes to Clean.
 At Clean the Implementer writes the merge request text and the factory commits and rebases; the
 user approves the push on the dashboard or in the terminal, and may have the factory open and
 merge the merge request on the Git host.
@@ -119,6 +125,7 @@ may_touch: [package.json, .github/**]   # optional: sensitive paths or globs thi
 scope: [src/export/**, test/export.test.ts, README.md]   # optional: every file this ticket is expected to create, modify or delete
 lands_after: [PROJ-120, web/WEB-7]   # optional: the tickets this one waits for; another workspace's as <workspace>/<ticket>
 check: required       # optional: required (always a Task check) or skip (never); without it only a Task that is not small is checked
+review: claude        # optional: claude (the Claude review, then the Codex gate) or codex (the gate alone); without it the user's SF_CLAUDE_REVIEW decides
 ---
 
 # PROJ-123: Short title
@@ -159,6 +166,12 @@ any other Task is small and starts without one (`write_task` answers `not_needed
 reason). `check: required` (any value but `skip` counts as required) always asks for one: use it
 for product tickets; `check: skip` never. The user's Check runs one in every case, and its verdict
 counts: the run queue then waits for it to be `ready`.
+
+`review:` says who reviews the ticket's iterations. `review: claude` adds the Claude review before
+the Codex gate: give it to risky tickets (authentication, the sandbox, the state format, and
+product tickets the user names). `review: codex` has the gate alone even when the user set
+`SF_CLAUDE_REVIEW=always`. Without the key the user's setting decides (by default the gate alone).
+Any other value is ignored. It is read once, at Start.
 
 Coding rules reach the Implementer, the reviewers and the Task check without you: `AGENTS.md` and
 the Markdown files it links to, and the user's own rules files; reference them by path, never copy them into the Task.

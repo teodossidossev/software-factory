@@ -729,7 +729,7 @@ test('usage errors exit 2: an unknown option, a positional argument, a budget th
   assert.deepEqual(['0', '0.0', '-1', '1e3', '', 'x', '1.2.3'].map(positiveDecimal), [undefined, undefined, undefined, undefined, undefined, undefined, undefined]);
 });
 
-test('the child environment: the user\'s SF_* settings dropped but the factory\'s executables, gate and sandbox; the smoke\'s directories, ports, models and limits on top', () => {
+test('the child environment: the user\'s SF_* settings dropped but the factory\'s executables, gate and sandbox; the smoke\'s directories, ports, models and limits on top, SF_CLAUDE_REVIEW=always among them (SF-131)', () => {
   const paths = smokePaths('/tmp/sf-smoke-x');
   const env = childEnv({
     PATH: '/bin', HOME: '/home/u', OPENAI_API_KEY: 'k',
@@ -741,7 +741,7 @@ test('the child environment: the user\'s SF_* settings dropped but the factory\'
     PATH: '/bin', HOME: '/home/u', OPENAI_API_KEY: 'k',
     SF_CLAUDE: '/c', SF_CODEX: '/x', SF_GATE: 'codex', SF_SANDBOX: 'off', SF_SANDBOX_DOMAINS: 'a.org', SF_GATE_TIMEOUT_MS: '5',
     SF_STATE_DIR: '/tmp/sf-smoke-x/state', SF_CONFIG_DIR: '/tmp/sf-smoke-x/config', SF_WORKTREE_ROOT: '/tmp/sf-smoke-x/worktrees',
-    SF_PORT: '0', SF_DASHBOARD_PORT: '0', SF_HANDOFF: 'off', SF_SIMPLIFY: 'off', SF_DESKTOP_NOTIFY: 'off', SF_REVIEW: 'on', SF_DASHBOARD: 'on',
+    SF_PORT: '0', SF_DASHBOARD_PORT: '0', SF_HANDOFF: 'off', SF_SIMPLIFY: 'off', SF_DESKTOP_NOTIFY: 'off', SF_REVIEW: 'on', SF_CLAUDE_REVIEW: 'always', SF_DASHBOARD: 'on',
     SF_ENV_FILE: '/tmp/sf-smoke-x/empty.env', SF_MODEL: 'haiku', SF_REVIEW_MODEL: 'haiku', SF_CODEX_MODEL: 'gpt-mini',
     SF_MAX_TURNS: '40', SF_REVIEW_MAX_TURNS: '30', SF_TASK_CHECK_MAX_TURNS: '30', SF_MAX_ITERATIONS: '2', SF_GATE_MAX_ROUNDS: '1', SF_GATE_MAX_TOKENS: '400000',
   });

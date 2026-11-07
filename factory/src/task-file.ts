@@ -62,6 +62,16 @@ export function mayTouch(fields: Map<string, string>): string[] {
   return pathList(fields, 'may_touch');
 }
 
+// The reviewer a Task asks for (SF-131): `review: claude` (the Claude review, then the gate) or
+// `review: codex` (the gate alone).
+export type TaskReview = 'claude' | 'codex';
+
+// The Task's review key (SF-131); undefined without the key or with any other value.
+export function taskReview(fields: Map<string, string>): TaskReview | undefined {
+  const value = fields.get('review');
+  return value === 'claude' || value === 'codex' ? value : undefined;
+}
+
 // The file scope of the Task (SF-053): `scope:` in the front matter, in the forms of may_touch, the
 // files the ticket is expected to create, modify or delete, tests and docs included. Undefined when
 // the Task declares none (no field, or an empty list): then nothing is checked.

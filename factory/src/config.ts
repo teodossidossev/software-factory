@@ -8,6 +8,7 @@ import { type ForgeSettings, forgeSettings } from './forge.js';
 import type { Job } from './jobs.js';
 import { configDir, HANDOFF_OFF_CODE, type HandoffMode } from './registry.js';
 import { DEFAULT_RULES_MAX_BYTES } from './rules-docs.js';
+import type { TaskReview } from './task-file.js';
 
 export interface Config {
   stateDir: string;
@@ -33,6 +34,10 @@ export interface Config {
   sensitivePaths: string[];
   // The Claude review of every published iteration (SF-038); false with SF_REVIEW=off.
   review: boolean;
+  // Which tickets the Claude review runs on (SF-131, SF_CLAUDE_REVIEW): ticket, the default, only
+  // those whose Task file says review: claude; always every ticket but those that say review: codex.
+  // A Config without it (the tests' literals) counts as always.
+  claudeReview?: 'ticket' | 'always';
   // The model of the review (SF_REVIEW_MODEL, passed as is); undefined uses the user's default.
   reviewModel: string | undefined;
   // maxTurns of the review (SF_REVIEW_MAX_TURNS).
@@ -285,6 +290,30 @@ export function gateConfig(env: NodeJS.ProcessEnv = process.env): Gate {
   return { on: false, reason: 'no codex on PATH; set SF_CODEX', missing: true };
 }
 
+// SF_CLAUDE_REVIEW (SF-131): ticket (the default) or always.
+export function claudeReviewSetting(env: NodeJS.ProcessEnv = process.env): NonNullable<Config['claudeReview']> {
+  const mode = env.SF_CLAUDE_REVIEW || 'ticket';
+  if (mode !== 'ticket' && mode !== 'always') {
+    throw new FactoryError('invalid_config', `SF_CLAUDE_REVIEW must be ticket or always, got "${mode}".`);
+  }
+  return mode;
+}
+
+// Whether the Claude review runs on a job (SF-131), decided at Start from the setting, the Task
+// file's review (taskReview) and the gate, with the reason for the job's review_setup event. With
+// the gate off Claude reviews every job; otherwise review: claude and review: codex win, and
+// without them SF_CLAUDE_REVIEW decides (absent: always).
+export function claudeReviewDecision(config: Pick<Config, 'claudeReview' | 'gate'>, review: TaskReview | undefined): { claude_review: boolean; reason: string } {
+  if (!config.gate.on) {
+    return { claude_review: true, reason: `the gate is off (${config.gate.reason})` };
+  }
+  if (review !== undefined) {
+    return { claude_review: review === 'claude', reason: `the Task file says review: ${review}` };
+  }
+  const setting = config.claudeReview ?? 'always';
+  return { claude_review: setting === 'always', reason: `SF_CLAUDE_REVIEW=${setting}` };
+}
+
 // SF_RULES_MAX_BYTES (SF-059): the bytes of rule file content the agents are given at most.
 export function rulesMaxBytes(env: NodeJS.ProcessEnv = process.env): number {
   return positiveInteger(env, 'SF_RULES_MAX_BYTES', DEFAULT_RULES_MAX_BYTES, 16 * 1024 * 1024);
@@ -335,7 +364,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     checkAfterFixMin: positiveInteger(env, 'SF_CHECK_AFTER_FIX_MIN', 5),
     maxTurns: positiveInteger(env, 'SF_MAX_TURNS', 150),
     turnLimitContinues: countSetting(env, 'SF_TURN_LIMIT_CONTINUES', 1, 10),
-    maxIterations: positiveInteger(env, 'SF_MAX_ITERATIONS', 5),
+    maxIterations: positiveInteger(env, 'SF_MAX_ITERATIONS', 3),
     claudePath,
     sandbox: sandboxSettings(env),
     model: env.SF_MODEL || undefined,
@@ -343,6 +372,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxJobs: positiveInteger(env, 'SF_MAX_JOBS', 3),
     sensitivePaths: sensitivePaths(env),
     review: env.SF_REVIEW !== 'off',
+    claudeReview: claudeReviewSetting(env),
     reviewModel: env.SF_REVIEW_MODEL || undefined,
     reviewMaxTurns: positiveInteger(env, 'SF_REVIEW_MAX_TURNS', 60),
     simplify: env.SF_SIMPLIFY !== 'off',

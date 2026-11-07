@@ -1,7 +1,8 @@
 # Operations
 
-This page covers keeping the factory running: updating it, reading its status and metrics, logs,
-cleaning up old jobs and worktrees, backup, troubleshooting, and its tests.
+This page covers keeping the factory running: updating it, the service's CPU limits, reading its
+status and metrics, logs, cleaning up old jobs and worktrees, backup, troubleshooting, and its
+tests.
 
 ## Updating the factory
 
@@ -69,6 +70,28 @@ Then:
   starts after that; a runner already running keeps its settings.
 - Building into a clone by hand while a job's next runner starts can load a mix of old and new
   files; `sf update` drains first for that reason.
+
+## The service's CPU limits
+
+The systemd user service (`sf service install`) caps the whole factory, `sf serve`, every job's
+runner and everything they run, at half the machine's cores (at least one, at most eight:
+`CPUQuota=800%` on 20 cores) and runs it at `Nice=10`, so a busy factory leaves your IDE and other
+programs responsive. `sf service install` writes these into the unit each time; there is no
+setting for them. To change them, add a drop-in, which `sf service install` never writes or
+removes:
+
+```sh
+mkdir -p ~/.config/systemd/user/software-factory.service.d
+printf '[Service]\nCPUQuota=1200%%\nNice=5\n' > ~/.config/systemd/user/software-factory.service.d/limits.conf
+systemctl --user daemon-reload
+systemctl --user restart software-factory     # running jobs keep running
+systemctl --user show software-factory -p CPUQuotaPerSecUSec -p Nice   # 12s and 5
+```
+
+`CPUQuota=` with no value in the drop-in removes the cap. An `sf serve` you start by hand has
+no limits. The CPU cap needs the `cpu` controller delegated to your systemd user instance (the
+default on current distributions); `Nice=10` applies either way. More:
+[Service](../../factory/README.md#service).
 
 ## sf status
 

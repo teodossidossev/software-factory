@@ -2,14 +2,17 @@
 // software-factory.service in ~/.config/systemd/user. The unit runs the installed sf with
 // KillMode=process: the job runners are detached processes that outlive a restart of sf serve
 // (SF-042), and systemd's default control-group mode would kill them on every stop, restart or crash
-// restart. Its environment is the PATH of the shell that ran the install (node, git, gh, claude and
-// codex are found as there) and the directory settings set in that shell; every other setting comes
-// from auth.env, which sf serve reads. Logs go to journald. On a machine without systemd user
-// services sf service says so, and sf serve works as before.
+// restart. The unit caps the CPU of its whole control group (sf serve, the runners and everything
+// they run) at half the cores and runs it at Nice=10 (SF-116), so the factory leaves the user's
+// machine responsive; a drop-in overrides them. Its environment is the PATH of the shell that ran
+// the install (node, git, gh, claude and codex are found as there) and the directory settings set
+// in that shell; every other setting comes from auth.env, which sf serve reads. Logs go to
+// journald. On a machine without systemd user services sf service says so, and sf serve works as
+// before.
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
-import { homedir, userInfo } from 'node:os';
+import { availableParallelism, homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writeFileAtomic } from './atomic.js';
@@ -49,6 +52,8 @@ export interface ServiceOptions {
   fromEnvFile?: readonly string[];
   // The absolute path of the installed sf.
   sf?: string;
+  // The machine's cores, for the unit's CPUQuota; by default os.availableParallelism().
+  cores?: number;
   run?: RunCommand;
   // Whether an sf serve answers on the state directory's socket.
   serveAnswers: () => Promise<boolean>;
@@ -70,9 +75,21 @@ function quoted(value: string): string {
   return `"${value.replaceAll('%', '%%').replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
 }
 
-// The unit's text: ExecStart of the installed sf, Restart=on-failure, KillMode=process, the PATH and
-// the directory settings of the shell (COPIED_SETTINGS that are set), nothing else.
-export function unitText(sf: string, env: NodeJS.ProcessEnv): string {
+// The unit's CPUQuota in percent of one core: half the cores, at least one and at most eight
+// (SF-116).
+export function cpuQuota(cores: number): number {
+  return Math.min(800, Math.max(100, Math.floor(cores / 2) * 100));
+}
+
+// The unit's limit settings for these cores, in the unit's order.
+function limitSettings(cores: number): string[] {
+  return [`CPUQuota=${cpuQuota(cores)}%`, 'Nice=10'];
+}
+
+// The unit's text: ExecStart of the installed sf, Restart=on-failure, KillMode=process, the CPU cap
+// for these cores and Nice=10, the PATH and the directory settings of the shell (COPIED_SETTINGS
+// that are set), nothing else.
+export function unitText(sf: string, env: NodeJS.ProcessEnv, cores: number): string {
   const environment = [['PATH', env.PATH ?? ''] as const, ...COPIED_SETTINGS.flatMap((name) => (env[name] ? [[name, env[name]!] as const] : []))];
   return [
     '# Written by sf service install (Software Factory); sf service uninstall removes it.',
@@ -86,6 +103,8 @@ export function unitText(sf: string, env: NodeJS.ProcessEnv): string {
     'RestartSec=5',
     // The job runners are detached and must outlive a stop or restart of sf serve (SF-042).
     'KillMode=process',
+    `# The factory must leave the user's machine responsive; a drop-in in ${UNIT_FILE}.d/ overrides these.`,
+    ...limitSettings(cores),
     ...environment.map(([name, value]) => `Environment=${quoted(`${name}=${value}`)}`),
     '',
     '[Install]',
@@ -143,9 +162,10 @@ class Service {
       );
     }
     const sf = this.#o.sf ?? INSTALLED_SF;
+    const cores = this.#o.cores ?? availableParallelism();
     await mkdir(unitDir(this.#o.env, this.#o.home ?? homedir()), { recursive: true });
-    await writeFileAtomic(this.path, Buffer.from(unitText(sf, this.#o.env), 'utf8'), 0o644);
-    this.#print(`Wrote ${this.path} (ExecStart=${sf} serve, KillMode=process: the job runners outlive a restart).`);
+    await writeFileAtomic(this.path, Buffer.from(unitText(sf, this.#o.env, cores), 'utf8'), 0o644);
+    this.#print(`Wrote ${this.path} (ExecStart=${sf} serve, KillMode=process: the job runners outlive a restart; ${limitSettings(cores).join(', ')}).`);
     const uncopied = uncopiedSettings(this.#o.env, this.#o.fromEnvFile);
     if (uncopied.length > 0) {
       this.#print(`Not copied into the unit: ${uncopied.join(', ')}. Put them in auth.env (sf info shows where it is), which the service reads.`);

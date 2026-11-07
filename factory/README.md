@@ -384,6 +384,27 @@ sf service uninstall   # stops, disables and removes it
   restart or crash restart. So `systemctl --user stop software-factory` and a restart leave running
   jobs running, as stopping a hand-started `sf serve` does. The unit's directory is
   `$XDG_CONFIG_HOME/systemd/user` (by default `~/.config/systemd/user`).
+- **Its limits.** The unit (SF-116) has `CPUQuota=<P>%`, with `P` half the cores in whole cores,
+  at least 100 and at most 800 (on 20 cores `800%`, on 7 cores `300%`, on 1 core `100%`), and
+  `Nice=10`. The service's control group holds `sf serve`, every job runner it starts (detached,
+  but in the same control group) and everything they run, so the whole factory gets at most that
+  much CPU, at a lower priority than your own programs, and leaves the machine responsive.
+  `sf service install` names the limits in its "Wrote …" line. There is no setting for them: to
+  change them write a systemd drop-in, which `sf service install` never writes or removes, for
+  example `~/.config/systemd/user/software-factory.service.d/limits.conf`:
+
+  ```ini
+  [Service]
+  CPUQuota=1200%
+  Nice=5
+  ```
+
+  then `systemctl --user daemon-reload` and `systemctl --user restart software-factory` (running
+  jobs keep running). `systemctl --user show software-factory -p CPUQuotaPerSecUSec -p Nice` shows
+  the limits in force (`8s` is `800%`). The CPU cap takes effect only where the user's systemd
+  manages the `cpu` controller: `cpu` is listed in
+  `/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers`;
+  where it is not, `Nice=10` still applies.
 - **Its environment.** `Environment=PATH=<the PATH of the shell that ran install>`, so `node`,
   `git`, `gh`, `claude` and `codex` are found as in that shell (nvm, a user-prefix npm,
   `~/.local/bin`), and one `Environment` line for each of `XDG_CONFIG_HOME`, `XDG_STATE_HOME`,

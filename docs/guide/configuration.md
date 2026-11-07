@@ -252,6 +252,16 @@ at fake hosts or open test-only paths. The test suites set them themselves.
 | `SF_TEST_TASK_CHECK_DELAY_MS` | unset: the automatic Task check runs 60000 ms (60 s) after its last trigger | digits only (`0` and up), in milliseconds; read only when `SF_TEST_HOOKS=on` and the automatic checks are on; any other value is ignored | A shorter wait from the last trigger to the automatic Task check, for the tests. | `SF_TEST_HOOKS=on SF_TEST_TASK_CHECK_DELAY_MS=200` |
 | `SF_BROWSER_HEADED` | unset: headless | exactly `1` shows the window; any other value stays headless | Read by the browser tests (`factory/test/browser/support.ts`), not by the factory: Chromium opens with a visible window during `npm run test:browser`. | `SF_BROWSER_HEADED=1 npm run test:browser` |
 
+### For running the tests
+
+Read by `factory/scripts/run-tests.mjs` (`npm test`, `npm run test:browser`), not by the factory. Set
+them in the shell that runs the tests, not in `auth.env`.
+
+| Key | Default | Allowed | Meaning | Example |
+| --- | --- | --- | --- | --- |
+| `SF_TEST_CONCURRENCY` | unset or empty: half the cores (`os.availableParallelism()`), rounded down, at least 1 | a positive integer (digits, no sign, no leading zero); anything else stops the run with exit code 2 before a test runs | The number of test files `node --test` runs at once (`--test-concurrency`). | `SF_TEST_CONCURRENCY=4 npm test` |
+| `SF_TEST_NICE` | unset or empty: nice 10 | exactly `0`; anything else stops the run with exit code 2 before a test runs | `0` leaves the priority of the tests alone; otherwise `node --test` and every test process it starts run at nice 10. A priority that cannot be set prints one warning and the tests still run. | `SF_TEST_NICE=0 npm test` |
+
 The full table with every detail is in the reference,
 [Environment](../../factory/README.md#environment).
 

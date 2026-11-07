@@ -241,8 +241,22 @@ workspaces and checkouts.
 The factory's own tests need no model and no network:
 
 ```sh
-npm test                 # from the repository root, or in factory/: build, then node --test dist/test/*.test.js
+npm test                 # from the repository root, or in factory/: build, then node scripts/run-tests.mjs unit
+npm test -- --test-name-pattern=foo   # arguments after -- go on to node --test, before the files
 npm run typecheck        # tsc --noEmit
+```
+
+`scripts/run-tests.mjs unit` runs `node --test --test-timeout=120000 --test-concurrency=<N>
+dist/test/*.test.js` with N half the cores rounded down (at least 1) and at nice 10, which every
+test process inherits, so the IDE and other work stay responsive while the suite (or several jobs'
+suites) run. Its exit code is the tests' own (1 when `node --test` was killed by a signal).
+`SF_TEST_CONCURRENCY=4 npm test` runs 4 files at once; `SF_TEST_NICE=0 npm test` keeps the normal
+priority; any other value of either stops with exit code 2 before a test runs
+([Configuration](configuration.md#for-running-the-tests)). The script lines in `factory/package.json`:
+
+```json
+"test": "npm run build && node scripts/run-tests.mjs unit",
+"test:browser": "npm run build && node scripts/check-browser.mjs && node scripts/run-tests.mjs browser"
 ```
 
 The dashboard's browser tests open the page in a real Chromium through Playwright; they are not
@@ -251,7 +265,7 @@ part of `npm test`:
 ```sh
 cd factory
 npm run browsers         # once per machine: playwright install chromium
-npm run test:browser     # build, check that Chromium is installed, run test/browser/
+npm run test:browser     # build, check that Chromium is installed, run test/browser/ (node scripts/run-tests.mjs browser: the same concurrency and nice)
 SF_BROWSER_HEADED=1 npm run test:browser   # with a visible window
 ```
 

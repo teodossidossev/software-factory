@@ -80,7 +80,12 @@ npm run test:browser                           # the dashboard's browser tests (
 Tests (SF-097): `npm run typecheck` checks the types without writing anything; `npm test` builds,
 then runs every compiled test with `node --test --test-timeout=120000 dist/test/*.test.js`, so a
 test that hangs fails after 2 minutes instead of holding the suite (a test may set a shorter
-timeout of its own). `npm run build` removes
+timeout of its own). Since SF-108 `scripts/run-tests.mjs` (`src/run-tests.ts`) starts that
+`node --test` with `--test-concurrency=<N>`, half the cores rounded down (at least 1), and at nice 10,
+which the test processes inherit, so the machine stays usable while the suite runs; its exit code is
+the child's (1 when it was killed by a signal). `SF_TEST_CONCURRENCY=<positive integer>` sets N and
+`SF_TEST_NICE=0` leaves the priority alone; any other value of either stops the run with exit code 2.
+`npm test -- <args>` passes the arguments on to `node --test`, before the files. `npm run build` removes
 `dist/` first (`scripts/clean.mjs`), so only the current sources are compiled and no compiled test
 of a deleted source runs. `npm test` and `npm run test:browser` both build first. At the repository
 root, `npm run build`, `npm run typecheck` and `npm test` run the same scripts in `factory/`.

@@ -365,14 +365,14 @@ test('Gate sandbox (SF-125): the canary read inside the gate\'s wrapper (a bwrap
   });
   assert.equal(ran.code, 1, ran.stdout + ran.stderr);
   assert.deepEqual(statuses(ran), ['PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
-  assert.equal(ran.rows.get('Gate sandbox')!.detail, 'the gate\'s wrapper let through: cat of the canary env file exited 0, ls of jobs/ exited 0');
+  assert.equal(ran.rows.get('Gate sandbox')!.detail, 'the gate\'s wrapper let through: cat of the canary env file exited 0, cat of the job\'s job.json under jobs/ exited 0');
   // The three commands, each inside the wrapper of the job's worktree, its iteration directory read-write last.
   // The gate's own runs (sf serve goes on with the job until Cleanup) aside.
   const runs = (await bwrapLog(ran.env)).filter((run) => run.argv[run.argv.indexOf('--') + 1] !== fakeCodex);
   const worktree = join(ran.dir, 'worktrees', 'smoke', 'SMOKE-1');
   const iteration = join(ran.dir, 'state', 'jobs', 'smoke', 'SMOKE-1', 'iterations', '001');
   assert.deepEqual(runs.map((run) => run.argv.slice(run.argv.indexOf('--'))), [
-    ['--', 'ls', worktree], ['--', 'cat', join(ran.dir, 'config', 'auth.env')], ['--', 'ls', join(ran.dir, 'state', 'jobs')],
+    ['--', 'ls', worktree], ['--', 'cat', join(ran.dir, 'config', 'auth.env')], ['--', 'cat', join(ran.dir, 'state', 'jobs', 'smoke', 'SMOKE-1', 'job.json')],
   ]);
   for (const run of runs) {
     const cut = run.argv.indexOf('--');

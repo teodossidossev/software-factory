@@ -33,11 +33,16 @@ review, the simplification pass, the Task check):
 | Other jobs' worktrees: every other workspace's folder, and every other ticket in the own workspace | another ticket's work in progress |
 | Other workspaces' checkouts (from the registry) | other repositories |
 | The tunnel client's profile (`$TUNNEL_CLIENT_PROFILE_DIR` or `~/.config/tunnel-client`) | the MCP token |
+| Claude Code's global config (`~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json`) and its backups (`~/.claude/backups`) | the MCP URL with its token, once `claude mcp add` stored it; the global config is denied for writing too (below) |
 | `~/.ssh`, `~/.codex`, `~/.aws`, `~/.config/gh`, `~/.git-credentials`, `~/.netrc`, `~/.npmrc`, `~/.claude/.credentials.json` | your keys and logins |
 | The Task checks' checkouts (`<temp>/sf-task-checks-<uid>/`) | the Task files being checked |
 
-Denied for writing only: Claude Code's user settings and global config (`~/.claude/settings.json`,
-`~/.claude.json`), which the next session would load and which could switch the sandbox's
+Every session also denies the tools of the MCP server named `software-factory`, the name under
+which you add the factory to Claude Code: a server added in the `user` scope loads into every
+session, and none may call the planning tools with the token Claude Code holds for it.
+
+Denied for writing (the global config for reading too, above): Claude Code's user settings and
+global config (`~/.claude/settings.json`, `~/.claude.json`), which the next session would load and which could switch the sandbox's
 filesystem rules off or start an MCP server outside it; the factory also pins filesystem isolation
 on in its own settings, which outrank yours. And the factory's own installation, so an agent cannot
 change the factory that runs it (unless the session's own repository is the factory's clone: the factory developing

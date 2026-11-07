@@ -13,10 +13,10 @@
 // [--now]` (the morning digest of SF-103, through the socket of sf serve).
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { type ChildProcess, spawn } from 'node:child_process';
-import { basename, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { open } from 'node:fs/promises';
+import { open, readFile, realpath } from 'node:fs/promises';
 import { addAttachment, checkSize, removeAttachment } from './attachments.js';
 import { openInBrowser } from './browser.js';
 import { envFilePath, gateConfig, gateLevelSetting, handoffSetting, loadConfig, loadEnvFile, rulesMaxBytes, stateDir } from './config.js';
@@ -28,6 +28,7 @@ import { Execution, type StateListener } from './execution.js';
 import { forgeSettings, withoutHostTokens } from './forge.js';
 import { codexVersion } from './gate.js';
 import { existsSync } from 'node:fs';
+import { writeFileAtomic } from './atomic.js';
 import { callSocket, listenSocket, socketPath } from './ipc.js';
 import { type Job, type JobState, JobStore } from './jobs.js';
 import { localTime } from './local-time.js';
@@ -36,7 +37,10 @@ import { MAX_RUNNING, MIN_RUNNING, ON_LIMIT_RULES, QueueStore, type QueueView, R
 import { followJobs, runJob } from './runner.js';
 import { jobNotification, notifyConfig, notifyTaskCheck, sendNotification, stateNotifier } from './notify.js';
 import { configDir, HANDOFF_MODES, ignoredWorkCheckouts, isHandoffMode, isWorkspaceColor, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_COLORS, workspaceColor, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN, type WorkspaceEntry } from './registry.js';
-import { loadHandbook, packageVersion, PortInUseError, SERVER_NAME, startServer } from './server.js';
+import {
+  ensureMcpToken, keepProfilePrivate, loadHandbook, mcpBaseUrl, mcpUrl, packageVersion, PortInUseError, probeMcp, profileHasUrl, readMcpToken, redactMcpToken, requireMcpToken,
+  replaceMcpToken, rewriteProfileUrl, SERVER_NAME, startServer, TOKEN_LABEL,
+} from './server.js';
 import { Setup } from './setup.js';
 import { handoverLines, limitLine, type StatusRow, statusRows } from './status.js';
 import { fileSummaryLines } from './patch.js';
@@ -54,7 +58,10 @@ import { DEFAULT_BUDGET_USD, DEFAULT_TIMEOUT_MIN, positiveDecimal, runSmoke } fr
 
 const DEFAULT_PORT = 8787;
 const USAGE = `Usage:
-  sf serve                                              Serve the MCP tools on 127.0.0.1:\${SF_PORT:-${DEFAULT_PORT}}/mcp and the dashboard
+  sf serve                                              Serve the MCP tools on 127.0.0.1:\${SF_PORT:-${DEFAULT_PORT}}/mcp/<token> and the dashboard; the token (mcp-token in the state directory) is made on the first start
+  sf mcp-url [--header|--rotate|--port]                 Print the MCP URL with its token, for an MCP client (claude mcp add --transport http software-factory <url>); --header: the URL without it and the Authorization header; --rotate: a new token (sf serve takes it at once; restart the tunnel); --port: the port only
+  sf mcp-url --write-profile|--check-profile <file>     The tunnel's steps (scripts/sf-tunnel.sh): set the profile's MCP url line to the URL with the token, or check that it is (exit 1 when not)
+  sf mcp-url --redact|--probe                           The tunnel's steps: copy stdin to stdout with the token shown as <token>; send an MCP initialize with the token (exit 0 answers, 1 refused, 2 not reachable)
   sf up [--no-open] [--no-tunnel]                       sf serve plus the planning tunnel for ChatGPT (scripts/sf-tunnel.sh run) in one terminal, and open the dashboard; Ctrl+C stops both
   sf dashboard [--open] [--rotate]                      Print the dashboard URL; --open also opens it (xdg-open); --rotate removes the token so the next sf serve makes a new one
   sf workspace add <name> --read <path> [--handoff checkout|off] [--color <name>]  Register a workspace: the local checkout (every job works in a worktree of it); --handoff: its own hand-over setting, over SF_HANDOFF; --color: its colour on the board (blue, teal, green, olive, orange, red, purple or grey; default: by its name). Again with the same path: changes the --handoff and --color given
@@ -229,6 +236,8 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     });
   }
   const testHooks = process.env.SF_TEST_HOOKS === 'on';
+  // The port the MCP endpoint bound, once it listens (SF_PORT=0: any free port).
+  let boundMcpPort: number | undefined;
   // The socket first: it refuses a second sf serve on the same state before recovery touches it.
   const socket = await listenSocket(config.stateDir, async ({ command, args }) => {
     // sf info: whether sf serve answers.
@@ -243,6 +252,13 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     if (command === 'digest-latest' && args.length === 0) {
       const latest = await digests.latest();
       return latest === undefined ? { digest: null } : { digest: latest.id, period: latest.period, counts: latest.counts, error: latest.error };
+    }
+    // sf mcp-url with SF_PORT=0 (SF-099): the port the MCP endpoint bound.
+    if (command === 'mcp-port') {
+      if (boundMcpPort === undefined) {
+        throw new FactoryError('serve_starting', 'sf serve has not opened its MCP endpoint yet.');
+      }
+      return { port: boundMcpPort };
     }
     if (command.startsWith('queue-')) {
       const result = await queueCommand(runQueue, command.slice('queue-'.length), args);
@@ -328,8 +344,14 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   });
   let server;
   try {
+    // The MCP token (SF-099): made on the first start; an invalid file stops the start.
+    const narrowed = await ensureMcpToken(config.stateDir);
+    if (narrowed !== undefined) {
+      console.error(`warning: ${narrowed}`);
+    }
     await execution.recover();
-    server = await startServer(port, handbook, await packageVersion(), execution, checks, history, runQueue, autoChecks);
+    server = await startServer(port, config.stateDir, handbook, await packageVersion(), execution, checks, history, runQueue, autoChecks);
+    boundMcpPort = server.port;
   } catch (error) {
     await socket.close();
     throw error;
@@ -352,7 +374,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   if (!config.gate.on && config.gate.missing === true) {
     console.log(`gate: off (${config.gate.reason}); the Claude review decides`);
   }
-  console.log(`${SERVER_NAME} listening on ${server.url.href}`);
+  console.log(`${SERVER_NAME} listening on ${mcpUrl(server.port)}`);
   console.log(`${SERVER_NAME} socket ${socket.path}`);
   // The runners write the state of their jobs; the dashboard hears of it from disk (SF-042). A job
   // that left working, awaiting_review or preparing_mr may free a hand-over that met the sandbox's config lock
@@ -410,7 +432,7 @@ interface Tunnel {
   stop(): void;
 }
 
-function startTunnel(): Tunnel | undefined {
+function startTunnel(token: string | undefined): Tunnel | undefined {
   const script = tunnelScript();
   if (!existsSync(script)) {
     console.error(`tunnel | not started: ${script} is missing; the dashboard works without it (${RUNBOOK}).`);
@@ -425,12 +447,12 @@ function startTunnel(): Tunnel | undefined {
       const lines = rest.split('\n');
       rest = lines.pop() ?? '';
       for (const line of lines) {
-        console.error(`tunnel | ${line}`);
+        console.error(`tunnel | ${redactMcpToken(line, token)}`);
       }
     });
     stream.on('end', () => {
       if (rest !== '') {
-        console.error(`tunnel | ${rest}`);
+        console.error(`tunnel | ${redactMcpToken(rest, token)}`);
         rest = '';
       }
     });
@@ -464,7 +486,8 @@ async function up(args: string[]): Promise<void> {
   const { dashboard } = await serve({ beforeStop: () => tunnel?.stop() });
   // The tunnel's check needs the factory to answer, so it starts after serve.
   if (values['no-tunnel'] !== true) {
-    tunnel = startTunnel();
+    // The tunnel's lines never show the MCP token (SF-099), which serve has made by now.
+    tunnel = startTunnel(await readMcpToken(stateDir()).catch(() => undefined));
   } else {
     console.log('tunnel: not started (--no-tunnel)');
   }
@@ -1050,7 +1073,13 @@ async function info(args: string[]): Promise<void> {
   const envFile = envFilePath();
   row('env file', envFile === undefined ? 'off (SF_ENV_FILE is empty)' : `${envFile} (${existsSync(envFile) ? 'read' : 'absent'})`);
   row('state', state);
-  row('mcp', `http://127.0.0.1:${parsePort('SF_PORT', DEFAULT_PORT)}/mcp (planning tools, loopback only)`);
+  const port = await mcpPort().catch((error: unknown) => {
+    if (error instanceof FactoryError && error.code === 'mcp_port_unknown') {
+      return undefined;
+    }
+    throw error;
+  });
+  row('mcp', port === undefined ? 'any free port (SF_PORT=0): sf mcp-url shows the URL while sf serve runs' : `${mcpUrl(port)} (planning tools, loopback only; the URL with the token: sf mcp-url)`);
   const token = dashboardOn() ? await readToken(state) : undefined;
   row('dashboard', !dashboardOn() ? 'off (SF_DASHBOARD=off)' : token === undefined ? 'no token yet (starts with sf serve)' : dashboardUrl(parsePort('SF_DASHBOARD_PORT', DEFAULT_DASHBOARD_PORT), token).href);
   row('model', process.env.SF_MODEL || 'Claude Code default');
@@ -1262,6 +1291,146 @@ async function dashboardCommand(args: string[]): Promise<void> {
   }
 }
 
+// `sf mcp-url` (SF-099): the MCP URL with its token for an MCP client, the rotation, and the
+// tunnel script's steps that need the token. The token is read from the state directory here and
+// is never on a command line; every line but the URL itself and --header shows it as <token>.
+const MCP_URL_OPTIONS = ['header', 'rotate', 'port', 'redact', 'probe', 'write-profile', 'check-profile'] as const;
+
+async function mcpUrlCommand(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args, allowPositionals: true, strict: true,
+    options: {
+      header: { type: 'boolean' }, rotate: { type: 'boolean' }, port: { type: 'boolean' }, redact: { type: 'boolean' }, probe: { type: 'boolean' },
+      'write-profile': { type: 'string' }, 'check-profile': { type: 'string' },
+    },
+  });
+  const chosen = MCP_URL_OPTIONS.filter((option) => values[option] !== undefined);
+  if (positionals.length !== 0 || chosen.length > 1) {
+    throw new UsageError(`mcp-url takes no arguments and one option at most: ${MCP_URL_OPTIONS.map((option) => `--${option}`).join(', ')}.`);
+  }
+  const state = stateDir();
+  if (values.port === true) {
+    console.log(String(await mcpPort()));
+    return;
+  }
+  if (values.rotate === true) {
+    await replaceMcpToken(state);
+    console.log('MCP token rotated: a running sf serve answers only the new one from its next request.');
+    console.log('Restart the tunnel (npm run tunnel again, or sf up), and give other MCP clients the new URL from sf mcp-url.');
+    return;
+  }
+  if (values.redact === true) {
+    // The filter outlives the tunnel client it reads: a missing token file still hides any token after /mcp/.
+    await redactStream(await readMcpToken(state).catch(() => undefined));
+    return;
+  }
+  const token = await requireMcpToken(state);
+  if (values.probe === true) {
+    await probe(token);
+    return;
+  }
+  const port = await mcpPort();
+  const writeProfile = values['write-profile'];
+  if (writeProfile !== undefined) {
+    // The file a link points at, so the link stays.
+    const target = await realpath(writeProfile);
+    // The file 0600 and the profile directory 0700, whether or not the URL changes (R4).
+    const narrowed = await keepProfilePrivate(target, dirname(resolve(writeProfile)), true);
+    const { text, changed } = rewriteProfileUrl(await readFile(target, 'utf8'), mcpUrl(port, token));
+    if (changed) {
+      await writeFileAtomic(target, Buffer.from(text, 'utf8'), 0o600);
+    }
+    console.log([`profile MCP url ${changed ? 'set to' : 'is'} ${mcpUrl(port)}`, ...narrowed].join('; '));
+    return;
+  }
+  const checkProfile = values['check-profile'];
+  if (checkProfile !== undefined) {
+    await keepProfilePrivate(await realpath(checkProfile), dirname(resolve(checkProfile)), false);
+    if (!profileHasUrl(await readFile(checkProfile, 'utf8'), mcpUrl(port, token))) {
+      throw new FactoryError('profile_mcp_url_mismatch', `profile MCP url is not the factory's URL (/mcp/${TOKEN_LABEL})`);
+    }
+    return;
+  }
+  if (values.header === true) {
+    console.log(mcpBaseUrl(port));
+    console.log(`Authorization: Bearer ${token}`);
+    return;
+  }
+  console.log(mcpUrl(port, token));
+}
+
+// The port of the MCP endpoint (SF-099): SF_PORT, or with SF_PORT=0 (any free port) the one the
+// running sf serve bound, asked on its socket; mcp_port_unknown when none answers.
+async function mcpPort(): Promise<number> {
+  const configured = parsePort('SF_PORT', DEFAULT_PORT);
+  if (configured !== 0) {
+    return configured;
+  }
+  const response = await callSocket(stateDir(), { command: 'mcp-port', args: [] }).catch(() => undefined);
+  const bound = response?.ok === true ? (response.result as { port?: unknown }).port : undefined;
+  if (typeof bound !== 'number' || !Number.isInteger(bound) || bound < 1 || bound > 65535) {
+    throw new FactoryError(
+      'mcp_port_unknown',
+      'SF_PORT is 0 (any free port), so the MCP port is the one the running sf serve bound, and no sf serve answers on this state directory (mcp_port_unknown): start sf serve, or set SF_PORT.',
+    );
+  }
+  return bound;
+}
+
+// sf mcp-url --probe: exit 0 when the factory answers the token, 1 when it refuses it (or answers
+// something else), 2 when nothing answers (a port that is not known included).
+async function probe(token: string): Promise<void> {
+  let port: number;
+  try {
+    port = await mcpPort();
+  } catch (error) {
+    if (!(error instanceof FactoryError) || error.code !== 'mcp_port_unknown') {
+      throw error;
+    }
+    console.error('factory not reachable: SF_PORT is 0 (any free port) and no sf serve answers on this state directory');
+    process.exitCode = 2;
+    return;
+  }
+  const outcome = await probeMcp(port, token);
+  if (outcome.result === 'answers') {
+    console.log(`factory answers at ${mcpUrl(port)}`);
+  } else if (outcome.result === 'refused') {
+    console.error(`the factory refused the token at ${mcpUrl(port)}`);
+    process.exitCode = 1;
+  } else if (outcome.result === 'unreachable') {
+    console.error(`factory not reachable at ${mcpUrl(port)}`);
+    process.exitCode = 2;
+  } else {
+    console.error(`the factory at ${mcpUrl(port)} answered HTTP ${outcome.status} without an MCP result`);
+    process.exitCode = 1;
+  }
+}
+
+// sf mcp-url --redact: stdin to stdout, the token shown as <token>. Ignores SIGINT and SIGTERM
+// and ends at the end of its input, so the tunnel client's last lines come through. Bytes pass
+// as latin1 unchanged; the end of a chunk that may begin a token waits for the next one.
+async function redactStream(token: string | undefined): Promise<void> {
+  process.on('SIGINT', () => undefined);
+  process.on('SIGTERM', () => undefined);
+  // A reader that went away ends the filter.
+  process.stdout.on('error', () => process.exit(0));
+  const hold = `/mcp/`.length + 64;
+  const write = async (text: string): Promise<void> => {
+    if (text !== '' && !process.stdout.write(Buffer.from(text, 'latin1'))) {
+      await new Promise((resolve) => process.stdout.once('drain', resolve));
+    }
+  };
+  process.stdin.setEncoding('latin1');
+  let pending = '';
+  for await (const chunk of process.stdin as AsyncIterable<string>) {
+    pending = redactMcpToken(pending + chunk, token);
+    const keep = Math.max(pending.lastIndexOf('\n') + 1, pending.length - hold);
+    await write(pending.slice(0, keep));
+    pending = pending.slice(keep);
+  }
+  await write(redactMcpToken(pending, token));
+}
+
 // `sf metrics` (SF-092): the gate's runs, tokens, items and yield per job and in total.
 async function metrics(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { since: { type: 'string' }, json: { type: 'boolean' } } });
@@ -1415,6 +1584,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'dashboard') {
     await dashboardCommand(rest);
+    return;
+  }
+  if (command === 'mcp-url') {
+    await mcpUrlCommand(rest);
     return;
   }
   if (command === 'run') {

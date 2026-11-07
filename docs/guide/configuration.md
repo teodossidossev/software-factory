@@ -9,6 +9,7 @@ values and an example, as the code of this version reads them.
 | What | Where | Read |
 | --- | --- | --- |
 | Environment settings (`SF_*`, tokens) | `~/.config/software-factory/auth.env`, or the environment | by every `sf` command at its start |
+| The MCP token | `~/.local/state/software-factory/mcp-token` | by `sf serve` on every MCP request; printed with `sf mcp-url` |
 | Workspaces | `~/.config/software-factory/workspaces.json` | at every use (an edit applies at once) |
 | Your own coding rules | `~/.config/software-factory/rules/<workspace>.md`, `rules/global.md` | at each job's Start |
 | The queue (order, limit, hold, limit rule) | `~/.local/state/software-factory/queue.json` | by `sf serve`; changed with `sf queue` or the board |
@@ -132,10 +133,10 @@ effect and says only whether each token is set.
 
 | Key | Default | Allowed | Meaning |
 | --- | --- | --- | --- |
-| `SF_PORT` | `8787` | `0` to `65535` (`0`: any free port) | Port of the MCP server, `http://127.0.0.1:<port>/mcp`. The tunnel expects `8787`. An invalid value is `invalid_port`. |
+| `SF_PORT` | `8787` | `0` to `65535` (`0`: any free port) | Port of the MCP server, `http://127.0.0.1:<port>/mcp/<token>` ([The MCP token](#the-mcp-token-mcp-token)). The tunnel script uses the same port (it asks `sf mcp-url --port`). With `0`, `sf mcp-url` and the tunnel script ask the running `sf serve` for the port it bound; without one they stop with `mcp_port_unknown`. An invalid value is `invalid_port`. |
 | `SF_DASHBOARD_PORT` | `8788` | `0` to `65535` | Port of the dashboard, `http://127.0.0.1:<port>/d/<token>/`. |
 | `SF_DASHBOARD` | on | `off` | `off` starts no dashboard and removes the saved token. |
-| `SF_STATE_DIR` | `${XDG_STATE_HOME:-~/.local/state}/software-factory` | path | Jobs, the queue, the socket `sf.sock`, the dashboard token. The socket path must fit 107 bytes (`socket_path_too_long`). |
+| `SF_STATE_DIR` | `${XDG_STATE_HOME:-~/.local/state}/software-factory` | path | Jobs, the queue, the socket `sf.sock`, the dashboard token, the MCP token. The socket path must fit 107 bytes (`socket_path_too_long`). |
 | `SF_WORKTREE_ROOT` | `<state dir>/worktrees` | absolute path | Where each job's worktree is created: `<root>/<workspace>/<ticket>`. |
 | `SF_CONFIG_DIR` | `${XDG_CONFIG_HOME:-~/.config}/software-factory` | path | `workspaces.json`, `auth.env` and `rules/`. |
 | `SF_ENV_FILE` | `<config dir>/auth.env` | path, or empty for none | The environment file (above). |
@@ -145,9 +146,10 @@ effect and says only whether each token is set.
 
 ### The ChatGPT tunnel (scripts/sf-tunnel.sh)
 
-The tunnel wrapper `scripts/sf-tunnel.sh` reads two settings of its own (and `XDG_CONFIG_HOME`
+The tunnel wrapper `scripts/sf-tunnel.sh` reads three settings of its own (and `XDG_CONFIG_HOME`
 for their defaults). It is a shell script, not an `sf` command: it reads them from its environment
-only. Started by `npm start` (`sf up`) it inherits the environment of `sf`, which includes the
+only. The steps that need the MCP token it leaves to the `sf` CLI (`sf mcp-url`), which reads
+`auth.env` itself, so `SF_PORT` and `SF_STATE_DIR` set only there count. Started by `npm start` (`sf up`) it inherits the environment of `sf`, which includes the
 values from `auth.env`; started by `npm run tunnel` or by hand it does not read `auth.env`, so
 export them in that shell. Give `init`, `set-key`, `check` and `run` the same values: `check` (and
 so `run`) refuses a profile whose key reference is not the current key file.
@@ -155,6 +157,7 @@ so `run`) refuses a profile whose key reference is not the current key file.
 | Key | Default | Allowed | Meaning |
 | --- | --- | --- | --- |
 | `SF_TUNNEL_KEY_FILE` | `${XDG_CONFIG_HOME:-~/.config}/software-factory/tunnel-runtime.key` | a file path | The file that holds the tunnel's runtime key. `set-key` writes it (mode 0600, its directory 0700), `init` writes a `file:<path>` reference to it into the profile, and `check` requires it to exist, be non-empty, have mode 600 and not hold a `tunnel_id`. Example: `SF_TUNNEL_KEY_FILE=/home/you/.secrets/sf-tunnel.key`. |
+| `SF_CLI` | `factory/bin/sf` of the script's own repository | a path to an `sf` executable | The CLI the wrapper calls for `sf mcp-url`. Without it the factory must be built (`factory/dist/src/cli.js`); else the wrapper says to run `npm run setup`. |
 | `TUNNEL_CLIENT_PROFILE_DIR` | `${XDG_CONFIG_HOME:-~/.config}/tunnel-client` | a directory path | The directory of tunnel-client profiles; the wrapper's profile is `<dir>/software-factory.yaml`, created by `init` and read by `check`, `doctor` and `run` (passed to `tunnel-client` as `--profile-dir`). Example: `TUNNEL_CLIENT_PROFILE_DIR=/home/you/.config/tunnel-client-work`. |
 
 For example, to keep both in another place:
@@ -167,9 +170,38 @@ scripts/sf-tunnel.sh set-key
 scripts/sf-tunnel.sh check
 ```
 
-The wrapper's other values are fixed in the script: the MCP URL `http://127.0.0.1:8787/mcp` (it
-does not follow `SF_PORT`) and the health address `127.0.0.1:8790` (which `sf info` reads through
-`SF_TUNNEL_HEALTH`). See the [connection runbook](../runbooks/chatgpt-connection.md).
+The MCP URL follows `SF_PORT`: `init` gives tunnel-client `http://127.0.0.1:<port>/mcp`, and
+`init`, `run` and `doctor` set the profile's MCP `url` line to `http://127.0.0.1:<port>/mcp/<token>`
+(`sf mcp-url --write-profile`). The health address `127.0.0.1:8790` is fixed in the script (`sf
+info` reads it through `SF_TUNNEL_HEALTH`). See the [connection runbook](../runbooks/chatgpt-connection.md).
+
+### The MCP token (mcp-token)
+
+The MCP endpoint answers only a request with the factory's MCP token (SF-099): as the path
+`http://127.0.0.1:<port>/mcp/<token>`, or as `Authorization: Bearer <token>` on `/mcp`. Anything
+else is `401`.
+
+- **The file**: `mcp-token` in the state directory, mode 0600: 64 lower-case hex digits, the
+  dashboard token's format, a value of its own. The first `sf serve` creates it; later starts keep
+  it. A file that is not a valid token stops `sf serve` with `invalid_mcp_token` (it is not
+  replaced silently: the tunnel would hold the old one). A valid file with a wider mode (`0644`)
+  is narrowed to 0600 at the start, with a warning to rotate it (others may have read it); a link,
+  a directory or a file of another user in its place stops `sf serve` with `unsafe_mcp_token`.
+  While serving, the file is read on every
+  request: a file that cannot be read or is invalid refuses every request (`401`, one log line a
+  minute at most, naming the error, never a value).
+- **`sf mcp-url`** prints the URL with the token, for an MCP client such as Claude Code;
+  `--header` prints `http://127.0.0.1:<port>/mcp` and the `Authorization: Bearer` header instead;
+  `--port` the port only. Without a token file it fails with `no_mcp_token`: start `sf serve` once.
+  The port is `SF_PORT`; with `SF_PORT=0` (any free port) it is the one the running `sf serve`
+  bound, asked on its socket, and without a running `sf serve` the command stops with
+  `mcp_port_unknown` (`--probe` exits 2: nothing answers). `sf info` then shows `any free port`.
+- **Rotating**: `sf mcp-url --rotate` writes a new token over the existing file (an invalid one too),
+  with or without a running `sf serve`; without a file it fails with `no_mcp_token` (the first token
+  is `sf serve`'s to make). A running `sf serve` answers only the new one from its next request. Restart the tunnel (`npm run tunnel` again, or `sf up`) and give other
+  clients the new URL.
+- Every other output (`sf serve`'s start lines, `sf info`, logs, the tunnel's lines) shows the URL
+  as `/mcp/<token>`, never the value.
 
 ### Queue
 

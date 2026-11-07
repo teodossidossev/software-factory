@@ -300,11 +300,18 @@ export function dashboardUrl(port: number, token: string): URL {
   return new URL(`http://${LOOPBACK_HOST}:${port}/d/${token}/`);
 }
 
-// The dashboard token, or undefined when the file is missing; kept across `sf serve` starts.
-export async function readToken(stateDir: string): Promise<string | undefined> {
+// A new secret token: 32 random bytes as 64 lower-case hex digits; the dashboard's and the MCP
+// endpoint's (SF-099) alike.
+export function newToken(): string {
+  return randomBytes(32).toString('hex');
+}
+
+// A token file of the state directory: its token, or undefined when the file is missing; invalid
+// (the error never holds the file's content) when it does not hold one token.
+export async function readTokenFile(stateDir: string, file: string, invalid: () => FactoryError): Promise<string | undefined> {
   let text: string;
   try {
-    text = await readFile(join(stateDir, TOKEN_FILE), 'utf8');
+    text = await readFile(join(stateDir, file), 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return undefined;
@@ -313,9 +320,14 @@ export async function readToken(stateDir: string): Promise<string | undefined> {
   }
   const token = text.trim();
   if (!TOKEN_PATTERN.test(token)) {
-    throw new FactoryError('invalid_token', `${TOKEN_FILE} does not hold a dashboard token.`);
+    throw invalid();
   }
   return token;
+}
+
+// The dashboard token, or undefined when the file is missing; kept across `sf serve` starts.
+export function readToken(stateDir: string): Promise<string | undefined> {
+  return readTokenFile(stateDir, TOKEN_FILE, () => new FactoryError('invalid_token', `${TOKEN_FILE} does not hold a dashboard token.`));
 }
 
 // With the dashboard off, a token of an earlier start must not point at a dead page.
@@ -966,7 +978,7 @@ export async function startDashboard(
   // gets a new one (sf dashboard --rotate removes the file on purpose).
   let tokenText = await readToken(stateDir).catch(() => undefined);
   if (tokenText === undefined) {
-    tokenText = randomBytes(32).toString('hex');
+    tokenText = newToken();
     await writeFileAtomic(join(stateDir, TOKEN_FILE), Buffer.from(`${tokenText}\n`));
   }
   const token = Buffer.from(tokenText, 'utf8');

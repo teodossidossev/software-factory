@@ -12,7 +12,7 @@ import { sandboxSettings } from '../src/config.js';
 import { gateEnvironment } from '../src/gate.js';
 import { saveRegistry } from '../src/registry.js';
 import { DENIED_TOOLS } from '../src/rules.js';
-import { absoluteRule, claudeUserSettings, cliRuleList, type DenialScope, HOME_CREDENTIALS, installDir, PATH_DENIAL_UNREPRESENTABLE, pathDenials, prepareTaskChecksDir, taskChecksDir, USER_SETTINGS_WEAKEN_SANDBOX, userSettingsWeakening, withSandboxDenials } from '../src/sandbox-denials.js';
+import { absoluteRule, claudeUserSettings, cliRuleList, type DenialScope, FACTORY_MCP_SERVER, HOME_CREDENTIALS, installDir, PATH_DENIAL_UNREPRESENTABLE, pathDenials, prepareTaskChecksDir, taskChecksDir, USER_SETTINGS_WEAKEN_SANDBOX, userSettingsWeakening, withSandboxDenials } from '../src/sandbox-denials.js';
 import { type IdleOutcome, ImplementerSession, sessionEnvironment } from '../src/session.js';
 import { call, FAKE, fakeLog, newEnv, newRepo, putTask, reviewScript, script, serve, stop, temp, waitFor } from './support/harness.js';
 
@@ -97,7 +97,9 @@ async function assertDenied(l: Layout, denials: Awaited<ReturnType<typeof pathDe
   for (const path of [...denials.sandbox.denyRead, ...denials.sandbox.denyWrite]) {
     assert.ok(path.startsWith('/') && !path.includes('/../'), path);
   }
-  assert.ok(denials.tools.every((rule) => /^(Read|Edit|Write)\(\/\/[^*]+(\/\*\*)?\)$/.test(rule)), denials.tools.join(', '));
+  // Path rules only, and the factory's own MCP server's tools (SF-099).
+  assert.ok(denials.tools.includes(`mcp__${FACTORY_MCP_SERVER}`));
+  assert.ok(denials.tools.every((rule) => rule === `mcp__${FACTORY_MCP_SERVER}` || /^(Read|Edit|Write)\(\/\/[^*]+(\/\*\*)?\)$/.test(rule)), denials.tools.join(', '));
   // What stays: the own worktree, the own checkout (its .git too), the state directory and the
   // worktree root themselves (listable), the own workspace's folder.
   for (const path of [...(own !== undefined ? [own] : []), l.checkout, join(l.checkout, '.git'), l.state, l.worktrees, join(l.worktrees, 'app'), l.home]) {
@@ -360,6 +362,54 @@ test('clean user settings: the factory\'s --settings pins filesystem isolation o
   // CLAUDE_CONFIG_DIR moves both.
   assert.deepEqual(claudeUserSettings({ CLAUDE_CONFIG_DIR: '/c' }, '/h'), ['/c/settings.json', '/c/.claude.json']);
   assert.deepEqual(claudeUserSettings({}, '/h'), ['/h/.claude/settings.json', '/h/.claude.json']);
+});
+
+test('the global config (SF-099: it holds the MCP URL with its token after claude mcp add) is denied for reading too, by the tools and Bash, under CLAUDE_CONFIG_DIR as well', async () => {
+  const l = await layout('denials-global-config');
+  const global = join(l.home, '.claude.json');
+  await writeFile(global, `${JSON.stringify({ mcpServers: { 'software-factory': { type: 'http', url: 'http://127.0.0.1:8787/mcp/x' } } })}\n`);
+  const userSettings = join(l.home, '.claude', 'settings.json');
+  await writeFile(userSettings, '{}\n');
+  const denials = await pathDenials(scope(l, 'job'));
+  for (const tool of ['Read', 'Edit', 'Write']) {
+    assert.ok(denials.tools.includes(`${tool}(/${global})`), `${tool} ${global}`);
+  }
+  assert.ok(denials.sandbox.denyRead.includes(global) && denials.sandbox.denyWrite.includes(global));
+  // The user settings stay readable (no secret there), denied for writing only.
+  assert.ok(!denials.tools.includes(`Read(/${userSettings})`) && !denials.sandbox.denyRead.includes(userSettings));
+  // A Task check too.
+  const check = await pathDenials(scope(l, 'task_check'));
+  assert.ok(check.tools.includes(`Read(/${global})`) && check.sandbox.denyRead.includes(global));
+  // The factory's own MCP server, as the docs name it: no session may use its tools, whatever the
+  // scope Claude Code loaded it from.
+  for (const denials of [await pathDenials(scope(l, 'job')), check]) {
+    assert.ok(denials.tools.includes(`mcp__${FACTORY_MCP_SERVER}`), denials.tools.join(', '));
+  }
+  assert.equal(FACTORY_MCP_SERVER, 'software-factory');
+  // Claude Code's backups of the global config hold the same token once it exists.
+  const backups = join(l.home, '.claude', 'backups');
+  await mkdir(backups);
+  await writeFile(join(backups, '.claude.json.backup.1'), '{}\n');
+  const withBackups = await pathDenials(scope(l, 'job'));
+  assert.ok(withBackups.tools.includes(`Read(/${backups})`) && withBackups.tools.includes(`Read(/${backups}/**)`));
+  assert.ok(withBackups.sandbox.denyRead.includes(backups));
+
+  // CLAUDE_CONFIG_DIR: its .claude.json, the home's left alone.
+  const moved = join(l.root, 'claude-config');
+  await mkdir(moved);
+  await writeFile(join(moved, '.claude.json'), '{}\n');
+  const elsewhere = await pathDenials({ ...scope(l, 'job'), env: { ...l.env, CLAUDE_CONFIG_DIR: moved } });
+  assert.ok(elsewhere.tools.includes(`Read(/${join(moved, '.claude.json')})`) && elsewhere.sandbox.denyRead.includes(join(moved, '.claude.json')));
+  await mkdir(join(moved, 'backups'));
+  assert.ok((await pathDenials({ ...scope(l, 'job'), env: { ...l.env, CLAUDE_CONFIG_DIR: moved } })).sandbox.denyRead.includes(join(moved, 'backups')));
+  assert.ok(!elsewhere.tools.includes(`Read(/${global})`));
+
+  // A missing one: denied for the tools (Claude Code may create it during the session), not in the
+  // sandbox (no placeholder).
+  await rm(join(moved, '.claude.json'));
+  const missing = await pathDenials({ ...scope(l, 'job'), env: { ...l.env, CLAUDE_CONFIG_DIR: moved } });
+  assert.ok(missing.tools.includes(`Read(/${join(moved, '.claude.json')})`));
+  assert.ok(!missing.sandbox.denyRead.includes(join(moved, '.claude.json')));
 });
 
 // The denials the guard compares with: what pathDenials builds for the layout.

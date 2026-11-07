@@ -47,7 +47,11 @@ test('sf info: works without sf serve, reads the env file and reports the state'
   assert.match(shown.stdout, /^tunnel {8}not running \(npm run tunnel\)$/m);
   assert.match(shown.stdout, /^dashboard {5}no token yet/m);
   assert.match(shown.stdout, /^jobs: none$/m);
-  assert.match(shown.stdout, /^mcp {11}http:\/\/127\.0\.0\.1:\d+\/mcp \(planning tools, loopback only\)$/m);
+  // The MCP URL with <token> in the token's place (SF-099), never a value; with SF_PORT=0 and no sf
+  // serve the port is not known yet.
+  assert.match(shown.stdout, /^mcp {11}any free port \(SF_PORT=0\): sf mcp-url shows the URL while sf serve runs$/m);
+  const fixed = await runCli({ ...env, extra: { ...env.extra, SF_PORT: '9123' } }, ['info']);
+  assert.match(fixed.stdout, /^mcp {11}http:\/\/127\.0\.0\.1:9123\/mcp\/<token> \(planning tools, loopback only; the URL with the token: sf mcp-url\)$/m);
   assert.doesNotMatch(shown.stdout, /subscriptions|auth /);
   assert.equal((await runCli(env, ['info', 'extra'])).code, 2);
 });

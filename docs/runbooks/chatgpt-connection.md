@@ -14,7 +14,7 @@ No secrets here. The runtime key lives only in a 0600 file outside the repositor
 ChatGPT (Work chat, connector "Software Factory", No authentication)
   → OpenAI-hosted /v1/mcp/{tunnel_id}
   ← tunnel-client on this machine: outbound HTTPS to api.openai.com:443, long poll
-  → http://127.0.0.1:8787/mcp   (sf serve, loopback only)
+  → http://127.0.0.1:8787/mcp/<token>   (sf serve, loopback only; the MCP token in the profile's url)
   → the registered workspaces
 ```
 
@@ -22,9 +22,18 @@ There is no inbound port, port forwarding or public listener.
 
 Credentials sit on two layers:
 - **Transport.** Only tunnel-client uses the runtime key (a `file:` reference in the profile).
-- **MCP.** No authentication: ChatGPT is set to *No authentication*. The factory listens on
-  loopback only, checks Host and Origin, and is reachable only through the private tunnel
-  (ADR-0005). Its tools only plan: `guide`, `read_file`, `search`, `write_task`, `task_check`,
+- **MCP.** ChatGPT is set to *No authentication*: the connector does not hold the factory's
+  secret, the tunnel client does. Since SF-099 the endpoint answers only a request with the MCP
+  token (`mcp-token` in the state directory, mode 0600): as the path `/mcp/<token>` or as
+  `Authorization: Bearer <token>` on `/mcp`; anything else is `401`. The tunnel client's profile
+  holds the token in its MCP `url` line, set by `scripts/sf-tunnel.sh` through
+  `sf mcp-url --write-profile` on every `run`. The tunnel is registered in your OpenAI
+  organisation, which decides who may use it; the token makes the local endpoint refuse every
+  client that does not hold it (a misconfigured or shared tunnel, another user on the machine, a
+  browser page, the Implementer, whose sandbox cannot read the state directory, the profile
+  directory nor Claude Code's `~/.claude.json`, where `claude mcp add` keeps the URL). Processes running as you outside the sandbox can read the token file anyway, and the
+  tunnel client's own admin surface on loopback (`127.0.0.1:8790`) is accepted on the same grounds.
+  The factory listens on loopback only and checks Host and Origin too. Its tools only plan: `guide`, `read_file`, `search`, `write_task`, `task_check`,
   `read_attachment`, `queue_list` and `queue_add`. Nothing reached through them starts, reviews or
   approves a job; `queue_add` only puts a written ticket in the run queue.
 
@@ -33,11 +42,12 @@ Credentials sit on two layers:
 | What | Where |
 | --- | --- |
 | tunnel-client | `~/.local/opt/tunnel-client/v0.0.18/` (with bundled `cloudflared`), symlink `~/.local/bin/tunnel-client` |
-| Profile | `~/.config/tunnel-client/software-factory.yaml` (created by `scripts/sf-tunnel.sh init`) |
+| Profile | `~/.config/tunnel-client/software-factory.yaml` (created by `scripts/sf-tunnel.sh init`; mode 0600, directory 0700; its MCP `url` holds the token) |
+| MCP token | `mcp-token` in the state directory (`~/.local/state/software-factory/`, mode 0600), made by the first `sf serve`; `sf mcp-url` prints the URL with it |
 | Profile example | `config/tunnel-client/software-factory.example.yaml` |
 | Runtime key | `~/.config/software-factory/tunnel-runtime.key` (0600, directory 0700) |
 | Launcher | `scripts/sf-tunnel.sh` (`init`, `set-key`, `check`, `doctor`, `run`) |
-| Factory | `factory/bin/sf serve` on `127.0.0.1:8787/mcp` |
+| Factory | `factory/bin/sf serve` on `127.0.0.1:<SF_PORT, default 8787>/mcp/<token>` |
 | tunnel-client admin | `http://127.0.0.1:8790/ui`, `/healthz`, `/readyz` (loopback only) |
 
 ## Installing tunnel-client (done once)
@@ -97,21 +107,46 @@ without the tunnel. The two halves separately, in two terminals:
 ```bash
 cd factory
 npm install && npm run build      # once, and after every change to factory/src
-bin/sf serve                      # prints the MCP URL http://127.0.0.1:8787/mcp and the dashboard URL
+bin/sf serve                      # prints the MCP URL http://127.0.0.1:8787/mcp/<token> and the dashboard URL
 ```
 
 **Tunnel (terminal 2), from the repository root:**
 
 ```bash
-scripts/sf-tunnel.sh init tunnel_XXXXXXXX   # once, or when the tunnel changes
+scripts/sf-tunnel.sh init tunnel_XXXXXXXX   # once, or when the tunnel changes (after the first sf serve)
 scripts/sf-tunnel.sh check                  # exit 0 = client, profile, key file and factory OK
-scripts/sf-tunnel.sh doctor                 # tunnel-client doctor --explain
-scripts/sf-tunnel.sh run                    # foreground daemon; keep it running
+scripts/sf-tunnel.sh doctor                 # sets the profile's MCP url, checks, then tunnel-client doctor --explain
+scripts/sf-tunnel.sh run                    # sets the profile's MCP url, checks, then the foreground daemon; keep it running
 tunnel-client health --port 8790 --require-control-plane-poll   # from another shell
 ```
 
+The script never reads or holds the MCP token: the `sf` CLI (`$SF_CLI`, else `factory/bin/sf`,
+so the factory must be built: `npm run setup`) does every step that needs it. `init` creates the
+profile with the plain `http://127.0.0.1:<port>/mcp` and then `sf mcp-url --write-profile` sets
+the `url` of the `mcp.server_urls` entry with `channel: main` to `/mcp/<token>`; `run` and
+`doctor` do that again first, so a profile made before SF-099 (plain `/mcp`) and a rotated token
+are taken up on the next run. Each of these also sets the profile file to exactly 0600 and the profile
+directory to exactly 0700, the URL current or not (a stricter mode too: a 0500 directory would
+block the rewrite). The check (`sf mcp-url --check-profile`) accepts only
+these exact modes and the current
+token, and `sf mcp-url --probe` sends an MCP `initialize` with it. The port is `SF_PORT` (default
+8787), as `sf serve` uses it; with `SF_PORT=0` the one the running `sf serve` bound
+(`mcp_port_unknown` while none runs). A profile whose MCP entry is not in the layout `init` writes, or
+points elsewhere than `127.0.0.1`, stops with `profile_mcp_url_unexpected` and is left as it is.
+Without a token file (no `sf serve` yet on this state directory) the script says to start
+`sf serve` first. Every message shows the URL as `http://127.0.0.1:<port>/mcp/<token>`, and the
+tunnel client's own output (`doctor --explain`, `run`'s logs) goes through `sf mcp-url --redact`,
+which shows the token as `<token>`.
+
+**Rotating the token.** `sf mcp-url --rotate` writes a new token over the existing one (without a
+token file it fails with `no_mcp_token`: start `sf serve` once); a running `sf serve` answers only
+the new one from its next request, without a restart. Then restart the tunnel (`npm run tunnel`
+again, or `sf up`): its `run` writes the new token into the profile. Give other MCP clients
+(Claude Code) the new URL from `sf mcp-url`.
+
 Stopping:
-- `Ctrl+C` in its terminal. `run` hands the signal straight to tunnel-client through `exec`.
+- `Ctrl+C` in its terminal. `run` passes SIGINT and SIGTERM on to tunnel-client as SIGTERM and
+  exits with its status once its last lines are through the filter.
 - For a background process: `kill -TERM <pid>`. Find the PID with
   `pgrep -f 'tunnel-client run --profile software-factory'` and `ss -ltnp | grep 8787`.
 - Stop only these two processes.
@@ -166,7 +201,13 @@ write actions; ChatGPT may ask for confirmation.
 ## Diagnostics
 
 - `scripts/sf-tunnel.sh check` shows which local precondition is missing, including a factory that
-  does not answer on 8787.
+  does not answer on its port (`factory not reachable`) or refuses the token (`the factory refused
+  the token`: the state directory of `sf serve` is not the one the script's `sf` reads).
+- **`profile MCP url is not the factory's URL (/mcp/<token>)`.** The profile holds the plain
+  `/mcp` URL or an earlier token: `scripts/sf-tunnel.sh run` (or `doctor`) sets it.
+- **401 from the factory.** The request had no token or a wrong one; the URL is `sf mcp-url`'s. A
+  log line `mcp: every request is refused: the MCP token file cannot be used (…)` means the
+  `mcp-token` file is unreadable or invalid: `sf mcp-url --rotate`, then restart the tunnel.
 - `tunnel-client doctor --profile software-factory --explain` checks the profile and the connection
   to the control plane.
 - `http://127.0.0.1:8790/ui` is the tunnel-client admin UI.

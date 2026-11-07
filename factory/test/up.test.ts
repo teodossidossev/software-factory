@@ -10,7 +10,7 @@ import { fetchRaw } from './support/dashboard-client.js';
 import { fakeLauncher } from './support/fake-launcher.js';
 import { CLI, type Env, newEnv, processEnv, runCli, temp } from './support/harness.js';
 
-const READY = /listening on (http:\/\/127\.0\.0\.1:\d+\/mcp)/;
+const READY = /listening on (http:\/\/127\.0\.0\.1:\d+\/mcp)\/<token>$/m;
 const DASHBOARD = /dashboard (http:\/\/127\.0\.0\.1:\d+\/d\/[0-9a-f]{64}\/)/;
 // The fake tunnel needs sleep and the launcher only printf: a PATH with the system tools.
 const TOOLS = '/usr/bin:/bin';

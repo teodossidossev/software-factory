@@ -16,7 +16,8 @@ import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/cli
 import { callSocket } from '../../src/ipc.js';
 import { JobStore, refusedTransitions } from '../../src/jobs.js';
 import { saveRegistry } from '../../src/registry.js';
-import { cliRuleList } from '../../src/sandbox-denials.js';
+import { MCP_TOKEN_FILE } from '../../src/server.js';
+import { cliRuleList, FACTORY_MCP_SERVER } from '../../src/sandbox-denials.js';
 import { rulesBlock } from '../../src/rules-docs.js';
 import { CheckStore, taskSha256 } from '../../src/task-check.js';
 import { writeTask } from '../../src/task-file.js';
@@ -24,7 +25,7 @@ import { writeTask } from '../../src/task-file.js';
 export const CLI = fileURLToPath(new URL('../../src/cli.js', import.meta.url));
 export const FAKE = fileURLToPath(new URL('./fake-claude.js', import.meta.url));
 const FAKE_CODEX_SCRIPT = fileURLToPath(new URL('./fake-codex.js', import.meta.url));
-const READY = /listening on (http:\/\/127\.0\.0\.1:\d+\/mcp)/;
+const READY = /listening on (http:\/\/127\.0\.0\.1:\d+\/mcp)\/<token>$/m;
 const DASHBOARD = /dashboard (http:\/\/127\.0\.0\.1:\d+\/d\/[0-9a-f]{64}\/)/;
 
 export let temp: string;
@@ -57,7 +58,7 @@ export interface Env {
 export interface Served {
   child: ChildProcess;
   client: Client;
-  // The printed MCP endpoint URL.
+  // The MCP endpoint URL with the token of the state directory (SF-099); sf serve prints it as /mcp/<token>.
   url: URL;
   // What sf serve printed up to the listening line.
   output: string;
@@ -256,6 +257,12 @@ export function runCli(env: Env, args: string[]): Promise<{ code: number | null;
   });
 }
 
+// The printed endpoint (http://127.0.0.1:<port>/mcp) with the MCP token of env's state directory (SF-099).
+export async function mcpUrlOf(env: Env, printed: URL): Promise<URL> {
+  const token = (await readFile(join(env.state, MCP_TOKEN_FILE), 'utf8')).trim();
+  return new URL(`${printed.href}/${token}`);
+}
+
 // args: the sf command line (`serve`, or `up` with its options).
 export async function serve(env: Env, args: string[] = ['serve']): Promise<Served> {
   const child = spawn(process.execPath, [CLI, ...args], { env: processEnv(env), stdio: ['ignore', 'pipe', 'pipe'] });
@@ -280,8 +287,9 @@ export async function serve(env: Env, args: string[] = ['serve']): Promise<Serve
     child.once('exit', (code) => reject(new Error(`sf serve exited with ${code}:\n${output}`)));
   });
   const client = new Client({ name: 'sf-011-execution', version: '0.0.0' });
-  await client.connect(new StreamableHTTPClientTransport(url));
-  return { child, client, url, output, dashboard, state: env.state };
+  const withToken = await mcpUrlOf(env, url);
+  await client.connect(new StreamableHTTPClientTransport(withToken));
+  return { child, client, url: withToken, output, dashboard, state: env.state };
 }
 
 export async function stop(served: Served, signal: NodeJS.Signals = 'SIGTERM'): Promise<void> {
@@ -423,8 +431,11 @@ export function assertPathDenials(argv: string[], env: Env, own: string, given: 
   for (const rule of [`Read(/${jobs})`, `Read(/${jobs}/**)`, `Edit(/${jobs}/**)`, `Write(/${jobs}/**)`, `Read(/${env.config})`, `Read(/${env.config}/**)`]) {
     assert.ok(extra.includes(rule), `${rule} not in ${extra.join(', ')}`);
   }
-  assert.ok(extra.every((rule) => /^(Read|Edit|Write)\(\/\/.+\)$/.test(rule)), extra.join(', '));
-  const paths = extra.map((rule) => rule.replace(/^\w+\(\//, '').replace(/(\/\*\*)?\)$/, ''));
+  // The factory's own MCP server's tools (SF-099), then path rules only.
+  assert.ok(extra.includes(`mcp__${FACTORY_MCP_SERVER}`), extra.join(', '));
+  const pathRules = extra.filter((rule) => rule !== `mcp__${FACTORY_MCP_SERVER}`);
+  assert.ok(pathRules.every((rule) => /^(Read|Edit|Write)\(\/\/.+\)$/.test(rule)), extra.join(', '));
+  const paths = pathRules.map((rule) => rule.replace(/^\w+\(\//, '').replace(/(\/\*\*)?\)$/, ''));
   assert.ok(!paths.some((path) => path === own || own.startsWith(`${path}/`)), `the own ${own} is denied: ${extra.join(', ')}`);
   const at = argv.indexOf('--settings');
   const sandbox = at < 0 ? undefined : (JSON.parse(argv[at + 1]!) as { sandbox?: { filesystem?: { denyRead?: string[]; denyWrite?: string[] } } }).sandbox;

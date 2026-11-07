@@ -9,9 +9,14 @@ starts a job only from that file.
 
 ## The planning tools (MCP)
 
-`sf serve` serves the planning tools on `http://127.0.0.1:8787/mcp` (loopback only; Host and
-Origin are checked, so only local clients and the tunnel reach it). Any MCP client can use them; the
-server sends the Handbook's Quick start as its instructions.
+`sf serve` serves the planning tools on `http://127.0.0.1:8787/mcp/<token>` (the port is
+`SF_PORT`; loopback only; Host and Origin are checked). Every request needs the factory's MCP
+token, in the path or as `Authorization: Bearer <token>` on `/mcp`; without it the answer is
+`401`. `sf mcp-url` prints the URL with the token (`sf mcp-url --header` the bearer form); every
+other output shows `<token>`. The first `sf serve` makes the token (`mcp-token` in the state
+directory, mode 0600); `sf mcp-url --rotate` makes a new one, which a running `sf serve` takes at
+once ([Configuration](configuration.md#the-mcp-token-mcp-token)). Any MCP client with the URL can
+use the tools; the server sends the Handbook's Quick start as its instructions.
 
 | Tool | What it does |
 | --- | --- |
@@ -30,19 +35,27 @@ None of them starts, reviews, approves or pushes a job: those stay yours.
 
 ChatGPT runs in the browser, so it reaches your local factory through OpenAI's Secure MCP Tunnel:
 a `tunnel-client` on your machine connects out to OpenAI and forwards ChatGPT's tool calls to
-`127.0.0.1:8787`. There is no inbound port.
+`127.0.0.1:8787`. There is no inbound port. ChatGPT's connector holds no secret: the tunnel
+client's profile holds the MCP token in its MCP `url`, which `scripts/sf-tunnel.sh` sets on every
+`run` (and `init`) through `sf mcp-url --write-profile`; the script itself never reads the token,
+and the tunnel client's output passes through a filter that shows it as `<token>`.
 
 Once, set it up as the [connection runbook](../runbooks/chatgpt-connection.md) describes:
 
 1. Install `tunnel-client` v0.0.18.
 2. In the OpenAI Platform: the Tunnels permission, a tunnel, its `tunnel_id`, and a runtime key.
-3. In the repository root: `scripts/sf-tunnel.sh init tunnel_<your id>` and
+3. Start `sf serve` (or `npm start`) once, so the MCP token exists. In the repository root:
+   `scripts/sf-tunnel.sh init tunnel_<your id>` and
    `scripts/sf-tunnel.sh set-key` (a hidden prompt; the key goes to
    `~/.config/software-factory/tunnel-runtime.key`, mode 0600).
 4. `scripts/sf-tunnel.sh check`: exit 0 means the client, the profile, the key file and the
    factory are fine.
 5. In ChatGPT: a custom MCP connector "Software Factory", connection **Tunnel**, authentication
-   **No authentication**; check that it lists the eight tools above.
+   **No authentication** (the token is in the tunnel's profile, not in ChatGPT); check that it
+   lists the eight tools above.
+
+After `sf mcp-url --rotate`, restart the tunnel (`npm run tunnel` again, or `sf up`): its `run`
+writes the new token into the profile.
 
 Then, for every ticket:
 
@@ -74,12 +87,31 @@ ChatGPT is not involved after planning: the factory's own reviewers review the j
 
 ## 2. With Claude Code (or another MCP client) on the local server
 
-A local MCP client reaches `http://127.0.0.1:8787/mcp` directly; no tunnel is needed. For Claude
-Code, register the server once:
+A local MCP client reaches the factory directly with the URL from `sf mcp-url`; no tunnel is
+needed. For Claude Code, register the server once, from the repository root, with `sf serve`
+started once before (it makes the token):
 
 ```sh
-claude mcp add --transport http software-factory http://127.0.0.1:8787/mcp
+claude mcp add --transport http software-factory "$(factory/bin/sf mcp-url)"
 ```
+
+or, with the token in a header instead of the path:
+
+```sh
+factory/bin/sf mcp-url --header        # prints the URL without the token, then the Authorization line
+claude mcp add --transport http software-factory http://127.0.0.1:8787/mcp --header "Authorization: Bearer <the token it printed>"
+```
+
+Claude Code keeps the URL (or the header) in its own MCP settings: after `sf mcp-url --rotate`,
+remove the server (`claude mcp remove software-factory`) and add it again with the new URL. Those
+settings are `~/.claude.json` (`$CLAUDE_CONFIG_DIR/.claude.json` when that is set, and its copies
+in `backups/`) for the default (`local`) and the `user` scope, which every session the factory
+starts may neither read nor write. Keep the name `software-factory`: every session the factory
+starts denies the tools of the server of that name, so a server added in the `user` scope (which
+loads into those sessions too) gives a job no way to the planning tools. Do not use
+`--scope project`: it writes the URL with the token into `.mcp.json` of the current directory,
+where a job working in that repository can read it. Run `sf mcp-url` and `claude mcp add` in your
+own terminal, not through an agent's session, whose transcript would keep the URL.
 
 Then, with `sf serve` running, in a Claude Code session (any directory):
 

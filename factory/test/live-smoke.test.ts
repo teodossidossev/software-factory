@@ -13,6 +13,7 @@ import { test } from 'node:test';
 import { CLASSIFIER_DENIAL, childEnv, DONT_ASK_DENIAL, PASSED_SETTINGS, positiveDecimal, PROBE_SCRIPT, PROBES, probeCallProblem, probeCommand, probeProblem, ProcessGroups, runSmoke, smokePaths, smokeProbe, smokeTask, STEPS, terminate, trackRunnerLock } from '../src/live-smoke.js';
 import { taskChecksDir } from '../src/sandbox-denials.js';
 import { Redactor } from '../src/redact.js';
+import { trackChild } from './support/children.js';
 import { CLI, codexLog, codexScript, type Env, FAKE, fakeCodex, fakeLog, git, newEnv, processEnv, reviewLog, reviewScript, script, temp } from './support/harness.js';
 
 const MR_PATH = '.software-factory/SMOKE-1.mr.md';
@@ -66,6 +67,7 @@ async function smoke(name: string, args: string[], setup: (env: Env) => Promise<
   const childEnvironment = { ...processEnv(env), SF_GATE: 'codex', SF_CODEX: fakeCodex, SF_NTFY_URL: 'http://127.0.0.1:9/never', TMPDIR: tmp, ...extra, ...extraOf?.(env) };
   const { code, stdout, stderr } = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
     const child = spawn(process.execPath, [CLI, 'smoke', ...args], { env: childEnvironment, stdio: ['ignore', 'pipe', 'pipe'] });
+    trackChild(child, ['smoke', ...args]);
     let out = '';
     let err = '';
     child.stdout.on('data', (chunk: Buffer) => {

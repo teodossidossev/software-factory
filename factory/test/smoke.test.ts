@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { MCP_TOKEN_FILE, quickStartSection } from '../src/server.js';
 import { CheckStore, taskSha256 } from '../src/task-check.js';
+import { checkChildren, isServe, REFUSAL_MS, removeOnExit, stopChild, trackChild } from './support/children.js';
 
 const CLI = fileURLToPath(new URL('../src/cli.js', import.meta.url));
 const HANDBOOK = fileURLToPath(new URL('../../HANDBOOK.md', import.meta.url));
@@ -26,28 +27,42 @@ interface Served {
 let temp: string;
 let configDir: string;
 let repo: string;
-const running = new Set<ChildProcess>();
 
 function env(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   // No automatic Task check unless a test turns it on (SF-086).
   return { PATH: process.env.PATH, HOME: process.env.HOME, SF_CONFIG_DIR: configDir, SF_STATE_DIR: join(temp, 'state'), SF_PORT: '0', SF_DASHBOARD_PORT: '0', SF_TASK_CHECK_AUTO: 'off', ...extra };
 }
 
+// Tracked (SF-114); a serve (expected to refuse) that still runs after REFUSAL_MS is stopped and rejects.
 function runCli(args: string[], extra: Record<string, string> = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [CLI, ...args], { env: env(extra), stdio: ['ignore', 'pipe', 'pipe'] });
+    trackChild(child, args);
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
+    const timer = isServe(args)
+      ? setTimeout(() => {
+        // First: the close the kill causes must not resolve the Promise.
+        timedOut = true;
+        void stopChild(child).then(() => reject(new Error(`sf ${args.join(' ')} did not exit within ${REFUSAL_MS / 1000} s; a refused start was expected:\n${stdout}${stderr}`)));
+      }, REFUSAL_MS)
+      : undefined;
     child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString('utf8')));
     child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString('utf8')));
-    child.once('close', (code) => resolve({ code, stdout, stderr }));
+    child.once('close', (code) => {
+      if (timedOut) {
+        return;
+      }
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr });
+    });
   });
 }
 
 function serve(extra: Record<string, string> = {}): Promise<Served> {
   const child = spawn(process.execPath, [CLI, 'serve'], { env: env(extra), stdio: ['ignore', 'pipe', 'pipe'] });
-  running.add(child);
-  child.once('exit', () => running.delete(child));
+  trackChild(child, ['serve']);
   return new Promise((resolve, reject) => {
     let output = '';
     const onData = (chunk: Buffer): void => {
@@ -124,6 +139,7 @@ function postStatus(url: URL, headers: Record<string, string>): Promise<number> 
 
 before(async () => {
   temp = await realpath(await mkdtemp(join(tmpdir(), 'sf-smoke-')));
+  removeOnExit(temp);
   configDir = join(temp, 'config');
   repo = join(temp, 'repo');
   await mkdir(join(repo, 'src'), { recursive: true });
@@ -140,10 +156,19 @@ before(async () => {
 });
 
 after(async () => {
-  for (const child of running) {
-    child.kill('SIGKILL');
+  let problems: string[];
+  try {
+    // The sf processes of the tests (SF-114): stopped, and a serve left running is a problem.
+    problems = await checkChildren(temp);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
   }
-  await rm(temp, { recursive: true, force: true });
+  if (problems.length > 0) {
+    // A failed root after hook does not set the exit code of a plain `node <file>` run (Node 24), only
+    // of node --test: the file fails either way.
+    process.exitCode = 1;
+    throw new assert.AssertionError({ message: `sf processes left running by this test file:\n${problems.join('\n')}` });
+  }
 });
 
 test('sf workspace add, list and remove manage the registry with the documented exit codes', async () => {

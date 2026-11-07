@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { replaceSecret } from '../src/redact.js';
 import { MCP_TOKEN_FILE, profileHasUrl, profileUrlLine, redactMcpToken, rewriteProfileUrl, sameSecret } from '../src/server.js';
+import { trackChild } from './support/children.js';
 import { call, CLI, type Env, newEnv, newRepo, processEnv, runCli, serve, type Served, stop, task, temp } from './support/harness.js';
 
 const SF_BIN = fileURLToPath(new URL('../../bin/sf', import.meta.url));
@@ -385,6 +386,7 @@ test('sf mcp-url --redact: the token becomes <token>, also across chunks; SIGINT
   await stop(await serve(env));
   const token = await tokenOf(env);
   const child = spawn(process.execPath, [CLI, 'mcp-url', '--redact'], { env: processEnv(env), stdio: ['pipe', 'pipe', 'pipe'] });
+  trackChild(child, ['mcp-url', '--redact']);
   let out = '';
   child.stdout.on('data', (chunk: Buffer) => (out += chunk.toString('utf8')));
   const exited = new Promise<number | null>((resolve) => child.once('exit', (code) => resolve(code)));

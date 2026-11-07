@@ -275,7 +275,11 @@ test process inherits, so the IDE and other work stay responsive while the suite
 suites) run. Its exit code is the tests' own (1 when `node --test` was killed by a signal).
 `SF_TEST_CONCURRENCY=4 npm test` runs 4 files at once; `SF_TEST_NICE=0 npm test` keeps the normal
 priority; any other value of either stops with exit code 2 before a test runs
-([Configuration](configuration.md#for-running-the-tests)). The script lines in `factory/package.json`:
+([Configuration](configuration.md#for-running-the-tests)). Since SF-114 every sf process a test
+starts is tracked by `factory/test/support/children.ts` and stopped (SIGTERM, then SIGKILL after 5 s)
+at the end of its file, also on a failure or a signal, and a file whose tests leave an `sf serve`
+running fails; an `sf serve` a test expected to refuse fails the test after 30 s instead of hanging.
+The script lines in `factory/package.json`:
 
 ```json
 "test": "npm run build && node scripts/run-tests.mjs unit",

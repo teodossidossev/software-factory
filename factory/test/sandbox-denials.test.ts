@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
-import { chmod, mkdir, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { sandboxAllowRead, sandboxSettings } from '../src/config.js';
@@ -948,12 +948,12 @@ test('gateWrapper (SF-125): the system read-only, then the denials, then the rea
   const worktree = join(codex.root, 'worktree');
   // Denials outside /tmp (the test's own files are under it): a directory, a file, one gone, one
   // under the temporary folders (the tmpfs hides it already), and an image's denied jobs/.
-  const args = gateWrapper(denialsOf(['/etc', '/bin/sh', '/nonexistent-sf-125', '/sf-tmp/x', '/tmp/x', '/var/lib']), {
+  const args = gateWrapper(denialsOf(['/etc', '/usr/bin/env', '/nonexistent-sf-125', '/sf-tmp/x', '/tmp/x', '/var/lib']), {
     worktree, codexPath: codex.linked, codexHome: '/h/.codex', iterationDir: '/var/lib/sf/jobs/app/T/iterations/001', images: ['/var/lib/sf/jobs/app/T/attachments/1.png'], tmp: '/sf-tmp',
   });
   assert.deepEqual(mounts(args), [
     ['--die-with-parent'], ['--unshare-pid'], ['--ro-bind', '/', '/'], ['--dev', '/dev'], ['--proc', '/proc'], ['--tmpfs', '/tmp'], ['--tmpfs', '/sf-tmp'],
-    ['--tmpfs', '/etc'], ['--ro-bind', '/dev/null', '/bin/sh'], ['--tmpfs', '/var/lib'],
+    ['--tmpfs', '/etc'], ['--ro-bind', '/dev/null', '/usr/bin/env'], ['--tmpfs', '/var/lib'],
     ['--ro-bind', worktree, worktree], ['--ro-bind', '/var/lib/sf/jobs/app/T/attachments/1.png', '/var/lib/sf/jobs/app/T/attachments/1.png'],
     ['--ro-bind', codex.modules, codex.modules], ['--ro-bind', NODE_PREFIX, NODE_PREFIX],
     ['--bind', '/h/.codex', '/h/.codex'], ['--bind', '/var/lib/sf/jobs/app/T/iterations/001', '/var/lib/sf/jobs/app/T/iterations/001'],
@@ -991,6 +991,20 @@ test('gateWrapper (SF-125): a denial inside a bound folder stays (the worktree\'
   const lastImage = args.map((entry) => entry.join(' ')).lastIndexOf(bound(image));
   assert.ok(lastImage > index(`--tmpfs ${jobs}`), JSON.stringify(args));
   assert.deepEqual(args.slice(-2), [['--bind', '/h/.codex', '/h/.codex'], ['--bind', '/i', '/i']]);
+});
+
+test('gateWrapper (SF-133): a denial reached through a link is hidden at its real path, once, since bwrap cannot mount through a link (/var/run/dbus with /var/run a link to /run)', async (t) => {
+  const linked = (await lstat('/var/run').catch(() => undefined))?.isSymbolicLink() === true && existsSync('/var/run/dbus');
+  if (!linked) {
+    t.skip('no /var/run link to a folder holding dbus here');
+    return;
+  }
+  const codex = await codexInstall('wrapper-link');
+  const real = realpathSync('/var/run/dbus');
+  const args = mounts(gateWrapper(denialsOf(['/var/run/dbus', real]), {
+    worktree: join(codex.root, 'worktree'), codexPath: codex.standalone, codexHome: '/h/.codex', iterationDir: '/i', images: [], tmp: '/tmp',
+  }));
+  assert.deepEqual(args.filter((mount) => mount[1] === real || mount[1] === '/var/run/dbus'), [['--tmpfs', real]]);
 });
 
 test('gateWrapperFor (SF-125): the wrapper of pathDenials(scope): every denyRead entry of the job\'s denials outside the temporary folders is hidden', async () => {

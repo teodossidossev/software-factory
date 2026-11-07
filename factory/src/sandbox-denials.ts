@@ -904,6 +904,16 @@ function hiding(path: string): string[] {
 
 const depth = (path: string): number => path.split(sep).filter((part) => part !== '').length;
 
+// Where bwrap can mount over a path: its real path when it exists, since bwrap cannot create a
+// mount point through a link (/var/run/dbus with /var/run a link to /run); else the path resolved.
+function mountPoint(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
 // The bwrap arguments the Codex gate runs under (SF-125), a later mount winning over an earlier one:
 //   1. the whole system read-only, a new /dev and /proc (--unshare-pid: an unprivileged bwrap mounts
 //      a procfs only in a PID namespace of its own), an empty /tmp, and an empty tmp when it is
@@ -920,7 +930,7 @@ export function gateWrapper(denials: PathDenials, options: GateWrapperOptions): 
   const tmp = resolve(options.tmp);
   const temporary = within(tmp, '/tmp') ? ['/tmp'] : ['/tmp', tmp];
   const args = ['--die-with-parent', '--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', ...temporary.flatMap((dir) => ['--tmpfs', dir])];
-  const denied = [...new Set(denials.sandbox.denyRead.map((path) => resolve(path)))];
+  const denied = [...new Set(denials.sandbox.denyRead.map(mountPoint))];
   for (const path of denied.filter((entry) => !temporary.some((dir) => within(entry, dir)))) {
     args.push(...hiding(path));
   }

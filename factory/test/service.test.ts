@@ -1,8 +1,9 @@
 // sf service (SF-101) with a fake systemctl and loginctl: the unit file sf service install writes
 // (KillMode=process, the CPU cap and Nice=10 of SF-116, the shell's PATH and directory settings,
-// nothing else), the refusal while a hand-started sf serve answers, the machine without systemd
-// user services, the linger warning, uninstall and status; then the CLI with fake systemctl and
-// loginctl on PATH.
+// nothing else), the refusal while a hand-started sf serve answers, the reinstall while the
+// service's own sf serve answers (SF-120: rewrite and restart, refused while it is busy), the
+// machine without systemd user services, the linger warning, uninstall and status; then the CLI
+// with fake systemctl and loginctl on PATH.
 import assert from 'node:assert/strict';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -10,6 +11,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
 import { type CommandOutput, type RunCommand, serviceCommand, type ServiceOptions, unitPath, unitText } from '../src/service.js';
+import { callSocket } from '../src/ipc.js';
 import { newEnv, runCli, serve, stop, temp } from './support/harness.js';
 
 interface Fake {
@@ -115,6 +117,83 @@ test('sf service install refuses with serve_running while a hand-started sf serv
   assert.ok(!fake.calls.some((call) => call.includes('enable') || call.includes('daemon-reload')));
 });
 
+const MAIN_PID = 'systemctl --user show software-factory --property=MainPID --value';
+const RELOADS_OR_RESTARTS = (call: string): boolean => call.includes('daemon-reload') || call.includes('enable') || call.includes('restart');
+
+// The service's own sf serve answers: its pid from ping is the service's MainPID (SF-120).
+function ownServe(answers: Record<string, Partial<CommandOutput>> = {}): Fake {
+  return fakeCommands({ [MAIN_PID]: { stdout: '4242\n' }, ...answers });
+}
+const own: Partial<ServiceOptions> = { serveAnswers: async () => true, servePid: async () => 4242, serveBusy: async () => [] };
+
+test('sf service install, while the service\'s own sf serve answers and is idle, rewrites the unit and restarts the service without enable --now', async () => {
+  const home = join(temp, 'service-reinstall');
+  const fake = ownServe();
+  const opts = options(home, fake, own);
+  await serviceCommand('install', opts);
+  assert.match(await readFile(unitPath(opts.env, home), 'utf8'), /^KillMode=process$/m);
+  assert.deepEqual(fake.calls, [
+    'systemctl --user show-environment',
+    MAIN_PID,
+    'loginctl show-user u --property=Linger',
+    'systemctl --user daemon-reload',
+    'systemctl --user enable software-factory',
+    'systemctl --user restart software-factory',
+  ]);
+  assert.ok(opts.lines.some((line) => line.includes('restarted software-factory') && line.includes('pid 4242') && line.includes('KillMode=process')), opts.lines.join('\n'));
+  assert.ok(opts.lines.some((line) => line.startsWith('Wrote ')));
+  assert.ok(!fake.calls.some((call) => call.includes('--now')));
+});
+
+test('sf service install refuses with serve_running when the answering sf serve is not the service\'s own, or that is in doubt', async () => {
+  const cases: Array<[string, Fake, Partial<ServiceOptions>]> = [
+    ['another pid', ownServe({ [MAIN_PID]: { stdout: '4243\n' } }), own],
+    ['no main pid', ownServe({ [MAIN_PID]: { stdout: '0\n' } }), own],
+    ['show fails', ownServe({ [MAIN_PID]: { code: 1, stdout: '4242\n', stderr: 'no such unit' } }), own],
+    ['no pid in ping', ownServe(), { ...own, servePid: async () => undefined }],
+  ];
+  for (const [name, fake, extra] of cases) {
+    const home = join(temp, `service-by-hand-${name.replaceAll(' ', '-')}`);
+    const opts = options(home, fake, extra);
+    await assert.rejects(serviceCommand('install', opts), (error: unknown) => {
+      assert.ok(error instanceof FactoryError, name);
+      assert.equal(error.code, 'serve_running', name);
+      assert.match(error.message, /Stop that sf serve first/);
+      assert.match(error.message, /keep running/);
+      return true;
+    });
+    assert.equal(existsSync(unitPath(opts.env, home)), false, name);
+    assert.ok(!fake.calls.some(RELOADS_OR_RESTARTS), `${name}: ${fake.calls.join(', ')}`);
+  }
+});
+
+test('sf service install refuses with serve_busy while a Task check or a hand-over runs in the service\'s own sf serve, and passes on serveBusy\'s error, writing nothing', async () => {
+  const home = join(temp, 'service-busy');
+  const fake = ownServe();
+  const opts = options(home, fake, { ...own, serveBusy: async () => ['the Task check of app/T-1'] });
+  await assert.rejects(serviceCommand('install', opts), (error: unknown) => {
+    assert.ok(error instanceof FactoryError);
+    assert.equal(error.code, 'serve_busy');
+    assert.match(error.message, /pid 4242/);
+    assert.match(error.message, /the Task check of app\/T-1/);
+    return true;
+  });
+  assert.equal(existsSync(unitPath(opts.env, home)), false);
+  assert.ok(!fake.calls.some(RELOADS_OR_RESTARTS), fake.calls.join(', '));
+
+  const failing = ownServe();
+  const updating = options(home, failing, { ...own, serveBusy: async () => { throw new FactoryError('update_in_progress', 'update_in_progress: sf update is running.'); } });
+  await assert.rejects(serviceCommand('install', updating), (error: unknown) => error instanceof FactoryError && error.code === 'update_in_progress');
+  assert.equal(existsSync(unitPath(updating.env, home)), false);
+  assert.ok(!failing.calls.some(RELOADS_OR_RESTARTS), failing.calls.join(', '));
+});
+
+test('sf service install fails with systemctl_failed when the restart of the service\'s own sf serve fails', async () => {
+  const home = join(temp, 'service-restart-fails');
+  const fake = ownServe({ 'systemctl --user restart software-factory': { code: 1, stderr: 'boom' } });
+  await assert.rejects(serviceCommand('install', options(home, fake, own)), (error: unknown) => error instanceof FactoryError && error.code === 'systemctl_failed' && /restart/.test(error.message) && /boom/.test(error.message));
+});
+
 test('without systemd user services, sf service says so', async () => {
   const home = join(temp, 'service-none');
   const fake = fakeCommands({ 'systemctl --user show-environment': { code: 1, stderr: 'Failed to connect to bus: No medium found\n' } });
@@ -145,10 +224,12 @@ test('sf service status shows the unit state and the journal; uninstall stops, d
   assert.equal(existsSync(unitPath(removed.env, home)), false);
 });
 
-// A fake systemctl and loginctl on PATH, logging their arguments.
-async function fakeBin(dir: string, systemctlExit = 0): Promise<string> {
+// A fake systemctl and loginctl on PATH, logging their arguments; with mainPid, systemctl prints it
+// for a call that asks for the MainPID.
+async function fakeBin(dir: string, systemctlExit = 0, mainPid?: number): Promise<string> {
   await mkdir(dir, { recursive: true });
-  for (const [name, body] of [['systemctl', `exit ${systemctlExit}`], ['loginctl', 'echo Linger=yes']] as const) {
+  const systemctl = `${mainPid === undefined ? '' : `case "$*" in *MainPID*) echo ${mainPid};; esac\n`}exit ${systemctlExit}`;
+  for (const [name, body] of [['systemctl', systemctl], ['loginctl', 'echo Linger=yes']] as const) {
     const file = join(dir, name);
     await writeFile(file, `#!/bin/sh\necho "${name} $*" >> "${join(dir, 'calls.log')}"\n${body}\n`);
     await chmod(file, 0o755);
@@ -185,4 +266,26 @@ test('the CLI: sf service install writes the unit under the user config, refuses
   const missing = await runCli(env, ['service', 'status']);
   assert.equal(missing.code, 1);
   assert.match(missing.stderr, /systemd_unavailable/);
+});
+
+test('the CLI: sf service install, while the service\'s own sf serve answers (its pid is the MainPID), rewrites the unit and restarts the service', async () => {
+  const env = await newEnv('service-cli-own');
+  const served = await serve(env);
+  try {
+    const pid = served.child.pid!;
+    const bin = await fakeBin(join(temp, 'service-cli-own-bin'), 0, pid);
+    env.extra = { PATH: `${bin}:${process.env.PATH}`, XDG_CONFIG_HOME: join(env.home, '.config') };
+    const installed = await runCli(env, ['service', 'install']);
+    assert.equal(installed.code, 0, installed.stderr);
+    assert.match(installed.stdout, new RegExp(`restarted software-factory .*pid ${pid}`));
+    assert.equal(existsSync(join(env.home, '.config', 'systemd', 'user', 'software-factory.service')), true);
+    const calls = await readFile(join(bin, 'calls.log'), 'utf8');
+    assert.match(calls, /systemctl --user restart software-factory/);
+    assert.doesNotMatch(calls, /enable --now/);
+    const ping = await callSocket(env.state, { command: 'ping', args: [] });
+    assert.ok(ping.ok);
+    assert.equal((ping.result as { pid?: number }).pid, pid);
+  } finally {
+    await stop(served);
+  }
 });

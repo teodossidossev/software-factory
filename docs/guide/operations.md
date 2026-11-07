@@ -260,7 +260,8 @@ Use `tailscale serve`, never `tailscale funnel`: Funnel puts the address on the 
 | `update_in_progress` | `sf update` is draining or building; or its build is done and waits for `sf serve` to restart (`sf status` shows the phase) | wait for it to end; restart `sf serve` when it says so |
 | `update_interrupted`, or `update interrupted` in `sf status` | an `sf update` ended while building, or its rollback failed (`rollback_failed`) | check the install (`git status`, `npm run build` in `factory/`), then `sf update --abandon` |
 | `state_too_new` at `sf serve`'s or a runner's start | the state was written by a newer factory than the one starting | update the factory (`sf update`) |
-| `serve_running` from `sf service install` | an `sf serve` you started by hand answers | stop it (its jobs keep running), then `sf service install` again |
+| `serve_running` from `sf service install` | an `sf serve` you started by hand answers (not the service's own) | stop it (its jobs keep running), then `sf service install` again |
+| `serve_busy` from `sf service install` | a Task check or a hand-over runs inside the service's `sf serve`, and a restart would cut it off | run `sf service install` again when it has ended (`sf status` shows the job) |
 | `systemd_unavailable` | no systemd user services on this machine | run `sf serve` (`npm run serve`) as before |
 | `socket_path_too_long` | `SF_STATE_DIR` is too deep for a Unix socket (107 bytes) | use a shorter state directory |
 | `sf serve` refuses to start with `registry_invalid` or `queue_invalid` | `workspaces.json` or `queue.json` has a key or value the strict parser does not accept | fix the file by the message (see [Configuration](configuration.md#the-workspace-registry-workspacesjson)) |

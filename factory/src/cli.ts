@@ -271,9 +271,9 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     if (!OPEN_WHILE_UPDATING.has(command)) {
       refuseWhileUpdating(config.stateDir);
     }
-    // sf info: whether sf serve answers.
+    // sf info: whether sf serve answers; sf service install: which process does (SF-120).
     if (command === 'ping') {
-      return {};
+      return { pid: process.pid };
     }
     // sf update's drain (SF-101): the Task checks and the hand-over operations running here now.
     if (command === 'serve-busy' && args.length === 0) {
@@ -1558,6 +1558,32 @@ async function serveAnswers(): Promise<boolean> {
   }
 }
 
+// The pid the answering sf serve reports in its ping (SF-120); none when nothing answers, it
+// refuses, or it names no pid (an sf serve of a version before SF-120).
+async function servePid(): Promise<number | undefined> {
+  try {
+    const response = await callSocket(stateDir(), { command: 'ping', args: [] });
+    const pid = response.ok ? (response.result as { pid?: unknown } | null)?.pid : undefined;
+    return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// The Task checks and hand-overs running inside the answering sf serve, one line each, in the
+// texts of sf update's drain (SF-120: sf service install refuses a restart while any runs).
+async function serveBusy(): Promise<string[]> {
+  const response = await callSocket(stateDir(), { command: 'serve-busy', args: [] });
+  if (!response.ok) {
+    throw new FactoryError(response.error.code, response.error.message);
+  }
+  const result = (response.result ?? {}) as { checks?: Array<{ workspace: string; ticket: string }>; handovers?: Array<{ workspace: string; ticket: string; step: string }> };
+  return [
+    ...(result.checks ?? []).map((check) => `the Task check of ${check.workspace}/${check.ticket}`),
+    ...(result.handovers ?? []).map((handover) => `the ${handover.step} of ${handover.workspace}/${handover.ticket}`),
+  ];
+}
+
 // The environment of the shell that ran sf, without what auth.env added (SF-101: sf service).
 function shellEnv(fromEnvFile: readonly string[]): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(process.env).filter(([name]) => !fromEnvFile.includes(name)));
@@ -1569,7 +1595,7 @@ async function service(args: string[], fromEnvFile: readonly string[]): Promise<
   if (args.length !== 1 || (command !== 'install' && command !== 'uninstall' && command !== 'status')) {
     throw new UsageError('service needs install, uninstall or status.');
   }
-  await serviceCommand(command, { env: shellEnv(fromEnvFile), fromEnvFile, serveAnswers });
+  await serviceCommand(command, { env: shellEnv(fromEnvFile), fromEnvFile, serveAnswers, servePid, serveBusy });
 }
 
 // This package's root (factory/): dist/src/cli.js is two levels below it.

@@ -8,7 +8,8 @@
 // the install (node, git, gh, claude and codex are found as there) and the directory settings set
 // in that shell; every other setting comes from auth.env, which sf serve reads. Logs go to
 // journald. On a machine without systemd user services sf service says so, and sf serve works as
-// before.
+// before. Run while the service's own sf serve answers, install rewrites the unit and restarts the
+// service (SF-120); an sf serve started by hand still refuses it.
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
@@ -57,6 +58,11 @@ export interface ServiceOptions {
   run?: RunCommand;
   // Whether an sf serve answers on the state directory's socket.
   serveAnswers: () => Promise<boolean>;
+  // The pid the answering sf serve reports (SF-120); by default none.
+  servePid?: () => Promise<number | undefined>;
+  // What runs inside that sf serve and a restart would cut off, one line each, empty when idle;
+  // by default nothing.
+  serveBusy?: () => Promise<string[]>;
   print?: (line: string) => void;
   home?: string;
   user?: string;
@@ -153,14 +159,39 @@ class Service {
     }
   }
 
-  async install(): Promise<void> {
-    await this.refuseWithoutSystemd();
-    if (await this.#o.serveAnswers()) {
+  // The service's main pid: systemd's MainPID when show answers with a positive integer.
+  async #mainPid(): Promise<number | undefined> {
+    const shown = await this.systemctl('show', SERVICE_NAME, '--property=MainPID', '--value');
+    const pid = Number(shown.stdout.trim());
+    return shown.code === 0 && Number.isInteger(pid) && pid > 0 ? pid : undefined;
+  }
+
+  // While an sf serve answers, install goes on only when it is the service's own (its pid from
+  // ping is the service's MainPID; SF-120) and nothing runs inside it that a restart would cut off.
+  // Every doubt about the pid is a hand-started sf serve. Returns that pid, or undefined when no
+  // sf serve answers.
+  async #ownServe(): Promise<number | undefined> {
+    if (!(await this.#o.serveAnswers())) {
+      return undefined;
+    }
+    const pid = await (this.#o.servePid ?? (async () => undefined))();
+    const mainPid = await this.#mainPid();
+    if (pid === undefined || mainPid === undefined || pid !== mainPid) {
       throw new FactoryError(
         'serve_running',
         'serve_running: an sf serve started by hand answers on the socket, and the service would fail against it at every start. Stop that sf serve first (its jobs keep running: their runners are detached), then run sf service install again.',
       );
     }
+    const busy = await (this.#o.serveBusy ?? (async () => []))();
+    if (busy.length > 0) {
+      throw new FactoryError('serve_busy', `serve_busy: the service's sf serve (pid ${pid}) is running ${busy.join(', ')}; a restart now would cut it off. Run sf service install again when it has ended.`);
+    }
+    return pid;
+  }
+
+  async install(): Promise<void> {
+    await this.refuseWithoutSystemd();
+    const running = await this.#ownServe();
     const sf = this.#o.sf ?? INSTALLED_SF;
     const cores = this.#o.cores ?? availableParallelism();
     await mkdir(unitDir(this.#o.env, this.#o.home ?? homedir()), { recursive: true });
@@ -172,8 +203,15 @@ class Service {
     }
     await this.#lingerWarning();
     await this.#must('daemon-reload');
-    await this.#must('enable', '--now', SERVICE_NAME);
-    this.#print(`Enabled and started ${SERVICE_NAME}. Logs: ${JOURNAL_HINT}. sf service status shows it.`);
+    if (running === undefined) {
+      await this.#must('enable', '--now', SERVICE_NAME);
+      this.#print(`Enabled and started ${SERVICE_NAME}. Logs: ${JOURNAL_HINT}. sf service status shows it.`);
+      return;
+    }
+    // enable --now would not restart a unit that runs; enable keeps it enabled at login.
+    await this.#must('enable', SERVICE_NAME);
+    await this.#must('restart', SERVICE_NAME);
+    this.#print(`Rewrote the unit and restarted ${SERVICE_NAME} (its sf serve, pid ${running}, answered on the socket); running jobs keep running (KillMode=process). Logs: ${JOURNAL_HINT}. sf service status shows it.`);
   }
 
   // A logout stops the user's services unless lingering is on; the user turns it on.

@@ -12,6 +12,7 @@ values and an example, as the code of this version reads them.
 | The MCP token | `~/.local/state/software-factory/mcp-token` | by `sf serve` on every MCP request; printed with `sf mcp-url` |
 | Workspaces | `~/.config/software-factory/workspaces.json` | at every use (an edit applies at once) |
 | Your own coding rules | `~/.config/software-factory/rules/<workspace>.md`, `rules/global.md` | at each job's Start |
+| The guard's private list | `~/.config/software-factory/guard-terms.txt` | at every check of the guard ([The guard](#the-guard)) |
 | The queue (order, limit, hold, limit rule) | `~/.local/state/software-factory/queue.json` | by `sf serve`; changed with `sf queue` or the board |
 | A ticket's plan | `.software-factory/<ticket>.md` in the workspace's checkout | at Start, by the Task check and the queue |
 
@@ -287,6 +288,7 @@ The top level is `{"workspaces": {<name>: <entry>}}` and, optionally, the mornin
 | `description` | no | text, at most 2,000 characters | What the repository is, for the morning digest. Without it the digest reads the first paragraph of the repository's `README.md` (else its `package.json`'s `description`). When it and the Git data disagree, the data wins. |
 | `app` | no | text, 1 to 64 characters | Workspaces with the same app share one daily and are compared in "One ticket across the app" (a backend and its frontend). Without it the workspace is its own app. |
 | `digest` | no | `{"track": true/false, "my_work": true/false}` | `track`: follow the repository in the morning digest. `my_work`: your commits here go into the daily of its app. Absent: both off. |
+| `guard` | no | `true` or `false` | `true`: the workspace is public; its pushes and MR texts are checked for the names of your other workspaces and your private list ([The guard](#the-guard)). Absent: `false` (secrets are still checked). Turn it on for `software-factory`. Only by editing the file. |
 
 The top-level `digest` sets the morning digest; every key is optional:
 
@@ -340,6 +342,66 @@ changes). On the dashboard, the Workspaces drawer adds a workspace (an absolute 
 digest switches; the name stays, and the path cannot change while the workspace has a live job), and
 removes one that has no live job. Its **Morning digest** section sets `at`, `weekdays_only` and
 `language`. The CLI has no flags for the digest's fields: use the drawer or edit the file.
+
+## The guard
+
+The guard keeps the names of your other workspaces, your employer, your colleagues and your
+secrets out of what the factory publishes. It has two parts:
+
+- **Secrets, in every workspace.** The values of the secret settings of `auth.env` (every key ending
+  in `TOKEN`, `SECRET`, `PASSWORD` or `API_KEY`, and `SF_NTFY_URL`), the dashboard and MCP tokens,
+  and well-known key formats (private key blocks, GitHub, GitLab, OpenAI, Slack and AWS keys). You
+  set nothing for this.
+- **Names, in a guarded workspace.** For a repository that is or may become public, set
+  `"guard": true` on its entry in `workspaces.json`; turn it on for `software-factory`:
+
+  ```json
+  "software-factory": { "read_checkout": "/home/you/IdeaProjects/software-factory", "guard": true }
+  ```
+
+  Its pushes and MR texts are then also checked for the names, Git hosts, ticket keys (`ABC` of
+  `ABC-123`) and work email domains of your other workspaces, built from the registry and the jobs
+  at each check, and for the terms of your private list.
+
+**The private list** is `~/.config/software-factory/guard-terms.txt`. It never lives in a
+repository and the factory never writes it. One entry per line:
+
+```text
+# my employer and colleagues
+ACME
+Jane Doe
+# a regular expression (JavaScript, case-insensitive)
+re:jane\s*doe
+# a false positive among the automatic terms: drop it
+!acme-tools
+```
+
+A plain line matches as a whole word, in any case (`ACME` matches `Acme's` and `acme-web`, not
+`acmeville`). `re:` starts a regular expression. `!` drops an automatic term (a workspace name, a
+host, a key prefix or a domain) that gives false positives; it never drops a line of the list. A
+line that is not valid (a broken expression, one that matches the empty text, an empty `re:` or `!`)
+stops every check with `guard_terms_invalid` naming its line number.
+
+**The hook.** `sf guard install-hook software-factory` writes a Git `pre-push` hook into your
+checkout, so your own pushes are checked too (it refuses to overwrite a hook it did not write).
+
+**See the hits.** `sf guard software-factory` lists what your next push would publish that the guard
+refuses, with the matched text: `sf guard software-factory --history` checks every commit, `--branch
+<name>` a branch name, `--mr <ticket>` a job's MR text, `--worktree <ticket>` a job's uncommitted
+change. It exits 0 without hits and 1 with hits. Only `sf guard` and the hook show the matched text
+(never a secret's); every other message names the place only.
+
+**When the guard stops a job** (`guard_hit`):
+
+- **At Clean** (the change): the factory first writes a Fix section `Guard` naming the places, and
+  the job goes through a normal fix round. After two such rounds it stops. Remove the text with
+  `sf say` (or by hand in the worktree, then `sf say`), or, for a false positive, add a `!` line to
+  `guard-terms.txt` and run `sf retry`. `sf guard <workspace> --worktree <ticket>` shows the matches.
+- **In the MR text**: the Implementer gets up to two more MR text turns; then the job stops. Tell it
+  how to word the text with `sf say`, or run `sf retry` for new turns.
+- **At the push** (`sf approve`, Push, `sf mr create`): nothing is pushed and the job is not
+  changed. The message names `sf guard <workspace> <commit> --mr <ticket>`; fix the commit, the
+  branch name or the MR text (on the Merge request screen), or add a `!` line, and push again.
 
 ## Coding rules
 

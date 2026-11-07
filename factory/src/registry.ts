@@ -8,7 +8,9 @@
 // SF-103 a workspace has an optional `description`, `app` (workspaces of one app share one daily) and
 // `digest: {track, my_work}`, and the registry an optional top-level `digest` (the morning digest's
 // time, weekdays only, model and language). Since SF-106 the registry has an optional top-level
-// `explain` (the plain explanation of each stop: on, model and language).
+// `explain` (the plain explanation of each stop: on, model and language). Since SF-122 a workspace has
+// an optional `guard` (src/guard.ts: its pushes and MR texts are checked for the names of the
+// user's other workspaces; absent: false).
 import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -94,6 +96,7 @@ const registrySchema = z.strictObject({
       description: z.string().max(MAX_DESCRIPTION_CHARS).optional(),
       app: z.string().trim().min(1).max(MAX_APP_CHARS).optional(),
       digest: workspaceDigestSchema.optional(),
+      guard: z.boolean().optional(),
     }),
   ),
   digest: digestSettingsSchema.optional(),
@@ -187,6 +190,8 @@ export interface Workspace {
   handoff?: HandoffMode;
   // The repository rule files not given to the agents (SF-059), as globs.
   rulesSkip?: string[];
+  // "guard": true in workspaces.json (SF-122); absent otherwise.
+  guard?: boolean;
 }
 
 // The entries whose ignored work_checkout differs from the checkout, for one warning at start.
@@ -261,6 +266,7 @@ export async function resolveWorkspace(name: string, dir = configDir()): Promise
     return {
       name, readCheckout: checkout, workCheckout: checkout, ...(entry.handoff !== undefined ? { handoff: entry.handoff } : {}),
       ...(entry.rules_skip !== undefined ? { rulesSkip: entry.rules_skip } : {}),
+      ...(entry.guard === true ? { guard: true } : {}),
     };
   } catch (error) {
     if (error instanceof FactoryError) {

@@ -48,7 +48,7 @@ bin/sf queue on-limit resume-then-queue|resume-only|wait  # what the queue does 
 bin/sf queue force <workspace> <ticket>        # Start anyway: the queued ticket starts whatever its Task check says; needs sf serve
 bin/sf say <workspace> <ticket> <message...>   # a user message into the session; on a handed-over job it is Ask for changes (section Hand-over to your checkout); needs sf serve
 bin/sf review <workspace> <ticket>             # retry a failed Claude review (needs_human with review_failed); needs sf serve
-bin/sf retry <workspace> <ticket>              # retry a transient MR preparation failure (fetch_failed, mr_serve_restarted, mr_interrupted, mr_commit_failed, mr_rebase_failed, mr_failed) without a new review; on mr_push_failed: push again; needs sf serve
+bin/sf retry <workspace> <ticket>              # retry a transient MR preparation failure (fetch_failed, mr_serve_restarted, mr_interrupted, mr_commit_failed, mr_rebase_failed, mr_failed) or a stop of the guard (guard_hit, guard_terms_invalid, guard_failed) without a new review; on mr_push_failed: push again; needs sf serve
 bin/sf accept <workspace> <ticket>             # accept a clean Claude review over a stopped gate (gate_rounds, gate_budget, gate_failed) or a ledger stop (review_churn, review_disputed) or the Fix round limit (iteration_limit) and prepare the MR, or skip the simplification pass's suggestions (simplify_offered); needs sf serve
 bin/sf simplify <workspace> <ticket>           # apply the simplification pass's suggestions (needs_human with simplify_offered): one Fix section "Simplify", reviewed as usual; needs sf serve
 bin/sf settle <workspace> <ticket> <id> accept|fix [note...]  # settle an escalated or contested finding of the ledger (needs_human); needs sf serve
@@ -69,6 +69,8 @@ bin/sf reset <workspace> <ticket>              # end the session, remove the wor
 bin/sf notify-test                             # one test notification on every channel; works without sf serve
 bin/sf info                                    # version, directories, settings (gate: codex <version or path> | off (<reason>); gate level: auto | full | invalid: <message>), sf serve and tunnel state, workspaces, jobs; works without sf serve
 bin/sf metrics [<workspace>] [--since YYYY-MM-DD] [--json]  # the Codex gate per job, current and archived: levels, runs, tokens, items by outcome, yield; then the totals (section sf metrics); works without sf serve
+bin/sf guard <workspace> [<rev> | <a>..<b>] [--remote <name>] [--branch <name>] [--mr <ticket>] [--worktree <ticket>] [--history]  # the guard (section Guard): what a push of <rev> (default HEAD) to --remote (default origin) would publish, a range, or --history every commit; each hit with its matched text (a secret's never); exit 1 on hits; works without sf serve
+bin/sf guard install-hook <workspace>          # write the guard's pre-push hook into the workspace's checkout (section Guard); never over a hook it did not write
 bin/sf smoke [--keep] [--timeout-min N] [--budget-usd N]  # the live smoke test (section Live smoke test): one tiny real job from Task check to push on a throwaway repository and state; a pass/fail table; works without sf serve and never touches yours
 bin/sf run <workspace> <ticket>                # the job's runner (section Jobs); sf serve starts it detached, one per job; refused (runner_running) while the job has one
 bin/sf service install|uninstall|status        # sf serve as a systemd user service (section Service); install refuses while an sf serve started by hand answers; run while the service runs, it rewrites the unit and restarts the service
@@ -97,7 +99,7 @@ instead of hanging.
 
 Exit codes: 0 ok, 1 error, 2 usage. `sf check-task` exits 0 when the check ran (ready or not
 ready) and 1 when it failed. `sf smoke` exits 0 when every step passed, 1 otherwise. `sf approve`
-exits 1 unless the branch was pushed; `sf mr create` exits 1 when the push or the merge request
+exits 1 unless the branch was pushed; `sf guard` exits 0 without hits and 1 with hits or an error; `sf mr create` exits 1 when the push or the merge request
 failed (the branch may be pushed then: the output says so).
 
 `sf up` is `sf serve` in the same process, then the tunnel as a child process (`SF_TUNNEL_SCRIPT`
@@ -1723,6 +1725,19 @@ The worktree stays until the hand-over or the push (SF-073).
 The Implementer only writes the MR text. The factory commits and rebases itself, outside the
 sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's placeholders.
 
+0. The guard's change check (SF-122, section Guard), after the acknowledged-paths and worktree
+   checks and before anything else (the Accept of `sf accept` is not recorded before it): the
+   worktree's change as step 3 would commit it, built in a temporary index (`worktreeTree` in
+   `src/guard.ts`: `git read-tree <base_commit>`, `git add --all` of the commit paths, `git
+   write-tree`), is scanned against `base_commit` with the terms of the workspace (secrets in every
+   workspace; names in one with `"guard": true`). With hits, while the Task file has fewer than
+   `GUARD_MAX_FIXES` (2) sections `## Fix <n>: Guard`, the factory writes the next one: what the
+   guard found and one line per place (`- G<k>: <path>:<line>:<column> (<n> characters, <label>)`,
+   at most 50), never the matched text; the job goes to `working` and the Fix goes through the
+   usual iteration, its reviews and Clean, and this check again (`SF_MAX_ITERATIONS` applies). With
+   two Guard fixes written, hits stop the job: `needs_human` with `guard_hit`, the places, and
+   `sf guard <workspace> --worktree <ticket>` to see the matches. A `guard-terms.txt` that cannot be
+   used (`guard_terms_invalid`) or a failed scan (`guard_failed`) stops it the same way.
 1. Target: `git fetch origin <base>` (60 s) when `origin` exists, target `origin/<base>`, else the
    local `<base>`. Its commit is stored as `target_commit`. A rebase left in progress by a restart
    of `sf serve` is aborted first.
@@ -1760,6 +1775,14 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    simplification pass (SF-055), `### Simplifications not applied` lists its suggestions before it
    (`withSimplifications`: the job's last `simplify.json`, when it has `skipped_at`; `- \`path\`: what Why: why (saves about N lines; added for R3)`), so they can become a
    follow-up ticket.
+   The guard (SF-122) then cleans the lines the factory added (every line that is not a line of
+   the Implementer's text): each match of a term on them becomes `[removed by the guard]`
+   (`redactAdded`), and the cleaned text is the factory text from here on. When the commit is made
+   with the factory's text (not with a valid text the user saved, which the push check covers), the
+   text is scanned (places `MR text:<line>:<column>`). With hits the factory sends a new MR text
+   turn told the places (`mr_attempts + 1`, nothing committed), at most `GUARD_MAX_MR_TURNS` (2)
+   more turns per preparation; then `needs_human` with `guard_hit`. The count lives in memory and
+   starts at 0 at each preparation (`sf retry` gives new turns).
    - `git reset -q --mixed <base_commit>` when the branch has commits on top of `base_commit` (a
      fix after Clean, or a retry after a commit). `HEAD` and the index go back to the base and the
      files stay, so the result is always one commit.
@@ -1819,6 +1842,9 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    | `mr_rebase_failed` | `git rebase` failed without conflicts; it was aborted |
    | `mr_conflict` | the conflict turn failed or left markers, or the rebase did not continue; it was aborted. When the continue failed, the resolution is kept in `iterations/NNN/conflict-resolution.diff` (named in the message) |
    | `mr_failed`, `mr_serve_restarted` | the factory failed, or `sf serve` restarted, during preparation |
+   | `guard_hit` | the guard found text that must not be published: in the change after two Guard fixes (step 0), or in the MR text after three MR text turns (step 3); the message names the places only (section Guard) |
+   | `guard_terms_invalid` | `guard-terms.txt` could not be read or has an invalid line (its number in the message) |
+   | `guard_failed` | a scan of the guard failed: a Git command, a diff over 16 MiB, or an environment or token file that could not be read for the secret check |
 
    A failed MR text turn keeps its own code (for example `turn_failed` or `sandbox_unavailable`).
    Fix with `sf say` (its iteration is reviewed again, and a clean verdict prepares again) or by
@@ -1830,7 +1856,9 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    turn, the commit and the rebase), with no fix turn, no Claude review, no gate and no
    simplification pass. It takes `needs_human` with `fetch_failed` (the fetch of step 1),
    `mr_serve_restarted`, `mr_interrupted` (paused as MR preparation began), `mr_commit_failed`,
-   `mr_rebase_failed` or `mr_failed` (`MR_RETRY_CODES` in `src/execution/shared.ts`), with the worktree,
+   `mr_rebase_failed`, `mr_failed`, or a stop of the guard (`guard_hit`, `guard_terms_invalid`,
+   `guard_failed`, SF-122: after a `!` line in `guard-terms.txt`, for example; the change check runs
+   first) (`MR_RETRY_CODES` in `src/execution/shared.ts`), with the worktree,
    no `prepared_commit` and a clean Claude review of the last iteration; anything else is
    `invalid_state` naming the state and code. The accepted sensitive paths are the clean path's:
    those of the last iteration's `review.json`, plus its `gate.json`'s when the gate's verdict is
@@ -1872,6 +1900,9 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    never pushed. It refuses when the branch tip is not `prepared_commit`
    (`branch_changed`, with both hashes: the user edited the branch by hand), unless `--as-is`
    (`as_is` on the dashboard) pushes the tip as it is; `branch_missing` when the branch is gone.
+   Then the guard's push check (SF-122, section Guard; `--as-is` does not skip it): the commits the
+   push publishes, the branch name and the MR text; a hit is `guard_hit` with the places, nothing is
+   pushed and the job is not changed.
    Then the job's Git LFS objects (SF-124), which used to go through the repository's `pre-push`
    hook (`git lfs pre-push`), a hook the factory never runs: the paths the job changed
    (`git diff --name-only --no-renames --diff-filter=AMT`) between the merge base of the pushed
@@ -1889,7 +1920,10 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    `origin/<base>` (the local `<base>` without it) nor the one of the merge base ("the checkout's
    .lfsconfig is not the one of <base>; push it yourself after checking it"). A failed `git lfs push` is `mr_push_failed` with git-lfs's text. Without LFS paths in the
    range nothing of this runs.
-   Then `git push origin <branch>:<branch>` with the protection below (120 s); `pushed` with the
+   Then `git push origin <commit>:refs/heads/<branch>` of the very commit the guard checked (a
+   branch that moved on since is not published unchecked; a handed-over job's saved commit goes
+   through its saved ref; the LFS step above takes the same commit as its `<ref>`) with the
+   protection below (120 s); `pushed` with the
    title and the merge request link (GitHub's compare page for `github.com`, GitLab's new merge
    request form otherwise; only the branch when the `origin` URL cannot be parsed). A failed
    push is `needs_human` with `mr_push_failed` or `mr_push_protected`; `sf approve` again
@@ -1907,7 +1941,8 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    it is approve and then the merge request, in one action; the host and the token are checked
    before anything is pushed. The host is chosen from the checkout's `origin` URL (as for the
    compare link): `github.com` is GitHub, any other host GitLab (except hosts known not to be
-   GitLab). The job records `mr: {host, number, url, state: "open"}`, appends a `merge_request`
+   GitLab). For a `pushed` job the guard checks the branch name and the MR text first (SF-122):
+   a hit is `guard_hit` and no merge request is opened. The job records `mr: {host, number, url, state: "open"}`, appends a `merge_request`
    event, and the notification and the dashboard show the link. A merge request that fails to
    open after a push leaves the job `pushed`, with the failure in the result.
 9. `sf mr merge` (the dashboard's Merge): merges the job's open merge request through the host's
@@ -1936,6 +1971,100 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    `sf info` says only whether each is set, and shows `SF_GITLAB_URL` as checked at start; a
    refused `SF_GITHUB_API` or `SF_GITLAB_URL` is named in its message with any credentials, query
    or fragment replaced by `[redacted]`.
+
+## Guard
+
+The guard (SF-122, `src/guard.ts`) keeps text out of what the factory publishes: one scan, two
+term sources. The **secret terms** apply to every workspace; the **name terms** only to a workspace
+with `"guard": true` in `workspaces.json` (section Workspace registry), which is treated as public.
+Turn it on for `software-factory`. The terms are built at every check, never stored.
+
+**Secret terms** (`secretTerms`, label `secret`): the value of every key of the environment file
+whose name matches `/(?:TOKEN|SECRET|PASSWORD|API_KEY)$/` (`SF_GITHUB_TOKEN`, `SF_GITLAB_TOKEN`,
+`SF_NTFY_TOKEN`, `OPENAI_API_KEY`; not `SF_GATE_MAX_TOKENS`) and of `SF_NTFY_URL` (its topic is a
+secret), and the content of `dashboard-token` and `mcp-token` in the state directory, each as a
+literal, case-sensitive substring; values shorter than 12 characters, `true`, `false`, `on`, `off`,
+`yes`, `no` and numbers are skipped. Plus the generic patterns (`SECRET_PATTERNS`, case-sensitive):
+`/-----BEGIN [A-Z ]*PRIVATE KEY-----/`, `/ghp_[A-Za-z0-9]{36}/`, `/github_pat_[A-Za-z0-9_]{22,}/`,
+`/glpat-[A-Za-z0-9_-]{20,}/`, `/(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}/`, `/(?<![A-Za-z0-9_-])xox[baprs]-[A-Za-z0-9-]{10,}/`
+(with a left boundary, so a branch slug such as `task-check-s-...` is no key),
+`/AKIA[0-9A-Z]{16}/`. A file that exists but cannot be read, or an environment file with an invalid
+line, is `guard_failed` (the check fails closed; the message never quotes a line). A secret is never
+printed, `sf guard` included: its hit shows as `[secret]`, and the characters a secret covers in
+any other hit's matched text (a private `re:` line over the same line, say) show as `*`.
+
+**Name terms** of a guarded workspace G (`buildTerms`), from the registry, the job store and the
+private list:
+
+| Kind | Source | Left out | Label |
+|---|---|---|---|
+| name | every other registered workspace without `"guard": true`, and every workspace that still has job directories in the state but is no longer registered | G and the guarded workspaces | `name of another workspace` |
+| host | the hosts of every remote URL of those registered workspaces' checkouts (`git remote get-url --all`), lower-cased, without a port | the hosts of G's own remotes, `github.com`, `gitlab.com`, `bitbucket.org`, `codeberg.org` | `Git host of another workspace` |
+| key | the prefix of each ticket (`ABC` of `ABC-123`) of their jobs and of their Task files (`.software-factory/` and its `archive/`) | every prefix of G's own jobs and Task files (so `SF` is never a term of the factory's repository) | `ticket key of another workspace` |
+| domain | the domain of `git config --get user.email` in their checkouts | public mail domains (`gmail.com`, `outlook.com`, `proton.me`, `users.noreply.github.com`, ...: `PUBLIC_EMAIL_DOMAINS`) | `email domain of another workspace` |
+
+G's own `user.email` never removes a domain: when it is on a domain term, the commits made in G
+carry it, their push is refused, and `sf guard` warns (set a public address with `git config
+--local user.email`). A registered workspace whose checkout cannot be read gives only its name and
+its job tickets, with a warning in `sf guard`.
+
+**The private list** `<config dir>/guard-terms.txt` (never in a repository, never written by the
+factory), one entry per line, trimmed: empty lines and `#` lines are skipped; `re:<pattern>` is a
+JavaScript regular expression (flags `giu`); `!<text>` drops every automatic term (a name, a host, a
+key prefix or a domain) equal to it case-insensitively, the way to silence a false positive (never
+a private line or a secret); any other line is a plain term. A `re:` line that does not compile,
+that matches the empty text, or an empty `re:` or `!` line is `guard_terms_invalid` naming its line
+number only; a missing file means no private terms.
+
+**Matching**, one line at a time: a plain term (a name, a host, a domain, a private line) is
+case-insensitive between Unicode-aware word boundaries (`ACME` matches `acme`, `Acme's` and
+`acme-web`, not `acmeville` or `my_acme`); a key prefix `P` matches `P-<digits>` between such
+boundaries (`ABC-123`, `abc-7-fix`; not `XABC-1` or `ABC-`); a `re:` line its own pattern; a secret
+as above. A hit records its place with the 1-based line and column.
+
+**What is checked:** for each commit its message, its author and committer (`<name> <email>`), the
+added lines of its change against its first parent (a root commit against the empty tree; removed
+and context lines and binary files give nothing), and the new paths of added, copied and renamed
+files; the branch name; the MR text. Files under `.software-factory/` are checked like any other
+file when a commit holds them. A diff over 16 MiB or a failing Git command is `guard_failed`.
+
+**Where it runs:** at MR preparation (section MR preparation, steps 0 and 3: the worktree's change,
+then the factory's MR text), and before every push and merge request the factory makes: `sf
+approve` (the dashboard's Push, `sf retry` on `mr_push_failed`, `--as-is` too) and `sf mr create`
+check the commits `git rev-list <commit> --not --remotes=origin` lists, the branch name and the MR
+text, and refuse with `guard_hit` (`The guard refused the push of <ws>/<ticket>: <places>. See the
+matches with: sf guard <ws> <commit> --mr <ticket>`) before anything is pushed and without changing
+the job; for a pushed job `sf mr create` checks the branch name and the MR text (`The guard refused
+the merge request of ...`). The existing history is never rewritten.
+
+**Where the matched text is shown:** only by `sf guard` (and the hook, which runs it). Every other
+message (job errors, which reach the notifications and the stop explanation, Fix sections,
+prompts, refusals) names the places only: `<place> (<n> characters, <label>)`, with any term
+inside the place masked by `*` (`docs/****-notes.md (file path, column 6)`), at most 20 places and
+`and <k> more`. An `mr_text_invalid` that quotes the MR title (the Implementer's at MR preparation,
+a saved one at the push) has every match of the check's terms masked the same way, since it comes
+before the guard's own check. No message prints a term's pattern or a private line's text.
+
+**`sf guard <workspace> [<rev> | <a>..<b>] [--remote <name>] [--branch <name>] [--mr <ticket>]
+[--worktree <ticket>] [--history]`** runs here, without `sf serve`: the commits a push of `<rev>`
+(default `HEAD`) to `--remote` (default `origin`) would publish (a remote without remote-tracking
+refs gives the whole history), a range `<a>..<b>`, or with `--history` every commit reachable from
+`<rev>` (`--history` or `--remote` with a range is a usage error); `--branch` adds a branch name,
+`--mr <ticket>` the job's MR text and its branch, `--worktree <ticket>` the job's uncommitted change
+as at MR preparation. It prints the warnings on stderr, one line per hit on stdout
+(`<place>: "<matched text>" (<label>)`, a secret as `[secret]`), then `<h> hits in <c> commits.` and
+exits 1; without hits `No hits in <c> commits.` and exit 0. Errors exit 1, usage errors 2. A
+workspace without `"guard": true` is checked for secrets only, with a note on stderr.
+
+**The pre-push hook:** `sf guard install-hook <workspace>` writes `pre-push` where Git looks for
+it in the checkout: the repository's own `core.hooksPath` (read by scope, since every factory Git
+call sets it to `/dev/null` on its command line, SF-124), resolved against the work tree's root,
+else `hooks/` of the common Git dir; mode 0755. For each
+pushed ref (a deletion is skipped) it runs `sf guard <workspace> <sha> --remote <remote>` (with
+`--branch` for a branch) and refuses the push on a hit. Its second line marks it as the factory's:
+`sf guard install-hook` rewrites only such a hook and refuses any other (`guard_hook_exists`,
+leaving it unchanged; call `sf guard` from your own hook instead). Any registered workspace takes
+it; in one without `"guard": true` it checks secrets only.
 
 ## Hand-over to your checkout
 
@@ -3459,7 +3588,7 @@ screen (`POST api/workspaces`, and `POST api/workspaces/<name>/edit` since SF-10
 {
   "workspaces": {
     "my-app": { "read_checkout": "/abs/path" },
-    "software-factory": { "read_checkout": "/abs/path2", "handoff": "off", "color": "teal", "rules_skip": ["docs/runbooks/coordinator.md"] }
+    "software-factory": { "read_checkout": "/abs/path2", "handoff": "off", "color": "teal", "rules_skip": ["docs/runbooks/coordinator.md"], "guard": true }
   }
 }
 ```
@@ -3481,7 +3610,11 @@ with the same name and path and `--handoff` (the other fields stay). The optiona
 invalid) is the workspace's colour on the board; without it the dashboard picks one by the name.
 `sf workspace add --color <name>` (an invalid name is refused with the list) and the dashboard's
 workspace form set it; `sf workspace add` again with the same name and path and `--color` changes
-it; `sf workspace list` shows it. The optional `rules_skip` (SF-059: a list of globs) names the
+it; `sf workspace list` shows it. The optional `guard` (SF-122: `true` or `false`, absent is
+`false`, any other value makes the file invalid) checks the workspace's pushes and MR texts for the
+names, Git hosts, ticket keys and email domains of your other workspaces and your private list
+(section Guard); turn it on for `software-factory` by editing the file (`sf workspace add` does not
+set it; the Edit keeps it). The optional `rules_skip` (SF-059: a list of globs) names the
 repository rule files not given to the agents (section Coding rules); edit the file to set it.
 The optional `description`, `app` and `digest: {track, my_work}`, and the top-level `digest`
 settings, are the morning digest's (SF-103, section Morning digest); the optional top-level

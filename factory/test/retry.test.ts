@@ -151,7 +151,7 @@ test('sf retry is refused with invalid_state on review_failed, on mr_conflict, o
     }
     const cli = await retry(env, 'R-1');
     assert.equal(cli.code, 1);
-    assert.match(cli.stderr, /^sf: sf retry needs needs_human after a transient MR preparation failure \(fetch_failed, mr_serve_restarted, mr_interrupted, mr_commit_failed, mr_rebase_failed, mr_failed\) or a failed push \(mr_push_failed\); the job is needs_human \(review_failed\)\.$/m);
+    assert.match(cli.stderr, /^sf: sf retry needs needs_human after a transient MR preparation failure \(fetch_failed, mr_serve_restarted, mr_interrupted, mr_commit_failed, mr_rebase_failed, mr_failed, guard_hit, guard_terms_invalid, guard_failed\) or a failed push \(mr_push_failed\); the job is needs_human \(review_failed\)\.$/m);
   } finally {
     await stop(served);
   }

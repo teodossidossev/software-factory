@@ -2,20 +2,26 @@
 // through the SDK's stateless handler, with the Handbook as instructions and the planning tools
 // guide, read_file, search, write_task, task_check (the last Task check of the current Task
 // file, SF-054; checked automatically after write_task, SF-086), queue_list and queue_add (the
-// run queue, SF-071), and read_attachment (a ticket's image as MCP image content, SF-064). No
-// authentication: it
-// listens on loopback only. Jobs
-// are started, reviewed and approved by the user (the dashboard, the CLI) and the reviewers,
-// never through this endpoint.
-import { readFile } from 'node:fs/promises';
-import { createServer, type Server as HttpServer } from 'node:http';
+// run queue, SF-071), and read_attachment (a ticket's image as MCP image content, SF-064). It
+// listens on loopback only and answers only a request with the MCP token of the state directory
+// (SF-099): in the path, /mcp/<token>, or as Authorization: Bearer <token> on /mcp, read from the
+// token file on every request. Jobs are started, reviewed and approved by the user (the
+// dashboard, the CLI) and the reviewers, never through this endpoint.
+import { createHash, timingSafeEqual } from 'node:crypto';
+import { constants } from 'node:fs';
+import { lstat, mkdir, open, readFile } from 'node:fs/promises';
+import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { localhostHostValidation, localhostOriginValidation, toNodeHandler } from '@modelcontextprotocol/node';
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { ATTACHMENT_NAME_PATTERN, MAX_ATTACHMENT_BYTES, readAttachment } from './attachments.js';
+import { writeFileAtomic } from './atomic.js';
+import { newToken, readTokenFile } from './dashboard.js';
 import { FactoryError } from './errors.js';
+import { replaceSecret } from './redact.js';
 import type { Execution } from './execution.js';
 import type { RunQueue } from './queue.js';
 import { DEPENDENCY_STATES } from './setup.js';
@@ -46,6 +52,330 @@ export class PortInUseError extends Error {
     super(`Port ${port} on ${LOOPBACK_HOST} is already in use.`);
     this.name = 'PortInUseError';
   }
+}
+
+// The MCP token (SF-099): the secret every request to the endpoint carries, kept in the state
+// directory (mode 0600) across starts, in the dashboard token's format; a value of its own.
+export const MCP_TOKEN_FILE = 'mcp-token';
+// What every output shows in the token's place.
+export const TOKEN_LABEL = '<token>';
+// A token anywhere after /mcp/: one the output filter does not know (an earlier one) is hidden too.
+const TOKEN_AFTER_PATH = /\/mcp\/[0-9a-f]{64}(?![0-9a-f])/g;
+const TOKEN_IN_PATH = /^\/mcp\/([^/]*)$/;
+const BEARER = /^Bearer +(\S+) *$/i;
+// A token file that cannot be used is logged at most this often while every request is refused.
+const REFUSAL_LOG_MS = 60_000;
+
+// The MCP URL with the token, or with TOKEN_LABEL in its place (a string: a URL would encode < >).
+export function mcpUrl(port: number, token: string = TOKEN_LABEL): string {
+  return `http://${LOOPBACK_HOST}:${port}${MCP_PATH}/${token}`;
+}
+
+// The URL without the token, for the bearer form and the profile tunnel-client init creates.
+export function mcpBaseUrl(port: number): string {
+  return `http://${LOOPBACK_HOST}:${port}${MCP_PATH}`;
+}
+
+const invalidMcpToken = (): FactoryError =>
+  new FactoryError('invalid_mcp_token', `${MCP_TOKEN_FILE} in the state directory does not hold an MCP token (invalid_mcp_token); sf mcp-url --rotate writes a new one (then restart the tunnel: npm run tunnel).`);
+
+// The MCP token, or undefined when the file is missing; invalid_mcp_token when it holds no token.
+export function readMcpToken(stateDir: string): Promise<string | undefined> {
+  return readTokenFile(stateDir, MCP_TOKEN_FILE, invalidMcpToken);
+}
+
+const noMcpToken = (): FactoryError =>
+  new FactoryError('no_mcp_token', 'There is no MCP token yet (no_mcp_token): start sf serve once (npm run serve); it creates the token in the state directory.');
+
+// The MCP token; no_mcp_token without the file.
+export async function requireMcpToken(stateDir: string): Promise<string> {
+  const token = await readMcpToken(stateDir);
+  if (token === undefined) {
+    throw noMcpToken();
+  }
+  return token;
+}
+
+// A file or directory that holds or guards a secret (SF-099: the MCP token, the tunnel client's
+// profile): opened without following a link, it must be a regular file (want 0o600) or a
+// directory (want 0o700) of this user, else unsafe; a mode wider than want (or, exact, any other
+// mode) is set to want (fix) or is a problem (check). Returns the mode it had then; undefined when
+// it was fine.
+// exact: any other mode counts (the tunnel profile, R4: a 0500 directory would block its rewrite);
+// else only a wider one (the MCP token, which a stricter 0400 keeps as private).
+export type PrivateKind = { want: 0o600 | 0o700; unsafe: () => FactoryError; exact?: boolean };
+
+export async function privateMode(path: string, { want, unsafe, exact = false }: PrivateKind, fix: boolean): Promise<number | undefined> {
+  const flags = constants.O_RDONLY | constants.O_NOFOLLOW | (want === 0o700 ? constants.O_DIRECTORY : constants.O_NONBLOCK);
+  let handle;
+  try {
+    handle = await open(path, flags);
+  } catch (error) {
+    // A link (ELOOP), a file where a directory belongs (ENOTDIR), or one this user cannot open
+    // (EACCES: another user's, or without its read bit).
+    if (['ELOOP', 'ENOTDIR', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '')) {
+      throw unsafe();
+    }
+    throw error;
+  }
+  try {
+    const info = await handle.stat();
+    const kind = want === 0o700 ? info.isDirectory() : info.isFile();
+    if (!kind || (process.getuid !== undefined && info.uid !== process.getuid())) {
+      throw unsafe();
+    }
+    const mode = info.mode & 0o777;
+    if (exact ? mode === want : (mode & ~want) === 0) {
+      return undefined;
+    }
+    if (fix) {
+      await handle.chmod(want);
+    }
+    return mode;
+  } finally {
+    await handle.close();
+  }
+}
+
+const octal = (mode: number): string => mode.toString(8);
+
+// At sf serve's start: a missing token file is created; an invalid one stops the start (a new token
+// made silently would leave the tunnel with the old one); a link or anything but a regular file of
+// this user stops it with unsafe_mcp_token; a valid one wider than 0600 is narrowed to 0600 and kept.
+// Returns a warning when it was narrowed (the token may have been read meanwhile), else undefined.
+export async function ensureMcpToken(stateDir: string): Promise<string | undefined> {
+  let widened: number | undefined;
+  try {
+    widened = await privateMode(join(stateDir, MCP_TOKEN_FILE), {
+      want: 0o600,
+      unsafe: () => new FactoryError('unsafe_mcp_token', `${MCP_TOKEN_FILE} in the state directory is a link, not a regular file, not yours or not readable (unsafe_mcp_token); remove it and start sf serve again (then restart the tunnel).`),
+    }, true);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+    await rotateMcpToken(stateDir);
+    return undefined;
+  }
+  if ((await readMcpToken(stateDir)) === undefined) {
+    await rotateMcpToken(stateDir);
+    return undefined;
+  }
+  return widened === undefined
+    ? undefined
+    : `${MCP_TOKEN_FILE} in the state directory had mode ${octal(widened)}; it is 600 now. Others may have read it meanwhile: sf mcp-url --rotate makes a new one (then restart the tunnel).`;
+}
+
+// The tunnel client's profile (SF-099): the file exactly 0600 and its directory exactly 0700, both
+// this user's; fix sets any other mode, else it is profile_unsafe. Returns what was narrowed, as words.
+export async function keepProfilePrivate(file: string, directory: string, fix: boolean): Promise<string[]> {
+  const unsafe = (what: string, mode?: number, want?: number) => (): FactoryError =>
+    new FactoryError('profile_unsafe', mode === undefined
+      ? `the profile ${what} is a link, of another kind, not yours or not readable (profile_unsafe): ${what === 'file' ? file : directory}`
+      : `the profile ${what} has mode ${octal(mode)}, not ${octal(want!)} (profile_unsafe): ${what === 'file' ? file : directory}; scripts/sf-tunnel.sh run sets it`);
+  const changed: string[] = [];
+  for (const [what, path, want] of [['file', file, 0o600], ['directory', directory, 0o700]] as const) {
+    const mode = await privateMode(path, { want, unsafe: unsafe(what), exact: true }, fix);
+    if (mode !== undefined && !fix) {
+      throw unsafe(what, mode, want)();
+    }
+    if (mode !== undefined) {
+      changed.push(`${what} mode ${octal(mode)} set to ${octal(want)}`);
+    }
+  }
+  return changed;
+}
+
+// sf mcp-url --rotate: a new token over the existing file (an invalid one too: that is how
+// invalid_mcp_token is left), whether or not sf serve runs; no_mcp_token without one (R5): the first
+// token is sf serve's to make.
+export async function replaceMcpToken(stateDir: string): Promise<void> {
+  try {
+    await lstat(join(stateDir, MCP_TOKEN_FILE));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw noMcpToken();
+    }
+    throw error;
+  }
+  await rotateMcpToken(stateDir);
+}
+
+// A new token in the file; a running sf serve answers with it from its next request.
+export async function rotateMcpToken(stateDir: string): Promise<void> {
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  await writeFileAtomic(join(stateDir, MCP_TOKEN_FILE), Buffer.from(`${newToken()}\n`), 0o600);
+}
+
+// Two secrets compared in constant time: the SHA-256 of each, so not even their lengths leak.
+export function sameSecret(given: string, expected: string): boolean {
+  const digest = (text: string): Buffer => createHash('sha256').update(text, 'utf8').digest();
+  return timingSafeEqual(digest(given), digest(expected));
+}
+
+// text with the token, and any token after /mcp/, shown as TOKEN_LABEL.
+export function redactMcpToken(text: string, token: string | undefined): string {
+  return replaceSecret(text, token ?? '', TOKEN_LABEL).replace(TOKEN_AFTER_PATH, `${MCP_PATH}/${TOKEN_LABEL}`);
+}
+
+// The MCP url line of a tunnel client's profile (SF-099).
+export interface ProfileUrlLine {
+  // The line's index in the text split at "\n".
+  index: number;
+  // What precedes "url:" on the line: the indentation, and "- " when the key opens the item.
+  prefix: string;
+  // The value as written, quotes included.
+  value: string;
+}
+
+const indentOf = (line: string): number => line.length - line.trimStart().length;
+const isBlank = (line: string): boolean => /^\s*(?:#.*)?$/.test(line);
+const FIELD = /^([A-Za-z_][\w-]*):(?:\s+(.*?))?\s*$/;
+
+// A scalar as YAML writes it: "double" or 'single' quoted, or plain up to a comment.
+function scalar(value: string): string {
+  const quoted = /^"((?:[^"\\]|\\.)*)"\s*(?:#.*)?$/.exec(value) ?? /^'((?:[^']|'')*)'\s*(?:#.*)?$/.exec(value);
+  return quoted !== null ? quoted[1]! : value.replace(/\s+#.*$/, '').trim();
+}
+
+const profileUnexpected = (): FactoryError =>
+  new FactoryError(
+    'profile_mcp_url_unexpected',
+    'The profile has no single mcp.server_urls entry with channel main and a url on 127.0.0.1 in the layout tunnel-client init writes (profile_mcp_url_unexpected); nothing changed. Create it again: scripts/sf-tunnel.sh init <tunnel_id>.',
+  );
+
+// The tunnel client's profile (SF-099): the url line of the mcp.server_urls entry whose channel is
+// main, found by a line scan of the layout `tunnel-client init` writes (the mcp: block, its
+// server_urls: list, the items, each item's keys at the item's indentation), never any line that
+// says url. No such entry, more than one, or a host other than 127.0.0.1: profile_mcp_url_unexpected.
+export function profileUrlLine(text: string): ProfileUrlLine {
+  const lines = text.split('\n').map((line) => line.replace(/\r$/, ''));
+  const starts = lines.flatMap((line, index) => (/^mcp:\s*(?:#.*)?$/.test(line) ? [index] : []));
+  if (starts.length !== 1) {
+    throw profileUnexpected();
+  }
+  // The mcp: block: the non-blank lines after it up to the next top-level line.
+  const block: number[] = [];
+  for (let index = starts[0]! + 1; index < lines.length; index++) {
+    if (isBlank(lines[index]!)) {
+      continue;
+    }
+    if (indentOf(lines[index]!) === 0) {
+      break;
+    }
+    block.push(index);
+  }
+  const keyIndent = Math.min(...block.map((index) => indentOf(lines[index]!)));
+  const keys = block.filter((index) => indentOf(lines[index]!) === keyIndent && /^\s*server_urls:\s*(?:#.*)?$/.test(lines[index]!));
+  if (keys.length !== 1) {
+    throw profileUnexpected();
+  }
+  // The list: the lines after server_urls: deeper than it, or items ("- ") at its indentation.
+  const list: number[] = [];
+  for (const index of block.filter((line) => line > keys[0]!)) {
+    const line = lines[index]!;
+    if (indentOf(line) > keyIndent || /^\s*-(?:\s|$)/.test(line)) {
+      list.push(index);
+      continue;
+    }
+    break;
+  }
+  const first = list[0] === undefined ? undefined : lines[list[0]]!;
+  if (first === undefined || !/^\s*-(?:\s|$)/.test(first)) {
+    throw profileUnexpected();
+  }
+  const itemIndent = indentOf(first);
+  const items: Array<Array<ProfileUrlLine & { key: string }>> = [];
+  let fieldIndent = itemIndent + 2;
+  const field = (index: number, prefix: string, rest: string): void => {
+    const match = FIELD.exec(rest);
+    if (match !== null) {
+      items.at(-1)!.push({ index, prefix, key: match[1]!, value: match[2] ?? '' });
+    }
+  };
+  for (const index of list) {
+    const line = lines[index]!;
+    const indent = indentOf(line);
+    if (indent === itemIndent && /^\s*-(?:\s|$)/.test(line)) {
+      items.push([]);
+      const opened = /^(\s*-\s+)(\S.*)$/.exec(line);
+      fieldIndent = opened === null ? itemIndent + 2 : opened[1]!.length;
+      if (opened !== null) {
+        field(index, opened[1]!, opened[2]!);
+      }
+    } else if (indent === fieldIndent) {
+      field(index, line.slice(0, indent), line.slice(indent));
+    }
+  }
+  const main = items.filter((fields) => fields.some((entry) => entry.key === 'channel' && scalar(entry.value) === 'main'));
+  const urls = main.length === 1 ? main[0]!.filter((entry) => entry.key === 'url') : [];
+  if (urls.length !== 1) {
+    throw profileUnexpected();
+  }
+  const { index, prefix, value } = urls[0]!;
+  const url = URL.parse(scalar(value));
+  if (url === null || url.protocol !== 'http:' || url.hostname !== LOOPBACK_HOST) {
+    throw profileUnexpected();
+  }
+  return { index, prefix, value };
+}
+
+// The profile with its MCP url line set to url, and whether that changed anything.
+export function rewriteProfileUrl(text: string, url: string): { text: string; changed: boolean } {
+  const { index, prefix, value } = profileUrlLine(text);
+  const wanted = `"${url}"`;
+  if (value === wanted) {
+    return { text, changed: false };
+  }
+  const lines = text.split('\n');
+  const ending = lines[index]!.endsWith('\r') ? '\r' : '';
+  lines[index] = `${prefix}url: ${wanted}${ending}`;
+  return { text: lines.join('\n'), changed: true };
+}
+
+// Whether the profile's MCP url line is exactly url, quoted as rewriteProfileUrl writes it.
+export function profileHasUrl(text: string, url: string): boolean {
+  return sameSecret(profileUrlLine(text).value, `"${url}"`);
+}
+
+// What sf mcp-url --probe found (SF-099).
+export type ProbeOutcome = { result: 'answers' } | { result: 'refused' } | { result: 'unreachable' } | { result: 'unexpected'; status: number };
+
+function hasResult(body: string): boolean {
+  // A JSON answer, or a server-sent event stream whose data lines carry it.
+  const candidates = [body, ...body.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice('data:'.length))];
+  return candidates.some((text) => {
+    try {
+      const message = JSON.parse(text) as unknown;
+      return message !== null && typeof message === 'object' && 'result' in message;
+    } catch {
+      return false;
+    }
+  });
+}
+
+// sf mcp-url --probe (SF-099): an MCP initialize with the token, as the tunnel's check sends it:
+// answers (HTTP 200 with a JSON-RPC result), refused (401), unreachable, or another answer.
+export async function probeMcp(port: number, token: string, timeoutMs = 3000): Promise<ProbeOutcome> {
+  const initialize = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'sf-mcp-url-probe', version: '0.0.0' } } };
+  let status: number;
+  let body: string;
+  try {
+    const response = await fetch(mcpUrl(port, token), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: JSON.stringify(initialize),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    status = response.status;
+    body = await response.text().catch(() => '');
+  } catch {
+    return { result: 'unreachable' };
+  }
+  if (status === 401) {
+    return { result: 'refused' };
+  }
+  return status === 200 && hasResult(body) ? { result: 'answers' } : { result: 'unexpected', status };
 }
 
 export async function packageVersion(): Promise<string> {
@@ -408,8 +738,32 @@ function createMcpServer(
 }
 
 export interface RunningServer {
+  // The endpoint without the token: http://127.0.0.1:<port>/mcp.
   url: URL;
+  port: number;
   close(): Promise<void>;
+}
+
+// What a request without the token gets (SF-099): never the token, nor why the file failed.
+const UNAUTHORIZED_BODY = JSON.stringify({
+  jsonrpc: '2.0',
+  error: { code: -32001, message: "Unauthorized: this endpoint needs the factory's MCP URL with its token; run sf mcp-url on the factory's machine." },
+  id: null,
+});
+
+// The token a request carries: the path's on /mcp/<token>, the bearer header's on /mcp; undefined
+// when it carries none; null when the path is not the endpoint's.
+function givenToken(req: IncomingMessage, pathname: string): string | undefined | null {
+  if (pathname === MCP_PATH) {
+    const header = req.headers.authorization;
+    return header === undefined ? undefined : BEARER.exec(header)?.[1];
+  }
+  const inPath = TOKEN_IN_PATH.exec(pathname);
+  return inPath === null ? null : inPath[1];
+}
+
+function unauthorized(res: ServerResponse): void {
+  res.writeHead(401, { 'content-type': 'application/json', 'www-authenticate': 'Bearer', 'cache-control': 'no-store' }).end(UNAUTHORIZED_BODY);
 }
 
 function listen(server: HttpServer, port: number): Promise<AddressInfo> {
@@ -425,15 +779,38 @@ function listen(server: HttpServer, port: number): Promise<AddressInfo> {
   });
 }
 
+// stateDir: where the MCP token is read, on every request (no cache: a rotated token counts at
+// once); a file that cannot be used refuses every request (fail closed).
 export async function startServer(
-  port: number, handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks?: ServerChecks, history?: TicketHistory, queue?: ServerQueue, auto?: ServerAutoChecks,
+  port: number, stateDir: string, handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks?: ServerChecks, history?: TicketHistory, queue?: ServerQueue, auto?: ServerAutoChecks,
 ): Promise<RunningServer> {
   const mcpHandler = createMcpHandler(() => createMcpServer(handbook, version, execution, checks, history, queue, auto));
   const nodeHandler = toNodeHandler(mcpHandler);
   const validateHost = localhostHostValidation();
   const validateOrigin = localhostOriginValidation();
+  let lastRefusalLog = -Infinity;
 
-  const httpServer = createServer((req, res) => {
+  // The current token, or undefined when the file cannot be used: logged (its error code, never a
+  // value) at most once per REFUSAL_LOG_MS.
+  const currentToken = async (): Promise<string | undefined> => {
+    let problem: string;
+    try {
+      const token = await readMcpToken(stateDir);
+      if (token !== undefined) {
+        return token;
+      }
+      problem = 'no_mcp_token';
+    } catch (error) {
+      problem = error instanceof FactoryError ? error.code : ((error as NodeJS.ErrnoException).code ?? 'unreadable');
+    }
+    if (Date.now() - lastRefusalLog >= REFUSAL_LOG_MS) {
+      lastRefusalLog = Date.now();
+      console.error(`mcp: every request is refused: the MCP token file cannot be used (${problem}); sf mcp-url --rotate writes a new one`);
+    }
+    return undefined;
+  };
+
+  const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     // Reject DNS-rebinding style requests before any routing.
     if (!validateHost(req, res) || !validateOrigin(req, res)) {
       return;
@@ -444,16 +821,35 @@ export async function startServer(
       res.writeHead(400, { 'content-type': 'application/json' }).end('{"error":"bad request target"}');
       return;
     }
-    if (target.pathname === MCP_PATH) {
-      void nodeHandler(req, res);
+    const given = givenToken(req, target.pathname);
+    if (given === null) {
+      res.writeHead(404, { 'content-type': 'application/json' }).end('{"error":"not found"}');
       return;
     }
-    res.writeHead(404, { 'content-type': 'application/json' }).end('{"error":"not found"}');
+    const token = await currentToken();
+    if (given === undefined || token === undefined || !sameSecret(given, token)) {
+      unauthorized(res);
+      return;
+    }
+    // The SDK sees the endpoint's path only: the token goes no further than here.
+    req.url = `${MCP_PATH}${target.search}`;
+    await nodeHandler(req, res);
+  };
+
+  const httpServer = createServer((req, res) => {
+    handle(req, res).catch((error: unknown) => {
+      console.error(error);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'content-type': 'application/json' });
+      }
+      res.end();
+    });
   });
 
   const address = await listen(httpServer, port);
   return {
-    url: new URL(`http://${LOOPBACK_HOST}:${address.port}${MCP_PATH}`),
+    url: new URL(mcpBaseUrl(address.port)),
+    port: address.port,
     async close() {
       await mcpHandler.close();
       await new Promise<void>((resolve, reject) => {

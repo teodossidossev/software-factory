@@ -20,7 +20,7 @@ const PUBLIC_NAMES = new Set([
   'GNOME_SHELL_SESSION_MODE', 'GTK_MODULES', 'QT_IM_MODULE', 'GTK_IM_MODULE', 'XMODIFIERS', 'NO_AT_BRIDGE', 'SYSTEMD_EXEC_PID',
   'INVOCATION_ID', 'JOURNAL_STREAM', 'MANAGERPID', 'NODE_ENV',
   // The factory's own settings that hold no secret (SF_NTFY_TOKEN and SF_NTFY_URL stay secret).
-  'SF_CHECK_AFTER_FIX_MIN', 'SF_CHECK_AFTER_START_MIN', 'SF_CLAUDE', 'SF_CODEX', 'SF_CODEX_MODEL', 'SF_CONFIG_DIR',
+  'SF_CHECK_AFTER_FIX_MIN', 'SF_CHECK_AFTER_START_MIN', 'SF_CLAUDE', 'SF_CLI', 'SF_CODEX', 'SF_CODEX_MODEL', 'SF_CONFIG_DIR',
   'SF_DASHBOARD', 'SF_DASHBOARD_PORT', 'SF_DESKTOP_NOTIFY', 'SF_ENV_FILE', 'SF_GATE', 'SF_GATE_FULL_PATHS', 'SF_GATE_LEVEL',
   'SF_GATE_MAX_ROUNDS', 'SF_GATE_MAX_TOKENS', 'SF_GATE_TIMEOUT_MS', 'SF_HANDBOOK', 'SF_MAX_ITERATIONS', 'SF_MAX_JOBS',
   'SF_MAX_TURNS', 'SF_MODEL', 'SF_NOTIFY_ITERATIONS', 'SF_PORT', 'SF_REVIEW', 'SF_REVIEW_MAX_TURNS', 'SF_REVIEW_MODEL',
@@ -101,6 +101,12 @@ const REVIEW_KEPT = new Set([...STRUCTURAL_FIELDS, 'name']);
 const PATH_FIELDS = ['file_path', 'path', 'notebook_path'];
 
 const escape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// One known secret (SF-099: the MCP token in the tunnel's lines) replaced by label wherever it
+// stands; an empty secret replaces nothing.
+export function replaceSecret(text: string, secret: string, label: string): string {
+  return secret === '' ? text : text.replaceAll(secret, label);
+}
 
 const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 

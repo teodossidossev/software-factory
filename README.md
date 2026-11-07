@@ -7,7 +7,7 @@ a fresh Claude session and the Codex CLI, turns their findings into fix rounds b
 both are clean writes the merge request text and makes one commit. You get the result in your own
 checkout, or push it and open the merge request from the dashboard.
 
-It runs on your machine, for one person: `sf serve` serves the planning tools (MCP, port 8787),
+It runs on your machine, for one person: `sf serve` serves the planning tools (MCP, port 8787, behind a token: `sf mcp-url`),
 the dashboard (port 8788) and the run queue, and each job runs in a process of its own.
 
 ## Quick start

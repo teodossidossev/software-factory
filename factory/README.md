@@ -29,6 +29,7 @@ bin/sf workspace remove <name>
 bin/sf digest [--now]             # the morning digest (section Morning digest): the latest digest's period and counts; --now makes one at once and prints its record's path and cost; needs sf serve
 bin/sf serve                      # foreground; Ctrl+C stops it; prints the dashboard URL
 bin/sf up [--no-open] [--no-tunnel]   # sf serve plus the tunnel (../scripts/sf-tunnel.sh run, output prefixed "tunnel | ") and the dashboard opened in the browser; Ctrl+C stops both; npm start at the repository root
+bin/sf mcp-url [--header|--rotate|--port]   # the MCP URL with its token (section MCP endpoint); --header: the URL without it and the bearer header; --rotate: a new token, taken at once by a running sf serve (restart the tunnel); works without sf serve
 bin/sf dashboard [--open] [--rotate]  # the dashboard URL of the last sf serve start; --open opens it with xdg-open; --rotate removes the token so the next sf serve makes a new one; works without sf serve
 bin/sf check-task <workspace> <ticket>  # the Task check (section Task check): paraphrase, findings by severity, verdict; stored by sha; works without sf serve
 bin/sf rules <workspace> [ticket] # the coding rules the agents would be given (section Coding rules): paths, sources, sizes, the files left out; never their text; works without sf serve
@@ -151,11 +152,54 @@ unknown workspace prints no rows and zero totals.
   The gate run before a ledger stop's go-on is replaced by the new one (`gate.json` is removed
   first): that iteration counts one run.
 
+## MCP endpoint
+
+`sf serve` serves the planning tools on `http://127.0.0.1:${SF_PORT:-8787}/mcp` (loopback only;
+Host and Origin checked, a DNS-rebinding request is `403`). Since SF-099 it answers only a request
+with the MCP token: the path `/mcp/<token>`, or `Authorization: Bearer <token>` on `/mcp`. The
+token is compared in constant time (the SHA-256 of each side through `timingSafeEqual`) and read
+from `mcp-token` in the state directory on every request, never cached, so `sf mcp-url --rotate`
+counts without a restart. A request without it, with a wrong one, or while the file cannot be used
+gets `401` with a JSON-RPC error that says to take the URL from `sf mcp-url`, and never reaches
+the tools; the answer never holds the token, and the SDK sees only the path `/mcp`. Other paths
+are `404`.
+
+- **The token**: 64 hex digits, mode 0600, made by the first `sf serve` and kept across starts; a
+  value of its own, not the dashboard's. An invalid file stops `sf serve` with `invalid_mcp_token`;
+  a valid one wider than 0600 is narrowed at the start with a warning to rotate it; a link, a
+  directory or another user's file stops it with `unsafe_mcp_token`;
+  while serving, an unreadable or invalid file refuses every request (fail closed) with one log
+  line a minute at most (`mcp: every request is refused: … (<code>)`), never a value.
+- **`sf mcp-url`**: the URL with the token, for an MCP client (`claude mcp add --transport http
+  software-factory "$(bin/sf mcp-url)"`); `--header` the plain URL and the bearer header;
+  `--rotate` a new token over the existing file (an invalid one too; it never makes the first one);
+  `--port` the port. Without the file: `no_mcp_token`, `--rotate` included. The port is
+  `SF_PORT`; with `SF_PORT=0` it is the port the running `sf serve` bound, asked on its socket
+  (`mcp-port`), and `mcp_port_unknown` without one (`--probe`: exit 2). Every other output
+  (the start line `listening on http://127.0.0.1:<port>/mcp/<token>`, `sf info`, logs, `sf up`'s
+  `tunnel | ` lines) shows `<token>`.
+- **The tunnel's steps** (`../scripts/sf-tunnel.sh` calls them; it never holds the token):
+  `--write-profile <file>` sets the profile's MCP `url` (the `mcp.server_urls` entry with
+  `channel: main`, found by a line scan of the layout `tunnel-client init` writes) to the URL with
+  the token. Every time, the URL current or not, it sets the profile file to exactly 0600 and its
+  directory to exactly 0700, a stricter mode too (a 0500 directory would block the rewrite; both
+  this user's; the directory not a link, a linked file counts by its
+  target; else `profile_unsafe`); another layout, several such entries or a host other than
+  `127.0.0.1` is `profile_mcp_url_unexpected` and changes nothing. `--check-profile <file>` exits 0
+  only for the current token, with the file exactly 0600 and its directory exactly 0700 (any other
+  mode is `profile_unsafe`). `--redact` copies stdin to stdout with the token (and any token after
+  `/mcp/`) as `<token>`, ignores SIGINT and SIGTERM and ends at the end of its input. `--probe`
+  sends an MCP `initialize` with the token: exit 0 when it answers, 1 when it refuses the token, 2
+  when nothing answers.
+
+The automation is unchanged: a Context owner with the token writes, queues and has tickets
+started by the run queue as before.
+
 ## Environment
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SF_PORT` | `8787` | Port of `http://127.0.0.1:<port>/mcp` (loopback only, Host and Origin checked). |
+| `SF_PORT` | `8787` | Port of `http://127.0.0.1:<port>/mcp/<token>` (loopback only, Host and Origin checked, the MCP token required; section MCP endpoint). |
 | `SF_ENV_FILE` | `<config dir>/auth.env`, by default `~/.config/software-factory/auth.env` (a historical name) | Environment file every `sf` command reads first: `KEY=VALUE` lines, `#` comments, optional `export`, quotes allowed; a variable already set in the environment wins; a missing file is fine. Empty value: no file. The repository root's `npm run serve` relies on it. |
 | `SF_DASHBOARD` | on | `off` starts no dashboard listener (and removes an old `dashboard-token`). |
 | `SF_DASHBOARD_PORT` | `8788` | Port of the dashboard, `http://127.0.0.1:<port>/d/<token>/` (loopback only, Host and Origin checked). |
@@ -1122,11 +1166,17 @@ reading and writing:
 - the Task checks' parent `<system temp>/sf-task-checks-<uid>/` (not for a Task check, which runs in it);
 - every other registered workspace's checkout (not one that is, or holds, the own checkout).
 
-Denied for writing only: Claude Code's user settings and global config (`$CLAUDE_CONFIG_DIR/settings.json`
+Denied for writing: Claude Code's user settings and global config (`$CLAUDE_CONFIG_DIR/settings.json`
 and `$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude/settings.json` and `~/.claude.json`), which a
 session's next query loads: from there `sandbox.filesystem.disabled`, `allowRead` and hooks are
-honoured, and user-scope MCP servers run outside the sandbox. They are denied for the tools even
-while missing (so they cannot be created), for Bash when they exist. On top, the factory's own
+honoured, and user-scope MCP servers run outside the sandbox. The global config is denied for
+reading too (SF-099): `claude mcp add` keeps the factory's MCP URL with its token there; so is its
+backups folder (`$CLAUDE_CONFIG_DIR/backups`, else `~/.claude/backups`), whose copies hold the same.
+They are denied for the tools even while missing (so they cannot be created or read once created),
+for Bash when they exist. Every session also denies the tools of the MCP server named
+`software-factory` (`mcp__software-factory`), the name the docs give the factory in Claude Code:
+user-scope servers load into every session, and a session must not reach the planning tools with
+the token Claude Code holds for them. On top, the factory's own
 `--settings` pin `sandbox.filesystem.disabled: false`, which outranks the user settings. And the running factory's own installation (the Git top-level of its module
 directory, else the nearest directory above it with a `package.json` named `software-factory`),
 unless it is, or holds, the session's own checkout (the factory developing itself). The session's

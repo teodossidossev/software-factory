@@ -54,6 +54,11 @@ export interface DenialScope {
 // login in ~/.claude/.credentials.json on Linux.
 export const HOME_CREDENTIALS = ['.ssh', '.codex', '.aws', '.config/gh', '.git-credentials', '.netrc', '.npmrc', '.claude/.credentials.json'];
 
+// The name the docs give the factory's own MCP server in Claude Code (`claude mcp add … software-factory
+// …`, SF-099): every session denies its tools, so none reaches the planning tools with the token
+// Claude Code holds for it, whichever scope it was added in.
+export const FACTORY_MCP_SERVER = 'software-factory';
+
 // A path as a permission rule pattern from the filesystem root ("//abs/path"), matching itself only.
 export const absoluteRule = (path: string): string => `/${path.replace(/[\\*?[\]{}()!]/g, '\\$&')}`;
 
@@ -224,6 +229,8 @@ async function candidates(scope: DenialScope): Promise<{ readWrite: string[]; wr
   }
   readWrite.push(env.TUNNEL_CLIENT_PROFILE_DIR || join(env.XDG_CONFIG_HOME || join(home, '.config'), 'tunnel-client'));
   readWrite.push(...HOME_CREDENTIALS.map((path) => join(home, path)));
+  // Claude Code's backups of its global config, which hold what the global config holds (SF-099).
+  readWrite.push(join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'backups'));
   if (scope.session !== 'task_check') {
     readWrite.push(taskChecksDir(scope.tmp));
   }
@@ -251,7 +258,8 @@ async function candidates(scope: DenialScope): Promise<{ readWrite: string[]; wr
 // (SF-100): the user settings (settings source "user": sandbox.filesystem.disabled, allowRead,
 // hooks, all honoured from there) and the global config (its user-scope MCP servers run outside
 // the sandbox), under CLAUDE_CONFIG_DIR, else ~/.claude and ~/.claude.json. Denied for writing,
-// for the tools even while missing, so a session cannot create them either.
+// for the tools even while missing, so a session cannot create them either. The global config is
+// denied for reading too (SF-099): `claude mcp add` keeps the factory's MCP URL with its token there.
 export function claudeUserSettings(env: NodeJS.ProcessEnv, home: string): string[] {
   const dir = env.CLAUDE_CONFIG_DIR || join(home, '.claude');
   return [join(dir, 'settings.json'), env.CLAUDE_CONFIG_DIR ? join(env.CLAUDE_CONFIG_DIR, '.claude.json') : join(home, '.claude.json')];
@@ -280,16 +288,19 @@ export async function pathDenials(scope: DenialScope): Promise<PathDenials> {
   }
   // The Claude configuration: an existing file as above; a missing one for the tools only (the
   // sandbox would leave a placeholder; Bash cannot write outside the worktree and the temporary
-  // directory anyway), by its path and by its folder's real path.
-  for (const path of settings) {
+  // directory anyway), by its path and by its folder's real path. The user settings stay readable;
+  // the global config does not.
+  const [userSettings, globalConfig] = settings;
+  for (const [path, readable] of [[userSettings!, true], [globalConfig!, false]] as const) {
     const entry = (await denied(path)) ?? {
       spellings: [...new Set([resolve(path), join((await realOrUndefined(dirname(resolve(path)))) ?? dirname(resolve(path)), basename(path))])], directory: false,
     };
-    rules(entry, ['Edit', 'Write']).forEach((rule) => tools.add(rule));
+    rules(entry, readable ? ['Edit', 'Write'] : ['Read', 'Edit', 'Write']).forEach((rule) => tools.add(rule));
     if (present(path)) {
-      entry.spellings.forEach((spelling) => denyWrite.add(spelling));
+      entry.spellings.forEach((spelling) => (readable ? denyWrite.add(spelling) : (denyRead.add(spelling), denyWrite.add(spelling))));
     }
   }
+  tools.add(`mcp__${FACTORY_MCP_SERVER}`);
   const sandbox = { denyRead: [...denyRead], denyWrite: [...denyWrite] };
   // The Implementer, the review and the simplification pass load the user settings (settingSources
   // "user"): one that weakens the sandbox stops the session before it starts.

@@ -9,12 +9,12 @@ import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
-import { quickStartSection } from '../src/server.js';
+import { MCP_TOKEN_FILE, quickStartSection } from '../src/server.js';
 import { CheckStore, taskSha256 } from '../src/task-check.js';
 
 const CLI = fileURLToPath(new URL('../src/cli.js', import.meta.url));
 const HANDBOOK = fileURLToPath(new URL('../../HANDBOOK.md', import.meta.url));
-const READY = /listening on (http:\/\/127\.0\.0\.1:(\d+)\/mcp)/;
+const READY = /listening on (http:\/\/127\.0\.0\.1:(\d+)\/mcp)\/<token>$/m;
 const TASK = '---\nticket: DEMO-1\ntitle: Demo task\nbase: main\n---\n\n# DEMO-1: Demo task\n\nПроверка ✓\n';
 
 interface Served {
@@ -55,7 +55,11 @@ function serve(extra: Record<string, string> = {}): Promise<Served> {
       const match = READY.exec(output);
       if (match) {
         child.stdout.off('data', onData);
-        resolve({ child, url: new URL(match[1]!), port: Number(match[2]) });
+        // The URL with the token of the state directory (SF-099); the line shows <token>.
+        readFile(join(String(env(extra).SF_STATE_DIR), MCP_TOKEN_FILE), 'utf8').then(
+          (token) => resolve({ child, url: new URL(`${match[1]!}/${token.trim()}`), port: Number(match[2]) }),
+          reject,
+        );
       }
     };
     child.stdout.on('data', onData);

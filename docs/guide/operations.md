@@ -175,7 +175,12 @@ workspaces and checkouts.
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| `sf: Port 8787 on 127.0.0.1 is already in use. Set SF_PORT to a free port.` | another `sf serve` (from another clone or terminal), or another program, has the port | stop the other `sf serve` (`ss -ltnp \| grep 8787`); or set `SF_PORT` (the ChatGPT tunnel expects 8787) |
+| `sf: Port 8787 on 127.0.0.1 is already in use. Set SF_PORT to a free port.` | another `sf serve` (from another clone or terminal), or another program, has the port | stop the other `sf serve` (`ss -ltnp \| grep 8787`); or set `SF_PORT` (in `auth.env`, so the ChatGPT tunnel's script, which asks `sf mcp-url --port`, uses the same port) |
+| `401` from the MCP endpoint, or `sf-tunnel: FAIL: the factory refused the token` | the client has no token, an old one (after `sf mcp-url --rotate`) or one of another state directory | take the URL from `sf mcp-url`; restart the tunnel (`npm run tunnel` again) so its `run` writes the current token into the profile |
+| `warning: mcp-token in the state directory had mode 644; it is 600 now.` at `sf serve`'s start | the token file was readable by others | `sf mcp-url --rotate`, then restart the tunnel and update other MCP clients |
+| `unsafe_mcp_token` at `sf serve`'s start | `mcp-token` is a link, a directory or another user's file | remove it and start `sf serve` again (a new token), then restart the tunnel |
+| `profile_unsafe` from `scripts/sf-tunnel.sh check` | the tunnel profile's mode is not 0600 or its directory's not 0700 (wider, or stricter such as a 0500 directory) | `scripts/sf-tunnel.sh run` (or `doctor`) sets them |
+| `invalid_mcp_token` at `sf serve`'s start, or `mcp: every request is refused: …` in its log | `mcp-token` in the state directory is not a valid token or cannot be read | `sf mcp-url --rotate` writes a new one; then restart the tunnel and update other MCP clients |
 | `Port 8788 … Set SF_DASHBOARD_PORT to a free port.` | the dashboard port is taken | as above, or `SF_DASHBOARD_PORT=8798` |
 | `Another sf serve is already listening on the socket.` (`serve_running`) | a second `sf serve` on the same state directory | use the running one; run only one `sf serve` per state directory |
 | `sf serve is not running.` | a command that needs `sf serve` (`start`, `say`, `queue`, `approve`, …) | start it (`npm start` or `npm run serve`) |

@@ -84,6 +84,25 @@ merge the merge request on the Git host.
 | `queue_add(workspace, ticket, at?)` | Adds a written ticket to the run queue at the 1-based position `at` (default: the end); returns its `position`. Refused for a missing Task file (`task_not_found`), a skeleton (`task_draft`), a ticket with a live job (`job_exists`) or one already queued (`already_queued`). The user removes and reorders. |
 | `task_check(workspace, ticket)` | The last Task check of the current Task file: `verdict` (`ready`, `not_ready`, `failed`, or `none` when this version has no check), the checker's `paraphrase`, its `findings` (`kind`, `severity`, `where`, `problem`, `expected`) and the `files` it expects to change; `running` (a check runs now) and `pending` (an automatic check is scheduled). The factory runs it automatically after `write_task`, or the user presses Check; call again until `running` and `pending` are false. This tool only reads it. |
 
+## Connecting a planner
+
+The tools are served by the user's `sf serve` on `http://127.0.0.1:<port>/mcp/<token>` (the port is
+`SF_PORT`, default 8787). Every request needs the factory's MCP token, in the path or as
+`Authorization: Bearer <token>` on `http://127.0.0.1:<port>/mcp`; without it the answer is `401`.
+The user sets the connection up once; you never ask for the token, and it never belongs in a chat,
+a Task file or a log.
+
+- **ChatGPT** reaches the factory through the user's Secure MCP Tunnel: the connector uses *No
+  authentication*, and the tunnel client holds the token in its profile
+  (`docs/runbooks/chatgpt-connection.md`).
+- **Claude Code** (or another local MCP client) takes the URL from `sf mcp-url`, which prints it
+  with the token: `claude mcp add --transport http software-factory "$(factory/bin/sf mcp-url)"`
+  from the factory's repository root, run in the user's own terminal, under the name
+  `software-factory` (every session the factory starts denies that server's tools) and never with
+  `--scope project`, which writes the token into the repository's `.mcp.json`; `sf mcp-url --header` prints the URL
+  without the token and the `Authorization` header for the header form. After `sf mcp-url
+  --rotate` the client needs the new URL.
+
 ## Task file format
 
 ```markdown

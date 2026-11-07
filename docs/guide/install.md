@@ -149,7 +149,7 @@ with `sf watch` or the job's Stream).
 
    ```
    software-factory dashboard http://127.0.0.1:8788/d/<token>/
-   software-factory listening on http://127.0.0.1:8787/mcp
+   software-factory listening on http://127.0.0.1:8787/mcp/<token>
    software-factory socket /home/you/.local/state/software-factory/sf.sock
    ```
 
@@ -163,6 +163,11 @@ with `sf watch` or the job's Stream).
    `sf dashboard --open` opens it, `sf info` shows it. Treat the URL as a password: anyone on your
    machine with it can start and push your jobs. `sf dashboard --rotate` makes the next `sf serve`
    create a new token. Both listeners are on `127.0.0.1` only.
+
+   The MCP URL on the `listening on` line shows `<token>`: the planning endpoint needs a token of
+   its own (`~/.local/state/software-factory/mcp-token`, made at the first start). `sf mcp-url`
+   prints the full URL for an MCP client such as Claude Code ([Planning](planning.md)); the ChatGPT
+   tunnel's script puts it into the tunnel's profile by itself.
 
 4. **Register your repository** as a workspace: on the dashboard, **Workspaces** → a name
    (`my-app`) and the absolute path of your checkout (`/home/you/work/my-app`) → *Add workspace*;

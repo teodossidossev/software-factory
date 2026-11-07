@@ -1,7 +1,8 @@
 // sf service (SF-101) with a fake systemctl and loginctl: the unit file sf service install writes
-// (KillMode=process, the shell's PATH and directory settings, nothing else), the refusal while a
-// hand-started sf serve answers, the machine without systemd user services, the linger warning,
-// uninstall and status; then the CLI with fake systemctl and loginctl on PATH.
+// (KillMode=process, the CPU cap and Nice=10 of SF-116, the shell's PATH and directory settings,
+// nothing else), the refusal while a hand-started sf serve answers, the machine without systemd
+// user services, the linger warning, uninstall and status; then the CLI with fake systemctl and
+// loginctl on PATH.
 import assert from 'node:assert/strict';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -34,7 +35,7 @@ function options(home: string, fake: Fake, extra: Partial<ServiceOptions> = {}):
   const lines: string[] = [];
   return {
     env: { PATH: '/opt/node/bin:/home/u/.local/bin', HOME: home, SF_STATE_DIR: '/state dir/sf', XDG_CONFIG_HOME: join(home, 'cfg'), SF_GATE: 'off', SF_GITHUB_TOKEN: 'secret', OTHER: 'x' },
-    sf: '/opt/sf/factory/bin/sf', run: fake.run, serveAnswers: async () => false, print: (line) => lines.push(line), home, user: 'u', lines, ...extra,
+    sf: '/opt/sf/factory/bin/sf', cores: 20, run: fake.run, serveAnswers: async () => false, print: (line) => lines.push(line), home, user: 'u', lines, ...extra,
   };
 }
 
@@ -49,6 +50,11 @@ test('sf service install writes the unit with KillMode=process, the PATH and the
   assert.match(unit, /^KillMode=process$/m);
   assert.match(unit, /^Restart=on-failure$/m);
   assert.match(unit, /^ExecStart="\/opt\/sf\/factory\/bin\/sf" serve$/m);
+  // The limits right after KillMode=process, under the comment that says why.
+  const lines = unit.split('\n');
+  const kill = lines.indexOf('KillMode=process');
+  assert.match(lines[kill + 1]!, /^# .*responsive.*software-factory\.service\.d\//);
+  assert.deepEqual(lines.slice(kill + 2, kill + 4), ['CPUQuota=800%', 'Nice=10']);
   const environment = unit.split('\n').filter((line) => line.startsWith('Environment='));
   assert.deepEqual(environment, [
     'Environment="PATH=/opt/node/bin:/home/u/.local/bin"',
@@ -62,10 +68,25 @@ test('sf service install writes the unit with KillMode=process, the PATH and the
   assert.ok(opts.lines.some((line) => line.includes('Not copied into the unit: SF_GATE.') && line.includes('auth.env')), opts.lines.join('\n'));
   assert.ok(!opts.lines.some((line) => line.includes('SF_GITHUB_TOKEN')));
   assert.ok(opts.lines.some((line) => line.includes('journalctl --user -u software-factory')));
+  assert.ok(opts.lines.some((line) => line.startsWith(`Wrote ${path} `) && line.includes('CPUQuota=800%, Nice=10')), opts.lines.join('\n'));
+});
+
+test('the unit caps the CPU at half the cores, at least one and at most eight, at Nice=10, in [Service]', () => {
+  for (const [cores, quota] of [[20, '800%'], [32, '800%'], [7, '300%'], [1, '100%']] as const) {
+    const lines = unitText('/opt/sf', { PATH: '/bin' }, cores).split('\n');
+    const service = lines.indexOf('[Service]');
+    const install = lines.indexOf('[Install]');
+    const kill = lines.indexOf('KillMode=process');
+    const cpu = lines.indexOf(`CPUQuota=${quota}`);
+    const nice = lines.indexOf('Nice=10');
+    assert.ok(service < kill && kill < cpu && cpu < nice && nice < install, `${cores} cores:\n${lines.join('\n')}`);
+    assert.equal(lines.filter((line) => line.startsWith('CPUQuota=')).length, 1);
+    assert.equal(lines.filter((line) => line.startsWith('Nice=')).length, 1);
+  }
 });
 
 test('the unit text escapes specifiers and quotes', () => {
-  const unit = unitText('/a b/sf', { PATH: '/x%y:/q"z' });
+  const unit = unitText('/a b/sf', { PATH: '/x%y:/q"z' }, 20);
   assert.match(unit, /^ExecStart="\/a b\/sf" serve$/m);
   assert.match(unit, /^Environment="PATH=\/x%%y:\/q\\"z"$/m);
 });
@@ -153,6 +174,8 @@ test('the CLI: sf service install writes the unit under the user config, refuses
   const unit = await readFile(join(env.home, '.config', 'systemd', 'user', 'software-factory.service'), 'utf8');
   assert.match(unit, /^KillMode=process$/m);
   assert.match(unit, /bin\/sf" serve$/m);
+  assert.match(unit, /^CPUQuota=\d+00%$/m);
+  assert.match(unit, /^Nice=10$/m);
   assert.match(unit, new RegExp(`^Environment="SF_STATE_DIR=${env.state}"$`, 'm'));
   assert.match(await readFile(join(bin, 'calls.log'), 'utf8'), /systemctl --user enable --now software-factory/);
   // Usage errors.

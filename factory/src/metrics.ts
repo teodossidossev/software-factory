@@ -86,11 +86,11 @@ export function outcomeOf(severity: Severity, status: LedgerStatus | undefined):
   return 'open';
 }
 
-// The ledger entry of a gate item of an iteration, as src/job-stream.ts finds it: the gate's entry
-// of the same iteration, path and problem; else the entry its reopens names (Claude's too: the gate
-// raised it again); else none.
-export function entryOf(ledger: readonly LedgerEntry[], iteration: number, item: ReviewItem): LedgerEntry | undefined {
-  const own = ledger.find((entry) => entry.reviewer === GATE_REVIEWER && entry.iteration === iteration && entry.path === item.path && entry.problem === item.problem);
+// The ledger entry of a reviewer's item of an iteration (the gate's by default), as
+// src/job-stream.ts finds it: that reviewer's entry of the same iteration, path and problem; else
+// the entry its reopens names (another reviewer's too: raised again); else none.
+export function entryOf(ledger: readonly LedgerEntry[], iteration: number, item: ReviewItem, reviewer: string = GATE_REVIEWER): LedgerEntry | undefined {
+  const own = ledger.find((entry) => entry.reviewer === reviewer && entry.iteration === iteration && entry.path === item.path && entry.problem === item.problem);
   if (own !== undefined) {
     return own;
   }

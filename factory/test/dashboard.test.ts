@@ -138,6 +138,31 @@ test('dashboard (SF-103): the digest list and one digest, a manual run and diges
   });
 });
 
+test('dashboard (SF-117): GET api/stats with days 7, 30 or 90 and a workspace; any other query or a longer path is an empty 404; POST is 405', async () => {
+  await withDashboard('dash-stats', fakeActions(), async (dashboard, { jobs, job }) => {
+    const base = dashboard.url;
+    await jobs.write({ ...job, workspace: 'web', ticket: 'W-1', branch: 'W-1-x', state: 'working' });
+    const all = await fetchRaw(new URL('api/stats?days=30', base));
+    assert.deepEqual([all.status, all.headers['content-type']], [200, 'application/json; charset=utf-8']);
+    const payload = JSON.parse(all.body);
+    assert.deepEqual([payload.days, payload.workspace, payload.workspaces], [30, null, ['app', 'web']]);
+    // The server's clock is the real one: only the jobs that are not finished are in every period.
+    const rows = (data: { jobs: Array<{ workspace: string; ticket: string }> }): string[] => data.jobs.map((row) => `${row.workspace}/${row.ticket}`);
+    assert.ok(rows(payload).includes('app/T-1') && rows(payload).includes('web/W-1'));
+    const app = JSON.parse((await fetchRaw(new URL('api/stats?days=7&workspace=app', base))).body);
+    assert.deepEqual([app.days, app.workspace, app.days_rows.length], [7, 'app', 7]);
+    assert.ok(rows(app).includes('app/T-1') && rows(app).every((row) => row.startsWith('app/')));
+    assert.deepEqual(app.by_workspace.map((row: { workspace: string }) => row.workspace), ['app']);
+    assert.equal(JSON.parse((await fetchRaw(new URL('api/stats?days=90', base))).body).days_rows.length, 90);
+    for (const path of ['api/stats', 'api/stats?days=14', 'api/stats?days=30&x=1', 'api/stats?days=30&days=7', 'api/stats?workspace=app', 'api/stats?days=30&workspace=../x', 'api/stats/x', 'api/stats/x?days=30']) {
+      const reply = await fetchRaw(new URL(path, base));
+      assert.deepEqual([reply.status, reply.body], [404, ''], path);
+    }
+    const post = await act(base, 'api/stats?days=30', {});
+    assert.deepEqual([post.status, post.headers.allow], [405, 'GET']);
+  });
+});
+
 test('dashboard: jobs, job detail, report, patch and mr endpoints; bad names are 404', async () => {
   await withDashboard('dash-api', fakeActions(), async (dashboard, { jobs }) => {
     const base = dashboard.url;

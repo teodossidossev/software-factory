@@ -42,6 +42,7 @@ import type { CheckSummary, TaskChecks } from './task-check.js';
 import { turnLimitLine } from './turn-limit.js';
 import { MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskScope, taskSha256, TICKET_PATTERN } from './task-file.js';
 import { TicketHistory } from './ticket-history.js';
+import { Stats, STATS_DAYS, type StatsDays } from './stats.js';
 import { refuseWhileUpdating, UPDATE_IN_PROGRESS } from './update.js';
 import { describeEvent, followLines, shortInput } from './watch.js';
 
@@ -1003,6 +1004,8 @@ export async function startDashboard(
   const changes = new Changes(jobs);
   // The tickets' history (SF-081), read for the planned ticket page.
   const history = new TicketHistory(stateDir);
+  // The Stats page's numbers (SF-117), with their caches.
+  const stats = new Stats(stateDir, jobs);
   const validateHost = localhostHostValidation();
   const validateOrigin = localhostOriginValidation();
   // The exact origin of the page, known once the listener has its port.
@@ -1133,6 +1136,10 @@ export async function startDashboard(
       await openStream(req, res, query);
       return;
     }
+    if (path[1] === 'stats') {
+      await statsView(res, path, query);
+      return;
+    }
     const [, kind, ...rest] = path;
     // The morning digest (SF-103): the list, newest first, and one stored record.
     if (kind === 'digests' && digests !== undefined && [...query.keys()].length === 0 && rest.length <= 1) {
@@ -1231,6 +1238,20 @@ export async function startDashboard(
       return;
     }
     empty(res, 404);
+  }
+
+  // GET api/stats?days=7|30|90[&workspace=<name>] (SF-117): the Stats page's payload. Any other
+  // key or value, a repeated key or a longer path is an empty 404.
+  async function statsView(res: ServerResponse, path: string[], query: URLSearchParams): Promise<void> {
+    const keys = [...query.keys()];
+    const days = STATS_DAYS.find((value) => String(value) === query.get('days'));
+    const workspace = query.get('workspace');
+    if (path.length !== 2 || days === undefined || new Set(keys).size !== keys.length || keys.some((key) => key !== 'days' && key !== 'workspace')
+      || (workspace !== null && !WORKSPACE_NAME_PATTERN.test(workspace))) {
+      empty(res, 404);
+      return;
+    }
+    json(res, 200, await stats.compute({ days: days satisfies StatsDays, workspace }));
   }
 
   // GET api/jobs/<ws>/<ticket>/changes (SF-079): the base and the published iterations; with

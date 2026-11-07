@@ -2919,6 +2919,75 @@ runs), the state checked before and after. Every check comes first; a refusal ch
   the rules or is not the message of the commit the push would carry (`prepared_commit`; in
   `handed_over` the saved one); a handed-over push of the user's own commits is not checked.
 
+### Stats
+
+The Stats button in the header (or `#stats`) opens a full page of the factory's numbers over the
+last 7, 30 or 90 days (30 by default), for every workspace or one; Refresh reads them again (never
+on a timer). Everything is computed by `sf serve` from the state directory (`src/stats.ts`, `GET
+api/stats?days=7|30|90[&workspace=<name>]` under the dashboard token), which it only reads. The
+payload holds numbers, times, workspace names, tickets, job directory names, states, Task titles
+and the warnings' own sentences: never a review's text, a prompt, a message or a setting.
+
+A day is the local day (the time zone of `sf serve`) of each record's own time, not of its job's
+start; the period is the chosen number of days ending today. The sections, in order:
+
+- **Warnings**, with a link to the job, the planned ticket or the digest each names (an archived
+  job has none), and the rules under "How warnings are found":
+  - a job far above the usual: its reference is the last 30 finished jobs (pushed, aborted, failed;
+    by their last change) of its workspace, itself left out, and there is no warning with fewer
+    than 5 of them. **Cost**: more than twice their median cost and at least $1. **Iterations**:
+    more than twice their median and at least 4. **Codex gate tokens**: more than twice their
+    median, when that median is above 0.
+  - **review churn**: a ledger entry reopened twice or more (the one reopened most, the lowest id
+    on a tie), or else a stop with `review_churn` or `review_disputed` in the period.
+  - **a stage failing**: the 3 newest runs of the Claude review, the Codex gate, the
+    simplification, the plan check, the digest or the explanation all failed, the newest in the
+    period.
+  - **a cost spike**: a day whose cost is more than twice the median of the days with a cost among
+    the 30 days before it (at least 7 such days) and at least $5, naming the job that cost most
+    that day.
+- **Now**: the jobs running, waiting for you (`needs_human`, `ready_for_human_review`,
+  `handed_over`) and paused now, and the run queue's entries (`—` when `queue.json` cannot be read).
+- **Does a second model pay?** *Codex found a blocker or major after Claude passed*: the
+  iterations whose `gate.json` is a verdict ended in the period and whose Claude review had no
+  blocker or major; caught when the gate had one; with how many of those findings were fixed (by
+  their ledger entry). *Claude found a new blocker or major right after a clean Codex gate*: the
+  gate runs only after a clean Claude review, so it is the next iteration instead: an iteration
+  whose gate had no blocker or major, followed by a Claude review in the period with a blocker or
+  major not caused by a fix (`caused_by` empty). Each lists its caught iterations, newest first.
+- **Review stages**, per stage (Claude review, Codex gate, plan check): runs with a verdict,
+  failed runs, findings by severity, how many led to a fix (each ledger entry counted once, an item
+  without one per occurrence, as `sf metrics` counts; for the plan check: the checks with a blocker
+  or major after which a version of the Task with another sha256 was checked, "Task revised"),
+  cost and tokens.
+- **Spend**: the cost (every role but the Codex gate) and the Codex gate's tokens; cost per day by
+  role, Codex gate tokens per day; per role (Implementer, Claude review, simplification, Codex
+  gate, plan check, digest, explanations) the cost, tokens and runs; per workspace.
+- **Load**: jobs started and finished, the median time to ready (from the job's creation to its
+  first `ready_for_human_review` or `handed_over`) and the median iterations of the pushed jobs.
+- **Jobs**: the jobs of the period (created or changed in it, or not finished), by cost, at most 200.
+
+Where the numbers come from: the Implementer's cost is each iteration's `meta.json` at its end,
+its tokens the SDK result messages in `events.jsonl`; the Claude review's cost is each
+`review.json` verdict, its tokens its `review_message` results; the same for the simplification
+(`simplify.json`); the Codex gate's tokens are each `gate.json`'s; the plan check's cost is each
+check record under `checks/`; the digests' each digest record; the explanations' the job's
+`explanation.json`. Failed Claude reviews and gate runs are counted from the `review_failed` lines
+of `events.jsonl`, because a retry removes their files; with a removed `gate.json` its tokens go
+too, so the days' Codex tokens can be below a job's `gate_tokens`. Not recorded: a dollar figure
+for the Codex gate (Codex reports tokens, and the factory has no price for them), tokens of the plan
+check, the digest and the explanations ("not recorded"), and earlier explanations (each stop
+replaces the job's one). A cost that was not recorded counts 0 and marks its role "at least".
+
+Limits and caches: at most the 1000 newest job directories are read (a note says how many were
+left out); an event log above 256 MiB is not read (its tokens and time to ready are missing); an
+event log is read only for a job changed within the period and the 30 days before, or not
+finished. A file that cannot be read is left out and counted in a note (a digest record too: each stored
+digest the digest list could not read counts once). A payload is kept 10 s per
+period and workspace; each job directory's numbers are kept until one of its files changes
+(`job.json`, `ledger.json`, `explanation.json`, `task.md` or an iteration directory), each event log
+is read on from where the last read ended, and each check record is kept until it changes.
+
 ### Browser tests
 
 `npm test` runs the page's script against a stand-in document (`test/support/fake-dom.ts`). The
@@ -2941,13 +3010,14 @@ read). They cover the board (columns and cards by state, a stop that is a decisi
 chip, no console error or failed request while it loads), the run queue's controls (the stepper,
 Add to queue and Remove from queue, Alt+Up and Alt+Down, drag and drop), the job page (Stream,
 Changes with its tree's keys, Merge request with Ctrl+S), the planned ticket page (the Task file,
-Edit and Save, Ctrl+S, the history), Escape and Ctrl+Enter in the composer, light and dark with a
-contrast of at least 4.5:1, and a 390 x 844 window, and the job page's Stream at 600, 1200 and
-2000 px (full width, long tool rows cut with an ellipsis, long outputs wrapped, no sideways
-scroll). A failing test saves a screenshot to `dist/test-results/<file>-<test name>.png` and prints
-its path. They run headless; `SF_BROWSER_HEADED=1 npm run test:browser` shows the window. A check
-that fails because of a defect in the factory's own code is kept and marked as a node:test todo
-until the defect is fixed.
+Edit and Save, Ctrl+S, the history), the Stats page (its chart boxes side by side and stacked at
+390 px, its contrast), Escape and Ctrl+Enter in the composer, light and dark with a contrast of at
+least 4.5:1, and a 390 x 844 window, and the job page's Stream at 600, 1200 and 2000 px (full
+width, long tool rows cut with an ellipsis, long outputs wrapped, no sideways scroll). A failing
+test saves a screenshot to `dist/test-results/<file>-<test name>.png` and prints its path. They
+run headless; `SF_BROWSER_HEADED=1 npm run test:browser` shows the window. A check that fails
+because of a defect in the factory's own code is kept and marked as a node:test todo until the
+defect is fixed.
 
 ### Checking the page by hand
 

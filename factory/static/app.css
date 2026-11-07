@@ -690,3 +690,58 @@ pre.raw.doc .heading { font-weight: 700; }
   .dg-pick { max-width: 160px; }
   .dg-body { gap: 10px; }
 }
+
+/* Stats (SF-117): a full page like the digest's, up to 1440 px wide; tiles in a grid, the charts two
+   per row from 900 px and one below, tables that scroll in their own box. The charts are inline SVG
+   whose colours are classes over the theme tokens (no style attribute: the CSP has no unsafe-inline). */
+#stats { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--bg); z-index: 6; padding-top: env(safe-area-inset-top, 0px); padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px)); }
+#stats .jhead .t1 .title { font-size: 16px; font-weight: 600; }
+#stats .jhead .tools { flex-wrap: wrap; }
+.st-body { max-width: 1440px; margin: 0 auto; display: grid; gap: 18px; min-width: 0; }
+.st-sec { display: grid; gap: 10px; min-width: 0; }
+.st-sec > h3 { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.st-sub { margin: 4px 0 0; font-size: 13px; font-weight: 600; }
+.st-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
+.st-tile { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; min-width: 0; }
+.st-tile-label, .st-tile-sub { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.st-tile-value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.st-charts, .st-pair { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+@media (min-width: 900px) { .st-charts, .st-pair { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.st-chart { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; display: grid; gap: 8px; min-width: 0; align-content: start; }
+.st-chart-head { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+.st-chart-head h4, .st-opinion h4 { margin: 0; font-size: 13px; font-weight: 600; }
+.st-svg { display: block; height: auto; }
+.st-grid { stroke: var(--border); stroke-width: 1; }
+.st-axis { fill: var(--muted); font: 11px var(--sans); }
+.st-label { fill: var(--fg); }
+.st-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); }
+.st-key { display: inline-flex; gap: 5px; align-items: center; }
+.st-swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.st-c-implementer, .st-c-started { fill: var(--a-impl); background: var(--a-impl); }
+.st-c-claude_review { fill: var(--a-claude); background: var(--a-claude); }
+.st-c-codex_gate, .st-c-codex_out { fill: var(--a-codex); background: var(--a-codex); }
+.st-c-codex_out { opacity: .55; }
+.st-c-simplify { fill: var(--ws-olive); background: var(--ws-olive); }
+.st-c-task_check { fill: var(--ws-teal); background: var(--ws-teal); }
+.st-c-digest { fill: var(--ws-grey); background: var(--ws-grey); }
+.st-c-explanation { fill: var(--ws-orange); background: var(--ws-orange); }
+.st-c-blocker { fill: var(--del); background: var(--del); }
+.st-c-major { fill: var(--s-human); background: var(--s-human); }
+.st-c-nit { fill: var(--s-ended); background: var(--s-ended); }
+.st-scroll { overflow-x: auto; min-width: 0; }
+.st-table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
+.st-table th, .st-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.st-table th { font-size: 12px; color: var(--muted); font-weight: 600; }
+.st-warn { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.st-warn li { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; background: var(--warn-bg); border-left: 3px solid var(--warn); border-radius: var(--radius-sm); padding: 6px 10px; font-size: 13px; }
+.st-warn-text { overflow-wrap: anywhere; min-width: 0; }
+.st-how summary { cursor: pointer; font-size: 12.5px; color: var(--accent); }
+.st-opinion p, .st-none, .st-notes p { margin: 0; }
+.st-big { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.st-cases { margin: 0; padding-left: 18px; display: grid; gap: 2px; }
+.st-cases li > span { margin-left: 8px; }
+.st-link { color: var(--accent); }
+@media (max-width: 760px) {
+  .st-body { gap: 12px; }
+  .st-tile-value { font-size: 18px; }
+}

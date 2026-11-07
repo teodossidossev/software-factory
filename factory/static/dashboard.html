@@ -26,6 +26,7 @@
       <nav class="ws" aria-label="Setup">
         <span id="workspace-filter" class="seg2" role="group" aria-label="Workspace"></span>
         <button id="open-digest" type="button" class="btn small">Digest</button>
+        <button id="open-stats" type="button" class="btn small">Stats</button>
         <button id="open-archived" type="button" class="btn small">Archived <span id="archived-count"></span></button>
         <button id="open-workspaces" type="button" class="btn small">Workspaces</button>
         <button id="open-new-ticket" type="button" class="btn small primary">New ticket</button>
@@ -92,6 +93,9 @@
 
   <!-- The morning digest (SF-103): the stored digests, Repositories and My daily. -->
   <section id="digest" hidden aria-label="Morning digest"></section>
+
+  <!-- The Stats page (SF-117): what the reviews found, the spend and load, and the warnings. -->
+  <section id="stats" hidden aria-label="Stats"></section>
 
   <div id="toast" hidden role="status"><span id="toast-text"></span><button id="toast-close" type="button" class="toast-x" aria-label="Close the message">×</button></div>
   <div id="ticket-confirm" class="confirm modal" role="dialog" aria-modal="true" aria-labelledby="ticket-confirm-title" aria-describedby="ticket-confirm-text" hidden>

@@ -111,6 +111,9 @@ test('outcomeOf and entryOf: the rules in order, nit first; the gate\'s own entr
   assert.equal(entryOf(ledger, 2, item('a', 'P.', 'major')), undefined);
   assert.equal(entryOf(ledger, 2, item('a', 'Q.', 'major', { reopens: 'R2' }))?.id, 'R2');
   assert.equal(entryOf(ledger, 2, item('a', 'Q.', 'major', { reopens: 'R9' })), undefined);
+  // With reviewer claude (SF-117): Claude's own entry, not the gate's.
+  assert.equal(entryOf(ledger, 2, item('a', 'P.', 'major'), 'claude')?.id, 'R2');
+  assert.equal(entryOf(ledger, 1, item('a', 'P.', 'major'), 'claude'), undefined);
 });
 
 test('collectMetrics: current and archived jobs, levels per iteration, runs, tokens, outcomes counted once per ledger entry, the yield, the totals and the unreadable records', async () => {

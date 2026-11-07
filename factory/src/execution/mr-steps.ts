@@ -6,19 +6,21 @@ import { createReadStream } from 'node:fs';
 import { type FileHandle, realpath } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { resolve as resolvePath } from 'node:path';
-import { handoffOffNotice } from '../config.js';
+import { envFilePath, handoffOffNotice } from '../config.js';
 import { FactoryError } from '../errors.js';
 import { chooseForge, type Forge, type ForgeKind, forgeFor, type MergeRequestStatus } from '../forge.js';
 import { runGit } from '../git.js';
+import { checkTerms, commitsToCheck, GUARD_MAX_FIXES, GUARD_MAX_MR_TURNS, guardFixContent, guardFixCount, guardMessage, type GuardHit, type GuardTerm, maskedMrTextFailure, maskedMrTextProblem, maskTerms, MAX_GUARD_MESSAGE, redactAdded, scanBranch, scanChange, scanCommits, scanMrText, worktreeTree } from '../guard.js';
 import { checkBranchFree, isAncestor, savedRef, settleAfterPush, subjectOf } from '../handoff.js';
 import { type Job, type JobMr, type JobState, now } from '../jobs.js';
 import { abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitFailure, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl, parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, validBranchName, withFindings, withNits, withSimplifications, worktreesOn } from '../mr.js';
 import { buildPatch, notificationLine } from '../patch.js';
 import { conflictPrompt, mrPrompt } from '../prompts.js';
 import { COMMIT_TYPES, DENIED_TOOLS, MANUAL_CLAIM, MAX_HEADER_CHARS, MR_REQUIRED_HEADINGS } from '../rules.js';
-import type { Workspace } from '../registry.js';
+import { configDir, type Workspace } from '../registry.js';
 import { actedVerdict, type ReviewItem, uniqueNits } from '../review.js';
 import type { IdleOutcome } from '../session.js';
+import { readTask } from '../task-file.js';
 import { removeWorktree } from '../worktree.js';
 import { cutOffError, exists, type Live, markedGroups, MR_RETRY_CODES, type MrContent, mrFailure, type MrInput, type MrOutcome, type MrSaved, type MrView, withoutDropped } from './shared.js';
 import type { Core } from './core.js';
@@ -38,6 +40,14 @@ const FIELD_FIXED = {
   pushed: 'Fixed after the first push.',
   handed_over: 'The branch is in your checkout.',
 } as const;
+
+// The guard's own errors (SF-122): a guard-terms.txt that cannot be used, a scan that failed.
+const GUARD_ERRORS: readonly string[] = ['guard_terms_invalid', 'guard_failed'];
+
+// Whether an error is one of the guard's own, which stop the job with its code.
+function isGuardError(error: unknown): error is FactoryError {
+  return error instanceof FactoryError && GUARD_ERRORS.includes(error.code);
+}
 
 // Whether the MR text is the user's (SF-080): mr-factory.md exists and its message is not mr.md's.
 function editedText(factory: string | undefined, text: string | undefined): boolean {
@@ -87,9 +97,20 @@ export class MrPart {
         await needsHuman(outcome.code, outcome.message);
         return;
       }
+      // The guard's terms (SF-122), before anything quotes the MR text: an invalid title is masked.
+      let terms: GuardTerm[];
+      try {
+        terms = await this.#guardTerms(live.workspace);
+      } catch (error) {
+        if (isGuardError(error)) {
+          await needsHuman(error.code, error.message);
+          return;
+        }
+        throw error;
+      }
       const written = await readMrText(cwd, job.ticket);
       if (!written.ok) {
-        await needsHuman(written.code, written.message);
+        await needsHuman(written.code, await maskedMrTextFailure(cwd, job.ticket, written, terms));
         return;
       }
       // The nits of the reviewed iteration go into the MR text by the factory's hand (SF-051).
@@ -98,12 +119,37 @@ export class MrPart {
       // And the suggestions of the simplification pass the user skipped (SF-055).
       const skipped = await this.core.parts.reviews.skippedSimplifications(job);
       const withSkipped = skipped === undefined ? withNitsText : withSimplifications(withNitsText, skipped.suggestions, skipped.iteration);
-      const factoryText = withFindings(withSkipped, await this.core.jobs.readLedger(job.workspace, job.ticket));
+      const composed = withFindings(withSkipped, await this.core.jobs.readLedger(job.workspace, job.ticket));
+      // The guard (SF-122): the lines the factory added lose every term; the Implementer's own
+      // lines are its to reword.
+      const factoryText = redactAdded(composed, written.text, terms);
       // The user's own MR text, saved on the Merge request screen (SF-080), stays the MR text: the
       // commit is made with it, unless it fails the rules; then with the factory's new text, and the
       // screen shows the problem (approve refuses until it is saved valid or reset).
       const userText = await this.#userMrText(job);
-      const mrText = { text: userText !== undefined && mrTextProblem(job.ticket, userText) === undefined ? userText : factoryText };
+      const usersOwn = userText !== undefined && mrTextProblem(job.ticket, userText) === undefined;
+      const mrText = { text: usersOwn ? userText : factoryText };
+      // The factory's text is checked before it is committed; the user's own is checked at the push.
+      if (!usersOwn) {
+        const hits = scanMrText(factoryText, terms);
+        if (hits.length > 0) {
+          const turns = live.mr?.guardTurns ?? 0;
+          if (turns < GUARD_MAX_MR_TURNS) {
+            const targetRef = live.mr?.targetRef ?? job.base;
+            live.mr = { ...live.mr, targetRef, guardTurns: turns + 1 };
+            current = { ...job, mr_attempts: job.mr_attempts + 1 };
+            await this.core.jobs.write(current);
+            live.session.send(mrPrompt({
+              ticket: job.ticket, branch: job.branch, targetRef, targetCommit: job.target_commit!, attempt: current.mr_attempts,
+              previousError: `The guard found text that must not be published in this repository in your MR text: ${guardMessage(hits, terms)}. Write the MR text again without it.`,
+              handbook: this.core.handbook,
+            }), DENIED_TOOLS);
+            return;
+          }
+          await needsHuman('guard_hit', `The guard found text that must not be published in this repository in the MR text, after ${turns + 1} MR text turns: ${guardMessage(hits, terms)}. Tell the Implementer how to word it (sf say; its iteration is reviewed again), or run sf retry for new MR text turns.`.slice(0, MAX_GUARD_MESSAGE));
+          return;
+        }
+      }
       const targetCommit = job.target_commit!;
       const prepared = await this.core.gitLocked(job.workspace, () => commitAndRebase(cwd, { baseCommit: job.base_commit!, targetCommit, mrText: mrText.text }));
       if (prepared.kind === 'failed') {
@@ -341,6 +387,13 @@ export class MrPart {
     }
     const workspace = live?.workspace ?? (await this.core.resolve(workspaceName));
     const cwd = job.worktree;
+    // A rebase left in progress when sf serve restarted during a conflict turn: aborted before the
+    // guard reads the worktree, so it sees the change and not the target's files.
+    await this.core.gitLocked(workspaceName, () => abortRebase(cwd));
+    const guarded = await this.#guardChange(job, workspace, cwd);
+    if (guarded !== undefined) {
+      return guarded;
+    }
     const target = await this.core.gitLocked(workspaceName, async () => {
       // A rebase left in progress when sf serve restarted during a conflict turn.
       await abortRebase(cwd);
@@ -360,6 +413,78 @@ export class MrPart {
     this.core.live.get(key)!.mr = { targetRef: target.ref };
     session.send(prompt, DENIED_TOOLS);
     return { state: next.state, iteration: next.iteration, branch: next.branch };
+  }
+
+  // The terms of a check of the guard (SF-122): the secrets, and the names of the user's other
+  // workspaces when the workspace is guarded as the registry holds it now (when it cannot be read,
+  // as in hand).
+  async #guardTerms(workspace: Workspace): Promise<GuardTerm[]> {
+    const guarded = (await this.core.resolve(workspace.name).catch(() => workspace)).guard === true;
+    const { terms } = await checkTerms({ workspace, guarded, configDir: configDir(), stateDir: this.core.config.stateDir, envFile: envFilePath() });
+    return terms;
+  }
+
+  // The guard's check of the change at Clean (SF-122): the worktree's change as the factory would
+  // commit it. Hits are a Guard fix (the usual iteration and its reviews) until GUARD_MAX_FIXES were
+  // written, then a stop; undefined when nothing was found. Before the Accept is recorded.
+  async #guardChange(job: Job, workspace: Workspace, cwd: string): Promise<{ state: JobState; iteration: number; branch: string } | undefined> {
+    const stop = async (code: string, message: string): Promise<{ state: JobState; iteration: number; branch: string }> => {
+      // from: awaiting_review, needs_human (checkPrepareMr, checkRetryMr)
+      const next = await this.core.transition(job, 'needs_human', 'fix', { code, message });
+      return { state: next.state, iteration: next.iteration, branch: next.branch };
+    };
+    let terms: GuardTerm[];
+    let hits: GuardHit[];
+    try {
+      terms = await this.#guardTerms(workspace);
+      const baseCommit = job.base_commit!;
+      hits = await scanChange(cwd, baseCommit, await worktreeTree(cwd, baseCommit), terms);
+    } catch (error) {
+      if (isGuardError(error)) {
+        return stop(error.code, error.message);
+      }
+      throw error;
+    }
+    if (hits.length === 0) {
+      return undefined;
+    }
+    const fixes = guardFixCount(await readTask(workspace, job.ticket));
+    if (fixes < GUARD_MAX_FIXES) {
+      const { iteration } = await this.core.parts.turns.fix(job, guardFixContent(hits, terms), { title: 'Guard', fromStop: job.state === 'needs_human' });
+      return { state: 'working', iteration, branch: job.branch };
+    }
+    const message = `The guard found text that must not be published in this repository, after ${fixes} Guard fixes: ${guardMessage(hits, terms)}. Remove it (sf say, or by hand and sf say), or drop a false positive with a "!" line in guard-terms.txt and sf retry. See the matches with: sf guard ${job.workspace} --worktree ${job.ticket}`;
+    return stop('guard_hit', message.slice(0, MAX_GUARD_MESSAGE));
+  }
+
+  // The terms of the push check (SF-122): the workspace as approve resolved it, just before.
+  async #pushTerms(workspace: Workspace): Promise<GuardTerm[]> {
+    return (await checkTerms({ workspace, guarded: workspace.guard === true, configDir: configDir(), stateDir: this.core.config.stateDir, envFile: envFilePath() })).terms;
+  }
+
+  // The guard's check before a push or a merge request the factory makes (SF-122): with commit,
+  // the commits the push of it to origin publishes; always the branch name and the job's MR text.
+  // A hit refuses with guard_hit, naming the places only; nothing is pushed and the job is not changed.
+  async #checkGuard(job: Job, workspace: Workspace, commit: string | undefined): Promise<void> {
+    const checkout = workspace.workCheckout;
+    const terms = await this.#pushTerms(workspace);
+    const hits: GuardHit[] = [];
+    if (commit !== undefined) {
+      hits.push(...(await scanCommits(checkout, await commitsToCheck(checkout, { rev: commit, remote: 'origin', history: false }), terms)));
+    }
+    hits.push(...scanBranch(job.branch, terms));
+    const text = await this.core.jobs.readMrText(job.workspace, job.ticket);
+    if (text !== undefined) {
+      hits.push(...scanMrText(text, terms));
+    }
+    if (hits.length === 0) {
+      return;
+    }
+    const key = `${job.workspace}/${job.ticket}`;
+    const message = commit !== undefined
+      ? `The guard refused the push of ${key}: ${guardMessage(hits, terms)}. See the matches with: sf guard ${job.workspace} ${commit.slice(0, 12)} --mr ${job.ticket}`
+      : `The guard refused the merge request of ${key}: ${guardMessage(hits, terms)}. See the matches with: sf guard ${job.workspace} --mr ${job.ticket}`;
+    throw new FactoryError('guard_hit', message.slice(0, MAX_GUARD_MESSAGE));
   }
 
   // The user's approve: the branch the factory prepared at Clean is pushed. Nothing is committed
@@ -419,9 +544,13 @@ export class MrPart {
     // The MR text the push and the merge request carry (SF-080); a handed-over branch the user
     // pushes with their own commits carries theirs.
     if (!(job.state === 'handed_over' && plan.source === undefined)) {
-      await this.#checkMrText(job, checkout, job.state === 'handed_over' ? job.handover!.saved : job.prepared_commit);
+      await this.#checkMrText(job, workspace, checkout, job.state === 'handed_over' ? job.handover!.saved : job.prepared_commit);
     }
-    const pushFailure = await this.core.gitLocked(workspaceName, () => pushBranch(checkout, job.branch, job.base, plan.source));
+    // The guard (SF-122) on every push the factory makes, --as-is included.
+    await this.#checkGuard(job, workspace, plan.commit);
+    // The commit the guard checked is what is pushed (SF-122), so a branch that moved on since is
+    // not published unchecked; a handed-over job's saved commit through its saved ref, as before.
+    const pushFailure = await this.core.gitLocked(workspaceName, () => pushBranch(checkout, job.branch, job.base, plan.source ?? plan.commit));
     if (pushFailure !== undefined) {
       if (job.state === 'handed_over') {
         // The checkout, the record, the saved ref and the config stay; Approve can be retried.
@@ -554,6 +683,7 @@ export class MrPart {
       if (combined) {
         return this.#approve(job, workspace, false, { forge, content });
       }
+      await this.#checkGuard(job, workspace, undefined);
       const opened = await this.#openMr(job, forge, content);
       const next: Job = { ...job, mr: { host: opened.host, number: opened.number, url: opened.url, state: opened.state } };
       await this.core.jobs.write(next);
@@ -609,7 +739,7 @@ export class MrPart {
       branch: job.branch, base: job.base,
       branch_editable: fixed === undefined, branch_reason: fixed === undefined ? null : FIELD_FIXED[fixed],
       base_editable: fixed === undefined, base_reason: fixed === undefined ? null : FIELD_FIXED[fixed],
-      problems: mrProblems(ticket, message, job.branch, job.base),
+      problems: await this.#shownProblems(job, message),
       pushed, pushed_at: events.pushed_at, editable, readonly_reason: readonly,
       target: { host: (await this.mergeRequestHost(workspaceName)).host, repository: (url === undefined ? undefined : parseOrigin(url)?.path) ?? null },
       rules: {
@@ -619,6 +749,30 @@ export class MrPart {
       commit: commit ?? null,
       commit_differs: commit !== undefined && !sameMessage(commit, message),
     };
+  }
+
+  // The problems the Merge request screen lists (SF-122): found on the text as it is, and quoted
+  // from it with the guard's terms masked first (a quote is cut, which would cut a secret out of
+  // its match). When the masked text gives other problems, or the terms cannot be read, a problem
+  // that quotes the text says only which field fails.
+  async #shownProblems(job: Job, message: MrContent): Promise<MrView['problems']> {
+    const problems = mrProblems(job.ticket, message, job.branch, job.base);
+    if (problems.length === 0) {
+      return problems;
+    }
+    let terms: GuardTerm[] | undefined;
+    try {
+      terms = await this.#pushTerms(await this.core.resolve(job.workspace));
+    } catch (error) {
+      if (!(error instanceof FactoryError)) {
+        throw error;
+      }
+    }
+    const masked = terms === undefined ? undefined : mrProblems(job.ticket, { title: maskTerms(message.title, terms), body: maskTerms(message.body, terms) }, job.branch, job.base);
+    if (terms !== undefined && masked !== undefined && masked.length === problems.length && masked.every((problem, index) => problem.field === problems[index]!.field)) {
+      return masked.map((problem) => ({ field: problem.field, message: maskTerms(problem.message, terms) }));
+    }
+    return problems.map((problem) => (problem.message.includes('"') ? { field: problem.field, message: `The ${problem.field} does not pass the rules.` } : problem));
   }
 
   // From the job's events (SF-080): the last save that is not undone by a reset after it, the
@@ -699,9 +853,10 @@ export class MrPart {
       }
       const message = mrMessage(messageText({ title: input.title, body: input.body }));
       const text = messageText(message);
-      const problem = mrTextProblem(ticket, text);
-      if (problem !== undefined) {
-        throw new FactoryError('mr_text_invalid', `The MR text is invalid: ${problem}.`);
+      if (mrTextProblem(ticket, text) !== undefined) {
+        // Masked before the problem cuts its quote (SF-122): validity is the original text's.
+        const terms = await this.#pushTerms(await this.core.resolve(workspaceName));
+        throw new FactoryError('mr_text_invalid', maskTerms(`The MR text is invalid: ${maskedMrTextProblem(ticket, text, terms)!}.`, terms));
       }
       const saved = await this.#applyMr(job, message, input.branch ?? job.branch, input.base ?? job.base);
       if ((await this.core.jobs.readMrFactoryText(workspaceName, ticket)) === undefined) {
@@ -860,14 +1015,18 @@ export class MrPart {
   // carry (the prepared commit; in handed_over, the saved one), else mr_text_invalid naming the
   // problem. Saving a valid text or Reset clears it. Not for a handed-over branch the user pushes
   // with their own commits.
-  async #checkMrText(job: Job, checkout: string, commit: string | null): Promise<void> {
+  // The problem quotes the title, which the guard has not checked yet: every match of the push
+  // check's terms in it is masked (SF-122).
+  async #checkMrText(job: Job, workspace: Workspace, checkout: string, commit: string | null): Promise<void> {
     const text = await this.core.jobs.readMrText(job.workspace, job.ticket);
     if (text === undefined) {
       return;
     }
-    const problem = mrTextProblem(job.ticket, text);
-    if (problem !== undefined) {
-      throw new FactoryError('mr_text_invalid', `The MR text is invalid: ${problem}. Save a valid text, or reset it to the factory's, on the Merge request screen.`);
+    if (mrTextProblem(job.ticket, text) !== undefined) {
+      // Masked before the problem cuts its quote (SF-122).
+      const terms = await this.#pushTerms(workspace);
+      const message = `The MR text is invalid: ${maskedMrTextProblem(job.ticket, text, terms)!}. Save a valid text, or reset it to the factory's, on the Merge request screen.`;
+      throw new FactoryError('mr_text_invalid', maskTerms(message, terms));
     }
     const message = commit === null ? undefined : await commitMessage(checkout, commit);
     if (message !== undefined && !sameMessage(message, mrMessage(text))) {

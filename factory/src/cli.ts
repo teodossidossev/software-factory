@@ -12,7 +12,8 @@
 // and `sf run`, the job's runner that sf serve starts (SF-042, src/runner.ts), and `sf digest
 // [--now]` (the morning digest of SF-103, through the socket of sf serve), `sf service` (sf serve
 // as a systemd user service, SF-101, src/service.ts) and `sf update` (the install updated, drained
-// first, SF-101, src/update.ts).
+// first, SF-101, src/update.ts) and `sf guard` (the guard of SF-122, src/guard.ts: run here, no sf
+// serve needed; `sf guard install-hook` writes the pre-push hook).
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { type ChildProcess, spawn } from 'node:child_process';
 import { basename, dirname, join, relative, resolve } from 'node:path';
@@ -30,6 +31,7 @@ import { currentExplanation, Explainer, explanationLines } from './explain.js';
 import { Execution, type StateListener } from './execution.js';
 import { forgeSettings, withoutHostTokens } from './forge.js';
 import { codexVersion } from './gate.js';
+import { checkTerms, commitsToCheck, type CommitSpec, type GuardHit, hitReport, installHook, scanBranch, scanChange, scanCommits, scanMrText, worktreeTree } from './guard.js';
 import { existsSync } from 'node:fs';
 import { writeFileAtomic } from './atomic.js';
 import { callSocket, listenSocket, socketPath } from './ipc.js';
@@ -58,7 +60,7 @@ import { collectRules, readJobRulesList, rulesLines } from './rules-docs.js';
 import { turnLimitLine } from './turn-limit.js';
 import { watchEvents } from './watch.js';
 import { DEFAULT_BUDGET_USD, DEFAULT_TIMEOUT_MIN, positiveDecimal, runSmoke } from './live-smoke.js';
-import { serviceCommand, updateService } from './service.js';
+import { INSTALLED_SF, serviceCommand, updateService } from './service.js';
 import { checkStateVersion } from './state-version.js';
 import {
   MARKER_POLL_MS, markerAtServeStart, markerLines, MarkerWatch, putMarkerBack, readSkippedChecks, recordSkippedCheck, refuseWhileUpdating, removeSkippedChecks, runCommand, runUpdate, updateMarked,
@@ -91,7 +93,7 @@ const USAGE = `Usage:
   sf queue force <workspace> <ticket>                   Start anyway: the queued ticket starts whatever its Task check says, until it leaves the queue
   sf say <workspace> <ticket> <message...>              Send a message into the job's Implementer session; on a handed-over job: Ask for changes (your checkout's edits go back into the job first)
   sf review <workspace> <ticket>                        Retry a failed Claude review (needs_human with review_failed) of the last iteration
-  sf retry <workspace> <ticket>                         Retry a transient MR preparation failure (fetch_failed, mr_serve_restarted, mr_interrupted, mr_commit_failed, mr_rebase_failed, mr_failed) without a new review; on mr_push_failed: push again
+  sf retry <workspace> <ticket>                         Retry a transient MR preparation failure (fetch_failed, mr_serve_restarted, mr_interrupted, mr_commit_failed, mr_rebase_failed, mr_failed) or a stop of the guard (guard_hit, guard_terms_invalid, guard_failed) without a new review; on mr_push_failed: push again
   sf accept <workspace> <ticket>                        Accept a clean Claude review over a stopped gate (needs_human with gate_rounds, gate_budget or gate_failed) or a ledger stop (review_churn, review_disputed) or the Fix round limit (iteration_limit) and prepare the MR; on simplify_offered: skip the suggestions (listed in the MR text)
   sf simplify <workspace> <ticket>                      Apply the simplification pass's suggestions (needs_human with simplify_offered): one Fix section "Simplify", reviewed as usual; sf accept skips them
   sf settle <workspace> <ticket> <id> accept|fix [note...]  Settle an escalated or contested finding of the ledger (needs_human): accept the risk, or the Implementer must fix it; the job goes on once nothing is left to settle
@@ -113,6 +115,8 @@ const USAGE = `Usage:
   sf explain <workspace> <ticket>                       The plain explanation of the job's current stop (sf serve writes one for each needs_human stop; explain in workspaces.json): the headline, the explanation, the choices and the recommendation; no sf serve needed, no model call
   sf notify-test                                        Send a test notification on every channel
   sf info                                               Version, directories, settings, whether sf serve and the tunnel run, workspaces, jobs
+  sf guard <workspace> [<rev> | <a>..<b>] [--remote <name>] [--branch <name>] [--mr <ticket>] [--worktree <ticket>] [--history]  The guard: check what a push of <rev> (default HEAD) to --remote (default origin) would publish, the commits of a range, or with --history every commit reachable from <rev>: messages, authors, committers, added lines and new file paths; --branch adds a branch name, --mr a job's MR text and branch, --worktree a job's uncommitted change. Secrets in every workspace, the names of your other workspaces in one with "guard": true; prints each hit with its matched text (never a secret's); exit 0 no hits, 1 hits or an error; no sf serve needed
+  sf guard install-hook <workspace>                     Write the guard's pre-push hook into the workspace's checkout (core.hooksPath followed); rewrites its own hook, never another
   sf metrics [<workspace>] [--since YYYY-MM-DD] [--json]  The Codex gate per job, current and archived: gate levels per iteration (F full, L light, l light skipped, - none, · no decision, ? unreadable), runs, tokens, items by outcome and the yield (fixed over all items), then the totals; no sf serve needed
   sf smoke [--keep] [--timeout-min N] [--budget-usd N]  The live smoke test: one tiny real job (Claude Code, Codex, Git) from Task check to push, on a throwaway repository with a local bare remote, its own sf serve and state in one temporary directory (never yours); prints a pass/fail table. Models: SF_SMOKE_MODEL (default haiku), SF_SMOKE_CODEX_MODEL (default: Codex's); budget: --timeout-min (default ${DEFAULT_TIMEOUT_MIN}) and --budget-usd (default ${DEFAULT_BUDGET_USD}), positive numbers; --keep keeps the directory
   sf run <workspace> <ticket>                           The job's runner: its turns, reviews and gate, detached from sf serve (sf serve starts it; one per job)
@@ -1535,6 +1539,100 @@ async function redactStream(token: string | undefined): Promise<void> {
   await write(redactMcpToken(pending, token));
 }
 
+// sf guard (SF-122): the guard's check of a workspace's commits, branch name, MR text or worktree,
+// run here; every hit printed with its matched text (a secret's never). Exit 1 on hits. Also
+// sf guard install-hook <workspace>: the pre-push hook.
+async function guard(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args, allowPositionals: true, strict: true,
+    options: { remote: { type: 'string' }, branch: { type: 'string' }, mr: { type: 'string' }, worktree: { type: 'string' }, history: { type: 'boolean' } },
+  });
+  if (positionals.length === 2 && positionals[0] === 'install-hook') {
+    if (Object.keys(values).length > 0) {
+      throw new UsageError('guard install-hook takes only <workspace>.');
+    }
+    const name = positionals[1]!;
+    checkName(name);
+    const workspace = await resolveWorkspace(name);
+    const written = await installHook(workspace.workCheckout, workspace.name, INSTALLED_SF);
+    console.log(`${written.replaced ? 'Rewrote' : 'Wrote'} ${written.path}.`);
+    return;
+  }
+  if (positionals.length < 1 || positionals.length > 2) {
+    throw new UsageError('guard needs <workspace> [<rev> | <a>..<b>], or install-hook <workspace>.');
+  }
+  const [name, rev] = positionals as [string, string | undefined];
+  checkName(name);
+  const ticketOf = (option: 'mr' | 'worktree'): string | undefined => {
+    const ticket = values[option];
+    if (ticket !== undefined && !TICKET_PATTERN.test(ticket)) {
+      throw new UsageError(`--${option} must be a ticket: ${TICKET_DESCRIPTION}.`);
+    }
+    return ticket;
+  };
+  const mrTicket = ticketOf('mr');
+  const worktreeTicket = ticketOf('worktree');
+  const range = rev !== undefined && rev.includes('..');
+  if (range && values.history === true) {
+    throw new UsageError('guard: --history takes a revision, not a range.');
+  }
+  if (range && values.remote !== undefined) {
+    throw new UsageError('guard: --remote takes a revision, not a range.');
+  }
+  const workspace = await resolveWorkspace(name);
+  const guarded = workspace.guard === true;
+  if (!guarded) {
+    console.error(`sf guard: workspace "${name}" is not guarded ("guard": true in workspaces.json); only secrets are checked.`);
+  }
+  const { terms, warnings } = await checkTerms({ workspace, guarded, configDir: configDir(), stateDir: stateDir(), envFile: envFilePath() });
+  for (const warning of warnings) {
+    console.error(`sf guard: warning: ${warning}`);
+  }
+  const checkout = workspace.workCheckout;
+  const spec: CommitSpec = range
+    ? { range: rev! }
+    : values.history === true ? { rev: rev ?? 'HEAD', history: true } : { rev: rev ?? 'HEAD', remote: values.remote ?? 'origin', history: false };
+  const commits = await commitsToCheck(checkout, spec);
+  const hits: GuardHit[] = await scanCommits(checkout, commits, terms);
+  const jobs = new JobStore(stateDir());
+  const jobOf = async (ticket: string): Promise<Job> => {
+    const job = await jobs.read(name, ticket);
+    if (job === undefined) {
+      throw new FactoryError('job_not_found', `No job ${name}/${ticket}.`);
+    }
+    return job;
+  };
+  let branch = values.branch;
+  if (mrTicket !== undefined) {
+    const job = await jobOf(mrTicket);
+    const text = await jobs.readMrText(name, mrTicket);
+    if (text === undefined) {
+      throw new FactoryError('mr_text_missing', `The job ${name}/${mrTicket} has no MR text.`);
+    }
+    hits.push(...scanMrText(text, terms));
+    branch ??= job.branch;
+  }
+  if (branch !== undefined) {
+    hits.push(...scanBranch(branch, terms));
+  }
+  if (worktreeTicket !== undefined) {
+    const job = await jobOf(worktreeTicket);
+    if (job.worktree === null || job.base_commit === null || !existsSync(job.worktree)) {
+      throw new FactoryError('worktree_missing', `The job ${name}/${worktreeTicket} has no worktree to check.`);
+    }
+    hits.push(...(await scanChange(job.worktree, job.base_commit, await worktreeTree(job.worktree, job.base_commit), terms)));
+  }
+  for (const hit of hits) {
+    console.log(hitReport(hit, terms));
+  }
+  if (hits.length > 0) {
+    console.log(`${hits.length} hits in ${commits.length} commits.`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`No hits in ${commits.length} commits.`);
+}
+
 // `sf metrics` (SF-092): the gate's runs, tokens, items and yield per job and in total.
 async function metrics(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { since: { type: 'string' }, json: { type: 'boolean' } } });
@@ -1635,10 +1733,22 @@ async function update(args: string[], fromEnvFile: readonly string[]): Promise<v
   });
 }
 
+// The environment file as every command reads it, for sf guard (SF-122): a file that cannot be read
+// or parsed is the guard's fail-closed guard_failed, naming the file only (parseEnvFile's message
+// quotes the line, which may hold a secret).
+function guardEnvFile(): string[] {
+  try {
+    return loadEnvFile();
+  } catch {
+    throw new FactoryError('guard_failed', `${basename(envFilePath() ?? 'auth.env')} could not be read for the secret check.`);
+  }
+}
+
 async function main(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
-  // SF_* settings from the environment file (auth.env), for every command alike.
-  const fromEnvFile = loadEnvFile();
+  // SF_* settings from the environment file (auth.env), for every command alike; sf guard's own
+  // failure never quotes the file's line (SF-122).
+  const fromEnvFile = command === 'guard' ? guardEnvFile() : loadEnvFile();
   if (command === 'service') {
     await service(rest, fromEnvFile);
     return;
@@ -1762,6 +1872,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'metrics') {
     await metrics(rest);
+    return;
+  }
+  if (command === 'guard') {
+    await guard(rest);
     return;
   }
   if (command === 'smoke') {

@@ -71,7 +71,8 @@ export interface MrContent {
 // The needs_human codes of a transient stop of MR preparation after the deciding clean verdict and
 // before the branch is prepared (SF-087): sf retry runs MR preparation again, without a new review.
 // Not after a conflict turn (mr_conflict_turn): its resolution is code no reviewer saw.
-export const MR_RETRY_CODES: readonly string[] = ['fetch_failed', 'mr_serve_restarted', 'mr_interrupted', 'mr_commit_failed', 'mr_rebase_failed', 'mr_failed'];
+// The guard's stops of MR preparation (SF-122) too: after a "!" line in guard-terms.txt, for example.
+export const MR_RETRY_CODES: readonly string[] = ['fetch_failed', 'mr_serve_restarted', 'mr_interrupted', 'mr_commit_failed', 'mr_rebase_failed', 'mr_failed', 'guard_hit', 'guard_terms_invalid', 'guard_failed'];
 
 // A Save of the Merge request screen (SF-080): the title, the body and, when they change, the
 // branch and the base.
@@ -258,9 +259,9 @@ export interface Live {
   session: ImplementerSession;
   // The session's cwd: the job's worktree.
   cwd: string;
-  // During MR preparation: the target's ref name, and the files of a stopped rebase while the
-  // conflict turn runs.
-  mr?: { targetRef: string; conflicts?: string[] };
+  // During MR preparation: the target's ref name, the files of a stopped rebase while the
+  // conflict turn runs, and the MR text turns the guard asked for (SF-122; absent: 0).
+  mr?: { targetRef: string; conflicts?: string[]; guardTurns?: number };
 }
 
 // A review in progress, Claude's, the gate's or the simplification pass (one at a time per job):

@@ -145,6 +145,30 @@ with `git lfs push` before the branch, and only when the job changed LFS files; 
 is any job while the `.lfsconfig` git-lfs reads in your checkout (where another job may be handed
 over) is not the base branch's.
 
+## The workspace's test command
+
+A workspace's `test_command` (in `workspaces.json`) runs code the Implementer wrote, so the factory
+never runs it with its own reach. It runs it in a bubblewrap (`bwrap`) sandbox it builds itself,
+before the MR text, on the reviewed worktree:
+
+- the whole file system read-only, and every path of the table above hidden: a directory shows as
+  empty, a file as empty (`/dev/null`). So `auth.env`, `sf.sock` and the tokens are out of reach;
+- `/run` hidden too, with the Unix sockets in it (your D-Bus and systemd user manager, the SSH and
+  keyring agents, Docker): through them a command could start a process outside the sandbox;
+- only the job's worktree and a private `/tmp` writable; that `/tmp` is the sandbox's own in-memory
+  file system, so it is gone with the sandbox, also when the runner was killed mid-run (it uses
+  memory, not disk: a suite that writes much to `/tmp` needs the memory for it);
+- no network (a network namespace of its own); loopback works, for tests that start a server;
+- an environment of `PATH`, `LANG`, `CI=1`, your `HOME` (read-only), `TMPDIR=/tmp` and
+  `npm_config_cache=/tmp/npm-cache` only: no `SF_*` setting and no value of the env file;
+- in a process namespace of its own that dies with the runner (`--die-with-parent`,
+  `--unshare-pid`): no process of the run outlives it, however the runner ends; a timeout
+  (`SF_TEST_TIMEOUT_MS`) or an abort kills the run's whole process group.
+
+Without `bwrap` the command does not run at all (`tests_unavailable`); there is no fallback outside
+the sandbox. It runs with the runner's control group and nice value, so the service's CPU limits
+apply.
+
 ## The limits
 
 - **Built once per session.** A worktree or state entry created after a session started stays

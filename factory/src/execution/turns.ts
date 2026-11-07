@@ -43,6 +43,9 @@ interface FixOptions {
   fromStop?: boolean;
   title?: string;
   overLimit?: boolean;
+  // The Tests Fix (SF-128), from preparing_mr: no checkFix, the transition's action is tests, written
+  // even at SF_MAX_ITERATIONS, and fixes is not counted (TEST_FIX_ROUNDS bounds it).
+  fromTests?: boolean;
 }
 
 export class TurnsPart {
@@ -401,11 +404,17 @@ export class TurnsPart {
   // fromStop: the Fix of the user's settlement or Simplify (SF-055), from needs_human.
   // title: the section's title after its number (## Fix N: Simplify).
   // overLimit: written even at SF_MAX_ITERATIONS (Simplify, once per job).
+  // fromTests: the Tests Fix of a failed test run (SF-128), from preparing_mr.
   async fix(current: Job, content: string, options: FixOptions = {}): Promise<{ iteration: number; check_after_minutes: number }> {
-    const { counts = {}, ledger, fromStop = false, title, overLimit = false } = options;
+    const { counts = {}, ledger, fromStop = false, title, fromTests = false } = options;
+    const overLimit = options.overLimit === true || fromTests;
     let job = current;
     const { workspace: workspaceName, ticket } = job;
-    if (!(fromStop && job.state === 'needs_human')) {
+    if (fromTests) {
+      if (job.state !== 'preparing_mr') {
+        throw new FactoryError('invalid_state', `A Tests Fix needs preparing_mr; the job is ${job.state}.`);
+      }
+    } else if (!(fromStop && job.state === 'needs_human')) {
       this.checkFix(job);
     }
     if (!overLimit && job.fixes >= this.core.config.maxIterations) {
@@ -436,8 +445,11 @@ export class TurnsPart {
     }
     job = await this.core.parts.start.syncTask(workspace, job);
     // A commit prepared before this turn is never pushed (SF-073).
-    // from: awaiting_review, ready_for_human_review (checkFix), needs_human (fromStop)
-    job = await this.core.transition({ ...job, ...counts, fixes: job.fixes + 1, prepared_commit: null }, 'working', 'fix');
+    job = fromTests
+      // from: preparing_mr (fromTests)
+      ? await this.core.transition({ ...job, ...counts, prepared_commit: null }, 'working', 'tests')
+      // from: awaiting_review, ready_for_human_review (checkFix), needs_human (fromStop)
+      : await this.core.transition({ ...job, ...counts, fixes: job.fixes + 1, prepared_commit: null }, 'working', 'fix');
     this.session(job, workspace).send(factoryPrompt(this.withChange(`/implement ${TASK_DIR}/${ticket}.md Fix ${fix}`, ticket, change), ticket, job.iteration + 1, this.imagesLine(job)), DENIED_TOOLS);
     return { iteration: job.iteration + 1, check_after_minutes: this.core.config.checkAfterFixMin };
   }

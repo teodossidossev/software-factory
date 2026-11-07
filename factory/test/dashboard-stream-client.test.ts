@@ -376,6 +376,10 @@ test("stream client: the implement prompt's Task toggle shows the Task text and 
 
 // For every needs_human code: the job, its detail, the stop block's label, the sentence, what it
 // shows inline, and the composer's buttons in order.
+// The messages of the test step's stops (SF-128), as src/execution/mr-steps.ts writes them.
+const TESTS_FAILED_MESSAGE = "The workspace's tests still fail after 2 Tests Fix rounds: `npm test` (exit 1) on iteration 1. Accept the iteration without passing tests (sf accept), or tell the Implementer what to do (sf say).";
+const TESTS_UNAVAILABLE_MESSAGE = "bwrap is not installed.\nThe workspace's test command `npm test` could not run on iteration 1. Fix it on this machine and run sf retry, or accept the iteration without tests (sf accept).";
+
 const STOPS: Array<[string, Record<string, unknown>, Record<string, unknown>, 'Your decision' | 'Stopped', string, RegExp, string[]]> = [
   ['simplify_offered', { iteration: 1, stop: { items: [SUGGESTION], saves_lines: 3 } }, { iterations: [iteration(1, { review: CLEAN, simplify: SIMPLIFY })] }, 'Your decision',
     'The simplification pass suggests 1 change (saves about 3 lines). Simplify or skip.', /^#1src\/guard\.tsThe second guard\.Why: The first one covers it\.saves about 3 lines$/, ['Simplify', 'Skip', 'Send', 'Abort…']],
@@ -434,6 +438,14 @@ const STOPS: Array<[string, Record<string, unknown>, Record<string, unknown>, 'Y
     'The branch is prepared, but its worktree could not be removed: The first line. Remove it by hand, then tell the Implementer to go on.', /^\/wt\/T-1$/, ['Tell it to go on', 'Abort…']],
   ['mr_push_failed', { prepared_commit: 'b'.repeat(40), worktree: null }, {}, 'Stopped', 'The push of T-1-demo failed: The first line. Fix the cause, then push again.', /^The first line\.\nThe second line\.$/, ['Push again', 'Abort…']],
   ['mr_push_protected', {}, {}, 'Stopped', 'The factory never pushes to T-1-demo. Rename the branch on the Merge request screen, or abort.', /^$/, ['Abort…']],
+  ['tests_failed', { message: TESTS_FAILED_MESSAGE }, { iterations: [iteration(1, { review: CLEAN })] }, 'Your decision',
+    "The workspace's tests still fail after the Tests Fix rounds (exit 1). Accept the change without passing tests, or tell the Implementer what to do.", /^The workspace's tests still fail/, ['Accept and prepare MR', 'Send', 'Abort…']],
+  ['tests_failed', { message: TESTS_FAILED_MESSAGE.replace('(exit 1)', '(timed out after 30 min)') }, { iterations: [iteration(1, { review: CLAUDE_FIX })] }, 'Your decision',
+    "The workspace's tests still fail after the Tests Fix rounds (timed out after 30 min). Accept the change without passing tests, or tell the Implementer what to do.", /^The workspace's tests still fail/, ['Send', 'Abort…']],
+  ['tests_unavailable', { message: TESTS_UNAVAILABLE_MESSAGE }, { iterations: [iteration(1, { review: CLEAN })] }, 'Stopped',
+    "The workspace's tests could not run: bwrap is not installed. Fix it on this machine and Retry, or accept without tests.", /^bwrap is not installed\.\nThe workspace's test command/, ['Retry', 'Accept and prepare MR', 'Send', 'Abort…']],
+  ['tests_unavailable', { message: TESTS_UNAVAILABLE_MESSAGE, mr_conflict_turn: true }, {}, 'Stopped',
+    "The workspace's tests could not run: bwrap is not installed. Fix it on this machine and Retry, or accept without tests.", /^bwrap is not installed\./, ['Send', 'Abort…']],
   ['odd_code', {}, {}, 'Stopped', 'The job stopped: The first line. Tell the Implementer what to do, or abort.', /^The first line\.\nThe second line\.$/, ['Send', 'Abort…']],
 ];
 
@@ -469,6 +481,36 @@ test('stream client: the stop block of every needs_human code: its label (a deci
       assert.ok(page.$('list-you').all().every((element) => !element.classList.contains('err')), name);
     }
   }
+});
+
+test('stream client (SF-128): a test run is one entry, running and then its result joined by run, its output behind the toggle; an Accept shows on its own; the Accept confirmation names the command', async () => {
+  const run = at(20);
+  const started: Entry = { k: '0', ts: at(20), it: 1, who: 'factory', t: 'tests', run, command: 'npm test' };
+  const ended: Entry = { k: '1', ts: at(22), it: 1, who: 'factory', t: 'tests_result', run, command: 'npm test', outcome: 'failed', exit_code: 1, timed_out: false, ms: 120000, reason: null, tail: 'not ok 2', tail_truncated: true };
+  const row = stopped('tests_failed', { message: TESTS_FAILED_MESSAGE });
+  const page = await withEntries(row, detail(row, { iterations: [iteration(1, { review: CLEAN })] }), [started]);
+  const line = (k: string): string => entryOf(page, k).querySelector('.line')!.textContent;
+  assert.deepEqual([line('0'), entryOf(page, '0').className], ['Tests running', 'e e-tests who-factory']);
+  assert.equal(byClass(entryOf(page, '0'), 'mono')[0]!.textContent, 'npm test');
+  const live = page.streams.at(-1)!;
+  live.emit('entries', { line: 1, entries: [ended] });
+  assert.deepEqual([nodes(page).map((node) => node.dataset.k), line('0')], [['0'], 'Tests failed (exit 1) after 2 min']);
+  assert.equal(byClass(entryOf(page, '0'), 'more').length, 0);
+  entryOf(page, '0').querySelector('button.line')!.click();
+  assert.deepEqual(byClass(entryOf(page, '0'), 'more')[0]!.children.map((child) => child.textContent), ['Output, its last lines', 'not ok 2']);
+  // Other outcomes, and a result without its run (the Accept) as an entry of its own.
+  live.emit('entries', { line: 2, entries: [
+    { ...ended, k: '2', run: at(30), outcome: 'accepted_failing', tail: '' },
+    { ...ended, k: '3', run: at(31), outcome: 'unavailable', exit_code: 127, reason: 'the command was not found (exit 127)', tail: '' },
+    { ...ended, k: '4', run: at(32), outcome: 'passed', exit_code: 0, ms: 12_000, tail: '' },
+    { ...ended, k: '5', run: at(33), outcome: 'failed', exit_code: null, timed_out: true, ms: 1_800_000, tail: '' },
+  ] });
+  assert.deepEqual(['2', '3', '4', '5'].map(line), [
+    'Tests accepted by you without passing (exit 1)', 'Tests could not run (the command was not found (exit 127))', 'Tests passed after 12 s', 'Tests timed out after 30 min',
+  ]);
+  act(page, 'Accept and prepare MR').click();
+  assert.equal(page.$('confirm-text').textContent, 'Accepts iteration 1 without passing tests (`npm test`); the MR text records it under ### Checks.');
+  assert.equal(page.$('confirm-ok').textContent, 'Accept and prepare the MR');
 });
 
 test('stream client: the stop moves with the job: it is live only while the job waits and on its last needs_human entry; settled entries show their decision', async () => {

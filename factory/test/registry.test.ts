@@ -83,6 +83,22 @@ test('resolveWorkspace and editedEntry (SF-122): guard: true only when the entry
   assert.deepEqual(editedEntry({ read_checkout: '/srv/a', guard: true }, edit), { read_checkout: '/srv/b', guard: true });
 });
 
+test('parseRegistry, resolveWorkspace and editedEntry (SF-128): test_command is 1 to 2000 characters without NUL, exposed as testCommand; the Edit keeps it', async () => {
+  for (const command of ['npm test', 'x', 'c'.repeat(2000), 'cd factory && npm test\nnpm run lint']) {
+    assert.deepEqual(parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', test_command: command } } })).workspaces.app, { read_checkout: '/srv/app', test_command: command });
+  }
+  for (const command of ['', 'c'.repeat(2001), 'npm\0test', 1, true, null, ['npm', 'test']]) {
+    invalid(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', test_command: command } } }));
+  }
+  assert.throws(() => parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', test_command: '' } } })), /workspaces\.app\.test_command/);
+  const dir = join(temp, 'resolve-tests');
+  await saveRegistry({ workspaces: { with: { read_checkout: repo, test_command: 'npm test' }, without: { read_checkout: repo } } }, dir);
+  assert.deepEqual(await resolveWorkspace('with', dir), { name: 'with', readCheckout: repo, workCheckout: repo, testCommand: 'npm test' });
+  assert.deepEqual(await resolveWorkspace('without', dir), { name: 'without', readCheckout: repo, workCheckout: repo });
+  const edit = { read_checkout: '/srv/b', description: 'B', app: '', handoff: 'off', color: 'auto', digest: { track: false, my_work: false } } as const;
+  assert.deepEqual(editedEntry({ read_checkout: '/srv/a', test_command: 'npm test' }, edit), { read_checkout: '/srv/b', handoff: 'off', description: 'B', test_command: 'npm test' });
+});
+
 test('parseRegistry (SF-084): a workspace may set color to one of the palette names; anything else is refused', () => {
   assert.deepEqual([...WORKSPACE_COLORS], ['blue', 'teal', 'green', 'olive', 'orange', 'red', 'purple', 'grey']);
   for (const color of WORKSPACE_COLORS) {

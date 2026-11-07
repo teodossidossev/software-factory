@@ -11,6 +11,10 @@ import { REVIEWER, type ReviewItem } from '../review.js';
 import type { Launch } from '../runner.js';
 import { ImplementerSession } from '../session.js';
 import { TASK_DIR } from '../task-file.js';
+import { TESTS_UNAVAILABLE } from '../test-command.js';
+
+// The reviewer name of the run of a workspace's test command among the running reviews (SF-128).
+export const TESTS_RUNNER = 'tests';
 
 export const MAX_REPORT_BYTES = 64 * 1024;
 
@@ -72,7 +76,8 @@ export interface MrContent {
 // before the branch is prepared (SF-087): sf retry runs MR preparation again, without a new review.
 // Not after a conflict turn (mr_conflict_turn): its resolution is code no reviewer saw.
 // The guard's stops of MR preparation (SF-122) too: after a "!" line in guard-terms.txt, for example.
-export const MR_RETRY_CODES: readonly string[] = ['fetch_failed', 'mr_serve_restarted', 'mr_interrupted', 'mr_commit_failed', 'mr_rebase_failed', 'mr_failed', 'guard_hit', 'guard_terms_invalid', 'guard_failed'];
+// And a test command that could not run (SF-128): Retry runs it again.
+export const MR_RETRY_CODES: readonly string[] = ['fetch_failed', 'mr_serve_restarted', 'mr_interrupted', 'mr_commit_failed', 'mr_rebase_failed', 'mr_failed', 'guard_hit', 'guard_terms_invalid', 'guard_failed', TESTS_UNAVAILABLE];
 
 // A Save of the Merge request screen (SF-080): the title, the body and, when they change, the
 // branch and the base.
@@ -264,10 +269,11 @@ export interface Live {
   mr?: { targetRef: string; conflicts?: string[]; guardTurns?: number };
 }
 
-// A review in progress, Claude's, the gate's or the simplification pass (one at a time per job):
-// the iteration it reviews and what cancels it.
+// A review in progress, Claude's, the gate's or the simplification pass, or the run of the
+// workspace's test command (SF-128: tests), one at a time per job: the iteration it reviews and
+// what cancels it.
 export interface RunningReview {
-  reviewer: typeof REVIEWER | typeof GATE_REVIEWER | typeof SIMPLIFIER;
+  reviewer: typeof REVIEWER | typeof GATE_REVIEWER | typeof SIMPLIFIER | typeof TESTS_RUNNER;
   iteration: number;
   controller: AbortController;
 }

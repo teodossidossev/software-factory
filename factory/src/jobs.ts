@@ -2,7 +2,8 @@
 // iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-level.json,gate-override.json,simplify.json} (plus the
 // gate's schema and output files, and tree, SF-079), ledger.json (the findings ledger, SF-052) from
 // the first Fix section on, task.md (the Task file as the Implementer was last given it, SF-067),
-// from MR preparation on mr.md (and mr-factory.md once the user edited it, SF-080), and objects/ (SF-079). Strictly parsed; every file but the event
+// from MR preparation on mr.md (and mr-factory.md once the user edited it, SF-080), tests-<N>.json (a run of the
+// workspace's test command on iteration N, SF-128), and objects/ (SF-079). Strictly parsed; every file but the event
 // log is replaced atomically. Knows nothing about the Implementer session, nor about Git: tree and
 // objects/ are only named here, src/changes.ts writes them.
 import { appendFile, type FileHandle, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
@@ -14,6 +15,7 @@ import { GATE_LEVELS, type GateLevel } from './gate-level.js';
 import { type LedgerEntry, ledgerSchema } from './ledger.js';
 import type { ReviewItem } from './review.js';
 import type { Suggestion } from './simplify.js';
+import type { TestsOutcome, TestsRecord } from './test-command.js';
 
 export const JOB_STATES = [
   'starting',
@@ -74,6 +76,8 @@ export const JOB_ACTIONS = [
   'go_on',
   'verdict',
   'prepare_mr',
+  // The end of the run of the workspace's test command (SF-128): a Tests Fix, or a stop.
+  'tests',
   // The Retry's own stop when MR preparation fails again before it began (SF-087, #retryMr).
   'mr_retry',
   'ready',
@@ -125,6 +129,9 @@ export const JOB_TRANSITIONS: readonly JobTransition[] = Object.freeze([
   ...rows('go_on', ['needs_human'], ['awaiting_review']),
   ...rows('verdict', ['awaiting_review'], ['needs_human']),
   ...rows('prepare_mr', ['awaiting_review', 'needs_human'], ['preparing_mr']),
+  // The test step of MR preparation (SF-128): a failure is a Tests Fix (working), the bound or a
+  // run that could not happen a stop; a pass goes on in preparing_mr.
+  ...rows('tests', ['preparing_mr'], ['working', 'needs_human']),
   ...rows('mr_retry', ['needs_human'], ['needs_human']),
   ...rows('ready', ['preparing_mr'], ['needs_human', 'ready_for_human_review', 'handed_over']),
   ...rows('hand_over', ['ready_for_human_review'], ['needs_human', 'handed_over']),
@@ -491,6 +498,10 @@ export type EventRecord = { ts: string; iteration: number } & (
   // and base the save set, when it changed them), or a new Clean wrote a new factory text and kept
   // the user's.
   | { type: 'mr_edited'; action: 'saved' | 'reset' | 'factory_new'; branch?: string; base?: string }
+  // The workspace's test command (SF-128): a run started (run: its started_at), and how it ended or
+  // the user's Accept of it (accepted_failing), with the last lines of its output (tail).
+  | { type: 'tests_started'; run: string; command: string }
+  | { type: 'tests'; run: string; command: string; outcome: TestsOutcome; exit_code: number | null; timed_out: boolean; duration_ms: number; reason?: string; tail: string; tail_truncated?: true }
 );
 
 // The bound of one reviewer event or message in events.jsonl (SF-045), in bytes of its JSON.
@@ -868,6 +879,40 @@ export class JobStore {
   // Written once per iteration, at its clean Claude verdict; parsed with the schema first.
   async writeGateLevel(workspace: string, ticket: string, number: number, record: GateLevelRecord): Promise<void> {
     await writeFileAtomic(join(this.iterationDir(workspace, ticket, number), 'gate-level.json'), Buffer.from(`${JSON.stringify(gateLevelSchema.parse(record), null, 2)}\n`));
+  }
+
+  // The run of the workspace's test command on an iteration (SF-128): tests-<N>.json of the job
+  // directory, replaced by a later run of the same iteration (Retry) and by the user's Accept.
+  async writeTests(workspace: string, ticket: string, number: number, record: TestsRecord): Promise<void> {
+    await writeFileAtomic(join(this.dir(workspace, ticket), `tests-${number}.json`), Buffer.from(`${JSON.stringify(record, null, 2)}\n`));
+  }
+
+  // undefined when no run ended on the iteration.
+  async readTests(workspace: string, ticket: string, number: number): Promise<TestsRecord | undefined> {
+    const text = await readOrMissing(join(this.dir(workspace, ticket), `tests-${number}.json`));
+    return text === undefined ? undefined : (JSON.parse(text) as TestsRecord);
+  }
+
+  // The job's tests-<N>.json records whose outcome is failed (SF-128: the bound of the Tests Fix
+  // rounds). A record that cannot be read or parsed counts as failed.
+  async failedTests(workspace: string, ticket: string): Promise<number> {
+    let names: string[];
+    try {
+      names = (await readdir(this.dir(workspace, ticket))).filter((name) => /^tests-\d+\.json$/.test(name));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return 0;
+      }
+      throw error;
+    }
+    let failed = 0;
+    for (const name of names) {
+      const outcome = await readFile(join(this.dir(workspace, ticket), name), 'utf8').then((text) => (JSON.parse(text) as { outcome?: unknown }).outcome, () => 'failed');
+      if (outcome === 'failed') {
+        failed += 1;
+      }
+    }
+    return failed;
   }
 
   // The gate's review of an iteration; undefined while none ended (or with the gate off).

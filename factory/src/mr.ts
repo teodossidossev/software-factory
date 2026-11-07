@@ -231,14 +231,26 @@ export function withSimplifications(text: string, suggestions: Suggestion[], ite
   return withSubsection(text, SIMPLIFY_HEADING, suggestions.map((item) => `- ${suggestionLine(item)}`), (rest) => `- … and ${rest} more: see simplify.json of iteration ${iteration}.`);
 }
 
-// The MR text with a subsection the factory writes (heading) at the end of `## Special things
-// to note`, one line per entry, replacing any such subsection already there (the model's, or an
-// earlier preparation's). A lone `- None.` there goes. Without entries only the old subsection
-// goes; without either the text stays as it is. The list is cut, with a closing line (more) that
-// counts the rest, so the text stays within MAX_MR_TEXT_BYTES.
-function withSubsection(text: string, heading: string, entries: string[], more: (rest: number) => string): string {
+// The factory's subsection of the workspace's test command (SF-128), and the section it ends.
+export const CHECKS_HEADING = '### Checks';
+const TESTING_HEADING = '## Testing';
+
+// The MR text with the factory's ### Checks subsection at the end of `## Testing` (SF-128): the
+// line of the workspace's test command on the iteration the MR is prepared from, replacing any
+// ### Checks already there (an earlier preparation's, the model's or the user's own).
+export function withChecks(text: string, line: string, iteration: number): string {
+  return withSubsection(text, CHECKS_HEADING, [line], () => `- See tests-${iteration}.json of the job.`, TESTING_HEADING, false);
+}
+
+// The MR text with a subsection the factory writes (heading) at the end of a section (parent,
+// `## Special things to note` by default), one line per entry, replacing any such subsection
+// already there (the model's, or an earlier preparation's). A lone `- None.` there goes (when
+// dropNone). Without entries only the old subsection goes; without either the text stays as it is.
+// The list is cut, with a closing line (more) that counts the rest, so the text stays within
+// MAX_MR_TEXT_BYTES.
+function withSubsection(text: string, heading: string, entries: string[], more: (rest: number) => string, parent = SPECIAL_HEADING, dropNone = true): string {
   const lines = text.split('\n');
-  const special = sectionRange(lines, SPECIAL_HEADING, 0, lines.length, /^#{1,2} /u);
+  const special = sectionRange(lines, parent, 0, lines.length, /^#{1,2} /u);
   if (special === undefined) {
     return text;
   }
@@ -258,7 +270,7 @@ function withSubsection(text: string, heading: string, entries: string[], more: 
     return build(special.end < lines.length ? [...body, ''] : body);
   }
   const content = body.filter((line) => line.trim() !== '');
-  if (content.length === 1 && /^\s*[-*]\s+None\.?\s*$/iu.test(content[0]!)) {
+  if (dropNone && content.length === 1 && /^\s*[-*]\s+None\.?\s*$/iu.test(content[0]!)) {
     body = body.filter((line) => line.trim() === '');
   }
   const lead = body.some((line) => line.trim() !== '') ? [...body, ''] : body;

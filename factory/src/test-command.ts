@@ -1,0 +1,406 @@
+// The workspace's test command (SF-128): run by the factory itself before a job is ready, as the
+// first step of MR preparation, on the reviewed worktree. The command is Implementer-written code
+// to the factory, so it never runs outside a bubblewrap (bwrap) sandbox the factory builds: the
+// whole file system read-only, the paths of the job's path denials (src/sandbox-denials.ts)
+// hidden, only the worktree and a private /tmp writable, no network but loopback, an environment of
+// PATH, LANG, CI, HOME, TMPDIR and npm_config_cache only. The private /tmp of each run is a tmpfs
+// of the sandbox's own mount namespace, never a directory of the host: it goes with the sandbox, so
+// a runner killed mid-run leaves nothing to clean. The sandbox dies with its parent
+// (--die-with-parent, --unshare-pid), and a timeout or an abort kills its process group. Also the
+// run's record (tests-<N>.json), the Fix section of a failure and the MR text's ### Checks lines.
+// This module knows processes and text; it knows nothing about jobs.
+import { spawn } from 'node:child_process';
+import { realpath, stat } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join, relative, isAbsolute, sep } from 'node:path';
+
+// The Tests Fix sections a job gets at most: once more records of the job say failed, the job stops
+// (tests_failed).
+export const TEST_FIX_ROUNDS = 2;
+
+// The output a record keeps: its last 64 KiB.
+export const MAX_TESTS_OUTPUT_BYTES = 64 * 1024;
+
+// What a Fix section quotes of the output: its last 150 lines, at most 12 KiB.
+export const FIX_TAIL_LINES = 150;
+export const FIX_TAIL_BYTES = 12 * 1024;
+
+// What a tests event carries of the output for the Stream: its last 40 lines, at most 4 KiB.
+export const EVENT_TAIL_LINES = 40;
+export const EVENT_TAIL_BYTES = 4 * 1024;
+
+// The longest test_command of workspaces.json.
+export const MAX_TEST_COMMAND_CHARS = 2000;
+
+// The stop codes of the test step: the tests failed after the Tests Fix rounds, or could not run.
+export const TESTS_FAILED = 'tests_failed';
+export const TESTS_UNAVAILABLE = 'tests_unavailable';
+export const TEST_CODES: readonly string[] = [TESTS_FAILED, TESTS_UNAVAILABLE];
+
+// The exit codes of a shell that could not run the command (not executable, not found).
+const UNAVAILABLE_EXITS = [126, 127];
+
+// How a run ended: passed, failed (an exit other than 0, 126 and 127, or the timeout), unavailable
+// (it could not run), or accepted_failing (the user accepted it without passing tests).
+export const TESTS_OUTCOMES = ['passed', 'failed', 'unavailable', 'accepted_failing'] as const;
+export type TestsOutcome = (typeof TESTS_OUTCOMES)[number];
+
+// One run of the test command (tests-<N>.json of the job, N the iteration it ran on).
+export interface TestsRecord {
+  command: string;
+  started_at: string;
+  ended_at: string;
+  duration_ms: number;
+  // null after a timeout or when the sandbox never ran the command.
+  exit_code: number | null;
+  timed_out: boolean;
+  outcome: TestsOutcome;
+  // unavailable: why the command could not run.
+  reason?: string;
+  // The last MAX_TESTS_OUTPUT_BYTES of stdout and stderr together, as they came.
+  output: string;
+  output_truncated: boolean;
+  // accepted_failing: when the user accepted, and what the run's outcome was.
+  accepted_at?: string;
+  accepted_from?: 'failed' | 'unavailable';
+}
+
+// What a run returns: its record, or aborted (the controller's abort; nothing of it applies).
+export type TestsResult = { aborted: false; record: TestsRecord } | { aborted: true };
+
+// A hidden path as the sandbox mounts it: an empty read-only directory, or /dev/null for a file.
+export interface HiddenMount {
+  path: string;
+  directory: boolean;
+}
+
+// The fields of a record a run decides; the command and the times are runTestCommand's.
+type Ending = Pick<TestsRecord, 'exit_code' | 'timed_out' | 'outcome'> & { reason?: string; output?: string; output_truncated?: boolean };
+
+// One run of runTestCommand: the command, where, what is hidden, how long, and what cancels it.
+export interface TestRun {
+  command: string;
+  // The worktree: the command's working directory, writable.
+  cwd: string;
+  // The paths hidden in the sandbox (the job's path denials, read and write): directories as an
+  // empty read-only directory, files as /dev/null.
+  hidden: readonly string[];
+  timeoutMs: number;
+  signal: AbortSignal;
+  // The environment the PATH, LANG and HOME come from (default: process.env).
+  env?: NodeJS.ProcessEnv;
+}
+
+// The sandbox's shell: tells the runner on fd 3 that the sandbox started, closes fd 3, then runs
+// the command ($1) in a shell of its own.
+const START_SCRIPT = 'printf started >&3; exec 3>&-; exec /bin/sh -c "$1"';
+
+// Whether path is inside dir or dir itself (both absolute, resolved).
+function within(path: string, dir: string): boolean {
+  const inside = relative(dir, path);
+  return inside === '' || (inside !== '..' && !inside.startsWith(`..${sep}`) && !isAbsolute(inside));
+}
+
+// The hidden paths as the sandbox mounts them: each by its real path, once, without the paths inside
+// a hidden directory (the empty directory over it already hides them), none that is or holds the
+// worktree; directories marked. A path that is gone is left out.
+export async function hiddenMounts(paths: readonly string[], cwd: string): Promise<HiddenMount[]> {
+  const found: HiddenMount[] = [];
+  for (const path of paths) {
+    const real = await realpath(path).catch(() => undefined);
+    const info = real === undefined ? undefined : await stat(real).catch(() => undefined);
+    if (real !== undefined && info !== undefined && !found.some((entry) => entry.path === real) && !within(cwd, real)) {
+      found.push({ path: real, directory: info.isDirectory() });
+    }
+  }
+  found.sort((a, b) => a.path.length - b.path.length);
+  const kept: HiddenMount[] = [];
+  for (const entry of found) {
+    if (!kept.some((outer) => outer.directory && within(entry.path, outer.path))) {
+      kept.push(entry);
+    }
+  }
+  return kept;
+}
+
+// The runtime directories hidden in every run, whatever the path denials say: their Unix sockets
+// (the user's D-Bus and systemd manager, the SSH and keyring agents, Docker) would reach past the
+// sandbox, since a read-only mount does not refuse a connect() and the network namespace covers
+// only abstract sockets. /var/run is a link to /run.
+const RUNTIME_DIRS = ['/run'];
+
+// The bwrap arguments of a run: the root read-only, a fresh /dev and /proc, a fresh tmpfs at /tmp
+// (the run's private /tmp, in the sandbox's memory: it ends with the sandbox, however the runner
+// ends) and the worktree writable, then the runtime directories and the hidden paths over them all
+// (a denied path inside the worktree stays hidden), then the start script with the command.
+export function bwrapArgs(options: { command: string; cwd: string; hidden: readonly HiddenMount[] }): string[] {
+  const args = ['--die-with-parent', '--unshare-pid', '--unshare-net', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc'];
+  args.push('--tmpfs', '/tmp', '--bind', options.cwd, options.cwd);
+  for (const entry of options.hidden) {
+    args.push(...(entry.directory ? ['--tmpfs', entry.path, '--remount-ro', entry.path] : ['--ro-bind', '/dev/null', entry.path]));
+  }
+  args.push('--chdir', options.cwd);
+  return [...args, '--', '/bin/sh', '-c', START_SCRIPT, 'sh', options.command];
+}
+
+// The only environment of a run: PATH and LANG as the factory has them, CI, the real HOME (read-only
+// in the sandbox) and the private /tmp for TMPDIR and npm's cache. No SF_* variable, no value of
+// the env file.
+export function testEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return {
+    PATH: env.PATH || '/usr/local/bin:/usr/bin:/bin',
+    LANG: env.LANG || 'C.UTF-8',
+    CI: '1',
+    HOME: env.HOME || homedir(),
+    TMPDIR: '/tmp',
+    npm_config_cache: '/tmp/npm-cache',
+  };
+}
+
+// The last bytes of the output, kept as it comes.
+class Tail {
+  readonly #limit: number;
+  #chunks: Buffer[] = [];
+  #bytes = 0;
+  truncated = false;
+
+  constructor(limit: number) {
+    this.#limit = limit;
+  }
+
+  push(chunk: Buffer): void {
+    this.#chunks.push(chunk);
+    this.#bytes += chunk.length;
+    while (this.#bytes - this.#chunks[0]!.length >= this.#limit) {
+      this.#bytes -= this.#chunks.shift()!.length;
+      this.truncated = true;
+    }
+  }
+
+  text(): string {
+    const all = Buffer.concat(this.#chunks);
+    const cut = all.length > this.#limit;
+    this.truncated ||= cut;
+    return cleanOutput((cut ? all.subarray(all.length - this.#limit) : all).toString('utf8'));
+  }
+}
+
+// Output as text the records, the Task file and the Stream can hold: no NUL, no ANSI escape
+// sequences, LF line ends.
+function cleanOutput(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/gu, '').replace(/\r\n?/gu, '\n').replace(/\0/gu, '');
+}
+
+// The last line of the sandbox's own error output (bwrap: …), on one line, at most 300 characters.
+function sandboxError(stderr: string): string | undefined {
+  const line = stderr.split('\n').map((entry) => entry.trim()).filter((entry) => entry !== '').at(-1);
+  return line === undefined ? undefined : line.slice(0, 300);
+}
+
+// Runs the command once in the sandbox. Never throws: bwrap missing, a sandbox that does not start or
+// a spawn error is unavailable, and so is exit 126 or 127; exit 0 passed; any other exit or the
+// timeout failed. The controller's abort kills the run and returns aborted.
+export async function runTestCommand(run: TestRun): Promise<TestsResult> {
+  const startedAt = new Date();
+  const finish = (fields: Ending): TestsResult => {
+    const ended = new Date();
+    return {
+      aborted: false,
+      record: {
+        command: run.command, started_at: startedAt.toISOString(), ended_at: ended.toISOString(), duration_ms: ended.getTime() - startedAt.getTime(),
+        exit_code: fields.exit_code, timed_out: fields.timed_out, outcome: fields.outcome, ...(fields.reason !== undefined ? { reason: fields.reason } : {}),
+        output: fields.output ?? '', output_truncated: fields.output_truncated ?? false,
+      },
+    };
+  };
+  if (run.signal.aborted) {
+    return { aborted: true };
+  }
+  let cwd: string;
+  let hidden: HiddenMount[];
+  try {
+    cwd = await realpath(run.cwd);
+    hidden = await hiddenMounts([...RUNTIME_DIRS, ...run.hidden], cwd);
+  } catch (error) {
+    return finish({ exit_code: null, timed_out: false, outcome: 'unavailable', reason: `the sandbox could not be prepared: ${(error as Error).message}`.slice(0, 300) });
+  }
+  return sandboxed(run, cwd, hidden, finish);
+}
+
+// The run in bwrap itself, with the worktree and the hidden paths prepared; finish makes the record
+// of how it ended.
+async function sandboxed(run: TestRun, cwd: string, hidden: readonly HiddenMount[], finish: (fields: Ending) => TestsResult): Promise<TestsResult> {
+  const output = new Tail(MAX_TESTS_OUTPUT_BYTES);
+  let stderr = '';
+  let started = false;
+  let timedOut = false;
+  let aborted = false;
+  const ended = await new Promise<{ code: number | null; signal: NodeJS.Signals | null } | { spawnError: Error }>((resolve) => {
+    // Detached: the run's process group is the sandbox's, killed whole. The environment is the
+    // sandbox's, so nothing else of the factory's reaches bwrap or the command.
+    const child = spawn('bwrap', bwrapArgs({ command: run.command, cwd, hidden }), {
+      cwd, env: testEnvironment(run.env), stdio: ['ignore', 'pipe', 'pipe', 'pipe'], detached: true,
+    });
+    const killGroup = (): void => {
+      if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) {
+        return;
+      }
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        // Already gone.
+      }
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killGroup();
+    }, run.timeoutMs);
+    const onAbort = (): void => {
+      aborted = true;
+      killGroup();
+    };
+    run.signal.addEventListener('abort', onAbort, { once: true });
+    // An abort while the sandbox was being prepared fired before the listener.
+    if (run.signal.aborted) {
+      onAbort();
+    }
+    // The runner does not leave a run behind it (--die-with-parent covers a runner that is killed).
+    process.once('exit', killGroup);
+    child.stdout!.on('data', (chunk: Buffer) => output.push(chunk));
+    child.stderr!.on('data', (chunk: Buffer) => {
+      output.push(chunk);
+      if (!started && stderr.length < 4096) {
+        stderr += chunk.toString('utf8');
+      }
+    });
+    (child.stdio[3] as NodeJS.ReadableStream).on('data', () => {
+      started = true;
+    });
+    const done = (value: { code: number | null; signal: NodeJS.Signals | null } | { spawnError: Error }): void => {
+      clearTimeout(timer);
+      run.signal.removeEventListener('abort', onAbort);
+      process.off('exit', killGroup);
+      resolve(value);
+    };
+    child.once('error', (error) => done({ spawnError: error }));
+    child.once('close', (code, signal) => done({ code, signal }));
+  });
+  if (aborted) {
+    return { aborted: true };
+  }
+  const tail = { output: output.text(), output_truncated: output.truncated };
+  if ('spawnError' in ended) {
+    const missing = (ended.spawnError as NodeJS.ErrnoException).code === 'ENOENT';
+    return finish({ exit_code: null, timed_out: false, outcome: 'unavailable', reason: missing ? 'bwrap is not installed' : `bwrap could not be started: ${ended.spawnError.message}`.slice(0, 300), ...tail });
+  }
+  if (timedOut) {
+    return finish({ exit_code: null, timed_out: true, outcome: 'failed', ...tail });
+  }
+  if (!started) {
+    const said = sandboxError(cleanOutput(stderr));
+    return finish({ exit_code: ended.code, timed_out: false, outcome: 'unavailable', reason: `the sandbox did not start${said !== undefined ? `: ${said}` : ended.code !== null ? ` (exit ${ended.code})` : ''}`, ...tail });
+  }
+  if (ended.code === 0) {
+    return finish({ exit_code: 0, timed_out: false, outcome: 'passed', ...tail });
+  }
+  if (ended.code !== null && UNAVAILABLE_EXITS.includes(ended.code)) {
+    const reason = ended.code === 127 ? 'the command was not found (exit 127)' : 'the command could not be executed (exit 126)';
+    return finish({ exit_code: ended.code, timed_out: false, outcome: 'unavailable', reason, ...tail });
+  }
+  return finish({ exit_code: ended.code, timed_out: false, outcome: 'failed', ...tail });
+}
+
+// A duration in words: "12 s", "4 min 12 s", "2 min", "1 h 5 min".
+export function durationText(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) {
+    return `${seconds} s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return seconds % 60 === 0 ? `${minutes} min` : `${minutes} min ${seconds % 60} s`;
+  }
+  const hours = Math.floor(minutes / 60);
+  return minutes % 60 === 0 ? `${hours} h` : `${hours} h ${minutes % 60} min`;
+}
+
+// How a failed run ended: "exit 1", or "timed out after 30 min".
+export function failureText(record: Pick<TestsRecord, 'exit_code' | 'timed_out' | 'duration_ms'>): string {
+  return record.timed_out ? `timed out after ${durationText(record.duration_ms)}` : `exit ${record.exit_code ?? '?'}`;
+}
+
+// The last lines of a text, at most lines lines and bytes bytes (whole lines; the last line cut from
+// its start when it alone is longer).
+export function lastLines(text: string, lines: number, bytes: number): string {
+  const all = text.replace(/\n+$/u, '').split('\n');
+  const kept: string[] = [];
+  let size = 0;
+  for (let index = all.length - 1; index >= 0 && kept.length < lines; index -= 1) {
+    const line = all[index]!;
+    const length = Buffer.byteLength(line, 'utf8') + 1;
+    if (size + length > bytes) {
+      if (kept.length === 0) {
+        kept.unshift(Buffer.from(line, 'utf8').subarray(-(bytes - 1)).toString('utf8').replace(/^�+/u, ''));
+      }
+      break;
+    }
+    kept.unshift(line);
+    size += length;
+  }
+  return kept.join('\n');
+}
+
+// The longest run of backticks in text.
+const longestTicks = (text: string): number => Math.max(0, ...[...text.matchAll(/`+/gu)].map((match) => match[0].length));
+
+// A fence for text: one backtick more than its longest run of backticks, at least three.
+function fence(text: string): string {
+  return '`'.repeat(Math.max(3, longestTicks(text) + 1));
+}
+
+// A command as inline code on one line: its lines joined with " ", in enough backticks.
+export function inlineCommand(command: string): string {
+  const line = command.split(/\r?\n/u).map((part) => part.trim()).filter((part) => part !== '').join(' ');
+  const ticks = '`'.repeat(longestTicks(line) + 1);
+  const pad = line.startsWith('`') || line.endsWith('`') ? ' ' : '';
+  return `${ticks}${pad}${line}${pad}${ticks}`;
+}
+
+// The Fix section of a failed run (titled Tests): the command, how it ended and the output's last
+// lines in a fence.
+export function testsFixContent(record: TestsRecord): string {
+  const tail = lastLines(record.output, FIX_TAIL_LINES, FIX_TAIL_BYTES);
+  const ending = record.timed_out
+    ? `It timed out after ${durationText(record.duration_ms)} and was stopped.`
+    : `It exited with ${record.exit_code ?? '?'}.`;
+  const lines = [
+    `The factory ran the workspace's test command on your worktree, in a sandbox without network, and it failed: ${inlineCommand(record.command)}. ${ending} Make the tests pass; do not weaken or skip a test to get there.`,
+    '',
+  ];
+  if (tail === '') {
+    lines.push('The command wrote no output.');
+  } else {
+    const marks = fence(tail);
+    lines.push(`The last lines of its output${record.output_truncated || tail !== record.output.replace(/\n+$/u, '') ? '' : ' (all of it)'}:`, '', `${marks}text`, tail, marks);
+  }
+  return lines.join('\n');
+}
+
+// The ### Checks line of the MR text for the record of the iteration the MR is prepared from.
+export function checksLine(record: TestsRecord, iteration: number): string {
+  const command = inlineCommand(record.command);
+  if (record.outcome === 'passed') {
+    return `- ${command}: passed in ${durationText(record.duration_ms)} on iteration ${iteration}.`;
+  }
+  if (record.outcome === 'accepted_failing' && record.accepted_from === 'unavailable') {
+    return `- ${command}: could not run (${record.reason ?? 'unknown reason'}); accepted by the user without tests.`;
+  }
+  if (record.outcome === 'accepted_failing') {
+    return `- ${command}: failed (${failureText(record)}); accepted by the user without passing tests.`;
+  }
+  if (record.outcome === 'unavailable') {
+    return `- ${command}: could not run (${record.reason ?? 'unknown reason'}).`;
+  }
+  return `- ${command}: failed (${failureText(record)}).`;
+}

@@ -452,6 +452,18 @@ test('ledgerStopEntries (SF-131): at iteration_limit the open blocker and major 
   assert.equal(ledgerStopEntries('gate_rounds', ledger), null);
 });
 
+test('stopAnswers (SF-128): tests_failed offers Accept with a clean review; tests_unavailable Retry first, then Accept; both Send a message and Abort', () => {
+  const accept = ['Accept and prepare MR', 'sf accept app T-1'];
+  const retry = ['Retry', 'sf retry app T-1'];
+  assert.deepEqual(commands(stopped('tests_failed'), { review: CLEAN_REVIEW }), [accept, ...ALWAYS]);
+  assert.deepEqual(commands(stopped('tests_failed'), { review: FIX_REVIEW }), ALWAYS);
+  assert.deepEqual(commands(stopped('tests_unavailable'), { review: CLEAN_REVIEW }), [retry, accept, ...ALWAYS]);
+  assert.deepEqual(commands(stopped('tests_unavailable')), [retry, ...ALWAYS]);
+  assert.deepEqual(commands(stopped('tests_unavailable', { mr_conflict_turn: true }), { review: CLEAN_REVIEW }), [accept, ...ALWAYS]);
+  // Without the Claude review (SF-131) Accept needs no review.
+  assert.deepEqual(commands(stopped('tests_failed', { claude_review: false })), [accept, ...ALWAYS]);
+});
+
 // ---------- The cap ----------
 
 test('the cap: an input over the limit loses the user\'s messages first (oldest first), then the Report from the end, then expected; never the stop message or the answers; too long alone: null', () => {

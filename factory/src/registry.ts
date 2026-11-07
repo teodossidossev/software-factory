@@ -10,7 +10,8 @@
 // time, weekdays only, model and language). Since SF-106 the registry has an optional top-level
 // `explain` (the plain explanation of each stop: on, model and language). Since SF-122 a workspace has
 // an optional `guard` (src/guard.ts: its pushes and MR texts are checked for the names of the
-// user's other workspaces; absent: false).
+// user's other workspaces; absent: false). Since SF-128 a workspace has an optional `test_command`
+// (src/test-command.ts: the factory runs it in a sandbox before a job is ready; absent: no run).
 import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -18,10 +19,18 @@ import * as z from 'zod/v4';
 import { writeFileAtomic } from './atomic.js';
 import { FactoryError } from './errors.js';
 import { gitToplevel } from './git.js';
+import { MAX_TEST_COMMAND_CHARS } from './test-command.js';
 
 export const WORKSPACE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 export const WORKSPACE_NAME_DESCRIPTION = '1-64 characters of a-z, 0-9 and "-", starting and ending with a letter or digit';
 const REGISTRY_FILE = 'workspaces.json';
+
+// The workspace's test command (SF-128): 1 to MAX_TEST_COMMAND_CHARS characters, no NUL.
+const testCommand = z
+  .string()
+  .min(1)
+  .max(MAX_TEST_COMMAND_CHARS)
+  .refine((value) => !value.includes('\0'), 'must be a command without NUL');
 
 const absolutePath = z
   .string()
@@ -97,6 +106,7 @@ const registrySchema = z.strictObject({
       app: z.string().trim().min(1).max(MAX_APP_CHARS).optional(),
       digest: workspaceDigestSchema.optional(),
       guard: z.boolean().optional(),
+      test_command: testCommand.optional(),
     }),
   ),
   digest: digestSettingsSchema.optional(),
@@ -142,8 +152,8 @@ export function workspaceApp(name: string, entry: WorkspaceEntry): string {
 }
 
 // What the Setup's Edit replaces (SF-103); "" removes description and app, 'default' the handoff
-// key, 'auto' the color key, and digest with both false the digest key. work_checkout and
-// rules_skip stay as they are.
+// key, 'auto' the color key, and digest with both false the digest key. work_checkout, rules_skip,
+// guard and test_command stay as they are.
 export interface WorkspaceEdit {
   read_checkout: string;
   description: string;
@@ -192,6 +202,8 @@ export interface Workspace {
   rulesSkip?: string[];
   // "guard": true in workspaces.json (SF-122); absent otherwise.
   guard?: boolean;
+  // The workspace's test_command (SF-128); absent: no test run before a job is ready.
+  testCommand?: string;
 }
 
 // The entries whose ignored work_checkout differs from the checkout, for one warning at start.
@@ -267,6 +279,7 @@ export async function resolveWorkspace(name: string, dir = configDir()): Promise
       name, readCheckout: checkout, workCheckout: checkout, ...(entry.handoff !== undefined ? { handoff: entry.handoff } : {}),
       ...(entry.rules_skip !== undefined ? { rulesSkip: entry.rules_skip } : {}),
       ...(entry.guard === true ? { guard: true } : {}),
+      ...(entry.test_command !== undefined ? { testCommand: entry.test_command } : {}),
     };
   } catch (error) {
     if (error instanceof FactoryError) {

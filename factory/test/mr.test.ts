@@ -11,7 +11,7 @@ import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { sandboxSettings } from '../src/config.js';
-import { commitAndRebase, commitPaths, continueRebase, filesWithMarkers, gitFailure, MAX_MR_TEXT_BYTES, mergeRequestLink, mrMessage, mrTextProblem, pushBranch, pushProtection, rebaseInProgress, submodulePaths, withNits } from '../src/mr.js';
+import { commitAndRebase, commitPaths, continueRebase, filesWithMarkers, gitFailure, MAX_MR_TEXT_BYTES, mergeRequestLink, mrMessage, mrTextProblem, pushBranch, pushProtection, rebaseInProgress, submodulePaths, withChecks, withNits } from '../src/mr.js';
 import { conflictPrompt, FACTORY_PROMPT_RULES, handbookSection, mrPrompt } from '../src/prompts.js';
 import { COMMIT_TYPES, commitHeader, DENIED_TOOLS, headerProblem, testingProblem } from '../src/rules.js';
 import type { ReviewItem } from '../src/review.js';
@@ -96,6 +96,21 @@ test('mergeRequestLink derives GitHub and GitLab pages from https and ssh origin
   for (const unparseable of ['/tmp/origin.git', 'file:///tmp/origin.git', '../origin', 'https://github.com/', 'C:\\repos\\app']) {
     assert.equal(mergeRequestLink(unparseable, 'main', 'T-1-x'), undefined, unparseable);
   }
+});
+
+test('withChecks puts the factory\'s ### Checks line at the end of ## Testing, replacing any ### Checks there; a lone "- None." stays (SF-128)', () => {
+  const text = (testing: string[]): string => ['feat(T-1): Change', '', '## Special things to note', '- None.', '## Testing', ...testing, '## Screenshots', 'N/A', ''].join('\n');
+  const line = '- `npm test`: passed in 4 min 12 s on iteration 2.';
+  assert.equal(withChecks(text(['npm run lint: passed', '']), line, 2), text(['npm run lint: passed', '', '### Checks', line, '']));
+  assert.equal(withChecks(text(['- None.']), line, 2), text(['- None.', '', '### Checks', line, '']));
+  // An earlier preparation's (or the user's own) ### Checks is replaced, the rest of ## Testing stays.
+  const earlier = text(['- Unit tests.', '', '### Checks', '- `npm test`: passed in 1 s on iteration 1.', '- an extra claim', '']);
+  assert.equal(withChecks(earlier, line, 2), text(['- Unit tests.', '', '### Checks', line, '']));
+  // The last section of the text.
+  assert.equal(withChecks('t\n\n## Testing\n- Unit tests.\n', line, 2), ['t', '', '## Testing', '- Unit tests.', '', '### Checks', line].join('\n'));
+  // Without ## Testing the text stays as it is.
+  assert.equal(withChecks('t\n\n## What\nx\n', line, 2), 't\n\n## What\nx\n');
+  assert.equal(mrTextProblem('T-1', withChecks(VALID_MR_TEXT, line, 2)), undefined);
 });
 
 test('withNits puts the factory\'s ### Nits not applied list at the end of ## Special things to note, replacing any there (SF-051)', () => {

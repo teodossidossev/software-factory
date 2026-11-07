@@ -6,14 +6,14 @@ import { createReadStream } from 'node:fs';
 import { type FileHandle, realpath } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { resolve as resolvePath } from 'node:path';
-import { envFilePath, handoffOffNotice } from '../config.js';
+import { DEFAULT_TEST_TIMEOUT_MS, envFilePath, handoffOffNotice } from '../config.js';
 import { FactoryError } from '../errors.js';
 import { chooseForge, type Forge, type ForgeKind, forgeFor, type MergeRequestStatus } from '../forge.js';
 import { runGit } from '../git.js';
 import { checkTerms, commitsToCheck, GUARD_MAX_FIXES, GUARD_MAX_MR_TURNS, guardFixContent, guardFixCount, guardMessage, type GuardHit, type GuardTerm, maskedMrTextFailure, maskedMrTextProblem, maskTerms, MAX_GUARD_MESSAGE, redactAdded, scanBranch, scanChange, scanCommits, scanMrText, worktreeTree } from '../guard.js';
 import { checkBranchFree, isAncestor, savedRef, settleAfterPush, subjectOf } from '../handoff.js';
-import { claudeReviews, type Job, type JobMr, type JobState, now } from '../jobs.js';
-import { abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitFailure, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl, parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, validBranchName, withAccepted, withFindings, withNits, withSimplifications, worktreesOn } from '../mr.js';
+import { claudeReviews, type EventRecord, type Job, type JobMr, type JobState, now } from '../jobs.js';
+import { abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitFailure, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl, parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, validBranchName, withAccepted, withChecks, withFindings, withNits, withSimplifications, worktreesOn } from '../mr.js';
 import { type LedgerEntry, notFixed } from '../ledger.js';
 import { buildPatch, notificationLine } from '../patch.js';
 import { conflictPrompt, mrPrompt } from '../prompts.js';
@@ -21,9 +21,11 @@ import { COMMIT_TYPES, DENIED_TOOLS, MANUAL_CLAIM, MAX_HEADER_CHARS, MR_REQUIRED
 import { configDir, type Workspace } from '../registry.js';
 import { actedVerdict, type ReviewItem, uniqueNits } from '../review.js';
 import type { IdleOutcome } from '../session.js';
+import { pathDenials } from '../sandbox-denials.js';
 import { readTask } from '../task-file.js';
+import { checksLine, EVENT_TAIL_BYTES, EVENT_TAIL_LINES, failureText, inlineCommand, lastLines, runTestCommand, TEST_CODES, TEST_FIX_ROUNDS, testsFixContent, TESTS_FAILED, type TestsRecord, type TestsResult, TESTS_UNAVAILABLE } from '../test-command.js';
 import { removeWorktree } from '../worktree.js';
-import { cutOffError, exists, type Live, markedGroups, MR_RETRY_CODES, type MrContent, mrFailure, type MrInput, type MrOutcome, type MrSaved, type MrView, withoutDropped } from './shared.js';
+import { cutOffError, exists, type Live, markedGroups, MR_RETRY_CODES, type MrContent, mrFailure, type MrInput, type MrOutcome, type MrSaved, type MrView, type RunningReview, TESTS_RUNNER, withoutDropped } from './shared.js';
 import type { Core } from './core.js';
 
 // The Merge request screen (SF-080): the needs_human codes of a push that failed or was refused,
@@ -68,6 +70,51 @@ async function samePath(a: string, b: string | null): Promise<boolean> {
   }
   const real = (path: string): Promise<string> => realpath(path).catch(() => resolvePath(path));
   return (await real(a)) === (await real(b));
+}
+
+// What the MR text turn of a preparation is given (prepareMr).
+interface MrTurn {
+  targetRef: string;
+  targetCommit: string;
+  attempt: number;
+  previousError: string | undefined;
+}
+
+// What the end of a test run needs of the preparation that started it (SF-128): mr_attempts before
+// it, and its MR text turn.
+interface TestsContext {
+  attempts: number;
+  turn: MrTurn;
+}
+
+// The title of the Fix section of a failed test run (SF-128): ## Fix N: Tests.
+const TESTS_TITLE = 'Tests';
+
+// A command in a stop's message: inline code, cut to 200 characters.
+function commandInMessage(command: string): string {
+  return inlineCommand(command.length > 200 ? `${command.slice(0, 199)}…` : command);
+}
+
+// The stop of a test run that could not happen (tests_unavailable): its reason first, on a line of
+// its own (the dashboard's sentence quotes the first line).
+function unavailableMessage(record: TestsRecord, iteration: number): string {
+  return `${record.reason ?? 'the command could not run'}.\nThe workspace's test command ${commandInMessage(record.command)} could not run on iteration ${iteration}. Fix it on this machine and run sf retry, or accept the iteration without tests (sf accept).`;
+}
+
+// The stop at the bound of the Tests Fix rounds (tests_failed): the command and how it ended.
+function failedMessage(record: TestsRecord, iteration: number): string {
+  return `The workspace's tests still fail after ${TEST_FIX_ROUNDS} Tests Fix rounds: ${commandInMessage(record.command)} (${failureText(record)}) on iteration ${iteration}. Accept the iteration without passing tests (sf accept), or tell the Implementer what to do (sf say).`;
+}
+
+// The tests event of a record (run: the tests_started event's): its outcome and the last lines of
+// its output for the Stream.
+export function testsEvent(iteration: number, run: string, record: TestsRecord): EventRecord {
+  const tail = lastLines(record.output, EVENT_TAIL_LINES, EVENT_TAIL_BYTES);
+  const truncated = record.output_truncated || tail !== record.output.replace(/\n+$/u, '');
+  return {
+    ts: now(), iteration, type: 'tests', run, command: record.command, outcome: record.outcome, exit_code: record.exit_code, timed_out: record.timed_out,
+    duration_ms: record.duration_ms, ...(record.reason !== undefined ? { reason: record.reason } : {}), tail, ...(truncated ? { tail_truncated: true as const } : {}),
+  };
 }
 
 export class MrPart {
@@ -121,14 +168,19 @@ export class MrPart {
       const skipped = await this.core.parts.reviews.skippedSimplifications(job);
       const withSkipped = skipped === undefined ? withNitsText : withSimplifications(withNitsText, skipped.suggestions, skipped.iteration);
       const ledger = await this.core.jobs.readLedger(job.workspace, job.ticket);
-      const composed = await this.#withAccepted(withFindings(withSkipped, ledger), job, ledger);
+      // The run of the workspace's test command on this iteration (SF-128), as ### Checks of ## Testing.
+      const tests = await this.core.jobs.readTests(job.workspace, job.ticket, job.iteration);
+      const checked = (text: string): string => (tests === undefined ? text : withChecks(text, checksLine(tests, job.iteration), job.iteration));
+      const composed = checked(await this.#withAccepted(withFindings(withSkipped, ledger), job, ledger));
       // The guard (SF-122): the lines the factory added lose every term; the Implementer's own
       // lines are its to reword.
       const factoryText = redactAdded(composed, written.text, terms);
       // The user's own MR text, saved on the Merge request screen (SF-080), stays the MR text: the
       // commit is made with it, unless it fails the rules; then with the factory's new text, and the
-      // screen shows the problem (approve refuses until it is saved valid or reset).
-      const userText = await this.#userMrText(job);
+      // screen shows the problem (approve refuses until it is saved valid or reset). It gets the
+      // factory's ### Checks too (SF-128), cleaned by the guard as the factory's lines are.
+      const saved = await this.#userMrText(job);
+      const userText = saved === undefined ? undefined : redactAdded(checked(saved), saved, terms);
       const usersOwn = userText !== undefined && mrTextProblem(job.ticket, userText) === undefined;
       const mrText = { text: usersOwn ? userText : factoryText };
       // The factory's text is checked before it is committed; the user's own is checked at the push.
@@ -160,6 +212,10 @@ export class MrPart {
       }
       if (userText !== undefined) {
         await this.core.jobs.writeMrFactoryText(job.workspace, job.ticket, factoryText);
+        // The user's text as committed, with its ### Checks (SF-128).
+        if (usersOwn && userText !== saved) {
+          await this.core.jobs.writeMrText(job.workspace, job.ticket, userText);
+        }
         await this.core.jobs.appendEvent(job.workspace, job.ticket, { ts: now(), iteration: job.iteration, type: 'mr_edited', action: 'factory_new' });
       } else {
         await this.core.jobs.writeMrText(job.workspace, job.ticket, factoryText);
@@ -433,17 +489,132 @@ export class MrPart {
       return resolveTarget(workspace.workCheckout, job.base);
     });
     await onAccepted?.();
-    const attempt = job.mr_attempts + 1;
+    const attempts = job.mr_attempts;
+    const attempt = attempts + 1;
     // from: awaiting_review, or needs_human: the retry and Accept or Skip (checkPrepareMr, checkAcceptGate), the Retry (checkRetryMr)
     const next = await this.core.parts.start.syncTask(workspace, await this.core.transition({ ...job, target_commit: target.commit, mr_attempts: attempt, mr_conflict_turn: false }, 'preparing_mr', 'prepare_mr'));
-    const prompt = mrPrompt({
-      ticket, branch: job.branch, targetRef: target.ref, targetCommit: target.commit, attempt,
-      previousError: afterTextTurn ? job.error?.message : undefined, handbook: this.core.handbook,
-    });
-    const session = this.core.parts.turns.session(next, workspace);
-    this.core.live.get(key)!.mr = { targetRef: target.ref };
-    session.send(prompt, DENIED_TOOLS);
+    // A stop of the test step ran no MR text turn: the next turn is not told its error (SF-128).
+    const previousError = afterTextTurn && !TEST_CODES.includes(job.error?.code ?? '') ? job.error?.message : undefined;
+    const turn: MrTurn = { targetRef: target.ref, targetCommit: target.commit, attempt, previousError };
+    // The workspace's test command (SF-128) as the registry holds it now (when it cannot be read, as
+    // in hand): its run comes first, outside the lock, unless this iteration passed or was accepted.
+    const command = (await this.core.resolve(workspaceName).catch(() => workspace)).testCommand;
+    if (command !== undefined && !(await this.#testsSettled(next))) {
+      this.#startTests(next, workspace, command, { attempts, turn });
+      return { state: next.state, iteration: next.iteration, branch: next.branch };
+    }
+    this.#mrTextTurn(next, workspace, turn);
     return { state: next.state, iteration: next.iteration, branch: next.branch };
+  }
+
+  // The MR text turn of MR preparation, in the job's session. Only under the lock.
+  #mrTextTurn(job: Job, workspace: Workspace, turn: MrTurn): void {
+    const prompt = mrPrompt({
+      ticket: job.ticket, branch: job.branch, targetRef: turn.targetRef, targetCommit: turn.targetCommit, attempt: turn.attempt,
+      previousError: turn.previousError, handbook: this.core.handbook,
+    });
+    const session = this.core.parts.turns.session(job, workspace);
+    this.core.live.get(`${job.workspace}/${job.ticket}`)!.mr = { targetRef: turn.targetRef };
+    session.send(prompt, DENIED_TOOLS);
+  }
+
+  // Whether the test step of the job's iteration is done (SF-128): its record passed, or the user
+  // accepted it without passing tests.
+  // A record that cannot be read counts as none: the tests run again.
+  async #testsSettled(job: Job): Promise<boolean> {
+    const record = await this.core.jobs.readTests(job.workspace, job.ticket, job.iteration).catch((error: unknown) => {
+      console.error(error);
+      return undefined;
+    });
+    return record?.outcome === 'passed' || record?.outcome === 'accepted_failing';
+  }
+
+  // Starts the run of the workspace's test command on the job's worktree (SF-128), registered as the
+  // job's running review, so abort and stop() cancel it and the runner waits for it. It runs outside
+  // the lock; its end applies under it (#tested). Only under the lock, in the runner.
+  #startTests(job: Job, workspace: Workspace, command: string, context: TestsContext): void {
+    this.core.runnerJob();
+    if (this.core.stopping) {
+      throw new FactoryError('runner_stopping', 'The runner of the job is stopping; no test run starts.');
+    }
+    const key = `${job.workspace}/${job.ticket}`;
+    this.core.reviews.get(key)?.controller.abort();
+    const running: RunningReview = { reviewer: TESTS_RUNNER, iteration: job.iteration, controller: new AbortController() };
+    this.core.reviews.set(key, running);
+    this.#runTests(job, workspace, command, running, context).catch((error: unknown) => console.error(error));
+  }
+
+  // The run itself: the tests_started event, the sandbox built from the job's path denials (session
+  // job, as the Implementer's), the command, then its end under the lock.
+  // Never leaves the run registered: whatever fails, its end is applied under the lock.
+  async #runTests(job: Job, workspace: Workspace, command: string, running: RunningReview, context: TestsContext): Promise<void> {
+    const run = now();
+    let result: TestsResult;
+    try {
+      await this.core.jobs.appendEvent(job.workspace, job.ticket, { ts: run, iteration: job.iteration, type: 'tests_started', run, command });
+      const denials = await pathDenials({
+        session: 'job', workspace: job.workspace, checkout: workspace.workCheckout, worktree: job.worktree!, stateDir: this.core.config.stateDir, worktreeRoot: this.core.config.worktreeRoot,
+      });
+      result = await runTestCommand({
+        command, cwd: job.worktree!, hidden: denials.sandbox.denyRead, timeoutMs: this.core.config.testTimeoutMs ?? DEFAULT_TEST_TIMEOUT_MS, signal: running.controller.signal,
+      });
+    } catch (error) {
+      // The path denials could not be built (or the event written): no run without them.
+      const at = now();
+      const reason = `the sandbox could not be built: ${error instanceof FactoryError ? error.message : (error as Error).message}`.slice(0, 300);
+      result = { aborted: false, record: { command, started_at: run, ended_at: at, duration_ms: Date.parse(at) - Date.parse(run), exit_code: null, timed_out: false, outcome: 'unavailable', reason, output: '', output_truncated: false } };
+    }
+    await this.core.locked(() => this.#tested(job, running, run, result, context));
+  }
+
+  // The end of a test run. A cancelled one (abort, stop()) leaves no trace, and so does one whose job
+  // moved on. Otherwise the record and the tests event are written; a pass goes on to the MR text
+  // turn; a run that could not happen stops the job (tests_unavailable); a failure is a Tests Fix,
+  // or, once more records failed than TEST_FIX_ROUNDS, a stop (tests_failed). A step that did not
+  // pass puts mr_attempts back: no MR text turn ran.
+  async #tested(job: Job, running: RunningReview, run: string, result: TestsResult, context: TestsContext): Promise<void> {
+    const { workspace: name, ticket, iteration } = job;
+    const key = `${name}/${ticket}`;
+    if (this.core.reviews.get(key) !== running || running.controller.signal.aborted) {
+      return;
+    }
+    this.core.reviews.delete(key);
+    if (result.aborted) {
+      return;
+    }
+    const current = await this.core.jobs.read(name, ticket);
+    if (current === undefined || current.created_at !== job.created_at || current.state !== 'preparing_mr' || current.iteration !== iteration) {
+      return;
+    }
+    const { record } = result;
+    const back: Job = { ...current, mr_attempts: context.attempts };
+    try {
+      await this.core.jobs.writeTests(name, ticket, iteration, record);
+      await this.core.jobs.appendEvent(name, ticket, testsEvent(iteration, run, record));
+      if (record.outcome === 'passed') {
+        this.#mrTextTurn(current, this.core.live.get(key)?.workspace ?? (await this.core.resolve(name)), context.turn);
+        return;
+      }
+      if (record.outcome === 'unavailable') {
+        // from: preparing_mr (the test step)
+        await this.core.transition(back, 'needs_human', 'tests', { code: TESTS_UNAVAILABLE, message: unavailableMessage(record, iteration) });
+        return;
+      }
+      const failed = await this.core.jobs.failedTests(name, ticket);
+      if (failed > TEST_FIX_ROUNDS) {
+        // from: preparing_mr (the test step)
+        await this.core.transition(back, 'needs_human', 'tests', { code: TESTS_FAILED, message: failedMessage(record, iteration) });
+        return;
+      }
+      await this.core.parts.turns.fix(back, testsFixContent(record), { title: TESTS_TITLE, fromTests: true });
+    } catch (error) {
+      console.error(error);
+      const latest = await this.core.jobs.read(name, ticket);
+      if (latest?.state === 'preparing_mr') {
+        // from: preparing_mr (the test step)
+        await this.core.transition({ ...latest, mr_attempts: context.attempts }, 'needs_human', 'tests', { code: 'mr_failed', message: `MR preparation failed inside the factory: ${(error as Error).message}`.slice(0, 1000) });
+      }
+    }
   }
 
   // The terms of a check of the guard (SF-122): the secrets, and the names of the user's other

@@ -124,6 +124,14 @@ test('the table: new records only by create, abort from every state not terminal
   assert.ok(Object.isFrozen(JOB_TRANSITIONS));
 });
 
+test('the test step (SF-128): from preparing_mr to working (a Tests Fix) or needs_human (a stop), by tests only', () => {
+  assert.deepEqual(JOB_TRANSITIONS.filter((row) => row.action === 'tests'), [
+    { from: 'preparing_mr', to: 'working', action: 'tests' },
+    { from: 'preparing_mr', to: 'needs_human', action: 'tests' },
+  ]);
+  checkTransition('preparing_mr', 'working', 'tests');
+});
+
 test('every call site passes a literal state and action, and every row of the table has a call site', async () => {
   const sites = await callSites();
   const forwarding = sites.filter((site) => site.call === FORWARDING);

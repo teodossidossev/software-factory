@@ -17,13 +17,16 @@ import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type
 import { type PathDenials, pathDenials, USER_SETTINGS_WEAKEN_SANDBOX } from '../sandbox-denials.js';
 import { changedBetween, type FixFiles, fixNumbers, guardSuggestions, offerMessage, runSimplify, SIMPLIFY_CODE, SIMPLIFY_TITLE, simplifyFix, type SimplifyInput, type SimplifyOutput, simplifyPrompt, type Suggestion } from '../simplify.js';
 import { mayTouch, parseFrontMatter, readTask, TASK_DIR } from '../task-file.js';
+import { TEST_CODES, type TestsRecord } from '../test-command.js';
 import { type UsageLimit, usageLimit } from '../usage-limit.js';
 import { exists, GATE_OVERRIDE_CODES, LEDGER_ACCEPT_CODES, markedGroups, type RunningReview, withoutDropped } from './shared.js';
 import type { Core } from './core.js';
+import { testsEvent } from './mr-steps.js';
 
 // The Fix round limit (SF-115) is accepted as the ledger stops are; the offer of the simplification
 // pass (SF-055): sf accept is its Skip.
-const ACCEPT_CODES: readonly string[] = [...GATE_OVERRIDE_CODES, ...LEDGER_ACCEPT_CODES, 'iteration_limit', SIMPLIFY_CODE];
+// The stops of the test step (SF-128): Accept goes on without passing tests.
+const ACCEPT_CODES: readonly string[] = [...GATE_OVERRIDE_CODES, ...LEDGER_ACCEPT_CODES, 'iteration_limit', SIMPLIFY_CODE, ...TEST_CODES];
 
 // The code of a session the factory refused to start because the user settings weaken the sandbox
 // (SF-100); undefined for any other failure.
@@ -168,6 +171,9 @@ export class ReviewsPart {
         }
         accepted = review !== undefined && 'verdict' in review ? review.accepted_sensitive : [];
       }
+      if (TEST_CODES.includes(code)) {
+        return this.#acceptTests(job, accepted, gate);
+      }
       if (code === SIMPLIFY_CODE) {
         // Skip (SF-055): MR preparation as after the clean gate, with the paths both reviewers
         // accepted; simplify.json is marked skipped, so the suggestions go into the MR text (mrIdle).
@@ -196,6 +202,29 @@ export class ReviewsPart {
         });
       } });
     });
+  }
+
+  // The Accept of a stop of the test step (SF-128: tests_failed, tests_unavailable): MR preparation
+  // without passing tests. No gate override: the gate was clean, off or already overridden. The
+  // accepted paths are the Retry's: accepted (the Claude review's, or the gate's without the Claude
+  // review, SF-131), plus with the Claude review the gate's when it was clean and not overridden.
+  // Once every check passed, the iteration's record says accepted_failing (with the run's details),
+  // so the test step is skipped, and a tests event records it. Only under the lock.
+  async #acceptTests(job: Job, accepted: string[], gate: GateRecord | undefined): Promise<{ state: JobState; iteration: number; branch: string }> {
+    const { workspace: workspaceName, ticket, iteration } = job;
+    const record = await this.core.jobs.readTests(workspaceName, ticket, iteration);
+    if (record === undefined || (record.outcome !== 'failed' && record.outcome !== 'unavailable')) {
+      throw new FactoryError('invalid_state', `sf accept needs a failed run of the test command on the last iteration (${iteration}); ${record === undefined ? 'it has none' : `its run says ${record.outcome}`}.`);
+    }
+    const overridden = (await this.core.jobs.readGateOverride(workspaceName, ticket, iteration)) !== undefined;
+    const gateAccepted = claudeReviews(job) && !overridden && gate !== undefined && 'verdict' in gate && actedVerdict(withoutDropped(gate)) === 'clean' ? gate.accepted_sensitive : [];
+    const from = record.outcome;
+    return this.core.parts.mr.prepareMr(job, [...new Set([...accepted, ...gateAccepted])], { onAccepted: async () => {
+      const at = now();
+      const acceptedRecord: TestsRecord = { ...record, outcome: 'accepted_failing', accepted_at: at, accepted_from: from };
+      await this.core.jobs.writeTests(workspaceName, ticket, iteration, acceptedRecord);
+      await this.core.jobs.appendEvent(workspaceName, ticket, { ...testsEvent(iteration, at, acceptedRecord), ts: at });
+    } });
   }
 
   // The user's settlement of an escalated or contested ledger entry (SF-052: sf settle, the

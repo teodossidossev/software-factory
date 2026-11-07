@@ -13,6 +13,10 @@
 // wait for a file the test creates (waitFile, SF-105), to run only once what the test waits on has
 // happened. Like the real CLI,
 // it refuses a --json-schema whose $schema is not draft-07 (SF-044): exit 1 before anything else.
+// A run whose schema is a stop's explanation's (SF-106: a headline and choices) is an explanation:
+// its script comes from $HOME/fake-explain.json ({"explains": [...]}, through $HOME/fake-explain.count),
+// it logs to $HOME/fake-explain.log and it gives a valid explanation by default, so the reviews'
+// scripts and logs stay as they are when sf serve explains a stop.
 // A review entry's probes (the Task check, SF-054) are Read, Grep and Glob calls made after the
 // init: each is first put to the SDK's PreToolUse hooks (registered at initialize) through the
 // hook_callback control request, as the real CLI does; a denied one gets an error result, an
@@ -74,6 +78,10 @@ interface Turn {
 }
 
 const CLEAN = { verdict: 'clean', summary: 'Looks right.', items: [], accepted_sensitive: [] };
+const EXPLANATION = {
+  headline: 'The job needs your answer.', explanation: 'The fake explains the stop.',
+  choices: [{ choice: 'Go on', effect: 'The job goes on.', recommended: true }], recommendation: 'Go on: it is the simplest.',
+};
 
 const argv = process.argv.slice(2);
 const option = (name: string): string | undefined => {
@@ -98,11 +106,14 @@ if (schema !== undefined) {
 
 const home = process.env.HOME ?? '.';
 const review = schema !== undefined;
-const name = review ? 'fake-review' : 'fake-claude';
+const properties = review ? ((JSON.parse(schema) as { properties?: Record<string, unknown> }).properties ?? {}) : {};
+const explain = review && 'headline' in properties && 'choices' in properties;
+const name = explain ? 'fake-explain' : review ? 'fake-review' : 'fake-claude';
 const controlPath = join(home, `${name}.json`);
 const countPath = join(home, `${name}.count`);
-const control = existsSync(controlPath) ? (JSON.parse(readFileSync(controlPath, 'utf8')) as { turns?: Turn[]; reviews?: Turn[] }) : {};
-const turns: Turn[] = (review ? control.reviews : control.turns) ?? [];
+const control = existsSync(controlPath) ? (JSON.parse(readFileSync(controlPath, 'utf8')) as { turns?: Turn[]; reviews?: Turn[]; explains?: Turn[] }) : {};
+const turns: Turn[] = (explain ? control.explains : review ? control.reviews : control.turns) ?? [];
+const defaultOutput = explain ? EXPLANATION : CLEAN;
 const count = existsSync(countPath) ? Number(readFileSync(countPath, 'utf8')) : 0;
 writeFileSync(countPath, String(count + 1));
 const turn: Turn = turns[count] ?? {};
@@ -315,7 +326,7 @@ async function runReview(): Promise<void> {
   out({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'text', text: 'Reviewed.' }] } });
   const subtype = turn.walk !== undefined ? 'error_during_execution' : (turn.subtype ?? 'success');
   if (subtype === 'success' && turn.noOutput !== true && preToolUseHooks.length > 0) {
-    const reason = await giveStructuredOutput(turn.output ?? CLEAN);
+    const reason = await giveStructuredOutput(turn.output ?? defaultOutput);
     if (reason !== undefined) {
       out({
         type: 'result', subtype: 'error_max_structured_output_retries', is_error: true, result: '', num_turns: 3, duration_ms: 2345, duration_api_ms: 2000,
@@ -330,7 +341,7 @@ async function runReview(): Promise<void> {
     total_cost_usd: turn.costTotal ?? 0.0456, usage: {}, modelUsage: {}, stop_reason: null, permission_denials: [],
     errors: subtype === 'success' ? undefined : (turn.walk !== undefined ? [turn.walk] : (turn.errors ?? ['fake review failure'])),
     ...(turn.walk !== undefined ? { result: turn.walk } : {}),
-    ...(turn.noOutput === true || subtype !== 'success' ? {} : { structured_output: turn.output ?? CLEAN }),
+    ...(turn.noOutput === true || subtype !== 'success' ? {} : { structured_output: turn.output ?? defaultOutput }),
   });
 }
 

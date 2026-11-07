@@ -2087,8 +2087,72 @@ function stopBlock(entry, live) {
   }
   block.id = 'stopblock';
   const detail = shownDetail();
-  block.append(el('div', '', stop.sentence(job)), ...stopInline(job, detail, entry));
+  const technical = [el('div', '', stop.sentence(job)), ...stopInline(job, detail, entry)];
+  const explained = stopExplanation(job, detail);
+  if (explained === null) {
+    block.append(...technical);
+    return block;
+  }
+  block.append(explanationBox(explained));
+  if (explained.output === null) {
+    // Still being written: the technical content stays as it is.
+    block.append(...technical);
+    return block;
+  }
+  // The technical content under Details, collapsed until opened.
+  const key = `${entry.k}/details`;
+  block.append(toggleButton(key, ui.open.has(key) ? 'Hide details' : 'Details'));
+  if (ui.open.has(key)) {
+    const more = el('div', 'stop-details');
+    more.append(...technical);
+    block.append(more);
+  }
   return block;
+}
+
+// The plain explanation of the job's current stop (SF-106): the detail's explanation while it is
+// pending or written for this very stop (updated_at and code); null when there is none, it failed,
+// or it is another stop's.
+function stopExplanation(job, detail) {
+  const explained = detail?.explanation;
+  if (explained === null || explained === undefined || typeof explained !== 'object' || job.state !== 'needs_human') {
+    return null;
+  }
+  if (explained.stop?.at !== job.updated_at || explained.stop?.code !== (job.error?.code ?? '')) {
+    return null;
+  }
+  if (explained.output === null || explained.output === undefined) {
+    return typeof explained.error === 'string' || explained.ended_at !== null ? null : { ...explained, output: null };
+  }
+  return explained;
+}
+
+// The box above the stop panel: "Explaining…" while pending; else the headline in bold, the
+// explanation, the choices (the recommended one marked), the recommendation and who explained it.
+function explanationBox(explained) {
+  const box = el('div', 'explain');
+  if (explained.output === null) {
+    box.append(el('div', 'muted', 'Explaining…'));
+    return box;
+  }
+  const { headline, explanation, choices, recommendation } = explained.output;
+  box.append(el('b', 'explain-head', String(headline ?? '')), el('div', 'explain-text', String(explanation ?? '')));
+  const list = el('ul', 'explain-choices');
+  for (const choice of Array.isArray(choices) ? choices : []) {
+    const item = el('li', '');
+    item.append(el('span', 'explain-choice', String(choice.choice ?? '')));
+    if (choice.recommended === true) {
+      item.append(el('span', 'tag rec', 'Recommended'));
+    }
+    item.append(el('span', 'explain-effect', String(choice.effect ?? '')));
+    list.append(item);
+  }
+  box.append(list);
+  if (typeof recommendation === 'string' && recommendation !== '') {
+    box.append(el('div', 'explain-rec', recommendation));
+  }
+  box.append(el('div', 'muted fs12', `Explained by ${String(explained.model ?? '')} · ${money(explained.cost_usd)}`));
+  return box;
 }
 
 // The body of one entry.
@@ -2266,8 +2330,9 @@ function stopSignature() {
   const job = shownJob();
   const detail = state.detail;
   const last = detail === null ? null : iterationOf(detail, detail.job.iteration);
+  // The stop's explanation too (SF-106): its pending and final writes change nothing else.
   return JSON.stringify([stopKey(), job?.state, job?.error, job?.stop, job?.gate_tokens, job?.worktree, job?.iteration, detail?.ledger, last?.simplify, last?.review, last?.gate,
-    detail === null ? '' : availability('settle', detail.job)]);
+    detail === null ? '' : availability('settle', detail.job), detail?.explanation ?? null]);
 }
 
 // The stop blocks drawn again when what they show changed.

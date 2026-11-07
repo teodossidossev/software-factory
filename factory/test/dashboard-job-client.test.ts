@@ -319,3 +319,92 @@ test('job client (SF-087): fetch_failed offers Retry first and posts it once; mr
   await show(page, detail(push));
   assert.deepEqual(labels(), ['Push again', 'Abort…']);
 });
+
+// ---------- The plain explanation of the stop (SF-106) ----------
+
+const EXPLAINED = {
+  headline: 'Keep your version of the rows, or go back?', explanation: 'You asked for one shared row. The Task file says one row each.',
+  choices: [{ choice: 'Keep your version', effect: 'The row stays shared.', recommended: true }, { choice: 'Go back', effect: 'One row each again.', recommended: false }],
+  recommendation: 'Keep your version: you asked for it last.',
+};
+
+test('job client (SF-106): a matching explanation is a box above the stop panel with Recommended and the model and cost; the technical content is under Details; pending says Explaining…; an error, another stop\'s or none leaves today\'s panel', async () => {
+  const row = job('needs_human', { error: { code: 'escalated', message: 'The Implementer escalated R1.' }, stop: { items: [{}], saves_lines: null } });
+  const ledger = [{
+    id: 'R1', iteration: 1, reviewer: 'claude', severity: 'major', path: 'README.md', problem: 'Problem of R1.', expected: 'Better.', status: 'escalated',
+    response: 'Which row?', evidence: '', reopened: 0, asked: 1, caused_by: '', dispute: null, settled: null,
+  }];
+  const record = (extra: Record<string, unknown> = {}) => ({
+    stop: { at: row.updated_at, code: 'escalated' }, model: 'sonnet', language: 'English', started_at: row.updated_at, ended_at: '2026-11-01T10:06:00.000Z',
+    cost_usd: 0.0123, output: EXPLAINED, error: null, ...extra,
+  });
+  const entries = [{ k: '0', ts: '2026-11-01T10:05:00.000Z', it: 1, who: 'factory', t: 'state', from: 'working', to: 'needs_human', code: 'escalated', msg: 'x' }];
+  const pageOf = (explanation: unknown): Promise<Page> => openJob({ ...detail(row), ledger, explanation } as unknown as Detail,
+    (path) => (/\/stream\?from=0$/.test(path) ? { entries, next: 1, end: true } : undefined));
+  const blockOf = (page: Page): FakeElement => page.$('stopblock');
+  const parts = (page: Page): string[] => texts(blockOf(page));
+
+  // Today's panel: the head, the sentence and the entries to settle.
+  const today = await pageOf(null);
+  const panel = parts(today);
+  assert.equal(panel.length, 3);
+  assert.equal(blockOf(today).all().filter((node) => node.className === 'explain').length, 0);
+  for (const other of [record({ output: null, error: 'Overloaded.' }), record({ stop: { at: '2026-11-01T10:00:00.000Z', code: 'escalated' } }), record({ stop: { at: row.updated_at, code: 'review_churn' } })]) {
+    const page = await pageOf(other);
+    assert.deepEqual(parts(page), panel, JSON.stringify(other.stop));
+    assert.equal(blockOf(page).all().filter((node) => node.className === 'explain').length, 0);
+  }
+
+  // Pending: Explaining… above today's content, not collapsed.
+  const pending = await pageOf(record({ ended_at: null, output: null, cost_usd: null }));
+  assert.deepEqual(parts(pending), [panel[0]!, 'Explaining…', ...panel.slice(1)]);
+  assert.equal((blockOf(pending).children[1] as FakeElement).className, 'explain');
+
+  // Written: the box, then Details; the technical content collapsed.
+  const page = await pageOf(record());
+  const box = blockOf(page).children[1] as FakeElement;
+  assert.equal(box.className, 'explain');
+  assert.deepEqual(texts(box), [
+    EXPLAINED.headline, EXPLAINED.explanation, 'Keep your versionRecommendedThe row stays shared.Go backOne row each again.', EXPLAINED.recommendation, 'Explained by sonnet · $0.01',
+  ]);
+  assert.equal((box.children[0] as FakeElement).tagName, 'B');
+  const items = (box.children[2] as FakeElement).children as FakeElement[];
+  assert.deepEqual(items.map((item) => item.all().filter((node) => node.textContent === 'Recommended').length), [1, 0]);
+  assert.deepEqual(parts(page), [panel[0]!, box.textContent, 'Details']);
+  assert.equal(blockOf(page).all().some((node) => node.textContent === panel[1]), false);
+  // Details opens the technical content below the box, as it was.
+  (blockOf(page).children[2] as FakeElement).click();
+  await page.flush();
+  assert.deepEqual(parts(page).slice(0, 3), [panel[0]!, box.textContent, 'Hide details']);
+  assert.deepEqual(texts(blockOf(page).children[3] as FakeElement), panel.slice(1));
+});
+
+test('job client (SF-106): an explanation that arrives with a new detail on an open page redraws the stop block: none → pending → written, without a reload', async () => {
+  const row = job('needs_human', { error: { code: 'escalated', message: 'The Implementer escalated R1.' }, stop: { items: [{}], saves_lines: null } });
+  const ledger = [{
+    id: 'R1', iteration: 1, reviewer: 'claude', severity: 'major', path: 'README.md', problem: 'Problem of R1.', expected: 'Better.', status: 'escalated',
+    response: 'Which row?', evidence: '', reopened: 0, asked: 1, caused_by: '', dispute: null, settled: null,
+  }];
+  const pending = {
+    stop: { at: row.updated_at, code: 'escalated' }, model: 'sonnet', language: 'English', started_at: row.updated_at, ended_at: null, cost_usd: null, output: null, error: null,
+  };
+  const entries = [{ k: '0', ts: '2026-11-01T10:05:00.000Z', it: 1, who: 'factory', t: 'state', from: 'working', to: 'needs_human', code: 'escalated', msg: 'x' }];
+  const shown = (explanation: unknown) => ({ ...detail(row), ledger, explanation }) as unknown as Detail;
+  const page = await openJob(shown(null), (path) => (/\/stream\?from=0$/.test(path) ? { entries, next: 1, end: true } : undefined));
+  const parts = (): string[] => texts(page.$('stopblock'));
+  const panel = parts();
+  assert.equal(panel.length, 3);
+
+  await show(page, shown(pending));
+  assert.deepEqual(parts(), [panel[0]!, 'Explaining…', ...panel.slice(1)]);
+
+  await show(page, shown({ ...pending, ended_at: '2026-11-01T10:06:00.000Z', cost_usd: 0.0123, output: EXPLAINED }));
+  const box = page.$('stopblock').children[1] as FakeElement;
+  assert.equal(box.className, 'explain');
+  assert.equal((box.children[0] as FakeElement).textContent, EXPLAINED.headline);
+  assert.deepEqual(parts(), [panel[0]!, box.textContent, 'Details']);
+
+  // A failed one after all: today's panel again.
+  await show(page, shown({ ...pending, ended_at: '2026-11-01T10:06:00.000Z', error: 'Overloaded.' }));
+  assert.deepEqual(parts(), panel);
+});

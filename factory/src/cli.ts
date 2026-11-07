@@ -26,6 +26,7 @@ import { Digests } from './digest-run.js';
 import { DigestSchedule } from './digest-schedule.js';
 import { DEFAULT_DASHBOARD_PORT, dashboardUrl, readToken, removeToken, type RunningDashboard, startDashboard } from './dashboard.js';
 import { FactoryError } from './errors.js';
+import { currentExplanation, Explainer, explanationLines } from './explain.js';
 import { Execution, type StateListener } from './execution.js';
 import { forgeSettings, withoutHostTokens } from './forge.js';
 import { codexVersion } from './gate.js';
@@ -109,6 +110,7 @@ const USAGE = `Usage:
   sf abort <workspace> <ticket> [--discard]             End the job; the worktree stays (its path is printed); --discard removes the worktree and the branch
   sf reset <workspace> <ticket>                         End the session, remove the worktree and archive the job; the branch is untouched
   sf digest [--now]                                     The morning digest of the followed workspaces (sf serve makes one a day at digest.at in workspaces.json): without --now, the latest digest's period and counts; --now makes one at once and prints the path of its record and its cost
+  sf explain <workspace> <ticket>                       The plain explanation of the job's current stop (sf serve writes one for each needs_human stop; explain in workspaces.json): the headline, the explanation, the choices and the recommendation; no sf serve needed, no model call
   sf notify-test                                        Send a test notification on every channel
   sf info                                               Version, directories, settings, whether sf serve and the tunnel run, workspaces, jobs
   sf metrics [<workspace>] [--since YYYY-MM-DD] [--json]  The Codex gate per job, current and archived: gate levels per iteration (F full, L light, l light skipped, - none, · no decision, ? unreadable), runs, tokens, items by outcome and the yield (fixed over all items), then the totals; no sf serve needed
@@ -204,6 +206,11 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     notify: (notification) => sendNotification(notification, notifyConfig()),
   });
   const digestSchedule = new DigestSchedule({ digests, configDir: configDir() });
+  // The plain explanation of each stop (SF-106): the job follower starts one when a job reaches a
+  // new needs_human stop, the start one for each stopped job without; the open pages get it.
+  const explainer = new Explainer({
+    jobs, configDir: configDir(), claudePath: config.claudePath, onWritten: (workspace, ticket) => dashboard?.refreshJob(workspace, ticket),
+  });
   // The run queue's scheduler: a pass after recovery, on every job state change (sf serve's own and
   // the runners', below), on every change of the queue; a pass that changed something refreshes
   // every page.
@@ -418,6 +425,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   // The run queue hears of both: a runner's job that reached ready_for_human_review frees a slot.
   const followed = followJobs(jobs, (job, from) => {
     autoChecks?.jobChanged(job);
+    explainer.jobChanged(job);
     dashboard?.onStateChange(job, from);
     execution.afterJobChange(job, from).catch((error: unknown) => console.error(error));
     reschedule(job, from);
@@ -447,6 +455,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   } else {
     markerWatch.start();
   }
+  explainer.start().catch((error: unknown) => console.error(error));
 
   let stopping = false;
   const stop = (signal: NodeJS.Signals): void => {
@@ -461,6 +470,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     runQueue.close();
     autoChecks?.close();
     digestSchedule.close();
+    explainer.close();
     Promise.all([server.close(), socket.close(), dashboard?.close()]).then(
       () => process.exit(0),
       (error: unknown) => {
@@ -1100,6 +1110,20 @@ async function digest(args: string[]): Promise<void> {
   ].join('\n'));
 }
 
+// sf explain <workspace> <ticket> (SF-106): read from the state directory, without sf serve or a model call.
+async function explain(args: string[]): Promise<void> {
+  if (args.length !== 2) {
+    throw new UsageError('explain needs <workspace> <ticket>.');
+  }
+  const [workspace, ticket] = checkJob(args, 'explain');
+  const jobs = new JobStore(stateDir());
+  const job = await jobs.read(workspace, ticket);
+  if (job === undefined) {
+    throw new FactoryError('job_not_found', `There is no job for ${workspace}/${ticket}.`);
+  }
+  console.log(explanationLines(await currentExplanation(jobs, job)).join('\n'));
+}
+
 async function notifyTest(args: string[]): Promise<void> {
   if (args.length !== 0) {
     throw new UsageError('notify-test takes no arguments.');
@@ -1691,6 +1715,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'digest') {
     await digest(rest);
+    return;
+  }
+  if (command === 'explain') {
+    await explain(rest);
     return;
   }
   if (command === 'info') {

@@ -31,10 +31,11 @@ import { FactoryError } from './errors.js';
 import type { Digests } from './digest-run.js';
 import type { Execution } from './execution.js';
 import type { RunQueue } from './queue.js';
+import { currentExplanation, ledgerStopEntries } from './explain.js';
 import { lineEntries, type StreamEntry, streamContext } from './job-stream.js';
 import { MAX_MR_TEXT_BYTES } from './mr.js';
 import type { Job, JobState, JobStore } from './jobs.js';
-import { DECISIONS, unsettled } from './ledger.js';
+import { DECISIONS } from './ledger.js';
 import { DIGEST_DEFAULTS, HANDOFF_MODES, WORKSPACE_COLORS, WORKSPACE_NAME_PATTERN } from './registry.js';
 import type { Setup, TicketRow } from './setup.js';
 import type { CheckSummary, TaskChecks } from './task-check.js';
@@ -300,6 +301,10 @@ export interface RunningDashboard {
   onStateChange(job: Job, from: JobState | null): void;
   // A ticket's data changed without a job (a Task check ended): every page gets the tickets again.
   refreshSetup(): void;
+  // The job's files changed without a state change (its stop's explanation, SF-106): every page
+  // gets the jobs again, and the pages that show the job its detail, as the POST mr-status route
+  // does; never throws.
+  refreshJob(workspace: string, ticket: string): void;
   close(): Promise<void>;
 }
 
@@ -606,9 +611,9 @@ async function stopOf(jobs: JobStore, job: Job): Promise<{ items: unknown[]; sav
     const items = record !== undefined && 'suggestions' in record ? record.suggestions : [];
     return { items, saves_lines: items.reduce((sum, item) => sum + item.saves_lines, 0) };
   }
-  if (code === 'escalated' || code === 'review_disputed' || code === 'review_churn') {
-    const ledger = await jobs.readLedger(job.workspace, job.ticket);
-    return { items: code === 'review_churn' ? ledger.filter((entry) => entry.status === 'open') : unsettled(ledger), saves_lines: null };
+  const entries = ledgerStopEntries(code ?? '', await jobs.readLedger(job.workspace, job.ticket));
+  if (entries !== null) {
+    return { items: entries, saves_lines: null };
   }
   if (code === 'gate_rounds' || code === 'gate_budget') {
     for (let number = job.iteration; number >= 1; number -= 1) {
@@ -788,6 +793,9 @@ async function jobDetail(jobs: JobStore, job: Job, gate: boolean, actions: Dashb
     // The findings ledger (SF-052): ledger.json as written; [] before the first Fix section.
     ledger: await jobs.readLedger(job.workspace, job.ticket),
     history: await stateHistory(jobs, job.workspace, job.ticket),
+    // The plain explanation of the current stop (SF-106): explanation.json while it is the job's
+    // current stop's (pending, written or failed); null otherwise.
+    explanation: await currentExplanation(jobs, job),
   };
 }
 
@@ -1956,6 +1964,9 @@ export async function startDashboard(
     },
     refreshSetup() {
       sendSetup(streams).catch((error: unknown) => console.error(error));
+    },
+    refreshJob(workspace, ticket) {
+      jobs.read(workspace, ticket).then((job) => (job !== undefined ? refresh(job) : refreshAll())).catch((error: unknown) => console.error(error));
     },
     async close() {
       for (const stream of streams) {

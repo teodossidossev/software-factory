@@ -7,7 +7,8 @@
 // its optional `rules_skip` (SF-059) names the repository rule files not given to the agents. Since
 // SF-103 a workspace has an optional `description`, `app` (workspaces of one app share one daily) and
 // `digest: {track, my_work}`, and the registry an optional top-level `digest` (the morning digest's
-// time, weekdays only, model and language).
+// time, weekdays only, model and language). Since SF-106 the registry has an optional top-level
+// `explain` (the plain explanation of each stop: on, model and language).
 import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -77,6 +78,13 @@ const digestSettingsSchema = z.strictObject({
   language: z.string().trim().min(1).max(MAX_LANGUAGE_CHARS).optional(),
 });
 
+// The plain explanation of each stop (SF-106): on, its language and model; every field optional.
+const explainSettingsSchema = z.strictObject({
+  on: z.boolean().optional(),
+  language: z.string().trim().min(1).max(MAX_LANGUAGE_CHARS).optional(),
+  model: z.string().min(1).optional(),
+});
+
 const registrySchema = z.strictObject({
   workspaces: z.record(
     z.string().regex(WORKSPACE_NAME_PATTERN),
@@ -89,6 +97,7 @@ const registrySchema = z.strictObject({
     }),
   ),
   digest: digestSettingsSchema.optional(),
+  explain: explainSettingsSchema.optional(),
 });
 
 export type Registry = z.infer<typeof registrySchema>;
@@ -105,6 +114,18 @@ export const DIGEST_DEFAULTS: DigestSettings = { at: '08:00', weekdays_only: tru
 
 export function digestSettings(registry: Registry): DigestSettings {
   return { ...DIGEST_DEFAULTS, ...registry.digest };
+}
+
+// The stop explanations' settings with their defaults (SF-106).
+export interface ExplainSettings {
+  on: boolean;
+  language: string;
+  model: string;
+}
+export const EXPLAIN_DEFAULTS: ExplainSettings = { on: true, language: 'English', model: 'sonnet' };
+
+export function explainSettings(registry: Registry): ExplainSettings {
+  return { ...EXPLAIN_DEFAULTS, ...registry.explain };
 }
 
 // A workspace's digest switches, absent ones false.

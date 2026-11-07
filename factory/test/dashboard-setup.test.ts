@@ -224,7 +224,7 @@ test('dashboard ticket page (SF-081): the page payload of a skeleton and of a wr
   await withDashboard('dash-ticket-page', fake, async (dashboard) => {
     const base = dashboard.url;
     const skeleton = JSON.parse((await fetchRaw(new URL('api/tickets/app/T-1/page', base))).body);
-    assert.deepEqual(Object.keys(skeleton), ['ticket', 'task', 'plan', 'check', 'history', 'queue']);
+    assert.deepEqual(Object.keys(skeleton), ['ticket', 'task', 'plan', 'check', 'check_rounds', 'check_usd', 'check_usd_complete', 'history', 'queue']);
     assert.deepEqual([skeleton.ticket.ticket, skeleton.ticket.draft, skeleton.ticket.conversation.message], ['T-1', true, ticketConversation('app', 'T-1')]);
     assert.deepEqual(skeleton.task, { text: draftContent('T-1', 'Skeleton', 'main'), sha256: taskSha256(draftContent('T-1', 'Skeleton', 'main')) });
     assert.deepEqual(skeleton.plan, { starts_from: 'main', files: [], scoped: false, waits_for: [] });

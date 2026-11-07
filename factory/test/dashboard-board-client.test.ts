@@ -164,7 +164,7 @@ test('board client: one column per ticket: a pushed one only in Done, a failed o
 });
 
 test('board client: a Queue card: the check chip, Start (secondary), Task and the ⋯ menu with Check, Archive and Delete…; a skeleton waits for the plan', async () => {
-  const check = (extra: Record<string, unknown> = {}) => ({ state: 'none', stale: false, running: false, blockers: 0, majors: 0, nits: 0, ended_at: null, start_note: 'not checked', ...extra });
+  const check = (extra: Record<string, unknown> = {}) => ({ state: 'none', check_reason: null, stale: false, running: false, blockers: 0, majors: 0, nits: 0, ended_at: null, start_note: 'not checked', ...extra });
   const page = await openBoard([], [
     ticket('app/T-1', { draft: true, check: check() }), ticket('app/T-2', { check: check({ state: 'ready', start_note: null }) }), ticket('app/T-3'),
   ]);
@@ -184,6 +184,12 @@ test('board client: a Queue card: the check chip, Start (secondary), Task and th
   assert.deepEqual(['app/T-1', 'app/T-2', 'app/T-3'].map((key) => buttons(card(page, key)).filter((element) => element.classList.contains('primary')).length), [0, 0, 0]);
   // Without the Task checks there is no Check.
   assert.deepEqual([chip(card(page, 'app/T-3')).textContent, labels(card(page, 'app/T-3'))], ['not checked', ['not checked', 'not checked', 'Start', 'Task', '⋯', 'Archive', 'Delete…']]);
+  // SF-130: a Task that needs no check: both chips say so, titled with the reason; Check stays.
+  const small = await openBoard([], [ticket('app/T-4', { check: check({ state: 'not_needed', check_reason: 'small: 2 scope entries, 500 words', start_note: null }) })]);
+  assert.deepEqual(buttons(card(small, 'app/T-4')).slice(0, 2).map((element) => [element.textContent, element.getAttribute('title')]), [
+    ['check not needed', 'small: 2 scope entries, 500 words'], ['check not needed', 'small: 2 scope entries, 500 words'],
+  ]);
+  assert.equal(labels(card(small, 'app/T-4')).includes('Check'), true);
   // The ⋯ menu is closed until its button opens it; a click elsewhere or Escape closes it.
   const menu = () => part(card(page, 'app/T-3'), 'cmenu')!;
   const toggle = () => button(card(page, 'app/T-3'), '⋯')!;

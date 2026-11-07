@@ -397,7 +397,7 @@ or on the board, not by editing the file.
 | Setting | Default | Change it with | Meaning |
 | --- | --- | --- | --- |
 | The limit `max_running` | `SF_MAX_JOBS` (3) | `sf queue limit <N>` (1 to 20), the board's "Run up to [− N +] jobs at once" | How many jobs may run at once, over every workspace. Only the queue's own starts wait for it: a start by hand always goes and counts. Lowering it stops no job. |
-| The order | the order tickets were added | `sf queue add <ws> <ticket> [--at N]`, `sf queue move <ws> <ticket> <N>`, `sf queue remove`, drag and drop or Alt+↑/↓ on the board | The queue starts the first entry whose plan check is `ready` and whose `lands_after` tickets are all merged. |
+| The order | the order tickets were added | `sf queue add <ws> <ticket> [--at N]`, `sf queue move <ws> <ticket> <N>`, `sf queue remove`, drag and drop or Alt+↑/↓ on the board | The queue starts the first entry whose plan check is `ready` (or not needed: a small, scoped Task with no check of its current version, see `check` below) and whose `lands_after` tickets are all merged. |
 | The hold | not held | `sf queue hold [reason…]`, `sf queue release` | A held queue starts nothing. |
 | The rule at a usage limit's reset | `resume-then-queue` | `sf queue on-limit resume-then-queue\|resume-only\|wait`, the board's *Rules ▾* menu | What happens when a usage limit resets (below). |
 | Start anyway | off per entry | `sf queue force <ws> <ticket>`, *Start anyway* on the card | The entry starts whatever its Task check says, until it leaves the queue. |
@@ -432,6 +432,7 @@ base: main
 scope: [src/export/**, test/export.test.ts, README.md]
 may_touch: [package.json, package-lock.json]
 lands_after: [APP-11, my-api/API-7]
+check: required
 ---
 ```
 
@@ -443,6 +444,7 @@ lands_after: [APP-11, my-api/API-7]
 | `scope` | no | **Files it will change** | Every file the ticket is expected to create, change or delete, tests and docs included (paths or globs). A changed path outside it (and outside `may_touch`) must be justified to a reviewer, or it is a fix item. Without it nothing is checked ("No list: the job may change any file, and nothing is checked."). |
 | `may_touch` | no | **Files it will change**, marked 🔒 | Sensitive paths (manifests, lockfiles, CI, configuration) the ticket may change on purpose. A sensitive path not named here needs a reviewer's acceptance. Also counts as in scope. |
 | `lands_after` | no | **Waits for** (and "Waits for" on the Queue card) | The tickets this one waits for: `APP-11` in the same workspace, `my-api/API-7` in another. The queue starts it only when all are merged; Start by hand does not wait. |
+| `check` | no | **Plan check** (`not needed` with the reason, or the check's result) | Whether the Task needs a plan check. `check: skip`: never. `check: required` (or any other value): always. Without it a Task needs one when it has no `scope`, more than 10 scope entries, a glob in `scope`, a `lands_after` ticket of another workspace or more than 1,200 words (the whitespace-separated words of the whole file, front matter included); otherwise it is small and starts from the queue without a check (`write_task` answers `not_needed`). A Check pressed by hand always runs, and its verdict counts as before. |
 
 Other keys are kept but ignored. The body's sections (the task, `## Files`, `## Review brief`)
 are described in [Planning](planning.md#what-makes-a-good-task-file) and in the

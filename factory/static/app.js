@@ -455,6 +455,11 @@ function mrStatusText(status) {
 function renderCheck(view) {
   const box = [];
   const record = view.check;
+  // A Task that needs no check (SF-130): the view says why.
+  if (typeof view.check_reason === 'string' && !view.running) {
+    box.push(el('p', 'check-head', `Task check: not needed: ${view.check_reason}.`));
+    return box;
+  }
   if (record === null) {
     box.push(el('p', 'check-head', view.running ? 'Task check: running…' : 'Task check: not checked yet. Check on the ticket\'s card runs it; it only advises.'));
     return box;
@@ -4287,8 +4292,8 @@ function isPlanned(row) {
 }
 
 // The Task check of a Queue card in words (SF-054): checking…, check: ready, not ready: N blocker,
-// M major, check failed (each with " · stale" once the Task file changed since), not checked; a
-// skeleton is a draft.
+// M major, check failed (each with " · stale" once the Task file changed since), check not needed
+// (SF-130), not checked; a skeleton is a draft.
 function checkNote(row) {
   if (row.draft) {
     return 'draft';
@@ -4296,6 +4301,9 @@ function checkNote(row) {
   const check = row.check;
   if (check !== null && typeof check === 'object' && check.running === true) {
     return 'checking…';
+  }
+  if (check?.state === 'not_needed') {
+    return 'check not needed';
   }
   if (check === null || typeof check !== 'object' || check.state === 'none') {
     return 'not checked';
@@ -4341,7 +4349,9 @@ function queueCard(row) {
   const note = checkNote(row);
   const noteChip = (className) => {
     const chip = button(className, note, { ticket: key });
-    chip.setAttribute('title', `${note}: open the ticket${row.check !== null && typeof row.check === 'object' && row.check.state !== 'none' ? ' and the check\'s findings' : ''}`);
+    // A Task that needs no check (SF-130): the chip's title is the reason.
+    chip.setAttribute('title', note === 'check not needed' && typeof row.check?.check_reason === 'string' ? row.check.check_reason
+      : `${note}: open the ticket${row.check !== null && typeof row.check === 'object' && row.check.state !== 'none' ? ' and the check\'s findings' : ''}`);
     return chip;
   };
   head.append(noteChip('tag cnote'));
@@ -5793,6 +5803,10 @@ function tkCheckWord(row, view) {
   if (tkChecking(keyOf(row), view)) {
     return 'Checking the plan…';
   }
+  // A Task that needs no check (SF-130): the board's summary says so, with checkNeed's reason.
+  if (row.check?.state === 'not_needed') {
+    return `Plan check not needed: ${row.check.check_reason ?? ''}`;
+  }
   const record = view.check;
   if (record === null) {
     return 'Plan not checked yet';
@@ -5969,14 +5983,33 @@ function tkWaits(plan) {
   });
 }
 
+// The plan-check rounds of the ticket, every version (SF-130): "N rounds · $X" ("at least $X" when a
+// cost is unknown), or "no rounds yet".
+function tkRounds() {
+  const data = state.tk.data;
+  const rounds = typeof data?.check_rounds === 'number' ? data.check_rounds : 0;
+  if (rounds === 0) {
+    return el('div', 'muted fs12 tk-rounds', 'no rounds yet');
+  }
+  return el('div', 'muted fs12 tk-rounds', roundsText(rounds, data.check_usd, data.check_usd_complete !== false, money));
+}
+
+// Plan-check rounds and their cost in words (SF-130): "N rounds · $X", "at least $X" when a cost
+// is unknown; format: the page's money or the Stats page's.
+const roundsText = (rounds, usd, complete, format) => `${counted(rounds, 'round')} · ${complete ? format(usd) : `at least ${format(usd)}`}`;
+
 // The Plan check card: the result in words, the findings with their kind in words, what the checker
-// understood (clamped) and the files it expects to change; the date, model and cost.
+// understood (clamped) and the files it expects to change; the date, model and cost; the rounds and
+// their cost (SF-130). A Task that needs no check (SF-130) says why instead of a result.
 function tkCheckCard(key, row, view, s) {
   const record = view.check;
   const output = record?.output ?? null;
   const failed = record !== null && (output === null || record.status === 'failed');
+  const notNeeded = row.check?.state === 'not_needed';
   const h3 = el('h3', '', 'Plan check ');
-  if (record === null) {
+  if (notNeeded) {
+    h3.append(el('span', 'tag', 'not needed'));
+  } else if (record === null) {
     h3.append(el('span', 'tag', 'not checked'));
   } else {
     h3.append(failed ? el('span', 'verdict stop', 'failed') : output.verdict === 'ready' ? el('span', 'verdict clean', 'ready') : el('span', 'verdict fix', 'not ready'));
@@ -5991,10 +6024,18 @@ function tkCheckCard(key, row, view, s) {
   if (checking) {
     content.push(el('p', 'fs13', 'Checking… a read-only session reads the plan and the code.'));
   }
+  if (notNeeded) {
+    if (!checking) {
+      content.push(el('p', 'fs13', `Not needed: ${row.check.check_reason ?? ''}. It starts from the queue without a check; Check the plan runs one anyway.`));
+    }
+    content.push(tkRounds());
+    return tkCard(h3, TK_HELP.check, ...content);
+  }
   if (record === null) {
     if (!checking) {
       content.push(el('p', 'fs13', row.draft ? 'Not checked yet. The plan is checked once the Context owner has written it.' : 'Not checked yet.'));
     }
+    content.push(tkRounds());
     return tkCard(h3, TK_HELP.check, ...content);
   }
   if (view.stale) {
@@ -6040,7 +6081,7 @@ function tkCheckCard(key, row, view, s) {
       content.push(details);
     }
   }
-  content.push(el('span', 'muted fs12', `${day(record.ended_at)} · ${record.model ?? 'default model'} · ${money(record.cost_usd)}`));
+  content.push(el('span', 'muted fs12', `${day(record.ended_at)} · ${record.model ?? 'default model'} · ${money(record.cost_usd)}`), tkRounds());
   return tkCard(h3, TK_HELP.check, ...content);
 }
 
@@ -7471,10 +7512,12 @@ function stStages(data) {
   const items = data.stages.map((row) => ({ ...row, label: ST_STAGES[row.stage] ?? row.stage }));
   const charts = el('div', 'st-charts');
   charts.append(stBars('findings', 'Findings per stage', items, ST_SEVERITIES.map((one) => ({ ...one, value: (row) => row.findings[one.key] })), String, 'No findings in this period.'));
-  section.append(charts, stTable(['Stage', 'Runs', 'Failed', 'Blocker', 'Major', 'Nit', 'Led to a fix', 'Cost', 'Tokens', 'Cost per run'], items.map((row) => [
+  // Rounds per ticket (SF-130): the plan check's (runs + failed) / tickets; "—" for the other stages.
+  section.append(charts, stTable(['Stage', 'Runs', 'Failed', 'Blocker', 'Major', 'Nit', 'Led to a fix', 'Cost', 'Tokens', 'Cost per run', 'Rounds per ticket'], items.map((row) => [
     row.label, String(row.runs), String(row.failed), String(row.findings.blocker), String(row.findings.major), String(row.findings.nit),
     row.stage === 'task_check' ? `${row.fixed} (Task revised)` : String(row.fixed), stMoney(row.cost_usd), stTokenLine(row.tokens),
     row.cost_usd === null || row.runs === 0 ? '—' : stMoney(row.cost_usd / row.runs),
+    typeof row.tickets === 'number' && row.tickets > 0 ? ((row.runs + row.failed) / row.tickets).toFixed(1) : '—',
   ])));
   return section;
 }
@@ -7523,15 +7566,24 @@ function stLoad(data) {
   return section;
 }
 
+// A job's plan checks (SF-130), all-time: "N rounds · $X" ("at least $X" when a cost is unknown),
+// "—" without one.
+function stPlanChecks(row) {
+  if (typeof row.plan_checks !== 'number' || row.plan_checks === 0) {
+    return '—';
+  }
+  return roundsText(row.plan_checks, row.plan_check_usd, row.plan_check_usd_complete !== false, stMoney);
+}
+
 function stJobs(data) {
   const section = stSection(`Jobs (${data.jobs.length})`);
   if (data.jobs.length === 0) {
     section.append(el('p', 'muted fs13', 'No job in this period.'));
     return section;
   }
-  section.append(stTable(['Workspace', 'Ticket', 'Title', 'State', 'Started', 'Iterations', 'Cost', 'Codex tokens', 'Claude B/M/N', 'Codex B/M/N', 'Time to ready'], data.jobs.map((row) => [
+  section.append(stTable(['Workspace', 'Ticket', 'Title', 'State', 'Started', 'Iterations', 'Cost', 'Plan', 'Codex tokens', 'Claude B/M/N', 'Codex B/M/N', 'Time to ready'], data.jobs.map((row) => [
     row.workspace, stLink({ kind: 'job', workspace: row.workspace, ticket: row.ticket, archived: row.archived }, row.ticket), row.title ?? '', row.state.replace(/_/g, ' '),
-    localTime(row.created_at).slice(0, 16), String(row.iterations), row.cost_complete ? stMoney(row.cost_usd) : `at least ${stMoney(row.cost_usd)}`, stTokens(row.codex_tokens),
+    localTime(row.created_at).slice(0, 16), String(row.iterations), row.cost_complete ? stMoney(row.cost_usd) : `at least ${stMoney(row.cost_usd)}`, stPlanChecks(row), stTokens(row.codex_tokens),
     stFindings(row.claude), stFindings(row.codex), stDuration(row.time_to_ready_s),
   ])));
   return section;

@@ -112,6 +112,8 @@ export interface StageRow {
   revised: number | null;
   // outcomes.fixed, or revised for the plan check.
   fixed: number;
+  // The plan check only (SF-130): the distinct tickets with a check record in the period; null otherwise.
+  tickets: number | null;
   cost_usd: number | null;
   tokens: ClaudeTokens | GateTokens | null;
 }
@@ -150,6 +152,11 @@ export interface JobRow {
   claude: Findings;
   codex: Findings;
   time_to_ready_s: number | null;
+  // The plan checks of its workspace and ticket (SF-130), all-time: every record, failed ones
+  // included; the sum of their known costs; false when a cost is unknown.
+  plan_checks: number;
+  plan_check_usd: number;
+  plan_check_usd_complete: boolean;
 }
 
 export type WarningKind = 'job_unusual' | 'review_churn' | 'stage_failing' | 'cost_spike';
@@ -871,7 +878,8 @@ export class Stats {
     };
 
     const stageOf = (stage: Stage): StageRow => ({
-      stage, runs: 0, failed: 0, findings: noFindings(), outcomes: stage === 'task_check' ? null : noOutcomes(), revised: stage === 'task_check' ? 0 : null, fixed: 0, cost_usd: null, tokens: null,
+      stage, runs: 0, failed: 0, findings: noFindings(), outcomes: stage === 'task_check' ? null : noOutcomes(), revised: stage === 'task_check' ? 0 : null, fixed: 0,
+      tickets: stage === 'task_check' ? 0 : null, cost_usd: null, tokens: null,
     });
     const stages = { claude_review: stageOf('claude_review'), codex_gate: stageOf('codex_gate'), task_check: stageOf('task_check') };
     const opinion = (): SecondOpinion & { dated: Array<SecondOpinionCase & { at: string }> } => ({ iterations: 0, caught: 0, findings: 0, fixed: 0, cases: [], dated: [] });
@@ -886,6 +894,16 @@ export class Stats {
     const readyTimes: number[] = [];
     const pushedIterations: number[] = [];
     const jobRows: Array<JobRow & { data: JobData }> = [];
+    // The plan checks of each ticket, all-time (SF-130).
+    const planChecks = new Map<string, { plan_checks: number; plan_check_usd: number; plan_check_usd_complete: boolean }>();
+    for (const record of checks.records) {
+      const key = `${record.workspace}/${record.ticket}`;
+      const sums = planChecks.get(key) ?? { plan_checks: 0, plan_check_usd: 0, plan_check_usd_complete: true };
+      sums.plan_checks += 1;
+      sums.plan_check_usd += record.cost ?? 0;
+      sums.plan_check_usd_complete &&= record.cost !== null;
+      planChecks.set(key, sums);
+    }
 
     for (const data of read) {
       const { job, summary, events, dir } = data;
@@ -1006,17 +1024,20 @@ export class Stats {
         jobRows.push({
           workspace: dir.workspace, ticket: job.ticket, dir: dir.name, archived: dir.archived, title: summary.title, state: job.state, created_at: job.created_at,
           iterations: job.iteration, cost_usd: summary.costs.reduce((total, cost) => total + (cost.cost ?? 0), 0), cost_complete: summary.costs.every((cost) => cost.cost !== null),
-          codex_tokens: job.gate_tokens, claude, codex, time_to_ready_s: timeToReady, data,
+          codex_tokens: job.gate_tokens, claude, codex, time_to_ready_s: timeToReady,
+          ...(planChecks.get(`${dir.workspace}/${job.ticket}`) ?? { plan_checks: 0, plan_check_usd: 0, plan_check_usd_complete: true }), data,
         });
       }
     }
 
-    // The plan check: its cost, runs, findings and revisions.
+    // The plan check: its cost, runs, findings, revisions and tickets.
+    const checkedTickets = new Set<string>();
     for (const record of checkRecords) {
       addCost('task_check', record.ended_at, record.cost, record.workspace, null);
       if (!inPeriod(record.ended_at)) {
         continue;
       }
+      checkedTickets.add(`${record.workspace}/${record.ticket}`);
       if (record.status === 'failed') {
         stages.task_check.failed += 1;
         continue;
@@ -1037,6 +1058,7 @@ export class Stats {
       stage.fixed = stage.outcomes!.fixed;
     }
     stages.task_check.fixed = stages.task_check.revised!;
+    stages.task_check.tickets = checkedTickets.size;
     stages.claude_review.cost_usd = roles.get('claude_review')!.cost_usd;
     stages.claude_review.tokens = roles.get('claude_review')!.tokens;
     stages.codex_gate.tokens = roles.get('codex_gate')!.tokens;

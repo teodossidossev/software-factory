@@ -27,7 +27,7 @@ import { runStructuredSession, SEVERITIES, SEVERITY_DEFINITIONS, type Severity }
 import { collectRules } from './rules-docs.js';
 import { matchesGlob, scopeOf } from './rules.js';
 import { absoluteRule, pathDenials, prepareTaskChecksDir, TASK_CHECK_DIR_UNSAFE } from './sandbox-denials.js';
-import { ARCHIVE_DIR, isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskScope, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
+import { ARCHIVE_DIR, checkNeed, isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskScope, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { addDetachedWorktree, removeWorktree } from './worktree.js';
 
 export const FINDING_KINDS = ['decision', 'contradiction', 'missing', 'overreach', 'unclear'] as const;
@@ -246,23 +246,29 @@ export class CheckStore {
 
   // The check that ended last, of any version of the Task file, or undefined.
   async last(workspace: string, ticket: string): Promise<CheckRecord | undefined> {
+    return (await this.records(workspace, ticket)).reduce<CheckRecord | undefined>((last, record) => (last === undefined || record.ended_at > last.ended_at ? record : last), undefined);
+  }
+
+  // Every stored check of the ticket, of every version of its Task file (SF-130: its rounds and
+  // cost), failed ones included, in the order they ended; an unreadable file is left out.
+  async records(workspace: string, ticket: string): Promise<CheckRecord[]> {
     let names: string[];
     try {
       names = await readdir(this.#dir(workspace, ticket));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return undefined;
+        return [];
       }
       throw error;
     }
-    let last: CheckRecord | undefined;
-    for (const name of names.filter((entry) => /^[0-9a-f]{16}\.json$/.test(entry))) {
+    const records: CheckRecord[] = [];
+    for (const name of names.filter((entry) => /^[0-9a-f]{16}\.json$/.test(entry)).sort()) {
       const record = await readRecord(join(this.#dir(workspace, ticket), name));
-      if (record !== undefined && (last === undefined || record.ended_at > last.ended_at)) {
-        last = record;
+      if (record !== undefined) {
+        records.push(record);
       }
     }
-    return last;
+    return records.sort((a, b) => (a.ended_at < b.ended_at ? -1 : a.ended_at > b.ended_at ? 1 : 0));
   }
 }
 
@@ -298,10 +304,13 @@ export function severityCounts(output: CheckOutput | null): Record<Severity, num
 }
 
 // What the board shows of a ticket's last check: none, the verdict (ready, not_ready) or failed;
-// stale when it read another version of the Task file than the current one; running while one runs
-// in sf serve; and the note of Start's confirmation.
+// not_needed (SF-130) when the current Task file has no check and checkNeed says it needs none, with
+// check_reason, checkNeed's reason (null otherwise); stale when it read another version of the Task
+// file than the current one; running while one runs in sf serve; and the note of Start's
+// confirmation.
 export interface CheckSummary {
-  state: 'none' | 'ready' | 'not_ready' | 'failed';
+  state: 'none' | 'ready' | 'not_ready' | 'failed' | 'not_needed';
+  check_reason: string | null;
   stale: boolean;
   running: boolean;
   blockers: number;
@@ -312,8 +321,12 @@ export interface CheckSummary {
 }
 
 // The note of Start's confirmation: "not checked", "stale", "check failed" or "not ready: N blocker,
-// M major"; null for a ready check of the current Task file. Start is never refused for it.
+// M major"; null for a ready check of the current Task file and for a Task that needs none (SF-130).
+// Start is never refused for it.
 export function startNote(summary: Pick<CheckSummary, 'state' | 'stale' | 'blockers' | 'majors'>): string | null {
+  if (summary.state === 'not_needed') {
+    return null;
+  }
   if (summary.state === 'none') {
     return 'not checked';
   }
@@ -335,7 +348,7 @@ export function checkSummary(record: CheckRecord | undefined, currentSha: string
   const counts = severityCounts(record?.output ?? null);
   const state = record === undefined ? 'none' : recordVerdict(record);
   const stale = record !== undefined && record.sha256 !== currentSha;
-  const summary = { state, stale, running, blockers: counts.blocker, majors: counts.major, nits: counts.nit, ended_at: record?.ended_at ?? null } as const;
+  const summary = { state, check_reason: null, stale, running, blockers: counts.blocker, majors: counts.major, nits: counts.nit, ended_at: record?.ended_at ?? null } as const;
   return { ...summary, start_note: startNote(summary) };
 }
 
@@ -699,13 +712,15 @@ async function currentTask(workspace: Workspace, ticket: string): Promise<{ text
   return undefined;
 }
 
-// The last check of a ticket as the views show it: the record, whether it is stale, and the
-// sha256 of the current Task file.
+// The last check of a ticket as the views show it: the record, whether it is stale, the sha256 of
+// the current Task file, and check_reason (SF-130): checkNeed's reason when the current Task file
+// has no check and needs none, else null.
 export interface CheckView {
   check: CheckRecord | null;
   stale: boolean;
   running: boolean;
   current_sha256: string | null;
+  check_reason: string | null;
 }
 
 // The check settings of a loaded Config: the review's executable, sandbox and model, the check's
@@ -844,12 +859,25 @@ export class TaskChecks {
     const workspace = await this.#options.resolve(name);
     const current = await currentTask(workspace, ticket);
     const check = (await this.store.last(name, ticket)) ?? null;
-    return { check, stale: check !== null && check.sha256 !== current?.sha256, running: this.isRunning(name, ticket), current_sha256: current?.sha256 ?? null };
+    const stale = check !== null && check.sha256 !== current?.sha256;
+    let reason: string | null = null;
+    if (current !== undefined && (check === null || stale)) {
+      const need = checkNeed(current.text, name);
+      if (!need.needed && (await this.store.read(name, ticket, current.sha256)) === undefined) {
+        reason = need.reason;
+      }
+    }
+    return { check, stale, running: this.isRunning(name, ticket), current_sha256: current?.sha256 ?? null, check_reason: reason };
   }
 
-  // The board's summary of a ticket's last check against its current Task file.
+  // The board's summary of a ticket's last check against its current Task file; not_needed (SF-130)
+  // when the view has a check_reason.
   async summary(name: string, ticket: string): Promise<CheckSummary> {
     const view = await this.view(name, ticket);
+    if (view.check_reason !== null) {
+      const summary = { state: 'not_needed', check_reason: view.check_reason, stale: false, running: view.running, blockers: 0, majors: 0, nits: 0, ended_at: null } as const;
+      return { ...summary, start_note: startNote(summary) };
+    }
     return checkSummary(view.check ?? undefined, view.current_sha256 ?? undefined, view.running);
   }
 

@@ -159,14 +159,53 @@ test('storage by the Task file\'s sha256: the file name, the last check, stale a
   assert.equal(await store.last('app', 'C-9'), undefined);
 
   // The summary and its note: not checked, stale, failed, not ready, ready.
-  assert.deepEqual(checkSummary(undefined, one), { state: 'none', stale: false, running: false, blockers: 0, majors: 0, nits: 0, ended_at: null, start_note: 'not checked' });
+  assert.deepEqual(checkSummary(undefined, one), { state: 'none', check_reason: null, stale: false, running: false, blockers: 0, majors: 0, nits: 0, ended_at: null, start_note: 'not checked' });
   const ok = record(one, '2026-11-05T10:00:00.000Z');
   assert.equal(checkSummary(ok, two).start_note, 'stale');
   assert.equal(checkSummary(ok, undefined).stale, true);
-  assert.deepEqual(checkSummary(ok, one), { state: 'not_ready', stale: false, running: false, blockers: 1, majors: 1, nits: 1, ended_at: ok.ended_at, start_note: 'not ready: 1 blocker, 1 major' });
+  assert.deepEqual(checkSummary(ok, one), { state: 'not_ready', check_reason: null, stale: false, running: false, blockers: 1, majors: 1, nits: 1, ended_at: ok.ended_at, start_note: 'not ready: 1 blocker, 1 major' });
   assert.equal(checkSummary(record(two, 'x', null), two).start_note, 'check failed');
   assert.equal(checkSummary(record(one, 'x', settleCheck('', { ...OUTPUT, findings: [finding('nit')] })), one).start_note, null);
   assert.equal(startNote({ state: 'ready', stale: true, blockers: 0, majors: 0 }), 'stale');
+});
+
+test('CheckStore.records (SF-130): every stored check of the ticket, all versions, failed ones included, in the order they ended', async () => {
+  const store = new CheckStore(join(temp, 'check-records'));
+  const one = taskSha256(taskText('C-1'));
+  const two = taskSha256(taskText('C-1', '', 'Twice.'));
+  const three = taskSha256(taskText('C-1', '', 'Thrice.'));
+  await store.write(record(two, '2026-11-05T11:00:00.000Z', null));
+  await store.write(record(one, '2026-11-05T10:00:00.000Z'));
+  await store.write(record(three, '2026-11-05T12:00:00.000Z'));
+  // A file that cannot be read is left out.
+  await writeFile(join(temp, 'check-records', 'checks', 'app', 'C-1', `${'f'.repeat(16)}.json`), 'not json');
+  assert.deepEqual((await store.records('app', 'C-1')).map((item) => [item.sha256, item.status]), [[one, 'checked'], [two, 'failed'], [three, 'checked']]);
+  assert.deepEqual(await store.records('app', 'C-9'), []);
+});
+
+test('TaskChecks.summary (SF-130): a Task that needs no check and has none of its current version is not_needed with the reason and no Start note; a record of it counts', async () => {
+  const repo = join(temp, 'summary-not-needed');
+  await mkdir(join(repo, '.software-factory'), { recursive: true });
+  const small = taskText('C-1', 'scope: [README.md]\n');
+  await writeFile(join(repo, '.software-factory', 'C-1.md'), small);
+  await writeFile(join(repo, '.software-factory', 'C-2.md'), taskText('C-2'));
+  const checks = new TaskChecks({
+    resolve: async () => ({ name: 'app', readCheckout: repo, workCheckout: repo }), claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 1, rulesMaxBytes: 49152,
+    stateDir: join(repo, 'state'), configDir: join(repo, 'config'), worktreeRoot: join(repo, 'worktrees'),
+  });
+  const words = small.split(/\s+/).filter((word) => word !== '').length;
+  assert.deepEqual(await checks.summary('app', 'C-1'), {
+    state: 'not_needed', check_reason: `small: 1 scope entries, ${words} words`, stale: false, running: false, blockers: 0, majors: 0, nits: 0, ended_at: null, start_note: null,
+  });
+  assert.equal((await checks.view('app', 'C-1')).check_reason, `small: 1 scope entries, ${words} words`);
+  // A large one (no scope) is not checked.
+  assert.deepEqual([(await checks.summary('app', 'C-2')).state, (await checks.summary('app', 'C-2')).start_note], ['none', 'not checked']);
+  // A stale record of an earlier version: still not needed.
+  await checks.store.write(record(taskSha256('earlier'), '2026-11-05T10:00:00.000Z'));
+  assert.equal((await checks.summary('app', 'C-1')).state, 'not_needed');
+  // A manual Check's record of the current version counts as today.
+  await checks.store.write(record(taskSha256(small), '2026-11-05T11:00:00.000Z'));
+  assert.deepEqual([(await checks.summary('app', 'C-1')).state, (await checks.summary('app', 'C-1')).check_reason], ['not_ready', null]);
 });
 
 // A workspace with a Task file; the check's record directory.
@@ -456,8 +495,8 @@ test('the dashboard: Check runs one check at a time, the tickets carry its summa
     const base = served.dashboard!;
     const tickets = async (): Promise<Array<Record<string, any>>> => JSON.parse((await fetchRaw(new URL('api/tickets', base))).body).tickets;
     const taskCheck = async (): Promise<Record<string, any>> => (await served.client.callTool({ name: 'task_check', arguments: { workspace: 'app', ticket: 'C-4' } })).structuredContent as Record<string, any>;
-    assert.deepEqual((await tickets())[0]!.check, { state: 'none', stale: false, running: false, blockers: 0, majors: 0, nits: 0, ended_at: null, start_note: 'not checked' });
-    assert.deepEqual(JSON.parse((await fetchRaw(new URL('api/tickets/app/C-4/check', base))).body), { check: null, stale: false, running: false, current_sha256: taskSha256(content) });
+    assert.deepEqual((await tickets())[0]!.check, { state: 'none', check_reason: null, stale: false, running: false, blockers: 0, majors: 0, nits: 0, ended_at: null, start_note: 'not checked' });
+    assert.deepEqual(JSON.parse((await fetchRaw(new URL('api/tickets/app/C-4/check', base))).body), { check: null, stale: false, running: false, current_sha256: taskSha256(content), check_reason: null });
     assert.deepEqual(await taskCheck(), { verdict: 'none', sha256: taskSha256(content), paraphrase: null, findings: [], files: [], error: null, model: null, checked_at: null, running: false, pending: false });
 
     // Two Checks at the same moment: one starts, the other is check_running; one session runs.
@@ -474,7 +513,7 @@ test('the dashboard: Check runs one check at a time, the tickets carry its summa
       assert.ok(Date.now() < deadline, 'the check did not end');
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    assert.deepEqual((await tickets())[0]!.check, { state: 'ready', stale: false, running: false, blockers: 0, majors: 0, nits: 1, ended_at: (await tickets())[0]!.check.ended_at, start_note: null });
+    assert.deepEqual((await tickets())[0]!.check, { state: 'ready', check_reason: null, stale: false, running: false, blockers: 0, majors: 0, nits: 1, ended_at: (await tickets())[0]!.check.ended_at, start_note: null });
     const view = JSON.parse((await fetchRaw(new URL('api/tickets/app/C-4/check', base))).body);
     assert.deepEqual([view.stale, view.check.output.verdict, Object.keys(view.check.output)[0]], [false, 'ready', 'paraphrase']);
     assert.equal((await reviewLog(env)).length, 1);

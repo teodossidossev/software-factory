@@ -34,14 +34,23 @@ rule changes, change it here, through a pull request like any other change.
   (`.software-factory/<ticket>.md`): goal, agreed decisions, behaviour, out of scope, tests, docs,
   acceptance, Review brief, and `lands_after` dependencies. Decisions the user must make are asked
   first; the Task file never leaves one open.
-- Run the Task check (`sf check-task <ws> <ticket>` or Check on the board) on larger Task files
-  and fix what it finds before Start.
+- **Lean Task files.** About 800 words for a change under 300 lines, 1,200 words up to 1,000
+  lines; split anything larger. The content: goal and agreed basis, decisions, behaviour as
+  outcomes, out of scope, tests as cases, acceptance, `scope:` and a Review brief. No pseudo-code:
+  name the files and the interfaces the plan decides on, never the statements. Product tickets
+  carry `check: required`. A small, scoped Task (up to 10 `scope:` paths without globs, no
+  `lands_after` ticket of another workspace, at most 1,200 words) starts without a plan check;
+  every other one is checked by itself after its write, and you fix what the check finds before
+  Start. Check on the board or `sf check-task <ws> <ticket>` runs one in any case.
+- **Placeholders.** No company or person names in this repository's Task files, MR texts and
+  commits. Use placeholders: `product-frontend` for a repository, `ABC-n` for a ticket, "the user"
+  for a person.
 - Wait for jobs with a background watcher; do not poll. Read job results with short summaries
   (states, verdicts, counts), never whole logs or diffs.
 - At most three jobs run at once (the user's plan allows it since 2026-11-05).
 - The run queue starts tickets by itself (`sf queue add <ws> <ticket>`, `sf queue list`,
-  `sf queue limit N`); it starts a ticket only when its plan check says ready (`sf queue force` to
-  override) and its `lands_after` tickets are merged.
+  `sf queue limit N`); it starts a ticket only when its plan check says ready or is not needed
+  (`sf queue force` to override) and its `lands_after` tickets are merged.
 - When a job of `software-factory` is ready for review (`ready_for_human_review`):
   1. Do not edit its `mr.md`: the push must carry exactly the prepared commit's message (SF-080).
   2. `sf mr create software-factory <ticket>`, then `sf mr merge software-factory <ticket>`.

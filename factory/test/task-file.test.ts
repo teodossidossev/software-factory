@@ -8,7 +8,7 @@ import { after, before, test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
 import { JobStore } from '../src/jobs.js';
 import type { Workspace } from '../src/registry.js';
-import { appendFix, checkTaskContent, landsAfter, MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskScope, taskSha256, writeTask } from '../src/task-file.js';
+import { appendFix, checkNeed, checkTaskContent, landsAfter, MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskScope, taskSha256, writeTask } from '../src/task-file.js';
 
 const VALID = '---\nticket: PROJ-1\ntitle: Export as CSV\nbase: master\n---\n\n# PROJ-1: Export as CSV\n';
 
@@ -206,4 +206,48 @@ test('writeTask (SF-064): every image reference into the ticket\'s folder must n
   await assert.rejects(writeTask(workspace, 'PROJ-1', `${ok}![t](PROJ-1/3.png)\n`, jobs), (error: unknown) => error instanceof FactoryError && error.code === 'attachment_missing');
   // appendFix is not checked.
   assert.match(await appendFix(workspace, 'PROJ-1', 1, '![gone](PROJ-1/7.png)'), /## Fix 1\n\n!\[gone\]\(PROJ-1\/7\.png\)/);
+});
+
+// SF-130: whether a Task needs a plan check, and why.
+const taskWith = (front: string, body = 'Small change.'): string => `---\nticket: PROJ-1\ntitle: T\nbase: main\n${front}---\n\n# PROJ-1: T\n\n${body}\n`;
+const SCOPE = 'scope: [src/a.ts, test/a.test.ts]\n';
+
+test('checkNeed (SF-130): a small scoped Task is not needed, with its scope entries and words', () => {
+  // ---, ticket:, PROJ-1, title:, T, base:, main, scope:, [src/a.ts,, test/a.test.ts], ---, #, PROJ-1:, T, Small, change.
+  assert.deepEqual(checkNeed(taskWith(SCOPE), 'web'), { needed: false, reason: 'small: 2 scope entries, 16 words' });
+  // Own-workspace lands_after, given bare or with its own workspace, does not count.
+  assert.equal(checkNeed(taskWith(`${SCOPE}lands_after: [PROJ-0, web/PROJ-2]\n`), 'web').needed, false);
+});
+
+test('checkNeed (SF-130): each condition with its reason, the first match giving it', () => {
+  assert.deepEqual(checkNeed(taskWith('check: required\n'), 'web'), { needed: true, reason: 'check: required' });
+  // An unknown value counts as required.
+  assert.deepEqual(checkNeed(taskWith(`check: maybe\n${SCOPE}`), 'web'), { needed: true, reason: 'check: required' });
+  assert.deepEqual(checkNeed(taskWith(''), 'web'), { needed: true, reason: 'no scope' });
+  assert.deepEqual(checkNeed(taskWith('scope: []\n'), 'web'), { needed: true, reason: 'no scope' });
+  assert.deepEqual(checkNeed('no front matter at all', 'web'), { needed: true, reason: 'no scope' });
+  const eleven = Array.from({ length: 11 }, (_, index) => `src/f${index}.ts`).join(', ');
+  assert.deepEqual(checkNeed(taskWith(`scope: [${eleven}]\n`), 'web'), { needed: true, reason: 'scope has 11 entries' });
+  const ten = Array.from({ length: 10 }, (_, index) => `src/f${index}.ts`).join(', ');
+  assert.equal(checkNeed(taskWith(`scope: [${ten}]\n`), 'web').needed, false);
+  assert.deepEqual(checkNeed(taskWith('scope: [src/**, README.md]\n'), 'web'), { needed: true, reason: 'scope has a glob' });
+  assert.deepEqual(checkNeed(taskWith(`${SCOPE}lands_after: [PROJ-0, api/API-7]\n`), 'web'), { needed: true, reason: 'lands after api/API-7' });
+  // The first match: more than 10 entries before a glob.
+  assert.equal(checkNeed(taskWith(`scope: [${ten}, src/**]\n`), 'web').reason, 'scope has 11 entries');
+});
+
+test('checkNeed (SF-130): words are the whitespace-separated tokens of the whole file, front matter included', () => {
+  const head = taskWith(SCOPE, '');
+  const headWords = head.split(/\s+/).filter((word) => word !== '').length;
+  const at = taskWith(SCOPE, Array.from({ length: 1200 - headWords }, () => 'word').join(' \n\t '));
+  assert.equal(checkNeed(at, 'web').reason, 'small: 2 scope entries, 1200 words');
+  const over = taskWith(SCOPE, Array.from({ length: 1201 - headWords }, () => 'word').join(' '));
+  assert.deepEqual(checkNeed(over, 'web'), { needed: true, reason: '1201 words' });
+});
+
+test('checkNeed (SF-130): check: skip wins over every condition', () => {
+  const big = Array.from({ length: 1300 }, () => 'word').join(' ');
+  const eleven = Array.from({ length: 11 }, (_, index) => `src/f${index}/**`).join(', ');
+  assert.deepEqual(checkNeed(taskWith(`check: skip\nscope: [${eleven}]\nlands_after: [api/API-7]\n`, big), 'web'), { needed: false, reason: 'check: skip' });
+  assert.deepEqual(checkNeed(taskWith('check: skip\n'), 'web'), { needed: false, reason: 'check: skip' });
 });

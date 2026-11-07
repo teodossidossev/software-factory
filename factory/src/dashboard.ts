@@ -38,7 +38,7 @@ import type { Job, JobState, JobStore } from './jobs.js';
 import { DECISIONS } from './ledger.js';
 import { DIGEST_DEFAULTS, HANDOFF_MODES, WORKSPACE_COLORS, WORKSPACE_NAME_PATTERN } from './registry.js';
 import type { Setup, TicketRow } from './setup.js';
-import type { CheckSummary, TaskChecks } from './task-check.js';
+import type { CheckRecord, CheckSummary, TaskChecks } from './task-check.js';
 import { turnLimitLine } from './turn-limit.js';
 import { MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskScope, taskSha256, TICKET_PATTERN } from './task-file.js';
 import { TicketHistory } from './ticket-history.js';
@@ -113,7 +113,8 @@ export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'editWo
 export type DashboardDigests = Pick<Digests, 'list' | 'read' | 'start'>;
 
 // The Task checks (SF-054): start one, a ticket's view and its board summary.
-export type DashboardChecks = Pick<TaskChecks, 'start' | 'view' | 'summary'>;
+// store: the records of a ticket's checks, its plan-check rounds and cost (SF-130).
+export type DashboardChecks = Pick<TaskChecks, 'start' | 'view' | 'summary' | 'store'>;
 
 // The run queue (SF-071): its view for the tickets payload and the board's changes.
 // rule: the rule at a usage limit's reset (SF-072). force: the card's Start anyway (SF-086);
@@ -1374,8 +1375,10 @@ export async function startDashboard(
 
   // GET api/tickets/<ws>/<ticket>/page (SF-081): the planned ticket page in one payload: the tickets
   // row with its conversation, the Task file and its sha256 (the version a Save starts from), the
-  // plan in plain words, the last check (null without the Task checks), the history, newest first,
-  // and queue null (SF-071 adds it). A ticket that is not in the tickets list is an empty 404.
+  // plan in plain words, the last check (null without the Task checks), the plan-check rounds of
+  // every version (SF-130: check_rounds, failed ones included; check_usd, the sum of the known costs;
+  // check_usd_complete, false when a cost is unknown; all-time), the history, newest first, and
+  // queue null (SF-071 adds it). A ticket that is not in the tickets list is an empty 404.
   async function ticketPage(res: ServerResponse, rest: string[], query: URLSearchParams): Promise<void> {
     const key = jobKey(rest[0], rest[1]);
     const row = key === undefined || [...query.keys()].length > 0 ? undefined : (await setup.tickets()).find((entry) => entry.workspace === key[0] && entry.ticket === key[1]);
@@ -1391,9 +1394,11 @@ export async function startDashboard(
       return;
     }
     let check = null;
+    let records: CheckRecord[] = [];
     if (checks !== undefined) {
       try {
         check = await checks.view(...key);
+        records = await checks.store.records(...key);
       } catch (error) {
         console.error(error);
       }
@@ -1403,6 +1408,9 @@ export async function startDashboard(
       task: { text: file.text, sha256: file.sha256 },
       plan: planOf(file.text, row),
       check,
+      check_rounds: records.length,
+      check_usd: records.reduce((total, record) => total + (record.cost_usd ?? 0), 0),
+      check_usd_complete: records.every((record) => record.cost_usd !== null),
       history: await history.timeline(...key, { sha256: file.sha256, mtime: file.mtime }),
       queue: null,
     });

@@ -663,3 +663,79 @@ test('sf serve: a Task file written through write_task is checked without a clic
     await stop(served);
   }
 });
+
+// SF-130: a small, scoped Task needs no plan check.
+const small = (ticket: string): string => text(ticket).replace('base: main\n', 'base: main\nscope: [README.md]\n');
+
+test('SF-130: no automatic check of a small Task, from a trigger or the queue\'s trigger; a large one runs', async () => {
+  const r = await rig('auto-small');
+  await r.put('S-1', small('S-1'));
+  await r.put('L-1');
+  r.auto.trigger('app', 'S-1');
+  r.auto.trigger('app', 'L-1');
+  await advance(r, MINUTE);
+  assert.deepEqual(r.runner.starts, ['auto app/L-1']);
+  assert.equal(r.auto.isPending('app', 'S-1'), false);
+  // The queue's trigger schedules nothing for it.
+  await r.auto.triggerIfUnchecked('app', 'S-1');
+  assert.equal(r.auto.isPending('app', 'S-1'), false);
+  await advance(r, MINUTE);
+  assert.deepEqual(r.runner.starts, ['auto app/L-1']);
+});
+
+test('SF-130: the plan check of a small Task with no record is not_needed, even while a trigger is pending; a manual Check of it runs, and its record counts', async () => {
+  const { checks, dir, release } = await realChecks('auto-small-manual');
+  const content = small('S-2').replace('base: main', 'base: -nope');
+  await writeFile(join(dir, '.software-factory', 'S-2.md'), content);
+  const clock = new FakeClock();
+  const workspace: Workspace = { name: 'app', readCheckout: dir, workCheckout: dir };
+  const auto = new AutoChecks({ checks, jobs: { read: async () => undefined }, resolve: async () => workspace, workspaces: async () => [], parallel: 1, timers: clock });
+  release();
+  assert.deepEqual(await planCheck(checks, auto, 'app', 'S-2'), { state: 'not_needed', blockers: 0, majors: 0 });
+  auto.trigger('app', 'S-2');
+  assert.equal((await planCheck(checks, auto, 'app', 'S-2')).state, 'not_needed');
+  // A manual Check always runs.
+  assert.equal((await checks.start('app', 'S-2')).started, true);
+  const deadline = Date.now() + 10_000;
+  while (checks.isRunning('app', 'S-2')) {
+    assert.ok(Date.now() < deadline, 'the manual check did not end');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal((await checks.store.read('app', 'S-2', taskSha256(content)))?.status, 'failed');
+  assert.deepEqual(await planCheck(checks, auto, 'app', 'S-2'), { state: 'failed', blockers: 0, majors: 0 });
+  await auto.idle();
+});
+
+test('sf serve (SF-130): write_task of a small Task answers not_needed with its reason and no check runs, nor from the queue; with the automatic checks off the answer is off', { timeout: 60_000 }, async () => {
+  const { env } = await autoEnv('auto-serve-small');
+  await reviewScript(env, [{ output: OUTPUT }]);
+  const served = await serve(env);
+  try {
+    const content = task('N-1', 'Small').replace('base: main\n', 'base: main\nscope: [README.md]\n');
+    const written = (await served.client.callTool({ name: 'write_task', arguments: { workspace: 'app', ticket: 'N-1', content } })).structuredContent as Record<string, unknown>;
+    const words = content.split(/\s+/).filter((word) => word !== '').length;
+    assert.deepEqual([written.check, written.check_reason, written.check_after_seconds], ['not_needed', `small: 1 scope entries, ${words} words`, undefined]);
+    assert.equal((await runCli(env, ['queue', 'hold'])).code, 0);
+    assert.equal((await runCli(env, ['queue', 'add', 'app', 'N-1'])).code, 0);
+    // Longer than the delay (300 ms) and the watcher's event: no session ran.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    await assert.rejects(reviewLog(env));
+    const row = (JSON.parse((await fetchRaw(new URL('api/tickets', served.dashboard!))).body).tickets as Array<Record<string, any>>).find((entry) => entry.ticket === 'N-1');
+    assert.deepEqual([row?.check?.state, row?.check?.check_reason, row?.check?.start_note, row?.queue_reason], ['not_needed', written.check_reason, null, null]);
+    // A large Task is scheduled.
+    const large = (await served.client.callTool({ name: 'write_task', arguments: { workspace: 'app', ticket: 'N-2', content: task('N-2', 'Large') } })).structuredContent as Record<string, unknown>;
+    assert.deepEqual([large.check, large.check_reason], ['scheduled', undefined]);
+  } finally {
+    await stop(served);
+  }
+  const off = await newEnv('auto-serve-off');
+  await newRepo(off, 'auto-serve-off-repo', false);
+  const servedOff = await serve(off);
+  try {
+    const content = task('N-3', 'Small').replace('base: main\n', 'base: main\nscope: [README.md]\n');
+    const written = (await servedOff.client.callTool({ name: 'write_task', arguments: { workspace: 'app', ticket: 'N-3', content } })).structuredContent as Record<string, unknown>;
+    assert.equal(written.check, 'off');
+  } finally {
+    await stop(servedOff);
+  }
+});

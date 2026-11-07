@@ -207,8 +207,8 @@ The Task file is everything the Implementer and the reviewers know about the tic
 ask you a question between Start and your own review, so leave no decision open.
 
 - **The front matter** (all keys: [Configuration](configuration.md#the-task-files-front-matter)):
-  `ticket`, `title` and `base` are required; `scope`, `may_touch` and `lands_after` are optional
-  but worth it.
+  `ticket`, `title` and `base` are required; `scope`, `may_touch`, `lands_after` and `check` are
+  optional but worth it.
 - **The task**: what to build, where, the decisions made in planning and why, the acceptance
   criteria, and what is out of scope. Reference the repository's standards by path instead of
   copying them; the coding rules reach the agents by themselves.
@@ -226,6 +226,11 @@ ask you a question between Start and your own review, so leave no decision open.
   their branch or wait for the merge.
 - **Size**: about one merge request; roughly 20 to 30 files is a soft limit. Split bigger work into
   several Task files with `lands_after` between them.
+- **Lean**: about 800 words for a change under 300 lines, 1,200 words up to 1,000 lines; split
+  anything larger. A lean Task holds the goal and agreed basis, the decisions, the behaviour as
+  outcomes, what is out of scope, the tests as cases, the acceptance, `scope:` and a Review brief.
+  No pseudo-code: name the files and the interfaces the plan decides on, never the statements.
+  Product tickets carry `check: required`.
 - **Never write a `## Fix N` section**: those are the factory's.
 
 ## The Task check
@@ -257,15 +262,27 @@ major finding, and a scope entry no expected file matches is an `overreach` nit.
 | `not_ready` | at least one blocker or major finding ("not ready: N blocker, M major") |
 | `failed` | the check could not run or gave no valid answer; never counts as ready |
 | `none` (MCP) / "not checked" | the current version of the Task file has no check |
+| "check not needed" | the current version has no check, and the Task needs none (below) |
 
 A check belongs to one version of the Task file (and its images): once the file changes, the old
 check is **stale** ("· stale" on the card).
 
+**Where it pays.** A small, well-scoped Task starts without a check. A Task needs one when its
+front matter says `check: required` (any value but `skip` counts as required), when it has no
+`scope`, more than 10 scope entries, a glob in `scope`, a `lands_after` ticket of another
+workspace, or more than 1,200 words (the whole file, front matter included); `check: skip` never
+needs one. Any other Task is not needed: `write_task` answers `not_needed` with the reason, the
+card says "check not needed" (the reason on hover), the page "Plan check not needed: <reason>",
+and the queue starts it without a check. Write lean Task files (above) and most tickets start this
+way; product tickets carry `check: required`. Check by hand still runs, and its verdict counts.
+The Plan check card shows the ticket's rounds and their cost ("N rounds · $X"), and Stats shows
+them per job (the Plan column) and the rounds per ticket of the plan check.
+
 **When it runs.** `sf serve` runs it by itself 60 seconds after the last change of a Task file
 (written by `write_task`, saved on the page, or changed on disk), and when a ticket without a check
-is added to the queue, unless `SF_TASK_CHECK_AUTO=off`. It does not run for a skeleton, for a
-version that has a check already (a failed one too: press Check to run it again), or while a job
-of the ticket runs. `SF_TASK_CHECK_PARALLEL` (default 1) checks run at once. You can always run it:
+is added to the queue, unless `SF_TASK_CHECK_AUTO=off`. It does not run for a skeleton, for a Task
+that needs no check (above), for a version that has a check already (a failed one too: press
+Check to run it again), or while a job of the ticket runs. `SF_TASK_CHECK_PARALLEL` (default 1) checks run at once. You can always run it:
 
 ```sh
 sf check-task my-app APP-12   # prints the paraphrase, the findings by severity, the files, the verdict
@@ -277,7 +294,8 @@ or press *Check* in the card's ⋯ menu or *Check the plan* on the page. A check
 `sf check-task` exits 0 when the check ran (ready or not) and 1 when it failed.
 
 **How it gates the queue.** The queue starts a queued ticket only when the Task check of its
-current Task file is `ready`. Otherwise the card says why ("plan not ready: 1 blocker, 2 major",
+current Task file is `ready`, or when the Task needs no check and its current version has none (a
+check you ran by hand counts, a `not_ready` one holds it). Otherwise the card says why ("plan not ready: 1 blocker, 2 major",
 "plan check failed", "plan being checked", "plan not checked") and the queue tries the next entry.
 To start it anyway:
 

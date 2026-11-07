@@ -40,9 +40,9 @@ function payload(extra: Record<string, unknown> = {}) {
     ],
     by_workspace: [{ workspace: 'app', cost: { implementer: 1.2, claude_review: 0.3, simplify: 0, task_check: 0.5, explanation: 0 }, total_usd: 2, codex_tokens: 1100, jobs_started: 1, median_time_to_ready_s: 5400 }],
     stages: [
-      { stage: 'claude_review', runs: 2, failed: 1, findings: { blocker: 1, major: 2, nit: 3 }, outcomes, revised: null, fixed: 1, cost_usd: 0.3, tokens: { input: 1000, output: 10 } },
-      { stage: 'codex_gate', runs: 1, failed: 0, findings: { blocker: 0, major: 1, nit: 0 }, outcomes, revised: null, fixed: 1, cost_usd: null, tokens: { input: 1000, cached_input: 0, output: 100 } },
-      { stage: 'task_check', runs: 1, failed: 0, findings: { blocker: 0, major: 1, nit: 0 }, outcomes: null, revised: 1, fixed: 1, cost_usd: 0.5, tokens: null },
+      { stage: 'claude_review', runs: 2, failed: 1, findings: { blocker: 1, major: 2, nit: 3 }, outcomes, revised: null, fixed: 1, tickets: null, cost_usd: 0.3, tokens: { input: 1000, output: 10 } },
+      { stage: 'codex_gate', runs: 1, failed: 0, findings: { blocker: 0, major: 1, nit: 0 }, outcomes, revised: null, fixed: 1, tickets: null, cost_usd: null, tokens: { input: 1000, cached_input: 0, output: 100 } },
+      { stage: 'task_check', runs: 4, failed: 1, findings: { blocker: 0, major: 1, nit: 0 }, outcomes: null, revised: 1, fixed: 1, tickets: 2, cost_usd: 0.5, tokens: null },
     ],
     second_opinion: {
       codex_after_claude: { iterations: 4, caught: 1, findings: 2, fixed: 1, cases: [{ workspace: 'app', ticket: 'T-1', dir: 'T-1', archived: false, iteration: 2, findings: 2, fixed: 1 }] },
@@ -51,6 +51,7 @@ function payload(extra: Record<string, unknown> = {}) {
     jobs: [{
       workspace: 'app', ticket: 'T-1', dir: 'T-1', archived: false, title: 'Demo', state: 'needs_human', created_at: '2026-11-06T08:00:00.000Z', iterations: 2, cost_usd: 1.5,
       cost_complete: false, codex_tokens: 1100, claude: { blocker: 1, major: 2, nit: 3 }, codex: { blocker: 0, major: 1, nit: 0 }, time_to_ready_s: null,
+      plan_checks: 3, plan_check_usd: 0.75, plan_check_usd_complete: false,
     }],
     warnings: [
       { kind: 'job_unusual', text: 'T-1: cost $12.40 (usual $4.10) — compared with the last 30 finished jobs of app.', at: '2026-11-07T10:00:00.000Z', target: { kind: 'job', workspace: 'app', ticket: 'T-1', archived: false } },
@@ -76,7 +77,7 @@ function ticketRow(name: string) {
   return {
     workspace: 'app', ticket: name, title: `Ticket ${name}`, base: 'main', draft: false, request: null, job: null, lands_after: [],
     conversation: { message: 'Plan.', url: 'https://chatgpt.com/?q=Plan.' },
-    check: { state: 'none', stale: false, running: false, blockers: 0, majors: 0, nits: 0, ended_at: null, start_note: 'not checked' },
+    check: { state: 'none', check_reason: null, stale: false, running: false, blockers: 0, majors: 0, nits: 0, ended_at: null, start_note: 'not checked' },
   };
 }
 
@@ -216,10 +217,11 @@ test('stats client: the stage table, the by-role table with "not recorded" and "
   const page = await openStats();
   const stages = sectionOf(page, /^Review stages$/);
   assert.deepEqual(rowTexts(tableAfter(stages)), [
-    ['Stage', 'Runs', 'Failed', 'Blocker', 'Major', 'Nit', 'Led to a fix', 'Cost', 'Tokens', 'Cost per run'],
-    ['Claude review', '2', '1', '1', '2', '3', '1', '$0.30', '1k in · 10 out', '$0.15'],
-    ['Codex gate', '1', '0', '0', '1', '0', '1', '—', '1k in (0 cached) · 100 out', '—'],
-    ['Plan check', '1', '0', '0', '1', '0', '1 (Task revised)', '$0.50', 'not recorded', '$0.50'],
+    ['Stage', 'Runs', 'Failed', 'Blocker', 'Major', 'Nit', 'Led to a fix', 'Cost', 'Tokens', 'Cost per run', 'Rounds per ticket'],
+    ['Claude review', '2', '1', '1', '2', '3', '1', '$0.30', '1k in · 10 out', '$0.15', '—'],
+    ['Codex gate', '1', '0', '0', '1', '0', '1', '—', '1k in (0 cached) · 100 out', '—', '—'],
+    // SF-130: (4 runs + 1 failed) / 2 tickets.
+    ['Plan check', '4', '1', '0', '1', '0', '1 (Task revised)', '$0.50', 'not recorded', '$0.13', '2.5'],
   ]);
   const spend = sectionOf(page, /^Spend$/);
   assert.deepEqual(spend.querySelectorAll('.st-tile').map((tile) => tile.textContent), ['Cost$12.50Codex gate in tokens only', 'Codex gate tokens2.1M2.1M in (1.0M cached) · 40k out']);
@@ -232,7 +234,11 @@ test('stats client: the stage table, the by-role table with "not recorded" and "
   ]);
   assert.deepEqual(rowTexts(tableAfter(spend)).slice(5).map((row) => row[2]), ['not recorded', 'not recorded', 'not recorded']);
   assert.deepEqual(rowTexts(tableAfter(spend, 1))[1], ['app', '$1.20', '$0.30', '$0.00', '$0.50', '$0.00', '$2.00', '1.1k', '1', '1.5h']);
-  assert.deepEqual(rowTexts(tableAfter(sectionOf(page, /^Jobs/)))[1], ['app', 'T-1', 'Demo', 'needs human', '2026-11-06 10:00', '2', 'at least $1.50', '1.1k', '1 / 2 / 3', '0 / 1 / 0', '—']);
+  // SF-130: the Plan column, the job's plan-check rounds and cost, one unknown.
+  assert.deepEqual(rowTexts(tableAfter(sectionOf(page, /^Jobs/)))[0], ['Workspace', 'Ticket', 'Title', 'State', 'Started', 'Iterations', 'Cost', 'Plan', 'Codex tokens', 'Claude B/M/N', 'Codex B/M/N', 'Time to ready']);
+  assert.deepEqual(rowTexts(tableAfter(sectionOf(page, /^Jobs/)))[1], ['app', 'T-1', 'Demo', 'needs human', '2026-11-06 10:00', '2', 'at least $1.50', '3 rounds · at least $0.75', '1.1k', '1 / 2 / 3', '0 / 1 / 0', '—']);
+  const complete = await openStats(payload({ jobs: [{ ...payload().jobs[0], plan_check_usd_complete: true }, { ...payload().jobs[0], ticket: 'T-2', plan_checks: 0, plan_check_usd: 0 }] }));
+  assert.deepEqual(rowTexts(tableAfter(sectionOf(complete, /^Jobs/))).slice(1).map((row) => row[7]), ['3 rounds · $0.75', '—']);
   assert.deepEqual(sectionOf(page, /^Load$/).querySelectorAll('.st-tile').map((tile) => tile.textContent),
     ['Jobs started3', 'Finished2pushed 1 · aborted 1 · failed 0', 'Time to ready1.5hmedian', 'Iterations2median of pushed jobs']);
 

@@ -367,7 +367,8 @@ export type GateRecord =
 // (needs_human with code gate_rounds, gate_budget or gate_failed) with Claude's clean review; at
 // is when, unapplied the Codex items of the iteration's gate.json the change goes without, or the
 // gate's error when it failed ([] when no gate ran on the iteration). Over a ledger stop (SF-052:
-// review_churn, review_disputed) unapplied are the ledger's open findings, each with its id.
+// review_churn, review_disputed) or the Fix round limit (SF-115: iteration_limit) unapplied are
+// the ledger's open findings, each with its id, and the gate's items that reopen none of them.
 export interface GateOverride {
   at: string;
   code: string;

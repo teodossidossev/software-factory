@@ -505,7 +505,7 @@ test('board client: the job page says the sentence of the stop with the numbers 
     [{ error: { code: 'simplify_offered', message: 'x' } }, 'The simplification pass suggests changes. Simplify or skip'],
     [{ error: { code: 'escalated', message: 'x' }, stop: { items: [{}, {}], saves_lines: null } }, 'The Implementer asks you about 2 findings. Answer each: Accept risk or Must fix'],
     [{ error: { code: 'gate_rounds', message: 'x' }, gate_fixes: 3, stop: { items: [{}, {}], saves_lines: null } }, 'Codex asked for fixes 3 times, the limit. Accept the change without its 2 open findings, or tell the Implementer what to fix'],
-    [{ error: { code: 'iteration_limit', message: 'x' }, fixes: 5 }, 'The reviewers asked for fixes 5 times, the limit. Give the Implementer a direction, or abort'],
+    [{ error: { code: 'iteration_limit', message: 'x' }, fixes: 5 }, 'The reviewers asked for fixes 5 times, the limit. With a clean Claude review, accept the change without its open findings; otherwise give the Implementer a direction, or abort'],
     [{ error: { code: 'max_turns', message: 'x' }, iteration: 2 }, 'The Implementer used all its turns on iteration 3. Tell it to go on'],
     [{ error: { code: 'review_failed', message: 'x' }, iteration: 2 }, 'The Claude review of iteration 2 could not run. Retry it'],
     [{ error: { code: 'session_failed', message: "You've hit your limit · resets 3am (Europe/Sofia)" } }, 'The Claude usage limit was reached; it resets at 3am (Europe/Sofia). Tell the Implementer to go on after that'],

@@ -394,7 +394,9 @@ const STOPS: Array<[string, Record<string, unknown>, Record<string, unknown>, 'Y
   ['gate_budget', { gate_tokens: 1200345, stop: { items: [], saves_lines: null } }, { iterations: [iteration(1, { review: CLAUDE_FIX })] }, 'Your decision',
     "The Codex gate used its token budget for this job. Accept the change with Claude's clean review, or tell the Implementer what to do.", /^The Codex gate used 1,200,345 tokens\.$/, ['Send', 'Abort…']],
   ['iteration_limit', { fixes: 5 }, { iterations: [iteration(1, { review: CLAUDE_FIX, gate: GATE_FIX })] }, 'Your decision',
-    'The reviewers asked for fixes 5 times, the limit. Give the Implementer a direction, or abort.', /^#1majorREADME\.md.*#2nita\.txtEmpty\.Expected: A line\.#3majorREADME\.md/, ['Send', 'Restart…', 'Abort…']],
+    'The reviewers asked for fixes 5 times, the limit. With a clean Claude review, accept the change without its open findings; otherwise give the Implementer a direction, or abort.', /^#1majorREADME\.md.*#2nita\.txtEmpty\.Expected: A line\.#3majorREADME\.md/, ['Send', 'Restart…', 'Abort…']],
+  ['iteration_limit', { fixes: 5 }, { iterations: [iteration(1, { review: CLEAN, gate: GATE_FIX })] }, 'Your decision',
+    'The reviewers asked for fixes 5 times, the limit. With a clean Claude review, accept the change without its open findings; otherwise give the Implementer a direction, or abort.', /^#1majorREADME\.mdIt greets the world\.Expected: It greets the reader\.$/, ['Accept and prepare MR', 'Send', 'Restart…', 'Abort…']],
   ['max_turns', {}, {}, 'Your decision', 'The Implementer used all its turns on iteration 2. Tell it to go on.', /^$/, ['Tell it to go on', 'Abort…']],
   ['gate_failed', {}, { iterations: [iteration(1, { review: CLEAN, gate: GATE_FAILED })] }, 'Stopped',
     "The Codex gate stopped without a verdict. Accept with Claude's clean review, or tell the Implementer to go on.", /^Codex wrote no output\.$/, ['Accept and prepare MR', 'Tell it to go on', 'Abort…']],
@@ -591,6 +593,14 @@ test('stream client: each confirmation opens inline in the composer before it po
     [stopped('mr_push_failed', { prepared_commit: 'b'.repeat(40), worktree: null }), {}, 'Push again', 'Approve app/T-1?', 'Approve: push the branch', [['approve', {}]], () => undefined],
     [stopped('gate_rounds', {}), { iterations: [iteration(1, { review: CLEAN, gate: GATE_FIX })] }, 'Accept and prepare MR', 'Accept and prepare MR app/T-1?', 'Accept and prepare the MR', [['accept', {}]], (page) => {
       assert.equal(page.$('confirm-items-title').textContent, 'Codex items that will not be applied (1):');
+    }],
+    [stopped('iteration_limit', {}), { iterations: [iteration(1, { review: CLEAN, gate: GATE_FIX })] }, 'Accept and prepare MR', 'Accept and prepare MR app/T-1?', 'Accept and prepare the MR', [['accept', {}]], (page) => {
+      assert.match(page.$('confirm-text').textContent, /^Accepts iteration .* at the Fix round limit /);
+      assert.equal(page.$('confirm-items-title').textContent, 'Open findings that will not be applied (1):');
+    }],
+    [stopped('iteration_limit', {}), { iterations: [iteration(1, { review: CLEAN, gate: GATE_FIX })], ledger: [ledgerEntry('R1', 'open')] }, 'Accept and prepare MR', 'Accept and prepare MR app/T-1?', 'Accept and prepare the MR', [['accept', {}]], (page) => {
+      assert.match(page.$('confirm-text').textContent, /^Accepts iteration .* at the Fix round limit /);
+      assert.equal(page.$('confirm-items-title').textContent, 'Open findings that will not be applied (2):');
     }],
     [stopped('simplify_offered', {}), { iterations: [iteration(1, { review: CLEAN, simplify: SIMPLIFY })] }, 'Skip', 'Accept and prepare MR app/T-1?', 'Skip and prepare the MR', [['accept', {}]], (page) => {
       assert.match(page.$('confirm-text').textContent, /^Skips the simplification/);

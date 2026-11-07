@@ -90,7 +90,9 @@ const GATE_CODES = ['gate_rounds', 'gate_budget', 'gate_failed'];
 const LEDGER_CODES = ['review_churn', 'review_disputed'];
 // The offer of the simplification pass (SF-055): Simplify applies it, Accept and prepare MR skips it.
 const SIMPLIFY_CODE = 'simplify_offered';
-const ACCEPT_CODES = [...GATE_CODES, ...LEDGER_CODES, SIMPLIFY_CODE];
+// The Fix round limit (SF-115), which Accept and prepare MR takes on with a clean Claude review.
+const LIMIT_CODE = 'iteration_limit';
+const ACCEPT_CODES = [...GATE_CODES, ...LEDGER_CODES, LIMIT_CODE, SIMPLIFY_CODE];
 // The stops whose findings the user settles here (Accept risk, Must fix).
 const SETTLE_STOPS = ['escalated', ...LEDGER_CODES];
 // The entries of STOPS (aliases included) whose Retry runs MR preparation again without a new
@@ -301,8 +303,8 @@ const clock = (ts) => localTime(ts).slice(11, 16);
 
 // The user may accept the last iteration over the stopped gate (Accept and prepare MR): the gate
 // handed the job over (gate_rounds, gate_budget, gate_failed), or the ledger did (SF-052:
-// review_churn, review_disputed), and Claude's review of that iteration is clean. Guidance only:
-// the factory checks it again.
+// review_churn, review_disputed), or the job reached the Fix round limit (SF-115: iteration_limit),
+// and Claude's review of that iteration is clean. Guidance only: the factory checks it again.
 function gateAcceptable(detail) {
   const job = detail?.job;
   if (job === undefined || job === null || job.state !== 'needs_human' || !ACCEPT_CODES.includes(job.error?.code)) {
@@ -325,6 +327,9 @@ function actedClean(review) {
 // The Codex items the gate asked for on the job's last iteration, or its error: what Accept and
 // prepare MR goes without. ran is false when no gate ran on it (the budget was used up first).
 function gateLeftovers(detail) {
+  if (detail.job.error?.code === LIMIT_CODE) {
+    return limitLeftovers(detail);
+  }
   if (LEDGER_CODES.includes(detail.job.error?.code)) {
     return { items: ledgerOpen(detail), error: null, ran: true, ledger: true };
   }
@@ -339,6 +344,20 @@ function gateLeftovers(detail) {
 // fixes the user decided and the disputed contests.
 function ledgerOpen(detail) {
   return (detail.ledger ?? []).filter((entry) => entry.status === 'open' || entry.status === 'user_fix' || (entry.status === 'contested' && entry.dispute !== null));
+}
+
+// What an Accept at the Fix round limit goes without (SF-115), as the factory's #ledgerUnapplied
+// decides it: the ledger's open findings, and the items of the last iteration's gate that reopen
+// none of them and no accepted risk (a refused gate fix wrote no ledger entries).
+function limitLeftovers(detail) {
+  const open = ledgerOpen(detail);
+  const ids = new Set(open.map((entry) => entry.id));
+  const accepted = new Set((detail.ledger ?? []).filter((entry) => entry.status === 'accepted_risk').map((entry) => entry.id));
+  const gate = iterationOf(detail, detail.job.iteration)?.gate ?? null;
+  const rest = gate === null || typeof gate.error === 'string'
+    ? []
+    : (gate.items ?? []).filter((item) => !ids.has(item.reopens ?? '') && !accepted.has(item.reopens ?? ''));
+  return { items: [...open, ...rest], error: null, ran: true, limit: true };
 }
 
 // The job waits on the offer of the simplification pass (SF-055).
@@ -2587,7 +2606,7 @@ function stopActions(job, detail) {
     case 'gate_budget':
       return [...accept, SEND, ABORT];
     case 'iteration_limit':
-      return [SEND, RESTART, ABORT];
+      return [...accept, SEND, RESTART, ABORT];
     case 'gate_failed':
       return [...accept, GO_ON, ABORT];
     case 'review_failed':
@@ -3019,7 +3038,7 @@ function availability(action, job) {
   }
   if (action === 'accept') {
     return state.detail !== null && keyOf(state.detail.job) === keyOf(job) && gateAcceptable(state.detail)
-      ? '' : 'only after the gate or the ledger stopped the job, or the simplification pass offered suggestions, with a clean Claude review.';
+      ? '' : 'only after the gate or the ledger stopped the job or at the Fix round limit, or when the simplification pass offered suggestions, with a clean Claude review.';
   }
   const handover = HANDOVER_ACTIONS.find(([name]) => name === action);
   if (handover !== undefined) {
@@ -3369,6 +3388,8 @@ function openConfirm(action) {
     simplify: `Writes one Fix section “Simplify” with the suggestions below into the Task file; the Implementer applies them and the Claude review and the gate review the result as usual. The suggestions are recorded in the ledger as your choice, so a reviewer cannot ask for them back. It runs once per job.`,
     accept: job.error?.code === SIMPLIFY_CODE
       ? `Skips the simplification: iteration ${job.iteration}, which the reviewers found clean, goes on to MR preparation as it is. The suggestions go into the MR text under “Simplifications not applied”, for a follow-up ticket.`
+      : job.error?.code === LIMIT_CODE
+      ? `Accepts iteration ${job.iteration}, which Claude reviewed clean, at the Fix round limit (iteration_limit). The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. The open findings are not applied; the override is recorded in the job's history.`
       : LEDGER_CODES.includes(job.error?.code)
       ? `Accepts iteration ${job.iteration}, which Claude reviewed clean, over the ledger's stop (${job.error?.code}). The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. The open findings are not applied; the override is recorded in the job's history.`
       : `Overrides the Codex gate (${job.error?.code}): iteration ${job.iteration}, which Claude reviewed clean, goes on as after a clean gate. The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. The override is recorded in the job's history.`,
@@ -3404,7 +3425,9 @@ function renderConfirmItems(leftovers) {
     }));
     return;
   }
-  $('confirm-items-title').textContent = leftovers.ledger === true
+  $('confirm-items-title').textContent = leftovers.limit === true
+    ? (leftovers.items.length === 0 ? 'No open finding is left.' : `Open findings that will not be applied (${leftovers.items.length}):`)
+    : leftovers.ledger === true
     ? (leftovers.items.length === 0 ? 'No open finding is left in the ledger.' : `Open findings of the ledger that will not be applied (${leftovers.items.length}):`)
     : leftovers.error !== null
     ? `The gate failed, so no Codex item is known: ${leftovers.error}`
@@ -3616,7 +3639,7 @@ const STOPS = {
   },
   iteration_limit: {
     kind: 'decision', reason: 'Fix round limit reached', button: () => 'Give a direction',
-    sentence: (job) => `${typeof job.fixes === 'number' ? `The reviewers asked for fixes ${counted(job.fixes, 'time')}, the limit.` : 'The reviewers asked for fixes as often as the limit allows.'} Give the Implementer a direction, or abort.`,
+    sentence: (job) => `${typeof job.fixes === 'number' ? `The reviewers asked for fixes ${counted(job.fixes, 'time')}, the limit.` : 'The reviewers asked for fixes as often as the limit allows.'} With a clean Claude review, accept the change without its open findings; otherwise give the Implementer a direction, or abort.`,
   },
   max_turns: {
     kind: 'decision', reason: 'Turn limit reached', button: () => 'Tell it to go on',

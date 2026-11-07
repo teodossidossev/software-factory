@@ -71,7 +71,7 @@ effect and says only whether each token is set.
 | --- | --- | --- | --- |
 | `SF_MAX_TURNS` | `150` | positive integer | Steps (tool calls and answers) of one Implementer turn. A big ticket may need more, for example `SF_MAX_TURNS=300`. |
 | `SF_TURN_LIMIT_CONTINUES` | `1` | `0` to `10` | How many times the factory says "continue" by itself, per chain of turns, after a turn used all its steps while still changing files. `0` stops at the first limit (`max_turns`). |
-| `SF_MAX_ITERATIONS` | `5` | positive integer | Fix sections a job may get from the reviewers. The next one stops the job (`iteration_limit`). Your own messages do not count. |
+| `SF_MAX_ITERATIONS` | `5` | positive integer | Fix sections a job may get from the reviewers. The next one stops the job (`iteration_limit`). With a clean Claude review you may Accept instead. Your own messages do not count. |
 | `SF_CHECK_AFTER_START_MIN` | `15` | positive integer | `check_after_minutes` the job status reports during the first iteration (a hint for a polling client; the dashboard does not need it). |
 | `SF_CHECK_AFTER_FIX_MIN` | `5` | positive integer | The same hint for later iterations. |
 

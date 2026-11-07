@@ -401,7 +401,7 @@ export class TurnsPart {
     if (!overLimit && job.fixes >= this.core.config.maxIterations) {
       const message = `${job.fixes} Fix sections were written, the limit of SF_MAX_ITERATIONS`;
       // from: awaiting_review, ready_for_human_review (checkFix), needs_human (fromStop)
-      await this.core.transition(job, 'needs_human', 'fix', { code: 'iteration_limit', message: `${message}; the user decides how to go on.` });
+      await this.core.transition(job, 'needs_human', 'fix', { code: 'iteration_limit', message: `${message}; the user decides how to go on: sf accept takes iteration ${job.iteration} as it is when Claude's review of it is clean (the open findings go unapplied), sf say gives a direction.` });
       throw new FactoryError('iteration_limit', `${message}; the job needs the user.`);
     }
     const workspace = await this.core.resolve(workspaceName);

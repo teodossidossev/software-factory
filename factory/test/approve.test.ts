@@ -677,7 +677,7 @@ test('notifications: desktop and ntfy for the user\'s states, silent iterations,
 
   assert.equal((await refused(served, 'request_fix', { workspace: 'app', ticket: 'N-1', content: 'more' })).code, 'iteration_limit');
   await until(async () => received.length === 1 && (await desktop()).length === 1);
-  const body = 'branch: N-1-notify-me\niteration_limit: 1 Fix sections were written, the limit of SF_MAX_ITERATIONS; the user decides how to go on.';
+  const body = 'branch: N-1-notify-me\niteration_limit: 1 Fix sections were written, the limit of SF_MAX_ITERATIONS; the user decides how to go on: sf accept takes iteration 2 as it is when Claude\'s review of it is clean (the open findings go unapplied), sf say gives a direction.';
   assert.equal(received[0]!.body, body);
   assert.deepEqual(
     [received[0]!.headers.title, received[0]!.headers.priority, received[0]!.headers.tags, received[0]!.headers.authorization],

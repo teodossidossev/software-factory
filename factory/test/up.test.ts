@@ -6,6 +6,7 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { stopChild, trackChild } from './support/children.js';
 import { fetchRaw } from './support/dashboard-client.js';
 import { fakeLauncher } from './support/fake-launcher.js';
 import { CLI, type Env, newEnv, processEnv, runCli, temp } from './support/harness.js';
@@ -29,6 +30,7 @@ interface Up {
 // sf up with every byte of its output kept, resolved once serve is listening.
 async function spawnUp(env: Env, args: string[]): Promise<Up> {
   const child = spawn(process.execPath, [CLI, 'up', ...args], { env: processEnv(env), stdio: ['ignore', 'pipe', 'pipe'] });
+  trackChild(child, ['up', ...args]);
   let out = '';
   let err = '';
   child.stdout.on('data', (chunk: Buffer) => (out += chunk.toString('utf8')));
@@ -41,7 +43,12 @@ async function spawnUp(env: Env, args: string[]): Promise<Up> {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
   };
-  await until(() => READY.test(out), 'the listening line');
+  try {
+    await until(() => READY.test(out), 'the listening line');
+  } catch (error) {
+    await stopChild(child);
+    throw error;
+  }
   return {
     child, out: () => out, err: () => err, dashboard: DASHBOARD.exec(out)![1]!, until,
     stop: (signal = 'SIGINT') => new Promise((resolve) => {

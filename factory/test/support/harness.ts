@@ -4,7 +4,8 @@
 // (test/support/fake-codex.ts) for the gate, the planning tools driven through the official
 // MCP client and the job steps through the socket of sf serve: start as sf start sends it, and with
 // SF_TEST_HOOKS=on check and a reviewer's verdict without a review session (fix, clean). Importing it registers the before/after hooks
-// that create and remove the temp dir.
+// that create and remove the temp dir, and stop every sf process the tests started
+// (test/support/children.ts, SF-114).
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
@@ -21,6 +22,7 @@ import { cliRuleList, FACTORY_MCP_SERVER } from '../../src/sandbox-denials.js';
 import { rulesBlock } from '../../src/rules-docs.js';
 import { CheckStore, taskSha256 } from '../../src/task-check.js';
 import { writeTask } from '../../src/task-file.js';
+import { checkChildren, isServe, REFUSAL_MS, removeOnExit, stopChild, trackChild } from './children.js';
 
 export const CLI = fileURLToPath(new URL('../../src/cli.js', import.meta.url));
 export const FAKE = fileURLToPath(new URL('./fake-claude.js', import.meta.url));
@@ -31,7 +33,6 @@ const DASHBOARD = /dashboard (http:\/\/127\.0\.0\.1:\d+\/d\/[0-9a-f]{64}\/)/;
 export let temp: string;
 // The fake Codex executable (test/support/fake-codex.ts behind a shell wrapper), for SF_CODEX.
 export let fakeCodex: string;
-const running = new Set<ChildProcess>();
 // Everything the sf processes of this test file wrote to stdout and stderr (SF-088): the after hook
 // fails on a refused state change in it.
 const outputs: Array<{ command: string; text: string }> = [];
@@ -245,15 +246,31 @@ export async function readyCheck(env: Env, repo: string, ticket: string): Promis
   });
 }
 
+// A serve or up (expected to refuse) that still runs after REFUSAL_MS is stopped and rejects.
 export function runCli(env: Env, args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [CLI, ...args], { env: processEnv(env), stdio: ['ignore', 'pipe', 'pipe'] });
+    trackChild(child, args);
     collect(child, args);
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
+    const timer = isServe(args)
+      ? setTimeout(() => {
+        // First: the close the kill causes must not resolve the Promise.
+        timedOut = true;
+        void stopChild(child).then(() => reject(new Error(`sf ${args.join(' ')} did not exit within ${REFUSAL_MS / 1000} s; a refused start was expected:\n${stdout}${stderr}`)));
+      }, REFUSAL_MS)
+      : undefined;
     child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString('utf8')));
     child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString('utf8')));
-    child.once('close', (code) => resolve({ code, stdout, stderr }));
+    child.once('close', (code) => {
+      if (timedOut) {
+        return;
+      }
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr });
+    });
   });
 }
 
@@ -267,8 +284,7 @@ export async function mcpUrlOf(env: Env, printed: URL): Promise<URL> {
 export async function serve(env: Env, args: string[] = ['serve']): Promise<Served> {
   const child = spawn(process.execPath, [CLI, ...args], { env: processEnv(env), stdio: ['ignore', 'pipe', 'pipe'] });
   collect(child, args);
-  running.add(child);
-  child.once('exit', () => running.delete(child));
+  trackChild(child, args);
   let dashboard: URL | undefined;
   let output = '';
   const url = await new Promise<URL>((resolve, reject) => {
@@ -287,8 +303,14 @@ export async function serve(env: Env, args: string[] = ['serve']): Promise<Serve
     child.once('exit', (code) => reject(new Error(`sf serve exited with ${code}:\n${output}`)));
   });
   const client = new Client({ name: 'sf-011-execution', version: '0.0.0' });
-  const withToken = await mcpUrlOf(env, url);
-  await client.connect(new StreamableHTTPClientTransport(withToken));
+  let withToken: URL;
+  try {
+    withToken = await mcpUrlOf(env, url);
+    await client.connect(new StreamableHTTPClientTransport(withToken));
+  } catch (err) {
+    await stopChild(child);
+    throw err;
+  }
   return { child, client, url: withToken, output, dashboard, state: env.state };
 }
 
@@ -361,6 +383,7 @@ export async function waitFor(served: Served, ticket: string, state: string, ite
 
 before(async () => {
   temp = await realpath(await mkdtemp(join(tmpdir(), 'sf-exec-')));
+  removeOnExit(temp);
   fakeCodex = join(temp, 'fake-codex');
   await writeFile(fakeCodex, `#!/bin/sh\nexec '${process.execPath}' '${FAKE_CODEX_SCRIPT}' "$@"\n`);
   await chmod(fakeCodex, 0o755);
@@ -397,21 +420,32 @@ async function illegalTransitions(dir: string): Promise<string[]> {
 }
 
 after(async () => {
-  for (const child of running) {
-    child.kill('SIGKILL');
-  }
-  for (const pid of await runnerPids(temp).catch(() => [])) {
-    // Only a live `sf run` of these tests, never a process that reused a stale lock's pid.
-    const command = await readFile(`/proc/${pid}/cmdline`, 'utf8').catch(() => '');
-    if (command.includes(`${CLI}\0run\0`)) {
-      process.kill(pid, 'SIGKILL');
+  let problems: string[];
+  let illegal: string[];
+  try {
+    // The sf processes of the tests (SF-114): stopped, and a serve left running is a problem.
+    problems = await checkChildren(temp);
+    for (const pid of await runnerPids(temp).catch(() => [])) {
+      // Only a live `sf run` of these tests, never a process that reused a stale lock's pid.
+      const command = await readFile(`/proc/${pid}/cmdline`, 'utf8').catch(() => '');
+      if (command.includes(`${CLI}\0run\0`)) {
+        process.kill(pid, 'SIGKILL');
+      }
     }
+    // Before the temp directory goes: the runners' logs are in it.
+    illegal = await illegalTransitions(temp);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
   }
-  // Before the temp directory goes: the runners' logs are in it.
-  const illegal = await illegalTransitions(temp);
-  await rm(temp, { recursive: true, force: true });
-  if (illegal.length > 0) {
-    throw new assert.AssertionError({ message: `State changes outside JOB_TRANSITIONS (src/jobs.ts):\n${illegal.join('\n')}` });
+  const sections = [
+    ...(problems.length > 0 ? [`sf processes left running by this test file:\n${problems.join('\n')}`] : []),
+    ...(illegal.length > 0 ? [`State changes outside JOB_TRANSITIONS (src/jobs.ts):\n${illegal.join('\n')}`] : []),
+  ];
+  if (sections.length > 0) {
+    // A failed root after hook does not set the exit code of a plain `node <file>` run (Node 24), only
+    // of node --test: the file fails either way.
+    process.exitCode = 1;
+    throw new assert.AssertionError({ message: sections.join('\n\n') });
   }
 });
 

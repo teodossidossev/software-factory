@@ -89,7 +89,11 @@ the child's (1 when it was killed by a signal). `SF_TEST_CONCURRENCY=<positive i
 `npm test -- <args>` passes the arguments on to `node --test`, before the files. `npm run build` removes
 `dist/` first (`scripts/clean.mjs`), so only the current sources are compiled and no compiled test
 of a deleted source runs. `npm test` and `npm run test:browser` both build first. At the repository
-root, `npm run build`, `npm run typecheck` and `npm test` run the same scripts in `factory/`.
+root, `npm run build`, `npm run typecheck` and `npm test` run the same scripts in `factory/`. Since
+SF-114 every sf process a test starts is tracked by `test/support/children.ts` and stopped (SIGTERM,
+then SIGKILL after 5 s) at the end of its file, also on a failure or a signal, and a file whose tests
+leave an `sf serve` running fails; an `sf serve` a test expected to refuse fails the test after 30 s
+instead of hanging.
 
 Exit codes: 0 ok, 1 error, 2 usage. `sf check-task` exits 0 when the check ran (ready or not
 ready) and 1 when it failed. `sf smoke` exits 0 when every step passed, 1 otherwise. `sf approve`

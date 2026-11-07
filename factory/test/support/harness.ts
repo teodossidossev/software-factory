@@ -1,7 +1,8 @@
 // Shared helpers of the end-to-end tests: the real `sf serve` and `sf` CLI with private config
 // and state directories, throwaway Git repositories and the fake Claude Code
 // (test/support/fake-claude.ts) as the Implementer executable, the fake Codex
-// (test/support/fake-codex.ts) for the gate, the planning tools driven through the official
+// (test/support/fake-codex.ts) for the gate, run inside the fake bubblewrap (test/support/fake-bwrap.ts,
+// first on every sf process's PATH, SF-125), the planning tools driven through the official
 // MCP client and the job steps through the socket of sf serve: start as sf start sends it, and with
 // SF_TEST_HOOKS=on check and a reviewer's verdict without a review session (fix, clean). Importing it registers the before/after hooks
 // that create and remove the temp dir, and stop every sf process the tests started
@@ -10,7 +11,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { after, before } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
@@ -27,12 +28,17 @@ import { checkChildren, isServe, REFUSAL_MS, removeOnExit, stopChild, trackChild
 export const CLI = fileURLToPath(new URL('../../src/cli.js', import.meta.url));
 export const FAKE = fileURLToPath(new URL('./fake-claude.js', import.meta.url));
 const FAKE_CODEX_SCRIPT = fileURLToPath(new URL('./fake-codex.js', import.meta.url));
+const FAKE_BWRAP_SCRIPT = fileURLToPath(new URL('./fake-bwrap.js', import.meta.url));
 const READY = /listening on (http:\/\/127\.0\.0\.1:\d+\/mcp)\/<token>$/m;
 const DASHBOARD = /dashboard (http:\/\/127\.0\.0\.1:\d+\/d\/[0-9a-f]{64}\/)/;
 
 export let temp: string;
 // The fake Codex executable (test/support/fake-codex.ts behind a shell wrapper), for SF_CODEX.
 export let fakeCodex: string;
+// The folder of the fake bwrap (SF-125: test/support/fake-bwrap.ts, then an exec of the command
+// after "--"), first on every sf process's PATH: a nested real bubblewrap may not run where the
+// tests do, and the gate runs inside one while the sandbox is on.
+export let fakeBwrapBin: string;
 // Everything the sf processes of this test file wrote to stdout and stderr (SF-088): the after hook
 // fails on a refused state change in it.
 const outputs: Array<{ command: string; text: string }> = [];
@@ -79,7 +85,7 @@ export function git(cwd: string, ...args: string[]): string {
 
 export function processEnv(env: Env): NodeJS.ProcessEnv {
   return {
-    PATH: process.env.PATH,
+    PATH: `${fakeBwrapBin}${delimiter}${process.env.PATH ?? ''}`,
     HOME: env.home,
     SF_CONFIG_DIR: env.config,
     SF_STATE_DIR: env.state,
@@ -185,6 +191,12 @@ export async function probeLog(env: Env): Promise<Array<{ tool: string; input: R
 export async function codexScript(env: Env, runs: unknown[]): Promise<void> {
   await writeFile(join(env.home, 'fake-codex.json'), JSON.stringify({ runs }));
   await rm(join(env.home, 'fake-codex.count'), { force: true });
+}
+
+// The argv of each run of the fake bwrap (SF-125); none when it never ran.
+export async function bwrapLog(env: Env): Promise<Array<{ argv: string[] }>> {
+  const text = await readFile(join(env.home, 'fake-bwrap.log'), 'utf8').catch(() => '');
+  return text.trim().split('\n').filter((line) => line !== '').map((line) => JSON.parse(line));
 }
 
 // What the fake Codex logged of each run.
@@ -395,6 +407,17 @@ before(async () => {
   fakeCodex = join(temp, 'fake-codex');
   await writeFile(fakeCodex, `#!/bin/sh\nexec '${process.execPath}' '${FAKE_CODEX_SCRIPT}' "$@"\n`);
   await chmod(fakeCodex, 0o755);
+  fakeBwrapBin = join(temp, 'bwrap-bin');
+  await mkdir(fakeBwrapBin);
+  await writeFile(join(fakeBwrapBin, 'bwrap'), [
+    '#!/bin/sh',
+    `'${process.execPath}' '${FAKE_BWRAP_SCRIPT}' "$@" || exit $?`,
+    'while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done',
+    'shift',
+    'exec "$@"',
+    '',
+  ].join('\n'));
+  await chmod(join(fakeBwrapBin, 'bwrap'), 0o755);
 });
 
 // The pids of the job runners (SF-042) whose lock is under dir: they outlive sf serve by design.

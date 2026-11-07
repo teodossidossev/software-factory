@@ -12,9 +12,10 @@
 // paths (by denyRead only, never allowRead); and the file-tool guard, a PreToolUse hook every job
 // session gets, holds Write and Edit to the own worktree and the read tools out of the home
 // directory's other paths, by real path.
+// SF-125: the Codex gate runs inside bubblewrap under the same denyRead list (gateWrapper).
 // This module knows the file system, the registry and Git; it knows nothing about jobs.
 import type { HookCallback, Options, SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
-import { lstatSync } from 'node:fs';
+import { lstatSync, realpathSync, statSync } from 'node:fs';
 import { chmod, lstat, mkdir, readdir, readFile, readlink, realpath, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -855,6 +856,100 @@ export async function checkUserSettings(file: string, denials: SandboxDenials, h
   if (weakening !== undefined) {
     throw new FactoryError(USER_SETTINGS_WEAKEN_SANDBOX, `${weakening}; the session does not start (${USER_SETTINGS_WEAKEN_SANDBOX}). Fix the file, then tell the job to go on.`);
   }
+}
+
+// What the Codex gate's wrapper binds back (SF-125): the job's worktree (Codex's --cd), the Codex
+// executable, Codex's own directory (CODEX_HOME, else ~/.codex), the iteration's directory (the
+// schema and output files), the Task's images (the job's copy) and the system temporary directory.
+export interface GateWrapperOptions {
+  worktree: string;
+  codexPath: string;
+  codexHome: string;
+  iterationDir: string;
+  images: readonly string[];
+  tmp: string;
+}
+
+// The directory the Codex executable needs whole: the real path of its nearest node_modules
+// ancestor (its launcher spawns the sibling package of the platform's binary), else its own folder.
+function codexPackage(codexPath: string): string {
+  let real: string;
+  try {
+    real = realpathSync(codexPath);
+  } catch {
+    real = resolve(codexPath);
+  }
+  for (let dir = dirname(real); ; dir = dirname(dir)) {
+    if (basename(dir) === 'node_modules') {
+      return dir;
+    }
+    if (dirname(dir) === dir) {
+      return dirname(real);
+    }
+  }
+}
+
+// The mount that hides a denied path that exists now: an empty tmpfs over a directory, /dev/null
+// over a file or a socket; none for a path gone since the denials were built (bwrap could not make
+// its mount point under the read-only root).
+function hiding(path: string): string[] {
+  let directory: boolean;
+  try {
+    directory = statSync(path).isDirectory();
+  } catch {
+    return [];
+  }
+  return directory ? ['--tmpfs', path] : ['--ro-bind', '/dev/null', path];
+}
+
+const depth = (path: string): number => path.split(sep).filter((part) => part !== '').length;
+
+// The bwrap arguments the Codex gate runs under (SF-125), a later mount winning over an earlier one:
+//   1. the whole system read-only, a new /dev and /proc (--unshare-pid: an unprivileged bwrap mounts
+//      a procfs only in a PID namespace of its own), an empty /tmp, and an empty tmp when it is
+//      not under /tmp;
+//   2. every denyRead entry not under those temporary folders hidden (hiding);
+//   3. bound back read-only: the worktree, the images, the Codex package (codexPackage) and node's
+//      prefix (dirname(dirname(realpath(process.execPath)))); then the denyRead entries inside one
+//      of these binds and the binds inside such an entry, shallowest first, so that the most
+//      specific path wins: a .env of the worktree stays hidden, an image under jobs/ stays bound
+//      when a bind holds jobs/;
+//   4. bound back read-write: CODEX_HOME and the iteration's directory.
+// No --unshare-net: Codex reaches OpenAI, and its own read-only sandbox holds its commands.
+export function gateWrapper(denials: PathDenials, options: GateWrapperOptions): string[] {
+  const tmp = resolve(options.tmp);
+  const temporary = within(tmp, '/tmp') ? ['/tmp'] : ['/tmp', tmp];
+  const args = ['--die-with-parent', '--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', ...temporary.flatMap((dir) => ['--tmpfs', dir])];
+  const denied = [...new Set(denials.sandbox.denyRead.map((path) => resolve(path)))];
+  for (const path of denied.filter((entry) => !temporary.some((dir) => within(entry, dir)))) {
+    args.push(...hiding(path));
+  }
+  const readOnly = [...new Set([
+    resolve(options.worktree), ...options.images.map((path) => resolve(path)), codexPackage(options.codexPath),
+    dirname(dirname(realpathSync(process.execPath))),
+  ])];
+  for (const path of readOnly) {
+    args.push('--ro-bind', path, path);
+  }
+  const inside = (path: string, dirs: readonly string[]): boolean => dirs.some((dir) => dir !== path && within(path, dir));
+  const again = denied.filter((path) => inside(path, readOnly));
+  const rebound = readOnly.filter((path) => inside(path, again));
+  const fixUp = [...again.map((path) => ({ path, mount: () => hiding(path) })), ...rebound.map((path) => ({ path, mount: () => ['--ro-bind', path, path] }))];
+  // Stable: at the same depth a denial comes before a bind.
+  fixUp.sort((a, b) => depth(a.path) - depth(b.path));
+  for (const entry of fixUp) {
+    args.push(...entry.mount());
+  }
+  for (const path of [...new Set([resolve(options.codexHome), resolve(options.iterationDir)])]) {
+    args.push('--bind', path, path);
+  }
+  return args;
+}
+
+// The gate's wrapper for a denial scope: pathDenials(scope), then gateWrapper. The review pipeline
+// and the smoke's Gate sandbox step build it the same way.
+export async function gateWrapperFor(scope: DenialScope, options: GateWrapperOptions): Promise<string[]> {
+  return gateWrapper(await pathDenials(scope), options);
 }
 
 // Whether a path exists now (a link counts, dangling or not).

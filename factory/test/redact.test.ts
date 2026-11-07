@@ -1,5 +1,6 @@
 // Unit tests of the redaction of the reviewers' live events (SF-045): environment values, keys and
-// content from outside the worktree (~/.codex above all) never reach events.jsonl.
+// content from outside the worktree (~/.codex above all) never reach events.jsonl. SF-125: a
+// reviewer's output, redacted in its free-text fields only.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Redactor, WITHHELD } from '../src/redact.js';
@@ -305,4 +306,47 @@ test('a failure message: redacted; its detail withheld when it shows or names a 
   r.codexEvent(command('cat ~/.codex/auth.json', 'x'));
   assert.equal(r.failure('Codex reported an error: it says literal-file-content'), `Codex reported an error: ${WITHHELD}`);
   assert.equal(r.failure('Codex timed out after 900000 ms and was stopped (SIGTERM).'), 'Codex timed out after 900000 ms and was stopped (SIGTERM).');
+});
+
+test('output (SF-125): a reviewer\'s free text loses keys, long environment values and the given tokens; short values, quoted code and every other field stay', () => {
+  const token = 'a'.repeat(32) + '0123456789abcdef0123456789abcdef';
+  const env = { HOME: '/home/alice', PATH: '/usr/bin', FLAG: '1', BRANCH: 'main', DEPLOY_KEY_VALUE: 'deploy-value-0123456789', SAME: 'src/app.ts' };
+  const output = {
+    verdict: 'fix',
+    summary: `Leaks ghp_${'A'.repeat(36)} and deploy-value-0123456789.`,
+    items: [
+      {
+        path: 'src/app.ts', severity: 'major', reopens: 'R1', caused_by: '',
+        problem: `It logs the dashboard token ${token}; it quotes \`if (process.env.FLAG === "1") { checkout("main"); }\`.`,
+        expected: 'Remove deploy-value-0123456789 from the log.',
+      },
+    ],
+    accepted_sensitive: ['src/app.ts'],
+  };
+  const redacted = new Redactor({ cwd: WORKTREE, env, home: '/home/alice', secrets: [token] }).output(output);
+  assert.deepEqual(redacted, {
+    verdict: 'fix',
+    summary: 'Leaks [redacted] and [redacted].',
+    items: [
+      {
+        path: 'src/app.ts', severity: 'major', reopens: 'R1', caused_by: '',
+        problem: 'It logs the dashboard token [redacted]; it quotes `if (process.env.FLAG === "1") { checkout("main"); }`.',
+        expected: 'Remove [redacted] from the log.',
+      },
+    ],
+    accepted_sensitive: ['src/app.ts'],
+  });
+  // A copy: the reviewer's output itself is unchanged.
+  assert.ok(output.summary.includes('ghp_'));
+  // The structural fields stay even when they equal an environment value of 8 characters or more.
+  const structural = new Redactor({ cwd: WORKTREE, env: { VERDICT: 'clean-and-fix', SEVERITY_VALUE: 'major-value', PATH_VALUE: 'src/app.ts', IDS: 'R1-R2-R3-R4' }, home: '/home/alice' }).output({
+    summary: 'ok', suggestions: [{ path: 'src/app.ts', what: 'Drop src/app.ts', why: 'R1-R2-R3-R4 added it.', saves_lines: 3, ledger_ids: ['R1-R2-R3-R4'] }],
+    verdict: 'clean-and-fix', severity: 'major-value',
+  });
+  assert.deepEqual(structural, {
+    summary: 'ok', suggestions: [{ path: 'src/app.ts', what: 'Drop [redacted]', why: '[redacted] added it.', saves_lines: 3, ledger_ids: ['R1-R2-R3-R4'] }],
+    verdict: 'clean-and-fix', severity: 'major-value',
+  });
+  // Never withheld whole, whatever it names.
+  assert.equal(new Redactor({ cwd: WORKTREE, env, home: '/home/alice' }).output({ summary: 'It reads ~/.codex/auth.json.' }).summary, 'It reads ~/.codex/auth.json.');
 });

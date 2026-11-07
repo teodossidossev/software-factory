@@ -5,12 +5,12 @@
 // limit, the token ceiling, failures, abort and serve restart during a gate, the gate off, and the
 // strict schema.
 import assert from 'node:assert/strict';
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { gateFullPaths, loadConfig, sensitivePaths } from '../src/config.js';
 import type { FactoryError } from '../src/errors.js';
-import { GATE_SCHEMA, gateArgs, gatePrompt } from '../src/gate.js';
+import { GATE_OUTPUT_FILE, GATE_SANDBOX_UNAVAILABLE, GATE_SCHEMA, gateArgs, gateEnvironment, type GateOptions, gatePrompt, runGate } from '../src/gate.js';
 import { WITHHELD } from '../src/redact.js';
 import { JobStore } from '../src/jobs.js';
 import { reviewPrompt } from '../src/review.js';
@@ -18,7 +18,7 @@ import { loadHandbook } from '../src/server.js';
 import { writeTask } from '../src/task-file.js';
 import { fetchRaw } from './support/dashboard-client.js';
 import {
-  call, codexLog, codexScript, type Env, fakeCodex, fakeLog, git, newEnv, newRepo, putRules, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor,
+  bwrapLog, call, codexLog, codexScript, type Env, fakeCodex, fakeLog, git, newEnv, newRepo, putRules, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, temp, waitFor,
 } from './support/harness.js';
 
 const CLAUDE_CLEAN = { verdict: 'clean', summary: 'Claude found it right.', items: [], accepted_sensitive: [] };
@@ -181,6 +181,14 @@ test('clean: Claude, then the gate in a read-only Codex in the worktree, then Cl
       '--output-schema', join(dir, 'gate-schema.json'), '--output-last-message', join(dir, 'gate-output.json'), '--json', '-',
     ]);
     assert.equal(run!.cwd, worktreeOf(env, 'G-1'));
+    // SF-125: Codex ran inside bwrap (the harness's fake, first on PATH) with the wrapper of the
+    // job's denials, then "--", the codex executable and its argv; its raw output file is gone.
+    const [wrapped] = await bwrapLog(env);
+    const cut = wrapped!.argv.indexOf('--');
+    assert.deepEqual(wrapped!.argv.slice(cut), ['--', fakeCodex, ...run!.argv]);
+    assert.deepEqual(wrapped!.argv.slice(0, 2), ['--die-with-parent', '--unshare-pid']);
+    assert.deepEqual(wrapped!.argv.slice(cut - 6, cut), ['--bind', join(env.home, '.codex'), join(env.home, '.codex'), '--bind', dir, dir]);
+    assert.equal(await exists(join(dir, GATE_OUTPUT_FILE)), false);
     assert.deepEqual(JSON.parse(await readFile(join(dir, 'gate-schema.json'), 'utf8')), GATE_SCHEMA);
     assert.ok(!run!.env.some((name) => name.startsWith('SF_')), run!.env.join(','));
     assert.ok(run!.env.includes('HOME') && run!.env.includes('PATH'));
@@ -272,7 +280,10 @@ test('the live events and the failure records hold no environment value, key or 
   const secret = 'leaky-secret-value-0123456789';
   // A short secret counts as much as a long one.
   const pin = 'q7z';
-  const env = await newEnv('gate-leak', gateEnv({ ANTHROPIC_FAKE_SECRET: secret, ANTHROPIC_FAKE_PIN: pin, SF_MAX_JOBS: '4' }));
+  // The gate's own (SF-125: it gets OPENAI_* and CODEX_* variables, not the review's ANTHROPIC_*).
+  const codexSecret = 'leaky-codex-value-9876543210';
+  const codexPin = 'w4k';
+  const env = await newEnv('gate-leak', gateEnv({ ANTHROPIC_FAKE_SECRET: secret, ANTHROPIC_FAKE_PIN: pin, OPENAI_FAKE_SECRET: codexSecret, OPENAI_FAKE_PIN: codexPin, SF_MAX_JOBS: '4' }));
   const repo = await newRepo(env, 'gate-leak-repo', false);
   await putTask(env, repo, 'L-1', 'Greet the reader');
   await putTask(env, repo, 'L-2', 'Greet the writer');
@@ -300,11 +311,11 @@ test('the live events and the failure records hold no environment value, key or 
     await call(served, 'start', { workspace: 'app', ticket: 'L-1' });
     await waitFor(served, 'L-1', 'ready_for_human_review', 1);
     const raw = await readFile(join(env.state, 'jobs', 'app', 'L-1', 'events.jsonl'), 'utf8');
-    for (const leaked of [secret, pin, 'fake-codex-config-model', 'fake-codex-auth-repeated', 'fake-access-token-value', 'fake-refresh-token-value', 'fake-codex-auth-file-content']) {
+    for (const leaked of [secret, pin, codexSecret, codexPin, 'fake-codex-config-model', 'fake-codex-auth-repeated', 'fake-access-token-value', 'fake-refresh-token-value', 'fake-codex-auth-file-content']) {
       assert.ok(!raw.includes(leaked), leaked);
     }
     const watched = (await runCli(env, ['watch', 'app', 'L-1', '--once'])).stdout;
-    for (const leaked of [secret, pin, 'fake-codex-config-model', 'fake-codex-auth-repeated']) {
+    for (const leaked of [secret, pin, codexSecret, codexPin, 'fake-codex-config-model', 'fake-codex-auth-repeated']) {
       assert.ok(!watched.includes(leaked), leaked);
     }
     const lines = withoutTime(watched);
@@ -313,7 +324,7 @@ test('the live events and the failure records hold no environment value, key or 
       '[1] review | The secret is [redacted:ANTHROPIC_FAKE_SECRET], the pin [redacted:ANTHROPIC_FAKE_PIN].',
       '[1] codex | exit 0',
       `[1] codex |   ${WITHHELD}`,
-      '[1] codex | The secret is [redacted:ANTHROPIC_FAKE_SECRET], the pin [redacted:ANTHROPIC_FAKE_PIN].',
+      '[1] codex | The secret is [redacted:OPENAI_FAKE_SECRET], the pin [redacted:OPENAI_FAKE_PIN].',
       // The prose that quotes ~/.codex, and the prose after the read that repeats it.
       `[1] review | ${WITHHELD}`,
       `[1] codex | ${WITHHELD}`,
@@ -962,4 +973,96 @@ test('the gate prompt carries <user_decisions> as the review does', async () => 
   }
   // The same body after each reviewer's own preamble.
   assert.equal(gate.slice(gate.indexOf('\n\n- Verify the claims')), review.slice(review.indexOf('\n\n- Verify the claims')));
+});
+
+// SF-125: runGate on its own, with a fake bwrap and a fake codex of the test's own (they log to
+// files of the test, never to $HOME): the bwrap logs its argv and runs the command after "--"; the
+// codex logs its argv and answers with a clean verdict, or exits 1 after writing it (fail).
+async function gateFakes(name: string): Promise<{ dir: string; bwrap: string; codex: string; bwrapArgs: string; codexArgs: string }> {
+  const root = join(temp, name);
+  const dir = join(root, 'iteration');
+  await mkdir(dir, { recursive: true });
+  const bwrapArgs = join(root, 'bwrap.args');
+  const codexArgs = join(root, 'codex.args');
+  const bwrap = join(root, 'bwrap');
+  await writeFile(bwrap, `#!/bin/sh\nprintf '%s\\n' "$@" > '${bwrapArgs}'\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n`);
+  const codex = join(root, 'codex');
+  await writeFile(codex, `#!${process.execPath}
+const { appendFileSync, writeFileSync } = require('node:fs');
+const argv = process.argv.slice(2);
+appendFileSync(${JSON.stringify(codexArgs)}, argv.join('\\n') + '\\n');
+process.stdin.resume();
+process.stdin.on('end', () => {
+  writeFileSync(argv[argv.indexOf('--output-last-message') + 1], JSON.stringify(${JSON.stringify(GATE_CLEAN)}));
+  process.stdout.write(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }) + '\\n');
+  process.exit(process.env.CODEX_FAKE_EXIT === '1' ? 1 : 0);
+});
+`);
+  await chmod(bwrap, 0o755);
+  await chmod(codex, 0o755);
+  return { dir, bwrap, codex, bwrapArgs, codexArgs };
+}
+
+const gateOptions = (fakes: { dir: string; codex: string }, extra: Partial<GateOptions>): GateOptions => ({
+  codexPath: fakes.codex, cwd: fakes.dir, dir: fakes.dir, model: undefined, timeoutMs: 30_000, signal: new AbortController().signal, wrapper: undefined, bwrapPath: undefined, ...extra,
+});
+
+test('runGate inside the wrapper (SF-125): bwrap gets the wrapper, "--", the codex executable and gateArgs; gate-output.json is gone after the run', async () => {
+  const fakes = await gateFakes('run-gate-wrapped');
+  const wrapper = ['--die-with-parent', '--ro-bind', '/', '/', '--tmpfs', '/tmp'];
+  const outcome = await runGate('the prompt', gateOptions(fakes, { wrapper, bwrapPath: fakes.bwrap, platform: 'linux' }));
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  assert.deepEqual(outcome.output, GATE_CLEAN);
+  const args = gateArgs({ cwd: fakes.dir, dir: fakes.dir, model: undefined });
+  assert.deepEqual((await readFile(fakes.bwrapArgs, 'utf8')).trimEnd().split('\n'), [...wrapper, '--', fakes.codex, ...args]);
+  assert.deepEqual((await readFile(fakes.codexArgs, 'utf8')).trimEnd().split('\n'), args);
+  assert.equal(await exists(join(fakes.dir, GATE_OUTPUT_FILE)), false);
+});
+
+test('runGate without a wrapper (SF_SANDBOX=off, SF-125) runs codex itself; a failed run leaves no gate-output.json either', async () => {
+  const fakes = await gateFakes('run-gate-unwrapped');
+  const outcome = await runGate('the prompt', gateOptions(fakes, { bwrapPath: fakes.bwrap }));
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  assert.equal(await exists(fakes.bwrapArgs), false);
+  assert.deepEqual((await readFile(fakes.codexArgs, 'utf8')).trimEnd().split('\n'), gateArgs({ cwd: fakes.dir, dir: fakes.dir, model: undefined }));
+  assert.equal(await exists(join(fakes.dir, GATE_OUTPUT_FILE)), false);
+
+  // Codex wrote its answer, then exited 1: a failed run, and the answer is gone too.
+  process.env.CODEX_FAKE_EXIT = '1';
+  try {
+    const failed = await runGate('the prompt', gateOptions(fakes, {}));
+    assert.ok(!failed.ok && failed.code === undefined && /^Codex exited with code 1/.test(failed.message), JSON.stringify(failed));
+  } finally {
+    delete process.env.CODEX_FAKE_EXIT;
+  }
+  assert.equal(await exists(join(fakes.dir, GATE_OUTPUT_FILE)), false);
+});
+
+test('fail closed (SF-125): with a wrapper and no bwrap, or on another platform than Linux, Codex never starts: gate_sandbox_unavailable naming the cause', async () => {
+  const fakes = await gateFakes('run-gate-refused');
+  const wrapper = ['--die-with-parent', '--ro-bind', '/', '/'];
+  for (const [extra, cause] of [
+    [{ wrapper, bwrapPath: undefined, platform: 'linux' }, /no bwrap on PATH/],
+    [{ wrapper, bwrapPath: fakes.bwrap, platform: 'darwin' }, /on Linux, and this is darwin/],
+  ] as const) {
+    const outcome = await runGate('the prompt', gateOptions(fakes, extra));
+    assert.ok(!outcome.ok, JSON.stringify(outcome));
+    assert.equal(outcome.code, GATE_SANDBOX_UNAVAILABLE);
+    assert.match(outcome.message, cause);
+    assert.ok(outcome.message.includes(GATE_SANDBOX_UNAVAILABLE), outcome.message);
+    assert.deepEqual(outcome.tokens, { input: 0, cached_input: 0, output: 0 });
+  }
+  assert.equal(await exists(fakes.bwrapArgs), false);
+  assert.equal(await exists(fakes.codexArgs), false);
+});
+
+test('the gate\'s environment (SF-125): the shell\'s, the locale\'s, the proxy\'s, OPENAI_* and CODEX_*; no other key, no SF_* setting, no SSH agent', () => {
+  const env = {
+    PATH: '/bin', HOME: '/h', LANG: 'C.UTF-8', LC_ALL: 'C', XDG_CONFIG_HOME: '/h/.config', TMPDIR: '/t', HTTPS_PROXY: 'http://proxy:3128', no_proxy: 'localhost',
+    OPENAI_API_KEY: 'sk-x', CODEX_HOME: '/h/.codex', AWS_SECRET_ACCESS_KEY: 'a', GITHUB_TOKEN: 'g', ANTHROPIC_API_KEY: 'k', SF_X: 'x', SSH_AUTH_SOCK: '/run/agent.sock',
+  };
+  assert.deepEqual(gateEnvironment(env), {
+    PATH: '/bin', HOME: '/h', LANG: 'C.UTF-8', LC_ALL: 'C', XDG_CONFIG_HOME: '/h/.config', TMPDIR: '/t', HTTPS_PROXY: 'http://proxy:3128', no_proxy: 'localhost',
+    OPENAI_API_KEY: 'sk-x', CODEX_HOME: '/h/.codex',
+  });
 });

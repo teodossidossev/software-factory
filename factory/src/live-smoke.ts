@@ -14,6 +14,8 @@
 // permission mode dontAsk, without the auto mode classifier, with any `node probe.mjs` call (a
 // prefix rule, SF-110) and the file tools allowed (SF-104, SF-109, SF_SMOKE_PROBE_ALLOW); its
 // sandbox stays a real job's.
+// The Gate sandbox step (SF-125) builds the Codex gate's bubblewrap wrapper for the job as the
+// factory does and checks, without Codex, that the canary env file and jobs/ are hidden inside it.
 import { type ChildProcess, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
@@ -21,10 +23,12 @@ import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gateConfig } from './config.js';
+import { findBwrap, gateEnvironment } from './gate.js';
 import { runGit } from './git.js';
 import { type Job, type JobState, JobStore, TERMINAL_STATES } from './jobs.js';
 import { mrTextProblem } from './mr.js';
-import { claudeConfigDir, FILE_GUARD } from './sandbox-denials.js';
+import { claudeConfigDir, FILE_GUARD, gateWrapperFor } from './sandbox-denials.js';
 import { PROBE_SCRIPT_NAME } from './session.js';
 import { CheckStore } from './task-check.js';
 
@@ -366,7 +370,9 @@ export function probeProblem(text: string, probe?: SmokeProbe): string | undefin
   return problems.length === 0 ? undefined : problems.join(', ');
 }
 
-export const STEPS = ['Setup', 'Task check', 'Start', 'Implementer turn', 'Sandbox', 'Claude review', 'Codex gate', 'MR text', 'Approve', 'Dashboard', 'Cleanup'] as const;
+export const STEPS = ['Setup', 'Task check', 'Start', 'Implementer turn', 'Sandbox', 'Gate sandbox', 'Claude review', 'Codex gate', 'MR text', 'Approve', 'Dashboard', 'Cleanup'] as const;
+// The steps whose SKIP counts as a pass with the sandbox off (SF-100, SF-125).
+export const SANDBOX_STEPS: readonly StepName[] = ['Sandbox', 'Gate sandbox'];
 export type StepName = (typeof STEPS)[number];
 
 export const DEFAULT_TIMEOUT_MIN = 20;
@@ -394,6 +400,8 @@ const STOPPED: readonly JobState[] = ['needs_human', 'failed', 'aborted'];
 const MAX_ITERATIONS = 2;
 // A child sf command of Cleanup (sf reset, sf abort) that hangs is stopped after this long.
 const CLEANUP_CHILD_MS = 120_000;
+// A command of the Gate sandbox step inside the wrapper is stopped after this long.
+const GATE_SANDBOX_MS = 30_000;
 // How long a process group may take to empty after its SIGKILL.
 const GROUP_GONE_MS = 5_000;
 
@@ -679,6 +687,19 @@ interface Outcome {
 }
 
 class StopError extends Error {}
+
+// One command inside the gate's wrapper (the Gate sandbox step), to its end or GATE_SANDBOX_MS.
+function wrapped(bwrap: string, wrapper: string[], command: string[], env: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(bwrap, [...wrapper, '--', ...command], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: GATE_SANDBOX_MS });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk: Buffer) => (stdout = (stdout + chunk.toString('utf8')).slice(-OUTPUT_KEEP)));
+    child.stderr.on('data', (chunk: Buffer) => (stderr = (stderr + chunk.toString('utf8')).slice(-OUTPUT_KEEP)));
+    child.once('error', (error) => resolve({ code: null, stdout, stderr: `${stderr}${error.message}` }));
+    child.once('close', (code) => resolve({ code, stdout, stderr }));
+  });
+}
 
 class Smoke {
   readonly #paths: SmokePaths;
@@ -1013,6 +1034,57 @@ class Smoke {
       : { status: 'FAIL', detail: short(closedPathProblem) };
   }
 
+  // The Gate sandbox step (SF-125), once the job's worktree and jobs/ exist: the canary env file and
+  // jobs/ exist outside the wrapper, and inside the gate's wrapper (gateWrapperFor, as the factory
+  // builds it for this job) a listing of the worktree works, while both `cat <canary>` and
+  // `ls <jobs>` fail (ENOENT counts: the tmpfs hiding them is the denial); a command that exits 0
+  // fails the step, whatever it printed. No Codex runs. With the sandbox off it is a SKIP.
+  async gateSandbox(): Promise<Outcome> {
+    if (this.sandboxOff) {
+      return { status: 'SKIP', detail: 'sandbox off' };
+    }
+    const job = await this.#job();
+    if (job?.worktree === null || job?.worktree === undefined) {
+      return { status: 'FAIL', detail: 'the job has no worktree to bind' };
+    }
+    const probe = this.#probe!;
+    const canary = await readFile(probe.canary, 'utf8').catch(() => undefined);
+    if (canary === undefined) {
+      return { status: 'FAIL', detail: `the canary env file ${probe.canary} is missing outside the wrapper` };
+    }
+    if (!existsSync(probe.jobs)) {
+      return { status: 'FAIL', detail: `${probe.jobs} is missing outside the wrapper` };
+    }
+    const bwrap = findBwrap(this.#env);
+    if (process.platform !== 'linux' || bwrap === undefined) {
+      return { status: 'FAIL', detail: process.platform !== 'linux' ? `the gate's wrapper needs Linux, this is ${process.platform}` : 'no bwrap on PATH' };
+    }
+    const gate = gateConfig(this.#env);
+    const { work, state, worktrees, config } = this.#paths;
+    const wrapper = await gateWrapperFor({
+      session: 'job', workspace: WORKSPACE, checkout: work, worktree: job.worktree, stateDir: state, worktreeRoot: worktrees, configDir: config, env: this.#env,
+    }, {
+      worktree: job.worktree, codexPath: gate.on ? gate.codexPath : process.execPath, codexHome: this.#env.CODEX_HOME || join(homedir(), '.codex'),
+      iterationDir: this.#jobs.iterationDir(WORKSPACE, TICKET, 1), images: [], tmp: tmpdir(),
+    });
+    const inside = (command: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> => wrapped(bwrap, wrapper, command, gateEnvironment(this.#env));
+    const control = await inside(['ls', job.worktree]);
+    this.#checkStop();
+    if (control.code !== 0) {
+      return { status: 'FAIL', detail: short(`the wrapper did not run: ${control.stderr.trim() || `exit ${control.code ?? 'by a signal'}`}`) };
+    }
+    const read = await inside(['cat', probe.canary]);
+    const listed = await inside(['ls', probe.jobs]);
+    this.#checkStop();
+    const problems = [
+      ...(read.code === 0 ? ['cat of the canary env file exited 0'] : []),
+      ...(listed.code === 0 ? ['ls of jobs/ exited 0'] : []),
+    ];
+    return problems.length === 0
+      ? { status: 'PASS', detail: 'the canary env file and jobs/ hidden inside the gate\'s wrapper' }
+      : { status: 'FAIL', detail: `the gate's wrapper let through: ${problems.join(', ')}` };
+  }
+
   review(): Promise<Outcome> {
     return this.#until(async () => {
       const job = await this.#job();
@@ -1305,7 +1377,8 @@ export async function runSmoke(options: SmokeOptions, print: (line: string) => v
   };
   const steps: Array<[StepName, () => Promise<Outcome>]> = [
     ['Setup', () => smoke.setup()], ['Task check', () => smoke.taskCheck()], ['Start', () => smoke.start()],
-    ['Implementer turn', () => smoke.implementer()], ['Sandbox', () => smoke.sandbox()], ['Claude review', () => smoke.review()], ['Codex gate', () => smoke.gate()],
+    ['Implementer turn', () => smoke.implementer()], ['Sandbox', () => smoke.sandbox()], ['Gate sandbox', () => smoke.gateSandbox()],
+    ['Claude review', () => smoke.review()], ['Codex gate', () => smoke.gate()],
     ['MR text', () => smoke.mrText()], ['Approve', () => smoke.approve()], ['Dashboard', () => smoke.dashboard()],
   ];
   let skipping = false;
@@ -1364,10 +1437,11 @@ export async function runSmoke(options: SmokeOptions, print: (line: string) => v
   print('');
   print(table(rows));
   const failed = rows.filter((row) => row.status === 'FAIL').length;
-  // The Sandbox step's SKIP with the sandbox off counts as a pass (SF-100); every other row must PASS.
-  const unchecked = smoke.sandboxOff && rows.some((row) => row.step === 'Sandbox' && row.status === 'SKIP');
+  // The SKIP of the Sandbox and Gate sandbox steps with the sandbox off counts as a pass (SF-100,
+  // SF-125); every other row must PASS.
+  const unchecked = smoke.sandboxOff && rows.some((row) => SANDBOX_STEPS.includes(row.step) && row.status === 'SKIP');
   // A signal fails the run even when it came in Cleanup, after every step passed.
-  const passed = !smoke.interrupted && rows.every((row) => row.status === 'PASS' || (unchecked && row.step === 'Sandbox'));
+  const passed = !smoke.interrupted && rows.every((row) => row.status === 'PASS' || (unchecked && SANDBOX_STEPS.includes(row.step) && row.status === 'SKIP'));
   const totals = `cost ${cost.unknown ? 'unknown' : `${cost.usd.toFixed(4)} USD`}, gate ${tokens} tokens`;
   print(passed ? `smoke: PASS${unchecked ? ' (sandbox not checked)' : ''}, ${totals}` : `smoke: FAIL (${failed} of ${STEPS.length} steps), ${totals}`);
   return passed ? 0 : 1;

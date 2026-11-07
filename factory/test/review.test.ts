@@ -3,7 +3,8 @@
 // verdict becomes ## Fix N and the next iteration, a clean one runs Clean, undeclared sensitive
 // paths, failures, SF_REVIEW=off and the review at serve start, abort during a review, the limit on
 // Fix sections, and what check, sf watch, sf status and the dashboard show. Then the schema the CLI
-// accepts (the fake refuses one it would not) and the retry of a failed review (SF-044).
+// accepts (the fake refuses one it would not) and the retry of a failed review (SF-044). SF-125:
+// the verdict is stored, and sent on, redacted.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -857,4 +858,39 @@ test('runReview with images (SF-065): the session\'s user message is the review 
     { type: 'image', media_type: 'image/png', bytes: png.length, sha256: sha(png) },
   ]);
   assert.deepEqual([without!.prompt, without!.blocks], ['Review this.', undefined]);
+});
+
+test('redacted (SF-125): a review finding holding an environment value is stored in review.json, the ledger, the Fix section and the next prompts as [redacted]; its path and severity stay', async () => {
+  const secret = 'review-secret-0123456789';
+  const env = await newEnv('review-redacted', { SF_REVIEW: 'on', APP_DEPLOY_VALUE: secret });
+  const repo = await newRepo(env, 'review-redacted-repo', false);
+  await putTask(env, repo, 'R-9', 'Greet the reader');
+  await script(env, [
+    { write: { 'README.md': 'hello world\n' }, text: 'Report of iteration 1' },
+    { write: { 'README.md': 'hello reader\n' }, text: 'Report of iteration 2\n\n| R1 | fixed | Done. |' },
+    { write: { '.software-factory/R-9.mr.md': mrText('feat(R-9): Greet the reader') }, text: 'prepared' },
+  ]);
+  const leaky = { ...FIX, summary: `It prints ${secret}.`, items: [{ ...FIX.items[0]!, problem: `It prints ${secret}.`, expected: `No ${secret} in it.` }] };
+  await reviewScript(env, [{ output: leaky }, { output: CLEAN }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'R-9' });
+    await waitFor(served, 'R-9', 'ready_for_human_review', 2);
+    const jobs = new JobStore(env.state);
+    const record = await jobs.readReview('app', 'R-9', 1);
+    assert.ok(record !== undefined && 'verdict' in record, JSON.stringify(record));
+    assert.equal(record.summary, 'It prints [redacted].');
+    assert.deepEqual(record.items, ledgerFields([{ path: 'README.md', problem: 'It prints [redacted].', expected: 'No [redacted] in it.', severity: 'major' }]));
+    assert.ok(!(await readFile(join(jobs.iterationDir('app', 'R-9', 1), 'review.json'), 'utf8')).includes(secret));
+    const fix = '1. [R1, major] `README.md`: It prints [redacted]. Expected: No [redacted] in it.';
+    assert.ok((await taskFile(repo, 'R-9')).includes(fix));
+    const prompts = (await fakeLog(env)).map((entry) => entry.prompt);
+    assert.ok(prompts.length === 3 && prompts.every((prompt) => !prompt.includes(secret)));
+    // The second review read the Task file with the redacted Fix section.
+    const reviews = await reviewLog(env);
+    assert.ok(reviews[1]!.prompt.includes(fix) && reviews.every((review) => !review.prompt.includes(secret)));
+    assert.ok(!(await readFile(join(env.state, 'jobs', 'app', 'R-9', 'ledger.json'), 'utf8')).includes(secret));
+  } finally {
+    await stop(served);
+  }
 });

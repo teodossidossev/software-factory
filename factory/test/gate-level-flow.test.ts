@@ -2,15 +2,17 @@
 // Codex: a light job runs the gate once, a full one after each fix, a none one never; the decision
 // is recorded once per iteration (gate-level.json and one gate_level event), a skipped gate never
 // stops on gate_budget, never shows as running in check, and a pause or a usage limit during the
-// simplification pass of a skipped-gate iteration interrupts the pass, not the gate.
+// simplification pass of a skipped-gate iteration interrupts the pass, not the gate. SF-125: a gate
+// finding is stored and sent on redacted; a gate the wrapper cannot hold stops the job.
 import assert from 'node:assert/strict';
-import { readFile, stat } from 'node:fs/promises';
+import { mkdir, readFile, stat, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { LIGHT_SKIPPED } from '../src/gate-level.js';
+import { GATE_SANDBOX_UNAVAILABLE } from '../src/gate.js';
 import { JobStore } from '../src/jobs.js';
 import {
-  call, codexLog, codexScript, type Env, fakeCodex, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, waitFor,
+  call, codexLog, codexScript, type Env, fakeCodex, fakeLog, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, temp, waitFor,
 } from './support/harness.js';
 
 const CLEAN = { verdict: 'clean', summary: 'Claude found it right.', items: [], accepted_sensitive: [] };
@@ -263,3 +265,74 @@ test('a skipped gate and a usage limit in the simplification pass: parked at sim
     await stop(served);
   }
 });
+
+test('redacted (SF-125): a gate finding holding an environment value is stored in gate.json and written in the next Fix section as [redacted]', async () => {
+  const secret = 'gate-secret-0123456789';
+  const env = await newEnv('level-redacted', levelEnv({ SF_GATE_LEVEL: 'full', APP_DEPLOY_VALUE: secret }));
+  const repo = await newRepo(env, 'level-redacted-repo', false);
+  await putTask(env, repo, 'GR-1', 'Export the value');
+  await script(env, [
+    { write: { 'src/app.ts': 'export const value = 1;\n' }, text: 'Report of iteration 1' },
+    { write: { 'src/app.ts': 'export const value = 2;\n' }, text: 'Report of iteration 2\n\n| R1 | fixed | It exports 2. |' },
+    { write: { '.software-factory/GR-1.mr.md': mrText('feat(GR-1): Export the value') }, text: 'prepared' },
+  ]);
+  const leaky = { ...GATE_FIX, summary: `It logs ${secret}.`, items: [{ ...GATE_FIX.items[0]!, problem: `It logs ${secret}.` }] };
+  await codexScript(env, [{ output: leaky }, { output: GATE_CLEAN }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'GR-1' });
+    await waitFor(served, 'GR-1', 'ready_for_human_review', 2);
+    const jobs = new JobStore(env.state);
+    const gate = await jobs.readGate('app', 'GR-1', 1);
+    assert.ok(gate !== undefined && 'verdict' in gate, JSON.stringify(gate));
+    assert.equal(gate.summary, 'It logs [redacted].');
+    assert.deepEqual(gate.items.map((item) => [item.path, item.problem, item.severity]), [['src/app.ts', 'It logs [redacted].', 'major']]);
+    assert.ok(!(await readFile(join(jobs.iterationDir('app', 'GR-1', 1), 'gate.json'), 'utf8')).includes(secret));
+    const task = await readFile(join(repo, '.software-factory', 'GR-1.md'), 'utf8');
+    assert.ok(task.includes('## Fix 1\n\nReview by Codex: It logs [redacted].\n\n1. [R1, major] `src/app.ts`: It logs [redacted]. Expected: It exports 2.'), task);
+    assert.ok((await fakeLog(env)).every((entry) => !entry.prompt.includes(secret)));
+  } finally {
+    await stop(served);
+  }
+});
+
+test('fail closed (SF-125): with the sandbox on and no bwrap on PATH, the gate never starts Codex; the job is needs_human with gate_sandbox_unavailable, gate.json and the event say why', async () => {
+  // A PATH with git and node only (the factory's and the Claude SDK's), no bwrap.
+  const bin = join(temp, 'no-bwrap-bin');
+  await mkdir(bin, { recursive: true });
+  for (const [name, target] of [['node', process.execPath], ['git', await gitPath()]] as const) {
+    await symlink(target, join(bin, name)).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'EEXIST') {
+        throw error;
+      }
+    });
+  }
+  const env = await newEnv('level-no-bwrap', levelEnv({ SF_GATE_LEVEL: 'full', PATH: bin }));
+  const repo = await newRepo(env, 'level-no-bwrap-repo', false);
+  await putTask(env, repo, 'GN-1', 'Export the value');
+  await script(env, [{ write: { 'src/app.ts': 'export const value = 1;\n' }, text: 'Report of iteration 1' }]);
+  await codexScript(env, [{ output: GATE_CLEAN }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'GN-1' });
+    const stopped = await waitFor(served, 'GN-1', 'needs_human', 1);
+    assert.equal(stopped.error.code, GATE_SANDBOX_UNAVAILABLE);
+    assert.match(stopped.error.message, /no bwrap on PATH/);
+    assert.equal(await codexRuns(env), 0);
+    const gate = await new JobStore(env.state).readGate('app', 'GN-1', 1);
+    assert.ok(gate !== undefined && 'error' in gate && gate.error === stopped.error.message, JSON.stringify(gate));
+    assert.ok((await eventsOf(env, 'GN-1')).some((event) => event.type === 'review_failed' && event.reviewer === 'codex' && event.error === stopped.error.message));
+  } finally {
+    await stop(served);
+  }
+});
+
+// The git executable of the test's PATH.
+async function gitPath(): Promise<string> {
+  for (const dir of (process.env.PATH ?? '').split(':')) {
+    if (dir !== '' && (await exists(join(dir, 'git')))) {
+      return join(dir, 'git');
+    }
+  }
+  assert.fail('no git on PATH');
+}

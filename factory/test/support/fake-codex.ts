@@ -27,7 +27,8 @@ interface Run {
   delayMs?: number;
   // Prints an agent message of this many bytes before the last one (to be cut at its bound).
   bigMessageBytes?: number;
-  // Leaks (SF-045): says the values of ANTHROPIC_FAKE_SECRET and ANTHROPIC_FAKE_PIN, quotes ~/.codex/config.toml,
+  // Leaks (SF-045): says the values of OPENAI_FAKE_SECRET and OPENAI_FAKE_PIN (SF-125: the gate gets
+  // OPENAI_* and CODEX_* variables, not ANTHROPIC_*), quotes ~/.codex/config.toml,
   // cats ~/.co*/auth.json, runs /usr/bin/env, then repeats the auth file without naming it.
   leak?: boolean;
   // After cat ~/.codex/auth.json, prints every event type with this literal in each free-text field,
@@ -92,12 +93,12 @@ function answer(): void {
   process.stdout.write('not a JSON line\nnull\n');
   event({ type: 'item.completed', item: { id: 'item_1', type: 'command_execution', command: 'bash -lc \'git status\'', aggregated_output: 'On branch fake\nnothing to commit\n', exit_code: 0, status: 'completed' } });
   if (run.leak === true) {
-    const secret = process.env.ANTHROPIC_FAKE_SECRET ?? '';
+    const secret = process.env.OPENAI_FAKE_SECRET ?? '';
     const auth = JSON.stringify({ OPENAI_API_KEY: null, tokens: { access_token: 'fake-access-token-value', refresh_token: 'fake-refresh-token-value' } });
-    event({ type: 'item.completed', item: { id: 'leak_0', type: 'agent_message', text: `The secret is ${secret}, the pin ${process.env.ANTHROPIC_FAKE_PIN ?? ''}.` } });
+    event({ type: 'item.completed', item: { id: 'leak_0', type: 'agent_message', text: `The secret is ${secret}, the pin ${process.env.OPENAI_FAKE_PIN ?? ''}.` } });
     event({ type: 'item.completed', item: { id: 'leak_p', type: 'agent_message', text: `${join(home, '.codex', 'config.toml')}: model = "fake-codex-config-model"` } });
     event({ type: 'item.completed', item: { id: 'leak_1', type: 'command_execution', command: 'bash -lc \'cat ~/.co*/auth.json\'', aggregated_output: auth, exit_code: 0, status: 'completed' } });
-    event({ type: 'item.completed', item: { id: 'leak_2', type: 'command_execution', command: '/usr/bin/env', aggregated_output: `ANTHROPIC_FAKE_SECRET=${secret}\nHOME=${home}\n`, exit_code: 0, status: 'completed' } });
+    event({ type: 'item.completed', item: { id: 'leak_2', type: 'command_execution', command: '/usr/bin/env', aggregated_output: `OPENAI_FAKE_SECRET=${secret}\nHOME=${home}\n`, exit_code: 0, status: 'completed' } });
     event({ type: 'item.completed', item: { id: 'leak_3', type: 'agent_message', text: 'The auth file says fake-codex-auth-repeated.' } });
   }
   if (run.walk !== undefined) {

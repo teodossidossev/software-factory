@@ -47,8 +47,9 @@ rule changes, change it here, through a pull request like any other change.
   (`SF_CLAUDE_REVIEW=ticket`), and fix rounds are capped at 3 (`SF_MAX_ITERATIONS`). Give
   `review: claude` to risky tickets: authentication, the sandbox, the state format, and the product
   tickets the user names. At the cap, Accept takes the iteration with its open findings listed in
-  the MR text. After the two weeks, compare cost and findings with the user (SF-132's Stats) and
-  decide whether it stays.
+  the MR text. After the two weeks, open Stats over the experiment's days, read the "Claude review
+  on/off" table and report to the user, per arm, the cost per delivered ticket, the Codex findings
+  per job and the aborts; then decide with the user whether it stays.
 - **Placeholders.** No company or person names in this repository's Task files, MR texts and
   commits. Use placeholders: `product-frontend` for a repository, `ABC-n` for a ticket, "the user"
   for a person.

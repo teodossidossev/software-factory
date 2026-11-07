@@ -7507,6 +7507,23 @@ function stSecondOpinion(data) {
   return section;
 }
 
+// The Claude review experiment (SF-132): one line per arm, on and off, of the jobs that recorded
+// claude_review; the empty text when neither has a job.
+const ST_ARMS = { on: 'On', off: 'Off' };
+function stArms(data) {
+  const section = stSection('Claude review on/off');
+  if (data.arms.every((row) => row.jobs === 0)) {
+    section.append(el('p', 'muted fs13', 'No jobs of the experiment yet.'));
+    return section;
+  }
+  const cost = (value, complete) => (value === null ? '—' : complete ? stMoney(value) : `at least ${stMoney(value)}`);
+  section.append(stTable(['Claude review', 'Jobs', 'Delivered', 'Aborted', 'Cost', 'Per delivered', 'Median iterations', 'Codex findings', 'Per job'], data.arms.map((row) => [
+    ST_ARMS[row.arm] ?? row.arm, String(row.jobs), String(row.delivered), String(row.aborted), cost(row.cost_usd, row.cost_complete),
+    cost(row.usd_per_delivered, row.cost_complete), stCount(row.median_iterations), String(row.codex_findings), stCount(row.codex_findings_per_job),
+  ])), el('p', 'muted fs13', 'Jobs started before the experiment are in neither arm.'));
+  return section;
+}
+
 function stStages(data) {
   const section = stSection('Review stages');
   const items = data.stages.map((row) => ({ ...row, label: ST_STAGES[row.stage] ?? row.stage }));
@@ -7537,9 +7554,11 @@ function stSpend(data) {
       { key: 'codex_out', name: 'Output', value: (row) => row.codex_tokens.output },
     ], stTokens, 'No Codex gate run in this period.'),
   );
+  // The simplification's line also has its offers and the user's choices (SF-132).
+  const offers = ({ offered, taken, skipped }) => ` · offered ${offered} · taken ${taken} · skipped ${skipped}`;
   section.append(charts, el('h4', 'st-sub', 'By role'), stTable(['Role', 'Cost', 'Tokens', 'Runs'], data.roles.map((row) => [
     ST_ROLES[row.role] ?? row.role, row.cost_usd === null ? 'tokens only' : row.complete ? stMoney(row.cost_usd) : `at least ${stMoney(row.cost_usd)}`,
-    stTokenLine(row.tokens), String(row.runs),
+    stTokenLine(row.tokens), row.role === 'simplify' ? `${row.runs}${offers(data.simplify)}` : String(row.runs),
   ])));
   const roles = ST_COST_ROLES.filter((key) => key !== 'digest');
   const items = data.by_workspace.map((row) => ({ ...row, label: row.workspace }));
@@ -7677,7 +7696,7 @@ function renderStats() {
       stTile('Running', String(data.now.running)), stTile('Waiting for you', String(data.now.waiting_for_you)),
       stTile('Paused', String(data.now.paused)), stTile('Queued', data.now.queued === null ? '—' : String(data.now.queued)),
     ));
-    body.append(stWarnings(data), now, stSecondOpinion(data), stStages(data), stSpend(data), stLoad(data), stJobs(data), ...stNotes(data));
+    body.append(stWarnings(data), now, stSecondOpinion(data), stArms(data), stStages(data), stSpend(data), stLoad(data), stJobs(data), ...stNotes(data));
   }
   // The focus stays on the control it was on; the scroll where it was.
   const focused = page.contains(document.activeElement) ? document.activeElement?.dataset?.st : undefined;

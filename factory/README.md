@@ -3199,6 +3199,14 @@ start; the period is the chosen number of days ending today. The sections, in or
   gate runs only after a clean Claude review, so it is the next iteration instead: an iteration
   whose gate had no blocker or major, followed by a Claude review in the period with a blocker or
   major not caused by a fix (`caused_by` empty). Each lists its caught iterations, newest first.
+- **Claude review on/off** (SF-132), the experiment of SF-131: one line per arm, `on` and `off`
+  (`arms` in the payload), of the jobs started in the period whose `job.json` records
+  `claude_review` true or false (`claude_review` of each job row; `null` for a job started before
+  SF-131, which is in neither arm, as the note under the table says). Per arm: the jobs, those
+  delivered (`pushed` or `handed_over`), those aborted, the cost (the sum of its jobs' cost as the
+  Jobs list sums it, "at least" when one is unknown), the cost per delivered job (`—` with none),
+  the median iterations of the delivered jobs, and the Codex gate's blockers and majors of its
+  jobs, in all and per job. With no job in either arm: "No jobs of the experiment yet."
 - **Review stages**, per stage (Claude review, Codex gate, plan check): runs with a verdict,
   failed runs, findings by severity, how many led to a fix (each ledger entry counted once, an item
   without one per occurrence, as `sf metrics` counts; for the plan check: the checks with a blocker
@@ -3208,7 +3216,10 @@ start; the period is the chosen number of days ending today. The sections, in or
   payload, null for the other stages).
 - **Spend**: the cost (every role but the Codex gate) and the Codex gate's tokens; cost per day by
   role, Codex gate tokens per day; per role (Implementer, Claude review, simplification, Codex
-  gate, plan check, digest, explanations) the cost, tokens and runs; per workspace.
+  gate, plan check, digest, explanations) the cost, tokens and runs; per workspace. The
+  simplification's line also says `offered N · taken N · skipped N` (`simplify` in the payload,
+  SF-132): the passes of the period whose `simplify.json` offered at least one suggestion, and the
+  `simplify_chosen` lines of `events.jsonl` in the period with the choice `simplify` or `skip`.
 - **Load**: jobs started and finished, the median time to ready (from the job's creation to its
   first `ready_for_human_review` or `handed_over`) and the median iterations of the pushed jobs.
 - **Jobs**: the jobs of the period (created or changed in it, or not finished), by cost, at most 200.

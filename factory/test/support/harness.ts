@@ -7,7 +7,7 @@
 // that create and remove the temp dir.
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before } from 'node:test';
@@ -47,6 +47,10 @@ export interface Env {
   config: string;
   state: string;
   home: string;
+  // The /proc the sandbox's config lock check of the sf processes scans (SF_TEST_PROC_DIR, SF-105):
+  // empty, nobody holds the lock; a test that needs a holder adds a <pid>/fd/<n> link to it.
+  // newEnv always makes one; only an Env never given to an sf process goes without.
+  proc?: string;
   extra?: Record<string, string>;
 }
 
@@ -92,6 +96,8 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
     SF_TASK_CHECK_AUTO: 'off',
     // The job steps of call() and refused() through the socket.
     SF_TEST_HOOKS: 'on',
+    // The config lock check scans this fake /proc, not the machine's (SF-105).
+    ...(env.proc !== undefined ? { SF_TEST_PROC_DIR: env.proc } : {}),
     // Temporary directories (the Task check's worktree, SF-054) where the test run makes its own.
     ...(process.env.TMPDIR !== undefined ? { TMPDIR: process.env.TMPDIR } : {}),
     // The zone of the times sf prints: the test file's own (SF-049), else the machine's.
@@ -100,13 +106,25 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
   };
 }
 
-export async function newEnv(name: string, extra: Record<string, string> = {}): Promise<Env> {
+export async function newEnv(name: string, extra: Record<string, string> = {}): Promise<Env & { proc: string }> {
   const root = join(temp, name);
-  const env = { config: join(root, 'config'), state: join(root, 'state'), home: join(root, 'home'), extra };
+  const env = { config: join(root, 'config'), state: join(root, 'state'), home: join(root, 'home'), proc: join(root, 'proc'), extra };
   await mkdir(env.home, { recursive: true });
+  await mkdir(env.proc, { recursive: true });
   // The factory commits at Clean with the user's Git identity.
   await writeFile(join(env.home, '.gitconfig'), '[user]\n\tname = Test User\n\temail = test@example.invalid\n');
   return env;
+}
+
+// Makes a process of env's fake /proc (SF_TEST_PROC_DIR, SF-105) hold path open, as the sandbox or
+// Git holds the config lock: a <pid>/fd/<n> link to its real path. One holder per Env at a time;
+// the undo it returns ends it.
+export async function holdOpen(env: Env, path: string): Promise<() => Promise<void>> {
+  assert.ok(env.proc !== undefined, 'the Env has no fake /proc');
+  const dir = join(env.proc, '4242');
+  await mkdir(join(dir, 'fd'), { recursive: true });
+  await symlink(await realpath(path), join(dir, 'fd', '3'));
+  return () => rm(dir, { recursive: true, force: true });
 }
 
 export async function script(env: Env, turns: unknown[]): Promise<void> {

@@ -51,6 +51,8 @@ export class Core {
   // Runner mode: the job; sf serve: the runners it talks to.
   readonly #runner: { workspace: string; ticket: string } | undefined;
   readonly runners: Runners | undefined;
+  // The /proc the sandbox's config lock check scans (ExecutionOptions.lockProc); undefined: the real one.
+  readonly lockProc: string | undefined;
   // Runner mode: stop() was called; nothing new starts.
   stopping = false;
   // The parts of the job lifecycle, filled by Execution's constructor once it has built each.
@@ -64,6 +66,7 @@ export class Core {
     this.handbook = handbook;
     this.#runner = options.runner;
     this.runners = options.runner === undefined ? new Runners(this.jobs, options.launch) : undefined;
+    this.lockProc = options.lockProc;
   }
 
   // The operations under locked not settled yet (Execution's idle).

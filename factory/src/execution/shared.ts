@@ -277,4 +277,7 @@ export interface ExecutionOptions {
   runner?: { workspace: string; ticket: string };
   // How sf serve starts a runner; the default spawns `sf run`.
   launch?: Launch;
+  // The /proc directory the sandbox's config lock check scans (LockScan.proc, SF-105); the real
+  // /proc without it. Only tests give another (SF_TEST_PROC_DIR under SF_TEST_HOOKS=on).
+  lockProc?: string;
 }

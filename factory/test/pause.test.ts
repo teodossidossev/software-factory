@@ -549,11 +549,12 @@ test('Usage limit in the Claude review (SF-072): parked with no review.json and 
     { write: { 'a.txt': 'a\n' } },
     { write: { '.software-factory/L-1.mr.md': mrText('feat(L-1): Review') }, text: 'prepared' },
     { write: { 'c.txt': 'c\n' } },
-    // Longer than the review: the review ends while the job works, not cancelled by the next one.
-    { delayMs: 4000, write: { 'd.txt': 'd\n' }, text: 'Answered.' },
+    // Runs once the review has ended (released by the test, SF-105): the review ends while the job
+    // works, not cancelled by the next one.
+    { waitFile: 'release-turn', write: { 'd.txt': 'd\n' }, text: 'Answered.' },
     { write: { '.software-factory/L-2.mr.md': mrText('feat(L-2): Moved on') }, text: 'prepared' },
   ]);
-  await reviewScript(env, [LIMIT_ERROR, { output: CLEAN }, { delayMs: 1500, ...LIMIT_ERROR }, { output: CLEAN }]);
+  await reviewScript(env, [LIMIT_ERROR, { output: CLEAN }, { waitFile: 'release-review', ...LIMIT_ERROR }, { output: CLEAN }]);
   const served = await serve(env);
   try {
     await call(served, 'start', { workspace: 'app', ticket: 'L-1' });
@@ -578,12 +579,16 @@ test('Usage limit in the Claude review (SF-072): parked with no review.json and 
     await waitFor(served, 'L-2', 'awaiting_review', 1);
     await until('the review of L-2 to start', async () => (await count(env, 'fake-review')) >= 3);
     assert.equal((await runCli(env, ['say', 'app', 'L-2', 'One', 'more'])).code, 0);
+    // The job has moved on (its next turn runs): only now does the review end at the limit.
+    await until('L-2 to work again', async () => (await jobs.read('app', 'L-2'))?.state === 'working');
+    await writeFile(join(env.home, 'release-review'), '');
     await until('the ignored review', async () => (await eventsOf(env, 'L-2')).some((record) => record.type === 'review_failed'));
     const ignored = (await eventsOf(env, 'L-2')).find((record) => record.type === 'review_failed')!;
     assert.deepEqual([ignored.iteration, ignored.ignored], [1, true]);
     const record = await jobs.readReview('app', 'L-2', 1);
     assert.ok(record !== undefined && 'error' in record && /hit your 5-hour limit/.test(record.error), JSON.stringify(record));
     assert.notEqual((await jobs.read('app', 'L-2'))!.state, 'waiting_limit');
+    await writeFile(join(env.home, 'release-turn'), '');
     await waitFor(served, 'L-2', 'ready_for_human_review', 2);
   } finally {
     await runCli(env, ['abort', 'app', 'L-2']);

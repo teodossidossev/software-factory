@@ -25,36 +25,51 @@ async function lock(dir: string, content: string, mode: number): Promise<string>
 
 const exists = (path: string): Promise<boolean> => lstat(path).then(() => true, () => false);
 
+// A /proc of the test's own (SF-105): pid directories with fd links, unreadable ones, or none.
+// Every test that expects a stale lock scans one, never the machine's /proc: there any other process
+// of the user (a factory job in its sandbox, a desktop's non-dumpable processes) may count as a
+// holder, as the check fails closed.
+async function fakeProc(): Promise<string> {
+  return mkdtemp(join(tmpdir(), 'sf-fake-proc-'));
+}
+
 test('staleSandboxLock: an empty read-only config.lock is stale, and removeStaleSandboxLock removes it', async () => {
   const dir = await gitDir();
   const path = await lock(dir, '', 0o444);
-  assert.equal(await staleSandboxLock(dir), true);
-  assert.equal(await removeStaleSandboxLock(dir), path);
+  // Nobody holds it.
+  const proc = await fakeProc();
+  assert.equal(await staleSandboxLock(dir, { proc }), true);
+  assert.equal(await removeStaleSandboxLock(dir, { proc }), path);
   assert.equal(await exists(path), false);
   // Nothing left: not stale, nothing removed.
-  assert.equal(await staleSandboxLock(dir), false);
-  assert.equal(await removeStaleSandboxLock(dir), undefined);
+  assert.equal(await staleSandboxLock(dir, { proc }), false);
+  assert.equal(await removeStaleSandboxLock(dir, { proc }), undefined);
 });
 
 test('staleSandboxLock: a non-empty lock, a writable one, or one on another platform is not stale and stays', async () => {
+  // Nobody holds them: only the file itself decides.
+  const proc = await fakeProc();
   const nonEmpty = await gitDir();
   const kept = await lock(nonEmpty, '[core]\n', 0o444);
-  assert.equal(await staleSandboxLock(nonEmpty), false);
-  assert.equal(await removeStaleSandboxLock(nonEmpty), undefined);
+  assert.equal(await staleSandboxLock(nonEmpty, { proc }), false);
+  assert.equal(await removeStaleSandboxLock(nonEmpty, { proc }), undefined);
   assert.equal(await exists(kept), true);
   for (const mode of [0o644, 0o200, 0o420, 0o402]) {
     const writable = await gitDir();
     const path = await lock(writable, '', mode);
-    assert.equal(await staleSandboxLock(writable), false, `mode ${mode.toString(8)}`);
-    assert.equal(await removeStaleSandboxLock(writable), undefined);
+    assert.equal(await staleSandboxLock(writable, { proc }), false, `mode ${mode.toString(8)}`);
+    assert.equal(await removeStaleSandboxLock(writable, { proc }), undefined);
     assert.equal(await exists(path), true);
   }
   const elsewhere = await gitDir();
   await lock(elsewhere, '', 0o444);
-  assert.equal(await staleSandboxLock(elsewhere, { platform: 'darwin' }), false);
+  assert.equal(await staleSandboxLock(elsewhere, { platform: 'darwin', proc }), false);
 });
 
-test('staleSandboxLock: a lock a child process holds open is not stale; once it exits, it is', async () => {
+// The one test on the machine's real /proc: only the direction no other process can change (a
+// holder keeps the lock whatever else runs). That the lock is stale once the child has exited
+// depends on every other process of the user, so it is the fake /proc's (the tests below).
+test('staleSandboxLock on the real /proc: a lock a child process holds open is not stale', async () => {
   const dir = await gitDir();
   const path = await lock(dir, '', 0o444);
   const fd = openSync(path, 'r');
@@ -69,7 +84,6 @@ test('staleSandboxLock: a lock a child process holds open is not stale; once it 
     child.kill();
     await once(child, 'exit');
   }
-  assert.equal(await staleSandboxLock(dir), true);
 });
 
 test('checkoutGitDir: the Git directory holding the config, a worktree\'s main checkout\'s', async () => {
@@ -83,17 +97,13 @@ test('checkoutGitDir: the Git directory holding the config, a worktree\'s main c
   assert.equal(await checkoutGitDir(worktree), join(repo, '.git'));
 });
 
-// A /proc of the test's own: pid directories with fd links, unreadable ones, or none.
-async function fakeProc(): Promise<string> {
-  return mkdtemp(join(tmpdir(), 'sf-fake-proc-'));
-}
-
 test('staleSandboxLock fails closed on /proc: a descriptor link to the lock, an unreadable fd directory of the factory\'s user, or no /proc at all keep the lock; processes gone during the scan do not', async () => {
   const dir = await gitDir();
   const path = await lock(dir, '', 0o444);
   const real = await realpath(path);
 
-  // Processes without the lock open, one gone (no fd directory): stale.
+  // Processes without the lock open, and one that vanished between the listing and the read of its
+  // fd directory (listed, but no fd directory any more): stale.
   const proc = await fakeProc();
   await mkdir(join(proc, '100', 'fd'), { recursive: true });
   await symlink('/dev/null', join(proc, '100', 'fd', '0'));

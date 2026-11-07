@@ -14,10 +14,13 @@ import { JobStore } from '../src/jobs.js';
 import { handbookSection } from '../src/prompts.js';
 import type { FileChange } from '../src/jobs.js';
 import { actedVerdict, decide, fixContent, MAX_USER_DECISIONS_CHARS, MAX_USER_MESSAGE_CHARS, readOnlySessionOptions, REVIEW_DENIED_TOOLS, REVIEW_SCHEMA, REVIEW_TOOLS, type ReviewItem, reviewPrompt, reviewSessionOptions, runReview, scopeItem, sensitiveItem, unacceptedItems, uniqueNits, userDecisionLines } from '../src/review.js';
+import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
+import { FILE_GUARD } from '../src/sandbox-denials.js';
 import { loadHandbook } from '../src/server.js';
+import { runSimplify } from '../src/simplify.js';
 import { writeTask } from '../src/task-file.js';
 import { act, fetchRaw } from './support/dashboard-client.js';
-import { assertPathDenials, call, type Env, FAKE, fakeLog, git, newEnv, newRepo, putRules, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor } from './support/harness.js';
+import { assertPathDenials, call, type Env, FAKE, fakeLog, git, newEnv, newRepo, probeLog, putRules, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor } from './support/harness.js';
 
 const FIX = {
   verdict: 'fix',
@@ -83,6 +86,86 @@ test('the options of runStructuredSession: without tools and settingSources, REV
   const none = readOnlySessionOptions({ ...base, tools: [], settingSources: [] }, new AbortController(), REVIEW_SCHEMA);
   assert.deepEqual([none.tools, none.settingSources], [[], []]);
   assert.deepEqual(none.outputFormat, { type: 'json_schema', schema: REVIEW_SCHEMA });
+});
+
+test('readOnlySessionOptions merges options.hooks (the file-tool guard, SF-123) with the session\'s own hooks: each event\'s matchers concatenated, the session\'s first', () => {
+  const base = { cwd: '/srv/app', claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 3 };
+  const hook = (): HookCallback => async () => ({});
+  const [guard, own, after] = [hook(), hook(), hook()];
+  const merged = readOnlySessionOptions({ ...base, hooks: { PreToolUse: [{ hooks: [guard] }] } }, new AbortController(), REVIEW_SCHEMA, [], { PreToolUse: [{ hooks: [own] }], PostToolUse: [{ hooks: [after] }] });
+  assert.deepEqual(merged.hooks, { PreToolUse: [{ hooks: [own] }, { hooks: [guard] }], PostToolUse: [{ hooks: [after] }] });
+  assert.deepEqual(readOnlySessionOptions({ ...base, hooks: { PreToolUse: [{ hooks: [guard] }] } }, new AbortController(), REVIEW_SCHEMA).hooks, { PreToolUse: [{ hooks: [guard] }] });
+  assert.deepEqual(readOnlySessionOptions(base, new AbortController(), REVIEW_SCHEMA, [], { PreToolUse: [{ hooks: [own] }] }).hooks, { PreToolUse: [{ hooks: [own] }] });
+  assert.equal('hooks' in readOnlySessionOptions(base, new AbortController(), REVIEW_SCHEMA), false);
+});
+
+test('readOnlySessionOptions hides the session environment\'s credentials from sandboxed commands (SF-123 Fix 2): one deny entry each in credentials.envVars, after the entries already there; none without a sandbox', () => {
+  const saved = { ...process.env };
+  Object.assign(process.env, { ANTHROPIC_API_KEY: 'sk-fake', CLAUDE_CODE_USE_BEDROCK: '1', AWS_SECRET_ACCESS_KEY: 'aws-fake', GOOGLE_APPLICATION_CREDENTIALS: '/g.json' });
+  try {
+    const sandbox = { enabled: true, credentials: { envVars: [{ name: 'MY_TOKEN', mode: 'mask' as const }] } };
+    const options = readOnlySessionOptions({ cwd: '/srv/app', claudePath: undefined, sandbox, model: undefined, maxTurns: 3, filesystem: { denyRead: [], denyWrite: [] } }, new AbortController(), REVIEW_SCHEMA);
+    const envVars = options.sandbox?.credentials?.envVars ?? [];
+    assert.deepEqual(envVars[0], { name: 'MY_TOKEN', mode: 'mask' });
+    // Exactly the passed credentials (Bedrock on: the cloud ones too), never PATH or the switch.
+    assert.deepEqual(envVars.slice(1).map((entry) => [entry.name, entry.mode]).sort(), Object.keys(options.env!).filter((name) => /^(ANTHROPIC_\w+|AWS_\w+|GOOGLE_\w+|CLOUD_ML_\w+|CLAUDE_CODE_OAUTH_TOKEN)$/.test(name)).map((name) => [name, 'deny']).sort());
+    for (const name of ['ANTHROPIC_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'GOOGLE_APPLICATION_CREDENTIALS']) {
+      assert.ok(envVars.some((entry) => entry.name === name && entry.mode === 'deny'), name);
+    }
+    assert.ok(!envVars.some((entry) => entry.name === 'PATH' || entry.name === 'CLAUDE_CODE_USE_BEDROCK'));
+    // The CLI itself still gets them; no sandbox stays none.
+    assert.equal(options.env!.AWS_SECRET_ACCESS_KEY, 'aws-fake');
+    assert.equal(readOnlySessionOptions({ cwd: '/srv/app', claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 3 }, new AbortController(), REVIEW_SCHEMA).sandbox, undefined);
+  } finally {
+    for (const name of Object.keys(process.env)) {
+      if (!(name in saved)) {
+        delete process.env[name];
+      }
+    }
+    Object.assign(process.env, saved);
+  }
+});
+
+test('runReview and runSimplify pass options.hooks on to the session (SF-123): its tool calls are put to them', async () => {
+  const env = await newEnv('review-hooks');
+  const probes = [{ tool: 'Read', input: { file_path: 'README.md' } }];
+  await reviewScript(env, [{ output: CLEAN, probes }, { output: { summary: 'Nothing to simplify.', suggestions: [] }, probes }]);
+  const seen: string[] = [];
+  const guard: HookCallback = async (input) => {
+    seen.push(input.hook_event_name === 'PreToolUse' ? input.tool_name : input.hook_event_name);
+    return input.hook_event_name === 'PreToolUse' && input.tool_name === 'Read'
+      ? { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'refused by the test guard' } }
+      : {};
+  };
+  const home = process.env.HOME;
+  process.env.HOME = env.home;
+  try {
+    const options = { cwd: env.home, claudePath: FAKE, sandbox: undefined, model: undefined, maxTurns: 3, signal: new AbortController().signal, hooks: { PreToolUse: [{ hooks: [guard] }] } };
+    assert.equal((await runReview('Review this.', options)).ok, true);
+    assert.equal((await runSimplify('Simplify this.', options)).ok, true);
+  } finally {
+    process.env.HOME = home;
+  }
+  assert.deepEqual(seen, ['Read', 'StructuredOutput', 'Read', 'StructuredOutput']);
+  assert.deepEqual((await probeLog(env)).filter((entry) => entry.tool === 'Read').map((entry) => [entry.decision, entry.output]), [['deny', 'refused by the test guard'], ['deny', 'refused by the test guard']]);
+});
+
+test('through sf serve (SF-123): the review of an iteration gets the job\'s file-tool guard, which refuses a Read in the home directory', async () => {
+  const env = await newEnv('review-guard', { SF_REVIEW: 'on' });
+  const repo = await newRepo(env, 'review-guard-repo', false);
+  await putTask(env, repo, 'R-2', 'Greet the reader');
+  await script(env, [{ write: { 'README.md': 'hello reader\n' }, text: 'Report of iteration 1' }, { write: { '.software-factory/R-2.mr.md': mrText('feat(R-2): Greet the reader') }, text: 'prepared' }]);
+  await reviewScript(env, [{ output: CLEAN, probes: [{ tool: 'Read', input: { file_path: join(env.home, 'fake-claude.json') } }, { tool: 'Read', input: { file_path: 'README.md' } }] }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'R-2' });
+    await waitFor(served, 'R-2', 'ready_for_human_review', 1);
+    const [home, own] = await probeLog(env);
+    assert.deepEqual([home!.decision, home!.hooks, own!.decision], ['deny', 1, 'allow']);
+    assert.ok(home!.output.startsWith(FILE_GUARD) && home!.output.includes(join(env.home, 'fake-claude.json')), home!.output);
+  } finally {
+    await stop(served);
+  }
 });
 
 test('fix, then clean: the Fix section from the items, the next iteration, Clean; the read-only argv, the prompt, review.json, check, sf watch, sf status and the dashboard', async () => {
@@ -159,17 +242,21 @@ test('fix, then clean: the Fix section from the items, the next iteration, Clean
     const watched = await runCli(env, ['watch', 'app', 'R-1', '--once']);
     assert.match(watched.stdout, /^\d\d:\d\d:\d\d \[1\] review by claude: fix \(1 item\)$/m);
     assert.match(watched.stdout, /^\d\d:\d\d:\d\d \[2\] review by claude: clean$/m);
-    // The review sessions live (SF-045): every SDK message of each, then the verdict line.
+    // The review sessions live (SF-045): every SDK message of each, then the verdict line. The
+    // session has the file-tool guard's hook (SF-123), so the fake gives its answer as a
+    // StructuredOutput tool call put to it (an assistant and a user message).
     const live = (await eventsOf(env, 'R-1')).filter((record) => record.type === 'review_message' || record.type === 'review');
     assert.deepEqual(live.map((record) => [record.iteration, record.type, (record.message as { type?: string } | undefined)?.type ?? record.verdict]), [1, 2].flatMap((iteration) => [
       [iteration, 'review_message', 'system'], [iteration, 'review_message', 'assistant'], [iteration, 'review_message', 'user'],
-      [iteration, 'review_message', 'assistant'], [iteration, 'review_message', 'result'], [iteration, 'review', iteration === 1 ? 'fix' : 'clean'],
+      [iteration, 'review_message', 'assistant'], [iteration, 'review_message', 'assistant'], [iteration, 'review_message', 'user'],
+      [iteration, 'review_message', 'result'], [iteration, 'review', iteration === 1 ? 'fix' : 'clean'],
     ]));
     assert.ok(live.filter((record) => record.type === 'review_message').every((record) => record.reviewer === 'claude' && Object.keys(record).sort().join() === 'iteration,message,reviewer,ts,type'));
     const reviewLines = watched.stdout.split('\n').filter((line) => / review( |$)/.test(line)).map((line) => line.slice(9));
-    assert.deepEqual(reviewLines, [
-      '[1] review | Read(README.md)', '[1] review | Reviewed.', '[1] review by claude: fix (1 item)',
-      '[2] review | Read(README.md)', '[2] review | Reviewed.', '[2] review by claude: clean',
+    // The answer's StructuredOutput call (SF-123: the session has the guard's hook), cut as any call.
+    assert.deepEqual(reviewLines.map((line) => line.replace(/^(\[\d\] review \| StructuredOutput)\(.*$/, '$1(…)')), [
+      '[1] review | Read(README.md)', '[1] review | Reviewed.', '[1] review | StructuredOutput(…)', '[1] review by claude: fix (1 item)',
+      '[2] review | Read(README.md)', '[2] review | Reviewed.', '[2] review | StructuredOutput(…)', '[2] review by claude: clean',
     ]);
     // The Implementer's cost (0.0123, then 0 more in the same session) and both reviews.
     assert.equal((await jobs.recordedCost('app', 'R-1', 2))!.toFixed(4), '0.1035');

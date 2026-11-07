@@ -8,10 +8,10 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { test } from 'node:test';
-import { CLASSIFIER_DENIAL, childEnv, DONT_ASK_DENIAL, PASSED_SETTINGS, positiveDecimal, PROBE_SCRIPT, PROBES, probeCallProblem, probeCommand, probeProblem, ProcessGroups, runSmoke, smokePaths, smokeProbe, smokeTask, STEPS, terminate, trackRunnerLock } from '../src/live-smoke.js';
-import { taskChecksDir } from '../src/sandbox-denials.js';
+import { CLASSIFIER_DENIAL, childEnv, DONT_ASK_DENIAL, initToolsProblem, outsideWriteProblem, PASSED_SETTINGS, positiveDecimal, PROBE_SCRIPT, PROBES, probeCallProblem, probeCommand, probeProblem, ProcessGroups, runSmoke, smokePaths, smokeProbe, smokeTask, STEPS, terminate, trackRunnerLock } from '../src/live-smoke.js';
+import { FILE_GUARD, taskChecksDir } from '../src/sandbox-denials.js';
 import { Redactor } from '../src/redact.js';
 import { trackChild } from './support/children.js';
 import { CLI, codexLog, codexScript, type Env, FAKE, fakeCodex, fakeLog, git, newEnv, processEnv, reviewLog, reviewScript, script, temp } from './support/harness.js';
@@ -36,9 +36,14 @@ function probeOutput(changed: Record<string, string> = {}): string {
   return `${JSON.stringify(PROBES.map((name) => ({ name, outcome: changed[name] ?? 'refused', code: changed[name] === undefined ? 'EACCES' : null })), null, 2)}\n`;
 }
 
-// The turns of a clean run: the Implementer's change and the probe's output, then the MR text at Clean.
+// The Write of the smoke's outside.txt the Task asks for (SF-123), from the worktree
+// <dir>/worktrees/smoke/SMOKE-1: the file-tool guard refuses it.
+const OUTSIDE_WRITE = { tool: 'Write', input: { file_path: '../../../outside.txt', content: 'outside\n' } };
+
+// The turns of a clean run: the Implementer's change, the probe's output and the Write outside the
+// worktree, then the MR text at Clean.
 const CLEAN_TURNS = [
-  { write: { 'greeting.txt': 'hello\nhello again\n', 'probe.json': probeOutput() }, text: '# Report: SMOKE-1, iteration 1\n\n## Done\nAdded the line.' },
+  { write: { 'greeting.txt': 'hello\nhello again\n', 'probe.json': probeOutput() }, calls: [OUTSIDE_WRITE], text: '# Report: SMOKE-1, iteration 1\n\n## Done\nAdded the line.' },
   { write: { [MR_PATH]: mrText('feat(SMOKE-1): Add a second greeting line') }, text: 'prepared' },
 ];
 
@@ -120,6 +125,7 @@ test('a clean run: every step PASS, exit 0, the temp directory gone, the user\'s
   assert.ok(ran.dir.startsWith(ran.tmp), ran.dir);
   assert.match(ran.stdout, /\nsmoke: PASS, cost \d+\.\d{4} USD, gate 1100 tokens\n$/);
   assert.match(ran.rows.get('Task check')!.detail, /^verdict ready/);
+  assert.equal(ran.rows.get('Sandbox')!.detail, `every probe refused (${PROBES.length}), no web tools, the Write outside the worktree refused`);
   assert.match(ran.rows.get('Codex gate')!.detail, /clean, 1100 tokens/);
   assert.match(ran.rows.get('MR text')!.detail, /^feat\(SMOKE-1\): Add a second greeting line$/);
   assert.match(ran.rows.get('Approve')!.detail, new RegExp(`^${BRANCH} at [0-9a-f]{12} on origin\\.git$`));
@@ -167,9 +173,20 @@ test('--keep keeps the directory and prints it; the bare remote has the job\'s b
     // The Task of the run: its probe of the run's own paths, the canary by its SHA-256 only.
     const canary = await readFile(join(ran.dir, 'config', 'auth.env'), 'utf8');
     assert.match(canary, /^SF_CANARY=[0-9a-f]{48}\n$/);
-    const probe = smokeProbe(smokePaths(ran.dir), createHash('sha256').update(canary).digest('hex'), undefined);
+    // The user's paths found as the smoke finds them, in the test's home (SF-123).
+    const found = (path: string): string | undefined => (existsSync(path) ? path : undefined);
+    const probe = smokeProbe(smokePaths(ran.dir), createHash('sha256').update(canary).digest('hex'), {
+      ssh: found(join(ran.env.home, '.ssh')), dbus: found(`/run/user/${process.getuid!()}/bus`), docker: found('/var/run/docker.sock'),
+      claudeProjects: found(join(ran.env.home, '.claude', 'projects')),
+    }, ran.env.home);
+    assert.equal(probe.homeCanary, join(ran.env.home, `.sf-smoke-${basename(ran.dir).slice('sf-smoke-'.length)}`, 'canary'));
     const task = git(join(ran.dir, 'origin.git'), 'show', 'main:.software-factory/SMOKE-1.md');
-    assert.equal(task, smokeTask(probe));
+    assert.equal(task, smokeTask(probe, join(ran.dir, 'outside.txt')));
+    assert.ok(task.includes(`--home-canary '${probe.homeCanary}'`));
+    // SF-123: the Write outside the worktree asked for; the home canary gone with Cleanup.
+    assert.ok(task.replace(/\s+/g, ' ').includes(`with the Write tool, write the line "outside" to the file \`${join(ran.dir, 'outside.txt')}\``));
+    assert.equal(existsSync(dirname(probe.homeCanary)), false);
+    assert.equal(existsSync(join(ran.dir, 'outside.txt')), false);
     assert.ok(task.includes(probeCommand(probe)));
     // SF-110: the probe as one Bash call on its own, then probe.json read with the Read tool.
     assert.ok(task.replace(/\s+/g, ' ').includes('as one Bash call on its own, with nothing before or after it (no `cd`, `echo`, `cat`, `;`, `&&` or `|`)'));
@@ -293,6 +310,43 @@ test('why probe.json is missing (SF-104, SF-110), from the job\'s events: no pro
   assert.equal(probeCallProblem(implementerEvent('assistant', [bash('p', probe)])), undefined);
 });
 
+test('the init-tools check (SF-123): fails on an Implementer init that lists WebFetch or WebSearch, or on no init; a reviewer\'s init does not count', () => {
+  const init = (tools: string[], extra: Record<string, unknown> = {}): string =>
+    JSON.stringify({ ts: 't', iteration: 1, ...extra, message: { type: 'system', subtype: 'init', tools, session_id: 's' } });
+  assert.equal(initToolsProblem(init(['Bash', 'Read', 'Write'])), undefined);
+  assert.equal(initToolsProblem(init(['Bash', 'WebFetch'])), 'the Implementer was offered WebFetch');
+  assert.equal(initToolsProblem([init(['Bash']), init(['WebSearch', 'WebFetch'])].join('\n')), 'the Implementer was offered WebSearch and WebFetch');
+  assert.equal(initToolsProblem(''), 'the Implementer\'s events have no init message');
+  assert.equal(initToolsProblem([init(['Bash']), init(['WebFetch'], { type: 'review_message' })].join('\n')), undefined);
+});
+
+test('the outside-write check (SF-123): passes only when the file is missing and the Write of it carries the guard\'s refusal', () => {
+  const worktree = '/t/worktrees/smoke/SMOKE-1';
+  const outside = '/t/outside.txt';
+  const write = (id: string, path: string): string => implementerEvent('assistant', [{ type: 'tool_use', id, name: 'Write', input: { file_path: path, content: 'outside\n' } }]);
+  const refused = `${FILE_GUARD} refuses this Write: ${outside} is outside the job's worktree ${worktree}, or in its .git.`;
+  const events = [write('w', outside), implementerEvent('user', [result('w', refused, true)])].join('\n');
+  assert.equal(outsideWriteProblem(events, outside, false, worktree), undefined);
+  // A relative path counts from the worktree; the result as text blocks too.
+  assert.equal(outsideWriteProblem([write('w', '../../../outside.txt'), implementerEvent('user', [result('w', [{ type: 'text', text: refused }], true)])].join('\n'), outside, false, worktree), undefined);
+  // The file exists: it fails whatever the events say.
+  assert.equal(outsideWriteProblem(events, outside, true, worktree), `${outside} was written outside the worktree`);
+  // No Write of it, or one another check refused, or one that ran.
+  assert.equal(outsideWriteProblem([write('w', '/t/other.txt'), implementerEvent('user', [result('w', refused, true)])].join('\n'), outside, false, worktree), `the Implementer made no Write of ${outside}`);
+  assert.equal(outsideWriteProblem([write('w', outside), implementerEvent('user', [result('w', 'File created successfully')])].join('\n'), outside, false, worktree),
+    `the Write of ${outside} was not refused by the file-tool guard: File created successfully`);
+});
+
+test('a Write outside the worktree the guard did not see (SF-123): the Sandbox step FAILs naming it', async () => {
+  const ran = await smoke('smoke-sandbox-write', [], async (env) => {
+    await script(env, [{ ...CLEAN_TURNS[0], calls: [] }]);
+    await reviewScript(env, [{ output: CHECK_READY }, { output: CLAUDE_CLEAN }]);
+  });
+  assert.equal(ran.code, 1, ran.stdout + ran.stderr);
+  assert.deepEqual(statuses(ran), ['PASS', 'PASS', 'PASS', 'PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
+  assert.equal(ran.rows.get('Sandbox')!.detail, `the Implementer made no Write of ${join(ran.dir, 'outside.txt')}`);
+});
+
 test('SF_SANDBOX=off: the Sandbox step is a SKIP that counts as a pass, the last line says the sandbox was not checked, exit 0', async () => {
   const ran = await smoke('smoke-sandbox-off', [], cleanScripts, { SF_SANDBOX: 'off' });
   assert.equal(ran.code, 0, ran.stdout + ran.stderr);
@@ -301,55 +355,85 @@ test('SF_SANDBOX=off: the Sandbox step is a SKIP that counts as a pass, the last
   assert.match(ran.stdout, /\nsmoke: PASS \(sandbox not checked\), cost \d+\.\d{4} USD, gate 1100 tokens\n$/);
 });
 
-test('probeProblem: every probe refused passes, absent only for ~/.ssh and SSH_AUTH_SOCK; anything else names the probe', () => {
+test('probeProblem: every probe refused passes, absent only for the user\'s paths that may be missing (never the home canary); anything else names the probe', () => {
   assert.equal(probeProblem(probeOutput()), undefined);
-  assert.equal(probeProblem(probeOutput({ '~/.ssh': 'absent', SSH_AUTH_SOCK: 'absent' })), undefined);
+  assert.equal(probeProblem(probeOutput({ '~/.ssh': 'absent', SSH_AUTH_SOCK: 'absent', dbus: 'absent', 'docker.sock': 'absent', '~/.claude/projects': 'absent' })), undefined);
   assert.equal(probeProblem(probeOutput({ 'auth.env': 'allowed', SSH_AUTH_SOCK: 'allowed' })), 'auth.env allowed, SSH_AUTH_SOCK allowed');
   assert.equal(probeProblem(probeOutput({ jobs: 'absent' })), 'jobs absent');
-  assert.equal(probeProblem(JSON.stringify([{ name: 'auth.env', outcome: 'refused' }])), 'dashboard-token missing, jobs missing, sf.sock missing, ~/.ssh missing, SSH_AUTH_SOCK missing');
+  // SF-123: each new probe allowed, the home canary absent.
+  assert.equal(probeProblem(probeOutput({ dbus: 'allowed', 'docker.sock': 'allowed', 'home-canary': 'allowed', '~/.claude/projects': 'allowed' })),
+    'dbus allowed, docker.sock allowed, home-canary allowed, ~/.claude/projects allowed');
+  assert.equal(probeProblem(probeOutput({ 'home-canary': 'absent' })), 'home-canary absent');
+  // Given the run's probe: absent only for a path the smoke did not give it (missing outside the sandbox).
+  const paths = smokePaths('/t/sf-smoke-x');
+  const given = smokeProbe(paths, 'ab'.repeat(32), { ssh: '/h/.ssh', dbus: '/run/user/1/bus', docker: '/var/run/docker.sock' }, '/h');
+  const absent = probeOutput({ '~/.ssh': 'absent', dbus: 'absent', 'docker.sock': 'absent', '~/.claude/projects': 'absent' });
+  assert.equal(probeProblem(absent, given), '~/.ssh absent, though it exists, dbus absent, though it exists, docker.sock absent, though it exists');
+  assert.equal(probeProblem(absent, smokeProbe(paths, 'ab'.repeat(32), {}, '/h')), undefined);
+  assert.equal(probeProblem(JSON.stringify(PROBES.filter((name) => name !== 'dbus').map((name) => ({ name, outcome: 'refused' })))), 'dbus missing');
+  assert.equal(probeProblem(JSON.stringify([{ name: 'auth.env', outcome: 'refused' }])), 'dashboard-token missing, jobs missing, sf.sock missing, ~/.ssh missing, SSH_AUTH_SOCK missing, dbus missing, docker.sock missing, home-canary missing, ~/.claude/projects missing');
   assert.equal(probeProblem('not json'), 'probe.json is not JSON');
   assert.equal(probeProblem('{}'), 'probe.json is not a list of probes');
 });
 
-test('the probe script: allowed only for what access shows (the canary by its SHA-256, a token, the job in jobs/, a connect, a non-empty ~/.ssh); refused for a hidden or missing path; never prints what it read', async () => {
+test('the probe script: allowed only for what access shows (the canary by its SHA-256, a token, the job in jobs/, a connect, a non-empty ~/.ssh, home canary and projects listing); refused for a hidden or missing path; absent exactly for an option not given; never prints what it read', async () => {
   const dir = join(temp, 'probe-script');
   await rm(dir, { recursive: true, force: true });
   await mkdir(join(dir, 'state', 'jobs', 'smoke'), { recursive: true });
   await mkdir(join(dir, 'ssh'));
+  await mkdir(join(dir, 'projects', 'p'), { recursive: true });
+  await writeFile(join(dir, 'home-canary'), 'canary-value\n');
   await writeFile(join(dir, 'probe.mjs'), PROBE_SCRIPT);
   const canary = 'SF_CANARY=0123456789abcdef\n';
   await writeFile(join(dir, 'auth.env'), canary);
   await writeFile(join(dir, 'state', 'dashboard-token'), 'token-value\n');
   await writeFile(join(dir, 'ssh', 'id_test'), 'key');
   const socket = join(dir, 'state', 'sf.sock');
-  const server = createServer((connection) => connection.end());
-  await new Promise<void>((resolve) => server.listen(socket, resolve));
+  const servers = [socket, join(dir, 'bus'), join(dir, 'docker.sock')].map((path) => {
+    const server = createServer((connection) => connection.end());
+    return { server, listening: new Promise<void>((resolve) => server.listen(path, resolve)) };
+  });
+  await Promise.all(servers.map(({ listening }) => listening));
   const run = (probe: Parameters<typeof probeCommand>[0], env: NodeJS.ProcessEnv): string =>
     execFileSync('sh', ['-c', probeCommand(probe).replace(/ > probe\.json$/, '')], { cwd: dir, env, encoding: 'utf8' });
   const sha = createHash('sha256').update(canary).digest('hex');
   try {
-    const open = { canary: join(dir, 'auth.env'), canarySha256: sha, token: join(dir, 'state', 'dashboard-token'), jobs: join(dir, 'state', 'jobs'), job: 'smoke', socket, ssh: join(dir, 'ssh') };
+    const open = {
+      canary: join(dir, 'auth.env'), canarySha256: sha, token: join(dir, 'state', 'dashboard-token'), jobs: join(dir, 'state', 'jobs'), job: 'smoke', socket, ssh: join(dir, 'ssh'),
+      dbus: join(dir, 'bus'), docker: join(dir, 'docker.sock'), claudeProjects: join(dir, 'projects'), homeCanary: join(dir, 'home-canary'),
+    };
     const allowed = run(open, { PATH: process.env.PATH, SSH_AUTH_SOCK: '/x' });
     assert.deepEqual(JSON.parse(allowed), [
       { name: 'auth.env', outcome: 'allowed', code: null }, { name: 'dashboard-token', outcome: 'allowed', code: null }, { name: 'jobs', outcome: 'allowed', code: null },
       { name: 'sf.sock', outcome: 'allowed', code: null }, { name: '~/.ssh', outcome: 'allowed', code: null }, { name: 'SSH_AUTH_SOCK', outcome: 'allowed', code: null },
+      { name: 'dbus', outcome: 'allowed', code: null }, { name: 'docker.sock', outcome: 'allowed', code: null }, { name: 'home-canary', outcome: 'allowed', code: null },
+      { name: '~/.claude/projects', outcome: 'allowed', code: null },
     ]);
-    assert.ok(!allowed.includes('SF_CANARY') && !allowed.includes('token-value'));
+    assert.ok(!allowed.includes('SF_CANARY') && !allowed.includes('token-value') && !allowed.includes('canary-value'));
     // What a sandbox shows for a denied path: an empty file, an empty folder, nothing at all.
     await writeFile(join(dir, 'empty'), '');
     await mkdir(join(dir, 'none'), { recursive: true });
-    const hidden = { ...open, canary: join(dir, 'empty'), token: join(dir, 'empty'), jobs: join(dir, 'none'), socket: join(dir, 'missing.sock'), ssh: join(dir, 'none') };
+    const hidden = {
+      ...open, canary: join(dir, 'empty'), token: join(dir, 'empty'), jobs: join(dir, 'none'), socket: join(dir, 'missing.sock'), ssh: join(dir, 'none'),
+      dbus: join(dir, 'missing.sock'), docker: join(dir, 'empty'), claudeProjects: join(dir, 'none'), homeCanary: join(dir, 'empty'),
+    };
     assert.deepEqual(JSON.parse(run(hidden, { PATH: process.env.PATH })), [
       { name: 'auth.env', outcome: 'refused', code: null }, { name: 'dashboard-token', outcome: 'refused', code: null }, { name: 'jobs', outcome: 'refused', code: null },
       { name: 'sf.sock', outcome: 'refused', code: 'ENOENT' }, { name: '~/.ssh', outcome: 'refused', code: null }, { name: 'SSH_AUTH_SOCK', outcome: 'absent', code: null },
+      { name: 'dbus', outcome: 'refused', code: 'ENOENT' }, { name: 'docker.sock', outcome: 'refused', code: 'ECONNREFUSED' }, { name: 'home-canary', outcome: 'refused', code: null },
+      { name: '~/.claude/projects', outcome: 'refused', code: null },
     ]);
-    const gone = { ...hidden, canary: join(dir, 'missing'), ssh: undefined };
+    // Options not given: absent, but for the home canary, which is always given (a missing one is refused).
+    const gone = { ...hidden, canary: join(dir, 'missing'), ssh: undefined, dbus: undefined, docker: undefined, claudeProjects: undefined, homeCanary: join(dir, 'missing') };
     const result = JSON.parse(run(gone, { PATH: process.env.PATH })) as Array<{ name: string; outcome: string; code: string | null }>;
     assert.deepEqual(result[0], { name: 'auth.env', outcome: 'refused', code: 'ENOENT' });
-    assert.deepEqual(result[4], { name: '~/.ssh', outcome: 'absent', code: null });
+    assert.deepEqual(result.slice(4).map(({ name, outcome }) => [name, outcome]), [
+      ['~/.ssh', 'absent'], ['SSH_AUTH_SOCK', 'absent'], ['dbus', 'absent'], ['docker.sock', 'absent'], ['home-canary', 'refused'], ['~/.claude/projects', 'absent'],
+    ]);
     assert.equal(probeProblem(JSON.stringify(result)), undefined);
+    assert.ok(!probeCommand(gone).includes('--dbus') && !probeCommand(gone).includes('--docker') && !probeCommand(gone).includes('--claude-projects') && probeCommand(gone).includes('--home-canary'));
   } finally {
-    server.close();
+    servers.forEach(({ server }) => server.close());
   }
 });
 

@@ -281,7 +281,7 @@ export class ReviewsPart {
       const denials = await this.#pathDenials(job, job.worktree);
       outcome = await runReview(reviewPrompt(input), {
         cwd: job.worktree, claudePath: this.core.config.claudePath, sandbox: this.core.config.sandbox, model: this.core.config.reviewModel,
-        deny: denials.tools, filesystem: denials.sandbox,
+        deny: denials.tools, filesystem: denials.sandbox, hooks: denials.hooks,
         maxTurns: this.core.config.reviewMaxTurns, signal: running.controller.signal, images: this.imageRefs(job, input.task),
         // The session live in events.jsonl (SF-045).
         onMessage: (message) => this.core.appendLive(job, 'review_message', redactor.reviewMessage(message)),
@@ -724,7 +724,7 @@ export class ReviewsPart {
       const denials = await this.#pathDenials(job, job.worktree);
       outcome = await runSimplify(simplifyPrompt(input), {
         cwd: job.worktree, claudePath: this.core.config.claudePath, sandbox: this.core.config.sandbox, model: this.core.config.reviewModel,
-        deny: denials.tools, filesystem: denials.sandbox,
+        deny: denials.tools, filesystem: denials.sandbox, hooks: denials.hooks,
         maxTurns: this.core.config.reviewMaxTurns, signal: running.controller.signal, images: this.imageRefs(job, input.task),
         onMessage: (message) => this.core.appendLive(job, 'review_message', redactor.reviewMessage(message), SIMPLIFIER),
       });

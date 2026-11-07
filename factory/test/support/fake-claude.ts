@@ -25,7 +25,8 @@
 // structured output is then given, as the real CLI gives it, by a StructuredOutput tool call put to
 // the hooks first (SF-070) and logged the same way; a denied one ends the run with the CLI's
 // error_max_structured_output_retries result, its error naming the hook's reason.
-// An Implementer turn can make a list of tool calls (each a tool_use and its tool_result) and can
+// An Implementer turn can make a list of tool calls (each a tool_use and its tool_result, put to the
+// PreToolUse hooks first like a probe, SF-123: a denied one's result is the hook's reason) and can
 // end like the real CLI at its turn limit (SF-069): the error_max_turns result with the CLI's
 // error text, then exit code 1, on which the SDK throws "Claude Code returned an error result".
 // A user message with a block that is not text (the images of SF-065) is logged with its blocks too:
@@ -228,7 +229,7 @@ function giveStructuredOutput(output: unknown): Promise<string | undefined> {
 // What the log keeps of a user message's blocks.
 type LoggedBlock = { type: 'text'; text: string } | { type: 'image'; media_type: string; bytes: number; sha256: string } | { type: string };
 
-function run(prompt: string, blocks?: LoggedBlock[]): void {
+async function run(prompt: string, blocks?: LoggedBlock[]): Promise<void> {
   appendFileSync(join(home, `${name}.log`), `${JSON.stringify({ argv, prompt, sessionId, cwd: process.cwd(), env: Object.keys(process.env).sort(), ...(blocks !== undefined ? { blocks } : {}) })}\n`);
   if (review) {
     void runReview();
@@ -268,8 +269,7 @@ function run(prompt: string, blocks?: LoggedBlock[]): void {
     out({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', is_error: false, content: 'ok 1 tests\npassed' }] } });
   }
   for (const [index, call] of (turn.calls ?? []).entries()) {
-    out({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'tool_use', id: `c${index}`, name: call.tool, input: call.input }] } });
-    out({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `c${index}`, is_error: false, content: 'done' }] } });
+    await hookedCall(`c${index}`, call.tool, call.input, () => 'done');
   }
   if (turn.maxTurns === true) {
     const limit = option('max-turns') ?? '?';

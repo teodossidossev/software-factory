@@ -318,12 +318,26 @@ sf smoke [--keep] [--timeout-min N] [--budget-usd N]
   the Implementer did not run the probe, the permission classifier refused it before the sandbox
   (the sandbox was not exercised), the probe failed (the first line of its error), or else
   `probe.json could not be read`. The step proves the **sandbox** holds even when the permission
-  check lets a command through, so only the smoke lets its probe past that check: it gives its
-  `sf serve` `SF_SMOKE_PROBE_ALLOW` (the probe's command line), and the Implementer gets one exact
-  allow rule `Bash(<that command>)` on top, still in permission mode `auto`, with exactly a real
-  job's sandbox and path denials. `src/config.ts` honours the setting only when the state directory
-  is the one the smoke made, `<tmpdir>/sf-smoke-*/state` (both resolved); a real install's state
-  directory never is, so a real job never gets the rule, even with the variable set. With `SF_SANDBOX=off` the step is SKIP (`sandbox off`), which counts as
+  check lets a command through. An allow rule does not pass the auto mode classifier (the live
+  smoke of 2026-11-07 showed it refusing the probe despite one, SF-104), so only the smoke's
+  Implementer runs in permission mode `dontAsk` (SF-109): no classifier and no prompt, a tool call
+  not pre-approved is denied. It gives its `sf serve` `SF_SMOKE_PROBE_ALLOW` (the probe's command
+  line), and the Implementer's session gets `permissionMode: "dontAsk"` and `allowedTools`: the
+  exact rule `Bash(<that command>)` and the file tools the ticket needs (`Read`, `Edit`, `Write`,
+  `Glob`, `Grep`, `TodoWrite`); its `cwd`, setting sources, deny list, path denials, sandbox,
+  environment, model and turn limit are exactly a real job's. `dontAsk` also approves, without the
+  classifier, any Bash command that runs in the sandbox (`autoAllowBashIfSandboxed: true`) and the
+  allow rules of the settings the session loads (`user`, `project`). That is accepted there: every
+  such command still runs in the same sandbox with the same path denials as a real job, the smoke
+  runs in its own temporary directory on canary data, and exercising exactly that sandbox is the
+  step's purpose. A refusal then comes from the sandbox (the probe writes it) or from `dontAsk` (a
+  denied tool, reported as `the probe failed: …`). `src/config.ts` honours the setting only when
+  the state directory is the one the smoke made, `<tmpdir>/sf-smoke-*/state` (both resolved); a
+  real install's state directory never is, so a real job never leaves mode `auto` and the
+  classifier, nor gets an allow rule, even with the variable set. With `SF_SANDBOX=off` the
+  smoke's session is still `dontAsk`, then without a sandbox: no Bash command is approved for
+  being sandboxed, but the probe, the file tools and the loaded settings' allow rules run outside
+  any sandbox and without the classifier. With `SF_SANDBOX=off` the step is SKIP (`sandbox off`), which counts as
   a pass: the last line then reads `smoke: PASS (sandbox not checked), cost …`.
 - **Budget.** `--timeout-min` (default 20) counts from Setup to the end of Dashboard;
   `--budget-usd` (default 2) bounds the cost read from the run's state: the `cost_usd` of the
@@ -1290,7 +1304,8 @@ The checkout's Git operations of one workspace (fetch, worktree add and remove, 
 the commit and rebase at Clean, push) are serialized through one Git lock per workspace; turns, publication,
 `check`, `say` and the start of another job run concurrently.
 
-Every turn runs with `cwd` = the job's worktree, `permissionMode: "auto"`, `settingSources: ["user",
+Every turn runs with `cwd` = the job's worktree, `permissionMode: "auto"` (`"dontAsk"` in `sf smoke`'s
+own job only, section Live smoke test), `settingSources: ["user",
 "project"]`, a deny list from `src/rules.ts` (mutating Git commands, `sudo`, `EnterWorktree`, `.git/**`
 edits, `.env` files; the same for every turn, MR preparation included), a filtered environment (no
 `SF_*`, no inherited Claude Code session markers) and, unless `SF_SANDBOX=off`, the sandbox

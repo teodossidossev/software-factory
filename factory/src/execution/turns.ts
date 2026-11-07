@@ -83,13 +83,16 @@ export class TurnsPart {
     let iteration = job.iteration + 1;
     // The worktree at the start of the turn running, for its turn limit (SF-069).
     let start: WorktreeState | undefined;
+    const probe = this.core.config.smokeProbeAllow;
     const session = new ImplementerSession(
       {
         cwd, maxTurns: this.core.config.maxTurns, claudePath: this.core.config.claudePath,
         sessionId: job.session_id ?? undefined, sandbox: this.core.config.sandbox, model: this.core.config.model,
         turnLimitContinues: this.core.config.turnLimitContinues,
-        // sf smoke's probe only (SF-104): undefined for every real job's state directory.
-        allowCommands: this.core.config.smokeProbeAllow !== undefined ? [this.core.config.smokeProbeAllow] : undefined,
+        // sf smoke's probe only (SF-104), in mode dontAsk (SF-109): undefined and false for every
+        // real job's state directory.
+        allowCommands: probe !== undefined ? [probe] : undefined,
+        smokeMode: probe !== undefined,
         // Built by the session's first turn, again for every session the factory creates (SF-100).
         pathDenials: () => pathDenials({
           session: 'job', workspace: name, checkout: workspace.workCheckout, worktree: cwd, stateDir: this.core.config.stateDir, worktreeRoot: this.core.config.worktreeRoot,
@@ -115,7 +118,7 @@ export class TurnsPart {
         message: async (message: SDKMessage) => {
           // No image bytes in events.jsonl (SF-065): a Read of an image returns them.
           await this.core.jobs.appendEvent(name, ticket, { ts: now(), iteration, message: withoutImageData(message) });
-          if (message.type === 'system' && message.subtype === 'init' && message.permissionMode === 'auto') {
+          if (message.type === 'system' && message.subtype === 'init' && message.permissionMode === session.permissionMode) {
             // Queued, not awaited: the session must never wait for the lock (abort holds it while
             // it closes the session).
             void this.#recordSession(name, ticket, message.session_id);

@@ -173,10 +173,11 @@ test('--keep keeps the directory and prints it; the bare remote has the job\'s b
     assert.equal(git(join(ran.dir, 'origin.git'), 'show', 'main:probe.mjs'), PROBE_SCRIPT);
     assert.equal(git(join(ran.dir, 'origin.git'), 'show', `${BRANCH}:probe.json`), probeOutput());
     assert.equal(git(join(ran.dir, 'origin.git'), 'log', '-1', '--format=%an <%ae>', 'main').trim(), 'sf-smoke <sf-smoke@localhost>');
-    // SF-104: the Implementer had the probe command, exactly, past the permission check, in mode auto.
+    // SF-104, SF-109: the Implementer ran in dontAsk, with the probe command, exactly, and the
+    // file tools of the ticket allowed.
     for (const entry of await fakeLog(ran.env)) {
-      assert.deepEqual(entry.argv.filter((arg) => arg.startsWith('--allowedTools')), [`--allowedTools=Bash(${probeCommand(probe)})`]);
-      assert.ok(entry.argv.includes('--permission-mode=auto'));
+      assert.deepEqual(entry.argv.filter((arg) => arg.startsWith('--allowedTools')), [`--allowedTools=Bash(${probeCommand(probe)}),Read,Edit,Write,Glob,Grep,TodoWrite`]);
+      assert.deepEqual(entry.argv.filter((arg) => arg.startsWith('--permission-mode')), ['--permission-mode=dontAsk']);
     }
     await untouched(ran);
   } finally {

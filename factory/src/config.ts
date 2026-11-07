@@ -70,7 +70,8 @@ export interface Config {
   // workspace's checkout on its branch; off leaves it in ready_for_human_review.
   handoff: HandoffMode;
   // The smoke's sandbox probe command (SF-104, SF_SMOKE_PROBE_ALLOW), allowed past the permission
-  // check of the Implementer; undefined everywhere but in sf smoke's own state (smokeProbeAllow).
+  // check of the Implementer, whose session it puts in dontAsk (SF-109); undefined everywhere but
+  // in sf smoke's own state (smokeProbeAllow).
   smokeProbeAllow: string | undefined;
 }
 
@@ -117,7 +118,8 @@ export function stateDir(env: NodeJS.ProcessEnv = process.env): string {
 const SMOKE_DIR = /^sf-smoke-[^/]+$/;
 
 // SF_SMOKE_PROBE_ALLOW (SF-104): the smoke's probe command, which the Implementer may run without
-// the permission check (the sandbox still holds it). Honoured only when the state directory is
+// the permission check (the sandbox still holds it); the only switch to the smoke's dontAsk
+// session (SF-109). Honoured only when the state directory is
 // the one sf smoke made for its run, both sides resolved (a symlinked tmpdir still matches); a
 // real install's state directory never is, and any realpath error ignores it. Empty is unset.
 export function smokeProbeAllow(env: NodeJS.ProcessEnv, dir: string): string | undefined {

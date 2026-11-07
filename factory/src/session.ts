@@ -60,8 +60,29 @@ export interface SessionOptions {
   pathDenials?: (() => Promise<PathDenials>) | undefined;
   // Commands allowed past the permission check (SF-104): one exact allowedTools rule
   // Bash(<command>) each, never a prefix rule. Only sf smoke's probe gets one (config.ts,
-  // smokeProbeAllow); the mode stays auto and the sandbox holds the command as any other.
+  // smokeProbeAllow); the sandbox holds the command as any other.
   allowCommands?: string[] | undefined;
+  // sf smoke's session only (SF-109; turns.ts sets it exactly when config.smokeProbeAllow is set):
+  // permission mode dontAsk, without the auto mode classifier, so the probe reaches the sandbox,
+  // with SMOKE_TOOLS allowed besides allowCommands. dontAsk also approves any Bash command the
+  // sandbox runs and the allow rules of the settings loaded; the sandbox, the path denials and every
+  // other option stay a real job's. Without it (every real job): auto, the classifier.
+  smokeMode?: boolean | undefined;
+}
+
+// The file tools the smoke's ticket needs (SF-109), allowed in its dontAsk session.
+export const SMOKE_TOOLS = ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'TodoWrite'] as const;
+
+// The permission mode of a session (SF-109): dontAsk for the smoke's, auto for every other.
+function sessionPermissionMode(smokeMode: boolean | undefined): 'auto' | 'dontAsk' {
+  return smokeMode === true ? 'dontAsk' : 'auto';
+}
+
+// The allowedTools of a session's query(): none for a real job; the exact Bash rules of
+// allowCommands, and in a smoke session also SMOKE_TOOLS.
+function allowedTools(options: SessionOptions): string[] {
+  const commands = (options.allowCommands ?? []).map((command) => `Bash(${command})`);
+  return options.smokeMode === true ? [...commands, ...SMOKE_TOOLS] : commands;
 }
 
 interface Queued {
@@ -183,6 +204,11 @@ export class ImplementerSession {
     this.#sessionId = options.sessionId;
   }
 
+  // The permission mode the session runs in and its init message must report (SF-109).
+  get permissionMode(): 'auto' | 'dontAsk' {
+    return sessionPermissionMode(this.#options.smokeMode);
+  }
+
   get sessionId(): string | undefined {
     return this.#sessionId;
   }
@@ -300,15 +326,17 @@ export class ImplementerSession {
     const abortController = new AbortController();
     this.#abort = abortController;
     const input = await promptInput(prompt, images);
+    const mode = this.permissionMode;
+    const allowed = allowedTools(this.#options);
     const turn = query({
       prompt: input.prompt,
       options: {
         abortController,
         cwd: this.#options.cwd,
-        permissionMode: 'auto',
+        permissionMode: mode,
         settingSources: ['user', 'project'],
         disallowedTools: [...disallowedTools, ...(denials?.tools ?? [])],
-        ...(this.#options.allowCommands !== undefined && this.#options.allowCommands.length > 0 ? { allowedTools: this.#options.allowCommands.map((command) => `Bash(${command})`) } : {}),
+        ...(allowed.length > 0 ? { allowedTools: allowed } : {}),
         maxTurns: this.#options.maxTurns,
         // A known startup failure (such as an unavailable sandbox) then ends with a result message.
         env: { ...sessionEnvironment(), CLAUDE_CODE_STARTUP_FAILURE_RESULTS: '1' },
@@ -324,8 +352,8 @@ export class ImplementerSession {
       for await (const message of turn) {
         await this.#hooks.message(message);
         if (message.type === 'system' && message.subtype === 'init') {
-          if (message.permissionMode !== 'auto') {
-            throw new TurnError('permission_mode_mismatch', `The Implementer reported permission mode "${message.permissionMode}" instead of "auto".`);
+          if (message.permissionMode !== mode) {
+            throw new TurnError('permission_mode_mismatch', `The Implementer reported permission mode "${message.permissionMode}" instead of "${mode}".`);
           }
           this.#sessionId = message.session_id;
         }

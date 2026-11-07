@@ -43,7 +43,7 @@ import type { RunnerRequest, RunnerWork } from './runner.js';
 import { DEFAULT_PAGE_BYTES } from './repo-files.js';
 import { ControlPart } from './execution/control.js';
 import { Core } from './execution/core.js';
-import { HandoverPart } from './execution/handover-steps.js';
+import { type HandoverRunning, HandoverPart } from './execution/handover-steps.js';
 import { MrPart } from './execution/mr-steps.js';
 import { ReviewsPart } from './execution/reviews.js';
 import type { CheckResult, ExclusiveScope, ExecutionOptions, MrInput, MrOutcome, MrSaved, MrView, Resumed, Retired, StateListener } from './execution/shared.js';
@@ -52,6 +52,7 @@ import { StatusPart } from './execution/status.js';
 import { TurnsPart } from './execution/turns.js';
 
 export { branchName, changeNote, firstPrompt, GATE_OVERRIDE_CODES, imagesChangedNote, LEDGER_ACCEPT_CODES, MAX_REPORT_BYTES, MR_RETRY_CODES, slugify } from './execution/shared.js';
+export type { HandoverRunning } from './execution/handover-steps.js';
 export type { CheckResult, ExclusiveScope, ExecutionOptions, MrInput, MrOutcome, MrSaved, MrView, Resumed, Retired, ReviewStatus, StateListener } from './execution/shared.js';
 
 export class Execution implements RunnerWork {
@@ -82,8 +83,13 @@ export class Execution implements RunnerWork {
   }
 
   // execution/start.ts
-  recover(): Promise<void> {
-    return this.#core.parts.start.recover();
+  recover(options: { startRunners?: boolean } = {}): Promise<void> {
+    return this.#core.parts.start.recover(options);
+  }
+
+  // The catch-up after an update (SF-101): runners for the resumable jobs recover() left alone.
+  ensureResumable(): Promise<void> {
+    return this.#core.parts.start.ensureResumable();
   }
 
   start(workspaceName: string, ticket: string, { queued = false }: { queued?: boolean } = {}): Promise<{ branch: string; state: JobState; check_after_minutes: number; worktree: string }> {
@@ -176,6 +182,11 @@ export class Execution implements RunnerWork {
 
   handOverLocked(workspace?: string): Promise<void> {
     return this.#core.parts.handover.handOverLocked(workspace);
+  }
+
+  // The hand-over operations running in this process now (SF-101: sf serve's serve-busy).
+  handoversRunning(): HandoverRunning[] {
+    return this.#core.parts.handover.running();
   }
 
   handover(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string }> {

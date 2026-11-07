@@ -63,6 +63,9 @@ export interface AutoChecksOptions {
   rereadMs?: number;
   timers?: AutoTimers;
   watch?: WatchFolder;
+  // The updating marker (SF-101): while updating() is true no automatic check starts; its trigger
+  // goes to skipped (update-skipped-checks.json) for the catch-up after the update.
+  update?: { updating(): boolean; skipped(workspace: string, ticket: string): Promise<void> };
 }
 
 // A ticket's automatic check: scheduled (its timer runs), due (fired; waits for a slot or for the
@@ -96,6 +99,7 @@ export class AutoChecks {
   readonly #rereadMs: number;
   readonly #timers: AutoTimers;
   readonly #watch: WatchFolder;
+  readonly #update: AutoChecksOptions['update'];
   readonly #entries = new Map<string, Entry>();
   // The due tickets, in the order they fired (their last trigger's order).
   #due: string[] = [];
@@ -118,6 +122,7 @@ export class AutoChecks {
     this.#rereadMs = options.rereadMs ?? WATCH_REREAD_MS;
     this.#timers = options.timers ?? REAL_TIMERS;
     this.#watch = options.watch ?? watchFolder;
+    this.#update = options.update;
     this.#checks.observe({
       // A manual Check goes at once: the ticket's pending automatic check is dropped.
       manualStart: (workspace, ticket) => {
@@ -272,6 +277,12 @@ export class AutoChecks {
       }
       if (!run) {
         this.#entries.delete(key);
+        continue;
+      }
+      // The factory is being updated (SF-101): not started; the catch-up checks it.
+      if (this.#update?.updating() === true) {
+        this.#entries.delete(key);
+        await this.#update.skipped(entry.workspace, entry.ticket).catch((error: unknown) => console.error(error));
         continue;
       }
       // A manual Check took the last slot or the ticket meanwhile.

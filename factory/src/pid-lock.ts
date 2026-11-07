@@ -21,7 +21,7 @@ export function isAlive(pid: number): boolean {
 
 // The start time of a process in clock ticks since boot (field 22 of /proc/<pid>/stat); undefined
 // where there is no /proc or no such process.
-function startTime(pid: number): string | undefined {
+export function startTime(pid: number): string | undefined {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
     return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19];
@@ -36,7 +36,7 @@ function ownerText(): string {
   return `${process.pid}${start !== undefined ? ` ${start}` : ''}\n`;
 }
 
-interface Owner {
+export interface Owner {
   pid: number;
   start: string | undefined;
 }
@@ -65,8 +65,9 @@ async function readOwner(path: string): Promise<Owner | undefined> {
   return text === undefined ? undefined : parseOwner(text);
 }
 
-// The owner is still the process that took the lock: alive, and started when it was then.
-function ownerAlive(owner: Owner): boolean {
+// The owner is still the process that took the lock: alive, and started when it was then (also the
+// pid of the updating marker, SF-101).
+export function ownerAlive(owner: Owner): boolean {
   return isAlive(owner.pid) && (owner.start === undefined || startTime(owner.pid) === undefined || startTime(owner.pid) === owner.start);
 }
 

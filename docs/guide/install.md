@@ -113,9 +113,25 @@ ln -sfn ~/.local/lib/software-factory/factory/bin/sf ~/.local/bin/sf
 sf --help
 ```
 
-To update it: `git pull`, `npm install` and `npm run build` in `factory/` (check that the build
-passed), then restart `sf serve` from its root with `npm run serve`. See
-[Operations: updating](operations.md#updating-the-factory) for what to watch.
+Run it as a systemd user service, so it starts at login and restarts after a crash:
+
+```sh
+sf service install     # refused while an sf serve you started by hand answers: stop that one first
+sf service status      # the unit's state; logs: journalctl --user -u software-factory
+```
+
+`sf service install` writes `~/.config/systemd/user/software-factory.service` with the `PATH` of
+the shell you run it in (so `node`, `git`, `claude` and `codex` are found as there) and the
+directory settings set there (`SF_STATE_DIR`, `SF_CONFIG_DIR`, …); every other setting belongs in
+`auth.env`, and it names the `SF_*` variables of your shell it did not copy. It warns when user
+lingering is off (a logout would stop the service) and tells you `loginctl enable-linger`.
+`systemctl --user stop software-factory` and a restart leave running jobs running (the unit has
+`KillMode=process`). Without systemd user services, run `npm run serve` as above.
+
+To update it: `sf update`. It pauses the running jobs, waits for their runners to end, pulls
+`origin/main`, builds and typechecks, restarts the service, resumes the jobs it paused and runs
+`sf smoke`; a failed build rolls back to where it started. See
+[Operations: updating](operations.md#updating-the-factory).
 
 In the rest of this guide, `sf` is whichever clone's `factory/bin/sf` you run (`npm run sf --` from
 the root, `factory/bin/sf`, or `sf` on your `PATH`).
@@ -125,11 +141,12 @@ the root, `factory/bin/sf`, or `sf` on your `PATH`).
 | Location | Contents |
 | --- | --- |
 | `~/.config/software-factory/` (`SF_CONFIG_DIR`) | `workspaces.json` (the workspaces), `auth.env` (the settings), `rules/` (your coding rules), `tunnel-runtime.key` (the tunnel's key) |
-| `~/.local/state/software-factory/` (`SF_STATE_DIR`) | `jobs/<workspace>/<ticket>/` (each job: `job.json`, `events.jsonl`, `iterations/`, `ledger.json`, `mr.md`, `runner.log`), archived jobs as `<ticket>.<stamp>/`, `queue.json`, `checks/` (Task checks), `tickets/` (ticket history), `requests/` (your New ticket words), `locks/`, `tmp/`, `sf.sock` (while `sf serve` runs), `dashboard-token` |
+| `~/.local/state/software-factory/` (`SF_STATE_DIR`) | `jobs/<workspace>/<ticket>/` (each job: `job.json`, `events.jsonl`, `iterations/`, `ledger.json`, `mr.md`, `runner.log`), archived jobs as `<ticket>.<stamp>/`, `queue.json`, `checks/` (Task checks), `tickets/` (ticket history), `requests/` (your New ticket words), `locks/`, `tmp/`, `sf.sock` (while `sf serve` runs), `dashboard-token`, `state-version` (the state's format), `update.log` and, while `sf update` runs, `updating` |
 | `~/.local/state/software-factory/worktrees/<workspace>/<ticket>/` (`SF_WORKTREE_ROOT`) | each job's worktree, while the job needs it |
 | `.software-factory/` in each workspace's checkout | the Task files `<ticket>.md`, their images `<ticket>/`, the MR texts, `archive/`; excluded from Git through `.git/info/exclude` |
 
-The logs: `sf serve` writes to its terminal (stdout and stderr); each job's runner writes to
+The logs: `sf serve` writes to its terminal (stdout and stderr), or to journald when it runs as the
+service (`journalctl --user -u software-factory`); each job's runner writes to
 `runner.log` in the job's directory, and everything the job did is in its `events.jsonl` (read it
 with `sf watch` or the job's Stream).
 

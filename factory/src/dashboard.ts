@@ -41,6 +41,7 @@ import type { CheckSummary, TaskChecks } from './task-check.js';
 import { turnLimitLine } from './turn-limit.js';
 import { MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskScope, taskSha256, TICKET_PATTERN } from './task-file.js';
 import { TicketHistory } from './ticket-history.js';
+import { refuseWhileUpdating, UPDATE_IN_PROGRESS } from './update.js';
 import { describeEvent, followLines, shortInput } from './watch.js';
 
 export const DEFAULT_DASHBOARD_PORT = 8788;
@@ -250,9 +251,15 @@ const BODIES = {
 };
 type PostRoute = keyof typeof BODIES;
 
+// The POSTs that still answer while the factory is being updated (SF-101): Pause, the update's own
+// tool, and the merge request's status, which starts nothing.
+const OPEN_WHILE_UPDATING: ReadonlySet<PostRoute> = new Set<PostRoute>(['pause', 'mr-status']);
+
 // The HTTP status of a FactoryError the methods can throw; any other code answers 500 and keeps
 // its code and message.
 const ERROR_STATUS: Record<string, number> = {
+  // sf update is draining or building (SF-101).
+  [UPDATE_IN_PROGRESS]: 409,
   invalid_state: 409, turn_running: 409, rebase_in_progress: 409, review_off: 409, runner_active: 409,
   job_exists: 409, job_active: 409, job_limit: 409, task_draft: 409, checkout_dirty: 409, branch_exists: 409, branch_changed: 409, branch_missing: 409, worktree_exists: 409,
   worktree_missing: 409, sensitive_unacknowledged: 409, ticket_exists: 409, workspace_exists: 409, workspace_busy: 409,
@@ -1703,6 +1710,16 @@ export async function startDashboard(
     if (req.headers.origin !== origin) {
       fail(403, 'invalid_origin', `Actions need the Origin ${origin}.`);
       return;
+    }
+    // The updating marker's gate (SF-101), before anything is read or changed.
+    if (!OPEN_WHILE_UPDATING.has(post.route)) {
+      try {
+        refuseWhileUpdating(stateDir);
+      } catch (error) {
+        const refusal = error as FactoryError;
+        fail(ERROR_STATUS[refusal.code] ?? 409, refusal.code, refusal.message);
+        return;
+      }
     }
     if (post.bytes === true ? !isOctetStream(req.headers['content-type']) : !isJsonContentType(req.headers['content-type'])) {
       fail(415, 'unsupported_media_type', post.bytes === true ? 'An image upload needs Content-Type: application/octet-stream.' : 'Actions need Content-Type: application/json.');

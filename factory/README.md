@@ -70,6 +70,8 @@ bin/sf info                                    # version, directories, settings 
 bin/sf metrics [<workspace>] [--since YYYY-MM-DD] [--json]  # the Codex gate per job, current and archived: levels, runs, tokens, items by outcome, yield; then the totals (section sf metrics); works without sf serve
 bin/sf smoke [--keep] [--timeout-min N] [--budget-usd N]  # the live smoke test (section Live smoke test): one tiny real job from Task check to push on a throwaway repository and state; a pass/fail table; works without sf serve and never touches yours
 bin/sf run <workspace> <ticket>                # the job's runner (section Jobs); sf serve starts it detached, one per job; refused (runner_running) while the job has one
+bin/sf service install|uninstall|status        # sf serve as a systemd user service (section Service); install refuses while an sf serve started by hand answers
+bin/sf update [--check|--abandon] [--no-smoke] # update this Git install to origin/main, drained first, rolled back on a failed build (section Updating the install)
 npm run typecheck && npm test
 npm run browsers                               # once: Playwright's Chromium for the browser tests (npm install downloads no browser)
 npm run test:browser                           # the dashboard's browser tests (section Browser tests); not part of npm test
@@ -336,6 +338,152 @@ sf smoke [--keep] [--timeout-min N] [--budget-usd N]
 - **Output.** One line per step as it ends, then the table (step, PASS / FAIL / SKIP, seconds,
   detail: cost in USD for the Claude steps, tokens for the gate), then the last line. Exit 0 when
   every step passed, 1 otherwise, 2 for a usage error.
+
+## Service
+
+`sf service` (SF-101, `src/service.ts`) runs `sf serve` as a systemd user service, so it starts
+at login, restarts after a crash and logs to journald. `sf up` and `sf serve` keep working as
+before for development.
+
+```
+sf service install     # writes ~/.config/systemd/user/software-factory.service, then systemctl --user daemon-reload and enable --now
+sf service status      # the unit's state (systemctl --user show) and where its logs are
+sf service uninstall   # stops, disables and removes it
+```
+
+- **The unit.** `ExecStart=<absolute path of the installed bin/sf> serve`, `Restart=on-failure`,
+  and `KillMode=process`: the job runners are detached processes that must outlive a restart of
+  `sf serve` (SF-042), and systemd's default `control-group` would kill them on every stop,
+  restart or crash restart. So `systemctl --user stop software-factory` and a restart leave running
+  jobs running, as stopping a hand-started `sf serve` does. The unit's directory is
+  `$XDG_CONFIG_HOME/systemd/user` (by default `~/.config/systemd/user`).
+- **Its environment.** `Environment=PATH=<the PATH of the shell that ran install>`, so `node`,
+  `git`, `gh`, `claude` and `codex` are found as in that shell (nvm, a user-prefix npm,
+  `~/.local/bin`), and one `Environment` line for each of `XDG_CONFIG_HOME`, `XDG_STATE_HOME`,
+  `SF_CONFIG_DIR`, `SF_STATE_DIR`, `SF_ENV_FILE` and `SF_WORKTREE_ROOT` that is set in that shell;
+  nothing else and nothing secret. Any other `SF_*` variable set in the shell is not copied:
+  `sf service install` names them; put them in `auth.env`, which the service reads like every `sf`
+  command. A setting that came from `auth.env` is not named.
+- **Refusals.** While an `sf serve` started by hand answers on the socket, `sf service install`
+  refuses with `serve_running` before it writes anything (the service would fail at every start
+  against that socket): stop that `sf serve` first (its jobs keep running), then install again. On
+  a machine without systemd user services (`systemctl --user` does not answer), every `sf service`
+  command says so (`systemd_unavailable`); run `sf serve` as before.
+- **Lingering.** A logout stops the user's services unless lingering is on. `sf service install`
+  warns when `loginctl show-user` says `Linger=no` and names `loginctl enable-linger <user>`; it
+  does not run it.
+- **Logs.** `journalctl --user -u software-factory` (also said by `sf service status`). A job's
+  runner still writes its own `runner.log`.
+
+## Updating the install
+
+`sf update` (SF-101, `src/update.ts`) updates the Git install the running `sf` comes from (the Git
+top level of its package root, for example `~/.local/lib/software-factory`) to `origin/main`. It
+drains first, so the swap never happens under a running job, and a failed build rolls back.
+
+```
+sf update                 # check, drain, pull, build, restart, resume, smoke
+sf update --no-smoke      # the same without sf smoke at the end
+sf update --check         # fetches origin main and says how many commits the install is behind, and the newest one's subject; changes nothing
+sf update --abandon       # removes the updating marker of an interrupted update, then resumes the jobs it paused
+```
+
+In this order:
+
+1. **Checks** (before any job is touched or anything written). It fetches `origin main` and
+   refuses an install with uncommitted changes (`install_not_clean`), one not on branch `main`
+   (`install_not_on_main`) and one that cannot fast-forward to `origin/main` (`install_diverged`),
+   each naming what to fix. An install already at `origin/main` is reported, exit 0. An `updating`
+   marker that exists is never overwritten: a live `sf update` refuses with `update_in_progress`;
+   one that ended in `building`, or `rollback_failed`, with `update_interrupted` (check the
+   install, then `sf update --abandon`); one that ended in `draining` is taken over by a running
+   `sf serve` (below), and without one it is `update_interrupted` too.
+2. **The marker** `updating` in the state directory (JSON, written atomically): the phase, the pid
+   of `sf update`, the start commit and the jobs it paused. Phases: `draining` (first, with the
+   start commit), `building` (just before the pull), `restart_pending` (after a good build),
+   `rollback_failed`. Every path that resumes "the recorded jobs" reads the list, removes the
+   marker, then resumes them. `sf status` shows the marker and its phase, and for `building` with a
+   dead pid or `rollback_failed` that the update was interrupted, the start commit, and "check the
+   install, then `sf update --abandon`".
+3. **The gates while the marker exists.** `sf serve` refuses every socket command and every
+   dashboard POST that changes something with `update_in_progress` before it does anything; Pause
+   (the update's own tool), `mr-status` and the reads (`ping`, `queue-list`, `serve-busy`) still
+   answer. `sf check-task` and `sf attach`, which run in their own processes, refuse too. The
+   background work skips, never as an error: the run queue's pass starts no ticket and applies no
+   usage-limit reset (its reset timer is armed again, so a parked job stays in `waiting_limit`); an
+   automatic Task check is not started and its trigger goes to `update-skipped-checks.json`; the
+   hand-over after `config_locked` waits. Work already past a gate when the marker was written may
+   still start a runner; the drain pauses that job like any other.
+4. **The drain**, with a running `sf serve` (over its socket, one command per job, as `sf pause`):
+   it waits until `serve-busy` lists no running Task check and no hand-over; pauses every job in
+   `working` or `awaiting_review`, each recorded in the marker before its pause is sent (a job the
+   pause did not pause is dropped from the list and named with the state it reached, for example
+   `needs_human` with `mr_interrupted` when the pause cut off the start of an MR preparation: `sf
+   say` goes on with it); waits until every job is idle (`needs_human`, `ready_for_human_review`,
+   `handed_over`, `paused`, `waiting_limit` or ended, no hand-over step running; `starting` and
+   `preparing_mr` are waited for); and waits until no job has a live runner. These share one
+   timeout of 10 minutes; on timeout (`drain_timeout`) it names what did not settle, removes the
+   marker, resumes the jobs it paused and stops without pulling.
+5. **Build.** Right before the pull it checks once more that no job runs and no runner lives (else
+   it drains again). Then, in phase `building`: `git pull --ff-only origin main`; `npm ci` in
+   `factory/` only when `factory/package-lock.json` changed between the two commits (`npm ci` never
+   rewrites the lockfile, so the install stays clean); `npm run build` and `npm run typecheck`. The
+   output goes to `update.log` in the state directory.
+6. **Rollback.** A failed step resets the install to the start commit (`git reset --hard`; the tree
+   was clean), runs `npm ci` again if the lockfile had changed, and `npm run build`; then it
+   resumes the jobs it paused on the old code and exits 1 with `update_failed`, naming `update.log`
+   and its last lines. When the rollback's build fails too, the marker stays in `rollback_failed`
+   (the gates stay) and it says so: fix the install by hand, then `sf update --abandon`.
+7. **Restart.** After a good build it writes `restart_pending`. With the service installed and
+   active it runs `systemctl --user restart software-factory`; installed but not active with no
+   `sf serve` answering, `systemctl --user start software-factory`. Then it waits up to 60 s for the
+   new `sf serve` to answer and runs `sf smoke` of the new install (unless `--no-smoke`) and
+   reports its verdict; a failed smoke is reported (exit 1), nothing is rolled back. A new `sf
+   serve` that does not answer is `serve_not_started` (the marker stays in `restart_pending`: the
+   first `sf serve` that starts resumes the jobs; see `journalctl --user -u software-factory`).
+   Without the service (or with it inactive while a hand-started `sf serve` answers) it says to
+   restart `sf serve` by hand and leaves the marker for it; until then the gates stay. Jobs you had
+   paused before the update stay paused in every case.
+8. **Without a running `sf serve`** the runners may still run (they are detached): a job with a
+   live runner refuses the update with `jobs_running` (start `sf serve`, then `sf update` again).
+   Otherwise it updates directly with the marker in `building` and its own pid (so an `sf serve`
+   started meanwhile stays gated); after a good build it restarts the service when it is installed
+   (`restart_pending` with no jobs), else removes the marker and says to start `sf serve`.
+
+**What `sf serve` does with the marker**, at its start and on a 5 s poll while it runs:
+`restart_pending` at the start finishes the update: it resumes the recorded jobs, then the
+catch-up. `draining` whose `sf update` died (at the start or while it runs) the same. `draining`
+or `building` with the `sf update` alive, `building` with it dead, and `rollback_failed` leave the
+marker: the gates apply, and recovery at the start repairs the job states but starts no runner.
+When the marker goes away (whoever removed it: a new `sf serve`, or `sf update` on a give-up, a
+rollback or `--abandon`), the catch-up runs: a runner for each job awaiting review that recovery
+left without one, one run-queue pass (which also resumes parked jobs whose limit reset), the
+hand-over of the jobs waiting with `config_locked`, and a check of each trigger in
+`update-skipped-checks.json` whose current Task file still has no stored check; then that file is
+deleted.
+
+Every runner of a resumed job is a new one: the drain waits until no runner lives, and a runner
+ends by itself once its job is idle, so no old runner outlives the swap and there is no IPC between
+a new `sf serve` and an old runner.
+
+## State format version
+
+The state directory holds `state-version` (SF-101, `src/state-version.ts`), a whole number: the
+format of the state files the factory last wrote. This release writes `1`. `sf serve` and every
+runner (`sf run`) read it at start: a missing file gets the current version; an equal one goes on;
+a lower one runs the migrations from it to the current one in order (`MIGRATIONS`; none exist
+yet), then writes the new number; a higher one refuses to start with `state_too_new` ("the state
+was written by a newer factory; update the factory"). A file that holds no whole number is
+`state_version_invalid`.
+
+### Changing the state format
+
+Any later change of a state file's format (`job.json`, `queue.json`, `events.jsonl`, the check
+records, the marker, anything under the state directory that an older or newer factory reads) must
+raise `STATE_VERSION` in `src/state-version.ts` and add a migration to `MIGRATIONS` that turns the
+state of the previous version into the new one (`{ from: N, run(stateDir) }`), with a test. Each
+step's number is written once it ran, so a failed migration starts again from the step that
+failed. An older factory then refuses the new state instead of misreading it.
 
 ## Task check
 

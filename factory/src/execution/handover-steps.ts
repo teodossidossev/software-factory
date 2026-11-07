@@ -12,6 +12,7 @@ import { mrMessage } from '../mr.js';
 import { notificationLine } from '../patch.js';
 import { checkoutGitDir, type LockScan, removeStaleSandboxLock, staleSandboxLock } from '../sandbox-lock.js';
 import type { Workspace } from '../registry.js';
+import { updateMarked } from '../update.js';
 import { removeWorktree } from '../worktree.js';
 import { cutOffError, type MrContent, mrFailure } from './shared.js';
 import type { Core } from './core.js';
@@ -42,11 +43,38 @@ const lockedOut = (job: Job): boolean => job.state === 'ready_for_human_review' 
 // How long the saved refs of a pushed or aborted job stay (SF-073).
 const SAVED_REF_DAYS = 7;
 
+// A hand-over operation running in this process (SF-101: sf serve's serve-busy): the hand-over (by
+// hand, or the factory's own after config_locked), Take it back, I opened the MR myself, and the
+// background check of the user's push.
+export type HandoverOperation = 'hand_over' | 'take_back' | 'handed_done' | 'push_check';
+export interface HandoverRunning {
+  workspace: string;
+  ticket: string;
+  step: HandoverOperation;
+}
+
 export class HandoverPart {
   readonly core: Core;
+  // The hand-over operations running now, each added when it begins and removed when it ends.
+  readonly #running = new Set<HandoverRunning>();
 
   constructor(core: Core) {
     this.core = core;
+  }
+
+  // The hand-over operations running in this process now (a copy).
+  running(): HandoverRunning[] {
+    return [...this.#running].map((entry) => ({ ...entry }));
+  }
+
+  async #tracked<T>(workspace: string, ticket: string, step: HandoverOperation, work: () => Promise<T>): Promise<T> {
+    const entry: HandoverRunning = { workspace, ticket, step };
+    this.#running.add(entry);
+    try {
+      return await work();
+    } finally {
+      this.#running.delete(entry);
+    }
   }
 
   worktreePath(workspace: string, ticket: string): string {
@@ -246,7 +274,12 @@ export class HandoverPart {
 
   // sf serve (at start, and through afterJobChange): hands over the jobs waiting with config_locked
   // of the workspace (of every workspace without one) in which no job is in the SANDBOXED_STATES. A refusal becomes the job's handoff_skipped; nothing is thrown.
+  // While the factory is being updated (SF-101: the updating marker) it returns at once; the
+  // catch-up after the update calls it again.
   async handOverLocked(workspace?: string): Promise<void> {
+    if (updateMarked(this.core.config.stateDir)) {
+      return;
+    }
     const all = await this.core.jobs.list();
     for (const job of all.filter((one) => lockedOut(one) && (workspace === undefined || one.workspace === workspace))) {
       if (sandboxesRunning(all, job.workspace)) {
@@ -290,6 +323,10 @@ export class HandoverPart {
   // no longer waiting so is left alone, and a refusal becomes its handoff_skipped instead of an
   // error; undefined then.
   #handover(workspaceName: string, ticket: string, retry: boolean): Promise<{ state: JobState; branch: string } | undefined> {
+    return this.#tracked(workspaceName, ticket, 'hand_over', () => this.#handoverLocked(workspaceName, ticket, retry));
+  }
+
+  #handoverLocked(workspaceName: string, ticket: string, retry: boolean): Promise<{ state: JobState; branch: string } | undefined> {
     return this.core.locked(async () => {
       const check = (job: Job): boolean => {
         if (retry && !lockedOut(job)) {
@@ -337,7 +374,7 @@ export class HandoverPart {
   // the checkout is as the factory left it (takeback_changed otherwise). ready_for_human_review is
   // not running (SF-071): no limit applies.
   takeback(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; worktree: string }> {
-    return this.core.locked(async () => {
+    return this.#tracked(workspaceName, ticket, 'take_back', () => this.core.locked(async () => {
       this.checkHandedOverJob(await this.core.job(workspaceName, ticket), 'sf takeback');
       await this.core.parts.mr.settled(workspaceName, ticket);
       const job = await this.core.job(workspaceName, ticket);
@@ -352,7 +389,7 @@ export class HandoverPart {
       // from: handed_over (checkHandedOverJob)
       const next = await this.core.transition({ ...(await this.#endHandover(job)), worktree, prepared_commit: handover.saved }, 'ready_for_human_review', 'take_back');
       return { state: next.state, branch: next.branch, worktree };
-    });
+    }));
   }
 
   // A handed-over job with no step of the hand-over in progress, and its record; invalid_state otherwise.
@@ -386,7 +423,11 @@ export class HandoverPart {
     }
   }
 
-  async #pushCheck(workspaceName: string, ticket: string, done: boolean, minIntervalMs = 0): Promise<{ state: JobState; branch: string; commit?: string; same_tree?: boolean | null }> {
+  #pushCheck(workspaceName: string, ticket: string, done: boolean, minIntervalMs = 0): Promise<{ state: JobState; branch: string; commit?: string; same_tree?: boolean | null }> {
+    return this.#tracked(workspaceName, ticket, done ? 'handed_done' : 'push_check', () => this.#pushCheckTracked(workspaceName, ticket, done, minIntervalMs));
+  }
+
+  async #pushCheckTracked(workspaceName: string, ticket: string, done: boolean, minIntervalMs: number): Promise<{ state: JobState; branch: string; commit?: string; same_tree?: boolean | null }> {
     const asked = await this.core.locked(async () => {
       const job = await this.core.job(workspaceName, ticket);
       if (!done && (job.state !== 'handed_over' || job.handover === undefined || job.handover.step !== null)) {

@@ -105,21 +105,39 @@ export class StartPart {
   // interrupted start failed, and a job awaiting review whose last iteration has no review, or a
   // clean review but no gate.json, or a clean gate.json and a simplification pass that never applied
   // (SF-055), gets a runner, which resumes it (resume: the review, the gate, the pass, or with the
-  // gate off now, Clean).
-  recover(): Promise<void> {
+  // gate off now, Clean). With startRunners false (SF-101: under an updating marker that stays) the
+  // states are repaired as always but no runner starts: ensureResumable starts them in the catch-up.
+  recover({ startRunners = true }: { startRunners?: boolean } = {}): Promise<void> {
     return this.core.locked(async () => {
       const runners = this.core.serveRunners();
       for (const job of await this.core.jobs.list()) {
         // One job's error is logged and the others are recovered all the same (SF-088: an illegal
         // state change of one job cannot stop sf serve's start).
-        await this.#recoverJob(runners, job).catch((error: unknown) => console.error(error));
+        await this.#recoverJob(runners, job, startRunners).catch((error: unknown) => console.error(error));
       }
       await this.core.parts.handover.cleanSavedRefs().catch((error: unknown) => console.error(error));
     });
   }
 
+  // The catch-up after an update (SF-101): a runner for each job awaiting review that has something
+  // to resume and none running, as recover() starts them.
+  ensureResumable(): Promise<void> {
+    return this.core.locked(async () => {
+      const runners = this.core.serveRunners();
+      for (const job of await this.core.jobs.list()) {
+        if (job.state === 'awaiting_review' && (job.handover === undefined || job.handover.step === null) && (await runners.owner(job.workspace, job.ticket)) === undefined) {
+          await (async () => {
+            if (await this.resumable(job)) {
+              await runners.ensure(job.workspace, job.ticket);
+            }
+          })().catch((error: unknown) => console.error(error));
+        }
+      }
+    });
+  }
+
   // recover() for one job. Only under the lock.
-  async #recoverJob(runners: Runners, job: Job): Promise<void> {
+  async #recoverJob(runners: Runners, job: Job, startRunners: boolean): Promise<void> {
     // A step of the hand-over cut off (SF-073), before the job's generic handling; left alone
     // while its runner still runs it.
     if (job.handover !== undefined && job.handover.step !== null) {
@@ -132,7 +150,7 @@ export class StartPart {
       return;
     }
     if (job.state === 'awaiting_review') {
-      if (await this.resumable(job)) {
+      if (startRunners && (await this.resumable(job))) {
         await runners.ensure(job.workspace, job.ticket);
       }
     } else if (job.state === 'working') {

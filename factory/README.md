@@ -2393,8 +2393,8 @@ a factory code) is an unknown outcome: nothing is re-sent, and Start stays off f
 until `api/jobs` is read again (at once; when that read fails, until the stream's next `jobs`
 event), with a message saying to check the board before starting again. The board follows the
 stream's `jobs`, `tickets` and `workspaces` events: a card moves column when its job changes state.
-On a phone-wide window (below 760 px) the columns stack with Your turn first, then Implementing
-and Reviewing.
+Below 768 px (a phone) the columns are one list with Your turn first, then Implementing, Reviewing,
+Queue and Done; from 768 to 1023 px they sit in two columns (section Phone and tablet).
 
 **The stop table.** A stop is a **decision** (the factory needs the user's choice; nothing failed:
 never red, never "Stopped") or an **error** (its reason in red). The card shows the reason and the
@@ -3022,6 +3022,44 @@ period and workspace; each job directory's numbers are kept until one of its fil
 (`job.json`, `ledger.json`, `explanation.json`, `task.md` or an iteration directory), each event log
 is read on from where the last read ended, and each check record is kept until it changes.
 
+### Phone and tablet
+
+The dashboard works from a phone (360-430 px wide) and a tablet (768 px) with nothing scrolling
+sideways (SF-119). Below 768 px the page is a phone; from 768 to 1023 px the board is a tablet's
+and the other pages keep their desktop layout, which fits there; from 1024 px nothing changes.
+
+- **Board.** Below 768 px the columns are one list: Your turn, Implementing, Reviewing, Queue,
+  Done; from 768 to 1023 px two columns (Your turn | Implementing, Reviewing | Queue, Done). Each
+  column heading is a button (▾ or ▸ before it) that folds its column, at every width; the folded
+  columns are kept in localStorage (`sf-board-folded`), a dependency chip pointing into a folded
+  column unfolds it, and j / k pass over a folded column's cards. A queued card's ⋯ menu has
+  *Move up* and *Move down* (one place, as Alt+Up / Alt+Down and drag and drop, which stay); the
+  drag hint is hidden on a phone.
+- **Top bar.** It wraps instead of hiding anything in a menu: the title and summary, the queue
+  controls on a full row, then the workspace filter and the page buttons; on a phone it is no
+  longer sticky and scrolls away with the board. The Rules menu opens under the queue row, as wide
+  as it.
+- **Job page.** The header shows the whole title on its own line and the Stream / Changes / Merge
+  request switch across the row (the key hints are hidden on a phone; the keys work). A Stream
+  row's time and actor sit above its text, which takes the whole width (a stop panel and its
+  explanation too). The composer's message box is the row's full width with the buttons under it,
+  primary first; the composer scrolls inside itself (at most 60 % of the screen's height).
+- **Changes.** Below 768 px the diff is unified, whatever layout was chosen (the stored choice,
+  `sf-diff-mode`, stays for a wider window, and the layout switch is hidden); the file tree sits
+  above the diff and folds behind its *▾ Files* button. Choosing a file folds it so the diff is in
+  view; `/` and the arrow keys open it again.
+- **Touch.** On a phone, and on any device without hover (a tablet), buttons, the switch, the
+  stepper, the column headings, the tree rows and the fields are at least 44 px high, fields use
+  16 px text (so iOS does not zoom), and the composer and the Merge request bar show the reasons of
+  their disabled buttons as text ("Off: Pause, Abort… (a confirmation is open: confirm or cancel it
+  first.)"). A tap shows what a hover shows: on a text with a title (the workspace chip, a title
+  cut with an ellipsis, a time, a dependency chip's state) its detail appears in the toast, and
+  the Merge request tab without MR text says why. A desktop with a mouse is unchanged, apart from
+  the column headings' fold marks and the Move up / Move down items.
+- **Keys.** Every key works at every width (j, k, G, s, c, m, n, p, F7, Shift+F7, /, Escape,
+  Ctrl+Enter, Ctrl+S, Alt+Up / Alt+Down, the tree's keys); the new controls are buttons reached by
+  Tab.
+
 ### Browser tests
 
 `npm test` runs the page's script against a stand-in document (`test/support/fake-dom.ts`). The
@@ -3047,7 +3085,9 @@ Changes with its tree's keys, Merge request with Ctrl+S), the planned ticket pag
 Edit and Save, Ctrl+S, the history), the Stats page (its chart boxes side by side and stacked at
 390 px, its contrast), Escape and Ctrl+Enter in the composer, light and dark with a contrast of at
 least 4.5:1, and a 390 x 844 window, and the job page's Stream at 600, 1200 and 2000 px (full
-width, long tool rows cut with an ellipsis, long outputs wrapped, no sideways scroll). A failing
+width, long tool rows cut with an ellipsis, long outputs wrapped, no sideways scroll), and the phone
+and tablet layout at 360, 390 and 768 px (no sideways scroll on any screen, the board as one list,
+44 px buttons, Changes unified, SF-119). A failing
 test saves a screenshot to `dist/test-results/<file>-<test name>.png` and prints its path. They
 run headless; `SF_BROWSER_HEADED=1 npm run test:browser` shows the window. A check that fails
 because of a defect in the factory's own code is kept and marked as a node:test todo until the
@@ -3062,7 +3102,7 @@ end), in a browser:
 
 1. Board: open the URL of `sf dashboard --open` next to `docs/design/dashboard-v3/prototype-full.html`
    of the branch `prototype-dashboard-v3`: the same top bar, columns and cards, in light and dark
-   (the OS scheme) and at phone width (below 760 px the columns stack with Your turn first). Five
+   (the OS scheme) and at phone width (below 768 px the columns stack with Your turn first). Five
    columns with their counts; each job is in the column of its state; a running card has the Now
    line and the tool calls, and its time moves every 15 s; a stopped one its reason, its code and
    one button. The workspace filter keeps one workspace's cards, its chips with the workspaces'
@@ -3184,7 +3224,8 @@ end), in a browser:
    difference from the prototype with its reason.
 16. Layout: Tab reaches each card, its buttons, the job page's *← Board*, the switch, the Stream's
    toggles and path links, the composer's message box and buttons and a confirmation's buttons.
-   On a phone the header wraps and the composer's buttons go under the message box.
+   On a phone the header wraps and the composer's buttons go under the message box, each at
+   least 44 px high.
 17. Accept and prepare MR (a fake Codex scripted to ask for fixes past `SF_GATE_MAX_ROUNDS=1`): the
    job is under Your turn with "Codex round limit reached", `gate_rounds` and *Decide N findings*;
    its page's stop block says "Your decision" (never red) with the last gate's findings, and the

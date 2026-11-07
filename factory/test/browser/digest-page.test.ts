@@ -163,15 +163,16 @@ browserTest('digest page: a failed model call shows the Git data with a note; th
   assert.equal(await fx.page.locator('#digest').isHidden(), true);
 });
 
-browserTest('digest page: at phone width nothing is wider than the screen', async (fx) => {
-  fx.digests.records.push(record('20261106T070000Z-scheduled'));
-  await fx.page.setViewportSize({ width: 390, height: 800 });
-  await fx.open('digest');
-  await card(fx, 'api').waitFor();
-  const widths = await fx.page.evaluate(() => {
-    const scroller = document.querySelector('#digest .form2')!;
-    return { scroll: scroller.scrollWidth, client: scroller.clientWidth };
+// SF-119: a phone (360, 390 px) and a tablet (768 px).
+for (const width of [360, 390, 768] as const) {
+  browserTest(`digest page: at ${width} px nothing is wider than the screen`, async (fx) => {
+    fx.digests.records.push(record('20261106T070000Z-scheduled'));
+    await fx.page.setViewportSize({ width, height: 800 });
+    await fx.open('digest');
+    await card(fx, 'api').waitFor();
+    const wide = await fx.page.evaluate(() => [document.documentElement, document.querySelector('#digest .jhead')!, document.querySelector('#digest .form2')!]
+      .filter((node) => node.scrollWidth > node.clientWidth).map((node) => `${node.tagName}.${node.className}: ${node.scrollWidth} > ${node.clientWidth}`));
+    assert.deepEqual(wide, []);
+    assert.equal(await fx.page.getByRole('button', { name: 'Generate now' }).isVisible(), true);
   });
-  assert.ok(widths.scroll <= widths.client, JSON.stringify(widths));
-  assert.equal(await fx.page.getByRole('button', { name: 'Generate now' }).isVisible(), true);
-});
+}

@@ -565,6 +565,14 @@ const store = {
   },
 };
 const DIFF_MODE_KEY = 'sf-diff-mode';
+// SF-119: a phone (below 768 px), and a phone or a device without hover (app.css has the same
+// two queries). Without matchMedia (the test stand-in) neither applies.
+const NARROW_QUERY = '(max-width: 767px)';
+const TOUCH_QUERY = '(max-width: 767px), (hover: none)';
+const media = (query) => typeof matchMedia === 'function' && matchMedia(query).matches === true;
+// SF-119: below 768 px the diff is unified, whatever was chosen; the choice stays stored for a
+// wider window.
+const diffLayout = () => (media(NARROW_QUERY) ? 'uni' : ui.cx.mode);
 
 // The Changes data of the job shown, read from the server: the index of api/jobs/<key>/changes and
 // the stamp (the job's iteration and state) it was read for, the stamp being read; the file lists
@@ -738,7 +746,7 @@ function wordHl(a, b) {
 // unchanged runs folded to "⋯ N unchanged lines" with 3 lines of context, none at the file's edges.
 function diffHtml(f) {
   const d = getDiff(f); const { A, B, ops } = d;
-  const side = ui.cx.mode === 'side', C = 3;
+  const side = diffLayout() === 'side', C = 3;
   const segs = [];
   for (let i = 0; i < ops.length;) {
     if (ops[i][0] === '=') { const s = { t: 'eq', rows: [] }; while (i < ops.length && ops[i][0] === '=') { s.rows.push(ops[i]); i++; } segs.push(s); }
@@ -885,7 +893,7 @@ function renderDiffPane() {
   collapse.checked = ui.cx.collapse;
   const label = el('label');
   label.append(collapse, ' Collapse unchanged');
-  $('dtool').replaceChildren(prev, next, dpath, ...(f ? [el('span', 'muted fs12', `${idx + 1}/${files.length} · ${f.status}`)] : []), el('span', 'sp'), select, seg, label);
+  $('dtool').replaceChildren(prev, next, dpath, ...(f ? [el('span', 'muted fs12', `${idx + 1}/${files.length} · ${f.status}`)] : []), el('span', 'sp'), select, ...(media(NARROW_QUERY) ? [] : [seg]), label);
   if (focused === 'cxview' || focused === 'cxcollapse') $(focused).focus();
   const body = $('dbody');
   if (!f) { body.replaceChildren(el('div', 'dempty', listOf(ui.cx.view) === 'loading' ? 'Loading…' : 'Select a file on the left.')); return; }
@@ -908,7 +916,7 @@ function renderDiffPane() {
   if (f.binary || versions.some((v) => v.kind === 'binary')) return message('Binary file: not shown.');
   if (versions.some((v) => v.kind === 'too_large')) return message('Larger than 1 MiB: not shown.');
   if (f.unavailable) return message('This file is not available.');
-  if (f.status === 'modified' && ui.cx.mode === 'side') {
+  if (f.status === 'modified' && diffLayout() === 'side') {
     const split = el('div', 'dnote split');
     split.append(el('span', '', `Before (${ui.cx.view === 'all' || ui.cx.view === 1 ? state.cx.index.base?.ref ?? '' : 'iteration ' + (ui.cx.view - 1)})`),
       el('span', '', `After (iteration ${ui.cx.view === 'all' ? its[its.length - 1].n : ui.cx.view})`));
@@ -944,7 +952,11 @@ function renderChanges(focusTree) {
     const sum = el('div', 'sum');
     sum.id = 'cxsum';
     const tb = el('div', 'tb');
-    tb.append(q, row, sum);
+    // SF-119: the tree's fold, shown on a phone only (app.css), above its filter.
+    const fold = button('btn small cxtree', '', { cxtree: '' });
+    fold.id = 'cxtree';
+    fold.setAttribute('aria-controls', 'tlist');
+    tb.append(fold, q, row, sum);
     const list = el('ul', 'tlist');
     list.id = 'tlist';
     list.setAttribute('role', 'tree');
@@ -966,6 +978,9 @@ function renderChanges(focusTree) {
     pane.append(tool, body);
     node.replaceChildren(tree, vdiv, pane);
   }
+  $('cxtree').textContent = ui.cx.tree ? '▾ Files' : '▸ Files';
+  $('cxtree').setAttribute('aria-expanded', String(ui.cx.tree));
+  node.querySelector('.tree').classList.toggle('folded', !ui.cx.tree);
   $('cxq').value = ui.cx.q;
   node.querySelectorAll('[data-flat]').forEach((b) => b.classList.toggle('on', (b.dataset.flat === '1') === ui.cx.flat));
   const list = listOf(ui.cx.view);
@@ -1003,7 +1018,7 @@ function treeKey(ev) {
   if (!r) return false;
   if (ev.key === 'ArrowLeft') { ev.preventDefault(); if (r.type === 'dir' && r.open) { ui.cx.collapsed.add(r.path); renderTree(true); } else if (r.parent) selectRow(r.parent, true); return true; }
   if (ev.key === 'ArrowRight') { ev.preventDefault(); if (r.type === 'dir' && !r.open) { ui.cx.collapsed.delete(r.path); renderTree(true); } else if (r.type === 'dir') { const n = rows[i + 1]; if (n) selectRow(n.id, true); } return true; }
-  if (ev.key === 'Enter') { ev.preventDefault(); if (r.type === 'dir') { if (r.open) ui.cx.collapsed.add(r.path); else ui.cx.collapsed.delete(r.path); renderTree(true); } else { selectRow(r.id, false); $('dbody').focus(); } return true; }
+  if (ev.key === 'Enter') { ev.preventDefault(); if (r.type === 'dir') { if (r.open) ui.cx.collapsed.add(r.path); else ui.cx.collapsed.delete(r.path); renderTree(true); } else { selectRow(r.id, false); if (media(NARROW_QUERY)) { ui.cx.tree = false; renderChanges(); } $('dbody').focus(); } return true; }
   return false;
 }
 // F7 / Shift+F7 and n / p: the next or previous file of the list, the folders on the way opened.
@@ -1474,8 +1489,21 @@ function renderMrChecks() {
 }
 
 // The bar: the state text, the problem count and the buttons; pushed: when, and Back to the stream;
-// read-only: why, and the push buttons of a handed-over job.
+// read-only: why, and the push buttons of a handed-over job; last, when a button is off with a
+// reason, those reasons (SF-119, shown on a phone or a device without hover).
 function mrBar(j, m, probs) {
+  const nodes = mrBarNodes(j, m, probs);
+  const lines = whyLines(nodes.filter((node) => node.classList?.contains('btn')));
+  if (lines.length === 0) {
+    return nodes;
+  }
+  const why = el('div', 'why');
+  why.append(...lines);
+  return [...nodes, why];
+}
+
+// The bar's nodes before the reasons: the state text, the problem count and the buttons.
+function mrBarNodes(j, m, probs) {
   const v = m.view;
   const back = button('btn', 'Back to the stream', { goto: 'stream' });
   if (v.pushed) {
@@ -2555,7 +2583,9 @@ function renderHead() {
     tab.append(el('span', 'kbd', key));
     if (screen === 'mr') {
       tab.setAttribute('aria-disabled', String(!mrOk));
-      tab.disabled = !mrOk;
+      // SF-119: on a phone or a device without hover the tab stays tappable, and its tap says why
+      // (go's toast); with a mouse its title does.
+      tab.disabled = !mrOk && !media(TOUCH_QUERY);
       tab.setAttribute('title', mrOk ? 'The merge request text' : 'No MR text yet: written at Clean');
     }
     switcher.append(tab);
@@ -2707,6 +2737,7 @@ function renderComposer() {
     placeHandoverPanel(null);
     $('composer-sentence').replaceChildren(el('span', 'muted', 'Loading the job…'));
     $('acts').replaceChildren();
+    $('acts-why').replaceChildren();
     msg.disabled = true;
     return;
   }
@@ -2750,6 +2781,23 @@ function renderComposer() {
   } else {
     placeHandoverPanel(null);
   }
+  const confirm = $('confirm');
+  $('acts-why').replaceChildren(...whyLines([...$('composer').querySelectorAll('button')].filter((node) => !confirm.contains(node))));
+}
+
+// SF-119: the reasons of the disabled buttons (their titles), as text for a phone or a device
+// without hover (app.css shows .why only there): one line per reason, in the buttons' order,
+// "Off: <labels> (<reason>)". Only .btn buttons with a title; Send (data-act "say", its reason
+// the empty box) is left out.
+function whyLines(buttons) {
+  const byReason = new Map();
+  for (const node of buttons) {
+    const reason = node.getAttribute('title') ?? '';
+    if (node.disabled && reason !== '' && node.classList.contains('btn') && node.dataset.act !== 'say') {
+      byReason.set(reason, [...(byReason.get(reason) ?? []), node.textContent.trim()]);
+    }
+  }
+  return [...byReason].map(([reason, labels]) => el('div', '', `Off: ${labels.join(', ')} (${reason})`));
 }
 
 // One action's button of the composer, disabled with its reason as its title: the action's
@@ -3803,7 +3851,48 @@ function button(className, text, data = {}) {
 }
 
 // What the cards need of the board as a whole: the dependency graph (SF-084).
-const board = { graph: { deps: new Map(), needed: new Map() } };
+// The board's folded columns (SF-119): names of COLUMNS, kept in localStorage.
+const board = { graph: { deps: new Map(), needed: new Map() }, folded: new Set() };
+const FOLD_KEY = 'sf-board-folded';
+
+// The folded columns stored before: the names of COLUMNS of a stored array, else none.
+function readFolds() {
+  let parsed = null;
+  try {
+    parsed = JSON.parse(store.get(FOLD_KEY) ?? 'null');
+  } catch {
+    // Unparseable: nothing folded.
+  }
+  return new Set(Array.isArray(parsed) ? parsed.filter((name) => COLUMNS.includes(name)) : []);
+}
+const storeFolds = () => store.set(FOLD_KEY, JSON.stringify(COLUMNS.filter((name) => board.folded.has(name))));
+
+// Each column heading's fold mark and aria-expanded, and its column's folded class.
+function applyFolds() {
+  for (const name of COLUMNS) {
+    const fold = document.querySelector(`[data-colfold="${name}"]`);
+    if (fold === null) {
+      continue;
+    }
+    const folded = board.folded.has(name);
+    fold.setAttribute('aria-expanded', String(!folded));
+    fold.closest('.col')?.classList.toggle('folded', folded);
+  }
+}
+
+// A column heading's click: its column folds or unfolds, at every width.
+function toggleFold(name) {
+  if (!COLUMNS.includes(name)) {
+    return;
+  }
+  if (board.folded.has(name)) {
+    board.folded.delete(name);
+  } else {
+    board.folded.add(name);
+  }
+  storeFolds();
+  applyFolds();
+}
 
 // ---------- Workspaces and dependencies on the board (SF-084) ----------
 
@@ -3943,6 +4032,13 @@ function showCard(key) {
   if (card === null) {
     toast({ level: 'info', text: `${key} has no card on the board: no Task file and no job.` });
     return;
+  }
+  // A card in a folded column: the column unfolds (SF-119).
+  const column = card.closest('.col')?.querySelector('[data-colfold]')?.dataset.colfold;
+  if (column !== undefined && board.folded.has(column)) {
+    board.folded.delete(column);
+    storeFolds();
+    applyFolds();
   }
   card.scrollIntoView({ block: 'nearest' });
   card.focus();
@@ -4474,8 +4570,9 @@ function onDragEnd() {
   clearDrop();
 }
 
-// A Queue card's ⋯ menu: Check (with the Task checks, not for a skeleton), Archive and Delete…,
-// shown while it is open (one card's at a time; a click elsewhere or Escape closes it).
+// A Queue card's ⋯ menu: Move up and Move down (a queued card, SF-119), Check (with the Task
+// checks, not for a skeleton), Archive and Delete…, shown while it is open (one card's at a time;
+// a click elsewhere or Escape closes it).
 function cardMenu(row, busy) {
   const key = keyOf(row);
   const open = state.openMenu === key;
@@ -4490,6 +4587,15 @@ function cardMenu(row, busy) {
     node.setAttribute('role', 'menuitem');
     return node;
   };
+  // SF-119: a queued card moves one place by a tap too (drag and Alt+Up / Alt+Down need a mouse or keys).
+  if (state.queue !== null && Number.isInteger(row.queue_position)) {
+    const pending = state.setupPending.has(`queue:${key}`);
+    const up = button('btn small', 'Move up', { qact: 'up', key });
+    up.disabled = busy || row.queue_position <= 1 || pending;
+    const down = button('btn small', 'Move down', { qact: 'down', key });
+    down.disabled = busy || row.queue_position >= queuedRows().length || pending;
+    menu.append(asItem(up), asItem(down));
+  }
   if (!row.draft && row.check !== null && typeof row.check === 'object') {
     const check = button('btn small', 'Check', { qact: 'check', key });
     check.title = 'A read-only Claude session reads the Task file and the repository and says whether it is ready; it only advises';
@@ -4679,11 +4785,12 @@ function armToast() {
 // related: the card whose dependencies and dependents the board shows (SF-084), or null. On
 // Changes (SF-079), cx as the prototype's: the view ('all' or an iteration), the selected file, the
 // tree's cursor and rows, the filter, the flat list, the closed folders, the diff layout ('side' or
-// 'uni', kept in localStorage), Collapse unchanged, the folds opened, and the path a path link
-// opened, checked against its iteration's list once it is read.
+// 'uni', kept in localStorage), Collapse unchanged, the folds opened, the path a path link
+// opened, checked against its iteration's list once it is read, and whether the tree is open
+// (SF-119: a phone folds it above the diff).
 const ui = {
   screen: 'board', job: null, ticket: null, opener: null, pending: false, sel: -1, open: new Set(), related: null,
-  cx: { view: 'all', sel: null, cursor: null, rows: [], q: '', flat: false, collapsed: new Set(), mode: 'side', collapse: true, unfolded: new Set(), check: null },
+  cx: { view: 'all', sel: null, cursor: null, rows: [], q: '', flat: false, collapsed: new Set(), mode: 'side', collapse: true, unfolded: new Set(), check: null, tree: true },
 };
 
 // The URL hash of the view: #<ws>/<ticket> (the Stream), #<ws>/<ticket>/changes, /mr, /ticket;
@@ -4733,7 +4840,7 @@ function go(key, screen = 'stream', focus = undefined, confirm = undefined) {
   if (fresh) {
     ui.sel = -1;
     ui.open.clear();
-    ui.cx = { ...ui.cx, view: screen === 'changes' ? ui.cx.view : 'all', sel: screen === 'changes' ? ui.cx.sel : null, q: '', collapsed: new Set(), unfolded: new Set(), cursor: null, check: screen === 'changes' ? ui.cx.check : null };
+    ui.cx = { ...ui.cx, view: screen === 'changes' ? ui.cx.view : 'all', sel: screen === 'changes' ? ui.cx.sel : null, q: '', collapsed: new Set(), unfolded: new Set(), cursor: null, check: screen === 'changes' ? ui.cx.check : null, tree: true };
   }
   if (screen !== 'changes') {
     $('scrChanges').replaceChildren();
@@ -4881,12 +4988,32 @@ function renderJobs() {
   }
 }
 
+// The elements whose tap does something of its own: their titles are not shown by a tap (SF-119).
+const TIP_CONTROLS = 'button, a, input, select, textarea, summary, label, [role="tab"], [role="treeitem"], [role="menuitem"], .card';
+// SF-119: on a phone or a device without hover a tap shows what a hover shows: the title of
+// the element tapped when it is the only place of that detail (not a control, not inside a
+// card, whose tap opens its page), or a dependency chip's (its state in words).
+function tipOf(target) {
+  if (!media(TOUCH_QUERY) || typeof target?.closest !== 'function') {
+    return '';
+  }
+  const holder = target.closest('[title]');
+  if (holder === null || (!holder.classList.contains('dchip') && holder.closest(TIP_CONTROLS) !== null)) {
+    return '';
+  }
+  return holder.getAttribute('title') ?? '';
+}
+
 // The delegated click listener of the top bar, the board, the cards, the job page (its header, the
 // Stream and the composer), the planned ticket page (SF-081) and the toast (the drawer keeps its own
 // listeners).
 function onClick(event) {
+  const tip = tipOf(event.target);
+  if (tip !== '') {
+    toast({ level: 'info', text: tip });
+  }
   const target = typeof event.target?.closest === 'function'
-    ? event.target.closest('[data-tk],[data-tkimg],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],[data-qforce],#limUp,#limDown,#rulesBtn,[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-homenu],[data-dismiss],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived,#open-digest,#open-stats')
+    ? event.target.closest('[data-colfold],[data-cxtree],[data-tk],[data-tkimg],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],[data-qforce],#limUp,#limDown,#rulesBtn,[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-homenu],[data-dismiss],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived,#open-digest,#open-stats')
     : null;
   // An open ⋯ menu closes on any click but its own toggle (its items act, then it is closed).
   if (state.openMenu !== null && (target === null || target.dataset.menu === undefined)) {
@@ -4955,6 +5082,15 @@ function onClick(event) {
     setCardMenu(state.openMenu === target.dataset.menu ? null : target.dataset.menu);
     return;
   }
+  if (target.dataset.colfold !== undefined) {
+    toggleFold(target.dataset.colfold);
+    return;
+  }
+  if (target.dataset.cxtree !== undefined) {
+    ui.cx.tree = !ui.cx.tree;
+    renderChanges();
+    return;
+  }
   if (target.id === 'done-all') {
     state.doneAll = !state.doneAll;
     renderBoard();
@@ -5011,6 +5147,12 @@ function onClick(event) {
       else ui.cx.collapsed.delete(row.path);
     }
     selectRow(target.dataset.trow, true);
+    // SF-119: on a phone a chosen file folds the tree, so its diff is in view.
+    if (row?.type === 'file' && media(NARROW_QUERY)) {
+      ui.cx.tree = false;
+      renderChanges();
+      $('dbody').focus();
+    }
   } else if (target.dataset.fold !== undefined) {
     ui.cx.unfolded.add(target.dataset.fold);
     const body = $('dbody');
@@ -5202,7 +5344,8 @@ function onKey(event) {
     return;
   }
   if (ui.screen === 'board') {
-    const cards = [...document.querySelectorAll('#cols .card')];
+    // A folded column's cards are passed over (SF-119).
+    const cards = [...document.querySelectorAll('#cols .col:not(.folded) .card')];
     const at = cards.indexOf(document.activeElement);
     if (event.key === 'j' || event.key === 'k') {
       event.preventDefault();
@@ -5258,13 +5401,23 @@ function onKey(event) {
       }
     }
   } else if (ui.screen === 'changes') {
+    // SF-119: a key that targets the filter or the rows of a tree folded on a phone opens it first;
+    // Enter and Space on the fold itself toggle it as a button.
     if (event.key === '/') {
       event.preventDefault();
+      if (!ui.cx.tree) {
+        ui.cx.tree = true;
+        renderChanges();
+      }
       $('cxq')?.focus();
     } else if (event.key === 'n' || event.key === 'p') {
       event.preventDefault();
       fileStep(event.key === 'n' ? 1 : -1);
-    } else if (!(typeof target?.closest === 'function' && target.closest('#dbody') !== null && (event.key === 'ArrowUp' || event.key === 'ArrowDown'))) {
+    } else if (target?.id !== 'cxtree' && !(typeof target?.closest === 'function' && target.closest('#dbody') !== null && (event.key === 'ArrowUp' || event.key === 'ArrowDown'))) {
+      if (!ui.cx.tree && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
+        ui.cx.tree = true;
+        renderChanges();
+      }
       treeKey(event);
     }
   }
@@ -5282,6 +5435,8 @@ function queueAction(action, key) {
     void checkTicket(row);
   } else if (action === 'archive') {
     void ticketAction('archive', row);
+  } else if ((action === 'up' || action === 'down') && Number.isInteger(row.queue_position)) {
+    moveQueued(key, row.queue_position + (action === 'up' ? -1 : 1));
   }
 }
 
@@ -8286,6 +8441,20 @@ function init() {
   if (mode === 'side' || mode === 'uni') {
     ui.cx.mode = mode;
   }
+  // SF-119: a phone's turn or a resized window across 768 px redraws the diff in its layout.
+  if (typeof matchMedia === 'function') {
+    const narrow = matchMedia(NARROW_QUERY);
+    if (typeof narrow?.addEventListener === 'function') {
+      narrow.addEventListener('change', () => {
+        if (ui.screen === 'changes') {
+          renderDiffPane();
+        }
+      });
+    }
+  }
+  // The board's folded columns (SF-119).
+  board.folded = readFolds();
+  applyFolds();
   document.addEventListener('visibilitychange', scheduleRefresh);
   $('toast').addEventListener('mouseenter', () => {
     state.toastHover = true;

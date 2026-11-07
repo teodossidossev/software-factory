@@ -177,16 +177,16 @@ test('review stages: findings by severity, fixed once per ledger entry, failures
 
   const payload = await stats(env.state, jobs).compute({ days: 7, workspace: null });
   assert.deepEqual(stage(payload, 'claude_review'), {
-    stage: 'claude_review', runs: 2, failed: 1, findings: { blocker: 1, major: 2, nit: 1 }, outcomes: { fixed: 1, contested: 0, accepted: 0, nit: 1, open: 1 }, revised: null, fixed: 1,
+    stage: 'claude_review', runs: 2, failed: 1, findings: { blocker: 1, major: 2, nit: 1 }, outcomes: { fixed: 1, contested: 0, accepted: 0, nit: 1, open: 1 }, revised: null, fixed: 1, tickets: null,
     cost_usd: 1, tokens: { input: 0, output: 0 },
   });
   // A failed gate.json still on disk adds its tokens; the removed ones do not.
   assert.deepEqual(stage(payload, 'codex_gate'), {
-    stage: 'codex_gate', runs: 0, failed: 3, findings: { blocker: 0, major: 0, nit: 0 }, outcomes: { fixed: 0, contested: 0, accepted: 0, nit: 0, open: 0 }, revised: null, fixed: 0,
+    stage: 'codex_gate', runs: 0, failed: 3, findings: { blocker: 0, major: 0, nit: 0 }, outcomes: { fixed: 0, contested: 0, accepted: 0, nit: 0, open: 0 }, revised: null, fixed: 0, tickets: null,
     cost_usd: null, tokens: { input: 10, cached_input: 0, output: 1 },
   });
   assert.deepEqual(stage(payload, 'task_check'), {
-    stage: 'task_check', runs: 3, failed: 1, findings: { blocker: 1, major: 1, nit: 1 }, outcomes: null, revised: 1, fixed: 1, cost_usd: 0.5, tokens: null,
+    stage: 'task_check', runs: 3, failed: 1, findings: { blocker: 1, major: 1, nit: 1 }, outcomes: null, revised: 1, fixed: 1, tickets: 3, cost_usd: 0.5, tokens: null,
   });
   const failing = payload.warnings.filter((warning) => warning.kind === 'stage_failing');
   assert.deepEqual(failing, [{
@@ -475,4 +475,30 @@ test('unreadable digest records: each one that does not parse counts once in not
   assert.equal(JSON.stringify(all).includes('SECRET-DIGEST'), false);
   const app = await stats(env.state, jobs).compute({ days: 7, workspace: 'app' });
   assert.equal(app.notes.unreadable, 0);
+});
+
+test('plan checks per job and per ticket (SF-130): each job row counts every record of its workspace and ticket, all-time, failed ones included, an unknown cost incomplete; the stage counts the distinct tickets of the period', async () => {
+  const env = await newEnv('stats-plan-checks');
+  const jobs = new JobStore(env.state);
+  await makeJob(jobs, 'app', 'P-1', [{ ended: on('2026-11-05'), cost: 1 }]);
+  await makeJob(jobs, 'app', 'P-2', [{ ended: on('2026-11-05'), cost: 1 }]);
+  await makeJob(jobs, 'app', 'P-3', [{ ended: on('2026-11-05'), cost: 1 }]);
+  // P-1: one before the period (counted all-time), a failed one and a ready one.
+  await check(env.state, 'app', 'P-1', 'a', 'checked', on('2026-10-01'), ['major'], 0.5);
+  await check(env.state, 'app', 'P-1', 'b', 'failed', on('2026-11-04'), [], 0.25);
+  await check(env.state, 'app', 'P-1', 'c', 'checked', on('2026-11-05'), [], 0.25);
+  // P-2: one cost unknown.
+  await check(env.state, 'app', 'P-2', 'd', 'checked', on('2026-11-05'), [], 0.5);
+  await check(env.state, 'app', 'P-2', 'e', 'checked', on('2026-11-06'), [], null);
+  // Another workspace's ticket of the same name is not P-1's.
+  await check(env.state, 'web', 'P-1', 'f', 'checked', on('2026-11-06'), [], 4);
+
+  const payload = await stats(env.state, jobs).compute({ days: 7, workspace: null });
+  const row = (ticket: string) => payload.jobs.find((one) => one.ticket === ticket)!;
+  assert.deepEqual([row('P-1').plan_checks, row('P-1').plan_check_usd, row('P-1').plan_check_usd_complete], [3, 1, true]);
+  assert.deepEqual([row('P-2').plan_checks, row('P-2').plan_check_usd, row('P-2').plan_check_usd_complete], [2, 0.5, false]);
+  assert.deepEqual([row('P-3').plan_checks, row('P-3').plan_check_usd, row('P-3').plan_check_usd_complete], [0, 0, true]);
+  // In the period: app/P-1 (two), app/P-2 (two) and web/P-1; the October one is not.
+  assert.deepEqual([stage(payload, 'task_check').tickets, stage(payload, 'task_check').runs, stage(payload, 'task_check').failed], [3, 4, 1]);
+  assert.deepEqual([stage(payload, 'claude_review').tickets, stage(payload, 'codex_gate').tickets], [null, null]);
 });

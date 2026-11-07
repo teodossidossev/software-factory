@@ -31,7 +31,7 @@ import { DEFAULT_PAGE_BYTES, MAX_FILE_BYTES, MAX_PAGE_BYTES, MAX_PATH_LENGTH, MI
 import { DEFAULT_RESULTS, MAX_QUERY_CHARS, MAX_RESULTS, search } from './search.js';
 import { checkFile, checkFinding, recordVerdict, type TaskChecks } from './task-check.js';
 import { AUTO_CHECK_DELAY_MS, type AutoChecks } from './task-check-auto.js';
-import { isDraft, MAX_TASK_BYTES, TICKET_DESCRIPTION, TICKET_PATTERN, writeTask } from './task-file.js';
+import { checkNeed, isDraft, MAX_TASK_BYTES, TICKET_DESCRIPTION, TICKET_PATTERN, writeTask } from './task-file.js';
 import type { TicketHistory } from './ticket-history.js';
 
 export const SERVER_NAME = 'software-factory';
@@ -419,8 +419,8 @@ export type ServerChecks = Pick<TaskChecks, 'current' | 'isRunning' | 'store'>;
 // The automatic Task checks (SF-086): write_task triggers one; task_check says whether one is pending.
 export type ServerAutoChecks = Pick<AutoChecks, 'trigger' | 'isPending'>;
 
-// What write_task says of the automatic check of the Task file it wrote (SF-086).
-export const WRITE_CHECK_STATES = ['scheduled', 'off', 'already_checked', 'draft'] as const;
+// What write_task says of the automatic check of the Task file it wrote (SF-086; not_needed: SF-130).
+export const WRITE_CHECK_STATES = ['scheduled', 'off', 'already_checked', 'draft', 'not_needed'] as const;
 export const CHECK_AFTER_SECONDS = AUTO_CHECK_DELAY_MS / 1000;
 
 // The run queue the Context owner reads and adds to (SF-071); it neither removes nor moves.
@@ -540,8 +540,9 @@ function createMcpServer(
         `title and base; at most ${MAX_TASK_BYTES} bytes. The folder is kept out of Git through .git/info/exclude. ` +
         'Returns the checkout-relative path, created or replaced, byte count and sha256, and check: what happens to the ' +
         `automatic Task check of what was written: scheduled (it starts after check_after_seconds, ${CHECK_AFTER_SECONDS}), off, ` +
-        'already_checked (this exact text has a check) or draft (a skeleton is not checked). An automatic Task check starts ' +
-        `${CHECK_AFTER_SECONDS} s after the write (unless SF_TASK_CHECK_AUTO=off); read it with task_check.`,
+        'already_checked (this exact text has a check), draft (a skeleton is not checked) or not_needed (a small, scoped ' +
+        'Task starts without a check; check_reason says why). An automatic Task check starts ' +
+        `${CHECK_AFTER_SECONDS} s after the write (unless SF_TASK_CHECK_AUTO=off or not needed); read it with task_check.`,
       inputSchema: z.strictObject({
         workspace: workspaceName,
         ticket: ticketKey,
@@ -554,6 +555,7 @@ function createMcpServer(
         sha256: z.string(),
         check: z.enum(WRITE_CHECK_STATES),
         check_after_seconds: z.number().int().optional(),
+        check_reason: z.string().optional(),
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
@@ -654,8 +656,9 @@ function createMcpServer(
   );
 
   // The automatic check of a Task file write_task wrote: off without the automatic checks; else a
-  // skeleton is a draft, a text with a check record is already_checked, and any other is scheduled.
-  async function writeCheck(workspace: string, ticket: string, content: string, sha256: string): Promise<{ check: (typeof WRITE_CHECK_STATES)[number]; check_after_seconds?: number }> {
+  // skeleton is a draft, a text with a check record is already_checked, one that needs no check
+  // (SF-130, checkNeed) is not_needed with check_reason, and any other is scheduled.
+  async function writeCheck(workspace: string, ticket: string, content: string, sha256: string): Promise<{ check: (typeof WRITE_CHECK_STATES)[number]; check_after_seconds?: number; check_reason?: string }> {
     if (auto === undefined) {
       return { check: 'off' };
     }
@@ -664,6 +667,10 @@ function createMcpServer(
     }
     if (checks !== undefined && (await checks.store.read(workspace, ticket, sha256)) !== undefined) {
       return { check: 'already_checked' };
+    }
+    const need = checkNeed(content, workspace);
+    if (!need.needed) {
+      return { check: 'not_needed', check_reason: need.reason };
     }
     auto.trigger(workspace, ticket);
     return { check: 'scheduled', check_after_seconds: CHECK_AFTER_SECONDS };

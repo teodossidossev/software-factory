@@ -27,9 +27,14 @@ queue (`queue_list`) and add a written ticket to it (`queue_add`) when the user 
 3. Write the Task file with `write_task` (format below), with a `## Review brief`: you are not
    there when the reviewers review, so the brief carries what they must check and why the plan's
    decisions were made. Show the user the plan.
-4. The Task is checked before Start without anyone asking: the factory starts the Task check 60 s
-   after your last `write_task` (its answer says `check: "scheduled"`; `"off"` when the user turned
-   the automatic check off: then ask them to press Check). Wait for it: call `task_check` until
+4. The Task is checked before Start only when it needs a check: a small Task (a `scope:` of up to
+   10 paths without globs, no `lands_after` ticket of another workspace, at most 1,200 words, no
+   `check:` key) starts without one, and `write_task` answers `check: "not_needed"` with the reason
+   in `check_reason`: tell the user, and go to step 5. `check: required` in the front matter asks
+   for a check whatever the size, `check: skip` for none. Otherwise the factory starts the Task
+   check 60 s after your last `write_task` without anyone asking (its answer says
+   `check: "scheduled"`; `"off"` when the user turned the automatic check off: then ask them to
+   press Check). Wait for it: call `task_check` until
    `running` and `pending` are both false. A fresh reader that sees only the Task file and the
    repository paraphrases it and lists findings: a wrong paraphrase, a `decision` left to the
    Implementer, a `contradiction` with the code (always a blocker), a `missing` file, test or
@@ -78,7 +83,7 @@ merge the merge request on the Git host.
 | `guide` | Returns this handbook. |
 | `read_file(workspace, path, offset?, max_bytes?)` | Reads a UTF-8 file from the workspace's read checkout, paged. Credential-like paths are refused. |
 | `search(workspace, query, mode, path_prefix?, max_results?)` | `mode: "path"` finds files whose relative path contains `query`; `mode: "content"` finds lines containing `query`. Both case-insensitive. Tracked and untracked files, ignored ones skipped. Bounded. |
-| `write_task(workspace, ticket, content)` | Creates or replaces the Task file `.software-factory/<ticket>.md` in the work checkout. Refused while a job on that ticket is running, and with `attachment_missing` when an image reference `![…](<ticket>/<name>)` names an image the ticket does not have. An automatic Task check starts 60 s after the write (unless SF_TASK_CHECK_AUTO=off); read it with `task_check`. Its answer's `check:` says what happens to it: `scheduled` (with `check_after_seconds`), `off`, `already_checked` (this exact text has a check) or `draft`. After writing, wait for the check, fix every blocker and major finding or ask the user, and write again; after two automatic rounds, hand the open findings to the user. |
+| `write_task(workspace, ticket, content)` | Creates or replaces the Task file `.software-factory/<ticket>.md` in the work checkout. Refused while a job on that ticket is running, and with `attachment_missing` when an image reference `![…](<ticket>/<name>)` names an image the ticket does not have. An automatic Task check starts 60 s after the write (unless SF_TASK_CHECK_AUTO=off); read it with `task_check`. Its answer's `check:` says what happens to it: `scheduled` (with `check_after_seconds`), `off`, `already_checked` (this exact text has a check), `draft` or `not_needed` (a small Task needs no check; `check_reason` says why, and no check runs). After writing, wait for the check, fix every blocker and major finding or ask the user, and write again; after two automatic rounds, hand the open findings to the user. |
 | `read_attachment(workspace, ticket, name)` | Returns one image the user attached to the ticket (`.software-factory/<ticket>/<name>`: PNG, JPEG, WebP or GIF) as image content, with one text line of its name, type and size. The first message of the ticket's conversation names its images. Refused: no Task file (`task_not_found`), no such image (`attachment_missing`), a file that is not the image its name says (`attachment_type`). |
 | `queue_list()` | The run queue: `max_running`, `running` (the jobs running now, started by hand too), `held`, and the queued tickets in order with their `position`, `queued_at` and `waits_for` (the `lands_after` tickets not merged yet, with their states). The queue also waits for a `ready` Task check of each ticket. |
 | `queue_add(workspace, ticket, at?)` | Adds a written ticket to the run queue at the 1-based position `at` (default: the end); returns its `position`. Refused for a missing Task file (`task_not_found`), a skeleton (`task_draft`), a ticket with a live job (`job_exists`) or one already queued (`already_queued`). The user removes and reorders. |
@@ -113,6 +118,7 @@ base: master          # branch to start from; a feature branch if this depends o
 may_touch: [package.json, .github/**]   # optional: sensitive paths or globs this ticket is expected to change
 scope: [src/export/**, test/export.test.ts, README.md]   # optional: every file this ticket is expected to create, modify or delete
 lands_after: [PROJ-120, web/WEB-7]   # optional: the tickets this one waits for; another workspace's as <workspace>/<ticket>
+check: required       # optional: required (always a Task check) or skip (never); without it only a Task that is not small is checked
 ---
 
 # PROJ-123: Short title
@@ -145,6 +151,14 @@ the job page as "Waits for" with each one's state (merged, pushed, running, plan
 and "Needed by" on the cards of the tickets waited for; a cycle is shown as an error. The run
 queue starts a queued ticket only when every ticket of its `lands_after` is merged (pushed is not
 enough); a start by hand does not wait for them. Entries that are not a valid ticket name are ignored.
+
+`check:` says whether the Task needs a Task check. Without it the factory decides: a Task needs
+one when it has no `scope:`, more than 10 scope entries, a glob in `scope:`, a `lands_after`
+ticket of another workspace or more than 1,200 words (the whole file, front matter included);
+any other Task is small and starts without one (`write_task` answers `not_needed` with the
+reason). `check: required` (any value but `skip` counts as required) always asks for one: use it
+for product tickets; `check: skip` never. The user's Check runs one in every case, and its verdict
+counts: the run queue then waits for it to be `ready`.
 
 Coding rules reach the Implementer, the reviewers and the Task check without you: `AGENTS.md` and
 the Markdown files it links to, and the user's own rules files; reference them by path, never copy them into the Task.

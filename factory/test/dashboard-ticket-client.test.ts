@@ -15,7 +15,7 @@ process.env.TZ = 'Europe/Sofia';
 const SHA = 'a'.repeat(64);
 const URL_PREFIX = 'https://chatgpt.com/?q=';
 
-const summary = (extra: Record<string, unknown> = {}) => ({ state: 'none', stale: false, running: false, blockers: 0, majors: 0, nits: 0, ended_at: null, start_note: 'not checked', ...extra });
+const summary = (extra: Record<string, unknown> = {}) => ({ state: 'none', check_reason: null, stale: false, running: false, blockers: 0, majors: 0, nits: 0, ended_at: null, start_note: 'not checked', ...extra });
 
 function ticket(name: string, extra: Record<string, unknown> = {}) {
   return {
@@ -202,6 +202,30 @@ test('ticket client: the plan check in words: not checked, checking, ready, not 
   action(page, 'check').click();
   await page.flush();
   assert.equal(posts(page).length, 1);
+});
+
+test('ticket client (SF-130): a Task that needs no check: the header line and the card say why; the card shows the rounds and their cost, "at least" with an unknown cost, "no rounds yet" without one', async () => {
+  const reason = 'small: 2 scope entries, 310 words';
+  const row = ticket('T-1', { check: summary({ state: 'not_needed', check_reason: reason, start_note: null }) });
+  const page = await openTicketPage([row], payload(row, { check: { check: null, stale: false, running: false, current_sha256: SHA, check_reason: reason }, check_rounds: 0, check_usd: 0, check_usd_complete: true }));
+  assert.equal(head(page).querySelector('.t2')!.children.at(-1)!.textContent, `Plan check not needed: ${reason}`);
+  const box = cardOf(page, /^Plan check/);
+  assert.equal(box.querySelector('h3')!.textContent, 'Plan check not needed');
+  assert.deepEqual(box.querySelectorAll('p').map((node) => node.textContent), [`Not needed: ${reason}. It starts from the queue without a check; Check the plan runs one anyway.`]);
+  assert.equal(box.querySelector('.tk-rounds')!.textContent, 'no rounds yet');
+  assert.equal(root(page).textContent.includes('not checked'), false);
+  assert.equal(root(page).textContent.includes('Not checked'), false);
+  // An earlier version was checked twice, one cost unknown: still not needed for this version.
+  const stale = await openTicketPage([row], payload(row, { check: VIEW({ paraphrase: 'p', verdict: 'ready', files: [], findings: [] }, { stale: true, check_reason: reason }), check_rounds: 2, check_usd: 0.75, check_usd_complete: false }));
+  assert.equal(cardOf(stale, /^Plan check/).querySelector('h3')!.textContent, 'Plan check not needed');
+  assert.equal(cardOf(stale, /^Plan check/).querySelector('.tk-rounds')!.textContent, '2 rounds · at least $0.75');
+  // A checked ticket: the rounds under the result.
+  const checked = ticket('T-1', { check: summary({ state: 'ready', start_note: null }) });
+  const ready = await openTicketPage([checked], payload(checked, { check: VIEW({ paraphrase: 'p', verdict: 'ready', files: [], findings: [] }), check_rounds: 3, check_usd: 1.25, check_usd_complete: true }));
+  assert.equal(cardOf(ready, /^Plan check/).querySelector('.tk-rounds')!.textContent, '3 rounds · $1.25');
+  // Not checked yet and needed: no rounds yet.
+  const fresh = await openTicketPage([ticket('T-1')], payload(ticket('T-1'), { check_rounds: 0, check_usd: 0, check_usd_complete: true }));
+  assert.equal(cardOf(fresh, /^Plan check/).querySelector('.tk-rounds')!.textContent, 'no rounds yet');
 });
 
 test('ticket client: Preview renders the body without the front matter as DOM nodes, only http(s) links; Edit has the whole file; Save posts the text and the version read, then reads the page again', async () => {

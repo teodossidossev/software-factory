@@ -95,6 +95,45 @@ export function landsAfter(fields: Map<string, string>, workspace: string): Tick
   return refs;
 }
 
+// The limits of a Task that starts without a plan check (SF-130).
+export const CHECK_NEED_MAX_SCOPE = 10;
+export const CHECK_NEED_MAX_WORDS = 1200;
+
+// Whether a Task needs a plan check (SF-130), and why: the one place of the rule. `check: skip`
+// never needs one; `check: required` (or any other value) always does; otherwise a Task needs one
+// with no scope, more than CHECK_NEED_MAX_SCOPE scope entries, a glob in scope, a lands_after
+// ticket of another workspace or more than CHECK_NEED_MAX_WORDS words (the whitespace-separated
+// tokens of the whole file, front matter included). The first match gives the reason.
+export function checkNeed(content: string, workspace: string): { needed: boolean; reason: string } {
+  const fields = parseFrontMatter(content) ?? new Map<string, string>();
+  const words = content.split(/\s+/).filter((word) => word !== '').length;
+  const check = fields.get('check');
+  if (check === 'skip') {
+    return { needed: false, reason: 'check: skip' };
+  }
+  if (check !== undefined) {
+    return { needed: true, reason: 'check: required' };
+  }
+  const scope = taskScope(fields);
+  if (scope === undefined) {
+    return { needed: true, reason: 'no scope' };
+  }
+  if (scope.length > CHECK_NEED_MAX_SCOPE) {
+    return { needed: true, reason: `scope has ${scope.length} entries` };
+  }
+  if (scope.some((entry) => entry.includes('*'))) {
+    return { needed: true, reason: 'scope has a glob' };
+  }
+  const other = landsAfter(fields, workspace).find((ref) => ref.workspace !== workspace);
+  if (other !== undefined) {
+    return { needed: true, reason: `lands after ${other.workspace}/${other.ticket}` };
+  }
+  if (words > CHECK_NEED_MAX_WORDS) {
+    return { needed: true, reason: `${words} words` };
+  }
+  return { needed: false, reason: `small: ${scope.length} scope entries, ${words} words` };
+}
+
 // The skeleton of a ticket created from the dashboard (SF-028), and the draft of SF-025: the
 // Context owner has not written the Task yet, so no job may start on it.
 export const DRAFT_MARKER = '## Status: waiting for the Context owner';

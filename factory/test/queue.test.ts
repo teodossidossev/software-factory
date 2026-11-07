@@ -16,6 +16,8 @@ import { LIMIT_RESET_HOLD_REASON, type PlanCheck, QueueStore, RunQueue, type Run
 import { resolveWorkspace, saveRegistry } from '../src/registry.js';
 import { followJobs } from '../src/runner.js';
 import { Setup } from '../src/setup.js';
+import { TaskChecks, taskSha256 } from '../src/task-check.js';
+import { planCheck } from '../src/task-check-auto.js';
 import { writeTask } from '../src/task-file.js';
 import { call, type Env, FAKE, git, newEnv, newRepo, putTask, readyCheck, refused, runCli, script, serve, stop, task, temp, turnsStarted, waitFor } from './support/harness.js';
 
@@ -916,4 +918,30 @@ test('sf serve: queue two tickets with limit 1, the second starts by itself once
     await runCli(env, ['abort', 'app', 'Q-1']);
     await stop(served);
   }
+});
+
+test('SF-130: with the plan check of sf serve, a small queued ticket with no check record starts; one with a not_ready record of its current version is held', TIMEOUT, async () => {
+  let checks!: TaskChecks;
+  const w = await world('queue-not-needed', { planCheck: (workspace, ticket) => planCheck(checks, undefined, workspace, ticket) });
+  checks = new TaskChecks({
+    resolve: (name) => resolveWorkspace(name, w.env.config), claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 1, rulesMaxBytes: 49152,
+    stateDir: w.env.state, configDir: w.env.config, worktreeRoot: join(w.env.state, 'worktrees'),
+  });
+  const workspace = await resolveWorkspace('app', w.env.config);
+  const small = (ticket: string): string => task(ticket, `Job ${ticket}`).replace('base: main\n', 'base: main\nscope: [README.md]\n');
+  await writeTask(workspace, 'S-1', small('S-1'), w.jobs);
+  await writeTask(workspace, 'S-2', small('S-2'), w.jobs);
+  const at = new Date().toISOString();
+  await checks.store.write({
+    workspace: 'app', ticket: 'S-2', sha256: taskSha256(small('S-2')), commit: null, status: 'checked', error: null, model: null, cost_usd: 0.5, started_at: at, ended_at: at,
+    output: { paraphrase: 'p', findings: [{ kind: 'decision', severity: 'blocker', where: 'w', problem: 'p', expected: 'e' }], files: [], verdict: 'not_ready' },
+  });
+  await w.queue.hold();
+  await w.queue.add('app', 'S-1');
+  await w.queue.add('app', 'S-2');
+  assert.deepEqual((await w.queue.view()).entries.map((row) => [row.ticket, row.plan_reason]), [['S-1', null], ['S-2', 'plan not ready: 1 blocker, 0 major']]);
+  await w.queue.release();
+  await w.queue.idle();
+  assert.deepEqual(w.execution.starts, ['app/S-1']);
+  assert.deepEqual(await queued(w), ['app/S-2']);
 });

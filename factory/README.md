@@ -556,6 +556,21 @@ document and the code. It only advises: Start is never refused for it; the run q
 ticket only once it is ready, unless the user says Start anyway (section Run queue). `sf serve`
 runs it by itself after each change of a Task file (below); the user can always press Check.
 
+- **Where it pays** (SF-130, `checkNeed` in `src/task-file.ts`, the only place of the rule): a
+  small, well-scoped Task starts without a plan check. In this order, the first match giving the
+  reason: `check: skip` in the front matter → not needed (`check: skip`); `check: required`, or any
+  other value of `check:` → needed (`check: required`); no `scope:` → needed (`no scope`); more than
+  10 scope entries (`scope has N entries`); an entry with `*` (`scope has a glob`); a `lands_after`
+  ticket of another workspace (`lands after <ws>/<ticket>`); more than 1,200 words, the
+  whitespace-separated tokens of the whole file, front matter included (`N words`). Otherwise it is
+  not needed, with the reason `small: N scope entries, N words`. A Task that needs no check gets no
+  automatic one (a trigger of it is dropped when it fires, and the queue's trigger schedules none);
+  `write_task` answers `check: "not_needed"` with `check_reason`; the run queue starts it with no
+  check of its current version (plan state `not_needed`, no reason on the card); the board's
+  summary is `not_needed` with `check_reason` (no Start note). A manual Check (the board, `sf
+  check-task`) always runs, and a record of the current version counts as for any Task: a
+  `not_ready` one holds the queue.
+
 - **Automatic runs** (SF-086, `src/task-check-auto.ts`, `AutoChecks`; only in `sf serve`, unless
   `SF_TASK_CHECK_AUTO=off`):
   - **Triggers**, per workspace and ticket: the MCP tool `write_task` after its write; the watcher
@@ -568,7 +583,7 @@ runs it by itself after each change of a Task file (below); the user can always 
     cancel came first, the look and the rename in one synchronous step.
   - **When it fires**, nothing runs, and the trigger is dropped, when the Task file is missing or a
     skeleton, when a check record of any status exists for its current sha256 (a failed one too:
-    press Check to run it again), or when a job of the ticket runs (non-terminal and not paused,
+    press Check to run it again), when the Task needs no check (SF-130, above), or when a job of the ticket runs (non-terminal and not paused,
     as `write_task`'s guard says). A paused job's Task file is checked.
   - **At most `SF_TASK_CHECK_PARALLEL`** automatic checks run at once over every workspace; the
     others wait in trigger order. A manual Check counts as running for this limit but never waits
@@ -657,11 +672,18 @@ runs it by itself after each change of a Task file (below); the user can always 
   api/tickets/<ws>/<ticket>/check`: answers at once, refused with `check_running` while one runs
   or is being set up for the ticket (the ticket is reserved before anything else, so two requests
   at once start one check) and with `task_draft` for a skeleton) and a note with the last check (`not
-  checked`, `checking…`, `check: ready`, `not ready: N blocker, M major`, `check failed`, `· stale`); the
-  tickets of the stream carry the summary (`check`). `GET api/tickets/<ws>/<ticket>/check` is the
-  last check with `stale`, `running` and the current sha256; the planned ticket page shows it in its
-  Plan check card (section Dashboard, SF-081) and the job's Task tab above the Task text, the
-  paraphrase above the findings. Start's confirmation adds "Task
+  checked`, `checking…`, `check: ready`, `not ready: N blocker, M major`, `check failed`, `· stale`,
+  or `check not needed` with the reason as its title, SF-130); the tickets of the stream carry the
+  summary (`check`, with `state` `not_needed` and `check_reason` for a Task that needs no check).
+  `GET api/tickets/<ws>/<ticket>/check` is the last check with `stale`, `running`, the current
+  sha256 and `check_reason` (the reason when the current version has no check and needs none, else
+  null); the planned ticket page shows it in its Plan check card (section Dashboard, SF-081: the
+  tag `not needed` and the reason for such a Task; under it the ticket's rounds, `N rounds · $X`,
+  `at least $X` when a cost is unknown, or `no rounds yet`, from the page payload's `check_rounds`,
+  every stored record of every version, failed ones included, `check_usd`, the sum of the known
+  costs, and `check_usd_complete`, all-time) and its header line (`Plan check not needed: <reason>`),
+  and the job's Task tab above the Task text, the paraphrase above the findings (`Task check: not
+  needed: <reason>.` for such a Task). Start's confirmation adds "Task
   check: not checked", "stale", "check failed" or "not ready: N blocker, M major" when that is the
   case, and starts anyway once confirmed. The Context owner reads it with the read-only MCP tool
   `task_check` (`{workspace, ticket}`): the check of the current Task file (`verdict` `ready`,
@@ -670,7 +692,8 @@ runs it by itself after each change of a Task file (below); the user can always 
   of the ticket runs now) and `pending` (an automatic one is scheduled and has not started) say
   whether to wait. It cannot run one: the factory runs it after `write_task`, whose answer says
   `check: "scheduled"` (with `check_after_seconds: 60`), `"off"` (`SF_TASK_CHECK_AUTO=off`),
-  `"already_checked"` (this exact text has a check) or `"draft"` (a skeleton).
+  `"already_checked"` (this exact text has a check), `"draft"` (a skeleton) or `"not_needed"`
+  (SF-130: the Task needs no check, with `check_reason`), in that order.
 
 ## Coding rules
 
@@ -2231,6 +2254,9 @@ It lives in `<state dir>/queue.json` (written atomically): `{"version": 1, "max_
   {fresh: true})`); a failed fetch leaves the state as it was.
 - **The plan must be ready** (SF-086): the scheduler starts a queued ticket only when the Task
   check of its current Task file is `ready` (section Task check), or its entry has `force: true`.
+  A Task that needs no check (SF-130, section Task check, Where it pays) and has no check of its
+  current version is `not_needed`: it starts as a ready one does, with no reason on its card; a
+  record of its current version (a manual Check) counts as for any Task.
   Otherwise the entry is skipped and kept in place, and its card says why: "plan not ready: N
   blocker, M major", "plan check failed", "plan being checked" (a check runs or is pending) or
   "plan not checked" (no check of this version; also with `SF_TASK_CHECK_AUTO=off`: press Check or
@@ -3024,13 +3050,19 @@ start; the period is the chosen number of days ending today. The sections, in or
   failed runs, findings by severity, how many led to a fix (each ledger entry counted once, an item
   without one per occurrence, as `sf metrics` counts; for the plan check: the checks with a blocker
   or major after which a version of the Task with another sha256 was checked, "Task revised"),
-  cost and tokens.
+  cost and tokens; for the plan check also the rounds per ticket (SF-130): its runs and failed
+  runs divided by the distinct tickets with a check record in the period (`tickets` in the
+  payload, null for the other stages).
 - **Spend**: the cost (every role but the Codex gate) and the Codex gate's tokens; cost per day by
   role, Codex gate tokens per day; per role (Implementer, Claude review, simplification, Codex
   gate, plan check, digest, explanations) the cost, tokens and runs; per workspace.
 - **Load**: jobs started and finished, the median time to ready (from the job's creation to its
   first `ready_for_human_review` or `handed_over`) and the median iterations of the pushed jobs.
 - **Jobs**: the jobs of the period (created or changed in it, or not finished), by cost, at most 200.
+  The column **Plan** (SF-130) is the plan checks of the job's workspace and ticket, all-time, not
+  only the period's: every check record, failed ones included (`plan_checks`), and the sum of their
+  known costs (`plan_check_usd`), `N rounds · $X`, or `at least $X` when a cost is unknown
+  (`plan_check_usd_complete` false); `—` without one.
 
 Where the numbers come from: the Implementer's cost is each iteration's `meta.json` at its end,
 its tokens the SDK result messages in `events.jsonl`; the Claude review's cost is each

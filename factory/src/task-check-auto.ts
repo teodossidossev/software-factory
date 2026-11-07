@@ -3,8 +3,9 @@
 // after its write, the watcher of each workspace's .software-factory folder, a ticket added to the run
 // queue without a check. A new trigger cancels the ticket's pending check and its running automatic
 // one (a cancelled run stores nothing). When it fires, nothing runs for a missing file or a skeleton,
-// a Task file that already has a check record of any status, or a ticket whose job runs (non-terminal
-// and not paused, as write_task's guard); such a trigger is dropped. At most `parallel` checks run at
+// a Task file that already has a check record of any status, one that needs no check (SF-130,
+// checkNeed), or a ticket whose job runs (non-terminal and not paused, as write_task's guard); such a
+// trigger is dropped. At most `parallel` checks run at
 // once over every workspace, a manual Check included (it never waits); the others wait in trigger
 // order. Every check runs through TaskChecks, so the board's "checking…" and check_running see it.
 // A manual Check cancels a pending automatic check of its ticket; a trigger that fires while a check
@@ -18,7 +19,7 @@ import { type Job, type JobStore, TERMINAL_STATES } from './jobs.js';
 import type { PlanCheck } from './queue.js';
 import type { Workspace } from './registry.js';
 import { type CheckRecord, currentCheckSha256, recordVerdict, severityCounts, type TaskChecks } from './task-check.js';
-import { isDraft, readTask, TASK_DIR, TICKET_PATTERN } from './task-file.js';
+import { checkNeed, isDraft, readTask, TASK_DIR, TICKET_PATTERN } from './task-file.js';
 
 // The time from a ticket's last trigger to its check.
 export const AUTO_CHECK_DELAY_MS = 60_000;
@@ -153,7 +154,8 @@ export class AutoChecks {
 
   // A trigger for a ticket added to the run queue: when its current Task file has no check record,
   // it reschedules the ticket's check as every trigger does, a pending one included (Fix 4); nothing
-  // when a record of the current version exists or a check of the ticket runs.
+  // when a record of the current version exists, the Task needs no check (SF-130) or a check of the
+  // ticket runs.
   async triggerIfUnchecked(workspace: string, ticket: string): Promise<void> {
     if (this.#checks.isRunning(workspace, ticket)) {
       return;
@@ -162,7 +164,7 @@ export class AutoChecks {
       const resolved = await this.#resolve(workspace);
       const task = await readTask(resolved, ticket);
       // Found by the check sha256 (SF-065): the text and its referenced images.
-      if ((await this.#checks.store.read(workspace, ticket, await currentCheckSha256(resolved, ticket, task))) !== undefined) {
+      if ((await this.#checks.store.read(workspace, ticket, await currentCheckSha256(resolved, ticket, task))) !== undefined || !checkNeed(task, workspace).needed) {
         return;
       }
     } catch (error) {
@@ -322,7 +324,8 @@ export class AutoChecks {
   }
 
   // Whether the ticket's check runs now: a Task file that is not a skeleton, has no check record of
-  // any status yet, and whose ticket has no running job (a paused one does not count).
+  // any status yet, needs a check (SF-130), and whose ticket has no running job (a paused one does
+  // not count).
   async #shouldRun(workspace: string, ticket: string): Promise<boolean> {
     let task: string;
     let resolved: Workspace;
@@ -336,7 +339,7 @@ export class AutoChecks {
       throw error;
     }
     // Found by the check sha256 (SF-065): the text and its referenced images.
-    if (isDraft(task) || (await this.#checks.store.read(workspace, ticket, await currentCheckSha256(resolved, ticket, task))) !== undefined) {
+    if (isDraft(task) || !checkNeed(task, workspace).needed || (await this.#checks.store.read(workspace, ticket, await currentCheckSha256(resolved, ticket, task))) !== undefined) {
       return false;
     }
     const job = await this.#jobs.read(workspace, ticket);
@@ -431,17 +434,24 @@ export class AutoChecks {
   }
 }
 
-// The plan check of a queued ticket (the run queue's planCheck): checking while a check of it is
-// pending or running, else the verdict of the check of its current Task file (none without one) with
-// its blocker and major counts.
+// The plan check of a queued ticket (the run queue's planCheck): checking while a check of it runs;
+// not_needed (SF-130) when its current Task file has no check record and needs none (a pending
+// trigger of it never runs); checking while a check of it is pending; else the verdict of the check
+// of its current Task file (none without one) with its blocker and major counts.
 export async function planCheck(checks: Pick<TaskChecks, 'view' | 'store'>, auto: Pick<AutoChecks, 'isPending'> | undefined, workspace: string, ticket: string): Promise<PlanCheck> {
   const view = await checks.view(workspace, ticket);
-  if (view.running || auto?.isPending(workspace, ticket) === true) {
+  if (view.running) {
     return { state: 'checking', blockers: 0, majors: 0 };
   }
   const record = view.check !== null && !view.stale
     ? view.check
     : view.current_sha256 === null ? undefined : await checks.store.read(workspace, ticket, view.current_sha256);
+  if (record === undefined && view.check_reason !== null) {
+    return { state: 'not_needed', blockers: 0, majors: 0 };
+  }
+  if (auto?.isPending(workspace, ticket) === true) {
+    return { state: 'checking', blockers: 0, majors: 0 };
+  }
   if (record === undefined) {
     return { state: 'none', blockers: 0, majors: 0 };
   }

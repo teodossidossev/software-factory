@@ -11,7 +11,7 @@ import { type FakeElement, type FetchRequest, loadPage, type Page } from './supp
 const STATIC_DIR = new URL('../../static/', import.meta.url);
 process.env.TZ = 'Europe/Sofia';
 
-const summary = (extra: Record<string, unknown> = {}) => ({ state: 'none', stale: false, running: false, blockers: 0, majors: 0, nits: 0, ended_at: null, start_note: 'not checked', ...extra });
+const summary = (extra: Record<string, unknown> = {}) => ({ state: 'none', check_reason: null, stale: false, running: false, blockers: 0, majors: 0, nits: 0, ended_at: null, start_note: 'not checked', ...extra });
 
 function ticket(name: string, extra: Record<string, unknown> = {}) {
   return { workspace: 'app', ticket: name, title: `Ticket ${name}`, base: 'main', draft: false, request: null, job: null, conversation: { message: 'm', url: null }, ...extra };
@@ -157,6 +157,47 @@ test('check client: the planned ticket page shows the check in its Plan check ca
   await page.flush();
   assert.deepEqual(checkCard(page).querySelectorAll('p').map((node) => node.textContent), ['Ready: an Implementer can build this plan without a design decision of its own.']);
   assert.equal(checkCard(page).querySelector('h3')!.textContent, 'Plan check ready');
+});
+
+test('check client (SF-130): a Task that needs no check: the card\'s note "check not needed" with the reason as its title, Check still there; Start\'s confirmation has no note', async () => {
+  const reason = 'small: 3 scope entries, 640 words';
+  const page = await openBoard([ticket('T-1', { check: summary({ state: 'not_needed', check_reason: reason, start_note: null }) })]);
+  const chip = card(page, 'app/T-1').all().find((element) => element.className === 'tag cnote')!;
+  assert.deepEqual([chip.textContent, chip.getAttribute('title')], ['check not needed', reason]);
+  assert.equal(card(page, 'app/T-1').textContent.includes('not checked'), false);
+  // A manual Check always runs.
+  button(card(page, 'app/T-1'), 'Check')!.click();
+  await page.flush();
+  assert.deepEqual(posts(page).map((request) => request.path), ['api/tickets/app/T-1/check']);
+  button(card(page, 'app/T-1'), 'Start')!.click();
+  await page.flush();
+  assert.match(page.$('ticket-confirm-text').textContent, /comes back to you to approve\.$/);
+});
+
+test('check client (SF-130): the Task toggle of a job whose Task needed no check says why', async () => {
+  const job = {
+    workspace: 'app', ticket: 'T-1', branch: 'T-1-demo', base: 'main', state: 'working', iteration: 1, mr_attempts: 0,
+    updated_at: '2026-11-01T10:05:00.000Z', created_at: '2026-11-01T10:00:00.000Z', error: null, prepared_commit: null, worktree: '/wt/T-1',
+    fixes: 0, gate_fixes: 0, gate_tokens: 0, files: 0, undeclared: 0, deleted: 0, title: 'Demo',
+  };
+  const view = { check: null, stale: false, running: false, current_sha256: 'b'.repeat(64), check_reason: 'small: 1 scope entries, 200 words' };
+  const prompt = { k: '2', ts: '2026-11-01T10:00:02.000Z', it: 1, who: 'factory', t: 'prompt', kind: 'implement', text: '/implement .software-factory/T-1.md', first: '/implement .software-factory/T-1.md', task_changed: false };
+  const page = await openBoard([], (path) => {
+    if (path === 'api/jobs/app/T-1') {
+      return { job, iterations: [], mr: false, gate: true, history: [] };
+    }
+    if (path === 'api/jobs/app/T-1/stream?from=0') {
+      return { entries: [prompt], next: 3, end: true };
+    }
+    return path === 'api/tickets/app/T-1/task' ? '---\nticket: T-1\n---\n' : path === 'api/tickets/app/T-1/check' ? view : undefined;
+  }, [job], '#app/T-1');
+  page.streams.at(-1)!.emit('job', { job, iterations: [], mr: false, gate: true, history: [] });
+  await page.flush();
+  const entry = (page.$('stream').children as FakeElement[]).find((child) => child.dataset.k === '2')!;
+  button(entry, 'Task')!.click();
+  await page.flush();
+  const check = page.$('stream').all().find((element) => element.className === 'task-check')!;
+  assert.deepEqual(check.children.map((child) => child.textContent), ['Task check: not needed: small: 1 scope entries, 200 words.']);
 });
 
 test('check client: the Task toggle of the job\'s implement prompt shows the last check, a failed one with its error', async () => {

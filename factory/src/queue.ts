@@ -13,8 +13,8 @@
 // resumes it, resume-only resumes it and holds the queue by hand, wait only marks it (the user
 // resumes) and holds the queue by hand.
 // With planCheck (SF-086) the scheduler starts a queued ticket only when the Task check of its
-// current Task file is ready, or its entry is forced (Start anyway); otherwise the entry stays in
-// place and its row says why.
+// current Task file is ready or not needed (SF-130), or its entry is forced (Start anyway);
+// otherwise the entry stays in place and its row says why.
 import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import * as z from 'zod/v4';
@@ -122,17 +122,20 @@ export class QueueStore {
 }
 
 // The Task check of a queued ticket's current Task file (SF-086): ready, not_ready, failed, checking
-// (pending or running) or none, with its blocker and major counts.
+// (pending or running), none, or not_needed (SF-130: no check of this version, and checkNeed says
+// it needs none), with its blocker and major counts.
 export interface PlanCheck {
-  state: 'ready' | 'not_ready' | 'failed' | 'checking' | 'none';
+  state: 'ready' | 'not_ready' | 'failed' | 'checking' | 'none' | 'not_needed';
   blockers: number;
   majors: number;
 }
 
-// Why the scheduler skips a queued ticket for its plan, as its card says it; null when ready.
+// Why the scheduler skips a queued ticket for its plan, as its card says it; null when ready or not
+// needed.
 export function planReason(plan: PlanCheck): string | null {
   switch (plan.state) {
     case 'ready':
+    case 'not_needed':
       return null;
     case 'not_ready':
       return `plan not ready: ${plan.blockers} blocker, ${plan.majors} major`;
@@ -357,8 +360,8 @@ export class RunQueue {
     });
   }
 
-  // Why the entry's plan holds it (null: it does not): forced, no plan check, or ready. A plan
-  // check that fails counts as not checked.
+  // Why the entry's plan holds it (null: it does not): forced, no plan check, ready or not
+  // needed. A plan check that fails counts as not checked.
   async #planHold(entry: QueueEntry): Promise<string | null> {
     if (entry.force === true || this.#planCheck === undefined) {
       return null;

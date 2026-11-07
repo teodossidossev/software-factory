@@ -16,9 +16,9 @@
 // reads a ticket's Task file, its plan in plain words, its check and its history in one payload,
 // and saves the Task file (only over the version it read). A ticket's images (SF-064) are uploaded
 // as raw bytes, served and removed through the attachments module's rules (src/attachments.ts).
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { open, readFile, rm } from 'node:fs/promises';
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { hostHeaderValidation, localhostOriginValidation } from '@modelcontextprotocol/node';
@@ -47,6 +47,8 @@ import { refuseWhileUpdating, UPDATE_IN_PROGRESS } from './update.js';
 import { describeEvent, followLines, shortInput } from './watch.js';
 
 export const DEFAULT_DASHBOARD_PORT = 8788;
+// The remote listener's port (SF-126), where `tailscale serve --bg 8789` points.
+export const DEFAULT_DASHBOARD_REMOTE_PORT = 8789;
 export const TOKEN_FILE = 'dashboard-token';
 export const MAX_STREAMS = 8;
 // The events.jsonl lines of one page of the job's Stream (SF-082).
@@ -60,6 +62,8 @@ const MAX_MR_BODY_BYTES = 6 * MAX_MR_TEXT_BYTES + 1024;
 // A file of mostly non-ASCII or control characters can need more and is written with write_task.
 export const MAX_TASK_BODY_BYTES = 2 * MAX_TASK_BYTES + 1024;
 const LOOPBACK_HOST = '127.0.0.1';
+// The Host names of the local listener, and the loopback Hosts the remote one takes with a listed Origin.
+const LOOPBACK_NAMES: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '[::1]']);
 const KEEP_ALIVE_MS = 15_000;
 const TOKEN_PATTERN = /^[0-9a-f]{64}$/;
 // Compiled to dist/src/dashboard.js; the package root is two levels up.
@@ -178,17 +182,19 @@ const NO_SETUP: DashboardSetup = {
 // The request body of each POST route, strict: unknown keys, null, arrays and wrong types are
 // refused; shape is what the refusal names.
 const BODIES = {
-  approve: { shape: '{"as_is"?: boolean}', schema: z.strictObject({ as_is: z.boolean().optional() }) },
+  // confirm (SF-126): the job's ticket, which the remote port needs on the four routes that can
+  // push or merge (CONFIRM_ROUTES); the local port ignores it.
+  approve: { shape: '{"as_is"?: boolean, "confirm"?: string}', schema: z.strictObject({ as_is: z.boolean().optional(), confirm: z.string().optional() }) },
   abort: { shape: '{"discard"?: boolean}', schema: z.strictObject({ discard: z.boolean().optional() }) },
   say: { shape: '{"message": string}', schema: z.strictObject({ message: z.string() }) },
   review: { shape: '{}', schema: z.strictObject({}) },
-  retry: { shape: '{}', schema: z.strictObject({}) },
+  retry: { shape: '{"confirm"?: string}', schema: z.strictObject({ confirm: z.string().optional() }) },
   accept: { shape: '{}', schema: z.strictObject({}) },
   settle: { shape: '{"id": string, "decision": "accept" | "fix", "note"?: string}', schema: z.strictObject({ id: z.string(), decision: z.enum(DECISIONS), note: z.string().optional() }) },
   simplify: { shape: '{}', schema: z.strictObject({}) },
   archive: { shape: '{}', schema: z.strictObject({}) },
-  'mr-create': { shape: '{}', schema: z.strictObject({}) },
-  'mr-merge': { shape: '{}', schema: z.strictObject({}) },
+  'mr-create': { shape: '{"confirm"?: string}', schema: z.strictObject({ confirm: z.string().optional() }) },
+  'mr-merge': { shape: '{"confirm"?: string}', schema: z.strictObject({ confirm: z.string().optional() }) },
   'mr-status': { shape: '{}', schema: z.strictObject({}) },
   pause: { shape: '{}', schema: z.strictObject({}) },
   resume: { shape: '{"message"?: string}', schema: z.strictObject({ message: z.string().optional() }) },
@@ -253,6 +259,9 @@ const BODIES = {
   'queue-force': { shape: '{"workspace": string, "ticket": string}', schema: z.strictObject({ workspace: z.string(), ticket: z.string() }) },
 };
 type PostRoute = keyof typeof BODIES;
+// The routes that can push or merge (SF-126): approve, retry (which pushes again after
+// mr_push_failed), mr-create and mr-merge. On the remote port each needs "confirm": the ticket.
+export const CONFIRM_ROUTES: readonly PostRoute[] = ['approve', 'retry', 'mr-create', 'mr-merge'];
 
 // The POSTs that still answer while the factory is being updated (SF-101): Pause, the update's own
 // tool, and the merge request's status, which starts nothing.
@@ -301,6 +310,8 @@ export interface RunningDashboard {
   url: URL;
   // The dashboard's URLs through Tailscale (SF-118), one per remote origin; empty without them.
   remoteUrls: URL[];
+  // The bound port of the remote listener (SF-126); undefined without remote origins.
+  remotePort: number | undefined;
   // The state listener: refreshes every open page; never throws.
   onStateChange(job: Job, from: JobState | null): void;
   // A ticket's data changed without a job (a Task check ended): every page gets the tickets again.
@@ -342,6 +353,33 @@ export function dashboardRemoteOrigins(env: NodeJS.ProcessEnv = process.env): st
 
 export function remoteDashboardUrls(origins: readonly string[], token: string): URL[] {
   return origins.map((origin) => new URL(`/d/${token}/`, origin));
+}
+
+// SF_DASHBOARD_REMOTE_LOGINS (SF-126): the Tailscale logins (Tailscale-User-Login) that may use
+// the remote port, comma-separated, compared ignoring case. Required with remote origins: without
+// one, anyone on the tailnet with the URL could push and merge.
+export function dashboardRemoteLogins(origins: readonly string[], env: NodeJS.ProcessEnv = process.env): string[] {
+  const logins: string[] = [];
+  for (const entry of (env.SF_DASHBOARD_REMOTE_LOGINS ?? '').split(',').map((part) => part.trim().toLowerCase()).filter((part) => part !== '')) {
+    if (!logins.includes(entry)) {
+      logins.push(entry);
+    }
+  }
+  if (origins.length > 0 && logins.length === 0) {
+    throw new FactoryError(
+      'invalid_config',
+      'SF_DASHBOARD_REMOTE_LOGINS is required with SF_DASHBOARD_REMOTE_ORIGINS: the comma-separated Tailscale logins (as tailscale status shows them) that may use the dashboard from another device.',
+    );
+  }
+  return logins;
+}
+
+// The remote listener's port (SF-126) next to the local one: the same port is refused, unless both
+// are 0 (each then gets a free port of its own).
+export function checkDashboardPorts(port: number, remotePort: number): void {
+  if (port === remotePort && port !== 0) {
+    throw new FactoryError('invalid_config', `SF_DASHBOARD_REMOTE_PORT must differ from SF_DASHBOARD_PORT (both are ${port}).`);
+  }
 }
 
 // A new secret token: 32 random bytes as 64 lower-case hex digits; the dashboard's and the MCP
@@ -841,6 +879,30 @@ function sameToken(given: string, token: Buffer): boolean {
   return candidate.length === token.length && timingSafeEqual(candidate, token);
 }
 
+// Whether the Cookie header holds the cookie name with the value, compared in constant time.
+// Every entry is compared (no early return), so the answer's time does not tell which one matched.
+function hasCookie(header: string | undefined, name: string, value: Buffer): boolean {
+  let found = false;
+  for (const part of (header ?? '').split(';')) {
+    const equals = part.indexOf('=');
+    if (equals > 0 && part.slice(0, equals).trim() === name && sameToken(part.slice(equals + 1).trim(), value)) {
+      found = true;
+    }
+  }
+  return found;
+}
+
+// The lower-case hostname of a Host header (a port dropped), or undefined when it is not one.
+function hostnameOf(host: string | undefined): string | undefined {
+  const url = host === undefined ? null : URL.parse(`http://${host}`);
+  return url !== null && url.pathname === '/' && url.search === '' && url.hash === '' && url.username === '' && url.password === '' ? url.hostname : undefined;
+}
+
+// A refused login as a log line shows it: printable ASCII only, at most 128 characters.
+function printableLogin(login: string): string {
+  return login.replace(/[^\x21-\x7e]/g, '?').slice(0, 128);
+}
+
 // An iteration number of a query or a path: 1 to 9999, written without a leading zero.
 function iterationParam(value: string | null | undefined): number | undefined {
   return typeof value === 'string' && /^[1-9]\d{0,3}$/.test(value) ? Number(value) : undefined;
@@ -980,6 +1042,8 @@ interface Stream {
   res: ServerResponse;
   job: [string, string] | undefined;
   abort: AbortController;
+  // Opened on the remote port (SF-126): its jobs events say remote: true.
+  remote: boolean;
 }
 
 // One POST, validated and dispatched: the body shape, the one call it stands for, and whether
@@ -988,6 +1052,8 @@ interface Post {
   route: PostRoute;
   // A check before the body is read; false answers an empty 404.
   exists?: () => Promise<boolean>;
+  // The job's ticket, which "confirm" must equal on the remote port (SF-126: CONFIRM_ROUTES).
+  confirm?: string;
   call: (data: unknown) => (() => Promise<unknown>) | undefined;
   // The raw body's bound in bytes; MAX_ACTION_BODY_BYTES by default.
   bodyLimit?: number;
@@ -1009,13 +1075,22 @@ interface Post {
 // null); onWorkspacesChanged: called after a workspace was added, edited or removed (SF-086: the
 // automatic checks read the registry again); digests: the morning digest (SF-103), none without (the
 // digest routes answer 404); remoteOrigins: the origins of SF_DASHBOARD_REMOTE_ORIGINS (SF-118), as
-// dashboardRemoteOrigins returns them (not validated again), whose Host and Origin pass as loopback.
+// dashboardRemoteOrigins returns them (not parsed again); with them a second listener opens on
+// remotePort (SF-126, SF_DASHBOARD_REMOTE_PORT), the only one that accepts them, and only from
+// remoteLogins (SF_DASHBOARD_REMOTE_LOGINS, as dashboardRemoteLogins returns them). The logins and the
+// two ports are checked here too (invalid_config), for a caller that did not check them.
 export async function startDashboard(
   port: number, stateDir: string, jobs: JobStore, actions: DashboardActions, setup: DashboardSetup = NO_SETUP,
-  { gate: gateOn = true, checks, queue, onWorkspacesChanged, digests, remoteOrigins = [] }: {
-    gate?: boolean; checks?: DashboardChecks; queue?: DashboardQueue; onWorkspacesChanged?: () => void; digests?: DashboardDigests; remoteOrigins?: readonly string[];
+  { gate: gateOn = true, checks, queue, onWorkspacesChanged, digests, remoteOrigins = [], remoteLogins = [], remotePort = DEFAULT_DASHBOARD_REMOTE_PORT }: {
+    gate?: boolean; checks?: DashboardChecks; queue?: DashboardQueue; onWorkspacesChanged?: () => void; digests?: DashboardDigests;
+    remoteOrigins?: readonly string[]; remoteLogins?: readonly string[]; remotePort?: number;
   } = {},
 ): Promise<RunningDashboard> {
+  const remoteOn = remoteOrigins.length > 0;
+  if (remoteOn) {
+    dashboardRemoteLogins(remoteOrigins, { SF_DASHBOARD_REMOTE_LOGINS: remoteLogins.join(',') });
+    checkDashboardPorts(port, remotePort);
+  }
   // The workspace change succeeded: the hook hears of it (a failing hook is logged).
   const workspacesChanged = <T>(result: T): T => {
     try {
@@ -1037,6 +1112,14 @@ export async function startDashboard(
     await writeFileAtomic(join(stateDir, TOKEN_FILE), Buffer.from(`${tokenText}\n`));
   }
   const token = Buffer.from(tokenText, 'utf8');
+  // The cookie of a token visit (SF-126): the hex HMAC-SHA256 of the token over the side's label,
+  // so it survives restarts and dies with the token. The local name carries the port (cookies are
+  // not kept apart by port); the remote one is __Host- and Secure (the phone reaches it over https).
+  const cookieOf = (side: 'local' | 'remote'): Buffer => Buffer.from(createHmac('sha256', tokenText).update(`dashboard-cookie:${side}`).digest('hex'), 'utf8');
+  const cookies = {
+    local: { name: '', value: cookieOf('local'), attributes: 'HttpOnly; SameSite=Strict; Path=/' },
+    remote: { name: '__Host-sf_dashboard', value: cookieOf('remote'), attributes: 'HttpOnly; Secure; SameSite=Strict; Path=/' },
+  };
 
   const streams = new Set<Stream>();
   const toolCalls = new ToolCallCounter();
@@ -1045,13 +1128,30 @@ export async function startDashboard(
   const history = new TicketHistory(stateDir);
   // The Stats page's numbers (SF-117), with their caches.
   const stats = new Stats(stateDir, jobs);
-  // Host and Origin are checked each on its own (SF-118): a proxy may keep the ts.net Host or
-  // rewrite it to the loopback one. A listed Origin passes as it is sent; any other goes to the
-  // loopback check (no Origin passes, a loopback hostname passes, anything else is a 403).
-  const validateHost = hostHeaderValidation(['localhost', '127.0.0.1', '[::1]', ...remoteOrigins.map((remote) => new URL(remote).hostname)]);
-  const validateLoopbackOrigin = localhostOriginValidation();
-  const remoteOrigin = (req: IncomingMessage): boolean => req.headers.origin !== undefined && remoteOrigins.includes(req.headers.origin);
-  const validateOrigin = (req: IncomingMessage, res: ServerResponse): boolean => remoteOrigin(req) || validateLoopbackOrigin(req, res);
+  // The local port accepts loopback Hosts and Origins only, as before SF-118, and ignores any
+  // Tailscale-User-* header.
+  const validateHost = hostHeaderValidation([...LOOPBACK_NAMES]);
+  const validateOrigin = localhostOriginValidation();
+  // The remote port (SF-126): remote is a fact of the socket. Tailscale's identity header names a
+  // listed login; the Host is a listed ts.net name (a proxy may keep it), or loopback (a proxy may
+  // rewrite it) with a listed Origin; an Origin, when sent, is a listed one, and only GET and HEAD
+  // may come without one. Anything else is an empty 403; a login refused is one log line that
+  // names the login, never the path.
+  const remoteHosts = new Set(remoteOrigins.map((remote) => new URL(remote).hostname));
+  const remoteAllowed = (req: IncomingMessage): boolean => {
+    const sentLogin = req.headers['tailscale-user-login'];
+    const login = typeof sentLogin === 'string' && sentLogin.trim() !== '' ? sentLogin.trim() : undefined;
+    if (login === undefined || !remoteLogins.includes(login.toLowerCase())) {
+      console.error(`dashboard: refused a request on the remote port from login ${login === undefined ? 'none' : printableLogin(login)} (not in SF_DASHBOARD_REMOTE_LOGINS)`);
+      return false;
+    }
+    const host = hostnameOf(req.headers.host);
+    const sent = req.headers.origin;
+    if (sent === undefined) {
+      return (req.method === 'GET' || req.method === 'HEAD') && host !== undefined && remoteHosts.has(host);
+    }
+    return remoteOrigins.includes(sent) && host !== undefined && (remoteHosts.has(host) || LOOPBACK_NAMES.has(host));
+  };
   // The exact origin of the page, known once the listener has its port.
   let origin = '';
   const send = (stream: Stream, event: string, data: unknown): void => {
@@ -1079,7 +1179,10 @@ export async function startDashboard(
     }
   }
 
-  async function openStream(req: IncomingMessage, res: ServerResponse, query: URLSearchParams): Promise<void> {
+  // The jobs as api/jobs and the jobs events send them (SF-126): remote says which port asked.
+  const jobsOf = async (remote: boolean) => ({ ...(await jobsPayload(jobs, setup, actions, toolCalls)), remote });
+
+  async function openStream(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, remote: boolean): Promise<void> {
     const [workspace, ticket, ...more] = (query.get('job') ?? '').split('/');
     const from = query.get('from') ?? '0';
     let key: [string, string] | undefined;
@@ -1101,7 +1204,7 @@ export async function startDashboard(
       empty(res, 503);
       return;
     }
-    const stream: Stream = { res, job: key, abort: new AbortController() };
+    const stream: Stream = { res, job: key, abort: new AbortController(), remote };
     streams.add(stream);
     const keepAlive = setInterval(() => res.write(': keep-alive\n\n'), KEEP_ALIVE_MS);
     const end = (): void => {
@@ -1113,7 +1216,7 @@ export async function startDashboard(
     res.once('close', end);
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', connection: 'keep-alive' });
     res.flushHeaders();
-    send(stream, 'jobs', await jobsPayload(jobs, setup, actions, toolCalls));
+    send(stream, 'jobs', await jobsOf(remote));
     await sendSetup([stream]);
     if (key === undefined) {
       return;
@@ -1153,7 +1256,7 @@ export async function startDashboard(
     }
   }
 
-  async function route(req: IncomingMessage, res: ServerResponse, path: string[], query: URLSearchParams): Promise<void> {
+  async function route(req: IncomingMessage, res: ServerResponse, path: string[], query: URLSearchParams, remote: boolean): Promise<void> {
     const joined = path.join('/');
     const file = files.get(joined);
     if (file !== undefined) {
@@ -1165,7 +1268,7 @@ export async function startDashboard(
       return;
     }
     if (joined === 'api/jobs') {
-      body(res, 'application/json; charset=utf-8', JSON.stringify(await jobsPayload(jobs, setup, actions, toolCalls)));
+      body(res, 'application/json; charset=utf-8', JSON.stringify(await jobsOf(remote)));
       return;
     }
     if (joined === 'api/workspaces') {
@@ -1177,7 +1280,7 @@ export async function startDashboard(
       return;
     }
     if (joined === 'api/stream') {
-      await openStream(req, res, query);
+      await openStream(req, res, query, remote);
       return;
     }
     if (path[1] === 'stats') {
@@ -1508,7 +1611,7 @@ export async function startDashboard(
     const exists = async (): Promise<boolean> => (await jobs.read(workspace, ticket)) !== undefined;
     if (action === 'approve') {
       return {
-        route: action, exists,
+        route: action, exists, confirm: ticket,
         call: (data) => {
           const parsed = parse(BODIES.approve.schema, data);
           return parsed ? () => actions.approve(workspace, ticket, parsed.as_is === true) : undefined;
@@ -1533,7 +1636,7 @@ export async function startDashboard(
       // sf retry (SF-087): the Execution refuses any job but one a transient MR preparation failure
       // stopped; on mr_push_failed it pushes again.
       const run = (): Promise<unknown> => actions.retryMr(workspace, ticket);
-      return { route: action, exists, call: (data) => (parse(BODIES.retry.schema, data) ? run : undefined) };
+      return { route: action, exists, confirm: ticket, call: (data) => (parse(BODIES.retry.schema, data) ? run : undefined) };
     }
     if (action === 'accept') {
       // sf accept: the Execution refuses any state but needs_human after a stop it takes on (the
@@ -1566,7 +1669,7 @@ export async function startDashboard(
       const run = (): Promise<unknown> => method(workspace, ticket);
       return {
         route: action, exists, call: (data) => (parse(BODIES[action].schema, data) ? run : undefined),
-        ...(action === 'mr-status' ? { refreshJob: [workspace, ticket] as [string, string] } : {}),
+        ...(action === 'mr-status' ? { refreshJob: [workspace, ticket] as [string, string] } : { confirm: ticket }),
       };
     }
     if (action === 'pause') {
@@ -1779,7 +1882,7 @@ export async function startDashboard(
 
   // A POST: the transport checks, then one call. A page that goes away while the call runs stops
   // waiting; the call itself goes on and settles here.
-  async function handlePost(req: IncomingMessage, res: ServerResponse, post: Post): Promise<void> {
+  async function handlePost(req: IncomingMessage, res: ServerResponse, post: Post, remote: boolean): Promise<void> {
     let gone = false;
     res.once('close', () => {
       gone = true;
@@ -1787,8 +1890,9 @@ export async function startDashboard(
     const fail = (status: number, code: string, message: string, headers: Record<string, string> = {}): void => {
       json(res, status, { ok: false, error: { code, message } }, headers);
     };
-    if (req.headers.origin !== origin && !remoteOrigin(req)) {
-      fail(403, 'invalid_origin', `Actions need the Origin ${[origin, ...remoteOrigins].join(' or ')}.`);
+    // The page's exact origin: the local one on the local port, a listed one on the remote port.
+    if (remote ? req.headers.origin === undefined || !remoteOrigins.includes(req.headers.origin) : req.headers.origin !== origin) {
+      fail(403, 'invalid_origin', `Actions need the Origin ${remote ? remoteOrigins.join(' or ') : origin}.`);
       return;
     }
     // The updating marker's gate (SF-101), before anything is read or changed.
@@ -1836,6 +1940,11 @@ export async function startDashboard(
       fail(400, 'invalid_body', `${post.route} expects ${BODIES[post.route].shape}; no other keys, no null.`);
       return;
     }
+    // The second confirmation from another device (SF-126): the job's ticket, typed by the user.
+    if (remote && CONFIRM_ROUTES.includes(post.route) && (post.confirm === undefined || (data as { confirm?: unknown }).confirm !== post.confirm)) {
+      fail(409, 'confirm_required', `From another device, ${post.route} needs "confirm": the job's ticket${post.confirm === undefined ? '' : ` (${post.confirm})`}.`);
+      return;
+    }
     let result: unknown;
     try {
       result = await run();
@@ -1865,17 +1974,36 @@ export async function startDashboard(
     json(res, 200, { ok: true, result });
   }
 
-  const httpServer = createServer((req, res) => {
+  // One request on the local port or, with remote true, on the remote one (SF-126).
+  const handle = (req: IncomingMessage, res: ServerResponse, remote: boolean): void => {
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
       res.setHeader(name, value);
     }
-    if (!validateHost(req, res) || !validateOrigin(req, res)) {
+    if (remote ? !remoteAllowed(req) : !validateHost(req, res) || !validateOrigin(req, res)) {
+      if (remote) {
+        empty(res, 403);
+      }
       return;
     }
     const target = URL.parse(req.url ?? '/', 'http://localhost');
-    const [first, given, ...path] = (target?.pathname ?? '').split('/').slice(1);
-    // /d/<token>/...: the token segment must be followed by a slash, so path has at least one entry.
-    if (target === null || first !== 'd' || given === undefined || path.length === 0 || !sameToken(given, token)) {
+    if (target === null) {
+      empty(res, 404);
+      return;
+    }
+    const segments = target.pathname.split('/').slice(1);
+    const [first, given, ...rest] = segments;
+    const cookie = remote ? cookies.remote : cookies.local;
+    let path: string[];
+    // /d/<token>/...: the token segment must be followed by a slash, so path has at least one
+    // entry. Without the token, the cookie of a token visit (SF-126) opens every path at the root.
+    if (first === 'd' && given !== undefined && rest.length > 0 && sameToken(given, token)) {
+      path = rest;
+      if (path.length === 1 && path[0] === '' && (req.method === 'GET' || req.method === 'HEAD')) {
+        res.setHeader('set-cookie', `${cookie.name}=${cookie.value.toString('utf8')}; ${cookie.attributes}`);
+      }
+    } else if (hasCookie(req.headers.cookie, cookie.name, cookie.value)) {
+      path = segments;
+    } else {
       empty(res, 404);
       return;
     }
@@ -1907,7 +2035,7 @@ export async function startDashboard(
         empty(res, 404);
         return;
       }
-      handlePost(req, res, post).catch(failed);
+      handlePost(req, res, post, remote).catch(failed);
       return;
     }
     if (what.kind === 'ticket-check') {
@@ -1921,7 +2049,7 @@ export async function startDashboard(
         empty(res, 404);
         return;
       }
-      (post !== undefined ? handlePost(req, res, post) : checkView(res, key)).catch(failed);
+      (post !== undefined ? handlePost(req, res, post, remote) : checkView(res, key)).catch(failed);
       return;
     }
     if (what.kind === 'ticket-task') {
@@ -1935,10 +2063,10 @@ export async function startDashboard(
           empty(res, 404);
           return;
         }
-        handlePost(req, res, taskPost(key)).catch(failed);
+        handlePost(req, res, taskPost(key), remote).catch(failed);
         return;
       }
-      route(req, res, path, target.searchParams).catch(failed);
+      route(req, res, path, target.searchParams, remote).catch(failed);
       return;
     }
     if (what.kind === 'ticket-attachment-add' || what.kind === 'ticket-attachment-remove') {
@@ -1958,7 +2086,7 @@ export async function startDashboard(
         empty(res, 404);
         return;
       }
-      handlePost(req, res, post).catch(failed);
+      handlePost(req, res, post, remote).catch(failed);
       return;
     }
     if (what.kind === 'queue') {
@@ -1970,32 +2098,51 @@ export async function startDashboard(
         empty(res, 404);
         return;
       }
-      handlePost(req, res, queuePost(what.action, queue)).catch(failed);
+      handlePost(req, res, queuePost(what.action, queue), remote).catch(failed);
       return;
     }
     if (what.kind === 'both' && req.method === 'POST') {
-      handlePost(req, res, setupPost(what)!).catch(failed);
+      handlePost(req, res, setupPost(what)!, remote).catch(failed);
       return;
     }
     if (req.method !== 'GET') {
       empty(res, 405, { allow: what.kind === 'both' ? 'GET, POST' : 'GET' });
       return;
     }
-    route(req, res, path, target.searchParams).catch(failed);
-  });
+    route(req, res, path, target.searchParams, remote).catch(failed);
+  };
 
-  const address = await new Promise<AddressInfo>((resolve, reject) => {
+  // A listener on 127.0.0.1:at; a taken port is port_in_use naming the setting that chose it.
+  const listen = (server: Server, at: number, setting: string): Promise<AddressInfo> => new Promise<AddressInfo>((resolve, reject) => {
     const onError = (error: NodeJS.ErrnoException): void => {
       reject(error.code === 'EADDRINUSE'
-        ? new FactoryError('port_in_use', `Port ${port} on ${LOOPBACK_HOST} is already in use. Set SF_DASHBOARD_PORT to a free port.`)
+        ? new FactoryError('port_in_use', `Port ${at} on ${LOOPBACK_HOST} is already in use. Set ${setting} to a free port.`)
         : error);
     };
-    httpServer.once('error', onError);
-    httpServer.listen(port, LOOPBACK_HOST, () => {
-      httpServer.off('error', onError);
-      resolve(httpServer.address() as AddressInfo);
+    server.once('error', onError);
+    server.listen(at, LOOPBACK_HOST, () => {
+      server.off('error', onError);
+      resolve(server.address() as AddressInfo);
     });
   });
+  // A listener closed, its open connections (event streams too) cut.
+  const closeServer = (server: Server): Promise<void> => new Promise<void>((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+    server.closeAllConnections();
+  });
+  const httpServer = createServer((req, res) => handle(req, res, false));
+  const address = await listen(httpServer, port, 'SF_DASHBOARD_PORT');
+  cookies.local.name = `sf_dashboard_${address.port}`;
+  const remoteServer = remoteOn ? createServer((req, res) => handle(req, res, true)) : undefined;
+  let remoteAddress: AddressInfo | undefined;
+  if (remoteServer !== undefined) {
+    try {
+      remoteAddress = await listen(remoteServer, remotePort, 'SF_DASHBOARD_REMOTE_PORT');
+    } catch (error) {
+      await closeServer(httpServer);
+      throw error;
+    }
+  }
   origin = `http://${LOOPBACK_HOST}:${address.port}`;
 
   // A state change: every page gets the list, the setup data (a job that starts or ends changes
@@ -2008,7 +2155,7 @@ export async function startDashboard(
     const selected = [...streams].filter((stream) => stream.job?.[0] === job.workspace && stream.job[1] === job.ticket);
     const detail = selected.length > 0 ? await jobDetail(jobs, job, gateOn, actions, setup) : undefined;
     for (const stream of streams) {
-      send(stream, 'jobs', list);
+      send(stream, 'jobs', { ...list, remote: stream.remote });
       if (detail !== undefined && selected.includes(stream)) {
         send(stream, 'job', detail);
       }
@@ -2024,7 +2171,7 @@ export async function startDashboard(
     }
     const list = await jobsPayload(jobs, setup, actions, toolCalls);
     for (const stream of streams) {
-      send(stream, 'jobs', list);
+      send(stream, 'jobs', { ...list, remote: stream.remote });
     }
     await sendSetup(streams);
   }
@@ -2032,6 +2179,7 @@ export async function startDashboard(
   return {
     url: dashboardUrl(address.port, tokenText),
     remoteUrls: remoteDashboardUrls(remoteOrigins, tokenText),
+    remotePort: remoteAddress?.port,
     onStateChange(job) {
       refresh(job).catch((error: unknown) => console.error(error));
     },
@@ -2046,10 +2194,7 @@ export async function startDashboard(
         stream.abort.abort();
         stream.res.end();
       }
-      await new Promise<void>((resolve, reject) => {
-        httpServer.close((error) => (error ? reject(error) : resolve()));
-        httpServer.closeAllConnections();
-      });
+      await Promise.all([httpServer, ...(remoteServer !== undefined ? [remoteServer] : [])].map(closeServer));
     },
   };
 }

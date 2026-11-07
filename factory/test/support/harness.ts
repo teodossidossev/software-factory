@@ -15,6 +15,7 @@ import { delimiter, join } from 'node:path';
 import { after, before } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { dashboardUrl, readToken } from '../../src/dashboard.js';
 import { callSocket } from '../../src/ipc.js';
 import { JobStore, refusedTransitions } from '../../src/jobs.js';
 import { saveRegistry } from '../../src/registry.js';
@@ -30,7 +31,8 @@ export const FAKE = fileURLToPath(new URL('./fake-claude.js', import.meta.url));
 const FAKE_CODEX_SCRIPT = fileURLToPath(new URL('./fake-codex.js', import.meta.url));
 const FAKE_BWRAP_SCRIPT = fileURLToPath(new URL('./fake-bwrap.js', import.meta.url));
 const READY = /listening on (http:\/\/127\.0\.0\.1:\d+\/mcp)\/<token>$/m;
-const DASHBOARD = /dashboard (http:\/\/127\.0\.0\.1:\d+\/d\/[0-9a-f]{64}\/)/;
+// sf serve prints the dashboard's port with <token> in the token's place (SF-126).
+const DASHBOARD = /dashboard http:\/\/127\.0\.0\.1:(\d+)\/d\/<token>\/ \(sf dashboard prints the full URL\)$/m;
 
 export let temp: string;
 // The fake Codex executable (test/support/fake-codex.ts behind a shell wrapper), for SF_CODEX.
@@ -300,12 +302,24 @@ export async function mcpUrlOf(env: Env, printed: URL): Promise<URL> {
   return new URL(`${printed.href}/${token}`);
 }
 
+// The dashboard of sf serve's output (SF-126): the printed port with the token of env's state
+// directory; undefined when no dashboard line was printed. The output never holds a token.
+export async function dashboardUrlOf(env: Env, output: string): Promise<URL | undefined> {
+  assert.doesNotMatch(output, /[0-9a-f]{64}/, 'sf serve printed a token');
+  const printed = DASHBOARD.exec(output);
+  if (printed === null) {
+    return undefined;
+  }
+  const token = await readToken(env.state);
+  assert.ok(token !== undefined, 'sf serve wrote no dashboard-token');
+  return dashboardUrl(Number(printed[1]), token);
+}
+
 // args: the sf command line (`serve`, or `up` with its options).
 export async function serve(env: Env, args: string[] = ['serve']): Promise<Served> {
   const child = spawn(process.execPath, [CLI, ...args], { env: processEnv(env), stdio: ['ignore', 'pipe', 'pipe'] });
   collect(child, args);
   trackChild(child, args);
-  let dashboard: URL | undefined;
   let output = '';
   const url = await new Promise<URL>((resolve, reject) => {
     const onData = (chunk: Buffer): void => {
@@ -313,8 +327,6 @@ export async function serve(env: Env, args: string[] = ['serve']): Promise<Serve
       const match = READY.exec(output);
       if (match) {
         child.stdout.off('data', onData);
-        const printed = DASHBOARD.exec(output);
-        dashboard = printed ? new URL(printed[1]!) : undefined;
         resolve(new URL(match[1]!));
       }
     };
@@ -324,7 +336,9 @@ export async function serve(env: Env, args: string[] = ['serve']): Promise<Serve
   });
   const client = new Client({ name: 'sf-011-execution', version: '0.0.0' });
   let withToken: URL;
+  let dashboard: URL | undefined;
   try {
+    dashboard = await dashboardUrlOf(env, output);
     withToken = await mcpUrlOf(env, url);
     await client.connect(new StreamableHTTPClientTransport(withToken));
   } catch (err) {

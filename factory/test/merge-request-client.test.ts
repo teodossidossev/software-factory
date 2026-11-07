@@ -29,10 +29,11 @@ type Job = ReturnType<typeof job>;
 
 const detail = (row: Job) => ({ job: row, iterations: [], mr: true, mr_title: 'feat(T-1): Demo', gate: true, history: [] });
 
-async function open(jobs: Job[], hash: string): Promise<Page> {
+// remote: what api/jobs says of the page's port (SF-126); absent by default, as before it.
+async function open(jobs: Job[], hash: string, remote?: boolean): Promise<Page> {
   const page = await loadPage(STATIC_DIR, (path) => {
     if (path === 'api/jobs') {
-      return { jobs };
+      return { jobs, ...(remote !== undefined ? { remote } : {}) };
     }
     const match = /^api\/jobs\/app\/([^/]+)$/.exec(path);
     const found = match ? jobs.find((row) => row.ticket === match[1]) : undefined;
@@ -537,4 +538,64 @@ test('mr screen (SF-080): the composer\'s primary in ready_for_human_review open
   let prevented = false;
   const event = page.window.dispatch('beforeunload', { preventDefault: () => { prevented = true; } }) as { returnValue?: unknown };
   assert.deepEqual([event.returnValue, prevented], ['', true]);
+});
+
+test('mr client (SF-126): from another device (api/jobs remote: true) Merge… asks "Type <ticket> to continue" and sends confirm only after the exact ticket; Cancel and Escape send nothing; locally nothing changes', async () => {
+  const opened = job('T-1', 'pushed', { mr: { host: 'github', number: 4, url: URL_1, state: 'open' } });
+  const page = await open([opened], '#app/T-1', true);
+  const confirmMerge = async (): Promise<void> => {
+    page.$('mr-merge-button').click();
+    assert.equal(page.$('confirm-title').textContent, 'Merge app/T-1?');
+    page.$('confirm-ok').click();
+    await page.flush();
+  };
+  await confirmMerge();
+  // The first confirmation as before, then the dialog; nothing is sent yet.
+  assert.equal(posts(page, 'mr-merge').length, 0);
+  assert.equal(page.$('remote-confirm').hidden, false);
+  assert.equal(page.$('remote-confirm-title').textContent, 'Type T-1 to continue');
+  assert.equal(page.$('remote-confirm-text').textContent, 'Merge from another device: it merges the merge request on the Git host.');
+  assert.deepEqual([page.$('remote-confirm-ok').textContent, page.$('remote-confirm-ok').disabled], ['Merge', true]);
+  for (const typed of ['T-', 't-1', 'T-1 ', 'app/T-1', 'T-10']) {
+    type(page, 'remote-confirm-input', typed);
+    assert.equal(page.$('remote-confirm-ok').disabled, true, typed);
+    page.$('remote-confirm-ok').click();
+    page.$('remote-confirm-input').dispatch('keydown', { key: 'Enter' });
+    await page.flush();
+    assert.equal(posts(page, 'mr-merge').length, 0, typed);
+  }
+  type(page, 'remote-confirm-input', 'T-1');
+  assert.equal(page.$('remote-confirm-ok').disabled, false);
+  page.$('remote-confirm-ok').click();
+  await page.flush();
+  assert.deepEqual(posts(page, 'mr-merge').map((request) => request.body), ['{"confirm":"T-1"}']);
+  assert.equal(page.$('remote-confirm').hidden, true);
+  posts(page, 'mr-merge')[0]!.respond(200, { ok: true, result: { state: 'pushed', branch: 'T-1-demo', mr: { ...opened.mr, state: 'merged' } } });
+  await page.flush();
+
+  // Cancel, and Escape, after the exact ticket: nothing is sent.
+  await confirmMerge();
+  type(page, 'remote-confirm-input', 'T-1');
+  page.$('remote-confirm-cancel').click();
+  await page.flush();
+  await confirmMerge();
+  type(page, 'remote-confirm-input', 'T-1');
+  page.$('remote-confirm-input').dispatch('keydown', { key: 'Escape' });
+  await page.flush();
+  assert.equal(page.$('remote-confirm').hidden, true);
+  assert.equal(posts(page, 'mr-merge').length, 1);
+  // Enter with the exact ticket sends it.
+  await confirmMerge();
+  type(page, 'remote-confirm-input', 'T-1');
+  page.$('remote-confirm-input').dispatch('keydown', { key: 'Enter' });
+  await page.flush();
+  assert.deepEqual(posts(page, 'mr-merge').map((request) => request.body), ['{"confirm":"T-1"}', '{"confirm":"T-1"}']);
+
+  // Locally (remote: false): the one confirmation, the body as before, no dialog.
+  const local = await open([opened], '#app/T-1', false);
+  local.$('mr-merge-button').click();
+  local.$('confirm-ok').click();
+  await local.flush();
+  assert.deepEqual(posts(local, 'mr-merge').map((request) => request.body), ['{}']);
+  assert.equal(local.document.getElementById('remote-confirm'), null);
 });

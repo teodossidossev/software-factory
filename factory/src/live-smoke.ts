@@ -24,6 +24,7 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gateConfig } from './config.js';
+import { dashboardUrl, readToken } from './dashboard.js';
 import { findBwrap, gateEnvironment } from './gate.js';
 import { runGit } from './git.js';
 import { type Job, type JobState, JobStore, TERMINAL_STATES } from './jobs.js';
@@ -933,17 +934,26 @@ class Smoke {
   async #startServe(): Promise<Outcome> {
     const child = this.#spawn(['serve']);
     this.#serve = child;
+    let listening = false;
     const ready = new Promise<Outcome>((resolve) => {
       const onData = (chunk: Buffer): void => {
         this.#serveOutput = (this.#serveOutput + chunk.toString('utf8')).slice(-OUTPUT_KEEP);
-        const dashboard = / dashboard (http:\/\/127\.0\.0\.1:\d+\/d\/[0-9a-f]{64}\/)/.exec(this.#serveOutput);
-        if (/ listening on http:\/\/\S+\/mcp/.test(this.#serveOutput)) {
+        // sf serve prints the dashboard's port with <token> (SF-126); the token is in the state directory.
+        const dashboard = / dashboard http:\/\/127\.0\.0\.1:(\d+)\/d\/<token>\//.exec(this.#serveOutput);
+        if (!listening && / listening on http:\/\/\S+\/mcp/.test(this.#serveOutput)) {
+          listening = true;
           if (dashboard === null) {
             resolve({ status: 'FAIL', detail: 'sf serve printed no dashboard URL' });
             return;
           }
-          this.#dashboard = new URL(dashboard[1]!);
-          resolve({ status: 'PASS', detail: `sf serve ready, dashboard on port ${this.#dashboard.port}` });
+          const port = Number(dashboard[1]);
+          resolve(readToken(this.#paths.state).then((token): Outcome => {
+            if (token === undefined) {
+              return { status: 'FAIL', detail: 'sf serve wrote no dashboard token' };
+            }
+            this.#dashboard = dashboardUrl(port, token);
+            return { status: 'PASS', detail: `sf serve ready, dashboard on port ${port}` };
+          }, (error: unknown): Outcome => ({ status: 'FAIL', detail: `the dashboard token cannot be read: ${error instanceof Error ? error.message : String(error)}` })));
         }
       };
       child.stdout!.on('data', onData);

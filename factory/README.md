@@ -28,7 +28,7 @@ bin/sf workspace list
 bin/sf workspace remove <name>
 bin/sf digest [--now]             # the morning digest (section Morning digest): the latest digest's period and counts; --now makes one at once and prints its record's path and cost; needs sf serve
 bin/sf explain <ws> <ticket>      # the plain explanation of the job's current stop (section Stop explanations): headline, explanation, choices, recommendation; or "No explanation for the current stop."; no sf serve, no model call
-bin/sf serve                      # foreground; Ctrl+C stops it; prints the dashboard URL
+bin/sf serve                      # foreground; Ctrl+C stops it; prints the dashboard URL with <token> (sf dashboard prints it in full)
 bin/sf up [--no-open] [--no-tunnel]   # sf serve plus the tunnel (../scripts/sf-tunnel.sh run, output prefixed "tunnel | ") and the dashboard opened in the browser; Ctrl+C stops both; npm start at the repository root
 bin/sf mcp-url [--header|--rotate|--port]   # the MCP URL with its token (section MCP endpoint); --header: the URL without it and the bearer header; --rotate: a new token, taken at once by a running sf serve (restart the tunnel); works without sf serve
 bin/sf dashboard [--open] [--rotate]  # the dashboard URL of the last sf serve start; --open opens it with xdg-open; --rotate removes the token so the next sf serve makes a new one; works without sf serve
@@ -52,7 +52,7 @@ bin/sf retry <workspace> <ticket>              # retry a transient MR preparatio
 bin/sf accept <workspace> <ticket>             # accept the last iteration over a stopped gate (gate_rounds, gate_budget, gate_failed) or a ledger stop (review_churn, review_disputed), with a clean Claude review or none on the job, or at the Fix round limit (iteration_limit) whatever the last verdict, and prepare the MR; or skip the simplification pass's suggestions (simplify_offered); needs sf serve
 bin/sf simplify <workspace> <ticket>           # apply the simplification pass's suggestions (needs_human with simplify_offered): one Fix section "Simplify", reviewed as usual; needs sf serve
 bin/sf settle <workspace> <ticket> <id> accept|fix [note...]  # settle an escalated or contested finding of the ledger (needs_human); needs sf serve
-bin/sf status [<workspace> <ticket>]           # one job (with its worktree, sensitive, out-of-scope and deleted paths) or all jobs, with estimated cost and elapsed time; works without sf serve
+bin/sf status [<workspace> <ticket>]           # one job (with its worktree, sensitive, out-of-scope and deleted paths) or all jobs, with estimated cost and elapsed time, and the dashboard's full URL; works without sf serve
 bin/sf watch <workspace> <ticket> [--once]     # the session live; works without sf serve
 bin/sf approve <workspace> <ticket> [--as-is]  # push the branch prepared at Clean; --as-is pushes a tip edited by hand; needs sf serve
 bin/sf mr create <workspace> <ticket>          # open the job's merge request on GitHub or GitLab (or reuse the open one); from ready_for_human_review: approve, then open; needs sf serve
@@ -107,7 +107,8 @@ names another script) and the dashboard through `xdg-open` once serve listens. W
 missing, its check fails (no profile or key: `scripts/sf-tunnel.sh check`) or the tunnel exits on
 its own, one `tunnel | ...` line says so with the runbook path and `sf up` goes on without it; it
 is not restarted (`npm run tunnel` in another terminal once it is fixed). A launcher failure is
-one `sf: ...` line and the printed URL stays usable by hand. A signal stops the tunnel first, then
+one `sf: ... run sf dashboard for the URL and open it by hand.` line (serve printed the URL with
+`<token>`; `sf up` opens the real one in-process). A signal stops the tunnel first, then
 the servers, exit code 0.
 
 ### sf status
@@ -116,6 +117,10 @@ One line per current job (archived ones excluded), sorted by workspace and ticke
 `TICKET`, `STATE`, `ITER` (published iterations), `BRANCH`, `SINCE` (the last state change, in
 local time), `EST_USD`, `ELAPSED` and `ERROR` (the error code; `sf status <workspace> <ticket>`
 prints the message below the table). Both work without `sf serve`; they read the state directory.
+Both show `dashboard: <the full URL>` (SF-126: `sf serve` prints it with `<token>`) once a
+`sf serve` start made the dashboard token, from that file and `SF_DASHBOARD_PORT`: the list of all
+jobs ends with it, one job has it after its worktree line, before the marked paths. Without a
+token, with an unusable one, or with `SF_DASHBOARD=off`, the line is left out.
 
 - `EST_USD` is the recorded cost, an estimate of the API-equivalent price and not a charge: the
   session usually runs on the user's Claude plan. It is the sum of `cost_usd` over
@@ -216,8 +221,10 @@ started by the run queue as before.
 | `SF_PORT` | `8787` | Port of `http://127.0.0.1:<port>/mcp/<token>` (loopback only, Host and Origin checked, the MCP token required; section MCP endpoint). |
 | `SF_ENV_FILE` | `<config dir>/auth.env`, by default `~/.config/software-factory/auth.env` (a historical name) | Environment file every `sf` command reads first: `KEY=VALUE` lines, `#` comments, optional `export`, quotes allowed; a variable already set in the environment wins; a missing file is fine. Empty value: no file. The repository root's `npm run serve` relies on it. |
 | `SF_DASHBOARD` | on | `off` starts no dashboard listener (and removes an old `dashboard-token`). |
-| `SF_DASHBOARD_PORT` | `8788` | Port of the dashboard, `http://127.0.0.1:<port>/d/<token>/` (loopback only, Host and Origin checked). |
-| `SF_DASHBOARD_REMOTE_ORIGINS` | none | Comma-separated `https://<machine>.<tailnet>.ts.net` origins whose requests the dashboard accepts as loopback ones (through `tailscale serve`, section Dashboard); the token stays required; anything else (http, another domain, a port or a path) is refused at start (`invalid_config`). |
+| `SF_DASHBOARD_PORT` | `8788` | Port of the dashboard, `http://127.0.0.1:<port>/d/<token>/` (loopback only, Host and Origin checked; the token visit sets the cookie `sf_dashboard_<port>`, section Dashboard). |
+| `SF_DASHBOARD_REMOTE_ORIGINS` | none | Comma-separated `https://<machine>.<tailnet>.ts.net` origins of your `tailscale serve` (section Dashboard). With them a second listener opens on `SF_DASHBOARD_REMOTE_PORT`, the only one that accepts them; the token (or its cookie) stays required; anything else (http, another domain, a port or a path) is refused at start (`invalid_config`). |
+| `SF_DASHBOARD_REMOTE_PORT` | `8789` | Port of the remote listener on `127.0.0.1`, where `tailscale serve --bg 8789` points; read only with remote origins; `0` is any free port; the value of `SF_DASHBOARD_PORT` (unless both are `0`) is `invalid_config`, a taken port `port_in_use`. |
+| `SF_DASHBOARD_REMOTE_LOGINS` | none | Comma-separated Tailscale logins (`Tailscale-User-Login`, compared ignoring case) that may use the remote port; required with remote origins (`invalid_config` at start when missing or empty). |
 | `SF_CONFIG_DIR` | `${XDG_CONFIG_HOME:-~/.config}/software-factory` | Directory of the workspace registry, the default `auth.env` and the `rules/` files. |
 | `SF_HANDBOOK` | `factory/HANDBOOK.md` | Handbook served as instructions (its `## Quick start` section) and by `guide`. |
 | `SF_STATE_DIR` | `${XDG_STATE_HOME:-~/.local/state}/software-factory` | Job state and the `sf.sock` socket. |
@@ -2649,12 +2656,25 @@ It lives in `<state dir>/queue.json` (written atomically): `{"version": 1, "max_
 A page served by `sf serve` on a second loopback listener,
 `http://127.0.0.1:${SF_DASHBOARD_PORT:-8788}/d/<token>/`, separate from the MCP port so the
 tunnel never reaches it. The first `sf serve` writes a random token (32 bytes, hex) to
-`${SF_STATE_DIR}/dashboard-token` (0600) and prints the URL; later starts reuse the file, so a
-bookmark keeps working across restarts, and `sf dashboard` prints the URL again from that file
-and `SF_DASHBOARD_PORT`. `sf dashboard --rotate` removes the file: the next `sf serve` start makes
-a new token and prints the new URL (a running `sf serve` keeps the old one until then). A missing
-or unusable file is replaced at start the same way; `SF_DASHBOARD=off` removes it. Any path
-without the right token answers 404 with an empty body.
+`${SF_STATE_DIR}/dashboard-token` (0600); later starts reuse the file, so a bookmark keeps working
+across restarts. `sf serve` prints no token (SF-126: its output is the service's journal):
+`software-factory dashboard http://127.0.0.1:<port>/d/<token>/ (sf dashboard prints the full URL)`,
+with the literal `<token>`. `sf dashboard`, `sf status` and `sf info` print the full URL from that file and
+`SF_DASHBOARD_PORT`; `sf up` opens it in-process. `sf dashboard --rotate` removes the file: the
+next `sf serve` start makes a new token (a running `sf serve` keeps the old one until then). A
+missing or unusable file is replaced at start the same way; `SF_DASHBOARD=off` removes it.
+
+**The cookie (SF-126).** A GET of `/d/<token>/` with the right token serves the page as before
+(200, no redirect) and also sets a cookie: `sf_dashboard_<port>=<v>; HttpOnly; SameSite=Strict;
+Path=/` locally (the port in the name, since browsers do not keep cookies apart by port), and
+`__Host-sf_dashboard=<v>; HttpOnly; Secure; SameSite=Strict; Path=/` on the remote port. `<v>` is
+the hex HMAC-SHA256 of the token over `dashboard-cookie:local` or `dashboard-cookie:remote`, so it
+survives restarts and dies with `sf dashboard --rotate` (at the next start). With a valid cookie
+every page and API path works at the root too (`/`, `/api/jobs`, the relative URLs of `app.js`),
+so `/` can be bookmarked; the actions keep their Origin check. Each side's cookie works on its own
+port only. A path with neither the right token nor a valid cookie (both compared in constant time)
+answers 404 with an empty body, and so does a link from another site to `/` (`SameSite=Strict`
+sends no cookie with it).
 
 `sf dashboard --open` prints the same URL and then opens it in the browser with `xdg-open` (Linux
 only, from `xdg-utils`), run without a shell with the URL as its one argument and waited for up to
@@ -2664,28 +2684,60 @@ in time, `sf` exits 1 with the reason; the printed URL stays usable by hand. Exi
 launcher accepted the URL, not that the page loaded: nothing checks that `sf serve` is running.
 On another platform `--open` is refused (`open_unsupported`); plain `sf dashboard` works everywhere.
 
-**Through Tailscale (SF-118).** `SF_DASHBOARD_REMOTE_ORIGINS` lists the origins of your
-`tailscale serve` (`https://<machine>.<tailnet>.ts.net`, https, no port, no path); anything else
-stops `sf serve` and `sf dashboard` with `invalid_config`, and with `SF_DASHBOARD=off` it is not
-read. A request whose Host is a listed origin's name (any port) passes the Host check as a loopback
-one does, and one whose Origin is exactly a listed origin passes the Origin check and the actions'
-Origin check; the two are checked each on its own, so a proxy that keeps the ts.net Host and one
-that rewrites it to `127.0.0.1:<port>` both work. Every other Host or Origin is refused (403) as
-before, and the token is still required. The listener stays on `127.0.0.1`; the `Tailscale-User-*`
-and `X-Forwarded-*` headers are not read. `sf serve` prints `software-factory dashboard through
-Tailscale https://<machine>.<tailnet>.ts.net/d/<token>/` after the local URL, and `sf dashboard`
-prints `Through Tailscale: <url>` after it, in full like the local one (`--open` opens only the
-local one). The setting is read at `sf serve`'s start. The steps:
+**Through Tailscale (SF-118, the remote port since SF-126).** `SF_DASHBOARD_REMOTE_ORIGINS` lists
+the origins of your `tailscale serve` (`https://<machine>.<tailnet>.ts.net`, https, no port, no
+path); anything else stops `sf serve` and `sf dashboard` with `invalid_config`, and with
+`SF_DASHBOARD=off` it is not read. With them `sf serve` opens a second listener on
+`127.0.0.1:${SF_DASHBOARD_REMOTE_PORT:-8789}`, and `tailscale serve --bg 8789` points there: a
+request is remote because of the socket it came in on, not because of headers a proxy may
+rewrite. The local port stops accepting the remote origins' Host and Origin (as before SF-118) and
+ignores every `Tailscale-User-*` header.
+
+On the remote port a request needs, in this order:
+
+- `Tailscale-User-Login` equal, ignoring case, to a login of `SF_DASHBOARD_REMOTE_LOGINS`
+  (required with the origins). Anything else, a tagged device or a Funnel request (Tailscale sets
+  no identity header for them), gets an empty 403 and one log line,
+  `dashboard: refused a request on the remote port from login <login or none> (not in
+  SF_DASHBOARD_REMOTE_LOGINS)`, never the path.
+- a Host that is a listed ts.net name (any port), or a loopback Host with an Origin that is a
+  listed origin. An Origin, when sent, must be a listed one (a loopback or other Origin is a 403);
+  only GET and HEAD may come without one. Each failure is an empty 403.
+- the token, or the remote cookie, as locally.
+
+The header is trusted because only Tailscale should connect to this port: `tailscale serve` sets
+`Tailscale-User-Login`, `-Name` and `-Profile-Pic` for a request from a user's device and first
+deletes any such header the client sent (Tailscale's `ipn/ipnlocal/serve.go`,
+`addTailscaleIdentityHeaders`; the Serve documentation, "Identity headers", says tagged devices and
+Funnel get none). Another process on the PC can reach `127.0.0.1:8789` and write the header itself,
+but still needs the token, as on the local port.
+
+The actions keep the Origin check (a listed origin on the remote port). The four that can push or
+merge, `approve`, `retry` (which pushes again after `mr_push_failed`), `mr-create` and `mr-merge`,
+need `"confirm": "<the job's ticket>"` in their body on the remote port; without it, or with
+another value, they answer 409 `confirm_required` before anything runs (locally `confirm` is
+accepted and ignored). `api/jobs` and the stream's `jobs` events carry a top-level `remote`
+(`true` on the remote port, `false` locally); with `remote` true the page asks for those four
+actions, after their usual confirmation, in a dialog "Type <ticket> to continue" whose button works
+only with the exact ticket.
+
+`sf serve` prints `software-factory dashboard remote listener 127.0.0.1:<port>` and
+`software-factory dashboard through Tailscale https://<machine>.<tailnet>.ts.net/d/<token>/`
+(the literal `<token>`) after the local line; `sf dashboard` prints `Through Tailscale: <url>`
+in full (`--open` opens only the local one). The settings are read at `sf serve`'s start. The
+steps:
 
 1. Install Tailscale on the PC and the phone, both in the same tailnet; in the admin console's DNS
    page turn on MagicDNS and HTTPS certificates.
 2. On the PC, once: `sudo tailscale set --operator=$USER`.
-3. `tailscale serve --bg 8788` (the dashboard's port, `SF_DASHBOARD_PORT`); `tailscale serve
-   status` shows the address, `tailscale serve reset` removes it. Never `tailscale funnel`, which
-   puts the address on the public internet.
-4. `SF_DASHBOARD_REMOTE_ORIGINS=https://<machine>.<tailnet>.ts.net` in `auth.env`, then restart
-   `sf serve`.
-5. Open the `Through Tailscale:` URL of `sf dashboard` on the phone.
+3. `tailscale serve --bg 8789` (the remote port, `SF_DASHBOARD_REMOTE_PORT`; `tailscale serve
+   reset` first if it pointed at 8788); `tailscale serve status` shows the address, `tailscale
+   serve reset` removes it. Never `tailscale funnel`, which puts the address on the public internet.
+4. `SF_DASHBOARD_REMOTE_ORIGINS=https://<machine>.<tailnet>.ts.net` and
+   `SF_DASHBOARD_REMOTE_LOGINS=<your login, as tailscale status shows it>` in `auth.env`, then
+   restart `sf serve`.
+5. Open the `Through Tailscale:` URL of `sf dashboard` on the phone once; then bookmark
+   `https://<machine>.<tailnet>.ts.net/`.
 
 **The board (SF-046, v3 since SF-077).** The page is the board of the dashboard v3 design
 (`docs/design/dashboard-v3/`, ported from its prototype: the same CSS, light and dark by the system,

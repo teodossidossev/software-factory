@@ -227,22 +227,49 @@ workspaces and checkouts.
 ## The dashboard on your phone (Tailscale)
 
 The dashboard listens on `127.0.0.1` only. To open it from your phone, `tailscale serve` on the PC
-proxies `https://<machine>.<tailnet>.ts.net/`, reachable only inside your own tailnet, to it, and
-`SF_DASHBOARD_REMOTE_ORIGINS` tells the dashboard to accept that address.
+proxies `https://<machine>.<tailnet>.ts.net/`, reachable only inside your own tailnet, to a second
+listener of its own, the remote port (`SF_DASHBOARD_REMOTE_PORT`, default 8789). That port serves
+only the Tailscale logins you list, and asks again before a push or a merge.
 
 1. Install Tailscale on the PC and the phone and log both into the same tailnet. In the Tailscale
    admin console, DNS: turn on MagicDNS and HTTPS certificates (`tailscale serve` asks for it if
    they are off).
 2. On the PC, once: `sudo tailscale set --operator=$USER` (so your user may run `tailscale serve`).
-3. `tailscale serve --bg 8788` (the dashboard's port, `SF_DASHBOARD_PORT`). It proxies
-   `https://<machine>.<tailnet>.ts.net/` to `http://127.0.0.1:8788` and keeps doing so across
-   reboots. `tailscale serve status` shows the address; `tailscale serve reset` removes it.
-4. Add `SF_DASHBOARD_REMOTE_ORIGINS=https://<machine>.<tailnet>.ts.net` to `auth.env`, then
-   restart `sf serve` (`systemctl --user restart software-factory` for the service).
+3. `tailscale serve --bg 8789` (the remote port, not the dashboard's 8788). It proxies
+   `https://<machine>.<tailnet>.ts.net/` to `http://127.0.0.1:8789` and keeps doing so across
+   reboots. `tailscale serve status` shows the address; `tailscale serve reset` removes it. If
+   you pointed it at 8788 before, run `tailscale serve reset` first.
+4. Add to `auth.env`, then restart `sf serve` (`systemctl --user restart software-factory` for the
+   service):
+   ```
+   SF_DASHBOARD_REMOTE_ORIGINS=https://<machine>.<tailnet>.ts.net
+   SF_DASHBOARD_REMOTE_LOGINS=<your login>
+   ```
+   Your login is the one `tailscale status` shows for your devices (such as `you@github` or
+   `you@example.com`); several are comma-separated. Without the logins `sf serve` does not start.
 5. `sf dashboard` prints `Through Tailscale: https://<machine>.<tailnet>.ts.net/d/<token>/`; open
-   it on the phone. Only devices of your tailnet reach it, and only with the token.
+   it on the phone once. The page sets a cookie, so from then on
+   `https://<machine>.<tailnet>.ts.net/` alone opens the dashboard: bookmark that one.
 
-Use `tailscale serve`, never `tailscale funnel`: Funnel puts the address on the public internet.
+What the phone gets:
+
+- Only requests that Tailscale marks with a listed login (`Tailscale-User-Login`) are served.
+  A tagged device or a Funnel request has no login and gets a 403; `sf serve`'s log names the
+  login refused (or `none`), never the path.
+- Approve, Retry (which pushes again after a failed push), Create merge request and Merge ask a
+  second time: "Type <ticket> to continue", and the button works only with the ticket typed
+  exactly. The other actions work as on the PC.
+- The local dashboard (`http://127.0.0.1:8788`) is as before: it refuses the Tailscale address and
+  ignores Tailscale's headers.
+
+`sf serve` prints no token (its log is the service's journal): its line is
+`software-factory dashboard http://127.0.0.1:8788/d/<token>/ (sf dashboard prints the full URL)`,
+with `remote listener 127.0.0.1:8789` and the Tailscale address beside it. `sf dashboard`,
+`sf status` (its last line) and `sf info` print the full URL; `sf up` opens it in your browser
+itself.
+
+Use `tailscale serve`, never `tailscale funnel`: Funnel puts the address on the public internet
+(and its requests carry no login, so the remote port refuses them anyway).
 
 ## Troubleshooting
 
@@ -255,6 +282,7 @@ Use `tailscale serve`, never `tailscale funnel`: Funnel puts the address on the 
 | `profile_unsafe` from `scripts/sf-tunnel.sh check` | the tunnel profile's mode is not 0600 or its directory's not 0700 (wider, or stricter such as a 0500 directory) | `scripts/sf-tunnel.sh run` (or `doctor`) sets them |
 | `invalid_mcp_token` at `sf serve`'s start, or `mcp: every request is refused: …` in its log | `mcp-token` in the state directory is not a valid token or cannot be read | `sf mcp-url --rotate` writes a new one; then restart the tunnel and update other MCP clients |
 | `Port 8788 … Set SF_DASHBOARD_PORT to a free port.` | the dashboard port is taken | as above, or `SF_DASHBOARD_PORT=8798` |
+| `Port 8789 … Set SF_DASHBOARD_REMOTE_PORT to a free port.` | the remote port is taken | as above, or another `SF_DASHBOARD_REMOTE_PORT`; then point `tailscale serve --bg <port>` at it |
 | `Another sf serve is already listening on the socket.` (`serve_running`) | a second `sf serve` on the same state directory | use the running one; run only one `sf serve` per state directory |
 | `sf serve is not running.` | a command that needs `sf serve` (`start`, `say`, `queue`, `approve`, …) | start it (`npm start` or `npm run serve`, or `systemctl --user start software-factory`) |
 | `update_in_progress` | `sf update` is draining or building; or its build is done and waits for `sf serve` to restart (`sf status` shows the phase) | wait for it to end; restart `sf serve` when it says so |
@@ -266,9 +294,14 @@ Use `tailscale serve`, never `tailscale funnel`: Funnel puts the address on the 
 | `socket_path_too_long` | `SF_STATE_DIR` is too deep for a Unix socket (107 bytes) | use a shorter state directory |
 | `sf serve` refuses to start with `registry_invalid` or `queue_invalid` | `workspaces.json` or `queue.json` has a key or value the strict parser does not accept | fix the file by the message (see [Configuration](configuration.md#the-workspace-registry-workspacesjson)) |
 | every `sf` command says `invalid_env_file` | a line in `auth.env` is not `KEY=VALUE` | fix that line |
-| the dashboard says 404 / the bookmark stopped working | wrong or rotated token, or another port | `sf dashboard` prints the current URL; `sf dashboard --rotate` makes a new token at the next `sf serve` start |
-| a 403 on the phone | the address is not in `SF_DASHBOARD_REMOTE_ORIGINS`, or `sf serve` was not restarted after adding it | add exactly the `https://<machine>.<tailnet>.ts.net` that `tailscale serve status` shows, restart `sf serve` ([The dashboard on your phone](#the-dashboard-on-your-phone-tailscale)) |
+| the dashboard says 404 / the bookmark stopped working | wrong or rotated token, or another port; a bookmark of `/` after `sf dashboard --rotate` (the cookie belongs to the old token) or after the browser dropped the cookie | `sf dashboard` prints the current URL: open it once, and `/` works again; `sf dashboard --rotate` makes a new token at the next `sf serve` start |
+| a 403 on the phone, and `dashboard: refused a request on the remote port from login none` in `sf serve`'s log | the request came without a Tailscale login: from a tagged device, through Funnel, or not through `tailscale serve` | open it from a device logged in as you, through `tailscale serve` (not Funnel) |
+| a 403 on the phone, the log naming your login | the login is not in `SF_DASHBOARD_REMOTE_LOGINS` | add it as the log shows it, restart `sf serve` |
+| a 403 on the phone, no log line | the address is not in `SF_DASHBOARD_REMOTE_ORIGINS`, or `sf serve` was not restarted after adding it | add exactly the `https://<machine>.<tailnet>.ts.net` that `tailscale serve status` shows, restart `sf serve` ([The dashboard on your phone](#the-dashboard-on-your-phone-tailscale)) |
+| the phone's address gives a 403 or nothing, and `tailscale serve status` shows `8788` | `tailscale serve` points at the local port, which refuses the Tailscale address | `tailscale serve reset`, then `tailscale serve --bg 8789` |
+| `confirm_required` on the phone | Approve, Retry, Create merge request or Merge was sent from the remote port without the ticket typed | use the dialog: type the ticket exactly as shown |
 | `invalid_config` naming `SF_DASHBOARD_REMOTE_ORIGINS` at `sf serve`'s start | an entry is not `https://<machine>.<tailnet>.ts.net` (http, another domain, a port, a path or a trailing part) | write each origin as `tailscale serve status` shows it, comma-separated, then start `sf serve` again |
+| `invalid_config` naming `SF_DASHBOARD_REMOTE_LOGINS` or `SF_DASHBOARD_REMOTE_PORT` at `sf serve`'s start | remote origins without logins, or the remote port equal to `SF_DASHBOARD_PORT` | set `SF_DASHBOARD_REMOTE_LOGINS`; give the remote port another number |
 | the hand-over or your own `git config` fails with "could not lock config file … File exists" | a stale `.git/config.lock` in the checkout: Claude Code's sandbox leaves an empty read-only one, which the factory removes when no job of the workspace runs; a lock that is not the sandbox's is never touched (`handover_failed`) | wait for the workspace's running jobs to end (`config_locked` hands over by itself); if no job and no Git command runs, delete `.git/config.lock` by hand |
 | sessions fail with an authentication message, `session_failed` | the Claude login expired | run `claude` and `/login`, then *Tell it to go on* |
 | `gate_failed` with a login message, or `gate: off` in `sf info` | Codex not found or not logged in | `codex login`; set `SF_CODEX` to its absolute path when it is not on the `PATH` of `sf serve` |

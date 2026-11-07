@@ -9,14 +9,14 @@ import { request } from 'node:http';
 import { connect } from 'node:net';
 import { join, resolve } from 'node:path';
 import { mock, test } from 'node:test';
-import { ACTIONS, MAX_ACTION_BODY_BYTES } from '../src/dashboard.js';
+import { ACTIONS, CONFIRM_ROUTES, MAX_ACTION_BODY_BYTES, startDashboard } from '../src/dashboard.js';
 import { FactoryError } from '../src/errors.js';
 import { JobStore } from '../src/jobs.js';
 import { factoryPrompt } from '../src/prompts.js';
 import type { DashboardQueue } from '../src/dashboard.js';
 import type { QueueView } from '../src/queue.js';
 import { act, CSP, fakeActions, fakeSetup, fetchRaw, openStream, type Reply, ticketRow, workspaceRow } from './support/dashboard-client.js';
-import { withDashboard } from './support/dashboard-state.js';
+import { fixture, withDashboard } from './support/dashboard-state.js';
 import { call, fakeLog, git, newEnv, newRepo, putTask, refused, script, serve, stop, waitFor } from './support/harness.js';
 
 
@@ -620,6 +620,52 @@ test('dashboard retry (SF-087): POST only, the action checks, Execution.retryMr 
     assert.deepEqual(error(await act(base, path, {})), { status: 409, code: 'invalid_state' });
     assert.equal(fake.calls.length, 2);
   });
+});
+
+test('dashboard confirm (SF-126): on the remote port approve, retry, mr-create and mr-merge need "confirm" equal to the ticket, else 409 confirm_required and nothing runs; locally they run without it', async () => {
+  const remoteOrigin = 'https://pc.tail1234.ts.net';
+  const store = await fixture('dash-act-confirm');
+  const fake = fakeActions();
+  const dashboard = await startDashboard(0, store.state, store.jobs, fake, undefined, { remoteOrigins: [remoteOrigin], remoteLogins: ['alice@github'], remotePort: 0 });
+  try {
+    const token = dashboard.url.pathname.split('/')[2]!;
+    const remote = new URL(`http://127.0.0.1:${dashboard.remotePort}/d/${token}/`);
+    const headers = { origin: remoteOrigin, 'tailscale-user-login': 'alice@github' };
+    const remoteAct = (action: string, body: unknown): Promise<Reply> => act(remote, `api/jobs/app/T-1/${action}`, body, { host: 'pc.tail1234.ts.net', headers });
+    const methods: Record<string, string> = { approve: 'approve', retry: 'retryMr', 'mr-create': 'createMergeRequest', 'mr-merge': 'mergeMergeRequest' };
+    assert.deepEqual(CONFIRM_ROUTES, Object.keys(methods));
+    for (const [action, method] of Object.entries(methods)) {
+      // Without confirm, with another ticket, another case or a non-string: refused before anything runs.
+      for (const body of [{}, { confirm: 'T-0' }, { confirm: 't-1' }, { confirm: '' }, { confirm: 'app/T-1' }]) {
+        const reply = await remoteAct(action, body);
+        assert.deepEqual(error(reply), { status: 409, code: 'confirm_required' }, `${action} ${JSON.stringify(body)}`);
+        assert.equal(JSON.parse(reply.body).error.message, `From another device, ${action} needs "confirm": the job's ticket (T-1).`);
+      }
+      assert.deepEqual(error(await remoteAct(action, { confirm: 1 })), { status: 400, code: 'invalid_body' }, action);
+      assert.deepEqual(fake.calls, [], action);
+      // With the ticket: it runs, once.
+      assert.equal((await remoteAct(action, { confirm: 'T-1' })).status, 200, action);
+      assert.deepEqual(fake.calls, [[method, 'app', 'T-1']], action);
+      fake.calls.length = 0;
+      // Locally: no confirm needed, and one sent is ignored.
+      for (const body of [{}, { confirm: 'T-0' }]) {
+        assert.equal((await act(dashboard.url, `api/jobs/app/T-1/${action}`, body)).status, 200, `${action} local ${JSON.stringify(body)}`);
+      }
+      assert.deepEqual(fake.calls, [[method, 'app', 'T-1'], [method, 'app', 'T-1']], action);
+      fake.calls.length = 0;
+    }
+    // approve keeps as_is beside confirm.
+    assert.equal((await remoteAct('approve', { as_is: true, confirm: 'T-1' })).status, 200);
+    // The other actions need no confirm on the remote port (none of them pushes or merges).
+    for (const [action, method] of [['abort', 'abort'], ['mr-status', 'mergeRequestStatus'], ['accept', 'acceptGate'], ['handover', 'handover'], ['pause', 'pause']] as const) {
+      fake.calls.length = 0;
+      assert.equal((await remoteAct(action, {})).status, 200, action);
+      assert.equal(fake.calls[0]![0], method, action);
+    }
+    assert.deepEqual(error(await remoteAct('mr-status', { confirm: 'T-1' })), { status: 400, code: 'invalid_body' });
+  } finally {
+    await dashboard.close();
+  }
 });
 
 test('dashboard accept (SF-047): POST only, the action checks, Execution.acceptGate once per request, its refusals mapped', async () => {

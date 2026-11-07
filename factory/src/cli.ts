@@ -25,7 +25,10 @@ import { openInBrowser } from './browser.js';
 import { envFilePath, gateConfig, gateLevelSetting, handoffSetting, loadConfig, loadEnvFile, rulesMaxBytes, stateDir } from './config.js';
 import { Digests } from './digest-run.js';
 import { DigestSchedule } from './digest-schedule.js';
-import { DEFAULT_DASHBOARD_PORT, dashboardRemoteOrigins, dashboardUrl, readToken, remoteDashboardUrls, removeToken, type RunningDashboard, startDashboard } from './dashboard.js';
+import {
+  checkDashboardPorts, DEFAULT_DASHBOARD_PORT, DEFAULT_DASHBOARD_REMOTE_PORT, dashboardRemoteLogins, dashboardRemoteOrigins, dashboardUrl, readToken, remoteDashboardUrls, removeToken,
+  type RunningDashboard, startDashboard,
+} from './dashboard.js';
 import { FactoryError } from './errors.js';
 import { currentExplanation, Explainer, explanationLines } from './explain.js';
 import { Execution, type StateListener } from './execution.js';
@@ -97,7 +100,7 @@ const USAGE = `Usage:
   sf accept <workspace> <ticket>                        Accept a clean Claude review over a stopped gate (needs_human with gate_rounds, gate_budget or gate_failed) or a ledger stop (review_churn, review_disputed) or the Fix round limit (iteration_limit) or the workspace's tests (tests_failed, tests_unavailable: without passing tests) and prepare the MR; on simplify_offered: skip the suggestions (listed in the MR text)
   sf simplify <workspace> <ticket>                      Apply the simplification pass's suggestions (needs_human with simplify_offered): one Fix section "Simplify", reviewed as usual; sf accept skips them
   sf settle <workspace> <ticket> <id> accept|fix [note...]  Settle an escalated or contested finding of the ledger (needs_human): accept the risk, or the Implementer must fix it; the job goes on once nothing is left to settle
-  sf status [<workspace> <ticket>]                      Show one job or all jobs: state, iterations, estimated cost, elapsed time
+  sf status [<workspace> <ticket>]                      Show one job or all jobs: state, iterations, estimated cost, elapsed time; both show the dashboard's full URL once sf serve made its token
   sf watch <workspace> <ticket> [--once]                Show the session live (Ctrl+C stops)
   sf approve <workspace> <ticket> [--as-is]             Push the branch prepared at Clean; --as-is pushes it even if its tip was edited by hand
   sf mr create <workspace> <ticket>                     Open the merge request of a pushed job on GitHub or GitLab (or reuse the open one); from ready_for_human_review: approve, then open it
@@ -139,7 +142,7 @@ class UsageError extends Error {}
 // update's own tool), mr-status (it starts nothing) and the reads.
 const OPEN_WHILE_UPDATING: ReadonlySet<string> = new Set(['ping', 'queue-list', 'serve-busy', 'digest-latest', 'mcp-port', 'pause', 'mr-status', 'check']);
 
-function parsePort(name: 'SF_PORT' | 'SF_DASHBOARD_PORT', fallback: number): number {
+function parsePort(name: 'SF_PORT' | 'SF_DASHBOARD_PORT' | 'SF_DASHBOARD_REMOTE_PORT', fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw === '') {
     return fallback;
@@ -163,6 +166,12 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   const dashboardPort = parsePort('SF_DASHBOARD_PORT', DEFAULT_DASHBOARD_PORT);
   // SF_DASHBOARD_REMOTE_ORIGINS (SF-118): an invalid value stops the start; not read with the dashboard off.
   const remoteOrigins = dashboardOn() ? dashboardRemoteOrigins() : [];
+  // With them (SF-126): the remote listener's port and the logins it serves, checked before anything starts.
+  const remoteLogins = dashboardRemoteLogins(remoteOrigins);
+  const remotePort = remoteOrigins.length > 0 ? parsePort('SF_DASHBOARD_REMOTE_PORT', DEFAULT_DASHBOARD_REMOTE_PORT) : DEFAULT_DASHBOARD_REMOTE_PORT;
+  if (remoteOrigins.length > 0) {
+    checkDashboardPorts(dashboardPort, remotePort);
+  }
   const config = loadConfig();
   const handbook = await loadHandbook();
   // Fail at startup on an invalid registry rather than on the first tool call.
@@ -409,7 +418,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
       // The dashboard's actions (DashboardActions: start, approve, abort, say, retryReview,
       // acceptGate and archiveFinished) run on the same Execution as the socket commands.
       dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, setup, {
-        gate: config.gate.on, checks, queue: runQueue, onWorkspacesChanged: () => void autoChecks?.rereadWorkspaces(), digests, remoteOrigins,
+        gate: config.gate.on, checks, queue: runQueue, onWorkspacesChanged: () => void autoChecks?.rereadWorkspaces(), digests, remoteOrigins, remoteLogins, remotePort,
       });
     } else {
       await removeToken(config.stateDir);
@@ -419,9 +428,15 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     await Promise.all([server.close(), socket.close()]);
     throw error;
   }
-  console.log(dashboard !== undefined ? `${SERVER_NAME} dashboard ${dashboard.url.href}` : `${SERVER_NAME} dashboard off (SF_DASHBOARD=off)`);
-  for (const url of dashboard?.remoteUrls ?? []) {
-    console.log(`${SERVER_NAME} dashboard through Tailscale ${url.href}`);
+  // No token in the output (SF-126): the service's journal keeps it. sf dashboard prints the URL.
+  console.log(dashboard !== undefined
+    ? `${SERVER_NAME} dashboard http://127.0.0.1:${dashboard.url.port}/d/${TOKEN_LABEL}/ (sf dashboard prints the full URL)`
+    : `${SERVER_NAME} dashboard off (SF_DASHBOARD=off)`);
+  if (dashboard?.remotePort !== undefined) {
+    console.log(`${SERVER_NAME} dashboard remote listener 127.0.0.1:${dashboard.remotePort}`);
+  }
+  for (const remote of remoteOrigins) {
+    console.log(`${SERVER_NAME} dashboard through Tailscale ${remote}/d/${TOKEN_LABEL}/`);
   }
   if (!config.gate.on && config.gate.missing === true) {
     console.log(`gate: off (${config.gate.reason}); the Claude review decides`);
@@ -571,10 +586,12 @@ async function up(args: string[]): Promise<void> {
     return;
   }
   try {
+    // The real URL, in this process only: serve printed it with <token> (SF-126).
     await openInBrowser(dashboard.href);
   } catch (error) {
-    // The URL was printed by serve; the page can be opened by hand.
-    console.error(`sf: ${error instanceof Error ? error.message : String(error)}`);
+    // The launcher's "open the URL above by hand" does not hold: the line above has <token>.
+    const reason = (error instanceof Error ? error.message : String(error)).replace(/; open the URL above by hand\.$/, '');
+    console.error(`sf: ${reason}; run sf dashboard for the URL and open it by hand.`);
   }
 }
 
@@ -1248,6 +1265,20 @@ function table(rows: StatusRow[]): string {
   return cells.map((row) => row.map((cell, column) => cell.padEnd(widths[column]!)).join('  ').trimEnd()).join('\n');
 }
 
+// The dashboard's full URL for sf status (SF-126: sf serve prints it with <token>), or undefined with
+// the dashboard off, before the first sf serve, or when the token file or SF_DASHBOARD_PORT is unusable.
+async function dashboardStatusUrl(): Promise<string | undefined> {
+  if (!dashboardOn()) {
+    return undefined;
+  }
+  try {
+    const token = await readToken(stateDir());
+    return token === undefined ? undefined : dashboardUrl(parsePort('SF_DASHBOARD_PORT', DEFAULT_DASHBOARD_PORT), token).href;
+  } catch {
+    return undefined;
+  }
+}
+
 async function status(args: string[]): Promise<void> {
   const jobs = new JobStore(stateDir());
   // One clock reading for every row.
@@ -1265,6 +1296,10 @@ async function status(args: string[]): Promise<void> {
     const turnLimits = all.flatMap((job) => [turnLimitLine(job), limitLine(job)].flatMap((line) => (line === undefined ? [] : [`${job.workspace}/${job.ticket}: ${line}`])));
     if (turnLimits.length > 0) {
       console.log(`\n${turnLimits.join('\n')}`);
+    }
+    const dashboard = await dashboardStatusUrl();
+    if (dashboard !== undefined) {
+      console.log(`\ndashboard: ${dashboard}`);
     }
     return;
   }
@@ -1299,6 +1334,11 @@ async function status(args: string[]): Promise<void> {
   }
   if (job.worktree !== null) {
     console.log(`\nworktree: ${job.worktree}`);
+  }
+  // The dashboard's full URL (SF-126), as for all jobs; before the marked paths, which end the output.
+  const dashboard = await dashboardStatusUrl();
+  if (dashboard !== undefined) {
+    console.log(`${job.worktree !== null ? '' : '\n'}dashboard: ${dashboard}`);
   }
   // The marked paths (sensitive, outside the Task's scope, deleted) of the last published
   // iteration (SF-024, SF-053).

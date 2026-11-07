@@ -134,6 +134,10 @@ const state = {
   unresolved: new Map(),
   doubts: new Map(),
   confirm: null,
+  // The page came through the remote port (SF-126: api/jobs's remote), and the open ticket
+  // dialog of an action that pushes or merges ({ ticket, resolve }).
+  remote: false,
+  ticketAsk: null,
   // The hand-over panel's More menu is open (SF-107).
   handoverMenu: false,
   // The registry, the tickets without a live job and the archived ones (null until the stream
@@ -3348,11 +3352,139 @@ const DONE_TEXT = {
   pause: 'Paused', resume: 'Resumed', restart: 'Restarted', handover: 'Handed over to your checkout', takeback: 'Taken back', 'handed-done': 'Your push is recorded',
 };
 
-// One request for one job; the result goes to that job only, whatever is selected by then.
+// The jobs of an api/jobs answer or a jobs event; its remote (SF-126) says which port the page uses.
+function jobsOf(text) {
+  const data = JSON.parse(text);
+  if (typeof data.remote === 'boolean') {
+    state.remote = data.remote;
+  }
+  return data.jobs;
+}
+
+// The actions that can push or merge (SF-126: CONFIRM_ROUTES of src/dashboard.ts): from another
+// device each asks for the job's ticket, typed, and sends it as confirm.
+const REMOTE_CONFIRM = ['approve', 'retry', 'mr-create', 'mr-merge'];
+const REMOTE_CONFIRM_TEXT = {
+  approve: 'it pushes the branch to origin.',
+  retry: 'it runs the MR preparation again, and pushes again after a failed push.',
+  'mr-create': 'it opens the merge request on the Git host, pushing the branch first when it is not pushed yet.',
+  'mr-merge': 'it merges the merge request on the Git host.',
+};
+
+// The ticket dialog, made on first use: a title, the action's text, the input and two buttons.
+function ticketDialog() {
+  const found = document.getElementById('remote-confirm');
+  if (found !== null) {
+    return found;
+  }
+  // A native modal dialog, styled by the browser: app.css's .confirm would display it while closed.
+  const dialog = el('dialog');
+  dialog.id = 'remote-confirm';
+  dialog.hidden = true;
+  dialog.setAttribute('aria-labelledby', 'remote-confirm-title');
+  dialog.setAttribute('aria-describedby', 'remote-confirm-text');
+  const title = el('h4');
+  title.id = 'remote-confirm-title';
+  const text = el('p');
+  text.id = 'remote-confirm-text';
+  const input = el('input');
+  input.id = 'remote-confirm-input';
+  input.type = 'text';
+  for (const [name, value] of [['autocomplete', 'off'], ['autocapitalize', 'off'], ['spellcheck', 'false'], ['aria-labelledby', 'remote-confirm-title']]) {
+    input.setAttribute(name, value);
+  }
+  const ok = el('button', 'btn btn-primary');
+  ok.id = 'remote-confirm-ok';
+  ok.type = 'button';
+  const cancel = el('button', 'btn', 'Cancel');
+  cancel.id = 'remote-confirm-cancel';
+  cancel.type = 'button';
+  const row = el('div', 'row');
+  row.append(ok, cancel);
+  dialog.append(title, text, input, row);
+  input.addEventListener('input', () => {
+    ok.disabled = state.ticketAsk === null || input.value !== state.ticketAsk.ticket;
+  });
+  dialog.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && event.target === input) {
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      if (!ok.disabled) {
+        settleTicketAsk(true);
+      }
+    } else if (event.key === 'Escape') {
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      settleTicketAsk(false);
+    }
+  });
+  // The browser's own Escape of a modal dialog.
+  dialog.addEventListener('cancel', (event) => {
+    event.preventDefault?.();
+    settleTicketAsk(false);
+  });
+  ok.addEventListener('click', () => settleTicketAsk(true));
+  cancel.addEventListener('click', () => settleTicketAsk(false));
+  document.body.append(dialog);
+  return dialog;
+}
+
+// "Type <ticket> to continue": true once the exact ticket is typed and confirmed, false on Cancel
+// (or while another such dialog is open).
+function askTicket(action, ticket) {
+  if (state.ticketAsk !== null) {
+    return Promise.resolve(false);
+  }
+  const dialog = ticketDialog();
+  $('remote-confirm-title').textContent = `Type ${ticket} to continue`;
+  $('remote-confirm-text').textContent = `${ACTION_LABELS[action]} from another device: ${REMOTE_CONFIRM_TEXT[action]}`;
+  const input = $('remote-confirm-input');
+  input.value = '';
+  $('remote-confirm-ok').textContent = ACTION_LABELS[action];
+  $('remote-confirm-ok').disabled = true;
+  dialog.hidden = false;
+  if (typeof dialog.showModal === 'function') {
+    dialog.showModal();
+  } else {
+    dialog.open = true;
+  }
+  input.focus();
+  return new Promise((resolve) => {
+    state.ticketAsk = { ticket, resolve };
+  });
+}
+
+// Closes the ticket dialog: true only when confirmed with the exact ticket typed.
+function settleTicketAsk(confirmed) {
+  const ask = state.ticketAsk;
+  if (ask === null) {
+    return;
+  }
+  const typed = $('remote-confirm-input').value;
+  state.ticketAsk = null;
+  const dialog = $('remote-confirm');
+  if (typeof dialog.close === 'function') {
+    dialog.close();
+  } else {
+    dialog.open = false;
+  }
+  dialog.hidden = true;
+  ask.resolve(confirmed && typed === ask.ticket);
+}
+
+// One request for one job; the result goes to that job only, whatever is selected by then. From
+// another device (SF-126) an action that can push or merge asks for the ticket first.
 async function run(action, key, body) {
   const id = pendingId(action, key);
   if (state.pending.has(id)) {
     return;
+  }
+  if (state.remote && REMOTE_CONFIRM.includes(action)) {
+    const ticket = key.slice(key.indexOf('/') + 1);
+    if (!(await askTicket(action, ticket)) || state.pending.has(id)) {
+      return;
+    }
+    body = { ...body, confirm: ticket };
   }
   state.pending.add(id);
   if (!state.unresolved.has(key)) {
@@ -4845,7 +4977,7 @@ function scheduleRefresh() {
     const seen = state.jobsSeen;
     getText('api/jobs').then((text) => {
       if (state.jobsSeen === seen) {
-        state.jobs = JSON.parse(text).jobs;
+        state.jobs = jobsOf(text);
       }
     }, () => undefined).finally(() => {
       state.refresh = null;
@@ -8469,7 +8601,7 @@ async function holdStart(key, reason) {
   renderBoard();
   let jobs;
   try {
-    jobs = JSON.parse(await withinTime(getText('api/jobs'))).jobs;
+    jobs = jobsOf(await withinTime(getText('api/jobs')));
   } catch (error) {
     if (state.startHolds.get(key) === hold) {
       hold.failed = true;
@@ -8510,7 +8642,7 @@ function openStream() {
   state.source = source;
   source.addEventListener('open', () => setConnection('live', 'live'));
   source.addEventListener('jobs', (message) => {
-    state.jobs = JSON.parse(message.data).jobs;
+    state.jobs = jobsOf(message.data);
     state.jobsSeen += 1;
     // A start whose board read failed is settled by this one.
     for (const [ticket, hold] of state.startHolds) {
@@ -8733,7 +8865,7 @@ function init() {
 
 function load() {
   getText('api/jobs').then((text) => {
-    state.jobs = JSON.parse(text).jobs;
+    state.jobs = jobsOf(text);
     renderBoard();
     route();
     if (ui.job === null) {

@@ -9,10 +9,9 @@ import { test } from 'node:test';
 import { stopChild, trackChild } from './support/children.js';
 import { fetchRaw } from './support/dashboard-client.js';
 import { fakeLauncher } from './support/fake-launcher.js';
-import { CLI, type Env, newEnv, processEnv, runCli, temp } from './support/harness.js';
+import { CLI, dashboardUrlOf, type Env, newEnv, processEnv, runCli, temp } from './support/harness.js';
 
 const READY = /listening on (http:\/\/127\.0\.0\.1:\d+\/mcp)\/<token>$/m;
-const DASHBOARD = /dashboard (http:\/\/127\.0\.0\.1:\d+\/d\/[0-9a-f]{64}\/)/;
 // The fake tunnel needs sleep and the launcher only printf: a PATH with the system tools.
 const TOOLS = '/usr/bin:/bin';
 
@@ -43,14 +42,19 @@ async function spawnUp(env: Env, args: string[]): Promise<Up> {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
   };
+  let dashboard: URL | undefined;
   try {
     await until(() => READY.test(out), 'the listening line');
+    // SF-126: the output has /d/<token>/ and no token; the URL comes from dashboard-token.
+    assert.match(out, /dashboard http:\/\/127\.0\.0\.1:\d+\/d\/<token>\/ \(sf dashboard prints the full URL\)$/m);
+    dashboard = await dashboardUrlOf(env, out + err);
+    assert.ok(dashboard !== undefined);
   } catch (error) {
     await stopChild(child);
     throw error;
   }
   return {
-    child, out: () => out, err: () => err, dashboard: DASHBOARD.exec(out)![1]!, until,
+    child, out: () => out, err: () => err, dashboard: dashboard.href, until,
     stop: (signal = 'SIGINT') => new Promise((resolve) => {
       if (child.exitCode !== null) {
         resolve(child.exitCode);
@@ -135,7 +139,7 @@ test('sf up: a missing script, a script that fails its check and a launcher fail
     assert.match(failed.err(), /^tunnel \| sf-tunnel: FAIL: profile missing: \/x\/software-factory\.yaml \(run: init <tunnel_id>\)$/m);
     assert.match(failed.err(), /^tunnel \| exited \(1\); sf up goes on without it and the dashboard works\. Fix it and run npm run tunnel in another terminal \(docs\/runbooks\/chatgpt-connection\.md\)\.$/m);
     assert.equal(failed.err().split('tunnel | exited').length, 2);
-    assert.match(failed.err(), /^sf: xdg-open exited with 3; open the URL above by hand\.$/m);
+    assert.match(failed.err(), /^sf: xdg-open exited with 3; run sf dashboard for the URL and open it by hand\.$/m);
     assert.deepEqual(await launcher.calls(), [[failed.dashboard]]);
     assert.equal((await fetchRaw(new URL('api/jobs', failed.dashboard))).status, 200);
   } finally {

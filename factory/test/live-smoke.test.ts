@@ -131,6 +131,10 @@ test('a clean run: every step PASS, exit 0, the temp directory gone, the user\'s
   assert.match(ran.rows.get('Codex gate')!.detail, /clean, 1100 tokens/);
   assert.match(ran.rows.get('MR text')!.detail, /^feat\(SMOKE-1\): Add a second greeting line$/);
   assert.match(ran.rows.get('Approve')!.detail, new RegExp(`^${BRANCH} at [0-9a-f]{12} on origin\\.git$`));
+  // SF-126: sf serve prints the dashboard with <token>; the smoke builds the URL from the printed
+  // port and the token file of its state directory, so the Dashboard step reads every page with it.
+  assert.match(ran.rows.get('Setup')!.detail, /^sf serve ready, dashboard on port \d+$/);
+  assert.match(ran.rows.get('Dashboard')!.detail, /^7 answers: the page and 6 API$/);
   // The table: a header and one row per step.
   assert.match(ran.stdout, /\nSTEP +RESULT +SECONDS +DETAIL\n/);
   await onlyChecksDir(ran.tmp);

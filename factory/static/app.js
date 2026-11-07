@@ -4689,7 +4689,7 @@ const ui = {
 // The URL hash of the view: #<ws>/<ticket> (the Stream), #<ws>/<ticket>/changes, /mr, /ticket;
 // a new one is a new history entry, so Back and Forward move between them.
 function setHash() {
-  const h = ui.screen === 'board' ? '' : ui.screen === 'digest' ? (dg.id === null ? 'digest' : `digest/${dg.id}`) : ui.screen === 'ticket' ? `${ui.ticket}/ticket` : ui.screen === 'stream' ? ui.job : `${ui.job}/${ui.screen}`;
+  const h = ui.screen === 'board' ? '' : ui.screen === 'stats' ? 'stats' : ui.screen === 'digest' ? (dg.id === null ? 'digest' : `digest/${dg.id}`) : ui.screen === 'ticket' ? `${ui.ticket}/ticket` : ui.screen === 'stream' ? ui.job : `${ui.job}/${ui.screen}`;
   if (decodeURIComponent(location.hash.slice(1)) !== h) {
     history.pushState(null, '', `#${h}`);
   }
@@ -4747,6 +4747,7 @@ function go(key, screen = 'stream', focus = undefined, confirm = undefined) {
   $('ticket').hidden = true;
   $('digest').hidden = true;
   leaveDigest();
+  $('stats').hidden = true;
   $('job').hidden = false;
   state.wantConfirm = confirm === undefined ? null : { action: confirm, key };
   select(key);
@@ -4806,6 +4807,7 @@ function back() {
   $('ticket').hidden = true;
   $('digest').hidden = true;
   leaveDigest();
+  $('stats').hidden = true;
   $('board').hidden = false;
   renderBoard();
   setHash();
@@ -4823,6 +4825,13 @@ function route() {
     const id = digest[1] ?? null;
     if (ui.screen !== 'digest' || dg.id !== id) {
       openDigest(id);
+    }
+    return;
+  }
+  // The Stats page (SF-117).
+  if (decodeURIComponent(location.hash.slice(1)) === 'stats') {
+    if (ui.screen !== 'stats') {
+      openStats();
     }
     return;
   }
@@ -4877,7 +4886,7 @@ function renderJobs() {
 // listeners).
 function onClick(event) {
   const target = typeof event.target?.closest === 'function'
-    ? event.target.closest('[data-tk],[data-tkimg],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],[data-qforce],#limUp,#limDown,#rulesBtn,[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-homenu],[data-dismiss],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived,#open-digest')
+    ? event.target.closest('[data-tk],[data-tkimg],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],[data-qforce],#limUp,#limDown,#rulesBtn,[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-homenu],[data-dismiss],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived,#open-digest,#open-stats')
     : null;
   // An open ⋯ menu closes on any click but its own toggle (its items act, then it is closed).
   if (state.openMenu !== null && (target === null || target.dataset.menu === undefined)) {
@@ -4959,6 +4968,8 @@ function onClick(event) {
     openArchived();
   } else if (target.id === 'open-digest') {
     openDigest(null);
+  } else if (target.id === 'open-stats') {
+    openStats();
   } else if (target.hasAttribute('data-ws')) {
     // A workspace's chip again: back to all.
     state.filter = state.filter === target.dataset.ws ? '' : target.dataset.ws;
@@ -5513,6 +5524,7 @@ function openTicket(key) {
   $('board').hidden = true;
   $('digest').hidden = true;
   leaveDigest();
+  $('stats').hidden = true;
   $('ticket').hidden = false;
   renderTicket();
   setHash();
@@ -6483,6 +6495,7 @@ function openDigest(id) {
   $('board').hidden = true;
   $('job').hidden = true;
   $('ticket').hidden = true;
+  $('stats').hidden = true;
   $('digest').hidden = false;
   renderDigest();
   setHash();
@@ -6907,6 +6920,552 @@ async function copyDaily(daily) {
     dg.copied.set(daily.app, { ok: false, text: `Copy failed: ${error.message}` });
   }
   renderDigest();
+}
+
+// ---------- The Stats page (SF-117) ----------
+
+// The Stats page (#stats): the period (7, 30 or 90 days) and the workspace chosen (null: all), the
+// payload as last read, a read's error, the read under way, and the charts shown as tables. In page
+// memory only; read on open, on a change and on Refresh, never on a timer.
+const st = { days: 30, workspace: null, data: null, error: null, load: 0, tables: new Set() };
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const ST_ROLES = { implementer: 'Implementer', claude_review: 'Claude review', simplify: 'Simplification', codex_gate: 'Codex gate', task_check: 'Plan check', digest: 'Digest', explanation: 'Explanations' };
+const ST_COST_ROLES = ['implementer', 'claude_review', 'simplify', 'task_check', 'digest', 'explanation'];
+const ST_STAGES = { claude_review: 'Claude review', codex_gate: 'Codex gate', task_check: 'Plan check' };
+const ST_SEVERITIES = [{ key: 'blocker', name: 'Blocker' }, { key: 'major', name: 'Major' }, { key: 'nit', name: 'Nit' }];
+const ST_DAY_CHARTS = ['cost-day', 'tokens-day', 'started-day'];
+// The rules of the warnings (src/stats.ts), one plain sentence each.
+const ST_RULES = [
+  'A job costs more than twice the median of the last 30 finished jobs of its workspace, and at least $1 (with at least 5 such jobs).',
+  'A job takes more than twice the median iterations of those jobs, and at least 4.',
+  'A job uses more than twice the median Codex gate tokens of those jobs.',
+  'A finding of a job was reopened twice or more, or the job stopped with review churn or a disputed review.',
+  'The last 3 runs of a stage (Claude review, Codex gate, simplification, plan check, digest, explanation) all failed.',
+  'A day costs more than twice the median of the days with a cost among the 30 days before (with at least 7 such days), and at least $5.',
+];
+
+// The formats: $1.23 ($100 on without decimals, — for none), 950 / 1.5k / 340k / 2.1M, 45s / 12m / 3.2h / 1.5d.
+const stMoney = (value) => (typeof value !== 'number' ? '—' : value >= 100 ? `$${Math.round(value)}` : `$${value.toFixed(2)}`);
+function stTokens(value) {
+  if (value >= 999500) {
+    return `${(value / 1e6).toFixed(1)}M`;
+  }
+  if (value >= 9950) {
+    return `${Math.round(value / 1000)}k`;
+  }
+  return value >= 1000 ? `${(value / 1000).toFixed(1).replace(/\.0$/, '')}k` : String(Math.round(value));
+}
+function stDuration(seconds) {
+  if (typeof seconds !== 'number') {
+    return '—';
+  }
+  if (seconds < 60) {
+    return `${Math.round(seconds)}s`;
+  }
+  if (seconds < 3600) {
+    return `${Math.round(seconds / 60)}m`;
+  }
+  return seconds < 86400 ? `${(seconds / 3600).toFixed(1)}h` : `${(seconds / 86400).toFixed(1)}d`;
+}
+const stCount = (value) => (typeof value !== 'number' ? '—' : Number.isInteger(value) ? String(value) : value.toFixed(1));
+const stPercent = (part, whole) => `${Math.round((part / whole) * 100)}%`;
+function stTokenLine(tokens) {
+  if (tokens === null || tokens === undefined) {
+    return 'not recorded';
+  }
+  return 'cached_input' in tokens
+    ? `${stTokens(tokens.input)} in (${stTokens(tokens.cached_input)} cached) · ${stTokens(tokens.output)} out`
+    : `${stTokens(tokens.input)} in · ${stTokens(tokens.output)} out`;
+}
+const stFindings = (findings) => `${findings.blocker} / ${findings.major} / ${findings.nit}`;
+
+function openStats() {
+  if (ui.job !== null) {
+    leaveJob();
+  }
+  if (state.drawer !== null) {
+    hideDrawer();
+  }
+  ui.screen = 'stats';
+  ui.job = null;
+  ui.ticket = null;
+  ui.pending = false;
+  $('board').hidden = true;
+  $('job').hidden = true;
+  $('ticket').hidden = true;
+  $('digest').hidden = true;
+  leaveDigest();
+  $('stats').hidden = false;
+  renderStats();
+  setHash();
+  $('stats').querySelector('[data-back]')?.focus();
+  void loadStats();
+}
+
+// One read of the payload; its answer is applied only when it is the last read and the page is shown.
+async function loadStats() {
+  st.load += 1;
+  const load = st.load;
+  const path = `api/stats?days=${st.days}${st.workspace === null ? '' : `&workspace=${encodeURIComponent(st.workspace)}`}`;
+  try {
+    const data = await getJson(path);
+    if (load !== st.load || ui.screen !== 'stats') {
+      return;
+    }
+    st.data = data;
+    st.error = null;
+  } catch (error) {
+    if (load !== st.load || ui.screen !== 'stats') {
+      return;
+    }
+    st.error = error.message;
+  }
+  renderStats();
+}
+
+// An SVG element: its attributes (class too) only through setAttribute.
+function svgEl(tag, attributes = {}, text = undefined) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [name, value] of Object.entries(attributes)) {
+    node.setAttribute(name, String(value));
+  }
+  if (text !== undefined) {
+    node.textContent = text;
+  }
+  return node;
+}
+
+// The top of a chart's axis: the smallest of 1, 2, 2.5, 5, 10 × a power of ten at or above max.
+function stTop(max) {
+  if (!(max > 0)) {
+    return 1;
+  }
+  const power = 10 ** Math.floor(Math.log10(max));
+  return [1, 2, 2.5, 5, 10].map((step) => step * power).find((top) => top >= max) ?? 10 * power;
+}
+
+// The colour key above a stacked chart.
+function stLegend(series) {
+  const legend = el('div', 'st-legend');
+  for (const one of series) {
+    const item = el('span', 'st-key');
+    item.append(el('span', `st-swatch st-c-${one.key}`), document.createTextNode(one.name));
+    legend.append(item);
+  }
+  return legend;
+}
+
+function stScroll(table) {
+  const wrap = el('div', 'st-scroll');
+  wrap.append(table);
+  return wrap;
+}
+
+// A table of rows of cells (a text or a node).
+function stTable(head, rows) {
+  const table = el('table', 'st-table');
+  const thead = el('thead');
+  const top = el('tr');
+  for (const text of head) {
+    top.append(el('th', '', text));
+  }
+  thead.append(top);
+  const tbody = el('tbody');
+  for (const cells of rows) {
+    const row = el('tr');
+    for (const cell of cells) {
+      const td = el('td');
+      td.append(cell);
+      row.append(td);
+    }
+    tbody.append(row);
+  }
+  table.append(thead, tbody);
+  return stScroll(table);
+}
+
+// A chart's box, whatever the data: its title and its Table toggle, then the SVG, the same numbers
+// as a table, or the muted line when every value is 0 (the toggle then shows the table of zeros).
+function stChart(id, title, items, series, format, empty, draw) {
+  const box = el('div', 'st-chart');
+  box.dataset.chart = id;
+  const head = el('div', 'st-chart-head');
+  const tabled = st.tables.has(id);
+  const toggle = button('btn small', tabled ? 'Chart' : 'Table', { st: `table-${id}` });
+  toggle.setAttribute('aria-pressed', String(tabled));
+  toggle.addEventListener('click', () => {
+    if (st.tables.has(id)) {
+      st.tables.delete(id);
+    } else {
+      st.tables.add(id);
+    }
+    renderStats();
+  });
+  head.append(el('h4', '', title), toggle);
+  box.append(head);
+  if (tabled) {
+    const total = series.length > 1 ? ['Total'] : [];
+    box.append(stTable([ST_DAY_CHARTS.includes(id) ? 'Day' : 'Name', ...series.map((one) => one.name), ...total], items.map((item) => {
+      const values = series.map((one) => one.value(item));
+      return [item.label, ...values.map(format), ...(total.length === 0 ? [] : [format(values.reduce((sum, value) => sum + value, 0))])];
+    })));
+  } else if (items.every((item) => series.every((one) => one.value(item) === 0))) {
+    box.append(el('p', 'muted fs13 st-none', empty));
+  } else {
+    if (series.length > 1) {
+      box.append(stLegend(series));
+    }
+    box.append(draw());
+  }
+  return box;
+}
+
+// Columns over the days: a y axis with gridlines at 0, ¼, ½, ¾ and the top, one column per day with
+// its series stacked in order, at most 12 day labels.
+function stColumns(id, title, rows, series, format, empty) {
+  const items = rows.map((row) => ({ ...row, label: row.day }));
+  return stChart(id, title, items, series, format, empty, () => {
+    const svg = svgEl('svg', { viewBox: '0 0 720 220', width: '100%', role: 'img', 'aria-label': title, class: 'st-svg' });
+    const left = 60;
+    const right = 712;
+    const top = 10;
+    const bottom = 194;
+    const max = stTop(Math.max(0, ...items.map((item) => series.reduce((sum, one) => sum + one.value(item), 0))));
+    const y = (value) => bottom - (value / max) * (bottom - top);
+    for (const part of [0, 0.25, 0.5, 0.75, 1]) {
+      svg.append(svgEl('line', { x1: left, x2: right, y1: y(max * part), y2: y(max * part), class: 'st-grid' }));
+      svg.append(svgEl('text', { x: left - 6, y: y(max * part) + 4, 'text-anchor': 'end', class: 'st-axis' }, format(max * part)));
+    }
+    const slot = (right - left) / Math.max(1, items.length);
+    const width = Math.max(1, slot * 0.7);
+    const every = Math.ceil(items.length / 12);
+    items.forEach((item, index) => {
+      const x = left + index * slot + (slot - width) / 2;
+      let base = 0;
+      for (const one of series) {
+        const value = one.value(item);
+        if (value > 0) {
+          const rect = svgEl('rect', { x: x.toFixed(1), y: y(base + value).toFixed(1), width: width.toFixed(1), height: (y(base) - y(base + value)).toFixed(1), class: `st-c-${one.key}` });
+          rect.append(svgEl('title', {}, `${item.label} · ${one.name}: ${format(value)}`));
+          svg.append(rect);
+          base += value;
+        }
+      }
+      if (index % every === 0) {
+        svg.append(svgEl('text', { x: (x + width / 2).toFixed(1), y: 212, 'text-anchor': 'middle', class: 'st-axis' }, item.label.slice(5)));
+      }
+    });
+    return svg;
+  });
+}
+
+// One horizontal bar per item: its label left, its series stacked, its value right; 28 high each.
+function stBars(id, title, items, series, format, empty) {
+  return stChart(id, title, items, series, format, empty, () => {
+    const svg = svgEl('svg', { viewBox: `0 0 720 ${28 * Math.max(1, items.length)}`, width: '100%', role: 'img', 'aria-label': title, class: 'st-svg' });
+    const left = 150;
+    const span = 470;
+    const max = Math.max(0, ...items.map((item) => series.reduce((sum, one) => sum + one.value(item), 0))) || 1;
+    items.forEach((item, index) => {
+      const y = index * 28;
+      svg.append(svgEl('text', { x: 4, y: y + 18, class: 'st-axis st-label' }, item.label));
+      let base = 0;
+      for (const one of series) {
+        const value = one.value(item);
+        if (value > 0) {
+          const rect = svgEl('rect', { x: (left + (base / max) * span).toFixed(1), y: y + 6, width: Math.max(1, (value / max) * span).toFixed(1), height: 16, class: `st-c-${one.key}` });
+          rect.append(svgEl('title', {}, `${item.label} · ${one.name}: ${format(value)}`));
+          svg.append(rect);
+          base += value;
+        }
+      }
+      svg.append(svgEl('text', { x: 716, y: y + 18, 'text-anchor': 'end', class: 'st-axis' }, format(base)));
+    });
+    return svg;
+  });
+}
+
+function stSection(title, className = '') {
+  const section = el('section', className === '' ? 'st-sec' : `st-sec ${className}`);
+  section.append(el('h3', '', title));
+  return section;
+}
+
+function stTile(label, value, sub = undefined) {
+  const tile = el('div', 'st-tile');
+  tile.append(el('div', 'st-tile-label', label), el('div', 'st-tile-value', value));
+  if (sub !== undefined) {
+    tile.append(el('div', 'st-tile-sub', sub));
+  }
+  return tile;
+}
+
+function stTiles(...tiles) {
+  const grid = el('div', 'st-tiles');
+  grid.append(...tiles);
+  return grid;
+}
+
+// Where a warning or a case points: a job that is not archived, a planned ticket, a digest; null otherwise.
+function stHref(target) {
+  if (target === null || target === undefined) {
+    return null;
+  }
+  if (target.kind === 'job') {
+    return target.archived ? null : `#${jobPath(`${target.workspace}/${target.ticket}`)}`;
+  }
+  if (target.kind === 'ticket') {
+    return `#${jobPath(`${target.workspace}/${target.ticket}`)}/ticket`;
+  }
+  return target.kind === 'digest' ? `#digest/${encodeURIComponent(target.id)}` : null;
+}
+
+// text as a link to the target, or "(archived)" (after the ticket's name) without one.
+function stLink(target, text) {
+  const href = stHref(target);
+  if (href === null) {
+    return el('span', 'muted', text === 'Open' ? '(archived)' : `${text} (archived)`);
+  }
+  const link = el('a', 'st-link', text);
+  link.href = href;
+  return link;
+}
+
+function stWarnings(data) {
+  const section = stSection(`Warnings (${data.warnings.length})`, 'st-warnings');
+  if (data.warnings.length === 0) {
+    section.append(el('p', 'muted fs13', 'No warnings: nothing is far from the usual.'));
+  } else {
+    const list = el('ul', 'st-warn');
+    for (const warning of data.warnings) {
+      const item = el('li');
+      item.append(el('span', 'st-warn-text', warning.text));
+      if (warning.target !== null) {
+        item.append(stLink(warning.target, 'Open'));
+      }
+      list.append(item);
+    }
+    section.append(list);
+  }
+  const how = el('details', 'st-how');
+  how.append(el('summary', '', 'How warnings are found'));
+  const rules = el('ul', 'fs13');
+  for (const rule of ST_RULES) {
+    rules.append(el('li', '', rule));
+  }
+  how.append(rules);
+  section.append(how);
+  return section;
+}
+
+function stOpinionCard(title, opinion, note = undefined) {
+  const card = el('div', 'card2 st-opinion');
+  card.append(el('h4', '', title));
+  if (opinion.iterations === 0) {
+    card.append(el('p', 'muted fs13', 'No iteration in this period had both reviews.'));
+    return card;
+  }
+  card.append(el('p', 'st-big', `${opinion.caught} of ${opinion.iterations} iterations (${stPercent(opinion.caught, opinion.iterations)})`));
+  card.append(el('p', 'fs13', `${opinion.fixed} of its ${opinion.findings} findings were fixed`));
+  if (note !== undefined) {
+    card.append(el('p', 'muted fs13', note));
+  }
+  if (opinion.cases.length > 0) {
+    const list = el('ul', 'st-cases fs13');
+    for (const one of opinion.cases) {
+      const item = el('li');
+      item.append(stLink({ kind: 'job', workspace: one.workspace, ticket: one.ticket, archived: one.archived }, one.ticket),
+        el('span', 'muted', `iteration ${one.iteration} · ${one.findings} findings · ${one.fixed} fixed`));
+      list.append(item);
+    }
+    card.append(list);
+  }
+  return card;
+}
+
+function stSecondOpinion(data) {
+  const section = stSection('Does a second model pay?');
+  const pair = el('div', 'st-pair');
+  pair.append(
+    stOpinionCard('Codex found a blocker or major after Claude passed', data.second_opinion.codex_after_claude),
+    stOpinionCard('Claude found a new blocker or major right after a clean Codex gate', data.second_opinion.claude_after_codex,
+      'The next iteration is usually MR preparation or your own request, so a finding here can be about new work.'),
+  );
+  section.append(pair);
+  return section;
+}
+
+function stStages(data) {
+  const section = stSection('Review stages');
+  const items = data.stages.map((row) => ({ ...row, label: ST_STAGES[row.stage] ?? row.stage }));
+  const charts = el('div', 'st-charts');
+  charts.append(stBars('findings', 'Findings per stage', items, ST_SEVERITIES.map((one) => ({ ...one, value: (row) => row.findings[one.key] })), String, 'No findings in this period.'));
+  section.append(charts, stTable(['Stage', 'Runs', 'Failed', 'Blocker', 'Major', 'Nit', 'Led to a fix', 'Cost', 'Tokens', 'Cost per run'], items.map((row) => [
+    row.label, String(row.runs), String(row.failed), String(row.findings.blocker), String(row.findings.major), String(row.findings.nit),
+    row.stage === 'task_check' ? `${row.fixed} (Task revised)` : String(row.fixed), stMoney(row.cost_usd), stTokenLine(row.tokens),
+    row.cost_usd === null || row.runs === 0 ? '—' : stMoney(row.cost_usd / row.runs),
+  ])));
+  return section;
+}
+
+function stSpend(data) {
+  const section = stSection('Spend');
+  const codex = data.totals.codex_tokens;
+  section.append(stTiles(
+    stTile('Cost', stMoney(data.totals.cost_usd), 'Codex gate in tokens only'),
+    stTile('Codex gate tokens', stTokens(codex.input + codex.output), `${stTokens(codex.input)} in (${stTokens(codex.cached_input)} cached) · ${stTokens(codex.output)} out`),
+  ));
+  const charts = el('div', 'st-charts');
+  charts.append(
+    stColumns('cost-day', 'Cost per day', data.days_rows, ST_COST_ROLES.map((key) => ({ key, name: ST_ROLES[key], value: (row) => row.cost[key] })), stMoney, 'No cost in this period.'),
+    stColumns('tokens-day', 'Codex gate tokens per day', data.days_rows, [
+      { key: 'codex_gate', name: 'Input', value: (row) => row.codex_tokens.input },
+      { key: 'codex_out', name: 'Output', value: (row) => row.codex_tokens.output },
+    ], stTokens, 'No Codex gate run in this period.'),
+  );
+  section.append(charts, el('h4', 'st-sub', 'By role'), stTable(['Role', 'Cost', 'Tokens', 'Runs'], data.roles.map((row) => [
+    ST_ROLES[row.role] ?? row.role, row.cost_usd === null ? 'tokens only' : row.complete ? stMoney(row.cost_usd) : `at least ${stMoney(row.cost_usd)}`,
+    stTokenLine(row.tokens), String(row.runs),
+  ])));
+  const roles = ST_COST_ROLES.filter((key) => key !== 'digest');
+  const items = data.by_workspace.map((row) => ({ ...row, label: row.workspace }));
+  const byWorkspace = el('div', 'st-charts');
+  byWorkspace.append(stBars('by-workspace', 'Cost by workspace', items, roles.map((key) => ({ key, name: ST_ROLES[key], value: (row) => row.cost[key] })), stMoney, 'No cost in this period.'));
+  section.append(el('h4', 'st-sub', 'By workspace'), byWorkspace, stTable(['Workspace', ...roles.map((key) => ST_ROLES[key]), 'Total', 'Codex tokens', 'Jobs started', 'Median time to ready'], data.by_workspace.map((row) => [
+    row.workspace, ...roles.map((key) => stMoney(row.cost[key])), stMoney(row.total_usd), stTokens(row.codex_tokens), String(row.jobs_started), stDuration(row.median_time_to_ready_s),
+  ])));
+  return section;
+}
+
+function stLoad(data) {
+  const section = stSection('Load');
+  const done = data.totals.jobs_finished;
+  section.append(stTiles(
+    stTile('Jobs started', String(data.totals.jobs_started)),
+    stTile('Finished', String(done.total), `pushed ${done.pushed} · aborted ${done.aborted} · failed ${done.failed}`),
+    stTile('Time to ready', stDuration(data.totals.median_time_to_ready_s), 'median'),
+    stTile('Iterations', stCount(data.totals.median_iterations), 'median of pushed jobs'),
+  ));
+  const charts = el('div', 'st-charts');
+  charts.append(stColumns('started-day', 'Jobs started per day', data.days_rows, [{ key: 'started', name: 'Jobs started', value: (row) => row.started }], stCount, 'No job started in this period.'));
+  section.append(charts);
+  return section;
+}
+
+function stJobs(data) {
+  const section = stSection(`Jobs (${data.jobs.length})`);
+  if (data.jobs.length === 0) {
+    section.append(el('p', 'muted fs13', 'No job in this period.'));
+    return section;
+  }
+  section.append(stTable(['Workspace', 'Ticket', 'Title', 'State', 'Started', 'Iterations', 'Cost', 'Codex tokens', 'Claude B/M/N', 'Codex B/M/N', 'Time to ready'], data.jobs.map((row) => [
+    row.workspace, stLink({ kind: 'job', workspace: row.workspace, ticket: row.ticket, archived: row.archived }, row.ticket), row.title ?? '', row.state.replace(/_/g, ' '),
+    localTime(row.created_at).slice(0, 16), String(row.iterations), row.cost_complete ? stMoney(row.cost_usd) : `at least ${stMoney(row.cost_usd)}`, stTokens(row.codex_tokens),
+    stFindings(row.claude), stFindings(row.codex), stDuration(row.time_to_ready_s),
+  ])));
+  return section;
+}
+
+function stNotes(data) {
+  const { notes } = data;
+  const lines = [
+    ...(notes.truncated > 0 ? [`Only the newest 1000 jobs are counted; ${notes.truncated} older ones are left out.`] : []),
+    ...(notes.unreadable > 0 ? [`${notes.unreadable} files could not be read and are left out.`] : []),
+    ...(notes.events_skipped > 0 ? [`${notes.events_skipped} event logs are too large to read; their tokens and time to ready are missing.`] : []),
+    ...(notes.digest_excluded ? ['Digests have no workspace and are not counted here.'] : []),
+  ];
+  if (lines.length === 0) {
+    return [];
+  }
+  const section = stSection('Notes', 'st-notes');
+  for (const line of lines) {
+    section.append(el('p', 'muted fs13', line));
+  }
+  return [section];
+}
+
+function renderStats() {
+  if (ui.screen !== 'stats') {
+    return;
+  }
+  const page = $('stats');
+  const data = st.data;
+  const backButton = button('btn back', '← Board ', { back: '', st: 'back' });
+  backButton.append(el('span', 'kbd', 'Esc'));
+  backButton.setAttribute('title', 'Back to the board (Esc)');
+  const t1 = el('div', 't1');
+  t1.append(el('span', 'title', 'Stats'));
+  const period = el('span', 'seg2');
+  period.setAttribute('role', 'group');
+  period.setAttribute('aria-label', 'Period');
+  for (const days of [7, 30, 90]) {
+    const node = button(st.days === days ? 'on' : '', `${days} days`, { st: `days-${days}` });
+    node.setAttribute('aria-pressed', String(st.days === days));
+    node.addEventListener('click', () => {
+      if (st.days !== days) {
+        st.days = days;
+        renderStats();
+        void loadStats();
+      }
+    });
+    period.append(node);
+  }
+  const pick = el('select', 'dg-pick');
+  pick.setAttribute('aria-label', 'Workspace');
+  pick.dataset.st = 'workspace';
+  const names = [...new Set([...(data?.workspaces ?? []), ...(st.workspace === null ? [] : [st.workspace])])];
+  for (const [value, text] of [['', 'All workspaces'], ...names.map((name) => [name, name])]) {
+    const option = el('option', '', text);
+    option.value = value;
+    pick.append(option);
+  }
+  pick.value = st.workspace ?? '';
+  pick.addEventListener('change', () => {
+    st.workspace = pick.value === '' ? null : pick.value;
+    renderStats();
+    void loadStats();
+  });
+  const refresh = button('btn', 'Refresh', { st: 'refresh' });
+  refresh.addEventListener('click', () => void loadStats());
+  const tools = el('div', 'tools');
+  tools.append(period, pick, refresh);
+  const t2 = el('div', 't2');
+  if (data !== null) {
+    t2.append(el('span', '', `${data.period.from} to ${data.period.to} · as of ${localTime(data.generated_at).slice(11, 16)}`));
+  }
+  const head = el('header', 'jhead');
+  head.append(backButton, t1, tools, t2);
+  const body = el('div', 'st-body');
+  if (st.error !== null) {
+    const card = el('div', 'card2');
+    const retry = button('btn', 'Retry', { st: 'retry' });
+    retry.addEventListener('click', () => void loadStats());
+    card.append(el('p', 'err-text fs13', `The stats could not be read (${st.error}).`), retry);
+    body.append(card);
+  } else if (data === null) {
+    body.append(el('p', 'muted fs13', 'Loading the stats…'));
+  } else if (data.workspaces.length === 0 && data.roles.every((row) => row.runs === 0)) {
+    const card = el('div', 'card2');
+    card.append(el('p', 'fs13', 'No jobs yet. The stats fill in once the factory has run a job.'));
+    body.append(card);
+  } else {
+    const now = stSection('Now');
+    now.append(stTiles(
+      stTile('Running', String(data.now.running)), stTile('Waiting for you', String(data.now.waiting_for_you)),
+      stTile('Paused', String(data.now.paused)), stTile('Queued', data.now.queued === null ? '—' : String(data.now.queued)),
+    ));
+    body.append(stWarnings(data), now, stSecondOpinion(data), stStages(data), stSpend(data), stLoad(data), stJobs(data), ...stNotes(data));
+  }
+  // The focus stays on the control it was on; the scroll where it was.
+  const focused = page.contains(document.activeElement) ? document.activeElement?.dataset?.st : undefined;
+  const scroll = page.querySelector('.form2')?.scrollTop ?? 0;
+  const wrap = el('div', 'form2');
+  wrap.append(body);
+  page.replaceChildren(head, wrap);
+  wrap.scrollTop = scroll;
+  if (focused !== undefined) {
+    [...page.querySelectorAll('[data-st]')].find((node) => node.dataset.st === focused)?.focus();
+  }
 }
 
 // ---------- The drawer: Workspaces, New ticket, Archived and an archived ticket's Task ----------

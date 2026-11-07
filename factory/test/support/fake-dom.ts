@@ -3,9 +3,9 @@
 // the properties the script uses (parentNode, closest, matches, dataset, classList,
 // style.setProperty, querySelector and querySelectorAll with tag, id, class and attribute
 // selectors), events that bubble to the document (so the page's delegated listeners get them),
-// document.visibilityState, a scripted fetch (a Blob body sent or answered too), a scripted
-// EventSource, timers that fire only when the test says so and, when the test gives one, a
-// clipboard; for a ticket's images (SF-064) Node's Blob and File (with arrayBuffer), paste and drop
+// document.visibilityState, document.createElementNS (the Stats page's SVG, SF-117), a scripted
+// fetch (a Blob body sent or answered too), a scripted EventSource, timers that fire only when
+// the test says so and, when the test gives one, a clipboard; for a ticket's images (SF-064) Node's Blob and File (with arrayBuffer), paste and drop
 // events with clipboardData / dataTransfer files (the test's dispatch gives them), URL.createObjectURL,
 // ClipboardItem, createImageBitmap and a canvas whose toBlob gives a PNG. It is not a browser: layout, focus order,
 // CSS and default actions (Enter in a textarea, a form's own submission) are out of its reach; the
@@ -68,6 +68,8 @@ function fire(listeners: Map<string, Listener[]>, event: FakeEvent & { stoppedNo
 export class FakeElement {
   readonly nodeType = 1;
   readonly tagName: string;
+  // An HTML element's; createElementNS (SF-117's SVG charts) sets another.
+  namespaceURI: string | null = 'http://www.w3.org/1999/xhtml';
   id = '';
   className = '';
   hidden = false;
@@ -535,6 +537,13 @@ export class FakeDocument {
 
   createElement(tagName: string): FakeElement {
     return new FakeElement(this, tagName);
+  }
+
+  // An element of a namespace (the SVG charts of SF-117): a FakeElement with namespaceURI set.
+  createElementNS(namespace: string, tagName: string): FakeElement {
+    const element = new FakeElement(this, tagName);
+    element.namespaceURI = namespace;
+    return element;
   }
 
   createTextNode(text: string): FakeText {

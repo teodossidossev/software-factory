@@ -361,7 +361,8 @@ export function childEnv(env: NodeJS.ProcessEnv, paths: SmokePaths, probe?: Smok
     ...child,
     SF_STATE_DIR: paths.state, SF_CONFIG_DIR: paths.config, SF_WORKTREE_ROOT: paths.worktrees,
     SF_PORT: '0', SF_DASHBOARD_PORT: '0', SF_HANDOFF: 'off', SF_SIMPLIFY: 'off', SF_DESKTOP_NOTIFY: 'off',
-    SF_REVIEW: 'on', SF_DASHBOARD: 'on', SF_ENV_FILE: paths.envFile,
+    // The smoke's scenario is the Claude review, then the gate (SF-131): on for every ticket.
+    SF_REVIEW: 'on', SF_CLAUDE_REVIEW: 'always', SF_DASHBOARD: 'on', SF_ENV_FILE: paths.envFile,
     SF_MODEL: model, SF_REVIEW_MODEL: model,
     ...(env.SF_SMOKE_CODEX_MODEL ? { SF_CODEX_MODEL: env.SF_SMOKE_CODEX_MODEL } : {}),
     SF_MAX_TURNS: '40', SF_REVIEW_MAX_TURNS: '30', SF_TASK_CHECK_MAX_TURNS: '30', SF_MAX_ITERATIONS: String(MAX_ITERATIONS),

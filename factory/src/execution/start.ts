@@ -6,7 +6,8 @@ import { dirname, join } from 'node:path';
 import { jobAttachment, type ResolvedImage, resolveTaskImages, writeImages } from '../attachments.js';
 import { FactoryError } from '../errors.js';
 import { runGit } from '../git.js';
-import { checkTransition, type Job, type JobState, now, RESTARTABLE_STATES, TERMINAL_STATES } from '../jobs.js';
+import { claudeReviewDecision } from '../config.js';
+import { checkTransition, claudeReviews, type Job, type JobState, now, RESTARTABLE_STATES, TERMINAL_STATES } from '../jobs.js';
 import { resolveTarget } from '../mr.js';
 import { changedPaths } from '../patch.js';
 import { removeSandboxPlaceholders } from '../placeholders.js';
@@ -16,7 +17,7 @@ import { collectRules, writeJobRules } from '../rules-docs.js';
 import { actedVerdict } from '../review.js';
 import { QueueStore, runningJobs } from '../queue.js';
 import { Runners } from '../runner.js';
-import { isDraft, parseFrontMatter, readTask, TASK_DIR, taskSha256, TICKET_DESCRIPTION, TICKET_PATTERN } from '../task-file.js';
+import { isDraft, parseFrontMatter, readTask, TASK_DIR, type TaskReview, taskReview, taskSha256, TICKET_DESCRIPTION, TICKET_PATTERN } from '../task-file.js';
 import { addWorktree, deleteBranch, removeWorktree } from '../worktree.js';
 import { branchName, checkNotInCheckout, exists, firstPrompt, withoutDropped } from './shared.js';
 import type { Core } from './core.js';
@@ -167,10 +168,18 @@ export class StartPart {
 
   // A job awaiting review that has something to resume: its last iteration has no review (with the
   // review on), or one acted on as clean (SF-051: a fix with nits only is) and no gate.json, or a
-  // clean gate.json too and a simplification pass that never applied (SF-055).
+  // clean gate.json too and a simplification pass that never applied (SF-055). With the Claude
+  // review off (SF-131) the gate is the review: no gate.json (with the review on), or a clean one.
   async resumable(job: Job): Promise<boolean> {
     if (job.state !== 'awaiting_review' || job.iteration === 0) {
       return false;
+    }
+    if (!claudeReviews(job)) {
+      const gate = await this.core.jobs.readGate(job.workspace, job.ticket, job.iteration);
+      if (gate === undefined) {
+        return this.core.config.review;
+      }
+      return 'verdict' in gate && actedVerdict(withoutDropped(gate)) === 'clean';
     }
     const review = await this.core.jobs.readReview(job.workspace, job.ticket, job.iteration);
     if (review === undefined) {
@@ -218,13 +227,13 @@ export class StartPart {
 
   // The base and the branch of a job from the ticket's Task file, which must not be a draft, and the
   // Task text they were read from.
-  async #plan(workspace: Workspace, ticket: string): Promise<{ base: string; branch: string; content: string }> {
+  async #plan(workspace: Workspace, ticket: string): Promise<{ base: string; branch: string; content: string; review: TaskReview | undefined }> {
     const content = await readTask(workspace, ticket);
     if (isDraft(content)) {
       throw new FactoryError('task_draft', `${TASK_DIR}/${ticket}.md is still the skeleton: the Context owner writes the Task with write_task first, then the user starts the job.`);
     }
     const fields = parseFrontMatter(content)!;
-    return { base: fields.get('base')!, branch: branchName(ticket, fields.get('title')!), content };
+    return { base: fields.get('base')!, branch: branchName(ticket, fields.get('title')!), content, review: taskReview(fields) };
   }
 
   // The run queue's limit (SF-071): the running jobs of every workspace (RUNNING_STATES), the
@@ -259,17 +268,21 @@ export class StartPart {
 
   // Writes the record of a new job in starting (the ticket's directory must be free). Only under
   // the lock.
-  async #claim(workspace: Workspace, ticket: string, plan: { base: string; branch: string }, images: ResolvedImage[]): Promise<Claimed> {
+  // The job's Claude review is decided here, once (SF-131): claude_review and its review_setup event.
+  async #claim(workspace: Workspace, ticket: string, plan: { base: string; branch: string; review: TaskReview | undefined }, images: ResolvedImage[]): Promise<Claimed> {
     const { base, branch } = plan;
     const created = now();
     const worktree = this.core.parts.handover.worktreePath(workspace.name, ticket);
+    const setup = claudeReviewDecision(this.core.config, plan.review);
     const job: Job = {
       workspace: workspace.name, ticket, branch, base, base_commit: null, state: 'starting', worktree, prepared_commit: null,
       iteration: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, mr_conflict_turn: false, created_at: created, updated_at: created,
+      claude_review: setup.claude_review,
     };
     checkTransition(null, 'starting', 'create');
     await this.core.jobs.write(job);
     await this.core.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, state: { from: null, to: 'starting' } });
+    await this.core.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, type: 'review_setup', ...setup });
     return { workspace, ticket, base, branch, worktree, images };
   }
 

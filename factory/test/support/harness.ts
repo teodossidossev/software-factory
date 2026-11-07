@@ -90,6 +90,10 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
     SF_REVIEW: 'off',
     // No gate unless the test turns it on (test/gate.test.ts).
     SF_GATE: 'off',
+    // The Claude review on every ticket and five Fix sections (SF-131), so the tests keep the flow
+    // of before; test/review-setting-flow.test.ts sets ticket.
+    SF_CLAUDE_REVIEW: 'always',
+    SF_MAX_ITERATIONS: '5',
     // No simplification pass unless the test turns it on (test/simplify.test.ts).
     SF_SIMPLIFY: 'off',
     // No hand-over to the checkout unless the test turns it on (test/handoff.test.ts, SF-073).

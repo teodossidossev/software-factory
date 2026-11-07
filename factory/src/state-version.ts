@@ -12,7 +12,7 @@ import { FactoryError } from './errors.js';
 
 export const STATE_VERSION_FILE = 'state-version';
 // The format this release reads and writes.
-export const STATE_VERSION = 1;
+export const STATE_VERSION = 2;
 
 // One step of the format: the state written at version from becomes the state of version from + 1.
 export interface Migration {
@@ -20,8 +20,12 @@ export interface Migration {
   run(stateDir: string): Promise<void>;
 }
 
-// The migrations, one per step; none exist yet.
-export const MIGRATIONS: readonly Migration[] = [];
+// The migrations, one per step.
+export const MIGRATIONS: readonly Migration[] = [
+  // 1 → 2 (SF-131): job.json may hold claude_review, which an older factory's strict schema refuses.
+  // A job without it counts as true (claudeReviews), so nothing is rewritten.
+  { from: 1, run: async () => undefined },
+];
 
 export interface StateVersionOptions {
   current?: number;

@@ -12,8 +12,9 @@ import { chooseForge, type Forge, type ForgeKind, forgeFor, type MergeRequestSta
 import { runGit } from '../git.js';
 import { checkTerms, commitsToCheck, GUARD_MAX_FIXES, GUARD_MAX_MR_TURNS, guardFixContent, guardFixCount, guardMessage, type GuardHit, type GuardTerm, maskedMrTextFailure, maskedMrTextProblem, maskTerms, MAX_GUARD_MESSAGE, redactAdded, scanBranch, scanChange, scanCommits, scanMrText, worktreeTree } from '../guard.js';
 import { checkBranchFree, isAncestor, savedRef, settleAfterPush, subjectOf } from '../handoff.js';
-import { type Job, type JobMr, type JobState, now } from '../jobs.js';
-import { abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitFailure, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl, parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, validBranchName, withFindings, withNits, withSimplifications, worktreesOn } from '../mr.js';
+import { claudeReviews, type Job, type JobMr, type JobState, now } from '../jobs.js';
+import { abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitFailure, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl, parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, validBranchName, withAccepted, withFindings, withNits, withSimplifications, worktreesOn } from '../mr.js';
+import { type LedgerEntry, notFixed } from '../ledger.js';
 import { buildPatch, notificationLine } from '../patch.js';
 import { conflictPrompt, mrPrompt } from '../prompts.js';
 import { COMMIT_TYPES, DENIED_TOOLS, MANUAL_CLAIM, MAX_HEADER_CHARS, MR_REQUIRED_HEADINGS } from '../rules.js';
@@ -119,7 +120,8 @@ export class MrPart {
       // And the suggestions of the simplification pass the user skipped (SF-055).
       const skipped = await this.core.parts.reviews.skippedSimplifications(job);
       const withSkipped = skipped === undefined ? withNitsText : withSimplifications(withNitsText, skipped.suggestions, skipped.iteration);
-      const composed = withFindings(withSkipped, await this.core.jobs.readLedger(job.workspace, job.ticket));
+      const ledger = await this.core.jobs.readLedger(job.workspace, job.ticket);
+      const composed = await this.#withAccepted(withFindings(withSkipped, ledger), job, ledger);
       // The guard (SF-122): the lines the factory added lose every term; the Implementer's own
       // lines are its to reword.
       const factoryText = redactAdded(composed, written.text, terms);
@@ -188,11 +190,29 @@ export class MrPart {
     return editedText(factory, text) ? text : undefined;
   }
 
+  // The MR text with the user's Accept over a stop of the iteration (SF-131), for a job without the
+  // Claude review and at the Fix round limit: its gate override's code and what went unapplied, the
+  // ledger entries the text already lists as not fixed aside (withFindings); with the Claude review
+  // off, after gate_failed or gate_budget, the note that no reviewer passed the iteration. The text
+  // as it is without such an override (an Accept over the gate of a job with the Claude review
+  // leaves the MR text as before).
+  async #withAccepted(text: string, job: Job, ledger: LedgerEntry[]): Promise<string> {
+    const override = await this.core.jobs.readGateOverride(job.workspace, job.ticket, job.iteration);
+    if (override === undefined || (claudeReviews(job) && override.code !== 'iteration_limit')) {
+      return text;
+    }
+    const listed = new Set(notFixed(ledger).map((entry) => entry.id));
+    const unapplied = typeof override.unapplied === 'string' ? override.unapplied : override.unapplied.filter((item) => item.id === undefined || !listed.has(item.id));
+    const noReviewer = !claudeReviews(job) && (override.code === 'gate_failed' || override.code === 'gate_budget');
+    return withAccepted(text, { code: override.code, unapplied }, job.iteration, noReviewer);
+  }
+
   // The nits of the job's last iteration (SF-051): those of its Claude review and of its gate,
-  // deduplicated by path and problem; the iteration that reaches Clean leaves them unapplied.
+  // deduplicated by path and problem; the iteration that reaches Clean leaves them unapplied. Without
+  // the Claude review (SF-131) the gate's alone.
   async #nitsAtClean(job: Job): Promise<ReviewItem[]> {
     const { workspace, ticket, iteration } = job;
-    const records = [await this.core.jobs.readReview(workspace, ticket, iteration), await this.core.jobs.readGate(workspace, ticket, iteration)];
+    const records = [claudeReviews(job) ? await this.core.jobs.readReview(workspace, ticket, iteration) : undefined, await this.core.jobs.readGate(workspace, ticket, iteration)];
     return uniqueNits(records.flatMap((record) => (record !== undefined && 'items' in record ? [record] : [])));
   }
 
@@ -232,7 +252,7 @@ export class MrPart {
     ].join('\n');
     const { job: published, changes } = await this.core.parts.turns.publish(rebased, live, outcome, await buildPatch(cwd, targetCommit), [note]);
     // from: preparing_mr (mrIdle, from #idle)
-    this.core.parts.reviews.startReview(await this.core.transition(published, 'awaiting_review', 'mr_turn_end', undefined, [notificationLine(changes)]));
+    await this.core.parts.reviews.startReview(await this.core.transition(published, 'awaiting_review', 'mr_turn_end', undefined, [notificationLine(changes)]));
   }
 
   // The branch holds the one commit on top of the target. With hand-over on (SF-073; the
@@ -327,7 +347,9 @@ export class MrPart {
 
   // The Retry in the runner: MR preparation with the paths the clean path accepted. Those of the
   // last iteration's Claude review, and of its gate when the gate's verdict was clean (as #pickUp
-  // builds them); after a gate override, the review's alone (as acceptGate passes them).
+  // builds them); after a gate override, the review's alone (as acceptGate passes them), whatever
+  // its verdict. Without the Claude review (SF-131) the last gate.json's: a clean one, or any after
+  // an override.
   retryMrInRunner(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; branch: string }> {
     return this.core.locked(async () => {
       const job = await this.core.job(workspaceName, ticket);
@@ -335,15 +357,24 @@ export class MrPart {
       if (!(await exists(job.worktree!))) {
         throw new FactoryError('invalid_state', `sf retry needs the job's worktree; the job is ${job.state} (${job.error!.code}) and its worktree ${job.worktree} is missing.`);
       }
-      const review = job.iteration > 0 ? await this.core.jobs.readReview(workspaceName, ticket, job.iteration) : undefined;
-      if (review === undefined || !('verdict' in review) || actedVerdict(withoutDropped(review)) !== 'clean') {
-        throw new FactoryError('invalid_state', `sf retry needs a clean Claude review of the last iteration (${job.iteration}); tell the Implementer to go on.`);
-      }
-      const gate = await this.core.jobs.readGate(workspaceName, ticket, job.iteration);
+      const gate = job.iteration > 0 ? await this.core.jobs.readGate(workspaceName, ticket, job.iteration) : undefined;
       const overridden = (await this.core.jobs.readGateOverride(workspaceName, ticket, job.iteration)) !== undefined;
-      const gateAccepted = !overridden && gate !== undefined && 'verdict' in gate && actedVerdict(withoutDropped(gate)) === 'clean' ? gate.accepted_sensitive : [];
+      const gateClean = gate !== undefined && 'verdict' in gate && actedVerdict(withoutDropped(gate)) === 'clean';
+      let accepted: string[];
+      if (claudeReviews(job)) {
+        const review = job.iteration > 0 ? await this.core.jobs.readReview(workspaceName, ticket, job.iteration) : undefined;
+        if (review === undefined || !('verdict' in review) || (!overridden && actedVerdict(withoutDropped(review)) !== 'clean')) {
+          throw new FactoryError('invalid_state', `sf retry needs a clean Claude review of the last iteration (${job.iteration}); tell the Implementer to go on.`);
+        }
+        accepted = [...new Set([...review.accepted_sensitive, ...(!overridden && gateClean ? gate.accepted_sensitive : [])])];
+      } else {
+        if (!overridden && !gateClean) {
+          throw new FactoryError('invalid_state', `sf retry needs a clean gate verdict of the last iteration (${job.iteration}); tell the Implementer to go on.`);
+        }
+        accepted = gate !== undefined && 'verdict' in gate ? gate.accepted_sensitive : [];
+      }
       try {
-        return await this.prepareMr(job, [...new Set([...review.accepted_sensitive, ...gateAccepted])], { retry: true });
+        return await this.prepareMr(job, accepted, { retry: true });
       } catch (error) {
         // A transient failure again (the fetch) stops the job again with its code, so it can be
         // retried once more; any other refusal leaves the job as it was.

@@ -49,12 +49,19 @@ export const GATE_SCHEMA = strictSchema(REVIEW_SCHEMA) as Record<string, unknown
 export interface GateInput extends ReviewInput {
   // The commit the Patch is against: Codex runs git diff against it.
   baseCommit: string;
+  // The gate is the job's only reviewer (SF-131: its Claude review is off).
+  onlyReviewer?: boolean;
 }
+
+// The gate's role in the prompt: the only reviewer of a job without the Claude review (SF-131), else
+// the second after a clean Claude review.
+export const ONLY_REVIEWER_LINE = 'You are the only reviewer of this iteration, and your verdict decides.';
 
 // The prompt of the gate: the SF-038 review prompt, adapted to Codex in a read-only worktree.
 export function gatePrompt(input: GateInput): string {
+  const role = input.onlyReviewer === true ? ONLY_REVIEWER_LINE : 'You are the second and deciding reviewer: a Claude review found this iteration clean, and your verdict decides.';
   return [
-    `Code review of iteration ${input.iteration} of ticket ${input.ticket}. You are the second and deciding reviewer: a Claude review found this iteration clean, and your verdict decides. You review; you change nothing.`,
+    `Code review of iteration ${input.iteration} of ticket ${input.ticket}. ${role} You review; you change nothing.`,
     `The current directory is the job's worktree: it holds the change of this iteration, not committed, against the base commit ${input.baseCommit}.`,
     `You work read-only. You may run read-only commands in the worktree: \`git diff ${input.baseCommit}\`, \`git status\`, \`rg\`, reading files. Do not leave the worktree. Do not read credentials: \`.env*\` files, keys, \`~/.ssh\`, \`~/.config\`.`,
     'Answer with JSON matching the output schema: verdict, summary, items and accepted_sensitive.',

@@ -8,7 +8,7 @@ import { after, before, test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
 import { JobStore } from '../src/jobs.js';
 import type { Workspace } from '../src/registry.js';
-import { appendFix, checkNeed, checkTaskContent, landsAfter, MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskScope, taskSha256, writeTask } from '../src/task-file.js';
+import { appendFix, checkNeed, checkTaskContent, landsAfter, MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskReview, taskScope, taskSha256, writeTask } from '../src/task-file.js';
 
 const VALID = '---\nticket: PROJ-1\ntitle: Export as CSV\nbase: master\n---\n\n# PROJ-1: Export as CSV\n';
 
@@ -126,6 +126,15 @@ test('taskScope reads scope: in the forms of may_touch; no field or an empty lis
   // Parsed next to may_touch, independently.
   const both = fields('may_touch: [package.json]\nscope: [src/**]');
   assert.deepEqual([mayTouch(both), taskScope(both)], [['package.json'], ['src/**']]);
+});
+
+test('taskReview (SF-131) reads review: claude or codex, quoted or with a comment too; any other value or no key is undefined', () => {
+  const fields = (text: string) => parseFrontMatter(`---\nticket: T-1\ntitle: t\nbase: main\n${text}\n---\n`)!;
+  assert.equal(taskReview(fields('review: claude')), 'claude');
+  assert.equal(taskReview(fields('review: "codex"  # the gate alone')), 'codex');
+  for (const other of ['review: Claude', 'review: both', 'review:', 'scope: [a]']) {
+    assert.equal(taskReview(fields(other)), undefined, other);
+  }
 });
 
 test('landsAfter (SF-084) reads lands_after: in the list forms of may_touch; a ticket of another workspace is <workspace>/<ticket>', () => {

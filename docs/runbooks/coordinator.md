@@ -42,6 +42,13 @@ rule changes, change it here, through a pull request like any other change.
   `lands_after` ticket of another workspace, at most 1,200 words) starts without a plan check;
   every other one is checked by itself after its write, and you fix what the check finds before
   Start. Check on the board or `sf check-task <ws> <ticket>` runs one in any case.
+- **Reviewers (experiment from the merge of SF-131, two weeks).** The Codex gate is the main
+  reviewer; the Claude review runs only on tickets with `review: claude` in the front matter
+  (`SF_CLAUDE_REVIEW=ticket`), and fix rounds are capped at 3 (`SF_MAX_ITERATIONS`). Give
+  `review: claude` to risky tickets: authentication, the sandbox, the state format, and the product
+  tickets the user names. At the cap, Accept takes the iteration with its open findings listed in
+  the MR text. After the two weeks, compare cost and findings with the user (SF-132's Stats) and
+  decide whether it stays.
 - **Placeholders.** No company or person names in this repository's Task files, MR texts and
   commits. Use placeholders: `product-frontend` for a repository, `ABC-n` for a ticket, "the user"
   for a person.

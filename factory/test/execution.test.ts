@@ -838,3 +838,51 @@ test('images (SF-065): Start refuses an unusable image; the job copies the refer
     await stop(served);
   }
 });
+
+test('the Fix round limit by default (SF-131): the fourth Fix is refused; its items are open ledger entries with ids; Accept after Claude\'s fix verdict prepares the MR with the open entries alone unapplied and listed, never a fix the user decided or a disputed contest', async () => {
+  // SF_MAX_ITERATIONS empty: the default, 3 Fix sections.
+  const env = await newEnv('limit-default', { SF_REVIEW: 'on', SF_MAX_ITERATIONS: '' });
+  const repo = await newRepo(env, 'limit-default-repo', false);
+  await putTask(env, repo, 'LIM-1', 'Round limit');
+  const fix = (n: number) => ({ verdict: 'fix', summary: `Problem ${n}.`, items: [{ path: 'a.txt', problem: `Problem ${n}.`, expected: `Solved ${n}.`, severity: 'major' }], accepted_sensitive: [] });
+  await script(env, [
+    { write: { 'a.txt': '1\n' } },
+    { write: { 'a.txt': '2\n' }, text: '| R1 | fixed | Done. |' },
+    { write: { 'a.txt': '3\n' }, text: '| R2 | fixed | Done. |' },
+    { write: { 'a.txt': '4\n' }, text: '| R3 | fixed | Done. |' },
+    { write: { '.software-factory/LIM-1.mr.md': mrText('feat(LIM-1): Round limit') }, text: 'prepared' },
+  ]);
+  await reviewScript(env, [{ output: fix(1) }, { output: fix(2) }, { output: fix(3) }, { output: fix(4) }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'LIM-1' });
+    const limited = await waitFor(served, 'LIM-1', 'needs_human', 4);
+    assert.deepEqual(limited.error, {
+      code: 'iteration_limit',
+      message: '3 Fix sections were written, the limit of SF_MAX_ITERATIONS; 1 open blocker or major findings; the user decides how to go on: sf accept takes iteration 4 as it is (the open findings go unapplied and are listed in the MR text), sf say gives a direction.',
+    });
+    assert.deepEqual((await readFile(join(repo, '.software-factory', 'LIM-1.md'), 'utf8')).match(/^## Fix \d+$/gm), ['## Fix 1', '## Fix 2', '## Fix 3']);
+    const jobs = new JobStore(env.state);
+    const ledger = await jobs.readLedger('app', 'LIM-1');
+    assert.deepEqual(ledger.map((entry) => [entry.id, entry.status]), [['R1', 'fixed'], ['R2', 'fixed'], ['R3', 'fixed'], ['R4', 'open']]);
+    // A fix the user decided and a disputed contest are not open entries: the Accept at the limit
+    // does not take them (rule 5).
+    const r4 = ledger[3]!;
+    await jobs.writeLedger('app', 'LIM-1', [
+      ...ledger,
+      { ...r4, id: 'R5', problem: 'Must fix.', status: 'user_fix', settled: { decision: 'fix', note: '', at: '2026-11-07T10:00:00.000Z' } },
+      { ...r4, id: 'R6', problem: 'Disputed.', status: 'contested', evidence: 'a.txt:1', dispute: { reviewer: 'claude', iteration: 4, reason: 'Still wrong.' } },
+    ]);
+
+    // Claude's last verdict is fix: Accept still takes the iteration on (SF-131).
+    const accepted = await runCli(env, ['accept', 'app', 'LIM-1']);
+    assert.equal(accepted.code, 0, accepted.stderr);
+    await waitFor(served, 'LIM-1', 'ready_for_human_review', 4);
+    const override = await jobs.readGateOverride('app', 'LIM-1', 4);
+    assert.deepEqual(override?.unapplied, [{ id: 'R4', path: 'a.txt', problem: 'Problem 4.', expected: 'Solved 4.', severity: 'major' }]);
+    assert.doesNotMatch((await jobs.readMrText('app', 'LIM-1'))!, /### Accepted over a stop\n(- .*\n)*- R[56] /);
+    assert.match((await jobs.readMrText('app', 'LIM-1'))!, /### Accepted over a stop\n- The user accepted iteration 4 over iteration_limit\.\n- R4 \[major\] `a\.txt`: Problem 4\. Expected: Solved 4\./);
+  } finally {
+    await stop(served);
+  }
+});

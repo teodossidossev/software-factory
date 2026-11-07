@@ -27,6 +27,7 @@ bin/sf workspace add <name> --read <path> [--handoff checkout|off] [--color <nam
 bin/sf workspace list
 bin/sf workspace remove <name>
 bin/sf digest [--now]             # the morning digest (section Morning digest): the latest digest's period and counts; --now makes one at once and prints its record's path and cost; needs sf serve
+bin/sf explain <ws> <ticket>      # the plain explanation of the job's current stop (section Stop explanations): headline, explanation, choices, recommendation; or "No explanation for the current stop."; no sf serve, no model call
 bin/sf serve                      # foreground; Ctrl+C stops it; prints the dashboard URL
 bin/sf up [--no-open] [--no-tunnel]   # sf serve plus the tunnel (../scripts/sf-tunnel.sh run, output prefixed "tunnel | ") and the dashboard opened in the browser; Ctrl+C stops both; npm start at the repository root
 bin/sf mcp-url [--header|--rotate|--port]   # the MCP URL with its token (section MCP endpoint); --header: the URL without it and the bearer header; --rotate: a new token, taken at once by a running sf serve (restart the tunnel); works without sf serve
@@ -2608,7 +2609,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | Path | Answer |
 |---|---|
 | `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, fixes, gate_fixes, gate_tokens, updated_at, created_at, error, and for the board (SF-046) `title` (of the Task file, or `null`), `cost_usd` (the estimate of the iterations and their Claude reviews, or `null`), `review` and `gate` (the last iteration's verdicts: `clean`, `fix`, `failed` or `null`) and `review_ended_at` (the end of that clean or fix Claude review, or `null`); `mr` (the merge request on the Git host or `null`) and `mr_host` (`{host, reason}`: `github`, `gitlab` or `null`, and why the merge request actions are off or `null`); for the v3 card (SF-077) `now` (`{who, what, ts}` of a running job: the Implementer's last tool call or the first line of its last text, read from at most the last 256 KB of `events.jsonl`; the Claude review or the Codex gate reviewing iteration N; the MR writer; else `null`), `tool_calls` (the Implementer's tool calls in the job, counted incrementally: only the bytes added since the last count are read) and `stop` (for `needs_human`, `{items, saves_lines}`: the suggestions of the last simplification pass and the lines they save, the ledger entries to settle (`escalated`, `review_disputed`), the open ones (`review_churn`) or the last gate's items (`gate_rounds`, `gate_budget`), none for other codes; `null` otherwise) |
-| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override, simplify}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied} or {ts, event: "merge_request", action, number, url, state}], mr_title, ledger}`; `mr_title` is the MR text's first line or `null`; `ledger` is `ledger.json` as written (`[]` before the first Fix section, SF-052); `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null`, `simplify` its `simplify.json` (SF-055) or `null` |
+| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override, simplify}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied} or {ts, event: "merge_request", action, number, url, state}], mr_title, ledger, explanation}`; `mr_title` is the MR text's first line or `null`; `explanation` is the job's `explanation.json` while it is the current stop's (SF-106, section Stop explanations), else `null`; `ledger` is `ledger.json` as written (`[]` before the first Fix section, SF-052); `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null`, `simplify` its `simplify.json` (SF-055) or `null` |
 | `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem, handoff, color, app, description, derived_description, digest}], handoff_default, digest}`: the registry, the checkout's path, its non-terminal jobs, why the checkout cannot be used now or `null`, its own hand-over setting or `null`, and its colour on the board (SF-084: its `color`, else the one its name picks); SF-103: its app (its own, else its name), its own description or `null`, the description derived from the repository or `null`, `digest: {track, my_work}`; at the top `handoff_default` (`checkout` or `off`, from `SF_HANDOFF`) and the morning digest's `digest: {at, weekdays_only, language}` |
 | `api/digests` | `{running, digests: [{id, trigger, period, ended_at, counts: {landed, live_branches, impact}, cost_usd, error}]}`, newest first (SF-103); the counts from the Git data, never from the model; 404 without the digest (in-process dashboards) |
 | `api/digests/<id>` | the stored record `digest/<id>.json` (SF-103); an unknown id or any query is an empty 404 |
@@ -3091,6 +3092,66 @@ Problems, Plan, Today, the commits it was made from, and Copy (plain text with "
 of mine need attention"), through the configured channels; a manual run sends none. The digest's
 texts stay on this machine: the state directory, the token-protected dashboard and the model.
 
+## Stop explanations
+
+A stop's own message is built from the reviewers' and the Implementer's text (ledger ids, criterion
+numbers, function names). So each time a job stops for you (`needs_human`), `sf serve` has a cheap
+model write a separate plain explanation of it (SF-106, `src/explain.ts`), in your language: a
+headline (what is needed from you), a short explanation (what you would see in the product, what was
+planned, what happened, why the job cannot decide alone), one to four choices with what each does
+(exactly one recommended), and a recommendation. It never decides or acts: you still answer with the
+stop's own buttons and commands, and the model is given only those (`stopAnswers`: the stop panel's
+actions for the code, the conditional ones only when they apply, Accept risk and Must fix per entry
+to settle, Send a message and Abort) and told never to name another.
+
+**The setting**: the optional top-level `explain` of `workspaces.json`, every field optional:
+`"explain": {"on": true, "language": "English", "model": "sonnet"}` (these are the defaults); for
+example `"explain": {"language": "Bulgarian"}`. It is read at each stop, so a change applies
+without a restart. The digest's `digest.language` is its own.
+
+**When**: `sf serve`'s job follower starts one for every new stop: a job in `needs_human` whose stop
+(`{at: updated_at, code: error.code}`) differs from the one seen before, a `needs_human` to
+`needs_human` change included; settling one entry of the same stop does not. A usage-limit stop
+(`session_failed` with Claude's limit message) explains itself and gets none, and so does every stop
+while `explain.on` is false. At its start `sf serve` explains every stopped job without a finished
+explanation of its current stop (a pending file a stopped `sf serve` left is written again; a stored
+error is not retried). At most two are written at once; the others wait, one per job. A newer stop
+of the job, or the job leaving `needs_human`, aborts its running or waiting one, and a call is
+written only while `explanation.json` still holds its own stop, so an older call never overwrites a
+newer stop's file; `sf serve`'s stop aborts every call.
+
+**The model**: one Agent SDK session as the digest's: no tools but the structured output, no setting
+sources, an empty temporary directory as its cwd, a 120-second timeout, retried once; a second
+failure stores the error. An output whose explanation has more than 120 words, or that does not
+recommend exactly one choice, is a failed one too. Its input, as data in the prompt: the Task copy's title and its first
+`## Goal…` section (else its first level-2 section), the stop's code and whole message, the ledger
+entries the stop panel lists (`escalated`, `review_disputed`: the unsettled ones; `review_churn`: the
+open ones), the last Report's `## Done` and `## Open questions`, your own messages to the job in its
+last two iterations (the factory's rules block cut) and the answers. The whole prompt stays under
+150,000 characters: your messages go first (oldest first), then the Report (from the end), then the
+entries' expected texts; the rest is never cut, and when it alone is too long no explanation is made
+and the error is stored.
+
+**The file**: `<job dir>/explanation.json`, `{stop: {at, code}, model, language, started_at,
+ended_at, cost_usd, output, error}`, written atomically: pending first (`output`, `error` and
+`ended_at` null), then with the output or the error. Its cost is its own, never added to the job's
+estimate. It never changes the job: `job.json`, `job.error`, the ledger and the notifications stay
+as they are.
+
+**The job page**: the stop panel shows, above its content, a box with the headline in bold, the
+explanation, the choices (the recommended one marked "Recommended"), the recommendation and a small
+line "Explained by <model> · $<cost>"; the technical content (the sentence and what the code shows)
+is below it under Details, collapsed. While it is being written the box says "Explaining…" and the
+panel stays as it is; with no explanation (off, failed, another stop's) the page is as before. The
+job's detail (`GET api/jobs/<ws>/<ticket>`) carries the file only while it is the current stop's;
+after each write the explainer asks the dashboard to refresh the job (`RunningDashboard.refreshJob`),
+so an open page shows the box without a reload.
+
+**`sf explain <workspace> <ticket>`** reads `job.json` and `explanation.json` from the state
+directory (no `sf serve`, no model call) and prints the current stop's headline, explanation,
+choices and recommendation, or "No explanation for the current stop." (with why: being written, or
+the error).
+
 ## Workspace registry
 
 `<config dir>/workspaces.json`, written by `sf workspace add|remove` and by the dashboard's start
@@ -3125,7 +3186,8 @@ workspace form set it; `sf workspace add` again with the same name and path and 
 it; `sf workspace list` shows it. The optional `rules_skip` (SF-059: a list of globs) names the
 repository rule files not given to the agents (section Coding rules); edit the file to set it.
 The optional `description`, `app` and `digest: {track, my_work}`, and the top-level `digest`
-settings, are the morning digest's (SF-103, section Morning digest). The Workspaces drawer's Edit
+settings, are the morning digest's (SF-103, section Morning digest); the optional top-level
+`explain: {on, language, model}` is the stop explanations' (SF-106, section Stop explanations). The Workspaces drawer's Edit
 changes an existing workspace's path, description, app, hand-over, colour and digest switches (the
 name stays; `work_checkout` and `rules_skip` are kept): its body has every field, `""` removes the
 description and the app, `"default"` the handoff, `"auto"` the color; the path is checked as Add

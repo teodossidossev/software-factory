@@ -154,3 +154,28 @@ export function digestPrompt(today: string, language: string, data: unknown): st
     '</git_data>',
   ].join('\n');
 }
+
+// The prompt of a stop's plain explanation (SF-106): the rules, then the stop's data as JSON
+// (src/explain.ts builds and caps it): the Task's title and goal, the stop's code and message, the
+// ledger entries of the stop, the last Report's Done and Open questions, the user's own messages and
+// the stop's real answers. The model has no tools but the structured output; it explains and
+// recommends, it never decides or acts.
+export function explainPrompt(language: string, data: unknown): string {
+  return [
+    'A job of the Software Factory stopped and waits for the user. Explain to the user, in plain words, what is needed from them, from the data below only. You have no tools besides the structured output. You explain and recommend; you never decide or act.',
+    '',
+    'Rules:',
+    `- Write every text in ${language}: short sentences, plain words, for a reader who did not follow the job and may not be a developer.`,
+    '- No ledger ids (R5), acceptance-criterion numbers (AC3), function or variable names, unless the user must type one. Name a file only when the user needs it to find the thing.',
+    '- Facts only from the data. Mark a guess with "likely".',
+    '- The data: task (the Task file\'s title and goal), stop (the code and the factory\'s message), entries (the findings the stop is about: each with its problem, what was expected, the Implementer\'s response and any dispute), report (the Implementer\'s last Report: what it did and its open questions), your_messages (what the user told the job lately), answers (the only answers the user has: each a button label and its sf command).',
+    '- headline: one sentence, at most 140 characters: what is needed from the user.',
+    '- explanation: at most 120 words, short sentences: what the user would see in the product (a concrete example), what was planned, what happened, and why the job cannot decide alone.',
+    '- choices: 1 to 4 items: choice, what the user can do in plain words; effect, what then happens; recommended, true for exactly one choice and false for the others. Each choice is made with the answers given: name a button by its label, or the command when the user must type it. Never invent a button, a command or an action that the answers do not contain.',
+    '- recommendation: one sentence: which choice and why. When the case is rare or narrow, recommend the simplest choice.',
+    '',
+    '<stop_data>',
+    JSON.stringify(data),
+    '</stop_data>',
+  ].join('\n');
+}

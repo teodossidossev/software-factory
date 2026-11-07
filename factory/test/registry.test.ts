@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
-import { configDir, digestSettings, editedEntry, loadRegistry, parseRegistry, resolveWorkspace, saveRegistry, WORKSPACE_COLORS, workspaceApp, workspaceColor, workspaceDigest } from '../src/registry.js';
+import { configDir, digestSettings, editedEntry, explainSettings, loadRegistry, parseRegistry, resolveWorkspace, saveRegistry, WORKSPACE_COLORS, workspaceApp, workspaceColor, workspaceDigest } from '../src/registry.js';
 
 let temp: string;
 let repo: string;
@@ -93,6 +93,23 @@ test('parseRegistry (SF-103): description, app and digest per workspace, the top
     { workspaces: {}, digest: { at: '8:00' } },
     { workspaces: {}, digest: { at: '08:00', email: 'x' } },
     { workspaces: {}, extra: 1 },
+  ]) {
+    invalid(JSON.stringify(bad));
+  }
+});
+
+test('parseRegistry (SF-106): the top-level explain settings, each field optional, with defaults; an unknown field inside it is refused', () => {
+  assert.deepEqual(explainSettings(parseRegistry('{"workspaces":{}}')), { on: true, language: 'English', model: 'sonnet' });
+  assert.deepEqual(explainSettings(parseRegistry('{"workspaces":{},"explain":{}}')), { on: true, language: 'English', model: 'sonnet' });
+  assert.deepEqual(explainSettings(parseRegistry('{"workspaces":{},"explain":{"language":" Bulgarian "}}')), { on: true, language: 'Bulgarian', model: 'sonnet' });
+  assert.deepEqual(explainSettings(parseRegistry('{"workspaces":{},"explain":{"on":false}}')), { on: false, language: 'English', model: 'sonnet' });
+  assert.deepEqual(explainSettings(parseRegistry('{"workspaces":{},"explain":{"on":true,"language":"Deutsch","model":"haiku"}}')), { on: true, language: 'Deutsch', model: 'haiku' });
+  for (const bad of [
+    { workspaces: {}, explain: { on: true, tone: 'calm' } },
+    { workspaces: {}, explain: { on: 'yes' } },
+    { workspaces: {}, explain: { language: '' } },
+    { workspaces: {}, explain: { model: '' } },
+    { workspaces: {}, explain: true },
   ]) {
     invalid(JSON.stringify(bad));
   }

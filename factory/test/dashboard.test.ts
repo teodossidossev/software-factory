@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { MAX_STREAMS, startDashboard, STREAM_PAGE_LINES, TOKEN_FILE } from '../src/dashboard.js';
 import { FactoryError } from '../src/errors.js';
+import { explanationPath } from '../src/explain.js';
 import { type EventRecord, type Job, JobStore } from '../src/jobs.js';
 import { buildPatch, fileChanges } from '../src/patch.js';
 import { saveRegistry } from '../src/registry.js';
@@ -181,6 +182,42 @@ test('dashboard: jobs, job detail, report, patch and mr endpoints; bad names are
   });
 });
 
+test('dashboard (SF-106): the job\'s detail has the explanation only for its current stop; refreshJob sends the job\'s detail to the pages that show it', async () => {
+  await withDashboard('dash-explain', fakeActions(), async (dashboard, { jobs, job }) => {
+    const detailOf = async (): Promise<Record<string, any>> => JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', dashboard.url))).body);
+    assert.equal((await detailOf()).explanation, null);
+    const stopped: Job = { ...job, state: 'needs_human', updated_at: '2026-11-01T10:06:00.000Z', error: { code: 'escalated', message: 'The Implementer escalated R1.' } };
+    await jobs.write(stopped);
+    const record = {
+      stop: { at: stopped.updated_at, code: 'escalated' }, model: 'sonnet', language: 'English', started_at: stopped.updated_at, ended_at: '2026-11-01T10:06:30.000Z', cost_usd: 0.01,
+      output: { headline: 'Keep it or go back?', explanation: 'Plain words.', choices: [{ choice: 'Keep it', effect: 'It stays.', recommended: true }], recommendation: 'Keep it.' }, error: null,
+    };
+    await writeFile(explanationPath(jobs, 'app', 'T-1'), JSON.stringify(record));
+    assert.deepEqual((await detailOf()).explanation, record);
+    // Another stop of the job (a newer updated_at, another code), or no stop: null.
+    for (const other of [{ ...stopped, updated_at: '2026-11-01T10:07:00.000Z' }, { ...stopped, error: { code: 'review_churn', message: 'x' } }, { ...stopped, state: 'working' as const }]) {
+      await jobs.write(other);
+      assert.equal((await detailOf()).explanation, null, JSON.stringify(other.error));
+    }
+    // An unreadable file: null.
+    await jobs.write(stopped);
+    await writeFile(explanationPath(jobs, 'app', 'T-1'), 'not json');
+    assert.equal((await detailOf()).explanation, null);
+
+    // refreshJob: the open page of the job gets its detail again, with the explanation.
+    const stream = await openStream(new URL('api/stream?job=app/T-1', dashboard.url));
+    try {
+      await stream.next('job');
+      await writeFile(explanationPath(jobs, 'app', 'T-1'), JSON.stringify(record));
+      dashboard.refreshJob('app', 'T-1');
+      assert.equal((await stream.next('jobs')).jobs.length, 2);
+      assert.deepEqual((await stream.next('job')).explanation, record);
+    } finally {
+      stream.close();
+    }
+  });
+});
+
 test('dashboard: the stream sends jobs, the job and the events, follows the file, resumes, is limited and stops on disconnect', async () => {
   await withDashboard('dash-stream', fakeActions(), async (dashboard, { jobs, job }) => {
     const stream = await openStream(new URL('api/stream?job=app/T-1', dashboard.url));
@@ -345,7 +382,7 @@ test('dashboard (SF-040): no reviewer or subscription in the data; the subscript
   await withDashboard('dash-no-reviewer', fakeActions(), async (dashboard) => {
     const base = dashboard.url;
     const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body);
-    assert.deepEqual(Object.keys(detail).sort(), ['gate', 'history', 'iterations', 'job', 'ledger', 'mr', 'mr_title']);
+    assert.deepEqual(Object.keys(detail).sort(), ['explanation', 'gate', 'history', 'iterations', 'job', 'ledger', 'mr', 'mr_title']);
     const { jobs: all } = JSON.parse((await fetchRaw(new URL('api/jobs', base))).body);
     assert.ok(all.every((job: Record<string, unknown>) => !('reviewer' in job)));
     assert.deepEqual([(await fetchRaw(new URL('api/subscriptions', base))).status], [404]);

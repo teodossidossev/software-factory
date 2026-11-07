@@ -167,6 +167,13 @@ code, pre, .mono { font-family: var(--mono); }
 .sev-major { color: var(--warn); background: var(--warn-bg); }
 .sev-minor, .sev-nit, .sev-note { color: var(--muted); background: var(--panel-2); border: 1px solid var(--border); }
 .block.stop { border-color: var(--s-human); border-width: 2px; }
+/* SF-106: the plain explanation above the stop panel; the technical content under Details. */
+.explain { margin: 6px 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel-2); display: grid; gap: 6px; }
+.explain-choices { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.explain-choices li > span { margin-right: 6px; }
+.explain-choice { font-weight: 600; }
+.tag.rec { color: var(--add); border-color: var(--add); }
+.stop-details { margin-top: 6px; display: grid; gap: 6px; }
 .block.fixsec { border-style: dashed; }
 .block.you { border-color: var(--a-you); }
 .inline-diff { margin-top: 6px; border: 1px solid var(--border); border-radius: var(--radius-sm); }

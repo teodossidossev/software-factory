@@ -215,6 +215,7 @@ started by the run queue as before.
 | `SF_ENV_FILE` | `<config dir>/auth.env`, by default `~/.config/software-factory/auth.env` (a historical name) | Environment file every `sf` command reads first: `KEY=VALUE` lines, `#` comments, optional `export`, quotes allowed; a variable already set in the environment wins; a missing file is fine. Empty value: no file. The repository root's `npm run serve` relies on it. |
 | `SF_DASHBOARD` | on | `off` starts no dashboard listener (and removes an old `dashboard-token`). |
 | `SF_DASHBOARD_PORT` | `8788` | Port of the dashboard, `http://127.0.0.1:<port>/d/<token>/` (loopback only, Host and Origin checked). |
+| `SF_DASHBOARD_REMOTE_ORIGINS` | none | Comma-separated `https://<machine>.<tailnet>.ts.net` origins whose requests the dashboard accepts as loopback ones (through `tailscale serve`, section Dashboard); the token stays required; anything else (http, another domain, a port or a path) is refused at start (`invalid_config`). |
 | `SF_CONFIG_DIR` | `${XDG_CONFIG_HOME:-~/.config}/software-factory` | Directory of the workspace registry, the default `auth.env` and the `rules/` files. |
 | `SF_HANDBOOK` | `factory/HANDBOOK.md` | Handbook served as instructions (its `## Quick start` section) and by `guide`. |
 | `SF_STATE_DIR` | `${XDG_STATE_HOME:-~/.local/state}/software-factory` | Job state and the `sf.sock` socket. |
@@ -2242,6 +2243,29 @@ port: exit 1, nothing launched). When `xdg-open` is missing, exits unsuccessfull
 in time, `sf` exits 1 with the reason; the printed URL stays usable by hand. Exit 0 means the
 launcher accepted the URL, not that the page loaded: nothing checks that `sf serve` is running.
 On another platform `--open` is refused (`open_unsupported`); plain `sf dashboard` works everywhere.
+
+**Through Tailscale (SF-118).** `SF_DASHBOARD_REMOTE_ORIGINS` lists the origins of your
+`tailscale serve` (`https://<machine>.<tailnet>.ts.net`, https, no port, no path); anything else
+stops `sf serve` and `sf dashboard` with `invalid_config`, and with `SF_DASHBOARD=off` it is not
+read. A request whose Host is a listed origin's name (any port) passes the Host check as a loopback
+one does, and one whose Origin is exactly a listed origin passes the Origin check and the actions'
+Origin check; the two are checked each on its own, so a proxy that keeps the ts.net Host and one
+that rewrites it to `127.0.0.1:<port>` both work. Every other Host or Origin is refused (403) as
+before, and the token is still required. The listener stays on `127.0.0.1`; the `Tailscale-User-*`
+and `X-Forwarded-*` headers are not read. `sf serve` prints `software-factory dashboard through
+Tailscale https://<machine>.<tailnet>.ts.net/d/<token>/` after the local URL, and `sf dashboard`
+prints `Through Tailscale: <url>` after it, in full like the local one (`--open` opens only the
+local one). The setting is read at `sf serve`'s start. The steps:
+
+1. Install Tailscale on the PC and the phone, both in the same tailnet; in the admin console's DNS
+   page turn on MagicDNS and HTTPS certificates.
+2. On the PC, once: `sudo tailscale set --operator=$USER`.
+3. `tailscale serve --bg 8788` (the dashboard's port, `SF_DASHBOARD_PORT`); `tailscale serve
+   status` shows the address, `tailscale serve reset` removes it. Never `tailscale funnel`, which
+   puts the address on the public internet.
+4. `SF_DASHBOARD_REMOTE_ORIGINS=https://<machine>.<tailnet>.ts.net` in `auth.env`, then restart
+   `sf serve`.
+5. Open the `Through Tailscale:` URL of `sf dashboard` on the phone.
 
 **The board (SF-046, v3 since SF-077).** The page is the board of the dashboard v3 design
 (`docs/design/dashboard-v3/`, ported from its prototype: the same CSS, light and dark by the system,

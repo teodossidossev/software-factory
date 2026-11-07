@@ -224,6 +224,26 @@ measure); the page and `sf digest --now` show each digest's cost.
 Copy them while no job runs, or stop `sf serve` first. A restored state directory needs the same
 workspaces and checkouts.
 
+## The dashboard on your phone (Tailscale)
+
+The dashboard listens on `127.0.0.1` only. To open it from your phone, `tailscale serve` on the PC
+proxies `https://<machine>.<tailnet>.ts.net/`, reachable only inside your own tailnet, to it, and
+`SF_DASHBOARD_REMOTE_ORIGINS` tells the dashboard to accept that address.
+
+1. Install Tailscale on the PC and the phone and log both into the same tailnet. In the Tailscale
+   admin console, DNS: turn on MagicDNS and HTTPS certificates (`tailscale serve` asks for it if
+   they are off).
+2. On the PC, once: `sudo tailscale set --operator=$USER` (so your user may run `tailscale serve`).
+3. `tailscale serve --bg 8788` (the dashboard's port, `SF_DASHBOARD_PORT`). It proxies
+   `https://<machine>.<tailnet>.ts.net/` to `http://127.0.0.1:8788` and keeps doing so across
+   reboots. `tailscale serve status` shows the address; `tailscale serve reset` removes it.
+4. Add `SF_DASHBOARD_REMOTE_ORIGINS=https://<machine>.<tailnet>.ts.net` to `auth.env`, then
+   restart `sf serve` (`systemctl --user restart software-factory` for the service).
+5. `sf dashboard` prints `Through Tailscale: https://<machine>.<tailnet>.ts.net/d/<token>/`; open
+   it on the phone. Only devices of your tailnet reach it, and only with the token.
+
+Use `tailscale serve`, never `tailscale funnel`: Funnel puts the address on the public internet.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -246,6 +266,8 @@ workspaces and checkouts.
 | `sf serve` refuses to start with `registry_invalid` or `queue_invalid` | `workspaces.json` or `queue.json` has a key or value the strict parser does not accept | fix the file by the message (see [Configuration](configuration.md#the-workspace-registry-workspacesjson)) |
 | every `sf` command says `invalid_env_file` | a line in `auth.env` is not `KEY=VALUE` | fix that line |
 | the dashboard says 404 / the bookmark stopped working | wrong or rotated token, or another port | `sf dashboard` prints the current URL; `sf dashboard --rotate` makes a new token at the next `sf serve` start |
+| a 403 on the phone | the address is not in `SF_DASHBOARD_REMOTE_ORIGINS`, or `sf serve` was not restarted after adding it | add exactly the `https://<machine>.<tailnet>.ts.net` that `tailscale serve status` shows, restart `sf serve` ([The dashboard on your phone](#the-dashboard-on-your-phone-tailscale)) |
+| `invalid_config` naming `SF_DASHBOARD_REMOTE_ORIGINS` at `sf serve`'s start | an entry is not `https://<machine>.<tailnet>.ts.net` (http, another domain, a port, a path or a trailing part) | write each origin as `tailscale serve status` shows it, comma-separated, then start `sf serve` again |
 | the hand-over or your own `git config` fails with "could not lock config file … File exists" | a stale `.git/config.lock` in the checkout: Claude Code's sandbox leaves an empty read-only one, which the factory removes when no job of the workspace runs; a lock that is not the sandbox's is never touched (`handover_failed`) | wait for the workspace's running jobs to end (`config_locked` hands over by itself); if no job and no Git command runs, delete `.git/config.lock` by hand |
 | sessions fail with an authentication message, `session_failed` | the Claude login expired | run `claude` and `/login`, then *Tell it to go on* |
 | `gate_failed` with a login message, or `gate: off` in `sf info` | Codex not found or not logged in | `codex login`; set `SF_CODEX` to its absolute path when it is not on the `PATH` of `sf serve` |

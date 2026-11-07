@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { appendFile, mkdir, readdir, readFile, readlink, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { MAX_STREAMS, startDashboard, STREAM_PAGE_LINES, TOKEN_FILE } from '../src/dashboard.js';
+import { dashboardRemoteOrigins, MAX_STREAMS, remoteDashboardUrls, startDashboard, STREAM_PAGE_LINES, TOKEN_FILE } from '../src/dashboard.js';
 import { FactoryError } from '../src/errors.js';
 import { explanationPath } from '../src/explain.js';
 import { type EventRecord, type Job, JobStore } from '../src/jobs.js';
@@ -17,7 +17,7 @@ import { buildPatch, fileChanges } from '../src/patch.js';
 import { saveRegistry } from '../src/registry.js';
 import { act, CSP, fakeActions, fetchRaw, openStream, type Stream } from './support/dashboard-client.js';
 import type { DashboardDigests } from '../src/dashboard.js';
-import { withDashboard } from './support/dashboard-state.js';
+import { fixture, withDashboard } from './support/dashboard-state.js';
 import { call, git, newEnv, newRepo, putTask, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
 
 // The live log prints the local time of the sf process (SF-049); Sofia is UTC+2 in November.
@@ -331,6 +331,7 @@ test('dashboard end to end: a fake cycle, the stream across mark_clean (the bran
   assert.equal(missing.code, 1);
   assert.match(missing.stderr, /There is no dashboard token: sf serve has not started/);
 
+  env.extra = { ...env.extra, SF_DASHBOARD_REMOTE_ORIGINS: 'https://pc.tail1234.ts.net' };
   const served = await serve(env);
   try {
     const base = served.dashboard!;
@@ -339,9 +340,15 @@ test('dashboard end to end: a fake cycle, the stream across mark_clean (the bran
     assert.ok(open === undefined || open === 2, `listeners: ${open}`);
     const token = (await readFile(join(env.state, TOKEN_FILE), 'utf8')).trim();
     assert.equal(base.pathname, `/d/${token}/`);
-    const printed = await runCli({ ...env, extra: { SF_DASHBOARD_PORT: '8799' } }, ['dashboard']);
+    // SF-118: the URL through Tailscale, in full like the local one.
+    assert.ok(served.output.includes(`dashboard through Tailscale https://pc.tail1234.ts.net/d/${token}/`), served.output);
+    const printed = await runCli({ ...env, extra: { SF_DASHBOARD_PORT: '8799', SF_DASHBOARD_REMOTE_ORIGINS: 'https://pc.tail1234.ts.net' } }, ['dashboard']);
     assert.equal(printed.code, 0, printed.stderr);
     assert.equal(printed.stdout.split('\n')[0], `http://127.0.0.1:8799/d/${token}/`);
+    assert.equal(printed.stdout.split('\n')[1], `Through Tailscale: https://pc.tail1234.ts.net/d/${token}/`);
+    const invalid = await runCli({ ...env, extra: { SF_DASHBOARD_REMOTE_ORIGINS: 'http://pc.tail1234.ts.net' } }, ['dashboard']);
+    assert.deepEqual([invalid.code, invalid.stdout], [1, '']);
+    assert.match(invalid.stderr, /SF_DASHBOARD_REMOTE_ORIGINS/);
     assert.match(printed.stdout, /The token stays the same across sf serve starts/);
     assert.equal((await runCli({ ...env, extra: { SF_DASHBOARD: 'off' } }, ['dashboard'])).code, 1);
     // --rotate removes the file; the running sf serve keeps its token, the next start makes a new one.
@@ -401,6 +408,105 @@ test('dashboard end to end: a fake cycle, the stream across mark_clean (the bran
   } finally {
     await stop(off);
   }
+});
+
+test('dashboard (SF-118): SF_DASHBOARD_REMOTE_ORIGINS accepts only https://<machine>.<tailnet>.ts.net origins, lower-cased and without duplicates', () => {
+  assert.deepEqual(dashboardRemoteOrigins({}), []);
+  assert.deepEqual(dashboardRemoteOrigins({ SF_DASHBOARD_REMOTE_ORIGINS: '' }), []);
+  assert.deepEqual(dashboardRemoteOrigins({ SF_DASHBOARD_REMOTE_ORIGINS: ' , ' }), []);
+  assert.deepEqual(dashboardRemoteOrigins({ SF_DASHBOARD_REMOTE_ORIGINS: 'https://pc.tail1234.ts.net' }), ['https://pc.tail1234.ts.net']);
+  assert.deepEqual(
+    dashboardRemoteOrigins({ SF_DASHBOARD_REMOTE_ORIGINS: ' https://PC.Tail1234.ts.net/ , https://phone-host.tail1234.ts.net,https://pc.tail1234.ts.net' }),
+    ['https://pc.tail1234.ts.net', 'https://phone-host.tail1234.ts.net'],
+  );
+  const refused = [
+    'http://pc.tail1234.ts.net', 'https://pc.example.com', 'https://ts.net', 'https://tail1234.ts.net', 'https://a.b.c.ts.net',
+    'https://pc.tail1234.ts.net:443', 'https://pc.tail1234.ts.net:8443', 'https://pc.tail1234.ts.net/d/', 'https://pc.tail1234.ts.net?x=1',
+    'https://pc.tail1234.ts.net#x', 'https://u:p@pc.tail1234.ts.net', 'pc.tail1234.ts.net', 'https://pc.tail1234.ts.net.example.com', 'https://100.64.0.1',
+  ];
+  for (const entry of refused) {
+    for (const value of [entry, `https://pc.tail1234.ts.net, ${entry} ,https://phone.tail1234.ts.net`]) {
+      assert.throws(() => dashboardRemoteOrigins({ SF_DASHBOARD_REMOTE_ORIGINS: value }), (error: unknown) => {
+        assert.ok(error instanceof FactoryError, value);
+        assert.equal(error.code, 'invalid_config', value);
+        assert.ok(error.message.includes('SF_DASHBOARD_REMOTE_ORIGINS'), error.message);
+        assert.ok(error.message.includes(`"${entry}"`), error.message);
+        return true;
+      }, value);
+    }
+  }
+});
+
+test('dashboard (SF-118): a listed Tailscale origin passes the Host and Origin checks as loopback does, each on its own; the token stays required; anything else is a 403', async () => {
+  const hex = 'ab'.repeat(32);
+  assert.deepEqual(remoteDashboardUrls(['https://pc.tail1234.ts.net'], hex).map((url) => url.href), [`https://pc.tail1234.ts.net/d/${hex}/`]);
+  const remote = 'https://pc.tail1234.ts.net';
+  const store = await fixture('dash-remote');
+  const fake = fakeActions();
+  const dashboard = await startDashboard(0, store.state, store.jobs, fake, undefined, { remoteOrigins: [remote] });
+  try {
+    const base = dashboard.url;
+    const token = base.pathname.split('/')[2]!;
+    assert.deepEqual(dashboard.remoteUrls.map((url) => url.href), [`${remote}/d/${token}/`]);
+    const loopbackHost = `127.0.0.1:${base.port}`;
+    const page = new URL('api/jobs', base);
+
+    // Accepted: the listed Host with or without the listed Origin, with :443, and the listed
+    // Origin with the loopback Host.
+    for (const url of [base, page]) {
+      for (const [host, headers] of [
+        ['pc.tail1234.ts.net', {}], ['pc.tail1234.ts.net', { origin: remote }], ['pc.tail1234.ts.net:443', {}], [loopbackHost, { origin: remote }],
+      ] as const) {
+        assert.equal((await fetchRaw(url, { host, headers })).status, 200, `${url.pathname} ${host} ${JSON.stringify(headers)}`);
+      }
+    }
+    for (const host of ['pc.tail1234.ts.net', loopbackHost]) {
+      const approved = await act(base, 'api/jobs/app/T-1/approve', {}, { host, headers: { origin: remote } });
+      assert.equal(approved.status, 200, `${host}: ${approved.body}`);
+    }
+    assert.deepEqual(fake.calls, [['approve', 'app', 'T-1'], ['approve', 'app', 'T-1']]);
+    fake.calls.length = 0;
+    // The loopback Origin with the listed Host passes too.
+    assert.equal((await act(base, 'api/jobs/app/T-1/approve', {}, { host: 'pc.tail1234.ts.net' })).status, 200);
+    assert.deepEqual(fake.calls, [['approve', 'app', 'T-1']]);
+    fake.calls.length = 0;
+    // The token is still required.
+    const wrong = `${token.slice(0, -1)}${token.endsWith('0') ? '1' : '0'}`;
+    const noToken = await fetchRaw(`http://${loopbackHost}/d/${wrong}/api/jobs`, { host: 'pc.tail1234.ts.net', headers: { origin: remote } });
+    assert.deepEqual([noToken.status, noToken.body], [404, '']);
+
+    // Refused: an unlisted Host; an unlisted, plain http, non-ts.net or ported Origin.
+    for (const [host, origin] of [
+      ['other.tail1234.ts.net', remote], ['pc.tail1234.ts.net', 'https://other.tail1234.ts.net'], ['pc.tail1234.ts.net', 'http://pc.tail1234.ts.net'],
+      ['pc.tail1234.ts.net', 'https://pc.example.com'], ['pc.tail1234.ts.net', 'https://pc.tail1234.ts.net:8443'],
+    ] as const) {
+      const label = `${host} ${origin}`;
+      assert.equal((await fetchRaw(page, { host, headers: { origin } })).status, 403, label);
+      assert.equal((await act(base, 'api/jobs/app/T-1/approve', {}, { host, headers: { origin } })).status, 403, label);
+    }
+    assert.equal((await fetchRaw(page, { host: 'other.tail1234.ts.net' })).status, 403);
+    // An action with the listed Host and no Origin is refused by the action's own check.
+    const bare = await fetchRaw(new URL('api/jobs/app/T-1/approve', base), {
+      method: 'POST', host: 'pc.tail1234.ts.net', headers: { 'content-type': 'application/json' }, body: '{}',
+    });
+    assert.equal(bare.status, 403);
+    assert.deepEqual(JSON.parse(bare.body).error, { code: 'invalid_origin', message: `Actions need the Origin http://${loopbackHost} or ${remote}.` });
+    assert.deepEqual(fake.calls, []);
+  } finally {
+    await dashboard.close();
+  }
+
+  // Without the option: no remote URL, the Tailscale Host and Origin are refused as today.
+  const plain = fakeActions();
+  await withDashboard('dash-remote-off', plain, async (dashboard) => {
+    const base = dashboard.url;
+    assert.deepEqual(dashboard.remoteUrls, []);
+    assert.equal((await fetchRaw(new URL('api/jobs', base), { host: 'pc.tail1234.ts.net' })).status, 403);
+    assert.equal((await act(base, 'api/jobs/app/T-1/approve', {}, { headers: { origin: remote } })).status, 403);
+    const bare = await fetchRaw(new URL('api/jobs/app/T-1/approve', base), { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    assert.deepEqual([bare.status, JSON.parse(bare.body).error.message], [403, `Actions need the Origin http://127.0.0.1:${base.port}.`]);
+    assert.deepEqual(plain.calls, []);
+  });
 });
 
 test('dashboard (SF-040): no reviewer or subscription in the data; the subscriptions, test event and nudge routes are gone', async () => {

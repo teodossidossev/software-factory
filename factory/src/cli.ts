@@ -24,7 +24,7 @@ import { openInBrowser } from './browser.js';
 import { envFilePath, gateConfig, gateLevelSetting, handoffSetting, loadConfig, loadEnvFile, rulesMaxBytes, stateDir } from './config.js';
 import { Digests } from './digest-run.js';
 import { DigestSchedule } from './digest-schedule.js';
-import { DEFAULT_DASHBOARD_PORT, dashboardUrl, readToken, removeToken, type RunningDashboard, startDashboard } from './dashboard.js';
+import { DEFAULT_DASHBOARD_PORT, dashboardRemoteOrigins, dashboardUrl, readToken, remoteDashboardUrls, removeToken, type RunningDashboard, startDashboard } from './dashboard.js';
 import { FactoryError } from './errors.js';
 import { currentExplanation, Explainer, explanationLines } from './explain.js';
 import { Execution, type StateListener } from './execution.js';
@@ -157,6 +157,8 @@ interface ServeHooks {
 async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefined }> {
   const port = parsePort('SF_PORT', DEFAULT_PORT);
   const dashboardPort = parsePort('SF_DASHBOARD_PORT', DEFAULT_DASHBOARD_PORT);
+  // SF_DASHBOARD_REMOTE_ORIGINS (SF-118): an invalid value stops the start; not read with the dashboard off.
+  const remoteOrigins = dashboardOn() ? dashboardRemoteOrigins() : [];
   const config = loadConfig();
   const handbook = await loadHandbook();
   // Fail at startup on an invalid registry rather than on the first tool call.
@@ -403,7 +405,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
       // The dashboard's actions (DashboardActions: start, approve, abort, say, retryReview,
       // acceptGate and archiveFinished) run on the same Execution as the socket commands.
       dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, setup, {
-        gate: config.gate.on, checks, queue: runQueue, onWorkspacesChanged: () => void autoChecks?.rereadWorkspaces(), digests,
+        gate: config.gate.on, checks, queue: runQueue, onWorkspacesChanged: () => void autoChecks?.rereadWorkspaces(), digests, remoteOrigins,
       });
     } else {
       await removeToken(config.stateDir);
@@ -414,6 +416,9 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     throw error;
   }
   console.log(dashboard !== undefined ? `${SERVER_NAME} dashboard ${dashboard.url.href}` : `${SERVER_NAME} dashboard off (SF_DASHBOARD=off)`);
+  for (const url of dashboard?.remoteUrls ?? []) {
+    console.log(`${SERVER_NAME} dashboard through Tailscale ${url.href}`);
+  }
   if (!config.gate.on && config.gate.missing === true) {
     console.log(`gate: off (${config.gate.reason}); the Claude review decides`);
   }
@@ -1373,12 +1378,16 @@ async function dashboardCommand(args: string[]): Promise<void> {
     return;
   }
   const port = parsePort('SF_DASHBOARD_PORT', DEFAULT_DASHBOARD_PORT);
+  const remoteOrigins = dashboardRemoteOrigins();
   const token = await readToken(stateDir());
   if (token === undefined) {
     throw new FactoryError('no_dashboard_token', 'There is no dashboard token: sf serve has not started with the dashboard on this state directory.');
   }
   const url = dashboardUrl(port, token).href;
   console.log(url);
+  for (const remote of remoteDashboardUrls(remoteOrigins, token)) {
+    console.log(`Through Tailscale: ${remote.href}`);
+  }
   console.log('The token stays the same across sf serve starts; sf dashboard --rotate makes the next start pick a new one.');
   if (values.open === true) {
     // The URL is printed first so it can be opened by hand when the launcher fails.

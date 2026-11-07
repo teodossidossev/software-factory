@@ -21,7 +21,7 @@ import { open, readFile, rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
-import { localhostHostValidation, localhostOriginValidation } from '@modelcontextprotocol/node';
+import { hostHeaderValidation, localhostOriginValidation } from '@modelcontextprotocol/node';
 import * as z from 'zod/v4';
 import { MAX_ATTACHMENT_BYTES } from './attachments.js';
 import { writeFileAtomic } from './atomic.js';
@@ -298,6 +298,8 @@ const ERROR_STATUS: Record<string, number> = {
 
 export interface RunningDashboard {
   url: URL;
+  // The dashboard's URLs through Tailscale (SF-118), one per remote origin; empty without them.
+  remoteUrls: URL[];
   // The state listener: refreshes every open page; never throws.
   onStateChange(job: Job, from: JobState | null): void;
   // A ticket's data changed without a job (a Task check ended): every page gets the tickets again.
@@ -311,6 +313,34 @@ export interface RunningDashboard {
 
 export function dashboardUrl(port: number, token: string): URL {
   return new URL(`http://${LOOPBACK_HOST}:${port}/d/${token}/`);
+}
+
+// SF_DASHBOARD_REMOTE_ORIGINS (SF-118): the origins of the user's `tailscale serve`, whose
+// requests the dashboard accepts as loopback ones. Only https://<machine>.<tailnet>.ts.net, with
+// no port, path, query, fragment or user info, so the setting cannot put the dashboard on any
+// other name; the first entry that is not one stops the start.
+const TAILSCALE_HOSTNAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ts\.net$/;
+
+export function dashboardRemoteOrigins(env: NodeJS.ProcessEnv = process.env): string[] {
+  const origins: string[] = [];
+  for (const entry of (env.SF_DASHBOARD_REMOTE_ORIGINS ?? '').split(',').map((part) => part.trim()).filter((part) => part !== '')) {
+    const url = URL.parse(entry);
+    const lower = entry.toLowerCase();
+    if (url === null || url.protocol !== 'https:' || url.port !== '' || (lower !== url.origin && lower !== `${url.origin}/`) || !TAILSCALE_HOSTNAME.test(url.hostname)) {
+      throw new FactoryError(
+        'invalid_config',
+        `SF_DASHBOARD_REMOTE_ORIGINS: "${entry}" is not an https://<machine>.<tailnet>.ts.net origin (https only, a Tailscale name, no port or path); the dashboard is only opened through Tailscale.`,
+      );
+    }
+    if (!origins.includes(url.origin)) {
+      origins.push(url.origin);
+    }
+  }
+  return origins;
+}
+
+export function remoteDashboardUrls(origins: readonly string[], token: string): URL[] {
+  return origins.map((origin) => new URL(`/d/${token}/`, origin));
 }
 
 // A new secret token: 32 random bytes as 64 lower-case hex digits; the dashboard's and the MCP
@@ -972,10 +1002,13 @@ interface Post {
 // the run queue (SF-071), none without (the queue routes answer 404, the tickets payload's queue is
 // null); onWorkspacesChanged: called after a workspace was added, edited or removed (SF-086: the
 // automatic checks read the registry again); digests: the morning digest (SF-103), none without (the
-// digest routes answer 404).
+// digest routes answer 404); remoteOrigins: the origins of SF_DASHBOARD_REMOTE_ORIGINS (SF-118), as
+// dashboardRemoteOrigins returns them (not validated again), whose Host and Origin pass as loopback.
 export async function startDashboard(
   port: number, stateDir: string, jobs: JobStore, actions: DashboardActions, setup: DashboardSetup = NO_SETUP,
-  { gate: gateOn = true, checks, queue, onWorkspacesChanged, digests }: { gate?: boolean; checks?: DashboardChecks; queue?: DashboardQueue; onWorkspacesChanged?: () => void; digests?: DashboardDigests } = {},
+  { gate: gateOn = true, checks, queue, onWorkspacesChanged, digests, remoteOrigins = [] }: {
+    gate?: boolean; checks?: DashboardChecks; queue?: DashboardQueue; onWorkspacesChanged?: () => void; digests?: DashboardDigests; remoteOrigins?: readonly string[];
+  } = {},
 ): Promise<RunningDashboard> {
   // The workspace change succeeded: the hook hears of it (a failing hook is logged).
   const workspacesChanged = <T>(result: T): T => {
@@ -1006,8 +1039,13 @@ export async function startDashboard(
   const history = new TicketHistory(stateDir);
   // The Stats page's numbers (SF-117), with their caches.
   const stats = new Stats(stateDir, jobs);
-  const validateHost = localhostHostValidation();
-  const validateOrigin = localhostOriginValidation();
+  // Host and Origin are checked each on its own (SF-118): a proxy may keep the ts.net Host or
+  // rewrite it to the loopback one. A listed Origin passes as it is sent; any other goes to the
+  // loopback check (no Origin passes, a loopback hostname passes, anything else is a 403).
+  const validateHost = hostHeaderValidation(['localhost', '127.0.0.1', '[::1]', ...remoteOrigins.map((remote) => new URL(remote).hostname)]);
+  const validateLoopbackOrigin = localhostOriginValidation();
+  const remoteOrigin = (req: IncomingMessage): boolean => req.headers.origin !== undefined && remoteOrigins.includes(req.headers.origin);
+  const validateOrigin = (req: IncomingMessage, res: ServerResponse): boolean => remoteOrigin(req) || validateLoopbackOrigin(req, res);
   // The exact origin of the page, known once the listener has its port.
   let origin = '';
   const send = (stream: Stream, event: string, data: unknown): void => {
@@ -1736,8 +1774,8 @@ export async function startDashboard(
     const fail = (status: number, code: string, message: string, headers: Record<string, string> = {}): void => {
       json(res, status, { ok: false, error: { code, message } }, headers);
     };
-    if (req.headers.origin !== origin) {
-      fail(403, 'invalid_origin', `Actions need the Origin ${origin}.`);
+    if (req.headers.origin !== origin && !remoteOrigin(req)) {
+      fail(403, 'invalid_origin', `Actions need the Origin ${[origin, ...remoteOrigins].join(' or ')}.`);
       return;
     }
     // The updating marker's gate (SF-101), before anything is read or changed.
@@ -1980,6 +2018,7 @@ export async function startDashboard(
 
   return {
     url: dashboardUrl(address.port, tokenText),
+    remoteUrls: remoteDashboardUrls(remoteOrigins, tokenText),
     onStateChange(job) {
       refresh(job).catch((error: unknown) => console.error(error));
     },

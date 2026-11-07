@@ -501,6 +501,41 @@ button.tag:hover { border-color: var(--accent); }
 .composer .status { padding: 4px 10px; }
 .composer .doubt { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .composer .doubt:has(#action-doubt:empty):has(#refresh-button[hidden]) { display: none; }
+/* The hand-over panel of a handed-over job (SF-107, variant A of its prototype): the heading with
+   More ▾, the facts, the two paths side by side (stacked below 720 px), Ask for changes and the
+   outcome with its × or the muted "Earlier" note. */
+.composer .handover { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel-2); font-size: 13px; min-width: 0; }
+.handover .ho-top { display: grid; gap: 8px; min-width: 0; }
+.handover .ho-error { padding: 6px 10px; border-radius: var(--radius-sm); background: var(--del-bg); color: var(--del); overflow-wrap: anywhere; }
+.handover .ho-head { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+.handover .ho-head b { font-size: 14px; font-weight: 600; }
+.handover .ho-facts { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; font-size: 12px; color: var(--muted); min-width: 0; }
+.handover .ho-facts .mono { color: var(--fg); overflow-wrap: anywhere; }
+.handover .ho-risks { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.handover .ho-chip { font: 11px var(--mono); color: var(--warn); background: var(--warn-bg); border: 1px solid var(--warn); border-radius: 999px; padding: 0 6px; }
+.handover .ho-paths { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+@media (max-width: 720px) { .handover .ho-paths { grid-template-columns: minmax(0, 1fr); } }
+.handover .ho-path { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; min-width: 0; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--panel); }
+.handover .ho-path ol { margin: 0 0 4px; padding-left: 20px; flex: 1; overflow-wrap: anywhere; }
+.handover .ho-path .btn { margin-top: auto; }
+.handover .ho-ask { display: grid; gap: 6px; }
+.handover .ho-ask textarea { width: 100%; }
+.handover .ho-askrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.handover .ho-askrow .muted { font-size: 12px; }
+.handover .ho-more { position: relative; flex: none; }
+.handover .ho-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 12; width: min(300px, calc(100vw - 32px)); display: grid; gap: 2px; padding: 6px; background: var(--panel); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: 0 12px 40px rgba(0,0,0,.2); }
+.handover .ho-item { all: unset; box-sizing: border-box; display: grid; gap: 2px; padding: 6px 8px; border-radius: var(--radius-sm); cursor: pointer; font-size: 13px; color: var(--fg); }
+.handover .ho-item .muted { font-size: 12px; }
+.handover .ho-item:hover, .handover .ho-item:focus-visible { background: var(--selected); }
+.handover .ho-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.handover .ho-item.danger { color: var(--del); }
+.handover .ho-item[disabled] { opacity: .5; cursor: not-allowed; }
+.handover .ho-sep { height: 1px; margin: 4px 0; background: var(--border); }
+.handover .status.dismissable, .handover .status.earlier { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+.handover .status.earlier { background: var(--panel); border: 1px dashed var(--border-strong); }
+.handover .ho-x { all: unset; flex: none; width: 22px; height: 22px; line-height: 22px; text-align: center; border-radius: 4px; cursor: pointer; font-size: 16px; color: inherit; }
+.handover .ho-x:hover { background: var(--panel); }
+.handover .ho-x:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .finding .decide input.note { flex: 1 1 180px; min-width: 0; height: 26px; padding: 0 8px; font: 12px var(--sans); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); }
 pre.raw.doc .heading { font-weight: 700; }
 #stream .task-check { margin: 6px 0; font-size: 13px; }

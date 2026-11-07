@@ -496,6 +496,8 @@ export class FakeQueue implements DashboardQueue {
 export class FakeActions {
   readonly calls: Call[] = [];
   readonly #jobs: JobStore;
+  // What mergeRequestHost answers for every workspace: off by default; a test turns it on (SF-107).
+  mrHost: Awaited<ReturnType<DashboardActions['mergeRequestHost']>> = { host: null, reason: 'origin is not a GitHub or GitLab remote' };
 
   constructor(jobs: JobStore) {
     this.#jobs = jobs;
@@ -523,7 +525,7 @@ export class FakeActions {
       simplify: record('simplify', (workspace: string, ticket: string) => this.#simplify(workspace, ticket)),
       saveMr: record('saveMr', (workspace: string, ticket: string, input: { title: string; body: string; branch?: string; base?: string }) => this.#saveMr(workspace, ticket, input)),
       // Read on every payload: not recorded.
-      mergeRequestHost: async () => ({ host: null, reason: 'origin is not a GitHub or GitLab remote' }),
+      mergeRequestHost: async () => this.mrHost,
       checkHandedOver: async (workspace: string, ticket: string) => {
         const job = await this.#job(workspace, ticket);
         return { state: job.state, branch: job.branch };

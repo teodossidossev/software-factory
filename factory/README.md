@@ -1849,6 +1849,32 @@ action, the same on the board and in the CLI:
 The board shows "In your checkout on <branch>" for a `handed_over` job, `sf status` and the
 notification "in your checkout on <branch>" with the MR title and the file lines.
 
+**The hand-over panel** (SF-107). On the job page of a `handed_over` job, under the bold sentence
+"In your checkout on <branch>.", the composer is a panel that says what to do next, built from the
+same actions, confirmations and availability rules as before:
+
+- The heading "It is in your checkout. How do you finish it?" with a **More ▾** menu, and a facts
+  line: the branch, "In your checkout since HH:MM" (`handover.at`, local time), the last
+  iteration's files and lines ("<N> files, +A −D as Local Changes"; left out without a file list)
+  and "Accepted risks:" with one chip per ledger entry accepted as a risk (simplifications aside).
+  A stop of a hand-over step (the job's `error`) shows at the top, above the heading.
+- **Two paths** side by side (stacked below 720 px), neither preferred: **I push it myself**
+  (review and run it in the IDE, commit with the prefilled message and push, open the MR on the
+  forge; its button **I opened the MR** is `sf handed-done`) and **The factory pushes it** (its
+  commit, or your own commits; your uncommitted edits stay in the checkout). Its button is **Push
+  and open the MR…** (Create merge request, with its confirmation) when the workspace's Git host
+  takes merge requests, else **Push…** (Approve, with its confirmation).
+- **Ask for changes** under the paths: the message box and its button (off while the box is empty);
+  the job takes your checkout's edits back with the message.
+- **More ▾**: **Take it back** (your checkout returns to how it was; the job stays ready) and
+  **Abort the job…**. It opens with Enter or Space, the arrow keys move between its items, and a
+  choice, a click outside or Esc closes it (Esc only closes it; the focus goes back to More).
+
+The outcome of an action shows at the bottom of the panel with a × that dismisses it. An outcome
+from before the hand-over (for example "Settled R4") is never shown as current: it is a muted note
+"Earlier, at HH:MM (before the hand-over): …" with Dismiss. A dismissed outcome stays gone while
+the page is open. The board's card of a handed-over job is unchanged.
+
 **The hand-over** runs under the workspace's Git lock, with S the job's commit (`prepared_commit`)
 and B the target commit it used (`base_commit`), never the local branch named by the base:
 

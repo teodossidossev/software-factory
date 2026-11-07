@@ -160,3 +160,44 @@ browserTest('Ctrl+Enter in #msg posts say', async (fx) => {
   assert.deepEqual((await request).postDataJSON(), { message: 'Use the new helper.' });
   await eventually(async () => fx.actions.calls.map((call) => [call.method, ...call.args]), [['say', WS, JOBS.working, 'Use the new helper.']]);
 });
+
+// SF-107: the hand-over panel of a handed-over job (created here, not in the shared fixture, so the
+// board's tests keep their jobs): its two paths side by side at 1200 px, stacked at 600 px, and no
+// horizontal scroll.
+browserTest('job page (SF-107): the hand-over panel shows its two paths side by side at 1200 px and stacked at 600 px, without a horizontal scroll', async (fx) => {
+  const ticket = 'SF-H1';
+  const ready = (await fx.jobs.read(WS, JOBS.ready))!;
+  const commit = 'a'.repeat(40);
+  await fx.jobs.write({
+    ...ready, ticket, branch: `${ticket}-work`, state: 'handed_over', prepared_commit: commit, worktree: null, session_id: `session-${ticket}`,
+    handover: {
+      branch: `${ticket}-work`, saved: commit, base: 'b'.repeat(40), previous: { branch: 'main' }, untracked: [], template: null, cleanup: null,
+      at: '2026-11-01T10:40:00.000Z', checked_at: null, step: null,
+    },
+  });
+  fx.actions.mrHost = { host: 'github', reason: null } as typeof fx.actions.mrHost;
+  await fx.page.setViewportSize({ width: 1200, height: 900 });
+  await fx.open(`${WS}/${ticket}`);
+  const paths = fx.page.locator('#handover-panel .ho-path');
+  await eventually(() => paths.count(), 2);
+  await eventually(() => fx.page.locator('#handover-panel .ho-path .btn').allInnerTexts(), ['I opened the MR', 'Push and open the MR…']);
+  const boxes = async () => Promise.all([paths.nth(0).boundingBox(), paths.nth(1).boundingBox()]);
+  const noScroll = (): Promise<boolean> => fx.page.evaluate(() => [document.documentElement, document.getElementById('job')!, document.getElementById('composer')!]
+    .every((node) => node.scrollWidth <= node.clientWidth));
+
+  // Side by side: one row, two equal boxes.
+  const [a, b] = await boxes();
+  assert.ok(a !== null && b !== null);
+  assert.ok(Math.abs(a.y - b.y) < 1, `same top: ${a.y} and ${b.y}`);
+  assert.ok(b.x >= a.x + a.width, `B right of A: ${a.x}+${a.width} and ${b.x}`);
+  assert.ok(Math.abs(a.width - b.width) < 1, `equal widths: ${a.width} and ${b.width}`);
+  assert.equal(await noScroll(), true);
+
+  // Stacked below 720 px: B under A, as wide, inside the viewport.
+  await fx.page.setViewportSize({ width: 600, height: 900 });
+  await eventually(async () => {
+    const [top, bottom] = await boxes();
+    return top !== null && bottom !== null && bottom.y >= top.y + top.height && Math.abs(top.x - bottom.x) < 1 && bottom.x + bottom.width <= 600;
+  }, true);
+  assert.equal(await noScroll(), true);
+});

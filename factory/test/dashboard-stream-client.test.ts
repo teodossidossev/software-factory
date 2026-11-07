@@ -515,7 +515,6 @@ test('stream client: the composer per state: its sentence, its message box and i
     [job('paused', { paused: { from: 'awaiting_review', step: 'review', at: at(5) } }), ['Resume', 'Restart…', 'Abort…'], 'disabled',
       'Paused by you during iteration 1. Resume runs it again; Restart starts the ticket again from its current Task file.'],
     [job('ready_for_human_review'), ['Review the MR and push', 'Approve…', 'Hand over to my checkout', 'Create merge request', 'Send', 'Abort…'], 'shown', 'Reviews are clean and the MR text is written. Push when you are happy.'],
-    [job('handed_over', { prepared_commit: 'a'.repeat(40), worktree: null }), ['Approve…', 'Ask for changes', 'I opened the MR myself', 'Take it back', 'Create merge request', 'Abort…'], 'shown', 'In your checkout on T-1-demo.'],
     [job('pushed'), ['Create merge request', 'Archive'], 'hidden', 'Pushed at 12:05.'],
     [job('pushed', { mr: mr('closed') }), ['Create merge request', 'Refresh MR status', 'Archive'], 'hidden', 'Pushed at 12:05.'],
     [job('pushed', { mr: mr('open') }), ['Merge…', 'Refresh MR status', 'Archive'], 'hidden', 'Pushed at 12:05.'],
@@ -536,6 +535,12 @@ test('stream client: the composer per state: its sentence, its message box and i
     assert.equal(acts(page).filter((node) => node.className.includes('primary')).length, primary ? 1 : 0, name);
     assert.equal(acts(page)[0]!.className, primary ? 'btn primary' : buttons[0] === 'Abort…' ? 'btn danger' : 'btn', name);
   }
+  // SF-107: a handed-over job's actions are in its hand-over panel; the bar's row is empty and hidden.
+  await update(page, job('handed_over', { prepared_commit: 'a'.repeat(40), worktree: null }));
+  assert.equal(page.$('composer-sentence').children[0]!.textContent, 'In your checkout on T-1-demo.');
+  assert.deepEqual([labels(page), page.$('composer').querySelector('.crow')!.hidden, page.$('msg').disabled], [[], true, false]);
+  assert.deepEqual(page.$('handover-panel').querySelectorAll('button').map((node) => node.textContent),
+    ['More ▾', 'Take it backYour checkout returns to how it was; the job stays ready.', 'Abort the job…', 'I opened the MR', 'Push and open the MR…', 'Ask for changes']);
   // The merge request line of a pushed job, a link to its https URL.
   await update(page, job('pushed', { mr: mr('open') }));
   assert.equal(page.$('mr-line').textContent, 'Merge request #7 (open): https://github.com/o/r/pull/7');

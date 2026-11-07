@@ -218,25 +218,57 @@ test('job client: the old MR view is gone; the Merge request screen reads mr-vie
   assert.deepEqual([gets(page, 'api/jobs/app/T-1/mr-view').length, gets(page, 'api/jobs/app/T-1/mr').length], [1, 0]);
 });
 
-// The hand-over (SF-073) in the composer: the actions of a handed-over job and of a ready one the
-// hand-over skipped, each posted at once.
-test('job client (SF-073): a handed-over job says "In your checkout on <branch>" and offers Approve, Ask for changes, I opened the MR myself and Take it back; a ready one with handoff_skipped offers Hand over to my checkout with the skip message', async () => {
-  const handover = { branch: 'T-1-demo', saved: 'a'.repeat(40), base: 'b'.repeat(40), previous: { branch: 'main' }, untracked: [], template: null, cleanup: null, at: '2026-11-01T10:06:00.000Z', checked_at: null, step: null };
-  const handed = job('handed_over', { prepared_commit: 'a'.repeat(40), worktree: null, handover, handoff_skipped: null, mr_host: { host: 'github', reason: null } });
+// ---------- The hand-over (SF-073) and its panel (SF-107) ----------
+
+const HANDOVER = {
+  branch: 'T-1-demo', saved: 'a'.repeat(40), base: 'b'.repeat(40), previous: { branch: 'main' }, untracked: [], template: null, cleanup: null,
+  at: '2026-11-01T10:06:00.000Z', checked_at: null, step: null,
+};
+
+function handedOver(extra: Record<string, unknown> = {}): Job {
+  return job('handed_over', { prepared_commit: 'a'.repeat(40), worktree: null, handover: HANDOVER, handoff_skipped: null, mr_host: { host: 'github', reason: null }, ...extra });
+}
+
+const FILE_CHANGES = [
+  { path: 'README.md', status: 'modified', sensitive: 'no', scope: 'none', additions: 3, deletions: 1 },
+  { path: 'a.txt', status: 'added', sensitive: 'no', scope: 'none', additions: 2, deletions: 0 },
+];
+
+function entry(id: string, status: string, reviewer = 'claude') {
+  return {
+    id, iteration: 1, reviewer, severity: 'major', path: 'README.md', problem: `Problem of ${id}.`, expected: 'Better.', status,
+    response: '', evidence: '', reopened: 0, asked: 1, caused_by: '', dispute: null, settled: null,
+  };
+}
+
+const panelOf = (page: Page): FakeElement => page.$('handover-panel');
+// The panel's button whose text starts with the label (a menu item has a second line).
+const inPanel = (page: Page, label: string): FakeElement => panelOf(page).querySelectorAll('button').find((node) => node.textContent.startsWith(label))!;
+const menuOf = (page: Page): FakeElement => panelOf(page).querySelector('.ho-menu')!;
+const posts = (page: Page, action: string): FetchRequest[] => page.requests.filter((request) => request.method === 'POST' && request.path === `api/jobs/app/T-1/${action}`);
+const typeMessage = (page: Page, text: string): void => {
+  page.$('msg').value = text;
+  page.$('msg').dispatch('input');
+};
+
+// The hand-over (SF-073) in the composer: a handed-over job's hand-over panel (SF-107) and a ready
+// one the hand-over skipped, each action posted at once.
+test('job client (SF-073): a handed-over job says "In your checkout on <branch>" and shows its hand-over panel; a ready one with handoff_skipped offers Hand over to my checkout with the skip message', async () => {
+  const handed = handedOver();
   const page = await openJob(detail(handed, { mr: true, mr_title: 'feat(T-1): Demo' } as Partial<Omit<Detail, 'job'>>));
   const acts = (): FakeElement[] => page.$('acts').children as FakeElement[];
   const act = (label: string): FakeElement => acts().find((node) => node.textContent === label)!;
   const posted = (action: string): FetchRequest[] => page.requests.filter((request) => request.method === 'POST' && request.path === `api/jobs/app/T-1/${action}`);
   assert.equal(facts(page)[0], 'In your checkout on T-1-demo');
-  assert.equal(page.$('composer-sentence').children[0]!.textContent, 'In your checkout on T-1-demo.');
-  assert.match(page.$('composer-sentence').children[1]!.textContent, /^Read, run and change it there\. Approve pushes it; Ask for changes sends your edits/);
-  assert.deepEqual(acts().map((node) => node.textContent), ['Approve…', 'Ask for changes', 'I opened the MR myself', 'Take it back', 'Create merge request', 'Abort…']);
-  assert.deepEqual([act('Approve…').className, act('Approve…').disabled, page.$('msg').disabled], ['btn primary', false, false]);
+  // Only the bold sentence stays above the panel; the bar's row is empty.
+  assert.deepEqual(texts(page.$('composer-sentence')), ['In your checkout on T-1-demo.']);
+  assert.deepEqual([acts().length, page.$('msg').disabled, panelOf(page).contains(page.$('msg'))], [0, false, true]);
   // The card on the board says where the job is.
   assert.notEqual(page.$('list-you').all().find((node) => node.className === 'reason ready' && node.textContent === 'In your checkout on T-1-demo'), undefined);
 
-  // Take it back goes at once.
-  act('Take it back').click();
+  // Take it back (in More) goes at once.
+  inPanel(page, 'More ▾').click();
+  inPanel(page, 'Take it back').click();
   await page.flush();
   assert.deepEqual(posted('takeback').map((request) => request.body), ['{}']);
   posted('takeback')[0]!.respond(200, { ok: true, result: { state: 'ready_for_human_review', branch: 'T-1-demo', worktree: '/wt/T-1' } });
@@ -252,6 +284,205 @@ test('job client (SF-073): a handed-over job says "In your checkout on <branch>"
   act('Hand over to my checkout').click();
   await page.flush();
   assert.deepEqual(posted('handover').map((request) => request.body), ['{}']);
+});
+
+test('job client (SF-107): a handed-over job shows the hand-over panel: the heading with More, the facts, the two paths and Ask for changes, in place of the button row', async () => {
+  const ledger = [entry('R4', 'accepted_risk'), entry('S1', 'accepted_risk', 'simplify'), entry('R5', 'open')];
+  const page = await openJob({ ...detail(handedOver(), { iterations: [iteration(1, { files: FILE_CHANGES })] }), ledger } as unknown as Detail);
+  const composer = page.$('composer');
+  const panel = panelOf(page);
+  // The panel right after #confirm; .crow hidden and #acts empty; #msg and #action-status inside it.
+  assert.equal(composer.children.indexOf(panel), composer.children.indexOf(page.$('confirm')) + 1);
+  assert.deepEqual([composer.querySelector('.crow')!.hidden, (page.$('acts').children as FakeElement[]).length], [true, 0]);
+  assert.deepEqual([panel.contains(page.$('msg')), panel.contains(page.$('action-status')), page.$('action-status').getAttribute('role')], [true, true, 'status']);
+  const top = panel.querySelector('.ho-top')!;
+  // The heading and More ▾, its menu closed.
+  assert.deepEqual(texts(top.querySelector('.ho-head')!), ['It is in your checkout. How do you finish it?', inPanel(page, 'More ▾').parentNode!.textContent]);
+  assert.deepEqual([inPanel(page, 'More ▾').getAttribute('aria-expanded'), menuOf(page).hidden, menuOf(page).getAttribute('role')], ['false', true, 'menu']);
+  // The facts: the branch, since when (local time), the last iteration's files and lines, the accepted risks (no simplification).
+  assert.deepEqual(texts(top.querySelector('.ho-facts')!), ['T-1-demo', 'In your checkout since 12:06', '2 files, +5 −1 as Local Changes', 'Accepted risks:R4']);
+  const chips = top.querySelectorAll('.ho-chip');
+  assert.deepEqual(chips.map((chip) => [chip.textContent, chip.getAttribute('title'), chip.tagName]), [['R4', 'Problem of R4.', 'SPAN']]);
+  // The two paths, each with its steps and its primary button.
+  const paths = top.querySelectorAll('.ho-path');
+  assert.deepEqual(paths.map((path) => [path.children[0]!.textContent, texts(path.children[1] as FakeElement), path.children[2]!.textContent, (path.children[2] as FakeElement).className]), [
+    ['I push it myself', ['Review and run it in the IDE.', 'Commit (the message is prefilled with the MR text) and push.', 'Open the MR on the forge.'], 'I opened the MR', 'btn primary'],
+    ['The factory pushes it', ['Review it in the IDE.', 'The factory pushes its commit (or your own commits, if you committed); your uncommitted edits stay in your checkout and are not pushed.', 'Then it opens the MR.'],
+      'Push and open the MR…', 'btn primary'],
+  ]);
+  // Ask for changes: the moved #msg with its placeholder, the button and its line.
+  const ask = panel.querySelector('.ho-ask')!;
+  assert.equal(ask.children[0], page.$('msg'));
+  assert.equal((page.$('msg') as unknown as { placeholder: string }).placeholder, 'What should the Implementer change? Your edits in the checkout go with the message.');
+  assert.deepEqual(texts(ask.querySelector('.ho-askrow')!), ['Ask for changes', "The job takes your checkout's edits back and works on your message."]);
+  // No muted SF-073 sentence and none of the old row's buttons.
+  assert.deepEqual(texts(page.$('composer-sentence')), ['In your checkout on T-1-demo.']);
+  for (const label of ['Approve…', 'I opened the MR myself', 'Create merge request', 'Abort…']) {
+    assert.equal(page.$('composer').all().some((node) => node.tagName === 'BUTTON' && node.textContent === label), false, label);
+  }
+
+  // No accepted risk: no "Accepted risks"; a last iteration without a file list: no files fact.
+  await show(page, { ...detail(handedOver(), { iterations: [iteration(1, { files: FILE_CHANGES }), iteration(2, { files: null })] }), ledger: [entry('S1', 'accepted_risk', 'simplify')] } as unknown as Detail);
+  assert.deepEqual(texts(panelOf(page).querySelector('.ho-facts')!), ['T-1-demo', 'In your checkout since 12:06']);
+  // Without an iteration either.
+  await show(page, detail(handedOver()));
+  assert.deepEqual(texts(panelOf(page).querySelector('.ho-facts')!), ['T-1-demo', 'In your checkout since 12:06']);
+});
+
+test('job client (SF-107): the panel\'s actions: I opened the MR posts handed-done; Push and open the MR… or Push… opens the existing confirmation; Ask for changes sends say; More holds Take it back and Abort', async () => {
+  const page = await openJob(detail(handedOver(), { mr: true, mr_title: 'feat(T-1): Demo' } as Partial<Omit<Detail, 'job'>>));
+  // I opened the MR posts handed-done at once; while it is out its button is off with the reason.
+  inPanel(page, 'I opened the MR').click();
+  await page.flush();
+  assert.deepEqual(posts(page, 'handed-done').map((request) => request.body), ['{}']);
+  assert.deepEqual([inPanel(page, 'I opened the MR').disabled, inPanel(page, 'I opened the MR').getAttribute('title')], [true, 'origin is being asked for your push.']);
+  posts(page, 'handed-done')[0]!.respond(200, { ok: true, result: { state: 'handed_over', branch: 'T-1-demo', error: { code: 'branch_not_pushed', message: 'origin has no T-1-demo.' } } });
+  await page.flush();
+
+  // With an MR host: Push and open the MR… opens mr-create's confirmation; nothing is posted before Confirm.
+  inPanel(page, 'Push and open the MR…').click();
+  assert.deepEqual([page.$('confirm').hidden, page.$('confirm-title').textContent, page.$('confirm-ok').textContent], [false, 'Create merge request app/T-1?', 'Create the merge request']);
+  assert.match(page.$('confirm-text').textContent, /^Pushes branch T-1-demo to origin as Approve does, then opens a merge request on GitHub/);
+  // An open confirmation turns the panel's buttons off, as the bar's.
+  assert.deepEqual([inPanel(page, 'I opened the MR').disabled, inPanel(page, 'I opened the MR').getAttribute('title')], [true, 'a confirmation is open: confirm or cancel it first.']);
+  page.$('confirm-ok').click();
+  await page.flush();
+  assert.deepEqual(posts(page, 'mr-create').map((request) => request.body), ['{}']);
+  posts(page, 'mr-create')[0]!.respond(200, { ok: true, result: { state: 'handed_over', branch: 'T-1-demo', error: { code: 'push_failed', message: 'offline' } } });
+  await page.flush();
+
+  // Without one: Push… opens approve's confirmation; path B does not open an MR.
+  const off = handedOver({ mr_host: { host: 'github', reason: 'SF_GITHUB_TOKEN is not set' } });
+  page.streams.at(-1)!.emit('jobs', { jobs: [off] });
+  await show(page, detail(off));
+  const pathB = panelOf(page).querySelectorAll('.ho-path')[1]!;
+  assert.deepEqual([texts(pathB.children[1] as FakeElement).length, pathB.children[2]!.textContent], [2, 'Push…']);
+  inPanel(page, 'Push…').click();
+  assert.deepEqual([page.$('confirm-title').textContent, page.$('confirm-ok').textContent], ['Approve app/T-1?', 'Approve: push the branch']);
+  assert.match(page.$('confirm-text').textContent, /^Pushes branch T-1-demo to origin from your checkout/);
+  page.$('confirm-cancel').click();
+  assert.equal(posts(page, 'approve').length, 0);
+
+  // Ask for changes: off for an empty or blank box; it sends say with the text.
+  assert.deepEqual([inPanel(page, 'Ask for changes').disabled, inPanel(page, 'Ask for changes').getAttribute('title')], [true, 'write a message first.']);
+  typeMessage(page, '   ');
+  assert.equal(inPanel(page, 'Ask for changes').disabled, true);
+  typeMessage(page, 'Rename the helper.');
+  assert.equal(inPanel(page, 'Ask for changes').disabled, false);
+  inPanel(page, 'Ask for changes').click();
+  await page.flush();
+  assert.deepEqual(posts(page, 'say').map((request) => request.body), ['{"message":"Rename the helper."}']);
+  posts(page, 'say')[0]!.respond(200, { ok: true, result: { state: 'working' } });
+  await page.flush();
+
+  // More ▾: opens on a click with the focus on Take it back; the arrows move between its items.
+  inPanel(page, 'More ▾').click();
+  assert.deepEqual([menuOf(page).hidden, inPanel(page, 'More ▾').getAttribute('aria-expanded'), page.document.activeElement?.textContent.startsWith('Take it back')], [false, 'true', true]);
+  assert.deepEqual(menuOf(page).children.map((node) => [(node as FakeElement).getAttribute('role'), (node as FakeElement).className]),
+    [['menuitem', 'ho-item'], ['separator', 'ho-sep'], ['menuitem', 'ho-item danger']]);
+  page.key('ArrowDown');
+  assert.equal(page.document.activeElement?.textContent, 'Abort the job…');
+  page.key('ArrowDown');
+  assert.equal(page.document.activeElement?.textContent.startsWith('Take it back'), true);
+  page.key('ArrowUp');
+  assert.equal(page.document.activeElement?.textContent, 'Abort the job…');
+  // A click outside closes it.
+  page.$('composer-sentence').click();
+  assert.equal(menuOf(page).hidden, true);
+  // Abort the job… opens Abort's confirmation and closes the menu.
+  inPanel(page, 'More ▾').click();
+  inPanel(page, 'Abort the job…').click();
+  assert.deepEqual([menuOf(page).hidden, page.$('confirm-title').textContent], [true, 'Abort app/T-1?']);
+  page.$('confirm-ok').click();
+  await page.flush();
+  assert.deepEqual(posts(page, 'abort').map((request) => request.body), ['{"discard":false}']);
+  posts(page, 'abort')[0]!.respond(200, { ok: true, result: { state: 'aborted', branch: 'T-1-demo', discarded: false } });
+  await page.flush();
+  // Take it back posts takeback and closes the menu.
+  inPanel(page, 'More ▾').click();
+  inPanel(page, 'Take it back').click();
+  await page.flush();
+  assert.deepEqual([menuOf(page).hidden, posts(page, 'takeback').map((request) => request.body)], [true, ['{}']]);
+});
+
+test('job client (SF-107): an outcome from before the hand-over is the "Earlier, at …" note and Dismiss hides it for good; an action on the panel shows as current, with a ×', async () => {
+  const ready = job('ready_for_human_review', { worktree: '/wt/T-1', handover: null, handoff_skipped: null, mr_host: { host: 'github', reason: null } });
+  const current = detail(ready);
+  const page = await openJob(current);
+  typeMessage(page, 'One more test.');
+  page.$('say-button').click();
+  await page.flush();
+  posts(page, 'say')[0]!.respond(200, { ok: true, result: { state: 'working' } });
+  await page.flush();
+  assert.equal(page.$('action-status').textContent, 'Sent: the Implementer is working on it (state working).');
+
+  // Handed over after it: the outcome is a muted note, not the current line.
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const handed = handedOver({ handover: { ...HANDOVER, at: new Date().toISOString() } });
+  current.job = handed;
+  page.streams.at(-1)!.emit('jobs', { jobs: [handed] });
+  await show(page, current);
+  const status = page.$('action-status');
+  assert.equal(panelOf(page).contains(status), true);
+  assert.equal(status.className, 'status earlier');
+  assert.match(status.textContent, /^Earlier, at \d\d:\d\d \(before the hand-over\): Sent: the Implementer is working on it \(state working\)\.Dismiss$/);
+  (status.querySelector('button') as FakeElement).click();
+  assert.deepEqual([status.textContent, status.className], ['', 'status']);
+  // It does not come back with the next event.
+  await show(page, current);
+  assert.equal(page.$('action-status').textContent, '');
+
+  // An action taken on the panel: its outcome is current, with a × that dismisses it.
+  inPanel(page, 'I opened the MR').click();
+  await page.flush();
+  assert.equal(page.$('action-status').className, 'status pending dismissable');
+  posts(page, 'handed-done')[0]!.respond(200, { ok: true, result: { state: 'handed_over', branch: 'T-1-demo', error: { code: 'branch_not_pushed', message: 'origin has no T-1-demo.' } } });
+  await page.flush();
+  assert.equal(page.$('action-status').className, 'status ok dismissable');
+  assert.match(page.$('action-status').textContent, /^Pushed by you: T-1-demo is on origin; the job is handed_over\.×$/);
+  const close = page.$('action-status').querySelector('button')!;
+  assert.deepEqual([close.textContent, close.getAttribute('aria-label')], ['×', 'Dismiss']);
+  close.click();
+  assert.equal(page.$('action-status').textContent, '');
+
+  // Another state: the outcome line exactly as before (no ×, no note), #msg and #action-status back in place.
+  const back = job('ready_for_human_review', { worktree: '/wt/T-1', handover: null, handoff_skipped: null, mr_host: { host: 'github', reason: null } });
+  current.job = back;
+  page.streams.at(-1)!.emit('jobs', { jobs: [back] });
+  await show(page, current);
+  const composer = page.$('composer');
+  const crow = composer.querySelector('.crow')!;
+  assert.equal(page.document.getElementById('handover-panel'), null);
+  assert.deepEqual([crow.hidden, crow.children.indexOf(page.$('msg')), crow.children.indexOf(page.$('acts'))], [false, 0, 1]);
+  assert.equal(composer.children.indexOf(page.$('action-status')), composer.children.indexOf(crow) + 1);
+  assert.equal((composer.children[composer.children.indexOf(crow) + 2] as FakeElement).className, 'doubt');
+  typeMessage(page, 'And one more.');
+  page.$('say-button').click();
+  await page.flush();
+  posts(page, 'say')[1]!.respond(200, { ok: true, result: { state: 'working' } });
+  await page.flush();
+  assert.deepEqual([page.$('action-status').className, page.$('action-status').children.length], ['status ok', 1]);
+});
+
+test('job client (SF-107): Escape with the More menu open closes it only: the job page stays and the focus is on More', async () => {
+  const page = await openJob(detail(handedOver()));
+  inPanel(page, 'More ▾').click();
+  assert.equal(menuOf(page).hidden, false);
+  page.key('Escape');
+  assert.deepEqual([menuOf(page).hidden, page.$('job').hidden, page.location.hash], [true, false, '#app/T-1']);
+  assert.equal(page.document.activeElement, inPanel(page, 'More ▾'));
+  assert.equal(inPanel(page, 'More ▾').getAttribute('aria-expanded'), 'false');
+  // The next Escape goes back as before.
+  page.key('Escape');
+  assert.equal(page.$('job').hidden, true);
+});
+
+test('job client (SF-107): a handed-over job with an error shows its code and message at the top of the panel, above the heading', async () => {
+  const page = await openJob(detail(handedOver({ error: { code: 'handover_restore_failed', message: 'git checkout main failed.' } })));
+  const top = panelOf(page).querySelector('.ho-top')!;
+  assert.deepEqual([(top.children[0] as FakeElement).className, top.children[0]!.textContent], ['ho-error', 'handover_restore_failed: git checkout main failed.']);
+  assert.equal((top.children[1] as FakeElement).className, 'ho-head');
+  assert.deepEqual(texts(page.$('composer-sentence')), ['In your checkout on T-1-demo.']);
 });
 
 test('job client (SF-072): a job waiting for limits offers Resume now and Abort…; from a turn Resume now carries the message box\'s text, from a review round none; after a reset under wait it says so', async () => {

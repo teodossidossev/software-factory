@@ -92,12 +92,14 @@ const LEDGER_CODES = ['review_churn', 'review_disputed'];
 const SIMPLIFY_CODE = 'simplify_offered';
 // The Fix round limit (SF-115), which Accept and prepare MR takes on whatever the last verdict (SF-131).
 const LIMIT_CODE = 'iteration_limit';
-const ACCEPT_CODES = [...GATE_CODES, ...LEDGER_CODES, LIMIT_CODE, SIMPLIFY_CODE];
+// The stops of the workspace's tests (SF-128), which Accept and prepare MR takes on without passing tests.
+const TESTS_CODES = ['tests_failed', 'tests_unavailable'];
+const ACCEPT_CODES = [...GATE_CODES, ...LEDGER_CODES, LIMIT_CODE, SIMPLIFY_CODE, ...TESTS_CODES];
 // The stops whose findings the user settles here (Accept risk, Must fix).
 const SETTLE_STOPS = ['escalated', ...LEDGER_CODES];
 // The entries of STOPS (aliases included) whose Retry runs MR preparation again without a new
 // review (SF-087): MR_RETRY_CODES of factory/src/execution.ts.
-const RETRY_STOPS = ['fetch_failed', 'mr_serve_restarted', 'mr_failed'];
+const RETRY_STOPS = ['fetch_failed', 'mr_serve_restarted', 'mr_failed', 'tests_unavailable'];
 
 const state = {
   jobs: [],
@@ -1829,6 +1831,59 @@ function fixItems(text) {
 // A toggle of an entry (data-toggle: the entry's key, or "<key>/task", "<key>/report").
 const toggleButton = (key, text) => button('linkish', text, { toggle: key });
 
+// A test run's duration (SF-128): "12 s" under a minute, else as dur.
+const testsDur = (ms) => (typeof ms !== 'number' ? null : ms < 60000 ? `${Math.max(0, Math.round(ms / 1000))} s` : dur(ms));
+
+// The line of a run of the workspace's test command (SF-128): running, or how it ended (res: its
+// tests_result), or the user's Accept of it.
+function testsLine(res) {
+  if (res === undefined || res === null) {
+    return 'Tests running';
+  }
+  const after = testsDur(res.ms) === null ? '' : ` after ${testsDur(res.ms)}`;
+  const ending = res.timed_out === true ? 'timed out' : `exit ${res.exit_code ?? '?'}`;
+  switch (res.outcome) {
+    case 'passed':
+      return `Tests passed${after}`;
+    case 'failed':
+      return res.timed_out === true ? `Tests timed out${after}` : `Tests failed (exit ${res.exit_code ?? '?'})${after}`;
+    case 'unavailable':
+      return `Tests could not run (${res.reason ?? 'unknown reason'})`;
+    case 'accepted_failing':
+      return typeof res.reason === 'string' ? `Tests accepted by you without running (${res.reason})` : `Tests accepted by you without passing (${ending})`;
+    default:
+      return `Tests ended (${String(res.outcome ?? '')})`;
+  }
+}
+
+// The body of a test run entry (SF-128): its line, the command, and the output's last lines behind
+// the toggle (collapsed).
+function testsBody(entry, open) {
+  const res = entry.t === 'tests_result' ? entry : entry.res;
+  const tail = typeof res?.tail === 'string' ? res.tail : '';
+  const line = tail === '' ? el('div', 'line', testsLine(res)) : button('line', testsLine(res), { toggle: entry.k });
+  const nodes = [line, el('div', 'mono fs12', String(entry.command ?? ''))];
+  if (open && tail !== '') {
+    const more = el('div', 'more');
+    more.append(el('span', 'lbl', res.tail_truncated === true ? 'Output, its last lines' : 'Output'), el('pre', '', tail));
+    nodes.push(more);
+  }
+  return nodes;
+}
+
+// The command of the open job's last test run, as inline code, for the Accept confirmation (SF-128).
+function testsCommand(key) {
+  if (key === state.key) {
+    for (let index = state.entries.length - 1; index >= 0; index -= 1) {
+      const entry = state.entries[index];
+      if ((entry.t === 'tests' || entry.t === 'tests_result') && typeof entry.command === 'string' && entry.command !== '') {
+        return `\`${entry.command}\``;
+      }
+    }
+  }
+  return "the workspace's test command";
+}
+
 // The changes entry: the iteration's files as path links, Open these changes (c) and its Report.
 function changesEntry(entry) {
   const block = el('div', 'block');
@@ -2254,6 +2309,9 @@ function entryBody(entry, open) {
       return [verdictBody(entry, open)];
     case 'changes':
       return [changesEntry(entry)];
+    case 'tests':
+    case 'tests_result':
+      return testsBody(entry, open);
     case 'simplify': {
       const suggestions = Array.isArray(entry.suggestions) ? entry.suggestions : [];
       const block = el('div', 'block');
@@ -2407,9 +2465,21 @@ function toolOf(id) {
   return null;
 }
 
+// The test run a tests_result belongs to (SF-128): the last tests entry of its run; null when the page
+// has not seen it.
+function testsOf(run) {
+  for (let index = state.entries.length - 1; index >= 0; index -= 1) {
+    const entry = state.entries[index];
+    if (entry.t === 'tests' && entry.run === run) {
+      return entry;
+    }
+  }
+  return null;
+}
+
 // Takes the entries of a page or of a live event, alike: an entry whose k is shown is ignored; a
-// tool_result joins its tool by id (dropped without it). Returns the entries added and the tools
-// that got their result.
+// tool_result joins its tool by id (dropped without it), a tests_result its test run by run (shown
+// on its own without it). Returns the entries added and the tools and runs that got their result.
 function takeEntries(list) {
   const added = [];
   const joined = [];
@@ -2427,6 +2497,16 @@ function takeEntries(list) {
         }
       }
       continue;
+    }
+    if (entry.t === 'tests_result') {
+      const run = typeof entry.run === 'string' && entry.run !== '' ? testsOf(entry.run) : null;
+      if (run !== null) {
+        run.res = entry;
+        if (!joined.includes(run) && !added.includes(run)) {
+          joined.push(run);
+        }
+        continue;
+      }
     }
     state.entries.push(entry);
     added.push(entry);
@@ -2642,6 +2722,10 @@ function stopActions(job, detail) {
       return [...accept, SEND, RESTART, ABORT];
     case 'gate_failed':
       return [...accept, GO_ON, ABORT];
+    case 'tests_failed':
+      return [...accept, SEND, ABORT];
+    case 'tests_unavailable':
+      return retryable(job) ? [RETRY, ...accept, SEND, ABORT] : [...accept, SEND, ABORT];
     case 'review_failed':
       return [{ a: 'review', l: 'Retry review' }, ABORT];
     case 'serve_restarted':
@@ -3437,7 +3521,9 @@ function openConfirm(action) {
     abort: `Ends the job on branch ${job.branch}: the Implementer session stops and queued messages are dropped. The branch and its worktree stay as they are.`,
     restart: `Starts ${job.ticket} again from its current Task file, as a new job on a fresh worktree and branch from ${job.base}. Thrown away: the Implementer session${job.state === 'paused' || job.state === 'needs_human' ? ' and its queued messages' : ''}, the worktree${typeof job.worktree === 'string' ? ` ${job.worktree}` : ''} with its uncommitted changes (unless kept below) and the branch ${job.branch}, deleted only when it has no commit beyond the base and was never pushed: otherwise nothing is touched and the restart is refused. The job's history is archived as sf reset does.`,
     simplify: `Writes one Fix section “Simplify” with the suggestions below into the Task file; the Implementer applies them and the Claude review and the gate review the result as usual. The suggestions are recorded in the ledger as your choice, so a reviewer cannot ask for them back. It runs once per job.`,
-    accept: job.error?.code === SIMPLIFY_CODE
+    accept: TESTS_CODES.includes(job.error?.code)
+      ? `Accepts iteration ${job.iteration} without passing tests (${testsCommand(key)}); the MR text records it under ### Checks.`
+      : job.error?.code === SIMPLIFY_CODE
       ? `Skips the simplification: iteration ${job.iteration}, which the reviewers found clean, goes on to MR preparation as it is. The suggestions go into the MR text under “Simplifications not applied”, for a follow-up ticket.`
       : job.error?.code === LIMIT_CODE
       ? `Accepts iteration ${job.iteration} at the Fix round limit with its open findings unapplied (listed in the MR text). The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. The override is recorded in the job's history.`
@@ -3653,6 +3739,8 @@ const said = (job) => (firstLine(job.error?.message) === '' ? '' : `: ${firstLin
 // A failed session that hit the Claude usage limit ("You've hit your … limit · resets 3am (Europe/Sofia)").
 const usageLimited = (job) => job.error?.code === 'session_failed' && /hit your .*limit/i.test(firstLine(job.error?.message));
 const resetTime = (job) => /resets\s+(.+)$/i.exec(firstLine(job.error?.message))?.[1] ?? null;
+// How the last run of a tests_failed stop ended (SF-128): "exit 1" or "timed out after 30 min" of its message.
+const testsEnding = (job) => /\((exit -?\d+|timed out after [^)]+)\) on iteration/.exec(firstLine(job.error?.message))?.[1] ?? null;
 
 // The stop codes (SF-077): one table for the cards and the job page (its header, its stop block
 // and its composer, SF-078). A decision (the factory needs the user's choice; nothing failed) never
@@ -3693,6 +3781,14 @@ const STOPS = {
   iteration_limit: {
     kind: 'decision', reason: 'Fix round limit reached', button: () => 'Give a direction',
     sentence: (job) => `${typeof job.fixes === 'number' ? `The reviewers asked for fixes ${counted(job.fixes, 'time')}, the limit.` : 'The reviewers asked for fixes as often as the limit allows.'} Accept the change with its open findings listed in the MR text, give the Implementer a direction, or abort.`,
+  },
+  tests_failed: {
+    kind: 'decision', reason: 'Tests keep failing', button: () => 'Decide',
+    sentence: (job) => `The workspace's tests still fail after the Tests Fix rounds${testsEnding(job) !== null ? ` (${testsEnding(job)})` : ''}. Accept the change without passing tests, or tell the Implementer what to do.`,
+  },
+  tests_unavailable: {
+    kind: 'error', reason: 'Tests could not run', button: (job) => (retryable(job) ? 'Retry' : 'Decide'),
+    sentence: (job) => `The workspace's tests could not run${said(job)}. Fix it on this machine and Retry, or accept without tests.`,
   },
   max_turns: {
     kind: 'decision', reason: 'Turn limit reached', button: () => 'Tell it to go on',

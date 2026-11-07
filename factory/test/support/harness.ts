@@ -7,7 +7,7 @@
 // that create and remove the temp dir, and stop every sf process the tests started
 // (test/support/children.ts, SF-114).
 import assert from 'node:assert/strict';
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -68,6 +68,10 @@ export interface Served {
   // The state directory, for the socket.
   state: string;
 }
+
+// Whether bwrap can create the sandbox of a workspace's test command (SF-128) on this machine: the
+// tests that run one are todos where it cannot.
+export const bwrapWorks = spawnSync('bwrap', ['--die-with-parent', '--unshare-pid', '--unshare-net', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--', '/bin/sh', '-c', 'exit 0'], { stdio: 'ignore' }).status === 0;
 
 export function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });

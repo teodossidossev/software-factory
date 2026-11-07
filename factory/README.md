@@ -228,7 +228,7 @@ started by the run queue as before.
 | `SF_CHECK_AFTER_FIX_MIN` | `5` | `check_after_minutes` in the job's status during later iterations. |
 | `SF_MAX_TURNS` | `150` | `maxTurns` of every Implementer turn. |
 | `SF_TURN_LIMIT_CONTINUES` | `1` | Continuations the factory sends by itself, per chain of Implementer turns, after a turn that reached `SF_MAX_TURNS` while making progress (SF-069, below); `0` to `10`, `0` stops at the first limit. |
-| `SF_MAX_ITERATIONS` | `3` | Fix sections a job may get (the reviewers', counted in the job's `fixes`); the next Fix is refused (`iteration_limit`, job `needs_human`): its items become open ledger entries, and the stop can be accepted whatever the last verdict (SF-131), with the open findings listed in the MR text. An `sf say` turn does not count. |
+| `SF_MAX_ITERATIONS` | `3` | Fix sections a job may get (the reviewers', counted in the job's `fixes`); the next Fix is refused (`iteration_limit`, job `needs_human`): its items become open ledger entries, and the stop can be accepted whatever the last verdict (SF-131), with the open findings listed in the MR text. An `sf say` turn does not count, nor a Tests Fix (SF-128, section MR preparation: `TEST_FIX_ROUNDS` bounds those). |
 | `SF_CLAUDE` | bundled binary | Absolute path of the Claude Code executable (`pathToClaudeCodeExecutable`). |
 | `SF_MODEL` | unset | Model of every Implementer turn, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
 | `SF_REVIEW` | on | `off` runs no Claude review (nor the gate): a published iteration stays in `awaiting_review` until the user goes on with `sf say` or aborts. |
@@ -247,6 +247,7 @@ started by the run queue as before.
 | `SF_GATE_MAX_ROUNDS` | `5` | Fix verdicts of the gate per job (the job's `gate_fixes`); the next one is not applied (`gate_rounds`, job `needs_human`). |
 | `SF_GATE_MAX_TOKENS` | `5000000` | Input plus output tokens of all gate runs of a job (the job's `gate_tokens`); a gate does not start at the limit, and a run that goes over it is not applied (`gate_budget`, job `needs_human`). |
 | `SF_GATE_TIMEOUT_MS` | `900000` | How long one gate run may take; then SIGTERM, and SIGKILL 5 s later (`gate_failed`). |
+| `SF_TEST_TIMEOUT_MS` | `1800000` (30 min) | How long one run of a workspace's `test_command` may take (SF-128, section MR preparation), 1 to 14400000 (4 h); then its process group is killed with SIGKILL and the run failed (a Tests Fix that names the timeout). |
 | `SF_GATE_LEVEL` | `auto` | The gate level of each iteration (SF-092, section Jobs): `auto` by the risk of the job's change (`full`, `light` or `none`); `full` runs the gate at every clean Claude verdict, as before SF-092. Empty is the default; anything else refuses to start (`invalid_config`). |
 | `SF_GATE_FULL_PATHS` | empty | Comma-separated globs (as `SF_SENSITIVE_PATHS`) whose changed paths make an iteration's gate level `full`. |
 | `SF_SMOKE_MODEL` | `haiku` | The model of `sf smoke`'s job (section Live smoke test): its `SF_MODEL` and `SF_REVIEW_MODEL` (Implementer, Claude review, Task check). |
@@ -565,6 +566,12 @@ state of the previous version into the new one (`{ from: N, run(stateDir) }`), w
 step's number is written once it ran, so a failed migration starts again from the step that
 failed. An older factory then refuses the new state instead of misreading it. Version 2 (SF-131):
 `job.json` may hold `claude_review`; its migration from 1 changes nothing.
+
+A new file or event that no older factory reads, and that changes the meaning of nothing it does
+read, is not a change of the format. So SF-128 kept `STATE_VERSION` at 1: its `tests-<N>.json`
+records are read only by the factory that writes them, `job.json` gained no field (the Tests Fix
+rounds are counted from those records), and an older Stream shows the new `tests_started` and
+`tests` events as factory notes (`src/job-stream.ts`, its last fallback).
 
 ## Task check
 
@@ -914,7 +921,7 @@ abort or reset. None of them is an MCP tool.
 <ticket>`, a detached child process (a session of its own: neither Ctrl+C nor the end of `sf serve`
 reaches it). The runner resumes the Implementer session by `session_id`, runs the queued turns,
 publishes, runs the review and the gate, applies their verdict (the Fix section, Clean and MR
-preparation), writes the job's state, sends the notifications, and exits when the job waits for a
+preparation, with the workspace's test command first, SF-128), writes the job's state, sends the notifications, and exits when the job waits for a
 person (`needs_human`, `ready_for_human_review`, `awaiting_review` with no review to run) or has
 ended. A restart of `sf serve` therefore leaves a working job working.
 
@@ -931,8 +938,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   and never takes the request: `runner_failed`). `start` does not
   wait: it answers once the job is `working` and its first turn queued. A request queued while a
   turn runs is taken by the runner and, for `sf say`, waits in the session as the next turn.
-- `sf abort` and `sf reset` stop the runner with SIGTERM (SIGKILL after 15 s): its turn, review and
-  gate end without their outcome being applied, and what the runner started that is still left
+- `sf abort` and `sf reset` stop the runner with SIGTERM (SIGKILL after 15 s): its turn, review,
+  gate and run of the workspace's test command (SF-128) end without their outcome being applied, and what the runner started that is still left
   (its process group) ends too; then `sf serve` changes the state. `approve` and the merge request
   stay in `sf serve` (they only push and talk to the Git host); `approve` and `sf mr create` wait
   up to 10 s for the job's runner to end and are refused with `runner_active` while it runs or a
@@ -1651,10 +1658,12 @@ any other is refused with `illegal_transition`.
 | `handed_over` | `pushed` | `push` |
 | `handed_over` | `pushed` | `pushed_by_user` |
 | `handed_over` | `aborted` | `abort` |
+| `preparing_mr` | `working` | `tests` |
 | `preparing_mr` | `awaiting_review` | `mr_turn_end` |
 | `preparing_mr` | `needs_human` | `recover` |
 | `preparing_mr` | `needs_human` | `repair_handover` |
 | `preparing_mr` | `needs_human` | `mr_turn_end` |
+| `preparing_mr` | `needs_human` | `tests` |
 | `preparing_mr` | `needs_human` | `ready` |
 | `preparing_mr` | `needs_human` | `pause` |
 | `preparing_mr` | `ready_for_human_review` | `repair_handover` |
@@ -1847,7 +1856,9 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
 1. Target: `git fetch origin <base>` (60 s) when `origin` exists, target `origin/<base>`, else the
    local `<base>`. Its commit is stored as `target_commit`. A rebase left in progress by a restart
    of `sf serve` is aborted first.
-2. State `preparing_mr`, `mr_attempts + 1`, and the **MR text turn**: one turn in the same session
+2. State `preparing_mr`, `mr_attempts + 1`; with a `test_command` in the workspace's entry of
+   `workspaces.json`, the **test step** comes first (SF-128, below), and then the **MR text turn**:
+   one turn in the same session
    with the deny list of every turn (all mutating Git commands stay denied) and `mrPrompt`
    (`src/prompts.ts`). The prompt names the target and, on a retry, the previous error. It asks
    for `.software-factory/<ticket>.mr.md` only: the first line is the title, which is also the
@@ -1857,6 +1868,61 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    run in this job, with its result, and anything not run goes on a line starting with
    `Not checked:`, saying who can run it. It asks for a short report (`# Report: <ticket>, MR
    preparation <attempt>`, `## Done`, `## Open questions`) and ends with the Handbook's `## Git rules` and `## MR template` verbatim.
+
+   **The test step** (SF-128, `src/test-command.ts`). The factory runs the workspace's
+   `test_command` itself on the reviewed worktree, before the MR text turn, the commit and the
+   rebase, on every way into MR preparation (the clean path, Accept, Skip and Retry). It is skipped
+   when the iteration's record already says `passed`, or `accepted_failing` (the user's Accept,
+   below); without the key nothing of this happens: no run, no record, no event, no `### Checks`.
+   The run never holds the job lock: MR preparation starts it, registered among the job's running
+   reviews (`RunningReview.reviewer` `tests`), and returns, as a review does; its end takes the lock
+   and applies the outcome. Abort and the runner's `stop()` cancel it (its process group killed),
+   and nothing of it is applied; a runner that ended mid-run is `mr_serve_restarted` as before
+   (Retry runs the tests again). Pause stays refused in `preparing_mr`.
+   - **Never outside a sandbox.** The command is Implementer-written code, so it runs as `sh -c
+     <test_command>` in the worktree inside a bubblewrap sandbox the factory builds: `bwrap
+     --die-with-parent --unshare-pid --unshare-net --ro-bind / / --dev /dev --proc /proc`, a fresh
+     tmpfs at `/tmp` and the worktree bound writable, then over them `/run` and every path of the
+     job's path denials (`pathDenials`, session `job`, as the Implementer's; section Jobs) hidden (a
+     directory as an empty read-only tmpfs, a file as `/dev/null`). `/run` goes because a read-only
+     mount does not refuse a `connect()`: its Unix sockets (the user's D-Bus and systemd manager,
+     the SSH and keyring agents, Docker) would reach past the sandbox. The run's private `/tmp` is
+     that tmpfs: it lives in the sandbox's own mount namespace, never in a directory of the host, so
+     it is gone when the sandbox ends, also when the runner was killed mid-run: nothing is left to
+     clean up. Being a tmpfs, it is held in memory (the kernel's default bound, half of RAM) and
+     counts against the service's memory limit; a suite that writes gigabytes to `/tmp` needs that
+     headroom. No network but loopback. The environment is `PATH`, `LANG`, `CI=1`, the real `HOME`
+     (read-only, its credentials hidden), `TMPDIR=/tmp` and `npm_config_cache=/tmp/npm-cache`, and
+     nothing else: no `SF_*` variable and no value of the env file. It inherits the runner's control
+     group and nice value. bwrap runs detached, so a timeout (`SF_TEST_TIMEOUT_MS`) or the abort
+     kills its whole process group, and `--die-with-parent` with `--unshare-pid` ends the sandbox
+     and every process in it when the runner dies, however it dies. There is no fallback without
+     bwrap. Dependencies must already be installed in the worktree: a missing install fails like any
+     test.
+   - **The record and the Stream.** Each run writes `tests-<N>.json` in the job directory (N the
+     iteration; a Retry overwrites it, an Accept rewrites it): `command`, `started_at`,
+     `ended_at`, `duration_ms`, `exit_code`, `timed_out`, `outcome` (`passed`, `failed`,
+     `unavailable` with its `reason`, `accepted_failing` with `accepted_at` and `accepted_from`),
+     and the last 64 KiB of stdout and stderr (`output`, `output_truncated`). The events
+     `tests_started` and `tests` (with the last 40 lines of the output) are one Stream entry per
+     run ("Tests failed (exit 1) after 2 min", the output behind its toggle).
+   - **A failure is a bounded Fix.** A non-zero exit other than 126 and 127, or the timeout, is a
+     failure. After the record is written the factory counts the job's records that say `failed`;
+     up to `TEST_FIX_ROUNDS` (2) it writes `## Fix N: Tests` (the command, the exit code or the
+     timeout, and the last 150 lines of the output, at most 12 KiB, in a fence; no ledger entries)
+     and the job goes to `working` (action `tests`) for the usual iteration, its reviews and Clean.
+     A Tests Fix does not count in `fixes` and never uses up `SF_MAX_ITERATIONS`. One more failure
+     stops the job: `needs_human` with `tests_failed`, naming the command and the exit code. bwrap
+     missing, a sandbox that does not start, a spawn error, and exit 126 or 127 are
+     `tests_unavailable`. A step that does not pass puts `mr_attempts` back to its value before the
+     preparation (no MR text turn ran), so the next MR text turn is not told the test failure.
+   - **The choices.** `sf accept` (Accept and prepare MR) takes both stops with the usual checks
+     (a clean Claude review on a job with the Claude review, none without it, SF-131; the accepted
+     paths): no gate override is written, the accepted paths are the Retry's (the Claude review's
+     plus the gate's when it was clean and not overridden, or the gate's without the Claude
+     review), and the iteration's record becomes `accepted_failing` with a `tests` event, so the
+     step is skipped.
+     `sf retry` runs the command again after `tests_unavailable`. `sf say` gives a direction.
 3. When that turn ends, the factory checks the MR text, then works in the worktree under the
    workspace's Git lock. Every Git call runs with a 60 s timeout and, like every Git call of the
    factory (SF-124: `runGit` and its siblings in `src/git.ts`, the only module that starts `git`),
@@ -1881,6 +1947,13 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    simplification pass (SF-055), `### Simplifications not applied` lists its suggestions before it
    (`withSimplifications`: the job's last `simplify.json`, when it has `skipped_at`; `- \`path\`: what Why: why (saves about N lines; added for R3)`), so they can become a
    follow-up ticket.
+   With a record of the test step for the iteration (SF-128), the factory writes `### Checks` at
+   the end of `## Testing` (`withChecks`), replacing any `### Checks` there, at every preparation:
+   one line, ``- `<command>`: passed in 4 min 12 s on iteration N.``, ``- `<command>`: failed (exit
+   1); accepted by the user without passing tests.`` or ``- `<command>`: could not run (<reason>);
+   accepted by the user without tests.`` A text the user saved (SF-080) gets it too, cleaned by the
+   guard as the factory's lines are, and is written back to `mr.md` with it, so the commit message
+   always carries it.
    The guard (SF-122) then cleans the lines the factory added (every line that is not a line of
    the Implementer's text): each match of a term on them becomes `[removed by the guard]`
    (`redactAdded`), and the cleaned text is the factory text from here on. When the commit is made
@@ -1951,6 +2024,8 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    | `guard_hit` | the guard found text that must not be published: in the change after two Guard fixes (step 0), or in the MR text after three MR text turns (step 3); the message names the places only (section Guard) |
    | `guard_terms_invalid` | `guard-terms.txt` could not be read or has an invalid line (its number in the message) |
    | `guard_failed` | a scan of the guard failed: a Git command, a diff over 16 MiB, or an environment or token file that could not be read for the secret check |
+   | `tests_failed` | the workspace's tests still failed after `TEST_FIX_ROUNDS` (2) Tests Fixes (SF-128): the command and the exit code (or the timeout) in the message; Accept, or `sf say` |
+   | `tests_unavailable` | the workspace's tests could not run (SF-128): bwrap missing, the sandbox did not start, a spawn error, or exit 126 or 127; the reason is the message's first line; Retry, Accept, or `sf say` |
 
    A failed MR text turn keeps its own code (for example `turn_failed` or `sandbox_unavailable`).
    Fix with `sf say` (its iteration is reviewed again, and a clean verdict prepares again) or by
@@ -1964,12 +2039,14 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    `mr_serve_restarted`, `mr_interrupted` (paused as MR preparation began), `mr_commit_failed`,
    `mr_rebase_failed`, `mr_failed`, or a stop of the guard (`guard_hit`, `guard_terms_invalid`,
    `guard_failed`, SF-122: after a `!` line in `guard-terms.txt`, for example; the change check runs
-   first) (`MR_RETRY_CODES` in `src/execution/shared.ts`), with the worktree,
+   first), or `tests_unavailable` (SF-128: the test step runs again) (`MR_RETRY_CODES` in
+   `src/execution/shared.ts`), with the worktree,
    no `prepared_commit` and a clean Claude review of the last iteration; anything else is
    `invalid_state` naming the state and code. The accepted sensitive paths are the clean path's:
    those of the last iteration's `review.json`, plus its `gate.json`'s when the gate's verdict is
    clean, or the review's alone after a gate override. The MR text turn names the previous error
-   only when an MR text turn ran before (`mr_attempts > 0`). A conflict turn makes a job not
+   only when an MR text turn ran before (`mr_attempts > 0`) and the stop was not one of the test
+   step's. A conflict turn makes a job not
    retryable: its resolution is applied before the job goes back to review, so a stop in between
    leaves code no reviewer saw. `job.json`'s `mr_conflict_turn` is set before the conflict prompt
    and cleared when the resolved iteration goes back to `awaiting_review` (and when MR preparation
@@ -3705,7 +3782,7 @@ screen (`POST api/workspaces`, and `POST api/workspaces/<name>/edit` since SF-10
 {
   "workspaces": {
     "my-app": { "read_checkout": "/abs/path" },
-    "software-factory": { "read_checkout": "/abs/path2", "handoff": "off", "color": "teal", "rules_skip": ["docs/runbooks/coordinator.md"], "guard": true }
+    "software-factory": { "read_checkout": "/abs/path2", "handoff": "off", "color": "teal", "rules_skip": ["docs/runbooks/coordinator.md"], "guard": true, "test_command": "cd factory && npm test" }
   }
 }
 ```
@@ -3731,13 +3808,17 @@ it; `sf workspace list` shows it. The optional `guard` (SF-122: `true` or `false
 `false`, any other value makes the file invalid) checks the workspace's pushes and MR texts for the
 names, Git hosts, ticket keys and email domains of your other workspaces and your private list
 (section Guard); turn it on for `software-factory` by editing the file (`sf workspace add` does not
-set it; the Edit keeps it). The optional `rules_skip` (SF-059: a list of globs) names the
+set it; the Edit keeps it). The optional `test_command` (SF-128: 1 to 2000 characters without NUL;
+anything else makes the file invalid) is the command the factory runs in a sandbox on the reviewed
+worktree before the job is ready (section MR preparation, the test step); without it nothing runs.
+Edit the file to set it (`sf workspace add` and the dashboard's form do not show it; the Edit keeps
+it); it is read at each preparation. The optional `rules_skip` (SF-059: a list of globs) names the
 repository rule files not given to the agents (section Coding rules); edit the file to set it.
 The optional `description`, `app` and `digest: {track, my_work}`, and the top-level `digest`
 settings, are the morning digest's (SF-103, section Morning digest); the optional top-level
 `explain: {on, language, model}` is the stop explanations' (SF-106, section Stop explanations). The Workspaces drawer's Edit
 changes an existing workspace's path, description, app, hand-over, colour and digest switches (the
-name stays; `work_checkout` and `rules_skip` are kept): its body has every field, `""` removes the
+name stays; `work_checkout`, `rules_skip`, `guard` and `test_command` are kept): its body has every field, `""` removes the
 description and the app, `"default"` the handoff, `"auto"` the color; the path is checked as Add
 checks it, and a path change while the workspace has a live job is `workspace_busy`.
 

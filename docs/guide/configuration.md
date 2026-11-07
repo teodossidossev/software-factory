@@ -72,7 +72,8 @@ effect and says only whether each token is set.
 | --- | --- | --- | --- |
 | `SF_MAX_TURNS` | `150` | positive integer | Steps (tool calls and answers) of one Implementer turn. A big ticket may need more, for example `SF_MAX_TURNS=300`. |
 | `SF_TURN_LIMIT_CONTINUES` | `1` | `0` to `10` | How many times the factory says "continue" by itself, per chain of turns, after a turn used all its steps while still changing files. `0` stops at the first limit (`max_turns`). |
-| `SF_MAX_ITERATIONS` | `3` | positive integer | Fix sections a job may get from the reviewers. The next one stops the job (`iteration_limit`): you may Accept the iteration as it is, whatever the last verdict, with its open findings listed in the MR text. Your own messages do not count. |
+| `SF_MAX_ITERATIONS` | `3` | positive integer | Fix sections a job may get from the reviewers. The next one stops the job (`iteration_limit`): you may Accept the iteration as it is, whatever the last verdict, with its open findings listed in the MR text. Your own messages do not count, nor the Tests Fix sections of the workspace's test command (at most two per job, then `tests_failed`). |
+| `SF_TEST_TIMEOUT_MS` | `1800000` (30 min) | 1 to 14400000 (4 h) | How long one run of a workspace's `test_command` may take; then it is killed, and the run counts as a failure (a Tests Fix that says it timed out). |
 | `SF_CHECK_AFTER_START_MIN` | `15` | positive integer | `check_after_minutes` the job status reports during the first iteration (a hint for a polling client; the dashboard does not need it). |
 | `SF_CHECK_AFTER_FIX_MIN` | `5` | positive integer | The same hint for later iterations. |
 
@@ -291,6 +292,7 @@ The top level is `{"workspaces": {<name>: <entry>}}` and, optionally, the mornin
 | `app` | no | text, 1 to 64 characters | Workspaces with the same app share one daily and are compared in "One ticket across the app" (a backend and its frontend). Without it the workspace is its own app. |
 | `digest` | no | `{"track": true/false, "my_work": true/false}` | `track`: follow the repository in the morning digest. `my_work`: your commits here go into the daily of its app. Absent: both off. |
 | `guard` | no | `true` or `false` | `true`: the workspace is public; its pushes and MR texts are checked for the names of your other workspaces and your private list ([The guard](#the-guard)). Absent: `false` (secrets are still checked). Turn it on for `software-factory`. Only by editing the file. |
+| `test_command` | no | a shell command, 1 to 2,000 characters, no NUL | The factory runs it itself (`sh -c` in the job's worktree) before a job is ready: after the clean review, before the MR text. It runs in a sandbox without network, with only the worktree and a private `/tmp` writable and your credentials and the factory's files hidden ([Trust model](trust-model.md)), so the dependencies must already be installed in the worktree. Exit 0 passes; another exit or `SF_TEST_TIMEOUT_MS` sends a `Tests` Fix to the Implementer (twice at most, then `tests_failed`); exit 126 or 127, or no `bwrap` on the machine, is `tests_unavailable`. The result goes into the MR text under `### Checks`. Absent: no run. Only by editing the file; the Edit keeps it. Needs `bwrap` (bubblewrap) installed. |
 
 The top-level `digest` sets the morning digest; every key is optional:
 

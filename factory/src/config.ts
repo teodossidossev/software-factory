@@ -64,6 +64,9 @@ export interface Config {
   gateMaxTokens: number;
   // How long one gate run may take (SF_GATE_TIMEOUT_MS).
   gateTimeoutMs: number;
+  // How long one run of a workspace's test command may take (SF-128, SF_TEST_TIMEOUT_MS); loadConfig
+  // always sets it, a Config made by hand may leave it to DEFAULT_TEST_TIMEOUT_MS.
+  testTimeoutMs?: number;
   // The gate level (SF-092, SF_GATE_LEVEL): auto by the risk of each iteration's change
   // (src/gate-level.ts), or full for every iteration.
   gateLevel: 'auto' | 'full';
@@ -350,6 +353,10 @@ export function taskCheckAutoSetting(env: NodeJS.ProcessEnv = process.env): bool
   return mode === 'on';
 }
 
+// SF_TEST_TIMEOUT_MS (SF-128): 30 minutes by default, at most 4 hours.
+export const DEFAULT_TEST_TIMEOUT_MS = 30 * 60_000;
+export const MAX_TEST_TIMEOUT_MS = 4 * 60 * 60_000;
+
 // The most automatic Task checks at once (SF-086, SF_TASK_CHECK_PARALLEL).
 export const MAX_TASK_CHECK_PARALLEL = 4;
 
@@ -407,6 +414,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     gateMaxRounds: positiveInteger(env, 'SF_GATE_MAX_ROUNDS', 5),
     gateMaxTokens: positiveInteger(env, 'SF_GATE_MAX_TOKENS', 5_000_000, 1_000_000_000),
     gateTimeoutMs: positiveInteger(env, 'SF_GATE_TIMEOUT_MS', 900_000, 86_400_000),
+    testTimeoutMs: positiveInteger(env, 'SF_TEST_TIMEOUT_MS', DEFAULT_TEST_TIMEOUT_MS, MAX_TEST_TIMEOUT_MS),
     gateLevel: gateLevelSetting(env),
     gateFullPaths: gateFullPaths(env),
     forge: forgeSettings(env),

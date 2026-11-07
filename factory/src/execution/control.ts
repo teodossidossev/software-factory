@@ -84,13 +84,15 @@ export class ControlPart {
     }
   }
 
+  // Cancels the job's running review, gate, simplification pass or test run (SF-128: its abort kills
+  // the sandbox's process group); its outcome is then never applied.
   #cancelReview(key: string): void {
     this.core.reviews.get(key)?.controller.abort();
     this.core.reviews.delete(key);
   }
 
-  // Ends the job: the runner stops (and with it the session, the review and the gate); the worktree
-  // stays unless discard, which removes it and the branch.
+  // Ends the job: the runner stops (and with it the session, the review, the gate and a run of the
+  // test command, SF-128); the worktree stays unless discard, which removes it and the branch.
   abort(workspaceName: string, ticket: string, discard: boolean): Promise<{ state: JobState; branch: string; discarded: boolean; worktree: string | null; error?: { code: string; message: string } }> {
     return this.core.locked(async () => {
       const found = await this.core.job(workspaceName, ticket);
@@ -609,8 +611,9 @@ export class ControlPart {
     }
   }
 
-  // Runner mode, on SIGTERM (abort, reset): the turn, the review and the gate end and their outcome
-  // is never applied; resolves once the state change in progress, if any, is written.
+  // Runner mode, on SIGTERM (abort, reset): the turn, the review, the gate and a run of the test
+  // command (SF-128) end and their outcome is never applied; resolves once the state change in
+  // progress, if any, is written.
   async stop(): Promise<void> {
     this.core.stopping = true;
     for (const key of [...this.core.reviews.keys()]) {

@@ -128,8 +128,10 @@ export const STOP_ALIASES: Readonly<Record<string, string>> = {
 const resolved = (code: string): string => (Object.hasOwn(STOP_ALIASES, code) ? STOP_ALIASES[code]! : code);
 const GATE_CODES = ['gate_rounds', 'gate_budget', 'gate_failed'];
 const LEDGER_CODES = ['review_churn', 'review_disputed'];
-const ACCEPT_CODES = [...GATE_CODES, ...LEDGER_CODES, 'iteration_limit', 'simplify_offered'];
-const RETRY_STOPS = ['fetch_failed', 'mr_serve_restarted', 'mr_failed'];
+// The stops of the test step (SF-128): Accept goes on without passing tests; Retry runs a command
+// that could not run again.
+const ACCEPT_CODES = [...GATE_CODES, ...LEDGER_CODES, 'iteration_limit', 'simplify_offered', 'tests_failed', 'tests_unavailable'];
+const RETRY_STOPS = ['fetch_failed', 'mr_serve_restarted', 'mr_failed', 'tests_unavailable'];
 
 // The ledger entries a ledger stop is about (the stop panel's, dashboard.ts stopOf): the unsettled
 // ones (escalated, review_disputed), the open ones (review_churn), the open blocker and major ones
@@ -212,6 +214,12 @@ export function stopAnswers(job: Job, facts: StopFacts, now = new Date()): StopA
         break;
       case 'gate_failed':
         actions = [...accept, goOn];
+        break;
+      case 'tests_failed':
+        actions = accept;
+        break;
+      case 'tests_unavailable':
+        actions = retryable(job) ? [retry, ...accept] : accept;
         break;
       case 'review_failed':
         actions = [answer('Retry review', 'review')];

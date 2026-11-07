@@ -60,6 +60,11 @@ type Body =
   | { t: 'verdict'; verdict: string; effective: string | null; summary?: string; items?: VerdictItem[] }
   | { t: 'changes'; files: number; paths: string[] }
   | { t: 'simplify'; suggestions: SimplifySuggestion[]; saves_lines: number }
+  // A run of the workspace's test command (SF-128): tests when it starts, tests_result when it ends
+  // or the user accepts it, joined by the client by run (the run's start); a tests_result without
+  // its tests shows on its own.
+  | { t: 'tests'; run: string; command: string }
+  | { t: 'tests_result'; run: string; command: string; outcome: string; exit_code: number | null; timed_out: boolean; ms: number | null; reason: string | null; tail: string; tail_truncated: boolean }
   | { t: 'note'; text: string };
 type Draft = { who: Who } & Body;
 // k: "<line>", or "<line>.<n>" when the line gives several entries; it: the iteration, from 1.
@@ -355,6 +360,16 @@ async function drafts(raw: string, record: Record<string, unknown>, it: number, 
   }
   if (record.type === 'gate_event') {
     return codexEntries(asRecord(record.event)) ?? noteEntry(raw, 'codex');
+  }
+  if (record.type === 'tests_started') {
+    return [{ t: 'tests', who: 'factory', run: String(record.run ?? ''), command: String(record.command ?? '') }];
+  }
+  if (record.type === 'tests') {
+    return [{
+      t: 'tests_result', who: 'factory', run: String(record.run ?? ''), command: String(record.command ?? ''), outcome: String(record.outcome ?? ''),
+      exit_code: numberOrNull(record.exit_code), timed_out: record.timed_out === true, ms: numberOrNull(record.duration_ms),
+      reason: typeof record.reason === 'string' ? record.reason : null, tail: cut(typeof record.tail === 'string' ? record.tail : ''), tail_truncated: record.tail_truncated === true,
+    }];
   }
   // The MR text (SF-080): the user's save or reset; a new Clean that kept the user's text.
   if (record.type === 'mr_edited') {

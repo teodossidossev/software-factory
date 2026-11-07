@@ -858,7 +858,7 @@ test('sf accept (SF-047): after gate_rounds with a clean Claude review the job g
     // Refused in any other state.
     const again = await runCli(env, ['accept', 'app', 'G-8']);
     assert.equal(again.code, 1);
-    assert.match(again.stderr, /^sf: sf accept needs needs_human after the gate or the ledger stopped the job or at the Fix round limit, or when the simplification pass offered suggestions \(gate_rounds, gate_budget, gate_failed, review_churn, review_disputed, iteration_limit, simplify_offered\); the job is ready_for_human_review/);
+    assert.match(again.stderr, /^sf: sf accept needs needs_human after the gate or the ledger stopped the job or at the Fix round limit, or when the simplification pass offered suggestions \(gate_rounds, gate_budget, gate_failed, review_churn, review_disputed, iteration_limit, simplify_offered, tests_failed, tests_unavailable\); the job is ready_for_human_review/);
     assert.equal((await runCli(env, ['accept', 'app'])).code, 2);
   } finally {
     await stop(served);

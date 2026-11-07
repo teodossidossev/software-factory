@@ -78,9 +78,13 @@ with the Task file (its `## Review brief` too), the Report, the Patch and the re
 On a ticket with the Claude review, a fresh, read-only Claude session reviews first, and the gate
 gives the deciding verdict after a `clean` one. A `fix` verdict becomes the next `## Fix N`,
 written by the factory, and the next iteration starts; the deciding `clean` verdict goes to Clean.
-At Clean the Implementer writes the merge request text and the factory commits and rebases; the
-user approves the push on the dashboard or in the terminal, and may have the factory open and
-merge the merge request on the Git host.
+At Clean, when the workspace has a test command, the factory first runs it itself on the reviewed
+worktree, in a sandbox without network: a failure becomes the next `## Fix N: Tests` (with the
+command and the end of its output) and a new iteration, at most twice per job, and then the job
+stops for the user; a Tests Fix does not count toward the three Fix sections. Then the Implementer
+writes the merge request text, the factory adds the test result under `### Checks` of
+`## Testing`, and commits and rebases; the user approves the push on the dashboard or in the
+terminal, and may have the factory open and merge the merge request on the Git host.
 
 ## Tools
 

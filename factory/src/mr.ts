@@ -1,6 +1,7 @@
 // MR preparation steps on the work checkout, all through runGit: the target, the MR text, the
 // factory's commit and rebase at Clean, the conflict resolution around it, the push and the merge
-// request link. Git runs here outside the sandbox, so the repository's hooks are switched off.
+// request link. Git runs here outside the sandbox; runGit (git.ts) keeps the repository's hooks and
+// fsmonitor off, and the push sends Git LFS objects itself (pushLfsObjects).
 // The Execution drives them around the Implementer's turns; this module runs no turn.
 import { type FileHandle, lstat, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -17,6 +18,8 @@ const FETCH_TIMEOUT_MS = 60_000;
 // The check of origin before a branch rename (SF-080, git ls-remote).
 const LS_REMOTE_TIMEOUT_MS = 15_000;
 const PUSH_TIMEOUT_MS = 120_000;
+// `git lfs push` of the job's LFS objects before the branch (SF-124); they may be large.
+const LFS_PUSH_TIMEOUT_MS = 600_000;
 // Each Git call of the commit and the rebase; a signing prompt that never returns ends here.
 const GIT_TIMEOUT_MS = 60_000;
 // Paths per Git call, well below the argv limit.
@@ -37,10 +40,10 @@ async function gitText(cwd: string, args: string[]): Promise<{ ok: boolean; text
   return { ok: result.code === 0, text: result.stdout.toString('utf8').trim(), stderr: result.stderr.trim() };
 }
 
-// Git as the factory runs it in the worktree at Clean: no repository hooks (they would run
-// outside the sandbox) and a timeout.
+// Git as the factory runs it in the worktree at Clean: with a timeout. No repository hook runs
+// (runGit in git.ts switches them off for every factory Git call).
 function factoryGit(cwd: string, args: string[]): ReturnType<typeof runGit> {
-  return runGit(cwd, ['-c', 'core.hooksPath=/dev/null', ...args], 1024 * 1024, GIT_TIMEOUT_MS);
+  return runGit(cwd, args, 1024 * 1024, GIT_TIMEOUT_MS);
 }
 
 // Why a factory Git call failed: its stderr, or its stdout when stderr is empty (Git prints some
@@ -544,12 +547,125 @@ export function pushProtection(branch: string, base: string): MrFailure | undefi
   };
 }
 
+// The changed paths of the pushed range whose filter attribute is lfs, read from the pushed commit
+// (source), not from the checkout's working tree. A Git without `check-attr --source` (before 2.40)
+// counts every changed path as LFS once a .gitattributes of the commit names filter=lfs.
+async function lfsPaths(cwd: string, source: string, changed: string[]): Promise<string[]> {
+  const attrArgs = ['check-attr', '-z', `--source=${source}`, 'filter', '--stdin'];
+  const attrs = await runGit(cwd, attrArgs, 64 * 1024 * 1024, GIT_TIMEOUT_MS, {}, changed.map((path) => `${path}\0`).join(''));
+  if (attrs.code === 0 && !attrs.truncated) {
+    const fields = attrs.stdout.toString('utf8').split('\0');
+    const paths: string[] = [];
+    for (let index = 0; index + 2 < fields.length; index += 3) {
+      if (fields[index + 2] === 'lfs') {
+        paths.push(fields[index]!);
+      }
+    }
+    return paths;
+  }
+  // 129 is Git's usage error: an unknown option, whatever the locale's wording.
+  if (attrs.code !== 129) {
+    throw new Error(gitFailure(attrArgs, attrs));
+  }
+  const grepArgs = ['grep', '-q', 'filter=lfs', source, '--', '.gitattributes', '**/.gitattributes'];
+  const grep = await factoryGit(cwd, grepArgs);
+  if (grep.code !== 0 && grep.code !== 1) {
+    throw new Error(gitFailure(grepArgs, grep));
+  }
+  return grep.code === 0 ? changed : [];
+}
+
+// The .lfsconfig git-lfs reads in the checkout cwd, which may name the LFS host: the working
+// tree's file, else the index's, else HEAD's; undefined when there is none. A working-tree entry
+// that is not a regular file, or a file over 1 MiB, throws.
+async function checkoutLfsConfig(cwd: string): Promise<Buffer | undefined> {
+  const top = await gitText(cwd, ['rev-parse', '--show-toplevel']);
+  const path = join(top.ok && top.text !== '' ? top.text : cwd, '.lfsconfig');
+  const stats = await lstat(path).catch(() => undefined);
+  if (stats !== undefined) {
+    if (!stats.isFile() || stats.size > 1024 * 1024) {
+      throw new Error('the checkout\'s .lfsconfig is not a regular file of at most 1 MiB');
+    }
+    return readFile(path);
+  }
+  return (await committedFile(cwd, ':.lfsconfig')) ?? (await committedFile(cwd, 'HEAD:.lfsconfig'));
+}
+
+// The blob at spec (<tree-ish>:<path>, or :<path> for the index), or undefined when there is none.
+async function committedFile(cwd: string, spec: string): Promise<Buffer | undefined> {
+  const result = await factoryGit(cwd, ['cat-file', 'blob', spec]);
+  if (result.truncated) {
+    throw new Error(`${spec} is over 1 MiB`);
+  }
+  return result.code === 0 ? result.stdout : undefined;
+}
+
+// Git LFS objects reach the remote through the repository's pre-push hook (`git lfs pre-push`),
+// which never runs from the factory (SF-124), so the push sends them itself: when a path the job
+// changed between the merge base of source and the base (origin's, else the local branch) and
+// source has the lfs filter, `git lfs push origin <source>`. It refuses without git-lfs, when the
+// job changed .lfsconfig (it could send the objects and the credentials to another host), and
+// when the .lfsconfig git-lfs reads in the checkout (checkoutLfsConfig; another job's, handed
+// over there) is neither the base's (upstream) nor the merge base's. Undefined when there is
+// nothing to send or it was sent.
+async function pushLfsObjects(cwd: string, branch: string, base: string, source: string): Promise<MrFailure | undefined> {
+  const failed = (message: string): MrFailure => ({ code: 'mr_push_failed', message });
+  if ((await factoryGit(cwd, ['rev-parse', '--verify', '--quiet', `${source}^{commit}`])).code !== 0) {
+    // Nothing to send; the push names the missing ref as it always did.
+    return undefined;
+  }
+  const tracking = `refs/remotes/origin/${base}`;
+  const upstream = (await factoryGit(cwd, ['rev-parse', '--verify', '--quiet', `${tracking}^{commit}`])).code === 0 ? tracking : `refs/heads/${base}`;
+  const mergeBase = await gitText(cwd, ['merge-base', source, upstream]);
+  // Without a common commit every file of source counts as the job's: diffed against the empty tree.
+  const lower = mergeBase.ok && mergeBase.text !== '' ? mergeBase.text : (await factoryGitOk(cwd, ['hash-object', '-t', 'tree', '/dev/null'])).trim();
+  const changed = nulList(await factoryGitOk(cwd, ['diff', '--name-only', '-z', '--no-renames', '--diff-filter=AMT', lower, source, '--']));
+  if (changed.length === 0 || (await lfsPaths(cwd, source, changed)).length === 0) {
+    return undefined;
+  }
+  if ((await factoryGit(cwd, ['lfs', 'version'])).code !== 0) {
+    return failed(`git push origin ${branch} failed: the job changes Git LFS files and git-lfs is not installed`);
+  }
+  const configArgs = ['diff', '--quiet', lower, source, '--', '.lfsconfig'];
+  const config = await factoryGit(cwd, configArgs);
+  if (config.code === 1) {
+    return failed(`refusing to push ${branch}: the job changed .lfsconfig; push it yourself after checking it`);
+  }
+  if (config.code !== 0) {
+    throw new Error(gitFailure(configArgs, config));
+  }
+  const inCheckout = await checkoutLfsConfig(cwd);
+  const same = async (spec: string): Promise<boolean> => {
+    const committed = await committedFile(cwd, spec);
+    return inCheckout === undefined ? committed === undefined : committed !== undefined && committed.equals(inCheckout);
+  };
+  if (!(await same(`${upstream}:.lfsconfig`)) && !(await same(`${lower}:.lfsconfig`))) {
+    return failed(`refusing to push ${branch}: the checkout's .lfsconfig is not the one of ${base}; push it yourself after checking it`);
+  }
+  const lfs = await runGit(cwd, ['lfs', 'push', 'origin', source], 1024 * 1024, LFS_PUSH_TIMEOUT_MS);
+  if (lfs.code === 0) {
+    return undefined;
+  }
+  const detail = lfs.code === null ? `it did not finish within ${LFS_PUSH_TIMEOUT_MS / 1000} s` : (lfs.stderr.trim() || lfs.stdout.toString('utf8').trim()).slice(0, 1000);
+  return failed(`git lfs push origin ${branch} failed: ${detail}`);
+}
+
 // source: the ref pushed to the branch (SF-073: the saved commit of a handed-over job,
-// refs/factory/<ticket>); the branch itself by default. The protections are the same.
+// refs/factory/<ticket>); the branch itself by default. The protections are the same. Git LFS
+// objects of the job go first (pushLfsObjects).
 export async function pushBranch(cwd: string, branch: string, base: string, source?: string): Promise<MrFailure | undefined> {
   const protectedFailure = pushProtection(branch, base);
   if (protectedFailure !== undefined) {
     return protectedFailure;
+  }
+  let lfsFailure: MrFailure | undefined;
+  try {
+    lfsFailure = await pushLfsObjects(cwd, branch, base, source ?? `refs/heads/${branch}`);
+  } catch (error) {
+    lfsFailure = { code: 'mr_push_failed', message: `git push origin ${branch} failed: the Git LFS check failed: ${(error as Error).message}` };
+  }
+  if (lfsFailure !== undefined) {
+    return lfsFailure;
   }
   const refspec = source === undefined ? `${branch}:${branch}` : `${source}:refs/heads/${branch}`;
   const result = await runGit(cwd, ['push', 'origin', refspec], 1024 * 1024, PUSH_TIMEOUT_MS);

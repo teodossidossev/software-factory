@@ -3,15 +3,15 @@
 // protection, the Handbook section extraction, the MR and conflict prompts, the deny list and the
 // sandbox settings.
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { type FileHandle, mkdir, mkdtemp, open, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, type FileHandle, mkdir, mkdtemp, open, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { sandboxSettings } from '../src/config.js';
-import { commitAndRebase, commitPaths, continueRebase, filesWithMarkers, gitFailure, MAX_MR_TEXT_BYTES, mergeRequestLink, mrMessage, mrTextProblem, pushProtection, rebaseInProgress, submodulePaths, withNits } from '../src/mr.js';
+import { commitAndRebase, commitPaths, continueRebase, filesWithMarkers, gitFailure, MAX_MR_TEXT_BYTES, mergeRequestLink, mrMessage, mrTextProblem, pushBranch, pushProtection, rebaseInProgress, submodulePaths, withNits } from '../src/mr.js';
 import { conflictPrompt, FACTORY_PROMPT_RULES, handbookSection, mrPrompt } from '../src/prompts.js';
 import { COMMIT_TYPES, commitHeader, DENIED_TOOLS, headerProblem, testingProblem } from '../src/rules.js';
 import type { ReviewItem } from '../src/review.js';
@@ -389,4 +389,179 @@ test('pushProtection refuses main, master and the base branch, and allows a tick
   }
   assert.equal(pushProtection('T-1-change-readme', 'main'), undefined);
   assert.equal(pushProtection('main-fix', 'master'), undefined);
+});
+
+// SF-124: a temporary bare origin.git and its clone repo/ with one commit on main pushed, the
+// identity in the repository's configuration.
+async function withPushRepo(run: (dir: string, repo: string, sh: (cwd: string, ...args: string[]) => string) => Promise<void>): Promise<void> {
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'sf-push-')));
+  const sh = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  try {
+    const repo = join(dir, 'repo');
+    sh(dir, 'init', '-q', '--bare', '-b', 'main', 'origin.git');
+    sh(dir, 'init', '-q', '-b', 'main', repo);
+    for (const [key, value] of [['user.name', 't'], ['user.email', 't@example.invalid'], ['commit.gpgsign', 'false']] as const) {
+      sh(repo, 'config', key, value);
+    }
+    sh(repo, 'remote', 'add', 'origin', join(dir, 'origin.git'));
+    await writeFile(join(repo, 'f.txt'), 'f\n');
+    sh(repo, 'add', 'f.txt');
+    sh(repo, 'commit', '-q', '-m', 'base');
+    sh(repo, 'push', '-q', 'origin', 'main');
+    await run(dir, repo, sh);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+test('pushBranch pushes past a pre-push hook that would refuse it, and the hook does not run (SF-124)', async () => {
+  await withPushRepo(async (dir, repo, sh) => {
+    const marker = join(dir, 'pre-push.marker');
+    await writeFile(join(repo, '.git', 'hooks', 'pre-push'), `#!/bin/sh\ntouch '${marker}'\nexit 1\n`);
+    await chmod(join(repo, '.git', 'hooks', 'pre-push'), 0o755);
+    sh(repo, 'switch', '-q', '-c', 'T-1-change');
+    sh(repo, 'commit', '-q', '--allow-empty', '-m', 'the change');
+    assert.equal(await pushBranch(repo, 'T-1-change', 'main'), undefined);
+    assert.equal(sh(join(dir, 'origin.git'), 'rev-parse', 'T-1-change'), sh(repo, 'rev-parse', 'HEAD'));
+    assert.equal(await stat(marker).then(() => true, () => false), false);
+    // A branch that does not exist fails at git push, with Git's text, as before.
+    const missing = await pushBranch(repo, 'T-1-missing', 'main');
+    assert.equal(missing?.code, 'mr_push_failed');
+    assert.match(missing.message, /^git push origin T-1-missing failed: error: src refspec T-1-missing does not match any/);
+  });
+});
+
+test('pushBranch sends the job\'s Git LFS objects with git lfs push first, only for LFS paths of the job\'s range, and refuses a changed .lfsconfig (SF-124)', async (t) => {
+  await withPushRepo(async (dir, repo, sh) => {
+    // A fake git-lfs on PATH: it logs its arguments, and fails a push while the file fail exists.
+    const bin = join(dir, 'bin');
+    const log = join(dir, 'lfs.log');
+    await mkdir(bin);
+    await writeFile(join(bin, 'git-lfs'), `#!/bin/sh\necho "$*" >> '${log}'\nif [ "$1" = push ] && [ -e '${join(dir, 'fail')}' ]; then echo 'batch request: 403 Forbidden' >&2; exit 2; fi\nexit 0\n`);
+    await chmod(join(bin, 'git-lfs'), 0o755);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}${delimiter}${path ?? ''}`;
+    t.after(() => {
+      process.env.PATH = path;
+    });
+    const lfsCalls = async (): Promise<string[]> => (await readFile(log, 'utf8').catch(() => '')).split('\n').filter((line) => line !== '');
+    const onOrigin = (branch: string): string => sh(join(dir, 'origin.git'), 'for-each-ref', '--format=%(objectname)', `refs/heads/${branch}`);
+    const commitOn = async (branch: string, files: Record<string, string>): Promise<void> => {
+      sh(repo, 'switch', '-q', '-c', branch, 'main');
+      for (const [name, content] of Object.entries(files)) {
+        await writeFile(join(repo, name), content);
+      }
+      sh(repo, 'add', '--all');
+      sh(repo, 'commit', '-q', '-m', branch);
+    };
+
+    await writeFile(join(repo, '.gitattributes'), '*.bin filter=lfs\n');
+    sh(repo, 'add', '.gitattributes');
+    sh(repo, 'commit', '-q', '-m', 'lfs attributes');
+    sh(repo, 'push', '-q', 'origin', 'main');
+    // Upstream commits on origin/main change .lfsconfig and an LFS file; they are not the job's.
+    const other = join(dir, 'other');
+    sh(dir, 'clone', '-q', join(dir, 'origin.git'), other);
+    await writeFile(join(other, '.lfsconfig'), '[lfs]\n\turl = https://elsewhere.invalid/lfs\n');
+    await writeFile(join(other, 'b.bin'), 'b\n');
+    sh(other, 'add', '--all');
+    sh(other, '-c', 'user.name=o', '-c', 'user.email=o@example.invalid', 'commit', '-q', '-m', 'upstream');
+    sh(other, 'push', '-q', 'origin', 'main');
+    sh(repo, 'fetch', '-q', 'origin');
+
+    // A range that adds a.bin: git lfs push origin <source> before the branch.
+    await commitOn('T-1-lfs', { 'a.bin': 'a\n' });
+    assert.equal(await pushBranch(repo, 'T-1-lfs', 'main'), undefined);
+    assert.deepEqual(await lfsCalls(), ['version', 'push origin refs/heads/T-1-lfs']);
+    assert.equal(onOrigin('T-1-lfs'), sh(repo, 'rev-parse', 'T-1-lfs'));
+    // The saved ref of a handed-over job is the source.
+    sh(repo, 'update-ref', 'refs/factory/T-1', 'T-1-lfs');
+    await rm(log);
+    assert.equal(await pushBranch(repo, 'T-1-handed', 'main', 'refs/factory/T-1'), undefined);
+    assert.deepEqual(await lfsCalls(), ['version', 'push origin refs/factory/T-1']);
+
+    // A range without an LFS path: no git-lfs at all.
+    await rm(log);
+    await commitOn('T-2-plain', { 'c.txt': 'c\n' });
+    assert.equal(await pushBranch(repo, 'T-2-plain', 'main'), undefined);
+    assert.deepEqual(await lfsCalls(), []);
+    assert.equal(onOrigin('T-2-plain'), sh(repo, 'rev-parse', 'T-2-plain'));
+
+    // The attributes are those of the pushed commit, not of the checkout's working tree.
+    await commitOn('T-3-tree', { 'd.bin': 'd\n' });
+    sh(repo, 'checkout', '-q', 'main');
+    await writeFile(join(repo, '.gitattributes'), '# edited by hand\n');
+    assert.equal(await pushBranch(repo, 'T-3-tree', 'main'), undefined);
+    assert.deepEqual(await lfsCalls(), ['version', 'push origin refs/heads/T-3-tree']);
+    sh(repo, 'checkout', '-q', '--', '.gitattributes');
+    await rm(log);
+    await commitOn('T-3-plain', { '.gitattributes': '', 'd.bin': 'd\n' });
+    sh(repo, 'checkout', '-q', 'main');
+    await writeFile(join(repo, '.gitattributes'), '* filter=lfs\n');
+    assert.equal(await pushBranch(repo, 'T-3-plain', 'main'), undefined);
+    assert.deepEqual(await lfsCalls(), []);
+    sh(repo, 'checkout', '-q', '--', '.gitattributes');
+
+    // A job that changed .lfsconfig: refused, nothing pushed, git-lfs never asked to push.
+    await commitOn('T-4-config', { 'a.bin': 'a\n', '.lfsconfig': '[lfs]\n\turl = https://attacker.invalid/lfs\n' });
+    assert.deepEqual(await pushBranch(repo, 'T-4-config', 'main'), {
+      code: 'mr_push_failed', message: 'refusing to push T-4-config: the job changed .lfsconfig; push it yourself after checking it',
+    });
+    assert.equal(onOrigin('T-4-config'), '');
+    assert.equal((await lfsCalls()).some((line) => line.startsWith('push')), false);
+
+    // R1: git-lfs takes its endpoint from the checkout's .lfsconfig (the working tree's file, else
+    // the index's, else HEAD's), not from the pushed commit: one that is not the base's (another
+    // job's, handed over to the checkout) is refused too, nothing pushed.
+    sh(repo, 'switch', '-q', '-c', 'T-7-other', 'main');
+    await writeFile(join(repo, '.lfsconfig'), '[lfs]\n\turl = https://attacker.invalid/lfs\n');
+    sh(repo, 'add', '.lfsconfig');
+    sh(repo, 'commit', '-q', '-m', 'another job');
+    const checkoutRefusal = { code: 'mr_push_failed', message: 'refusing to push T-1-lfs-again: the checkout\'s .lfsconfig is not the one of main; push it yourself after checking it' };
+    sh(repo, 'update-ref', 'refs/factory/T-1-again', 'T-1-lfs');
+    await rm(log);
+    // In the working tree (tracked here; an untracked one is read the same way).
+    assert.deepEqual(await pushBranch(repo, 'T-1-lfs-again', 'main', 'refs/factory/T-1-again'), checkoutRefusal);
+    // Only in the index.
+    await rm(join(repo, '.lfsconfig'));
+    assert.deepEqual(await pushBranch(repo, 'T-1-lfs-again', 'main', 'refs/factory/T-1-again'), checkoutRefusal);
+    // Only in HEAD.
+    sh(repo, 'rm', '-q', '--cached', '.lfsconfig');
+    assert.deepEqual(await pushBranch(repo, 'T-1-lfs-again', 'main', 'refs/factory/T-1-again'), checkoutRefusal);
+    assert.equal(onOrigin('T-1-lfs-again'), '');
+    assert.equal((await lfsCalls()).some((line) => line.startsWith('push')), false);
+    sh(repo, 'reset', '-q', '--hard');
+    // The base's own .lfsconfig (origin/main's here) in the checkout is fine.
+    sh(repo, 'switch', '-q', '--detach', 'origin/main');
+    assert.equal(await pushBranch(repo, 'T-1-lfs-again', 'main', 'refs/factory/T-1-again'), undefined);
+    assert.deepEqual(await lfsCalls(), ['version', 'version', 'version', 'version', 'push origin refs/factory/T-1-again']);
+    assert.equal(onOrigin('T-1-lfs-again'), sh(repo, 'rev-parse', 'T-1-lfs'));
+
+    // A failed git lfs push is mr_push_failed with git-lfs's text, and the branch is not pushed.
+    await writeFile(join(dir, 'fail'), '');
+    await commitOn('T-5-fail', { 'e.bin': 'e\n' });
+    assert.deepEqual(await pushBranch(repo, 'T-5-fail', 'main'), { code: 'mr_push_failed', message: 'git lfs push origin T-5-fail failed: batch request: 403 Forbidden' });
+    assert.equal(onOrigin('T-5-fail'), '');
+  });
+});
+
+test('pushBranch refuses a job that changes Git LFS files when git-lfs is not installed (SF-124)', async (t) => {
+  if (spawnSync('git', ['lfs', 'version']).status === 0) {
+    t.skip('git-lfs is installed here');
+    return;
+  }
+  await withPushRepo(async (dir, repo, sh) => {
+    await writeFile(join(repo, '.gitattributes'), '*.bin filter=lfs\n');
+    sh(repo, 'add', '.gitattributes');
+    sh(repo, 'commit', '-q', '-m', 'lfs attributes');
+    sh(repo, 'push', '-q', 'origin', 'main');
+    sh(repo, 'switch', '-q', '-c', 'T-6-lfs');
+    await writeFile(join(repo, 'a.bin'), 'a\n');
+    sh(repo, 'add', 'a.bin');
+    sh(repo, 'commit', '-q', '-m', 'binary');
+    assert.deepEqual(await pushBranch(repo, 'T-6-lfs', 'main'), {
+      code: 'mr_push_failed', message: 'git push origin T-6-lfs failed: the job changes Git LFS files and git-lfs is not installed',
+    });
+    assert.equal(sh(join(dir, 'origin.git'), 'for-each-ref', 'refs/heads/T-6-lfs'), '');
+  });
 });

@@ -15,7 +15,9 @@ import { type Job, type JobState, JobStore } from '../src/jobs.js';
 import { QueueStore } from '../src/queue.js';
 import { resolveWorkspace } from '../src/registry.js';
 import { FACTORY_PROMPT_RULES, factoryPrompt } from '../src/prompts.js';
-import { SMOKE_PROBE_RULE, SMOKE_TOOLS, sessionAllowedTools } from '../src/session.js';
+import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
+import { sandboxSettings } from '../src/config.js';
+import { ImplementerSession, type IdleOutcome, sandboxEnvDenials, sessionEnvironment, SMOKE_PROBE_RULE, SMOKE_TOOLS, sessionAllowedTools } from '../src/session.js';
 import { taskSha256, writeTask } from '../src/task-file.js';
 import {
   call, codexLog, codexScript, FAKE, fakeCodex, fakeLog, git, newEnv, newRepo, putRules, putTask, readyCheck, refused, reviewLog, reviewScript, runCli, script, serve, stop, task, temp, turnsStarted,
@@ -526,6 +528,10 @@ test('the smoke\'s session (SF-104, SF-109, SF-110): an sf serve whose state dir
   // The ticket history, which request_fix creates, exists for both turns: the same paths to deny
   // (a missing path is left out of the denials).
   await mkdir(join(env.state, 'tickets'), { recursive: true });
+  // The fake's count and log, which its first run creates in the home: there for both turns too,
+  // as the home's entries are denied to Bash (SF-123).
+  await writeFile(join(env.home, 'fake-claude.count'), '0');
+  await writeFile(join(env.home, 'fake-claude.log'), '');
   let served = await serve(env);
   await call(served, 'start', { workspace: 'app', ticket: 'P-1' });
   await waitFor(served, 'P-1', 'awaiting_review', 1);
@@ -885,4 +891,60 @@ test('the Fix round limit by default (SF-131): the fourth Fix is refused; its it
   } finally {
     await stop(served);
   }
+});
+
+test('cloud credentials (SF-123): sessionEnvironment passes AWS_*, GOOGLE_* and CLOUD_ML_* only on Bedrock or Vertex; sandboxEnvDenials hides the passed credentials from sandboxed commands, never PATH', () => {
+  const env = {
+    PATH: '/bin', HOME: '/h', ANTHROPIC_API_KEY: 'k', CLAUDE_CODE_OAUTH_TOKEN: 'o', AWS_ACCESS_KEY_ID: 'a', AWS_SECRET_ACCESS_KEY: 's',
+    GOOGLE_APPLICATION_CREDENTIALS: '/g.json', CLOUD_ML_REGION: 'r', SF_STATE_DIR: '/x',
+  };
+  const plain = sessionEnvironment(env);
+  assert.deepEqual(Object.keys(plain).filter((name) => /^(AWS|GOOGLE|CLOUD_ML)_/.test(name)), []);
+  assert.deepEqual(sandboxEnvDenials(plain), [{ name: 'ANTHROPIC_API_KEY', mode: 'deny' }, { name: 'CLAUDE_CODE_OAUTH_TOKEN', mode: 'deny' }]);
+  for (const provider of ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX']) {
+    const cloud = sessionEnvironment({ ...env, [provider]: '1' });
+    assert.deepEqual([cloud.AWS_ACCESS_KEY_ID, cloud.AWS_SECRET_ACCESS_KEY, cloud.GOOGLE_APPLICATION_CREDENTIALS, cloud.CLOUD_ML_REGION, cloud[provider]], ['a', 's', '/g.json', 'r', '1']);
+    const hidden = sandboxEnvDenials(cloud).map((entry) => entry.name);
+    assert.deepEqual(hidden.sort(), ['ANTHROPIC_API_KEY', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLOUD_ML_REGION', 'GOOGLE_APPLICATION_CREDENTIALS']);
+    assert.ok(!hidden.includes('PATH') && !hidden.includes(provider) && !hidden.includes('HOME'));
+  }
+  // An empty or plainly off switch is not set; any other value is.
+  for (const off of ['', '0', 'false', 'off', 'No']) {
+    assert.equal(sessionEnvironment({ ...env, CLAUDE_CODE_USE_BEDROCK: off }).AWS_ACCESS_KEY_ID, undefined, off);
+  }
+  assert.equal(sessionEnvironment({ ...env, CLAUDE_CODE_USE_VERTEX: 'true' }).AWS_ACCESS_KEY_ID, 'a');
+});
+
+test('cloud credentials (SF-123): an Implementer turn adds the denials to the sandbox\'s credentials.envVars after the entries already there', async () => {
+  const env = await newEnv('session-env-denials');
+  await mkdir(join(env.home, 'work'), { recursive: true });
+  await script(env, [{}]);
+  const sandbox: SandboxSettings = { ...sandboxSettings({})!, credentials: { envVars: [{ name: 'MY_TOKEN', mode: 'mask' }] } };
+  const saved = { ...process.env };
+  Object.assign(process.env, { HOME: env.home, ANTHROPIC_API_KEY: 'sk-fake', CLAUDE_CODE_USE_BEDROCK: '1', AWS_SECRET_ACCESS_KEY: 'aws-fake' });
+  try {
+    const outcome = await new Promise<IdleOutcome>((resolve) => {
+      new ImplementerSession({ cwd: join(env.home, 'work'), maxTurns: 3, claudePath: FAKE, sandbox }, {
+        message: async () => undefined, prompt: async () => undefined, idle: async (ended) => resolve(ended),
+      }).send('go', []);
+    });
+    assert.equal(outcome.ok, true);
+  } finally {
+    for (const name of Object.keys(process.env)) {
+      if (!(name in saved)) {
+        delete process.env[name];
+      }
+    }
+    Object.assign(process.env, saved);
+  }
+  const [entry] = await fakeLog(env);
+  const settings = JSON.parse(entry!.argv[entry!.argv.indexOf('--settings') + 1]!) as { sandbox: SandboxSettings };
+  const envVars = settings.sandbox.credentials?.envVars ?? [];
+  assert.deepEqual(envVars[0], { name: 'MY_TOKEN', mode: 'mask' });
+  for (const name of ['ANTHROPIC_API_KEY', 'AWS_SECRET_ACCESS_KEY']) {
+    assert.ok(envVars.slice(1).some((found) => found.name === name && found.mode === 'deny'), JSON.stringify(envVars));
+  }
+  assert.ok(!envVars.some((found) => found.name === 'PATH' || found.name === 'CLAUDE_CODE_USE_BEDROCK'));
+  // The CLI itself still gets them: Bedrock needs them.
+  assert.ok(entry!.env.includes('AWS_SECRET_ACCESS_KEY') && entry!.env.includes('ANTHROPIC_API_KEY'));
 });

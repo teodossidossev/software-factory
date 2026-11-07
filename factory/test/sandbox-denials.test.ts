@@ -8,12 +8,12 @@ import { existsSync } from 'node:fs';
 import { chmod, mkdir, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { sandboxSettings } from '../src/config.js';
+import { sandboxAllowRead, sandboxSettings } from '../src/config.js';
 import { gateEnvironment } from '../src/gate.js';
 import { saveRegistry } from '../src/registry.js';
 import { DENIED_TOOLS } from '../src/rules.js';
-import { absoluteRule, claudeUserSettings, cliRuleList, type DenialScope, FACTORY_MCP_SERVER, HOME_CREDENTIALS, installDir, PATH_DENIAL_UNREPRESENTABLE, pathDenials, prepareTaskChecksDir, taskChecksDir, USER_SETTINGS_WEAKEN_SANDBOX, userSettingsWeakening, withSandboxDenials } from '../src/sandbox-denials.js';
-import { type IdleOutcome, ImplementerSession, sessionEnvironment } from '../src/session.js';
+import { absoluteRule, claudeProjectName, claudeUserSettings, cliRuleList, type DenialScope, FACTORY_MCP_SERVER, FILE_GUARD, HOME_CREDENTIALS, installDir, PATH_DENIAL_UNREPRESENTABLE, pathDenials, prepareTaskChecksDir, taskChecksDir, USER_SETTINGS_WEAKEN_SANDBOX, userSettingsWeakening, withSandboxDenials } from '../src/sandbox-denials.js';
+import { type IdleOutcome, ImplementerSession, sessionEnvironment, withSandboxEnvDenials } from '../src/session.js';
 import { call, FAKE, fakeLog, newEnv, newRepo, putTask, reviewScript, script, serve, stop, temp, waitFor } from './support/harness.js';
 
 // A factory laid out under root: its config (registry, env file), its state with the worktrees of
@@ -55,10 +55,10 @@ async function layout(name: string): Promise<Layout> {
   await writeFile(join(l.state, 'queue.json'), '{}\n');
   await mkdir(join(l.root, 'secrets'));
   await writeFile(l.envFile, 'SF_GITHUB_TOKEN=x\n');
-  for (const dir of ['.ssh', '.codex', '.aws', '.config/gh']) {
+  for (const dir of ['.ssh', '.codex', '.aws', '.config/gh', '.config/git']) {
     await mkdir(join(l.home, dir), { recursive: true });
   }
-  for (const file of ['.git-credentials', '.npmrc', '.claude/.credentials.json']) {
+  for (const file of ['.git-credentials', '.config/git/credentials', '.npmrc', '.claude/.credentials.json']) {
     await writeFile(join(l.home, file), 'secret');
   }
   await writeFile(join(l.install, 'package.json'), '{"name":"software-factory"}\n');
@@ -69,7 +69,7 @@ async function layout(name: string): Promise<Layout> {
 
 const scope = (l: Layout, session: DenialScope['session']): DenialScope => ({
   session, workspace: 'app', checkout: l.checkout, ...(session === 'job' ? { worktree: l.own } : {}), stateDir: l.state, worktreeRoot: l.worktrees,
-  env: l.env, moduleDir: join(l.install, 'dist', 'src'), tmp: l.tmp,
+  env: l.env, moduleDir: join(l.install, 'dist', 'src'), tmp: l.tmp, systemRoot: join(l.root, 'sys'),
 });
 
 // The paths of a layout denied for reading and writing in every session; the Task checks' parent
@@ -242,7 +242,8 @@ test('the Implementer session: every query gets the prompt\'s deny list plus the
       const deny = entry.argv.find((arg) => arg.startsWith('--disallowedTools='))!.slice('--disallowedTools='.length).split(',');
       assert.deepEqual(deny, [...DENIED_TOOLS, ...denials.tools]);
       const settings = JSON.parse(entry.argv[entry.argv.indexOf('--settings') + 1]!) as { sandbox: typeof sandbox };
-      assert.deepEqual(settings.sandbox, { ...sandbox, filesystem: { disabled: false, ...denials.sandbox } });
+      // SF-123: with the session environment's credentials, if any, hidden from sandboxed commands.
+      assert.deepEqual(settings.sandbox, withSandboxEnvDenials({ ...sandbox, filesystem: { disabled: false, ...denials.sandbox } }, sessionEnvironment()));
     }
 
     // A session whose denials cannot be built runs no turn.
@@ -616,4 +617,293 @@ test('a user allowRead of ~/.ssh (R1): the Implementer never starts a query, so 
   } finally {
     await stop(running);
   }
+});
+
+// SF-123: a layout whose checkout is in the home directory (~/code/app, a Git repository with an
+// ignored .env, a tracked config/.env.production and a .env.example), whose own worktree is a Git
+// repository with an untracked .env, and whose home holds .kube, .npm, .local/share/pnpm,
+// .local/state, ~/.bashrc and a sibling checkout ~/code/other.
+async function homeLayout(name: string): Promise<Layout & { homeCheckout: string }> {
+  const l = await layout(name);
+  const homeCheckout = join(l.home, 'code', 'app');
+  for (const dir of [join(homeCheckout, 'config'), join(l.home, 'code', 'other'), join(l.home, '.kube'), join(l.home, '.npm'), join(l.home, '.local', 'share', 'pnpm'), join(l.home, '.local', 'state', 'x')]) {
+    await mkdir(dir, { recursive: true });
+  }
+  await writeFile(join(l.home, '.kube', 'config'), 'secret');
+  await writeFile(join(l.home, '.npm', 'x'), 'cache');
+  await writeFile(join(l.home, '.bashrc'), 'rc');
+  const git = (cwd: string, ...args: string[]): void => void execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, stdio: 'ignore' });
+  git(homeCheckout, 'init', '-q');
+  await writeFile(join(homeCheckout, '.gitignore'), '.env\n');
+  await writeFile(join(homeCheckout, '.env'), 'SECRET=1\n');
+  await writeFile(join(homeCheckout, '.env.example'), 'SECRET=\n');
+  await writeFile(join(homeCheckout, 'config', '.env.production'), 'SECRET=2\n');
+  await writeFile(join(homeCheckout, 'README.md'), 'readme\n');
+  git(homeCheckout, 'add', '.gitignore', '.env.example', 'config/.env.production', 'README.md');
+  git(homeCheckout, 'commit', '-q', '-m', 'init');
+  git(l.own, 'init', '-q');
+  await writeFile(join(l.own, '.env'), 'SECRET=3\n');
+  await mkdir(join(l.own, 'src'));
+  return { ...l, homeCheckout };
+}
+
+const homeScope = (l: Layout & { homeCheckout: string }, session: DenialScope['session'] = 'job'): DenialScope => ({ ...scope(l, session), checkout: l.homeCheckout });
+
+test('the user\'s socket locations (SF-123) are denied for reading and writing when present, left out when missing', async () => {
+  const l = await layout('denials-sockets');
+  const sys = join(l.root, 'sys');
+  const uid = String(process.getuid!());
+  const present = [join(sys, 'run', 'user', uid), join(sys, 'run', 'dbus'), join(sys, 'var', 'run', 'docker.sock'), join(sys, 'run', 'tailscale'), join(sys, 'tmp', '.X11-unix'), join(sys, 'tmp', 'ssh-abc123'), join(sys, 'tmp', `tmux-${uid}`), join(l.root, 'xdg')];
+  for (const path of present) {
+    if (path.endsWith('.sock')) {
+      await mkdir(join(path, '..'), { recursive: true });
+      await writeFile(path, '');
+    } else {
+      await mkdir(path, { recursive: true });
+    }
+  }
+  await mkdir(join(sys, 'tmp', 'other'), { recursive: true });
+  const denials = await pathDenials({ ...scope(l, 'job'), env: { ...l.env, XDG_RUNTIME_DIR: join(l.root, 'xdg') } });
+  for (const path of present) {
+    assert.ok(denials.sandbox.denyRead.includes(path) && denials.sandbox.denyWrite.includes(path), `${path} not denied`);
+  }
+  const missing = ['run/docker.sock', 'var/run/dbus', 'run/containerd', 'run/podman', 'var/run/tailscale', 'run/screen'].map((path) => join(sys, path));
+  for (const path of [...missing, join(sys, 'tmp', 'other'), join(sys, 'tmp')]) {
+    assert.ok(!denials.sandbox.denyRead.includes(path) && !denials.sandbox.denyWrite.includes(path), `${path} denied`);
+  }
+  // The Unix sockets stay allowed: Linux cannot allow them by path.
+  assert.equal(sandboxSettings({})!.network!.allowAllUnixSockets, true);
+});
+
+test('the home directory (SF-123): a job\'s sandboxed commands read nothing in the home directory but the kept paths, by denyRead only; the specific denials stay inside them; a Task check gets no home denials', async () => {
+  const l = await homeLayout('denials-home');
+  const denials = await pathDenials(homeScope(l));
+  const at = (...parts: string[]): string => join(l.home, ...parts);
+  for (const path of [at('.kube'), at('.local', 'state'), at('.bashrc'), at('code', 'other'), at('.claude')]) {
+    assert.ok(denials.sandbox.denyRead.includes(path), `${path} readable`);
+  }
+  for (const path of [at('.npm'), at('.local', 'share', 'pnpm'), at('.local'), at('.local', 'share'), at('code'), l.homeCheckout, l.home]) {
+    assert.ok(!denials.sandbox.denyRead.includes(path), `${path} denied`);
+  }
+  // By denyRead only: not for the tools (the guard holds them), not for writing.
+  assert.ok(!denials.sandbox.denyWrite.includes(at('.kube')) && !denials.tools.some((rule) => rule.includes(absoluteRule(at('.kube')))));
+  assert.deepEqual([...denials.kept].sort(), [l.own, l.homeCheckout, at('.npm'), at('.local', 'share', 'pnpm'), at('.config', 'git')].sort());
+  // A specific denial inside a kept path stays: Git's second credential store in ~/.config/git.
+  assert.ok(denials.sandbox.denyRead.includes(at('.config', 'git', 'credentials')) && denials.tools.includes(`Read(${absoluteRule(at('.config', 'git', 'credentials'))})`));
+  assert.ok(denials.sandbox.denyRead.includes(at('.config', 'gh')) && !denials.sandbox.denyRead.includes(at('.config', 'git')));
+  // No allowRead anywhere, so nothing re-opens a denial inside a kept path.
+  assert.deepEqual(Object.keys(denials.sandbox).sort(), ['denyRead', 'denyWrite']);
+  const merged = withSandboxDenials(sandboxSettings({}), denials.sandbox)!;
+  assert.equal(merged.filesystem!.allowRead, undefined);
+  // A Task check: the specific denials only.
+  const check = await pathDenials(homeScope(l, 'task_check'));
+  assert.ok(!check.sandbox.denyRead.includes(at('.kube')) && check.sandbox.denyRead.includes(at('.ssh')));
+});
+
+test('.env files (SF-123): the worktree\'s and the checkout\'s .env files (untracked, ignored or tracked) are denied for reading, nothing re-opens them; .env.example is not', async () => {
+  const l = await homeLayout('denials-env');
+  const denials = await pathDenials(homeScope(l));
+  for (const path of [join(l.homeCheckout, '.env'), join(l.homeCheckout, 'config', '.env.production'), join(l.own, '.env')]) {
+    assert.ok(denials.sandbox.denyRead.includes(path), `${path} readable`);
+    assert.ok(denials.tools.includes(`Read(${absoluteRule(path)})`), `${path} readable by the Read tool`);
+    // Nothing outside denyRead holds it: no allowRead, and no kept path re-allows (kept paths only steer the home denials).
+    assert.ok(!(withSandboxDenials(sandboxSettings({}), denials.sandbox)!.filesystem!.allowRead ?? []).length);
+  }
+  assert.ok(!denials.sandbox.denyRead.includes(join(l.homeCheckout, '.env.example')));
+  assert.ok(!denials.tools.some((rule) => rule.includes('.env.example')));
+});
+
+test('SF_SANDBOX_ALLOW_READ (SF-123): an entry is kept; one that is, holds or lies in a denied path, climbs, is absolute or has ~ gives invalid_config', async () => {
+  const l = await homeLayout('denials-allow-read');
+  await mkdir(join(l.home, '.m2', 'repository'), { recursive: true });
+  await mkdir(join(l.home, '.m2', 'settings'), { recursive: true });
+  const withAllow = (value: string): DenialScope => ({ ...homeScope(l), env: { ...l.env, SF_SANDBOX_ALLOW_READ: value } });
+  const denials = await pathDenials(withAllow(' .m2/repository , '));
+  assert.ok(denials.kept.includes(join(l.home, '.m2', 'repository')));
+  assert.ok(!denials.sandbox.denyRead.includes(join(l.home, '.m2')) && !denials.sandbox.denyRead.includes(join(l.home, '.m2', 'repository')));
+  assert.ok(denials.sandbox.denyRead.includes(join(l.home, '.m2', 'settings')));
+  for (const value of ['.ssh', '.ssh/keys', '.config', '../x', join(l.root, 'abs'), '~/.m2']) {
+    await assert.rejects(pathDenials(withAllow(value)), (error: { code?: string; message?: string }) => error.code === 'invalid_config' && error.message!.includes(`"${value}"`), value);
+  }
+  assert.deepEqual(sandboxAllowRead({ SF_SANDBOX_ALLOW_READ: '.m2/repository,.gradle/caches' }), ['.m2/repository', '.gradle/caches']);
+  assert.deepEqual(sandboxAllowRead({}), []);
+});
+
+test('the user settings (SF-123): checked against the specific denials only, so an allowRead of ~/projects/** passes and one of ~/.ssh stops the job', async () => {
+  const l = await homeLayout('denials-home-settings');
+  await mkdir(join(l.home, 'projects'));
+  const file = join(l.home, '.claude', 'settings.json');
+  await writeFile(file, JSON.stringify({ sandbox: { filesystem: { allowRead: ['~/projects/**'] } } }));
+  const denials = await pathDenials(homeScope(l));
+  // ~/projects is denied as a home entry all the same: the user re-opens it in their own settings.
+  assert.ok(denials.sandbox.denyRead.includes(join(l.home, 'projects')));
+  await writeFile(file, JSON.stringify({ sandbox: { filesystem: { allowRead: ['~/.ssh'] } } }));
+  await assert.rejects(pathDenials(homeScope(l)), (error: { code?: string }) => error.code === USER_SETTINGS_WEAKEN_SANDBOX);
+});
+
+// Puts one tool call to the denials' PreToolUse hook: the guard's reason, or undefined when it passes.
+async function guard(denials: Awaited<ReturnType<typeof pathDenials>>, cwd: string, tool: string, input: unknown): Promise<string | undefined> {
+  const hook = denials.hooks!.PreToolUse![0]!.hooks[0]!;
+  const answer = await hook({ hook_event_name: 'PreToolUse', session_id: 's', transcript_path: '', cwd, tool_name: tool, tool_input: input, tool_use_id: 't' } as never, 't', { signal: new AbortController().signal });
+  const specific = (answer as { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string } }).hookSpecificOutput;
+  return specific?.permissionDecision === 'deny' ? specific.permissionDecisionReason : undefined;
+}
+
+test('the file-tool guard (SF-123): writes only in the own worktree outside its .git, by real path; reads in the home only in the kept paths and the session\'s own Claude Code project folder', async () => {
+  const l = await homeLayout('denials-file-guard');
+  await symlink(l.home, join(l.own, 'out'));
+  // A dangling link out of the worktree, and one through a chain of dangling links.
+  await symlink(join(l.home, '.bashrc.d', 'new'), join(l.own, 'dangling'));
+  await symlink(join(l.own, 'dangling'), join(l.own, 'chained'));
+  await symlink(join(l.own, 'loop-b'), join(l.own, 'loop-a'));
+  await symlink(join(l.own, 'loop-a'), join(l.own, 'loop-b'));
+  const project = join(l.home, '.claude', 'projects', claudeProjectName(l.own));
+  await mkdir(project, { recursive: true });
+  await writeFile(join(project, 'tool-output.txt'), 'saved');
+  await mkdir(join(l.home, '.claude', 'projects', 'other'), { recursive: true });
+  const denials = await pathDenials(homeScope(l));
+  const ask = (tool: string, input: unknown): Promise<string | undefined> => guard(denials, l.own, tool, input);
+  // Writes refused, the reason naming the path: the checkout's hook, a home file, through a link, the worktree's .git.
+  for (const path of [join(l.homeCheckout, '.git', 'hooks', 'pre-commit'), join(l.home, '.bashrc'), join(l.own, 'out', '.bashrc'), join(l.own, '.git', 'config'), join(l.own, 'dangling'), join(l.own, 'chained')]) {
+    for (const tool of ['Write', 'Edit', 'MultiEdit']) {
+      const reason = await ask(tool, { file_path: path, content: 'x' });
+      assert.ok(reason?.startsWith(FILE_GUARD) && reason.includes(path), `${tool} ${path}: ${reason}`);
+    }
+  }
+  assert.match((await ask('NotebookEdit', { notebook_path: join(l.home, 'n.ipynb'), new_source: '' }))!, /n\.ipynb/);
+  // A loop of links cannot be checked: refused.
+  assert.ok((await ask('Write', { file_path: join(l.own, 'loop-a'), content: 'x' }))?.startsWith(FILE_GUARD));
+  // Writes allowed: a file of the worktree, a new nested one, a relative one.
+  assert.equal(await ask('Write', { file_path: join(l.own, 'src', 'a.ts'), content: 'x' }), undefined);
+  assert.equal(await ask('Write', { file_path: join(l.own, 'new', 'deep', 'b.ts'), content: 'x' }), undefined);
+  assert.equal(await ask('Edit', { file_path: 'src/a.ts', old_string: 'x', new_string: 'y' }), undefined);
+  // A ~ path, a missing path, an input that is not an object: refused, the path named.
+  assert.match((await ask('Write', { file_path: '~/.bashrc', content: 'x' }))!, /~\/\.bashrc/);
+  assert.ok((await ask('Write', { content: 'x' }))?.startsWith(FILE_GUARD));
+  assert.ok((await ask('Read', 'x'))?.startsWith(FILE_GUARD));
+  // Reads refused in the home outside the kept paths, by any read tool.
+  for (const [tool, input] of [
+    ['Read', { file_path: join(l.home, '.kube', 'config') }], ['Read', { file_path: join(l.home, '.claude', 'projects', 'other', 'x') }],
+    ['Grep', { pattern: 'x', path: join(l.home, '.kube') }], ['LS', { path: l.home }], ['Glob', { pattern: `${l.home}/.kube/*` }],
+    ['Glob', { pattern: `{src/*,${l.home}/.kube/*}` }], ['Read', { file_path: join(l.own, 'out', '.kube', 'config') }],
+  ] as const) {
+    const reason = await ask(tool, input);
+    assert.ok(reason?.startsWith(FILE_GUARD), `${tool} ${JSON.stringify(input)}: ${reason}`);
+  }
+  assert.match((await ask('Read', { file_path: '~/.kube/config' }))!, /~\/\.kube\/config/);
+  // Reads allowed: a kept toolchain, the checkout, the own project folder, the worktree, outside the home.
+  for (const [tool, input] of [
+    ['Read', { file_path: join(l.home, '.npm', 'x') }], ['Read', { file_path: join(l.homeCheckout, 'README.md') }], ['Read', { file_path: join(project, 'tool-output.txt') }],
+    ['Grep', { pattern: 'x', path: 'src' }], ['Glob', { pattern: '**/*.ts', path: 'src' }], ['Read', { file_path: '/etc/hostname' }], ['Bash', { command: 'cat ~/.kube/config' }],
+  ] as const) {
+    assert.equal(await ask(tool, input), undefined, `${tool} ${JSON.stringify(input)}`);
+  }
+});
+
+test('claudeProjectName (SF-123): Claude Code\'s folder name of a project, every character but letters and digits as "-", a long one cut with its hash', () => {
+  assert.equal(claudeProjectName('/home/teo/.local/state/sf/worktrees/app/A_1'), '-home-teo--local-state-sf-worktrees-app-A-1');
+  const long = claudeProjectName(`/${'a'.repeat(250)}`);
+  assert.match(long, /^-a{199}-[0-9a-z]+$/);
+});
+
+test('a worktree Git cannot list (SF-123): its .env files are found by walking it, so none is left out', async () => {
+  const l = await layout('denials-env-walk');
+  await mkdir(join(l.own, 'pkg'), { recursive: true });
+  await writeFile(join(l.own, '.env'), 'SECRET=1\n');
+  await writeFile(join(l.own, 'pkg', '.env.local'), 'SECRET=2\n');
+  await writeFile(join(l.own, 'pkg', '.env.sample'), 'SECRET=\n');
+  const denials = await pathDenials(scope(l, 'job'));
+  assert.ok(denials.sandbox.denyRead.includes(join(l.own, '.env')) && denials.sandbox.denyRead.includes(join(l.own, 'pkg', '.env.local')));
+  assert.ok(!denials.sandbox.denyRead.includes(join(l.own, 'pkg', '.env.sample')));
+});
+
+test('CLAUDE_CONFIG_DIR outside the home directory (SF-123): its entries but the shell snapshots are denied to Bash as the home\'s are, and the guard refuses reads there but in the own project folder', async () => {
+  const l = await homeLayout('denials-config-outside');
+  const config = join(l.root, 'claude-config');
+  const own = join(config, 'projects', claudeProjectName(l.own));
+  for (const dir of [join(config, 'shell-snapshots'), own, join(config, 'projects', 'other'), join(config, 'plugins')]) {
+    await mkdir(dir, { recursive: true });
+  }
+  await writeFile(join(own, 'x.jsonl'), '{}');
+  await writeFile(join(config, 'projects', 'other', 'x.jsonl'), '{}');
+  const denials = await pathDenials({ ...homeScope(l), env: { ...l.env, CLAUDE_CONFIG_DIR: config } });
+  assert.ok(denials.sandbox.denyRead.includes(join(config, 'projects')) && denials.sandbox.denyRead.includes(join(config, 'plugins')));
+  assert.ok(!denials.sandbox.denyRead.includes(join(config, 'shell-snapshots')) && denials.kept.includes(join(config, 'shell-snapshots')));
+  assert.ok((await guard(denials, l.own, 'Read', { file_path: join(config, 'projects', 'other', 'x.jsonl') }))?.startsWith(FILE_GUARD));
+  assert.equal(await guard(denials, l.own, 'Read', { file_path: join(own, 'x.jsonl') }), undefined);
+});
+
+test('the file-tool guard and links under a search (SF-123 Fix 1): a Glob or Grep that ripgrep\'s --follow would carry into a denied home path through a link anywhere below its folder is refused; links within the worktree, into a toolchain or dangling ones pass', async () => {
+  const l = await homeLayout('denials-guard-links');
+  const at = (...parts: string[]): string => join(l.own, ...parts);
+  await mkdir(at('src', 'deep', 'er'), { recursive: true });
+  await writeFile(at('src', 'a.ts'), 'a');
+  // Links that keep a search where it may go: within the worktree, into a kept toolchain, dangling.
+  await symlink(at('src', 'a.ts'), at('src', 'alias.ts'));
+  await symlink(join(l.home, '.npm'), at('src', 'npm-cache'));
+  await symlink(join(l.root, 'nowhere'), at('src', 'dangling'));
+  const denials = await pathDenials(homeScope(l));
+  const ask = (tool: string, input: unknown): Promise<string | undefined> => guard(denials, l.own, tool, input);
+  for (const [tool, input] of [['Glob', { pattern: 'src/**' }], ['Glob', { pattern: '**/*.ts' }], ['Grep', { pattern: 'x' }], ['Grep', { pattern: 'x', path: 'src' }]] as const) {
+    assert.equal(await ask(tool, input), undefined, `${tool} ${JSON.stringify(input)}`);
+  }
+  // A link to the home directory planted deep below src: every search that walks src is refused, naming the link.
+  await symlink(l.home, at('src', 'deep', 'er', 'home'));
+  for (const [tool, input] of [['Glob', { pattern: 'src/**' }], ['Glob', { pattern: '**/*.ts' }], ['Grep', { pattern: 'x' }], ['Grep', { pattern: 'x', path: at('src') }], ['Glob', { pattern: '*', path: at('src', 'deep') }]] as const) {
+    const reason = await ask(tool, input);
+    assert.ok(reason?.startsWith(FILE_GUARD) && reason.includes(at('src', 'deep', 'er', 'home')), `${tool} ${JSON.stringify(input)}: ${reason}`);
+  }
+  // A pattern without a glob character matches at any depth: the whole folder is walked. A search of
+  // a folder beside the link still passes; a Read of a file stays a check of that path only.
+  assert.ok((await ask('Glob', { pattern: 'config' }))?.startsWith(FILE_GUARD));
+  assert.ok((await ask('Glob', { pattern: 'docs/**' }))?.startsWith(FILE_GUARD));
+  await mkdir(at('docs'));
+  assert.equal(await ask('Glob', { pattern: '**', path: at('docs') }), undefined);
+  assert.equal(await ask('Read', { file_path: at('src', 'a.ts') }), undefined);
+  // Through a folder outside the worktree (one sandboxed commands may write, such as the temporary
+  // directory) that holds a link to a denied home path.
+  await rm(at('src', 'deep', 'er', 'home'));
+  const hop = join(l.tmp, 'hop');
+  await mkdir(hop, { recursive: true });
+  await symlink(join(l.home, '.kube'), join(hop, 'kube'));
+  await symlink(hop, at('src', 'hop'));
+  const reason = await ask('Glob', { pattern: 'src/**' });
+  assert.ok(reason?.startsWith(FILE_GUARD) && reason.includes(join(hop, 'kube')), reason);
+  // A loop of folder links ends (each folder walked once).
+  await rm(at('src', 'hop'));
+  await symlink(at('src'), at('src', 'deep', 'loop'));
+  assert.equal(await ask('Glob', { pattern: 'src/**' }), undefined);
+  // A search of a folder that holds the home directory, by path, by an absolute pattern or through a
+  // link to it, is refused without any link into the home.
+  for (const [tool, input] of [['Grep', { pattern: 'secret', path: l.root }], ['Glob', { pattern: '*/.kube/*', path: l.root }], ['Glob', { pattern: `${l.root}/*/.kube/*` }]] as const) {
+    const reason = await ask(tool, input);
+    assert.ok(reason?.startsWith(FILE_GUARD) && reason.includes(`holding ${l.home}`), `${tool} ${JSON.stringify(input)}: ${reason}`);
+  }
+  await symlink(l.root, at('src', 'up'));
+  assert.match((await ask('Glob', { pattern: 'src/**' }))!, /links to .* holding /);
+  await rm(at('src', 'up'));
+  // A toolchain is walked too: sandboxed commands may write in one (Claude Code allows ~/.npm/_logs).
+  await mkdir(join(l.home, '.npm', '_logs'), { recursive: true });
+  await symlink(join(l.home, '.kube'), join(l.home, '.npm', '_logs', 'kube'));
+  for (const input of [{ pattern: 'src/**' }, { pattern: '**', path: join(l.home, '.npm') }]) {
+    assert.ok((await ask('Glob', input))?.includes(join(l.home, '.npm', '_logs', 'kube')), JSON.stringify(input));
+  }
+});
+
+test('SF_SANDBOX_ALLOW_READ (SF-123 Fix 4): an entry that is, or holds, the home directory (or a guarded root) is refused, though no credential exists below the home; so is one that only links there', async () => {
+  const l = await layout('denials-allow-read-home');
+  // A home with no specific denial below it: no credential, no Claude Code folder.
+  const home = join(l.root, 'bare-home');
+  await mkdir(join(home, '.m2', 'repository'), { recursive: true });
+  await mkdir(join(home, 'notes'), { recursive: true });
+  await symlink(home, join(home, '.m2', 'home-link'));
+  await symlink('/', join(home, 'root-link'));
+  const withAllow = (value: string): DenialScope => ({ ...scope(l, 'job'), env: { ...l.env, HOME: home, SF_SANDBOX_ALLOW_READ: value } });
+  for (const value of ['.', './', '.m2/..', '.m2/home-link', 'root-link', '.m2/repository,.']) {
+    await assert.rejects(pathDenials(withAllow(value)), (error: { code?: string; message?: string }) => error.code === 'invalid_config' && error.message!.includes('SF_SANDBOX_ALLOW_READ'), value);
+  }
+  // A toolchain below the home still passes, and the home's other entries stay denied.
+  const denials = await pathDenials(withAllow('.m2/repository'));
+  assert.ok(denials.kept.includes(join(home, '.m2', 'repository')) && !denials.kept.includes(home));
+  assert.ok(denials.sandbox.denyRead.includes(join(home, 'notes')));
 });

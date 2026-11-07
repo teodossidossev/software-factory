@@ -117,6 +117,7 @@ effect and says only whether each token is set.
 | --- | --- | --- | --- |
 | `SF_SANDBOX` | on | `off` | `off` runs the Implementer, the reviews, the simplification pass and the Task check without Claude Code's sandbox: the path denials then hold for the tools only, not for commands ([the trust model](trust-model.md)). Leave it on. |
 | `SF_SANDBOX_DOMAINS` | empty | comma-separated host names, `*.` allowed in front | Extra hosts sandboxed commands may reach besides `registry.npmjs.org`, for example a private registry your tests need: `npm.example.com,*.pkg.example.com`. |
+| `SF_SANDBOX_ALLOW_READ` | empty | comma-separated paths relative to the home directory, no `..`, no `~`, not absolute | Toolchain folders of your home directory a job's sandboxed commands may read besides the kept ones (the Node toolchains, Git's configuration), for example `.m2/repository,.gradle/caches`. An entry that is, holds or lies in a denied path (`.ssh`, `.config`), or that is or holds the home directory itself (`.`, a link to it), stops the session with `invalid_config` ([the trust model](trust-model.md#the-home-directory)). |
 | `SF_SENSITIVE_PATHS` | empty | comma-separated globs | Paths added to the built-in sensitive paths (manifests, lockfiles, CI, IDE and agent files, root dotfiles). A sensitive path the Task's `may_touch` does not name must be accepted by a reviewer. |
 
 ### Hand-over

@@ -12,7 +12,7 @@ import { type FixItem, fixItemLine, LEDGER_REF, type LedgerEntry, SCOPE_PROBLEM,
 import { handbookSection } from './prompts.js';
 import { ENV_FILE_RULES } from './rules.js';
 import { type SandboxDenials, withSandboxDenials } from './sandbox-denials.js';
-import { sessionEnvironment } from './session.js';
+import { sessionEnvironment, withSandboxEnvDenials } from './session.js';
 import { TASK_DIR } from './task-file.js';
 
 export const REVIEWER = 'claude';
@@ -232,6 +232,8 @@ export interface ReviewOptions {
   // the session's own, and the sandbox's filesystem deny lists merged into sandbox.
   deny?: string[] | undefined;
   filesystem?: SandboxDenials | undefined;
+  // The path denials' hooks (SF-123: the file-tool guard), merged with the session's own hooks.
+  hooks?: Options['hooks'];
   // The session's tools; REVIEW_TOOLS by default. [] (the morning digest, SF-103): none but the
   // SDK's structured-output tool.
   tools?: string[];
@@ -272,12 +274,17 @@ export function reviewSessionOptions(options: Omit<ReviewOptions, 'onMessage' | 
 // The options of every read-only session with a structured output (the review, the Task check of
 // SF-054, the morning digest of SF-103): REVIEW_TOOLS only (or the given tools), REVIEW_DENIED_TOOLS
 // plus deny plus the options' path denials (SF-100), the given output schema, and the given hooks
-// (the Task check's path guard).
+// (the Task check's path guard) merged with the options' hooks (the file-tool guard, SF-123); the
+// environment's credentials denied to sandboxed commands (SF-123).
 export function readOnlySessionOptions(
   options: Omit<ReviewOptions, 'onMessage' | 'signal'>, abortController: AbortController, schema: Record<string, unknown>, deny: readonly string[] = [],
-  hooks?: Options['hooks'],
+  sessionHooks?: Options['hooks'],
 ): Options {
-  const sandbox = withSandboxDenials(options.sandbox, options.filesystem);
+  // The environment, built once: the CLI gets it, and its credentials are hidden from sandboxed
+  // commands (SF-123 rule 7), after the path denials, as in an Implementer turn.
+  const environment = sessionEnvironment();
+  const sandbox = withSandboxEnvDenials(withSandboxDenials(options.sandbox, options.filesystem), environment);
+  const hooks = mergeHooks(sessionHooks, options.hooks);
   return {
     abortController,
     cwd: options.cwd,
@@ -289,12 +296,25 @@ export function readOnlySessionOptions(
     outputFormat: { type: 'json_schema', schema },
     maxTurns: options.maxTurns,
     // A known startup failure (such as an unavailable sandbox) then ends with a result message.
-    env: { ...sessionEnvironment(), CLAUDE_CODE_STARTUP_FAILURE_RESULTS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
+    env: { ...environment, CLAUDE_CODE_STARTUP_FAILURE_RESULTS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
     ...(sandbox !== undefined ? { sandbox } : {}),
     ...(options.model !== undefined ? { model: options.model } : {}),
     ...(options.claudePath !== undefined ? { pathToClaudeCodeExecutable: options.claudePath } : {}),
     ...(hooks !== undefined ? { hooks } : {}),
   };
+}
+
+// Two hooks options as one: each event's matchers concatenated (the first's first); undefined when
+// neither has any.
+export function mergeHooks(first: Options['hooks'], second: Options['hooks']): Options['hooks'] {
+  if (first === undefined || second === undefined) {
+    return first ?? second;
+  }
+  const merged: NonNullable<Options['hooks']> = { ...first };
+  for (const [event, matchers] of Object.entries(second) as Array<[keyof typeof merged, NonNullable<typeof merged[keyof typeof merged]>]>) {
+    merged[event] = [...(first[event] ?? []), ...matchers];
+  }
+  return merged;
 }
 
 export type ReviewOutcome =

@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import type { Job } from '../src/jobs.js';
 import { jobNotification } from '../src/notify.js';
 import { changedFilesSection, fileSummaryLines, notificationLine } from '../src/patch.js';
-import { globToRegExp, matchesGlob, SENSITIVE_PATHS, scopeOf, sensitivityOf } from '../src/rules.js';
+import { DENIED_TOOLS, globToRegExp, matchesGlob, SENSITIVE_PATHS, scopeOf, sensitivityOf } from '../src/rules.js';
 import { mayTouch, parseFrontMatter } from '../src/task-file.js';
 
 test('globToRegExp: * and ? stay inside a segment, ** crosses directories, {a,b} alternates, the rest is literal', () => {
@@ -123,4 +123,8 @@ test("notificationLine puts the marked-path summaries on one line, so a ready or
   assert.equal(jobNotification({ ...job, handoff_skipped: { code: 'handoff_off', message: 'T-1: ready; hand-over off for this workspace (handoff "off" in workspaces.json)' } }, ['feat(T-1): X', line]).body, `branch: T-1-x\nfeat(T-1): X\n${line}`);
   assert.equal(jobNotification({ ...job, handoff_skipped: { code: 'checkout_dirty', message: 'T-1: ready, but your checkout has changes' } }, ['feat(T-1): X', line]).body, 'branch: T-1-x\nT-1: ready, but your checkout has changes\nfeat(T-1): X');
   assert.equal(jobNotification({ ...job, state: 'awaiting_review' }, [line]).body, `Report and Patch of iteration 1 are ready for the reviewers\n${line}`);
+});
+
+test('DENIED_TOOLS denies the web tools, which the sandbox does not hold (SF-123)', () => {
+  assert.ok(DENIED_TOOLS.includes('WebFetch') && DENIED_TOOLS.includes('WebSearch'));
 });

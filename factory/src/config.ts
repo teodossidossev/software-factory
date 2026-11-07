@@ -83,10 +83,32 @@ export interface Config {
 // The gate: on with its Codex executable, or off with why (missing: no executable was found).
 export type Gate = { on: true; codexPath: string } | { on: false; reason: string; missing?: true };
 
+// SF_SANDBOX_ALLOW_READ (SF-123): comma-separated paths relative to the home directory that a job's
+// sandboxed commands may still read there (toolchains beyond the default ones, such as
+// .m2/repository,.gradle/caches). Entries are trimmed and empty ones dropped; an absolute entry, or
+// one with a ".." segment or a "~", or one that names the home directory itself (".") is refused
+// with invalid_config. Whether an entry touches a
+// denied path is checked where the denials are built (src/sandbox-denials.ts).
+export function sandboxAllowRead(env: NodeJS.ProcessEnv = process.env): string[] {
+  const entries = globList(env.SF_SANDBOX_ALLOW_READ);
+  for (const entry of entries) {
+    if (isAbsolute(entry) || entry.includes('~') || entry.split(/[\\/]/).includes('..')) {
+      throw new FactoryError('invalid_config', `SF_SANDBOX_ALLOW_READ has an invalid entry "${entry}": it must be a path relative to the home directory, without ".." or "~".`);
+    }
+    // The home directory itself (".", "./"): it would keep the whole home readable (SF-123 Fix 4).
+    if (entry.split(/[\\/]/).every((segment) => segment === '' || segment === '.')) {
+      throw new FactoryError('invalid_config', `SF_SANDBOX_ALLOW_READ has an invalid entry "${entry}": it names the home directory itself, not a folder in it.`);
+    }
+  }
+  return entries;
+}
+
 // Domains sandboxed commands may reach: the npm registry and SF_SANDBOX_DOMAINS (comma-separated).
 // The factory's own fetch and push run outside the sandbox, so the Git host is not needed. Binding
 // local ports and every Unix socket is allowed, so the repository's own tests can start servers on
-// loopback and on Unix sockets. No command runs outside the sandbox (SF-100): with
+// loopback and on Unix sockets: Linux cannot allow sockets by path (allowUnixSockets is macOS
+// only), so the user's sockets (D-Bus, docker, tailscaled, agents, tmux) are kept out by denying
+// their locations for reading instead (SF-123, src/sandbox-denials.ts). No command runs outside the sandbox (SF-100): with
 // allowUnsandboxedCommands false the CLI ignores dangerouslyDisableSandbox, and a project's
 // .claude/settings.json (which the Implementer can write in its worktree) can neither switch the
 // sandbox off nor widen it, so the path denials hold for Bash.

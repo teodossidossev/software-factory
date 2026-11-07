@@ -91,11 +91,13 @@ const ALL_GIT_COMMANDS = [
 // .env files are off limits to every session, the reviewer's included.
 export const ENV_FILE_RULES = ['Read', 'Edit', 'Write'].flatMap((tool) => [`${tool}(**/.env)`, `${tool}(**/.env.*)`]);
 // Every turn, MR preparation included: every mutating Git command is the factory's or the user's;
-// .git and .env files are off limits.
+// .git and .env files are off limits; no web tool, which the sandbox does not hold (SF-123).
 export const DENIED_TOOLS = [
   ...ALL_GIT_COMMANDS.map((command) => `Bash(git ${command}:*)`),
   'Bash(sudo:*)',
   'EnterWorktree',
+  'WebFetch',
+  'WebSearch',
   'Edit(.git/**)',
   'Write(.git/**)',
   ...ENV_FILE_RULES,

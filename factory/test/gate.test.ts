@@ -322,7 +322,9 @@ test('the live events and the failure records hold no environment value, key or 
     }
     const events = await eventsOf(env, 'L-1');
     const results = events.filter((record) => record.type === 'review_message' && (record.message as { type: string }).type === 'user');
-    assert.deepEqual(results.map((record) => ((record.message as { message: { content: Array<{ content: unknown }> } }).message.content[0]!.content)), ['the file', WITHHELD]);
+    // The second is the read of ~/.codex/auth.json; the third the answer's StructuredOutput call,
+    // which the fake makes once the review has a hook (the file-tool guard, SF-123), after that read.
+    assert.deepEqual(results.map((record) => ((record.message as { message: { content: Array<{ content: unknown }> } }).message.content[0]!.content)), ['the file', WITHHELD, WITHHELD]);
     const outputs = events.filter((record) => record.type === 'gate_event').map((record) => (record.event as { item?: { id?: string; aggregated_output?: string } }).item)
       .filter((item) => item?.id?.startsWith('leak_') === true && item.aggregated_output !== undefined).map((item) => item!.aggregated_output);
     assert.deepEqual(outputs, [WITHHELD, WITHHELD]);

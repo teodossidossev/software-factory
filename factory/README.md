@@ -253,6 +253,7 @@ started by the run queue as before.
 | `SF_SMOKE_CODEX_MODEL` | unset | The gate's model in `sf smoke`, its `SF_CODEX_MODEL`; unset uses Codex's default. |
 | `SF_SANDBOX` | on | `off` runs the Implementer, the reviews, the simplification pass and the Task check without Claude Code's sandbox. The path denials for the tools (SF-100) still apply; those for Bash go with the sandbox. |
 | `SF_SANDBOX_DOMAINS` | empty | Comma-separated extra hosts sandboxed commands may reach, besides `registry.npmjs.org`. |
+| `SF_SANDBOX_ALLOW_READ` | empty | Comma-separated paths relative to the home directory that a job's sandboxed commands may read there besides the kept paths (SF-123, section Jobs, "The path denials"), for other toolchains: `.m2/repository,.gradle/caches`. An absolute entry, one with a `..` segment or a `~`, one that is or holds the home directory itself (`.`, a link to it), or one that is, holds or lies in a path denied for reading stops the session with `invalid_config`, naming the entry. |
 | `SF_DESKTOP_NOTIFY` | on | `off` disables the desktop notification. |
 | `SF_NOTIFY_ITERATIONS` | off | `on` also notifies `awaiting_review` (each published iteration). |
 | `SF_NTFY_URL` | unset | Full ntfy topic URL, e.g. `https://ntfy.sh/<topic>`; unset disables ntfy. |
@@ -315,13 +316,26 @@ sf smoke [--keep] [--timeout-min N] [--budget-usd N]
   sandbox and keep the output in `probe.json` (in the Task's `scope`; its Review brief says it is
   the expected probe output). The probe tries to read the canary `auth.env` (given its SHA-256
   only), read the run's `dashboard-token`, list its `jobs/`, `connect()` to its `sf.sock`, list
-  `~/.ssh` when it exists, and whether `SSH_AUTH_SOCK` is set; it writes only `{name, outcome,
-  code}` per probe (`refused`, `allowed` or `absent`, the error code), never anything it read. As
+  `~/.ssh` when it exists, and whether `SSH_AUTH_SOCK` is set; SF-123: `connect()` to the session
+  bus `/run/user/<uid>/bus` (`dbus`) and to `/var/run/docker.sock` (`docker.sock`), list
+  `~/.claude/projects` (each passed, as `--dbus`, `--docker` and `--claude-projects`, only when it
+  exists outside the sandbox), and read the home canary `$HOME/.sf-smoke-<suffix>/canary`
+  (`--home-canary`, always: Setup makes it with random content, Cleanup removes it, `--keep` or
+  not). It writes only `{name, outcome,
+  code}` per probe (`refused`, `allowed` or `absent`, the error code), never anything it read; `absent`
+  exactly for an option not given. As
   the sandbox may hide a denied file as empty, a folder as an empty listing, or answer `ENOENT`, a
   probe is `allowed` only when it sees what access would show (the canary's content, a non-empty
-  token, the smoke's workspace in `jobs/`, a connection, a non-empty `~/.ssh`). Once iteration 1 is
+  token, the smoke's workspace in `jobs/`, a connection, a non-empty `~/.ssh`, home canary or
+  projects listing). The Task then asks for a `Write` of `<the run's directory>/outside.txt`, outside the
+  worktree. Once iteration 1 is
   published the step reads `probe.json` from the job's worktree: PASS only when it exists and every
-  probe is `refused` (`absent` for a missing `~/.ssh` and an unset `SSH_AUTH_SOCK`); a missing or
+  probe is `refused` (`absent` for a missing `~/.ssh`, session bus, `docker.sock` or
+  `~/.claude/projects` and an unset `SSH_AUTH_SOCK`, and only for a path the smoke did not give
+  the probe, because it is missing outside the sandbox; the home canary must be refused), the
+  Implementer's `system`/`init` messages in `events.jsonl` list no `WebFetch` or `WebSearch`, and
+  `outside.txt` does not exist while the tool result of the Implementer's `Write` of it carries the
+  file-tool guard's refusal (each named in the step's detail otherwise); a missing or
   unreadable file fails it, with the reason the step finds in the job's `events.jsonl` (SF-104):
   the Implementer did not run the probe, the permission classifier refused it before the sandbox
   (the sandbox was not exercised), the permission check refused it before the sandbox in
@@ -1414,8 +1428,11 @@ the commit and rebase at Clean, push) are serialized through one Git lock per wo
 Every turn runs with `cwd` = the job's worktree, `permissionMode: "auto"` (`"dontAsk"` in `sf smoke`'s
 own job only, section Live smoke test), `settingSources: ["user",
 "project"]`, a deny list from `src/rules.ts` (mutating Git commands, `sudo`, `EnterWorktree`, `.git/**`
-edits, `.env` files; the same for every turn, MR preparation included), a filtered environment (no
-`SF_*`, no inherited Claude Code session markers) and, unless `SF_SANDBOX=off`, the sandbox
+edits, `.env` files, `WebFetch` and `WebSearch`, which the sandbox does not hold (SF-123); the same
+for every turn, MR preparation included), the file-tool guard as its `hooks` (SF-123, below), a
+filtered environment (no `SF_*`, no inherited Claude Code session markers; the cloud providers'
+`AWS_*`, `GOOGLE_*` and `CLOUD_ML_*` only when `CLAUDE_CODE_USE_BEDROCK` or `CLAUDE_CODE_USE_VERTEX`
+is set, SF-123) and, unless `SF_SANDBOX=off`, the sandbox
 `{enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false, filesystem: {disabled: false}, network: {allowedDomains:
 ["registry.npmjs.org", ...SF_SANDBOX_DOMAINS], allowLocalBinding: true, allowAllUnixSockets: true}}`.
 Local binding and Unix sockets are allowed so that the repository's own tests, which start servers on
@@ -1425,7 +1442,13 @@ the Implementer, so the Git host is not needed there; a repository whose checks 
 under `~/.claude`. No session gets `SSH_AUTH_SOCK` (SF-100), and neither does the Codex gate: the
 factory fetches and pushes itself. On Linux the sandbox can allow every Unix socket or none
 (`allowUnixSockets` is macOS only), so all stay allowed for the repositories' tests; `sf.sock` is
-in a denied path. No command runs outside the sandbox (`allowUnsandboxedCommands: false`, SF-100):
+in a denied path, and so are the user's socket locations (SF-123, below). Every `ANTHROPIC_*`,
+`AWS_*`, `GOOGLE_*`, `CLOUD_ML_*` and `CLAUDE_CODE_OAUTH_TOKEN` the session's environment passes is
+hidden from sandboxed commands: each Implementer turn, and each read-only session (the Claude
+review, the simplification pass, the Task check: `readOnlySessionOptions`, SF-123 Fix 2), adds one
+`{name, mode: "deny"}` entry each
+(`sandboxEnvDenials`, `src/session.ts`) to the sandbox's `credentials.envVars`, after any entries
+already there. No command runs outside the sandbox (`allowUnsandboxedCommands: false`, SF-100):
 Claude Code ignores a command's `dangerouslyDisableSandbox`, and a project's `.claude/settings.json`
 (which the Implementer can write in its worktree) can neither switch the sandbox off nor widen it,
 so the path denials below hold for every Bash command. A repository whose checks cannot run inside
@@ -1446,10 +1469,68 @@ reading and writing:
   root every other workspace's folder and, in the own workspace's, every other ticket's worktree;
 - the tunnel client's profile (`$TUNNEL_CLIENT_PROFILE_DIR`, else
   `${XDG_CONFIG_HOME:-~/.config}/tunnel-client`);
-- `~/.ssh`, `~/.codex`, `~/.aws`, `~/.config/gh`, `~/.git-credentials`, `~/.netrc`, `~/.npmrc` and
+- `~/.ssh`, `~/.codex`, `~/.aws`, `~/.config/gh`, `~/.git-credentials`, `~/.config/git/credentials`
+  (Git's second credential store, inside the kept `.config/git`, SF-123), `~/.netrc`, `~/.npmrc` and
   Claude Code's login `~/.claude/.credentials.json`;
 - the Task checks' parent `<system temp>/sf-task-checks-<uid>/` (not for a Task check, which runs in it);
-- every other registered workspace's checkout (not one that is, or holds, the own checkout).
+- every other registered workspace's checkout (not one that is, or holds, the own checkout);
+- the user's socket locations, when they exist (SF-123): `/run/user/<uid>`, `$XDG_RUNTIME_DIR`,
+  `/run/dbus`, `/var/run/dbus`, `/run/docker.sock`, `/var/run/docker.sock`, `/run/containerd`,
+  `/run/podman`, `/run/tailscale`, `/var/run/tailscale`, `/run/screen`, `/tmp/.X11-unix`, every
+  `/tmp/ssh-*` and `/tmp/tmux-<uid>`. Linux cannot allow sockets by path, so `allowAllUnixSockets`
+  stays `true` and their locations are denied instead; abstract sockets belong to a network
+  namespace and stay unreachable.
+
+Denied for reading (SF-123): the `.env` and `.env.*` files that exist in the own worktree and the
+checkout (`git ls-files --cached --others`, so tracked, untracked and ignored ones; a folder Git
+cannot list, or not in its time limit, is walked instead, so none is left out), but
+`.env.example`, `.env.sample` and `.env.template`; for the tools by `Read(//<path>)` too, on top
+of the `**/.env` rules of `src/rules.ts`.
+
+The home directory (SF-123), for `job` sessions (the Implementer, the review, the simplification
+pass): their sandboxed commands read there only the **kept paths** that exist, which
+`PathDenials.kept` lists by real path: the own worktree and the checkout, `.gitconfig`,
+`.config/git`, `.npm`, `.nvm`, `.volta`, `.local/share/fnm`, `.local/share/pnpm`, `.yarn`, `.bun`,
+`.node-gyp`, `.cache/{node,node-gyp,pnpm,yarn,ms-playwright}`, `.local/bin`, Claude Code's shell
+snapshots (`$CLAUDE_CONFIG_DIR/shell-snapshots`, else `~/.claude/shell-snapshots`, which each Bash
+command sources first) and the entries of `SF_SANDBOX_ALLOW_READ`. Claude Code's configuration
+directory, when `CLAUDE_CONFIG_DIR` puts it outside the home, is guarded the same way. A kept
+path that is, or holds, the home keeps it whole. Every entry of the home and of
+each folder on the way down to a kept path that is neither a kept path nor on the way to one (nor a
+link into or holding one) goes into the sandbox's `denyRead`, and only there. No `allowRead` is
+used: the installed SDK lets `allowRead` win over `denyRead` for matching paths, which would re-open
+a `.env` or a credential inside a kept path. So every other denial stays a plain `denyRead` entry
+and wins inside a kept path too: a denied path is never covered by anything that re-opens it.
+`SF_SANDBOX_ALLOW_READ` is parsed by `sandboxAllowRead` (`src/config.ts`), which refuses an entry
+naming the home itself (`.`); an entry that is, holds or lies in a path denied for reading, or whose
+path or real path is or holds a guarded root (the home, an outside `CLAUDE_CONFIG_DIR`), whatever
+lies below it (SF-123 Fix 4), is refused with `invalid_config`.
+
+The file-tool guard (SF-123): `pathDenials` also returns `hooks`, a `PreToolUse` hook that the
+Implementer's every query (`hooks`), and the review and the simplification pass
+(`ReviewOptions.hooks`, merged with a session's own hooks, `PreToolUse` matchers concatenated) get.
+A hook runs in every permission mode, where `canUseTool` is asked only for a call that would
+prompt. `Write`, `Edit`, `MultiEdit` and `NotebookEdit` pass only when every target's real path
+(for a new file: the nearest existing parent's real path plus the rest) is in the own worktree,
+outside its `.git`. `Read`, `Grep`, `Glob` (its pattern's fixed part, per brace alternative too) and
+`LS` are refused when a target's real path is in the home directory outside the kept paths and the
+session's own Claude Code project folder `<CLAUDE_CONFIG_DIR or ~/.claude>/projects/<the worktree's
+path, every character but ASCII letters and digits as "-">` (past 200 characters cut, with a hash,
+as the CLI does), where Claude Code keeps the transcript and the tool output it saves; Bash stays
+denied it. `Glob` and `Grep` (SF-123 Fix 1) walk folders. The installed CLI runs ripgrep for both
+without `--follow` (Glob: `rg --files --null --glob <pattern> --sort=modified --no-ignore
+--hidden`), but the guard holds them as if they followed links: it walks every folder of the call
+(its path or the working directory, and each fixed part of a `Glob` pattern: a pattern without a
+`/` matches at any depth), level by level by real path, 64 folders at a time, following every link
+to a folder (outside the worktree too: the temporary directory, a toolchain, where Claude Code lets
+sandboxed commands write `~/.npm/_logs`). It refuses the call when its folder, or a link below, is
+a refused path or holds a guarded root (a search of `/home`), naming the path; a dangling link
+leads nowhere, a loop ends at a folder already walked, an error other than `ENOENT`, `ENOTDIR`,
+`ELOOP`, `EACCES` or `EPERM` refuses the call, and more than 50,000 folders refuse it. A link made
+by a background command after the check is not seen. A `~` path, a missing path, a pattern it cannot expand or an input it cannot read is
+refused, and the reason, which starts with "The factory's file-tool guard", names the path. A
+dangling link is followed to where it points (a `Write` through it would create its target); a
+loop of links is refused.
 
 Denied for writing: Claude Code's user settings and global config (`$CLAUDE_CONFIG_DIR/settings.json`
 and `$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude/settings.json` and `~/.claude.json`), which a
@@ -1484,7 +1565,8 @@ settings Claude Code loads (`$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/
 that is, holds or lies inside a path denied for reading or writing (paths matched as the denials
 are), or a file that cannot be read as a JSON object stop the session before it starts, and the job
 goes to `needs_human` with `user_settings_weaken_sandbox`, naming the key and the path; a missing
-file is fine. What each session can still reach, and the limits: [the trust model](../docs/guide/trust-model.md).
+file is fine. The entries are held against the specific denials only, not against the home
+directory's entries (SF-123): an `allowRead` of `~/projects/**` passes, one of `~/.ssh` does not. What each session can still reach, and the limits: [the trust model](../docs/guide/trust-model.md).
 
 The sandbox (bubblewrap) needs a mount point for every path it masks. When such a path does not
 exist in the worktree it creates it as a zero-byte file with mode 0444 and leaves it there:

@@ -28,18 +28,46 @@ const CLAUDE_SESSION_MARKERS = new Set([
 // No SSH_AUTH_SOCK (SF-100): the factory fetches and pushes itself, outside the sandbox, so no
 // session needs the user's SSH agent.
 const KEPT_NAMES = new Set(['PATH', 'HOME', 'LANG', 'LANGUAGE', 'TERM', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TZ']);
-const KEPT_PATTERN = /^(LC_\w+|XDG_\w+|(HTTPS?|ALL|NO)_PROXY|(https?|all|no)_proxy|ANTHROPIC_\w+|CLAUDE_\w+|AWS_\w+|GOOGLE_\w+|CLOUD_ML_\w+)$/;
+const KEPT_PATTERN = /^(LC_\w+|XDG_\w+|(HTTPS?|ALL|NO)_PROXY|(https?|all|no)_proxy|ANTHROPIC_\w+|CLAUDE_\w+)$/;
+// The cloud providers' credentials (SF-123): passed only when Claude Code itself runs on Bedrock or
+// Vertex, whose provider needs them; a workspace never does.
+const CLOUD_PATTERN = /^(AWS_\w+|GOOGLE_\w+|CLOUD_ML_\w+)$/;
+const CLOUD_PROVIDER_SWITCHES = ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX'];
+// A provider switch is on unless it is unset or plainly off; an unknown value counts as on, so a
+// Bedrock or Vertex setup never loses its credentials.
+const switchOn = (value: string | undefined): boolean => value !== undefined && !['', '0', 'false', 'no', 'off'].includes(value.trim().toLowerCase());
+// The passed variables sandboxed commands never see (SF-123): the Anthropic and cloud credentials
+// and the OAuth token Claude Code itself uses.
+const SANDBOX_HIDDEN_PATTERN = /^(ANTHROPIC_\w+|AWS_\w+|GOOGLE_\w+|CLOUD_ML_\w+|CLAUDE_CODE_OAUTH_TOKEN)$/;
 
-// The child's environment: the basics, proxies and the Anthropic/Claude (and cloud provider) auth
-// variables; nothing of the factory (SF_*) and no inherited Claude session markers.
+// The child's environment: the basics, proxies and the Anthropic/Claude auth variables, and the
+// cloud provider's when Claude Code runs on Bedrock or Vertex; nothing of the factory (SF_*) and no
+// inherited Claude session markers.
 export function sessionEnvironment(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const cloud = CLOUD_PROVIDER_SWITCHES.some((name) => switchOn(env[name]));
   const result: Record<string, string> = {};
   for (const [name, value] of Object.entries(env)) {
-    if (value !== undefined && (KEPT_NAMES.has(name) || KEPT_PATTERN.test(name)) && !CLAUDE_SESSION_MARKERS.has(name)) {
+    if (value !== undefined && (KEPT_NAMES.has(name) || KEPT_PATTERN.test(name) || (cloud && CLOUD_PATTERN.test(name))) && !CLAUDE_SESSION_MARKERS.has(name)) {
       result[name] = value;
     }
   }
   return result;
+}
+
+// One credentials.envVars deny entry of the sandbox settings (the installed SDK's shape) for each
+// credential of the given environment (sessionEnvironment's result) that sandboxed commands may not see.
+export function sandboxEnvDenials(environment: Record<string, string>): Array<{ name: string; mode: 'deny' }> {
+  return Object.keys(environment).filter((name) => SANDBOX_HIDDEN_PATTERN.test(name)).map((name) => ({ name, mode: 'deny' as const }));
+}
+
+// The sandbox settings with the environment's credentials hidden from sandboxed commands
+// (sandboxEnvDenials), after any credentials.envVars entries already there; undefined stays undefined.
+export function withSandboxEnvDenials(sandbox: SandboxSettings | undefined, environment: Record<string, string>): SandboxSettings | undefined {
+  const denied = sandboxEnvDenials(environment);
+  if (sandbox === undefined || denied.length === 0) {
+    return sandbox;
+  }
+  return { ...sandbox, credentials: { ...sandbox.credentials, envVars: [...(sandbox.credentials?.envVars ?? []), ...denied] } };
 }
 
 export interface SessionOptions {
@@ -55,8 +83,9 @@ export interface SessionOptions {
   // Continuations after a turn limit per chain (SF_TURN_LIMIT_CONTINUES); default 0.
   turnLimitContinues?: number | undefined;
   // Builds the session's path denials (SF-100, src/sandbox-denials.ts): called once, by the first
-  // turn before its query(); its tools go on top of every prompt's deny list and its sandbox lists
-  // into the sandbox settings of every query. A failure fails that turn.
+  // turn before its query(); its tools go on top of every prompt's deny list, its sandbox lists
+  // into the sandbox settings of every query and its hooks (the file-tool guard, SF-123) are every
+  // query's hooks. A failure fails that turn.
   pathDenials?: (() => Promise<PathDenials>) | undefined;
   // Commands allowed past the permission check (SF-104): one exact allowedTools rule
   // Bash(<command>) each, never a prefix rule, but in a smoke session (smokeMode), which gets the
@@ -334,7 +363,8 @@ export class ImplementerSession {
       }
     }
     const denials = this.#denials;
-    const sandbox = withSandboxDenials(this.#options.sandbox, denials?.sandbox);
+    const environment = sessionEnvironment();
+    const sandbox = withSandboxEnvDenials(withSandboxDenials(this.#options.sandbox, denials?.sandbox), environment);
     const abortController = new AbortController();
     this.#abort = abortController;
     const input = await promptInput(prompt, images);
@@ -351,9 +381,11 @@ export class ImplementerSession {
         ...(allowed.length > 0 ? { allowedTools: allowed } : {}),
         maxTurns: this.#options.maxTurns,
         // A known startup failure (such as an unavailable sandbox) then ends with a result message.
-        env: { ...sessionEnvironment(), CLAUDE_CODE_STARTUP_FAILURE_RESULTS: '1' },
+        env: { ...environment, CLAUDE_CODE_STARTUP_FAILURE_RESULTS: '1' },
         ...(this.#sessionId !== undefined ? { resume: this.#sessionId } : {}),
         ...(sandbox !== undefined ? { sandbox } : {}),
+        // The file-tool guard (SF-123), in every permission mode.
+        ...(denials?.hooks !== undefined ? { hooks: denials.hooks } : {}),
         ...(this.#options.model !== undefined ? { model: this.#options.model } : {}),
         ...(this.#options.claudePath !== undefined ? { pathToClaudeCodeExecutable: this.#options.claudePath } : {}),
       },

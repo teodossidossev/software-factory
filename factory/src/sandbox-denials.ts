@@ -7,26 +7,35 @@
 // lists for Bash. A path that does not exist when they are built is left out everywhere, so the
 // sandbox never leaves a placeholder for it. Also the Task checks' parent directory, which the
 // Task checks create and the other sessions deny.
+// SF-123: the user's socket locations are denied too; the .env files of the worktree and the
+// checkout for reading; a job's sandboxed commands read nothing in the home directory but the kept
+// paths (by denyRead only, never allowRead); and the file-tool guard, a PreToolUse hook every job
+// session gets, holds Write and Edit to the own worktree and the read tools out of the home
+// directory's other paths, by real path.
 // This module knows the file system, the registry and Git; it knows nothing about jobs.
-import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
+import type { HookCallback, Options, SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
 import { lstatSync } from 'node:fs';
-import { chmod, lstat, mkdir, readdir, readFile, realpath, stat } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readdir, readFile, readlink, realpath, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { envFilePath } from './config.js';
+import { envFilePath, sandboxAllowRead } from './config.js';
 import { FactoryError } from './errors.js';
-import { gitToplevel } from './git.js';
+import { gitToplevel, runGit } from './git.js';
 import { configDir, loadRegistry } from './registry.js';
 
 // The sandbox's filesystem deny lists (the installed SDK's SandboxSettings.filesystem fields).
 export type SandboxDenials = Required<Pick<NonNullable<SandboxSettings['filesystem']>, 'denyRead' | 'denyWrite'>>;
 
 // tools: permission deny rules for the session's disallowedTools; sandbox: merged into the
-// sandbox's filesystem settings (withSandboxDenials).
+// sandbox's filesystem settings (withSandboxDenials); kept: the paths under the home directory a
+// job's sandboxed commands may still read (SF-123), real; hooks: the file-tool guard (SF-123), the
+// hooks option of every job session's query().
 export interface PathDenials {
   tools: string[];
   sandbox: SandboxDenials;
+  kept: string[];
+  hooks: Options['hooks'];
 }
 
 export interface DenialScope {
@@ -48,11 +57,19 @@ export interface DenialScope {
   moduleDir?: string;
   // The system temporary directory (default: os.tmpdir()).
   tmp?: string;
+  // The root under which the system's socket locations (/run, /var/run, /tmp) are looked up
+  // (default: /); tests give a fake one.
+  systemRoot?: string;
 }
 
 // The user's credentials in the home directory, denied when they exist. Claude Code keeps its
 // login in ~/.claude/.credentials.json on Linux.
-export const HOME_CREDENTIALS = ['.ssh', '.codex', '.aws', '.config/gh', '.git-credentials', '.netrc', '.npmrc', '.claude/.credentials.json'];
+// Git's credential store has two default files: ~/.git-credentials and ~/.config/git/credentials
+// (SF-123: .config/git is a kept path, so its credentials must be a denial of their own).
+export const HOME_CREDENTIALS = ['.ssh', '.codex', '.aws', '.config/gh', '.git-credentials', '.config/git/credentials', '.netrc', '.npmrc', '.claude/.credentials.json'];
+
+// Claude Code's configuration directory: CLAUDE_CONFIG_DIR, else ~/.claude.
+export const claudeConfigDir = (env: NodeJS.ProcessEnv, home: string): string => env.CLAUDE_CONFIG_DIR || join(home, '.claude');
 
 // The name the docs give the factory's own MCP server in Claude Code (`claude mcp add … software-factory
 // …`, SF-099): every session denies its tools, so none reaches the planning tools with the token
@@ -193,7 +210,7 @@ const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 
 // The paths denied for reading and writing, and those denied for writing only, as given (not yet
 // checked for existence).
-async function candidates(scope: DenialScope): Promise<{ readWrite: string[]; writeOnly: string[]; settings: string[] }> {
+async function candidates(scope: DenialScope): Promise<{ readWrite: string[]; writeOnly: string[]; readOnly: string[]; settings: string[] }> {
   const env = scope.env ?? process.env;
   const home = env.HOME || homedir();
   const config = scope.configDir ?? configDir(env);
@@ -229,8 +246,9 @@ async function candidates(scope: DenialScope): Promise<{ readWrite: string[]; wr
   }
   readWrite.push(env.TUNNEL_CLIENT_PROFILE_DIR || join(env.XDG_CONFIG_HOME || join(home, '.config'), 'tunnel-client'));
   readWrite.push(...HOME_CREDENTIALS.map((path) => join(home, path)));
+  readWrite.push(...(await socketLocations(env, scope.systemRoot ?? '/')));
   // Claude Code's backups of its global config, which hold what the global config holds (SF-099).
-  readWrite.push(join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'backups'));
+  readWrite.push(join(claudeConfigDir(env, home), 'backups'));
   if (scope.session !== 'task_check') {
     readWrite.push(taskChecksDir(scope.tmp));
   }
@@ -251,7 +269,49 @@ async function candidates(scope: DenialScope): Promise<{ readWrite: string[]; wr
   if (realInstall !== undefined && !within(ownCheckout, realInstall)) {
     writeOnly.push(realInstall);
   }
-  return { readWrite, writeOnly, settings: claudeUserSettings(env, home) };
+  // The .env files of the own worktree and checkout, for reading (SF-123).
+  const readOnly = [...(scope.worktree !== undefined ? await envFiles(scope.worktree) : []), ...(await envFiles(scope.checkout))];
+  return { readWrite, writeOnly, readOnly, settings: claudeUserSettings(env, home) };
+}
+
+// Where the user's Unix sockets live (SF-123): the session bus and the systemd user manager in the
+// runtime directory, the system bus, docker, containerd, podman, tailscaled, screen, X11, the SSH
+// agents and tmux, under root (/ but in tests). Linux cannot allow sockets by path, so their
+// locations are denied instead; a missing one is left out like every other.
+async function socketLocations(env: NodeJS.ProcessEnv, root: string): Promise<string[]> {
+  const uid = process.getuid?.() ?? 'user';
+  const at = (...parts: string[]): string => join(root, ...parts);
+  const paths = [
+    at('run', 'user', String(uid)), at('run', 'dbus'), at('var', 'run', 'dbus'), at('run', 'docker.sock'), at('var', 'run', 'docker.sock'),
+    at('run', 'containerd'), at('run', 'podman'), at('run', 'tailscale'), at('var', 'run', 'tailscale'), at('run', 'screen'),
+    at('tmp', '.X11-unix'), at('tmp', `tmux-${uid}`),
+    ...(await readdir(at('tmp')).catch(() => [] as string[])).filter((name) => name.startsWith('ssh-')).map((name) => at('tmp', name)),
+  ];
+  if (env.XDG_RUNTIME_DIR !== undefined && isAbsolute(env.XDG_RUNTIME_DIR)) {
+    paths.push(env.XDG_RUNTIME_DIR);
+  }
+  return paths;
+}
+
+// The example files a repository shares, which hold no secret: never denied.
+const ENV_EXAMPLES = new Set(['.env.example', '.env.sample', '.env.template']);
+
+// Whether a file name is a .env file to deny: .env or .env.*, but the shared examples.
+const isEnvFile = (name: string): boolean => (name === '.env' || name.startsWith('.env.')) && !ENV_EXAMPLES.has(name);
+
+// The .env and .env.* files under a Git work tree (SF-123), absolute: the tracked ones and every
+// untracked one, ignored ones included (`git ls-files --cached --others` without an exclude list
+// lists what `--others --ignored --exclude-standard` lists, and the untracked files not ignored).
+// When Git cannot list them (not a work tree, a failure, its time limit), the folder is walked
+// instead, so a session never starts with a .env left out.
+async function envFiles(dir: string): Promise<string[]> {
+  const listed = await runGit(dir, ['ls-files', '-z', '--cached', '--others', '--', ':(glob)**/.env', ':(glob)**/.env.*'], 4 * 1024 * 1024, 60_000).catch(() => undefined);
+  if (listed === undefined || listed.code !== 0 || listed.truncated) {
+    const found = await readdir(dir, { recursive: true, withFileTypes: true }).catch(() => []);
+    return found.filter((entry) => entry.isFile() && isEnvFile(entry.name) && !relative(dir, entry.parentPath).split(sep).includes('.git')).map((entry) => join(entry.parentPath, entry.name));
+  }
+  const names = listed.stdout.toString('utf8').split('\0').filter((name) => name !== '');
+  return [...new Set(names)].filter((name) => isEnvFile(basename(name))).map((name) => join(dir, name));
 }
 
 // The Claude Code configuration a session loads that it could otherwise rewrite for its next query
@@ -261,14 +321,146 @@ async function candidates(scope: DenialScope): Promise<{ readWrite: string[]; wr
 // for the tools even while missing, so a session cannot create them either. The global config is
 // denied for reading too (SF-099): `claude mcp add` keeps the factory's MCP URL with its token there.
 export function claudeUserSettings(env: NodeJS.ProcessEnv, home: string): string[] {
-  const dir = env.CLAUDE_CONFIG_DIR || join(home, '.claude');
+  const dir = claudeConfigDir(env, home);
   return [join(dir, 'settings.json'), env.CLAUDE_CONFIG_DIR ? join(env.CLAUDE_CONFIG_DIR, '.claude.json') : join(home, '.claude.json')];
+}
+
+// The paths under the home directory a job's sandboxed commands keep reading (SF-123), relative to
+// it: Git's configuration, the Node toolchains and their caches, and ~/.local/bin.
+export const HOME_KEPT = [
+  '.gitconfig', '.config/git', '.npm', '.nvm', '.volta', '.local/share/fnm', '.local/share/pnpm', '.yarn', '.bun', '.node-gyp',
+  '.cache/node', '.cache/node-gyp', '.cache/pnpm', '.cache/yarn', '.cache/ms-playwright', '.local/bin',
+];
+
+// Claude Code's name for a project's folder under <config>/projects (as the installed CLI makes it):
+// every character but an ASCII letter or digit as "-", and past 200 characters the first 200 then
+// "-" and the base-36 absolute value of the path's 32-bit string hash.
+export function claudeProjectName(path: string): string {
+  const name = path.replace(/[^a-zA-Z0-9]/g, '-');
+  if (name.length <= 200) {
+    return name;
+  }
+  let hash = 0;
+  for (let index = 0; index < path.length; index += 1) {
+    hash = ((hash << 5) - hash + path.charCodeAt(index)) | 0;
+  }
+  return `${name.slice(0, 200)}-${Math.abs(hash).toString(36)}`;
+}
+
+// The most links realTarget follows through dangling links before it gives up (a loop).
+const MAX_LINKS = 40;
+
+// The path with its deepest existing ancestor's links resolved: where a write or read of it lands,
+// for a file not there yet too. A dangling link on the way is followed to where it points (a Write
+// through it creates its target), so it never reads as a new file in its own folder. Throws on a
+// loop of dangling links.
+async function realTarget(path: string, followed = 0): Promise<string> {
+  const rest: string[] = [];
+  let existing = path;
+  for (;;) {
+    const real = await realOrUndefined(existing);
+    if (real !== undefined) {
+      return join(real, ...rest);
+    }
+    const link = await readlink(existing).catch(() => undefined);
+    if (link !== undefined) {
+      if (followed >= MAX_LINKS) {
+        throw new Error(`too many links at ${existing}`);
+      }
+      return realTarget(join(resolve(dirname(existing), link), ...rest), followed + 1);
+    }
+    const parent = dirname(existing);
+    if (parent === existing) {
+      return path;
+    }
+    rest.unshift(basename(existing));
+    existing = parent;
+  }
+}
+
+// The kept paths of a job session that exist, real: the own worktree and checkout, HOME_KEPT, the
+// installed Claude Code's shell snapshots (each Bash command first sources one) and the entries
+// of SF_SANDBOX_ALLOW_READ, each refused with invalid_config when it is, holds or lies in a path
+// denied for reading (denyRead), or is or holds a guarded root (the home itself, by any link).
+async function keptPaths(scope: DenialScope, home: string, denyRead: readonly string[]): Promise<string[]> {
+  const env = scope.env ?? process.env;
+  const extra: string[] = [];
+  // The roots the kept paths are carved out of (SF-123 Fix 4): an entry that is, or holds, one of
+  // them (the home itself, or a link to it or to /) would keep it whole, whatever lies below it.
+  const roots = [...new Set([resolve(home), ...(await guardedRoots(env, home))])];
+  for (const entry of sandboxAllowRead(env)) {
+    const path = join(home, entry);
+    const spellings = [...new Set([path, (await realOrUndefined(path)) ?? path])];
+    const root = roots.find((guarded) => spellings.some((spelling) => within(guarded, spelling)));
+    if (root !== undefined) {
+      throw new FactoryError('invalid_config', `SF_SANDBOX_ALLOW_READ has the entry "${entry}", which is or holds ${root}, whose paths a job reads only through the kept ones; the session does not start.`);
+    }
+    const hit = denyRead.find((denied) => spellings.some((spelling) => within(denied, spelling) || within(spelling, denied)));
+    if (hit !== undefined) {
+      throw new FactoryError('invalid_config', `SF_SANDBOX_ALLOW_READ has the entry "${entry}", which covers the denied ${hit}; the session does not start.`);
+    }
+    extra.push(path);
+  }
+  const paths = [
+    ...(scope.worktree !== undefined ? [scope.worktree] : []), scope.checkout,
+    ...HOME_KEPT.map((path) => join(home, path)), join(claudeConfigDir(env, home), 'shell-snapshots'), ...extra,
+  ];
+  const kept = new Set<string>();
+  for (const path of paths) {
+    const real = await realOrUndefined(resolve(path));
+    if (real !== undefined) {
+      kept.add(real);
+    }
+  }
+  return [...kept];
+}
+
+// The folders whose contents a job reads only through the kept paths (SF-123): the home directory
+// and Claude Code's configuration directory when CLAUDE_CONFIG_DIR puts it outside the home; real.
+async function guardedRoots(env: NodeJS.ProcessEnv, home: string): Promise<string[]> {
+  const realHome = (await realOrUndefined(home)) ?? resolve(home);
+  const config = await realOrUndefined(claudeConfigDir(env, home));
+  return config === undefined || within(config, realHome) ? [realHome] : [realHome, config];
+}
+
+// The entries a job's sandboxed commands may not read in a guarded root (SF-123): every entry of
+// the root and of each folder on the way down to a kept path, unless it is a kept path, on the
+// way to one, or a link into, or holding, one. Absolute, spelled from the root's real path. A kept
+// path that is, or holds, the root keeps it whole (a checkout at $HOME, say): nothing is denied.
+async function homeEntries(realHome: string, kept: readonly string[]): Promise<string[]> {
+  if (kept.some((path) => within(realHome, path))) {
+    return [];
+  }
+  const onTheWay = new Set<string>([realHome]);
+  for (const path of kept.filter((path) => within(path, realHome))) {
+    for (let dir = dirname(path); within(dir, realHome); dir = dirname(dir)) {
+      onTheWay.add(dir);
+      if (dir === realHome) {
+        break;
+      }
+    }
+  }
+  const denied: string[] = [];
+  for (const dir of onTheWay) {
+    for (const entry of await entries(dir)) {
+      if (onTheWay.has(entry) || kept.includes(entry)) {
+        continue;
+      }
+      const real = (await realOrUndefined(entry)) ?? entry;
+      if (!kept.some((path) => within(real, path) || within(path, real))) {
+        denied.push(entry);
+      }
+    }
+  }
+  return denied;
 }
 
 // The denials of one session (DenialScope). Paths are absolute, each also by its real path when that
 // differs; a missing path is left out.
 export async function pathDenials(scope: DenialScope): Promise<PathDenials> {
-  const { readWrite, writeOnly, settings } = await candidates(scope);
+  const env = scope.env ?? process.env;
+  const home = env.HOME || homedir();
+  const { readWrite, writeOnly, readOnly, settings } = await candidates(scope);
   const tools = new Set<string>();
   const denyRead = new Set<string>();
   const denyWrite = new Set<string>();
@@ -286,6 +478,13 @@ export async function pathDenials(scope: DenialScope): Promise<PathDenials> {
       entry.spellings.forEach((spelling) => denyWrite.add(spelling));
     }
   }
+  for (const path of readOnly) {
+    const entry = await denied(path);
+    if (entry !== undefined) {
+      rules(entry, ['Read']).forEach((rule) => tools.add(rule));
+      entry.spellings.forEach((spelling) => denyRead.add(spelling));
+    }
+  }
   // The Claude configuration: an existing file as above; a missing one for the tools only (the
   // sandbox would leave a placeholder; Bash cannot write outside the worktree and the temporary
   // directory anyway), by its path and by its folder's real path. The user settings stay readable;
@@ -301,15 +500,271 @@ export async function pathDenials(scope: DenialScope): Promise<PathDenials> {
     }
   }
   tools.add(`mcp__${FACTORY_MCP_SERVER}`);
-  const sandbox = { denyRead: [...denyRead], denyWrite: [...denyWrite] };
+  // The specific denials: what the user settings and SF_SANDBOX_ALLOW_READ are held against.
+  const specific = { denyRead: [...denyRead], denyWrite: [...denyWrite] };
+  const kept = await keptPaths(scope, home, specific.denyRead);
   // The Implementer, the review and the simplification pass load the user settings (settingSources
-  // "user"): one that weakens the sandbox stops the session before it starts.
+  // "user"): one that weakens the sandbox stops the session before it starts. Their sandboxed
+  // commands read nothing in the home directory but the kept paths (SF-123), by denyRead only: no
+  // allowRead, which would win over every denial inside what it re-opens.
+  const roots = await guardedRoots(env, home);
   if (scope.session === 'job') {
-    const env = scope.env ?? process.env;
-    const home = env.HOME || homedir();
-    await checkUserSettings(claudeUserSettings(env, home)[0]!, sandbox, home);
+    await checkUserSettings(claudeUserSettings(env, home)[0]!, specific, home);
+    for (const root of roots) {
+      for (const path of await homeEntries(root, kept)) {
+        (await denied(path))?.spellings.forEach((spelling) => denyRead.add(spelling));
+      }
+    }
   }
-  return { tools: [...tools], sandbox };
+  const sandbox = { denyRead: [...denyRead], denyWrite: [...denyWrite] };
+  const projects = join(claudeConfigDir(env, home), 'projects');
+  const ownProjects = scope.worktree === undefined ? [] : [...new Set([resolve(scope.worktree), (await realOrUndefined(scope.worktree)) ?? resolve(scope.worktree)])].map((path) => join(projects, claudeProjectName(path)));
+  const guard = await fileGuard({ worktree: scope.worktree, roots, kept, projects: ownProjects });
+  return { tools: [...tools], sandbox, kept, hooks: guardHooksOf(guard) };
+}
+
+// The text every refusal of the file-tool guard starts with (the smoke looks for it).
+export const FILE_GUARD = "The factory's file-tool guard";
+
+// The file tools that write, and the ones that read, by name (SF-123).
+const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+const READ_TOOLS = new Set(['Read', 'Grep', 'Glob', 'LS']);
+// The keys of a tool input that name a path; each one present is a target.
+const PATH_KEYS = ['file_path', 'path', 'notebook_path'];
+// The most brace alternatives a Glob pattern may expand to.
+const MAX_ALTERNATIVES = 64;
+const GLOB_CHARS = /[*?[\]{}]/;
+
+// What the guard checks against, real paths: the own worktree (undefined: no write passes), the
+// guarded roots (guardedRoots), the kept paths and the session's own Claude Code project folders.
+interface FileGuard {
+  worktree: string | undefined;
+  roots: string[];
+  kept: string[];
+  projects: string[];
+}
+
+// The guard of the given paths, each by the real path it lands on.
+async function fileGuard(given: FileGuard): Promise<FileGuard> {
+  return {
+    worktree: given.worktree === undefined ? undefined : await realTarget(resolve(given.worktree)),
+    roots: given.roots,
+    kept: given.kept,
+    projects: [...new Set(await Promise.all(given.projects.map((path) => realTarget(path))))],
+  };
+}
+
+// A Glob pattern's brace alternatives, innermost group first; undefined for one the guard does not
+// read the way the tool does (a backslash, an extglob, "|", unpaired braces, too many alternatives).
+function braceAlternatives(pattern: string): string[] | undefined {
+  if (pattern.includes('\\') || pattern.includes('|') || /[@!+*?]\(/.test(pattern)) {
+    return undefined;
+  }
+  let alternatives = [pattern];
+  for (;;) {
+    const next: string[] = [];
+    let expanded = false;
+    for (const alternative of alternatives) {
+      const group = /\{([^{}]*)\}/.exec(alternative);
+      if (group === null) {
+        next.push(alternative);
+        continue;
+      }
+      expanded = true;
+      next.push(...group[1]!.split(',').map((part) => alternative.slice(0, group.index) + part + alternative.slice(group.index + group[0].length)));
+    }
+    if (next.length > MAX_ALTERNATIVES) {
+      return undefined;
+    }
+    alternatives = next;
+    if (!expanded) {
+      return alternatives.some((alternative) => alternative.includes('{') || alternative.includes('}')) ? undefined : alternatives;
+    }
+  }
+}
+
+// The paths a file tool call reaches, absolute (relative ones from cwd), or the value the guard
+// cannot read: a path that is not a string, has white space at either end or starts with "~", a
+// missing target of a write or a Read, a Glob pattern it cannot expand or that climbs with ".."
+// after a glob segment. A Glob, Grep or LS without a path reaches cwd. searches: the folders a Glob
+// or Grep walks below for files to match (SF-123 Fix 1): every path of the call, its folder and a
+// Glob pattern's fixed parts alike (a pattern without a "/" matches at any depth, and Claude Code
+// may move part of a pattern into the folder searched).
+function targets(tool: string, input: Record<string, unknown>, cwd: string): { paths: string[]; searches: string[] } | { unreadable: string } {
+  const plain = (value: unknown): value is string => typeof value === 'string' && value !== '' && value === value.trim() && !value.startsWith('~');
+  const given = PATH_KEYS.filter((key) => input[key] !== undefined && input[key] !== '').map((key) => input[key]);
+  const bad = given.find((value) => !plain(value));
+  if (bad !== undefined) {
+    return { unreadable: typeof bad === 'string' ? bad : JSON.stringify(bad) ?? String(bad) };
+  }
+  const paths = (given as string[]).map((path) => resolve(cwd, path));
+  if (paths.length === 0) {
+    if (WRITE_TOOLS.has(tool) || tool === 'Read') {
+      return { unreadable: '(no path)' };
+    }
+    paths.push(cwd);
+  }
+  if (tool === 'Glob' && input.pattern !== undefined) {
+    const pattern = input.pattern;
+    const alternatives = typeof pattern === 'string' ? braceAlternatives(pattern) : undefined;
+    if (alternatives === undefined) {
+      return { unreadable: typeof pattern === 'string' ? pattern : String(JSON.stringify(pattern)) };
+    }
+    const bases = [...paths];
+    for (const alternative of alternatives) {
+      const segments = alternative.split('/');
+      const first = segments.findIndex((segment) => GLOB_CHARS.test(segment));
+      if (alternative.startsWith('~') || (first >= 0 && segments.slice(first).includes('..'))) {
+        return { unreadable: alternative };
+      }
+      const fixed = (first < 0 ? segments : segments.slice(0, first)).join('/');
+      paths.push(...(isAbsolute(alternative) ? [resolve('/', fixed)] : bases.map((base) => resolve(base, fixed))));
+    }
+  }
+  return { paths, searches: SEARCH_TOOLS.has(tool) ? paths : [] };
+}
+
+// Whether a real path is one the read tools may not reach: in a guarded root, outside the kept
+// paths and the session's own Claude Code project folders.
+const readDenied = (guard: FileGuard, real: string): boolean =>
+  guard.roots.some((root) => within(real, root)) && !guard.kept.some((kept) => within(real, kept)) && !guard.projects.some((project) => within(real, project));
+
+// The most folders the link check of one search walks; more refuse the search. SEARCH_BATCH: the
+// folders it reads at once.
+const MAX_SEARCH_DIRS = 50_000;
+const SEARCH_BATCH = 64;
+// The tools whose search walks the folders below its path. The installed CLI runs ripgrep for both
+// without --follow; the guard holds them as if they followed links, so a CLI that does stays held.
+const SEARCH_TOOLS = new Set(['Glob', 'Grep']);
+// The errors that mean a folder or a link leads nowhere a search could go: anything else (EMFILE,
+// EIO) cannot be checked, so the call is refused.
+const NOWHERE = new Set(['ENOENT', 'ENOTDIR', 'ELOOP', 'EACCES', 'EPERM']);
+const nowhere = <T>(fallback: T) => (error: NodeJS.ErrnoException): T => {
+  if (NOWHERE.has(error.code ?? '')) {
+    return fallback;
+  }
+  throw error;
+};
+
+// Why a search reaching a folder (a real path) is refused: it is a refused path, or it holds one
+// of the guarded roots (a search of /home walks into the home directory).
+function searchDenied(guard: FileGuard, real: string): string | undefined {
+  if (readDenied(guard, real)) {
+    return 'in the home directory outside the worktree, the checkout and the toolchains';
+  }
+  const held = guard.roots.find((root) => within(root, real));
+  return held === undefined ? undefined : `holding ${held}`;
+}
+
+// Why a search from dir (a real path) would reach a refused path (SF-123 Fix 1), or undefined:
+// dir itself, or a link anywhere below it, as ripgrep with --follow walks it. Every folder it would
+// reach is walked once, level by level, by its real path, a link's target folder included (a folder
+// outside the worktree, such as the temporary directory, may hold a link of its own). A dangling
+// link leads nowhere; an error that is not one of NOWHERE throws (the call is refused). More than
+// MAX_SEARCH_DIRS folders refuse the search.
+async function searchEscape(guard: FileGuard, dir: string): Promise<string | undefined> {
+  const own = searchDenied(guard, dir);
+  if (own !== undefined) {
+    return `${dir} is ${own}`;
+  }
+  const visited = new Set<string>([dir]);
+  let level = [dir];
+  while (level.length > 0) {
+    const next: string[] = [];
+    for (let start = 0; start < level.length; start += SEARCH_BATCH) {
+      const found = await Promise.all(level.slice(start, start + SEARCH_BATCH).map(async (current) => {
+        const listed = await readdir(current, { withFileTypes: true }).catch(nowhere([]));
+        return Promise.all(listed.map(async (entry): Promise<{ folder?: string; escape?: string }> => {
+          const path = join(current, entry.name);
+          if (entry.isDirectory()) {
+            return { folder: path };
+          }
+          if (!entry.isSymbolicLink()) {
+            return {};
+          }
+          const real = await realpath(path).catch(nowhere(undefined));
+          if (real === undefined) {
+            return {};
+          }
+          const denied = searchDenied(guard, real);
+          if (denied !== undefined) {
+            return { escape: `${path} below it links to ${real}, ${denied}` };
+          }
+          return (await stat(real).catch(nowhere(undefined)))?.isDirectory() === true ? { folder: real } : {};
+        }));
+      }));
+      for (const result of found.flat()) {
+        if (result.escape !== undefined) {
+          return result.escape;
+        }
+        if (result.folder !== undefined && !visited.has(result.folder)) {
+          visited.add(result.folder);
+          if (visited.size > MAX_SEARCH_DIRS) {
+            return `the folders below ${dir} are too many to check for links (over ${MAX_SEARCH_DIRS})`;
+          }
+          next.push(result.folder);
+        }
+      }
+    }
+    level = next;
+  }
+  return undefined;
+}
+
+// Why the guard refuses a tool call (SF-123), or undefined when it passes. A write tool passes only
+// when every target, links resolved, is in the own worktree outside its .git; a read tool is
+// refused when a target lies in the home directory outside the kept paths and the session's own
+// Claude Code project folders. Every other tool passes. Never throws: a call it fails to check is
+// refused (Claude Code would take a hook that throws as no decision).
+export async function fileGuardReason(guard: FileGuard, tool: string, input: unknown, cwd: string | undefined): Promise<string | undefined> {
+  if (!WRITE_TOOLS.has(tool) && !READ_TOOLS.has(tool)) {
+    return undefined;
+  }
+  try {
+    const base = cwd ?? guard.worktree;
+    if (typeof input !== 'object' || input === null || base === undefined) {
+      return `${FILE_GUARD} refuses this ${tool}: its input cannot be checked.`;
+    }
+    const found = targets(tool, input as Record<string, unknown>, base);
+    if ('unreadable' in found) {
+      return `${FILE_GUARD} refuses this ${tool}: the path ${found.unreadable} cannot be checked (give a plain absolute path, no ~).`;
+    }
+    for (const path of found.paths) {
+      const real = await realTarget(path);
+      if (WRITE_TOOLS.has(tool)) {
+        if (guard.worktree === undefined || !within(real, guard.worktree) || within(real, join(guard.worktree, '.git'))) {
+          return `${FILE_GUARD} refuses this ${tool}: ${path} is outside the job's worktree${guard.worktree === undefined ? '' : ` ${guard.worktree}`}, or in its .git.`;
+        }
+      } else if (readDenied(guard, real)) {
+        return `${FILE_GUARD} refuses this ${tool}: ${path} is in the home directory, outside the worktree, the checkout and the toolchains.`;
+      }
+    }
+    for (const path of found.searches) {
+      const real = await realTarget(path);
+      if ((await stat(real).catch(nowhere(undefined)))?.isDirectory() === true) {
+        const escape = await searchEscape(guard, real);
+        if (escape !== undefined) {
+          return `${FILE_GUARD} refuses this ${tool} of ${path}: ${escape}.`;
+        }
+      }
+    }
+    return undefined;
+  } catch {
+    return `${FILE_GUARD} could not check this ${tool} call; it is refused.`;
+  }
+}
+
+// The guard as the session's PreToolUse hook (in the form of the Task check's guardHooks): it runs
+// in every permission mode, auto and dontAsk included; a refusal is a deny with the reason.
+function guardHooksOf(guard: FileGuard): { PreToolUse: Array<{ hooks: HookCallback[] }> } {
+  const hook: HookCallback = async (input) => {
+    if (input.hook_event_name !== 'PreToolUse') {
+      return {};
+    }
+    const reason = await fileGuardReason(guard, input.tool_name, input.tool_input, typeof input.cwd === 'string' && isAbsolute(input.cwd) ? input.cwd : undefined);
+    return reason === undefined ? {} : { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } };
+  };
+  return { PreToolUse: [{ hooks: [hook] }] };
 }
 
 export const USER_SETTINGS_WEAKEN_SANDBOX = 'user_settings_weaken_sandbox';

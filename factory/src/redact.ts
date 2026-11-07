@@ -2,6 +2,8 @@
 // of the Claude review loses every environment value, every key and every content from outside the
 // worktree (~/.codex above all) before it goes to events.jsonl and the Event stream. One Redactor
 // per run: a Claude tool result is withheld by the tool use that asked for it.
+// SF-125: a reviewer's output (the verdict, its items, the simplification pass's suggestions) is
+// redacted too, before anything stores or sends it (output).
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -117,7 +119,18 @@ export interface RedactorOptions {
   env?: NodeJS.ProcessEnv;
   // The user's home; default os.homedir().
   home?: string;
+  // Literal secrets that are not in the environment (the dashboard and MCP tokens, SF-125): output
+  // replaces them wherever they stand.
+  secrets?: readonly string[];
 }
+
+// The shortest environment value output redacts (SF-125): a reviewer quoting code that holds a
+// short value ("1", true, main) is quoting code, not a secret.
+const OUTPUT_MIN_VALUE = 8;
+// The free-text fields of a reviewer's output (SF-125): the verdict's summary, its items' problem
+// and expected (review.ts), the suggestions' what and why (simplify.ts). Every other field stays as
+// it is: the ledger and the scope checks compare them.
+const OUTPUT_LISTS: ReadonlyArray<[string, readonly string[]]> = [['items', ['problem', 'expected']], ['suggestions', ['what', 'why']]];
 
 export class Redactor {
   readonly #cwd: string;
@@ -127,6 +140,8 @@ export class Redactor {
   readonly #values = new Map<string, string>();
   readonly #names: Set<string>;
   readonly #valuePattern: RegExp | undefined;
+  // The environment values of OUTPUT_MIN_VALUE characters or more and the given secrets, longest first.
+  readonly #outputPattern: RegExp | undefined;
   // The ids of the review's tool uses whose results are withheld.
   readonly #withheld = new Set<string>();
   // Set once the run has read something withheld: its prose from then on is withheld too.
@@ -146,6 +161,44 @@ export class Redactor {
     this.#names = new Set(this.#values.values());
     const values = [...this.#values.keys()].sort((a, b) => b.length - a.length);
     this.#valuePattern = values.length > 0 ? new RegExp(`(?<![A-Za-z0-9])(?:${values.map(escape).join('|')})(?![A-Za-z0-9])`, 'g') : undefined;
+    const literal = [...new Set([...values.filter((value) => value.length >= OUTPUT_MIN_VALUE), ...(options.secrets ?? []).filter((secret) => secret !== '')])].sort((a, b) => b.length - a.length);
+    this.#outputPattern = literal.length > 0 ? new RegExp(`(?<![A-Za-z0-9])(?:${literal.map(escape).join('|')})(?![A-Za-z0-9])`, 'g') : undefined;
+  }
+
+  // A reviewer's output (SF-125): a deep copy whose free-text fields (OUTPUT_LISTS and summary) lose
+  // every key text() knows, every environment value of OUTPUT_MIN_VALUE characters or more and
+  // every given secret, each as [redacted]. Never withheld whole; every other field stays as it is.
+  output<T>(value: T): T {
+    const copy: unknown = structuredClone(value);
+    if (!isObject(copy)) {
+      return copy as T;
+    }
+    if (typeof copy.summary === 'string') {
+      copy.summary = this.#outputText(copy.summary);
+    }
+    for (const [list, fields] of OUTPUT_LISTS) {
+      const entries = copy[list];
+      if (!Array.isArray(entries)) {
+        continue;
+      }
+      for (const entry of entries) {
+        for (const field of fields) {
+          if (isObject(entry) && typeof entry[field] === 'string') {
+            entry[field] = this.#outputText(entry[field]);
+          }
+        }
+      }
+    }
+    return copy as T;
+  }
+
+  // One free-text string of a reviewer's output, redacted (output).
+  #outputText(text: string): string {
+    let result = this.#outputPattern !== undefined ? text.replace(this.#outputPattern, REDACTED) : text;
+    for (const [pattern, replacement] of KEY_PATTERNS) {
+      result = result.replace(pattern, replacement);
+    }
+    return result;
   }
 
   // A string without environment values and keys.

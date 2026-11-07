@@ -3,7 +3,8 @@
 // without review fixes or with SF_SIMPLIFY=off; no suggestions go on to MR preparation; suggestions
 // stop the job (simplify_offered); Simplify writes the Fix section and the ledger entries, a reviewer
 // cannot ask for them back, and the pass never runs twice; Skip (sf accept, gate on) prepares the
-// MR with the suggestions listed; a failed run goes on to MR preparation.
+// MR with the suggestions listed; a failed run goes on to MR preparation. SF-125: the suggestions
+// are stored redacted.
 import assert from 'node:assert/strict';
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -267,6 +268,31 @@ test('once per job: the pass is marked on the job before it runs; one the user m
     const passed = (await events(jobs, 'S-8')).filter((event) => event.type === 'simplify');
     assert.ok(passed.every((event) => event.iteration === 2 && event.ignored === true), JSON.stringify(passed));
     assert.equal((await jobs.read('app', 'S-8'))!.simplify_iteration, 2);
+  } finally {
+    await stop(served);
+  }
+});
+
+test('redacted (SF-125): a suggestion holding an environment value is stored in simplify.json, and offered, as [redacted]; its path and ledger ids stay', async () => {
+  const secret = 'simplify-secret-0123456789';
+  const env = await newEnv('simplify-redacted', { SF_REVIEW: 'on', SF_SIMPLIFY: 'on', APP_DEPLOY_VALUE: secret });
+  const repo = await newRepo(env, 'simplify-redacted-repo', false);
+  await putTask(env, repo, 'S-9', 'Greet the reader');
+  await script(env, turns('S-9'));
+  const leaky = { ...SUGGESTION, what: `The second guard, which logs ${secret}.`, why: `Nothing needs ${secret}.`, ledger_ids: [] };
+  await reviewScript(env, [{ output: FIX }, { output: CLEAN }, { output: { summary: `One guard logs ${secret}.`, suggestions: [leaky] } }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'S-9' });
+    const offered = await waitFor(served, 'S-9', 'needs_human', 2);
+    assert.equal(offered.error.code, 'simplify_offered');
+    assert.ok(!offered.error.message.includes(secret) && offered.error.message.includes('which logs [redacted].'), offered.error.message);
+    const jobs = new JobStore(env.state);
+    const record = await jobs.readSimplify('app', 'S-9', 2);
+    assert.ok(record !== undefined && 'suggestions' in record, JSON.stringify(record));
+    assert.equal(record.summary, 'One guard logs [redacted].');
+    assert.deepEqual(record.suggestions, [{ ...leaky, what: 'The second guard, which logs [redacted].', why: 'Nothing needs [redacted].' }]);
+    assert.ok(!(await readFile(join(jobs.iterationDir('app', 'S-9', 2), 'simplify.json'), 'utf8')).includes(secret));
   } finally {
     await stop(served);
   }

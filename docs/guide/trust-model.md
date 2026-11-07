@@ -62,6 +62,38 @@ Before each Implementer, review and simplification session starts, the factory r
 
 No session gets your SSH agent (`SSH_AUTH_SOCK` is not passed on), and neither does the Codex gate.
 
+## The Codex gate
+
+The gate runs `codex exec` inside bubblewrap (`bwrap`), under the same read denials as a job's
+sandboxed commands (the `denyRead` list of the job's path denials, built before each run):
+
+- the whole machine read-only, a new `/dev` and `/proc`, and an empty `/tmp` and system temporary
+  directory;
+- every denied path hidden: a folder behind an empty tmpfs, a file or a socket behind `/dev/null`;
+- bound back read-only: the job's worktree (a `.env` in it stays hidden), the Task's images, the
+  Codex package (its nearest `node_modules` folder, or its own folder) and node's installation;
+- bound back read-write: Codex's own directory (`CODEX_HOME`, else `~/.codex`, which Codex reads
+  for its login and writes its sessions to) and the iteration's directory (the output schema and
+  the answer).
+
+The network stays open, since Codex reaches OpenAI; Codex's own read-only sandbox still holds the
+commands it runs. Its environment is short: `PATH`, `HOME`, the locale and terminal variables,
+`TMPDIR`, `TZ`, `XDG_*`, the proxy variables, `OPENAI_*` and `CODEX_*`; no `SF_*` setting, no SSH
+agent, no other tool's key. With the sandbox on the gate never runs without the wrapper: without
+`bwrap` on `PATH`, or on another system than Linux, it does not start and the job stops with
+`gate_sandbox_unavailable`. `SF_SANDBOX=off` runs it unwrapped, with Codex's own sandbox only.
+The `Gate sandbox` step of `sf smoke` checks the wrapper: inside it, the smoke's canary env file
+and `jobs/` must be hidden.
+
+Every reviewer's verdict (the Claude review's, the gate's, the simplification pass's) is redacted
+before the factory stores or sends it: its free text (the summary, each item's problem and
+expected, each suggestion's what and why) loses every key the redaction knows (`sk-…`, `ghp_…`,
+`NAME_TOKEN=…` and the like), every environment value of 8 characters or more and the dashboard
+and MCP tokens, each as `[redacted]`. Shorter values stay, so a finding that quotes code with `1`
+or `main` is not mangled; the paths, severities and ledger ids stay as they are. That covers
+`review.json`, `gate.json`, `simplify.json`, the events, the dashboard, the Fix section and the
+Implementer's prompt. The raw answer Codex writes (`gate-output.json`) is deleted once read.
+
 ## The home directory
 
 A job's sandboxed commands read nothing in your home directory but what a build needs, the
@@ -125,7 +157,7 @@ simplification pass and the Task check alike.
 | Implementer (and its MR turns) | its worktree, its workspace's checkout (with its `.git`), the kept paths of the home directory, the rest of the machine outside the home directory but the paths above | its worktree (outside its `.git`, the guard), the sandbox's temporary directory | Bash in the sandbox |
 | Claude review, simplification pass | as the Implementer, with the guard | nothing (read-only tools) | none |
 | Task check | its own checkout of the Task's base only (a path guard on every tool call) | nothing | none |
-| Codex gate | Codex's own read-only sandbox: the files of the machine | nothing | read-only |
+| Codex gate | as a job's sandboxed commands (the wrapper above): its worktree, the images, the Codex package and node, `CODEX_HOME`, the rest of the machine outside the home directory but the paths above | `CODEX_HOME`, the iteration's directory | read-only (Codex's own sandbox) |
 
 ## What runs outside the sandbox
 
@@ -177,8 +209,10 @@ apply.
   sandbox leaves no placeholder for it.
 - **The Task check** does not deny the Task checks' parent directory, because it runs inside it: a
   check could read another check's checkout running at the same time.
-- **The Codex gate** has only Codex's own read-only sandbox: it can read files the paths above
-  deny to Claude. It cannot write, and it gets no SSH agent and no `SF_*` setting.
+- **The Codex gate** reads what the wrapper binds back, `CODEX_HOME` above all (its login, which
+  goes to OpenAI anyway), and the network is open to it. It gets no SSH agent, no `SF_*` setting
+  and no other tool's key. Its prompt holds the Task file, the Report and the Patch, which go to
+  OpenAI as they are.
 - **Unix sockets.** On Linux the sandbox can allow every Unix socket or none (allowing them by path
   is macOS only), and the repositories' tests use sockets of their own, so all are allowed. The
   known socket locations above are denied instead; a socket elsewhere, in a path not denied, stays

@@ -2,19 +2,24 @@
 // (SF-038), the Codex gate (SF-039) at the iteration's gate level (SF-092), the ledger of findings
 // (settle, SF-052), the user's retry of a failed review (SF-044) and override of a stopped gate
 // (SF-047), and the simplification pass after a clean verdict (SF-055).
+// SF-125: the gate runs inside the wrapper of the sessions' read denials, and every reviewer's
+// output is redacted (Redactor.output) right after its session ends, before it is stored or used.
 import { readFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type ImageRef, imageRefs } from '../attachments.js';
+import { readToken } from '../dashboard.js';
 import { FactoryError } from '../errors.js';
 import { gateDecision } from '../gate-level.js';
-import { GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from '../gate.js';
+import { findBwrap, GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from '../gate.js';
 import { jobUserMessages } from '../job-stream.js';
 import { claudeReviews, type GateOverride, type GateRecord, type IterationMeta, type Job, type JobState, now, type ReviewRecord, type SimplifyRecord } from '../jobs.js';
 import { applyVerdict, entryItem, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, LEDGER_ID, FACTORY_PROBLEMS, settle, SETTLE_CODES, unappliedEntries, unsettled } from '../ledger.js';
 import { Redactor } from '../redact.js';
 import { readJobRules } from '../rules-docs.js';
 import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, type StructuredOutcome, unacceptedItems } from '../review.js';
-import { type PathDenials, pathDenials, USER_SETTINGS_WEAKEN_SANDBOX } from '../sandbox-denials.js';
+import { type DenialScope, gateWrapperFor, type PathDenials, pathDenials, USER_SETTINGS_WEAKEN_SANDBOX } from '../sandbox-denials.js';
+import { readMcpToken } from '../server.js';
 import { changedBetween, type FixFiles, fixNumbers, guardSuggestions, offerMessage, runSimplify, SIMPLIFY_CODE, SIMPLIFY_TITLE, simplifyFix, type SimplifyInput, type SimplifyOutput, simplifyPrompt, type Suggestion } from '../simplify.js';
 import { mayTouch, parseFrontMatter, readTask, TASK_DIR } from '../task-file.js';
 import { TEST_CODES, type TestsRecord } from '../test-command.js';
@@ -274,12 +279,32 @@ export class ReviewsPart {
     });
   }
 
+  // The denial scope of a review, simplification or gate session in the job's worktree (SF-100,
+  // SF-125).
+  async #denialScope(job: Job, worktree: string): Promise<DenialScope> {
+    const { config } = this.core;
+    const workspace = await this.core.resolve(job.workspace);
+    return { session: 'job', workspace: job.workspace, checkout: workspace.workCheckout, worktree, stateDir: config.stateDir, worktreeRoot: config.worktreeRoot };
+  }
+
   // The path denials of a review or simplification session in the job's worktree (SF-100), built
   // before each session.
   async #pathDenials(job: Job, worktree: string): Promise<PathDenials> {
-    const { config } = this.core;
-    const workspace = await this.core.resolve(job.workspace);
-    return pathDenials({ session: 'job', workspace: job.workspace, checkout: workspace.workCheckout, worktree, stateDir: config.stateDir, worktreeRoot: config.worktreeRoot });
+    return pathDenials(await this.#denialScope(job, worktree));
+  }
+
+  // The Redactor of a reviewer's run in the job's worktree, with the dashboard and MCP tokens as
+  // literal secrets (SF-125); a token file that is missing or unreadable adds none.
+  async #redactor(job: Job): Promise<Redactor> {
+    const { stateDir } = this.core.config;
+    const secrets: string[] = [];
+    for (const read of [readToken, readMcpToken]) {
+      const token = await read(stateDir).catch(() => undefined);
+      if (token !== undefined) {
+        secrets.push(token);
+      }
+    }
+    return new Redactor({ cwd: job.worktree ?? '', secrets });
   }
 
   // The material of a review of the job's last iteration, the Task file read in the worktree.
@@ -301,7 +326,7 @@ export class ReviewsPart {
     let outcome: ReviewOutcome;
     // The code a session refused before it started stops the job with (user_settings_weaken_sandbox).
     let stop: string | undefined;
-    const redactor = new Redactor({ cwd: job.worktree ?? '' });
+    const redactor = await this.#redactor(job);
     try {
       if (job.worktree === null) {
         throw new Error('the job has no worktree');
@@ -327,6 +352,10 @@ export class ReviewsPart {
     // names the settings file and the key for the user (no session ran).
     if (!outcome.ok && stop === undefined) {
       outcome = { ...outcome, message: redactor.failure(outcome.message) };
+    }
+    // The verdict redacted before review.json, the events, the Fix section and the prompts (SF-125).
+    if (outcome.ok) {
+      outcome = { ...outcome, output: redactor.output(outcome.output) };
     }
     const ended = outcome;
     await this.core.afterSession(job);
@@ -537,7 +566,7 @@ export class ReviewsPart {
     const { workspace: name, ticket, iteration } = job;
     const gate = this.core.config.gate;
     let outcome: GateOutcome;
-    const redactor = new Redactor({ cwd: job.worktree ?? '' });
+    const redactor = await this.#redactor(job);
     try {
       if (!gate.on) {
         throw new Error(`the gate is off (${gate.reason})`);
@@ -546,9 +575,15 @@ export class ReviewsPart {
         throw new Error('the job has no worktree or base commit');
       }
       const input = await this.#reviewInput(job, job.worktree);
+      const dir = this.core.jobs.iterationDir(name, ticket, iteration);
+      const images = this.imageRefs(job, input.task).map((image) => image.path);
+      // Codex inside bubblewrap under the sessions' read denials (SF-125); with the sandbox off
+      // (SF_SANDBOX=off), unwrapped.
+      const wrapper = this.core.config.sandbox === undefined ? undefined : await gateWrapperFor(await this.#denialScope(job, job.worktree), {
+        worktree: job.worktree, codexPath: gate.codexPath, codexHome: process.env.CODEX_HOME || join(homedir(), '.codex'), iterationDir: dir, images, tmp: tmpdir(),
+      });
       outcome = await runGate(gatePrompt({ ...input, baseCommit: job.base_commit, onlyReviewer: claude === undefined }), {
-        codexPath: gate.codexPath, cwd: job.worktree, dir: this.core.jobs.iterationDir(name, ticket, iteration), model: this.core.config.codexModel,
-        images: this.imageRefs(job, input.task).map((image) => image.path),
+        codexPath: gate.codexPath, cwd: job.worktree, dir, model: this.core.config.codexModel, images, wrapper, bwrapPath: findBwrap(),
         timeoutMs: this.core.config.gateTimeoutMs, signal: running.controller.signal,
         // The run live in events.jsonl (SF-045).
         onEvent: (event) => this.core.appendLive(job, 'gate_event', redactor.codexEvent(event)),
@@ -560,9 +595,16 @@ export class ReviewsPart {
     // A usage limit of the plan (SF-072), read before redaction.
     const limit = outcome.ok ? undefined : usageLimit(outcome.message, new Date(), 'codex');
     // The failure message (Codex's stderr or error event) goes to gate.json, the event and the
-    // job's error: withheld or redacted like the run's prose (src/redact.ts, failure).
+    // job's error: withheld or redacted like the run's prose (src/redact.ts, failure). A gate the
+    // factory refused to start (a code: gate_sandbox_unavailable) has the factory's own text, which
+    // names the cause for the user (no Codex ran).
     if (!outcome.ok) {
-      outcome = { ...outcome, message: redactor.failure(outcome.message) };
+      if (outcome.code === undefined) {
+        outcome = { ...outcome, message: redactor.failure(outcome.message) };
+      }
+    } else {
+      // The verdict redacted before gate.json, the events, the Fix section and the prompts (SF-125).
+      outcome = { ...outcome, output: redactor.output(outcome.output) };
     }
     const ended = outcome;
     await this.core.afterSession(job);
@@ -617,7 +659,7 @@ export class ReviewsPart {
     }
     if (!outcome.ok) {
       // from: awaiting_review (current)
-      await this.core.transition(job, 'needs_human', 'verdict', { code: 'gate_failed', message: outcome.message });
+      await this.core.transition(job, 'needs_human', 'verdict', { code: outcome.code ?? 'gate_failed', message: outcome.message });
       return;
     }
     if (job.gate_tokens > this.core.config.gateMaxTokens) {
@@ -744,7 +786,7 @@ export class ReviewsPart {
   async #runSimplifyPass(job: Job, running: RunningReview, sensitive: string[]): Promise<void> {
     let outcome: StructuredOutcome<SimplifyOutput>;
     let stop: string | undefined;
-    const redactor = new Redactor({ cwd: job.worktree ?? '' });
+    const redactor = await this.#redactor(job);
     try {
       if (job.worktree === null) {
         throw new Error('the job has no worktree');
@@ -766,6 +808,10 @@ export class ReviewsPart {
     const limit = outcome.ok ? undefined : usageLimit(outcome.message, new Date(), 'claude');
     if (!outcome.ok && stop === undefined) {
       outcome = { ...outcome, message: redactor.failure(outcome.message) };
+    }
+    // The suggestions redacted before simplify.json, the events and the Simplify Fix (SF-125).
+    if (outcome.ok) {
+      outcome = { ...outcome, output: redactor.output(outcome.output) };
     }
     const ended = outcome;
     await this.core.afterSession(job);

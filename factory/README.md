@@ -252,7 +252,7 @@ started by the run queue as before.
 | `SF_GATE_FULL_PATHS` | empty | Comma-separated globs (as `SF_SENSITIVE_PATHS`) whose changed paths make an iteration's gate level `full`. |
 | `SF_SMOKE_MODEL` | `haiku` | The model of `sf smoke`'s job (section Live smoke test): its `SF_MODEL` and `SF_REVIEW_MODEL` (Implementer, Claude review, Task check). |
 | `SF_SMOKE_CODEX_MODEL` | unset | The gate's model in `sf smoke`, its `SF_CODEX_MODEL`; unset uses Codex's default. |
-| `SF_SANDBOX` | on | `off` runs the Implementer, the reviews, the simplification pass and the Task check without Claude Code's sandbox. The path denials for the tools (SF-100) still apply; those for Bash go with the sandbox. |
+| `SF_SANDBOX` | on | `off` runs the Implementer, the reviews, the simplification pass and the Task check without Claude Code's sandbox, and the Codex gate without its bubblewrap wrapper (SF-125). The path denials for the tools (SF-100) still apply; those for Bash go with the sandbox. |
 | `SF_SANDBOX_DOMAINS` | empty | Comma-separated extra hosts sandboxed commands may reach, besides `registry.npmjs.org`. |
 | `SF_SANDBOX_ALLOW_READ` | empty | Comma-separated paths relative to the home directory that a job's sandboxed commands may read there besides the kept paths (SF-123, section Jobs, "The path denials"), for other toolchains: `.m2/repository,.gradle/caches`. An absolute entry, one with a `..` segment or a `~`, one that is or holds the home directory itself (`.`, a link to it), or one that is, holds or lies in a path denied for reading stops the session with `invalid_config`, naming the entry. |
 | `SF_DESKTOP_NOTIFY` | on | `off` disables the desktop notification. |
@@ -302,7 +302,8 @@ sf smoke [--keep] [--timeout-min N] [--budget-usd N]
 - **Models.** `SF_SMOKE_MODEL` (default `haiku`) is the Claude model of the Implementer, the
   review and the Task check; `SF_SMOKE_CODEX_MODEL` (default unset: Codex's own default) the gate's.
 - **Steps.** Setup, Task check (PASS when the check ran, ready or not ready: the verdict is in the
-  detail), Start, Implementer turn (iteration 1 published), Sandbox (SF-100, below), Claude review (a `review.json` with a
+  detail), Start, Implementer turn (iteration 1 published), Sandbox (SF-100, below), Gate sandbox
+  (SF-125, below), Claude review (a `review.json` with a
   verdict), Codex gate (a `gate.json` with a verdict; with the gate off it fails with `sf info`'s
   reason and the job still goes on), MR text (ready for review with an `mr.md` that passes the MR
   rules), Approve (the job `pushed` and `origin.git` has its branch at the prepared commit),
@@ -313,6 +314,16 @@ sf smoke [--keep] [--timeout-min N] [--budget-usd N]
   `--keep` keeps it). Each PASS is decided from what the factory wrote. A FAIL skips
   every later step up to Dashboard (but the gate off); a job that stops fails the step it was on
   with its error code and message. Cleanup always runs.
+- **Gate sandbox** (SF-125). Once the job's worktree and `jobs/` exist, the smoke builds the
+  gate's wrapper for the job as the factory does (`gateWrapperFor` with the job's denial scope and
+  the smoke's child environment) and spends no Codex tokens: it checks, outside the wrapper, that
+  the canary `auth.env` and `jobs/` exist, then runs `ls <worktree>` inside the wrapper (it must
+  work, or the wrapper did not run), `cat <canary>` and `ls <jobs>`. PASS only when both fail:
+  the tmpfs hiding them is the denial, so `ENOENT` counts; a command that exits 0 fails the step,
+  whatever it printed. Without `bwrap`
+  on `PATH` it fails. The Codex gate step still needs a verdict from the real gate inside the
+  wrapper. With `SF_SANDBOX=off` it is a SKIP, which the last line counts as a pass like the
+  Sandbox step's.
 - **Sandbox** (SF-100). The Task has the Implementer run `node probe.mjs <the run's paths>` in its
   sandbox and keep the output in `probe.json` (in the Task's `scope`; its Review brief says it is
   the expected probe output). The probe tries to read the canary `auth.env` (given its SHA-256
@@ -384,7 +395,7 @@ sf smoke [--keep] [--timeout-min N] [--budget-usd N]
 - **Cost to expect.** One small Task file read, one one-line change, one review, one gate run and
   one MR text: with `haiku` a small fraction of the default 2 USD (it usually runs on your Claude
   plan; the gate's tokens on your Codex plan) and a few minutes. The last line says what this run
-  cost: `smoke: PASS, cost <USD>, gate <N> tokens`, or `smoke: FAIL (<n> of 11 steps), ...`.
+  cost: `smoke: PASS, cost <USD>, gate <N> tokens`, or `smoke: FAIL (<n> of 12 steps), ...`.
 - **Output.** One line per step as it ends, then the table (step, PASS / FAIL / SKIP, seconds,
   detail: cost in USD for the Claude steps, tokens for the gate), then the last line. Exit 0 when
   every step passed, 1 otherwise, 2 for a usage error.
@@ -1094,7 +1105,19 @@ ended. A restart of `sf serve` therefore leaves a working job working.
     line, the job's error) is redacted the same way and withheld like prose: the factory's
     lead-in up to the first `: ` stays (`Codex reported an error: `), and the detail after it
     (Codex's error or stderr, the review's errors) is withheld when it shows or names a home file
-    or the run has read something withheld.
+    or the run has read something withheld. A gate the factory refused to start
+    (`gate_sandbox_unavailable`) keeps the factory's own message.
+  - The **output** of every reviewer (SF-125, `Redactor.output`): the Claude review's verdict,
+    the gate's and the simplification pass's suggestions go through it right after the session
+    ends, before `review.json`, `gate.json`, `simplify.json`, the events, the dashboard, the
+    ledger, the Fix section and the Implementer's prompt see them. A deep copy whose free-text
+    fields only (`summary`, each item's `problem` and `expected`, each suggestion's `what` and
+    `why`) lose the keys by their form above, every environment value of 8 characters or more
+    and the dashboard and MCP tokens (read from the state directory), each as `[redacted]`.
+    Shorter values stay, so a finding that quotes code with `1`, `true` or `main` is kept as it
+    is; `verdict`, `severity`, `path`, `reopens`, `caused_by`, `ledger_ids` and
+    `accepted_sensitive` stay exactly as they are (the ledger and the scope checks compare them),
+    and a string is never withheld whole.
   - **Known issue.** Codex's command lines stay readable after a run is marked, so a command
     that repeats a value it read outside the worktree (`echo <value read from ~/.codex>`) shows
     that value on its `codex | $ …` line, in `events.jsonl` and in `sf watch`, unless the value
@@ -1217,13 +1240,37 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   read-only --disable memories -c memories.use_memories=false --cd <worktree> --output-schema
   <schema file> --output-last-message <out file> --json [--model SF_CODEX_MODEL] -`, the prompt on
   stdin. The schema and out files are `gate-schema.json` and `gate-output.json` in the iteration's
-  directory. The user's `~/.codex/config.toml` and login apply; the environment is the factory's
-  without any `SF_*` variable. The gate sees the Task file, the Report, the Patch and the
+  directory; `gate-output.json` is deleted once read, after a failed run too (SF-125), so only the
+  redacted verdict in `gate.json` stays. The user's `~/.codex/config.toml` and login apply. The
+  environment (SF-125, `gateEnvironment`) holds only `PATH`, `HOME`, `LANG`, `LANGUAGE`, `TERM`,
+  `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `TZ`, `LC_*`, `XDG_*`, the proxy variables (`HTTP_PROXY`,
+  `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, either case), `OPENAI_*` and `CODEX_*`: no `SF_*`
+  setting, no SSH agent, no other tool's key. The gate sees the Task file, the Report, the Patch and the
   repository with its `AGENTS.md` (SF-050): `--disable memories` and `memories.use_memories=false`
   keep the user's Codex memories out, whatever `config.toml` says. The user's global
   `~/.codex/AGENTS.md` (or `AGENTS.override.md`) still loads: Codex documents no switch for it, and
   `CODEX_HOME` is not moved, since the login refreshes itself there. Codex reads the worktree
-  itself in its read-only sandbox. Its prompt is the review prompt adapted: the base commit (so
+  itself in its read-only sandbox.
+- The gate's **wrapper** (SF-125, `gateWrapper` in `src/sandbox-denials.ts`): with the sandbox on
+  (`SF_SANDBOX` not `off`) the factory runs `bwrap <wrapper> -- <codex> <argv>`, the wrapper
+  built before each run from the `denyRead` list of the job's path denials (the Claude sessions'
+  scope, `gateWrapperFor`), a later mount winning: `--die-with-parent --unshare-pid --ro-bind / /
+  --dev /dev --proc /proc --tmpfs /tmp` (and a `--tmpfs` over the system temporary directory when
+  it is not under `/tmp`); every `denyRead` entry not under those hidden (a folder as `--tmpfs`, a
+  file or socket as `--ro-bind /dev/null`; one gone since is left out); `--ro-bind` back the
+  worktree, the Task's images, the real path of the Codex executable's nearest `node_modules`
+  ancestor (else its own folder: a launcher spawns its sibling package) and node's prefix
+  (`dirname(dirname(realpath(process.execPath)))`), then the `denyRead` entries inside one of
+  these binds and the binds inside such an entry again, shallowest first, so the most specific
+  path wins (a `.env` of the worktree stays hidden; an image under a bound `jobs/` stays bound);
+  last `--bind` of `CODEX_HOME` (else `~/.codex`) and the iteration's directory. No
+  `--unshare-net`: Codex reaches OpenAI, and its own read-only sandbox holds its commands.
+  `--unshare-pid` is there because an unprivileged `bwrap` mounts a new `/proc` only in a PID
+  namespace of its own. The gate **fails closed**: with the sandbox on and no `bwrap` on `PATH`
+  (`findBwrap`), or on another platform than Linux, Codex does not start; `gate.json` and the
+  `review_failed` event carry the factory's message naming the cause, and the job goes to
+  `needs_human` with `gate_sandbox_unavailable` (install bubblewrap, then tell the job to go on;
+  `SF_SANDBOX=off` runs the gate unwrapped, with the rest of the sandbox off too). Its prompt is the review prompt adapted: the base commit (so
   it can run `git diff <base_commit>`), the read-only commands
   it may run, that it must not leave the worktree or read credentials, that it decides after a
   clean Claude review, then the same rules and material as the Claude review. The schema is the

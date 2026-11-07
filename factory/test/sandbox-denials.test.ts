@@ -1,18 +1,22 @@
 // The path denials of every session the factory starts (SF-100): what is denied for reading and
 // writing, what for writing only, what stays (the own worktree and checkout), missing paths left
 // out, the sandbox's filesystem lists, the Implementer session building them once, the Task checks'
-// parent directory, and no SSH agent in the sessions' and the gate's environment.
+// parent directory, and no SSH agent in the sessions' and the gate's environment. SF-125: the Codex
+// gate's bubblewrap wrapper of the same denyRead list.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { chmod, mkdir, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { sandboxAllowRead, sandboxSettings } from '../src/config.js';
 import { gateEnvironment } from '../src/gate.js';
 import { saveRegistry } from '../src/registry.js';
 import { DENIED_TOOLS } from '../src/rules.js';
-import { absoluteRule, claudeProjectName, claudeUserSettings, cliRuleList, type DenialScope, FACTORY_MCP_SERVER, FILE_GUARD, HOME_CREDENTIALS, installDir, PATH_DENIAL_UNREPRESENTABLE, pathDenials, prepareTaskChecksDir, taskChecksDir, USER_SETTINGS_WEAKEN_SANDBOX, userSettingsWeakening, withSandboxDenials } from '../src/sandbox-denials.js';
+import {
+  absoluteRule, claudeProjectName, claudeUserSettings, cliRuleList, type DenialScope, FACTORY_MCP_SERVER, FILE_GUARD, gateWrapper, gateWrapperFor, HOME_CREDENTIALS, installDir,
+  PATH_DENIAL_UNREPRESENTABLE, type PathDenials, pathDenials, prepareTaskChecksDir, taskChecksDir, USER_SETTINGS_WEAKEN_SANDBOX, userSettingsWeakening, withSandboxDenials,
+} from '../src/sandbox-denials.js';
 import { type IdleOutcome, ImplementerSession, sessionEnvironment, withSandboxEnvDenials } from '../src/session.js';
 import { call, FAKE, fakeLog, newEnv, newRepo, putTask, reviewScript, script, serve, stop, temp, waitFor } from './support/harness.js';
 
@@ -205,7 +209,8 @@ test('the Task checks\' parent: made 0700, a wider mode narrowed, a link or a fi
 test('no SSH agent: SSH_AUTH_SOCK reaches neither a Claude session nor the Codex gate', () => {
   const env = { PATH: '/bin', HOME: '/h', SSH_AUTH_SOCK: '/run/agent.sock', ANTHROPIC_API_KEY: 'k', SF_STATE_DIR: '/s' };
   assert.deepEqual(sessionEnvironment(env), { PATH: '/bin', HOME: '/h', ANTHROPIC_API_KEY: 'k' });
-  assert.deepEqual(gateEnvironment(env), { PATH: '/bin', HOME: '/h', ANTHROPIC_API_KEY: 'k' });
+  // SF-125: the gate gets no other tool's key either.
+  assert.deepEqual(gateEnvironment(env), { PATH: '/bin', HOME: '/h' });
 });
 
 test('the Implementer session: every query gets the prompt\'s deny list plus the path denials and the sandbox with their filesystem lists, built once per session object; a failing build fails the turn', async () => {
@@ -906,4 +911,93 @@ test('SF_SANDBOX_ALLOW_READ (SF-123 Fix 4): an entry that is, or holds, the home
   const denials = await pathDenials(withAllow('.m2/repository'));
   assert.ok(denials.kept.includes(join(home, '.m2', 'repository')) && !denials.kept.includes(home));
   assert.ok(denials.sandbox.denyRead.includes(join(home, 'notes')));
+});
+
+// The bwrap arguments as mounts, in order (SF-125): [option, ...its values].
+function mounts(args: string[]): string[][] {
+  const arity: Record<string, number> = { '--die-with-parent': 0, '--unshare-pid': 0, '--tmpfs': 1, '--dev': 1, '--proc': 1, '--ro-bind': 2, '--bind': 2 };
+  const result: string[][] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const count = arity[args[index]!];
+    assert.ok(count !== undefined, `unexpected bwrap argument ${args[index]}`);
+    result.push(args.slice(index, index + count + 1));
+    index += count;
+  }
+  return result;
+}
+
+const denialsOf = (denyRead: string[]): PathDenials => ({ tools: [], sandbox: { denyRead, denyWrite: [] }, kept: [], hooks: undefined });
+
+// Codex as npm installs it (a link in bin/ to the launcher in node_modules), and a standalone one.
+async function codexInstall(name: string): Promise<{ root: string; linked: string; modules: string; standalone: string }> {
+  const root = await realpath(await mkdir(join(temp, name), { recursive: true }).then(() => join(temp, name)));
+  const launcher = join(root, 'lib', 'node_modules', '@openai', 'codex', 'bin', 'codex.js');
+  await mkdir(dirname(launcher), { recursive: true });
+  await writeFile(launcher, '');
+  await mkdir(join(root, 'bin'), { recursive: true });
+  await symlink(launcher, join(root, 'bin', 'codex'));
+  await mkdir(join(root, 'standalone'), { recursive: true });
+  await writeFile(join(root, 'standalone', 'codex'), '');
+  return { root, linked: join(root, 'bin', 'codex'), modules: join(root, 'lib', 'node_modules'), standalone: join(root, 'standalone', 'codex') };
+}
+
+const NODE_PREFIX = dirname(dirname(realpathSync(process.execPath)));
+
+test('gateWrapper (SF-125): the system read-only, then the denials, then the read-only binds, then CODEX_HOME and the iteration directory read-write, last; no --unshare-net', async () => {
+  const codex = await codexInstall('wrapper-order');
+  const worktree = join(codex.root, 'worktree');
+  // Denials outside /tmp (the test's own files are under it): a directory, a file, one gone, one
+  // under the temporary folders (the tmpfs hides it already), and an image's denied jobs/.
+  const args = gateWrapper(denialsOf(['/etc', '/bin/sh', '/nonexistent-sf-125', '/sf-tmp/x', '/tmp/x', '/var/lib']), {
+    worktree, codexPath: codex.linked, codexHome: '/h/.codex', iterationDir: '/var/lib/sf/jobs/app/T/iterations/001', images: ['/var/lib/sf/jobs/app/T/attachments/1.png'], tmp: '/sf-tmp',
+  });
+  assert.deepEqual(mounts(args), [
+    ['--die-with-parent'], ['--unshare-pid'], ['--ro-bind', '/', '/'], ['--dev', '/dev'], ['--proc', '/proc'], ['--tmpfs', '/tmp'], ['--tmpfs', '/sf-tmp'],
+    ['--tmpfs', '/etc'], ['--ro-bind', '/dev/null', '/bin/sh'], ['--tmpfs', '/var/lib'],
+    ['--ro-bind', worktree, worktree], ['--ro-bind', '/var/lib/sf/jobs/app/T/attachments/1.png', '/var/lib/sf/jobs/app/T/attachments/1.png'],
+    ['--ro-bind', codex.modules, codex.modules], ['--ro-bind', NODE_PREFIX, NODE_PREFIX],
+    ['--bind', '/h/.codex', '/h/.codex'], ['--bind', '/var/lib/sf/jobs/app/T/iterations/001', '/var/lib/sf/jobs/app/T/iterations/001'],
+  ]);
+  assert.ok(!args.includes('--unshare-net'));
+  // A tmp under /tmp has no tmpfs of its own; the worktree under it is bound back after /tmp's.
+  const under = mounts(gateWrapper(denialsOf([]), { worktree, codexPath: codex.standalone, codexHome: '/h/.codex', iterationDir: '/i', images: [], tmp: join(temp, 'tmp') }));
+  assert.deepEqual(under.filter((mount) => mount[0] === '--tmpfs'), [['--tmpfs', '/tmp']]);
+  assert.ok(worktree.startsWith('/tmp/') ? under.findIndex((mount) => mount[1] === worktree) > under.findIndex((mount) => mount[1] === '/tmp') : true);
+  // Codex without a node_modules above it: its own folder.
+  assert.ok(under.some((mount) => mount.join(' ') === `--ro-bind ${join(codex.root, 'standalone')} ${join(codex.root, 'standalone')}`), JSON.stringify(under));
+});
+
+test('gateWrapper (SF-125): a denial inside a bound folder stays (the worktree\'s .env), and a bind inside such a denial is bound again (an image under jobs/), the most specific path winning', async () => {
+  const codex = await codexInstall('wrapper-fixup');
+  const worktree = join(codex.root, 'worktree');
+  const jobs = join(codex.root, 'standalone', 'jobs');
+  const image = join(jobs, 'app', 'T', 'attachments', '1.png');
+  await mkdir(dirname(image), { recursive: true });
+  await mkdir(worktree, { recursive: true });
+  await writeFile(join(worktree, '.env'), 'SECRET=1\n');
+  await writeFile(image, 'png');
+  const args = mounts(gateWrapper(denialsOf([join(worktree, '.env'), jobs]), {
+    worktree, codexPath: codex.standalone, codexHome: '/h/.codex', iterationDir: '/i', images: [image], tmp: '/tmp',
+  }));
+  const index = (mount: string): number => args.findIndex((entry) => entry.join(' ') === mount);
+  // The worktree, the image, the Codex folder (holding jobs/) bound; then jobs/ and the .env hidden
+  // again, and the image bound again after jobs/; the read-write binds last.
+  const bound = (path: string): string => `--ro-bind ${path} ${path}`;
+  for (const mount of [bound(worktree), bound(image), bound(join(codex.root, 'standalone')), `--tmpfs ${jobs}`, `--ro-bind /dev/null ${join(worktree, '.env')}`]) {
+    assert.ok(index(mount) >= 0, `${mount} in ${JSON.stringify(args)}`);
+  }
+  assert.ok(index(`--tmpfs ${jobs}`) > index(bound(join(codex.root, 'standalone'))));
+  assert.ok(index(`--ro-bind /dev/null ${join(worktree, '.env')}`) > index(bound(worktree)));
+  const lastImage = args.map((entry) => entry.join(' ')).lastIndexOf(bound(image));
+  assert.ok(lastImage > index(`--tmpfs ${jobs}`), JSON.stringify(args));
+  assert.deepEqual(args.slice(-2), [['--bind', '/h/.codex', '/h/.codex'], ['--bind', '/i', '/i']]);
+});
+
+test('gateWrapperFor (SF-125): the wrapper of pathDenials(scope): every denyRead entry of the job\'s denials outside the temporary folders is hidden', async () => {
+  const l = await layout('wrapper-for');
+  const codex = await codexInstall('wrapper-for-codex');
+  const options = { worktree: l.own, codexPath: codex.linked, codexHome: join(l.home, '.codex'), iterationDir: join(l.state, 'jobs', 'app', 'A-1'), images: [], tmp: l.tmp };
+  const args = await gateWrapperFor(scope(l, 'job'), options);
+  assert.deepEqual(args, gateWrapper(await pathDenials(scope(l, 'job')), options));
+  assert.deepEqual(args.slice(-6), ['--bind', join(l.home, '.codex'), join(l.home, '.codex'), '--bind', join(l.state, 'jobs', 'app', 'A-1'), join(l.state, 'jobs', 'app', 'A-1')]);
 });

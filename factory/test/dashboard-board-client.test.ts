@@ -45,7 +45,8 @@ const workspace = (name: string, color?: WorkspaceColor) => ({ name, path: `/srv
 type Job = ReturnType<typeof job>;
 
 // answer.jobs off leaves later api/jobs reads to the test.
-async function openBoard(jobs: Job[], tickets: ReturnType<typeof ticket>[], workspaces = [workspace('app')], hash = '', answer = { jobs: true }): Promise<Page> {
+// globals: names added to the page's context (a localStorage, a matchMedia: SF-119).
+async function openBoard(jobs: Job[], tickets: ReturnType<typeof ticket>[], workspaces = [workspace('app')], hash = '', answer = { jobs: true }, globals: Record<string, unknown> = {}): Promise<Page> {
   const page = await loadPage(STATIC_DIR, (path) => {
     if (path === 'api/jobs') {
       return answer.jobs ? { jobs } : undefined;
@@ -53,7 +54,7 @@ async function openBoard(jobs: Job[], tickets: ReturnType<typeof ticket>[], work
     const match = /^api\/jobs\/([^/]+)\/([^/]+)$/.exec(path);
     const found = match ? jobs.find((row) => row.ticket === match[2]) : undefined;
     return found ? detail(found) : undefined;
-  });
+  }, undefined, globals);
   page.location.hash = hash;
   page.document.dispatch('DOMContentLoaded');
   await page.flush();
@@ -1240,4 +1241,97 @@ test('board client (SF-087): a Your turn card of fetch_failed, mr_serve_restarte
   await page.flush();
   assert.match(card(page, 'app/T-1').textContent, /MR preparation runs again \(state preparing_mr\)\./);
   assert.equal(onJobPage(page), false);
+});
+
+// SF-119: a localStorage over a map, and a matchMedia whose matches the test sets (narrow: below
+// 768 px or no hover, the same answer for both queries).
+const storageOf = (map: Map<string, string>) => ({ getItem: (name: string) => map.get(name) ?? null, setItem: (name: string, value: string) => void map.set(name, value) });
+const mediaOf = (screen: { narrow: boolean }) => (query: string) => ({ get matches() { return screen.narrow; }, media: query, addEventListener: () => undefined });
+const folded = (page: Page): string[] => COLUMNS.filter((column) => page.$(LISTS[column]).parentNode!.classList.contains('folded'));
+const foldOf = (page: Page, column: string): FakeElement => page.document.querySelector(`[data-colfold="${column}"]`)!;
+
+test('board client (SF-119): a column heading folds its column, kept in localStorage; a stored list keeps its column names only; the headings read as before', async () => {
+  const stored = new Map<string, string>();
+  const page = await openBoard([job('J-1', 'working'), job('D-1', 'pushed')], [ticket('app/T-1')], [workspace('app')], '', { jobs: true }, { localStorage: storageOf(stored) });
+  assert.deepEqual([folded(page), foldOf(page, 'done').getAttribute('aria-expanded'), foldOf(page, 'done').getAttribute('aria-controls')], [[], 'true', 'list-done']);
+  assert.deepEqual(COLUMNS.map((column) => page.$(`col-${column}-title`).textContent), ['Queue 1', 'Implementing 1', 'Reviewing 0', 'Your turn 0', 'Done 1']);
+  foldOf(page, 'done').click();
+  assert.deepEqual([folded(page), foldOf(page, 'done').getAttribute('aria-expanded'), stored.get('sf-board-folded')], [['done'], 'false', '["done"]']);
+  foldOf(page, 'queue').click();
+  assert.equal(stored.get('sf-board-folded'), '["queue","done"]');
+  // Kept across a new rendering of the board.
+  page.streams.at(-1)!.emit('jobs', { jobs: [job('J-1', 'working'), job('D-1', 'pushed')] });
+  assert.deepEqual(folded(page), ['queue', 'done']);
+  foldOf(page, 'queue').click();
+  foldOf(page, 'done').click();
+  assert.deepEqual([folded(page), stored.get('sf-board-folded'), foldOf(page, 'done').getAttribute('aria-expanded')], [[], '[]', 'true']);
+  // A stored list: its column names only; anything else folds nothing.
+  const again = await openBoard([], [], [workspace('app')], '', { jobs: true }, { localStorage: storageOf(new Map([['sf-board-folded', '["done","nope"]']])) });
+  assert.deepEqual(folded(again), ['done']);
+  const bad = await openBoard([], [], [workspace('app')], '', { jobs: true }, { localStorage: storageOf(new Map([['sf-board-folded', '{bad']])) });
+  assert.deepEqual(folded(bad), []);
+  const object = await openBoard([], [], [workspace('app')], '', { jobs: true }, { localStorage: storageOf(new Map([['sf-board-folded', '{"done":true}']])) });
+  assert.deepEqual(folded(object), []);
+});
+
+test('board client (SF-119): a queued card\'s menu has Move up and Move down, off at the queue\'s ends, posting api/queue/move one place; none on a card out of the queue', async () => {
+  const page = await openQueue(queuedTickets());
+  const item = (key: string, label: string) => button(card(page, key), label);
+  assert.deepEqual([item('app/T-3', 'Move up')!.disabled, item('app/T-3', 'Move down')!.disabled], [true, false]);
+  assert.deepEqual([item('app/T-2', 'Move up')!.disabled, item('app/T-2', 'Move down')!.disabled], [false, false]);
+  assert.deepEqual([item('app/T-6', 'Move up')!.disabled, item('app/T-6', 'Move down')!.disabled], [false, true]);
+  assert.deepEqual([item('app/T-4', 'Move up'), item('app/T-4', 'Move down')], [undefined, undefined]);
+  // The first items of the menu, before Archive (and Check).
+  const menu = part(card(page, 'app/T-3'), 'cmenu')!;
+  assert.deepEqual(labels(menu).slice(0, 2), ['Move up', 'Move down']);
+  assert.equal(item('app/T-3', 'Move down')!.getAttribute('role'), 'menuitem');
+  item('app/T-3', 'Move down')!.click();
+  await page.flush();
+  assert.deepEqual(posts(page).map((request) => [request.path, request.body]), [['api/queue/move', '{"workspace":"app","ticket":"T-3","to":2}']]);
+  // Pending: both off.
+  assert.deepEqual([item('app/T-3', 'Move up')!.disabled, item('app/T-3', 'Move down')!.disabled], [true, true]);
+  posts(page)[0]!.respond(200, { ok: true, result: { position: 2 } });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, 'app/T-3 moved to position 2.');
+  item('app/T-6', 'Move up')!.click();
+  await page.flush();
+  assert.deepEqual([posts(page)[1]!.path, posts(page)[1]!.body], ['api/queue/move', '{"workspace":"app","ticket":"T-6","to":2}']);
+});
+
+test('board client (SF-119): on a phone or without hover a dependency chip\'s tap shows its state in the toast and still focuses its card; with a mouse no toast', async () => {
+  const setup = async (narrow: boolean) => openBoard([{ ...job('W-1', 'working'), workspace: 'web' }], [
+    ticket('app/Q-1', { lands_after: [dep('web/W-1', 'running')] }),
+  ], [workspace('app'), workspace('web')], '', { jobs: true }, { matchMedia: mediaOf({ narrow }) });
+  const chipOf = (page: Page) => lineOf(card(page, 'app/Q-1'), 'waits')!.all().find((element) => element.classList.contains('dchip'))!;
+  const phone = await setup(true);
+  chipOf(phone).click();
+  await phone.flush();
+  assert.deepEqual([phone.$('toast').hidden, phone.$('toast-text').textContent, phone.document.activeElement], [false, 'web/W-1: running', card(phone, 'web/W-1')]);
+  // A tap on a card's own text opens the card (its page shows the detail): no toast.
+  phone.$('toast-close').click();
+  part(card(phone, 'app/Q-1'), 'wschip')!.click();
+  assert.equal(phone.$('toast').hidden, true);
+  const mouse = await setup(false);
+  chipOf(mouse).click();
+  await mouse.flush();
+  assert.deepEqual([mouse.$('toast').hidden, mouse.document.activeElement], [true, card(mouse, 'web/W-1')]);
+});
+
+test('board client (SF-119): a chip pointing into a folded column unfolds it (stored) and focuses its card; j and k pass over a folded column\'s cards', async () => {
+  const stored = new Map<string, string>([['sf-board-folded', '["implementing"]']]);
+  const page = await openBoard([{ ...job('W-1', 'working'), workspace: 'web' }, job('D-1', 'pushed')], [
+    ticket('app/Q-1', { lands_after: [dep('web/W-1', 'running')] }),
+  ], [workspace('app'), workspace('web')], '', { jobs: true }, { localStorage: storageOf(stored) });
+  assert.deepEqual(folded(page), ['implementing']);
+  // j and k: Q-1 (Queue), then D-1 (Done); Implementing's W-1 is passed over.
+  page.key('j');
+  assert.equal(page.document.activeElement, card(page, 'app/Q-1'));
+  page.key('j');
+  assert.equal(page.document.activeElement, card(page, 'app/D-1'));
+  page.key('k');
+  assert.equal(page.document.activeElement, card(page, 'app/Q-1'));
+  lineOf(card(page, 'app/Q-1'), 'waits')!.all().find((element) => element.classList.contains('dchip'))!.click();
+  await page.flush();
+  assert.deepEqual([folded(page), stored.get('sf-board-folded'), foldOf(page, 'implementing').getAttribute('aria-expanded'), page.document.activeElement],
+    [[], '[]', 'true', card(page, 'web/W-1')]);
 });

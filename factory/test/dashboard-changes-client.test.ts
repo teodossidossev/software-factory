@@ -421,3 +421,82 @@ test('changes client: the script never calls an array-only method on a querySele
     .filter(([, line]) => /querySelectorAll\([^)]*\)\??\.(?!forEach\b|length\b)[A-Za-z]+\(/.test(line));
   assert.deepEqual(calls, []);
 });
+
+// SF-119: a matchMedia whose matches the test sets (narrow: below 768 px), and the change listeners
+// the page added.
+function mediaOf(narrow: boolean) {
+  const screen = { narrow, listeners: [] as Array<() => void> };
+  const matchMedia = (query: string) => ({
+    get matches() { return screen.narrow; }, media: query,
+    addEventListener: (name: string, listener: () => void) => { if (name === 'change') screen.listeners.push(listener); },
+  });
+  return { screen, matchMedia };
+}
+const cxtree = (page: Page): [string, string | null, boolean] => [page.$('cxtree').textContent, page.$('cxtree').getAttribute('aria-expanded'), page.$('scrChanges').querySelector('.tree')!.classList.contains('folded')];
+
+test('changes client (SF-119): below 768 px the diff is unified with no layout switch and no Before / After, the stored side by side kept; a wider window draws side by side again', async () => {
+  const stored = new Map<string, string>([['sf-diff-mode', 'side']]);
+  const { screen, matchMedia } = mediaOf(true);
+  const page = await openChanges(job('awaiting_review'), (path) => api(path), '/changes', { localStorage: storageOf(stored), matchMedia });
+  assert.deepEqual([page.$('dbody').querySelector('.dfile')!.className, page.$('dtool').querySelectorAll('[data-mode]').length, notes(page)], ['dfile uni', 0, []]);
+  rowOf(page, 'f:src/app/main.ts').click();
+  await page.flush();
+  assert.deepEqual([page.$('dbody').querySelector('.dfile')!.className, stored.get('sf-diff-mode')], ['dfile uni', 'side']);
+  // The window grows past 767 px: the listener redraws the diff in the stored layout.
+  screen.narrow = false;
+  assert.equal(screen.listeners.length, 1);
+  screen.listeners.forEach((listener) => listener());
+  assert.deepEqual([page.$('dbody').querySelector('.dfile')!.className, page.$('dtool').querySelectorAll('[data-mode]').map((button) => button.textContent), stored.get('sf-diff-mode')],
+    ['dfile', ['Side-by-side', 'Unified'], 'side']);
+});
+
+test('changes client (SF-119): the tree folds by its toggle; below 768 px a chosen file folds it and focuses the diff, wider it stays open; another job opens it again', async () => {
+  const other = { ...job('awaiting_review'), ticket: 'T-2', branch: 'T-2-demo' };
+  const narrow = mediaOf(true);
+  const get = (path: string) => (path === 'api/jobs/app/T-2' ? detail(other) : api(path.replace('/app/T-2/', '/app/T-1/')));
+  const page = await openChanges(job('awaiting_review'), get, '/changes', { matchMedia: narrow.matchMedia });
+  assert.deepEqual([...cxtree(page), page.$('cxtree').getAttribute('aria-controls')], ['▾ Files', 'true', false, 'tlist']);
+  page.$('cxtree').click();
+  assert.deepEqual(cxtree(page), ['▸ Files', 'false', true]);
+  page.$('cxtree').click();
+  assert.deepEqual(cxtree(page), ['▾ Files', 'true', false]);
+  // A folder's click leaves the tree open; a file's folds it, its diff shown and focused.
+  rowOf(page, 'd:docs').click();
+  assert.deepEqual(cxtree(page), ['▾ Files', 'true', false]);
+  rowOf(page, 'f:src/app/main.ts').click();
+  await page.flush();
+  assert.deepEqual([...cxtree(page), dpath(page), page.document.activeElement], ['▸ Files', 'false', true, 'src/app/main.ts', page.$('dbody')]);
+  // Another job: the tree open again.
+  page.streams.at(-1)!.emit('jobs', { jobs: [job('awaiting_review'), other] });
+  page.location.hash = '#app/T-2/changes';
+  page.window.dispatch('hashchange');
+  await page.flush();
+  page.streams.at(-1)!.emit('job', detail(other));
+  await page.flush();
+  assert.deepEqual(cxtree(page), ['▾ Files', 'true', false]);
+  // Not narrow: a file's click leaves the tree open.
+  const wide = await openChanges(job('awaiting_review'), (path) => api(path), '/changes', { matchMedia: mediaOf(false).matchMedia });
+  rowOf(wide, 'f:src/app/main.ts').click();
+  await wide.flush();
+  assert.deepEqual([...cxtree(wide), dpath(wide)], ['▾ Files', 'true', false, 'src/app/main.ts']);
+});
+
+test('changes client (SF-119): the keys of a folded tree: / opens it and focuses the filter, an arrow opens it and moves in it; Enter on the toggle is left to the button', async () => {
+  const page = await openChanges(job('awaiting_review'), (path) => api(path), '/changes', { matchMedia: mediaOf(true).matchMedia });
+  rowOf(page, 'f:src/app/main.ts').click();
+  await page.flush();
+  assert.deepEqual([cxtree(page)[2], page.document.activeElement], [true, page.$('dbody')]);
+  page.key('/');
+  assert.deepEqual([...cxtree(page), page.document.activeElement], ['▾ Files', 'true', false, page.$('cxq')]);
+  rowOf(page, 'f:src/app/main.ts').click();
+  await page.flush();
+  assert.deepEqual([cxtree(page)[2], page.document.activeElement], [true, page.$('dbody')]);
+  // Up and Down in the diff scroll it; Left is the tree's.
+  page.key('ArrowDown');
+  assert.equal(cxtree(page)[2], true);
+  page.key('ArrowLeft');
+  assert.deepEqual([cxtree(page)[2], page.document.activeElement?.classList.contains('trow'), selected(page)], [false, true, ['d:src/app']]);
+  page.$('cxtree').focus();
+  const enter = page.key('Enter');
+  assert.equal(enter.defaultPrevented, false);
+});

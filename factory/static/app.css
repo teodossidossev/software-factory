@@ -85,10 +85,6 @@ code, pre, .mono { font-family: var(--mono); }
 .card .act { margin-top: 4px; display: flex; gap: 8px; }
 .card .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--s-working); display: inline-block; animation: pulse 1.6s infinite; flex: none; align-self: center; }
 @keyframes pulse { 50% { opacity: .3; } }
-@media (max-width: 760px) {
-  .cols { grid-template-columns: minmax(0, 1fr); overflow-x: visible; }
-  .col.you { order: -2; } .col.impl, .col.rev { order: -1; }
-}
 
 /* Job view: a full page */
 #job { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--bg); z-index: 6;
@@ -110,7 +106,7 @@ code, pre, .mono { font-family: var(--mono); }
 .jhead .tools { grid-row: span 2; display: flex; gap: 8px; align-items: center; }
 .scr { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .streamwrap { flex: 1; overflow-y: auto; min-height: 0; padding-block: 8px 24px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
-@media (max-width: 760px) { .jhead { grid-template-columns: minmax(0, 1fr) auto; } .jhead .back { grid-row: auto; } .jhead .t1 { grid-column: 1 / -1; order: 3; } .jhead .t2 { grid-column: 1 / -1; order: 4; } .jhead .tools { grid-row: auto; grid-column: 1 / -1; order: 5; } }
+@media (max-width: 767px) { .jhead { grid-template-columns: minmax(0, 1fr) auto; } .jhead .back { grid-row: auto; } .jhead .t1 { grid-column: 1 / -1; order: 3; } .jhead .t2 { grid-column: 1 / -1; order: 4; } .jhead .tools { grid-row: auto; grid-column: 1 / -1; order: 5; } }
 
 /* Stream */
 #stream { list-style: none; margin: 0; padding: 0; font-size: 13px; }
@@ -280,8 +276,8 @@ code, pre, .mono { font-family: var(--mono); }
 .dfile .fold { all: unset; cursor: pointer; display: block; text-align: center; color: var(--accent); background: var(--panel-2); border-block: 1px solid var(--border); font: 12px/22px var(--sans); }
 .dfile .fold:hover { text-decoration: underline; }
 .dnote { padding: 6px 12px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); }
-@media (max-width: 760px) {
-  #scrChanges { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(140px, 38%) minmax(0, 1fr); }
+@media (max-width: 767px) {
+  #scrChanges { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .vdiv { display: none; }
   .dfile:not(.uni) .r { grid-template-columns: 4ch minmax(0, 1fr) 4ch minmax(0, 1fr); }
 }
@@ -626,7 +622,7 @@ pre.raw.doc .heading { font-weight: 700; }
 #drawer .drawer-heading h2 { overflow-wrap: anywhere; }
 #drawer .drawer-kicker { font: 12.5px/1.4 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
 #drawer .panel { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-@media (max-width: 760px) {
+@media (max-width: 767px) {
   #drawer { padding: 12px 12px 48px; }
 }
 
@@ -686,7 +682,7 @@ pre.raw.doc .heading { font-weight: 700; }
 #drawer .ws-app { margin-left: 8px; font-weight: 400; }
 #drawer .ws-description { font-size: 13px; overflow-wrap: anywhere; }
 #drawer input[type="time"] { min-height: var(--control); padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--panel); color: inherit; font: inherit; width: 9em; }
-@media (max-width: 760px) {
+@media (max-width: 767px) {
   .dg-pick { max-width: 160px; }
   .dg-body { gap: 10px; }
 }
@@ -744,4 +740,65 @@ pre.raw.doc .heading { font-weight: 700; }
 @media (max-width: 760px) {
   .st-body { gap: 12px; }
   .st-tile-value { font-size: 18px; }
+}
+
+/* SF-119: phone (below 768 px), touch (phone or no hover), tablet board. */
+/* Every width: the column headings fold their column (the list and Done's "show all"); the reasons
+   of the disabled buttons, shown only by the touch block; the tree's fold, shown only on a phone. */
+.colfold { all: unset; cursor: pointer; display: inline-flex; gap: 6px; align-items: baseline; border-radius: 4px; }
+.colfold::before { content: "▾"; color: var(--muted); }
+.col.folded .colfold::before { content: "▸"; }
+.colfold:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.col.folded > :not(h2) { display: none; }
+.why { display: none; font-size: 12px; color: var(--muted); gap: 2px; overflow-wrap: anywhere; }
+.mrbar .why { flex-basis: 100%; }
+#cxtree { display: none; }
+/* A tablet: the board's sections in two columns, Your turn | Implementing, Reviewing | Queue, Done. */
+@media (max-width: 1023px) {
+  .cols { grid-template-columns: repeat(2, minmax(0, 1fr)); overflow-x: visible; }
+  .col.you { order: -2; } .col.impl, .col.rev { order: -1; }
+}
+/* A phone: one list, the top bar scrolls away, the header's whole title and full-width switch, the
+   Stream's time and actor above the text, the composer's full-width box, Changes stacked. */
+@media (max-width: 767px) {
+  #job, #ticket, #digest { padding-bottom: env(safe-area-inset-bottom, 0px); }
+  .kbd { display: none; }
+  .cols { grid-template-columns: minmax(0, 1fr); }
+  .qhint { display: none; }
+  .topbar { position: static; gap: 8px 12px; }
+  .topbar h1 { font-size: 15px; }
+  .topbar .qctl, .topbar nav.ws { margin-left: 0; flex: 1 1 100%; }
+  .seg2 { flex-wrap: wrap; max-width: 100%; }
+  .qctl { position: relative; }
+  .qctl .menuwrap { position: static; }
+  .qctl .menu { left: 0; right: 0; width: auto; }
+  .jhead .t1 { flex-wrap: wrap; }
+  .jhead .t1 .title { white-space: normal; overflow-wrap: anywhere; flex-basis: 100%; }
+  .jhead .tools { flex-wrap: wrap; }
+  .switch { display: flex; width: 100%; }
+  .switch button { flex: 1 1 auto; justify-content: center; padding: 0 8px; }
+  .e { grid-template-columns: auto minmax(0, 1fr); gap: 0 8px; }
+  .e > .ts { grid-column: 1; grid-row: 1; line-height: 16px; }
+  .e > .who { grid-column: 2; grid-row: 1; line-height: 16px; }
+  .e > .who.cont { display: none; }
+  .e > .body { grid-column: 1 / -1; grid-row: 2; }
+  .composer { max-height: 60vh; overflow-y: auto; }
+  .composer textarea { flex: 1 1 100%; }
+  .tree { max-height: 45vh; border-right: 0; border-bottom: 1px solid var(--border); }
+  .tree.folded :is(.ffq, .tb .row, .tlist) { display: none; }
+  .dtool .dpath { flex: 1 1 100%; max-width: 100%; }
+  #cxtree { display: inline-flex; justify-self: start; }
+  pre.cm { overflow-wrap: anywhere; }
+}
+/* A phone or a device without hover: 44 px targets, 16 px fields, the reasons line. */
+@media (max-width: 767px), (hover: none) {
+  .btn, .btn.small, :is(#drawer, #ticket-confirm) .btn { min-height: 44px; min-width: 44px; height: auto; white-space: normal; max-width: 100%; }
+  .switch button, .seg2 button { display: inline-flex; align-items: center; min-height: 44px; }
+  .stepper button { width: 44px; line-height: 44px; }
+  .colfold, .trow, .handover .ho-item { min-height: 44px; }
+  .handover .ho-x, .toast-x { width: 44px; height: 44px; line-height: 44px; text-align: center; }
+  .ffq, .dtool select, .dg-pick, .finding .decide input.note { min-height: 44px; }
+  /* iOS zooms into a field whose text is smaller than 16 px. */
+  :is(input, select, textarea) { font-size: 16px !important; }
+  .why:not(:empty) { display: grid; }
 }

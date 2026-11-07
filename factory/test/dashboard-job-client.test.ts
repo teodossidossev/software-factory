@@ -47,7 +47,8 @@ function detail(row: Job, extra: Partial<Omit<Detail, 'job'>> = {}): Detail {
 
 // The page with the job of shown open through the URL's hash (screen: '', '/changes' or '/mr'); get
 // answers the other GETs (undefined leaves them pending; an empty Stream page by default).
-async function openJob(shown: Detail, get: (path: string) => unknown = () => undefined, clipboard?: { writeText(text: string): Promise<void> }, others: Job[] = [], screen = ''): Promise<Page> {
+// globals: names added to the page's context (a matchMedia: SF-119).
+async function openJob(shown: Detail, get: (path: string) => unknown = () => undefined, clipboard?: { writeText(text: string): Promise<void> }, others: Job[] = [], screen = '', globals: Record<string, unknown> = {}): Promise<Page> {
   const page = await loadPage(STATIC_DIR, (path) => {
     if (path === 'api/jobs') {
       return { jobs: [shown.job, ...others] };
@@ -56,7 +57,7 @@ async function openJob(shown: Detail, get: (path: string) => unknown = () => und
       return shown;
     }
     return get(path);
-  }, clipboard);
+  }, clipboard, globals);
   page.location.hash = `#app/T-1${screen}`;
   page.document.dispatch('DOMContentLoaded');
   await page.flush();
@@ -638,4 +639,57 @@ test('job client (SF-106): an explanation that arrives with a new detail on an o
   // A failed one after all: today's panel again.
   await show(page, shown({ ...pending, ended_at: '2026-11-01T10:06:00.000Z', error: 'Overloaded.' }));
   assert.deepEqual(parts(), panel);
+});
+
+// SF-119: a matchMedia whose matches the test sets (narrow: below 768 px or no hover, the same answer
+// for both queries).
+const mediaOf = (narrow: boolean) => (query: string) => ({ matches: narrow, media: query, addEventListener: () => undefined });
+const whyText = (page: Page): string[] => page.$('acts-why').children.map((line) => line.textContent);
+
+test('job client (SF-119): the reasons line names the disabled buttons with their reason, one line per reason, never Send; empty when nothing is off', async () => {
+  const page = await openJob(detail(job('working')));
+  const actButtons = () => page.$('acts').children.map((node) => node as FakeElement);
+  assert.deepEqual(actButtons().map((node) => node.textContent), ['Send', 'Pause', 'Abort…']);
+  // Send is off (the box is empty) and has its reason as its title, but is not named.
+  assert.deepEqual([actButtons()[0]!.disabled, whyText(page)], [true, []]);
+  actButtons().find((node) => node.textContent === 'Abort…')!.click();
+  await page.flush();
+  assert.equal(page.$('confirm').hidden, false);
+  assert.deepEqual(whyText(page), ['Off: Pause, Abort… (a confirmation is open: confirm or cancel it first.)']);
+  page.$('confirm-cancel').click();
+  await page.flush();
+  assert.deepEqual(whyText(page), []);
+  // The reasons line is the composer's last child; the SF-107 order before it stays.
+  const children = page.$('composer').children.map((node) => (node as FakeElement).id || (node as FakeElement).className);
+  assert.deepEqual(children.slice(-4), ['crow', 'action-status', 'doubt', 'acts-why']);
+});
+
+test('job client (SF-119): on a phone or without hover a tap on the workspace chip shows its title in the toast; a control\'s tap shows none; with a mouse none', async () => {
+  const phone = await openJob(detail(job('working')), () => undefined, undefined, [], '', { matchMedia: mediaOf(true) });
+  phone.$('jhead').querySelector('.t1 .wschip')!.click();
+  assert.deepEqual([phone.$('toast').hidden, phone.$('toast-text').textContent], [false, 'Workspace app']);
+  phone.key('Escape');
+  assert.deepEqual([phone.$('toast').hidden, phone.$('job').hidden], [true, false]);
+  // The job's title (cut with an ellipsis on a wide screen) by a tap too.
+  phone.$('jhead').querySelector('.t1 .title')!.click();
+  assert.equal(phone.$('toast-text').textContent, 'Demo');
+  phone.$('toast-close').click();
+  // ← Board has a title, but it is a control: its label says it.
+  phone.$('jhead').querySelector('[data-back]')!.click();
+  assert.equal(phone.$('toast').hidden, true);
+  const mouse = await openJob(detail(job('working')), () => undefined, undefined, [], '', { matchMedia: mediaOf(false) });
+  mouse.$('jhead').querySelector('.t1 .wschip')!.click();
+  assert.equal(mouse.$('toast').hidden, true);
+});
+
+test('job client (SF-119): on a phone or without hover the Merge request tab without MR text stays tappable, aria-disabled, and its tap says why and stays on the Stream', async () => {
+  const page = await openJob(detail(job('working')), () => undefined, undefined, [], '', { matchMedia: mediaOf(true) });
+  const tab = () => page.$('jhead').querySelector('[data-goto="mr"]')!;
+  assert.deepEqual([tab().getAttribute('aria-disabled'), tab().disabled, tab().getAttribute('title')], ['true', false, 'No MR text yet: written at Clean']);
+  tab().click();
+  await page.flush();
+  assert.deepEqual([page.$('toast-text').textContent, page.location.hash, page.$('scrStream').hidden, page.$('scrMr').hidden], ['No MR text yet: written at Clean', '#app/T-1', false, true]);
+  // With a mouse: disabled, as the switch test says.
+  const mouse = await openJob(detail(job('working')), () => undefined, undefined, [], '', { matchMedia: mediaOf(false) });
+  assert.equal(mouse.$('jhead').querySelector('[data-goto="mr"]')!.disabled, true);
 });

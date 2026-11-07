@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="referrer" content="no-referrer">
   <title>Software Factory</title>
   <link rel="stylesheet" href="app.css">
@@ -34,11 +34,11 @@
     </header>
     <p id="board-hint" class="bhint" hidden></p>
     <div class="cols" id="cols">
-      <section class="col queue" aria-labelledby="col-queue-title"><h2 id="col-queue-title">Queue <span class="n" id="count-queue"></span></h2><ul id="qlist"></ul></section>
-      <section class="col impl" aria-labelledby="col-implementing-title"><h2 id="col-implementing-title">Implementing <span class="n" id="count-implementing"></span></h2><ul id="list-implementing"></ul></section>
-      <section class="col rev" aria-labelledby="col-reviewing-title"><h2 id="col-reviewing-title">Reviewing <span class="n" id="count-reviewing"></span></h2><ul id="list-reviewing"></ul></section>
-      <section class="col you" aria-labelledby="col-you-title"><h2 id="col-you-title">Your turn <span class="n" id="count-you"></span></h2><ul id="list-you"></ul></section>
-      <section class="col done" aria-labelledby="col-done-title"><h2 id="col-done-title">Done <span class="n" id="count-done"></span></h2><ul id="list-done"></ul><button id="done-all" type="button" class="linkish" hidden></button></section>
+      <section class="col queue" aria-labelledby="col-queue-title"><h2 id="col-queue-title"><button type="button" class="colfold" data-colfold="queue" aria-expanded="true" aria-controls="qlist">Queue <span class="n" id="count-queue"></span></button></h2><ul id="qlist"></ul></section>
+      <section class="col impl" aria-labelledby="col-implementing-title"><h2 id="col-implementing-title"><button type="button" class="colfold" data-colfold="implementing" aria-expanded="true" aria-controls="list-implementing">Implementing <span class="n" id="count-implementing"></span></button></h2><ul id="list-implementing"></ul></section>
+      <section class="col rev" aria-labelledby="col-reviewing-title"><h2 id="col-reviewing-title"><button type="button" class="colfold" data-colfold="reviewing" aria-expanded="true" aria-controls="list-reviewing">Reviewing <span class="n" id="count-reviewing"></span></button></h2><ul id="list-reviewing"></ul></section>
+      <section class="col you" aria-labelledby="col-you-title"><h2 id="col-you-title"><button type="button" class="colfold" data-colfold="you" aria-expanded="true" aria-controls="list-you">Your turn <span class="n" id="count-you"></span></button></h2><ul id="list-you"></ul></section>
+      <section class="col done" aria-labelledby="col-done-title"><h2 id="col-done-title"><button type="button" class="colfold" data-colfold="done" aria-expanded="true" aria-controls="list-done">Done <span class="n" id="count-done"></span></button></h2><ul id="list-done"></ul><button id="done-all" type="button" class="linkish" hidden></button></section>
     </div>
   </div>
 
@@ -80,6 +80,7 @@
           <span id="action-doubt" class="status error" role="status" aria-live="polite"></span>
           <button id="refresh-button" type="button" class="btn small" hidden>Refresh state</button>
         </div>
+        <div id="acts-why" class="why"></div>
       </div>
     </div>
     <!-- The Changes screen (SF-079): app.js builds the tree, the divider and the diff pane in it. -->

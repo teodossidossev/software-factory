@@ -126,7 +126,11 @@ directory settings set there (`SF_STATE_DIR`, `SF_CONFIG_DIR`, …); every other
 `auth.env`, and it names the `SF_*` variables of your shell it did not copy. It warns when user
 lingering is off (a logout would stop the service) and tells you `loginctl enable-linger`.
 `systemctl --user stop software-factory` and a restart leave running jobs running (the unit has
-`KillMode=process`). Without systemd user services, run `npm run serve` as above.
+`KillMode=process`). Running `sf service install` again while the service runs (for example after
+an update changed the unit) rewrites the unit and restarts the service; jobs keep running. It waits
+for nothing: while a Task check or a hand-over runs inside the service's `sf serve`, it refuses with
+`serve_busy`; run it again when that has ended. Without systemd user services, run
+`npm run serve` as above.
 
 To update it: `sf update`. It pauses the running jobs, waits for their runners to end, pulls
 `origin/main`, builds and typechecks, restarts the service, resumes the jobs it paused and runs

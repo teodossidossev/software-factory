@@ -71,7 +71,7 @@ bin/sf info                                    # version, directories, settings 
 bin/sf metrics [<workspace>] [--since YYYY-MM-DD] [--json]  # the Codex gate per job, current and archived: levels, runs, tokens, items by outcome, yield; then the totals (section sf metrics); works without sf serve
 bin/sf smoke [--keep] [--timeout-min N] [--budget-usd N]  # the live smoke test (section Live smoke test): one tiny real job from Task check to push on a throwaway repository and state; a pass/fail table; works without sf serve and never touches yours
 bin/sf run <workspace> <ticket>                # the job's runner (section Jobs); sf serve starts it detached, one per job; refused (runner_running) while the job has one
-bin/sf service install|uninstall|status        # sf serve as a systemd user service (section Service); install refuses while an sf serve started by hand answers
+bin/sf service install|uninstall|status        # sf serve as a systemd user service (section Service); install refuses while an sf serve started by hand answers; run while the service runs, it rewrites the unit and restarts the service
 bin/sf update [--check|--abandon] [--no-smoke] # update this Git install to origin/main, drained first, rolled back on a failed build (section Updating the install)
 npm run typecheck && npm test
 npm run browsers                               # once: Playwright's Chromium for the browser tests (npm install downloads no browser)
@@ -419,9 +419,19 @@ sf service uninstall   # stops, disables and removes it
   command. A setting that came from `auth.env` is not named.
 - **Refusals.** While an `sf serve` started by hand answers on the socket, `sf service install`
   refuses with `serve_running` before it writes anything (the service would fail at every start
-  against that socket): stop that `sf serve` first (its jobs keep running), then install again. On
-  a machine without systemd user services (`systemctl --user` does not answer), every `sf service`
+  against that socket): stop that `sf serve` first (its jobs keep running), then install again.
+  Install tells the service's own `sf serve` from a hand-started one by its pid: `ping` answers
+  with the pid of the `sf serve` that answers, and when that equals the service's `MainPID`
+  (`systemctl --user show software-factory --property=MainPID`) it is the service's own; anything
+  else (no pid, no `MainPID`, another number) counts as started by hand. While the service's own
+  `sf serve` runs a Task check or a hand-over (what `serve-busy` names), install refuses with
+  `serve_busy`, writing nothing: a restart would cut it off; run it again when it has ended. On a
+  machine without systemd user services (`systemctl --user` does not answer), every `sf service`
   command says so (`systemd_unavailable`); run `sf serve` as before.
+- **Reinstall while it runs.** Run while the service's own `sf serve` answers and is idle (for
+  example after an update changed the unit), `sf service install` rewrites the unit, then runs
+  `systemctl --user daemon-reload`, `enable` (without `--now`, which would not restart a running
+  unit) and `restart`. Running jobs keep running (`KillMode=process`: their runners are detached).
 - **Lingering.** A logout stops the user's services unless lingering is on. `sf service install`
   warns when `loginctl show-user` says `Linger=no` and names `loginctl enable-linger <user>`; it
   does not run it.

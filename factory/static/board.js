@@ -53,16 +53,6 @@ const canMerge = (job) => job.state === 'pushed' && hasMr(job) && job.mr.state =
 const mrOff = (job) => (job.mr_host === null || typeof job.mr_host !== 'object' ? 'the Git host is not known yet.'
   : typeof job.mr_host.reason === 'string' && job.mr_host.reason !== '' ? `${job.mr_host.reason}.` : '');
 
-// A duration as the prototype writes it: "14 min", "1 h 4 min".
-const dur = (ms) => {
-  const m = Math.max(0, Math.round(ms / 60000));
-  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
-};
-// An estimated cost (the jobs payload's cost_usd): "$1.23", or "—" without one.
-const money = (value) => (typeof value === 'number' ? `$${value.toFixed(2)}` : '—');
-const firstLine = (text) => (typeof text === 'string' ? text.split('\n')[0].trim() : '');
-const counted = (n, word, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
-
 // The iteration a job shows, numbered from 1, the same on its card and on its page: the one under
 // way while the Implementer works on it (starting, working, paused in its turn, stopped by its
 // session), else the last one published; never 0.
@@ -275,16 +265,6 @@ function nowLine(job) {
 const jobByKey = (key) => state.jobs.find((job) => keyOf(job) === key) ?? null;
 const ticketByKey = (key) => (state.tickets ?? []).find((row) => keyOf(row) === key) ?? null;
 const titleOf = (job) => (typeof job.title === 'string' && job.title !== '' ? job.title : job.branch);
-
-// A button with its data-* attributes, for the delegated click listener.
-function button(className, text, data = {}) {
-  const node = el('button', className, text);
-  node.type = 'button';
-  for (const [name, value] of Object.entries(data)) {
-    node.dataset[name] = value;
-  }
-  return node;
-}
 
 // What the cards need of the board as a whole: the dependency graph (SF-084).
 // The board's folded columns (SF-119): names of COLUMNS, kept in localStorage.

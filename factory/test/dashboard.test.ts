@@ -73,15 +73,22 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
 
     const origin = `http://127.0.0.1:${base.port}`;
     const wrong = `${token.slice(0, -1)}${token.endsWith('0') ? '1' : '0'}`;
-    // SF-136: a file of static/ that is not in the list, or a name like a script's, is a 404 too.
-    const unlisted = ['dashboard.html', 'main.js', 'core', 'core.js.map', 'app.js/', 'static/app.js'].map((name) => `/d/${token}/${name}`);
+    // SF-136: a file of static/ that is not in the list, or a name like a script's, is a 404 too;
+    // SF-137: so is the old single script, now cut into the files of the list.
+    const unlisted = ['dashboard.html', 'app.js', 'core', 'core.js.map', 'app.js/', 'static/app.js'].map((name) => `/d/${token}/${name}`);
     for (const path of ['/', '/d/', '/d//', `/d/${token}`, `/d/${wrong}/`, `/d/${wrong}/api/jobs`, `/d/${token.slice(0, 10)}/`, `/x/${token}/`, `/d/${token}/nope`, `/d/${token}/api/nope`, ...unlisted]) {
       const reply = await fetchRaw(`${origin}${path}`);
       assert.deepEqual([reply.status, reply.body], [404, ''], path);
       assert.equal(reply.headers['content-security-policy'], CSP, path);
     }
+    // SF-137: the dashboard's scripts, in load order.
+    assert.deepEqual([...DASHBOARD_SCRIPTS], ['core.js', 'job-screens.js', 'job-page.js', 'board.js', 'routing.js', 'ticket-page.js', 'reports.js', 'setup.js', 'main.js']);
     // SF-136: every script of DASHBOARD_SCRIPTS is served as JavaScript, each with its own text (its
-    // header names it).
+    // header names it); SF-137: none is longer than 2,500 lines.
+    for (const file of DASHBOARD_SCRIPTS) {
+      const lines = (await fetchRaw(new URL(file, base))).body.trimEnd().split('\n').length;
+      assert.ok(lines <= 2500, `${file}: ${lines} lines`);
+    }
     const scripts = DASHBOARD_SCRIPTS.map((file) => [file, 'text/javascript', `// ${file}, `] as const);
     for (const [path, type, marker] of [['', 'text/html', '<script src="core.js"'], ...scripts, ['app.css', 'text/css', 'prefers-color-scheme'], ['favicon.svg', 'image/svg+xml', '<svg']] as const) {
       const reply = await fetchRaw(new URL(path, base));
@@ -614,7 +621,7 @@ test('dashboard (SF-126): the remote cookie is __Host- and Secure; api/jobs says
     assert.deepEqual(visit.headers['set-cookie'], [`__Host-sf_dashboard=${cookieValue(token, 'remote')}; HttpOnly; Secure; SameSite=Strict; Path=/`]);
     const cookie = `__Host-sf_dashboard=${cookieValue(token, 'remote')}`;
     const root = `http://127.0.0.1:${dashboard.remotePort}`;
-    for (const path of ['/', '/api/jobs', '/app.js']) {
+    for (const path of ['/', '/api/jobs', '/core.js']) {
       assert.equal((await fetchRaw(`${root}${path}`, { host: 'pc.tail1234.ts.net', headers: { ...LOGIN, cookie } })).status, 200, path);
     }
     // Each side's cookie works on its own port only.
@@ -691,14 +698,14 @@ test('dashboard (SF-126): a token visit sets the local cookie; with it the page 
     const token = base.pathname.split('/')[2]!;
     const visit = await fetchRaw(base);
     assert.equal(visit.status, 200);
-    assert.match(visit.body, /<script src="app.js"/);
+    assert.match(visit.body, /<script src="core.js"/);
     assert.deepEqual(visit.headers['set-cookie'], [`sf_dashboard_${port}=${cookieValue(token, 'local')}; HttpOnly; SameSite=Strict; Path=/`]);
     // Only the page's visit sets it.
     assert.equal((await fetchRaw(new URL('api/jobs', base))).headers['set-cookie'], undefined);
     const cookie = `sf_dashboard_${port}=${cookieValue(token, 'local')}`;
     const root = `http://127.0.0.1:${port}`;
     for (const value of [cookie, `other=1; ${cookie}; more=2`]) {
-      for (const path of ['/', '/api/jobs', '/app.js', '/api/jobs/app/T-1', '/api/tickets']) {
+      for (const path of ['/', '/api/jobs', '/core.js', '/api/jobs/app/T-1', '/api/tickets']) {
         const reply = await fetchRaw(`${root}${path}`, { headers: { cookie: value } });
         assert.equal(reply.status, 200, `${path} ${value}`);
         assert.equal(reply.headers['set-cookie'], undefined, path);

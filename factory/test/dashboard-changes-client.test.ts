@@ -1,4 +1,4 @@
-// Behaviour of the job page's Changes screen in static/app.js (SF-079, the prototype's tree, diff
+// Behaviour of the job page's Changes screen in static/job-screens.js (SF-079, the prototype's tree, diff
 // pane and iteration selector), run under node:vm against the fake page of test/support/fake-dom.ts
 // with the changes and file routes answered by the test: the tree's rows (folders compacted, M/A/D
 // and their colours, the binary and unavailable tags, the counts), the summary, the filter, the

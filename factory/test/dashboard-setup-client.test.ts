@@ -1,4 +1,4 @@
-// Behaviour of the setup in static/app.js (SF-025, SF-046), run under node:vm against the fake
+// Behaviour of the setup in static/setup.js (SF-025, SF-046), run under node:vm against the fake
 // page of test/support/fake-dom.ts: Workspaces and New ticket in the drawer from the header, the
 // workspace form and list, the new-ticket form, on the planned ticket page (SF-081) the
 // conversation link (a click, never automatic) and the first message's Copy, an archived Task in

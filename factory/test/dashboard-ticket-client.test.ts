@@ -1,4 +1,4 @@
-// The planned ticket page in static/app.js (SF-081), run under node:vm against the fake page of
+// The planned ticket page in static/ticket-page.js (SF-081), run under node:vm against the fake page of
 // test/support/fake-dom.ts: the header and its line per dependency state, each card's plain label
 // and help line, the lock of a may_touch row, "No list", Waits for with ✓, the plan check in
 // words with the findings' kinds, Edit | Preview with the Markdown preview (DOM nodes, only http(s)

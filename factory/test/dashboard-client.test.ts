@@ -1,11 +1,11 @@
-// Behaviour of static/app.js, run under node:vm against the fake page of test/support/fake-dom.ts:
-// the action matrix per state, the confirmations (cancel, discard, double submission), the say
-// draft rules, the outcome texts and what happens when the selection changes while a request is
-// out. The job opens as its full page (the URL's #<ws>/<ticket> or its card, SF-077) and its actions
-// are the composer's buttons (SF-078); the board itself is tested in dashboard-board-client.test.ts,
-// the job page's header and screens in dashboard-job-client.test.ts, its Stream and composer in
-// dashboard-stream-client.test.ts. These are script checks, not browser acceptance: the manual steps
-// are in factory/README.md.
+// Behaviour of the job's actions in static/job-page.js, run under node:vm against the fake page of
+// test/support/fake-dom.ts: the action matrix per state, the confirmations (cancel, discard, double
+// submission), the say draft rules, the outcome texts and what happens when the selection changes
+// while a request is out. The job opens as its full page (the URL's #<ws>/<ticket> or its card,
+// SF-077) and its actions are the composer's buttons (SF-078); the board itself is tested in
+// dashboard-board-client.test.ts, the job page's header and screens in
+// dashboard-job-client.test.ts, its Stream and composer in dashboard-stream-client.test.ts. These
+// are script checks, not browser acceptance: the manual steps are in factory/README.md.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { served, servedDetail } from './support/dashboard-client.js';

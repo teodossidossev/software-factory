@@ -1,4 +1,4 @@
-// The Task check in static/app.js (SF-054), under node:vm against the fake page of
+// The Task check in static/job-screens.js (SF-054), under node:vm against the fake page of
 // test/support/fake-dom.ts: the Queue card's check note and Check (one POST, off while a check runs),
 // the Start confirmation's note (not checked, stale, not ready: N blocker, M major; none for a
 // ready check), the last check in the planned ticket page's Plan check card (SF-081) and behind the

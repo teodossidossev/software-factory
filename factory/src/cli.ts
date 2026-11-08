@@ -1,17 +1,14 @@
-// The sf command: `sf serve`, `sf up` (serve, the tunnel and the browser), `sf workspace
-// add|list|remove`, `sf start|say|review|retry|approve|pause|resume|restart|abort|reset`,
-// `sf handover|takeback|handed-done` (SF-073) and
-// `sf mr create|merge|status` and `sf queue list|add|remove|move|limit|hold|release` (SF-071)
-// and `sf queue on-limit` (SF-072) and `sf queue force` (SF-086)
-// (through the socket of sf serve),
-// `sf status|watch|dashboard` (reading the state directory directly), `sf check-task` (the Task
-// check of SF-054, run here and stored in the state directory), `sf rules` (the coding rules of
-// SF-059, read here), `sf notify-test`, `sf info`, `sf metrics` (the gate's cost and yield, SF-092,
-// reading the state directory directly), `sf smoke` (the live smoke test of SF-090,
-// src/live-smoke.ts: its own sf processes on a throwaway repository and state)
-// and `sf run`, the job's runner that sf serve starts (SF-042, src/runner.ts), and `sf digest
-// [--now]` (the morning digest of SF-103, through the socket of sf serve), `sf service` (sf serve
-// as a systemd user service, SF-101, src/service.ts) and `sf update` (the install updated, drained
+// The sf command. The commands that go to sf serve over its socket (start, say, the queue, the
+// merge request, pause, ...) are the table of src/commands.ts: checked, sent and shown here by it.
+// The others run here: `sf serve`, `sf up` (serve, the tunnel and the browser), `sf workspace
+// add|list|remove`, `sf status|watch|dashboard` (reading the state directory directly), `sf
+// check-task` (the Task check of SF-054, run here and stored in the state directory), `sf rules`
+// (the coding rules of SF-059, read here), `sf notify-test`, `sf info`, `sf metrics` (the gate's
+// cost and yield, SF-092, reading the state directory directly), `sf smoke` (the live smoke test
+// of SF-090, src/live-smoke.ts: its own sf processes on a throwaway repository and state) and `sf
+// run`, the job's runner that sf serve starts (SF-042, src/runner.ts), and `sf digest [--now]`
+// (the morning digest of SF-103, through the socket of sf serve), `sf service` (sf serve as a
+// systemd user service, SF-101, src/service.ts) and `sf update` (the install updated, drained
 // first, SF-101, src/update.ts) and `sf guard` (the guard of SF-122, src/guard.ts: run here, no sf
 // serve needed; `sf guard install-hook` writes the pre-push hook).
 // Exit codes: 0 ok, 1 error, 2 usage.
@@ -41,10 +38,10 @@ import { callSocket, listenSocket, socketPath } from './ipc.js';
 import { type Job, type JobState, JobStore } from './jobs.js';
 import { localTime } from './local-time.js';
 import { collectMetrics, metricsLines } from './metrics.js';
-import { MAX_RUNNING, MIN_RUNNING, ON_LIMIT_RULES, QueueStore, type QueueView, RunQueue } from './queue.js';
+import { QueueStore, RunQueue } from './queue.js';
 import { followJobs, runJob } from './runner.js';
 import { jobNotification, notifyConfig, notifyTaskCheck, sendNotification, stateNotifier } from './notify.js';
-import { configDir, HANDOFF_MODES, ignoredWorkCheckouts, isHandoffMode, isWorkspaceColor, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_COLORS, workspaceColor, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN, type WorkspaceEntry } from './registry.js';
+import { configDir, HANDOFF_MODES, ignoredWorkCheckouts, isHandoffMode, isWorkspaceColor, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_COLORS, workspaceColor, type WorkspaceEntry } from './registry.js';
 import {
   ensureMcpToken, keepProfilePrivate, loadHandbook, mcpBaseUrl, mcpUrl, packageVersion, PortInUseError, probeMcp, profileHasUrl, readMcpToken, redactMcpToken, requireMcpToken,
   replaceMcpToken, rewriteProfileUrl, SERVER_NAME, startServer, TOKEN_LABEL,
@@ -65,6 +62,8 @@ import { watchEvents } from './watch.js';
 import { DEFAULT_BUDGET_USD, DEFAULT_TIMEOUT_MIN, positiveDecimal, runSmoke } from './live-smoke.js';
 import { INSTALLED_SF, serviceCommand, updateService } from './service.js';
 import { checkStateVersion } from './state-version.js';
+import { answerLines, checkArgs, checkJob, checkName, cliCommand, type Command, COMMANDS, socketName, UsageError, usageLines } from './commands.js';
+import { socketHandler } from './ipc-handlers.js';
 import {
   MARKER_POLL_MS, markerAtServeStart, markerLines, MarkerWatch, putMarkerBack, readSkippedChecks, recordSkippedCheck, refuseWhileUpdating, removeSkippedChecks, runCommand, runUpdate, updateMarked,
 } from './update.js';
@@ -84,36 +83,9 @@ const USAGE = `Usage:
   sf rules <workspace> [ticket]                         List the coding rules the agents would be given (AGENTS.md and the Markdown files it links to, the user's rules files): paths, sources, sizes and the files left out, without their text; a started job's stored list, else read at the Task file's base, else at the checkout's HEAD
   sf attach <workspace> <ticket> <file> [name]          Attach an image (PNG, JPEG, WebP or GIF by its bytes, at most 5 MB, 10 per ticket) to the ticket: .software-factory/<ticket>/<name> next to its Task file; name: default the next number (1.png, 2.png, ...); refused while a job of the ticket runs (paused aside); no sf serve needed
   sf attach <workspace> <ticket> --remove <name>        Remove an image of the ticket, under the same guard
-  sf start <workspace> <ticket>                         Start the job for .software-factory/<ticket>.md in a worktree of its own
-  sf queue list                                         The run queue: the limit of jobs at once, the running count, held or not (by hand, or by a job parked on a usage limit), the rule at a limit's reset, and the queued tickets in order with what each waits for, and the starts that failed
-  sf queue add <workspace> <ticket> [--at N]            Queue a planned ticket at position N (1-based; default: the end); sf serve starts it by itself when a slot is free, its lands_after tickets are merged and the Task check of its current Task file is ready
-  sf queue remove <workspace> <ticket>                  Take a ticket out of the queue
-  sf queue move <workspace> <ticket> <N>                Move a queued ticket to position N
-  sf queue limit <N>                                    Run up to N jobs at once (1-20, every workspace; default SF_MAX_JOBS); gates only the queue's own starts, a start by hand always goes
-  sf queue hold [reason...]                             Hold the queue: it starts nothing until sf queue release
-  sf queue release                                      Release a held queue (a job parked on a usage limit still holds it until it goes on)
-  sf queue on-limit resume-then-queue|resume-only|wait  What happens when a usage limit resets: resume the parked jobs, then start queued tickets again (default); resume them and hold the queue; or hold the queue and let you resume them
-  sf queue force <workspace> <ticket>                   Start anyway: the queued ticket starts whatever its Task check says, until it leaves the queue
-  sf say <workspace> <ticket> <message...>              Send a message into the job's Implementer session; on a handed-over job: Ask for changes (your checkout's edits go back into the job first)
-  sf review <workspace> <ticket>                        Retry a failed Claude review (needs_human with review_failed) of the last iteration
-  sf retry <workspace> <ticket>                         Retry a transient MR preparation failure (fetch_failed, mr_serve_restarted, mr_interrupted, mr_commit_failed, mr_rebase_failed, mr_failed) or a stop of the guard (guard_hit, guard_terms_invalid, guard_failed) or a test command that could not run (tests_unavailable) without a new review; on mr_push_failed: push again
-  sf accept <workspace> <ticket>                        Accept a clean Claude review over a stopped gate (needs_human with gate_rounds, gate_budget or gate_failed) or a ledger stop (review_churn, review_disputed) or the Fix round limit (iteration_limit) or the workspace's tests (tests_failed, tests_unavailable: without passing tests) and prepare the MR; on simplify_offered: skip the suggestions (listed in the MR text)
-  sf simplify <workspace> <ticket>                      Apply the simplification pass's suggestions (needs_human with simplify_offered): one Fix section "Simplify", reviewed as usual; sf accept skips them
-  sf settle <workspace> <ticket> <id> accept|fix [note...]  Settle an escalated or contested finding of the ledger (needs_human): accept the risk, or the Implementer must fix it; the job goes on once nothing is left to settle
+${usageLines().join('\n')}
   sf status [<workspace> <ticket>]                      Show one job or all jobs: state, iterations, estimated cost, elapsed time; both show the dashboard's full URL once sf serve made its token
   sf watch <workspace> <ticket> [--once]                Show the session live (Ctrl+C stops)
-  sf approve <workspace> <ticket> [--as-is]             Push the branch prepared at Clean; --as-is pushes it even if its tip was edited by hand
-  sf mr create <workspace> <ticket>                     Open the merge request of a pushed job on GitHub or GitLab (or reuse the open one); from ready_for_human_review: approve, then open it
-  sf mr merge <workspace> <ticket>                      Merge the job's open merge request through the host's API; refused with the host's reason when it cannot be merged
-  sf mr status <workspace> <ticket>                     The merge request's state on the host: open, merged or closed, mergeable or not, the checks
-  sf pause <workspace> <ticket>                         Pause a working job or one awaiting review: the turn, review or gate stops at once; worktree, branch, session and history stay
-  sf resume <workspace> <ticket> [message...]           Go on with a paused job, or one waiting for a usage limit (now, before the reset), where it stopped (the turn with the message, or "Continue where you stopped."; an interrupted review or gate runs again); a Task file changed meanwhile is handed on with its diff
-  sf restart <workspace> <ticket> [--keep-files]        Start the ticket again from its current Task file on a fresh worktree and branch (paused, waiting_limit, aborted, failed or needs_human); the old job is archived, its branch deleted only without commits and never pushed; --keep-files copies the old worktree's changed and new files in first
-  sf handover <workspace> <ticket>                      Hand over to my checkout: the job's branch in the workspace's checkout at its base, the job's changes as Local Changes, the commit message prefilled (ready_for_human_review; automatic with hand-over on: the workspace's handoff, else SF_HANDOFF=checkout)
-  sf takeback <workspace> <ticket>                      Take it back: the branch back from your checkout into the job (handed_over), only while your checkout is as the factory left it
-  sf handed-done <workspace> <ticket>                   I opened the MR myself: the job is pushed once origin has the branch with your changes (handed_over)
-  sf abort <workspace> <ticket> [--discard]             End the job; the worktree stays (its path is printed); --discard removes the worktree and the branch
-  sf reset <workspace> <ticket>                         End the session, remove the worktree and archive the job; the branch is untouched
   sf digest [--now]                                     The morning digest of the followed workspaces (sf serve makes one a day at digest.at in workspaces.json): without --now, the latest digest's period and counts; --now makes one at once and prints the path of its record and its cost
   sf explain <workspace> <ticket>                       The plain explanation of the job's current stop (sf serve writes one for each needs_human stop; explain in workspaces.json): the headline, the explanation, the choices and the recommendation; no sf serve needed, no model call
   sf notify-test                                        Send a test notification on every channel
@@ -135,12 +107,6 @@ Notes:
   dashboard --open: Linux with xdg-open; waits for the launcher at most 10 s; on a launcher failure exits 1 and leaves the printed URL to open by hand.
   check-task: exits 0 when the check ran (ready or not ready), 1 when it failed; SF_TASK_CHECK_MAX_TURNS (default 30) and SF_REVIEW_MODEL apply. It runs in its own process, outside SF_TASK_CHECK_PARALLEL.
 Exit codes: 0 ok, 1 error, 2 usage.`;
-
-class UsageError extends Error {}
-
-// The socket commands that still answer while the factory is being updated (SF-101): pause (the
-// update's own tool), mr-status (it starts nothing) and the reads.
-const OPEN_WHILE_UPDATING: ReadonlySet<string> = new Set(['ping', 'queue-list', 'serve-busy', 'digest-latest', 'mcp-port', 'pause', 'mr-status', 'check']);
 
 function parsePort(name: 'SF_PORT' | 'SF_DASHBOARD_PORT' | 'SF_DASHBOARD_REMOTE_PORT', fallback: number): number {
   const raw = process.env[name];
@@ -278,118 +244,10 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   // The port the MCP endpoint bound, once it listens (SF_PORT=0: any free port).
   let boundMcpPort: number | undefined;
   // The socket first: it refuses a second sf serve on the same state before recovery touches it.
-  const socket = await listenSocket(config.stateDir, async ({ command, args }) => {
-    // The updating marker's gate (SF-101): while sf update drains or builds, every command that
-    // changes something is refused before it does; pause, mr-status and the reads still answer.
-    if (!OPEN_WHILE_UPDATING.has(command)) {
-      refuseWhileUpdating(config.stateDir);
-    }
-    // sf info: whether sf serve answers; sf service install: which process does (SF-120).
-    if (command === 'ping') {
-      return { pid: process.pid };
-    }
-    // sf update's drain (SF-101): the Task checks and the hand-over operations running here now.
-    if (command === 'serve-busy' && args.length === 0) {
-      return { checks: checks.running(), handovers: execution.handoversRunning() };
-    }
-    // sf digest --now and sf digest (SF-103).
-    if (command === 'digest-run' && args.length === 0) {
-      const { id, path, cost_usd } = await digests.run('manual');
-      return { id, path, cost_usd };
-    }
-    if (command === 'digest-latest' && args.length === 0) {
-      const latest = await digests.latest();
-      return latest === undefined ? { digest: null } : { digest: latest.id, period: latest.period, counts: latest.counts, error: latest.error };
-    }
-    // sf mcp-url with SF_PORT=0 (SF-099): the port the MCP endpoint bound.
-    if (command === 'mcp-port') {
-      if (boundMcpPort === undefined) {
-        throw new FactoryError('serve_starting', 'sf serve has not opened its MCP endpoint yet.');
-      }
-      return { port: boundMcpPort };
-    }
-    if (command.startsWith('queue-')) {
-      const result = await queueCommand(runQueue, command.slice('queue-'.length), args);
-      if (command !== 'queue-list') {
-        dashboard?.refreshSetup();
-      }
-      return result;
-    }
-    const [workspace = '', ticket = '', ...words] = args;
-    if (command === 'start' && words.length === 0) {
-      return execution.start(workspace, ticket);
-    }
-    if (command === 'say') {
-      return execution.say(workspace, ticket, words.join(' '));
-    }
-    if (command === 'review' && words.length === 0) {
-      return execution.retryReview(workspace, ticket);
-    }
-    if (command === 'retry' && words.length === 0) {
-      return execution.retryMr(workspace, ticket);
-    }
-    if (command === 'accept' && words.length === 0) {
-      return execution.acceptGate(workspace, ticket);
-    }
-    if (command === 'simplify' && words.length === 0) {
-      return execution.simplify(workspace, ticket);
-    }
-    if (command === 'settle' && words.length >= 2 && (words[1] === 'accept' || words[1] === 'fix')) {
-      return execution.settle(workspace, ticket, words[0]!, words[1], words.slice(2).join(' '));
-    }
-    if (command === 'approve' && (words.length === 0 || (words.length === 1 && words[0] === '--as-is'))) {
-      return execution.approve(workspace, ticket, words.length === 1);
-    }
-    if (command === 'abort' && (words.length === 0 || (words.length === 1 && words[0] === '--discard'))) {
-      return execution.abort(workspace, ticket, words.length === 1);
-    }
-    if (command === 'reset' && words.length === 0) {
-      return execution.reset(workspace, ticket);
-    }
-    // sf pause, resume and restart (SF-067).
-    if (command === 'pause' && words.length === 0) {
-      return execution.pause(workspace, ticket);
-    }
-    if (command === 'resume') {
-      return execution.resumePaused(workspace, ticket, words.join(' '));
-    }
-    if (command === 'restart' && (words.length === 0 || (words.length === 1 && words[0] === '--keep-files'))) {
-      return execution.restart(workspace, ticket, words.length === 1);
-    }
-    // sf handover, takeback and handed-done (SF-073).
-    if (command === 'handover' && words.length === 0) {
-      return execution.handover(workspace, ticket);
-    }
-    if (command === 'takeback' && words.length === 0) {
-      return execution.takeback(workspace, ticket);
-    }
-    if (command === 'handed-done' && words.length === 0) {
-      return execution.handedDone(workspace, ticket);
-    }
-    // sf mr create|merge|status (SF-048).
-    if (command === 'mr-create' && words.length === 0) {
-      return execution.createMergeRequest(workspace, ticket);
-    }
-    if (command === 'mr-merge' && words.length === 0) {
-      return execution.mergeMergeRequest(workspace, ticket);
-    }
-    if (command === 'mr-status' && words.length === 0) {
-      return execution.mergeRequestStatus(workspace, ticket);
-    }
-    // Tests only (SF_TEST_HOOKS=on): check, and a reviewer's verdict without a review session,
-    // so the end-to-end tests drive the cycle step by step. No CLI command sends these.
-    if (testHooks && command === 'check' && words.length <= 2) {
-      const [offset, maxBytes] = words.map(Number);
-      return execution.check(workspace, ticket, offset, maxBytes);
-    }
-    if (testHooks && command === 'fix' && words.length === 1) {
-      return execution.requestFix(workspace, ticket, words[0]!);
-    }
-    if (testHooks && command === 'clean') {
-      return execution.markClean(workspace, ticket, words);
-    }
-    throw new FactoryError('bad_request', `Unknown command "${command}".`);
-  });
+  const socket = await listenSocket(config.stateDir, socketHandler({
+    execution, queue: runQueue, checks, digests, mcpPort: () => boundMcpPort,
+    stateDir: config.stateDir, testHooks, onQueueChange: () => dashboard?.refreshSetup(),
+  }));
   let server;
   // The updating marker at the start (SF-101): the jobs of a finished (restart_pending) or dead
   // (draining) update to resume, the marker removed already; or a marker that stays, under which
@@ -613,16 +471,6 @@ function colorLabel(name: string, entry: WorkspaceEntry): string {
   return entry.color !== undefined ? entry.color : `${workspaceColor(name)} (by its name)`;
 }
 
-function checkName(name: string | undefined): string {
-  if (name === undefined) {
-    throw new UsageError('a workspace name is required.');
-  }
-  if (!WORKSPACE_NAME_PATTERN.test(name)) {
-    throw new FactoryError('invalid_name', `workspace name must be ${WORKSPACE_NAME_DESCRIPTION}.`);
-  }
-  return name;
-}
-
 async function checkout(path: string, option: string): Promise<string> {
   try {
     return await verifyCheckout(resolve(path), `${option} ${path}`);
@@ -699,18 +547,6 @@ async function workspace(args: string[]): Promise<void> {
   throw new UsageError(command === undefined ? 'a workspace command is required.' : `unknown workspace command "${command}".`);
 }
 
-function checkJob(args: string[], command: string): [string, string] {
-  const [workspace, ticket] = args;
-  if (workspace === undefined || ticket === undefined) {
-    throw new UsageError(`${command} needs <workspace> <ticket>.`);
-  }
-  checkName(workspace);
-  if (!TICKET_PATTERN.test(ticket)) {
-    throw new FactoryError('invalid_ticket', `ticket must be ${TICKET_DESCRIPTION}.`);
-  }
-  return [workspace, ticket];
-}
-
 // The result of a socket command of sf serve; a refusal throws its code and message.
 async function request(command: string, args: string[]): Promise<Record<string, unknown>> {
   const response = await callSocket(stateDir(), { command, args });
@@ -720,259 +556,15 @@ async function request(command: string, args: string[]): Promise<Record<string, 
   return response.result as Record<string, unknown>;
 }
 
-async function viaServer(command: string, args: string[]): Promise<Record<string, unknown>> {
-  const result = await request(command, args);
-  const show = (value: unknown): string => (typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value));
-  console.log(Object.entries(result).map(([key, value]) => `${key}: ${show(value)}`).join('\n'));
-  return result;
-}
-
-// sf queue's socket commands (SF-071), run by sf serve's run queue.
-function queueCommand(queue: RunQueue, command: string, args: string[]): Promise<unknown> {
-  const [workspace = '', ticket = ''] = args;
-  if (command === 'list' && args.length === 0) {
-    return queue.view();
-  }
-  if (command === 'add' && (args.length === 2 || args.length === 3)) {
-    return queue.add(workspace, ticket, args[2] === undefined ? undefined : Number(args[2]));
-  }
-  if (command === 'remove' && args.length === 2) {
-    return queue.remove(workspace, ticket);
-  }
-  if (command === 'move' && args.length === 3) {
-    return queue.move(workspace, ticket, Number(args[2]));
-  }
-  if (command === 'limit' && args.length === 1) {
-    return queue.limit(Number(args[0]));
-  }
-  if (command === 'hold') {
-    return queue.hold(args.join(' '));
-  }
-  if (command === 'release' && args.length === 0) {
-    return queue.release();
-  }
-  if (command === 'on-limit' && args.length === 1) {
-    return queue.rule(args[0]!);
-  }
-  if (command === 'force' && args.length === 2) {
-    return queue.force(workspace, ticket);
-  }
-  return Promise.reject(new FactoryError('bad_request', `Unknown command "queue-${command}".`));
-}
-
-// sf queue list: the limit, the running count, held or not, the entries in order with what each
-// waits for, the next one to start and the starts that failed.
-function queueLines(view: QueueView): string[] {
-  const ref = (row: { workspace: string; ticket: string }): string => `${row.workspace}/${row.ticket}`;
-  const lines = [
-    `limit: ${view.max_running} job${view.max_running === 1 ? '' : 's'} at once`,
-    `running: ${view.running}`,
-    `held: ${view.held ? `yes${view.hold_reason !== null ? ` (${view.hold_reason})` : ''}` : 'no'}`,
-    // The limit hold (SF-072): parked jobs hold the queue, whatever the hold by hand.
-    ...(view.limit_hold !== null ? [`usage limit: ${view.limit_hold.parked} parked job${view.limit_hold.parked === 1 ? ' holds' : 's hold'} the queue${view.limit_hold.resets_at !== null ? `, resets at ${localTime(view.limit_hold.resets_at)}` : ''}`] : []),
-    `on limit reset: ${view.on_limit}`,
-    `next: ${view.next !== null ? ref(view.next) : 'nothing ready'}`,
-  ];
-  lines.push(view.entries.length === 0 ? 'queue: empty' : 'queue:');
-  for (const entry of view.entries) {
-    const waits = entry.waits_for.map((dep) => `${ref(dep)} (${dep.state})`).join(', ');
-    const plan = entry.force ? '  forced (Start anyway)' : entry.plan_reason !== null ? `  ${entry.plan_reason}` : '';
-    lines.push(`  ${entry.position}. ${ref(entry)}${waits !== '' ? `  waits for ${waits}` : ''}${plan}`);
-  }
-  if (view.errors.length > 0) {
-    lines.push('start failed:');
-    for (const error of view.errors) {
-      lines.push(`  ${ref(error)}  ${error.code}: ${error.message}`);
-    }
-  }
-  return lines;
-}
-
-// A 1-based position or a limit as typed: digits only.
-function wholeNumber(value: string | undefined, what: string): string {
-  if (value === undefined || !/^\d+$/.test(value)) {
-    throw new UsageError(`${what} must be a whole number.`);
-  }
-  return value;
-}
-
-// sf queue list|add|remove|move|limit|hold|release|on-limit|force: the arguments checked here, the change in sf serve.
-async function queue(args: string[]): Promise<void> {
-  const [command, ...rest] = args;
-  if (command === 'list') {
-    if (rest.length !== 0) {
-      throw new UsageError('queue list takes no arguments.');
-    }
-    console.log(queueLines((await request('queue-list', [])) as unknown as QueueView).join('\n'));
-    return;
-  }
-  if (command === 'add') {
-    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, strict: true, options: { at: { type: 'string' } } });
-    if (positionals.length !== 2) {
-      throw new UsageError('queue add needs <workspace> <ticket> [--at N].');
-    }
-    const at = values.at === undefined ? [] : [wholeNumber(values.at, '--at')];
-    await viaServer('queue-add', [...checkJob(positionals, 'queue add'), ...at]);
-    return;
-  }
-  if (command === 'remove') {
-    if (rest.length !== 2) {
-      throw new UsageError('queue remove needs <workspace> <ticket>.');
-    }
-    await viaServer('queue-remove', checkJob(rest, 'queue remove'));
-    return;
-  }
-  if (command === 'move') {
-    if (rest.length !== 3) {
-      throw new UsageError('queue move needs <workspace> <ticket> <N>.');
-    }
-    await viaServer('queue-move', [...checkJob(rest, 'queue move'), wholeNumber(rest[2], 'N')]);
-    return;
-  }
-  if (command === 'limit') {
-    if (rest.length !== 1) {
-      throw new UsageError(`queue limit needs <N>, ${MIN_RUNNING} to ${MAX_RUNNING}.`);
-    }
-    await viaServer('queue-limit', [wholeNumber(rest[0], 'N')]);
-    return;
-  }
-  if (command === 'hold') {
-    await viaServer('queue-hold', rest);
-    return;
-  }
-  if (command === 'release') {
-    if (rest.length !== 0) {
-      throw new UsageError('queue release takes no arguments.');
-    }
-    await viaServer('queue-release', []);
-    return;
-  }
-  if (command === 'on-limit') {
-    if (rest.length !== 1 || !(ON_LIMIT_RULES as readonly string[]).includes(rest[0]!)) {
-      throw new UsageError(`queue on-limit needs one of ${ON_LIMIT_RULES.join(', ')}.`);
-    }
-    await viaServer('queue-on-limit', rest);
-    return;
-  }
-  if (command === 'force') {
-    if (rest.length !== 2) {
-      throw new UsageError('queue force needs <workspace> <ticket>.');
-    }
-    await viaServer('queue-force', checkJob(rest, 'queue force'));
-    return;
-  }
-  throw new UsageError(command === undefined ? 'a queue command is required.' : `unknown queue command "${command}".`);
-}
-
-async function approve(args: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { 'as-is': { type: 'boolean' } } });
-  if (positionals.length !== 2) {
-    throw new UsageError('approve needs <workspace> <ticket> [--as-is].');
-  }
-  const result = await viaServer('approve', [...checkJob(positionals, 'approve'), ...(values['as-is'] === true ? ['--as-is'] : [])]);
-  if (result.state === 'needs_human' || (result.state === 'handed_over' && result.error !== undefined)) {
-    console.log('The push failed; fix it and run sf approve again.');
-  } else if (result.state === 'pushed' && result.link === undefined) {
-    console.log('No merge request link: the origin URL could not be parsed. Open the merge request for the branch above.');
-  }
-  if (result.state !== 'pushed') {
-    process.exitCode = 1;
-  }
-}
-
-// sf retry (SF-087): MR preparation again, shown as sf review shows its outcome; on mr_push_failed
-// the push again, shown and ended as sf approve (exit 1 unless pushed).
-async function retry(args: string[]): Promise<void> {
-  if (args.length !== 2) {
-    throw new UsageError('retry needs <workspace> <ticket>.');
-  }
-  const result = await viaServer('retry', checkJob(args, 'retry'));
-  if ('iteration' in result) {
-    return;
-  }
-  if (result.state !== 'pushed') {
-    console.log('The push failed; fix it and run sf retry again.');
-    process.exitCode = 1;
-  } else if (result.link === undefined) {
-    console.log('No merge request link: the origin URL could not be parsed. Open the merge request for the branch above.');
-  }
-}
-
-// sf mr create|merge|status <workspace> <ticket> (SF-048), through the socket of sf serve.
-async function mergeRequest(args: string[]): Promise<void> {
-  const [sub, ...rest] = args;
-  if (sub !== 'create' && sub !== 'merge' && sub !== 'status') {
-    throw new UsageError(sub === undefined ? 'mr needs create, merge or status.' : `unknown mr command "${sub}".`);
-  }
-  if (rest.length !== 2) {
-    throw new UsageError(`mr ${sub} needs <workspace> <ticket>.`);
-  }
-  const result = await request(`mr-${sub}`, checkJob(rest, `mr ${sub}`));
-  const mr = result.mr as { number: number; url: string; state: string; reused?: boolean; merge_commit?: string | null } | undefined;
-  const error = result.error as { code: string; message: string } | undefined;
-  const lines: string[] = [`state: ${String(result.state)}`, `branch: ${String(result.branch)}`];
-  if (sub === 'create') {
-    if (typeof result.title === 'string') {
-      lines.push(`title: ${result.title}`);
-    }
-    if (mr !== undefined) {
-      lines.push(`merge request: #${mr.number} ${mr.reused === true ? 'already open, reused' : 'opened'}`, `url: ${mr.url}`);
-    }
-    if (error !== undefined) {
-      lines.push(result.state === 'pushed'
-        ? `The branch is pushed, but the merge request was not opened: ${error.code}: ${error.message}`
-        : `The push failed: ${error.code}: ${error.message}`);
-    }
-  } else if (sub === 'merge' && mr !== undefined) {
-    lines.push(`merge request: #${mr.number} merged`, ...(typeof mr.merge_commit === 'string' ? [`merge commit: ${mr.merge_commit}`] : []), `url: ${mr.url}`);
-  } else if (sub === 'status') {
-    const status = result.status as { number: number; url: string; state: string; draft: boolean; mergeable: boolean | null; reason?: string; checks?: string; merge_commit?: string };
-    lines.push(
-      `merge request: #${status.number} ${status.state}${status.draft ? ' (draft)' : ''}`,
-      `url: ${status.url}`,
-      ...(status.state === 'open' ? [`mergeable: ${status.mergeable === null ? 'not known yet' : status.mergeable ? 'yes' : 'no'}`] : []),
-      ...(status.reason !== undefined && status.state === 'open' ? [`reason: ${status.reason}`] : []),
-      ...(status.checks !== undefined ? [`checks: ${status.checks}`] : []),
-      ...(status.merge_commit !== undefined ? [`merge commit: ${status.merge_commit}`] : []),
-    );
-  }
+// A command of the table (src/commands.ts): its arguments checked here, then sent as typed to sf
+// serve, which checks them again with the same checkArgs; the answer printed.
+async function viaServer(command: Command, args: string[]): Promise<void> {
+  const { flags } = checkArgs(command, args);
+  const { lines, failed } = answerLines(command, await request(socketName(command), args), flags);
   console.log(lines.join('\n'));
-  if (error !== undefined) {
+  if (failed) {
     process.exitCode = 1;
   }
-}
-
-async function abort(args: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { discard: { type: 'boolean' } } });
-  if (positionals.length !== 2) {
-    throw new UsageError('abort needs <workspace> <ticket> [--discard].');
-  }
-  const result = await viaServer('abort', [...checkJob(positionals, 'abort'), ...(values.discard === true ? ['--discard'] : [])]);
-  if (result.error !== undefined) {
-    process.exitCode = 1;
-  } else if (values.discard !== true) {
-    console.log(result.worktree === null ? 'The branch is left as it is.' : `The branch and its worktree are left as they are: ${String(result.worktree)}`);
-  }
-}
-
-// sf restart <workspace> <ticket> [--keep-files] (SF-067), through the socket of sf serve.
-async function restart(args: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { 'keep-files': { type: 'boolean' } } });
-  if (positionals.length !== 2) {
-    throw new UsageError('restart needs <workspace> <ticket> [--keep-files].');
-  }
-  const result = await viaServer('restart', [...checkJob(positionals, 'restart'), ...(values['keep-files'] === true ? ['--keep-files'] : [])]);
-  console.log(result.branch_deleted === null ? 'The old job is archived; it had no branch to delete.' : 'The old job is archived and its branch deleted (no commits, never pushed).');
-}
-
-async function reset(args: string[]): Promise<void> {
-  if (args.length !== 2) {
-    throw new UsageError('reset needs <workspace> <ticket>.');
-  }
-  const result = await viaServer('reset', checkJob(args, 'reset'));
-  console.log(result.checkout === 'unavailable'
-    ? 'The workspace is not registered (or its checkout is gone): only the job record was archived; nothing in Git was touched.'
-    : 'The worktree is removed; the branch is untouched.');
 }
 
 // Tests only (SF_TEST_HOOKS=on, SF-105): SF_TEST_PROC_DIR, a /proc of the test's own that the
@@ -1117,11 +709,11 @@ async function digest(args: string[]): Promise<void> {
     throw new UsageError('digest takes no arguments but --now.');
   }
   if (values.now === true) {
-    const result = await request('digest-run', []);
+    const result = await request(socketName(COMMANDS.digestRun), []);
     console.log(`digest: ${String(result.path)}\ncost: ${typeof result.cost_usd === 'number' ? `$${result.cost_usd.toFixed(4)}` : 'unknown'}`);
     return;
   }
-  const result = await request('digest-latest', []);
+  const result = await request(socketName(COMMANDS.digestLatest), []);
   if (result.digest === null) {
     console.log('No digest yet: sf digest --now makes one.');
     return;
@@ -1226,7 +818,7 @@ async function info(args: string[]): Promise<void> {
 
   // sf serve answers on its socket; the tunnel on its health port.
   try {
-    await callSocket(state, { command: 'ping', args: [] });
+    await callSocket(state, { command: socketName(COMMANDS.ping), args: [] });
     row('serve', `running (${socketPath(state)})`);
   } catch {
     row('serve', 'not running (npm run serve)');
@@ -1514,7 +1106,7 @@ async function mcpPort(): Promise<number> {
   if (configured !== 0) {
     return configured;
   }
-  const response = await callSocket(stateDir(), { command: 'mcp-port', args: [] }).catch(() => undefined);
+  const response = await callSocket(stateDir(), { command: socketName(COMMANDS.mcpPort), args: [] }).catch(() => undefined);
   const bound = response?.ok === true ? (response.result as { port?: unknown }).port : undefined;
   if (typeof bound !== 'number' || !Number.isInteger(bound) || bound < 1 || bound > 65535) {
     throw new FactoryError(
@@ -1690,7 +1282,7 @@ async function metrics(args: string[]): Promise<void> {
 // Whether an sf serve answers on the state directory's socket.
 async function serveAnswers(): Promise<boolean> {
   try {
-    return (await callSocket(stateDir(), { command: 'ping', args: [] })).ok;
+    return (await callSocket(stateDir(), { command: socketName(COMMANDS.ping), args: [] })).ok;
   } catch {
     return false;
   }
@@ -1700,7 +1292,7 @@ async function serveAnswers(): Promise<boolean> {
 // refuses, or it names no pid (an sf serve of a version before SF-120).
 async function servePid(): Promise<number | undefined> {
   try {
-    const response = await callSocket(stateDir(), { command: 'ping', args: [] });
+    const response = await callSocket(stateDir(), { command: socketName(COMMANDS.ping), args: [] });
     const pid = response.ok ? (response.result as { pid?: unknown } | null)?.pid : undefined;
     return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : undefined;
   } catch {
@@ -1797,93 +1389,14 @@ async function main(argv: string[]): Promise<void> {
     await update(rest, fromEnvFile);
     return;
   }
-  if (command === 'start') {
-    if (rest.length !== 2) {
-      throw new UsageError('start needs <workspace> <ticket>.');
-    }
-    await viaServer('start', checkJob(rest, 'start'));
-    return;
-  }
-  if (command === 'queue') {
-    await queue(rest);
+  // The commands of the table (src/commands.ts), sent to sf serve.
+  const job = cliCommand(argv);
+  if (job !== undefined) {
+    await viaServer(job.command, job.args);
     return;
   }
   if (command === 'attach') {
     await attach(rest);
-    return;
-  }
-  if (command === 'review') {
-    if (rest.length !== 2) {
-      throw new UsageError('review needs <workspace> <ticket>.');
-    }
-    await viaServer('review', checkJob(rest, 'review'));
-    return;
-  }
-  if (command === 'retry') {
-    await retry(rest);
-    return;
-  }
-  if (command === 'accept') {
-    if (rest.length !== 2) {
-      throw new UsageError('accept needs <workspace> <ticket>.');
-    }
-    await viaServer('accept', checkJob(rest, 'accept'));
-    return;
-  }
-  if (command === 'simplify') {
-    if (rest.length !== 2) {
-      throw new UsageError('simplify needs <workspace> <ticket>.');
-    }
-    await viaServer('simplify', checkJob(rest, 'simplify'));
-    return;
-  }
-  if (command === 'settle') {
-    checkJob(rest, 'settle');
-    if (rest.length < 4 || (rest[3] !== 'accept' && rest[3] !== 'fix')) {
-      throw new UsageError('settle needs <workspace> <ticket> <id> accept|fix [note...].');
-    }
-    await viaServer('settle', rest);
-    return;
-  }
-  if (command === 'approve') {
-    await approve(rest);
-    return;
-  }
-  if (command === 'abort') {
-    await abort(rest);
-    return;
-  }
-  if (command === 'mr') {
-    await mergeRequest(rest);
-    return;
-  }
-  if (command === 'reset') {
-    await reset(rest);
-    return;
-  }
-  if (command === 'pause') {
-    if (rest.length !== 2) {
-      throw new UsageError('pause needs <workspace> <ticket>.');
-    }
-    await viaServer('pause', checkJob(rest, 'pause'));
-    return;
-  }
-  if (command === 'resume') {
-    if (rest.length < 2) {
-      throw new UsageError('resume needs <workspace> <ticket> [message...].');
-    }
-    await viaServer('resume', [...checkJob(rest.slice(0, 2), 'resume'), ...rest.slice(2)]);
-    return;
-  }
-  if (command === 'restart') {
-    await restart(rest);
-    return;
-  }
-  if (command === 'handover' || command === 'takeback' || command === 'handed-done') {
-    if (rest.length !== 2) {
-      throw new UsageError(`${command} needs <workspace> <ticket>.`);
-    }
-    await viaServer(command, checkJob(rest, command));
     return;
   }
   if (command === 'check-task') {
@@ -1921,14 +1434,6 @@ async function main(argv: string[]): Promise<void> {
   if (command === 'smoke') {
     // Its children are stopped and its directory gone; nothing is left to wait for.
     process.exit(await smoke(rest));
-  }
-  if (command === 'say') {
-    checkJob(rest, 'say');
-    if (rest.length < 3) {
-      throw new UsageError('say needs <workspace> <ticket> <message...>.');
-    }
-    await viaServer('say', rest);
-    return;
   }
   if (command === 'status') {
     await status(rest);

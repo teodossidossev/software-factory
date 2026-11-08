@@ -804,7 +804,7 @@ test('sf queue on-limit (SF-072): the rule is checked by the CLI, stored by sf s
     assert.match((await runCli(env, ['queue', 'list'])).stdout, /^held: no\non limit reset: wait$/m);
     assert.equal(JSON.parse(await readFile(join(env.state, 'queue.json'), 'utf8')).on_limit, 'wait');
     const bad = await runCli(env, ['queue', 'on-limit', 'later']);
-    assert.deepEqual([bad.code, /queue on-limit needs one of resume-then-queue, resume-only, wait\./.test(bad.stderr)], [2, true]);
+    assert.deepEqual([bad.code, /queue on-limit needs resume-then-queue\|resume-only\|wait\./.test(bad.stderr)], [2, true]);
     assert.equal(JSON.parse(await readFile(join(env.state, 'queue.json'), 'utf8')).on_limit, 'wait');
   } finally {
     await stop(served);

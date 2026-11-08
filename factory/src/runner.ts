@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { writeFileAtomic } from './atomic.js';
 import type { ImageRef } from './attachments.js';
 import { FactoryError } from './errors.js';
+import { internalError } from './http.js';
 import type { Job, JobState, JobStore } from './jobs.js';
 import type { Decision } from './ledger.js';
 import { isAlive, liveOwner, staleOwner, tryLock } from './pid-lock.js';
@@ -406,7 +407,7 @@ export async function runJob(jobDir: string, work: RunnerWork, options: RunOptio
             if (!(error instanceof FactoryError)) {
               console.error(error);
             }
-            reply = { ok: false, error: error instanceof FactoryError ? { code: error.code, message: error.message } : { code: 'internal_error', message: 'The request failed inside the runner.' } };
+            reply = { ok: false, error: error instanceof FactoryError ? { code: error.code, message: error.message } : internalError('The request failed inside the runner.') };
           }
           await writeReply(jobDir, next.id, reply);
           continue;

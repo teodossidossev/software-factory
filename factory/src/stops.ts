@@ -6,7 +6,7 @@
 // settles ledger entries there, and its actions in order, each shown only while its precondition
 // holds. job.error.code stays a string on disk: canonicalStop resolves it, and an unknown code is
 // `other`. Pure: the caller reads the facts (the ledger, the last review and gate, the Git host).
-import type { DashboardAction } from './dashboard.js';
+import type { DashboardAction } from './dashboard-routes.js';
 import { claudeReviews, type GateRecord, type Job, PAUSABLE_STATES, RESTARTABLE_STATES, type ReviewRecord, TERMINAL_STATES } from './jobs.js';
 import type { LedgerEntry } from './ledger.js';
 import { actedVerdict, type ReviewItem } from './review.js';

@@ -16,7 +16,7 @@
 // reads a ticket's Task file, its plan in plain words, its check and its history in one payload,
 // and saves the Task file (only over the version it read). A ticket's images (SF-064) are uploaded
 // as raw bytes, served and removed through the attachments module's rules (src/attachments.ts).
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import { open, readFile, rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -27,15 +27,15 @@ import { MAX_ATTACHMENT_BYTES } from './attachments.js';
 import { writeFileAtomic } from './atomic.js';
 import { Changes } from './changes.js';
 import { conversationUrl, MAX_CONVERSATION_URL, ticketConversation } from './conversation.js';
+import { CONFIRM_ACTIONS, type JobKey, type JobRoute, openWhileUpdating, postRoute, type PostRoute, type QueueRoute } from './dashboard-routes.js';
 import { FactoryError } from './errors.js';
 import type { Digests } from './digest-run.js';
 import type { Execution } from './execution.js';
 import type { RunQueue } from './queue.js';
 import { currentExplanation, ledgerStopEntries } from './explain.js';
+import { internalError, listen, LOOPBACK_HOST, sameSecret, sendJson, statusOf } from './http.js';
 import { lineEntries, type StreamEntry, streamContext } from './job-stream.js';
-import { MAX_MR_TEXT_BYTES } from './mr.js';
 import { claudeReviews, type Job, type JobState, type JobStore } from './jobs.js';
-import { DECISIONS } from './ledger.js';
 import { DIGEST_DEFAULTS, HANDOFF_MODES, WORKSPACE_COLORS, WORKSPACE_NAME_PATTERN } from './registry.js';
 import type { Setup, TicketRow } from './setup.js';
 import type { CheckRecord, CheckSummary, TaskChecks } from './task-check.js';
@@ -44,7 +44,7 @@ import { MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskScope, taskSha256, TICK
 import { TicketHistory } from './ticket-history.js';
 import { Stats, STATS_DAYS, type StatsDays } from './stats.js';
 import { type JobFacts, jobActions, NO_FACTS, settleEntries, stopFields } from './stops.js';
-import { refuseWhileUpdating, UPDATE_IN_PROGRESS } from './update.js';
+import { refuseWhileUpdating } from './update.js';
 import { describeEvent, followLines, shortInput } from './watch.js';
 
 export const DEFAULT_DASHBOARD_PORT = 8788;
@@ -56,13 +56,10 @@ export const MAX_STREAMS = 8;
 export const STREAM_PAGE_LINES = 2000;
 // The raw body of an action request, in bytes: a transport bound, not a lifecycle rule.
 export const MAX_ACTION_BODY_BYTES = 128 * 1024;
-// mr-save (SF-080): an MR text of MAX_MR_TEXT_BYTES, every character JSON-escaped at worst.
-const MAX_MR_BODY_BYTES = 6 * MAX_MR_TEXT_BYTES + 1024;
 // The raw body of the planned ticket page's Save (SF-081): a whole Task file as a JSON string, whose
 // escapes can take up to twice its bytes; the content's own size is checked by the Task file writer.
 // A file of mostly non-ASCII or control characters can need more and is written with write_task.
 export const MAX_TASK_BODY_BYTES = 2 * MAX_TASK_BYTES + 1024;
-const LOOPBACK_HOST = '127.0.0.1';
 // The Host names of the local listener, and the loopback Hosts the remote one takes with a listed Origin.
 const LOOPBACK_NAMES: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '[::1]']);
 const KEEP_ALIVE_MS = 15_000;
@@ -101,12 +98,6 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | 'say' | 'retryReview' | 'retryMr' | 'acceptGate' | 'settle' | 'simplify' | 'archiveFinished'
   | 'createMergeRequest' | 'mergeMergeRequest' | 'mergeRequestStatus' | 'mergeRequestHost' | 'pause' | 'resumePaused' | 'restart'
   | 'handover' | 'takeback' | 'handedDone' | 'checkHandedOver' | 'mergeRequestView' | 'saveMr' | 'resetMr'>;
-export type DashboardAction = 'approve' | 'abort' | 'say' | 'review' | 'retry' | 'accept' | 'settle' | 'simplify' | 'archive' | 'mr-create' | 'mr-merge' | 'mr-status' | 'pause' | 'resume' | 'restart'
-  | 'handover' | 'takeback' | 'handed-done' | 'mr-save' | 'mr-reset';
-export const ACTIONS: DashboardAction[] = [
-  'approve', 'abort', 'say', 'review', 'retry', 'accept', 'settle', 'simplify', 'archive', 'mr-create', 'mr-merge', 'mr-status', 'pause', 'resume', 'restart', 'handover', 'takeback', 'handed-done',
-  'mr-save', 'mr-reset',
-];
 // How often the job's detail asks origin for the user's push of a handed-over branch (SF-073).
 const PUSH_CHECK_INTERVAL_MS = 60_000;
 
@@ -130,8 +121,6 @@ export type DashboardChecks = Pick<TaskChecks, 'start' | 'view' | 'summary' | 's
 // rule: the rule at a usage limit's reset (SF-072). force: the card's Start anyway (SF-086);
 // withTicket: Save writes under the queue's lock of the ticket (SF-086).
 export type DashboardQueue = Pick<RunQueue, 'view' | 'add' | 'remove' | 'move' | 'limit' | 'hold' | 'release' | 'rule' | 'force' | 'withTicket'>;
-export const QUEUE_ACTIONS = ['add', 'remove', 'move', 'limit', 'hold', 'release', 'rule', 'force'] as const;
-type QueueAction = (typeof QUEUE_ACTIONS)[number];
 
 // A dashboard without a start screen (in-process tests of the older endpoints).
 const NO_SETUP: DashboardSetup = {
@@ -185,35 +174,10 @@ const NO_SETUP: DashboardSetup = {
   },
 };
 
-// The request body of each POST route, strict: unknown keys, null, arrays and wrong types are
-// refused; shape is what the refusal names.
+// The request body of each setup, Task check, task and attachment POST, strict: unknown keys, null,
+// arrays and wrong types are refused; shape is what the refusal names. The job and queue actions
+// have theirs in POST_ROUTES (src/dashboard-routes.ts).
 const BODIES = {
-  // confirm (SF-126): the job's ticket, which the remote port needs on the four routes that can
-  // push or merge (CONFIRM_ROUTES); the local port ignores it.
-  approve: { shape: '{"as_is"?: boolean, "confirm"?: string}', schema: z.strictObject({ as_is: z.boolean().optional(), confirm: z.string().optional() }) },
-  abort: { shape: '{"discard"?: boolean}', schema: z.strictObject({ discard: z.boolean().optional() }) },
-  say: { shape: '{"message": string}', schema: z.strictObject({ message: z.string() }) },
-  review: { shape: '{}', schema: z.strictObject({}) },
-  retry: { shape: '{"confirm"?: string}', schema: z.strictObject({ confirm: z.string().optional() }) },
-  accept: { shape: '{}', schema: z.strictObject({}) },
-  settle: { shape: '{"id": string, "decision": "accept" | "fix", "note"?: string}', schema: z.strictObject({ id: z.string(), decision: z.enum(DECISIONS), note: z.string().optional() }) },
-  simplify: { shape: '{}', schema: z.strictObject({}) },
-  archive: { shape: '{}', schema: z.strictObject({}) },
-  'mr-create': { shape: '{"confirm"?: string}', schema: z.strictObject({ confirm: z.string().optional() }) },
-  'mr-merge': { shape: '{"confirm"?: string}', schema: z.strictObject({ confirm: z.string().optional() }) },
-  'mr-status': { shape: '{}', schema: z.strictObject({}) },
-  pause: { shape: '{}', schema: z.strictObject({}) },
-  resume: { shape: '{"message"?: string}', schema: z.strictObject({ message: z.string().optional() }) },
-  restart: { shape: '{"keep_files"?: boolean}', schema: z.strictObject({ keep_files: z.boolean().optional() }) },
-  handover: { shape: '{}', schema: z.strictObject({}) },
-  takeback: { shape: '{}', schema: z.strictObject({}) },
-  'handed-done': { shape: '{}', schema: z.strictObject({}) },
-  // The Merge request screen (SF-080): the MR title and text, and the branch and the base when they change.
-  'mr-save': {
-    shape: '{"title": string, "body": string, "branch"?: string, "base"?: string}',
-    schema: z.strictObject({ title: z.string(), body: z.string(), branch: z.string().optional(), base: z.string().optional() }),
-  },
-  'mr-reset': { shape: '{}', schema: z.strictObject({}) },
   'workspace-add': {
     shape: `{"name": string, "path": string, "handoff"?: "checkout" | "off", "color"?: ${WORKSPACE_COLORS.map((color) => `"${color}"`).join(' | ')}, "description"?: string, "app"?: string, "digest"?: {"track": boolean, "my_work": boolean}}`,
     schema: z.strictObject({
@@ -250,67 +214,10 @@ const BODIES = {
   'ticket-attachment-add': { shape: 'the image\'s bytes', schema: z.instanceof(Buffer) },
   'ticket-attachment-remove': { shape: '{}', schema: z.strictObject({}) },
   'ticket-new': { shape: '{"workspace": string, "ticket": string, "title": string, "request": string}', schema: z.strictObject({ workspace: z.string(), ticket: z.string(), title: z.string(), request: z.string() }) },
-  // The run queue (SF-071): positions are 1-based; the limit's range is the queue's own check
-  // (invalid_limit).
-  'queue-add': { shape: '{"workspace": string, "ticket": string, "at"?: integer >= 1}', schema: z.strictObject({ workspace: z.string(), ticket: z.string(), at: z.number().int().min(1).optional() }) },
-  'queue-remove': { shape: '{"workspace": string, "ticket": string}', schema: z.strictObject({ workspace: z.string(), ticket: z.string() }) },
-  'queue-move': { shape: '{"workspace": string, "ticket": string, "to": integer >= 1}', schema: z.strictObject({ workspace: z.string(), ticket: z.string(), to: z.number().int().min(1) }) },
-  'queue-limit': { shape: '{"max_running": number}', schema: z.strictObject({ max_running: z.number() }) },
-  'queue-hold': { shape: '{"reason"?: string}', schema: z.strictObject({ reason: z.string().optional() }) },
-  'queue-release': { shape: '{}', schema: z.strictObject({}) },
-  // The Rules menu (SF-072): the rule at a usage limit's reset; its values are the queue's own check
-  // (invalid_rule).
-  'queue-rule': { shape: '{"rule": string}', schema: z.strictObject({ rule: z.string() }) },
-  // Start anyway (SF-086): the queued ticket starts whatever its plan check says.
-  'queue-force': { shape: '{"workspace": string, "ticket": string}', schema: z.strictObject({ workspace: z.string(), ticket: z.string() }) },
 };
-type PostRoute = keyof typeof BODIES;
-// The routes that can push or merge (SF-126): approve, retry (which pushes again after
-// mr_push_failed), mr-create and mr-merge. On the remote port each needs "confirm": the ticket.
-export const CONFIRM_ROUTES: readonly PostRoute[] = ['approve', 'retry', 'mr-create', 'mr-merge'];
-
-// The POSTs that still answer while the factory is being updated (SF-101): Pause, the update's own
-// tool, and the merge request's status, which starts nothing.
-const OPEN_WHILE_UPDATING: ReadonlySet<PostRoute> = new Set<PostRoute>(['pause', 'mr-status']);
-
-// The HTTP status of a FactoryError the methods can throw; any other code answers 500 and keeps
-// its code and message.
-const ERROR_STATUS: Record<string, number> = {
-  // sf update is draining or building (SF-101).
-  [UPDATE_IN_PROGRESS]: 409,
-  invalid_state: 409, turn_running: 409, rebase_in_progress: 409, review_off: 409, runner_active: 409,
-  job_exists: 409, job_active: 409, job_limit: 409, task_draft: 409, checkout_dirty: 409, branch_exists: 409, branch_changed: 409, branch_missing: 409, worktree_exists: 409,
-  worktree_missing: 409, sensitive_unacknowledged: 409, ticket_exists: 409, workspace_exists: 409, workspace_busy: 409,
-  job_not_found: 404, workspace_not_found: 404, task_not_found: 404,
-  // Save of the planned ticket page (SF-081): the Task file is another version than the one read.
-  // Not the job view's task_changed field (SF-067).
-  task_changed: 409,
-  // The Task check (SF-054): one at a time per ticket.
-  check_running: 409,
-  // A Restart that would delete a branch with commits or a pushed one (SF-067).
-  restart_refused: 409,
-  // The hand-over to the user's checkout (SF-073) and its way back.
-  checkout_busy: 409, handover_refused: 409, handover_mismatch: 409, checkout_changing: 409, checkout_moved: 409,
-  takeback_changed: 409, takeback_switch_failed: 409, branch_in_checkout: 409, not_pushed: 409, handed_over: 409, handover_interrupted: 409, ask_interrupted: 409,
-  invalid_content: 400, invalid_ticket: 400, invalid_name: 400, workspace_invalid: 400,
-  // The merge request (SF-048): the host's refusals and the actions being off are conflicts; a host
-  // that failed or refused the token is a bad gateway.
-  mr_not_mergeable: 409, mr_not_open: 409, mr_token_missing: 409, mr_host_unsupported: 409, mr_host_changed: 409, mr_text_missing: 409,
-  mr_auth_failed: 502, mr_host_error: 502, mr_host_unreachable: 502,
-  // The Merge request screen (SF-080): a text that breaks the rules (also approve's, while the MR
-  // text is invalid or not the prepared commit's message), a rename or a base change refused.
-  mr_text_invalid: 400, branch_locked: 409, base_unrelated: 409,
-  // origin did not say where a handed-over branch is (SF-073).
-  push_check_failed: 502,
-  // The morning digest (SF-103): one run at a time; its settings.
-  digest_running: 409, invalid_digest_settings: 400,
-  // The run queue (SF-071).
-  already_queued: 409, not_queued: 409, invalid_limit: 400, invalid_position: 400, invalid_rule: 400,
-  // A ticket's images (SF-064): not an image, too large, too many, and a Task file that refers to
-  // one the ticket does not have (also an image to remove that is not there); a Start, Restart or
-  // Resume whose Task file refers to images that cannot be used (SF-065).
-  attachment_type: 400, attachment_too_large: 413, attachment_limit: 409, attachment_missing: 400, attachment_invalid: 409,
-};
+type SetupRoute = keyof typeof BODIES;
+// A setup POST's route and the body as its refusal names it.
+const setupBody = (route: SetupRoute): { route: SetupRoute; shape: string } => ({ route, shape: BODIES[route].shape });
 
 export interface RunningDashboard {
   url: URL;
@@ -901,6 +808,9 @@ async function jobDetail(jobs: JobStore, job: Job, gate: boolean, actions: Dashb
     // SF-129: the ids of the ledger entries the stop block offers Accept risk and Must fix for
     // (src/stops.ts settleEntries); [] unless the stop is one the user settles in.
     settle_ids: settleEntries(job, ledger, new Date()).map((entry) => entry.id),
+    // SF-139: the actions that need the job's ticket typed again on the remote port (POST_ROUTES'
+    // confirm routes); the page asks for it exactly for these.
+    confirm_actions: [...CONFIRM_ACTIONS],
     history: await stateHistory(jobs, job.workspace, job.ticket),
     // The plain explanation of the current stop (SF-106): explanation.json while it is the job's
     // current stop's (pending, written or failed); null otherwise.
@@ -908,18 +818,13 @@ async function jobDetail(jobs: JobStore, job: Job, gate: boolean, actions: Dashb
   };
 }
 
-function sameToken(given: string, token: Buffer): boolean {
-  const candidate = Buffer.from(given, 'utf8');
-  return candidate.length === token.length && timingSafeEqual(candidate, token);
-}
-
 // Whether the Cookie header holds the cookie name with the value, compared in constant time.
 // Every entry is compared (no early return), so the answer's time does not tell which one matched.
-function hasCookie(header: string | undefined, name: string, value: Buffer): boolean {
+function hasCookie(header: string | undefined, name: string, value: string): boolean {
   let found = false;
   for (const part of (header ?? '').split(';')) {
     const equals = part.indexOf('=');
-    if (equals > 0 && part.slice(0, equals).trim() === name && sameToken(part.slice(equals + 1).trim(), value)) {
+    if (equals > 0 && part.slice(0, equals).trim() === name && sameSecret(part.slice(equals + 1).trim(), value)) {
       found = true;
     }
   }
@@ -953,7 +858,8 @@ function jobKey(workspace: string | undefined, ticket: string | undefined): [str
 // What a path is for the method rule: a job action (POST only), a setup action (POST only), a
 // path that lists on GET and acts on POST, or a read (GET only).
 type Target =
-  | { kind: 'action'; action: DashboardAction; workspace: string | undefined; ticket: string | undefined }
+  // A job's action of POST_ROUTES (SF-139), POST only.
+  | { kind: 'action'; name: string; route: JobRoute; workspace: string | undefined; ticket: string | undefined }
   | { kind: 'workspace-remove'; name: string | undefined }
   // The Workspaces dialog's Edit and the Morning digest section (SF-103), POST only.
   | { kind: 'workspace-edit'; name: string | undefined }
@@ -971,8 +877,8 @@ type Target =
   | { kind: 'ticket-attachment-add'; workspace: string | undefined; ticket: string | undefined }
   | { kind: 'ticket-attachment-remove'; workspace: string | undefined; ticket: string | undefined; name: string | undefined }
   | { kind: 'both'; route: 'workspace-add' | 'ticket-new' }
-  // The run queue (SF-071): api/queue/<action>, POST only.
-  | { kind: 'queue'; action: QueueAction }
+  // The run queue (SF-071): api/queue/<action>, POST only; name is its POST_ROUTES name.
+  | { kind: 'queue'; name: string; route: QueueRoute }
   | { kind: 'read' };
 
 function targetOf(path: string[]): Target {
@@ -980,11 +886,9 @@ function targetOf(path: string[]): Target {
   if (api !== 'api') {
     return { kind: 'read' };
   }
-  if (kind === 'jobs' && path.length === 5) {
-    const action = ACTIONS.find((known) => known === c);
-    if (action !== undefined) {
-      return { kind: 'action', action, workspace: a, ticket: b };
-    }
+  const action = kind === 'jobs' && path.length === 5 && c !== undefined ? postRoute(c, 'job') : undefined;
+  if (action !== undefined && c !== undefined) {
+    return { kind: 'action', name: c, route: action, workspace: a, ticket: b };
   }
   if (kind === 'workspaces' && path.length === 2) {
     return { kind: 'both', route: 'workspace-add' };
@@ -1019,9 +923,9 @@ function targetOf(path: string[]): Target {
   if (kind === 'tickets' && path.length === 7 && c === 'attachments' && path[6] === 'remove') {
     return { kind: 'ticket-attachment-remove', workspace: a, ticket: b, name: path[5] };
   }
-  const queueAction = QUEUE_ACTIONS.find((known) => known === a);
-  if (kind === 'queue' && path.length === 3 && queueAction !== undefined) {
-    return { kind: 'queue', action: queueAction };
+  const change = kind === 'queue' && path.length === 3 ? postRoute(`queue-${a}`, 'queue') : undefined;
+  if (change !== undefined) {
+    return { kind: 'queue', name: `queue-${a}`, route: change };
   }
   return { kind: 'read' };
 }
@@ -1083,10 +987,15 @@ interface Stream {
 // One POST, validated and dispatched: the body shape, the one call it stands for, and whether
 // the page refreshes its setup data after it.
 interface Post {
-  route: PostRoute;
+  // The route's name, and the body as invalid_body names it.
+  route: string;
+  shape: string;
+  // Answers while sf update drains or builds (SF-101); false by default.
+  openWhileUpdating?: boolean;
   // A check before the body is read; false answers an empty 404.
   exists?: () => Promise<boolean>;
-  // The job's ticket, which "confirm" must equal on the remote port (SF-126: CONFIRM_ROUTES).
+  // The job's ticket, which "confirm" must equal on the remote port (SF-126: the confirm routes of
+  // POST_ROUTES).
   confirm?: string;
   call: (data: unknown) => (() => Promise<unknown>) | undefined;
   // The raw body's bound in bytes; MAX_ACTION_BODY_BYTES by default.
@@ -1100,7 +1009,7 @@ interface Post {
   refreshJobs?: boolean;
   // The action may change the job's record without a state change (mr-status, SF-048): every page
   // gets the jobs again, and the pages that show the job its detail, as on a state change.
-  refreshJob?: [string, string];
+  refreshJob?: JobKey;
 }
 
 // gate: whether the Codex gate is on (SF_GATE), shown in the job's pipeline; checks: the Task
@@ -1145,11 +1054,10 @@ export async function startDashboard(
     tokenText = newToken();
     await writeFileAtomic(join(stateDir, TOKEN_FILE), Buffer.from(`${tokenText}\n`));
   }
-  const token = Buffer.from(tokenText, 'utf8');
   // The cookie of a token visit (SF-126): the hex HMAC-SHA256 of the token over the side's label,
   // so it survives restarts and dies with the token. The local name carries the port (cookies are
   // not kept apart by port); the remote one is __Host- and Secure (the phone reaches it over https).
-  const cookieOf = (side: 'local' | 'remote'): Buffer => Buffer.from(createHmac('sha256', tokenText).update(`dashboard-cookie:${side}`).digest('hex'), 'utf8');
+  const cookieOf = (side: 'local' | 'remote'): string => createHmac('sha256', tokenText).update(`dashboard-cookie:${side}`).digest('hex');
   const cookies = {
     local: { name: '', value: cookieOf('local'), attributes: 'HttpOnly; SameSite=Strict; Path=/' },
     remote: { name: '__Host-sf_dashboard', value: cookieOf('remote'), attributes: 'HttpOnly; Secure; SameSite=Strict; Path=/' },
@@ -1198,9 +1106,6 @@ export async function startDashboard(
   };
   const body = (res: ServerResponse, type: string, data: string | Buffer): void => {
     res.writeHead(200, { 'content-type': type }).end(data);
-  };
-  const json = (res: ServerResponse, status: number, data: unknown, headers: Record<string, string> = {}): void => {
-    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...headers }).end(JSON.stringify(data));
   };
 
   // The start screen's data, sent to every page on connect and after every change.
@@ -1302,15 +1207,15 @@ export async function startDashboard(
       return;
     }
     if (joined === 'api/jobs') {
-      body(res, 'application/json; charset=utf-8', JSON.stringify(await jobsOf(remote)));
+      sendJson(res, 200, await jobsOf(remote));
       return;
     }
     if (joined === 'api/workspaces') {
-      body(res, 'application/json; charset=utf-8', JSON.stringify(await workspacesPayload(setup)));
+      sendJson(res, 200, await workspacesPayload(setup));
       return;
     }
     if (joined === 'api/tickets') {
-      body(res, 'application/json; charset=utf-8', JSON.stringify(await ticketsPayload(setup, checks, queue)));
+      sendJson(res, 200, await ticketsPayload(setup, checks, queue));
       return;
     }
     if (joined === 'api/stream') {
@@ -1325,7 +1230,7 @@ export async function startDashboard(
     // The morning digest (SF-103): the list, newest first, and one stored record.
     if (kind === 'digests' && digests !== undefined && [...query.keys()].length === 0 && rest.length <= 1) {
       if (rest.length === 0) {
-        json(res, 200, await digests.list());
+        sendJson(res, 200, await digests.list());
         return;
       }
       const record = await digests.read(rest[0]!);
@@ -1333,7 +1238,7 @@ export async function startDashboard(
         empty(res, 404);
         return;
       }
-      json(res, 200, record);
+      sendJson(res, 200, record);
       return;
     }
     if (kind === 'tickets' && rest.length === 3 && rest[2] === 'page') {
@@ -1361,7 +1266,7 @@ export async function startDashboard(
       if (job.state === 'handed_over') {
         void actions.checkHandedOver(job.workspace, job.ticket, PUSH_CHECK_INTERVAL_MS).catch((error: unknown) => console.error(error));
       }
-      body(res, 'application/json; charset=utf-8', JSON.stringify(await jobDetail(jobs, job, gateOn, actions, setup)));
+      sendJson(res, 200, await jobDetail(jobs, job, gateOn, actions, setup));
       return;
     }
     if (tail.length === 1 && tail[0] === 'stream') {
@@ -1370,7 +1275,7 @@ export async function startDashboard(
         empty(res, 404);
         return;
       }
-      json(res, 200, await streamPage(...key, Number(from)));
+      sendJson(res, 200, await streamPage(...key, Number(from)));
       return;
     }
     if (tail.length === 1 && tail[0] === 'mr') {
@@ -1395,7 +1300,7 @@ export async function startDashboard(
         empty(res, 404);
         return;
       }
-      json(res, 200, view);
+      sendJson(res, 200, view);
       return;
     }
     if (tail.length === 1 && (tail[0] === 'changes' || tail[0] === 'file')) {
@@ -1404,7 +1309,7 @@ export async function startDashboard(
         empty(res, 404);
         return;
       }
-      json(res, 200, data);
+      sendJson(res, 200, data);
       return;
     }
     const number = Number(tail[1]);
@@ -1432,7 +1337,7 @@ export async function startDashboard(
       empty(res, 404);
       return;
     }
-    json(res, 200, await stats.compute({ days: days satisfies StatsDays, workspace }));
+    sendJson(res, 200, await stats.compute({ days: days satisfies StatsDays, workspace }));
   }
 
   // GET api/jobs/<ws>/<ticket>/changes (SF-079): the base and the published iterations; with
@@ -1507,11 +1412,11 @@ export async function startDashboard(
     if (!(error instanceof FactoryError)) {
       throw error;
     }
-    const status = ERROR_STATUS[error.code] ?? 500;
+    const status = statusOf(error.code);
     if (status === 404) {
       empty(res, 404);
     } else {
-      json(res, status, { ok: false, error: { code: error.code, message: error.message } });
+      sendJson(res, status, { ok: false, error: { code: error.code, message: error.message } });
     }
   }
 
@@ -1545,7 +1450,7 @@ export async function startDashboard(
         console.error(error);
       }
     }
-    json(res, 200, {
+    sendJson(res, 200, {
       ticket: await ticketEntry(row, checks),
       task: { text: file.text, sha256: file.sha256 },
       plan: planOf(file.text, row),
@@ -1613,7 +1518,7 @@ export async function startDashboard(
     try {
       view = await checks.view(...key);
     } catch (error) {
-      if (error instanceof FactoryError && ERROR_STATUS[error.code] === 404) {
+      if (error instanceof FactoryError && statusOf(error.code) === 404) {
         empty(res, 404);
         return;
       }
@@ -1623,7 +1528,7 @@ export async function startDashboard(
       empty(res, 404);
       return;
     }
-    json(res, 200, view);
+    sendJson(res, 200, view);
   }
 
   // POST api/tickets/<ws>/<ticket>/check: starts a check and answers at once; its end reaches every
@@ -1633,138 +1538,37 @@ export async function startDashboard(
       return undefined;
     }
     const run = (): Promise<unknown> => checks.start(...key);
-    return { route: 'ticket-check', call: (data) => (BODIES['ticket-check'].schema.safeParse(data).success ? run : undefined), refreshSetup: true };
+    return { ...setupBody('ticket-check'), call: (data) => (BODIES['ticket-check'].schema.safeParse(data).success ? run : undefined), refreshSetup: true };
   }
 
-  // The job action as the one Execution call it stands for.
-  function jobPost(action: DashboardAction, [workspace, ticket]: [string, string]): Post {
-    const parse = <T>(schema: z.ZodType<T>, data: unknown): T | undefined => {
-      const parsed = schema.safeParse(data);
-      return parsed.success ? parsed.data : undefined;
-    };
-    const exists = async (): Promise<boolean> => (await jobs.read(workspace, ticket)) !== undefined;
-    if (action === 'approve') {
-      return {
-        route: action, exists, confirm: ticket,
-        call: (data) => {
-          const parsed = parse(BODIES.approve.schema, data);
-          return parsed ? () => actions.approve(workspace, ticket, parsed.as_is === true) : undefined;
-        },
-      };
+  // A job or queue action of POST_ROUTES (SF-139) as the one call it stands for, its body checked by
+  // the route's schema only. A job's action gets the job (key), which is looked up first; a queue's
+  // needs the run queue (none without it: an empty 404).
+  function routePost(name: string, route: JobRoute, key: JobKey): Post;
+  function routePost(name: string, route: QueueRoute): Post | undefined;
+  function routePost(name: string, route: PostRoute, key?: JobKey): Post | undefined {
+    let run: (body: unknown) => Promise<unknown>;
+    if (route.kind === 'job') {
+      if (key === undefined) {
+        return undefined;
+      }
+      run = (body) => route.call(actions, queue, key, body);
+    } else {
+      const runQueue = queue;
+      if (runQueue === undefined) {
+        return undefined;
+      }
+      run = (body) => route.call(actions, runQueue, undefined, body);
     }
-    if (action === 'abort') {
-      return {
-        route: action, exists,
-        call: (data) => {
-          const parsed = parse(BODIES.abort.schema, data);
-          return parsed ? () => actions.abort(workspace, ticket, parsed.discard === true) : undefined;
-        },
-      };
-    }
-    if (action === 'review') {
-      // sf review: the Execution refuses any state but needs_human with review_failed.
-      const run = (): Promise<unknown> => actions.retryReview(workspace, ticket);
-      return { route: action, exists, call: (data) => (parse(BODIES.review.schema, data) ? run : undefined) };
-    }
-    if (action === 'retry') {
-      // sf retry (SF-087): the Execution refuses any job but one a transient MR preparation failure
-      // stopped; on mr_push_failed it pushes again.
-      const run = (): Promise<unknown> => actions.retryMr(workspace, ticket);
-      return { route: action, exists, confirm: ticket, call: (data) => (parse(BODIES.retry.schema, data) ? run : undefined) };
-    }
-    if (action === 'accept') {
-      // sf accept: the Execution refuses any state but needs_human after a stop it takes on (the
-      // gate's, the ledger's, the Fix round limit), with the checks of acceptGateInRunner.
-      const run = (): Promise<unknown> => actions.acceptGate(workspace, ticket);
-      return { route: action, exists, call: (data) => (parse(BODIES.accept.schema, data) ? run : undefined) };
-    }
-    if (action === 'simplify') {
-      // sf simplify (SF-055): the Execution refuses any state but needs_human with simplify_offered.
-      const run = (): Promise<unknown> => actions.simplify(workspace, ticket);
-      return { route: action, exists, call: (data) => (parse(BODIES.simplify.schema, data) ? run : undefined) };
-    }
-    if (action === 'settle') {
-      // sf settle (SF-052): the Execution refuses any state but needs_human, and any entry but an
-      // escalated or contested one.
-      return {
-        route: action, exists,
-        call: (data) => {
-          const parsed = parse(BODIES.settle.schema, data);
-          return parsed ? () => actions.settle(workspace, ticket, parsed.id, parsed.decision, parsed.note ?? '') : undefined;
-        },
-      };
-    }
-    if (action === 'mr-create' || action === 'mr-merge' || action === 'mr-status') {
-      // sf mr create, merge and status (SF-048). The Execution announces an opened or merged merge
-      // request to every page; a state the status found changed on the host reaches them here: the
-      // jobs, and the job's detail to the pages that show it.
-      const methods = { 'mr-create': actions.createMergeRequest, 'mr-merge': actions.mergeMergeRequest, 'mr-status': actions.mergeRequestStatus };
-      const method = methods[action].bind(actions);
-      const run = (): Promise<unknown> => method(workspace, ticket);
-      return {
-        route: action, exists, call: (data) => (parse(BODIES[action].schema, data) ? run : undefined),
-        ...(action === 'mr-status' ? { refreshJob: [workspace, ticket] as [string, string] } : { confirm: ticket }),
-      };
-    }
-    if (action === 'pause') {
-      // sf pause (SF-067): the Execution refuses any state but working and awaiting_review.
-      const run = (): Promise<unknown> => actions.pause(workspace, ticket);
-      return { route: action, exists, call: (data) => (parse(BODIES.pause.schema, data) ? run : undefined) };
-    }
-    if (action === 'resume') {
-      // sf resume (SF-067): paused only; a message only when a turn was paused.
-      return {
-        route: action, exists,
-        call: (data) => {
-          const parsed = parse(BODIES.resume.schema, data);
-          return parsed ? () => actions.resumePaused(workspace, ticket, parsed.message ?? '') : undefined;
-        },
-      };
-    }
-    if (action === 'restart') {
-      // sf restart (SF-067): a new job replaces the old one, so every page gets the jobs again.
-      return {
-        route: action, exists, refreshJobs: true,
-        call: (data) => {
-          const parsed = parse(BODIES.restart.schema, data);
-          return parsed ? () => actions.restart(workspace, ticket, parsed.keep_files === true) : undefined;
-        },
-      };
-    }
-    if (action === 'handover' || action === 'takeback' || action === 'handed-done') {
-      // sf handover, takeback and handed-done (SF-073): the Execution refuses any state but
-      // ready_for_human_review (handover) and handed_over (the others).
-      const methods = { handover: actions.handover, takeback: actions.takeback, 'handed-done': actions.handedDone };
-      const method = methods[action].bind(actions);
-      const run = (): Promise<unknown> => method(workspace, ticket);
-      return { route: action, exists, call: (data) => (parse(BODIES[action].schema, data) ? run : undefined) };
-    }
-    if (action === 'mr-save' || action === 'mr-reset') {
-      // The Merge request screen (SF-080): the Execution refuses any state but ready_for_human_review
-      // and needs_human after a failed push; the job's detail reaches every page that shows it.
-      return {
-        route: action, exists, bodyLimit: MAX_MR_BODY_BYTES, refreshJob: [workspace, ticket],
-        call: (data) => {
-          if (action === 'mr-reset') {
-            return parse(BODIES['mr-reset'].schema, data) ? () => actions.resetMr(workspace, ticket) : undefined;
-          }
-          const parsed = parse(BODIES['mr-save'].schema, data);
-          return parsed ? () => actions.saveMr(workspace, ticket, parsed) : undefined;
-        },
-      };
-    }
-    if (action === 'archive') {
-      // A finished job leaves the Jobs list as with sf reset (the history is archived, a kept
-      // worktree removed, the branch untouched). A live job is refused (invalid_state); the
-      // Execution checks the state and retires the job under one lock acquisition.
-      const run = (): Promise<unknown> => actions.archiveFinished(workspace, ticket);
-      return { route: action, exists, call: (data) => (parse(BODIES.archive.schema, data) ? run : undefined), refreshJobs: true };
-    }
+    const { body, shape, bodyLimit, refresh } = route;
     return {
-      route: action, exists,
+      route: name, shape, openWhileUpdating: openWhileUpdating(route), bodyLimit,
+      exists: key === undefined ? undefined : async () => (await jobs.read(...key)) !== undefined,
+      confirm: route.confirm === true ? key?.[1] : undefined,
+      refreshJob: refresh === 'job' ? key : undefined, refreshJobs: refresh === 'jobs', refreshSetup: refresh === 'setup',
       call: (data) => {
-        const parsed = parse(BODIES.say.schema, data);
-        return parsed ? () => actions.say(workspace, ticket, parsed.message) : undefined;
+        const parsed = body.safeParse(data);
+        return parsed.success ? () => run(parsed.data) : undefined;
       },
     };
   }
@@ -1775,7 +1579,7 @@ export async function startDashboard(
   // start.
   function taskPost([workspace, ticket]: [string, string]): Post {
     return {
-      route: 'ticket-task',
+      ...setupBody('ticket-task'),
       bodyLimit: MAX_TASK_BODY_BYTES,
       call: (data) => {
         const parsed = BODIES['ticket-task'].schema.safeParse(data);
@@ -1794,7 +1598,7 @@ export async function startDashboard(
   // every page (its row, its conversation).
   function attachmentAddPost([workspace, ticket]: [string, string], name: string | undefined): Post {
     return {
-      route: 'ticket-attachment-add',
+      ...setupBody('ticket-attachment-add'),
       bytes: true,
       bodyLimit: MAX_ATTACHMENT_BYTES,
       call: (data) => (data instanceof Buffer ? () => setup.addAttachment(workspace, ticket, data, name) : undefined),
@@ -1805,7 +1609,7 @@ export async function startDashboard(
   // POST api/tickets/<ws>/<ticket>/attachments/<name>/remove (SF-064) with {}.
   function attachmentRemovePost([workspace, ticket]: [string, string], name: string): Post {
     return {
-      route: 'ticket-attachment-remove',
+      ...setupBody('ticket-attachment-remove'),
       call: (data) => (BODIES['ticket-attachment-remove'].schema.safeParse(data).success ? () => setup.removeAttachment(workspace, ticket, name) : undefined),
       refreshSetup: true,
     };
@@ -1818,7 +1622,7 @@ export async function startDashboard(
         return undefined;
       }
       return {
-        route: 'workspace-edit',
+        ...setupBody('workspace-edit'),
         call: (data) => {
           const parsed = BODIES['workspace-edit'].schema.safeParse(data);
           return parsed.success ? () => setup.editWorkspace(name, parsed.data).then(workspacesChanged) : undefined;
@@ -1828,7 +1632,7 @@ export async function startDashboard(
     }
     if (target.kind === 'digest-settings') {
       return {
-        route: 'digest-settings',
+        ...setupBody('digest-settings'),
         call: (data) => {
           const parsed = BODIES['digest-settings'].schema.safeParse(data);
           return parsed.success ? () => setup.saveDigestSettings(parsed.data) : undefined;
@@ -1841,7 +1645,7 @@ export async function startDashboard(
       if (run === undefined) {
         return undefined;
       }
-      return { route: 'digest-run', call: (data) => (BODIES['digest-run'].schema.safeParse(data).success ? async () => run.start('manual') : undefined) };
+      return { ...setupBody('digest-run'), call: (data) => (BODIES['digest-run'].schema.safeParse(data).success ? async () => run.start('manual') : undefined) };
     }
     if (target.kind === 'ticket-action') {
       const key = jobKey(target.workspace, target.ticket);
@@ -1853,23 +1657,23 @@ export async function startDashboard(
         // sf start: the Execution refuses a skeleton (task_draft), a live job and every other
         // reason a job cannot start; the new job and the shorter ticket list reach every page.
         const run = (): Promise<unknown> => actions.start(workspace, ticket);
-        return { route: 'ticket-start', call: (data) => (BODIES['ticket-start'].schema.safeParse(data).success ? run : undefined), refreshJobs: true };
+        return { ...setupBody('ticket-start'), call: (data) => (BODIES['ticket-start'].schema.safeParse(data).success ? run : undefined), refreshJobs: true };
       }
       const route = `ticket-${target.action}` as const;
       const methods = { archive: setup.archiveTicket, restore: setup.restoreTicket, delete: setup.deleteTicket };
       const method = methods[target.action].bind(setup);
-      return { route, call: (data) => (BODIES[route].schema.safeParse(data).success ? () => method(workspace, ticket) : undefined), refreshSetup: true, refreshJobs: target.action !== 'restore' };
+      return { ...setupBody(route), call: (data) => (BODIES[route].schema.safeParse(data).success ? () => method(workspace, ticket) : undefined), refreshSetup: true, refreshJobs: target.action !== 'restore' };
     }
     if (target.kind === 'workspace-remove') {
       const name = target.name;
       if (name === undefined || !WORKSPACE_NAME_PATTERN.test(name)) {
         return undefined;
       }
-      return { route: 'workspace-remove', call: (data) => (BODIES['workspace-remove'].schema.safeParse(data).success ? () => setup.removeWorkspace(name).then(workspacesChanged) : undefined), refreshSetup: true };
+      return { ...setupBody('workspace-remove'), call: (data) => (BODIES['workspace-remove'].schema.safeParse(data).success ? () => setup.removeWorkspace(name).then(workspacesChanged) : undefined), refreshSetup: true };
     }
     if (target.route === 'workspace-add') {
       return {
-        route: 'workspace-add',
+        ...setupBody('workspace-add'),
         call: (data) => {
           const parsed = BODIES['workspace-add'].schema.safeParse(data);
           if (!parsed.success) {
@@ -1882,33 +1686,10 @@ export async function startDashboard(
       };
     }
     return {
-      route: 'ticket-new',
+      ...setupBody('ticket-new'),
       call: (data) => {
         const parsed = BODIES['ticket-new'].schema.safeParse(data);
         return parsed.success ? () => setup.createTicket(parsed.data) : undefined;
-      },
-      refreshSetup: true,
-    };
-  }
-
-  // The run queue's changes (SF-071): each body to its one call; every page gets the tickets again.
-  function queuePost(action: QueueAction, runQueue: DashboardQueue): Post {
-    const calls: { [A in QueueAction]: (data: z.infer<(typeof BODIES)[`queue-${A}`]['schema']>) => Promise<unknown> } = {
-      add: (data) => runQueue.add(data.workspace, data.ticket, data.at),
-      remove: (data) => runQueue.remove(data.workspace, data.ticket),
-      move: (data) => runQueue.move(data.workspace, data.ticket, data.to),
-      limit: (data) => runQueue.limit(data.max_running),
-      hold: (data) => runQueue.hold(data.reason),
-      release: () => runQueue.release(),
-      rule: (data) => runQueue.rule(data.rule),
-      force: (data) => runQueue.force(data.workspace, data.ticket),
-    };
-    const route = `queue-${action}` as const;
-    return {
-      route,
-      call: (data) => {
-        const parsed = BODIES[route].schema.safeParse(data);
-        return parsed.success ? () => (calls[action] as (body: unknown) => Promise<unknown>)(parsed.data) : undefined;
       },
       refreshSetup: true,
     };
@@ -1922,7 +1703,7 @@ export async function startDashboard(
       gone = true;
     });
     const fail = (status: number, code: string, message: string, headers: Record<string, string> = {}): void => {
-      json(res, status, { ok: false, error: { code, message } }, headers);
+      sendJson(res, status, { ok: false, error: { code, message } }, headers);
     };
     // The page's exact origin: the local one on the local port, a listed one on the remote port.
     if (remote ? req.headers.origin === undefined || !remoteOrigins.includes(req.headers.origin) : req.headers.origin !== origin) {
@@ -1930,12 +1711,12 @@ export async function startDashboard(
       return;
     }
     // The updating marker's gate (SF-101), before anything is read or changed.
-    if (!OPEN_WHILE_UPDATING.has(post.route)) {
+    if (post.openWhileUpdating !== true) {
       try {
         refuseWhileUpdating(stateDir);
       } catch (error) {
         const refusal = error as FactoryError;
-        fail(ERROR_STATUS[refusal.code] ?? 409, refusal.code, refusal.message);
+        fail(statusOf(refusal.code, 409), refusal.code, refusal.message);
         return;
       }
     }
@@ -1971,12 +1752,12 @@ export async function startDashboard(
     }
     const run = post.call(data);
     if (run === undefined) {
-      fail(400, 'invalid_body', `${post.route} expects ${BODIES[post.route].shape}; no other keys, no null.`);
+      fail(400, 'invalid_body', `${post.route} expects ${post.shape}; no other keys, no null.`);
       return;
     }
     // The second confirmation from another device (SF-126): the job's ticket, typed by the user.
-    if (remote && CONFIRM_ROUTES.includes(post.route) && (post.confirm === undefined || (data as { confirm?: unknown }).confirm !== post.confirm)) {
-      fail(409, 'confirm_required', `From another device, ${post.route} needs "confirm": the job's ticket${post.confirm === undefined ? '' : ` (${post.confirm})`}.`);
+    if (remote && post.confirm !== undefined && (data as { confirm?: unknown }).confirm !== post.confirm) {
+      fail(409, 'confirm_required', `From another device, ${post.route} needs "confirm": the job's ticket (${post.confirm}).`);
       return;
     }
     let result: unknown;
@@ -1987,11 +1768,12 @@ export async function startDashboard(
         return;
       }
       if (error instanceof FactoryError) {
-        fail(ERROR_STATUS[error.code] ?? 500, error.code, error.message);
+        fail(statusOf(error.code), error.code, error.message);
         return;
       }
       console.error(error);
-      fail(500, 'internal_error', 'The request failed inside the factory.');
+      const failure = internalError();
+      fail(500, failure.code, failure.message);
       return;
     }
     if (post.refreshJob !== undefined) {
@@ -2005,7 +1787,7 @@ export async function startDashboard(
     if (gone) {
       return;
     }
-    json(res, 200, { ok: true, result });
+    sendJson(res, 200, { ok: true, result });
   }
 
   // One request on the local port or, with remote true, on the remote one (SF-126).
@@ -2030,10 +1812,10 @@ export async function startDashboard(
     let path: string[];
     // /d/<token>/...: the token segment must be followed by a slash, so path has at least one
     // entry. Without the token, the cookie of a token visit (SF-126) opens every path at the root.
-    if (first === 'd' && given !== undefined && rest.length > 0 && sameToken(given, token)) {
+    if (first === 'd' && given !== undefined && rest.length > 0 && sameSecret(given, tokenText)) {
       path = rest;
       if (path.length === 1 && path[0] === '' && (req.method === 'GET' || req.method === 'HEAD')) {
-        res.setHeader('set-cookie', `${cookie.name}=${cookie.value.toString('utf8')}; ${cookie.attributes}`);
+        res.setHeader('set-cookie', `${cookie.name}=${cookie.value}; ${cookie.attributes}`);
       }
     } else if (hasCookie(req.headers.cookie, cookie.name, cookie.value)) {
       path = segments;
@@ -2061,7 +1843,7 @@ export async function startDashboard(
       let post: Post | undefined;
       if (what.kind === 'action') {
         const key = jobKey(what.workspace, what.ticket);
-        post = key === undefined ? undefined : jobPost(what.action, key);
+        post = key === undefined ? undefined : routePost(what.name, what.route, key);
       } else {
         post = setupPost(what);
       }
@@ -2128,11 +1910,12 @@ export async function startDashboard(
         empty(res, 405, { allow: 'POST' });
         return;
       }
-      if (queue === undefined) {
+      const post = routePost(what.name, what.route);
+      if (post === undefined) {
         empty(res, 404);
         return;
       }
-      handlePost(req, res, queuePost(what.action, queue), remote).catch(failed);
+      handlePost(req, res, post, remote).catch(failed);
       return;
     }
     if (what.kind === 'both' && req.method === 'POST') {
@@ -2146,19 +1929,6 @@ export async function startDashboard(
     route(req, res, path, target.searchParams, remote).catch(failed);
   };
 
-  // A listener on 127.0.0.1:at; a taken port is port_in_use naming the setting that chose it.
-  const listen = (server: Server, at: number, setting: string): Promise<AddressInfo> => new Promise<AddressInfo>((resolve, reject) => {
-    const onError = (error: NodeJS.ErrnoException): void => {
-      reject(error.code === 'EADDRINUSE'
-        ? new FactoryError('port_in_use', `Port ${at} on ${LOOPBACK_HOST} is already in use. Set ${setting} to a free port.`)
-        : error);
-    };
-    server.once('error', onError);
-    server.listen(at, LOOPBACK_HOST, () => {
-      server.off('error', onError);
-      resolve(server.address() as AddressInfo);
-    });
-  });
   // A listener closed, its open connections (event streams too) cut.
   const closeServer = (server: Server): Promise<void> => new Promise<void>((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));

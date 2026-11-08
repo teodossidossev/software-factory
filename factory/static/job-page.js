@@ -569,9 +569,9 @@ function jobsOf(text) {
   return data.jobs;
 }
 
-// The actions that can push or merge (SF-126: CONFIRM_ROUTES of src/dashboard.ts): from another
-// device each asks for the job's ticket, typed, and sends it as confirm.
-const REMOTE_CONFIRM = ['approve', 'retry', 'mr-create', 'mr-merge'];
+// What the dialog says of each action that asks for the job's ticket from another device (SF-126).
+// Which actions ask is the server's (SF-139: the detail's confirm_actions, the confirm routes of
+// POST_ROUTES in src/dashboard-routes.ts).
 const REMOTE_CONFIRM_TEXT = {
   approve: 'it pushes the branch to origin.',
   retry: 'it runs the MR preparation again, and pushes again after a failed push.',
@@ -680,16 +680,31 @@ function settleTicketAsk(confirmed) {
   ask.resolve(confirmed && typed === ask.ticket);
 }
 
+// The actions that ask for the job's ticket from another device: the detail's confirm_actions
+// (the same for every job), read from the job's detail when the page has none (a board card's
+// Retry); none when that read fails (the server then refuses with confirm_required).
+async function confirmActions(key) {
+  let detail = state.detail;
+  if (!Array.isArray(detail?.confirm_actions)) {
+    try {
+      detail = await withinTime(readDetail(key));
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(detail?.confirm_actions) ? detail.confirm_actions : [];
+}
+
 // One request for one job; the result goes to that job only, whatever is selected by then. From
-// another device (SF-126) an action that can push or merge asks for the ticket first.
+// another device (SF-126) an action of the server's confirm_actions asks for the ticket first.
 async function run(action, key, body) {
   const id = pendingId(action, key);
   if (state.pending.has(id)) {
     return;
   }
-  if (state.remote && REMOTE_CONFIRM.includes(action)) {
+  if (state.remote && (await confirmActions(key)).includes(action)) {
     const ticket = key.slice(key.indexOf('/') + 1);
-    if (!(await askTicket(action, ticket)) || state.pending.has(id)) {
+    if (state.pending.has(id) || !(await askTicket(action, ticket)) || state.pending.has(id)) {
       return;
     }
     body = { ...body, confirm: ticket };

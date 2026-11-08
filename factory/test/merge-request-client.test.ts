@@ -9,6 +9,7 @@
 // acceptance.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { POST_ROUTES, type RouteName } from '../src/dashboard-routes.js';
 import { COMMIT_TYPES, MANUAL_CLAIM, MAX_HEADER_CHARS, MR_REQUIRED_HEADINGS } from '../src/rules.js';
 import { served } from './support/dashboard-client.js';
 import { type FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
@@ -30,17 +31,22 @@ function job(ticket: string, state: string, extra: Record<string, unknown> = {})
 }
 type Job = ReturnType<typeof job>;
 
-const detail = (row: Job) => ({ job: row, iterations: [], mr: true, mr_title: 'feat(T-1): Demo', gate: true, history: [] });
+// confirm_actions (SF-139): the actions the server says ask for the ticket from another device; the
+// confirm routes of POST_ROUTES by default.
+const CONFIRM_ACTIONS = (Object.keys(POST_ROUTES) as RouteName[]).filter((name) => POST_ROUTES[name].confirm === true);
+const detail = (row: Job, confirmActions: readonly string[] = CONFIRM_ACTIONS) => ({
+  job: row, iterations: [], mr: true, mr_title: 'feat(T-1): Demo', gate: true, history: [], confirm_actions: confirmActions,
+});
 
 // remote: what api/jobs says of the page's port (SF-126); absent by default, as before it.
-async function open(jobs: Job[], hash: string, remote?: boolean): Promise<Page> {
+async function open(jobs: Job[], hash: string, remote?: boolean, confirmActions: readonly string[] = CONFIRM_ACTIONS): Promise<Page> {
   const page = await loadPage(STATIC_DIR, (path) => {
     if (path === 'api/jobs') {
       return { jobs, ...(remote !== undefined ? { remote } : {}) };
     }
     const match = /^api\/jobs\/app\/([^/]+)$/.exec(path);
     const found = match ? jobs.find((row) => row.ticket === match[1]) : undefined;
-    return found ? detail(found) : undefined;
+    return found ? detail(found, confirmActions) : undefined;
   });
   page.location.hash = hash;
   page.document.dispatch('DOMContentLoaded');
@@ -52,7 +58,7 @@ async function open(jobs: Job[], hash: string, remote?: boolean): Promise<Page> 
   stream.emit('tickets', { tickets: [], archived: [] });
   const shown = jobs.find((row) => `#app/${row.ticket}` === hash);
   if (shown !== undefined) {
-    stream.emit('job', detail(shown));
+    stream.emit('job', detail(shown, confirmActions));
   }
   await page.flush();
   return page;
@@ -601,4 +607,72 @@ test('mr client (SF-126): from another device (api/jobs remote: true) Merge… a
   await local.flush();
   assert.deepEqual(posts(local, 'mr-merge').map((request) => request.body), ['{}']);
   assert.equal(local.document.getElementById('remote-confirm'), null);
+});
+
+test('mr client (SF-139): from another device the page asks for the ticket exactly for the detail\'s confirm_actions, the server\'s list; locally never', async () => {
+  const opened = job('T-1', 'pushed', { mr: { host: 'github', number: 4, url: URL_1, state: 'open' } });
+  assert.deepEqual(CONFIRM_ACTIONS, ['approve', 'retry', 'mr-create', 'mr-merge']);
+  const merge = async (page: Page): Promise<void> => {
+    page.$('mr-merge-button').click();
+    page.$('confirm-ok').click();
+    await page.flush();
+  };
+  const status = async (page: Page): Promise<void> => {
+    page.$('mr-status-button').click();
+    await page.flush();
+  };
+  const asking = (page: Page): boolean => page.document.getElementById('remote-confirm')?.hidden === false;
+
+  // A list without mr-merge but with mr-status: Merge goes at once, Refresh MR status asks.
+  const other = await open([opened], '#app/T-1', true, ['mr-status']);
+  await merge(other);
+  assert.equal(asking(other), false);
+  assert.deepEqual(posts(other, 'mr-merge').map((request) => request.body), ['{}']);
+  await status(other);
+  assert.equal(asking(other), true);
+  assert.equal(other.$('remote-confirm-title').textContent, 'Type T-1 to continue');
+  assert.equal(posts(other, 'mr-status').length, 0);
+  type(other, 'remote-confirm-input', 'T-1');
+  other.$('remote-confirm-ok').click();
+  await other.flush();
+  assert.deepEqual(posts(other, 'mr-status').map((request) => request.body), ['{"confirm":"T-1"}']);
+
+  // An empty list: nothing asks.
+  const none = await open([opened], '#app/T-1', true, []);
+  await merge(none);
+  await status(none);
+  assert.equal(none.document.getElementById('remote-confirm'), null);
+  assert.deepEqual([posts(none, 'mr-merge').map((request) => request.body), posts(none, 'mr-status').map((request) => request.body)], [['{}'], ['{}']]);
+
+  // The server's list (the default): Merge asks, Refresh MR status does not.
+  const served = await open([opened], '#app/T-1', true);
+  await status(served);
+  assert.deepEqual(posts(served, 'mr-status').map((request) => request.body), ['{}']);
+  await merge(served);
+  assert.equal(asking(served), true);
+  assert.equal(posts(served, 'mr-merge').length, 0);
+
+  // Locally the list changes nothing.
+  const local = await open([opened], '#app/T-1', false, ['mr-status', 'mr-merge']);
+  await merge(local);
+  await status(local);
+  assert.equal(local.document.getElementById('remote-confirm'), null);
+  assert.deepEqual([posts(local, 'mr-merge').map((request) => request.body), posts(local, 'mr-status').map((request) => request.body)], [['{}'], ['{}']]);
+});
+
+test('mr client (SF-139): a board card\'s Retry from another device reads confirm_actions from the job\'s detail when the page has none, then asks for the ticket', async () => {
+  const failed = job('T-1', 'needs_human', { error: { code: 'mr_rebase_failed', message: 'Git failed.' } });
+  const page = await open([failed], '', true);
+  const reads = (): number => page.requests.filter((request) => request.method === 'GET' && request.path === 'api/jobs/app/T-1').length;
+  const before = reads();
+  const retry = card(page, 'app/T-1').all().find((element) => element.tagName === 'BUTTON' && element.textContent === 'Retry')!;
+  retry.click();
+  await page.flush();
+  assert.equal(reads(), before + 1);
+  assert.equal(page.$('remote-confirm').hidden, false);
+  assert.equal(posts(page, 'retry').length, 0);
+  type(page, 'remote-confirm-input', 'T-1');
+  page.$('remote-confirm-ok').click();
+  await page.flush();
+  assert.deepEqual(posts(page, 'retry').map((request) => request.body), ['{"confirm":"T-1"}']);
 });

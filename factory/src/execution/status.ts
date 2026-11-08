@@ -6,7 +6,7 @@ import { claudeReviews, type FileChange, type Job } from '../jobs.js';
 import { DEFAULT_PAGE_BYTES, MAX_PAGE_BYTES, MIN_PAGE_BYTES, pageBuffer } from '../repo-files.js';
 import { actedVerdict, REVIEWER } from '../review.js';
 import { withoutDropped } from '../stops.js';
-import type { Core } from './core.js';
+import type { JobStorePort, LivePort, SettingsPort } from './ports.js';
 import type { CheckResult, ReviewStatus } from './dto.js';
 import { gateSkipped, MAX_REPORT_BYTES, type RunningReview } from './shared.js';
 
@@ -23,14 +23,18 @@ function cutUtf8(text: string, maxBytes: number): string {
 }
 
 export class StatusPart {
-  readonly core: Core;
+  readonly #store: JobStorePort;
+  readonly #sessions: LivePort;
+  readonly #settings: SettingsPort;
 
-  constructor(core: Core) {
-    this.core = core;
+  constructor(store: JobStorePort, sessions: LivePort, settings: SettingsPort) {
+    this.#store = store;
+    this.#sessions = sessions;
+    this.#settings = settings;
   }
 
   #checkAfter(job: Job): number {
-    return job.iteration === 0 ? this.core.config.checkAfterStartMin : this.core.config.checkAfterFixMin;
+    return job.iteration === 0 ? this.#settings.config.checkAfterStartMin : this.#settings.config.checkAfterFixMin;
   }
 
   async lastFiles(job: Job): Promise<FileChange[] | undefined> {
@@ -38,7 +42,7 @@ export class StatusPart {
       return undefined;
     }
     try {
-      return (await this.core.jobs.readMeta(job.workspace, job.ticket, job.iteration)).files;
+      return (await this.#store.jobs.readMeta(job.workspace, job.ticket, job.iteration)).files;
     } catch {
       return undefined;
     }
@@ -48,7 +52,7 @@ export class StatusPart {
     if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(maxBytes) || maxBytes < MIN_PAGE_BYTES || maxBytes > MAX_PAGE_BYTES) {
       throw new FactoryError('invalid_range', `offset must be >= 0 and max_bytes ${MIN_PAGE_BYTES} to ${MAX_PAGE_BYTES}.`);
     }
-    const job = await this.core.job(workspace, ticket);
+    const job = await this.#store.job(workspace, ticket);
     const result: CheckResult = {
       state: job.state,
       iteration: job.iteration,
@@ -59,7 +63,7 @@ export class StatusPart {
     };
     // The last published Report and Patch, in every state but the ones where an iteration runs.
     if (job.iteration > 0 && job.state !== 'working' && job.state !== 'starting') {
-      const { report, patch } = await this.core.jobs.readIteration(workspace, ticket, job.iteration);
+      const { report, patch } = await this.#store.jobs.readIteration(workspace, ticket, job.iteration);
       result.report = cutUtf8(report, MAX_REPORT_BYTES);
       result.patch = pageBuffer(patch, offset, maxBytes, 'the patch');
       const files = await this.lastFiles(job);
@@ -70,7 +74,7 @@ export class StatusPart {
         };
       }
     }
-    const mr = await this.core.jobs.readMrText(workspace, ticket);
+    const mr = await this.#store.jobs.readMrText(workspace, ticket);
     if (mr !== undefined) {
       result.mr = cutUtf8(mr, MAX_REPORT_BYTES);
     }
@@ -89,12 +93,12 @@ export class StatusPart {
     if (job.iteration === 0) {
       return undefined;
     }
-    const running = this.core.reviews.get(`${job.workspace}/${job.ticket}`);
+    const running = this.#sessions.reviews.get(`${job.workspace}/${job.ticket}`);
     if (!claudeReviews(job)) {
-      const gate = this.core.config.review ? await this.#gateStatus(job, running) : undefined;
+      const gate = this.#settings.config.review ? await this.#gateStatus(job, running) : undefined;
       return gate !== undefined ? { status: 'off', gate } : { status: 'off' };
     }
-    const record = await this.core.jobs.readReview(job.workspace, job.ticket, job.iteration);
+    const record = await this.#store.jobs.readReview(job.workspace, job.ticket, job.iteration);
     if (record !== undefined) {
       if (!('verdict' in record)) {
         return { status: 'failed', summary: record.error };
@@ -107,7 +111,7 @@ export class StatusPart {
     if (running?.reviewer === REVIEWER && running.iteration === job.iteration) {
       return { status: 'running' };
     }
-    if (!this.core.config.review) {
+    if (!this.#settings.config.review) {
       return { status: 'off' };
     }
     return job.state === 'awaiting_review' ? { status: 'running' } : undefined;
@@ -116,12 +120,12 @@ export class StatusPart {
   // The gate's status for check, after a clean Claude verdict: like the review's, undefined with the
   // gate off, skipped by the iteration's gate level, and when none will run.
   async #gateStatus(job: Job, running: RunningReview | undefined): Promise<ReviewStatus | undefined> {
-    const record = await this.core.jobs.readGate(job.workspace, job.ticket, job.iteration);
+    const record = await this.#store.jobs.readGate(job.workspace, job.ticket, job.iteration);
     if (record !== undefined) {
       return 'verdict' in record ? { status: 'done', verdict: record.verdict, summary: record.summary } : { status: 'failed', summary: record.error };
     }
     // Off, or skipped by the iteration's gate level (SF-092): no gate will run.
-    if (!this.core.config.gate.on || (await gateSkipped(this.core.jobs, job))) {
+    if (!this.#settings.config.gate.on || (await gateSkipped(this.#store.jobs, job))) {
       return undefined;
     }
     if (running?.reviewer === GATE_REVIEWER && running.iteration === job.iteration) {
@@ -132,8 +136,8 @@ export class StatusPart {
 
   async status(workspace?: string, ticket?: string): Promise<Job[]> {
     if (workspace !== undefined && ticket !== undefined) {
-      return [await this.core.job(workspace, ticket)];
+      return [await this.#store.job(workspace, ticket)];
     }
-    return this.core.jobs.list();
+    return this.#store.jobs.list();
   }
 }

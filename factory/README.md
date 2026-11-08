@@ -971,6 +971,23 @@ in `src/execution/`: `start.ts`, `turns.ts`, `reviews.ts`, `mr-steps.ts`, `hando
 reviewers' verdicts take the fix and the clean paths, and the user goes on with `sf say`, approve,
 abort or reset. None of them is an MCP tool.
 
+Each part takes only what it uses (SF-143): the narrow ports of `src/execution/ports.ts`, which one
+`Core` (`src/execution/core.ts`) implements, and the other parts it calls as interfaces of just
+those methods, declared next to it. `src/execution.ts` builds `Core` and wires the parts; where two
+parts call each other, the one built first reaches the other late, and a call before the wiring
+completes throws. The ports, and the parts that use each:
+
+- `JobStorePort` (`jobs`, `job`, `transition`): every part.
+- `LockPort` (`locked`, `gitLocked`, `lockProc`): every part but `status`.
+- `LivePort` (`live`, `reviews`, `appendLive`, `afterSession`): `status`, `turns`, `reviews`, `mr`,
+  `control`.
+- `RunnerPort` (`serveRunners`, `runnerJob`, `runners`): `start`, `turns`, `reviews`, `mr`,
+  `control`.
+- `NoticePort` (`announce`): `mr`.
+- `SettingsPort` (`config`, `handbook`, `resolve`, `maxRunning`): every part.
+- `StopPort` (`isStopping`, `setStopping`): `turns`, `reviews`, `mr`, `control` (only `control`
+  sets it, at `stop`).
+
 **Each job runs in its own process** (SF-042, `src/runner.ts`). `sf serve` creates the job at
 `start`; the job's turns, its reviews and its gate run in the job's **runner**, `sf run <workspace>
 <ticket>`, a detached child process (a session of its own: neither Ctrl+C nor the end of `sf serve`

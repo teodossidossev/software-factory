@@ -12,8 +12,8 @@ import { FactoryError } from '../errors.js';
 import { gateDecision } from '../gate-level.js';
 import { findBwrap, GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from '../gate.js';
 import { jobUserMessages } from '../job-stream.js';
-import { claudeReviews, type GateOverride, type GateRecord, type IterationMeta, type Job, type JobState, now, type ReviewRecord, type SimplifyRecord } from '../jobs.js';
-import { applyVerdict, entryItem, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, LEDGER_ID, FACTORY_PROBLEMS, settle, unappliedEntries, unsettled } from '../ledger.js';
+import { claudeReviews, type FileChange, type GateOverride, type GateRecord, type IterationMeta, type Job, type JobState, now, type PauseStep, type ReviewRecord, type SimplifyRecord } from '../jobs.js';
+import { applyVerdict, entryItem, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, LEDGER_ID, type LedgerEntry, FACTORY_PROBLEMS, settle, unappliedEntries, unsettled } from '../ledger.js';
 import { Redactor } from '../redact.js';
 import { readJobRules } from '../rules-docs.js';
 import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, type StructuredOutcome, unacceptedItems } from '../review.js';
@@ -24,11 +24,12 @@ import { codesWithAction, settleCodes, withoutDropped } from '../stops.js';
 import { mayTouch, parseFrontMatter, readTask, TASK_DIR } from '../task-file.js';
 import { TEST_CODES, type TestsRecord } from '../test-command.js';
 import { type UsageLimit, usageLimit } from '../usage-limit.js';
-import type { Core } from './core.js';
+import type { RunnerRequest } from '../runner.js';
+import type { JobStorePort, LivePort, LockPort, RunnerPort, SettingsPort, StopPort } from './ports.js';
 import { LEDGER_ACCEPT_CODES } from './errors.js';
 import { testsEvent } from './events.js';
 import { markedGroups } from './prompts.js';
-import { exists, type RunningReview } from './shared.js';
+import { exists, type FixOptions, type RunningReview } from './shared.js';
 
 // The stops whose settlement moves the job on by itself once nothing is left to settle
 // (src/stops.ts: escalated, review_disputed). A churn stop's settlement is only recorded: the job
@@ -45,17 +46,56 @@ const ACCEPT_CODES: readonly string[] = codesWithAction('accept');
 const refusalCode = (error: unknown): string | undefined =>
   error instanceof FactoryError && error.code === USER_SETTINGS_WEAKEN_SANDBOX ? error.code : undefined;
 
-export class ReviewsPart {
-  readonly core: Core;
+// What ReviewsPart calls of the other parts, by just those methods.
+export interface ReviewsControl {
+  park(job: Job, step: PauseStep, limit: UsageLimit): Promise<void>;
+  request(workspaceName: string, ticket: string, request: Exclude<RunnerRequest, { kind: 'turn' }>): Promise<unknown>;
+}
 
-  constructor(core: Core) {
-    this.core = core;
+export interface ReviewsMr {
+  prepareMr(job: Job, sensitive: string[], options?: { onAccepted?: () => Promise<void>; retry?: boolean }): Promise<{ state: JobState; iteration: number; branch: string }>;
+}
+
+export interface ReviewsStatus {
+  lastFiles(job: Job): Promise<FileChange[] | undefined>;
+}
+
+export interface ReviewsTurns {
+  fix(current: Job, content: string, options?: FixOptions): Promise<{ iteration: number; check_after_minutes: number }>;
+  goOn(job: Job, ledger: LedgerEntry[]): Promise<JobState>;
+}
+
+export interface ReviewsPeers {
+  readonly control: ReviewsControl;
+  readonly mr: ReviewsMr;
+  readonly status: ReviewsStatus;
+  readonly turns: ReviewsTurns;
+}
+
+export class ReviewsPart {
+  readonly #store: JobStorePort;
+  readonly #locks: LockPort;
+  readonly #sessions: LivePort;
+  readonly #runner: RunnerPort;
+  readonly #settings: SettingsPort;
+  readonly #stop: StopPort;
+  // The parts it calls (src/execution.ts wires them).
+  readonly #peers: ReviewsPeers;
+
+  constructor(store: JobStorePort, locks: LockPort, sessions: LivePort, runner: RunnerPort, settings: SettingsPort, stop: StopPort, peers: ReviewsPeers) {
+    this.#store = store;
+    this.#locks = locks;
+    this.#sessions = sessions;
+    this.#runner = runner;
+    this.#settings = settings;
+    this.#stop = stop;
+    this.#peers = peers;
   }
 
   // The job's images as prompt images (SF-065): the job's own copy, with the alt texts of the Task
   // text given (the one the agent reads); [] without images.
   imageRefs(job: Job, task: string): ImageRef[] {
-    return imageRefs(job.ticket, this.core.jobs.attachmentsDir(job.workspace, job.ticket), job.attachments ?? [], task);
+    return imageRefs(job.ticket, this.#store.jobs.attachmentsDir(job.workspace, job.ticket), job.attachments ?? [], task);
   }
 
   // Starts the review of the job's last iteration; it runs outside the lock. A review still running
@@ -64,8 +104,8 @@ export class ReviewsPart {
   // the go-on after a settlement, the end of a conflict turn, the pick-up of a runner) goes through
   // here. Only under the lock.
   async startReview(job: Job): Promise<void> {
-    this.core.runnerJob();
-    if (!this.core.config.review || this.core.stopping) {
+    this.#runner.runnerJob();
+    if (!this.#settings.config.review || this.#stop.isStopping()) {
       return;
     }
     if (!claudeReviews(job)) {
@@ -74,9 +114,9 @@ export class ReviewsPart {
       return;
     }
     const key = `${job.workspace}/${job.ticket}`;
-    this.core.reviews.get(key)?.controller.abort();
+    this.#sessions.reviews.get(key)?.controller.abort();
     const running: RunningReview = { reviewer: REVIEWER, iteration: job.iteration, controller: new AbortController() };
-    this.core.reviews.set(key, running);
+    this.#sessions.reviews.set(key, running);
     this.#review(job, running).catch((error: unknown) => console.error(error));
   }
 
@@ -84,12 +124,12 @@ export class ReviewsPart {
   // back to awaiting_review without a new iteration, the failed review.json goes, and the review
   // of the last iteration runs again.
   retryReview(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number }> {
-    return this.core.parts.control.request(workspaceName, ticket, { kind: 'review' }) as Promise<{ state: JobState; iteration: number }>;
+    return this.#peers.control.request(workspaceName, ticket, { kind: 'review' }) as Promise<{ state: JobState; iteration: number }>;
   }
 
   // sf review needs the review on and a job that a failed review handed to the user.
   checkRetryReview(job: Job): void {
-    if (!this.core.config.review) {
+    if (!this.#settings.config.review) {
       throw new FactoryError('review_off', 'The Claude review is off (SF_REVIEW=off); nothing would review the iteration.');
     }
     if (job.state !== 'needs_human' || job.error?.code !== 'review_failed') {
@@ -99,18 +139,18 @@ export class ReviewsPart {
 
   // The retry in the runner.
   retryReviewInRunner(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number }> {
-    return this.core.locked(async () => {
-      const job = await this.core.job(workspaceName, ticket);
+    return this.#locks.locked(async () => {
+      const job = await this.#store.job(workspaceName, ticket);
       this.checkRetryReview(job);
       if (job.worktree === null || !(await exists(job.worktree))) {
         throw new FactoryError('worktree_missing', `The worktree of ${workspaceName}/${ticket} is missing; sf reset the ticket and start again.`);
       }
-      await this.core.jobs.removeReview(workspaceName, ticket, job.iteration);
+      await this.#store.jobs.removeReview(workspaceName, ticket, job.iteration);
       // from: needs_human (checkRetryReview)
-      const next = await this.core.transition(job, 'awaiting_review', 'review_retry');
+      const next = await this.#store.transition(job, 'awaiting_review', 'review_retry');
       await this.startReview(next);
       // The job as the start left it: a gate over its budget hands it to the user at once.
-      const started = await this.core.job(workspaceName, ticket);
+      const started = await this.#store.job(workspaceName, ticket);
       return { state: started.state, iteration: started.iteration };
     });
   }
@@ -125,7 +165,7 @@ export class ReviewsPart {
   // goes unapplied (the Codex items, the gate's error, or the ledger's open findings) and a
   // gate_overridden event; MR preparation lists it in the MR text.
   acceptGate(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; branch: string }> {
-    return this.core.parts.control.request(workspaceName, ticket, { kind: 'accept' }) as Promise<{ state: JobState; iteration: number; branch: string }>;
+    return this.#peers.control.request(workspaceName, ticket, { kind: 'accept' }) as Promise<{ state: JobState; iteration: number; branch: string }>;
   }
 
   // The code the gate (or the ledger, SF-052, or the Fix round limit, SF-115) stopped with;
@@ -144,7 +184,7 @@ export class ReviewsPart {
   // At the limit the ledger's open entries alone (SF-131): the refused Fix wrote its items there as
   // open; the fixes the user decided and the disputed contests are not taken.
   async #ledgerUnapplied(job: Job, gate: GateRecord | undefined, code: string): Promise<Array<ReviewItem & { id?: string }>> {
-    const ledger = await this.core.jobs.readLedger(job.workspace, job.ticket);
+    const ledger = await this.#store.jobs.readLedger(job.workspace, job.ticket);
     if (code === 'iteration_limit') {
       return ledger.filter((entry) => entry.status === 'open').map((entry) => ({ id: entry.id, ...entryItem(entry) }));
     }
@@ -159,17 +199,17 @@ export class ReviewsPart {
 
   // The override in the runner.
   acceptGateInRunner(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; branch: string }> {
-    return this.core.locked(async () => {
-      const job = await this.core.job(workspaceName, ticket);
+    return this.#locks.locked(async () => {
+      const job = await this.#store.job(workspaceName, ticket);
       const code = this.checkAcceptGate(job);
-      const gate = job.iteration > 0 ? await this.core.jobs.readGate(workspaceName, ticket, job.iteration) : undefined;
+      const gate = job.iteration > 0 ? await this.#store.jobs.readGate(workspaceName, ticket, job.iteration) : undefined;
       const gateAccepted = gate !== undefined && 'verdict' in gate ? gate.accepted_sensitive : [];
       // The paths the deciding review accepted: Claude's (whatever its verdict at the Fix round
       // limit), or with the Claude review off the last gate.json's (SF-131). prepareMr refuses the
       // marked paths they leave (sensitive_unacknowledged).
       let accepted = gateAccepted;
       if (claudeReviews(job)) {
-        const review = job.iteration > 0 ? await this.core.jobs.readReview(workspaceName, ticket, job.iteration) : undefined;
+        const review = job.iteration > 0 ? await this.#store.jobs.readReview(workspaceName, ticket, job.iteration) : undefined;
         // Items the ledger dropped (they reopened an accepted risk, SF-052) never count.
         if (code !== 'iteration_limit') {
           if (review === undefined || !('verdict' in review) || actedVerdict(withoutDropped(review)) !== 'clean') {
@@ -190,14 +230,14 @@ export class ReviewsPart {
         // Skip (SF-055): MR preparation as after the clean gate, with the paths both reviewers
         // accepted; simplify.json is marked skipped, so the suggestions go into the MR text (mrIdle).
         // No gate override: the gate was clean.
-        const record = await this.core.jobs.readSimplify(workspaceName, ticket, job.iteration);
+        const record = await this.#store.jobs.readSimplify(workspaceName, ticket, job.iteration);
         const sensitive = [...new Set([...accepted, ...gateAccepted])];
-        return this.core.parts.mr.prepareMr(job, sensitive, { onAccepted: async () => {
+        return this.#peers.mr.prepareMr(job, sensitive, { onAccepted: async () => {
           const at = now();
           if (record !== undefined && 'suggestions' in record) {
-            await this.core.jobs.writeSimplify(workspaceName, ticket, job.iteration, { ...record, skipped_at: at });
+            await this.#store.jobs.writeSimplify(workspaceName, ticket, job.iteration, { ...record, skipped_at: at });
           }
-          await this.core.jobs.appendEvent(workspaceName, ticket, {
+          await this.#store.jobs.appendEvent(workspaceName, ticket, {
             ts: at, iteration: job.iteration, type: 'simplify_chosen', choice: 'skip', suggestions: record !== undefined && 'suggestions' in record ? record.suggestions.length : 0,
           });
         } });
@@ -206,9 +246,9 @@ export class ReviewsPart {
         ? await this.#ledgerUnapplied(job, gate, code)
         : gate === undefined ? [] : 'verdict' in gate ? gate.items : gate.error;
       const override: GateOverride = { at: now(), code, unapplied };
-      return this.core.parts.mr.prepareMr(job, accepted, { onAccepted: async () => {
-        await this.core.jobs.writeGateOverride(workspaceName, ticket, job.iteration, override);
-        await this.core.jobs.appendEvent(workspaceName, ticket, {
+      return this.#peers.mr.prepareMr(job, accepted, { onAccepted: async () => {
+        await this.#store.jobs.writeGateOverride(workspaceName, ticket, job.iteration, override);
+        await this.#store.jobs.appendEvent(workspaceName, ticket, {
           ts: override.at, iteration: job.iteration, type: 'gate_overridden', code: override.code,
           unapplied: Array.isArray(override.unapplied) ? override.unapplied.length : 0,
         });
@@ -224,18 +264,18 @@ export class ReviewsPart {
   // so the test step is skipped, and a tests event records it. Only under the lock.
   async #acceptTests(job: Job, accepted: string[], gate: GateRecord | undefined): Promise<{ state: JobState; iteration: number; branch: string }> {
     const { workspace: workspaceName, ticket, iteration } = job;
-    const record = await this.core.jobs.readTests(workspaceName, ticket, iteration);
+    const record = await this.#store.jobs.readTests(workspaceName, ticket, iteration);
     if (record === undefined || (record.outcome !== 'failed' && record.outcome !== 'unavailable')) {
       throw new FactoryError('invalid_state', `sf accept needs a failed run of the test command on the last iteration (${iteration}); ${record === undefined ? 'it has none' : `its run says ${record.outcome}`}.`);
     }
-    const overridden = (await this.core.jobs.readGateOverride(workspaceName, ticket, iteration)) !== undefined;
+    const overridden = (await this.#store.jobs.readGateOverride(workspaceName, ticket, iteration)) !== undefined;
     const gateAccepted = claudeReviews(job) && !overridden && gate !== undefined && 'verdict' in gate && actedVerdict(withoutDropped(gate)) === 'clean' ? gate.accepted_sensitive : [];
     const from = record.outcome;
-    return this.core.parts.mr.prepareMr(job, [...new Set([...accepted, ...gateAccepted])], { onAccepted: async () => {
+    return this.#peers.mr.prepareMr(job, [...new Set([...accepted, ...gateAccepted])], { onAccepted: async () => {
       const at = now();
       const acceptedRecord: TestsRecord = { ...record, outcome: 'accepted_failing', accepted_at: at, accepted_from: from };
-      await this.core.jobs.writeTests(workspaceName, ticket, iteration, acceptedRecord);
-      await this.core.jobs.appendEvent(workspaceName, ticket, { ...testsEvent(iteration, at, acceptedRecord), ts: at });
+      await this.#store.jobs.writeTests(workspaceName, ticket, iteration, acceptedRecord);
+      await this.#store.jobs.appendEvent(workspaceName, ticket, { ...testsEvent(iteration, at, acceptedRecord), ts: at });
     } });
   }
 
@@ -246,7 +286,7 @@ export class ReviewsPart {
   // decided, or else the review that was stopped runs again. After review_churn the settlement is
   // only recorded; sf say goes on.
   settle(workspaceName: string, ticket: string, id: string, decision: Decision, note = ''): Promise<{ state: JobState; id: string; status: string; waiting: string[] }> {
-    return this.core.parts.control.request(workspaceName, ticket, { kind: 'settle', id, decision, note }) as Promise<{ state: JobState; id: string; status: string; waiting: string[] }>;
+    return this.#peers.control.request(workspaceName, ticket, { kind: 'settle', id, decision, note }) as Promise<{ state: JobState; id: string; status: string; waiting: string[] }>;
   }
 
   // sf settle needs needs_human, a ledger id, accept or fix, and a note of plain text; the entry
@@ -268,29 +308,29 @@ export class ReviewsPart {
 
   // The settlement in the runner.
   settleInRunner(workspaceName: string, ticket: string, id: string, decision: Decision, note: string): Promise<{ state: JobState; id: string; status: string; waiting: string[] }> {
-    return this.core.locked(async () => {
-      const job = await this.core.job(workspaceName, ticket);
+    return this.#locks.locked(async () => {
+      const job = await this.#store.job(workspaceName, ticket);
       this.checkSettle(job, id, decision, note);
-      const ledger = settle(await this.core.jobs.readLedger(workspaceName, ticket), id, decision, note, now());
+      const ledger = settle(await this.#store.jobs.readLedger(workspaceName, ticket), id, decision, note, now());
       if (typeof ledger === 'string') {
         throw new FactoryError('invalid_state', ledger);
       }
-      await this.core.jobs.writeLedger(workspaceName, ticket, ledger);
+      await this.#store.jobs.writeLedger(workspaceName, ticket, ledger);
       const status = ledger.find((entry) => entry.id === id)!.status;
       const waiting = unsettled(ledger).map((entry) => entry.id);
       const code = job.error?.code;
       if (waiting.length > 0 || code === undefined || !SETTLE_CODES.includes(code)) {
         return { state: job.state, id, status, waiting };
       }
-      return { state: await this.core.parts.turns.goOn(job, ledger), id, status, waiting };
+      return { state: await this.#peers.turns.goOn(job, ledger), id, status, waiting };
     });
   }
 
   // The denial scope of a review, simplification or gate session in the job's worktree (SF-100,
   // SF-125).
   async #denialScope(job: Job, worktree: string): Promise<DenialScope> {
-    const { config } = this.core;
-    const workspace = await this.core.resolve(job.workspace);
+    const { config } = this.#settings;
+    const workspace = await this.#settings.resolve(job.workspace);
     return { session: 'job', workspace: job.workspace, checkout: workspace.workCheckout, worktree, stateDir: config.stateDir, worktreeRoot: config.worktreeRoot };
   }
 
@@ -303,20 +343,20 @@ export class ReviewsPart {
   // The Redactor of a reviewer's run in the job's worktree, with the dashboard and MCP tokens as
   // literal secrets (SF-125); a token file that is missing or unreadable adds none.
   async #redactor(job: Job): Promise<Redactor> {
-    return new Redactor({ cwd: job.worktree ?? '', secrets: await factoryTokens(this.core.config) });
+    return new Redactor({ cwd: job.worktree ?? '', secrets: await factoryTokens(this.#settings.config) });
   }
 
   // The material of a review of the job's last iteration, the Task file read in the worktree.
   async #reviewInput(job: Job, worktree: string): Promise<ReviewInput> {
     const { workspace: name, ticket, iteration } = job;
-    const { report, patch } = await this.core.jobs.readIteration(name, ticket, iteration);
-    const meta = await this.core.jobs.readMeta(name, ticket, iteration);
+    const { report, patch } = await this.#store.jobs.readIteration(name, ticket, iteration);
+    const meta = await this.#store.jobs.readMeta(name, ticket, iteration);
     return {
-      ticket, iteration, report, patch, patchTruncated: meta.patch_truncated, files: meta.files, handbook: this.core.handbook,
-      task: await readFile(join(worktree, TASK_DIR, `${ticket}.md`), 'utf8'), ledger: await this.core.jobs.readLedger(name, ticket),
-      rules: await readJobRules(this.core.jobs.dir(name, ticket)),
+      ticket, iteration, report, patch, patchTruncated: meta.patch_truncated, files: meta.files, handbook: this.#settings.handbook,
+      task: await readFile(join(worktree, TASK_DIR, `${ticket}.md`), 'utf8'), ledger: await this.#store.jobs.readLedger(name, ticket),
+      rules: await readJobRules(this.#store.jobs.dir(name, ticket)),
       // Every message sent up to and including the reviewed iteration (SF-112).
-      userMessages: (await jobUserMessages(this.core.jobs, name, ticket)).filter((m) => m.iteration <= iteration),
+      userMessages: (await jobUserMessages(this.#store.jobs, name, ticket)).filter((m) => m.iteration <= iteration),
     };
   }
 
@@ -333,11 +373,11 @@ export class ReviewsPart {
       const input = await this.#reviewInput(job, job.worktree);
       const denials = await this.#pathDenials(job, job.worktree);
       outcome = await runReview(reviewPrompt(input), {
-        cwd: job.worktree, claudePath: this.core.config.claudePath, sandbox: this.core.config.sandbox, model: this.core.config.reviewModel,
+        cwd: job.worktree, claudePath: this.#settings.config.claudePath, sandbox: this.#settings.config.sandbox, model: this.#settings.config.reviewModel,
         deny: denials.tools, filesystem: denials.sandbox, hooks: denials.hooks,
-        maxTurns: this.core.config.reviewMaxTurns, signal: running.controller.signal, images: this.imageRefs(job, input.task),
+        maxTurns: this.#settings.config.reviewMaxTurns, signal: running.controller.signal, images: this.imageRefs(job, input.task),
         // The session live in events.jsonl (SF-045).
-        onMessage: (message) => this.core.appendLive(job, 'review_message', redactor.reviewMessage(message)),
+        onMessage: (message) => this.#sessions.appendLive(job, 'review_message', redactor.reviewMessage(message)),
       });
     } catch (error) {
       const at = now();
@@ -357,8 +397,8 @@ export class ReviewsPart {
       outcome = { ...outcome, output: redactor.output(outcome.output) };
     }
     const ended = outcome;
-    await this.core.afterSession(job);
-    await this.core.locked(() => this.#reviewed(job, running, ended, limit, stop));
+    await this.#sessions.afterSession(job);
+    await this.#locks.locked(() => this.#reviewed(job, running, ended, limit, stop));
   }
 
   // The end of a review. A cancelled one leaves no trace. One that hit a usage limit (limit) while
@@ -369,26 +409,26 @@ export class ReviewsPart {
   async #reviewed(reviewed: Job, running: RunningReview, outcome: ReviewOutcome, limit?: UsageLimit, stop?: string): Promise<void> {
     const { workspace: name, ticket, iteration } = reviewed;
     const key = `${name}/${ticket}`;
-    if (this.core.reviews.get(key) !== running || running.controller.signal.aborted) {
+    if (this.#sessions.reviews.get(key) !== running || running.controller.signal.aborted) {
       return;
     }
-    this.core.reviews.delete(key);
-    const job = await this.core.jobs.read(name, ticket);
+    this.#sessions.reviews.delete(key);
+    const job = await this.#store.jobs.read(name, ticket);
     // Another job of the ticket (after a reset) is not this review's.
     if (job === undefined || job.created_at !== reviewed.created_at) {
       return;
     }
     const current = job.state === 'awaiting_review' && job.iteration === iteration;
     if (current && limit !== undefined) {
-      await this.core.parts.control.park(job, 'review', limit);
+      await this.#peers.control.park(job, 'review', limit);
       return;
     }
     const ignored = current ? {} : { ignored: true as const };
     const record: ReviewRecord = outcome.ok
       ? { reviewer: REVIEWER, ...outcome.output, cost_usd: outcome.costUsd, started_at: outcome.startedAt, ended_at: outcome.endedAt }
       : { reviewer: REVIEWER, error: outcome.message };
-    await this.core.jobs.writeReview(name, ticket, iteration, record);
-    await this.core.jobs.appendEvent(name, ticket, outcome.ok
+    await this.#store.jobs.writeReview(name, ticket, iteration, record);
+    await this.#store.jobs.appendEvent(name, ticket, outcome.ok
       ? { ts: now(), iteration, type: 'review', reviewer: REVIEWER, ...(await this.#verdictOf(job, outcome.output)), items: outcome.output.items.length, ...ignored }
       : { ts: now(), iteration, type: 'review_failed', reviewer: REVIEWER, error: outcome.message, ...ignored });
     if (!current) {
@@ -396,7 +436,7 @@ export class ReviewsPart {
     }
     if (!outcome.ok) {
       // from: awaiting_review (current)
-      await this.core.transition(job, 'needs_human', 'verdict', { code: stop ?? 'review_failed', message: outcome.message });
+      await this.#store.transition(job, 'needs_human', 'verdict', { code: stop ?? 'review_failed', message: outcome.message });
       return;
     }
     await this.applying(job, () => this.afterClaude(job, outcome.output));
@@ -406,13 +446,13 @@ export class ReviewsPart {
   // last iteration not in accepted, nor accepted by the user as a risk (SF-052), as fix items.
   async unaccepted(job: Job, accepted: string[]): Promise<ReviewItem[]> {
     const byUser = await this.#markedAcceptedByUser(job);
-    return unacceptedItems((await this.core.parts.status.lastFiles(job)) ?? [], [...accepted, ...byUser]);
+    return unacceptedItems((await this.#peers.status.lastFiles(job)) ?? [], [...accepted, ...byUser]);
   }
 
   // The marked paths (undeclared sensitive, outside the Task's scope) whose ledger entry the user
   // settled as an accepted risk.
   async #markedAcceptedByUser(job: Job): Promise<string[]> {
-    return (await this.core.jobs.readLedger(job.workspace, job.ticket))
+    return (await this.#store.jobs.readLedger(job.workspace, job.ticket))
       .filter((entry) => entry.status === 'accepted_risk' && FACTORY_PROBLEMS.includes(entry.problem))
       .map((entry) => entry.path);
   }
@@ -434,10 +474,10 @@ export class ReviewsPart {
     const applied = await this.#applyLedger(job, REVIEWER, output);
     if (applied.kind === 'stop') {
       // from: awaiting_review (#reviewed current, #pickUp through resumable)
-      await this.core.transition(job, 'needs_human', 'verdict', { code: applied.code, message: applied.message });
+      await this.#store.transition(job, 'needs_human', 'verdict', { code: applied.code, message: applied.message });
     } else if (applied.kind === 'fix') {
-      await this.core.parts.turns.fix(job, fixContent(summary, applied.items), { ledger: applied.ledger });
-    } else if (this.core.config.gate.on && (await this.#gateRuns(job))) {
+      await this.#peers.turns.fix(job, fixContent(summary, applied.items), { ledger: applied.ledger });
+    } else if (this.#settings.config.gate.on && (await this.#gateRuns(job))) {
       await this.startGate(job, output);
     } else {
       // The gate off, or skipped by the iteration's gate level (SF-092): the same way to Clean.
@@ -453,7 +493,7 @@ export class ReviewsPart {
   // Task's may_touch, and recorded with its gate_level event. Only under the lock.
   async #gateRuns(job: Job): Promise<boolean> {
     const { workspace, ticket, iteration } = job;
-    const recorded = await this.core.jobs.readGateLevel(workspace, ticket, iteration);
+    const recorded = await this.#store.jobs.readGateLevel(workspace, ticket, iteration);
     if (recorded !== undefined) {
       return recorded.ran;
     }
@@ -461,25 +501,25 @@ export class ReviewsPart {
       // The gate is the job's only review (SF-131): it always runs, at level full.
       const at = now();
       const reasons = ['no Claude review'];
-      await this.core.jobs.writeGateLevel(workspace, ticket, iteration, { level: 'full', ran: true, reasons, files: null, lines: null, at });
-      await this.core.jobs.appendEvent(workspace, ticket, { ts: at, iteration, type: 'gate_level', level: 'full', ran: true, reasons });
+      await this.#store.jobs.writeGateLevel(workspace, ticket, iteration, { level: 'full', ran: true, reasons, files: null, lines: null, at });
+      await this.#store.jobs.appendEvent(workspace, ticket, { ts: at, iteration, type: 'gate_level', level: 'full', ran: true, reasons });
       return true;
     }
     let meta: IterationMeta | undefined;
     try {
-      meta = await this.core.jobs.readMeta(workspace, ticket, iteration);
+      meta = await this.#store.jobs.readMeta(workspace, ticket, iteration);
     } catch (error) {
       // No file list: the level cannot be known, so it is full.
       console.error(error);
     }
-    const { config } = this.core;
+    const { config } = this.#settings;
     const decision = gateDecision({
       files: meta?.files, patchTruncated: meta?.patch_truncated === true, mayTouch: await this.#mayTouch(job), setting: config.gateLevel, fullPaths: config.gateFullPaths,
       sensitivePaths: config.sensitivePaths,
     }, job.gate_fixes);
     const at = now();
-    await this.core.jobs.writeGateLevel(workspace, ticket, iteration, { ...decision, at });
-    await this.core.jobs.appendEvent(workspace, ticket, { ts: at, iteration, type: 'gate_level', level: decision.level, ran: decision.ran, reasons: decision.reasons });
+    await this.#store.jobs.writeGateLevel(workspace, ticket, iteration, { ...decision, at });
+    await this.#store.jobs.appendEvent(workspace, ticket, { ts: at, iteration, type: 'gate_level', level: decision.level, ran: decision.ran, reasons: decision.reasons });
     return decision.ran;
   }
 
@@ -488,7 +528,7 @@ export class ReviewsPart {
   // (the level is then full).
   async #mayTouch(job: Job): Promise<string[] | undefined> {
     try {
-      return mayTouch(parseFrontMatter(await readTask(await this.core.resolve(job.workspace), job.ticket)) ?? new Map<string, string>());
+      return mayTouch(parseFrontMatter(await readTask(await this.#settings.resolve(job.workspace), job.ticket)) ?? new Map<string, string>());
     } catch (error) {
       console.error(error);
       return undefined;
@@ -502,17 +542,17 @@ export class ReviewsPart {
   async #applyLedger(job: Job, reviewer: typeof REVIEWER | typeof GATE_REVIEWER, output: ReviewOutput): Promise<Applied> {
     const { workspace, ticket, iteration } = job;
     const applied = applyVerdict({
-      ledger: await this.core.jobs.readLedger(workspace, ticket), items: output.items, extra: await this.unaccepted(job, output.accepted_sensitive), reviewer, iteration,
+      ledger: await this.#store.jobs.readLedger(workspace, ticket), items: output.items, extra: await this.unaccepted(job, output.accepted_sensitive), reviewer, iteration,
     });
     if (applied.dropped.length > 0) {
-      const record = reviewer === REVIEWER ? await this.core.jobs.readReview(workspace, ticket, iteration) : await this.core.jobs.readGate(workspace, ticket, iteration);
+      const record = reviewer === REVIEWER ? await this.#store.jobs.readReview(workspace, ticket, iteration) : await this.#store.jobs.readGate(workspace, ticket, iteration);
       if (record !== undefined && 'verdict' in record) {
         const marked = { ...record, dropped: applied.dropped };
-        await (reviewer === REVIEWER ? this.core.jobs.writeReview(workspace, ticket, iteration, marked as ReviewRecord) : this.core.jobs.writeGate(workspace, ticket, iteration, marked as GateRecord));
+        await (reviewer === REVIEWER ? this.#store.jobs.writeReview(workspace, ticket, iteration, marked as ReviewRecord) : this.#store.jobs.writeGate(workspace, ticket, iteration, marked as GateRecord));
       }
     }
     if (applied.kind !== 'fix') {
-      await this.core.jobs.writeLedger(workspace, ticket, applied.ledger);
+      await this.#store.jobs.writeLedger(workspace, ticket, applied.ledger);
     }
     return applied;
   }
@@ -528,11 +568,11 @@ export class ReviewsPart {
         return;
       }
       console.error(error);
-      const latest = await this.core.jobs.read(job.workspace, job.ticket);
+      const latest = await this.#store.jobs.read(job.workspace, job.ticket);
       if (latest?.state === 'awaiting_review') {
         const code = error instanceof FactoryError ? error.code : 'review_failed';
         // from: awaiting_review (the guard above)
-        await this.core.transition(latest, 'needs_human', 'verdict', { code, message: `The review's verdict could not be applied: ${(error as Error).message}`.slice(0, 1000) });
+        await this.#store.transition(latest, 'needs_human', 'verdict', { code, message: `The review's verdict could not be applied: ${(error as Error).message}`.slice(0, 1000) });
       }
     }
   }
@@ -541,29 +581,29 @@ export class ReviewsPart {
   // without one as the job's only review (SF-131: claude undefined); it runs outside the lock. A job
   // whose gate runs used up SF_GATE_MAX_TOKENS goes to the user instead. Only under the lock.
   async startGate(job: Job, claude?: ReviewOutput): Promise<void> {
-    if (job.gate_tokens >= this.core.config.gateMaxTokens) {
+    if (job.gate_tokens >= this.#settings.config.gateMaxTokens) {
       // from: awaiting_review (afterClaude, and goOn after its transition)
-      await this.core.transition(job, 'needs_human', 'verdict', {
+      await this.#store.transition(job, 'needs_human', 'verdict', {
         code: 'gate_budget',
-        message: `The gate runs of this job used ${job.gate_tokens} tokens, the limit of SF_GATE_MAX_TOKENS (${this.core.config.gateMaxTokens}); the user decides how to go on.`,
+        message: `The gate runs of this job used ${job.gate_tokens} tokens, the limit of SF_GATE_MAX_TOKENS (${this.#settings.config.gateMaxTokens}); the user decides how to go on.`,
       });
       return;
     }
-    this.core.runnerJob();
-    if (this.core.stopping) {
+    this.#runner.runnerJob();
+    if (this.#stop.isStopping()) {
       return;
     }
     const key = `${job.workspace}/${job.ticket}`;
-    this.core.reviews.get(key)?.controller.abort();
+    this.#sessions.reviews.get(key)?.controller.abort();
     const running: RunningReview = { reviewer: GATE_REVIEWER, iteration: job.iteration, controller: new AbortController() };
-    this.core.reviews.set(key, running);
+    this.#sessions.reviews.set(key, running);
     this.#gate(job, running, claude).catch((error: unknown) => console.error(error));
   }
 
   // Runs the gate, then applies its outcome under the lock.
   async #gate(job: Job, running: RunningReview, claude: ReviewOutput | undefined): Promise<void> {
     const { workspace: name, ticket, iteration } = job;
-    const gate = this.core.config.gate;
+    const gate = this.#settings.config.gate;
     let outcome: GateOutcome;
     const redactor = await this.#redactor(job);
     try {
@@ -574,18 +614,18 @@ export class ReviewsPart {
         throw new Error('the job has no worktree or base commit');
       }
       const input = await this.#reviewInput(job, job.worktree);
-      const dir = this.core.jobs.iterationDir(name, ticket, iteration);
+      const dir = this.#store.jobs.iterationDir(name, ticket, iteration);
       const images = this.imageRefs(job, input.task).map((image) => image.path);
       // Codex inside bubblewrap under the sessions' read denials (SF-125); with the sandbox off
       // (SF_SANDBOX=off), unwrapped.
-      const wrapper = this.core.config.sandbox === undefined ? undefined : await gateWrapperFor(await this.#denialScope(job, job.worktree), {
+      const wrapper = this.#settings.config.sandbox === undefined ? undefined : await gateWrapperFor(await this.#denialScope(job, job.worktree), {
         worktree: job.worktree, codexPath: gate.codexPath, codexHome: process.env.CODEX_HOME || join(homedir(), '.codex'), iterationDir: dir, images, tmp: tmpdir(),
       });
       outcome = await runGate(gatePrompt({ ...input, baseCommit: job.base_commit, onlyReviewer: claude === undefined }), {
-        codexPath: gate.codexPath, cwd: job.worktree, dir, model: this.core.config.codexModel, images, wrapper, bwrapPath: findBwrap(),
-        timeoutMs: this.core.config.gateTimeoutMs, signal: running.controller.signal,
+        codexPath: gate.codexPath, cwd: job.worktree, dir, model: this.#settings.config.codexModel, images, wrapper, bwrapPath: findBwrap(),
+        timeoutMs: this.#settings.config.gateTimeoutMs, signal: running.controller.signal,
         // The run live in events.jsonl (SF-045).
-        onEvent: (event) => this.core.appendLive(job, 'gate_event', redactor.codexEvent(event)),
+        onEvent: (event) => this.#sessions.appendLive(job, 'gate_event', redactor.codexEvent(event)),
       });
     } catch (error) {
       const at = now();
@@ -606,8 +646,8 @@ export class ReviewsPart {
       outcome = { ...outcome, output: redactor.output(outcome.output) };
     }
     const ended = outcome;
-    await this.core.afterSession(job);
-    await this.core.locked(() => this.#gated(job, running, claude, ended, limit));
+    await this.#sessions.afterSession(job);
+    await this.#locks.locked(() => this.#gated(job, running, claude, ended, limit));
   }
 
   // The end of a gate run. A cancelled one leaves no trace. Otherwise its tokens count for the job,
@@ -622,11 +662,11 @@ export class ReviewsPart {
   async #gated(gated: Job, running: RunningReview, claude: ReviewOutput | undefined, outcome: GateOutcome, limit?: UsageLimit): Promise<void> {
     const { workspace: name, ticket, iteration } = gated;
     const key = `${name}/${ticket}`;
-    if (this.core.reviews.get(key) !== running || running.controller.signal.aborted) {
+    if (this.#sessions.reviews.get(key) !== running || running.controller.signal.aborted) {
       return;
     }
-    this.core.reviews.delete(key);
-    const read = await this.core.jobs.read(name, ticket);
+    this.#sessions.reviews.delete(key);
+    const read = await this.#store.jobs.read(name, ticket);
     if (read === undefined || read.created_at !== gated.created_at) {
       return;
     }
@@ -634,23 +674,23 @@ export class ReviewsPart {
     // A run that hit a usage limit is discarded whole (SF-072): its tokens are not charged either,
     // so a parked and rerun round never counts toward SF_GATE_MAX_TOKENS.
     if (current && limit !== undefined) {
-      await this.core.parts.control.park(read, 'gate', limit);
+      await this.#peers.control.park(read, 'gate', limit);
       return;
     }
     let job = read;
     const used = outcome.tokens.input + outcome.tokens.output;
     if (used > 0) {
       job = { ...job, gate_tokens: job.gate_tokens + used };
-      await this.core.jobs.write(job);
+      await this.#store.jobs.write(job);
     }
     const ignored = current ? {} : { ignored: true as const };
-    const model = this.core.config.codexModel !== undefined ? { model: this.core.config.codexModel } : {};
+    const model = this.#settings.config.codexModel !== undefined ? { model: this.#settings.config.codexModel } : {};
     const times = { started_at: outcome.startedAt, ended_at: outcome.endedAt };
     const record: GateRecord = outcome.ok
       ? { reviewer: GATE_REVIEWER, ...outcome.output, ...model, tokens: outcome.tokens, ...times }
       : { reviewer: GATE_REVIEWER, error: outcome.message, ...model, tokens: outcome.tokens, ...times };
-    await this.core.jobs.writeGate(name, ticket, iteration, record);
-    await this.core.jobs.appendEvent(name, ticket, outcome.ok
+    await this.#store.jobs.writeGate(name, ticket, iteration, record);
+    await this.#store.jobs.appendEvent(name, ticket, outcome.ok
       ? { ts: now(), iteration, type: 'review', reviewer: GATE_REVIEWER, ...(await this.#verdictOf(job, outcome.output)), items: outcome.output.items.length, ...ignored }
       : { ts: now(), iteration, type: 'review_failed', reviewer: GATE_REVIEWER, error: outcome.message, ...ignored });
     if (!current) {
@@ -658,14 +698,14 @@ export class ReviewsPart {
     }
     if (!outcome.ok) {
       // from: awaiting_review (current)
-      await this.core.transition(job, 'needs_human', 'verdict', { code: outcome.code ?? 'gate_failed', message: outcome.message });
+      await this.#store.transition(job, 'needs_human', 'verdict', { code: outcome.code ?? 'gate_failed', message: outcome.message });
       return;
     }
-    if (job.gate_tokens > this.core.config.gateMaxTokens) {
+    if (job.gate_tokens > this.#settings.config.gateMaxTokens) {
       // from: awaiting_review (current)
-      await this.core.transition(job, 'needs_human', 'verdict', {
+      await this.#store.transition(job, 'needs_human', 'verdict', {
         code: 'gate_budget',
-        message: `The gate runs of this job used ${job.gate_tokens} tokens, over the limit of SF_GATE_MAX_TOKENS (${this.core.config.gateMaxTokens}); the gate's verdict (${outcome.output.verdict}) was not applied.`,
+        message: `The gate runs of this job used ${job.gate_tokens} tokens, over the limit of SF_GATE_MAX_TOKENS (${this.#settings.config.gateMaxTokens}); the gate's verdict (${outcome.output.verdict}) was not applied.`,
       });
       return;
     }
@@ -675,20 +715,20 @@ export class ReviewsPart {
     const applied = await this.#applyLedger(job, GATE_REVIEWER, outcome.output);
     if (applied.kind === 'stop') {
       // from: awaiting_review (current)
-      await this.core.transition(job, 'needs_human', 'verdict', { code: applied.code, message: applied.message });
+      await this.#store.transition(job, 'needs_human', 'verdict', { code: applied.code, message: applied.message });
       return;
     }
     const fixing = applied.kind === 'fix';
-    if (fixing && claude !== undefined && job.gate_fixes >= this.core.config.gateMaxRounds) {
-      const message = `The gate asked for a fix ${job.gate_fixes + 1} times, over the limit of SF_GATE_MAX_ROUNDS (${this.core.config.gateMaxRounds}); the fix was not applied. Claude: ${oneLine(claude.summary)} Codex: ${oneLine(summary)}`;
+    if (fixing && claude !== undefined && job.gate_fixes >= this.#settings.config.gateMaxRounds) {
+      const message = `The gate asked for a fix ${job.gate_fixes + 1} times, over the limit of SF_GATE_MAX_ROUNDS (${this.#settings.config.gateMaxRounds}); the fix was not applied. Claude: ${oneLine(claude.summary)} Codex: ${oneLine(summary)}`;
       // from: awaiting_review (current)
-      await this.core.transition(job, 'needs_human', 'verdict', { code: 'gate_rounds', message: message.slice(0, 2000) });
+      await this.#store.transition(job, 'needs_human', 'verdict', { code: 'gate_rounds', message: message.slice(0, 2000) });
       return;
     }
     const decided = job;
     await this.applying(decided, async () => {
       if (applied.kind === 'fix') {
-        await this.core.parts.turns.fix(decided, fixContent(summary, applied.items, 'Codex'), { counts: { gate_fixes: decided.gate_fixes + 1 }, ledger: applied.ledger });
+        await this.#peers.turns.fix(decided, fixContent(summary, applied.items, 'Codex'), { counts: { gate_fixes: decided.gate_fixes + 1 }, ledger: applied.ledger });
       } else {
         await this.afterClean(decided, claude === undefined ? accepted : [...new Set([...claude.accepted_sensitive, ...accepted])]);
       }
@@ -702,19 +742,19 @@ export class ReviewsPart {
   // run does. Only under the lock.
   async afterClean(job: Job, sensitive: string[]): Promise<void> {
     const { workspace, ticket, iteration } = job;
-    const record = await this.core.jobs.readSimplify(workspace, ticket, iteration);
+    const record = await this.#store.jobs.readSimplify(workspace, ticket, iteration);
     if (record !== undefined) {
       await this.#offerSimplify(job, record, sensitive);
     } else if (job.simplify_iteration === iteration) {
       const at = now();
       const error = 'The simplification pass was interrupted (its runner ended while it ran); it runs once per job.';
-      await this.core.jobs.writeSimplify(workspace, ticket, iteration, { reviewer: SIMPLIFIER, error, started_at: at, ended_at: at });
-      await this.core.jobs.appendEvent(workspace, ticket, { ts: at, iteration, type: 'simplify', reviewer: SIMPLIFIER, suggestions: 0, dropped: 0, error });
-      await this.core.parts.mr.prepareMr(job, sensitive);
+      await this.#store.jobs.writeSimplify(workspace, ticket, iteration, { reviewer: SIMPLIFIER, error, started_at: at, ended_at: at });
+      await this.#store.jobs.appendEvent(workspace, ticket, { ts: at, iteration, type: 'simplify', reviewer: SIMPLIFIER, suggestions: 0, dropped: 0, error });
+      await this.#peers.mr.prepareMr(job, sensitive);
     } else if (this.#simplifyDue(job)) {
       await this.#startSimplify(job, sensitive);
     } else {
-      await this.core.parts.mr.prepareMr(job, sensitive);
+      await this.#peers.mr.prepareMr(job, sensitive);
     }
   }
 
@@ -723,14 +763,14 @@ export class ReviewsPart {
   // simplify_iteration, written before a pass starts, is still absent. So it runs at most once per job,
   // whether that run ended, failed, was interrupted or the job moved on.
   #simplifyDue(job: Job): boolean {
-    return this.core.config.simplify && job.fixes >= 1 && job.simplify_iteration === undefined;
+    return this.#settings.config.simplify && job.fixes >= 1 && job.simplify_iteration === undefined;
   }
 
   // The suggestions the user skipped (SF-055), with the iteration the pass ran on: the simplify.json
   // marked skipped_at by sf accept. A Simplify, or an answer by sf say, leaves none.
   async skippedSimplifications(job: Job): Promise<{ suggestions: Suggestion[]; iteration: number } | undefined> {
     for (let number = job.iteration; number >= 1; number -= 1) {
-      const record = await this.core.jobs.readSimplify(job.workspace, job.ticket, number);
+      const record = await this.#store.jobs.readSimplify(job.workspace, job.ticket, number);
       if (record !== undefined) {
         return 'suggestions' in record && record.skipped_at !== undefined ? { suggestions: record.suggestions, iteration: number } : undefined;
       }
@@ -742,16 +782,16 @@ export class ReviewsPart {
   // written first, so the pass is used up before it runs. It runs outside the lock, as the reviews
   // do, and stops with them (abort, reset). Only under the lock.
   async #startSimplify(current: Job, sensitive: string[]): Promise<void> {
-    this.core.runnerJob();
-    if (this.core.stopping) {
+    this.#runner.runnerJob();
+    if (this.#stop.isStopping()) {
       return;
     }
     const job: Job = { ...current, simplify_iteration: current.iteration };
-    await this.core.jobs.write(job);
+    await this.#store.jobs.write(job);
     const key = `${job.workspace}/${job.ticket}`;
-    this.core.reviews.get(key)?.controller.abort();
+    this.#sessions.reviews.get(key)?.controller.abort();
     const running: RunningReview = { reviewer: SIMPLIFIER, iteration: job.iteration, controller: new AbortController() };
-    this.core.reviews.set(key, running);
+    this.#sessions.reviews.set(key, running);
     this.#runSimplifyPass(job, running, sensitive).catch((error: unknown) => console.error(error));
   }
 
@@ -759,16 +799,16 @@ export class ReviewsPart {
   // Fix section N, the files iteration N+1 changed against iteration N (their Patches compared).
   async #simplifyInput(job: Job, worktree: string): Promise<SimplifyInput> {
     const { workspace, ticket, iteration } = job;
-    const { patch } = await this.core.jobs.readIteration(workspace, ticket, iteration);
-    const meta = await this.core.jobs.readMeta(workspace, ticket, iteration);
+    const { patch } = await this.#store.jobs.readIteration(workspace, ticket, iteration);
+    const meta = await this.#store.jobs.readMeta(workspace, ticket, iteration);
     const task = await readFile(join(worktree, TASK_DIR, `${ticket}.md`), 'utf8');
     const fixes: FixFiles[] = [];
     for (const fix of fixNumbers(task)) {
       let files: string[] | undefined;
       if (fix >= 1 && fix + 1 <= iteration) {
         try {
-          const before = (await this.core.jobs.readIteration(workspace, ticket, fix)).patch.toString('utf8');
-          const after = (await this.core.jobs.readIteration(workspace, ticket, fix + 1)).patch.toString('utf8');
+          const before = (await this.#store.jobs.readIteration(workspace, ticket, fix)).patch.toString('utf8');
+          const after = (await this.#store.jobs.readIteration(workspace, ticket, fix + 1)).patch.toString('utf8');
           files = changedBetween(before, after);
         } catch {
           files = undefined;
@@ -776,7 +816,7 @@ export class ReviewsPart {
       }
       fixes.push({ fix, files });
     }
-    return { ticket, iteration, task, patch, patchTruncated: meta.patch_truncated, ledger: await this.core.jobs.readLedger(workspace, ticket), fixes };
+    return { ticket, iteration, task, patch, patchTruncated: meta.patch_truncated, ledger: await this.#store.jobs.readLedger(workspace, ticket), fixes };
   }
 
   // Runs the pass (the review's session settings: SF_REVIEW_MODEL, SF_REVIEW_MAX_TURNS, the
@@ -793,10 +833,10 @@ export class ReviewsPart {
       const input = await this.#simplifyInput(job, job.worktree);
       const denials = await this.#pathDenials(job, job.worktree);
       outcome = await runSimplify(simplifyPrompt(input), {
-        cwd: job.worktree, claudePath: this.core.config.claudePath, sandbox: this.core.config.sandbox, model: this.core.config.reviewModel,
+        cwd: job.worktree, claudePath: this.#settings.config.claudePath, sandbox: this.#settings.config.sandbox, model: this.#settings.config.reviewModel,
         deny: denials.tools, filesystem: denials.sandbox, hooks: denials.hooks,
-        maxTurns: this.core.config.reviewMaxTurns, signal: running.controller.signal, images: this.imageRefs(job, input.task),
-        onMessage: (message) => this.core.appendLive(job, 'review_message', redactor.reviewMessage(message), SIMPLIFIER),
+        maxTurns: this.#settings.config.reviewMaxTurns, signal: running.controller.signal, images: this.imageRefs(job, input.task),
+        onMessage: (message) => this.#sessions.appendLive(job, 'review_message', redactor.reviewMessage(message), SIMPLIFIER),
       });
     } catch (error) {
       const at = now();
@@ -813,8 +853,8 @@ export class ReviewsPart {
       outcome = { ...outcome, output: redactor.output(outcome.output) };
     }
     const ended = outcome;
-    await this.core.afterSession(job);
-    await this.core.locked(() => this.#simplifyEnded(job, running, sensitive, ended, limit, stop));
+    await this.#sessions.afterSession(job);
+    await this.#locks.locked(() => this.#simplifyEnded(job, running, sensitive, ended, limit, stop));
   }
 
   // The end of the pass. A cancelled one leaves no trace; one the job moved on from leaves only its
@@ -826,21 +866,21 @@ export class ReviewsPart {
   async #simplifyEnded(started: Job, running: RunningReview, sensitive: string[], outcome: StructuredOutcome<SimplifyOutput>, limit?: UsageLimit, stop?: string): Promise<void> {
     const { workspace, ticket, iteration } = started;
     const key = `${workspace}/${ticket}`;
-    if (this.core.reviews.get(key) !== running || running.controller.signal.aborted) {
+    if (this.#sessions.reviews.get(key) !== running || running.controller.signal.aborted) {
       return;
     }
-    this.core.reviews.delete(key);
-    const job = await this.core.jobs.read(workspace, ticket);
+    this.#sessions.reviews.delete(key);
+    const job = await this.#store.jobs.read(workspace, ticket);
     if (job === undefined || job.created_at !== started.created_at) {
       return;
     }
     const current = job.state === 'awaiting_review' && job.iteration === iteration;
     if (current && limit !== undefined) {
-      await this.core.parts.control.park(job, 'simplify', limit);
+      await this.#peers.control.park(job, 'simplify', limit);
       return;
     }
-    const guarded = outcome.ok ? guardSuggestions(outcome.output.suggestions, await this.core.jobs.readLedger(workspace, ticket)) : undefined;
-    await this.core.jobs.appendEvent(workspace, ticket, {
+    const guarded = outcome.ok ? guardSuggestions(outcome.output.suggestions, await this.#store.jobs.readLedger(workspace, ticket)) : undefined;
+    await this.#store.jobs.appendEvent(workspace, ticket, {
       ts: now(), iteration, type: 'simplify', reviewer: SIMPLIFIER, suggestions: guarded?.kept.length ?? 0, dropped: guarded?.dropped.length ?? 0,
       ...(outcome.ok ? {} : { error: outcome.message }), ...(current ? {} : { ignored: true as const }),
     });
@@ -850,10 +890,10 @@ export class ReviewsPart {
     const record: SimplifyRecord = outcome.ok
       ? { reviewer: SIMPLIFIER, summary: outcome.output.summary, suggestions: guarded!.kept, dropped: guarded!.dropped, cost_usd: outcome.costUsd, model: outcome.model, started_at: outcome.startedAt, ended_at: outcome.endedAt }
       : { reviewer: SIMPLIFIER, error: outcome.message, started_at: outcome.startedAt, ended_at: outcome.endedAt };
-    await this.core.jobs.writeSimplify(workspace, ticket, iteration, record);
+    await this.#store.jobs.writeSimplify(workspace, ticket, iteration, record);
     if (stop !== undefined && !outcome.ok) {
       // from: awaiting_review (current)
-      await this.core.transition(job, 'needs_human', 'verdict', { code: stop, message: outcome.message });
+      await this.#store.transition(job, 'needs_human', 'verdict', { code: stop, message: outcome.message });
       return;
     }
     await this.applying(job, () => this.#offerSimplify(job, record, sensitive));
@@ -863,18 +903,18 @@ export class ReviewsPart {
   // none, or a failed run, goes on to MR preparation. Only under the lock.
   async #offerSimplify(job: Job, record: SimplifyRecord, sensitive: string[]): Promise<void> {
     if (!('suggestions' in record) || record.suggestions.length === 0) {
-      await this.core.parts.mr.prepareMr(job, sensitive);
+      await this.#peers.mr.prepareMr(job, sensitive);
       return;
     }
     // from: awaiting_review (afterClean from afterClaude, #gated and #pickUp; #simplifyEnded current)
-    await this.core.transition(job, 'needs_human', 'verdict', { code: SIMPLIFY_CODE, message: offerMessage(record.suggestions) });
+    await this.#store.transition(job, 'needs_human', 'verdict', { code: SIMPLIFY_CODE, message: offerMessage(record.suggestions) });
   }
 
   // The user's Simplify on the offer (sf simplify, the dashboard's Simplify, SF-055): one Fix section
   // "Simplify" with the suggestions, each recorded in the ledger as accepted_risk of reviewer
   // simplify, and the normal pipeline (the Implementer, the Claude review, the gate). Never twice.
   simplify(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; check_after_minutes: number }> {
-    return this.core.parts.control.request(workspaceName, ticket, { kind: 'simplify' }) as Promise<{ state: JobState; iteration: number; check_after_minutes: number }>;
+    return this.#peers.control.request(workspaceName, ticket, { kind: 'simplify' }) as Promise<{ state: JobState; iteration: number; check_after_minutes: number }>;
   }
 
   // sf simplify needs needs_human with simplify_offered.
@@ -886,14 +926,14 @@ export class ReviewsPart {
 
   // The Simplify in the runner.
   applySimplify(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; check_after_minutes: number }> {
-    return this.core.locked(async () => {
-      const job = await this.core.job(workspaceName, ticket);
+    return this.#locks.locked(async () => {
+      const job = await this.#store.job(workspaceName, ticket);
       this.checkSimplify(job);
-      const ledger = await this.core.jobs.readLedger(workspaceName, ticket);
+      const ledger = await this.#store.jobs.readLedger(workspaceName, ticket);
       if (ledger.some(isSimplification)) {
         throw new FactoryError('invalid_state', 'The simplification was applied on this job already; it runs once per job.');
       }
-      const record = await this.core.jobs.readSimplify(workspaceName, ticket, job.iteration);
+      const record = await this.#store.jobs.readSimplify(workspaceName, ticket, job.iteration);
       if (record === undefined || !('suggestions' in record) || record.suggestions.length === 0) {
         throw new FactoryError('invalid_state', `Iteration ${job.iteration} has no suggestion of the simplification pass.`);
       }
@@ -901,8 +941,8 @@ export class ReviewsPart {
         throw new FactoryError('worktree_missing', `The worktree of ${workspaceName}/${ticket} is missing; sf reset the ticket and start again.`);
       }
       const fix = simplifyFix(ledger, record.summary, record.suggestions, job.iteration, now());
-      const result = await this.core.parts.turns.fix(job, fix.content, { ledger: fix.ledger, fromStop: true, title: SIMPLIFY_TITLE, overLimit: true });
-      await this.core.jobs.appendEvent(workspaceName, ticket, { ts: now(), iteration: job.iteration, type: 'simplify_chosen', choice: 'simplify', suggestions: record.suggestions.length });
+      const result = await this.#peers.turns.fix(job, fix.content, { ledger: fix.ledger, fromStop: true, title: SIMPLIFY_TITLE, overLimit: true });
+      await this.#store.jobs.appendEvent(workspaceName, ticket, { ts: now(), iteration: job.iteration, type: 'simplify_chosen', choice: 'simplify', suggestions: record.suggestions.length });
       return { state: 'working', ...result };
     });
   }

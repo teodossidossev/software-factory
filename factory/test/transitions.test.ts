@@ -54,15 +54,15 @@ function literal(argument: string): string | undefined {
   return /^'([a-z_]+)'$/.exec(argument.trim())?.[1];
 }
 
-// Every #transition(, core.transition( (the parts of src/execution/, SF-089) and checkTransition(
-// call of the sources, declarations and comments aside, with its second and third arguments read
-// as literals.
+// Every #transition(, core.transition( (the parts of src/execution/, SF-089), #store.transition(
+// (the parts through their JobStorePort since SF-143) and checkTransition( call of the sources,
+// declarations and comments aside, with its second and third arguments read as literals.
 async function callSites(): Promise<CallSite[]> {
   const dir = join(ROOT, 'src');
   const sites: CallSite[] = [];
   for (const name of (await readdir(dir, { recursive: true })).filter((file) => file.endsWith('.ts')).sort()) {
     const source = await readFile(join(dir, name), 'utf8');
-    for (const match of source.matchAll(/(?:#transition|\bcore\.transition|\bcheckTransition)\(/g)) {
+    for (const match of source.matchAll(/(?:#transition|\bcore\.transition|#store\.transition|\bcheckTransition)\(/g)) {
       const before = source.slice(source.lastIndexOf('\n', match.index) + 1, match.index);
       if (/(?:async |function )$/.test(before) || before.trimStart().startsWith('//')) {
         continue;

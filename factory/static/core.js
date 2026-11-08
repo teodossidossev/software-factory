@@ -1,6 +1,6 @@
 // core.js, the first of the dashboard's scripts (DASHBOARD_SCRIPTS in src/dashboard.ts): the
-// constants, the state, the small DOM and HTTP helpers and the connection tag. Each of them is a
-// classic script, loaded in order with defer, and shares the page's globals with the others.
+// constants, the state, the small DOM, format and HTTP helpers and the connection tag. Each of them
+// is a classic script, loaded in order with defer, and shares the page's globals with the others.
 
 // Software Factory dashboard v3 (SF-077, SF-078), the port of docs/design/dashboard-v3/prototype.html:
 // the top bar (the summary, the connection, the workspace filter, Archived, Workspaces and New
@@ -196,6 +196,28 @@ function el(tag, className, text) {
   return node;
 }
 
+// A button with its data-* attributes, for the delegated click listener.
+function button(className, text, data = {}) {
+  const node = el('button', className, text);
+  node.type = 'button';
+  for (const [name, value] of Object.entries(data)) {
+    node.dataset[name] = value;
+  }
+  return node;
+}
+
+// An SVG element: its attributes (class too) only through setAttribute.
+function svgEl(tag, attributes = {}, text = undefined) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [name, value] of Object.entries(attributes)) {
+    node.setAttribute(name, String(value));
+  }
+  if (text !== undefined) {
+    node.textContent = text;
+  }
+  return node;
+}
+
 const keyOf = (job) => `${job.workspace}/${job.ticket}`;
 const jobPath = (key) => key.split('/').map(encodeURIComponent).join('/');
 // "2026-11-04 12:14:25" of a stored timestamp (ISO 8601 UTC) in the browser's local time (SF-049);
@@ -219,6 +241,15 @@ function timeEl(ts) {
   }
   return node;
 }
+// A duration as the prototype writes it: "14 min", "1 h 4 min".
+const dur = (ms) => {
+  const m = Math.max(0, Math.round(ms / 60000));
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
+};
+// An estimated cost (the jobs payload's cost_usd): "$1.23", or "—" without one.
+const money = (value) => (typeof value === 'number' ? `$${value.toFixed(2)}` : '—');
+const firstLine = (text) => (typeof text === 'string' ? text.split('\n')[0].trim() : '');
+const counted = (n, word, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
 const pendingId = (action, key) => `${action}\n${key}`;
 
 async function getText(path) {
@@ -227,6 +258,10 @@ async function getText(path) {
     throw new Error(`${path}: HTTP ${response.status}`);
   }
   return response.text();
+}
+
+async function getJson(path) {
+  return JSON.parse(await getText(path));
 }
 
 // A refusal of an action by the factory: its code and message, shown as they are.

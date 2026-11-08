@@ -11,7 +11,11 @@
   <script src="job-screens.js" defer></script>
   <script src="job-page.js" defer></script>
   <script src="board.js" defer></script>
-  <script src="app.js" defer></script>
+  <script src="routing.js" defer></script>
+  <script src="ticket-page.js" defer></script>
+  <script src="reports.js" defer></script>
+  <script src="setup.js" defer></script>
+  <script src="main.js" defer></script>
 </head>
 <body>
   <div id="board">
@@ -88,13 +92,13 @@
         <div id="acts-why" class="why"></div>
       </div>
     </div>
-    <!-- The Changes screen (SF-079): app.js builds the tree, the divider and the diff pane in it. -->
+    <!-- The Changes screen (SF-079): job-screens.js builds the tree, the divider and the diff pane in it. -->
     <div class="scr" id="scrChanges" hidden></div>
-    <!-- The Merge request screen (SF-080): app.js builds the form, the side panel and the bar in it. -->
+    <!-- The Merge request screen (SF-080): job-screens.js builds the form, the side panel and the bar in it. -->
     <div class="scr" id="scrMr" hidden></div>
   </section>
 
-  <!-- The planned ticket's page (SF-081): app.js builds its header, the Task file and the plan in it. -->
+  <!-- The planned ticket's page (SF-081): ticket-page.js builds its header, the Task file and the plan in it. -->
   <section id="ticket" hidden aria-label="Planned ticket"></section>
 
   <!-- The morning digest (SF-103): the stored digests, Repositories and My daily. -->

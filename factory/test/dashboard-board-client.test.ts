@@ -1,4 +1,4 @@
-// Behaviour of the v3 board in static/app.js (SF-046, SF-077), run under node:vm against the fake page
+// Behaviour of the v3 board in static/board.js (SF-046, SF-077), run under node:vm against the fake page
 // of test/support/fake-dom.ts: the five columns from the job states and the tickets, Done's last
 // eight, each card kind (the Now line and the tool calls, the reason and the one button of STOPS for
 // every stop code, ready, paused, done), the iteration shown, the cost and the elapsed time, the

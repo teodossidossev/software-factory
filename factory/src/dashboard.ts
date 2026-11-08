@@ -78,7 +78,7 @@ const SECURITY_HEADERS = {
 // The dashboard's script (SF-136): classic scripts that share the page's globals, in load order.
 // dashboard.html has one deferred <script> per entry, in this order; nothing at the top level of a
 // file uses a name defined in a later one.
-export const DASHBOARD_SCRIPTS = ['core.js', 'job-screens.js', 'job-page.js', 'board.js', 'app.js'] as const;
+export const DASHBOARD_SCRIPTS = ['core.js', 'job-screens.js', 'job-page.js', 'board.js', 'routing.js', 'ticket-page.js', 'reports.js', 'setup.js', 'main.js'] as const;
 const STATIC_FILES: Record<string, { file: string; type: string }> = {
   '': { file: 'dashboard.html', type: 'text/html; charset=utf-8' },
   ...Object.fromEntries(DASHBOARD_SCRIPTS.map((file) => [file, { file, type: 'text/javascript; charset=utf-8' }])),

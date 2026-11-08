@@ -1,12 +1,13 @@
-// Behaviour of the job page's header and its Changes and Merge request screens in static/app.js
-// (SF-078), run under node:vm against the fake page of test/support/fake-dom.ts: the URL hash that
-// opens the page, the header for each state (the sentence, the iteration from shownIteration, the
-// cost, the elapsed time, the branch that copies its checkout command), the screen switch and its
-// keys s, c and m, Merge request off without MR text; the old MR view (Copy MR text, the Codex
-// items not applied) inside its screen until SF-080, and that the old Changes view is gone (SF-079:
-// the Changes screen is tested in dashboard-changes-client.test.ts). The Stream, its stop blocks
-// and the composer are tested in dashboard-stream-client.test.ts. Script checks, not browser
-// acceptance: the manual steps are in factory/README.md.
+// Behaviour of the job page's header and its Changes and Merge request screens in
+// static/job-page.js and static/job-screens.js (SF-078), run under node:vm against the fake page of
+// test/support/fake-dom.ts: the URL hash that opens the page, the header for each state (the
+// sentence, the iteration from shownIteration, the cost, the elapsed time, the branch that copies
+// its checkout command), the screen switch and its keys s, c and m, Merge request off without MR
+// text; the old MR view (Copy MR text, the Codex items not applied) inside its screen until SF-080,
+// and that the old Changes view is gone (SF-079: the Changes screen is tested in
+// dashboard-changes-client.test.ts). The Stream, its stop blocks and the composer are tested in
+// dashboard-stream-client.test.ts. Script checks, not browser acceptance: the manual steps are in
+// factory/README.md.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { served, servedDetail } from './support/dashboard-client.js';

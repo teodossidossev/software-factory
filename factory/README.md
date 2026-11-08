@@ -3251,11 +3251,19 @@ retargets a request, and an answer that arrives for another job changes nothing 
 The page is plain HTML, CSS and JavaScript from `static/`, with no external resources, under
 `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self';
 img-src 'self' blob:` (`blob:` for New ticket's thumbnails before upload, SF-064) and `Cache-Control: no-store`; every value is rendered as text.
-The page's JavaScript is five classic scripts that share its globals, loaded with `defer` in the
-order of `DASHBOARD_SCRIPTS` (`src/dashboard.ts`, SF-136): `core.js` (constants, state, helpers),
-`job-screens.js` (Task check, Changes, Merge request, Stream), `job-page.js` (header, composer,
-hand-over, job actions), `board.js` (board, cards, queue, toast) and `app.js` (routing, ticket page,
-digest, Stats, setup, start); the server serves those and no other script.
+The page's JavaScript is nine classic scripts that share its globals, loaded with `defer` in the
+order of `DASHBOARD_SCRIPTS` (`src/dashboard.ts`, SF-136, SF-137); the server serves those and no
+other script, and none is longer than 2,500 lines:
+
+- `core.js`: constants, state, the DOM, format and HTTP helpers, the connection tag.
+- `job-screens.js`: what the job page reads, Task check, Changes, Merge request, Stream.
+- `job-page.js`: the job page's header, composer, hand-over panel, job actions.
+- `board.js`: board, cards, workspaces and dependencies, queue, toast.
+- `routing.js`: the view shown, routing, the delegated click, input, change and key handlers.
+- `ticket-page.js`: Markdown preview, the planned ticket page, a ticket's images.
+- `reports.js`: the morning digest and the Stats page.
+- `setup.js`: the drawer and the setup (workspaces, new ticket, archived, ticket actions).
+- `main.js`: the stream, the job selected, the page's start and loading; it loads last.
 
 Endpoints under `/d/<token>/`. The read endpoints are GET only (anything else `405` with
 `Allow: GET`); the action endpoints are POST only (anything else `405` with `Allow: POST`; GET,

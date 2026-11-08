@@ -1,12 +1,13 @@
-// Behaviour of the job page's Stream in static/app.js (SF-078), run under node:vm against the fake
-// page of test/support/fake-dom.ts: SF-082's entries read page by page from
-// api/jobs/<ws>/<ticket>/stream, then live from the stream's entries events (a reconnect resumes at
-// the next line, an entry is never shown twice, a tool_result joins its tool by id), each entry type
-// as the prototype's entryHtml draws it, the separators, the keys j, k, G and Enter, the toggles,
-// the path links to Changes, the implement prompt's Task; the stop block of every needs_human code
-// (its label, sentence and what it shows inline) and the composer: its actions per state, its inline
-// confirmations, the posts and their bodies, Ctrl+Enter, Escape, Refresh state and the reasons of
-// disabled buttons. Script checks, not browser acceptance: the manual steps are in factory/README.md.
+// Behaviour of the job page's Stream in static/job-screens.js and static/job-page.js (SF-078), run
+// under node:vm against the fake page of test/support/fake-dom.ts: SF-082's entries read page by
+// page from api/jobs/<ws>/<ticket>/stream, then live from the stream's entries events (a reconnect
+// resumes at the next line, an entry is never shown twice, a tool_result joins its tool by id),
+// each entry type as the prototype's entryHtml draws it, the separators, the keys j, k, G and
+// Enter, the toggles, the path links to Changes, the implement prompt's Task; the stop block of
+// every needs_human code (its label, sentence and what it shows inline) and the composer: its
+// actions per state, its inline confirmations, the posts and their bodies, Ctrl+Enter, Escape,
+// Refresh state and the reasons of disabled buttons. Script checks, not browser acceptance: the
+// manual steps are in factory/README.md.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ACTION_IDS, canonicalStop, STOPS as STOP_ROWS } from '../src/stops.js';

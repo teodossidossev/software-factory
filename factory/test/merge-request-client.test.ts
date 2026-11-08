@@ -1,11 +1,12 @@
-// The merge request in static/app.js (SF-048), run under node:vm against the fake page of
-// test/support/fake-dom.ts: Create merge request, Merge… and Refresh MR status in the job page's
-// composer (SF-078) with their inline confirmations (the title, the target branch and the number),
-// the link, the actions off with the missing variable named in their title, and the buttons and the
-// link on the Your turn and Done board cards, whose confirmations open on the job's page (SF-077).
-// The Merge request screen (SF-080): its fields and hints per state, Edit | Preview, the side
-// panel, the live checks, Save (the button and Ctrl+S), Reset, the two pushes and the diff against
-// the factory's text. Script checks, not browser acceptance.
+// The merge request in static/job-page.js, static/job-screens.js and static/board.js (SF-048), run
+// under node:vm against the fake page of test/support/fake-dom.ts: Create merge request, Merge… and
+// Refresh MR status in the job page's composer (SF-078) with their inline confirmations (the title,
+// the target branch and the number), the link, the actions off with the missing variable named in
+// their title, and the buttons and the link on the Your turn and Done board cards, whose
+// confirmations open on the job's page (SF-077). The Merge request screen (SF-080): its fields and
+// hints per state, Edit | Preview, the side panel, the live checks, Save (the button and Ctrl+S),
+// Reset, the two pushes and the diff against the factory's text. Script checks, not browser
+// acceptance.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { COMMIT_TYPES, MANUAL_CLAIM, MAX_HEADER_CHARS, MR_REQUIRED_HEADINGS } from '../src/rules.js';

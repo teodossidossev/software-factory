@@ -29,7 +29,7 @@ export function ticketConversation(workspace: string, ticket: string, request?: 
 // Above this length the prefilled link is not offered; the message is copied by hand instead.
 export const MAX_CONVERSATION_URL = 7500;
 
-// The ChatGPT composer prefilled with the message; sending it may still need Enter. static/app.js
+// The ChatGPT composer prefilled with the message; sending it may still need Enter. static/core.js
 // keeps the same prefix to check the URL it links to.
 export const CHATGPT_PREFILL_URL = 'https://chatgpt.com/?q=';
 

@@ -54,7 +54,7 @@ const row = (kind: StopKind, actions: StopAction[], extra: Partial<Omit<StopRow,
 
 // The rows, in the order the derived lists keep (the accept codes as sf accept names them, the
 // Retry rows as sf retry does). The
-// dashboard's STOPS (static/app.js) has the words of each row, under the same keys.
+// dashboard's STOPS (static/board.js) has the words of each row, under the same keys.
 export const STOPS = {
   escalated: row('decision', [SEND, ABORT], { settle: { resumes: true } }),
   gate_rounds: row('decision', [ACCEPT, SEND, ABORT], { group: 'gate' }),

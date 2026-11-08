@@ -1,4 +1,4 @@
-// The Stats page in static/app.js (SF-117), run under node:vm against the fake page of
+// The Stats page in static/reports.js (SF-117), run under node:vm against the fake page of
 // test/support/fake-dom.ts: #stats and the Stats button, the period and workspace reads (an older
 // answer ignored), the warnings first with their links, the second opinion, the Claude review
 // on/off table (SF-132), the stage and role tables, the Table toggle, the SVG charts

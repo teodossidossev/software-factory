@@ -213,6 +213,21 @@ measure); the page and `sf digest --now` show each digest's cost.
 - **Temporary files**: the Task check's temporary checkouts are removed when the check ends; files
   kept by `sf restart --keep-files` are under `<state dir>/tmp/`.
 
+### Leftover sandbox processes
+
+Claude Code's Bash sandbox (`bwrap`) outlives the `claude` process of a session that ended: the
+leftovers are reparented to the systemd user manager, each with its `sh` and `socat` children. The
+factory ends them itself: an orphaned `bwrap` of your user (its parent is pid 1 or `systemd`) whose
+command line names a path under the factory's worktree root or state directory, with everything it
+started, gets SIGTERM, then SIGKILL 2 s later. A sandbox of a running session, another user's
+process and a bwrap naming neither directory (a Flatpak app's) are never touched; an orphaned
+sandbox of your own Claude Code session counts when it names a path under the state directory, as
+its deny list does. It runs shortly after each query of a job's session, after a job's session is
+stopped (abort, pause, restart, reset), and every 10 minutes while `sf serve` runs; each run that ends
+something logs `sandbox reaper: ended …`, and a failure logs `sandbox reaper: failed: …` (in
+`journalctl --user -u software-factory` for the service). More:
+[Jobs](../../factory/README.md#jobs).
+
 ## Backup
 
 | What | Why |

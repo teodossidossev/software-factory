@@ -12,6 +12,7 @@ import { SIMPLIFIER } from '../ledger.js';
 import { gitBusy } from '../mr.js';
 import { factoryPrompt } from '../prompts.js';
 import { DENIED_TOOLS } from '../rules.js';
+import { factoryRoots, reapOrphanedSandboxes } from '../sandbox-reaper.js';
 import type { Workspace } from '../registry.js';
 import { readJobRules } from '../rules-docs.js';
 import { actedVerdict, REVIEWER } from '../review.js';
@@ -401,6 +402,9 @@ export class ControlPart {
     this.core.live.delete(key);
     await live?.session.close();
     await this.core.runners?.stop(workspace, ticket);
+    // The Bash sandboxes the session's Claude Code left (SF-141), before the config lock check
+    // below, as one of them may still hold the lock open.
+    await this.#reapSandboxes();
     // The session stopped without an idle outcome (abort, pause, restart, reset): the sandbox's
     // leftover config lock goes as after a turn's end, unless another job runs (SF-085).
     const job = await this.core.jobs.read(workspace, ticket).catch(() => undefined);
@@ -622,6 +626,13 @@ export class ControlPart {
     const sessions = [...this.core.live.values()].map((live) => live.session);
     this.core.live.clear();
     await Promise.all(sessions.map((session) => session.close()));
+    await this.#reapSandboxes();
     await this.core.locked(async () => undefined);
+  }
+
+  // Ends the orphaned Bash sandboxes of the factory's sessions (SF-141): those under its worktree
+  // root or state directory. Never throws.
+  #reapSandboxes(): Promise<number[]> {
+    return reapOrphanedSandboxes(factoryRoots(this.core.config));
   }
 }

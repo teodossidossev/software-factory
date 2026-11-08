@@ -50,6 +50,7 @@ import { Setup } from './setup.js';
 import { handoverLines, limitLine, type StatusRow, statusRows } from './status.js';
 import { fileSummaryLines } from './patch.js';
 import { prepareTaskChecksDir } from './sandbox-denials.js';
+import { factoryRoots, reapOrphanedSandboxes, REAP_EVERY_MS } from './sandbox-reaper.js';
 import { CheckStore, checkLines, checkSettings, refuseDraft, runTaskCheck, TaskChecks } from './task-check.js';
 import { AutoChecks, planCheck } from './task-check-auto.js';
 import { TicketHistory } from './ticket-history.js';
@@ -338,6 +339,10 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     markerWatch.start();
   }
   explainer.start().catch((error: unknown) => console.error(error));
+  // The leftovers of the sessions' Bash sandboxes (SF-141), also those no session end caught: every
+  // REAP_EVERY_MS while sf serve runs. The reaper never throws.
+  const sandboxReaper = setInterval(() => void reapOrphanedSandboxes(factoryRoots(config)), REAP_EVERY_MS);
+  sandboxReaper.unref();
 
   let stopping = false;
   const stop = (signal: NodeJS.Signals): void => {
@@ -353,6 +358,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     autoChecks?.close();
     digestSchedule.close();
     explainer.close();
+    clearInterval(sandboxReaper);
     Promise.all([server.close(), socket.close(), dashboard?.close()]).then(
       () => process.exit(0),
       (error: unknown) => {

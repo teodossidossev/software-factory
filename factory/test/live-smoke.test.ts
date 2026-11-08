@@ -614,46 +614,24 @@ test('a signal in Cleanup: the active job is aborted before its reset, Cleanup g
   }
 });
 
-// The pid of a live process whose command line holds these arguments in a row and whose HOME is
-// home (Linux /proc), or undefined.
-async function findProcess(home: string, args: string[]): Promise<number | undefined> {
-  const needle = `\0${args.join('\0')}\0`;
-  for (const name of (await readdir('/proc')).filter((entry) => /^\d+$/.test(entry))) {
-    const command = await readFile(`/proc/${name}/cmdline`, 'utf8').catch(() => '');
-    if (command.includes(needle) && (await readFile(`/proc/${name}/environ`, 'utf8').catch(() => '')).split('\0').includes(`HOME=${home}`)) {
-      return Number(name);
-    }
-  }
-  return undefined;
-}
-
 test('the first signal while Cleanup\'s sf reset runs: the job was aborted before the reset (sf serve runs a reset it was asked for to its end), exit 1', async () => {
-  let home = '';
-  let caught: number | undefined;
-  let watching = false;
+  let sent = false;
   const ran = await smoke('smoke-reset-signal', ['--keep'], async (env) => {
-    home = env.home;
     await script(env, CLEAN_TURNS);
     // The review fails: the job waits in needs_human, active, when Cleanup starts.
     await reviewScript(env, [{ output: CHECK_READY }, { noOutput: true }, { noOutput: true }]);
   }, {}, (text, child) => {
-    if (watching || !/^Dashboard: SKIP/m.test(text)) {
-      return;
+    // Cleanup prints the abort's line and starts its sf reset in the same tick (live-smoke.ts,
+    // cleanup), and stdout to a pipe is written at once: the smoke's signal handler, which runs in a
+    // later tick, finds the reset already started as its running child sf command. The test waits
+    // for that line, an event, instead of scanning /proc for the short-lived sf reset.
+    if (!sent && /^Dashboard: SKIP[^\n]*\njob aborted \(sf abort smoke SMOKE-1\)\n/m.test(text)) {
+      sent = true;
+      child.kill('SIGTERM');
     }
-    watching = true;
-    // Watch for Cleanup's sf reset and signal the smoke while it runs.
-    void (async () => {
-      const deadline = Date.now() + 30_000;
-      while (caught === undefined && Date.now() < deadline && child.exitCode === null) {
-        caught = await findProcess(home, ['reset', 'smoke', 'SMOKE-1']);
-      }
-      if (caught !== undefined) {
-        child.kill('SIGTERM');
-      }
-    })();
   });
   try {
-    assert.notEqual(caught, undefined, `Cleanup's sf reset was not seen running:\n${ran.stdout}`);
+    assert.equal(sent, true, `Cleanup's abort line was never seen:\n${ran.stdout}`);
     assert.equal(ran.code, 1, ran.stdout + ran.stderr);
     assert.deepEqual(statuses(ran), ['PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
     assert.match(ran.stdout, /^Dashboard: SKIP[^\n]*\njob aborted \(sf abort smoke SMOKE-1\)\nCleanup: PASS/m);

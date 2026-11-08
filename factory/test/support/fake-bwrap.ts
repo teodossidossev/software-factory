@@ -10,9 +10,12 @@
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, relative, sep } from 'node:path';
 
+// The options of the gate's wrapper (src/sandbox-denials.ts) and of the test command's sandbox
+// (bwrapArgs, src/test-command.ts). --unshare-net, --remount-ro and --chdir change no denial: the
+// bwrap script runs the command from --chdir's folder.
 const ARITY: Record<string, number> = {
-  '--die-with-parent': 0, '--unshare-pid': 0, '--unshare-user': 0, '--new-session': 0,
-  '--tmpfs': 1, '--dev': 1, '--proc': 1, '--ro-bind': 2, '--bind': 2,
+  '--die-with-parent': 0, '--unshare-pid': 0, '--unshare-net': 0, '--unshare-user': 0, '--new-session': 0,
+  '--tmpfs': 1, '--remount-ro': 1, '--chdir': 1, '--dev': 1, '--proc': 1, '--ro-bind': 2, '--bind': 2,
 };
 
 const argv = process.argv.slice(2);

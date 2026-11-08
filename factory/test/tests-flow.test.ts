@@ -1,16 +1,17 @@
 // End-to-end tests of the workspace's test command (SF-128) with the real sf serve and CLI, the fake
-// Claude and a real bubblewrap sandbox: a pass reaches ready with ### Checks in the MR text; a
-// failure writes a Tests Fix and the next iteration runs; the third failure stops the job
-// (tests_failed) and Accept prepares the MR; Retry after tests_unavailable runs the command again; a
-// check answers while a slow run is under way, and Abort during the run leaves no process; a
-// timeout is a failure; a workspace without the key prepares today's MR text. Todos where bwrap
-// cannot create a sandbox: there is no seam that runs the command outside one.
+// Claude and the fake bubblewrap the harness puts first on PATH (test/support/fake-bwrap.ts, SF-125),
+// which takes the sandbox's arguments and runs the command: a pass reaches ready with ### Checks in
+// the MR text; a failure writes a Tests Fix and the next iteration runs; the third failure stops the
+// job (tests_failed) and Accept prepares the MR; Retry after tests_unavailable runs the command
+// again; a check answers while a slow run is under way, and Abort during the run leaves no process; a
+// timeout is a failure; a workspace without the key prepares today's MR text. The real sandbox is
+// test/test-command.test.ts's.
 import assert from 'node:assert/strict';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { saveRegistry } from '../src/registry.js';
-import { bwrapWorks, call, type Env, git, newEnv, newRepo, putTask, reviewScript, runCli, script, serve, stop, waitFor } from './support/harness.js';
+import { bwrapLog, call, type Env, git, newEnv, newRepo, putTask, reviewScript, runCli, script, serve, stop, waitFor } from './support/harness.js';
 
 const TITLE = 'feat(T-1): Change the README';
 
@@ -22,14 +23,6 @@ function mrText(header = TITLE): string {
     '## Checklist', '- [x] Branch name', '- [x] Target branch', '',
   ].join('\n');
 }
-
-const sandboxTest = (name: string, body: () => Promise<void>): void => {
-  if (bwrapWorks) {
-    test(name, body);
-  } else {
-    test(name, { todo: 'bwrap cannot create a sandbox on this machine' });
-  }
-};
 
 // Workspace app with an origin and, unless command is undefined, its test_command.
 async function testsEnv(name: string, command: string | undefined, extra: Record<string, string> = {}): Promise<{ env: Env; repo: string }> {
@@ -77,7 +70,7 @@ async function until(check: () => Promise<boolean>, what: string, ms = 20_000): 
 // A `sleep 60` only this test runs: 60 seconds and a fraction nobody else uses.
 const slowSleep = (): string[] => ['sleep', `60.${String(Math.floor(Math.random() * 1_000_000)).padStart(6, '0')}`];
 
-sandboxTest('a passing run reaches ready_for_human_review with ### Checks in the MR text and the commit', async () => {
+test('a passing run reaches ready_for_human_review with ### Checks in the MR text and the commit', async () => {
   const { env, repo } = await testsEnv('tests-pass', 'exit 0');
   await script(env, [{ write: { 'README.md': 'hello world\n' }, text: 'iteration 1' }, { write: { '.software-factory/T-1.mr.md': mrText() }, text: 'prepared' }]);
   const served = await serve(env);
@@ -88,6 +81,10 @@ sandboxTest('a passing run reaches ready_for_human_review with ### Checks in the
     const ready = await waitFor(served, 'T-1', 'ready_for_human_review', 1);
     const record = await testsRecord(env, 1);
     assert.deepEqual([record.command, record.outcome, record.exit_code, record.timed_out], ['exit 0', 'passed', 0, false]);
+    // The command ran through bwrap (the fake, first on PATH) with the sandbox's arguments.
+    const runs = await bwrapLog(env);
+    assert.equal(runs.length, 1, JSON.stringify(runs));
+    assert.deepEqual([runs[0]!.argv.slice(0, 3), runs[0]!.argv.at(-1)], [['--die-with-parent', '--unshare-pid', '--unshare-net'], 'exit 0']);
     const text = await readFile(join(jobDir(env), 'mr.md'), 'utf8');
     assert.match(text, /\n## Testing\nNot checked: nothing to run\.\n\n### Checks\n- `exit 0`: passed in \d+ s on iteration 1\.\n\n## Screenshots\n/u);
     assert.match(git(repo, 'log', '-1', '--format=%B', ready.branch), /### Checks\n- `exit 0`: passed in \d+ s on iteration 1\./u);
@@ -99,7 +96,7 @@ sandboxTest('a passing run reaches ready_for_human_review with ### Checks in the
   }
 });
 
-sandboxTest('a failure writes a Tests Fix and the next iteration runs; the third failure is tests_failed, and Accept prepares the MR', async () => {
+test('a failure writes a Tests Fix and the next iteration runs; the third failure is tests_failed, and Accept prepares the MR', async () => {
   const { env, repo } = await testsEnv('tests-fail', 'echo "not ok 1"; exit 1', { SF_REVIEW: 'on', SF_MAX_ITERATIONS: '1' });
   await script(env, [
     { write: { 'README.md': 'one\n' }, text: 'iteration 1' },
@@ -140,7 +137,7 @@ sandboxTest('a failure writes a Tests Fix and the next iteration runs; the third
   }
 });
 
-sandboxTest('exit 127 stops the job as tests_unavailable; Retry runs the command again', async () => {
+test('exit 127 stops the job as tests_unavailable; Retry runs the command again', async () => {
   // Retry needs a clean Claude review of the iteration.
   const { env, repo } = await testsEnv('tests-retry', 'exit 127', { SF_REVIEW: 'on' });
   await script(env, [{ write: { 'README.md': 'hello world\n' }, text: 'iteration 1' }, { write: { '.software-factory/T-1.mr.md': mrText() }, text: 'prepared' }]);
@@ -168,7 +165,7 @@ sandboxTest('exit 127 stops the job as tests_unavailable; Retry runs the command
   }
 });
 
-sandboxTest('a check answers while a slow run is under way, and Abort during the run leaves no process and no record', async () => {
+test('a check answers while a slow run is under way, and Abort during the run leaves no process and no record', async () => {
   const sleep = slowSleep();
   const { env } = await testsEnv('tests-abort', sleep.join(' '));
   await script(env, [{ write: { 'README.md': 'hello world\n' }, text: 'iteration 1' }]);
@@ -192,7 +189,7 @@ sandboxTest('a check answers while a slow run is under way, and Abort during the
   }
 });
 
-sandboxTest('a run that times out is a failure: a Tests Fix names the timeout', async () => {
+test('a run that times out is a failure: a Tests Fix names the timeout', async () => {
   const sleep = slowSleep();
   const { env, repo } = await testsEnv('tests-timeout', sleep.join(' '), { SF_TEST_TIMEOUT_MS: '1000' });
   await script(env, [{ write: { 'README.md': 'one\n' }, text: 'iteration 1' }, { write: { 'README.md': 'two\n' }, text: 'iteration 2' }]);

@@ -24,10 +24,13 @@ const COMPUTED: readonly string[] = [
   'runner.ts: process.execPath',
   'cli.ts: script',
   'cli.ts: sf',
-  'gate.ts: options.codexPath',
+  // The gate's Codex (SF_CODEX or codex on PATH) or the bwrap that wraps it (findBwrap: bwrap on PATH).
+  'gate.ts: command',
   'gate.ts: codexPath',
   'browser.ts: LAUNCHER',
   'live-smoke.ts: process.execPath',
+  // The bwrap of the Gate sandbox step (findBwrap: bwrap on PATH), the command after its "--".
+  'live-smoke.ts: bwrap',
 ];
 
 const git = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();

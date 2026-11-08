@@ -2262,10 +2262,9 @@ private list:
 | key | the prefix of each ticket (`ABC` of `ABC-123`) of their jobs and of their Task files (`.software-factory/` and its `archive/`) | every prefix of G's own jobs and Task files (so `SF` is never a term of the factory's repository) | `ticket key of another workspace` |
 | domain | the domain of `git config --get user.email` in their checkouts | public mail domains (`gmail.com`, `outlook.com`, `proton.me`, `users.noreply.github.com`, ...: `PUBLIC_EMAIL_DOMAINS`) | `email domain of another workspace` |
 
-G's own `user.email` never removes a domain: when it is on a domain term, the commits made in G
-carry it, their push is refused, and `sf guard` warns (set a public address with `git config
---local user.email`). A registered workspace whose checkout cannot be read gives only its name and
-its job tickets, with a warning in `sf guard`.
+G's own `user.email` never removes a domain, and needs no change: the author and committer of a
+commit are never checked (below). A registered workspace whose checkout cannot be read gives only
+its name and its job tickets, with a warning in `sf guard`.
 
 **The private list** `<config dir>/guard-terms.txt` (never in a repository, never written by the
 factory), one entry per line, trimmed: empty lines and `#` lines are skipped; `re:<pattern>` is a
@@ -2281,10 +2280,11 @@ case-insensitive between Unicode-aware word boundaries (`ACME` matches `acme`, `
 boundaries (`ABC-123`, `abc-7-fix`; not `XABC-1` or `ABC-`); a `re:` line its own pattern; a secret
 as above. A hit records its place with the 1-based line and column.
 
-**What is checked:** for each commit its message, its author and committer (`<name> <email>`), the
-added lines of its change against its first parent (a root commit against the empty tree; removed
-and context lines and binary files give nothing), and the new paths of added, copied and renamed
-files; the branch name; the MR text. Files under `.software-factory/` are checked like any other
+**What is checked:** for each commit its message, the added lines of its change against its first
+parent (a root commit against the empty tree; removed and context lines and binary files give
+nothing), and the new paths of added, copied and renamed files; the branch name; the MR text. The
+author and committer of a commit (name and email) are never checked, for names or secrets: they
+are the user's own identity (SF-135). Files under `.software-factory/` are checked like any other
 file when a commit holds them. A diff over 16 MiB or a failing Git command is `guard_failed`.
 
 **Where it runs:** at MR preparation (section MR preparation, steps 0 and 3: the worktree's change,

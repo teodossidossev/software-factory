@@ -4,10 +4,11 @@
 // key prefixes and email domains of the user's other workspaces, built from the registry and the job
 // store at every check, plus the private list guard-terms.txt in the config directory) only to a
 // workspace with "guard": true in workspaces.json. What is scanned: the commits a push publishes
-// (message, author, committer, added lines, new file paths), the branch name and the MR text; at MR
-// preparation the worktree's change as the factory would commit it. Only `sf guard` (and the pre-push
-// hook, which runs it) prints a matched text (hitReport, never a secret's); every other message
-// names places only (hitPlace, guardMessage), with the terms inside them masked.
+// (message, added lines, new file paths; never the author or committer, the user's own identity
+// (SF-135)), the branch name and the MR text; at MR preparation the worktree's change as the factory
+// would commit it. Only `sf guard` (and the pre-push hook, which runs it) prints a matched text
+// (hitReport, never a secret's); every other message names places only (hitPlace, guardMessage),
+// with the terms inside them masked.
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -284,7 +285,6 @@ export async function buildTerms(input: { workspace: Workspace; configDir: strin
   // What G itself holds is never a term: its hosts and its own ticket prefixes.
   const ownHosts = new Set<string>();
   const ownPrefixes = new Set<string>();
-  let ownDomain: string | undefined;
   for (const ticket of jobTickets.get(own) ?? []) {
     const prefix = keyPrefix(ticket);
     if (prefix !== undefined) {
@@ -301,7 +301,6 @@ export async function buildTerms(input: { workspace: Workspace; configDir: strin
         ownPrefixes.add(prefix);
       }
     }
-    ownDomain = await emailDomain(workspace.readCheckout);
   } catch {
     // The checkout's own reads only narrow the terms; the scan of it reports its failure.
   }
@@ -344,9 +343,6 @@ export async function buildTerms(input: { workspace: Workspace; configDir: strin
 
   const { terms: privateTerms, drops } = await readPrivateTerms(configDir);
   const kept = unique(automatic).filter((term) => !drops.includes(term.text.toLowerCase()));
-  if (ownDomain !== undefined && kept.some((term) => term.kind === 'domain' && term.text === ownDomain)) {
-    warnings.push("the checkout's own user.email is on the email domain of another workspace; commits made here carry it (set a public address with git config --local user.email).");
-  }
   return { terms: unique([...kept, ...privateTerms]), warnings };
 }
 
@@ -734,18 +730,16 @@ export async function commitsToCheck(cwd: string, spec: CommitSpec): Promise<str
   return result.stdout.toString('utf8').split('\n').map((line) => line.trim()).filter((line) => line !== '');
 }
 
-// The hits of the commits: message, author and committer, and the change against the first parent
-// (a root commit against the empty tree).
+// The hits of the commits: message and the change against the first parent (a root commit against
+// the empty tree). The author and committer are the user's own identity and never scanned (SF-135).
 export async function scanCommits(cwd: string, commits: readonly string[], terms: readonly GuardTerm[]): Promise<GuardHit[]> {
   const hits: GuardHit[] = [];
   for (const sha of commits) {
     const short = sha.slice(0, 12);
-    const fields = (await gitOk(cwd, ['show', '-s', '--no-show-signature', '--format=%an <%ae>%x00%cn <%ce>%x00%P%x00%B', sha])).stdout.toString('utf8');
-    const [author = '', committer = '', parents = '', ...rest] = fields.split('\0');
+    const fields = (await gitOk(cwd, ['show', '-s', '--no-show-signature', '--format=%P%x00%B', sha])).stdout.toString('utf8');
+    const [parents = '', ...rest] = fields.split('\0');
     const message = rest.join('\0');
     hits.push(...scanText(message.replace(/\n+$/, ''), terms, (line, column) => `commit ${short} message:${line}:${column}`));
-    hits.push(...lineHits(author, terms, (column) => `commit ${short} author:${column}`));
-    hits.push(...lineHits(committer, terms, (column) => `commit ${short} committer:${column}`));
     const parent = parents.trim().split(/\s+/).find((one) => one !== '');
     hits.push(...(await scanChange(cwd, parent ?? (await emptyTree(cwd)), sha, terms, sha)));
   }

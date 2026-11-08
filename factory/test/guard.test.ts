@@ -109,12 +109,12 @@ test('buildTerms: the names, Git hosts, ticket key prefixes and email domains of
   assert.deepEqual(texts(unset.terms), ['host:gitlab.example.com', 'key:ABC', 'key:DEF', 'name:old-client', 'name:product-frontend']);
   assert.deepEqual(unset.warnings, []);
 
-  // The guarded checkout's own identity on that domain: the term stays, with a warning.
+  // The guarded checkout's own identity on that domain: the term stays, with no warning (SF-135).
   git(pf, 'config', 'user.email', 'me@acme.example.com');
   git(sf, 'config', 'user.email', 'me@acme.example.com');
   const own = await buildTerms({ workspace: ws('software-factory', sf), configDir: config, stateDir: state });
   assert.ok(texts(own.terms).includes('domain:acme.example.com'));
-  assert.deepEqual(own.warnings, ["the checkout's own user.email is on the email domain of another workspace; commits made here carry it (set a public address with git config --local user.email)."]);
+  assert.deepEqual(own.warnings, []);
 });
 
 test('buildTerms: a registered workspace whose checkout is missing gives its name, its job tickets and a warning', async () => {
@@ -204,9 +204,15 @@ test('scans: added lines and new paths of each commit against its first parent; 
   const plusPlus = await commit(cwd, { 'list.txt': '++ ACME\n' }, 'plus');
   assert.deepEqual((await scanCommits(cwd, [plusPlus], terms)).map((hit) => hit.where), [`list.txt:1:4 in commit ${plusPlus.slice(0, 12)}`]);
 
-  execFileSync('git', ['-c', 'user.name=Me', '-c', 'user.email=me@acme.example.com', 'commit', '-q', '--allow-empty', '-m', 'empty'], { cwd });
+  // The author and committer are the user's own identity (SF-135): never scanned, for names or secrets.
+  const identity = ['-c', 'user.name=ACME Me', '-c', 'user.email=me@acme.example.com'];
+  const secret: GuardTerm = { kind: 'secret', text: 'me@acme.example.com', label: 'secret', pattern: /me@acme\.example\.com/g };
+  execFileSync('git', [...identity, 'commit', '-q', '--allow-empty', '-m', 'empty'], { cwd });
   const authored = git(cwd, 'rev-parse', 'HEAD').trim();
-  assert.deepEqual((await scanCommits(cwd, [authored], [terms[2]!])).map((hit) => hit.where), [`commit ${authored.slice(0, 12)} author:8`, `commit ${authored.slice(0, 12)} committer:8`]);
+  assert.deepEqual(await scanCommits(cwd, [authored], [...terms, secret]), []);
+  execFileSync('git', [...identity, 'commit', '-q', '--allow-empty', '-m', 'empty for ACME'], { cwd });
+  const told = git(cwd, 'rev-parse', 'HEAD').trim();
+  assert.deepEqual((await scanCommits(cwd, [told], terms)).map((hit) => hit.where), [`commit ${told.slice(0, 12)} message:1:11`]);
 
   // A merge commit: its change against the first parent.
   git(cwd, 'checkout', '-q', '-b', 'side');

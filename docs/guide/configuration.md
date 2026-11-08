@@ -369,6 +369,11 @@ secrets out of what the factory publishes. It has two parts:
   `ABC-123`) and work email domains of your other workspaces, built from the registry and the jobs
   at each check, and for the terms of your private list.
 
+What is checked in a commit: its message, its added lines and the paths of its new files; also the
+branch name and the MR text. The author and committer of a commit (your name and email) are never
+checked, so your own Git identity needs no change, even when its email domain is that of another
+workspace or on your private list.
+
 **The private list** is `~/.config/software-factory/guard-terms.txt`. It never lives in a
 repository and the factory never writes it. One entry per line:
 

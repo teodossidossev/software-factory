@@ -10,6 +10,7 @@
 import { query, type SandboxSettings, type SDKMessage, type SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
 import { type ImageRef, promptInput } from './attachments.js';
 import { type PathDenials, withSandboxDenials } from './sandbox-denials.js';
+import { factoryRoots, reapOrphanedSandboxes } from './sandbox-reaper.js';
 
 // Markers a running Claude Code session sets for its children; a session inheriting them acts as
 // a child and may not save its transcript.
@@ -101,6 +102,11 @@ export interface SessionOptions {
   // other option stay a real job's. Without it (every real job): auto, the classifier.
   smokeMode?: boolean | undefined;
 }
+
+// How long after a query's end its orphaned sandboxes are looked for (SF-141): the query is aborted
+// as it ends, and Claude Code's process, whose sandboxes are orphaned only once it has exited, may
+// take that long.
+const REAP_AFTER_QUERY_MS = 3_000;
 
 // The file tools the smoke's ticket needs (SF-109), allowed in its dontAsk session.
 export const SMOKE_TOOLS = ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'TodoWrite'] as const;
@@ -341,6 +347,23 @@ export class ImplementerSession {
     return turn.continued < allowed ? { prompt: answer.prompt, disallowedTools: turn.disallowedTools, continued: turn.continued + 1 } : undefined;
   }
 
+  // The Bash sandboxes the query's Claude Code left behind (SF-141) end once it has exited: looked
+  // for REAP_AFTER_QUERY_MS after the query, under the factory's worktree root and state directory as
+  // the environment names them. The timer holds neither the session nor its process: a runner that
+  // exits sooner leaves them to sf serve's next look. Never throws.
+  #reapAfterQuery(): void {
+    setTimeout(() => {
+      void (async () => {
+        try {
+          await reapOrphanedSandboxes(factoryRoots());
+        } catch (error) {
+          // factoryRoots refused the configuration (a relative SF_WORKTREE_ROOT): one line.
+          console.error(`sandbox reaper: failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      })();
+    }, REAP_AFTER_QUERY_MS).unref();
+  }
+
   async #turn(next: Queued): Promise<TurnResult> {
     const { prompt, disallowedTools, images } = next;
     this.#calls = [];
@@ -419,6 +442,7 @@ export class ImplementerSession {
       input.done();
       // Ends the child process when the turn stopped early (a mismatch or an error).
       abortController.abort();
+      this.#reapAfterQuery();
     }
     if (result === undefined) {
       throw new TurnError('session_failed', 'The Implementer ended the turn without a result.');

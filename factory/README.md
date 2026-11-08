@@ -997,6 +997,25 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   stay in `sf serve` (they only push and talk to the Git host); `approve` and `sf mr create` wait
   up to 10 s for the job's runner to end and are refused with `runner_active` while it runs or a
   request (`sf say`, a fix) waits for it.
+- What a process-group kill misses (SF-141, `src/sandbox-reaper.ts`): Claude Code starts its Bash
+  sandbox as `bwrap --new-session --die-with-parent …`, in a session of its own, and when the
+  `claude` process of a query ends its bwraps are reparented to the systemd user manager (or pid 1)
+  and live on with their `sh` and `socat` children. The sandbox reaper ends those orphans of the
+  factory's own sessions and nothing else: a process of the factory's user whose command is `bwrap`,
+  whose parent is pid 1 or a `systemd` process, and one of whose arguments is the worktree root or
+  the state directory or a path under one (`/` never counts as a root), with its descendants of the
+  same user, the reaper's own process and its ancestors excepted: SIGTERM, then SIGKILL 2 s later for
+  any still alive; each is looked at again before each signal, so a pid reused since the scan (told
+  apart by its start time) is not signalled. A bwrap whose parent is alive and not systemd (a running
+  session's), another user's process and one naming neither root are never touched; an orphaned
+  bwrap of the user's own Claude Code that names a path under the state directory (its deny list
+  does) is ended like the factory's. Without `/proc` it does nothing. It runs 3 s after each query
+  of an Implementer session ends (in the runner, on a timer that does not keep the runner alive: a
+  runner that exits sooner leaves those to the next run), after `sf serve`
+  stopped a job's session (abort, pause, restart, reset; before the config lock check of the
+  hand-over), when a runner stops, and every 10 minutes while `sf serve` runs. It never throws into
+  its caller: a failure is one log line (`sandbox reaper: failed: …`), and so is what it ended
+  (`sandbox reaper: ended N orphaned sandboxes (M processes)`).
 - The runner's output goes to `runner.log` in the job directory. The dashboard of `sf serve`
   follows the state the runners write through the job files (`fs.watch`, and a look every second).
 - The Git operations on a workspace's checkout (fetch, worktree add and remove, the commit and

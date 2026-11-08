@@ -278,6 +278,19 @@ a longer one is refused at start with `socket_path_too_long`.
 The execution variables are read once when `sf serve` starts. `sf status` and `sf watch` read
 `SF_STATE_DIR` themselves; `sf start`, `sf queue`, `sf say`, `sf review`, `sf retry`, `sf accept`, `sf simplify`, `sf settle`, `sf approve`, `sf mr`, `sf abort` and `sf reset` use it to find the socket; `sf notify-test` reads the notification variables itself; `sf smoke` reads `SF_SMOKE_MODEL` and `SF_SMOKE_CODEX_MODEL` itself and gives its own children their settings (section Live smoke test).
 
+The commands that go to `sf serve` over the socket are one table (SF-138, `src/commands.ts`): each
+entry has the command's name, its arguments and flags as `sf help` writes them, its description,
+whether it answers while `sf update` drains or builds, and the call it makes in `sf serve`. The
+CLI builds from it the help lines of these commands, their argument check and the socket request
+(the name with `-` for a space, such as `queue-add`, and the arguments as typed); `sf serve`'s
+socket handler (`src/ipc-handlers.ts`) looks the request up in the same table, checks the
+arguments with the same function, refuses it with `update_in_progress` during an update unless
+the entry stays open, and runs it. A wrong argument count gets one message built from the entry,
+such as `accept needs <workspace> <ticket>.`: the CLI prints it with the help and exits 2, the
+socket answers it as `bad_request`. The requests of the factory's own steps (`ping`, `serve-busy`,
+`digest-run`, `digest-latest`, `mcp-port`, and `check`, `fix` and `clean` under `SF_TEST_HOOKS`)
+are entries of the table without a description, so no `sf` command or help line of their own.
+
 ## Live smoke test
 
 `sf smoke` (SF-090, `src/live-smoke.ts`) runs one tiny real job from start to push against the

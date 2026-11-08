@@ -8,6 +8,7 @@
 // are in factory/README.md.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { served, servedDetail } from './support/dashboard-client.js';
 import { type FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
 
 const STATIC_DIR = new URL('../../static/', import.meta.url);
@@ -25,20 +26,21 @@ interface JobShape {
   error?: { code: string; message: string } | null;
 }
 
+// The job as the server sends it: with its stop's row, its actions and their availability (SF-129).
 function job(shape: JobShape) {
   const prepared = shape.state === 'ready_for_human_review' || shape.state === 'pushed';
-  return {
+  return served({
     workspace: shape.workspace, ticket: shape.ticket, branch: `${shape.ticket}-demo`, base: 'main', state: shape.state,
     iteration: shape.iteration ?? 1, mr_attempts: shape.mr_attempts ?? 0, updated_at: shape.updated_at ?? '2026-11-01T10:05:00.000Z',
     created_at: '2026-11-01T10:00:00.000Z', error: shape.error ?? null,
     prepared_commit: shape.prepared_commit !== undefined ? shape.prepared_commit : (prepared ? 'a'.repeat(40) : null),
     worktree: shape.worktree !== undefined ? shape.worktree : (prepared ? null : `/wt/${shape.ticket}`),
     files: 0, undeclared: 0, deleted: 0,
-  };
+  });
 }
 
 function detail(shape: JobShape) {
-  return { job: job(shape), iterations: [], mr: false, history: [{ ts: '2026-11-01T10:00:00.000Z', from: null, to: 'starting' }] };
+  return servedDetail({ job: job(shape), iterations: [], mr: false, history: [{ ts: '2026-11-01T10:00:00.000Z', from: null, to: 'starting' }] });
 }
 
 // A is the job the user acts on: ready_for_human_review, the branch prepared at Clean.
@@ -755,10 +757,7 @@ test('client: Retry review shows only in needs_human after a failed review; one 
   const page = await openPage();
   const stream = page.streams.at(-1)!;
   const button = (): FakeElement => control(page, 'review-button');
-  const stuck = (code: string | null) => {
-    const shown = detail({ ...A, state: 'needs_human' });
-    return { ...shown, job: { ...shown.job, error: code === null ? null : { code, message: `The ${code} message.` } } };
-  };
+  const stuck = (code: string | null) => detail({ ...A, state: 'needs_human', error: code === null ? null : { code, message: `The ${code} message.` } });
   // Hidden in every other state, and for needs_human with another cause.
   assert.equal(button().hidden, true);
   for (const shown of [stuck(null), stuck('iteration_limit'), detail({ ...A, state: 'awaiting_review' })]) {

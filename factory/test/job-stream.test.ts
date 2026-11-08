@@ -393,3 +393,16 @@ test('lineEntries: the park on a usage limit and the resume from it (SF-072) car
   ]);
   assert.equal((await one({ state: { from: 'waiting_limit', to: 'aborted' } })).text, undefined);
 });
+
+test('lineEntries (SF-129): a state entry with a code carries its canonical row\'s stop_code and stop_kind, an alias resolved; one without a code none', async () => {
+  assert.deepEqual(await one({ state: { from: 'preparing_mr', to: 'needs_human', error: { code: 'mr_rebase_failed', message: 'Git failed.' } } }), {
+    t: 'state', who: 'factory', from: 'preparing_mr', to: 'needs_human', code: 'mr_rebase_failed', msg: 'Git failed.', stop_code: 'mr_failed', stop_kind: 'error', k: '7', ts: TS, it: 2,
+  });
+  const limit = await one({ state: { from: 'working', to: 'needs_human', error: { code: 'session_failed', message: "You've hit your limit · resets 3am" } } });
+  assert.deepEqual([limit.t === 'state' && limit.stop_code, limit.t === 'state' && limit.stop_kind], ['usage_limit', 'error']);
+  const odd = await one({ state: { from: 'working', to: 'failed', error: { code: 'start_failed', message: 'No.' } } });
+  assert.deepEqual([odd.t === 'state' && odd.stop_code, odd.t === 'state' && odd.stop_kind], ['other', 'error']);
+  const decision = await one({ state: { from: 'awaiting_review', to: 'needs_human', error: { code: 'escalated', message: 'Q.' } } });
+  assert.deepEqual([decision.t === 'state' && decision.stop_code, decision.t === 'state' && decision.stop_kind], ['escalated', 'decision']);
+  assert.equal('stop_code' in (await one({ state: { from: 'working', to: 'awaiting_review' } })), false);
+});

@@ -18,13 +18,20 @@ A job that stops for you is in `needs_human` with a **code**; a job that could n
 
 Always read the message first: it names the findings, the files, the limit or Git's own words.
 
+One table in the factory decides each stop: its kind (decision or error), the codes that share it
+(for example `mr_rebase_failed` is shown as `mr_failed`), and the actions it offers, each shown only
+while it applies (Accept with a clean Claude review, Retry never after a conflict turn). The board,
+the job's page, the stop's plain explanation and the factory's own checks all read it, so a button
+you see is one the command takes; the factory still checks every action again when you press it.
+A code the table does not know shows as "Stopped" with Send and Abort.
+
 ## The actions
 
 | Action | Button | Command | What it does |
 | --- | --- | --- | --- |
 | Send a message | Send; *Tell it to go on* (sends "Go on." when the box is empty) | `sf say my-app APP-12 "<message>"` | A new Implementer turn in the same session; its iteration is reviewed as usual. Works on any `needs_human` stop. |
 | Accept | Accept and prepare MR…; Skip (for the simplification pass) | `sf accept my-app APP-12` | Go on to MR preparation over a stopped gate, a ledger stop or a stop of the workspace's tests (`tests_failed`, `tests_unavailable`: without passing tests, and the MR text says so under `### Checks`) when the last Claude review of the iteration is clean, or when the job has no Claude review (the Codex gate alone reviews it, `SF_CLAUDE_REVIEW`); at the Fix round limit whatever the last verdict. The items not applied are recorded, shown on the Merge request screen and listed in the MR text (under "Accepted over a stop", with "No reviewer passed iteration N." when only the gate reviewed and it failed or ran out of budget), and the nits and the ledger's findings not fixed go into the MR text too. |
-| Settle a finding | *Accept risk* / *Must fix* on the finding | `sf settle my-app APP-12 R7 accept\|fix [note…]` | Accept an escalated or contested finding as a risk, or decide that it must be fixed. |
+| Settle a finding | *Accept risk* / *Must fix* on the finding | `sf settle my-app APP-12 R7 accept\|fix [note…]` | Accept an escalated or contested finding as a risk, or decide that it must be fixed, at an `escalated`, `review_disputed` or `review_churn` stop. After the last one at `escalated` or `review_disputed` the job goes on by itself; at `review_churn` the decision is only recorded and the job waits for you. |
 | Retry the review | Retry review | `sf review my-app APP-12` | Runs the failed Claude review again on the same iteration. |
 | Retry MR preparation | Retry | `sf retry my-app APP-12` | MR preparation again, without a new review. |
 | Simplify | Simplify… | `sf simplify my-app APP-12` | One Fix section "Simplify" from the simplification pass's suggestions. |
@@ -80,6 +87,7 @@ Always read the message first: it names the findings, the files, the limit or Gi
 | `mr_serve_restarted` | MR preparation interrupted · Retry | `sf serve` started while the job was `preparing_mr` and its runner was gone. | Retry. |
 | `mr_interrupted` | MR preparation interrupted · Retry | You paused the job just as MR preparation began. | Retry. |
 | `fetch_failed` | Fetch failed · Retry | `git fetch origin <base>` failed or took over 60 s (at Clean). | Check the network and your Git credentials, then Retry. |
+| `guard_hit`, `guard_terms_invalid`, `guard_failed` | Guard stopped the MR · Retry | The guard found text that must not be published, or could not read its terms or `auth.env` ([Configuration: the guard](configuration.md#the-guard)). | Tell the Implementer how to word it (Send), or fix the file and Retry (`sf retry`). |
 | `tests_unavailable` | Tests could not run · Retry | The workspace's `test_command` could not run: `bwrap` (bubblewrap) is missing or its sandbox did not start, or the command exited with 126 or 127 (not executable, not found). The reason is the message's first line. | Fix it on this machine (install bubblewrap, install the dependencies in the worktree, correct `test_command` in `workspaces.json`), then Retry (`sf retry`): the tests run again. Or Accept and prepare MR without tests, or Send. |
 
 After a conflict turn there is no Retry (the resolution was not reviewed yet): use *Tell it to go

@@ -14,24 +14,30 @@ import { gateDecision } from '../gate-level.js';
 import { findBwrap, GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from '../gate.js';
 import { jobUserMessages } from '../job-stream.js';
 import { claudeReviews, type GateOverride, type GateRecord, type IterationMeta, type Job, type JobState, now, type ReviewRecord, type SimplifyRecord } from '../jobs.js';
-import { applyVerdict, entryItem, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, LEDGER_ID, FACTORY_PROBLEMS, settle, SETTLE_CODES, unappliedEntries, unsettled } from '../ledger.js';
+import { applyVerdict, entryItem, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, LEDGER_ID, FACTORY_PROBLEMS, settle, unappliedEntries, unsettled } from '../ledger.js';
 import { Redactor } from '../redact.js';
 import { readJobRules } from '../rules-docs.js';
 import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, type StructuredOutcome, unacceptedItems } from '../review.js';
 import { type DenialScope, gateWrapperFor, type PathDenials, pathDenials, USER_SETTINGS_WEAKEN_SANDBOX } from '../sandbox-denials.js';
 import { readMcpToken } from '../server.js';
 import { changedBetween, type FixFiles, fixNumbers, guardSuggestions, offerMessage, runSimplify, SIMPLIFY_CODE, SIMPLIFY_TITLE, simplifyFix, type SimplifyInput, type SimplifyOutput, simplifyPrompt, type Suggestion } from '../simplify.js';
+import { codesWithAction, settleCodes } from '../stops.js';
 import { mayTouch, parseFrontMatter, readTask, TASK_DIR } from '../task-file.js';
 import { TEST_CODES, type TestsRecord } from '../test-command.js';
 import { type UsageLimit, usageLimit } from '../usage-limit.js';
-import { exists, GATE_OVERRIDE_CODES, LEDGER_ACCEPT_CODES, markedGroups, type RunningReview, withoutDropped } from './shared.js';
+import { exists, LEDGER_ACCEPT_CODES, markedGroups, type RunningReview, withoutDropped } from './shared.js';
 import type { Core } from './core.js';
 import { testsEvent } from './mr-steps.js';
 
-// The Fix round limit (SF-115) is accepted as the ledger stops are; the offer of the simplification
-// pass (SF-055): sf accept is its Skip.
-// The stops of the test step (SF-128): Accept goes on without passing tests.
-const ACCEPT_CODES: readonly string[] = [...GATE_OVERRIDE_CODES, ...LEDGER_ACCEPT_CODES, 'iteration_limit', SIMPLIFY_CODE, ...TEST_CODES];
+// The stops whose settlement moves the job on by itself once nothing is left to settle
+// (src/stops.ts: escalated, review_disputed). A churn stop's settlement is only recorded: the job
+// stays needs_human, and sf say moves it on.
+const SETTLE_CODES: readonly string[] = settleCodes({ resumes: true });
+
+// The stops sf accept takes on (src/stops.ts: every row with an Accept): the gate's and the
+// ledger's, the Fix round limit (SF-115), the simplification pass's offer (SF-055: its Skip) and
+// the test step's (SF-128: without passing tests).
+const ACCEPT_CODES: readonly string[] = codesWithAction('accept');
 
 // The code of a session the factory refused to start because the user settings weaken the sandbox
 // (SF-100); undefined for any other failure.

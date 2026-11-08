@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { type WorkspaceColor, workspaceColor } from '../src/registry.js';
+import { served, servedDetail } from './support/dashboard-client.js';
 import { type FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
 
 const STATIC_DIR = new URL('../../static/', import.meta.url);
@@ -20,18 +21,19 @@ const COLUMNS = ['queue', 'implementing', 'reviewing', 'you', 'done'] as const;
 const LISTS: Record<(typeof COLUMNS)[number], string> = { queue: 'qlist', implementing: 'list-implementing', reviewing: 'list-reviewing', you: 'list-you', done: 'list-done' };
 const minutesAgo = (minutes: number): string => new Date(Date.now() - minutes * 60000).toISOString();
 
+// The job as the server sends it: with its stop's row, its actions and their availability (SF-129).
 function job(ticket: string, state: string, extra: Record<string, unknown> = {}) {
-  return {
+  return served({
     workspace: 'app', ticket, branch: `${ticket}-demo`, base: 'main', state, iteration: 1, mr_attempts: 0,
     updated_at: minutesAgo(4), created_at: '2026-11-01T10:00:00.000Z', error: null,
     prepared_commit: state === 'ready_for_human_review' ? 'a'.repeat(40) : null, worktree: state === 'ready_for_human_review' ? null : `/wt/${ticket}`,
     fixes: 0, gate_fixes: 0, gate_tokens: 0, files: 0, undeclared: 0, deleted: 0, title: `Title of ${ticket}`, cost_usd: null, review: null, review_ended_at: null, gate: null,
     now: null, tool_calls: 0, stop: null, ...extra,
-  };
+  });
 }
 
 function detail(row: ReturnType<typeof job>) {
-  return { job: row, iterations: [], mr: false, gate: true, history: [] };
+  return servedDetail({ job: row, iterations: [], mr: false, gate: true, history: [] });
 }
 
 function ticket(key: string, extra: Record<string, unknown> = {}) {
@@ -1258,6 +1260,40 @@ test('board client (SF-087): a Your turn card of fetch_failed, mr_serve_restarte
   await page.flush();
   assert.match(card(page, 'app/T-1').textContent, /MR preparation runs again \(state preparing_mr\)\./);
   assert.equal(onJobPage(page), false);
+});
+
+test('board client (SF-129): each Your turn card keeps its single primary, read from the payload: Retry on a retryable fetch_failed, Retry review on review_failed, the stop\'s button otherwise', async () => {
+  const stop = (ticket: string, code: string, extra: Record<string, unknown> = {}) => job(ticket, 'needs_human', { error: { code, message: `The ${code} message.` }, ...extra });
+  const cases: Array<[ReturnType<typeof job>, string]> = [
+    [stop('A-1', 'fetch_failed'), 'Retry'],
+    [stop('A-2', 'fetch_failed', { mr_conflict_turn: true }), 'Tell it to go on'],
+    [stop('A-3', 'review_failed'), 'Retry review'],
+    [stop('A-4', 'tests_unavailable'), 'Retry'],
+    [stop('A-5', 'mr_rebase_failed'), 'Retry'],
+    [stop('A-6', 'gate_budget'), 'Decide'],
+    [stop('A-7', 'iteration_limit'), 'Give a direction'],
+    [stop('A-8', 'session_failed', { error: { code: 'session_failed', message: "You've hit your limit · resets 3am" } }), 'Tell it to go on'],
+    [stop('A-9', 'mr_conflict'), 'Tell it how'],
+    [stop('B-1', 'guard_failed'), 'Retry'],
+    [stop('B-5', 'odd_code'), 'Open the job'],
+    [stop('B-2', 'mr_push_failed', { prepared_commit: 'a'.repeat(40) }), 'Push again'],
+    [job('B-3', 'ready_for_human_review'), 'Review the MR and push'],
+    [job('B-4', 'paused'), 'Resume'],
+  ];
+  const page = await openBoard(cases.map(([row]) => row), []);
+  for (const [row, primary] of cases) {
+    const shown = card(page, `app/${row.ticket}`).all().filter((node) => node.tagName === 'BUTTON' && node.classList.contains('primary'));
+    assert.deepEqual(shown.map((node) => node.textContent), [primary], `${row.ticket} ${row.state} ${JSON.stringify(row.error)}`);
+  }
+  // A Retry the server does not offer is no card's primary, whatever the code says: the card opens
+  // the job with the stop's own button, its words read the same availability.
+  const fed = stop('C-1', 'fetch_failed') as ReturnType<typeof job> & { availability: Record<string, string> };
+  const other = await openBoard([{ ...fed, availability: { ...fed.availability, retry: 'only after a transient MR preparation failure.' } } as ReturnType<typeof job>], []);
+  assert.deepEqual(labels(card(other, 'app/C-1')), ['Tell it to go on']);
+  assert.deepEqual([button(card(other, 'app/C-1'), 'Tell it to go on')!.dataset.run, button(card(other, 'app/C-1'), 'Tell it to go on')!.dataset.open], [undefined, 'app/C-1']);
+  // The card's kind is the payload's stop_kind: the reason is red only for an error.
+  const kinds = await openBoard([{ ...stop('D-1', 'gate_rounds'), stop_kind: 'error' } as ReturnType<typeof job>, stop('D-2', 'gate_rounds'), stop('D-3', 'mr_failed')], []);
+  assert.deepEqual(['app/D-1', 'app/D-2', 'app/D-3'].map((key) => part(card(kinds, key), 'reason')!.className), ['reason err', 'reason', 'reason err']);
 });
 
 // SF-119: a localStorage over a map, and a matchMedia whose matches the test sets (narrow: below

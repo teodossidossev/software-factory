@@ -10,12 +10,13 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   capExplainInput, currentExplanation, EXPLAIN_SCHEMA, type ExplainInput, type ExplainModel, type ExplainOutput, Explainer, explanationLines, explanationPath,
-  type ExplanationRecord, ledgerStopEntries, MAX_EXPLANATION_WORDS, outputProblem, readExplanation, stopAnswers, taskGoal,
+  actionCommand, type ExplanationRecord, ledgerStopEntries, MAX_EXPLANATION_WORDS, outputProblem, readExplanation, stopAnswers, taskGoal,
 } from '../src/explain.js';
 import { type Job, JobStore, type ReviewRecord } from '../src/jobs.js';
 import type { LedgerEntry } from '../src/ledger.js';
 import { explainPrompt } from '../src/prompts.js';
 import { saveRegistry } from '../src/registry.js';
+import { jobActions, NO_FACTS, STOP_CODES, STOPS } from '../src/stops.js';
 import type { StructuredOutcome } from '../src/review.js';
 import { newEnv, runCli } from './support/harness.js';
 
@@ -386,15 +387,21 @@ const commands = (job: Job, facts: { ledger?: LedgerEntry[]; review?: ReviewReco
   stopAnswers(job, { ledger: facts.ledger ?? [], review: facts.review }).map((answer) => [answer.label, answer.command]);
 const ALWAYS = [['Send a message', 'sf say app T-1 "<message>"'], ['Abort', 'sf abort app T-1']];
 
-test('stopAnswers: an escalated stop lists Accept risk and Must fix per entry to settle with the sf settle commands; every stop ends with Send a message and Abort', () => {
-  const ledger = [entry('R1', 'escalated'), entry('R2', 'fixed'), entry('R3', 'contested', { dispute: { reviewer: 'codex', iteration: 2, reason: 'No.' } })];
-  assert.deepEqual(commands(stopped('escalated'), { ledger }), [
-    ['Accept risk', 'sf settle app T-1 R1 accept'], ['Must fix', 'sf settle app T-1 R1 fix'],
-    ['Accept risk', 'sf settle app T-1 R3 accept'], ['Must fix', 'sf settle app T-1 R3 fix'], ...ALWAYS,
-  ]);
+test('stopAnswers: a stop the user settles in (escalated, review_disputed, review_churn) lists Accept risk and Must fix per escalated or contested entry with the sf settle commands; every stop ends with Send a message and Abort', () => {
+  const ledger = [entry('R1', 'escalated'), entry('R2', 'fixed'), entry('R3', 'contested', { dispute: { reviewer: 'codex', iteration: 2, reason: 'No.' } }), entry('R4', 'open')];
+  const settles = (...ids: string[]) => ids.flatMap((id) => [['Accept risk', `sf settle app T-1 ${id} accept`], ['Must fix', `sf settle app T-1 ${id} fix`]]);
+  assert.deepEqual(commands(stopped('escalated'), { ledger }), [...settles('R1', 'R3'), ...ALWAYS]);
   assert.deepEqual(commands(stopped('review_disputed'), { ledger: [ledger[2]!], review: CLEAN_REVIEW }), [
-    ['Accept and prepare MR', 'sf accept app T-1'], ['Accept risk', 'sf settle app T-1 R3 accept'], ['Must fix', 'sf settle app T-1 R3 fix'], ...ALWAYS,
+    ['Accept and prepare MR', 'sf accept app T-1'], ...settles('R3'), ...ALWAYS,
   ]);
+  // SF-129: every row with a settlement, over the entries sf settle takes: a contest without a
+  // dispute too, and review_churn's (its settlement is recorded; the job stays needs_human).
+  const contested = entry('R5', 'contested');
+  assert.deepEqual(commands(stopped('escalated'), { ledger: [contested] }), [...settles('R5'), ...ALWAYS]);
+  assert.deepEqual(commands(stopped('review_churn'), { ledger: [...ledger, contested], review: CLEAN_REVIEW }), [
+    ['Accept and prepare MR', 'sf accept app T-1'], ...settles('R1', 'R3', 'R5'), ...ALWAYS,
+  ]);
+  assert.deepEqual(commands(stopped('gate_rounds'), { ledger }), ALWAYS);
   assert.deepEqual(commands(stopped('odd_code')), ALWAYS);
   assert.deepEqual(commands(stopped('mr_push_protected')), ALWAYS);
 });
@@ -443,6 +450,28 @@ test('stopAnswers (SF-131): at iteration_limit Accept whatever the last verdict,
   }
   assert.deepEqual(commands(stopped('gate_failed', { claude_review: false })), [accept, ['Tell it to go on', 'sf say app T-1 "Go on."'], ...ALWAYS]);
   assert.deepEqual(commands(stopped('simplify_offered', { claude_review: false })), [['Simplify', 'sf simplify app T-1'], ['Skip', 'sf accept app T-1'], ...ALWAYS]);
+});
+
+test('stopAnswers (SF-129): per row, its commands are those of the actions the job page shows, then the settlements, Send a message and Abort; they cannot disagree', () => {
+  const ledger = [entry('R1', 'escalated'), entry('R2', 'contested'), entry('R3', 'open')];
+  const REVIEWS: Array<ReviewRecord | undefined> = [CLEAN_REVIEW, FIX_REVIEW, undefined];
+  const cases: Array<[string, string]> = [...STOP_CODES.filter((code) => code !== 'usage_limit' && code !== 'other').map((code): [string, string] => [code, `The stop of ${code}.`]),
+    ['session_failed', "You've hit your limit · resets 3am"], ['odd_code', 'Odd.'],
+    ...STOP_CODES.flatMap((code) => STOPS[code].aliases.map((alias): [string, string] => [alias, 'Aliased.']))];
+  for (const [code, message] of cases) {
+    for (const extra of [{}, { mr_conflict_turn: true }, { claude_review: false }]) {
+      for (const review of REVIEWS) {
+        const job = stopped(code, { ...extra, prepared_commit: code === 'mr_push_failed' ? 'a'.repeat(40) : null }, message);
+        const shown = jobActions(job, { ...NO_FACTS, ledger, review }, new Date()).actions.map((action) => actionCommand(job, action.action));
+        const answers: string[] = stopAnswers(job, { ledger, review }).map((answer) => answer.command);
+        const settle = answers.filter((command) => command.startsWith('sf settle '));
+        assert.deepEqual(answers.slice(-2), ['sf say app T-1 "<message>"', 'sf abort app T-1'], code);
+        assert.deepEqual(new Set(answers.filter((command) => !settle.includes(command))), new Set([...shown, 'sf say app T-1 "<message>"', 'sf abort app T-1']), `${code} ${JSON.stringify(extra)}`);
+        // The settlements come after the shown actions, only on a row the user settles in.
+        assert.equal(settle.length > 0, ['escalated', 'review_disputed', 'review_churn'].includes(code), code);
+      }
+    }
+  }
 });
 
 test('ledgerStopEntries (SF-131): at iteration_limit the open blocker and major entries, nits and settled ones aside', () => {

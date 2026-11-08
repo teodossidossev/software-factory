@@ -27,14 +27,6 @@
 const RECONNECT_MS = 3000;
 const READ_TIMEOUT_MS = 10000;
 const TERMINAL_STATES = ['pushed', 'aborted', 'failed'];
-const SAY_STATES = ['working', 'awaiting_review', 'needs_human', 'ready_for_human_review', 'handed_over'];
-// The hand-over to the user's checkout (SF-073): the composer's actions, each with the state it takes.
-const HANDOVER_ACTIONS = [['handover', 'ready_for_human_review'], ['handed-done', 'handed_over'], ['takeback', 'handed_over']];
-// Pause, Resume and Restart (SF-067): the states each takes; a job parked on a usage limit
-// (SF-072, waiting_limit) is resumed (Resume now) and restarted like a paused one.
-const PAUSE_STATES = ['working', 'awaiting_review'];
-const RESUME_STATES = ['paused', 'waiting_limit'];
-const RESTART_STATES = ['paused', 'waiting_limit', 'aborted', 'failed', 'needs_human'];
 // The rule at a usage limit's reset (SF-072), as the Rules menu names them.
 const ON_LIMIT_RULES = ['resume-then-queue', 'resume-only', 'wait'];
 const ACTION_LABELS = {
@@ -84,22 +76,10 @@ const PENDING_TEXT = {
   'handed-done': 'Asking origin for your push…',
 };
 const $ = (id) => document.getElementById(id);
-// The codes of a job the gate stopped, which Accept and prepare MR takes on (SF-047).
-const GATE_CODES = ['gate_rounds', 'gate_budget', 'gate_failed'];
-// The ledger's stops (SF-052) that Accept and prepare MR takes on as well.
-const LEDGER_CODES = ['review_churn', 'review_disputed'];
-// The offer of the simplification pass (SF-055): Simplify applies it, Accept and prepare MR skips it.
-const SIMPLIFY_CODE = 'simplify_offered';
-// The Fix round limit (SF-115), which Accept and prepare MR takes on whatever the last verdict (SF-131).
-const LIMIT_CODE = 'iteration_limit';
-// The stops of the workspace's tests (SF-128), which Accept and prepare MR takes on without passing tests.
-const TESTS_CODES = ['tests_failed', 'tests_unavailable'];
-const ACCEPT_CODES = [...GATE_CODES, ...LEDGER_CODES, LIMIT_CODE, SIMPLIFY_CODE, ...TESTS_CODES];
-// The stops whose findings the user settles here (Accept risk, Must fix).
-const SETTLE_STOPS = ['escalated', ...LEDGER_CODES];
-// The entries of STOPS (aliases included) whose Retry runs MR preparation again without a new
-// review (SF-087): MR_RETRY_CODES of factory/src/execution.ts.
-const RETRY_STOPS = ['fetch_failed', 'mr_serve_restarted', 'mr_failed', 'tests_unavailable'];
+// SF-129: the rules of a job's stop and actions are the server's (factory/src/stops.ts). Each job
+// of the payloads carries its stop's canonical row (stop_code, stop_kind, stop_group), the
+// actions the page shows (actions, in order) and every action's availability ('' or why not); the
+// detail carries the ledger entries to settle (settle_ids). The page renders them.
 
 const state = {
   jobs: [],
@@ -310,37 +290,13 @@ const clock = (ts) => localTime(ts).slice(11, 16);
 // Whether the Claude review runs on the job (SF-131): its claude_review, true when absent.
 const claudeOn = (job) => job?.claude_review !== false;
 
-// The user may accept the last iteration over the stopped gate (Accept and prepare MR): the gate
-// handed the job over (gate_rounds, gate_budget, gate_failed), or the ledger did (SF-052:
-// review_churn, review_disputed), and Claude's review of that iteration is clean, or the job has no
-// Claude review (SF-131: the gate is the review); or the job reached the Fix round limit (SF-115:
-// iteration_limit), whatever the last verdict (SF-131). Guidance only: the factory checks it again.
-function gateAcceptable(detail) {
-  const job = detail?.job;
-  if (job === undefined || job === null || job.state !== 'needs_human' || !ACCEPT_CODES.includes(job.error?.code)) {
-    return false;
-  }
-  return job.error.code === LIMIT_CODE || !claudeOn(job) || actedClean(iterationOf(detail, job.iteration)?.review);
-}
-
-// A Claude review the factory acts on as clean, as the factory decides it: a verdict without a
-// blocker or major item (an item without a severity reads as major), the items the ledger dropped
-// aside (SF-052).
-function actedClean(review) {
-  if (verdictOf(review) !== 'clean' && verdictOf(review) !== 'fix') {
-    return false;
-  }
-  const dropped = new Set((review.dropped ?? []).map((item) => JSON.stringify(item)));
-  return (review.items ?? []).every((item) => item.severity === 'nit' || dropped.has(JSON.stringify(item)));
-}
-
 // The Codex items the gate asked for on the job's last iteration, or its error: what Accept and
 // prepare MR goes without. ran is false when no gate ran on it (the budget was used up first).
 function gateLeftovers(detail) {
-  if (detail.job.error?.code === LIMIT_CODE) {
+  if (detail.job.stop_group === 'limit') {
     return limitLeftovers(detail);
   }
-  if (LEDGER_CODES.includes(detail.job.error?.code)) {
+  if (detail.job.stop_group === 'ledger') {
     return { items: ledgerOpen(detail), error: null, ran: true, ledger: true };
   }
   const gate = iterationOf(detail, detail.job.iteration)?.gate ?? null;
@@ -363,23 +319,11 @@ function limitLeftovers(detail) {
   return { items: (detail.ledger ?? []).filter((entry) => entry.status === 'open'), error: null, ran: true, limit: true };
 }
 
-// The job waits on the offer of the simplification pass (SF-055).
-const simplifiable = (job) => job !== null && job !== undefined && job.state === 'needs_human' && job.error?.code === SIMPLIFY_CODE;
-
 // The suggestions the simplification pass offers on the job's last iteration (SF-055), for the
 // stop block and the confirmations of Simplify and of Skip (accept).
 function offeredSuggestions(detail) {
   const record = iterationOf(detail, detail?.job?.iteration)?.simplify ?? null;
   return { items: Array.isArray(record?.suggestions) ? record.suggestions : [], suggestions: true };
-}
-
-// The ledger's findings the user settles while the job waits (SF-052): escalated entries and
-// contests, each with Accept risk and Must fix.
-function settleable(detail) {
-  if (detail?.job?.state !== 'needs_human' || !SETTLE_STOPS.includes(detail.job.error?.code)) {
-    return [];
-  }
-  return (detail.ledger ?? []).filter((entry) => entry.status === 'escalated' || entry.status === 'contested');
 }
 
 // The user's override of the gate that still stands (SF-047): the newest gate-override.json, unless
@@ -2054,8 +1998,9 @@ function suggestionItems(suggestions, it) {
 const noteKey = (id) => `${state.key}/${id}`;
 
 // One ledger entry of a stop: the id, severity, path and problem, what the Implementer said, a
-// dispute's reason, and Accept risk / Must fix with a note; a settled one shows its decision.
-function ledgerFinding(entry, busy) {
+// dispute's reason, and, when the server offers it to settle (offered: one of settle_ids),
+// Accept risk / Must fix with a note; a settled one shows its decision.
+function ledgerFinding(entry, busy, offered) {
   const node = el('li', 'finding');
   node.dataset.id = entry.id;
   node.append(el('span', 'fid', entry.id), severityTag(entry.severity), pathLink(entry.path, entry.iteration > 0 ? entry.iteration : null));
@@ -2078,7 +2023,7 @@ function ledgerFinding(entry, busy) {
     if (entry.settled.note) {
       decide.append(el('span', 'muted', entry.settled.note));
     }
-  } else if (entry.status === 'escalated' || entry.status === 'contested') {
+  } else if (offered) {
     const note = el('input', 'note');
     note.type = 'text';
     note.placeholder = 'Note (optional)';
@@ -2101,17 +2046,18 @@ function ledgerFinding(entry, busy) {
   return node;
 }
 
-// The ledger entries of a ledger stop: those to settle, the open ones of a churn stop, and the
-// ones settled since the stop (with their decision), in ledger order.
+// The ledger entries of a ledger stop: those to settle (the detail's settle_ids, SF-129), the open
+// ones of a churn stop, and the ones settled since the stop (with their decision), in ledger order.
 function stopLedger(detail, code, since) {
-  const keep = new Set([...settleable(detail), ...(code === 'review_churn' ? ledgerOpen(detail) : [])]);
+  const settleIds = new Set(Array.isArray(detail.settle_ids) ? detail.settle_ids : []);
+  const keep = new Set([...(detail.ledger ?? []).filter((entry) => settleIds.has(entry.id)), ...(code === 'review_churn' ? ledgerOpen(detail) : [])]);
   return (detail.ledger ?? []).filter((entry) => keep.has(entry) || (entry.settled !== null && entry.settled !== undefined && typeof since === 'string' && entry.settled.at >= since));
 }
 
 // What the stop block shows for its code (the Task's table): the suggestions, the entries to
 // settle, the findings, the gate's tokens, an error or the message.
 function stopInline(job, detail, entry) {
-  const code = typeof job.error?.code === 'string' ? job.error.code : '';
+  const code = job.stop_code ?? 'other';
   const message = typeof job.error?.message === 'string' ? job.error.message : '';
   const whole = () => (message === '' ? [] : [el('pre', 'raw', message)]);
   const last = detail === null ? null : iterationOf(detail, job.iteration);
@@ -2120,11 +2066,8 @@ function stopInline(job, detail, entry) {
     list.append(...items.map((item, index) => findingHtml(item, index, job.iteration)));
     return items.length === 0 ? [] : [list];
   };
-  if (usageLimited(job)) {
-    return whole();
-  }
-  switch (STOP_ALIASES[code] ?? code) {
-    case SIMPLIFY_CODE: {
+  switch (code) {
+    case 'simplify_offered': {
       const items = detail === null ? (job.stop?.items ?? []) : offeredSuggestions(detail).items;
       return items.length === 0 ? [] : [suggestionItems(items, job.iteration)];
     }
@@ -2140,7 +2083,8 @@ function stopInline(job, detail, entry) {
       }
       const busy = availability('settle', detail.job);
       const list = el('ul', 'findings');
-      list.append(...entries.map((item) => ledgerFinding(item, busy)));
+      const offered = new Set(Array.isArray(detail.settle_ids) ? detail.settle_ids : []);
+      list.append(...entries.map((item) => ledgerFinding(item, busy, offered.has(item.id))));
       return [list];
     }
     case 'gate_rounds':
@@ -2182,10 +2126,13 @@ function stopInline(job, detail, entry) {
 // decision", never as an error.
 function stopBlock(entry, live) {
   const job = live ? shownJob() : null;
-  const stop = stopEntry(job ?? { error: { code: entry.code ?? '', message: entry.msg ?? '' } });
+  // The live stop's row is the job's, an earlier one the Stream entry's (SF-129).
+  const stop = stopEntry(job === null ? entry.stop_code : job.stop_code);
+  // Its kind is the server's too (stop_kind): a decision is never labelled as an error.
+  const decision = (job === null ? entry.stop_kind : job.stop_kind) === 'decision';
   const block = el('div', 'block stop');
   const head = el('div', 'bh');
-  head.append(el('span', stop.kind === 'decision' ? 'verdict fix' : 'verdict stop', stop.kind === 'decision' ? 'Your decision' : 'Stopped'), stop.reason);
+  head.append(el('span', decision ? 'verdict fix' : 'verdict stop', decision ? 'Your decision' : 'Stopped'), stop.reason);
   if (typeof entry.code === 'string') {
     head.append(el('span', 'tag', entry.code));
   }
@@ -2696,110 +2643,7 @@ function renderHead() {
 // The job has its MR text (written at Clean): the Merge request screen applies.
 const mrAvailable = () => shownDetail()?.mr === true;
 
-// ---------- The composer (SF-078, the prototype's actionsFor and renderComposer) ----------
-
-const SEND = { a: 'say', l: 'Send' };
-const GO_ON = { a: 'goon', l: 'Tell it to go on' };
-const RETRY = { a: 'retry', l: 'Retry' };
-const ABORT = { a: 'abort', l: 'Abort…', d: true };
-const RESTART = { a: 'restart', l: 'Restart…' };
-const ARCHIVE = { a: 'archive', l: 'Archive' };
-
-// The actions of a stopped job, by its code (the Task's table), primary first.
-function stopActions(job, detail) {
-  const accept = gateAcceptable(detail) ? [{ a: 'accept', l: 'Accept and prepare MR' }] : [];
-  if (usageLimited(job)) {
-    return [GO_ON, ABORT];
-  }
-  const code = typeof job.error?.code === 'string' ? job.error.code : '';
-  switch (STOP_ALIASES[code] ?? code) {
-    case SIMPLIFY_CODE:
-      return [{ a: 'simplify', l: 'Simplify' }, { a: 'accept', l: 'Skip' }, SEND, ABORT];
-    case 'escalated':
-      return [SEND, ABORT];
-    case 'review_disputed':
-    case 'review_churn':
-    case 'gate_rounds':
-    case 'gate_budget':
-      return [...accept, SEND, ABORT];
-    case 'iteration_limit':
-      return [...accept, SEND, RESTART, ABORT];
-    case 'gate_failed':
-      return [...accept, GO_ON, ABORT];
-    case 'tests_failed':
-      return [...accept, SEND, ABORT];
-    case 'tests_unavailable':
-      return retryable(job) ? [RETRY, ...accept, SEND, ABORT] : [...accept, SEND, ABORT];
-    case 'review_failed':
-      return [{ a: 'review', l: 'Retry review' }, ABORT];
-    case 'serve_restarted':
-    case 'session_failed':
-      return [GO_ON, RESTART, ABORT];
-    case 'fetch_failed':
-      // A conflict turn ran in this MR preparation (SF-087): no Retry, its iteration is reviewed again.
-      return retryable(job) ? [RETRY, ABORT] : [GO_ON, ABORT];
-    case 'mr_serve_restarted':
-    case 'mr_failed':
-      return retryable(job) ? [RETRY, GO_ON, ABORT] : [GO_ON, ABORT];
-    case 'max_turns':
-    case 'sandbox_unavailable':
-    case 'publish_failed':
-    case 'worktree_remove_failed':
-      return [GO_ON, ABORT];
-    case 'mr_conflict':
-      return [{ a: 'say', l: 'Tell it how' }, ABORT];
-    case 'mr_push_failed':
-      return [{ a: 'approve', l: 'Push again' }, ABORT];
-    case 'mr_push_protected':
-      // Open the Merge request screen to rename the branch comes with SF-080.
-      return [ABORT];
-    default:
-      return [SEND, ABORT];
-  }
-}
-
-// The actions that apply to the job now, primary first ({ a: action, l: label, p: primary, d:
-// danger }); a finished job has no primary.
-function actionsFor(job, detail) {
-  let list;
-  switch (job.state) {
-    case 'starting':
-    case 'working':
-    case 'awaiting_review':
-      list = [SEND, { a: 'pause', l: 'Pause' }, ABORT];
-      break;
-    case 'preparing_mr':
-      list = [ABORT];
-      break;
-    case 'paused':
-      list = [{ a: 'resume', l: 'Resume' }, RESTART, ABORT];
-      break;
-    case 'waiting_limit':
-      // SF-072: no message waits for a parked job; Resume now carries it (from a turn).
-      list = [{ a: 'resume', l: 'Resume now' }, ABORT];
-      break;
-    case 'ready_for_human_review':
-      // SF-080: the Merge request screen first; Approve… stays.
-      list = [{ a: 'review-mr', l: ACTION_LABELS['review-mr'] }, { a: 'approve', l: 'Approve…' }, { a: 'handover', l: ACTION_LABELS.handover }, ...(canCreateMr(job) ? [{ a: 'mr-create', l: 'Create merge request' }] : []), SEND, ABORT];
-      break;
-    case 'handed_over':
-      // SF-073: the branch waits in the user's checkout. Its actions are in the hand-over panel
-      // (SF-107, renderHandoverPanel); the bar's row stays empty.
-      return [];
-    case 'needs_human':
-      list = stopActions(job, detail);
-      break;
-    case 'pushed':
-      return [...(canCreateMr(job) ? [{ a: 'mr-create', l: 'Create merge request' }] : []), ...(canMerge(job) ? [{ a: 'mr-merge', l: 'Merge…' }] : []),
-        ...(hasMr(job) ? [{ a: 'mr-status', l: 'Refresh MR status' }] : []), ARCHIVE];
-    case 'aborted':
-    case 'failed':
-      return [RESTART, ARCHIVE];
-    default:
-      list = [ABORT];
-  }
-  return list.map((action, index) => ({ ...action, p: index === 0 && action.d !== true }));
-}
+// ---------- The composer (SF-078, the prototype's renderComposer; SF-129: the server's actions) ----------
 
 // The placeholder of the message box, per state.
 const PLACEHOLDER = {
@@ -2861,11 +2705,12 @@ function renderComposer() {
   }
   $('composer-sentence').replaceChildren(...cs);
   msg.hidden = finished;
-  msg.disabled = !(SAY_STATES.includes(job.state) || pausedTurn(job));
+  msg.disabled = !(job.availability?.say === '' || pausedTurn(job));
   const resumeWord = job.state === 'waiting_limit' ? 'Resume now' : 'Resume';
-  msg.placeholder = RESUME_STATES.includes(job.state) ? (pausedTurn(job) ? `${resumeWord} sends this to the Implementer, if you write one` : `${resumeWord}, then message the Implementer`)
+  msg.placeholder = job.availability?.resume === '' ? (pausedTurn(job) ? `${resumeWord} sends this to the Implementer, if you write one` : `${resumeWord}, then message the Implementer`)
     : PLACEHOLDER[job.state] ?? 'Message';
-  const buttons = actionsFor(job, state.detail).map((action) => actionButton(job, action.a, action.l, `btn${action.p ? ' primary' : ''}${action.d ? ' danger' : ''}`));
+  // The actions the server lists for the job, in its order (SF-129).
+  const buttons = (Array.isArray(job.actions) ? job.actions : []).map((shown) => actionButton(job, shown.action, shown.label, `btn${shown.primary ? ' primary' : ''}${shown.danger ? ' danger' : ''}`));
   keepFocus($('acts'), () => $('acts').replaceChildren(...buttons));
   if (job.state === 'handed_over') {
     renderHandoverPanel(job, state.detail);
@@ -3093,11 +2938,10 @@ function renderDetail(detail) {
 }
 
 // The job waits for the user after a failed Claude review: Retry review runs it again.
-const reviewFailed = (job) => job.state === 'needs_human' && job.error?.code === 'review_failed';
-// A transient stop of MR preparation that Retry takes on (SF-087); never after a conflict turn,
-// whose resolution no reviewer saw.
-const retryable = (job) => job.state === 'needs_human' && typeof job.error?.code === 'string'
-  && RETRY_STOPS.includes(STOP_ALIASES[job.error.code] ?? job.error.code) && job.mr_conflict_turn !== true;
+const reviewFailed = (job) => job.stop_code === 'review_failed';
+// Retry applies to the job's stop (SF-087), as the server says (SF-129): the job's own availability,
+// without the page's pending and unresolved layer.
+const retryOn = (job) => job.availability?.retry === '';
 
 const preparationKnown = (job) => job.state === 'preparing_mr' || state.pending.has(pendingId('approve', keyOf(job)));
 
@@ -3121,80 +2965,14 @@ function availability(action, job) {
       ? "the last action's outcome is unknown and the current state could not be loaded."
       : "the last action's outcome is unknown; waiting for the current state.";
   }
-  if (action === 'approve') {
-    if (canApprove(job)) {
-      return '';
-    }
-    if (job.state === 'needs_human') {
-      return 'approve pushes a branch prepared at Clean; this job has none yet.';
-    }
-    if (job.state === 'preparing_mr') {
-      return 'the branch is being prepared.';
-    }
-    if (job.state === 'awaiting_review') {
-      return 'the reviewers have not reached Clean yet.';
-    }
-    return `not available while the job is ${job.state}.`;
-  }
-  if (action === 'abort') {
-    return TERMINAL_STATES.includes(job.state) ? `the job is already ${job.state}.` : '';
-  }
-  if (action === 'archive') {
-    return TERMINAL_STATES.includes(job.state) ? '' : 'only a finished job is archived.';
-  }
-  if (action === 'pause') {
-    if (job.state === 'preparing_mr') {
-      return 'the MR is being prepared (commit, rebase); it cannot be paused now.';
-    }
-    return PAUSE_STATES.includes(job.state) ? '' : 'only while the Implementer works or the reviewers review.';
-  }
-  if (action === 'resume') {
-    return RESUME_STATES.includes(job.state) ? '' : 'only for a paused job, or one waiting for limits.';
-  }
-  if (action === 'restart') {
-    return RESTART_STATES.includes(job.state) ? '' : 'only for a paused, waiting for limits, aborted, failed or needs_human job.';
-  }
-  if (action === 'mr-create') {
-    if (!canCreateMr(job)) {
-      return hasMr(job) && job.state === 'pushed' ? `the merge request #${job.mr.number} is ${job.mr.state}.` : 'a merge request needs a pushed branch, or one ready to approve.';
-    }
-    return mrOff(job);
-  }
-  if (action === 'mr-merge') {
-    return canMerge(job) ? mrOff(job) : 'only an open merge request of a pushed job is merged.';
-  }
-  if (action === 'mr-status') {
-    return hasMr(job) ? mrOff(job) : 'no merge request yet.';
-  }
-  if (action === 'review') {
-    return reviewFailed(job) ? '' : 'only after a failed review.';
-  }
-  if (action === 'retry') {
-    return retryable(job) ? '' : 'only after a transient MR preparation failure.';
-  }
-  if (action === 'simplify') {
-    return simplifiable(job) ? '' : 'only when the simplification pass offers suggestions (simplify_offered).';
-  }
-  if (action === 'accept') {
-    return state.detail !== null && keyOf(state.detail.job) === keyOf(job) && gateAcceptable(state.detail)
-      ? '' : 'only at the Fix round limit, or after the gate or the ledger stopped the job or when the simplification pass offered suggestions, with a clean Claude review (or none on the job).';
-  }
-  const handover = HANDOVER_ACTIONS.find(([name]) => name === action);
-  if (handover !== undefined) {
-    return job.state === handover[1] ? '' : `only when the job is ${handover[1]}; it is ${job.state}.`;
-  }
-  if (job.state === 'paused') {
-    return pausedTurn(job) ? 'the job is paused: Resume sends the message.' : 'the job is paused: Resume, then send the message.';
-  }
-  if (job.state === 'waiting_limit') {
-    return pausedTurn(job) ? 'the job waits for limits: Resume now sends the message.' : 'the job waits for limits: Resume now, then send the message.';
-  }
-  return SAY_STATES.includes(job.state) ? '' : `messages need working, awaiting_review, needs_human, ready_for_human_review or handed_over; the job is ${job.state}.`;
+  // The job's own rules are the server's (SF-129: factory/src/stops.ts).
+  const given = job.availability?.[action];
+  return typeof given === 'string' ? given : "the job's actions are not known yet.";
 }
 
 // A job paused (SF-067) or parked on a usage limit (SF-072) during the Implementer's turn: its
 // Resume takes the message.
-const pausedTurn = (job) => RESUME_STATES.includes(job.state) && job.paused?.from === 'working';
+const pausedTurn = (job) => job.availability?.resume === '' && job.paused?.from === 'working';
 
 // The outcome line. On a handed-over job's panel (SF-107) it has a × to dismiss it, and an outcome
 // from before the hand-over is a muted note "Earlier, at …" with Dismiss, never a current line.
@@ -3653,20 +3431,20 @@ function openConfirm(action) {
     abort: `Ends the job on branch ${job.branch}: the Implementer session stops and queued messages are dropped. The branch and its worktree stay as they are.`,
     restart: `Starts ${job.ticket} again from its current Task file, as a new job on a fresh worktree and branch from ${job.base}. Thrown away: the Implementer session${job.state === 'paused' || job.state === 'needs_human' ? ' and its queued messages' : ''}, the worktree${typeof job.worktree === 'string' ? ` ${job.worktree}` : ''} with its uncommitted changes (unless kept below) and the branch ${job.branch}, deleted only when it has no commit beyond the base and was never pushed: otherwise nothing is touched and the restart is refused. The job's history is archived as sf reset does.`,
     simplify: `Writes one Fix section “Simplify” with the suggestions below into the Task file; the Implementer applies them and the Claude review and the gate review the result as usual. The suggestions are recorded in the ledger as your choice, so a reviewer cannot ask for them back. It runs once per job.`,
-    accept: TESTS_CODES.includes(job.error?.code)
+    accept: job.stop_group === 'tests'
       ? `Accepts iteration ${job.iteration} without passing tests (${testsCommand(key)}); the MR text records it under ### Checks.`
-      : job.error?.code === SIMPLIFY_CODE
+      : job.stop_group === 'simplify'
       ? `Skips the simplification: iteration ${job.iteration}, which the reviewers found clean, goes on to MR preparation as it is. The suggestions go into the MR text under “Simplifications not applied”, for a follow-up ticket.`
-      : job.error?.code === LIMIT_CODE
+      : job.stop_group === 'limit'
       ? `Accepts iteration ${job.iteration} at the Fix round limit with its open findings unapplied (listed in the MR text). The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. The override is recorded in the job's history.`
       : !claudeOn(job)
-      ? `Accepts iteration ${job.iteration}, which only the Codex gate reviewed, over ${job.error?.code}. The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. ${LEDGER_CODES.includes(job.error?.code) ? 'The open findings are not applied; the override' : 'The override'} is recorded in the job's history.`
-      : LEDGER_CODES.includes(job.error?.code)
+      ? `Accepts iteration ${job.iteration}, which only the Codex gate reviewed, over ${job.error?.code}. The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. ${job.stop_group === 'ledger' ? 'The open findings are not applied; the override' : 'The override'} is recorded in the job's history.`
+      : job.stop_group === 'ledger'
       ? `Accepts iteration ${job.iteration} over the ledger's stop (${job.error?.code}). The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. The open findings are not applied; the override is recorded in the job's history.`
       : `Overrides the Codex gate (${job.error?.code}): iteration ${job.iteration} goes on as after a clean gate. The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. The override is recorded in the job's history.`,
   };
   $('confirm-text').textContent = texts[action];
-  renderConfirmItems(action === 'simplify' || (action === 'accept' && job.error?.code === SIMPLIFY_CODE) ? offeredSuggestions(state.detail)
+  renderConfirmItems(action === 'simplify' || (action === 'accept' && job.stop_group === 'simplify') ? offeredSuggestions(state.detail)
     : action === 'accept' ? gateLeftovers(state.detail) : null);
   $('discard').checked = false;
   $('as-is').checked = false;
@@ -3718,7 +3496,7 @@ function renderConfirmButton() {
   ok.textContent = confirm.action === 'mr-create' ? 'Create the merge request'
     : confirm.action === 'mr-merge' ? `Merge #${job?.mr?.number} into ${job?.base}`
     : confirm.action === 'simplify' ? 'Simplify'
-    : confirm.action === 'accept' ? (job?.error?.code === SIMPLIFY_CODE ? 'Skip and prepare the MR' : 'Accept and prepare the MR')
+    : confirm.action === 'accept' ? (job?.stop_group === 'simplify' ? 'Skip and prepare the MR' : 'Accept and prepare the MR')
     : confirm.action === 'restart' ? ($('keep-files').checked ? 'Restart, keep the files' : 'Restart')
     : confirm.action === 'approve' ? ($('as-is').checked ? 'Approve: push as it is' : 'Approve: push the branch') : discard ? 'Abort and discard the branch' : 'Abort, keep the worktree';
   ok.className = confirm.action === 'abort' ? 'btn small danger' : 'btn small primary';
@@ -3760,6 +3538,10 @@ function sendSay(goOn = false) {
   void run('say', key, { message: text.trim() === '' ? 'Go on.' : text });
 }
 
+// The composer's actions posted at once, without a confirmation: Pause, Retry review, Retry, Refresh
+// MR status, Archive and the hand-over's (SF-073).
+const POSTED_AT_ONCE = ['pause', 'review', 'retry', 'mr-status', 'archive', 'handover', 'takeback', 'handed-done'];
+
 // A button of the composer (the prototype's act): the ones that ask first open their confirmation;
 // Send, Tell it to go on, Pause, Resume, Retry review, Refresh MR status, Archive and the hand-over's
 // actions (SF-073) post at once.
@@ -3780,7 +3562,7 @@ function act(action) {
     if (availability('resume', job) === '') {
       void run('resume', key, pausedTurn(job) && message.trim() !== '' ? { message } : {});
     }
-  } else if (['pause', 'review', 'retry', 'mr-status', 'archive', ...HANDOVER_ACTIONS.map(([name]) => name)].includes(action) && availability(action, job) === '') {
+  } else if (POSTED_AT_ONCE.includes(action) && availability(action, job) === '') {
     void run(action, key, {});
   }
 }
@@ -3859,7 +3641,7 @@ const counted = (n, word, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
 // session), else the last one published; never 0.
 const SESSION_CODES = ['serve_restarted', 'session_failed', 'turn_failed', 'max_turns', 'sandbox_unavailable', 'permission_mode_mismatch', 'publish_failed'];
 function shownIteration(job) {
-  const underWay = job.state === 'starting' || job.state === 'working' || (RESUME_STATES.includes(job.state) && job.paused?.step === 'turn')
+  const underWay = job.state === 'starting' || job.state === 'working' || (job.availability?.resume === '' && job.paused?.step === 'turn')
     || (job.state === 'needs_human' && SESSION_CODES.includes(job.error?.code));
   return Math.max(1, underWay ? job.iteration + 1 : job.iteration);
 }
@@ -3868,152 +3650,146 @@ function shownIteration(job) {
 const stopCount = (job) => (Array.isArray(job.stop?.items) ? job.stop.items.length : null);
 // The first line of the job's error message, after ": ", or nothing.
 const said = (job) => (firstLine(job.error?.message) === '' ? '' : `: ${firstLine(job.error.message).replace(/\.$/, '')}`);
-// A failed session that hit the Claude usage limit ("You've hit your … limit · resets 3am (Europe/Sofia)").
-const usageLimited = (job) => job.error?.code === 'session_failed' && /hit your .*limit/i.test(firstLine(job.error?.message));
+// When the Claude usage limit of a usage_limit stop resets ("You've hit your … limit · resets 3am (Europe/Sofia)").
 const resetTime = (job) => /resets\s+(.+)$/i.exec(firstLine(job.error?.message))?.[1] ?? null;
 // How the last run of a tests_failed stop ended (SF-128): "exit 1" or "timed out after 30 min" of its message.
 const testsEnding = (job) => /\((exit -?\d+|timed out after [^)]+)\) on iteration/.exec(firstLine(job.error?.message))?.[1] ?? null;
 
-// The stop codes (SF-077): one table for the cards and the job page (its header, its stop block
-// and its composer, SF-078). A decision (the factory needs the user's choice; nothing failed) never
-// shows as an error; an error does. Each entry: its kind, the card's reason, the sentence (with the
-// job's numbers, or the words without one that is not known) and the card's button. N, M, X and T
-// come from the job; the codes of factory/src.
+// The words of each stop (SF-077) for the cards and the job page (its header, its stop block and
+// its composer, SF-078), keyed by the server's stop_code (SF-129: the rows of factory/src/stops.ts;
+// a stop's kind is the payload's stop_kind, so a decision never shows as an error). Each entry:
+// the card's reason, the sentence (with the job's numbers, or the words without one that is not
+// known) and the card's button. N, M, X and T come from the job.
 const STOPS = {
   simplify_offered: {
-    kind: 'decision', reason: 'Simplification offered', button: () => 'Simplify or skip',
+    reason: 'Simplification offered', button: () => 'Simplify or skip',
     sentence: (job) => (stopCount(job) !== null && typeof job.stop?.saves_lines === 'number'
       ? `The simplification pass suggests ${counted(stopCount(job), 'change')} (saves about ${counted(job.stop.saves_lines, 'line')}). Simplify or skip.`
       : 'The simplification pass suggests changes. Simplify or skip.'),
   },
   escalated: {
-    kind: 'decision', reason: 'Question for you',
+    reason: 'Question for you',
     button: (job) => (stopCount(job) ? `Answer ${counted(stopCount(job), 'question')}` : 'Answer the questions'),
     sentence: (job) => `The Implementer asks you about ${stopCount(job) ? counted(stopCount(job), 'finding') : 'findings'}. Answer each: Accept risk or Must fix.`,
   },
   review_disputed: {
-    kind: 'decision', reason: 'A reviewer disputes a contest',
+    reason: 'A reviewer disputes a contest',
     button: (job) => (stopCount(job) ? `Settle ${counted(stopCount(job), 'finding')}` : 'Settle the findings'),
     sentence: (job) => `A reviewer reopened ${stopCount(job) ? counted(stopCount(job), 'finding') : 'findings'} the Implementer contested. Settle each: Accept risk or Must fix.`,
   },
   review_churn: {
-    kind: 'decision', reason: 'Fixes keep making findings',
+    reason: 'Fixes keep making findings',
     button: (job) => (stopCount(job) ? `Decide ${counted(stopCount(job), 'finding')}` : 'Decide the findings'),
     sentence: (job) => `The fixes keep making new findings${stopCount(job) !== null ? ` (${stopCount(job)} open)` : ''}. Accept the change as it is, or tell the Implementer what to fix.`,
   },
   gate_rounds: {
-    kind: 'decision', reason: 'Codex round limit reached',
+    reason: 'Codex round limit reached',
     button: (job) => (stopCount(job) ? `Decide ${counted(stopCount(job), 'finding')}` : 'Decide the findings'),
     sentence: (job) => `${typeof job.gate_fixes === 'number' ? `Codex asked for fixes ${counted(job.gate_fixes, 'time')}, the limit.` : 'Codex asked for fixes as often as the limit allows.'} Accept the change without its ${stopCount(job) !== null ? counted(stopCount(job), 'open finding') : 'open findings'}, or tell the Implementer what to fix.`,
   },
   gate_budget: {
-    kind: 'decision', reason: 'Codex token budget used up', button: () => 'Decide',
+    reason: 'Codex token budget used up', button: () => 'Decide',
     sentence: (job) => `The Codex gate used its token budget for this job. ${claudeOn(job) ? "Accept the change with Claude's clean review" : 'Accept the change, which no reviewer passed'}, or tell the Implementer what to do.`,
   },
   iteration_limit: {
-    kind: 'decision', reason: 'Fix round limit reached', button: () => 'Give a direction',
+    reason: 'Fix round limit reached', button: () => 'Give a direction',
     sentence: (job) => `${typeof job.fixes === 'number' ? `The reviewers asked for fixes ${counted(job.fixes, 'time')}, the limit.` : 'The reviewers asked for fixes as often as the limit allows.'} Accept the change with its open findings listed in the MR text, give the Implementer a direction, or abort.`,
   },
   tests_failed: {
-    kind: 'decision', reason: 'Tests keep failing', button: () => 'Decide',
+    reason: 'Tests keep failing', button: () => 'Decide',
     sentence: (job) => `The workspace's tests still fail after the Tests Fix rounds${testsEnding(job) !== null ? ` (${testsEnding(job)})` : ''}. Accept the change without passing tests, or tell the Implementer what to do.`,
   },
   tests_unavailable: {
-    kind: 'error', reason: 'Tests could not run', button: (job) => (retryable(job) ? 'Retry' : 'Decide'),
+    reason: 'Tests could not run', button: (job) => (retryOn(job) ? 'Retry' : 'Decide'),
     sentence: (job) => `The workspace's tests could not run${said(job)}. Fix it on this machine and Retry, or accept without tests.`,
   },
   max_turns: {
-    kind: 'decision', reason: 'Turn limit reached', button: () => 'Tell it to go on',
+    reason: 'Turn limit reached', button: () => 'Tell it to go on',
     sentence: (job) => `The Implementer used all its turns on iteration ${shownIteration(job)}. Tell it to go on.`,
   },
   gate_failed: {
-    kind: 'error', reason: 'Codex gate gave no verdict', button: () => 'Decide',
+    reason: 'Codex gate gave no verdict', button: () => 'Decide',
     sentence: (job) => `The Codex gate stopped without a verdict. ${claudeOn(job) ? "Accept with Claude's clean review" : 'Accept the change, which no reviewer passed'}, or tell the Implementer to go on.`,
   },
   review_failed: {
-    kind: 'error', reason: 'Claude review could not run', button: () => 'Retry review',
+    reason: 'Claude review could not run', button: () => 'Retry review',
     sentence: (job) => `The Claude review of iteration ${shownIteration(job)} could not run. Retry it.`,
   },
   serve_restarted: {
-    kind: 'error', reason: 'Interrupted by a restart', button: () => 'Tell it to go on',
+    reason: 'Interrupted by a restart', button: () => 'Tell it to go on',
     sentence: (job) => `sf serve restarted while iteration ${shownIteration(job)} ran. Tell the Implementer to go on.`,
   },
   mr_serve_restarted: {
-    kind: 'error', reason: 'MR preparation interrupted', button: (job) => (retryable(job) ? 'Retry' : 'Tell it to go on'),
-    sentence: (job) => (retryable(job)
+    reason: 'MR preparation interrupted', button: (job) => (retryOn(job) ? 'Retry' : 'Tell it to go on'),
+    sentence: (job) => (retryOn(job)
       ? 'The MR preparation was interrupted. Retry prepares the MR again without a new review; Tell it to go on reviews the iteration again.'
       : 'The MR preparation was interrupted. Tell the Implementer to go on: the iteration is reviewed again and the MR is prepared again.'),
   },
   // session_failed with the usage-limit message.
   usage_limit: {
-    kind: 'error', reason: 'Usage limit reached', button: () => 'Tell it to go on',
+    reason: 'Usage limit reached', button: () => 'Tell it to go on',
     sentence: (job) => `The Claude usage limit was reached${resetTime(job) !== null ? `; it resets at ${resetTime(job)}` : ''}. Tell the Implementer to go on after that.`,
   },
   session_failed: {
-    kind: 'error', reason: 'Implementer session failed', button: () => 'Tell it to go on',
+    reason: 'Implementer session failed', button: () => 'Tell it to go on',
     sentence: (job) => `The Implementer's session failed${said(job)}. Tell it to go on, or restart.`,
   },
   sandbox_unavailable: {
-    kind: 'error', reason: 'Sandbox unavailable', button: () => 'Tell it to go on',
+    reason: 'Sandbox unavailable', button: () => 'Tell it to go on',
     sentence: (job) => `The Implementer's sandbox could not start${said(job)}. Fix it on this machine, then tell it to go on.`,
   },
   publish_failed: {
-    kind: 'error', reason: 'Iteration not published', button: () => 'Tell it to go on',
+    reason: 'Iteration not published', button: () => 'Tell it to go on',
     sentence: (job) => `The factory could not publish the Report and Patch of iteration ${shownIteration(job)}. Tell it to go on to try again.`,
   },
   mr_conflict: {
-    kind: 'error', reason: 'Rebase conflict', button: () => 'Tell it how',
+    reason: 'Rebase conflict', button: () => 'Tell it how',
     sentence: (job) => `The rebase onto ${job.base} conflicts and the Implementer could not resolve it. Tell it how, or abort.`,
   },
   mr_text_missing: {
-    kind: 'error', reason: 'MR text missing or invalid', button: () => 'Tell it to fix it',
+    reason: 'MR text missing or invalid', button: () => 'Tell it to fix it',
     sentence: (job) => `The Implementer's MR text is missing or breaks a rule${said(job)}. Tell it to write it again.`,
   },
   mr_empty: {
-    kind: 'error', reason: 'Nothing to commit', button: () => 'Tell it what is missing',
+    reason: 'Nothing to commit', button: () => 'Tell it what is missing',
     sentence: (job) => `The reviewed change has nothing to commit against ${job.base}. Tell the Implementer what is missing, or abort.`,
   },
   mr_failed: {
-    kind: 'error', reason: 'MR preparation failed', button: (job) => (retryable(job) ? 'Retry' : 'Tell it to go on'),
-    sentence: (job) => (retryable(job)
+    reason: 'MR preparation failed', button: (job) => (retryOn(job) ? 'Retry' : 'Tell it to go on'),
+    sentence: (job) => (retryOn(job)
       ? `The MR preparation failed${said(job)}. Retry prepares the MR again without a new review; Tell it to go on reviews the iteration again.`
       : `The MR preparation failed${said(job)}. Tell the Implementer to go on (the iteration is reviewed again), or abort.`),
   },
   fetch_failed: {
-    kind: 'error', reason: 'Fetch failed', button: (job) => (retryable(job) ? 'Retry' : 'Tell it to go on'),
-    sentence: (job) => `Git could not fetch ${job.base} from origin after the clean review. ${retryable(job) ? 'Retry when the network is back.' : 'Tell the Implementer to go on when the network is back (the iteration is reviewed again).'}`,
+    reason: 'Fetch failed', button: (job) => (retryOn(job) ? 'Retry' : 'Tell it to go on'),
+    sentence: (job) => `Git could not fetch ${job.base} from origin after the clean review. ${retryOn(job) ? 'Retry when the network is back.' : 'Tell the Implementer to go on when the network is back (the iteration is reviewed again).'}`,
+  },
+  // The guard's stops of MR preparation (SF-122): guard_hit, guard_terms_invalid, guard_failed.
+  guard_hit: {
+    reason: 'Guard stopped the MR', button: (job) => (retryOn(job) ? 'Retry' : 'Tell it how'),
+    sentence: (job) => `The guard stopped MR preparation${said(job)}. ${retryOn(job) ? 'Retry runs it again' : 'Tell the Implementer how to go on'}, or abort.`,
   },
   worktree_remove_failed: {
-    kind: 'error', reason: 'Worktree not removed', button: () => 'Tell it to go on',
+    reason: 'Worktree not removed', button: () => 'Tell it to go on',
     sentence: (job) => `The branch is prepared, but its worktree could not be removed${said(job)}. Remove it by hand, then tell the Implementer to go on.`,
   },
   mr_push_failed: {
-    kind: 'error', reason: 'Push failed', button: () => 'Push again',
+    reason: 'Push failed', button: () => 'Push again',
     sentence: (job) => `The push of ${job.branch} failed${said(job)}. Fix the cause, then push again.`,
   },
   mr_push_protected: {
-    kind: 'error', reason: 'Push refused', button: () => 'Open the job',
+    reason: 'Push refused', button: () => 'Open the job',
     sentence: (job) => `The factory never pushes to ${job.branch}. Rename the branch on the Merge request screen, or abort.`,
   },
   // Any other code.
   other: {
-    kind: 'error', reason: 'Stopped', button: () => 'Open the job',
+    reason: 'Stopped', button: () => 'Open the job',
     sentence: (job) => `The job stopped${said(job)}. Tell the Implementer what to do, or abort.`,
   },
 };
-// The codes that share an entry of STOPS.
-const STOP_ALIASES = {
-  mr_interrupted: 'mr_serve_restarted', turn_failed: 'session_failed', permission_mode_mismatch: 'session_failed',
-  mr_text_invalid: 'mr_text_missing', mr_commit_failed: 'mr_failed', mr_rebase_failed: 'mr_failed',
-};
-
-// The entry of STOPS for a stopped job.
-function stopEntry(job) {
-  if (usageLimited(job)) {
-    return STOPS.usage_limit;
-  }
-  const code = typeof job.error?.code === 'string' ? job.error.code : '';
-  return Object.hasOwn(STOPS, STOP_ALIASES[code] ?? code) ? STOPS[STOP_ALIASES[code] ?? code] : STOPS.other;
+// The entry of STOPS for a stop's canonical code (the server's stop_code, SF-129).
+function stopEntry(code) {
+  return typeof code === 'string' && Object.hasOwn(STOPS, code) ? STOPS[code] : STOPS.other;
 }
 
 // The sentence of a job's state, as the job page's header says it.
@@ -4039,7 +3815,7 @@ function sentence(job) {
     case 'preparing_mr':
       return 'Writing the MR text';
     case 'needs_human':
-      return stopEntry(job).sentence(job).replace(/\.$/, '');
+      return stopEntry(job.stop_code).sentence(job).replace(/\.$/, '');
     case 'ready_for_human_review':
       return 'Reviews are clean and the MR text is written. Push when you are happy';
     case 'handed_over':
@@ -4371,8 +4147,8 @@ function jobCard(job) {
     line.append(el('i', 'pulse'), el('b', '', `Now: ${now.who}`), what);
     item.append(line, el('div', 'meta', `Iteration ${shownIteration(job)} · ${counted(typeof job.tool_calls === 'number' ? job.tool_calls : 0, 'tool call')}`));
   } else if (job.state === 'needs_human') {
-    const stop = stopEntry(job);
-    const reason = el('div', stop.kind === 'error' ? 'reason err' : 'reason', stop.reason);
+    const stop = stopEntry(job.stop_code);
+    const reason = el('div', job.stop_kind === 'decision' ? 'reason' : 'reason err', stop.reason);
     if (typeof job.error?.message === 'string') {
       reason.setAttribute('title', job.error.message);
     }
@@ -4432,17 +4208,17 @@ function yourTurn(job) {
   } else if (reviewFailed(job)) {
     primary = button('btn primary small', ACTION_LABELS.review, { run: 'review', key });
     primary.disabled = availability('review', job) !== '';
-  } else if (retryable(job)) {
+  } else if (retryOn(job)) {
     // Retry of a transient MR preparation failure (SF-087), posted at once.
     primary = button('btn primary small', ACTION_LABELS.retry, { run: 'retry', key });
     primary.disabled = availability('retry', job) !== '';
   } else {
-    const stop = stopEntry(job);
+    const stop = stopEntry(job.stop_code);
     const data = { open: key };
-    if (job.error?.code === 'mr_push_failed' && canApprove(job)) {
+    if (job.stop_code === 'mr_push_failed' && canApprove(job)) {
       data.confirm = 'approve';
     } else {
-      data.focus = stop.kind === 'decision' && stopCount(job) ? 'stop' : 'composer';
+      data.focus = job.stop_kind === 'decision' && stopCount(job) ? 'stop' : 'composer';
     }
     primary = button('btn primary small', stop.button(job), data);
   }
@@ -5681,7 +5457,7 @@ function queueAction(action, key) {
 // Retry review, Retry and Resume of a Your turn card: posted at once, once.
 function cardRun(action, key) {
   const job = jobByKey(key);
-  if (job === null || availability(action, job) !== '' || (action === 'review' && !reviewFailed(job)) || (action === 'retry' && !retryable(job))) {
+  if (job === null || availability(action, job) !== '' || (action === 'review' && !reviewFailed(job)) || (action === 'retry' && !retryOn(job))) {
     return;
   }
   void run(action, key, {});

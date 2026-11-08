@@ -19,9 +19,8 @@ export type Decision = (typeof DECISIONS)[number];
 export const LEDGER_ID = /^R[1-9]\d{0,5}$/;
 // A reference to an entry in a review item (reopens, caused_by): a ledger id, or "" for none.
 export const LEDGER_REF = /^(?:R[1-9]\d{0,5})?$/;
-// The stops whose settlement moves the job on by itself once nothing is left to settle. A churn
-// stop has nothing unsettled: settling there records the decision, and sf say moves the job on.
-export const SETTLE_CODES: readonly string[] = ['escalated', 'review_disputed'];
+// Which stops the user settles in, and whose settlement moves the job on, is src/stops.ts's table
+// (settleCodes). It is not imported here: src/stops.ts reads src/review.ts, which reads this module.
 // The codes of a stop the ledger made.
 export type LedgerStop = 'review_disputed' | 'review_churn';
 

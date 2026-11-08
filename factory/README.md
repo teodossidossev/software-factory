@@ -928,6 +928,28 @@ workspace's checkout; the checkout itself (the user's IDE checkout) is never wri
 factory beyond its Git refs (branches) and worktree registrations, except by the hand-over to it
 and back (SF-073, section Hand-over to your checkout).
 
+**One table decides each stop** (SF-129, `src/stops.ts`). A `needs_human` job's `error.code` stays
+a string on disk; `canonicalStop` resolves it to a row of `STOPS`: an alias to its row (for example
+`mr_rebase_failed` to `mr_failed`), `session_failed` with Claude's usage-limit message to
+`usage_limit`, any other code to `other`. Each row gives the stop's `kind` (`decision` or `error`),
+its `aliases`, its `group` (`gate`, `ledger`, `limit`, `simplify`, `tests` or none), its `settle`
+(`{resumes}` or none: whether the user settles ledger entries there, and whether the last
+settlement moves the job on) and its `actions` in order, each with a label and a precondition
+(`always`; `clean_review`: Accept applies, a clean Claude review of the last iteration with the
+dropped items aside, none needed without the Claude review or at the Fix round limit; `retryable`
+and `not_retryable`: Retry applies, never after a conflict turn). `jobActions(job, facts, now)`
+gives the actions a job shows in every state (the stop's row in `needs_human`) and every action's
+availability, `''` or its one-line reason; `facts` (the ledger, the last iteration's review and
+gate) are read only for stopped jobs, plus the workspace's Git host. Every list the factory checks
+is derived from it: the codes `sf accept` takes (every row with an Accept), `GATE_OVERRIDE_CODES`
+and `LEDGER_ACCEPT_CODES` (the `gate` and `ledger` groups), `MR_RETRY_CODES` (every code of a row
+with a Retry, aliases included: the guard's stops are one row, `guard_hit`, in the order `sf retry`
+has always named them), the stops
+whose settlement resumes the job (`escalated`, `review_disputed`; after `review_churn` a settlement
+is only recorded and the job stays `needs_human`), the stats' churn codes, and the stop's answers
+of its explanation (section Stop explanations). The dashboard renders the result (section
+Dashboard); the Execution still checks every action again.
+
 The job operations below are the Execution's (`src/execution.ts`, a thin coordinator over its parts
 in `src/execution/`: `start.ts`, `turns.ts`, `reviews.ts`, `mr-steps.ts`, `handover-steps.ts`,
 `control.ts`, `status.ts`): the user starts a job (the dashboard's Start, `sf start`), the
@@ -2094,7 +2116,7 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    `mr_rebase_failed`, `mr_failed`, or a stop of the guard (`guard_hit`, `guard_terms_invalid`,
    `guard_failed`, SF-122: after a `!` line in `guard-terms.txt`, for example; the change check runs
    first), or `tests_unavailable` (SF-128: the test step runs again) (`MR_RETRY_CODES` in
-   `src/execution/shared.ts`), with the worktree,
+   `src/execution/shared.ts`, derived from the stop table of `src/stops.ts`), with the worktree,
    no `prepared_commit` and a clean Claude review of the last iteration; anything else is
    `invalid_state` naming the state and code. The accepted sensitive paths are the clean path's:
    those of the last iteration's `review.json`, plus its `gate.json`'s when the gate's verdict is
@@ -2860,8 +2882,12 @@ Queue and Done; from 768 to 1023 px they sit in two columns (section Phone and t
 
 **The stop table.** A stop is a **decision** (the factory needs the user's choice; nothing failed:
 never red, never "Stopped") or an **error** (its reason in red). The card shows the reason and the
-button; the job's page (SF-078) says the sentence in its header, its stop block and its composer;
-one table, `STOPS` in `static/app.js`:
+button; the job's page (SF-078) says the sentence in its header, its stop block and its composer.
+One table on the server decides each stop (SF-129, `STOPS` in `src/stops.ts`, section Jobs): its
+kind, the codes that share it, its group, its settlement and its actions; the page renders what
+the payloads send (`stop_code`, `stop_kind`, `stop_group`, `actions`, `availability`, the
+detail's `settle_ids`) and decides no rule of its own. `STOPS` in `static/app.js` keeps only the
+words of each row, keyed by `stop_code`:
 
 | Code | Kind | Reason on the card | Button |
 |---|---|---|---|
@@ -2872,6 +2898,8 @@ one table, `STOPS` in `static/app.js`:
 | `gate_rounds` | decision | Codex round limit reached | Decide N findings |
 | `gate_budget` | decision | Codex token budget used up | Decide |
 | `iteration_limit` | decision | Fix round limit reached | Give a direction |
+| `tests_failed` | decision | Tests keep failing | Decide |
+| `tests_unavailable` | error | Tests could not run | Retry (Decide after a conflict turn) |
 | `max_turns` | decision | Turn limit reached | Tell it to go on |
 | `gate_failed` | error | Codex gate gave no verdict | Decide |
 | `review_failed` | error | Claude review could not run | Retry review |
@@ -2886,6 +2914,7 @@ one table, `STOPS` in `static/app.js`:
 | `mr_empty` | error | Nothing to commit | Tell it what is missing |
 | `mr_commit_failed`, `mr_rebase_failed`, `mr_failed` | error | MR preparation failed | Retry (Tell it to go on after a conflict turn) |
 | `fetch_failed` | error | Fetch failed | Retry (Tell it to go on after a conflict turn) |
+| `guard_hit`, `guard_terms_invalid`, `guard_failed` | error | Guard stopped the MR | Retry (Tell it how after a conflict turn) |
 | `worktree_remove_failed` | error | Worktree not removed | Tell it to go on |
 | `mr_push_failed` | error | Push failed | Push again |
 | `mr_push_protected` | error | Push refused | Open the job |
@@ -2903,10 +2932,12 @@ confirmation where it has one; *Tell it to go on* is a message, "Go on." when th
 | `simplify_offered` | each suggestion: its path, what, why and the lines it saves | Simplify, Skip (Accept and prepare MR without them: they are listed in the MR text), Send, Abort… |
 | `escalated` | each escalated finding with the Implementer's question, a note and *Accept risk* / *Must fix* (sent at once) | Send, Abort… |
 | `review_disputed` | each contested finding with the contest, its evidence and the reviewer's reason, a note and *Accept risk* / *Must fix* | Accept and prepare MR (with a clean Claude review), Send, Abort… |
-| `review_churn` | the open findings of the ledger (*Accept risk* / *Must fix* on those to settle) | Accept and prepare MR (with a clean Claude review), Send, Abort… |
+| `review_churn` | the open findings of the ledger (*Accept risk* / *Must fix* on those to settle: the settlement is only recorded, the job stays `needs_human`) | Accept and prepare MR (with a clean Claude review), Send, Abort… |
 | `gate_rounds` | the last gate's findings (nothing to settle one by one: the API settles only escalated and contested ones) | Accept and prepare MR (with a clean Claude review), Send, Abort… |
 | `gate_budget` | the gate's tokens used | Accept and prepare MR (with a clean Claude review), Send, Abort… |
 | `iteration_limit` | the open blocker and major ledger entries | Accept and prepare MR (whatever the last verdict), Send, Restart…, Abort… |
+| `tests_failed` | the whole message | Accept and prepare MR (with a clean Claude review; without passing tests), Send, Abort… |
+| `tests_unavailable` | the whole message | Retry (the test step again; no Retry after a conflict turn), Accept and prepare MR (with a clean Claude review), Send, Abort… |
 | `max_turns` | nothing | Tell it to go on, Abort… |
 | `gate_failed` | the gate's error | Accept and prepare MR (with a clean Claude review), Tell it to go on, Abort… |
 | `review_failed` | the review's error | Retry review, Abort… |
@@ -2920,12 +2951,16 @@ confirmation where it has one; *Tell it to go on* is a message, "Go on." when th
 | `mr_empty` | nothing | Send, Abort… |
 | `mr_commit_failed`, `mr_rebase_failed`, `mr_failed` | the whole message | Retry, Tell it to go on, Abort…; after a conflict turn no Retry |
 | `fetch_failed` | the whole message | Retry, Abort…; after a conflict turn Tell it to go on, Abort… |
+| `guard_hit`, `guard_terms_invalid`, `guard_failed` | the whole message | Retry (as `sf retry`, SF-122), Send, Abort…; after a conflict turn no Retry |
 | `worktree_remove_failed` | the worktree's path | Tell it to go on, Abort… |
 | `mr_push_failed` | the whole message | Push again (Approve, its confirmation), Abort… |
 | `mr_push_protected` | nothing | the Merge request screen (rename the branch, change the base, SF-080), then Approve; Abort… |
 | any other code | the whole message | Send, Abort… |
 
-A settled finding shows its decision ("Accepted risk", "Must fix") instead of the buttons.
+A settled finding shows its decision ("Accepted risk", "Must fix") instead of the buttons. The
+entries with *Accept risk* / *Must fix* are the detail's `settle_ids`: the escalated and contested
+ones (those `sf settle` takes) at a stop whose row has a settlement (`escalated`,
+`review_disputed`, `review_churn`).
 
 **Full pages.** One view shows at a time: the board, a job's page or a planned ticket's page; the
 URL hash says which, and the browser's Back and Forward move between them: `#<workspace>/<ticket>`
@@ -3192,8 +3227,8 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 
 | Path | Answer |
 |---|---|
-| `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, fixes, gate_fixes, gate_tokens, updated_at, created_at, error, and for the board (SF-046) `title` (of the Task file, or `null`), `cost_usd` (the estimate of the iterations and their Claude reviews, or `null`), `review` and `gate` (the last iteration's verdicts: `clean`, `fix`, `failed` or `null`) and `review_ended_at` (the end of that clean or fix Claude review, or `null`); `mr` (the merge request on the Git host or `null`) and `mr_host` (`{host, reason}`: `github`, `gitlab` or `null`, and why the merge request actions are off or `null`); for the v3 card (SF-077) `now` (`{who, what, ts}` of a running job: the Implementer's last tool call or the first line of its last text, read from at most the last 256 KB of `events.jsonl`; the Claude review or the Codex gate reviewing iteration N; the MR writer; else `null`), `tool_calls` (the Implementer's tool calls in the job, counted incrementally: only the bytes added since the last count are read) and `stop` (for `needs_human`, `{items, saves_lines}`: the suggestions of the last simplification pass and the lines they save, the ledger entries to settle (`escalated`, `review_disputed`), the open ones (`review_churn`) or the last gate's items (`gate_rounds`, `gate_budget`), none for other codes; `null` otherwise) |
-| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override, simplify}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied} or {ts, event: "merge_request", action, number, url, state}], mr_title, ledger, explanation}`; `mr_title` is the MR text's first line or `null`; `explanation` is the job's `explanation.json` while it is the current stop's (SF-106, section Stop explanations), else `null`; `ledger` is `ledger.json` as written (`[]` before the first Fix section, SF-052); `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null`, `simplify` its `simplify.json` (SF-055) or `null` |
+| `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, fixes, gate_fixes, gate_tokens, updated_at, created_at, error, and for the board (SF-046) `title` (of the Task file, or `null`), `cost_usd` (the estimate of the iterations and their Claude reviews, or `null`), `review` and `gate` (the last iteration's verdicts: `clean`, `fix`, `failed` or `null`) and `review_ended_at` (the end of that clean or fix Claude review, or `null`); `mr` (the merge request on the Git host or `null`) and `mr_host` (`{host, reason}`: `github`, `gitlab` or `null`, and why the merge request actions are off or `null`); for the v3 card (SF-077) `now` (`{who, what, ts}` of a running job: the Implementer's last tool call or the first line of its last text, read from at most the last 256 KB of `events.jsonl`; the Claude review or the Codex gate reviewing iteration N; the MR writer; else `null`), `tool_calls` (the Implementer's tool calls in the job, counted incrementally: only the bytes added since the last count are read) and `stop` (for `needs_human`, `{items, saves_lines}`: the suggestions of the last simplification pass and the lines they save, the ledger entries to settle (`escalated`, `review_disputed`), the open ones (`review_churn`) or the last gate's items (`gate_rounds`, `gate_budget`), none for other codes; `null` otherwise); SF-129 (`src/stops.ts`): `stop_code`, `stop_kind` and `stop_group` (the canonical row of a `needs_human` job's stop, `null` otherwise), `actions` (`[{action, label, primary, danger}]`: the actions the job's page shows, in order) and `availability` (every action's `''` or why it is off; Accept from the real review) |
+| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override, simplify}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied} or {ts, event: "merge_request", action, number, url, state}], mr_title, ledger, settle_ids, explanation}`; `job` has the fields of an `api/jobs` row's job part, `stop_code`, `stop_kind`, `stop_group`, `actions` and `availability` included (SF-129); `settle_ids` the ids of the ledger entries the stop block offers *Accept risk* / *Must fix* for (`[]` unless the stop's row has a settlement); `mr_title` is the MR text's first line or `null`; `explanation` is the job's `explanation.json` while it is the current stop's (SF-106, section Stop explanations), else `null`; `ledger` is `ledger.json` as written (`[]` before the first Fix section, SF-052); `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null`, `simplify` its `simplify.json` (SF-055) or `null` |
 | `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem, handoff, color, app, description, derived_description, digest}], handoff_default, digest}`: the registry, the checkout's path, its non-terminal jobs, why the checkout cannot be used now or `null`, its own hand-over setting or `null`, and its colour on the board (SF-084: its `color`, else the one its name picks); SF-103: its app (its own, else its name), its own description or `null`, the description derived from the repository or `null`, `digest: {track, my_work}`; at the top `handoff_default` (`checkout` or `off`, from `SF_HANDOFF`) and the morning digest's `digest: {at, weekdays_only, language}` |
 | `api/digests` | `{running, digests: [{id, trigger, period, ended_at, counts: {landed, live_branches, impact}, cost_usd, error}]}`, newest first (SF-103); the counts from the Git data, never from the model; 404 without the digest (in-process dashboards) |
 | `api/digests/<id>` | the stored record `digest/<id>.json` (SF-103); an unknown id or any query is an empty 404 |
@@ -3205,7 +3240,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `api/jobs/<ws>/<ticket>/changes` | the Changes screen's iterations (SF-079): `{base: {ref, commit}, iterations: [{n, ended_at, truncated, base_commit}]}`; `base.ref` is the job's base branch, `base.commit` the last published iteration's base; an iteration's `base_commit` is `null` when it is not known (section Changes) |
 | `api/jobs/<ws>/<ticket>/changes?from=base\|<N>&to=<N>` | the files of a view: `{files: [{path, status, additions, deletions, binary, unavailable}], more}`, `status` `added`, `modified` or `deleted`, sorted by path, at most 3000 files (`more: true` beyond). Only two pairs: `from=base` with a published `to` (the base of iteration `to` against `to`) and `from=<to − 1>` with `to` ≥ 2; any other pair, a half pair or another parameter is an empty 404 |
 | `api/jobs/<ws>/<ticket>/file?at=base\|<N>&path=<path>` | one side of one file (SF-079): `{kind: "text", text}`, `{kind: "absent"}`, `{kind: "binary", bytes}` (the blob's size, `null` at an iteration whose Patch holds no content), `{kind: "too_large", bytes}` above 1 MiB, or `{kind: "unavailable", reason}`; `at=base` takes `&of=<N>`, the iteration whose base is meant (the last one when left out). Only a path of a `changes` list of a view that shows that side is served (for `at=base&of=N` the list of `from=base&to=N`; for `at=N` those of `from=base&to=N`, `from=N−1&to=N` and `from=N&to=N+1`); any other path, `..`, `.software-factory/`, an iteration not published or another parameter is an empty 404 |
-| `api/jobs/<ws>/<ticket>/stream?from=<line>` | the job's Stream (SF-082) for the v3 job page: `{entries, next, end}`, the entries of at most 2000 lines of `events.jsonl` from the 0-based `from` (default 0, at most 9 digits, else 404), in line order; `next` is the first line not read, `end` whether the file has no more lines (a `from` past the last line: `{entries: [], next: from, end: true}`; a job without `events.jsonl`: `{entries: [], next: 0, end: true}`). Each entry has `t`, `k` (`"<line>"`, or `"<line>.<n>"` when the line gives several), `ts`, `it` (the record's iteration, at least 1) and `who` (`implementer`, `claude`, `codex`, `you`, `factory` or `mr`). Types: `prompt` (`kind` `implement`, `fix` with `fix_n` and the `## Fix N` section of `task.md` as `fix`, `mr`, `conflict` or `continue`; `text` without the factory's rules block, `first`, `task_changed` when the Task-change note was cut from `text`; SF-112: the first `/implement` prompt with the job's `<rules>` block, and kept files, is an `implement` prompt whose `text` has no rules block, and the turn-limit continuation is a `continue` prompt), `user` (the user's message, `text`, `task_changed`; a Resume's leading `<rules>` block is cut from its `text`), `text`, `tool` (`id`, `line`, `detail`: the input as JSON, at most 16384 characters), `tool_result` (`id`, `out`, `result` at most 16384 characters, `err`; never merged into its `tool`: the client joins them by `id`), `result` (`turns`, `ms`, `cost`), `state` (`from`, `to`, `code`, `msg`), `verdict` (`verdict`, `effective`, and `summary` and `items` with their ledger `id` only when the iteration's `review.json` or `gate.json` matches the record's verdict and item count), `changes` (after a published iteration: `files`, `paths` from `meta.json`), `simplify` (`suggestions`, `saves_lines`) and `note` (every other record, as one `sf watch` line without its time and prefix). An entry depends only on its line and the job's files when it is built (`src/job-stream.ts`); a live `verdict` can lack the ledger ids a later page load has |
+| `api/jobs/<ws>/<ticket>/stream?from=<line>` | the job's Stream (SF-082) for the v3 job page: `{entries, next, end}`, the entries of at most 2000 lines of `events.jsonl` from the 0-based `from` (default 0, at most 9 digits, else 404), in line order; `next` is the first line not read, `end` whether the file has no more lines (a `from` past the last line: `{entries: [], next: from, end: true}`; a job without `events.jsonl`: `{entries: [], next: 0, end: true}`). Each entry has `t`, `k` (`"<line>"`, or `"<line>.<n>"` when the line gives several), `ts`, `it` (the record's iteration, at least 1) and `who` (`implementer`, `claude`, `codex`, `you`, `factory` or `mr`). Types: `prompt` (`kind` `implement`, `fix` with `fix_n` and the `## Fix N` section of `task.md` as `fix`, `mr`, `conflict` or `continue`; `text` without the factory's rules block, `first`, `task_changed` when the Task-change note was cut from `text`; SF-112: the first `/implement` prompt with the job's `<rules>` block, and kept files, is an `implement` prompt whose `text` has no rules block, and the turn-limit continuation is a `continue` prompt), `user` (the user's message, `text`, `task_changed`; a Resume's leading `<rules>` block is cut from its `text`), `text`, `tool` (`id`, `line`, `detail`: the input as JSON, at most 16384 characters), `tool_result` (`id`, `out`, `result` at most 16384 characters, `err`; never merged into its `tool`: the client joins them by `id`), `result` (`turns`, `ms`, `cost`), `state` (`from`, `to`, `code`, `msg`; with a code also `stop_code` and `stop_kind`, its canonical row of `src/stops.ts`, SF-129, so an earlier stop of the job resolves without aliases on the page), `verdict` (`verdict`, `effective`, and `summary` and `items` with their ledger `id` only when the iteration's `review.json` or `gate.json` matches the record's verdict and item count), `changes` (after a published iteration: `files`, `paths` from `meta.json`), `simplify` (`suggestions`, `saves_lines`) and `note` (every other record, as one `sf watch` line without its time and prefix). An entry depends only on its line and the job's files when it is built (`src/job-stream.ts`); a live `verdict` can lack the ledger ids a later page load has |
 | `api/tickets/<ws>/<ticket>/task` | the ticket's Task file, `text/markdown`, read through the Task file reader (a regular file of valid Task content); `?archived=1` reads `.software-factory/archive/<ticket>.md` instead (any other `archived` value is 404); an unknown workspace or a missing file is an empty 404, a file the reader refuses its refusal (`400 invalid_content`) |
 | `api/tickets/<ws>/<ticket>/attachments/<name>` | one image of the ticket (SF-064), with the content type its bytes tell and `x-content-type-options: nosniff`; a missing workspace, Task file or image (or any query) is an empty 404, a bad name `400 invalid_name`, a file that is not the image its name says `400 attachment_type` |
 | `api/stream?job=<ws>/<ticket>&from=<line>` | server-sent events: `jobs` (on connect and on every state change), `workspaces` and `tickets` (as the two endpoints, at the same times and after every setup action from a page), `job` (the job's detail, on connect and when it changes state), `event` (`{line, ts, iteration, type, text}` for every visible line of `events.jsonl` from the 0-based `from`, as `sf watch` formats it; the page reads `entries` since SF-078), `entries` (`{line, entries}`, the line's entries as `api/jobs/<ws>/<ticket>/stream` gives them, for every line from `from` that has entries, strictly in line order; a line whose build fails is logged and skipped); a comment every 15 s; at most 8 streams, then 503 |
@@ -3820,9 +3855,12 @@ model write a separate plain explanation of it (SF-106, `src/explain.ts`), in yo
 headline (what is needed from you), a short explanation (what you would see in the product, what was
 planned, what happened, why the job cannot decide alone), one to four choices with what each does
 (exactly one recommended), and a recommendation. It never decides or acts: you still answer with the
-stop's own buttons and commands, and the model is given only those (`stopAnswers`: the stop panel's
-actions for the code, the conditional ones only when they apply, Accept risk and Must fix per entry
-to settle, Send a message and Abort) and told never to name another.
+stop's own buttons and commands, and the model is given only those (`stopAnswers`: the actions the
+job's page shows for the stop, built from `jobActions` of `src/stops.ts` so they cannot disagree,
+each with its command (`goon` is `sf say <ws> <ticket> "Go on."`, a message `sf say <ws> <ticket>
+"<message>"`, any other `sf <action>`), Accept risk and Must fix per escalated or contested entry
+at a stop whose row has a settlement (`escalated`, `review_disputed`, `review_churn`), Send a
+message and Abort) and told never to name another.
 
 **The setting**: the optional top-level `explain` of `workspaces.json`, every field optional:
 `"explain": {"on": true, "language": "English", "model": "sonnet"}` (these are the defaults); for

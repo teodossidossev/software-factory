@@ -9,6 +9,7 @@
 // acceptance: the manual steps are in factory/README.md.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { served, servedDetail } from './support/dashboard-client.js';
 import { type FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
 
 const STATIC_DIR = new URL('../../static/', import.meta.url);
@@ -16,14 +17,15 @@ const STATIC_DIR = new URL('../../static/', import.meta.url);
 // The page shows local time (SF-049); the zone is set, not the machine's: Sofia is UTC+2 in November.
 process.env.TZ = 'Europe/Sofia';
 
+// The job as the server sends it: with its stop's row, its actions and their availability (SF-129).
 function job(state: string, extra: Record<string, unknown> = {}) {
   const prepared = state === 'ready_for_human_review' || state === 'pushed';
-  return {
+  return served({
     workspace: 'app', ticket: 'T-1', branch: 'T-1-demo', base: 'main', state, iteration: 1, mr_attempts: 0,
     updated_at: '2026-11-01T10:05:00.000Z', created_at: '2026-11-01T10:00:00.000Z', error: null,
     prepared_commit: prepared ? 'a'.repeat(40) : null, worktree: prepared ? null : '/wt/T-1',
     fixes: 0, gate_fixes: 0, gate_tokens: 0, files: 0, undeclared: 0, deleted: 0, title: 'Demo', ...extra,
-  };
+  });
 }
 
 type Job = ReturnType<typeof job>;
@@ -42,7 +44,7 @@ function iteration(number: number, extra: Record<string, unknown> = {}) {
 }
 
 function detail(row: Job, extra: Partial<Omit<Detail, 'job'>> = {}): Detail {
-  return { job: row, iterations: [], mr: false, gate: true, history: [{ ts: '2026-11-01T10:00:00.000Z', from: null, to: 'starting' }], ...extra };
+  return servedDetail({ job: row, iterations: [], mr: false, gate: true, history: [{ ts: '2026-11-01T10:00:00.000Z', from: null, to: 'starting' }], ...extra });
 }
 
 // The page with the job of shown open through the URL's hash (screen: '', '/changes' or '/mr'); get

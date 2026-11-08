@@ -283,12 +283,13 @@ async function loadTicket(key, reset) {
   renderTicket();
 }
 
-// The tickets changed (the stream): the page follows its row (title, draft, check, dependencies),
-// reads the check again, so a check that ends while the page is open shows at once, and reads the
-// page again (a plan written meanwhile, its history; unsaved edits stay, with the version they
-// started from). A ticket that left the Queue goes back to the board, unless its start is on the
-// way to its job.
-function refreshTicket() {
+// The tickets changed (the stream): the page follows its row (title, draft, check, dependencies).
+// When changed (the tickets the event names, SF-140) is null or names the page's ticket, it reads
+// the check again, so a check that ends while the page is open shows at once, and reads the page
+// again (a plan written meanwhile, its history; unsaved edits stay, with the version they started
+// from). A ticket that left the Queue goes back to the board, unless its start is on the way to
+// its job.
+function refreshTicket(changed = null) {
   if (ui.screen !== 'ticket' || state.tk.data === null) {
     return;
   }
@@ -309,6 +310,9 @@ function refreshTicket() {
   }
   state.tk.data.ticket = row;
   renderTicket();
+  if (changed !== null && !changed.some((other) => keyOf(other) === key)) {
+    return;
+  }
   void tkReadCheck(key);
   if (state.tk.load === null) {
     void loadTicket(key, false);

@@ -525,3 +525,29 @@ test('ticket client: Copy image puts a PNG on the clipboard as it is, draws JPEG
   assert.equal(imagesCard(plain).querySelector('[role=status]')!.textContent, 'This browser cannot put an image on the clipboard: open 1.png and copy it there.');
   assert.equal(plain.requests.some((request) => request.path.includes('/attachments/')), false);
 });
+
+test('ticket client (SF-140): a tickets event naming another ticket fetches nothing but updates the row; one naming the open ticket, or without changed, reads it again once', async () => {
+  const row = ticket('T-1');
+  const page = await openTicketPage([row, ticket('T-2')], payload(row));
+  const reads = (): string[] => page.requests.filter((request) => request.method === 'GET' && request.path.startsWith('api/tickets/app/T-1/')).map((request) => request.path);
+  const answer = async (): Promise<void> => {
+    page.requests.filter((request) => request.path === 'api/tickets/app/T-1/page').at(-1)!.respond(200, payload(row));
+    await page.flush();
+  };
+  const before = reads().length;
+  const emit = async (title: string, changed?: unknown[]): Promise<void> => {
+    page.streams.at(-1)!.emit('tickets', { tickets: [{ ...row, title }, ticket('T-2')], archived: [], ...(changed === undefined ? {} : { changed }) });
+    await page.flush();
+  };
+  await emit('Renamed', [{ workspace: 'app', ticket: 'T-2' }, { workspace: 'web', ticket: 'T-1' }]);
+  assert.deepEqual(reads().slice(before), []);
+  assert.match(head(page).querySelector('.t1')!.textContent, /Renamed/);
+
+  await emit('Named', [{ workspace: 'app', ticket: 'T-2' }, { workspace: 'app', ticket: 'T-1' }]);
+  assert.deepEqual(reads().slice(before).sort(), ['api/tickets/app/T-1/check', 'api/tickets/app/T-1/page']);
+  assert.match(head(page).querySelector('.t1')!.textContent, /Named/);
+  await answer();
+
+  await emit('Everything');
+  assert.deepEqual(reads().slice(before).sort(), ['api/tickets/app/T-1/check', 'api/tickets/app/T-1/check', 'api/tickets/app/T-1/page', 'api/tickets/app/T-1/page']);
+});

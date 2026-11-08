@@ -3040,7 +3040,8 @@ itself), each card with a short help line:
 | **History** | | What happened to the plan (below). |
 
 The check is read again (`GET api/tickets/<ws>/<ticket>/check`) on every tickets refresh of the
-stream, so a check that ends while the page is open shows at once. **Start now** asks with Start's
+stream that may concern the ticket (SF-140: one without `changed`, or one that names it), so a
+check that ends while the page is open shows at once. **Start now** asks with Start's
 confirmation of the Queue card (the check's note too) and adds the dependencies not merged yet
 ("Waits for SF-071 (running), SF-072 (planned, not started): they are not merged yet."); it still
 starts once confirmed, and the page moves to the new job's Stream.
@@ -3290,6 +3291,16 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `api/tickets/<ws>/<ticket>/task` | the ticket's Task file, `text/markdown`, read through the Task file reader (a regular file of valid Task content); `?archived=1` reads `.software-factory/archive/<ticket>.md` instead (any other `archived` value is 404); an unknown workspace or a missing file is an empty 404, a file the reader refuses its refusal (`400 invalid_content`) |
 | `api/tickets/<ws>/<ticket>/attachments/<name>` | one image of the ticket (SF-064), with the content type its bytes tell and `x-content-type-options: nosniff`; a missing workspace, Task file or image (or any query) is an empty 404, a bad name `400 invalid_name`, a file that is not the image its name says `400 attachment_type` |
 | `api/stream?job=<ws>/<ticket>&from=<line>` | server-sent events: `jobs` (on connect and on every state change), `workspaces` and `tickets` (as the two endpoints, at the same times and after every setup action from a page), `job` (the job's detail, on connect and when it changes state), `event` (`{line, ts, iteration, type, text}` for every visible line of `events.jsonl` from the 0-based `from`, as `sf watch` formats it; the page reads `entries` since SF-078), `entries` (`{line, entries}`, the line's entries as `api/jobs/<ws>/<ticket>/stream` gives them, for every line from `from` that has entries, strictly in line order; a line whose build fails is logged and skipped); a comment every 15 s; at most 8 streams, then 503 |
+
+The reads above are one route table in `src/dashboard.ts` (SF-140), matched in order; a path no
+route matches is an empty 404. The stream tells the pages what changed: the changes that arrive
+within one tick are merged and sent once, one event per changed kind (`jobs`, then a `job` event
+per changed job to the pages that follow it, `workspaces`, `tickets`), and a change that arrives
+while they are sent goes out right after. A `tickets` event caused by job changes names their
+tickets in `changed: [{workspace, ticket}]`; it has no `changed` on connect and after a change
+that may touch any ticket (a setup action, a Task check, the run queue). The ticket page reads
+its check and its page again only when `changed` is absent or names its ticket; the board and
+the ticket's row follow every `tickets` event.
 
 The job and queue actions below (`api/jobs/<ws>/<ticket>/<action>` and `api/queue/<action>`) live
 in one route table, `POST_ROUTES` in `src/dashboard-routes.ts` (SF-139): each route's body, its one

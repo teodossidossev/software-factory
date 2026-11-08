@@ -19,7 +19,7 @@ import { explanationPath } from '../src/explain.js';
 import { type EventRecord, type Job, JobStore } from '../src/jobs.js';
 import { buildPatch, fileChanges } from '../src/patch.js';
 import { saveRegistry } from '../src/registry.js';
-import { act, CSP, fakeActions, fetchRaw, openStream, type Stream } from './support/dashboard-client.js';
+import { act, CSP, fakeActions, fakeSetup, fetchRaw, openStream, type Stream, ticketRow, workspaceRow } from './support/dashboard-client.js';
 import type { DashboardDigests } from '../src/dashboard.js';
 import { fixture, withDashboard } from './support/dashboard-state.js';
 import { call, git, newEnv, newRepo, putTask, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
@@ -259,6 +259,62 @@ test('dashboard: jobs, job detail, report, patch and mr endpoints; bad names are
       assert.deepEqual([reply.status, reply.body], [404, ''], path);
     }
   });
+});
+
+test('dashboard (SF-140): every GET route of the table answers with its status, type and body; any other path is an empty 404', async () => {
+  const setup = fakeSetup([workspaceRow('app')], [ticketRow('app', 'T-5')]);
+  setup.texts.set('app/T-5', '---\nticket: T-5\ntitle: Five\nbase: main\n---\n\n# T-5: Five\n');
+  setup.texts.set('app/archive/T-4', '# T-4\n');
+  setup.images.set('app/T-5/1.png', { type: 'image/png', data: Buffer.from('png bytes') });
+  const record = { id: 'd1', workspaces: [] };
+  const digests = { list: async () => ({ running: false, digests: [] }), read: async (id: string) => (id === 'd1' ? record : undefined) } as unknown as DashboardDigests;
+  const actions = fakeActions();
+  actions.mrView = { text: 'feat(T-1): Demo' } as unknown as typeof actions.mrView;
+  await withDashboard('dash-get-table', actions, async (dashboard, { jobs }) => {
+    const base = dashboard.url;
+    await jobs.writeMrText('app', 'T-1', 'feat(T-1): Demo\n');
+    const JSON_TYPE = 'application/json; charset=utf-8';
+    const MD = 'text/markdown; charset=utf-8';
+    const answers: Array<[string, string, (body: string) => void]> = [
+      ['', 'text/html; charset=utf-8', (body) => assert.match(body, /<html/i)],
+      ['core.js', 'text/javascript; charset=utf-8', (body) => assert.ok(body.length > 0)],
+      ['app.css', 'text/css; charset=utf-8', (body) => assert.ok(body.length > 0)],
+      ['favicon.svg', 'image/svg+xml; charset=utf-8', (body) => assert.match(body, /<svg/)],
+      ['api/jobs', JSON_TYPE, (body) => assert.deepEqual([JSON.parse(body).jobs.length, JSON.parse(body).remote], [2, false])],
+      ['api/workspaces', JSON_TYPE, (body) => assert.equal(JSON.parse(body).workspaces[0].name, 'app')],
+      ['api/tickets', JSON_TYPE, (body) => assert.deepEqual(JSON.parse(body).tickets.map((row: { ticket: string }) => row.ticket), ['T-5'])],
+      ['api/stats?days=7', JSON_TYPE, (body) => assert.equal(typeof JSON.parse(body), 'object')],
+      ['api/digests', JSON_TYPE, (body) => assert.deepEqual(JSON.parse(body), { running: false, digests: [] })],
+      ['api/digests/d1', JSON_TYPE, (body) => assert.deepEqual(JSON.parse(body), record)],
+      ['api/tickets/app/T-5/page', JSON_TYPE, (body) => assert.equal(JSON.parse(body).ticket.ticket, 'T-5')],
+      ['api/tickets/app/T-5/task', MD, (body) => assert.match(body, /^---\nticket: T-5/)],
+      ['api/tickets/app/T-4/task?archived=1', MD, (body) => assert.equal(body, '# T-4\n')],
+      ['api/tickets/app/T-5/attachments/1.png', 'image/png', (body) => assert.equal(body, 'png bytes')],
+      ['api/jobs/app/T-1', JSON_TYPE, (body) => assert.equal(JSON.parse(body).job.ticket, 'T-1')],
+      ['api/jobs/app/T-1/stream?from=0', JSON_TYPE, (body) => assert.equal(JSON.parse(body).end, true)],
+      ['api/jobs/app/T-1/mr', MD, (body) => assert.equal(body, 'feat(T-1): Demo\n')],
+      ['api/jobs/app/T-1/mr-view', JSON_TYPE, (body) => assert.deepEqual(JSON.parse(body), { text: 'feat(T-1): Demo' })],
+      ['api/jobs/app/T-1/changes', JSON_TYPE, (body) => assert.equal(typeof JSON.parse(body), 'object')],
+      ['api/jobs/app/T-1/iterations/1/report', MD, (body) => assert.equal(body, '# Report: T-1, iteration 1\n## Done\nThings.\n')],
+      ['api/jobs/app/T-1/iterations/1/patch', 'text/x-diff; charset=utf-8', (body) => assert.match(body, /^\+hello world$/m)],
+    ];
+    for (const [path, type, check] of answers) {
+      const reply = await fetchRaw(new URL(path, base));
+      assert.deepEqual([reply.status, reply.headers['content-type']], [200, type], path);
+      check(reply.body);
+    }
+    const stream = await openStream(new URL('api/stream', base));
+    assert.deepEqual([stream.status, stream.headers['content-type']], [200, 'text/event-stream; charset=utf-8']);
+    stream.close();
+    for (const path of [
+      'nope', 'core.js/x', 'api', 'api/', 'api/nope', 'api/jobs/', 'api/stats', 'api/stats/x?days=7', 'api/digests/d2', 'api/digests/d1/x', 'api/digests?x=1',
+      'api/tickets/app/T-5', 'api/tickets/app/T-5/other', 'api/tickets/app/T-5/page/x', 'api/tickets/app/T-5/attachments/2.png',
+      'api/jobs/app/T-1/mr-view?x=1', 'api/jobs/app/T-1/file', 'api/jobs/app/T-1/iterations/1', 'api/jobs/app/T-1/iterations/2/patch', 'api/jobs/app/T-9/mr', 'api/jobs/app/T-1/other',
+    ]) {
+      const reply = await fetchRaw(new URL(path, base));
+      assert.deepEqual([reply.status, reply.body], [404, ''], path);
+    }
+  }, setup, { digests });
 });
 
 test('dashboard (SF-106): the job\'s detail has the explanation only for its current stop; refreshJob sends the job\'s detail to the pages that show it', async () => {

@@ -57,7 +57,8 @@ function openStream() {
     if (ui.job !== null) {
       renderHead();
     }
-    refreshTicket();
+    // SF-140: changed names the tickets the event is about; absent, it may be about any.
+    refreshTicket(Array.isArray(data.changed) ? data.changed : null);
     if (ui.pending) {
       route();
     }

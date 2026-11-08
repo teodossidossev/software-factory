@@ -225,9 +225,12 @@ export interface RunningDashboard {
   remoteUrls: URL[];
   // The bound port of the remote listener (SF-126); undefined without remote origins.
   remotePort: number | undefined;
-  // The state listener: refreshes every open page; never throws.
+  // The state listener: every open page gets the jobs, the setup data and the tickets naming the
+  // job's, and the pages that show the job its detail; never throws. The page updates of the calls
+  // within one tick are sent together, once.
   onStateChange(job: Job, from: JobState | null): void;
-  // A ticket's data changed without a job (a Task check ended): every page gets the tickets again.
+  // A ticket's data changed without a job (a Task check ended, the run queue changed): every page
+  // gets the workspaces and all the tickets again.
   refreshSetup(): void;
   // The job's files changed without a state change (its stop's explanation, SF-106): every page
   // gets the jobs again, and the pages that show the job its detail, as the POST mr-status route
@@ -976,6 +979,81 @@ function readBody(req: IncomingMessage, limit: number): Promise<Buffer | 'too_la
   });
 }
 
+// A ticket or a job, by its workspace and ticket.
+type TicketKey = JobKey;
+
+// A change the open pages are told of (changed): the kinds it touches; tickets names the tickets
+// it touches, or 'all'.
+interface Change {
+  jobs?: true;
+  workspaces?: true;
+  tickets?: 'all' | TicketKey[];
+  job?: TicketKey;
+}
+
+// The changes of one flush merged: the keys by "<ws>/<ticket>", so each is sent once.
+interface Marked {
+  jobs: boolean;
+  workspaces: boolean;
+  tickets: 'all' | Map<string, TicketKey> | undefined;
+  job: Map<string, TicketKey>;
+}
+
+const keyText = ([workspace, ticket]: TicketKey): string => `${workspace}/${ticket}`;
+
+// The kinds of both, the keys unioned; 'all' wins over keys.
+function mergeChange(marked: Marked | undefined, change: Change): Marked {
+  const into: Marked = marked ?? { jobs: false, workspaces: false, tickets: undefined, job: new Map() };
+  into.jobs ||= change.jobs === true;
+  into.workspaces ||= change.workspaces === true;
+  if (change.tickets === 'all') {
+    into.tickets = 'all';
+  } else if (change.tickets !== undefined && into.tickets !== 'all') {
+    into.tickets ??= new Map();
+    for (const key of change.tickets) {
+      into.tickets.set(keyText(key), key);
+    }
+  }
+  if (change.job !== undefined) {
+    into.job.set(keyText(change.job), change.job);
+  }
+  return into;
+}
+
+// One GET as a route's handler sees it: params are the path's segments that the pattern's "*" stand for.
+interface GetRequest {
+  req: IncomingMessage;
+  res: ServerResponse;
+  query: URLSearchParams;
+  remote: boolean;
+  params: string[];
+}
+
+interface GetRoute {
+  pattern: string;
+  when?: (query: URLSearchParams) => boolean;
+  handler: (get: GetRequest) => Promise<void> | void;
+}
+
+// The segments a pattern's "*" stand for when the path matches it, else undefined.
+function matchPath(pattern: string, path: string[]): string[] | undefined {
+  const parts = pattern.split('/');
+  if (parts.length !== path.length) {
+    return undefined;
+  }
+  const params: string[] = [];
+  for (const [index, part] of parts.entries()) {
+    if (part === '*') {
+      params.push(path[index]!);
+    } else if (part !== path[index]) {
+      return undefined;
+    }
+  }
+  return params;
+}
+
+const noQuery = (query: URLSearchParams): boolean => [...query.keys()].length === 0;
+
 interface Stream {
   res: ServerResponse;
   job: [string, string] | undefined;
@@ -1108,15 +1186,6 @@ export async function startDashboard(
     res.writeHead(200, { 'content-type': type }).end(data);
   };
 
-  // The start screen's data, sent to every page on connect and after every change.
-  async function sendSetup(targets: Iterable<Stream>): Promise<void> {
-    const workspaces = await workspacesPayload(setup);
-    const tickets = await ticketsPayload(setup, checks, queue);
-    for (const stream of targets) {
-      send(stream, 'workspaces', workspaces);
-      send(stream, 'tickets', tickets);
-    }
-  }
 
   // The jobs as api/jobs and the jobs events send them (SF-126): remote says which port asked.
   const jobsOf = async (remote: boolean) => ({ ...(await jobsPayload(jobs, setup, actions, toolCalls)), remote });
@@ -1156,7 +1225,9 @@ export async function startDashboard(
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', connection: 'keep-alive' });
     res.flushHeaders();
     send(stream, 'jobs', await jobsOf(remote));
-    await sendSetup([stream]);
+    // The start screen's data: on connect whole, later after each change (changed).
+    send(stream, 'workspaces', await workspacesPayload(setup));
+    send(stream, 'tickets', await ticketsPayload(setup, checks, queue));
     if (key === undefined) {
       return;
     }
@@ -1195,144 +1266,141 @@ export async function startDashboard(
     }
   }
 
-  async function route(req: IncomingMessage, res: ServerResponse, path: string[], query: URLSearchParams, remote: boolean): Promise<void> {
-    const joined = path.join('/');
-    const file = files.get(joined);
-    if (file !== undefined) {
-      body(res, file.type, file.body);
-      return;
-    }
-    if (path[0] !== 'api') {
-      empty(res, 404);
-      return;
-    }
-    if (joined === 'api/jobs') {
-      sendJson(res, 200, await jobsOf(remote));
-      return;
-    }
-    if (joined === 'api/workspaces') {
-      sendJson(res, 200, await workspacesPayload(setup));
-      return;
-    }
-    if (joined === 'api/tickets') {
-      sendJson(res, 200, await ticketsPayload(setup, checks, queue));
-      return;
-    }
-    if (joined === 'api/stream') {
-      await openStream(req, res, query, remote);
-      return;
-    }
-    if (path[1] === 'stats') {
-      await statsView(res, path, query);
-      return;
-    }
-    const [, kind, ...rest] = path;
+  // The GET routes, matched in order against the path: a pattern's segments must equal the path's,
+  // "*" stands for any one segment and hands it to the handler; when, if given, must hold too. A
+  // path no route matches is an empty 404.
+  const getRoutes: GetRoute[] = [
+    ...[...files].map(([pattern, file]): GetRoute => ({ pattern, handler: ({ res }) => body(res, file.type, file.body) })),
+    { pattern: 'api/jobs', handler: async ({ res, remote }) => sendJson(res, 200, await jobsOf(remote)) },
+    { pattern: 'api/workspaces', handler: async ({ res }) => sendJson(res, 200, await workspacesPayload(setup)) },
+    { pattern: 'api/tickets', handler: async ({ res }) => sendJson(res, 200, await ticketsPayload(setup, checks, queue)) },
+    { pattern: 'api/stream', handler: ({ req, res, query, remote }) => openStream(req, res, query, remote) },
+    { pattern: 'api/stats', handler: ({ res, query }) => statsView(res, query) },
     // The morning digest (SF-103): the list, newest first, and one stored record.
-    if (kind === 'digests' && digests !== undefined && [...query.keys()].length === 0 && rest.length <= 1) {
-      if (rest.length === 0) {
-        sendJson(res, 200, await digests.list());
+    { pattern: 'api/digests', when: (query) => digests !== undefined && noQuery(query), handler: async ({ res }) => sendJson(res, 200, await digests!.list()) },
+    { pattern: 'api/digests/*', when: (query) => digests !== undefined && noQuery(query), handler: ({ res, params: [id] }) => digestRecord(res, id!) },
+    { pattern: 'api/tickets/*/*/page', handler: ({ res, params, query }) => ticketPage(res, params, query) },
+    { pattern: 'api/tickets/*/*/task', handler: ({ res, params, query }) => taskText(res, params, query) },
+    { pattern: 'api/tickets/*/*/attachments/*', handler: ({ res, params, query }) => attachmentFile(res, params, query) },
+    { pattern: 'api/jobs/*/*', handler: jobRead(jobView) },
+    { pattern: 'api/jobs/*/*/stream', handler: jobRead(streamView) },
+    { pattern: 'api/jobs/*/*/mr', handler: jobRead(mrText) },
+    // The Merge request screen (SF-080).
+    { pattern: 'api/jobs/*/*/mr-view', when: noQuery, handler: jobRead(mrView) },
+    { pattern: 'api/jobs/*/*/changes', handler: jobRead(({ res, query }, job) => sendFound(res, changesOf(job, query))) },
+    { pattern: 'api/jobs/*/*/file', handler: jobRead(({ res, query }, job) => sendFound(res, fileOf(job, query))) },
+    { pattern: 'api/jobs/*/*/iterations/*/report', handler: jobRead((get, job) => iterationFile(get, job, 'report')) },
+    { pattern: 'api/jobs/*/*/iterations/*/patch', handler: jobRead((get, job) => iterationFile(get, job, 'patch')) },
+  ];
+
+  async function route(req: IncomingMessage, res: ServerResponse, path: string[], query: URLSearchParams, remote: boolean): Promise<void> {
+    for (const { pattern, when, handler } of getRoutes) {
+      const params = matchPath(pattern, path);
+      if (params !== undefined && (when === undefined || when(query))) {
+        await handler({ req, res, query, remote, params });
         return;
       }
-      const record = await digests.read(rest[0]!);
-      if (record === undefined) {
-        empty(res, 404);
-        return;
-      }
-      sendJson(res, 200, record);
-      return;
-    }
-    if (kind === 'tickets' && rest.length === 3 && rest[2] === 'page') {
-      await ticketPage(res, rest, query);
-      return;
-    }
-    if (kind === 'tickets' && rest.length === 4 && rest[2] === 'attachments') {
-      await attachmentFile(res, rest, query);
-      return;
-    }
-    if (kind === 'tickets') {
-      await taskText(res, rest, query);
-      return;
-    }
-    const key = kind === 'jobs' ? jobKey(rest[0], rest[1]) : undefined;
-    const job = key === undefined ? undefined : await jobs.read(...key);
-    if (key === undefined || job === undefined) {
-      empty(res, 404);
-      return;
-    }
-    const [, , ...tail] = rest;
-    if (tail.length === 0) {
-      // A handed-over job (SF-073): origin is asked for the user's push, without waiting and at most
-      // once a minute; a push found reaches the page through the job's events.
-      if (job.state === 'handed_over') {
-        void actions.checkHandedOver(job.workspace, job.ticket, PUSH_CHECK_INTERVAL_MS).catch((error: unknown) => console.error(error));
-      }
-      sendJson(res, 200, await jobDetail(jobs, job, gateOn, actions, setup));
-      return;
-    }
-    if (tail.length === 1 && tail[0] === 'stream') {
-      const from = query.get('from') ?? '0';
-      if (!/^\d{1,9}$/.test(from)) {
-        empty(res, 404);
-        return;
-      }
-      sendJson(res, 200, await streamPage(...key, Number(from)));
-      return;
-    }
-    if (tail.length === 1 && tail[0] === 'mr') {
-      const text = await jobs.readMrText(...key);
-      if (text === undefined) {
-        empty(res, 404);
-        return;
-      }
-      body(res, 'text/markdown; charset=utf-8', text);
-      return;
-    }
-    if (tail.length === 1 && tail[0] === 'mr-view' && [...query.keys()].length === 0) {
-      // The Merge request screen (SF-080); an empty 404 without MR text.
-      let view;
-      try {
-        view = await actions.mergeRequestView(...key);
-      } catch (error) {
-        refuseRead(res, error);
-        return;
-      }
-      if (view === undefined) {
-        empty(res, 404);
-        return;
-      }
-      sendJson(res, 200, view);
-      return;
-    }
-    if (tail.length === 1 && (tail[0] === 'changes' || tail[0] === 'file')) {
-      const data = tail[0] === 'changes' ? await changesOf(job, query) : await fileOf(job, query);
-      if (data === undefined) {
-        empty(res, 404);
-        return;
-      }
-      sendJson(res, 200, data);
-      return;
-    }
-    const number = Number(tail[1]);
-    if (tail.length === 3 && tail[0] === 'iterations' && iterationParam(tail[1]) !== undefined && number <= job.iteration
-      && (tail[2] === 'report' || tail[2] === 'patch')) {
-      const iteration = await jobs.readIteration(...key, number);
-      if (tail[2] === 'report') {
-        body(res, 'text/markdown; charset=utf-8', iteration.report);
-      } else {
-        body(res, 'text/x-diff; charset=utf-8', iteration.patch);
-      }
-      return;
     }
     empty(res, 404);
   }
 
+  // A job route's handler: the job of the path's first two segments, or an empty 404.
+  function jobRead(handler: (get: GetRequest, job: Job, key: [string, string]) => Promise<void>): GetRoute['handler'] {
+    return async (get) => {
+      const key = jobKey(get.params[0], get.params[1]);
+      const job = key === undefined ? undefined : await jobs.read(...key);
+      if (key === undefined || job === undefined) {
+        empty(get.res, 404);
+        return;
+      }
+      await handler(get, job, key);
+    };
+  }
+
+  // JSON of what was found, or an empty 404.
+  async function sendFound(res: ServerResponse, found: Promise<unknown>): Promise<void> {
+    const data = await found;
+    if (data === undefined) {
+      empty(res, 404);
+      return;
+    }
+    sendJson(res, 200, data);
+  }
+
+  // GET api/digests/<id>: one stored digest, or an empty 404.
+  async function digestRecord(res: ServerResponse, id: string): Promise<void> {
+    await sendFound(res, digests!.read(id));
+  }
+
+  // GET api/jobs/<ws>/<ticket>: the job's detail. A handed-over job (SF-073): origin is asked for
+  // the user's push, without waiting and at most once a minute; a push found reaches the page
+  // through the job's events.
+  async function jobView({ res }: GetRequest, job: Job): Promise<void> {
+    if (job.state === 'handed_over') {
+      void actions.checkHandedOver(job.workspace, job.ticket, PUSH_CHECK_INTERVAL_MS).catch((error: unknown) => console.error(error));
+    }
+    sendJson(res, 200, await jobDetail(jobs, job, gateOn, actions, setup));
+  }
+
+  // GET api/jobs/<ws>/<ticket>/stream?from=<line>: a page of the job's Stream (streamPage).
+  async function streamView({ res, query }: GetRequest, _job: Job, key: [string, string]): Promise<void> {
+    const from = query.get('from') ?? '0';
+    if (!/^\d{1,9}$/.test(from)) {
+      empty(res, 404);
+      return;
+    }
+    sendJson(res, 200, await streamPage(...key, Number(from)));
+  }
+
+  // GET api/jobs/<ws>/<ticket>/mr: the MR text as Markdown, or an empty 404 without one.
+  async function mrText({ res }: GetRequest, _job: Job, key: [string, string]): Promise<void> {
+    const text = await jobs.readMrText(...key);
+    if (text === undefined) {
+      empty(res, 404);
+      return;
+    }
+    body(res, 'text/markdown; charset=utf-8', text);
+  }
+
+  // GET api/jobs/<ws>/<ticket>/mr-view: the Merge request screen's payload; an empty 404 without
+  // MR text.
+  async function mrView({ res }: GetRequest, _job: Job, key: [string, string]): Promise<void> {
+    let view;
+    try {
+      view = await actions.mergeRequestView(...key);
+    } catch (error) {
+      refuseRead(res, error);
+      return;
+    }
+    if (view === undefined) {
+      empty(res, 404);
+      return;
+    }
+    sendJson(res, 200, view);
+  }
+
+  // GET api/jobs/<ws>/<ticket>/iterations/<N>/report|patch: a published iteration's Report or Patch.
+  async function iterationFile({ res, params }: GetRequest, job: Job, which: 'report' | 'patch'): Promise<void> {
+    const number = iterationParam(params[2]);
+    if (number === undefined || number > job.iteration) {
+      empty(res, 404);
+      return;
+    }
+    const iteration = await jobs.readIteration(job.workspace, job.ticket, number);
+    if (which === 'report') {
+      body(res, 'text/markdown; charset=utf-8', iteration.report);
+    } else {
+      body(res, 'text/x-diff; charset=utf-8', iteration.patch);
+    }
+  }
+
   // GET api/stats?days=7|30|90[&workspace=<name>] (SF-117): the Stats page's payload. Any other
-  // key or value, a repeated key or a longer path is an empty 404.
-  async function statsView(res: ServerResponse, path: string[], query: URLSearchParams): Promise<void> {
+  // key or value or a repeated key is an empty 404.
+  async function statsView(res: ServerResponse, query: URLSearchParams): Promise<void> {
     const keys = [...query.keys()];
     const days = STATS_DAYS.find((value) => String(value) === query.get('days'));
     const workspace = query.get('workspace');
-    if (path.length !== 2 || days === undefined || new Set(keys).size !== keys.length || keys.some((key) => key !== 'days' && key !== 'workspace')
+    if (days === undefined || new Set(keys).size !== keys.length || keys.some((key) => key !== 'days' && key !== 'workspace')
       || (workspace !== null && !WORKSPACE_NAME_PATTERN.test(workspace))) {
       empty(res, 404);
       return;
@@ -1426,8 +1494,8 @@ export async function startDashboard(
   // every version (SF-130: check_rounds, failed ones included; check_usd, the sum of the known costs;
   // check_usd_complete, false when a cost is unknown; all-time), the history, newest first, and
   // queue null (SF-071 adds it). A ticket that is not in the tickets list is an empty 404.
-  async function ticketPage(res: ServerResponse, rest: string[], query: URLSearchParams): Promise<void> {
-    const key = jobKey(rest[0], rest[1]);
+  async function ticketPage(res: ServerResponse, [workspace, ticket]: string[], query: URLSearchParams): Promise<void> {
+    const key = jobKey(workspace, ticket);
     const row = key === undefined || [...query.keys()].length > 0 ? undefined : (await setup.tickets()).find((entry) => entry.workspace === key[0] && entry.ticket === key[1]);
     if (key === undefined || row === undefined) {
       empty(res, 404);
@@ -1466,8 +1534,8 @@ export async function startDashboard(
   // GET api/tickets/<ws>/<ticket>/task[?archived=1]: the Task file through the Task file reader,
   // as text/markdown. A missing ticket, workspace or file is an empty 404, as for the other reads;
   // a file the reader refuses (not a Task file, not a regular file) answers its refusal.
-  async function taskText(res: ServerResponse, rest: string[], query: URLSearchParams): Promise<void> {
-    const key = rest.length === 3 && rest[2] === 'task' ? jobKey(rest[0], rest[1]) : undefined;
+  async function taskText(res: ServerResponse, [workspace, ticket]: string[], query: URLSearchParams): Promise<void> {
+    const key = jobKey(workspace, ticket);
     const archived = query.get('archived');
     if (key === undefined || (archived !== null && archived !== '1') || query.getAll('archived').length > 1) {
       empty(res, 404);
@@ -1486,15 +1554,15 @@ export async function startDashboard(
   // GET api/tickets/<ws>/<ticket>/attachments/<name> (SF-064): one image of the ticket with the
   // type told by its bytes and nosniff. A missing ticket, workspace, Task file or image is an empty
   // 404; anything the attachments module refuses answers its refusal.
-  async function attachmentFile(res: ServerResponse, rest: string[], query: URLSearchParams): Promise<void> {
-    const key = jobKey(rest[0], rest[1]);
+  async function attachmentFile(res: ServerResponse, [workspace, ticket, name]: string[], query: URLSearchParams): Promise<void> {
+    const key = jobKey(workspace, ticket);
     if (key === undefined || [...query.keys()].length > 0) {
       empty(res, 404);
       return;
     }
     let image;
     try {
-      image = await setup.readAttachment(...key, rest[3]!);
+      image = await setup.readAttachment(...key, name!);
     } catch (error) {
       if (error instanceof FactoryError && error.code === 'attachment_missing') {
         empty(res, 404);
@@ -1777,12 +1845,11 @@ export async function startDashboard(
       return;
     }
     if (post.refreshJob !== undefined) {
-      const key = post.refreshJob;
-      jobs.read(...key).then((job) => (job !== undefined ? refresh(job) : refreshAll())).catch((error: unknown) => console.error(error));
+      jobChanged(post.refreshJob).catch((error: unknown) => console.error(error));
     } else if (post.refreshJobs === true) {
-      refreshAll().catch((error: unknown) => console.error(error));
+      changed({ jobs: true, workspaces: true, tickets: 'all' });
     } else if (post.refreshSetup === true) {
-      sendSetup(streams).catch((error: unknown) => console.error(error));
+      changed({ workspaces: true, tickets: 'all' });
     }
     if (gone) {
       return;
@@ -1949,35 +2016,82 @@ export async function startDashboard(
   }
   origin = `http://${LOOPBACK_HOST}:${address.port}`;
 
-  // A state change: every page gets the list, the setup data (a job that starts or ends changes
-  // the tickets and the live counts) and, where it is selected, the job.
-  const refresh = async (job: Job): Promise<void> => {
-    if (streams.size === 0) {
+  // What the open pages are told after a change: the kinds marked by the calls of changed within
+  // one tick, merged (keys unioned, 'all' wins over keys), and sent by one flush. A change that
+  // arrives while a flush builds or sends is marked again and sent by one more flush right after.
+  let marked: Marked | undefined;
+  let flushQueued = false;
+  let flushing = false;
+  const queueFlush = (): void => {
+    if (!flushQueued && !flushing && marked !== undefined) {
+      flushQueued = true;
+      setImmediate(() => void flush());
+    }
+  };
+  function changed(change: Change): void {
+    marked = mergeChange(marked, change);
+    queueFlush();
+  }
+  async function flush(): Promise<void> {
+    flushQueued = false;
+    const change = marked;
+    marked = undefined;
+    if (change === undefined || streams.size === 0) {
       return;
     }
-    const list = await jobsPayload(jobs, setup, actions, toolCalls);
-    const selected = [...streams].filter((stream) => stream.job?.[0] === job.workspace && stream.job[1] === job.ticket);
-    const detail = selected.length > 0 ? await jobDetail(jobs, job, gateOn, actions, setup) : undefined;
-    for (const stream of streams) {
-      send(stream, 'jobs', { ...list, remote: stream.remote });
-      if (detail !== undefined && selected.includes(stream)) {
-        send(stream, 'job', detail);
+    flushing = true;
+    try {
+      await sendChange(change);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      flushing = false;
+      queueFlush();
+    }
+  }
+
+  // Each marked payload built once and sent: jobs to every page, a changed job's detail to the
+  // pages that follow it (one job event per job), workspaces and tickets to every page; tickets
+  // with changed, the tickets it names, unless every ticket was marked.
+  async function sendChange(change: Marked): Promise<void> {
+    const list = change.jobs ? await jobsPayload(jobs, setup, actions, toolCalls) : undefined;
+    const details = [];
+    for (const [workspace, ticket] of change.job.values()) {
+      const followers = [...streams].filter((stream) => stream.job?.[0] === workspace && stream.job[1] === ticket);
+      const job = followers.length > 0 ? await jobs.read(workspace, ticket) : undefined;
+      if (job !== undefined) {
+        details.push({ followers, detail: await jobDetail(jobs, job, gateOn, actions, setup) });
       }
     }
-    await sendSetup(streams);
-  };
-
-  // A ticket action that may have archived or started a job: every page gets the jobs and the
-  // setup data again (a page following an archived job sees it gone from the list).
-  async function refreshAll(): Promise<void> {
-    if (streams.size === 0) {
-      return;
-    }
-    const list = await jobsPayload(jobs, setup, actions, toolCalls);
+    const workspaces = change.workspaces ? await workspacesPayload(setup) : undefined;
+    const tickets = change.tickets === undefined ? undefined : {
+      ...(await ticketsPayload(setup, checks, queue)),
+      ...(change.tickets === 'all' ? {} : { changed: [...change.tickets.values()].map(([workspace, ticket]) => ({ workspace, ticket })) }),
+    };
     for (const stream of streams) {
-      send(stream, 'jobs', { ...list, remote: stream.remote });
+      if (list !== undefined) {
+        send(stream, 'jobs', { ...list, remote: stream.remote });
+      }
+      for (const { followers, detail } of details) {
+        if (followers.includes(stream)) {
+          send(stream, 'job', detail);
+        }
+      }
+      if (workspaces !== undefined) {
+        send(stream, 'workspaces', workspaces);
+      }
+      if (tickets !== undefined) {
+        send(stream, 'tickets', tickets);
+      }
     }
-    await sendSetup(streams);
+  }
+
+  // A job's change: the jobs, the job, the setup data (a job that starts or ends changes the
+  // tickets and the live counts), its ticket; a job that is gone changes every ticket (a page
+  // following an archived job sees it gone from the list).
+  async function jobChanged(key: TicketKey): Promise<void> {
+    const job = await jobs.read(...key);
+    changed(job !== undefined ? { jobs: true, job: key, workspaces: true, tickets: [key] } : { jobs: true, workspaces: true, tickets: 'all' });
   }
 
   return {
@@ -1985,19 +2099,22 @@ export async function startDashboard(
     remoteUrls: remoteDashboardUrls(remoteOrigins, tokenText),
     remotePort: remoteAddress?.port,
     onStateChange(job) {
-      refresh(job).catch((error: unknown) => console.error(error));
+      const key: TicketKey = [job.workspace, job.ticket];
+      changed({ jobs: true, job: key, workspaces: true, tickets: [key] });
     },
     refreshSetup() {
-      sendSetup(streams).catch((error: unknown) => console.error(error));
+      changed({ workspaces: true, tickets: 'all' });
     },
     refreshJob(workspace, ticket) {
-      jobs.read(workspace, ticket).then((job) => (job !== undefined ? refresh(job) : refreshAll())).catch((error: unknown) => console.error(error));
+      jobChanged([workspace, ticket]).catch((error: unknown) => console.error(error));
     },
     async close() {
       for (const stream of streams) {
         stream.abort.abort();
         stream.res.end();
       }
+      // A flush still queued has no page to tell.
+      streams.clear();
       await Promise.all([httpServer, ...(remoteServer !== undefined ? [remoteServer] : [])].map(closeServer));
     },
   };

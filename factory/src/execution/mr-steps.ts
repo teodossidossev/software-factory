@@ -12,26 +12,28 @@ import { chooseForge, type Forge, type ForgeKind, forgeFor, type MergeRequestSta
 import { runGit } from '../git.js';
 import { checkTerms, commitsToCheck, GUARD_MAX_FIXES, GUARD_MAX_MR_TURNS, guardFixContent, guardFixCount, guardMessage, type GuardHit, type GuardTerm, maskedMrTextFailure, maskedMrTextProblem, maskTerms, MAX_GUARD_MESSAGE, redactAdded, scanBranch, scanChange, scanCommits, scanMrText, worktreeTree } from '../guard.js';
 import { checkBranchFree, isAncestor, savedRef, settleAfterPush, subjectOf } from '../handoff.js';
-import { claudeReviews, type Job, type JobMr, type JobState, now } from '../jobs.js';
+import { claudeReviews, type FileChange, type Handover, type Job, type JobMr, type JobState, now } from '../jobs.js';
 import { abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitFailure, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl, parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, validBranchName, withAccepted, withChecks, withFindings, withNits, withSimplifications, worktreesOn } from '../mr.js';
 import { type LedgerEntry, notFixed } from '../ledger.js';
-import { buildPatch, notificationLine } from '../patch.js';
+import { buildPatch, notificationLine, type Patch } from '../patch.js';
 import { conflictPrompt, mrPrompt } from '../prompts.js';
 import { COMMIT_TYPES, DENIED_TOOLS, MANUAL_CLAIM, MAX_HEADER_CHARS, MR_REQUIRED_HEADINGS } from '../rules.js';
 import { configDir, type Workspace } from '../registry.js';
 import { actedVerdict, type ReviewItem, uniqueNits } from '../review.js';
-import type { IdleOutcome } from '../session.js';
+import type { IdleOutcome, ImplementerSession } from '../session.js';
 import { pathDenials } from '../sandbox-denials.js';
 import { withoutDropped } from '../stops.js';
 import { readTask } from '../task-file.js';
 import { checksLine, failureText, inlineCommand, runTestCommand, TEST_CODES, TEST_FIX_ROUNDS, testsFixContent, TESTS_FAILED, type TestsRecord, type TestsResult, TESTS_UNAVAILABLE } from '../test-command.js';
 import { removeWorktree } from '../worktree.js';
-import type { Core } from './core.js';
+import type { RunnerRequest } from '../runner.js';
+import type { Suggestion } from '../simplify.js';
+import type { JobStorePort, LivePort, LockPort, NoticePort, RunnerPort, SettingsPort, StopPort } from './ports.js';
 import type { MrContent, MrInput, MrOutcome, MrSaved, MrView } from './dto.js';
 import { cutOffError, MR_RETRY_CODES, mrFailure } from './errors.js';
 import { TESTS_RUNNER, testsEvent } from './events.js';
 import { markedGroups } from './prompts.js';
-import { exists, type Live, type RunningReview } from './shared.js';
+import { exists, type FixOptions, type Live, type RunningReview } from './shared.js';
 
 // The Merge request screen (SF-080): the needs_human codes of a push that failed or was refused,
 // in which the MR text stays editable (the prepared commit and its worktree are kept until the push).
@@ -111,11 +113,67 @@ function failedMessage(record: TestsRecord, iteration: number): string {
   return `The workspace's tests still fail after ${TEST_FIX_ROUNDS} Tests Fix rounds: ${commandInMessage(record.command)} (${failureText(record)}) on iteration ${iteration}. Accept the iteration without passing tests (sf accept), or tell the Implementer what to do (sf say).`;
 }
 
-export class MrPart {
-  readonly core: Core;
+// What MrPart calls of the other parts, by just those methods.
+export interface MrControl {
+  request(workspaceName: string, ticket: string, request: Exclude<RunnerRequest, { kind: 'turn' }>): Promise<unknown>;
+}
 
-  constructor(core: Core) {
-    this.core = core;
+export interface MrHandover {
+  checkHandedOverJob(job: Job, command: string): Handover;
+  handOver(job: Job, workspace: Workspace, content: MrContent): Promise<{ ok: true; job: Job } | { ok: false; job: Job; error: { code: string; message: string } }>;
+  handoverNote(job: Job, note: string): Promise<void>;
+  leaveCheckout(job: Job, workspace: Workspace, pushed: boolean): Promise<Job>;
+}
+
+export interface MrReviews {
+  skippedSimplifications(job: Job): Promise<{ suggestions: Suggestion[]; iteration: number } | undefined>;
+  startReview(job: Job): Promise<void>;
+  unaccepted(job: Job, accepted: string[]): Promise<ReviewItem[]>;
+}
+
+export interface MrStart {
+  syncTask(workspace: Workspace, job: Job): Promise<Job>;
+}
+
+export interface MrStatus {
+  lastFiles(job: Job): Promise<FileChange[] | undefined>;
+}
+
+export interface MrTurns {
+  fix(current: Job, content: string, options?: FixOptions): Promise<{ iteration: number; check_after_minutes: number }>;
+  publish(job: Job, live: Live, outcome: Extract<IdleOutcome, { ok: true }>, built: Patch, extraSections: string[]): Promise<{ job: Job; changes: FileChange[] }>;
+  session(job: Job, workspace: Workspace): ImplementerSession;
+}
+
+export interface MrPeers {
+  readonly control: MrControl;
+  readonly handover: MrHandover;
+  readonly reviews: MrReviews;
+  readonly start: MrStart;
+  readonly status: MrStatus;
+  readonly turns: MrTurns;
+}
+
+export class MrPart {
+  readonly #store: JobStorePort;
+  readonly #locks: LockPort;
+  readonly #sessions: LivePort;
+  readonly #runner: RunnerPort;
+  readonly #notice: NoticePort;
+  readonly #settings: SettingsPort;
+  readonly #stop: StopPort;
+  // The parts it calls (src/execution.ts wires them).
+  readonly #peers: MrPeers;
+
+  constructor(store: JobStorePort, locks: LockPort, sessions: LivePort, runner: RunnerPort, notice: NoticePort, settings: SettingsPort, stop: StopPort, peers: MrPeers) {
+    this.#store = store;
+    this.#locks = locks;
+    this.#sessions = sessions;
+    this.#runner = runner;
+    this.#notice = notice;
+    this.#settings = settings;
+    this.#stop = stop;
+    this.#peers = peers;
   }
 
   // The end of a turn of MR preparation (mark_clean). After the MR text turn: validate the text,
@@ -128,7 +186,7 @@ export class MrPart {
     let current = job;
     const needsHuman = async (code: string, message: string): Promise<void> => {
       // from: preparing_mr (#idle calls mrIdle only then)
-      await this.core.transition(current, 'needs_human', 'mr_turn_end', { code, message });
+      await this.#store.transition(current, 'needs_human', 'mr_turn_end', { code, message });
     };
     try {
       if (await rebaseInProgress(cwd)) {
@@ -159,11 +217,11 @@ export class MrPart {
       // So do the ledger's findings not fixed: accepted risks, contests and nits left (SF-052).
       const withNitsText = withNits(written.text, await this.#nitsAtClean(job), job.iteration);
       // And the suggestions of the simplification pass the user skipped (SF-055).
-      const skipped = await this.core.parts.reviews.skippedSimplifications(job);
+      const skipped = await this.#peers.reviews.skippedSimplifications(job);
       const withSkipped = skipped === undefined ? withNitsText : withSimplifications(withNitsText, skipped.suggestions, skipped.iteration);
-      const ledger = await this.core.jobs.readLedger(job.workspace, job.ticket);
+      const ledger = await this.#store.jobs.readLedger(job.workspace, job.ticket);
       // The run of the workspace's test command on this iteration (SF-128), as ### Checks of ## Testing.
-      const tests = await this.core.jobs.readTests(job.workspace, job.ticket, job.iteration);
+      const tests = await this.#store.jobs.readTests(job.workspace, job.ticket, job.iteration);
       const checked = (text: string): string => (tests === undefined ? text : withChecks(text, checksLine(tests, job.iteration), job.iteration));
       const composed = checked(await this.#withAccepted(withFindings(withSkipped, ledger), job, ledger));
       // The guard (SF-122): the lines the factory added lose every term; the Implementer's own
@@ -186,11 +244,11 @@ export class MrPart {
             const targetRef = live.mr?.targetRef ?? job.base;
             live.mr = { ...live.mr, targetRef, guardTurns: turns + 1 };
             current = { ...job, mr_attempts: job.mr_attempts + 1 };
-            await this.core.jobs.write(current);
+            await this.#store.jobs.write(current);
             live.session.send(mrPrompt({
               ticket: job.ticket, branch: job.branch, targetRef, targetCommit: job.target_commit!, attempt: current.mr_attempts,
               previousError: `The guard found text that must not be published in this repository in your MR text: ${guardMessage(hits, terms)}. Write the MR text again without it.`,
-              handbook: this.core.handbook,
+              handbook: this.#settings.handbook,
             }), DENIED_TOOLS);
             return;
           }
@@ -199,21 +257,21 @@ export class MrPart {
         }
       }
       const targetCommit = job.target_commit!;
-      const prepared = await this.core.gitLocked(job.workspace, () => commitAndRebase(cwd, { baseCommit: job.base_commit!, targetCommit, mrText: mrText.text }));
+      const prepared = await this.#locks.gitLocked(job.workspace, () => commitAndRebase(cwd, { baseCommit: job.base_commit!, targetCommit, mrText: mrText.text }));
       if (prepared.kind === 'failed') {
         await needsHuman(prepared.failure.code, prepared.failure.message);
         return;
       }
       if (userText !== undefined) {
-        await this.core.jobs.writeMrFactoryText(job.workspace, job.ticket, factoryText);
+        await this.#store.jobs.writeMrFactoryText(job.workspace, job.ticket, factoryText);
         // The user's text as committed, with its ### Checks (SF-128).
         if (usersOwn && userText !== saved) {
-          await this.core.jobs.writeMrText(job.workspace, job.ticket, userText);
+          await this.#store.jobs.writeMrText(job.workspace, job.ticket, userText);
         }
-        await this.core.jobs.appendEvent(job.workspace, job.ticket, { ts: now(), iteration: job.iteration, type: 'mr_edited', action: 'factory_new' });
+        await this.#store.jobs.appendEvent(job.workspace, job.ticket, { ts: now(), iteration: job.iteration, type: 'mr_edited', action: 'factory_new' });
       } else {
-        await this.core.jobs.writeMrText(job.workspace, job.ticket, factoryText);
-        await this.core.jobs.removeMrFactoryText(job.workspace, job.ticket);
+        await this.#store.jobs.writeMrText(job.workspace, job.ticket, factoryText);
+        await this.#store.jobs.removeMrFactoryText(job.workspace, job.ticket);
       }
       if (prepared.kind === 'conflict') {
         // The job stays preparing_mr while the Implementer resolves the conflicts.
@@ -221,7 +279,7 @@ export class MrPart {
         live.mr = { targetRef, conflicts: prepared.files };
         // From here a stop may leave a resolution no reviewer saw: no Retry (SF-087).
         current = { ...job, mr_conflict_turn: true };
-        await this.core.jobs.write(current);
+        await this.#store.jobs.write(current);
         live.session.send(conflictPrompt({ ticket: job.ticket, targetRef, targetCommit, files: prepared.files }), DENIED_TOOLS);
         return;
       }
@@ -235,8 +293,8 @@ export class MrPart {
   // The MR text the user saved (SF-080): mr.md when mr-factory.md exists and differs from it;
   // undefined when the text was never edited or is the factory's again.
   async #userMrText(job: Job): Promise<string | undefined> {
-    const factory = await this.core.jobs.readMrFactoryText(job.workspace, job.ticket);
-    const text = await this.core.jobs.readMrText(job.workspace, job.ticket);
+    const factory = await this.#store.jobs.readMrFactoryText(job.workspace, job.ticket);
+    const text = await this.#store.jobs.readMrText(job.workspace, job.ticket);
     return editedText(factory, text) ? text : undefined;
   }
 
@@ -247,7 +305,7 @@ export class MrPart {
   // as it is without such an override (an Accept over the gate of a job with the Claude review
   // leaves the MR text as before).
   async #withAccepted(text: string, job: Job, ledger: LedgerEntry[]): Promise<string> {
-    const override = await this.core.jobs.readGateOverride(job.workspace, job.ticket, job.iteration);
+    const override = await this.#store.jobs.readGateOverride(job.workspace, job.ticket, job.iteration);
     if (override === undefined || (claudeReviews(job) && override.code !== 'iteration_limit')) {
       return text;
     }
@@ -262,7 +320,7 @@ export class MrPart {
   // the Claude review (SF-131) the gate's alone.
   async #nitsAtClean(job: Job): Promise<ReviewItem[]> {
     const { workspace, ticket, iteration } = job;
-    const records = [claudeReviews(job) ? await this.core.jobs.readReview(workspace, ticket, iteration) : undefined, await this.core.jobs.readGate(workspace, ticket, iteration)];
+    const records = [claudeReviews(job) ? await this.#store.jobs.readReview(workspace, ticket, iteration) : undefined, await this.#store.jobs.readGate(workspace, ticket, iteration)];
     return uniqueNits(records.flatMap((record) => (record !== undefined && 'items' in record ? [record] : [])));
   }
 
@@ -278,18 +336,18 @@ export class MrPart {
     const targetCommit = job.target_commit!;
     live.mr = { targetRef };
     if (!outcome.ok) {
-      await this.core.gitLocked(job.workspace, () => abortRebase(cwd));
+      await this.#locks.gitLocked(job.workspace, () => abortRebase(cwd));
       const message = `The rebase had conflicts in ${files.join(', ')}; the conflict turn failed (${outcome.code}: ${outcome.message}). The rebase was aborted.`;
       // from: preparing_mr (mrIdle, from #idle)
-      await this.core.transition(job, 'needs_human', 'mr_turn_end', { code: 'mr_conflict', message: message.slice(0, 1000) });
+      await this.#store.transition(job, 'needs_human', 'mr_turn_end', { code: 'mr_conflict', message: message.slice(0, 1000) });
       return;
     }
     // A continue that fails keeps the resolution next to the iteration being rebased.
-    const save = (write: (handle: FileHandle) => Promise<void>): Promise<string> => this.core.jobs.writeConflictResolution(job.workspace, job.ticket, job.iteration, write);
-    const failure = await this.core.gitLocked(job.workspace, () => continueRebase(cwd, { files, targetCommit, save }));
+    const save = (write: (handle: FileHandle) => Promise<void>): Promise<string> => this.#store.jobs.writeConflictResolution(job.workspace, job.ticket, job.iteration, write);
+    const failure = await this.#locks.gitLocked(job.workspace, () => continueRebase(cwd, { files, targetCommit, save }));
     if (failure !== undefined) {
       // from: preparing_mr (mrIdle, from #idle)
-      await this.core.transition(job, 'needs_human', 'mr_turn_end', failure);
+      await this.#store.transition(job, 'needs_human', 'mr_turn_end', failure);
       return;
     }
     // The resolution goes back to review with this transition: the conflict turn's window ends
@@ -300,9 +358,9 @@ export class MrPart {
       '',
       `The rebase onto ${targetRef} (${targetCommit}) had conflicts in ${files.join(', ')}, resolved by the Implementer. The Patch is now against the target.`,
     ].join('\n');
-    const { job: published, changes } = await this.core.parts.turns.publish(rebased, live, outcome, await buildPatch(cwd, targetCommit), [note]);
+    const { job: published, changes } = await this.#peers.turns.publish(rebased, live, outcome, await buildPatch(cwd, targetCommit), [note]);
     // from: preparing_mr (mrIdle, from #idle)
-    await this.core.parts.reviews.startReview(await this.core.transition(published, 'awaiting_review', 'mr_turn_end', undefined, [notificationLine(changes)]));
+    await this.#peers.reviews.startReview(await this.#store.transition(published, 'awaiting_review', 'mr_turn_end', undefined, [notificationLine(changes)]));
   }
 
   // The branch holds the one commit on top of the target. With hand-over on (SF-073; the
@@ -314,33 +372,33 @@ export class MrPart {
     const cwd = live.cwd;
     const tip = (await runGit(cwd, ['rev-parse', '--verify', `refs/heads/${job.branch}`])).stdout.toString('utf8').trim();
     const content = mrMessage(mrText);
-    this.core.live.delete(`${job.workspace}/${job.ticket}`);
-    const lines = [content.title, notificationLine((await this.core.parts.status.lastFiles(job)) ?? [])];
+    this.#sessions.live.delete(`${job.workspace}/${job.ticket}`);
+    const lines = [content.title, notificationLine((await this.#peers.status.lastFiles(job)) ?? [])];
     let ready: Job = { ...job, base_commit: job.target_commit, prepared_commit: tip };
     // The registry as it is now: its handoff may have changed while the job ran. When it cannot be
     // read or the checkout not verified, the setting from the job's start applies (the hand-over
     // itself then answers the checkout's problem as its refusal).
-    const own = (await this.core.resolve(job.workspace).catch(() => live.workspace)).handoff;
-    const off = handoffOffNotice(own, this.core.config.handoff, job.ticket);
+    const own = (await this.#settings.resolve(job.workspace).catch(() => live.workspace)).handoff;
+    const off = handoffOffNotice(own, this.#settings.config.handoff, job.ticket);
     if (off !== undefined) {
       ready = { ...ready, handoff_skipped: off };
     } else {
-      const outcome = await this.core.parts.handover.handOver(ready, live.workspace, content);
+      const outcome = await this.#peers.handover.handOver(ready, live.workspace, content);
       if (outcome.ok) {
         // from: preparing_mr (mrIdle; handOver writes the job in the same state)
-        await this.core.transition(outcome.job, 'handed_over', 'ready', undefined, lines);
+        await this.#store.transition(outcome.job, 'handed_over', 'ready', undefined, lines);
         console.log(`${job.workspace}/${job.ticket}: branch ${job.branch} ready (${content.title}), in the checkout`);
         return;
       }
       if (outcome.error.code === 'handover_interrupted') {
         // from: preparing_mr (mrIdle; handOver writes the job in the same state)
-        await this.core.transition(outcome.job, 'needs_human', 'ready', outcome.error);
+        await this.#store.transition(outcome.job, 'needs_human', 'ready', outcome.error);
         return;
       }
       ready = { ...outcome.job, handoff_skipped: outcome.error };
     }
     // from: preparing_mr (mrIdle; handOver writes the job in the same state)
-    await this.core.transition(ready, 'ready_for_human_review', 'ready', undefined, lines);
+    await this.#store.transition(ready, 'ready_for_human_review', 'ready', undefined, lines);
     console.log(`${job.workspace}/${job.ticket}: branch ${job.branch} ready (${content.title})`);
   }
 
@@ -350,7 +408,7 @@ export class MrPart {
   // and the job ends in ready_for_human_review with the branch in the checkout. Also the retry
   // after a failed preparation (needs_human with mr_attempts > 0).
   markClean(workspaceName: string, ticket: string, sensitive: string[] = []): Promise<{ state: JobState; iteration: number; branch: string }> {
-    return this.core.parts.control.request(workspaceName, ticket, { kind: 'clean', sensitive }) as Promise<{ state: JobState; iteration: number; branch: string }>;
+    return this.#peers.control.request(workspaceName, ticket, { kind: 'clean', sensitive }) as Promise<{ state: JobState; iteration: number; branch: string }>;
   }
 
   // Whether MR preparation may start: awaiting_review, the retry after a failed preparation, or the
@@ -369,11 +427,11 @@ export class MrPart {
   // turn, no review, no gate and no simplification pass. On mr_push_failed it is approve without
   // --as-is: the push again, in sf serve.
   async retryMr(workspaceName: string, ticket: string): Promise<MrOutcome | { state: JobState; iteration: number; branch: string }> {
-    const job = await this.core.job(workspaceName, ticket);
+    const job = await this.#store.job(workspaceName, ticket);
     if (job.state === 'needs_human' && job.error?.code === 'mr_push_failed') {
       return this.approve(workspaceName, ticket, false);
     }
-    return this.core.parts.control.request(workspaceName, ticket, { kind: 'retry' }) as Promise<{ state: JobState; iteration: number; branch: string }>;
+    return this.#peers.control.request(workspaceName, ticket, { kind: 'retry' }) as Promise<{ state: JobState; iteration: number; branch: string }>;
   }
 
   // sf retry needs needs_human with one of MR_RETRY_CODES, the worktree, no prepared commit and no
@@ -401,18 +459,18 @@ export class MrPart {
   // its verdict. Without the Claude review (SF-131) the last gate.json's: a clean one, or any after
   // an override.
   retryMrInRunner(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; branch: string }> {
-    return this.core.locked(async () => {
-      const job = await this.core.job(workspaceName, ticket);
+    return this.#locks.locked(async () => {
+      const job = await this.#store.job(workspaceName, ticket);
       this.checkRetryMr(job);
       if (!(await exists(job.worktree!))) {
         throw new FactoryError('invalid_state', `sf retry needs the job's worktree; the job is ${job.state} (${job.error!.code}) and its worktree ${job.worktree} is missing.`);
       }
-      const gate = job.iteration > 0 ? await this.core.jobs.readGate(workspaceName, ticket, job.iteration) : undefined;
-      const overridden = (await this.core.jobs.readGateOverride(workspaceName, ticket, job.iteration)) !== undefined;
+      const gate = job.iteration > 0 ? await this.#store.jobs.readGate(workspaceName, ticket, job.iteration) : undefined;
+      const overridden = (await this.#store.jobs.readGateOverride(workspaceName, ticket, job.iteration)) !== undefined;
       const gateClean = gate !== undefined && 'verdict' in gate && actedVerdict(withoutDropped(gate)) === 'clean';
       let accepted: string[];
       if (claudeReviews(job)) {
-        const review = job.iteration > 0 ? await this.core.jobs.readReview(workspaceName, ticket, job.iteration) : undefined;
+        const review = job.iteration > 0 ? await this.#store.jobs.readReview(workspaceName, ticket, job.iteration) : undefined;
         if (review === undefined || !('verdict' in review) || (!overridden && actedVerdict(withoutDropped(review)) !== 'clean')) {
           throw new FactoryError('invalid_state', `sf retry needs a clean Claude review of the last iteration (${job.iteration}); tell the Implementer to go on.`);
         }
@@ -430,7 +488,7 @@ export class MrPart {
         // retried once more; any other refusal leaves the job as it was.
         if (error instanceof FactoryError && MR_RETRY_CODES.includes(error.code)) {
           // from: needs_human (checkRetryMr)
-          await this.core.transition(job, 'needs_human', 'mr_retry', { code: error.code, message: error.message });
+          await this.#store.transition(job, 'needs_human', 'mr_retry', { code: error.code, message: error.message });
         }
         throw error;
       }
@@ -453,7 +511,7 @@ export class MrPart {
     } else {
       afterTextTurn = this.checkPrepareMr(job, onAccepted !== undefined);
     }
-    const unacknowledged = markedGroups(await this.core.parts.reviews.unaccepted(job, sensitive));
+    const unacknowledged = markedGroups(await this.#peers.reviews.unaccepted(job, sensitive));
     if (unacknowledged.length > 0) {
       const lines = unacknowledged.map((group) => `${group.label.charAt(0).toUpperCase()}${group.label.slice(1)} in the reviewed iteration: ${group.paths.join(', ')}.`);
       throw new FactoryError('sensitive_unacknowledged', `${lines.join(' ')} Each must be named in the accepted sensitive paths with the reason it is needed; otherwise it is a fix item.`);
@@ -462,20 +520,20 @@ export class MrPart {
       throw new FactoryError('worktree_missing', `The worktree of ${workspaceName}/${ticket} is missing; sf reset the ticket and start again.`);
     }
     const key = `${workspaceName}/${ticket}`;
-    const live = this.core.live.get(key);
+    const live = this.#sessions.live.get(key);
     if (live?.session.busy === true) {
       throw new FactoryError('turn_running', 'A turn of the Implementer is running; wait for it to end.');
     }
-    const workspace = live?.workspace ?? (await this.core.resolve(workspaceName));
+    const workspace = live?.workspace ?? (await this.#settings.resolve(workspaceName));
     const cwd = job.worktree;
     // A rebase left in progress when sf serve restarted during a conflict turn: aborted before the
     // guard reads the worktree, so it sees the change and not the target's files.
-    await this.core.gitLocked(workspaceName, () => abortRebase(cwd));
+    await this.#locks.gitLocked(workspaceName, () => abortRebase(cwd));
     const guarded = await this.#guardChange(job, workspace, cwd);
     if (guarded !== undefined) {
       return guarded;
     }
-    const target = await this.core.gitLocked(workspaceName, async () => {
+    const target = await this.#locks.gitLocked(workspaceName, async () => {
       // A rebase left in progress when sf serve restarted during a conflict turn.
       await abortRebase(cwd);
       // No turn while the user's checkout holds the branch (SF-073).
@@ -486,13 +544,13 @@ export class MrPart {
     const attempts = job.mr_attempts;
     const attempt = attempts + 1;
     // from: awaiting_review, or needs_human: the retry and Accept or Skip (checkPrepareMr, checkAcceptGate), the Retry (checkRetryMr)
-    const next = await this.core.parts.start.syncTask(workspace, await this.core.transition({ ...job, target_commit: target.commit, mr_attempts: attempt, mr_conflict_turn: false }, 'preparing_mr', 'prepare_mr'));
+    const next = await this.#peers.start.syncTask(workspace, await this.#store.transition({ ...job, target_commit: target.commit, mr_attempts: attempt, mr_conflict_turn: false }, 'preparing_mr', 'prepare_mr'));
     // A stop of the test step ran no MR text turn: the next turn is not told its error (SF-128).
     const previousError = afterTextTurn && !TEST_CODES.includes(job.error?.code ?? '') ? job.error?.message : undefined;
     const turn: MrTurn = { targetRef: target.ref, targetCommit: target.commit, attempt, previousError };
     // The workspace's test command (SF-128) as the registry holds it now (when it cannot be read, as
     // in hand): its run comes first, outside the lock, unless this iteration passed or was accepted.
-    const command = (await this.core.resolve(workspaceName).catch(() => workspace)).testCommand;
+    const command = (await this.#settings.resolve(workspaceName).catch(() => workspace)).testCommand;
     if (command !== undefined && !(await this.#testsSettled(next))) {
       this.#startTests(next, workspace, command, { attempts, turn });
       return { state: next.state, iteration: next.iteration, branch: next.branch };
@@ -505,10 +563,10 @@ export class MrPart {
   #mrTextTurn(job: Job, workspace: Workspace, turn: MrTurn): void {
     const prompt = mrPrompt({
       ticket: job.ticket, branch: job.branch, targetRef: turn.targetRef, targetCommit: turn.targetCommit, attempt: turn.attempt,
-      previousError: turn.previousError, handbook: this.core.handbook,
+      previousError: turn.previousError, handbook: this.#settings.handbook,
     });
-    const session = this.core.parts.turns.session(job, workspace);
-    this.core.live.get(`${job.workspace}/${job.ticket}`)!.mr = { targetRef: turn.targetRef };
+    const session = this.#peers.turns.session(job, workspace);
+    this.#sessions.live.get(`${job.workspace}/${job.ticket}`)!.mr = { targetRef: turn.targetRef };
     session.send(prompt, DENIED_TOOLS);
   }
 
@@ -516,7 +574,7 @@ export class MrPart {
   // accepted it without passing tests.
   // A record that cannot be read counts as none: the tests run again.
   async #testsSettled(job: Job): Promise<boolean> {
-    const record = await this.core.jobs.readTests(job.workspace, job.ticket, job.iteration).catch((error: unknown) => {
+    const record = await this.#store.jobs.readTests(job.workspace, job.ticket, job.iteration).catch((error: unknown) => {
       console.error(error);
       return undefined;
     });
@@ -527,14 +585,14 @@ export class MrPart {
   // job's running review, so abort and stop() cancel it and the runner waits for it. It runs outside
   // the lock; its end applies under it (#tested). Only under the lock, in the runner.
   #startTests(job: Job, workspace: Workspace, command: string, context: TestsContext): void {
-    this.core.runnerJob();
-    if (this.core.stopping) {
+    this.#runner.runnerJob();
+    if (this.#stop.isStopping()) {
       throw new FactoryError('runner_stopping', 'The runner of the job is stopping; no test run starts.');
     }
     const key = `${job.workspace}/${job.ticket}`;
-    this.core.reviews.get(key)?.controller.abort();
+    this.#sessions.reviews.get(key)?.controller.abort();
     const running: RunningReview = { reviewer: TESTS_RUNNER, iteration: job.iteration, controller: new AbortController() };
-    this.core.reviews.set(key, running);
+    this.#sessions.reviews.set(key, running);
     this.#runTests(job, workspace, command, running, context).catch((error: unknown) => console.error(error));
   }
 
@@ -545,12 +603,12 @@ export class MrPart {
     const run = now();
     let result: TestsResult;
     try {
-      await this.core.jobs.appendEvent(job.workspace, job.ticket, { ts: run, iteration: job.iteration, type: 'tests_started', run, command });
+      await this.#store.jobs.appendEvent(job.workspace, job.ticket, { ts: run, iteration: job.iteration, type: 'tests_started', run, command });
       const denials = await pathDenials({
-        session: 'job', workspace: job.workspace, checkout: workspace.workCheckout, worktree: job.worktree!, stateDir: this.core.config.stateDir, worktreeRoot: this.core.config.worktreeRoot,
+        session: 'job', workspace: job.workspace, checkout: workspace.workCheckout, worktree: job.worktree!, stateDir: this.#settings.config.stateDir, worktreeRoot: this.#settings.config.worktreeRoot,
       });
       result = await runTestCommand({
-        command, cwd: job.worktree!, hidden: denials.sandbox.denyRead, timeoutMs: this.core.config.testTimeoutMs ?? DEFAULT_TEST_TIMEOUT_MS, signal: running.controller.signal,
+        command, cwd: job.worktree!, hidden: denials.sandbox.denyRead, timeoutMs: this.#settings.config.testTimeoutMs ?? DEFAULT_TEST_TIMEOUT_MS, signal: running.controller.signal,
       });
     } catch (error) {
       // The path denials could not be built (or the event written): no run without them.
@@ -558,7 +616,7 @@ export class MrPart {
       const reason = `the sandbox could not be built: ${error instanceof FactoryError ? error.message : (error as Error).message}`.slice(0, 300);
       result = { aborted: false, record: { command, started_at: run, ended_at: at, duration_ms: Date.parse(at) - Date.parse(run), exit_code: null, timed_out: false, outcome: 'unavailable', reason, output: '', output_truncated: false } };
     }
-    await this.core.locked(() => this.#tested(job, running, run, result, context));
+    await this.#locks.locked(() => this.#tested(job, running, run, result, context));
   }
 
   // The end of a test run. A cancelled one (abort, stop()) leaves no trace, and so does one whose job
@@ -569,44 +627,44 @@ export class MrPart {
   async #tested(job: Job, running: RunningReview, run: string, result: TestsResult, context: TestsContext): Promise<void> {
     const { workspace: name, ticket, iteration } = job;
     const key = `${name}/${ticket}`;
-    if (this.core.reviews.get(key) !== running || running.controller.signal.aborted) {
+    if (this.#sessions.reviews.get(key) !== running || running.controller.signal.aborted) {
       return;
     }
-    this.core.reviews.delete(key);
+    this.#sessions.reviews.delete(key);
     if (result.aborted) {
       return;
     }
-    const current = await this.core.jobs.read(name, ticket);
+    const current = await this.#store.jobs.read(name, ticket);
     if (current === undefined || current.created_at !== job.created_at || current.state !== 'preparing_mr' || current.iteration !== iteration) {
       return;
     }
     const { record } = result;
     const back: Job = { ...current, mr_attempts: context.attempts };
     try {
-      await this.core.jobs.writeTests(name, ticket, iteration, record);
-      await this.core.jobs.appendEvent(name, ticket, testsEvent(iteration, run, record));
+      await this.#store.jobs.writeTests(name, ticket, iteration, record);
+      await this.#store.jobs.appendEvent(name, ticket, testsEvent(iteration, run, record));
       if (record.outcome === 'passed') {
-        this.#mrTextTurn(current, this.core.live.get(key)?.workspace ?? (await this.core.resolve(name)), context.turn);
+        this.#mrTextTurn(current, this.#sessions.live.get(key)?.workspace ?? (await this.#settings.resolve(name)), context.turn);
         return;
       }
       if (record.outcome === 'unavailable') {
         // from: preparing_mr (the test step)
-        await this.core.transition(back, 'needs_human', 'tests', { code: TESTS_UNAVAILABLE, message: unavailableMessage(record, iteration) });
+        await this.#store.transition(back, 'needs_human', 'tests', { code: TESTS_UNAVAILABLE, message: unavailableMessage(record, iteration) });
         return;
       }
-      const failed = await this.core.jobs.failedTests(name, ticket);
+      const failed = await this.#store.jobs.failedTests(name, ticket);
       if (failed > TEST_FIX_ROUNDS) {
         // from: preparing_mr (the test step)
-        await this.core.transition(back, 'needs_human', 'tests', { code: TESTS_FAILED, message: failedMessage(record, iteration) });
+        await this.#store.transition(back, 'needs_human', 'tests', { code: TESTS_FAILED, message: failedMessage(record, iteration) });
         return;
       }
-      await this.core.parts.turns.fix(back, testsFixContent(record), { title: TESTS_TITLE, fromTests: true });
+      await this.#peers.turns.fix(back, testsFixContent(record), { title: TESTS_TITLE, fromTests: true });
     } catch (error) {
       console.error(error);
-      const latest = await this.core.jobs.read(name, ticket);
+      const latest = await this.#store.jobs.read(name, ticket);
       if (latest?.state === 'preparing_mr') {
         // from: preparing_mr (the test step)
-        await this.core.transition({ ...latest, mr_attempts: context.attempts }, 'needs_human', 'tests', { code: 'mr_failed', message: `MR preparation failed inside the factory: ${(error as Error).message}`.slice(0, 1000) });
+        await this.#store.transition({ ...latest, mr_attempts: context.attempts }, 'needs_human', 'tests', { code: 'mr_failed', message: `MR preparation failed inside the factory: ${(error as Error).message}`.slice(0, 1000) });
       }
     }
   }
@@ -615,8 +673,8 @@ export class MrPart {
   // workspaces when the workspace is guarded as the registry holds it now (when it cannot be read,
   // as in hand).
   async #guardTerms(workspace: Workspace): Promise<GuardTerm[]> {
-    const guarded = (await this.core.resolve(workspace.name).catch(() => workspace)).guard === true;
-    const { terms } = await checkTerms({ workspace, guarded, configDir: configDir(), stateDir: this.core.config.stateDir, envFile: envFilePath() });
+    const guarded = (await this.#settings.resolve(workspace.name).catch(() => workspace)).guard === true;
+    const { terms } = await checkTerms({ workspace, guarded, configDir: configDir(), stateDir: this.#settings.config.stateDir, envFile: envFilePath() });
     return terms;
   }
 
@@ -626,7 +684,7 @@ export class MrPart {
   async #guardChange(job: Job, workspace: Workspace, cwd: string): Promise<{ state: JobState; iteration: number; branch: string } | undefined> {
     const stop = async (code: string, message: string): Promise<{ state: JobState; iteration: number; branch: string }> => {
       // from: awaiting_review, needs_human (checkPrepareMr, checkRetryMr)
-      const next = await this.core.transition(job, 'needs_human', 'fix', { code, message });
+      const next = await this.#store.transition(job, 'needs_human', 'fix', { code, message });
       return { state: next.state, iteration: next.iteration, branch: next.branch };
     };
     let terms: GuardTerm[];
@@ -646,7 +704,7 @@ export class MrPart {
     }
     const fixes = guardFixCount(await readTask(workspace, job.ticket));
     if (fixes < GUARD_MAX_FIXES) {
-      const { iteration } = await this.core.parts.turns.fix(job, guardFixContent(hits, terms), { title: 'Guard', fromStop: job.state === 'needs_human' });
+      const { iteration } = await this.#peers.turns.fix(job, guardFixContent(hits, terms), { title: 'Guard', fromStop: job.state === 'needs_human' });
       return { state: 'working', iteration, branch: job.branch };
     }
     const message = `The guard found text that must not be published in this repository, after ${fixes} Guard fixes: ${guardMessage(hits, terms)}. Remove it (sf say, or by hand and sf say), or drop a false positive with a "!" line in guard-terms.txt and sf retry. See the matches with: sf guard ${job.workspace} --worktree ${job.ticket}`;
@@ -655,7 +713,7 @@ export class MrPart {
 
   // The terms of the push check (SF-122): the workspace as approve resolved it, just before.
   async #pushTerms(workspace: Workspace): Promise<GuardTerm[]> {
-    return (await checkTerms({ workspace, guarded: workspace.guard === true, configDir: configDir(), stateDir: this.core.config.stateDir, envFile: envFilePath() })).terms;
+    return (await checkTerms({ workspace, guarded: workspace.guard === true, configDir: configDir(), stateDir: this.#settings.config.stateDir, envFile: envFilePath() })).terms;
   }
 
   // The guard's check before a push or a merge request the factory makes (SF-122): with commit,
@@ -669,7 +727,7 @@ export class MrPart {
       hits.push(...(await scanCommits(checkout, await commitsToCheck(checkout, { rev: commit, remote: 'origin', history: false }), terms)));
     }
     hits.push(...scanBranch(job.branch, terms));
-    const text = await this.core.jobs.readMrText(job.workspace, job.ticket);
+    const text = await this.#store.jobs.readMrText(job.workspace, job.ticket);
     if (text !== undefined) {
       hits.push(...scanMrText(text, terms));
     }
@@ -686,13 +744,13 @@ export class MrPart {
   // The user's approve: the branch the factory prepared at Clean is pushed. Nothing is committed
   // or rebased here; a tip that moved since is refused unless asIs.
   approve(workspaceName: string, ticket: string, asIs = false): Promise<MrOutcome> {
-    return this.core.locked(async () => {
+    return this.#locks.locked(async () => {
       // Refused at once in a state approve does not take; checked again once the runner has ended.
-      this.#checkApprovable(await this.core.job(workspaceName, ticket), 'approve');
+      this.#checkApprovable(await this.#store.job(workspaceName, ticket), 'approve');
       await this.settled(workspaceName, ticket);
-      const job = await this.core.job(workspaceName, ticket);
+      const job = await this.#store.job(workspaceName, ticket);
       this.#checkApprovable(job, 'approve');
-      return this.#approve(job, await this.core.resolve(workspaceName), asIs);
+      return this.#approve(job, await this.#settings.resolve(workspaceName), asIs);
     });
   }
 
@@ -700,7 +758,7 @@ export class MrPart {
   // exits once the job waits for the user) and no request (sf say, a fix) waits for one;
   // runner_active otherwise. Only under the lock, under which every request is queued.
   async settled(workspaceName: string, ticket: string): Promise<void> {
-    if (!(await this.core.serveRunners().settled(workspaceName, ticket))) {
+    if (!(await this.#runner.serveRunners().settled(workspaceName, ticket))) {
       throw new FactoryError('runner_active', `The runner of ${workspaceName}/${ticket} is running a request (sf say or a fix); wait for the job to wait for you again.`);
     }
   }
@@ -746,17 +804,17 @@ export class MrPart {
     await this.#checkGuard(job, workspace, plan.commit);
     // The commit the guard checked is what is pushed (SF-122), so a branch that moved on since is
     // not published unchecked; a handed-over job's saved commit through its saved ref, as before.
-    const pushFailure = await this.core.gitLocked(workspaceName, () => pushBranch(checkout, job.branch, job.base, plan.source ?? plan.commit));
+    const pushFailure = await this.#locks.gitLocked(workspaceName, () => pushBranch(checkout, job.branch, job.base, plan.source ?? plan.commit));
     if (pushFailure !== undefined) {
       if (job.state === 'handed_over') {
         // The checkout, the record, the saved ref and the config stay; Approve can be retried.
         const kept: Job = { ...job, error: pushFailure };
-        await this.core.jobs.write(kept);
-        this.core.announce(kept, []);
+        await this.#store.jobs.write(kept);
+        this.#notice.announce(kept, []);
         return { state: kept.state, branch: kept.branch, error: pushFailure };
       }
       // from: ready_for_human_review, needs_human (#approvable; handed_over keeps its state above)
-      const next = await this.core.transition(job, 'needs_human', 'push', pushFailure);
+      const next = await this.#store.transition(job, 'needs_human', 'push', pushFailure);
       return { state: next.state, branch: next.branch, error: pushFailure };
     }
     let message = plan.message;
@@ -764,21 +822,21 @@ export class MrPart {
     if (job.state === 'handed_over') {
       const handover = job.handover!;
       if (plan.source !== undefined) {
-        const changed = await this.core.gitLocked(workspaceName, () => settleAfterPush(checkout, handover));
+        const changed = await this.#locks.gitLocked(workspaceName, () => settleAfterPush(checkout, handover));
         message = `Pushed the factory's commit ${handover.saved.slice(0, 12)}.${changed !== undefined && changed > 0 ? ` Your uncommitted changes (${changed} files) were not pushed.` : ''}`;
       }
-      after = await this.core.parts.handover.leaveCheckout(job, workspace, true);
+      after = await this.#peers.handover.leaveCheckout(job, workspace, true);
     } else if (job.worktree !== null) {
       // The worktree stays until the push (SF-073); a failure keeps its path for the next action.
       const worktree = job.worktree;
-      const failure = await this.core.gitLocked(workspaceName, () => removeWorktree(checkout, worktree));
+      const failure = await this.#locks.gitLocked(workspaceName, () => removeWorktree(checkout, worktree));
       if (failure === undefined) {
         after = { ...job, worktree: null };
       } else {
-        await this.core.parts.handover.handoverNote(job, `The worktree could not be removed after the push: ${failure}`);
+        await this.#peers.handover.handoverNote(job, `The worktree could not be removed after the push: ${failure}`);
       }
     }
-    const mrText = (await this.core.jobs.readMrText(workspaceName, ticket)) ?? '';
+    const mrText = (await this.#store.jobs.readMrText(workspaceName, ticket)) ?? '';
     const { title } = mrMessage(mrText);
     const url = await originUrl(checkout);
     const link = url === undefined ? undefined : mergeRequestLink(url, job.base, job.branch);
@@ -794,11 +852,11 @@ export class MrPart {
     const mr = opened === undefined ? job.mr : { host: opened.host, number: opened.number, url: opened.url, state: opened.state };
     const lines = [title, ...(opened !== undefined ? [`Merge request #${opened.number}: ${opened.url}`] : link !== undefined ? [link] : [])];
     // from: ready_for_human_review, handed_over, needs_human (#approvable)
-    const pushed = await this.core.transition({ ...after, prepared_commit: plan.commit, mr }, 'pushed', 'push', undefined, lines);
+    const pushed = await this.#store.transition({ ...after, prepared_commit: plan.commit, mr }, 'pushed', 'push', undefined, lines);
     if (opened !== undefined) {
       await this.#mrEvent(pushed, opened.reused ? 'reused' : 'created');
     }
-    this.core.live.delete(`${workspaceName}/${ticket}`);
+    this.#sessions.live.delete(`${workspaceName}/${ticket}`);
     console.log(`${job.workspace}/${job.ticket}: pushed ${job.branch}\n  ${title}${link !== undefined ? `\n  ${link}` : ''}`);
     return {
       state: pushed.state, branch: pushed.branch, ...(title !== '' ? { title } : {}), ...(link !== undefined ? { link } : {}),
@@ -810,7 +868,7 @@ export class MrPart {
   // saved commit when the user did not commit (T is B), the user's commits when they descend from
   // B, else branch_changed.
   async #handedOverPush(job: Job, checkout: string, tip: string): Promise<{ commit: string; source: string | undefined; message: string | undefined }> {
-    const handover = this.core.parts.handover.checkHandedOverJob(job, 'approve');
+    const handover = this.#peers.handover.checkHandedOverJob(job, 'approve');
     if (tip === handover.base) {
       return { commit: handover.saved, source: savedRef(job.ticket), message: undefined };
     }
@@ -822,7 +880,7 @@ export class MrPart {
 
   // The MR text as the merge request's title and body: the same message as the job's commit (mrMessage).
   async mrContent(job: Job): Promise<MrContent> {
-    const text = await this.core.jobs.readMrText(job.workspace, job.ticket);
+    const text = await this.#store.jobs.readMrText(job.workspace, job.ticket);
     if (text === undefined || text.trim() === '') {
       throw new FactoryError('mr_text_missing', `The job ${job.workspace}/${job.ticket} has no MR text to open a merge request with.`);
     }
@@ -832,8 +890,8 @@ export class MrPart {
   // The Forge of the job's workspace (its checkout's origin); refused when the job's merge request
   // is on another host than the origin now is.
   async #forge(job: Job, workspace?: Workspace): Promise<Forge> {
-    const checkout = (workspace ?? (await this.core.resolve(job.workspace))).workCheckout;
-    const forge = forgeFor(await originUrl(checkout), this.core.config.forge);
+    const checkout = (workspace ?? (await this.#settings.resolve(job.workspace))).workCheckout;
+    const forge = forgeFor(await originUrl(checkout), this.#settings.config.forge);
     if (job.mr !== null && job.mr.host !== forge.kind) {
       throw new FactoryError('mr_host_changed', `The merge request #${job.mr.number} is on ${job.mr.host}, but the checkout's origin is now on ${forge.kind}.`);
     }
@@ -847,7 +905,7 @@ export class MrPart {
 
   async #mrEvent(job: Job, action: 'created' | 'reused' | 'merged' | 'updated'): Promise<void> {
     const mr = job.mr!;
-    await this.core.jobs.appendEvent(job.workspace, job.ticket, {
+    await this.#store.jobs.appendEvent(job.workspace, job.ticket, {
       ts: now(), iteration: job.iteration, type: 'merge_request', action, host: mr.host, number: mr.number, url: mr.url, mr_state: mr.state,
       ...(typeof mr.merge_commit === 'string' ? { merge_commit: mr.merge_commit } : {}),
     });
@@ -857,12 +915,12 @@ export class MrPart {
   // one already open for the branch; from ready_for_human_review it is approve (the push) and then
   // the merge request, in one action. The host and its token are checked before anything is pushed.
   createMergeRequest(workspaceName: string, ticket: string): Promise<MrOutcome> {
-    return this.core.locked(async () => {
+    return this.#locks.locked(async () => {
       // A job that approve would push: its runner has ended first.
-      if (this.#approvable(await this.core.job(workspaceName, ticket))) {
+      if (this.#approvable(await this.#store.job(workspaceName, ticket))) {
         await this.settled(workspaceName, ticket);
       }
-      const job = await this.core.job(workspaceName, ticket);
+      const job = await this.#store.job(workspaceName, ticket);
       const combined = this.#approvable(job);
       if (combined) {
         this.#checkApprovable(job, 'sf mr create');
@@ -873,7 +931,7 @@ export class MrPart {
       if (job.mr?.state === 'merged') {
         throw new FactoryError('invalid_state', `The merge request #${job.mr.number} of ${workspaceName}/${ticket} is already merged.`);
       }
-      const workspace = await this.core.resolve(workspaceName);
+      const workspace = await this.#settings.resolve(workspaceName);
       const forge = await this.#forge(job, workspace);
       const content = await this.mrContent(job);
       if (combined) {
@@ -882,9 +940,9 @@ export class MrPart {
       await this.#checkGuard(job, workspace, undefined);
       const opened = await this.#openMr(job, forge, content);
       const next: Job = { ...job, mr: { host: opened.host, number: opened.number, url: opened.url, state: opened.state } };
-      await this.core.jobs.write(next);
+      await this.#store.jobs.write(next);
       await this.#mrEvent(next, opened.reused ? 'reused' : 'created');
-      this.core.announce(next, [content.title, `Merge request #${opened.number}: ${opened.url}`]);
+      this.#notice.announce(next, [content.title, `Merge request #${opened.number}: ${opened.url}`]);
       return { state: next.state, branch: next.branch, title: content.title, mr: opened };
     });
   }
@@ -896,12 +954,12 @@ export class MrPart {
   // the rules the page checks with, and the message of the commit the push would carry. Undefined
   // without mr.md. No network call: the origin is checked only at Save.
   async mergeRequestView(workspaceName: string, ticket: string): Promise<MrView | undefined> {
-    const job = await this.core.job(workspaceName, ticket);
-    const text = await this.core.jobs.readMrText(workspaceName, ticket);
+    const job = await this.#store.job(workspaceName, ticket);
+    const text = await this.#store.jobs.readMrText(workspaceName, ticket);
     if (text === undefined) {
       return undefined;
     }
-    const factoryText = await this.core.jobs.readMrFactoryText(workspaceName, ticket);
+    const factoryText = await this.#store.jobs.readMrFactoryText(workspaceName, ticket);
     const message = mrMessage(text);
     const factory = factoryText === undefined ? message : mrMessage(factoryText);
     const edited = editedText(factoryText, text);
@@ -919,7 +977,7 @@ export class MrPart {
     }
     let checkout: string | undefined;
     try {
-      checkout = (await this.core.resolve(workspaceName)).workCheckout;
+      checkout = (await this.#settings.resolve(workspaceName)).workCheckout;
     } catch (error) {
       if (!(error instanceof FactoryError)) {
         throw error;
@@ -958,7 +1016,7 @@ export class MrPart {
     }
     let terms: GuardTerm[] | undefined;
     try {
-      terms = await this.#pushTerms(await this.core.resolve(job.workspace));
+      terms = await this.#pushTerms(await this.#settings.resolve(job.workspace));
     } catch (error) {
       if (!(error instanceof FactoryError)) {
         throw error;
@@ -977,7 +1035,7 @@ export class MrPart {
     const found = { saved_at: null as string | null, factory_new_at: null as string | null, pushed_at: null as string | null };
     let stream;
     try {
-      stream = createReadStream(this.core.jobs.eventsPath(job.workspace, job.ticket), { encoding: 'utf8' });
+      stream = createReadStream(this.#store.jobs.eventsPath(job.workspace, job.ticket), { encoding: 'utf8' });
       for await (const line of createInterface({ input: stream, crlfDelay: Infinity })) {
         if (!line.includes('"mr_edited"') && !line.includes('"pushed"')) {
           continue;
@@ -1035,12 +1093,12 @@ export class MrPart {
   // check comes first: a refusal changes nothing. The first save keeps the factory's text as
   // mr-factory.md.
   saveMr(workspaceName: string, ticket: string, input: MrInput): Promise<MrSaved> {
-    return this.core.locked(async () => {
-      this.#checkMrEditable(await this.core.job(workspaceName, ticket), 'Save');
+    return this.#locks.locked(async () => {
+      this.#checkMrEditable(await this.#store.job(workspaceName, ticket), 'Save');
       await this.settled(workspaceName, ticket);
-      const job = await this.core.job(workspaceName, ticket);
+      const job = await this.#store.job(workspaceName, ticket);
       this.#checkMrEditable(job, 'Save');
-      const current = await this.core.jobs.readMrText(workspaceName, ticket);
+      const current = await this.#store.jobs.readMrText(workspaceName, ticket);
       if (current === undefined) {
         throw new FactoryError('mr_text_missing', `The job ${workspaceName}/${ticket} has no MR text yet.`);
       }
@@ -1051,14 +1109,14 @@ export class MrPart {
       const text = messageText(message);
       if (mrTextProblem(ticket, text) !== undefined) {
         // Masked before the problem cuts its quote (SF-122): validity is the original text's.
-        const terms = await this.#pushTerms(await this.core.resolve(workspaceName));
+        const terms = await this.#pushTerms(await this.#settings.resolve(workspaceName));
         throw new FactoryError('mr_text_invalid', maskTerms(`The MR text is invalid: ${maskedMrTextProblem(ticket, text, terms)!}.`, terms));
       }
       const saved = await this.#applyMr(job, message, input.branch ?? job.branch, input.base ?? job.base);
-      if ((await this.core.jobs.readMrFactoryText(workspaceName, ticket)) === undefined) {
-        await this.core.jobs.writeMrFactoryText(workspaceName, ticket, current);
+      if ((await this.#store.jobs.readMrFactoryText(workspaceName, ticket)) === undefined) {
+        await this.#store.jobs.writeMrFactoryText(workspaceName, ticket, current);
       }
-      await this.core.jobs.writeMrText(workspaceName, ticket, text);
+      await this.#store.jobs.writeMrText(workspaceName, ticket, text);
       return this.#mrApplied(saved, 'saved', job);
     });
   }
@@ -1066,30 +1124,30 @@ export class MrPart {
   // Reset to factory text (SF-080): mr-factory.md back as mr.md (it stays), and the commit message
   // rewritten as a save does; branch and base stay. Refused when the text already is the factory's.
   resetMr(workspaceName: string, ticket: string): Promise<MrSaved> {
-    return this.core.locked(async () => {
-      this.#checkMrEditable(await this.core.job(workspaceName, ticket), 'Reset');
+    return this.#locks.locked(async () => {
+      this.#checkMrEditable(await this.#store.job(workspaceName, ticket), 'Reset');
       await this.settled(workspaceName, ticket);
-      const job = await this.core.job(workspaceName, ticket);
+      const job = await this.#store.job(workspaceName, ticket);
       this.#checkMrEditable(job, 'Reset');
-      const factory = await this.core.jobs.readMrFactoryText(workspaceName, ticket);
-      const current = await this.core.jobs.readMrText(workspaceName, ticket);
+      const factory = await this.#store.jobs.readMrFactoryText(workspaceName, ticket);
+      const current = await this.#store.jobs.readMrText(workspaceName, ticket);
       if (factory === undefined || !editedText(factory, current)) {
         throw new FactoryError('invalid_state', "The MR text is already the factory's.");
       }
       const saved = await this.#applyMr(job, mrMessage(factory), job.branch, job.base);
-      await this.core.jobs.writeMrText(workspaceName, ticket, factory);
+      await this.#store.jobs.writeMrText(workspaceName, ticket, factory);
       return this.#mrApplied(saved, 'reset', job);
     });
   }
 
   // The job record and the mr_edited event after a save or a reset.
   async #mrApplied(job: Job, action: 'saved' | 'reset', before: Job): Promise<MrSaved> {
-    await this.core.jobs.write(job);
-    await this.core.jobs.appendEvent(job.workspace, job.ticket, {
+    await this.#store.jobs.write(job);
+    await this.#store.jobs.appendEvent(job.workspace, job.ticket, {
       ts: now(), iteration: job.iteration, type: 'mr_edited', action,
       ...(job.branch !== before.branch ? { branch: job.branch } : {}), ...(job.base !== before.base ? { base: job.base } : {}),
     });
-    const edited = editedText(await this.core.jobs.readMrFactoryText(job.workspace, job.ticket), await this.core.jobs.readMrText(job.workspace, job.ticket));
+    const edited = editedText(await this.#store.jobs.readMrFactoryText(job.workspace, job.ticket), await this.#store.jobs.readMrText(job.workspace, job.ticket));
     return { state: job.state, branch: job.branch, base: job.base, edited, prepared_commit: job.prepared_commit };
   }
 
@@ -1099,8 +1157,8 @@ export class MrPart {
   // fails puts the prepared commit back (branch_locked): a refusal changes nothing. Returns the job
   // as it is to be written (not written here).
   async #applyMr(job: Job, message: MrContent, branch: string, base: string): Promise<Job> {
-    const checkout = (await this.core.resolve(job.workspace)).workCheckout;
-    return this.core.gitLocked(job.workspace, async () => {
+    const checkout = (await this.#settings.resolve(job.workspace)).workCheckout;
+    return this.#locks.gitLocked(job.workspace, async () => {
       const renaming = branch !== job.branch;
       if (renaming) {
         await this.#checkRename(job, checkout, branch, base);
@@ -1214,7 +1272,7 @@ export class MrPart {
   // The problem quotes the title, which the guard has not checked yet: every match of the push
   // check's terms in it is masked (SF-122).
   async #checkMrText(job: Job, workspace: Workspace, checkout: string, commit: string | null): Promise<void> {
-    const text = await this.core.jobs.readMrText(job.workspace, job.ticket);
+    const text = await this.#store.jobs.readMrText(job.workspace, job.ticket);
     if (text === undefined) {
       return;
     }
@@ -1234,8 +1292,8 @@ export class MrPart {
   // force). The host's refusal (conflicts, failing required checks, a draft) comes back as
   // mr_not_mergeable with its reason, and nothing changes.
   mergeMergeRequest(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; mr: JobMr }> {
-    return this.core.locked(async () => {
-      const job = await this.core.job(workspaceName, ticket);
+    return this.#locks.locked(async () => {
+      const job = await this.#store.job(workspaceName, ticket);
       if (job.state !== 'pushed' || job.mr === null) {
         throw new FactoryError('invalid_state', `sf mr merge needs a pushed job with a merge request (sf mr create opens one); the job is ${job.state}${job.state === 'pushed' ? ' without one' : ''}.`);
       }
@@ -1245,9 +1303,9 @@ export class MrPart {
       const forge = await this.#forge(job);
       const merged = await forge.merge(job.mr.number);
       const next: Job = { ...job, mr: { ...job.mr, state: 'merged', merge_commit: merged.merge_commit } };
-      await this.core.jobs.write(next);
+      await this.#store.jobs.write(next);
       await this.#mrEvent(next, 'merged');
-      this.core.announce(next, [`Merge request #${job.mr.number} merged into ${job.base}`, job.mr.url]);
+      this.#notice.announce(next, [`Merge request #${job.mr.number} merged into ${job.base}`, job.mr.url]);
       return { state: next.state, branch: next.branch, mr: next.mr! };
     });
   }
@@ -1255,19 +1313,19 @@ export class MrPart {
   // sf mr status (SF-048): what the host says of the job's merge request now. A merge request the
   // host has merged or closed meanwhile (by hand) is recorded so; nobody is notified.
   async mergeRequestStatus(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; mr: JobMr; status: MergeRequestStatus }> {
-    const job = await this.core.job(workspaceName, ticket);
+    const job = await this.#store.job(workspaceName, ticket);
     if (job.mr === null) {
       throw new FactoryError('invalid_state', `No merge request is recorded for ${workspaceName}/${ticket}; sf mr create opens one.`);
     }
     const number = job.mr.number;
     const status = await (await this.#forge(job)).status(number);
-    return this.core.locked(async () => {
-      const current = await this.core.job(workspaceName, ticket);
+    return this.#locks.locked(async () => {
+      const current = await this.#store.job(workspaceName, ticket);
       if (current.mr === null || current.mr.number !== number || current.mr.state === status.state) {
         return { state: current.state, branch: current.branch, mr: current.mr ?? job.mr!, status };
       }
       const next: Job = { ...current, mr: { ...current.mr, state: status.state, ...(status.merge_commit !== undefined ? { merge_commit: status.merge_commit } : {}) } };
-      await this.core.jobs.write(next);
+      await this.#store.jobs.write(next);
       await this.#mrEvent(next, 'updated');
       return { state: next.state, branch: next.branch, mr: next.mr!, status };
     });
@@ -1278,14 +1336,14 @@ export class MrPart {
   async mergeRequestHost(workspaceName: string): Promise<{ host: ForgeKind | null; reason: string | null }> {
     let origin: string | undefined;
     try {
-      origin = await originUrl((await this.core.resolve(workspaceName)).workCheckout);
+      origin = await originUrl((await this.#settings.resolve(workspaceName)).workCheckout);
     } catch (error) {
       if (error instanceof FactoryError) {
         return { host: null, reason: error.message };
       }
       throw error;
     }
-    const choice = chooseForge(origin, this.core.config.forge);
+    const choice = chooseForge(origin, this.#settings.config.forge);
     return choice.ok ? { host: choice.kind, reason: null } : { host: choice.kind, reason: choice.reason };
   }
 }

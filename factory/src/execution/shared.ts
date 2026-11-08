@@ -1,12 +1,13 @@
 // What more than one part of the job lifecycle uses (SF-089, from src/execution.ts): the report's
 // size bound, the branch name and file helpers, the gate's skip, and the runtime types of a job's
-// session, of a running review and of Execution's options. The data shapes are in ./dto.ts, the
+// session, of a running review, of Execution's options and of a Fix section's options (SF-143:
+// what the parts that write a Fix section pass). The data shapes are in ./dto.ts, the
 // codes and refusals in ./errors.ts, the Implementer's text in ./prompts.ts and the tests event in
 // ./events.ts (SF-142).
 import { stat } from 'node:fs/promises';
 import type { GATE_REVIEWER } from '../gate.js';
 import type { Job, JobStore } from '../jobs.js';
-import type { SIMPLIFIER } from '../ledger.js';
+import type { LedgerEntry, SIMPLIFIER } from '../ledger.js';
 import type { Workspace } from '../registry.js';
 import type { REVIEWER } from '../review.js';
 import type { Launch } from '../runner.js';
@@ -80,4 +81,17 @@ export interface ExecutionOptions {
   // The run queue's limit max_running (SF-071), read at each start of the queue's own (SF-142:
   // sf serve reads it from queue.json); without it, config.maxJobs.
   maxRunning?: () => Promise<number>;
+}
+
+// The options of a Fix section (fix).
+export interface FixOptions {
+  // What else the Fix counts for (the gate's gate_fixes).
+  counts?: Partial<Pick<Job, 'gate_fixes'>>;
+  ledger?: LedgerEntry[];
+  fromStop?: boolean;
+  title?: string;
+  overLimit?: boolean;
+  // The Tests Fix (SF-128), from preparing_mr: no checkFix, the transition's action is tests, written
+  // even at SF_MAX_ITERATIONS, and fixes is not counted (TEST_FIX_ROUNDS bounds it).
+  fromTests?: boolean;
 }

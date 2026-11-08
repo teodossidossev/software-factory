@@ -1,9 +1,11 @@
 // The job lifecycle (SF-089: a thin coordinator over its parts in src/execution/). Execution keeps
 // the public operations that sf serve, the runner (sf run), the CLI and the tests call, each a call
-// into the part that owns it, and wires the parts to one Core:
+// into the part that owns it. It builds one Core and wires the parts (SF-143): each part takes only
+// the ports of Core it uses, and the other parts it calls (the constructor below):
 // - execution/core.ts: the shared state and seams (the job store, the config, the live sessions,
 //   the running reviews, locked, gitLocked, transition: every state change after the first, the
 //   seam for notifications and for JOB_TRANSITIONS in src/jobs.ts, SF-088).
+// - execution/ports.ts: the narrow ports Core implements, and which part uses which.
 // - execution/start.ts: start, the worktree and the Task file's copy, restart (SF-067), recover
 //   (the rule for a restart of sf serve, SF-042).
 // - execution/turns.ts: the Implementer session, the end of a turn and the published iteration,
@@ -49,6 +51,7 @@ import { Core } from './execution/core.js';
 import type { CheckResult, ExclusiveScope, MrInput, MrOutcome, MrSaved, MrView, Resumed, Retired, StateListener } from './execution/dto.js';
 import { type HandoverRunning, HandoverPart } from './execution/handover-steps.js';
 import { MrPart } from './execution/mr-steps.js';
+import type { JobStorePort, LivePort, LockPort, NoticePort, RunnerPort, SettingsPort, StopPort } from './execution/ports.js';
 import { ReviewsPart } from './execution/reviews.js';
 import type { ExecutionOptions } from './execution/shared.js';
 import { StartPart } from './execution/start.js';
@@ -62,24 +65,88 @@ export type { CheckResult, ExclusiveScope, MrInput, MrOutcome, MrSaved, MrView, 
 export type { HandoverRunning } from './execution/handover-steps.js';
 export type { ExecutionOptions } from './execution/shared.js';
 
+// The parts some part built before them reaches late (the constructor's mutual pairs).
+interface LateParts {
+  turns: TurnsPart;
+  mr: MrPart;
+  control: ControlPart;
+}
+
 export class Execution implements RunnerWork {
   // The same store as the parts' (core.jobs).
   readonly jobs: JobStore;
   readonly #core: Core;
+  readonly #parts: { start: StartPart; turns: TurnsPart; reviews: ReviewsPart; mr: MrPart; handover: HandoverPart; control: ControlPart; status: StatusPart };
 
   // handbook: the loaded Handbook text; MR preparation sends its Git rules and MR template, the
   // review its review rules.
   constructor(config: Config, resolve: (name: string) => Promise<Workspace>, onStateChange: StateListener = () => {}, handbook = '', options: ExecutionOptions = {}) {
     const core = new Core(config, resolve, onStateChange, handbook, options);
-    core.parts = {
-      start: new StartPart(core),
-      turns: new TurnsPart(core),
-      reviews: new ReviewsPart(core),
-      mr: new MrPart(core),
-      handover: new HandoverPart(core),
-      control: new ControlPart(core),
-      status: new StatusPart(core),
+    // Core implements every port; each part takes only the ones it uses.
+    const store: JobStorePort = core;
+    const locks: LockPort = core;
+    const sessions: LivePort = core;
+    const runner: RunnerPort = core;
+    const notice: NoticePort = core;
+    const settings: SettingsPort = core;
+    const stop: StopPort = core;
+    // The parts are built in this order, each given the parts built before it as they are. Where
+    // two parts call each other, the one built first reaches the other late, through wired, which
+    // is filled only once every part is built and Core is bound; a call through it before then
+    // throws. The mutual pairs, one per line, with the side that is bound late:
+    // - start↔turns: start reaches turns late.
+    // - start↔control: start reaches control late.
+    // - turns↔reviews: reviews reaches turns late.
+    // - turns↔mr: mr reaches turns late.
+    // - turns↔control: turns reaches control late.
+    // - reviews↔mr: reviews reaches mr late.
+    // - reviews↔control: reviews reaches control late.
+    // - mr↔handover: handover reaches mr late.
+    // - mr↔control: mr reaches control late.
+    // - Core↔handover: Core.afterSession reaches handover.clearAfter through bindClearAfter.
+    let wired: LateParts | undefined;
+    const late = <K extends keyof LateParts>(name: K): LateParts[K] => {
+      if (wired === undefined) {
+        throw new Error(`The ${name} part was called before src/execution.ts wired the parts.`);
+      }
+      return wired[name];
     };
+    const status = new StatusPart(store, sessions, settings);
+    const handover = new HandoverPart(store, locks, settings, {
+      get mr() { return late('mr'); },
+      status,
+    });
+    const reviews = new ReviewsPart(store, locks, sessions, runner, settings, stop, {
+      get control() { return late('control'); },
+      get mr() { return late('mr'); },
+      status,
+      get turns() { return late('turns'); },
+    });
+    const start = new StartPart(store, locks, runner, settings, {
+      get control() { return late('control'); },
+      handover,
+      reviews,
+      get turns() { return late('turns'); },
+    });
+    const mr = new MrPart(store, locks, sessions, runner, notice, settings, stop, {
+      get control() { return late('control'); },
+      handover,
+      reviews,
+      start,
+      status,
+      get turns() { return late('turns'); },
+    });
+    const turns = new TurnsPart(store, locks, sessions, runner, settings, stop, {
+      get control() { return late('control'); },
+      handover,
+      mr,
+      reviews,
+      start,
+    });
+    const control = new ControlPart(store, locks, sessions, runner, settings, stop, { handover, mr, reviews, start, turns });
+    core.bindClearAfter((workspace, except, log) => handover.clearAfter(workspace, except, log));
+    wired = { turns, mr, control };
+    this.#parts = { start, turns, reviews, mr, handover, control, status };
     this.#core = core;
     this.jobs = core.jobs;
   }
@@ -91,174 +158,174 @@ export class Execution implements RunnerWork {
 
   // execution/start.ts
   recover(options: { startRunners?: boolean } = {}): Promise<void> {
-    return this.#core.parts.start.recover(options);
+    return this.#parts.start.recover(options);
   }
 
   // The catch-up after an update (SF-101): runners for the resumable jobs recover() left alone.
   ensureResumable(): Promise<void> {
-    return this.#core.parts.start.ensureResumable();
+    return this.#parts.start.ensureResumable();
   }
 
   start(workspaceName: string, ticket: string, { queued = false }: { queued?: boolean } = {}): Promise<{ branch: string; state: JobState; check_after_minutes: number; worktree: string }> {
-    return this.#core.parts.start.start(workspaceName, ticket, { queued });
+    return this.#parts.start.start(workspaceName, ticket, { queued });
   }
 
   fetchBase(workspaceName: string, base: string): Promise<void> {
-    return this.#core.parts.start.fetchBase(workspaceName, base);
+    return this.#parts.start.fetchBase(workspaceName, base);
   }
 
   restart(workspaceName: string, ticket: string, keepFiles = false): Promise<{ branch: string; state: JobState; check_after_minutes: number; worktree: string; archived: string; branch_deleted: string | null; kept: string[] }> {
-    return this.#core.parts.start.restart(workspaceName, ticket, keepFiles);
+    return this.#parts.start.restart(workspaceName, ticket, keepFiles);
   }
 
   // execution/turns.ts
   requestFix(workspaceName: string, ticket: string, content: string): Promise<{ iteration: number; check_after_minutes: number }> {
-    return this.#core.parts.turns.requestFix(workspaceName, ticket, content);
+    return this.#parts.turns.requestFix(workspaceName, ticket, content);
   }
 
   say(workspaceName: string, ticket: string, message: string): Promise<{ state: JobState; queued: boolean }> {
-    return this.#core.parts.turns.say(workspaceName, ticket, message);
+    return this.#parts.turns.say(workspaceName, ticket, message);
   }
 
   // execution/reviews.ts
   retryReview(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number }> {
-    return this.#core.parts.reviews.retryReview(workspaceName, ticket);
+    return this.#parts.reviews.retryReview(workspaceName, ticket);
   }
 
   acceptGate(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; branch: string }> {
-    return this.#core.parts.reviews.acceptGate(workspaceName, ticket);
+    return this.#parts.reviews.acceptGate(workspaceName, ticket);
   }
 
   settle(workspaceName: string, ticket: string, id: string, decision: Decision, note = ''): Promise<{ state: JobState; id: string; status: string; waiting: string[] }> {
-    return this.#core.parts.reviews.settle(workspaceName, ticket, id, decision, note);
+    return this.#parts.reviews.settle(workspaceName, ticket, id, decision, note);
   }
 
   simplify(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; check_after_minutes: number }> {
-    return this.#core.parts.reviews.simplify(workspaceName, ticket);
+    return this.#parts.reviews.simplify(workspaceName, ticket);
   }
 
   // execution/mr-steps.ts
   markClean(workspaceName: string, ticket: string, sensitive: string[] = []): Promise<{ state: JobState; iteration: number; branch: string }> {
-    return this.#core.parts.mr.markClean(workspaceName, ticket, sensitive);
+    return this.#parts.mr.markClean(workspaceName, ticket, sensitive);
   }
 
   retryMr(workspaceName: string, ticket: string): Promise<MrOutcome | { state: JobState; iteration: number; branch: string }> {
-    return this.#core.parts.mr.retryMr(workspaceName, ticket);
+    return this.#parts.mr.retryMr(workspaceName, ticket);
   }
 
   approve(workspaceName: string, ticket: string, asIs = false): Promise<MrOutcome> {
-    return this.#core.parts.mr.approve(workspaceName, ticket, asIs);
+    return this.#parts.mr.approve(workspaceName, ticket, asIs);
   }
 
   createMergeRequest(workspaceName: string, ticket: string): Promise<MrOutcome> {
-    return this.#core.parts.mr.createMergeRequest(workspaceName, ticket);
+    return this.#parts.mr.createMergeRequest(workspaceName, ticket);
   }
 
   mergeRequestView(workspaceName: string, ticket: string): Promise<MrView | undefined> {
-    return this.#core.parts.mr.mergeRequestView(workspaceName, ticket);
+    return this.#parts.mr.mergeRequestView(workspaceName, ticket);
   }
 
   saveMr(workspaceName: string, ticket: string, input: MrInput): Promise<MrSaved> {
-    return this.#core.parts.mr.saveMr(workspaceName, ticket, input);
+    return this.#parts.mr.saveMr(workspaceName, ticket, input);
   }
 
   resetMr(workspaceName: string, ticket: string): Promise<MrSaved> {
-    return this.#core.parts.mr.resetMr(workspaceName, ticket);
+    return this.#parts.mr.resetMr(workspaceName, ticket);
   }
 
   mergeMergeRequest(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; mr: JobMr }> {
-    return this.#core.parts.mr.mergeMergeRequest(workspaceName, ticket);
+    return this.#parts.mr.mergeMergeRequest(workspaceName, ticket);
   }
 
   mergeRequestStatus(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; mr: JobMr; status: MergeRequestStatus }> {
-    return this.#core.parts.mr.mergeRequestStatus(workspaceName, ticket);
+    return this.#parts.mr.mergeRequestStatus(workspaceName, ticket);
   }
 
   mergeRequestHost(workspaceName: string): Promise<{ host: ForgeKind | null; reason: string | null }> {
-    return this.#core.parts.mr.mergeRequestHost(workspaceName);
+    return this.#parts.mr.mergeRequestHost(workspaceName);
   }
 
   // execution/handover-steps.ts
   afterTaskCheck(workspaceName: string, ticket: string): Promise<void> {
-    return this.#core.parts.handover.afterTaskCheck(workspaceName, ticket);
+    return this.#parts.handover.afterTaskCheck(workspaceName, ticket);
   }
 
   afterJobChange(job: Job, from: JobState | null): Promise<void> {
-    return this.#core.parts.handover.afterJobChange(job, from);
+    return this.#parts.handover.afterJobChange(job, from);
   }
 
   handOverLocked(workspace?: string): Promise<void> {
-    return this.#core.parts.handover.handOverLocked(workspace);
+    return this.#parts.handover.handOverLocked(workspace);
   }
 
   // The hand-over operations running in this process now (SF-101: sf serve's serve-busy).
   handoversRunning(): HandoverRunning[] {
-    return this.#core.parts.handover.running();
+    return this.#parts.handover.running();
   }
 
   handover(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string }> {
-    return this.#core.parts.handover.handover(workspaceName, ticket);
+    return this.#parts.handover.handover(workspaceName, ticket);
   }
 
   takeback(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; worktree: string }> {
-    return this.#core.parts.handover.takeback(workspaceName, ticket);
+    return this.#parts.handover.takeback(workspaceName, ticket);
   }
 
   handedDone(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; commit?: string; same_tree?: boolean | null }> {
-    return this.#core.parts.handover.handedDone(workspaceName, ticket);
+    return this.#parts.handover.handedDone(workspaceName, ticket);
   }
 
   checkHandedOver(workspaceName: string, ticket: string, minIntervalMs = 0): Promise<{ state: JobState; branch: string; commit?: string; same_tree?: boolean | null }> {
-    return this.#core.parts.handover.checkHandedOver(workspaceName, ticket, minIntervalMs);
+    return this.#parts.handover.checkHandedOver(workspaceName, ticket, minIntervalMs);
   }
 
   // execution/control.ts
   exclusive<T>(work: (scope: ExclusiveScope) => Promise<T>): Promise<T> {
-    return this.#core.parts.control.exclusive(work);
+    return this.#parts.control.exclusive(work);
   }
 
   abort(workspaceName: string, ticket: string, discard: boolean): Promise<{ state: JobState; branch: string; discarded: boolean; worktree: string | null; error?: { code: string; message: string } }> {
-    return this.#core.parts.control.abort(workspaceName, ticket, discard);
+    return this.#parts.control.abort(workspaceName, ticket, discard);
   }
 
   pause(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; step: PauseStep | null }> {
-    return this.#core.parts.control.pause(workspaceName, ticket);
+    return this.#parts.control.pause(workspaceName, ticket);
   }
 
   limitReset(workspaceName: string, ticket: string, parkedAt: string, resume: boolean): Promise<'resumed' | 'waiting' | 'failed' | 'skipped'> {
-    return this.#core.parts.control.limitReset(workspaceName, ticket, parkedAt, resume);
+    return this.#parts.control.limitReset(workspaceName, ticket, parkedAt, resume);
   }
 
   resumePaused(workspaceName: string, ticket: string, message = ''): Promise<Resumed> {
-    return this.#core.parts.control.resumePaused(workspaceName, ticket, message);
+    return this.#parts.control.resumePaused(workspaceName, ticket, message);
   }
 
   reset(workspaceName: string, ticket: string): Promise<Retired> {
-    return this.#core.parts.control.reset(workspaceName, ticket);
+    return this.#parts.control.reset(workspaceName, ticket);
   }
 
   archiveFinished(workspaceName: string, ticket: string): Promise<Retired> {
-    return this.#core.parts.control.archiveFinished(workspaceName, ticket);
+    return this.#parts.control.archiveFinished(workspaceName, ticket);
   }
 
   apply(request: RunnerRequest): Promise<unknown> {
-    return this.#core.parts.control.apply(request);
+    return this.#parts.control.apply(request);
   }
 
   resume(): Promise<void> {
-    return this.#core.parts.control.resume();
+    return this.#parts.control.resume();
   }
 
   stop(): Promise<void> {
-    return this.#core.parts.control.stop();
+    return this.#parts.control.stop();
   }
 
   // execution/status.ts
   check(workspace: string, ticket: string, offset = 0, maxBytes = DEFAULT_PAGE_BYTES): Promise<CheckResult> {
-    return this.#core.parts.status.check(workspace, ticket, offset, maxBytes);
+    return this.#parts.status.check(workspace, ticket, offset, maxBytes);
   }
 
   status(workspace?: string, ticket?: string): Promise<Job[]> {
-    return this.#core.parts.status.status(workspace, ticket);
+    return this.#parts.status.status(workspace, ticket);
   }
 }

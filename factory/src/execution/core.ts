@@ -2,7 +2,8 @@
 // live Implementer sessions and the running reviews of this process, the operation lock (locked),
 // the per-workspace Git lock (gitLocked), transition (every state change after the first, the seam
 // for notifications and for JOB_TRANSITIONS in src/jobs.ts, SF-088), and the runner seams. No job
-// logic: the parts (parts) hold it, and reach each other only as this.core.parts.<part>.
+// logic: the parts hold it. Core implements the narrow ports of ./ports.ts (SF-143); each part takes
+// only the ports it uses, and src/execution.ts wires the parts to each other.
 import { join } from 'node:path';
 import { withoutImageData } from '../attachments.js';
 import type { Config } from '../config.js';
@@ -14,27 +15,14 @@ import { REVIEWER } from '../review.js';
 import { withLock } from '../pid-lock.js';
 import { Runners } from '../runner.js';
 import { TICKET_DESCRIPTION, TICKET_PATTERN } from '../task-file.js';
-import type { ControlPart } from './control.js';
 import type { StateListener } from './dto.js';
-import type { HandoverPart } from './handover-steps.js';
-import type { MrPart } from './mr-steps.js';
-import type { ReviewsPart } from './reviews.js';
+import type { JobStorePort, LivePort, LockPort, NoticePort, RunnerPort, SettingsPort, StopPort } from './ports.js';
 import type { ExecutionOptions, Live, RunningReview } from './shared.js';
-import type { StartPart } from './start.js';
-import type { StatusPart } from './status.js';
-import type { TurnsPart } from './turns.js';
 
-export interface Parts {
-  start: StartPart;
-  turns: TurnsPart;
-  reviews: ReviewsPart;
-  mr: MrPart;
-  handover: HandoverPart;
-  control: ControlPart;
-  status: StatusPart;
-}
+// The hand-over part's check of the sandbox's leftover config lock after a session (clearAfter).
+export type ClearAfter = (workspace: string, except: string | undefined, log: { job: Job; iteration: number }) => Promise<void>;
 
-export class Core {
+export class Core implements JobStorePort, LockPort, LivePort, RunnerPort, NoticePort, SettingsPort, StopPort {
   readonly jobs: JobStore;
   readonly config: Config;
   readonly resolve: (name: string) => Promise<Workspace>;
@@ -57,9 +45,10 @@ export class Core {
   // The run queue's limit max_running (ExecutionOptions.maxRunning); undefined: config.maxJobs.
   readonly maxRunning: (() => Promise<number>) | undefined;
   // Runner mode: stop() was called; nothing new starts.
-  stopping = false;
-  // The parts of the job lifecycle, filled by Execution's constructor once it has built each.
-  parts!: Parts;
+  #stopping = false;
+  // The hand-over part's clearAfter, set by src/execution.ts once it has built the part (the
+  // Core↔handover pair); afterSession throws before.
+  #clearAfter: ClearAfter | undefined;
 
   constructor(config: Config, resolve: (name: string) => Promise<Workspace>, onStateChange: StateListener, handbook: string, options: ExecutionOptions) {
     this.config = config;
@@ -71,6 +60,19 @@ export class Core {
     this.runners = options.runner === undefined ? new Runners(this.jobs, options.launch) : undefined;
     this.lockProc = options.lockProc;
     this.maxRunning = options.maxRunning;
+  }
+
+  isStopping(): boolean {
+    return this.#stopping;
+  }
+
+  setStopping(): void {
+    this.#stopping = true;
+  }
+
+  // src/execution.ts, once the hand-over part is built.
+  bindClearAfter(clearAfter: ClearAfter): void {
+    this.#clearAfter = clearAfter;
   }
 
   // The operations under locked not settled yet (Execution's idle).
@@ -175,7 +177,10 @@ export class Core {
   // simplification pass; iteration: the one it worked on): the sandbox's leftover config lock goes,
   // unless another job of the workspace runs. A failure is only logged; the job goes on.
   afterSession(job: Job, iteration = job.iteration): Promise<void> {
-    return this.parts.handover.clearAfter(job.workspace, job.ticket, { job, iteration });
+    if (this.#clearAfter === undefined) {
+      throw new Error('Core.afterSession before src/execution.ts bound the hand-over part.');
+    }
+    return this.#clearAfter(job.workspace, job.ticket, { job, iteration });
   }
 
   // A change of the job's merge request outside a state change: the listeners (the notification,

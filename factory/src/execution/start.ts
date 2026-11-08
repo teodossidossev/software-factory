@@ -3,11 +3,11 @@
 // restart (SF-067) and the rule for a restart of sf serve (recover, SF-042).
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readlink, rm, symlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { jobAttachment, type ResolvedImage, resolveTaskImages, writeImages } from '../attachments.js';
+import { type ImageRef, jobAttachment, type ResolvedImage, resolveTaskImages, writeImages } from '../attachments.js';
 import { FactoryError } from '../errors.js';
 import { runGit } from '../git.js';
 import { claudeReviewDecision } from '../config.js';
-import { checkTransition, claudeReviews, type Job, type JobState, now, RESTARTABLE_STATES, runningJobs, TERMINAL_STATES } from '../jobs.js';
+import { checkTransition, claudeReviews, type Handover, type Job, type JobState, now, RESTARTABLE_STATES, runningJobs, TERMINAL_STATES } from '../jobs.js';
 import { resolveTarget } from '../mr.js';
 import { changedPaths } from '../patch.js';
 import { removeSandboxPlaceholders } from '../placeholders.js';
@@ -19,7 +19,7 @@ import { Runners } from '../runner.js';
 import { withoutDropped } from '../stops.js';
 import { isDraft, parseFrontMatter, readTask, TASK_DIR, type TaskReview, taskReview, taskSha256, TICKET_DESCRIPTION, TICKET_PATTERN } from '../task-file.js';
 import { addWorktree, deleteBranch, removeWorktree } from '../worktree.js';
-import type { Core } from './core.js';
+import type { JobStorePort, LockPort, RunnerPort, SettingsPort } from './ports.js';
 import { checkNotInCheckout } from './errors.js';
 import { firstPrompt } from './prompts.js';
 import { branchName, exists } from './shared.js';
@@ -95,11 +95,46 @@ async function copyKept(kept: Kept, worktree: string): Promise<void> {
   }
 }
 
-export class StartPart {
-  readonly core: Core;
+// What StartPart calls of the other parts, by just those methods.
+export interface StartControl {
+  endSession(workspace: string, ticket: string): Promise<void>;
+}
 
-  constructor(core: Core) {
-    this.core = core;
+export interface StartHandover {
+  worktreePath(workspace: string, ticket: string): string;
+  repairHandover(job: Job, handover: Handover): Promise<void>;
+  cleanSavedRefs(): Promise<void>;
+}
+
+export interface StartReviews {
+  imageRefs(job: Job, task: string): ImageRef[];
+}
+
+export interface StartTurns {
+  imagesLine(job: Job): { dir: string; names: string[] } | undefined;
+}
+
+export interface StartPeers {
+  readonly control: StartControl;
+  readonly handover: StartHandover;
+  readonly reviews: StartReviews;
+  readonly turns: StartTurns;
+}
+
+export class StartPart {
+  readonly #store: JobStorePort;
+  readonly #locks: LockPort;
+  readonly #runner: RunnerPort;
+  readonly #settings: SettingsPort;
+  // The parts it calls (src/execution.ts wires them).
+  readonly #peers: StartPeers;
+
+  constructor(store: JobStorePort, locks: LockPort, runner: RunnerPort, settings: SettingsPort, peers: StartPeers) {
+    this.#store = store;
+    this.#locks = locks;
+    this.#runner = runner;
+    this.#settings = settings;
+    this.#peers = peers;
   }
 
   // At serve start (SF-042): a job in working, preparing_mr or awaiting_review whose runner is alive
@@ -111,23 +146,23 @@ export class StartPart {
   // gate off now, Clean). With startRunners false (SF-101: under an updating marker that stays) the
   // states are repaired as always but no runner starts: ensureResumable starts them in the catch-up.
   recover({ startRunners = true }: { startRunners?: boolean } = {}): Promise<void> {
-    return this.core.locked(async () => {
-      const runners = this.core.serveRunners();
-      for (const job of await this.core.jobs.list()) {
+    return this.#locks.locked(async () => {
+      const runners = this.#runner.serveRunners();
+      for (const job of await this.#store.jobs.list()) {
         // One job's error is logged and the others are recovered all the same (SF-088: an illegal
         // state change of one job cannot stop sf serve's start).
         await this.#recoverJob(runners, job, startRunners).catch((error: unknown) => console.error(error));
       }
-      await this.core.parts.handover.cleanSavedRefs().catch((error: unknown) => console.error(error));
+      await this.#peers.handover.cleanSavedRefs().catch((error: unknown) => console.error(error));
     });
   }
 
   // The catch-up after an update (SF-101): a runner for each job awaiting review that has something
   // to resume and none running, as recover() starts them.
   ensureResumable(): Promise<void> {
-    return this.core.locked(async () => {
-      const runners = this.core.serveRunners();
-      for (const job of await this.core.jobs.list()) {
+    return this.#locks.locked(async () => {
+      const runners = this.#runner.serveRunners();
+      for (const job of await this.#store.jobs.list()) {
         if (job.state === 'awaiting_review' && (job.handover === undefined || job.handover.step === null) && (await runners.owner(job.workspace, job.ticket)) === undefined) {
           await (async () => {
             if (await this.resumable(job)) {
@@ -145,7 +180,7 @@ export class StartPart {
     // while its runner still runs it.
     if (job.handover !== undefined && job.handover.step !== null) {
       if ((await runners.owner(job.workspace, job.ticket)) === undefined) {
-        await this.core.parts.handover.repairHandover(job, job.handover).catch((error: unknown) => console.error(error));
+        await this.#peers.handover.repairHandover(job, job.handover).catch((error: unknown) => console.error(error));
       }
       return;
     }
@@ -158,13 +193,13 @@ export class StartPart {
       }
     } else if (job.state === 'working') {
       // from: working (the branch above)
-      await this.core.transition(job, 'needs_human', 'recover', { code: 'serve_restarted', message: 'sf serve restarted and the runner of the job had ended while the iteration ran; use sf say to continue.' });
+      await this.#store.transition(job, 'needs_human', 'recover', { code: 'serve_restarted', message: 'sf serve restarted and the runner of the job had ended while the iteration ran; use sf say to continue.' });
     } else if (job.state === 'preparing_mr') {
       // from: preparing_mr (the branch above)
-      await this.core.transition(job, 'needs_human', 'recover', { code: 'mr_serve_restarted', message: 'sf serve restarted and the runner of the job had ended during MR preparation; go on with sf say (its iteration is reviewed again and a clean verdict prepares the branch again), or abort or reset the job.' });
+      await this.#store.transition(job, 'needs_human', 'recover', { code: 'mr_serve_restarted', message: 'sf serve restarted and the runner of the job had ended during MR preparation; go on with sf say (its iteration is reviewed again and a clean verdict prepares the branch again), or abort or reset the job.' });
     } else if (job.state === 'starting') {
       // from: starting (the branch above)
-      await this.core.transition(job, 'failed', 'recover', { code: 'serve_restarted', message: 'sf serve restarted while the job was starting.' });
+      await this.#store.transition(job, 'failed', 'recover', { code: 'serve_restarted', message: 'sf serve restarted while the job was starting.' });
     }
   }
 
@@ -177,21 +212,21 @@ export class StartPart {
       return false;
     }
     if (!claudeReviews(job)) {
-      const gate = await this.core.jobs.readGate(job.workspace, job.ticket, job.iteration);
+      const gate = await this.#store.jobs.readGate(job.workspace, job.ticket, job.iteration);
       if (gate === undefined) {
-        return this.core.config.review;
+        return this.#settings.config.review;
       }
       return 'verdict' in gate && actedVerdict(withoutDropped(gate)) === 'clean';
     }
-    const review = await this.core.jobs.readReview(job.workspace, job.ticket, job.iteration);
+    const review = await this.#store.jobs.readReview(job.workspace, job.ticket, job.iteration);
     if (review === undefined) {
-      return this.core.config.review;
+      return this.#settings.config.review;
     }
     // Items the ledger dropped (they reopened an accepted risk, SF-052) never count, as in acceptGate.
     if (!('verdict' in review) || actedVerdict(withoutDropped(review)) !== 'clean') {
       return false;
     }
-    const gate = await this.core.jobs.readGate(job.workspace, job.ticket, job.iteration);
+    const gate = await this.#store.jobs.readGate(job.workspace, job.ticket, job.iteration);
     if (gate === undefined) {
       return true;
     }
@@ -204,15 +239,15 @@ export class StartPart {
   // lock only, so a long fetch holds no other job. queued: the run queue's own start (SF-071),
   // refused with job_limit unless fewer than max_running jobs run; a start by hand has no limit.
   async start(workspaceName: string, ticket: string, { queued = false }: { queued?: boolean } = {}): Promise<{ branch: string; state: JobState; check_after_minutes: number; worktree: string }> {
-    const claimed = await this.core.locked(async () => {
+    const claimed = await this.#locks.locked(async () => {
       if (!TICKET_PATTERN.test(ticket)) {
         throw new FactoryError('invalid_ticket', `ticket must be ${TICKET_DESCRIPTION}.`);
       }
-      const workspace = await this.core.resolve(workspaceName);
+      const workspace = await this.#settings.resolve(workspaceName);
       const plan = await this.#plan(workspace, ticket);
       // Every image the Task file refers to must be usable (SF-065): attachment_invalid otherwise.
       const images = await resolveTaskImages(workspace.workCheckout, ticket, plan.content);
-      const existing = await this.core.jobs.read(workspace.name, ticket);
+      const existing = await this.#store.jobs.read(workspace.name, ticket);
       if (existing !== undefined && !TERMINAL_STATES.includes(existing.state)) {
         throw new FactoryError('job_exists', `The job for ${workspace.name}/${ticket} is ${existing.state}.`);
       }
@@ -220,7 +255,7 @@ export class StartPart {
         await this.#checkSlot(workspace.name, ticket);
       }
       if (existing !== undefined) {
-        await this.core.jobs.archive(workspace.name, ticket);
+        await this.#store.jobs.archive(workspace.name, ticket);
       }
       return this.#claim(workspace, ticket, plan, images);
     });
@@ -243,8 +278,8 @@ export class StartPart {
   // queue.json; without it, config.maxJobs); job_limit otherwise. Only the queue's own start runs
   // it, only under the lock.
   async #checkSlot(workspaceName: string, ticket: string): Promise<void> {
-    const limit = this.core.maxRunning === undefined ? this.core.config.maxJobs : await this.core.maxRunning();
-    const running = runningJobs(await this.core.jobs.list()).filter((job) => !(job.workspace === workspaceName && job.ticket === ticket));
+    const limit = this.#settings.maxRunning === undefined ? this.#settings.config.maxJobs : await this.#settings.maxRunning();
+    const running = runningJobs(await this.#store.jobs.list()).filter((job) => !(job.workspace === workspaceName && job.ticket === ticket));
     if (running.length >= limit) {
       throw new FactoryError('job_limit', `${running.length} job${running.length === 1 ? '' : 's'} run (${running.map((job) => `${job.ticket} ${job.state}`).join(', ')}); the limit is ${limit}.`);
     }
@@ -254,11 +289,11 @@ export class StartPart {
   // checks again whether a ticket it waits for is merged), under the workspace's Git lock; nothing
   // without an origin. fetch_failed when Git fails.
   async fetchBase(workspaceName: string, base: string): Promise<void> {
-    const workspace = await this.core.resolve(workspaceName);
+    const workspace = await this.#settings.resolve(workspaceName);
     if (base.startsWith('-') || (await runGit(workspace.workCheckout, ['check-ref-format', '--branch', base])).code !== 0) {
       throw new FactoryError('base_not_found', `The base "${base}" is not a valid branch name.`);
     }
-    await this.core.gitLocked(workspaceName, async () => {
+    await this.#locks.gitLocked(workspaceName, async () => {
       if (!(await runGit(workspace.workCheckout, ['remote'])).stdout.toString('utf8').split('\n').includes('origin')) {
         return;
       }
@@ -275,17 +310,17 @@ export class StartPart {
   async #claim(workspace: Workspace, ticket: string, plan: { base: string; branch: string; review: TaskReview | undefined }, images: ResolvedImage[]): Promise<Claimed> {
     const { base, branch } = plan;
     const created = now();
-    const worktree = this.core.parts.handover.worktreePath(workspace.name, ticket);
-    const setup = claudeReviewDecision(this.core.config, plan.review);
+    const worktree = this.#peers.handover.worktreePath(workspace.name, ticket);
+    const setup = claudeReviewDecision(this.#settings.config, plan.review);
     const job: Job = {
       workspace: workspace.name, ticket, branch, base, base_commit: null, state: 'starting', worktree, prepared_commit: null,
       iteration: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, mr_conflict_turn: false, created_at: created, updated_at: created,
       claude_review: setup.claude_review,
     };
     checkTransition(null, 'starting', 'create');
-    await this.core.jobs.write(job);
-    await this.core.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, state: { from: null, to: 'starting' } });
-    await this.core.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, type: 'review_setup', ...setup });
+    await this.#store.jobs.write(job);
+    await this.#store.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, state: { from: null, to: 'starting' } });
+    await this.#store.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, type: 'review_setup', ...setup });
     return { workspace, ticket, base, branch, worktree, images };
   }
 
@@ -298,26 +333,26 @@ export class StartPart {
     const keptNote = kept !== undefined && kept.paths.length > 0 ? ` The files kept from the previous job are in ${kept.dir}.` : '';
     let baseCommit: string;
     try {
-      baseCommit = await this.core.gitLocked(workspace.name, () => this.#createWorktree(workspace.workCheckout, base, branch, worktree));
+      baseCommit = await this.#locks.gitLocked(workspace.name, () => this.#createWorktree(workspace.workCheckout, base, branch, worktree));
     } catch (error) {
       const failure = error instanceof FactoryError ? error : new FactoryError('start_failed', 'Git failed while creating the worktree.');
-      await this.core.locked(async () => {
-        const job = await this.core.jobs.read(workspace.name, ticket);
+      await this.#locks.locked(async () => {
+        const job = await this.#store.jobs.read(workspace.name, ticket);
         if (job !== undefined && job.state === 'starting') {
           // from: starting (the guard above)
-          await this.core.transition({ ...job, worktree: null }, 'failed', 'launch', { code: failure.code, message: `${failure.message}${keptNote}` });
+          await this.#store.transition({ ...job, worktree: null }, 'failed', 'launch', { code: failure.code, message: `${failure.message}${keptNote}` });
         }
       });
       throw new FactoryError(failure.code, `${failure.message}${keptNote}`);
     }
-    const result = await this.core.locked(async () => {
-      let job = await this.core.jobs.read(workspace.name, ticket);
+    const result = await this.#locks.locked(async () => {
+      let job = await this.#store.jobs.read(workspace.name, ticket);
       if (job === undefined || job.state !== 'starting') {
         await removeWorktree(workspace.workCheckout, worktree);
         throw new FactoryError('job_ended', `The job for ${workspace.name}/${ticket} ended while it was starting.${keptNote}`);
       }
       job = { ...job, base_commit: baseCommit };
-      await this.core.jobs.write(job);
+      await this.#store.jobs.write(job);
       let rules: string;
       try {
         rules = await this.#collectJobRules(workspace, ticket, baseCommit);
@@ -330,7 +365,7 @@ export class StartPart {
         }
         const message = `${failure.message} Fix it, then sf restart the ticket.${keptNote}`;
         // from: starting (checked when the job was read above)
-        await this.core.transition(job, 'failed', 'launch', { code: failure.code, message });
+        await this.#store.transition(job, 'failed', 'launch', { code: failure.code, message });
         throw new FactoryError(failure.code, message);
       }
       if (kept !== undefined) {
@@ -338,12 +373,12 @@ export class StartPart {
       }
       job = await this.storeImages(job, claimed.images);
       // from: starting (checked when the job was read above)
-      job = await this.core.transition(await this.syncTask(workspace, job), 'working', 'launch');
+      job = await this.#store.transition(await this.syncTask(workspace, job), 'working', 'launch');
       // The first turn runs in the job's runner, with the images' blocks.
-      const prompt = factoryPrompt(firstPrompt(ticket, kept?.paths ?? [], rules), ticket, job.iteration + 1, this.core.parts.turns.imagesLine(job));
-      const images = this.core.parts.reviews.imageRefs(job, (await this.core.jobs.readTaskCopy(workspace.name, ticket)) ?? '');
-      await this.core.serveRunners().queue(workspace.name, ticket, { kind: 'turn', prompt, ...(images.length > 0 ? { images } : {}) });
-      return { branch, state: job.state, check_after_minutes: this.core.config.checkAfterStartMin, worktree };
+      const prompt = factoryPrompt(firstPrompt(ticket, kept?.paths ?? [], rules), ticket, job.iteration + 1, this.#peers.turns.imagesLine(job));
+      const images = this.#peers.reviews.imageRefs(job, (await this.#store.jobs.readTaskCopy(workspace.name, ticket)) ?? '');
+      await this.#runner.serveRunners().queue(workspace.name, ticket, { kind: 'turn', prompt, ...(images.length > 0 ? { images } : {}) });
+      return { branch, state: job.state, check_after_minutes: this.#settings.config.checkAfterStartMin, worktree };
     });
     if (kept !== undefined) {
       await rm(kept.dir, { recursive: true, force: true });
@@ -356,9 +391,9 @@ export class StartPart {
   // Throws when they cannot be collected or stored: the job does not start without them.
   async #collectJobRules(workspace: Workspace, ticket: string, baseCommit: string): Promise<string> {
     const collected = await collectRules(workspace.workCheckout, baseCommit, {
-      workspace: workspace.name, skip: workspace.rulesSkip ?? [], configDir: configDir(), maxBytes: this.core.config.rulesMaxBytes,
+      workspace: workspace.name, skip: workspace.rulesSkip ?? [], configDir: configDir(), maxBytes: this.#settings.config.rulesMaxBytes,
     });
-    await writeJobRules(this.core.jobs.dir(workspace.name, ticket), collected);
+    await writeJobRules(this.#store.jobs.dir(workspace.name, ticket), collected);
     return collected.block;
   }
 
@@ -389,8 +424,8 @@ export class StartPart {
     if (content === undefined) {
       return job;
     }
-    if ((await this.core.jobs.readTaskCopy(job.workspace, job.ticket)) !== content) {
-      await this.core.jobs.writeTaskCopy(job.workspace, job.ticket, Buffer.from(content, 'utf8'));
+    if ((await this.#store.jobs.readTaskCopy(job.workspace, job.ticket)) !== content) {
+      await this.#store.jobs.writeTaskCopy(job.workspace, job.ticket, Buffer.from(content, 'utf8'));
     }
     return this.recordTask(job, content);
   }
@@ -403,7 +438,7 @@ export class StartPart {
       return job;
     }
     const next: Job = { ...job, task_sha256: sha256 };
-    await this.core.jobs.write(next);
+    await this.#store.jobs.write(next);
     return next;
   }
 
@@ -429,7 +464,7 @@ export class StartPart {
     if (images.length === 0 && job.attachments === undefined) {
       return job;
     }
-    const dirs = [this.core.jobs.attachmentsDir(workspace, ticket), ...(job.worktree !== null ? [join(job.worktree, TASK_DIR, ticket)] : [])];
+    const dirs = [this.#store.jobs.attachmentsDir(workspace, ticket), ...(job.worktree !== null ? [join(job.worktree, TASK_DIR, ticket)] : [])];
     for (const dir of dirs) {
       if (images.length > 0) {
         await writeImages(dir, images);
@@ -440,8 +475,8 @@ export class StartPart {
     const records = images.map(jobAttachment);
     const { attachments: _before, ...rest } = job;
     const next: Job = records.length > 0 ? { ...rest, attachments: records } : rest;
-    await this.core.jobs.write(next);
-    await this.core.jobs.appendEvent(workspace, ticket, { ts: now(), iteration: job.iteration, type: 'attachments', images: records });
+    await this.#store.jobs.write(next);
+    await this.#store.jobs.appendEvent(workspace, ticket, { ts: now(), iteration: job.iteration, type: 'attachments', images: records });
     return next;
   }
 
@@ -464,13 +499,13 @@ export class StartPart {
   // (restart_refused). keepFiles: the old worktree's changed and new files go into the new worktree
   // before the first turn, whose prompt says so.
   async restart(workspaceName: string, ticket: string, keepFiles = false): Promise<{ branch: string; state: JobState; check_after_minutes: number; worktree: string; archived: string; branch_deleted: string | null; kept: string[] }> {
-    const { claimed, kept, archived, deleted } = await this.core.locked(async () => {
-      const old = await this.core.job(workspaceName, ticket);
+    const { claimed, kept, archived, deleted } = await this.#locks.locked(async () => {
+      const old = await this.#store.job(workspaceName, ticket);
       checkNotInCheckout(old);
       if (!RESTARTABLE_STATES.includes(old.state)) {
         throw new FactoryError('invalid_state', `sf restart needs paused, waiting_limit, aborted, failed or needs_human; the job is ${old.state}.`);
       }
-      const workspace = await this.core.resolve(workspaceName);
+      const workspace = await this.#settings.resolve(workspaceName);
       const checkout = workspace.workCheckout;
       const plan = await this.#plan(workspace, ticket);
       // Every image the Task file refers to must be usable (SF-065), before anything changes.
@@ -484,20 +519,20 @@ export class StartPart {
         }
         return oldExists;
       };
-      await this.core.gitLocked(workspaceName, branchCheck);
-      await this.core.parts.control.endSession(workspaceName, ticket);
-      const worktree = old.worktree ?? this.core.parts.handover.worktreePath(workspaceName, ticket);
+      await this.#locks.gitLocked(workspaceName, branchCheck);
+      await this.#peers.control.endSession(workspaceName, ticket);
+      const worktree = old.worktree ?? this.#peers.handover.worktreePath(workspaceName, ticket);
       let saved: Kept | undefined;
       if (keepFiles && old.base_commit !== null && (await exists(worktree))) {
-        await mkdir(join(this.core.config.stateDir, 'tmp'), { recursive: true, mode: 0o700 });
-        const dir = await mkdtemp(join(this.core.config.stateDir, 'tmp', `restart-${ticket}-`));
+        await mkdir(join(this.#settings.config.stateDir, 'tmp'), { recursive: true, mode: 0o700 });
+        const dir = await mkdtemp(join(this.#settings.config.stateDir, 'tmp', `restart-${ticket}-`));
         saved = { dir, paths: await saveKept(worktree, old.base_commit, dir) };
       }
       // Once the old worktree is gone, the saved files are the only copy: they stay on a failure.
       let removed = false;
       const keptNote = (): string => (removed && saved !== undefined && saved.paths.length > 0 ? ` The files kept from the old worktree are in ${saved.dir}.` : '');
       try {
-        const { deleteOld, failure } = await this.core.gitLocked(workspaceName, async () => {
+        const { deleteOld, failure } = await this.#locks.gitLocked(workspaceName, async () => {
           const deleting = await branchCheck();
           const notRemoved = await removeWorktree(checkout, worktree);
           if (notRemoved !== undefined) {
@@ -510,7 +545,7 @@ export class StartPart {
         if (failure !== undefined) {
           throw new FactoryError('restart_failed', failure);
         }
-        const name = await this.core.jobs.archive(workspaceName, ticket);
+        const name = await this.#store.jobs.archive(workspaceName, ticket);
         return { claimed: await this.#claim(workspace, ticket, plan, images), kept: saved, archived: `jobs/${workspaceName}/${name}`, deleted: deleteOld ? old.branch : null };
       } catch (error) {
         if (saved !== undefined && !removed) {

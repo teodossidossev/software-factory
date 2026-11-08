@@ -1,8 +1,8 @@
 // The workspace's test command (SF-128, src/test-command.ts): the run in a real bubblewrap sandbox
 // (pass, fail, a timeout and an abort that leave no process, a parent killed with SIGKILL that leaves
 // none either and nothing of its private /tmp on the host, the path denials hidden, no SF_* variable,
-// no network but loopback, exit 127, the capped tail), and the text the factory makes of a run. The sandbox tests are todos on a machine
-// where bwrap cannot create a sandbox; nothing here runs the command outside one.
+// no network but loopback, exit 127, the capped tail), and the text the factory makes of a run. The sandbox tests skip where the real
+// bubblewrap cannot start (bubblewrapStarts, test/support/harness.ts); nothing here runs the command outside one.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
@@ -19,17 +19,6 @@ import {
 const SELF = fileURLToPath(import.meta.url);
 // The child mode of the SIGKILL test: this file runs one command and waits.
 const CHILD = 'SF_TEST_COMMAND_CHILD';
-
-// Whether bwrap can create the sandbox the factory builds on this machine.
-const usable = spawnSync('bwrap', ['--die-with-parent', '--unshare-pid', '--unshare-net', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--', '/bin/sh', '-c', 'exit 0'], { stdio: 'ignore' }).status === 0;
-const NO_BWRAP = 'bwrap cannot create a sandbox on this machine';
-const sandboxTest = (name: string, body: () => Promise<void>): void => {
-  if (usable) {
-    test(name, body);
-  } else {
-    test(name, { todo: NO_BWRAP });
-  }
-};
 
 // The pids of the processes whose argv is exactly argv.
 async function processesOf(argv: string[]): Promise<number[]> {
@@ -69,6 +58,14 @@ if (process.env[CHILD] !== undefined) {
   const { command, cwd } = JSON.parse(process.env[CHILD]) as { command: string; cwd: string };
   await runTestCommand({ command, cwd, hidden: [], timeoutMs: 600_000, signal: new AbortController().signal });
 } else {
+  // Imported here, not above: the harness registers before and after hooks, which the child above
+  // (a plain node run killed with SIGKILL) must not run.
+  const { BWRAP_CANNOT_START, bubblewrapStarts } = await import('./support/harness.js');
+  // The tests that run the command in the real bubblewrap: skipped where it cannot start (inside
+  // another sandbox).
+  const sandboxTest = (name: string, body: () => Promise<void>): void => {
+    test(name, { skip: bubblewrapStarts() ? false : BWRAP_CANNOT_START }, body);
+  };
   let root: string;
   let worktree: string;
 

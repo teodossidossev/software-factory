@@ -9,6 +9,7 @@
 // (test/support/children.ts, SF-114).
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
@@ -24,6 +25,7 @@ import { cliRuleList, FACTORY_MCP_SERVER } from '../../src/sandbox-denials.js';
 import { rulesBlock } from '../../src/rules-docs.js';
 import { CheckStore, taskSha256 } from '../../src/task-check.js';
 import { writeTask } from '../../src/task-file.js';
+import { bwrapArgs } from '../../src/test-command.js';
 import { checkChildren, isServe, REFUSAL_MS, removeOnExit, stopChild, trackChild } from './children.js';
 
 export const CLI = fileURLToPath(new URL('../../src/cli.js', import.meta.url));
@@ -38,8 +40,9 @@ export let temp: string;
 // The fake Codex executable (test/support/fake-codex.ts behind a shell wrapper), for SF_CODEX.
 export let fakeCodex: string;
 // The folder of the fake bwrap (SF-125: test/support/fake-bwrap.ts, then an exec of the command
-// after "--"), first on every sf process's PATH: a nested real bubblewrap may not run where the
-// tests do, and the gate runs inside one while the sandbox is on.
+// after "--" from the folder of --chdir, when given), first on every sf process's PATH: a nested real
+// bubblewrap may not run where the tests do, and the gate and the workspace's test command
+// (SF-128) run inside one.
 export let fakeBwrapBin: string;
 // Everything the sf processes of this test file wrote to stdout and stderr (SF-088): the after hook
 // fails on a refused state change in it.
@@ -77,9 +80,28 @@ export interface Served {
   state: string;
 }
 
-// Whether bwrap can create the sandbox of a workspace's test command (SF-128) on this machine: the
-// tests that run one are todos where it cannot.
-export const bwrapWorks = spawnSync('bwrap', ['--die-with-parent', '--unshare-pid', '--unshare-net', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--', '/bin/sh', '-c', 'exit 0'], { stdio: 'ignore' }).status === 0;
+// Why a test that needs the real bubblewrap skips (bubblewrapStarts).
+export const BWRAP_CANNOT_START = 'bubblewrap cannot start here';
+let bwrapStarted: boolean | undefined;
+
+// Whether the real bwrap starts the sandbox of a workspace's test command (SF-128) here: the exact
+// arguments bwrapArgs gives a run in a temporary worktree, /run hidden as in every run, and its start
+// script reports the start. It cannot inside another sandbox (no new namespace, or no mount over /run
+// there); the tests that need it skip with BWRAP_CANNOT_START. Probed once per process.
+export function bubblewrapStarts(): boolean {
+  if (bwrapStarted === undefined) {
+    const cwd = mkdtempSync(join(tmpdir(), 'sf-bwrap-probe-'));
+    try {
+      const probe = spawnSync('bwrap', bwrapArgs({ command: 'true', cwd, hidden: [{ path: '/run', directory: true }] }), {
+        cwd, encoding: 'utf8', stdio: ['ignore', 'ignore', 'ignore', 'pipe'], timeout: 30_000,
+      });
+      bwrapStarted = probe.status === 0 && probe.output[3] === 'started';
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }
+  return bwrapStarted;
+}
 
 export function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -426,8 +448,13 @@ before(async () => {
   await writeFile(join(fakeBwrapBin, 'bwrap'), [
     '#!/bin/sh',
     `'${process.execPath}' '${FAKE_BWRAP_SCRIPT}' "$@" || exit $?`,
-    'while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done',
+    'dir=',
+    'while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do',
+    '  if [ "$1" = --chdir ]; then dir=$2; fi',
+    '  shift',
+    'done',
     'shift',
+    'if [ -n "$dir" ]; then cd "$dir" || exit 1; fi',
     'exec "$@"',
     '',
   ].join('\n'));

@@ -9,7 +9,7 @@ import { request } from 'node:http';
 import { connect } from 'node:net';
 import { join, resolve } from 'node:path';
 import { mock, test } from 'node:test';
-import { ACTIONS, CONFIRM_ROUTES, MAX_ACTION_BODY_BYTES, startDashboard } from '../src/dashboard.js';
+import { ACTIONS, CONFIRM_ROUTES, DASHBOARD_SCRIPTS, MAX_ACTION_BODY_BYTES, startDashboard } from '../src/dashboard.js';
 import { FactoryError } from '../src/errors.js';
 import { JobStore } from '../src/jobs.js';
 import { factoryPrompt } from '../src/prompts.js';
@@ -50,7 +50,7 @@ test('dashboard actions: POST only on the action routes, GET only elsewhere, 404
         assert.equal(reply.headers['content-security-policy'], CSP);
       }
     }
-    for (const path of ['', 'app.js', 'api/jobs', 'api/jobs/app/T-1', 'api/jobs/app/T-1/mr', 'api/jobs/app/T-1/iterations/1/report', 'api/stream', 'api/jobs/app/T-1/approve/x', 'api/jobs/app/T-1/other']) {
+    for (const path of ['', ...DASHBOARD_SCRIPTS, 'api/jobs', 'api/jobs/app/T-1', 'api/jobs/app/T-1/mr', 'api/jobs/app/T-1/iterations/1/report', 'api/stream', 'api/jobs/app/T-1/approve/x', 'api/jobs/app/T-1/other']) {
       const reply = await act(base, path, {});
       assert.deepEqual([reply.status, reply.headers.allow, reply.body], [405, 'GET', ''], path);
     }

@@ -1,7 +1,7 @@
-// A small stand-in for the dashboard page, so static/app.js runs under node:vm: a document built
-// from static/dashboard.html as a tree (every element, its attributes and its text), elements with
-// the properties the script uses (parentNode, closest, matches, dataset, classList,
-// style.setProperty, querySelector and querySelectorAll with tag, id, class and attribute
+// A small stand-in for the dashboard page, so its scripts (DASHBOARD_SCRIPTS of static/) run under
+// node:vm: a document built from static/dashboard.html as a tree (every element, its attributes and
+// its text), elements with the properties the scripts use (parentNode, closest, matches, dataset,
+// classList, style.setProperty, querySelector and querySelectorAll with tag, id, class and attribute
 // selectors), events that bubble to the document (so the page's delegated listeners get them),
 // document.visibilityState, document.createElementNS (the Stats page's SVG, SF-117), a scripted
 // fetch (a Blob body sent or answered too), a scripted EventSource, timers that fire only when
@@ -12,6 +12,7 @@
 // manual browser steps in factory/README.md cover those.
 import { readFile } from 'node:fs/promises';
 import { createContext, runInContext } from 'node:vm';
+import { DASHBOARD_SCRIPTS } from '../../src/dashboard.js';
 
 export class FakeText {
   readonly nodeType = 3;
@@ -720,17 +721,23 @@ export class FakeEventSource {
 // reads its Stream before it opens the job's live stream, so a test about something else gets it.
 export const EMPTY_STREAM_PAGE = /^api\/jobs\/[^/]+\/[^/]+\/stream\?from=(\d+)$/;
 
-// Builds the document from the page's HTML, runs app.js in a fresh context against it and returns
-// the handles. Fetches are answered by the test, through requests[i].respond, unless autoGet
-// answers a GET (undefined leaves it pending; a Stream page it leaves undefined is an empty last
-// page). Without a clipboard, navigator has none (as in a context where the browser refuses it);
-// globals adds names to the page's context (a localStorage), none by default.
+// The page's scripts, each file of DASHBOARD_SCRIPTS with its text, in load order.
+export async function readScripts(staticDir: URL): Promise<Array<{ file: string; source: string }>> {
+  return Promise.all(DASHBOARD_SCRIPTS.map(async (file) => ({ file, source: await readFile(new URL(file, staticDir), 'utf8') })));
+}
+
+// Builds the document from the page's HTML, runs the page's scripts (DASHBOARD_SCRIPTS, in order) in
+// one fresh context against it, each under its own file name, and returns the handles. Fetches are
+// answered by the test, through requests[i].respond, unless autoGet answers a GET (undefined leaves
+// it pending; a Stream page it leaves undefined is an empty last page). Without a clipboard,
+// navigator has none (as in a context where the browser refuses it); globals adds names to the
+// page's context (a localStorage), none by default.
 export async function loadPage(
   staticDir: URL, autoGet: (path: string) => unknown, clipboard?: FakeClipboard,
   globals: Record<string, unknown> = {},
 ): Promise<Page> {
   const html = await readFile(new URL('dashboard.html', staticDir), 'utf8');
-  const source = await readFile(new URL('app.js', staticDir), 'utf8');
+  const sources = await readScripts(staticDir);
   const document = new FakeDocument();
   parseHtml(document, html);
   const requests: FetchRequest[] = [];
@@ -828,7 +835,9 @@ export async function loadPage(
     document, window, location, history, navigator, fetch, EventSource: FakeEventSource, setTimeout: fakeSetTimeout, clearTimeout: fakeClearTimeout, URLSearchParams, console,
     Blob, File, URL: objectUrl, ClipboardItem: FakeClipboardItem, createImageBitmap, ...globals,
   });
-  runInContext(source, context, { filename: 'app.js' });
+  for (const { file, source } of sources) {
+    runInContext(source, context, { filename: file });
+  }
   return {
     document,
     $: (id) => {

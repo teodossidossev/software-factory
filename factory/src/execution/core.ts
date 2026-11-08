@@ -15,10 +15,11 @@ import { withLock } from '../pid-lock.js';
 import { Runners } from '../runner.js';
 import { TICKET_DESCRIPTION, TICKET_PATTERN } from '../task-file.js';
 import type { ControlPart } from './control.js';
+import type { StateListener } from './dto.js';
 import type { HandoverPart } from './handover-steps.js';
 import type { MrPart } from './mr-steps.js';
 import type { ReviewsPart } from './reviews.js';
-import type { ExecutionOptions, Live, RunningReview, StateListener } from './shared.js';
+import type { ExecutionOptions, Live, RunningReview } from './shared.js';
 import type { StartPart } from './start.js';
 import type { StatusPart } from './status.js';
 import type { TurnsPart } from './turns.js';
@@ -53,6 +54,8 @@ export class Core {
   readonly runners: Runners | undefined;
   // The /proc the sandbox's config lock check scans (ExecutionOptions.lockProc); undefined: the real one.
   readonly lockProc: string | undefined;
+  // The run queue's limit max_running (ExecutionOptions.maxRunning); undefined: config.maxJobs.
+  readonly maxRunning: (() => Promise<number>) | undefined;
   // Runner mode: stop() was called; nothing new starts.
   stopping = false;
   // The parts of the job lifecycle, filled by Execution's constructor once it has built each.
@@ -67,6 +70,7 @@ export class Core {
     this.#runner = options.runner;
     this.runners = options.runner === undefined ? new Runners(this.jobs, options.launch) : undefined;
     this.lockProc = options.lockProc;
+    this.maxRunning = options.maxRunning;
   }
 
   // The operations under locked not settled yet (Execution's idle).

@@ -107,7 +107,11 @@ function fakeModel(jobs: JobStore, outcomes: Array<'ok' | 'fail' | 'block' | 'ha
         return done(OUTPUT);
       }
       if (outcome === 'hang') {
-        await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+        // Until the signal aborts; a signal already aborted (the timeout ran out before this call
+        // got here, as under load) never fires its abort event again.
+        if (!signal.aborted) {
+          await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+        }
         return { ok: false, message: 'The explanation session failed: aborted', model: null, startedAt: T0, endedAt: T0 };
       }
       if (outcome === 'fail') {

@@ -17,8 +17,11 @@
 // - execution/control.ts: pause and Resume (SF-067), the usage-limit park (SF-072), abort, reset,
 //   Archive, exclusive, and the requests sf serve queues to a job's runner.
 // - execution/status.ts: check and status.
-// - execution/shared.ts: the constants, helpers and types more than one part uses, and the names
-//   this module exports.
+// - execution/dto.ts: the data shapes Execution's calls return or take (SF-142).
+// - execution/errors.ts: the codes sf accept and sf retry take on, and the shared refusals.
+// - execution/prompts.ts: the first prompt and the notes the Implementer is given.
+// - execution/events.ts: the tests event of the job's stream.
+// - execution/shared.ts: the helpers and runtime types more than one part uses.
 // The Implementer session of each job works in the job's own worktree and publishes an iteration
 // (Report, Patch and the file list) when the session goes idle; then the Claude review of that
 // iteration runs (SF-038, src/review.ts), and after a clean one the Codex gate (SF-039,
@@ -43,17 +46,21 @@ import type { RunnerRequest, RunnerWork } from './runner.js';
 import { DEFAULT_PAGE_BYTES } from './repo-files.js';
 import { ControlPart } from './execution/control.js';
 import { Core } from './execution/core.js';
+import type { CheckResult, ExclusiveScope, MrInput, MrOutcome, MrSaved, MrView, Resumed, Retired, StateListener } from './execution/dto.js';
 import { type HandoverRunning, HandoverPart } from './execution/handover-steps.js';
 import { MrPart } from './execution/mr-steps.js';
 import { ReviewsPart } from './execution/reviews.js';
-import type { CheckResult, ExclusiveScope, ExecutionOptions, MrInput, MrOutcome, MrSaved, MrView, Resumed, Retired, StateListener } from './execution/shared.js';
+import type { ExecutionOptions } from './execution/shared.js';
 import { StartPart } from './execution/start.js';
 import { StatusPart } from './execution/status.js';
 import { TurnsPart } from './execution/turns.js';
 
-export { branchName, changeNote, firstPrompt, GATE_OVERRIDE_CODES, imagesChangedNote, LEDGER_ACCEPT_CODES, MAX_REPORT_BYTES, MR_RETRY_CODES, slugify } from './execution/shared.js';
+export { GATE_OVERRIDE_CODES, LEDGER_ACCEPT_CODES, MR_RETRY_CODES } from './execution/errors.js';
+export { changeNote, firstPrompt, imagesChangedNote } from './execution/prompts.js';
+export { branchName, MAX_REPORT_BYTES, slugify } from './execution/shared.js';
+export type { CheckResult, ExclusiveScope, MrInput, MrOutcome, MrSaved, MrView, Resumed, Retired, ReviewStatus, StateListener } from './execution/dto.js';
 export type { HandoverRunning } from './execution/handover-steps.js';
-export type { CheckResult, ExclusiveScope, ExecutionOptions, MrInput, MrOutcome, MrSaved, MrView, Resumed, Retired, ReviewStatus, StateListener } from './execution/shared.js';
+export type { ExecutionOptions } from './execution/shared.js';
 
 export class Execution implements RunnerWork {
   // The same store as the parts' (core.jobs).

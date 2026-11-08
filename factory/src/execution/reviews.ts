@@ -8,7 +8,6 @@ import { readFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type ImageRef, imageRefs } from '../attachments.js';
-import { readToken } from '../dashboard.js';
 import { FactoryError } from '../errors.js';
 import { gateDecision } from '../gate-level.js';
 import { findBwrap, GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from '../gate.js';
@@ -19,15 +18,17 @@ import { Redactor } from '../redact.js';
 import { readJobRules } from '../rules-docs.js';
 import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, type StructuredOutcome, unacceptedItems } from '../review.js';
 import { type DenialScope, gateWrapperFor, type PathDenials, pathDenials, USER_SETTINGS_WEAKEN_SANDBOX } from '../sandbox-denials.js';
-import { readMcpToken } from '../server.js';
+import { factoryTokens } from '../secrets.js';
 import { changedBetween, type FixFiles, fixNumbers, guardSuggestions, offerMessage, runSimplify, SIMPLIFY_CODE, SIMPLIFY_TITLE, simplifyFix, type SimplifyInput, type SimplifyOutput, simplifyPrompt, type Suggestion } from '../simplify.js';
-import { codesWithAction, settleCodes } from '../stops.js';
+import { codesWithAction, settleCodes, withoutDropped } from '../stops.js';
 import { mayTouch, parseFrontMatter, readTask, TASK_DIR } from '../task-file.js';
 import { TEST_CODES, type TestsRecord } from '../test-command.js';
 import { type UsageLimit, usageLimit } from '../usage-limit.js';
-import { exists, LEDGER_ACCEPT_CODES, markedGroups, type RunningReview, withoutDropped } from './shared.js';
 import type { Core } from './core.js';
-import { testsEvent } from './mr-steps.js';
+import { LEDGER_ACCEPT_CODES } from './errors.js';
+import { testsEvent } from './events.js';
+import { markedGroups } from './prompts.js';
+import { exists, type RunningReview } from './shared.js';
 
 // The stops whose settlement moves the job on by itself once nothing is left to settle
 // (src/stops.ts: escalated, review_disputed). A churn stop's settlement is only recorded: the job
@@ -302,15 +303,7 @@ export class ReviewsPart {
   // The Redactor of a reviewer's run in the job's worktree, with the dashboard and MCP tokens as
   // literal secrets (SF-125); a token file that is missing or unreadable adds none.
   async #redactor(job: Job): Promise<Redactor> {
-    const { stateDir } = this.core.config;
-    const secrets: string[] = [];
-    for (const read of [readToken, readMcpToken]) {
-      const token = await read(stateDir).catch(() => undefined);
-      if (token !== undefined) {
-        secrets.push(token);
-      }
-    }
-    return new Redactor({ cwd: job.worktree ?? '', secrets });
+    return new Redactor({ cwd: job.worktree ?? '', secrets: await factoryTokens(this.core.config) });
   }
 
   // The material of a review of the job's last iteration, the Task file read in the worktree.

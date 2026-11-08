@@ -24,8 +24,10 @@ import { CONTINUE_PROMPT, limitDecision, worktreeChanged, type WorktreeState, wo
 import { appendFix, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskScope } from '../task-file.js';
 import { TicketHistory } from '../ticket-history.js';
 import { usageLimit } from '../usage-limit.js';
-import { changeNote, checkNotInCheckout, cutOffError, exists, type Live } from './shared.js';
 import type { Core } from './core.js';
+import { checkNotInCheckout, cutOffError } from './errors.js';
+import { changeNote } from './prompts.js';
+import { exists, type Live } from './shared.js';
 
 type Success = Extract<IdleOutcome, { ok: true }>;
 

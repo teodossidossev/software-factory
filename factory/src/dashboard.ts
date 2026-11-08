@@ -37,6 +37,7 @@ import { internalError, listen, LOOPBACK_HOST, sameSecret, sendJson, statusOf } 
 import { lineEntries, type StreamEntry, streamContext } from './job-stream.js';
 import { claudeReviews, type Job, type JobState, type JobStore } from './jobs.js';
 import { DIGEST_DEFAULTS, HANDOFF_MODES, WORKSPACE_COLORS, WORKSPACE_NAME_PATTERN } from './registry.js';
+import { DASHBOARD_TOKEN_FILE as TOKEN_FILE, readTokenFile } from './secrets.js';
 import type { Setup, TicketRow } from './setup.js';
 import type { CheckRecord, CheckSummary, TaskChecks } from './task-check.js';
 import { turnLimitLine } from './turn-limit.js';
@@ -47,10 +48,12 @@ import { type JobFacts, jobActions, NO_FACTS, settleEntries, stopFields } from '
 import { refuseWhileUpdating } from './update.js';
 import { describeEvent, followLines, shortInput } from './watch.js';
 
+// The dashboard token's file: src/secrets.ts's.
+export { DASHBOARD_TOKEN_FILE as TOKEN_FILE } from './secrets.js';
+
 export const DEFAULT_DASHBOARD_PORT = 8788;
 // The remote listener's port (SF-126), where `tailscale serve --bg 8789` points.
 export const DEFAULT_DASHBOARD_REMOTE_PORT = 8789;
-export const TOKEN_FILE = 'dashboard-token';
 export const MAX_STREAMS = 8;
 // The events.jsonl lines of one page of the job's Stream (SF-082).
 export const STREAM_PAGE_LINES = 2000;
@@ -63,7 +66,6 @@ export const MAX_TASK_BODY_BYTES = 2 * MAX_TASK_BYTES + 1024;
 // The Host names of the local listener, and the loopback Hosts the remote one takes with a listed Origin.
 const LOOPBACK_NAMES: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '[::1]']);
 const KEEP_ALIVE_MS = 15_000;
-const TOKEN_PATTERN = /^[0-9a-f]{64}$/;
 // Compiled to dist/src/dashboard.js; the package root is two levels up.
 const STATIC_DIR = new URL('../../static/', import.meta.url);
 const SECURITY_HEADERS = {
@@ -304,25 +306,6 @@ export function newToken(): string {
   return randomBytes(32).toString('hex');
 }
 
-// A token file of the state directory: its token, or undefined when the file is missing; invalid
-// (the error never holds the file's content) when it does not hold one token.
-export async function readTokenFile(stateDir: string, file: string, invalid: () => FactoryError): Promise<string | undefined> {
-  let text: string;
-  try {
-    text = await readFile(join(stateDir, file), 'utf8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return undefined;
-    }
-    throw error;
-  }
-  const token = text.trim();
-  if (!TOKEN_PATTERN.test(token)) {
-    throw invalid();
-  }
-  return token;
-}
-
 // The dashboard token, or undefined when the file is missing; kept across `sf serve` starts.
 export function readToken(stateDir: string): Promise<string | undefined> {
   return readTokenFile(stateDir, TOKEN_FILE, () => new FactoryError('invalid_token', `${TOKEN_FILE} does not hold a dashboard token.`));
@@ -559,7 +542,7 @@ const toolUses = (raw: string): number =>
 export class ToolCallCounter {
   private readonly seen = new Map<string, { ino: number; offset: number; count: number; rest: Buffer }>();
   private readonly running = new Map<string, Promise<number>>();
-  // The bytes read so far, for the tests.
+  // The bytes of every log read so far, across counts.
   bytesRead = 0;
 
   count(path: string): Promise<number> {

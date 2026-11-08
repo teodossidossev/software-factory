@@ -377,7 +377,7 @@ test('the queue\'s own start counts the running jobs of every workspace against 
   const store = new QueueStore(env.state, 3);
   await store.write({ ...(await store.read()), max_running: 2 });
   const config = loadConfig({ SF_STATE_DIR: env.state, SF_CLAUDE: FAKE });
-  const execution = new Execution(config, (name) => resolveWorkspace(name, env.config));
+  const execution = new Execution(config, (name) => resolveWorkspace(name, env.config), undefined, undefined, { maxRunning: async () => (await store.read()).max_running });
   await assert.rejects(execution.start('app', 'L-1', { queued: true }), { code: 'job_limit', message: '2 jobs run (X-1 working, X-2 awaiting_review); the limit is 2.' });
   assert.equal(await jobs.read('app', 'L-1'), undefined);
   await jobs.write(record('web', 'X-2', 'starting'));
@@ -402,7 +402,7 @@ test('usage limit (SF-072): a parked job counts against max_running for the queu
   const store = new QueueStore(env.state, 3);
   await store.write({ ...(await store.read()), max_running: 2 });
   const config = loadConfig({ SF_STATE_DIR: env.state, SF_CLAUDE: FAKE });
-  const execution = new Execution(config, (name) => resolveWorkspace(name, env.config));
+  const execution = new Execution(config, (name) => resolveWorkspace(name, env.config), undefined, undefined, { maxRunning: async () => (await store.read()).max_running });
   await assert.rejects(execution.start('app', 'L-9', { queued: true }), { code: 'job_limit', message: '2 jobs run (L-1 waiting_limit, L-3 waiting_limit); the limit is 2.' });
   assert.equal(await execution.limitReset('app', 'L-2', at, true), 'skipped');
   assert.equal(await execution.limitReset('app', 'L-3', at, true), 'skipped', 'parked again since the queue saw it');

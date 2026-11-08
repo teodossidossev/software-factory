@@ -127,7 +127,7 @@ async function world(name: string, options: { web?: boolean; recheckMs?: number 
   const jobs = new JobStore(env.state);
   const store = new QueueStore(env.state, 3);
   const resolve = (workspace: string) => resolveWorkspace(workspace, env.config);
-  const execution = new FakeExecution(jobs, new Execution(config(env), resolve));
+  const execution = new FakeExecution(jobs, new Execution(config(env), resolve, undefined, undefined, { maxRunning: async () => (await store.read()).max_running }));
   const setup = new Setup({ configDir: env.config, jobs, exclusive: (work) => work({} as ExclusiveScope) });
   const make = (): RunQueue => new RunQueue(store, execution, setup, jobs, {
     resolve, ...(options.recheckMs !== undefined ? { recheckMs: options.recheckMs } : {}),

@@ -19,7 +19,7 @@ import { parseArgs } from 'node:util';
 import { open, readFile, realpath } from 'node:fs/promises';
 import { addAttachment, checkSize, removeAttachment } from './attachments.js';
 import { openInBrowser } from './browser.js';
-import { envFilePath, gateConfig, gateLevelSetting, handoffSetting, loadConfig, loadEnvFile, rulesMaxBytes, stateDir } from './config.js';
+import { type Config, envFilePath, gateConfig, gateLevelSetting, handoffSetting, loadConfig, loadEnvFile, rulesMaxBytes, stateDir } from './config.js';
 import { Digests } from './digest-run.js';
 import { DigestSchedule } from './digest-schedule.js';
 import {
@@ -28,7 +28,7 @@ import {
 } from './dashboard.js';
 import { FactoryError } from './errors.js';
 import { currentExplanation, Explainer, explanationLines } from './explain.js';
-import { Execution, type StateListener } from './execution.js';
+import { Execution, type ExecutionOptions, type StateListener } from './execution.js';
 import { forgeSettings, withoutHostTokens } from './forge.js';
 import { codexVersion } from './gate.js';
 import { checkTerms, commitsToCheck, type CommitSpec, type GuardHit, hitReport, installHook, scanBranch, scanChange, scanCommits, scanMrText, worktreeTree } from './guard.js';
@@ -55,6 +55,7 @@ import { CheckStore, checkLines, checkSettings, refuseDraft, runTaskCheck, TaskC
 import { AutoChecks, planCheck } from './task-check-auto.js';
 import { TicketHistory } from './ticket-history.js';
 import { parseFrontMatter, readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
+import { type TestHooks, testHooks } from './test-hooks.js';
 import { gitToplevel, runGit } from './git.js';
 import { resolveTarget } from './mr.js';
 import { collectRules, readJobRulesList, rulesLines } from './rules-docs.js';
@@ -173,7 +174,8 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     dashboard?.onStateChange(job, from);
     reschedule(job, from);
   };
-  const execution = new Execution(config, (name) => resolveWorkspace(name), onStateChange, handbook.text, testLockProc());
+  const tests = testHooks();
+  const execution = new Execution(config, (name) => resolveWorkspace(name), onStateChange, handbook.text, executionOptions(config, tests));
   // The tickets' history (SF-081): New ticket and Save (Setup) and write_task (the MCP server)
   // record the Task file's writes; Execution records its Fix sections itself.
   const history = new TicketHistory(config.stateDir);
@@ -227,11 +229,10 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   // ready or failed is notified like a job.
   if (config.taskCheckAuto) {
     const notifySettings = notifyConfig();
-    // Tests only (SF_TEST_HOOKS=on): a shorter time from the last trigger to the check.
-    const testDelay = process.env.SF_TEST_HOOKS === 'on' && /^\d+$/.test(process.env.SF_TEST_TASK_CHECK_DELAY_MS ?? '') ? Number(process.env.SF_TEST_TASK_CHECK_DELAY_MS) : undefined;
     autoChecks = new AutoChecks({
       checks, jobs, resolve: (name) => resolveWorkspace(name), parallel: config.taskCheckParallel,
-      ...(testDelay !== undefined ? { delayMs: testDelay } : {}),
+      // A test hook: a shorter time from the last trigger to the check.
+      ...(tests.taskCheckDelayMs !== undefined ? { delayMs: tests.taskCheckDelayMs } : {}),
       workspaces: async () => Object.entries((await loadRegistry()).workspaces).map(([name, entry]) => ({ name, workCheckout: entry.read_checkout })),
       onCheckEnded: (record) => {
         dashboard?.refreshSetup();
@@ -241,13 +242,12 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
       update: { updating: () => updateMarked(config.stateDir), skipped: (workspace, ticket) => recordSkippedCheck(config.stateDir, { workspace, ticket }) },
     });
   }
-  const testHooks = process.env.SF_TEST_HOOKS === 'on';
   // The port the MCP endpoint bound, once it listens (SF_PORT=0: any free port).
   let boundMcpPort: number | undefined;
   // The socket first: it refuses a second sf serve on the same state before recovery touches it.
   const socket = await listenSocket(config.stateDir, socketHandler({
     execution, queue: runQueue, checks, digests, mcpPort: () => boundMcpPort,
-    stateDir: config.stateDir, testHooks, onQueueChange: () => dashboard?.refreshSetup(),
+    stateDir: config.stateDir, testHooks: tests, onQueueChange: () => dashboard?.refreshSetup(),
   }));
   let server;
   // The updating marker at the start (SF-101): the jobs of a finished (restart_pending) or dead
@@ -332,7 +332,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   const markerWatch = new MarkerWatch(config.stateDir, atStart.gated, {
     resume: ({ workspace, ticket }) => execution.resumePaused(workspace, ticket),
     catchUp,
-  }, testHooks && /^\d+$/.test(process.env.SF_TEST_MARKER_POLL_MS ?? '') ? Number(process.env.SF_TEST_MARKER_POLL_MS) : MARKER_POLL_MS);
+  }, tests.markerPollMs ?? MARKER_POLL_MS);
   if (atStart.resume !== undefined) {
     markerWatch.finish(atStart.resume).catch((error: unknown) => console.error(error)).finally(() => markerWatch.start());
   } else {
@@ -573,13 +573,14 @@ async function viaServer(command: Command, args: string[]): Promise<void> {
   }
 }
 
-// Tests only (SF_TEST_HOOKS=on, SF-105): SF_TEST_PROC_DIR, a /proc of the test's own that the
-// sandbox's config lock check scans instead of the real one, so that the machine's other processes
-// cannot keep a test's lock. sf serve, its runners (sf run inherits the environment) and sf
-// check-task read it; without SF_TEST_HOOKS=on it is ignored.
-function testLockProc(): { lockProc?: string } {
-  const dir = process.env.SF_TEST_PROC_DIR;
-  return process.env.SF_TEST_HOOKS === 'on' && dir !== undefined && dir !== '' ? { lockProc: dir } : {};
+// What every Execution of sf serve, its runners and sf check-task is given (SF-142): the /proc of a
+// test hook (TestHooks.procDir, SF-105) for the sandbox's config lock check, the real one without
+// it; and the run queue's limit for its own starts (SF-071), max_running of queue.json read at each.
+function executionOptions(config: Config, hooks: TestHooks): ExecutionOptions {
+  return {
+    ...(hooks.procDir !== undefined ? { lockProc: hooks.procDir } : {}),
+    maxRunning: async () => (await new QueueStore(config.stateDir, config.maxJobs).read()).max_running,
+  };
 }
 
 // `sf run <workspace> <ticket>` (SF-042): the job's runner, started detached by sf serve. Runs the
@@ -605,7 +606,7 @@ async function run(args: string[]): Promise<void> {
     sending.add(sent);
     void sent.finally(() => sending.delete(sent));
   };
-  const execution = new Execution(config, (name) => resolveWorkspace(name), onStateChange, handbook.text, { runner: { workspace, ticket }, ...testLockProc() });
+  const execution = new Execution(config, (name) => resolveWorkspace(name), onStateChange, handbook.text, { runner: { workspace, ticket }, ...executionOptions(config, testHooks()) });
   console.log(`${new Date().toISOString()} runner ${process.pid} for ${workspace}/${ticket} started`);
   await runJob(jobs.dir(workspace, ticket), execution, { settle: async () => void (await Promise.allSettled([...sending])) });
   console.log(`${new Date().toISOString()} runner ${process.pid} for ${workspace}/${ticket} ended`);
@@ -676,7 +677,7 @@ async function checkTask(args: string[]): Promise<void> {
   console.log([...checkLines(record), '', `stored: ${path}`].join('\n'));
   // The check's worktree shared the checkout's Git directory: the config lock its sandbox left
   // goes as after a check of sf serve's, unless a job of the workspace runs (SF-085).
-  await new Execution(config, (workspaceName) => resolveWorkspace(workspaceName), undefined, undefined, testLockProc()).afterTaskCheck(name, ticket);
+  await new Execution(config, (workspaceName) => resolveWorkspace(workspaceName), undefined, undefined, executionOptions(config, testHooks())).afterTaskCheck(name, ticket);
   if (record.status === 'failed') {
     process.exitCode = 1;
   }

@@ -5,8 +5,10 @@ import { GATE_REVIEWER } from '../gate.js';
 import { claudeReviews, type FileChange, type Job } from '../jobs.js';
 import { DEFAULT_PAGE_BYTES, MAX_PAGE_BYTES, MIN_PAGE_BYTES, pageBuffer } from '../repo-files.js';
 import { actedVerdict, REVIEWER } from '../review.js';
-import { type CheckResult, gateSkipped, MAX_REPORT_BYTES, type ReviewStatus, type RunningReview, withoutDropped } from './shared.js';
+import { withoutDropped } from '../stops.js';
 import type { Core } from './core.js';
+import type { CheckResult, ReviewStatus } from './dto.js';
+import { gateSkipped, MAX_REPORT_BYTES, type RunningReview } from './shared.js';
 
 function cutUtf8(text: string, maxBytes: number): string {
   const buffer = Buffer.from(text, 'utf8');

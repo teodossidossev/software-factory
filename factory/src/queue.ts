@@ -21,7 +21,7 @@ import * as z from 'zod/v4';
 import { writeFileAtomic } from './atomic.js';
 import { FactoryError } from './errors.js';
 import type { Execution } from './execution.js';
-import { type Job, type JobStore, now, RUNNING_STATES, TERMINAL_STATES } from './jobs.js';
+import { type Job, type JobStore, now, runningJobs, TERMINAL_STATES } from './jobs.js';
 import { limitResetNotification, type Notification } from './notify.js';
 import { resolveWorkspace, type Workspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import type { DependencyRow, Setup } from './setup.js';
@@ -63,11 +63,6 @@ export type QueueEntry = QueueFile['entries'][number];
 export type QueueError = QueueFile['errors'][number];
 
 const sameTicket = (a: TicketRef, b: TicketRef): boolean => a.workspace === b.workspace && a.ticket === b.ticket;
-
-// The running jobs of every workspace (RUNNING_STATES).
-export function runningJobs(jobs: Job[]): Job[] {
-  return jobs.filter((job) => RUNNING_STATES.includes(job.state));
-}
 
 // The jobs parked on a usage limit (SF-072), in park order (paused.at).
 export function parkedJobs(jobs: Job[]): Job[] {

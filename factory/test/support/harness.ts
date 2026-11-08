@@ -138,8 +138,10 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
     SF_TEST_HOOKS: 'on',
     // The config lock check scans this fake /proc, not the machine's (SF-105).
     ...(env.proc !== undefined ? { SF_TEST_PROC_DIR: env.proc } : {}),
-    // Temporary directories (the Task check's worktree, SF-054) where the test run makes its own.
-    ...(process.env.TMPDIR !== undefined ? { TMPDIR: process.env.TMPDIR } : {}),
+    // Temporary directories (the Task check's worktree, SF-054, under <tmp>/sf-task-checks-<uid>)
+    // in the test run's own directory, never the machine's: the shared one may belong to the user's
+    // factory, or be read-only inside a sandbox.
+    TMPDIR: temp,
     // The zone of the times sf prints: the test file's own (SF-049), else the machine's.
     ...(process.env.TZ !== undefined ? { TZ: process.env.TZ } : {}),
     ...env.extra,

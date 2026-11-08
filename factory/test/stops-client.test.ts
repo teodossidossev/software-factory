@@ -6,9 +6,9 @@ import { test } from 'node:test';
 import { STOP_CODES } from '../src/stops.js';
 import { readScripts } from './support/fake-dom.js';
 
-const STATIC_DIR = new URL('../../static/', import.meta.url);
-// Every script of the page, in load order, as one text.
-const pageSource = async (): Promise<string> => (await readScripts(STATIC_DIR)).map(({ source }) => source).join('\n');
+// Every script of the page, in load order, as one text: the files written by hand (SF-146: web/*.ts
+// for a script built from TypeScript), whose comments and layout the checks below read.
+const pageSource = async (): Promise<string> => (await readScripts('source')).map(({ source }) => source).join('\n');
 
 // What the page decided by hand before SF-129, now the server's.
 const DELETED = [

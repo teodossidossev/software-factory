@@ -90,7 +90,9 @@ the child's (1 when it was killed by a signal). `SF_TEST_CONCURRENCY=<positive i
 `SF_TEST_NICE=0` leaves the priority alone; any other value of either stops the run with exit code 2.
 `npm test -- <args>` passes the arguments on to `node --test`, before the files. `npm run build` removes
 `dist/` first (`scripts/clean.mjs`), so only the current sources are compiled and no compiled test
-of a deleted source runs. `npm test` and `npm run test:browser` both build first. At the repository
+of a deleted source runs. `npm run build` also builds the dashboard's page code (SF-146): the
+TypeScript of `web/` through `tsconfig.web.json` into `dist/web/`, and `npm run typecheck` checks
+both configurations. `npm test` and `npm run test:browser` both build first. At the repository
 root, `npm run build`, `npm run typecheck` and `npm test` run the same scripts in `factory/`. Since
 SF-114 every sf process a test starts is tracked by `test/support/children.ts` and stopped (SIGTERM,
 then SIGKILL after 5 s) at the end of its file, also on a failure or a signal, and a file whose tests
@@ -3250,14 +3252,20 @@ were opened for: opening another job or leaving the job's page closes the confir
 retargets a request, and an answer that arrives for another job changes nothing on the shown one
 (it shows on that job's card and when it is opened again).
 
-The page is plain HTML, CSS and JavaScript from `static/`, with no external resources, under
+The page is plain HTML, CSS and JavaScript, with no external resources, under
 `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self';
 img-src 'self' blob:` (`blob:` for New ticket's thumbnails before upload, SF-064) and `Cache-Control: no-store`; every value is rendered as text.
-The page's JavaScript is nine classic scripts that share its globals, loaded with `defer` in the
-order of `DASHBOARD_SCRIPTS` (`src/dashboard.ts`, SF-136, SF-137); the server serves those and no
-other script, and none is longer than 2,500 lines:
+The HTML, the CSS and the icon are in `static/`. The page's JavaScript is nine classic scripts that
+share its globals, loaded with `defer` in the order of `DASHBOARD_SCRIPTS` (`src/dashboard.ts`,
+SF-136, SF-137); the server serves those and no other script, and none is longer than 2,500 lines.
+The page code is being turned into TypeScript (SF-146 to SF-150): a script with a source
+`web/<name>.ts` is built by `npm run build` into `dist/web/<name>.js` and served from there, the
+others from `static/` until SF-150 (`dashboardScriptFiles` decides, once at start). A file of `web/`
+has no `import` or `export`, so the compiler keeps it a global classic script; `web/types.d.ts`
+types the server payloads the typed code reads (copied from `src/`, never imported), and
+`web/globals.d.ts` declares the globals it uses from the scripts still in `static/`.
 
-- `core.js`: constants, state, the DOM, format and HTTP helpers, the connection tag.
+- `core.js` (built from `web/core.ts`): constants, state, the DOM, format and HTTP helpers, the connection tag.
 - `job-screens.js`: what the job page reads, Task check, Changes, Merge request, Stream.
 - `job-page.js`: the job page's header, composer, hand-over panel, job actions.
 - `board.js`: board, cards, workspaces and dependencies, queue, toast.

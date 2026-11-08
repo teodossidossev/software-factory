@@ -414,8 +414,10 @@ test('changes client: no iteration yet says when the changes come; the divider r
 
 // A browser's querySelectorAll returns a NodeList, which has forEach but none of the other array
 // methods; the fake DOM returns an array, so a call like .find on it passes here and throws there.
+// It reads the files written by hand (web/*.ts for a script built from TypeScript, SF-146), so a
+// line it names is a line to edit.
 test('changes client: the script never calls an array-only method on a querySelectorAll result', async () => {
-  const calls = (await readScripts(STATIC_DIR)).flatMap(({ file, source }) => source.split('\n').map((line, at) => [`${file}:${at + 1}`, line] as const))
+  const calls = (await readScripts('source')).flatMap(({ file, source }) => source.split('\n').map((line, at) => [`${file}:${at + 1}`, line] as const))
     .filter(([, line]) => /querySelectorAll\([^)]*\)\??\.(?!forEach\b|length\b)[A-Za-z]+\(/.test(line));
   assert.deepEqual(calls, []);
 });

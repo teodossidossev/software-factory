@@ -138,10 +138,10 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
     SF_TEST_HOOKS: 'on',
     // The config lock check scans this fake /proc, not the machine's (SF-105).
     ...(env.proc !== undefined ? { SF_TEST_PROC_DIR: env.proc } : {}),
-    // Temporary directories (the Task check's worktree, SF-054, under <tmp>/sf-task-checks-<uid>)
-    // in the test run's own directory, never the machine's: the shared one may belong to the user's
-    // factory, or be read-only inside a sandbox.
-    TMPDIR: temp,
+    // Temporary directories (the Task check's worktree, SF-054, under its parent sf-task-checks-<uid>,
+    // SF-100) in the test run's own directory, never the machine's: the user's running factory owns
+    // <tmp>/sf-task-checks-<uid>, and a sandbox that runs the tests may mask it read-only.
+    TMPDIR: join(temp, 'tmp'),
     // The zone of the times sf prints: the test file's own (SF-049), else the machine's.
     ...(process.env.TZ !== undefined ? { TZ: process.env.TZ } : {}),
     ...env.extra,
@@ -442,6 +442,7 @@ export async function waitFor(served: Served, ticket: string, state: string, ite
 before(async () => {
   temp = await realpath(await mkdtemp(join(tmpdir(), 'sf-exec-')));
   removeOnExit(temp);
+  await mkdir(join(temp, 'tmp'));
   fakeCodex = join(temp, 'fake-codex');
   await writeFile(fakeCodex, `#!/bin/sh\nexec '${process.execPath}' '${FAKE_CODEX_SCRIPT}' "$@"\n`);
   await chmod(fakeCodex, 0o755);

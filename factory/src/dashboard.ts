@@ -17,6 +17,7 @@
 // and saves the Task file (only over the version it read). A ticket's images (SF-064) are uploaded
 // as raw bytes, served and removed through the attachments module's rules (src/attachments.ts).
 import { createHmac, randomBytes } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { open, readFile, rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -66,8 +67,13 @@ export const MAX_TASK_BODY_BYTES = 2 * MAX_TASK_BYTES + 1024;
 // The Host names of the local listener, and the loopback Hosts the remote one takes with a listed Origin.
 const LOOPBACK_NAMES: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '[::1]']);
 const KEEP_ALIVE_MS = 15_000;
-// Compiled to dist/src/dashboard.js; the package root is two levels up.
-const STATIC_DIR = new URL('../../static/', import.meta.url);
+// Compiled to dist/src/dashboard.js; the package root is two levels up. The page's HTML, CSS and
+// icon are in static/; its scripts are in static/ or, once converted to TypeScript, in web/ and
+// built into dist/web/ (SF-146).
+const PACKAGE_DIR = new URL('../../', import.meta.url);
+const STATIC_DIR = new URL('static/', PACKAGE_DIR);
+const WEB_SOURCE_DIR = new URL('web/', PACKAGE_DIR);
+const WEB_BUILD_DIR = new URL('dist/web/', PACKAGE_DIR);
 const SECURITY_HEADERS = {
   'cache-control': 'no-store',
   'x-content-type-options': 'nosniff',
@@ -78,9 +84,23 @@ const SECURITY_HEADERS = {
 // dashboard.html has one deferred <script> per entry, in this order; nothing at the top level of a
 // file uses a name defined in a later one.
 export const DASHBOARD_SCRIPTS = ['core.js', 'job-screens.js', 'job-page.js', 'board.js', 'routing.js', 'ticket-page.js', 'reports.js', 'setup.js', 'main.js'] as const;
+export type DashboardScript = (typeof DASHBOARD_SCRIPTS)[number];
+// The files of each entry of DASHBOARD_SCRIPTS, in load order (SF-146): url, the file served, is the
+// build output dist/web/<name>.js when web/<name>.ts exists, else static/<name>.js; source, the file
+// written by hand, is that web/<name>.ts, else the same static/<name>.js. The dashboard reads url
+// once at start, and the tests read the same files through this function. Once SF-150 converts the
+// last script, every entry comes from dist/web/ and the fallback goes.
+export function dashboardScriptFiles(): Array<{ file: DashboardScript; url: URL; source: URL }> {
+  return DASHBOARD_SCRIPTS.map((file) => {
+    const typed = new URL(file.replace(/\.js$/, '.ts'), WEB_SOURCE_DIR);
+    return existsSync(typed)
+      ? { file, url: new URL(file, WEB_BUILD_DIR), source: typed }
+      : { file, url: new URL(file, STATIC_DIR), source: new URL(file, STATIC_DIR) };
+  });
+}
+// The page's other files, all in static/.
 const STATIC_FILES: Record<string, { file: string; type: string }> = {
   '': { file: 'dashboard.html', type: 'text/html; charset=utf-8' },
-  ...Object.fromEntries(DASHBOARD_SCRIPTS.map((file) => [file, { file, type: 'text/javascript; charset=utf-8' }])),
   'app.css': { file: 'app.css', type: 'text/css; charset=utf-8' },
   'favicon.svg': { file: 'favicon.svg', type: 'image/svg+xml; charset=utf-8' },
 };
@@ -1107,6 +1127,9 @@ export async function startDashboard(
   const files = new Map<string, { body: Buffer; type: string }>();
   for (const [path, { file, type }] of Object.entries(STATIC_FILES)) {
     files.set(path, { body: await readFile(new URL(file, STATIC_DIR)), type });
+  }
+  for (const { file, url } of dashboardScriptFiles()) {
+    files.set(file, { body: await readFile(url), type: 'text/javascript; charset=utf-8' });
   }
   // The token persists across starts, so a bookmark keeps working; a missing or unusable file
   // gets a new one (sf dashboard --rotate removes the file on purpose).

@@ -180,6 +180,12 @@ Any other value is ignored. It is read once, at Start.
 Coding rules reach the Implementer, the reviewers and the Task check without you: `AGENTS.md` and
 the Markdown files it links to, and the user's own rules files; reference them by path, never copy them into the Task.
 
+In the factory's own repository, the dashboard's page code is TypeScript in `factory/web/` (SF-146;
+the scripts still in `factory/static/` move there with SF-147 to SF-150): strict, with no `any`, and
+each file a global classic script, with no `import` or `export`. A new page file goes into
+`DASHBOARD_SCRIPTS` (`factory/src/dashboard.ts`), in its load order, and gets its `<script>` in
+`dashboard.html`.
+
 The user can attach images to a ticket (screenshots, pasted on the dashboard or added with
 `sf attach`): they live in `.software-factory/<ticket>/` next to the Task file, at most 10 of
 PNG, JPEG, WebP or GIF, 5 MB each. Read them with `read_attachment`. In the Task file, refer to an

@@ -3,13 +3,17 @@
 // startDashboard with a fake DashboardActions (methods per route, token, Origin, content type,
 // body bounds, strict JSON, error mapping, a pending and a disconnected approve), then end to
 // end through `sf serve`, where the same POSTs reach the real Execution and the fake Implementer.
+// The job and queue routes are those of POST_ROUTES (SF-139, src/dashboard-routes.ts): the tests
+// iterate over the table, each route with a body it takes and the call it makes.
 import assert from 'node:assert/strict';
 import { mkdir, readFile, rm, stat } from 'node:fs/promises';
 import { request } from 'node:http';
 import { connect } from 'node:net';
 import { join, resolve } from 'node:path';
 import { mock, test } from 'node:test';
-import { ACTIONS, CONFIRM_ROUTES, DASHBOARD_SCRIPTS, MAX_ACTION_BODY_BYTES, startDashboard } from '../src/dashboard.js';
+import { socketCommand } from '../src/commands.js';
+import { DASHBOARD_SCRIPTS, MAX_ACTION_BODY_BYTES, startDashboard } from '../src/dashboard.js';
+import { MAX_MR_BODY_BYTES, openWhileUpdating, POST_ROUTES, type PostRoute, type RouteName } from '../src/dashboard-routes.js';
 import { FactoryError } from '../src/errors.js';
 import { JobStore } from '../src/jobs.js';
 import { factoryPrompt } from '../src/prompts.js';
@@ -39,11 +43,116 @@ async function until(condition: () => boolean): Promise<void> {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Each route of POST_ROUTES (SF-139) as the dashboard answered it before the table: a body it
+// takes, the one fake call it makes (fakeActions' or fakeQueue's), what the pages get again, the
+// socket command it mirrors and whether it needs the ticket on the remote port.
+const ROUTES: Record<RouteName, { body: unknown; call: unknown[]; refresh?: PostRoute['refresh']; command?: string; confirm?: true }> = {
+  approve: { body: { as_is: true }, call: ['approve', 'app', 'T-1'], command: 'approve', confirm: true },
+  abort: { body: { discard: true }, call: ['abort', 'app', 'T-1', true], command: 'abort' },
+  say: { body: { message: 'hi' }, call: ['say', 'app', 'T-1', 'hi'], command: 'say' },
+  review: { body: {}, call: ['retryReview', 'app', 'T-1'], command: 'review' },
+  retry: { body: {}, call: ['retryMr', 'app', 'T-1'], command: 'retry', confirm: true },
+  accept: { body: {}, call: ['acceptGate', 'app', 'T-1'], command: 'accept' },
+  settle: { body: { id: 'R1', decision: 'fix', note: 'n' }, call: ['settle', 'app', 'T-1', 'R1', 'fix', 'n'], command: 'settle' },
+  simplify: { body: {}, call: ['simplify', 'app', 'T-1'], command: 'simplify' },
+  archive: { body: {}, call: ['archiveFinished', 'app', 'T-1'], refresh: 'jobs' },
+  'mr-create': { body: {}, call: ['createMergeRequest', 'app', 'T-1'], command: 'mr-create', confirm: true },
+  'mr-merge': { body: {}, call: ['mergeMergeRequest', 'app', 'T-1'], command: 'mr-merge', confirm: true },
+  'mr-status': { body: {}, call: ['mergeRequestStatus', 'app', 'T-1'], refresh: 'job', command: 'mr-status' },
+  pause: { body: {}, call: ['pause', 'app', 'T-1'], command: 'pause' },
+  resume: { body: { message: 'go' }, call: ['resumePaused', 'app', 'T-1', 'go'], command: 'resume' },
+  restart: { body: { keep_files: true }, call: ['restart', 'app', 'T-1', true], refresh: 'jobs', command: 'restart' },
+  handover: { body: {}, call: ['handover', 'app', 'T-1'], command: 'handover' },
+  takeback: { body: {}, call: ['takeback', 'app', 'T-1'], command: 'takeback' },
+  'handed-done': { body: {}, call: ['handedDone', 'app', 'T-1'], command: 'handed-done' },
+  'mr-save': { body: { title: 't', body: 'b', branch: 'T-1-x' }, call: ['saveMr', 'app', 'T-1', { title: 't', body: 'b', branch: 'T-1-x' }], refresh: 'job' },
+  'mr-reset': { body: {}, call: ['resetMr', 'app', 'T-1'], refresh: 'job' },
+  'queue-add': { body: { workspace: 'app', ticket: 'T-5', at: 2 }, call: ['add', 'app', 'T-5', 2], refresh: 'setup', command: 'queue-add' },
+  'queue-remove': { body: { workspace: 'app', ticket: 'T-5' }, call: ['remove', 'app', 'T-5'], refresh: 'setup', command: 'queue-remove' },
+  'queue-move': { body: { workspace: 'app', ticket: 'T-5', to: 1 }, call: ['move', 'app', 'T-5', 1], refresh: 'setup', command: 'queue-move' },
+  'queue-limit': { body: { max_running: 4 }, call: ['limit', 4], refresh: 'setup', command: 'queue-limit' },
+  'queue-hold': { body: { reason: 'r' }, call: ['hold', 'r'], refresh: 'setup', command: 'queue-hold' },
+  'queue-release': { body: {}, call: ['release'], refresh: 'setup', command: 'queue-release' },
+  'queue-rule': { body: { rule: 'hold' }, call: ['rule', 'hold'], refresh: 'setup', command: 'queue-on-limit' },
+  'queue-force': { body: { workspace: 'app', ticket: 'T-5' }, call: ['force', 'app', 'T-5'], refresh: 'setup', command: 'queue-force' },
+};
+const ROUTE_NAMES = Object.keys(POST_ROUTES) as RouteName[];
+const JOB_ROUTES = ROUTE_NAMES.filter((name) => POST_ROUTES[name].kind === 'job');
+// A route's path: api/jobs/app/T-1/<name> or api/queue/<action>.
+const routePath = (name: RouteName): string => (POST_ROUTES[name].kind === 'job' ? `api/jobs/app/T-1/${name}` : `api/queue/${name.slice('queue-'.length)}`);
+
+test('POST_ROUTES (SF-139): every route as before: its kind, what the pages get again, its body bound, its socket command (an entry of commands.ts), the update gate (pause and mr-status open) and the confirm routes', () => {
+  assert.deepEqual(ROUTE_NAMES, Object.keys(ROUTES));
+  assert.deepEqual(JOB_ROUTES, [
+    'approve', 'abort', 'say', 'review', 'retry', 'accept', 'settle', 'simplify', 'archive', 'mr-create', 'mr-merge', 'mr-status', 'pause', 'resume', 'restart', 'handover', 'takeback', 'handed-done',
+    'mr-save', 'mr-reset',
+  ]);
+  for (const name of ROUTE_NAMES) {
+    const route = POST_ROUTES[name];
+    const expected = ROUTES[name];
+    assert.equal(route.kind, name.startsWith('queue-') ? 'queue' : 'job', name);
+    assert.deepEqual([route.refresh, route.command, route.confirm], [expected.refresh, expected.command, expected.confirm], name);
+    assert.equal(route.bodyLimit, name === 'mr-save' || name === 'mr-reset' ? MAX_MR_BODY_BYTES : undefined, name);
+    if (route.command !== undefined) {
+      assert.notEqual(socketCommand(route.command), undefined, `${name}: ${route.command}`);
+    }
+  }
+  assert.deepEqual(ROUTE_NAMES.filter((name) => openWhileUpdating(POST_ROUTES[name])), ['mr-status', 'pause']);
+  assert.deepEqual(ROUTE_NAMES.filter((name) => POST_ROUTES[name].confirm === true), ['approve', 'retry', 'mr-create', 'mr-merge']);
+});
+
+test('dashboard actions (SF-139): every route of POST_ROUTES answers as before: POST only, its body strictly, its one call with the arguments, the result passed through', async () => {
+  const fake = fakeActions();
+  const queue = fakeQueue({
+    max_running: 2, running: 0, held: false, hold_reason: null, on_limit: 'resume-then-queue', limit_hold: null, errors: [], entries: [], next: null,
+  });
+  await withDashboard('dash-act-table', fake, async (dashboard) => {
+    const base = dashboard.url;
+    for (const name of ROUTE_NAMES) {
+      const path = routePath(name);
+      for (const method of ['GET', 'PUT']) {
+        const reply = await act(base, path, {}, { method });
+        assert.deepEqual([reply.status, reply.headers.allow, reply.body], [405, 'POST', ''], `${method} ${name}`);
+      }
+      const bad = await act(base, path, { ...(ROUTES[name].body as object), extra: 1 });
+      assert.deepEqual(error(bad), { status: 400, code: 'invalid_body' }, name);
+      assert.equal(JSON.parse(bad.body).error.message, `${name} expects ${POST_ROUTES[name].shape}; no other keys, no null.`);
+      assert.deepEqual([fake.calls, queue.calls], [[], []], name);
+      fake.answer = { from: name };
+      queue.answer = { from: name };
+      assert.deepEqual(result(await act(base, path, ROUTES[name].body)), { from: name }, name);
+      assert.deepEqual(POST_ROUTES[name].kind === 'job' ? [fake.calls, queue.calls] : [queue.calls, fake.calls], [[ROUTES[name].call], []], name);
+      fake.calls.length = 0;
+      queue.calls.length = 0;
+    }
+  }, undefined, { queue });
+});
+
+test('dashboard actions (SF-139): a name not in POST_ROUTES is no action: a GET is an empty 404, a POST 405 (Allow: GET) as before, nothing is dispatched', async () => {
+  const fake = fakeActions();
+  const queue = fakeQueue({
+    max_running: 2, running: 0, held: false, hold_reason: null, on_limit: 'resume-then-queue', limit_hold: null, errors: [], entries: [], next: null,
+  });
+  await withDashboard('dash-act-unknown', fake, async (dashboard) => {
+    const base = dashboard.url;
+    const paths = [
+      ...['other', 'start', 'reset', 'constructor', 'toString', '__proto__', 'hasOwnProperty', 'queue-add', 'queue-on-limit', 'Approve'].map((name) => `api/jobs/app/T-1/${name}`),
+      ...['clear', 'list', 'on-limit', 'approve', 'constructor', '__proto__', 'queue-add'].map((name) => `api/queue/${name}`),
+    ];
+    for (const path of paths) {
+      assert.deepEqual([(await fetchRaw(new URL(path, base))).status], [404], `GET ${path}`);
+      const posted = await act(base, path, {});
+      assert.deepEqual([posted.status, posted.headers.allow, posted.body], [405, 'GET', ''], `POST ${path}`);
+    }
+    assert.deepEqual([fake.calls, queue.calls], [[], []]);
+  }, undefined, { queue });
+});
+
 test('dashboard actions: POST only on the action routes, GET only elsewhere, 404 for bad names and jobs; nothing is dispatched', async () => {
   const fake = fakeActions();
   await withDashboard('dash-act-routes', fake, async (dashboard) => {
     const base = dashboard.url;
-    for (const action of ACTIONS) {
+    for (const action of JOB_ROUTES) {
       for (const method of ['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']) {
         const reply = await act(base, `api/jobs/app/T-1/${action}`, {}, { method });
         assert.deepEqual([reply.status, reply.headers.allow, reply.body], [405, 'POST', ''], `${method} ${action}`);
@@ -622,7 +731,7 @@ test('dashboard retry (SF-087): POST only, the action checks, Execution.retryMr 
   });
 });
 
-test('dashboard confirm (SF-126): on the remote port approve, retry, mr-create and mr-merge need "confirm" equal to the ticket, else 409 confirm_required and nothing runs; locally they run without it', async () => {
+test('dashboard confirm (SF-126): on the remote port the confirm routes of POST_ROUTES (approve, retry, mr-create and mr-merge) need "confirm" equal to the ticket, else 409 confirm_required and nothing runs; locally they run without it; the other job routes need none', async () => {
   const remoteOrigin = 'https://pc.tail1234.ts.net';
   const store = await fixture('dash-act-confirm');
   const fake = fakeActions();
@@ -633,8 +742,10 @@ test('dashboard confirm (SF-126): on the remote port approve, retry, mr-create a
     const headers = { origin: remoteOrigin, 'tailscale-user-login': 'alice@github' };
     const remoteAct = (action: string, body: unknown): Promise<Reply> => act(remote, `api/jobs/app/T-1/${action}`, body, { host: 'pc.tail1234.ts.net', headers });
     const methods: Record<string, string> = { approve: 'approve', retry: 'retryMr', 'mr-create': 'createMergeRequest', 'mr-merge': 'mergeMergeRequest' };
-    assert.deepEqual(CONFIRM_ROUTES, Object.keys(methods));
-    for (const [action, method] of Object.entries(methods)) {
+    const confirmRoutes = JOB_ROUTES.filter((name) => POST_ROUTES[name].confirm === true);
+    assert.deepEqual(confirmRoutes, Object.keys(methods));
+    for (const action of confirmRoutes) {
+      const method = methods[action]!;
       // Without confirm, with another ticket, another case or a non-string: refused before anything runs.
       for (const body of [{}, { confirm: 'T-0' }, { confirm: 't-1' }, { confirm: '' }, { confirm: 'app/T-1' }]) {
         const reply = await remoteAct(action, body);
@@ -656,11 +767,11 @@ test('dashboard confirm (SF-126): on the remote port approve, retry, mr-create a
     }
     // approve keeps as_is beside confirm.
     assert.equal((await remoteAct('approve', { as_is: true, confirm: 'T-1' })).status, 200);
-    // The other actions need no confirm on the remote port (none of them pushes or merges).
-    for (const [action, method] of [['abort', 'abort'], ['mr-status', 'mergeRequestStatus'], ['accept', 'acceptGate'], ['handover', 'handover'], ['pause', 'pause']] as const) {
+    // The other job routes need no confirm on the remote port (none of them pushes or merges).
+    for (const action of JOB_ROUTES.filter((name) => POST_ROUTES[name].confirm !== true)) {
       fake.calls.length = 0;
-      assert.equal((await remoteAct(action, {})).status, 200, action);
-      assert.equal(fake.calls[0]![0], method, action);
+      assert.equal((await remoteAct(action, ROUTES[action].body)).status, 200, action);
+      assert.deepEqual(fake.calls, [ROUTES[action].call], action);
     }
     assert.deepEqual(error(await remoteAct('mr-status', { confirm: 'T-1' })), { status: 400, code: 'invalid_body' });
   } finally {

@@ -3,6 +3,7 @@
 import { stat } from 'node:fs/promises';
 import { FactoryError } from '../errors.js';
 import { GATE_REVIEWER } from '../gate.js';
+import { internalError } from '../http.js';
 import type { Job, JobMr, JobState, JobStore, PauseStep } from '../jobs.js';
 import { SIMPLIFIER, SCOPE_PROBLEM, SENSITIVE_PROBLEM } from '../ledger.js';
 import type { Workspace } from '../registry.js';
@@ -135,7 +136,7 @@ export function mrFailure(error: unknown): { code: string; message: string } {
     return { code: error.code, message: error.message };
   }
   console.error(error);
-  return { code: 'internal_error', message: 'The merge request failed inside the factory.' };
+  return internalError('The merge request failed inside the factory.');
 }
 
 // The paths of the factory's fix items (src/review.ts, unacceptedItems) by kind, each with its

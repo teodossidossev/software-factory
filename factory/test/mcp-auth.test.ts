@@ -11,13 +11,15 @@ import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { replaceSecret } from '../src/redact.js';
-import { MCP_TOKEN_FILE, profileHasUrl, profileUrlLine, redactMcpToken, rewriteProfileUrl, sameSecret } from '../src/server.js';
+import { sameSecret } from '../src/http.js';
+import { MCP_TOKEN_FILE, profileHasUrl, profileUrlLine, redactMcpToken, rewriteProfileUrl } from '../src/server.js';
 import { trackChild } from './support/children.js';
 import { call, CLI, type Env, newEnv, newRepo, processEnv, runCli, serve, type Served, stop, task, temp } from './support/harness.js';
 
 const SF_BIN = fileURLToPath(new URL('../../bin/sf', import.meta.url));
 const TUNNEL_SCRIPT = fileURLToPath(new URL('../../../scripts/sf-tunnel.sh', import.meta.url));
 const SERVER_SOURCE = fileURLToPath(new URL('../../src/server.ts', import.meta.url));
+const HTTP_SOURCE = fileURLToPath(new URL('../../src/http.ts', import.meta.url));
 const OTHER = 'b'.repeat(64);
 
 const tokenOf = async (env: Env): Promise<string> => (await readFile(join(env.state, MCP_TOKEN_FILE), 'utf8')).trim();
@@ -54,15 +56,18 @@ test('redact.ts replaceSecret and redactMcpToken: one known secret and any token
   assert.equal(redactMcpToken(`http://h/mcp/${OTHER} /d/${OTHER}/`, undefined), `http://h/mcp/<token> /d/${OTHER}/`);
 });
 
-test('the token is compared in constant time: sameSecret with timingSafeEqual on digests, used by the endpoint', async () => {
+test('the token is compared in constant time: sameSecret of src/http.ts with timingSafeEqual on digests, used by the endpoint', async () => {
   assert.equal(sameSecret(OTHER, OTHER), true);
   assert.equal(sameSecret(OTHER, 'c'.repeat(64)), false);
   assert.equal(sameSecret('short', OTHER), false);
   assert.equal(sameSecret('', OTHER), false);
+  assert.match(await readFile(HTTP_SOURCE, 'utf8'), /export function sameSecret[\s\S]{0,300}timingSafeEqual\(digest\(given\), digest\(expected\)\)/);
   const source = await readFile(SERVER_SOURCE, 'utf8');
-  assert.match(source, /export function sameSecret[\s\S]{0,300}timingSafeEqual\(digest\(given\), digest\(expected\)\)/);
+  assert.match(source, /import \{[^}]*\bsameSecret\b[^}]*\} from '\.\/http\.js'/);
   assert.match(source, /!sameSecret\(given, token\)/);
   assert.doesNotMatch(source, /given === token|token === given/);
+  // The one compare: no other timingSafeEqual in the endpoint.
+  assert.doesNotMatch(source, /timingSafeEqual/);
 });
 
 test('the profile line scan: the url of the main channel only, the layouts tunnel-client writes; anything else is profile_mcp_url_unexpected', () => {

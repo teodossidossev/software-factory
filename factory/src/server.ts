@@ -7,11 +7,9 @@
 // (SF-099): in the path, /mcp/<token>, or as Authorization: Bearer <token> on /mcp, read from the
 // token file on every request. Jobs are started, reviewed and approved by the user (the
 // dashboard, the CLI) and the reviewers, never through this endpoint.
-import { createHash, timingSafeEqual } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, readFile } from 'node:fs/promises';
-import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { localhostHostValidation, localhostOriginValidation, toNodeHandler } from '@modelcontextprotocol/node';
@@ -21,6 +19,7 @@ import { ATTACHMENT_NAME_PATTERN, MAX_ATTACHMENT_BYTES, readAttachment } from '.
 import { writeFileAtomic } from './atomic.js';
 import { newToken, readTokenFile } from './dashboard.js';
 import { FactoryError } from './errors.js';
+import { internalError, listen, LOOPBACK_HOST, sameSecret, sendJson } from './http.js';
 import { replaceSecret } from './redact.js';
 import type { Execution } from './execution.js';
 import type { RunQueue } from './queue.js';
@@ -35,7 +34,6 @@ import { checkNeed, isDraft, MAX_TASK_BYTES, TICKET_DESCRIPTION, TICKET_PATTERN,
 import type { TicketHistory } from './ticket-history.js';
 
 export const SERVER_NAME = 'software-factory';
-const LOOPBACK_HOST = '127.0.0.1';
 const MCP_PATH = '/mcp';
 // Compiled to dist/src/server.js; the package root is two levels up.
 const PACKAGE_ROOT = new URL('../../', import.meta.url);
@@ -45,13 +43,6 @@ export interface Handbook {
   text: string;
   // The "## Quick start" section, sent as server instructions.
   quickStart: string;
-}
-
-export class PortInUseError extends Error {
-  constructor(port: number) {
-    super(`Port ${port} on ${LOOPBACK_HOST} is already in use.`);
-    this.name = 'PortInUseError';
-  }
 }
 
 // The MCP token (SF-099): the secret every request to the endpoint carries, kept in the state
@@ -205,12 +196,6 @@ export async function replaceMcpToken(stateDir: string): Promise<void> {
 export async function rotateMcpToken(stateDir: string): Promise<void> {
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   await writeFileAtomic(join(stateDir, MCP_TOKEN_FILE), Buffer.from(`${newToken()}\n`), 0o600);
-}
-
-// Two secrets compared in constant time: the SHA-256 of each, so not even their lengths leak.
-export function sameSecret(given: string, expected: string): boolean {
-  const digest = (text: string): Buffer => createHash('sha256').update(text, 'utf8').digest();
-  return timingSafeEqual(digest(given), digest(expected));
 }
 
 // text with the token, and any token after /mcp/, shown as TOKEN_LABEL.
@@ -398,8 +383,7 @@ function toolResult<T extends Record<string, unknown>>(structuredContent: T) {
 }
 
 function toolError(error: unknown) {
-  let code = 'internal_error';
-  let message = 'The request failed inside the factory.';
+  let { code, message }: { code: string; message: string } = internalError();
   if (error instanceof FactoryError || error instanceof RepoReadError) {
     ({ code, message } = error);
   } else {
@@ -751,12 +735,15 @@ export interface RunningServer {
   close(): Promise<void>;
 }
 
+// The endpoint's own JSON answers keep their content type, without a charset.
+const PLAIN_JSON = { 'content-type': 'application/json' };
+
 // What a request without the token gets (SF-099): never the token, nor why the file failed.
-const UNAUTHORIZED_BODY = JSON.stringify({
+const UNAUTHORIZED_BODY = {
   jsonrpc: '2.0',
   error: { code: -32001, message: "Unauthorized: this endpoint needs the factory's MCP URL with its token; run sf mcp-url on the factory's machine." },
   id: null,
-});
+};
 
 // The token a request carries: the path's on /mcp/<token>, the bearer header's on /mcp; undefined
 // when it carries none; null when the path is not the endpoint's.
@@ -770,20 +757,7 @@ function givenToken(req: IncomingMessage, pathname: string): string | undefined 
 }
 
 function unauthorized(res: ServerResponse): void {
-  res.writeHead(401, { 'content-type': 'application/json', 'www-authenticate': 'Bearer', 'cache-control': 'no-store' }).end(UNAUTHORIZED_BODY);
-}
-
-function listen(server: HttpServer, port: number): Promise<AddressInfo> {
-  return new Promise((resolve, reject) => {
-    const onError = (error: NodeJS.ErrnoException): void => {
-      reject(error.code === 'EADDRINUSE' ? new PortInUseError(port) : error);
-    };
-    server.once('error', onError);
-    server.listen(port, LOOPBACK_HOST, () => {
-      server.off('error', onError);
-      resolve(server.address() as AddressInfo);
-    });
-  });
+  sendJson(res, 401, UNAUTHORIZED_BODY, { ...PLAIN_JSON, 'www-authenticate': 'Bearer', 'cache-control': 'no-store' });
 }
 
 // stateDir: where the MCP token is read, on every request (no cache: a rotated token counts at
@@ -825,12 +799,12 @@ export async function startServer(
     // Request targets such as "//" are not parseable; answer 400 instead of throwing.
     const target = URL.parse(req.url ?? '/', 'http://localhost');
     if (target === null) {
-      res.writeHead(400, { 'content-type': 'application/json' }).end('{"error":"bad request target"}');
+      sendJson(res, 400, { error: 'bad request target' }, PLAIN_JSON);
       return;
     }
     const given = givenToken(req, target.pathname);
     if (given === null) {
-      res.writeHead(404, { 'content-type': 'application/json' }).end('{"error":"not found"}');
+      sendJson(res, 404, { error: 'not found' }, PLAIN_JSON);
       return;
     }
     const token = await currentToken();
@@ -853,7 +827,7 @@ export async function startServer(
     });
   });
 
-  const address = await listen(httpServer, port);
+  const address = await listen(httpServer, port, 'SF_PORT');
   return {
     url: new URL(mcpBaseUrl(address.port)),
     port: address.port,

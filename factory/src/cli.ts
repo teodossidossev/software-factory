@@ -43,7 +43,7 @@ import { followJobs, runJob } from './runner.js';
 import { jobNotification, notifyConfig, notifyTaskCheck, sendNotification, stateNotifier } from './notify.js';
 import { configDir, HANDOFF_MODES, ignoredWorkCheckouts, isHandoffMode, isWorkspaceColor, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_COLORS, workspaceColor, type WorkspaceEntry } from './registry.js';
 import {
-  ensureMcpToken, keepProfilePrivate, loadHandbook, mcpBaseUrl, mcpUrl, packageVersion, PortInUseError, probeMcp, profileHasUrl, readMcpToken, redactMcpToken, requireMcpToken,
+  ensureMcpToken, keepProfilePrivate, loadHandbook, mcpBaseUrl, mcpUrl, packageVersion, probeMcp, profileHasUrl, readMcpToken, redactMcpToken, requireMcpToken,
   replaceMcpToken, rewriteProfileUrl, SERVER_NAME, startServer, TOKEN_LABEL,
 } from './server.js';
 import { Setup } from './setup.js';
@@ -1488,9 +1488,7 @@ main(process.argv.slice(2)).catch((error: unknown) => {
     console.error(`sf: ${(error as Error).message}\n\n${USAGE}`);
     process.exit(2);
   }
-  if (error instanceof PortInUseError) {
-    console.error(`sf: ${error.message} Set SF_PORT to a free port.`);
-  } else if (error instanceof FactoryError || (error instanceof Error && 'code' in error)) {
+  if (error instanceof FactoryError || (error instanceof Error && 'code' in error)) {
     console.error(`sf: ${error.message}`);
   } else {
     console.error(error);

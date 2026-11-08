@@ -13,6 +13,7 @@ import { mock, test } from 'node:test';
 import {
   checkDashboardPorts, DASHBOARD_SCRIPTS, dashboardRemoteLogins, dashboardRemoteOrigins, MAX_STREAMS, remoteDashboardUrls, removeToken, startDashboard, STREAM_PAGE_LINES, TOKEN_FILE,
 } from '../src/dashboard.js';
+import { POST_ROUTES, type RouteName } from '../src/dashboard-routes.js';
 import { FactoryError } from '../src/errors.js';
 import { explanationPath } from '../src/explain.js';
 import { type EventRecord, type Job, JobStore } from '../src/jobs.js';
@@ -612,7 +613,7 @@ test('dashboard (SF-126): the remote port serves listed logins only; its Host is
   }
 });
 
-test('dashboard (SF-126): the remote cookie is __Host- and Secure; api/jobs says remote; the local port refuses the Tailscale Host and Origin and ignores Tailscale-User-*', async () => {
+test('dashboard (SF-126): the remote cookie is __Host- and Secure; api/jobs says remote; the detail\'s confirm_actions on both ports (SF-139); the local port refuses the Tailscale Host and Origin and ignores Tailscale-User-*', async () => {
   const { dashboard, token, remote } = await remoteDashboard('dash-remote-cookie');
   try {
     const base = dashboard.url;
@@ -636,6 +637,12 @@ test('dashboard (SF-126): the remote cookie is __Host- and Secure; api/jobs says
     const stream = await openStream(new URL('api/stream', base));
     assert.equal((await stream.next('jobs')).remote, false);
     stream.close();
+    // SF-139: the job's detail names the actions that ask for the ticket from another device, the
+    // confirm routes of POST_ROUTES, on both ports alike.
+    const confirmActions = (Object.keys(POST_ROUTES) as RouteName[]).filter((name) => POST_ROUTES[name].confirm === true);
+    assert.deepEqual(confirmActions, ['approve', 'retry', 'mr-create', 'mr-merge']);
+    assert.deepEqual(JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', remote), { host: 'pc.tail1234.ts.net', headers: LOGIN })).body).confirm_actions, confirmActions);
+    assert.deepEqual(JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body).confirm_actions, confirmActions);
 
     // The local port as before SF-118: the Tailscale Host and Origin are a 403; Tailscale-User-*
     // changes nothing (no login is needed, a listed one opens nothing more).
@@ -749,7 +756,7 @@ test('dashboard (SF-040): no reviewer or subscription in the data; the subscript
   await withDashboard('dash-no-reviewer', fakeActions(), async (dashboard) => {
     const base = dashboard.url;
     const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body);
-    assert.deepEqual(Object.keys(detail).sort(), ['explanation', 'gate', 'history', 'iterations', 'job', 'ledger', 'mr', 'mr_title', 'settle_ids']);
+    assert.deepEqual(Object.keys(detail).sort(), ['confirm_actions', 'explanation', 'gate', 'history', 'iterations', 'job', 'ledger', 'mr', 'mr_title', 'settle_ids']);
     const { jobs: all } = JSON.parse((await fetchRaw(new URL('api/jobs', base))).body);
     assert.ok(all.every((job: Record<string, unknown>) => !('reviewer' in job)));
     assert.deepEqual([(await fetchRaw(new URL('api/subscriptions', base))).status], [404]);

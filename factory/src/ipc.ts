@@ -4,6 +4,7 @@ import { chmod, mkdir, rm } from 'node:fs/promises';
 import { connect, createServer, type Server } from 'node:net';
 import { join } from 'node:path';
 import { FactoryError } from './errors.js';
+import { internalError } from './http.js';
 
 const MAX_REQUEST_BYTES = 128 * 1024;
 // sun_path holds 108 bytes on Linux (104 on macOS), including the terminating NUL.
@@ -42,7 +43,7 @@ function errorResponse(error: unknown): IpcResponse {
     return { ok: false, error: { code: error.code, message: error.message } };
   }
   console.error(error);
-  return { ok: false, error: { code: 'internal_error', message: 'The request failed inside the factory.' } };
+  return { ok: false, error: internalError() };
 }
 
 export interface RunningSocket {

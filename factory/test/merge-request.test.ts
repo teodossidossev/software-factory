@@ -9,7 +9,7 @@ import { chmod, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { Config } from '../src/config.js';
-import { ACTIONS } from '../src/dashboard.js';
+import { postRoute } from '../src/dashboard-routes.js';
 import { FactoryError } from '../src/errors.js';
 import { Execution, type MrInput } from '../src/execution.js';
 import { type Job, JobStore } from '../src/jobs.js';
@@ -258,7 +258,7 @@ test('dashboard mr routes: POST only, an empty body, the Execution called once w
   fake.mrHost = { host: null, reason: 'SF_GITHUB_TOKEN is not set in the environment file' };
   await withDashboard('dash-mr-routes', fake, async (dashboard) => {
     const base = dashboard.url;
-    assert.ok(['mr-create', 'mr-merge', 'mr-status'].every((action) => ACTIONS.includes(action as never)));
+    assert.ok(['mr-create', 'mr-merge', 'mr-status'].every((action) => postRoute(action, 'job') !== undefined));
     for (const [action, method] of [['mr-create', 'createMergeRequest'], ['mr-merge', 'mergeMergeRequest'], ['mr-status', 'mergeRequestStatus']] as const) {
       assert.equal((await act(base, `api/jobs/app/T-1/${action}`, {}, { method: 'GET' })).status, 405);
       assert.equal((await act(base, `api/jobs/app/T-1/${action}`, { x: 1 })).status, 400);

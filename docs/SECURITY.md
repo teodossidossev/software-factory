@@ -5,8 +5,8 @@ was last checked. The mechanics are in the [trust model](guide/trust-model.md); 
 found the gaps are in [audits/](audits/README.md). Update this file whenever a change moves a line
 between "protected" and "open", and after every audit.
 
-Last checked: 2026-11-08, `sf smoke` PASS on `main` at 9f83d39 (12 of 12 steps, every sandbox probe
-refused).
+Last checked: 2026-11-08, `sf smoke` PASS on `main` at aa1a9f1 (12 of 12 steps, every sandbox probe
+refused), and the factory's test command passed in a sandbox without network on `main` at c66ab78.
 
 ## Protected
 
@@ -17,6 +17,11 @@ refused).
   - It writes only in its own worktree.
   - It has no WebFetch or WebSearch.
   - It cannot run a command outside the sandbox.
+- **Sandboxes do not outlive their session.** Sandbox processes left behind by a finished session
+  are ended.
+- **Tests run before every merge request.** In the factory's own workspace, typecheck and the unit
+  tests run in a sandbox without network before the MR text is written; a failure sends the job
+  back to fix it.
 - **The Codex gate runs in a read-denying wrapper.** It sees no secrets and no other jobs. Secrets
   in its findings are masked.
 - **Code from a repository never runs as you through Git.** The factory's Git commands run no hooks
@@ -31,7 +36,9 @@ refused).
 - **What is published is checked.**
   - The guard refuses a push or an MR text that holds a secret, in every workspace.
   - In a workspace with `"guard": true`, it also refuses the names on your private list and the
-    names of your other workspaces.
+    names of your other workspaces. It is on for the factory's own public repository. In the
+    company repositories it checks secrets only, so issue keys and links stay allowed there.
+  - Commit authors and committers are not checked.
 - **Checked on every update.** `sf smoke` runs the sandbox and gate probes. A probe that gets
   through fails the smoke.
 
@@ -42,9 +49,8 @@ refused).
 - **The factory itself runs as you,** outside any sandbox: fetch, commit, push, the merge request.
   That is why every change goes through a pull or merge request, and product repositories are
   never pushed without your go.
-- **Orphaned sandbox processes** of finished sessions are not ended yet (SF-141).
-- **Not yet switched on for the factory's own workspace:** the guard (`"guard": true`) and the test
-  command in a sandbox without network.
+- **The test command runs only where it is set.** The company workspaces have none yet, so their
+  jobs reach the merge request without a test run.
 - **Outside the home directory** a sandboxed command still reads what the system lets any user
   read (`/etc`, `/opt`).
 - **A phone that is lost unlocked** opens the dashboard. The dangerous actions still need the

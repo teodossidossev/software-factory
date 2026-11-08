@@ -491,3 +491,28 @@ test('sf guard: unpushed commits, --branch, --mr, --worktree, --history and a ra
   assert.equal(hook.stdout, `Wrote ${join(other, '.git', 'hooks', 'pre-push')}.\n`);
   assert.equal((await stat(join(other, '.git', 'hooks', 'pre-push'))).mode & 0o777, 0o755);
 });
+
+test('sf guard: the author and committer are never checked, the own user.email on another workspace\'s domain warns nothing; a term in the message still hits (SF-135)', async () => {
+  const { env, repo } = await guardEnv('guard-identity', true);
+  const pf = join(temp, 'guard-identity-pf');
+  git(pf, 'config', 'user.email', 'me@acme.example.com');
+  git(repo, 'config', 'user.email', 'jane@acme.example.com');
+  await writeFile(join(env.config, 'guard-terms.txt'), 'Jane Doe\n');
+  const guard = (...args: string[]): ReturnType<typeof runCli> => runCli(env, ['guard', ...args]);
+  const identity = ['-c', 'user.name=Jane Doe', '-c', 'user.email=jane@acme.example.com'];
+
+  await writeFile(join(repo, 'notes.txt'), 'clean\n');
+  git(repo, 'add', 'notes.txt');
+  execFileSync('git', [...identity, 'commit', '-q', '-m', 'notes'], { cwd: repo });
+  const clean = await guard('app');
+  assert.deepEqual([clean.code, clean.stdout, clean.stderr], [0, 'No hits in 1 commits.\n', '']);
+  const history = await guard('app', '--history');
+  assert.equal(history.code, 0, history.stdout);
+  assert.doesNotMatch(history.stdout, /author|committer/);
+
+  execFileSync('git', [...identity, 'commit', '-q', '--allow-empty', '-m', 'thanks to Jane Doe'], { cwd: repo });
+  const sha = git(repo, 'rev-parse', 'HEAD').trim().slice(0, 12);
+  const told = await guard('app');
+  assert.equal(told.code, 1);
+  assert.equal(told.stdout, `commit ${sha} message:1:11: "Jane Doe" (private list line 1)\n1 hits in 2 commits.\n`);
+});

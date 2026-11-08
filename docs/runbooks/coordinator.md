@@ -26,6 +26,14 @@ rule changes, change it here, through a pull request like any other change.
   approve, push or open a merge request without the user's explicit go. Their code never goes into
   published artifacts or other external pages.
 
+## Audits and security
+
+- Every audit goes into `docs/audits/<date>-<name>.md` (findings as found, then what came of them)
+  and into the index `docs/audits/README.md`, with other workspaces' names and keys replaced by
+  placeholders.
+- `docs/SECURITY.md` says in plain words what is protected and what is open. Update it, and its
+  "Last checked" line, after every change that closes or opens a gap and after every audit.
+
 ## Running tickets
 
 - One ticket is one factory job (or, for work the factory cannot do, one fresh subagent). Every

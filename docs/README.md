@@ -9,6 +9,8 @@ The index of `docs/`. Start with the [user guide](guide/README.md).
 | [design/SF-011-factory.md](design/SF-011-factory.md) | The SF-011 design of the factory (historical) |
 | [design/SF-036-reviewers.md](design/SF-036-reviewers.md) | The SF-036 design of the reviewers and factory-owned Git (historical) |
 | [design/dashboard-v3/](design/dashboard-v3/README.md) | The dashboard's design reference: the prototype every dashboard ticket implements |
+| [SECURITY.md](SECURITY.md) | The state of security in plain words: what is protected, what is open, when it was last checked |
+| [audits/](audits/README.md) | The independent audits of the factory and what came of each |
 | [runbooks/chatgpt-connection.md](runbooks/chatgpt-connection.md) | The tunnel and the ChatGPT connector for planning |
 | [runbooks/coordinator.md](runbooks/coordinator.md) | The user's rules for the coordinating Claude Code session |
 | [project/DECISIONS.md](project/DECISIONS.md) | Decisions the user approved, in date order (history; the ADRs and the reference hold the current state) |

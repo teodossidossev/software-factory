@@ -1,6 +1,6 @@
-// The server's payloads as the page's TypeScript reads them (SF-146 to SF-148). Each type copies, from the
+// The server's payloads as the page's TypeScript reads them (SF-146 to SF-149). Each type copies, from the
 // server's own type in src/ (named on each), only the fields the typed page code reads; it never
-// imports from src/. A file converted later (SF-149, SF-150) adds the fields it reads.
+// imports from src/. A file converted later (SF-150) adds the fields it reads.
 // A global declaration file: no import or export, so every type is visible to every page script.
 
 // A job's state: src/jobs.ts JOB_STATES.
@@ -241,7 +241,7 @@ interface CheckOutput {
   verdict: 'ready' | 'not_ready';
 }
 interface CheckView {
-  check: { output: CheckOutput | null; error: string | null; model: string | null; ended_at: string } | null;
+  check: { status: 'checked' | 'failed'; output: CheckOutput | null; error: string | null; model: string | null; cost_usd: number | null; ended_at: string } | null;
   stale: boolean;
   running: boolean;
   check_reason: string | null;
@@ -341,16 +341,25 @@ interface StreamPage {
   end: boolean;
 }
 
-// A ticket without a live job: src/setup.ts TicketRow, as the tickets payload's rows carry it
-// (src/dashboard.ts ticketsPayload: check with the Task checks only, and the run queue's fields).
-interface TicketRow {
+// A ticket without a live job, as the planned ticket page's payload carries it: src/setup.ts
+// TicketRow with its conversation (src/dashboard.ts ticketEntry: the first message, and its
+// ChatGPT link or null when it is too long for one; check with the Task checks only).
+interface TicketEntry {
   workspace: string;
   ticket: string;
   title: string;
+  base: string;
   draft: boolean;
   job: JobState | null;
   lands_after: DependencyRow[];
+  // src/attachments.ts Attachment: only the name.
+  attachments: Array<{ name: string }>;
+  conversation: { message: string; url: string | null };
   check?: CheckSummary | null;
+}
+// A ticket without a live job, as the tickets payload's rows carry it (src/dashboard.ts
+// ticketsPayload: ticketEntry and the run queue's fields).
+interface TicketRow extends TicketEntry {
   queue_position: number | null;
   queue_error: { code: string; message: string } | null;
   queue_reason: string | null;
@@ -416,4 +425,261 @@ interface DigestSettings {
   weekdays_only: boolean;
   model: string;
   language: string;
+}
+
+// The planned ticket page, api/tickets/<ws>/<ticket>/page: src/dashboard.ts ticketPage. The check is
+// null without the Task checks; the history is src/ticket-history.ts TimelineEntry, newest first.
+interface TicketPage {
+  ticket: TicketEntry;
+  task: { text: string; sha256: string };
+  plan: TicketPlan;
+  check: CheckView | null;
+  check_rounds: number;
+  check_usd: number;
+  check_usd_complete: boolean;
+  history: Array<{ ts: string | null; text: string }>;
+}
+// The plan in plain words: src/dashboard.ts planOf. The page updates waits_for's states from the
+// tickets payload.
+interface TicketPlan {
+  starts_from: string;
+  files: Array<{ path: string; sensitive: boolean }>;
+  scoped: boolean;
+  waits_for: PlanDependency[];
+}
+// A ticket the plan waits for (of another workspace as <workspace>/<ticket>): src/dashboard.ts planOf.
+interface PlanDependency {
+  ticket: string;
+  state: DependencyState;
+  merged: boolean;
+}
+
+// The morning digests, api/digests: src/digest-run.ts Digests.list, newest first.
+interface DigestList {
+  running: boolean;
+  digests: DigestSummary[];
+}
+// A digest of the list: src/digest-run.ts DigestSummary.
+interface DigestSummary {
+  id: string;
+  trigger: 'scheduled' | 'manual';
+  ended_at: string;
+}
+
+// One digest, api/digests/<id>: src/digest-run.ts DigestRecord.
+interface DigestRecord {
+  id: string;
+  ended_at: string;
+  period: { from: string; to: string };
+  workspaces: DigestWorkspace[];
+  daily_sources: DigestDailySource[];
+  output: DigestOutput | null;
+  cost_usd: number | null;
+  error: string | null;
+  notes: string[];
+}
+// A workspace of a digest: src/digest-run.ts DigestWorkspace, its fetch src/digest.ts MirrorResult.
+interface DigestWorkspace {
+  name: string;
+  app: string;
+  track: boolean;
+  fetch: { message: string | null; notes: string[] };
+  git: DigestGit | null;
+  error: string | null;
+}
+// A workspace's Git data: src/digest.ts RepoData.
+interface DigestGit {
+  main: string;
+  landed: DigestLanded[];
+  branches: DigestBranch[];
+  notes: string[];
+}
+// A commit that landed on the main branch: src/digest.ts LandedEntry.
+interface DigestLanded {
+  sha: string;
+  full_sha: string;
+  author: string;
+  mine: boolean;
+  date: string;
+  subject: string;
+  ticket: string | null;
+  dirs: string[];
+  stat: string;
+}
+// A branch: src/digest.ts LiveBranch.
+interface DigestBranch {
+  name: string;
+  local: boolean;
+  author: string;
+  mine: boolean;
+  age_days: number;
+  ahead: number;
+  behind: number;
+  local_only: number;
+  subject: string;
+  landed: boolean;
+  overlap?: string[];
+}
+// The material of one daily: src/digest-run.ts DailySource, its commits DailyCommit.
+interface DigestDailySource {
+  app: string;
+  workspaces: string[];
+  commits: Array<{ sha: string; ref: string; date: string; subject: string; workspace: string }>;
+}
+// The model's output: src/digest-run.ts DigestOutput.
+interface DigestOutput {
+  repos: Array<{
+    name: string;
+    headline: string;
+    merged: Array<{ sha: string; problem: string }>;
+    branches: Array<{ ref: string; what: string }>;
+    impact_on_me: string[];
+  }>;
+  cross_repo: DigestCross[];
+  dailies: DigestDaily[];
+}
+// A ticket across the workspaces: an entry of DigestOutput's cross_repo.
+interface DigestCross {
+  ticket: string;
+  by_workspace: Readonly<Record<string, string>>;
+  for_me: string;
+}
+// A daily: an entry of DigestOutput's dailies.
+interface DigestDaily {
+  app: string;
+  workspaces: string[];
+  yesterday: string[];
+  problems: string[];
+  plan: string[];
+  next: string[];
+}
+
+// The Stats page's payload, api/stats: src/stats.ts StatsPayload and its rows (named Stats* here, as
+// JobRow and WorkspaceRow are the board's).
+type StatsRole = 'implementer' | 'claude_review' | 'simplify' | 'codex_gate' | 'task_check' | 'digest' | 'explanation';
+// The roles with a cost in USD: src/stats.ts CostRole.
+type StatsCostRole = Exclude<StatsRole, 'codex_gate'>;
+// src/stats.ts Findings.
+interface StatsFindings {
+  blocker: number;
+  major: number;
+  nit: number;
+}
+// src/stats.ts ClaudeTokens and GateTokens.
+interface StatsClaudeTokens {
+  input: number;
+  output: number;
+}
+interface StatsGateTokens {
+  input: number;
+  cached_input: number;
+  output: number;
+}
+// src/stats.ts DayRow.
+interface StatsDayRow {
+  day: string;
+  cost: Readonly<Record<StatsCostRole, number>>;
+  codex_tokens: StatsGateTokens;
+  started: number;
+}
+// src/stats.ts RoleRow.
+interface StatsRoleRow {
+  role: StatsRole;
+  cost_usd: number | null;
+  complete: boolean;
+  tokens: StatsClaudeTokens | StatsGateTokens | null;
+  runs: number;
+}
+// src/stats.ts WorkspaceRow.
+interface StatsWorkspaceRow {
+  workspace: string;
+  cost: Readonly<Record<Exclude<StatsCostRole, 'digest'>, number>>;
+  total_usd: number;
+  codex_tokens: number;
+  jobs_started: number;
+  median_time_to_ready_s: number | null;
+}
+// src/stats.ts StageRow.
+interface StatsStageRow {
+  stage: 'claude_review' | 'codex_gate' | 'task_check';
+  runs: number;
+  failed: number;
+  findings: StatsFindings;
+  fixed: number;
+  tickets: number | null;
+  cost_usd: number | null;
+  tokens: StatsClaudeTokens | StatsGateTokens | null;
+}
+// src/stats.ts SecondOpinion and SecondOpinionCase.
+interface StatsSecondOpinion {
+  iterations: number;
+  caught: number;
+  findings: number;
+  fixed: number;
+  cases: Array<{ workspace: string; ticket: string; archived: boolean; iteration: number; findings: number; fixed: number }>;
+}
+// src/stats.ts ArmRow.
+interface StatsArmRow {
+  arm: 'on' | 'off';
+  jobs: number;
+  delivered: number;
+  aborted: number;
+  cost_usd: number;
+  cost_complete: boolean;
+  usd_per_delivered: number | null;
+  median_iterations: number | null;
+  codex_findings: number;
+  codex_findings_per_job: number | null;
+}
+// src/stats.ts JobRow.
+interface StatsJobRow {
+  workspace: string;
+  ticket: string;
+  archived: boolean;
+  title: string | null;
+  state: JobState;
+  created_at: string;
+  iterations: number;
+  cost_usd: number;
+  cost_complete: boolean;
+  codex_tokens: number;
+  claude: StatsFindings;
+  codex: StatsFindings;
+  time_to_ready_s: number | null;
+  plan_checks: number;
+  plan_check_usd: number;
+  plan_check_usd_complete: boolean;
+}
+// What a warning points at: src/stats.ts WarningTarget.
+type StatsTarget =
+  | { kind: 'job'; workspace: string; ticket: string; archived: boolean }
+  | { kind: 'ticket'; workspace: string; ticket: string }
+  | { kind: 'digest'; id: string };
+// The payload: src/stats.ts StatsPayload.
+interface StatsPayload {
+  generated_at: string;
+  period: { from: string; to: string };
+  workspaces: string[];
+  now: { running: number; waiting_for_you: number; paused: number; queued: number | null };
+  totals: {
+    cost_usd: number;
+    codex_tokens: StatsGateTokens;
+    jobs_started: number;
+    jobs_finished: { total: number; pushed: number; aborted: number; failed: number };
+    median_time_to_ready_s: number | null;
+    median_iterations: number | null;
+  };
+  days_rows: StatsDayRow[];
+  roles: StatsRoleRow[];
+  by_workspace: StatsWorkspaceRow[];
+  stages: StatsStageRow[];
+  second_opinion: { codex_after_claude: StatsSecondOpinion; claude_after_codex: StatsSecondOpinion };
+  arms: StatsArmRow[];
+  // src/stats.ts SimplifyCounts.
+  simplify: { offered: number; taken: number; skipped: number };
+  jobs: StatsJobRow[];
+  // src/stats.ts StatsWarning.
+  warnings: Array<{ text: string; target: StatsTarget | null }>;
+  // src/stats.ts StatsNotes.
+  notes: { truncated: number; unreadable: number; events_skipped: number; digest_excluded: boolean };
 }

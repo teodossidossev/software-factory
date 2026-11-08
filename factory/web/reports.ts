@@ -1,6 +1,8 @@
-// reports.js, the dashboard's seventh script (DASHBOARD_SCRIPTS in src/dashboard.ts): the morning
-// digest and the Stats page. A classic script, loaded in order with defer, sharing the page's
-// globals with the others.
+// reports.js, the dashboard's seventh script (DASHBOARD_SCRIPTS in src/dashboard.ts), built from
+// web/reports.ts into dist/web/ (SF-149): the morning digest and the Stats page. A classic script,
+// loaded in order with defer, sharing the page's globals with the others. This file has no import
+// or export on purpose: the compiler keeps it a script, so its top-level names stay the page's
+// globals.
 'use strict';
 
 // ---------- The morning digest (SF-103) ----------
@@ -10,9 +12,20 @@
 // 'daily'), the poll's timer while a run goes, the ids known when a run was seen starting (the new
 // one opens when it appears), Generate now's request, the Copy outcome per app, and the read under way.
 const DIGEST_POLL_MS = 10000;
-const dg = { list: null, id: null, record: null, error: null, tab: 'repos', poll: null, known: null, starting: false, copied: new Map(), load: 0 };
+const dg: {
+  list: DigestList | null;
+  id: string | null;
+  record: DigestRecord | null;
+  error: string | null;
+  tab: 'repos' | 'daily';
+  poll: ReturnType<typeof setTimeout> | null;
+  known: Set<string> | null;
+  starting: boolean;
+  copied: Map<string, { ok: boolean; text: string }>;
+  load: number;
+} = { list: null, id: null, record: null, error: null, tab: 'repos', poll: null, known: null, starting: false, copied: new Map(), load: 0 };
 
-function openDigest(id) {
+function openDigest(id: string | null): void {
   if (ui.job !== null) {
     leaveJob();
   }
@@ -28,36 +41,37 @@ function openDigest(id) {
   if (id === null || dg.record?.id !== id) {
     dg.record = id === null && dg.list !== null && dg.record?.id === dg.list.digests[0]?.id ? dg.record : null;
   }
-  $('board').hidden = true;
-  $('job').hidden = true;
-  $('ticket').hidden = true;
-  $('stats').hidden = true;
-  $('digest').hidden = false;
+  byId('board').hidden = true;
+  byId('job').hidden = true;
+  byId('ticket').hidden = true;
+  byId('stats').hidden = true;
+  const page = byId('digest');
+  page.hidden = false;
   renderDigest();
   setHash();
-  $('digest').querySelector('[data-back]')?.focus();
+  page.querySelector<HTMLElement>('[data-back]')?.focus();
   void loadDigests();
 }
 
 // The page closes: no more polling.
-function leaveDigest() {
-  clearTimeout(dg.poll);
+function leaveDigest(): void {
+  clearTimeout(dg.poll ?? undefined);
   dg.poll = null;
 }
 
 // Reads the list, then the digest shown; while a run goes, again every 10 s, and a digest that
 // appears meanwhile opens.
-async function loadDigests() {
+async function loadDigests(): Promise<void> {
   dg.load += 1;
   const load = dg.load;
-  clearTimeout(dg.poll);
+  clearTimeout(dg.poll ?? undefined);
   dg.poll = null;
-  let list;
+  let list: DigestList;
   try {
-    list = await getJson('api/digests');
+    list = payload<DigestList>(await getText('api/digests'));
   } catch (error) {
     if (load === dg.load && ui.screen === 'digest') {
-      dg.error = `The digests could not be read (${error.message}).`;
+      dg.error = `The digests could not be read (${errorMessage(error)}).`;
       renderDigest();
     }
     return;
@@ -70,8 +84,9 @@ async function loadDigests() {
   if (list.running && dg.known === null) {
     dg.known = new Set(list.digests.map((digest) => digest.id));
   }
-  if (dg.known !== null) {
-    const fresh = list.digests.find((digest) => !dg.known.has(digest.id));
+  const known = dg.known;
+  if (known !== null) {
+    const fresh = list.digests.find((digest) => !known.has(digest.id));
     if (fresh !== undefined) {
       dg.known = null;
       dg.id = fresh.id;
@@ -88,7 +103,7 @@ async function loadDigests() {
   if (id !== null && dg.record?.id !== id) {
     renderDigest();
     try {
-      const record = await getJson(`api/digests/${encodeURIComponent(id)}`);
+      const record = payload<DigestRecord>(await getText(`api/digests/${encodeURIComponent(id)}`));
       if (load === dg.load && ui.screen === 'digest') {
         dg.record = record;
       }
@@ -105,7 +120,7 @@ async function loadDigests() {
 }
 
 // Generate now: one manual run, never sent twice; the page polls until its digest appears.
-async function generateNow() {
+async function generateNow(): Promise<void> {
   if (dg.starting || dg.list?.running === true) {
     return;
   }
@@ -120,21 +135,21 @@ async function generateNow() {
       toast({ level: 'info', text: 'A digest is being generated already; this page opens it when it is ready.' });
     } else {
       dg.known = null;
-      toast({ level: 'error', text: error instanceof ActionError ? `${error.code}: ${error.message}` : `The request failed (${error.message}); it may have started. The page reads the list again.` });
+      toast({ level: 'error', text: error instanceof ActionError ? `${error.code}: ${error.message}` : `The request failed (${errorMessage(error)}); it may have started. The page reads the list again.` });
     }
   }
   dg.starting = false;
   await loadDigests();
 }
 
-const dgTime = (ts) => localTime(ts).slice(0, 16);
-const dgCost = (cost) => (typeof cost === 'number' ? `$${cost.toFixed(2)}` : 'cost unknown');
+const dgTime = (ts: unknown): string => localTime(ts).slice(0, 16);
+const dgCost = (cost: unknown): string => (typeof cost === 'number' ? `$${cost.toFixed(2)}` : 'cost unknown');
 
-function renderDigest() {
+function renderDigest(): void {
   if (ui.screen !== 'digest') {
     return;
   }
-  const page = $('digest');
+  const page = byId('digest');
   const list = dg.list;
   const record = dg.record;
   const running = list?.running === true || dg.starting;
@@ -144,7 +159,8 @@ function renderDigest() {
   const t1 = el('div', 't1');
   t1.append(el('span', 'title', 'Morning digest'));
   const tools = el('div', 'tools');
-  if (list !== null && list.digests.length > 0) {
+  const newest = list?.digests[0];
+  if (list !== null && newest !== undefined) {
     const pick = el('select', 'dg-pick');
     pick.setAttribute('aria-label', 'Earlier digests');
     for (const digest of list.digests) {
@@ -152,8 +168,8 @@ function renderDigest() {
       option.value = digest.id;
       pick.append(option);
     }
-    pick.value = record?.id ?? dg.id ?? list.digests[0].id;
-    pick.addEventListener('change', () => openDigest(pick.value === list.digests[0].id ? null : pick.value));
+    pick.value = record?.id ?? dg.id ?? newest.id;
+    pick.addEventListener('change', () => openDigest(pick.value === newest.id ? null : pick.value));
     tools.append(pick);
   }
   const generate = el('button', 'btn primary', running ? 'Generating…' : 'Generate now');
@@ -187,7 +203,8 @@ function renderDigest() {
   } else {
     const tabs = el('div', 'edtabs dg-tabs');
     tabs.setAttribute('role', 'tablist');
-    for (const [tab, text] of [['repos', 'Repositories'], ['daily', 'My daily']]) {
+    const names: ReadonlyArray<[typeof dg.tab, string]> = [['repos', 'Repositories'], ['daily', 'My daily']];
+    for (const [tab, text] of names) {
       const node = el('button', dg.tab === tab ? 'on' : '', text);
       node.type = 'button';
       node.setAttribute('role', 'tab');
@@ -215,7 +232,7 @@ function renderDigest() {
   wrap.scrollTop = scroll;
 }
 
-function dgList(items, className = 'dg-items') {
+function dgList(items: readonly string[], className = 'dg-items'): HTMLElement {
   if (items.length === 0) {
     return el('p', 'muted fs13', 'None.');
   }
@@ -224,15 +241,15 @@ function dgList(items, className = 'dg-items') {
   return list;
 }
 
-function dgSection(title, ...content) {
+function dgSection(title: string, ...content: Node[]): HTMLElement {
   const section = el('section', 'dg-sec');
   section.append(el('h4', '', title), ...content);
   return section;
 }
 
 // The Repositories tab: "One ticket across the app", then a card per followed workspace.
-function dgRepos(record) {
-  const nodes = [];
+function dgRepos(record: DigestRecord): HTMLElement[] {
+  const nodes: HTMLElement[] = [];
   const cross = record.output?.cross_repo ?? [];
   if (cross.length > 0) {
     nodes.push(dgCross(cross, record));
@@ -249,7 +266,7 @@ function dgRepos(record) {
   return nodes;
 }
 
-function dgCross(rows, record) {
+function dgCross(rows: readonly DigestCross[], record: DigestRecord): HTMLElement {
   const names = record.workspaces.map((workspace) => workspace.name).filter((name) => rows.some((row) => Object.hasOwn(row.by_workspace ?? {}, name)));
   const card = el('div', 'card2 dg-cross');
   card.append(el('h3', '', 'One ticket across the app'));
@@ -273,7 +290,9 @@ function dgCross(rows, record) {
   return card;
 }
 
-function dgRepoCard(workspace, repo, record) {
+type DigestRepo = DigestOutput['repos'][number];
+
+function dgRepoCard(workspace: DigestWorkspace, repo: DigestRepo | null, record: DigestRecord): HTMLElement {
   const card = el('article', 'card2 dg-repo');
   card.dataset.ws = workspace.name;
   const title = el('h3', 'dg-title');
@@ -308,12 +327,13 @@ function dgRepoCard(workspace, repo, record) {
     box.append(el('h4', '', 'Effect on my work'), dgList(impact));
     card.append(box);
   }
-  // Landed: the last 24 hours of the period shown, the earlier ones folded away.
+  // Landed: the last 24 hours of the period shown, the earlier ones folded away. Each index of
+  // entries is one of git.landed.
   const recent = Date.parse(record.period.to) - 86400000;
   const entries = git.landed.map((entry) => dgLanded(entry, repo));
-  const shown = entries.filter((_, index) => Date.parse(git.landed[index].date) >= recent);
-  const earlier = entries.filter((_, index) => Date.parse(git.landed[index].date) < recent);
-  const landed = [];
+  const shown = entries.filter((_, index) => Date.parse(git.landed[index]?.date ?? '') >= recent);
+  const earlier = entries.filter((_, index) => Date.parse(git.landed[index]?.date ?? '') < recent);
+  const landed: HTMLElement[] = [];
   if (git.landed.length === 0) {
     landed.push(el('p', 'muted fs13', 'Nothing landed in the period.'));
   }
@@ -335,7 +355,7 @@ function dgRepoCard(workspace, repo, record) {
   return card;
 }
 
-function dgLanded(entry, repo) {
+function dgLanded(entry: DigestLanded, repo: DigestRepo | null): HTMLElement {
   const item = el('li', entry.mine ? 'dg-entry mine' : 'dg-entry');
   const meta = el('div', 'dg-meta');
   meta.append(el('span', 'mono', dgTime(entry.date).slice(5)), el('span', 'dg-who', entry.author));
@@ -358,7 +378,7 @@ function dgLanded(entry, repo) {
   return item;
 }
 
-function dgBranches(branches, repo) {
+function dgBranches(branches: readonly DigestBranch[], repo: DigestRepo | null): HTMLElement {
   const list = el('ul', 'dg-branches');
   for (const branch of branches) {
     const item = el('li', branch.mine ? 'dg-entry mine' : 'dg-entry');
@@ -383,8 +403,9 @@ function dgBranches(branches, repo) {
     item.append(meta);
     const what = repo?.branches?.find((entry) => entry.ref === branch.name)?.what;
     item.append(el('div', 'dg-what', what ?? branch.subject));
-    if (branch.mine && (branch.overlap ?? []).length > 0) {
-      item.append(el('div', 'fs12 dg-overlap', `Shares with main: ${branch.overlap.join(', ')}`));
+    const overlap = branch.overlap ?? [];
+    if (branch.mine && overlap.length > 0) {
+      item.append(el('div', 'fs12 dg-overlap', `Shares with main: ${overlap.join(', ')}`));
     }
     list.append(item);
   }
@@ -392,9 +413,9 @@ function dgBranches(branches, repo) {
 }
 
 // My daily: a card per app, its four sections, the commits it was made from and Copy.
-function dgDaily(record) {
+function dgDaily(record: DigestRecord): HTMLElement[] {
   const sources = record.daily_sources ?? [];
-  const dailies = record.output?.dailies ?? sources.map((source) => ({ app: source.app, workspaces: source.workspaces, yesterday: [], problems: [], plan: [], next: [] }));
+  const dailies: DigestDaily[] = record.output?.dailies ?? sources.map((source) => ({ app: source.app, workspaces: source.workspaces, yesterday: [], problems: [], plan: [], next: [] }));
   if (dailies.length === 0) {
     const empty = el('div', 'card2 dg-empty');
     empty.append(el('p', 'fs13', 'No daily in this digest: no workspace has My daily on (Workspaces → Edit), or you have no commits or open branches there in the two days.'));
@@ -436,12 +457,12 @@ function dgDaily(record) {
 }
 
 // The daily as plain text: "Yesterday:", "Problems:", "Plan:", "Today:", each with "- " items.
-function dailyText(daily) {
-  const part = (title, items) => [`${title}:`, ...items.map((item) => `- ${item}`)];
+function dailyText(daily: DigestDaily): string {
+  const part = (title: string, items: readonly string[]): string[] => [`${title}:`, ...items.map((item) => `- ${item}`)];
   return [...part('Yesterday', daily.yesterday), ...part('Problems', daily.problems), ...part('Plan', daily.plan), ...part('Today', daily.next)].join('\n');
 }
 
-async function copyDaily(daily) {
+async function copyDaily(daily: DigestDaily): Promise<void> {
   try {
     if (typeof navigator.clipboard?.writeText !== 'function') {
       throw new Error('the browser gives no clipboard here');
@@ -449,23 +470,38 @@ async function copyDaily(daily) {
     await navigator.clipboard.writeText(dailyText(daily));
     dg.copied.set(daily.app, { ok: true, text: 'Copied.' });
   } catch (error) {
-    dg.copied.set(daily.app, { ok: false, text: `Copy failed: ${error.message}` });
+    dg.copied.set(daily.app, { ok: false, text: `Copy failed: ${errorMessage(error)}` });
   }
   renderDigest();
 }
 
 // ---------- The Stats page (SF-117) ----------
 
+// A series of a chart: its colour key, its name and its value of an item.
+interface StSeries<T> {
+  key: string;
+  name: string;
+  value: (item: T) => number;
+}
+
 // The Stats page (#stats): the period (7, 30 or 90 days) and the workspace chosen (null: all), the
 // payload as last read, a read's error, the read under way, and the charts shown as tables. In page
 // memory only; read on open, on a change and on Refresh, never on a timer.
-const st = { days: 30, workspace: null, data: null, error: null, load: 0, tables: new Set(), warningsAll: false };
+const st: {
+  days: number;
+  workspace: string | null;
+  data: StatsPayload | null;
+  error: string | null;
+  load: number;
+  tables: Set<string>;
+  warningsAll: boolean;
+} = { days: 30, workspace: null, data: null, error: null, load: 0, tables: new Set(), warningsAll: false };
 const SVG_NS = 'http://www.w3.org/2000/svg';
-const ST_ROLES = { implementer: 'Implementer', claude_review: 'Claude review', simplify: 'Simplification', codex_gate: 'Codex gate', task_check: 'Plan check', digest: 'Digest', explanation: 'Explanations' };
-const ST_COST_ROLES = ['implementer', 'claude_review', 'simplify', 'task_check', 'digest', 'explanation'];
-const ST_STAGES = { claude_review: 'Claude review', codex_gate: 'Codex gate', task_check: 'Plan check' };
-const ST_SEVERITIES = [{ key: 'blocker', name: 'Blocker' }, { key: 'major', name: 'Major' }, { key: 'nit', name: 'Nit' }];
-const ST_DAY_CHARTS = ['cost-day', 'tokens-day', 'started-day'];
+const ST_ROLES: Readonly<Record<StatsRole, string>> = { implementer: 'Implementer', claude_review: 'Claude review', simplify: 'Simplification', codex_gate: 'Codex gate', task_check: 'Plan check', digest: 'Digest', explanation: 'Explanations' };
+const ST_COST_ROLES: readonly StatsCostRole[] = ['implementer', 'claude_review', 'simplify', 'task_check', 'digest', 'explanation'];
+const ST_STAGES: Readonly<Record<string, string>> = { claude_review: 'Claude review', codex_gate: 'Codex gate', task_check: 'Plan check' };
+const ST_SEVERITIES: ReadonlyArray<{ key: keyof StatsFindings; name: string }> = [{ key: 'blocker', name: 'Blocker' }, { key: 'major', name: 'Major' }, { key: 'nit', name: 'Nit' }];
+const ST_DAY_CHARTS: readonly string[] = ['cost-day', 'tokens-day', 'started-day'];
 // The warnings listed before "Show all N".
 const ST_WARNINGS_SHOWN = 10;
 // The rules of the warnings (src/stats.ts), one plain sentence each.
@@ -481,8 +517,8 @@ const ST_RULES = [
 ];
 
 // The formats: $1.23 ($100 on without decimals, — for none), 950 / 1.5k / 340k / 2.1M, 45s / 12m / 3.2h / 1.5d.
-const stMoney = (value) => (typeof value !== 'number' ? '—' : value >= 100 ? `$${Math.round(value)}` : `$${value.toFixed(2)}`);
-function stTokens(value) {
+const stMoney = (value: unknown): string => (typeof value !== 'number' ? '—' : value >= 100 ? `$${Math.round(value)}` : `$${value.toFixed(2)}`);
+function stTokens(value: number): string {
   if (value >= 999500) {
     return `${(value / 1e6).toFixed(1)}M`;
   }
@@ -491,7 +527,7 @@ function stTokens(value) {
   }
   return value >= 1000 ? `${(value / 1000).toFixed(1).replace(/\.0$/, '')}k` : String(Math.round(value));
 }
-function stDuration(seconds) {
+function stDuration(seconds: unknown): string {
   if (typeof seconds !== 'number') {
     return '—';
   }
@@ -503,9 +539,9 @@ function stDuration(seconds) {
   }
   return seconds < 86400 ? `${(seconds / 3600).toFixed(1)}h` : `${(seconds / 86400).toFixed(1)}d`;
 }
-const stCount = (value) => (typeof value !== 'number' ? '—' : Number.isInteger(value) ? String(value) : value.toFixed(1));
-const stPercent = (part, whole) => `${Math.round((part / whole) * 100)}%`;
-function stTokenLine(tokens) {
+const stCount = (value: unknown): string => (typeof value !== 'number' ? '—' : Number.isInteger(value) ? String(value) : value.toFixed(1));
+const stPercent = (part: number, whole: number): string => `${Math.round((part / whole) * 100)}%`;
+function stTokenLine(tokens: StatsClaudeTokens | StatsGateTokens | null | undefined): string {
   if (tokens === null || tokens === undefined) {
     return 'not recorded';
   }
@@ -513,9 +549,9 @@ function stTokenLine(tokens) {
     ? `${stTokens(tokens.input)} in (${stTokens(tokens.cached_input)} cached) · ${stTokens(tokens.output)} out`
     : `${stTokens(tokens.input)} in · ${stTokens(tokens.output)} out`;
 }
-const stFindings = (findings) => `${findings.blocker} / ${findings.major} / ${findings.nit}`;
+const stFindings = (findings: StatsFindings): string => `${findings.blocker} / ${findings.major} / ${findings.nit}`;
 
-function openStats() {
+function openStats(): void {
   if (ui.job !== null) {
     leaveJob();
   }
@@ -526,25 +562,26 @@ function openStats() {
   ui.job = null;
   ui.ticket = null;
   ui.pending = false;
-  $('board').hidden = true;
-  $('job').hidden = true;
-  $('ticket').hidden = true;
-  $('digest').hidden = true;
+  byId('board').hidden = true;
+  byId('job').hidden = true;
+  byId('ticket').hidden = true;
+  byId('digest').hidden = true;
   leaveDigest();
-  $('stats').hidden = false;
+  const page = byId('stats');
+  page.hidden = false;
   renderStats();
   setHash();
-  $('stats').querySelector('[data-back]')?.focus();
+  page.querySelector<HTMLElement>('[data-back]')?.focus();
   void loadStats();
 }
 
 // One read of the payload; its answer is applied only when it is the last read and the page is shown.
-async function loadStats() {
+async function loadStats(): Promise<void> {
   st.load += 1;
   const load = st.load;
   const path = `api/stats?days=${st.days}${st.workspace === null ? '' : `&workspace=${encodeURIComponent(st.workspace)}`}`;
   try {
-    const data = await getJson(path);
+    const data = payload<StatsPayload>(await getText(path));
     if (load !== st.load || ui.screen !== 'stats') {
       return;
     }
@@ -554,13 +591,13 @@ async function loadStats() {
     if (load !== st.load || ui.screen !== 'stats') {
       return;
     }
-    st.error = error.message;
+    st.error = errorMessage(error);
   }
   renderStats();
 }
 
 // The top of a chart's axis: the smallest of 1, 2, 2.5, 5, 10 × a power of ten at or above max.
-function stTop(max) {
+function stTop(max: number): number {
   if (!(max > 0)) {
     return 1;
   }
@@ -569,7 +606,7 @@ function stTop(max) {
 }
 
 // The colour key above a stacked chart.
-function stLegend(series) {
+function stLegend(series: ReadonlyArray<{ key: string; name: string }>): HTMLElement {
   const legend = el('div', 'st-legend');
   for (const one of series) {
     const item = el('span', 'st-key');
@@ -579,14 +616,14 @@ function stLegend(series) {
   return legend;
 }
 
-function stScroll(table) {
+function stScroll(table: HTMLElement): HTMLElement {
   const wrap = el('div', 'st-scroll');
   wrap.append(table);
   return wrap;
 }
 
 // A table of rows of cells (a text or a node).
-function stTable(head, rows) {
+function stTable(head: readonly string[], rows: ReadonlyArray<ReadonlyArray<string | Node>>): HTMLElement {
   const table = el('table', 'st-table');
   const thead = el('thead');
   const top = el('tr');
@@ -610,7 +647,7 @@ function stTable(head, rows) {
 
 // A chart's box, whatever the data: its title and its Table toggle, then the SVG, the same numbers
 // as a table, or the muted line when every value is 0 (the toggle then shows the table of zeros).
-function stChart(id, title, items, series, format, empty, draw) {
+function stChart<T extends { label: string }>(id: string, title: string, items: readonly T[], series: ReadonlyArray<StSeries<T>>, format: (value: number) => string, empty: string, draw: () => SVGElement): HTMLElement {
   const box = el('div', 'st-chart');
   box.dataset.chart = id;
   const head = el('div', 'st-chart-head');
@@ -646,7 +683,7 @@ function stChart(id, title, items, series, format, empty, draw) {
 
 // Columns over the days: a y axis with gridlines at 0, ¼, ½, ¾ and the top, one column per day with
 // its series stacked in order, at most 12 day labels.
-function stColumns(id, title, rows, series, format, empty) {
+function stColumns<R extends { day: string }>(id: string, title: string, rows: readonly R[], series: ReadonlyArray<StSeries<R>>, format: (value: number) => string, empty: string): HTMLElement {
   const items = rows.map((row) => ({ ...row, label: row.day }));
   return stChart(id, title, items, series, format, empty, () => {
     const svg = svgEl('svg', { viewBox: '0 0 720 220', width: '100%', role: 'img', 'aria-label': title, class: 'st-svg' });
@@ -655,7 +692,7 @@ function stColumns(id, title, rows, series, format, empty) {
     const top = 10;
     const bottom = 194;
     const max = stTop(Math.max(0, ...items.map((item) => series.reduce((sum, one) => sum + one.value(item), 0))));
-    const y = (value) => bottom - (value / max) * (bottom - top);
+    const y = (value: number): number => bottom - (value / max) * (bottom - top);
     for (const part of [0, 0.25, 0.5, 0.75, 1]) {
       svg.append(svgEl('line', { x1: left, x2: right, y1: y(max * part), y2: y(max * part), class: 'st-grid' }));
       svg.append(svgEl('text', { x: left - 6, y: y(max * part) + 4, 'text-anchor': 'end', class: 'st-axis' }, format(max * part)));
@@ -684,7 +721,7 @@ function stColumns(id, title, rows, series, format, empty) {
 }
 
 // One horizontal bar per item: its label left, its series stacked, its value right; 28 high each.
-function stBars(id, title, items, series, format, empty) {
+function stBars<T extends { label: string }>(id: string, title: string, items: readonly T[], series: ReadonlyArray<StSeries<T>>, format: (value: number) => string, empty: string): HTMLElement {
   return stChart(id, title, items, series, format, empty, () => {
     const svg = svgEl('svg', { viewBox: `0 0 720 ${28 * Math.max(1, items.length)}`, width: '100%', role: 'img', 'aria-label': title, class: 'st-svg' });
     const left = 150;
@@ -709,13 +746,13 @@ function stBars(id, title, items, series, format, empty) {
   });
 }
 
-function stSection(title, className = '') {
+function stSection(title: string, className = ''): HTMLElement {
   const section = el('section', className === '' ? 'st-sec' : `st-sec ${className}`);
   section.append(el('h3', '', title));
   return section;
 }
 
-function stTile(label, value, sub = undefined) {
+function stTile(label: string, value: string, sub: string | undefined = undefined): HTMLElement {
   const tile = el('div', 'st-tile');
   tile.append(el('div', 'st-tile-label', label), el('div', 'st-tile-value', value));
   if (sub !== undefined) {
@@ -724,14 +761,14 @@ function stTile(label, value, sub = undefined) {
   return tile;
 }
 
-function stTiles(...tiles) {
+function stTiles(...tiles: HTMLElement[]): HTMLElement {
   const grid = el('div', 'st-tiles');
   grid.append(...tiles);
   return grid;
 }
 
 // Where a warning or a case points: a job that is not archived, a planned ticket, a digest; null otherwise.
-function stHref(target) {
+function stHref(target: StatsTarget | null | undefined): string | null {
   if (target === null || target === undefined) {
     return null;
   }
@@ -745,7 +782,7 @@ function stHref(target) {
 }
 
 // text as a link to the target, or "(archived)" (after the ticket's name) without one.
-function stLink(target, text) {
+function stLink(target: StatsTarget | null | undefined, text: string): HTMLElement {
   const href = stHref(target);
   if (href === null) {
     return el('span', 'muted', text === 'Open' ? '(archived)' : `${text} (archived)`);
@@ -755,13 +792,13 @@ function stLink(target, text) {
   return link;
 }
 
-function stWarnings(data) {
+function stWarnings(data: StatsPayload): HTMLElement {
   const section = stSection(`Warnings (${data.warnings.length})`, 'st-warnings');
   if (data.warnings.length === 0) {
     section.append(el('p', 'muted fs13', 'No warnings: nothing is far from the usual.'));
   } else {
     const list = el('ul', 'st-warn');
-    const item = (warning) => {
+    const item = (warning: StatsPayload['warnings'][number]): HTMLElement => {
       const row = el('li');
       row.append(el('span', 'st-warn-text', warning.text));
       if (warning.target !== null) {
@@ -794,7 +831,7 @@ function stWarnings(data) {
   return section;
 }
 
-function stOpinionCard(title, opinion, note = undefined) {
+function stOpinionCard(title: string, opinion: StatsSecondOpinion, note: string | undefined = undefined): HTMLElement {
   const card = el('div', 'card2 st-opinion');
   card.append(el('h4', '', title));
   if (opinion.iterations === 0) {
@@ -819,7 +856,7 @@ function stOpinionCard(title, opinion, note = undefined) {
   return card;
 }
 
-function stSecondOpinion(data) {
+function stSecondOpinion(data: StatsPayload): HTMLElement {
   const section = stSection('Does a second model pay?');
   const pair = el('div', 'st-pair');
   pair.append(
@@ -833,14 +870,14 @@ function stSecondOpinion(data) {
 
 // The Claude review experiment (SF-132): one line per arm, on and off, of the jobs that recorded
 // claude_review; the empty text when neither has a job.
-const ST_ARMS = { on: 'On', off: 'Off' };
-function stArms(data) {
+const ST_ARMS: Readonly<Record<string, string>> = { on: 'On', off: 'Off' };
+function stArms(data: StatsPayload): HTMLElement {
   const section = stSection('Claude review on/off');
   if (data.arms.every((row) => row.jobs === 0)) {
     section.append(el('p', 'muted fs13', 'No jobs of the experiment yet.'));
     return section;
   }
-  const cost = (value, complete) => (value === null ? '—' : complete ? stMoney(value) : `at least ${stMoney(value)}`);
+  const cost = (value: number | null, complete: boolean): string => (value === null ? '—' : complete ? stMoney(value) : `at least ${stMoney(value)}`);
   section.append(stTable(['Claude review', 'Jobs', 'Delivered', 'Aborted', 'Cost', 'Per delivered', 'Median iterations', 'Codex findings', 'Per job'], data.arms.map((row) => [
     ST_ARMS[row.arm] ?? row.arm, String(row.jobs), String(row.delivered), String(row.aborted), cost(row.cost_usd, row.cost_complete),
     cost(row.usd_per_delivered, row.cost_complete), stCount(row.median_iterations), String(row.codex_findings), stCount(row.codex_findings_per_job),
@@ -848,11 +885,11 @@ function stArms(data) {
   return section;
 }
 
-function stStages(data) {
+function stStages(data: StatsPayload): HTMLElement {
   const section = stSection('Review stages');
   const items = data.stages.map((row) => ({ ...row, label: ST_STAGES[row.stage] ?? row.stage }));
   const charts = el('div', 'st-charts');
-  charts.append(stBars('findings', 'Findings per stage', items, ST_SEVERITIES.map((one) => ({ ...one, value: (row) => row.findings[one.key] })), String, 'No findings in this period.'));
+  charts.append(stBars('findings', 'Findings per stage', items, ST_SEVERITIES.map((one) => ({ ...one, value: (row: StatsStageRow) => row.findings[one.key] })), String, 'No findings in this period.'));
   // Rounds per ticket (SF-130): the plan check's (runs + failed) / tickets; "—" for the other stages.
   section.append(charts, stTable(['Stage', 'Runs', 'Failed', 'Blocker', 'Major', 'Nit', 'Led to a fix', 'Cost', 'Tokens', 'Cost per run', 'Rounds per ticket'], items.map((row) => [
     row.label, String(row.runs), String(row.failed), String(row.findings.blocker), String(row.findings.major), String(row.findings.nit),
@@ -863,7 +900,7 @@ function stStages(data) {
   return section;
 }
 
-function stSpend(data) {
+function stSpend(data: StatsPayload): HTMLElement {
   const section = stSection('Spend');
   const codex = data.totals.codex_tokens;
   section.append(stTiles(
@@ -872,29 +909,29 @@ function stSpend(data) {
   ));
   const charts = el('div', 'st-charts');
   charts.append(
-    stColumns('cost-day', 'Cost per day', data.days_rows, ST_COST_ROLES.map((key) => ({ key, name: ST_ROLES[key], value: (row) => row.cost[key] })), stMoney, 'No cost in this period.'),
+    stColumns('cost-day', 'Cost per day', data.days_rows, ST_COST_ROLES.map((key) => ({ key, name: ST_ROLES[key], value: (row: StatsDayRow) => row.cost[key] })), stMoney, 'No cost in this period.'),
     stColumns('tokens-day', 'Codex gate tokens per day', data.days_rows, [
       { key: 'codex_gate', name: 'Input', value: (row) => row.codex_tokens.input },
       { key: 'codex_out', name: 'Output', value: (row) => row.codex_tokens.output },
     ], stTokens, 'No Codex gate run in this period.'),
   );
   // The simplification's line also has its offers and the user's choices (SF-132).
-  const offers = ({ offered, taken, skipped }) => ` · offered ${offered} · taken ${taken} · skipped ${skipped}`;
+  const offers = ({ offered, taken, skipped }: StatsPayload['simplify']): string => ` · offered ${offered} · taken ${taken} · skipped ${skipped}`;
   section.append(charts, el('h4', 'st-sub', 'By role'), stTable(['Role', 'Cost', 'Tokens', 'Runs'], data.roles.map((row) => [
     ST_ROLES[row.role] ?? row.role, row.cost_usd === null ? 'tokens only' : row.complete ? stMoney(row.cost_usd) : `at least ${stMoney(row.cost_usd)}`,
     stTokenLine(row.tokens), row.role === 'simplify' ? `${row.runs}${offers(data.simplify)}` : String(row.runs),
   ])));
-  const roles = ST_COST_ROLES.filter((key) => key !== 'digest');
+  const roles = ST_COST_ROLES.filter((key): key is Exclude<StatsCostRole, 'digest'> => key !== 'digest');
   const items = data.by_workspace.map((row) => ({ ...row, label: row.workspace }));
   const byWorkspace = el('div', 'st-charts');
-  byWorkspace.append(stBars('by-workspace', 'Cost by workspace', items, roles.map((key) => ({ key, name: ST_ROLES[key], value: (row) => row.cost[key] })), stMoney, 'No cost in this period.'));
+  byWorkspace.append(stBars('by-workspace', 'Cost by workspace', items, roles.map((key) => ({ key, name: ST_ROLES[key], value: (row: StatsWorkspaceRow) => row.cost[key] })), stMoney, 'No cost in this period.'));
   section.append(el('h4', 'st-sub', 'By workspace'), byWorkspace, stTable(['Workspace', ...roles.map((key) => ST_ROLES[key]), 'Total', 'Codex tokens', 'Jobs started', 'Median time to ready'], data.by_workspace.map((row) => [
     row.workspace, ...roles.map((key) => stMoney(row.cost[key])), stMoney(row.total_usd), stTokens(row.codex_tokens), String(row.jobs_started), stDuration(row.median_time_to_ready_s),
   ])));
   return section;
 }
 
-function stLoad(data) {
+function stLoad(data: StatsPayload): HTMLElement {
   const section = stSection('Load');
   const done = data.totals.jobs_finished;
   section.append(stTiles(
@@ -911,14 +948,14 @@ function stLoad(data) {
 
 // A job's plan checks (SF-130), all-time: "N rounds · $X" ("at least $X" when a cost is unknown),
 // "—" without one.
-function stPlanChecks(row) {
+function stPlanChecks(row: StatsJobRow): string {
   if (typeof row.plan_checks !== 'number' || row.plan_checks === 0) {
     return '—';
   }
   return roundsText(row.plan_checks, row.plan_check_usd, row.plan_check_usd_complete !== false, stMoney);
 }
 
-function stJobs(data) {
+function stJobs(data: StatsPayload): HTMLElement {
   const section = stSection(`Jobs (${data.jobs.length})`);
   if (data.jobs.length === 0) {
     section.append(el('p', 'muted fs13', 'No job in this period.'));
@@ -932,7 +969,7 @@ function stJobs(data) {
   return section;
 }
 
-function stNotes(data) {
+function stNotes(data: StatsPayload): HTMLElement[] {
   const { notes } = data;
   const lines = [
     ...(notes.truncated > 0 ? [`Only the newest 1000 jobs are counted; ${notes.truncated} older ones are left out.`] : []),
@@ -950,11 +987,11 @@ function stNotes(data) {
   return [section];
 }
 
-function renderStats() {
+function renderStats(): void {
   if (ui.screen !== 'stats') {
     return;
   }
-  const page = $('stats');
+  const page = byId('stats');
   const data = st.data;
   const backButton = button('btn back', '← Board ', { back: '', st: 'back' });
   backButton.append(el('span', 'kbd', 'Esc'));
@@ -980,7 +1017,8 @@ function renderStats() {
   pick.setAttribute('aria-label', 'Workspace');
   pick.dataset.st = 'workspace';
   const names = [...new Set([...(data?.workspaces ?? []), ...(st.workspace === null ? [] : [st.workspace])])];
-  for (const [value, text] of [['', 'All workspaces'], ...names.map((name) => [name, name])]) {
+  const options: Array<[string, string]> = [['', 'All workspaces'], ...names.map((name): [string, string] => [name, name])];
+  for (const [value, text] of options) {
     const option = el('option', '', text);
     option.value = value;
     pick.append(option);
@@ -1023,13 +1061,14 @@ function renderStats() {
     body.append(stWarnings(data), now, stSecondOpinion(data), stArms(data), stStages(data), stSpend(data), stLoad(data), stJobs(data), ...stNotes(data));
   }
   // The focus stays on the control it was on; the scroll where it was.
-  const focused = page.contains(document.activeElement) ? document.activeElement?.dataset?.st : undefined;
+  const active = document.activeElement;
+  const focused = active !== null && page.contains(active) && hasDataset(active) ? active.dataset?.st : undefined;
   const scroll = page.querySelector('.form2')?.scrollTop ?? 0;
   const wrap = el('div', 'form2');
   wrap.append(body);
   page.replaceChildren(head, wrap);
   wrap.scrollTop = scroll;
   if (focused !== undefined) {
-    [...page.querySelectorAll('[data-st]')].find((node) => node.dataset.st === focused)?.focus();
+    [...page.querySelectorAll<HTMLElement>('[data-st]')].find((node) => node.dataset.st === focused)?.focus();
   }
 }

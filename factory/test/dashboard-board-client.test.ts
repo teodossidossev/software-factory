@@ -976,7 +976,7 @@ test('board client (SF-071): drag and drop and Alt+Up / Alt+Down post api/queue/
 test('board client: no element of the page has an inline style and no prototype-only part exists; values go in as text', async () => {
   const html = await readFile(new URL('dashboard.html', STATIC_DIR), 'utf8');
   assert.doesNotMatch(html, /\sstyle=/);
-  const scripts = await readScripts(STATIC_DIR);
+  const scripts = await readScripts();
   for (const { file, source } of scripts) {
     assert.doesNotMatch(source, /innerHTML|insertAdjacentHTML|outerHTML|setAttribute\('style'|\.style\.(?!setProperty)/, file);
   }

@@ -11,8 +11,8 @@
     "sf": "bin/sf"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "build": "node scripts/clean.mjs && tsc",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.web.json",
+    "build": "node scripts/clean.mjs && tsc && tsc -p tsconfig.web.json",
     "start": "node dist/src/cli.js serve",
     "test": "npm run build && node scripts/run-tests.mjs unit",
     "browsers": "playwright install chromium",

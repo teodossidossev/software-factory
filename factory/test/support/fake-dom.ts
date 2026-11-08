@@ -1,4 +1,5 @@
-// A small stand-in for the dashboard page, so its scripts (DASHBOARD_SCRIPTS of static/) run under
+// A small stand-in for the dashboard page, so its scripts (DASHBOARD_SCRIPTS, each read from the file
+// dashboardScriptFiles resolves: dist/web/ for one built from web/, else static/) run under
 // node:vm: a document built from static/dashboard.html as a tree (every element, its attributes and
 // its text), elements with the properties the scripts use (parentNode, closest, matches, dataset,
 // classList, style.setProperty, querySelector and querySelectorAll with tag, id, class and attribute
@@ -12,7 +13,7 @@
 // manual browser steps in factory/README.md cover those.
 import { readFile } from 'node:fs/promises';
 import { createContext, runInContext } from 'node:vm';
-import { DASHBOARD_SCRIPTS } from '../../src/dashboard.js';
+import { dashboardScriptFiles } from '../../src/dashboard.js';
 
 export class FakeText {
   readonly nodeType = 3;
@@ -721,12 +722,16 @@ export class FakeEventSource {
 // reads its Stream before it opens the job's live stream, so a test about something else gets it.
 export const EMPTY_STREAM_PAGE = /^api\/jobs\/[^/]+\/[^/]+\/stream\?from=(\d+)$/;
 
-// The page's scripts, each file of DASHBOARD_SCRIPTS with its text, in load order.
-export async function readScripts(staticDir: URL): Promise<Array<{ file: string; source: string }>> {
-  return Promise.all(DASHBOARD_SCRIPTS.map(async (file) => ({ file, source: await readFile(new URL(file, staticDir), 'utf8') })));
+// The page's scripts, each file of DASHBOARD_SCRIPTS with its text, in load order: by default the
+// files the dashboard serves (SF-146: a script built from web/ is read from dist/web/); with
+// 'source', the files written by hand (web/<name>.ts, else static/<name>.js), for a check of the
+// code's own words, comments and layout, which the compiler does not keep.
+export async function readScripts(which: 'served' | 'source' = 'served'): Promise<Array<{ file: string; source: string }>> {
+  return Promise.all(dashboardScriptFiles().map(async ({ file, url, source }) => ({ file, source: await readFile(which === 'served' ? url : source, 'utf8') })));
 }
 
-// Builds the document from the page's HTML, runs the page's scripts (DASHBOARD_SCRIPTS, in order) in
+// Builds the document from the page's HTML (dashboard.html of staticDir), runs the page's scripts
+// (DASHBOARD_SCRIPTS, in order, from the files the dashboard serves: readScripts) in
 // one fresh context against it, each under its own file name, and returns the handles. Fetches are
 // answered by the test, through requests[i].respond, unless autoGet answers a GET (undefined leaves
 // it pending; a Stream page it leaves undefined is an empty last page). Without a clipboard,
@@ -737,7 +742,7 @@ export async function loadPage(
   globals: Record<string, unknown> = {},
 ): Promise<Page> {
   const html = await readFile(new URL('dashboard.html', staticDir), 'utf8');
-  const sources = await readScripts(staticDir);
+  const sources = await readScripts();
   const document = new FakeDocument();
   parseHtml(document, html);
   const requests: FetchRequest[] = [];

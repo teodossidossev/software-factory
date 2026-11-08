@@ -1,6 +1,8 @@
-// core.js, the first of the dashboard's scripts (DASHBOARD_SCRIPTS in src/dashboard.ts): the
-// constants, the state, the small DOM, format and HTTP helpers and the connection tag. Each of them
-// is a classic script, loaded in order with defer, and shares the page's globals with the others.
+// core.js, the first of the dashboard's scripts (DASHBOARD_SCRIPTS in src/dashboard.ts), built from
+// web/core.ts into dist/web/ (SF-146): the constants, the state, the small DOM, format and HTTP
+// helpers and the connection tag. Each of them is a classic script, loaded in order with defer, and
+// shares the page's globals with the others. This file has no import or export on purpose: the
+// compiler keeps it a script, so its top-level names stay the page's globals.
 
 // Software Factory dashboard v3 (SF-077, SF-078), the port of docs/design/dashboard-v3/prototype.html:
 // the top bar (the summary, the connection, the workspace filter, Archived, Workspaces and New
@@ -30,16 +32,18 @@
 
 const RECONNECT_MS = 3000;
 const READ_TIMEOUT_MS = 10000;
-const TERMINAL_STATES = ['pushed', 'aborted', 'failed'];
+const TERMINAL_STATES: readonly JobState[] = ['pushed', 'aborted', 'failed'];
 // The rule at a usage limit's reset (SF-072), as the Rules menu names them.
-const ON_LIMIT_RULES = ['resume-then-queue', 'resume-only', 'wait'];
-const ACTION_LABELS = {
+const ON_LIMIT_RULES: readonly OnLimitRule[] = ['resume-then-queue', 'resume-only', 'wait'];
+// The labels and pending texts are looked up by the action names the server's payloads carry, so a
+// name without an entry reads as undefined.
+const ACTION_LABELS: Readonly<Record<string, string>> = {
   approve: 'Approve', abort: 'Abort', say: 'Send', review: 'Retry review', retry: 'Retry', accept: 'Accept and prepare MR', settle: 'Settle', simplify: 'Simplify', archive: 'Archive',
   'mr-create': 'Create merge request', 'mr-merge': 'Merge', 'mr-status': 'Refresh MR status', pause: 'Pause', resume: 'Resume', restart: 'Restart',
   handover: 'Hand over to my checkout', takeback: 'Take it back', 'handed-done': 'I opened the MR myself',
   'review-mr': 'Review the MR and push',
 };
-const PENDING_REASONS = {
+const PENDING_REASONS: Readonly<Record<string, string>> = {
   accept: 'the override was requested; waiting for its outcome.',
   settle: 'a settlement was requested; waiting for its outcome.',
   simplify: 'the simplification was requested; waiting for its outcome.',
@@ -59,7 +63,7 @@ const PENDING_REASONS = {
   takeback: 'Take it back was requested; waiting for its outcome.',
   'handed-done': 'origin is being asked for your push.',
 };
-const PENDING_TEXT = {
+const PENDING_TEXT: Readonly<Record<string, string>> = {
   accept: 'Accepting over the gate…',
   settle: 'Settling the finding…',
   simplify: 'Writing the Simplify Fix section…',
@@ -79,13 +83,113 @@ const PENDING_TEXT = {
   takeback: 'Taking the branch back from your checkout…',
   'handed-done': 'Asking origin for your push…',
 };
-const $ = (id) => document.getElementById(id);
+// The element with the id, or null when the page has none.
+const $ = (id: string): HTMLElement | null => document.getElementById(id);
+// The element with the id, where the page requires it: dashboard.html has it, so a missing one is a
+// broken page and throws.
+function byId(id: string): HTMLElement {
+  const node = document.getElementById(id);
+  if (node === null) {
+    throw new Error(`The page has no element #${id}`);
+  }
+  return node;
+}
 // SF-129: the rules of a job's stop and actions are the server's (factory/src/stops.ts). Each job
 // of the payloads carries its stop's canonical row (stop_code, stop_kind, stop_group), the
 // actions the page shows (actions, in order) and every action's availability ('' or why not); the
 // detail carries the ledger entries to settle (settle_ids). The page renders them.
 
-const state = {
+// The page's own records in the state, as the scripts that fill them write them.
+// A job's last outcome, shown on its page and in the toast (job-page.js setOutcome stamps at).
+interface Outcome {
+  level: 'ok' | 'info' | 'warn' | 'error';
+  text: string;
+  link?: string;
+  at?: string;
+}
+// The Changes data of the job shown (see cxData): the sides and diffs are the Changes screen's
+// (job-screens.js), read through their own checks.
+interface CxData {
+  index: unknown;
+  stamp: string | null;
+  loading: string | null;
+  lists: Map<string, unknown>;
+  sides: Map<string, unknown>;
+  diffs: Map<string, unknown>;
+  focusTree: boolean;
+}
+// The planned ticket page (SF-081); its payload and check are ticket-page.js's.
+interface TicketPageState {
+  key: string | null;
+  data: unknown;
+  check: unknown;
+  error: string | null;
+  load: object | null;
+  textarea: HTMLTextAreaElement | null;
+  copied: string | null;
+  imageStatus: string | null;
+  uploading: number;
+}
+interface PageState {
+  jobs: JobRow[];
+  key: string | null;
+  detail: JobDetail | null;
+  cache: Map<string, string>;
+  cx: CxData;
+  taskView: { stamp: string | null; text: string | null; check: unknown } | null;
+  source: EventSource | null;
+  retry: ReturnType<typeof setTimeout> | null;
+  lastLine: number;
+  entries: Array<Record<string, unknown>>;
+  seen: Set<string>;
+  streamLoad: object | null;
+  labels: Map<string, string | null>;
+  prevLabel: string | null;
+  notes: Map<string, string>;
+  stopSig: string | null;
+  pending: Set<string>;
+  outcomes: Map<string, Outcome | null>;
+  drafts: Map<string, string>;
+  unresolved: Map<string, { reason: string; refreshing: boolean; failed: boolean }>;
+  doubts: Map<string, string>;
+  confirm: { action: string; key: string } | null;
+  remote: boolean;
+  ticketAsk: { ticket: string; resolve: (confirmed: boolean) => void } | null;
+  handoverMenu: boolean;
+  workspaces: WorkspaceRow[] | null;
+  tickets: TicketRow[] | null;
+  archived: ArchivedRow[];
+  setupPending: Set<string>;
+  ticketConfirm: { action: string; key: string; row: TicketRow } | null;
+  filter: string;
+  doneAll: boolean;
+  drawer: 'task' | 'workspaces' | 'ticket' | 'archived' | null;
+  task: { key: string } | null;
+  wantConfirm: { action: string; key: string } | null;
+  startHolds: Map<string, { reason: string; failed: boolean }>;
+  mrStatus: Map<string, { number: number; state: string }>;
+  refresh: ReturnType<typeof setTimeout> | null;
+  jobsSeen: number;
+  toastTimer: ReturnType<typeof setTimeout> | null;
+  toastLevel: Outcome['level'] | null;
+  toastHover: boolean;
+  highlight: string | null;
+  highlightShown: boolean;
+  wantFocus: 'composer' | 'stop' | null;
+  jobLandsAfter: unknown[];
+  openMenu: string | null;
+  queue: QueueView | null;
+  drag: string | null;
+  tk: TicketPageState;
+  goAfterStart: string | null;
+  newImages: Array<{ file: File; ext: string; url: string }>;
+  wsSettings: { handoff_default: HandoffMode | null; digest: DigestSettings | null };
+  wsEdit: string | null;
+  wsEditForm: HTMLFormElement | null;
+  digestDirty: boolean;
+}
+
+const state: PageState = {
   jobs: [],
   key: null, // "<ws>/<ticket>" of the job open on its page
   detail: null,
@@ -185,7 +289,7 @@ const state = {
 // src/conversation.ts).
 const CHATGPT_PREFILL_URL = 'https://chatgpt.com/?q=';
 
-function el(tag, className, text) {
+function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
   if (className) {
     node.className = className;
@@ -196,8 +300,9 @@ function el(tag, className, text) {
   return node;
 }
 
-// A button with its data-* attributes, for the delegated click listener.
-function button(className, text, data = {}) {
+// A button with its data-* attributes, for the delegated click listener. Without a text it is
+// empty, for the caller to fill (board.js's dependency chips and workspace filter).
+function button(className: string, text?: string, data: Readonly<Record<string, string>> = {}): HTMLButtonElement {
   const node = el('button', className, text);
   node.type = 'button';
   for (const [name, value] of Object.entries(data)) {
@@ -207,7 +312,7 @@ function button(className, text, data = {}) {
 }
 
 // An SVG element: its attributes (class too) only through setAttribute.
-function svgEl(tag, attributes = {}, text = undefined) {
+function svgEl(tag: string, attributes: Readonly<Record<string, string | number>> = {}, text: string | undefined = undefined): SVGElement {
   const node = document.createElementNS(SVG_NS, tag);
   for (const [name, value] of Object.entries(attributes)) {
     node.setAttribute(name, String(value));
@@ -218,41 +323,42 @@ function svgEl(tag, attributes = {}, text = undefined) {
   return node;
 }
 
-const keyOf = (job) => `${job.workspace}/${job.ticket}`;
-const jobPath = (key) => key.split('/').map(encodeURIComponent).join('/');
+const keyOf = (job: { workspace: string; ticket: string }): string => `${job.workspace}/${job.ticket}`;
+const jobPath = (key: string): string => key.split('/').map(encodeURIComponent).join('/');
 // "2026-11-04 12:14:25" of a stored timestamp (ISO 8601 UTC) in the browser's local time (SF-049);
 // empty when it is missing or does not parse.
-function localTime(ts) {
+function localTime(ts: unknown): string {
   const date = typeof ts === 'string' ? new Date(ts) : null;
   if (date === null || Number.isNaN(date.getTime())) {
     return '';
   }
-  const pad = (value) => String(value).padStart(2, '0');
+  const pad = (value: number): string => String(value).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 // A <time> of a stored timestamp: the local time as text, the exact UTC moment in its datetime
-// and its title, so hovering shows it.
-function timeEl(ts) {
+// and its title, so hovering shows it. The text is empty for anything but a string.
+function timeEl(ts: unknown): HTMLTimeElement {
   const text = localTime(ts);
   const node = el('time', '', text);
-  if (text !== '') {
+  if (text !== '' && typeof ts === 'string') {
     node.setAttribute('datetime', ts);
     node.setAttribute('title', ts);
   }
   return node;
 }
 // A duration as the prototype writes it: "14 min", "1 h 4 min".
-const dur = (ms) => {
+const dur = (ms: number): string => {
   const m = Math.max(0, Math.round(ms / 60000));
   return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
 };
 // An estimated cost (the jobs payload's cost_usd): "$1.23", or "—" without one.
-const money = (value) => (typeof value === 'number' ? `$${value.toFixed(2)}` : '—');
-const firstLine = (text) => (typeof text === 'string' ? text.split('\n')[0].trim() : '');
-const counted = (n, word, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
-const pendingId = (action, key) => `${action}\n${key}`;
+const money = (value: unknown): string => (typeof value === 'number' ? `$${value.toFixed(2)}` : '—');
+// split always returns at least one part.
+const firstLine = (text: unknown): string => (typeof text === 'string' ? (text.split('\n')[0] ?? '').trim() : '');
+const counted = (n: number, word: string, many = `${word}s`): string => `${n} ${n === 1 ? word : many}`;
+const pendingId = (action: string, key: string): string => `${action}\n${key}`;
 
-async function getText(path) {
+async function getText(path: string): Promise<string> {
   const response = await fetch(path, { cache: 'no-store' });
   if (!response.ok) {
     throw new Error(`${path}: HTTP ${response.status}`);
@@ -260,38 +366,46 @@ async function getText(path) {
   return response.text();
 }
 
-async function getJson(path) {
+// The parsed body, unchecked: each caller checks the shape it reads.
+async function getJson(path: string): Promise<unknown> {
   return JSON.parse(await getText(path));
 }
 
 // A refusal of an action by the factory: its code and message, shown as they are.
 class ActionError extends Error {
-  constructor(code, message) {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
     super(message);
     this.code = code;
   }
 }
 
+// A parsed JSON value that is an object (an array too), its fields read as unknown.
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return value !== null && typeof value === 'object';
+}
+
 // The action's answer. A 4xx, and a 5xx that names a factory refusal, is definite: ActionError.
 // Anything else (no answer, a body cut or unreadable after the headers, a 2xx without a result,
 // an internal failure) throws a plain Error: the action may have run.
-async function post(path, body) {
+async function post(path: string, body: unknown): Promise<unknown> {
   return answerOf(await fetch(path, {
     method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
   }));
 }
 
 // An image upload (SF-064): the file's raw bytes as the body, with the same answer as post.
-async function postBytes(path, file) {
+async function postBytes(path: string, file: Blob): Promise<unknown> {
   return answerOf(await fetch(path, {
     method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/octet-stream' }, body: file,
   }));
 }
 
 // The result of an action's answer, or its refusal (see post).
-async function answerOf(response) {
+async function answerOf(response: Response): Promise<unknown> {
   const refused = response.status >= 400 && response.status < 500;
-  let data;
+  let data: unknown;
   try {
     data = await response.json();
   } catch {
@@ -301,10 +415,10 @@ async function answerOf(response) {
     }
     throw new Error(`HTTP ${response.status}, the answer could not be read`);
   }
-  if (response.ok && data !== null && typeof data === 'object' && data.ok === true && Object.hasOwn(data, 'result')) {
+  if (response.ok && isRecord(data) && data.ok === true && Object.hasOwn(data, 'result')) {
     return data.result;
   }
-  const error = data !== null && typeof data === 'object' && typeof data.error === 'object' && data.error !== null ? data.error : {};
+  const error = isRecord(data) && isRecord(data.error) ? data.error : {};
   if (refused || (response.status >= 500 && typeof error.code === 'string' && error.code !== 'internal_error')) {
     throw new ActionError(String(error.code ?? `http_${response.status}`), String(error.message ?? `HTTP ${response.status}`));
   }
@@ -312,8 +426,8 @@ async function answerOf(response) {
 }
 
 // The connection, a tag in the top bar while the stream is not connected.
-function setConnection(text, kind) {
-  const node = $('connection');
+function setConnection(text: string, kind: string): void {
+  const node = byId('connection');
   node.textContent = text;
   node.className = `tag ${kind}`;
   node.hidden = kind === 'live';
@@ -324,7 +438,6 @@ function setConnection(text, kind) {
 // per view ("<from>|<to>"), the sides of the files per "<side>|<path>" (side "base:<N>" or "<N>"),
 // each 'loading', the answer or { error }; the line diffs per pair of sides; whether the tree takes
 // the focus once its list arrives.
-function cxData() {
+function cxData(): CxData {
   return { index: null, stamp: null, loading: null, lists: new Map(), sides: new Map(), diffs: new Map(), focusTree: false };
 }
-

@@ -100,9 +100,10 @@ function byId(id: string): HTMLElement {
 // detail carries the ledger entries to settle (settle_ids). The page renders them.
 
 // The page's own records in the state, as the scripts that fill them write them.
-// A job's last outcome, shown on its page and in the toast (job-page.js setOutcome stamps at).
+// A job's last outcome, shown on its page and in the toast (job-page.js setOutcome stamps at); pending
+// while its action's request is out (job-page.js run).
 interface Outcome {
-  level: 'ok' | 'info' | 'warn' | 'error';
+  level: 'ok' | 'info' | 'warn' | 'error' | 'pending';
   text: string;
   link?: string;
   at?: string;

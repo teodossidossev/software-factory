@@ -13,7 +13,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { type WorkspaceColor, workspaceColor } from '../src/registry.js';
 import { served, servedDetail } from './support/dashboard-client.js';
-import { type FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
+import { type FakeElement, type FetchRequest, loadPage, type Page, readScripts } from './support/fake-dom.js';
 
 const STATIC_DIR = new URL('../../static/', import.meta.url);
 process.env.TZ = 'Europe/Sofia';
@@ -975,9 +975,11 @@ test('board client (SF-071): drag and drop and Alt+Up / Alt+Down post api/queue/
 
 test('board client: no element of the page has an inline style and no prototype-only part exists; values go in as text', async () => {
   const html = await readFile(new URL('dashboard.html', STATIC_DIR), 'utf8');
-  const source = await readFile(new URL('app.js', STATIC_DIR), 'utf8');
   assert.doesNotMatch(html, /\sstyle=/);
-  assert.doesNotMatch(source, /innerHTML|insertAdjacentHTML|outerHTML|setAttribute\('style'|\.style\.(?!setProperty)/);
+  const scripts = await readScripts(STATIC_DIR);
+  for (const { file, source } of scripts) {
+    assert.doesNotMatch(source, /innerHTML|insertAdjacentHTML|outerHTML|setAttribute\('style'|\.style\.(?!setProperty)/, file);
+  }
   const jobs = [
     job('W', 'working'), job('N', 'needs_human', { error: { code: 'gate_rounds', message: 'x' } }), job('R', 'ready_for_human_review'),
     job('P', 'pushed', { mr: { number: 3, state: 'open', url: 'https://github.com/acme/app/pull/3' }, mr_host: { host: 'github', reason: null } }),
@@ -996,7 +998,9 @@ test('board client: no element of the page has an inline style and no prototype-
     assert.equal(page.document.querySelectorAll(selector).length, 0, selector);
   }
   assert.doesNotMatch(page.document.documentElement.textContent, /PROTOTYPE|\(prototype\)|Simulated|simulated/);
-  assert.doesNotMatch(source, /PROTOTYPE|\(prototype\)|Simulated/);
+  for (const { file, source } of scripts) {
+    assert.doesNotMatch(source, /PROTOTYPE|\(prototype\)|Simulated/, file);
+  }
 });
 
 test('board client: the ChatGPT reviewer is not shown anywhere', async () => {

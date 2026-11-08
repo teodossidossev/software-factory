@@ -2705,9 +2705,9 @@ Path=/` locally (the port in the name, since browsers do not keep cookies apart 
 `__Host-sf_dashboard=<v>; HttpOnly; Secure; SameSite=Strict; Path=/` on the remote port. `<v>` is
 the hex HMAC-SHA256 of the token over `dashboard-cookie:local` or `dashboard-cookie:remote`, so it
 survives restarts and dies with `sf dashboard --rotate` (at the next start). With a valid cookie
-every page and API path works at the root too (`/`, `/api/jobs`, the relative URLs of `app.js`),
-so `/` can be bookmarked; the actions keep their Origin check. Each side's cookie works on its own
-port only. A path with neither the right token nor a valid cookie (both compared in constant time)
+every page and API path works at the root too (`/`, `/api/jobs`, the relative URLs of the page's
+scripts), so `/` can be bookmarked; the actions keep their Origin check. Each side's cookie works on
+its own port only. A path with neither the right token nor a valid cookie (both compared in constant time)
 answers 404 with an empty body, and so does a link from another site to `/` (`SameSite=Strict`
 sends no cookie with it).
 
@@ -2899,7 +2899,7 @@ button; the job's page (SF-078) says the sentence in its header, its stop block 
 One table on the server decides each stop (SF-129, `STOPS` in `src/stops.ts`, section Jobs): its
 kind, the codes that share it, its group, its settlement and its actions; the page renders what
 the payloads send (`stop_code`, `stop_kind`, `stop_group`, `actions`, `availability`, the
-detail's `settle_ids`) and decides no rule of its own. `STOPS` in `static/app.js` keeps only the
+detail's `settle_ids`) and decides no rule of its own. `STOPS` in `static/board.js` keeps only the
 words of each row, keyed by `stop_code`:
 
 | Code | Kind | Reason on the card | Button |
@@ -3232,6 +3232,11 @@ retargets a request, and an answer that arrives for another job changes nothing 
 The page is plain HTML, CSS and JavaScript from `static/`, with no external resources, under
 `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self';
 img-src 'self' blob:` (`blob:` for New ticket's thumbnails before upload, SF-064) and `Cache-Control: no-store`; every value is rendered as text.
+The page's JavaScript is five classic scripts that share its globals, loaded with `defer` in the
+order of `DASHBOARD_SCRIPTS` (`src/dashboard.ts`, SF-136): `core.js` (constants, state, helpers),
+`job-screens.js` (Task check, Changes, Merge request, Stream), `job-page.js` (header, composer,
+hand-over, job actions), `board.js` (board, cards, queue, toast) and `app.js` (routing, ticket page,
+digest, Stats, setup, start); the server serves those and no other script.
 
 Endpoints under `/d/<token>/`. The read endpoints are GET only (anything else `405` with
 `Allow: GET`); the action endpoints are POST only (anything else `405` with `Allow: POST`; GET,

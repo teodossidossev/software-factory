@@ -11,7 +11,7 @@ import { appendFile, mkdir, readdir, readFile, readlink, stat, writeFile } from 
 import { join } from 'node:path';
 import { mock, test } from 'node:test';
 import {
-  checkDashboardPorts, dashboardRemoteLogins, dashboardRemoteOrigins, MAX_STREAMS, remoteDashboardUrls, removeToken, startDashboard, STREAM_PAGE_LINES, TOKEN_FILE,
+  checkDashboardPorts, DASHBOARD_SCRIPTS, dashboardRemoteLogins, dashboardRemoteOrigins, MAX_STREAMS, remoteDashboardUrls, removeToken, startDashboard, STREAM_PAGE_LINES, TOKEN_FILE,
 } from '../src/dashboard.js';
 import { FactoryError } from '../src/errors.js';
 import { explanationPath } from '../src/explain.js';
@@ -73,12 +73,17 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
 
     const origin = `http://127.0.0.1:${base.port}`;
     const wrong = `${token.slice(0, -1)}${token.endsWith('0') ? '1' : '0'}`;
-    for (const path of ['/', '/d/', '/d//', `/d/${token}`, `/d/${wrong}/`, `/d/${wrong}/api/jobs`, `/d/${token.slice(0, 10)}/`, `/x/${token}/`, `/d/${token}/nope`, `/d/${token}/api/nope`]) {
+    // SF-136: a file of static/ that is not in the list, or a name like a script's, is a 404 too.
+    const unlisted = ['dashboard.html', 'main.js', 'core', 'core.js.map', 'app.js/', 'static/app.js'].map((name) => `/d/${token}/${name}`);
+    for (const path of ['/', '/d/', '/d//', `/d/${token}`, `/d/${wrong}/`, `/d/${wrong}/api/jobs`, `/d/${token.slice(0, 10)}/`, `/x/${token}/`, `/d/${token}/nope`, `/d/${token}/api/nope`, ...unlisted]) {
       const reply = await fetchRaw(`${origin}${path}`);
       assert.deepEqual([reply.status, reply.body], [404, ''], path);
       assert.equal(reply.headers['content-security-policy'], CSP, path);
     }
-    for (const [path, type, marker] of [['', 'text/html', '<script src="app.js"'], ['app.js', 'text/javascript', 'EventSource'], ['app.css', 'text/css', 'prefers-color-scheme']] as const) {
+    // SF-136: every script of DASHBOARD_SCRIPTS is served as JavaScript, each with its own text (its
+    // header names it).
+    const scripts = DASHBOARD_SCRIPTS.map((file) => [file, 'text/javascript', `// ${file}, `] as const);
+    for (const [path, type, marker] of [['', 'text/html', '<script src="core.js"'], ...scripts, ['app.css', 'text/css', 'prefers-color-scheme']] as const) {
       const reply = await fetchRaw(new URL(path, base));
       assert.equal(reply.status, 200, path);
       assert.equal(reply.headers['content-type'], `${type}; charset=utf-8`);
@@ -90,6 +95,8 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
     // No inline scripts or styles in the page.
     const page = (await fetchRaw(base)).body;
     assert.doesNotMatch(page, /<script>|<style|style=/);
+    // SF-136: its scripts are exactly DASHBOARD_SCRIPTS, in their order, each deferred.
+    assert.deepEqual([...page.matchAll(/<script\b[^>]*>/g)].map(([tag]) => tag), DASHBOARD_SCRIPTS.map((file) => `<script src="${file}" defer>`));
 
     const post = await fetchRaw(new URL('api/jobs', base), { method: 'POST' });
     assert.deepEqual([post.status, post.body, post.headers.allow], [405, '', 'GET']);

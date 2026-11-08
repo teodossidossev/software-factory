@@ -7,9 +7,8 @@
 // unavailable notes, the divider, a path link of the Stream (openChanges) and the empty states.
 // Script checks, not browser acceptance: the manual steps are in factory/README.md.
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { type FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
+import { type FakeElement, type FetchRequest, loadPage, type Page, readScripts } from './support/fake-dom.js';
 
 const STATIC_DIR = new URL('../../static/', import.meta.url);
 process.env.TZ = 'Europe/Sofia';
@@ -416,8 +415,7 @@ test('changes client: no iteration yet says when the changes come; the divider r
 // A browser's querySelectorAll returns a NodeList, which has forEach but none of the other array
 // methods; the fake DOM returns an array, so a call like .find on it passes here and throws there.
 test('changes client: the script never calls an array-only method on a querySelectorAll result', async () => {
-  const source = await readFile(new URL('app.js', STATIC_DIR), 'utf8');
-  const calls = source.split('\n').map((line, at) => [at + 1, line] as const)
+  const calls = (await readScripts(STATIC_DIR)).flatMap(({ file, source }) => source.split('\n').map((line, at) => [`${file}:${at + 1}`, line] as const))
     .filter(([, line]) => /querySelectorAll\([^)]*\)\??\.(?!forEach\b|length\b)[A-Za-z]+\(/.test(line));
   assert.deepEqual(calls, []);
 });

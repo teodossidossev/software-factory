@@ -83,7 +83,7 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
     // SF-136: every script of DASHBOARD_SCRIPTS is served as JavaScript, each with its own text (its
     // header names it).
     const scripts = DASHBOARD_SCRIPTS.map((file) => [file, 'text/javascript', `// ${file}, `] as const);
-    for (const [path, type, marker] of [['', 'text/html', '<script src="core.js"'], ...scripts, ['app.css', 'text/css', 'prefers-color-scheme']] as const) {
+    for (const [path, type, marker] of [['', 'text/html', '<script src="core.js"'], ...scripts, ['app.css', 'text/css', 'prefers-color-scheme'], ['favicon.svg', 'image/svg+xml', '<svg']] as const) {
       const reply = await fetchRaw(new URL(path, base));
       assert.equal(reply.status, 200, path);
       assert.equal(reply.headers['content-type'], `${type}; charset=utf-8`);

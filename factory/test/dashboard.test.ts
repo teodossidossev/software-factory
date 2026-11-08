@@ -112,12 +112,12 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
   });
 });
 
-// SF-146, SF-147: core.js and job-screens.js are built from web/*.ts into dist/web/ and served from
-// there; the other scripts are still served from static/, until SF-148 to SF-150 convert them. Each
-// is served with the text of the file dashboardScriptFiles names, and each built one is a classic
-// script: the compiler kept it free of import and export (a module would have gained an `export {}`).
-const BUILT_SCRIPTS = ['core.js', 'job-screens.js'];
-test('dashboard: core.js and job-screens.js are served from the build output dist/web/, the other scripts from static/', async () => {
+// SF-146 to SF-148: core.js, job-screens.js, job-page.js and board.js are built from web/*.ts into
+// dist/web/ and served from there; the other scripts are still served from static/, until SF-149 and
+// SF-150 convert them. Each is served with the text of the file dashboardScriptFiles names, and each
+// built one is a classic script: the compiler kept it free of import and export (a module would have gained an `export {}`).
+const BUILT_SCRIPTS = ['core.js', 'job-screens.js', 'job-page.js', 'board.js'];
+test('dashboard: core.js, job-screens.js, job-page.js and board.js are served from the build output dist/web/, the other scripts from static/', async () => {
   const packageDir = new URL('../../', import.meta.url);
   const files = dashboardScriptFiles();
   assert.deepEqual(files.map(({ file }) => file), [...DASHBOARD_SCRIPTS]);
@@ -148,6 +148,10 @@ test('dashboard: core.js and job-screens.js are served from the build output dis
     const screens = (await fetchRaw(new URL('job-screens.js', dashboard.url))).body;
     assert.match(screens, /^function cxGet\(map, id, path, done\) \{$/m);
     assert.match(screens, /^const MR = new Map\(\);$/m);
+    const jobPage = (await fetchRaw(new URL('job-page.js', dashboard.url))).body;
+    assert.match(jobPage, /^async function run\(action, key, body\) \{$/m);
+    const boardScript = (await fetchRaw(new URL('board.js', dashboard.url))).body;
+    assert.match(boardScript, /^const STOPS = \{$/m);
   });
 });
 

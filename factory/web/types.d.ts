@@ -1,6 +1,6 @@
-// The server's payloads as the page's TypeScript reads them (SF-146, SF-147). Each type copies, from the
+// The server's payloads as the page's TypeScript reads them (SF-146 to SF-148). Each type copies, from the
 // server's own type in src/ (named on each), only the fields the typed page code reads; it never
-// imports from src/. A file converted later (SF-147 to SF-150) adds the fields it reads.
+// imports from src/. A file converted later (SF-149, SF-150) adds the fields it reads.
 // A global declaration file: no import or export, so every type is visible to every page script.
 
 // A job's state: src/jobs.ts JOB_STATES.
@@ -31,27 +31,100 @@ type PauseStep = 'turn' | 'review' | 'gate' | 'simplify';
 type StopKind = 'decision' | 'error';
 type StopGroup = 'gate' | 'ledger' | 'limit' | 'simplify' | 'tests';
 
-// A job of api/jobs and of the stream's jobs events: src/dashboard.ts jobSummary. stop is the jobs
-// payload's only (jobsPayload); the detail's job has none.
+// A job of api/jobs and of the stream's jobs events: src/dashboard.ts jobSummary. title, cost_usd,
+// review, now, tool_calls and stop are the jobs payload's only (jobsPayload, boardFacts); the
+// detail's job has none.
 interface JobRow {
   workspace: string;
   ticket: string;
+  branch: string;
+  base: string;
   state: JobState;
   iteration: number;
   updated_at: string;
+  created_at: string;
   error: { code: string; message: string } | null;
   worktree: string | null;
+  prepared_commit: string | null;
   fixes: number;
+  gate_fixes: number;
   gate_tokens: number;
   // The changed files' count (fileCounts).
   files: number;
+  mr: JobMr | null;
+  mr_host: { host: 'github' | 'gitlab' | null; reason: string | null };
   paused: { from: JobState; step: PauseStep | null; at: string } | null;
   limit: { provider: 'claude' | 'codex'; resets_at: string; reset_seen?: true } | null;
+  task_changed: boolean | null;
+  turn_limit: string | null;
+  // The job in the user's checkout (src/jobs.ts Handover): only what the page reads.
+  handover: { at: string } | null;
+  handoff_skipped: { code: string; message: string } | null;
   claude_review: boolean;
   stop_code: string | null;
   stop_kind: StopKind | null;
   stop_group: StopGroup | null;
+  // src/stops.ts jobActions: the actions the job page shows, in order, and every action's
+  // availability ('' or why it is off).
+  actions: ShownAction[];
+  availability: Readonly<Record<string, string>>;
+  title?: string;
+  cost_usd?: number | null;
+  review?: 'clean' | 'fix' | 'failed' | null;
+  now?: { who: string; what: string; ts: string | null } | null;
+  tool_calls?: number;
   stop?: JobStop | null;
+}
+
+// The merge request on the Git host: src/jobs.ts JobMr.
+interface JobMr {
+  host: 'github' | 'gitlab';
+  number: number;
+  url: string;
+  state: 'open' | 'merged' | 'closed';
+  merge_commit?: string | null;
+}
+
+// An action of the job page: src/stops.ts ShownAction.
+interface ShownAction {
+  action: string;
+  label: string;
+  primary: boolean;
+  danger: boolean;
+}
+
+// api/jobs and the stream's jobs events: src/dashboard.ts jobsPayload, with the remote port's
+// remote (SF-126).
+interface JobsPayload {
+  jobs: JobRow[];
+  remote?: boolean;
+}
+
+// The result of a job's action (POST api/jobs/<ws>/<ticket>/<action>): the fields describeOutcome
+// and run read of the results of src/execution.ts Execution's action methods (approve and
+// createMergeRequest's MrOutcome, say, settle, pause, abort, restart, handedDone, mergeMergeRequest,
+// mergeRequestStatus, ...), each absent from the results that have none.
+interface ActionResult {
+  state?: JobState;
+  branch?: string;
+  title?: string;
+  message?: string;
+  link?: string;
+  error?: { code: string; message: string } | null;
+  archived?: string;
+  commit?: string;
+  mr?: { number: number; url: string; reused?: boolean; merge_commit?: string | null } | null;
+  status?: MergeRequestStatus | string | null;
+  iteration?: number;
+  step?: string | null;
+  id?: string;
+  waiting?: string[];
+  task_changed?: boolean;
+  kept?: string[];
+  branch_deleted?: string | null;
+  discarded?: boolean;
+  worktree?: string | null;
+  queued?: boolean;
 }
 
 // What a stopped job waits on: src/dashboard.ts stopOf. Its items are unknown[] there: the
@@ -95,9 +168,11 @@ type SimplifyRecord =
   | { suggestions: Suggestion[]; error?: undefined }
   | { error: string; suggestions?: undefined };
 
-// An iteration of the detail: src/dashboard.ts jobDetail.
+// An iteration of the detail: src/dashboard.ts jobDetail; files: its file list (src/jobs.ts
+// FileChange, only the line counts), null for an iteration published before SF-024.
 interface IterationRow {
   number: number;
+  files: Array<{ additions: number; deletions: number }> | null;
   review: ReviewRecord | null;
   gate: GateRecord | null;
   gate_override: GateOverride | null;
@@ -112,6 +187,7 @@ interface LedgerEntry {
   path: string;
   problem: string;
   expected: string;
+  reviewer: string;
   status: 'open' | 'fixed' | 'contested' | 'escalated' | 'left' | 'accepted_risk' | 'user_fix';
   response: string;
   evidence: string;
@@ -139,6 +215,8 @@ interface JobDetail {
   job: JobRow;
   iterations: IterationRow[];
   mr: boolean;
+  mr_title: string | null;
+  confirm_actions: string[];
   ledger: LedgerEntry[];
   settle_ids: string[];
   explanation: ExplanationRecord | null;
@@ -263,11 +341,48 @@ interface StreamPage {
   end: boolean;
 }
 
-// A ticket without a live job: src/setup.ts TicketRow.
+// A ticket without a live job: src/setup.ts TicketRow, as the tickets payload's rows carry it
+// (src/dashboard.ts ticketsPayload: check with the Task checks only, and the run queue's fields).
 interface TicketRow {
   workspace: string;
   ticket: string;
   title: string;
+  draft: boolean;
+  job: JobState | null;
+  lands_after: DependencyRow[];
+  check?: CheckSummary | null;
+  queue_position: number | null;
+  queue_error: { code: string; message: string } | null;
+  queue_reason: string | null;
+  queue_force: boolean;
+}
+// A ticket in the run queue: its position, 1-based.
+type QueuedRow = TicketRow & { queue_position: number };
+
+// A ticket's check for the board: src/task-check.ts CheckSummary.
+interface CheckSummary {
+  state: 'none' | 'ready' | 'not_ready' | 'failed' | 'not_needed';
+  check_reason: string | null;
+  stale: boolean;
+  running: boolean;
+  blockers: number;
+  majors: number;
+}
+
+// The state of a ticket another lands after: src/setup.ts DEPENDENCY_STATES.
+type DependencyState = 'merged' | 'pushed' | 'running' | 'planned' | 'missing';
+// A ticket another lands after, with its state: src/setup.ts DependencyRow.
+interface DependencyRow {
+  workspace: string;
+  ticket: string;
+  state: DependencyState;
+}
+// A live job's Task file's lands_after (the tickets payload's job_lands_after): src/setup.ts
+// JobDependencies.
+interface JobDependencies {
+  workspace: string;
+  ticket: string;
+  lands_after: DependencyRow[];
 }
 
 // An archived ticket: src/setup.ts ArchivedRow.
@@ -280,6 +395,8 @@ interface ArchivedRow {
 // A registered workspace: src/setup.ts WorkspaceRow.
 interface WorkspaceRow {
   name: string;
+  // src/registry.ts WorkspaceColor.
+  color: string;
 }
 
 // The run queue of the tickets payload: src/queue.ts QueueView.
@@ -289,6 +406,8 @@ interface QueueView {
   held: boolean;
   hold_reason: string | null;
   next: { workspace: string; ticket: string } | null;
+  on_limit: OnLimitRule;
+  limit_hold: { parked: number; resets_at: string | null } | null;
 }
 
 // The morning digest's settings: src/registry.ts DigestSettings.

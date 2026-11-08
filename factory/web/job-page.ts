@@ -1,32 +1,53 @@
-// job-page.js, the dashboard's third script (DASHBOARD_SCRIPTS in src/dashboard.ts): the job page's
-// header, the composer, the hand-over panel and the job's detail and actions. A classic script,
-// loaded in order with defer, sharing the page's globals with the others.
+// job-page.js, the dashboard's third script (DASHBOARD_SCRIPTS in src/dashboard.ts), built from
+// web/job-page.ts into dist/web/ (SF-148): the job page's header, the composer, the hand-over panel
+// and the job's detail and actions. A classic script, loaded in order with defer, sharing the
+// page's globals with the others. This file has no import or export on purpose: the compiler keeps
+// it a script, so its top-level names stay the page's globals.
 'use strict';
+
+// The element with the id, where the page requires it as that tag (dashboard.html has it so, or
+// the page made it): a missing one or one of another tag is a broken page and throws.
+function byIdAs<K extends keyof HTMLElementTagNameMap>(id: string, tag: K): HTMLElementTagNameMap[K] {
+  const node = byId(id);
+  if (!isTag(node, tag)) {
+    throw new Error(`The page's element #${id} is not a <${tag}>`);
+  }
+  return node;
+}
+
+// An element read as an HTML element, which has a dataset (an Element's type has none). No
+// instanceof: the tests' fake page has no element classes.
+const hasDataset = (node: Element): node is HTMLElement => 'dataset' in node;
+
+// The last merge request status read from the host for a job: run() stores the whole status
+// (MergeRequestStatus) of the mr-status answer, which core.ts's state types by the two fields
+// every reader compares.
+const mrStatusOf = (key: string): MergeRequestStatus | undefined => state.mrStatus.get(key) as MergeRequestStatus | undefined;
 
 // ---------- The header (SF-078, the prototype's renderHead) ----------
 
 // Draws a part of the job page again (the header, the composer's actions: on every jobs event,
 // every 15 s while the job runs) and keeps the focus on the button it was on.
-function keepFocus(container, work) {
+function keepFocus(container: HTMLElement, work: () => void): void {
   const active = document.activeElement;
-  const data = active !== null && active !== undefined && container.contains(active) ? active.dataset ?? {} : {};
+  const data: Readonly<DOMStringMap> = active !== null && active !== undefined && container.contains(active) && hasDataset(active) ? active.dataset ?? {} : {};
   const name = ['act', 'goto', 'back', 'copyBranch', 'tk', 'tktab', 'homenu'].find((key) => data[key] !== undefined);
   work();
   if (name !== undefined) {
     const attribute = name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
-    [...container.querySelectorAll(`[data-${attribute}]`)].find((node) => node.dataset[name] === data[name])?.focus();
+    [...container.querySelectorAll<HTMLElement>(`[data-${attribute}]`)].find((node) => node.dataset[name] === data[name])?.focus();
   }
 }
 
 // ← Board (Esc), the key, the title and the code of a stop; the switch Stream (s), Changes (N) (c)
 // and Merge request (m); the sentence with the state's dot, the iteration, the cost, the time and
 // the branch, which copies its checkout command.
-function renderHead() {
+function renderHead(): void {
   const job = shownJob();
   if (job === null) {
     return;
   }
-  $('job').className = `st-${job.state}`;
+  byId('job').className = `st-${job.state}`;
   const backButton = button('btn back', '← Board', { back: '' });
   backButton.setAttribute('title', 'Back to the board (Esc)');
   const t1 = el('div', 't1');
@@ -40,7 +61,7 @@ function renderHead() {
   switcher.setAttribute('role', 'tablist');
   switcher.setAttribute('aria-label', 'Job screens');
   const mrOk = mrAvailable();
-  for (const [screen, text, key] of [['stream', 'Stream', 's'], ['changes', typeof job.files === 'number' ? `Changes (${job.files})` : 'Changes', 'c'], ['mr', 'Merge request', 'm']]) {
+  for (const [screen, text, key] of [['stream', 'Stream', 's'], ['changes', typeof job.files === 'number' ? `Changes (${job.files})` : 'Changes', 'c'], ['mr', 'Merge request', 'm']] as const) {
     const tab = button(ui.screen === screen ? 'on' : '', `${text} `, { goto: screen });
     tab.setAttribute('role', 'tab');
     tab.setAttribute('aria-selected', String(ui.screen === screen));
@@ -67,16 +88,16 @@ function renderHead() {
     el('span', '', `${money(job.cost_usd)}${running ? ' so far' : ''} (Claude, est.)`), el('span', '', `${dur(end - Date.parse(job.created_at))} elapsed`), branch);
   // SF-084: what the ticket waits for, who waits for it, and a cycle it is part of.
   t2.append(...dependencyLines(keyOf(job), dependencyGraph(), 'span').lines);
-  keepFocus($('jhead'), () => $('jhead').replaceChildren(backButton, t1, tools, t2));
+  keepFocus(byId('jhead'), () => byId('jhead').replaceChildren(backButton, t1, tools, t2));
 }
 
 // The job has its MR text (written at Clean): the Merge request screen applies.
-const mrAvailable = () => shownDetail()?.mr === true;
+const mrAvailable = (): boolean => shownDetail()?.mr === true;
 
 // ---------- The composer (SF-078, the prototype's renderComposer; SF-129: the server's actions) ----------
 
 // The placeholder of the message box, per state.
-const PLACEHOLDER = {
+const PLACEHOLDER: Readonly<Partial<Record<JobState, string>>> = {
   starting: 'Message the Implementer; it reads it at its next step (Ctrl+Enter sends)',
   working: 'Message the Implementer; it reads it at its next step (Ctrl+Enter sends)',
   awaiting_review: 'Message the job; the Implementer reads it when the reviews end',
@@ -89,20 +110,20 @@ const PLACEHOLDER = {
 // The composer: the sentence in bold (and the merge request of a pushed job), the inline
 // confirmation, the message box and the actions; a disabled action has its reason as its title. A
 // handed-over job has its hand-over panel instead of the message box and the actions (SF-107).
-function renderComposer() {
+function renderComposer(): void {
   const job = state.detail?.job ?? null;
   // A confirmation opened before the doubt is not one the user could open now.
   if (state.confirm !== null && state.unresolved.has(state.confirm.key) && availability(state.confirm.action, job) !== '') {
     closeConfirm();
     return;
   }
-  const msg = $('msg');
-  $('refresh-button').hidden = state.unresolved.get(state.key)?.failed !== true;
+  const msg = byIdAs('msg', 'textarea');
+  byId('refresh-button').hidden = state.key === null || state.unresolved.get(state.key)?.failed !== true;
   if (job === null) {
     placeHandoverPanel(null);
-    $('composer-sentence').replaceChildren(el('span', 'muted', 'Loading the job…'));
-    $('acts').replaceChildren();
-    $('acts-why').replaceChildren();
+    byId('composer-sentence').replaceChildren(el('span', 'muted', 'Loading the job…'));
+    byId('acts').replaceChildren();
+    byId('acts-why').replaceChildren();
     msg.disabled = true;
     return;
   }
@@ -122,7 +143,7 @@ function renderComposer() {
     cs.push(line);
     // The status last read shows only while it is of the merge request the job shows now (the same
     // number and state): after a merge, a close or a new merge request it stays hidden.
-    const read = state.mrStatus.get(keyOf(job));
+    const read = mrStatusOf(keyOf(job));
     if (read !== undefined && read.number === job.mr.number && read.state === job.mr.state) {
       const status = el('span', 'muted', mrStatusText(read));
       status.id = 'mr-status-line';
@@ -133,7 +154,7 @@ function renderComposer() {
   if (finished) {
     cs.push(el('span', 'muted', 'The message box is hidden on a finished job.'));
   }
-  $('composer-sentence').replaceChildren(...cs);
+  byId('composer-sentence').replaceChildren(...cs);
   msg.hidden = finished;
   msg.disabled = !(job.availability?.say === '' || pausedTurn(job));
   const resumeWord = job.state === 'waiting_limit' ? 'Resume now' : 'Resume';
@@ -141,25 +162,25 @@ function renderComposer() {
     : PLACEHOLDER[job.state] ?? 'Message';
   // The actions the server lists for the job, in its order (SF-129).
   const buttons = (Array.isArray(job.actions) ? job.actions : []).map((shown) => actionButton(job, shown.action, shown.label, `btn${shown.primary ? ' primary' : ''}${shown.danger ? ' danger' : ''}`));
-  keepFocus($('acts'), () => $('acts').replaceChildren(...buttons));
+  keepFocus(byId('acts'), () => byId('acts').replaceChildren(...buttons));
   if (job.state === 'handed_over') {
     renderHandoverPanel(job, state.detail);
   } else {
     placeHandoverPanel(null);
   }
-  const confirm = $('confirm');
-  $('acts-why').replaceChildren(...whyLines([...$('composer').querySelectorAll('button')].filter((node) => !confirm.contains(node))));
+  const confirm = byId('confirm');
+  byId('acts-why').replaceChildren(...whyLines([...byId('composer').querySelectorAll('button')].filter((node) => !confirm.contains(node))));
 }
 
 // SF-119: the reasons of the disabled buttons (their titles), as text for a phone or a device
 // without hover (app.css shows .why only there): one line per reason, in the buttons' order,
 // "Off: <labels> (<reason>)". Only .btn buttons with a title; Send (data-act "say", its reason
 // the empty box) is left out.
-function whyLines(buttons) {
-  const byReason = new Map();
+function whyLines(buttons: readonly HTMLElement[]): HTMLElement[] {
+  const byReason = new Map<string, string[]>();
   for (const node of buttons) {
     const reason = node.getAttribute('title') ?? '';
-    if (node.disabled && reason !== '' && node.classList.contains('btn') && node.dataset.act !== 'say') {
+    if ('disabled' in node && node.disabled === true && reason !== '' && node.classList.contains('btn') && node.dataset.act !== 'say') {
       byReason.set(reason, [...(byReason.get(reason) ?? []), node.textContent.trim()]);
     }
   }
@@ -168,14 +189,14 @@ function whyLines(buttons) {
 
 // One action's button of the composer, disabled with its reason as its title: the action's
 // availability, an open confirmation, an empty message box for a message.
-function actionButton(job, action, label, className) {
+function actionButton(job: JobRow, action: string, label: string, className: string): HTMLButtonElement {
   const node = button(className, label, { act: action });
   node.id = `${action}-button`;
   let reason = availability(action === 'goon' ? 'say' : action, job);
   if (reason === '' && state.confirm !== null) {
     reason = 'a confirmation is open: confirm or cancel it first.';
   }
-  if (reason === '' && action === 'say' && $('msg').value.trim() === '') {
+  if (reason === '' && action === 'say' && byIdAs('msg', 'textarea').value.trim() === '') {
     reason = 'write a message first.';
   }
   node.disabled = reason !== '';
@@ -192,22 +213,28 @@ function actionButton(job, action, label, className) {
 // outcome) move into it, and back to their places (#msg before #acts in .crow, #action-status right
 // after .crow) when it goes. A new panel, or one taken away, draws the outcome again in its form.
 // Returns the panel (null when taken away).
-function placeHandoverPanel(key) {
-  const composer = $('composer');
-  const crow = composer.querySelector('.crow');
-  const msg = $('msg');
-  const status = $('action-status');
+function placeHandoverPanel(key: string): HTMLElement;
+function placeHandoverPanel(key: null): null;
+function placeHandoverPanel(key: string | null): HTMLElement | null {
+  const composer = byId('composer');
+  // dashboard.html's composer has its .crow row.
+  const crow = composer.querySelector<HTMLElement>('.crow');
+  if (crow === null) {
+    throw new Error('The composer has no .crow row');
+  }
+  const msg = byId('msg');
+  const status = byId('action-status');
   let panel = $('handover-panel');
   if (panel !== null && panel.dataset.key !== key) {
     // Out of the panel first: a removed panel's elements are no longer in the document.
-    $('acts').before(msg);
+    byId('acts').before(msg);
     crow.after(status);
     panel.remove();
     panel = null;
     state.handoverMenu = false;
     crow.hidden = false;
     if (key === null) {
-      renderOutcome(state.outcomes.get(state.key) ?? null);
+      renderOutcome(outcomeOf(state.key));
     }
   }
   if (key === null || panel !== null) {
@@ -221,22 +248,30 @@ function placeHandoverPanel(key) {
   const ask = el('div', 'ho-ask');
   ask.append(msg, el('div', 'ho-askrow'));
   panel.append(el('div', 'ho-top'), ask, status);
-  $('confirm').after(panel);
+  byId('confirm').after(panel);
   crow.hidden = true;
-  renderOutcome(state.outcomes.get(state.key) ?? null);
+  renderOutcome(outcomeOf(state.key));
   return panel;
 }
 
+// The last outcome of a job (none without a job open).
+const outcomeOf = (key: string | null): Outcome | null => (key === null ? null : state.outcomes.get(key) ?? null);
+
 // The last iteration of the detail, or null without one.
-const lastIteration = (detail) => (detail?.iterations ?? []).reduce((last, iteration) => (last === null || iteration.number > last.number ? iteration : last), null);
+const lastIteration = (detail: JobDetail | null): IterationRow | null => (detail?.iterations ?? []).reduce<IterationRow | null>((last, iteration) => (last === null || iteration.number > last.number ? iteration : last), null);
 
 // The panel of a handed-over job, drawn again on each call (the focus kept): its stop, if any; the
 // heading with the More menu; the facts; the two paths (I push it myself, The factory pushes it);
 // Ask for changes with the moved #msg.
-function renderHandoverPanel(job, detail) {
+function renderHandoverPanel(job: JobRow, detail: JobDetail | null): void {
   const panel = placeHandoverPanel(keyOf(job));
-  const top = panel.querySelector('.ho-top');
-  const parts = [];
+  // placeHandoverPanel made the panel with its .ho-top and .ho-askrow.
+  const top = panel.querySelector<HTMLElement>('.ho-top');
+  const row = panel.querySelector<HTMLElement>('.ho-askrow');
+  if (top === null || row === null) {
+    throw new Error('The hand-over panel has no .ho-top or .ho-askrow');
+  }
+  const parts: HTMLElement[] = [];
   if (job.error) {
     parts.push(el('div', 'ho-error', `${job.error.code}: ${job.error.message}`));
   }
@@ -256,12 +291,11 @@ function renderHandoverPanel(job, detail) {
   );
   parts.push(paths);
   keepFocus(top, () => top.replaceChildren(...parts));
-  const row = panel.querySelector('.ho-askrow');
   keepFocus(row, () => row.replaceChildren(actionButton(job, 'say', 'Ask for changes', 'btn'), el('span', 'muted', "The job takes your checkout's edits back and works on your message.")));
 }
 
 // One path of the panel: its title, its steps and its button.
-function handoverPath(title, steps, action) {
+function handoverPath(title: string, steps: readonly string[], action: HTMLElement): HTMLElement {
   const box = el('section', 'ho-path');
   const list = el('ol');
   list.append(...steps.map((step) => el('li', '', step)));
@@ -272,7 +306,7 @@ function handoverPath(title, steps, action) {
 // The facts line: the branch, since when it is in the checkout, the last iteration's files and
 // their lines (when it has a file list), and the accepted risks as chips (simplifications aside,
 // as notFixed of src/ledger.ts).
-function handoverFacts(job, detail) {
+function handoverFacts(job: JobRow, detail: JobDetail | null): HTMLElement {
   const facts = el('div', 'ho-facts');
   facts.append(el('span', 'mono', job.branch));
   const since = clock(job.handover?.at);
@@ -281,7 +315,7 @@ function handoverFacts(job, detail) {
   }
   const files = lastIteration(detail)?.files;
   if (Array.isArray(files)) {
-    const sum = (field) => files.reduce((total, file) => total + (Number(file[field]) || 0), 0);
+    const sum = (field: 'additions' | 'deletions'): number => files.reduce((total, file) => total + (Number(file[field]) || 0), 0);
     facts.append(el('span', '', `${files.length} ${files.length === 1 ? 'file' : 'files'}, +${sum('additions')} −${sum('deletions')} as Local Changes`));
   }
   const risks = (detail?.ledger ?? []).filter((entry) => entry.status === 'accepted_risk' && entry.reviewer !== 'simplify');
@@ -298,7 +332,7 @@ function handoverFacts(job, detail) {
 }
 
 // The More ▾ menu: Take it back (with what it does) and, after a separator, Abort the job….
-function handoverMenu(job) {
+function handoverMenu(job: JobRow): HTMLElement {
   const wrap = el('div', 'ho-more');
   const toggle = button('btn small', 'More ▾', { homenu: '' });
   toggle.setAttribute('aria-haspopup', 'menu');
@@ -320,38 +354,42 @@ function handoverMenu(job) {
   return wrap;
 }
 
+// The menu's items, made by handoverMenu as buttons.
+const handoverItems = (): HTMLButtonElement[] => [...($('handover-panel')?.querySelectorAll<HTMLButtonElement>('.ho-menu [role="menuitem"]') ?? [])];
+
 // Opens or closes the More menu; an opened one focuses its first item.
-function setHandoverMenu(open) {
+function setHandoverMenu(open: boolean): void {
   if (state.handoverMenu === open) {
     return;
   }
   state.handoverMenu = open;
   renderComposer();
   if (open) {
-    [...($('handover-panel')?.querySelectorAll('.ho-menu [role="menuitem"]') ?? [])].find((item) => !item.disabled)?.focus();
+    handoverItems().find((item) => !item.disabled)?.focus();
   }
 }
 
 // Arrow Down and Up move between the open menu's items (from its toggle too).
-function handoverMenuKey(event) {
-  const items = [...($('handover-panel')?.querySelectorAll('.ho-menu [role="menuitem"]') ?? [])].filter((item) => !item.disabled);
+function handoverMenuKey(event: KeyboardEvent): void {
+  const items = handoverItems().filter((item) => !item.disabled);
   if (items.length === 0) {
     return;
   }
-  const at = items.indexOf(document.activeElement);
+  const at = items.findIndex((item) => item === document.activeElement);
   const step = event.key === 'ArrowDown' ? 1 : -1;
-  items[at < 0 ? (step === 1 ? 0 : items.length - 1) : (at + step + items.length) % items.length].focus();
+  // In range: an index within the items, which are not empty.
+  items[at < 0 ? (step === 1 ? 0 : items.length - 1) : (at + step + items.length) % items.length]?.focus();
 }
 
 // ---------- The job's detail and its actions ----------
 
-function renderDetail(detail) {
+function renderDetail(detail: JobDetail): void {
   state.detail = detail;
   renderHead();
   // Changes reads its index again when the job's iteration or state moved; the screen stays as it
   // is until the new index arrives.
   if (ui.screen === 'changes') {
-    if ($('scrChanges').children.length === 0) {
+    if (byId('scrChanges').children.length === 0) {
       renderChanges();
     } else {
       cxIndex();
@@ -368,16 +406,16 @@ function renderDetail(detail) {
 }
 
 // The job waits for the user after a failed Claude review: Retry review runs it again.
-const reviewFailed = (job) => job.stop_code === 'review_failed';
+const reviewFailed = (job: JobRow): boolean => job.stop_code === 'review_failed';
 // Retry applies to the job's stop (SF-087), as the server says (SF-129): the job's own availability,
 // without the page's pending and unresolved layer.
-const retryOn = (job) => job.availability?.retry === '';
+const retryOn = (job: JobRow): boolean => job.availability?.retry === '';
 
-const preparationKnown = (job) => job.state === 'preparing_mr' || state.pending.has(pendingId('approve', keyOf(job)));
+const preparationKnown = (job: JobRow): boolean => job.state === 'preparing_mr' || state.pending.has(pendingId('approve', keyOf(job)));
 
 // Why an action is unavailable for the job, or '' when the page lets it through. Guidance only:
 // the factory's own guards decide, and their refusal is shown as it comes.
-function availability(action, job) {
+function availability(action: string, job: JobRow | null): string {
   if (job === null) {
     return 'the job is loading.';
   }
@@ -386,7 +424,8 @@ function availability(action, job) {
     return mrAvailable() ? '' : 'no MR text yet: written at Clean.';
   }
   if (state.pending.has(pendingId(action, keyOf(job)))) {
-    return PENDING_REASONS[action];
+    // Every action run() posts has its reason; the fallback keeps any other one off too.
+    return PENDING_REASONS[action] ?? 'its request is out; waiting for its outcome.';
   }
   const unresolved = state.unresolved.get(keyOf(job));
   // Abort stays for a preparation known to run: it is the only way to stop it.
@@ -402,12 +441,12 @@ function availability(action, job) {
 
 // A job paused (SF-067) or parked on a usage limit (SF-072) during the Implementer's turn: its
 // Resume takes the message.
-const pausedTurn = (job) => job.availability?.resume === '' && job.paused?.from === 'working';
+const pausedTurn = (job: JobRow): boolean => job.availability?.resume === '' && job.paused?.from === 'working';
 
 // The outcome line. On a handed-over job's panel (SF-107) it has a × to dismiss it, and an outcome
 // from before the hand-over is a muted note "Earlier, at …" with Dismiss, never a current line.
-function renderOutcome(outcome) {
-  const node = $('action-status');
+function renderOutcome(outcome: Outcome | null): void {
+  const node = byId('action-status');
   if (outcome === null) {
     node.className = 'status';
     node.replaceChildren();
@@ -436,7 +475,7 @@ function renderOutcome(outcome) {
 
 // Dismissing the outcome of the shown job (the hand-over panel's × or Dismiss): it leaves the
 // page's memory, so it does not come back while the page is open.
-function dismissOutcome() {
+function dismissOutcome(): void {
   if (state.key !== null) {
     state.outcomes.delete(state.key);
   }
@@ -444,7 +483,7 @@ function dismissOutcome() {
 }
 
 // The outcome of a job, stamped with when it was set (SF-107: one from before a hand-over is not current).
-function setOutcome(key, outcome) {
+function setOutcome(key: string, outcome: Outcome | null): void {
   if (outcome !== null) {
     outcome.at = new Date().toISOString();
   }
@@ -454,9 +493,12 @@ function setOutcome(key, outcome) {
   }
 }
 
+// The result of an action, as web/types.d.ts declares it; {} for anything but an object.
+const actionResult = (result: unknown): ActionResult => (result !== null && typeof result === 'object' ? (result as ActionResult) : {});
+
 // The outcome of a completed call, as the factory reported it: HTTP 200 is not success.
-function describeOutcome(action, result) {
-  const data = result !== null && typeof result === 'object' ? result : {};
+function describeOutcome(action: string, result: unknown): Outcome {
+  const data = actionResult(result);
   const detail = data.error ? `${data.error.code}: ${data.error.message}` : '';
   if (action === 'archive') {
     return { level: 'ok', text: `Archived: the job left the list (its history is in ${data.archived ?? 'the state directory'}); the branch ${data.branch ?? ''} is untouched.` };
@@ -554,15 +596,15 @@ function describeOutcome(action, result) {
 }
 
 // The short words of a success, for the toast of the job page.
-const DONE_TEXT = {
+const DONE_TEXT: Readonly<Record<string, string>> = {
   say: 'Message sent', approve: 'Pushed', abort: 'Aborted', review: 'The review runs again', accept: 'The MR is being prepared', settle: 'Settled',
   simplify: 'Simplify sent to the Implementer', archive: 'Archived', 'mr-create': 'Merge request opened', 'mr-merge': 'Merged', 'mr-status': 'MR status read',
   pause: 'Paused', resume: 'Resumed', restart: 'Restarted', handover: 'Handed over to your checkout', takeback: 'Taken back', 'handed-done': 'Your push is recorded',
 };
 
 // The jobs of an api/jobs answer or a jobs event; its remote (SF-126) says which port the page uses.
-function jobsOf(text) {
-  const data = JSON.parse(text);
+function jobsOf(text: string): JobRow[] {
+  const data = payload<JobsPayload>(text);
   if (typeof data.remote === 'boolean') {
     state.remote = data.remote;
   }
@@ -572,7 +614,7 @@ function jobsOf(text) {
 // What the dialog says of each action that asks for the job's ticket from another device (SF-126).
 // Which actions ask is the server's (SF-139: the detail's confirm_actions, the confirm routes of
 // POST_ROUTES in src/dashboard-routes.ts).
-const REMOTE_CONFIRM_TEXT = {
+const REMOTE_CONFIRM_TEXT: Readonly<Record<string, string>> = {
   approve: 'it pushes the branch to origin.',
   retry: 'it runs the MR preparation again, and pushes again after a failed push.',
   'mr-create': 'it opens the merge request on the Git host, pushing the branch first when it is not pushed yet.',
@@ -580,9 +622,13 @@ const REMOTE_CONFIRM_TEXT = {
 };
 
 // The ticket dialog, made on first use: a title, the action's text, the input and two buttons.
-function ticketDialog() {
-  const found = document.getElementById('remote-confirm');
+function ticketDialog(): HTMLDialogElement {
+  const found = $('remote-confirm');
   if (found !== null) {
+    // Made below, as a dialog.
+    if (!isTag(found, 'dialog')) {
+      throw new Error("The page's element #remote-confirm is not a <dialog>");
+    }
     return found;
   }
   // A native modal dialog, styled by the browser: app.css's .confirm would display it while closed.
@@ -598,7 +644,7 @@ function ticketDialog() {
   const input = el('input');
   input.id = 'remote-confirm-input';
   input.type = 'text';
-  for (const [name, value] of [['autocomplete', 'off'], ['autocapitalize', 'off'], ['spellcheck', 'false'], ['aria-labelledby', 'remote-confirm-title']]) {
+  for (const [name, value] of [['autocomplete', 'off'], ['autocapitalize', 'off'], ['spellcheck', 'false'], ['aria-labelledby', 'remote-confirm-title']] as const) {
     input.setAttribute(name, value);
   }
   const ok = el('button', 'btn btn-primary');
@@ -639,17 +685,18 @@ function ticketDialog() {
 
 // "Type <ticket> to continue": true once the exact ticket is typed and confirmed, false on Cancel
 // (or while another such dialog is open).
-function askTicket(action, ticket) {
+function askTicket(action: string, ticket: string): Promise<boolean> {
   if (state.ticketAsk !== null) {
     return Promise.resolve(false);
   }
   const dialog = ticketDialog();
-  $('remote-confirm-title').textContent = `Type ${ticket} to continue`;
-  $('remote-confirm-text').textContent = `${ACTION_LABELS[action]} from another device: ${REMOTE_CONFIRM_TEXT[action]}`;
-  const input = $('remote-confirm-input');
+  byId('remote-confirm-title').textContent = `Type ${ticket} to continue`;
+  byId('remote-confirm-text').textContent = `${ACTION_LABELS[action]} from another device: ${REMOTE_CONFIRM_TEXT[action]}`;
+  const input = byIdAs('remote-confirm-input', 'input');
   input.value = '';
-  $('remote-confirm-ok').textContent = ACTION_LABELS[action];
-  $('remote-confirm-ok').disabled = true;
+  const ok = byIdAs('remote-confirm-ok', 'button');
+  ok.textContent = ACTION_LABELS[action] ?? null;
+  ok.disabled = true;
   dialog.hidden = false;
   if (typeof dialog.showModal === 'function') {
     dialog.showModal();
@@ -663,14 +710,14 @@ function askTicket(action, ticket) {
 }
 
 // Closes the ticket dialog: true only when confirmed with the exact ticket typed.
-function settleTicketAsk(confirmed) {
+function settleTicketAsk(confirmed: boolean): void {
   const ask = state.ticketAsk;
   if (ask === null) {
     return;
   }
-  const typed = $('remote-confirm-input').value;
+  const typed = byIdAs('remote-confirm-input', 'input').value;
   state.ticketAsk = null;
-  const dialog = $('remote-confirm');
+  const dialog = byIdAs('remote-confirm', 'dialog');
   if (typeof dialog.close === 'function') {
     dialog.close();
   } else {
@@ -683,7 +730,7 @@ function settleTicketAsk(confirmed) {
 // The actions that ask for the job's ticket from another device: the detail's confirm_actions
 // (the same for every job), read from the job's detail when the page has none (a board card's
 // Retry); none when that read fails (the server then refuses with confirm_required).
-async function confirmActions(key) {
+async function confirmActions(key: string): Promise<string[]> {
   let detail = state.detail;
   if (!Array.isArray(detail?.confirm_actions)) {
     try {
@@ -697,7 +744,7 @@ async function confirmActions(key) {
 
 // One request for one job; the result goes to that job only, whatever is selected by then. From
 // another device (SF-126) an action of the server's confirm_actions asks for the ticket first.
-async function run(action, key, body) {
+async function run(action: string, key: string, body: Readonly<Record<string, unknown>>): Promise<void> {
   const id = pendingId(action, key);
   if (state.pending.has(id)) {
     return;
@@ -713,24 +760,26 @@ async function run(action, key, body) {
   if (!state.unresolved.has(key)) {
     clearDoubt(key);
   }
-  const waiting = { level: 'pending', text: PENDING_TEXT[action] };
+  // Every action run() posts has its text.
+  const waiting: Outcome = { level: 'pending', text: PENDING_TEXT[action] ?? '' };
   setOutcome(key, waiting);
   renderComposer();
   refreshStop();
   renderBoard();
-  let outcome;
-  let unknownReason;
+  let outcome: Outcome | undefined;
+  let unknownReason: string | undefined;
   try {
     const result = await post(`api/jobs/${jobPath(key)}/${action}`, body);
     outcome = describeOutcome(action, result);
-    if (action === 'mr-status' && result !== null && typeof result === 'object' && result.status) {
-      state.mrStatus.set(key, result.status);
+    const status = actionResult(result).status;
+    if (action === 'mr-status' && status && typeof status === 'object') {
+      state.mrStatus.set(key, status);
     }
     // The sent draft goes; text edited meanwhile stays.
     if ((action === 'say' || action === 'resume') && typeof body.message === 'string' && state.drafts.get(key) === body.message) {
       state.drafts.delete(key);
       if (key === state.key) {
-        $('msg').value = '';
+        byIdAs('msg', 'textarea').value = '';
       }
     }
     if (action === 'settle' && typeof body.id === 'string') {
@@ -740,7 +789,7 @@ async function run(action, key, body) {
     if (error instanceof ActionError) {
       outcome = { level: 'error', text: `${error.code}: ${error.message}` };
     } else {
-      unknownReason = error.message;
+      unknownReason = errorMessage(error);
     }
   }
   state.pending.delete(id);
@@ -750,6 +799,10 @@ async function run(action, key, body) {
     }
     markUnknown(key, unknownReason);
     return;
+  }
+  // The try set it, or its catch did: an ActionError's outcome or the unknown reason.
+  if (outcome === undefined) {
+    throw new Error(`The outcome of ${action} was not set`);
   }
   setOutcome(key, outcome);
   if (outcome.level === 'ok' && key === ui.job) {
@@ -761,20 +814,20 @@ async function run(action, key, body) {
   void refreshDetail(key);
 }
 
-async function readDetail(key) {
-  return JSON.parse(await getText(`api/jobs/${jobPath(key)}`));
+async function readDetail(key: string): Promise<JobDetail> {
+  return payload<JobDetail>(await getText(`api/jobs/${jobPath(key)}`));
 }
 
 // A read that never answers must not hold the controls without a way out.
-function withinTime(read) {
+function withinTime<T>(read: Promise<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('no answer in time')), READ_TIMEOUT_MS);
     read.then(resolve, reject).finally(() => clearTimeout(timer));
   });
 }
 
-async function refreshDetail(key) {
-  let detail;
+async function refreshDetail(key: string): Promise<void> {
+  let detail: JobDetail;
   try {
     detail = await readDetail(key);
   } catch {
@@ -787,30 +840,30 @@ async function refreshDetail(key) {
 
 // The warning of an unknown outcome has its own line: a definite answer never replaces it, and it
 // never replaces one. It outlives the hold, until the next action for the job starts.
-function showDoubt(key, text) {
+function showDoubt(key: string, text: string): void {
   state.doubts.set(key, text);
   if (key === state.key) {
-    $('action-doubt').textContent = text;
+    byId('action-doubt').textContent = text;
   }
 }
 
-function clearDoubt(key) {
+function clearDoubt(key: string): void {
   state.doubts.delete(key);
   if (key === state.key) {
-    $('action-doubt').textContent = '';
+    byId('action-doubt').textContent = '';
   }
 }
 
 // The action may have run: the job's controls wait for a state read after this moment. The
 // entry's identity is that moment; nothing is ever re-sent.
-function markUnknown(key, reason) {
+function markUnknown(key: string, reason: string): void {
   state.unresolved.set(key, { reason, refreshing: false, failed: false });
   void settleUnknown(key);
 }
 
 // Reads the job's current state for its unknown outcome: the only thing that lifts the hold. A
 // read that an even later unknown outcome overtook decides nothing; that one has its own.
-async function settleUnknown(key) {
+async function settleUnknown(key: string): Promise<void> {
   const entry = state.unresolved.get(key);
   if (entry === undefined || entry.refreshing) {
     return;
@@ -822,8 +875,8 @@ async function settleUnknown(key) {
   renderComposer();
   refreshStop();
   renderBoard();
-  let detail;
-  let failure;
+  let detail: JobDetail | undefined;
+  let failure: unknown;
   try {
     detail = await withinTime(readDetail(key));
   } catch (error) {
@@ -835,11 +888,15 @@ async function settleUnknown(key) {
   }
   if (failure !== undefined) {
     entry.failed = true;
-    showDoubt(key, `${lead} and the current state could not be loaded (${failure.message}). The controls stay off until it is: use Refresh state, or wait for the page to reconnect. If sf serve restarted, open the new dashboard URL.`);
+    showDoubt(key, `${lead} and the current state could not be loaded (${errorMessage(failure)}). The controls stay off until it is: use Refresh state, or wait for the page to reconnect. If sf serve restarted, open the new dashboard URL.`);
     renderComposer();
     refreshStop();
     renderBoard();
     return;
+  }
+  // A read that did not fail gave the detail.
+  if (detail === undefined) {
+    throw new Error(`The detail of ${key} was not read`);
   }
   state.unresolved.delete(key);
   showDoubt(key, `${lead}: it may have taken effect. The state shown is current; check it and the Stream before choosing a next action.`);
@@ -853,17 +910,18 @@ async function settleUnknown(key) {
 
 // The confirmations, inline in the composer (the prototype's Abort), each with today's content;
 // the action is posted only from its button.
-function openConfirm(action) {
-  const job = state.detail?.job ?? null;
-  if (job === null || availability(action, job) !== '' || state.confirm !== null) {
+function openConfirm(action: string): void {
+  const detail = state.detail;
+  const job = detail?.job ?? null;
+  if (detail === null || job === null || availability(action, job) !== '' || state.confirm !== null) {
     return;
   }
   const key = keyOf(job);
   state.confirm = { action, key };
-  $('confirm-title').textContent = `${ACTION_LABELS[action]} ${key}?`;
+  byId('confirm-title').textContent = `${ACTION_LABELS[action]} ${key}?`;
   const host = job.mr_host?.host === 'gitlab' ? 'GitLab' : 'GitHub';
-  const mrTitle = typeof state.detail?.mr_title === 'string' ? state.detail.mr_title : '(the MR text\'s first line)';
-  const texts = {
+  const mrTitle = typeof detail.mr_title === 'string' ? detail.mr_title : '(the MR text\'s first line)';
+  const texts: Readonly<Record<string, string>> = {
     'mr-create': canApprove(job)
       ? `Pushes branch ${job.branch} to origin as Approve does, then opens a merge request on ${host} from ${job.branch} into ${job.base}, titled “${mrTitle}”, with the rest of the MR text as its description.`
       : `Opens a merge request on ${host} from ${job.branch} into ${job.base}, titled “${mrTitle}”, with the rest of the MR text as its description. One already open for the branch is reused.`,
@@ -888,38 +946,38 @@ function openConfirm(action) {
       ? `Accepts iteration ${job.iteration} over the ledger's stop (${job.error?.code}). The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. The open findings are not applied; the override is recorded in the job's history.`
       : `Overrides the Codex gate (${job.error?.code}): iteration ${job.iteration} goes on as after a clean gate. The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. The override is recorded in the job's history.`,
   };
-  $('confirm-text').textContent = texts[action];
-  renderConfirmItems(action === 'simplify' || (action === 'accept' && job.stop_group === 'simplify') ? offeredSuggestions(state.detail)
-    : action === 'accept' ? gateLeftovers(state.detail) : null);
-  $('discard').checked = false;
-  $('as-is').checked = false;
-  $('discard-label').hidden = action !== 'abort';
-  $('keep-files').checked = false;
-  $('keep-files-label').hidden = action !== 'restart';
-  $('as-is-label').hidden = action !== 'approve';
-  $('confirm').hidden = false;
+  byId('confirm-text').textContent = texts[action] ?? null;
+  renderConfirmItems(action === 'simplify' || (action === 'accept' && job.stop_group === 'simplify') ? offeredSuggestions(detail)
+    : action === 'accept' ? gateLeftovers(detail) : null);
+  byIdAs('discard', 'input').checked = false;
+  byIdAs('as-is', 'input').checked = false;
+  byId('discard-label').hidden = action !== 'abort';
+  byIdAs('keep-files', 'input').checked = false;
+  byId('keep-files-label').hidden = action !== 'restart';
+  byId('as-is-label').hidden = action !== 'approve';
+  byId('confirm').hidden = false;
   renderConfirmButton();
   renderComposer();
-  $('confirm-cancel').focus();
+  byId('confirm-cancel').focus();
 }
 
 // The Codex items Accept and prepare MR goes without, listed in its confirmation (path, problem).
-function renderConfirmItems(leftovers) {
-  $('confirm-items').hidden = leftovers === null;
+function renderConfirmItems(leftovers: Leftovers | ReturnType<typeof offeredSuggestions> | null): void {
+  byId('confirm-items').hidden = leftovers === null;
   if (leftovers === null) {
-    $('confirm-items-list').replaceChildren();
+    byId('confirm-items-list').replaceChildren();
     return;
   }
-  if (leftovers.suggestions === true) {
-    $('confirm-items-title').textContent = `Suggestions of the simplification pass (${leftovers.items.length}):`;
-    $('confirm-items-list').replaceChildren(...leftovers.items.map((item) => {
+  if ('suggestions' in leftovers) {
+    byId('confirm-items-title').textContent = `Suggestions of the simplification pass (${leftovers.items.length}):`;
+    byId('confirm-items-list').replaceChildren(...leftovers.items.map((item) => {
       const entry = el('li');
       entry.append(el('code', '', item.path), document.createTextNode(`: ${item.what} Why: ${item.why} (about ${item.saves_lines} lines)`));
       return entry;
     }));
     return;
   }
-  $('confirm-items-title').textContent = leftovers.limit === true
+  byId('confirm-items-title').textContent = leftovers.limit === true
     ? (leftovers.items.length === 0 ? 'No open finding is left.' : `Open findings that will not be applied (${leftovers.items.length}):`)
     : leftovers.ledger === true
     ? (leftovers.items.length === 0 ? 'No open finding is left in the ledger.' : `Open findings of the ledger that will not be applied (${leftovers.items.length}):`)
@@ -927,44 +985,44 @@ function renderConfirmItems(leftovers) {
     ? `The gate failed, so no Codex item is known: ${leftovers.error}`
     : !leftovers.ran ? 'Codex did not review this iteration (its token budget was used up before it ran), so what it would ask for is not known.'
       : leftovers.items.length === 0 ? 'The gate left no Codex item on this iteration.' : `Codex items that will not be applied (${leftovers.items.length}):`;
-  $('confirm-items-list').replaceChildren(...leftovers.items.map((item) => itemEntry(item, false)));
+  byId('confirm-items-list').replaceChildren(...leftovers.items.map((item) => itemEntry(item, false)));
 }
 
-function renderConfirmButton() {
+function renderConfirmButton(): void {
   const confirm = state.confirm;
   if (confirm === null) {
     return;
   }
-  const discard = confirm.action === 'abort' && $('discard').checked;
-  const ok = $('confirm-ok');
+  const discard = confirm.action === 'abort' && byIdAs('discard', 'input').checked;
+  const ok = byId('confirm-ok');
   const job = state.detail?.job;
   ok.textContent = confirm.action === 'mr-create' ? 'Create the merge request'
     : confirm.action === 'mr-merge' ? `Merge #${job?.mr?.number} into ${job?.base}`
     : confirm.action === 'simplify' ? 'Simplify'
     : confirm.action === 'accept' ? (job?.stop_group === 'simplify' ? 'Skip and prepare the MR' : 'Accept and prepare the MR')
-    : confirm.action === 'restart' ? ($('keep-files').checked ? 'Restart, keep the files' : 'Restart')
-    : confirm.action === 'approve' ? ($('as-is').checked ? 'Approve: push as it is' : 'Approve: push the branch') : discard ? 'Abort and discard the branch' : 'Abort, keep the worktree';
+    : confirm.action === 'restart' ? (byIdAs('keep-files', 'input').checked ? 'Restart, keep the files' : 'Restart')
+    : confirm.action === 'approve' ? (byIdAs('as-is', 'input').checked ? 'Approve: push as it is' : 'Approve: push the branch') : discard ? 'Abort and discard the branch' : 'Abort, keep the worktree';
   ok.className = confirm.action === 'abort' ? 'btn small danger' : 'btn small primary';
 }
 
-function closeConfirm() {
+function closeConfirm(): void {
   state.confirm = null;
-  $('confirm').hidden = true;
+  byId('confirm').hidden = true;
   renderConfirmItems(null);
-  $('discard').checked = false;
-  $('as-is').checked = false;
-  $('keep-files').checked = false;
+  byIdAs('discard', 'input').checked = false;
+  byIdAs('as-is', 'input').checked = false;
+  byIdAs('keep-files', 'input').checked = false;
   renderComposer();
 }
 
-function submitConfirm() {
+function submitConfirm(): void {
   const confirm = state.confirm;
   if (confirm === null) {
     return;
   }
-  const discard = confirm.action === 'abort' && $('discard').checked;
-  const asIs = confirm.action === 'approve' && $('as-is').checked;
-  const keepFiles = confirm.action === 'restart' && $('keep-files').checked;
+  const discard = confirm.action === 'abort' && byIdAs('discard', 'input').checked;
+  const asIs = confirm.action === 'approve' && byIdAs('as-is', 'input').checked;
+  const keepFiles = confirm.action === 'restart' && byIdAs('keep-files', 'input').checked;
   closeConfirm();
   // The target was captured when the confirmation opened; a selection changed since drops it.
   if (confirm.key !== state.key) {
@@ -974,9 +1032,9 @@ function submitConfirm() {
 }
 
 // Send, and Tell it to go on ("Go on." for an empty box): the message box's text, once.
-function sendSay(goOn = false) {
+function sendSay(goOn = false): void {
   const key = state.key;
-  const text = $('msg').value;
+  const text = byIdAs('msg', 'textarea').value;
   if (key === null || (text.trim() === '' && !goOn) || availability('say', state.detail?.job ?? null) !== '') {
     return;
   }
@@ -985,12 +1043,12 @@ function sendSay(goOn = false) {
 
 // The composer's actions posted at once, without a confirmation: Pause, Retry review, Retry, Refresh
 // MR status, Archive and the hand-over's (SF-073).
-const POSTED_AT_ONCE = ['pause', 'review', 'retry', 'mr-status', 'archive', 'handover', 'takeback', 'handed-done'];
+const POSTED_AT_ONCE: readonly string[] = ['pause', 'review', 'retry', 'mr-status', 'archive', 'handover', 'takeback', 'handed-done'];
 
 // A button of the composer (the prototype's act): the ones that ask first open their confirmation;
 // Send, Tell it to go on, Pause, Resume, Retry review, Refresh MR status, Archive and the hand-over's
 // actions (SF-073) post at once.
-function act(action) {
+function act(action: string): void {
   const job = state.detail?.job ?? null;
   if (job === null) {
     return;
@@ -1003,7 +1061,7 @@ function act(action) {
   } else if (['abort', 'restart', 'approve', 'accept', 'simplify', 'mr-create', 'mr-merge'].includes(action)) {
     openConfirm(action);
   } else if (action === 'resume') {
-    const message = $('msg').value;
+    const message = byIdAs('msg', 'textarea').value;
     if (availability('resume', job) === '') {
       void run('resume', key, pausedTurn(job) && message.trim() !== '' ? { message } : {});
     }
@@ -1013,11 +1071,10 @@ function act(action) {
 }
 
 // Accept risk or Must fix on a ledger entry of the stop: posted at once, with its note.
-function settle(id, decision) {
+function settle(id: string, decision: string): void {
   const job = state.detail?.job ?? null;
   if (job === null || availability('settle', job) !== '') {
     return;
   }
   void run('settle', keyOf(job), { id, decision, note: state.notes.get(noteKey(id)) ?? '' });
 }
-

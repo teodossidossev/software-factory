@@ -166,6 +166,42 @@ test('dashboard (SF-117): GET api/stats with days 7, 30 or 90 and a workspace; a
   });
 });
 
+test('dashboard (SF-129): api/jobs and the detail carry the stop\'s canonical row, the actions in order and every availability; the detail its settle_ids', async () => {
+  await withDashboard('dash-stops', fakeActions(), async (dashboard, { jobs, job }) => {
+    const base = dashboard.url;
+    const at = '2026-11-01T10:06:00.000Z';
+    const entry = (id: string, status: string) => ({
+      id, iteration: 1, reviewer: 'claude', severity: 'major' as const, path: 'README.md', problem: 'P.', expected: 'E.', status: status as 'open',
+      response: '', evidence: '', reopened: 0, asked: 1, caused_by: '', dispute: null, settled: null,
+    });
+    await jobs.write({ ...job, state: 'needs_human', updated_at: at, error: { code: 'review_churn', message: 'The fixes keep making findings.' } });
+    await jobs.writeLedger('app', 'T-1', [entry('R1', 'open'), entry('R2', 'contested'), entry('R3', 'escalated'), entry('R4', 'fixed')]);
+    await jobs.writeReview('app', 'T-1', 1, { reviewer: 'claude', verdict: 'clean', summary: 'Right.', items: [], accepted_sensitive: [], cost_usd: 0.1, started_at: at, ended_at: at });
+    const row = JSON.parse((await fetchRaw(new URL('api/jobs', base))).body).jobs.find((candidate: Job) => candidate.ticket === 'T-1');
+    assert.deepEqual([row.stop_code, row.stop_kind, row.stop_group], ['review_churn', 'decision', 'ledger']);
+    // The board's Accept reads the real review too.
+    assert.deepEqual(row.actions, [
+      { action: 'accept', label: 'Accept and prepare MR', primary: true, danger: false }, { action: 'say', label: 'Send', primary: false, danger: false },
+      { action: 'abort', label: 'Abort…', primary: false, danger: true },
+    ]);
+    assert.deepEqual([row.availability.accept, row.availability.settle, row.availability.say, row.availability.retry], ['', '', '', 'only after a transient MR preparation failure.']);
+    const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body);
+    assert.deepEqual([detail.job.stop_code, detail.job.actions, detail.job.availability], [row.stop_code, row.actions, row.availability]);
+    assert.deepEqual(detail.settle_ids, ['R2', 'R3']);
+
+    // An alias resolves to its row; the failed job has no stop and Restart and Archive, no primary.
+    await jobs.write({ ...job, state: 'needs_human', updated_at: at, error: { code: 'mr_rebase_failed', message: 'Git failed.' } });
+    const again = JSON.parse((await fetchRaw(new URL('api/jobs', base))).body).jobs;
+    const stopped = again.find((candidate: Job) => candidate.ticket === 'T-1');
+    assert.deepEqual([stopped.stop_code, stopped.stop_kind, stopped.stop_group, stopped.actions.map((shown: { action: string }) => shown.action)], ['mr_failed', 'error', null, ['retry', 'goon', 'abort']]);
+    const failed = again.find((candidate: Job) => candidate.ticket === 'T-0');
+    assert.deepEqual([failed.stop_code, failed.actions], [null, [
+      { action: 'restart', label: 'Restart…', primary: false, danger: false }, { action: 'archive', label: 'Archive', primary: false, danger: false },
+    ]]);
+    assert.deepEqual(JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body).settle_ids, []);
+  });
+});
+
 test('dashboard: jobs, job detail, report, patch and mr endpoints; bad names are 404', async () => {
   await withDashboard('dash-api', fakeActions(), async (dashboard, { jobs }) => {
     const base = dashboard.url;
@@ -173,7 +209,7 @@ test('dashboard: jobs, job detail, report, patch and mr endpoints; bad names are
     assert.equal(list.headers['content-type'], 'application/json; charset=utf-8');
     const { jobs: all } = JSON.parse(list.body);
     assert.deepEqual(all.map((job: Job) => [job.ticket, job.state]), [['T-0', 'failed'], ['T-1', 'awaiting_review']]);
-    assert.deepEqual(Object.keys(all[1]).sort(), ['base', 'branch', 'claude_review', 'cost_usd', 'created_at', 'deleted', 'error', 'files', 'fixes', 'gate', 'gate_fixes', 'gate_tokens', 'handoff_skipped', 'handover', 'iteration', 'limit', 'mr', 'mr_attempts', 'mr_conflict_turn', 'mr_host', 'now', 'paused', 'prepared_commit', 'review', 'review_ended_at', 'state', 'stop', 'task_changed', 'ticket', 'title', 'tool_calls', 'turn_limit', 'undeclared', 'updated_at', 'workspace', 'worktree']);
+    assert.deepEqual(Object.keys(all[1]).sort(), ['actions', 'availability', 'base', 'branch', 'claude_review', 'cost_usd', 'created_at', 'deleted', 'error', 'files', 'fixes', 'gate', 'gate_fixes', 'gate_tokens', 'handoff_skipped', 'handover', 'iteration', 'limit', 'mr', 'mr_attempts', 'mr_conflict_turn', 'mr_host', 'now', 'paused', 'prepared_commit', 'review', 'review_ended_at', 'state', 'stop', 'stop_code', 'stop_group', 'stop_kind', 'task_changed', 'ticket', 'title', 'tool_calls', 'turn_limit', 'undeclared', 'updated_at', 'workspace', 'worktree']);
     assert.deepEqual(all[0].error, { code: 'start_failed', message: 'Git failed.' });
 
     const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body);
@@ -699,7 +735,7 @@ test('dashboard (SF-040): no reviewer or subscription in the data; the subscript
   await withDashboard('dash-no-reviewer', fakeActions(), async (dashboard) => {
     const base = dashboard.url;
     const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body);
-    assert.deepEqual(Object.keys(detail).sort(), ['explanation', 'gate', 'history', 'iterations', 'job', 'ledger', 'mr', 'mr_title']);
+    assert.deepEqual(Object.keys(detail).sort(), ['explanation', 'gate', 'history', 'iterations', 'job', 'ledger', 'mr', 'mr_title', 'settle_ids']);
     const { jobs: all } = JSON.parse((await fetchRaw(new URL('api/jobs', base))).body);
     assert.ok(all.every((job: Record<string, unknown>) => !('reviewer' in job)));
     assert.deepEqual([(await fetchRaw(new URL('api/subscriptions', base))).status], [404]);

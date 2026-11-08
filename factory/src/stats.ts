@@ -22,6 +22,7 @@ import { localTime } from './local-time.js';
 import { entryOf, type Outcome, type Outcomes, outcomeOf } from './metrics.js';
 import { QueueStore } from './queue.js';
 import { REVIEWER, type ReviewItem, type Severity } from './review.js';
+import { codesWith } from './stops.js';
 import { parseFrontMatter } from './task-file.js';
 
 // The periods the page offers, in local days ending today.
@@ -257,7 +258,7 @@ const MAX_JOB_ROWS = 200;
 const SPIKE_DAYS = 30;
 const WAITING_STATES: readonly JobState[] = ['needs_human', 'ready_for_human_review', 'handed_over'];
 const READY_STATES: readonly string[] = ['ready_for_human_review', 'handed_over'];
-const CHURN_CODES: readonly string[] = ['review_churn', 'review_disputed'];
+const CHURN_CODES: readonly string[] = codesWith('ledger');
 // Only the event lines with one of these are parsed.
 const EVENT_MARKS = ['"type":"result"', '"type":"review"', '"type":"review_failed"', '"type":"simplify_chosen"', '"state":{'];
 const DELIVERED_STATES: readonly JobState[] = ['pushed', 'handed_over'];

@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
 import { type Job, JobStore } from '../src/jobs.js';
 import { Setup } from '../src/setup.js';
-import { act, fakeActions, fakeSetup, fetchRaw, openStream, type Reply, ticketRow, workspaceRow } from './support/dashboard-client.js';
+import { act, fakeActions, fakeSetup, fetchRaw, openStream, type Reply, served, ticketRow, workspaceRow } from './support/dashboard-client.js';
 import { withDashboard } from './support/dashboard-state.js';
 import { type FakeElement, loadPage } from './support/fake-dom.js';
 import { newEnv, newRepo, putTask } from './support/harness.js';
@@ -254,7 +254,8 @@ test('dashboard: a finished job is archived from its card; a live one is refused
   });
 
   const STATIC_DIR = new URL('../../static/', import.meta.url);
-  const shape = (state: string) => ({
+  // The job as the server sends it, with its actions (SF-129).
+  const shape = (state: string) => served({
     workspace: 'app', ticket: 'T-1', branch: 'T-1-x', base: 'main', state, iteration: 0, mr_attempts: 0, updated_at: '2026-11-01T10:05:00.000Z',
     created_at: '2026-11-01T10:00:00.000Z', error: null, worktree: null, prepared_commit: null, files: 0, undeclared: 0, deleted: 0,
   });

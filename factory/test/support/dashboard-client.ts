@@ -1,13 +1,17 @@
 // A raw HTTP client of the Dashboard for tests: one request with full control of method, headers
 // and body (fetchRaw), an action POST as the page sends it (act), a server-sent event stream
-// (openStream), a fake DashboardActions that records every call (fakeActions) and a fake
+// (openStream), a fake DashboardActions that records every call (fakeActions), a fake
 // DashboardSetup with settable workspaces, tickets and Task files that records every change
-// (fakeSetup).
+// (fakeSetup), and the server's rules on a test's own job and detail payloads (served,
+// servedDetail).
 import assert from 'node:assert/strict';
 import { get, request, type IncomingMessage } from 'node:http';
 import type { DashboardActions, DashboardSetup } from '../../src/dashboard.js';
 import { FactoryError } from '../../src/errors.js';
 import type { MrInput } from '../../src/execution.js';
+import type { Job } from '../../src/jobs.js';
+import type { LedgerEntry } from '../../src/ledger.js';
+import { type JobFacts, jobActions, settleEntries, stopFields } from '../../src/stops.js';
 import type { AddWorkspaceOptions, ArchivedRow, JobDependencies, TicketInput, TicketRow, WorkspaceRow } from '../../src/setup.js';
 import { type WorkspaceEdit, workspaceColor } from '../../src/registry.js';
 import { taskSha256 } from '../../src/task-file.js';
@@ -342,4 +346,33 @@ export function fakeSetup(workspaces: WorkspaceRow[] = [], tickets: TicketRow[] 
     return value;
   }
   return fake;
+}
+
+// A job of a test's payload as the server sends it (SF-129): with its stop's canonical row
+// (stop_code, stop_kind, stop_group), its actions and every action's availability, computed by
+// src/stops.ts from the job and the facts (the ledger, the last iteration's review and gate; the
+// Git host is the job's mr_host), over whatever the job carried. A test that feeds its own
+// actions and availability builds the job without it.
+export function served<T extends object>(job: T, facts: Partial<JobFacts> = {}): T {
+  const shape = job as Record<string, unknown>;
+  const real = { mr: null, mr_conflict_turn: false, ...shape, error: shape.error ?? undefined, paused: shape.paused ?? undefined } as unknown as Job;
+  const now = new Date();
+  const host = shape.mr_host;
+  return { ...job, ...stopFields(real, now), ...jobActions(real, { ledger: [], review: undefined, mrHost: host === undefined ? null : (host as JobFacts['mrHost']), ...facts }, now) };
+}
+
+// A job detail of a test as the server sends it (SF-129): its job served with the detail's facts
+// (its ledger, the review and gate of the job's last iteration), and settle_ids, the entries the
+// stop block offers to settle. A detail that already carries settle_ids keeps them.
+export function servedDetail<T extends { job: object; iterations?: unknown[]; ledger?: unknown[] }>(detail: T): T {
+  const job = detail.job as Record<string, unknown>;
+  const ledger = (detail.ledger ?? []) as LedgerEntry[];
+  const last = (detail.iterations ?? []).find((iteration) => (iteration as { number?: unknown }).number === job.iteration) as { review?: unknown; gate?: unknown } | undefined;
+  const facts = { ledger, review: (last?.review ?? undefined) as JobFacts['review'], gate: (last?.gate ?? undefined) as JobFacts['gate'] };
+  const real = { mr: null, mr_conflict_turn: false, ...job, error: job.error ?? undefined } as unknown as Job;
+  return {
+    settle_ids: settleEntries(real, ledger, new Date()).map((entry) => entry.id),
+    ...detail,
+    job: served(detail.job, facts),
+  };
 }

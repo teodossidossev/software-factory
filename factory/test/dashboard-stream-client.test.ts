@@ -9,6 +9,8 @@
 // disabled buttons. Script checks, not browser acceptance: the manual steps are in factory/README.md.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { ACTION_IDS, canonicalStop, STOPS as STOP_ROWS } from '../src/stops.js';
+import { served as asServed, servedDetail } from './support/dashboard-client.js';
 import { type FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
 
 const STATIC_DIR = new URL('../../static/', import.meta.url);
@@ -18,14 +20,15 @@ process.env.TZ = 'Europe/Sofia';
 type Row = Record<string, unknown> & { state: string };
 type Entry = Record<string, unknown> & { k: string; t: string };
 
+// The job as the server sends it: with its stop's row, its actions and their availability (SF-129).
 function job(state: string, extra: Record<string, unknown> = {}): Row {
   const prepared = state === 'ready_for_human_review' || state === 'pushed';
-  return {
+  return asServed({
     workspace: 'app', ticket: 'T-1', branch: 'T-1-demo', base: 'main', state, iteration: 1, mr_attempts: 0,
     updated_at: '2026-11-01T10:05:00.000Z', created_at: '2026-11-01T10:00:00.000Z', error: null,
     prepared_commit: prepared ? 'a'.repeat(40) : null, worktree: prepared ? null : '/wt/T-1', mr: null, mr_host: { host: 'github', reason: null },
     fixes: 0, gate_fixes: 0, gate_tokens: 0, files: 2, undeclared: 0, deleted: 0, title: 'Demo', cost_usd: 1.5, now: null, tool_calls: 0, stop: null, ...extra,
-  };
+  });
 }
 
 const times = { started_at: '2026-11-01T10:05:01.000Z', ended_at: '2026-11-01T10:06:00.000Z' };
@@ -48,8 +51,9 @@ function iteration(number: number, extra: Record<string, unknown> = {}) {
   return { number, ...META, files: FILES, review: null, gate: null, gate_override: null, simplify: null, ...extra };
 }
 
+// The detail as the server sends it: its job with the detail's facts, and settle_ids (SF-129).
 function detail(row: Row, extra: Record<string, unknown> = {}) {
-  return { job: row, iterations: [iteration(1)], mr: false, mr_title: null, gate: true, ledger: [], history: [], ...extra };
+  return servedDetail({ job: row, iterations: [iteration(1)], mr: false, mr_title: null, gate: true, ledger: [], history: [], ...extra });
 }
 
 function ledgerEntry(id: string, status: string, extra: Record<string, unknown> = {}) {
@@ -60,8 +64,11 @@ function ledgerEntry(id: string, status: string, extra: Record<string, unknown> 
 }
 
 const at = (minute: number): string => `2026-11-01T10:${String(minute).padStart(2, '0')}:00.000Z`;
-const state = (k: string, from: string | null, to: string, code: string | null = null, msg: string | null = null, minute = 0): Entry =>
-  ({ k, ts: at(minute), it: 1, who: 'factory', t: 'state', from, to, code, msg });
+// A state entry as SF-082 sends it; with a code, its canonical row's code and kind (SF-129).
+const state = (k: string, from: string | null, to: string, code: string | null = null, msg: string | null = null, minute = 0): Entry => {
+  const stop = code === null ? null : canonicalStop(code, msg, new Date());
+  return { k, ts: at(minute), it: 1, who: 'factory', t: 'state', from, to, code, msg, ...(stop === null ? {} : { stop_code: stop, stop_kind: STOP_ROWS[stop].kind }) };
+};
 const tool = (k: string, id: string, line: string, who = 'implementer'): Entry => ({ k, ts: at(2), it: 1, who, t: 'tool', id, line, detail: `{\n  "command": "${line}"\n}` });
 const result = (k: string, id: string, out: string, err = false, who = 'implementer'): Entry => ({ k, ts: at(3), it: 1, who, t: 'tool_result', id, out, result: `output of ${id}`, err });
 const IMPLEMENT: Entry = { k: '2', ts: at(1), it: 1, who: 'factory', t: 'prompt', kind: 'implement', text: '/implement .software-factory/T-1.md', first: '/implement .software-factory/T-1.md', task_changed: false };
@@ -552,6 +559,45 @@ test('stream client: the stop moves with the job: it is live only while the job 
   await update(page, stopped('max_turns', {}));
   assert.equal(page.$('stopblock').parentNode!.parentNode, entryOf(page, '3'));
   assert.equal(entryOf(page, '2').querySelector('#stopblock'), null);
+});
+
+test('stream client (SF-129): the composer shows the actions it receives, in their order, off with the received reason; the stop block offers settling for settle_ids only; pending and unresolved win over a received \'\'', async () => {
+  // A row whose actions no rule of the page would give a working job: the page renders them.
+  const fed = (extra: Record<string, unknown> = {}): Row => ({
+    ...job('working'),
+    actions: [{ action: 'retry', label: 'Retry', primary: true, danger: false }, { action: 'say', label: 'Send', primary: false, danger: false }, { action: 'abort', label: 'Abort…', primary: false, danger: true }],
+    availability: { ...Object.fromEntries(ACTION_IDS.map((id) => [id, 'not from the page.'])), retry: '', say: '', abort: 'the server says no.' },
+    ...extra,
+  });
+  const plain = (row: Row, extra: Record<string, unknown> = {}) => ({ job: row, iterations: [iteration(1)], mr: false, mr_title: null, gate: true, ledger: [], history: [], settle_ids: [], ...extra }) as ReturnType<typeof detail>;
+  const control = { held: false };
+  const row = fed();
+  const page = await openJob(row, plain(row), {}, () => undefined, control);
+  assert.deepEqual(acts(page).map((node) => [node.textContent, node.className, node.disabled, node.getAttribute('title')]), [
+    ['Retry', 'btn primary', false, null], ['Send', 'btn', true, 'write a message first.'], ['Abort…', 'btn danger', true, 'the server says no.'],
+  ]);
+  // Pending wins over the received '': Retry waits for its outcome.
+  control.held = true;
+  act(page, 'Retry').click();
+  await page.flush();
+  assert.deepEqual(sent(page), [['retry', {}]]);
+  assert.deepEqual([act(page, 'Retry').disabled, act(page, 'Retry').getAttribute('title')], [true, 'the MR preparation is being started again.']);
+  // Unresolved wins too: the outcome is unknown until the state is read again.
+  posts(page)[0]!.fail();
+  await page.flush();
+  assert.deepEqual([act(page, 'Retry').disabled, act(page, 'Retry').getAttribute('title')], [true, "the last action's outcome is unknown; waiting for the current state."]);
+  page.requests.filter((request) => request.method === 'GET' && request.path === 'api/jobs/app/T-1').at(-1)!.respond(200, plain(row));
+  await page.flush();
+  assert.equal(act(page, 'Retry').disabled, false);
+
+  // settle_ids: the entries the server lists to settle, each with Accept risk and Must fix; an
+  // escalated one it does not list is not the page's to offer.
+  const ledger = [ledgerEntry('R1', 'escalated', { response: 'Which language?' }), ledgerEntry('R2', 'escalated', { response: 'Which file?' })];
+  const stop = stopped('escalated', { stop: { items: [{}, {}], saves_lines: null } });
+  const settling = await withEntries(stop, plain(stop, { ledger, settle_ids: ['R2'] }), [state('2', 'working', 'needs_human', 'escalated', 'x', 9)]);
+  const finding = (id: string): FakeElement => settling.$('stopblock').all().find((element) => element.dataset.id === id)!;
+  assert.equal(finding('R1'), undefined);
+  assert.deepEqual([buttonIn(finding('R2'), 'Accept risk').disabled, buttonIn(finding('R2'), 'Must fix').disabled], [false, false]);
 });
 
 test('stream client: the composer per state: its sentence, its message box and its actions, primary first; a disabled action has its reason as title', async () => {

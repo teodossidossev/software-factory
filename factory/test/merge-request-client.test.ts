@@ -9,21 +9,23 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { COMMIT_TYPES, MANUAL_CLAIM, MAX_HEADER_CHARS, MR_REQUIRED_HEADINGS } from '../src/rules.js';
+import { served } from './support/dashboard-client.js';
 import { type FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
 
 const STATIC_DIR = new URL('../../static/', import.meta.url);
 const URL_1 = 'https://github.com/acme/app/pull/1';
 const GITHUB = { host: 'github', reason: null };
 
+// The job as the server sends it, with its actions and their availability (SF-129).
 function job(ticket: string, state: string, extra: Record<string, unknown> = {}) {
   const prepared = state === 'ready_for_human_review' || state === 'pushed';
-  return {
+  return served({
     workspace: 'app', ticket, branch: `${ticket}-demo`, base: 'main', state, iteration: 1, mr_attempts: 1,
     updated_at: new Date(Date.now() - 4 * 60000).toISOString(), created_at: '2026-11-01T10:00:00.000Z', error: null,
     prepared_commit: prepared ? 'a'.repeat(40) : null, worktree: prepared ? null : `/wt/${ticket}`, fixes: 0, gate_fixes: 0, gate_tokens: 0,
     files: 0, undeclared: 0, deleted: 0, title: `Title of ${ticket}`, cost_usd: null, review: 'clean', review_ended_at: null, gate: null,
     mr: null as Record<string, unknown> | null, mr_host: GITHUB as { host: string | null; reason: string | null }, ...extra,
-  };
+  });
 }
 type Job = ReturnType<typeof job>;
 

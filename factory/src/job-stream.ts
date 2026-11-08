@@ -7,6 +7,7 @@ import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import type { GateRecord, IterationMeta, JobStore, ReviewRecord, SimplifyRecord } from './jobs.js';
 import type { LedgerEntry } from './ledger.js';
+import { canonicalStop, type StopCode, type StopKind, STOPS } from './stops.js';
 import { CONTINUE_PROMPT } from './turn-limit.js';
 import { describeEvent, limitStateText, shortInput } from './watch.js';
 
@@ -56,7 +57,7 @@ type Body =
   | { t: 'tool_result'; id: string; out: string; result: string; err: boolean }
   | { t: 'result'; turns: number | null; ms: number | null; cost: number | null }
   // text: the line of a park on a usage limit or the resume from it (SF-072, describeEvent).
-  | { t: 'state'; from: string | null; to: string; code: string | null; msg: string | null; text?: string }
+  | { t: 'state'; from: string | null; to: string; code: string | null; msg: string | null; text?: string; stop_code?: StopCode; stop_kind?: StopKind }
   | { t: 'verdict'; verdict: string; effective: string | null; summary?: string; items?: VerdictItem[] }
   | { t: 'changes'; files: number; paths: string[] }
   | { t: 'simplify'; suggestions: SimplifySuggestion[]; saves_lines: number }
@@ -339,9 +340,12 @@ async function drafts(raw: string, record: Record<string, unknown>, it: number, 
     const error = asRecord(state.error);
     const code = typeof error.code === 'string' ? error.code : null;
     const text = limitStateText(state.from, state.to);
+    const msg = typeof error.message === 'string' ? error.message : null;
+    // SF-129: a stop's canonical row (src/stops.ts), so the page resolves no alias of its own.
+    const stop = code === null ? null : canonicalStop(code, msg, new Date());
     const entry: Draft = {
       t: 'state', who: 'factory', from: typeof state.from === 'string' ? state.from : null, to: String(state.to),
-      code, msg: typeof error.message === 'string' ? error.message : null, ...(text !== undefined ? { text } : {}),
+      code, msg, ...(text !== undefined ? { text } : {}), ...(stop !== null ? { stop_code: stop, stop_kind: STOPS[stop].kind } : {}),
     };
     return [entry, ...(await changesEntry({ from: state.from, to: state.to, code }, it, ctx))];
   }

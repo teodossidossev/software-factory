@@ -10,8 +10,8 @@ import type { Page } from '../repo-files.js';
 import { REVIEWER, type ReviewItem } from '../review.js';
 import type { Launch } from '../runner.js';
 import { ImplementerSession } from '../session.js';
+import { codesWith, storedCodesWithAction } from '../stops.js';
 import { TASK_DIR } from '../task-file.js';
-import { TESTS_UNAVAILABLE } from '../test-command.js';
 
 // The reviewer name of the run of a workspace's test command among the running reviews (SF-128).
 export const TESTS_RUNNER = 'tests';
@@ -20,11 +20,12 @@ export const MAX_REPORT_BYTES = 64 * 1024;
 
 const MAX_SLUG = 40;
 
-// The codes of a job the gate handed to the user, which sf accept may take on to MR preparation.
-export const GATE_OVERRIDE_CODES: readonly string[] = ['gate_rounds', 'gate_budget', 'gate_failed'];
+// The codes of a job the gate handed to the user, which sf accept may take on to MR preparation
+// (src/stops.ts, the gate group).
+export const GATE_OVERRIDE_CODES: readonly string[] = codesWith('gate');
 
 // The ledger's stops (SF-052) that sf accept takes on as well, with a clean Claude review.
-export const LEDGER_ACCEPT_CODES: readonly string[] = ['review_churn', 'review_disputed'];
+export const LEDGER_ACCEPT_CODES: readonly string[] = codesWith('ledger');
 
 export interface CheckResult {
   state: JobState;
@@ -74,10 +75,16 @@ export interface MrContent {
 
 // The needs_human codes of a transient stop of MR preparation after the deciding clean verdict and
 // before the branch is prepared (SF-087): sf retry runs MR preparation again, without a new review.
-// Not after a conflict turn (mr_conflict_turn): its resolution is code no reviewer saw.
-// The guard's stops of MR preparation (SF-122) too: after a "!" line in guard-terms.txt, for example.
-// And a test command that could not run (SF-128): Retry runs it again.
-export const MR_RETRY_CODES: readonly string[] = ['fetch_failed', 'mr_serve_restarted', 'mr_interrupted', 'mr_commit_failed', 'mr_rebase_failed', 'mr_failed', 'guard_hit', 'guard_terms_invalid', 'guard_failed', TESTS_UNAVAILABLE];
+// Not after a conflict turn (mr_conflict_turn): its resolution is code no reviewer saw. Every code
+// of a row with a Retry in src/stops.ts, aliases included: the guard's stops of MR preparation too
+// (SF-122: after a "!" line in guard-terms.txt, for example), and a test command that could not
+// run (SF-128). The order is the one sf retry has always named them in; a code it does not name
+// goes last.
+const RETRY_ORDER: readonly string[] = [
+  'fetch_failed', 'mr_serve_restarted', 'mr_interrupted', 'mr_commit_failed', 'mr_rebase_failed', 'mr_failed', 'guard_hit', 'guard_terms_invalid', 'guard_failed', 'tests_unavailable',
+];
+const retryRank = (code: string): number => (RETRY_ORDER.includes(code) ? RETRY_ORDER.indexOf(code) : RETRY_ORDER.length);
+export const MR_RETRY_CODES: readonly string[] = storedCodesWithAction('retry').sort((a, b) => retryRank(a) - retryRank(b));
 
 // A Save of the Merge request screen (SF-080): the title, the body and, when they change, the
 // branch and the base.
@@ -141,11 +148,8 @@ export function markedGroups(items: ReviewItem[]): Array<{ label: string; paths:
     .filter((group) => group.paths.length > 0);
 }
 
-// A review record without the items the ledger dropped (SF-052), compared as written.
-export function withoutDropped(record: { items: ReviewItem[]; dropped?: ReviewItem[] }): { items: ReviewItem[] } {
-  const dropped = new Set((record.dropped ?? []).map((item) => JSON.stringify(item)));
-  return { items: record.items.filter((item) => !dropped.has(JSON.stringify(item))) };
-}
+// A review record without the items the ledger dropped (SF-052): src/stops.ts's.
+export { withoutDropped } from '../stops.js';
 
 // The refusal of an action a handed-over job does not take before Take it back (SF-073).
 function handedOverError(job: Job): FactoryError {

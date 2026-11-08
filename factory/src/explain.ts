@@ -13,13 +13,13 @@ import { writeFileAtomic } from './atomic.js';
 import { MAX_MODEL_INPUT_CHARS } from './digest.js';
 import { digestSessionOptions } from './digest-run.js';
 import { jobUserMessages } from './job-stream.js';
-import { claudeReviews, type Job, type JobStore, type ReviewRecord } from './jobs.js';
+import { claudeReviews, type Job, type JobStore } from './jobs.js';
 import { type LedgerEntry, unsettled } from './ledger.js';
 import { explainPrompt } from './prompts.js';
 import { configDir as defaultConfigDir, explainSettings, type ExplainSettings, loadRegistry } from './registry.js';
 import { runStructuredSession, type StructuredOutcome } from './review.js';
+import { type ActionId, canonicalStop, type JobFacts, jobActions, settleEntries } from './stops.js';
 import { parseFrontMatter } from './task-file.js';
-import { usageLimit } from './usage-limit.js';
 
 export const EXPLANATION_FILE = 'explanation.json';
 // One model call's timeout; a failed call is tried once more.
@@ -77,7 +77,7 @@ const jobKey = (job: Job): string => `${job.workspace}/${job.ticket}`;
 // A usage-limit stop: session_failed with a message the usage limit's test recognises (it explains
 // itself: the dashboard shows the reset and Tell it to go on).
 export function usageLimitStop(job: Job, now: Date): boolean {
-  return job.error?.code === 'session_failed' && usageLimit(job.error.message, now, 'claude') !== undefined;
+  return job.error !== undefined && canonicalStop(job.error.code, job.error.message, now) === 'usage_limit';
 }
 
 const recordSchema = z.strictObject({
@@ -118,20 +118,7 @@ export async function currentExplanation(jobs: JobStore, job: Job): Promise<Expl
   return record !== undefined && sameStop(record.stop, stop) ? record : null;
 }
 
-// ---------- The stop's answers (the stop panel's, static/app.js) ----------
-
-// The codes that share an entry of the dashboard's STOPS (its STOP_ALIASES).
-export const STOP_ALIASES: Readonly<Record<string, string>> = {
-  mr_interrupted: 'mr_serve_restarted', turn_failed: 'session_failed', permission_mode_mismatch: 'session_failed',
-  mr_text_invalid: 'mr_text_missing', mr_commit_failed: 'mr_failed', mr_rebase_failed: 'mr_failed',
-};
-const resolved = (code: string): string => (Object.hasOwn(STOP_ALIASES, code) ? STOP_ALIASES[code]! : code);
-const GATE_CODES = ['gate_rounds', 'gate_budget', 'gate_failed'];
-const LEDGER_CODES = ['review_churn', 'review_disputed'];
-// The stops of the test step (SF-128): Accept goes on without passing tests; Retry runs a command
-// that could not run again.
-const ACCEPT_CODES = [...GATE_CODES, ...LEDGER_CODES, 'iteration_limit', 'simplify_offered', 'tests_failed', 'tests_unavailable'];
-const RETRY_STOPS = ['fetch_failed', 'mr_serve_restarted', 'mr_failed', 'tests_unavailable'];
+// ---------- The stop's answers (the stop panel's: src/stops.ts) ----------
 
 // The ledger entries a ledger stop is about (the stop panel's, dashboard.ts stopOf): the unsettled
 // ones (escalated, review_disputed), the open ones (review_churn), the open blocker and major ones
@@ -146,32 +133,6 @@ export function ledgerStopEntries(code: string, ledger: LedgerEntry[]): LedgerEn
   return code === 'review_churn' ? ledger.filter((entry) => entry.status === 'open') : null;
 }
 
-// A Claude review the factory acts on as clean: a verdict without a blocker or major item, the
-// items the ledger dropped aside (the dashboard's actedClean).
-function actedClean(review: ReviewRecord | undefined): boolean {
-  if (review === undefined || !('verdict' in review)) {
-    return false;
-  }
-  const dropped = new Set((review.dropped ?? []).map((item) => JSON.stringify(item)));
-  return review.items.every((item) => item.severity === 'nit' || dropped.has(JSON.stringify(item)));
-}
-
-// Accept and prepare the MR applies (the dashboard's gateAcceptable): a gate or ledger stop over a
-// clean Claude review of the job's last iteration, or over none without the Claude review (SF-131:
-// the gate is the review); the Fix round limit (SF-115) whatever the last verdict (SF-131).
-export function gateAcceptable(job: Job, review: ReviewRecord | undefined): boolean {
-  const code = job.error?.code ?? '';
-  if (job.state !== 'needs_human' || !ACCEPT_CODES.includes(code)) {
-    return false;
-  }
-  return code === 'iteration_limit' || !claudeReviews(job) || actedClean(review);
-}
-
-// Retry applies (the dashboard's retryable): a transient stop of MR preparation, never after a conflict turn.
-export function retryable(job: Job): boolean {
-  return job.state === 'needs_human' && job.error !== undefined && RETRY_STOPS.includes(resolved(job.error.code)) && job.mr_conflict_turn !== true;
-}
-
 export interface StopAnswer {
   label: string;
   command: string;
@@ -179,80 +140,27 @@ export interface StopAnswer {
 
 // What stopAnswers reads of the job: its ledger and the Claude review of its last iteration (none
 // without the Claude review, SF-131).
-export interface StopFacts {
-  ledger: LedgerEntry[];
-  review: ReviewRecord | undefined;
+export type StopFacts = Pick<JobFacts, 'ledger' | 'review'>;
+
+// The sf command of a shown action (the one the dashboard posts): goon says "Go on.", say a message;
+// every other action is sf <action>.
+export function actionCommand(job: Pick<Job, 'workspace' | 'ticket'>, action: ActionId): string {
+  const args = action === 'goon' ? ['say', '"Go on."'] : action === 'say' ? ['say', '"<message>"'] : [action];
+  return ['sf', args[0]!, job.workspace, job.ticket, ...args.slice(1)].join(' ');
 }
 
-// The stop's real answers, each a button label and its sf command: the actions the stop panel
-// offers for the code (its stopActions, the conditional ones only when they apply now), Accept risk
-// and Must fix for each entry to settle, and always Send a message and Abort.
+// The stop's real answers, each a button label and its sf command: the actions the job page shows
+// for the stop (jobActions, without its Send and Abort), Accept risk and Must fix for each entry
+// to settle (settleEntries), and always Send a message and Abort.
 export function stopAnswers(job: Job, facts: StopFacts, now = new Date()): StopAnswer[] {
-  // A button label and its command: sf <verb> <workspace> <ticket> [args...].
-  const answer = (label: string, verb: string, ...args: string[]): StopAnswer => ({ label, command: ['sf', verb, job.workspace, job.ticket, ...args].join(' ') });
-  const goOn = answer('Tell it to go on', 'say', '"Go on."');
-  const restart = answer('Restart', 'restart');
-  const retry = answer('Retry', 'retry');
-  const accept = gateAcceptable(job, facts.review) ? [answer('Accept and prepare MR', 'accept')] : [];
-  const code = job.error?.code ?? '';
-  let actions: StopAnswer[];
-  if (usageLimitStop(job, now)) {
-    actions = [goOn];
-  } else {
-    switch (resolved(code)) {
-      case 'simplify_offered':
-        actions = [answer('Simplify', 'simplify'), answer('Skip', 'accept')];
-        break;
-      case 'review_disputed':
-      case 'review_churn':
-      case 'gate_rounds':
-      case 'gate_budget':
-        actions = accept;
-        break;
-      case 'iteration_limit':
-        actions = [...accept, restart];
-        break;
-      case 'gate_failed':
-        actions = [...accept, goOn];
-        break;
-      case 'tests_failed':
-        actions = accept;
-        break;
-      case 'tests_unavailable':
-        actions = retryable(job) ? [retry, ...accept] : accept;
-        break;
-      case 'review_failed':
-        actions = [answer('Retry review', 'review')];
-        break;
-      case 'serve_restarted':
-      case 'session_failed':
-        actions = [goOn, restart];
-        break;
-      case 'fetch_failed':
-        actions = retryable(job) ? [retry] : [goOn];
-        break;
-      case 'mr_serve_restarted':
-      case 'mr_failed':
-        actions = retryable(job) ? [retry, goOn] : [goOn];
-        break;
-      case 'max_turns':
-      case 'sandbox_unavailable':
-      case 'publish_failed':
-      case 'worktree_remove_failed':
-        actions = [goOn];
-        break;
-      case 'mr_conflict':
-        actions = [answer('Tell it how', 'say', '"<message>"')];
-        break;
-      case 'mr_push_failed':
-        actions = [answer('Push again', 'approve')];
-        break;
-      default:
-        actions = [];
-    }
-  }
-  const settle = code === 'escalated' || code === 'review_disputed' ? (ledgerStopEntries(code, facts.ledger) ?? []).flatMap((entry) => [answer('Accept risk', 'settle', entry.id, 'accept'), answer('Must fix', 'settle', entry.id, 'fix')]) : [];
-  return [...actions, ...settle, answer('Send a message', 'say', '"<message>"'), answer('Abort', 'abort')];
+  const answer = (label: string, command: string): StopAnswer => ({ label, command });
+  const actions = jobActions(job, { ...facts, gate: undefined, mrHost: null }, now).actions
+    .filter((shown) => shown.action !== 'abort' && !(shown.action === 'say' && shown.label === 'Send'))
+    .map((shown) => answer(shown.label.replace(/…$/u, ''), actionCommand(job, shown.action)));
+  const settle = settleEntries(job, facts.ledger, now).flatMap((entry) => [
+    answer('Accept risk', `${actionCommand(job, 'settle')} ${entry.id} accept`), answer('Must fix', `${actionCommand(job, 'settle')} ${entry.id} fix`),
+  ]);
+  return [...actions, ...settle, answer('Send a message', actionCommand(job, 'say')), answer('Abort', actionCommand(job, 'abort'))];
 }
 
 // ---------- The model's input ----------

@@ -45,6 +45,10 @@ export const ACTIVE_STATES: readonly JobState[] = ['starting', 'working', 'await
 // its slot). A paused job and one that waits for the user (needs_human, ready_for_human_review,
 // handed_over) do not count.
 export const RUNNING_STATES: readonly JobState[] = ['starting', 'working', 'awaiting_review', 'preparing_mr', 'waiting_limit'];
+// The running jobs of every workspace (RUNNING_STATES): what the run queue's limit counts.
+export function runningJobs(jobs: Job[]): Job[] {
+  return jobs.filter((job) => RUNNING_STATES.includes(job.state));
+}
 // States after which a new job for the same ticket may start.
 export const TERMINAL_STATES: readonly JobState[] = ['failed', 'aborted', 'pushed'];
 // The states sf pause takes (SF-067), and what was interrupted when the job was paused: the
@@ -150,10 +154,10 @@ export const JOB_TRANSITIONS: readonly JobTransition[] = Object.freeze([
   ...rows('ask_for_changes', ['handed_over'], ['needs_human']),
 ].map((row) => Object.freeze(row)));
 
-// Every refusal of checkTransition in this process; nothing clears it (the test harness reads it).
+// Every refusal of checkTransition in this process; nothing clears it.
 const refusals: JobTransition[] = [];
 
-// The refusals of checkTransition in this process, for the tests (SF-088).
+// The refusals of checkTransition in this process so far, oldest first (SF-088).
 export function refusedTransitions(): JobTransition[] {
   return refusals.map((row) => ({ ...row }));
 }

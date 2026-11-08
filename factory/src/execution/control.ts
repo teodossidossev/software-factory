@@ -17,11 +17,15 @@ import type { Workspace } from '../registry.js';
 import { readJobRules } from '../rules-docs.js';
 import { actedVerdict, REVIEWER } from '../review.js';
 import type { RunnerRequest } from '../runner.js';
+import { withoutDropped } from '../stops.js';
 import { readTask, TASK_DIR, taskDiff, taskSha256 } from '../task-file.js';
 import type { UsageLimit } from '../usage-limit.js';
 import { deleteBranch, removeWorktree } from '../worktree.js';
-import { checkNotInCheckout, type ExclusiveScope, exists, firstPrompt, gateSkipped, imagesChangedNote, type Resumed, type Retired, withoutDropped } from './shared.js';
 import type { Core } from './core.js';
+import type { ExclusiveScope, Resumed, Retired } from './dto.js';
+import { checkNotInCheckout } from './errors.js';
+import { firstPrompt, imagesChangedNote } from './prompts.js';
+import { exists, gateSkipped } from './shared.js';
 
 export class ControlPart {
   readonly core: Core;

@@ -12,7 +12,7 @@ import { chooseForge, type Forge, type ForgeKind, forgeFor, type MergeRequestSta
 import { runGit } from '../git.js';
 import { checkTerms, commitsToCheck, GUARD_MAX_FIXES, GUARD_MAX_MR_TURNS, guardFixContent, guardFixCount, guardMessage, type GuardHit, type GuardTerm, maskedMrTextFailure, maskedMrTextProblem, maskTerms, MAX_GUARD_MESSAGE, redactAdded, scanBranch, scanChange, scanCommits, scanMrText, worktreeTree } from '../guard.js';
 import { checkBranchFree, isAncestor, savedRef, settleAfterPush, subjectOf } from '../handoff.js';
-import { claudeReviews, type EventRecord, type Job, type JobMr, type JobState, now } from '../jobs.js';
+import { claudeReviews, type Job, type JobMr, type JobState, now } from '../jobs.js';
 import { abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitFailure, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl, parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, validBranchName, withAccepted, withChecks, withFindings, withNits, withSimplifications, worktreesOn } from '../mr.js';
 import { type LedgerEntry, notFixed } from '../ledger.js';
 import { buildPatch, notificationLine } from '../patch.js';
@@ -22,11 +22,16 @@ import { configDir, type Workspace } from '../registry.js';
 import { actedVerdict, type ReviewItem, uniqueNits } from '../review.js';
 import type { IdleOutcome } from '../session.js';
 import { pathDenials } from '../sandbox-denials.js';
+import { withoutDropped } from '../stops.js';
 import { readTask } from '../task-file.js';
-import { checksLine, EVENT_TAIL_BYTES, EVENT_TAIL_LINES, failureText, inlineCommand, lastLines, runTestCommand, TEST_CODES, TEST_FIX_ROUNDS, testsFixContent, TESTS_FAILED, type TestsRecord, type TestsResult, TESTS_UNAVAILABLE } from '../test-command.js';
+import { checksLine, failureText, inlineCommand, runTestCommand, TEST_CODES, TEST_FIX_ROUNDS, testsFixContent, TESTS_FAILED, type TestsRecord, type TestsResult, TESTS_UNAVAILABLE } from '../test-command.js';
 import { removeWorktree } from '../worktree.js';
-import { cutOffError, exists, type Live, markedGroups, MR_RETRY_CODES, type MrContent, mrFailure, type MrInput, type MrOutcome, type MrSaved, type MrView, type RunningReview, TESTS_RUNNER, withoutDropped } from './shared.js';
 import type { Core } from './core.js';
+import type { MrContent, MrInput, MrOutcome, MrSaved, MrView } from './dto.js';
+import { cutOffError, MR_RETRY_CODES, mrFailure } from './errors.js';
+import { TESTS_RUNNER, testsEvent } from './events.js';
+import { markedGroups } from './prompts.js';
+import { exists, type Live, type RunningReview } from './shared.js';
 
 // The Merge request screen (SF-080): the needs_human codes of a push that failed or was refused,
 // in which the MR text stays editable (the prepared commit and its worktree are kept until the push).
@@ -104,17 +109,6 @@ function unavailableMessage(record: TestsRecord, iteration: number): string {
 // The stop at the bound of the Tests Fix rounds (tests_failed): the command and how it ended.
 function failedMessage(record: TestsRecord, iteration: number): string {
   return `The workspace's tests still fail after ${TEST_FIX_ROUNDS} Tests Fix rounds: ${commandInMessage(record.command)} (${failureText(record)}) on iteration ${iteration}. Accept the iteration without passing tests (sf accept), or tell the Implementer what to do (sf say).`;
-}
-
-// The tests event of a record (run: the tests_started event's): its outcome and the last lines of
-// its output for the Stream.
-export function testsEvent(iteration: number, run: string, record: TestsRecord): EventRecord {
-  const tail = lastLines(record.output, EVENT_TAIL_LINES, EVENT_TAIL_BYTES);
-  const truncated = record.output_truncated || tail !== record.output.replace(/\n+$/u, '');
-  return {
-    ts: now(), iteration, type: 'tests', run, command: record.command, outcome: record.outcome, exit_code: record.exit_code, timed_out: record.timed_out,
-    duration_ms: record.duration_ms, ...(record.reason !== undefined ? { reason: record.reason } : {}), tail, ...(truncated ? { tail_truncated: true as const } : {}),
-  };
 }
 
 export class MrPart {

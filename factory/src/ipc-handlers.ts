@@ -4,12 +4,14 @@
 import { COMMANDS, checkArgs, type Serve, socketCommand } from './commands.js';
 import { FactoryError } from './errors.js';
 import type { IpcHandler } from './ipc.js';
+import type { TestHooks } from './test-hooks.js';
 import { refuseWhileUpdating } from './update.js';
 
 export interface SocketHandlerOptions extends Serve {
   stateDir: string;
-  // SF_TEST_HOOKS=on: the tests' commands (check, fix, clean) answer.
-  testHooks: boolean;
+  // The test hooks (src/test-hooks.ts): with socketCommands, the tests' commands (check, fix,
+  // clean) answer.
+  testHooks: TestHooks;
   // After a queue command that changed the queue.
   onQueueChange(): void;
 }
@@ -22,7 +24,7 @@ export function socketHandler(options: SocketHandlerOptions): IpcHandler {
     if (command?.openWhileUpdating !== true) {
       refuseWhileUpdating(options.stateDir);
     }
-    if (command === undefined || (command.testOnly === true && !options.testHooks)) {
+    if (command === undefined || (command.testOnly === true && !options.testHooks.socketCommands)) {
       throw new FactoryError('bad_request', `Unknown command "${name}".`);
     }
     const checked = checkArgs(command, args);

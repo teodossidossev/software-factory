@@ -17,7 +17,7 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { ATTACHMENT_NAME_PATTERN, MAX_ATTACHMENT_BYTES, readAttachment } from './attachments.js';
 import { writeFileAtomic } from './atomic.js';
-import { newToken, readTokenFile } from './dashboard.js';
+import { newToken } from './dashboard.js';
 import { FactoryError } from './errors.js';
 import { internalError, listen, LOOPBACK_HOST, sameSecret, sendJson } from './http.js';
 import { replaceSecret } from './redact.js';
@@ -28,6 +28,7 @@ import { handbookSection } from './prompts.js';
 import { resolveWorkspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { DEFAULT_PAGE_BYTES, MAX_FILE_BYTES, MAX_PAGE_BYTES, MAX_PATH_LENGTH, MIN_PAGE_BYTES, RepoFiles, RepoReadError } from './repo-files.js';
 import { DEFAULT_RESULTS, MAX_QUERY_CHARS, MAX_RESULTS, search } from './search.js';
+import { MCP_TOKEN_FILE, readTokenFile } from './secrets.js';
 import { checkFile, checkFinding, recordVerdict, type TaskChecks } from './task-check.js';
 import { AUTO_CHECK_DELAY_MS, type AutoChecks } from './task-check-auto.js';
 import { checkNeed, isDraft, MAX_TASK_BYTES, TICKET_DESCRIPTION, TICKET_PATTERN, writeTask } from './task-file.js';
@@ -45,9 +46,8 @@ export interface Handbook {
   quickStart: string;
 }
 
-// The MCP token (SF-099): the secret every request to the endpoint carries, kept in the state
-// directory (mode 0600) across starts, in the dashboard token's format; a value of its own.
-export const MCP_TOKEN_FILE = 'mcp-token';
+// The MCP token's file (SF-099): src/secrets.ts's.
+export { MCP_TOKEN_FILE } from './secrets.js';
 // What every output shows in the token's place.
 export const TOKEN_LABEL = '<token>';
 // A token anywhere after /mcp/: one the output filter does not know (an earlier one) is hidden too.

@@ -14,8 +14,9 @@ import { checkoutGitDir, type LockScan, removeStaleSandboxLock, staleSandboxLock
 import type { Workspace } from '../registry.js';
 import { updateMarked } from '../update.js';
 import { removeWorktree } from '../worktree.js';
-import { cutOffError, type MrContent, mrFailure } from './shared.js';
 import type { Core } from './core.js';
+import type { MrContent } from './dto.js';
+import { cutOffError, mrFailure } from './errors.js';
 
 // The states in which a job's sessions may run under Claude Code's sandbox, which binds the
 // workspace checkout's .git/config.lock into each sandboxed command (SF-085): the Implementer's

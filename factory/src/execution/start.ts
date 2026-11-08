@@ -7,7 +7,7 @@ import { jobAttachment, type ResolvedImage, resolveTaskImages, writeImages } fro
 import { FactoryError } from '../errors.js';
 import { runGit } from '../git.js';
 import { claudeReviewDecision } from '../config.js';
-import { checkTransition, claudeReviews, type Job, type JobState, now, RESTARTABLE_STATES, TERMINAL_STATES } from '../jobs.js';
+import { checkTransition, claudeReviews, type Job, type JobState, now, RESTARTABLE_STATES, runningJobs, TERMINAL_STATES } from '../jobs.js';
 import { resolveTarget } from '../mr.js';
 import { changedPaths } from '../patch.js';
 import { removeSandboxPlaceholders } from '../placeholders.js';
@@ -15,12 +15,14 @@ import { factoryPrompt } from '../prompts.js';
 import { configDir, type Workspace } from '../registry.js';
 import { collectRules, writeJobRules } from '../rules-docs.js';
 import { actedVerdict } from '../review.js';
-import { QueueStore, runningJobs } from '../queue.js';
 import { Runners } from '../runner.js';
+import { withoutDropped } from '../stops.js';
 import { isDraft, parseFrontMatter, readTask, TASK_DIR, type TaskReview, taskReview, taskSha256, TICKET_DESCRIPTION, TICKET_PATTERN } from '../task-file.js';
 import { addWorktree, deleteBranch, removeWorktree } from '../worktree.js';
-import { branchName, checkNotInCheckout, exists, firstPrompt, withoutDropped } from './shared.js';
 import type { Core } from './core.js';
+import { checkNotInCheckout } from './errors.js';
+import { firstPrompt } from './prompts.js';
+import { branchName, exists } from './shared.js';
 
 // A job record claimed by start or restart (SF-067), before its worktree exists.
 interface Claimed {
@@ -237,10 +239,11 @@ export class StartPart {
   }
 
   // The run queue's limit (SF-071): the running jobs of every workspace (RUNNING_STATES), the
-  // ticket's own aside, are fewer than max_running of queue.json; job_limit otherwise. Only the
-  // queue's own start runs it, only under the lock.
+  // ticket's own aside, are fewer than max_running (ExecutionOptions.maxRunning: sf serve reads
+  // queue.json; without it, config.maxJobs); job_limit otherwise. Only the queue's own start runs
+  // it, only under the lock.
   async #checkSlot(workspaceName: string, ticket: string): Promise<void> {
-    const { max_running: limit } = await new QueueStore(this.core.config.stateDir, this.core.config.maxJobs).read();
+    const limit = this.core.maxRunning === undefined ? this.core.config.maxJobs : await this.core.maxRunning();
     const running = runningJobs(await this.core.jobs.list()).filter((job) => !(job.workspace === workspaceName && job.ticket === ticket));
     if (running.length >= limit) {
       throw new FactoryError('job_limit', `${running.length} job${running.length === 1 ? '' : 's'} run (${running.map((job) => `${job.ticket} ${job.state}`).join(', ')}); the limit is ${limit}.`);

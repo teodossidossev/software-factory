@@ -112,33 +112,42 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
   });
 });
 
-// SF-146: core.js is built from web/core.ts into dist/web/ and served from there; the other scripts
-// are still served from static/, until SF-147 to SF-150 convert them. Each is served with the text of
-// the file dashboardScriptFiles names, and the built core.js is a classic script: the compiler kept
-// it free of import and export (a module would have gained an `export {}`).
-test('dashboard: core.js is served from the build output dist/web/, the other scripts from static/', async () => {
+// SF-146, SF-147: core.js and job-screens.js are built from web/*.ts into dist/web/ and served from
+// there; the other scripts are still served from static/, until SF-148 to SF-150 convert them. Each
+// is served with the text of the file dashboardScriptFiles names, and each built one is a classic
+// script: the compiler kept it free of import and export (a module would have gained an `export {}`).
+const BUILT_SCRIPTS = ['core.js', 'job-screens.js'];
+test('dashboard: core.js and job-screens.js are served from the build output dist/web/, the other scripts from static/', async () => {
   const packageDir = new URL('../../', import.meta.url);
   const files = dashboardScriptFiles();
   assert.deepEqual(files.map(({ file }) => file), [...DASHBOARD_SCRIPTS]);
   for (const { file, url, source } of files) {
-    const [served, written] = file === 'core.js' ? ['dist/web/core.js', 'web/core.ts'] : [`static/${file}`, `static/${file}`];
+    const [served, written] = BUILT_SCRIPTS.includes(file) ? [`dist/web/${file}`, `web/${file.replace(/\.js$/, '.ts')}`] : [`static/${file}`, `static/${file}`];
     assert.deepEqual([url.href, source.href], [new URL(served, packageDir).href, new URL(written, packageDir).href], file);
   }
-  await assert.rejects(stat(new URL('static/core.js', packageDir)), { code: 'ENOENT' });
+  for (const file of BUILT_SCRIPTS) {
+    await assert.rejects(stat(new URL(`static/${file}`, packageDir)), { code: 'ENOENT' }, file);
+  }
   await withDashboard('dash-built', fakeActions(), async (dashboard) => {
     for (const { file, url } of files) {
       const reply = await fetchRaw(new URL(file, dashboard.url));
       assert.equal(reply.status, 200, file);
       assert.equal(reply.body, await readFile(url, 'utf8'), file);
     }
+    for (const file of BUILT_SCRIPTS) {
+      const built = (await fetchRaw(new URL(file, dashboard.url))).body;
+      assert.ok(built.startsWith(`// ${file}, `), file);
+      assert.match(built, /^'use strict';$/m, file);
+      assert.doesNotMatch(built, /^\s*(import|export)\b/m, file);
+      // No TypeScript left: the typed declarations are plain JavaScript.
+      assert.doesNotMatch(built, /^(interface|type) /m, file);
+    }
     const core = (await fetchRaw(new URL('core.js', dashboard.url))).body;
-    assert.ok(core.startsWith('// core.js, '));
-    assert.match(core, /^'use strict';$/m);
-    assert.doesNotMatch(core, /^\s*(import|export)\b/m);
-    // No TypeScript left: the typed declarations of web/core.ts are plain JavaScript.
     assert.match(core, /^const state = \{$/m);
     assert.match(core, /^function el\(tag, className, text\) \{$/m);
-    assert.doesNotMatch(core, /^interface /m);
+    const screens = (await fetchRaw(new URL('job-screens.js', dashboard.url))).body;
+    assert.match(screens, /^function cxGet\(map, id, path, done\) \{$/m);
+    assert.match(screens, /^const MR = new Map\(\);$/m);
   });
 });
 

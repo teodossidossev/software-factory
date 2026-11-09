@@ -59,21 +59,28 @@ export interface TmpKept {
 
 // The session's read lists for the given roots: each kept path that exists and lies under a root, by
 // each spelling (its path and its real path) that does, in allowRead, and in allowWrite too when it
-// is written. With no root, nothing.
+// is written. A read-only kept path that holds a written one, by any of their spellings, is left out
+// of allowRead: Claude Code mounts the allowRead binds after the allowWrite binds, so it would mount
+// read only over every written path inside it, whatever their depth. With no root, nothing.
 export async function claudeTmpRule(roots: readonly string[], keep: readonly TmpKept[]): Promise<ClaudeTmp> {
-  const allowRead = new Set<string>();
-  const allowWrite = new Set<string>();
+  const spelled: { spellings: string[]; write: boolean }[] = [];
   for (const { path, write } of keep) {
     const real = path === undefined ? undefined : await realOrUndefined(path);
-    if (path === undefined || real === undefined) {
+    if (path !== undefined && real !== undefined) {
+      spelled.push({ spellings: [...new Set([resolve(path), real])], write });
+    }
+  }
+  const written = spelled.filter(({ write }) => write).flatMap(({ spellings }) => spellings);
+  const allowRead = new Set<string>();
+  const allowWrite = new Set<string>();
+  for (const { spellings, write } of spelled) {
+    if (!write && spellings.some((spelling) => written.some((path) => within(path, spelling)))) {
       continue;
     }
-    for (const spelling of new Set([resolve(path), real])) {
-      if (inTmpRoot(spelling, roots)) {
-        allowRead.add(spelling);
-        if (write) {
-          allowWrite.add(spelling);
-        }
+    for (const spelling of spellings.filter((each) => inTmpRoot(each, roots))) {
+      allowRead.add(spelling);
+      if (write) {
+        allowWrite.add(spelling);
       }
     }
   }
@@ -84,7 +91,8 @@ export async function claudeTmpRule(roots: readonly string[], keep: readonly Tmp
 // its temporary folder and a Task check's own folder (checkFolder) written; its checkout and the
 // state directory read. A job session (one with a worktree) also writes its checkout's Git directory
 // (gitDirOf), so that Claude Code can bind its config.lock there and the worktree's Git commands can
-// write its objects, refs and worktrees/<name>; the rest of the checkout stays read only.
+// write its objects, refs and worktrees/<name>; the checkout, which then holds a written path, is
+// left out (claudeTmpRule), as is a state directory that holds the worktree.
 export interface TmpScope {
   worktree?: string | undefined;
   sessionTmp?: string | undefined;

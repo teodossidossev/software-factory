@@ -1807,16 +1807,23 @@ real path; `allowRead` reads back each kept path that lies under one of them (by
 does, when it exists): the session's worktree, its own temporary folder and, for a Task check, its
 own `check-*` folder (`DenialScope.checkFolder`; not the Task checks' parent, so not a sibling
 check's), which `allowWrite` holds too, and its checkout and the state directory (the
-smoke's run is under `/tmp`), read only. For a job session (one with a worktree), `allowWrite` also
-holds the checkout's Git directory, read without Git: `<checkout>/.git`, or, when `.git` is a file,
-the common directory its `gitdir:` line and that directory's `commondir` name (nothing when any of
-it cannot be read), so that Claude Code can bind its `config.lock` there and the worktree's Git
-commands can write; the rest of the checkout stays read only, and a Task check writes none of it. Every more specific `denyRead` inside a kept path (a `.env`,
+smoke's run is under `/tmp`), read only. For a job session (one with a worktree), `allowRead` and
+`allowWrite` also hold the checkout's Git directory, read without Git: `<checkout>/.git`, or, when
+`.git` is a file, the common directory its `gitdir:` line and that directory's `commondir` name
+(nothing when any of it cannot be read), so that Claude Code can bind its `config.lock` there and the
+worktree's Git commands can write. A read-only kept path that holds a written one, by any of their
+spellings, is left out of `allowRead`: Claude Code mounts the `allowRead` binds after the
+`allowWrite` binds, so it would mount read only over every written path inside it. So a job whose
+checkout lies under a temporary root reads only the checkout's Git directory, not the rest of the
+checkout (it works in its worktree), nor the state directory when that holds its worktree; a Task
+check writes nothing in its checkout and keeps reading it. Paths outside the temporary roots, every
+real workspace's, are not affected. Every more specific `denyRead` inside a kept path (a `.env`,
 another job, `jobs/`, the Task checks' parent of a job) stays in force. `pathDenials(...).sandbox`
 does not hold the roots: the Codex gate and the test runs keep their own empty `/tmp`. A job
 session's user settings are held against the roots too: an `allowRead` there under `/tmp` refuses the session with
-`user_settings_weaken_sandbox`. The file-tool guard keeps the same paths there (the state directory
-included); its tool rules still deny the state's entries. Each session gets a temporary folder of its own,
+`user_settings_weaken_sandbox`. The file-tool guard keeps the same paths there, and the checkout
+by its own kept paths: a job's tools no longer read a state directory that holds its worktree, which
+they never needed; its tool rules still deny the state's entries. Each session gets a temporary folder of its own,
 `mkdtemp(<os.tmpdir()>/sf-claude-<pid>-)` (0700, short: Claude Code puts sockets there), passed as
 `CLAUDE_CODE_TMPDIR`, so Claude Code's `TMPDIR` for sandboxed commands is `<folder>/claude-<uid>`
 instead of the shared `/tmp/claude-<uid>`. The Implementer's session makes it with its first turn, before

@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import { handoffOffNotice } from '../src/config.js';
 import { mrMessage } from '../src/mr.js';
 import { saveRegistry } from '../src/registry.js';
-import { call, fakeLog, git, putTask, readyCheck, refused, runCli, script, serve, stop, turnsStarted, waitFor } from './support/harness.js';
+import { call, fakeLog, git, putTask, readyCheck, refused, runCli, script, stop, turnsStarted, waitFor } from './support/harness.js';
 import { config, exists, gitCode, head, job, mrText, mrTurn, refusedSocket, remoteTip, rev, setup, status, toClean, worktreeOf } from './support/handoff.js';
 
 test('automatic hand-over at ready: the checkout on the branch at B with the job\'s changes as Local Changes, added files intent-to-add, the message prefilled, the worktree gone, no slot held; Approve without a user commit pushes the saved commit', async () => {

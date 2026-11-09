@@ -8,7 +8,7 @@
 // The usage limit (SF-072) and the images of a Resume (SF-065) are test/pause-limits.test.ts's
 // (SF-152: one file ran near run-tests' per-file limit).
 import assert from 'node:assert/strict';
-import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';

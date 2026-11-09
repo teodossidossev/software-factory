@@ -11,7 +11,7 @@ import { addAttachment, removeAttachment } from '../src/attachments.js';
 import { JobStore } from '../src/jobs.js';
 import { firstPrompt, imagesChangedNote } from '../src/execution.js';
 import { factoryPrompt } from '../src/prompts.js';
-import { call, codexLog, codexScript, type Env, fakeCodex, fakeLog, git, newEnv, newRepo, putTask, refused, reviewLog, reviewScript, runCli, script, serve, stop, task, turnsStarted, waitFor } from './support/harness.js';
+import { call, codexLog, codexScript, type Env, fakeCodex, fakeLog, git, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, turnsStarted, waitFor } from './support/harness.js';
 import { CLEAN, count, eventsOf, FIX, GATE_CLEAN, jobDir, LONG, mrText, nothingRuns, until, worktreeOf } from './support/pause.js';
 
 // SF-072: the usage limit. The known messages as the sessions end with them.

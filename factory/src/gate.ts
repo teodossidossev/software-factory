@@ -4,13 +4,15 @@
 // form of its output schema, and reads back the verdict, the token usage and the errors. Knows
 // nothing about job states; the Execution applies the verdict.
 // Codex runs inside bubblewrap under the Claude sessions' read denials (the wrapper,
-// src/sandbox-denials.ts), and never without it while the sandbox is on; it gets a short list of
-// environment variables, and the raw output file is removed once read.
-import { spawn } from 'node:child_process';
+// src/sandbox-denials.ts) and its socket filter (src/seccomp.ts), and never without them while the
+// sandbox is on; it gets a short list of environment variables, and the raw output file is removed
+// once read.
+import { spawn, type SpawnOptions } from 'node:child_process';
 import { accessSync, constants } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { delimiter, isAbsolute, join } from 'node:path';
 import type { GateTokens } from './jobs.js';
+import { filterSupports, spawnSeccomped } from './seccomp.js';
 import { issues, oneLine, REVIEW_SCHEMA, reviewBody, type ReviewInput, reviewOutput, type ReviewOutput } from './review.js';
 
 // The reviewer name of the gate in gate.json and the review events.
@@ -97,6 +99,8 @@ export interface GateOptions {
   bwrapPath: string | undefined;
   // The platform (default process.platform): the wrapper holds on Linux only.
   platform?: NodeJS.Platform;
+  // The architecture (default process.arch): the wrapper's socket filter holds on x64 and arm64.
+  arch?: NodeJS.Architecture;
 }
 
 export type GateOutcome = { tokens: GateTokens; startedAt: string; endedAt: string } & (
@@ -161,6 +165,10 @@ function sandboxUnavailable(options: GateOptions): string | undefined {
   const platform = options.platform ?? process.platform;
   if (platform !== 'linux') {
     return `The gate did not start: it runs only inside bubblewrap, on Linux, and this is ${platform} (${GATE_SANDBOX_UNAVAILABLE}); SF_SANDBOX=off runs it without (and without the sandbox).`;
+  }
+  const arch = options.arch ?? process.arch;
+  if (!filterSupports(arch)) {
+    return `The gate did not start: the gate's socket filter does not support ${arch} (${GATE_SANDBOX_UNAVAILABLE}); SF_SANDBOX=off runs it without (and without the sandbox).`;
   }
   if (options.bwrapPath === undefined) {
     return `The gate did not start: it runs only inside bubblewrap, and there is no bwrap on PATH (${GATE_SANDBOX_UNAVAILABLE}); install bubblewrap, then go on.`;
@@ -239,10 +247,10 @@ export async function runGate(prompt: string, options: GateOptions): Promise<Gat
     }
   };
   const ended = await new Promise<{ code: number | null; signal: NodeJS.Signals | null } | { spawnError: Error }>((resolve) => {
-    const [command, args] = options.wrapper === undefined
-      ? [options.codexPath, gateArgs(options)]
-      : [options.bwrapPath!, [...options.wrapper, '--', options.codexPath, ...gateArgs(options)]];
-    const child = spawn(command, args, { cwd: options.cwd, env: gateEnvironment(), stdio: ['pipe', 'pipe', 'pipe'] });
+    const spawnOptions: SpawnOptions = { cwd: options.cwd, env: gateEnvironment(), stdio: ['pipe', 'pipe', 'pipe'] };
+    const child = options.wrapper === undefined
+      ? spawn(options.codexPath, gateArgs(options), spawnOptions)
+      : spawnSeccomped(options.bwrapPath!, options.wrapper, [options.codexPath, ...gateArgs(options)], spawnOptions);
     let killTimer: NodeJS.Timeout | undefined;
     const kill = (): void => {
       if (child.exitCode !== null || child.signalCode !== null) {
@@ -262,7 +270,7 @@ export async function runGate(prompt: string, options: GateOptions): Promise<Gat
     process.once('exit', onExit);
     options.signal.addEventListener('abort', kill, { once: true });
     let pending = '';
-    child.stdout.on('data', (chunk: Buffer) => {
+    child.stdout!.on('data', (chunk: Buffer) => {
       pending += chunk.toString('utf8');
       const lines = pending.split('\n');
       pending = lines.pop()!;
@@ -270,12 +278,12 @@ export async function runGate(prompt: string, options: GateOptions): Promise<Gat
         onLine(line);
       }
     });
-    child.stderr.on('data', (chunk: Buffer) => {
+    child.stderr!.on('data', (chunk: Buffer) => {
       stderr = (stderr + chunk.toString('utf8')).slice(-MAX_STDERR_BYTES);
     });
     // Codex may exit before it reads the whole prompt; that shows in its exit.
-    child.stdin.on('error', () => {});
-    child.stdin.end(prompt);
+    child.stdin!.on('error', () => {});
+    child.stdin!.end(prompt);
     const finish = (result: { code: number | null; signal: NodeJS.Signals | null } | { spawnError: Error }): void => {
       clearTimeout(timer);
       clearTimeout(killTimer);

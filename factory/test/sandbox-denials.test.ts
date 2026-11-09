@@ -961,7 +961,7 @@ test('SF_SANDBOX_ALLOW_READ (SF-123 Fix 4): an entry that is, or holds, the home
 
 // The bwrap arguments as mounts, in order (SF-125): [option, ...its values].
 function mounts(args: string[]): string[][] {
-  const arity: Record<string, number> = { '--die-with-parent': 0, '--unshare-pid': 0, '--tmpfs': 1, '--dev': 1, '--proc': 1, '--ro-bind': 2, '--bind': 2 };
+  const arity: Record<string, number> = { '--die-with-parent': 0, '--unshare-pid': 0, '--seccomp': 1, '--tmpfs': 1, '--dev': 1, '--proc': 1, '--ro-bind': 2, '--bind': 2 };
   const result: string[][] = [];
   for (let index = 0; index < args.length; index += 1) {
     const count = arity[args[index]!];
@@ -989,7 +989,7 @@ async function codexInstall(name: string): Promise<{ root: string; linked: strin
 
 const NODE_PREFIX = dirname(dirname(realpathSync(process.execPath)));
 
-test('gateWrapper (SF-125): the system read-only, then the denials, then the read-only binds, then CODEX_HOME and the iteration directory read-write, last; no --unshare-net', async () => {
+test('gateWrapper (SF-125, SF-161): the socket filter on fd 3, the system read-only, then the denials, then the read-only binds, then CODEX_HOME and the iteration directory read-write, last; no --unshare-net', async () => {
   const codex = await codexInstall('wrapper-order');
   const worktree = join(codex.root, 'worktree');
   // Denials outside /tmp (the test's own files are under it): a directory, a file, one gone, one
@@ -998,13 +998,15 @@ test('gateWrapper (SF-125): the system read-only, then the denials, then the rea
     worktree, codexPath: codex.linked, codexHome: '/h/.codex', iterationDir: '/var/lib/sf/jobs/app/T/iterations/001', images: ['/var/lib/sf/jobs/app/T/attachments/1.png'], tmp: '/sf-tmp',
   });
   assert.deepEqual(mounts(args), [
-    ['--die-with-parent'], ['--unshare-pid'], ['--ro-bind', '/', '/'], ['--dev', '/dev'], ['--proc', '/proc'], ['--tmpfs', '/tmp'], ['--tmpfs', '/sf-tmp'],
+    ['--die-with-parent'], ['--unshare-pid'], ['--seccomp', '3'], ['--ro-bind', '/', '/'], ['--dev', '/dev'], ['--proc', '/proc'], ['--tmpfs', '/tmp'], ['--tmpfs', '/sf-tmp'],
     ['--tmpfs', '/etc'], ['--ro-bind', '/dev/null', '/usr/bin/env'], ['--tmpfs', '/var/lib'],
     ['--ro-bind', worktree, worktree], ['--ro-bind', '/var/lib/sf/jobs/app/T/attachments/1.png', '/var/lib/sf/jobs/app/T/attachments/1.png'],
     ['--ro-bind', codex.modules, codex.modules], ['--ro-bind', NODE_PREFIX, NODE_PREFIX],
     ['--bind', '/h/.codex', '/h/.codex'], ['--bind', '/var/lib/sf/jobs/app/T/iterations/001', '/var/lib/sf/jobs/app/T/iterations/001'],
   ]);
   assert.ok(!args.includes('--unshare-net'));
+  // The socket filter (src/seccomp.ts), which spawnSeccomped writes to fd 3, once.
+  assert.deepEqual(mounts(args).filter((mount) => mount[0] === '--seccomp'), [['--seccomp', '3']]);
   // A tmp under /tmp has no tmpfs of its own; the worktree under it is bound back after /tmp's.
   const under = mounts(gateWrapper(denialsOf([]), { worktree, codexPath: codex.standalone, codexHome: '/h/.codex', iterationDir: '/i', images: [], tmp: join(temp, 'tmp') }));
   assert.deepEqual(under.filter((mount) => mount[0] === '--tmpfs'), [['--tmpfs', '/tmp']]);

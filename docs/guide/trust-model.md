@@ -85,13 +85,18 @@ sandboxed commands (the `denyRead` list of the job's path denials, built before 
   the answer).
 
 The network stays open, since Codex reaches OpenAI; Codex's own read-only sandbox still holds the
-commands it runs. Its environment is short: `PATH`, `HOME`, the locale and terminal variables,
-`TMPDIR`, `TZ`, `XDG_*`, the proxy variables, `OPENAI_*` and `CODEX_*`; no `SF_*` setting, no SSH
-agent, no other tool's key. With the sandbox on the gate never runs without the wrapper: without
-`bwrap` on `PATH`, or on another system than Linux, it does not start and the job stops with
-`gate_sandbox_unavailable`. `SF_SANDBOX=off` runs it unwrapped, with Codex's own sandbox only.
+commands it runs. A seccomp filter of the wrapper refuses new Unix sockets, so the abstract sockets
+of the machine (the X server's among them) stay out of reach: `socket` for `AF_UNIX` fails with
+`EPERM`, and so does every syscall of another architecture (i386, x32) that could get around it.
+TCP, UDP and `socketpair` (Node's child processes) still work. Its environment is short: `PATH`,
+`HOME`, the locale and terminal variables, `TMPDIR`, `TZ`, `XDG_*`, the proxy variables, `OPENAI_*`
+and `CODEX_*`; no `SF_*` setting, no SSH agent, no other tool's key. With the sandbox on the gate
+never runs without the wrapper: without `bwrap` on `PATH`, on another system than Linux, or on a
+processor other than x86_64 and arm64 (the socket filter's), it does not start and the job stops
+with `gate_sandbox_unavailable`. `SF_SANDBOX=off` runs it unwrapped, with Codex's own sandbox only.
 The `Gate sandbox` step of `sf smoke` checks the wrapper: inside it, the smoke's canary env file
-and `jobs/` must be hidden.
+and `jobs/` must be hidden, and a connect to an abstract Unix socket the smoke listens on must be
+refused.
 
 Every reviewer's verdict (the Claude review's, the gate's, the simplification pass's) is redacted
 before the factory stores or sends it: its free text (the summary, each item's problem and
@@ -238,9 +243,9 @@ apply.
 - **The Task check** does not deny the Task checks' parent directory, because it runs inside it: a
   check could read another check's checkout running at the same time.
 - **The Codex gate** reads what the wrapper binds back, `CODEX_HOME` above all (its login, which
-  goes to OpenAI anyway), and the network is open to it. It gets no SSH agent, no `SF_*` setting
-  and no other tool's key. Its prompt holds the Task file, the Report and the Patch, which go to
-  OpenAI as they are.
+  goes to OpenAI anyway), and the network is open to it, but for new Unix sockets. It gets no SSH
+  agent, no `SF_*` setting and no other tool's key. Its prompt holds the Task file, the Report and
+  the Patch, which go to OpenAI as they are.
 - **Unix sockets.** On Linux the sandbox can allow every Unix socket or none (allowing them by path
   is macOS only), and the repositories' tests use sockets of their own, so all are allowed. The
   known socket locations above are denied instead; a socket elsewhere, in a path not denied, stays

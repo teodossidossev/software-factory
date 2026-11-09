@@ -6,23 +6,27 @@
 // hides it (the tmpfs's own folder too, where bwrap would show it empty), any other bind, --dev and
 // --proc show it; a path no mount covers is hidden. A hidden argument fails the command as its
 // ENOENT would: one line on stderr, exit 1. With $HOME/fake-bwrap.json {"open": true} nothing is
-// hidden. An option the fake does not know exits 2.
+// hidden. An option the fake does not know exits 2. With --seccomp (the gate's socket filter, whose
+// program it does not read), a command whose argument holds the smoke's abstract socket probe
+// (\0sf-smoke-) fails as the filter would: EPERM on stdout, exit 1; without it the probe runs. With
+// $HOME/fake-bwrap.json {"unfiltered": true} the fake takes the wrapper as one without --seccomp.
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, relative, sep } from 'node:path';
 
 // The options of the gate's wrapper (src/sandbox-denials.ts) and of the test command's sandbox
-// (bwrapArgs, src/test-command.ts). --unshare-net, --remount-ro and --chdir change no denial: the
-// bwrap script runs the command from --chdir's folder.
+// (bwrapArgs, src/test-command.ts). --unshare-net, --remount-ro, --chdir and --seccomp change no
+// denial: the bwrap script runs the command from --chdir's folder.
 const ARITY: Record<string, number> = {
   '--die-with-parent': 0, '--unshare-pid': 0, '--unshare-net': 0, '--unshare-user': 0, '--new-session': 0,
-  '--tmpfs': 1, '--remount-ro': 1, '--chdir': 1, '--dev': 1, '--proc': 1, '--ro-bind': 2, '--ro-bind-try': 2, '--bind': 2,
+  '--seccomp': 1, '--tmpfs': 1, '--remount-ro': 1, '--chdir': 1, '--dev': 1, '--proc': 1, '--ro-bind': 2, '--ro-bind-try': 2, '--bind': 2,
 };
 
 const argv = process.argv.slice(2);
 const home = process.env.HOME ?? '.';
 appendFileSync(join(home, 'fake-bwrap.log'), `${JSON.stringify({ argv })}\n`);
 const control = join(home, 'fake-bwrap.json');
-const open = existsSync(control) && (JSON.parse(readFileSync(control, 'utf8')) as { open?: boolean }).open === true;
+const settings = existsSync(control) ? (JSON.parse(readFileSync(control, 'utf8')) as { open?: boolean; unfiltered?: boolean }) : {};
+const open = settings.open === true;
 
 const within = (path: string, dir: string): boolean => {
   const inside = relative(dir, path);
@@ -30,6 +34,7 @@ const within = (path: string, dir: string): boolean => {
 };
 
 const mounts: Array<{ target: string; shows: boolean }> = [];
+let seccomp = false;
 let index = 0;
 for (; index < argv.length && argv[index] !== '--'; index += 1) {
   const option = argv[index]!;
@@ -38,7 +43,9 @@ for (; index < argv.length && argv[index] !== '--'; index += 1) {
     process.stderr.write(`fake bwrap: unknown option or missing value: ${option}\n`);
     process.exit(2);
   }
-  if (option === '--tmpfs') {
+  if (option === '--seccomp') {
+    seccomp = settings.unfiltered !== true;
+  } else if (option === '--tmpfs') {
     mounts.push({ target: argv[index + 1]!, shows: false });
   } else if (option === '--dev' || option === '--proc') {
     mounts.push({ target: argv[index + 1]!, shows: true });
@@ -51,6 +58,10 @@ const command = argv.slice(index + 1);
 if (command.length === 0) {
   process.stderr.write('fake bwrap: no command after --\n');
   process.exit(2);
+}
+if (seccomp && command.some((arg) => arg.includes('\\0sf-smoke-') && arg.includes('connect('))) {
+  process.stdout.write('EPERM\n');
+  process.exit(1);
 }
 if (!open) {
   for (const path of command.filter((arg) => arg.startsWith('/'))) {

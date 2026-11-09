@@ -924,11 +924,11 @@ function mountPoint(path: string): string {
 //      specific path wins: a .env of the worktree stays hidden, an image under jobs/ stays bound
 //      when a bind holds jobs/;
 //   4. bound back read-write: CODEX_HOME and the iteration's directory.
-// No --unshare-net: Codex reaches OpenAI, and its own read-only sandbox holds its commands.
+// The host's network namespace (Codex reaches OpenAI); --seccomp 3 refuses new Unix sockets (seccomp.ts).
 export function gateWrapper(denials: PathDenials, options: GateWrapperOptions): string[] {
   const tmp = resolve(options.tmp);
   const temporary = within(tmp, '/tmp') ? ['/tmp'] : ['/tmp', tmp];
-  const args = ['--die-with-parent', '--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', ...temporary.flatMap((dir) => ['--tmpfs', dir])];
+  const args = ['--die-with-parent', '--unshare-pid', '--seccomp', '3', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', ...temporary.flatMap((dir) => ['--tmpfs', dir])];
   const denied = [...new Set(denials.sandbox.denyRead.map(mountPoint))];
   for (const path of denied.filter((entry) => !temporary.some((dir) => within(entry, dir)))) {
     args.push(...hiding(path));

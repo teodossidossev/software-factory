@@ -161,7 +161,7 @@ interface PageState {
   tickets: TicketRow[] | null;
   archived: ArchivedRow[];
   setupPending: Set<string>;
-  ticketConfirm: { action: string; key: string; row: TicketRow } | null;
+  ticketConfirm: { action: string; key: string; row: ConfirmedTicket } | null;
   filter: string;
   doneAll: boolean;
   drawer: 'task' | 'workspaces' | 'ticket' | 'archived' | null;

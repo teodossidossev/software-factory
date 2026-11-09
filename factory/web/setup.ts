@@ -1,38 +1,50 @@
-// setup.js, the dashboard's eighth script (DASHBOARD_SCRIPTS in src/dashboard.ts): the drawer and
-// the setup (workspaces, new ticket, archived, ticket actions). A classic script, loaded in order
-// with defer, sharing the page's globals with the others.
+// setup.js, the dashboard's eighth script (DASHBOARD_SCRIPTS in src/dashboard.ts), built from
+// web/setup.ts into dist/web/ (SF-150): the drawer and the setup (workspaces, new ticket, archived,
+// ticket actions). A classic script, loaded in order with defer, sharing the page's globals with
+// the others. This file has no import or export on purpose: the compiler keeps it a script, so its
+// top-level names stay the page's globals.
 'use strict';
+
+// The ticket Start or Delete asks about (openTicketConfirm): a ticket of the board or of the planned
+// ticket page, or an archived one (the drawer's Delete…, archivedRow), which has no check and no base.
+type ConfirmedTicket = (TicketEntry & { archivedRow?: false }) | (ArchivedRow & { archivedRow: true; check?: undefined; base?: undefined });
+// A ticket an action names: its workspace and key.
+interface TicketKey {
+  workspace: string;
+  ticket: string;
+}
 
 // ---------- The drawer: Workspaces, New ticket, Archived and an archived ticket's Task ----------
 
 // The job opens as its page (#job), a planned ticket as its page (#ticket, SF-081); the drawer stays
 // for the setup panels and an archived ticket's Task.
-const PANELS = { task: 'task-panel', workspaces: 'workspaces-panel', ticket: 'ticket-panel', archived: 'archived-panel' };
+type DrawerKind = NonNullable<PageState['drawer']>;
+const PANELS: Readonly<Record<DrawerKind, string>> = { task: 'task-panel', workspaces: 'workspaces-panel', ticket: 'ticket-panel', archived: 'archived-panel' };
 
-function showDrawer(kind, kicker, title) {
+function showDrawer(kind: DrawerKind, kicker: string, title: string): void {
   state.drawer = kind;
   if (kind !== 'task') {
     state.task = null;
   }
   for (const [name, id] of Object.entries(PANELS)) {
-    $(id).hidden = name !== kind;
+    byId(id).hidden = name !== kind;
   }
-  $('drawer-kicker').textContent = kicker;
-  $('drawer-title').textContent = title;
-  $('drawer').hidden = false;
-  $('scrim').hidden = false;
-  $('drawer-close').focus();
+  byId('drawer-kicker').textContent = kicker;
+  byId('drawer-title').textContent = title;
+  byId('drawer').hidden = false;
+  byId('scrim').hidden = false;
+  byId('drawer-close').focus();
 }
 
-function hideDrawer() {
+function hideDrawer(): void {
   state.drawer = null;
   state.task = null;
-  $('drawer').hidden = true;
-  $('scrim').hidden = true;
+  byId('drawer').hidden = true;
+  byId('scrim').hidden = true;
 }
 
 // The drawer's ✕, its scrim and Escape.
-function closeDrawer() {
+function closeDrawer(): void {
   if (state.drawer === null) {
     return;
   }
@@ -41,7 +53,7 @@ function closeDrawer() {
 }
 
 // The job page closes: no job is followed any more; drafts and outcomes stay with their jobs.
-function leaveJob() {
+function leaveJob(): void {
   closeConfirm();
   state.key = null;
   state.detail = null;
@@ -51,7 +63,7 @@ function leaveJob() {
   openStream();
 }
 
-function openWantedConfirm() {
+function openWantedConfirm(): void {
   const wanted = state.wantConfirm;
   if (wanted === null || state.detail === null || keyOf(state.detail.job) !== wanted.key) {
     return;
@@ -62,55 +74,55 @@ function openWantedConfirm() {
 
 // An archived ticket's Task text in the drawer, as text: headings bold by a line rule, never HTML
 // from the file. A planned ticket opens as its page (SF-081).
-async function openTask(row) {
+async function openTask(row: ArchivedRow): Promise<void> {
   const key = `${row.workspace}/${row.ticket}`;
   const task = { key };
   showDrawer('task', `${row.workspace} · .software-factory/archive/${row.ticket}.md`, `${row.ticket} · ${row.title}`);
   state.task = task;
-  $('task-body').replaceChildren(document.createTextNode('Loading the Task file…'));
-  let text;
+  byId('task-body').replaceChildren(document.createTextNode('Loading the Task file…'));
+  let text: string;
   try {
     text = await getText(`api/tickets/${jobPath(key)}/task?archived=1`);
   } catch (error) {
-    text = `Could not load the Task file: ${error.message}`;
+    text = `Could not load the Task file: ${errorMessage(error)}`;
   }
   if (state.task === task) {
-    $('task-body').replaceChildren(...renderReport(text));
+    byId('task-body').replaceChildren(...renderReport(text));
   }
 }
 
-function openWorkspaces() {
+function openWorkspaces(): void {
   showDrawer('workspaces', 'Setup', 'Workspaces');
   renderWorkspaces();
 }
 
-function openNewTicket() {
+function openNewTicket(): void {
   showDrawer('ticket', 'Setup', 'New ticket');
   renderWorkspaces();
 }
 
-function openArchived() {
+function openArchived(): void {
   showDrawer('archived', 'Setup', 'Archived tickets');
   renderArchived();
 }
 
 // ---------- Setup: workspaces, new ticket, archived, ticket actions ----------
 
-function renderSetup() {
+function renderSetup(): void {
   renderWorkspaces();
   renderArchived();
   renderBoard();
   renderTicket();
 }
 
-function renderWorkspaces() {
+function renderWorkspaces(): void {
   const rows = state.workspaces ?? [];
-  $('no-workspaces').hidden = state.workspaces === null || rows.length > 0;
+  byId('no-workspaces').hidden = state.workspaces === null || rows.length > 0;
   if (state.wsEdit !== null && !rows.some((row) => row.name === state.wsEdit)) {
     state.wsEdit = null;
     state.wsEditForm = null;
   }
-  $('workspace-list').replaceChildren(...rows.map((row) => {
+  byId('workspace-list').replaceChildren(...rows.map((row) => {
     const item = el('li');
     if (state.wsEdit === row.name && state.wsEditForm !== null) {
       // The Edit form (SF-103), kept across redraws so what is typed stays.
@@ -151,15 +163,15 @@ function renderWorkspaces() {
     return item;
   }));
   // The existing apps, the App field's suggestions (SF-103).
-  const apps = [...new Set(rows.map((row) => row.app).filter((app) => typeof app === 'string' && app !== ''))].sort();
-  $('workspace-apps').replaceChildren(...apps.map((app) => {
+  const apps = [...new Set(rows.map((row) => row.app).filter((app): app is string => typeof app === 'string' && app !== ''))].sort();
+  byId('workspace-apps').replaceChildren(...apps.map((app) => {
     const option = el('option');
     option.value = app;
     return option;
   }));
   // Default's words: what SF_HANDOFF says now.
   const handoffDefault = handoffDefaultText();
-  for (const select of [$('workspace-handoff'), state.wsEditForm?.querySelector('[data-wsf="handoff"]')]) {
+  for (const select of [byId('workspace-handoff'), state.wsEditForm?.querySelector('[data-wsf="handoff"]')]) {
     const first = select?.children?.[0];
     if (first !== undefined && first !== null) {
       first.textContent = handoffDefault;
@@ -168,7 +180,7 @@ function renderWorkspaces() {
   renderDigestSettings();
   // The workspace choice of the form keeps its value while the options are replaced; the
   // board's filter is the default.
-  const select = $('ticket-workspace');
+  const select = byIdAs('ticket-workspace', 'select');
   const chosen = select.value !== '' ? select.value : state.filter;
   select.replaceChildren(...rows.map((row) => {
     const option = el('option', '', row.name);
@@ -177,13 +189,13 @@ function renderWorkspaces() {
   }));
   select.value = rows.some((row) => row.name === chosen) ? chosen : (rows[0]?.name ?? '');
   select.disabled = rows.length === 0;
-  $('ticket-create').disabled = rows.length === 0 || state.setupPending.has('ticket') || state.setupPending.has('ticket-images');
+  byIdAs('ticket-create', 'button').disabled = rows.length === 0 || state.setupPending.has('ticket') || state.setupPending.has('ticket-images');
 }
 
-function renderArchived() {
+function renderArchived(): void {
   const rows = state.archived ?? [];
-  $('no-archived').hidden = rows.length > 0;
-  $('archived-list').replaceChildren(...rows.map((row) => {
+  byId('no-archived').hidden = rows.length > 0;
+  byId('archived-list').replaceChildren(...rows.map((row) => {
     const key = `${row.workspace}/${row.ticket}`;
     const item = el('li');
     item.append(el('div', 'ticket-name', `${key} · ${row.title}`));
@@ -207,33 +219,33 @@ function renderArchived() {
 }
 
 // A status line of a form in the drawer, or the board's message ('toast').
-function setSetupStatus(id, outcome) {
+function setSetupStatus(id: string, outcome: Outcome | null): void {
   if (id === 'toast') {
     toast(outcome);
     return;
   }
-  const node = $(id);
+  const node = byId(id);
   node.className = outcome === null ? 'status' : `status ${outcome.level}`;
   node.textContent = outcome === null ? '' : outcome.text;
 }
 
 // One request for one form or ticket; the page sends nothing twice.
-async function setupRequest(what, path, body, statusId, describe) {
+async function setupRequest(what: string, path: string, body: unknown, statusId: string, describe: (result: unknown) => Outcome): Promise<unknown> {
   if (state.setupPending.has(what)) {
     return undefined;
   }
   state.setupPending.add(what);
   setSetupStatus(statusId, { level: 'pending', text: 'Sending…' });
   renderSetup();
-  let result;
-  let outcome;
+  let result: unknown;
+  let outcome: Outcome;
   try {
     result = await post(path, body);
     outcome = describe(result);
   } catch (error) {
     outcome = error instanceof ActionError
       ? { level: 'error', text: `${error.code}: ${error.message}` }
-      : { level: 'error', text: `The request failed (${error.message}); it may have taken effect. The board refreshes on the next change; reload the page to see the current state.` };
+      : { level: 'error', text: `The request failed (${errorMessage(error)}); it may have taken effect. The board refreshes on the next change; reload the page to see the current state.` };
   }
   state.setupPending.delete(what);
   setSetupStatus(statusId, outcome);
@@ -242,14 +254,14 @@ async function setupRequest(what, path, body, statusId, describe) {
 }
 
 // "Default (now: yes, from SF_HANDOFF)": the hand-over field's first option (SF-103).
-function handoffDefaultText() {
+function handoffDefaultText(): string {
   const now = state.wsSettings.handoff_default;
   return now === 'checkout' || now === 'off' ? `Default (now: ${now === 'checkout' ? 'yes' : 'no'}, from SF_HANDOFF)` : 'Default (from SF_HANDOFF)';
 }
 
 // The colour the workspace sets itself, or 'auto': the row's colour when it is not the one its name
 // picks (the sum of the name's UTF-16 code units mod the palette's size, src/registry.ts).
-function ownColor(row) {
+function ownColor(row: WorkspaceRow): string {
   let sum = 0;
   for (let index = 0; index < row.name.length; index += 1) {
     sum += row.name.charCodeAt(index);
@@ -258,7 +270,7 @@ function ownColor(row) {
 }
 
 // A field of the Edit form: its label, the control and the help text under it, each on its own line.
-function wsField(label, control, help) {
+function wsField(label: string, control: Field, help: string): HTMLElement {
   const field = el('div', 'field');
   if (control.type === 'checkbox') {
     const choice = el('label', 'choice');
@@ -277,7 +289,7 @@ function wsField(label, control, help) {
   return field;
 }
 
-function wsSelect(key, options, value) {
+function wsSelect(key: string, options: ReadonlyArray<readonly [string, string]>, value: string): HTMLSelectElement {
   const select = el('select');
   select.dataset.wsf = key;
   for (const [optionValue, text] of options) {
@@ -292,7 +304,7 @@ function wsSelect(key, options, value) {
 // Edit (SF-103): the card becomes the form: the checkout's path, Description (its placeholder the
 // repository's own description), App (the existing apps as suggestions), Hand-over, Colour and the
 // two digest switches. Save posts every field; Cancel changes nothing. The name stays.
-function openWorkspaceEdit(row) {
+function openWorkspaceEdit(row: WorkspaceRow): void {
   const form = el('form', 'form ws-edit');
   form.dataset.ws = row.name;
   const title = el('div', 'ws-name');
@@ -316,7 +328,7 @@ function openWorkspaceEdit(row) {
   app.setAttribute('list', 'workspace-apps');
   app.setAttribute('autocomplete', 'off');
   const handoff = wsSelect('handoff', [['default', handoffDefaultText()], ['checkout', 'Yes'], ['off', 'No']], row.handoff ?? 'default');
-  const color = wsSelect('color', [['auto', 'Automatic (from the name)'], ...WS_COLORS.map((name) => [name, name])], ownColor(row));
+  const color = wsSelect('color', [['auto', 'Automatic (from the name)'], ...WS_COLORS.map((name): [string, string] => [name, name])], ownColor(row));
   const track = el('input');
   track.type = 'checkbox';
   track.dataset.wsf = 'track';
@@ -364,44 +376,52 @@ function openWorkspaceEdit(row) {
   path.focus();
 }
 
-function closeWorkspaceEdit() {
+function closeWorkspaceEdit(): void {
   state.wsEdit = null;
   state.wsEditForm = null;
   renderWorkspaces();
 }
 
-async function submitWorkspaceEdit(name) {
+async function submitWorkspaceEdit(name: string): Promise<void> {
   const form = state.wsEditForm;
   if (form === null || state.wsEdit !== name) {
     return;
   }
-  const field = (key) => form.querySelector(`[data-wsf="${key}"]`);
-  const status = field('status');
-  const path = field('path').value.trim();
+  // A part of the Edit form, as openWorkspaceEdit made it: a missing one or one of another tag is a
+  // broken form and throws.
+  const field = <K extends keyof HTMLElementTagNameMap>(key: string, tag: K): HTMLElementTagNameMap[K] => {
+    const node = form.querySelector(`[data-wsf="${key}"]`);
+    if (!isTag(node, tag)) {
+      throw new Error(`The Edit form has no <${tag}> ${key}`);
+    }
+    return node;
+  };
+  const status = field('status', 'div');
+  const path = field('path', 'input').value.trim();
   if (path === '') {
     status.className = 'status error';
     status.textContent = 'The path of the local checkout is needed.';
     return;
   }
   const body = {
-    path, description: field('description').value, app: field('app').value, handoff: field('handoff').value, color: field('color').value,
-    digest: { track: field('track').checked === true, my_work: field('my_work').checked === true },
+    path, description: field('description', 'textarea').value, app: field('app', 'input').value, handoff: field('handoff', 'select').value, color: field('color', 'select').value,
+    digest: { track: field('track', 'input').checked === true, my_work: field('my_work', 'input').checked === true },
   };
   if (state.setupPending.has('workspace')) {
     return;
   }
   state.setupPending.add('workspace');
-  field('save').disabled = true;
+  field('save', 'button').disabled = true;
   status.className = 'status pending';
   status.textContent = 'Saving…';
-  let outcome = null;
+  let outcome: string | null = null;
   try {
     await post(`api/workspaces/${encodeURIComponent(name)}/edit`, body);
   } catch (error) {
-    outcome = error instanceof ActionError ? `${error.code}: ${error.message}` : `The request failed (${error.message}); it may have taken effect. Reload the page to see the current state.`;
+    outcome = error instanceof ActionError ? `${error.code}: ${error.message}` : `The request failed (${errorMessage(error)}); it may have taken effect. Reload the page to see the current state.`;
   }
   state.setupPending.delete('workspace');
-  field('save').disabled = false;
+  field('save', 'button').disabled = false;
   if (outcome === null) {
     closeWorkspaceEdit();
     setSetupStatus('workspace-status', { level: 'ok', text: `Saved ${name}.` });
@@ -413,42 +433,42 @@ async function submitWorkspaceEdit(name) {
 }
 
 // The Morning digest section (SF-103): the stored settings, unless values are typed and not saved.
-function renderDigestSettings() {
+function renderDigestSettings(): void {
   const settings = state.wsSettings.digest;
   if (settings === null || state.digestDirty || state.setupPending.has('digest')) {
     return;
   }
-  $('digest-at').value = settings.at;
-  $('digest-weekdays').checked = settings.weekdays_only === true;
-  $('digest-language').value = settings.language;
+  byIdAs('digest-at', 'input').value = settings.at;
+  byIdAs('digest-weekdays', 'input').checked = settings.weekdays_only === true;
+  byIdAs('digest-language', 'input').value = settings.language;
 }
 
-async function submitDigestSettings() {
-  const at = $('digest-at').value;
-  const language = $('digest-language').value.trim();
+async function submitDigestSettings(): Promise<void> {
+  const at = byIdAs('digest-at', 'input').value;
+  const language = byIdAs('digest-language', 'input').value.trim();
   if (!/^\d\d:\d\d$/.test(at) || language === '') {
     setSetupStatus('digest-status', { level: 'error', text: 'A time (HH:MM) and a language are needed.' });
     return;
   }
-  const result = await setupRequest('digest', 'api/digest-settings', { at, weekdays_only: $('digest-weekdays').checked === true, language }, 'digest-status', (data) =>
-    ({ level: 'ok', text: `Saved: ${data.at}${data.weekdays_only ? ' on weekdays' : ' every day'}, in ${data.language}. sf serve uses it at its next check.` }));
+  const result = await setupRequest('digest', 'api/digest-settings', { at, weekdays_only: byIdAs('digest-weekdays', 'input').checked === true, language }, 'digest-status', (data) =>
+    ({ level: 'ok', text: `Saved: ${fieldOf(data, 'at')}${fieldOf(data, 'weekdays_only') ? ' on weekdays' : ' every day'}, in ${fieldOf(data, 'language')}. sf serve uses it at its next check.` }));
   if (result !== undefined) {
     state.digestDirty = false;
   }
 }
 
-async function submitWorkspace() {
-  const name = $('workspace-name').value.trim();
-  const path = $('workspace-path').value.trim();
+async function submitWorkspace(): Promise<void> {
+  const name = byIdAs('workspace-name', 'input').value.trim();
+  const path = byIdAs('workspace-path', 'input').value.trim();
   // The workspace's own hand-over setting (SF-083); empty: SF_HANDOFF applies. Its colour on the
   // board (SF-084); empty: the server picks one by its name. Its description, app and digest
   // switches (SF-103); empty or off: none, its name, off.
-  const handoff = $('workspace-handoff').value;
-  const color = $('workspace-color').value;
-  const description = $('workspace-description').value.trim();
-  const app = $('workspace-app').value.trim();
-  const track = $('workspace-track').checked === true;
-  const myWork = $('workspace-mywork').checked === true;
+  const handoff = byIdAs('workspace-handoff', 'select').value;
+  const color = byIdAs('workspace-color', 'select').value;
+  const description = byIdAs('workspace-description', 'textarea').value.trim();
+  const app = byIdAs('workspace-app', 'input').value.trim();
+  const track = byIdAs('workspace-track', 'input').checked === true;
+  const myWork = byIdAs('workspace-mywork', 'input').checked === true;
   if (name === '' || path === '') {
     setSetupStatus('workspace-status', { level: 'error', text: 'A name and the path of the local checkout are needed.' });
     return;
@@ -458,26 +478,26 @@ async function submitWorkspace() {
     ...(track || myWork ? { digest: { track, my_work: myWork } } : {}),
   };
   const result = await setupRequest('workspace', 'api/workspaces', body, 'workspace-status', (data) =>
-    ({ level: 'ok', text: `Registered ${data.name} (${data.path}). Next: New ticket.` }));
+    ({ level: 'ok', text: `Registered ${fieldOf(data, 'name')} (${fieldOf(data, 'path')}). Next: New ticket.` }));
   if (result !== undefined) {
-    for (const id of ['workspace-name', 'workspace-path', 'workspace-handoff', 'workspace-color', 'workspace-description', 'workspace-app']) {
-      $(id).value = '';
+    for (const field of [byIdAs('workspace-name', 'input'), byIdAs('workspace-path', 'input'), byIdAs('workspace-handoff', 'select'), byIdAs('workspace-color', 'select'), byIdAs('workspace-description', 'textarea'), byIdAs('workspace-app', 'input')]) {
+      field.value = '';
     }
-    $('workspace-track').checked = false;
-    $('workspace-mywork').checked = false;
+    byIdAs('workspace-track', 'input').checked = false;
+    byIdAs('workspace-mywork', 'input').checked = false;
   }
 }
 
-async function removeWorkspace(name) {
+async function removeWorkspace(name: string): Promise<void> {
   await setupRequest('workspace', `api/workspaces/${encodeURIComponent(name)}/remove`, {}, 'workspace-status', (data) =>
-    ({ level: 'ok', text: `Removed ${data.removed} from the registry; the checkout and its files are untouched.` }));
+    ({ level: 'ok', text: `Removed ${fieldOf(data, 'removed')} from the registry; the checkout and its files are untouched.` }));
 }
 
-async function submitTicket() {
-  const workspace = $('ticket-workspace').value;
-  const ticket = $('ticket-key').value.trim();
-  const title = $('ticket-title').value.trim();
-  const request = $('ticket-request').value;
+async function submitTicket(): Promise<void> {
+  const workspace = byIdAs('ticket-workspace', 'select').value;
+  const ticket = byIdAs('ticket-key', 'input').value.trim();
+  const title = byIdAs('ticket-title', 'input').value.trim();
+  const request = byIdAs('ticket-request', 'textarea').value;
   if (workspace === '' || ticket === '' || title === '' || request.trim() === '') {
     setSetupStatus('ticket-status', { level: 'error', text: 'The workspace, the ticket key, the title and the request are all needed.' });
     return;
@@ -485,7 +505,7 @@ async function submitTicket() {
   if (state.setupPending.has('ticket-images') || (await newImagesSettled())) {
     return;
   }
-  const describe = (data) => ({ level: 'ok', text: `Ticket created: ${data.path} in ${data.workspace} (base ${data.base}), an empty skeleton in the Queue. Next: a click on its card opens the conversation; your words are its first message.` });
+  const describe = (data: unknown): Outcome => ({ level: 'ok', text: `Ticket created: ${fieldOf(data, 'path')} in ${fieldOf(data, 'workspace')} (base ${fieldOf(data, 'base')}), an empty skeleton in the Queue. Next: a click on its card opens the conversation; your words are its first message.` });
   // The images go with this ticket as they are now; one pasted while it is being created stays for
   // the next ticket (Fix 4).
   const sending = snapshotNewImages();
@@ -498,29 +518,30 @@ async function submitTicket() {
   // go up (SF-064); one that fails leaves the ticket created, and the form stays open saying which
   // and why.
   if (result !== undefined) {
-    $('ticket-key').value = '';
-    $('ticket-title').value = '';
-    $('ticket-request').value = '';
-    const key = `${result.workspace ?? workspace}/${result.ticket ?? ticket}`;
+    byIdAs('ticket-key', 'input').value = '';
+    byIdAs('ticket-title', 'input').value = '';
+    byIdAs('ticket-request', 'textarea').value = '';
+    const key = `${fieldOf(result, 'workspace') ?? workspace}/${fieldOf(result, 'ticket') ?? ticket}`;
     state.highlight = key;
     state.highlightShown = false;
-    let uploaded = { count: 0, failed: [] };
+    let uploaded: { count: number; failed: string[] } = { count: 0, failed: [] };
     if (sending.length > 0) {
       state.setupPending.add('ticket-images');
       setSetupStatus('ticket-status', { level: 'pending', text: `Ticket created; attaching ${counted(sending.length, 'image')}…` });
       renderSetup();
-      uploaded = await uploadNewImages(key, sending);
+      const done = await uploadNewImages(key, sending);
+      uploaded = done;
       state.setupPending.delete('ticket-images');
       // Only the images sent leave the form; one pasted meanwhile stays for the next ticket.
-      for (const image of uploaded.sent) {
+      for (const image of done.sent) {
         URL.revokeObjectURL(image.url);
       }
-      state.newImages = state.newImages.filter((image) => !uploaded.sent.includes(image));
+      state.newImages = state.newImages.filter((image) => !done.sent.includes(image));
       renderSetup();
     }
     releaseNewImages();
     if (uploaded.failed.length > 0) {
-      setSetupStatus('ticket-status', { level: 'error', text: `Ticket created: ${result.path} in ${result.workspace ?? workspace}. Not attached: ${uploaded.failed.join('; ')}. Add ${uploaded.failed.length === 1 ? 'it' : 'them'} on the ticket's page: paste or drop on its Images card.` });
+      setSetupStatus('ticket-status', { level: 'error', text: `Ticket created: ${fieldOf(result, 'path')} in ${fieldOf(result, 'workspace') ?? workspace}. Not attached: ${uploaded.failed.join('; ')}. Add ${uploaded.failed.length === 1 ? 'it' : 'them'} on the ticket's page: paste or drop on its Images card.` });
       renderBoard();
       return;
     }
@@ -533,57 +554,61 @@ async function submitTicket() {
 
 // Archive, restore or delete one ticket; one request per ticket at a time, the outcome in the
 // board's status line.
-async function ticketAction(action, row) {
+async function ticketAction(action: 'archive' | 'restore' | 'delete', row: TicketKey): Promise<void> {
   const key = `${row.workspace}/${row.ticket}`;
   const id = `ticket:${key}`;
   if (state.setupPending.has(id)) {
     return;
   }
-  const texts = {
-    archive: (data) => `Archived ${key}: ${data.path}.${data.jobArchived ? ' Its finished job left the board.' : ''}`,
-    restore: (data) => `Restored ${key}: ${data.path}.`,
-    delete: (data) => `Deleted ${key}: ${Array.isArray(data.deleted) ? data.deleted.join(', ') : ''}.${data.jobArchived ? ' Its finished job left the board.' : ''}`,
+  const deletedOf = (data: unknown): string => {
+    const deleted = fieldOf(data, 'deleted');
+    return Array.isArray(deleted) ? deleted.join(', ') : '';
+  };
+  const texts: Readonly<Record<typeof action, (data: unknown) => string>> = {
+    archive: (data) => `Archived ${key}: ${fieldOf(data, 'path')}.${fieldOf(data, 'jobArchived') ? ' Its finished job left the board.' : ''}`,
+    restore: (data) => `Restored ${key}: ${fieldOf(data, 'path')}.`,
+    delete: (data) => `Deleted ${key}: ${deletedOf(data)}.${fieldOf(data, 'jobArchived') ? ' Its finished job left the board.' : ''}`,
   };
   await setupRequest(id, `api/tickets/${jobPath(key)}/${action}`, {}, 'toast', (data) => ({ level: 'ok', text: texts[action](data ?? {}) }));
 }
 
 // Start and Delete ask first: Start names the workspace, the ticket and the base branch; Delete
 // cannot be undone. extra: what the planned ticket page adds to Start's text (what it waits for).
-function openTicketConfirm(action, row, extra = '') {
+function openTicketConfirm(action: 'start' | 'delete', row: ConfirmedTicket, extra = ''): void {
   const key = `${row.workspace}/${row.ticket}`;
   if (state.ticketConfirm !== null) {
     return;
   }
   state.ticketConfirm = { action, key, row };
   if (action === 'start') {
-    $('ticket-confirm-title').textContent = `Start ${row.ticket} in ${row.workspace}?`;
+    byId('ticket-confirm-title').textContent = `Start ${row.ticket} in ${row.workspace}?`;
     // The Task check only advises (SF-054): its note is part of the text, Start stays on.
     const note = typeof row.check?.start_note === 'string' ? ` Task check: ${row.check.start_note}.` : '';
-    $('ticket-confirm-text').textContent = `Starts a job on .software-factory/${row.ticket}.md of workspace ${row.workspace}: a new branch from ${row.base} in its own worktree, where the Implementer runs iteration 1. Claude reviews it, the Codex gate checks it, and the branch comes back to you to approve.${note}${extra}`;
-    $('ticket-ok').textContent = 'Start the job';
-    $('ticket-ok').className = 'btn btn-primary';
+    byId('ticket-confirm-text').textContent = `Starts a job on .software-factory/${row.ticket}.md of workspace ${row.workspace}: a new branch from ${row.base} in its own worktree, where the Implementer runs iteration 1. Claude reviews it, the Codex gate checks it, and the branch comes back to you to approve.${note}${extra}`;
+    byId('ticket-ok').textContent = 'Start the job';
+    byId('ticket-ok').className = 'btn btn-primary';
   } else {
-    $('ticket-confirm-title').textContent = `Delete ${key}?`;
-    $('ticket-confirm-text').textContent = `Deletes .software-factory/${row.ticket}.md and its MR text${row.archivedRow ? ' from the archive' : ''}. Cannot be undone; Archive keeps the file instead. A finished job of the ticket leaves the board (its history stays in the state directory).`;
-    $('ticket-ok').textContent = 'Delete the ticket';
-    $('ticket-ok').className = 'btn btn-danger';
+    byId('ticket-confirm-title').textContent = `Delete ${key}?`;
+    byId('ticket-confirm-text').textContent = `Deletes .software-factory/${row.ticket}.md and its MR text${row.archivedRow ? ' from the archive' : ''}. Cannot be undone; Archive keeps the file instead. A finished job of the ticket leaves the board (its history stays in the state directory).`;
+    byId('ticket-ok').textContent = 'Delete the ticket';
+    byId('ticket-ok').className = 'btn btn-danger';
   }
-  $('ticket-confirm').hidden = false;
+  byId('ticket-confirm').hidden = false;
   renderBoard();
   renderArchived();
   renderTicket();
-  $('ticket-cancel').focus();
+  byId('ticket-cancel').focus();
 }
 
-function closeTicketConfirm() {
+function closeTicketConfirm(): void {
   state.ticketConfirm = null;
-  $('ticket-confirm').hidden = true;
+  byId('ticket-confirm').hidden = true;
   renderBoard();
   renderArchived();
   renderTicket();
 }
 
-async function submitTicketConfirm() {
+async function submitTicketConfirm(): Promise<void> {
   const confirm = state.ticketConfirm;
   if (confirm === null) {
     return;
@@ -598,7 +623,7 @@ async function submitTicketConfirm() {
 
 // One start per confirmation, never re-sent. A refusal is shown as it comes; an answer that does
 // not settle the outcome holds Start for the ticket until the board is read again.
-async function startTicket(row) {
+async function startTicket(row: TicketKey): Promise<void> {
   const key = `${row.workspace}/${row.ticket}`;
   const id = `ticket:${key}`;
   if (state.setupPending.has(id) || state.startHolds.has(key)) {
@@ -608,8 +633,8 @@ async function startTicket(row) {
   setSetupStatus('toast', { level: 'pending', text: `Starting ${key}: creating the branch and its worktree…` });
   renderBoard();
   renderTicket();
-  let outcome;
-  let unknown;
+  let outcome: Outcome | undefined;
+  let unknown: string | undefined;
   // Started from its planned ticket page (SF-081): the page goes to the new job's Stream, whether
   // the stream brings the job before or after this answer.
   if (ui.screen === 'ticket' && ui.ticket === key) {
@@ -617,13 +642,12 @@ async function startTicket(row) {
   }
   try {
     const result = await post(`api/tickets/${jobPath(key)}/start`, {});
-    const data = result !== null && typeof result === 'object' ? result : {};
-    outcome = { level: 'ok', text: `Started ${key}: branch ${data.branch}, ${data.state}. The Implementer runs iteration 1.` };
+    outcome = { level: 'ok', text: `Started ${key}: branch ${fieldOf(result, 'branch')}, ${fieldOf(result, 'state')}. The Implementer runs iteration 1.` };
   } catch (error) {
     if (error instanceof ActionError) {
       outcome = { level: 'error', text: `${error.code}: ${error.message}` };
     } else {
-      unknown = error.message;
+      unknown = errorMessage(error);
     }
   }
   state.setupPending.delete(id);
@@ -634,7 +658,8 @@ async function startTicket(row) {
     await holdStart(key, unknown);
     return;
   }
-  setSetupStatus('toast', outcome);
+  // Set by now: the request answered, or was refused.
+  setSetupStatus('toast', outcome ?? null);
   renderBoard();
   renderTicket();
   goToStarted();
@@ -643,10 +668,10 @@ async function startTicket(row) {
 // The page of a ticket started from it moves to the job's Stream once the new job is on the board
 // (the stream's jobs event may come before or after Start's answer); an earlier failed or aborted
 // job of the ticket is not it.
-function goToStarted() {
+function goToStarted(): void {
   const key = state.goAfterStart;
   const job = key === null ? null : jobByKey(key);
-  if (job === null || TERMINAL_STATES.includes(job.state)) {
+  if (key === null || job === null || TERMINAL_STATES.includes(job.state)) {
     return;
   }
   state.goAfterStart = null;
@@ -658,19 +683,19 @@ function goToStarted() {
 // The start may have created the job: Start stays off for the ticket until api/jobs is read
 // after this moment (or, when that read fails, until the stream's next jobs event); the page
 // sends nothing by itself.
-async function holdStart(key, reason) {
+async function holdStart(key: string, reason: string): Promise<void> {
   const hold = { reason, failed: false };
   state.startHolds.set(key, hold);
   const lead = `The start of ${key} failed (${reason}). Its outcome is unknown: the job may have started`;
   setSetupStatus('toast', { level: 'error', text: `${lead}; the board is being read again.` });
   renderBoard();
-  let jobs;
+  let jobs: JobRow[];
   try {
     jobs = jobsOf(await withinTime(getText('api/jobs')));
   } catch (error) {
     if (state.startHolds.get(key) === hold) {
       hold.failed = true;
-      setSetupStatus('toast', { level: 'error', text: `${lead}, and the board could not be read (${error.message}). Start stays off for ${key} until the page reconnects; check the board before starting again.` });
+      setSetupStatus('toast', { level: 'error', text: `${lead}, and the board could not be read (${errorMessage(error)}). Start stays off for ${key} until the page reconnects; check the board before starting again.` });
     }
     return;
   }

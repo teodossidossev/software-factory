@@ -2938,7 +2938,7 @@ button; the job's page (SF-078) says the sentence in its header, its stop block 
 One table on the server decides each stop (SF-129, `STOPS` in `src/stops.ts`, section Jobs): its
 kind, the codes that share it, its group, its settlement and its actions; the page renders what
 the payloads send (`stop_code`, `stop_kind`, `stop_group`, `actions`, `availability`, the
-detail's `settle_ids`) and decides no rule of its own. `STOPS` in `static/board.js` keeps only the
+detail's `settle_ids`) and decides no rule of its own. `STOPS` in `web/board.ts` keeps only the
 words of each row, keyed by `stop_code`:
 
 | Code | Kind | Reason on the card | Button |
@@ -3272,17 +3272,16 @@ retargets a request, and an answer that arrives for another job changes nothing 
 The page is plain HTML, CSS and JavaScript, with no external resources, under
 `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self';
 img-src 'self' blob:` (`blob:` for New ticket's thumbnails before upload, SF-064) and `Cache-Control: no-store`; every value is rendered as text.
-The HTML, the CSS and the icon are in `static/`. The page's JavaScript is nine classic scripts that
+The HTML and the CSS are in `static/`, and nothing else. The page's JavaScript is nine classic scripts that
 share its globals, loaded with `defer` in the order of `DASHBOARD_SCRIPTS` (`src/dashboard.ts`,
 SF-136, SF-137); the server serves those and no other script, and none is longer than 2,500 lines.
-The page code is being turned into TypeScript (SF-146 to SF-150): a script with a source
-`web/<name>.ts` is built by `npm run build` into `dist/web/<name>.js` and served from there, the
-others from `static/` until SF-150 (`dashboardScriptFiles` decides, once at start). A file of `web/`
-has no `import` or `export`, so the compiler keeps it a global classic script; `web/types.d.ts`
-types the server payloads the typed code reads (copied from `src/`, never imported), and
-`web/globals.d.ts` declares the globals it uses from the scripts still in `static/`.
+The page code lives only in `web/`, in TypeScript (SF-146 to SF-150): each script's source
+`web/<name>.ts` is built by `npm run build` into `dist/web/<name>.js` and served from there
+(`dashboardScriptFiles`); `static/` holds no script. A file of `web/` has no `import` or `export`,
+so the compiler keeps it a global classic script; `web/types.d.ts` types the server payloads the
+page reads (copied from `src/`, never imported).
 
-- `core.js` (built from `web/core.ts`): constants, state, the DOM, format and HTTP helpers, the connection tag.
+- `core.js`: constants, state, the DOM, format and HTTP helpers, the connection tag.
 - `job-screens.js`: what the job page reads, Task check, Changes, Merge request, Stream.
 - `job-page.js`: the job page's header, composer, hand-over panel, job actions.
 - `board.js`: board, cards, workspaces and dependencies, queue, toast.

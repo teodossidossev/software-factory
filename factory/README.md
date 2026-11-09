@@ -29,7 +29,7 @@ bin/sf workspace remove <name>
 bin/sf digest [--now]             # the morning digest (section Morning digest): the latest digest's period and counts; --now makes one at once and prints its record's path and cost; needs sf serve
 bin/sf explain <ws> <ticket>      # the plain explanation of the job's current stop (section Stop explanations): headline, explanation, choices, recommendation; or "No explanation for the current stop."; no sf serve, no model call
 bin/sf serve                      # foreground; Ctrl+C stops it; prints the dashboard URL with <token> (sf dashboard prints it in full)
-bin/sf up [--no-open] [--no-tunnel]   # sf serve plus the tunnel (../scripts/sf-tunnel.sh run, output prefixed "tunnel | ") and the dashboard opened in the browser; Ctrl+C stops both; npm start at the repository root
+bin/sf up [--no-open] [--no-tunnel]   # sf serve (with its tunnel, section sf up) and the dashboard opened in the browser; --no-tunnel is SF_TUNNEL=off; Ctrl+C stops both; npm start at the repository root
 bin/sf mcp-url [--header|--rotate|--port]   # the MCP URL with its token (section MCP endpoint); --header: the URL without it and the bearer header; --rotate: a new token, taken at once by a running sf serve (restart the tunnel); works without sf serve
 bin/sf dashboard [--open] [--rotate]  # the dashboard URL of the last sf serve start; --open opens it with xdg-open; --rotate removes the token so the next sf serve makes a new one; works without sf serve
 bin/sf check-task <workspace> <ticket>  # the Task check (section Task check): paraphrase, findings by severity, verdict; stored by sha; works without sf serve
@@ -126,14 +126,35 @@ ready) and 1 when it failed. `sf smoke` exits 0 when every step passed, 1 otherw
 exits 1 unless the branch was pushed; `sf guard` exits 0 without hits and 1 with hits or an error; `sf mr create` exits 1 when the push or the merge request
 failed (the branch may be pushed then: the output says so).
 
-`sf up` is `sf serve` in the same process, then the tunnel as a child process (`SF_TUNNEL_SCRIPT`
-names another script) and the dashboard through `xdg-open` once serve listens. When the script is
-missing, its check fails (no profile or key: `scripts/sf-tunnel.sh check`) or the tunnel exits on
-its own, one `tunnel | ...` line says so with the runbook path and `sf up` goes on without it; it
-is not restarted (`npm run tunnel` in another terminal once it is fixed). A launcher failure is
+**The tunnel runs inside `sf serve`** (SF-154, `src/tunnel.ts`). With `SF_TUNNEL=auto` (the
+default) and a tunnel profile (`${TUNNEL_CLIENT_PROFILE_DIR:-${XDG_CONFIG_HOME:-~/.config}/tunnel-client}/software-factory.yaml`),
+`sf serve` starts `../scripts/sf-tunnel.sh run` (`SF_TUNNEL_SCRIPT` names another script) once it
+listens, as a child in its own process group, its lines on stderr prefixed `tunnel | ` with the
+MCP token shown as `<token>`, and ends that group when it stops (SIGTERM, SIGKILL after 5 s; a group that still does not end
+stays in `tunnel.pid` for the next start, and a restart of it fails without starting another).
+Without a profile, or with `SF_TUNNEL=off`, it prints `tunnel: not started (<why>)` and starts
+none. Never two tunnels; at the start, in this order: (1) a process group named in `tunnel.pid` (state
+directory) whose leader still has the recorded pid and start time (field 22 of
+`/proc/<pid>/stat`) and runs `sf-tunnel.sh` is ended (SIGTERM, SIGKILL after 5 s): a crashed
+`sf serve`'s leftover; anything else under that pid (a reused pid) is left alone, with
+`tunnel.pid`; a leftover that
+does not end is a failed start (`tunnel: not started: ... did not end`): nothing starts beside it
+and `tunnel.pid` keeps it; so does a group that cannot be checked (`/proc` or a file of it, or
+`tunnel.pid` itself, fails to read: `tunnel.pid names a group that cannot be checked; no tunnel
+started`); (2) `sf serve` asks
+the tunnel health address (`SF_TUNNEL_HEALTH`) for `/readyz`; (3) when anything answers it starts
+none and logs `tunnel: not started: a tunnel already runs outside sf serve`; otherwise it starts the
+child and writes its group leader's pid and start time to `tunnel.pid`. `sf serve` never ends or recovers a tunnel it did not
+start, and does not take over when an outside tunnel stops (the health check `tunnel` reports it).
+A missing script, a child that cannot start and one that exits by itself are one `tunnel | ...` line
+each with the runbook path; the health check restarts sf serve's own tunnel (section Health checks,
+Recovery). The systemd unit is unchanged: the service's `sf serve` runs the tunnel the same way.
+
+`sf up` is `sf serve` in the same process, with its tunnel (`--no-tunnel` equals `SF_TUNNEL=off`),
+and the dashboard through `xdg-open` once serve listens. A launcher failure is
 one `sf: ... run sf dashboard for the URL and open it by hand.` line (serve printed the URL with
-`<token>`; `sf up` opens the real one in-process). A signal stops the tunnel first, then
-the servers, exit code 0.
+`<token>`; `sf up` opens the real one in-process). A signal stops the tunnel and the servers, exit
+code 0.
 
 ### sf status
 
@@ -272,7 +293,8 @@ started by the run queue as before.
 | `SF_TASK_CHECK_AUTO` | `on` | The automatic Task check of `sf serve` (SF-086, section Task check): `on` checks a written Task file 60 s after its last change; `off` keeps the check manual (Check on the board, `sf check-task`). Empty is the default; anything else refuses to start (`invalid_config`). |
 | `SF_TASK_CHECK_PARALLEL` | `1` | The automatic Task checks that run at once over every workspace, 1 to 4 (SF-086); a manual Check counts toward it but never waits. Anything else refuses to start (`invalid_config`). |
 | `SF_HEALTH` | `on` | `sf serve`'s health checks (SF-153, section Health checks): `on` runs them every 30 s for the dashboard's light and the notifications; `off` runs none (the tests' own `sf serve`s), the light stays grey. `sf health` runs its checks whatever it says. Empty is the default; anything else refuses to start (`invalid_config`). |
-| `SF_TUNNEL_HEALTH` | `127.0.0.1:8790` | The tunnel client's admin endpoint (`host:port`) that `sf info` and the health check `tunnel` ask (`/readyz`, `/metrics`). |
+| `SF_TUNNEL` | `auto` | The ChatGPT tunnel in `sf serve` (SF-154, section sf up): `auto` starts `scripts/sf-tunnel.sh run` as its child when a tunnel profile exists and no tunnel answers on `SF_TUNNEL_HEALTH`; `off` starts none (run `npm run tunnel` in a terminal of its own). `sf up --no-tunnel` is `off`. Empty is the default; anything else refuses to start (`invalid_config`). |
+| `SF_TUNNEL_HEALTH` | `127.0.0.1:8790` | The tunnel client's admin endpoint (`host:port`) that `sf info`, the health check `tunnel` (`/readyz`, `/metrics`) and `sf serve`'s tunnel start (`/readyz`: anything answering means a tunnel already runs) ask. |
 | `SF_RULES_MAX_BYTES` | `49152` (48 KiB) | The bytes of rule file content the agents are given at most (SF-059, section Coding rules); the headings and the fixed sentence do not count. The user's rules files are taken first, and one over the budget is cut to it (SF-093). A positive integer up to 16 MiB. |
 | `SF_GATE` | `codex` | The gate after a clean Claude review (SF-039): `codex` runs the Codex CLI, `off` lets the Claude verdict decide. With `codex` and no executable found the gate is off, and `sf serve` prints one line saying so. |
 | `SF_CODEX` | `codex` on `PATH` | Absolute path of the Codex CLI executable. Pointing at nothing turns the gate off; it is not looked for on `PATH` then. |
@@ -1079,7 +1101,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   of an Implementer session ends (in the runner, on a timer that does not keep the runner alive: a
   runner that exits sooner leaves those to the next run), after `sf serve`
   stopped a job's session (abort, pause, restart, reset; before the config lock check of the
-  hand-over), when a runner stops, and every 10 minutes while `sf serve` runs. It never throws into
+  hand-over), when a runner stops, and in `sf serve` right before each health check `sandboxes`
+  (every 30 s), or every 10 minutes with `SF_HEALTH=off` (SF-154). It never throws into
   its caller: a failure is one log line (`sandbox reaper: failed: …`), and so is what it ended
   (`sandbox reaper: ended N orphaned sandboxes (M processes)`).
 - The runner's output goes to `runner.log` in the job directory. The dashboard of `sf serve`
@@ -2667,11 +2690,12 @@ each runs within 20 s (its requests and commands within 3 s and 10 s), and one t
 | `remote` | Remote dashboard | the remote listener does not answer on its port, or `tailscale serve status` does not proxy to `127.0.0.1:<port>` | no remote origins (`SF_DASHBOARD_REMOTE_ORIGINS`) |
 | `logins` | Logins | the Claude CLI (`claude auth status`: `SF_CLAUDE`, else the Agent SDK's own binary) or, with the gate on, the Codex CLI (`codex login status`) is not logged in, or a Git host refuses the token a registered workspace's origin uses (one `GET /user` on GitHub, `GET /api/v4/user` on GitLab; the answer's body is never read); the detail names which and what to run | nothing to log in to |
 | `disk` | Disk space | the file system of the state directory or of the worktree root has less than 10 % or less than 5 GB free | — |
-| `sandboxes` | Sandbox leftovers | a fresh orphan scan (the reaper's finder, section Jobs) finds a pid the previous scan found too, so the reaper did not end it; the first scan of a process is never `down` (`sf health` scans twice, 10 s apart) | — |
+| `sandboxes` | Sandbox leftovers | a fresh orphan scan (the reaper's finder, section Jobs) finds a pid the previous scan found too, so the reaper did not end it: `sf serve` runs the reaper right before each scan, so such a pid outlived a reap; the first scan of a process is never `down` (`sf health` scans twice, 10 s apart, and reaps between them) | — |
 | `digest` | Morning digest | the scheduled digest was missed (due by the clock, no scheduled digest started since today's start, `at` more than 30 minutes past), or the last scheduled digest's record has an `error` | no workspace follows (no digest scheduled) |
 
 **`sf health [--json]`** computes the checks locally without asking `sf serve` (`logins` always
-runs; `queue` reads `queue.json` and the stored plan checks) and prints one row per check:
+runs; `queue` reads `queue.json` and the stored plan checks; it recovers nothing but reaps sandbox
+leftovers between its two orphan scans) and prints one row per check:
 `STATUS LABEL DETAIL`; `--json` prints the list. Exit 0 when every check is `ok` or `off`, 3 when
 any is `recovering` and none `down`, 1 when any is `down`; 2 on a usage error. It takes about 10 s
 (the second orphan scan).
@@ -2689,7 +2713,34 @@ light turns red with "sf serve does not answer", until the stream answers again.
 channels (section Notifications): "Factory health: <label> is down" with its detail, `Priority:
 high`, `Tags: rotating_light`. Nothing more while it stays down; one "Factory health: <label> is ok
 again" (`Priority: default`, `Tags: white_check_mark`) once it is `ok` or `off` again. A check that
-is already down when `sf serve` starts is notified once at the start.
+is already down when `sf serve` starts is notified once at the start. A `recovering` check is never
+notified (below).
+
+**Recovery** (SF-154, `src/recovery.ts`). `sf serve` repairs two things by itself, and only these:
+its own tunnel and sandbox leftovers. Sandbox leftovers are reaped right before each `sandboxes`
+check (above). The `tunnel` check has a recovery while the tunnel is `sf serve`'s own child: a
+`down` result restarts it (its process group ended, SIGTERM then SIGKILL after 5 s, and a new child
+started; when a tunnel outside `sf serve` answers by then, `sf serve` gives the tunnel up and starts
+none). Every `down` result starts an attempt (within the cap), also right after the start: within 90 s of
+`sf serve`'s first start of the tunnel, the attempt restarts a child that has died at once, and
+leaves one that still runs to come up (`tunnel: not restarted: it started N s ago and still runs;
+left to come up`); the next attempt, after the 90 s, restarts it.
+
+- From the attempt on, the check shows `recovering` until a pass returns `ok` (success) or 3 passes
+  (about 90 s) go by without `ok` (a failed attempt; a new one starts at once when the cap allows).
+  The detail adds `recovering: restart the tunnel (attempt N of 3 this hour)` and "the tunnel
+  restarted: in ChatGPT, refresh the plugin and start a new chat if it still fails"; an `ok` detail
+  keeps that last sentence for the hour after the attempt.
+- **At most 3 attempts per check in a rolling hour**, whatever their outcome. At the cap the check
+  shows `down` with "recovery failed 3 times: <last error>" (the attempt's error, else the check's
+  last detail) until the hour frees an attempt. No recovery can loop.
+- Notifications: none while `recovering`; one `down` notification when the cap is reached (its
+  detail as above); the "ok again" one as for any check that was notified down.
+- Every attempt writes one line to `sf serve`'s log (the service's journal):
+  `health recovery: <check>: <action>: succeeded | failed: <last error>`. No line holds the MCP
+  token.
+- With `SF_HEALTH=off` there is no monitor: the tunnel is started but not recovered, and the reaper
+  runs every 10 minutes instead.
 
 ## Notifications
 

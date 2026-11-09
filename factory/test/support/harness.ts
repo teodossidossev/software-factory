@@ -121,7 +121,10 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
     SF_CLAUDE: FAKE,
     // The machine's real notify-send stays quiet; the notification test sets its own PATH.
     SF_DESKTOP_NOTIFY: 'off',
-    // No real tunnel: sf up reports the missing script unless the test gives a fake one.
+    // No real tunnel: sf serve starts none, its health address is one nothing listens on, and the
+    // script is missing unless the test gives a fake one.
+    SF_TUNNEL: 'off',
+    SF_TUNNEL_HEALTH: '127.0.0.1:1',
     SF_TUNNEL_SCRIPT: join(temp, 'no-such-tunnel.sh'),
     // No Claude review unless the test turns it on (test/review.test.ts).
     SF_REVIEW: 'off',

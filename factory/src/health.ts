@@ -116,17 +116,6 @@ export async function checkMcp(port: number | undefined, token: string | undefin
 
 // ---------- tunnel ----------
 
-// The tunnel client's profile, as scripts/sf-tunnel.sh resolves it.
-export function tunnelProfile(env: NodeJS.ProcessEnv = process.env, home = env.HOME ?? ''): string {
-  const dir = env.TUNNEL_CLIENT_PROFILE_DIR || join(env.XDG_CONFIG_HOME || join(home, '.config'), 'tunnel-client');
-  return join(dir, 'software-factory.yaml');
-}
-
-// The tunnel client's admin endpoint (host:port), as sf info reads it.
-export function tunnelHealthAddress(env: NodeJS.ProcessEnv = process.env): string {
-  return env.SF_TUNNEL_HEALTH || '127.0.0.1:8790';
-}
-
 export type Fetcher = (url: string, timeoutMs: number) => Promise<{ status: number; text: string }>;
 
 // A GET that reads the body as text, bounded by timeoutMs.
@@ -159,7 +148,7 @@ export async function checkTunnel(profile: string, address: string, fetcher: Fet
   try {
     ready = (await fetcher(`${base}/readyz`, REQUEST_TIMEOUT_MS)).status;
   } catch {
-    return down(`the tunnel client does not answer at ${base}/readyz, so the age of its last poll of OpenAI is unknown: start it (npm run tunnel, or sf up)`);
+    return down(`the tunnel client does not answer at ${base}/readyz, so the age of its last poll of OpenAI is unknown: start it (sf serve starts it with SF_TUNNEL=auto; or npm run tunnel)`);
   }
   let age: number | undefined;
   try {
@@ -653,6 +642,8 @@ export interface HealthMonitorOptions {
   onChange?: (checks: HealthCheck[]) => void;
   // A check turned down, or is ok again after it was down; never rejects.
   notify?: (notification: Notification) => Promise<unknown>;
+  // The recovery (src/recovery.ts): each pass's results as they are shown and notified; never throws.
+  recover?: (results: HealthCheck[]) => HealthCheck[];
 }
 
 // sf serve's checks: every everyMs, logins every loginsEveryMs; the last result kept, since moved
@@ -664,6 +655,7 @@ export class HealthMonitor {
   readonly #timeoutMs: number;
   readonly #onChange: (checks: HealthCheck[]) => void;
   readonly #notify: (notification: Notification) => Promise<unknown>;
+  readonly #recover: (results: HealthCheck[]) => HealthCheck[];
   readonly #checks = new Map<HealthId, HealthCheck>();
   // The checks notified as down and not yet as ok again.
   readonly #notifiedDown = new Set<HealthId>();
@@ -678,6 +670,7 @@ export class HealthMonitor {
     this.#timeoutMs = options.timeoutMs ?? CHECK_TIMEOUT_MS;
     this.#onChange = options.onChange ?? (() => {});
     this.#notify = options.notify ?? (() => Promise.resolve());
+    this.#recover = options.recover ?? ((results) => results);
   }
 
   // The last result, in the checks' order; [] before the first pass ended.
@@ -700,7 +693,7 @@ export class HealthMonitor {
     if (loginsDue) {
       this.#loginsAt = nowMs;
     }
-    const results = await runChecks(this.#deps, ids, this.#timeoutMs);
+    const results = this.#recover(await runChecks(this.#deps, ids, this.#timeoutMs));
     let changed = false;
     for (const result of results) {
       const before = this.#checks.get(result.id);

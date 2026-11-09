@@ -97,10 +97,18 @@ Never paste a key, password or cookie into a chat.
 
 ## Running locally
 
-One terminal does for both: `npm start` at the repository root (`sf up`) runs the factory, the
-tunnel (`scripts/sf-tunnel.sh run`, its lines prefixed `tunnel | `) and opens the dashboard;
-Ctrl+C stops both. When the profile or the key is missing it says so in one line and runs
-without the tunnel. The two halves separately, in two terminals:
+**The tunnel runs inside `sf serve`** (SF-154). Once the profile exists (`init` below, done
+once), every `sf serve` (`bin/sf serve`, `npm start` at the repository root, which is `sf up` and
+also opens the dashboard, or the systemd service) starts `scripts/sf-tunnel.sh run` as its child,
+its lines prefixed `tunnel | `, and ends it when it stops; Ctrl+C stops both. When the script's
+check fails (no key, for example) it says so in one `tunnel | ` line and the factory runs without
+the tunnel. The health check `tunnel` restarts it when its connection to OpenAI dies (at most 3
+times an hour; the factory's README, section Health checks): after a restart, refresh the plugin in
+ChatGPT and start a new chat if it still fails. `sf serve` starts none when a tunnel already answers
+on `127.0.0.1:8790` (one you started by hand), and never ends or restarts that one.
+
+A separate terminal for the tunnel is only needed with `SF_TUNNEL=off` (or `sf up --no-tunnel`),
+and for the one-time steps of the tunnel script:
 
 **Factory (terminal 1):**
 
@@ -110,7 +118,7 @@ npm install && npm run build      # once, and after every change to factory/src
 bin/sf serve                      # prints the MCP URL http://127.0.0.1:8787/mcp/<token> and the dashboard URL
 ```
 
-**Tunnel (terminal 2), from the repository root:**
+**Tunnel (terminal 2, only with `SF_TUNNEL=off`; `init`, `set-key`, `check` and `doctor` any time), from the repository root:**
 
 ```bash
 scripts/sf-tunnel.sh init tunnel_XXXXXXXX   # once, or when the tunnel changes (after the first sf serve)
@@ -140,8 +148,9 @@ which shows the token as `<token>`.
 
 **Rotating the token.** `sf mcp-url --rotate` writes a new token over the existing one (without a
 token file it fails with `no_mcp_token`: start `sf serve` once); a running `sf serve` answers only
-the new one from its next request, without a restart. Then restart the tunnel (`npm run tunnel`
-again, or `sf up`): its `run` writes the new token into the profile. Give other MCP clients
+the new one from its next request, without a restart. Then restart the tunnel (restart `sf serve`,
+which restarts its tunnel; with `SF_TUNNEL=off`, `npm run tunnel` again): its `run` writes the new
+token into the profile. Give other MCP clients
 (Claude Code) the new URL from `sf mcp-url`.
 
 Stopping:
@@ -207,8 +216,11 @@ write actions; ChatGPT may ask for confirmation.
   what `/readyz` does not: on 2026-11-09 the client had run for 5 days and said `ready`, while its
   connection to OpenAI was dead ("Tunnel-client has not been seen for 300 seconds" in ChatGPT). The
   panel (a click on the light) and `bin/sf health` give the age of the last poll. What to do:
-  1. Restart the tunnel: stop `scripts/sf-tunnel.sh run` (or `sf up`) with Ctrl+C and start it
-     again; the light turns green within 30 s of its first successful poll.
+  1. The tunnel `sf serve` runs is restarted by `sf serve` itself: the light is yellow
+     (`recovering`) meanwhile and turns green within 30 s of its first successful poll. After 3
+     failed restarts in an hour it turns red ("recovery failed 3 times: ..."): fix the cause from
+     the `tunnel | ` lines in `sf serve`'s log and restart `sf serve`. A tunnel started by hand
+     (`SF_TUNNEL=off`): stop `scripts/sf-tunnel.sh run` with Ctrl+C and start it again.
   2. In ChatGPT, open the **Software Factory** plugin at https://chatgpt.com/plugins and press
      **Refresh**, then open a **new** Work chat: a conversation started before the restart keeps
      failing.

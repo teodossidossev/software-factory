@@ -22,7 +22,8 @@ const COMPUTED: readonly string[] = [
   'service.ts: file',
   'notify.ts: executable',
   'runner.ts: process.execPath',
-  'cli.ts: script',
+  // The tunnel script (scripts/sf-tunnel.sh or SF_TUNNEL_SCRIPT), sf serve's child.
+  'tunnel.ts: script',
   'cli.ts: sf',
   // The gate's Codex (SF_CODEX or codex on PATH) or the bwrap that wraps it (findBwrap: bwrap on PATH).
   'gate.ts: command',

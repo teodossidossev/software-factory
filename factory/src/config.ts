@@ -354,6 +354,16 @@ export function healthSetting(env: NodeJS.ProcessEnv = process.env): boolean {
   return mode === 'on';
 }
 
+// SF_KEEP_AWAKE: on (the default: sf serve keeps the laptop from sleeping while a job runs,
+// src/keep-awake.ts) or off (the tests' own sf serves).
+export function keepAwakeSetting(env: NodeJS.ProcessEnv = process.env): boolean {
+  const mode = env.SF_KEEP_AWAKE || 'on';
+  if (mode !== 'on' && mode !== 'off') {
+    throw new FactoryError('invalid_config', `SF_KEEP_AWAKE must be on or off, got "${mode}".`);
+  }
+  return mode === 'on';
+}
+
 // SF_TUNNEL: auto (the default: sf serve runs the ChatGPT tunnel when it has a tunnel profile) or
 // off (no tunnel in sf serve).
 export function tunnelSetting(env: NodeJS.ProcessEnv = process.env): 'auto' | 'off' {

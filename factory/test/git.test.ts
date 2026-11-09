@@ -34,6 +34,8 @@ const COMPUTED: readonly string[] = [
   'live-smoke.ts: bwrap',
   // The health checks' status commands (SF-153): the Claude CLI, the Codex CLI and tailscale, never git.
   'health.ts: command',
+  // The sleep inhibitor of sf serve (SF-158): systemd-inhibit, or a fake one in the tests, never git.
+  'keep-awake.ts: this.#options.command',
 ];
 
 const git = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();

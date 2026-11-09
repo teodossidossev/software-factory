@@ -20,7 +20,7 @@ import { parseArgs } from 'node:util';
 import { open, readFile, realpath } from 'node:fs/promises';
 import { addAttachment, checkSize, removeAttachment } from './attachments.js';
 import { openInBrowser } from './browser.js';
-import { type Config, DEFAULT_TEST_TIMEOUT_MS, envFilePath, gateConfig, gateLevelSetting, handoffSetting, healthSetting, loadConfig, loadEnvFile, rulesMaxBytes, stateDir, tunnelSetting } from './config.js';
+import { type Config, DEFAULT_TEST_TIMEOUT_MS, envFilePath, gateConfig, gateLevelSetting, handoffSetting, healthSetting, keepAwakeSetting, loadConfig, loadEnvFile, rulesMaxBytes, stateDir, tunnelSetting } from './config.js';
 import { DigestStore, Digests } from './digest-run.js';
 import { DigestSchedule } from './digest-schedule.js';
 import {
@@ -53,6 +53,7 @@ import { fileSummaryLines } from './patch.js';
 import { prepareTaskChecksDir } from './sandbox-denials.js';
 import { factoryRoots, OrphanWatch, reapOrphanedSandboxes } from './sandbox-reaper.js';
 import { reapThenScan, upkeep } from './recovery.js';
+import { KEEP_AWAKE_COMMAND, KEEP_AWAKE_EVERY_MS, KeepAwake } from './keep-awake.js';
 import { TunnelChild, tunnelHealthAddress, tunnelProfile, tunnelScript } from './tunnel.js';
 import {
   fetchText, forgeTargets, freeSpace, type HealthDeps, healthExitCode, healthLines, httpAnswers, type QueueFacts, runChecks, runCheckCommand,
@@ -145,8 +146,9 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
     checkDashboardPorts(dashboardPort, remotePort);
   }
   const config = loadConfig();
-  // SF_HEALTH and SF_TUNNEL: an invalid value stops the start here.
+  // SF_HEALTH, SF_TUNNEL and SF_KEEP_AWAKE: an invalid value stops the start here.
   const healthOn = healthSetting();
+  const keepAwakeOn = keepAwakeSetting();
   const tunnelOn = tunnelSetting() === 'auto' && options.tunnel !== 'off';
   const handbook = await loadHandbook();
   // Fail at startup on an invalid registry rather than on the first tool call.
@@ -364,6 +366,9 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
     markerWatch.start();
   }
   explainer.start().catch((error: unknown) => console.error(error));
+  // The laptop stays awake while a job runs (src/keep-awake.ts), unless SF_KEEP_AWAKE=off.
+  const keepAwake = keepAwakeOn ? new KeepAwake({ intervalMs: KEEP_AWAKE_EVERY_MS, jobs: () => jobs.list(), command: KEEP_AWAKE_COMMAND }) : undefined;
+  keepAwake?.start();
   // The tunnel's check needs the factory to answer, so it starts here; its group ends with sf serve.
   if (tunnel !== undefined) {
     process.once('exit', () => tunnel.stopNow());
@@ -389,6 +394,7 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
     digestSchedule.close();
     explainer.close();
     upkept.close();
+    keepAwake?.stop();
     Promise.all([server.close(), socket.close(), dashboard?.close(), tunnel?.stop()]).then(
       () => process.exit(0),
       (error: unknown) => {

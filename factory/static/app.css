@@ -286,7 +286,7 @@ code, pre, .mono { font-family: var(--mono); }
 .form2 { flex: 1; min-height: 0; overflow-y: auto; padding-block: 16px 24px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
 .form2 .grid { max-width: 1280px; margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
 @media (max-width: 980px) { .form2 .grid { grid-template-columns: minmax(0, 1fr); } }
-.card2 { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; display: grid; gap: 8px; min-width: 0; }
+.card2 { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
 .card2 h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0; display: flex; gap: 8px; align-items: baseline; }
 .fld { display: grid; gap: 4px; }
 .fld label { font-size: 12px; font-weight: 600; }
@@ -318,7 +318,9 @@ code, pre, .mono { font-family: var(--mono); }
 .checks .ok { color: var(--add); } .checks .no { color: var(--del); }
 .kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; font-size: 13px; }
 .kv dt { color: var(--muted); } .kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
-pre.cm { margin: 0; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px; font: 12px/1.45 var(--mono); white-space: pre-wrap; }
+pre.cm { margin: 0; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px; font: 12px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* The planning conversation's first message: long, so it scrolls inside its card. */
+#ticket pre.cm { max-height: 22em; overflow: auto; }
 .notline { background: var(--warn-bg); color: var(--fg); border-left: 3px solid var(--warn); padding: 3px 8px; font-size: 12.5px; border-radius: 3px; }
 .mrbar { flex: none; background: var(--panel); border-top: 1px solid var(--border); padding-block: 10px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .mrbar .sp { flex: 1; }
@@ -787,7 +789,6 @@ pre.raw.doc .heading { font-weight: 700; }
   .tree.folded :is(.ffq, .tb .row, .tlist) { display: none; }
   .dtool .dpath { flex: 1 1 100%; max-width: 100%; }
   #cxtree { display: inline-flex; justify-self: start; }
-  pre.cm { overflow-wrap: anywhere; }
 }
 /* A phone or a device without hover: 44 px targets, 16 px fields, the reasons line. */
 @media (max-width: 767px), (hover: none) {

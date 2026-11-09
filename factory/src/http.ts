@@ -65,7 +65,9 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   invalid_content: 400, invalid_ticket: 400, invalid_name: 400, workspace_invalid: 400,
   // The merge request: the host's refusals and the actions being off are conflicts; a host
   // that failed or refused the token is a bad gateway.
-  mr_not_mergeable: 409, mr_not_open: 409, mr_token_missing: 409, mr_host_unsupported: 409, mr_host_changed: 409, mr_text_missing: 409,
+  // mr_check_failed: the merge check refused the change on the base as it is now;
+  // runner_stopping: the check was cancelled (stop, sf reset), or nothing new starts while stopping.
+  mr_not_mergeable: 409, mr_check_failed: 409, runner_stopping: 409, mr_not_open: 409, mr_token_missing: 409, mr_host_unsupported: 409, mr_host_changed: 409, mr_text_missing: 409,
   mr_auth_failed: 502, mr_host_error: 502, mr_host_unreachable: 502,
   // The Merge request screen: a text that breaks the rules (also approve's, while the MR
   // text is invalid or not the prepared commit's message), a rename or a base change refused.

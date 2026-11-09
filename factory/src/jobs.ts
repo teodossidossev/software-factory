@@ -504,6 +504,8 @@ export type EventRecord = { ts: string; iteration: number } & (
   // the user's Accept of it (accepted_failing), with the last lines of its output (tail).
   | { type: 'tests_started'; run: string; command: string }
   | { type: 'tests'; run: string; command: string; outcome: TestsOutcome; exit_code: number | null; timed_out: boolean; duration_ms: number; reason?: string; tail: string; tail_truncated?: true }
+  // The merge check before sf mr merge (src/merge-check.ts): its last base commit (null: none), how it ended.
+  | { type: 'merge_checked'; base_commit: string | null; outcome: 'passed' | 'failed' | 'conflict' | 'timed_out' | 'aborted'; duration_ms: number }
 );
 
 // The bound of one reviewer event or message in events.jsonl, in bytes of its JSON.

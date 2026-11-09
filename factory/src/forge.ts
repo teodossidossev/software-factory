@@ -114,7 +114,8 @@ export interface Forge {
   status(number: number): Promise<MergeRequestStatus>;
   // Merges an open, mergeable merge request; mr_not_open or mr_not_mergeable (the host's reason)
   // otherwise. GitHub: merge method merge with the host's commit title; GitLab: PUT .../merge.
-  merge(number: number): Promise<{ merge_commit: string | null }>;
+  // With head (the commit the merge check tested), the host merges only while the branch is there.
+  merge(number: number, head?: string): Promise<{ merge_commit: string | null }>;
 }
 
 // Which host a workspace's origin is on, and why the merge request actions are off when they are:
@@ -410,7 +411,7 @@ function githubForge(client: HostClient, path: string): Forge {
         ...(reason !== undefined ? { reason } : {}), ...(checks !== undefined ? { checks } : {}), ...(mergeCommit !== undefined ? { merge_commit: mergeCommit } : {}),
       };
     },
-    async merge(number) {
+    async merge(number, head) {
       const status = await forge.status(number);
       if (status.state !== 'open') {
         throw new FactoryError('mr_not_open', `Pull request #${number} is ${status.state} on GitHub; nothing was merged.`);
@@ -419,7 +420,7 @@ function githubForge(client: HostClient, path: string): Forge {
       if (status.mergeable === false && (status.draft || /conflicts/.test(status.reason ?? ''))) {
         throw new FactoryError('mr_not_mergeable', `GitHub cannot merge pull request #${number}: ${status.reason}.`);
       }
-      const reply = await client.request('PUT', `${base}/pulls/${number}/merge`, { merge_method: 'merge' });
+      const reply = await client.request('PUT', `${base}/pulls/${number}/merge`, { merge_method: 'merge', ...(head !== undefined ? { sha: head } : {}) });
       if (reply.status === 405 || reply.status === 409 || reply.status === 422) {
         const said = client.hostMessage(reply.data);
         throw new FactoryError('mr_not_mergeable', `GitHub refused to merge pull request #${number}: ${said !== '' ? said : `HTTP ${reply.status}`}${status.reason !== undefined ? ` (${status.reason})` : ''}.`);
@@ -508,7 +509,7 @@ function gitlabForge(client: HostClient, path: string): Forge {
         ...(mergeCommit !== undefined ? { merge_commit: mergeCommit } : {}),
       };
     },
-    async merge(number) {
+    async merge(number, head) {
       const status = await forge.status(number);
       if (status.state !== 'open') {
         throw new FactoryError('mr_not_open', `Merge request !${number} is ${status.state} on GitLab; nothing was merged.`);
@@ -516,7 +517,7 @@ function gitlabForge(client: HostClient, path: string): Forge {
       if (status.mergeable === false) {
         throw new FactoryError('mr_not_mergeable', `GitLab cannot merge merge request !${number}: ${status.reason}.`);
       }
-      const reply = await client.request('PUT', `${project}/merge_requests/${number}/merge`);
+      const reply = await client.request('PUT', `${project}/merge_requests/${number}/merge`, head !== undefined ? { sha: head } : undefined);
       if (reply.status === 405 || reply.status === 406 || reply.status === 409 || reply.status === 422) {
         const said = client.hostMessage(reply.data);
         throw new FactoryError('mr_not_mergeable', `GitLab refused to merge merge request !${number}: ${said !== '' ? said : `HTTP ${reply.status}`}.`);

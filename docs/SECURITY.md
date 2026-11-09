@@ -33,7 +33,8 @@ refused), and the factory's test command passed in a sandbox without network on 
   tests run in a sandbox without network before the MR text is written; a failure sends the job
   back to fix it. The test run cannot change the worktree's `.git`, and a run that changes
   `.claude`, `.mcp.json` or `.codex` fails; so does one where any of them is a link, before it
-  starts.
+  starts. The merge runs them again, in the same sandbox, on the change merged into the base as
+  it is now; a conflict or a failure refuses the merge, and nothing is merged.
 - **The Codex gate runs in a read-denying wrapper.** It sees no secrets and no other jobs. Secrets
   in its findings are masked.
 - **Code from a repository never runs as you through Git.** The factory's Git commands run no hooks

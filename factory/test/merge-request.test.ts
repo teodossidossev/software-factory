@@ -217,7 +217,7 @@ test('sf mr: a missing token and a wrong host turn the actions off and say why, 
     git(repo, 'remote', 'set-url', 'origin', 'https://bitbucket.org/acme/app.git');
     const wrong = await runCli(env, ['mr', 'create', 'app', 'T-1']);
     assert.equal(wrong.code, 1);
-    assert.match(wrong.stderr, /^sf: Merge requests are off for this workspace: bitbucket\.org is neither GitHub nor GitLab\.$/m);
+    assert.match(wrong.stderr, /^sf: Merge requests are off for this workspace: bitbucket\.org is not GitHub or gitlab\.com; if it is a GitLab, set SF_GITLAB_URL to its API \(https:\/\/bitbucket\.org\/api\/v4\)\.$/m);
     assert.equal(fake.requests.length, requests);
 
     // Not pushed yet and not ready: refused.

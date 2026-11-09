@@ -1,9 +1,10 @@
-// The Git host's merge requests: GitHub (github.com, REST API v3) and GitLab (REST API
-// v4), chosen from the workspace checkout's origin URL. Opens a pull request / merge request from
-// the job's branch into its base (or reuses the open one), reads its state and merges it through
-// the host's API; nothing is pushed or forced here. The tokens come from the environment file
-// (SF_GITHUB_TOKEN, SF_GITLAB_TOKEN); each goes only in the Authorization header of a request to
-// its own host's API, redirects are refused, and no message carries it.
+// The Git host's merge requests: GitHub (github.com, REST API v3) and GitLab (gitlab.com or the
+// host of SF_GITLAB_URL, REST API v4), chosen from the workspace checkout's origin URL. Opens a
+// pull request / merge request from the job's branch into its base (or reuses the open one), reads
+// its state and merges it through the host's API; nothing is pushed or forced here. The tokens
+// come from the environment file (SF_GITHUB_TOKEN, SF_GITLAB_TOKEN); each goes only in the
+// Authorization header of a request to its own host's API, redirects are refused, and no message
+// carries it.
 import { FactoryError } from './errors.js';
 import { parseOrigin } from './mr.js';
 
@@ -13,8 +14,9 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_HOST_MESSAGE = 300;
 const GITHUB_HOST = 'github.com';
 const GITHUB_API = 'https://api.github.com';
-// Hosts known not to be GitLab: their origin never gets the GitLab token.
-const NOT_GITLAB = /^(?:bitbucket\.org|codeberg\.org|gitee\.com|(?:ssh\.)?dev\.azure\.com|[^.]+\.visualstudio\.com)$/;
+// The one GitLab known without SF_GITLAB_URL; a self-hosted GitLab is named by SF_GITLAB_URL.
+const GITLAB_HOST = 'gitlab.com';
+const GITLAB_API = 'https://gitlab.com/api/v4';
 
 // The hosts' settings, read once when sf serve starts.
 export interface ForgeSettings {
@@ -22,7 +24,8 @@ export interface ForgeSettings {
   // The GitHub API base: https://api.github.com, or SF_GITHUB_API on loopback (tests only).
   githubApi: string;
   gitlabToken: string | undefined;
-  // SF_GITLAB_URL: the GitLab API base when it is not https://<host>/api/v4.
+  // SF_GITLAB_URL: the API base of the one GitLab the token goes to; required for a self-hosted
+  // GitLab (without it, only gitlab.com, at https://gitlab.com/api/v4).
   gitlabUrl: string | undefined;
 }
 
@@ -141,20 +144,26 @@ export function chooseForge(origin: string | undefined, settings: ForgeSettings)
     }
     return { ok: true, kind: 'github', host, path, api: settings.githubApi, token: settings.githubToken, tokenName: 'SF_GITHUB_TOKEN' };
   }
-  // Any other host is GitLab. With SF_GITLAB_URL the GitLab token goes to that host only.
-  if (NOT_GITLAB.test(hostnameOf(host))) {
-    return { ok: false, kind: null, code: 'mr_host_unsupported', reason: `${hostnameOf(host)} is neither GitHub nor GitLab` };
-  }
-  let api = `https://${host}/api/v4`;
+  // A host is GitLab only when it is gitlab.com or the host of SF_GITLAB_URL: the GitLab token goes
+  // to no other host. With SF_GITLAB_URL set, it goes to that host only, gitlab.com included.
+  const hostname = hostnameOf(host);
+  let api: string;
   if (settings.gitlabUrl !== undefined) {
     const configured = new URL(settings.gitlabUrl).hostname;
-    if (configured !== hostnameOf(host)) {
+    if (configured !== hostname) {
       return {
         ok: false, kind: 'gitlab', code: 'mr_host_unsupported',
-        reason: `the origin is on ${hostnameOf(host)}, but SF_GITLAB_URL is for ${configured}; the GitLab token is not sent to another host`,
+        reason: `the origin is on ${hostname}, but SF_GITLAB_URL is for ${configured}; the GitLab token is not sent to another host`,
       };
     }
     api = settings.gitlabUrl;
+  } else if (hostname === GITLAB_HOST) {
+    api = GITLAB_API;
+  } else {
+    return {
+      ok: false, kind: null, code: 'mr_host_unsupported',
+      reason: `${hostname} is not GitHub or gitlab.com; if it is a GitLab, set SF_GITLAB_URL to its API (https://${hostname}/api/v4)`,
+    };
   }
   if (settings.gitlabToken === undefined) {
     return { ok: false, kind: 'gitlab', code: 'mr_token_missing', reason: 'SF_GITLAB_TOKEN is not set in the environment file', missing: 'SF_GITLAB_TOKEN' };

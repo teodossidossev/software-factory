@@ -39,6 +39,9 @@ refused), and the factory's test command passed in a sandbox without network on 
   in its findings are masked.
 - **Code from a repository never runs as you through Git.** The factory's Git commands run no hooks
   and no fsmonitor.
+- **The GitLab token goes only to gitlab.com or the host of `SF_GITLAB_URL`.** A workspace on any
+  other host that is not GitHub has its merge request actions off, and the hourly logins check
+  leaves it out.
 - **The dashboard:**
   - It listens on loopback only.
   - From another device it opens only through Tailscale, for the logins in
@@ -62,8 +65,6 @@ refused), and the factory's test command passed in a sandbox without network on 
     browser extension's bridge.
   - A link swapped between the file guard's check and the write can send a write out of the
     worktree.
-  - The GitLab token is sent to any host that is not GitHub or one of four known forges when
-    `SF_GITLAB_URL` is not set (today's workspaces send it only to the right host).
   - ChatGPT's `read_file` can read git-ignored secret files in a workspace (such as `.envrc`).
   - The guard does not scan binary or `-diff` files.
 - **The network is open to the agents.** It has to be: Claude and Codex are remote models. The

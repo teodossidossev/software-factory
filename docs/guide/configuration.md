@@ -239,8 +239,8 @@ merge request actions (`sf mr create`, `sf mr merge`, `sf mr status`, the Merge 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `SF_GITHUB_TOKEN` | unset | For workspaces whose `origin` is on `github.com`: a fine-grained token on the repository with Pull requests read and write, Contents read and write (write for merging), Checks read. Sent only to `https://api.github.com`. Unset: the actions are off, `mr_token_missing`. |
-| `SF_GITLAB_TOKEN` | unset | For every other host (taken as GitLab): a token with scope `api`, sent only to the GitLab API of the `origin` host. |
-| `SF_GITLAB_URL` | `https://<origin host>/api/v4` | The GitLab API base when it differs (another port or path). `https` (or `http` on loopback only); no credentials, query or fragment. Set, the token goes only to this host, and workspaces on other hosts are refused (`mr_host_unsupported`). |
+| `SF_GITLAB_TOKEN` | unset | For workspaces whose `origin` is on `gitlab.com`, or on the host of `SF_GITLAB_URL`: a token with scope `api`, sent only to that GitLab's API. Any other host gets no token (`mr_host_unsupported`). |
+| `SF_GITLAB_URL` | unset (`https://gitlab.com/api/v4` for `gitlab.com`) | Required for a self-hosted GitLab: its API base, such as `https://git.example.com/api/v4`. `https` (or `http` on loopback only); no credentials, query or fragment. Set, the token goes only to this host, and workspaces on other hosts, `gitlab.com` included, are refused (`mr_host_unsupported`). |
 
 `GITHUB_TOKEN`, `GITLAB_TOKEN` and `OPENAI_API_KEY` are not read by the factory. The Codex gate
 uses your Codex login (`codex login`), not an API key. `CODEX_HOME` (Codex's own setting, default

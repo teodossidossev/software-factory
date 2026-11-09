@@ -307,7 +307,7 @@ test('mr screen (SF-080): the fields with their hints, the side panel (commit me
     'Files', '3 changed · Open Changes c', 'Claude', 'clean at iteration 2', 'Codex', 'clean at iteration 2 · 12,345 tokens', 'Fix rounds', '1', 'Target', 'GitHub acme/appmain ← T-1-demo',
   ]);
   assert.deepEqual(cardOf(page, 'Not checked').querySelectorAll('.notline').map((node) => [node.className, node.textContent]), [['notline', 'Not checked: by hand, open the page (the user)']]);
-  assert.deepEqual(checks(page), ['✓Title follows the commit header rule', '✓Branch and base are set', '✓All required headings are present', '✓## Testing claims no manual check as run (SF-058)']);
+  assert.deepEqual(checks(page), ['✓Title follows the commit header rule', '✓Branch and base are set', '✓All required headings are present', '✓## Testing claims no manual check as run']);
 
   assert.deepEqual(barTexts(page), ["The factory's text", '', 'Save Ctrl+S', 'Reset to factory text', 'Push branch only', 'Push and open MR ↗']);
   assert.deepEqual([barButton(page, 'Save')!.disabled, barButton(page, 'Reset')!.disabled, barButton(page, 'Push branch only')!.disabled, barButton(page, 'Push and open MR')!.disabled], [true, true, false, false]);
@@ -329,10 +329,10 @@ test('mr screen (SF-080): the checks run live with the server\'s rules; each pro
   type(page, 'mrBase', ' ');
   type(page, 'mrBody', BODY.replace('## Why the change\n', '').replace('## How\n', '').replace('- npm test: passed', '- By hand: opened the page'));
   assert.deepEqual([bad(page, 'branch'), bad(page, 'base')], ['The branch is required.', 'The base branch is required.']);
-  assert.equal(bad(page, 'body'), 'Missing heading: ## How. Missing heading: ## Why the change. SF-058: the ## Testing line "- By hand: opened the page" reads as a check that was run. Anything not run goes on a line starting with "Not checked:".');
-  assert.deepEqual(checks(page), ['✕Title follows the commit header rule', '✕Branch and base are set', '✕All required headings are present', '✕## Testing claims no manual check as run (SF-058)']);
+  assert.equal(bad(page, 'body'), 'Missing heading: ## How. Missing heading: ## Why the change. Testing claim: the ## Testing line "- By hand: opened the page" reads as a check that was run. Anything not run goes on a line starting with "Not checked:".');
+  assert.deepEqual(checks(page), ['✕Title follows the commit header rule', '✕Branch and base are set', '✕All required headings are present', '✕## Testing claims no manual check as run']);
   assert.deepEqual(cardOf(page, 'Not checked').querySelectorAll('.notline').map((node) => [node.className, node.textContent]), [
-    ['notline', 'Not checked: by hand, open the page (the user)'], ['notline bad', 'SF-058: By hand: opened the page'],
+    ['notline', 'Not checked: by hand, open the page (the user)'], ['notline bad', 'Testing claim: By hand: opened the page'],
   ]);
   assert.deepEqual(barTexts(page).slice(0, 2), ['Unsaved changes', '6 problems to fix before pushing']);
   assert.deepEqual([barButton(page, 'Save')!.disabled, barButton(page, 'Push branch only')!.disabled, barButton(page, 'Push and open MR')!.disabled], [false, true, true]);

@@ -1,4 +1,4 @@
-// The config lock Claude Code's sandbox leaves in a checkout's Git directory (SF-085): to protect
+// The config lock Claude Code's sandbox leaves in a checkout's Git directory: to protect
 // .git/config it binds an empty, read-only .git/config.lock into every sandboxed command, creating
 // the file when it is missing and never removing it. Git then refuses every config write in that
 // checkout (the hand-over's commit.template and commit.cleanup, the user's own git config). This
@@ -22,7 +22,7 @@ export async function checkoutGitDir(checkout: string): Promise<string> {
 
 // Where the open-file check looks: the /proc directory, and the users whose processes it must be
 // able to see into. Production always scans the real /proc; tests inject proc, a fake /proc tree of
-// their own (directly, or through SF_TEST_PROC_DIR under SF_TEST_HOOKS=on, SF-105), so that the
+// their own (directly, or through SF_TEST_PROC_DIR under SF_TEST_HOOKS=on), so that the
 // machine's other processes (factory jobs in their sandboxes) cannot decide a test's lock.
 export interface LockScan {
   platform?: NodeJS.Platform;

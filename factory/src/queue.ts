@@ -1,4 +1,4 @@
-// The run queue (SF-071): one order of the planned tickets of every workspace, a limit of jobs that
+// The run queue: one order of the planned tickets of every workspace, a limit of jobs that
 // run at once (max_running) and the scheduler of sf serve that starts the next queued ticket by
 // itself when a slot is free. QueueStore reads and writes <state>/queue.json; RunQueue changes it
 // and runs the passes, all one at a time on one promise chain. A ticket leaves queue.json before
@@ -6,14 +6,14 @@
 // scheduler never starts a ticket twice, across concurrent events and restarts alike. The limit
 // gates only the starts the queue makes itself (Execution.start with queued); a start by hand
 // always goes, and its job counts as running here too.
-// A job parked on a usage limit (SF-072, waiting_limit) holds its slot and holds the queue: while any
+// A job parked on a usage limit (waiting_limit) holds its slot and holds the queue: while any
 // job is parked the scheduler starts nothing (the limit hold, computed, never stored; releasing the
 // hold by hand does not end it). One timer at the earliest reset of the parked jobs applies the rule
 // of queue.json's on_limit to each job whose reset has passed, in park order: resume-then-queue
 // resumes it, resume-only resumes it and holds the queue by hand, wait only marks it (the user
 // resumes) and holds the queue by hand.
-// With planCheck (SF-086) the scheduler starts a queued ticket only when the Task check of its
-// current Task file is ready or not needed (SF-130), or its entry is forced (Start anyway);
+// With planCheck the scheduler starts a queued ticket only when the Task check of its current
+// Task file is ready or not needed, or its entry is forced (Start anyway);
 // otherwise the entry stays in place and its row says why.
 import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -36,7 +36,7 @@ export const DEPENDENCY_RECHECK_MS = 5 * 60_000;
 // How soon a parked job whose reset passed and whose step failed inside the factory is tried again.
 export const LIMIT_RECHECK_MS = 60_000;
 
-// What the queue does when a usage limit resets (SF-072).
+// What the queue does when a usage limit resets.
 export const ON_LIMIT_RULES = ['resume-then-queue', 'resume-only', 'wait'] as const;
 export type OnLimitRule = (typeof ON_LIMIT_RULES)[number];
 export const DEFAULT_ON_LIMIT: OnLimitRule = 'resume-then-queue';
@@ -51,13 +51,13 @@ const queueSchema = z.strictObject({
   max_running: z.number().int().min(MIN_RUNNING).max(MAX_RUNNING),
   held: z.boolean(),
   hold_reason: z.string().nullable(),
-  // The rule at a usage limit's reset (SF-072); absent in a queue.json written before: the default.
+  // The rule at a usage limit's reset; absent in a queue.json written without it: the default.
   on_limit: z.enum(ON_LIMIT_RULES).default(DEFAULT_ON_LIMIT),
-  // force (SF-086): Start anyway, whatever the plan check says; until the entry leaves the queue.
+  // force: Start anyway, whatever the plan check says; until the entry leaves the queue.
   entries: z.array(z.strictObject({ workspace: workspaceName, ticket: ticketKey, queued_at: timestamp, force: z.literal(true).optional() })),
   // The scheduler's start that failed, per ticket (out of the queue): shown on its card.
   errors: z.array(z.strictObject({ workspace: workspaceName, ticket: ticketKey, code: z.string(), message: z.string(), at: timestamp })),
-  // When the scheduler last started a queued ticket (SF-153: the health check queue reads it);
+  // When the scheduler last started a queued ticket (the health check queue reads it);
   // absent before the first start. State format 3 (src/state-version.ts).
   last_start: timestamp.optional(),
 });
@@ -67,7 +67,7 @@ export type QueueError = QueueFile['errors'][number];
 
 const sameTicket = (a: TicketRef, b: TicketRef): boolean => a.workspace === b.workspace && a.ticket === b.ticket;
 
-// The jobs parked on a usage limit (SF-072), in park order (paused.at).
+// The jobs parked on a usage limit, in park order (paused.at).
 export function parkedJobs(jobs: Job[]): Job[] {
   return jobs.filter((job) => job.state === 'waiting_limit').sort((a, b) => (a.paused?.at ?? '').localeCompare(b.paused?.at ?? ''));
 }
@@ -119,8 +119,8 @@ export class QueueStore {
   }
 }
 
-// The Task check of a queued ticket's current Task file (SF-086): ready, not_ready, failed, checking
-// (pending or running), none, or not_needed (SF-130: no check of this version, and checkNeed says
+// The Task check of a queued ticket's current Task file: ready, not_ready, failed, checking
+// (pending or running), none, or not_needed (no check of this version, and checkNeed says
 // it needs none), with its blocker and major counts.
 export interface PlanCheck {
   state: 'ready' | 'not_ready' | 'failed' | 'checking' | 'none' | 'not_needed';
@@ -147,7 +147,7 @@ export function planReason(plan: PlanCheck): string | null {
 }
 
 // A queued ticket as the queue shows it: its 1-based position, the tickets it lands after that are
-// not merged yet (SF-084's states), whether it is forced and why its plan holds it (SF-086: null
+// not merged yet (with their dependency states), whether it is forced and why its plan holds it (null
 // when the plan is ready, the entry forced, or the queue has no plan check).
 export interface QueueRow {
   workspace: string;
@@ -165,9 +165,9 @@ export interface QueueView {
   running: number;
   held: boolean;
   hold_reason: string | null;
-  // The rule at a usage limit's reset (SF-072).
+  // The rule at a usage limit's reset.
   on_limit: OnLimitRule;
-  // The limit hold (SF-072): the parked jobs and the earliest reset the timer waits for (null when
+  // The limit hold: the parked jobs and the earliest reset the timer waits for (null when
   // every parked job's reset passed under wait); null when no job is parked.
   limit_hold: { parked: number; resets_at: string | null } | null;
   entries: QueueRow[];
@@ -184,16 +184,16 @@ export interface RunQueueOptions {
   resolve?: (name: string) => Promise<Workspace>;
   // DEPENDENCY_RECHECK_MS by default (tests).
   recheckMs?: number;
-  // The clock of the reset timer (SF-072); Date.now by default (tests).
+  // The clock of the reset timer; Date.now by default (tests).
   clock?: () => number;
-  // Sends the one notification of a reset (SF-072; sf serve: sendNotification); never throws.
+  // Sends the one notification of a reset (sf serve: sendNotification); never throws.
   notify?: (notification: Notification) => Promise<unknown>;
-  // The Task check of a queued ticket (SF-086); without it every plan counts as ready.
+  // The Task check of a queued ticket; without it every plan counts as ready.
   planCheck?: (workspace: string, ticket: string) => Promise<PlanCheck>;
   // Called after a ticket was added (the dashboard, the CLI and MCP alike; sf serve: the automatic
   // check of a ticket without one); never throws.
   onAdded?: (workspace: string, ticket: string) => void;
-  // The updating marker (SF-101): while it is true a pass starts no queued ticket and calls no
+  // The updating marker: while it is true a pass starts no queued ticket and calls no
   // limitReset; the reset timer is armed again as always, so a parked job stays in waiting_limit.
   // Checked at the start of a pass and again right before each start and each limitReset.
   updating?: () => boolean;
@@ -229,7 +229,7 @@ export class RunQueue {
   // The last work of each ticket under withTicket, by "<workspace>/<ticket>".
   readonly #ticketLocks = new Map<string, Promise<void>>();
   #timer: NodeJS.Timeout | undefined;
-  // The usage limit's reset timer (SF-072): at the earliest reset of the parked jobs.
+  // The usage limit's reset timer: at the earliest reset of the parked jobs.
   #resetTimer: NodeJS.Timeout | undefined;
   #closed = false;
 
@@ -269,7 +269,7 @@ export class RunQueue {
     return this.#passQueued;
   }
 
-  // Runs work for a ticket after the work asked for it before (SF-086): the scheduler's last look
+  // Runs work for a ticket after the work asked for it before: the scheduler's last look
   // at a ticket's plan and its start, and the factory's own writes of its Task file (write_task,
   // the dashboard's Save), so no such write lands between the look and the job's claim. Work for
   // other tickets runs meanwhile.
@@ -348,7 +348,7 @@ export class RunQueue {
     return result;
   }
 
-  // Start anyway (SF-086): the queued ticket starts whatever its plan check says, for any version
+  // Start anyway: the queued ticket starts whatever its plan check says, for any version
   // of its Task file, until it leaves the queue (not_queued otherwise).
   async force(workspace: string, ticket: string): Promise<{ force: true }> {
     checkRef(workspace, ticket);
@@ -418,7 +418,7 @@ export class RunQueue {
     });
   }
 
-  // The rule at a usage limit's reset (SF-072): resume-then-queue, resume-only or wait (invalid_rule).
+  // The rule at a usage limit's reset: resume-then-queue, resume-only or wait (invalid_rule).
   async rule(rule: string): Promise<{ on_limit: OnLimitRule }> {
     if (!(ON_LIMIT_RULES as readonly string[]).includes(rule)) {
       throw new FactoryError('invalid_rule', `The rule must be one of ${ON_LIMIT_RULES.join(', ')}.`);
@@ -430,7 +430,7 @@ export class RunQueue {
     });
   }
 
-  // The scheduler starts again; the reason goes. The limit hold (SF-072) stays while a job is parked.
+  // The scheduler starts again; the reason goes. The limit hold stays while a job is parked.
   release(): Promise<{ held: false }> {
     return this.#change((queue) => {
       queue.held = false;
@@ -440,7 +440,7 @@ export class RunQueue {
   }
 
   // The queue as it is now: its limit, the running count, the entries with what each waits for
-  // (SF-084's states as last known: the merged check's cache applies) and the next one to start.
+  // (their dependency states as last known: the merged check's cache applies) and the next one to start.
   async view(): Promise<QueueView> {
     const queue = await this.#store.read();
     const jobs = await this.#jobs.list();
@@ -469,10 +469,10 @@ export class RunQueue {
       .catch((error: unknown): TaskInfo => (error instanceof FactoryError && ['task_not_found', 'workspace_not_found'].includes(error.code) ? 'gone' : { refs: [] }));
   }
 
-  // One pass: first the parked jobs whose usage limit reset (SF-072, #resets) and the reset timer;
+  // One pass: first the parked jobs whose usage limit reset (#resets) and the reset timer;
   // then, unless held by hand or by a parked job, the entries whose Task file is gone or whose ticket
   // has a live job leave the queue (and so do the start errors of those tickets); then, while fewer
-  // jobs run than max_running, the first entry whose plan does not hold it (ready or forced, SF-086)
+  // jobs run than max_running, the first entry whose plan does not hold it (ready or forced)
   // and whose dependencies are all merged leaves queue.json and starts. An entry held by its plan
   // stays in place; the end of a Task check asks for a pass.
   async #pass(): Promise<void> {
@@ -484,7 +484,7 @@ export class RunQueue {
     let changed = await this.#resets();
     const queue = await this.#store.read();
     const jobs = await this.#jobs.list();
-    // While the factory is being updated (SF-101) nothing starts; the catch-up asks for a pass.
+    // While the factory is being updated nothing starts; the catch-up asks for a pass.
     if (queue.held || parkedJobs(jobs).length > 0 || this.#closed || this.#updating()) {
       if (changed) {
         this.#onChange();
@@ -558,7 +558,7 @@ export class RunQueue {
         }
         const index = queue.entries.indexOf(entry);
         queue.entries.splice(index, 1);
-        // The start's time, for the health check queue (SF-153), in the same write.
+        // The start's time, for the health check queue, in the same write.
         queue.last_start = now();
         // Out of queue.json before the start: a restart in between never starts it twice.
         await this.#store.write(queue);
@@ -604,7 +604,7 @@ export class RunQueue {
     }
   }
 
-  // The parked jobs whose reset has passed (SF-072), in park order, under queue.json's rule: resumed
+  // The parked jobs whose reset has passed, in park order, under queue.json's rule: resumed
   // (resume-then-queue, resume-only) or marked to wait for the user (wait); after resume-only and
   // wait the queue is held by hand. One notification for them all. Then the reset timer is armed at
   // the earliest reset still ahead. Returns whether anything changed.
@@ -616,7 +616,7 @@ export class RunQueue {
     let resumed = 0;
     let waiting = 0;
     for (const job of due) {
-      // Under the updating marker (SF-101) no reset is applied; the timer below is armed again.
+      // Under the updating marker no reset is applied; the timer below is armed again.
       if (this.#closed || this.#updating()) {
         break;
       }
@@ -653,7 +653,7 @@ export class RunQueue {
     return resumed + waiting > 0;
   }
 
-  // Whether every ticket of refs is merged (SF-084's state). When one is not, its workspace's base
+  // Whether every ticket of refs is merged. When one is not, its workspace's base
   // is fetched (once per workspace and base in a pass: fetched) and the states asked again past the
   // merged check's cache whenever a base of theirs was fetched in this pass; a failed fetch leaves
   // them as they were.

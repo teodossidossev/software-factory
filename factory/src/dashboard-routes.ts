@@ -1,9 +1,9 @@
-// The dashboard's job and queue actions (SF-139), in one table: POST api/jobs/<ws>/<ticket>/<name>
+// The dashboard's job and queue actions, in one table: POST api/jobs/<ws>/<ticket>/<name>
 // and POST api/queue/<action> (the entry queue-<action>). For each, its body (strict: unknown keys,
 // null, arrays and wrong types are refused; shape is what the refusal names), the one
 // DashboardActions or DashboardQueue call it stands for, whether the remote port needs the job's
-// ticket typed again (SF-126), what the pages get again after it, its body bound and the socket
-// command it mirrors (src/commands.ts), whose openWhileUpdating is its update gate (SF-101). The
+// ticket typed again, what the pages get again after it, its body bound and the socket
+// command it mirrors (src/commands.ts), whose openWhileUpdating is its update gate. The
 // dashboard (src/dashboard.ts) looks a POST up here; the job's detail sends the confirm routes to
 // the page (confirm_actions). The setup, Task check, task and attachment posts have their own
 // handlers there.
@@ -13,7 +13,7 @@ import type { DashboardActions, DashboardQueue } from './dashboard.js';
 import { DECISIONS } from './ledger.js';
 import { MAX_MR_TEXT_BYTES } from './mr.js';
 
-// mr-save (SF-080): an MR text of MAX_MR_TEXT_BYTES, every character JSON-escaped at worst.
+// mr-save: an MR text of MAX_MR_TEXT_BYTES, every character JSON-escaped at worst.
 export const MAX_MR_BODY_BYTES = 6 * MAX_MR_TEXT_BYTES + 1024;
 
 export type JobKey = readonly [workspace: string, ticket: string];
@@ -22,7 +22,7 @@ interface RouteBase<S extends z.ZodType> {
   // The body as the invalid_body refusal names it.
   shape: string;
   body: S;
-  // On the remote port the body's "confirm" must equal the job's ticket (SF-126): the routes that
+  // On the remote port the body's "confirm" must equal the job's ticket: the routes that
   // can push or merge.
   confirm?: true;
   // What the pages get again after a call that answered: the job (its record may change without a
@@ -43,7 +43,7 @@ export interface JobRoute<S extends z.ZodType = z.ZodType> extends RouteBase<S> 
   call(actions: DashboardActions, queue: DashboardQueue | undefined, key: JobKey, body: z.infer<S>): Promise<unknown>;
 }
 
-// A change of the run queue (SF-071); none without a run queue (an empty 404).
+// A change of the run queue; none without a run queue (an empty 404).
 export interface QueueRoute<S extends z.ZodType = z.ZodType> extends RouteBase<S> {
   kind: 'queue';
   call(actions: DashboardActions, queue: DashboardQueue, key: undefined, body: z.infer<S>): Promise<unknown>;
@@ -74,7 +74,7 @@ export const POST_ROUTES = {
   }),
   // sf review: the Execution refuses any state but needs_human with review_failed.
   review: job({ ...EMPTY, command: 'review', call: (actions, _queue, [w, t]) => actions.retryReview(w, t) }),
-  // sf retry (SF-087): the Execution refuses any job but one a transient MR preparation failure
+  // sf retry: the Execution refuses any job but one a transient MR preparation failure
   // stopped; on mr_push_failed it pushes again.
   retry: job({
     shape: '{"confirm"?: string}', body: z.strictObject(CONFIRM), confirm: true, command: 'retry',
@@ -83,20 +83,20 @@ export const POST_ROUTES = {
   // sf accept: the Execution refuses any state but needs_human after a stop it takes on (the gate's,
   // the ledger's, the Fix round limit), with the checks of acceptGateInRunner.
   accept: job({ ...EMPTY, command: 'accept', call: (actions, _queue, [w, t]) => actions.acceptGate(w, t) }),
-  // sf settle (SF-052): the Execution refuses any state but needs_human, and any entry but an
+  // sf settle: the Execution refuses any state but needs_human, and any entry but an
   // escalated or contested one.
   settle: job({
     shape: '{"id": string, "decision": "accept" | "fix", "note"?: string}',
     body: z.strictObject({ id: z.string(), decision: z.enum(DECISIONS), note: z.string().optional() }), command: 'settle',
     call: (actions, _queue, [w, t], body) => actions.settle(w, t, body.id, body.decision, body.note ?? ''),
   }),
-  // sf simplify (SF-055): the Execution refuses any state but needs_human with simplify_offered.
+  // sf simplify: the Execution refuses any state but needs_human with simplify_offered.
   simplify: job({ ...EMPTY, command: 'simplify', call: (actions, _queue, [w, t]) => actions.simplify(w, t) }),
   // A finished job leaves the Jobs list as with sf reset (the history is archived, a kept worktree
   // removed, the branch untouched). A live job is refused (invalid_state); the Execution checks the
   // state and retires the job under one lock acquisition.
   archive: job({ ...EMPTY, refresh: 'jobs', call: (actions, _queue, [w, t]) => actions.archiveFinished(w, t) }),
-  // sf mr create, merge and status (SF-048). The Execution announces an opened or merged merge
+  // sf mr create, merge and status. The Execution announces an opened or merged merge
   // request to every page; a state the status found changed on the host reaches them here.
   'mr-create': job({
     shape: '{"confirm"?: string}', body: z.strictObject(CONFIRM), confirm: true, command: 'mr-create',
@@ -107,24 +107,24 @@ export const POST_ROUTES = {
     call: (actions, _queue, [w, t]) => actions.mergeMergeRequest(w, t),
   }),
   'mr-status': job({ ...EMPTY, refresh: 'job', command: 'mr-status', call: (actions, _queue, [w, t]) => actions.mergeRequestStatus(w, t) }),
-  // sf pause (SF-067): the Execution refuses any state but working and awaiting_review.
+  // sf pause: the Execution refuses any state but working and awaiting_review.
   pause: job({ ...EMPTY, command: 'pause', call: (actions, _queue, [w, t]) => actions.pause(w, t) }),
-  // sf resume (SF-067): paused only; a message only when a turn was paused.
+  // sf resume: paused only; a message only when a turn was paused.
   resume: job({
     shape: '{"message"?: string}', body: z.strictObject({ message: z.string().optional() }), command: 'resume',
     call: (actions, _queue, [w, t], body) => actions.resumePaused(w, t, body.message ?? ''),
   }),
-  // sf restart (SF-067): a new job replaces the old one, so every page gets the jobs again.
+  // sf restart: a new job replaces the old one, so every page gets the jobs again.
   restart: job({
     shape: '{"keep_files"?: boolean}', body: z.strictObject({ keep_files: z.boolean().optional() }), refresh: 'jobs', command: 'restart',
     call: (actions, _queue, [w, t], body) => actions.restart(w, t, body.keep_files === true),
   }),
-  // sf handover, takeback and handed-done (SF-073): the Execution refuses any state but
+  // sf handover, takeback and handed-done: the Execution refuses any state but
   // ready_for_human_review (handover) and handed_over (the others).
   handover: job({ ...EMPTY, command: 'handover', call: (actions, _queue, [w, t]) => actions.handover(w, t) }),
   takeback: job({ ...EMPTY, command: 'takeback', call: (actions, _queue, [w, t]) => actions.takeback(w, t) }),
   'handed-done': job({ ...EMPTY, command: 'handed-done', call: (actions, _queue, [w, t]) => actions.handedDone(w, t) }),
-  // The Merge request screen (SF-080): the MR title and text, and the branch and the base when they
+  // The Merge request screen: the MR title and text, and the branch and the base when they
   // change. The Execution refuses any state but ready_for_human_review and needs_human after a
   // failed push; the job's detail reaches every page that shows it. mr-reset keeps mr-save's bound.
   'mr-save': job({
@@ -135,7 +135,7 @@ export const POST_ROUTES = {
   }),
   'mr-reset': job({ ...EMPTY, refresh: 'job', bodyLimit: MAX_MR_BODY_BYTES, call: (actions, _queue, [w, t]) => actions.resetMr(w, t) }),
 
-  // The run queue (SF-071): positions are 1-based; the limit's range is the queue's own check
+  // The run queue: positions are 1-based; the limit's range is the queue's own check
   // (invalid_limit). Every page gets the tickets again.
   'queue-add': queue({
     shape: '{"workspace": string, "ticket": string, "at"?: integer >= 1}',
@@ -160,13 +160,13 @@ export const POST_ROUTES = {
     call: (_actions, q, _key, body) => q.hold(body.reason),
   }),
   'queue-release': queue({ ...EMPTY, command: 'queue-release', call: (_actions, q) => q.release() }),
-  // The Rules menu (SF-072): the rule at a usage limit's reset; its values are the queue's own check
+  // The Rules menu: the rule at a usage limit's reset; its values are the queue's own check
   // (invalid_rule).
   'queue-rule': queue({
     shape: '{"rule": string}', body: z.strictObject({ rule: z.string() }), command: 'queue-on-limit',
     call: (_actions, q, _key, body) => q.rule(body.rule),
   }),
-  // Start anyway (SF-086): the queued ticket starts whatever its plan check says.
+  // Start anyway: the queued ticket starts whatever its plan check says.
   'queue-force': queue({
     shape: '{"workspace": string, "ticket": string}', body: z.strictObject({ workspace: z.string(), ticket: z.string() }), command: 'queue-force',
     call: (_actions, q, _key, body) => q.force(body.workspace, body.ticket),

@@ -1,6 +1,6 @@
-// The server's payloads as the page's TypeScript reads them (SF-146 to SF-149). Each type copies, from the
+// The server's payloads as the page's TypeScript reads them. Each type copies, from the
 // server's own type in src/ (named on each), only the fields the typed page code reads; it never
-// imports from src/. A file converted later (SF-150) adds the fields it reads.
+// imports from src/. A page script that reads another field adds it here.
 // A global declaration file: no import or export, so every type is visible to every page script.
 
 // A job's state: src/jobs.ts JOB_STATES.
@@ -94,7 +94,7 @@ interface ShownAction {
 }
 
 // api/jobs and the stream's jobs events: src/dashboard.ts jobsPayload, with the remote port's
-// remote (SF-126).
+// remote.
 interface JobsPayload {
   jobs: JobRow[];
   remote?: boolean;
@@ -169,7 +169,7 @@ type SimplifyRecord =
   | { error: string; suggestions?: undefined };
 
 // An iteration of the detail: src/dashboard.ts jobDetail; files: its file list (src/jobs.ts
-// FileChange, only the line counts), null for an iteration published before SF-024.
+// FileChange, only the line counts), null for an iteration whose meta has no files list.
 interface IterationRow {
   number: number;
   files: Array<{ additions: number; deletions: number }> | null;
@@ -382,7 +382,7 @@ interface CheckSummary {
   running: boolean;
   blockers: number;
   majors: number;
-  // The note of Start's confirmation (SF-054).
+  // The note of Start's confirmation.
   start_note: string | null;
 }
 
@@ -444,7 +444,7 @@ interface DigestSettings {
 }
 
 // The workspaces payload (api/workspaces and the stream's workspaces event): src/dashboard.ts
-// workspacesPayload, the registry with src/setup.ts WorkspaceSettings (SF-103).
+// workspacesPayload, the registry with src/setup.ts WorkspaceSettings.
 interface WorkspacesPayload {
   workspaces: WorkspaceRow[];
   handoff_default: HandoffMode;
@@ -452,7 +452,7 @@ interface WorkspacesPayload {
 }
 
 // The tickets payload (api/tickets and the stream's tickets event): src/dashboard.ts ticketsPayload;
-// the event adds changed, the tickets it is about, when it is not about all of them (SF-140).
+// the event adds changed, the tickets it is about, when it is not about all of them.
 interface TicketsPayload {
   tickets: TicketRow[];
   archived: ArchivedRow[];
@@ -721,7 +721,7 @@ interface StatsPayload {
 // A health check's status: src/health.ts HEALTH_STATUSES. off is "not configured" and counts as green.
 type HealthStatus = 'ok' | 'recovering' | 'down' | 'off';
 
-// One health check of api/health and of the stream's health events (SF-153): src/health.ts
+// One health check of api/health and of the stream's health events: src/health.ts
 // HealthCheck.
 interface HealthCheck {
   label: string;

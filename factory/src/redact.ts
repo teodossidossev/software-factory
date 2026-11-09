@@ -1,8 +1,8 @@
-// The redaction of the reviewers' live events (SF-045): a Codex event of the gate or an SDK message
+// The redaction of the reviewers' live events: a Codex event of the gate or an SDK message
 // of the Claude review loses every environment value, every key and every content from outside the
 // worktree (~/.codex above all) before it goes to events.jsonl and the Event stream. One Redactor
 // per run: a Claude tool result is withheld by the tool use that asked for it.
-// SF-125: a reviewer's output (the verdict, its items, the simplification pass's suggestions) is
+// A reviewer's output (the verdict, its items, the simplification pass's suggestions) is
 // redacted too, before anything stores or sends it (output).
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -104,7 +104,7 @@ const PATH_FIELDS = ['file_path', 'path', 'notebook_path'];
 
 const escape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-// One known secret (SF-099: the MCP token in the tunnel's lines) replaced by label wherever it
+// One known secret (e.g. the MCP token in the tunnel's lines) replaced by label wherever it
 // stands; an empty secret replaces nothing.
 export function replaceSecret(text: string, secret: string, label: string): string {
   return secret === '' ? text : text.replaceAll(secret, label);
@@ -119,15 +119,15 @@ export interface RedactorOptions {
   env?: NodeJS.ProcessEnv;
   // The user's home; default os.homedir().
   home?: string;
-  // Literal secrets that are not in the environment (the dashboard and MCP tokens, SF-125): output
+  // Literal secrets that are not in the environment (the dashboard and MCP tokens): output
   // replaces them wherever they stand.
   secrets?: readonly string[];
 }
 
-// The shortest environment value output redacts (SF-125): a reviewer quoting code that holds a
+// The shortest environment value output redacts: a reviewer quoting code that holds a
 // short value ("1", true, main) is quoting code, not a secret.
 const OUTPUT_MIN_VALUE = 8;
-// The free-text fields of a reviewer's output (SF-125): the verdict's summary, its items' problem
+// The free-text fields of a reviewer's output: the verdict's summary, its items' problem
 // and expected (review.ts), the suggestions' what and why (simplify.ts). Every other field stays as
 // it is: the ledger and the scope checks compare them.
 const OUTPUT_LISTS: ReadonlyArray<[string, readonly string[]]> = [['items', ['problem', 'expected']], ['suggestions', ['what', 'why']]];
@@ -165,7 +165,7 @@ export class Redactor {
     this.#outputPattern = literal.length > 0 ? new RegExp(`(?<![A-Za-z0-9])(?:${literal.map(escape).join('|')})(?![A-Za-z0-9])`, 'g') : undefined;
   }
 
-  // A reviewer's output (SF-125): a deep copy whose free-text fields (OUTPUT_LISTS and summary) lose
+  // A reviewer's output: a deep copy whose free-text fields (OUTPUT_LISTS and summary) lose
   // every key text() knows, every environment value of OUTPUT_MIN_VALUE characters or more and
   // every given secret, each as [redacted]. Never withheld whole; every other field stays as it is.
   output<T>(value: T): T {

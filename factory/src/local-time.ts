@@ -1,4 +1,4 @@
-// The local time of a stored timestamp (SF-049). The factory stores every time as ISO 8601 UTC
+// The local time of a stored timestamp. The factory stores every time as ISO 8601 UTC
 // (jobs.ts now()); what it prints for the user is the time of the zone the sf process runs in.
 const pad = (value: number): string => String(value).padStart(2, '0');
 

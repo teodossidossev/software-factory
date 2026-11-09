@@ -1,7 +1,6 @@
-// MR preparation and the push (SF-089, from src/execution.ts): Clean (markClean, the commit and
-// rebase, the conflict turn and the MR text turn), the Retry of a transient failure (SF-087),
-// approve (the push), the merge request on the Git host (SF-048) and the Merge request screen
-// (the MR text, the branch and the base the user edits).
+// MR preparation and the push: Clean (markClean, the commit and rebase, the conflict turn and the
+// MR text turn), the Retry of a transient failure, approve (the push), the merge request on the Git
+// host and the Merge request screen (the MR text, the branch and the base the user edits).
 import { createReadStream } from 'node:fs';
 import { type FileHandle, realpath } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
@@ -35,7 +34,7 @@ import { TESTS_RUNNER, testsEvent } from './events.js';
 import { markedGroups } from './prompts.js';
 import { exists, type FixOptions, type Live, type RunningReview } from './shared.js';
 
-// The Merge request screen (SF-080): the needs_human codes of a push that failed or was refused,
+// The Merge request screen: the needs_human codes of a push that failed or was refused,
 // in which the MR text stays editable (the prepared commit and its worktree are kept until the push).
 const MR_PUSH_CODES: readonly string[] = ['mr_push_failed', 'mr_push_protected'];
 
@@ -51,7 +50,7 @@ const FIELD_FIXED = {
   handed_over: 'The branch is in your checkout.',
 } as const;
 
-// The guard's own errors (SF-122): a guard-terms.txt that cannot be used, a scan that failed.
+// The guard's own errors: a guard-terms.txt that cannot be used, a scan that failed.
 const GUARD_ERRORS: readonly string[] = ['guard_terms_invalid', 'guard_failed'];
 
 // Whether an error is one of the guard's own, which stop the job with its code.
@@ -59,7 +58,7 @@ function isGuardError(error: unknown): error is FactoryError {
   return error instanceof FactoryError && GUARD_ERRORS.includes(error.code);
 }
 
-// Whether the MR text is the user's (SF-080): mr-factory.md exists and its message is not mr.md's.
+// Whether the MR text is the user's: mr-factory.md exists and its message is not mr.md's.
 function editedText(factory: string | undefined, text: string | undefined): boolean {
   return factory !== undefined && text !== undefined && !sameMessage(mrMessage(factory), mrMessage(text));
 }
@@ -87,14 +86,14 @@ interface MrTurn {
   previousError: string | undefined;
 }
 
-// What the end of a test run needs of the preparation that started it (SF-128): mr_attempts before
+// What the end of a test run needs of the preparation that started it: mr_attempts before
 // it, and its MR text turn.
 interface TestsContext {
   attempts: number;
   turn: MrTurn;
 }
 
-// The title of the Fix section of a failed test run (SF-128): ## Fix N: Tests.
+// The title of the Fix section of a failed test run: ## Fix N: Tests.
 const TESTS_TITLE = 'Tests';
 
 // A command in a stop's message: inline code, cut to 200 characters.
@@ -197,7 +196,7 @@ export class MrPart {
         await needsHuman(outcome.code, outcome.message);
         return;
       }
-      // The guard's terms (SF-122), before anything quotes the MR text: an invalid title is masked.
+      // The guard's terms, before anything quotes the MR text: an invalid title is masked.
       let terms: GuardTerm[];
       try {
         terms = await this.#guardTerms(live.workspace);
@@ -213,24 +212,24 @@ export class MrPart {
         await needsHuman(written.code, await maskedMrTextFailure(cwd, job.ticket, written, terms));
         return;
       }
-      // The nits of the reviewed iteration go into the MR text by the factory's hand (SF-051).
-      // So do the ledger's findings not fixed: accepted risks, contests and nits left (SF-052).
+      // The nits of the reviewed iteration go into the MR text by the factory's hand.
+      // So do the ledger's findings not fixed: accepted risks, contests and nits left.
       const withNitsText = withNits(written.text, await this.#nitsAtClean(job), job.iteration);
-      // And the suggestions of the simplification pass the user skipped (SF-055).
+      // And the suggestions of the simplification pass the user skipped.
       const skipped = await this.#peers.reviews.skippedSimplifications(job);
       const withSkipped = skipped === undefined ? withNitsText : withSimplifications(withNitsText, skipped.suggestions, skipped.iteration);
       const ledger = await this.#store.jobs.readLedger(job.workspace, job.ticket);
-      // The run of the workspace's test command on this iteration (SF-128), as ### Checks of ## Testing.
+      // The run of the workspace's test command on this iteration, as ### Checks of ## Testing.
       const tests = await this.#store.jobs.readTests(job.workspace, job.ticket, job.iteration);
       const checked = (text: string): string => (tests === undefined ? text : withChecks(text, checksLine(tests, job.iteration), job.iteration));
       const composed = checked(await this.#withAccepted(withFindings(withSkipped, ledger), job, ledger));
-      // The guard (SF-122): the lines the factory added lose every term; the Implementer's own
+      // The guard: the lines the factory added lose every term; the Implementer's own
       // lines are its to reword.
       const factoryText = redactAdded(composed, written.text, terms);
-      // The user's own MR text, saved on the Merge request screen (SF-080), stays the MR text: the
+      // The user's own MR text, saved on the Merge request screen, stays the MR text: the
       // commit is made with it, unless it fails the rules; then with the factory's new text, and the
       // screen shows the problem (approve refuses until it is saved valid or reset). It gets the
-      // factory's ### Checks too (SF-128), cleaned by the guard as the factory's lines are.
+      // factory's ### Checks too, cleaned by the guard as the factory's lines are.
       const saved = await this.#userMrText(job);
       const userText = saved === undefined ? undefined : redactAdded(checked(saved), saved, terms);
       const usersOwn = userText !== undefined && mrTextProblem(job.ticket, userText) === undefined;
@@ -264,7 +263,7 @@ export class MrPart {
       }
       if (userText !== undefined) {
         await this.#store.jobs.writeMrFactoryText(job.workspace, job.ticket, factoryText);
-        // The user's text as committed, with its ### Checks (SF-128).
+        // The user's text as committed, with its ### Checks.
         if (usersOwn && userText !== saved) {
           await this.#store.jobs.writeMrText(job.workspace, job.ticket, userText);
         }
@@ -277,7 +276,7 @@ export class MrPart {
         // The job stays preparing_mr while the Implementer resolves the conflicts.
         const targetRef = live.mr?.targetRef ?? job.base;
         live.mr = { targetRef, conflicts: prepared.files };
-        // From here a stop may leave a resolution no reviewer saw: no Retry (SF-087).
+        // From here a stop may leave a resolution no reviewer saw: no Retry.
         current = { ...job, mr_conflict_turn: true };
         await this.#store.jobs.write(current);
         live.session.send(conflictPrompt({ ticket: job.ticket, targetRef, targetCommit, files: prepared.files }), DENIED_TOOLS);
@@ -290,7 +289,7 @@ export class MrPart {
     }
   }
 
-  // The MR text the user saved (SF-080): mr.md when mr-factory.md exists and differs from it;
+  // The MR text the user saved: mr.md when mr-factory.md exists and differs from it;
   // undefined when the text was never edited or is the factory's again.
   async #userMrText(job: Job): Promise<string | undefined> {
     const factory = await this.#store.jobs.readMrFactoryText(job.workspace, job.ticket);
@@ -298,12 +297,12 @@ export class MrPart {
     return editedText(factory, text) ? text : undefined;
   }
 
-  // The MR text with the user's Accept over a stop of the iteration (SF-131), for a job without the
+  // The MR text with the user's Accept over a stop of the iteration, for a job without the
   // Claude review and at the Fix round limit: its gate override's code and what went unapplied, the
   // ledger entries the text already lists as not fixed aside (withFindings); with the Claude review
   // off, after gate_failed or gate_budget, the note that no reviewer passed the iteration. The text
   // as it is without such an override (an Accept over the gate of a job with the Claude review
-  // leaves the MR text as before).
+  // leaves the MR text unchanged).
   async #withAccepted(text: string, job: Job, ledger: LedgerEntry[]): Promise<string> {
     const override = await this.#store.jobs.readGateOverride(job.workspace, job.ticket, job.iteration);
     if (override === undefined || (claudeReviews(job) && override.code !== 'iteration_limit')) {
@@ -315,9 +314,9 @@ export class MrPart {
     return withAccepted(text, { code: override.code, unapplied }, job.iteration, noReviewer);
   }
 
-  // The nits of the job's last iteration (SF-051): those of its Claude review and of its gate,
-  // deduplicated by path and problem; the iteration that reaches Clean leaves them unapplied. Without
-  // the Claude review (SF-131) the gate's alone.
+  // The nits of the job's last iteration: those of its Claude review and of its gate, deduplicated
+  // by path and problem; the iteration that reaches Clean leaves them unapplied. Without the Claude
+  // review the gate's alone.
   async #nitsAtClean(job: Job): Promise<ReviewItem[]> {
     const { workspace, ticket, iteration } = job;
     const records = [claudeReviews(job) ? await this.#store.jobs.readReview(workspace, ticket, iteration) : undefined, await this.#store.jobs.readGate(workspace, ticket, iteration)];
@@ -350,8 +349,8 @@ export class MrPart {
       await this.#store.transition(job, 'needs_human', 'mr_turn_end', failure);
       return;
     }
-    // The resolution goes back to review with this transition: the conflict turn's window ends
-    // (SF-087), so a later stop of MR preparation after a clean verdict on it may be retried.
+    // The resolution goes back to review with this transition: the conflict turn's window ends,
+    // so a later stop of MR preparation after a clean verdict on it may be retried.
     const rebased: Job = { ...job, base_commit: targetCommit, target_commit: targetCommit, mr_conflict_turn: false };
     const note = [
       '## MR preparation',
@@ -363,8 +362,8 @@ export class MrPart {
     await this.#peers.reviews.startReview(await this.#store.transition(published, 'awaiting_review', 'mr_turn_end', undefined, [notificationLine(changes)]));
   }
 
-  // The branch holds the one commit on top of the target. With hand-over on (SF-073; the
-  // workspace's handoff in workspaces.json, else SF_HANDOFF, SF-083) the factory hands it over to
+  // The branch holds the one commit on top of the target. With hand-over on (the workspace's
+  // handoff in workspaces.json, else SF_HANDOFF) the factory hands it over to
   // the workspace's checkout at once (handed_over); a refusal leaves it in ready_for_human_review
   // with the reason (handoff_skipped), and so does hand-over off, naming the setting. The worktree
   // stays until the hand-over or the push.
@@ -414,7 +413,7 @@ export class MrPart {
   // Whether MR preparation may start: awaiting_review, the retry after a failed preparation, or the
   // user's Accept (acceptGate, which checked the state); returns whether it is the retry.
   checkPrepareMr(job: Job, accepted = false): boolean {
-    // A prepared commit means the preparation ended (a failed push): not a retry (SF-073).
+    // A prepared commit means the preparation ended (a failed push): not a retry.
     const retry = !accepted && job.state === 'needs_human' && job.mr_attempts > 0 && job.worktree !== null && job.prepared_commit === null;
     if (!(job.state === 'awaiting_review' || retry || accepted)) {
       throw new FactoryError('invalid_state', `mark_clean needs awaiting_review (or needs_human after an MR preparation); the job is ${job.state}.`);
@@ -422,7 +421,7 @@ export class MrPart {
     return retry;
   }
 
-  // The user's Retry (sf retry, the dashboard's Retry; SF-087): a job that a transient failure
+  // The user's Retry (sf retry, the dashboard's Retry): a job that a transient failure
   // stopped in MR preparation after the deciding clean verdict prepares the MR again, with no fix
   // turn, no review, no gate and no simplification pass. On mr_push_failed it is approve without
   // --as-is: the push again, in sf serve.
@@ -456,7 +455,7 @@ export class MrPart {
   // The Retry in the runner: MR preparation with the paths the clean path accepted. Those of the
   // last iteration's Claude review, and of its gate when the gate's verdict was clean (as #pickUp
   // builds them); after a gate override, the review's alone (as acceptGate passes them), whatever
-  // its verdict. Without the Claude review (SF-131) the last gate.json's: a clean one, or any after
+  // its verdict. Without the Claude review the last gate.json's: a clean one, or any after
   // an override.
   retryMrInRunner(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; branch: string }> {
     return this.#locks.locked(async () => {
@@ -497,8 +496,8 @@ export class MrPart {
 
   // The work of mark_clean, also run for a clean verdict of the review. Only under the lock.
   // With onAccepted (acceptGate, which checked the state), the user's Accept is recorded by it once
-  // every check has passed, before the job moves on: the gate override, or the Skip (SF-055).
-  // With retry (sf retry, SF-087, which passes the clean path's accepted paths), the state is
+  // every check has passed, before the job moves on: the gate override, or the Skip.
+  // With retry (sf retry, which passes the clean path's accepted paths), the state is
   // checkRetryMr's; the Implementer is told the previous error only when an MR text turn ran.
   async prepareMr(job: Job, sensitive: string[], options: { onAccepted?: () => Promise<void>; retry?: boolean } = {}): Promise<{ state: JobState; iteration: number; branch: string }> {
     const { workspace: workspaceName, ticket } = job;
@@ -536,7 +535,7 @@ export class MrPart {
     const target = await this.#locks.gitLocked(workspaceName, async () => {
       // A rebase left in progress when sf serve restarted during a conflict turn.
       await abortRebase(cwd);
-      // No turn while the user's checkout holds the branch (SF-073).
+      // No turn while the user's checkout holds the branch.
       await checkBranchFree(workspace.workCheckout, cwd, job.branch, ticket);
       return resolveTarget(workspace.workCheckout, job.base);
     });
@@ -545,10 +544,10 @@ export class MrPart {
     const attempt = attempts + 1;
     // from: awaiting_review, or needs_human: the retry and Accept or Skip (checkPrepareMr, checkAcceptGate), the Retry (checkRetryMr)
     const next = await this.#peers.start.syncTask(workspace, await this.#store.transition({ ...job, target_commit: target.commit, mr_attempts: attempt, mr_conflict_turn: false }, 'preparing_mr', 'prepare_mr'));
-    // A stop of the test step ran no MR text turn: the next turn is not told its error (SF-128).
+    // A stop of the test step ran no MR text turn: the next turn is not told its error.
     const previousError = afterTextTurn && !TEST_CODES.includes(job.error?.code ?? '') ? job.error?.message : undefined;
     const turn: MrTurn = { targetRef: target.ref, targetCommit: target.commit, attempt, previousError };
-    // The workspace's test command (SF-128) as the registry holds it now (when it cannot be read, as
+    // The workspace's test command as the registry holds it now (when it cannot be read, as
     // in hand): its run comes first, outside the lock, unless this iteration passed or was accepted.
     const command = (await this.#settings.resolve(workspaceName).catch(() => workspace)).testCommand;
     if (command !== undefined && !(await this.#testsSettled(next))) {
@@ -570,7 +569,7 @@ export class MrPart {
     session.send(prompt, DENIED_TOOLS);
   }
 
-  // Whether the test step of the job's iteration is done (SF-128): its record passed, or the user
+  // Whether the test step of the job's iteration is done: its record passed, or the user
   // accepted it without passing tests.
   // A record that cannot be read counts as none: the tests run again.
   async #testsSettled(job: Job): Promise<boolean> {
@@ -581,7 +580,7 @@ export class MrPart {
     return record?.outcome === 'passed' || record?.outcome === 'accepted_failing';
   }
 
-  // Starts the run of the workspace's test command on the job's worktree (SF-128), registered as the
+  // Starts the run of the workspace's test command on the job's worktree, registered as the
   // job's running review, so abort and stop() cancel it and the runner waits for it. It runs outside
   // the lock; its end applies under it (#tested). Only under the lock, in the runner.
   #startTests(job: Job, workspace: Workspace, command: string, context: TestsContext): void {
@@ -669,7 +668,7 @@ export class MrPart {
     }
   }
 
-  // The terms of a check of the guard (SF-122): the secrets, and the names of the user's other
+  // The terms of a check of the guard: the secrets, and the names of the user's other
   // workspaces when the workspace is guarded as the registry holds it now (when it cannot be read,
   // as in hand).
   async #guardTerms(workspace: Workspace): Promise<GuardTerm[]> {
@@ -678,7 +677,7 @@ export class MrPart {
     return terms;
   }
 
-  // The guard's check of the change at Clean (SF-122): the worktree's change as the factory would
+  // The guard's check of the change at Clean: the worktree's change as the factory would
   // commit it. Hits are a Guard fix (the usual iteration and its reviews) until GUARD_MAX_FIXES were
   // written, then a stop; undefined when nothing was found. Before the Accept is recorded.
   async #guardChange(job: Job, workspace: Workspace, cwd: string): Promise<{ state: JobState; iteration: number; branch: string } | undefined> {
@@ -711,12 +710,12 @@ export class MrPart {
     return stop('guard_hit', message.slice(0, MAX_GUARD_MESSAGE));
   }
 
-  // The terms of the push check (SF-122): the workspace as approve resolved it, just before.
+  // The terms of the push check: the workspace as approve resolved it, just before.
   async #pushTerms(workspace: Workspace): Promise<GuardTerm[]> {
     return (await checkTerms({ workspace, guarded: workspace.guard === true, configDir: configDir(), stateDir: this.#settings.config.stateDir, envFile: envFilePath() })).terms;
   }
 
-  // The guard's check before a push or a merge request the factory makes (SF-122): with commit,
+  // The guard's check before a push or a merge request the factory makes: with commit,
   // the commits the push of it to origin publishes; always the branch name and the job's MR text.
   // A hit refuses with guard_hit, naming the places only; nothing is pushed and the job is not changed.
   async #checkGuard(job: Job, workspace: Workspace, commit: string | undefined): Promise<void> {
@@ -763,14 +762,14 @@ export class MrPart {
     }
   }
 
-  // The job's prepared branch can be pushed: ready_for_human_review, handed_over (SF-073), or
+  // The job's prepared branch can be pushed: ready_for_human_review, handed_over, or
   // needs_human after a push that failed (the worktree is kept until the push).
   #approvable(job: Job): boolean {
     return job.state === 'ready_for_human_review' || job.state === 'handed_over' || (job.state === 'needs_human' && job.prepared_commit !== null);
   }
 
   #checkApprovable(job: Job, command: string): void {
-    // A cut-off step of the hand-over is repaired first (SF-073).
+    // A cut-off step of the hand-over is repaired first.
     if (job.handover !== undefined && job.handover.step !== null) {
       throw cutOffError(job, job.handover.step);
     }
@@ -795,15 +794,15 @@ export class MrPart {
     if (job.state !== 'handed_over' && tip !== job.prepared_commit && !asIs) {
       throw new FactoryError('branch_changed', `The tip of ${job.branch} is ${tip.slice(0, 12)}, not the prepared ${(job.prepared_commit ?? '').slice(0, 12)}: it was edited by hand. Approve with --as-is to push it as it is.`);
     }
-    // The MR text the push and the merge request carry (SF-080); a handed-over branch the user
+    // The MR text the push and the merge request carry; a handed-over branch the user
     // pushes with their own commits carries theirs.
     if (!(job.state === 'handed_over' && plan.source === undefined)) {
       await this.#checkMrText(job, workspace, checkout, job.state === 'handed_over' ? job.handover!.saved : job.prepared_commit);
     }
-    // The guard (SF-122) on every push the factory makes, --as-is included.
+    // The guard on every push the factory makes, --as-is included.
     await this.#checkGuard(job, workspace, plan.commit);
-    // The commit the guard checked is what is pushed (SF-122), so a branch that moved on since is
-    // not published unchecked; a handed-over job's saved commit through its saved ref, as before.
+    // The commit the guard checked is what is pushed, so a branch that moved on since is not
+    // published unchecked; a handed-over job's saved commit is pushed through its saved ref.
     const pushFailure = await this.#locks.gitLocked(workspaceName, () => pushBranch(checkout, job.branch, job.base, plan.source ?? plan.commit));
     if (pushFailure !== undefined) {
       if (job.state === 'handed_over') {
@@ -827,7 +826,7 @@ export class MrPart {
       }
       after = await this.#peers.handover.leaveCheckout(job, workspace, true);
     } else if (job.worktree !== null) {
-      // The worktree stays until the push (SF-073); a failure keeps its path for the next action.
+      // The worktree stays until the push; a failure keeps its path for the next action.
       const worktree = job.worktree;
       const failure = await this.#locks.gitLocked(workspaceName, () => removeWorktree(checkout, worktree));
       if (failure === undefined) {
@@ -864,7 +863,7 @@ export class MrPart {
     };
   }
 
-  // What Approve pushes of a handed-over job (SF-073), from the branch's tip T in the checkout: the
+  // What Approve pushes of a handed-over job, from the branch's tip T in the checkout: the
   // saved commit when the user did not commit (T is B), the user's commits when they descend from
   // B, else branch_changed.
   async #handedOverPush(job: Job, checkout: string, tip: string): Promise<{ commit: string; source: string | undefined; message: string | undefined }> {
@@ -911,7 +910,7 @@ export class MrPart {
     });
   }
 
-  // sf mr create (SF-048): opens the merge request of a pushed job on the Git host, or reuses the
+  // sf mr create: opens the merge request of a pushed job on the Git host, or reuses the
   // one already open for the branch; from ready_for_human_review it is approve (the push) and then
   // the merge request, in one action. The host and its token are checked before anything is pushed.
   createMergeRequest(workspaceName: string, ticket: string): Promise<MrOutcome> {
@@ -947,7 +946,7 @@ export class MrPart {
     });
   }
 
-  // The Merge request screen (SF-080): the job's MR text as mrMessage reads mr.md, the factory's
+  // The Merge request screen: the job's MR text as mrMessage reads mr.md, the factory's
   // (mr-factory.md, or the same without one), whether and when the user edited it, the branch and
   // the base and whether each can change, every problem of the saved text, the state of the screen
   // (editable, or why not), the target (the workspace's Git host and the repository of its origin),
@@ -1005,7 +1004,7 @@ export class MrPart {
     };
   }
 
-  // The problems the Merge request screen lists (SF-122): found on the text as it is, and quoted
+  // The problems the Merge request screen lists: found on the text as it is, and quoted
   // from it with the guard's terms masked first (a quote is cut, which would cut a secret out of
   // its match). When the masked text gives other problems, or the terms cannot be read, a problem
   // that quotes the text says only which field fails.
@@ -1029,7 +1028,7 @@ export class MrPart {
     return problems.map((problem) => (problem.message.includes('"') ? { field: problem.field, message: `The ${problem.field} does not pass the rules.` } : problem));
   }
 
-  // From the job's events (SF-080): the last save that is not undone by a reset after it, the
+  // From the job's events: the last save that is not undone by a reset after it, the
   // last factory_new after the last save or reset, and the last change to pushed.
   async #mrEvents(job: Job): Promise<{ saved_at: string | null; factory_new_at: string | null; pushed_at: string | null }> {
     const found = { saved_at: null as string | null, factory_new_at: null as string | null, pushed_at: null as string | null };
@@ -1068,7 +1067,7 @@ export class MrPart {
     return found;
   }
 
-  // The MR text can be edited (SF-080): ready_for_human_review, or needs_human after a push that
+  // The MR text can be edited: ready_for_human_review, or needs_human after a push that
   // failed or was refused (the prepared commit and its worktree are kept until the push).
   #mrEditable(job: Job): boolean {
     return job.state === 'ready_for_human_review' || (job.state === 'needs_human' && job.prepared_commit !== null && MR_PUSH_CODES.includes(job.error?.code ?? ''));
@@ -1085,7 +1084,7 @@ export class MrPart {
     }
   }
 
-  // Save of the Merge request screen (SF-080), as approve runs: refused at once in a state it
+  // Save of the Merge request screen, as approve runs: refused at once in a state it
   // does not take, then once the runner has ended (runner_active while a request runs), checked
   // again. The text is composed as mr.md is written (messageText of mrMessage) and must pass
   // mrTextProblem as the factory's does; the branch and the base, when they change, are checked
@@ -1108,7 +1107,7 @@ export class MrPart {
       const message = mrMessage(messageText({ title: input.title, body: input.body }));
       const text = messageText(message);
       if (mrTextProblem(ticket, text) !== undefined) {
-        // Masked before the problem cuts its quote (SF-122): validity is the original text's.
+        // Masked before the problem cuts its quote: validity is the original text's.
         const terms = await this.#pushTerms(await this.#settings.resolve(workspaceName));
         throw new FactoryError('mr_text_invalid', maskTerms(`The MR text is invalid: ${maskedMrTextProblem(ticket, text, terms)!}.`, terms));
       }
@@ -1121,7 +1120,7 @@ export class MrPart {
     });
   }
 
-  // Reset to factory text (SF-080): mr-factory.md back as mr.md (it stays), and the commit message
+  // Reset to factory text: mr-factory.md back as mr.md (it stays), and the commit message
   // rewritten as a save does; branch and base stay. Refused when the text already is the factory's.
   resetMr(workspaceName: string, ticket: string): Promise<MrSaved> {
     return this.#locks.locked(async () => {
@@ -1198,7 +1197,7 @@ export class MrPart {
     });
   }
 
-  // A rename before the first push (SF-080): the job not pushed, handed over or with a merge
+  // A rename before the first push: the job not pushed, handed over or with a merge
   // request; a valid name that is neither protected nor the base, that exists neither in the
   // checkout nor on origin; the branch never pushed (not on origin) and checked out in no worktree
   // but the job's own, the user's checkout included. Otherwise branch_locked with the reason.
@@ -1234,7 +1233,7 @@ export class MrPart {
     }
   }
 
-  // A base change before the push (SF-080): the job's branch has never reached origin (a failed
+  // A base change before the push: the job's branch has never reached origin (a failed
   // push may have; git ls-remote), and the new base exists on origin and contains the commit the
   // change was rebased onto at Clean, so the merge request carries only the job's commit;
   // otherwise base_unrelated. The commit is not rebased.
@@ -1265,19 +1264,19 @@ export class MrPart {
     }
   }
 
-  // Before a push (SF-080): the MR text is valid and is the message of the commit the push would
+  // Before a push: the MR text is valid and is the message of the commit the push would
   // carry (the prepared commit; in handed_over, the saved one), else mr_text_invalid naming the
   // problem. Saving a valid text or Reset clears it. Not for a handed-over branch the user pushes
   // with their own commits.
   // The problem quotes the title, which the guard has not checked yet: every match of the push
-  // check's terms in it is masked (SF-122).
+  // check's terms in it is masked.
   async #checkMrText(job: Job, workspace: Workspace, checkout: string, commit: string | null): Promise<void> {
     const text = await this.#store.jobs.readMrText(job.workspace, job.ticket);
     if (text === undefined) {
       return;
     }
     if (mrTextProblem(job.ticket, text) !== undefined) {
-      // Masked before the problem cuts its quote (SF-122).
+      // Masked before the problem cuts its quote.
       const terms = await this.#pushTerms(workspace);
       const message = `The MR text is invalid: ${maskedMrTextProblem(job.ticket, text, terms)!}. Save a valid text, or reset it to the factory's, on the Merge request screen.`;
       throw new FactoryError('mr_text_invalid', maskTerms(message, terms));
@@ -1288,7 +1287,7 @@ export class MrPart {
     }
   }
 
-  // sf mr merge (SF-048): merges the job's open merge request through the host's API (no push, no
+  // sf mr merge: merges the job's open merge request through the host's API (no push, no
   // force). The host's refusal (conflicts, failing required checks, a draft) comes back as
   // mr_not_mergeable with its reason, and nothing changes.
   mergeMergeRequest(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; mr: JobMr }> {
@@ -1310,7 +1309,7 @@ export class MrPart {
     });
   }
 
-  // sf mr status (SF-048): what the host says of the job's merge request now. A merge request the
+  // sf mr status: what the host says of the job's merge request now. A merge request the
   // host has merged or closed meanwhile (by hand) is recorded so; nobody is notified.
   async mergeRequestStatus(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; mr: JobMr; status: MergeRequestStatus }> {
     const job = await this.#store.job(workspaceName, ticket);

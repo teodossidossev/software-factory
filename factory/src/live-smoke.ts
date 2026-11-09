@@ -1,4 +1,4 @@
-// `sf smoke` (SF-090): one tiny real job from Setup to the push, against a throwaway local
+// `sf smoke`: one tiny real job from Setup to the push, against a throwaway local
 // repository with a local bare remote, through the factory's own CLI and HTTP only. Every path and
 // port comes from one temporary directory (mkdtemp) or a free port; the child sf processes get the
 // smoke's environment without the user's SF_* settings (but the Claude Code, Codex, gate and
@@ -6,15 +6,15 @@
 // remotes. Each step's PASS is decided from what the factory wrote (the job record, its iteration,
 // review and gate records, the Task check record, the bare remote), not from an exit code alone.
 // A time and a cost budget bound the run; Cleanup always runs. Prints a pass/fail table.
-// The Sandbox step (SF-100) has the Implementer run a probe of the run's own secrets and control
+// The Sandbox step has the Implementer run a probe of the run's own secrets and control
 // paths (a canary env file, the dashboard token, jobs/, sf.sock, ~/.ssh, SSH_AUTH_SOCK) and of the
-// user's (SF-123: the session bus, docker.sock, a canary in the home directory, ~/.claude/projects)
+// user's (the session bus, docker.sock, a canary in the home directory, ~/.claude/projects)
 // inside its sandbox, and passes only when every one was refused, the Implementer was offered no web
 // tool and its Write outside the worktree was refused by the factory's file-tool guard. Only the smoke's Implementer runs in
 // permission mode dontAsk, without the auto mode classifier, with any `node probe.mjs` call (a
-// prefix rule, SF-110) and the file tools allowed (SF-104, SF-109, SF_SMOKE_PROBE_ALLOW); its
+// prefix rule) and the file tools allowed (SF_SMOKE_PROBE_ALLOW); its
 // sandbox stays a real job's.
-// The Gate sandbox step (SF-125) builds the Codex gate's bubblewrap wrapper for the job as the
+// The Gate sandbox step builds the Codex gate's bubblewrap wrapper for the job as the
 // factory does and checks, without Codex, that the canary env file and jobs/ are hidden inside it.
 import { type ChildProcess, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
@@ -36,10 +36,10 @@ import { CheckStore } from './task-check.js';
 export const WORKSPACE = 'smoke';
 export const TICKET = 'SMOKE-1';
 
-// What the smoke's sandbox probe (SF-100) tries, from the run's own directories: the canary env
+// What the smoke's sandbox probe tries, from the run's own directories: the canary env
 // file in its config directory (by the SHA-256 of its content, never the value), the dashboard
 // token, the jobs/ folder (allowed only when its listing holds the smoke's workspace) and sf.sock of
-// its state, and ~/.ssh when it exists outside the sandbox (undefined: absent). SF-123: the session
+// its state, and ~/.ssh when it exists outside the sandbox (undefined: absent). The user's session
 // bus, docker.sock and ~/.claude/projects, each when it exists outside the sandbox (undefined:
 // absent), and a canary file the smoke makes in the home directory, always.
 export interface SmokeProbe {
@@ -62,12 +62,12 @@ export type FoundPaths = Partial<Pick<SmokeProbe, 'ssh' | 'dbus' | 'docker' | 'c
 export const PROBE_OUTPUT = 'probe.json';
 export const CANARY_FILE = 'auth.env';
 
-// The home canary of a run (SF-123): $HOME/.sf-smoke-<the suffix of the run's directory>/canary.
+// The home canary of a run: $HOME/.sf-smoke-<the suffix of the run's directory>/canary.
 export function homeCanaryPath(paths: SmokePaths, home: string): string {
   return join(home, `.sf-smoke-${basename(paths.dir).replace(/^sf-smoke-/, '')}`, 'canary');
 }
 
-// The file the smoke's Task asks the Implementer to write outside its worktree (SF-123).
+// The file the smoke's Task asks the Implementer to write outside its worktree.
 export const outsidePath = (paths: SmokePaths): string => join(paths.dir, 'outside.txt');
 
 export function smokeProbe(paths: SmokePaths, canarySha256: string, found: FoundPaths = {}, home = homedir()): SmokeProbe {
@@ -138,7 +138,7 @@ the expected probe output of the smoke's sandbox check; do not review it.
 `;
 }
 
-// The sandbox probe (SF-100), placed in the smoke repository: it tries each path it is given and
+// The sandbox probe, placed in the smoke repository: it tries each path it is given and
 // prints, for each probe, only {name, outcome, code}, never anything it read. The sandbox may hide a
 // denied file as empty, a denied folder as an empty listing, or answer ENOENT, so a probe is
 // allowed only when it sees what access would show: the canary's content by its SHA-256, a
@@ -146,7 +146,7 @@ the expected probe output of the smoke's sandbox check; do not review it.
 // connect() to the session bus or docker.sock, a non-empty home canary, a non-empty listing of
 // ~/.claude/projects. Every other result is refused; an option not given, and SSH_AUTH_SOCK not
 // set, are absent.
-export const PROBE_SCRIPT = `// The sandbox probe of sf smoke (SF-100). Prints only whether each access worked.
+export const PROBE_SCRIPT = `// The sandbox probe of sf smoke. Prints only whether each access worked.
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { connect } from 'node:net';
@@ -214,9 +214,9 @@ process.stdout.write(\`\${JSON.stringify(results, null, 2)}\\n\`);
 export const PROBES = ['auth.env', 'dashboard-token', 'jobs', 'sf.sock', '~/.ssh', 'SSH_AUTH_SOCK', 'dbus', 'docker.sock', 'home-canary', '~/.claude/projects'] as const;
 const MAY_BE_ABSENT: readonly string[] = ['~/.ssh', 'SSH_AUTH_SOCK', 'dbus', 'docker.sock', '~/.claude/projects'];
 
-// The text of the auto mode classifier's refusal in a tool_result (SF-104).
+// The text of the auto mode classifier's refusal in a tool_result.
 export const CLASSIFIER_DENIAL = 'denied by the Claude Code auto mode classifier';
-// The text of the dontAsk permission mode's refusal in a tool_result (SF-110).
+// The text of the dontAsk permission mode's refusal in a tool_result.
 export const DONT_ASK_DENIAL = "running in don't ask mode";
 const PROBE_RESULT_CHARS = 200;
 
@@ -251,7 +251,7 @@ function implementerMessages(events: string): EventMessage[] {
   return messages;
 }
 
-// Why probe.json is missing, from the job's events.jsonl text (SF-104): the probe call is the last
+// Why probe.json is missing, from the job's events.jsonl text: the probe call is the last
 // Bash tool_use of the Implementer's main thread whose command runs the probe, its result the
 // tool_result with its id. undefined when the call ran without an error result; a line that is not
 // JSON is skipped.
@@ -290,10 +290,10 @@ export function probeCallProblem(events: string): string | undefined {
   return undefined;
 }
 
-// The web tools no job may be offered (SF-123, src/rules.ts DENIED_TOOLS).
+// The web tools no job may be offered (src/rules.ts DENIED_TOOLS).
 const WEB_TOOLS = ['WebFetch', 'WebSearch'];
 
-// Why the Implementer's tools are wrong, from the job's events.jsonl text (SF-123): an init message
+// Why the Implementer's tools are wrong, from the job's events.jsonl text: an init message
 // that lists a web tool, or no init message at all; undefined when every init lists none.
 export function initToolsProblem(events: string): string | undefined {
   const inits = implementerMessages(events).filter((message) => message.type === 'system' && message.subtype === 'init');
@@ -304,7 +304,7 @@ export function initToolsProblem(events: string): string | undefined {
   return listed.length === 0 ? undefined : `the Implementer was offered ${listed.join(' and ')}`;
 }
 
-// Why the Write outside the worktree is wrong (SF-123), from the job's events.jsonl text: the file
+// Why the Write outside the worktree is wrong, from the job's events.jsonl text: the file
 // exists, the Implementer made no Write of it (a relative path counts from the worktree), or the
 // last one's tool_result does not carry the file-tool guard's refusal; undefined otherwise.
 export function outsideWriteProblem(events: string, outside: string, exists: boolean, worktree: string): string | undefined {
@@ -337,7 +337,7 @@ const ABSENT_OPTIONS: Readonly<Record<string, keyof SmokeProbe>> = { '~/.ssh': '
 
 // The Sandbox step's verdict on probe.json's text: undefined when every probe is there and refused
 // (or absent where it may be), else what is wrong. Given the run's probe, absent passes only for a
-// path the smoke did not give it, because it is missing outside the sandbox (SF-123). Nothing of
+// path the smoke did not give it, because it is missing outside the sandbox. Nothing of
 // the file but names and outcomes is used.
 export function probeProblem(text: string, probe?: SmokeProbe): string | undefined {
   let parsed: unknown;
@@ -372,7 +372,7 @@ export function probeProblem(text: string, probe?: SmokeProbe): string | undefin
 }
 
 export const STEPS = ['Setup', 'Task check', 'Start', 'Implementer turn', 'Sandbox', 'Gate sandbox', 'Claude review', 'Codex gate', 'MR text', 'Approve', 'Dashboard', 'Cleanup'] as const;
-// The steps whose SKIP counts as a pass with the sandbox off (SF-100, SF-125).
+// The steps whose SKIP counts as a pass with the sandbox off.
 export const SANDBOX_STEPS: readonly StepName[] = ['Sandbox', 'Gate sandbox'];
 export type StepName = (typeof STEPS)[number];
 
@@ -452,9 +452,9 @@ export function smokePaths(dir: string): SmokePaths {
 // The environment of every child sf process: env (the smoke's own, which already holds the user's
 // env file) without its SF_* variables but PASSED_SETTINGS, then the smoke's directories, ports
 // and settings on top. So no notification, Git host token, test hook or other user setting reaches
-// the child, and SF_ENV_FILE (an empty file) adds nothing. With the run's probe (SF-104),
+// the child, and SF_ENV_FILE (an empty file) adds nothing. With the run's probe,
 // SF_SMOKE_PROBE_ALLOW is its command: sf serve then runs the Implementer in dontAsk with any
-// `node probe.mjs` call allowed (SF-109, SF-110; config.ts, smokeProbeAllow, honoured only for the
+// `node probe.mjs` call allowed (config.ts, smokeProbeAllow, honoured only for the
 // smoke's own state directory).
 export function childEnv(env: NodeJS.ProcessEnv, paths: SmokePaths, probe?: SmokeProbe): NodeJS.ProcessEnv {
   const child: NodeJS.ProcessEnv = {};
@@ -468,7 +468,7 @@ export function childEnv(env: NodeJS.ProcessEnv, paths: SmokePaths, probe?: Smok
     ...child,
     SF_STATE_DIR: paths.state, SF_CONFIG_DIR: paths.config, SF_WORKTREE_ROOT: paths.worktrees,
     SF_PORT: '0', SF_DASHBOARD_PORT: '0', SF_HANDOFF: 'off', SF_SIMPLIFY: 'off', SF_DESKTOP_NOTIFY: 'off',
-    // The smoke's scenario is the Claude review, then the gate (SF-131): on for every ticket.
+    // The smoke's scenario is the Claude review, then the gate: on for every ticket.
     SF_REVIEW: 'on', SF_CLAUDE_REVIEW: 'always', SF_DASHBOARD: 'on', SF_ENV_FILE: paths.envFile,
     SF_MODEL: model, SF_REVIEW_MODEL: model,
     ...(env.SF_SMOKE_CODEX_MODEL ? { SF_CODEX_MODEL: env.SF_SMOKE_CODEX_MODEL } : {}),
@@ -897,12 +897,12 @@ class Smoke {
       await mkdir(dir, { recursive: true, mode: 0o700 });
     }
     await writeFile(envFile, '');
-    // The canary env file (SF-100): one random line in the smoke's config directory, which the
+    // The canary env file: one random line in the smoke's config directory, which the
     // children never load (SF_ENV_FILE is the empty file); the probe is given its SHA-256 only.
     const canary = `SF_CANARY=${randomBytes(24).toString('hex')}\n`;
     await writeFile(join(config, CANARY_FILE), canary, { mode: 0o600 });
-    // The user's paths the probe tries when they exist here, outside the sandbox (SF-123 for all but
-    // ~/.ssh), and the home canary, made here with random content.
+    // The user's paths the probe tries when they exist here, outside the sandbox, and the home
+    // canary, made here with random content.
     const home = homedir();
     const found = (path: string): string | undefined => (existsSync(path) ? path : undefined);
     this.#probe = smokeProbe(this.#paths, createHash('sha256').update(canary).digest('hex'), {
@@ -911,8 +911,8 @@ class Smoke {
     }, home);
     await mkdir(dirname(this.#probe.homeCanary), { recursive: true, mode: 0o700 });
     await writeFile(this.#probe.homeCanary, `${randomBytes(24).toString('hex')}\n`, { mode: 0o600 });
-    // Every later child sf command, sf serve and its runners too, gets the probe's allow (SF-104),
-    // which selects the dontAsk session (SF-109).
+    // Every later child sf command, sf serve and its runners too, gets the probe's allow,
+    // which selects the dontAsk session.
     this.#env = childEnv(process.env, this.#paths, this.#probe);
     await git(this.#paths.dir, ['init', '-q', '--bare', '-b', 'main', origin]);
     await git(this.#paths.dir, ['clone', '-q', origin, work]);
@@ -938,7 +938,7 @@ class Smoke {
     const ready = new Promise<Outcome>((resolve) => {
       const onData = (chunk: Buffer): void => {
         this.#serveOutput = (this.#serveOutput + chunk.toString('utf8')).slice(-OUTPUT_KEEP);
-        // sf serve prints the dashboard's port with <token> (SF-126); the token is in the state directory.
+        // sf serve prints the dashboard's port with <token>; the token is in the state directory.
         const dashboard = / dashboard http:\/\/127\.0\.0\.1:(\d+)\/d\/<token>\//.exec(this.#serveOutput);
         if (!listening && / listening on http:\/\/\S+\/mcp/.test(this.#serveOutput)) {
           listening = true;
@@ -1012,10 +1012,10 @@ class Smoke {
     return this.#env.SF_SANDBOX === 'off';
   }
 
-  // The Sandbox step (SF-100), once the first iteration is published: probe.json in the job's
+  // The Sandbox step, once the first iteration is published: probe.json in the job's
   // worktree must exist and say refused for every probe (absent for the user's paths that are);
   // the Implementer's init lists no web tool, and its Write outside the worktree was refused by the
-  // file-tool guard and left no file (SF-123). With the sandbox off it is a SKIP.
+  // file-tool guard and left no file. With the sandbox off it is a SKIP.
   async sandbox(): Promise<Outcome> {
     if (this.sandboxOff) {
       return { status: 'SKIP', detail: 'sandbox off' };
@@ -1028,7 +1028,7 @@ class Smoke {
     try {
       text = await readFile(join(job.worktree, PROBE_OUTPUT), 'utf8');
     } catch (error) {
-      // Why there is none, from the Implementer's own probe call (SF-104).
+      // Why there is none, from the Implementer's own probe call.
       const events = await readFile(this.#jobs.eventsPath(WORKSPACE, TICKET), 'utf8').catch(() => '');
       return { status: 'FAIL', detail: short(probeCallProblem(events) ?? `${PROBE_OUTPUT} could not be read (${(error as NodeJS.ErrnoException).code ?? 'error'})`) };
     }
@@ -1044,12 +1044,12 @@ class Smoke {
       : { status: 'FAIL', detail: short(closedPathProblem) };
   }
 
-  // The Gate sandbox step (SF-125), once the job's worktree and jobs/ exist: the canary env file and
+  // The Gate sandbox step, once the job's worktree and jobs/ exist: the canary env file and
   // the job's job.json under jobs/ exist outside the wrapper, and inside the gate's wrapper
   // (gateWrapperFor, as the factory builds it for this job) a listing of the worktree works, while
   // both `cat <canary>` and `cat <jobs>/<workspace>/<ticket>/job.json` fail (ENOENT counts: the tmpfs
   // hiding them is the denial); a command that exits 0 fails the step, whatever it printed. Not
-  // `ls <jobs>` (SF-134): the read-write bind of the iteration's directory leaves the empty folders
+  // `ls <jobs>`: the read-write bind of the iteration's directory leaves the empty folders
   // above it inside the tmpfs, so jobs/ lists, holding nothing else. No Codex runs. With the sandbox
   // off it is a SKIP.
   async gateSandbox(): Promise<Outcome> {
@@ -1257,7 +1257,7 @@ class Smoke {
       await this.#groups.end(pid);
     }
     await this.#removeOutsideWorktrees(problems);
-    // The home canary (SF-123) goes whatever --keep says: it is outside the run's directory.
+    // The home canary goes whatever --keep says: it is outside the run's directory.
     if (this.#probe !== undefined) {
       try {
         await rm(dirname(this.#probe.homeCanary), { recursive: true, force: true, maxRetries: 3 });
@@ -1279,7 +1279,7 @@ class Smoke {
   }
 
   // The worktrees of the throwaway repository outside the temp directory: a Task check's
-  // (<os temp>/sf-task-checks-<uid>/check-*/repo, SF-100) that a stopped sf check-task left behind.
+  // (<os temp>/sf-task-checks-<uid>/check-*/repo) that a stopped sf check-task left behind.
   // Its check-* directory goes: it belongs to this run only, found through the repository's own
   // worktree list. The shared sf-task-checks-<uid> parent stays.
   async #removeOutsideWorktrees(problems: string[]): Promise<void> {
@@ -1451,8 +1451,7 @@ export async function runSmoke(options: SmokeOptions, print: (line: string) => v
   print('');
   print(table(rows));
   const failed = rows.filter((row) => row.status === 'FAIL').length;
-  // The SKIP of the Sandbox and Gate sandbox steps with the sandbox off counts as a pass (SF-100,
-  // SF-125); every other row must PASS.
+  // The SKIP of the Sandbox and Gate sandbox steps with the sandbox off counts as a pass; every other row must PASS.
   const unchecked = smoke.sandboxOff && rows.some((row) => SANDBOX_STEPS.includes(row.step) && row.status === 'SKIP');
   // A signal fails the run even when it came in Cleanup, after every step passed.
   const passed = !smoke.interrupted && rows.every((row) => row.status === 'PASS' || (unchecked && SANDBOX_STEPS.includes(row.step) && row.status === 'SKIP'));

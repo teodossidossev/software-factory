@@ -1,5 +1,5 @@
 // routing.js, the dashboard's fifth script (DASHBOARD_SCRIPTS in src/dashboard.ts), built from
-// web/routing.ts into dist/web/ (SF-150): the view shown, the routing and the page's delegated
+// web/routing.ts into dist/web/: the view shown, the routing and the page's delegated
 // click, input, change and key handlers. A classic script, loaded in order with defer, sharing the
 // page's globals with the others. This file has no import or export on purpose: the compiler keeps
 // it a script, so its top-level names stay the page's globals.
@@ -21,12 +21,12 @@ const isField = (node: Element | null): node is Field => isTag(node, 'input') ||
 // or a planned ticket's page 'ticket' (ui.ticket); ui.opener is the key of the card that opened
 // it; pending: the hash names a job or ticket not loaded yet. On the Stream: sel, the selected
 // entry (j, k, G), and open, the toggles open.
-// related: the card whose dependencies and dependents the board shows (SF-084), or null. On
-// Changes (SF-079), cx as the prototype's: the view ('all' or an iteration), the selected file, the
+// related: the card whose dependencies and dependents the board shows, or null. On
+// Changes, cx as the prototype's: the view ('all' or an iteration), the selected file, the
 // tree's cursor and rows, the filter, the flat list, the closed folders, the diff layout ('side' or
 // 'uni', kept in localStorage), Collapse unchanged, the folds opened, the path a path link
 // opened, checked against its iteration's list once it is read, and whether the tree is open
-// (SF-119: a phone folds it above the diff).
+// (a phone folds it above the diff).
 interface UiState {
   screen: string;
   job: string | null;
@@ -189,7 +189,7 @@ function back(): void {
 // The view of the URL hash (on load and on every hashchange). A hash of a job or ticket the board
 // does not have shows the board; it is tried again when the jobs and tickets first arrive.
 function route(): void {
-  // The morning digest (SF-103): #digest, the newest, or #digest/<id>.
+  // The morning digest: #digest, the newest, or #digest/<id>.
   const digest = /^digest(?:\/([0-9A-Za-z-]+))?$/.exec(decodeURIComponent(location.hash.slice(1)));
   if (digest !== null) {
     const id = digest[1] ?? null;
@@ -198,7 +198,7 @@ function route(): void {
     }
     return;
   }
-  // The Stats page (SF-117).
+  // The Stats page.
   if (decodeURIComponent(location.hash.slice(1)) === 'stats') {
     if (ui.screen !== 'stats') {
       openStats();
@@ -253,9 +253,9 @@ function renderJobs(): void {
   }
 }
 
-// The elements whose tap does something of its own: their titles are not shown by a tap (SF-119).
+// The elements whose tap does something of its own: their titles are not shown by a tap.
 const TIP_CONTROLS = 'button, a, input, select, textarea, summary, label, [role="tab"], [role="treeitem"], [role="menuitem"], .card';
-// SF-119: on a phone or a device without hover a tap shows what a hover shows: the title of
+// On a phone or a device without hover a tap shows what a hover shows: the title of
 // the element tapped when it is the only place of that detail (not a control, not inside a
 // card, whose tap opens its page), or a dependency chip's (its state in words).
 function tipOf(target: EventTarget | null | undefined): string {
@@ -271,7 +271,7 @@ function tipOf(target: EventTarget | null | undefined): string {
 }
 
 // The delegated click listener of the top bar, the board, the cards, the job page (its header, the
-// Stream and the composer), the planned ticket page (SF-081) and the toast (the drawer keeps its own
+// Stream and the composer), the planned ticket page and the toast (the drawer keeps its own
 // listeners).
 function onClick(event: MouseEvent): void {
   const tip = tipOf(event.target);
@@ -286,7 +286,7 @@ function onClick(event: MouseEvent): void {
   if (state.openMenu !== null && (target === null || target.dataset.menu === undefined)) {
     setCardMenu(null);
   }
-  // The Rules menu (SF-072) closes on a click outside it.
+  // The Rules menu closes on a click outside it.
   if (clicked !== null && clicked.closest('.menuwrap') === null && !byId('rulesMenu').hidden) {
     closeRules();
   }
@@ -294,7 +294,7 @@ function onClick(event: MouseEvent): void {
     toggleRules();
     return;
   }
-  // The hand-over panel's More menu (SF-107) closes on a choice and on a click outside it.
+  // The hand-over panel's More menu closes on a choice and on a click outside it.
   if (state.handoverMenu && clicked !== null && clicked.closest('[data-homenu]') === null
     && (clicked.closest('.ho-menu') === null || clicked.closest('[role="menuitem"]') !== null)) {
     setHandoverMenu(false);
@@ -319,7 +319,7 @@ function onClick(event: MouseEvent): void {
     tkImageAction(target.dataset.tkimg, target.dataset.name);
     return;
   }
-  // The Merge request screen (SF-080): its bar, Edit | Preview, and the diff against the factory's text.
+  // The Merge request screen: its bar, Edit | Preview, and the diff against the factory's text.
   if (target.dataset.mr !== undefined) {
     mrAction(target.dataset.mr);
     return;
@@ -417,7 +417,7 @@ function onClick(event: MouseEvent): void {
       else ui.cx.collapsed.delete(row.path);
     }
     selectRow(target.dataset.trow, true);
-    // SF-119: on a phone a chosen file folds the tree, so its diff is in view.
+    // On a phone a chosen file folds the tree, so its diff is in view.
     if (row?.type === 'file' && media(NARROW_QUERY)) {
       ui.cx.tree = false;
       renderChanges();
@@ -459,7 +459,7 @@ function onClick(event: MouseEvent): void {
 // 'composer' is the stop block's, as applyWantedFocus reads it.
 const focusOf = (value: string | undefined): 'composer' | 'stop' | undefined => (value === undefined ? undefined : value === 'composer' ? 'composer' : 'stop');
 
-// The Merge request screen's fields (SF-080) and the draft's field each one types into.
+// The Merge request screen's fields and the draft's field each one types into.
 const MR_INPUTS: ReadonlyMap<string, MrField> = new Map([['mrTitle', 'title'], ['mrBranch', 'branch'], ['mrBase', 'base'], ['mrBody', 'body']]);
 
 // What typing in the job page keeps: the draft of the message box (and Send follows it), a note on
@@ -479,7 +479,7 @@ function onInput(event: Event): void {
   }
   const mrField = target === null ? undefined : MR_INPUTS.get(target.id);
   if (target !== null && mrField !== undefined && ui.screen === 'mr' && state.key !== null) {
-    // The Merge request screen (SF-080): the draft, and the checks, the side panel and the bar after it.
+    // The Merge request screen: the draft, and the checks, the side panel and the bar after it.
     const m = mrState(state.key);
     m[mrField] = target.value;
     m.outcome = null;
@@ -509,7 +509,7 @@ function onInput(event: Event): void {
 function onChange(event: Event): void {
   const node = targetOf(event.target);
   const target = isField(node) ? node : null;
-  // A rule of the Rules menu (SF-072).
+  // A rule of the Rules menu.
   if (isTag(target, 'input') && target.name === 'rule' && target.checked) {
     setRule(target.value);
     return;
@@ -527,8 +527,8 @@ function onChange(event: Event): void {
 // job page: Escape closes an open confirmation, then goes back one level (a screen of the job to
 // its Stream, the Stream to the board); c, m and s switch the screens; on the Stream j and k select
 // an entry, G the last, Enter toggles the selected one; Ctrl+Enter in the message box sends.
-// Escape closes the toast first. Alt+Up and Alt+Down move a queued card with SF-071's queue. On
-// Changes (SF-079): / the filter (Arrow Down or Enter in it goes to the tree), the tree's keys
+// Escape closes the toast first. Alt+Up and Alt+Down move a queued card with the run queue. On
+// Changes: / the filter (Arrow Down or Enter in it goes to the tree), the tree's keys
 // (treeKey), F7 / Shift+F7 and n / p the next and previous file, Arrow Left and Right on the
 // divider its width.
 function onKey(event: KeyboardEvent): void {
@@ -536,14 +536,14 @@ function onKey(event: KeyboardEvent): void {
     return;
   }
   const target = targetOf(event.target);
-  // Escape closes the open Rules menu first (SF-072).
+  // Escape closes the open Rules menu first.
   if (event.key === 'Escape' && !byId('rulesMenu').hidden) {
     event.preventDefault();
     closeRules();
     byId('rulesBtn').focus();
     return;
   }
-  // The hand-over panel's More menu (SF-107): Escape closes it only (the page stays), the focus back
+  // The hand-over panel's More menu: Escape closes it only (the page stays), the focus back
   // on More; Arrow Down and Up move between its items.
   if (state.handoverMenu && event.key === 'Escape') {
     event.preventDefault();
@@ -561,13 +561,13 @@ function onKey(event: KeyboardEvent): void {
     dividerKey(event);
     return;
   }
-  // The Merge request screen (SF-080): Ctrl+S saves, in a field or not.
+  // The Merge request screen: Ctrl+S saves, in a field or not.
   if (ui.screen === 'mr' && (event.ctrlKey || event.metaKey) && !event.altKey && (event.key === 's' || event.key === 'S')) {
     event.preventDefault();
     mrAction('save');
     return;
   }
-  // The planned ticket page (SF-081): Ctrl+S saves while editing.
+  // The planned ticket page: Ctrl+S saves while editing.
   if (ui.screen === 'ticket' && (event.ctrlKey || event.metaKey) && !event.altKey && (event.key === 's' || event.key === 'S') && ui.ticket !== null && TK[ui.ticket]?.tab === 'edit') {
     event.preventDefault();
     tkAction('save');
@@ -601,7 +601,7 @@ function onKey(event: KeyboardEvent): void {
   if (state.drawer !== null || state.ticketConfirm !== null) {
     return;
   }
-  // SF-071: Alt+Up / Alt+Down move the focused queued card one place.
+  // Alt+Up / Alt+Down move the focused queued card one place.
   if (ui.screen === 'board' && event.altKey && !event.ctrlKey && !event.metaKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
     const item = closestOf(document.activeElement, '#qlist .card[data-q]');
     const row = item ? ticketByKey(item.dataset.ticket ?? null) : null;
@@ -615,7 +615,7 @@ function onKey(event: KeyboardEvent): void {
     return;
   }
   if (ui.screen === 'board' && event.key === 'Escape' && (state.openMenu !== null || ui.related !== null)) {
-    // SF-084: Escape closes a card's ⋯ menu (the focus back on its toggle), else clears the highlight.
+    // Escape closes a card's ⋯ menu (the focus back on its toggle), else clears the highlight.
     event.preventDefault();
     const menu = state.openMenu;
     if (menu !== null) {
@@ -627,7 +627,7 @@ function onKey(event: KeyboardEvent): void {
     return;
   }
   if (ui.screen === 'board') {
-    // A folded column's cards are passed over (SF-119).
+    // A folded column's cards are passed over.
     const cards = [...document.querySelectorAll<HTMLElement>('#cols .col:not(.folded) .card')];
     const at = cards.findIndex((card) => card === document.activeElement);
     if (event.key === 'j' || event.key === 'k') {
@@ -690,7 +690,7 @@ function onKey(event: KeyboardEvent): void {
       }
     }
   } else if (ui.screen === 'changes') {
-    // SF-119: a key that targets the filter or the rows of a tree folded on a phone opens it first;
+    // A key that targets the filter or the rows of a tree folded on a phone opens it first;
     // Enter and Space on the fold itself toggle it as a button.
     if (event.key === '/') {
       event.preventDefault();

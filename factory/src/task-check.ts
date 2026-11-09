@@ -1,10 +1,10 @@
-// The Task check (SF-054): before Start, a fresh, read-only Agent SDK query() reads the Task file
+// The Task check: before Start, a fresh, read-only Agent SDK query() reads the Task file
 // and the repository only, and says whether an Implementer could build it without a design
 // decision of its own. It runs in a temporary detached worktree of the work checkout at the Task's
 // base (the code the Implementer starts from), which has no .software-factory folder, and a
 // PreToolUse hook refuses every Read, Grep or Glob that reaches outside that worktree and every other
-// tool but the SDK's StructuredOutput (SF-070). Its prompt holds the repository's and the user's
-// coding rules read at the checkout's commit (SF-059, src/rules-docs.ts) and the Task file, and
+// tool but the SDK's StructuredOutput. Its prompt holds the repository's and the user's
+// coding rules read at the checkout's commit (src/rules-docs.ts) and the Task file, and
 // nothing of the Context owner's conversation, the jobs or the ledger; its output is a paraphrase first, then
 // findings, the files it expects to change and a verdict. A check is stored by the sha256 of the Task file it read, under the state
 // directory, never in the work checkout. It only advises: nothing here starts, refuses or changes
@@ -62,7 +62,7 @@ export const checkOutput = z.strictObject({
 export type CheckFinding = z.output<typeof checkFinding>;
 export type CheckOutput = z.output<typeof checkOutput>;
 export type CheckVerdict = CheckOutput['verdict'];
-// The schema sent as outputFormat, draft-07 without $schema (as the review's, SF-044).
+// The schema sent as outputFormat, draft-07 without $schema (as the review's).
 const { $schema: _draft, ...checkSchema } = z.toJSONSchema(checkOutput, { target: 'draft-7' });
 export const CHECK_SCHEMA: Record<string, unknown> = checkSchema;
 
@@ -71,7 +71,7 @@ export function checkVerdict(findings: readonly CheckFinding[]): CheckVerdict {
   return findings.some((item) => item.severity !== 'nit') ? 'not_ready' : 'ready';
 }
 
-// The findings of the files the checker expects against the Task's scope (SF-053), when it has one:
+// The findings of the files the checker expects against the Task's scope, when it has one:
 // an expected file outside scope and may_touch is missing (major: the job would get a scope fix
 // item for it), a scope entry no expected file matches is overreach (nit). One the checker gave
 // already (the same kind naming the path) is not repeated.
@@ -115,8 +115,8 @@ export function settleCheck(task: string, output: CheckOutput): CheckOutput {
   return { paraphrase: output.paraphrase, findings, files: output.files, verdict: checkVerdict(findings) };
 }
 
-// The prompt of the check: what it is and how to answer, the <rules> block when there is one
-// (SF-059), then the Task file. Nothing else: no conversation, job, review or ledger.
+// The prompt of the check: what it is and how to answer, the <rules> block when there is one,
+// then the Task file. Nothing else: no conversation, job, review or ledger.
 export function checkPrompt(ticket: string, task: string, rules = ''): string {
   return [
     `Readiness check of the Task file of ticket ${ticket}, before an Implementer builds it. You check; you change nothing.`,
@@ -140,7 +140,7 @@ export function checkPrompt(ticket: string, task: string, rules = ''): string {
 
 // The sha256 of a Task file's text (UTF-8), as write_task reports it.
 export const taskSha256 = (task: string): string => createHash('sha256').update(task, 'utf8').digest('hex');
-// The sha256 a check of a Task file is stored and found by (SF-065): taskSha256 of the text when
+// The sha256 a check of a Task file is stored and found by: taskSha256 of the text when
 // it refers to no image; otherwise the sha256 of the text, a newline and the sorted
 // "<name>:<sha256>" lines of its referenced images ("<name>:missing" for one that cannot be read),
 // so a changed image makes the check stale.
@@ -208,7 +208,7 @@ export class CheckStore {
     return path;
   }
 
-  // The record of an automatic check (SF-086), unless signal aborts first: a complete temp file is
+  // The record of an automatic check, unless signal aborts first: a complete temp file is
   // written, then signal is looked at and the file renamed into place in one synchronous step, so a
   // cancel either comes before the commit (nothing stored, the temp file goes) or after it (the run
   // had ended). Returns the path, or undefined when cancelled.
@@ -249,7 +249,7 @@ export class CheckStore {
     return (await this.records(workspace, ticket)).reduce<CheckRecord | undefined>((last, record) => (last === undefined || record.ended_at > last.ended_at ? record : last), undefined);
   }
 
-  // Every stored check of the ticket, of every version of its Task file (SF-130: its rounds and
+  // Every stored check of the ticket, over all versions of its Task file (its plan-check rounds and
   // cost), failed ones included, in the order they ended; an unreadable file is left out.
   async records(workspace: string, ticket: string): Promise<CheckRecord[]> {
     let names: string[];
@@ -304,7 +304,7 @@ export function severityCounts(output: CheckOutput | null): Record<Severity, num
 }
 
 // What the board shows of a ticket's last check: none, the verdict (ready, not_ready) or failed;
-// not_needed (SF-130) when the current Task file has no check and checkNeed says it needs none, with
+// not_needed when the current Task file has no check and checkNeed says it needs none, with
 // check_reason, checkNeed's reason (null otherwise); stale when it read another version of the Task
 // file than the current one; running while one runs in sf serve; and the note of Start's
 // confirmation.
@@ -321,7 +321,7 @@ export interface CheckSummary {
 }
 
 // The note of Start's confirmation: "not checked", "stale", "check failed" or "not ready: N blocker,
-// M major"; null for a ready check of the current Task file and for a Task that needs none (SF-130).
+// M major"; null for a ready check of the current Task file and for a Task that needs none.
 // Start is never refused for it.
 export function startNote(summary: Pick<CheckSummary, 'state' | 'stale' | 'blockers' | 'majors'>): string | null {
   if (summary.state === 'not_needed') {
@@ -359,13 +359,13 @@ export interface CheckOptions {
   model: string | undefined;
   // SF_TASK_CHECK_MAX_TURNS.
   maxTurns: number;
-  // SF_RULES_MAX_BYTES (SF-059).
+  // SF_RULES_MAX_BYTES.
   rulesMaxBytes: number;
   // The factory's state and config directories: off limits to the checker, with the work
   // checkout's .software-factory folder (the other Task files, the MR texts, the archive).
   stateDir: string;
   configDir: string;
-  // The worktree root (SF_WORKTREE_ROOT): every job's worktree is off limits too (SF-100).
+  // The worktree root (SF_WORKTREE_ROOT): every job's worktree is off limits too.
   worktreeRoot: string;
   signal?: AbortSignal;
   // Every SDK message of the session, in order; a failing call changes nothing of the outcome.
@@ -572,7 +572,7 @@ export async function cutOutsideLinks(root: string): Promise<string[]> {
 
 // The check's checkout: a detached worktree of the work checkout at the Task's base (fetched from
 // origin when there is one, as Start does), in a new directory check-* under the Task checks' parent
-// directory (SF-100: <tmp>/sf-task-checks-<uid>, which every other session denies; an unsafe one
+// directory (<tmp>/sf-task-checks-<uid>, which every other session denies; an unsafe one
 // fails the check with task_check_dir_unsafe), with its symbolic links out of it cut
 // (cutOutsideLinks). remove() takes it away and prunes its registration.
 async function checkCheckout(checkout: string, task: string): Promise<{ root: string; commit: string; remove: () => Promise<void> }> {
@@ -604,10 +604,10 @@ async function checkCheckout(checkout: string, task: string): Promise<{ root: st
 
 // Runs one check of the given Task text in its own worktree of the work checkout at the Task's
 // base. Never throws: a checkout that cannot be made or a failed session is a failed record, its
-// error redacted like a failed review's (SF-045). The worktree is removed afterwards.
+// error redacted like a failed review's. The worktree is removed afterwards.
 export async function runTaskCheck(workspace: Workspace, ticket: string, task: string, options: CheckOptions): Promise<CheckRecord> {
   const startedAt = new Date().toISOString();
-  // The referenced images, read by the factory from the work checkout's folder (SF-065): the
+  // The referenced images, read by the factory from the work checkout's folder: the
   // session may not read .software-factory/. One that cannot be used fails the check; no session runs.
   const references = attachmentReferences(ticket, task);
   let images: ResolvedImage[];
@@ -660,7 +660,7 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
         model: options.model ?? null, cost_usd: null, started_at: startedAt, ended_at: new Date().toISOString(),
       };
     }
-    // The paths off limits to every session (SF-100), but the Task checks' parent directory the check
+    // The paths off limits to every session, but the Task checks' parent directory the check
     // runs in: on top of checkDeniedRules for the tools, and for the sandbox.
     let denials: Awaited<ReturnType<typeof pathDenials>>;
     try {
@@ -713,7 +713,7 @@ async function currentTask(workspace: Workspace, ticket: string): Promise<{ text
 }
 
 // The last check of a ticket as the views show it: the record, whether it is stale, the sha256 of
-// the current Task file, and check_reason (SF-130): checkNeed's reason when the current Task file
+// the current Task file, and check_reason: checkNeed's reason when the current Task file
 // has no check and needs none, else null.
 export interface CheckView {
   check: CheckRecord | null;
@@ -739,7 +739,7 @@ export interface TaskChecksOptions extends Omit<CheckOptions, 'signal' | 'onMess
   onSettled?: (workspace: string, ticket: string) => void;
 }
 
-// Who hears of the checks of TaskChecks besides onSettled (SF-086: the automatic checks).
+// Who hears of the checks of TaskChecks besides onSettled (the automatic checks).
 export interface CheckObserver {
   // A manual check of the ticket (start) was accepted and is about to run.
   manualStart?: (workspace: string, ticket: string) => void;
@@ -748,7 +748,7 @@ export interface CheckObserver {
 }
 
 // The checks of sf serve: one running per ticket at most, started from the dashboard (start) or by
-// the automatic checks (startAuto, SF-086); the views of the dashboard and the Context owner's
+// the automatic checks (startAuto); the views of the dashboard and the Context owner's
 // task_check tool.
 export class TaskChecks {
   readonly store: CheckStore;
@@ -775,8 +775,8 @@ export class TaskChecks {
     return [...this.#running].some((key) => key.startsWith(`${workspace}/`));
   }
 
-  // The checks running or being set up, manual and automatic, by workspace and ticket (SF-101: sf
-  // serve's serve-busy). Read-only: a copy.
+  // The checks running or being set up, manual and automatic, by workspace and ticket (sf serve's
+  // serve-busy). Read-only: a copy.
   running(): Array<{ workspace: string; ticket: string }> {
     return [...this.#running].map((key) => {
       const slash = key.indexOf('/');
@@ -797,7 +797,7 @@ export class TaskChecks {
     return { started, sha256 };
   }
 
-  // An automatic check (SF-086): as start, with signal passed to the check. A check cancelled
+  // An automatic check: as start, with signal passed to the check. A check cancelled
   // through signal stores nothing. ended settles with the stored record, or undefined when the
   // check was cancelled or could not be stored.
   startAuto(name: string, ticket: string, signal: AbortSignal): Promise<{ started: true; sha256: string; ended: Promise<CheckRecord | undefined> }> {
@@ -870,7 +870,7 @@ export class TaskChecks {
     return { check, stale, running: this.isRunning(name, ticket), current_sha256: current?.sha256 ?? null, check_reason: reason };
   }
 
-  // The board's summary of a ticket's last check against its current Task file; not_needed (SF-130)
+  // The board's summary of a ticket's last check against its current Task file; not_needed
   // when the view has a check_reason.
   async summary(name: string, ticket: string): Promise<CheckSummary> {
     const view = await this.view(name, ticket);

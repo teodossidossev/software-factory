@@ -1,4 +1,4 @@
-// The turn limit of an Implementer turn (SF-069): when a turn ends at maxTurns (SF_MAX_TURNS),
+// The turn limit of an Implementer turn: when a turn ends at maxTurns (SF_MAX_TURNS),
 // the factory goes on by itself, at most SF_TURN_LIMIT_CONTINUES times per chain of turns, while
 // the turn made progress: the worktree changed during it and it was not repeating one tool call.
 // Otherwise the job stops with a plain sentence. The session driver (src/session.ts) counts the

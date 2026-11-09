@@ -3,7 +3,7 @@
 // queued and run in order. When the queue is empty the driver reports the outcome of the turns
 // since it was last idle. Each prompt carries its own deny list; the driver does not know why.
 // It knows nothing about jobs, Git or MCP.
-// A turn that ends at maxTurns (SF-069) is put to the turnLimit hook: it answers with a
+// A turn that ends at maxTurns is put to the turnLimit hook: it answers with a
 // continuation, which runs next in the same session with the same deny list, or with the reason
 // the turn stops. Every prompt sent starts a chain; the driver sends at most turnLimitContinues
 // continuations per chain, whatever the hook answers.
@@ -26,18 +26,18 @@ const CLAUDE_SESSION_MARKERS = new Set([
   'CLAUDE_PID',
   'CLAUDE_EFFORT',
 ]);
-// No SSH_AUTH_SOCK (SF-100): the factory fetches and pushes itself, outside the sandbox, so no
+// No SSH_AUTH_SOCK: the factory fetches and pushes itself, outside the sandbox, so no
 // session needs the user's SSH agent.
 const KEPT_NAMES = new Set(['PATH', 'HOME', 'LANG', 'LANGUAGE', 'TERM', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TZ']);
 const KEPT_PATTERN = /^(LC_\w+|XDG_\w+|(HTTPS?|ALL|NO)_PROXY|(https?|all|no)_proxy|ANTHROPIC_\w+|CLAUDE_\w+)$/;
-// The cloud providers' credentials (SF-123): passed only when Claude Code itself runs on Bedrock or
+// The cloud providers' credentials: passed only when Claude Code itself runs on Bedrock or
 // Vertex, whose provider needs them; a workspace never does.
 const CLOUD_PATTERN = /^(AWS_\w+|GOOGLE_\w+|CLOUD_ML_\w+)$/;
 const CLOUD_PROVIDER_SWITCHES = ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX'];
 // A provider switch is on unless it is unset or plainly off; an unknown value counts as on, so a
 // Bedrock or Vertex setup never loses its credentials.
 const switchOn = (value: string | undefined): boolean => value !== undefined && !['', '0', 'false', 'no', 'off'].includes(value.trim().toLowerCase());
-// The passed variables sandboxed commands never see (SF-123): the Anthropic and cloud credentials
+// The passed variables sandboxed commands never see: the Anthropic and cloud credentials
 // and the OAuth token Claude Code itself uses.
 const SANDBOX_HIDDEN_PATTERN = /^(ANTHROPIC_\w+|AWS_\w+|GOOGLE_\w+|CLOUD_ML_\w+|CLAUDE_CODE_OAUTH_TOKEN)$/;
 
@@ -83,46 +83,46 @@ export interface SessionOptions {
   model?: string | undefined;
   // Continuations after a turn limit per chain (SF_TURN_LIMIT_CONTINUES); default 0.
   turnLimitContinues?: number | undefined;
-  // Builds the session's path denials (SF-100, src/sandbox-denials.ts): called once, by the first
+  // Builds the session's path denials (src/sandbox-denials.ts): called once, by the first
   // turn before its query(); its tools go on top of every prompt's deny list, its sandbox lists
-  // into the sandbox settings of every query and its hooks (the file-tool guard, SF-123) are every
+  // into the sandbox settings of every query and its hooks (the file-tool guard) are every
   // query's hooks. A failure fails that turn.
   pathDenials?: (() => Promise<PathDenials>) | undefined;
-  // Commands allowed past the permission check (SF-104): one exact allowedTools rule
+  // Commands allowed past the permission check: one exact allowedTools rule
   // Bash(<command>) each, never a prefix rule, but in a smoke session (smokeMode), which gets the
-  // one prefix rule SMOKE_PROBE_RULE instead (SF-110). Only sf smoke's probe sets it (config.ts,
+  // one prefix rule SMOKE_PROBE_RULE instead. Only sf smoke's probe sets it (config.ts,
   // smokeProbeAllow); the sandbox holds the command as any other.
   allowCommands?: string[] | undefined;
-  // sf smoke's session only (SF-109; turns.ts sets it exactly when config.smokeProbeAllow is set):
+  // sf smoke's session only (turns.ts sets it exactly when config.smokeProbeAllow is set):
   // permission mode dontAsk, without the auto mode classifier, so the probe reaches the sandbox,
   // with SMOKE_TOOLS allowed and, given allowCommands, the prefix rule SMOKE_PROBE_RULE in place of
-  // the exact rules (SF-110): the only session with a prefix rule, so the Implementer adding to the
+  // the exact rules: the only session with a prefix rule, so the Implementer adding to the
   // probe's command line still reaches the sandbox. dontAsk also approves any Bash command the
   // sandbox runs and the allow rules of the settings loaded; the sandbox, the path denials and every
   // other option stay a real job's. Without it (every real job): auto, the classifier.
   smokeMode?: boolean | undefined;
 }
 
-// How long after a query's end its orphaned sandboxes are looked for (SF-141): the query is aborted
+// How long after a query's end its orphaned sandboxes are looked for: the query is aborted
 // as it ends, and Claude Code's process, whose sandboxes are orphaned only once it has exited, may
 // take that long.
 const REAP_AFTER_QUERY_MS = 3_000;
 
-// The file tools the smoke's ticket needs (SF-109), allowed in its dontAsk session.
+// The file tools the smoke's ticket needs, allowed in its dontAsk session.
 export const SMOKE_TOOLS = ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'TodoWrite'] as const;
 
-// The smoke's sandbox probe script (SF-100), in the root of its repository (live-smoke.ts).
+// The smoke's sandbox probe script, in the root of its repository (live-smoke.ts).
 export const PROBE_SCRIPT_NAME = 'probe.mjs';
-// The allow rule of the probe in a smoke session (SF-110): any `node probe.mjs …` call.
+// The allow rule of the probe in a smoke session: any `node probe.mjs …` call.
 export const SMOKE_PROBE_RULE = `Bash(node ${PROBE_SCRIPT_NAME}:*)`;
 
-// The permission mode of a session (SF-109): dontAsk for the smoke's, auto for every other.
+// The permission mode of a session: dontAsk for the smoke's, auto for every other.
 function sessionPermissionMode(smokeMode: boolean | undefined): 'auto' | 'dontAsk' {
   return smokeMode === true ? 'dontAsk' : 'auto';
 }
 
 // The allowedTools of a session's query(): none for a real job; in a smoke session
-// SMOKE_PROBE_RULE when allowCommands is set (SF-110), and SMOKE_TOOLS; else the exact Bash rules of
+// SMOKE_PROBE_RULE when allowCommands is set, and SMOKE_TOOLS; else the exact Bash rules of
 // allowCommands.
 export function sessionAllowedTools(options: Pick<SessionOptions, 'allowCommands' | 'smokeMode'>): string[] {
   const commands = options.allowCommands ?? [];
@@ -135,7 +135,7 @@ export function sessionAllowedTools(options: Pick<SessionOptions, 'allowCommands
 interface Queued {
   prompt: string;
   disallowedTools: string[];
-  // The image blocks sent after the prompt text (SF-065); a continuation has none.
+  // The image blocks sent after the prompt text; a continuation has none.
   images?: ImageRef[] | undefined;
   // Continuations sent before this prompt in its chain: 0 for a prompt sent, n for the nth continuation.
   continued: number;
@@ -251,7 +251,7 @@ export class ImplementerSession {
     this.#sessionId = options.sessionId;
   }
 
-  // The permission mode the session runs in and its init message must report (SF-109).
+  // The permission mode the session runs in and its init message must report.
   get permissionMode(): 'auto' | 'dontAsk' {
     return sessionPermissionMode(this.#options.smokeMode);
   }
@@ -265,7 +265,7 @@ export class ImplementerSession {
     return this.#running;
   }
 
-  // images: sent after the prompt text in the same user message (SF-065); without any, the prompt
+  // images: sent after the prompt text in the same user message; without any, the prompt
   // goes to query() as the string.
   send(prompt: string, disallowedTools: string[], images?: ImageRef[]): void {
     if (this.#closed) {
@@ -347,7 +347,7 @@ export class ImplementerSession {
     return turn.continued < allowed ? { prompt: answer.prompt, disallowedTools: turn.disallowedTools, continued: turn.continued + 1 } : undefined;
   }
 
-  // The Bash sandboxes the query's Claude Code left behind (SF-141) end once it has exited: looked
+  // The Bash sandboxes the query's Claude Code left behind end once it has exited: looked
   // for REAP_AFTER_QUERY_MS after the query, under the factory's worktree root and state directory as
   // the environment names them. The timer holds neither the session nor its process: a runner that
   // exits sooner leaves them to sf serve's next look. Never throws.
@@ -368,7 +368,7 @@ export class ImplementerSession {
     const { prompt, disallowedTools, images } = next;
     this.#calls = [];
     await this.#hooks.prompt(prompt, next.continued, images);
-    // Closed while the hook ran (it reads the worktree, SF-069): no turn starts.
+    // Closed while the hook ran (it reads the worktree): no turn starts.
     if (this.#closed) {
       throw new TurnError('closed', 'The session was closed before the turn started.');
     }
@@ -407,7 +407,7 @@ export class ImplementerSession {
         env: { ...environment, CLAUDE_CODE_STARTUP_FAILURE_RESULTS: '1' },
         ...(this.#sessionId !== undefined ? { resume: this.#sessionId } : {}),
         ...(sandbox !== undefined ? { sandbox } : {}),
-        // The file-tool guard (SF-123), in every permission mode.
+        // The file-tool guard, in every permission mode.
         ...(denials?.hooks !== undefined ? { hooks: denials.hooks } : {}),
         ...(this.#options.model !== undefined ? { model: this.#options.model } : {}),
         ...(this.#options.claudePath !== undefined ? { pathToClaudeCodeExecutable: this.#options.claudePath } : {}),

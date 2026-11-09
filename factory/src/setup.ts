@@ -35,11 +35,11 @@ export interface WorkspaceRow {
   liveJobs: number;
   // Why the checkout cannot be used right now (missing, not a Git work tree), or null.
   problem: string | null;
-  // The workspace's own hand-over setting (SF-083), or null: SF_HANDOFF applies.
+  // The workspace's own hand-over setting, or null: SF_HANDOFF applies.
   handoff: HandoffMode | null;
-  // The workspace's colour on the board (SF-084): its configured color, else the hash of its name.
+  // The workspace's colour on the board: its configured color, else the hash of its name.
   color: WorkspaceColor;
-  // The morning digest (SF-103): its app (its own, else its name), its own description or null, the
+  // The morning digest: its app (its own, else its name), its own description or null, the
   // description derived from the repository (the edit form's placeholder) or null, and its switches.
   app: string;
   description: string | null;
@@ -47,14 +47,14 @@ export interface WorkspaceRow {
   digest: { track: boolean; my_work: boolean };
 }
 
-// The workspaces payload's settings (SF-103): the hand-over default (SF_HANDOFF) and the morning
+// The workspaces payload's settings: the hand-over default (SF_HANDOFF) and the morning
 // digest's time, weekdays only and language (its model only in workspaces.json).
 export interface WorkspaceSettings {
   handoff_default: HandoffMode;
   digest: Omit<DigestSettings, 'model'>;
 }
 
-// Add workspace's optional fields (SF-083, SF-084, SF-103); absent: SF_HANDOFF applies, the colour
+// Add workspace's optional fields; absent: SF_HANDOFF applies, the colour
 // by the name, no description, the name as the app, both digest switches off.
 export interface AddWorkspaceOptions {
   handoff?: HandoffMode;
@@ -64,7 +64,7 @@ export interface AddWorkspaceOptions {
   digest?: { track: boolean; my_work: boolean };
 }
 
-// The state of a ticket another one lands after (SF-084), one rule for the board and the job page:
+// The state of a ticket another one lands after, one rule for the board and the job page:
 // merged: its last job (live or archived) is pushed and merged into its base (the merge request
 // state the factory recorded, else Git: the branch tip is an ancestor of origin/<base> in the
 // workspace's checkout, only when no merge request state is recorded); pushed: pushed, not merged
@@ -84,7 +84,7 @@ export interface DependencyRow {
 // payload, built on every state change and page connect, runs no Git command beyond it.
 export const MERGE_CHECK_TTL_MS = 30_000;
 
-// A live job's Task file and the tickets it lands after (SF-084): the job page's Waits for, and the
+// A live job's Task file and the tickets it lands after: the job page's Waits for, and the
 // board's Needed by of the tickets it waits for.
 export interface JobDependencies {
   workspace: string;
@@ -103,13 +103,13 @@ export interface TicketRow {
   request: string | null;
   // The state of the ticket's last job when it ended, or null without a job.
   job: JobState | null;
-  // The tickets it lands after (SF-084), with their states, in the order of the Task file.
+  // The tickets it lands after, with their states, in the order of the Task file.
   lands_after: DependencyRow[];
-  // Its images (SF-064): .software-factory/<ticket>/, as listAttachments sees them.
+  // Its images: .software-factory/<ticket>/, as listAttachments sees them.
   attachments: Attachment[];
 }
 
-// An archived Task file: .software-factory/archive/<ticket>.md (SF-027).
+// An archived Task file: .software-factory/archive/<ticket>.md.
 export interface ArchivedRow {
   workspace: string;
   ticket: string;
@@ -136,10 +136,10 @@ export interface SetupOptions {
   exclusive: <T>(work: (scope: ExclusiveScope) => Promise<T>) => Promise<T>;
   // The clock of the merge check's cache (tests); Date.now by default.
   now?: () => number;
-  // The tickets' history (SF-081): New ticket records "created", Save "edited"; without it
+  // The tickets' history: New ticket records "created", Save "edited"; without it
   // nothing is recorded.
   history?: TicketHistory;
-  // SF_HANDOFF (SF-103: the workspaces payload's handoff_default); checkout by default.
+  // SF_HANDOFF (the workspaces payload's handoff_default); checkout by default.
   handoffDefault?: HandoffMode;
 }
 
@@ -186,7 +186,7 @@ async function isFile(path: string): Promise<boolean> {
   }
 }
 
-// A ticket's images for its row (SF-064); none when they cannot be listed (the row still shows).
+// A ticket's images for its row; none when they cannot be listed (the row still shows).
 async function attachmentsOf(workspace: Workspace, ticket: string): Promise<Attachment[]> {
   if (!canHaveAttachments(ticket)) {
     return [];
@@ -216,7 +216,7 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-// The skeleton of a new ticket (SF-028): the Task front matter, the heading and the marker with
+// The skeleton of a new ticket: the Task front matter, the heading and the marker with
 // its note. The User's own words are not in it: they open the conversation instead.
 export function draftContent(ticket: string, title: string, base: string): string {
   return `---\nticket: ${ticket}\ntitle: ${title}\nbase: ${base}\n---\n\n# ${ticket}: ${title}\n\n${DRAFT_MARKER}\n\n${DRAFT_NOTE}\n`;
@@ -259,7 +259,7 @@ export class Setup {
     this.#handoffDefault = options.handoffDefault ?? 'checkout';
   }
 
-  // The history record of a write by the User (SF-081), or none without a history.
+  // The history record of a write by the User, or none without a history.
   #record(name: string, ticket: string, kind: 'created' | 'edited'): ((sha256: string) => Promise<void>) | undefined {
     const history = this.#history;
     return history === undefined ? undefined : (sha256) => history.append(name, ticket, { kind, by: 'you', sha256 });
@@ -293,7 +293,7 @@ export class Setup {
     return rows;
   }
 
-  // The workspaces payload's settings (SF-103).
+  // The workspaces payload's settings.
   async workspaceSettings(): Promise<WorkspaceSettings> {
     const { model: _model, ...digest } = digestSettings(await loadRegistry(this.#configDir));
     return { handoff_default: this.#handoffDefault, digest };
@@ -301,9 +301,9 @@ export class Setup {
 
   // The same rules as `sf workspace add <name> --read <path> [--handoff ...] [--color ...]`: the name
   // pattern, an absolute path that is the root of a non-bare Git work tree, a name not registered
-  // yet. Until SF-019 the work checkout is the read checkout. handoff: the workspace's own hand-over
-  // setting (SF-083); undefined: SF_HANDOFF applies. color: its colour on the board (SF-084);
-  // undefined: the hash of its name. description, app and digest (SF-103): the morning digest's.
+  // yet. handoff: the workspace's own hand-over setting; undefined: SF_HANDOFF applies. color: its
+  // colour on the board; undefined: the hash of its name. description, app and digest: the morning
+  // digest's.
   addWorkspace(name: string, path: string, options: AddWorkspaceOptions = {}): Promise<WorkspaceRow> {
     return this.#exclusive(async () => {
       if (!WORKSPACE_NAME_PATTERN.test(name)) {
@@ -328,10 +328,10 @@ export class Setup {
     });
   }
 
-  // Edit of an existing workspace (SF-103): the form's fields replace the entry's (src/registry.ts
-  // editedEntry); work_checkout and rules_skip stay. The path is validated as Add does; changing it
-  // is refused while the workspace has a live job (workspace_busy), the other fields change at any
-  // time. The name cannot change.
+  // Edit of an existing workspace: the form's fields replace the entry's (src/registry.ts
+  // editedEntry); work_checkout, rules_skip, guard and test_command stay. The path is validated as
+  // Add does; changing it is refused while the workspace has a live job (workspace_busy), the other
+  // fields change at any time. The name cannot change.
   editWorkspace(name: string, edit: Omit<WorkspaceEdit, 'read_checkout'> & { path: string }): Promise<WorkspaceRow> {
     return this.#exclusive(async () => {
       if (!WORKSPACE_NAME_PATTERN.test(name)) {
@@ -363,7 +363,7 @@ export class Setup {
     });
   }
 
-  // The morning digest's settings of the Setup (SF-103): the time (HH:MM), weekdays only and the
+  // The morning digest's settings of the Setup: the time (HH:MM), weekdays only and the
   // language; the model stays as workspaces.json has it.
   saveDigestSettings(input: { at: string; weekdays_only: boolean; language: string }): Promise<WorkspaceSettings['digest']> {
     return this.#exclusive(async () => {
@@ -445,7 +445,7 @@ export class Setup {
   }
 
   // The Task files whose ticket has no live job, sorted by workspace and ticket, each with the
-  // tickets it lands after and their states (SF-084).
+  // tickets it lands after and their states.
   async tickets(): Promise<TicketRow[]> {
     const states = this.#dependencyStates();
     const rows: TicketRow[] = [];
@@ -461,7 +461,7 @@ export class Setup {
     return rows;
   }
 
-  // The Task files whose ticket has a live job and lands after another ticket (SF-084), with the
+  // The Task files whose ticket has a live job and lands after another ticket, with the
   // states of those tickets.
   async jobDependencies(): Promise<JobDependencies[]> {
     const states = this.#dependencyStates();
@@ -475,7 +475,7 @@ export class Setup {
     return rows;
   }
 
-  // The states of the tickets refs names (SF-071: the run queue's merged check), in their order;
+  // The states of the tickets refs names (the run queue's merged check), in their order;
   // fresh: the Git answer of whether a pushed job is merged is asked again, not taken from the
   // MERGE_CHECK_TTL_MS cache (and the cache gets the new answer).
   dependencyStates(refs: TicketRef[], { fresh }: { fresh: boolean }): Promise<DependencyRow[]> {
@@ -484,7 +484,7 @@ export class Setup {
 
   // The base of the ticket's last job, live or archived (the branch it is merged into), or
   // undefined without one: where the run queue fetches before it checks again whether the ticket is
-  // merged (SF-071).
+  // merged.
   async lastJobBase(ref: TicketRef): Promise<string | undefined> {
     const current = await this.#jobs.read(ref.workspace, ref.ticket).catch(() => undefined);
     return (current ?? (await this.#lastArchivedJob(ref)))?.base;
@@ -558,7 +558,7 @@ export class Setup {
     return undefined;
   }
 
-  // Merged: the merge request state the factory recorded (SF-048) decides when there is one (merged
+  // Merged: the merge request state the factory recorded decides when there is one (merged
   // or not: open and closed are not merged); only without one does Git decide, its answer kept
   // MERGE_CHECK_TTL_MS per ticket (fresh: asked again).
   async #merged(ref: TicketRef, job: JobFacts, entry: WorkspaceEntry | undefined, fresh: boolean): Promise<boolean> {
@@ -579,7 +579,7 @@ export class Setup {
     return merged;
   }
 
-  // The workspace of an attachment action (SF-064), with its name checked; the ticket's rules are
+  // The workspace of an attachment action, with its name checked; the ticket's rules are
   // the attachments module's.
   async #attachmentWorkspace(name: string): Promise<Workspace> {
     if (!WORKSPACE_NAME_PATTERN.test(name)) {
@@ -588,18 +588,18 @@ export class Setup {
     return resolveWorkspace(name, this.#configDir);
   }
 
-  // Adds one image to the ticket (SF-064) under file, or the next number; under the Execution's
+  // Adds one image to the ticket under file, or the next number; under the Execution's
   // lock, so a job cannot start between the guard and the write.
   addAttachment(name: string, ticket: string, data: Uint8Array, file?: string): Promise<Attachment> {
     return this.#exclusive(async () => addAttachment(await this.#attachmentWorkspace(name), ticket, data, this.#jobs, file));
   }
 
-  // Removes one image of the ticket (SF-064), under the same lock and guard.
+  // Removes one image of the ticket, under the same lock and guard.
   removeAttachment(name: string, ticket: string, file: string): Promise<{ name: string }> {
     return this.#exclusive(async () => removeAttachment(await this.#attachmentWorkspace(name), ticket, file, this.#jobs));
   }
 
-  // One image of the ticket with its bytes (SF-064).
+  // One image of the ticket with its bytes.
   async readAttachment(name: string, ticket: string, file: string): Promise<Attachment & { data: Buffer }> {
     return readAttachment(await this.#attachmentWorkspace(name), ticket, file);
   }
@@ -646,7 +646,7 @@ export class Setup {
   }
 
   // Moves <ticket>.md (and <ticket>.mr.md) into .software-factory/archive/, replacing an older
-  // archived copy, then the ticket's images (SF-064: the folder <ticket>/, replacing an older
+  // archived copy, then the ticket's images (the folder <ticket>/, replacing an older
   // archive/<ticket>/); a finished job of the ticket is archived first. All under one lock acquisition:
   // check, retire the job, then move the files. A failed retirement moves nothing; a file
   // operation that fails after it leaves the job archived and the files as far as they got.
@@ -678,7 +678,7 @@ export class Setup {
     });
   }
 
-  // Moves an archived Task file (and its MR text) back, then its images (SF-064); refused when the
+  // Moves an archived Task file (and its MR text) back, then its images; refused when the
   // ticket has a Task file or an images folder.
   restoreTicket(name: string, ticket: string): Promise<{ workspace: string; ticket: string; path: string }> {
     return this.#exclusive(async () => {
@@ -705,10 +705,10 @@ export class Setup {
     });
   }
 
-  // Deletes the Task file and the MR text of the ticket, active or archived, its images (SF-064:
-  // <ticket>/ and archive/<ticket>/) and the stored request; a finished job of the ticket is archived first (its history stays in the state
-  // directory, and so does the ticket's history file of SF-081, on purpose). The same order and
-  // failure behaviour as archiveTicket.
+  // Deletes the Task file and the MR text of the ticket, active or archived, its images (<ticket>/
+  // and archive/<ticket>/) and the stored request; a finished job of the ticket is archived first
+  // (its history stays in the state directory, and so does the ticket's history file, on purpose).
+  // The same order and failure behaviour as archiveTicket.
   deleteTicket(name: string, ticket: string): Promise<{ workspace: string; ticket: string; deleted: string[]; jobArchived: boolean }> {
     return this.#exclusive(async (scope) => {
       const target = await this.#ticketTarget(name, ticket);
@@ -755,7 +755,7 @@ export class Setup {
     return readTask(await resolveWorkspace(name, this.#configDir), ticket, archived);
   }
 
-  // The planned ticket page's Task file (SF-081): its text through the Task file reader (as
+  // The planned ticket page's Task file: its text through the Task file reader (as
   // taskText), its sha256 (the version a Save starts from) and its modification time.
   async taskFile(name: string, ticket: string): Promise<{ text: string; sha256: string; mtime: string }> {
     const text = await this.taskText(name, ticket);
@@ -764,7 +764,7 @@ export class Setup {
     return { text, sha256: taskSha256(text), mtime: stats.mtime.toISOString() };
   }
 
-  // Save on the planned ticket page (SF-081): the whole Task file through the Task file writer (its
+  // Save on the planned ticket page: the whole Task file through the Task file writer (its
   // validation, its refusal while a job of the ticket runs), only over the version the page read
   // (sha256; another one is task_changed), recorded as "edited" by you.
   saveTask(name: string, ticket: string, content: string, sha256: string): Promise<WriteTaskResult> {
@@ -781,7 +781,7 @@ export class Setup {
   }
 
   // The title of a ticket's Task file, read from the active file or, when it is not there, from
-  // its archived copy (SF-057); null when there is none to read (a deleted Task file, an
+  // its archived copy; null when there is none to read (a deleted Task file, an
   // unregistered workspace): the board's card falls back to the branch. Read for every job on
   // every refresh, so only the registry and the file are read (no Git check of the checkout); the
   // title is display text, never a decision.
@@ -870,7 +870,7 @@ export class Setup {
       }
       const base = await defaultBranch(workspace.workCheckout);
       await writeTask(workspace, ticket, draftContent(ticket, title, base), this.#jobs, { record: this.#record(name, ticket, 'created') });
-      // A new ticket starts without images (SF-064): a folder left behind by a Task file removed by
+      // A new ticket starts without images: a folder left behind by a Task file removed by
       // hand goes, once the skeleton is written (the writer's guard has passed).
       if (canHaveAttachments(ticket)) {
         await rm(join(workspace.workCheckout, TASK_DIR, ticket), { recursive: true, force: true });

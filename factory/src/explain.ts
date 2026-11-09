@@ -1,4 +1,4 @@
-// The plain explanation of each stop (SF-106). When sf serve sees a job in needs_human, one
+// The plain explanation of each stop. When sf serve sees a job in needs_human, one
 // structured model session with no tools (as the morning digest's) reads the stop's data (the Task's
 // goal, the stop's message, its ledger entries, the last Report, the user's own messages and the
 // stop's real answers) and writes, in the user's language, a headline, a short explanation, the
@@ -122,7 +122,7 @@ export async function currentExplanation(jobs: JobStore, job: Job): Promise<Expl
 
 // The ledger entries a ledger stop is about (the stop panel's, dashboard.ts stopOf): the unsettled
 // ones (escalated, review_disputed), the open ones (review_churn), the open blocker and major ones
-// (iteration_limit, SF-131: what an Accept leaves unapplied); null for any other stop.
+// (iteration_limit: what an Accept leaves unapplied); null for any other stop.
 export function ledgerStopEntries(code: string, ledger: LedgerEntry[]): LedgerEntry[] | null {
   if (code === 'escalated' || code === 'review_disputed') {
     return unsettled(ledger);
@@ -139,7 +139,7 @@ export interface StopAnswer {
 }
 
 // What stopAnswers reads of the job: its ledger and the Claude review of its last iteration (none
-// without the Claude review, SF-131).
+// without the Claude review).
 export type StopFacts = Pick<JobFacts, 'ledger' | 'review'>;
 
 // The sf command of a shown action (the one the dashboard posts): goon says "Go on.", say a message;

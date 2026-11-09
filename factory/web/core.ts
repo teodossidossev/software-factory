@@ -1,30 +1,30 @@
 // core.js, the first of the dashboard's scripts (DASHBOARD_SCRIPTS in src/dashboard.ts), built from
-// web/core.ts into dist/web/ (SF-146): the constants, the state, the small DOM, format and HTTP
+// web/core.ts into dist/web/: the constants, the state, the small DOM, format and HTTP
 // helpers and the connection tag. Each of them is a classic script, loaded in order with defer, and
 // shares the page's globals with the others. This file has no import or export on purpose: the
 // compiler keeps it a script, so its top-level names stay the page's globals.
 
-// Software Factory dashboard v3 (SF-077, SF-078), the port of docs/design/dashboard-v3/prototype.html:
+// Software Factory dashboard v3, the port of docs/design/dashboard-v3/prototype.html:
 // the top bar (the summary, the connection, the workspace filter, Archived, Workspaces and New
-// ticket; the queue controls and the Rules menu stay hidden until SF-071 and SF-072), the board's
+// ticket; the queue controls and the Rules menu are hidden without the run queue), the board's
 // five columns Queue, Implementing, Reviewing, Your turn and Done, whose cards say who acts now, why
 // a job stopped (one table, STOPS) and carry one primary action only where the user acts, and the
 // full pages a card opens: a job's page at #<ws>/<ticket> (/changes, /mr) and a planned ticket's
-// page at #<ws>/<ticket>/ticket (SF-081: the Task file to preview, edit and save, the plan in plain
+// page at #<ws>/<ticket>/ticket (the Task file to preview, edit and save, the plan in plain
 // words, its check, the conversation and the history, read from api/tickets/<ws>/<ticket>/page). The
-// job's page (SF-078): its
+// job's page: its
 // header with the screen switch, and the Stream, one chronological list of the job's entries
-// (SF-082: read page by page from api/jobs/<ws>/<ticket>/stream, then live from the stream's entries
-// events), with its stop block and the composer pinned at the bottom; the Changes screen (SF-079):
+// (read page by page from api/jobs/<ws>/<ticket>/stream, then live from the stream's entries
+// events), with its stop block and the composer pinned at the bottom; the Changes screen:
 // the file tree and the side-by-side or unified diff of an iteration's files, read from
-// api/jobs/<ws>/<ticket>/changes and /file; the Merge request screen (SF-080): the branch, the base,
+// api/jobs/<ws>/<ticket>/changes and /file; the Merge request screen: the branch, the base,
 // the MR title and text to edit, preview, save (api/jobs/<ws>/<ticket>/mr-view, mr-save and
 // mr-reset) and push. The board's messages go to the toast. The job's actions (approve, abort, say, Retry review, Accept and prepare MR, Simplify,
-// settle, Pause, Resume, Restart, archive and the merge request on the Git host, SF-048) go as POSTs
+// settle, Pause, Resume, Restart, archive and the merge request on the Git host) go as POSTs
 // to api/jobs/<ws>/<ticket>/<action>, each one a deliberate click, confirmed inline where it pushes,
 // ends, overrides or merges, never retried or replayed by the page. A Queue card starts its job
 // (POST api/tickets/<ws>/<ticket>/start, confirmed, never retried; its confirmation says when the
-// Task is not checked, the check is stale or not ready) and runs the Task check (SF-054: Check, POST
+// Task is not checked, the check is stale or not ready) and runs the Task check (Check, POST
 // api/tickets/<ws>/<ticket>/check; it only advises). Every value goes in through textContent; the
 // hrefs are the server's ChatGPT URL, checked against its fixed prefix, and a merge request's https
 // URL from the Git host.
@@ -33,7 +33,7 @@
 const RECONNECT_MS = 3000;
 const READ_TIMEOUT_MS = 10000;
 const TERMINAL_STATES: readonly JobState[] = ['pushed', 'aborted', 'failed'];
-// The rule at a usage limit's reset (SF-072), as the Rules menu names them.
+// The rule at a usage limit's reset, as the Rules menu names them.
 const ON_LIMIT_RULES: readonly OnLimitRule[] = ['resume-then-queue', 'resume-only', 'wait'];
 // The labels and pending texts are looked up by the action names the server's payloads carry, so a
 // name without an entry reads as undefined.
@@ -94,7 +94,7 @@ function byId(id: string): HTMLElement {
   }
   return node;
 }
-// SF-129: the rules of a job's stop and actions are the server's (factory/src/stops.ts). Each job
+// The rules of a job's stop and actions are the server's (factory/src/stops.ts). Each job
 // of the payloads carries its stop's canonical row (stop_code, stop_kind, stop_group), the
 // actions the page shows (actions, in order) and every action's availability ('' or why not); the
 // detail carries the ledger entries to settle (settle_ids). The page renders them.
@@ -119,7 +119,7 @@ interface CxData {
   diffs: Map<string, unknown>;
   focusTree: boolean;
 }
-// The planned ticket page (SF-081); its payload and check are ticket-page.js's.
+// The planned ticket page; its payload and check are ticket-page.js's.
 interface TicketPageState {
   key: string | null;
   data: unknown;
@@ -195,13 +195,13 @@ const state: PageState = {
   key: null, // "<ws>/<ticket>" of the job open on its page
   detail: null,
   cache: new Map(), // "<n>/<view>" -> text, for the selected job
-  // The Changes screen's data of the selected job (SF-079, cxData); the implement prompt's Task
+  // The Changes screen's data of the selected job (cxData); the implement prompt's Task
   // (its stamp, the Task text and its check).
   cx: cxData(),
   taskView: null,
   source: null,
   retry: null,
-  // The Stream (SF-078): the next line of events.jsonl to read (the last page's next, then each
+  // The Stream: the next line of events.jsonl to read (the last page's next, then each
   // live entries event's line + 1); the entries shown in order (a tool carries its joined result
   // as res) and the keys taken; the token of the page load under way; the label before each entry
   // (a continuation hides its author), the last label; the notes typed on ledger entries; what the
@@ -223,11 +223,11 @@ const state: PageState = {
   unresolved: new Map(),
   doubts: new Map(),
   confirm: null,
-  // The page came through the remote port (SF-126: api/jobs's remote), and the open ticket
+  // The page came through the remote port (api/jobs's remote), and the open ticket
   // dialog of an action that pushes or merges ({ ticket, resolve }).
   remote: false,
   ticketAsk: null,
-  // The hand-over panel's More menu is open (SF-107).
+  // The hand-over panel's More menu is open.
   handoverMenu: false,
   // The registry, the tickets without a live job and the archived ones (null until the stream
   // sends them), the requests out for the setup forms and the ticket actions, and the open
@@ -247,9 +247,9 @@ const state: PageState = {
   task: null,
   wantConfirm: null,
   startHolds: new Map(),
-  // The last merge request status read from the host, per job (SF-048).
+  // The last merge request status read from the host, per job.
   mrStatus: new Map(),
-  // The board v3 (SF-077): the timer of the next read of api/jobs while a card runs and the count
+  // The board v3: the timer of the next read of api/jobs while a card runs and the count
   // of the stream's jobs events (a read they overtook is dropped); the toast's
   // timer, its message's level and whether the pointer is on it; the new ticket whose card is
   // highlighted, and whether it was scrolled to.
@@ -262,23 +262,23 @@ const state: PageState = {
   highlightShown: false,
   // Where the job page's focus goes once its detail is shown (a card's button): 'composer', 'stop' or null.
   wantFocus: null,
-  // SF-084: the tickets the live jobs' Task files land after (the tickets payload's
+  // The tickets the live jobs' Task files land after (the tickets payload's
   // job_lands_after), and the Queue card whose ⋯ menu is open.
   jobLandsAfter: [],
   openMenu: null,
-  // SF-071: the run queue as the tickets payload sends it ({max_running, running, held,
+  // The run queue as the tickets payload sends it ({max_running, running, held,
   // hold_reason, next}; null without one) and the queued card being dragged.
   queue: null,
   drag: null,
-  // The planned ticket page (SF-081): the ticket shown, its page payload, its check as last read,
+  // The planned ticket page: the ticket shown, its page payload, its check as last read,
   // a read's error, the read under way, the editor (kept across redraws) and the Copy's outcome;
   // the ticket whose Start answered before its job reached the board (the page moves to the job).
   tk: { key: null, data: null, check: null, error: null, load: null, textarea: null, copied: null, imageStatus: null, uploading: 0 },
   goAfterStart: null,
-  // New ticket's images (SF-064), in paste order: each file, the extension of its real type and its
+  // New ticket's images, in paste order: each file, the extension of its real type and its
   // blob: URL for the thumbnail.
   newImages: [],
-  // SF-103: the workspaces payload's settings ({handoff_default, digest}), the workspace whose card
+  // The workspaces payload's settings ({handoff_default, digest}), the workspace whose card
   // is open as the Edit form and that form (kept across redraws), and whether the Morning digest
   // section has unsaved values.
   wsSettings: { handoff_default: null, digest: null },
@@ -326,7 +326,7 @@ function svgEl(tag: string, attributes: Readonly<Record<string, string | number>
 
 const keyOf = (job: { workspace: string; ticket: string }): string => `${job.workspace}/${job.ticket}`;
 const jobPath = (key: string): string => key.split('/').map(encodeURIComponent).join('/');
-// "2026-11-04 12:14:25" of a stored timestamp (ISO 8601 UTC) in the browser's local time (SF-049);
+// "2026-11-04 12:14:25" of a stored timestamp (ISO 8601 UTC) in the browser's local time;
 // empty when it is missing or does not parse.
 function localTime(ts: unknown): string {
   const date = typeof ts === 'string' ? new Date(ts) : null;
@@ -396,7 +396,7 @@ async function post(path: string, body: unknown): Promise<unknown> {
   }));
 }
 
-// An image upload (SF-064): the file's raw bytes as the body, with the same answer as post.
+// An image upload: the file's raw bytes as the body, with the same answer as post.
 async function postBytes(path: string, file: Blob): Promise<unknown> {
   return answerOf(await fetch(path, {
     method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/octet-stream' }, body: file,

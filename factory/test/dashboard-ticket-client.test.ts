@@ -34,7 +34,7 @@ function payload(row: ReturnType<typeof ticket>, extra: Record<string, unknown> 
     history: [
       { ts: '2026-11-05T10:00:00.000Z', kind: 'edited', by: 'you', text: 'Edited by you' },
       { ts: '2026-11-04T09:00:00.000Z', kind: 'written', by: 'context_owner', text: 'Plan written by the Context owner (ChatGPT)' },
-      { ts: null, kind: 'note', by: null, text: 'Recorded since SF-081; earlier steps are known only from checks and jobs.' },
+      { ts: null, kind: 'note', by: null, text: 'Older steps were not recorded; they are known only from checks and jobs.' },
     ],
     queue: null, ...extra,
   };
@@ -116,7 +116,7 @@ test('ticket client: the header, Starts from, Files it will change with the lock
   }
   const history = cardOf(page, /^History$/);
   assert.deepEqual(history.querySelectorAll('ul.hist li').map((item) => item.children[1]!.textContent), [
-    'Edited by you', 'Plan written by the Context owner (ChatGPT)', 'Recorded since SF-081; earlier steps are known only from checks and jobs.',
+    'Edited by you', 'Plan written by the Context owner (ChatGPT)', 'Older steps were not recorded; they are known only from checks and jobs.',
   ]);
   assert.deepEqual(history.querySelectorAll('ul.hist li').map((item) => item.children[0]!.textContent), ['Nov 5, 12:00', 'Nov 4, 11:00', '']);
   assert.equal(hint(history), 'What happened to this plan.');

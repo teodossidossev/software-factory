@@ -16,7 +16,7 @@ export const TICKET_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 export const TICKET_DESCRIPTION = '1-64 characters of A-Z, a-z, 0-9, ".", "_" and "-", starting with a letter or digit';
 export const MAX_TASK_BYTES = 256 * 1024;
 export const TASK_DIR = '.software-factory';
-// Archived Task files: .software-factory/archive/<ticket>.md (SF-027).
+// Archived Task files: .software-factory/archive/<ticket>.md.
 export const ARCHIVE_DIR = 'archive';
 const EXCLUDE_ENTRY = `${TASK_DIR}/`;
 const EXCLUDE_EQUIVALENTS = new Set([TASK_DIR, `/${TASK_DIR}`, EXCLUDE_ENTRY, `/${EXCLUDE_ENTRY}`]);
@@ -62,17 +62,17 @@ export function mayTouch(fields: Map<string, string>): string[] {
   return pathList(fields, 'may_touch');
 }
 
-// The reviewer a Task asks for (SF-131): `review: claude` (the Claude review, then the gate) or
+// The reviewer a Task asks for: `review: claude` (the Claude review, then the gate) or
 // `review: codex` (the gate alone).
 export type TaskReview = 'claude' | 'codex';
 
-// The Task's review key (SF-131); undefined without the key or with any other value.
+// The Task's review key; undefined without the key or with any other value.
 export function taskReview(fields: Map<string, string>): TaskReview | undefined {
   const value = fields.get('review');
   return value === 'claude' || value === 'codex' ? value : undefined;
 }
 
-// The file scope of the Task (SF-053): `scope:` in the front matter, in the forms of may_touch, the
+// The file scope of the Task: `scope:` in the front matter, in the forms of may_touch, the
 // files the ticket is expected to create, modify or delete, tests and docs included. Undefined when
 // the Task declares none (no field, or an empty list): then nothing is checked.
 export function taskScope(fields: Map<string, string>): string[] | undefined {
@@ -80,13 +80,13 @@ export function taskScope(fields: Map<string, string>): string[] | undefined {
   return scope.length > 0 ? scope : undefined;
 }
 
-// A ticket this one lands after (SF-084): its workspace and its name.
+// A ticket this one lands after: its workspace and its name.
 export interface TicketRef {
   workspace: string;
   ticket: string;
 }
 
-// The tickets the Task waits for (SF-084): `lands_after:` in the front matter, in the forms of
+// The tickets the Task waits for: `lands_after:` in the front matter, in the forms of
 // may_touch, each entry `<ticket>` (in workspace, this Task's own) or `<workspace>/<ticket>`.
 // Entries that name no valid workspace or ticket are dropped (they could not be looked up safely),
 // and each ticket is listed once.
@@ -105,11 +105,11 @@ export function landsAfter(fields: Map<string, string>, workspace: string): Tick
   return refs;
 }
 
-// The limits of a Task that starts without a plan check (SF-130).
+// The limits of a Task that starts without a plan check.
 export const CHECK_NEED_MAX_SCOPE = 10;
 export const CHECK_NEED_MAX_WORDS = 1200;
 
-// Whether a Task needs a plan check (SF-130), and why: the one place of the rule. `check: skip`
+// Whether a Task needs a plan check, and why: the one place of the rule. `check: skip`
 // never needs one; `check: required` (or any other value) always does; otherwise a Task needs one
 // with no scope, more than CHECK_NEED_MAX_SCOPE scope entries, a glob in scope, a lands_after
 // ticket of another workspace or more than CHECK_NEED_MAX_WORDS words (the whitespace-separated
@@ -144,8 +144,8 @@ export function checkNeed(content: string, workspace: string): { needed: boolean
   return { needed: false, reason: `small: ${scope.length} scope entries, ${words} words` };
 }
 
-// The skeleton of a ticket created from the dashboard (SF-028), and the draft of SF-025: the
-// Context owner has not written the Task yet, so no job may start on it.
+// The skeleton of a ticket created from the dashboard, and Task files written with the older
+// "## Status: draft" marker: the Context owner has not written the Task yet, so no job may start on it.
 export const DRAFT_MARKER = '## Status: waiting for the Context owner';
 const OLD_DRAFT_MARKER = '## Status: draft';
 
@@ -179,9 +179,9 @@ export function checkTaskContent(ticket: string, content: string): Buffer {
 
 export const MAX_FIX_BYTES = 64 * 1024;
 
-// write_task is refused while a job for the ticket exists in a non-terminal state, paused aside
-// (SF-067): the Task file changes while the job is paused, and Resume hands the change on.
-// The same guard keeps a ticket's images (SF-064) unchanged; what: what the refusal says cannot be
+// write_task is refused while a job for the ticket exists in a non-terminal state, paused aside:
+// the Task file changes while the job is paused, and Resume hands the change on.
+// The same guard keeps a ticket's images unchanged; what: what the refusal says cannot be
 // done.
 export async function refuseWhileJobRunning(workspace: Workspace, ticket: string, jobs: JobStore, what = 'the Task file cannot be replaced now'): Promise<void> {
   const job = await jobs.read(workspace.name, ticket);
@@ -236,7 +236,7 @@ function serialized<T>(work: () => Promise<T>): Promise<T> {
   return next;
 }
 
-// Records a write of the Task file in the ticket's history (SF-081), given the sha256 of the text
+// Records a write of the Task file in the ticket's history, given the sha256 of the text
 // written; called inside the write's serialized section, so the history follows the file's order.
 export type RecordWrite = (sha256: string) => Promise<unknown>;
 
@@ -249,7 +249,7 @@ async function recordWrite(record: RecordWrite | undefined, sha256: string): Pro
   }
 }
 
-// expectedSha256 (the page's Save, SF-081): the sha256 of the version the edit started from; the
+// expectedSha256 (the page's Save): the sha256 of the version the edit started from; the
 // write is refused with task_changed when the file is another version now (or task_not_found when
 // it is gone), so a concurrent write is never overwritten unseen. record: see RecordWrite.
 export interface WriteTaskOptions {
@@ -264,7 +264,7 @@ export function writeTask(workspace: Workspace, ticket: string, content: string,
     }
     const buffer = checkTaskContent(ticket, content);
     await refuseWhileJobRunning(workspace, ticket, jobs);
-    // Every image the Task file refers to in the ticket's folder (SF-064) must be there.
+    // Every image the Task file refers to in the ticket's folder must be there.
     const missing = await missingAttachments(workspace, ticket, content);
     if (missing.length > 0) {
       throw new FactoryError('attachment_missing', `The Task file refers to images ${ticket} does not have: ${missing.join(', ')}. Refer only to the attachments of ${TASK_DIR}/${ticket}/.`);
@@ -295,15 +295,15 @@ async function readTaskRaw(workspace: Workspace, ticket: string, archived = fals
   return readFile(join(workspace.workCheckout, path), 'utf8');
 }
 
-// The sha256 of a Task file's text (SF-067): what a job records of the version it was given.
+// The sha256 of a Task file's text: what a job records of the version it was given.
 export function taskSha256(content: string): string {
   return createHash('sha256').update(content, 'utf8').digest('hex');
 }
 
-// The bound of a Task file diff (SF-067) in bytes; a longer one is not sent.
+// The bound of a Task file diff in bytes; a longer one is not sent.
 export const MAX_TASK_DIFF_BYTES = 64 * 1024;
 
-// The unified diff of the ticket's Task file from before to after (SF-067), with the file's own
+// The unified diff of the ticket's Task file from before to after, with the file's own
 // path in its header (a/ and b/ .software-factory/<ticket>.md); undefined when Git cannot make one
 // or it is longer than MAX_TASK_DIFF_BYTES.
 export async function taskDiff(ticket: string, before: string, after: string): Promise<string | undefined> {
@@ -338,7 +338,7 @@ export async function readTask(workspace: Workspace, ticket: string, archived = 
 }
 
 // Appends "## Fix N" to the Task file, keeping its existing content; returns the new text. A title
-// goes after the number: "## Fix N: <title>" (SF-055, Simplify). record: see RecordWrite.
+// goes after the number: "## Fix N: <title>" (Simplify). record: see RecordWrite.
 export function appendFix(workspace: Workspace, ticket: string, fix: number, content: string, title?: string, options: { record?: RecordWrite } = {}): Promise<string> {
   return serialized(async () => {
     if (content.includes('\0') || /\p{Surrogate}/u.test(content) || content.length === 0 || Buffer.byteLength(content, 'utf8') > MAX_FIX_BYTES) {

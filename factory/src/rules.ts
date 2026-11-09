@@ -1,5 +1,5 @@
 // The verifiable part of the Git rules, the tool deny lists the factory hands to the Implementer
-// session per turn, and the sensitive paths (SF-024). The Handbook (## Git rules, ## MR template)
+// session per turn, and the sensitive paths. The Handbook (## Git rules, ## MR template)
 // is the prose source.
 
 // Conventional Commits types allowed in the commit header.
@@ -37,11 +37,11 @@ export function sectionLines(lines: string[], heading: string): string[] {
   return section;
 }
 
-// SF-058: the ## Testing section lists only what was run in this job. The MR prompt states the
+// The ## Testing section lists only what was run in this job. The MR prompt states the
 // rule; testingProblem refuses the line that most often breaks it.
 export const MR_TESTING_RULE = '`## Testing` lists only what was run in this job, with its result; anything not run (manual steps, live checks, browsers) goes on a line starting with `Not checked:`, saying who can run it';
 // A line that starts, after any list marker, checkbox or emphasis, with "By hand" or "Manual".
-// Exported for the Merge request screen (SF-080), which checks the text live with the same rule.
+// Exported for the Merge request screen, which checks the text live with the same rule.
 export const MANUAL_CLAIM = /^\s*(?:(?:[-*+]|\d+[.)])\s+)?(?:\[[ xX]\]\s+)?[*_]*(?:by hand\b|manual)/iu;
 
 // Why the MR text's ## Testing section claims a manual step as run, or undefined: a line there
@@ -91,7 +91,7 @@ const ALL_GIT_COMMANDS = [
 // .env files are off limits to every session, the reviewer's included.
 export const ENV_FILE_RULES = ['Read', 'Edit', 'Write'].flatMap((tool) => [`${tool}(**/.env)`, `${tool}(**/.env.*)`]);
 // Every turn, MR preparation included: every mutating Git command is the factory's or the user's;
-// .git and .env files are off limits; no web tool, which the sandbox does not hold (SF-123).
+// .git and .env files are off limits; no web tool, which the sandbox does not hold.
 export const DENIED_TOOLS = [
   ...ALL_GIT_COMMANDS.map((command) => `Bash(git ${command}:*)`),
   'Bash(sudo:*)',
@@ -188,7 +188,7 @@ export function sensitivityOf(path: string, mayTouch: readonly string[], extra: 
 
 export type Scope = 'in' | 'out' | 'none';
 
-// Whether a path is in the Task's file scope (SF-053): its scope or its may_touch (paths or globs)
+// Whether a path is in the Task's file scope: its scope or its may_touch (paths or globs)
 // names it; none when the Task declares no scope.
 export function scopeOf(path: string, scope: readonly string[] | undefined, mayTouch: readonly string[]): Scope {
   if (scope === undefined) {

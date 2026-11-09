@@ -35,7 +35,7 @@ function resultText(content: unknown): string {
 export interface DescribedEvent {
   ts: string | null;
   iteration: number | null;
-  // "prompt", "state", "notify_failed", "placeholders_removed", "review", "review_failed" (Claude's or the gate's), "gate_overridden" (the user accepted over the stopped gate), "gate_level" (SF-092), "simplify" and "simplify_chosen" (SF-055), "interrupted" and "task_changed" (SF-067), "attachments" (SF-065), "turn_limit_continued" (SF-069), "sandbox_lock_removed" (SF-085), "mr_edited" (SF-080), "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
+  // "prompt", "state", "notify_failed", "placeholders_removed", "review", "review_failed" (Claude's or the gate's), "gate_overridden" (the user accepted over the stopped gate), "gate_level", "simplify" and "simplify_chosen", "interrupted" and "task_changed", "attachments", "turn_limit_continued", "sandbox_lock_removed", "mr_edited", "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
   type: string;
   lines: string[];
 }
@@ -71,7 +71,7 @@ export function formatEvent(raw: string): string[] {
   return describeEvent(raw)?.lines ?? [];
 }
 
-// The line of a state change into or out of waiting_limit (SF-072): parked on a usage limit, or
+// The line of a state change into or out of waiting_limit: parked on a usage limit, or
 // resumed from it into the turn or the review; undefined for any other change.
 export function limitStateText(from: unknown, to: unknown): string | undefined {
   if (to === 'waiting_limit') {
@@ -83,7 +83,7 @@ export function limitStateText(from: unknown, to: unknown): string | undefined {
   return undefined;
 }
 
-// One image of an attachments event (SF-065): its name, type and size.
+// One image of an attachments event: its name, type and size.
 function asImage(value: unknown): string {
   const image = (typeof value === 'object' && value !== null ? value : {}) as Record<string, unknown>;
   return `${String(image.name)} (${String(image.type)}, ${String(image.bytes)} bytes)`;
@@ -99,7 +99,7 @@ function recordLines(record: Record<string, unknown>): string[] {
   }
   const state = record.state as { from: string | null; to: string; error?: { code: string; message: string } } | undefined;
   if (state !== undefined) {
-    // The park on a usage limit and the resume from it (SF-072).
+    // The park on a usage limit and the resume from it.
     const limit = limitStateText(state.from, state.to);
     if (limit !== undefined) {
       return [`${prefix} ${limit}`];
@@ -121,11 +121,11 @@ function recordLines(record: Record<string, unknown>): string[] {
     }
     const count = typeof record.items === 'number' ? record.items : 0;
     const items = record.verdict === 'fix' ? ` (${count} ${count === 1 ? 'item' : 'items'})` : '';
-    // The verdict the factory acted on, when it is not the reviewer's (SF-051).
+    // The verdict the factory acted on, when it is not the reviewer's.
     const effective = record.effective === 'clean' || record.effective === 'fix' ? `, acted on as ${record.effective}` : '';
     return [`${prefix} review by ${String(record.reviewer)}: ${String(record.verdict)}${items}${effective}${ignored}`];
   }
-  // The gate level of the iteration (SF-092): whether the gate runs, and why.
+  // The gate level of the iteration: whether the gate runs, and why.
   if (record.type === 'gate_level') {
     const reasons = Array.isArray(record.reasons) ? record.reasons.map(String).join('; ') : '';
     return [`${prefix} Codex gate: ${String(record.level)}, ${record.ran === true ? 'runs' : 'skipped'} (${oneLine(reasons)})`];
@@ -134,7 +134,7 @@ function recordLines(record: Record<string, unknown>): string[] {
     const count = typeof record.unapplied === 'number' ? record.unapplied : 0;
     return [`${prefix} gate overridden by the user (${String(record.code)}): ${count} Codex ${count === 1 ? 'item' : 'items'} not applied`];
   }
-  // The simplification pass (SF-055): its outcome, and the user's choice on its offer.
+  // The simplification pass: its outcome, and the user's choice on its offer.
   if (record.type === 'simplify') {
     const ignored = record.ignored === true ? ' (ignored: the job had moved on)' : '';
     if (typeof record.error === 'string') {
@@ -148,12 +148,12 @@ function recordLines(record: Record<string, unknown>): string[] {
     const count = typeof record.suggestions === 'number' ? record.suggestions : 0;
     return [`${prefix} simplification ${record.choice === 'skip' ? 'skipped' : 'chosen'} by the user: ${count} ${count === 1 ? 'suggestion' : 'suggestions'}`];
   }
-  // A step the user's Pause interrupted, and a Task file changed while paused (SF-067).
+  // A step the user's Pause interrupted, and a Task file changed while paused.
   if (record.type === 'interrupted') {
     const who = typeof record.reviewer === 'string' ? ` by ${record.reviewer}` : '';
     return [`${prefix} ${String(record.step)}${who} interrupted by the pause (no verdict; it runs again on Resume)`];
   }
-  // The job's images, resolved and copied (SF-065).
+  // The job's images, resolved and copied.
   if (record.type === 'attachments') {
     const images = Array.isArray(record.images) ? record.images.map((image) => asImage(image)) : [];
     return [`${prefix} attachments: ${images.length === 0 ? 'none' : images.join(', ')}`];
@@ -161,16 +161,16 @@ function recordLines(record: Record<string, unknown>): string[] {
   if (record.type === 'task_changed') {
     return [`${prefix} the Task file changed while the job was paused; the new one is in use`];
   }
-  // An Implementer turn ended at the turn limit while making progress; the factory went on (SF-069).
+  // An Implementer turn ended at the turn limit while making progress; the factory went on.
   if (record.type === 'turn_limit_continued') {
     const changed = typeof record.changed_paths === 'number' ? `, ${record.changed_paths} changed ${record.changed_paths === 1 ? 'path' : 'paths'}` : '';
     return [`${prefix} turn limit of ${String(record.max_turns)} steps reached while making progress${changed}; the factory went on by itself (${String(record.continued)} of ${String(record.allowed)})`];
   }
-  // The sandbox's leftover config lock, removed by the factory (SF-085).
+  // The sandbox's leftover config lock, removed by the factory.
   if (record.type === 'sandbox_lock_removed') {
     return [`${prefix} removed the config lock the sandbox left: ${String(record.path)}`];
   }
-  // The MR text (SF-080): the user's save or reset, or a new Clean that kept the user's text.
+  // The MR text: the user's save or reset, or a new Clean that kept the user's text.
   if (record.type === 'mr_edited') {
     const line = { saved: 'You edited the MR text', reset: "You reset the MR text to the factory's", factory_new: 'Clean wrote a new MR text; yours is kept. Compare or reset on the Merge request screen.' }[String(record.action)];
     if (line === undefined) {
@@ -229,7 +229,7 @@ function textLines(text: string): string[] {
 const asRecord = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 
-// The lines of one Codex event of the gate (SF-039), without the "codex | " prefix.
+// The lines of one Codex event of the gate, without the "codex | " prefix.
 function codexLines(event: Record<string, unknown>): string[] {
   const item = asRecord(event.item);
   if (event.type === 'error') {
@@ -274,7 +274,7 @@ export function shortInput(input: unknown): string {
   return oneLine(typeof named === 'string' ? named : JSON.stringify(input ?? {}), INPUT_CHARS);
 }
 
-// The lines of one Claude review message (SF-038), without the "review | " prefix: its text and
+// The lines of one Claude review message, without the "review | " prefix: its text and
 // tool uses. The verdict has its own record.
 function reviewLines(message: Record<string, unknown>): string[] {
   if (message.type !== 'assistant') {
@@ -291,7 +291,7 @@ function reviewLines(message: Record<string, unknown>): string[] {
   });
 }
 
-// A gate_event or review_message record (SF-045) as reviewer-prefixed lines; a cut one is marked.
+// A gate_event or review_message record as reviewer-prefixed lines; a cut one is marked.
 function reviewerLines(record: Record<string, unknown>): string[] {
   const codex = record.type === 'gate_event';
   const body = asRecord(codex ? record.event : record.message);

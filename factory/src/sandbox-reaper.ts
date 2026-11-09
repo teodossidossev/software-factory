@@ -1,4 +1,4 @@
-// The leftovers of Claude Code's Bash sandbox (SF-141). Claude Code starts its sandbox as
+// The leftovers of Claude Code's Bash sandbox. Claude Code starts its sandbox as
 // `bwrap --new-session --die-with-parent …`: its own session, so no process-group kill reaches it,
 // and when the claude process of a query ends its bwraps are reparented to the systemd user manager
 // (or pid 1) and live on with their shells and socat bridges. This module ends those orphans, the
@@ -172,7 +172,7 @@ export async function findOrphanedSandboxes(roots: readonly string[], options: R
   return ((await leftovers(roots, options))?.chosen ?? []).map((info) => info.pid);
 }
 
-// The orphan scans of the health check sandboxes (SF-153): each scan is a fresh
+// The orphan scans of the health check sandboxes: each scan is a fresh
 // findOrphanedSandboxes; it returns how many pids it found and those the previous scan of this
 // watch found too (the reaper did not end them). The first scan has no previous one, so none
 // persist.

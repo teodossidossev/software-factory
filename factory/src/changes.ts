@@ -1,4 +1,4 @@
-// The file versions of a job's iterations for the dashboard's Changes screen (SF-079), read-only.
+// The file versions of a job's iterations for the dashboard's Changes screen, read-only.
 // The tree of the job's files after iteration N is the tree of N's base (the base_commit of its
 // meta.json; job.base_commit for an older iteration while no MR preparation started) with N's
 // Patch applied, built by Git in a temporary index; the new objects go into the job's own object
@@ -138,7 +138,7 @@ class GitFailure extends Error {}
 
 const isObjectId = (text: string): boolean => /^[0-9a-f]{40,64}$/.test(text);
 
-// The base of an iteration: recorded in its meta.json since SF-079; for an older one the job's
+// The base of an iteration: the base_commit of its meta.json; for a meta.json without one the job's
 // base_commit while MR preparation never started (no rebase can have moved it), else unknown.
 export function baseOf(job: Job, meta: IterationMeta): string | null {
   if (typeof meta.base_commit === 'string') {

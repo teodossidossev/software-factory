@@ -16,7 +16,7 @@ export interface Config {
   checkAfterFixMin: number;
   maxTurns: number;
   // Continuations the factory sends by itself after an Implementer turn ended at maxTurns while
-  // making progress, per chain of turns (SF-069, SF_TURN_LIMIT_CONTINUES); 0 turns them off.
+  // making progress, per chain of turns (SF_TURN_LIMIT_CONTINUES); 0 turns them off.
   turnLimitContinues: number;
   maxIterations: number;
   // Claude Code executable for the Implementer; undefined uses the SDK's bundled binary.
@@ -32,9 +32,9 @@ export interface Config {
   maxJobs: number;
   // Extra sensitive path globs (SF_SENSITIVE_PATHS), on top of rules.ts.
   sensitivePaths: string[];
-  // The Claude review of every published iteration (SF-038); false with SF_REVIEW=off.
+  // The Claude review of every published iteration; false with SF_REVIEW=off.
   review: boolean;
-  // Which tickets the Claude review runs on (SF-131, SF_CLAUDE_REVIEW): ticket, the default, only
+  // Which tickets the Claude review runs on (SF_CLAUDE_REVIEW): ticket, the default, only
   // those whose Task file says review: claude; always every ticket but those that say review: codex.
   // A Config without it (the tests' literals) counts as always.
   claudeReview?: 'ticket' | 'always';
@@ -42,19 +42,19 @@ export interface Config {
   reviewModel: string | undefined;
   // maxTurns of the review (SF_REVIEW_MAX_TURNS).
   reviewMaxTurns: number;
-  // The simplification pass after the deciding clean verdict of a job with review fixes (SF-055);
+  // The simplification pass after the deciding clean verdict of a job with review fixes;
   // false with SF_SIMPLIFY=off. Its model and maxTurns are the review's.
   simplify: boolean;
-  // maxTurns of the Task check (SF-054, SF_TASK_CHECK_MAX_TURNS); its model is reviewModel.
+  // maxTurns of the Task check (SF_TASK_CHECK_MAX_TURNS); its model is reviewModel.
   taskCheckMaxTurns: number;
-  // The automatic Task checks of sf serve (SF-086, SF_TASK_CHECK_AUTO): on by default; false keeps
+  // The automatic Task checks of sf serve (SF_TASK_CHECK_AUTO): on by default; false keeps
   // the check manual (Check on the board, sf check-task).
   taskCheckAuto: boolean;
   // The automatic checks that run at once over every workspace, 1-4 (SF_TASK_CHECK_PARALLEL).
   taskCheckParallel: number;
-  // The bytes of rule file content given to the agents at most (SF-059, SF_RULES_MAX_BYTES).
+  // The bytes of rule file content given to the agents at most (SF_RULES_MAX_BYTES).
   rulesMaxBytes: number;
-  // The Codex gate after a clean Claude review (SF-039): the executable, or why the gate is off.
+  // The Codex gate after a clean Claude review: the executable, or why the gate is off.
   gate: Gate;
   // The model of the gate (SF_CODEX_MODEL, passed as --model); undefined uses Codex's default.
   codexModel: string | undefined;
@@ -64,21 +64,21 @@ export interface Config {
   gateMaxTokens: number;
   // How long one gate run may take (SF_GATE_TIMEOUT_MS).
   gateTimeoutMs: number;
-  // How long one run of a workspace's test command may take (SF-128, SF_TEST_TIMEOUT_MS); loadConfig
+  // How long one run of a workspace's test command may take (SF_TEST_TIMEOUT_MS); loadConfig
   // always sets it, a Config made by hand may leave it to DEFAULT_TEST_TIMEOUT_MS.
   testTimeoutMs?: number;
-  // The gate level (SF-092, SF_GATE_LEVEL): auto by the risk of each iteration's change
+  // The gate level (SF_GATE_LEVEL): auto by the risk of each iteration's change
   // (src/gate-level.ts), or full for every iteration.
   gateLevel: 'auto' | 'full';
   // Extra path globs that make an iteration full (SF_GATE_FULL_PATHS).
   gateFullPaths: string[];
-  // The Git hosts' tokens and API bases for the merge requests (SF-048).
+  // The Git hosts' tokens and API bases for the merge requests.
   forge: ForgeSettings;
-  // SF_HANDOFF (SF-073): checkout, the default, hands a job ready for review over to the
+  // SF_HANDOFF: checkout, the default, hands a job ready for review over to the
   // workspace's checkout on its branch; off leaves it in ready_for_human_review.
   handoff: HandoffMode;
-  // The smoke's sandbox probe command (SF-104, SF_SMOKE_PROBE_ALLOW), allowed past the permission
-  // check of the Implementer, whose session it puts in dontAsk (SF-109); undefined everywhere but
+  // The smoke's sandbox probe command (SF_SMOKE_PROBE_ALLOW), allowed past the permission
+  // check of the Implementer, whose session it puts in dontAsk; undefined everywhere but
   // in sf smoke's own state (smokeProbeAllow).
   smokeProbeAllow: string | undefined;
 }
@@ -86,7 +86,7 @@ export interface Config {
 // The gate: on with its Codex executable, or off with why (missing: no executable was found).
 export type Gate = { on: true; codexPath: string } | { on: false; reason: string; missing?: true };
 
-// SF_SANDBOX_ALLOW_READ (SF-123): comma-separated paths relative to the home directory that a job's
+// SF_SANDBOX_ALLOW_READ: comma-separated paths relative to the home directory that a job's
 // sandboxed commands may still read there (toolchains beyond the default ones, such as
 // .m2/repository,.gradle/caches). Entries are trimmed and empty ones dropped; an absolute entry, or
 // one with a ".." segment or a "~", or one that names the home directory itself (".") is refused
@@ -98,7 +98,7 @@ export function sandboxAllowRead(env: NodeJS.ProcessEnv = process.env): string[]
     if (isAbsolute(entry) || entry.includes('~') || entry.split(/[\\/]/).includes('..')) {
       throw new FactoryError('invalid_config', `SF_SANDBOX_ALLOW_READ has an invalid entry "${entry}": it must be a path relative to the home directory, without ".." or "~".`);
     }
-    // The home directory itself (".", "./"): it would keep the whole home readable (SF-123 Fix 4).
+    // The home directory itself (".", "./"): it would keep the whole home readable.
     if (entry.split(/[\\/]/).every((segment) => segment === '' || segment === '.')) {
       throw new FactoryError('invalid_config', `SF_SANDBOX_ALLOW_READ has an invalid entry "${entry}": it names the home directory itself, not a folder in it.`);
     }
@@ -111,7 +111,7 @@ export function sandboxAllowRead(env: NodeJS.ProcessEnv = process.env): string[]
 // local ports and every Unix socket is allowed, so the repository's own tests can start servers on
 // loopback and on Unix sockets: Linux cannot allow sockets by path (allowUnixSockets is macOS
 // only), so the user's sockets (D-Bus, docker, tailscaled, agents, tmux) are kept out by denying
-// their locations for reading instead (SF-123, src/sandbox-denials.ts). No command runs outside the sandbox (SF-100): with
+// their locations for reading instead (src/sandbox-denials.ts). No command runs outside the sandbox: with
 // allowUnsandboxedCommands false the CLI ignores dangerouslyDisableSandbox, and a project's
 // .claude/settings.json (which the Implementer can write in its worktree) can neither switch the
 // sandbox off nor widen it, so the path denials hold for Bash.
@@ -131,7 +131,7 @@ export function sandboxSettings(env: NodeJS.ProcessEnv = process.env): SandboxSe
     autoAllowBashIfSandboxed: true,
     allowUnsandboxedCommands: false,
     // The flag settings outrank the user's: filesystem isolation, which carries the path denials,
-    // stays on whatever ~/.claude/settings.json says (SF-100).
+    // stays on whatever ~/.claude/settings.json says.
     filesystem: { disabled: false },
     network: { allowedDomains: [...new Set(['registry.npmjs.org', ...extra])], allowLocalBinding: true, allowAllUnixSockets: true },
   };
@@ -144,14 +144,14 @@ export function stateDir(env: NodeJS.ProcessEnv = process.env): string {
   return join(env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'software-factory');
 }
 
-// The state directory sf smoke makes for its run (SF-104): <tmpdir>/sf-smoke-<suffix>/state.
+// The state directory sf smoke makes for its run: <tmpdir>/sf-smoke-<suffix>/state.
 const SMOKE_DIR = /^sf-smoke-[^/]+$/;
 
-// SF_SMOKE_PROBE_ALLOW (SF-104): the smoke's probe command, which the Implementer may run without
-// the permission check (the sandbox still holds it); the only switch to the smoke's dontAsk
-// session (SF-109). Honoured only when the state directory is
-// the one sf smoke made for its run, both sides resolved (a symlinked tmpdir still matches); a
-// real install's state directory never is, and any realpath error ignores it. Empty is unset.
+// SF_SMOKE_PROBE_ALLOW: the smoke's probe command, which the Implementer may run without the
+// permission check (the sandbox still holds it); the only switch to the smoke's dontAsk session.
+// Honoured only when the state directory is the one sf smoke made for its run, both sides resolved
+// (a symlinked tmpdir still matches); a real install's state directory never is, and any realpath
+// error ignores it. Empty is unset.
 export function smokeProbeAllow(env: NodeJS.ProcessEnv, dir: string): string | undefined {
   const command = env.SF_SMOKE_PROBE_ALLOW;
   if (command === undefined || command === '') {
@@ -189,12 +189,12 @@ export function sensitivePaths(env: NodeJS.ProcessEnv = process.env): string[] {
   return globList(env.SF_SENSITIVE_PATHS);
 }
 
-// SF_GATE_FULL_PATHS (SF-092): globs that make an iteration's gate level full, as SF_SENSITIVE_PATHS.
+// SF_GATE_FULL_PATHS: globs that make an iteration's gate level full, as SF_SENSITIVE_PATHS.
 export function gateFullPaths(env: NodeJS.ProcessEnv = process.env): string[] {
   return globList(env.SF_GATE_FULL_PATHS);
 }
 
-// SF_GATE_LEVEL (SF-092): auto (the default) or full.
+// SF_GATE_LEVEL: auto (the default) or full.
 export function gateLevelSetting(env: NodeJS.ProcessEnv = process.env): Config['gateLevel'] {
   const mode = env.SF_GATE_LEVEL || 'auto';
   if (mode !== 'auto' && mode !== 'full') {
@@ -315,7 +315,7 @@ export function gateConfig(env: NodeJS.ProcessEnv = process.env): Gate {
   return { on: false, reason: 'no codex on PATH; set SF_CODEX', missing: true };
 }
 
-// SF_CLAUDE_REVIEW (SF-131): ticket (the default) or always.
+// SF_CLAUDE_REVIEW: ticket (the default) or always.
 export function claudeReviewSetting(env: NodeJS.ProcessEnv = process.env): NonNullable<Config['claudeReview']> {
   const mode = env.SF_CLAUDE_REVIEW || 'ticket';
   if (mode !== 'ticket' && mode !== 'always') {
@@ -324,7 +324,7 @@ export function claudeReviewSetting(env: NodeJS.ProcessEnv = process.env): NonNu
   return mode;
 }
 
-// Whether the Claude review runs on a job (SF-131), decided at Start from the setting, the Task
+// Whether the Claude review runs on a job, decided at Start from the setting, the Task
 // file's review (taskReview) and the gate, with the reason for the job's review_setup event. With
 // the gate off Claude reviews every job; otherwise review: claude and review: codex win, and
 // without them SF_CLAUDE_REVIEW decides (absent: always).
@@ -339,12 +339,12 @@ export function claudeReviewDecision(config: Pick<Config, 'claudeReview' | 'gate
   return { claude_review: setting === 'always', reason: `SF_CLAUDE_REVIEW=${setting}` };
 }
 
-// SF_RULES_MAX_BYTES (SF-059): the bytes of rule file content the agents are given at most.
+// SF_RULES_MAX_BYTES: the bytes of rule file content the agents are given at most.
 export function rulesMaxBytes(env: NodeJS.ProcessEnv = process.env): number {
   return positiveInteger(env, 'SF_RULES_MAX_BYTES', DEFAULT_RULES_MAX_BYTES, 16 * 1024 * 1024);
 }
 
-// SF_HEALTH (SF-153): sf serve's health checks, on (the default) or off (the tests' own sf serves:
+// SF_HEALTH: sf serve's health checks, on (the default) or off (the tests' own sf serves:
 // no check spawns the fake CLIs). sf health runs its checks whatever it says.
 export function healthSetting(env: NodeJS.ProcessEnv = process.env): boolean {
   const mode = env.SF_HEALTH || 'on';
@@ -354,7 +354,7 @@ export function healthSetting(env: NodeJS.ProcessEnv = process.env): boolean {
   return mode === 'on';
 }
 
-// SF_TASK_CHECK_AUTO (SF-086): on (the default) or off.
+// SF_TASK_CHECK_AUTO: on (the default) or off.
 export function taskCheckAutoSetting(env: NodeJS.ProcessEnv = process.env): boolean {
   const mode = env.SF_TASK_CHECK_AUTO || 'on';
   if (mode !== 'on' && mode !== 'off') {
@@ -363,11 +363,11 @@ export function taskCheckAutoSetting(env: NodeJS.ProcessEnv = process.env): bool
   return mode === 'on';
 }
 
-// SF_TEST_TIMEOUT_MS (SF-128): 30 minutes by default, at most 4 hours.
+// SF_TEST_TIMEOUT_MS: 30 minutes by default, at most 4 hours.
 export const DEFAULT_TEST_TIMEOUT_MS = 30 * 60_000;
 export const MAX_TEST_TIMEOUT_MS = 4 * 60 * 60_000;
 
-// The most automatic Task checks at once (SF-086, SF_TASK_CHECK_PARALLEL).
+// The most automatic Task checks at once (SF_TASK_CHECK_PARALLEL).
 export const MAX_TASK_CHECK_PARALLEL = 4;
 
 // SF_HANDOFF: checkout (the default) or off.
@@ -379,7 +379,7 @@ export function handoffSetting(env: NodeJS.ProcessEnv = process.env): Config['ha
   return mode;
 }
 
-// Whether a job of a workspace is handed over at ready (SF-083): the workspace's handoff in
+// Whether a job of a workspace is handed over at ready: the workspace's handoff in
 // workspaces.json wins over SF_HANDOFF. undefined: hand it over; else the notice that names the
 // setting which turned it off (the job's handoff_skipped, shown by sf status and the dashboard).
 export function handoffOffNotice(own: HandoffMode | undefined, global: HandoffMode, ticket: string): NonNullable<Job['handoff_skipped']> | undefined {

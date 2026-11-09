@@ -1,6 +1,6 @@
-// The start of a job and its recovery (SF-089, from src/execution.ts): start (the record, the
-// fetch, the worktree and the first turn), the Task file's copy in the worktree and its images,
-// restart (SF-067) and the rule for a restart of sf serve (recover, SF-042).
+// The start of a job and its recovery: start (the record, the fetch, the worktree and the first
+// turn), the Task file's copy in the worktree and its images, restart and the rule for a restart of
+// sf serve (recover).
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readlink, rm, symlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { type ImageRef, jobAttachment, type ResolvedImage, resolveTaskImages, writeImages } from '../attachments.js';
@@ -24,18 +24,18 @@ import { checkNotInCheckout } from './errors.js';
 import { firstPrompt } from './prompts.js';
 import { branchName, exists } from './shared.js';
 
-// A job record claimed by start or restart (SF-067), before its worktree exists.
+// A job record claimed by start or restart, before its worktree exists.
 interface Claimed {
   workspace: Workspace;
   ticket: string;
   base: string;
   branch: string;
   worktree: string;
-  // The images the Task file refers to (SF-065), read when the start was accepted.
+  // The images the Task file refers to, read when the start was accepted.
   images: ResolvedImage[];
 }
 
-// The files sf restart --keep-files keeps (SF-067): their paths relative to the worktree, saved
+// The files sf restart --keep-files keeps: their paths relative to the worktree, saved
 // under dir until the new worktree exists.
 interface Kept {
   dir: string;
@@ -137,19 +137,19 @@ export class StartPart {
     this.#peers = peers;
   }
 
-  // At serve start (SF-042): a job in working, preparing_mr or awaiting_review whose runner is alive
-  // is left alone, and so is a paused one (SF-067) and one parked on a usage limit (SF-072: the run
-  // queue arms its timer from limit.resets_at). Without a runner, a working job and an MR preparation need a person, an
+  // At serve start: a job in working, preparing_mr or awaiting_review whose runner is alive is left
+  // alone, and so is a paused one and one parked on a usage limit (the run queue arms its timer from
+  // limit.resets_at). Without a runner, a working job and an MR preparation need a person, an
   // interrupted start failed, and a job awaiting review whose last iteration has no review, or a
-  // clean review but no gate.json, or a clean gate.json and a simplification pass that never applied
-  // (SF-055), gets a runner, which resumes it (resume: the review, the gate, the pass, or with the
-  // gate off now, Clean). With startRunners false (SF-101: under an updating marker that stays) the
-  // states are repaired as always but no runner starts: ensureResumable starts them in the catch-up.
+  // clean review but no gate.json, or a clean gate.json and a simplification pass that never applied,
+  // gets a runner, which resumes it (resume: the review, the gate, the pass, or, with the gate off,
+  // Clean). With startRunners false (under an updating marker that stays) the states are repaired
+  // but no runner starts: ensureResumable starts them in the catch-up.
   recover({ startRunners = true }: { startRunners?: boolean } = {}): Promise<void> {
     return this.#locks.locked(async () => {
       const runners = this.#runner.serveRunners();
       for (const job of await this.#store.jobs.list()) {
-        // One job's error is logged and the others are recovered all the same (SF-088: an illegal
+        // One job's error is logged and the others are recovered all the same (an illegal
         // state change of one job cannot stop sf serve's start).
         await this.#recoverJob(runners, job, startRunners).catch((error: unknown) => console.error(error));
       }
@@ -157,7 +157,7 @@ export class StartPart {
     });
   }
 
-  // The catch-up after an update (SF-101): a runner for each job awaiting review that has something
+  // The catch-up after an update: a runner for each job awaiting review that has something
   // to resume and none running, as recover() starts them.
   ensureResumable(): Promise<void> {
     return this.#locks.locked(async () => {
@@ -176,7 +176,7 @@ export class StartPart {
 
   // recover() for one job. Only under the lock.
   async #recoverJob(runners: Runners, job: Job, startRunners: boolean): Promise<void> {
-    // A step of the hand-over cut off (SF-073), before the job's generic handling; left alone
+    // A step of the hand-over cut off, before the job's generic handling; left alone
     // while its runner still runs it.
     if (job.handover !== undefined && job.handover.step !== null) {
       if ((await runners.owner(job.workspace, job.ticket)) === undefined) {
@@ -204,9 +204,9 @@ export class StartPart {
   }
 
   // A job awaiting review that has something to resume: its last iteration has no review (with the
-  // review on), or one acted on as clean (SF-051: a fix with nits only is) and no gate.json, or a
-  // clean gate.json too and a simplification pass that never applied (SF-055). With the Claude
-  // review off (SF-131) the gate is the review: no gate.json (with the review on), or a clean one.
+  // review on), or one acted on as clean (a fix with nits only is) and no gate.json, or a clean
+  // gate.json too and a simplification pass that never applied. With the Claude review off the
+  // gate is the review: no gate.json (with the review on), or a clean one.
   async resumable(job: Job): Promise<boolean> {
     if (job.state !== 'awaiting_review' || job.iteration === 0) {
       return false;
@@ -222,7 +222,7 @@ export class StartPart {
     if (review === undefined) {
       return this.#settings.config.review;
     }
-    // Items the ledger dropped (they reopened an accepted risk, SF-052) never count, as in acceptGate.
+    // Items the ledger dropped (they reopened an accepted risk) never count, as in acceptGate.
     if (!('verdict' in review) || actedVerdict(withoutDropped(review)) !== 'clean') {
       return false;
     }
@@ -230,13 +230,13 @@ export class StartPart {
     if (gate === undefined) {
       return true;
     }
-    // A clean gate whose outcome never applied (the pass, its record or MR preparation; SF-055).
+    // A clean gate whose outcome never applied (the pass, its record or MR preparation).
     return 'verdict' in gate && actedVerdict(withoutDropped(gate)) === 'clean';
   }
 
   // Creates the job record and its worktree, then runs the first iteration. The validation and
   // the record are under the lock, the fetch and the worktree creation under the workspace's Git
-  // lock only, so a long fetch holds no other job. queued: the run queue's own start (SF-071),
+  // lock only, so a long fetch holds no other job. queued: the run queue's own start,
   // refused with job_limit unless fewer than max_running jobs run; a start by hand has no limit.
   async start(workspaceName: string, ticket: string, { queued = false }: { queued?: boolean } = {}): Promise<{ branch: string; state: JobState; check_after_minutes: number; worktree: string }> {
     const claimed = await this.#locks.locked(async () => {
@@ -245,7 +245,7 @@ export class StartPart {
       }
       const workspace = await this.#settings.resolve(workspaceName);
       const plan = await this.#plan(workspace, ticket);
-      // Every image the Task file refers to must be usable (SF-065): attachment_invalid otherwise.
+      // Every image the Task file refers to must be usable: attachment_invalid otherwise.
       const images = await resolveTaskImages(workspace.workCheckout, ticket, plan.content);
       const existing = await this.#store.jobs.read(workspace.name, ticket);
       if (existing !== undefined && !TERMINAL_STATES.includes(existing.state)) {
@@ -273,7 +273,7 @@ export class StartPart {
     return { base: fields.get('base')!, branch: branchName(ticket, fields.get('title')!), content, review: taskReview(fields) };
   }
 
-  // The run queue's limit (SF-071): the running jobs of every workspace (RUNNING_STATES), the
+  // The run queue's limit: the running jobs of every workspace (RUNNING_STATES), the
   // ticket's own aside, are fewer than max_running (ExecutionOptions.maxRunning: sf serve reads
   // queue.json; without it, config.maxJobs); job_limit otherwise. Only the queue's own start runs
   // it, only under the lock.
@@ -285,7 +285,7 @@ export class StartPart {
     }
   }
 
-  // git fetch of the base from origin in the workspace's checkout (SF-071: the run queue, before it
+  // git fetch of the base from origin in the workspace's checkout (the run queue, before it
   // checks again whether a ticket it waits for is merged), under the workspace's Git lock; nothing
   // without an origin. fetch_failed when Git fails.
   async fetchBase(workspaceName: string, base: string): Promise<void> {
@@ -306,7 +306,7 @@ export class StartPart {
 
   // Writes the record of a new job in starting (the ticket's directory must be free). Only under
   // the lock.
-  // The job's Claude review is decided here, once (SF-131): claude_review and its review_setup event.
+  // The job's Claude review is decided here, once: claude_review and its review_setup event.
   async #claim(workspace: Workspace, ticket: string, plan: { base: string; branch: string; review: TaskReview | undefined }, images: ResolvedImage[]): Promise<Claimed> {
     const { base, branch } = plan;
     const created = now();
@@ -324,7 +324,7 @@ export class StartPart {
     return { workspace, ticket, base, branch, worktree, images };
   }
 
-  // The claimed job's worktree, then its first turn. kept (sf restart --keep-files, SF-067): the
+  // The claimed job's worktree, then its first turn. kept (sf restart --keep-files): the
   // files of the previous job, saved in a directory of their own, are copied into the worktree
   // before the first turn, whose prompt names them; the directory goes once they are copied, and
   // stays (named in the error) when the job could not start.
@@ -386,7 +386,7 @@ export class StartPart {
     return result;
   }
 
-  // The job's coding rules (SF-059), collected once at its first base commit and stored in its
+  // The job's coding rules, collected once at its first base commit and stored in its
   // directory (rules.md, rules.json) for every later prompt; the block, '' when none were found.
   // Throws when they cannot be collected or stored: the job does not start without them.
   async #collectJobRules(workspace: Workspace, ticket: string, baseCommit: string): Promise<string> {
@@ -417,7 +417,7 @@ export class StartPart {
   }
 
   // The Task file of the checkout, copied into the worktree before every Implementer turn. The
-  // version copied is the one the Implementer was last given (SF-067): kept as task.md in the job
+  // version copied is the one the Implementer was last given: kept as task.md in the job
   // directory, and recorded as the job's version (recordTask). Returns the job.
   async syncTask(workspace: Workspace, job: Job): Promise<Job> {
     const content = await this.copyTask(workspace, job);
@@ -430,7 +430,7 @@ export class StartPart {
     return this.recordTask(job, content);
   }
 
-  // The Task file's version the job works from (SF-067): its sha256 in job.json, written when it
+  // The Task file's version the job works from: its sha256 in job.json, written when it
   // changed. Returns the job.
   async recordTask(job: Job, content: string): Promise<Job> {
     const sha256 = taskSha256(content);
@@ -443,7 +443,7 @@ export class StartPart {
   }
 
   // Copies the checkout's Task file into the worktree, for the reviewers only (a review round on
-  // Resume, SF-067): what the Implementer was last given stays recorded, so its next prompt carries
+  // Resume): what the Implementer was last given stays recorded, so its next prompt carries
   // the change. Returns the text copied; undefined without a worktree.
   async copyTask(workspace: Workspace, job: Job): Promise<string | undefined> {
     if (job.worktree === null) {
@@ -455,7 +455,7 @@ export class StartPart {
     return readFile(join(dir, `${job.ticket}.md`), 'utf8');
   }
 
-  // The job's images (SF-065): copied into its directory (attachments/, the copy its agents are
+  // The job's images: copied into its directory (attachments/, the copy its agents are
   // given) and into the worktree's .software-factory/<ticket>/ (kept out of Git as the Task file
   // there), each replacing the copy before; recorded in job.json (absent with none) and logged with
   // an attachments event. A job that had none and gets none is left as it is. Returns the job.
@@ -491,10 +491,10 @@ export class StartPart {
     }
   }
 
-  // sf restart (SF-067): the ticket starts again from its current Task file, as a new job on a fresh
-  // worktree and branch from the Task's base, for a job that is paused, parked on a usage limit
-  // (SF-072), aborted, failed or needs the user. The old job is retired as reset does (its runner stopped, its worktree removed, its
-  // directory archived), and its branch deleted, only when it has no commit beyond the job's base
+  // sf restart: the ticket starts again from its current Task file, as a new job on a fresh worktree
+  // and branch from the Task's base, for a job that is paused, parked on a usage limit, aborted,
+  // failed or needs the user. The old job is retired as reset does (its runner stopped, its worktree
+  // removed, its directory archived), and its branch deleted, only when it has no commit beyond the job's base
   // and was never pushed; otherwise nothing is touched and the restart is refused with the reason
   // (restart_refused). keepFiles: the old worktree's changed and new files go into the new worktree
   // before the first turn, whose prompt says so.
@@ -508,7 +508,7 @@ export class StartPart {
       const workspace = await this.#settings.resolve(workspaceName);
       const checkout = workspace.workCheckout;
       const plan = await this.#plan(workspace, ticket);
-      // Every image the Task file refers to must be usable (SF-065), before anything changes.
+      // Every image the Task file refers to must be usable, before anything changes.
       const images = await resolveTaskImages(checkout, ticket, plan.content);
       // Checked before anything changes, and again below, in the Git lock that deletes the branch,
       // once the runner has stopped: nothing can add a commit between that check and the deletion.
@@ -594,7 +594,7 @@ export class StartPart {
     if (tracking.length > 0) {
       throw refuse(`the branch ${job.branch} was pushed (${tracking.map((name) => name.replace(/^refs\/remotes\//, '')).join(', ')})`);
     }
-    // Every configured remote is asked (SF-067, R2): a push needs no upstream and no fetched
+    // Every configured remote is asked: a push needs no upstream and no fetched
     // remote-tracking branch. One that cannot answer refuses: the branch may be on it.
     const remotes = await runGit(checkout, ['remote']);
     if (remotes.code !== 0) {

@@ -1,4 +1,4 @@
-// The morning digest's timer in sf serve (SF-103): a check at start and every 60 s. Each check
+// The morning digest's timer in sf serve: a check at start and every 60 s. Each check
 // rereads workspaces.json and starts the scheduled digest when now is past today's `at` (local time;
 // on a weekday when weekdays_only), at least one workspace has track or my_work on, and no scheduled
 // digest started today. A machine that slept through `at`, or an sf serve started later, is covered

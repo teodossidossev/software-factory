@@ -1,4 +1,4 @@
-// The images of a ticket (SF-064): .software-factory/<ticket>/<name> in the work checkout, next to
+// The images of a ticket: .software-factory/<ticket>/<name> in the work checkout, next to
 // the Task file (kept out of Git with the folder). One set of rules for the dashboard, the CLI and
 // the MCP tools: the type from the magic bytes only (PNG, JPEG, WebP, GIF), at most
 // MAX_ATTACHMENT_BYTES each and MAX_ATTACHMENTS per ticket, names of ATTACHMENT_NAME_PATTERN with
@@ -311,7 +311,7 @@ export async function missingAttachments(workspace: Workspace, ticket: string, c
 }
 
 // ---------------------------------------------------------------------------------------------
-// The images a job gives its agents (SF-065): the attachments the Task file refers to, resolved at
+// The images a job gives its agents: the attachments the Task file refers to, resolved at
 // Start, Restart and every Resume, copied into the job directory (the job's own copy, which the
 // factory reads for the image blocks, the gate and the hashes) and into the worktree.
 
@@ -544,7 +544,7 @@ export function withoutImageData(value: unknown): unknown {
   return Object.fromEntries(Object.entries(record).map(([key, entry]) => [key, withoutImageData(entry)]));
 }
 
-// The hash input of an image for the Task check (SF-065): name:sha256 of its bytes, or name:missing
+// The hash input of an image for the Task check: name:sha256 of its bytes, or name:missing
 // when no regular file of that name can be read in dir.
 export async function imageHashes(dir: string, references: readonly AttachmentReference[]): Promise<Array<{ name: string; sha256: string }>> {
   const hashes: Array<{ name: string; sha256: string }> = [];

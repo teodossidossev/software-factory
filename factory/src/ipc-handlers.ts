@@ -1,4 +1,4 @@
-// sf serve's socket handler (SF-138): each request is a command of the table in src/commands.ts,
+// sf serve's socket handler: each request is a command of the table in src/commands.ts,
 // its arguments checked with the CLI's own checkArgs, refused while sf update drains or builds
 // unless the command stays open, then run.
 import { COMMANDS, checkArgs, type Serve, socketCommand } from './commands.js';
@@ -19,7 +19,7 @@ export interface SocketHandlerOptions extends Serve {
 export function socketHandler(options: SocketHandlerOptions): IpcHandler {
   return async ({ command: name, args }) => {
     const command = socketCommand(name);
-    // The updating marker's gate (SF-101): every command that changes something is refused before
+    // The updating marker's gate: every command that changes something is refused before
     // it does, an unknown one too.
     if (command?.openWhileUpdating !== true) {
       refuseWhileUpdating(options.stateDir);

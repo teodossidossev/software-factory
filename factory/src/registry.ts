@@ -1,17 +1,16 @@
 // The workspace registry: ${SF_CONFIG_DIR:-${XDG_CONFIG_HOME:-~/.config}/software-factory}/workspaces.json.
 // Strictly parsed; an invalid file is an error, a missing file an empty registry. The checkout
-// path is verified at use time: it must be the root of a non-bare Git work tree. Since SF-019 a
-// workspace is one checkout: the Implementer works in a worktree of it, so a separate work
-// checkout (`work_checkout`) is read for compatibility and ignored. A workspace's optional `handoff`
-// (SF-083) wins over SF_HANDOFF for its jobs; its optional `color` (SF-084) marks its cards on the board;
-// its optional `rules_skip` (SF-059) names the repository rule files not given to the agents. Since
-// SF-103 a workspace has an optional `description`, `app` (workspaces of one app share one daily) and
-// `digest: {track, my_work}`, and the registry an optional top-level `digest` (the morning digest's
-// time, weekdays only, model and language). Since SF-106 the registry has an optional top-level
-// `explain` (the plain explanation of each stop: on, model and language). Since SF-122 a workspace has
-// an optional `guard` (src/guard.ts: its pushes and MR texts are checked for the names of the
-// user's other workspaces; absent: false). Since SF-128 a workspace has an optional `test_command`
-// (src/test-command.ts: the factory runs it in a sandbox before a job is ready; absent: no run).
+// path is verified at use time: it must be the root of a non-bare Git work tree. A workspace is
+// one checkout: the Implementer works in a worktree of it, so a separate work checkout
+// (`work_checkout`) is read for compatibility and ignored. A workspace's optional `handoff` wins
+// over SF_HANDOFF for its jobs; its optional `color` marks its cards on the board; its optional
+// `rules_skip` names the repository rule files not given to the agents. A workspace has an optional
+// `description`, `app` (workspaces of one app share one daily) and `digest: {track, my_work}`, and
+// the registry an optional top-level `digest` (the morning digest's time, weekdays only, model and
+// language) and `explain` (the plain explanation of each stop: on, model and language). A workspace
+// has an optional `guard` (src/guard.ts: its pushes and MR texts are checked for the names of the
+// user's other workspaces; absent: false) and an optional `test_command` (src/test-command.ts: the
+// factory runs it in a sandbox before a job is ready; absent: no run).
 import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -25,7 +24,7 @@ export const WORKSPACE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 export const WORKSPACE_NAME_DESCRIPTION = '1-64 characters of a-z, 0-9 and "-", starting and ending with a letter or digit';
 const REGISTRY_FILE = 'workspaces.json';
 
-// The workspace's test command (SF-128): 1 to MAX_TEST_COMMAND_CHARS characters, no NUL.
+// The workspace's test command: 1 to MAX_TEST_COMMAND_CHARS characters, no NUL.
 const testCommand = z
   .string()
   .min(1)
@@ -37,11 +36,11 @@ const absolutePath = z
   .min(1)
   .refine((value) => isAbsolute(value) && !value.includes('\0'), 'must be an absolute path without NUL');
 
-// The hand-over settings (SF-073, SF-083): checkout hands a job ready for review over to the
+// The hand-over settings: checkout hands a job ready for review over to the
 // workspace's checkout; off leaves it in ready_for_human_review.
 export const HANDOFF_MODES = ['checkout', 'off'] as const;
 export type HandoffMode = (typeof HANDOFF_MODES)[number];
-// The handoff_skipped code of a job that was not handed over because hand-over is off (SF-083):
+// The handoff_skipped code of a job that was not handed over because hand-over is off:
 // a setting, not a refusal.
 export const HANDOFF_OFF_CODE = 'handoff_off';
 
@@ -49,7 +48,7 @@ export function isHandoffMode(value: unknown): value is HandoffMode {
   return (HANDOFF_MODES as readonly unknown[]).includes(value);
 }
 
-// The workspace colours (SF-084): the board's palette, each a light and a dark token --ws-<name> in
+// The workspace colours: the board's palette, each a light and a dark token --ws-<name> in
 // static/app.css. A workspace's optional `color` picks one; without it, workspaceColor hashes the name.
 export const WORKSPACE_COLORS = ['blue', 'teal', 'green', 'olive', 'orange', 'red', 'purple', 'grey'] as const;
 export type WorkspaceColor = (typeof WORKSPACE_COLORS)[number];
@@ -71,14 +70,14 @@ export function workspaceColor(name: string, color?: WorkspaceColor): WorkspaceC
   return WORKSPACE_COLORS[sum % WORKSPACE_COLORS.length]!;
 }
 
-// The morning digest (SF-103): a workspace's description and app, at most this long.
+// The morning digest: a workspace's description and app, at most this long.
 export const MAX_DESCRIPTION_CHARS = 2000;
 export const MAX_APP_CHARS = 64;
 // "HH:MM", 00:00 to 23:59.
 export const DIGEST_TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 export const MAX_LANGUAGE_CHARS = 40;
 
-// A workspace's digest switches (SF-103): track, followed in the morning digest; my_work, my commits
+// A workspace's digest switches: track, followed in the morning digest; my_work, my commits
 // here go into the daily of its app. Absent: false.
 const workspaceDigestSchema = z.strictObject({ track: z.boolean().optional(), my_work: z.boolean().optional() });
 
@@ -89,7 +88,7 @@ const digestSettingsSchema = z.strictObject({
   language: z.string().trim().min(1).max(MAX_LANGUAGE_CHARS).optional(),
 });
 
-// The plain explanation of each stop (SF-106): on, its language and model; every field optional.
+// The plain explanation of each stop: on, its language and model; every field optional.
 const explainSettingsSchema = z.strictObject({
   on: z.boolean().optional(),
   language: z.string().trim().min(1).max(MAX_LANGUAGE_CHARS).optional(),
@@ -116,7 +115,7 @@ const registrySchema = z.strictObject({
 export type Registry = z.infer<typeof registrySchema>;
 export type WorkspaceEntry = Registry['workspaces'][string];
 
-// The morning digest's settings with their defaults (SF-103).
+// The morning digest's settings with their defaults.
 export interface DigestSettings {
   at: string;
   weekdays_only: boolean;
@@ -129,7 +128,7 @@ export function digestSettings(registry: Registry): DigestSettings {
   return { ...DIGEST_DEFAULTS, ...registry.digest };
 }
 
-// The stop explanations' settings with their defaults (SF-106).
+// The stop explanations' settings with their defaults.
 export interface ExplainSettings {
   on: boolean;
   language: string;
@@ -151,7 +150,7 @@ export function workspaceApp(name: string, entry: WorkspaceEntry): string {
   return entry.app ?? name;
 }
 
-// What the Setup's Edit replaces (SF-103); "" removes description and app, 'default' the handoff
+// What the Setup's Edit replaces; "" removes description and app, 'default' the handoff
 // key, 'auto' the color key, and digest with both false the digest key. work_checkout, rules_skip,
 // guard and test_command stay as they are.
 export interface WorkspaceEdit {
@@ -192,17 +191,17 @@ export function checkWorkspaceText(description: string, app: string): void {
 export interface Workspace {
   name: string;
   // The real path of the checkout, verified as a Git work tree root; for file operations only,
-  // never returned to clients. Both names hold the same path since SF-019: the Context owner reads
+  // never returned to clients. Both names hold the same path: the Context owner reads
   // it, the Task files live in it, and every job's worktree is created from it.
   readCheckout: string;
   workCheckout: string;
-  // The workspace's own hand-over setting (SF-083); absent: SF_HANDOFF applies.
+  // The workspace's own hand-over setting; absent: SF_HANDOFF applies.
   handoff?: HandoffMode;
-  // The repository rule files not given to the agents (SF-059), as globs.
+  // The repository rule files not given to the agents, as globs.
   rulesSkip?: string[];
-  // "guard": true in workspaces.json (SF-122); absent otherwise.
+  // "guard": true in workspaces.json; absent otherwise.
   guard?: boolean;
-  // The workspace's test_command (SF-128); absent: no test run before a job is ready.
+  // The workspace's test_command; absent: no test run before a job is ready.
   testCommand?: string;
 }
 

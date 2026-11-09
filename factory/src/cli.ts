@@ -2,14 +2,14 @@
 // merge request, pause, ...) are the table of src/commands.ts: checked, sent and shown here by it.
 // The others run here: `sf serve`, `sf up` (serve, the tunnel and the browser), `sf workspace
 // add|list|remove`, `sf status|watch|dashboard` (reading the state directory directly), `sf
-// check-task` (the Task check of SF-054, run here and stored in the state directory), `sf rules`
-// (the coding rules of SF-059, read here), `sf notify-test`, `sf info`, `sf metrics` (the gate's
-// cost and yield, SF-092, reading the state directory directly), `sf smoke` (the live smoke test
-// of SF-090, src/live-smoke.ts: its own sf processes on a throwaway repository and state) and `sf
-// run`, the job's runner that sf serve starts (SF-042, src/runner.ts), and `sf digest [--now]`
-// (the morning digest of SF-103, through the socket of sf serve), `sf service` (sf serve as a
-// systemd user service, SF-101, src/service.ts) and `sf update` (the install updated, drained
-// first, SF-101, src/update.ts) and `sf guard` (the guard of SF-122, src/guard.ts: run here, no sf
+// check-task` (a Task check, run here and stored in the state directory), `sf rules`
+// (the coding rules, read here), `sf notify-test`, `sf info`, `sf metrics` (the gate's
+// cost and yield, reading the state directory directly), `sf smoke` (the live smoke test,
+// src/live-smoke.ts: its own sf processes on a throwaway repository and state) and `sf
+// run`, the job's runner that sf serve starts (src/runner.ts), and `sf digest [--now]`
+// (the morning digest, through the socket of sf serve), `sf service` (sf serve as a
+// systemd user service, src/service.ts) and `sf update` (the install updated, drained
+// first, src/update.ts) and `sf guard` (the guard, src/guard.ts: run here, no sf
 // serve needed; `sf guard install-hook` writes the pre-push hook).
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { type ChildProcess, spawn } from 'node:child_process';
@@ -138,28 +138,28 @@ interface ServeHooks {
 async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefined }> {
   const port = parsePort('SF_PORT', DEFAULT_PORT);
   const dashboardPort = parsePort('SF_DASHBOARD_PORT', DEFAULT_DASHBOARD_PORT);
-  // SF_DASHBOARD_REMOTE_ORIGINS (SF-118): an invalid value stops the start; not read with the dashboard off.
+  // SF_DASHBOARD_REMOTE_ORIGINS: an invalid value stops the start; not read with the dashboard off.
   const remoteOrigins = dashboardOn() ? dashboardRemoteOrigins() : [];
-  // With them (SF-126): the remote listener's port and the logins it serves, checked before anything starts.
+  // With them: the remote listener's port and the logins it serves, checked before anything starts.
   const remoteLogins = dashboardRemoteLogins(remoteOrigins);
   const remotePort = remoteOrigins.length > 0 ? parsePort('SF_DASHBOARD_REMOTE_PORT', DEFAULT_DASHBOARD_REMOTE_PORT) : DEFAULT_DASHBOARD_REMOTE_PORT;
   if (remoteOrigins.length > 0) {
     checkDashboardPorts(dashboardPort, remotePort);
   }
   const config = loadConfig();
-  // SF_HEALTH (SF-153): an invalid value stops the start here.
+  // SF_HEALTH: an invalid value stops the start here.
   const healthOn = healthSetting();
   const handbook = await loadHandbook();
   // Fail at startup on an invalid registry rather than on the first tool call.
   const registry = await loadRegistry();
   const ignored = ignoredWorkCheckouts(registry);
   if (ignored.length > 0) {
-    console.error(`warning: the work_checkout of workspace(s) ${ignored.join(', ')} is ignored since SF-019: every job works in a worktree of the checkout.`);
+    console.error(`warning: the work_checkout of workspace(s) ${ignored.join(', ')} is ignored: every job works in a worktree of the checkout.`);
   }
-  // The Task checks' parent directory (SF-100), which every other session denies: made now; an unsafe
+  // The Task checks' parent directory, which every other session denies: made here; an unsafe
   // one (a link, another owner) is one warning, and every Task check then fails with task_check_dir_unsafe.
   await prepareTaskChecksDir().catch((error: unknown) => console.error(`warning: ${error instanceof Error ? error.message : String(error)}`));
-  // The run queue (SF-071): an invalid queue.json fails here, as an invalid registry does.
+  // The run queue: an invalid queue.json fails here, as an invalid registry does.
   const queueStore = new QueueStore(config.stateDir, config.maxJobs);
   await queueStore.read();
   const jobs = new JobStore(config.stateDir);
@@ -173,8 +173,8 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
       void runQueue.schedule();
     }
   };
-  // A job of the ticket that runs (non-terminal, not paused) cancels its automatic Task checks
-  // (SF-086): no check runs on a Task file a job is using.
+  // A job of the ticket that runs (non-terminal, not paused) cancels its automatic Task checks:
+  // no check runs on a Task file a job is using.
   let autoChecks: AutoChecks | undefined;
   const onStateChange: StateListener = (job, from, lines) => {
     autoChecks?.jobChanged(job);
@@ -184,21 +184,21 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   };
   const tests = testHooks();
   const execution = new Execution(config, (name) => resolveWorkspace(name), onStateChange, handbook.text, executionOptions(config, tests));
-  // The tickets' history (SF-081): New ticket and Save (Setup) and write_task (the MCP server)
+  // The tickets' history: New ticket and Save (Setup) and write_task (the MCP server)
   // record the Task file's writes; Execution records its Fix sections itself.
   const history = new TicketHistory(config.stateDir);
   // The start screen of the dashboard: the registry and the Task files, under the Execution's lock.
   // A finished job leaves with its Task file through the lock's scope, in the same acquisition as
   // the ticket action's checks: it is archived and a kept worktree removed.
   const setup = new Setup({ configDir: configDir(), jobs, exclusive: (work) => execution.exclusive(work), history, handoffDefault: config.handoff });
-  // The morning digest (SF-103): one a day by the timer, Generate now on the dashboard, sf digest
+  // The morning digest: one a day by the timer, Generate now on the dashboard, sf digest
   // --now through the socket; a scheduled one is notified with its counts.
   const digests = new Digests({
     stateDir: config.stateDir, configDir: configDir(), claudePath: config.claudePath,
     notify: (notification) => sendNotification(notification, notifyConfig()),
   });
   const digestSchedule = new DigestSchedule({ digests, configDir: configDir() });
-  // The plain explanation of each stop (SF-106): the job follower starts one when a job reaches a
+  // The plain explanation of each stop: the job follower starts one when a job reaches a
   // new needs_human stop, the start one for each stopped job without; the open pages get it.
   const explainer = new Explainer({
     jobs, configDir: configDir(), claudePath: config.claudePath, onWritten: (workspace, ticket) => dashboard?.refreshJob(workspace, ticket),
@@ -206,21 +206,21 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   // The run queue's scheduler: a pass after recovery, on every job state change (sf serve's own and
   // the runners', below), on every change of the queue; a pass that changed something refreshes
   // every page.
-  // At a usage limit's reset (SF-072) it resumes the parked jobs (or marks them, under wait) and sends
-  // one notification. With the automatic checks (SF-086) the queue starts a ticket only when its plan
+  // At a usage limit's reset it resumes the parked jobs (or marks them, under wait) and sends
+  // one notification. With the automatic checks the queue starts a ticket only when its plan
   // is ready or forced, and a ticket added without a check gets one.
   const runQueue = new RunQueue(queueStore, execution, setup, jobs, {
     onChange: () => dashboard?.refreshSetup(),
     notify: (notification) => sendNotification(notification, notifyConfig()),
     planCheck: (workspace, ticket) => planCheck(checks, autoChecks, workspace, ticket),
     onAdded: (workspace, ticket) => void autoChecks?.triggerIfUnchecked(workspace, ticket),
-    // The updating marker (SF-101): no start and no limit reset while sf update drains or builds.
+    // The updating marker: no start and no limit reset while sf update drains or builds.
     updating: () => updateMarked(config.stateDir),
   });
-  // The Task checks (SF-054): started from the dashboard, read by the Context owner's task_check; an ended
+  // The Task checks: started from the dashboard, read by the Context owner's task_check; an ended
   // check reaches every page.
   // A check's worktree shares the checkout's Git directory: when the last check of the workspace
-  // ended, the config lock its sandbox left goes unless a job runs there (SF-085).
+  // ended, the config lock its sandbox left goes unless a job runs there.
   const checks: TaskChecks = new TaskChecks({
     ...checkSettings(config, configDir()), resolve: (name) => resolveWorkspace(name),
     onSettled: (workspace, ticket) => {
@@ -228,11 +228,11 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
       if (!checks.runningIn(workspace)) {
         void execution.afterTaskCheck(workspace, ticket);
       }
-      // A queued ticket may be ready now (SF-086).
+      // A queued ticket may be ready after this check.
       void runQueue.schedule();
     },
   });
-  // The automatic Task checks (SF-086), unless SF_TASK_CHECK_AUTO=off: write_task, the watcher of
+  // The automatic Task checks, unless SF_TASK_CHECK_AUTO=off: write_task, the watcher of
   // every workspace's .software-factory folder and the run queue trigger them; a check that ends not
   // ready or failed is notified like a job.
   if (config.taskCheckAuto) {
@@ -246,7 +246,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
         dashboard?.refreshSetup();
         void notifyTaskCheck(record, notifySettings);
       },
-      // The updating marker (SF-101): a check due meanwhile is recorded for the catch-up.
+      // The updating marker: a check due meanwhile is recorded for the catch-up.
       update: { updating: () => updateMarked(config.stateDir), skipped: (workspace, ticket) => recordSkippedCheck(config.stateDir, { workspace, ticket }) },
     });
   }
@@ -258,15 +258,15 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     stateDir: config.stateDir, testHooks: tests, onQueueChange: () => dashboard?.refreshSetup(),
   }));
   let server;
-  // The updating marker at the start (SF-101): the jobs of a finished (restart_pending) or dead
+  // The updating marker at the start: the jobs of a finished (restart_pending) or dead
   // (draining) update to resume, the marker removed already; or a marker that stays, under which
   // recovery repairs the states but starts no runner.
   // A start that fails after it took the marker puts it back, so the next sf serve resumes the jobs.
   let atStart: Awaited<ReturnType<typeof markerAtServeStart>> | undefined;
   try {
-    // The state format (SF-101): a newer one is refused (state_too_new) before anything reads it.
+    // The state format: a newer one is refused (state_too_new) before anything reads it.
     await checkStateVersion(config.stateDir);
-    // The MCP token (SF-099): made on the first start; an invalid file stops the start.
+    // The MCP token: made on the first start; an invalid file stops the start.
     const narrowed = await ensureMcpToken(config.stateDir);
     if (narrowed !== undefined) {
       console.error(`warning: ${narrowed}`);
@@ -280,7 +280,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     await socket.close();
     throw error;
   }
-  // The health checks (SF-153), unless SF_HEALTH=off: every CHECK_EVERY_MS (logins hourly), the
+  // The health checks, unless SF_HEALTH=off: every CHECK_EVERY_MS (logins hourly), the
   // traffic light of the dashboard and one notification when a check turns down or is ok again.
   const healthMonitor = healthOn ? new HealthMonitor(healthDeps(config, {
     mcp: async () => ({ port: boundMcpPort, token: await readMcpToken(config.stateDir).catch(() => undefined) }),
@@ -310,7 +310,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     await Promise.all([server.close(), socket.close()]);
     throw error;
   }
-  // No token in the output (SF-126): the service's journal keeps it. sf dashboard prints the URL.
+  // No token in the output: the service's journal keeps it. sf dashboard prints the URL.
   console.log(dashboard !== undefined
     ? `${SERVER_NAME} dashboard http://127.0.0.1:${dashboard.url.port}/d/${TOKEN_LABEL}/ (sf dashboard prints the full URL)`
     : `${SERVER_NAME} dashboard off (SF_DASHBOARD=off)`);
@@ -325,9 +325,9 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   }
   console.log(`${SERVER_NAME} listening on ${mcpUrl(server.port)}`);
   console.log(`${SERVER_NAME} socket ${socket.path}`);
-  // The runners write the state of their jobs; the dashboard hears of it from disk (SF-042). A job
-  // that left working, awaiting_review or preparing_mr may free a hand-over that met the sandbox's config lock
-  // (SF-085), and so may sf serve's start.
+  // The runners write the state of their jobs; the dashboard hears of it from disk. A job
+  // that left working, awaiting_review or preparing_mr may free a hand-over that met the sandbox's config lock,
+  // and so may sf serve's start.
   // The run queue hears of both: a runner's job that reached ready_for_human_review frees a slot.
   const followed = followJobs(jobs, (job, from) => {
     autoChecks?.jobChanged(job);
@@ -341,7 +341,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   void runQueue.schedule();
   await autoChecks?.start();
   digestSchedule.start();
-  // The updating marker while sf serve runs (SF-101): its poll; the catch-up once the marker is gone
+  // The updating marker while sf serve runs: its poll; the catch-up once the marker is gone
   // (what the gates held back), the resume of the jobs of an update that finished or died.
   const catchUp = async (): Promise<void> => {
     await execution.ensureResumable().catch((error: unknown) => console.error(error));
@@ -362,7 +362,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     markerWatch.start();
   }
   explainer.start().catch((error: unknown) => console.error(error));
-  // The leftovers of the sessions' Bash sandboxes (SF-141), also those no session end caught: every
+  // The leftovers of the sessions' Bash sandboxes, also those no session end caught: every
   // REAP_EVERY_MS while sf serve runs. The reaper never throws.
   const sandboxReaper = setInterval(() => void reapOrphanedSandboxes(factoryRoots(config)), REAP_EVERY_MS);
   sandboxReaper.unref();
@@ -466,7 +466,7 @@ async function up(args: string[]): Promise<void> {
   const { dashboard } = await serve({ beforeStop: () => tunnel?.stop() });
   // The tunnel's check needs the factory to answer, so it starts after serve.
   if (values['no-tunnel'] !== true) {
-    // The tunnel's lines never show the MCP token (SF-099), which serve has made by now.
+    // The tunnel's lines never show the MCP token, which serve has made by now.
     tunnel = startTunnel(await readMcpToken(stateDir()).catch(() => undefined));
   } else {
     console.log('tunnel: not started (--no-tunnel)');
@@ -475,7 +475,7 @@ async function up(args: string[]): Promise<void> {
     return;
   }
   try {
-    // The real URL, in this process only: serve printed it with <token> (SF-126).
+    // The real URL, in this process only: serve printed it with <token>.
     await openInBrowser(dashboard.href);
   } catch (error) {
     // The launcher's "open the URL above by hand" does not hold: the line above has <token>.
@@ -484,7 +484,7 @@ async function up(args: string[]): Promise<void> {
   }
 }
 
-// The hand-over setting that decides for a workspace's jobs (SF-083): its own handoff, else
+// The hand-over setting that decides for a workspace's jobs: its own handoff, else
 // SF_HANDOFF with this shell's value (sf serve reads its own environment).
 function handoffLabel(entry: WorkspaceEntry): string {
   if (entry.handoff !== undefined) {
@@ -497,7 +497,7 @@ function handoffLabel(entry: WorkspaceEntry): string {
   }
 }
 
-// The workspace's colour on the board (SF-084): its own, else the one its name picks.
+// The workspace's colour on the board: its own, else the one its name picks.
 function colorLabel(name: string, entry: WorkspaceEntry): string {
   return entry.color !== undefined ? entry.color : `${workspaceColor(name)} (by its name)`;
 }
@@ -541,7 +541,7 @@ async function workspace(args: string[]): Promise<void> {
       throw new UsageError('workspace add requires --read <path>.');
     }
     if (values.work !== undefined) {
-      throw new FactoryError('work_checkout_retired', '--work is no longer supported: every job works in a worktree of the checkout (SF-019).');
+      throw new FactoryError('work_checkout_retired', '--work is not supported: every job works in a worktree of the checkout.');
     }
     const handoff = values.handoff;
     if (handoff !== undefined && !isHandoffMode(handoff)) {
@@ -553,7 +553,7 @@ async function workspace(args: string[]): Promise<void> {
     }
     const registry = await loadRegistry();
     const real = await checkout(read, '--read');
-    // Registered: the same checkout with --handoff or --color changes those (SF-084), the rest stays.
+    // Registered: the same checkout with --handoff or --color changes those, the rest stays.
     const existing = Object.hasOwn(registry.workspaces, name) ? registry.workspaces[name] : undefined;
     if (existing !== undefined && (existing.read_checkout !== real || (handoff === undefined && color === undefined))) {
       throw new FactoryError('workspace_exists', `workspace "${name}" is already registered; remove it first, or give the same --read with --handoff or --color to change those.`);
@@ -598,9 +598,9 @@ async function viaServer(command: Command, args: string[]): Promise<void> {
   }
 }
 
-// What every Execution of sf serve, its runners and sf check-task is given (SF-142): the /proc of a
-// test hook (TestHooks.procDir, SF-105) for the sandbox's config lock check, the real one without
-// it; and the run queue's limit for its own starts (SF-071), max_running of queue.json read at each.
+// What every Execution of sf serve, its runners and sf check-task is given: the /proc of a
+// test hook (TestHooks.procDir) for the sandbox's config lock check, the real one without
+// it; and the run queue's limit for its own starts, max_running of queue.json read at each.
 function executionOptions(config: Config, hooks: TestHooks): ExecutionOptions {
   return {
     ...(hooks.procDir !== undefined ? { lockProc: hooks.procDir } : {}),
@@ -608,7 +608,7 @@ function executionOptions(config: Config, hooks: TestHooks): ExecutionOptions {
   };
 }
 
-// `sf run <workspace> <ticket>` (SF-042): the job's runner, started detached by sf serve. Runs the
+// `sf run <workspace> <ticket>`: the job's runner, started detached by sf serve. Runs the
 // queued requests, the turns, the reviews and the gate of the job, notifies like sf serve, and
 // ends when nothing is left to run; runner_running when the job has a runner already.
 async function run(args: string[]): Promise<void> {
@@ -617,7 +617,7 @@ async function run(args: string[]): Promise<void> {
   }
   const [workspace, ticket] = checkJob(args, 'run');
   const config = loadConfig();
-  // The state format (SF-101): a runner refuses a newer one (state_too_new).
+  // The state format: a runner refuses a newer one (state_too_new).
   await checkStateVersion(config.stateDir);
   const handbook = await loadHandbook();
   const jobs = new JobStore(config.stateDir);
@@ -637,7 +637,7 @@ async function run(args: string[]): Promise<void> {
   console.log(`${new Date().toISOString()} runner ${process.pid} for ${workspace}/${ticket} ended`);
 }
 
-// sf rules <workspace> [ticket] (SF-059): the coding rules that would be given, without their
+// sf rules <workspace> [ticket]: the coding rules that would be given, without their
 // text. A ticket whose job has its rules stored: the job's own list (rules.json), as its prompts
 // carry them; a job with a base commit and nothing stored: none (it started without them). Else
 // read at the Task file's base (fetched as Start does), and at the checkout's HEAD without a ticket.
@@ -667,7 +667,7 @@ async function rules(args: string[]): Promise<void> {
       } else if (job.error?.code === 'rules_failed') {
         console.log(`The job of ${name}/${ticket} failed at Start: ${job.error.message}`);
       } else {
-        console.log(`The job of ${name}/${ticket} has no stored rules (it started before SF-059): its prompts carry no <rules> block.`);
+        console.log(`The job of ${name}/${ticket} has no stored rules (it started before rules were stored): its prompts carry no <rules> block.`);
       }
       return;
     }
@@ -681,7 +681,7 @@ async function rules(args: string[]): Promise<void> {
   console.log(rulesLines(name, list).join('\n'));
 }
 
-// sf check-task <workspace> <ticket> (SF-054): one Task check in this process, without sf serve;
+// sf check-task <workspace> <ticket>: one Task check in this process, without sf serve;
 // the record goes to the state directory, as from the dashboard's Check.
 async function checkTask(args: string[]): Promise<void> {
   if (args.length !== 2) {
@@ -689,7 +689,7 @@ async function checkTask(args: string[]): Promise<void> {
   }
   const [name, ticket] = checkJob(args, 'check-task');
   const config = loadConfig();
-  // It runs in this process, past sf serve's gates (SF-101).
+  // It runs in this process, past sf serve's gates.
   refuseWhileUpdating(config.stateDir);
   const workspace = await resolveWorkspace(name);
   const task = await readTask(workspace, ticket);
@@ -701,14 +701,14 @@ async function checkTask(args: string[]): Promise<void> {
   const path = await new CheckStore(config.stateDir).write(record);
   console.log([...checkLines(record), '', `stored: ${path}`].join('\n'));
   // The check's worktree shared the checkout's Git directory: the config lock its sandbox left
-  // goes as after a check of sf serve's, unless a job of the workspace runs (SF-085).
+  // goes as after a check of sf serve's, unless a job of the workspace runs.
   await new Execution(config, (workspaceName) => resolveWorkspace(workspaceName), undefined, undefined, executionOptions(config, testHooks())).afterTaskCheck(name, ticket);
   if (record.status === 'failed') {
     process.exitCode = 1;
   }
 }
 
-// sf smoke [--keep] [--timeout-min N] [--budget-usd N] (SF-090): the options checked here, the run
+// sf smoke [--keep] [--timeout-min N] [--budget-usd N]: the options checked here, the run
 // in src/live-smoke.ts. Returns the exit code: 0 when every step passed, 1 otherwise.
 async function smoke(args: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
@@ -734,7 +734,7 @@ async function smoke(args: string[]): Promise<number> {
   return runSmoke({ keep: values.keep === true, timeoutMin, budgetUsd });
 }
 
-// sf digest [--now] (SF-103), through the socket of sf serve.
+// sf digest [--now], through the socket of sf serve.
 async function digest(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { now: { type: 'boolean' } } });
   if (positionals.length > 0) {
@@ -760,7 +760,7 @@ async function digest(args: string[]): Promise<void> {
   ].join('\n'));
 }
 
-// sf explain <workspace> <ticket> (SF-106): read from the state directory, without sf serve or a model call.
+// sf explain <workspace> <ticket>: read from the state directory, without sf serve or a model call.
 async function explain(args: string[]): Promise<void> {
   if (args.length !== 2) {
     throw new UsageError('explain needs <workspace> <ticket>.');
@@ -830,7 +830,7 @@ async function info(args: string[]): Promise<void> {
   } else if (gate !== undefined) {
     row('gate', `off (${gate.reason})`);
   }
-  // The gate level (SF-092), whatever the gate's state.
+  // The gate level, whatever the gate's state.
   try {
     row('gate level', gateLevelSetting());
   } catch (error) {
@@ -880,7 +880,7 @@ async function info(args: string[]): Promise<void> {
   }
 }
 
-// The Claude CLI the factory runs (SF-153's logins check): SF_CLAUDE, else the Agent SDK's own
+// The Claude CLI the factory runs (for the logins check): SF_CLAUDE, else the Agent SDK's own
 // binary for this platform, else claude on PATH.
 function claudeExecutable(config: Config): string {
   if (config.claudePath !== undefined) {
@@ -897,7 +897,7 @@ function claudeExecutable(config: Config): string {
 // orphan scans and the digests.
 type HealthSources = Pick<HealthDeps, 'mcp' | 'queue' | 'sandboxes' | 'digests'>;
 
-// The checks' dependencies (SF-153), the same for sf serve and sf health but for sources.
+// The checks' dependencies, the same for sf serve and sf health but for sources.
 function healthDeps(config: Config, sources: HealthSources): HealthDeps {
   const jobs = new JobStore(config.stateDir);
   return {
@@ -954,7 +954,7 @@ async function localQueueFacts(config: Config): Promise<QueueFacts> {
 // sf health: the second orphan scan this long after the first.
 const SANDBOX_RESCAN_MS = 10_000;
 
-// `sf health [--json]` (SF-153): the checks computed here once, without asking sf serve; logins
+// `sf health [--json]`: the checks computed here once, without asking sf serve; logins
 // always run, the orphan scan runs twice 10 s apart. Returns the exit code: 0 all ok or off, 3 any
 // recovering and none down, 1 any down.
 async function health(args: string[]): Promise<number> {
@@ -987,7 +987,7 @@ function table(rows: StatusRow[]): string {
   return cells.map((row) => row.map((cell, column) => cell.padEnd(widths[column]!)).join('  ').trimEnd()).join('\n');
 }
 
-// The dashboard's full URL for sf status (SF-126: sf serve prints it with <token>), or undefined with
+// The dashboard's full URL for sf status (sf serve prints it with <token>), or undefined with
 // the dashboard off, before the first sf serve, or when the token file or SF_DASHBOARD_PORT is unusable.
 async function dashboardStatusUrl(): Promise<string | undefined> {
   if (!dashboardOn()) {
@@ -1005,7 +1005,7 @@ async function status(args: string[]): Promise<void> {
   const jobs = new JobStore(stateDir());
   // One clock reading for every row.
   const now = new Date();
-  // The updating marker (SF-101), its phase, and what to do when the update was interrupted.
+  // The updating marker, its phase, and what to do when the update was interrupted.
   const update = await markerLines(stateDir());
   if (args.length === 0) {
     if (update.length > 0) {
@@ -1013,8 +1013,8 @@ async function status(args: string[]): Promise<void> {
     }
     const all = await jobs.list();
     console.log(all.length === 0 ? 'No jobs.' : table(await statusRows(jobs, all, now)));
-    // The jobs whose Implementer went on by itself after a turn limit (SF-069), one line each.
-    // And the jobs parked on a usage limit (SF-072), with the provider and the reset.
+    // The jobs whose Implementer went on by itself after a turn limit, one line each.
+    // And the jobs parked on a usage limit, with the provider and the reset.
     const turnLimits = all.flatMap((job) => [turnLimitLine(job), limitLine(job)].flatMap((line) => (line === undefined ? [] : [`${job.workspace}/${job.ticket}: ${line}`])));
     if (turnLimits.length > 0) {
       console.log(`\n${turnLimits.join('\n')}`);
@@ -1044,12 +1044,12 @@ async function status(args: string[]): Promise<void> {
   if (turnLimit !== undefined) {
     console.log(`\n${turnLimit}`);
   }
-  // A job parked on a usage limit (SF-072).
+  // A job parked on a usage limit.
   const limit = limitLine(job);
   if (limit !== undefined) {
     console.log(`\n${limit}`);
   }
-  // The job in the user's checkout, or why it is not (SF-073).
+  // The job in the user's checkout, or why it is not.
   const handover = handoverLines(job, (await jobs.readMrText(workspace, ticket))?.split(/\r?\n/)[0]);
   if (handover.length > 0) {
     console.log(`\n${handover.join('\n')}`);
@@ -1057,13 +1057,13 @@ async function status(args: string[]): Promise<void> {
   if (job.worktree !== null) {
     console.log(`\nworktree: ${job.worktree}`);
   }
-  // The dashboard's full URL (SF-126), as for all jobs; before the marked paths, which end the output.
+  // The dashboard's full URL, as for all jobs; before the marked paths, which end the output.
   const dashboard = await dashboardStatusUrl();
   if (dashboard !== undefined) {
     console.log(`${job.worktree !== null ? '' : '\n'}dashboard: ${dashboard}`);
   }
   // The marked paths (sensitive, outside the Task's scope, deleted) of the last published
-  // iteration (SF-024, SF-053).
+  // iteration.
   if (job.iteration > 0) {
     try {
       const files = (await jobs.readMeta(workspace, ticket, job.iteration)).files ?? [];
@@ -1093,14 +1093,14 @@ async function watch(args: string[]): Promise<void> {
   await watchEvents(jobs.eventsPath(workspace, ticket), values.once !== true, (line) => console.log(line), abort.signal);
 }
 
-// sf attach (SF-064): the attachments module's rules on the files directly, without sf serve.
+// sf attach: the attachments module's rules on the files directly, without sf serve.
 async function attach(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { remove: { type: 'string' } } });
   if (values.remove !== undefined ? positionals.length !== 2 : positionals.length < 3 || positionals.length > 4) {
     throw new UsageError('attach needs <workspace> <ticket> <file> [name], or <workspace> <ticket> --remove <name>.');
   }
   const [name, ticket] = checkJob(positionals, 'attach');
-  // It changes the ticket's files in this process, past sf serve's gates (SF-101).
+  // It changes the ticket's files in this process, past sf serve's gates.
   refuseWhileUpdating(stateDir());
   const workspace = await resolveWorkspace(name);
   const jobs = new JobStore(stateDir());
@@ -1161,7 +1161,7 @@ async function dashboardCommand(args: string[]): Promise<void> {
   }
 }
 
-// `sf mcp-url` (SF-099): the MCP URL with its token for an MCP client, the rotation, and the
+// `sf mcp-url`: the MCP URL with its token for an MCP client, the rotation, and the
 // tunnel script's steps that need the token. The token is read from the state directory here and
 // is never on a command line; every line but the URL itself and --header shows it as <token>.
 const MCP_URL_OPTIONS = ['header', 'rotate', 'port', 'redact', 'probe', 'write-profile', 'check-profile'] as const;
@@ -1229,7 +1229,7 @@ async function mcpUrlCommand(args: string[]): Promise<void> {
   console.log(mcpUrl(port, token));
 }
 
-// The port of the MCP endpoint (SF-099): SF_PORT, or with SF_PORT=0 (any free port) the one the
+// The port of the MCP endpoint: SF_PORT, or with SF_PORT=0 (any free port) the one the
 // running sf serve bound, asked on its socket; mcp_port_unknown when none answers.
 async function mcpPort(): Promise<number> {
   const configured = parsePort('SF_PORT', DEFAULT_PORT);
@@ -1301,7 +1301,7 @@ async function redactStream(token: string | undefined): Promise<void> {
   await write(redactMcpToken(pending, token));
 }
 
-// sf guard (SF-122): the guard's check of a workspace's commits, branch name, MR text or worktree,
+// sf guard: the guard's check of a workspace's commits, branch name, MR text or worktree,
 // run here; every hit printed with its matched text (a secret's never). Exit 1 on hits. Also
 // sf guard install-hook <workspace>: the pre-push hook.
 async function guard(args: string[]): Promise<void> {
@@ -1395,7 +1395,7 @@ async function guard(args: string[]): Promise<void> {
   console.log(`No hits in ${commits.length} commits.`);
 }
 
-// `sf metrics` (SF-092): the gate's runs, tokens, items and yield per job and in total.
+// `sf metrics`: the gate's runs, tokens, items and yield per job and in total.
 async function metrics(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { since: { type: 'string' }, json: { type: 'boolean' } } });
   if (positionals.length > 1) {
@@ -1418,8 +1418,8 @@ async function serveAnswers(): Promise<boolean> {
   }
 }
 
-// The pid the answering sf serve reports in its ping (SF-120); none when nothing answers, it
-// refuses, or it names no pid (an sf serve of a version before SF-120).
+// The pid the answering sf serve reports in its ping; none when nothing answers, it
+// refuses, or it names no pid (the ping of an sf serve built without the pid field).
 async function servePid(): Promise<number | undefined> {
   try {
     const response = await callSocket(stateDir(), { command: socketName(COMMANDS.ping), args: [] });
@@ -1431,7 +1431,7 @@ async function servePid(): Promise<number | undefined> {
 }
 
 // The Task checks and hand-overs running inside the answering sf serve, one line each, in the
-// texts of sf update's drain (SF-120: sf service install refuses a restart while any runs).
+// texts of sf update's drain (sf service install refuses a restart while any runs).
 async function serveBusy(): Promise<string[]> {
   const response = await callSocket(stateDir(), { command: 'serve-busy', args: [] });
   if (!response.ok) {
@@ -1444,12 +1444,12 @@ async function serveBusy(): Promise<string[]> {
   ];
 }
 
-// The environment of the shell that ran sf, without what auth.env added (SF-101: sf service).
+// The environment of the shell that ran sf, without what auth.env added, for sf service.
 function shellEnv(fromEnvFile: readonly string[]): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(process.env).filter(([name]) => !fromEnvFile.includes(name)));
 }
 
-// sf service install|uninstall|status (SF-101).
+// sf service install|uninstall|status.
 async function service(args: string[], fromEnvFile: readonly string[]): Promise<void> {
   const [command] = args;
   if (args.length !== 1 || (command !== 'install' && command !== 'uninstall' && command !== 'status')) {
@@ -1461,7 +1461,7 @@ async function service(args: string[], fromEnvFile: readonly string[]): Promise<
 // This package's root (factory/): dist/src/cli.js is two levels below it.
 const PACKAGE_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
-// sf update [--check|--abandon] [--no-smoke] (SF-101): the install is the Git top level of this
+// sf update [--check|--abandon] [--no-smoke]: the install is the Git top level of this
 // package's root; npm runs in the package.
 async function update(args: string[], fromEnvFile: readonly string[]): Promise<void> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { check: { type: 'boolean' }, abandon: { type: 'boolean' }, 'no-smoke': { type: 'boolean' } } });
@@ -1495,7 +1495,7 @@ async function update(args: string[], fromEnvFile: readonly string[]): Promise<v
   });
 }
 
-// The environment file as every command reads it, for sf guard (SF-122): a file that cannot be read
+// The environment file as every command reads it, for sf guard: a file that cannot be read
 // or parsed is the guard's fail-closed guard_failed, naming the file only (parseEnvFile's message
 // quotes the line, which may hold a secret).
 function guardEnvFile(): string[] {
@@ -1509,7 +1509,7 @@ function guardEnvFile(): string[] {
 async function main(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
   // SF_* settings from the environment file (auth.env), for every command alike; sf guard's own
-  // failure never quotes the file's line (SF-122).
+  // failure never quotes the file's line.
   const fromEnvFile = command === 'guard' ? guardEnvFile() : loadEnvFile();
   if (command === 'service') {
     await service(rest, fromEnvFile);

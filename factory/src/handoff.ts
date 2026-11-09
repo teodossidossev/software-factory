@@ -1,4 +1,4 @@
-// The hand-over of a finished job to the workspace's checkout (SF-073): the job's branch checked out
+// The hand-over of a finished job to the workspace's checkout: the job's branch checked out
 // there at its base B with the job's changes as Local Changes, the commit message prefilled; and the
 // way back: Ask for changes (a snapshot of the checkout goes back into the job's worktree and the
 // checkout gives the branch back), Take it back (only while the checkout is as the factory left it),
@@ -196,7 +196,7 @@ async function liveWorktree(checkout: string, path: string | null): Promise<bool
   return path !== null && (await pathExists(path)) && (await registeredWorktrees(checkout)).includes(path);
 }
 
-// Before an Implementer turn (SF-073): no job runs while the user's checkout holds its branch. The
+// Before an Implementer turn: no job runs while the user's checkout holds its branch. The
 // branch must not be checked out in the checkout, and the job's worktree must be on it: a detached
 // one (a hand-over cut off, a worktree that could not be removed) is switched back to it, which Git
 // refuses while another checkout has the branch. branch_in_checkout otherwise. A missing worktree,
@@ -259,7 +259,7 @@ export interface HandedOver {
   removeFailure?: string;
 }
 
-// The hand-over (SF-073, steps 1 to 11): refused before anything changes when the checkout has
+// The hand-over (steps 1 to 11 below): refused before anything changes when the checkout has
 // tracked changes (checkout_dirty), an operation in progress (checkout_busy) or a file where the job
 // adds one (handover_refused); undone when Git refuses the switch (handover_refused) or the working
 // tree is not the job's commit afterwards (handover_mismatch). An undo that fails is
@@ -466,7 +466,7 @@ export interface Asked {
   kept: string[];
 }
 
-// Ask for changes, the Git steps (SF-073, steps 1 to 4): the checkout must be on the branch
+// Ask for changes, the Git steps (1 to 4): the checkout must be on the branch
 // (checkout_moved) and quiet (checkout_busy); its state goes into refs/factory/<ticket>-ask, the
 // checkout gives the branch back (checkout_changing when a file changed meanwhile, nothing
 // changed then), and the job's worktree holds the snapshot as uncommitted changes on B.
@@ -583,7 +583,7 @@ export async function finishAsk(checkout: string, worktree: string, ticket: stri
   return { snapshot, kept };
 }
 
-// Take it back (SF-073): only while HEAD is the branch at B and the checkout's snapshot is the
+// Take it back: only while HEAD is the branch at B and the checkout's snapshot is the
 // job's commit (takeback_changed otherwise, naming the files); the branch back on S, the checkout on
 // previous, the config restored and the worktree on the branch. A switch back that fails is undone
 // (takeback_switch_failed): the checkout and the branch are as before.

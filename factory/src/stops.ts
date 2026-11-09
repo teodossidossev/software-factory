@@ -1,4 +1,4 @@
-// The stops of a job and the actions it offers (SF-129): one table, read by the Execution (which
+// The stops of a job and the actions it offers: one table, read by the Execution (which
 // stop sf accept, sf retry and sf settle take on), the explanation's answers (explain.ts), the
 // stats (stats.ts) and the dashboard's payloads (dashboard.ts), whose page renders what it
 // receives and decides no rule of its own. A row per canonical stop code: its kind (a decision
@@ -13,9 +13,8 @@ import { actedVerdict, type ReviewItem } from './review.js';
 import { usageLimit } from './usage-limit.js';
 
 export type StopKind = 'decision' | 'error';
-// gate: the Codex gate stopped (sf accept overrides it); ledger: the ledger did (SF-052); limit:
-// the Fix round limit (SF-115); simplify: the simplification pass's offer (SF-055); tests: the
-// workspace's tests (SF-128).
+// gate: the Codex gate stopped (sf accept overrides it); ledger: the ledger did; limit: the Fix
+// round limit; simplify: the simplification pass's offer; tests: the workspace's tests.
 export type StopGroup = 'gate' | 'ledger' | 'limit' | 'simplify' | 'tests';
 // The dashboard's actions (POST api/jobs/<ws>/<ticket>/<action>), plus goon (Tell it to go on:
 // say "Go on.") and review-mr (opens the Merge request screen; no command, never in a stop row).
@@ -68,7 +67,7 @@ export const STOPS = {
   fetch_failed: row('error', [RETRY, action('goon', 'Tell it to go on', 'not_retryable'), ABORT]),
   mr_serve_restarted: row('error', [RETRY, GO_ON, ABORT], { aliases: ['mr_interrupted'] }),
   mr_failed: row('error', [RETRY, GO_ON, ABORT], { aliases: ['mr_commit_failed', 'mr_rebase_failed'] }),
-  // The guard's stops of MR preparation (SF-122): sf retry runs new MR text turns, or the check
+  // The guard's stops of MR preparation: sf retry runs new MR text turns, or the check
   // again after a fix of guard-terms.txt or auth.env.
   guard_hit: row('error', [RETRY, SEND, ABORT], { aliases: ['guard_terms_invalid', 'guard_failed'] }),
   tests_unavailable: row('error', [RETRY, ACCEPT, SEND, ABORT], { group: 'tests' }),
@@ -131,13 +130,13 @@ export function storedCodesWithAction(id: StopAction['id']): string[] {
 
 // ---------- The rules of a job's actions ----------
 
-// A review record without the items the ledger dropped (SF-052), compared as written.
+// A review record without the items the ledger dropped, compared as written.
 export function withoutDropped(record: { items: ReviewItem[]; dropped?: ReviewItem[] }): { items: ReviewItem[] } {
   const dropped = new Set((record.dropped ?? []).map((item) => JSON.stringify(item)));
   return { items: record.items.filter((item) => !dropped.has(JSON.stringify(item))) };
 }
 
-// Whether the merge request actions are on for the job's workspace (SF-048): its Git host, or why not.
+// Whether the merge request actions are on for the job's workspace: its Git host, or why not.
 export interface MrHost {
   host: string | null;
   reason: string | null;
@@ -174,10 +173,10 @@ export const ACTION_IDS: readonly ActionId[] = [
   'pause', 'resume', 'restart', 'handover', 'takeback', 'handed-done', 'mr-save', 'mr-reset', 'review-mr',
 ];
 
-// The states that take a message (sf say), and the hand-over's actions (SF-073) with the state each takes.
+// The states that take a message (sf say), and the hand-over's actions with the state each takes.
 const SAY_STATES: readonly string[] = ['working', 'awaiting_review', 'needs_human', 'ready_for_human_review', 'handed_over'];
 const HANDOVER_STATES: Readonly<Partial<Record<ActionId, string>>> = { handover: 'ready_for_human_review', 'handed-done': 'handed_over', takeback: 'handed_over' };
-// Pause, Resume and Restart (SF-067): a job parked on a usage limit (SF-072, waiting_limit) is
+// Pause, Resume and Restart: a job parked on a usage limit (waiting_limit) is
 // resumed (Resume now) and restarted like a paused one.
 const RESUME_STATES: readonly string[] = ['paused', 'waiting_limit'];
 
@@ -195,7 +194,7 @@ function stopRowOf(job: Job, now: Date): { code: StopCode; row: StopRow } | null
 const actedClean = (review: ReviewRecord | undefined): boolean => review !== undefined && 'verdict' in review && actedVerdict(withoutDropped(review)) === 'clean';
 
 // Accept applies on a row with an Accept (sf accept checks it again): at the Fix round limit
-// whatever the last verdict (SF-131), without the Claude review (the gate is the review), else
+// whatever the last verdict, without the Claude review (the gate is the review), else
 // with a clean Claude review of the last iteration.
 function acceptable(job: Job, facts: JobFacts, now: Date): boolean {
   const stop = stopRowOf(job, now);
@@ -205,7 +204,7 @@ function acceptable(job: Job, facts: JobFacts, now: Date): boolean {
   return stop.row.group === 'limit' || !claudeReviews(job) || actedClean(facts.review);
 }
 
-// Retry applies (SF-087): a stop whose row has Retry, never after a conflict turn, whose resolution
+// Retry applies: a stop whose row has Retry, never after a conflict turn, whose resolution
 // no reviewer saw.
 function retryable(job: Job, now: Date): boolean {
   const stop = stopRowOf(job, now);
@@ -226,7 +225,7 @@ function holds(precondition: Precondition, job: Job, facts: JobFacts, now: Date)
 }
 
 // The job can be pushed: the branch prepared at Clean is ready, or its push failed and approve
-// tries again. The merge request on the Git host (SF-048): Create merge request applies to a
+// tries again. The merge request on the Git host: Create merge request applies to a
 // branch ready to approve (push, then open) and to a pushed one without an open or merged one;
 // Merge to an open one.
 const canApprove = (job: Job): boolean => job.state === 'ready_for_human_review' || job.state === 'handed_over' || (job.state === 'needs_human' && typeof job.prepared_commit === 'string');
@@ -236,7 +235,7 @@ const canMerge = (job: Job): boolean => job.state === 'pushed' && hasMr(job) && 
 // Why the merge request actions are off for the job's workspace, or ''.
 const mrOff = (host: MrHost | null | undefined): string => (host === null || host === undefined || typeof host !== 'object' ? 'the Git host is not known yet.'
   : typeof host.reason === 'string' && host.reason !== '' ? `${host.reason}.` : '');
-// A job paused (SF-067) or parked on a usage limit (SF-072) during the Implementer's turn: its
+// A job paused or parked on a usage limit during the Implementer's turn: its
 // Resume takes the message.
 const pausedTurn = (job: Job): boolean => RESUME_STATES.includes(job.state) && job.paused?.from === 'working';
 
@@ -328,16 +327,16 @@ function shownActions(job: Job, facts: JobFacts, now: Date): { list: Listed[]; p
     case 'paused':
       return { list: [listed('resume', 'Resume'), toListed(RESTART), toListed(ABORT)], primary: true };
     case 'waiting_limit':
-      // SF-072: no message waits for a parked job; Resume now carries it (from a turn).
+      // No message waits for a parked job; Resume now carries it (from a turn).
       return { list: [listed('resume', 'Resume now'), toListed(ABORT)], primary: true };
     case 'ready_for_human_review':
-      // SF-080: the Merge request screen first; Approve… stays.
+      // The Merge request screen first; Approve… stays.
       return {
         list: [listed('review-mr', 'Review the MR and push'), listed('approve', 'Approve…'), listed('handover', 'Hand over to my checkout'), ...mrCreate, toListed(SEND), toListed(ABORT)],
         primary: true,
       };
     case 'handed_over':
-      // SF-073: its actions are in the hand-over panel; the composer's row stays empty.
+      // Its actions are in the hand-over panel; the composer's row stays empty.
       return { list: [], primary: false };
     case 'needs_human': {
       const stop = stopRowOf(job, now)!;

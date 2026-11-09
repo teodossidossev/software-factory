@@ -1,11 +1,15 @@
-// The code checks npm test runs before the unit tests (SF-144); npm run check-code runs them alone.
+// The code checks npm test runs before the unit tests; npm run check-code runs them alone.
 // A size ratchet: no .ts module under src/ or web/ passes 600 lines, except those code-size.json
 // lists, and a listed one may not grow past its recorded count. A listed file that shrank by more
 // than 50 lines, fell to 600 lines or fewer, or is gone fails until --update lowers the list.
 // --update rewrites code-size.json with today's counts and only ever lowers them: it never adds a
 // file and never raises a count. Also: no .js file under static/, and every web/X.ts is a
 // dashboard script (X.js in DASHBOARD_SCRIPTS of src/dashboard.ts). Declaration files (.d.ts) are
-// exempt from both rules. The root is the package directory: the working directory, or --root.
+// exempt from those rules. Last, no comment in a .ts file under src/ or web/, .d.ts included, cites
+// a ticket (SF- and a number): comments say what the code does now; the ticket lives in the commit
+// and the Task file. A comment is a line that starts with //, /* or *, or the text after a // on a
+// code line that is not inside a string. The root is the package directory: the working
+// directory, or --root.
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 
@@ -33,6 +37,47 @@ function countLines(text) {
 }
 
 const isModule = (name) => name.endsWith('.ts') && !name.endsWith('.d.ts');
+const TICKET = /SF-\d+/;
+
+// The comment of a line, or null: the whole line when it starts with //, /* or *; else the text
+// from the first // that is not inside a '', "" or `` string. A line-based check: a string or a
+// comment that spans lines is read line by line.
+function commentOf(line) {
+  const text = line.trimStart();
+  if (text.startsWith('//') || text.startsWith('/*') || text.startsWith('*')) {
+    return text;
+  }
+  let quote = null;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (quote !== null) {
+      if (char === '\\') {
+        index += 1;
+      } else if (char === quote) {
+        quote = null;
+      }
+    } else if (char === "'" || char === '"' || char === '`') {
+      quote = char;
+    } else if (char === '/' && line[index + 1] === '/') {
+      return line.slice(index);
+    }
+  }
+  return null;
+}
+
+function ticketProblems(root) {
+  const problems = [];
+  const isSource = (name) => name.endsWith('.ts');
+  for (const file of [...files(root, 'src', isSource), ...files(root, 'web', isSource)]) {
+    readFileSync(join(root, file), 'utf8').split('\n').forEach((line, index) => {
+      const ticket = TICKET.exec(commentOf(line) ?? '');
+      if (ticket !== null) {
+        problems.push(`${file}:${index + 1}: a comment cites ${ticket[0]}: say what the code does now; the ticket lives in the commit and the Task file.`);
+      }
+    });
+  }
+  return problems;
+}
 
 // The names of DASHBOARD_SCRIPTS, read from its line in src/dashboard.ts; null when there is none.
 function dashboardScripts(root) {
@@ -129,12 +174,12 @@ function main(args) {
     writeFileSync(join(root, LIST), `${JSON.stringify(sorted, null, 2)}\n`);
     list = sorted;
   }
-  const problems = [...sizeProblems(list, counts), ...layoutProblems(root)];
+  const problems = [...sizeProblems(list, counts), ...layoutProblems(root), ...ticketProblems(root)];
   for (const problem of problems) {
     console.error(`check-code: ${problem}`);
   }
   if (problems.length === 0) {
-    console.log(`check-code: ${counts.size} modules, none over ${LIMIT} lines or past ${LIST}.`);
+    console.log(`check-code: ${counts.size} modules, none over ${LIMIT} lines or past ${LIST}; no comment cites a ticket.`);
   }
   return problems.length === 0 ? 0 : 1;
 }

@@ -1,5 +1,5 @@
 // setup.js, the dashboard's eighth script (DASHBOARD_SCRIPTS in src/dashboard.ts), built from
-// web/setup.ts into dist/web/ (SF-150): the drawer and the setup (workspaces, new ticket, archived,
+// web/setup.ts into dist/web/: the drawer and the setup (workspaces, new ticket, archived,
 // ticket actions). A classic script, loaded in order with defer, sharing the page's globals with
 // the others. This file has no import or export on purpose: the compiler keeps it a script, so its
 // top-level names stay the page's globals.
@@ -16,7 +16,7 @@ interface TicketKey {
 
 // ---------- The drawer: Workspaces, New ticket, Archived and an archived ticket's Task ----------
 
-// The job opens as its page (#job), a planned ticket as its page (#ticket, SF-081); the drawer stays
+// The job opens as its page (#job), a planned ticket as its page (#ticket); the drawer stays
 // for the setup panels and an archived ticket's Task.
 type DrawerKind = NonNullable<PageState['drawer']>;
 const PANELS: Readonly<Record<DrawerKind, string>> = { task: 'task-panel', workspaces: 'workspaces-panel', ticket: 'ticket-panel', archived: 'archived-panel' };
@@ -73,7 +73,7 @@ function openWantedConfirm(): void {
 }
 
 // An archived ticket's Task text in the drawer, as text: headings bold by a line rule, never HTML
-// from the file. A planned ticket opens as its page (SF-081).
+// from the file. A planned ticket opens as its page.
 async function openTask(row: ArchivedRow): Promise<void> {
   const key = `${row.workspace}/${row.ticket}`;
   const task = { key };
@@ -125,13 +125,13 @@ function renderWorkspaces(): void {
   byId('workspace-list').replaceChildren(...rows.map((row) => {
     const item = el('li');
     if (state.wsEdit === row.name && state.wsEditForm !== null) {
-      // The Edit form (SF-103), kept across redraws so what is typed stays.
+      // The Edit form, kept across redraws so what is typed stays.
       item.append(state.wsEditForm);
       return item;
     }
     const name = el('div', 'ws-name');
     name.append(wsDot(row.name), document.createTextNode(row.name));
-    // Its app (SF-103), when it is not the workspace itself.
+    // Its app, when it is not the workspace itself.
     if (typeof row.app === 'string' && row.app !== row.name) {
       name.append(el('span', 'chipx ws-app', row.app));
     }
@@ -145,7 +145,7 @@ function renderWorkspaces(): void {
     } else if (typeof row.derived_description === 'string' && row.derived_description !== '') {
       item.append(el('div', 'ws-description hint', `${row.derived_description} (from the repository)`));
     }
-    // The workspace's own hand-over setting (SF-083), or SF_HANDOFF's.
+    // The workspace's own hand-over setting, or SF_HANDOFF's.
     item.append(el('div', 'ws-handoff hint', row.handoff === 'checkout' || row.handoff === 'off' ? `Hand-over: ${row.handoff} (this workspace)` : 'Hand-over: as SF_HANDOFF'));
     const digest = row.digest ?? { track: false, my_work: false };
     item.append(el('div', 'ws-digest hint', `Morning digest: ${digest.track ? 'on' : 'off'} · My daily: ${digest.my_work ? 'on' : 'off'}`));
@@ -162,7 +162,7 @@ function renderWorkspaces(): void {
     item.append(line);
     return item;
   }));
-  // The existing apps, the App field's suggestions (SF-103).
+  // The existing apps, the App field's suggestions.
   const apps = [...new Set(rows.map((row) => row.app).filter((app): app is string => typeof app === 'string' && app !== ''))].sort();
   byId('workspace-apps').replaceChildren(...apps.map((app) => {
     const option = el('option');
@@ -253,7 +253,7 @@ async function setupRequest(what: string, path: string, body: unknown, statusId:
   return outcome.level === 'ok' ? result : undefined;
 }
 
-// "Default (now: yes, from SF_HANDOFF)": the hand-over field's first option (SF-103).
+// "Default (now: yes, from SF_HANDOFF)": the hand-over field's first option.
 function handoffDefaultText(): string {
   const now = state.wsSettings.handoff_default;
   return now === 'checkout' || now === 'off' ? `Default (now: ${now === 'checkout' ? 'yes' : 'no'}, from SF_HANDOFF)` : 'Default (from SF_HANDOFF)';
@@ -301,7 +301,7 @@ function wsSelect(key: string, options: ReadonlyArray<readonly [string, string]>
   return select;
 }
 
-// Edit (SF-103): the card becomes the form: the checkout's path, Description (its placeholder the
+// Edit: the card becomes the form: the checkout's path, Description (its placeholder the
 // repository's own description), App (the existing apps as suggestions), Hand-over, Colour and the
 // two digest switches. Save posts every field; Cancel changes nothing. The name stays.
 function openWorkspaceEdit(row: WorkspaceRow): void {
@@ -432,7 +432,7 @@ async function submitWorkspaceEdit(name: string): Promise<void> {
   renderSetup();
 }
 
-// The Morning digest section (SF-103): the stored settings, unless values are typed and not saved.
+// The Morning digest section: the stored settings, unless values are typed and not saved.
 function renderDigestSettings(): void {
   const settings = state.wsSettings.digest;
   if (settings === null || state.digestDirty || state.setupPending.has('digest')) {
@@ -460,9 +460,9 @@ async function submitDigestSettings(): Promise<void> {
 async function submitWorkspace(): Promise<void> {
   const name = byIdAs('workspace-name', 'input').value.trim();
   const path = byIdAs('workspace-path', 'input').value.trim();
-  // The workspace's own hand-over setting (SF-083); empty: SF_HANDOFF applies. Its colour on the
-  // board (SF-084); empty: the server picks one by its name. Its description, app and digest
-  // switches (SF-103); empty or off: none, its name, off.
+  // The workspace's own hand-over setting; empty: SF_HANDOFF applies. Its colour on the
+  // board; empty: the server picks one by its name. Its description, app and digest
+  // switches; empty or off: none, its name, off.
   const handoff = byIdAs('workspace-handoff', 'select').value;
   const color = byIdAs('workspace-color', 'select').value;
   const description = byIdAs('workspace-description', 'textarea').value.trim();
@@ -513,9 +513,9 @@ async function submitTicket(): Promise<void> {
   if (result === undefined) {
     releaseNewImages();
   }
-  // Created (SF-066): the dialog closes and the new ticket's card is highlighted (a click on it
+  // Created: the dialog closes and the new ticket's card is highlighted (a click on it
   // opens its page); a failure keeps the dialog open with the error and the input. Then its images
-  // go up (SF-064); one that fails leaves the ticket created, and the form stays open saying which
+  // go up; one that fails leaves the ticket created, and the form stays open saying which
   // and why.
   if (result !== undefined) {
     byIdAs('ticket-key', 'input').value = '';
@@ -582,7 +582,7 @@ function openTicketConfirm(action: 'start' | 'delete', row: ConfirmedTicket, ext
   state.ticketConfirm = { action, key, row };
   if (action === 'start') {
     byId('ticket-confirm-title').textContent = `Start ${row.ticket} in ${row.workspace}?`;
-    // The Task check only advises (SF-054): its note is part of the text, Start stays on.
+    // The Task check only advises: its note is part of the text, Start stays on.
     const note = typeof row.check?.start_note === 'string' ? ` Task check: ${row.check.start_note}.` : '';
     byId('ticket-confirm-text').textContent = `Starts a job on .software-factory/${row.ticket}.md of workspace ${row.workspace}: a new branch from ${row.base} in its own worktree, where the Implementer runs iteration 1. Claude reviews it, the Codex gate checks it, and the branch comes back to you to approve.${note}${extra}`;
     byId('ticket-ok').textContent = 'Start the job';
@@ -635,7 +635,7 @@ async function startTicket(row: TicketKey): Promise<void> {
   renderTicket();
   let outcome: Outcome | undefined;
   let unknown: string | undefined;
-  // Started from its planned ticket page (SF-081): the page goes to the new job's Stream, whether
+  // Started from its planned ticket page: the page goes to the new job's Stream, whether
   // the stream brings the job before or after this answer.
   if (ui.screen === 'ticket' && ui.ticket === key) {
     state.goAfterStart = key;

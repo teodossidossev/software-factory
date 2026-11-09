@@ -1,4 +1,4 @@
-// The state format version (SF-101): <state dir>/state-version holds a whole number, the format
+// The state format version: <state dir>/state-version holds a whole number, the format
 // of the state files the factory last wrote. sf serve and every runner (sf run) check it at start:
 // a missing file gets the current version; an equal one goes on; a lower one runs the migrations
 // from it to the current one in order, then the new number is written; a higher one refuses with
@@ -22,10 +22,10 @@ export interface Migration {
 
 // The migrations, one per step.
 export const MIGRATIONS: readonly Migration[] = [
-  // 1 → 2 (SF-131): job.json may hold claude_review, which an older factory's strict schema refuses.
+  // 1 → 2: job.json may hold claude_review, which an older factory's strict schema refuses.
   // A job without it counts as true (claudeReviews), so nothing is rewritten.
   { from: 1, run: async () => undefined },
-  // 2 → 3 (SF-153): queue.json may hold last_start, which an older factory's strict schema refuses.
+  // 2 → 3: queue.json may hold last_start, which an older factory's strict schema refuses.
   // A queue without it has had no start recorded yet, so nothing is rewritten.
   { from: 2, run: async () => undefined },
 ];

@@ -1,11 +1,11 @@
-// The guard (SF-122): one scan with two term sources keeps text out of what the factory publishes.
+// The guard: one scan with two term sources keeps text out of what the factory publishes.
 // The secret terms (the values of the environment file's secret keys, the factory's token files and
 // a few generic key patterns) apply to every workspace; the name terms (the names, Git hosts, ticket
 // key prefixes and email domains of the user's other workspaces, built from the registry and the job
 // store at every check, plus the private list guard-terms.txt in the config directory) only to a
 // workspace with "guard": true in workspaces.json. What is scanned: the commits a push publishes
-// (message, added lines, new file paths; never the author or committer, the user's own identity
-// (SF-135)), the branch name and the MR text; at MR preparation the worktree's change as the factory
+// (message, added lines, new file paths; never the author or committer, the user's own identity),
+// the branch name and the MR text; at MR preparation the worktree's change as the factory
 // would commit it. Only `sf guard` (and the pre-push hook, which runs it) prints a matched text
 // (hitReport, never a secret's); every other message names places only (hitPlace, guardMessage),
 // with the terms inside them masked.
@@ -80,7 +80,7 @@ export interface GuardTerm {
 }
 
 export interface GuardHit {
-  // The place (rule 6 of SF-122): never the matched text, but a term may occur in it (a path).
+  // The place: never the matched text, but a term may occur in it (a path).
   where: string;
   match: string;
   label: string;
@@ -258,7 +258,7 @@ function keyPrefix(ticket: string): string | undefined {
   return TICKET_KEY.exec(ticket)?.[1]?.toUpperCase();
 }
 
-// The name terms of the guarded workspace G (rule 2 of SF-122), with the private list's terms
+// The name terms of the guarded workspace G, with the private list's terms
 // and its "!" drops applied; warnings for the CLI (the factory's own checks ignore them).
 export async function buildTerms(input: { workspace: Workspace; configDir: string; stateDir: string }): Promise<{ terms: GuardTerm[]; warnings: string[] }> {
   const { workspace, configDir, stateDir } = input;
@@ -365,7 +365,7 @@ function isSecretValue(value: string): boolean {
   return value.length >= MIN_SECRET_CHARS && !NOT_SECRET.some((pattern) => pattern.test(value));
 }
 
-// The secret terms of every workspace (rule 3a of SF-122): the values of the environment file's
+// The secret terms of every workspace: the values of the environment file's
 // secret keys and of the token files, as literal substrings, and the generic key patterns.
 export async function secretTerms(input: { stateDir: string; envFile: string | undefined }): Promise<GuardTerm[]> {
   const values: string[] = [];
@@ -411,7 +411,7 @@ export async function checkTerms(input: { workspace: Workspace; guarded: boolean
 
 // The hits of the terms in one line; place gives the hit's place from its 1-based column.
 // The matched text of every other hit has the characters of a secret match in the same line masked
-// by "*" (SF-122): a private regular expression that also covers a secret never carries it.
+// by "*": a private regular expression that also covers a secret never carries it.
 function lineHits(line: string, terms: readonly GuardTerm[], place: (column: number) => string): GuardHit[] {
   const secretRanges: Array<[number, number]> = [];
   for (const term of terms) {
@@ -480,7 +480,7 @@ export function maskTerms(text: string, terms: readonly GuardTerm[]): string {
 }
 
 // The MR text's problem (mrTextProblem) quoted from the text with every term masked first: the
-// problem cuts its quotes at 100 characters, which would cut a secret out of its match (SF-122).
+// problem cuts its quotes at 100 characters, which would cut a secret out of its match.
 // Valid or not is the original text's; undefined when it is valid.
 export function maskedMrTextProblem(ticket: string, text: string, terms: readonly GuardTerm[]): string | undefined {
   if (mrTextProblem(ticket, text) === undefined) {
@@ -489,7 +489,7 @@ export function maskedMrTextProblem(ticket: string, text: string, terms: readonl
   return mrTextProblem(ticket, maskTerms(text, terms)) ?? 'it does not pass the rules of the MR text';
 }
 
-// readMrText's failure for a message (SF-122): an invalid text's problem rebuilt from the masked
+// readMrText's failure for a message: an invalid text's problem rebuilt from the masked
 // text in the worktree, or without any quote when it cannot be rebuilt; any other failure masked.
 export async function maskedMrTextFailure(cwd: string, ticket: string, failure: { code: string; message: string }, terms: readonly GuardTerm[]): Promise<string> {
   const path = mrTextPath(ticket);
@@ -731,7 +731,7 @@ export async function commitsToCheck(cwd: string, spec: CommitSpec): Promise<str
 }
 
 // The hits of the commits: message and the change against the first parent (a root commit against
-// the empty tree). The author and committer are the user's own identity and never scanned (SF-135).
+// the empty tree). The author and committer are the user's own identity and never scanned.
 export async function scanCommits(cwd: string, commits: readonly string[], terms: readonly GuardTerm[]): Promise<GuardHit[]> {
   const hits: GuardHit[] = [];
   for (const sha of commits) {
@@ -790,7 +790,7 @@ export function hookText(sf: string, workspace: string): string {
 }
 
 // Where Git looks for the checkout's pre-push hook: the repository's own core.hooksPath (every
-// factory Git call sets it to /dev/null on its command line, SF-124, so the value is read by
+// factory Git call sets it to /dev/null on its command line, so the value is read by
 // scope, the command line's left out), resolved against the work tree's root (a leading ~/
 // against the home directory); without one, hooks/ of the common Git dir.
 async function prePushPath(checkout: string): Promise<string> {

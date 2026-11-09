@@ -15,7 +15,7 @@ import { turnLimitLine } from './turn-limit.js';
 const DESKTOP_TIMEOUT_MS = 5_000;
 const NTFY_TIMEOUT_MS = 10_000;
 export const NOTIFIED_STATES: readonly JobState[] = ['ready_for_human_review', 'handed_over', 'needs_human', 'paused', 'waiting_limit', 'pushed', 'failed'];
-// The name of a usage limit's provider in a notification (SF-072).
+// The name of a usage limit's provider in a notification.
 const PROVIDER_NAMES = { claude: 'Claude', codex: 'Codex' } as const;
 
 export interface NotifyConfig {
@@ -56,9 +56,9 @@ export function notifiedStates(config: NotifyConfig): readonly JobState[] {
 
 // The notification for a job that reached state (or whose merge request was opened or merged);
 // extra: the MR title and link (or the merge request's) when pushed, the
-// sensitive, out-of-scope and deleted paths of the iteration (SF-024, SF-053).
+// sensitive, out-of-scope and deleted paths of the iteration.
 export function jobNotification(job: Job, extra: string[] = []): Notification {
-  // A chain that went on by itself after a turn limit (SF-069) says so in one line.
+  // A chain that went on by itself after a turn limit says so in one line.
   const turnLimit = turnLimitLine(job);
   const lines = turnLimit !== undefined ? [turnLimit, ...extra] : extra;
   if (job.state === 'awaiting_review') {
@@ -70,7 +70,7 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
     };
   }
   if (job.state === 'paused') {
-    // SF-067: what the pause interrupted, which Resume runs again.
+    // What the pause interrupted, which Resume runs again.
     const step = job.paused?.step;
     return {
       title: `${job.ticket}: paused`,
@@ -80,7 +80,7 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
     };
   }
   if (job.state === 'waiting_limit') {
-    // SF-072: whose usage limit, and until when (local time, HH:MM) the job is parked.
+    // Whose usage limit, and until when (local time, HH:MM) the job is parked.
     const limit = job.limit;
     const until = limit !== undefined ? localTime(limit.resets_at)?.slice(11, 16) : undefined;
     return {
@@ -91,7 +91,7 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
     };
   }
   if (job.state === 'handed_over') {
-    // SF-073: the changes wait in the user's checkout; extra holds the MR title and the file lines.
+    // The changes wait in the user's checkout; extra holds the MR title and the file lines.
     return {
       title: `${job.ticket}: in your checkout`,
       body: [`in your checkout on ${job.branch}`, ...(job.error !== undefined ? [`${job.error.code}: ${job.error.message}`] : []), ...lines].slice(0, 3).join('\n'),
@@ -99,11 +99,11 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
       tags: 'eyes',
     };
   }
-  // Why the automatic hand-over did not happen (SF-073); not when hand-over is off (SF-083): a
+  // Why the automatic hand-over did not happen; not when hand-over is off: a
   // setting the user chose is not news, and the files line stays in the body.
   const skipped = job.state === 'ready_for_human_review' && job.handoff_skipped !== undefined && job.handoff_skipped.code !== HANDOFF_OFF_CODE ? [job.handoff_skipped.message] : [];
   const body = [`branch: ${job.branch}`, ...(job.error !== undefined ? [`${job.error.code}: ${job.error.message}`] : []), ...skipped, ...lines].slice(0, 3);
-  // A pushed job's merge request on the Git host (SF-048) names the title once it is opened or merged.
+  // A pushed job's merge request on the Git host names the title once it is opened or merged.
   const mr = job.state === 'pushed' && job.mr !== null && job.mr !== undefined ? job.mr : undefined;
   return {
     title: mr !== undefined ? `${job.ticket}: merge request #${mr.number} ${mr.state === 'open' ? 'opened' : mr.state}` : `${job.ticket}: ${job.state}`,
@@ -113,7 +113,7 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
   };
 }
 
-// The one notification of the run queue at a usage limit's reset (SF-072): the parked jobs it
+// The one notification of the run queue at a usage limit's reset: the parked jobs it
 // resumed, or (rule wait) those that wait for the user.
 export function limitResetNotification(resumed: number, waiting: number): Notification {
   const jobs = (count: number): string => `${count} job${count === 1 ? '' : 's'}`;
@@ -121,7 +121,7 @@ export function limitResetNotification(resumed: number, waiting: number): Notifi
   return { title: 'Usage limit reset', body: `Usage limit reset: ${parts.join(', ')}`, priority: 'default', tags: 'hourglass' };
 }
 
-// The notification for an automatic Task check (SF-086) that ended not ready ("N blocker, M major ·
+// The notification for an automatic Task check that ended not ready ("N blocker, M major ·
 // <workspace>", the counts as the board writes them) or failed (the first line of its error);
 // undefined for a ready one.
 export function taskCheckNotification(record: CheckRecord): Notification | undefined {
@@ -154,12 +154,12 @@ export async function notifyTaskCheck(record: CheckRecord, config: NotifyConfig,
   }
 }
 
-// The notification of a scheduled morning digest (SF-103): counts only, never a name, subject or code.
+// The notification of a scheduled morning digest: counts only, never a name, subject or code.
 export function digestNotification(counts: { landed: number; impact: number }): Notification {
   return { title: 'Morning digest ready', body: `Morning digest ready: ${counts.landed} landed, ${counts.impact} of mine need attention`, priority: 'default', tags: 'newspaper' };
 }
 
-// The notification of a health check (SF-153) that turned down, or is ok again after it was down:
+// The notification of a health check that turned down, or is ok again after it was down:
 // its label and detail (the checks' details carry no token).
 export function healthNotification(check: { label: string; detail: string }, turned: 'down' | 'ok'): Notification {
   const detail = check.detail.replace(/\s+/g, ' ').trim().slice(0, 300);

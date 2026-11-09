@@ -1,5 +1,5 @@
 // job-screens.js, the dashboard's second script (DASHBOARD_SCRIPTS in src/dashboard.ts), built from
-// web/job-screens.ts into dist/web/ (SF-147): what the job page reads, the Task check, the Changes
+// web/job-screens.ts into dist/web/: what the job page reads, the Task check, the Changes
 // screen, the Merge request screen and the Stream. A classic script, loaded in order with defer,
 // sharing the page's globals with the others. This file has no import or export on purpose: the
 // compiler keeps it a script, so its top-level names stay the page's globals.
@@ -25,14 +25,14 @@ function isTag<K extends keyof HTMLElementTagNameMap>(node: Element | null, tag:
   return node !== null && node.tagName === tag.toUpperCase();
 }
 
-// ---------- The job page (SF-078): what its header, Stream, stop block and composer read ----------
+// ---------- The job page: what its header, Stream, stop block and composer read ----------
 
 const verdictOf = (record: ReviewRecord | GateRecord | null | undefined): 'failed' | 'clean' | 'fix' | null | undefined => (record === null || record === undefined ? null : typeof record.error === 'string' ? 'failed' : record.verdict);
 const iterationOf = (detail: JobDetail, number: unknown): IterationRow | null => detail.iterations.find((iteration) => iteration.number === number) ?? null;
 // "10:05" of a timestamp, local time.
 const clock = (ts: unknown): string => localTime(ts).slice(11, 16);
 
-// Whether the Claude review runs on the job (SF-131): its claude_review, true when absent.
+// Whether the Claude review runs on the job: its claude_review, true when absent.
 const claudeOn = (job: { claude_review?: boolean } | null | undefined): boolean => job?.claude_review !== false;
 
 // The leftovers' items: the ledger's entries, the gate's items.
@@ -59,27 +59,27 @@ function gateLeftovers(detail: JobDetail): Leftovers {
   return typeof gate.error === 'string' ? { items: [], error: gate.error, ran: true } : { items: gate.items ?? [], error: null, ran: true };
 }
 
-// The ledger's findings an Accept over a ledger stop goes without (SF-052): open entries, the
+// The ledger's findings an Accept over a ledger stop goes without: open entries, the
 // fixes the user decided and the disputed contests.
 function ledgerOpen(detail: JobDetail): LedgerEntry[] {
   return (detail.ledger ?? []).filter((entry) => entry.status === 'open' || entry.status === 'user_fix' || (entry.status === 'contested' && entry.dispute !== null));
 }
 
-// What an Accept at the Fix round limit goes without (SF-115), as the factory's #ledgerUnapplied
-// decides it: the ledger's open entries alone (SF-131: the refused Fix wrote its items there), no
+// What an Accept at the Fix round limit goes without, as the factory's #ledgerUnapplied
+// decides it: the ledger's open entries alone (the refused Fix wrote its items there), no
 // fix the user decided and no disputed contest.
 function limitLeftovers(detail: JobDetail): Leftovers {
   return { items: (detail.ledger ?? []).filter((entry) => entry.status === 'open'), error: null, ran: true, limit: true };
 }
 
-// The suggestions the simplification pass offers on the job's last iteration (SF-055), for the
+// The suggestions the simplification pass offers on the job's last iteration, for the
 // stop block and the confirmations of Simplify and of Skip (accept).
 function offeredSuggestions(detail: JobDetail): { items: Suggestion[]; suggestions: true } {
   const record = iterationOf(detail, detail?.job?.iteration)?.simplify ?? null;
   return { items: Array.isArray(record?.suggestions) ? record.suggestions : [], suggestions: true };
 }
 
-// The user's override of the gate that still stands (SF-047): the newest gate-override.json, unless
+// The user's override of the gate that still stands: the newest gate-override.json, unless
 // a later iteration was reviewed by the gate again; null when there is none.
 function standingOverride(detail: JobDetail): GateOverride | null {
   for (const iteration of [...detail.iterations].reverse()) {
@@ -93,10 +93,10 @@ function standingOverride(detail: JobDetail): GateOverride | null {
   return null;
 }
 
-// The notice of a paused job whose Task file changed since the Implementer was last given it (SF-067).
+// The notice of a paused job whose Task file changed since the Implementer was last given it.
 const TASK_CHANGED = 'Task file changed since the job started: Resume hands the change to the Implementer and the reviewers.';
 
-// What moves a paused job on (SF-067), after "Paused by you during iteration N".
+// What moves a paused job on, after "Paused by you during iteration N".
 function pausedNext(job: JobRow): string {
   const step = job.paused?.step;
   const again = step === 'turn' ? 'Resume continues the same session (with your message, if you write one below)'
@@ -104,7 +104,7 @@ function pausedNext(job: JobRow): string {
   return `${again}; Restart starts the ticket again from its current Task file`;
 }
 
-// What moves a job parked on a usage limit on (SF-072).
+// What moves a job parked on a usage limit on.
 function parkedNext(job: JobRow): string {
   const turn = job.paused?.from === 'working';
   if (job.limit?.reset_seen === true) {
@@ -118,7 +118,7 @@ function parkedNext(job: JobRow): string {
 const headSentence = (job: JobRow): string => (job.state === 'paused' ? `${sentence(job)}. ${pausedNext(job)}`
   : job.state === 'waiting_limit' ? `${sentence(job)}. ${parkedNext(job)}` : sentence(job));
 
-// A parked job's reset time (SF-072), HH:MM in local time, or null.
+// A parked job's reset time, HH:MM in local time, or null.
 const limitClock = (job: JobRow): string | null => (typeof job.limit?.resets_at === 'string' ? clock(job.limit.resets_at) : null);
 const LIMIT_PROVIDERS: Readonly<Record<string, string>> = { claude: 'Claude', codex: 'Codex' };
 
@@ -146,16 +146,16 @@ function mrStatusText(status: MergeRequestStatus): string {
   return `On the host: ${parts.join(', ')}.`;
 }
 
-// ---------- Task check (SF-054) ----------
+// ---------- Task check ----------
 
 // The last check of a ticket, as the implement prompt's Task toggle shows it (the planned ticket
-// page has its own Plan check card, SF-081):
+// page has its own Plan check card):
 // the stale mark and the verdict, the paraphrase above the findings (by severity), then the
 // expected files.
 function renderCheck(view: CheckView): HTMLElement[] {
   const box: HTMLElement[] = [];
   const record = view.check;
-  // A Task that needs no check (SF-130): the view says why.
+  // A Task that needs no check: the view says why.
   if (typeof view.check_reason === 'string' && !view.running) {
     box.push(el('p', 'check-head', `Task check: not needed: ${view.check_reason}.`));
     return box;
@@ -226,7 +226,7 @@ async function checkTicket(row: { workspace: string; ticket: string }): Promise<
     ({ level: 'ok', text: `Checking ${key}: a read-only Claude session reads the Task file and the repository; the card shows the verdict when it ends. It only advises: Start stays yours.` }));
 }
 
-// ---------- The Changes screen (SF-079): the prototype's file tree, diff pane and iteration selector ----------
+// ---------- The Changes screen: the prototype's file tree, diff pane and iteration selector ----------
 
 // Report: preformatted, Markdown headings bold (the Stream's changes entries and the MR text).
 function renderReport(text: string): HTMLSpanElement[] {
@@ -270,12 +270,12 @@ const store = {
   },
 };
 const DIFF_MODE_KEY = 'sf-diff-mode';
-// SF-119: a phone (below 768 px), and a phone or a device without hover (app.css has the same
+// A phone (below 768 px), and a phone or a device without hover (app.css has the same
 // two queries). Without matchMedia (the test stand-in) neither applies.
 const NARROW_QUERY = '(max-width: 767px)';
 const TOUCH_QUERY = '(max-width: 767px), (hover: none)';
 const media = (query: string): boolean => typeof matchMedia === 'function' && matchMedia(query).matches === true;
-// SF-119: below 768 px the diff is unified, whatever was chosen; the choice stays stored for a
+// Below 768 px the diff is unified, whatever was chosen; the choice stays stored for a
 // wider window.
 const diffLayout = (): 'side' | 'uni' => (media(NARROW_QUERY) ? 'uni' : ui.cx.mode);
 
@@ -290,7 +290,7 @@ const isCxError = (value: unknown): value is CxError => isRecord(value) && typeo
 // A view of the Changes screen: All changes, or an iteration's.
 type CxView = 'all' | number;
 
-// core.ts's PageState keeps the Changes data and the Stream's entries untyped (unknown, SF-146: its
+// core.ts's PageState keeps the Changes data and the Stream's entries untyped (unknown: its
 // types change only for a shared helper). This file alone writes them, so these read them back as
 // the types it writes: the index (cxIndex), the reads (cxGet), the line diffs (getDiff) and the
 // entries (takeEntries).
@@ -743,7 +743,7 @@ function renderChanges(focusTree?: boolean): void {
     const sum = el('div', 'sum');
     sum.id = 'cxsum';
     const tb = el('div', 'tb');
-    // SF-119: the tree's fold, shown on a phone only (app.css), above its filter.
+    // The tree's fold, shown on a phone only (app.css), above its filter.
     const fold = button('btn small cxtree', '', { cxtree: '' });
     fold.id = 'cxtree';
     fold.setAttribute('aria-controls', 'tlist');
@@ -868,7 +868,7 @@ function itemEntry(item: { id?: string | null; path: string; problem: string; ex
   return entry;
 }
 
-// ---------- The Merge request screen (SF-080: the prototype's renderMr, renderMrChecks and mrAction) ----------
+// ---------- The Merge request screen (the prototype's renderMr, renderMrChecks and mrAction) ----------
 
 // Per job ("<ws>/<ticket>"): the mr-view last read (the server's) and its signature, the draft
 // (title, body, branch, base; kept across screens), the saved values the draft is compared with,
@@ -963,15 +963,14 @@ function mrProblems(j: JobRow, m: LoadedMr): MrProblem[] {
   }
   const claim = section(m.body, '## Testing').find((line) => manualClaim(rules).test(line) && !/not/iu.test(line));
   if (claim !== undefined) {
-    p.push({ field: 'body', message: `SF-058: the ## Testing line "${claim.trim().slice(0, 90)}" reads as a check that was run. Anything not run goes on a line starting with "Not checked:".` });
+    p.push({ field: 'body', message: `Testing claim: the ## Testing line "${claim.trim().slice(0, 90)}" reads as a check that was run. Anything not run goes on a line starting with "Not checked:".` });
   }
   return p;
 }
 // The problems shown: the draft's while it has unsaved changes, else the server's list of the saved text.
 const mrShownProblems = (j: JobRow, m: LoadedMr): MrProblem[] => (mrDirty(m) ? mrProblems(j, m) : m.view.problems);
 
-// The mark of a Preview list line (md's mark): a "Not checked:" line, a manual check claimed as run
-// (SF-058).
+// The mark of a Preview list line (md's mark): a "Not checked:" line, a manual check claimed as run.
 function mdMark(raw: string): string {
   const m = state.key === null ? undefined : MR.get(state.key);
   if (NOT_CHECKED.test(raw)) {
@@ -1280,7 +1279,7 @@ function renderMrChecks(): void {
   }
   for (const line of flagged) {
     const n = el('div', 'notline bad');
-    n.append(el('b', '', 'SF-058:'), document.createTextNode(' '), ...inl(line.replace(/^\s*[-*+]\s+/, '')));
+    n.append(el('b', '', 'Testing claim:'), document.createTextNode(' '), ...inl(line.replace(/^\s*[-*+]\s+/, '')));
     notCard.append(n);
   }
 
@@ -1289,14 +1288,14 @@ function renderMrChecks(): void {
     ['Title follows the commit header rule', !probs.some((p) => p.field === 'title')],
     ['Branch and base are set', !probs.some((p) => p.field === 'branch' || p.field === 'base')],
     ['All required headings are present', !probs.some((p) => p.message.startsWith('Missing heading'))],
-    ['## Testing claims no manual check as run (SF-058)', !probs.some((p) => p.message.startsWith('SF-058'))],
+    ['## Testing claims no manual check as run', !probs.some((p) => p.message.startsWith('Testing claim:'))],
   ] as const) {
     const item = el('li');
     item.append(el('span', ok ? 'ok' : 'no', ok ? '✓' : '✕'), document.createTextNode(label));
     checks.append(item);
   }
   const cards = [commit, mrCard('Carries', kv), notCard, mrCard('Checks', checks)];
-  // The Codex items the user accepted the change without (SF-047), for a follow-up ticket.
+  // The Codex items the user accepted the change without, for a follow-up ticket.
   const override = standingOverride(detail);
   if (override !== null) {
     const items = Array.isArray(override.unapplied) ? override.unapplied : [];
@@ -1312,7 +1311,7 @@ function renderMrChecks(): void {
 
 // The bar: the state text, the problem count and the buttons; pushed: when, and Back to the stream;
 // read-only: why, and the push buttons of a handed-over job; last, when a button is off with a
-// reason, those reasons (SF-119, shown on a phone or a device without hover).
+// reason, those reasons (shown on a phone or a device without hover).
 function mrBar(j: JobRow, m: LoadedMr, probs: MrProblem[]): HTMLElement[] {
   const nodes = mrBarNodes(j, m, probs);
   const lines = whyLines(nodes.filter((node) => node.classList?.contains('btn')));
@@ -1518,7 +1517,7 @@ function copyValue(text: string, box: HTMLTextAreaElement | HTMLInputElement, sa
   navigator.clipboard.writeText(text).then(() => say('Copied.'), select);
 }
 
-// ---------- The Stream (SF-078): SF-082's entries, as the prototype's renderStream and entryHtml ----------
+// ---------- The Stream: the server's entries, as the prototype's renderStream and entryHtml ----------
 
 // The entries of the Stream as the page keeps them (state.entries): the server's, a tool with its
 // tool_result joined as res, a test run with its tests_result joined as res; a tool_result is never
@@ -1536,8 +1535,8 @@ const STATE_WORD: Readonly<Record<string, string>> = {
   starting: 'Starting', working: 'Implementing', awaiting_review: 'In review', preparing_mr: 'Writing the MR', needs_human: 'Waiting for you',
   ready_for_human_review: 'Ready for you', handed_over: 'Handed over to your checkout', paused: 'Paused by you', waiting_limit: 'Waiting for limits', pushed: 'Pushed', aborted: 'Aborted', failed: 'Failed',
 };
-// The line of a state change that is not a stop; the factory's own line when it gives one (SF-072:
-// the park on a usage limit and the resume from it).
+// The line of a state change that is not a stop; the factory's own line when it gives one (the
+// park on a usage limit and the resume from it).
 const STATE_TEXT = (entry: StateEntry): string => {
   if (typeof entry.text === 'string' && entry.text !== '') {
     return entry.text;
@@ -1670,10 +1669,10 @@ function fixItems(text: unknown): FindingLike[] {
 // A toggle of an entry (data-toggle: the entry's key, or "<key>/task", "<key>/report").
 const toggleButton = (key: string, text: string): HTMLButtonElement => button('linkish', text, { toggle: key });
 
-// A test run's duration (SF-128): "12 s" under a minute, else as dur.
+// A test run's duration: "12 s" under a minute, else as dur.
 const testsDur = (ms: unknown): string | null => (typeof ms !== 'number' ? null : ms < 60000 ? `${Math.max(0, Math.round(ms / 1000))} s` : dur(ms));
 
-// The line of a run of the workspace's test command (SF-128): running, or how it ended (res: its
+// The line of a run of the workspace's test command: running, or how it ended (res: its
 // tests_result), or the user's Accept of it.
 function testsLine(res: TestsResultEntry | null | undefined): string {
   if (res === undefined || res === null) {
@@ -1695,7 +1694,7 @@ function testsLine(res: TestsResultEntry | null | undefined): string {
   }
 }
 
-// The body of a test run entry (SF-128): its line, the command, and the output's last lines behind
+// The body of a test run entry: its line, the command, and the output's last lines behind
 // the toggle (collapsed).
 function testsBody(entry: TestsEntry | TestsResultEntry, open: boolean): HTMLElement[] {
   const res = entry.t === 'tests_result' ? entry : entry.res;
@@ -1711,7 +1710,7 @@ function testsBody(entry: TestsEntry | TestsResultEntry, open: boolean): HTMLEle
   return nodes;
 }
 
-// The command of the open job's last test run, as inline code, for the Accept confirmation (SF-128).
+// The command of the open job's last test run, as inline code, for the Accept confirmation.
 function testsCommand(key: string): string {
   if (key === state.key) {
     for (let index = state.entries.length - 1; index >= 0; index -= 1) {
@@ -1751,8 +1750,8 @@ function changesEntry(entry: Extract<ShownEntry, { t: 'changes' }>): HTMLElement
   return block;
 }
 
-// The implement prompt's Task: the Task file and its last check, from the sources of the old Task
-// tab, once per job and Fix section.
+// The implement prompt's Task: the Task file (api/tickets/<ws>/<ticket>/task, the archived one as a
+// fallback) and its last check, once per job and Fix section.
 async function loadTaskView(): Promise<void> {
   const key = state.key;
   const job = state.detail?.job ?? jobByKey(key);
@@ -1782,7 +1781,7 @@ async function loadTaskView(): Promise<void> {
   }
 }
 
-// The images sent with a prompt (SF-065), as one muted line; none without.
+// The images sent with a prompt, as one muted line; none without.
 function imagesLine(entry: { images?: string[] }): HTMLElement[] {
   return Array.isArray(entry.images) && entry.images.length > 0 ? [el('div', 'muted fs12', `Images: ${entry.images.join(', ')}`)] : [];
 }
@@ -1948,7 +1947,7 @@ function ledgerFinding(entry: LedgerEntry, busy: string, offered: boolean): HTML
   return node;
 }
 
-// The ledger entries of a ledger stop: those to settle (the detail's settle_ids, SF-129), the open
+// The ledger entries of a ledger stop: those to settle (the detail's settle_ids), the open
 // ones of a churn stop, and the ones settled since the stop (with their decision), in ledger order.
 function stopLedger(detail: JobDetail, code: string, since: string | null): LedgerEntry[] {
   const settleIds = new Set(Array.isArray(detail.settle_ids) ? detail.settle_ids : []);
@@ -1994,7 +1993,7 @@ function stopInline(job: JobRow, detail: JobDetail | null, entry: StateEntry): H
     case 'gate_budget':
       return [el('div', '', `The Codex gate used ${typeof job.gate_tokens === 'number' ? job.gate_tokens.toLocaleString('en-US') : 'its'} tokens.`)];
     case 'iteration_limit':
-      // The open blocker and major findings (SF-131: the ledger's, the stop's items).
+      // The open blocker and major findings (the ledger's, the stop's items).
       return findings(Array.isArray(job.stop?.items) ? job.stop.items : [...(last?.review?.items ?? []), ...(last?.gate?.items ?? [])]);
     case 'gate_failed':
       return typeof last?.gate?.error === 'string' ? [el('pre', 'raw', last.gate.error)] : whole();
@@ -2028,7 +2027,7 @@ function stopInline(job: JobRow, detail: JobDetail | null, entry: StateEntry): H
 // decision", never as an error.
 function stopBlock(entry: StateEntry, live: boolean): HTMLElement {
   const job = live ? shownJob() : null;
-  // The live stop's row is the job's, an earlier one the Stream entry's (SF-129).
+  // The live stop's row is the job's, an earlier one the Stream entry's.
   const stop = stopEntry(job === null ? entry.stop_code : job.stop_code);
   // Its kind is the server's too (stop_kind): a decision is never labelled as an error.
   const decision = (job === null ? entry.stop_kind : job.stop_kind) === 'decision';
@@ -2070,7 +2069,7 @@ function stopBlock(entry: StateEntry, live: boolean): HTMLElement {
   return block;
 }
 
-// The plain explanation of the job's current stop (SF-106): the detail's explanation while it is
+// The plain explanation of the job's current stop: the detail's explanation while it is
 // pending or written for this very stop (updated_at and code); null when there is none, it failed,
 // or it is another stop's.
 function stopExplanation(job: JobRow, detail: JobDetail | null): ExplanationRecord | null {
@@ -2296,7 +2295,7 @@ function stopSignature(): string {
   const job = shownJob();
   const detail = state.detail;
   const last = detail === null ? null : iterationOf(detail, detail.job.iteration);
-  // The stop's explanation too (SF-106): its pending and final writes change nothing else.
+  // The stop's explanation too: its pending and final writes change nothing else.
   return JSON.stringify([stopKey(), job?.state, job?.error, job?.stop, job?.gate_tokens, job?.worktree, job?.iteration, detail?.ledger, last?.simplify, last?.review, last?.gate,
     detail === null ? '' : availability('settle', detail.job), detail?.explanation ?? null]);
 }
@@ -2321,7 +2320,7 @@ function toolOf(id: string): ToolEntry | null {
   return null;
 }
 
-// The test run a tests_result belongs to (SF-128): the last tests entry of its run; null when the page
+// The test run a tests_result belongs to: the last tests entry of its run; null when the page
 // has not seen it.
 function testsOf(run: string): TestsEntry | null {
   for (let index = state.entries.length - 1; index >= 0; index -= 1) {

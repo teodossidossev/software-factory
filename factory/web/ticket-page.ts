@@ -1,5 +1,5 @@
 // ticket-page.js, the dashboard's sixth script (DASHBOARD_SCRIPTS in src/dashboard.ts), built from
-// web/ticket-page.ts into dist/web/ (SF-149): the Markdown preview, the planned ticket page and a
+// web/ticket-page.ts into dist/web/: the Markdown preview, the planned ticket page and a
 // ticket's images. A classic script, loaded in order with defer, sharing the page's globals with
 // the others. This file has no import or export on purpose: the compiler keeps it a script, so its
 // top-level names stay the page's globals.
@@ -171,7 +171,7 @@ function fmParse(text: string): { fm: Record<string, string>; body: string } {
   return { fm, body: match !== null ? text.slice(match[0].length) : text };
 }
 
-// ---------- The planned ticket page (SF-081, the prototype's renderTicket, tkState, tkHistory, tkAction) ----------
+// ---------- The planned ticket page (the prototype's renderTicket, tkState, tkHistory, tkAction) ----------
 
 // The page's own record of a ticket (TK).
 interface TicketEditor {
@@ -188,7 +188,7 @@ interface TicketEditor {
 // sha256 of the version it started from (Save sends it; another version on disk is task_changed),
 // the tab, whether the paraphrase is shown whole, whether this page saved it, and a conflict.
 const TK: Record<string, TicketEditor> = {};
-// The words of a finding's kind and of a dependency's state (SF-084's states).
+// The words of a finding's kind and of a dependency's state.
 const KIND_WORD: Readonly<Record<string, string>> = { decision: 'needs a decision', contradiction: 'contradicts itself', missing: 'something is missing', overreach: 'does more than asked', unclear: 'unclear' };
 const WAIT_WORD: Readonly<Record<string, string>> = { merged: 'merged', pushed: 'pushed, not merged yet', running: 'running', planned: 'planned, not started', missing: 'unknown ticket' };
 const waitWord = (stateName: string): string => WAIT_WORD[stateName] ?? WAIT_WORD.missing ?? '';
@@ -320,7 +320,7 @@ async function loadTicket(key: string, reset: boolean): Promise<void> {
 }
 
 // The tickets changed (the stream): the page follows its row (title, draft, check, dependencies).
-// When changed (the tickets the event names, SF-140) is null or names the page's ticket, it reads
+// When changed (the tickets the event names) is null or names the page's ticket, it reads
 // the check again, so a check that ends while the page is open shows at once, and reads the page
 // again (a plan written meanwhile, its history; unsaved edits stay, with the version they started
 // from). A ticket that left the Queue goes back to the board, unless its start is on the way to
@@ -389,7 +389,7 @@ function tkCheckWord(row: TicketEntry, view: CheckView | null): string {
   if (tkChecking(keyOf(row), view)) {
     return 'Checking the plan…';
   }
-  // A Task that needs no check (SF-130): the board's summary says so, with checkNeed's reason.
+  // A Task that needs no check: the board's summary says so, with checkNeed's reason.
   if (row.check?.state === 'not_needed') {
     return `Plan check not needed: ${row.check.check_reason ?? ''}`;
   }
@@ -570,7 +570,7 @@ function tkWaits(plan: TicketPlan): HTMLElement[] {
   });
 }
 
-// The plan-check rounds of the ticket, every version (SF-130): "N rounds · $X" ("at least $X" when a
+// The plan-check rounds of the ticket, every version: "N rounds · $X" ("at least $X" when a
 // cost is unknown), or "no rounds yet".
 function tkRounds(): HTMLElement {
   const data = tkData();
@@ -581,13 +581,13 @@ function tkRounds(): HTMLElement {
   return el('div', 'muted fs12 tk-rounds', roundsText(rounds, data.check_usd, data.check_usd_complete !== false, money));
 }
 
-// Plan-check rounds and their cost in words (SF-130): "N rounds · $X", "at least $X" when a cost
+// Plan-check rounds and their cost in words: "N rounds · $X", "at least $X" when a cost
 // is unknown; format: the page's money or the Stats page's.
 const roundsText = (rounds: number, usd: number, complete: boolean, format: (value: number) => string): string => `${counted(rounds, 'round')} · ${complete ? format(usd) : `at least ${format(usd)}`}`;
 
 // The Plan check card: the result in words, the findings with their kind in words, what the checker
 // understood (clamped) and the files it expects to change; the date, model and cost; the rounds and
-// their cost (SF-130). A Task that needs no check (SF-130) says why instead of a result.
+// their cost. A Task that needs no check says why instead of a result.
 function tkCheckCard(key: string, row: TicketEntry, view: CheckView, s: TicketEditor): HTMLElement {
   const record = view.check;
   const output = record?.output ?? null;
@@ -868,7 +868,7 @@ async function tkSave(key: string): Promise<void> {
   }
 }
 
-// ---------- A ticket's images (SF-064): the planned ticket page's Images card and New ticket ----------
+// ---------- A ticket's images: the planned ticket page's Images card and New ticket ----------
 
 // The server's rules (src/attachments.ts), checked here too so the page says at once why an image
 // is not taken; the server checks every upload again.

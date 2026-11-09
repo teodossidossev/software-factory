@@ -172,9 +172,7 @@ function renderDigest(): void {
     pick.addEventListener('change', () => openDigest(pick.value === newest.id ? null : pick.value));
     tools.append(pick);
   }
-  const generate = el('button', 'btn primary', running ? 'Generating…' : 'Generate now');
-  generate.type = 'button';
-  generate.dataset.dg = 'generate';
+  const generate = button('btn primary', running ? 'Generating…' : 'Generate now', { dg: 'generate' });
   generate.disabled = running;
   generate.setAttribute('title', 'Make a digest now from the latest Git data; it does not replace the day\'s scheduled one');
   generate.addEventListener('click', () => void generateNow());
@@ -205,11 +203,9 @@ function renderDigest(): void {
     tabs.setAttribute('role', 'tablist');
     const names: ReadonlyArray<[typeof dg.tab, string]> = [['repos', 'Repositories'], ['daily', 'My daily']];
     for (const [tab, text] of names) {
-      const node = el('button', dg.tab === tab ? 'on' : '', text);
-      node.type = 'button';
+      const node = button(dg.tab === tab ? 'on' : '', text, { dgtab: tab });
       node.setAttribute('role', 'tab');
       node.setAttribute('aria-selected', String(dg.tab === tab));
-      node.dataset.dgtab = tab;
       node.addEventListener('click', () => {
         dg.tab = tab;
         renderDigest();
@@ -412,6 +408,18 @@ function dgBranches(branches: readonly DigestBranch[], repo: DigestRepo | null):
   return list;
 }
 
+// The daily's sections, headed in Bulgarian (language bulgarian, bg or български, any case) or English:
+// "Yesterday" when the span starts the day before the digest (local dates) or is unknown, else "Since <weekday>".
+function dailyParts(record: DigestRecord, daily: DigestDaily): Array<[string, readonly string[]]> {
+  const bg = ['bulgarian', 'bg', 'български'].includes(String(record.language ?? '').trim().toLowerCase());
+  const from = new Date(record.daily_days?.yesterday?.from ?? Number.NaN);
+  const start = new Date(record.started_at);
+  const before = new Date(start.getFullYear(), start.getMonth(), start.getDate() - 1);
+  const since = Number.isNaN(from.getTime() - start.getTime()) || from.toDateString() === before.toDateString() ? null : new Intl.DateTimeFormat(bg ? 'bg' : 'en', { weekday: 'long' }).format(from);
+  const titles = bg ? [since === null ? 'Вчера' : `От ${since}`, 'Проблеми', 'План', 'Днес'] : [since === null ? 'Yesterday' : `Since ${since}`, 'Problems', 'Plan', 'Today'];
+  return [daily.yesterday, daily.problems, daily.plan, daily.next].map((items, index) => [titles[index]!, items]);
+}
+
 // My daily: a card per app, its four sections, the commits it was made from and Copy.
 function dgDaily(record: DigestRecord): HTMLElement[] {
   const sources = record.daily_sources ?? [];
@@ -426,11 +434,8 @@ function dgDaily(record: DigestRecord): HTMLElement[] {
     card.dataset.app = daily.app;
     const title = el('h3', 'dg-title');
     title.append(el('span', 'dg-name', daily.app), ...daily.workspaces.map((name) => wsChip(name)));
-    card.append(title);
-    card.append(
-      dgSection('Yesterday', dgList(daily.yesterday)), dgSection('Problems', dgList(daily.problems)),
-      dgSection('Plan', dgList(daily.plan)), dgSection('Today', dgList(daily.next)),
-    );
+    const parts = dailyParts(record, daily);
+    card.append(title, ...parts.map(([heading, items]) => dgSection(heading, dgList(items))));
     const commits = sources.find((source) => source.app === daily.app)?.commits ?? [];
     const fold = el('details', 'dg-fold');
     const list = el('ul', 'dg-commits');
@@ -442,10 +447,8 @@ function dgDaily(record: DigestRecord): HTMLElement[] {
     fold.append(el('summary', '', `The commits it was made from (${commits.length})`), list);
     card.append(fold);
     const row = el('div', 'dg-copyrow');
-    const copy = el('button', 'btn small', 'Copy');
-    copy.type = 'button';
-    copy.dataset.dg = 'copy';
-    copy.addEventListener('click', () => void copyDaily(daily));
+    const copy = button('btn small', 'Copy', { dg: 'copy' });
+    copy.addEventListener('click', () => void copyDaily(daily.app, parts));
     row.append(copy);
     const copied = dg.copied.get(daily.app);
     if (copied !== undefined) {
@@ -456,21 +459,18 @@ function dgDaily(record: DigestRecord): HTMLElement[] {
   });
 }
 
-// The daily as plain text: "Yesterday:", "Problems:", "Plan:", "Today:", each with "- " items.
-function dailyText(daily: DigestDaily): string {
-  const part = (title: string, items: readonly string[]): string[] => [`${title}:`, ...items.map((item) => `- ${item}`)];
-  return [...part('Yesterday', daily.yesterday), ...part('Problems', daily.problems), ...part('Plan', daily.plan), ...part('Today', daily.next)].join('\n');
-}
+// The daily as plain text: each heading as on the page ("Yesterday:", "Problems:"…), with "- " items.
+const dailyText = (parts: ReadonlyArray<[string, readonly string[]]>): string => parts.flatMap(([heading, items]) => [`${heading}:`, ...items.map((item) => `- ${item}`)]).join('\n');
 
-async function copyDaily(daily: DigestDaily): Promise<void> {
+async function copyDaily(app: string, parts: ReadonlyArray<[string, readonly string[]]>): Promise<void> {
   try {
     if (typeof navigator.clipboard?.writeText !== 'function') {
       throw new Error('the browser gives no clipboard here');
     }
-    await navigator.clipboard.writeText(dailyText(daily));
-    dg.copied.set(daily.app, { ok: true, text: 'Copied.' });
+    await navigator.clipboard.writeText(dailyText(parts));
+    dg.copied.set(app, { ok: true, text: 'Copied.' });
   } catch (error) {
-    dg.copied.set(daily.app, { ok: false, text: `Copy failed: ${errorMessage(error)}` });
+    dg.copied.set(app, { ok: false, text: `Copy failed: ${errorMessage(error)}` });
   }
   renderDigest();
 }

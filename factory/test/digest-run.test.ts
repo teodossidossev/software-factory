@@ -11,7 +11,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
-import { dailyDays, digestPeriod, DIGEST_SCHEMA, type DigestModel, type DigestOutput, Digests, digestSessionOptions, stamp } from '../src/digest-run.js';
+import { dailiesOf, dailyDays, digestPeriod, DIGEST_SCHEMA, type DigestModel, type DigestOutput, Digests, digestSessionOptions, stamp } from '../src/digest-run.js';
 import type { Notification } from '../src/notify.js';
 import { DIGEST_DEFAULTS, type DigestSettings, saveRegistry } from '../src/registry.js';
 import { readOnlySessionOptions } from '../src/review.js';
@@ -148,7 +148,10 @@ test('a manual digest: the output stored with the Git data, the cost and the per
   // The whole prompt, rules and data, within the cap.
   assert.ok(call!.prompt.length <= 150_000);
   assert.match(call!.prompt, /the data wins/);
-  assert.match(call!.prompt, /Mark a guess with "likely"/);
+  // A guess in the digest's language, never the English word; no other English words.
+  assert.doesNotMatch(call!.prompt, /Mark a guess with "likely"/);
+  assert.match(call!.prompt, /Mark a guess with the word for "likely" in Deutsch\./);
+  assert.match(call!.prompt, /stay as they are; unless Deutsch is English, no other English words\./);
   const data = JSON.parse(/<git_data>\n(.*)\n<\/git_data>/s.exec(call!.prompt)![1]!);
   assert.deepEqual(data.apps, { shop: ['backend', 'frontend'] });
   assert.equal(data.workspaces[1].description, 'The shop\'s web front end.');
@@ -210,7 +213,7 @@ test('the period on a Monday is Friday 07:00 to the run, whatever scheduled dige
   fx.clock.now = local(9, 15, 30);
   const manual = await fx.digests.run('manual');
   assert.deepEqual(manual.record.period, { from: friday, to: local(9, 15, 30).toISOString() });
-  // The daily's days and since are as before: yesterday is Friday.
+  // The daily's days: yesterday from Friday 00:00 to Monday 00:00.
   assert.deepEqual(manual.record.daily_days, dailyDays(local(9, 15, 30)));
 });
 
@@ -280,12 +283,27 @@ test('the model call\'s options: no tools but the structured output, no setting 
   assert.equal('$schema' in DIGEST_SCHEMA, false);
 });
 
-test('the daily\'s days: yesterday is the last working day (Friday on a Monday), today until now', () => {
-  const monday = new Date(2026, 10, 9, 8, 15);
+test('the daily\'s days: yesterday from the last working day to today (Friday and the weekend on a Monday), today until now; a Saturday commit of mine is in the daily', () => {
+  const monday = new Date(2026, 10, 9, 7);
   const days = dailyDays(monday);
-  assert.deepEqual(days.yesterday, { from: new Date(2026, 10, 6).toISOString(), to: new Date(2026, 10, 7).toISOString() });
+  assert.deepEqual(days.yesterday, { from: new Date(2026, 10, 6).toISOString(), to: new Date(2026, 10, 9).toISOString() });
   assert.deepEqual(days.today, { from: new Date(2026, 10, 9).toISOString(), to: monday.toISOString() });
-  assert.equal(dailyDays(new Date(2026, 10, 4, 9)).yesterday.from, new Date(2026, 10, 3).toISOString());
+  // No moment between the two.
+  assert.equal(days.yesterday.to, days.today.from);
+  const wednesday = new Date(2026, 10, 11, 9);
+  assert.deepEqual(dailyDays(wednesday).yesterday, { from: new Date(2026, 10, 10).toISOString(), to: new Date(2026, 10, 11).toISOString() });
+  assert.deepEqual(dailyDays(wednesday).today, { from: new Date(2026, 10, 11).toISOString(), to: wednesday.toISOString() });
+
+  // My commit on a ticket's branch on Saturday afternoon, and one of Thursday outside the days.
+  const commit = (sha: string, date: Date) => ({ sha, ref: 'SHOP-9-feature', date: date.toISOString(), subject: `SHOP-9: ${sha}`, why: '', stat: '' });
+  const workspace = {
+    name: 'backend', app: 'shop', description: null, description_source: null, track: false, my_work: true,
+    fetch: { status: 'ok' as const, message: null, last_fetch_ok_at: null, notes: [] },
+    git: { main: 'main', me: ME, landed: [], branches: [], my_commits: [commit('saturday', new Date(2026, 10, 7, 15, 30)), commit('thursday', new Date(2026, 10, 5, 18))], notes: [] },
+    error: null,
+  };
+  const [daily] = dailiesOf([workspace], days);
+  assert.deepEqual(daily!.commits.map((entry) => [entry.sha, entry.workspace]), [['saturday', 'backend']]);
 });
 
 test('sf serve starts the timer; sf digest --now and sf digest through the socket; digest_running through the socket', async () => {

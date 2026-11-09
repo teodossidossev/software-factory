@@ -3975,9 +3975,10 @@ day is any day, or a weekday with `weekdays_only`. With `at` 07:00 and `weekdays
 digest covers Friday 07:00 to Monday 07:00 whatever happened before: a Friday digest that ran late,
 or a manual run later on Monday (still from Friday 07:00); a Tuesday's from Monday 07:00; a manual
 run on a Sunday from Friday 07:00. Without `weekdays_only`, Monday's is from Sunday 07:00. Past
-digests do not move the period, and a DST change keeps `at` in local time. **The daily**: yesterday is
-the last working day before today (00:00-24:00 local time; Friday on a Monday), today until the run.
-Dates are committer dates.
+digests do not move the period, and a DST change keeps `at` in local time. **The daily**: yesterday runs
+from 00:00 (local time) of the last working day before today to 00:00 of today, so on a Monday it
+covers Friday and the weekend; today runs from 00:00 until the run, and no commit falls
+between the two. Dates are committer dates.
 
 **The mirrors**: each workspace with `track` or `my_work` gets a bare clone of its own,
 `<state dir>/digest/mirrors/<workspace>.git` (`git clone --bare --reference <checkout> --dissociate
@@ -4030,7 +4031,13 @@ manual run.
 every 10 s while a run goes and opens the new digest) and the earlier digests. Repositories: "One
 ticket across the app", then a card per followed workspace (the headline, Effect on my work, Landed
 on main with the older entries folded, Live branches). My daily: a card per app with Yesterday,
-Problems, Plan, Today, the commits it was made from, and Copy (plain text with "- " items).
+Problems, Plan, Today, the commits it was made from, and Copy (plain text with "- " items, the same
+headings). The first heading names the span: "Yesterday" when it starts the day before the digest
+(local dates), else "Since <weekday>" ("Since Friday" on a Monday). The four headings follow the
+digest's `language`: Bulgarian (`Bulgarian`, `bg` or `български`, any case) gives Вчера / От
+<weekday>, Проблеми, План, Днес; any other language gives English. The rest of the page stays in
+English. The prompt asks for the digest's language throughout: a guess is marked with its word for
+"likely", and no English words appear but the identifiers.
 
 **Notification**: a scheduled digest sends one, with counts only ("Morning digest ready: N landed, M
 of mine need attention"), through the configured channels; a manual run sends none. The digest's

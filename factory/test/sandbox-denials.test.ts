@@ -248,7 +248,10 @@ test('the Implementer session: every query gets the prompt\'s deny list plus the
       assert.deepEqual(deny, [...DENIED_TOOLS, ...denials.tools]);
       const settings = JSON.parse(entry.argv[entry.argv.indexOf('--settings') + 1]!) as { sandbox: typeof sandbox };
       // SF-123: with the session environment's credentials, if any, hidden from sandboxed commands.
-      assert.deepEqual(settings.sandbox, withSandboxEnvDenials({ ...sandbox, filesystem: { disabled: false, ...denials.sandbox } }, sessionEnvironment()));
+      // The host's temporary roots denied (here only the layout's tmp, which holds no kept path).
+      assert.deepEqual(denials.claudeTmp, { denyRead: [l.tmp], allowRead: [], allowWrite: [] });
+      const filesystem = { disabled: false, denyRead: [...denials.sandbox.denyRead, l.tmp], denyWrite: denials.sandbox.denyWrite, allowRead: [], allowWrite: [] };
+      assert.deepEqual(settings.sandbox, withSandboxEnvDenials({ ...sandbox, filesystem }, sessionEnvironment()));
     }
 
     // A session whose denials cannot be built runs no turn.
@@ -893,7 +896,10 @@ test('the file-tool guard and links under a search (SF-123 Fix 1): a Glob or Gre
   await symlink(at('src', 'a.ts'), at('src', 'alias.ts'));
   await symlink(join(l.home, '.npm'), at('src', 'npm-cache'));
   await symlink(join(l.root, 'nowhere'), at('src', 'dangling'));
-  const denials = await pathDenials(homeScope(l));
+  // The session's own temporary folder, kept: sandboxed commands write there.
+  const sessionTmp = join(l.tmp, 'sf-claude-links');
+  await mkdir(sessionTmp, { mode: 0o700 });
+  const denials = await pathDenials({ ...homeScope(l), sessionTmp });
   const ask = (tool: string, input: unknown): Promise<string | undefined> => guard(denials, l.own, tool, input);
   for (const [tool, input] of [['Glob', { pattern: 'src/**' }], ['Glob', { pattern: '**/*.ts' }], ['Grep', { pattern: 'x' }], ['Grep', { pattern: 'x', path: 'src' }]] as const) {
     assert.equal(await ask(tool, input), undefined, `${tool} ${JSON.stringify(input)}`);
@@ -911,10 +917,10 @@ test('the file-tool guard and links under a search (SF-123 Fix 1): a Glob or Gre
   await mkdir(at('docs'));
   assert.equal(await ask('Glob', { pattern: '**', path: at('docs') }), undefined);
   assert.equal(await ask('Read', { file_path: at('src', 'a.ts') }), undefined);
-  // Through a folder outside the worktree (one sandboxed commands may write, such as the temporary
-  // directory) that holds a link to a denied home path.
+  // Through a folder outside the worktree (one sandboxed commands may write, such as the session's
+  // temporary folder) that holds a link to a denied home path.
   await rm(at('src', 'deep', 'er', 'home'));
-  const hop = join(l.tmp, 'hop');
+  const hop = join(sessionTmp, 'hop');
   await mkdir(hop, { recursive: true });
   await symlink(join(l.home, '.kube'), join(hop, 'kube'));
   await symlink(hop, at('src', 'hop'));
@@ -972,7 +978,7 @@ function mounts(args: string[]): string[][] {
   return result;
 }
 
-const denialsOf = (denyRead: string[]): PathDenials => ({ tools: [], sandbox: { denyRead, denyWrite: [] }, kept: [], hooks: undefined });
+const denialsOf = (denyRead: string[]): PathDenials => ({ tools: [], sandbox: { denyRead, denyWrite: [] }, claudeTmp: { denyRead: [], allowRead: [], allowWrite: [] }, kept: [], hooks: undefined });
 
 // Codex as npm installs it (a link in bin/ to the launcher in node_modules), and a standalone one.
 async function codexInstall(name: string): Promise<{ root: string; linked: string; modules: string; standalone: string }> {

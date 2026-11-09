@@ -333,9 +333,9 @@ export class ReviewsPart {
   }
 
   // The path denials of a review or simplification session in the job's worktree, built
-  // before each session.
-  async #pathDenials(job: Job, worktree: string): Promise<PathDenials> {
-    return pathDenials(await this.#denialScope(job, worktree));
+  // as each session starts, for its own temporary folder.
+  async #pathDenials(job: Job, worktree: string, sessionTmp: string): Promise<PathDenials> {
+    return pathDenials({ ...(await this.#denialScope(job, worktree)), sessionTmp });
   }
 
   // The Redactor of a reviewer's run in the job's worktree, with the dashboard and MCP tokens as
@@ -368,11 +368,11 @@ export class ReviewsPart {
       if (job.worktree === null) {
         throw new Error('the job has no worktree');
       }
-      const input = await this.#reviewInput(job, job.worktree);
-      const denials = await this.#pathDenials(job, job.worktree);
+      const worktree = job.worktree;
+      const input = await this.#reviewInput(job, worktree);
       outcome = await runReview(reviewPrompt(input), {
-        cwd: job.worktree, claudePath: this.#settings.config.claudePath, sandbox: this.#settings.config.sandbox, model: this.#settings.config.reviewModel,
-        deny: denials.tools, filesystem: denials.sandbox, hooks: denials.hooks,
+        cwd: worktree, claudePath: this.#settings.config.claudePath, sandbox: this.#settings.config.sandbox, model: this.#settings.config.reviewModel,
+        pathDenials: (sessionTmp) => this.#pathDenials(job, worktree, sessionTmp),
         maxTurns: this.#settings.config.reviewMaxTurns, signal: running.controller.signal, images: this.imageRefs(job, input.task),
         // The session live in events.jsonl.
         onMessage: (message) => this.#sessions.appendLive(job, 'review_message', redactor.reviewMessage(message)),
@@ -828,11 +828,11 @@ export class ReviewsPart {
       if (job.worktree === null) {
         throw new Error('the job has no worktree');
       }
-      const input = await this.#simplifyInput(job, job.worktree);
-      const denials = await this.#pathDenials(job, job.worktree);
+      const worktree = job.worktree;
+      const input = await this.#simplifyInput(job, worktree);
       outcome = await runSimplify(simplifyPrompt(input), {
-        cwd: job.worktree, claudePath: this.#settings.config.claudePath, sandbox: this.#settings.config.sandbox, model: this.#settings.config.reviewModel,
-        deny: denials.tools, filesystem: denials.sandbox, hooks: denials.hooks,
+        cwd: worktree, claudePath: this.#settings.config.claudePath, sandbox: this.#settings.config.sandbox, model: this.#settings.config.reviewModel,
+        pathDenials: (sessionTmp) => this.#pathDenials(job, worktree, sessionTmp),
         maxTurns: this.#settings.config.reviewMaxTurns, signal: running.controller.signal, images: this.imageRefs(job, input.task),
         onMessage: (message) => this.#sessions.appendLive(job, 'review_message', redactor.reviewMessage(message), SIMPLIFIER),
       });

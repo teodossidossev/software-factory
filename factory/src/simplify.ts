@@ -181,8 +181,8 @@ export function guardSuggestions(suggestions: Suggestion[], ledger: LedgerEntry[
   return { kept: suggestions.filter((candidate) => !dropped.includes(candidate)), dropped };
 }
 
-// Runs the pass; never throws (runStructuredSession). options.deny and options.filesystem carry the
-// session's path denials, as for the review.
+// Runs the pass; never throws but its path denials' error (runStructuredSession). options.pathDenials
+// builds the session's path denials, as for the review.
 export function runSimplify(prompt: string, options: ReviewOptions): Promise<StructuredOutcome<SimplifyOutput>> {
   return runStructuredSession(prompt, options, { schema: SIMPLIFY_SCHEMA, output: simplifyOutput, noun: 'simplification pass', outputNoun: 'answer' });
 }

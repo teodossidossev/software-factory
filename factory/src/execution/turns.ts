@@ -141,9 +141,10 @@ export class TurnsPart {
         // real job's state directory.
         allowCommands: probe !== undefined ? [probe] : undefined,
         smokeMode: probe !== undefined,
-        // Built by the session's first turn, again for every session the factory creates.
-        pathDenials: () => pathDenials({
-          session: 'job', workspace: name, checkout: workspace.workCheckout, worktree: cwd, stateDir: this.#settings.config.stateDir, worktreeRoot: this.#settings.config.worktreeRoot,
+        // Built by the session's first turn, again for every session the factory creates, with
+        // the session's own temporary folder kept.
+        pathDenials: (sessionTmp) => pathDenials({
+          session: 'job', workspace: name, checkout: workspace.workCheckout, worktree: cwd, sessionTmp, stateDir: this.#settings.config.stateDir, worktreeRoot: this.#settings.config.worktreeRoot,
         }),
       },
       {

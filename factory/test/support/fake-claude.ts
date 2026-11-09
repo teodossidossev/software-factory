@@ -3,8 +3,9 @@
 // the --resume one), an assistant message, optionally a tool_use and its tool_result, and a
 // result. Each run takes the next turn script from $HOME/fake-claude.json ({"turns": [...]},
 // consumed in order through $HOME/fake-claude.count) and logs argv, prompt and environment
-// names to $HOME/fake-claude.log. A turn can write files into cwd to produce a Patch, then run a
-// list of argv commands in cwd (to delete files or run Git where a test needs it), or end
+// names (and the CLAUDE_CODE_TMPDIR folder with its mode) to $HOME/fake-claude.log. A turn can
+// write files into cwd to produce a Patch, then run a list of argv commands in cwd (to delete
+// files or run Git where a test needs it), or end
 // with a startup failure. A turn can also leave sandbox placeholders behind, like bubblewrap does. Sandbox arguments are logged with argv and otherwise ignored.
 // A run with --json-schema is a review (SF-038): its script comes from $HOME/fake-review.json
 // ({"reviews": [...]}, consumed through $HOME/fake-review.count) and it logs to
@@ -33,7 +34,7 @@
 // each text block's text, each image block's media type, size and sha256 (never its bytes).
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { matchesGlob } from '../../src/rules.js';
 import { createInterface } from 'node:readline';
@@ -236,7 +237,10 @@ function giveStructuredOutput(output: unknown): Promise<string | undefined> {
 type LoggedBlock = { type: 'text'; text: string } | { type: 'image'; media_type: string; bytes: number; sha256: string } | { type: string };
 
 async function run(prompt: string, blocks?: LoggedBlock[]): Promise<void> {
-  appendFileSync(join(home, `${name}.log`), `${JSON.stringify({ argv, prompt, sessionId, cwd: process.cwd(), env: Object.keys(process.env).sort(), ...(blocks !== undefined ? { blocks } : {}) })}\n`);
+  // The session's own temporary folder (CLAUDE_CODE_TMPDIR) and its mode while the run lasts.
+  const tmp = process.env.CLAUDE_CODE_TMPDIR;
+  const tmpdir = tmp === undefined ? undefined : { path: tmp, mode: existsSync(tmp) ? statSync(tmp).mode & 0o777 : null };
+  appendFileSync(join(home, `${name}.log`), `${JSON.stringify({ argv, prompt, sessionId, cwd: process.cwd(), env: Object.keys(process.env).sort(), ...(tmpdir !== undefined ? { tmpdir } : {}), ...(blocks !== undefined ? { blocks } : {}) })}\n`);
   if (review) {
     void runReview();
     return;

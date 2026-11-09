@@ -213,7 +213,7 @@ export async function turnsStarted(env: Env, count: number): Promise<void> {
 // A user message's blocks as the fake logs them (SF-065): only when one is not text.
 export type LoggedBlock = { type: 'text'; text: string } | { type: 'image'; media_type: string; bytes: number; sha256: string };
 
-export async function fakeLog(env: Env): Promise<Array<{ argv: string[]; prompt: string; sessionId: string; cwd: string; env: string[]; blocks?: LoggedBlock[] }>> {
+export async function fakeLog(env: Env): Promise<Array<{ argv: string[]; prompt: string; sessionId: string; cwd: string; env: string[]; tmpdir?: { path: string; mode: number | null }; blocks?: LoggedBlock[] }>> {
   return (await readFile(join(env.home, 'fake-claude.log'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
 }
 
@@ -223,7 +223,7 @@ export async function reviewScript(env: Env, reviews: unknown[]): Promise<void> 
   await rm(join(env.home, 'fake-review.count'), { force: true });
 }
 
-export async function reviewLog(env: Env): Promise<Array<{ argv: string[]; prompt: string; sessionId: string; cwd: string; env: string[]; blocks?: LoggedBlock[] }>> {
+export async function reviewLog(env: Env): Promise<Array<{ argv: string[]; prompt: string; sessionId: string; cwd: string; env: string[]; tmpdir?: { path: string; mode: number | null }; blocks?: LoggedBlock[] }>> {
   return (await readFile(join(env.home, 'fake-review.log'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
 }
 
@@ -566,14 +566,19 @@ export function assertPathDenials(argv: string[], env: Env, own: string, given: 
   const paths = pathRules.map((rule) => rule.replace(/^\w+\(\//, '').replace(/(\/\*\*)?\)$/, ''));
   assert.ok(!paths.some((path) => path === own || own.startsWith(`${path}/`)), `the own ${own} is denied: ${extra.join(', ')}`);
   const at = argv.indexOf('--settings');
-  const sandbox = at < 0 ? undefined : (JSON.parse(argv[at + 1]!) as { sandbox?: { filesystem?: { denyRead?: string[]; denyWrite?: string[] } } }).sandbox;
+  const sandbox = at < 0 ? undefined : (JSON.parse(argv[at + 1]!) as { sandbox?: { filesystem?: { denyRead?: string[]; denyWrite?: string[]; allowRead?: string[] } } }).sandbox;
   assert.equal(sandbox !== undefined, sandboxed, `a sandbox was ${sandboxed ? 'expected' : 'not expected'}: ${argv.join(' ')}`);
   if (sandbox !== undefined) {
     assert.ok(sandbox.filesystem?.denyRead !== undefined && sandbox.filesystem.denyWrite !== undefined, JSON.stringify(sandbox));
+    // A temporary root denied for reading holds the own directory only where an allowRead inside it
+    // reads the own directory back (src/host-tmp.ts).
+    const allowRead = sandbox.filesystem.allowRead ?? [];
+    const readBack = (denied: string): boolean => allowRead.some((allowed) => (own === allowed || own.startsWith(`${allowed}/`)) && allowed.startsWith(`${denied}/`));
     for (const list of [sandbox.filesystem.denyRead, sandbox.filesystem.denyWrite]) {
       assert.ok(list.includes(jobs) && list.includes(env.config), list.join(', '));
       assert.ok(list.every((path) => path.startsWith('/')), list.join(', '));
-      assert.ok(!list.some((path) => path === own || own.startsWith(`${path}/`)), `the own ${own} is denied: ${list.join(', ')}`);
+      const holding = list.filter((path) => path === own || own.startsWith(`${path}/`));
+      assert.ok(holding.every((path) => list === sandbox.filesystem!.denyRead && readBack(path)), `the own ${own} is denied: ${list.join(', ')}`);
     }
   }
   return extra;

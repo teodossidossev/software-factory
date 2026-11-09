@@ -19,6 +19,7 @@ refused), and the factory's test command passed in a sandbox without network on 
   - It cannot read your home directory except the paths its tools need.
   - It cannot reach your keys, `auth.env`, SSH, the dashboard token, or other jobs.
   - It cannot reach the session bus, docker or the Tailscale daemon.
+  - The agent sees no host `/tmp`: no other program's sockets, no other session's output.
   - It writes only in its own worktree. Its file tools write nothing in the worktree's `.git` or
     agent configuration (`.claude/`, `.mcp.json`, `.codex/`); its commands cannot write those that
     exist when the session starts, and Claude Code's own sandbox keeps them from a missing
@@ -62,8 +63,6 @@ refused), and the factory's test command passed in a sandbox without network on 
 ## Open
 
 - **Found by the audit of 2026-11-09, being fixed:**
-  - The agent's Bash can connect to Unix sockets under `/tmp` that are not denied, among them the
-    browser extension's bridge.
   - A link swapped between the file guard's check and the write can send a write out of the
     worktree.
   - ChatGPT's `read_file` can read git-ignored secret files in a workspace (such as `.envrc`).

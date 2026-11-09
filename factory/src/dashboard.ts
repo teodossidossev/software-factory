@@ -95,6 +95,7 @@ export function dashboardScriptFiles(): Array<{ file: DashboardScript; url: URL;
 const STATIC_FILES: Record<string, { file: string; type: string }> = {
   '': { file: 'dashboard.html', type: 'text/html; charset=utf-8' },
   'app.css': { file: 'app.css', type: 'text/css; charset=utf-8' },
+  'favicon.svg': { file: 'favicon.svg', type: 'image/svg+xml; charset=utf-8' },
 };
 
 // The User's actions, bound by `sf serve` to its one Execution: the same methods, guards and

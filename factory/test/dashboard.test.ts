@@ -77,7 +77,7 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
     // SF-136: a file of static/ that is not in the list, or a name like a script's, is a 404 too;
     // SF-137: so is the old single script, now cut into the files of the list; SF-150: and the
     // page's old icon.
-    const unlisted = ['dashboard.html', 'favicon.svg', 'app.js', 'core', 'core.js.map', 'app.js/', 'static/app.js'].map((name) => `/d/${token}/${name}`);
+    const unlisted = ['dashboard.html', 'app.js', 'core', 'core.js.map', 'app.js/', 'static/app.js'].map((name) => `/d/${token}/${name}`);
     for (const path of ['/', '/d/', '/d//', `/d/${token}`, `/d/${wrong}/`, `/d/${wrong}/api/jobs`, `/d/${token.slice(0, 10)}/`, `/x/${token}/`, `/d/${token}/nope`, `/d/${token}/api/nope`, ...unlisted]) {
       const reply = await fetchRaw(`${origin}${path}`);
       assert.deepEqual([reply.status, reply.body], [404, ''], path);
@@ -92,7 +92,7 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
       assert.ok(lines <= 2500, `${file}: ${lines} lines`);
     }
     const scripts = DASHBOARD_SCRIPTS.map((file) => [file, 'text/javascript', `// ${file}, `] as const);
-    for (const [path, type, marker] of [['', 'text/html', '<script src="core.js"'], ...scripts, ['app.css', 'text/css', 'prefers-color-scheme']] as const) {
+    for (const [path, type, marker] of [['', 'text/html', '<script src="core.js"'], ...scripts, ['app.css', 'text/css', 'prefers-color-scheme'], ['favicon.svg', 'image/svg+xml', '<svg']] as const) {
       const reply = await fetchRaw(new URL(path, base));
       assert.equal(reply.status, 200, path);
       assert.equal(reply.headers['content-type'], `${type}; charset=utf-8`);
@@ -126,7 +126,7 @@ test('dashboard: every script is served from the build output dist/web/, static/
   for (const { file, url, source } of files) {
     assert.deepEqual([url.href, source.href], [new URL(`dist/web/${file}`, packageDir).href, new URL(`web/${file.replace(/\.js$/, '.ts')}`, packageDir).href], file);
   }
-  assert.deepEqual((await readdir(new URL('static/', packageDir))).sort(), ['app.css', 'dashboard.html']);
+  assert.deepEqual((await readdir(new URL('static/', packageDir))).sort(), ['app.css', 'dashboard.html', 'favicon.svg']);
   await withDashboard('dash-built', fakeActions(), async (dashboard) => {
     for (const { file, url } of files) {
       const reply = await fetchRaw(new URL(file, dashboard.url));
@@ -330,6 +330,7 @@ test('dashboard (SF-140): every GET route of the table answers with its status, 
       ['', 'text/html; charset=utf-8', (body) => assert.match(body, /<html/i)],
       ['core.js', 'text/javascript; charset=utf-8', (body) => assert.ok(body.length > 0)],
       ['app.css', 'text/css; charset=utf-8', (body) => assert.ok(body.length > 0)],
+      ['favicon.svg', 'image/svg+xml; charset=utf-8', (body) => assert.match(body, /<svg/)],
       ['api/jobs', JSON_TYPE, (body) => assert.deepEqual([JSON.parse(body).jobs.length, JSON.parse(body).remote], [2, false])],
       ['api/workspaces', JSON_TYPE, (body) => assert.equal(JSON.parse(body).workspaces[0].name, 'app')],
       ['api/tickets', JSON_TYPE, (body) => assert.deepEqual(JSON.parse(body).tickets.map((row: { ticket: string }) => row.ticket), ['T-5'])],

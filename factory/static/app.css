@@ -802,3 +802,25 @@ pre.raw.doc .heading { font-weight: 700; }
   :is(input, select, textarea) { font-size: 16px !important; }
   .why:not(:empty) { display: grid; }
 }
+
+/* SF-153: the health checks' traffic light in the top bar and its panel. */
+.hwrap { position: relative; display: inline-flex; }
+.hlight { width: 26px; height: 26px; padding: 0; border-radius: 50%; border: 1px solid var(--border-strong); background: var(--panel); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+.hlight:hover { border-color: var(--accent); }
+.hbulb { width: 14px; height: 14px; border-radius: 50%; background: var(--s-ended); }
+.hlight.green .hbulb { background: var(--add); }
+.hlight.yellow .hbulb { background: var(--warn); }
+.hlight.red .hbulb { background: var(--del); }
+.hpanel { position: absolute; top: 32px; left: 0; z-index: 20; width: min(440px, 90vw); max-height: 70vh; overflow: auto; background: var(--panel); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow); padding: 8px 12px; font-size: 13px; }
+.hpanel ul { list-style: none; margin: 6px 0 0; padding: 0; }
+.hpanel li { padding: 6px 0; border-top: 1px solid var(--border); }
+.hhead { display: flex; gap: 8px; align-items: center; }
+.hdot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--s-ended); }
+.hdot.ok { background: var(--add); }
+.hdot.recovering { background: var(--warn); }
+.hdot.down { background: var(--del); }
+.hstatus { margin-left: auto; color: var(--muted); font: 11px var(--mono); }
+.hrow.down .hstatus { color: var(--del); }
+.hdetail { color: var(--fg); overflow-wrap: anywhere; }
+.hsince, .hlost { color: var(--muted); font-size: 12px; }
+@media (max-width: 767px) { .hpanel { position: fixed; left: 5vw; top: 56px; } }

@@ -200,6 +200,20 @@ write actions; ChatGPT may ask for confirmation.
 
 ## Diagnostics
 
+- **The dashboard's light says the tunnel is down (SF-153).** The health check `tunnel` asks the
+  tunnel client's admin endpoint (`127.0.0.1:8790`, `SF_TUNNEL_HEALTH`) twice: `/readyz` must
+  answer 200, and `/metrics`'
+  `commands_poll_last_successful_timestamp_seconds` must be at most 120 s old. The second catches
+  what `/readyz` does not: on 2026-11-09 the client had run for 5 days and said `ready`, while its
+  connection to OpenAI was dead ("Tunnel-client has not been seen for 300 seconds" in ChatGPT). The
+  panel (a click on the light) and `bin/sf health` give the age of the last poll. What to do:
+  1. Restart the tunnel: stop `scripts/sf-tunnel.sh run` (or `sf up`) with Ctrl+C and start it
+     again; the light turns green within 30 s of its first successful poll.
+  2. In ChatGPT, open the **Software Factory** plugin at https://chatgpt.com/plugins and press
+     **Refresh**, then open a **new** Work chat: a conversation started before the restart keeps
+     failing.
+  "Tunnel's sf build" down means the `sf` the script runs is older than its sources (after a
+  `git pull`): `npm run build` in `factory/`, then restart the tunnel.
 - `scripts/sf-tunnel.sh check` shows which local precondition is missing, including a factory that
   does not answer on its port (`factory not reachable`) or refuses the token (`the factory refused
   the token`: the state directory of `sf serve` is not the one the script's `sf` reads).

@@ -14,13 +14,14 @@
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { type ChildProcess, spawn } from 'node:child_process';
 import { basename, dirname, join, relative, resolve } from 'node:path';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { open, readFile, realpath } from 'node:fs/promises';
 import { addAttachment, checkSize, removeAttachment } from './attachments.js';
 import { openInBrowser } from './browser.js';
-import { type Config, envFilePath, gateConfig, gateLevelSetting, handoffSetting, loadConfig, loadEnvFile, rulesMaxBytes, stateDir } from './config.js';
-import { Digests } from './digest-run.js';
+import { type Config, DEFAULT_TEST_TIMEOUT_MS, envFilePath, gateConfig, gateLevelSetting, handoffSetting, healthSetting, loadConfig, loadEnvFile, rulesMaxBytes, stateDir } from './config.js';
+import { DigestStore, Digests } from './digest-run.js';
 import { DigestSchedule } from './digest-schedule.js';
 import {
   checkDashboardPorts, DEFAULT_DASHBOARD_PORT, DEFAULT_DASHBOARD_REMOTE_PORT, dashboardRemoteLogins, dashboardRemoteOrigins, dashboardUrl, readToken, remoteDashboardUrls, removeToken,
@@ -29,7 +30,7 @@ import {
 import { FactoryError } from './errors.js';
 import { currentExplanation, Explainer, explanationLines } from './explain.js';
 import { Execution, type ExecutionOptions, type StateListener } from './execution.js';
-import { forgeSettings, withoutHostTokens } from './forge.js';
+import { checkForgeToken, chooseForge, forgeSettings, withoutHostTokens } from './forge.js';
 import { codexVersion } from './gate.js';
 import { checkTerms, commitsToCheck, type CommitSpec, type GuardHit, hitReport, installHook, scanBranch, scanChange, scanCommits, scanMrText, worktreeTree } from './guard.js';
 import { existsSync } from 'node:fs';
@@ -39,7 +40,7 @@ import { type Job, type JobState, JobStore } from './jobs.js';
 import { localTime } from './local-time.js';
 import { collectMetrics, metricsLines } from './metrics.js';
 import { QueueStore, RunQueue } from './queue.js';
-import { followJobs, runJob } from './runner.js';
+import { followJobs, lockPath, runJob } from './runner.js';
 import { jobNotification, notifyConfig, notifyTaskCheck, sendNotification, stateNotifier } from './notify.js';
 import { configDir, HANDOFF_MODES, ignoredWorkCheckouts, isHandoffMode, isWorkspaceColor, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_COLORS, workspaceColor, type WorkspaceEntry } from './registry.js';
 import {
@@ -50,14 +51,18 @@ import { Setup } from './setup.js';
 import { handoverLines, limitLine, type StatusRow, statusRows } from './status.js';
 import { fileSummaryLines } from './patch.js';
 import { prepareTaskChecksDir } from './sandbox-denials.js';
-import { factoryRoots, reapOrphanedSandboxes, REAP_EVERY_MS } from './sandbox-reaper.js';
+import { factoryRoots, OrphanWatch, reapOrphanedSandboxes, REAP_EVERY_MS } from './sandbox-reaper.js';
+import {
+  fetchText, forgeTargets, freeSpace, type HealthDeps, healthExitCode, healthLines, HealthMonitor, httpAnswers, type QueueFacts, runChecks, runCheckCommand, tunnelHealthAddress, tunnelProfile,
+} from './health.js';
+import { liveOwner } from './pid-lock.js';
 import { CheckStore, checkLines, checkSettings, refuseDraft, runTaskCheck, TaskChecks } from './task-check.js';
 import { AutoChecks, planCheck } from './task-check-auto.js';
 import { TicketHistory } from './ticket-history.js';
 import { parseFrontMatter, readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { type TestHooks, testHooks } from './test-hooks.js';
 import { gitToplevel, runGit } from './git.js';
-import { resolveTarget } from './mr.js';
+import { originUrl, resolveTarget } from './mr.js';
 import { collectRules, readJobRulesList, rulesLines } from './rules-docs.js';
 import { turnLimitLine } from './turn-limit.js';
 import { watchEvents } from './watch.js';
@@ -92,6 +97,7 @@ ${usageLines().join('\n')}
   sf explain <workspace> <ticket>                       The plain explanation of the job's current stop (sf serve writes one for each needs_human stop; explain in workspaces.json): the headline, the explanation, the choices and the recommendation; no sf serve needed, no model call
   sf notify-test                                        Send a test notification on every channel
   sf info                                               Version, directories, settings, whether sf serve and the tunnel run, workspaces, jobs
+  sf health [--json]                                    The health checks, computed here once without sf serve (MCP endpoint, tunnel, the tunnel's sf build, jobs, run queue, remote dashboard, logins, disk, sandbox leftovers, digest): one row each; --json the list; exit 0 all ok or off, 3 any recovering, 1 any down
   sf guard <workspace> [<rev> | <a>..<b>] [--remote <name>] [--branch <name>] [--mr <ticket>] [--worktree <ticket>] [--history]  The guard: check what a push of <rev> (default HEAD) to --remote (default origin) would publish, the commits of a range, or with --history every commit reachable from <rev>: messages, added lines and new file paths (never authors or committers); --branch adds a branch name, --mr a job's MR text and branch, --worktree a job's uncommitted change. Secrets in every workspace, the names of your other workspaces in one with "guard": true; prints each hit with its matched text (never a secret's); exit 0 no hits, 1 hits or an error; no sf serve needed
   sf guard install-hook <workspace>                     Write the guard's pre-push hook into the workspace's checkout (core.hooksPath followed); rewrites its own hook, never another
   sf metrics [<workspace>] [--since YYYY-MM-DD] [--json]  The Codex gate per job, current and archived: gate levels per iteration (F full, L light, l light skipped, - none, · no decision, ? unreadable), runs, tokens, items by outcome and the yield (fixed over all items), then the totals; no sf serve needed
@@ -141,6 +147,8 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     checkDashboardPorts(dashboardPort, remotePort);
   }
   const config = loadConfig();
+  // SF_HEALTH (SF-153): an invalid value stops the start here.
+  const healthOn = healthSetting();
   const handbook = await loadHandbook();
   // Fail at startup on an invalid registry rather than on the first tool call.
   const registry = await loadRegistry();
@@ -272,12 +280,27 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     await socket.close();
     throw error;
   }
+  // The health checks (SF-153), unless SF_HEALTH=off: every CHECK_EVERY_MS (logins hourly), the
+  // traffic light of the dashboard and one notification when a check turns down or is ok again.
+  const healthMonitor = healthOn ? new HealthMonitor(healthDeps(config, {
+    mcp: async () => ({ port: boundMcpPort, token: await readMcpToken(config.stateDir).catch(() => undefined) }),
+    queue: async () => ({ view: await runQueue.view(), lastStart: (await queueStore.read()).last_start, newestJob: newestJob(await jobs.list()) }),
+    sandboxes: (() => {
+      const watch = new OrphanWatch(() => factoryRoots(config));
+      return () => watch.scan();
+    })(),
+    digests: digests.store,
+  }), {
+    onChange: () => dashboard?.healthChanged(),
+    notify: (notification) => sendNotification(notification, notifyConfig()),
+  }) : undefined;
   try {
     if (dashboardOn()) {
       // The dashboard's actions (DashboardActions: start, approve, abort, say, retryReview,
       // acceptGate and archiveFinished) run on the same Execution as the socket commands.
       dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, setup, {
         gate: config.gate.on, checks, queue: runQueue, onWorkspacesChanged: () => void autoChecks?.rereadWorkspaces(), digests, remoteOrigins, remoteLogins, remotePort,
+        ...(healthMonitor !== undefined ? { health: healthMonitor } : {}),
       });
     } else {
       await removeToken(config.stateDir);
@@ -343,6 +366,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   // REAP_EVERY_MS while sf serve runs. The reaper never throws.
   const sandboxReaper = setInterval(() => void reapOrphanedSandboxes(factoryRoots(config)), REAP_EVERY_MS);
   sandboxReaper.unref();
+  healthMonitor?.start();
 
   let stopping = false;
   const stop = (signal: NodeJS.Signals): void => {
@@ -359,6 +383,7 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     digestSchedule.close();
     explainer.close();
     clearInterval(sandboxReaper);
+    healthMonitor?.close();
     Promise.all([server.close(), socket.close(), dashboard?.close()]).then(
       () => process.exit(0),
       (error: unknown) => {
@@ -830,7 +855,7 @@ async function info(args: string[]): Promise<void> {
   } catch {
     row('serve', 'not running (npm run serve)');
   }
-  const health = process.env.SF_TUNNEL_HEALTH || '127.0.0.1:8790';
+  const health = tunnelHealthAddress();
   try {
     const reply = await fetch(`http://${health}/readyz`, { signal: AbortSignal.timeout(1500) });
     row('tunnel', `${reply.ok ? 'ready' : `answers ${reply.status}`} (http://${health}/readyz)`);
@@ -853,6 +878,104 @@ async function info(args: string[]): Promise<void> {
   if (all.length > 0) {
     console.log(table(await statusRows(jobs, all, new Date())));
   }
+}
+
+// The Claude CLI the factory runs (SF-153's logins check): SF_CLAUDE, else the Agent SDK's own
+// binary for this platform, else claude on PATH.
+function claudeExecutable(config: Config): string {
+  if (config.claudePath !== undefined) {
+    return config.claudePath;
+  }
+  try {
+    return createRequire(import.meta.url).resolve(`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/claude`);
+  } catch {
+    return 'claude';
+  }
+}
+
+// What sf serve and sf health each read differently: the MCP port and token, the run queue, the
+// orphan scans and the digests.
+type HealthSources = Pick<HealthDeps, 'mcp' | 'queue' | 'sandboxes' | 'digests'>;
+
+// The checks' dependencies (SF-153), the same for sf serve and sf health but for sources.
+function healthDeps(config: Config, sources: HealthSources): HealthDeps {
+  const jobs = new JobStore(config.stateDir);
+  return {
+    ...sources,
+    now: () => new Date(),
+    probe: (port, token) => probeMcp(port, token),
+    tunnelProfile: tunnelProfile(),
+    tunnelAddress: tunnelHealthAddress(),
+    fetch: fetchText,
+    packageRoot: PACKAGE_ROOT,
+    tunnelScript: tunnelScript(),
+    jobs: {
+      jobs, testTimeoutMs: config.testTimeoutMs ?? DEFAULT_TEST_TIMEOUT_MS,
+      runnerAlive: async (job) => (await liveOwner(lockPath(jobs.dir(job.workspace, job.ticket)))) !== undefined,
+    },
+    remote: () => {
+      const origins = dashboardOn() ? dashboardRemoteOrigins() : [];
+      return { origins, port: origins.length > 0 ? parsePort('SF_DASHBOARD_REMOTE_PORT', DEFAULT_DASHBOARD_REMOTE_PORT) : DEFAULT_DASHBOARD_REMOTE_PORT };
+    },
+    answers: httpAnswers,
+    run: runCheckCommand,
+    logins: {
+      claudePath: claudeExecutable(config),
+      // The Codex CLI only when the gate runs it.
+      codexPath: config.gate.on ? config.gate.codexPath : undefined,
+      forgeTargets: async () => forgeTargets(await loadRegistry(), originUrl, (origin) => chooseForge(origin, config.forge)),
+      checkToken: (target) => checkForgeToken(target),
+    },
+    diskPaths: [config.stateDir, config.worktreeRoot],
+    freeSpace,
+    configDir: configDir(),
+  };
+}
+
+// The newest job's creation time (a start by hand counts as a start for the queue check).
+function newestJob(all: Job[]): string | undefined {
+  return all.map((job) => job.created_at).sort().at(-1);
+}
+
+// The run queue as sf health sees it without sf serve: a RunQueue of its own that only reads (its
+// view; it starts nothing), with the plan checks as stored.
+async function localQueueFacts(config: Config): Promise<QueueFacts> {
+  const store = new QueueStore(config.stateDir, config.maxJobs);
+  const jobs = new JobStore(config.stateDir);
+  const refused = (): Promise<never> => Promise.reject(new FactoryError('read_only', 'sf health changes nothing.'));
+  const setup = new Setup({ configDir: configDir(), jobs, exclusive: refused });
+  const checks = new TaskChecks({ ...checkSettings(config, configDir()), resolve: (name) => resolveWorkspace(name) });
+  const queue = new RunQueue(store, { start: refused, fetchBase: refused, limitReset: refused }, setup, jobs, {
+    planCheck: (workspace, ticket) => planCheck(checks, undefined, workspace, ticket),
+  });
+  return { view: await queue.view(), lastStart: (await store.read()).last_start, newestJob: newestJob(await jobs.list()) };
+}
+
+// sf health: the second orphan scan this long after the first.
+const SANDBOX_RESCAN_MS = 10_000;
+
+// `sf health [--json]` (SF-153): the checks computed here once, without asking sf serve; logins
+// always run, the orphan scan runs twice 10 s apart. Returns the exit code: 0 all ok or off, 3 any
+// recovering and none down, 1 any down.
+async function health(args: string[]): Promise<number> {
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { json: { type: 'boolean' } } });
+  if (positionals.length !== 0) {
+    throw new UsageError('health takes no arguments (only --json).');
+  }
+  const config = loadConfig();
+  const watch = new OrphanWatch(() => factoryRoots(config));
+  const checks = await runChecks(healthDeps(config, {
+    mcp: async () => ({ port: await mcpPort().catch(() => undefined), token: await readMcpToken(config.stateDir).catch(() => undefined) }),
+    queue: () => localQueueFacts(config),
+    sandboxes: async () => {
+      await watch.scan();
+      await new Promise((resolve) => setTimeout(resolve, SANDBOX_RESCAN_MS));
+      return watch.scan();
+    },
+    digests: new DigestStore(config.stateDir),
+  }));
+  console.log(values.json === true ? JSON.stringify(checks, null, 2) : healthLines(checks).join('\n'));
+  return healthExitCode(checks);
 }
 
 function table(rows: StatusRow[]): string {
@@ -1429,6 +1552,10 @@ async function main(argv: string[]): Promise<void> {
   if (command === 'info') {
     await info(rest);
     return;
+  }
+  if (command === 'health') {
+    // A request's keep-alive or a check's timer must not hold the exit.
+    process.exit(await health(rest));
   }
   if (command === 'metrics') {
     await metrics(rest);

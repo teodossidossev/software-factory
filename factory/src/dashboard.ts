@@ -31,6 +31,7 @@ import { CONFIRM_ACTIONS, type JobKey, type JobRoute, openWhileUpdating, postRou
 import { FactoryError } from './errors.js';
 import type { Digests } from './digest-run.js';
 import type { Execution } from './execution.js';
+import type { HealthMonitor } from './health.js';
 import type { RunQueue } from './queue.js';
 import { currentExplanation, ledgerStopEntries } from './explain.js';
 import { internalError, listen, LOOPBACK_HOST, sameSecret, sendJson, statusOf } from './http.js';
@@ -82,7 +83,7 @@ const SECURITY_HEADERS = {
 // The dashboard's script (SF-136): classic scripts that share the page's globals, in load order.
 // dashboard.html has one deferred <script> per entry, in this order; nothing at the top level of a
 // file uses a name defined in a later one.
-export const DASHBOARD_SCRIPTS = ['core.js', 'job-screens.js', 'job-page.js', 'board.js', 'routing.js', 'ticket-page.js', 'reports.js', 'setup.js', 'main.js'] as const;
+export const DASHBOARD_SCRIPTS = ['core.js', 'job-screens.js', 'job-page.js', 'board.js', 'routing.js', 'ticket-page.js', 'reports.js', 'setup.js', 'health.js', 'main.js'] as const;
 export type DashboardScript = (typeof DASHBOARD_SCRIPTS)[number];
 // The files of each entry of DASHBOARD_SCRIPTS, in load order (SF-146, SF-150): url, the file
 // served, is the build output dist/web/<name>.js; source, the file written by hand, is
@@ -127,6 +128,8 @@ export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'editWo
 
 // The morning digest (SF-103): the list, one record, a manual run.
 export type DashboardDigests = Pick<Digests, 'list' | 'read' | 'start'>;
+// The health checks' last result (SF-153: sf serve's HealthMonitor).
+export type DashboardHealth = Pick<HealthMonitor, 'list'>;
 
 // The Task checks (SF-054): start one, a ticket's view and its board summary.
 // store: the records of a ticket's checks, its plan-check rounds and cost (SF-130).
@@ -251,6 +254,8 @@ export interface RunningDashboard {
   // gets the jobs again, and the pages that show the job its detail, as the POST mr-status route
   // does; never throws.
   refreshJob(workspace: string, ticket: string): void;
+  // A health check's status changed (SF-153): every open page gets the checks again.
+  healthChanged(): void;
   close(): Promise<void>;
 }
 
@@ -1095,11 +1100,13 @@ interface Post {
 // dashboardRemoteOrigins returns them (not parsed again); with them a second listener opens on
 // remotePort (SF-126, SF_DASHBOARD_REMOTE_PORT), the only one that accepts them, and only from
 // remoteLogins (SF_DASHBOARD_REMOTE_LOGINS, as dashboardRemoteLogins returns them). The logins and the
-// two ports are checked here too (invalid_config), for a caller that did not check them.
+// two ports are checked here too (invalid_config), for a caller that did not check them; health:
+// the health checks (SF-153), none without (GET api/health answers 404, the stream sends no health
+// event).
 export async function startDashboard(
   port: number, stateDir: string, jobs: JobStore, actions: DashboardActions, setup: DashboardSetup = NO_SETUP,
-  { gate: gateOn = true, checks, queue, onWorkspacesChanged, digests, remoteOrigins = [], remoteLogins = [], remotePort = DEFAULT_DASHBOARD_REMOTE_PORT }: {
-    gate?: boolean; checks?: DashboardChecks; queue?: DashboardQueue; onWorkspacesChanged?: () => void; digests?: DashboardDigests;
+  { gate: gateOn = true, checks, queue, onWorkspacesChanged, digests, health, remoteOrigins = [], remoteLogins = [], remotePort = DEFAULT_DASHBOARD_REMOTE_PORT }: {
+    gate?: boolean; checks?: DashboardChecks; queue?: DashboardQueue; onWorkspacesChanged?: () => void; digests?: DashboardDigests; health?: DashboardHealth;
     remoteOrigins?: readonly string[]; remoteLogins?: readonly string[]; remotePort?: number;
   } = {},
 ): Promise<RunningDashboard> {
@@ -1223,6 +1230,10 @@ export async function startDashboard(
     res.once('close', end);
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', connection: 'keep-alive' });
     res.flushHeaders();
+    // The health checks first (SF-153): the light is right from the connect on.
+    if (health !== undefined) {
+      send(stream, 'health', health.list());
+    }
     send(stream, 'jobs', await jobsOf(remote));
     // The start screen's data: on connect whole, later after each change (changed).
     send(stream, 'workspaces', await workspacesPayload(setup));
@@ -1275,6 +1286,8 @@ export async function startDashboard(
     { pattern: 'api/tickets', handler: async ({ res }) => sendJson(res, 200, await ticketsPayload(setup, checks, queue)) },
     { pattern: 'api/stream', handler: ({ req, res, query, remote }) => openStream(req, res, query, remote) },
     { pattern: 'api/stats', handler: ({ res, query }) => statsView(res, query) },
+    // The health checks' last result (SF-153).
+    { pattern: 'api/health', when: (query) => health !== undefined && noQuery(query), handler: ({ res }) => sendJson(res, 200, health!.list()) },
     // The morning digest (SF-103): the list, newest first, and one stored record.
     { pattern: 'api/digests', when: (query) => digests !== undefined && noQuery(query), handler: async ({ res }) => sendJson(res, 200, await digests!.list()) },
     { pattern: 'api/digests/*', when: (query) => digests !== undefined && noQuery(query), handler: ({ res, params: [id] }) => digestRecord(res, id!) },
@@ -2106,6 +2119,15 @@ export async function startDashboard(
     },
     refreshJob(workspace, ticket) {
       jobChanged([workspace, ticket]).catch((error: unknown) => console.error(error));
+    },
+    healthChanged() {
+      if (health === undefined) {
+        return;
+      }
+      const list = health.list();
+      for (const stream of streams) {
+        send(stream, 'health', list);
+      }
     },
     async close() {
       for (const stream of streams) {

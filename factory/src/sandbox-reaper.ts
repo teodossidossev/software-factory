@@ -172,6 +172,28 @@ export async function findOrphanedSandboxes(roots: readonly string[], options: R
   return ((await leftovers(roots, options))?.chosen ?? []).map((info) => info.pid);
 }
 
+// The orphan scans of the health check sandboxes (SF-153): each scan is a fresh
+// findOrphanedSandboxes; it returns how many pids it found and those the previous scan of this
+// watch found too (the reaper did not end them). The first scan has no previous one, so none
+// persist.
+export class OrphanWatch {
+  readonly #roots: () => readonly string[];
+  readonly #options: ReapOptions;
+  #previous: Set<number> | undefined;
+
+  constructor(roots: () => readonly string[], options: ReapOptions = {}) {
+    this.#roots = roots;
+    this.#options = options;
+  }
+
+  async scan(): Promise<{ found: number; persisting: number[] }> {
+    const found = await findOrphanedSandboxes(this.#roots(), this.#options);
+    const previous = this.#previous;
+    this.#previous = new Set(found);
+    return { found: found.length, persisting: previous === undefined ? [] : found.filter((pid) => previous.has(pid)) };
+  }
+}
+
 // Sends the signal, ignoring a process gone meanwhile (ESRCH) or not ours to signal (EPERM).
 function signal(pid: number, name: NodeJS.Signals): void {
   try {

@@ -85,6 +85,12 @@ const EXPLANATION = {
 };
 
 const argv = process.argv.slice(2);
+// The health checks' login status (SF-153): logged in, like the real CLI's `claude auth status`;
+// nothing is logged and no turn is taken.
+if (argv[0] === 'auth' && argv[1] === 'status') {
+  process.stdout.write(`${JSON.stringify({ loggedIn: true, authMethod: 'fake' })}\n`);
+  process.exit(0);
+}
 const option = (name: string): string | undefined => {
   const inline = argv.find((arg) => arg.startsWith(`--${name}=`));
   if (inline !== undefined) {

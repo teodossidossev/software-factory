@@ -57,6 +57,9 @@ const queueSchema = z.strictObject({
   entries: z.array(z.strictObject({ workspace: workspaceName, ticket: ticketKey, queued_at: timestamp, force: z.literal(true).optional() })),
   // The scheduler's start that failed, per ticket (out of the queue): shown on its card.
   errors: z.array(z.strictObject({ workspace: workspaceName, ticket: ticketKey, code: z.string(), message: z.string(), at: timestamp })),
+  // When the scheduler last started a queued ticket (SF-153: the health check queue reads it);
+  // absent before the first start. State format 3 (src/state-version.ts).
+  last_start: timestamp.optional(),
 });
 export type QueueFile = z.infer<typeof queueSchema>;
 export type QueueEntry = QueueFile['entries'][number];
@@ -555,6 +558,8 @@ export class RunQueue {
         }
         const index = queue.entries.indexOf(entry);
         queue.entries.splice(index, 1);
+        // The start's time, for the health check queue (SF-153), in the same write.
+        queue.last_start = now();
         // Out of queue.json before the start: a restart in between never starts it twice.
         await this.#store.write(queue);
         changed = true;

@@ -15,6 +15,7 @@
   <script src="ticket-page.js" defer></script>
   <script src="reports.js" defer></script>
   <script src="setup.js" defer></script>
+  <script src="health.js" defer></script>
   <script src="main.js" defer></script>
 </head>
 <body>
@@ -23,6 +24,11 @@
       <h1>Software Factory</h1>
       <span class="summary" id="summary"></span>
       <span id="connection" class="tag" role="status">connecting</span>
+      <!-- The health checks' traffic light (SF-153): web/health.ts -->
+      <div class="hwrap" id="health-wrap">
+        <button id="health-light" class="hlight unknown" type="button" aria-expanded="false" aria-controls="health-panel" aria-label="Factory health: not checked yet" title="Factory health: not checked yet"><span class="hbulb" aria-hidden="true"></span></button>
+        <div id="health-panel" class="hpanel" role="region" aria-label="Health checks" hidden><b>Health checks</b><ul id="health-list"></ul></div>
+      </div>
       <!-- The run queue (SF-071): shown when the tickets payload carries the queue -->
       <div class="qctl" id="qctl" hidden>
         <span>Run up to</span>

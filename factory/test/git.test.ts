@@ -31,6 +31,8 @@ const COMPUTED: readonly string[] = [
   'live-smoke.ts: process.execPath',
   // The bwrap of the Gate sandbox step (findBwrap: bwrap on PATH), the command after its "--".
   'live-smoke.ts: bwrap',
+  // The health checks' status commands (SF-153): the Claude CLI, the Codex CLI and tailscale, never git.
+  'health.ts: command',
 ];
 
 const git = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();

@@ -68,6 +68,7 @@ bin/sf abort <workspace> <ticket> [--discard]  # end the job; the worktree stays
 bin/sf reset <workspace> <ticket>              # end the session, remove the worktree and archive the job; the branch stays; needs sf serve
 bin/sf notify-test                             # one test notification on every channel; works without sf serve
 bin/sf info                                    # version, directories, settings (gate: codex <version or path> | off (<reason>); gate level: auto | full | invalid: <message>), sf serve and tunnel state, workspaces, jobs; works without sf serve
+bin/sf health [--json]                         # the health checks, computed here once (section Health checks): one row each, --json the list; exit 0 all ok or off, 3 any recovering, 1 any down; works without sf serve
 bin/sf metrics [<workspace>] [--since YYYY-MM-DD] [--json]  # the Codex gate per job, current and archived: levels, runs, tokens, items by outcome, yield; then the totals (section sf metrics); works without sf serve
 bin/sf guard <workspace> [<rev> | <a>..<b>] [--remote <name>] [--branch <name>] [--mr <ticket>] [--worktree <ticket>] [--history]  # the guard (section Guard): what a push of <rev> (default HEAD) to --remote (default origin) would publish, a range, or --history every commit; each hit with its matched text (a secret's never); exit 1 on hits; works without sf serve
 bin/sf guard install-hook <workspace>          # write the guard's pre-push hook into the workspace's checkout (section Guard); never over a hook it did not write
@@ -249,6 +250,8 @@ started by the run queue as before.
 | `SF_TASK_CHECK_MAX_TURNS` | `30` | `maxTurns` of the Task check (SF-054); its model is `SF_REVIEW_MODEL`. |
 | `SF_TASK_CHECK_AUTO` | `on` | The automatic Task check of `sf serve` (SF-086, section Task check): `on` checks a written Task file 60 s after its last change; `off` keeps the check manual (Check on the board, `sf check-task`). Empty is the default; anything else refuses to start (`invalid_config`). |
 | `SF_TASK_CHECK_PARALLEL` | `1` | The automatic Task checks that run at once over every workspace, 1 to 4 (SF-086); a manual Check counts toward it but never waits. Anything else refuses to start (`invalid_config`). |
+| `SF_HEALTH` | `on` | `sf serve`'s health checks (SF-153, section Health checks): `on` runs them every 30 s for the dashboard's light and the notifications; `off` runs none (the tests' own `sf serve`s), the light stays grey. `sf health` runs its checks whatever it says. Empty is the default; anything else refuses to start (`invalid_config`). |
+| `SF_TUNNEL_HEALTH` | `127.0.0.1:8790` | The tunnel client's admin endpoint (`host:port`) that `sf info` and the health check `tunnel` ask (`/readyz`, `/metrics`). |
 | `SF_RULES_MAX_BYTES` | `49152` (48 KiB) | The bytes of rule file content the agents are given at most (SF-059, section Coding rules); the headings and the fixed sentence do not count. The user's rules files are taken first, and one over the budget is cut to it (SF-093). A positive integer up to 16 MiB. |
 | `SF_GATE` | `codex` | The gate after a clean Claude review (SF-039): `codex` runs the Codex CLI, `off` lets the Claude verdict decide. With `codex` and no executable found the gate is off, and `sf serve` prints one line saying so. |
 | `SF_CODEX` | `codex` on `PATH` | Absolute path of the Codex CLI executable. Pointing at nothing turns the gate off; it is not looked for on `PATH` then. |
@@ -583,7 +586,7 @@ a new `sf serve` and an old runner.
 ## State format version
 
 The state directory holds `state-version` (SF-101, `src/state-version.ts`), a whole number: the
-format of the state files the factory last wrote. This release writes `1`. `sf serve` and every
+format of the state files the factory last wrote. This release writes `3`. `sf serve` and every
 runner (`sf run`) read it at start: a missing file gets the current version; an equal one goes on;
 a lower one runs the migrations from it to the current one in order (`MIGRATIONS`; none exist
 yet), then writes the new number; a higher one refuses to start with `state_too_new` ("the state
@@ -598,7 +601,8 @@ raise `STATE_VERSION` in `src/state-version.ts` and add a migration to `MIGRATIO
 state of the previous version into the new one (`{ from: N, run(stateDir) }`), with a test. Each
 step's number is written once it ran, so a failed migration starts again from the step that
 failed. An older factory then refuses the new state instead of misreading it. Version 2 (SF-131):
-`job.json` may hold `claude_review`; its migration from 1 changes nothing.
+`job.json` may hold `claude_review`; its migration from 1 changes nothing. Version 3 (SF-153):
+`queue.json` may hold `last_start`; its migration from 2 changes nothing.
 
 A new file or event that no older factory reads, and that changes the meaning of nothing it does
 read, is not a change of the format. So SF-128 kept `STATE_VERSION` at 1: its `tests-<N>.json`
@@ -2617,6 +2621,50 @@ exists.
 | `ask_interrupted` | an Ask for changes was cut off; the edits are in the worktree |
 | `branch_in_checkout` | a turn was refused: the job's branch is checked out in the user's checkout, or its worktree cannot be put back on the branch |
 
+## Health checks
+
+What can be checked by a script is checked by one (SF-153): a fixed list of checks that `sf serve`
+runs every 30 s (`logins` hourly) and keeps, and `sf health` runs once in its own process. Each
+answers `{id, label, status, detail, since}`: `status` is `ok`, `down`, `off` (not configured,
+which counts as green) or `recovering` (set only by the recovery, SF-154); `since` is when the
+status last changed (`sf health`: the run's time). A check never throws and never hangs its caller:
+each runs within 20 s (its requests and commands within 3 s and 10 s), and one that fails to run is
+`down` with its error. No detail holds a token or the body of a host's answer.
+
+| Check | Label | `down` when | `off` when |
+|---|---|---|---|
+| `mcp` | MCP endpoint | the MCP endpoint does not answer an `initialize` with the token (as `sf mcp-url --probe`), or the port or the token is unknown | — |
+| `tunnel` | ChatGPT tunnel | the tunnel client's admin endpoint (`SF_TUNNEL_HEALTH`, default `127.0.0.1:8790`) does not answer `/readyz` with 200, **or** its `/metrics` value `commands_poll_last_successful_timestamp_seconds` is more than 120 s old or missing: a client can be ready on its own side while its connection to OpenAI is dead; the detail gives the age of the last poll | no tunnel profile (`${TUNNEL_CLIENT_PROFILE_DIR:-${XDG_CONFIG_HOME:-~/.config}/tunnel-client}/software-factory.yaml`, as `scripts/sf-tunnel.sh` resolves it) |
+| `tunnel-cli` | Tunnel's sf build | the `sf` that `scripts/sf-tunnel.sh` runs (this package's `bin/sf`) is not built from its sources: a `src/**/*.ts` is newer than `dist/src/cli.js`, or it is missing ("run npm run build in <dir>") | the script is not there |
+| `jobs` | Jobs | a job's test run has run longer than `SF_TEST_TIMEOUT_MS` plus 5 minutes (from its `tests_started` without a `tests` event), or a job in `working`, `awaiting_review` or `preparing_mr` has no live runner a minute after its last state change; each is named | — |
+| `queue` | Run queue | the queue is not held (by hand or by a usage limit), not empty, nothing runs, and nothing started for 10 minutes (since `queue.json`'s `last_start`, the newest job's creation or the oldest entry's `queued_at`, the latest of them); the detail names the head and why it waits ("plan not ready: …", the tickets it waits for) | — |
+| `remote` | Remote dashboard | the remote listener does not answer on its port, or `tailscale serve status` does not proxy to `127.0.0.1:<port>` | no remote origins (`SF_DASHBOARD_REMOTE_ORIGINS`) |
+| `logins` | Logins | the Claude CLI (`claude auth status`: `SF_CLAUDE`, else the Agent SDK's own binary) or, with the gate on, the Codex CLI (`codex login status`) is not logged in, or a Git host refuses the token a registered workspace's origin uses (one `GET /user` on GitHub, `GET /api/v4/user` on GitLab; the answer's body is never read); the detail names which and what to run | nothing to log in to |
+| `disk` | Disk space | the file system of the state directory or of the worktree root has less than 10 % or less than 5 GB free | — |
+| `sandboxes` | Sandbox leftovers | a fresh orphan scan (the reaper's finder, section Jobs) finds a pid the previous scan found too, so the reaper did not end it; the first scan of a process is never `down` (`sf health` scans twice, 10 s apart) | — |
+| `digest` | Morning digest | the scheduled digest was missed (due by the clock, no scheduled digest started since today's start, `at` more than 30 minutes past), or the last scheduled digest's record has an `error` | no workspace follows (no digest scheduled) |
+
+**`sf health [--json]`** computes the checks locally without asking `sf serve` (`logins` always
+runs; `queue` reads `queue.json` and the stored plan checks) and prints one row per check:
+`STATUS LABEL DETAIL`; `--json` prints the list. Exit 0 when every check is `ok` or `off`, 3 when
+any is `recovering` and none `down`, 1 when any is `down`; 2 on a usage error. It takes about 10 s
+(the second orphan scan).
+
+**The traffic light.** The dashboard's header has a round light (`web/health.ts`): red when any
+check is `down`, else yellow when any is `recovering`, else green (`off` is green); grey before the
+first result. Its title and accessible label say the same in words ("Factory health: down: MCP
+endpoint"). A click opens a panel with each check's label, status, detail and since (read again from
+`GET api/health`, the last result as JSON); a second click or Escape closes it. The live stream
+sends a `health` event with the list as its first event on connect and again whenever a status
+changes. When the stream itself is lost for more than 30 s (or the page's first read fails), the
+light turns red with "sf serve does not answer", until the stream answers again.
+
+**Notification.** A check that turns `down` in `sf serve` sends one notification on the configured
+channels (section Notifications): "Factory health: <label> is down" with its detail, `Priority:
+high`, `Tags: rotating_light`. Nothing more while it stays down; one "Factory health: <label> is ok
+again" (`Priority: default`, `Tags: white_check_mark`) once it is `ok` or `off` again. A check that
+is already down when `sf serve` starts is notified once at the start.
+
 ## Notifications
 
 On `ready_for_human_review`, `handed_over`, `needs_human`, `paused`, `waiting_limit` (SF-072), `pushed` and `failed` (iterations are silent unless
@@ -2677,7 +2725,9 @@ a limit `max_running` of the jobs that run at once (1-20, every workspace togeth
 `SF_MAX_JOBS`, 3), and `sf serve` starting the next queued ticket by itself when a slot is free.
 It lives in `<state dir>/queue.json` (written atomically): `{"version": 1, "max_running": N,
 "held": false, "hold_reason": null, "on_limit": "resume-then-queue", "entries": [{workspace, ticket, queued_at, force?}], "errors":
-[{workspace, ticket, code, message, at}]}`. A missing file is an empty queue; an invalid one stops
+[{workspace, ticket, code, message, at}], "last_start"?}`; `last_start` (SF-153, state format 3) is when the scheduler
+last started a queued ticket, written with the entry's removal before each start (the health check
+`queue` reads it); absent before the first start. A missing file is an empty queue; an invalid one stops
 `sf serve` at its start (`queue_invalid`), as an invalid registry does.
 
 - **Running** is `starting`, `working`, `awaiting_review`, `preparing_mr` or `waiting_limit` (a job

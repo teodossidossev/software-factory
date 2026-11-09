@@ -1807,7 +1807,11 @@ real path; `allowRead` reads back each kept path that lies under one of them (by
 does, when it exists): the session's worktree, its own temporary folder and, for a Task check, its
 own `check-*` folder (`DenialScope.checkFolder`; not the Task checks' parent, so not a sibling
 check's), which `allowWrite` holds too, and its checkout and the state directory (the
-smoke's run is under `/tmp`), read only. Every more specific `denyRead` inside a kept path (a `.env`,
+smoke's run is under `/tmp`), read only. For a job session (one with a worktree), `allowWrite` also
+holds the checkout's Git directory, read without Git: `<checkout>/.git`, or, when `.git` is a file,
+the common directory its `gitdir:` line and that directory's `commondir` name (nothing when any of
+it cannot be read), so that Claude Code can bind its `config.lock` there and the worktree's Git
+commands can write; the rest of the checkout stays read only, and a Task check writes none of it. Every more specific `denyRead` inside a kept path (a `.env`,
 another job, `jobs/`, the Task checks' parent of a job) stays in force. `pathDenials(...).sandbox`
 does not hold the roots: the Codex gate and the test runs keep their own empty `/tmp`. A job
 session's user settings are held against the roots too: an `allowRead` there under `/tmp` refuses the session with

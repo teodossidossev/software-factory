@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { sandboxSettings } from '../src/config.js';
-import { claudeTmpRule, inTmpRoot, makeSessionTmp, removeSessionTmp, SESSION_TMP_PREFIX, sweepSessionTmps, TMP_REFUSAL, tmpRoots } from '../src/host-tmp.js';
+import { claudeTmpOf, claudeTmpRule, inTmpRoot, makeSessionTmp, removeSessionTmp, SESSION_TMP_PREFIX, sweepSessionTmps, TMP_REFUSAL, type TmpScope, tmpRoots } from '../src/host-tmp.js';
 import { saveRegistry } from '../src/registry.js';
 import { runReview } from '../src/review.js';
 import { type DenialScope, FILE_GUARD, type PathDenials, pathDenials, prepareTaskChecksDir, taskChecksDir, withSandboxDenials } from '../src/sandbox-denials.js';
@@ -126,6 +126,63 @@ test('nothing kept under the temporary root: the root denied, nothing read back;
   assert.deepEqual(await tmpRoots(join(l.root, 'sys', 'tmp', 'inner'), join(l.root, 'sys')), [join(l.root, 'sys', 'tmp')]);
   assert.deepEqual(await claudeTmpRule([empty], [{ path: join(empty, 'gone'), write: true }, { path: l.own, write: true }]), { denyRead: [empty], allowRead: [], allowWrite: [] });
   assert.ok(inTmpRoot(join(empty, 'x'), [empty]) && !inTmpRoot(l.own, [empty]));
+});
+
+// The scope of claudeTmpOf for a layout: a job's (with its worktree) or a Task check's.
+const tmpScope = (l: Layout, session: 'job' | 'task_check'): TmpScope => ({
+  ...(session === 'job' ? { worktree: l.own } : {}), sessionTmp: l.sessionTmp, checkout: l.checkout, stateDir: l.state, tmp: l.tmp, systemRoot: join(l.root, 'sys'),
+});
+
+test('a job whose checkout is under the temporary root: the checkout\'s .git directory written, the checkout itself read only', async () => {
+  const l = await layout('host-tmp-gitdir');
+  await mkdir(join(l.checkout, '.git', 'worktrees', 'A-1'), { recursive: true });
+  const kept = await claudeTmpOf(tmpScope(l, 'job'));
+  assert.ok(kept.allowWrite.includes(join(l.checkout, '.git')), kept.allowWrite.join(' '));
+  assert.ok(kept.allowRead.includes(l.checkout) && !kept.allowWrite.includes(l.checkout));
+  assert.deepEqual(sorted(kept.allowWrite), sorted([l.own, l.sessionTmp, join(l.checkout, '.git')]));
+});
+
+test('a job whose checkout is a linked one (.git a file): its common directory written, neither the checkout nor its .git file', async () => {
+  const l = await layout('host-tmp-linked');
+  const main = join(l.tmp, 'main-repo');
+  const linked = join(main, '.git', 'worktrees', 'checkout');
+  await mkdir(linked, { recursive: true });
+  await writeFile(join(linked, 'commondir'), '../..\n');
+  await writeFile(join(l.checkout, '.git'), `gitdir: ${linked}\n`);
+  const kept = await claudeTmpOf(tmpScope(l, 'job'));
+  assert.ok(kept.allowWrite.includes(join(main, '.git')), kept.allowWrite.join(' '));
+  for (const path of [l.checkout, join(l.checkout, '.git'), linked]) {
+    assert.ok(!kept.allowWrite.includes(path), path);
+  }
+  // A relative gitdir resolves against the checkout.
+  await writeFile(join(l.checkout, '.git'), 'gitdir: ../main-repo/.git/worktrees/checkout\n');
+  assert.ok((await claudeTmpOf(tmpScope(l, 'job'))).allowWrite.includes(join(main, '.git')));
+});
+
+test('a job whose checkout\'s .git file points nowhere, or cannot be read: nothing added, nothing thrown', async () => {
+  const l = await layout('host-tmp-gitdir-nowhere');
+  await writeFile(join(l.checkout, '.git'), `gitdir: ${join(l.tmp, 'gone', '.git', 'worktrees', 'x')}\n`);
+  assert.deepEqual(sorted((await claudeTmpOf(tmpScope(l, 'job'))).allowWrite), sorted([l.own, l.sessionTmp]));
+  await writeFile(join(l.checkout, '.git'), 'not a gitdir line\n');
+  assert.deepEqual(sorted((await claudeTmpOf(tmpScope(l, 'job'))).allowWrite), sorted([l.own, l.sessionTmp]));
+  // A gitdir whose commondir exists but cannot be read (a loop of links): no Git path written.
+  const linked = join(l.tmp, 'main-repo', '.git', 'worktrees', 'checkout');
+  await mkdir(linked, { recursive: true });
+  await symlink(join(linked, 'commondir'), join(linked, 'commondir'));
+  await writeFile(join(l.checkout, '.git'), `gitdir: ${linked}\n`);
+  assert.deepEqual(sorted((await claudeTmpOf(tmpScope(l, 'job'))).allowWrite), sorted([l.own, l.sessionTmp]));
+  await rm(join(l.checkout, '.git'));
+  await symlink(join(l.checkout, '.git'), join(l.checkout, '.git'));
+  assert.deepEqual(sorted((await claudeTmpOf(tmpScope(l, 'job'))).allowWrite), sorted([l.own, l.sessionTmp]));
+});
+
+test('a Task check whose checkout is under the temporary root: no .git written', async () => {
+  const l = await layout('host-tmp-gitdir-check');
+  await mkdir(join(l.checkout, '.git'));
+  const kept = await claudeTmpOf(tmpScope(l, 'task_check'));
+  assert.ok(kept.allowRead.includes(l.checkout));
+  assert.deepEqual(sorted(kept.allowWrite), [l.sessionTmp]);
+  assert.ok(!kept.allowRead.includes(join(l.checkout, '.git')));
 });
 
 test('a test run under the same denials keeps its own writable /tmp: no /tmp, no system temporary folder hidden', async () => {

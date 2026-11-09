@@ -9,7 +9,7 @@
 // keeps its own files and sockets there instead of in the shared /tmp/claude-<uid>.
 // Also where the user's Unix sockets live (socketLocations), which every session denies.
 import { rmSync } from 'node:fs';
-import { lstat, mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
+import { lstat, mkdtemp, readdir, readFile, realpath, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { within } from './test-command.js';
@@ -82,7 +82,9 @@ export async function claudeTmpRule(roots: readonly string[], keep: readonly Tmp
 
 // The temporary roots of a Claude session and its read lists for them (claudeTmpRule): its worktree,
 // its temporary folder and a Task check's own folder (checkFolder) written; its checkout and the
-// state directory read.
+// state directory read. A job session (one with a worktree) also writes its checkout's Git directory
+// (gitDirOf), so that Claude Code can bind its config.lock there and the worktree's Git commands can
+// write its objects, refs and worktrees/<name>; the rest of the checkout stays read only.
 export interface TmpScope {
   worktree?: string | undefined;
   sessionTmp?: string | undefined;
@@ -93,10 +95,41 @@ export interface TmpScope {
   systemRoot: string;
 }
 
+// The Git directory that holds a checkout's config, read without Git: <checkout>/.git when it is a
+// directory; when it is a file, the directory of its gitdir: line (relative to the checkout), or the
+// common directory its commondir file names (relative to that directory). Undefined when any of it
+// cannot be read; never throws.
+async function gitDirOf(checkout: string): Promise<string | undefined> {
+  const dotGit = join(checkout, '.git');
+  const info = await stat(dotGit).catch(() => undefined);
+  if (info?.isDirectory() === true) {
+    return dotGit;
+  }
+  if (info?.isFile() !== true) {
+    return undefined;
+  }
+  const line = (await readFile(dotGit, 'utf8').catch(() => '')).split(/\r?\n/).find((text) => text.startsWith('gitdir:'));
+  const target = line?.slice('gitdir:'.length).trim();
+  if (target === undefined || target === '') {
+    return undefined;
+  }
+  const gitDir = resolve(checkout, target);
+  // No commondir: the gitdir is the common directory. One there that cannot be read: nothing.
+  const common = await readFile(join(gitDir, 'commondir'), 'utf8').then(
+    (text) => text.trim(),
+    (error: unknown) => ((error as NodeJS.ErrnoException).code === 'ENOENT' ? '' : undefined),
+  );
+  if (common === undefined) {
+    return undefined;
+  }
+  return common === '' ? gitDir : resolve(gitDir, common);
+}
+
 // The read lists of a Claude session for the temporary roots of its scope.
 export async function claudeTmpOf(scope: TmpScope): Promise<ClaudeTmp> {
   return claudeTmpRule(await tmpRoots(scope.tmp, scope.systemRoot), [
     { path: scope.worktree, write: true }, { path: scope.sessionTmp, write: true }, { path: scope.checkFolder, write: true },
+    { path: scope.worktree === undefined ? undefined : await gitDirOf(scope.checkout), write: true },
     { path: scope.checkout, write: false }, { path: scope.stateDir, write: false },
   ]);
 }

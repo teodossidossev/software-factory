@@ -7,10 +7,11 @@
 // lists for Bash. A path that does not exist when they are built is left out everywhere, so the
 // sandbox never leaves a placeholder for it. Also the Task checks' parent directory, which the
 // Task checks create and the other sessions deny.
-// The user's socket locations are denied too; the .env files of the worktree and the
-// checkout for reading; a job's sandboxed commands read nothing in the home directory but the kept
-// paths (by denyRead only, never allowRead); and the file-tool guard, a PreToolUse hook every job
-// session gets, holds Write and Edit to the own worktree and the read tools out of the home
+// The user's socket locations are denied too; the .env files of the worktree and the checkout for
+// reading; the worktree's .git and agent configuration (.claude, .mcp.json, .codex) for writing; a
+// job's sandboxed commands read nothing in the home directory but the kept paths (by denyRead only,
+// never allowRead); and the file-tool guard, a PreToolUse hook every job session gets, holds Write
+// and Edit to the own worktree outside that configuration and the read tools out of the home
 // directory's other paths, by real path.
 // The Codex gate runs inside bubblewrap under the same denyRead list (gateWrapper).
 // This module knows the file system, the registry and Git; it knows nothing about jobs.
@@ -24,6 +25,7 @@ import { envFilePath, sandboxAllowRead } from './config.js';
 import { FactoryError } from './errors.js';
 import { gitToplevel, runGit } from './git.js';
 import { configDir, loadRegistry } from './registry.js';
+import { AGENT_CONFIG, watchedPaths, within } from './test-command.js';
 
 // The sandbox's filesystem deny lists (the installed SDK's SandboxSettings.filesystem fields).
 export type SandboxDenials = Required<Pick<NonNullable<SandboxSettings['filesystem']>, 'denyRead' | 'denyWrite'>>;
@@ -110,12 +112,6 @@ export async function prepareTaskChecksDir(dir = taskChecksDir()): Promise<strin
     await chmod(dir, 0o700);
   }
   return realpath(dir);
-}
-
-// Whether path is inside dir or dir itself (both absolute, resolved).
-function within(path: string, dir: string): boolean {
-  const inside = relative(dir, path);
-  return inside === '' || (inside !== '..' && !inside.startsWith(`..${sep}`) && !isAbsolute(inside));
 }
 
 const realOrUndefined = (path: string): Promise<string | undefined> => realpath(path).catch(() => undefined);
@@ -465,25 +461,22 @@ export async function pathDenials(scope: DenialScope): Promise<PathDenials> {
   const tools = new Set<string>();
   const denyRead = new Set<string>();
   const denyWrite = new Set<string>();
-  for (const path of readWrite) {
-    const entry = await denied(path);
-    if (entry !== undefined) {
-      rules(entry, ['Read', 'Edit', 'Write']).forEach((rule) => tools.add(rule));
-      entry.spellings.forEach((spelling) => (denyRead.add(spelling), denyWrite.add(spelling)));
-    }
-  }
-  for (const path of writeOnly) {
-    const entry = await denied(path);
-    if (entry !== undefined) {
-      rules(entry, ['Edit', 'Write']).forEach((rule) => tools.add(rule));
-      entry.spellings.forEach((spelling) => denyWrite.add(spelling));
-    }
-  }
-  for (const path of readOnly) {
-    const entry = await denied(path);
-    if (entry !== undefined) {
-      rules(entry, ['Read']).forEach((rule) => tools.add(rule));
-      entry.spellings.forEach((spelling) => denyRead.add(spelling));
+  // Denied for reading and writing, for writing only, for reading only; and the own worktree's .git
+  // and agent configuration, each when it exists, which no sandboxed command may change (the
+  // file-tool guard holds the tools).
+  const groups = [
+    { paths: readWrite, ruleTools: ['Read', 'Edit', 'Write'], read: true, write: true },
+    { paths: writeOnly, ruleTools: ['Edit', 'Write'], read: false, write: true },
+    { paths: readOnly, ruleTools: ['Read'], read: true, write: false },
+    { paths: scope.worktree === undefined ? [] : await watchedPaths(scope.worktree), ruleTools: [], read: false, write: true },
+  ] as const;
+  for (const { paths, ruleTools, read, write } of groups) {
+    for (const path of paths) {
+      const entry = await denied(path);
+      if (entry !== undefined) {
+        rules(entry, ruleTools).forEach((rule) => tools.add(rule));
+        entry.spellings.forEach((spelling) => (read && denyRead.add(spelling), write && denyWrite.add(spelling)));
+      }
     }
   }
   // The Claude configuration: an existing file as above; a missing one for the tools only (the
@@ -713,7 +706,8 @@ async function searchEscape(guard: FileGuard, dir: string): Promise<string | und
 }
 
 // Why the guard refuses a tool call, or undefined when it passes. A write tool passes only
-// when every target, links resolved, is in the own worktree outside its .git; a read tool is
+// when every target, links resolved, is in the own worktree outside its .git and its agent
+// configuration (.claude, .mcp.json, .codex); a read tool is
 // refused when a target lies in the home directory outside the kept paths and the session's own
 // Claude Code project folders. Every other tool passes. Never throws: a call it fails to check is
 // refused (Claude Code would take a hook that throws as no decision).
@@ -735,6 +729,11 @@ export async function fileGuardReason(guard: FileGuard, tool: string, input: unk
       if (WRITE_TOOLS.has(tool)) {
         if (guard.worktree === undefined || !within(real, guard.worktree) || within(real, join(guard.worktree, '.git'))) {
           return `${FILE_GUARD} refuses this ${tool}: ${path} is outside the job's worktree${guard.worktree === undefined ? '' : ` ${guard.worktree}`}, or in its .git.`;
+        }
+        // The agent configuration (.claude, .mcp.json, .codex), by its path or the real path it links to.
+        const config = AGENT_CONFIG.map((name) => join(guard.worktree!, name));
+        if ([...config, ...(await Promise.all(config.map((root) => realTarget(root))))].some((root) => within(real, root))) {
+          return `${FILE_GUARD} refuses this ${tool}: ${path} is agent configuration; the factory does not let a job change it.`;
         }
       } else if (readDenied(guard, real)) {
         return `${FILE_GUARD} refuses this ${tool}: ${path} is in the home directory, outside the worktree, the checkout and the toolchains.`;

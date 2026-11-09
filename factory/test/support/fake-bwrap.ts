@@ -15,7 +15,7 @@ import { isAbsolute, join, relative, sep } from 'node:path';
 // bwrap script runs the command from --chdir's folder.
 const ARITY: Record<string, number> = {
   '--die-with-parent': 0, '--unshare-pid': 0, '--unshare-net': 0, '--unshare-user': 0, '--new-session': 0,
-  '--tmpfs': 1, '--remount-ro': 1, '--chdir': 1, '--dev': 1, '--proc': 1, '--ro-bind': 2, '--bind': 2,
+  '--tmpfs': 1, '--remount-ro': 1, '--chdir': 1, '--dev': 1, '--proc': 1, '--ro-bind': 2, '--ro-bind-try': 2, '--bind': 2,
 };
 
 const argv = process.argv.slice(2);

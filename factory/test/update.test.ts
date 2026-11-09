@@ -261,7 +261,6 @@ function setup(r: Repos, extra: Partial<UpdateOptions> & { failOn?: (args: strin
 
 const A = { workspace: 'app', ticket: 'A-1' };
 const B = { workspace: 'app', ticket: 'B-1' };
-const C = { workspace: 'web', ticket: 'C-1' };
 
 async function rejectsWith(promise: Promise<unknown>, code: string): Promise<FactoryError> {
   let caught: unknown;

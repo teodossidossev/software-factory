@@ -6,7 +6,7 @@
 // push again on mr_push_failed; and no Retry after a conflict turn.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFile, rm, stat } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { callSocket } from '../src/ipc.js';
@@ -29,15 +29,6 @@ function mrText(header: string): string {
 
 const retry = (env: Env, ticket: string): ReturnType<typeof runCli> => runCli(env, ['retry', 'app', ticket]);
 const lockOf = (env: Env, ticket: string): string => join(env.state, 'jobs', 'app', ticket, 'runner.pid');
-
-async function exists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 function alive(pid: number): boolean {
   try {

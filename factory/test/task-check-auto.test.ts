@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { loadConfig } from '../src/config.js';
 import { FactoryError } from '../src/errors.js';
-import { type Job, type JobState, JobStore } from '../src/jobs.js';
+import type { Job, JobState } from '../src/jobs.js';
 import { type Notification, notifyTaskCheck, taskCheckNotification } from '../src/notify.js';
 import type { Workspace } from '../src/registry.js';
 import { type CheckObserver, type CheckRecord, CheckStore, TaskChecks, taskSha256 } from '../src/task-check.js';

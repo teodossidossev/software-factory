@@ -753,6 +753,28 @@ runs it by itself after each change of a Task file (below); the user can always 
   `"already_checked"` (this exact text has a check), `"draft"` (a skeleton) or `"not_needed"`
   (SF-130: the Task needs no check, with `check_reason`), in that order.
 
+## Development
+
+`npm test` runs `npm run check-code` (SF-144, `scripts/check-code.mjs`) before the build and the
+unit tests; `npm run check-code` runs it alone, from `factory/` (or `--root <dir>`). No build is
+needed. The compiler adds `noUnusedLocals`, `noUnusedParameters`, `noImplicitReturns`,
+`noFallthroughCasesInSwitch` and `noImplicitOverride` to `strict` (`tsconfig.json` and
+`tsconfig.web.json`): dead code is removed, and an unused parameter an interface needs gets a
+leading `_`.
+
+- **The 600-line rule**: no `.ts` module under `src/` or `web/` passes 600 lines (its
+  `\n`-separated lines, not counting a final empty one). Declaration files (`.d.ts`) are exempt.
+- **The ratchet**: `code-size.json` holds the count of each module over 600 lines today, sorted by
+  path (`{ "src/dashboard.ts": 2120, ... }`). A listed module may not grow past its count; it may
+  only shrink. The check fails when a listed module grows, an unlisted one passes 600 lines, or a
+  listed one shrank by more than 50 lines, fell to 600 lines or fewer, or is gone.
+- **Lowering the list**: `npm run check-code -- --update` rewrites `code-size.json` with today's
+  counts: it lowers counts and drops the modules at 600 lines or fewer or gone. It never raises a
+  count nor adds a module, so the check still fails on one that grew; a larger count is a hand
+  edit of `code-size.json` that review sees.
+- **Layout**: no `.js` file under `static/` (the dashboard's scripts are `web/*.ts`, built to
+  `dist/web/`), and each `web/X.ts` has its `X.js` in `DASHBOARD_SCRIPTS` (`src/dashboard.ts`).
+
 ## Coding rules
 
 Repositories keep their coding rules in `AGENTS.md` and the documents it links to; the user keeps

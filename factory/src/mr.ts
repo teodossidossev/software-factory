@@ -349,7 +349,7 @@ export async function branchesOnOrigin(cwd: string, names: string[]): Promise<Se
     throw new FactoryError('branch_locked', `Could not check origin for ${names[0]}: ${why}`);
   }
   const found = new Set(result.stdout.toString('utf8').split('\n').map((line) => line.split('\t')[1]?.trim()));
-  return new Set(names.filter((name, index) => found.has(refs[index])));
+  return new Set(names.filter((_name, index) => found.has(refs[index])));
 }
 
 // The worktrees of the checkout (the checkout itself included) that have branch checked out.

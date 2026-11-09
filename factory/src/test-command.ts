@@ -12,7 +12,7 @@
 import { spawn } from 'node:child_process';
 import { realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join, relative, isAbsolute, sep } from 'node:path';
+import { relative, isAbsolute, sep } from 'node:path';
 
 // The Tests Fix sections a job gets at most: once more records of the job say failed, the job stops
 // (tests_failed).

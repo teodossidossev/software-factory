@@ -375,7 +375,6 @@ export function applyVerdict(input: VerdictInput): Applied {
       entry.dispute = { reviewer: input.reviewer, iteration: input.iteration, reason: reasonFor(item) };
       lines.push(`${entryLabel(entry)} The Implementer contests it: ${oneLine(entry.response) || '(no note)'} Evidence: ${entry.evidence}. ${name} reopens it: ${reasonFor(item)}`);
     }
-    const ids = disputes.map((item) => target(item)!.id).join(', ');
     const message = stopMessage(`${name} disputes the contest of ${idList(disputes.map((item) => target(item)!.id))}.`, lines, `Settle each disputed entry: accept the risk or must fix (sf settle <workspace> <ticket> <id> accept|fix [note]). ${QUESTION}`);
     return { kind: 'stop', code: 'review_disputed', message, ledger, dropped };
   }
@@ -410,7 +409,6 @@ export function applyVerdict(input: VerdictInput): Applied {
     carried.set(entry.id, item);
   }
   if (churned.length > 0) {
-    const ids = churned.map((entry) => entry.id).join(', ');
     const facts = churned.map((entry) => `${entryLabel(entry)} Before: ${previous.get(entry.id)}.`);
     const message = stopMessage(`${name} reopened ${idList(churned.map((entry) => entry.id))} a second time after it was fixed:`, facts, `The fixes do not settle it. ${QUESTION}`);
     return { kind: 'stop', code: 'review_churn', message, ledger, dropped };
@@ -524,7 +522,6 @@ export function settle(ledger: LedgerEntry[], id: string, decision: Decision, no
 // The message of an escalation stop: one question per escalated entry, and how to answer.
 export function escalationMessage(escalated: LedgerEntry[]): string {
   const questions = escalated.map((entry) => `${entryLabel(entry)} Question: ${oneLine(entry.response)}`);
-  const ids = escalated.map((entry) => entry.id).join(', ');
   return stopMessage(`The Implementer escalated ${idList(escalated.map((entry) => entry.id))}: only you know the answer.`, questions, 'Settle each: accept the risk or must fix (sf settle <workspace> <ticket> <id> accept|fix [note]); then the review runs, or the Fix you decided.');
 }
 

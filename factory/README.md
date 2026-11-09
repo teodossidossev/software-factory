@@ -2055,7 +2055,7 @@ SF-072. When a session hits the plan's usage limit ("You've hit your 5-hour limi
   asks "Limit reset: resume?". The resume is SF-067's Resume without a message (a turn goes on in
   the same session, a round runs again); one that fails (`worktree_missing`) hands the job to the
   user in `needs_human` with that error. A session that hits a limit again parks the job again.
-  `sf queue on-limit <rule>` and the board's Rules menu set the rule (`invalid_rule` otherwise);
+  `sf queue on-limit <rule>` and the rules in the board's factory pill set the rule (`invalid_rule` otherwise);
   `sf queue list` prints it and the limit hold.
 - **Notifications**: each park is notified ("Usage limit (Claude): parked until 03:00"), and each
   reset once: "Usage limit reset: N jobs resumed" (or "N jobs wait for you" under `wait`).
@@ -2790,14 +2790,19 @@ leftovers between its two orphan scans) and prints one row per check:
 any is `recovering` and none `down`, 1 when any is `down`; 2 on a usage error. It takes about 10 s
 (the second orphan scan).
 
-**The traffic light.** The dashboard's header has a round light (`web/health.ts`): red when any
-check is `down`, else yellow when any is `recovering`, else green (`off` is green); grey before the
-first result. Its title and accessible label say the same in words ("Factory health: down: MCP
-endpoint"). A click opens a panel with each check's label, status, detail and since (read again from
-`GET api/health`, the last result as JSON); a second click or Escape closes it. The live stream
-sends a `health` event with the list as its first event on connect and again whenever a status
-changes. When the stream itself is lost for more than 30 s (or the page's first read fails), the
-light turns red with "sf serve does not answer", until the stream answers again.
+**The factory pill.** The board's top bar has one pill for the factory (`web/health.ts`): a dot,
+red when any check is `down`, else yellow when any is `recovering`, else green (`off` is green); grey
+before the first result. Beside the dot its words: "N down" (the checks that are `down`), else
+"recovering", else none; then "R/L running" (below). Its title and accessible label say it in full
+("Factory health: down: MCP endpoint · 2/3 running"). A click opens a popover under it: "N of M
+checks down · checked 12 s ago" (the time since the page last received the checks), the failing
+checks (`down` and `recovering`) first, each with label, detail and "since 10:43" (the date too
+before today), then the passing ones one line each (dot, label, detail), read again from `GET
+api/health` (the last result as JSON); with the run queue the popover also holds the run limit and
+the reset rule (section The board). A second click, Escape or a click outside closes it. The live
+stream sends a `health` event with the list as its first event on connect and again whenever a
+status changes. When the stream itself is lost for more than 30 s (or the page's first read fails),
+the pill turns red with "sf serve does not answer", until the stream answers again.
 
 **Notification.** A check that turns `down` in `sf serve` sends one notification on the configured
 channels (section Notifications): "Factory health: <label> is down" with its detail, `Priority:
@@ -3054,19 +3059,25 @@ steps:
 
 **The board (SF-046, v3 since SF-077).** The page is the board of the dashboard v3 design
 (`docs/design/dashboard-v3/`, ported from its prototype: the same CSS, light and dark by the system,
-the same markup and keys). The top bar has the title, "N wait for you · M running" (the page title
-is `(N) Software Factory` while N > 0), the connection as a tag while the stream is not connected,
-the workspace filter (*All workspaces*, then one chip per workspace with its colour dot and name:
-a click keeps that workspace's cards and counts, a second click shows all again), *Archived* (with its count),
-*Workspaces* and *New ticket*, and the run queue's controls (SF-071, section Run queue): "Run up
-to [− N +] jobs at once" (the stepper posts `api/queue/limit`, off at 1 and 20 and while a change
-is out) and the queue's status, "2 running · 1 slot free · next: SF-069" ("nothing ready" when no
-entry can start) or, held, "Queue held: <reason> · 2 running" in the warning colour; while a job is
-parked on a usage limit (SF-072) "Queue held: usage limit, resets at 03:00 · 2 running" (once every
-reset passed under `wait`: "Queue held: usage limit reset, resume the parked jobs"). *Rules ▾*
-opens the Rules menu (SF-072): "When the usage limit resets", with the queue's rule checked
-(*Resume parked jobs, then go on with the queue*, *Resume parked jobs only*, *Wait for me*); a
-choice posts `api/queue/rule` at once; a click outside or Escape closes it. Five columns, each heading with its count: **Queue** (the Task files of
+the same markup and keys). The top bar (`web/header.ts`, SF-160) is one 48 px row from 1100 px:
+the favicon and "Software Factory"; "N waits for you" as a button (hidden at 0; N counts every
+workspace, with "(hidden)" while the workspace filter hides some of them; a click lifts that filter
+and scrolls Your turn into view; the page title is `(N) Software Factory` while the board shows N
+there); the page tabs *Board* (current), *Digest*, *Stats*, *Archived (n)* and *Workspaces*; the
+workspace filter, a select of *All workspaces (n)* and each workspace's full name with its count of
+jobs (one workspace keeps its cards and counts); the factory pill (section Health checks: the
+health dot, its words and "R/L running", R the queue's running count and L its limit, or "R
+running", the running jobs of every workspace, without the run queue); and *New ticket*. Below
+1100 px the tabs go and a second row holds a page select and the workspace select, half the width
+each; below 420 px the name keeps its icon only, and nothing scrolls sideways. The pill's popover
+holds, with the run queue (SF-071, section Run queue): "Run up to [− N +] jobs at once" (the
+stepper posts `api/queue/limit`, off at 1 and 20 and while a change is out) and the queue's status,
+"2 running · 1 slot free · next: SF-069" ("nothing ready" when no entry can start) or, held, "Queue
+held: <reason> · 2 running" in the warning colour; while a job is parked on a usage limit (SF-072)
+"Queue held: usage limit, resets at 03:00 · 2 running" (once every reset passed under `wait`:
+"Queue held: usage limit reset, resume the parked jobs"); then the rule "When the usage limit
+resets" with the queue's rule checked (*Resume parked jobs, then go on with the queue*, *Resume
+parked jobs only*, *Wait for me*); a choice posts `api/queue/rule` at once. Five columns, each heading with its count: **Queue** (the Task files of
 every usable workspace whose ticket has no job, or whose last job is `failed` or `aborted`: first
 the queued ones in the queue's order, each with its position, or "The queue is empty: add a ticket
 below.", then a "Not queued" divider and the other planned tickets; the heading counts the queued
@@ -3511,7 +3522,7 @@ retargets a request, and an answer that arrives for another job changes nothing 
 The page is plain HTML, CSS and JavaScript, with no external resources, under
 `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self';
 img-src 'self' blob:` (`blob:` for New ticket's thumbnails before upload, SF-064) and `Cache-Control: no-store`; every value is rendered as text.
-The HTML and the CSS are in `static/`, and nothing else. The page's JavaScript is nine classic scripts that
+The HTML and the CSS are in `static/`, and nothing else. The page's JavaScript is eleven classic scripts that
 share its globals, loaded with `defer` in the order of `DASHBOARD_SCRIPTS` (`src/dashboard.ts`,
 SF-136, SF-137); the server serves those and no other script, and none is longer than 2,500 lines.
 The page code lives only in `web/`, in TypeScript (SF-146 to SF-150): each script's source
@@ -3520,14 +3531,17 @@ The page code lives only in `web/`, in TypeScript (SF-146 to SF-150): each scrip
 so the compiler keeps it a global classic script; `web/types.d.ts` types the server payloads the
 page reads (copied from `src/`, never imported).
 
-- `core.js`: constants, state, the DOM, format and HTTP helpers, the connection tag.
+- `core.js`: constants, state, the DOM, format and HTTP helpers.
 - `job-screens.js`: what the job page reads, Task check, Changes, Merge request, Stream.
 - `job-page.js`: the job page's header, composer, hand-over panel, job actions.
+- `header.js`: the board's top bar: what waits for you, the pages, the workspace filter, the
+  pill's running count, the run limit and the reset rule.
 - `board.js`: board, cards, workspaces and dependencies, queue, toast.
 - `routing.js`: the view shown, routing, the delegated click, input, change and key handlers.
 - `ticket-page.js`: Markdown preview, the planned ticket page, a ticket's images.
 - `reports.js`: the morning digest and the Stats page.
 - `setup.js`: the drawer and the setup (workspaces, new ticket, archived, ticket actions).
+- `health.js`: the factory pill's health dot and words and its popover with the checks.
 - `main.js`: the stream, the job selected, the page's start and loading; it loads last.
 
 Endpoints under `/d/<token>/`. The read endpoints are GET only (anything else `405` with
@@ -3880,10 +3894,9 @@ and the other pages keep their desktop layout, which fits there; from 1024 px no
   column unfolds it, and j / k pass over a folded column's cards. A queued card's ⋯ menu has
   *Move up* and *Move down* (one place, as Alt+Up / Alt+Down and drag and drop, which stay); the
   drag hint is hidden on a phone.
-- **Top bar.** It wraps instead of hiding anything in a menu: the title and summary, the queue
-  controls on a full row, then the workspace filter and the page buttons; on a phone it is no
-  longer sticky and scrolls away with the board. The Rules menu opens under the queue row, as wide
-  as it.
+- **Top bar.** Below 1100 px its second row holds the page select and the workspace select; on a
+  phone it is no longer sticky and scrolls away with the board, and the factory pill's popover
+  opens across the screen under it (below 560 px).
 - **Job page.** The header shows the whole title on its own line and the Stream / Changes / Merge
   request switch across the row (the key hints are hidden on a phone; the keys work). A Stream
   row's time and actor sit above its text, which takes the whole width (a stop panel and its
@@ -3950,15 +3963,14 @@ end), in a browser:
    (the OS scheme) and at phone width (below 768 px the columns stack with Your turn first). Five
    columns with their counts; each job is in the column of its state; a running card has the Now
    line and the tool calls, and its time moves every 15 s; a stopped one its reason, its code and
-   one button. The workspace filter keeps one workspace's cards, its chips with the workspaces'
-   colour dots; two workspaces' cards differ at a glance by their stripes, and each card names its
+   one button. The workspace filter keeps one workspace's cards; two workspaces' cards differ at a glance by their stripes, and each card names its
    workspace. Dependencies: a Queue card whose Task file has `lands_after:` an open ticket shows
    Waits for with its chip; hovering it outlines that ticket's card and dims the rest; its chip
    scrolls to that card. Narrow the window: no Queue card overlaps the next column, keys do not
    wrap. With more than eight finished
-   jobs Done shows eight and *Show all N*, which expands the column in place. The run queue's
-   controls are shown ("Run up to N jobs at once" and its status) and *Rules ▾*, whose menu opens
-   below it with the queue's rule checked and closes on Escape or a click outside (SF-072).
+   jobs Done shows eight and *Show all N*, which expands the column in place. The factory pill's
+   popover shows the checks and, with the run queue, "Run up to N jobs at once", its status and the
+   reset rule with the queue's rule checked; it closes on Escape or a click outside (SF-072, SF-160).
 2. Start: on a Queue card with a written Task file click Start: the dialog names the workspace,
    the ticket and the base branch; Cancel sends nothing (`sf status` unchanged). Confirm: the toast
    at the top says the job started and goes after 6 s, and the card appears under Implementing,
@@ -4026,7 +4038,7 @@ end), in a browser:
    and Refresh state appears; back online, click it: the state is current and nothing was
    re-sent. The same for Start: offline, confirm a Start: its outcome is unknown and Start stays
    off for that ticket until the board is read again; nothing is re-sent.
-12. Reconnect: stop `sf serve` with the page open: the top bar shows "reconnecting" and no request
+12. Reconnect: stop `sf serve` with the page open: after 30 s the factory pill shows "sf serve does not answer" and no request
    is re-sent; start it again and reopen the page with the new URL (the old token is 404).
 13. Setup: with an empty registry (`SF_CONFIG_DIR` pointing at an empty directory) the board says
    to add a workspace; Workspaces opens the drawer with the Add form; add a throwaway repository by

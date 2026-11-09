@@ -55,11 +55,8 @@ code, pre, .mono { font-family: var(--mono); }
 
 /* Board */
 #board { padding-block: 0 72px; }
-.topbar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
-  padding-block: 10px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
-.topbar h1 { font-size: 16px; margin: 0; display: flex; gap: 8px; align-items: center; }
-.topbar .summary { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
-.topbar .ws { margin-left: auto; font-size: 12px; }
+.topbar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-height: 48px; background: var(--panel); border-bottom: 1px solid var(--border);
+  padding-block: 8px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
 .cols { display: grid; grid-template-columns: repeat(5, minmax(220px, 1fr)); gap: 12px; padding-block: 16px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); overflow-x: auto; align-items: start; }
 .col { min-width: 0; }
 .col h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; display: flex; gap: 6px; align-items: baseline; }
@@ -342,8 +339,7 @@ pre.cm { margin: 0; background: var(--panel-2); border: 1px solid var(--border);
 .dep .ok { color: var(--add); } .dep .wait { color: var(--warn); }
 #ticket { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--bg); z-index: 6; padding-top: env(safe-area-inset-top, 0px); padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px)); }
 
-/* Board: queue, concurrency, rules menu */
-.qctl { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
+/* Board: queue, concurrency */
 .stepper { display: inline-flex; align-items: center; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; }
 .stepper button { all: unset; cursor: pointer; width: 26px; text-align: center; line-height: 26px; }
 .stepper button:hover { background: var(--panel-2); }
@@ -351,9 +347,6 @@ pre.cm { margin: 0; background: var(--panel-2); border: 1px solid var(--border);
 .stepper output { min-width: 2ch; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums; }
 .qstatus { color: var(--muted); font-size: 13px; }
 .qstatus.held { color: var(--warn); font-weight: 600; }
-.menuwrap { position: relative; }
-.menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 12; width: min(360px, calc(100vw - 32px)); background: var(--panel); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: 0 12px 40px rgba(0,0,0,.2); padding: 12px; display: grid; gap: 8px; font-size: 13px; }
-.menu label { display: flex; gap: 8px; align-items: baseline; cursor: pointer; }
 .card .pos { font: 700 11px var(--mono); color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 0 4px; }
 .card.dragging { opacity: .4; }
 .card.dropbefore { box-shadow: 0 -3px 0 var(--accent); }
@@ -382,7 +375,6 @@ pre.cm { margin: 0; background: var(--panel-2); border: 1px solid var(--border);
    (the checker's paraphrase), .pointer, .mt6, .pick (the image file label). The ticket page's
    <div class="card2" style="min-width:0"> needs no rule: .card2 has min-width: 0. The tree depth (--d)
    and the tree width (--tree-w) are set with element.style.setProperty. */
-.topbar .qctl { margin-left: auto; }
 .qhint { font-size: 11px; margin-left: auto; }
 .light { font-weight: 400; }
 .grow { flex: 1; }
@@ -416,16 +408,13 @@ textarea.mdedit.fld { font: 12.5px/1.5 var(--mono); padding: 8px; border: 1px so
 .cmhead { display: flex; gap: 8px; align-items: center; }
 
 /* The live page's own pieces, which the prototype does not show, in its style: the hidden
-   attribute (the prototype page's first style element), the connection, the workspace filter and
-   the setup buttons in the top bar, the board's hint, the toast's close button and its error, an
+   attribute (the prototype page's first style element), the board's hint, the toast's close button and its error, an
    error reason, the "last job" mark, a card's last outcome, the new ticket's highlight, a Queue
    card's wrapping actions; on the job page the header's branch button and the checkout
    command's copy box, the composer's inline
    confirmation with today's content (its list and its choices), its outcome and unknown-outcome
    lines, a ledger entry's note field in the stop block, and the Task and Report of an entry. */
 [hidden]:not([hidden=until-found i]) { display: none !important; }
-#connection.down { color: var(--warn); border-color: var(--warn); }
-.topbar nav.ws { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .bhint { margin: 12px 0 0; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); color: var(--muted); font-size: 13px; }
 .col .linkish { margin-top: 8px; }
 #toast { z-index: 60; display: flex; gap: 10px; align-items: baseline; }
@@ -461,9 +450,8 @@ button.tag:hover { border-color: var(--accent); }
 .card .row1 .tag { flex: none; }
 .wschip { display: inline-flex; align-items: center; gap: 4px; min-width: 0; font: 11px var(--mono); color: var(--muted); }
 .card .row1 .wschip { flex: 0 1 auto; overflow: hidden; }
-.wschip .wsname, .seg2 .wsname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wschip .wsname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wsdot { width: 8px; height: 8px; border-radius: 50%; background: var(--ws, var(--s-ended)); display: inline-block; flex: none; }
-.seg2 button[data-ws] { display: inline-flex; align-items: center; gap: 5px; max-width: 200px; }
 .ws-name .wsdot { margin-right: 6px; }
 .jhead .t1 .wschip { flex: 0 1 auto; max-width: 30%; }
 .card .cnote { margin-left: auto; min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
@@ -766,13 +754,8 @@ pre.raw.doc .heading { font-weight: 700; }
   .kbd { display: none; }
   .cols { grid-template-columns: minmax(0, 1fr); }
   .qhint { display: none; }
-  .topbar { position: static; gap: 8px 12px; }
-  .topbar h1 { font-size: 15px; }
-  .topbar .qctl, .topbar nav.ws { margin-left: 0; flex: 1 1 100%; }
+  .topbar { position: static; }
   .seg2 { flex-wrap: wrap; max-width: 100%; }
-  .qctl { position: relative; }
-  .qctl .menuwrap { position: static; }
-  .qctl .menu { left: 0; right: 0; width: auto; }
   .jhead .t1 { flex-wrap: wrap; }
   .jhead .t1 .title { white-space: normal; overflow-wrap: anywhere; flex-basis: 100%; }
   .jhead .tools { flex-wrap: wrap; }
@@ -797,30 +780,81 @@ pre.raw.doc .heading { font-weight: 700; }
   .stepper button { width: 44px; line-height: 44px; }
   .colfold, .trow, .handover .ho-item { min-height: 44px; }
   .handover .ho-x, .toast-x { width: 44px; height: 44px; line-height: 44px; text-align: center; }
-  .ffq, .dtool select, .dg-pick, .finding .decide input.note { min-height: 44px; }
+  .ffq, .dtool select, .dg-pick, .finding .decide input.note, .hselect, .needs, .hlight { min-height: 44px; }
   /* iOS zooms into a field whose text is smaller than 16 px. */
   :is(input, select, textarea) { font-size: 16px !important; }
   .why:not(:empty) { display: grid; }
 }
 
-/* The health checks' traffic light in the top bar and its panel. */
-.hwrap { position: relative; display: inline-flex; }
-.hlight { width: 26px; height: 26px; padding: 0; border-radius: 50%; border: 1px solid var(--border-strong); background: var(--panel); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
-.hlight:hover { border-color: var(--accent); }
-.hbulb { width: 14px; height: 14px; border-radius: 50%; background: var(--s-ended); }
+/* The board's top bar (web/header.ts, the prototype's v1): the name, what waits for you, the page
+   tabs, the workspace select, the factory pill and New ticket in one 48 px row; below 1100 px the
+   tabs go and a second row holds the page select and the workspace select, half the width each; below
+   420 px the name keeps its icon only. Nothing in it scrolls sideways. */
+.topbar .brand { margin: 0; display: inline-flex; gap: 8px; align-items: center; font-size: 15px; font-weight: 700; white-space: nowrap; }
+.topbar .brand img { width: 20px; height: 20px; flex: none; }
+.needs { display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 10px; border-radius: 999px; cursor: pointer; white-space: nowrap; font-size: 13px; font-weight: 600;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); background: color-mix(in srgb, var(--accent) 12%, var(--panel)); color: var(--accent); }
+.needs .hid { color: var(--muted); font-weight: 400; }
+.tabs { display: flex; align-items: stretch; gap: 2px; align-self: stretch; margin-block: -8px; }
+.tab { all: unset; display: inline-flex; align-items: center; gap: 5px; padding: 0 10px; font-size: 13px; color: var(--muted); border-block: 2px solid transparent; white-space: nowrap; cursor: pointer; }
+.tab:hover { color: var(--fg); }
+.tab[aria-current="page"] { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tab .count { font: 11px var(--mono); color: var(--muted); }
+.hgap { flex: 1 1 auto; }
+.hbreak, #page-select { display: none; }
+.hselect { height: 30px; min-width: 0; max-width: 300px; padding: 0 8px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--panel); color: var(--fg); font: 13px var(--sans); text-overflow: ellipsis; }
+@media (max-width: 1099px) {
+  .tabs { display: none; }
+  .hbreak { display: block; flex-basis: 100%; height: 0; margin-bottom: -8px; order: 1; }
+  #page-select { display: block; }
+  .hselect { order: 2; flex: 1 1 0; max-width: none; }
+}
+/* From 1100 px one row whatever the names: the workspace select and the pill's words shrink. */
+@media (min-width: 1100px) {
+  .topbar { flex-wrap: nowrap; }
+  .topbar > :not(.hselect, .hwrap, .hgap) { flex: none; }
+  .hselect { flex: 0 1 auto; }
+}
+@media (max-width: 419px) { .topbar .brand .bname { display: none; } }
+
+/* The factory pill (web/health.ts): the health dot (SF-153's colours), the words of a failing check
+   or a lost stream, the running count; its popover under it with the checks, the run limit and the
+   reset rule (web/header.ts). */
+.hwrap { position: relative; display: inline-flex; min-width: 0; }
+.hlight { display: inline-flex; align-items: center; gap: 8px; height: 30px; min-width: 0; padding: 0 10px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--panel); cursor: pointer; font-size: 13px; white-space: nowrap; }
+.hlight:hover, .hlight[aria-expanded="true"] { border-color: var(--accent); }
+.hbulb { width: 10px; height: 10px; border-radius: 50%; background: var(--s-ended); flex: none; }
 .hlight.green .hbulb { background: var(--add); }
 .hlight.yellow .hbulb { background: var(--warn); }
-.hlight.red .hbulb { background: var(--del); }
-.hpanel { position: absolute; top: 32px; left: 0; z-index: 20; width: min(440px, 90vw); max-height: 70vh; overflow: auto; background: var(--panel); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow); padding: 8px 12px; font-size: 13px; }
-.hpanel ul { list-style: none; margin: 6px 0 0; padding: 0; }
-.hpanel li { padding: 6px 0; border-top: 1px solid var(--border); }
-.hhead { display: flex; gap: 8px; align-items: center; }
+.hlight.red .hbulb { background: var(--del); box-shadow: 0 0 0 3px color-mix(in srgb, var(--del) 25%, transparent); }
+.hwords { min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.hwords:empty { display: none; }
+.hlight.red .hwords { color: var(--del); }
+.hlight.yellow .hwords { color: var(--warn); }
+.hrun { color: var(--muted); font-variant-numeric: tabular-nums; }
+.hpanel { position: absolute; top: calc(100% + 6px); right: 0; z-index: 20; width: min(400px, calc(100vw - 32px)); max-height: calc(100vh - 120px); overflow: auto; display: grid; gap: 8px;
+  background: var(--panel); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: 0 12px 40px rgba(0,0,0,.2); padding: 12px; font-size: 13px; }
+.hpanel h3, .rules legend { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0; padding: 0; }
+.hp-head { font-weight: 600; }
+.hpanel ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.hrow { display: grid; gap: 2px; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--del-bg); }
+.hrow.recovering { background: var(--warn-bg); }
+.hhead { display: flex; gap: 8px; align-items: center; font-weight: 600; }
 .hdot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--s-ended); }
 .hdot.ok { background: var(--add); }
 .hdot.recovering { background: var(--warn); }
 .hdot.down { background: var(--del); }
 .hstatus { margin-left: auto; color: var(--muted); font: 11px var(--mono); }
-.hrow.down .hstatus { color: var(--del); }
-.hdetail { color: var(--fg); overflow-wrap: anywhere; }
+.hrow.down .hstatus, .hrow.down .hhead b { color: var(--del); }
+.hdetail { color: var(--fg); overflow-wrap: anywhere; font-size: 12.5px; }
 .hsince, .hlost { color: var(--muted); font-size: 12px; }
-@media (max-width: 767px) { .hpanel { position: fixed; left: 5vw; top: 56px; } }
+.hline { display: grid; grid-template-columns: 8px 9.5em minmax(0, 1fr); gap: 8px; align-items: center; padding: 3px 0; border-top: 1px solid var(--border); font-size: 12.5px; }
+.hline .hdot { width: 8px; height: 8px; }
+.hdt { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.qctl { display: grid; gap: 8px; border-top: 1px solid var(--border); padding-top: 10px; }
+.qrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.rules { border: 0; margin: 0; padding: 0; display: grid; gap: 6px; min-width: 0; }
+.rules legend { margin-bottom: 6px; }
+.rules label { display: flex; gap: 8px; align-items: baseline; cursor: pointer; }
+@media (max-width: 560px) { .hpanel { position: fixed; top: 56px; left: 16px; right: 16px; width: auto; max-height: calc(100vh - 72px); } }

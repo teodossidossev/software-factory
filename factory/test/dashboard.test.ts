@@ -84,8 +84,9 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
       assert.deepEqual([reply.status, reply.body], [404, ''], path);
       assert.equal(reply.headers['content-security-policy'], CSP, path);
     }
-    // SF-137: the dashboard's scripts, in load order (SF-153: health.js before main.js).
-    assert.deepEqual([...DASHBOARD_SCRIPTS], ['core.js', 'job-screens.js', 'job-page.js', 'board.js', 'routing.js', 'ticket-page.js', 'reports.js', 'setup.js', 'health.js', 'main.js']);
+    // SF-137: the dashboard's scripts, in load order (SF-153: health.js before main.js; SF-160: the
+    // top bar's header.js before board.js).
+    assert.deepEqual([...DASHBOARD_SCRIPTS], ['core.js', 'job-screens.js', 'job-page.js', 'header.js', 'board.js', 'routing.js', 'ticket-page.js', 'reports.js', 'setup.js', 'health.js', 'main.js']);
     // SF-136: every script of DASHBOARD_SCRIPTS is served as JavaScript, each with its own text (its
     // header names it); SF-137: none is longer than 2,500 lines.
     for (const file of DASHBOARD_SCRIPTS) {
@@ -153,6 +154,8 @@ test('dashboard: every script is served from the build output dist/web/, static/
     assert.match(screens, /^const MR = new Map\(\);$/m);
     const jobPage = (await fetchRaw(new URL('job-page.js', dashboard.url))).body;
     assert.match(jobPage, /^async function run\(action, key, body\) \{$/m);
+    const header = (await fetchRaw(new URL('header.js', dashboard.url))).body;
+    assert.match(header, /^function renderHeader\(\) \{$/m);
     const boardScript = (await fetchRaw(new URL('board.js', dashboard.url))).body;
     assert.match(boardScript, /^const STOPS = \{$/m);
     const routing = (await fetchRaw(new URL('routing.js', dashboard.url))).body;

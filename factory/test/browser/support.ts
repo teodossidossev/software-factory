@@ -738,7 +738,7 @@ export function browserTest(name: string, fn: (fx: Fixture) => Promise<void>, op
       page, dashboard, url, state, jobs, actions, setup, queue, digests, problems,
       async open(hash = '') {
         await page.goto(`${url}${hash === '' ? '' : `#${hash}`}`);
-        await page.waitForFunction(() => document.getElementById('connection')?.textContent === 'live');
+        await page.waitForFunction(() => document.getElementById('health-light')?.dataset.stream === 'live');
       },
       posted(path) {
         return page.waitForRequest((request) => request.method() === 'POST' && request.url() === `${url}${path}`);

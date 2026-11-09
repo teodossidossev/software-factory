@@ -55,6 +55,8 @@ browserTest('board: SF-T2 waits for SF-T9, pushed and not merged yet', async (fx
 
 browserTest('queue: the "Run up to N" stepper posts api/queue/limit and shows the new limit', async (fx) => {
   await fx.open();
+  // The run limit is in the factory pill's popover (SF-160).
+  await fx.page.locator('#health-light').click();
   await fx.page.locator('#qctl').waitFor();
   // Two jobs run at the limit of 2; one fewer starts nothing, as the real queue would.
   assert.equal(await fx.page.locator('#limVal').innerText(), '2');

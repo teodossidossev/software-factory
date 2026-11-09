@@ -27,10 +27,8 @@ function openStream(): void {
   const key = state.key;
   const source = new EventSource(`api/stream?${params}`);
   state.source = source;
-  source.addEventListener('open', () => {
-    setConnection('live', 'live');
-    healthStreamUp();
-  });
+  // The pill (health.js) says when the stream is lost and when it answers again.
+  source.addEventListener('open', healthStreamUp);
   // The health checks: the first event on connect, then one on every status change.
   source.addEventListener('health', (message: MessageEvent<string>) => onHealthEvent(message.data));
   source.addEventListener('jobs', (message: MessageEvent<string>) => {
@@ -92,7 +90,6 @@ function openStream(): void {
     source.close();
     if (state.source === source) {
       state.source = null;
-      setConnection('reconnecting', 'down');
       healthStreamDown();
       state.retry = setTimeout(openStream, RECONNECT_MS);
     }
@@ -249,7 +246,8 @@ function init(): void {
     }
   });
 
-  // The traffic light of the health checks.
+  // The top bar and its factory pill with the health checks.
+  initHeader();
   initHealth();
   renderSetup();
   // "Since when" on the cards moves on by itself, unless the focus is on the board (a redraw
@@ -273,7 +271,6 @@ function load(): void {
       openStream();
     }
   }, () => {
-    setConnection('reconnecting', 'down');
     healthStreamDown();
     state.retry = setTimeout(load, RECONNECT_MS);
   });

@@ -1,4 +1,4 @@
-// board.js, the dashboard's fourth script (DASHBOARD_SCRIPTS in src/dashboard.ts), built from
+// board.js, the dashboard's fifth script (DASHBOARD_SCRIPTS in src/dashboard.ts), built from
 // web/board.ts into dist/web/: the board, the workspaces and dependencies on it, its cards,
 // the queue and the toast. A classic script, loaded in order with defer, sharing the page's globals
 // with the others. This file has no import or export on purpose: the compiler keeps it a script, so
@@ -34,10 +34,8 @@ const fieldOf = (data: unknown, name: string): unknown => (isRecord(data) ? data
 // A ticket in the run queue: it has its position.
 const isQueued = (row: TicketRow): row is QueuedRow => Number.isInteger(row.queue_position);
 
-// The run queue: the Queue column's text without a queued ticket, and the limit's range.
+// The run queue: the Queue column's text without a queued ticket.
 const QUEUE_EMPTY = 'The queue is empty: add a ticket below.';
-const LIMIT_MIN = 1;
-const LIMIT_MAX = 20;
 // Done shows the most recent jobs; "Show all" shows the rest.
 const DONE_LIMIT = 8;
 const DONE_LABELS: Readonly<Partial<Record<JobState, string>>> = { pushed: 'Pushed', aborted: 'Aborted', failed: 'Failed' };
@@ -857,81 +855,6 @@ function queueCard(row: TicketRow): HTMLLIElement {
   return item;
 }
 
-// The top bar's run queue: Run up to N jobs at once with its stepper, and the status line
-// (the running count, the free slots and the next ticket, or the hold); hidden without the queue.
-function renderQueueBar(): void {
-  const bar = byId('qctl');
-  const queue = state.queue;
-  bar.hidden = queue === null;
-  if (queue === null) {
-    return;
-  }
-  const busy = state.setupPending.has('queue:limit');
-  byId('limVal').textContent = String(queue.max_running);
-  byIdAs('limDown', 'button').disabled = busy || queue.max_running <= LIMIT_MIN;
-  byIdAs('limUp', 'button').disabled = busy || queue.max_running >= LIMIT_MAX;
-  const status = byId('qstatus');
-  // A job parked on a usage limit holds the queue, whatever the hold by hand.
-  const limitHold = queue.limit_hold !== null && typeof queue.limit_hold === 'object' ? queue.limit_hold : null;
-  status.className = queue.held || limitHold !== null ? 'qstatus held' : 'qstatus';
-  const free = Math.max(0, queue.max_running - queue.running);
-  status.textContent = limitHold !== null
-    ? `Queue held: usage limit${typeof limitHold.resets_at === 'string' ? `, resets at ${clock(limitHold.resets_at)}` : ' reset, resume the parked jobs'} · ${queue.running} running`
-    : queue.held
-      ? `Queue held${queue.hold_reason ? `: ${queue.hold_reason}` : ''} · ${queue.running} running`
-      : `${queue.running} running · ${free} slot${free === 1 ? '' : 's'} free · next: ${queue.next?.ticket ?? 'nothing ready'}`;
-  renderRules();
-}
-
-// The Rules menu of the top bar: the rule at a usage limit's reset, checked as the queue
-// has it; a change is posted at once (api/queue/rule) and the board shows the server's queue.
-function renderRules(): void {
-  const queue = state.queue;
-  // dashboard.html's Rules button is in its menu's wrapper.
-  const wrap = byId('rulesBtn').parentElement;
-  if (wrap === null) {
-    throw new Error('The Rules button has no parent');
-  }
-  wrap.hidden = queue === null;
-  if (queue === null) {
-    closeRules();
-    return;
-  }
-  const busy = state.setupPending.has('queue:rule');
-  for (const rule of ON_LIMIT_RULES) {
-    const input = byIdAs(`rule-${rule}`, 'input');
-    input.checked = queue.on_limit === rule;
-    input.disabled = busy;
-  }
-}
-// The Rules button: the menu opens or closes (only with the queue).
-function toggleRules(): void {
-  if (state.queue === null) {
-    return;
-  }
-  const menu = byId('rulesMenu');
-  menu.hidden = !menu.hidden;
-  byId('rulesBtn').setAttribute('aria-expanded', String(!menu.hidden));
-}
-// The menu closes (Escape, a click outside, the queue gone).
-function closeRules(): void {
-  byId('rulesMenu').hidden = true;
-  byId('rulesBtn').setAttribute('aria-expanded', 'false');
-}
-// The toast after a rule was saved.
-const RULE_TEXT: Readonly<Record<string, string>> = {
-  'resume-then-queue': 'At a usage limit reset the parked jobs resume, then the queue goes on.',
-  'resume-only': 'At a usage limit reset the parked jobs resume; the queue stays held until you release it.',
-  wait: 'At a usage limit reset nothing resumes: you resume the parked jobs.',
-};
-// A rule chosen in the menu: posted once unless it is the queue's already.
-function setRule(rule: string): void {
-  if (state.queue === null || !ON_LIMIT_RULES.some((known) => known === rule) || rule === state.queue.on_limit) {
-    return;
-  }
-  void setupRequest('queue:rule', 'api/queue/rule', { rule }, 'toast', (data) => ({ level: 'ok', text: RULE_TEXT[String(fieldOf(data, 'on_limit'))] ?? 'Rule saved.' }));
-}
-
 // The queued tickets of every workspace, in their order.
 const queuedRows = (): QueuedRow[] => (state.tickets ?? []).filter(isQueued).sort((a, b) => a.queue_position - b.queue_position);
 
@@ -954,17 +877,6 @@ function queueForce(key: string): void {
   }
   void setupRequest(`queue:${key}`, 'api/queue/force', { workspace: row.workspace, ticket: row.ticket }, 'toast', () =>
     ({ level: 'ok', text: `${key} starts when a slot is free, whatever its plan check says.` }));
-}
-
-// One job more or fewer at once (the stepper), within 1-20.
-function setLimit(delta: number): void {
-  const queue = state.queue;
-  const next = queue === null ? NaN : queue.max_running + delta;
-  if (!(next >= LIMIT_MIN && next <= LIMIT_MAX)) {
-    return;
-  }
-  void setupRequest('queue:limit', 'api/queue/limit', { max_running: next }, 'toast', (data) =>
-    ({ level: 'ok', text: `Run up to ${fieldOf(data, 'max_running')} job${fieldOf(data, 'max_running') === 1 ? '' : 's'} at once.` }));
 }
 
 // A queued ticket to position to (1-based), by a drop or Alt+Up / Alt+Down; nothing outside the queue.
@@ -1093,29 +1005,10 @@ function setCardMenu(key: string | null): void {
 
 const visible = (workspace: string): boolean => state.filter === '' || workspace === state.filter;
 
-// The workspace filter in the top bar: All and one chip per workspace, its colour dot and its name.
-function renderFilter(): void {
-  const names = (state.workspaces ?? []).map((row) => row.name);
-  if (state.filter !== '' && state.workspaces !== null && !names.includes(state.filter)) {
-    state.filter = '';
-  }
-  const node = byId('workspace-filter');
-  node.hidden = names.length === 0;
-  node.replaceChildren(...[['', 'All workspaces'] as const, ...names.map((name) => [name, name] as const)].map(([name, label]) => {
-    const filter = button(state.filter === name ? 'on' : '', name === '' ? label : undefined, { ws: name });
-    if (name !== '') {
-      filter.append(wsDot(name), el('span', 'wsname', shortName(name)));
-      filter.setAttribute('title', state.filter === name ? 'Show every workspace' : `Show workspace ${name} only`);
-    }
-    filter.setAttribute('aria-pressed', String(state.filter === name));
-    return filter;
-  }));
-}
-
-// The board (the prototype's renderBoard): the top bar's summary and the five columns. The focus
+// The board (the prototype's renderBoard): the top bar (header.js) and the five columns. The focus
 // stays on the card it was on.
 function renderBoard(): void {
-  renderFilter();
+  renderHeader();
   const active = document.activeElement;
   const focused = active !== null && active !== undefined && byId('cols').contains(active) && hasDataset(active) && active.classList?.contains('card')
     ? (active.dataset.open !== undefined ? `[data-open="${active.dataset.open}"]` : `[data-ticket="${active.dataset.ticket}"]`) : null;
@@ -1152,15 +1045,11 @@ function renderBoard(): void {
     }
     byId(LIST_OF[column]).replaceChildren(...(cards.length > 0 ? cards : [el('li', 'empty', EMPTY_TEXT[column === 'queue' ? 'planned' : column])]));
   }
-  renderQueueBar();
   const more = byId('done-all');
   more.hidden = lists.done.length <= DONE_LIMIT;
   more.textContent = state.doneAll ? `Show the last ${DONE_LIMIT}` : `Show all ${lists.done.length}`;
   const wait = lists.you.length;
-  const running = jobs.filter((job) => RUNNING.includes(job.state)).length;
-  byId('summary').textContent = `${wait} wait${wait === 1 ? 's' : ''} for you · ${running} running`;
   document.title = `${wait > 0 ? `(${wait}) ` : ''}Software Factory`;
-  byId('archived-count').textContent = `(${state.archived.length})`;
   let hint = '';
   if (state.workspaces !== null && state.workspaces.length === 0) {
     hint = 'No workspace yet: Workspaces adds the local checkout of a repository to work in.';

@@ -22,7 +22,8 @@ export const MAX_REVIEW_PATCH_BYTES = 256 * 1024;
 // The only tools of the review session.
 export const REVIEW_TOOLS = ['Read', 'Grep', 'Glob'];
 // Denied as well, should a tool outside REVIEW_TOOLS still be offered.
-export const REVIEW_DENIED_TOOLS = ['Bash', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task', 'Agent', ...ENV_FILE_RULES];
+// 'mcp__*': every MCP server's tools, though readOnlySessionOptions loads none (strictMcpConfig).
+export const REVIEW_DENIED_TOOLS = ['Bash', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task', 'Agent', 'mcp__*', ...ENV_FILE_RULES];
 // The caps of <user_decisions>, in characters: one message's text, and all the texts sent.
 export const MAX_USER_MESSAGE_CHARS = 4000;
 export const MAX_USER_DECISIONS_CHARS = 16000;
@@ -283,7 +284,9 @@ export function reviewSessionOptions(options: Omit<ReviewOptions, 'onMessage' | 
 // the morning digest): REVIEW_TOOLS only (or the given tools), REVIEW_DENIED_TOOLS plus deny plus
 // the options' path denials, the given output schema, and the given hooks (the Task check's path
 // guard) merged with the options' hooks (the file-tool guard); the environment's credentials
-// denied to sandboxed commands.
+// denied to sandboxed commands. No MCP server: strictMcpConfig with no mcpServers leaves out the
+// user's, the project's .mcp.json and the plugins' servers (tools covers built-in tools only), and
+// REVIEW_DENIED_TOOLS denies 'mcp__*'. No caller gives a read-only session a server of its own.
 export function readOnlySessionOptions(
   options: Omit<ReviewOptions, 'onMessage' | 'signal' | 'pathDenials'>, abortController: AbortController, schema: Record<string, unknown>, deny: readonly string[] = [],
   sessionHooks?: Options['hooks'],
@@ -301,6 +304,8 @@ export function readOnlySessionOptions(
     settings: { claudeMdExcludes: outsideInstructionFiles(options.cwd), ...JOB_SESSION_SETTINGS },
     tools: options.tools ?? REVIEW_TOOLS,
     disallowedTools: [...REVIEW_DENIED_TOOLS, ...deny, ...(options.deny ?? [])],
+    strictMcpConfig: true,
+    mcpServers: {},
     outputFormat: { type: 'json_schema', schema },
     maxTurns: options.maxTurns,
     // A known startup failure (such as an unavailable sandbox) then ends with a result message.

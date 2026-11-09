@@ -1,9 +1,12 @@
 // Read-only access to UTF-8 files of one workspace read checkout, for the read_file tool. Callers pass
-// checkout-relative paths only; the root is a real path verified by the registry.
+// checkout-relative paths only; the root is a real path verified by the registry. A read is refused
+// for a credential-like name (isForbidden) and for a file Git ignores (outside .software-factory/).
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, sep } from 'node:path';
+import { runGit } from './git.js';
+import { TASK_DIR } from './task-file.js';
 
 export const MAX_FILE_BYTES = 2 * 1024 * 1024;
 export const DEFAULT_PAGE_BYTES = 16384;
@@ -11,6 +14,9 @@ export const MIN_PAGE_BYTES = 4;
 export const MAX_PAGE_BYTES = 32768;
 export const MAX_PATH_LENGTH = 4096;
 const READ_CHUNK_BYTES = 65536;
+const CHECK_IGNORE_TIMEOUT_MS = 10_000;
+// git check-ignore -q prints nothing; a bound for the unexpected.
+const CHECK_IGNORE_MAX_BYTES = 4096;
 
 export type RepoReadErrorCode =
   | 'invalid_path'
@@ -51,10 +57,10 @@ export interface ReadFileResult {
 }
 
 const ALLOWED_ENV_NAMES = new Set(['.env.example', '.env.sample', '.env.template']);
-const FORBIDDEN_NAMES = new Set(['.npmrc', '.netrc', '.git-credentials', 'id_rsa', 'id_ed25519']);
-const FORBIDDEN_EXTENSIONS = ['.key', '.p12', '.pfx'];
+const FORBIDDEN_NAMES = new Set(['.npmrc', '.netrc', '.git-credentials', '.envrc']);
+const FORBIDDEN_EXTENSIONS = ['.key', '.p12', '.pfx', '.pem', '.tfvars'];
 
-// Minimal deny list for read_file and search; it is not a general secret detector.
+// Minimal deny list for read_file and search, tracked or not; it is not a general secret detector.
 export function isForbidden(relativePath: string): boolean {
   const segments = relativePath.split('/');
   if (segments.includes('.git')) {
@@ -67,7 +73,13 @@ export function isForbidden(relativePath: string): boolean {
   if (FORBIDDEN_NAMES.has(name)) {
     return true;
   }
+  if (name.startsWith('id_') && !name.endsWith('.pub')) {
+    return true;
+  }
   const lowerName = name.toLowerCase();
+  if (lowerName.startsWith('credentials') && lowerName.endsWith('.json')) {
+    return true;
+  }
   return FORBIDDEN_EXTENSIONS.some((extension) => lowerName.endsWith(extension));
 }
 
@@ -162,8 +174,8 @@ export class RepoFiles {
     return { path, encoding: 'utf-8', ...pageBuffer(buffer, offset, maxBytes, path) };
   }
 
-  // Applies the deny list to the requested path and to its symlink-free target,
-  // and keeps the target inside the root by comparing path segments.
+  // Applies the deny list to the requested path and to its symlink-free target, keeps the target
+  // inside the root by comparing path segments, and then refuses either path when Git ignores it.
   async #resolve(path: string): Promise<string> {
     if (isForbidden(path)) {
       throw new RepoReadError('forbidden_path', `${path} is excluded from repository reads.`);
@@ -182,10 +194,40 @@ export class RepoFiles {
     if (inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
       throw new RepoReadError('forbidden_path', `${path} resolves outside the repository.`);
     }
-    if (isForbidden(inside.split(sep).join('/'))) {
+    const target = inside.split(sep).join('/');
+    if (isForbidden(target)) {
       throw new RepoReadError('forbidden_path', `${path} resolves to a file excluded from repository reads.`);
     }
+    await this.#refuseIgnored(path, path);
+    if (target !== '' && target !== path) {
+      await this.#refuseIgnored(path, target);
+    }
     return real;
+  }
+
+  // Refuses the read of requested when Git ignores checked (requested itself or its target), as
+  // search skips it: `git check-ignore --no-index` with the read checkout's .gitignore files, info/exclude
+  // and core.excludesFile, with no hooks and no fsmonitor (runGit). The Task directory is ignored
+  // by info/exclude on purpose and stays readable. Exit 0 is ignored, 1 not; any other end (a path
+  // beyond a symbolic link or in a submodule, a timeout, no Git) refuses, as it cannot tell.
+  async #refuseIgnored(requested: string, checked: string): Promise<void> {
+    if (checked.startsWith(`${TASK_DIR}/`)) {
+      return;
+    }
+    let code: number | null;
+    try {
+      // -q takes one path. check-ignore refuses --literal-pathspecs (search's way); the ./ prefix
+      // keeps a leading ':' from being read as pathspec magic instead.
+      code = (await runGit(this.#root, ['check-ignore', '-q', '--no-index', '--', `./${checked}`], CHECK_IGNORE_MAX_BYTES, CHECK_IGNORE_TIMEOUT_MS)).code;
+    } catch {
+      code = null;
+    }
+    if (code === 0) {
+      throw new RepoReadError('forbidden_path', `${requested} is excluded from repository reads (ignored by .gitignore).`);
+    }
+    if (code !== 1) {
+      throw new RepoReadError('forbidden_path', `${requested} is excluded from repository reads (could not check .gitignore).`);
+    }
   }
 
   // Reads at most MAX_FILE_BYTES + 1 bytes, so a growing file cannot force an unbounded read.

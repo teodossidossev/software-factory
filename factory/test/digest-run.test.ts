@@ -269,7 +269,7 @@ test('digest_running: a second run is refused while one goes; the flag is cleare
   assert.equal(none.record.error, 'No workspace is followed or has My daily on.');
 });
 
-test('the model call\'s options: no tools but the structured output, no setting sources, the empty cwd, three turns', () => {
+test('the model call\'s options: no tools but the structured output, no setting sources, no MCP server, the empty cwd, three turns', () => {
   const signal = new AbortController().signal;
   const options = readOnlySessionOptions(digestSessionOptions('/state/digest/session', 'sonnet', '/bin/claude', signal), new AbortController(), DIGEST_SCHEMA);
   assert.deepEqual(options.tools, []);
@@ -281,6 +281,10 @@ test('the model call\'s options: no tools but the structured output, no setting 
   assert.deepEqual(options.outputFormat, { type: 'json_schema', schema: DIGEST_SCHEMA });
   assert.equal(options.sandbox, undefined);
   assert.equal('$schema' in DIGEST_SCHEMA, false);
+  // No MCP server, the user's included (SF-164).
+  assert.equal(options.strictMcpConfig, true);
+  assert.deepEqual(options.mcpServers, {});
+  assert.ok(options.disallowedTools?.includes('mcp__*'), options.disallowedTools?.join(', '));
 });
 
 test('the daily\'s days: yesterday from the last working day to today (Friday and the weekend on a Monday), today until now; a Saturday commit of mine is in the daily', () => {
@@ -347,6 +351,8 @@ test('sf serve starts the timer; sf digest --now and sf digest through the socke
       };
       assert.equal(value('tools'), '');
       assert.equal(value('setting-sources'), '');
+      assert.ok(entry.argv.includes('--strict-mcp-config'), entry.argv.join(' '));
+      assert.ok(!entry.argv.some((arg) => arg.startsWith('--mcp-config')), entry.argv.join(' '));
       assert.equal(value('model'), 'fake-digest');
     }
     // The read checkout is untouched.

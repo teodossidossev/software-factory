@@ -53,26 +53,58 @@ test('child processes get the environment without the Git hosts\' tokens', () =>
   assert.deepEqual(withoutHostTokens({ PATH: '/bin', SF_GITHUB_TOKEN: 'a', SF_GITLAB_TOKEN: 'b', SF_GITLAB_URL: 'https://git.corp/api/v4' }), { PATH: '/bin', SF_GITLAB_URL: 'https://git.corp/api/v4' });
 });
 
-test('forge choice: GitHub for github.com, GitLab for other hosts; the missing variable named; a wrong host refused without its token', () => {
+test('forge choice: GitHub for github.com, GitLab for gitlab.com or the host of SF_GITLAB_URL only; the missing variable named; another host refused without its token', () => {
   const none = forgeSettings({});
   const both = forgeSettings({ SF_GITHUB_TOKEN: 'a', SF_GITLAB_TOKEN: 'b' });
   assert.deepEqual(chooseForge('git@github.com:acme/app.git', none), {
     ok: false, kind: 'github', code: 'mr_token_missing', reason: 'SF_GITHUB_TOKEN is not set in the environment file', missing: 'SF_GITHUB_TOKEN',
   });
-  assert.deepEqual(chooseForge('https://gitlab.example.com/group/sub/app.git', none), {
+  assert.deepEqual(chooseForge('https://gitlab.com/group/sub/app.git', none), {
     ok: false, kind: 'gitlab', code: 'mr_token_missing', reason: 'SF_GITLAB_TOKEN is not set in the environment file', missing: 'SF_GITLAB_TOKEN',
   });
   const github = chooseForge('https://github.com/acme/app.git', both);
   assert.deepEqual(github, { ok: true, kind: 'github', host: 'github.com', path: 'acme/app', api: 'https://api.github.com', token: 'a', tokenName: 'SF_GITHUB_TOKEN' });
-  const gitlab = chooseForge('ssh://git@gitlab.example.com:2222/group/sub/app.git', both);
-  assert.deepEqual(gitlab, { ok: true, kind: 'gitlab', host: 'gitlab.example.com', path: 'group/sub/app', api: 'https://gitlab.example.com/api/v4', token: 'b', tokenName: 'SF_GITLAB_TOKEN' });
+  // gitlab.com without SF_GITLAB_URL: GitLab at https://gitlab.com/api/v4.
+  assert.deepEqual(chooseForge('git@gitlab.com:group/sub/app.git', both), {
+    ok: true, kind: 'gitlab', host: 'gitlab.com', path: 'group/sub/app', api: 'https://gitlab.com/api/v4', token: 'b', tokenName: 'SF_GITLAB_TOKEN',
+  });
+  // A self-hosted GitLab: GitLab when SF_GITLAB_URL names its host.
+  const named = forgeSettings({ SF_GITHUB_TOKEN: 'a', SF_GITLAB_TOKEN: 'b', SF_GITLAB_URL: 'https://gitlab.example.com/api/v4' });
+  assert.deepEqual(chooseForge('https://gitlab.example.com/group/sub/app.git', forgeSettings({ SF_GITLAB_URL: 'https://gitlab.example.com/api/v4' })), {
+    ok: false, kind: 'gitlab', code: 'mr_token_missing', reason: 'SF_GITLAB_TOKEN is not set in the environment file', missing: 'SF_GITLAB_TOKEN',
+  });
+  assert.deepEqual(chooseForge('ssh://git@gitlab.example.com:2222/group/sub/app.git', named), {
+    ok: true, kind: 'gitlab', host: 'gitlab.example.com', path: 'group/sub/app', api: 'https://gitlab.example.com/api/v4', token: 'b', tokenName: 'SF_GITLAB_TOKEN',
+  });
+  // The same hosts without SF_GITLAB_URL, and any other host that is not GitHub (GitHub
+  // Enterprise, Gitea, sourcehut, Bitbucket): refused with what to set, and no token.
+  const unnamed = (hostname: string) => ({
+    ok: false, kind: null, code: 'mr_host_unsupported',
+    reason: `${hostname} is not GitHub or gitlab.com; if it is a GitLab, set SF_GITLAB_URL to its API (https://${hostname}/api/v4)`,
+  });
+  for (const [origin, hostname] of [
+    ['https://gitlab.example.com/group/sub/app.git', 'gitlab.example.com'],
+    ['ssh://git@gitlab.example.com:2222/group/sub/app.git', 'gitlab.example.com'],
+    ['https://gitlab.example.com:8443/group/sub/app.git', 'gitlab.example.com'],
+    ['git@github.example.com:acme/app.git', 'github.example.com'],
+    ['https://gitea.example.org/acme/app.git', 'gitea.example.org'],
+    ['https://git.sr.ht/~acme/app', 'git.sr.ht'],
+    ['https://bitbucket.org/acme/app.git', 'bitbucket.org'],
+  ] as const) {
+    assert.deepEqual(chooseForge(origin, both), unnamed(hostname), origin);
+  }
   // SF_GITLAB_URL is the API of its own host only.
   const configured = forgeSettings({ SF_GITLAB_TOKEN: 'b', SF_GITLAB_URL: 'https://git.corp:8443/api/v4' });
   assert.equal((chooseForge('git@git.corp:group/app.git', configured) as { api: string }).api, 'https://git.corp:8443/api/v4');
-  const elsewhere = chooseForge('https://gitlab.com/group/app.git', configured);
-  assert.equal(elsewhere.ok, false);
-  assert.match((elsewhere as { reason: string }).reason, /the origin is on gitlab\.com, but SF_GITLAB_URL is for git\.corp; the GitLab token is not sent to another host/);
-  for (const origin of [undefined, '/srv/repos/app.git', 'https://github.com/acme', 'https://github.com/acme/app/extra', 'https://bitbucket.org/acme/app.git']) {
+  for (const origin of ['https://gitlab.com/group/app.git', 'https://gitlab.example.com/group/app.git']) {
+    const elsewhere = chooseForge(origin, configured);
+    const hostname = new URL(origin).hostname;
+    assert.deepEqual(elsewhere, {
+      ok: false, kind: 'gitlab', code: 'mr_host_unsupported',
+      reason: `the origin is on ${hostname}, but SF_GITLAB_URL is for git.corp; the GitLab token is not sent to another host`,
+    }, origin);
+  }
+  for (const origin of [undefined, '/srv/repos/app.git', 'https://github.com/acme', 'https://github.com/acme/app/extra']) {
     const choice = chooseForge(origin, both);
     assert.deepEqual([choice.ok, (choice as { code: string }).code], [false, 'mr_host_unsupported'], String(origin));
   }

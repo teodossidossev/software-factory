@@ -333,8 +333,8 @@ started by the run queue as before.
 | `SF_NTFY_URL` | unset | Full ntfy topic URL, e.g. `https://ntfy.sh/<topic>`; unset disables ntfy. |
 | `SF_NTFY_TOKEN` | unset | Sent as `Authorization: Bearer <token>` to a server that needs it. |
 | `SF_GITHUB_TOKEN` | unset | The GitHub token of the merge request actions (SF-048): a fine-grained token on the repository with Pull requests read and write, Contents read and write (write for `sf mr merge`), Checks read for `sf mr status`. Sent only as `Authorization: Bearer <token>` to `https://api.github.com`. Unset turns the actions off for workspaces on `github.com`, saying so. |
-| `SF_GITLAB_TOKEN` | unset | The GitLab token (scope `api`) of the merge request actions, sent only as `Authorization: Bearer <token>` to the GitLab API of the workspace's origin host. Unset turns the actions off for GitLab workspaces. |
-| `SF_GITLAB_URL` | `https://<host>/api/v4` | The GitLab API base when it differs (another port or path; `http` only on loopback, so the token never travels in cleartext: any other `http` URL is refused at start). Set, the GitLab token goes to this URL only, and only for workspaces whose origin is on its host name; other hosts are refused (`mr_host_unsupported`). |
+| `SF_GITLAB_TOKEN` | unset | The GitLab token (scope `api`) of the merge request actions, sent only as `Authorization: Bearer <token>` to the GitLab API of `gitlab.com` or of the host of `SF_GITLAB_URL`, never to another host. Unset turns the actions off for GitLab workspaces. |
+| `SF_GITLAB_URL` | unset (`https://gitlab.com/api/v4` for `gitlab.com`) | Required for a self-hosted GitLab: its API base, such as `https://git.example.com/api/v4` (`http` only on loopback, so the token never travels in cleartext: any other `http` URL is refused at start). Without it, a host other than `github.com` and `gitlab.com` is refused (`mr_host_unsupported`, naming the URL to set). Set, the GitLab token goes to this URL only, and only for workspaces whose origin is on its host name; other hosts, `gitlab.com` included, are refused (`mr_host_unsupported`). |
 | `SF_GITHUB_API` | `https://api.github.com` | Tests only: the fake GitHub on loopback (`127.0.0.1`, `localhost` or `[::1]`); any other host is refused at start. |
 | `SF_TEST_HOOKS` | off | Tests only. `on` makes `sf serve` answer the socket commands `check`, `fix` and `clean` (the reviewers' verdict paths without a review session) for the end-to-end tests. Never set it in real use. |
 
@@ -2381,8 +2381,8 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    is reused, never duplicated. From `ready_for_human_review` (or `needs_human` after a failed push)
    it is approve and then the merge request, in one action; the host and the token are checked
    before anything is pushed. The host is chosen from the checkout's `origin` URL (as for the
-   compare link): `github.com` is GitHub, any other host GitLab (except hosts known not to be
-   GitLab). For a `pushed` job the guard checks the branch name and the MR text first (SF-122):
+   compare link): `github.com` is GitHub; `gitlab.com`, or the host of `SF_GITLAB_URL` when it is
+   set, is GitLab; any other host is `mr_host_unsupported` and gets no token. For a `pushed` job the guard checks the branch name and the MR text first (SF-122):
    a hit is `guard_hit` and no merge request is opened. The job records `mr: {host, number, url, state: "open"}`, appends a `merge_request`
    event, and the notification and the dashboard show the link. A merge request that fails to
    open after a push leaves the job `pushed`, with the failure in the result.
@@ -2432,7 +2432,7 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    | Code | Meaning |
    |---|---|
    | `mr_token_missing` | the workspace's host has no token: `SF_GITHUB_TOKEN` or `SF_GITLAB_TOKEN` is named |
-   | `mr_host_unsupported` | the origin names no GitHub or GitLab repository, or a host other than `SF_GITLAB_URL`'s |
+   | `mr_host_unsupported` | the origin names no GitHub or GitLab repository; or it is on a host other than `github.com` and `gitlab.com` without `SF_GITLAB_URL` (the reason names `https://<host>/api/v4` to set, if it is a GitLab); or on a host other than `SF_GITLAB_URL`'s |
    | `mr_auth_failed` | the host refused the token (401); the message names the variable, never the token |
    | `mr_host_error` | the host refused the request (its status and words), or answered with a redirect, which is never followed |
    | `mr_host_unreachable` | the host did not answer (30 s) |

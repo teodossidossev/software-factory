@@ -169,7 +169,7 @@ job stays `pushed` (or where it was) and the answer says why.
 | Code | What it means | What to do |
 | --- | --- | --- |
 | `mr_token_missing` | No token for the workspace's host. | Set `SF_GITHUB_TOKEN` or `SF_GITLAB_TOKEN` in `auth.env`, restart `sf serve`. |
-| `mr_host_unsupported` | `origin` names no GitHub or GitLab repository, or a host other than `SF_GITLAB_URL`'s. | Open the merge request yourself, or fix `SF_GITLAB_URL`. |
+| `mr_host_unsupported` | `origin` names no GitHub or GitLab repository; or it is on a host other than `github.com` and `gitlab.com` while `SF_GITLAB_URL` is not set ("<host> is not GitHub or gitlab.com; if it is a GitLab, set SF_GITLAB_URL to its API (https://<host>/api/v4)"); or on a host other than `SF_GITLAB_URL`'s. No token is sent to that host. | For a self-hosted GitLab, set `SF_GITLAB_URL` to its API in `auth.env` and restart `sf serve`; otherwise open the merge request yourself, or fix `SF_GITLAB_URL`. |
 | `mr_auth_failed` | The host refused the token (401). | Renew the token and its permissions. |
 | `mr_host_error` | The host refused the request (its status and words), or redirected. | Read the host's words. |
 | `mr_host_unreachable` | The host did not answer within 30 s. | Try again later. |

@@ -10,9 +10,9 @@ import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { checkForgeToken, type ForgeChoice } from '../src/forge.js';
+import { checkForgeToken, chooseForge, type ForgeChoice, forgeSettings } from '../src/forge.js';
 import {
-  checkDigest, checkDisk, checkJobs, checkLogins, checkMcp, checkQueue, checkRemote, checkSandboxes, checkTunnel, checkTunnelCli, type CommandRunner, fetchText, guarded,
+  checkDigest, checkDisk, checkJobs, checkLogins, checkMcp, checkQueue, checkRemote, checkSandboxes, checkTunnel, checkTunnelCli, type CommandRunner, fetchText, forgeTargets, guarded,
   HEALTH_CHECKS, type HealthCheck, healthExitCode, healthLines, HealthMonitor, type HealthStatus, metricValue, type QueueFacts, runChecks,
 } from '../src/health.js';
 import type { Job } from '../src/jobs.js';
@@ -264,6 +264,25 @@ test('logins: the CLIs\' own status commands and each forge token; down names wh
   });
   assert.equal(refused.status, 'down');
   assert.match(refused.detail, /GitHub refused SF_GITHUB_TOKEN/);
+});
+
+test('forgeTargets: the GitLab token goes to gitlab.com or the host of SF_GITLAB_URL only, never to an unnamed host', async () => {
+  const origins: Record<string, string> = {
+    '/w/saas': 'git@gitlab.com:group/saas.git',
+    '/w/corp': 'https://git.corp/group/corp.git',
+    '/w/other': 'https://git.other.example/group/other.git',
+    '/w/hub': 'git@github.com:acme/hub.git',
+  };
+  const registry = { workspaces: Object.fromEntries(Object.keys(origins).map((checkout) => [checkout.slice(3), { read_checkout: checkout }])) } as unknown as Registry;
+  const targets = async (env: NodeJS.ProcessEnv): Promise<string[]> => {
+    const settings = forgeSettings({ SF_GITHUB_TOKEN: 'ghp_x', SF_GITLAB_TOKEN: 'glpat_x', ...env });
+    const found = await forgeTargets(registry, async (checkout) => origins[checkout], (origin) => chooseForge(origin, settings));
+    return found.map((target) => `${target.tokenName} ${target.api}`).sort();
+  };
+  // Without SF_GITLAB_URL: gitlab.com only; git.corp and git.other.example get no token.
+  assert.deepEqual(await targets({}), ['SF_GITHUB_TOKEN https://api.github.com', 'SF_GITLAB_TOKEN https://gitlab.com/api/v4']);
+  // With SF_GITLAB_URL naming git.corp: that host only, gitlab.com and git.other.example left out.
+  assert.deepEqual(await targets({ SF_GITLAB_URL: 'https://git.corp/api/v4' }), ['SF_GITHUB_TOKEN https://api.github.com', 'SF_GITLAB_TOKEN https://git.corp/api/v4']);
 });
 
 test('checkForgeToken: one GET /user with the token in the Authorization header; 200 is accepted, 401 refused; the reply body and the token never reach the reason', async () => {

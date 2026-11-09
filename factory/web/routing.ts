@@ -1,4 +1,4 @@
-// routing.js, the dashboard's fifth script (DASHBOARD_SCRIPTS in src/dashboard.ts), built from
+// routing.js, the dashboard's sixth script (DASHBOARD_SCRIPTS in src/dashboard.ts), built from
 // web/routing.ts into dist/web/: the view shown, the routing and the page's delegated
 // click, input, change and key handlers. A classic script, loaded in order with defer, sharing the
 // page's globals with the others. This file has no import or export on purpose: the compiler keeps
@@ -280,19 +280,15 @@ function onClick(event: MouseEvent): void {
   }
   const clicked = targetOf(event.target);
   const target = clicked !== null
-    ? clicked.closest<HTMLElement>('[data-colfold],[data-cxtree],[data-tk],[data-tkimg],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],[data-qforce],#limUp,#limDown,#rulesBtn,[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-homenu],[data-dismiss],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived,#open-digest,#open-stats')
+    ? clicked.closest<HTMLElement>('[data-colfold],[data-cxtree],[data-tk],[data-tkimg],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],[data-qforce],#limUp,#limDown,[data-run],[data-open],[data-ticket],[data-back],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-homenu],[data-dismiss],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived,#open-digest,#open-stats')
     : null;
   // An open ⋯ menu closes on any click but its own toggle (its items act, then it is closed).
   if (state.openMenu !== null && (target === null || target.dataset.menu === undefined)) {
     setCardMenu(null);
   }
-  // The Rules menu closes on a click outside it.
-  if (clicked !== null && clicked.closest('.menuwrap') === null && !byId('rulesMenu').hidden) {
-    closeRules();
-  }
-  if (target?.id === 'rulesBtn') {
-    toggleRules();
-    return;
+  // The factory pill's popover closes on a click outside it.
+  if (clicked !== null && clicked.closest('#health-wrap') === null) {
+    closeHealth(false);
   }
   // The hand-over panel's More menu closes on a choice and on a click outside it.
   if (state.handoverMenu && clicked !== null && clicked.closest('[data-homenu]') === null
@@ -373,11 +369,6 @@ function onClick(event: MouseEvent): void {
     openDigest(null);
   } else if (target.id === 'open-stats') {
     openStats();
-  } else if (target.hasAttribute('data-ws')) {
-    // A workspace's chip again: back to all.
-    // The branch's hasAttribute('data-ws') says data-ws is there, so the fallback never applies.
-    state.filter = state.filter === target.dataset.ws ? '' : (target.dataset.ws ?? '');
-    renderBoard();
   } else if (target.dataset.qact !== undefined) {
     // The Queue card's buttons carry data-key (board.js queueCard); no ticket has the key ''.
     queueAction(target.dataset.qact, target.dataset.key ?? '');
@@ -509,7 +500,7 @@ function onInput(event: Event): void {
 function onChange(event: Event): void {
   const node = targetOf(event.target);
   const target = isField(node) ? node : null;
-  // A rule of the Rules menu.
+  // A rule of the factory pill's popover.
   if (isTag(target, 'input') && target.name === 'rule' && target.checked) {
     setRule(target.value);
     return;
@@ -536,11 +527,9 @@ function onKey(event: KeyboardEvent): void {
     return;
   }
   const target = targetOf(event.target);
-  // Escape closes the open Rules menu first.
-  if (event.key === 'Escape' && !byId('rulesMenu').hidden) {
+  // Escape closes the factory pill's open popover first.
+  if (event.key === 'Escape' && closeHealth(true)) {
     event.preventDefault();
-    closeRules();
-    byId('rulesBtn').focus();
     return;
   }
   // The hand-over panel's More menu: Escape closes it only (the page stays), the focus back

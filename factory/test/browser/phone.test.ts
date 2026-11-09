@@ -1,6 +1,7 @@
 // The dashboard on a phone and a tablet in a real browser (SF-119): no screen scrolls sideways at
 // 360, 390 and 768 px; the board as one list with folding headings, two columns at 768 px; the top
-// bar's 44 px buttons and the Rules menu inside the screen; the composer's full-width box, its 44 px
+// bar's 44 px controls and the factory pill's popover inside the screen, its rows at 1100 px and
+// below, nothing sideways at 420 px; the composer's full-width box, its 44 px
 // buttons and the reasons line; the Stream rows' time above the text; Changes unified with its
 // folding tree; a tap showing a hover detail in the toast; the viewport meta; the hand-over panel.
 import assert from 'node:assert/strict';
@@ -81,7 +82,7 @@ browserTest('phone (SF-119): at 390 px the board is one list (Your turn, Impleme
   assert.equal(await fold.getAttribute('aria-expanded'), 'false');
   assert.equal(await fx.page.locator('#list-done').isVisible(), false);
   await fx.page.reload();
-  await fx.page.waitForFunction(() => document.getElementById('connection')?.textContent === 'live');
+  await fx.page.waitForFunction(() => document.getElementById('health-light')?.dataset.stream === 'live');
   assert.equal(await fold.getAttribute('aria-expanded'), 'false');
   assert.equal(await fx.page.locator('#list-done').isVisible(), false);
   await fold.click();
@@ -94,27 +95,63 @@ browserTest('phone (SF-119): at 390 px the board is one list (Your turn, Impleme
   }, true);
 });
 
-browserTest('phone (SF-119): at 390 px every top-bar button is inside the screen and at least 44 px high, the stepper\'s are 44 x 44, and the Rules menu opens inside the screen', async (fx) => {
+browserTest('phone (SF-119, SF-160): at 390 px every top-bar button and select is inside the screen and at least 44 px high; the pill\'s popover opens inside the screen with the stepper\'s buttons 44 x 44', async (fx) => {
   await fx.page.setViewportSize({ width: 390, height: 800 });
   await fx.open('');
   await fx.page.locator('#cols .card').first().waitFor();
-  const buttons = await fx.page.locator('.topbar button').evaluateAll((nodes) => nodes
+  await fx.page.locator('#workspace-filter').waitFor();
+  const controls = await fx.page.locator('.topbar button, .topbar select').evaluateAll((nodes) => nodes
     .filter((node) => (node as HTMLElement).offsetParent !== null)
     .map((node) => {
       const rect = node.getBoundingClientRect();
-      return { text: (node as HTMLElement).innerText.trim(), x: rect.x, right: rect.x + rect.width, height: rect.height };
+      return { text: (node as HTMLElement).id || (node as HTMLElement).innerText.trim(), x: rect.x, right: rect.x + rect.width, height: rect.height };
     }));
-  assert.ok(buttons.length >= 8, JSON.stringify(buttons));
-  const off = buttons.filter((button) => button.x < 0 || button.right > 390 || button.height < 44);
+  assert.deepEqual(controls.map((control) => control.text).sort(), ['health-light', 'open-new-ticket', 'page-select', 'waits', 'workspace-filter'], JSON.stringify(controls));
+  const off = controls.filter((control) => control.x < 0 || control.right > 390 || control.height < 44);
   assert.deepEqual(off, []);
+  await fx.page.locator('#health-light').click();
+  await fx.page.locator('#qctl').waitFor();
   for (const id of ['#limDown', '#limUp']) {
     const stepper = await box(fx, id);
     assert.ok(stepper.width >= 44 && stepper.height >= 44, `${id}: ${JSON.stringify(stepper)}`);
   }
-  await fx.page.locator('#rulesBtn').click();
-  await fx.page.locator('#rulesMenu').waitFor();
-  const menu = await box(fx, '#rulesMenu');
-  assert.ok(menu.x >= 0 && menu.x + menu.width <= 390, JSON.stringify(menu));
+  const panel = await box(fx, '#health-panel');
+  assert.ok(panel.x >= 0 && panel.x + panel.width <= 390, JSON.stringify(panel));
+  await fx.page.keyboard.press('Escape');
+  assert.equal(await fx.page.locator('#health-panel').isVisible(), false);
+});
+
+browserTest('top bar (SF-160): one 48 px row with the tabs from 1100 px; below, a second row with the page and workspace selects half the width each; at 420 px nothing scrolls sideways and below it the name keeps its icon only', async (fx) => {
+  await fx.page.setViewportSize({ width: 1100, height: 800 });
+  await fx.open('');
+  await fx.page.locator('#cols .card').first().waitFor();
+  await fx.page.locator('#workspace-filter').waitFor();
+  const bar = await box(fx, '.topbar');
+  assert.ok(bar.height <= 49, `top bar ${bar.height} px high`);
+  // A long workspace name and the pill's longest words keep the one row: they shrink.
+  await fx.page.evaluate(() => {
+    const option = document.createElement('option');
+    option.textContent = 'a-workspace-with-a-very-long-name-that-goes-on-and-on-and-on (12)';
+    document.getElementById('workspace-filter')!.append(option);
+    document.getElementById('health-words')!.textContent = 'sf serve does not answer';
+  });
+  assert.ok((await box(fx, '.topbar')).height <= 49, `top bar ${(await box(fx, '.topbar')).height} px high with long names`);
+  assert.deepEqual(await sideScroll(fx, ['.topbar']), []);
+  assert.deepEqual([await fx.page.locator('.topbar .tabs').isVisible(), await fx.page.locator('#page-select').isVisible()], [true, false]);
+  await fx.page.setViewportSize({ width: 1099, height: 800 });
+  await eventually(() => fx.page.locator('#page-select').isVisible(), true);
+  assert.equal(await fx.page.locator('.topbar .tabs').isVisible(), false);
+  const [pages, filter] = await Promise.all([box(fx, '#page-select'), box(fx, '#workspace-filter')]);
+  assert.ok(Math.abs(pages.y - filter.y) <= 1 && Math.abs(pages.width - filter.width) <= 1 && pages.y > bar.y + 30, JSON.stringify([pages, filter]));
+  await fx.page.setViewportSize({ width: 420, height: 800 });
+  await eventually(() => sideScroll(fx, ['.topbar']), []);
+  assert.equal(await fx.page.locator('.topbar .bname').isVisible(), true);
+  await fx.page.locator('#health-light').click();
+  await fx.page.locator('#health-panel').waitFor();
+  assert.deepEqual(await sideScroll(fx, ['.topbar', '#health-panel']), []);
+  await fx.page.setViewportSize({ width: 400, height: 800 });
+  await eventually(() => fx.page.locator('.topbar .bname').isVisible(), false);
+  assert.equal(await fx.page.locator('.topbar .brand img').isVisible(), true);
 });
 
 browserTest('phone (SF-119): at 390 px the composer\'s box is full width with the buttons under it, primary first, each at least 44 x 44; an open confirmation\'s buttons too; the reasons line shows what is off', async (fx) => {

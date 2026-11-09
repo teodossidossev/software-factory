@@ -19,11 +19,11 @@
   "src/stats.ts": 1321,
   "src/task-check.ts": 916,
   "src/update.ts": 917,
-  "web/board.ts": 1247,
+  "web/board.ts": 1135,
   "web/job-page.ts": 1080,
   "web/job-screens.ts": 2484,
   "web/reports.ts": 1074,
-  "web/routing.ts": 739,
+  "web/routing.ts": 729,
   "web/setup.ts": 709,
   "web/ticket-page.ts": 1277
 }

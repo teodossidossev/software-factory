@@ -10,6 +10,7 @@
   <script src="core.js" defer></script>
   <script src="job-screens.js" defer></script>
   <script src="job-page.js" defer></script>
+  <script src="header.js" defer></script>
   <script src="board.js" defer></script>
   <script src="routing.js" defer></script>
   <script src="ticket-page.js" defer></script>
@@ -20,32 +21,46 @@
 </head>
 <body>
   <div id="board">
+    <!-- The board's top bar (web/header.ts): one row from 1100 px, a second row with the page and
+         workspace selects below; the factory pill's popover holds the checks (web/health.ts), the run
+         limit and the reset rule. -->
     <header class="topbar">
-      <h1>Software Factory</h1>
-      <span class="summary" id="summary"></span>
-      <span id="connection" class="tag" role="status">connecting</span>
-      <!-- The health checks' traffic light: web/health.ts -->
-      <div class="hwrap" id="health-wrap">
-        <button id="health-light" class="hlight unknown" type="button" aria-expanded="false" aria-controls="health-panel" aria-label="Factory health: not checked yet" title="Factory health: not checked yet"><span class="hbulb" aria-hidden="true"></span></button>
-        <div id="health-panel" class="hpanel" role="region" aria-label="Health checks" hidden><b>Health checks</b><ul id="health-list"></ul></div>
-      </div>
-      <!-- The run queue: shown when the tickets payload carries the queue -->
-      <div class="qctl" id="qctl" hidden>
-        <span>Run up to</span>
-        <span class="stepper"><button id="limDown" type="button" aria-label="One job fewer">−</button><output id="limVal"></output><button id="limUp" type="button" aria-label="One job more">+</button></span>
-        <span>jobs at once</span>
-        <span class="qstatus" id="qstatus"></span>
-        <!-- The rule at a usage limit's reset -->
-        <div class="menuwrap" hidden><button class="btn small" id="rulesBtn" type="button" aria-expanded="false">Rules ▾</button><div class="menu" id="rulesMenu" hidden><b>When the usage limit resets</b><label><input type="radio" name="rule" value="resume-then-queue" id="rule-resume-then-queue"> Resume parked jobs, then go on with the queue</label><label><input type="radio" name="rule" value="resume-only" id="rule-resume-only"> Resume parked jobs only</label><label><input type="radio" name="rule" value="wait" id="rule-wait"> Wait for me</label></div></div>
-      </div>
-      <nav class="ws" aria-label="Setup">
-        <span id="workspace-filter" class="seg2" role="group" aria-label="Workspace"></span>
-        <button id="open-digest" type="button" class="btn small">Digest</button>
-        <button id="open-stats" type="button" class="btn small">Stats</button>
-        <button id="open-archived" type="button" class="btn small">Archived <span id="archived-count"></span></button>
-        <button id="open-workspaces" type="button" class="btn small">Workspaces</button>
-        <button id="open-new-ticket" type="button" class="btn small primary">New ticket</button>
+      <h1 class="brand"><img src="favicon.svg" alt="" width="20" height="20"><span class="bname">Software Factory</span></h1>
+      <button id="waits" type="button" class="needs" hidden></button>
+      <nav class="tabs" aria-label="Pages">
+        <button id="open-board" type="button" class="tab" aria-current="page">Board</button>
+        <button id="open-digest" type="button" class="tab">Digest</button>
+        <button id="open-stats" type="button" class="tab">Stats</button>
+        <button id="open-archived" type="button" class="tab">Archived <span id="archived-count" class="count"></span></button>
+        <button id="open-workspaces" type="button" class="tab">Workspaces</button>
       </nav>
+      <span class="hgap"></span>
+      <span class="hbreak"></span>
+      <select id="page-select" class="hselect" aria-label="Page">
+        <option value="board">Board</option>
+        <option value="digest">Digest</option>
+        <option value="stats">Stats</option>
+        <option value="archived" id="page-archived">Archived</option>
+        <option value="workspaces">Workspaces</option>
+      </select>
+      <select id="workspace-filter" class="hselect" aria-label="Workspace"></select>
+      <div class="hwrap" id="health-wrap">
+        <button id="health-light" class="hlight unknown" type="button" aria-expanded="false" aria-controls="health-panel" aria-haspopup="true"><span class="hbulb" aria-hidden="true"></span><span id="health-words" class="hwords"></span><span id="health-run" class="hrun"></span></button>
+        <div id="health-panel" class="hpanel" role="region" aria-label="Factory" hidden>
+          <h3>Health</h3>
+          <div id="health-head" class="hp-head"></div>
+          <ul id="health-list"></ul>
+          <!-- The run queue: shown when the tickets payload carries the queue -->
+          <div class="qctl" id="qctl" hidden>
+            <h3>Run queue</h3>
+            <div class="qrow"><span>Run up to</span><span class="stepper"><button id="limDown" type="button" aria-label="One job fewer">−</button><output id="limVal"></output><button id="limUp" type="button" aria-label="One job more">+</button></span><span>jobs at once</span></div>
+            <div class="qstatus" id="qstatus"></div>
+            <!-- The rule at a usage limit's reset -->
+            <fieldset class="rules" id="rules"><legend>When the usage limit resets</legend><label><input type="radio" name="rule" value="resume-then-queue" id="rule-resume-then-queue"> Resume parked jobs, then go on with the queue</label><label><input type="radio" name="rule" value="resume-only" id="rule-resume-only"> Resume parked jobs only</label><label><input type="radio" name="rule" value="wait" id="rule-wait"> Wait for me</label></fieldset>
+          </div>
+        </div>
+      </div>
+      <button id="open-new-ticket" type="button" class="btn primary">New ticket</button>
     </header>
     <p id="board-hint" class="bhint" hidden></p>
     <div class="cols" id="cols">

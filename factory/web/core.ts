@@ -1,12 +1,12 @@
 // core.js, the first of the dashboard's scripts (DASHBOARD_SCRIPTS in src/dashboard.ts), built from
 // web/core.ts into dist/web/: the constants, the state, the small DOM, format and HTTP
-// helpers and the connection tag. Each of them is a classic script, loaded in order with defer, and
+// helpers. Each of the dashboard's scripts is a classic script, loaded in order with defer, and
 // shares the page's globals with the others. This file has no import or export on purpose: the
 // compiler keeps it a script, so its top-level names stay the page's globals.
 
 // Software Factory dashboard v3, the port of docs/design/dashboard-v3/prototype.html:
-// the top bar (the summary, the connection, the workspace filter, Archived, Workspaces and New
-// ticket; the queue controls and the Rules menu are hidden without the run queue), the board's
+// the top bar (header.js: what waits for the user, the pages, the workspace filter, the factory
+// pill with the health checks, the run limit and the reset rule, and New ticket), the board's
 // five columns Queue, Implementing, Reviewing, Your turn and Done, whose cards say who acts now, why
 // a job stopped (one table, STOPS) and carry one primary action only where the user acts, and the
 // full pages a card opens: a job's page at #<ws>/<ticket> (/changes, /mr) and a planned ticket's
@@ -424,14 +424,6 @@ async function answerOf(response: Response): Promise<unknown> {
     throw new ActionError(String(error.code ?? `http_${response.status}`), String(error.message ?? `HTTP ${response.status}`));
   }
   throw new Error(`HTTP ${response.status}${error.code ? ` ${error.code}` : ''}, no result`);
-}
-
-// The connection, a tag in the top bar while the stream is not connected.
-function setConnection(text: string, kind: string): void {
-  const node = byId('connection');
-  node.textContent = text;
-  node.className = `tag ${kind}`;
-  node.hidden = kind === 'live';
 }
 
 // The Changes data of the job shown, read from the server: the index of api/jobs/<key>/changes and

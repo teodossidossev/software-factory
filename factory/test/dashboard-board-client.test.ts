@@ -92,13 +92,13 @@ test('board client: the five columns follow the states, the Queue holds the plan
   assert.deepEqual(keys(page, 'you').sort(), ['app/J-4', 'app/J-5', 'app/J-6']);
   assert.deepEqual(keys(page, 'done').sort(), ['app/J-7', 'app/J-8', 'app/J-9']);
   assert.deepEqual(COLUMNS.map((column) => page.$(`count-${column}`).textContent), ['2', '2', '2', '3', '3']);
-  // The column headings and the top bar: "N wait for you · M running", and the page title.
+  // The column headings and the top bar: "N wait for you", the pill's "M running", and the page title.
   assert.deepEqual(page.document.querySelectorAll('#cols .col h2').map((heading) => heading.textContent), ['Queue 2', 'Implementing 2', 'Reviewing 2', 'Your turn 3', 'Done 3']);
-  assert.equal(page.$('summary').textContent, '3 wait for you · 4 running');
-  // Connected: no connection tag; not connected: a tag says so.
-  assert.equal(page.$('connection').hidden, true);
+  assert.deepEqual([page.$('waits').hidden, page.$('waits').textContent, page.$('health-run').textContent], [false, '3 wait for you', '4 running']);
+  // Connected: the pill's stream is live; not connected: down (red after 30 s: dashboard-health-client.test.ts).
+  assert.equal(page.$('health-light').dataset.stream, 'live');
   page.streams.at(-1)!.emit('error');
-  assert.deepEqual([page.$('connection').hidden, page.$('connection').className, page.$('connection').textContent], [false, 'tag down', 'reconnecting']);
+  assert.equal(page.$('health-light').dataset.stream, 'down');
   assert.equal(page.document.title, '(3) Software Factory');
   // A card: the key, the title (the branch without one); the Queue's card the last job's state.
   assert.match(card(page, 'app/J-1').textContent, /^J-1/);
@@ -111,7 +111,7 @@ test('board client: the five columns follow the states, the Queue holds the plan
     [['empty', 'No ticket waits to start.']], [['empty', 'Nothing is being implemented.']], [['empty', 'Nothing is in review.']],
     [['empty', 'Nothing waits for you.']], [['empty', 'No finished job.']],
   ]);
-  assert.deepEqual([page.$('summary').textContent, page.document.title], ['0 wait for you · 0 running', 'Software Factory']);
+  assert.deepEqual([page.$('waits').hidden, page.$('health-run').textContent, page.document.title], [true, '0 running', 'Software Factory']);
   // Without SF-071 the Queue has no queued part: no empty-queue line, no "Not queued" divider.
   assert.equal(page.document.querySelectorAll('#qlist .qdiv').length, 0);
 
@@ -202,7 +202,7 @@ test('board client: a Queue card: the check chip, Start (secondary), Task and th
   page.key('Escape');
   assert.deepEqual([menu().hidden, page.document.activeElement], [true, toggle()]);
   toggle().click();
-  page.$('summary').click();
+  page.$('cols').click();
   assert.equal(menu().hidden, true);
   // Archive and Delete… go through the confirmation and the routes of today.
   toggle().click();
@@ -372,22 +372,70 @@ test('board client: a card moves column on a jobs event; the workspace filter ch
   assert.deepEqual([keys(page, 'reviewing'), keys(page, 'you')], [[], ['app/T-1']]);
   assert.equal(page.$('count-you').textContent, '1');
 
-  // The filter: All and one chip per workspace (its dot and name); one workspace keeps its cards and counts.
-  const filters = () => page.$('workspace-filter').children as FakeElement[];
-  assert.deepEqual(filters().map((element) => [element.textContent, element.getAttribute('aria-pressed'), element.className]), [['All workspaces', 'true', 'on'], ['app', 'false', ''], ['web', 'false', '']]);
-  assert.deepEqual(filters().slice(1).map((element) => (element.children[0] as FakeElement).className), ['wsdot ws-teal', 'wsdot ws-purple']);
-  filters()[2]!.click();
+  // The filter (SF-160): a select with All workspaces and each workspace's full name and job count;
+  // one workspace keeps its cards and counts.
+  const select = page.$('workspace-filter');
+  const options = () => (select.children as FakeElement[]).map((option) => [option.value, option.textContent]);
+  assert.equal(select.tagName, 'SELECT');
+  assert.deepEqual([options(), select.value, select.hidden], [[['', 'All workspaces (2)'], ['app', 'app (1)'], ['web', 'web (1)']], '', false]);
+  const choose = (name: string): void => {
+    select.value = name;
+    select.dispatch('change');
+  };
+  choose('web');
   assert.deepEqual([keys(page, 'queue'), keys(page, 'implementing'), keys(page, 'you')], [['web/W-2'], ['web/W-1'], []]);
-  assert.equal(page.$('count-you').textContent, '0');
+  assert.deepEqual([page.$('count-you').textContent, select.value], ['0', 'web']);
   // The workspace shows on every card, even when the board shows one workspace (SF-084).
   assert.equal(part(card(page, 'web/W-1'), 'wschip')!.textContent, 'web');
-  // The same chip again: every workspace.
-  filters()[2]!.click();
-  assert.deepEqual([keys(page, 'you'), filters()[0]!.getAttribute('aria-pressed')], [['app/T-1'], 'true']);
-  filters()[2]!.click();
+  // The choice stays across a new rendering of the board.
+  stream.emit('jobs', { jobs: [job('T-1', 'ready_for_human_review'), { ...job('W-1', 'working'), workspace: 'web' }] });
+  assert.deepEqual([keys(page, 'you'), select.value], [[], 'web']);
+  // All workspaces again: every workspace.
+  choose('');
+  assert.deepEqual([keys(page, 'you'), select.value], [['app/T-1'], '']);
+  choose('web');
   // A removed workspace drops its filter.
   stream.emit('workspaces', { workspaces: [workspace('app')] });
-  assert.deepEqual(keys(page, 'you'), ['app/T-1']);
+  assert.deepEqual([keys(page, 'you'), select.value, options()], [['app/T-1'], '', [['', 'All workspaces (2)'], ['app', 'app (1)']]]);
+  // Without any workspace the select hides.
+  stream.emit('workspaces', { workspaces: [] });
+  assert.equal(select.hidden, true);
+});
+
+test('board client (SF-160): "N waits for you" counts every workspace, hides at 0, adds "(hidden)" while the filter hides some of them; its click clears that filter and scrolls Your turn into view', async () => {
+  const page = await openBoard([job('T-1', 'needs_human'), { ...job('W-1', 'paused'), workspace: 'web' }, job('T-2', 'working')], [], [workspace('app'), workspace('web')]);
+  const waits = page.$('waits');
+  const you = page.document.querySelector('#cols .col.you')!;
+  assert.deepEqual([waits.tagName, waits.hidden, waits.textContent], ['BUTTON', false, '2 wait for you']);
+  const select = page.$('workspace-filter');
+  select.value = 'web';
+  select.dispatch('change');
+  assert.deepEqual([keys(page, 'you'), waits.textContent, waits.querySelector('.hid')!.textContent], [['web/W-1'], '2 wait for you (hidden)', ' (hidden)']);
+  waits.click();
+  assert.deepEqual([select.value, keys(page, 'you').sort(), waits.textContent, you.scrolledIntoView], ['', ['app/T-1', 'web/W-1'], '2 wait for you', 1]);
+  // A filter that hides none of them: no "(hidden)", and the click keeps the filter.
+  page.streams.at(-1)!.emit('jobs', { jobs: [{ ...job('W-1', 'paused'), workspace: 'web' }] });
+  select.value = 'web';
+  select.dispatch('change');
+  assert.equal(waits.textContent, '1 waits for you');
+  waits.click();
+  assert.deepEqual([select.value, you.scrolledIntoView], ['web', 2]);
+  page.streams.at(-1)!.emit('jobs', { jobs: [] });
+  assert.equal(waits.hidden, true);
+});
+
+test('board client (SF-160): the top bar\'s pages: the tabs with Board current and Archived\'s count, and the page select below 1100 px opening the same pages and drawers', async () => {
+  const page = await openBoard([], [], [workspace('app')]);
+  assert.deepEqual(page.document.querySelectorAll('.topbar .tabs button').map((tab) => [tab.id, tab.textContent, tab.getAttribute('aria-current')]), [
+    ['open-board', 'Board', 'page'], ['open-digest', 'Digest', null], ['open-stats', 'Stats', null], ['open-archived', 'Archived (0)', null], ['open-workspaces', 'Workspaces', null],
+  ]);
+  const pages = page.$('page-select');
+  assert.deepEqual([pages.value, (pages.children as FakeElement[]).map((option) => option.textContent)], ['board', ['Board', 'Digest', 'Stats', 'Archived (0)', 'Workspaces']]);
+  pages.value = 'workspaces';
+  pages.dispatch('change');
+  assert.deepEqual([page.$('drawer').hidden, pages.value], [false, 'board']);
+  assert.equal(page.document.querySelectorAll('.topbar .brand img[src="favicon.svg"]').length, 1);
+  assert.equal(page.$('open-new-ticket').closest('.topbar')!.tagName, 'HEADER');
 });
 
 test('board client (SF-131): a card awaiting review without its Now line names the reviewer: the Codex gate for a job without the Claude review, else Claude until its review is clean', async () => {
@@ -758,17 +806,18 @@ test('board client: api/jobs is read again every 15 s only while a card runs and
   assert.equal(jobReads(page).length, before);
 });
 
-test('board client: without a run queue (the tickets payload has none) the queue controls and the Rules menu stay hidden and no queue route is called; with the queue both show (SF-072)', async () => {
+test('board client: without a run queue (the tickets payload has none) the queue controls and the rules stay hidden and no queue route is called; with the queue both show in the factory pill\'s popover (SF-072, SF-160)', async () => {
   const page = await openBoard([job('T-1', 'working')], [ticket('app/T-2', { queue_position: 1, queue_error: null })]);
-  assert.deepEqual(page.document.querySelectorAll('#rulesMenu input').map((input) => [input.type, input.name, input.value]),
+  assert.deepEqual(page.document.querySelectorAll('#rules input').map((input) => [input.type, input.name, input.value]),
     [['radio', 'rule', 'resume-then-queue'], ['radio', 'rule', 'resume-only'], ['radio', 'rule', 'wait']]);
-  for (const selector of ['.qctl', '.menuwrap', '#rulesMenu']) {
-    assert.equal(page.document.querySelector(selector)!.hidden, true, selector);
-  }
-  assert.equal(page.document.querySelector('.qctl')!.closest('.topbar')!.tagName, 'HEADER');
+  assert.equal(page.$('qctl').hidden, true);
+  assert.equal(page.$('rules').closest('#qctl'), page.$('qctl'));
+  assert.equal(page.$('qctl').closest('#health-panel')!.closest('.topbar')!.tagName, 'HEADER');
+  // Without the queue the pill reads the running jobs of every workspace.
+  assert.equal(page.$('health-run').textContent, '1 running');
   assert.equal(page.document.querySelectorAll('#qlist .pos, #qlist .waits, #qlist .qdiv, #qlist [draggable]').length, 0);
   assert.equal(labels(card(page, 'app/T-2')).some((label) => /queue/.test(label)), false);
-  for (const id of ['limUp', 'limDown', 'rulesBtn']) {
+  for (const id of ['limUp', 'limDown']) {
     page.$(id).click();
   }
   card(page, 'app/T-2').focus();
@@ -776,9 +825,9 @@ test('board client: without a run queue (the tickets payload has none) the queue
   await page.flush();
   assert.deepEqual(page.requests.filter((request) => /queue|limit|rule/i.test(request.path)).map((request) => request.path), []);
   assert.deepEqual(keys(page, 'queue'), ['app/T-2']);
-  // With the queue: its controls and the Rules button show; the menu itself opens on a click.
+  // With the queue: its controls and the rules show in the popover; the pill reads the queue's R/L.
   page.streams.at(-1)!.emit('tickets', { tickets: [ticket('app/T-2', { queue_position: 1, queue_error: null })], archived: [], queue: QUEUE });
-  assert.deepEqual([page.$('qctl').hidden, page.document.querySelector('.menuwrap')!.hidden, page.$('rulesMenu').hidden], [false, false, true]);
+  assert.deepEqual([page.$('qctl').hidden, page.$('health-panel').hidden, page.$('health-run').textContent], [false, true, '1/2 running']);
 });
 
 const QUEUE = { max_running: 2, running: 1, held: false, hold_reason: null, next: { workspace: 'app', ticket: 'T-3' }, on_limit: 'resume-then-queue', limit_hold: null };
@@ -806,7 +855,7 @@ const queuedTickets = () => [
 test('board client (SF-071): the run queue in the top bar: Run up to N jobs at once with the stepper posting api/queue/limit, and the status line', async () => {
   const page = await openQueue(queuedTickets());
   assert.equal(page.$('qctl').hidden, false);
-  assert.match(page.$('qctl').textContent, /^Run up to−2\+jobs at once1 running · 1 slot free · next: T-3/);
+  assert.match(page.$('qctl').textContent, /^Run queueRun up to−2\+jobs at once1 running · 1 slot free · next: T-3When the usage limit resets/);
   assert.deepEqual([page.$('limVal').textContent, page.$('qstatus').className, page.$('qstatus').textContent], ['2', 'qstatus', '1 running · 1 slot free · next: T-3']);
   // One job more: posted once, both buttons off until the answer; the board shows the server's value.
   page.$('limUp').click();
@@ -1080,7 +1129,7 @@ test('board client (SF-084): hovering or focusing a card outlines its dependenci
   page.streams.at(-1)!.emit('jobs', { jobs: [job('B-1', 'working'), job('D-1', 'pushed')] });
   assert.deepEqual(marks(), ['', 'rel', 'dim', 'rel', 'dim']);
   // Off the cards: cleared; a card without dependencies or dependents dims nothing.
-  page.$('summary').dispatch('mouseover');
+  page.$('board-hint').dispatch('mouseover');
   assert.deepEqual(marks(), ['', '', '', '', '']);
   card(page, 'app/Q-3').dispatch('mouseover');
   assert.deepEqual(marks(), ['', '', '', '', '']);
@@ -1092,7 +1141,7 @@ test('board client (SF-084): hovering or focusing a card outlines its dependenci
   assert.deepEqual(marks(), ['', '', '', '', '']);
   card(page, 'app/Q-2').dispatch('focusin');
   assert.deepEqual(marks(), ['rel', '', 'dim', 'dim', 'dim']);
-  card(page, 'app/Q-2').dispatch('focusout', { relatedTarget: page.$('summary') });
+  card(page, 'app/Q-2').dispatch('focusout', { relatedTarget: page.$('board-hint') });
   assert.deepEqual(marks(), ['', '', '', '', '']);
   card(page, 'app/Q-2').dispatch('mouseover');
   page.$('cols').dispatch('mouseleave');
@@ -1112,7 +1161,8 @@ test('board client (SF-084): a chip scrolls to its card and focuses it, lifting 
   // Its card outlined with the others dimmed.
   assert.deepEqual([card(page, 'app/Q-1').classList.contains('rel'), card(page, 'app/Q-2').classList.contains('dim')], [true, true]);
   // Filtered out: the filter goes back to every workspace.
-  page.$('workspace-filter').children.map((child) => child as FakeElement).find((element) => element.textContent === 'app')!.click();
+  page.$('workspace-filter').value = 'app';
+  page.$('workspace-filter').dispatch('change');
   assert.deepEqual(keys(page, 'implementing'), []);
   chip('web/W-1').click();
   assert.deepEqual([keys(page, 'implementing'), page.document.activeElement], [['web/W-1'], card(page, 'web/W-1')]);
@@ -1186,7 +1236,7 @@ test('board client (SF-072): a parked job is in Implementing, holds its slot and
   // 03:00 in Sofia; the turn was under way: iteration 1.
   assert.deepEqual([part(parked, 'parked')?.textContent, part(parked, 'meta')?.textContent, part(parked, 'now')], ['Waiting for limits · resets at 03:00', 'Iteration 1 · parked, holds its slot', undefined]);
   assert.deepEqual(labels(parked), []);
-  assert.match(page.$('summary').textContent, /· 3 running$/);
+  assert.equal(page.$('health-run').textContent, '3 running');
   const reset = card(page, 'app/T-2');
   assert.deepEqual([part(reset, 'parked')?.textContent, labels(reset)], ['Limit reset: resume?', ['Resume']]);
   button(reset, 'Resume')!.click();
@@ -1209,17 +1259,21 @@ test('board client (SF-072): #qstatus while a job is parked: held by the usage l
   assert.equal(page.$('qstatus').textContent, 'Queue held: usage limit reset; release the queue to go on · 1 running');
 });
 
-test('board client (SF-072): the Rules menu opens from the top bar with the queue\'s rule checked; a choice posts api/queue/rule once; Escape and a click outside close it', async () => {
+test('board client (SF-072, SF-160): the rules are in the factory pill\'s popover with the queue\'s rule checked; a choice posts api/queue/rule once and keeps the popover open; Escape and a click outside close it', async () => {
   const page = await openQueue(queuedTickets(), { ...QUEUE, on_limit: 'resume-only' });
   const rules = (): Array<[string, boolean]> => ['resume-then-queue', 'resume-only', 'wait'].map((rule) => [rule, page.$(`rule-${rule}`).checked]);
-  assert.deepEqual([page.document.querySelector('.menuwrap')!.hidden, page.$('rulesMenu').hidden, page.$('rulesBtn').getAttribute('aria-expanded')], [false, true, 'false']);
-  page.$('rulesBtn').click();
-  assert.deepEqual([page.$('rulesMenu').hidden, page.$('rulesBtn').getAttribute('aria-expanded')], [false, 'true']);
+  const pill = page.$('health-light');
+  assert.deepEqual([page.$('health-panel').hidden, pill.getAttribute('aria-expanded')], [true, 'false']);
+  pill.click();
+  await page.flush();
+  assert.deepEqual([page.$('health-panel').hidden, pill.getAttribute('aria-expanded'), page.$('qctl').hidden], [false, 'true', false]);
   assert.deepEqual(rules(), [['resume-then-queue', false], ['resume-only', true], ['wait', false]]);
   page.$('rule-wait').checked = true;
+  page.$('rule-wait').click();
   page.$('rule-wait').dispatch('change');
   await page.flush();
   assert.deepEqual(posts(page).map((request) => [request.path, request.body]), [['api/queue/rule', '{"rule":"wait"}']]);
+  assert.equal(page.$('health-panel').hidden, false);
   assert.equal(page.$('rule-wait').disabled, true);
   posts(page)[0]!.respond(200, { ok: true, result: { on_limit: 'wait' } });
   await page.flush();
@@ -1233,11 +1287,11 @@ test('board client (SF-072): the Rules menu opens from the top bar with the queu
   await page.flush();
   assert.equal(posts(page).length, 1);
   page.key('Escape');
-  assert.deepEqual([page.$('rulesMenu').hidden, page.$('rulesBtn').getAttribute('aria-expanded')], [true, 'false']);
-  page.$('rulesBtn').click();
-  assert.equal(page.$('rulesMenu').hidden, false);
-  page.$('summary').click();
-  assert.equal(page.$('rulesMenu').hidden, true);
+  assert.deepEqual([page.$('health-panel').hidden, pill.getAttribute('aria-expanded')], [true, 'false']);
+  pill.click();
+  assert.equal(page.$('health-panel').hidden, false);
+  page.$('cols').click();
+  assert.equal(page.$('health-panel').hidden, true);
 });
 
 test('board client (SF-087): a Your turn card of fetch_failed, mr_serve_restarted or mr_failed posts Retry at once, once; after a conflict turn it opens the job instead; mr_push_failed keeps Push again', async () => {

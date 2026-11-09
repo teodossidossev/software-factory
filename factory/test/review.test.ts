@@ -89,6 +89,18 @@ test('the options of runStructuredSession: without tools and settingSources, REV
   assert.deepEqual(none.outputFormat, { type: 'json_schema', schema: REVIEW_SCHEMA });
 });
 
+test('every read-only session loads no MCP server: strictMcpConfig, no mcpServers, and \'mcp__*\' denied (SF-164)', () => {
+  const base = { cwd: '/srv/app', claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 3 };
+  for (const options of [
+    reviewSessionOptions(base, new AbortController()),
+    readOnlySessionOptions({ ...base, tools: [], settingSources: [] }, new AbortController(), REVIEW_SCHEMA, ['Read(//x/**)'], undefined),
+  ]) {
+    assert.equal(options.strictMcpConfig, true);
+    assert.deepEqual(options.mcpServers, {});
+    assert.ok(options.disallowedTools?.includes('mcp__*'), options.disallowedTools?.join(', '));
+  }
+});
+
 test('readOnlySessionOptions merges options.hooks (the file-tool guard, SF-123) with the session\'s own hooks: each event\'s matchers concatenated, the session\'s first', () => {
   const base = { cwd: '/srv/app', claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 3 };
   const hook = (): HookCallback => async () => ({});

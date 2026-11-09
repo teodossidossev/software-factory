@@ -89,6 +89,13 @@ Every session also denies the tools of the MCP server named `software-factory`, 
 which you add the factory to Claude Code: a server added in the `user` scope loads into every
 session, and none may call the planning tools with the token Claude Code holds for it.
 
+The read-only sessions (the Claude review, the simplification pass, the Task check, a stop's
+explanation, the morning digest) load no MCP server at all: they start with `strictMcpConfig` and
+no `mcpServers`, so neither a server you added in the `user` scope nor the repository's `.mcp.json`
+loads, and their `disallowedTools` deny `mcp__*` as well. The SDK's `tools` option covers the
+built-in tools only, so without this a server of yours would load into the morning digest, which
+reads other people's commit messages. None of them is given a server on purpose.
+
 Denied for writing (the global config for reading too, above): Claude Code's user settings and
 global config (`~/.claude/settings.json`, `~/.claude.json`), which the next session would load and which could switch the sandbox's
 filesystem rules off or start an MCP server outside it; the factory also pins filesystem isolation
@@ -211,6 +218,27 @@ simplification pass and the Task check alike.
 | Claude review, simplification pass | as the Implementer, with the guard | nothing (read-only tools) | none |
 | Task check | its own checkout of the Task's base only (a path guard on every tool call) | nothing | none |
 | Codex gate | as a job's sandboxed commands (the wrapper above): its worktree, the images, the Codex package and node, `CODEX_HOME`, the rest of the machine outside the home directory but the paths above | `CODEX_HOME`, the iteration's directory | read-only (Codex's own sandbox) |
+
+## What the Context owner can read
+
+The planning tools `read_file` and `search` read the workspace's read checkout for the Context
+owner (ChatGPT, or another MCP client you connect), so what they return goes to that model's
+provider.
+`search` lists tracked and untracked files and skips the ones Git ignores. `read_file` refuses,
+with `forbidden_path`:
+
+- a credential-like name, tracked or not: anything under `.git`, `.env` and `.env.*` (but
+  `.env.example`, `.env.sample` and `.env.template`), `.envrc`, `.npmrc`, `.netrc`,
+  `.git-credentials`, `id_*` files other than `*.pub`, `credentials*.json`, and `*.key`, `*.p12`,
+  `*.pfx`, `*.pem`, `*.tfvars`;
+- a file Git ignores (`git check-ignore --no-index`, with the checkout's `.gitignore` files,
+  `info/exclude` and your `core.excludesFile`), reason "ignored by .gitignore", except under
+  `.software-factory/`, which the factory itself excludes;
+- a path Git cannot check (one beyond a symbolic link, or in a submodule), reason "could not check
+  .gitignore".
+
+Both the requested path and, for a link, the path it resolves to in the checkout are checked; a
+link out of the checkout is refused. The check runs Git like every other factory Git call (below).
 
 ## What runs outside the sandbox
 

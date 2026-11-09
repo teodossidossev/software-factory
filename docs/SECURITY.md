@@ -39,6 +39,13 @@ refused), and the factory's test command passed in a sandbox without network on 
 - **The Codex gate runs in a read-denying wrapper.** It sees no secrets and no other jobs. Secrets
   in its findings are masked. The wrapper refuses new Unix sockets, so the gate cannot reach your
   X server, session bus or other local services through one.
+- **ChatGPT reads no secret file of a workspace.** `read_file` refuses the files Git ignores
+  (outside `.software-factory/`) and credential-like names tracked or not (`.env`, `.envrc`, `*.pem`,
+  `*.key`, SSH keys, `credentials*.json`, `*.tfvars`), links resolved, as `search` already skipped
+  them.
+- **The read-only sessions load no MCP server.** The morning digest, which reads other people's
+  commit messages, the reviews and the Task check start without your MCP servers and deny every
+  MCP tool, so nothing they read can drive one.
 - **Code from a repository never runs as you through Git.** The factory's Git commands run no hooks
   and no fsmonitor.
 - **The GitLab token goes only to gitlab.com or the host of `SF_GITLAB_URL`.** A workspace on any
@@ -65,7 +72,6 @@ refused), and the factory's test command passed in a sandbox without network on 
 - **Found by the audit of 2026-11-09, being fixed:**
   - A link swapped between the file guard's check and the write can send a write out of the
     worktree.
-  - ChatGPT's `read_file` can read git-ignored secret files in a workspace (such as `.envrc`).
   - The guard does not scan binary or `-diff` files.
 - **The network is open to the agents.** It has to be: Claude and Codex are remote models. The
   code a job works on goes to Anthropic and OpenAI; secrets do not.

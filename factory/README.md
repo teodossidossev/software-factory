@@ -1177,7 +1177,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   turn and after the conflict re-publication of MR preparation, unless `SF_REVIEW=off`. It is a
   fresh Agent SDK `query()` (never `resume`) in the worktree, read-only: the tools `Read`, `Grep`
   and `Glob` only (`tools`), and `Bash`, `Edit`, `Write`, `NotebookEdit`, `WebFetch`, `WebSearch`,
-  `Task`, `Agent` and the `.env` rules denied as well. It has the Implementer's permission mode,
+  `Task`, `Agent`, every MCP tool (`mcp__*`) and the `.env` rules denied as well; it loads no MCP
+  server (`strictMcpConfig` with no `mcpServers`, as every read-only session). It has the Implementer's permission mode,
   sandbox and filtered environment, `maxTurns` `SF_REVIEW_MAX_TURNS` and model `SF_REVIEW_MODEL`.
   It sees the Task file, the Report, the Patch and the repository, nothing the user wrote outside
   it (SF-050): `settingSources: ['project']` keeps the repository's `CLAUDE.md`, `AGENTS.md`,
@@ -4218,7 +4219,8 @@ longest texts are cut in half; the digest says what was left out. The stored rec
 Git data.
 
 **The model**: one Agent SDK session per digest in `sf serve`, with the settings' model, no tools but
-the structured output, no setting sources (no CLAUDE.md, AGENTS.md or user settings), an empty
+the structured output, no setting sources (no CLAUDE.md, AGENTS.md or user settings), no MCP server
+(`strictMcpConfig`, no `mcpServers`, `mcp__*` denied: the user's own would load otherwise), an empty
 `<state dir>/digest/session/` as its cwd, three turns and a 10-minute timeout. Facts only from the
 data, a guess marked "likely", problems and plans as suggestions, the settings' language. An invalid
 or failed answer is retried once; then the digest is stored with the Git data and the error, and the

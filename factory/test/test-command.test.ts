@@ -8,15 +8,18 @@
 // runs its sleep in the harness's fake bwrap there.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
 import { delimiter, dirname, join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { saveRegistry } from '../src/registry.js';
 import { pathDenials } from '../src/sandbox-denials.js';
 import {
-  bwrapArgs, checksLine, durationText, hiddenMounts, inlineCommand, lastLines, MAX_TESTS_OUTPUT_BYTES, runTestCommand, testEnvironment, type TestsRecord, testsFixContent,
+  bwrapArgs, checksLine, configChangedReason, configFingerprint, durationText, firstChange, hiddenMounts, inlineCommand, lastLines, MAX_TESTS_OUTPUT_BYTES, runTestCommand, testEnvironment,
+  type TestsRecord, testsFixContent, WATCHED_PATH_UNSAFE, watchedPaths,
 } from '../src/test-command.js';
 
 const SELF = fileURLToPath(import.meta.url);
@@ -102,6 +105,140 @@ if (process.env[CHILD] !== undefined) {
     assert.equal(record.output_truncated, false);
     assert.ok(record.duration_ms >= 0 && Date.parse(record.ended_at) >= Date.parse(record.started_at));
     assert.ok((await stat(join(worktree, 'made.txt'))).isFile());
+  });
+
+  // A worktree of its own, linked to Git by a .git file as a job's is.
+  const freshWorktree = async (name: string): Promise<string> => {
+    const dir = join(root, name);
+    await mkdir(dir);
+    await writeFile(join(dir, '.git'), 'gitdir: /nowhere/.git/worktrees/x\n');
+    return dir;
+  };
+  // The environment of a run in the real bubblewrap where it starts, else in the harness's fake one
+  // (an exec of the command, no sandbox): the fingerprint is the runner's, not the sandbox's.
+  const anyBwrap = (): NodeJS.ProcessEnv => (bubblewrapStarts() ? process.env : { PATH: `${harness.fakeBwrapBin}${delimiter}${process.env.PATH ?? ''}`, HOME: root });
+  const fakeBwrap = (): NodeJS.ProcessEnv => ({ PATH: `${harness.fakeBwrapBin}${delimiter}${process.env.PATH ?? ''}`, HOME: root });
+
+  sandboxTest("the worktree's .git is read-only in the sandbox: writing it fails, and the run is as before", async () => {
+    const own = await freshWorktree('git-read-only');
+    const record = await recordOf("if echo 'gitdir: /tmp/evil' > .git 2>err.txt; then echo WROTE; exit 1; fi; cat err.txt; touch dist.txt", { cwd: own });
+    assert.equal(record.outcome, 'passed', record.output);
+    assert.match(record.output, /Read-only file system/u);
+    assert.equal(await readFile(join(own, '.git'), 'utf8'), 'gitdir: /nowhere/.git/worktrees/x\n');
+    assert.ok((await stat(join(own, 'dist.txt'))).isFile());
+  });
+
+  sandboxTest('a run in a folder without .git still runs', async () => {
+    const record = await recordOf('echo ok');
+    assert.deepEqual([record.outcome, record.output], ['passed', 'ok\n']);
+  });
+
+  for (const [what, command, changed] of [
+    ['creates .claude/settings.json', 'mkdir -p .claude && echo \'{"hooks":{}}\' > .claude/settings.json', '.claude'],
+    ['creates .mcp.json', 'echo {} > .mcp.json', '.mcp.json'],
+    ['creates .codex/config.toml', 'mkdir .codex && echo x > .codex/config.toml', '.codex'],
+  ] as const) {
+    test(`a run that exits 0 but ${what} failed, with the reason`, async () => {
+      const own = await freshWorktree(`config-${changed}`);
+      const record = await recordOf(`${command}; echo done`, { cwd: own, env: anyBwrap() });
+      assert.deepEqual([record.outcome, record.exit_code, record.reason], ['failed', 0, configChangedReason(changed)], record.output);
+      assert.equal(record.reason, `the test run changed ${changed}: the factory does not let a test run change .git, .claude, .mcp.json or .codex`);
+      assert.equal(record.output, 'done\n');
+      assert.ok(testsFixContent(record).includes(`It exited with 0. It failed because the test run changed ${changed}: the factory`), testsFixContent(record));
+      assert.equal(checksLine(record, 2), `- \`${command}; echo done\`: failed (${record.reason}).`);
+      // Nothing is put back.
+      assert.equal(existsSync(join(own, changed)), true);
+    });
+  }
+
+  test('a run where a watched path (.git, .claude, .mcp.json, .codex) is a link does not start and failed, naming it', async () => {
+    for (const name of ['.git', '.claude', '.mcp.json', '.codex']) {
+      const own = await freshWorktree(`linked${name}`);
+      await mkdir(join(own, 'innocent'));
+      await rm(join(own, '.git'));
+      await writeFile(join(own, 'git-file'), 'gitdir: /nowhere\n');
+      await symlink(name === '.git' ? 'git-file' : 'innocent', join(own, name));
+      const record = await recordOf('touch ran.txt', { cwd: own, env: anyBwrap() });
+      assert.deepEqual([record.outcome, record.exit_code, record.timed_out, record.reason], ['failed', null, false, `the test run did not start: ${name} is a link`]);
+      assert.equal(existsSync(join(own, 'ran.txt')), false);
+      assert.equal(checksLine(record, 1), `- \`touch ran.txt\`: failed (the test run did not start: ${name} is a link).`);
+    }
+  });
+
+  test('watchedPaths: the four paths, absolute; nothing is made for a missing one', async () => {
+    const own = join(root, 'watched');
+    await mkdir(own);
+    assert.deepEqual(await watchedPaths(own), ['.git', '.claude', '.mcp.json', '.codex'].map((name) => join(own, name)));
+    assert.deepEqual(await readdir(own), []);
+    // A link that leads nowhere (or a loop) cannot be denied: refused, for each watched path, .git too.
+    for (const name of ['.git', '.claude', '.mcp.json', '.codex']) {
+      const dangling = join(root, `watched-dangling${name}`);
+      await mkdir(dangling);
+      await symlink(join(dangling, 'nowhere'), join(dangling, name));
+      await assert.rejects(watchedPaths(dangling), (error: { code?: string; message?: string }) => error.code === WATCHED_PATH_UNSAFE && error.message!.includes(join(dangling, name)));
+    }
+  });
+
+  test('a run that changes .git (no sandbox holds it here: the fake bwrap) failed, whatever its exit', async () => {
+    const own = await freshWorktree('git-changed');
+    const record = await recordOf("echo 'gitdir: /tmp/evil' > .git; exit 3", { cwd: own, env: fakeBwrap() });
+    assert.deepEqual([record.outcome, record.exit_code, record.reason], ['failed', 3, configChangedReason('.git')]);
+    // Nothing is put back.
+    assert.equal(await readFile(join(own, '.git'), 'utf8'), 'gitdir: /tmp/evil\n');
+  });
+
+  test('a run that changes nothing of the agent configuration is as before, writing dist/, caches and coverage', async () => {
+    const own = await freshWorktree('unchanged');
+    await mkdir(join(own, '.claude'));
+    await writeFile(join(own, '.claude', 'settings.json'), '{}\n');
+    const record = await recordOf('mkdir -p dist coverage node_modules/.cache && touch dist/a.js coverage/lcov.info node_modules/.cache/x && cat .claude/settings.json', { cwd: own, env: anyBwrap() });
+    assert.deepEqual([record.outcome, record.exit_code, record.reason, record.output], ['passed', 0, undefined, '{}\n']);
+  });
+
+  test('the fingerprint of the agent configuration: absence counts, a file by size, mtime and content, a link followed only into the worktree, the first change by path', async () => {
+    const own = await freshWorktree('fingerprint');
+    const empty = await configFingerprint(own);
+    assert.deepEqual([...empty.keys()], ['.git', '.claude', '.mcp.json', '.codex']);
+    assert.deepEqual([empty.get('.claude'), empty.get('.mcp.json'), empty.get('.codex')], ['absent', 'absent', 'absent']);
+    assert.match(empty.get('.git')!, /^file 34 \S+ [0-9a-f]{64}$/u);
+    assert.equal(firstChange(empty, await configFingerprint(own)), undefined);
+
+    await mkdir(join(own, '.claude', 'skills', 'x'), { recursive: true });
+    await writeFile(join(own, '.claude', 'skills', 'x', 'SKILL.md'), 'one\n');
+    const made = await configFingerprint(own);
+    assert.equal(firstChange(empty, made), '.claude');
+    assert.deepEqual([...made.keys()].filter((key) => key.startsWith('.claude')), ['.claude', '.claude/skills', '.claude/skills/x', '.claude/skills/x/SKILL.md']);
+
+    // The same size and mtime, another content.
+    const skill = join(own, '.claude', 'skills', 'x', 'SKILL.md');
+    const { atime, mtime } = await stat(skill);
+    await writeFile(skill, 'two\n');
+    await utimes(skill, atime, mtime);
+    assert.equal(firstChange(made, await configFingerprint(own)), '.claude/skills/x/SKILL.md');
+
+    // A link: its target, and what it leads to in the worktree; one out of it by its target only.
+    await mkdir(join(own, 'innocent'));
+    await writeFile(join(own, 'innocent', 'servers.json'), '{}\n');
+    await symlink('innocent/servers.json', join(own, '.mcp.json'));
+    await symlink(dirname(root), join(own, '.codex'));
+    const linked = await configFingerprint(own);
+    assert.match(linked.get('.mcp.json')!, /^link innocent\/servers\.json file 3 /u);
+    assert.equal(linked.get('.codex'), `link ${dirname(root)}`);
+    await writeFile(join(own, 'innocent', 'servers.json'), '{"x":1}\n');
+    assert.equal(firstChange(linked, await configFingerprint(own)), '.mcp.json');
+
+    // An unreadable folder is a change of its own, never an error.
+    if (process.getuid?.() !== 0) {
+      const before = await configFingerprint(own);
+      await chmod(join(own, '.claude', 'skills'), 0o000);
+      try {
+        const after = await configFingerprint(own);
+        assert.equal(after.get('.claude/skills'), 'folder unreadable EACCES');
+        assert.equal(firstChange(before, after), '.claude/skills');
+      } finally {
+        await chmod(join(own, '.claude', 'skills'), 0o755);
+      }
+    }
   });
 
   sandboxTest('a non-zero exit failed, with its exit code', async () => {
@@ -302,7 +439,7 @@ if (process.env[CHILD] !== undefined) {
     const args = bwrapArgs({ command: 'npm test', cwd: '/wt', hidden: [{ path: '/cfg', directory: true }, { path: '/state/sf.sock', directory: false }] });
     assert.deepEqual(args, [
       '--die-with-parent', '--unshare-pid', '--unshare-net', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc',
-      '--tmpfs', '/tmp', '--bind', '/wt', '/wt',
+      '--tmpfs', '/tmp', '--bind', '/wt', '/wt', '--ro-bind-try', '/wt/.git', '/wt/.git',
       '--tmpfs', '/cfg', '--remount-ro', '/cfg', '--ro-bind', '/dev/null', '/state/sf.sock', '--chdir', '/wt',
       '--', '/bin/sh', '-c', 'printf started >&3; exec 3>&-; exec /bin/sh -c "$1"', 'sh', 'npm test',
     ]);
@@ -323,6 +460,38 @@ if (process.env[CHILD] !== undefined) {
       { path: join(root, 'lone'), directory: false },
       { path: dir, directory: true },
     ]);
+  });
+
+  // A job's test step through sf serve (the fake Claude and the fake bwrap): the job directory of
+  // app/T-1 and its job.json.
+  const jobDirOf = (env: { state: string }): string => join(env.state, 'jobs', 'app', 'T-1');
+  const jobJsonOf = async (env: { state: string }): Promise<Record<string, any>> => JSON.parse(await readFile(join(jobDirOf(env), 'job.json'), 'utf8'));
+
+  test('a run that changes .claude and is then stopped with its runner stops the job: needs_human, "an aborted test run changed .claude", no new turn (SF-159)', async () => {
+    const sleep = uniqueSleep();
+    const env = await harness.newEnv('tests-aborted-change');
+    const repo = await harness.newRepo(env, 'tests-aborted-change-repo', true);
+    await saveRegistry({ workspaces: { app: { read_checkout: repo, test_command: `mkdir -p .claude && echo '{"hooks":{}}' > .claude/settings.json && ${sleep.join(' ')}` } } }, env.config);
+    await harness.putTask(env, repo, 'T-1', 'Change README');
+    await harness.script(env, [{ write: { 'README.md': 'hello world\n' }, text: 'iteration 1' }]);
+    const served = await harness.serve(env);
+    try {
+      await harness.call(served, 'start', { workspace: 'app', ticket: 'T-1' });
+      await harness.waitFor(served, 'T-1', 'awaiting_review', 1);
+      await harness.call(served, 'mark_clean', { workspace: 'app', ticket: 'T-1' });
+      await until(async () => (await processesOf(sleep)).length > 0, 'the run to start', 20_000);
+      // The runner's stop, as at a SIGTERM that is not an abort: the run is cancelled with the job still in its test step.
+      for (const pid of await harness.runnerPids(env.state)) {
+        process.kill(pid, 'SIGTERM');
+      }
+      await until(async () => (await jobJsonOf(env)).state === 'needs_human', 'the job to stop', 20_000);
+      assert.deepEqual((await jobJsonOf(env)).error, { code: 'tests_failed', message: 'an aborted test run changed .claude' });
+      await until(async () => (await processesOf(sleep)).length === 0, 'the run to end', 20_000);
+      assert.equal((await harness.fakeLog(env)).length, 1);
+      await assert.rejects(readFile(join(jobDirOf(env), 'tests-1.json')), { code: 'ENOENT' });
+    } finally {
+      await harness.stop(served);
+    }
   });
 
   test('the text of a run: durations, the last lines, the Fix section and the ### Checks lines', () => {

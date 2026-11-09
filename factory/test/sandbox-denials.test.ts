@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { chmod, lstat, mkdir, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { sandboxAllowRead, sandboxSettings } from '../src/config.js';
 import { gateEnvironment } from '../src/gate.js';
@@ -803,6 +803,52 @@ test('the file-tool guard (SF-123): writes only in the own worktree outside its 
   ] as const) {
     assert.equal(await ask(tool, input), undefined, `${tool} ${JSON.stringify(input)}`);
   }
+});
+
+test('the worktree\'s .git and agent configuration (SF-159): denied to Bash for writing when present, never for reading, no tool rule; the file-tool guard refuses every write tool there, by real path', async () => {
+  const l = await layout('denials-agent-config');
+  await writeFile(join(l.own, '.git'), 'gitdir: /elsewhere\n');
+  await mkdir(join(l.own, '.claude'));
+  await writeFile(join(l.own, '.mcp.json'), '{}\n');
+  const denials = await pathDenials(scope(l, 'job'));
+  for (const name of ['.git', '.claude', '.mcp.json']) {
+    assert.ok(denials.sandbox.denyWrite.includes(join(l.own, name)), `${name} writable by Bash`);
+    assert.ok(!denials.sandbox.denyRead.includes(join(l.own, name)), `${name} unreadable`);
+    assert.ok(!denials.tools.some((rule) => rule.includes(absoluteRule(join(l.own, name)))), name);
+  }
+  // A missing one is left out, so the sandbox leaves no placeholder for it, and nothing is made for
+  // it; the guard still holds the tools.
+  assert.ok(!denials.sandbox.denyWrite.includes(join(l.own, '.codex')));
+  assert.equal(existsSync(join(l.own, '.codex')), false);
+  // A Task check has no worktree of its own (every ticket's is denied whole): no entry of its own for them.
+  const check = await pathDenials(scope(l, 'task_check'));
+  assert.ok(!['.git', '.claude', '.mcp.json'].some((name) => check.sandbox.denyWrite.includes(join(l.own, name))));
+
+  const ask = (tool: string, input: unknown): Promise<string | undefined> => guard(denials, l.own, tool, input);
+  await mkdir(join(l.own, 'src'));
+  await symlink(join(l.own, '.claude'), join(l.own, 'src', 'into-claude'));
+  for (const path of ['.claude/settings.json', '.claude/settings.local.json', '.claude/skills/x/SKILL.md', '.mcp.json', '.codex/config.toml', '.codex', 'src/into-claude/settings.json']) {
+    for (const [tool, input] of [['Write', { file_path: path, content: '{}' }], ['Edit', { file_path: join(l.own, path), old_string: 'a', new_string: 'b' }], ['MultiEdit', { file_path: path, edits: [] }], ['NotebookEdit', { notebook_path: path, new_source: '' }]] as const) {
+      const reason = await ask(tool, input);
+      assert.equal(reason, `${FILE_GUARD} refuses this ${tool}: ${resolve(l.own, path)} is agent configuration; the factory does not let a job change it.`, `${tool} ${path}`);
+    }
+  }
+  for (const path of ['src/x.ts', 'docs/.claude.md', '.claude.md', '.mcp.json.example', '.codex-notes/a.md']) {
+    assert.equal(await ask('Write', { file_path: path, content: 'x' }), undefined, path);
+  }
+  // .claude a link to a folder of the worktree: a write there is a write of .claude.
+  await rm(join(l.own, '.claude'), { recursive: true });
+  await mkdir(join(l.own, 'innocent'));
+  await symlink('innocent', join(l.own, '.claude'));
+  assert.match((await ask('Write', { file_path: 'innocent/settings.json', content: '{}' }))!, /is agent configuration/u);
+  // .claude a link to a folder: denied by both spellings. A link that leads nowhere could be removed
+  // and replaced by Bash, so no session starts (SF-159 Fix 2).
+  const linked = await pathDenials(scope(l, 'job'));
+  assert.ok(linked.sandbox.denyWrite.includes(join(l.own, '.claude')) && linked.sandbox.denyWrite.includes(join(l.own, 'innocent')));
+  await symlink(join(l.own, 'nowhere'), join(l.own, '.codex'));
+  await assert.rejects(pathDenials(scope(l, 'job')), (error: { code?: string }) => error.code === 'watched_path_unsafe');
+  // The worktree's .git keeps its own refusal.
+  assert.match((await ask('Write', { file_path: '.git', content: 'gitdir: /evil' }))!, /outside the job's worktree .*, or in its \.git\./u);
 });
 
 test('claudeProjectName (SF-123): Claude Code\'s folder name of a project, every character but letters and digits as "-", a long one cut with its hash', () => {

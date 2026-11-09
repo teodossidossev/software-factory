@@ -108,6 +108,11 @@ export interface SessionOptions {
 // take that long.
 const REAP_AFTER_QUERY_MS = 3_000;
 
+// The settings every Claude session of a job passes on top of its own: no hook from a settings
+// file (a .claude/settings.json a job could have written) runs. The hooks passed to query(), such
+// as the file-tool guard, still do.
+export const JOB_SESSION_SETTINGS = { disableAllHooks: true } as const;
+
 // The file tools the smoke's ticket needs, allowed in its dontAsk session.
 export const SMOKE_TOOLS = ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'TodoWrite'] as const;
 
@@ -400,6 +405,7 @@ export class ImplementerSession {
         cwd: this.#options.cwd,
         permissionMode: mode,
         settingSources: ['user', 'project'],
+        settings: { ...JOB_SESSION_SETTINGS },
         disallowedTools: [...disallowedTools, ...(denials?.tools ?? [])],
         ...(allowed.length > 0 ? { allowedTools: allowed } : {}),
         maxTurns: this.#options.maxTurns,

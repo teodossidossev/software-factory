@@ -6,8 +6,12 @@ found the gaps are in [audits/](audits/README.md). Update this file whenever a c
 between "protected" and "open", and after every audit.
 
 Last checked: 2026-11-09, the [audit of 2026-11-09](audits/2026-11-09-audit.md) on `main` at
-c4f6d33. It found two critical ways out of the sandbox, listed under "Open" until their fix
-(SF-159) lands; the run queue is held until then.
+c4f6d33. It found two critical ways out of the sandbox, both closed by SF-159: a test run could
+rewrite the worktree's `.git` so that the factory's next Git call ran a command as you, and a job
+could write `.claude/settings.json` hooks (or `.mcp.json`, `.codex/`) that the next Claude session
+in the worktree ran outside any sandbox. Its other findings are listed under "Open".
+Before it: 2026-11-08, `sf smoke` PASS on `main` at aa1a9f1 (12 of 12 steps, every sandbox probe
+refused), and the factory's test command passed in a sandbox without network on `main` at c66ab78.
 
 ## Protected
 
@@ -15,14 +19,21 @@ c4f6d33. It found two critical ways out of the sandbox, listed under "Open" unti
   - It cannot read your home directory except the paths its tools need.
   - It cannot reach your keys, `auth.env`, SSH, the dashboard token, or other jobs.
   - It cannot reach the session bus, docker or the Tailscale daemon.
-  - It writes only in its own worktree.
+  - It writes only in its own worktree. Its file tools write nothing in the worktree's `.git` or
+    agent configuration (`.claude/`, `.mcp.json`, `.codex/`); its commands cannot write those that
+    exist when the session starts, and Claude Code's own sandbox keeps them from a missing
+    `.claude` configuration and `.mcp.json`.
+  - Its sessions run no hook from a settings file, so a `.claude/settings.json` a job wrote runs
+    nothing.
   - It has no WebFetch or WebSearch.
   - It cannot run a command outside the sandbox.
 - **Sandboxes do not outlive their session.** Sandbox processes left behind by a finished session
   are ended.
 - **Tests run before every merge request.** In the factory's own workspace, typecheck and the unit
   tests run in a sandbox without network before the MR text is written; a failure sends the job
-  back to fix it.
+  back to fix it. The test run cannot change the worktree's `.git`, and a run that changes
+  `.claude`, `.mcp.json` or `.codex` fails; so does one where any of them is a link, before it
+  starts.
 - **The Codex gate runs in a read-denying wrapper.** It sees no secrets and no other jobs. Secrets
   in its findings are masked.
 - **Code from a repository never runs as you through Git.** The factory's Git commands run no hooks
@@ -46,10 +57,6 @@ c4f6d33. It found two critical ways out of the sandbox, listed under "Open" unti
 ## Open
 
 - **Found by the audit of 2026-11-09, being fixed:**
-  - The test run can rewrite its worktree's `.git`, so the factory's next Git call runs a command
-    the job planted, as you (proven in a lab). Fix: SF-159.
-  - The test run, or the agent's Write and Edit tools, can create Claude Code settings with hooks
-    in the worktree, which the next session runs outside the sandbox. Fix: SF-159.
   - The agent's Bash can connect to Unix sockets under `/tmp` that are not denied, among them the
     browser extension's bridge.
   - A link swapped between the file guard's check and the write can send a write out of the

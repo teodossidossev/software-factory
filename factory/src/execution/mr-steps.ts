@@ -569,14 +569,10 @@ export class MrPart {
     session.send(prompt, DENIED_TOOLS);
   }
 
-  // Whether the test step of the job's iteration is done: its record passed, or the user
-  // accepted it without passing tests.
-  // A record that cannot be read counts as none: the tests run again.
+  // Whether the test step of the job's iteration is done: its record passed, or the user accepted
+  // it without passing tests. A record that cannot be read counts as none: the tests run again.
   async #testsSettled(job: Job): Promise<boolean> {
-    const record = await this.#store.jobs.readTests(job.workspace, job.ticket, job.iteration).catch((error: unknown) => {
-      console.error(error);
-      return undefined;
-    });
+    const record = await this.#store.jobs.readTests(job.workspace, job.ticket, job.iteration).catch((error: unknown) => (console.error(error), undefined));
     return record?.outcome === 'passed' || record?.outcome === 'accepted_failing';
   }
 
@@ -596,16 +592,18 @@ export class MrPart {
   }
 
   // The run itself: the tests_started event, the sandbox built from the job's path denials (session
-  // job, as the Implementer's), the command, then its end under the lock.
-  // Never leaves the run registered: whatever fails, its end is applied under the lock.
+  // job, as the Implementer's), the command, then its end under the lock, whatever fails.
   async #runTests(job: Job, workspace: Workspace, command: string, running: RunningReview, context: TestsContext): Promise<void> {
     const run = now();
     let result: TestsResult;
+    // An abort (stop() too) queues the run's end on the lock at once, so stop() waits for it.
+    let ended: (value: TestsResult) => void = () => undefined;
+    const end = new Promise<TestsResult>((resolve) => (ended = resolve));
+    let queued: Promise<void> | undefined;
+    running.controller.signal.addEventListener('abort', () => (queued = this.#locks.locked(async () => this.#tested(job, running, run, await end, context))), { once: true });
     try {
       await this.#store.jobs.appendEvent(job.workspace, job.ticket, { ts: run, iteration: job.iteration, type: 'tests_started', run, command });
-      const denials = await pathDenials({
-        session: 'job', workspace: job.workspace, checkout: workspace.workCheckout, worktree: job.worktree!, stateDir: this.#settings.config.stateDir, worktreeRoot: this.#settings.config.worktreeRoot,
-      });
+      const denials = await pathDenials({ session: 'job', workspace: job.workspace, checkout: workspace.workCheckout, worktree: job.worktree!, stateDir: this.#settings.config.stateDir, worktreeRoot: this.#settings.config.worktreeRoot });
       result = await runTestCommand({
         command, cwd: job.worktree!, hidden: denials.sandbox.denyRead, timeoutMs: this.#settings.config.testTimeoutMs ?? DEFAULT_TEST_TIMEOUT_MS, signal: running.controller.signal,
       });
@@ -615,24 +613,27 @@ export class MrPart {
       const reason = `the sandbox could not be built: ${error instanceof FactoryError ? error.message : (error as Error).message}`.slice(0, 300);
       result = { aborted: false, record: { command, started_at: run, ended_at: at, duration_ms: Date.parse(at) - Date.parse(run), exit_code: null, timed_out: false, outcome: 'unavailable', reason, output: '', output_truncated: false } };
     }
-    await this.#locks.locked(() => this.#tested(job, running, run, result, context));
+    ended(result);
+    await (queued ?? this.#locks.locked(() => this.#tested(job, running, run, result, context)));
   }
 
-  // The end of a test run. A cancelled one (abort, stop()) leaves no trace, and so does one whose job
-  // moved on. Otherwise the record and the tests event are written; a pass goes on to the MR text
-  // turn; a run that could not happen stops the job (tests_unavailable); a failure is a Tests Fix,
-  // or, once more records failed than TEST_FIX_ROUNDS, a stop (tests_failed). A step that did not
-  // pass puts mr_attempts back: no MR text turn ran.
+  // The end of a test run. A cancelled one (abort, stop(); its result is aborted only then) leaves no
+  // trace, but one that changed a watched path stops its job still in this step (tests_failed: no
+  // turn starts on that worktree). Otherwise, for the job's step, the record and the tests event are
+  // written; a pass goes on to the MR text turn; one that could not run stops the job
+  // (tests_unavailable); a failure is a Tests Fix, or past TEST_FIX_ROUNDS a stop (tests_failed).
   async #tested(job: Job, running: RunningReview, run: string, result: TestsResult, context: TestsContext): Promise<void> {
     const { workspace: name, ticket, iteration } = job;
     const key = `${name}/${ticket}`;
-    if (this.#sessions.reviews.get(key) !== running || running.controller.signal.aborted) {
+    const latest = result.aborted && result.changed !== undefined ? await this.#store.jobs.read(name, ticket) : undefined;
+    if (latest?.created_at === job.created_at && latest.state === 'preparing_mr' && result.aborted) {
+      // from: preparing_mr (the test step)
+      await this.#store.transition({ ...latest, mr_attempts: context.attempts }, 'needs_human', 'tests', { code: TESTS_FAILED, message: `an aborted test run changed ${result.changed}` });
+    }
+    if (this.#sessions.reviews.get(key) !== running || running.controller.signal.aborted || result.aborted) {
       return;
     }
     this.#sessions.reviews.delete(key);
-    if (result.aborted) {
-      return;
-    }
     const current = await this.#store.jobs.read(name, ticket);
     if (current === undefined || current.created_at !== job.created_at || current.state !== 'preparing_mr' || current.iteration !== iteration) {
       return;

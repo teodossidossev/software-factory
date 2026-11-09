@@ -12,7 +12,7 @@ import { type FixItem, fixItemLine, LEDGER_REF, type LedgerEntry, SCOPE_PROBLEM,
 import { handbookSection } from './prompts.js';
 import { ENV_FILE_RULES } from './rules.js';
 import { type SandboxDenials, withSandboxDenials } from './sandbox-denials.js';
-import { sessionEnvironment, withSandboxEnvDenials } from './session.js';
+import { JOB_SESSION_SETTINGS, sessionEnvironment, withSandboxEnvDenials } from './session.js';
 import { TASK_DIR } from './task-file.js';
 
 export const REVIEWER = 'claude';
@@ -266,7 +266,7 @@ export function outsideInstructionFiles(cwd: string): string[] {
 // repository's own settings and instructions only. settingSources ['project'] leaves out the user's
 // settings and ~/.claude/CLAUDE.md; CLAUDE_CODE_DISABLE_AUTO_MEMORY leaves out the user's
 // auto-memory of the project, which the CLI loads whatever the setting sources; claudeMdExcludes
-// leaves out the instruction files above the worktree.
+// leaves out the instruction files above the worktree; JOB_SESSION_SETTINGS runs no settings hook.
 export function reviewSessionOptions(options: Omit<ReviewOptions, 'onMessage' | 'signal'>, abortController: AbortController): Options {
   return readOnlySessionOptions(options, abortController, REVIEW_SCHEMA);
 }
@@ -290,7 +290,7 @@ export function readOnlySessionOptions(
     cwd: options.cwd,
     permissionMode: 'auto',
     settingSources: options.settingSources ?? ['project'],
-    settings: { claudeMdExcludes: outsideInstructionFiles(options.cwd) },
+    settings: { claudeMdExcludes: outsideInstructionFiles(options.cwd), ...JOB_SESSION_SETTINGS },
     tools: options.tools ?? REVIEW_TOOLS,
     disallowedTools: [...REVIEW_DENIED_TOOLS, ...deny, ...(options.deny ?? [])],
     outputFormat: { type: 'json_schema', schema },

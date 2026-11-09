@@ -2,17 +2,24 @@
 // first step of MR preparation, on the reviewed worktree. The command is Implementer-written code
 // to the factory, so it never runs outside a bubblewrap (bwrap) sandbox the factory builds: the
 // whole file system read-only, the paths of the job's path denials (src/sandbox-denials.ts)
-// hidden, only the worktree and a private /tmp writable, no network but loopback, an environment of
-// PATH, LANG, CI, HOME, TMPDIR and npm_config_cache only. The private /tmp of each run is a tmpfs
-// of the sandbox's own mount namespace, never a directory of the host: it goes with the sandbox, so
-// a runner killed mid-run leaves nothing to clean. The sandbox dies with its parent
+// hidden, only the worktree (but its .git) and a private /tmp writable, no network but loopback, an
+// environment of PATH, LANG, CI, HOME, TMPDIR and npm_config_cache only. A run that changes the
+// worktree's .git or agent configuration (.claude, .mcp.json, .codex) failed, whatever its exit:
+// the runner compares a fingerprint of them taken before and after it; a run where one of them is
+// a link does not start, and failed. The private /tmp of each run is a tmpfs of the sandbox's own
+// mount namespace, never a directory of the host: it goes with the sandbox, so a runner killed
+// mid-run leaves nothing to clean. The sandbox dies with its parent
 // (--die-with-parent, --unshare-pid), and a timeout or an abort kills its process group. Also the
 // run's record (tests-<N>.json), the Fix section of a failure and the MR text's ### Checks lines.
-// This module knows processes and text; it knows nothing about jobs.
+// This module knows processes, text and the files of the worktree; it knows nothing about jobs.
 import { spawn } from 'node:child_process';
-import { realpath, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { lstat, readdir, readlink, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { relative, isAbsolute, sep } from 'node:path';
+import { join, relative, isAbsolute, sep } from 'node:path';
+import { pipeline } from 'node:stream/promises';
+import { FactoryError } from './errors.js';
 
 // The Tests Fix sections a job gets at most: once more records of the job say failed, the job stops
 // (tests_failed).
@@ -69,8 +76,9 @@ export interface TestsRecord {
   accepted_from?: 'failed' | 'unavailable';
 }
 
-// What a run returns: its record, or aborted (the controller's abort; nothing of it applies).
-export type TestsResult = { aborted: false; record: TestsRecord } | { aborted: true };
+// What a run returns: its record, or aborted (the controller's abort; nothing of it applies but
+// changed, the first watched path it changed, if any).
+export type TestsResult = { aborted: false; record: TestsRecord } | { aborted: true; changed?: string };
 
 // A hidden path as the sandbox mounts it: an empty read-only directory, or /dev/null for a file.
 export interface HiddenMount {
@@ -103,7 +111,7 @@ export interface TestRun {
 const START_SCRIPT = 'printf started >&3; exec 3>&-; exec /bin/sh -c "$1"';
 
 // Whether path is inside dir or dir itself (both absolute, resolved).
-function within(path: string, dir: string): boolean {
+export function within(path: string, dir: string): boolean {
   const inside = relative(dir, path);
   return inside === '' || (inside !== '..' && !inside.startsWith(`..${sep}`) && !isAbsolute(inside));
 }
@@ -138,17 +146,112 @@ const RUNTIME_DIRS = ['/run'];
 
 // The bwrap arguments of a run: the root read-only, a fresh /dev and /proc, a fresh tmpfs at /tmp
 // (the run's private /tmp, in the sandbox's memory: it ends with the sandbox, however the runner
-// ends) and the worktree writable, then the runtime directories and the hidden paths over them all
-// (a denied path inside the worktree stays hidden), then the start script with the command.
+// ends) and the worktree writable but its .git (a file in a worktree, a folder in a checkout; none
+// in a plain folder), then the runtime directories and the hidden paths over them all (a denied
+// path inside the worktree stays hidden), then the start script with the command.
 export function bwrapArgs(options: { command: string; cwd: string; hidden: readonly HiddenMount[] }): string[] {
   const args = ['--die-with-parent', '--unshare-pid', '--unshare-net', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc'];
-  args.push('--tmpfs', '/tmp', '--bind', options.cwd, options.cwd);
+  args.push('--tmpfs', '/tmp', '--bind', options.cwd, options.cwd, '--ro-bind-try', join(options.cwd, '.git'), join(options.cwd, '.git'));
   for (const entry of options.hidden) {
     args.push(...(entry.directory ? ['--tmpfs', entry.path, '--remount-ro', entry.path] : ['--ro-bind', '/dev/null', entry.path]));
   }
   args.push('--chdir', options.cwd);
   return [...args, '--', '/bin/sh', '-c', START_SCRIPT, 'sh', options.command];
 }
+
+// The worktree's agent configuration, which the next Claude Code or Codex session in the worktree
+// loads, outside any sandbox for its hooks and MCP servers.
+export const AGENT_CONFIG = ['.claude', '.mcp.json', '.codex'] as const;
+// What a test run may not change: the worktree's link to Git (its config runs commands in the
+// factory's own Git calls), then the agent configuration.
+export const WATCHED_PATHS = ['.git', ...AGENT_CONFIG] as const;
+
+// The watched paths of a worktree, absolute. A link that leads nowhere among them could not be
+// denied for writing and could be replaced: it throws WATCHED_PATH_UNSAFE.
+export async function watchedPaths(worktree: string): Promise<string[]> {
+  const paths = WATCHED_PATHS.map((name) => join(worktree, name));
+  for (const path of paths) {
+    const info = await lstat(path).catch(() => undefined);
+    if (info?.isSymbolicLink() === true && (await stat(path).catch(() => undefined)) === undefined) {
+      throw new FactoryError(WATCHED_PATH_UNSAFE, `${path} is a link that leads nowhere, so no sandbox can keep it from being replaced; remove it or make it lead to a real file or folder.`);
+    }
+  }
+  return paths;
+}
+export const WATCHED_PATH_UNSAFE = 'watched_path_unsafe';
+
+// A fingerprint: each path (relative to the worktree) with its kind; a file's size, mtime, SHA-256.
+export type Fingerprint = Map<string, string>;
+
+// The fingerprint of WATCHED_PATHS under cwd (a real path): each path, each entry of a folder below
+// it, every one, a missing path as absent, an unreadable one by its error. A link is its target,
+// followed only into cwd (outside it the sandbox writes nothing that stays). Never throws.
+export async function configFingerprint(cwd: string): Promise<Fingerprint> {
+  const found: Fingerprint = new Map();
+  const seen = new Set<string>();
+  for (const name of WATCHED_PATHS) {
+    await addEntries(cwd, name, found, seen);
+  }
+  return found;
+}
+
+const errorCode = (error: unknown): string => (error as NodeJS.ErrnoException).code ?? 'error';
+
+async function sha256(path: string): Promise<string> {
+  const hash = createHash('sha256');
+  await pipeline(createReadStream(path), hash);
+  return hash.digest('hex');
+}
+
+// Adds the entry of name (relative to cwd) and, for a folder, of everything below it; seen: the
+// real folders already walked (a loop of links ends there).
+async function addEntries(cwd: string, name: string, found: Fingerprint, seen: Set<string>): Promise<void> {
+  const path = join(cwd, name);
+  let info = await lstat(path).catch((error: unknown) => errorCode(error));
+  if (typeof info === 'string') {
+    found.set(name, info === 'ENOENT' ? 'absent' : `unreadable ${info}`);
+    return;
+  }
+  let link = '';
+  if (info.isSymbolicLink()) {
+    link = `link ${await readlink(path).catch(errorCode)} `;
+    const real = await realpath(path).catch(() => undefined);
+    const target = real === undefined || !within(real, cwd) ? undefined : await stat(real).catch(() => undefined);
+    if (target === undefined) {
+      found.set(name, link.trimEnd());
+      return;
+    }
+    info = target;
+  }
+  if (info.isFile()) {
+    found.set(name, `${link}file ${info.size} ${info.mtimeMs} ${await sha256(path).catch(errorCode)}`);
+    return;
+  }
+  if (!info.isDirectory()) {
+    found.set(name, `${link}other ${info.mode}`);
+    return;
+  }
+  const real = await realpath(path).catch(() => path);
+  if (seen.has(real)) {
+    found.set(name, `${link}folder seen`);
+    return;
+  }
+  seen.add(real);
+  const names = await readdir(path).catch(errorCode);
+  found.set(name, `${link}folder${typeof names === 'string' ? ` unreadable ${names}` : ''}`);
+  for (const entry of typeof names === 'string' ? [] : names.sort()) {
+    await addEntries(cwd, `${name}/${entry}`, found, seen);
+  }
+}
+
+// The first path (in order) whose entry differs between two fingerprints, or undefined.
+export function firstChange(before: Fingerprint, after: Fingerprint): string | undefined {
+  return [...new Set([...before.keys(), ...after.keys()])].sort().find((path) => before.get(path) !== after.get(path));
+}
+
+// Why a run that changed path failed.
+export const configChangedReason = (path: string): string =>
+  `the test run changed ${path}: the factory does not let a test run change .git, .claude, .mcp.json or .codex`;
 
 // The only environment of a run: PATH and LANG as the factory has them, CI, the real HOME (read-only
 // in the sandbox) and the private /tmp for TMPDIR and npm's cache. No SF_* variable, no value of
@@ -233,7 +336,19 @@ export async function runTestCommand(run: TestRun): Promise<TestsResult> {
   } catch (error) {
     return finish({ exit_code: null, timed_out: false, outcome: 'unavailable', reason: `the sandbox could not be prepared: ${(error as Error).message}`.slice(0, 300) });
   }
-  return sandboxed(run, cwd, hidden, { clock, deadline: startedAt.getTime() + run.timeoutMs }, finish);
+  // A watched path that is a link: the fingerprint could not hold what it leads to.
+  for (const name of WATCHED_PATHS) {
+    if ((await lstat(join(cwd, name)).catch(() => undefined))?.isSymbolicLink() === true) {
+      return finish({ exit_code: null, timed_out: false, outcome: 'failed', reason: `the test run did not start: ${name} is a link` });
+    }
+  }
+  const before = await configFingerprint(cwd);
+  const result = await sandboxed(run, cwd, hidden, { clock, deadline: startedAt.getTime() + run.timeoutMs }, finish);
+  const changed = firstChange(before, await configFingerprint(cwd));
+  if (result.aborted) {
+    return changed === undefined ? result : { aborted: true, changed };
+  }
+  return changed === undefined ? result : { aborted: false, record: { ...result.record, outcome: 'failed', reason: configChangedReason(changed) } };
 }
 
 // The run in bwrap itself, with the worktree and the hidden paths prepared, until the deadline (ms of
@@ -344,9 +459,13 @@ export function durationText(ms: number): string {
   return minutes % 60 === 0 ? `${hours} h` : `${hours} h ${minutes % 60} min`;
 }
 
-// How a failed run ended: "exit 1", "timed out after 30 min", or "killed after 7 h" (a signal from
-// outside the factory, or the kernel, ended the sandbox: no exit code, no timeout).
-export function failureText(record: Pick<TestsRecord, 'exit_code' | 'timed_out' | 'duration_ms'>): string {
+// How a failed run ended: "exit 1", "timed out after 30 min", "killed after 7 h" (a signal from
+// outside the factory, or the kernel, ended the sandbox: no exit code, no timeout), or the reason
+// it failed whatever its exit (it changed the agent configuration).
+export function failureText(record: Pick<TestsRecord, 'exit_code' | 'timed_out' | 'duration_ms' | 'reason'>): string {
+  if (record.reason !== undefined) {
+    return record.reason;
+  }
   if (record.timed_out) {
     return `timed out after ${durationText(record.duration_ms)}`;
   }
@@ -399,8 +518,9 @@ export function testsFixContent(record: TestsRecord): string {
     : record.exit_code === null
       ? `It was killed by a signal after ${durationText(record.duration_ms)}, before it exited.`
       : `It exited with ${record.exit_code}.`;
+  const why = record.reason === undefined ? '' : ` It failed because ${record.reason}.`;
   const lines = [
-    `The factory ran the workspace's test command on your worktree, in a sandbox without network, and it failed: ${inlineCommand(record.command)}. ${ending} Make the tests pass; do not weaken or skip a test to get there.`,
+    `The factory ran the workspace's test command on your worktree, in a sandbox without network, and it failed: ${inlineCommand(record.command)}. ${ending}${why} Make the tests pass; do not weaken or skip a test to get there.`,
     '',
   ];
   if (tail === '') {

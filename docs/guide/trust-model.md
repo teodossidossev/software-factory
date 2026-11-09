@@ -23,6 +23,14 @@ A job's sessions (the Implementer, the Claude review, the simplification pass) a
 resolved (below). The web tools `WebFetch` and `WebSearch`, which the sandbox does not hold, are
 denied to every job's turns.
 
+A job's sessions also run no hook from a settings file: each passes `disableAllHooks: true` in its
+settings (and so does every other read-only session: the Task check, a stop's explanation, the
+morning digest). Hooks run outside the sandbox, and a
+`.claude/settings.json` in the worktree (one a job wrote included) would otherwise give them to the
+next session there. `disableAllHooks` leaves the hooks the factory passes to the session itself,
+the file-tool guard among them, running; `sf smoke`'s Sandbox step shows that on the real Claude
+Code (the guard refuses its `Write` outside the worktree).
+
 The denials are built for each session when it starts, from the factory's config, the workspace
 registry and the session's own working directory.
 
@@ -127,6 +135,16 @@ permission mode (`auto` and the smoke's `dontAsk` included) and checks each call
 
 - `Write`, `Edit`, `MultiEdit` and `NotebookEdit` pass only inside the job's own worktree, outside
   its `.git`. A link in the worktree that points out of it does not help.
+- They are refused, too, under the worktree's `.claude/`, of its `.mcp.json` and under its
+  `.codex/` (by their path and by the real path a link there leads to): that is agent
+  configuration, which the next Claude Code or Codex session in the worktree loads, outside any
+  sandbox for its hooks and MCP servers. The reason reads "… is agent configuration; the factory
+  does not let a job change it". Bash cannot write them either: the worktree's `.git`, `.claude`,
+  `.mcp.json` and `.codex`, when they exist as the session starts, are in the sandbox's
+  `denyWrite`; Claude Code's own sandbox keeps Bash from writing a missing `.claude`
+  configuration and `.mcp.json`, and the fingerprint around the test run (below) catches the
+  rest. One that is a link leading nowhere could be replaced, so no session starts then
+  (`watched_path_unsafe`).
 - `Read`, `Grep`, `Glob` and `LS` are refused in the home directory outside the kept paths and
   the session's own Claude Code project folder (`~/.claude/projects/<the worktree's path, every
   character but letters and digits as ->`), where Claude Code keeps the session's transcript and the
@@ -154,7 +172,7 @@ simplification pass and the Task check alike.
 
 | Session | Reads | Writes | Runs commands |
 | --- | --- | --- | --- |
-| Implementer (and its MR turns) | its worktree, its workspace's checkout (with its `.git`), the kept paths of the home directory, the rest of the machine outside the home directory but the paths above | its worktree (outside its `.git`, the guard), the sandbox's temporary directory | Bash in the sandbox |
+| Implementer (and its MR turns) | its worktree, its workspace's checkout (with its `.git`), the kept paths of the home directory, the rest of the machine outside the home directory but the paths above | its worktree (outside its `.git` and its agent configuration: the guard and `denyWrite`), the sandbox's temporary directory | Bash in the sandbox |
 | Claude review, simplification pass | as the Implementer, with the guard | nothing (read-only tools) | none |
 | Task check | its own checkout of the Task's base only (a path guard on every tool call) | nothing | none |
 | Codex gate | as a job's sandboxed commands (the wrapper above): its worktree, the images, the Codex package and node, `CODEX_HOME`, the rest of the machine outside the home directory but the paths above | `CODEX_HOME`, the iteration's directory | read-only (Codex's own sandbox) |
@@ -190,6 +208,16 @@ before the MR text, on the reviewed worktree:
 - only the job's worktree and a private `/tmp` writable; that `/tmp` is the sandbox's own in-memory
   file system, so it is gone with the sandbox, also when the runner was killed mid-run (it uses
   memory, not disk: a suite that writes much to `/tmp` needs the memory for it);
+- the worktree's `.git` read-only (`--ro-bind-try`): a run that rewrote it could point the
+  worktree at a Git directory of its own, whose config (a `filter.<x>.clean` command) the
+  factory's next Git call would run as you;
+- the agent configuration watched: the factory takes a fingerprint (path, size, mtime and SHA-256
+  of each file, absence included) of the worktree's `.git`, `.claude/`, `.mcp.json` and `.codex/`
+  before and after the run, and a run that changed any of them fails, whatever its exit code,
+  with "the test run changed <path>: the factory does not let a test run change .git, .claude,
+  .mcp.json or .codex"; the Tests Fix turn gets it as any failure. Nothing is put back. When one
+  of them is a link, the run does not start and fails with "the test run did not start: <path> is
+  a link";
 - no network (a network namespace of its own); loopback works, for tests that start a server;
 - an environment of `PATH`, `LANG`, `CI=1`, your `HOME` (read-only), `TMPDIR=/tmp` and
   `npm_config_cache=/tmp/npm-cache` only: no `SF_*` setting and no value of the env file;

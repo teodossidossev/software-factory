@@ -104,7 +104,10 @@ when a file could not start, was killed by a signal, ran past its limit or left 
 its output, or when no file matches; else the first failing file's exit code; a last line names the files that failed.
 `SF_TEST_CONCURRENCY=<positive integer>` sets N, `SF_TEST_FILE_TIMEOUT_MS=<positive integer>` the
 limit of a file in ms (at most 2147483647, the longest timer Node keeps), and `SF_TEST_NICE=0`
-leaves the priority alone; any other value of any of them stops the run with exit code 2. Ctrl-C
+leaves the priority alone; any other value of any of them stops the run with exit code 2.
+`SF_TEST_LIVE_CLAUDE=1` runs the one test that starts the real Claude Code (SF-159,
+`test/session-settings.test.ts`: the file-tool guard with `disableAllHooks`), which needs a login and
+the network as `sf smoke` does; without it that test is skipped. Ctrl-C
 (SIGINT) or SIGTERM kills the running files and starts no more. The files and every `sf` process
 they start share Node's compile cache in `dist/.compile-cache` (`NODE_COMPILE_CACHE`, unless already
 set; removed with `dist/` by each build), so an `sf` process does not compile its modules again (about
@@ -415,7 +418,10 @@ sf smoke [--keep] [--timeout-min N] [--budget-usd N]
   the probe, because it is missing outside the sandbox; the home canary must be refused), the
   Implementer's `system`/`init` messages in `events.jsonl` list no `WebFetch` or `WebSearch`, and
   `outside.txt` does not exist while the tool result of the Implementer's `Write` of it carries the
-  file-tool guard's refusal (each named in the step's detail otherwise); a missing or
+  file-tool guard's refusal (each named in the step's detail otherwise; the session passes
+  `disableAllHooks: true` as every job session does, so this also shows, on the real CLI, that the
+  guard runs with it, SF-159; `test/session-settings.test.ts` has the same check as a test that
+  runs only with `SF_TEST_LIVE_CLAUDE=1`, against a Claude Code with a login); a missing or
   unreadable file fails it, with the reason the step finds in the job's `events.jsonl` (SF-104):
   the Implementer did not run the probe, the permission classifier refused it before the sandbox
   (the sandbox was not exercised), the permission check refused it before the sandbox in
@@ -1153,7 +1159,9 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   `.claude/rules` and `.claude/settings.json` and leaves out the user's settings and
   `~/.claude/CLAUDE.md`; `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` in its environment leaves out the
   user's auto-memory of the project, which Claude Code loads whatever the setting sources; and
-  `claudeMdExcludes` (in the `settings` option) lists the `CLAUDE.md`, `.claude/CLAUDE.md`,
+  `claudeMdExcludes` (in the `settings` option, with the Implementer's `disableAllHooks: true`,
+  SF-159; every read-only session of `runStructuredSession` gets both: the review, the
+  simplification pass, the Task check, a stop's explanation, the morning digest) lists the `CLAUDE.md`, `.claude/CLAUDE.md`,
   `AGENTS.md`, `.claude/AGENTS.md` and `.claude/rules/**` of every directory above the worktree,
   which Claude Code would otherwise load as project instructions (`~/CLAUDE.md`, and
   `~/.claude/CLAUDE.md` or `~/.claude/AGENTS.md` read as the home directory's). `CLAUDE.local.md`
@@ -1631,7 +1639,10 @@ the commit and rebase at Clean, push) are serialized through one Git lock per wo
 
 Every turn runs with `cwd` = the job's worktree, `permissionMode: "auto"` (`"dontAsk"` in `sf smoke`'s
 own job only, section Live smoke test), `settingSources: ["user",
-"project"]`, a deny list from `src/rules.ts` (mutating Git commands, `sudo`, `EnterWorktree`, `.git/**`
+"project"]`, `settings: { disableAllHooks: true }` (SF-159, `JOB_SESSION_SETTINGS` of
+`src/session.ts`: no hook of a settings file runs, so a `.claude/settings.json` a job wrote runs
+nothing outside the sandbox; the hooks given to `query()`, the file-tool guard among them, still
+run, which `sf smoke`'s Sandbox step shows on the real CLI), a deny list from `src/rules.ts` (mutating Git commands, `sudo`, `EnterWorktree`, `.git/**`
 edits, `.env` files, `WebFetch` and `WebSearch`, which the sandbox does not hold (SF-123); the same
 for every turn, MR preparation included), the file-tool guard as its `hooks` (SF-123, below), a
 filtered environment (no `SF_*`, no inherited Claude Code session markers; the cloud providers'
@@ -1716,7 +1727,18 @@ Implementer's every query (`hooks`), and the review and the simplification pass
 A hook runs in every permission mode, where `canUseTool` is asked only for a call that would
 prompt. `Write`, `Edit`, `MultiEdit` and `NotebookEdit` pass only when every target's real path
 (for a new file: the nearest existing parent's real path plus the rest) is in the own worktree,
-outside its `.git`. `Read`, `Grep`, `Glob` (its pattern's fixed part, per brace alternative too) and
+outside its `.git`, and not its agent configuration (SF-159): under `.claude/`, `.mcp.json` itself
+or under `.codex/` of the worktree, by their path or the real path a link there leads to, is
+refused with "The factory's file-tool guard refuses this <tool>: <path> is agent configuration;
+the factory does not let a job change it." (`docs/.claude.md` or `src/x.ts` pass). For Bash,
+`pathDenials` puts the worktree's `.git`, `.claude`, `.mcp.json` and `.codex` in the sandbox's
+`denyWrite` (no tool rule: the guard holds the tools), each only when it exists, as every
+denial (`watchedPaths` of `src/test-command.ts` makes nothing): Claude Code's own sandbox already
+keeps Bash from writing a missing `.claude` configuration and `.mcp.json`, and the fingerprint
+around the test run (section MR preparation) catches the rest. One of the four that is a link leading nowhere (or a loop of links) cannot be denied and Bash could
+replace it, so the denials are refused with `watched_path_unsafe`, naming the path: the session
+does not start (the Implementer's turn and the review fail with that code; the test step is
+`unavailable`). `Read`, `Grep`, `Glob` (its pattern's fixed part, per brace alternative too) and
 `LS` are refused when a target's real path is in the home directory outside the kept paths and the
 session's own Claude Code project folder `<CLAUDE_CONFIG_DIR or ~/.claude>/projects/<the worktree's
 path, every character but ASCII letters and digits as "-">` (past 200 characters cut, with a hash,
@@ -2079,7 +2101,11 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    - **Never outside a sandbox.** The command is Implementer-written code, so it runs as `sh -c
      <test_command>` in the worktree inside a bubblewrap sandbox the factory builds: `bwrap
      --die-with-parent --unshare-pid --unshare-net --ro-bind / / --dev /dev --proc /proc`, a fresh
-     tmpfs at `/tmp` and the worktree bound writable, then over them `/run` and every path of the
+     tmpfs at `/tmp` and the worktree bound writable, its `.git` bound read-only over it
+     (`--ro-bind-try <worktree>/.git <worktree>/.git`, SF-159: a run that rewrote the worktree's
+     `.git` file could point it at a Git directory of its own whose config, a `filter.<x>.clean`
+     command, the factory's next Git call would run outside any sandbox; `-try` leaves a folder
+     without `.git` as it was), then over them `/run` and every path of the
      job's path denials (`pathDenials`, session `job`, as the Implementer's; section Jobs) hidden (a
      directory as an empty read-only tmpfs, a file as `/dev/null`). `/run` goes because a read-only
      mount does not refuse a `connect()`: its Unix sockets (the user's D-Bus and systemd manager,
@@ -2099,12 +2125,27 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
      compares the clock with the deadline every second), and a run the machine slept through past
      its limit ends within a second or two of the resume as timed out. A run killed by a signal from
      outside the factory says so in its Tests Fix (`killed after <duration>`). There is no fallback without
-     bwrap. Dependencies must already be installed in the worktree: a missing install fails like any
+     bwrap.
+   - **No change to the agent configuration** (SF-159). Before and after the run the runner takes a
+     fingerprint (`configFingerprint`) of the worktree's `.git`, `.claude/**`, `.mcp.json` and
+     `.codex/**`: each path with its kind, a file with its size, mtime and SHA-256, a missing one
+     as absent, an unreadable one by its error, a link by its target (followed only into the
+     worktree), every entry below each of the four. A difference makes the run `failed` whatever its exit code
+     (or `unavailable` exit), with `reason` "the test run changed <the first changed path>: the
+     factory does not let a test run change .git, .claude, .mcp.json or .codex"; the Tests Fix
+     section adds "It failed because <reason>." to how the command ended, and the `### Checks` line
+     and the `tests_failed` message show the reason instead of the exit. Writing `dist/`, caches or
+     coverage changes nothing of it. Nothing is put back. When one of the four is a link (to a
+     file or a folder, or leading nowhere), the run does not start: it is `failed` with `reason`
+     "the test run did not start: <the path> is a link" (no exit code, no output), and the
+     Tests Fix turn gets it as any failure. An aborted run is compared too: nothing else of it
+     applies, but a change stops a job still in its test step (`needs_human`, `tests_failed`, "an
+     aborted test run changed <path>"), so no turn starts on that worktree. Dependencies must already be installed in the worktree: a missing install fails like any
      test.
    - **The record and the Stream.** Each run writes `tests-<N>.json` in the job directory (N the
      iteration; a Retry overwrites it, an Accept rewrites it): `command`, `started_at`,
-     `ended_at`, `duration_ms`, `exit_code`, `timed_out`, `outcome` (`passed`, `failed`,
-     `unavailable` with its `reason`, `accepted_failing` with `accepted_at` and `accepted_from`),
+     `ended_at`, `duration_ms`, `exit_code`, `timed_out`, `outcome` (`passed`, `failed`, with a
+     `reason` when it changed the agent configuration, `unavailable` with its `reason`, `accepted_failing` with `accepted_at` and `accepted_from`),
      and the last 64 KiB of stdout and stderr (`output`, `output_truncated`). The events
      `tests_started` and `tests` (with the last 40 lines of the output) are one Stream entry per
      run ("Tests failed (exit 1) after 2 min", the output behind its toggle).

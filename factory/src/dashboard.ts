@@ -17,7 +17,6 @@
 // and saves the Task file (only over the version it read). A ticket's images (SF-064) are uploaded
 // as raw bytes, served and removed through the attachments module's rules (src/attachments.ts).
 import { createHmac, randomBytes } from 'node:crypto';
-import { existsSync } from 'node:fs';
 import { open, readFile, rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -67,9 +66,9 @@ export const MAX_TASK_BODY_BYTES = 2 * MAX_TASK_BYTES + 1024;
 // The Host names of the local listener, and the loopback Hosts the remote one takes with a listed Origin.
 const LOOPBACK_NAMES: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '[::1]']);
 const KEEP_ALIVE_MS = 15_000;
-// Compiled to dist/src/dashboard.js; the package root is two levels up. The page's HTML, CSS and
-// icon are in static/; its scripts are in static/ or, once converted to TypeScript, in web/ and
-// built into dist/web/ (SF-146).
+// Compiled to dist/src/dashboard.js; the package root is two levels up. The page's HTML and CSS are
+// in static/, and nothing else; its scripts are written in TypeScript in web/ and built into
+// dist/web/ (SF-146 to SF-150).
 const PACKAGE_DIR = new URL('../../', import.meta.url);
 const STATIC_DIR = new URL('static/', PACKAGE_DIR);
 const WEB_SOURCE_DIR = new URL('web/', PACKAGE_DIR);
@@ -85,24 +84,17 @@ const SECURITY_HEADERS = {
 // file uses a name defined in a later one.
 export const DASHBOARD_SCRIPTS = ['core.js', 'job-screens.js', 'job-page.js', 'board.js', 'routing.js', 'ticket-page.js', 'reports.js', 'setup.js', 'main.js'] as const;
 export type DashboardScript = (typeof DASHBOARD_SCRIPTS)[number];
-// The files of each entry of DASHBOARD_SCRIPTS, in load order (SF-146): url, the file served, is the
-// build output dist/web/<name>.js when web/<name>.ts exists, else static/<name>.js; source, the file
-// written by hand, is that web/<name>.ts, else the same static/<name>.js. The dashboard reads url
-// once at start, and the tests read the same files through this function. Once SF-150 converts the
-// last script, every entry comes from dist/web/ and the fallback goes.
+// The files of each entry of DASHBOARD_SCRIPTS, in load order (SF-146, SF-150): url, the file
+// served, is the build output dist/web/<name>.js; source, the file written by hand, is
+// web/<name>.ts. The dashboard reads url once at start, and the tests read the same files through
+// this function.
 export function dashboardScriptFiles(): Array<{ file: DashboardScript; url: URL; source: URL }> {
-  return DASHBOARD_SCRIPTS.map((file) => {
-    const typed = new URL(file.replace(/\.js$/, '.ts'), WEB_SOURCE_DIR);
-    return existsSync(typed)
-      ? { file, url: new URL(file, WEB_BUILD_DIR), source: typed }
-      : { file, url: new URL(file, STATIC_DIR), source: new URL(file, STATIC_DIR) };
-  });
+  return DASHBOARD_SCRIPTS.map((file) => ({ file, url: new URL(file, WEB_BUILD_DIR), source: new URL(file.replace(/\.js$/, '.ts'), WEB_SOURCE_DIR) }));
 }
 // The page's other files, all in static/.
 const STATIC_FILES: Record<string, { file: string; type: string }> = {
   '': { file: 'dashboard.html', type: 'text/html; charset=utf-8' },
   'app.css': { file: 'app.css', type: 'text/css; charset=utf-8' },
-  'favicon.svg': { file: 'favicon.svg', type: 'image/svg+xml; charset=utf-8' },
 };
 
 // The User's actions, bound by `sf serve` to its one Execution: the same methods, guards and

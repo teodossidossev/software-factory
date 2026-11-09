@@ -1,7 +1,19 @@
-// routing.js, the dashboard's fifth script (DASHBOARD_SCRIPTS in src/dashboard.ts): the view
-// shown, the routing and the page's delegated click, input, change and key handlers. A classic
-// script, loaded in order with defer, sharing the page's globals with the others.
+// routing.js, the dashboard's fifth script (DASHBOARD_SCRIPTS in src/dashboard.ts), built from
+// web/routing.ts into dist/web/ (SF-150): the view shown, the routing and the page's delegated
+// click, input, change and key handlers. A classic script, loaded in order with defer, sharing the
+// page's globals with the others. This file has no import or export on purpose: the compiler keeps
+// it a script, so its top-level names stay the page's globals.
 'use strict';
+
+// An event's target as the page's element, or null when it is none (the tests' fake events may
+// have no target: undefined).
+const targetOf = (target: EventTarget | null | undefined): HTMLElement | null => (target !== undefined && isElement(target) && hasDataset(target) ? target : null);
+// Whether a control is disabled (an element that has no disabled is not). No instanceof: the
+// tests' fake page has no element classes.
+const isDisabled = (node: HTMLElement): boolean => 'disabled' in node && node.disabled === true;
+// A form field of the page: an input, a textarea or a select (by its tag name).
+type Field = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+const isField = (node: Element | null): node is Field => isTag(node, 'input') || isTag(node, 'textarea') || isTag(node, 'select');
 
 // ---------- The job page and the routing (the prototype's go, back, openTicket, route, setHash) ----------
 
@@ -15,14 +27,38 @@
 // 'uni', kept in localStorage), Collapse unchanged, the folds opened, the path a path link
 // opened, checked against its iteration's list once it is read, and whether the tree is open
 // (SF-119: a phone folds it above the diff).
-const ui = {
+interface UiState {
+  screen: string;
+  job: string | null;
+  ticket: string | null;
+  opener: string | null;
+  pending: boolean;
+  sel: number;
+  open: Set<string>;
+  related: string | null;
+  cx: {
+    view: CxView;
+    sel: string | null;
+    cursor: string | null;
+    rows: TreeRow[];
+    q: string;
+    flat: boolean;
+    collapsed: Set<string>;
+    mode: 'side' | 'uni';
+    collapse: boolean;
+    unfolded: Set<string>;
+    check: string | null;
+    tree: boolean;
+  };
+}
+const ui: UiState = {
   screen: 'board', job: null, ticket: null, opener: null, pending: false, sel: -1, open: new Set(), related: null,
   cx: { view: 'all', sel: null, cursor: null, rows: [], q: '', flat: false, collapsed: new Set(), mode: 'side', collapse: true, unfolded: new Set(), check: null, tree: true },
 };
 
 // The URL hash of the view: #<ws>/<ticket> (the Stream), #<ws>/<ticket>/changes, /mr, /ticket;
 // a new one is a new history entry, so Back and Forward move between them.
-function setHash() {
+function setHash(): void {
   const h = ui.screen === 'board' ? '' : ui.screen === 'stats' ? 'stats' : ui.screen === 'digest' ? (dg.id === null ? 'digest' : `digest/${dg.id}`) : ui.screen === 'ticket' ? `${ui.ticket}/ticket` : ui.screen === 'stream' ? ui.job : `${ui.job}/${ui.screen}`;
   if (decodeURIComponent(location.hash.slice(1)) !== h) {
     history.pushState(null, '', `#${h}`);
@@ -31,11 +67,11 @@ function setHash() {
 
 // The job page's screen (the prototype's renderJobScreen): the header, and the Stream, the Changes
 // or the Merge request screen.
-function renderJobScreen() {
+function renderJobScreen(): void {
   renderHead();
-  $('scrStream').hidden = ui.screen !== 'stream';
-  $('scrChanges').hidden = ui.screen !== 'changes';
-  $('scrMr').hidden = ui.screen !== 'mr';
+  byId('scrStream').hidden = ui.screen !== 'stream';
+  byId('scrChanges').hidden = ui.screen !== 'changes';
+  byId('scrMr').hidden = ui.screen !== 'mr';
   if (state.detail === null || keyOf(state.detail.job) !== ui.job) {
     return;
   }
@@ -49,7 +85,7 @@ function renderJobScreen() {
 // Opens a job's page on a screen; focus 'stop' or 'composer' is where its card's action points;
 // confirm ('approve', 'mr-create', 'mr-merge') opens that confirmation once its detail is shown.
 // The Merge request screen waits for the MR text (written at Clean).
-function go(key, screen = 'stream', focus = undefined, confirm = undefined) {
+function go(key: string, screen = 'stream', focus: 'composer' | 'stop' | undefined = undefined, confirm: string | undefined = undefined): void {
   if (jobByKey(key) === null) {
     return;
   }
@@ -70,19 +106,19 @@ function go(key, screen = 'stream', focus = undefined, confirm = undefined) {
     ui.cx = { ...ui.cx, view: screen === 'changes' ? ui.cx.view : 'all', sel: screen === 'changes' ? ui.cx.sel : null, q: '', collapsed: new Set(), unfolded: new Set(), cursor: null, check: screen === 'changes' ? ui.cx.check : null, tree: true };
   }
   if (screen !== 'changes') {
-    $('scrChanges').replaceChildren();
+    byId('scrChanges').replaceChildren();
   }
   ui.screen = screen;
   ui.job = key;
   ui.ticket = null;
   ui.opener = key;
   ui.pending = false;
-  $('board').hidden = true;
-  $('ticket').hidden = true;
-  $('digest').hidden = true;
+  byId('board').hidden = true;
+  byId('ticket').hidden = true;
+  byId('digest').hidden = true;
   leaveDigest();
-  $('stats').hidden = true;
-  $('job').hidden = false;
+  byId('stats').hidden = true;
+  byId('job').hidden = false;
   state.wantConfirm = confirm === undefined ? null : { action: confirm, key };
   select(key);
   renderJobScreen();
@@ -91,10 +127,10 @@ function go(key, screen = 'stream', focus = undefined, confirm = undefined) {
   state.wantFocus = focus ?? null;
   applyWantedFocus();
   if (screen === 'stream' && state.wantFocus === null && state.confirm === null) {
-    $('streamwrap').focus();
+    byId('streamwrap').focus();
   } else if (screen === 'changes') {
     // The selected row, now or once the list arrives.
-    const row = document.querySelector('#tlist .trow.sel');
+    const row = document.querySelector<HTMLElement>('#tlist .trow.sel');
     state.cx.focusTree = row === null;
     row?.focus();
   }
@@ -102,18 +138,18 @@ function go(key, screen = 'stream', focus = undefined, confirm = undefined) {
 
 // Where a card's button points once the job's detail is shown: the message box, or the primary
 // action when the box takes nothing now ('composer'), or the stop block ('stop').
-function applyWantedFocus() {
+function applyWantedFocus(): void {
   const focus = state.wantFocus;
   if (focus === null || state.detail === null || keyOf(state.detail.job) !== ui.job) {
     return;
   }
   state.wantFocus = null;
   if (focus === 'composer') {
-    const box = $('msg');
+    const box = byIdAs('msg', 'textarea');
     if (!box.disabled && !box.hidden) {
       box.focus();
     } else {
-      $('acts').querySelector('.btn.primary')?.focus();
+      byId('acts').querySelector<HTMLElement>('.btn.primary')?.focus();
     }
   } else {
     // The stop block may come with the Stream, after the detail.
@@ -127,7 +163,7 @@ function applyWantedFocus() {
 }
 
 // Back to the board, the focus on the card that opened the page.
-function back() {
+function back(): void {
   if (ui.job !== null) {
     leaveJob();
   }
@@ -137,22 +173,22 @@ function back() {
   ui.screen = 'board';
   ui.job = null;
   ui.ticket = null;
-  $('job').hidden = true;
-  $('ticket').hidden = true;
-  $('digest').hidden = true;
+  byId('job').hidden = true;
+  byId('ticket').hidden = true;
+  byId('digest').hidden = true;
   leaveDigest();
-  $('stats').hidden = true;
-  $('board').hidden = false;
+  byId('stats').hidden = true;
+  byId('board').hidden = false;
   renderBoard();
   setHash();
   if (ui.opener !== null) {
-    document.querySelector(`#cols .card[data-open="${ui.opener}"], #cols .card[data-ticket="${ui.opener}"]`)?.focus();
+    document.querySelector<HTMLElement>(`#cols .card[data-open="${ui.opener}"], #cols .card[data-ticket="${ui.opener}"]`)?.focus();
   }
 }
 
 // The view of the URL hash (on load and on every hashchange). A hash of a job or ticket the board
 // does not have shows the board; it is tried again when the jobs and tickets first arrive.
-function route() {
+function route(): void {
   // The morning digest (SF-103): #digest, the newest, or #digest/<id>.
   const digest = /^digest(?:\/([0-9A-Za-z-]+))?$/.exec(decodeURIComponent(location.hash.slice(1)));
   if (digest !== null) {
@@ -177,7 +213,9 @@ function route() {
     }
     return;
   }
-  const [, key, sub] = match;
+  // The key's group always matches when the hash does.
+  const key = match[1] ?? '';
+  const sub = match[2];
   if (sub === 'ticket') {
     const row = ticketByKey(key);
     if (row !== null && isPlanned(row)) {
@@ -201,7 +239,7 @@ function route() {
 
 // The jobs changed (the stream, a read): the board and the open job's header, its composer and its
 // stop; a job page whose job left the board (its ticket archived or deleted) goes back to the board.
-function renderJobs() {
+function renderJobs(): void {
   goToStarted();
   if (ui.job !== null && jobByKey(ui.job) === null) {
     back();
@@ -220,11 +258,12 @@ const TIP_CONTROLS = 'button, a, input, select, textarea, summary, label, [role=
 // SF-119: on a phone or a device without hover a tap shows what a hover shows: the title of
 // the element tapped when it is the only place of that detail (not a control, not inside a
 // card, whose tap opens its page), or a dependency chip's (its state in words).
-function tipOf(target) {
-  if (!media(TOUCH_QUERY) || typeof target?.closest !== 'function') {
+function tipOf(target: EventTarget | null | undefined): string {
+  const node = targetOf(target);
+  if (!media(TOUCH_QUERY) || node === null) {
     return '';
   }
-  const holder = target.closest('[title]');
+  const holder = node.closest('[title]');
   if (holder === null || (!holder.classList.contains('dchip') && holder.closest(TIP_CONTROLS) !== null)) {
     return '';
   }
@@ -234,20 +273,21 @@ function tipOf(target) {
 // The delegated click listener of the top bar, the board, the cards, the job page (its header, the
 // Stream and the composer), the planned ticket page (SF-081) and the toast (the drawer keeps its own
 // listeners).
-function onClick(event) {
+function onClick(event: MouseEvent): void {
   const tip = tipOf(event.target);
   if (tip !== '') {
     toast({ level: 'info', text: tip });
   }
-  const target = typeof event.target?.closest === 'function'
-    ? event.target.closest('[data-colfold],[data-cxtree],[data-tk],[data-tkimg],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],[data-qforce],#limUp,#limDown,#rulesBtn,[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-homenu],[data-dismiss],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived,#open-digest,#open-stats')
+  const clicked = targetOf(event.target);
+  const target = clicked !== null
+    ? clicked.closest<HTMLElement>('[data-colfold],[data-cxtree],[data-tk],[data-tkimg],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],[data-qforce],#limUp,#limDown,#rulesBtn,[data-run],[data-open],[data-ticket],[data-back],[data-ws],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-homenu],[data-dismiss],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived,#open-digest,#open-stats')
     : null;
   // An open ⋯ menu closes on any click but its own toggle (its items act, then it is closed).
   if (state.openMenu !== null && (target === null || target.dataset.menu === undefined)) {
     setCardMenu(null);
   }
   // The Rules menu (SF-072) closes on a click outside it.
-  if (typeof event.target?.closest === 'function' && event.target.closest('.menuwrap') === null && !$('rulesMenu').hidden) {
+  if (clicked !== null && clicked.closest('.menuwrap') === null && !byId('rulesMenu').hidden) {
     closeRules();
   }
   if (target?.id === 'rulesBtn') {
@@ -255,8 +295,8 @@ function onClick(event) {
     return;
   }
   // The hand-over panel's More menu (SF-107) closes on a choice and on a click outside it.
-  if (state.handoverMenu && typeof event.target?.closest === 'function' && event.target.closest('[data-homenu]') === null
-    && (event.target.closest('.ho-menu') === null || event.target.closest('[role="menuitem"]') !== null)) {
+  if (state.handoverMenu && clicked !== null && clicked.closest('[data-homenu]') === null
+    && (clicked.closest('.ho-menu') === null || clicked.closest('[role="menuitem"]') !== null)) {
     setHandoverMenu(false);
   }
   if (target?.dataset.homenu !== undefined) {
@@ -268,7 +308,7 @@ function onClick(event) {
     return;
   }
   // A link (a merge request's) goes where it points; it does not open the card around it.
-  if (target === null || target.disabled || (typeof event.target.closest === 'function' && event.target.closest('a') !== null)) {
+  if (target === null || isDisabled(target) || (clicked !== null && clicked.closest('a') !== null)) {
     return;
   }
   if (target.dataset.tk !== undefined) {
@@ -335,10 +375,12 @@ function onClick(event) {
     openStats();
   } else if (target.hasAttribute('data-ws')) {
     // A workspace's chip again: back to all.
-    state.filter = state.filter === target.dataset.ws ? '' : target.dataset.ws;
+    // The branch's hasAttribute('data-ws') says data-ws is there, so the fallback never applies.
+    state.filter = state.filter === target.dataset.ws ? '' : (target.dataset.ws ?? '');
     renderBoard();
   } else if (target.dataset.qact !== undefined) {
-    queueAction(target.dataset.qact, target.dataset.key);
+    // The Queue card's buttons carry data-key (board.js queueCard); no ticket has the key ''.
+    queueAction(target.dataset.qact, target.dataset.key ?? '');
   } else if (target.dataset.qtoggle !== undefined) {
     queueToggle(target.dataset.qtoggle);
   } else if (target.dataset.qforce !== undefined) {
@@ -346,9 +388,10 @@ function onClick(event) {
   } else if (target.id === 'limUp' || target.id === 'limDown') {
     setLimit(target.id === 'limUp' ? 1 : -1);
   } else if (target.dataset.run !== undefined) {
-    cardRun(target.dataset.run, target.dataset.key);
+    // A card's buttons carry data-key (board.js); no job has the key ''.
+    cardRun(target.dataset.run, target.dataset.key ?? '');
   } else if (target.dataset.open !== undefined) {
-    go(target.dataset.open, target.dataset.screen ?? 'stream', target.dataset.focus, target.dataset.confirm);
+    go(target.dataset.open, target.dataset.screen ?? 'stream', focusOf(target.dataset.focus), target.dataset.confirm);
   } else if (target.dataset.ticket !== undefined) {
     openTicket(target.dataset.ticket);
   } else if (target.hasAttribute('data-back')) {
@@ -356,7 +399,7 @@ function onClick(event) {
   } else if (target.dataset.goto !== undefined) {
     if (target.dataset.goto === 'changes') {
       openChanges(null, null);
-    } else {
+    } else if (ui.job !== null) {
       go(ui.job, target.dataset.goto);
     }
   } else if (target.dataset.cfile !== undefined) {
@@ -378,11 +421,11 @@ function onClick(event) {
     if (row?.type === 'file' && media(NARROW_QUERY)) {
       ui.cx.tree = false;
       renderChanges();
-      $('dbody').focus();
+      byId('dbody').focus();
     }
   } else if (target.dataset.fold !== undefined) {
     ui.cx.unfolded.add(target.dataset.fold);
-    const body = $('dbody');
+    const body = byId('dbody');
     const top = body.scrollTop;
     renderDiffPane();
     body.scrollTop = top;
@@ -398,12 +441,13 @@ function onClick(event) {
   } else if (target.dataset.act !== undefined) {
     act(target.dataset.act);
   } else if (target.dataset.settle !== undefined) {
-    const [id, decision] = target.dataset.settle.split(':');
+    // "<id>:<decision>" (job-screens.js ledgerFinding): both parts are there.
+    const [id = '', decision = ''] = target.dataset.settle.split(':');
     settle(id, decision);
   } else if (target.hasAttribute('data-copy-branch')) {
     const job = shownJob();
     if (job !== null) {
-      copyValue(`git checkout ${job.branch}`, $('checkout-text'), (text) => toast({ level: 'info', text: `${text} git checkout ${job.branch}` }));
+      copyValue(`git checkout ${job.branch}`, byIdAs('checkout-text', 'textarea'), (text) => toast({ level: 'info', text: `${text} git checkout ${job.branch}` }));
     }
   } else if (target.matches('#stream li.e')) {
     ui.sel = entries().indexOf(target);
@@ -411,22 +455,33 @@ function onClick(event) {
   }
 }
 
+// A card's data-focus (board.js): where its button points on the job page; a value other than
+// 'composer' is the stop block's, as applyWantedFocus reads it.
+const focusOf = (value: string | undefined): 'composer' | 'stop' | undefined => (value === undefined ? undefined : value === 'composer' ? 'composer' : 'stop');
+
+// The Merge request screen's fields (SF-080) and the draft's field each one types into.
+const MR_INPUTS: ReadonlyMap<string, MrField> = new Map([['mrTitle', 'title'], ['mrBranch', 'branch'], ['mrBase', 'base'], ['mrBody', 'body']]);
+
 // What typing in the job page keeps: the draft of the message box (and Send follows it), a note on
 // a ledger entry.
-function onInput(event) {
-  const target = event.target;
+function onInput(event: Event): void {
+  const node = targetOf(event.target);
+  const target = isField(node) ? node : null;
   if (target?.id === 'tkText' && ui.screen === 'ticket') {
-    // The planned ticket page's editor: Unsaved changes and Save follow it.
-    const s = tkState(ui.ticket);
-    s.text = target.value;
-    const bar = $('ticket').querySelector('.edtabs');
-    bar?.replaceWith(tkTabs(ui.ticket, s));
+    // The planned ticket page's editor: Unsaved changes and Save follow it (the page has its ticket).
+    if (ui.ticket !== null) {
+      const s = tkState(ui.ticket);
+      s.text = target.value;
+      const bar = byId('ticket').querySelector('.edtabs');
+      bar?.replaceWith(tkTabs(ui.ticket, s));
+    }
     return;
   }
-  if (['mrTitle', 'mrBranch', 'mrBase', 'mrBody'].includes(target?.id) && ui.screen === 'mr' && state.key !== null) {
+  const mrField = target === null ? undefined : MR_INPUTS.get(target.id);
+  if (target !== null && mrField !== undefined && ui.screen === 'mr' && state.key !== null) {
     // The Merge request screen (SF-080): the draft, and the checks, the side panel and the bar after it.
     const m = mrState(state.key);
-    m[{ mrTitle: 'title', mrBranch: 'branch', mrBase: 'base', mrBody: 'body' }[target.id]] = target.value;
+    m[mrField] = target.value;
     m.outcome = null;
     renderMrChecks();
     return;
@@ -436,7 +491,7 @@ function onInput(event) {
       state.drafts.set(state.key, target.value);
     }
     renderComposer();
-  } else if (typeof target?.dataset?.note === 'string') {
+  } else if (typeof target?.dataset.note === 'string') {
     state.notes.set(noteKey(target.dataset.note), target.value);
   } else if (target?.id === 'cxq') {
     // The Changes filter: the tree follows; the diff shows the first match when the selected file is filtered out.
@@ -451,17 +506,18 @@ function onInput(event) {
 }
 
 // The Changes screen's selector and Collapse unchanged.
-function onChange(event) {
-  const target = event.target;
+function onChange(event: Event): void {
+  const node = targetOf(event.target);
+  const target = isField(node) ? node : null;
   // A rule of the Rules menu (SF-072).
-  if (target?.name === 'rule' && target.checked) {
+  if (isTag(target, 'input') && target.name === 'rule' && target.checked) {
     setRule(target.value);
     return;
   }
   if (target?.id === 'cxview') {
     ui.cx.view = target.value === 'all' ? 'all' : Number(target.value);
     renderChanges();
-  } else if (target?.id === 'cxcollapse') {
+  } else if (isTag(target, 'input') && target.id === 'cxcollapse') {
     ui.cx.collapse = target.checked;
     renderDiffPane();
   }
@@ -475,16 +531,16 @@ function onChange(event) {
 // Changes (SF-079): / the filter (Arrow Down or Enter in it goes to the tree), the tree's keys
 // (treeKey), F7 / Shift+F7 and n / p the next and previous file, Arrow Left and Right on the
 // divider its width.
-function onKey(event) {
+function onKey(event: KeyboardEvent): void {
   if (event.defaultPrevented) {
     return;
   }
-  const target = event.target;
+  const target = targetOf(event.target);
   // Escape closes the open Rules menu first (SF-072).
-  if (event.key === 'Escape' && !$('rulesMenu').hidden) {
+  if (event.key === 'Escape' && !byId('rulesMenu').hidden) {
     event.preventDefault();
     closeRules();
-    $('rulesBtn').focus();
+    byId('rulesBtn').focus();
     return;
   }
   // The hand-over panel's More menu (SF-107): Escape closes it only (the page stays), the focus back
@@ -492,10 +548,10 @@ function onKey(event) {
   if (state.handoverMenu && event.key === 'Escape') {
     event.preventDefault();
     setHandoverMenu(false);
-    $('handover-panel')?.querySelector('[data-homenu]')?.focus();
+    $('handover-panel')?.querySelector<HTMLElement>('[data-homenu]')?.focus();
     return;
   }
-  if (state.handoverMenu && (event.key === 'ArrowDown' || event.key === 'ArrowUp') && typeof target?.closest === 'function' && target.closest('.ho-more') !== null) {
+  if (state.handoverMenu && (event.key === 'ArrowDown' || event.key === 'ArrowUp') && target !== null && target.closest('.ho-more') !== null) {
     event.preventDefault();
     handoverMenuKey(event);
     return;
@@ -512,12 +568,12 @@ function onKey(event) {
     return;
   }
   // The planned ticket page (SF-081): Ctrl+S saves while editing.
-  if (ui.screen === 'ticket' && (event.ctrlKey || event.metaKey) && !event.altKey && (event.key === 's' || event.key === 'S') && TK[ui.ticket]?.tab === 'edit') {
+  if (ui.screen === 'ticket' && (event.ctrlKey || event.metaKey) && !event.altKey && (event.key === 's' || event.key === 'S') && ui.ticket !== null && TK[ui.ticket]?.tab === 'edit') {
     event.preventDefault();
     tkAction('save');
     return;
   }
-  if (typeof target?.closest === 'function' && target.closest('textarea, input, select') !== null) {
+  if (target !== null && target.closest('textarea, input, select') !== null) {
     if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && target.id === 'msg') {
       event.preventDefault();
       act('say');
@@ -525,7 +581,7 @@ function onKey(event) {
       target.blur();
     } else if (target.id === 'cxq' && (event.key === 'ArrowDown' || event.key === 'Enter')) {
       event.preventDefault();
-      document.querySelector('#tlist .trow.sel')?.focus();
+      document.querySelector<HTMLElement>('#tlist .trow.sel')?.focus();
     }
     return;
   }
@@ -536,7 +592,7 @@ function onKey(event) {
     }
     return;
   }
-  if (event.key === 'Escape' && !$('toast').hidden) {
+  if (event.key === 'Escape' && !byId('toast').hidden) {
     event.preventDefault();
     toast(null);
     return;
@@ -547,9 +603,9 @@ function onKey(event) {
   }
   // SF-071: Alt+Up / Alt+Down move the focused queued card one place.
   if (ui.screen === 'board' && event.altKey && !event.ctrlKey && !event.metaKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
-    const item = document.activeElement?.closest?.('#qlist .card[data-q]');
-    const row = item ? ticketByKey(item.dataset.ticket) : null;
-    if (row !== null && Number.isInteger(row.queue_position)) {
+    const item = closestOf(document.activeElement, '#qlist .card[data-q]');
+    const row = item ? ticketByKey(item.dataset.ticket ?? null) : null;
+    if (row !== null && isQueued(row)) {
       event.preventDefault();
       moveQueued(keyOf(row), row.queue_position + (event.key === 'ArrowUp' ? -1 : 1));
     }
@@ -564,7 +620,7 @@ function onKey(event) {
     const menu = state.openMenu;
     if (menu !== null) {
       setCardMenu(null);
-      cardOf(menu)?.querySelector('[data-menu]')?.focus();
+      cardOf(menu)?.querySelector<HTMLElement>('[data-menu]')?.focus();
     } else {
       relate(null);
     }
@@ -572,13 +628,16 @@ function onKey(event) {
   }
   if (ui.screen === 'board') {
     // A folded column's cards are passed over (SF-119).
-    const cards = [...document.querySelectorAll('#cols .col:not(.folded) .card')];
-    const at = cards.indexOf(document.activeElement);
+    const cards = [...document.querySelectorAll<HTMLElement>('#cols .col:not(.folded) .card')];
+    const at = cards.findIndex((card) => card === document.activeElement);
     if (event.key === 'j' || event.key === 'k') {
       event.preventDefault();
       cards[Math.min(cards.length - 1, Math.max(0, at + (event.key === 'j' ? 1 : -1)))]?.focus();
     } else if (event.key === 'Enter' && document.activeElement?.classList?.contains('card')) {
-      const card = document.activeElement;
+      const card = targetOf(document.activeElement);
+      if (card === null) {
+        return;
+      }
       if (card.dataset.open !== undefined) {
         go(card.dataset.open, 'stream');
       } else if (card.dataset.ticket !== undefined) {
@@ -592,7 +651,9 @@ function onKey(event) {
     if (state.confirm !== null) {
       closeConfirm();
     } else if (ui.screen === 'changes' || ui.screen === 'mr') {
-      go(ui.job, 'stream');
+      if (ui.job !== null) {
+        go(ui.job, 'stream');
+      }
     } else {
       back();
     }
@@ -621,10 +682,11 @@ function onKey(event) {
       ui.sel = all.length - 1;
       markSel(true);
     } else if (event.key === 'Enter' && ui.sel >= 0 && document.activeElement?.tagName !== 'BUTTON') {
-      const toggleOf = all[ui.sel]?.querySelector('[data-toggle]');
+      const toggleOf = all[ui.sel]?.querySelector<HTMLElement>('[data-toggle]');
       if (toggleOf !== null && toggleOf !== undefined) {
         event.preventDefault();
-        toggle(toggleOf.dataset.toggle);
+        // The selector asks for its data-toggle.
+        toggle(toggleOf.dataset.toggle ?? '');
       }
     }
   } else if (ui.screen === 'changes') {
@@ -640,7 +702,7 @@ function onKey(event) {
     } else if (event.key === 'n' || event.key === 'p') {
       event.preventDefault();
       fileStep(event.key === 'n' ? 1 : -1);
-    } else if (target?.id !== 'cxtree' && !(typeof target?.closest === 'function' && target.closest('#dbody') !== null && (event.key === 'ArrowUp' || event.key === 'ArrowDown'))) {
+    } else if (target?.id !== 'cxtree' && !(target !== null && target.closest('#dbody') !== null && (event.key === 'ArrowUp' || event.key === 'ArrowDown'))) {
       if (!ui.cx.tree && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
         ui.cx.tree = true;
         renderChanges();
@@ -651,7 +713,7 @@ function onKey(event) {
 }
 
 // The buttons of a Queue card (and Archive ticket of a pushed card).
-function queueAction(action, key) {
+function queueAction(action: string, key: string): void {
   const row = ticketByKey(key);
   if (row === null) {
     return;
@@ -662,13 +724,13 @@ function queueAction(action, key) {
     void checkTicket(row);
   } else if (action === 'archive') {
     void ticketAction('archive', row);
-  } else if ((action === 'up' || action === 'down') && Number.isInteger(row.queue_position)) {
+  } else if ((action === 'up' || action === 'down') && isQueued(row)) {
     moveQueued(key, row.queue_position + (action === 'up' ? -1 : 1));
   }
 }
 
 // Retry review, Retry and Resume of a Your turn card: posted at once, once.
-function cardRun(action, key) {
+function cardRun(action: string, key: string): void {
   const job = jobByKey(key);
   if (job === null || availability(action, job) !== '' || (action === 'review' && !reviewFailed(job)) || (action === 'retry' && !retryOn(job))) {
     return;

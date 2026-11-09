@@ -340,6 +340,12 @@ interface StreamPage {
   next: number;
   end: boolean;
 }
+// The live stream's entries of one line of a job's events (the entries event): src/dashboard.ts
+// lineEntries, sent with its 0-based line.
+interface StreamLine {
+  line: number;
+  entries: StreamEntry[];
+}
 
 // A ticket without a live job, as the planned ticket page's payload carries it: src/setup.ts
 // TicketRow with its conversation (src/dashboard.ts ticketEntry: the first message, and its
@@ -376,6 +382,8 @@ interface CheckSummary {
   running: boolean;
   blockers: number;
   majors: number;
+  // The note of Start's confirmation (SF-054).
+  start_note: string | null;
 }
 
 // The state of a ticket another lands after: src/setup.ts DEPENDENCY_STATES.
@@ -404,8 +412,16 @@ interface ArchivedRow {
 // A registered workspace: src/setup.ts WorkspaceRow.
 interface WorkspaceRow {
   name: string;
+  path: string;
+  liveJobs: number;
+  problem: string | null;
+  handoff: HandoffMode | null;
   // src/registry.ts WorkspaceColor.
   color: string;
+  app: string;
+  description: string | null;
+  derived_description: string | null;
+  digest: { track: boolean; my_work: boolean };
 }
 
 // The run queue of the tickets payload: src/queue.ts QueueView.
@@ -419,12 +435,30 @@ interface QueueView {
   limit_hold: { parked: number; resets_at: string | null } | null;
 }
 
-// The morning digest's settings: src/registry.ts DigestSettings.
+// The morning digest's settings, as the workspaces payload carries them: src/registry.ts
+// DigestSettings without its model (src/setup.ts WorkspaceSettings).
 interface DigestSettings {
   at: string;
   weekdays_only: boolean;
-  model: string;
   language: string;
+}
+
+// The workspaces payload (api/workspaces and the stream's workspaces event): src/dashboard.ts
+// workspacesPayload, the registry with src/setup.ts WorkspaceSettings (SF-103).
+interface WorkspacesPayload {
+  workspaces: WorkspaceRow[];
+  handoff_default: HandoffMode;
+  digest: DigestSettings;
+}
+
+// The tickets payload (api/tickets and the stream's tickets event): src/dashboard.ts ticketsPayload;
+// the event adds changed, the tickets it is about, when it is not about all of them (SF-140).
+interface TicketsPayload {
+  tickets: TicketRow[];
+  archived: ArchivedRow[];
+  job_lands_after: JobDependencies[];
+  queue: QueueView | null;
+  changed?: Array<{ workspace: string; ticket: string }>;
 }
 
 // The planned ticket page, api/tickets/<ws>/<ticket>/page: src/dashboard.ts ticketPage. The check is

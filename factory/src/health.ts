@@ -11,7 +11,7 @@ import { open, readdir, stat, statfs } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { DigestStore } from './digest-run.js';
 import { digestFollowed, digestTime, dueByClock } from './digest-schedule.js';
-import { checkForgeToken, type ForgeChoice, withoutHostTokens } from './forge.js';
+import { type ForgeChoice, withoutHostTokens } from './forge.js';
 import { type Job, type JobStore, runningJobs } from './jobs.js';
 import { healthNotification, type Notification } from './notify.js';
 import type { QueueView } from './queue.js';

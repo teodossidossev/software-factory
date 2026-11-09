@@ -60,16 +60,54 @@ function gitEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+// After the SIGTERM of a process group (below), SIGKILL follows after this long, for a process of
+// it that ignores SIGTERM.
+export const GIT_KILL_AFTER_MS = 5_000;
+
 // timeoutMs, when given, stops Git with SIGTERM; the result then has code null. env: variables
 // added to the minimal environment (e.g. GIT_INDEX_FILE for a snapshot in a temporary index).
 // input, when given, is Git's whole stdin (e.g. for `check-attr --stdin`); stdin is closed otherwise.
+// signal, when given, stops Git and what it started (the ssh of a fetch) with SIGTERM on its abort: Git
+// runs in a process group of its own, which every stop kills whole (the abort, the timeout, an output
+// past maxBytes), SIGKILL following after GIT_KILL_AFTER_MS; the result, code null, comes once they
+// all exited.
 export function runGit(
-  cwd: string, args: string[], maxBytes = 1024 * 1024, timeoutMs?: number, env: Record<string, string> = {}, input?: string,
+  cwd: string, args: string[], maxBytes = 1024 * 1024, timeoutMs?: number, env: Record<string, string> = {}, input?: string, signal?: AbortSignal,
 ): Promise<GitResult> {
   return new Promise((resolve, reject) => {
+    const group = signal !== undefined;
     const child = spawn('git', gitArgs(args), {
-      cwd, env: { ...gitEnv(), ...env }, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'], timeout: timeoutMs, killSignal: 'SIGTERM',
+      cwd, env: { ...gitEnv(), ...env }, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+      // A process group's timeout is this function's own, so it kills the whole group.
+      ...(group ? { detached: true } : { timeout: timeoutMs, killSignal: 'SIGTERM' as const }),
     });
+    const signalGroup = (name: NodeJS.Signals): void => {
+      try {
+        process.kill(-child.pid!, name);
+      } catch {
+        // Already gone, or never started (the error event says so).
+      }
+    };
+    let killTimer: NodeJS.Timeout | undefined;
+    const stop = (): void => {
+      if (!group) {
+        child.kill('SIGTERM');
+        return;
+      }
+      signalGroup('SIGTERM');
+      killTimer ??= setTimeout(() => signalGroup('SIGKILL'), GIT_KILL_AFTER_MS);
+    };
+    const timer = group && timeoutMs !== undefined ? setTimeout(stop, timeoutMs) : undefined;
+    const onAbort = stop;
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted === true) {
+      onAbort();
+    }
+    const settle = (): void => {
+      clearTimeout(timer);
+      clearTimeout(killTimer);
+      signal?.removeEventListener('abort', onAbort);
+    };
     if (input !== undefined) {
       // Git may exit before it reads it all; its exit code tells, not the broken pipe.
       child.stdin!.on('error', () => {});
@@ -88,7 +126,7 @@ export function runGit(
       length += Math.min(room, chunk.length);
       if (chunk.length >= room) {
         truncated = true;
-        child.kill('SIGTERM');
+        stop();
       }
     });
     child.stderr!.on('data', (chunk: Buffer) => {
@@ -96,8 +134,12 @@ export function runGit(
         stderr += chunk.toString('utf8');
       }
     });
-    child.once('error', reject);
+    child.once('error', (error) => {
+      settle();
+      reject(error);
+    });
     child.once('close', (code) => {
+      settle();
       resolve({ code, stdout: Buffer.concat(chunks, length), stderr, truncated });
     });
   });

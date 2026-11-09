@@ -56,7 +56,7 @@ bin/sf status [<workspace> <ticket>]           # one job (with its worktree, sen
 bin/sf watch <workspace> <ticket> [--once]     # the session live; works without sf serve
 bin/sf approve <workspace> <ticket> [--as-is]  # push the branch prepared at Clean; --as-is pushes a tip edited by hand; needs sf serve
 bin/sf mr create <workspace> <ticket>          # open the job's merge request on GitHub or GitLab (or reuse the open one); from ready_for_human_review: approve, then open; needs sf serve
-bin/sf mr merge <workspace> <ticket>           # merge the job's open merge request through the host's API (refused with the host's reason); needs sf serve
+bin/sf mr merge <workspace> <ticket>           # merge the job's open merge request through the host's API, after the test command passed on the change merged into the current base (refused with the reason); needs sf serve
 bin/sf mr status <workspace> <ticket>          # the merge request on the host: open, merged or closed, mergeable or why not, the checks; needs sf serve
 bin/sf pause <workspace> <ticket>              # stop a working job or one awaiting review at once (section Pause, Resume and Restart); worktree, branch, session and history stay; needs sf serve
 bin/sf resume <workspace> <ticket> [message...]   # go on with a paused job where it stopped; a Task file changed meanwhile goes with its diff; needs sf serve
@@ -2376,6 +2376,39 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    No push, no force. A draft, a conflict or anything else the host refuses (failing required
    checks, missing approvals) is `mr_not_mergeable` with the host's reason, and nothing changes.
    Merged: `mr.state` `merged`, `mr.merge_commit`, a `merge_request` event and a notification.
+
+   **The merge check.** In a workspace with a `test_command`, the merge first checks the change
+   against its base as it is now, whoever pushed the branch (`src/merge-check.ts`): the factory
+   fetches the base and the branch from `origin` (one `git fetch` into `origin/<base>` and
+   `origin/<branch>`), creates a temporary detached worktree
+   `<worktree root>/<workspace>/.merge-check-<ticket>-<random>` at `origin/<base>`, merges the
+   branch's head into it (`git merge --no-ff --no-edit`, no hooks, no fsmonitor, unsigned, no
+   automatic maintenance) and runs the test command there, in the sandbox of the job's own test
+   runs (the path denials of a job session, for that worktree) with the same timeout
+   (`SF_TEST_TIMEOUT_MS`). The worktree is removed however the check ends; one that cannot be
+   removed (still on disk or registered), or whose removal cannot be verified (the checkout's
+   worktrees cannot be listed), refuses the merge too, and so does a worktree an earlier check of
+   the ticket left behind that cannot be removed. A conflict, a failing, timed-out
+   or unavailable run, or a sandbox that cannot be built refuses the merge with
+   `mr_check_failed` (409): "The change fails on <base> as it is now (<base commit, 12
+   characters>): <the first lines of the failure>"; nothing is merged, and the job stays `pushed`
+   with its merge request open. A fetch that fails refuses with its own code (`fetch_failed`,
+   `base_not_found`, `branch_missing`). Each fetch, the worktree's creation (with its submodules) and
+   the merge have 120 s; past it, Git and all it started (the ssh of a fetch, a checkout filter, a
+   merge driver) are killed as one process group, and the check fails; a cancellation stops them
+   the same way. After a passing run the factory fetches again: a base (or
+   branch) that moved meanwhile is checked once more, and a second move refuses ("… keeps moving
+   on origin; merge again."). A pass merges, and the factory sends the branch head it tested, so
+   the host refuses (`mr_not_mergeable`) a branch pushed to after the check. The check runs
+   outside the operation lock, as the job's running test run: `sf reset` and the runner's stop
+   cancel it at any step (a fetch, the worktree's creation or the merge stops with its process
+   group, the ssh of a fetch included; the test run's sandbox is killed), and a cancelled check
+   merges nothing (`runner_stopping`, 409); a second merge of the job while it runs is
+   `invalid_state` ("A merge check is running …"). Each check is one `merge_checked` event of the
+   job, however many runs it took: `base_commit` (its last run's; `null` when no run started), `outcome` (`passed`,
+   `failed`, `conflict`, `timed_out` or `aborted`; `failed` too for a fetch that failed or a base
+   that keeps moving) and `duration_ms` (the whole check). A workspace without a `test_command`
+   merges as before.
 10. `sf mr status` (the dashboard's Refresh MR status): what the host says now: open, merged or
     closed, draft, mergeable or why not, and the checks (GitHub's check runs of the head commit,
     GitLab's head pipeline) when the host reports them. A merge request merged or closed on the
@@ -2389,6 +2422,7 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    | `mr_host_error` | the host refused the request (its status and words), or answered with a redirect, which is never followed |
    | `mr_host_unreachable` | the host did not answer (30 s) |
    | `mr_not_mergeable` | the host cannot merge it: a draft, conflicts, failing required checks, ...; the host's reason in the message |
+   | `mr_check_failed` | the merge check refused it: the change conflicts, or its tests fail, on the base as it is now, or the base keeps moving; nothing merged |
    | `mr_not_open` | the merge request is merged or closed on the host |
    | `mr_host_changed` | the job's merge request is on another host than the checkout's origin now is |
 
@@ -3535,7 +3569,7 @@ shares; the setup, Task check, task and attachment posts have their own handlers
 | `POST api/jobs/<ws>/<ticket>/mr-save` | `{"title": string, "body": string, "branch"?: string, "base"?: string}` | `Execution.saveMr(ws, ticket, input)` (SF-080): the MR text saved, the prepared commit's message rewritten, the branch renamed and the base changed when given and different; result `{state, branch, base, edited, prepared_commit}`; `400 mr_text_invalid`, `409` for `invalid_state`, `runner_active`, `branch_changed`, `branch_locked`, `base_unrelated`, `mr_text_missing`; its body may be up to 6 × 64 KiB + 1 KiB (an MR text of 64 KiB, escaped); the pages that show the job get its detail |
 | `POST api/jobs/<ws>/<ticket>/mr-reset` | `{}` | `Execution.resetMr(ws, ticket)` (SF-080): the factory's text back and the commit message with it; result as `mr-save`; `409 invalid_state` "The MR text is already the factory's." |
 | `POST api/jobs/<ws>/<ticket>/handover`, `.../takeback`, `.../handed-done` | `{}` | `Execution.handover`, `takeback`, `handedDone` (`sf handover`, `sf takeback`, `sf handed-done`, SF-073); `409` for `invalid_state`, `runner_active` and the hand-over's codes (section Hand-over to your checkout). `GET api/jobs/<ws>/<ticket>` of a `handed_over` job also starts `Execution.checkHandedOver` (at most once a minute), whose push reaches the page through the job's events |
-| `POST api/jobs/<ws>/<ticket>/mr-merge` | `{}` | `Execution.mergeMergeRequest(ws, ticket)` (`sf mr merge`): result `{state, branch, mr}`; `409 mr_not_mergeable` with the host's reason, `409 mr_not_open`, and the codes above |
+| `POST api/jobs/<ws>/<ticket>/mr-merge` | `{}` | `Execution.mergeMergeRequest(ws, ticket)` (`sf mr merge`): result `{state, branch, mr}`; `409 mr_not_mergeable` with the host's reason, `409 mr_not_open`, `409 mr_check_failed` (the merge check), `409 runner_stopping` (the check was cancelled), and the codes above |
 | `POST api/jobs/<ws>/<ticket>/mr-status` | `{}` | `Execution.mergeRequestStatus(ws, ticket)` (`sf mr status`): result `{state, branch, mr, status: {number, url, state, draft, mergeable, reason?, checks?, merge_commit?}}`; every page gets the jobs again, and the pages that show the job its detail (a merge request merged or closed on the host shows so at once) |
 | `POST api/workspaces` | `{"name": string, "path": string, "handoff"?: "checkout" \| "off", "color"?: <palette name>, "description"?: string, "app"?: string, "digest"?: {"track": boolean, "my_work": boolean}}` | `Setup.addWorkspace`: the rules of `sf workspace add`; `color` one of `blue`, `teal`, `green`, `olive`, `orange`, `red`, `purple`, `grey` (SF-084), anything else `400 invalid_body`; `description`, `app` and `digest` (SF-103; absent: none, the name, both off); result the workspace row |
 | `POST api/workspaces/<name>/edit` | `{"path": string, "description": string, "app": string, "handoff": "default" \| "checkout" \| "off", "color": "auto" \| <palette name>, "digest": {"track": boolean, "my_work": boolean}}`, every key required | `Setup.editWorkspace` (SF-103): the fields replace the entry's (`""` removes description and app, `default` the handoff, `auto` the color; `work_checkout` and `rules_skip` stay); the path checked as Add checks it; a path change while the workspace has a live job `409 workspace_busy`; result the workspace row |

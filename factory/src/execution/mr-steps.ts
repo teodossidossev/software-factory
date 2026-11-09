@@ -14,6 +14,7 @@ import { checkBranchFree, isAncestor, savedRef, settleAfterPush, subjectOf } fro
 import { claudeReviews, type FileChange, type Handover, type Job, type JobMr, type JobState, now } from '../jobs.js';
 import { abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitFailure, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl, parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, validBranchName, withAccepted, withChecks, withFindings, withNits, withSimplifications, worktreesOn } from '../mr.js';
 import { type LedgerEntry, notFixed } from '../ledger.js';
+import { MergeChecks } from '../merge-check.js';
 import { buildPatch, notificationLine, type Patch } from '../patch.js';
 import { conflictPrompt, mrPrompt } from '../prompts.js';
 import { COMMIT_TYPES, DENIED_TOOLS, MANUAL_CLAIM, MAX_HEADER_CHARS, MR_REQUIRED_HEADINGS } from '../rules.js';
@@ -163,6 +164,7 @@ export class MrPart {
   readonly #stop: StopPort;
   // The parts it calls (src/execution.ts wires them).
   readonly #peers: MrPeers;
+  readonly #mergeChecks: MergeChecks;
 
   constructor(store: JobStorePort, locks: LockPort, sessions: LivePort, runner: RunnerPort, notice: NoticePort, settings: SettingsPort, stop: StopPort, peers: MrPeers) {
     this.#store = store;
@@ -173,6 +175,7 @@ export class MrPart {
     this.#settings = settings;
     this.#stop = stop;
     this.#peers = peers;
+    this.#mergeChecks = new MergeChecks({ store, locks, sessions, settings, stop });
   }
 
   // The end of a turn of MR preparation (mark_clean). After the MR text turn: validate the text,
@@ -1289,19 +1292,12 @@ export class MrPart {
   }
 
   // sf mr merge: merges the job's open merge request through the host's API (no push, no
-  // force). The host's refusal (conflicts, failing required checks, a draft) comes back as
-  // mr_not_mergeable with its reason, and nothing changes.
+  // force), after the merge check of a workspace with a test command (src/merge-check.ts). The
+  // host's refusal (conflicts, failing required checks, a draft) comes back as mr_not_mergeable
+  // with its reason, and nothing changes.
   mergeMergeRequest(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; mr: JobMr }> {
-    return this.#locks.locked(async () => {
-      const job = await this.#store.job(workspaceName, ticket);
-      if (job.state !== 'pushed' || job.mr === null) {
-        throw new FactoryError('invalid_state', `sf mr merge needs a pushed job with a merge request (sf mr create opens one); the job is ${job.state}${job.state === 'pushed' ? ' without one' : ''}.`);
-      }
-      if (job.mr.state !== 'open') {
-        throw new FactoryError('invalid_state', `The merge request #${job.mr.number} is ${job.mr.state}; only an open one is merged.`);
-      }
-      const forge = await this.#forge(job);
-      const merged = await forge.merge(job.mr.number);
+    return this.#mergeChecks.merge(workspaceName, ticket, (job) => this.#forge(job), async (job, forge, head) => {
+      const merged = await forge.merge(job.mr.number, head);
       const next: Job = { ...job, mr: { ...job.mr, state: 'merged', merge_commit: merged.merge_commit } };
       await this.#store.jobs.write(next);
       await this.#mrEvent(next, 'merged');

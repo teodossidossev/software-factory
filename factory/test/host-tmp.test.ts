@@ -75,12 +75,13 @@ async function guard(denials: PathDenials, cwd: string, tool: string, input: unk
   return specific?.permissionDecision === 'deny' ? specific.permissionDecisionReason : undefined;
 }
 
-test('a job under the temporary root: the root denied, the worktree, the checkout, the state directory and the session\'s folder read back, only the worktree and the folder written; its .env and the other jobs stay denied', async () => {
+test('a job under the temporary root: the root denied, the worktree, the session\'s folder and the checkout\'s .git read back and written, neither the checkout nor the state directory (each holds a written path) read back; its .env and the other jobs stay denied', async () => {
   const l = await layout('host-tmp-job');
+  await mkdir(join(l.checkout, '.git'));
   const denials = await pathDenials(scope(l, 'job'));
   assert.deepEqual(denials.claudeTmp.denyRead, [l.tmp]);
-  assert.deepEqual(sorted(denials.claudeTmp.allowRead), sorted([l.own, l.sessionTmp, l.checkout, l.state]));
-  assert.deepEqual(sorted(denials.claudeTmp.allowWrite), sorted([l.own, l.sessionTmp]));
+  assert.deepEqual(sorted(denials.claudeTmp.allowRead), sorted([l.own, l.sessionTmp, join(l.checkout, '.git')]));
+  assert.deepEqual(sorted(denials.claudeTmp.allowWrite), sorted([l.own, l.sessionTmp, join(l.checkout, '.git')]));
   // The more specific denials inside the kept paths stay; the root is not one of them (the gate and
   // the test runs, which use sandbox.denyRead, keep their own empty /tmp).
   for (const path of [join(l.own, '.env'), l.sibling, join(l.state, 'jobs')]) {
@@ -133,13 +134,43 @@ const tmpScope = (l: Layout, session: 'job' | 'task_check'): TmpScope => ({
   ...(session === 'job' ? { worktree: l.own } : {}), sessionTmp: l.sessionTmp, checkout: l.checkout, stateDir: l.state, tmp: l.tmp, systemRoot: join(l.root, 'sys'),
 });
 
-test('a job whose checkout is under the temporary root: the checkout\'s .git directory written, the checkout itself read only', async () => {
+test('a job whose checkout is under the temporary root: allowRead and allowWrite hold the checkout\'s .git, neither holds the checkout', async () => {
   const l = await layout('host-tmp-gitdir');
   await mkdir(join(l.checkout, '.git', 'worktrees', 'A-1'), { recursive: true });
   const kept = await claudeTmpOf(tmpScope(l, 'job'));
-  assert.ok(kept.allowWrite.includes(join(l.checkout, '.git')), kept.allowWrite.join(' '));
-  assert.ok(kept.allowRead.includes(l.checkout) && !kept.allowWrite.includes(l.checkout));
+  for (const list of [kept.allowRead, kept.allowWrite]) {
+    assert.ok(list.includes(join(l.checkout, '.git')) && !list.includes(l.checkout), list.join(' '));
+  }
   assert.deepEqual(sorted(kept.allowWrite), sorted([l.own, l.sessionTmp, join(l.checkout, '.git')]));
+});
+
+test('a job whose state directory holds its worktree, both under the temporary root: the state directory not read back, the worktree read and written', async () => {
+  const l = await layout('host-tmp-state');
+  const kept = await claudeTmpOf(tmpScope(l, 'job'));
+  assert.ok(!kept.allowRead.includes(l.state), kept.allowRead.join(' '));
+  assert.ok(kept.allowRead.includes(l.own) && kept.allowWrite.includes(l.own));
+  // A Task check writes nothing in the state directory: it keeps reading it.
+  assert.ok((await claudeTmpOf(tmpScope(l, 'task_check'))).allowRead.includes(l.state));
+});
+
+test('a read-only kept path: left out when it holds a written one by any spelling (a link or its real path), kept beside one', async () => {
+  const l = await layout('host-tmp-cover');
+  const real = join(l.tmp, 'real');
+  const link = join(l.tmp, 'link');
+  const beside = join(l.tmp, 'real-beside');
+  await mkdir(join(real, 'written'), { recursive: true });
+  await mkdir(beside);
+  await symlink(real, link);
+  // The read path given through the link, the written one by its real path.
+  const viaLink = await claudeTmpRule([l.tmp], [{ path: join(real, 'written'), write: true }, { path: link, write: false }, { path: beside, write: false }]);
+  assert.deepEqual(sorted(viaLink.allowRead), sorted([join(real, 'written'), beside]));
+  assert.deepEqual(viaLink.allowWrite, [join(real, 'written')]);
+  // The read path by its real path, the written one through the link: both spellings of each.
+  const viaReal = await claudeTmpRule([l.tmp], [{ path: join(link, 'written'), write: true }, { path: real, write: false }]);
+  assert.deepEqual(sorted(viaReal.allowRead), sorted([join(link, 'written'), join(real, 'written')]));
+  assert.deepEqual(sorted(viaReal.allowWrite), sorted(viaReal.allowRead));
+  // A read-only path the same as a written one: read and written, once each.
+  assert.deepEqual(await claudeTmpRule([l.tmp], [{ path: beside, write: false }, { path: beside, write: true }]), { denyRead: [l.tmp], allowRead: [beside], allowWrite: [beside] });
 });
 
 test('a job whose checkout is a linked one (.git a file): its common directory written, neither the checkout nor its .git file', async () => {
@@ -176,11 +207,11 @@ test('a job whose checkout\'s .git file points nowhere, or cannot be read: nothi
   assert.deepEqual(sorted((await claudeTmpOf(tmpScope(l, 'job'))).allowWrite), sorted([l.own, l.sessionTmp]));
 });
 
-test('a Task check whose checkout is under the temporary root: no .git written', async () => {
+test('a Task check whose checkout is under the temporary root: no .git written, the checkout kept read only', async () => {
   const l = await layout('host-tmp-gitdir-check');
   await mkdir(join(l.checkout, '.git'));
   const kept = await claudeTmpOf(tmpScope(l, 'task_check'));
-  assert.ok(kept.allowRead.includes(l.checkout));
+  assert.deepEqual(sorted(kept.allowRead), sorted([l.sessionTmp, l.checkout, l.state]));
   assert.deepEqual(sorted(kept.allowWrite), [l.sessionTmp]);
   assert.ok(!kept.allowRead.includes(join(l.checkout, '.git')));
 });
@@ -198,7 +229,7 @@ test('a test run under the same denials keeps its own writable /tmp: no /tmp, no
   assert.deepEqual(args.flatMap((arg, index) => (arg === '/tmp' ? [args[index - 1]] : [])), ['--tmpfs']);
 });
 
-test('the file-tool guard: a read in the temporary root outside the kept paths is refused, one made after the session started too; the worktree, the session\'s folder and the state directory there pass, its specific denials still refused; the home keeps its own reason', async () => {
+test('the file-tool guard: a read in the temporary root outside the kept paths is refused, one made after the session started too; the worktree, the session\'s folder and the checkout there pass, the state directory that holds the worktree not, its specific denials still refused; the home keeps its own reason', async () => {
   const l = await layout('host-tmp-guard');
   const denials = await pathDenials(scope(l, 'job'));
   const ask = (tool: string, input: unknown): Promise<string | undefined> => guard(denials, l.own, tool, input);
@@ -222,10 +253,10 @@ test('the file-tool guard: a read in the temporary root outside the kept paths i
   assert.equal(await ask('Glob', { pattern: '**' }), undefined);
   assert.equal(await ask('Read', { file_path: join(l.sessionTmp, 'out.txt') }), undefined);
   assert.equal(await ask('Read', { file_path: join(l.checkout, 'README.md') }), undefined);
-  // The state directory, read back by the sandbox, is kept for the tools too; its jobs/ stays denied
-  // (a tool rule, which the sandbox's denyRead matches).
-  assert.equal(await ask('Glob', { pattern: '*', path: l.state }), undefined);
-  assert.equal(await ask('Read', { file_path: join(l.state, 'serve.log') }), undefined);
+  // The state directory holds the worktree, so the sandbox does not read it back, nor does the guard
+  // keep it; its jobs/ stays denied (a tool rule, which the sandbox's denyRead matches).
+  assert.ok((await ask('Glob', { pattern: '*', path: l.state }))?.includes(TMP_REFUSAL));
+  assert.ok((await ask('Read', { file_path: join(l.state, 'serve.log') }))?.includes(TMP_REFUSAL));
   assert.ok(denials.tools.includes(`Read(/${join(l.state, 'jobs')}/**)`) && denials.sandbox.denyRead.includes(join(l.state, 'jobs')));
   assert.match((await ask('Read', { file_path: join(l.home, 'notes', 'n.md') }))!, /is in the home directory, outside the worktree, the checkout and the toolchains\.$/);
 });

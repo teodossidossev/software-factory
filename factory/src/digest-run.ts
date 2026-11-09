@@ -12,7 +12,7 @@ import { capModelInput, derivedDescription, MAX_MODEL_INPUT_CHARS, extractRepo, 
 import { FactoryError } from './errors.js';
 import { type ChannelResult, digestNotification, type Notification } from './notify.js';
 import { digestPrompt } from './prompts.js';
-import { configDir as defaultConfigDir, digestSettings, loadRegistry, verifyCheckout, workspaceApp, workspaceDigest } from './registry.js';
+import { configDir as defaultConfigDir, type DigestSettings, digestSettings, loadRegistry, verifyCheckout, workspaceApp, workspaceDigest } from './registry.js';
 import { type ReviewOptions, runStructuredSession, type StructuredOutcome } from './review.js';
 
 export const DIGEST_DIR = 'digest';
@@ -152,6 +152,19 @@ export function dailyDays(now: Date): { yesterday: Span; today: Span } {
     yesterday: { from: yesterday.toISOString(), to: localDay(yesterday, 1).toISOString() },
     today: { from: localDay(now).toISOString(), to: now.toISOString() },
   };
+}
+
+// The period of every digest, scheduled or manual (SF-155): from `at` (local time) on the previous
+// digest day before today, to now. A digest day is any day, or a weekday with weekdays_only; so
+// Friday on a Monday, a Saturday or a Sunday. Past digests do not move it.
+export function digestPeriod(now: Date, settings: Pick<DigestSettings, 'at' | 'weekdays_only'>): Span {
+  let day = localDay(now, -1);
+  while (settings.weekdays_only && isWeekend(day)) {
+    day = localDay(day, -1);
+  }
+  const [hours, minutes] = settings.at.split(':').map(Number) as [number, number];
+  const from = new Date(day.getFullYear(), day.getMonth(), day.getDate(), hours, minutes);
+  return { from: from.toISOString(), to: now.toISOString() };
 }
 
 const within = (date: string, span: Span): boolean => {
@@ -382,10 +395,9 @@ export class Digests {
     await this.store.prune(started).catch((error: unknown) => console.error(error));
     const registry = await loadRegistry(this.#configDir);
     const settings = digestSettings(registry);
-    // The period: from the end of the newest scheduled digest, else 24 hours back, to this run's start.
-    const lastScheduled = (await this.store.list()).find((summary) => summary.trigger === 'scheduled');
+    const period = digestPeriod(started, settings);
+    const from = new Date(period.from);
     const to = started;
-    const from = lastScheduled !== undefined && Date.parse(lastScheduled.period.to) < to.getTime() ? new Date(lastScheduled.period.to) : new Date(to.getTime() - DAY);
     const days = dailyDays(started);
     const since = new Date(Math.min(from.getTime(), Date.parse(days.yesterday.from)));
     const mirrors = join(this.#stateDir, DIGEST_DIR, 'mirrors');
@@ -436,7 +448,7 @@ export class Digests {
     if (workspaces.every((workspace) => workspace.git === null)) {
       error = workspaces.length === 0 ? 'No workspace is followed or has My daily on.' : 'No workspace gave Git data.';
     } else {
-      const { input, cut } = modelInput(workspaces, dailySources, { from: from.toISOString(), to: to.toISOString() }, days, settings.language);
+      const { input, cut } = modelInput(workspaces, dailySources, period, days, settings.language);
       // The whole prompt, its rules too, stays within the cap.
       const rules = digestPrompt(localDate(started), settings.language, null).length - 'null'.length;
       const note = capModelInput(input, cut, MAX_MODEL_INPUT_CHARS - rules);
@@ -459,7 +471,7 @@ export class Digests {
       }
     }
     const record = await this.store.write({
-      trigger, started_at: started.toISOString(), ended_at: this.#now().toISOString(), period: { from: from.toISOString(), to: to.toISOString() }, daily_days: days,
+      trigger, started_at: started.toISOString(), ended_at: this.#now().toISOString(), period, daily_days: days,
       model: settings.model, language: settings.language, workspaces, daily_sources: dailySources, output, cost_usd: cost, error, notes, counts: digestCounts(workspaces),
     }, `${stamp(started)}-${trigger}`);
     if (trigger === 'scheduled' && this.#notify !== undefined) {

@@ -3871,8 +3871,13 @@ that slept through `at`, or an `sf serve` started later, gets it at the next che
 the Digest page and `sf digest --now` make one at once (`digest_running` while one goes); a manual
 run does not replace the day's scheduled one.
 
-**The period**: from the end of the newest scheduled digest (24 hours back without one) to this
-run's start; on a Monday after a Friday digest that is Friday to Monday. **The daily**: yesterday is
+**The period** (`digestPeriod` in `src/digest-run.ts`, SF-155), the same for scheduled and manual
+runs: from `at` (local time) on the previous digest day before today, to this run's start. A digest
+day is any day, or a weekday with `weekdays_only`. With `at` 07:00 and `weekdays_only`, Monday's
+digest covers Friday 07:00 to Monday 07:00 whatever happened before: a Friday digest that ran late,
+or a manual run later on Monday (still from Friday 07:00); a Tuesday's from Monday 07:00; a manual
+run on a Sunday from Friday 07:00. Without `weekdays_only`, Monday's is from Sunday 07:00. Past
+digests do not move the period, and a DST change keeps `at` in local time. **The daily**: yesterday is
 the last working day before today (00:00-24:00 local time; Friday on a Monday), today until the run.
 Dates are committer dates.
 

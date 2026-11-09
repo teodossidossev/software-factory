@@ -3,7 +3,8 @@
 // refs/sf-local kept, the read checkout untouched), what landed (a merge's author from the merged
 // side), the live branches (squash landed, earlier_merge, ahead/behind, age, mine, local), overlap
 // and hit_by after the merge base, my commits once, the failures, the "why", the diff excerpt, the
-// cap and the derived description.
+// cap and the derived description. Then the digest's period (SF-155, digestPeriod in
+// src/digest-run.ts).
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -12,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { capModelInput, derivedDescription, extractRepo, MAX_DERIVED_DESCRIPTION_CHARS, myEmail, needsAttention, type RepoData, syncMirror, ticketKey, whyOf } from '../src/digest.js';
+import { digestPeriod } from '../src/digest-run.js';
 
 const NOW = Date.now();
 const DAY = 86_400_000;
@@ -357,4 +359,49 @@ test('my commits: all of them, more than 300, from a log of over 1 MB read as a 
   const busyCommits = busy.my_commits.filter((commit) => commit.subject.startsWith('Commit '));
   assert.equal(busyCommits.length, 320);
   assert.ok(busyCommits.every((commit) => commit.why === why(Number(commit.subject.slice(7))).slice(0, 1500)));
+});
+
+// The period (SF-155, digestPeriod in src/digest-run.ts): from `at` on the previous digest day before
+// today, local time, to the run's start. Past digests play no part (the Digests run in
+// test/digest-run.test.ts shows that with stored scheduled digests).
+test('the period: from `at` on the previous digest day (Friday on a Monday and a Sunday with weekdays_only), to the run\'s start', () => {
+  const at = (day: number, hours: number, minutes = 0): Date => new Date(2026, 10, day, hours, minutes);
+  const weekdays = { at: '07:00', weekdays_only: true };
+  const everyDay = { at: '07:00', weekdays_only: false };
+  // 2026-11-09 is a Monday.
+  assert.deepEqual(digestPeriod(at(9, 7, 1), weekdays), { from: at(6, 7).toISOString(), to: at(9, 7, 1).toISOString() });
+  // A manual run later on Monday: still from Friday, though Monday's scheduled digest ran at 07:00.
+  assert.equal(digestPeriod(at(9, 15, 30), weekdays).from, at(6, 7).toISOString());
+  // Before `at` on Monday: the previous digest day is still Friday.
+  assert.equal(digestPeriod(at(9, 6, 0), weekdays).from, at(6, 7).toISOString());
+  assert.equal(digestPeriod(at(10, 7, 1), weekdays).from, at(9, 7).toISOString());
+  // Saturday and Sunday (manual runs): Friday.
+  assert.equal(digestPeriod(at(8, 10), weekdays).from, at(6, 7).toISOString());
+  assert.equal(digestPeriod(at(7, 10), weekdays).from, at(6, 7).toISOString());
+  // Every day a digest day: Sunday on a Monday.
+  assert.equal(digestPeriod(at(9, 7, 1), everyDay).from, at(8, 7).toISOString());
+  assert.equal(digestPeriod(at(9, 7, 1), { at: '23:59', weekdays_only: false }).from, at(8, 23, 59).toISOString());
+  // Across a month's start.
+  assert.equal(digestPeriod(new Date(2026, 5, 1, 9), weekdays).from, new Date(2026, 4, 29, 7).toISOString());
+});
+
+test('the period across a DST change keeps `at` in local time', () => {
+  const zone = process.env.TZ;
+  process.env.TZ = 'Europe/Berlin';
+  try {
+    const weekdays = { at: '07:00', weekdays_only: true };
+    // Summer time ends on Sunday 2026-10-25: Friday 07:00 CEST is 05:00 UTC, Monday 07:01 CET 06:01 UTC.
+    assert.deepEqual(digestPeriod(new Date('2026-10-26T06:01:00Z'), weekdays), { from: '2026-10-23T05:00:00.000Z', to: '2026-10-26T06:01:00.000Z' });
+    // Summer time starts on Sunday 2026-03-29: Friday 07:00 CET is 06:00 UTC; without weekdays_only
+    // Sunday 07:00 CEST, 05:00 UTC.
+    assert.equal(digestPeriod(new Date('2026-03-30T05:01:00Z'), weekdays).from, '2026-03-27T06:00:00.000Z');
+    assert.equal(digestPeriod(new Date('2026-03-30T05:01:00Z'), { ...weekdays, weekdays_only: false }).from, '2026-03-29T05:00:00.000Z');
+    assert.equal(digestPeriod(new Date('2026-10-26T06:01:00Z'), { ...weekdays, weekdays_only: false }).from, '2026-10-25T06:00:00.000Z');
+  } finally {
+    if (zone === undefined) {
+      delete process.env.TZ;
+    } else {
+      process.env.TZ = zone;
+    }
+  }
 });

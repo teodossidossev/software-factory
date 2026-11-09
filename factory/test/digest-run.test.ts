@@ -1,7 +1,7 @@
 // One morning digest run (SF-103, src/digest-run.ts) with a fake model on a temporary origin and
 // read checkout: the output stored with the Git data, cost and period; an invalid output retried
-// once, then the Git data stored with the error; the period from the last scheduled digest's end, the
-// first one 24 hours; old digests deleted; digest_running for a second run; the notification of a
+// once, then the Git data stored with the error; the period from `at` on the previous digest day,
+// whatever digests ran before; old digests deleted; digest_running for a second run; the notification of a
 // scheduled run (counts only); and the model call's options: no tools but the structured output, no
 // setting sources, the empty cwd. Then sf serve's timer, sf digest --now and sf digest through the
 // socket, with the fake Claude as the model.
@@ -11,9 +11,9 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
-import { dailyDays, DIGEST_SCHEMA, type DigestModel, type DigestOutput, Digests, digestSessionOptions, stamp } from '../src/digest-run.js';
+import { dailyDays, digestPeriod, DIGEST_SCHEMA, type DigestModel, type DigestOutput, Digests, digestSessionOptions, stamp } from '../src/digest-run.js';
 import type { Notification } from '../src/notify.js';
-import { saveRegistry } from '../src/registry.js';
+import { DIGEST_DEFAULTS, type DigestSettings, saveRegistry } from '../src/registry.js';
 import { readOnlySessionOptions } from '../src/review.js';
 import { newEnv, newRepo, reviewLog, reviewScript, runCli, serve, stop } from './support/harness.js';
 
@@ -81,7 +81,7 @@ interface Setup {
 }
 
 // A state and config directory of its own; the model answers from outcomes in order.
-async function setUp(outcomes: Array<Awaited<ReturnType<DigestModel>>>, now = new Date()): Promise<Setup> {
+async function setUp(outcomes: Array<Awaited<ReturnType<DigestModel>>>, now = new Date(), settings: Partial<DigestSettings> = {}): Promise<Setup> {
   count += 1;
   const state = join(temp, `state-${count}`);
   const config = join(temp, `config-${count}`);
@@ -91,7 +91,7 @@ async function setUp(outcomes: Array<Awaited<ReturnType<DigestModel>>>, now = ne
       frontend: { read_checkout: web, app: 'shop', description: 'The shop\'s web front end.', digest: { track: true, my_work: true } },
       other: { read_checkout: checkout },
     },
-    digest: { model: 'fake-model', language: 'Deutsch' },
+    digest: { model: 'fake-model', language: 'Deutsch', ...settings },
   }, config);
   const calls: Setup['calls'] = [];
   const notifications: Notification[] = [];
@@ -115,7 +115,7 @@ async function setUp(outcomes: Array<Awaited<ReturnType<DigestModel>>>, now = ne
 const ok = (output: unknown = OUTPUT, costUsd = 0.25) => ({ ok: true as const, output: output as DigestOutput, costUsd, model: 'fake-model', startedAt: '', endedAt: '' });
 const failed = (message: string) => ({ ok: false as const, message, model: null, startedAt: '', endedAt: '' });
 
-test('a manual digest: the output stored with the Git data, the cost and a first period of 24 hours; the prompt and the counts', async () => {
+test('a manual digest: the output stored with the Git data, the cost and the period; the prompt and the counts', async () => {
   const fx = await setUp([ok()]);
   const result = await fx.digests.run('manual');
   const record: any = JSON.parse(await readFile(result.path, 'utf8'));
@@ -125,7 +125,7 @@ test('a manual digest: the output stored with the Git data, the cost and a first
   assert.equal(result.cost_usd, 0.25);
   assert.deepEqual(record.output, OUTPUT);
   assert.equal(record.error, null);
-  assert.equal(Date.parse(record.period.to) - Date.parse(record.period.from), 86_400_000);
+  assert.deepEqual(record.period, digestPeriod(new Date(record.started_at), DIGEST_DEFAULTS));
   assert.equal(record.period.to, record.started_at);
   assert.deepEqual(record.daily_days, dailyDays(new Date(record.started_at)));
   assert.deepEqual([record.model, record.language, record.trigger], ['fake-model', 'Deutsch', 'manual']);
@@ -175,7 +175,7 @@ test('an invalid output is retried once; a second failure stores the Git data wi
   assert.equal(second.record.cost_usd, null);
 });
 
-test('the period starts at the last scheduled digest\'s end; a scheduled run notifies with counts only; a manual one uses the same from', async () => {
+test('a scheduled run notifies with counts only; a manual one does not', async () => {
   // Near the commits, which are an hour old.
   const start = new Date(Math.floor(Date.now() / 1000) * 1000);
   const later = (hours: number): Date => new Date(start.getTime() + hours * 3_600_000);
@@ -185,15 +185,33 @@ test('the period starts at the last scheduled digest\'s end; a scheduled run not
   assert.deepEqual(fx.notifications, [{ title: 'Morning digest ready', body: 'Morning digest ready: 2 landed, 2 of mine need attention', priority: 'default', tags: 'newspaper' }]);
   fx.clock.now = later(2.5);
   const manual = await fx.digests.run('manual');
-  assert.deepEqual(manual.record.period, { from: start.toISOString(), to: later(2.5).toISOString() });
   assert.equal(fx.notifications.length, 1);
-  // The next scheduled one starts where the scheduled one ended, not the manual one.
   fx.clock.now = later(72);
-  const monday = await fx.digests.run('scheduled');
-  assert.equal(monday.record.period.from, start.toISOString());
+  const next = await fx.digests.run('scheduled');
   assert.equal(await fx.digests.scheduledSince(later(71)), true);
   assert.equal(await fx.digests.scheduledSince(later(73)), false);
-  assert.deepEqual((await fx.digests.list()).digests.map((summary) => summary.id), [monday.id, manual.id, scheduled.id]);
+  assert.deepEqual((await fx.digests.list()).digests.map((summary) => summary.id), [next.id, manual.id, scheduled.id]);
+});
+
+test('the period on a Monday is Friday 07:00 to the run, whatever scheduled digest ran before: none, Friday 16:40 or Monday 07:00 itself', async () => {
+  // 2026-11-09 is a Monday; `at` 07:00 on weekdays only.
+  const local = (day: number, hours: number, minutes = 0): Date => new Date(2026, 10, day, hours, minutes);
+  const friday = local(6, 7).toISOString();
+  const fx = await setUp([ok(), ok(), ok()], local(9, 6, 30), { at: '07:00', weekdays_only: true });
+  const none = await fx.digests.run('manual');
+  assert.deepEqual(none.record.period, { from: friday, to: local(9, 6, 30).toISOString() });
+  // Friday's scheduled digest ran late, at 16:40.
+  const late = local(6, 16, 40);
+  await writeFile(join(fx.state, 'digest', `${stamp(late)}-scheduled.json`), JSON.stringify({ trigger: 'scheduled', started_at: late.toISOString(), ended_at: late.toISOString(), period: { from: local(5, 7).toISOString(), to: late.toISOString() }, workspaces: [], cost_usd: null, error: null }));
+  fx.clock.now = local(9, 7, 1);
+  const scheduled = await fx.digests.run('scheduled');
+  assert.deepEqual(scheduled.record.period, { from: friday, to: local(9, 7, 1).toISOString() });
+  // A manual run later on Monday, after Monday's scheduled one.
+  fx.clock.now = local(9, 15, 30);
+  const manual = await fx.digests.run('manual');
+  assert.deepEqual(manual.record.period, { from: friday, to: local(9, 15, 30).toISOString() });
+  // The daily's days and since are as before: yesterday is Friday.
+  assert.deepEqual(manual.record.daily_days, dailyDays(local(9, 15, 30)));
 });
 
 test('a record is never overwritten: the same start gets -2; digests older than 60 days are deleted at the next run', async () => {
@@ -297,7 +315,8 @@ test('sf serve starts the timer; sf digest --now and sf digest through the socke
     assert.equal(costLine, 'cost: $0.2700');
     const latest = await runCli(env, ['digest']);
     assert.equal(latest.code, 0, latest.stderr);
-    assert.match(latest.stdout, /^digest: \d{8}T\d{6}Z-manual\nperiod: \d{4}-\d\d-\d\d \d\d:\d\d:\d\d to \d{4}-\d\d-\d\d \d\d:\d\d:\d\d\nlanded: 0\nlive branches: 0\nmine need attention: 0\n$/);
+    // The repository's first commit, made just now, falls in the period (yesterday's 00:00 to the run).
+    assert.match(latest.stdout, /^digest: \d{8}T\d{6}Z-manual\nperiod: \d{4}-\d\d-\d\d \d\d:\d\d:\d\d to \d{4}-\d\d-\d\d \d\d:\d\d:\d\d\nlanded: 1\nlive branches: 0\nmine need attention: 0\n$/);
     // The sessions: no tools but the structured output, no setting sources, the empty cwd.
     const sessions = await reviewLog(env);
     assert.equal(sessions.length, 2);

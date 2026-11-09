@@ -57,7 +57,6 @@ export type CostRole = Exclude<Role, 'codex_gate'>;
 const COST_ROLES: readonly CostRole[] = ['implementer', 'claude_review', 'simplify', 'task_check', 'digest', 'explanation'];
 // The roles of a job directory.
 type JobCostRole = 'implementer' | 'claude_review' | 'simplify' | 'explanation';
-const JOB_COST_ROLES: readonly JobCostRole[] = ['implementer', 'claude_review', 'simplify', 'explanation'];
 
 export type Findings = Record<Severity, number>;
 // The tokens of a Claude session: input with the cache reads and writes, and output.

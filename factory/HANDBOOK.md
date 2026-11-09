@@ -286,6 +286,8 @@ with every iteration. The Context owner does not review.
   reason tied to the Task: the verdict names it in `accepted_sensitive` and says why in its
   summary; otherwise it is a major fix item, whatever severity the reviewer gives it.
 - Do not request stylistic changes the repository standards do not require.
+- A module of the factory stays under 600 lines: `npm test` runs `check-code`, which enforces it
+  (a module `code-size.json` lists may not grow past its count).
 
 ## Git rules
 

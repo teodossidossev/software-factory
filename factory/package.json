@@ -14,7 +14,8 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.web.json",
     "build": "node scripts/clean.mjs && tsc && tsc -p tsconfig.web.json",
     "start": "node dist/src/cli.js serve",
-    "test": "npm run build && node scripts/run-tests.mjs unit",
+    "check-code": "node scripts/check-code.mjs",
+    "test": "npm run check-code && npm run build && node scripts/run-tests.mjs unit",
     "browsers": "playwright install chromium",
     "test:browser": "npm run build && node scripts/check-browser.mjs && node scripts/run-tests.mjs browser"
   },

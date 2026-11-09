@@ -2,26 +2,28 @@
 // endpoint serving /readyz and /metrics with an old and a fresh poll, a stale and a fresh build, a
 // job past its test limit, a stuck queue, ...), the guard that keeps a failing or hanging check from
 // its caller, sf serve's monitor (since, the change callback, one notification down and one ok
-// again), and sf health's exit codes and --json.
+// again), the reaper before each sandboxes check (SF-154), and sf health's exit codes and --json.
 import assert from 'node:assert/strict';
-import { createServer, type Server } from 'node:http';
+import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdir, mkdtemp, readFile, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { checkForgeToken, type ForgeChoice } from '../src/forge.js';
 import {
   checkDigest, checkDisk, checkJobs, checkLogins, checkMcp, checkQueue, checkRemote, checkSandboxes, checkTunnel, checkTunnelCli, type CommandRunner, fetchText, guarded,
-  HEALTH_CHECKS, type HealthCheck, type HealthDeps, healthExitCode, healthLines, HealthMonitor, type HealthStatus, metricValue, type QueueFacts, runChecks,
+  HEALTH_CHECKS, type HealthCheck, healthExitCode, healthLines, HealthMonitor, type HealthStatus, metricValue, type QueueFacts, runChecks,
 } from '../src/health.js';
 import type { Job } from '../src/jobs.js';
 import type { Notification } from '../src/notify.js';
 import { QUEUE_FILE, QueueStore, RunQueue } from '../src/queue.js';
 import { STATE_VERSION } from '../src/state-version.js';
 import type { Registry } from '../src/registry.js';
+import { reapThenScan } from '../src/recovery.js';
 import { OrphanWatch } from '../src/sandbox-reaper.js';
 import { newEnv, runCli } from './support/harness.js';
+import { deps, fakeServer } from './support/health.js';
 
 const NOW = Date.parse('2026-11-09T10:00:00.000Z');
 const iso = (ms: number): string => new Date(ms).toISOString();
@@ -29,17 +31,6 @@ const MIN = 60_000;
 
 async function tempDir(name: string): Promise<string> {
   return mkdtemp(join(tmpdir(), `sf-health-${name}-`));
-}
-
-// An HTTP server on loopback answering each path with handler's status and text.
-async function fakeServer(handler: (path: string) => { status: number; text: string }): Promise<{ server: Server; port: number; close(): Promise<void> }> {
-  const server = createServer((req, res) => {
-    const { status, text } = handler(req.url ?? '/');
-    res.writeHead(status, { 'content-type': 'text/plain' }).end(text);
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const { port } = server.address() as AddressInfo;
-  return { server, port, close: () => new Promise((resolve) => server.close(() => resolve())) };
 }
 
 test('mcp: ok when the endpoint answers the token; down without a port, without a token, refused or unreachable; the URL shows <token>', async () => {
@@ -327,6 +318,44 @@ test('sandboxes: the first scan is never down; a pid the previous scan found too
   assert.deepEqual(await checkSandboxes(async () => ({ found: 0, persisting: [] })), { status: 'ok', detail: 'no orphaned sandbox' });
 });
 
+test('sandboxes in sf serve\'s monitor: an orphan found by one check is reaped before the next and never shows down', async () => {
+  const proc = await tempDir('proc-reaped');
+  const root = '/home/u/.local/state/software-factory';
+  const uid = 1000;
+  // A pid above any real pid_max: nothing real is signalled.
+  const orphan = join(proc, '5004242');
+  const addOrphan = async (): Promise<void> => {
+    await mkdir(orphan, { recursive: true });
+    await writeFile(join(orphan, 'status'), `Name:\tbwrap\nState:\tS (sleeping)\nPid:\t5004242\nPPid:\t1\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\n`);
+    await writeFile(join(orphan, 'stat'), `5004242 (bwrap) S 1 ${'0 '.repeat(17)}5242 0 0\n`);
+    await writeFile(join(orphan, 'cmdline'), ['bwrap', '--bind', `${root}/worktrees/app/A-1`, '--', 'bash'].join('\0'));
+  };
+  // The reaper ends what it finds; the orphan appears right after the first reap, so the first
+  // check's scan finds it.
+  const reaps: number[] = [];
+  const reap = async (): Promise<void> => {
+    reaps.push(reaps.length);
+    await rm(orphan, { recursive: true, force: true });
+    if (reaps.length === 1) {
+      await addOrphan();
+    }
+  };
+  const watch = new OrphanWatch(() => [root], { proc, uid });
+  const statuses: string[] = [];
+  const monitor = new HealthMonitor(deps(() => new Date(NOW), { sandboxes: reapThenScan(watch, reap) }));
+  for (let pass = 0; pass < 3; pass += 1) {
+    await monitor.check();
+    statuses.push(monitor.list().find((one) => one.id === 'sandboxes')!.detail);
+  }
+  assert.deepEqual(statuses, ['1 orphaned sandbox process found, not yet seen twice', 'no orphaned sandbox', 'no orphaned sandbox']);
+  assert.equal(reaps.length, 3, 'one reap before each check');
+  // Without the reap, the second scan would have called it down.
+  await addOrphan();
+  const unreaped = new OrphanWatch(() => [root], { proc, uid });
+  await unreaped.scan();
+  assert.equal((await checkSandboxes(() => unreaped.scan())).status, 'down');
+});
+
 function registry(follow: boolean, at = '08:00'): Registry {
   return { workspaces: { app: { read_checkout: '/srv/app', ...(follow ? { digest: { track: true } } : {}) } }, digest: { at, weekdays_only: false } };
 }
@@ -365,32 +394,6 @@ test('sf health\'s exit code: 0 all ok or off (off is never red), 3 any recoveri
   assert.equal(healthExitCode([check('recovering'), check('down')]), 1);
   assert.deepEqual(healthLines([{ ...check('down'), detail: 'refused' }]), ['DOWN       MCP endpoint  refused']);
 });
-
-// Every check's dependency, each answering ok (or off), with the parts a test changes.
-function deps(now: () => Date, overrides: Partial<HealthDeps> = {}): HealthDeps {
-  return {
-    now,
-    mcp: async () => ({ port: 8787, token: 't' }),
-    probe: async () => ({ result: 'answers' }),
-    tunnelProfile: '/nonexistent/software-factory.yaml',
-    tunnelAddress: '127.0.0.1:1',
-    fetch: fetchText,
-    packageRoot: '/nonexistent',
-    tunnelScript: '/nonexistent/sf-tunnel.sh',
-    jobs: { jobs: { list: async () => [], eventsPath: () => '/nonexistent' }, testTimeoutMs: 30 * MIN, runnerAlive: async () => true },
-    queue: async () => ({ view: { held: false, limit_hold: null, running: 0, entries: [] }, lastStart: undefined, newestJob: undefined }),
-    remote: () => ({ origins: [], port: 8789 }),
-    answers: async () => true,
-    run: async () => ({ code: 0, stdout: '' }),
-    logins: { claudePath: '/bin/claude', codexPath: undefined, forgeTargets: async () => [], checkToken: async () => ({ ok: true }) },
-    diskPaths: ['/state'],
-    freeSpace: async () => ({ device: 1, free: 100 * 1024 ** 3, total: 200 * 1024 ** 3 }),
-    sandboxes: async () => ({ found: 0, persisting: [] }),
-    configDir: '/nonexistent-config',
-    digests: { list: async () => [] },
-    ...overrides,
-  };
-}
 
 test('runChecks: one result per check in the fixed order, since the run\'s time; a check whose dependency throws is down, the others run', async () => {
   const at = new Date(NOW);

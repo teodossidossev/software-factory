@@ -17,7 +17,8 @@ const SANDBOX_NAME = 'bwrap';
 // SIGTERM first; SIGKILL for whatever is still alive this long after.
 const GRACE_MS = 2_000;
 const POLL_MS = 100;
-// How often sf serve looks for leftovers while it runs, whatever ended (cli.ts).
+// How often sf serve looks for leftovers while it runs with SF_HEALTH=off, whatever ended
+// (src/recovery.ts); with the health checks on, it looks before each sandboxes check.
 export const REAP_EVERY_MS = 10 * 60_000;
 
 export interface ReapOptions {

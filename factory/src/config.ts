@@ -354,6 +354,16 @@ export function healthSetting(env: NodeJS.ProcessEnv = process.env): boolean {
   return mode === 'on';
 }
 
+// SF_TUNNEL: auto (the default: sf serve runs the ChatGPT tunnel when it has a tunnel profile) or
+// off (no tunnel in sf serve).
+export function tunnelSetting(env: NodeJS.ProcessEnv = process.env): 'auto' | 'off' {
+  const mode = env.SF_TUNNEL || 'auto';
+  if (mode !== 'auto' && mode !== 'off') {
+    throw new FactoryError('invalid_config', `SF_TUNNEL must be auto or off, got "${mode}".`);
+  }
+  return mode;
+}
+
 // SF_TASK_CHECK_AUTO: on (the default) or off.
 export function taskCheckAutoSetting(env: NodeJS.ProcessEnv = process.env): boolean {
   const mode = env.SF_TASK_CHECK_AUTO || 'on';

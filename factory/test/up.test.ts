@@ -1,6 +1,7 @@
-// `sf up` (SF-025): sf serve in the process, the tunnel script as a child with its output
-// prefixed, the dashboard opened once with the printed URL, Ctrl+C stopping both; without the
-// script, with a script that exits, with --no-tunnel and --no-open; usage errors; `npm start`.
+// `sf up` (SF-025): sf serve in the process, the tunnel script as serve's one child with its output
+// prefixed (SF-154: SF_TUNNEL=auto and a tunnel profile), the dashboard opened once with the printed
+// URL, Ctrl+C stopping both; without the script, with a script that exits, with --no-tunnel (no
+// tunnel at all) and --no-open; usage errors; `npm start`.
 import assert from 'node:assert/strict';
 import { type ChildProcess, spawn } from 'node:child_process';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -78,6 +79,14 @@ async function fakeTunnel(name: string, body: string): Promise<{ script: string;
   return { script, log };
 }
 
+// An env whose HOME has a tunnel profile, with SF_TUNNEL=auto: sf serve starts the tunnel.
+async function tunnelEnv(name: string, extra: Record<string, string>): Promise<Env> {
+  const env = await newEnv(name, { SF_TUNNEL: 'auto', ...extra });
+  await mkdir(join(env.home, '.config', 'tunnel-client'), { recursive: true });
+  await writeFile(join(env.home, '.config', 'tunnel-client', 'software-factory.yaml'), 'config_version: 1\n');
+  return env;
+}
+
 const RUNNING = `trap 'echo term >> "$LOG"; exit 0' TERM
 echo "sf-tunnel: ok: fake tunnel up"
 echo "fake warning" >&2
@@ -86,12 +95,13 @@ while :; do sleep 0.2; done`;
 test('sf up: serve, the tunnel child with prefixed output, the dashboard opened once; SIGINT stops both', async () => {
   const launcher = await fakeLauncher('up-open', 0);
   const tunnel = await fakeTunnel('up-tunnel', RUNNING.replace('"$LOG"', `'${join(temp, 'up-tunnel', 'tunnel.log')}'`));
-  const env = await newEnv('up-ok', { PATH: `${launcher.bin}:${TOOLS}`, SF_TUNNEL_SCRIPT: tunnel.script });
+  const env = await tunnelEnv('up-ok', { PATH: `${launcher.bin}:${TOOLS}`, SF_TUNNEL_SCRIPT: tunnel.script });
   const up = await spawnUp(env, []);
   try {
     assert.doesNotMatch(up.out(), /auth: /);
     await up.until(() => up.err().includes('tunnel | sf-tunnel: ok: fake tunnel up') && up.err().includes('tunnel | fake warning'), 'the tunnel lines');
-    assert.match(await readFile(tunnel.log, 'utf8'), /^args run$/m);
+    // One tunnel: serve's.
+    assert.deepEqual((await readFile(tunnel.log, 'utf8')).split('\n').filter((line) => line.startsWith('args')), ['args run']);
     const deadline = Date.now() + 15_000;
     while ((await launcher.calls()).length === 0 && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -118,7 +128,7 @@ test('sf up: serve, the tunnel child with prefixed output, the dashboard opened 
 test('sf up: a missing script, a script that fails its check and a launcher failure are reported once; serve goes on; --no-tunnel and --no-open', async () => {
   const launcher = await fakeLauncher('up-open-fail', 3);
   // No script at all.
-  const missingEnv = await newEnv('up-missing', { PATH: `${launcher.bin}:${TOOLS}`, SF_TUNNEL_SCRIPT: join(temp, 'up-missing', 'nope.sh') });
+  const missingEnv = await tunnelEnv('up-missing', { PATH: `${launcher.bin}:${TOOLS}`, SF_TUNNEL_SCRIPT: join(temp, 'up-missing', 'nope.sh') });
   const missing = await spawnUp(missingEnv, ['--no-open']);
   try {
     await missing.until(() => missing.err().includes('tunnel | not started'), 'the missing-script line');
@@ -132,12 +142,12 @@ test('sf up: a missing script, a script that fails its check and a launcher fail
   // The script's own check fails (no profile): its line, then the exit line, and serve goes on;
   // the launcher fails: the reason, and serve goes on.
   const failing = await fakeTunnel('up-tunnel-fail', 'echo "sf-tunnel: FAIL: profile missing: /x/software-factory.yaml (run: init <tunnel_id>)" >&2\nexit 1');
-  const failEnv = await newEnv('up-fail', { PATH: `${launcher.bin}:${TOOLS}`, SF_TUNNEL_SCRIPT: failing.script });
+  const failEnv = await tunnelEnv('up-fail', { PATH: `${launcher.bin}:${TOOLS}`, SF_TUNNEL_SCRIPT: failing.script });
   const failed = await spawnUp(failEnv, []);
   try {
     await failed.until(() => failed.err().includes('tunnel | exited') && failed.err().includes('sf: xdg-open exited with 3'), 'the failure lines');
     assert.match(failed.err(), /^tunnel \| sf-tunnel: FAIL: profile missing: \/x\/software-factory\.yaml \(run: init <tunnel_id>\)$/m);
-    assert.match(failed.err(), /^tunnel \| exited \(1\); sf up goes on without it and the dashboard works\. Fix it and run npm run tunnel in another terminal \(docs\/runbooks\/chatgpt-connection\.md\)\.$/m);
+    assert.match(failed.err(), /^tunnel \| exited \(1\); the dashboard works without it \(docs\/runbooks\/chatgpt-connection\.md\)\.$/m);
     assert.equal(failed.err().split('tunnel | exited').length, 2);
     assert.match(failed.err(), /^sf: xdg-open exited with 3; run sf dashboard for the URL and open it by hand\.$/m);
     assert.deepEqual(await launcher.calls(), [[failed.dashboard]]);
@@ -146,13 +156,15 @@ test('sf up: a missing script, a script that fails its check and a launcher fail
     assert.equal(await failed.stop(), 0);
   }
 
-  // --no-tunnel: nothing spawned; --no-open: nothing launched.
-  const quietEnv = await newEnv('up-quiet', { PATH: `${launcher.bin}:${TOOLS}`, SF_TUNNEL_SCRIPT: failing.script });
+  // --no-tunnel (SF_TUNNEL=off, though the env says auto and has a profile): nothing spawned;
+  // --no-open: nothing launched.
+  const quietEnv = await tunnelEnv('up-quiet', { PATH: `${launcher.bin}:${TOOLS}`, SF_TUNNEL_SCRIPT: failing.script });
   const quiet = await spawnUp(quietEnv, ['--no-tunnel', '--no-open']);
   try {
     await quiet.until(() => quiet.out().includes('tunnel: not started (--no-tunnel)'), 'the no-tunnel line');
     await new Promise((resolve) => setTimeout(resolve, 200));
     assert.equal(quiet.err(), '');
+    assert.equal((await readFile(failing.log, 'utf8')).split('\n').filter((line) => line.startsWith('args')).length, 1, 'only the failing run above');
     assert.deepEqual(await launcher.calls(), [[failed.dashboard]]);
   } finally {
     assert.equal(await quiet.stop(), 0);

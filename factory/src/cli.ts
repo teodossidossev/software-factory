@@ -12,7 +12,7 @@
 // first, src/update.ts) and `sf guard` (the guard, src/guard.ts: run here, no sf
 // serve needed; `sf guard install-hook` writes the pre-push hook).
 // Exit codes: 0 ok, 1 error, 2 usage.
-import { type ChildProcess, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -20,7 +20,7 @@ import { parseArgs } from 'node:util';
 import { open, readFile, realpath } from 'node:fs/promises';
 import { addAttachment, checkSize, removeAttachment } from './attachments.js';
 import { openInBrowser } from './browser.js';
-import { type Config, DEFAULT_TEST_TIMEOUT_MS, envFilePath, gateConfig, gateLevelSetting, handoffSetting, healthSetting, loadConfig, loadEnvFile, rulesMaxBytes, stateDir } from './config.js';
+import { type Config, DEFAULT_TEST_TIMEOUT_MS, envFilePath, gateConfig, gateLevelSetting, handoffSetting, healthSetting, loadConfig, loadEnvFile, rulesMaxBytes, stateDir, tunnelSetting } from './config.js';
 import { DigestStore, Digests } from './digest-run.js';
 import { DigestSchedule } from './digest-schedule.js';
 import {
@@ -30,7 +30,7 @@ import {
 import { FactoryError } from './errors.js';
 import { currentExplanation, Explainer, explanationLines } from './explain.js';
 import { Execution, type ExecutionOptions, type StateListener } from './execution.js';
-import { checkForgeToken, chooseForge, forgeSettings, withoutHostTokens } from './forge.js';
+import { checkForgeToken, chooseForge, forgeSettings } from './forge.js';
 import { codexVersion } from './gate.js';
 import { checkTerms, commitsToCheck, type CommitSpec, type GuardHit, hitReport, installHook, scanBranch, scanChange, scanCommits, scanMrText, worktreeTree } from './guard.js';
 import { existsSync } from 'node:fs';
@@ -51,9 +51,11 @@ import { Setup } from './setup.js';
 import { handoverLines, limitLine, type StatusRow, statusRows } from './status.js';
 import { fileSummaryLines } from './patch.js';
 import { prepareTaskChecksDir } from './sandbox-denials.js';
-import { factoryRoots, OrphanWatch, reapOrphanedSandboxes, REAP_EVERY_MS } from './sandbox-reaper.js';
+import { factoryRoots, OrphanWatch, reapOrphanedSandboxes } from './sandbox-reaper.js';
+import { reapThenScan, upkeep } from './recovery.js';
+import { TunnelChild, tunnelHealthAddress, tunnelProfile, tunnelScript } from './tunnel.js';
 import {
-  fetchText, forgeTargets, freeSpace, type HealthDeps, healthExitCode, healthLines, HealthMonitor, httpAnswers, type QueueFacts, runChecks, runCheckCommand, tunnelHealthAddress, tunnelProfile,
+  fetchText, forgeTargets, freeSpace, type HealthDeps, healthExitCode, healthLines, httpAnswers, type QueueFacts, runChecks, runCheckCommand,
 } from './health.js';
 import { liveOwner } from './pid-lock.js';
 import { CheckStore, checkLines, checkSettings, refuseDraft, runTaskCheck, TaskChecks } from './task-check.js';
@@ -77,11 +79,11 @@ import {
 
 const DEFAULT_PORT = 8787;
 const USAGE = `Usage:
-  sf serve                                              Serve the MCP tools on 127.0.0.1:\${SF_PORT:-${DEFAULT_PORT}}/mcp/<token> and the dashboard; the token (mcp-token in the state directory) is made on the first start
+  sf serve                                              Serve the MCP tools on 127.0.0.1:\${SF_PORT:-${DEFAULT_PORT}}/mcp/<token> and the dashboard; the token (mcp-token in the state directory) is made on the first start; with SF_TUNNEL=auto (the default) and a tunnel profile, the ChatGPT tunnel (scripts/sf-tunnel.sh run) as its child, restarted by the health checks
   sf mcp-url [--header|--rotate|--port]                 Print the MCP URL with its token, for an MCP client (claude mcp add --transport http software-factory <url>); --header: the URL without it and the Authorization header; --rotate: a new token (sf serve takes it at once; restart the tunnel); --port: the port only
   sf mcp-url --write-profile|--check-profile <file>     The tunnel's steps (scripts/sf-tunnel.sh): set the profile's MCP url line to the URL with the token, or check that it is (exit 1 when not)
   sf mcp-url --redact|--probe                           The tunnel's steps: copy stdin to stdout with the token shown as <token>; send an MCP initialize with the token (exit 0 answers, 1 refused, 2 not reachable)
-  sf up [--no-open] [--no-tunnel]                       sf serve plus the planning tunnel for ChatGPT (scripts/sf-tunnel.sh run) in one terminal, and open the dashboard; Ctrl+C stops both
+  sf up [--no-open] [--no-tunnel]                       sf serve (with its tunnel; --no-tunnel: SF_TUNNEL=off) in one terminal, and open the dashboard; Ctrl+C stops both
   sf dashboard [--open] [--rotate]                      Print the dashboard URL; --open also opens it (xdg-open); --rotate removes the token so the next sf serve makes a new one
   sf workspace add <name> --read <path> [--handoff checkout|off] [--color <name>]  Register a workspace: the local checkout (every job works in a worktree of it); --handoff: its own hand-over setting, over SF_HANDOFF; --color: its colour on the board (blue, teal, green, olive, orange, red, purple or grey; default: by its name). Again with the same path: changes the --handoff and --color given
   sf workspace list                                     List registered workspaces, their hand-over setting and colour
@@ -130,12 +132,8 @@ function parsePort(name: 'SF_PORT' | 'SF_DASHBOARD_PORT' | 'SF_DASHBOARD_REMOTE_
 
 const dashboardOn = (): boolean => process.env.SF_DASHBOARD !== 'off';
 
-interface ServeHooks {
-  // Called once, before the servers close, when a signal stops sf serve.
-  beforeStop?: () => void;
-}
-
-async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefined }> {
+// options.tunnel: sf up --no-tunnel's off, over SF_TUNNEL.
+async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL | undefined }> {
   const port = parsePort('SF_PORT', DEFAULT_PORT);
   const dashboardPort = parsePort('SF_DASHBOARD_PORT', DEFAULT_DASHBOARD_PORT);
   // SF_DASHBOARD_REMOTE_ORIGINS: an invalid value stops the start; not read with the dashboard off.
@@ -147,8 +145,9 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     checkDashboardPorts(dashboardPort, remotePort);
   }
   const config = loadConfig();
-  // SF_HEALTH: an invalid value stops the start here.
+  // SF_HEALTH and SF_TUNNEL: an invalid value stops the start here.
   const healthOn = healthSetting();
+  const tunnelOn = tunnelSetting() === 'auto' && options.tunnel !== 'off';
   const handbook = await loadHandbook();
   // Fail at startup on an invalid registry rather than on the first tool call.
   const registry = await loadRegistry();
@@ -280,20 +279,23 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     await socket.close();
     throw error;
   }
-  // The health checks, unless SF_HEALTH=off: every CHECK_EVERY_MS (logins hourly), the
-  // traffic light of the dashboard and one notification when a check turns down or is ok again.
-  const healthMonitor = healthOn ? new HealthMonitor(healthDeps(config, {
-    mcp: async () => ({ port: boundMcpPort, token: await readMcpToken(config.stateDir).catch(() => undefined) }),
-    queue: async () => ({ view: await runQueue.view(), lastStart: (await queueStore.read()).last_start, newestJob: newestJob(await jobs.list()) }),
-    sandboxes: (() => {
-      const watch = new OrphanWatch(() => factoryRoots(config));
-      return () => watch.scan();
-    })(),
-    digests: digests.store,
-  }), {
-    onChange: () => dashboard?.healthChanged(),
-    notify: (notification) => sendNotification(notification, notifyConfig()),
+  // The tunnel with SF_TUNNEL=auto and a tunnel profile: started once serve answers, below.
+  const tunnel = tunnelOn && existsSync(tunnelProfile()) ? new TunnelChild({
+    script: tunnelScript(), stateDir: config.stateDir, address: tunnelHealthAddress(), token: () => readMcpToken(config.stateDir),
   }) : undefined;
+  // The health checks, unless SF_HEALTH=off (src/recovery.ts): every CHECK_EVERY_MS (logins
+  // hourly), the traffic light of the dashboard, one notification when a check turns down or is ok
+  // again, the tunnel's recovery and the sandbox reaper before each sandboxes check.
+  const upkept = upkeep({
+    health: healthOn, tunnel, roots: () => factoryRoots(config), watch: new OrphanWatch(() => factoryRoots(config)),
+    deps: healthDeps(config, {
+      mcp: async () => ({ port: boundMcpPort, token: await readMcpToken(config.stateDir).catch(() => undefined) }),
+      queue: async () => ({ view: await runQueue.view(), lastStart: (await queueStore.read()).last_start, newestJob: newestJob(await jobs.list()) }),
+      digests: digests.store,
+    }),
+    monitor: { onChange: () => dashboard?.healthChanged(), notify: (notification) => sendNotification(notification, notifyConfig()) },
+  });
+  const healthMonitor = upkept.monitor;
   try {
     if (dashboardOn()) {
       // The dashboard's actions (DashboardActions: start, approve, abort, say, retryReview,
@@ -362,11 +364,16 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     markerWatch.start();
   }
   explainer.start().catch((error: unknown) => console.error(error));
-  // The leftovers of the sessions' Bash sandboxes, also those no session end caught: every
-  // REAP_EVERY_MS while sf serve runs. The reaper never throws.
-  const sandboxReaper = setInterval(() => void reapOrphanedSandboxes(factoryRoots(config)), REAP_EVERY_MS);
-  sandboxReaper.unref();
-  healthMonitor?.start();
+  // The tunnel's check needs the factory to answer, so it starts here; its group ends with sf serve.
+  if (tunnel !== undefined) {
+    process.once('exit', () => tunnel.stopNow());
+    await tunnel.start();
+  } else {
+    console.log(`tunnel: not started (${tunnelOn ? `no tunnel profile: ${tunnelProfile()}` : options.tunnel === 'off' ? '--no-tunnel' : 'SF_TUNNEL=off'})`);
+  }
+  // The leftovers of the sessions' Bash sandboxes, also those no session end caught: before each
+  // sandboxes check, or every REAP_EVERY_MS with SF_HEALTH=off. The reaper never throws.
+  upkept.start();
 
   let stopping = false;
   const stop = (signal: NodeJS.Signals): void => {
@@ -375,16 +382,14 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
     }
     stopping = true;
     console.log(`${SERVER_NAME} received ${signal}, shutting down`);
-    hooks.beforeStop?.();
     followed.close();
     markerWatch.close();
     runQueue.close();
     autoChecks?.close();
     digestSchedule.close();
     explainer.close();
-    clearInterval(sandboxReaper);
-    healthMonitor?.close();
-    Promise.all([server.close(), socket.close(), dashboard?.close()]).then(
+    upkept.close();
+    Promise.all([server.close(), socket.close(), dashboard?.close(), tunnel?.stop()]).then(
       () => process.exit(0),
       (error: unknown) => {
         console.error(error);
@@ -397,80 +402,14 @@ async function serve(hooks: ServeHooks = {}): Promise<{ dashboard: URL | undefin
   return { dashboard: dashboard?.url };
 }
 
-const RUNBOOK = 'docs/runbooks/chatgpt-connection.md';
-
-// scripts/sf-tunnel.sh of this package (dist/src/cli.js is three levels below the repository
-// root), or SF_TUNNEL_SCRIPT.
-function tunnelScript(): string {
-  return process.env.SF_TUNNEL_SCRIPT || fileURLToPath(new URL('../../../scripts/sf-tunnel.sh', import.meta.url));
-}
-
-// The tunnel as a child of sf up, its output on stderr prefixed "tunnel | ". A missing script,
-// a failed check or an exit is reported once; sf up goes on without the tunnel.
-interface Tunnel {
-  // Ends the tunnel on purpose: its exit is not reported as a failure.
-  stop(): void;
-}
-
-function startTunnel(token: string | undefined): Tunnel | undefined {
-  const script = tunnelScript();
-  if (!existsSync(script)) {
-    console.error(`tunnel | not started: ${script} is missing; the dashboard works without it (${RUNBOOK}).`);
-    return undefined;
-  }
-  const child: ChildProcess = spawn(script, ['run'], { env: withoutHostTokens(), stdio: ['ignore', 'pipe', 'pipe'] });
-  const forward = (stream: NodeJS.ReadableStream): void => {
-    let rest = '';
-    stream.setEncoding('utf8');
-    stream.on('data', (chunk: string) => {
-      rest += chunk;
-      const lines = rest.split('\n');
-      rest = lines.pop() ?? '';
-      for (const line of lines) {
-        console.error(`tunnel | ${redactMcpToken(line, token)}`);
-      }
-    });
-    stream.on('end', () => {
-      if (rest !== '') {
-        console.error(`tunnel | ${redactMcpToken(rest, token)}`);
-        rest = '';
-      }
-    });
-  };
-  forward(child.stdout!);
-  forward(child.stderr!);
-  let wanted = false;
-  child.once('error', (error) => {
-    console.error(`tunnel | could not start (${error.message}); sf up goes on without it (${RUNBOOK}).`);
-  });
-  child.once('exit', (code, signal) => {
-    if (!wanted) {
-      console.error(`tunnel | exited (${code ?? signal}); sf up goes on without it and the dashboard works. Fix it and run npm run tunnel in another terminal (${RUNBOOK}).`);
-    }
-  });
-  return {
-    stop() {
-      wanted = true;
-      child.kill('SIGTERM');
-    },
-  };
-}
-
-// `sf up`: sf serve in this process, the tunnel as a child, the dashboard in the browser.
+// `sf up`: sf serve in this process (the tunnel is its child), the dashboard in the browser.
 async function up(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { 'no-open': { type: 'boolean' }, 'no-tunnel': { type: 'boolean' } } });
   if (positionals.length !== 0) {
     throw new UsageError('up takes no arguments (only --no-open and --no-tunnel).');
   }
-  let tunnel: Tunnel | undefined;
-  const { dashboard } = await serve({ beforeStop: () => tunnel?.stop() });
-  // The tunnel's check needs the factory to answer, so it starts after serve.
-  if (values['no-tunnel'] !== true) {
-    // The tunnel's lines never show the MCP token, which serve has made by now.
-    tunnel = startTunnel(await readMcpToken(stateDir()).catch(() => undefined));
-  } else {
-    console.log('tunnel: not started (--no-tunnel)');
-  }
+  // The tunnel is serve's (SF_TUNNEL); --no-tunnel is SF_TUNNEL=off.
+  const { dashboard } = await serve(values['no-tunnel'] === true ? { tunnel: 'off' } : {});
   if (values['no-open'] === true || dashboard === undefined) {
     return;
   }
@@ -893,12 +832,12 @@ function claudeExecutable(config: Config): string {
   }
 }
 
-// What sf serve and sf health each read differently: the MCP port and token, the run queue, the
-// orphan scans and the digests.
-type HealthSources = Pick<HealthDeps, 'mcp' | 'queue' | 'sandboxes' | 'digests'>;
+// What sf serve and sf health each read differently: the MCP port and token, the run queue and the
+// digests. Each adds its own orphan scans (sandboxes).
+type HealthSources = Pick<HealthDeps, 'mcp' | 'queue' | 'digests'>;
 
 // The checks' dependencies, the same for sf serve and sf health but for sources.
-function healthDeps(config: Config, sources: HealthSources): HealthDeps {
+function healthDeps(config: Config, sources: HealthSources): Omit<HealthDeps, 'sandboxes'> {
   const jobs = new JobStore(config.stateDir);
   return {
     ...sources,
@@ -955,7 +894,7 @@ async function localQueueFacts(config: Config): Promise<QueueFacts> {
 const SANDBOX_RESCAN_MS = 10_000;
 
 // `sf health [--json]`: the checks computed here once, without asking sf serve; logins
-// always run, the orphan scan runs twice 10 s apart. Returns the exit code: 0 all ok or off, 3 any
+// always run, the orphan scan runs twice 10 s apart with the reaper between them. Returns the exit code: 0 all ok or off, 3 any
 // recovering and none down, 1 any down.
 async function health(args: string[]): Promise<number> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { json: { type: 'boolean' } } });
@@ -964,16 +903,19 @@ async function health(args: string[]): Promise<number> {
   }
   const config = loadConfig();
   const watch = new OrphanWatch(() => factoryRoots(config));
-  const checks = await runChecks(healthDeps(config, {
-    mcp: async () => ({ port: await mcpPort().catch(() => undefined), token: await readMcpToken(config.stateDir).catch(() => undefined) }),
-    queue: () => localQueueFacts(config),
+  const checks = await runChecks({
+    ...healthDeps(config, {
+      mcp: async () => ({ port: await mcpPort().catch(() => undefined), token: await readMcpToken(config.stateDir).catch(() => undefined) }),
+      queue: () => localQueueFacts(config),
+      digests: new DigestStore(config.stateDir),
+    }),
+    // The reaper between the two scans, as sf serve before each check.
     sandboxes: async () => {
       await watch.scan();
       await new Promise((resolve) => setTimeout(resolve, SANDBOX_RESCAN_MS));
-      return watch.scan();
+      return reapThenScan(watch, () => reapOrphanedSandboxes(factoryRoots(config)))();
     },
-    digests: new DigestStore(config.stateDir),
-  }));
+  });
   console.log(values.json === true ? JSON.stringify(checks, null, 2) : healthLines(checks).join('\n'));
   return healthExitCode(checks);
 }
@@ -1186,7 +1128,7 @@ async function mcpUrlCommand(args: string[]): Promise<void> {
   if (values.rotate === true) {
     await replaceMcpToken(state);
     console.log('MCP token rotated: a running sf serve answers only the new one from its next request.');
-    console.log('Restart the tunnel (npm run tunnel again, or sf up), and give other MCP clients the new URL from sf mcp-url.');
+    console.log('Restart the tunnel (restart sf serve, which restarts its own; with SF_TUNNEL=off, npm run tunnel again), and give other MCP clients the new URL from sf mcp-url.');
     return;
   }
   if (values.redact === true) {

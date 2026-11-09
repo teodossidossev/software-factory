@@ -473,7 +473,10 @@ test('sf up: the relay of the tunnel\'s lines shows the token as <token>', async
   const dir = join(temp, 'mcp-up-tunnel');
   await mkdir(dir, { recursive: true });
   const script = join(dir, 'sf-tunnel.sh');
-  const env = await newEnv('mcp-up', { SF_TUNNEL_SCRIPT: script, PATH: '/usr/bin:/bin' });
+  // sf serve runs the tunnel with SF_TUNNEL=auto and a tunnel profile.
+  const env = await newEnv('mcp-up', { SF_TUNNEL: 'auto', SF_TUNNEL_SCRIPT: script, PATH: '/usr/bin:/bin' });
+  await mkdir(join(env.home, '.config', 'tunnel-client'), { recursive: true });
+  await writeFile(join(env.home, '.config', 'tunnel-client', 'software-factory.yaml'), 'config_version: 1\n');
   // The fake prints what a tunnel client may print, the profile's URL, again and again (the test
   // listens from the moment serve answers).
   await writeFile(script, `#!/bin/sh\nt=$(cat '${join(env.state, MCP_TOKEN_FILE)}')\ntrap 'exit 0' TERM\nwhile :; do echo "url http://127.0.0.1:1/mcp/$t"; echo "err $t" >&2; sleep 0.2; done\n`);

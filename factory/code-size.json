@@ -1,5 +1,5 @@
 {
-  "src/cli.ts": 1625,
+  "src/cli.ts": 1567,
   "src/dashboard.ts": 2142,
   "src/digest.ts": 819,
   "src/execution/control.ts": 713,
@@ -8,7 +8,7 @@
   "src/execution/start.ts": 614,
   "src/guard.ts": 832,
   "src/handoff.ts": 686,
-  "src/health.ts": 746,
+  "src/health.ts": 739,
   "src/jobs.ts": 977,
   "src/live-smoke.ts": 1462,
   "src/mr.ts": 749,

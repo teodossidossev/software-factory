@@ -1,4 +1,4 @@
-// The simplification pass (SF-055): reviewers add, nobody removes. Once per job, after the deciding
+// The simplification pass: reviewers add, nobody removes. Once per job, after the deciding
 // clean verdict of a job that had review fixes, a fresh read-only Agent SDK query() (the review's
 // tools, isolation and sandbox, src/review.ts) reads the Task file without its Fix sections, the
 // final Patch, the findings ledger and the files each Fix section's iteration changed, and names
@@ -31,7 +31,7 @@ export const simplifyOutput = z.strictObject({
 });
 export type Suggestion = z.output<typeof suggestion>;
 export type SimplifyOutput = z.output<typeof simplifyOutput>;
-// The schema sent as outputFormat: draft-07 without $schema, as the review's (SF-044).
+// The schema sent as outputFormat: draft-07 without $schema, as the review's.
 const { $schema: _draft, ...simplifySchema } = z.toJSONSchema(simplifyOutput, { target: 'draft-7' });
 export const SIMPLIFY_SCHEMA: Record<string, unknown> = simplifySchema;
 
@@ -182,7 +182,7 @@ export function guardSuggestions(suggestions: Suggestion[], ledger: LedgerEntry[
 }
 
 // Runs the pass; never throws (runStructuredSession). options.deny and options.filesystem carry the
-// session's path denials (SF-100), as for the review.
+// session's path denials, as for the review.
 export function runSimplify(prompt: string, options: ReviewOptions): Promise<StructuredOutcome<SimplifyOutput>> {
   return runStructuredSession(prompt, options, { schema: SIMPLIFY_SCHEMA, output: simplifyOutput, noun: 'simplification pass', outputNoun: 'answer' });
 }
@@ -206,7 +206,7 @@ export function offerMessage(suggestions: Suggestion[]): string {
 }
 
 // The user chose Simplify: one ledger entry per suggestion (reviewer simplify, accepted_risk with
-// SIMPLIFY_NOTE: a reviewer item that reopens one is dropped, SF-052 rule 1), asked in Fix fix, and
+// SIMPLIFY_NOTE: a reviewer item that reopens one is dropped), asked in Fix fix, and
 // the body of that Fix section.
 export function simplifyFix(ledger: LedgerEntry[], summary: string, suggestions: Suggestion[], fix: number, at: string): { ledger: LedgerEntry[]; content: string } {
   let number = nextNumber(ledger);

@@ -225,7 +225,7 @@ test('sf workspace add, list and remove manage the registry with the documented 
   execFileSync('git', ['init', '-q', broken]);
   const retired = await runCli(['workspace', 'add', 'broken', '--read', repo, '--work', broken]);
   assert.equal(retired.code, 1);
-  assert.match(retired.stderr, /--work is no longer supported/);
+  assert.match(retired.stderr, /--work is not supported/);
   assert.equal((await runCli(['workspace', 'add', 'broken', '--read', broken])).code, 0);
   assert.equal((await runCli(['workspace', 'add', 'gone', '--read', broken])).code, 0);
   assert.equal((await runCli(['workspace', 'remove', 'gone'])).code, 0);
@@ -510,7 +510,7 @@ test('sf rules (SF-059): the rule files that would be given, without their text:
   // A job started before SF-059: nothing stored, no rules in its prompts.
   const before = await runCli(['rules', 'rules-demo', 'T-1']);
   assert.equal(before.code, 0, before.stderr);
-  assert.equal(before.stdout, 'The job of rules-demo/T-1 has no stored rules (it started before SF-059): its prompts carry no <rules> block.\n');
+  assert.equal(before.stdout, 'The job of rules-demo/T-1 has no stored rules (it started before rules were stored): its prompts carry no <rules> block.\n');
   // A job with stored rules: its own list, whatever the rules files and the budget say today.
   const { collectRules, writeJobRules } = await import('../src/rules-docs.js');
   const jobDir = join(temp, 'state', 'jobs', 'rules-demo', 'T-1');

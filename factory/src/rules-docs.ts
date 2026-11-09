@@ -1,8 +1,8 @@
-// The coding rules the agents are given (SF-059): the repository's instruction file (AGENTS.md,
+// The coding rules the agents are given: the repository's instruction file (AGENTS.md,
 // else CLAUDE.md, else .github/copilot-instructions.md) and the Markdown files AGENTS.md links to,
 // one hop, read at a commit; then the user's rules files of the workspace and of every workspace
 // in the config directory. The documents go to the agents as they are, in one <rules> block, up to
-// a byte budget (SF-093: the user's files first, cut when they do not fit; then the repository's).
+// a byte budget (the user's files first, cut when they do not fit; then the repository's).
 // Nothing here knows about job states: the Execution collects them once per job and stores the
 // block and its list in the job's directory.
 import { createHash } from 'node:crypto';
@@ -350,7 +350,7 @@ export async function writeJobRules(jobDir: string, collected: CollectedRules): 
   await writeFileAtomic(join(jobDir, RULES_TEXT), Buffer.from(collected.block, 'utf8'));
 }
 
-// The job's <rules> block; '' for a job without rules (started before SF-059, or none found).
+// The job's <rules> block; '' for a job without rules (started before rules were stored, or none found).
 export async function readJobRules(jobDir: string): Promise<string> {
   try {
     return await readFile(join(jobDir, RULES_TEXT), 'utf8');
@@ -363,7 +363,7 @@ export async function readJobRules(jobDir: string): Promise<string> {
 }
 
 // The job's stored list (rules.json), the rules its prompts carry; undefined for a job without
-// rules.md (started before SF-059, or whose collection failed).
+// rules.md (started before rules were stored, or whose collection failed).
 export async function readJobRulesList(jobDir: string): Promise<RulesList | undefined> {
   try {
     await stat(join(jobDir, RULES_TEXT));

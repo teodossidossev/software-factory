@@ -1,17 +1,17 @@
 // board.js, the dashboard's fourth script (DASHBOARD_SCRIPTS in src/dashboard.ts), built from
-// web/board.ts into dist/web/ (SF-148): the board, the workspaces and dependencies on it, its cards,
+// web/board.ts into dist/web/: the board, the workspaces and dependencies on it, its cards,
 // the queue and the toast. A classic script, loaded in order with defer, sharing the page's globals
 // with the others. This file has no import or export on purpose: the compiler keeps it a script, so
 // its top-level names stay the page's globals.
 'use strict';
 
-// ---------- The board (SF-077: the v3 board of docs/design/dashboard-v3/prototype.html) ----------
+// ---------- The board (the v3 board of docs/design/dashboard-v3/prototype.html) ----------
 
 // The columns of the board; a job is in any but the Queue.
 type Column = 'queue' | 'implementing' | 'reviewing' | 'you' | 'done';
 type JobColumn = Exclude<Column, 'queue'>;
 // The column of each job state; the tickets without a live job are in the Queue. One column per
-// ticket (SF-057): a ticket whose last job failed or was aborted is in the Queue (to start again),
+// ticket: a ticket whose last job failed or was aborted is in the Queue (to start again),
 // not also in Done; a pushed one is only in Done.
 const COLUMN_OF: Readonly<Record<JobState, JobColumn>> = {
   starting: 'implementing', working: 'implementing', waiting_limit: 'implementing',
@@ -24,7 +24,7 @@ const COLUMNS: readonly Column[] = ['queue', 'implementing', 'reviewing', 'you',
 const isColumn = (name: unknown): name is Column => COLUMNS.some((column) => column === name);
 // The list of each column: #qlist as the prototype's Queue, #list-<column> for the others.
 const LIST_OF: Readonly<Record<Column, string>> = { queue: 'qlist', implementing: 'list-implementing', reviewing: 'list-reviewing', you: 'list-you', done: 'list-done' };
-// Without SF-071's queue the Queue is today's Planned column, with its empty text.
+// Without the run queue the Queue column lists the planned tickets, with its empty text.
 const EMPTY_TEXT: Readonly<Record<'planned' | JobColumn, string>> = { planned: 'No ticket waits to start.', implementing: 'Nothing is being implemented.', reviewing: 'Nothing is in review.', you: 'Nothing waits for you.', done: 'No finished job.' };
 // The element an event's target is in that matches the selector, or null (a target that is no
 // element too; the tests' fake events may have none, undefined).
@@ -34,7 +34,7 @@ const fieldOf = (data: unknown, name: string): unknown => (isRecord(data) ? data
 // A ticket in the run queue: it has its position.
 const isQueued = (row: TicketRow): row is QueuedRow => Number.isInteger(row.queue_position);
 
-// The run queue (SF-071): the Queue column's text without a queued ticket, and the limit's range.
+// The run queue: the Queue column's text without a queued ticket, and the limit's range.
 const QUEUE_EMPTY = 'The queue is empty: add a ticket below.';
 const LIMIT_MIN = 1;
 const LIMIT_MAX = 20;
@@ -43,7 +43,7 @@ const DONE_LIMIT = 8;
 const DONE_LABELS: Readonly<Partial<Record<JobState, string>>> = { pushed: 'Pushed', aborted: 'Aborted', failed: 'Failed' };
 const RESTARTABLE: readonly JobState[] = ['failed', 'aborted'];
 // The states of a running card: the Now line, the tool calls, the cost "so far"; a job parked on a
-// usage limit (SF-072) holds its slot and counts as running, with a card of its own.
+// usage limit holds its slot and counts as running, with a card of its own.
 const RUNNING: readonly JobState[] = ['starting', 'working', 'awaiting_review', 'preparing_mr', 'waiting_limit'];
 // While a card runs and the page is visible, api/jobs is read again this often.
 const REFRESH_MS = 15000;
@@ -54,12 +54,12 @@ const TOAST_MS = 6000;
 // tries again.
 const canApprove = (job: JobRow): boolean => job.state === 'ready_for_human_review' || job.state === 'handed_over' || (job.state === 'needs_human' && typeof job.prepared_commit === 'string');
 
-// The hand-over (SF-073): the line of a job in the user's checkout, and why a job ready for review
+// The hand-over: the line of a job in the user's checkout, and why a job ready for review
 // was not handed over ('' when it was not refused).
 const checkoutLine = (job: JobRow): string => `In your checkout on ${job.branch}`;
 const skippedNote = (job: JobRow): string => (job.handoff_skipped !== null && typeof job.handoff_skipped === 'object' ? `Not handed over to your checkout: ${job.handoff_skipped.message} ` : '');
 
-// The merge request on the Git host (SF-048): the job has one; Create merge request applies to a
+// The merge request on the Git host: the job has one; Create merge request applies to a
 // branch ready to approve (push, then open) and to a pushed one without an open or merged one;
 // Merge to an open one. mrOff: why the actions are off for the job's workspace, or ''.
 const hasMr = (job: JobRow): job is JobRow & { mr: JobMr } => job.mr !== null && typeof job.mr === 'object';
@@ -84,11 +84,11 @@ const stopCount = (job: JobRow): number | null => (Array.isArray(job.stop?.items
 const said = (job: JobRow): string => (firstLine(job.error?.message) === '' ? '' : `: ${firstLine(job.error?.message).replace(/\.$/, '')}`);
 // When the Claude usage limit of a usage_limit stop resets ("You've hit your … limit · resets 3am (Europe/Sofia)").
 const resetTime = (job: JobRow): string | null => /resets\s+(.+)$/i.exec(firstLine(job.error?.message))?.[1] ?? null;
-// How the last run of a tests_failed stop ended (SF-128): "exit 1" or "timed out after 30 min" of its message.
+// How the last run of a tests_failed stop ended: "exit 1" or "timed out after 30 min" of its message.
 const testsEnding = (job: JobRow): string | null => /\((exit -?\d+|timed out after [^)]+)\) on iteration/.exec(firstLine(job.error?.message))?.[1] ?? null;
 
-// The words of each stop (SF-077) for the cards and the job page (its header, its stop block and
-// its composer, SF-078), keyed by the server's stop_code (SF-129: the rows of factory/src/stops.ts;
+// The words of each stop for the cards and the job page (its header, its stop block and
+// its composer), keyed by the server's stop_code (the rows of factory/src/stops.ts;
 // a stop's kind is the payload's stop_kind, so a decision never shows as an error). Each entry:
 // the card's reason, the sentence (with the job's numbers, or the words without one that is not
 // known) and the card's button. N, M, X and T come from the job.
@@ -196,7 +196,7 @@ const STOPS = {
     reason: 'Fetch failed', button: (job: JobRow) => (retryOn(job) ? 'Retry' : 'Tell it to go on'),
     sentence: (job: JobRow) => `Git could not fetch ${job.base} from origin after the clean review. ${retryOn(job) ? 'Retry when the network is back.' : 'Tell the Implementer to go on when the network is back (the iteration is reviewed again).'}`,
   },
-  // The guard's stops of MR preparation (SF-122): guard_hit, guard_terms_invalid, guard_failed.
+  // The guard's stops of MR preparation: guard_hit, guard_terms_invalid, guard_failed.
   guard_hit: {
     reason: 'Guard stopped the MR', button: (job: JobRow) => (retryOn(job) ? 'Retry' : 'Tell it how'),
     sentence: (job: JobRow) => `The guard stopped MR preparation${said(job)}. ${retryOn(job) ? 'Retry runs it again' : 'Tell the Implementer how to go on'}, or abort.`,
@@ -227,7 +227,7 @@ interface StopWords {
 }
 // A code with an entry of STOPS.
 const isStopCode = (code: unknown): code is keyof typeof STOPS => typeof code === 'string' && Object.hasOwn(STOPS, code);
-// The entry of STOPS for a stop's canonical code (the server's stop_code, SF-129).
+// The entry of STOPS for a stop's canonical code (the server's stop_code).
 function stopEntry(code: unknown): StopWords {
   return isStopCode(code) ? STOPS[code] : STOPS.other;
 }
@@ -243,7 +243,7 @@ function sentence(job: JobRow): string {
     case 'paused':
       return `Paused by you during iteration ${it}`;
     case 'waiting_limit': {
-      // SF-072: parked on a usage limit.
+      // Parked on a usage limit.
       const who = LIMIT_PROVIDERS[job.limit?.provider ?? ''] ?? 'The';
       if (job.limit?.reset_seen === true) {
         return `The ${who} usage limit reset during iteration ${it}; the job waits for you`;
@@ -259,7 +259,7 @@ function sentence(job: JobRow): string {
     case 'ready_for_human_review':
       return 'Reviews are clean and the MR text is written. Push when you are happy';
     case 'handed_over':
-      // SF-073: the branch waits in the user's checkout.
+      // The branch waits in the user's checkout.
       return checkoutLine(job);
     case 'pushed':
       return `Pushed at ${clock(job.updated_at)}`;
@@ -294,8 +294,8 @@ interface DependencyGraph {
   deps: Map<string, DependencyRow[]>;
   needed: Map<string, string[]>;
 }
-// What the cards need of the board as a whole: the dependency graph (SF-084).
-// The board's folded columns (SF-119): names of COLUMNS, kept in localStorage.
+// What the cards need of the board as a whole: the dependency graph.
+// The board's folded columns: names of COLUMNS, kept in localStorage.
 const board: { graph: DependencyGraph; folded: Set<string> } = { graph: { deps: new Map(), needed: new Map() }, folded: new Set() };
 const FOLD_KEY = 'sf-board-folded';
 
@@ -338,7 +338,7 @@ function toggleFold(name: unknown): void {
   applyFolds();
 }
 
-// ---------- Workspaces and dependencies on the board (SF-084) ----------
+// ---------- Workspaces and dependencies on the board ----------
 
 // The workspace palette: the --ws-<name> tokens of app.css. The server sends each workspace's
 // colour (its own, else the one its name picks); the page only reads it.
@@ -486,7 +486,7 @@ function showCard(key: string): void {
     toast({ level: 'info', text: `${key} has no card on the board: no Task file and no job.` });
     return;
   }
-  // A card in a folded column: the column unfolds (SF-119).
+  // A card in a folded column: the column unfolds.
   const column = card.closest('.col')?.querySelector<HTMLElement>('[data-colfold]')?.dataset.colfold;
   if (column !== undefined && board.folded.has(column)) {
     board.folded.delete(column);
@@ -541,7 +541,7 @@ function onCardBlur(event: FocusEvent): void {
   }
 }
 
-// The first line of a job card: the key, the workspace chip (SF-084), the code of a stopped job,
+// The first line of a job card: the key, the workspace chip, the code of a stopped job,
 // and the money: the cost so far (none before there is one) and the time since the start while it
 // runs, the cost and the time it took when it does not.
 function cardRow(job: JobRow): HTMLElement {
@@ -559,7 +559,7 @@ function cardRow(job: JobRow): HTMLElement {
   return row;
 }
 
-// Every card (SF-084): its key for the dependency highlight and its workspace's colour stripe.
+// Every card: its key for the dependency highlight and its workspace's colour stripe.
 function boardCard(key: string, workspace: string): HTMLLIElement {
   const item = el('li', `card ${wsClass(workspace)}`.trim());
   item.setAttribute('tabindex', '0');
@@ -575,7 +575,7 @@ function jobCard(job: JobRow): HTMLLIElement {
   item.dataset.open = key;
   item.append(cardRow(job), el('div', 'title', titleOf(job)));
   if (job.state === 'waiting_limit') {
-    // SF-072: parked on a usage limit, holding its slot; once the reset passed under the rule wait,
+    // Parked on a usage limit, holding its slot; once the reset passed under the rule wait,
     // the user resumes it.
     if (job.limit?.reset_seen === true) {
       const act = el('div', 'act');
@@ -602,11 +602,11 @@ function jobCard(job: JobRow): HTMLLIElement {
     const n = stopCount(job);
     item.append(reason, el('div', 'meta', `Iteration ${shownIteration(job)} · ${n ? `${counted(n, 'finding')} to decide` : `stopped at ${clock(job.updated_at)}`}`), ...yourTurn(job));
   } else if (job.state === 'ready_for_human_review') {
-    // SF-073: why the automatic hand-over did not happen, when it was refused.
+    // Why the automatic hand-over did not happen, when it was refused.
     const skipped = skippedNote(job) === '' ? [] : [el('div', 'meta note', skippedNote(job).trim())];
     item.append(el('div', 'reason ready', 'Ready to push: reviews clean, MR text written'), el('div', 'meta', `Iteration ${shownIteration(job)}`), ...skipped, ...yourTurn(job));
   } else if (job.state === 'handed_over') {
-    // SF-073: the job's changes wait in the user's checkout.
+    // The job's changes wait in the user's checkout.
     item.append(el('div', 'reason ready', checkoutLine(job)), el('div', 'meta', `Iteration ${shownIteration(job)}`), ...yourTurn(job));
   } else if (job.state === 'paused') {
     item.append(el('div', 'reason', 'Paused by you'), el('div', 'meta', `Iteration ${shownIteration(job)}`));
@@ -624,11 +624,11 @@ function jobCard(job: JobRow): HTMLLIElement {
       item.append(...pushedFoot(job));
     }
   }
-  // SF-069: the Implementer's turn went on by itself after the turn limit.
+  // The Implementer's turn went on by itself after the turn limit.
   if (typeof job.turn_limit === 'string') {
     item.append(el('div', 'meta note', job.turn_limit));
   }
-  // SF-084: who waits for this ticket, and a cycle it is part of.
+  // Who waits for this ticket, and a cycle it is part of.
   const { needed, cycle } = dependencyLines(key, board.graph, 'div');
   item.append(...[needed, cycle].filter((line) => line !== null));
   return item;
@@ -636,27 +636,27 @@ function jobCard(job: JobRow): HTMLLIElement {
 
 // The one primary action of a Your turn card, and the job's last outcome. It opens the job's page
 // at the stop or the message box (a handed-over branch with the Approve confirmation, a branch
-// ready for review on its Merge request screen, SF-080), except Retry review, Retry (SF-087) and Resume, which go
+// ready for review on its Merge request screen), except Retry review, Retry and Resume, which go
 // at once; a prepared branch also offers Create merge request….
 function yourTurn(job: JobRow): HTMLElement[] {
   const key = keyOf(job);
   const act = el('div', 'act');
   let primary: HTMLButtonElement;
   if (job.state === 'ready_for_human_review') {
-    // SF-080: the job's Merge request screen, where the text is reviewed, saved and pushed.
+    // The job's Merge request screen, where the text is reviewed, saved and pushed.
     primary = button('btn primary small', 'Review the MR and push', { open: key, screen: 'mr' });
   } else if (job.state === 'handed_over') {
     primary = button('btn primary small', 'Review the MR and push', { open: key, confirm: 'approve' });
     primary.disabled = availability('approve', job) !== '';
   } else if (job.state === 'paused') {
-    // Resume (SF-067) needs no confirmation; a message for the Implementer is written in the job.
+    // Resume needs no confirmation; a message for the Implementer is written in the job.
     primary = button('btn primary small', ACTION_LABELS.resume, { run: 'resume', key });
     primary.disabled = availability('resume', job) !== '';
   } else if (reviewFailed(job)) {
     primary = button('btn primary small', ACTION_LABELS.review, { run: 'review', key });
     primary.disabled = availability('review', job) !== '';
   } else if (retryOn(job)) {
-    // Retry of a transient MR preparation failure (SF-087), posted at once.
+    // Retry of a transient MR preparation failure, posted at once.
     primary = button('btn primary small', ACTION_LABELS.retry, { run: 'retry', key });
     primary.disabled = availability('retry', job) !== '';
   } else {
@@ -702,8 +702,8 @@ function mrCardButton(job: JobRow, action: string): HTMLButtonElement {
   return node;
 }
 
-// A pushed job on Done (SF-048): its merge request with the link, Create merge request… or
-// Merge… where they apply, Archive ticket while its Task file is active (SF-057: the ticket has
+// A pushed job on Done: its merge request with the link, Create merge request… or
+// Merge… where they apply, Archive ticket while its Task file is active (the ticket has
 // no Queue card then), and the job's last outcome. Never a primary button.
 function pushedFoot(job: JobRow): HTMLElement[] {
   const key = keyOf(job);
@@ -735,16 +735,16 @@ function lastJobState(row: TicketRow): JobState | null {
   return jobByKey(keyOf(row))?.state ?? row.job ?? null;
 }
 
-// One column per ticket (SF-057): a ticket is in the Queue without a job or after a failed or
+// One column per ticket: a ticket is in the Queue without a job or after a failed or
 // aborted one; any other job (active, or pushed) keeps it in that job's column only.
 function isPlanned(row: TicketRow): boolean {
   const last = lastJobState(row);
   return last === null || RESTARTABLE.includes(last);
 }
 
-// The Task check of a Queue card in words (SF-054): checking…, check: ready, not ready: N blocker,
-// M major, check failed (each with " · stale" once the Task file changed since), check not needed
-// (SF-130), not checked; a skeleton is a draft.
+// The Task check of a Queue card in words: checking…, check: ready, not ready: N blocker,
+// M major, check failed (each with " · stale" once the Task file changed after the check), check
+// not needed, not checked; a skeleton is a draft.
 function checkNote(row: TicketRow): string {
   if (row.draft) {
     return 'draft';
@@ -763,12 +763,12 @@ function checkNote(row: TicketRow): string {
   return `${text}${check.stale ? ' · stale' : ''}`;
 }
 
-// A Queue card (the prototype's queueCard): a click opens the planned ticket's page (SF-081); the
-// last job's mark opens that failed or aborted job. The first line: with the run queue (SF-071) a
+// A Queue card (the prototype's queueCard): a click opens the planned ticket's page; the
+// last job's mark opens that failed or aborted job. The first line: with the run queue a
 // queued card's position, then the key, the workspace chip and the plan-check chip (which opens the
 // planned ticket with the check's findings; under the title when the line has no room). Then the
-// dependency lines (SF-084), the queue's failed start, why the queue does not start it for its plan
-// (SF-086: plan not ready, plan check failed, plan being checked, plan not checked; with Start
+// dependency lines, the queue's failed start, why the queue does not start it for its plan
+// (plan not ready, plan check failed, plan being checked, plan not checked; with Start
 // anyway, which forces the entry), and the actions: Start (secondary in the
 // Queue, confirmed; its title names what it waits for) or "waiting for the plan" for a skeleton,
 // with the run queue Add to queue / Remove from queue (not on a skeleton), Task, the ⋯ menu with
@@ -800,7 +800,7 @@ function queueCard(row: TicketRow): HTMLLIElement {
   const note = checkNote(row);
   const noteChip = (className: string): HTMLButtonElement => {
     const chip = button(className, note, { ticket: key });
-    // A Task that needs no check (SF-130): the chip's title is the reason.
+    // A Task that needs no check: the chip's title is the reason.
     chip.setAttribute('title', note === 'check not needed' && typeof row.check?.check_reason === 'string' ? row.check.check_reason
       : `${note}: open the ticket${row.check !== null && typeof row.check === 'object' && row.check.state !== 'none' ? ' and the check\'s findings' : ''}`);
     return chip;
@@ -857,7 +857,7 @@ function queueCard(row: TicketRow): HTMLLIElement {
   return item;
 }
 
-// The top bar's run queue (SF-071): Run up to N jobs at once with its stepper, and the status line
+// The top bar's run queue: Run up to N jobs at once with its stepper, and the status line
 // (the running count, the free slots and the next ticket, or the hold); hidden without the queue.
 function renderQueueBar(): void {
   const bar = byId('qctl');
@@ -871,7 +871,7 @@ function renderQueueBar(): void {
   byIdAs('limDown', 'button').disabled = busy || queue.max_running <= LIMIT_MIN;
   byIdAs('limUp', 'button').disabled = busy || queue.max_running >= LIMIT_MAX;
   const status = byId('qstatus');
-  // SF-072: a job parked on a usage limit holds the queue, whatever the hold by hand.
+  // A job parked on a usage limit holds the queue, whatever the hold by hand.
   const limitHold = queue.limit_hold !== null && typeof queue.limit_hold === 'object' ? queue.limit_hold : null;
   status.className = queue.held || limitHold !== null ? 'qstatus held' : 'qstatus';
   const free = Math.max(0, queue.max_running - queue.running);
@@ -883,7 +883,7 @@ function renderQueueBar(): void {
   renderRules();
 }
 
-// The Rules menu of the top bar (SF-072): the rule at a usage limit's reset, checked as the queue
+// The Rules menu of the top bar: the rule at a usage limit's reset, checked as the queue
 // has it; a change is posted at once (api/queue/rule) and the board shows the server's queue.
 function renderRules(): void {
   const queue = state.queue;
@@ -946,7 +946,7 @@ function queueToggle(key: string): void {
     ({ level: 'ok', text: queued ? `${key} is out of the queue.` : `${key} is queued at position ${fieldOf(data, 'position')}.` }));
 }
 
-// Start anyway of a queued card (SF-086): the queue starts it whatever its plan check says.
+// Start anyway of a queued card: the queue starts it whatever its plan check says.
 function queueForce(key: string): void {
   const row = ticketByKey(key);
   if (row === null || state.queue === null || !isQueued(row)) {
@@ -1038,7 +1038,7 @@ function onDragEnd(): void {
   clearDrop();
 }
 
-// A Queue card's ⋯ menu: Move up and Move down (a queued card, SF-119), Check (with the Task
+// A Queue card's ⋯ menu: Move up and Move down (a queued card), Check (with the Task
 // checks, not for a skeleton), Archive and Delete…, shown while it is open (one card's at a time;
 // a click elsewhere or Escape closes it).
 function cardMenu(row: TicketRow, busy: boolean): HTMLElement[] {
@@ -1055,7 +1055,7 @@ function cardMenu(row: TicketRow, busy: boolean): HTMLElement[] {
     node.setAttribute('role', 'menuitem');
     return node;
   };
-  // SF-119: a queued card moves one place by a tap too (drag and Alt+Up / Alt+Down need a mouse or keys).
+  // A queued card moves one place by a tap too (drag and Alt+Up / Alt+Down need a mouse or keys).
   if (state.queue !== null && isQueued(row)) {
     const pending = state.setupPending.has(`queue:${key}`);
     const up = button('btn small', 'Move up', { qact: 'up', key });
@@ -1093,8 +1093,7 @@ function setCardMenu(key: string | null): void {
 
 const visible = (workspace: string): boolean => state.filter === '' || workspace === state.filter;
 
-// The workspace filter in the top bar: All and one chip per workspace, its colour dot and its name
-// (SF-084).
+// The workspace filter in the top bar: All and one chip per workspace, its colour dot and its name.
 function renderFilter(): void {
   const names = (state.workspaces ?? []).map((row) => row.name);
   if (state.filter !== '' && state.workspaces !== null && !names.includes(state.filter)) {
@@ -1125,7 +1124,7 @@ function renderBoard(): void {
   // A failed or aborted job whose ticket is in the Queue is not also in Done.
   const planned = (state.tickets ?? []).filter((row) => visible(row.workspace) && isPlanned(row));
   const plannedKeys = new Set(planned.map(keyOf));
-  // With the run queue (SF-071) the queued tickets come first, in their order.
+  // With the run queue the queued tickets come first, in their order.
   const inQueue = (row: TicketRow): row is QueuedRow => state.queue !== null && isQueued(row);
   const queued = planned.filter(inQueue).sort((a, b) => a.queue_position - b.queue_position);
   const lists: { queue: TicketRow[] } & Record<JobColumn, JobRow[]> = { queue: [...queued, ...planned.filter((row) => !inQueue(row))], implementing: [], reviewing: [], you: [], done: [] };
@@ -1178,7 +1177,7 @@ function renderBoard(): void {
   scheduleRefresh();
 }
 
-// The new ticket's card, once the stream lists it (SF-066): scrolled to and focused once; it stays
+// The new ticket's card, once the stream lists it: scrolled to and focused once; it stays
 // highlighted until another ticket is created.
 function showHighlight(): void {
   if (state.highlight === null || state.highlightShown || ui.screen !== 'board') {
@@ -1217,7 +1216,7 @@ function scheduleRefresh(): void {
   }, REFRESH_MS);
 }
 
-// ---------- The toast (SF-068): the board's messages ----------
+// ---------- The toast: the board's messages ----------
 
 // One message at a time, a new one replacing the old: ok and info go after TOAST_MS (not while
 // the pointer is on it), errors stay until closed; × and Escape close it.

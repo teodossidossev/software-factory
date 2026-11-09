@@ -1,10 +1,10 @@
-// The factory's MCP endpoint for the planner (SF-040): a loopback HTTP listener serving /mcp
+// The factory's MCP endpoint for the planner: a loopback HTTP listener serving /mcp
 // through the SDK's stateless handler, with the Handbook as instructions and the planning tools
 // guide, read_file, search, write_task, task_check (the last Task check of the current Task
-// file, SF-054; checked automatically after write_task, SF-086), queue_list and queue_add (the
-// run queue, SF-071), and read_attachment (a ticket's image as MCP image content, SF-064). It
-// listens on loopback only and answers only a request with the MCP token of the state directory
-// (SF-099): in the path, /mcp/<token>, or as Authorization: Bearer <token> on /mcp, read from the
+// file; checked automatically after write_task), queue_list and queue_add (the
+// run queue), and read_attachment (a ticket's image as MCP image content). It
+// listens on loopback only and answers only a request with the MCP token of the state directory:
+// in the path, /mcp/<token>, or as Authorization: Bearer <token> on /mcp, read from the
 // token file on every request. Jobs are started, reviewed and approved by the user (the
 // dashboard, the CLI) and the reviewers, never through this endpoint.
 import { constants } from 'node:fs';
@@ -46,7 +46,7 @@ export interface Handbook {
   quickStart: string;
 }
 
-// The MCP token's file (SF-099): src/secrets.ts's.
+// The MCP token's file: src/secrets.ts's.
 export { MCP_TOKEN_FILE } from './secrets.js';
 // What every output shows in the token's place.
 export const TOKEN_LABEL = '<token>';
@@ -87,7 +87,7 @@ export async function requireMcpToken(stateDir: string): Promise<string> {
   return token;
 }
 
-// A file or directory that holds or guards a secret (SF-099: the MCP token, the tunnel client's
+// A file or directory that holds or guards a secret (the MCP token, the tunnel client's
 // profile): opened without following a link, it must be a regular file (want 0o600) or a
 // directory (want 0o700) of this user, else unsafe; a mode wider than want (or, exact, any other
 // mode) is set to want (fix) or is a problem (check). Returns the mode it had then; undefined when
@@ -157,7 +157,7 @@ export async function ensureMcpToken(stateDir: string): Promise<string | undefin
     : `${MCP_TOKEN_FILE} in the state directory had mode ${octal(widened)}; it is 600 now. Others may have read it meanwhile: sf mcp-url --rotate makes a new one (then restart the tunnel).`;
 }
 
-// The tunnel client's profile (SF-099): the file exactly 0600 and its directory exactly 0700, both
+// The tunnel client's profile: the file exactly 0600 and its directory exactly 0700, both
 // this user's; fix sets any other mode, else it is profile_unsafe. Returns what was narrowed, as words.
 export async function keepProfilePrivate(file: string, directory: string, fix: boolean): Promise<string[]> {
   const unsafe = (what: string, mode?: number, want?: number) => (): FactoryError =>
@@ -203,7 +203,7 @@ export function redactMcpToken(text: string, token: string | undefined): string 
   return replaceSecret(text, token ?? '', TOKEN_LABEL).replace(TOKEN_AFTER_PATH, `${MCP_PATH}/${TOKEN_LABEL}`);
 }
 
-// The MCP url line of a tunnel client's profile (SF-099).
+// The MCP url line of a tunnel client's profile.
 export interface ProfileUrlLine {
   // The line's index in the text split at "\n".
   index: number;
@@ -229,7 +229,7 @@ const profileUnexpected = (): FactoryError =>
     'The profile has no single mcp.server_urls entry with channel main and a url on 127.0.0.1 in the layout tunnel-client init writes (profile_mcp_url_unexpected); nothing changed. Create it again: scripts/sf-tunnel.sh init <tunnel_id>.',
   );
 
-// The tunnel client's profile (SF-099): the url line of the mcp.server_urls entry whose channel is
+// The tunnel client's profile: the url line of the mcp.server_urls entry whose channel is
 // main, found by a line scan of the layout `tunnel-client init` writes (the mcp: block, its
 // server_urls: list, the items, each item's keys at the item's indentation), never any line that
 // says url. No such entry, more than one, or a host other than 127.0.0.1: profile_mcp_url_unexpected.
@@ -323,7 +323,7 @@ export function profileHasUrl(text: string, url: string): boolean {
   return sameSecret(profileUrlLine(text).value, `"${url}"`);
 }
 
-// What sf mcp-url --probe found (SF-099).
+// What sf mcp-url --probe found.
 export type ProbeOutcome = { result: 'answers' } | { result: 'refused' } | { result: 'unreachable' } | { result: 'unexpected'; status: number };
 
 function hasResult(body: string): boolean {
@@ -339,7 +339,7 @@ function hasResult(body: string): boolean {
   });
 }
 
-// sf mcp-url --probe (SF-099): an MCP initialize with the token, as the tunnel's check sends it:
+// sf mcp-url --probe: an MCP initialize with the token, as the tunnel's check sends it:
 // answers (HTTP 200 with a JSON-RPC result), refused (401), unreachable, or another answer.
 export async function probeMcp(port: number, token: string, timeoutMs = 3000): Promise<ProbeOutcome> {
   const initialize = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'sf-mcp-url-probe', version: '0.0.0' } } };
@@ -396,27 +396,27 @@ const workspaceName = z.string().regex(WORKSPACE_NAME_PATTERN).describe(`Registe
 const ticketKey = z.string().regex(TICKET_PATTERN).describe(`Ticket key, e.g. "PROJ-123": ${TICKET_DESCRIPTION}.`);
 const relativePath = (what: string) => z.string().min(1).max(MAX_PATH_LENGTH).describe(what);
 
-// The Task checks task_check reads (SF-054): the check of the current Task file, whether one runs,
-// and the stored checks (write_task's already_checked, SF-086).
+// The Task checks task_check reads: the check of the current Task file, whether one runs,
+// and the stored checks (write_task's already_checked).
 export type ServerChecks = Pick<TaskChecks, 'current' | 'isRunning' | 'store'>;
 
-// The automatic Task checks (SF-086): write_task triggers one; task_check says whether one is pending.
+// The automatic Task checks: write_task triggers one; task_check says whether one is pending.
 export type ServerAutoChecks = Pick<AutoChecks, 'trigger' | 'isPending'>;
 
-// What write_task says of the automatic check of the Task file it wrote (SF-086; not_needed: SF-130).
+// What write_task says of the automatic check of the Task file it wrote.
 export const WRITE_CHECK_STATES = ['scheduled', 'off', 'already_checked', 'draft', 'not_needed'] as const;
 export const CHECK_AFTER_SECONDS = AUTO_CHECK_DELAY_MS / 1000;
 
-// The run queue the Context owner reads and adds to (SF-071); it neither removes nor moves.
-// withTicket: write_task writes under the queue's lock of the ticket (SF-086).
+// The run queue the Context owner reads and adds to; it neither removes nor moves.
+// withTicket: write_task writes under the queue's lock of the ticket.
 export type ServerQueue = Pick<RunQueue, 'view' | 'add' | 'withTicket'>;
 
 const dependencyRow = z.object({ workspace: z.string(), ticket: z.string(), state: z.enum(DEPENDENCY_STATES) });
 
 // execution: only its JobStore, for write_task's guard against replacing the Task file of a live job.
-// history: the tickets' history (SF-081), where write_task records "written"; none records nothing.
-// queue: the run queue (SF-071); without it queue_list and queue_add answer queue_unavailable.
-// auto: the automatic Task checks (SF-086); without it write_task triggers none (check: off) and
+// history: the tickets' history, where write_task records "written"; none records nothing.
+// queue: the run queue; without it queue_list and queue_add answer queue_unavailable.
+// auto: the automatic Task checks; without it write_task triggers none (check: off) and
 // task_check's pending is false.
 function createMcpServer(
   handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks: ServerChecks | undefined, history?: TicketHistory, queue?: ServerQueue, auto?: ServerAutoChecks,
@@ -548,7 +548,7 @@ function createMcpServer(
         const record = history === undefined ? undefined : (sha256: string) => history.append(workspace, ticket, { kind: 'written', by: 'context_owner', sha256 });
         const target = await resolveWorkspace(workspace);
         const write = (): ReturnType<typeof writeTask> => writeTask(target, ticket, content, execution.jobs, { record });
-        // Never between the run queue's last look at the ticket's plan and its start (SF-086).
+        // Never between the run queue's last look at the ticket's plan and its start.
         const written = await (queue === undefined ? write() : queue.withTicket(workspace, ticket, write));
         return toolResult({ ...written, ...(await writeCheck(workspace, ticket, content, written.sha256)) });
       } catch (error) {
@@ -641,7 +641,7 @@ function createMcpServer(
 
   // The automatic check of a Task file write_task wrote: off without the automatic checks; else a
   // skeleton is a draft, a text with a check record is already_checked, one that needs no check
-  // (SF-130, checkNeed) is not_needed with check_reason, and any other is scheduled.
+  // (checkNeed) is not_needed with check_reason, and any other is scheduled.
   async function writeCheck(workspace: string, ticket: string, content: string, sha256: string): Promise<{ check: (typeof WRITE_CHECK_STATES)[number]; check_after_seconds?: number; check_reason?: string }> {
     if (auto === undefined) {
       return { check: 'off' };
@@ -738,7 +738,7 @@ export interface RunningServer {
 // The endpoint's own JSON answers keep their content type, without a charset.
 const PLAIN_JSON = { 'content-type': 'application/json' };
 
-// What a request without the token gets (SF-099): never the token, nor why the file failed.
+// What a request without the token gets: never the token, nor why the file failed.
 const UNAUTHORIZED_BODY = {
   jsonrpc: '2.0',
   error: { code: -32001, message: "Unauthorized: this endpoint needs the factory's MCP URL with its token; run sf mcp-url on the factory's machine." },

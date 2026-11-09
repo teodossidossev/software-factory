@@ -1,17 +1,17 @@
-// The test hooks (SF-142): the settings only the factory's own tests set, read here and nowhere
+// The test hooks: the settings only the factory's own tests set, read here and nowhere
 // else, once per process. Every hook is off unless SF_TEST_HOOKS=on; production code takes them
 // from the TestHooks object it is given. SF_TEST_TIMEOUT_MS, SF_TEST_CONCURRENCY and SF_TEST_NICE
 // are real settings, not hooks (src/config.ts, src/run-tests.ts).
 export interface TestHooks {
   // The socket's test-only commands (check, fix, clean; src/commands.ts testOnly) answer.
   readonly socketCommands: boolean;
-  // SF_TEST_TASK_CHECK_DELAY_MS: a shorter time from the last trigger to an automatic Task check
-  // (SF-086); undefined: the factory's own.
+  // SF_TEST_TASK_CHECK_DELAY_MS: a shorter time from the last trigger to an automatic Task check;
+  // undefined: the factory's own.
   readonly taskCheckDelayMs: number | undefined;
-  // SF_TEST_MARKER_POLL_MS: a shorter poll of the updating marker (SF-101); undefined: the
+  // SF_TEST_MARKER_POLL_MS: a shorter poll of the updating marker; undefined: the
   // factory's own.
   readonly markerPollMs: number | undefined;
-  // SF_TEST_PROC_DIR (SF-105): a /proc of the test's own that the sandbox's config lock check
+  // SF_TEST_PROC_DIR: a /proc of the test's own that the sandbox's config lock check
   // scans instead of the real one, so that the machine's other processes cannot keep a test's
   // lock; sf run inherits it with the environment. undefined: the real /proc.
   readonly procDir: string | undefined;

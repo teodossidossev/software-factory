@@ -24,18 +24,18 @@
       <h1>Software Factory</h1>
       <span class="summary" id="summary"></span>
       <span id="connection" class="tag" role="status">connecting</span>
-      <!-- The health checks' traffic light (SF-153): web/health.ts -->
+      <!-- The health checks' traffic light: web/health.ts -->
       <div class="hwrap" id="health-wrap">
         <button id="health-light" class="hlight unknown" type="button" aria-expanded="false" aria-controls="health-panel" aria-label="Factory health: not checked yet" title="Factory health: not checked yet"><span class="hbulb" aria-hidden="true"></span></button>
         <div id="health-panel" class="hpanel" role="region" aria-label="Health checks" hidden><b>Health checks</b><ul id="health-list"></ul></div>
       </div>
-      <!-- The run queue (SF-071): shown when the tickets payload carries the queue -->
+      <!-- The run queue: shown when the tickets payload carries the queue -->
       <div class="qctl" id="qctl" hidden>
         <span>Run up to</span>
         <span class="stepper"><button id="limDown" type="button" aria-label="One job fewer">−</button><output id="limVal"></output><button id="limUp" type="button" aria-label="One job more">+</button></span>
         <span>jobs at once</span>
         <span class="qstatus" id="qstatus"></span>
-        <!-- The rule at a usage limit's reset (SF-072) -->
+        <!-- The rule at a usage limit's reset -->
         <div class="menuwrap" hidden><button class="btn small" id="rulesBtn" type="button" aria-expanded="false">Rules ▾</button><div class="menu" id="rulesMenu" hidden><b>When the usage limit resets</b><label><input type="radio" name="rule" value="resume-then-queue" id="rule-resume-then-queue"> Resume parked jobs, then go on with the queue</label><label><input type="radio" name="rule" value="resume-only" id="rule-resume-only"> Resume parked jobs only</label><label><input type="radio" name="rule" value="wait" id="rule-wait"> Wait for me</label></div></div>
       </div>
       <nav class="ws" aria-label="Setup">
@@ -98,19 +98,19 @@
         <div id="acts-why" class="why"></div>
       </div>
     </div>
-    <!-- The Changes screen (SF-079): job-screens.js builds the tree, the divider and the diff pane in it. -->
+    <!-- The Changes screen: job-screens.js builds the tree, the divider and the diff pane in it. -->
     <div class="scr" id="scrChanges" hidden></div>
-    <!-- The Merge request screen (SF-080): job-screens.js builds the form, the side panel and the bar in it. -->
+    <!-- The Merge request screen: job-screens.js builds the form, the side panel and the bar in it. -->
     <div class="scr" id="scrMr" hidden></div>
   </section>
 
-  <!-- The planned ticket's page (SF-081): ticket-page.js builds its header, the Task file and the plan in it. -->
+  <!-- The planned ticket's page: ticket-page.js builds its header, the Task file and the plan in it. -->
   <section id="ticket" hidden aria-label="Planned ticket"></section>
 
-  <!-- The morning digest (SF-103): the stored digests, Repositories and My daily. -->
+  <!-- The morning digest: the stored digests, Repositories and My daily. -->
   <section id="digest" hidden aria-label="Morning digest"></section>
 
-  <!-- The Stats page (SF-117): what the reviews found, the spend and load, and the warnings. -->
+  <!-- The Stats page: what the reviews found, the spend and load, and the warnings. -->
   <section id="stats" hidden aria-label="Stats"></section>
 
   <div id="toast" hidden role="status"><span id="toast-text"></span><button id="toast-close" type="button" class="toast-x" aria-label="Close the message">×</button></div>
@@ -200,7 +200,7 @@
         </div>
         <div id="workspace-status" class="status" role="status" aria-live="polite"></div>
       </form>
-      <!-- The morning digest's schedule and language (SF-103); its model only in workspaces.json. -->
+      <!-- The morning digest's schedule and language; its model only in workspaces.json. -->
       <form id="digest-form" class="form">
         <h3 class="section-title">Morning digest</h3>
         <div class="field">
@@ -245,7 +245,7 @@
           <textarea id="ticket-request" rows="5"></textarea>
           <p class="hint">Not written into the Task file: these words open the conversation, where ChatGPT investigates, discusses it with you and writes the Task file. Once it is written, you start the job on the board, with Start on its Queue card.</p>
         </div>
-        <!-- A ticket's images (SF-064): pasted anywhere in the form (Ctrl+V) or dropped; uploaded once the ticket is created. -->
+        <!-- A ticket's images: pasted anywhere in the form (Ctrl+V) or dropped; uploaded once the ticket is created. -->
         <div class="field">
           <div id="ticket-drop" class="drop">Paste a screenshot anywhere in this form (Ctrl+V) or drop images here. PNG, JPEG, WebP or GIF, at most 5 MB each and 10 per ticket; ChatGPT reads them while it writes the Task file.</div>
           <div id="ticket-images" class="thumbs" hidden></div>
@@ -253,7 +253,7 @@
         <fieldset class="owner">
           <legend>Context owner</legend>
           <label class="choice"><input id="owner-chatgpt" type="radio" name="owner" value="chatgpt" checked> ChatGPT, in the browser</label>
-          <label class="choice is-off"><input id="owner-claude" type="radio" name="owner" value="claude" disabled> Claude Code (SF-023)</label>
+          <label class="choice is-off"><input id="owner-claude" type="radio" name="owner" value="claude" disabled> Claude Code (not available yet)</label>
         </fieldset>
         <div class="row">
           <button id="ticket-create" type="submit" class="btn btn-primary">Create the ticket</button>

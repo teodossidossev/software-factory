@@ -1,44 +1,44 @@
-// The job lifecycle (SF-089: a thin coordinator over its parts in src/execution/). Execution keeps
-// the public operations that sf serve, the runner (sf run), the CLI and the tests call, each a call
-// into the part that owns it. It builds one Core and wires the parts (SF-143): each part takes only
+// The job lifecycle (a thin coordinator over its parts in src/execution/). Execution keeps the
+// public operations that sf serve, the runner (sf run), the CLI and the tests call, each a call
+// into the part that owns it. It builds one Core and wires the parts: each part takes only
 // the ports of Core it uses, and the other parts it calls (the constructor below):
 // - execution/core.ts: the shared state and seams (the job store, the config, the live sessions,
 //   the running reviews, locked, gitLocked, transition: every state change after the first, the
-//   seam for notifications and for JOB_TRANSITIONS in src/jobs.ts, SF-088).
+//   seam for notifications and for JOB_TRANSITIONS in src/jobs.ts).
 // - execution/ports.ts: the narrow ports Core implements, and which part uses which.
-// - execution/start.ts: start, the worktree and the Task file's copy, restart (SF-067), recover
-//   (the rule for a restart of sf serve, SF-042).
+// - execution/start.ts: start, the worktree and the Task file's copy, restart, recover (the rule
+//   for a restart of sf serve).
 // - execution/turns.ts: the Implementer session, the end of a turn and the published iteration,
 //   say, requestFix and the Fix section.
-// - execution/reviews.ts: the Claude review (SF-038), the Codex gate (SF-039), the ledger (settle),
-//   retryReview (SF-044), acceptGate (SF-047), the simplification pass (SF-055).
-// - execution/mr-steps.ts: MR preparation at Clean (markClean, SF-019, SF-037), retryMr (SF-087),
-//   approve (the push), the merge request on the Git host (SF-048), the Merge request screen.
-// - execution/handover-steps.ts: the hand-over to the user's checkout and its checks (SF-073), the
-//   sandbox's config lock (SF-085).
-// - execution/control.ts: pause and Resume (SF-067), the usage-limit park (SF-072), abort, reset,
+// - execution/reviews.ts: the Claude review, the Codex gate, the ledger (settle), retryReview,
+//   acceptGate, the simplification pass.
+// - execution/mr-steps.ts: MR preparation at Clean (markClean), retryMr, approve (the push), the
+//   merge request on the Git host, the Merge request screen.
+// - execution/handover-steps.ts: the hand-over to the user's checkout and its checks, the
+//   sandbox's config lock.
+// - execution/control.ts: pause and Resume, the usage-limit park, abort, reset,
 //   Archive, exclusive, and the requests sf serve queues to a job's runner.
 // - execution/status.ts: check and status.
-// - execution/dto.ts: the data shapes Execution's calls return or take (SF-142).
+// - execution/dto.ts: the data shapes Execution's calls return or take.
 // - execution/errors.ts: the codes sf accept and sf retry take on, and the shared refusals.
 // - execution/prompts.ts: the first prompt and the notes the Implementer is given.
 // - execution/events.ts: the tests event of the job's stream.
 // - execution/shared.ts: the helpers and runtime types more than one part uses.
 // The Implementer session of each job works in the job's own worktree and publishes an iteration
 // (Report, Patch and the file list) when the session goes idle; then the Claude review of that
-// iteration runs (SF-038, src/review.ts), and after a clean one the Codex gate (SF-039,
-// src/gate.ts); the deciding verdict takes the path of requestFix or markClean; a clean one first
-// runs the simplification pass (SF-055, src/simplify.ts) when the job had review fixes.
-// Several jobs of one workspace run at the same time; the run queue (SF-071, src/queue.ts) limits
+// iteration runs (src/review.ts), and after a clean one the Codex gate (src/gate.ts); the
+// deciding verdict takes the path of requestFix or markClean; a clean one first runs the
+// simplification pass (src/simplify.ts) when the job had review fixes.
+// Several jobs of one workspace run at the same time; the run queue (src/queue.ts) limits
 // only the starts it makes itself to max_running running jobs of every workspace (a start by hand
 // always goes). The Git operations on the shared checkout are serialized per workspace, across
-// processes. Since SF-042 each job's turns, reviews and gate run in the job's runner
+// processes. Each job's turns, reviews and gate run in the job's runner
 // (src/runner.ts), a detached `sf run` with an Execution of its own in runner mode: sf serve
 // creates the job at start, queues the requests that need a turn or a review (the first turn, say,
 // a Fix section, Clean, the retry of a review, the override of the gate, the Retry of MR
 // preparation, the Resume of a paused job) and waits for the runner's reply; abort, pause, restart
 // and reset stop the runner first. approve and the merge request stay in sf serve. The user starts
-// and approves (the dashboard, the CLI); no MCP tool reaches these methods since SF-040.
+// and approves (the dashboard, the CLI); no MCP tool reaches these methods.
 import type { Config } from './config.js';
 import type { Decision } from './ledger.js';
 import type { ForgeKind, MergeRequestStatus } from './forge.js';
@@ -161,7 +161,7 @@ export class Execution implements RunnerWork {
     return this.#parts.start.recover(options);
   }
 
-  // The catch-up after an update (SF-101): runners for the resumable jobs recover() left alone.
+  // The catch-up after an update: runners for the resumable jobs recover() left alone.
   ensureResumable(): Promise<void> {
     return this.#parts.start.ensureResumable();
   }
@@ -258,7 +258,7 @@ export class Execution implements RunnerWork {
     return this.#parts.handover.handOverLocked(workspace);
   }
 
-  // The hand-over operations running in this process now (SF-101: sf serve's serve-busy).
+  // The hand-over operations running in this process now (sf serve's serve-busy).
   handoversRunning(): HandoverRunning[] {
     return this.#parts.handover.running();
   }

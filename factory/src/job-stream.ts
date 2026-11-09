@@ -1,4 +1,4 @@
-// The job's Stream (SF-082): each events.jsonl line as typed entries for the dashboard's job page
+// The job's Stream: each events.jsonl line as typed entries for the dashboard's job page
 // (docs/design/dashboard-v3/prototype.html, its stream entries). An entry depends only on its line
 // and the job's files at the time of the build, never on other lines, so the paged route and the
 // live event give the same entries (but for the ledger ids of a live verdict, written after its
@@ -18,11 +18,11 @@ const RULES_MARK = '\n\nRules from the Software Factory:';
 const CHANGE_NOTE = /(?:^|\n\n)The Task file \S+ changed since you were last given it/u;
 const KEPT_FILES = '\n\nThis job restarts an earlier job of ';
 // The images line of factoryPrompt (src/prompts.ts) and the Resume's note of changed images
-// (src/execution/control.ts), SF-065: each after a blank line, the images line last before the rules.
+// (src/execution/control.ts): each after a blank line, the images line last before the rules.
 const IMAGES_LINE = /\n\nThe Task's images are in .+: .+\. Read them when you need them\.$/u;
 const IMAGES_CHANGED = /\n\nThe Task's images changed while the job was paused: .+\.$/u;
 const CONTINUE = 'Continue where you stopped.';
-// The job's <rules> block (SF-059) in the first prompt, after the /implement line and a blank line
+// The job's <rules> block in the first prompt, after the /implement line and a blank line
 // (firstPrompt, src/execution/shared.ts), and before a Resume's message in a new session
 // (#resumePrompt, src/execution/control.ts): each up to the first line that is exactly </rules>
 // followed by a blank line or by the end.
@@ -49,19 +49,19 @@ export interface SimplifySuggestion {
 }
 
 type Body =
-  // images: the names of the image blocks sent with the prompt (SF-065).
+  // images: the names of the image blocks sent with the prompt.
   | { t: 'prompt'; kind: PromptKind; text: string; first: string; task_changed: boolean; fix_n?: number; fix?: string; images?: string[] }
   | { t: 'user'; text: string; task_changed: boolean; images?: string[] }
   | { t: 'text'; text: string }
   | { t: 'tool'; id: string; line: string; detail: string }
   | { t: 'tool_result'; id: string; out: string; result: string; err: boolean }
   | { t: 'result'; turns: number | null; ms: number | null; cost: number | null }
-  // text: the line of a park on a usage limit or the resume from it (SF-072, describeEvent).
+  // text: the line of a park on a usage limit or the resume from it (describeEvent).
   | { t: 'state'; from: string | null; to: string; code: string | null; msg: string | null; text?: string; stop_code?: StopCode; stop_kind?: StopKind }
   | { t: 'verdict'; verdict: string; effective: string | null; summary?: string; items?: VerdictItem[] }
   | { t: 'changes'; files: number; paths: string[] }
   | { t: 'simplify'; suggestions: SimplifySuggestion[]; saves_lines: number }
-  // A run of the workspace's test command (SF-128): tests when it starts, tests_result when it ends
+  // A run of the workspace's test command: tests when it starts, tests_result when it ends
   // or the user accepts it, joined by the client by run (the run's start); a tests_result without
   // its tests shows on its own.
   | { t: 'tests'; run: string; command: string }
@@ -130,7 +130,7 @@ function cut(text: string, limit = DETAIL_CHARS): string {
 }
 
 // A one-line text cut as shortInput (src/watch.ts) cuts a tool's input: through shortInput itself, as
-// a path, since watch.ts exports no other cut (SF-082 changes nothing else there).
+// a path, since watch.ts exports no other cut.
 const shortLine = (text: string): string => shortInput({ path: text });
 
 // The text of a tool result's content: a string, or the text parts of an array.
@@ -171,7 +171,7 @@ function fixSection(task: string | undefined, fix: number): string {
 async function promptEntry(prompt: string, ctx: StreamContext, sent: unknown): Promise<Draft> {
   const rules = prompt.indexOf(RULES_MARK);
   let text = (rules < 0 ? prompt : prompt.slice(0, rules)).replace(IMAGES_LINE, '');
-  // The note of changed images is cut too; task_changed stays the Task text's (SF-065).
+  // The note of changed images is cut too; task_changed stays the Task text's.
   text = text.replace(IMAGES_CHANGED, '');
   const note = CHANGE_NOTE.exec(text);
   const taskChanged = note !== null;
@@ -341,7 +341,7 @@ async function drafts(raw: string, record: Record<string, unknown>, it: number, 
     const code = typeof error.code === 'string' ? error.code : null;
     const text = limitStateText(state.from, state.to);
     const msg = typeof error.message === 'string' ? error.message : null;
-    // SF-129: a stop's canonical row (src/stops.ts), so the page resolves no alias of its own.
+    // A stop's canonical row (src/stops.ts), so the page resolves no alias of its own.
     const stop = code === null ? null : canonicalStop(code, msg, new Date());
     const entry: Draft = {
       t: 'state', who: 'factory', from: typeof state.from === 'string' ? state.from : null, to: String(state.to),
@@ -375,7 +375,7 @@ async function drafts(raw: string, record: Record<string, unknown>, it: number, 
       reason: typeof record.reason === 'string' ? record.reason : null, tail: cut(typeof record.tail === 'string' ? record.tail : ''), tail_truncated: record.tail_truncated === true,
     }];
   }
-  // The MR text (SF-080): the user's save or reset; a new Clean that kept the user's text.
+  // The MR text: the user's save or reset; a new Clean that kept the user's text.
   if (record.type === 'mr_edited') {
     return noteEntry(raw, record.action === 'factory_new' ? 'factory' : 'you');
   }
@@ -405,7 +405,7 @@ export async function lineEntries(raw: string, line: number, ctx: StreamContext)
   return entries.map((entry, index) => ({ ...entry, k: entries.length === 1 ? String(line) : `${line}.${index}`, ts, it }));
 }
 
-// One of the user's own messages to the job (SF-112): a prompt the Stream shows as the user's.
+// One of the user's own messages to the job: a prompt the Stream shows as the user's.
 // iteration: the iteration the turn publishes; at: the record's ts.
 export interface UserMessage {
   iteration: number;

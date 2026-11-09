@@ -1,5 +1,5 @@
 // main.js, the dashboard's last script (DASHBOARD_SCRIPTS in src/dashboard.ts), built from
-// web/main.ts into dist/web/ (SF-150): the stream, the job selected, the page's start and its
+// web/main.ts into dist/web/: the stream, the job selected, the page's start and its
 // loading. A classic script, loaded in order with defer, sharing the page's globals with the
 // others. This file has no import or export on purpose: the compiler keeps it a script, so its
 // top-level names stay the page's globals.
@@ -31,7 +31,7 @@ function openStream(): void {
     setConnection('live', 'live');
     healthStreamUp();
   });
-  // The health checks (SF-153): the first event on connect, then one on every status change.
+  // The health checks: the first event on connect, then one on every status change.
   source.addEventListener('health', (message: MessageEvent<string>) => onHealthEvent(message.data));
   source.addEventListener('jobs', (message: MessageEvent<string>) => {
     state.jobs = jobsOf(message.data);
@@ -50,7 +50,7 @@ function openStream(): void {
   source.addEventListener('workspaces', (message: MessageEvent<string>) => {
     const data = payload<WorkspacesPayload>(message.data);
     state.workspaces = data.workspaces;
-    // SF-103: the hand-over default and the morning digest's settings.
+    // The hand-over default and the morning digest's settings.
     state.wsSettings = { handoff_default: data.handoff_default ?? null, digest: data.digest ?? null };
     renderSetup();
   });
@@ -64,7 +64,7 @@ function openStream(): void {
     if (ui.job !== null) {
       renderHead();
     }
-    // SF-140: changed names the tickets the event is about; absent, it may be about any.
+    // Changed names the tickets the event is about; absent, it may be about any.
     refreshTicket(Array.isArray(data.changed) ? data.changed : null);
     if (ui.pending) {
       route();
@@ -79,7 +79,7 @@ function openStream(): void {
       }
     }
   });
-  // The Stream's entries of one line (SF-082), as a page gives them.
+  // The Stream's entries of one line, as a page gives them.
   source.addEventListener('entries', (message: MessageEvent<string>) => {
     const data = payload<StreamLine>(message.data);
     if (key === state.key && Number.isInteger(data.line)) {
@@ -145,12 +145,12 @@ function init(): void {
   document.addEventListener('input', onInput);
   document.addEventListener('change', onChange);
   document.addEventListener('pointerdown', onDividerDown);
-  // The diff layout chosen before (SF-079).
+  // The diff layout chosen before.
   const mode = store.get(DIFF_MODE_KEY);
   if (mode === 'side' || mode === 'uni') {
     ui.cx.mode = mode;
   }
-  // SF-119: a phone's turn or a resized window across 768 px redraws the diff in its layout.
+  // A phone's turn or a resized window across 768 px redraws the diff in its layout.
   if (typeof matchMedia === 'function') {
     const narrow = matchMedia(NARROW_QUERY);
     if (typeof narrow?.addEventListener === 'function') {
@@ -161,7 +161,7 @@ function init(): void {
       });
     }
   }
-  // The board's folded columns (SF-119).
+  // The board's folded columns.
   board.folded = readFolds();
   applyFolds();
   document.addEventListener('visibilitychange', scheduleRefresh);
@@ -215,7 +215,7 @@ function init(): void {
     event.preventDefault();
     void submitTicket();
   });
-  // The Morning digest section (SF-103): typed values stay until saved.
+  // The Morning digest section: typed values stay until saved.
   byId('digest-form').addEventListener('submit', (event) => {
     event.preventDefault();
     void submitDigestSettings();
@@ -224,7 +224,7 @@ function init(): void {
     byId(id).addEventListener('input', () => (state.digestDirty = true));
     byId(id).addEventListener('change', () => (state.digestDirty = true));
   }
-  // A ticket's images (SF-064): New ticket's paste, drop and ×; the planned ticket page's paste and
+  // A ticket's images: New ticket's paste, drop and ×; the planned ticket page's paste and
   // drop.
   byId('ticket-form').addEventListener('paste', onFormPaste);
   byId('ticket-form').addEventListener('dragover', onFormDrag);
@@ -249,7 +249,7 @@ function init(): void {
     }
   });
 
-  // The traffic light of the health checks (SF-153).
+  // The traffic light of the health checks.
   initHealth();
   renderSetup();
   // "Since when" on the cards moves on by itself, unless the focus is on the board (a redraw

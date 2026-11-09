@@ -1,4 +1,4 @@
-// One morning digest run (SF-103): the followed workspaces' mirrors and Git data (src/digest.ts),
+// One morning digest run: the followed workspaces' mirrors and Git data (src/digest.ts),
 // one model call with a structured output (retried once; on a second failure the digest keeps the
 // Git data and the error), the stored record digest/<id>.json in the state directory, and for a
 // scheduled run one notification with counts only. A run that is going is not started twice
@@ -154,7 +154,7 @@ export function dailyDays(now: Date): { yesterday: Span; today: Span } {
   };
 }
 
-// The period of every digest, scheduled or manual (SF-155): from `at` (local time) on the previous
+// The period of every digest, scheduled or manual: from `at` (local time) on the previous
 // digest day before today, to now. A digest day is any day, or a weekday with weekdays_only; so
 // Friday on a Monday, a Saturday or a Sunday. Past digests do not move it.
 export function digestPeriod(now: Date, settings: Pick<DigestSettings, 'at' | 'weekdays_only'>): Span {

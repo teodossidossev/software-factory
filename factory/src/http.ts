@@ -1,4 +1,4 @@
-// The HTTP helpers of the factory's two listeners (SF-139): the MCP endpoint (src/server.ts) and the
+// The HTTP helpers of the factory's two listeners: the MCP endpoint (src/server.ts) and the
 // dashboard (src/dashboard.ts). The loopback listen with its port_in_use, a JSON answer, the
 // constant-time compare of a secret, the internal_error answer of a failure that is not a
 // FactoryError, and the dashboard's HTTP status of a FactoryError's code.
@@ -45,40 +45,40 @@ export function internalError(message = 'The request failed inside the factory.'
 // The dashboard's HTTP status of a FactoryError the methods can throw; any other code answers
 // statusOf's fallback (500) and keeps its code and message.
 export const ERROR_STATUS: Readonly<Record<string, number>> = {
-  // sf update is draining or building (SF-101): update.ts's UPDATE_IN_PROGRESS, written out so this
+  // sf update is draining or building: update.ts's UPDATE_IN_PROGRESS, written out so this
   // module imports nothing of the factory but its errors (runner.ts imports it, and update.ts runner.ts).
   update_in_progress: 409,
   invalid_state: 409, turn_running: 409, rebase_in_progress: 409, review_off: 409, runner_active: 409,
   job_exists: 409, job_active: 409, job_limit: 409, task_draft: 409, checkout_dirty: 409, branch_exists: 409, branch_changed: 409, branch_missing: 409, worktree_exists: 409,
   worktree_missing: 409, sensitive_unacknowledged: 409, ticket_exists: 409, workspace_exists: 409, workspace_busy: 409,
   job_not_found: 404, workspace_not_found: 404, task_not_found: 404,
-  // Save of the planned ticket page (SF-081): the Task file is another version than the one read.
-  // Not the job view's task_changed field (SF-067).
+  // Save of the planned ticket page: the Task file is another version than the one read.
+  // Not the job view's task_changed field.
   task_changed: 409,
-  // The Task check (SF-054): one at a time per ticket.
+  // The Task check: one at a time per ticket.
   check_running: 409,
-  // A Restart that would delete a branch with commits or a pushed one (SF-067).
+  // A Restart that would delete a branch with commits or a pushed one.
   restart_refused: 409,
-  // The hand-over to the user's checkout (SF-073) and its way back.
+  // The hand-over to the user's checkout and its way back.
   checkout_busy: 409, handover_refused: 409, handover_mismatch: 409, checkout_changing: 409, checkout_moved: 409,
   takeback_changed: 409, takeback_switch_failed: 409, branch_in_checkout: 409, not_pushed: 409, handed_over: 409, handover_interrupted: 409, ask_interrupted: 409,
   invalid_content: 400, invalid_ticket: 400, invalid_name: 400, workspace_invalid: 400,
-  // The merge request (SF-048): the host's refusals and the actions being off are conflicts; a host
+  // The merge request: the host's refusals and the actions being off are conflicts; a host
   // that failed or refused the token is a bad gateway.
   mr_not_mergeable: 409, mr_not_open: 409, mr_token_missing: 409, mr_host_unsupported: 409, mr_host_changed: 409, mr_text_missing: 409,
   mr_auth_failed: 502, mr_host_error: 502, mr_host_unreachable: 502,
-  // The Merge request screen (SF-080): a text that breaks the rules (also approve's, while the MR
+  // The Merge request screen: a text that breaks the rules (also approve's, while the MR
   // text is invalid or not the prepared commit's message), a rename or a base change refused.
   mr_text_invalid: 400, branch_locked: 409, base_unrelated: 409,
-  // origin did not say where a handed-over branch is (SF-073).
+  // origin did not say where a handed-over branch is.
   push_check_failed: 502,
-  // The morning digest (SF-103): one run at a time; its settings.
+  // The morning digest: one run at a time; its settings.
   digest_running: 409, invalid_digest_settings: 400,
-  // The run queue (SF-071).
+  // The run queue.
   already_queued: 409, not_queued: 409, invalid_limit: 400, invalid_position: 400, invalid_rule: 400,
-  // A ticket's images (SF-064): not an image, too large, too many, and a Task file that refers to
+  // A ticket's images: not an image, too large, too many, and a Task file that refers to
   // one the ticket does not have (also an image to remove that is not there); a Start, Restart or
-  // Resume whose Task file refers to images that cannot be used (SF-065).
+  // Resume whose Task file refers to images that cannot be used.
   attachment_type: 400, attachment_too_large: 413, attachment_limit: 409, attachment_missing: 400, attachment_invalid: 409,
 };
 

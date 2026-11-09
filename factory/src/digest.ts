@@ -1,4 +1,4 @@
-// The morning digest's Git data (SF-103): a bare mirror per workspace under the state directory,
+// The morning digest's Git data: a bare mirror per workspace under the state directory,
 // fetched from origin and from the read checkout's local branches, and the extraction over it (what
 // landed on the main branch in the period, the live branches, mine, my commits). No model and no
 // stored state of its own: each function takes the paths it works on. Nothing here writes to the

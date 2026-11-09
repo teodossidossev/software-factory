@@ -1,4 +1,4 @@
-// The Claude review of one published iteration (SF-038): a fresh, read-only Agent SDK query() in
+// The Claude review of one published iteration: a fresh, read-only Agent SDK query() in
 // the job's worktree, with the Task file, the Report, the Patch and the marked paths (sensitive,
 // outside the Task's scope, deleted) in its prompt and a structured verdict as its output. Knows
 // nothing about job states; the Execution applies the verdict.
@@ -22,11 +22,11 @@ export const MAX_REVIEW_PATCH_BYTES = 256 * 1024;
 export const REVIEW_TOOLS = ['Read', 'Grep', 'Glob'];
 // Denied as well, should a tool outside REVIEW_TOOLS still be offered.
 export const REVIEW_DENIED_TOOLS = ['Bash', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task', 'Agent', ...ENV_FILE_RULES];
-// The caps of <user_decisions> (SF-112), in characters: one message's text, and all the texts sent.
+// The caps of <user_decisions>, in characters: one message's text, and all the texts sent.
 export const MAX_USER_MESSAGE_CHARS = 4000;
 export const MAX_USER_DECISIONS_CHARS = 16000;
 
-// The weight of a review item (SF-051). Only blocker and major items make a fix; nits never block.
+// The weight of a review item. Only blocker and major items make a fix; nits never block.
 export const SEVERITIES = ['blocker', 'major', 'nit'] as const;
 export type Severity = (typeof SEVERITIES)[number];
 // The definitions both reviewers read (reviewBody) and the schema carries.
@@ -40,8 +40,8 @@ const reviewItem = z.strictObject({
   problem: z.string().describe('What is wrong.'),
   expected: z.string().describe('What is expected instead.'),
   severity: z.enum(SEVERITIES).describe(SEVERITIES.map((severity) => `${severity}: ${SEVERITY_DEFINITIONS[severity]}`).join('; ')),
-  // The ledger (SF-052): each a ledger id or "" (anything else is an invalid verdict); absent in
-  // verdicts and records before it, read as "".
+  // Ledger references: each a ledger id or "" (anything else is an invalid verdict); absent in
+  // verdicts and records written before the findings ledger, read as "".
   reopens: z.string().regex(LEDGER_REF).default('').describe('The ledger id of the settled finding this item reopens (only when the settlement is wrong by evidence in the worktree; say why in problem), or "".'),
   caused_by: z.string().regex(LEDGER_REF).default('').describe('The ledger id of the fix whose change caused this item, or "".'),
 });
@@ -49,16 +49,16 @@ export const reviewOutput = z.strictObject({
   verdict: z.enum(['clean', 'fix']),
   summary: z.string().describe('Why, including every undeclared sensitive or out-of-scope path accepted.'),
   items: z.array(reviewItem),
-  // The name stays for stored records; it holds the out-of-scope paths accepted too (SF-053).
+  // The name stays for stored records; it holds the out-of-scope paths accepted too.
   accepted_sensitive: z.array(z.string()).describe('The undeclared sensitive or out-of-scope paths you accept, each justified in summary.'),
 });
 // An item as the reviewers give it and the records keep it: reopens and caused_by may be absent
-// (verdicts and records before SF-052).
+// (verdicts and records written before the findings ledger).
 export type ReviewItem = z.input<typeof reviewItem>;
 export type ReviewOutput = Omit<z.output<typeof reviewOutput>, 'items'> & { items: ReviewItem[] };
 // The schema sent as outputFormat (the CLI's --json-schema), from the same definition as the
 // validation: draft-07 output without $schema, since the CLI refuses zod's default draft 2020-12
-// $schema (SF-044).
+// $schema.
 const { $schema: _draft, ...reviewSchema } = z.toJSONSchema(reviewOutput, { target: 'draft-7' });
 export const REVIEW_SCHEMA: Record<string, unknown> = reviewSchema;
 
@@ -75,11 +75,11 @@ export interface ReviewInput {
   files: FileChange[] | undefined;
   // The loaded Handbook text; its review rules are sent verbatim.
   handbook: string;
-  // The job's findings ledger (SF-052); its settled entries are sent.
+  // The job's findings ledger; its settled entries are sent.
   ledger?: LedgerEntry[];
-  // The job's <rules> block (SF-059, src/rules-docs.ts); absent or '' when it has none.
+  // The job's <rules> block (src/rules-docs.ts); absent or '' when it has none.
   rules?: string;
-  // The user's own messages to the job up to the reviewed iteration (SF-112), oldest first; absent
+  // The user's own messages to the job up to the reviewed iteration, oldest first; absent
   // or [] when there are none.
   userMessages?: UserMessage[];
 }
@@ -107,7 +107,7 @@ function cutText(text: string, limit: number): string {
   return `${text.slice(0, end)}…`;
 }
 
-// The lines inside <user_decisions> (SF-112): one <user_message> per message, oldest first, each
+// The lines inside <user_decisions>: one <user_message> per message, oldest first, each
 // text cut to MAX_USER_MESSAGE_CHARS; the newest messages whose texts fit in
 // MAX_USER_DECISIONS_CHARS (the newest always), after a line counting the older ones left out;
 // "None." without messages.
@@ -155,8 +155,8 @@ export function reviewPrompt(input: ReviewInput): string {
 }
 
 // The rules of every reviewer (the Claude review and the gate, src/gate.ts), the Handbook's review
-// rules and the material of the iteration: the job's coding rules when it has them (SF-059), the
-// Task file, the user's messages to the job (SF-112), the Report, the marked paths (sensitive,
+// rules and the material of the iteration: the job's coding rules when it has them, the
+// Task file, the user's messages to the job, the Report, the marked paths (sensitive,
 // outside the Task's scope, deleted) and the Patch, inline up to MAX_REVIEW_PATCH_BYTES.
 export function reviewBody(input: ReviewInput): string[] {
   const { ticket } = input;
@@ -222,19 +222,19 @@ export interface ReviewOptions {
   maxTurns: number;
   // Aborts the session (abort, reset, a newer review).
   signal: AbortSignal;
-  // Every SDK message of the session, in order, awaited before the next one (SF-045); a failing
+  // Every SDK message of the session, in order, awaited before the next one; a failing
   // call changes nothing of the outcome.
   onMessage?: (message: SDKMessage) => Promise<void>;
-  // The Task's images (SF-065): their image blocks follow the prompt in the session's user message,
+  // The Task's images: their image blocks follow the prompt in the session's user message,
   // each after a line naming it, as for the Implementer.
   images?: ImageRef[] | undefined;
-  // The session's path denials (SF-100, src/sandbox-denials.ts): permission rules denied on top of
+  // The session's path denials (src/sandbox-denials.ts): permission rules denied on top of
   // the session's own, and the sandbox's filesystem deny lists merged into sandbox.
   deny?: string[] | undefined;
   filesystem?: SandboxDenials | undefined;
-  // The path denials' hooks (SF-123: the file-tool guard), merged with the session's own hooks.
+  // The path denials' hooks (the file-tool guard), merged with the session's own hooks.
   hooks?: Options['hooks'];
-  // The session's tools; REVIEW_TOOLS by default. [] (the morning digest, SF-103): none but the
+  // The session's tools; REVIEW_TOOLS by default. [] (the morning digest): none but the
   // SDK's structured-output tool.
   tools?: string[];
   // The settings and instruction files loaded; ['project'] by default. [] (the morning digest):
@@ -262,7 +262,7 @@ export function outsideInstructionFiles(cwd: string): string[] {
   return patterns;
 }
 
-// The query() options of a review session (SF-050): read-only tools, the schema, and the
+// The query() options of a review session: read-only tools, the schema, and the
 // repository's own settings and instructions only. settingSources ['project'] leaves out the user's
 // settings and ~/.claude/CLAUDE.md; CLAUDE_CODE_DISABLE_AUTO_MEMORY leaves out the user's
 // auto-memory of the project, which the CLI loads whatever the setting sources; claudeMdExcludes
@@ -271,17 +271,17 @@ export function reviewSessionOptions(options: Omit<ReviewOptions, 'onMessage' | 
   return readOnlySessionOptions(options, abortController, REVIEW_SCHEMA);
 }
 
-// The options of every read-only session with a structured output (the review, the Task check of
-// SF-054, the morning digest of SF-103): REVIEW_TOOLS only (or the given tools), REVIEW_DENIED_TOOLS
-// plus deny plus the options' path denials (SF-100), the given output schema, and the given hooks
-// (the Task check's path guard) merged with the options' hooks (the file-tool guard, SF-123); the
-// environment's credentials denied to sandboxed commands (SF-123).
+// The options of every read-only session with a structured output (the review, the Task check,
+// the morning digest): REVIEW_TOOLS only (or the given tools), REVIEW_DENIED_TOOLS plus deny plus
+// the options' path denials, the given output schema, and the given hooks (the Task check's path
+// guard) merged with the options' hooks (the file-tool guard); the environment's credentials
+// denied to sandboxed commands.
 export function readOnlySessionOptions(
   options: Omit<ReviewOptions, 'onMessage' | 'signal'>, abortController: AbortController, schema: Record<string, unknown>, deny: readonly string[] = [],
   sessionHooks?: Options['hooks'],
 ): Options {
   // The environment, built once: the CLI gets it, and its credentials are hidden from sandboxed
-  // commands (SF-123 rule 7), after the path denials, as in an Implementer turn.
+  // commands, after the path denials, as in an Implementer turn.
   const environment = sessionEnvironment();
   const sandbox = withSandboxEnvDenials(withSandboxDenials(options.sandbox, options.filesystem), environment);
   const hooks = mergeHooks(sessionHooks, options.hooks);
@@ -415,7 +415,7 @@ export function itemLine(item: ReviewItem): string {
 
 // The body of the Fix section the factory writes for a review: the summary as a lead line (by: who
 // reviewed), then one numbered item per blocker or major entry, then the nits, numbered on, under
-// "Nits (optional):"; each item with its ledger id (SF-052).
+// "Nits (optional):"; each item with its ledger id.
 export function fixContent(summary: string, items: FixItem[], by = 'Claude'): string {
   // A fix the user decided is never optional, whatever its severity.
   const optional = items.filter((fixItem) => fixItem.item.severity === 'nit' && fixItem.userNote === undefined);
@@ -433,7 +433,7 @@ export function sensitiveItem(path: string): ReviewItem {
   return { path, problem: SENSITIVE_PROBLEM, expected: 'Remove it, or justify it in the Report.', severity: 'major' };
 }
 
-// The fix item of a path outside the Task's scope a verdict did not accept (SF-053): always major.
+// The fix item of a path outside the Task's scope a verdict did not accept: always major.
 export function scopeItem(path: string): ReviewItem {
   return { path, problem: SCOPE_PROBLEM, expected: 'Remove the change, or justify it in the Report.', severity: 'major' };
 }
@@ -458,13 +458,13 @@ export const nits = (items: ReviewItem[]): ReviewItem[] => items.filter((item) =
 // A verdict as the reviewer writes it, or as the factory acts on it.
 export type Verdict = 'clean' | 'fix';
 
-// The reviewer's verdict before the sensitive-path rule, as the factory acts on it (SF-051): a round
+// The reviewer's verdict before the sensitive-path rule, as the factory acts on it: a round
 // is clean when it has no blocker or major item, whatever the reviewer wrote; fix otherwise.
 export function actedVerdict(output: { items: ReviewItem[] }): Verdict {
   return blocking(output.items).length > 0 ? 'fix' : 'clean';
 }
 
-// The verdict the factory acts on, for both reviewers (SF-051): fix when the reviewer gave a
+// The verdict the factory acts on, for both reviewers: fix when the reviewer gave a
 // blocker or major item, or when an undeclared sensitive path or a path outside the Task's scope
 // is not accepted (unaccepted, always major); clean otherwise, whatever the reviewer wrote. The
 // items of a fix are the blocking ones (the reviewer's, then the unaccepted paths), then the

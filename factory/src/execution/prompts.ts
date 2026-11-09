@@ -1,12 +1,11 @@
-// The text the job lifecycle gives the Implementer (SF-142, from src/execution/shared.ts): the
-// first prompt of a job, the notes of a changed Task file or its images, and the groups of the
-// factory's marked paths.
+// The text the job lifecycle gives the Implementer: the first prompt of a job, the notes of a
+// changed Task file or its images, and the groups of the factory's marked paths.
 import { SCOPE_PROBLEM, SENSITIVE_PROBLEM } from '../ledger.js';
 import type { ReviewItem } from '../review.js';
 import { TASK_DIR } from '../task-file.js';
 
 // The paths of the factory's fix items (src/review.ts, unacceptedItems) by kind, each with its
-// label: the undeclared sensitive paths, then the paths outside the Task's scope (SF-053).
+// label: the undeclared sensitive paths, then the paths outside the Task's scope.
 export function markedGroups(items: ReviewItem[]): Array<{ label: string; paths: string[] }> {
   return [
     { label: 'undeclared sensitive path(s)', problem: SENSITIVE_PROBLEM },
@@ -15,7 +14,7 @@ export function markedGroups(items: ReviewItem[]): Array<{ label: string; paths:
     .filter((group) => group.paths.length > 0);
 }
 
-// The line of a Resume's prompt when the Task's images changed while the job was paused (SF-065).
+// The line of a Resume's prompt when the Task's images changed while the job was paused.
 export function imagesChangedNote(names: readonly string[]): string {
   return `The Task's images changed while the job was paused: ${names.join(', ')}.`;
 }
@@ -23,9 +22,9 @@ export function imagesChangedNote(names: readonly string[]): string {
 // How many kept files the first prompt names.
 const MAX_KEPT_NAMED = 50;
 
-// What the Implementer is told of a Task file that changed since it was last given it (SF-067:
-// on Resume, or the next Fix section or sf say after a review round resumed): its diff, or, when
-// none could be made, to read it again.
+// What the Implementer is told of a Task file that changed since it was last given it (on
+// Resume, or the next Fix section or sf say after a review round resumed): its diff, or, when none
+// could be made, to read it again.
 export function changeNote(ticket: string, diff: string | undefined): string {
   const path = `${TASK_DIR}/${ticket}.md`;
   if (diff === undefined) {
@@ -35,7 +34,7 @@ export function changeNote(ticket: string, diff: string | undefined): string {
 }
 
 // The first prompt of a job: /implement of its Task file, then the job's <rules> block when it has
-// one (SF-059); after sf restart --keep-files (SF-067), with the files kept from the previous job.
+// one; after sf restart --keep-files, with the files kept from the previous job.
 export function firstPrompt(ticket: string, kept: string[], rules = ''): string {
   const command = [`/implement ${TASK_DIR}/${ticket}.md`, ...(rules !== '' ? ['', rules.trimEnd()] : [])].join('\n');
   if (kept.length === 0) {

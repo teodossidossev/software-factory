@@ -1,8 +1,8 @@
-// The Stats page (SF-117): the factory's numbers over 7, 30 or 90 local days, computed from the
+// The Stats page: the factory's numbers over 7, 30 or 90 local days, computed from the
 // state directory and only read from it. What each review stage found and what of it was fixed,
 // how often the Codex gate caught what the Claude review passed (and the other way round), the
 // cost and the tokens per day, workspace and role, the jobs running and waiting now, the Claude
-// review experiment's two arms and the simplification's offers taken (SF-132), and the warnings
+// review experiment's two arms and the simplification's offers taken, and the warnings
 // when a job, a stage or a day is far from the usual. The payload holds numbers, times,
 // workspace names, tickets, job directory names, states, Task titles and the warnings' own
 // sentences; never a review's text, a prompt, a message or a setting.
@@ -113,7 +113,7 @@ export interface StageRow {
   revised: number | null;
   // outcomes.fixed, or revised for the plan check.
   fixed: number;
-  // The plan check only (SF-130): the distinct tickets with a check record in the period; null otherwise.
+  // The plan check only: the distinct tickets with a check record in the period; null otherwise.
   tickets: number | null;
   cost_usd: number | null;
   tokens: ClaudeTokens | GateTokens | null;
@@ -153,17 +153,17 @@ export interface JobRow {
   claude: Findings;
   codex: Findings;
   time_to_ready_s: number | null;
-  // The plan checks of its workspace and ticket (SF-130), all-time: every record, failed ones
+  // The plan checks of its workspace and ticket, all-time: every record, failed ones
   // included; the sum of their known costs; false when a cost is unknown.
   plan_checks: number;
   plan_check_usd: number;
   plan_check_usd_complete: boolean;
-  // From job.json (SF-131): whether the Claude review ran on the job; null for a job started
-  // before.
+  // From job.json: whether the Claude review ran on the job; null for a job.json written before
+  // that field.
   claude_review: boolean | null;
 }
 
-// One arm of the Claude review experiment (SF-132): the jobs started in the period whose
+// One arm of the Claude review experiment: the jobs started in the period whose
 // claude_review is true (on) or false (off).
 export interface ArmRow {
   arm: 'on' | 'off';
@@ -184,7 +184,7 @@ export interface ArmRow {
   codex_findings_per_job: number | null;
 }
 
-// The simplification pass in the period (SF-132): the records with a suggestion, and the user's
+// The simplification pass in the period: the records with a suggestion, and the user's
 // choices.
 export interface SimplifyCounts {
   offered: number;
@@ -941,7 +941,7 @@ export class Stats {
     const readyTimes: number[] = [];
     const pushedIterations: number[] = [];
     const jobRows: Array<JobRow & { data: JobData }> = [];
-    // The plan checks of each ticket, all-time (SF-130).
+    // The plan checks of each ticket, all-time.
     const planChecks = new Map<string, { plan_checks: number; plan_check_usd: number; plan_check_usd_complete: boolean }>();
     for (const record of checks.records) {
       const key = `${record.workspace}/${record.ticket}`;
@@ -1194,7 +1194,7 @@ async function readCheck(path: string, workspace: string, ticket: string): Promi
   return { workspace, ticket, sha256: record.sha256, status: record.status, findings, cost: costOf(record.cost_usd), started_at: record.started_at, ended_at: record.ended_at };
 }
 
-// The arms of the Claude review experiment (SF-132), on then off: the job rows started in the
+// The arms of the Claude review experiment, on then off: the job rows started in the
 // period with claude_review true or false, before the job list is cut to MAX_JOB_ROWS.
 function armRows(rows: readonly JobRow[], inPeriod: (ts: unknown) => boolean): ArmRow[] {
   return (['on', 'off'] as const).map((arm): ArmRow => {

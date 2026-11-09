@@ -1,4 +1,4 @@
-// What a job's state reads as (SF-089, from src/execution.ts): check (the Report, the review and
+// What a job's state reads as: check (the Report, the review and
 // the gate of the last iteration, paged) and status.
 import { FactoryError } from '../errors.js';
 import { GATE_REVIEWER } from '../gate.js';
@@ -88,7 +88,7 @@ export class StatusPart {
   // The review of the last published iteration: its record once it ended, running while it runs or
   // is due, off with SF_REVIEW=off; undefined before the first iteration and when none will run.
   // After a Claude verdict acted on as clean, gate is the gate's the same way; absent with the gate off.
-  // Without the Claude review (SF-131): off, with the gate's status as gate.
+  // Without the Claude review: off, with the gate's status as gate.
   async #reviewStatus(job: Job): Promise<CheckResult['review']> {
     if (job.iteration === 0) {
       return undefined;
@@ -124,7 +124,7 @@ export class StatusPart {
     if (record !== undefined) {
       return 'verdict' in record ? { status: 'done', verdict: record.verdict, summary: record.summary } : { status: 'failed', summary: record.error };
     }
-    // Off, or skipped by the iteration's gate level (SF-092): no gate will run.
+    // Off, or skipped by the iteration's gate level: no gate will run.
     if (!this.#settings.config.gate.on || (await gateSkipped(this.#store.jobs, job))) {
       return undefined;
     }

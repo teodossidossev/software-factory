@@ -1,5 +1,5 @@
-// The factory's health checks (SF-153): a fixed list of checks, each answering ok, down or off (not
-// configured, which counts as green); recovering is set by the recovery only (SF-154). sf serve runs
+// The factory's health checks: a fixed list of checks, each answering ok, down or off (not
+// configured, which counts as green); recovering is set by the recovery only. sf serve runs
 // them every 30 s (logins hourly) in a HealthMonitor, keeps the last result for the dashboard's
 // traffic light (GET api/health, the stream's health event) and notifies a check that turns down
 // and that is ok again; sf health runs them once in its own process. A check never throws and never

@@ -1,5 +1,5 @@
-// The data shapes of the job lifecycle (SF-142, from src/execution/shared.ts): what Execution's
-// calls return or take, and the listener of its state changes. src/execution.ts exports them.
+// The data shapes of the job lifecycle: what Execution's calls return or take, and the listener of
+// its state changes. src/execution.ts exports them.
 import type { Job, JobMr, JobState, PauseStep } from '../jobs.js';
 import type { Page } from '../repo-files.js';
 
@@ -37,9 +37,9 @@ export interface MrOutcome {
   error?: { code: string; message: string };
   title?: string;
   link?: string;
-  // The merge request opened (or reused) on the Git host (SF-048).
+  // The merge request opened (or reused) on the Git host.
   mr?: JobMr & { reused: boolean };
-  // What was pushed of a handed-over job (SF-073): the factory's commit or the user's.
+  // What was pushed of a handed-over job: the factory's commit or the user's.
   message?: string;
 }
 
@@ -49,7 +49,7 @@ export interface MrContent {
   body: string;
 }
 
-// A Save of the Merge request screen (SF-080): the title, the body and, when they change, the
+// A Save of the Merge request screen: the title, the body and, when they change, the
 // branch and the base.
 export interface MrInput {
   title: string;
@@ -58,7 +58,7 @@ export interface MrInput {
   base?: string;
 }
 
-// The Merge request screen's view of a job's MR text (SF-080, GET mr-view).
+// The Merge request screen's view of a job's MR text (GET mr-view).
 export interface MrView {
   title: string;
   body: string;
@@ -83,7 +83,7 @@ export interface MrView {
   commit_differs: boolean;
 }
 
-// What a Save or Reset of the MR text left (SF-080).
+// What a Save or Reset of the MR text left.
 export interface MrSaved {
   state: JobState;
   branch: string;
@@ -92,7 +92,7 @@ export interface MrSaved {
   prepared_commit: string | null;
 }
 
-// What a Resume did (SF-067): the job's state and iteration, the step it went on with, and
+// What a Resume did: the job's state and iteration, the step it went on with, and
 // whether the Task file had changed.
 export interface Resumed {
   state: JobState;

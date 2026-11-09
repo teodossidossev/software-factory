@@ -31,13 +31,13 @@ export function formatElapsed(seconds: number): string {
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secondsLeft).padStart(2, '0')}`;
 }
 
-// SINCE: updated_at in local time (SF-049), "YYYY-MM-DD HH:MM:SS"; empty when it is missing or
+// SINCE: updated_at in local time, "YYYY-MM-DD HH:MM:SS"; empty when it is missing or
 // does not parse, never the stored value.
 export function formatSince(ts: unknown): string {
   return localTime(ts) ?? '';
 }
 
-// The hand-over lines of sf status for one job (SF-073): a handed-over job is "in your checkout on
+// The hand-over lines of sf status for one job: a handed-over job is "in your checkout on
 // <branch>" with the MR title; a job waiting in ready_for_human_review names why it was not handed
 // over. [] otherwise.
 export function handoverLines(job: Job, mrTitle: string | undefined): string[] {
@@ -50,7 +50,7 @@ export function handoverLines(job: Job, mrTitle: string | undefined): string[] {
   return [];
 }
 
-// The usage-limit line of sf status for a parked job (SF-072): whose limit and when it resets, in
+// The usage-limit line of sf status for a parked job: whose limit and when it resets, in
 // local time; or, once it reset under the rule wait, that the job waits for the user's Resume.
 // undefined otherwise.
 export function limitLine(job: Job): string | undefined {

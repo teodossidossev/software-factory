@@ -1,4 +1,4 @@
-// The Git host's merge requests (SF-048): GitHub (github.com, REST API v3) and GitLab (REST API
+// The Git host's merge requests: GitHub (github.com, REST API v3) and GitLab (REST API
 // v4), chosen from the workspace checkout's origin URL. Opens a pull request / merge request from
 // the job's branch into its base (or reuses the open one), reads its state and merges it through
 // the host's API; nothing is pushed or forced here. The tokens come from the environment file
@@ -173,7 +173,7 @@ export function forgeFor(origin: string | undefined, settings: ForgeSettings): F
   return gitlabForge(new HostClient(choice, `GitLab ${hostnameOf(choice.host)}`), choice.path);
 }
 
-// The forge tokens' check of sf health (SF-153): one read-only "who am I" call to the host's API
+// The forge tokens' check of sf health: one read-only "who am I" call to the host's API
 // (GitHub GET /user, GitLab GET /api/v4/user), the token in the Authorization header only, no
 // redirect followed. The answer's body is never read: the result names the host, the variable and
 // the status only.

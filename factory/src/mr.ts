@@ -15,10 +15,10 @@ import { COMMIT_TYPES, headerProblem, manualClaim, MAX_HEADER_CHARS, MR_REQUIRED
 import { TASK_DIR } from './task-file.js';
 
 const FETCH_TIMEOUT_MS = 60_000;
-// The check of origin before a branch rename (SF-080, git ls-remote).
+// The check of origin before a branch rename (git ls-remote).
 const LS_REMOTE_TIMEOUT_MS = 15_000;
 const PUSH_TIMEOUT_MS = 120_000;
-// `git lfs push` of the job's LFS objects before the branch (SF-124); they may be large.
+// `git lfs push` of the job's LFS objects before the branch; they may be large.
 const LFS_PUSH_TIMEOUT_MS = 600_000;
 // Each Git call of the commit and the rebase; a signing prompt that never returns ends here.
 const GIT_TIMEOUT_MS = 60_000;
@@ -193,7 +193,7 @@ function sectionRange(lines: string[], heading: string, from: number, to: number
   return start === undefined ? undefined : { start, end: to };
 }
 
-// The MR text with the factory's list of the nits not applied (SF-051): a `### Nits not applied`
+// The MR text with the factory's list of the nits not applied: a `### Nits not applied`
 // subsection at the end of `## Special things to note`, one line per nit (withSubsection).
 export function withNits(text: string, nits: ReviewItem[], iteration: number): string {
   return withSubsection(text, NITS_HEADING, nits.map((item) => `- ${itemLine(item)}`), (rest) => `- … and ${rest} more: see review.json and gate.json of iteration ${iteration}.`);
@@ -201,7 +201,7 @@ export function withNits(text: string, nits: ReviewItem[], iteration: number): s
 
 export const FINDINGS_HEADING = '### Review findings not fixed';
 
-// The MR text with the factory's list of the review findings not fixed (SF-052): every
+// The MR text with the factory's list of the review findings not fixed: every
 // accepted_risk, contested and left entry of the ledger, one line each with its id, as a
 // `### Review findings not fixed` subsection of `## Special things to note` (withSubsection).
 export function withFindings(text: string, ledger: LedgerEntry[]): string {
@@ -210,7 +210,7 @@ export function withFindings(text: string, ledger: LedgerEntry[]): string {
 
 export const ACCEPTED_HEADING = '### Accepted over a stop';
 
-// The MR text with the user's Accept over a stop (SF-131): a `### Accepted over a stop` subsection
+// The MR text with the user's Accept over a stop: a `### Accepted over a stop` subsection
 // of `## Special things to note` (withSubsection) with the stop's code, "No reviewer passed iteration
 // N." when no reviewer did (noReviewer), and what went unapplied: one line per finding, or the
 // gate's error.
@@ -224,18 +224,18 @@ export function withAccepted(text: string, accepted: { code: string; unapplied: 
 
 export const SIMPLIFY_HEADING = '### Simplifications not applied';
 
-// The MR text with the suggestions of the simplification pass the user skipped (SF-055), one line
+// The MR text with the suggestions of the simplification pass the user skipped, one line
 // each, as a `### Simplifications not applied` subsection of `## Special things to note`
 // (withSubsection), so they can become a follow-up ticket.
 export function withSimplifications(text: string, suggestions: Suggestion[], iteration: number): string {
   return withSubsection(text, SIMPLIFY_HEADING, suggestions.map((item) => `- ${suggestionLine(item)}`), (rest) => `- … and ${rest} more: see simplify.json of iteration ${iteration}.`);
 }
 
-// The factory's subsection of the workspace's test command (SF-128), and the section it ends.
+// The factory's subsection of the workspace's test command, and the section it ends.
 export const CHECKS_HEADING = '### Checks';
 const TESTING_HEADING = '## Testing';
 
-// The MR text with the factory's ### Checks subsection at the end of `## Testing` (SF-128): the
+// The MR text with the factory's ### Checks subsection at the end of `## Testing`: the
 // line of the workspace's test command on the iteration the MR is prepared from, replacing any
 // ### Checks already there (an earlier preparation's, the model's or the user's own).
 export function withChecks(text: string, line: string, iteration: number): string {
@@ -299,7 +299,7 @@ export function mrMessage(text: string): { title: string; body: string } {
   return { title, body: rest.join('\n') };
 }
 
-// A message as the factory writes it, into the commit and into mr.md (SF-080): the title, a blank
+// A message as the factory writes it, into the commit and into mr.md: the title, a blank
 // line, the body and a final newline; the title and a newline when the body is empty.
 export function messageText(message: { title: string; body: string }): string {
   return `${message.body === '' ? message.title : `${message.title}\n\n${message.body}`}\n`;
@@ -317,7 +317,7 @@ export async function commitMessage(cwd: string, commit: string): Promise<{ titl
   return result.code === 0 ? mrMessage(result.stdout.toString('utf8')) : undefined;
 }
 
-// The prepared commit's message rewritten (SF-080), before any push, in the job's worktree whose
+// The prepared commit's message rewritten, before any push, in the job's worktree whose
 // HEAD is that commit: `commit --amend --only` without paths changes the message only, never the
 // staged files or the tree; the author and the author date stay, the user's commit.gpgSign
 // applies as at Clean. The message goes through a file in the Git dir, as commitAndRebase writes
@@ -375,7 +375,7 @@ export async function validBranchName(cwd: string, name: string): Promise<boolea
   return name !== '' && !name.startsWith('-') && (await runGit(cwd, ['check-ref-format', '--branch', name])).code === 0;
 }
 
-// Every problem of an MR text and its branch and base for the Merge request screen (SF-080), each
+// Every problem of an MR text and its branch and base for the Merge request screen, each
 // with its field, in the screen's words: the title against the commit header rule (headerProblem),
 // the body once per missing required heading and once for a manual check claimed as run
 // (testingProblem), an empty branch or base. The same rules as mrTextProblem, every problem listed.
@@ -404,7 +404,7 @@ export function mrProblems(ticket: string, message: { title: string; body: strin
   }
   const claim = manualClaim(lines);
   if (claim !== undefined) {
-    problems.push({ field: 'body', message: `SF-058: the ## Testing line "${claim.trim().slice(0, 90)}" reads as a check that was run. Anything not run goes on a line starting with "Not checked:".` });
+    problems.push({ field: 'body', message: `Testing claim: the ## Testing line "${claim.trim().slice(0, 90)}" reads as a check that was run. Anything not run goes on a line starting with "Not checked:".` });
   }
   return problems;
 }
@@ -627,7 +627,7 @@ async function committedFile(cwd: string, spec: string): Promise<Buffer | undefi
 }
 
 // Git LFS objects reach the remote through the repository's pre-push hook (`git lfs pre-push`),
-// which never runs from the factory (SF-124), so the push sends them itself: when a path the job
+// which never runs from the factory, so the push sends them itself: when a path the job
 // changed between the merge base of source and the base (origin's, else the local branch) and
 // source has the lfs filter, `git lfs push origin <source>`. It refuses without git-lfs, when the
 // job changed .lfsconfig (it could send the objects and the credentials to another host), and
@@ -676,7 +676,7 @@ async function pushLfsObjects(cwd: string, branch: string, base: string, source:
   return failed(`git lfs push origin ${branch} failed: ${detail}`);
 }
 
-// source: the ref pushed to the branch (SF-073: the saved commit of a handed-over job,
+// source: the ref pushed to the branch (e.g. the saved commit of a handed-over job,
 // refs/factory/<ticket>); the branch itself by default. The protections are the same. Git LFS
 // objects of the job go first (pushLfsObjects).
 export async function pushBranch(cwd: string, branch: string, base: string, source?: string): Promise<MrFailure | undefined> {

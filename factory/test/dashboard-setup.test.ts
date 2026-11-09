@@ -232,7 +232,7 @@ test('dashboard ticket page (SF-081): the page payload of a skeleton and of a wr
     // fixture's job of T-1 read from the state directory.
     assert.deepEqual([skeleton.check, skeleton.queue], [null, null]);
     assert.deepEqual(skeleton.history.map((entry: { kind: string; text: string }) => [entry.kind, entry.text]), [
-      ['started', 'Started as a job (now: awaiting_review)'], ['note', 'Recorded since SF-081; earlier steps are known only from checks and jobs.'],
+      ['started', 'Started as a job (now: awaiting_review)'], ['note', 'Older steps were not recorded; they are known only from checks and jobs.'],
     ]);
 
     const planned = await fetchRaw(new URL('api/tickets/app/T-2/page', base));

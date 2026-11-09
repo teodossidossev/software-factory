@@ -1,4 +1,4 @@
-// The paths a session the factory starts may not reach (SF-100): the factory's config and env file,
+// The paths a session the factory starts may not reach: the factory's config and env file,
 // its state (but the worktrees), the other jobs' worktrees, the other workspaces' checkouts, the
 // tunnel client's profile, the user's credentials in the home directory and the Task checks'
 // checkouts, denied for reading and writing; the factory's own installation, denied for writing.
@@ -7,12 +7,12 @@
 // lists for Bash. A path that does not exist when they are built is left out everywhere, so the
 // sandbox never leaves a placeholder for it. Also the Task checks' parent directory, which the
 // Task checks create and the other sessions deny.
-// SF-123: the user's socket locations are denied too; the .env files of the worktree and the
+// The user's socket locations are denied too; the .env files of the worktree and the
 // checkout for reading; a job's sandboxed commands read nothing in the home directory but the kept
 // paths (by denyRead only, never allowRead); and the file-tool guard, a PreToolUse hook every job
 // session gets, holds Write and Edit to the own worktree and the read tools out of the home
 // directory's other paths, by real path.
-// SF-125: the Codex gate runs inside bubblewrap under the same denyRead list (gateWrapper).
+// The Codex gate runs inside bubblewrap under the same denyRead list (gateWrapper).
 // This module knows the file system, the registry and Git; it knows nothing about jobs.
 import type { HookCallback, Options, SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
 import { lstatSync, realpathSync, statSync } from 'node:fs';
@@ -30,7 +30,7 @@ export type SandboxDenials = Required<Pick<NonNullable<SandboxSettings['filesyst
 
 // tools: permission deny rules for the session's disallowedTools; sandbox: merged into the
 // sandbox's filesystem settings (withSandboxDenials); kept: the paths under the home directory a
-// job's sandboxed commands may still read (SF-123), real; hooks: the file-tool guard (SF-123), the
+// job's sandboxed commands may still read, real; hooks: the file-tool guard, the
 // hooks option of every job session's query().
 export interface PathDenials {
   tools: string[];
@@ -66,14 +66,14 @@ export interface DenialScope {
 // The user's credentials in the home directory, denied when they exist. Claude Code keeps its
 // login in ~/.claude/.credentials.json on Linux.
 // Git's credential store has two default files: ~/.git-credentials and ~/.config/git/credentials
-// (SF-123: .config/git is a kept path, so its credentials must be a denial of their own).
+// (.config/git is a kept path, so its credentials must be a denial of their own).
 export const HOME_CREDENTIALS = ['.ssh', '.codex', '.aws', '.config/gh', '.git-credentials', '.config/git/credentials', '.netrc', '.npmrc', '.claude/.credentials.json'];
 
 // Claude Code's configuration directory: CLAUDE_CONFIG_DIR, else ~/.claude.
 export const claudeConfigDir = (env: NodeJS.ProcessEnv, home: string): string => env.CLAUDE_CONFIG_DIR || join(home, '.claude');
 
 // The name the docs give the factory's own MCP server in Claude Code (`claude mcp add … software-factory
-// …`, SF-099): every session denies its tools, so none reaches the planning tools with the token
+// …`): every session denies its tools, so none reaches the planning tools with the token
 // Claude Code holds for it, whichever scope it was added in.
 export const FACTORY_MCP_SERVER = 'software-factory';
 
@@ -248,7 +248,7 @@ async function candidates(scope: DenialScope): Promise<{ readWrite: string[]; wr
   readWrite.push(env.TUNNEL_CLIENT_PROFILE_DIR || join(env.XDG_CONFIG_HOME || join(home, '.config'), 'tunnel-client'));
   readWrite.push(...HOME_CREDENTIALS.map((path) => join(home, path)));
   readWrite.push(...(await socketLocations(env, scope.systemRoot ?? '/')));
-  // Claude Code's backups of its global config, which hold what the global config holds (SF-099).
+  // Claude Code's backups of its global config, which hold what the global config holds.
   readWrite.push(join(claudeConfigDir(env, home), 'backups'));
   if (scope.session !== 'task_check') {
     readWrite.push(taskChecksDir(scope.tmp));
@@ -270,12 +270,12 @@ async function candidates(scope: DenialScope): Promise<{ readWrite: string[]; wr
   if (realInstall !== undefined && !within(ownCheckout, realInstall)) {
     writeOnly.push(realInstall);
   }
-  // The .env files of the own worktree and checkout, for reading (SF-123).
+  // The .env files of the own worktree and checkout, for reading.
   const readOnly = [...(scope.worktree !== undefined ? await envFiles(scope.worktree) : []), ...(await envFiles(scope.checkout))];
   return { readWrite, writeOnly, readOnly, settings: claudeUserSettings(env, home) };
 }
 
-// Where the user's Unix sockets live (SF-123): the session bus and the systemd user manager in the
+// Where the user's Unix sockets live: the session bus and the systemd user manager in the
 // runtime directory, the system bus, docker, containerd, podman, tailscaled, screen, X11, the SSH
 // agents and tmux, under root (/ but in tests). Linux cannot allow sockets by path, so their
 // locations are denied instead; a missing one is left out like every other.
@@ -300,7 +300,7 @@ const ENV_EXAMPLES = new Set(['.env.example', '.env.sample', '.env.template']);
 // Whether a file name is a .env file to deny: .env or .env.*, but the shared examples.
 const isEnvFile = (name: string): boolean => (name === '.env' || name.startsWith('.env.')) && !ENV_EXAMPLES.has(name);
 
-// The .env and .env.* files under a Git work tree (SF-123), absolute: the tracked ones and every
+// The .env and .env.* files under a Git work tree, absolute: the tracked ones and every
 // untracked one, ignored ones included (`git ls-files --cached --others` without an exclude list
 // lists what `--others --ignored --exclude-standard` lists, and the untracked files not ignored).
 // When Git cannot list them (not a work tree, a failure, its time limit), the folder is walked
@@ -315,18 +315,18 @@ async function envFiles(dir: string): Promise<string[]> {
   return [...new Set(names)].filter((name) => isEnvFile(basename(name))).map((name) => join(dir, name));
 }
 
-// The Claude Code configuration a session loads that it could otherwise rewrite for its next query
-// (SF-100): the user settings (settings source "user": sandbox.filesystem.disabled, allowRead,
+// The Claude Code configuration a session loads that it could otherwise rewrite for its next query:
+// the user settings (settings source "user": sandbox.filesystem.disabled, allowRead,
 // hooks, all honoured from there) and the global config (its user-scope MCP servers run outside
 // the sandbox), under CLAUDE_CONFIG_DIR, else ~/.claude and ~/.claude.json. Denied for writing,
 // for the tools even while missing, so a session cannot create them either. The global config is
-// denied for reading too (SF-099): `claude mcp add` keeps the factory's MCP URL with its token there.
+// denied for reading too: `claude mcp add` keeps the factory's MCP URL with its token there.
 export function claudeUserSettings(env: NodeJS.ProcessEnv, home: string): string[] {
   const dir = claudeConfigDir(env, home);
   return [join(dir, 'settings.json'), env.CLAUDE_CONFIG_DIR ? join(env.CLAUDE_CONFIG_DIR, '.claude.json') : join(home, '.claude.json')];
 }
 
-// The paths under the home directory a job's sandboxed commands keep reading (SF-123), relative to
+// The paths under the home directory a job's sandboxed commands keep reading, relative to
 // it: Git's configuration, the Node toolchains and their caches, and ~/.local/bin.
 export const HOME_KEPT = [
   '.gitconfig', '.config/git', '.npm', '.nvm', '.volta', '.local/share/fnm', '.local/share/pnpm', '.yarn', '.bun', '.node-gyp',
@@ -386,7 +386,7 @@ async function realTarget(path: string, followed = 0): Promise<string> {
 async function keptPaths(scope: DenialScope, home: string, denyRead: readonly string[]): Promise<string[]> {
   const env = scope.env ?? process.env;
   const extra: string[] = [];
-  // The roots the kept paths are carved out of (SF-123 Fix 4): an entry that is, or holds, one of
+  // The roots the kept paths are carved out of: an entry that is, or holds, one of
   // them (the home itself, or a link to it or to /) would keep it whole, whatever lies below it.
   const roots = [...new Set([resolve(home), ...(await guardedRoots(env, home))])];
   for (const entry of sandboxAllowRead(env)) {
@@ -416,7 +416,7 @@ async function keptPaths(scope: DenialScope, home: string, denyRead: readonly st
   return [...kept];
 }
 
-// The folders whose contents a job reads only through the kept paths (SF-123): the home directory
+// The folders whose contents a job reads only through the kept paths: the home directory
 // and Claude Code's configuration directory when CLAUDE_CONFIG_DIR puts it outside the home; real.
 async function guardedRoots(env: NodeJS.ProcessEnv, home: string): Promise<string[]> {
   const realHome = (await realOrUndefined(home)) ?? resolve(home);
@@ -424,7 +424,7 @@ async function guardedRoots(env: NodeJS.ProcessEnv, home: string): Promise<strin
   return config === undefined || within(config, realHome) ? [realHome] : [realHome, config];
 }
 
-// The entries a job's sandboxed commands may not read in a guarded root (SF-123): every entry of
+// The entries a job's sandboxed commands may not read in a guarded root: every entry of
 // the root and of each folder on the way down to a kept path, unless it is a kept path, on the
 // way to one, or a link into, or holding, one. Absolute, spelled from the root's real path. A kept
 // path that is, or holds, the root keeps it whole (a checkout at $HOME, say): nothing is denied.
@@ -506,7 +506,7 @@ export async function pathDenials(scope: DenialScope): Promise<PathDenials> {
   const kept = await keptPaths(scope, home, specific.denyRead);
   // The Implementer, the review and the simplification pass load the user settings (settingSources
   // "user"): one that weakens the sandbox stops the session before it starts. Their sandboxed
-  // commands read nothing in the home directory but the kept paths (SF-123), by denyRead only: no
+  // commands read nothing in the home directory but the kept paths, by denyRead only: no
   // allowRead, which would win over every denial inside what it re-opens.
   const roots = await guardedRoots(env, home);
   if (scope.session === 'job') {
@@ -527,7 +527,7 @@ export async function pathDenials(scope: DenialScope): Promise<PathDenials> {
 // The text every refusal of the file-tool guard starts with (the smoke looks for it).
 export const FILE_GUARD = "The factory's file-tool guard";
 
-// The file tools that write, and the ones that read, by name (SF-123).
+// The file tools that write, and the ones that read, by name.
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 const READ_TOOLS = new Set(['Read', 'Grep', 'Glob', 'LS']);
 // The keys of a tool input that name a path; each one present is a target.
@@ -588,7 +588,7 @@ function braceAlternatives(pattern: string): string[] | undefined {
 // cannot read: a path that is not a string, has white space at either end or starts with "~", a
 // missing target of a write or a Read, a Glob pattern it cannot expand or that climbs with ".."
 // after a glob segment. A Glob, Grep or LS without a path reaches cwd. searches: the folders a Glob
-// or Grep walks below for files to match (SF-123 Fix 1): every path of the call, its folder and a
+// or Grep walks below for files to match: every path of the call, its folder and a
 // Glob pattern's fixed parts alike (a pattern without a "/" matches at any depth, and Claude Code
 // may move part of a pattern into the folder searched).
 function targets(tool: string, input: Record<string, unknown>, cwd: string): { paths: string[]; searches: string[] } | { unreadable: string } {
@@ -657,7 +657,7 @@ function searchDenied(guard: FileGuard, real: string): string | undefined {
   return held === undefined ? undefined : `holding ${held}`;
 }
 
-// Why a search from dir (a real path) would reach a refused path (SF-123 Fix 1), or undefined:
+// Why a search from dir (a real path) would reach a refused path, or undefined:
 // dir itself, or a link anywhere below it, as ripgrep with --follow walks it. Every folder it would
 // reach is walked once, level by level, by its real path, a link's target folder included (a folder
 // outside the worktree, such as the temporary directory, may hold a link of its own). A dangling
@@ -712,7 +712,7 @@ async function searchEscape(guard: FileGuard, dir: string): Promise<string | und
   return undefined;
 }
 
-// Why the guard refuses a tool call (SF-123), or undefined when it passes. A write tool passes only
+// Why the guard refuses a tool call, or undefined when it passes. A write tool passes only
 // when every target, links resolved, is in the own worktree outside its .git; a read tool is
 // refused when a target lies in the home directory outside the kept paths and the session's own
 // Claude Code project folders. Every other tool passes. Never throws: a call it fails to check is
@@ -858,7 +858,7 @@ export async function checkUserSettings(file: string, denials: SandboxDenials, h
   }
 }
 
-// What the Codex gate's wrapper binds back (SF-125): the job's worktree (Codex's --cd), the Codex
+// What the Codex gate's wrapper binds back: the job's worktree (Codex's --cd), the Codex
 // executable, Codex's own directory (CODEX_HOME, else ~/.codex), the iteration's directory (the
 // schema and output files), the Task's images (the job's copy) and the system temporary directory.
 export interface GateWrapperOptions {
@@ -914,7 +914,7 @@ function mountPoint(path: string): string {
   }
 }
 
-// The bwrap arguments the Codex gate runs under (SF-125), a later mount winning over an earlier one:
+// The bwrap arguments the Codex gate runs under, a later mount winning over an earlier one:
 //   1. the whole system read-only, a new /dev and /proc (--unshare-pid: an unprivileged bwrap mounts
 //      a procfs only in a PID namespace of its own), an empty /tmp, and an empty tmp when it is
 //      not under /tmp;

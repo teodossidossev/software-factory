@@ -1,7 +1,7 @@
-// The user's control of a job and the runner's requests (SF-089, from src/execution.ts): pause and
-// Resume (SF-067), the park on a usage limit and its reset (SF-072), abort, reset and Archive
-// (retire), exclusive (the start screen's section under the lock), and the requests sf serve
-// queues to a job's runner (request, apply, resume, stop).
+// The user's control of a job and the runner's requests: pause and Resume, the park on a usage
+// limit and its reset, abort, reset and Archive (retire), exclusive (the start screen's section
+// under the lock), and the requests sf serve queues to a job's runner (request, apply, resume,
+// stop).
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { changedImages, type ImageRef, jobAttachment, type JobAttachment, type ResolvedImage, resolveTaskImages, sameImages } from '../attachments.js';
@@ -160,15 +160,15 @@ export class ControlPart {
     }
   }
 
-  // Cancels the job's running review, gate, simplification pass or test run (SF-128: its abort kills
-  // the sandbox's process group); its outcome is then never applied.
+  // Cancels the job's running review, gate, simplification pass or test run (its abort kills the
+  // sandbox's process group); its outcome is then never applied.
   #cancelReview(key: string): void {
     this.#sessions.reviews.get(key)?.controller.abort();
     this.#sessions.reviews.delete(key);
   }
 
   // Ends the job: the runner stops (and with it the session, the review, the gate and a run of the
-  // test command, SF-128); the worktree stays unless discard, which removes it and the branch.
+  // test command); the worktree stays unless discard, which removes it and the branch.
   abort(workspaceName: string, ticket: string, discard: boolean): Promise<{ state: JobState; branch: string; discarded: boolean; worktree: string | null; error?: { code: string; message: string } }> {
     return this.#locks.locked(async () => {
       const found = await this.#store.job(workspaceName, ticket);
@@ -179,7 +179,7 @@ export class ControlPart {
         checkNotInCheckout(found);
       }
       if (found.state === 'handed_over') {
-        // The checkout holds the branch (SF-073): no runner may be running.
+        // The checkout holds the branch: no runner may be running.
         await this.#peers.mr.settled(workspaceName, ticket);
       }
       const workspace = await this.#settings.resolve(workspaceName);
@@ -210,7 +210,7 @@ export class ControlPart {
     });
   }
 
-  // sf pause (SF-067): stops the job where it is, the way abort does (the runner stops, and with it
+  // sf pause: stops the job where it is, the way abort does (the runner stops, and with it
   // the turn, the review, the gate or the simplification pass and their processes), and the job
   // goes to paused with its worktree, branch, session, iterations, ledger and events. A review round
   // that ran is thrown away, recorded as interrupted (never as a verdict), and runs again on Resume.
@@ -261,7 +261,7 @@ export class ControlPart {
     });
   }
 
-  // A session of the job hit the plan's usage limit (SF-072): the job parks in waiting_limit, as a
+  // A session of the job hit the plan's usage limit: the job parks in waiting_limit, as a
   // pause would leave it (paused: from working for the turn, awaiting_review for a round; the
   // interrupted event, so the round is due again on Resume; a simplification pass not used up), with
   // the limit: its provider and when the run queue goes on (the parsed reset, else paused.at + 30
@@ -280,7 +280,7 @@ export class ControlPart {
     await this.#store.transition(parked, 'waiting_limit', 'park');
   }
 
-  // The run queue's step for a parked job whose limit reset (SF-072), in sf serve. The job is read
+  // The run queue's step for a parked job whose limit reset, in sf serve. The job is read
   // again under the lock: one no longer parked since the queue saw it (parkedAt: its paused.at;
   // aborted, reset, restarted, resumed by hand, parked again) or already handled is skipped. resume:
   // the job is resumed as sf resume does it, without a message (its runner's reply awaited outside the
@@ -327,7 +327,7 @@ export class ControlPart {
   // What a job in working or awaiting_review was doing: the turn, or the review round that runs or
   // is due on its last iteration (the Claude review, the gate after a clean one, the simplification
   // pass once started); null when none was (awaiting review with the review off). Without the Claude
-  // review (SF-131) the gate is the review: due while its gate.json is missing.
+  // review the gate is the review: due while its gate.json is missing.
   async #interruptedStep(job: Job): Promise<PauseStep | null> {
     const { workspace, ticket, iteration } = job;
     if (job.state === 'working') {
@@ -349,7 +349,7 @@ export class ControlPart {
       if (!('verdict' in review) || actedVerdict(withoutDropped(review)) !== 'clean') {
         return null;
       }
-      // A gate the iteration's gate level skipped (SF-092) counts as absent, as with the gate off.
+      // A gate the iteration's gate level skipped counts as absent, as with the gate off.
       if (gate === undefined && this.#settings.config.gate.on && !(await gateSkipped(this.#store.jobs, job))) {
         return 'gate';
       }
@@ -360,12 +360,12 @@ export class ControlPart {
     return job.simplify_iteration === iteration && (await this.#store.jobs.readSimplify(workspace, ticket, iteration)) === undefined ? 'simplify' : null;
   }
 
-  // sf resume (SF-067): the paused job goes on where it stopped. A turn: the same Implementer session
+  // sf resume: the paused job goes on where it stopped. A turn: the same Implementer session
   // goes on with the message, or "Continue where you stopped."; a review round: it runs again on the
   // same iteration (no message: sf say sends one after). When the Task file changed since the
   // Implementer was last given it, the new one is copied into the worktree (the reviewers read it
   // there), its sha256 recorded, and the turn's message carries its diff. A start by hand: the run
-  // queue's limit does not apply (SF-071).
+  // queue's limit does not apply.
   async resumePaused(workspaceName: string, ticket: string, message = ''): Promise<Resumed> {
     const id = await this.#locks.locked(async () => {
       const job = await this.#store.job(workspaceName, ticket);
@@ -376,7 +376,7 @@ export class ControlPart {
     return this.#runner.serveRunners().reply(workspaceName, ticket, id) as Promise<Resumed>;
   }
 
-  // sf resume needs a paused job, or one parked on a usage limit (SF-072: resumed now, before the
+  // sf resume needs a paused job, or one parked on a usage limit (resumed now, before the
   // reset); a message only when a turn was paused, and then plain text. From waiting_limit the job
   // already holds its slot.
   #checkResume(job: Job, message: string): void {
@@ -401,7 +401,7 @@ export class ControlPart {
       }
       const workspace = await this.#settings.resolve(workspaceName);
       const pause = job.paused ?? { from: 'working' as const, step: 'turn' as const };
-      // The images the Task file refers to now (SF-065), from the folder: an image changed while
+      // The images the Task file refers to now, from the folder: an image changed while
       // paused is found even when the text did not change; one that cannot be used refuses the
       // Resume before anything changes (the job stays paused).
       const images = await resolveTaskImages(workspace.workCheckout, ticket, await readTask(workspace, ticket));
@@ -442,7 +442,7 @@ export class ControlPart {
 
   // The first prompt of a Resume from working: the message, else "Continue where you stopped.". A
   // Resume that opens a new Implementer session (no session_id yet) gives the job's <rules> block
-  // (SF-059) first: with iteration 0 and no message, the job's first prompt.
+  // first: with iteration 0 and no message, the job's first prompt.
   async #resumePrompt(job: Job, message: string): Promise<string> {
     const text = message.trim() !== '' ? message : 'Continue where you stopped.';
     if (job.session_id !== null) {
@@ -477,11 +477,11 @@ export class ControlPart {
     this.#sessions.live.delete(key);
     await live?.session.close();
     await this.#runner.runners?.stop(workspace, ticket);
-    // The Bash sandboxes the session's Claude Code left (SF-141), before the config lock check
+    // The Bash sandboxes the session's Claude Code left, before the config lock check
     // below, as one of them may still hold the lock open.
     await this.#reapSandboxes();
     // The session stopped without an idle outcome (abort, pause, restart, reset): the sandbox's
-    // leftover config lock goes as after a turn's end, unless another job runs (SF-085).
+    // leftover config lock goes as after a turn's end, unless another job runs.
     const job = await this.#store.jobs.read(workspace, ticket).catch(() => undefined);
     if (job !== undefined) {
       await this.#sessions.afterSession(job, job.state === 'working' || job.state === 'preparing_mr' ? job.iteration + 1 : job.iteration);
@@ -572,8 +572,8 @@ export class ControlPart {
     const id = await this.#locks.locked(async () => {
       const job = await this.#store.job(workspaceName, ticket);
       this.#check(job, request);
-      // Ask for changes (SF-073) and every other answer of the user is not a new start: the run
-      // queue's limit does not apply (SF-071).
+      // Ask for changes and every other answer of the user is not a new start: the run queue's
+      // limit does not apply.
       return this.#runner.serveRunners().queue(workspaceName, ticket, request);
     });
     return this.#runner.serveRunners().reply(workspaceName, ticket, id);
@@ -648,9 +648,9 @@ export class ControlPart {
 
   // Runner mode: what the job was doing when its last runner ended. A job awaiting review whose
   // last iteration has no review gets one; one whose review is clean and has no gate.json gets its
-  // gate (or, with the gate off now, Clean); one with a clean gate.json too gets its simplification
-  // pass, or its outcome (SF-055). Without the Claude review (SF-131): no gate.json gets the gate, a
-  // clean one its outcome.
+  // gate (or, with the gate off, Clean); one with a clean gate.json too gets its simplification
+  // pass, or its outcome. Without the Claude review: no gate.json gets the gate, a clean one its
+  // outcome.
   resume(): Promise<void> {
     const { workspace, ticket } = this.#runner.runnerJob();
     return this.#locks.locked(async () => {
@@ -671,7 +671,7 @@ export class ControlPart {
     const gate = await this.#store.jobs.readGate(workspace, ticket, job.iteration);
     if (!claudeReviews(job)) {
       if (gate === undefined) {
-        // startReview starts the gate (SF-131).
+        // startReview starts the gate.
         await this.#peers.reviews.startReview(job);
       } else if ('verdict' in gate) {
         // A clean gate (resumable) whose outcome never applied.
@@ -683,7 +683,7 @@ export class ControlPart {
     if (review === undefined) {
       await this.#peers.reviews.startReview(job);
     } else if ('verdict' in review && gate !== undefined && 'verdict' in gate) {
-      // A clean gate whose simplification pass never applied (SF-055).
+      // A clean gate whose simplification pass never applied.
       await this.#peers.reviews.applying(job, () => this.#peers.reviews.afterClean(job, [...new Set([...review.accepted_sensitive, ...gate.accepted_sensitive])]));
     } else if ('verdict' in review) {
       await this.#peers.reviews.applying(job, () => this.#peers.reviews.afterClaude(job, review));
@@ -691,7 +691,7 @@ export class ControlPart {
   }
 
   // Runner mode, on SIGTERM (abort, reset): the turn, the review, the gate and a run of the test
-  // command (SF-128) end and their outcome is never applied; resolves once the state change in
+  // command end and their outcome is never applied; resolves once the state change in
   // progress, if any, is written.
   async stop(): Promise<void> {
     this.#stop.setStopping();
@@ -705,7 +705,7 @@ export class ControlPart {
     await this.#locks.locked(async () => undefined);
   }
 
-  // Ends the orphaned Bash sandboxes of the factory's sessions (SF-141): those under its worktree
+  // Ends the orphaned Bash sandboxes of the factory's sessions: those under its worktree
   // root or state directory. Never throws.
   #reapSandboxes(): Promise<number[]> {
     return reapOrphanedSandboxes(factoryRoots(this.#settings.config));

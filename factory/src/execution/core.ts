@@ -1,8 +1,8 @@
-// The shared state and seams of the job lifecycle's parts (SF-089): the job store, the config, the
+// The shared state and seams of the job lifecycle's parts: the job store, the config, the
 // live Implementer sessions and the running reviews of this process, the operation lock (locked),
 // the per-workspace Git lock (gitLocked), transition (every state change after the first, the seam
-// for notifications and for JOB_TRANSITIONS in src/jobs.ts, SF-088), and the runner seams. No job
-// logic: the parts hold it. Core implements the narrow ports of ./ports.ts (SF-143); each part takes
+// for notifications and for JOB_TRANSITIONS in src/jobs.ts), and the runner seams. No job
+// logic: the parts hold it. Core implements the narrow ports of ./ports.ts; each part takes
 // only the ports it uses, and src/execution.ts wires the parts to each other.
 import { join } from 'node:path';
 import { withoutImageData } from '../attachments.js';
@@ -103,15 +103,14 @@ export class Core implements JobStorePort, LockPort, LivePort, RunnerPort, Notic
   }
 
   // Every state change after the first: refused (illegal_transition) before anything is written
-  // unless JOB_TRANSITIONS allows it (SF-088). action: the step that changes the state, a literal
+  // unless JOB_TRANSITIONS allows it. action: the step that changes the state, a literal
   // at every call site.
   async transition(job: Job, to: JobState, action: JobAction, error?: { code: string; message: string }, lines?: string[]): Promise<Job> {
     checkTransition(job.state, to, action);
     const from = job.state;
-    // What a pause interrupted is kept only while the job is paused (SF-067) or parked on a usage
-    // limit (SF-072, with the limit); why the hand-over did not happen only while
-    // ready_for_human_review, and the hand-over only while handed_over, unless one of its steps was
-    // cut off (SF-073: recover() repairs it).
+    // What a pause interrupted is kept only while the job is paused or parked on a usage limit (with
+    // the limit); why the hand-over did not happen only while ready_for_human_review, and the
+    // hand-over only while handed_over, unless one of its steps was cut off (recover() repairs it).
     const { error: _previous, paused, limit, handoff_skipped: skipped, handover, ...rest } = job;
     const next: Job = {
       ...rest, state: to, updated_at: now(), ...(error !== undefined ? { error } : {}),
@@ -162,9 +161,8 @@ export class Core implements JobStorePort, LockPort, LivePort, RunnerPort, Notic
   }
 
   // Appends one message of a running review (review_message) or one Codex event of a running gate
-  // (gate_event), already redacted (src/redact.ts), to the job's events.jsonl, cut to its bound
-  // (SF-045).
-  // reviewer: whose session a review_message is (the simplification pass's too, SF-055).
+  // (gate_event), already redacted (src/redact.ts), to the job's events.jsonl, cut to its bound.
+  // reviewer: whose session a review_message is (the simplification pass's too).
   appendLive(job: Job, type: 'review_message' | 'gate_event', raw: unknown, reviewer: string = REVIEWER): Promise<void> {
     const { value, truncated } = cutEvent(withoutImageData(raw));
     const cut = truncated ? { truncated: true as const } : {};

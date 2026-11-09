@@ -1,4 +1,4 @@
-// sf metrics (SF-092): what the Codex gate cost and what its items were worth, per job and in
+// sf metrics: what the Codex gate cost and what its items were worth, per job and in
 // total, read from the state directory without sf serve: every job directory of the workspace (or
 // of every workspace), current and archived, with its job.json, each iteration's gate.json and
 // gate-level.json, and ledger.json. Unreadable files never stop it: each counts once in the
@@ -14,7 +14,7 @@ export type Outcome = (typeof OUTCOMES)[number];
 export type Outcomes = Record<Outcome, number>;
 
 // The gate level of one iteration as the levels column shows it: F full, L light that ran, l light
-// skipped, - none, · no gate decision (a Claude fix verdict, SF_GATE=off, a job older than SF-092),
+// skipped, - none, · no gate decision (a Claude fix verdict, SF_GATE=off, an iteration without gate-level.json),
 // ? a gate.json or gate-level.json that cannot be read.
 export const LEVEL_MARKS = { full: 'F', light: 'L', light_skipped: 'l', none: '-', undecided: '·', unreadable: '?' } as const;
 

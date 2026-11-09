@@ -116,7 +116,7 @@ export function changedFiles(patch: string): { files: ChangedFile[]; submodules:
   return { files, submodules };
 }
 
-// The Patch text per file, by the path changedFiles reads (SF-055: which files an iteration changed,
+// The Patch text per file, by the path changedFiles reads (which files an iteration changed,
 // by comparing two iterations' Patches file by file).
 export function fileSections(patch: string): Map<string, string> {
   const sections = new Map<string, string>();
@@ -176,17 +176,17 @@ export function fileSummaryLines(changes: FileChange[]): string[] {
 }
 
 // The same summaries on one line, as the notifications carry them: a body holds three lines, so
-// with the branch and the MR title before it none of the marked paths is cut (SF-053).
+// with the branch and the MR title before it none of the marked paths is cut.
 export function notificationLine(changes: FileChange[]): string {
   return fileSummaryLines(changes).join('; ');
 }
 
 const STATUS_LETTERS: Record<string, FileChange['status']> = { A: 'added', M: 'modified', D: 'deleted', T: 'modified' };
 
-// The structured file list of an iteration (SF-024): the status of every changed tracked file
+// The structured file list of an iteration: the status of every changed tracked file
 // (`git diff --name-status`) and every untracked file as added, the line counts from the Patch
 // table (0 for a file the Patch omits), and the marks of each path (marksOf): the sensitivity from
-// the rules and may_touch, and the scope from the Task's scope and may_touch (SF-053).
+// the rules and may_touch, and the scope from the Task's scope and may_touch.
 export async function fileChanges(
   cwd: string, baseCommit: string, counted: ChangedFile[], marks: (path: string) => Marks,
 ): Promise<FileChange[]> {
@@ -249,7 +249,7 @@ export async function buildPatch(cwd: string, baseCommit: string): Promise<Patch
 }
 
 // The whole Patch against baseCommit as a sha256, never cut at MAX_PATCH_BYTES, with the paths it
-// covers, sorted (the turn limit's progress test, SF-069): the paths and filters of buildPatch,
+// covers, sorted (the turn limit's progress test): the paths and filters of buildPatch,
 // binary content included, streamed through the hash. buildPatch stays the bounded one for display.
 export async function patchDigest(cwd: string, baseCommit: string): Promise<{ paths: string[]; hash: string }> {
   const { tracked, untracked } = await changedPaths(cwd, baseCommit);

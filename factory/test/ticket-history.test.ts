@@ -129,7 +129,7 @@ test('ticket history: a ticket older than the recording says so once, last: noth
     ['2026-10-30T10:00:00.000Z', 'checked', 'Checked: ready'],
     [null, 'note', OLDER_NOTE],
   ]);
-  assert.equal(OLDER_NOTE, 'Recorded since SF-081; earlier steps are known only from checks and jobs.');
+  assert.equal(OLDER_NOTE, 'Older steps were not recorded; they are known only from checks and jobs.');
   // Recorded since: an edit after the older steps; the note stays, once.
   await history.append('app', 'T-1', { kind: 'edited', by: 'you', sha256: sha('b') });
   assert.deepEqual(texts(await history.timeline('app', 'T-1', { sha256: sha('b'), mtime: '2026-11-05T09:00:00.000Z' })), ['Edited by you', 'Started as a job (ended: failed)', 'Checked: ready', OLDER_NOTE]);

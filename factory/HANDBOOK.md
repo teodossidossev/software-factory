@@ -180,11 +180,15 @@ Any other value is ignored. It is read once, at Start.
 Coding rules reach the Implementer, the reviewers and the Task check without you: `AGENTS.md` and
 the Markdown files it links to, and the user's own rules files; reference them by path, never copy them into the Task.
 
-In the factory's own repository, the dashboard's page code is TypeScript in `factory/web/` (SF-146;
-the scripts still in `factory/static/` move there with SF-147 to SF-150): strict, with no `any`, and
-each file a global classic script, with no `import` or `export`. A new page file goes into
-`DASHBOARD_SCRIPTS` (`factory/src/dashboard.ts`), in its load order, and gets its `<script>` in
-`dashboard.html`.
+In the factory's own repository, the dashboard's page code is TypeScript in `factory/web/`; no
+script lives in `factory/static/`. It is strict, with no `any`, and each file is a global classic
+script, with no `import` or `export`. A new page file goes into `DASHBOARD_SCRIPTS`
+(`factory/src/dashboard.ts`), in its load order, and gets its `<script>` in `dashboard.html`.
+
+Comments in the factory's code describe what the code does now and why, not its history: no
+ticket numbers and no "now", "no longer" or "since" about earlier versions. The ticket lives in
+the commit and the Task file. `npm run check-code` (part of `npm test`) fails on a comment in
+`factory/src/` or `factory/web/` that cites `SF-` and a number.
 
 The user can attach images to a ticket (screenshots, pasted on the dashboard or added with
 `sf attach`): they live in `.software-factory/<ticket>/` next to the Task file, at most 10 of

@@ -1,12 +1,11 @@
-// The factory's own secrets in the state directory (SF-142, from src/dashboard.ts and
-// src/server.ts): the dashboard token's and the MCP token's (SF-099) files, how a token file is
-// read, and both tokens at once for the Redactor of a reviewer's run (SF-125).
+// The factory's own secrets in the state directory: the dashboard token's and the MCP token's files,
+// how a token file is read, and both tokens at once for the Redactor of a reviewer's run.
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { FactoryError } from './errors.js';
 
 export const DASHBOARD_TOKEN_FILE = 'dashboard-token';
-// The MCP token (SF-099): the secret every request to the endpoint carries, kept in the state
+// The MCP token: the secret every request to the endpoint carries, kept in the state
 // directory (mode 0600) across starts, in the dashboard token's format; a value of its own.
 export const MCP_TOKEN_FILE = 'mcp-token';
 const TOKEN_PATTERN = /^[0-9a-f]{64}$/;

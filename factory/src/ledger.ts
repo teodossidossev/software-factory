@@ -1,4 +1,4 @@
-// The findings ledger (SF-052): jobs/<ws>/<ticket>/ledger.json, one entry per review item that went
+// The findings ledger: jobs/<ws>/<ticket>/ledger.json, one entry per review item that went
 // into a Fix section, with how it was settled. The Implementer answers each item in the Report's
 // Fix table (fixed, contested with evidence, escalated to the user, left as a nit); the reviewers
 // see every settled entry and may reopen one only with a reason; the user settles what is escalated
@@ -61,8 +61,8 @@ export interface FixItem {
 }
 
 // The problem of the factory's item for an undeclared sensitive path a reviewer did not accept
-// (src/review.ts, sensitiveItem), and of its item for a path outside the Task's scope (SF-053,
-// scopeItem). Such an entry is settled by the reviewers' acceptance of the path, not by the
+// (src/review.ts, sensitiveItem), and of its item for a path outside the Task's scope
+// (scopeItem). Such an entry is settled by the reviewers' acceptance of the path, not by the
 // Report: the factory raises it again each round while it stands.
 export const SENSITIVE_PROBLEM = 'Undeclared sensitive path.';
 export const SCOPE_PROBLEM = "Outside the Task's scope.";
@@ -99,7 +99,7 @@ export interface EvidenceContext {
   // Whether a test file of the worktree holds the text (a test's name).
   testNamed(name: string): Promise<boolean>;
   sections: string[];
-  // The texts of the user's own messages to the job (SF-112); absent means none.
+  // The texts of the user's own messages to the job; absent means none.
   userMessages?: readonly string[];
 }
 
@@ -107,7 +107,7 @@ const PATH_LINE = /(?<![\w/.-])((?:[\w@.-]+\/)*[\w@-][\w@.-]*\.\w+):(\d+)(?:-\d+
 const TEST_FILE = /(?<![\w/.-])((?:[\w@.-]+\/)*(?:[\w@.-]*[._-](?:test|spec)\.\w+|test_[\w.-]+\.\w+))(?![\w/:.-])/giu;
 const TEST_NAME = /\btests?\b[^"'`\n]{0,40}["'`]([^"'`\n]{3,})["'`]/giu;
 const SECTION = /§\s*([^|§\n]+)/gu;
-// A quote of the user's own message to the job (SF-112), in double quotes or backticks.
+// A quote of the user's own message to the job, in double quotes or backticks.
 const USER_MESSAGE = /\buser(?:'s)? message\b[^"`\n]{0,40}["`]([^"`\n]{8,})["`]/giu;
 // The longest quote of a user's message recorded as evidence, in characters.
 const MAX_QUOTE_CHARS = 200;
@@ -117,7 +117,7 @@ const insideWorktree = (path: string): boolean => !path.startsWith('/') && !path
 // The evidence in a contest's note a reviewer can check without the Implementer: a path:line of a
 // file in the worktree (the line within it), a test file in the worktree or a quoted test name a
 // test file of the worktree holds, a §section of the Task file, a quote of the user's own message
-// to the job (SF-112) that message holds, case and spacing aside; joined with "; ", "" when there
+// to the job that message holds, case and spacing aside; joined with "; ", "" when there
 // is none. A wish to contest is not evidence.
 export async function findEvidence(note: string, context: EvidenceContext): Promise<string> {
   const found: string[] = [];
@@ -232,7 +232,7 @@ export async function answerFix(ledger: LedgerEntry[], report: string, fix: numb
   const result: LedgerEntry[] = [];
   for (const entry of ledger) {
     const row = rows.get(entry.id);
-    // A simplification (SF-055) the Implementer did not apply is no longer the user's removal: left,
+    // A simplification the Implementer did not apply is no longer the user's removal: left,
     // with the Implementer's note, so the reviewers may judge it again.
     if (entry.asked === fix && isSimplification(entry) && entry.status === 'accepted_risk' && row !== undefined && row.answer !== 'fixed') {
       result.push({ ...entry, status: 'left', response: row.note, settled: null });
@@ -323,15 +323,15 @@ export function stopMessage(lead: string, facts: string[], tail: string, noun = 
   return [head, tail].join(' ');
 }
 
-// The stop's one question with three answers (SF-052).
+// The stop's one question with three answers.
 const QUESTION = 'Accept and prepare the MR (when Claude\'s review of the iteration is clean; the open findings go unapplied), continue (sf settle the entries or sf say), or back to planning (abort, keeping the branch)?';
 
-// Applies the ledger to a reviewer's verdict (SF-052), in this order: an item that reopens an
+// Applies the ledger to a reviewer's verdict, in this order: an item that reopens an
 // accepted_risk entry is dropped (the user decided); one that reopens a contested entry is a
 // dispute (review_disputed, the user settles it); one that reopens a fixed or left entry opens it
 // again, and a second reopening is churn (review_churn); when every blocker and major item left
 // names the fix that caused it (caused_by), the fixes make the findings (review_churn). Otherwise
-// the verdict applies as before (SF-051): the blocking items (the reviewer's, the extra ones, the
+// the verdict applies: the blocking items (the reviewer's, the extra ones, the
 // open blocker and major entries and the fixes the user decided) make a fix, with the reviewer's
 // nits as optional; each item of a fix keeps or gets its ledger id.
 export function applyVerdict(input: VerdictInput): Applied {
@@ -361,7 +361,7 @@ export function applyVerdict(input: VerdictInput): Applied {
     : reasonOf(item));
 
   // 1. The user decided: an accepted risk is never raised again, whatever its severity (the user's
-  // simplifications too, SF-055: an independent defect their removal causes comes without reopens).
+  // simplifications too: an independent defect their removal causes comes without reopens).
   const all = [...input.items, ...extras];
   const dropped = all.filter((item) => target(item)?.status === 'accepted_risk');
   const items = all.filter((item) => target(item)?.status !== 'accepted_risk');
@@ -431,7 +431,7 @@ export function applyVerdict(input: VerdictInput): Applied {
     return { kind: 'stop', code: 'review_churn', message, ledger, dropped };
   }
 
-  // 5. The verdict as before, with the ledger's open blocking entries and the user's fixes. An
+  // 5. Otherwise the verdict applies, with the ledger's open blocking entries and the user's fixes. An
   // open entry of the factory's whose path is no longer raised (with the same problem) is fixed.
   const raised = new Set(input.extra.map(factoryKey));
   for (const entry of ledger) {
@@ -525,7 +525,7 @@ export function escalationMessage(escalated: LedgerEntry[]): string {
   return stopMessage(`The Implementer escalated ${idList(escalated.map((entry) => entry.id))}: only you know the answer.`, questions, 'Settle each: accept the risk or must fix (sf settle <workspace> <ticket> <id> accept|fix [note]); then the review runs, or the Fix you decided.');
 }
 
-// The reviewer of the entries the user's Simplify recorded (SF-055): one per suggestion of the
+// The reviewer of the entries the user's Simplify recorded: one per suggestion of the
 // simplification pass, accepted_risk, so a reviewer item that reopens one is dropped (rule 1).
 export const SIMPLIFIER = 'simplify';
 export const isSimplification = (entry: LedgerEntry): boolean => entry.reviewer === SIMPLIFIER;
@@ -555,7 +555,7 @@ export function settledLines(ledger: LedgerEntry[]): string[] {
 }
 
 // The entries the MR text lists as not fixed: accepted risks, contests and nits left.
-// The user's simplifications (SF-055) are not findings and stay out.
+// The user's simplifications are not findings and stay out.
 export function notFixed(ledger: LedgerEntry[]): LedgerEntry[] {
   return ledger.filter((entry) => !isSimplification(entry) && (entry.status === 'accepted_risk' || entry.status === 'contested' || entry.status === 'left'));
 }

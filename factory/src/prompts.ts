@@ -16,13 +16,13 @@ export const FACTORY_PROMPT_RULES = `Rules from the Software Factory:
   ## Fix N items (only when answering a Fix section: one row per item, by its id: | R7 | fixed / contested / escalated / left | <evidence or note> |)
 - Answer each Fix item: fixed; contested only with evidence a reviewer can check without you (a path:line in the worktree, a test name, a §section of the Task file, or the user's own message to this job quoted as: user message "<its exact words, at least 8 characters>"), else it reads as open; escalated only when it turns on something only the user knows, outside the repository and the Task file (the note is the question); left for nits only. An item that conflicts with the Task file only because the user's message asked for what you did is contested with that message, never escalated.`;
 
-// The line of factoryPrompt that names the Task's images (SF-065); the job stream recognises it.
+// The line of factoryPrompt that names the Task's images; the job stream recognises it.
 export function imagesLine(dir: string, names: readonly string[]): string {
   return `The Task's images are in ${dir}: ${names.join(', ')}. Read them when you need them.`;
 }
 
 // first: the command or the user's message; iteration: the number of the iteration to be published.
-// images: the job's images (SF-065), dir the absolute path of their folder in the worktree; with
+// images: the job's images, dir the absolute path of their folder in the worktree; with
 // any, one line names them before the rules.
 export function factoryPrompt(first: string, ticket: string, iteration: number, images?: { dir: string; names: string[] }): string {
   const line = images !== undefined && images.names.length > 0 ? `${imagesLine(images.dir, images.names)}\n\n` : '';
@@ -131,7 +131,7 @@ export function conflictPrompt(input: ConflictPromptInput): string {
   ].join('\n');
 }
 
-// The prompt of the morning digest (SF-103): the rules, today's date and the Git data of every
+// The prompt of the morning digest: the rules, today's date and the Git data of every
 // workspace as JSON (src/digest-run.ts builds it, capped at 150,000 characters). The model has no
 // tools but the structured output.
 export function digestPrompt(today: string, language: string, data: unknown): string {
@@ -155,7 +155,7 @@ export function digestPrompt(today: string, language: string, data: unknown): st
   ].join('\n');
 }
 
-// The prompt of a stop's plain explanation (SF-106): the rules, then the stop's data as JSON
+// The prompt of a stop's plain explanation: the rules, then the stop's data as JSON
 // (src/explain.ts builds and caps it): the Task's title and goal, the stop's code and message, the
 // ledger entries of the stop, the last Report's Done and Open questions, the user's own messages and
 // the stop's real answers. The model has no tools but the structured output; it explains and

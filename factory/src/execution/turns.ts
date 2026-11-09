@@ -1,7 +1,7 @@
-// The Implementer's turns (SF-089, from src/execution.ts): the session of each job, the end of a
-// turn (#idle: the Report, the Patch and the published iteration), the turn limit (SF-076), the
-// answers to the Fix items, say (a user message), requestFix and the Fix section the factory
-// appends, and goOn (the path after a verdict).
+// The Implementer's turns: the session of each job, the end of a turn (#idle: the Report, the
+// Patch and the published iteration), the turn limit, the answers to the Fix items, say (a user
+// message), requestFix and the Fix section the factory appends, and goOn (the path after a
+// verdict).
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { readFile, stat } from 'node:fs/promises';
 import { join, resolve as resolvePath, sep } from 'node:path';
@@ -32,7 +32,7 @@ import { exists, type FixOptions, type Live } from './shared.js';
 
 type Success = Extract<IdleOutcome, { ok: true }>;
 
-// The stop at the Fix round limit (SF-115, SF-131): fixes Fix sections written, open the open
+// The stop at the Fix round limit: fixes Fix sections written, open the open
 // blocker and major findings, iteration the one an Accept takes.
 export function iterationLimitMessage(fixes: number, open: number, iteration: number): string {
   return `${fixes} Fix sections were written, the limit of SF_MAX_ITERATIONS; ${open} open blocker or major findings; the user decides how to go on: sf accept takes iteration ${iteration} as it is (the open findings go unapplied and are listed in the MR text), sf say gives a direction.`;
@@ -82,7 +82,7 @@ export class TurnsPart {
   readonly #stop: StopPort;
   // The parts it calls (src/execution.ts wires them).
   readonly #peers: TurnsPeers;
-  // The tickets' history (SF-081): each Fix section the factory appends is recorded as fix_added.
+  // The tickets' history: each Fix section the factory appends is recorded as fix_added.
   readonly #history: TicketHistory;
 
   constructor(store: JobStorePort, locks: LockPort, sessions: LivePort, runner: RunnerPort, settings: SettingsPort, stop: StopPort, peers: TurnsPeers) {
@@ -97,12 +97,12 @@ export class TurnsPart {
   }
 
   // The prompt of an Implementer turn, with the change of the Task file since the Implementer was
-  // last given it (SF-067: changed while paused) when there is one. change: taskChange's.
+  // last given it (changed while paused) when there is one. change: taskChange's.
   withChange(prompt: string, ticket: string, change: { diff: string | undefined } | undefined): string {
     return change === undefined ? prompt : `${prompt}\n\n${changeNote(ticket, change.diff)}`;
   }
 
-  // The images line of the job's prompts (SF-065): their folder in the worktree and their names;
+  // The images line of the job's prompts: their folder in the worktree and their names;
   // undefined without images.
   imagesLine(job: Job): { dir: string; names: string[] } | undefined {
     const attachments = job.attachments ?? [];
@@ -129,7 +129,7 @@ export class TurnsPart {
     const cwd = job.worktree;
     const { workspace: name, ticket } = job;
     let iteration = job.iteration + 1;
-    // The worktree at the start of the turn running, for its turn limit (SF-069).
+    // The worktree at the start of the turn running, for its turn limit.
     let start: WorktreeState | undefined;
     const probe = this.#settings.config.smokeProbeAllow;
     const session = new ImplementerSession(
@@ -137,11 +137,11 @@ export class TurnsPart {
         cwd, maxTurns: this.#settings.config.maxTurns, claudePath: this.#settings.config.claudePath,
         sessionId: job.session_id ?? undefined, sandbox: this.#settings.config.sandbox, model: this.#settings.config.model,
         turnLimitContinues: this.#settings.config.turnLimitContinues,
-        // sf smoke's probe only (SF-104), in mode dontAsk (SF-109): undefined and false for every
+        // sf smoke's probe only, in mode dontAsk: undefined and false for every
         // real job's state directory.
         allowCommands: probe !== undefined ? [probe] : undefined,
         smokeMode: probe !== undefined,
-        // Built by the session's first turn, again for every session the factory creates (SF-100).
+        // Built by the session's first turn, again for every session the factory creates.
         pathDenials: () => pathDenials({
           session: 'job', workspace: name, checkout: workspace.workCheckout, worktree: cwd, stateDir: this.#settings.config.stateDir, worktreeRoot: this.#settings.config.worktreeRoot,
         }),
@@ -150,7 +150,7 @@ export class TurnsPart {
         prompt: async (prompt, continued, images) => {
           const current = await this.#store.jobs.read(name, ticket);
           iteration = (current?.iteration ?? 0) + 1;
-          // The images by name, type and size only, never their bytes (SF-065).
+          // The images by name, type and size only, never their bytes.
           const sent = images === undefined ? undefined : await Promise.all(images.map(async (image) => ({
             name: image.name, type: image.type,
             bytes: current?.attachments?.find((record) => record.name === image.name)?.bytes ?? (await stat(image.path).then((info) => info.size, () => 0)),
@@ -164,7 +164,7 @@ export class TurnsPart {
         },
         turnLimit: (turn) => this.#turnLimit(name, ticket, iteration, cwd, start, turn),
         message: async (message: SDKMessage) => {
-          // No image bytes in events.jsonl (SF-065): a Read of an image returns them.
+          // No image bytes in events.jsonl: a Read of an image returns them.
           await this.#store.jobs.appendEvent(name, ticket, { ts: now(), iteration, message: withoutImageData(message) });
           if (message.type === 'system' && message.subtype === 'init' && message.permissionMode === session.permissionMode) {
             // Queued, not awaited: the session must never wait for the lock (abort holds it while
@@ -192,7 +192,7 @@ export class TurnsPart {
     }
   }
 
-  // A turn of the job ended at maxTurns (SF-069): go on with a continuation when the worktree
+  // A turn of the job ended at maxTurns: go on with a continuation when the worktree
   // changed since start and the turn was not repeating itself, and the chain has one left (the
   // session's bound, turn.allowed); else the plain reason it stops. Never waits for the lock.
   async #turnLimit(name: string, ticket: string, iteration: number, cwd: string, start: WorktreeState | undefined, turn: LimitedTurn): Promise<LimitAnswer> {
@@ -247,14 +247,14 @@ export class TurnsPart {
       }
       // Before the Patch and before the MR commit, whatever the outcome of the turn.
       await this.#peers.control.clean(job, job.iteration + 1, live.cwd);
-      // The turn's sandbox has ended (SF-085), before the hand-over at the end of MR preparation.
+      // The turn's sandbox has ended, before the hand-over at the end of MR preparation.
       await this.#sessions.afterSession(job, job.iteration + 1);
       if (job.state === 'preparing_mr') {
         await this.#peers.mr.mrIdle(job, live, outcome);
         return;
       }
       if (!outcome.ok) {
-        // A turn that hit the plan's usage limit parks the job (SF-072); its turn runs again on Resume.
+        // A turn that hit the plan's usage limit parks the job; its turn runs again on Resume.
         const limit = outcome.code === 'session_failed' || outcome.code === 'turn_failed' ? usageLimit(outcome.message, new Date(), 'claude') : undefined;
         if (limit !== undefined) {
           await this.#peers.control.park(job, 'turn', limit);
@@ -266,7 +266,7 @@ export class TurnsPart {
       }
       try {
         const { job: published, changes } = await this.publish(job, live, outcome, await buildPatch(live.cwd, job.base_commit!), []);
-        // The Report's answers to the last Fix section go into the ledger (SF-052); an escalated
+        // The Report's answers to the last Fix section go into the ledger; an escalated
         // item stops the job before the review.
         const escalated = await this.#answerFix(published, live.cwd, outcome.text);
         if (escalated.length > 0) {
@@ -284,7 +284,7 @@ export class TurnsPart {
     });
   }
 
-  // The ledger after the Report of the job's last iteration (SF-052): the entries the Fix section it
+  // The ledger after the Report of the job's last iteration: the entries the Fix section it
   // answers listed take the Implementer's answers; returns the entries it escalated. Nothing before
   // the first Fix section. Only under the lock.
   async #answerFix(job: Job, cwd: string, report: string): Promise<LedgerEntry[]> {
@@ -315,7 +315,7 @@ export class TurnsPart {
     // A test's name counts when a test file of the worktree (tracked or new) holds it.
     const testNamed = async (name: string): Promise<boolean> =>
       (await runGit(cwd, ['grep', '--untracked', '-q', '-F', '-e', name, '--', '*test*', '*spec*'])).code === 0;
-    // The user's own messages up to this iteration: a contest may quote one (SF-112).
+    // The user's own messages up to this iteration: a contest may quote one.
     const userMessages = (await jobUserMessages(this.#store.jobs, job.workspace, job.ticket)).filter((m) => m.iteration <= job.iteration).map((m) => m.text);
     const answered = await answerFix(ledger, report, fix, { lines, testNamed, sections: headings(task), userMessages });
     await this.#store.jobs.writeLedger(job.workspace, job.ticket, answered.ledger);
@@ -323,7 +323,7 @@ export class TurnsPart {
   }
 
   // The marks rule of a job: the Task file's may_touch plus SF_SENSITIVE_PATHS for the
-  // sensitivity, and its scope plus may_touch for the scope (SF-053).
+  // sensitivity, and its scope plus may_touch for the scope.
   async #marks(workspace: Workspace, ticket: string): Promise<(path: string) => Marks> {
     let declared: string[] = [];
     let scope: string[] | undefined;
@@ -349,7 +349,7 @@ export class TurnsPart {
     if (outcome.denials.length > 0) {
       sections.push(['## Denied actions', '', ...outcome.denials.map((tool) => `- ${tool}`)].join('\n'));
     }
-    // The rules the iteration was given (SF-059), before the Report that marks it complete.
+    // The rules the iteration was given, before the Report that marks it complete.
     await copyRulesRecord(this.#store.jobs.dir(workspaceName, ticket), this.#store.jobs.iterationDir(workspaceName, ticket, number));
     await this.#store.jobs.writeIteration(workspaceName, ticket, {
       report: `${sections.join('\n\n')}\n`,
@@ -372,9 +372,9 @@ export class TurnsPart {
     return { job: { ...job, iteration: number }, changes };
   }
 
-  // The job a ledger stop held goes on (SF-052): a Fix section when the user decided a fix (with the
+  // The job a ledger stop held goes on: a Fix section when the user decided a fix (with the
   // open blocker and major entries), otherwise the review that was stopped runs again: the gate
-  // when it stopped the job, else the Claude review; without the Claude review (SF-131) always the
+  // when it stopped the job, else the Claude review; without the Claude review always the
   // gate, which startReview starts. Only under the lock.
   async goOn(job: Job, ledger: LedgerEntry[]): Promise<JobState> {
     const { workspace: workspaceName, ticket, iteration } = job;
@@ -413,7 +413,7 @@ export class TurnsPart {
   }
 
   // After Clean the branch holds the one commit: a further fix or message works on in the worktree,
-  // which is kept until the push (SF-073), or recreates it from the branch when it is gone; the next
+  // which is kept until the push, or recreates it from the branch when it is gone; the next
   // Clean commits the whole change again as one commit.
   async #reopen(job: Job, workspace: Workspace): Promise<Job> {
     const worktree = job.worktree ?? this.#peers.handover.worktreePath(job.workspace, job.ticket);
@@ -438,11 +438,11 @@ export class TurnsPart {
   // The work of request_fix, also run for a fix verdict of the review: appends ## Fix N and starts
   // the next iteration. SF_MAX_ITERATIONS limits the Fix sections; an sf say turn does not count.
   // counts: what else the Fix counts for (the gate's gate_fixes). Only under the lock.
-  // ledger: the findings ledger with the section's items (SF-052), written once the section is.
-  // fromStop: the Fix of the user's settlement or Simplify (SF-055), from needs_human.
+  // ledger: the findings ledger with the section's items, written once the section is.
+  // fromStop: the Fix of the user's settlement or Simplify, from needs_human.
   // title: the section's title after its number (## Fix N: Simplify).
   // overLimit: written even at SF_MAX_ITERATIONS (Simplify, once per job).
-  // fromTests: the Tests Fix of a failed test run (SF-128), from preparing_mr.
+  // fromTests: the Tests Fix of a failed test run, from preparing_mr.
   async fix(current: Job, content: string, options: FixOptions = {}): Promise<{ iteration: number; check_after_minutes: number }> {
     const { counts = {}, ledger, fromStop = false, title, fromTests = false } = options;
     const overLimit = options.overLimit === true || fromTests;
@@ -456,7 +456,7 @@ export class TurnsPart {
       this.checkFix(job);
     }
     if (!overLimit && job.fixes >= this.#settings.config.maxIterations) {
-      // The refused verdict's items become open ledger entries with ids (SF-131): the stop lists
+      // The refused verdict's items become open ledger entries with ids: the stop lists
       // them, and an Accept leaves them unapplied in the MR text.
       if (ledger !== undefined) {
         await this.#store.jobs.writeLedger(workspaceName, ticket, ledger);
@@ -468,21 +468,21 @@ export class TurnsPart {
       throw new FactoryError('iteration_limit', `${message}; the job needs the user.`);
     }
     const workspace = await this.#settings.resolve(workspaceName);
-    // No turn while the user's checkout holds the branch (SF-073); nothing is written before.
+    // No turn while the user's checkout holds the branch; nothing is written before.
     const free = job;
     await this.#locks.gitLocked(workspaceName, () => checkBranchFree(workspace.workCheckout, free.worktree, free.branch, ticket));
     if (job.state === 'ready_for_human_review') {
       job = await this.#reopen(job, workspace);
     }
     const fix = job.iteration;
-    // A change made while the job was paused, before the factory's own Fix section (SF-067).
+    // A change made while the job was paused, before the factory's own Fix section.
     const change = job.task_sha256 === undefined || job.worktree === null ? undefined : await this.#peers.control.taskChange(workspace, job);
     await appendFix(workspace, ticket, fix, content, title, { record: (sha256) => this.#history.append(workspaceName, ticket, { kind: 'fix_added', by: 'factory', sha256, fix }) });
     if (ledger !== undefined) {
       await this.#store.jobs.writeLedger(workspaceName, ticket, ledger);
     }
     job = await this.#peers.start.syncTask(workspace, job);
-    // A commit prepared before this turn is never pushed (SF-073).
+    // A commit prepared before this turn is never pushed.
     job = fromTests
       // from: preparing_mr (fromTests)
       ? await this.#store.transition({ ...job, ...counts, prepared_commit: null }, 'working', 'tests')
@@ -500,11 +500,11 @@ export class TurnsPart {
 
   // sf say needs a job with a session to go on with and a non-empty text message.
   checkSay(job: Job, message: string): void {
-    // A step of the hand-over that was cut off is repaired by recover() first (SF-073).
+    // A step of the hand-over that was cut off is repaired by recover() first.
     if (job.handover !== undefined && job.handover.step !== null) {
       throw cutOffError(job, job.handover.step);
     }
-    // A parked job (SF-072) has no session to queue a message in: Resume carries it.
+    // A parked job has no session to queue a message in: Resume carries it.
     if (job.state === 'waiting_limit') {
       throw new FactoryError('invalid_state', `The job waits for the usage limit to reset. Resume the job with a message: sf resume ${job.workspace} ${job.ticket} [message]`);
     }
@@ -526,17 +526,17 @@ export class TurnsPart {
       this.checkSay(job, message);
       const workspace = this.#sessions.live.get(`${workspaceName}/${ticket}`)?.workspace ?? (await this.#settings.resolve(workspaceName));
       if (job.state === 'handed_over') {
-        // Ask for changes (SF-073): the checkout's state back into the job; by hand, so the run
-        // queue's limit does not apply (SF-071).
+        // Ask for changes: the checkout's state back into the job; by hand, so the run queue's
+        // limit does not apply.
         job = await this.#peers.handover.askForChanges(job, workspace);
       }
-      // No turn while the user's checkout holds the branch (SF-073), before anything else is written.
+      // No turn while the user's checkout holds the branch, before anything else is written.
       const free = job;
       await this.#locks.gitLocked(workspaceName, () => checkBranchFree(workspace.workCheckout, free.worktree, free.branch, ticket));
       if (job.state === 'ready_for_human_review') {
         job = await this.#reopen(job, workspace);
       }
-      // A commit prepared before this turn is never pushed (SF-073).
+      // A commit prepared before this turn is never pushed.
       if (job.prepared_commit !== null) {
         job = { ...job, prepared_commit: null };
         await this.#store.jobs.write(job);
@@ -546,7 +546,7 @@ export class TurnsPart {
       }
       const session = this.session(job, workspace);
       const queued = session.busy;
-      // A change made while the job was paused and not handed on yet (SF-067).
+      // A change made while the job was paused and not handed on yet.
       const change = job.task_sha256 === undefined ? undefined : await this.#peers.control.taskChange(workspace, job);
       job = await this.#peers.start.syncTask(workspace, job);
       if (job.state !== 'working') {

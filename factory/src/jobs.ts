@@ -1,11 +1,10 @@
 // Job state on disk: <state dir>/jobs/<workspace>/<ticket>/ with job.json, events.jsonl and
 // iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-level.json,gate-override.json,simplify.json} (plus the
-// gate's schema and output files, and tree, SF-079), ledger.json (the findings ledger, SF-052) from
-// the first Fix section on, task.md (the Task file as the Implementer was last given it, SF-067),
-// from MR preparation on mr.md (and mr-factory.md once the user edited it, SF-080), tests-<N>.json (a run of the
-// workspace's test command on iteration N, SF-128), and objects/ (SF-079). Strictly parsed; every file but the event
-// log is replaced atomically. Knows nothing about the Implementer session, nor about Git: tree and
-// objects/ are only named here, src/changes.ts writes them.
+// gate's schema and output files, and tree), ledger.json (the findings ledger) from the first Fix section on, task.md
+// (the Task file as the Implementer was last given it), from MR preparation on mr.md (and mr-factory.md once the user
+// edited it), tests-<N>.json (a run of the workspace's test command on iteration N), and objects/. Strictly parsed;
+// every file but the event log is replaced atomically. Knows nothing about the Implementer session, nor about Git:
+// tree and objects/ are only named here, src/changes.ts writes them.
 import { appendFile, type FileHandle, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import * as z from 'zod/v4';
@@ -22,13 +21,13 @@ export const JOB_STATES = [
   'working',
   'awaiting_review',
   'needs_human',
-  // The user paused the job (SF-067): nothing runs; sf resume goes on where it stopped.
+  // The user paused the job: nothing runs; sf resume goes on where it stopped.
   'paused',
-  // A session hit the plan's usage limit (SF-072): parked, nothing runs, the job keeps its slot; the
+  // A session hit the plan's usage limit: parked, nothing runs, the job keeps its slot; the
   // run queue resumes it when the limit resets, or sf resume does now.
   'waiting_limit',
   'ready_for_human_review',
-  // The job's changes are in the workspace's checkout on its branch (SF-073): the user reviews them
+  // The job's changes are in the workspace's checkout on its branch: the user reviews them
   // there; nothing of the job runs.
   'handed_over',
   'preparing_mr',
@@ -37,12 +36,12 @@ export const JOB_STATES = [
   'failed',
 ] as const;
 export type JobState = (typeof JOB_STATES)[number];
-// Every state in which the session may be alive. paused is not one (SF-067): nothing of a paused
-// job runs; nor is handed_over (SF-073): the job's changes wait in the user's checkout.
+// Every state in which the session may be alive. paused is not one: nothing of a paused
+// job runs; nor is handed_over: the job's changes wait in the user's checkout.
 export const ACTIVE_STATES: readonly JobState[] = ['starting', 'working', 'awaiting_review', 'needs_human', 'ready_for_human_review', 'preparing_mr'];
-// The states that count as running against the run queue's limit max_running (SF-071), across
-// every workspace: the job works or is reviewed, or is parked on a usage limit (SF-072: it holds
-// its slot). A paused job and one that waits for the user (needs_human, ready_for_human_review,
+// The states that count as running against the run queue's limit max_running, across
+// every workspace: the job works or is reviewed, or is parked on a usage limit (it holds its
+// slot). A paused job and one that waits for the user (needs_human, ready_for_human_review,
 // handed_over) do not count.
 export const RUNNING_STATES: readonly JobState[] = ['starting', 'working', 'awaiting_review', 'preparing_mr', 'waiting_limit'];
 // The running jobs of every workspace (RUNNING_STATES): what the run queue's limit counts.
@@ -51,22 +50,22 @@ export function runningJobs(jobs: Job[]): Job[] {
 }
 // States after which a new job for the same ticket may start.
 export const TERMINAL_STATES: readonly JobState[] = ['failed', 'aborted', 'pushed'];
-// The states sf pause takes (SF-067), and what was interrupted when the job was paused: the
+// The states sf pause takes, and what was interrupted when the job was paused: the
 // Implementer's turn, or a round of the Claude review, the gate or the simplification pass (none
 // when nothing ran, as while awaiting review with the review off).
 export const PAUSABLE_STATES = ['working', 'awaiting_review'] as const;
 export const PAUSE_STEPS = ['turn', 'review', 'gate', 'simplify'] as const;
 export type PauseStep = (typeof PAUSE_STEPS)[number];
-// The states sf restart takes (SF-067): a job that waits for the user or has ended, not pushed, or
-// is parked on a usage limit (SF-072).
+// The states sf restart takes: a job that waits for the user or has ended, not pushed, or
+// is parked on a usage limit.
 export const RESTARTABLE_STATES: readonly JobState[] = ['paused', 'waiting_limit', 'aborted', 'failed', 'needs_human'];
-// The states sf resume takes: paused (SF-067) and waiting_limit (SF-072).
+// The states sf resume takes: paused and waiting_limit.
 export const RESUMABLE_STATES: readonly JobState[] = ['paused', 'waiting_limit'];
 // How long a job parked on a usage limit without a parsed reset time waits before the run queue
-// tries it again (SF-072).
+// tries it again.
 export const LIMIT_RETRY_MS = 30 * 60_000;
 
-// The steps of src/execution.ts that change a job's state (SF-088), each named after the step, not
+// The steps of src/execution/ that change a job's state, each named after the step, not
 // after the error code: every needs_human stop of one step shares its action. The order is the
 // order of the README's table.
 export const JOB_ACTIONS = [
@@ -80,9 +79,9 @@ export const JOB_ACTIONS = [
   'go_on',
   'verdict',
   'prepare_mr',
-  // The end of the run of the workspace's test command (SF-128): a Tests Fix, or a stop.
+  // The end of the run of the workspace's test command: a Tests Fix, or a stop.
   'tests',
-  // The Retry's own stop when MR preparation fails again before it began (SF-087, #retryMr).
+  // The Retry's own stop when MR preparation fails again before it began (retryMr).
   'mr_retry',
   'ready',
   'hand_over',
@@ -112,8 +111,8 @@ function rows(action: JobAction, from: readonly (JobState | null)[], to: readonl
   return from.flatMap((one) => to.map((target) => ({ from: one, to: target, action })));
 }
 
-// Every allowed state change (SF-088): #transition and #claim in src/execution.ts refuse any other.
-// Each call site there names its from states in a comment, derived from its guards.
+// Every allowed state change: transition (src/execution/core.ts) and #claim (src/execution/start.ts) refuse any
+// other. Each call site in src/execution/ names its from states in a comment, derived from its guards.
 export const JOB_TRANSITIONS: readonly JobTransition[] = Object.freeze([
   ...rows('create', [null], ['starting']),
   ...rows('launch', ['starting'], ['working', 'failed']),
@@ -123,7 +122,7 @@ export const JOB_TRANSITIONS: readonly JobTransition[] = Object.freeze([
   // until recover() repairs it. handing_over is cut off in preparing_mr or ready_for_human_review,
   // and goes on only to needs_human (handover_interrupted, with a prepared commit) and aborted.
   // asking is cut off in handed_over and goes on to needs_human (ask_interrupted, without a prepared
-  // commit), which the retry of MR preparation (#checkPrepareMr) takes on, and from there to any
+  // commit), which the retry of MR preparation (checkPrepareMr) takes on, and from there to any
   // state but a new job's starting, failed and pushed (approve refuses a cut-off step).
   ...rows('repair_handover', JOB_STATES.filter((state) => !['starting', 'failed', 'pushed'].includes(state)), ['needs_human']),
   ...rows('repair_handover', ['needs_human', 'ready_for_human_review', 'preparing_mr', 'aborted'], ['ready_for_human_review']),
@@ -133,7 +132,7 @@ export const JOB_TRANSITIONS: readonly JobTransition[] = Object.freeze([
   ...rows('go_on', ['needs_human'], ['awaiting_review']),
   ...rows('verdict', ['awaiting_review'], ['needs_human']),
   ...rows('prepare_mr', ['awaiting_review', 'needs_human'], ['preparing_mr']),
-  // The test step of MR preparation (SF-128): a failure is a Tests Fix (working), the bound or a
+  // The test step of MR preparation: a failure is a Tests Fix (working), the bound or a
   // run that could not happen a stop; a pass goes on in preparing_mr.
   ...rows('tests', ['preparing_mr'], ['working', 'needs_human']),
   ...rows('mr_retry', ['needs_human'], ['needs_human']),
@@ -157,7 +156,7 @@ export const JOB_TRANSITIONS: readonly JobTransition[] = Object.freeze([
 // Every refusal of checkTransition in this process; nothing clears it.
 const refusals: JobTransition[] = [];
 
-// The refusals of checkTransition in this process so far, oldest first (SF-088).
+// The refusals of checkTransition in this process so far, oldest first.
 export function refusedTransitions(): JobTransition[] {
   return refusals.map((row) => ({ ...row }));
 }
@@ -190,10 +189,10 @@ export function renderTransitions(): string {
 const timestamp = z.iso.datetime();
 const commit = z.string().regex(/^[0-9a-f]{40,64}$/);
 
-// The steps of a hand-over (SF-073) that change the checkout; recorded before the change, so
+// The steps of a hand-over that change the checkout; recorded before the change, so
 // recover() can repair one that was cut off.
 export const HANDOVER_STEPS = ['handing_over', 'asking'] as const;
-// A job in the user's checkout (SF-073): its branch, the job's commit S saved as
+// A job in the user's checkout: its branch, the job's commit S saved as
 // refs/factory/<ticket>, the base B the branch was reset to, what the checkout was on before
 // (a branch, or a detached commit), the user's untracked files from before (never touched), the
 // local commit.template and commit.cleanup the factory replaced (null: unset), when it was handed
@@ -222,13 +221,13 @@ const jobSchema = z.strictObject({
   base_commit: commit.nullable(),
   // The target commit of MR preparation: resolved at Clean, the commit the branch is rebased onto.
   target_commit: commit.nullable().default(null),
-  // The job's worktree (SF-019), absolute; null before start, after Clean and once removed.
+  // The job's worktree, absolute; null before start, after Clean and once removed.
   worktree: z.string().min(1).nullable().default(null),
   // The branch tip the factory prepared at Clean; approve pushes it unless the tip moved.
   prepared_commit: commit.nullable().default(null),
   // Number of MR preparation turns started.
   mr_attempts: z.number().int().min(0).default(0),
-  // Whether the MR preparation in progress ran a conflict turn (SF-087): set before the conflict
+  // Whether the MR preparation in progress ran a conflict turn: set before the conflict
   // prompt is sent, cleared when the resolved iteration goes back to review and when MR preparation
   // starts. Its resolution is applied before the job goes back to review, so a stop in between
   // leaves code no reviewer saw: no Retry then.
@@ -238,23 +237,23 @@ const jobSchema = z.strictObject({
   iteration: z.number().int().min(0),
   // Number of Fix sections written (by the reviewers' fix verdicts); SF_MAX_ITERATIONS limits it.
   fixes: z.number().int().min(0).default(0),
-  // Fix verdicts of the gate (SF-039); SF_GATE_MAX_ROUNDS limits them.
+  // Fix verdicts of the gate; SF_GATE_MAX_ROUNDS limits them.
   gate_fixes: z.number().int().min(0).default(0),
   // Input plus output tokens of every gate run of the job; SF_GATE_MAX_TOKENS limits them.
   gate_tokens: z.number().int().min(0).default(0),
-  // The iteration the simplification pass started on (SF-055), written before it runs; absent before.
+  // The iteration the simplification pass started on, written before it runs; absent until then.
   // Once set, the pass never runs again on the job, whatever became of that run.
   simplify_iteration: z.number().int().min(1).optional(),
-  // Whether the Claude review runs on the job (SF-131), decided at Start (SF_CLAUDE_REVIEW, the Task
-  // file's review, the gate) and never changed after; false: the Codex gate is the review. Absent in
-  // a job started before: true (claudeReviews).
+  // Whether the Claude review runs on the job, decided at Start (SF_CLAUDE_REVIEW, the Task file's
+  // review, the gate) and never changed after; false: the Codex gate is the review. Absent in a
+  // job.json written without it: true (claudeReviews).
   claude_review: z.boolean().optional(),
   session_id: z.string().min(1).nullable(),
-  // The sha256 of the Task file the job works from (SF-067): recorded at Start, at every later copy
-  // into the worktree and on a Resume that found the Task file changed; absent in a job started
-  // before. task.md keeps the version the Implementer was last given, which can be older.
+  // The sha256 of the Task file the job works from: recorded at Start, at every later copy into
+  // the worktree and on a Resume that found the Task file changed; absent in a job.json written
+  // without it. task.md keeps the version the Implementer was last given, which can be older.
   task_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
-  // The images the Task file refers to (SF-065), as resolved at Start, Restart or the last Resume and
+  // The images the Task file refers to, as resolved at Start, Restart or the last Resume and
   // copied into attachments/ of the job directory; absent when it refers to none.
   attachments: z.array(z.strictObject({
     name: z.string().min(1),
@@ -262,10 +261,10 @@ const jobSchema = z.strictObject({
     bytes: z.number().int().min(0),
     sha256: z.string().regex(/^[0-9a-f]{64}$/),
   })).optional(),
-  // While paused (SF-067) or waiting_limit (SF-072): the state the job was paused in, what was
+  // While paused or waiting_limit: the state the job was paused in, what was
   // interrupted, and when.
   paused: z.strictObject({ from: z.enum(PAUSABLE_STATES), step: z.enum(PAUSE_STEPS).nullable(), at: timestamp }).optional(),
-  // While waiting_limit (SF-072): whose usage limit the session hit and when the run queue goes on
+  // While waiting_limit: whose usage limit the session hit and when the run queue goes on
   // (the parsed reset, else paused.at + 30 minutes); reset_seen once that time passed under the
   // rule wait (the user resumes), with when the user was told.
   limit: z.strictObject({
@@ -275,18 +274,18 @@ const jobSchema = z.strictObject({
     notified_at: timestamp.optional(),
   }).optional(),
   // The continuations the factory sent by itself in the Implementer's current chain of turns, after
-  // a turn limit (SF-069), and how many the chain may have; absent once a new chain starts.
+  // a turn limit, and how many the chain may have; absent once a new chain starts.
   turn_limit: z.strictObject({ continued: z.number().int().min(1), allowed: z.number().int().min(0) }).optional(),
   created_at: timestamp,
   // Time of the last state change.
   updated_at: timestamp,
   error: z.strictObject({ code: z.string(), message: z.string() }).optional(),
-  // The job in the user's checkout (SF-073); absent otherwise.
+  // The job in the user's checkout; absent otherwise.
   handover: handoverSchema.optional(),
-  // Why the automatic hand-over did not happen at ready for review (SF-073); absent once the job
+  // Why the automatic hand-over did not happen at ready for review; absent once the job
   // leaves ready_for_human_review or is handed over.
   handoff_skipped: z.strictObject({ code: z.string(), message: z.string() }).optional(),
-  // The merge request the factory opened on the Git host (SF-048), from pushed on; null before.
+  // The merge request the factory opened on the Git host, from pushed on; null before.
   mr: z.strictObject({
     host: z.enum(['github', 'gitlab']),
     number: z.number().int().min(1),
@@ -305,15 +304,14 @@ export interface ChangedFile {
   removed: number;
 }
 
-// One file of an iteration (SF-024): its status against the base, whether it is a sensitive
-// path and whether the Task file declared it, whether it is in the Task's file scope (SF-053),
-// and its line counts.
+// One file of an iteration: its status against the base, whether it is a sensitive path and
+// whether the Task file declared it, whether it is in the Task's file scope, and its line counts.
 export interface FileChange {
   path: string;
   status: 'added' | 'modified' | 'deleted' | 'renamed';
   from?: string;
   sensitive: 'declared' | 'undeclared' | 'no';
-  // none when the Task declares no scope; a record written before SF-053 reads as none.
+  // none when the Task declares no scope; a record written without scope reads as none.
   scope: 'in' | 'out' | 'none';
   additions: number;
   deletions: number;
@@ -326,7 +324,7 @@ export interface IterationMeta {
   // Tool names of denied tool calls, in order; never their inputs.
   denials: string[];
   changed_files: ChangedFile[];
-  // The structured file list (SF-024); absent in iterations published before it.
+  // The structured file list; absent in a meta.json written without it.
   files?: FileChange[];
   patch_truncated: boolean;
   submodule_changed: string[];
@@ -334,11 +332,11 @@ export interface IterationMeta {
   cost_usd: number | null;
   cost_usd_total: number | null;
   duration_ms: number | null;
-  // The commit the iteration's Patch is against (SF-079); absent in iterations published before.
+  // The commit the iteration's Patch is against; absent in a meta.json written without it.
   base_commit?: string;
 }
 
-// iterations/NNN/review.json: the Claude review of the iteration (SF-038), or why it failed.
+// iterations/NNN/review.json: the Claude review of the iteration, or why it failed.
 export type ReviewRecord =
   | {
       reviewer: string;
@@ -346,7 +344,7 @@ export type ReviewRecord =
       summary: string;
       items: ReviewItem[];
       accepted_sensitive: string[];
-      // The items that reopened an accepted risk (SF-052): dropped, the user decided.
+      // The items that reopened an accepted risk: dropped, the user decided.
       dropped?: ReviewItem[];
       cost_usd: number | null;
       started_at: string;
@@ -361,7 +359,7 @@ export interface GateTokens {
   output: number;
 }
 
-// iterations/NNN/gate.json: the gate's review of the iteration (SF-039), or why it failed.
+// iterations/NNN/gate.json: the gate's review of the iteration, or why it failed.
 export type GateRecord =
   | {
       reviewer: string;
@@ -369,7 +367,7 @@ export type GateRecord =
       summary: string;
       items: ReviewItem[];
       accepted_sensitive: string[];
-      // The items that reopened an accepted risk (SF-052): dropped, the user decided.
+      // The items that reopened an accepted risk: dropped, the user decided.
       dropped?: ReviewItem[];
       model?: string;
       tokens: GateTokens;
@@ -378,19 +376,19 @@ export type GateRecord =
     }
   | { reviewer: string; error: string; model?: string; tokens: GateTokens; started_at: string; ended_at: string };
 
-// iterations/NNN/gate-override.json (SF-047): the user accepted the iteration over a stopped gate
+// iterations/NNN/gate-override.json: the user accepted the iteration over a stopped gate
 // (needs_human with code gate_rounds, gate_budget or gate_failed) with Claude's clean review; at
 // is when, unapplied the Codex items of the iteration's gate.json the change goes without, or the
-// gate's error when it failed ([] when no gate ran on the iteration). Over a ledger stop (SF-052:
-// review_churn, review_disputed) or the Fix round limit (SF-115: iteration_limit) unapplied are
-// the ledger's open findings, each with its id, and the gate's items that reopen none of them.
+// gate's error when it failed ([] when no gate ran on the iteration). Over a ledger stop
+// (review_churn, review_disputed) or the Fix round limit (iteration_limit) unapplied are the ledger's
+// open findings, each with its id, and the gate's items that reopen none of them.
 export interface GateOverride {
   at: string;
   code: string;
   unapplied: Array<ReviewItem & { id?: string }> | string;
 }
 
-// iterations/NNN/gate-level.json (SF-092): the gate level of the iteration, decided once at its
+// iterations/NNN/gate-level.json: the gate level of the iteration, decided once at its
 // clean Claude verdict (src/gate-level.ts): the level, the rules that decided it, whether the gate
 // ran, and the change's counts of files and of added plus deleted lines (null when the iteration's
 // meta.json has no file list). Strictly parsed.
@@ -404,7 +402,7 @@ export const gateLevelSchema = z.strictObject({
 });
 export type GateLevelRecord = z.output<typeof gateLevelSchema>;
 
-// One job directory of a workspace (SF-092, listAll): current (<ticket>) or archived
+// One job directory of a workspace (listAll): current (<ticket>) or archived
 // (<ticket>.<stamp>), with its job.json parsed, or why it could not be.
 export interface JobDir {
   workspace: string;
@@ -416,7 +414,7 @@ export interface JobDir {
 }
 
 // iterations/NNN/simplify.json: the simplification pass after the deciding clean verdict of the
-// iteration (SF-055), or why it failed (redacted). suggestions: what it offers the user; dropped:
+// iteration, or why it failed (redacted). suggestions: what it offers the user; dropped:
 // what the factory withheld because it names a fixed blocker entry of the ledger.
 export type SimplifyRecord =
   | {
@@ -443,72 +441,72 @@ export interface Iteration {
 // removed placeholders, or a review's outcome, Codex event or Claude message.
 export type EventRecord = { ts: string; iteration: number } & (
   | { message: unknown }
-  // A prompt sent to the Implementer, with the names, types and sizes of its image blocks (SF-065),
+  // A prompt sent to the Implementer, with the names, types and sizes of its image blocks,
   // never their bytes.
   | { prompt: string; images?: Array<{ name: string; type: string; bytes: number }> }
   | { state: { from: JobState | null; to: JobState; error?: { code: string; message: string } } }
   | { type: 'notify_failed'; channel: string; message: string }
   // Sandbox placeholders the factory removed from the work checkout (src/placeholders.ts).
   | { type: 'placeholders_removed'; paths: string[] }
-  // The outcome of a review (SF-038), Claude's or the gate's (SF-039, reviewer codex); ignored when
+  // The outcome of a review, Claude's or the gate's (reviewer codex); ignored when
   // the job had moved on before it ended.
-  // effective: the verdict the factory acted on when it is not the reviewer's (SF-051): clean for a
+  // effective: the verdict the factory acted on when it is not the reviewer's: clean for a
   // fix with nits only, fix for a clean that leaves an undeclared sensitive path unaccepted.
   | { type: 'review'; reviewer: string; verdict: 'clean' | 'fix'; items: number; effective?: 'clean' | 'fix'; ignored?: true }
   | { type: 'review_failed'; reviewer: string; error: string; ignored?: true }
-  // The reviewers live (SF-045): one JSONL event of the Codex gate's stdout, one SDK message of the
+  // The reviewers live: one JSONL event of the Codex gate's stdout, one SDK message of the
   // Claude review session; truncated when cut to MAX_LIVE_EVENT_BYTES (cutEvent).
   | { type: 'gate_event'; reviewer: string; event: unknown; truncated?: true }
   | { type: 'review_message'; reviewer: string; message: unknown; truncated?: true }
-  // The user accepted the iteration over the stopped gate (SF-047): the code it stopped with and
+  // The user accepted the iteration over the stopped gate: the code it stopped with and
   // the number of Codex items not applied (0 when the gate failed or did not run).
   | { type: 'gate_overridden'; code: string; unapplied: number }
-  // Whether the Claude review runs on the job (SF-131), decided at Start, and why.
+  // Whether the Claude review runs on the job, decided at Start, and why.
   | { type: 'review_setup'; claude_review: boolean; reason: string }
-  // The gate level of the iteration (SF-092): the level, whether the gate runs, and why.
+  // The gate level of the iteration: the level, whether the gate runs, and why.
   | { type: 'gate_level'; level: GateLevel; ran: boolean; reasons: string[] }
-  // The simplification pass (SF-055): its outcome (the suggestions offered, those the factory
+  // The simplification pass: its outcome (the suggestions offered, those the factory
   // dropped, or its error), and the user's choice on the offer (simplify or skip).
   | { type: 'simplify'; reviewer: string; suggestions: number; dropped: number; error?: string; ignored?: true }
   | { type: 'simplify_chosen'; choice: 'simplify' | 'skip'; suggestions: number }
-  // A step the user's Pause interrupted (SF-067): the turn, or a round of a reviewer, thrown away
+  // A step the user's Pause interrupted: the turn, or a round of a reviewer, thrown away
   // and run again on Resume; never a verdict.
-  // A usage limit (SF-072) interrupts the same way: the job parks in waiting_limit.
+  // A usage limit interrupts the same way: the job parks in waiting_limit.
   | { type: 'interrupted'; step: PauseStep; reviewer?: string }
-  // The images of the job (SF-065), resolved and copied at Start, Restart or a Resume that found them
+  // The images of the job, resolved and copied at Start, Restart or a Resume that found them
   // changed: name, type, size and sha256 of each, never their bytes.
   | { type: 'attachments'; images: Array<{ name: string; type: string; bytes: number; sha256: string }> }
-  // The Task file changed while the job was paused (SF-067): the sha256 the job had, and the new one.
+  // The Task file changed while the job was paused: the sha256 the job had, and the new one.
   | { type: 'task_changed'; from: string | null; to: string }
   // An Implementer turn ended at the turn limit while making progress, and the factory sent a
-  // continuation (SF-069): its number in the chain, the chain's allowance, the turn's maxTurns, the
+  // continuation: its number in the chain, the chain's allowance, the turn's maxTurns, the
   // worktree's changed paths and the turn's tool calls.
   | { type: 'turn_limit_continued'; continued: number; allowed: number; max_turns: number; changed_paths: number; tool_calls: number }
-  // The merge request on the Git host (SF-048): opened, reused (already open for the branch),
+  // The merge request on the Git host: opened, reused (already open for the branch),
   // merged by the factory, or found merged or closed on the host by sf mr status.
   // mr_state, not state: a record with state is a state change.
   | { type: 'merge_request'; action: 'created' | 'reused' | 'merged' | 'updated'; host: JobMr['host']; number: number; url: string; mr_state: JobMr['state']; merge_commit?: string }
-  // The hand-over to the user's checkout (SF-073): done, ended (by Ask for changes, Take it back, the
+  // The hand-over to the user's checkout: done, ended (by Ask for changes, Take it back, the
   // push or abort, with the record as it was), or a note (a worktree that could not be removed, the
   // files Ask for changes left in the checkout because they changed).
   | { type: 'handover'; action: 'handed_over' | 'ended' | 'note'; handover?: Handover; note?: string }
-  // The user's own push of a handed-over branch, found on origin (SF-073): the commit, and whether
+  // The user's own push of a handed-over branch, found on origin: the commit, and whether
   // its tree is the job's commit's (null when the commit is not known locally).
   | { type: 'handover_pushed'; commit: string; same_tree: boolean | null }
   // The factory removed the config lock Claude Code's sandbox left in the workspace checkout's Git
-  // directory (SF-085, src/sandbox-lock.ts): its path.
+  // directory (src/sandbox-lock.ts): its path.
   | { type: 'sandbox_lock_removed'; path: string }
-  // The MR text (SF-080): the user saved their own or reset it to the factory's (with the branch
+  // The MR text: the user saved their own or reset it to the factory's (with the branch
   // and base the save set, when it changed them), or a new Clean wrote a new factory text and kept
   // the user's.
   | { type: 'mr_edited'; action: 'saved' | 'reset' | 'factory_new'; branch?: string; base?: string }
-  // The workspace's test command (SF-128): a run started (run: its started_at), and how it ended or
+  // The workspace's test command: a run started (run: its started_at), and how it ended or
   // the user's Accept of it (accepted_failing), with the last lines of its output (tail).
   | { type: 'tests_started'; run: string; command: string }
   | { type: 'tests'; run: string; command: string; outcome: TestsOutcome; exit_code: number | null; timed_out: boolean; duration_ms: number; reason?: string; tail: string; tail_truncated?: true }
 );
 
-// The bound of one reviewer event or message in events.jsonl (SF-045), in bytes of its JSON.
+// The bound of one reviewer event or message in events.jsonl, in bytes of its JSON.
 export const MAX_LIVE_EVENT_BYTES = 16 * 1024;
 
 // A string cut to at most limit UTF-16 units and marked, without splitting a surrogate pair.
@@ -554,8 +552,8 @@ export function cutEvent(value: unknown): { value: unknown; truncated: boolean }
   return { value: typeof type === 'string' ? { type: cutString(type, 64) } : null, truncated: true };
 }
 
-// Whether the Claude review runs on the job (SF-131): its claude_review, true when absent (a job
-// started before). False: the Codex gate is the review, and its last gate.json decides.
+// Whether the Claude review runs on the job: its claude_review, true when absent (a job.json
+// written without it). False: the Codex gate is the review, and its last gate.json decides.
 export function claudeReviews(job: Pick<Job, 'claude_review'>): boolean {
   return job.claude_review !== false;
 }
@@ -568,7 +566,7 @@ export function now(): string {
   return new Date().toISOString();
 }
 
-// Items stored before SF-051 have no severity: they read as major.
+// Items stored without a severity read as major.
 function majorUnlessSet(items: ReviewItem[]): ReviewItem[] {
   return items.map((item) => (item.severity === undefined ? { ...item, severity: 'major' } : item));
 }
@@ -605,7 +603,7 @@ export class JobStore {
     return join(this.root, workspace, ticket);
   }
 
-  // The job's own copy of the Task file's images (SF-065): what its agents are given.
+  // The job's own copy of the Task file's images: what its agents are given.
   attachmentsDir(workspace: string, ticket: string): string {
     return join(this.dir(workspace, ticket), 'attachments');
   }
@@ -670,7 +668,7 @@ export class JobStore {
     return jobs.sort((a, b) => `${a.workspace}/${a.ticket}`.localeCompare(`${b.workspace}/${b.ticket}`));
   }
 
-  // Every job directory of every workspace, current and archived (SF-092, sf metrics), sorted by
+  // Every job directory of every workspace, current and archived (sf metrics), sorted by
   // workspace and name. job.json is parsed with jobSchema but not checked against the directory's
   // name (an archived job's ticket is not its directory's name); a file that cannot be read or
   // parsed gives the error instead.
@@ -707,12 +705,12 @@ export class JobStore {
     return name;
   }
 
-  // The Task file as the Implementer was last given it (SF-067); undefined in a job started before.
+  // The Task file as the Implementer was last given it; undefined in a job directory without task.md.
   readTaskCopy(workspace: string, ticket: string): Promise<string | undefined> {
     return readOrMissing(join(this.dir(workspace, ticket), 'task.md'));
   }
 
-  // Replaced atomically, by #syncTask of the Execution only.
+  // Replaced atomically, by syncTask (src/execution/start.ts) only.
   async writeTaskCopy(workspace: string, ticket: string, content: Buffer): Promise<void> {
     await writeFileAtomic(join(this.dir(workspace, ticket), 'task.md'), content);
   }
@@ -726,7 +724,7 @@ export class JobStore {
     await writeFileAtomic(join(this.dir(workspace, ticket), 'mr.md'), Buffer.from(text, 'utf8'));
   }
 
-  // The factory's MR text, kept next to mr.md once the user saved their own (SF-080); undefined
+  // The factory's MR text, kept next to mr.md once the user saved their own; undefined
   // while the MR text was never edited.
   readMrFactoryText(workspace: string, ticket: string): Promise<string | undefined> {
     return readOrMissing(join(this.dir(workspace, ticket), 'mr-factory.md'));
@@ -736,7 +734,7 @@ export class JobStore {
     await writeFileAtomic(join(this.dir(workspace, ticket), 'mr-factory.md'), Buffer.from(text, 'utf8'));
   }
 
-  // At a Clean without an edit (SF-080): the factory's text is mr.md again.
+  // At a Clean without an edit: the factory's text is mr.md again.
   async removeMrFactoryText(workspace: string, ticket: string): Promise<void> {
     await rm(join(this.dir(workspace, ticket), 'mr-factory.md'), { force: true });
   }
@@ -757,7 +755,7 @@ export class JobStore {
   async readMeta(workspace: string, ticket: string, number: number): Promise<IterationMeta> {
     const dir = join(this.dir(workspace, ticket), 'iterations', String(number).padStart(3, '0'));
     const meta = JSON.parse(await readFile(join(dir, 'meta.json'), 'utf8')) as IterationMeta;
-    // A file list written before SF-053 has no scope: none.
+    // A file list written without scope reads as none.
     return meta.files === undefined ? meta : { ...meta, files: meta.files.map((change) => ({ ...change, scope: change.scope ?? 'none' })) };
   }
 
@@ -766,19 +764,19 @@ export class JobStore {
     return join(this.dir(workspace, ticket), 'iterations', String(number).padStart(3, '0'));
   }
 
-  // iterations/NNN/tree (SF-079): the tree id of the job's files after the iteration, derived by
+  // iterations/NNN/tree: the tree id of the job's files after the iteration, derived by
   // src/changes.ts from the iteration's base and Patch.
   treePath(workspace: string, ticket: string, number: number): string {
     return join(this.iterationDir(workspace, ticket, number), 'tree');
   }
 
-  // The job's own Git object directory (SF-079): the objects of the iteration trees, with the
+  // The job's own Git object directory: the objects of the iteration trees, with the
   // workspace's objects as alternates; nothing is written into the workspace's repository.
   objectsDir(workspace: string, ticket: string): string {
     return join(this.dir(workspace, ticket), 'objects');
   }
 
-  // The resolution of a conflict turn whose rebase could not continue (SF-056), kept with the
+  // The resolution of a conflict turn whose rebase could not continue, kept with the
   // iteration being rebased, its content written by write; returns the file's path.
   async writeConflictResolution(workspace: string, ticket: string, number: number, write: (handle: FileHandle) => Promise<void>): Promise<string> {
     const path = join(this.iterationDir(workspace, ticket, number), 'conflict-resolution.diff');
@@ -790,7 +788,7 @@ export class JobStore {
     await writeFileAtomic(join(this.iterationDir(workspace, ticket, number), 'review.json'), Buffer.from(`${JSON.stringify(review, null, 2)}\n`));
   }
 
-  // Before a retried review (SF-044): the failed record goes, so the iteration's review shows as running.
+  // Before a retried review: the failed record goes, so the iteration's review shows as running.
   async removeReview(workspace: string, ticket: string, number: number): Promise<void> {
     const dir = join(this.dir(workspace, ticket), 'iterations', String(number).padStart(3, '0'));
     await rm(join(dir, 'review.json'), { force: true });
@@ -806,12 +804,12 @@ export class JobStore {
     await writeFileAtomic(join(this.iterationDir(workspace, ticket, number), 'gate.json'), Buffer.from(`${JSON.stringify(gate, null, 2)}\n`));
   }
 
-  // Before the stopped gate runs again (SF-052, after the user settled a dispute).
+  // Before the stopped gate runs again, after the user settled a dispute.
   async removeGate(workspace: string, ticket: string, number: number): Promise<void> {
     await rm(join(this.iterationDir(workspace, ticket, number), 'gate.json'), { force: true });
   }
 
-  // The findings ledger (SF-052); [] before the first Fix section. Strictly parsed.
+  // The findings ledger; [] before the first Fix section. Strictly parsed.
   async readLedger(workspace: string, ticket: string): Promise<LedgerEntry[]> {
     const text = await readOrMissing(join(this.dir(workspace, ticket), 'ledger.json'));
     if (text === undefined) {
@@ -835,12 +833,12 @@ export class JobStore {
     await writeFileAtomic(join(this.dir(workspace, ticket), 'ledger.json'), Buffer.from(`${JSON.stringify(ledgerSchema.parse(ledger), null, 2)}\n`));
   }
 
-  // The outcome of the simplification pass on an iteration (SF-055), replaced atomically.
+  // The outcome of the simplification pass on an iteration, replaced atomically.
   async writeSimplify(workspace: string, ticket: string, number: number, record: SimplifyRecord): Promise<void> {
     await writeFileAtomic(join(this.iterationDir(workspace, ticket, number), 'simplify.json'), Buffer.from(`${JSON.stringify(record, null, 2)}\n`));
   }
 
-  // The simplification pass of an iteration (SF-055); undefined when none ended there.
+  // The simplification pass of an iteration; undefined when none ended there.
   async readSimplify(workspace: string, ticket: string, number: number): Promise<SimplifyRecord | undefined> {
     const text = await readOrMissing(join(this.iterationDir(workspace, ticket, number), 'simplify.json'));
     return text === undefined ? undefined : (JSON.parse(text) as SimplifyRecord);
@@ -850,7 +848,7 @@ export class JobStore {
     await writeFileAtomic(join(this.iterationDir(workspace, ticket, number), 'gate-override.json'), Buffer.from(`${JSON.stringify(override, null, 2)}\n`));
   }
 
-  // The user's override of the gate on an iteration (SF-047); undefined when there is none.
+  // The user's override of the gate on an iteration; undefined when there is none.
   async readGateOverride(workspace: string, ticket: string, number: number): Promise<GateOverride | undefined> {
     const text = await readOrMissing(join(this.iterationDir(workspace, ticket, number), 'gate-override.json'));
     if (text === undefined) {
@@ -860,7 +858,7 @@ export class JobStore {
     return Array.isArray(override.unapplied) ? { ...override, unapplied: majorUnlessSet(override.unapplied) } : override;
   }
 
-  // The gate level of an iteration (SF-092); undefined when none was decided there. Strictly parsed:
+  // The gate level of an iteration; undefined when none was decided there. Strictly parsed:
   // gate_level_invalid for a file that is not valid JSON or does not match the schema.
   async readGateLevel(workspace: string, ticket: string, number: number): Promise<GateLevelRecord | undefined> {
     const text = await readOrMissing(join(this.iterationDir(workspace, ticket, number), 'gate-level.json'));
@@ -885,7 +883,7 @@ export class JobStore {
     await writeFileAtomic(join(this.iterationDir(workspace, ticket, number), 'gate-level.json'), Buffer.from(`${JSON.stringify(gateLevelSchema.parse(record), null, 2)}\n`));
   }
 
-  // The run of the workspace's test command on an iteration (SF-128): tests-<N>.json of the job
+  // The run of the workspace's test command on an iteration: tests-<N>.json of the job
   // directory, replaced by a later run of the same iteration (Retry) and by the user's Accept.
   async writeTests(workspace: string, ticket: string, number: number, record: TestsRecord): Promise<void> {
     await writeFileAtomic(join(this.dir(workspace, ticket), `tests-${number}.json`), Buffer.from(`${JSON.stringify(record, null, 2)}\n`));
@@ -897,7 +895,7 @@ export class JobStore {
     return text === undefined ? undefined : (JSON.parse(text) as TestsRecord);
   }
 
-  // The job's tests-<N>.json records whose outcome is failed (SF-128: the bound of the Tests Fix
+  // The job's tests-<N>.json records whose outcome is failed (the bound of the Tests Fix
   // rounds). A record that cannot be read or parsed counts as failed.
   async failedTests(workspace: string, ticket: string): Promise<number> {
     let names: string[];

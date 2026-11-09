@@ -1,4 +1,4 @@
-// sf update (SF-101): updates the Git install the running sf comes from, draining first. The
+// sf update: updates the Git install the running sf comes from, draining first. The
 // install is pulled and built only once no job runs: the running jobs are paused (each recorded in
 // the updating marker before its pause is sent), the build and typecheck run, a failed step rolls
 // the install back to the commit it started from and resumes the recorded jobs on the old code, a

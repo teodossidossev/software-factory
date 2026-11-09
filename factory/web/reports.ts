@@ -1,11 +1,11 @@
 // reports.js, the dashboard's seventh script (DASHBOARD_SCRIPTS in src/dashboard.ts), built from
-// web/reports.ts into dist/web/ (SF-149): the morning digest and the Stats page. A classic script,
+// web/reports.ts into dist/web/: the morning digest and the Stats page. A classic script,
 // loaded in order with defer, sharing the page's globals with the others. This file has no import
 // or export on purpose: the compiler keeps it a script, so its top-level names stay the page's
 // globals.
 'use strict';
 
-// ---------- The morning digest (SF-103) ----------
+// ---------- The morning digest ----------
 
 // The Digest page (#digest, #digest/<id>): the list as last read ({running, digests}, newest first),
 // the digest shown (its id; null: the newest) and its record, a read's error, the tab ('repos' or
@@ -475,7 +475,7 @@ async function copyDaily(daily: DigestDaily): Promise<void> {
   renderDigest();
 }
 
-// ---------- The Stats page (SF-117) ----------
+// ---------- The Stats page ----------
 
 // A series of a chart: its colour key, its name and its value of an item.
 interface StSeries<T> {
@@ -868,7 +868,7 @@ function stSecondOpinion(data: StatsPayload): HTMLElement {
   return section;
 }
 
-// The Claude review experiment (SF-132): one line per arm, on and off, of the jobs that recorded
+// The Claude review experiment: one line per arm, on and off, of the jobs that recorded
 // claude_review; the empty text when neither has a job.
 const ST_ARMS: Readonly<Record<string, string>> = { on: 'On', off: 'Off' };
 function stArms(data: StatsPayload): HTMLElement {
@@ -890,7 +890,7 @@ function stStages(data: StatsPayload): HTMLElement {
   const items = data.stages.map((row) => ({ ...row, label: ST_STAGES[row.stage] ?? row.stage }));
   const charts = el('div', 'st-charts');
   charts.append(stBars('findings', 'Findings per stage', items, ST_SEVERITIES.map((one) => ({ ...one, value: (row: StatsStageRow) => row.findings[one.key] })), String, 'No findings in this period.'));
-  // Rounds per ticket (SF-130): the plan check's (runs + failed) / tickets; "—" for the other stages.
+  // Rounds per ticket: the plan check's (runs + failed) / tickets; "—" for the other stages.
   section.append(charts, stTable(['Stage', 'Runs', 'Failed', 'Blocker', 'Major', 'Nit', 'Led to a fix', 'Cost', 'Tokens', 'Cost per run', 'Rounds per ticket'], items.map((row) => [
     row.label, String(row.runs), String(row.failed), String(row.findings.blocker), String(row.findings.major), String(row.findings.nit),
     row.stage === 'task_check' ? `${row.fixed} (Task revised)` : String(row.fixed), stMoney(row.cost_usd), stTokenLine(row.tokens),
@@ -915,7 +915,7 @@ function stSpend(data: StatsPayload): HTMLElement {
       { key: 'codex_out', name: 'Output', value: (row) => row.codex_tokens.output },
     ], stTokens, 'No Codex gate run in this period.'),
   );
-  // The simplification's line also has its offers and the user's choices (SF-132).
+  // The simplification's line also has its offers and the user's choices.
   const offers = ({ offered, taken, skipped }: StatsPayload['simplify']): string => ` · offered ${offered} · taken ${taken} · skipped ${skipped}`;
   section.append(charts, el('h4', 'st-sub', 'By role'), stTable(['Role', 'Cost', 'Tokens', 'Runs'], data.roles.map((row) => [
     ST_ROLES[row.role] ?? row.role, row.cost_usd === null ? 'tokens only' : row.complete ? stMoney(row.cost_usd) : `at least ${stMoney(row.cost_usd)}`,
@@ -946,7 +946,7 @@ function stLoad(data: StatsPayload): HTMLElement {
   return section;
 }
 
-// A job's plan checks (SF-130), all-time: "N rounds · $X" ("at least $X" when a cost is unknown),
+// A job's plan checks, all-time: "N rounds · $X" ("at least $X" when a cost is unknown),
 // "—" without one.
 function stPlanChecks(row: StatsJobRow): string {
   if (typeof row.plan_checks !== 'number' || row.plan_checks === 0) {

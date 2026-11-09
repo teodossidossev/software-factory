@@ -134,3 +134,30 @@ test('check-code: a web/*.ts file not in DASHBOARD_SCRIPTS fails; a declaration 
     assert.doesNotMatch(run.stderr, /types/);
   });
 });
+
+test('check-code: a comment in src/ that cites a ticket fails, a whole-line one and a trailing one, with file and line', async () => {
+  await withTree({ 'src/a.ts': 'x;\n// the reason (SF-12)\n', 'src/b.ts': 'code; // SF-12\n', 'src/c.ts': '/* SF-7 */\n/**\n * since SF-8\n */\n' }, {}, async (root) => {
+    const run = check(root);
+    assert.equal(run.code, 1);
+    assert.match(run.stderr, /src\/a\.ts:2: a comment cites SF-12/);
+    assert.match(run.stderr, /src\/b\.ts:1: a comment cites SF-12/);
+    assert.match(run.stderr, /src\/c\.ts:1: a comment cites SF-7/);
+    assert.match(run.stderr, /src\/c\.ts:3: a comment cites SF-8/);
+  });
+});
+
+test('check-code: a ticket in a string on a code line, or in a comment under test/, passes', async () => {
+  const strings = "const a = 'SF-12';\nconst b = \"// SF-12\";\nconst c = `see // SF-12`; // fine\nconst d = 'it\\'s // SF-12';\n";
+  await withTree({ 'src/a.ts': strings, 'test/x.test.ts': '// SF-12\ncode; // SF-12\n' }, {}, async (root) => {
+    const run = check(root);
+    assert.equal(run.code, 0, run.stderr);
+  });
+});
+
+test('check-code: a comment that cites a ticket in a declaration file under web/ fails', async () => {
+  await withTree({ 'web/types.d.ts': 'type A = string;\n// SF-12\n' }, {}, async (root) => {
+    const run = check(root);
+    assert.equal(run.code, 1);
+    assert.match(run.stderr, /web\/types\.d\.ts:2: a comment cites SF-12/);
+  });
+});

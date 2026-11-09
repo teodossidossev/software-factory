@@ -1,9 +1,9 @@
 // Runs Git with a fixed argv, no shell, a minimal environment and a bounded output. The only
-// module that starts a `git` process (SF-124; test/git.test.ts scans src/ for any other).
+// module that starts a `git` process (test/git.test.ts scans src/ for any other).
 import { spawn } from 'node:child_process';
 import type { Hash } from 'node:crypto';
 
-// Put before every caller's arguments, with no way to leave it out (SF-124): the factory runs Git
+// Put before every caller's arguments, with no way to leave it out: the factory runs Git
 // as the user, outside the sandbox, so neither the repository's hooks (a core.hooksPath such as
 // .husky resolves into files a job wrote) nor an fsmonitor program ever runs from here.
 export const GIT_SAFETY_ARGS: readonly string[] = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
@@ -35,7 +35,7 @@ function gitArgs(args: string[]): string[] {
     const key = (at < 0 ? setting : setting.slice(0, at)).toLowerCase();
     const safe = SAFE_VALUES.get(key);
     if (safe !== undefined && (fromEnv || at < 0 || setting.slice(at + 1) !== safe)) {
-      throw new Error(`refusing a factory Git call that sets ${key}: hooks and fsmonitor stay off (SF-124)`);
+      throw new Error(`refusing a factory Git call that sets ${key}: hooks and fsmonitor stay off`);
     }
   }
   return [...GIT_SAFETY_ARGS, ...args];
@@ -61,8 +61,8 @@ function gitEnv(): NodeJS.ProcessEnv {
 }
 
 // timeoutMs, when given, stops Git with SIGTERM; the result then has code null. env: variables
-// added to the minimal environment (SF-073: GIT_INDEX_FILE for a snapshot in a temporary index).
-// input, when given, is Git's whole stdin (SF-124: `check-attr --stdin`); stdin is closed otherwise.
+// added to the minimal environment (e.g. GIT_INDEX_FILE for a snapshot in a temporary index).
+// input, when given, is Git's whole stdin (e.g. for `check-attr --stdin`); stdin is closed otherwise.
 export function runGit(
   cwd: string, args: string[], maxBytes = 1024 * 1024, timeoutMs?: number, env: Record<string, string> = {}, input?: string,
 ): Promise<GitResult> {
@@ -118,7 +118,7 @@ export function runGitToFile(cwd: string, args: string[], fd: number): Promise<{
   });
 }
 
-// Runs Git and feeds its whole stdout into hash, unbounded and never held in memory (SF-069).
+// Runs Git and feeds its whole stdout into hash, unbounded and never held in memory.
 export function runGitToHash(cwd: string, args: string[], hash: Hash): Promise<{ code: number | null; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn('git', gitArgs(args), { cwd, env: gitEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
@@ -138,7 +138,7 @@ export function runGitToHash(cwd: string, args: string[], hash: Hash): Promise<{
 
 // Runs Git and hands its stdout to onRecord one record at a time, the records split at the byte
 // separator (a byte that cannot occur inside a UTF-8 character, such as 0x1e), the last one
-// without it too. Unbounded and never held whole in memory (SF-103: the morning digest's log of my
+// without it too. Unbounded and never held whole in memory (e.g. the morning digest's log of my
 // commits). timeoutMs and env as for runGit; a timeout gives code null. An onRecord that throws
 // stops Git and rejects with its error.
 export function streamGitRecords(

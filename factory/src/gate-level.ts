@@ -1,6 +1,6 @@
-// The gate level of an iteration (SF-092): how much of the Codex gate a clean Claude verdict gets,
+// The gate level of an iteration: how much of the Codex gate a clean Claude verdict gets,
 // by the risk of the job's whole change at that iteration (its meta.json files).
-// - full: the gate's rounds as before SF-092, up to SF_GATE_MAX_ROUNDS. When SF_GATE_LEVEL=full, or
+// - full: every round of the gate, up to SF_GATE_MAX_ROUNDS. When SF_GATE_LEVEL=full, or
 //   a changed path is sensitive, named by the Task's may_touch, security-relevant (SECURITY_WORDS,
 //   SF_GATE_FULL_PATHS) or an agents' instructions file (CLAUDE.md, AGENTS.md at any depth), or the
 //   change is large, or its files cannot be known.

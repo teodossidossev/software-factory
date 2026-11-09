@@ -1,4 +1,4 @@
-// Locks between the factory's processes (SF-042: sf serve and the job runners): a file holding the
+// Locks between the factory's processes (sf serve and the job runners): a file holding the
 // pid of its owner and, where /proc tells it, the owner's start time, so a pid reused by another
 // process is not taken for the owner. The file is created atomically, as a hard link of a complete
 // temp file, so it is never seen empty. A lock whose owner is no longer alive is stale and is taken
@@ -66,7 +66,7 @@ async function readOwner(path: string): Promise<Owner | undefined> {
 }
 
 // The owner is still the process that took the lock: alive, and started when it was then (also the
-// pid of the updating marker, SF-101).
+// pid of the updating marker).
 export function ownerAlive(owner: Owner): boolean {
   return isAlive(owner.pid) && (owner.start === undefined || startTime(owner.pid) === undefined || startTime(owner.pid) === owner.start);
 }

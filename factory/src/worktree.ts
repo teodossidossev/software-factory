@@ -1,7 +1,7 @@
-// The worktree of a job (SF-019): created from the workspace's checkout at start, recreated from
-// the branch after Clean when a reviewer asks for another fix, and removed at Clean, at
-// the end of the job and by reset. The Task check (SF-054) reads a detached one at the base. Every Git call runs through runGit; nothing here knows about
-// jobs or sessions.
+// The worktree of a job: created from the workspace's checkout at start, recreated from the branch
+// after Clean when a reviewer asks for another fix, and removed at Clean, at the end of the job and
+// by reset. The Task check reads a detached one at the base. Every Git call runs through runGit;
+// nothing here knows about jobs or sessions.
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { FactoryError } from './errors.js';
@@ -41,7 +41,7 @@ export async function addWorktree(checkout: string, path: string, branch: string
   await updateSubmodules(path);
 }
 
-// `git worktree add --detach` at path of commit, submodules included (the Task check, SF-054).
+// `git worktree add --detach` at path of commit, submodules included (the Task check).
 export async function addDetachedWorktree(checkout: string, path: string, commit: string): Promise<void> {
   const result = await runGit(checkout, ['worktree', 'add', '--detach', path, commit]);
   if (result.code !== 0) {

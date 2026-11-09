@@ -1,9 +1,9 @@
-// The job's runner (SF-042): `sf run <workspace> <ticket>`, one detached process per job that runs
+// The job's runner: `sf run <workspace> <ticket>`, one detached process per job that runs
 // the job's Implementer turns, its reviews and its gate and writes its state, so a restart of
 // sf serve leaves a working job alone. One runner per job, guarded by runner.pid in the job
 // directory (src/pid-lock.ts). sf serve talks to it only through files: each request is a JSON
 // file in queue/ (taken oldest first), the runner's answer to it a file of the same name in
-// replies/; abort, pause (SF-067), restart and reset stop it with SIGTERM. The runner exits when
+// replies/; abort, pause, restart and reset stop it with SIGTERM. The runner exits when
 // nothing is left to run: the job waits for a person or has ended. Its output goes to runner.log in the job directory.
 import { type ChildProcess, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -20,7 +20,7 @@ import type { Decision } from './ledger.js';
 import { isAlive, liveOwner, staleOwner, tryLock } from './pid-lock.js';
 
 // What sf serve asks of a job's runner. turn: the first turn of a started job (its prompt, and the
-// image blocks that go with it, SF-065), sent without a reply being awaited; the others are the
+// image blocks that go with it), sent without a reply being awaited; the others are the
 // user's and the reviewers' requests.
 export type RunnerRequest =
   | { kind: 'turn'; prompt: string; images?: ImageRef[] }
@@ -29,13 +29,13 @@ export type RunnerRequest =
   | { kind: 'clean'; sensitive: string[] }
   | { kind: 'review' }
   | { kind: 'accept' }
-  // The user's settlement of a ledger entry (SF-052).
+  // The user's settlement of a ledger entry.
   | { kind: 'settle'; id: string; decision: Decision; note: string }
-  // The user's Simplify on the offer of the simplification pass (SF-055).
+  // The user's Simplify on the offer of the simplification pass.
   | { kind: 'simplify' }
-  // The user's Resume of a paused job (SF-067), with the message for the Implementer ('' for none).
+  // The user's Resume of a paused job, with the message for the Implementer ('' for none).
   | { kind: 'resume'; message: string }
-  // The user's Retry of a transient MR preparation failure (SF-087): MR preparation runs again,
+  // The user's Retry of a transient MR preparation failure: MR preparation runs again,
   // without a new review.
   | { kind: 'retry' };
 

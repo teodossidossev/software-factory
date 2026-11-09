@@ -1,7 +1,7 @@
-// The hand-over of a job's branch to the user's checkout (SF-073, SF-089: from src/execution.ts):
-// handover, takeback, the check of the user's own push, Ask for changes, the repair of a cut-off
-// step, the saved refs, and the sandbox's leftover config lock around hand-overs and sessions
-// (SF-085: handOverLocked, afterTaskCheck, afterJobChange).
+// The hand-over of a job's branch to the user's checkout: handover, takeback, the check of the
+// user's own push, Ask for changes, the repair of a cut-off step, the saved refs, and the sandbox's
+// leftover config lock around hand-overs and sessions (handOverLocked, afterTaskCheck,
+// afterJobChange).
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { FactoryError } from '../errors.js';
@@ -19,12 +19,12 @@ import type { MrContent } from './dto.js';
 import { cutOffError, mrFailure } from './errors.js';
 
 // The states in which a job's sessions may run under Claude Code's sandbox, which binds the
-// workspace checkout's .git/config.lock into each sandboxed command (SF-085): the Implementer's
+// workspace checkout's .git/config.lock into each sandboxed command: the Implementer's
 // turns (working, and the MR text and conflict turns of preparing_mr) and the reviewers' sessions.
 const SANDBOXED_STATES: readonly JobState[] = ['working', 'awaiting_review', 'preparing_mr'];
 
 // The refusal of a hand-over or Take it back that met the sandbox's leftover config lock while
-// another job of the workspace ran, whose sandbox may be using it (SF-085); a hand-over refused so
+// another job of the workspace ran, whose sandbox may be using it; a hand-over refused so
 // runs by itself once none runs.
 const CONFIG_LOCKED_CODE = 'config_locked';
 
@@ -38,13 +38,13 @@ const sandboxesRunning = (jobs: Job[], workspace: string, except?: string): bool
   jobs.some((job) => job.workspace === workspace && job.ticket !== except && SANDBOXED_STATES.includes(job.state));
 
 // A job waiting in ready_for_human_review because its hand-over met the sandbox's leftover config
-// lock while another job of the workspace ran (SF-085).
+// lock while another job of the workspace ran.
 const lockedOut = (job: Job): boolean => job.state === 'ready_for_human_review' && job.handoff_skipped?.code === CONFIG_LOCKED_CODE;
 
-// How long the saved refs of a pushed or aborted job stay (SF-073).
+// How long the saved refs of a pushed or aborted job stay.
 const SAVED_REF_DAYS = 7;
 
-// A hand-over operation running in this process (SF-101: sf serve's serve-busy): the hand-over (by
+// A hand-over operation running in this process (sf serve's serve-busy): the hand-over (by
 // hand, or the factory's own after config_locked), Take it back, I opened the MR myself, and the
 // background check of the user's push.
 export type HandoverOperation = 'hand_over' | 'take_back' | 'handed_done' | 'push_check';
@@ -104,7 +104,7 @@ export class HandoverPart {
     return join(this.#settings.config.worktreeRoot, workspace, ticket);
   }
 
-  // A hand-over or an Ask for changes that sf serve's restart cut off (SF-073). handing_over is
+  // A hand-over or an Ask for changes that sf serve's restart cut off. handing_over is
   // undone when it is safe (the checkout on the branch holding exactly the job's commit, or still on
   // what it was on): the job waits in ready_for_human_review with its worktree, handoff_skipped
   // handover_interrupted; otherwise nothing in the checkout changes and the job needs the user.
@@ -151,7 +151,7 @@ export class HandoverPart {
     });
   }
 
-  // The saved refs of the hand-over (refs/factory/<ticket>, refs/factory/<ticket>-ask, SF-073) go once
+  // The saved refs of the hand-over (refs/factory/<ticket>, refs/factory/<ticket>-ask) go once
   // every job they may belong to is pushed or aborted for more than 7 days, or does not exist.
   async cleanSavedRefs(): Promise<void> {
     const jobs = new Map((await this.#store.jobs.list()).map((job) => [`${job.workspace}/${job.ticket}`, job]));
@@ -179,7 +179,7 @@ export class HandoverPart {
     }
   }
 
-  // The hand-over of a prepared job to the workspace's checkout (SF-073, src/handoff.ts), under the
+  // The hand-over of a prepared job to the workspace's checkout (src/handoff.ts), under the
   // workspace's Git lock: the record with step handing_over is written before the checkout changes.
   // ok: the job to move to handed_over (its worktree gone, or kept when it could not be removed);
   // else the refusal and the job as written (without the record). Only under the lock.
@@ -218,16 +218,16 @@ export class HandoverPart {
     }
   }
 
-  // Where the lock check looks: the Execution's lockProc (tests only, SF-105), else the real /proc.
+  // Where the lock check looks: the Execution's lockProc (tests only), else the real /proc.
   #scan(): LockScan {
     return this.#locks.lockProc === undefined ? {} : { proc: this.#locks.lockProc };
   }
 
-  // The sandbox's leftover config lock in the workspace checkout's Git directory (SF-085): removed
-  // when it is stale (src/sandbox-lock.ts) and no job of the workspace other than the ticket except
-  // is in working, awaiting_review or preparing_mr (their sandboxes may be using it). removed: gone, with the
-  // event sandbox_lock_removed in log.job's log (in sf serve's output without log); busy: stale but
-  // kept for a running job; none: no stale lock. Only under the workspace's Git lock.
+  // The sandbox's leftover config lock in the workspace checkout's Git directory: removed when it
+  // is stale (src/sandbox-lock.ts) and no job of the workspace other than the ticket except is in
+  // working, awaiting_review or preparing_mr (their sandboxes may be using it). removed: gone, with
+  // the event sandbox_lock_removed in log.job's log (in sf serve's output without log); busy: stale
+  // but kept for a running job; none: no stale lock. Only under the workspace's Git lock.
   async #sandboxLock(workspace: string, checkout: string, except: string | undefined, log: { job: Job; iteration: number } | undefined): Promise<'removed' | 'busy' | 'none'> {
     const gitDir = await checkoutGitDir(checkout);
     if (!(await staleSandboxLock(gitDir, this.#scan()))) {
@@ -263,17 +263,16 @@ export class HandoverPart {
     }
   }
 
-  // Right before a hand-over or Take it back, under the workspace's Git lock (SF-085): a stale
-  // sandbox lock goes; one kept for another running job refuses with config_locked and the action's
-  // message (CONFIG_LOCKED),
-  // before anything changes. A lock that is not stale stays: Git's own refusal tells of it.
+  // Right before a hand-over or Take it back, under the workspace's Git lock: a stale sandbox lock
+  // goes; one kept for another running job refuses with config_locked and the action's message
+  // (CONFIG_LOCKED), before anything changes. A lock that is not stale stays: Git's own refusal tells of it.
   async #freeConfig(job: Job, checkout: string, action: keyof typeof CONFIG_LOCKED): Promise<void> {
     if ((await this.#sandboxLock(job.workspace, checkout, job.ticket, { job, iteration: job.iteration })) === 'busy') {
       throw new FactoryError(CONFIG_LOCKED_CODE, CONFIG_LOCKED[action]);
     }
   }
 
-  // sf serve, when a Task check of the workspace ended and no other check of it runs (SF-085): the
+  // sf serve, when a Task check of the workspace ended and no other check of it runs: the
   // check's worktree shares the checkout's Git directory, so its sandbox may have left the lock;
   // it goes unless a job of the workspace runs. The removal is logged in the ticket's job, if any.
   async afterTaskCheck(workspaceName: string, ticket: string): Promise<void> {
@@ -281,7 +280,7 @@ export class HandoverPart {
     await this.clearAfter(workspaceName, undefined, job === undefined ? undefined : { job, iteration: job.iteration });
   }
 
-  // sf serve, on each job change it sees (SF-085): when a job left the SANDBOXED_STATES (working,
+  // sf serve, on each job change it sees: when a job left the SANDBOXED_STATES (working,
   // awaiting_review, preparing_mr; a move between two of them does not count), or one came to wait
   // with config_locked, the workspace's jobs waiting with config_locked are handed over once none
   // of its jobs is in one of those states. The retry changes a job only by
@@ -296,9 +295,9 @@ export class HandoverPart {
   }
 
   // sf serve (at start, and through afterJobChange): hands over the jobs waiting with config_locked
-  // of the workspace (of every workspace without one) in which no job is in the SANDBOXED_STATES. A refusal becomes the job's handoff_skipped; nothing is thrown.
-  // While the factory is being updated (SF-101: the updating marker) it returns at once; the
-  // catch-up after the update calls it again.
+  // of the workspace (of every workspace without one) in which no job is in the SANDBOXED_STATES. A
+  // refusal becomes the job's handoff_skipped; nothing is thrown. While the factory is being updated
+  // (the updating marker) it returns at once; the catch-up after the update calls it again.
   async handOverLocked(workspace?: string): Promise<void> {
     if (updateMarked(this.#settings.config.stateDir)) {
       return;
@@ -334,9 +333,9 @@ export class HandoverPart {
     return rest;
   }
 
-  // sf handover (SF-073): hands a job waiting in ready_for_human_review over to the checkout. A
+  // sf handover: hands a job waiting in ready_for_human_review over to the checkout. A
   // refusal (checkout_dirty, checkout_busy, handover_refused, handover_mismatch) leaves the job as it
-  // was and is returned as the error; config_locked (SF-085) becomes its handoff_skipped too, so
+  // was and is returned as the error; config_locked becomes its handoff_skipped too, so
   // the factory hands it over by itself once no other job of the workspace runs.
   handover(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string }> {
     return this.#handover(workspaceName, ticket, false) as Promise<{ state: JobState; branch: string }>;
@@ -393,9 +392,9 @@ export class HandoverPart {
     });
   }
 
-  // sf takeback (SF-073): the job back from the checkout into ready_for_human_review, only while
+  // sf takeback: the job back from the checkout into ready_for_human_review, only while
   // the checkout is as the factory left it (takeback_changed otherwise). ready_for_human_review is
-  // not running (SF-071): no limit applies.
+  // not running: no limit applies.
   takeback(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; worktree: string }> {
     return this.#tracked(workspaceName, ticket, 'take_back', () => this.#locks.locked(async () => {
       this.checkHandedOverJob(await this.#store.job(workspaceName, ticket), 'sf takeback');
@@ -426,13 +425,13 @@ export class HandoverPart {
     return job.handover;
   }
 
-  // sf handed-done (SF-073): the user opened the merge request from the checkout; origin must have
+  // sf handed-done: the user opened the merge request from the checkout; origin must have
   // the branch beyond the base (not_pushed otherwise), and the job goes to pushed.
   handedDone(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; commit?: string; same_tree?: boolean | null }> {
     return this.#pushCheck(workspaceName, ticket, true);
   }
 
-  // The check for the user's own push of a handed-over branch (SF-073): origin is asked where the
+  // The check for the user's own push of a handed-over branch: origin is asked where the
   // branch is, outside the lock; a branch pushed beyond the base moves the job to pushed. Errors
   // change nothing and are logged. minIntervalMs: none when origin was asked as recently (the
   // dashboard's job detail, every 60 s at most).
@@ -548,7 +547,7 @@ export class HandoverPart {
     return { ...(await this.#endHandover(job)), worktree };
   }
 
-  // Ask for changes on a handed-over job (SF-073), in the runner before the turn, under the
+  // Ask for changes on a handed-over job, in the runner before the turn, under the
   // workspace's Git lock: the checkout's state goes into refs/factory/<ticket>-ask and the job's
   // worktree, and the checkout gives the branch back. A refusal before the switch (checkout_moved,
   // checkout_busy, checkout_changing, handover_refused) leaves everything as it was; a failure after

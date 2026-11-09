@@ -1,10 +1,10 @@
-// The automatic Task checks of sf serve (SF-086). A trigger, keyed by workspace/ticket, (re)schedules
+// The automatic Task checks of sf serve. A trigger, keyed by workspace/ticket, (re)schedules
 // a check of the ticket's current Task file AUTO_CHECK_DELAY_MS after its last trigger: write_task
 // after its write, the watcher of each workspace's .software-factory folder, a ticket added to the run
 // queue without a check. A new trigger cancels the ticket's pending check and its running automatic
 // one (a cancelled run stores nothing). When it fires, nothing runs for a missing file or a skeleton,
-// a Task file that already has a check record of any status, one that needs no check (SF-130,
-// checkNeed), or a ticket whose job runs (non-terminal and not paused, as write_task's guard); such a
+// a Task file that already has a check record of any status, one that needs no check
+// (checkNeed), or a ticket whose job runs (non-terminal and not paused, as write_task's guard); such a
 // trigger is dropped. At most `parallel` checks run at
 // once over every workspace, a manual Check included (it never waits); the others wait in trigger
 // order. Every check runs through TaskChecks, so the board's "checking…" and check_running see it.
@@ -64,7 +64,7 @@ export interface AutoChecksOptions {
   rereadMs?: number;
   timers?: AutoTimers;
   watch?: WatchFolder;
-  // The updating marker (SF-101): while updating() is true no automatic check starts; its trigger
+  // The updating marker: while updating() is true no automatic check starts; its trigger
   // goes to skipped (update-skipped-checks.json) for the catch-up after the update.
   update?: { updating(): boolean; skipped(workspace: string, ticket: string): Promise<void> };
 }
@@ -153,8 +153,8 @@ export class AutoChecks {
   }
 
   // A trigger for a ticket added to the run queue: when its current Task file has no check record,
-  // it reschedules the ticket's check as every trigger does, a pending one included (Fix 4); nothing
-  // when a record of the current version exists, the Task needs no check (SF-130) or a check of the
+  // it reschedules the ticket's check as every trigger does, a pending one included; nothing
+  // when a record of the current version exists, the Task needs no check or a check of the
   // ticket runs.
   async triggerIfUnchecked(workspace: string, ticket: string): Promise<void> {
     if (this.#checks.isRunning(workspace, ticket)) {
@@ -163,7 +163,7 @@ export class AutoChecks {
     try {
       const resolved = await this.#resolve(workspace);
       const task = await readTask(resolved, ticket);
-      // Found by the check sha256 (SF-065): the text and its referenced images.
+      // Found by the check sha256: the text and its referenced images.
       if ((await this.#checks.store.read(workspace, ticket, await currentCheckSha256(resolved, ticket, task))) !== undefined || !checkNeed(task, workspace).needed) {
         return;
       }
@@ -281,7 +281,7 @@ export class AutoChecks {
         this.#entries.delete(key);
         continue;
       }
-      // The factory is being updated (SF-101): not started; the catch-up checks it.
+      // The factory is being updated: not started; the catch-up checks it.
       if (this.#update?.updating() === true) {
         this.#entries.delete(key);
         await this.#update.skipped(entry.workspace, entry.ticket).catch((error: unknown) => console.error(error));
@@ -324,7 +324,7 @@ export class AutoChecks {
   }
 
   // Whether the ticket's check runs now: a Task file that is not a skeleton, has no check record of
-  // any status yet, needs a check (SF-130), and whose ticket has no running job (a paused one does
+  // any status yet, needs a check, and whose ticket has no running job (a paused one does
   // not count).
   async #shouldRun(workspace: string, ticket: string): Promise<boolean> {
     let task: string;
@@ -338,7 +338,7 @@ export class AutoChecks {
       }
       throw error;
     }
-    // Found by the check sha256 (SF-065): the text and its referenced images.
+    // Found by the check sha256: the text and its referenced images.
     if (isDraft(task) || !checkNeed(task, workspace).needed || (await this.#checks.store.read(workspace, ticket, await currentCheckSha256(resolved, ticket, task))) !== undefined) {
       return false;
     }
@@ -435,7 +435,7 @@ export class AutoChecks {
 }
 
 // The plan check of a queued ticket (the run queue's planCheck): checking while a check of it runs;
-// not_needed (SF-130) when its current Task file has no check record and needs none (a pending
+// not_needed when its current Task file has no check record and needs none (a pending
 // trigger of it never runs); checking while a check of it is pending; else the verdict of the check
 // of its current Task file (none without one) with its blocker and major counts.
 export async function planCheck(checks: Pick<TaskChecks, 'view' | 'store'>, auto: Pick<AutoChecks, 'isPending'> | undefined, workspace: string, ticket: string): Promise<PlanCheck> {

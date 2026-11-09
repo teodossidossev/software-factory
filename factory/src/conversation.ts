@@ -1,4 +1,4 @@
-// The ChatGPT conversation that plans a ticket (SF-025, SF-028, SF-040): the first message the
+// The ChatGPT conversation that plans a ticket: the first message the
 // dashboard offers for a ticket, and the prefilled ChatGPT link that carries it. ChatGPT only
 // plans: it reads the repository, discusses the ticket with the User and writes the Task file;
 // the User starts the job on the dashboard.
@@ -6,7 +6,7 @@
 // The message that opens the ChatGPT conversation of a ticket from the dashboard: the connector,
 // guide, the User's own words (never written into the Task file), the investigation and the Task
 // file written with write_task, then the hand-back to the User. attachments: the names of the
-// ticket's images (SF-064); with any, how to read them and refer to them comes before the last
+// ticket's images; with any, how to read them and refer to them comes before the last
 // sentence.
 export function ticketConversation(workspace: string, ticket: string, request?: string, attachments: string[] = []): string {
   const words = request === undefined || request.trim() === '' ? '' : `Here is what I want, in my words:\n\n${request.trim()}\n\n`;

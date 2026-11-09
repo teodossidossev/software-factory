@@ -1,4 +1,4 @@
-// The narrow ports of the job lifecycle's parts (SF-143): each part takes only the ports whose
+// The narrow ports of the job lifecycle's parts: each part takes only the ports whose
 // members it uses, and the parts it calls as interfaces of just those methods, declared next to it.
 // One object implements every port (execution/core.ts); src/execution.ts builds it and wires the
 // parts.
@@ -21,7 +21,7 @@ export interface JobStorePort {
   // The job; refused for an invalid ticket (invalid_ticket) and for no job (job_not_found).
   job(workspace: string, ticket: string): Promise<Job>;
   // Every state change after the first: refused (illegal_transition) before anything is written
-  // unless JOB_TRANSITIONS allows it (SF-088).
+  // unless JOB_TRANSITIONS allows it.
   transition(job: Job, to: JobState, action: JobAction, error?: { code: string; message: string }, lines?: string[]): Promise<Job>;
 }
 

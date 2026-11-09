@@ -1,8 +1,7 @@
-// The review and gate pipeline (SF-089, from src/execution.ts): the Claude review of an iteration
-// (SF-038), the Codex gate (SF-039) at the iteration's gate level (SF-092), the ledger of findings
-// (settle, SF-052), the user's retry of a failed review (SF-044) and override of a stopped gate
-// (SF-047), and the simplification pass after a clean verdict (SF-055).
-// SF-125: the gate runs inside the wrapper of the sessions' read denials, and every reviewer's
+// The review and gate pipeline: the Claude review of an iteration, the Codex gate at the
+// iteration's gate level, the ledger of findings (settle), the user's retry of a failed review and
+// override of a stopped gate, and the simplification pass after a clean verdict.
+// The gate runs inside the wrapper of the sessions' read denials, and every reviewer's
 // output is redacted (Redactor.output) right after its session ends, before it is stored or used.
 import { readFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
@@ -37,12 +36,12 @@ import { exists, type FixOptions, type RunningReview } from './shared.js';
 const SETTLE_CODES: readonly string[] = settleCodes({ resumes: true });
 
 // The stops sf accept takes on (src/stops.ts: every row with an Accept): the gate's and the
-// ledger's, the Fix round limit (SF-115), the simplification pass's offer (SF-055: its Skip) and
-// the test step's (SF-128: without passing tests).
+// ledger's, the Fix round limit, the simplification pass's offer (its Skip) and the test
+// step's (without passing tests).
 const ACCEPT_CODES: readonly string[] = codesWithAction('accept');
 
-// The code of a session the factory refused to start because the user settings weaken the sandbox
-// (SF-100); undefined for any other failure.
+// The code of a session the factory refused to start because the user settings weaken the sandbox;
+// undefined for any other failure.
 const refusalCode = (error: unknown): string | undefined =>
   error instanceof FactoryError && error.code === USER_SETTINGS_WEAKEN_SANDBOX ? error.code : undefined;
 
@@ -92,15 +91,15 @@ export class ReviewsPart {
     this.#peers = peers;
   }
 
-  // The job's images as prompt images (SF-065): the job's own copy, with the alt texts of the Task
+  // The job's images as prompt images: the job's own copy, with the alt texts of the Task
   // text given (the one the agent reads); [] without images.
   imageRefs(job: Job, task: string): ImageRef[] {
     return imageRefs(job.ticket, this.#store.jobs.attachmentsDir(job.workspace, job.ticket), job.attachments ?? [], task);
   }
 
   // Starts the review of the job's last iteration; it runs outside the lock. A review still running
-  // for the job is cancelled. Nothing with SF_REVIEW=off. A job without the Claude review (SF-131,
-  // claude_review false) gets the gate instead, which is then its review: every caller (the publish,
+  // for the job is cancelled. Nothing with SF_REVIEW=off. A job without the Claude review
+  // (claude_review false) gets the gate instead, which is then its review: every caller (the publish,
   // the go-on after a settlement, the end of a conflict turn, the pick-up of a runner) goes through
   // here. Only under the lock.
   async startReview(job: Job): Promise<void> {
@@ -157,10 +156,10 @@ export class ReviewsPart {
 
   // The user's override of a stopped gate (sf accept, the dashboard's Accept and prepare MR): a job
   // the gate handed over (needs_human with gate_rounds, gate_budget or gate_failed), or the ledger
-  // or the Fix round limit (iteration_limit, SF-115) stopped, goes on as after a clean gate, to MR
+  // or the Fix round limit (iteration_limit) stopped, goes on as after a clean gate, to MR
   // preparation with the accepted paths. With the Claude review on, its last iteration needs a
-  // clean Claude review, except at the Fix round limit (SF-131: whatever the last verdict), and the
-  // paths are the review's accepted_sensitive; with it off (SF-131) no clean review is needed, and
+  // clean Claude review, except at the Fix round limit (whatever the last verdict), and the
+  // paths are the review's accepted_sensitive; with it off no clean review is needed, and
   // the paths are the last gate.json's. The override is recorded first: gate-override.json with what
   // goes unapplied (the Codex items, the gate's error, or the ledger's open findings) and a
   // gate_overridden event; MR preparation lists it in the MR text.
@@ -168,7 +167,7 @@ export class ReviewsPart {
     return this.#peers.control.request(workspaceName, ticket, { kind: 'accept' }) as Promise<{ state: JobState; iteration: number; branch: string }>;
   }
 
-  // The code the gate (or the ledger, SF-052, or the Fix round limit, SF-115) stopped with;
+  // The code the gate (or the ledger, or the Fix round limit) stopped with;
   // invalid_state unless it is one sf accept takes on.
   checkAcceptGate(job: Job): string {
     const code = job.error?.code;
@@ -179,9 +178,9 @@ export class ReviewsPart {
   }
 
   // What an Accept over a ledger stop (review_churn, review_disputed) or the Fix round limit
-  // (iteration_limit, SF-115) goes without: the ledger's open findings with their ids, and, after a
+  // (iteration_limit) goes without: the ledger's open findings with their ids, and, after a
   // ledger stop, the items of the iteration's gate that neither reopen one of them nor were dropped.
-  // At the limit the ledger's open entries alone (SF-131): the refused Fix wrote its items there as
+  // At the limit the ledger's open entries alone: the refused Fix wrote its items there as
   // open; the fixes the user decided and the disputed contests are not taken.
   async #ledgerUnapplied(job: Job, gate: GateRecord | undefined, code: string): Promise<Array<ReviewItem & { id?: string }>> {
     const ledger = await this.#store.jobs.readLedger(job.workspace, job.ticket);
@@ -205,12 +204,12 @@ export class ReviewsPart {
       const gate = job.iteration > 0 ? await this.#store.jobs.readGate(workspaceName, ticket, job.iteration) : undefined;
       const gateAccepted = gate !== undefined && 'verdict' in gate ? gate.accepted_sensitive : [];
       // The paths the deciding review accepted: Claude's (whatever its verdict at the Fix round
-      // limit), or with the Claude review off the last gate.json's (SF-131). prepareMr refuses the
+      // limit), or with the Claude review off the last gate.json's. prepareMr refuses the
       // marked paths they leave (sensitive_unacknowledged).
       let accepted = gateAccepted;
       if (claudeReviews(job)) {
         const review = job.iteration > 0 ? await this.#store.jobs.readReview(workspaceName, ticket, job.iteration) : undefined;
-        // Items the ledger dropped (they reopened an accepted risk, SF-052) never count.
+        // Items the ledger dropped (they reopened an accepted risk) never count.
         if (code !== 'iteration_limit') {
           if (review === undefined || !('verdict' in review) || actedVerdict(withoutDropped(review)) !== 'clean') {
             const what = review === undefined ? 'has none' : !('verdict' in review) ? 'failed' : review.verdict === 'fix' ? 'says fix' : 'says clean with a blocker or major item';
@@ -227,7 +226,7 @@ export class ReviewsPart {
         return this.#acceptTests(job, accepted, gate);
       }
       if (code === SIMPLIFY_CODE) {
-        // Skip (SF-055): MR preparation as after the clean gate, with the paths both reviewers
+        // Skip: MR preparation as after the clean gate, with the paths both reviewers
         // accepted; simplify.json is marked skipped, so the suggestions go into the MR text (mrIdle).
         // No gate override: the gate was clean.
         const record = await this.#store.jobs.readSimplify(workspaceName, ticket, job.iteration);
@@ -256,10 +255,10 @@ export class ReviewsPart {
     });
   }
 
-  // The Accept of a stop of the test step (SF-128: tests_failed, tests_unavailable): MR preparation
+  // The Accept of a stop of the test step (tests_failed, tests_unavailable): MR preparation
   // without passing tests. No gate override: the gate was clean, off or already overridden. The
   // accepted paths are the Retry's: accepted (the Claude review's, or the gate's without the Claude
-  // review, SF-131), plus with the Claude review the gate's when it was clean and not overridden.
+  // review), plus with the Claude review the gate's when it was clean and not overridden.
   // Once every check passed, the iteration's record says accepted_failing (with the run's details),
   // so the test step is skipped, and a tests event records it. Only under the lock.
   async #acceptTests(job: Job, accepted: string[], gate: GateRecord | undefined): Promise<{ state: JobState; iteration: number; branch: string }> {
@@ -279,7 +278,7 @@ export class ReviewsPart {
     } });
   }
 
-  // The user's settlement of an escalated or contested ledger entry (SF-052: sf settle, the
+  // The user's settlement of an escalated or contested ledger entry (sf settle, the
   // dashboard's Accept risk and Must fix) while the job is needs_human: accept makes it
   // accepted_risk, fix user_fix. Once an escalated or review_disputed stop has no escalated entry
   // and no disputed contest left, the job goes on by itself: a Fix section with the fixes the user
@@ -326,22 +325,21 @@ export class ReviewsPart {
     });
   }
 
-  // The denial scope of a review, simplification or gate session in the job's worktree (SF-100,
-  // SF-125).
+  // The denial scope of a review, simplification or gate session in the job's worktree.
   async #denialScope(job: Job, worktree: string): Promise<DenialScope> {
     const { config } = this.#settings;
     const workspace = await this.#settings.resolve(job.workspace);
     return { session: 'job', workspace: job.workspace, checkout: workspace.workCheckout, worktree, stateDir: config.stateDir, worktreeRoot: config.worktreeRoot };
   }
 
-  // The path denials of a review or simplification session in the job's worktree (SF-100), built
+  // The path denials of a review or simplification session in the job's worktree, built
   // before each session.
   async #pathDenials(job: Job, worktree: string): Promise<PathDenials> {
     return pathDenials(await this.#denialScope(job, worktree));
   }
 
   // The Redactor of a reviewer's run in the job's worktree, with the dashboard and MCP tokens as
-  // literal secrets (SF-125); a token file that is missing or unreadable adds none.
+  // literal secrets; a token file that is missing or unreadable adds none.
   async #redactor(job: Job): Promise<Redactor> {
     return new Redactor({ cwd: job.worktree ?? '', secrets: await factoryTokens(this.#settings.config) });
   }
@@ -355,7 +353,7 @@ export class ReviewsPart {
       ticket, iteration, report, patch, patchTruncated: meta.patch_truncated, files: meta.files, handbook: this.#settings.handbook,
       task: await readFile(join(worktree, TASK_DIR, `${ticket}.md`), 'utf8'), ledger: await this.#store.jobs.readLedger(name, ticket),
       rules: await readJobRules(this.#store.jobs.dir(name, ticket)),
-      // Every message sent up to and including the reviewed iteration (SF-112).
+      // Every message sent up to and including the reviewed iteration.
       userMessages: (await jobUserMessages(this.#store.jobs, name, ticket)).filter((m) => m.iteration <= iteration),
     };
   }
@@ -376,7 +374,7 @@ export class ReviewsPart {
         cwd: job.worktree, claudePath: this.#settings.config.claudePath, sandbox: this.#settings.config.sandbox, model: this.#settings.config.reviewModel,
         deny: denials.tools, filesystem: denials.sandbox, hooks: denials.hooks,
         maxTurns: this.#settings.config.reviewMaxTurns, signal: running.controller.signal, images: this.imageRefs(job, input.task),
-        // The session live in events.jsonl (SF-045).
+        // The session live in events.jsonl.
         onMessage: (message) => this.#sessions.appendLive(job, 'review_message', redactor.reviewMessage(message)),
       });
     } catch (error) {
@@ -384,7 +382,7 @@ export class ReviewsPart {
       stop = refusalCode(error);
       outcome = { ok: false, message: `The review could not start: ${(error as Error).message}`.slice(0, 1000), startedAt: at, endedAt: at };
     }
-    // A usage limit (SF-072) is read from the message as the session wrote it, before redaction.
+    // A usage limit is read from the message as the session wrote it, before redaction.
     const limit = outcome.ok ? undefined : usageLimit(outcome.message, new Date(), 'claude');
     // The failure message goes to review.json, the event and the job's error: withheld or redacted
     // like the session's prose (src/redact.ts, failure); a refusal is the factory's own text, which
@@ -392,7 +390,7 @@ export class ReviewsPart {
     if (!outcome.ok && stop === undefined) {
       outcome = { ...outcome, message: redactor.failure(outcome.message) };
     }
-    // The verdict redacted before review.json, the events, the Fix section and the prompts (SF-125).
+    // The verdict redacted before review.json, the events, the Fix section and the prompts.
     if (outcome.ok) {
       outcome = { ...outcome, output: redactor.output(outcome.output) };
     }
@@ -402,7 +400,7 @@ export class ReviewsPart {
   }
 
   // The end of a review. A cancelled one leaves no trace. One that hit a usage limit (limit) while
-  // the job still awaits review of the same iteration parks the job (SF-072) and writes nothing of
+  // the job still awaits review of the same iteration parks the job and writes nothing of
   // the round. Otherwise review.json and the event are written; the verdict applies only while the
   // job still awaits review of the same iteration.
   // stop: the code of a session refused before it started, for the job's error instead of review_failed.
@@ -442,8 +440,8 @@ export class ReviewsPart {
     await this.applying(job, () => this.afterClaude(job, outcome.output));
   }
 
-  // The undeclared sensitive paths and the paths outside the Task's scope (SF-053) of the job's
-  // last iteration not in accepted, nor accepted by the user as a risk (SF-052), as fix items.
+  // The undeclared sensitive paths and the paths outside the Task's scope of the job's
+  // last iteration not in accepted, nor accepted by the user as a risk, as fix items.
   async unaccepted(job: Job, accepted: string[]): Promise<ReviewItem[]> {
     const byUser = await this.#markedAcceptedByUser(job);
     return unacceptedItems((await this.#peers.status.lastFiles(job)) ?? [], [...accepted, ...byUser]);
@@ -463,11 +461,11 @@ export class ReviewsPart {
     return effective === output.verdict ? { verdict: output.verdict } : { verdict: output.verdict, effective };
   }
 
-  // The Claude verdict as the factory acts on it (decide, SF-051): fix (a blocker or major item, or
+  // The Claude verdict as the factory acts on it (decide): fix (a blocker or major item, or
   // an undeclared sensitive path or a path outside the Task's scope it does not accept) is the
   // next Fix section; clean (a fix with nits only too) starts the gate, or with the gate off runs
   // Clean. Only under the lock.
-  // The ledger applies first (SF-052, #applyLedger): a dropped item never counts, a dispute or
+  // The ledger applies first (#applyLedger): a dropped item never counts, a dispute or
   // churn hands the job to the user.
   async afterClaude(job: Job, output: ReviewOutput): Promise<void> {
     const { summary, accepted_sensitive: accepted } = output;
@@ -480,13 +478,13 @@ export class ReviewsPart {
     } else if (this.#settings.config.gate.on && (await this.#gateRuns(job))) {
       await this.startGate(job, output);
     } else {
-      // The gate off, or skipped by the iteration's gate level (SF-092): the same way to Clean.
+      // The gate off, or skipped by the iteration's gate level: the same way to Clean.
       await this.afterClean(job, accepted);
     }
   }
 
-  // Whether the gate runs on the job's last iteration, by its gate level (SF-092,
-  // src/gate-level.ts): decided once per iteration, before the gate's budget check, so a gate that
+  // Whether the gate runs on the job's last iteration, by its gate level
+  // (src/gate-level.ts): decided once per iteration, before the gate's budget check, so a gate that
   // does not run never stops on gate_budget. A decision already recorded in gate-level.json (the
   // job picked up again after a pause, a park or a restart of sf serve) is used as it is; otherwise
   // the level is decided from the job's change at the iteration (its meta.json files) and the
@@ -498,7 +496,7 @@ export class ReviewsPart {
       return recorded.ran;
     }
     if (!claudeReviews(job)) {
-      // The gate is the job's only review (SF-131): it always runs, at level full.
+      // The gate is the job's only review: it always runs, at level full.
       const at = now();
       const reasons = ['no Claude review'];
       await this.#store.jobs.writeGateLevel(workspace, ticket, iteration, { level: 'full', ran: true, reasons, files: null, lines: null, at });
@@ -535,7 +533,7 @@ export class ReviewsPart {
     }
   }
 
-  // The ledger applied to a reviewer's verdict on the job's last iteration (SF-052, applyVerdict):
+  // The ledger applied to a reviewer's verdict on the job's last iteration (applyVerdict):
   // the items that reopen an accepted risk are recorded as dropped in review.json or gate.json,
   // and the ledger is written unless the verdict is a fix (fix writes it with its Fix section).
   // Only under the lock.
@@ -577,8 +575,8 @@ export class ReviewsPart {
     }
   }
 
-  // Starts the gate after a clean Claude verdict (claude) whose gate level runs it (SF-092), or
-  // without one as the job's only review (SF-131: claude undefined); it runs outside the lock. A job
+  // Starts the gate after a clean Claude verdict (claude) whose gate level runs it, or
+  // without one as the job's only review (claude undefined); it runs outside the lock. A job
   // whose gate runs used up SF_GATE_MAX_TOKENS goes to the user instead. Only under the lock.
   async startGate(job: Job, claude?: ReviewOutput): Promise<void> {
     if (job.gate_tokens >= this.#settings.config.gateMaxTokens) {
@@ -616,7 +614,7 @@ export class ReviewsPart {
       const input = await this.#reviewInput(job, job.worktree);
       const dir = this.#store.jobs.iterationDir(name, ticket, iteration);
       const images = this.imageRefs(job, input.task).map((image) => image.path);
-      // Codex inside bubblewrap under the sessions' read denials (SF-125); with the sandbox off
+      // Codex inside bubblewrap under the sessions' read denials; with the sandbox off
       // (SF_SANDBOX=off), unwrapped.
       const wrapper = this.#settings.config.sandbox === undefined ? undefined : await gateWrapperFor(await this.#denialScope(job, job.worktree), {
         worktree: job.worktree, codexPath: gate.codexPath, codexHome: process.env.CODEX_HOME || join(homedir(), '.codex'), iterationDir: dir, images, tmp: tmpdir(),
@@ -624,14 +622,14 @@ export class ReviewsPart {
       outcome = await runGate(gatePrompt({ ...input, baseCommit: job.base_commit, onlyReviewer: claude === undefined }), {
         codexPath: gate.codexPath, cwd: job.worktree, dir, model: this.#settings.config.codexModel, images, wrapper, bwrapPath: findBwrap(),
         timeoutMs: this.#settings.config.gateTimeoutMs, signal: running.controller.signal,
-        // The run live in events.jsonl (SF-045).
+        // The run live in events.jsonl.
         onEvent: (event) => this.#sessions.appendLive(job, 'gate_event', redactor.codexEvent(event)),
       });
     } catch (error) {
       const at = now();
       outcome = { ok: false, message: `The gate could not start: ${(error as Error).message}`.slice(0, 1000), tokens: noTokens(), startedAt: at, endedAt: at };
     }
-    // A usage limit of the plan (SF-072), read before redaction.
+    // A usage limit of the plan, read before redaction.
     const limit = outcome.ok ? undefined : usageLimit(outcome.message, new Date(), 'codex');
     // The failure message (Codex's stderr or error event) goes to gate.json, the event and the
     // job's error: withheld or redacted like the run's prose (src/redact.ts, failure). A gate the
@@ -642,7 +640,7 @@ export class ReviewsPart {
         outcome = { ...outcome, message: redactor.failure(outcome.message) };
       }
     } else {
-      // The verdict redacted before gate.json, the events, the Fix section and the prompts (SF-125).
+      // The verdict redacted before gate.json, the events, the Fix section and the prompts.
       outcome = { ...outcome, output: redactor.output(outcome.output) };
     }
     const ended = outcome;
@@ -652,13 +650,13 @@ export class ReviewsPart {
 
   // The end of a gate run. A cancelled one leaves no trace. Otherwise its tokens count for the job,
   // gate.json and the event are written, and the verdict applies only while the job still awaits
-  // review of the same iteration, as the factory acts on it (decide, SF-051): clean (a fix with nits
+  // review of the same iteration, as the factory acts on it (decide): clean (a fix with nits
   // only too) runs Clean with the paths both reviewers accepted, fix (a blocker or major item, or an
   // undeclared sensitive path or a path outside the Task's scope the gate does not accept) is the
-  // next Fix section unless the gate's rounds are used up. Without a Claude review (claude undefined,
-  // SF-131) the paths are the gate's alone and SF_GATE_MAX_ROUNDS does not apply: SF_MAX_ITERATIONS
+  // next Fix section unless the gate's rounds are used up. Without a Claude review (claude undefined)
+  // the paths are the gate's alone and SF_GATE_MAX_ROUNDS does not apply: SF_MAX_ITERATIONS
   // limits the rounds. A run that hit a usage limit (limit) while the job still awaits review of the
-  // same iteration parks the job (SF-072): no gate.json, no event, no tokens charged.
+  // same iteration parks the job: no gate.json, no event, no tokens charged.
   async #gated(gated: Job, running: RunningReview, claude: ReviewOutput | undefined, outcome: GateOutcome, limit?: UsageLimit): Promise<void> {
     const { workspace: name, ticket, iteration } = gated;
     const key = `${name}/${ticket}`;
@@ -671,7 +669,7 @@ export class ReviewsPart {
       return;
     }
     const current = read.state === 'awaiting_review' && read.iteration === iteration;
-    // A run that hit a usage limit is discarded whole (SF-072): its tokens are not charged either,
+    // A run that hit a usage limit is discarded whole: its tokens are not charged either,
     // so a parked and rerun round never counts toward SF_GATE_MAX_TOKENS.
     if (current && limit !== undefined) {
       await this.#peers.control.park(read, 'gate', limit);
@@ -710,7 +708,7 @@ export class ReviewsPart {
       return;
     }
     const { summary, accepted_sensitive: accepted } = outcome.output;
-    // The ledger applies first (SF-052): a dropped item never counts, a dispute or churn hands the
+    // The ledger applies first: a dropped item never counts, a dispute or churn hands the
     // job to the user.
     const applied = await this.#applyLedger(job, GATE_REVIEWER, outcome.output);
     if (applied.kind === 'stop') {
@@ -735,7 +733,7 @@ export class ReviewsPart {
     });
   }
 
-  // After the deciding clean verdict (SF-055): the simplification pass when it is due, else MR
+  // After the deciding clean verdict: the simplification pass when it is due, else MR
   // preparation with the accepted paths (sensitive). A pass that already ended on this iteration
   // (its runner stopped before the outcome applied) applies its record; one that started on it and
   // never ended (its runner stopped while it ran) is recorded as failed and goes on, as a failed
@@ -758,7 +756,7 @@ export class ReviewsPart {
     }
   }
 
-  // Whether the simplification pass runs on the job (SF-055): SF_SIMPLIFY on, at least one Fix
+  // Whether the simplification pass runs on the job: SF_SIMPLIFY on, at least one Fix
   // section written (at SF_MAX_ITERATIONS too: Simplify may go over it), and never before: the job's
   // simplify_iteration, written before a pass starts, is still absent. So it runs at most once per job,
   // whether that run ended, failed, was interrupted or the job moved on.
@@ -766,7 +764,7 @@ export class ReviewsPart {
     return this.#settings.config.simplify && job.fixes >= 1 && job.simplify_iteration === undefined;
   }
 
-  // The suggestions the user skipped (SF-055), with the iteration the pass ran on: the simplify.json
+  // The suggestions the user skipped, with the iteration the pass ran on: the simplify.json
   // marked skipped_at by sf accept. A Simplify, or an answer by sf say, leaves none.
   async skippedSimplifications(job: Job): Promise<{ suggestions: Suggestion[]; iteration: number } | undefined> {
     for (let number = job.iteration; number >= 1; number -= 1) {
@@ -843,12 +841,12 @@ export class ReviewsPart {
       stop = refusalCode(error);
       outcome = { ok: false, message: `The simplification pass could not start: ${(error as Error).message}`.slice(0, 1000), model: null, startedAt: at, endedAt: at };
     }
-    // A usage limit of the plan (SF-072), read before redaction.
+    // A usage limit of the plan, read before redaction.
     const limit = outcome.ok ? undefined : usageLimit(outcome.message, new Date(), 'claude');
     if (!outcome.ok && stop === undefined) {
       outcome = { ...outcome, message: redactor.failure(outcome.message) };
     }
-    // The suggestions redacted before simplify.json, the events and the Simplify Fix (SF-125).
+    // The suggestions redacted before simplify.json, the events and the Simplify Fix.
     if (outcome.ok) {
       outcome = { ...outcome, output: redactor.output(outcome.output) };
     }
@@ -860,8 +858,8 @@ export class ReviewsPart {
   // The end of the pass. A cancelled one leaves no trace; one the job moved on from leaves only its
   // event (ignored); either way the job's simplify_iteration keeps any later pass from running. Otherwise simplify.json (the suggestions the
   // ledger guard kept, and those it dropped) and the event are written and the outcome applies. A
-  // pass that hit a usage limit (limit) while the job is still current parks the job instead
-  // (SF-072): no simplify.json, no event, and the pass runs again on Resume.
+  // pass that hit a usage limit (limit) while the job is still current parks the job instead:
+  // no simplify.json, no event, and the pass runs again on Resume.
   // stop: the code of a pass refused before it started: the job stops with it instead of going on.
   async #simplifyEnded(started: Job, running: RunningReview, sensitive: string[], outcome: StructuredOutcome<SimplifyOutput>, limit?: UsageLimit, stop?: string): Promise<void> {
     const { workspace, ticket, iteration } = started;
@@ -910,7 +908,7 @@ export class ReviewsPart {
     await this.#store.transition(job, 'needs_human', 'verdict', { code: SIMPLIFY_CODE, message: offerMessage(record.suggestions) });
   }
 
-  // The user's Simplify on the offer (sf simplify, the dashboard's Simplify, SF-055): one Fix section
+  // The user's Simplify on the offer (sf simplify, the dashboard's Simplify): one Fix section
   // "Simplify" with the suggestions, each recorded in the ledger as accepted_risk of reviewer
   // simplify, and the normal pipeline (the Implementer, the Claude review, the gate). Never twice.
   simplify(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; check_after_minutes: number }> {

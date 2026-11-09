@@ -1,15 +1,15 @@
-// sf service install|uninstall|status (SF-101): sf serve as a systemd user service,
+// sf service install|uninstall|status: sf serve as a systemd user service,
 // software-factory.service in ~/.config/systemd/user. The unit runs the installed sf with
 // KillMode=process: the job runners are detached processes that outlive a restart of sf serve
-// (SF-042), and systemd's default control-group mode would kill them on every stop, restart or crash
+// and systemd's default control-group mode would kill them on every stop, restart or crash
 // restart. The unit caps the CPU of its whole control group (sf serve, the runners and everything
-// they run) at half the cores and runs it at Nice=10 (SF-116), so the factory leaves the user's
+// they run) at half the cores and runs it at Nice=10, so the factory leaves the user's
 // machine responsive; a drop-in overrides them. Its environment is the PATH of the shell that ran
 // the install (node, git, gh, claude and codex are found as there) and the directory settings set
 // in that shell; every other setting comes from auth.env, which sf serve reads. Logs go to
-// journald. On a machine without systemd user services sf service says so, and sf serve works as
-// before. Run while the service's own sf serve answers, install rewrites the unit and restarts the
-// service (SF-120); an sf serve started by hand still refuses it.
+// journald. On a machine without systemd user services sf service says so, and sf serve works
+// without it. Run while the service's own sf serve answers, install rewrites the unit and restarts the
+// service; an sf serve started by hand refuses it.
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
@@ -58,7 +58,7 @@ export interface ServiceOptions {
   run?: RunCommand;
   // Whether an sf serve answers on the state directory's socket.
   serveAnswers: () => Promise<boolean>;
-  // The pid the answering sf serve reports (SF-120); by default none.
+  // The pid the answering sf serve reports; by default none.
   servePid?: () => Promise<number | undefined>;
   // What runs inside that sf serve and a restart would cut off, one line each, empty when idle;
   // by default nothing.
@@ -81,8 +81,7 @@ function quoted(value: string): string {
   return `"${value.replaceAll('%', '%%').replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
 }
 
-// The unit's CPUQuota in percent of one core: half the cores, at least one and at most eight
-// (SF-116).
+// The unit's CPUQuota in percent of one core: half the cores, at least one and at most eight.
 export function cpuQuota(cores: number): number {
   return Math.min(800, Math.max(100, Math.floor(cores / 2) * 100));
 }
@@ -107,7 +106,7 @@ export function unitText(sf: string, env: NodeJS.ProcessEnv, cores: number): str
     `ExecStart=${quoted(sf)} serve`,
     'Restart=on-failure',
     'RestartSec=5',
-    // The job runners are detached and must outlive a stop or restart of sf serve (SF-042).
+    // The job runners are detached and must outlive a stop or restart of sf serve.
     'KillMode=process',
     `# The factory must leave the user's machine responsive; a drop-in in ${UNIT_FILE}.d/ overrides these.`,
     ...limitSettings(cores),
@@ -167,7 +166,7 @@ class Service {
   }
 
   // While an sf serve answers, install goes on only when it is the service's own (its pid from
-  // ping is the service's MainPID; SF-120) and nothing runs inside it that a restart would cut off.
+  // ping is the service's MainPID) and nothing runs inside it that a restart would cut off.
   // Every doubt about the pid is a hand-started sf serve. Returns that pid, or undefined when no
   // sf serve answers.
   async #ownServe(): Promise<number | undefined> {

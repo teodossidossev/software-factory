@@ -1,4 +1,4 @@
-// The history of a planned ticket (SF-081): what the factory records of the Task file's writes,
+// The history of a planned ticket: what the factory records of the Task file's writes,
 // <state>/tickets/<ws>/<ticket>/history.jsonl, append-only, one line {ts, kind, by, sha256} per
 // write (a Fix section adds its number), and the timeline the planned ticket page shows: those
 // writes, the Task checks (<state>/checks/<ws>/<ticket>/*.json) and the jobs of the ticket
@@ -47,7 +47,7 @@ export interface CurrentTask {
 }
 
 export const HISTORY_FILE = 'history.jsonl';
-export const OLDER_NOTE = 'Recorded since SF-081; earlier steps are known only from checks and jobs.';
+export const OLDER_NOTE = 'Older steps were not recorded; they are known only from checks and jobs.';
 // An archived job directory of the ticket: <ticket>.<YYYYMMDDTHHMMSSZ> (JobStore.archive).
 const ARCHIVED_JOB_STAMP = /^\d{8}T\d{6}Z$/;
 const SHA256 = /^[0-9a-f]{64}$/;

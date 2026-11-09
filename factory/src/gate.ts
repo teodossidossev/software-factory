@@ -1,9 +1,9 @@
-// The gate (SF-039): the second, deciding review of an iteration a Claude review found clean, run by
+// The gate: the second, deciding review of an iteration a Claude review found clean, run by
 // the Codex CLI (`codex exec`) on the user's ChatGPT plan. Codex reads the worktree itself in its
-// read-only sandbox; the factory gives it the SF-038 review material in the prompt, the strict form
-// of the SF-038 output schema, and reads back the verdict, the token usage and the errors. Knows
+// read-only sandbox; the factory gives it the Claude review's material in the prompt, the strict
+// form of its output schema, and reads back the verdict, the token usage and the errors. Knows
 // nothing about job states; the Execution applies the verdict.
-// SF-125: Codex runs inside bubblewrap under the Claude sessions' read denials (the wrapper,
+// Codex runs inside bubblewrap under the Claude sessions' read denials (the wrapper,
 // src/sandbox-denials.ts), and never without it while the sandbox is on; it gets a short list of
 // environment variables, and the raw output file is removed once read.
 import { spawn } from 'node:child_process';
@@ -22,7 +22,7 @@ export const GATE_OUTPUT_FILE = 'gate-output.json';
 const KILL_AFTER_MS = 5000;
 // How much of stderr is kept for the failure message.
 const MAX_STDERR_BYTES = 16 * 1024;
-// The code of a gate the factory did not start because bubblewrap cannot hold it (SF-125).
+// The code of a gate the factory did not start because bubblewrap cannot hold it.
 export const GATE_SANDBOX_UNAVAILABLE = 'gate_sandbox_unavailable';
 
 // The schema in the strict form OpenAI structured outputs need: every object has
@@ -55,15 +55,15 @@ export const GATE_SCHEMA = strictSchema(REVIEW_SCHEMA) as Record<string, unknown
 export interface GateInput extends ReviewInput {
   // The commit the Patch is against: Codex runs git diff against it.
   baseCommit: string;
-  // The gate is the job's only reviewer (SF-131: its Claude review is off).
+  // The gate is the job's only reviewer (its Claude review is off).
   onlyReviewer?: boolean;
 }
 
-// The gate's role in the prompt: the only reviewer of a job without the Claude review (SF-131), else
+// The gate's role in the prompt: the only reviewer of a job without the Claude review, else
 // the second after a clean Claude review.
 export const ONLY_REVIEWER_LINE = 'You are the only reviewer of this iteration, and your verdict decides.';
 
-// The prompt of the gate: the SF-038 review prompt, adapted to Codex in a read-only worktree.
+// The prompt of the gate: the Claude review's prompt, adapted to Codex in a read-only worktree.
 export function gatePrompt(input: GateInput): string {
   const role = input.onlyReviewer === true ? ONLY_REVIEWER_LINE : 'You are the second and deciding reviewer: a Claude review found this iteration clean, and your verdict decides.';
   return [
@@ -85,12 +85,12 @@ export interface GateOptions {
   timeoutMs: number;
   // Cancels the run (abort, reset, a newer review): the process is killed.
   signal: AbortSignal;
-  // Every JSONL event of stdout that parses, in order, as it arrives (SF-045); runGate waits for
+  // Every JSONL event of stdout that parses, in order, as it arrives; runGate waits for
   // the calls before it returns, and a failing call changes nothing of the outcome.
   onEvent?: (event: unknown) => Promise<void>;
-  // The Task's images (SF-065): absolute paths of the job's copy, one --image each.
+  // The Task's images: absolute paths of the job's copy, one --image each.
   images?: readonly string[] | undefined;
-  // The bwrap arguments Codex runs under (SF-125, gateWrapper); undefined runs it unwrapped (the
+  // The bwrap arguments Codex runs under (gateWrapper); undefined runs it unwrapped (the
   // sandbox off, SF_SANDBOX=off).
   wrapper: string[] | undefined;
   // The bwrap executable (findBwrap); with a wrapper and none, Codex does not start.
@@ -108,10 +108,10 @@ export type GateOutcome = { tokens: GateTokens; startedAt: string; endedAt: stri
 // The usage of a run that reported none.
 export const noTokens = (): GateTokens => ({ input: 0, cached_input: 0, output: 0 });
 
-// The argv of `codex exec`; the prompt goes to stdin ("-"). The user's Codex memories stay out
-// (SF-050): the memories feature off, and no memories injected should a later Codex read them
-// without it. The user's global AGENTS.md has no documented switch and still loads. The Task's
-// images (SF-065) go before --cd, so each --image is followed by another option, never by the
+// The argv of `codex exec`; the prompt goes to stdin ("-"). The user's Codex memories stay out:
+// the memories feature off, and no memories injected should a later Codex read them without it.
+// The user's global AGENTS.md has no documented switch and still loads. The Task's images go
+// before --cd, so each --image is followed by another option, never by the
 // final "-" (--image takes several values).
 export function gateArgs(options: Pick<GateOptions, 'cwd' | 'dir' | 'model' | 'images'>): string[] {
   return [
@@ -125,8 +125,8 @@ export function gateArgs(options: Pick<GateOptions, 'cwd' | 'dir' | 'model' | 'i
   ];
 }
 
-// The variables of the factory's environment the gate gets (SF-125): the shell's and the locale's,
-// the proxy's, and Codex's and OpenAI's own. Nothing else: no SF_* setting, no SSH agent (SF-100),
+// The variables of the factory's environment the gate gets: the shell's and the locale's,
+// the proxy's, and Codex's and OpenAI's own. Nothing else: no SF_* setting, no SSH agent,
 // no other tool's key.
 const GATE_NAMES = new Set(['PATH', 'HOME', 'LANG', 'LANGUAGE', 'TERM', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TZ']);
 const GATE_PREFIX = /^(?:LC_|XDG_|OPENAI_|CODEX_)/;
@@ -137,7 +137,7 @@ export function gateEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.Pr
   return Object.fromEntries(Object.entries(env).filter(([name, value]) => value !== undefined && kept(name)));
 }
 
-// The bwrap executable on PATH (SF-125), or undefined.
+// The bwrap executable on PATH, or undefined.
 export function findBwrap(env: NodeJS.ProcessEnv = process.env): string | undefined {
   for (const dir of (env.PATH ?? '').split(delimiter)) {
     if (dir === '' || !isAbsolute(dir)) {
@@ -153,7 +153,7 @@ export function findBwrap(env: NodeJS.ProcessEnv = process.env): string | undefi
   return undefined;
 }
 
-// Why the wrapper cannot hold the gate here (SF-125), or undefined when it can (or there is none).
+// Why the wrapper cannot hold the gate here, or undefined when it can (or there is none).
 function sandboxUnavailable(options: GateOptions): string | undefined {
   if (options.wrapper === undefined) {
     return undefined;
@@ -290,7 +290,7 @@ export async function runGate(prompt: string, options: GateOptions): Promise<Gat
     child.once('close', (code, signal) => finish({ code, signal }));
   });
   await delivered;
-  // The outcome from the run and its output file, which goes once read (SF-125): the verdict the
+  // The outcome from the run and its output file, which goes once read: the verdict the
   // factory keeps is the redacted one, never Codex's raw answer.
   const outcome = async (): Promise<GateOutcome> => {
     if ('spawnError' in ended) {

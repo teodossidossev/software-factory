@@ -1,4 +1,4 @@
-// health.js, the dashboard's traffic light (SF-153), built from web/health.ts into dist/web/: red
+// health.js, the dashboard's traffic light, built from web/health.ts into dist/web/: red
 // when a health check is down, else yellow while one is being recovered, else green ("off", not
 // configured, counts as green); its title and accessible label say the same in words. A click opens
 // the panel with every check (label, status, detail, since), read again from api/health. The

@@ -1,12 +1,12 @@
-// The test runner behind npm test and npm run test:browser (SF-108), started by
-// scripts/run-tests.mjs. It runs each test file as its own `node --test <file>` child, at most N at
-// once (half the cores), each at nice 10, which the test processes it starts inherit, so the
-// user's IDE stays responsive while the suite runs. Since SF-152 each child is detached (a process
-// group of its own) and has SF_TEST_FILE_TIMEOUT_MS (5 minutes by default): a file that runs
-// longer is killed, with every process below it and every process of its mark (RUN_MARK), and the
-// run fails, so one file cannot hold the suite forever; so is a file whose output processes it left
-// still hold open after it exited. A child's output is printed whole: a passing file's when it ends, a failing
-// file's at the end of the run. A failing file never exits 0.
+// The test runner behind npm test and npm run test:browser, started by scripts/run-tests.mjs. It
+// runs each test file as its own `node --test <file>` child, at most N at once (half the cores),
+// each at nice 10, which the test processes it starts inherit, so the user's IDE stays responsive
+// while the suite runs. Each child is detached (a process group of its own) and has
+// SF_TEST_FILE_TIMEOUT_MS (5 minutes by default): a file that runs longer is killed, with every
+// process below it and every process of its mark (RUN_MARK), and the run fails, so one file cannot
+// hold the suite forever; so is a file whose output processes it left still hold open after it
+// exited. A child's output is printed whole: a passing file's when it ends, a failing file's at
+// the end of the run. A failing file never exits 0.
 import { spawn } from 'node:child_process';
 import { globSync, readdirSync, readFileSync } from 'node:fs';
 import os from 'node:os';
@@ -59,7 +59,7 @@ const DEFAULT_NICE = 10;
 
 // SF_TEST_FILE_TIMEOUT_MS: how long one test file may run.
 export const DEFAULT_FILE_TIMEOUT_MS = 5 * 60_000;
-// Node's compile cache of a run's processes, under root (SF-152): each sf process a test starts loads
+// Node's compile cache of a run's processes, under root: each sf process a test starts loads
 // the same modules, and compiles them again without it. dist/ is removed by every build, and the
 // cache with it.
 export const COMPILE_CACHE_DIR = 'dist/.compile-cache';
@@ -69,7 +69,7 @@ export const MAX_FILE_TIMEOUT_MS = 2 ** 31 - 1;
 
 // How long main waits for a child's output to close after the child exited. A process the file left
 // behind may hold it, one that escaped the child's group and tree too: after this the file failed,
-// and those processes are killed (SF-152).
+// and those processes are killed.
 export const CLOSE_GRACE_MS = 5_000;
 
 // factory/ (this file is dist/src/run-tests.js).
@@ -181,7 +181,7 @@ export function killTree(pid: number, signal: (pid: number, signal: NodeJS.Signa
   for (const entry of tree) send(entry, 'SIGKILL');
 }
 
-// The environment variable that marks the processes of one file's child (SF-152): every process it
+// The environment variable that marks the processes of one file's child: every process it
 // starts inherits it, one that left the child's group and tree too, unless it is given an
 // environment without it. test/support/harness.ts passes it on to the sf processes it starts.
 export const RUN_MARK = 'RUN_TESTS_MARK';

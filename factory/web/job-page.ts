@@ -1,5 +1,5 @@
 // job-page.js, the dashboard's third script (DASHBOARD_SCRIPTS in src/dashboard.ts), built from
-// web/job-page.ts into dist/web/ (SF-148): the job page's header, the composer, the hand-over panel
+// web/job-page.ts into dist/web/: the job page's header, the composer, the hand-over panel
 // and the job's detail and actions. A classic script, loaded in order with defer, sharing the
 // page's globals with the others. This file has no import or export on purpose: the compiler keeps
 // it a script, so its top-level names stay the page's globals.
@@ -24,7 +24,7 @@ const hasDataset = (node: Element): node is HTMLElement => 'dataset' in node;
 // every reader compares.
 const mrStatusOf = (key: string): MergeRequestStatus | undefined => state.mrStatus.get(key) as MergeRequestStatus | undefined;
 
-// ---------- The header (SF-078, the prototype's renderHead) ----------
+// ---------- The header (the prototype's renderHead) ----------
 
 // Draws a part of the job page again (the header, the composer's actions: on every jobs event,
 // every 15 s while the job runs) and keeps the focus on the button it was on.
@@ -68,7 +68,7 @@ function renderHead(): void {
     tab.append(el('span', 'kbd', key));
     if (screen === 'mr') {
       tab.setAttribute('aria-disabled', String(!mrOk));
-      // SF-119: on a phone or a device without hover the tab stays tappable, and its tap says why
+      // On a phone or a device without hover the tab stays tappable, and its tap says why
       // (go's toast); with a mouse its title does.
       tab.disabled = !mrOk && !media(TOUCH_QUERY);
       tab.setAttribute('title', mrOk ? 'The merge request text' : 'No MR text yet: written at Clean');
@@ -86,7 +86,7 @@ function renderHead(): void {
   const end = running ? Date.now() : Date.parse(job.updated_at);
   t2.append(line, el('span', '', `Iteration ${shownIteration(job)}${job.state === 'working' || job.state === 'starting' ? ' (running)' : ''}`),
     el('span', '', `${money(job.cost_usd)}${running ? ' so far' : ''} (Claude, est.)`), el('span', '', `${dur(end - Date.parse(job.created_at))} elapsed`), branch);
-  // SF-084: what the ticket waits for, who waits for it, and a cycle it is part of.
+  // What the ticket waits for, who waits for it, and a cycle it is part of.
   t2.append(...dependencyLines(keyOf(job), dependencyGraph(), 'span').lines);
   keepFocus(byId('jhead'), () => byId('jhead').replaceChildren(backButton, t1, tools, t2));
 }
@@ -94,7 +94,7 @@ function renderHead(): void {
 // The job has its MR text (written at Clean): the Merge request screen applies.
 const mrAvailable = (): boolean => shownDetail()?.mr === true;
 
-// ---------- The composer (SF-078, the prototype's renderComposer; SF-129: the server's actions) ----------
+// ---------- The composer (the prototype's renderComposer, with the server's actions) ----------
 
 // The placeholder of the message box, per state.
 const PLACEHOLDER: Readonly<Partial<Record<JobState, string>>> = {
@@ -109,7 +109,7 @@ const PLACEHOLDER: Readonly<Partial<Record<JobState, string>>> = {
 
 // The composer: the sentence in bold (and the merge request of a pushed job), the inline
 // confirmation, the message box and the actions; a disabled action has its reason as its title. A
-// handed-over job has its hand-over panel instead of the message box and the actions (SF-107).
+// handed-over job has its hand-over panel instead of the message box and the actions.
 function renderComposer(): void {
   const job = state.detail?.job ?? null;
   // A confirmation opened before the doubt is not one the user could open now.
@@ -132,7 +132,7 @@ function renderComposer(): void {
   if (job.state === 'paused' && job.task_changed === true) {
     cs.push(el('span', 'muted', TASK_CHANGED));
   }
-  // The hand-over (SF-073): why a job ready for review was not handed over; what a handed-over one takes.
+  // The hand-over: why a job ready for review was not handed over; what a handed-over one takes.
   if (job.state === 'ready_for_human_review' && skippedNote(job) !== '') {
     cs.push(el('span', 'muted', skippedNote(job).trim()));
   }
@@ -160,7 +160,7 @@ function renderComposer(): void {
   const resumeWord = job.state === 'waiting_limit' ? 'Resume now' : 'Resume';
   msg.placeholder = job.availability?.resume === '' ? (pausedTurn(job) ? `${resumeWord} sends this to the Implementer, if you write one` : `${resumeWord}, then message the Implementer`)
     : PLACEHOLDER[job.state] ?? 'Message';
-  // The actions the server lists for the job, in its order (SF-129).
+  // The actions the server lists for the job, in its order.
   const buttons = (Array.isArray(job.actions) ? job.actions : []).map((shown) => actionButton(job, shown.action, shown.label, `btn${shown.primary ? ' primary' : ''}${shown.danger ? ' danger' : ''}`));
   keepFocus(byId('acts'), () => byId('acts').replaceChildren(...buttons));
   if (job.state === 'handed_over') {
@@ -172,7 +172,7 @@ function renderComposer(): void {
   byId('acts-why').replaceChildren(...whyLines([...byId('composer').querySelectorAll('button')].filter((node) => !confirm.contains(node))));
 }
 
-// SF-119: the reasons of the disabled buttons (their titles), as text for a phone or a device
+// The reasons of the disabled buttons (their titles), as text for a phone or a device
 // without hover (app.css shows .why only there): one line per reason, in the buttons' order,
 // "Off: <labels> (<reason>)". Only .btn buttons with a title; Send (data-act "say", its reason
 // the empty box) is left out.
@@ -206,7 +206,7 @@ function actionButton(job: JobRow, action: string, label: string, className: str
   return node;
 }
 
-// ---------- The hand-over panel (SF-107: the two ways to finish a handed-over job) ----------
+// ---------- The hand-over panel (the two ways to finish a handed-over job) ----------
 
 // Puts the hand-over panel in the composer for the job's key, or takes it away (key null): the
 // panel goes right after #confirm and .crow is hidden; #msg (the Ask box) and #action-status (the
@@ -407,7 +407,7 @@ function renderDetail(detail: JobDetail): void {
 
 // The job waits for the user after a failed Claude review: Retry review runs it again.
 const reviewFailed = (job: JobRow): boolean => job.stop_code === 'review_failed';
-// Retry applies to the job's stop (SF-087), as the server says (SF-129): the job's own availability,
+// Retry applies to the job's stop, as the server says: the job's own availability,
 // without the page's pending and unresolved layer.
 const retryOn = (job: JobRow): boolean => job.availability?.retry === '';
 
@@ -419,7 +419,7 @@ function availability(action: string, job: JobRow | null): string {
   if (job === null) {
     return 'the job is loading.';
   }
-  // Review the MR and push only opens the Merge request screen (SF-080).
+  // Review the MR and push only opens the Merge request screen.
   if (action === 'review-mr') {
     return mrAvailable() ? '' : 'no MR text yet: written at Clean.';
   }
@@ -434,16 +434,16 @@ function availability(action: string, job: JobRow | null): string {
       ? "the last action's outcome is unknown and the current state could not be loaded."
       : "the last action's outcome is unknown; waiting for the current state.";
   }
-  // The job's own rules are the server's (SF-129: factory/src/stops.ts).
+  // The job's own rules are the server's (factory/src/stops.ts).
   const given = job.availability?.[action];
   return typeof given === 'string' ? given : "the job's actions are not known yet.";
 }
 
-// A job paused (SF-067) or parked on a usage limit (SF-072) during the Implementer's turn: its
+// A job paused or parked on a usage limit during the Implementer's turn: its
 // Resume takes the message.
 const pausedTurn = (job: JobRow): boolean => job.availability?.resume === '' && job.paused?.from === 'working';
 
-// The outcome line. On a handed-over job's panel (SF-107) it has a × to dismiss it, and an outcome
+// The outcome line. On a handed-over job's panel it has a × to dismiss it, and an outcome
 // from before the hand-over is a muted note "Earlier, at …" with Dismiss, never a current line.
 function renderOutcome(outcome: Outcome | null): void {
   const node = byId('action-status');
@@ -482,7 +482,7 @@ function dismissOutcome(): void {
   renderOutcome(null);
 }
 
-// The outcome of a job, stamped with when it was set (SF-107: one from before a hand-over is not current).
+// The outcome of a job, stamped with when it was set (one from before a hand-over is not current).
 function setOutcome(key: string, outcome: Outcome | null): void {
   if (outcome !== null) {
     outcome.at = new Date().toISOString();
@@ -602,7 +602,7 @@ const DONE_TEXT: Readonly<Record<string, string>> = {
   pause: 'Paused', resume: 'Resumed', restart: 'Restarted', handover: 'Handed over to your checkout', takeback: 'Taken back', 'handed-done': 'Your push is recorded',
 };
 
-// The jobs of an api/jobs answer or a jobs event; its remote (SF-126) says which port the page uses.
+// The jobs of an api/jobs answer or a jobs event; its remote says which port the page uses.
 function jobsOf(text: string): JobRow[] {
   const data = payload<JobsPayload>(text);
   if (typeof data.remote === 'boolean') {
@@ -611,8 +611,8 @@ function jobsOf(text: string): JobRow[] {
   return data.jobs;
 }
 
-// What the dialog says of each action that asks for the job's ticket from another device (SF-126).
-// Which actions ask is the server's (SF-139: the detail's confirm_actions, the confirm routes of
+// What the dialog says of each action that asks for the job's ticket from another device.
+// Which actions ask is the server's (the detail's confirm_actions, the confirm routes of
 // POST_ROUTES in src/dashboard-routes.ts).
 const REMOTE_CONFIRM_TEXT: Readonly<Record<string, string>> = {
   approve: 'it pushes the branch to origin.',
@@ -743,7 +743,7 @@ async function confirmActions(key: string): Promise<string[]> {
 }
 
 // One request for one job; the result goes to that job only, whatever is selected by then. From
-// another device (SF-126) an action of the server's confirm_actions asks for the ticket first.
+// another device an action of the server's confirm_actions asks for the ticket first.
 async function run(action: string, key: string, body: Readonly<Record<string, unknown>>): Promise<void> {
   const id = pendingId(action, key);
   if (state.pending.has(id)) {
@@ -1042,12 +1042,12 @@ function sendSay(goOn = false): void {
 }
 
 // The composer's actions posted at once, without a confirmation: Pause, Retry review, Retry, Refresh
-// MR status, Archive and the hand-over's (SF-073).
+// MR status, Archive and the hand-over's.
 const POSTED_AT_ONCE: readonly string[] = ['pause', 'review', 'retry', 'mr-status', 'archive', 'handover', 'takeback', 'handed-done'];
 
 // A button of the composer (the prototype's act): the ones that ask first open their confirmation;
 // Send, Tell it to go on, Pause, Resume, Retry review, Refresh MR status, Archive and the hand-over's
-// actions (SF-073) post at once.
+// actions post at once.
 function act(action: string): void {
   const job = state.detail?.job ?? null;
   if (job === null) {

@@ -1,4 +1,4 @@
-// The workspace's test command (SF-128): run by the factory itself before a job is ready, as the
+// The workspace's test command: run by the factory itself before a job is ready, as the
 // first step of MR preparation, on the reviewed worktree. The command is Implementer-written code
 // to the factory, so it never runs outside a bubblewrap (bwrap) sandbox the factory builds: the
 // whole file system read-only, the paths of the job's path denials (src/sandbox-denials.ts)
@@ -29,7 +29,7 @@ export const FIX_TAIL_BYTES = 12 * 1024;
 export const EVENT_TAIL_LINES = 40;
 export const EVENT_TAIL_BYTES = 4 * 1024;
 
-// How often a run compares the clock with its deadline (SF-152): Node's timers count only the time
+// How often a run compares the clock with its deadline: Node's timers count only the time
 // the machine is awake, so a run the machine slept through ends within this long of the resume.
 export const DEADLINE_CHECK_MS = 1000;
 
@@ -89,7 +89,7 @@ export interface TestRun {
   // The paths hidden in the sandbox (the job's path denials, read and write): directories as an
   // empty read-only directory, files as /dev/null.
   hidden: readonly string[];
-  // How long the run may take, by the clock (sleep of the machine included, SF-152).
+  // How long the run may take, by the clock (sleep of the machine included).
   timeoutMs: number;
   signal: AbortSignal;
   // The clock of the record's times and of the limit, in ms (default: Date.now).
@@ -264,7 +264,7 @@ async function sandboxed(run: TestRun, cwd: string, hidden: readonly HiddenMount
       timedOut = true;
       killGroup();
     };
-    // The limit by the clock: Node's timers stand still while the machine is suspended (SF-152), so a
+    // The limit by the clock: Node's timers stand still while the machine is suspended, so a
     // run the machine slept through past its deadline ends within DEADLINE_CHECK_MS of the resume.
     // The timer of the whole limit stays, for a clock that is set back; a clock set forward past the
     // deadline ends the run early, as a sleep would (Node has no clock that counts a suspend).

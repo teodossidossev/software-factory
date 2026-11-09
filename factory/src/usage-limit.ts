@@ -1,4 +1,4 @@
-// A plan's usage limit in a failure message (SF-072): the Claude session's ("You've hit your 5-hour
+// A plan's usage limit in a failure message: the Claude session's ("You've hit your 5-hour
 // limit · resets 3am (Europe/Sofia)") or the Codex gate's ("You've hit your usage limit. Try again in
 // 2 hours 13 minutes."), and when it resets. One function for every caller: the Implementer turn,
 // the Claude review and the simplification pass pass source claude, the gate codex; only that

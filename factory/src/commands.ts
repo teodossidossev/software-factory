@@ -1,4 +1,4 @@
-// The commands that go to sf serve over its socket (SF-138), in one table: for each, its name, its
+// The commands that go to sf serve over its socket, in one table: for each, its name, its
 // arguments and flags as the help shows them, its help description, whether it answers while sf
 // update drains or builds, and the call it makes in sf serve. The CLI (src/cli.ts) builds its help
 // lines, its argument check and its socket call from it; sf serve's socket handler
@@ -46,7 +46,7 @@ export interface Command {
   flags?: readonly string[];
   // The help's description; none for the requests no CLI command sends (sf info's ping, the tests' hooks).
   description?: string;
-  // Answers while sf update drains or builds (SF-101): pause (the update's own tool), mr status
+  // Answers while sf update drains or builds: pause (the update's own tool), mr status
   // (it starts nothing) and the reads.
   openWhileUpdating?: true;
   // Answered only with SF_TEST_HOOKS=on.
@@ -61,7 +61,7 @@ export const COMMANDS = {
     description: 'Start the job for .software-factory/<ticket>.md in a worktree of its own',
     run: (s, [w = '', t = '']) => s.execution.start(w, t),
   },
-  // sf queue (SF-071, SF-072, SF-086): the run queue of sf serve.
+  // sf queue: the run queue of sf serve.
   queueList: {
     name: 'queue list', args: [], openWhileUpdating: true,
     description: 'The run queue: the limit of jobs at once, the running count, held or not (by hand, or by a job parked on a usage limit), the rule at a limit\'s reset, and the queued tickets in order with what each waits for, and the starts that failed',
@@ -142,7 +142,7 @@ export const COMMANDS = {
     description: 'Push the branch prepared at Clean; --as-is pushes it even if its tip was edited by hand',
     run: (s, [w = '', t = ''], flags) => s.execution.approve(w, t, flags['as-is'] === true),
   },
-  // sf mr create|merge|status (SF-048).
+  // sf mr create|merge|status.
   mrCreate: {
     name: 'mr create', args: ['<workspace>', '<ticket>'],
     description: 'Open the merge request of a pushed job on GitHub or GitLab (or reuse the open one); from ready_for_human_review: approve, then open it',
@@ -158,7 +158,7 @@ export const COMMANDS = {
     description: 'The merge request\'s state on the host: open, merged or closed, mergeable or not, the checks',
     run: (s, [w = '', t = '']) => s.execution.mergeRequestStatus(w, t),
   },
-  // sf pause, resume and restart (SF-067).
+  // sf pause, resume and restart.
   pause: {
     name: 'pause', args: ['<workspace>', '<ticket>'], openWhileUpdating: true,
     description: 'Pause a working job or one awaiting review: the turn, review or gate stops at once; worktree, branch, session and history stay',
@@ -174,7 +174,7 @@ export const COMMANDS = {
     description: 'Start the ticket again from its current Task file on a fresh worktree and branch (paused, waiting_limit, aborted, failed or needs_human); the old job is archived, its branch deleted only without commits and never pushed; --keep-files copies the old worktree\'s changed and new files in first',
     run: (s, [w = '', t = ''], flags) => s.execution.restart(w, t, flags['keep-files'] === true),
   },
-  // sf handover, takeback and handed-done (SF-073).
+  // sf handover, takeback and handed-done.
   handover: {
     name: 'handover', args: ['<workspace>', '<ticket>'],
     description: 'Hand over to my checkout: the job\'s branch in the workspace\'s checkout at its base, the job\'s changes as Local Changes, the commit message prefilled (ready_for_human_review; automatic with hand-over on: the workspace\'s handoff, else SF_HANDOFF=checkout)',
@@ -202,14 +202,14 @@ export const COMMANDS = {
   },
 
   // The requests of sf's own steps, no command of their own.
-  // sf info: whether sf serve answers; sf service install: which process does (SF-120).
+  // sf info: whether sf serve answers; sf service install: which process does.
   ping: { name: 'ping', args: [], openWhileUpdating: true, run: async () => ({ pid: process.pid }) },
-  // sf update's drain (SF-101): the Task checks and the hand-over operations running here now.
+  // sf update's drain: the Task checks and the hand-over operations running here now.
   serveBusy: {
     name: 'serve-busy', args: [], openWhileUpdating: true,
     run: async (s) => ({ checks: s.checks.running(), handovers: s.execution.handoversRunning() }),
   },
-  // sf digest --now and sf digest (SF-103).
+  // sf digest --now and sf digest.
   digestRun: {
     name: 'digest-run', args: [],
     run: async (s) => {
@@ -224,7 +224,7 @@ export const COMMANDS = {
       return latest === undefined ? { digest: null } : { digest: latest.id, period: latest.period, counts: latest.counts, error: latest.error };
     },
   },
-  // sf mcp-url with SF_PORT=0 (SF-099): the port the MCP endpoint bound.
+  // sf mcp-url with SF_PORT=0: the port the MCP endpoint bound.
   mcpPort: {
     name: 'mcp-port', args: [], openWhileUpdating: true,
     run: async (s) => {
@@ -419,7 +419,7 @@ function queueLines(view: QueueView): string[] {
     `limit: ${view.max_running} job${view.max_running === 1 ? '' : 's'} at once`,
     `running: ${view.running}`,
     `held: ${view.held ? `yes${view.hold_reason !== null ? ` (${view.hold_reason})` : ''}` : 'no'}`,
-    // The limit hold (SF-072): parked jobs hold the queue, whatever the hold by hand.
+    // The limit hold: parked jobs hold the queue, whatever the hold by hand.
     ...(view.limit_hold !== null ? [`usage limit: ${view.limit_hold.parked} parked job${view.limit_hold.parked === 1 ? ' holds' : 's hold'} the queue${view.limit_hold.resets_at !== null ? `, resets at ${localTime(view.limit_hold.resets_at)}` : ''}`] : []),
     `on limit reset: ${view.on_limit}`,
     `next: ${view.next !== null ? ref(view.next) : 'nothing ready'}`,
@@ -451,7 +451,7 @@ function approved(result: Result): Answer {
   };
 }
 
-// sf retry (SF-087): MR preparation again, shown as sf review shows its outcome; on mr_push_failed
+// sf retry: MR preparation again, shown as sf review shows its outcome; on mr_push_failed
 // the push again, shown and ended as sf approve (exit 1 unless pushed).
 function retried(result: Result): Answer {
   const lines = resultLines(result);
@@ -464,7 +464,7 @@ function retried(result: Result): Answer {
   return { lines: [...lines, ...(result.link === undefined ? [NO_MR_LINK] : [])], failed: false };
 }
 
-// sf mr create|merge|status (SF-048): exit 1 when the push or the merge request failed.
+// sf mr create|merge|status: exit 1 when the push or the merge request failed.
 function mergeRequestShown(command: Command, result: Result): Answer {
   const mr = result.mr as { number: number; url: string; state: string; reused?: boolean; merge_commit?: string | null } | undefined;
   const error = result.error as { code: string; message: string } | undefined;

@@ -29,6 +29,10 @@ export const FIX_TAIL_BYTES = 12 * 1024;
 export const EVENT_TAIL_LINES = 40;
 export const EVENT_TAIL_BYTES = 4 * 1024;
 
+// How often a run compares the clock with its deadline (SF-152): Node's timers count only the time
+// the machine is awake, so a run the machine slept through ends within this long of the resume.
+export const DEADLINE_CHECK_MS = 1000;
+
 // The longest test_command of workspaces.json.
 export const MAX_TEST_COMMAND_CHARS = 2000;
 
@@ -85,8 +89,11 @@ export interface TestRun {
   // The paths hidden in the sandbox (the job's path denials, read and write): directories as an
   // empty read-only directory, files as /dev/null.
   hidden: readonly string[];
+  // How long the run may take, by the clock (sleep of the machine included, SF-152).
   timeoutMs: number;
   signal: AbortSignal;
+  // The clock of the record's times and of the limit, in ms (default: Date.now).
+  now?: () => number;
   // The environment the PATH, LANG and HOME come from (default: process.env).
   env?: NodeJS.ProcessEnv;
 }
@@ -202,9 +209,10 @@ function sandboxError(stderr: string): string | undefined {
 // a spawn error is unavailable, and so is exit 126 or 127; exit 0 passed; any other exit or the
 // timeout failed. The controller's abort kills the run and returns aborted.
 export async function runTestCommand(run: TestRun): Promise<TestsResult> {
-  const startedAt = new Date();
+  const clock = run.now ?? Date.now;
+  const startedAt = new Date(clock());
   const finish = (fields: Ending): TestsResult => {
-    const ended = new Date();
+    const ended = new Date(clock());
     return {
       aborted: false,
       record: {
@@ -225,12 +233,12 @@ export async function runTestCommand(run: TestRun): Promise<TestsResult> {
   } catch (error) {
     return finish({ exit_code: null, timed_out: false, outcome: 'unavailable', reason: `the sandbox could not be prepared: ${(error as Error).message}`.slice(0, 300) });
   }
-  return sandboxed(run, cwd, hidden, finish);
+  return sandboxed(run, cwd, hidden, { clock, deadline: startedAt.getTime() + run.timeoutMs }, finish);
 }
 
-// The run in bwrap itself, with the worktree and the hidden paths prepared; finish makes the record
-// of how it ended.
-async function sandboxed(run: TestRun, cwd: string, hidden: readonly HiddenMount[], finish: (fields: Ending) => TestsResult): Promise<TestsResult> {
+// The run in bwrap itself, with the worktree and the hidden paths prepared, until the deadline (ms of
+// the clock); finish makes the record of how it ended.
+async function sandboxed(run: TestRun, cwd: string, hidden: readonly HiddenMount[], limit: { clock: () => number; deadline: number }, finish: (fields: Ending) => TestsResult): Promise<TestsResult> {
   const output = new Tail(MAX_TESTS_OUTPUT_BYTES);
   let stderr = '';
   let started = false;
@@ -252,10 +260,20 @@ async function sandboxed(run: TestRun, cwd: string, hidden: readonly HiddenMount
         // Already gone.
       }
     };
-    const timer = setTimeout(() => {
+    const expire = (): void => {
       timedOut = true;
       killGroup();
-    }, run.timeoutMs);
+    };
+    // The limit by the clock: Node's timers stand still while the machine is suspended (SF-152), so a
+    // run the machine slept through past its deadline ends within DEADLINE_CHECK_MS of the resume.
+    // The timer of the whole limit stays, for a clock that is set back; a clock set forward past the
+    // deadline ends the run early, as a sleep would (Node has no clock that counts a suspend).
+    const timer = setTimeout(expire, run.timeoutMs);
+    const check = setInterval(() => {
+      if (limit.clock() >= limit.deadline) {
+        expire();
+      }
+    }, DEADLINE_CHECK_MS);
     const onAbort = (): void => {
       aborted = true;
       killGroup();
@@ -279,6 +297,7 @@ async function sandboxed(run: TestRun, cwd: string, hidden: readonly HiddenMount
     });
     const done = (value: { code: number | null; signal: NodeJS.Signals | null } | { spawnError: Error }): void => {
       clearTimeout(timer);
+      clearInterval(check);
       run.signal.removeEventListener('abort', onAbort);
       process.off('exit', killGroup);
       resolve(value);
@@ -325,9 +344,13 @@ export function durationText(ms: number): string {
   return minutes % 60 === 0 ? `${hours} h` : `${hours} h ${minutes % 60} min`;
 }
 
-// How a failed run ended: "exit 1", or "timed out after 30 min".
+// How a failed run ended: "exit 1", "timed out after 30 min", or "killed after 7 h" (a signal from
+// outside the factory, or the kernel, ended the sandbox: no exit code, no timeout).
 export function failureText(record: Pick<TestsRecord, 'exit_code' | 'timed_out' | 'duration_ms'>): string {
-  return record.timed_out ? `timed out after ${durationText(record.duration_ms)}` : `exit ${record.exit_code ?? '?'}`;
+  if (record.timed_out) {
+    return `timed out after ${durationText(record.duration_ms)}`;
+  }
+  return record.exit_code === null ? `killed after ${durationText(record.duration_ms)}` : `exit ${record.exit_code}`;
 }
 
 // The last lines of a text, at most lines lines and bytes bytes (whole lines; the last line cut from
@@ -373,7 +396,9 @@ export function testsFixContent(record: TestsRecord): string {
   const tail = lastLines(record.output, FIX_TAIL_LINES, FIX_TAIL_BYTES);
   const ending = record.timed_out
     ? `It timed out after ${durationText(record.duration_ms)} and was stopped.`
-    : `It exited with ${record.exit_code ?? '?'}.`;
+    : record.exit_code === null
+      ? `It was killed by a signal after ${durationText(record.duration_ms)}, before it exited.`
+      : `It exited with ${record.exit_code}.`;
   const lines = [
     `The factory ran the workspace's test command on your worktree, in a sandbox without network, and it failed: ${inlineCommand(record.command)}. ${ending} Make the tests pass; do not weaken or skip a test to get there.`,
     '',

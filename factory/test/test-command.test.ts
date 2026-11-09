@@ -1,14 +1,17 @@
 // The workspace's test command (SF-128, src/test-command.ts): the run in a real bubblewrap sandbox
-// (pass, fail, a timeout and an abort that leave no process, a parent killed with SIGKILL that leaves
-// none either and nothing of its private /tmp on the host, the path denials hidden, no SF_* variable,
-// no network but loopback, exit 127, the capped tail), and the text the factory makes of a run. The sandbox tests skip where the real
-// bubblewrap cannot start (bubblewrapStarts, test/support/harness.ts); nothing here runs the command outside one.
+// (pass, fail, a timeout (also under the job's path denials, SF-152) and an abort that leave no
+// process, a parent killed with SIGKILL that leaves none either and nothing of its private /tmp on
+// the host, the path denials hidden, no SF_* variable, no network but loopback, exit 127, the capped
+// tail), the limit by the clock across a suspend (SF-152), and the text the factory makes of a run.
+// The sandbox tests skip where the real bubblewrap cannot start (bubblewrapStarts,
+// test/support/harness.ts); nothing here runs the command outside one, but the suspend test, which
+// runs its sleep in the harness's fake bwrap there.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { pathDenials } from '../src/sandbox-denials.js';
@@ -60,7 +63,8 @@ if (process.env[CHILD] !== undefined) {
 } else {
   // Imported here, not above: the harness registers before and after hooks, which the child above
   // (a plain node run killed with SIGKILL) must not run.
-  const { BWRAP_CANNOT_START, bubblewrapStarts } = await import('./support/harness.js');
+  const harness = await import('./support/harness.js');
+  const { BWRAP_CANNOT_START, bubblewrapStarts } = harness;
   // The tests that run the command in the real bubblewrap: skipped where it cannot start (inside
   // another sandbox).
   const sandboxTest = (name: string, body: () => Promise<void>): void => {
@@ -125,6 +129,55 @@ if (process.env[CHILD] !== undefined) {
     assert.equal(record.exit_code, null);
     assert.equal(record.output, 'before\n');
     await until(async () => (await processesOf(sleep)).length === 0, 'the sleep to end');
+  });
+
+  sandboxTest("a timeout under the job's path denials ends the run within seconds and leaves no process of it", async () => {
+    const config = join(root, 'timeout-config');
+    const state = join(root, 'timeout-state');
+    const worktreeRoot = join(state, 'worktrees');
+    const own = join(worktreeRoot, 'app', 'T-2');
+    await mkdir(config, { recursive: true });
+    await mkdir(join(state, 'jobs'), { recursive: true });
+    await mkdir(own, { recursive: true });
+    await writeFile(join(config, 'auth.env'), 'GITHUB_TOKEN=sf152-secret-value\n');
+    await writeFile(join(state, 'jobs', 'job.json'), '{}\n');
+    const denials = await pathDenials({
+      session: 'job', workspace: 'app', checkout: worktree, worktree: own, stateDir: state, worktreeRoot, configDir: config,
+      env: { HOME: join(root, 'home'), SF_CONFIG_DIR: config },
+    });
+    assert.ok(denials.sandbox.denyRead.includes(join(state, 'jobs')), denials.sandbox.denyRead.join(' '));
+    // A sleep of ten minutes only this test starts.
+    const sleep = ['sleep', `600.${String(Math.floor(Math.random() * 1_000_000)).padStart(6, '0')}`];
+    const started = Date.now();
+    // The job's state is hidden (an empty folder) while the run sleeps past its limit.
+    const record = await recordOf(`if [ -e '${join(state, 'jobs', 'job.json')}' ]; then echo JOBS; fi; echo before; ${sleep.join(' ')}`, {
+      cwd: own, hidden: denials.sandbox.denyRead, timeoutMs: 2000,
+    });
+    assert.ok(Date.now() - started < 10_000, `the run took ${Date.now() - started} ms`);
+    assert.deepEqual([record.outcome, record.timed_out, record.exit_code], ['failed', true, null]);
+    assert.equal(record.output, 'before\n');
+    assert.ok(record.duration_ms >= 2000 && record.duration_ms < 10_000, String(record.duration_ms));
+    assert.ok(testsFixContent(record).includes('It timed out after 2 s and was stopped.'), testsFixContent(record));
+    await until(async () => (await processesOf(sleep)).length === 0, 'the sleep to end', 5000);
+  });
+
+  // SF-152's incident: the machine was suspended 30 s after the run started and resumed 7 hours
+  // later; Node's timers stand still while it sleeps, so a timer of 30 minutes had not fired. The
+  // clock here jumps 7 hours forward half a second into the run, as the clock does at a resume. The
+  // limit is the runner's, not the sandbox's: where the real bubblewrap cannot start, the harness's
+  // fake one (an exec of the command) runs it.
+  test('a run the machine slept through past its limit ends within seconds of the resume as timed out, with no process left', async () => {
+    const sleep = uniqueSleep();
+    const slept = 7 * 60 * 60_000;
+    const begun = Date.now();
+    const now = (): number => Date.now() + (Date.now() - begun > 500 ? slept : 0);
+    const env = bubblewrapStarts() ? process.env : { PATH: `${harness.fakeBwrapBin}${delimiter}${process.env.PATH ?? ''}`, HOME: root };
+    const record = await recordOf(`echo before; ${sleep.join(' ')}`, { timeoutMs: 30 * 60_000, now, env });
+    assert.ok(Date.now() - begun < 10_000, `the run took ${Date.now() - begun} ms`);
+    assert.deepEqual([record.outcome, record.timed_out, record.exit_code, record.output], ['failed', true, null, 'before\n']);
+    assert.ok(record.duration_ms >= slept, String(record.duration_ms));
+    assert.ok(testsFixContent(record).includes('It timed out after 7 h and was stopped.'), testsFixContent(record));
+    await until(async () => (await processesOf(sleep)).length === 0, 'the sleep to end', 5000);
   });
 
   sandboxTest("the controller's abort returns aborted and leaves no process of the run", async () => {
@@ -299,6 +352,10 @@ if (process.env[CHILD] !== undefined) {
     assert.ok(!fix.includes('line 249\n') && fix.includes('line 250\nline 251'), fix);
     assert.ok(Buffer.byteLength(fix) < 13 * 1024);
     assert.ok(testsFixContent({ ...base, timed_out: true, exit_code: null, duration_ms: 1_800_000, output: '' }).includes('It timed out after 30 min and was stopped.'));
+    // SF-152: a run killed by a signal from outside (no exit code, no timeout) says so, not "exit ?".
+    const killed = { ...base, exit_code: null, duration_ms: 25_140_000 };
+    assert.ok(testsFixContent(killed).includes('It was killed by a signal after 6 h 59 min, before it exited.'), testsFixContent(killed));
+    assert.equal(checksLine(killed, 3), '- `npm test`: failed (killed after 6 h 59 min).');
     assert.equal(checksLine({ ...base, outcome: 'passed', exit_code: 0 }, 3), '- `npm test`: passed in 4 min 12 s on iteration 3.');
     assert.equal(checksLine({ ...base, outcome: 'accepted_failing', accepted_from: 'failed' }, 3), '- `npm test`: failed (exit 1); accepted by the user without passing tests.');
     assert.equal(checksLine({ ...base, outcome: 'accepted_failing', accepted_from: 'unavailable', exit_code: 127, reason: 'the command was not found (exit 127)' }, 3),

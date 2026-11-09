@@ -42,7 +42,7 @@ export let fakeCodex: string;
 // The folder of the fake bwrap (SF-125: test/support/fake-bwrap.ts, then an exec of the command
 // after "--" from the folder of --chdir, when given), first on every sf process's PATH: a nested real
 // bubblewrap may not run where the tests do, and the gate and the workspace's test command
-// (SF-128) run inside one.
+// (SF-128) run inside one. An Env with realBwrap leaves it off (SF-152).
 export let fakeBwrapBin: string;
 // Everything the sf processes of this test file wrote to stdout and stderr (SF-088): the after hook
 // fails on a refused state change in it.
@@ -65,6 +65,9 @@ export interface Env {
   // newEnv always makes one; only an Env never given to an sf process goes without.
   proc?: string;
   extra?: Record<string, string>;
+  // The real bubblewrap (SF-152): the fake bwrap stays off the PATH of the sf processes. Only for a
+  // test that skips where bubblewrap cannot start (bubblewrapStarts).
+  realBwrap?: boolean;
 }
 
 export interface Served {
@@ -109,7 +112,7 @@ export function git(cwd: string, ...args: string[]): string {
 
 export function processEnv(env: Env): NodeJS.ProcessEnv {
   return {
-    PATH: `${fakeBwrapBin}${delimiter}${process.env.PATH ?? ''}`,
+    PATH: env.realBwrap === true ? process.env.PATH ?? '' : `${fakeBwrapBin}${delimiter}${process.env.PATH ?? ''}`,
     HOME: env.home,
     SF_CONFIG_DIR: env.config,
     SF_STATE_DIR: env.state,
@@ -146,17 +149,25 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
     TMPDIR: join(temp, 'tmp'),
     // The zone of the times sf prints: the test file's own (SF-049), else the machine's.
     ...(process.env.TZ !== undefined ? { TZ: process.env.TZ } : {}),
+    // Node's compile cache of the test run (SF-152, set by src/run-tests.ts): an sf process loads its
+    // modules from it instead of compiling them again.
+    ...(process.env.NODE_COMPILE_CACHE !== undefined ? { NODE_COMPILE_CACHE: process.env.NODE_COMPILE_CACHE } : {}),
+    // The mark of the test file's processes (SF-152, RUN_MARK of src/run-tests.ts): run-tests kills
+    // the sf processes a file left behind by it.
+    ...(process.env.RUN_TESTS_MARK !== undefined ? { RUN_TESTS_MARK: process.env.RUN_TESTS_MARK } : {}),
     ...env.extra,
   };
 }
 
-export async function newEnv(name: string, extra: Record<string, string> = {}): Promise<Env & { proc: string }> {
+export async function newEnv(name: string, extra: Record<string, string> = {}, options: { realBwrap?: boolean } = {}): Promise<Env & { proc: string }> {
   const root = join(temp, name);
-  const env = { config: join(root, 'config'), state: join(root, 'state'), home: join(root, 'home'), proc: join(root, 'proc'), extra };
+  const env = { config: join(root, 'config'), state: join(root, 'state'), home: join(root, 'home'), proc: join(root, 'proc'), extra, ...options };
   await mkdir(env.home, { recursive: true });
   await mkdir(env.proc, { recursive: true });
-  // The factory commits at Clean with the user's Git identity.
-  await writeFile(join(env.home, '.gitconfig'), '[user]\n\tname = Test User\n\temail = test@example.invalid\n');
+  // The factory commits at Clean with the user's Git identity. No automatic gc or maintenance
+  // (SF-152): the tiny repositories of a test never need them, and each would start git processes
+  // after the factory's commits and fetches.
+  await writeFile(join(env.home, '.gitconfig'), '[user]\n\tname = Test User\n\temail = test@example.invalid\n[gc]\n\tauto = 0\n[maintenance]\n\tauto = false\n');
   return env;
 }
 

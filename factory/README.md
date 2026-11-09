@@ -82,15 +82,36 @@ npm run test:browser                           # the dashboard's browser tests (
 ```
 
 Tests (SF-097): `npm run typecheck` checks the types without writing anything; `npm test` builds,
-then runs every compiled test with `node --test --test-timeout=120000 dist/test/*.test.js`, so a
-test that hangs fails after 2 minutes instead of holding the suite (a test may set a shorter
-timeout of its own). Since SF-108 `scripts/run-tests.mjs` (`src/run-tests.ts`) starts that
-`node --test` with `--test-concurrency=<N>`, half the cores rounded down (at least 1), and at nice 10,
-which the test processes inherit, so the machine stays usable while the suite runs; its exit code is
-the child's (1 when it was killed by a signal). `SF_TEST_CONCURRENCY=<positive integer>` sets N and
-`SF_TEST_NICE=0` leaves the priority alone; any other value of either stops the run with exit code 2.
-`npm test -- <args>` passes the arguments on to `node --test`, before the files. `npm run build` removes
-`dist/` first (`scripts/clean.mjs`), so only the current sources are compiled and no compiled test
+then runs every compiled test (`dist/test/*.test.js`) with `node --test --test-timeout=120000`, so a
+test that hangs fails after 2 minutes instead of holding the suite (a test may set a shorter timeout
+of its own). Since SF-108 `scripts/run-tests.mjs` (`src/run-tests.ts`) runs them N at once, N half
+the cores rounded down (at least 1; the cores Node counts, `os.availableParallelism()`, which under
+`sf service`'s CPUQuota are the quota's: a job's test run on a 20-core machine gets 8, so N is 4),
+at nice 10, which the test processes inherit, so the machine stays usable while the suite runs. Since SF-152 each file is a `node --test <file>` child of its
+own, detached (a process group of its own). Its output is printed whole under a line that names the
+file, how it ended and how long it ran (`run-tests: <file> (exit 0, 4.2 s)`): a passing file's when
+it ends, a failing file's at the end of the run, so the last lines show the failures. A file that
+runs longer than `SF_TEST_FILE_TIMEOUT_MS` (default 300000, 5 minutes) is killed with SIGKILL, its
+process group and every process below it (a detached server a test started included), `run-tests:
+<file> exceeded <limit> ms and was killed` is printed at once, its output so far at the end of the
+run, and the run fails, so no file holds the suite forever. A file whose `node --test` exited but
+whose output is still open 5 s later (a process the file left holds it) failed too: `run-tests:
+<file> exited (<code>), but processes it left kept its output open 5000 ms later and were killed`.
+Each file's processes carry a mark of their own in their environment (`RUN_TESTS_MARK`, which the
+tests' harness passes on to the `sf` processes it starts), so both kills also find the processes
+that left the file's process group and tree. The run's exit code is 0 when every file passed; 1
+when a file could not start, was killed by a signal, ran past its limit or left processes holding
+its output, or when no file matches; else the first failing file's exit code; a last line names the files that failed.
+`SF_TEST_CONCURRENCY=<positive integer>` sets N, `SF_TEST_FILE_TIMEOUT_MS=<positive integer>` the
+limit of a file in ms (at most 2147483647, the longest timer Node keeps), and `SF_TEST_NICE=0`
+leaves the priority alone; any other value of any of them stops the run with exit code 2. Ctrl-C
+(SIGINT) or SIGTERM kills the running files and starts no more. The files and every `sf` process
+they start share Node's compile cache in `dist/.compile-cache` (`NODE_COMPILE_CACHE`, unless already
+set; removed with `dist/` by each build), so an `sf` process does not compile its modules again (about
+a fifth of its start-up CPU); the tests' Git config turns off automatic gc and maintenance. All of this applies to `npm run
+test:browser` too.
+`npm test -- <args>` passes the arguments on to each `node --test`, before its file. `npm run build`
+removes `dist/` first (`scripts/clean.mjs`), so only the current sources are compiled and no compiled test
 of a deleted source runs. `npm run build` also builds the dashboard's page code (SF-146): the
 TypeScript of `web/` through `tsconfig.web.json` into `dist/web/`, and `npm run typecheck` checks
 both configurations. `npm test` and `npm run test:browser` both build first. At the repository
@@ -259,7 +280,7 @@ started by the run queue as before.
 | `SF_GATE_MAX_ROUNDS` | `5` | Fix verdicts of the gate per job (the job's `gate_fixes`); the next one is not applied (`gate_rounds`, job `needs_human`). |
 | `SF_GATE_MAX_TOKENS` | `5000000` | Input plus output tokens of all gate runs of a job (the job's `gate_tokens`); a gate does not start at the limit, and a run that goes over it is not applied (`gate_budget`, job `needs_human`). |
 | `SF_GATE_TIMEOUT_MS` | `900000` | How long one gate run may take; then SIGTERM, and SIGKILL 5 s later (`gate_failed`). |
-| `SF_TEST_TIMEOUT_MS` | `1800000` (30 min) | How long one run of a workspace's `test_command` may take (SF-128, section MR preparation), 1 to 14400000 (4 h); then its process group is killed with SIGKILL and the run failed (a Tests Fix that names the timeout). |
+| `SF_TEST_TIMEOUT_MS` | `1800000` (30 min) | How long one run of a workspace's `test_command` may take (SF-128, section MR preparation), 1 to 14400000 (4 h), by the clock, the time the machine sleeps included (SF-152); then its process group is killed with SIGKILL and the run failed (a Tests Fix that names the timeout). |
 | `SF_GATE_LEVEL` | `auto` | The gate level of each iteration (SF-092, section Jobs): `auto` by the risk of the job's change (`full`, `light` or `none`); `full` runs the gate at every clean Claude verdict, as before SF-092. Empty is the default; anything else refuses to start (`invalid_config`). |
 | `SF_GATE_FULL_PATHS` | empty | Comma-separated globs (as `SF_SENSITIVE_PATHS`) whose changed paths make an iteration's gate level `full`. |
 | `SF_SMOKE_MODEL` | `haiku` | The model of `sf smoke`'s job (section Live smoke test): its `SF_MODEL` and `SF_REVIEW_MODEL` (Implementer, Claude review, Task check). |
@@ -2049,7 +2070,12 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
      nothing else: no `SF_*` variable and no value of the env file. It inherits the runner's control
      group and nice value. bwrap runs detached, so a timeout (`SF_TEST_TIMEOUT_MS`) or the abort
      kills its whole process group, and `--die-with-parent` with `--unshare-pid` ends the sandbox
-     and every process in it when the runner dies, however it dies. There is no fallback without
+     and every process in it when the runner dies, however it dies. A stuck run is ended by that
+     timeout, or by the abort, and by nothing else; the timeout counts by the clock, sleep of the
+     machine included (SF-152: Node's timers stand still while it is suspended, so the runner
+     compares the clock with the deadline every second), and a run the machine slept through past
+     its limit ends within a second or two of the resume as timed out. A run killed by a signal from
+     outside the factory says so in its Tests Fix (`killed after <duration>`). There is no fallback without
      bwrap. Dependencies must already be installed in the worktree: a missing install fails like any
      test.
    - **The record and the Stream.** Each run writes `tests-<N>.json` in the job directory (N the

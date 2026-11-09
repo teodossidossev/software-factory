@@ -4,14 +4,15 @@
 // the MR text; a failure writes a Tests Fix and the next iteration runs; the third failure stops the
 // job (tests_failed) and Accept prepares the MR; Retry after tests_unavailable runs the command
 // again; a check answers while a slow run is under way, and Abort during the run leaves no process; a
-// timeout is a failure; a workspace without the key prepares today's MR text. The real sandbox is
+// timeout is a failure, also in the real bubblewrap under the job's path denials (SF-152); a
+// workspace without the key prepares today's MR text. The rest of the real sandbox is
 // test/test-command.test.ts's.
 import assert from 'node:assert/strict';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { saveRegistry } from '../src/registry.js';
-import { bwrapLog, call, type Env, git, newEnv, newRepo, putTask, reviewScript, runCli, script, serve, stop, waitFor } from './support/harness.js';
+import { BWRAP_CANNOT_START, bubblewrapStarts, bwrapLog, call, type Env, git, newEnv, newRepo, putTask, reviewScript, runCli, script, serve, stop, waitFor } from './support/harness.js';
 
 const TITLE = 'feat(T-1): Change the README';
 
@@ -25,8 +26,8 @@ function mrText(header = TITLE): string {
 }
 
 // Workspace app with an origin and, unless command is undefined, its test_command.
-async function testsEnv(name: string, command: string | undefined, extra: Record<string, string> = {}): Promise<{ env: Env; repo: string }> {
-  const env = await newEnv(name, extra);
+async function testsEnv(name: string, command: string | undefined, extra: Record<string, string> = {}, options: { realBwrap?: boolean } = {}): Promise<{ env: Env; repo: string }> {
+  const env = await newEnv(name, extra, options);
   const repo = await newRepo(env, `${name}-repo`, true);
   await setCommand(env, repo, command);
   await putTask(env, repo, 'T-1', 'Change README');
@@ -202,6 +203,33 @@ test('a run that times out is a failure: a Tests Fix names the timeout', async (
     const record = await testsRecord(env, 1);
     assert.deepEqual([record.outcome, record.timed_out, record.exit_code], ['failed', true, null]);
     assert.ok((await taskText(repo)).includes('It timed out after 1 s and was stopped.'));
+    await until(async () => (await processesOf(sleep)).length === 0, 'the timed-out run to end', 5000);
+    const aborted = await runCli(env, ['abort', 'app', 'T-1']);
+    assert.equal(aborted.code, 0, aborted.stdout + aborted.stderr);
+  } finally {
+    await stop(served);
+  }
+});
+
+// SF-152: the same through the real bubblewrap, under the path denials pathDenials builds for this
+// test's state directory and worktree root (the fake bwrap off PATH); skipped where it cannot start.
+test('with the real bubblewrap and the job\'s path denials, a run that times out ends at its limit: a Tests Fix names the timeout and no process is left', { skip: bubblewrapStarts() ? false : BWRAP_CANNOT_START }, async () => {
+  // A sleep of ten minutes only this test runs.
+  const sleep = ['sleep', `600.${String(Math.floor(Math.random() * 1_000_000)).padStart(6, '0')}`];
+  const { env, repo } = await testsEnv('tests-timeout-real', `echo before; ${sleep.join(' ')}`, { SF_TEST_TIMEOUT_MS: '2000' }, { realBwrap: true });
+  await script(env, [{ write: { 'README.md': 'one\n' }, text: 'iteration 1' }, { write: { 'README.md': 'two\n' }, text: 'iteration 2' }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'T-1' });
+    await waitFor(served, 'T-1', 'awaiting_review', 1);
+    await call(served, 'mark_clean', { workspace: 'app', ticket: 'T-1' });
+    await waitFor(served, 'T-1', 'awaiting_review', 2);
+    const record = await testsRecord(env, 1);
+    assert.deepEqual([record.outcome, record.timed_out, record.exit_code, record.output], ['failed', true, null, 'before\n'], JSON.stringify(record));
+    assert.ok(record.duration_ms >= 2000 && record.duration_ms < 15_000, String(record.duration_ms));
+    // The real sandbox ran it: the fake one logs every call.
+    assert.deepEqual(await bwrapLog(env), []);
+    assert.ok((await taskText(repo)).includes('It timed out after 2 s and was stopped.'));
     await until(async () => (await processesOf(sleep)).length === 0, 'the timed-out run to end', 5000);
     const aborted = await runCli(env, ['abort', 'app', 'T-1']);
     assert.equal(aborted.code, 0, aborted.stdout + aborted.stderr);

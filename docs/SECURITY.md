@@ -5,8 +5,9 @@ was last checked. The mechanics are in the [trust model](guide/trust-model.md); 
 found the gaps are in [audits/](audits/README.md). Update this file whenever a change moves a line
 between "protected" and "open", and after every audit.
 
-Last checked: 2026-11-08, `sf smoke` PASS on `main` at aa1a9f1 (12 of 12 steps, every sandbox probe
-refused), and the factory's test command passed in a sandbox without network on `main` at c66ab78.
+Last checked: 2026-11-09, the [audit of 2026-11-09](audits/2026-11-09-audit.md) on `main` at
+c4f6d33. It found two critical ways out of the sandbox, listed under "Open" until their fix
+(SF-159) lands; the run queue is held until then.
 
 ## Protected
 
@@ -44,6 +45,19 @@ refused), and the factory's test command passed in a sandbox without network on 
 
 ## Open
 
+- **Found by the audit of 2026-11-09, being fixed:**
+  - The test run can rewrite its worktree's `.git`, so the factory's next Git call runs a command
+    the job planted, as you (proven in a lab). Fix: SF-159.
+  - The test run, or the agent's Write and Edit tools, can create Claude Code settings with hooks
+    in the worktree, which the next session runs outside the sandbox. Fix: SF-159.
+  - The agent's Bash can connect to Unix sockets under `/tmp` that are not denied, among them the
+    browser extension's bridge.
+  - A link swapped between the file guard's check and the write can send a write out of the
+    worktree.
+  - The GitLab token is sent to any host that is not GitHub or one of four known forges when
+    `SF_GITLAB_URL` is not set (today's workspaces send it only to the right host).
+  - ChatGPT's `read_file` can read git-ignored secret files in a workspace (such as `.envrc`).
+  - The guard does not scan binary or `-diff` files.
 - **The network is open to the agents.** It has to be: Claude and Codex are remote models. The
   code a job works on goes to Anthropic and OpenAI; secrets do not.
 - **The factory itself runs as you,** outside any sandbox: fetch, commit, push, the merge request.

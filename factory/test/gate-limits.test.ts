@@ -453,12 +453,13 @@ test('runGate without a wrapper (SF_SANDBOX=off, SF-125) runs codex itself; a fa
   assert.equal(await exists(join(fakes.dir, GATE_OUTPUT_FILE)), false);
 });
 
-test('fail closed (SF-125): with a wrapper and no bwrap, or on another platform than Linux, Codex never starts: gate_sandbox_unavailable naming the cause', async () => {
+test('fail closed (SF-125, SF-161): with a wrapper and no bwrap, on another platform than Linux, or on an architecture the socket filter does not support, Codex never starts: gate_sandbox_unavailable naming the cause', async () => {
   const fakes = await gateFakes('run-gate-refused');
   const wrapper = ['--die-with-parent', '--ro-bind', '/', '/'];
   for (const [extra, cause] of [
     [{ wrapper, bwrapPath: undefined, platform: 'linux' }, /no bwrap on PATH/],
     [{ wrapper, bwrapPath: fakes.bwrap, platform: 'darwin' }, /on Linux, and this is darwin/],
+    [{ wrapper, bwrapPath: fakes.bwrap, platform: 'linux', arch: 'ia32' }, /^The gate did not start: the gate's socket filter does not support ia32 \(gate_sandbox_unavailable\)/],
   ] as const) {
     const outcome = await runGate('the prompt', gateOptions(fakes, extra));
     assert.ok(!outcome.ok, JSON.stringify(outcome));

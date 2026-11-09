@@ -25,13 +25,14 @@ const COMPUTED: readonly string[] = [
   // The tunnel script (scripts/sf-tunnel.sh or SF_TUNNEL_SCRIPT), sf serve's child.
   'tunnel.ts: script',
   'cli.ts: sf',
-  // The gate's Codex (SF_CODEX or codex on PATH) or the bwrap that wraps it (findBwrap: bwrap on PATH).
-  'gate.ts: command',
+  // The gate's Codex unwrapped (SF_CODEX or codex on PATH; the wrapped one goes through spawnSeccomped).
+  'gate.ts: options.codexPath',
   'gate.ts: codexPath',
   'browser.ts: LAUNCHER',
   'live-smoke.ts: process.execPath',
-  // The bwrap of the Gate sandbox step (findBwrap: bwrap on PATH), the command after its "--".
-  'live-smoke.ts: bwrap',
+  // The bwrap of the gate and of the smoke's Gate sandbox step (findBwrap: bwrap on PATH), Codex or
+  // the step's command after its "--" (SF-161).
+  'seccomp.ts: bwrap',
   // The health checks' status commands (SF-153): the Claude CLI, the Codex CLI and tailscale, never git.
   'health.ts: command',
   // The sleep inhibitor of sf serve (SF-158): systemd-inhibit, or a fake one in the tests, never git.

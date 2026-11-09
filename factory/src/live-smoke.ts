@@ -15,11 +15,13 @@
 // prefix rule) and the file tools allowed (SF_SMOKE_PROBE_ALLOW); its
 // sandbox stays a real job's.
 // The Gate sandbox step builds the Codex gate's bubblewrap wrapper for the job as the
-// factory does and checks, without Codex, that the canary env file and jobs/ are hidden inside it.
+// factory does and checks, without Codex, that the canary env file and jobs/ are hidden inside it
+// and that its socket filter refuses a Unix socket.
 import { type ChildProcess, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,36 +32,18 @@ import { runGit } from './git.js';
 import { type Job, type JobState, JobStore, TERMINAL_STATES } from './jobs.js';
 import { mrTextProblem } from './mr.js';
 import { claudeConfigDir, FILE_GUARD, gateWrapperFor } from './sandbox-denials.js';
+import { filterSupports, spawnSeccomped } from './seccomp.js';
 import { PROBE_SCRIPT_NAME } from './session.js';
+import { PROBE_OUTPUT, PROBE_SCRIPT, PROBES, probeCommand, type SmokeProbe, socketProbeScript } from './smoke-probe.js';
 import { CheckStore } from './task-check.js';
 
 export const WORKSPACE = 'smoke';
 export const TICKET = 'SMOKE-1';
-
-// What the smoke's sandbox probe tries, from the run's own directories: the canary env
-// file in its config directory (by the SHA-256 of its content, never the value), the dashboard
-// token, the jobs/ folder (allowed only when its listing holds the smoke's workspace) and sf.sock of
-// its state, and ~/.ssh when it exists outside the sandbox (undefined: absent). The user's session
-// bus, docker.sock and ~/.claude/projects, each when it exists outside the sandbox (undefined:
-// absent), and a canary file the smoke makes in the home directory, always.
-export interface SmokeProbe {
-  canary: string;
-  canarySha256: string;
-  token: string;
-  jobs: string;
-  job: string;
-  socket: string;
-  ssh: string | undefined;
-  dbus: string | undefined;
-  docker: string | undefined;
-  claudeProjects: string | undefined;
-  homeCanary: string;
-}
+export { PROBE_OUTPUT, PROBE_SCRIPT, PROBES, probeCommand, type SmokeProbe };
 
 // The user's paths the probe tries when they exist outside the sandbox.
 export type FoundPaths = Partial<Pick<SmokeProbe, 'ssh' | 'dbus' | 'docker' | 'claudeProjects'>>;
 
-export const PROBE_OUTPUT = 'probe.json';
 export const CANARY_FILE = 'auth.env';
 
 // The home canary of a run: $HOME/.sf-smoke-<the suffix of the run's directory>/canary.
@@ -76,20 +60,6 @@ export function smokeProbe(paths: SmokePaths, canarySha256: string, found: Found
     socket: join(paths.state, 'sf.sock'), ssh: found.ssh, dbus: found.dbus, docker: found.docker, claudeProjects: found.claudeProjects,
     homeCanary: homeCanaryPath(paths, home),
   };
-}
-
-// A shell word in single quotes.
-const quoted = (text: string): string => `'${text.replace(/'/g, `'\\''`)}'`;
-
-// The probe's command line, run in the worktree.
-export function probeCommand(probe: SmokeProbe): string {
-  return [
-    'node', PROBE_SCRIPT_NAME, '--canary', quoted(probe.canary), '--canary-sha256', probe.canarySha256, '--token', quoted(probe.token),
-    '--jobs', quoted(probe.jobs), '--job', probe.job, '--socket', quoted(probe.socket), ...(probe.ssh !== undefined ? ['--ssh', quoted(probe.ssh)] : []),
-    ...(probe.dbus !== undefined ? ['--dbus', quoted(probe.dbus)] : []), ...(probe.docker !== undefined ? ['--docker', quoted(probe.docker)] : []),
-    ...(probe.claudeProjects !== undefined ? ['--claude-projects', quoted(probe.claudeProjects)] : []), '--home-canary', quoted(probe.homeCanary),
-    '>', PROBE_OUTPUT,
-  ].join(' ');
 }
 
 // The smoke's Task file of a run, committed in the throwaway repository; outside: the file it asks
@@ -138,80 +108,6 @@ the expected probe output of the smoke's sandbox check; do not review it.
 `;
 }
 
-// The sandbox probe, placed in the smoke repository: it tries each path it is given and
-// prints, for each probe, only {name, outcome, code}, never anything it read. The sandbox may hide a
-// denied file as empty, a denied folder as an empty listing, or answer ENOENT, so a probe is
-// allowed only when it sees what access would show: the canary's content by its SHA-256, a
-// non-empty token, the smoke's workspace in jobs/, a connect() to sf.sock, a non-empty ~/.ssh, a
-// connect() to the session bus or docker.sock, a non-empty home canary, a non-empty listing of
-// ~/.claude/projects. Every other result is refused; an option not given, and SSH_AUTH_SOCK not
-// set, are absent.
-export const PROBE_SCRIPT = `// The sandbox probe of sf smoke. Prints only whether each access worked.
-import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
-import { connect } from 'node:net';
-
-const args = process.argv.slice(2);
-const option = (name) => {
-  const index = args.indexOf(\`--\${name}\`);
-  return index >= 0 ? args[index + 1] : undefined;
-};
-const results = [];
-const attempt = (name, run) => {
-  try {
-    results.push({ name, outcome: run() ? 'allowed' : 'refused', code: null });
-  } catch (error) {
-    results.push({ name, outcome: 'refused', code: typeof error?.code === 'string' ? error.code : 'ERROR' });
-  }
-};
-attempt('auth.env', () => createHash('sha256').update(readFileSync(option('canary'))).digest('hex') === option('canary-sha256'));
-attempt('dashboard-token', () => readFileSync(option('token'), 'utf8').trim() !== '');
-attempt('jobs', () => readdirSync(option('jobs')).includes(option('job')));
-const connected = (path) => new Promise((resolve) => {
-  let client;
-  const timer = setTimeout(() => {
-    client?.destroy();
-    resolve({ outcome: 'refused', code: 'ETIMEDOUT' });
-  }, 5000);
-  try {
-    client = connect(path);
-  } catch (error) {
-    clearTimeout(timer);
-    resolve({ outcome: 'refused', code: typeof error?.code === 'string' ? error.code : 'ERROR' });
-    return;
-  }
-  client.once('connect', () => {
-    clearTimeout(timer);
-    client.destroy();
-    resolve({ outcome: 'allowed', code: null });
-  });
-  client.once('error', (error) => {
-    clearTimeout(timer);
-    resolve({ outcome: 'refused', code: typeof error?.code === 'string' ? error.code : 'ERROR' });
-  });
-});
-results.push({ name: 'sf.sock', ...(await connected(option('socket'))) });
-if (option('ssh') === undefined) {
-  results.push({ name: '~/.ssh', outcome: 'absent', code: null });
-} else {
-  attempt('~/.ssh', () => readdirSync(option('ssh')).length > 0);
-}
-results.push({ name: 'SSH_AUTH_SOCK', outcome: process.env.SSH_AUTH_SOCK ? 'allowed' : 'absent', code: null });
-for (const [name, key] of [['dbus', 'dbus'], ['docker.sock', 'docker']]) {
-  results.push(option(key) === undefined ? { name, outcome: 'absent', code: null } : { name, ...(await connected(option(key))) });
-}
-attempt('home-canary', () => readFileSync(option('home-canary'), 'utf8').trim() !== '');
-if (option('claude-projects') === undefined) {
-  results.push({ name: '~/.claude/projects', outcome: 'absent', code: null });
-} else {
-  attempt('~/.claude/projects', () => readdirSync(option('claude-projects')).length > 0);
-}
-process.stdout.write(\`\${JSON.stringify(results, null, 2)}\\n\`);
-`;
-
-// The probes the Sandbox step expects, each refused; absent passes for the user's paths that may be
-// missing only (the home canary, which the smoke makes, never).
-export const PROBES = ['auth.env', 'dashboard-token', 'jobs', 'sf.sock', '~/.ssh', 'SSH_AUTH_SOCK', 'dbus', 'docker.sock', 'home-canary', '~/.claude/projects'] as const;
 const MAY_BE_ABSENT: readonly string[] = ['~/.ssh', 'SSH_AUTH_SOCK', 'dbus', 'docker.sock', '~/.claude/projects'];
 
 // The text of the auto mode classifier's refusal in a tool_result.
@@ -692,11 +588,11 @@ class StopError extends Error {}
 // One command inside the gate's wrapper (the Gate sandbox step), to its end or GATE_SANDBOX_MS.
 function wrapped(bwrap: string, wrapper: string[], command: string[], env: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    const child = spawn(bwrap, [...wrapper, '--', ...command], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: GATE_SANDBOX_MS });
+    const child = spawnSeccomped(bwrap, wrapper, command, { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: GATE_SANDBOX_MS });
     let stdout = '';
     let stderr = '';
-    child.stdout.on('data', (chunk: Buffer) => (stdout = (stdout + chunk.toString('utf8')).slice(-OUTPUT_KEEP)));
-    child.stderr.on('data', (chunk: Buffer) => (stderr = (stderr + chunk.toString('utf8')).slice(-OUTPUT_KEEP)));
+    child.stdout!.on('data', (chunk: Buffer) => (stdout = (stdout + chunk.toString('utf8')).slice(-OUTPUT_KEEP)));
+    child.stderr!.on('data', (chunk: Buffer) => (stderr = (stderr + chunk.toString('utf8')).slice(-OUTPUT_KEEP)));
     child.once('error', (error) => resolve({ code: null, stdout, stderr: `${stderr}${error.message}` }));
     child.once('close', (code) => resolve({ code, stdout, stderr }));
   });
@@ -1050,8 +946,11 @@ class Smoke {
   // both `cat <canary>` and `cat <jobs>/<workspace>/<ticket>/job.json` fail (ENOENT counts: the tmpfs
   // hiding them is the denial); a command that exits 0 fails the step, whatever it printed. Not
   // `ls <jobs>`: the read-write bind of the iteration's directory leaves the empty folders
-  // above it inside the tmpfs, so jobs/ lists, holding nothing else. No Codex runs. With the sandbox
-  // off it is a SKIP.
+  // above it inside the tmpfs, so jobs/ lists, holding nothing else. Then the socket probe
+  // (socketProbeScript) connects to an abstract Unix socket the step listens on outside: only its
+  // exit 1 with EPERM passes (the socket filter refused it); the listener closes at the step's end.
+  // No Codex runs. With the sandbox off it is a SKIP; on an architecture the filter does not
+  // support, a FAIL.
   async gateSandbox(): Promise<Outcome> {
     if (this.sandboxOff) {
       return { status: 'SKIP', detail: 'sandbox off' };
@@ -1073,6 +972,9 @@ class Smoke {
     if (process.platform !== 'linux' || bwrap === undefined) {
       return { status: 'FAIL', detail: process.platform !== 'linux' ? `the gate's wrapper needs Linux, this is ${process.platform}` : 'no bwrap on PATH' };
     }
+    if (!filterSupports(process.arch)) {
+      return { status: 'FAIL', detail: `the gate's socket filter does not support ${process.arch}` };
+    }
     const gate = gateConfig(this.#env);
     const { work, state, worktrees, config } = this.#paths;
     const wrapper = await gateWrapperFor({
@@ -1082,21 +984,43 @@ class Smoke {
       iterationDir: this.#jobs.iterationDir(WORKSPACE, TICKET, 1), images: [], tmp: tmpdir(),
     });
     const inside = (command: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> => wrapped(bwrap, wrapper, command, gateEnvironment(this.#env));
-    const control = await inside(['ls', job.worktree]);
-    this.#checkStop();
-    if (control.code !== 0) {
-      return { status: 'FAIL', detail: short(`the wrapper did not run: ${control.stderr.trim() || `exit ${control.code ?? 'by a signal'}`}`) };
+    const socketName = `sf-smoke-${randomBytes(8).toString('hex')}`;
+    const listener = createServer((socket) => socket.destroy());
+    try {
+      await new Promise<void>((resolve, reject) => {
+        listener.once('error', reject);
+        listener.listen(`\0${socketName}`, resolve);
+      });
+    } catch (error) {
+      return { status: 'FAIL', detail: short(`the smoke could not listen on an abstract Unix socket: ${(error as Error).message}`) };
     }
-    const read = await inside(['cat', probe.canary]);
-    const listed = await inside(['cat', jobFile]);
-    this.#checkStop();
-    const problems = [
-      ...(read.code === 0 ? ['cat of the canary env file exited 0'] : []),
-      ...(listed.code === 0 ? ['cat of the job\'s job.json under jobs/ exited 0'] : []),
-    ];
-    return problems.length === 0
-      ? { status: 'PASS', detail: 'the canary env file and jobs/ hidden inside the gate\'s wrapper' }
-      : { status: 'FAIL', detail: `the gate's wrapper let through: ${problems.join(', ')}` };
+    try {
+      const control = await inside(['ls', job.worktree]);
+      this.#checkStop();
+      if (control.code !== 0) {
+        return { status: 'FAIL', detail: short(`the wrapper did not run: ${control.stderr.trim() || `exit ${control.code ?? 'by a signal'}`}`) };
+      }
+      const read = await inside(['cat', probe.canary]);
+      const listed = await inside(['cat', jobFile]);
+      this.#checkStop();
+      const problems = [
+        ...(read.code === 0 ? ['cat of the canary env file exited 0'] : []),
+        ...(listed.code === 0 ? ['cat of the job\'s job.json under jobs/ exited 0'] : []),
+      ];
+      if (problems.length > 0) {
+        return { status: 'FAIL', detail: `the gate's wrapper let through: ${problems.join(', ')}` };
+      }
+      const socket = await inside([process.execPath, '-e', socketProbeScript(socketName)]);
+      this.#checkStop();
+      if (socket.code === 1 && socket.stdout.trim() === 'EPERM') {
+        return { status: 'PASS', detail: 'the canary env file and jobs/ hidden inside the gate\'s wrapper; Unix sockets refused' };
+      }
+      return socket.code === 0
+        ? { status: 'FAIL', detail: 'a Unix socket connected inside the gate\'s wrapper' }
+        : { status: 'FAIL', detail: short(`the socket probe failed: ${`${socket.stdout} ${socket.stderr}`.trim() || `exit ${socket.code ?? 'by a signal'}`}`) };
+    } finally {
+      listener.close();
+    }
   }
 
   review(): Promise<Outcome> {

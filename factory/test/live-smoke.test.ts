@@ -4,16 +4,19 @@
 // leave untouched: the steps of a run and the Sandbox step's checks. The time budget, the signals,
 // the process groups, the child environment, the option parsing and the redaction of its settings
 // are test/live-smoke-halt.test.ts's (SF-152: one file ran near run-tests' per-file limit).
-// SF-125: the Gate sandbox step, through the harness's fake bwrap.
+// SF-125: the Gate sandbox step, through the harness's fake bwrap. SF-161: its socket probe, and the
+// probe's names imported from src/smoke-probe.ts (live-smoke.ts re-exports them).
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { basename, dirname, join } from 'node:path';
 import { test } from 'node:test';
-import { CLASSIFIER_DENIAL, DONT_ASK_DENIAL, initToolsProblem, outsideWriteProblem, PROBE_SCRIPT, PROBES, probeCallProblem, probeCommand, probeProblem, smokePaths, smokeProbe, smokeTask, STEPS } from '../src/live-smoke.js';
+import { CLASSIFIER_DENIAL, DONT_ASK_DENIAL, initToolsProblem, outsideWriteProblem, probeCallProblem, probeProblem, smokePaths, smokeProbe, smokeTask, STEPS } from '../src/live-smoke.js';
+import * as liveSmoke from '../src/live-smoke.js';
+import { PROBE_SCRIPT, PROBES, probeCommand, socketProbeScript } from '../src/smoke-probe.js';
 import { FILE_GUARD } from '../src/sandbox-denials.js';
 import { bwrapLog, codexLog, codexScript, fakeCodex, fakeLog, git, reviewLog, reviewScript, script, temp } from './support/harness.js';
 import { BRANCH, CHECK_READY, CLAUDE_CLEAN, CLEAN_TURNS, cleanScripts, onlyChecksDir, probeOutput, smoke, statuses, untouched } from './support/live-smoke.js';
@@ -27,7 +30,7 @@ test('a clean run: every step PASS, exit 0, the temp directory gone, the user\'s
   assert.match(ran.stdout, /\nsmoke: PASS, cost \d+\.\d{4} USD, gate 1100 tokens\n$/);
   assert.match(ran.rows.get('Task check')!.detail, /^verdict ready/);
   assert.equal(ran.rows.get('Sandbox')!.detail, `every probe refused (${PROBES.length}), no web tools, the Write outside the worktree refused`);
-  assert.equal(ran.rows.get('Gate sandbox')!.detail, 'the canary env file and jobs/ hidden inside the gate\'s wrapper');
+  assert.equal(ran.rows.get('Gate sandbox')!.detail, 'the canary env file and jobs/ hidden inside the gate\'s wrapper; Unix sockets refused');
   assert.match(ran.rows.get('Codex gate')!.detail, /clean, 1100 tokens/);
   assert.match(ran.rows.get('MR text')!.detail, /^feat\(SMOKE-1\): Add a second greeting line$/);
   assert.match(ran.rows.get('Approve')!.detail, new RegExp(`^${BRANCH} at [0-9a-f]{12} on origin\\.git$`));
@@ -286,6 +289,24 @@ test('Gate sandbox (SF-125): the canary read inside the gate\'s wrapper (a bwrap
   await onlyChecksDir(ran.tmp);
 });
 
+test('Gate sandbox (SF-161): a wrapper without the socket filter (a bwrap that ignores --seccomp) lets the socket probe connect to the smoke\'s abstract socket: the step FAILs; the probe ran as node -e inside the job\'s wrapper, with --seccomp 3', async () => {
+  const ran = await smoke('smoke-gate-sandbox-unfiltered', [], async (env) => {
+    await cleanScripts(env);
+    await writeFile(join(env.home, 'fake-bwrap.json'), JSON.stringify({ unfiltered: true }));
+  });
+  assert.equal(ran.code, 1, ran.stdout + ran.stderr);
+  assert.deepEqual(statuses(ran), ['PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'FAIL', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'SKIP', 'PASS'], ran.stdout);
+  assert.equal(ran.rows.get('Gate sandbox')!.detail, 'a Unix socket connected inside the gate\'s wrapper');
+  const runs = (await bwrapLog(ran.env)).filter((run) => run.argv[run.argv.indexOf('--') + 1] !== fakeCodex);
+  assert.equal(runs.length, 4);
+  const probe = runs.at(-1)!.argv;
+  const cut = probe.indexOf('--');
+  assert.deepEqual(probe.slice(cut + 1, cut + 3), [process.execPath, '-e']);
+  assert.match(probe[cut + 3]!, /connect\('\\0sf-smoke-[0-9a-f]{16}'\)/);
+  assert.deepEqual(probe.slice(probe.indexOf('--seccomp'), probe.indexOf('--seccomp') + 2), ['--seccomp', '3']);
+  await onlyChecksDir(ran.tmp);
+});
+
 test('Gate sandbox (SF-125): a canary env file missing outside the wrapper FAILs the step: a hidden one would prove nothing', async () => {
   let removed = false;
   const ran = await smoke('smoke-gate-sandbox-missing', [], cleanScripts, {}, (text) => {
@@ -378,5 +399,35 @@ test('the probe script: allowed only for what access shows (the canary by its SH
     assert.ok(!probeCommand(gone).includes('--dbus') && !probeCommand(gone).includes('--docker') && !probeCommand(gone).includes('--claude-projects') && probeCommand(gone).includes('--home-canary'));
   } finally {
     servers.forEach(({ server }) => server.close());
+  }
+});
+
+test('smoke-probe.ts (SF-161) holds the probe\'s names; live-smoke.ts re-exports the same', () => {
+  assert.equal(liveSmoke.PROBE_SCRIPT, PROBE_SCRIPT);
+  assert.equal(liveSmoke.PROBES, PROBES);
+  assert.equal(liveSmoke.probeCommand, probeCommand);
+  assert.equal(liveSmoke.PROBE_OUTPUT, 'probe.json');
+});
+
+test('the socket probe (SF-161): connected and exit 0 on an abstract socket that listens; the error\'s code and exit 2 on one nobody listens on', async () => {
+  const name = `sf-smoke-${process.pid.toString(16).padStart(16, '0')}`;
+  const run = (): { code: number; stdout: string } => {
+    try {
+      return { code: 0, stdout: execFileSync(process.execPath, ['-e', socketProbeScript(name)], { encoding: 'utf8' }) };
+    } catch (error) {
+      const failed = error as { status: number; stdout: string };
+      return { code: failed.status, stdout: failed.stdout };
+    }
+  };
+  assert.deepEqual(run(), { code: 2, stdout: 'ECONNREFUSED\n' });
+  const server = createServer((socket) => socket.destroy());
+  await new Promise<void>((resolve) => server.listen(`\0${name}`, resolve));
+  try {
+    const connected = await new Promise<{ code: number; stdout: string }>((resolve) => {
+      execFile(process.execPath, ['-e', socketProbeScript(name)], { encoding: 'utf8' }, (error, stdout) => resolve({ code: error === null ? 0 : (error.code as number), stdout }));
+    });
+    assert.deepEqual(connected, { code: 0, stdout: 'connected\n' });
+  } finally {
+    server.close();
   }
 });

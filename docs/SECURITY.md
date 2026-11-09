@@ -36,7 +36,8 @@ refused), and the factory's test command passed in a sandbox without network on 
   starts. The merge runs them again, in the same sandbox, on the change merged into the base as
   it is now; a conflict or a failure refuses the merge, and nothing is merged.
 - **The Codex gate runs in a read-denying wrapper.** It sees no secrets and no other jobs. Secrets
-  in its findings are masked.
+  in its findings are masked. The wrapper refuses new Unix sockets, so the gate cannot reach your
+  X server, session bus or other local services through one.
 - **Code from a repository never runs as you through Git.** The factory's Git commands run no hooks
   and no fsmonitor.
 - **The GitLab token goes only to gitlab.com or the host of `SF_GITLAB_URL`.** A workspace on any

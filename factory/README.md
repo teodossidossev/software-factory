@@ -406,10 +406,14 @@ sf smoke [--keep] [--timeout-min N] [--budget-usd N]
   the canary `auth.env` and `jobs/` exist, then runs `ls <worktree>` inside the wrapper (it must
   work, or the wrapper did not run), `cat <canary>` and `ls <jobs>`. PASS only when both fail:
   the tmpfs hiding them is the denial, so `ENOENT` counts; a command that exits 0 fails the step,
-  whatever it printed. Without `bwrap`
-  on `PATH` it fails. The Codex gate step still needs a verdict from the real gate inside the
-  wrapper. With `SF_SANDBOX=off` it is a SKIP, which the last line counts as a pass like the
-  Sandbox step's.
+  whatever it printed. Then (SF-161) it listens on an abstract Unix socket `\0sf-smoke-<16 random
+  hex>` outside the wrapper and runs `node -e <a connect to it>` inside: PASS only when that exits 1
+  with `EPERM` (the wrapper's socket filter refused the socket); a connect FAILs it ("a Unix socket
+  connected inside the gate's wrapper"), any other result too ("the socket probe failed: …"). The
+  listener closes at the step's end. Without `bwrap` on `PATH` it fails, and on an architecture the
+  socket filter does not support (not x64 or arm64). The Codex gate step still needs a verdict from
+  the real gate inside the wrapper. With `SF_SANDBOX=off` it is a SKIP, which the last line counts
+  as a pass like the Sandbox step's.
 - **Sandbox** (SF-100). The Task has the Implementer run `node probe.mjs <the run's paths>` in its
   sandbox and keep the output in `probe.json` (in the Task's `scope`; its Review brief says it is
   the expected probe output). The probe tries to read the canary `auth.env` (given its SHA-256
@@ -1427,9 +1431,9 @@ ended. A restart of `sf serve` therefore leaves a working job working.
 - The gate's **wrapper** (SF-125, `gateWrapper` in `src/sandbox-denials.ts`): with the sandbox on
   (`SF_SANDBOX` not `off`) the factory runs `bwrap <wrapper> -- <codex> <argv>`, the wrapper
   built before each run from the `denyRead` list of the job's path denials (the Claude sessions'
-  scope, `gateWrapperFor`), a later mount winning: `--die-with-parent --unshare-pid --ro-bind / /
-  --dev /dev --proc /proc --tmpfs /tmp` (and a `--tmpfs` over the system temporary directory when
-  it is not under `/tmp`); every `denyRead` entry not under those hidden (a folder as `--tmpfs`, a
+  scope, `gateWrapperFor`), a later mount winning: `--die-with-parent --unshare-pid --seccomp 3
+  --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp` (and a `--tmpfs` over the system temporary
+  directory when it is not under `/tmp`); every `denyRead` entry not under those hidden (a folder as `--tmpfs`, a
   file or socket as `--ro-bind /dev/null`; one gone since is left out); `--ro-bind` back the
   worktree, the Task's images, the real path of the Codex executable's nearest `node_modules`
   ancestor (else its own folder: a launcher spawns its sibling package) and node's prefix
@@ -1437,10 +1441,17 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   these binds and the binds inside such an entry again, shallowest first, so the most specific
   path wins (a `.env` of the worktree stays hidden; an image under a bound `jobs/` stays bound);
   last `--bind` of `CODEX_HOME` (else `~/.codex`) and the iteration's directory. No
-  `--unshare-net`: Codex reaches OpenAI, and its own read-only sandbox holds its commands.
+  `--unshare-net`: Codex reaches OpenAI, and its own read-only sandbox holds its commands. So the
+  host's abstract Unix sockets (the X server's `@/tmp/.X11-unix/X0`, which may accept the user
+  without a cookie) would be in reach; `--seccomp 3` (SF-161, `src/seccomp.ts`) loads a classic BPF
+  seccomp filter that bwrap reads from fd 3, where the factory writes it and closes the pipe
+  (`spawnSeccomped`): `socket(AF_UNIX, …)` gets `EPERM`, as does every syscall of another
+  architecture than the host's (i386) and, on x86_64, every x32 syscall; everything else is allowed,
+  `socketpair` (Node's child stdio), TCP and UDP included. Built for x64 and arm64.
   `--unshare-pid` is there because an unprivileged `bwrap` mounts a new `/proc` only in a PID
   namespace of its own. The gate **fails closed**: with the sandbox on and no `bwrap` on `PATH`
-  (`findBwrap`), or on another platform than Linux, Codex does not start; `gate.json` and the
+  (`findBwrap`), on another platform than Linux, or on an architecture the socket filter does not
+  support (not x64 or arm64), Codex does not start; `gate.json` and the
   `review_failed` event carry the factory's message naming the cause, and the job goes to
   `needs_human` with `gate_sandbox_unavailable` (install bubblewrap, then tell the job to go on;
   `SF_SANDBOX=off` runs the gate unwrapped, with the rest of the sandbox off too). Its prompt is the review prompt adapted: the base commit (so

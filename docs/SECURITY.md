@@ -66,6 +66,9 @@ refused), and the factory's test command passed in a sandbox without network on 
     names of your other workspaces. It is on for the factory's own public repository. In the
     company repositories it checks secrets only, so issue keys and links stay allowed there.
   - Commit authors and committers are not checked.
+  - Every file is scanned as text, whatever its attributes or bytes (a `-diff` or `binary`
+    attribute, a NUL byte), and a workspace with `"guard": true` pushes no LFS files, whose content
+    the guard cannot read.
 - **Checked on every update.** `sf smoke` runs the sandbox and gate probes. A probe that gets
   through fails the smoke.
 
@@ -74,7 +77,8 @@ refused), and the factory's test command passed in a sandbox without network on 
 - **Found by the audit of 2026-11-09, being fixed:**
   - A link swapped between the file guard's check and the write can send a write out of the
     worktree.
-  - The guard does not scan binary or `-diff` files.
+- **LFS content is not scanned for secrets in a workspace without the guard flag.** The guard reads
+  an LFS file's pointer only.
 - **The network is open to the agents.** It has to be: Claude and Codex are remote models. The
   code a job works on goes to Anthropic and OpenAI; secrets do not.
 - **The factory itself runs as you,** outside any sandbox: fetch, commit, push, the merge request.

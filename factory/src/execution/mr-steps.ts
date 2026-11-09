@@ -12,7 +12,7 @@ import { runGit } from '../git.js';
 import { checkTerms, commitsToCheck, GUARD_MAX_FIXES, GUARD_MAX_MR_TURNS, guardFixContent, guardFixCount, guardMessage, type GuardHit, type GuardTerm, maskedMrTextFailure, maskedMrTextProblem, maskTerms, MAX_GUARD_MESSAGE, redactAdded, scanBranch, scanChange, scanCommits, scanMrText, worktreeTree } from '../guard.js';
 import { checkBranchFree, isAncestor, savedRef, settleAfterPush, subjectOf } from '../handoff.js';
 import { claudeReviews, type FileChange, type Handover, type Job, type JobMr, type JobState, now } from '../jobs.js';
-import { abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitFailure, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl, parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, validBranchName, withAccepted, withChecks, withFindings, withNits, withSimplifications, worktreesOn } from '../mr.js';
+import { abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitFailure, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl, parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, refuseGuardedLfs, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, validBranchName, withAccepted, withChecks, withFindings, withNits, withSimplifications, worktreesOn } from '../mr.js';
 import { type LedgerEntry, notFixed } from '../ledger.js';
 import { MergeChecks } from '../merge-check.js';
 import { buildPatch, notificationLine, type Patch } from '../patch.js';
@@ -677,8 +677,7 @@ export class MrPart {
   // as in hand).
   async #guardTerms(workspace: Workspace): Promise<GuardTerm[]> {
     const guarded = (await this.#settings.resolve(workspace.name).catch(() => workspace)).guard === true;
-    const { terms } = await checkTerms({ workspace, guarded, configDir: configDir(), stateDir: this.#settings.config.stateDir, envFile: envFilePath() });
-    return terms;
+    return (await checkTerms({ workspace, guarded, configDir: configDir(), stateDir: this.#settings.config.stateDir, envFile: envFilePath() })).terms;
   }
 
   // The guard's check of the change at Clean: the worktree's change as the factory would
@@ -719,14 +718,15 @@ export class MrPart {
     return (await checkTerms({ workspace, guarded: workspace.guard === true, configDir: configDir(), stateDir: this.#settings.config.stateDir, envFile: envFilePath() })).terms;
   }
 
-  // The guard's check before a push or a merge request the factory makes: with commit,
-  // the commits the push of it to origin publishes; always the branch name and the job's MR text.
-  // A hit refuses with guard_hit, naming the places only; nothing is pushed and the job is not changed.
+  // The guard's check before a push or a merge request the factory makes: with commit, the commits the push
+  // of it to origin publishes, and in a guarded workspace no LFS file (guard_failed); always the branch name
+  // and the job's MR text. A hit refuses with guard_hit, naming the places only; nothing is pushed and the job is not changed.
   async #checkGuard(job: Job, workspace: Workspace, commit: string | undefined): Promise<void> {
     const checkout = workspace.workCheckout;
     const terms = await this.#pushTerms(workspace);
     const hits: GuardHit[] = [];
     if (commit !== undefined) {
+      await (workspace.guard === true ? refuseGuardedLfs(checkout, job.base, commit) : undefined);
       hits.push(...(await scanCommits(checkout, await commitsToCheck(checkout, { rev: commit, remote: 'origin', history: false }), terms)));
     }
     hits.push(...scanBranch(job.branch, terms));

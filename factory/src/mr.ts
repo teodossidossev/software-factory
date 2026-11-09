@@ -107,12 +107,7 @@ async function gitDir(cwd: string): Promise<string> {
 }
 
 async function exists(path: string): Promise<boolean> {
-  try {
-    await lstat(path);
-    return true;
-  } catch {
-    return false;
-  }
+  return lstat(path).then(() => true, () => false);
 }
 
 // True while a rebase is in progress in the worktree.
@@ -567,10 +562,7 @@ export function pushProtection(branch: string, base: string): MrFailure | undefi
   if (branch !== base && !PROTECTED_BRANCHES.includes(branch)) {
     return undefined;
   }
-  return {
-    code: 'mr_push_protected',
-    message: `refusing to push ${branch}: nothing is pushed to main, master or the base branch (${base}) directly; every change goes through a merge request`,
-  };
+  return { code: 'mr_push_protected', message: `refusing to push ${branch}: nothing is pushed to main, master or the base branch (${base}) directly; every change goes through a merge request` };
 }
 
 // The changed paths of the pushed range whose filter attribute is lfs, read from the pushed commit
@@ -626,33 +618,44 @@ async function committedFile(cwd: string, spec: string): Promise<Buffer | undefi
   return result.code === 0 ? result.stdout : undefined;
 }
 
-// Git LFS objects reach the remote through the repository's pre-push hook (`git lfs pre-push`),
-// which never runs from the factory, so the push sends them itself: when a path the job
-// changed between the merge base of source and the base (origin's, else the local branch) and
-// source has the lfs filter, `git lfs push origin <source>`. It refuses without git-lfs, when the
-// job changed .lfsconfig (it could send the objects and the credentials to another host), and
-// when the .lfsconfig git-lfs reads in the checkout (checkoutLfsConfig; another job's, handed
-// over there) is neither the base's (upstream) nor the merge base's. Undefined when there is
-// nothing to send or it was sent.
-async function pushLfsObjects(cwd: string, branch: string, base: string, source: string): Promise<MrFailure | undefined> {
-  const failed = (message: string): MrFailure => ({ code: 'mr_push_failed', message });
+// The range a push of source publishes, from its merge base with the base (origin's, else the local
+// branch; else the empty tree), and its LFS paths. Undefined when source is no commit.
+async function pushedLfs(cwd: string, base: string, source: string): Promise<{ upstream: string; lower: string; paths: string[] } | undefined> {
   if ((await factoryGit(cwd, ['rev-parse', '--verify', '--quiet', `${source}^{commit}`])).code !== 0) {
-    // Nothing to send; the push names the missing ref as it always did.
     return undefined;
   }
   const tracking = `refs/remotes/origin/${base}`;
   const upstream = (await factoryGit(cwd, ['rev-parse', '--verify', '--quiet', `${tracking}^{commit}`])).code === 0 ? tracking : `refs/heads/${base}`;
   const mergeBase = await gitText(cwd, ['merge-base', source, upstream]);
-  // Without a common commit every file of source counts as the job's: diffed against the empty tree.
   const lower = mergeBase.ok && mergeBase.text !== '' ? mergeBase.text : (await factoryGitOk(cwd, ['hash-object', '-t', 'tree', '/dev/null'])).trim();
   const changed = nulList(await factoryGitOk(cwd, ['diff', '--name-only', '-z', '--no-renames', '--diff-filter=AMT', lower, source, '--']));
-  if (changed.length === 0 || (await lfsPaths(cwd, source, changed)).length === 0) {
+  return { upstream, lower, paths: changed.length === 0 ? [] : await lfsPaths(cwd, source, changed) };
+}
+
+// The guard cannot read LFS content (it scans the pointers), so a guarded workspace pushes no LFS
+// file: guard_failed when the push of source holds one, before anything is pushed.
+export async function refuseGuardedLfs(cwd: string, base: string, source: string): Promise<void> {
+  const paths = (await pushedLfs(cwd, base, source).catch((error: Error) => Promise.reject(new FactoryError('guard_failed', `The guard's Git LFS check failed: ${error.message}`))))?.paths ?? [];
+  if (paths.length > 0) {
+    const named = `${paths.slice(0, 5).join(', ')}${paths.length > 5 ? ` and ${paths.length - 5} more` : ''}`;
+    throw new FactoryError('guard_failed', `The guard cannot read LFS content; this workspace is guarded, so LFS files are not pushed: ${named}`);
+  }
+}
+
+// `git lfs pre-push` never runs from the factory, so the push sends the LFS objects of the pushed
+// range itself (`git lfs push origin <source>`). Refused without git-lfs, when the job changed
+// .lfsconfig (another host could get the objects and credentials), and when the checkout's
+// .lfsconfig (checkoutLfsConfig) is neither the base's nor the merge base's. Undefined unless refused.
+async function pushLfsObjects(cwd: string, branch: string, base: string, source: string): Promise<MrFailure | undefined> {
+  const failed = (message: string): MrFailure => ({ code: 'mr_push_failed', message });
+  const range = await pushedLfs(cwd, base, source);
+  if (range === undefined || range.paths.length === 0) {
     return undefined;
   }
   if ((await factoryGit(cwd, ['lfs', 'version'])).code !== 0) {
     return failed(`git push origin ${branch} failed: the job changes Git LFS files and git-lfs is not installed`);
   }
-  const configArgs = ['diff', '--quiet', lower, source, '--', '.lfsconfig'];
+  const configArgs = ['diff', '--quiet', range.lower, source, '--', '.lfsconfig'];
   const config = await factoryGit(cwd, configArgs);
   if (config.code === 1) {
     return failed(`refusing to push ${branch}: the job changed .lfsconfig; push it yourself after checking it`);
@@ -665,7 +668,7 @@ async function pushLfsObjects(cwd: string, branch: string, base: string, source:
     const committed = await committedFile(cwd, spec);
     return inCheckout === undefined ? committed === undefined : committed !== undefined && committed.equals(inCheckout);
   };
-  if (!(await same(`${upstream}:.lfsconfig`)) && !(await same(`${lower}:.lfsconfig`))) {
+  if (!(await same(`${range.upstream}:.lfsconfig`)) && !(await same(`${range.lower}:.lfsconfig`))) {
     return failed(`refusing to push ${branch}: the checkout's .lfsconfig is not the one of ${base}; push it yourself after checking it`);
   }
   const lfs = await runGit(cwd, ['lfs', 'push', 'origin', source], 1024 * 1024, LFS_PUSH_TIMEOUT_MS);
@@ -684,12 +687,8 @@ export async function pushBranch(cwd: string, branch: string, base: string, sour
   if (protectedFailure !== undefined) {
     return protectedFailure;
   }
-  let lfsFailure: MrFailure | undefined;
-  try {
-    lfsFailure = await pushLfsObjects(cwd, branch, base, source ?? `refs/heads/${branch}`);
-  } catch (error) {
-    lfsFailure = { code: 'mr_push_failed', message: `git push origin ${branch} failed: the Git LFS check failed: ${(error as Error).message}` };
-  }
+  const lfsFailure = await pushLfsObjects(cwd, branch, base, source ?? `refs/heads/${branch}`)
+    .catch((error: Error): MrFailure => ({ code: 'mr_push_failed', message: `git push origin ${branch} failed: the Git LFS check failed: ${error.message}` }));
   if (lfsFailure !== undefined) {
     return lfsFailure;
   }

@@ -638,8 +638,8 @@ async function emptyTree(cwd: string): Promise<string> {
 export async function scanChange(cwd: string, from: string, to: string, terms: readonly GuardTerm[], commit?: string): Promise<GuardHit[]> {
   const suffix = commit === undefined ? '' : ` in commit ${commit.slice(0, 12)}`;
   const hits: GuardHit[] = [];
-  // Explicit prefixes: diff.noprefix or diff.mnemonicPrefix in the user's configuration would change them.
-  const diffArgs = ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/', '-M', '-U0', from, to];
+  // Explicit prefixes (the user's diff.noprefix or diff.mnemonicPrefix would change them); --text diffs every file as text, whatever its attributes or bytes.
+  const diffArgs = ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--text', '--src-prefix=a/', '--dst-prefix=b/', '-M', '-U0', from, to];
   const what = commit === undefined ? 'The change of the worktree' : `The change of commit ${commit.slice(0, 12)}`;
   const tooLarge = `${what} is too large for the guard (over 16 MiB of diff).`;
   const diff = await gitOk(cwd, diffArgs, {}, tooLarge);

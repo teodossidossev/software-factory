@@ -11,7 +11,7 @@ import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { sandboxSettings } from '../src/config.js';
-import { commitAndRebase, commitPaths, continueRebase, filesWithMarkers, gitFailure, MAX_MR_TEXT_BYTES, mergeRequestLink, mrMessage, mrTextProblem, pushBranch, pushProtection, rebaseInProgress, submodulePaths, withChecks, withNits } from '../src/mr.js';
+import { commitAndRebase, commitPaths, continueRebase, filesWithMarkers, gitFailure, MAX_MR_TEXT_BYTES, mergeRequestLink, mrMessage, mrTextProblem, pushBranch, pushProtection, rebaseInProgress, refuseGuardedLfs, submodulePaths, withChecks, withNits } from '../src/mr.js';
 import { conflictPrompt, FACTORY_PROMPT_RULES, handbookSection, mrPrompt } from '../src/prompts.js';
 import { COMMIT_TYPES, commitHeader, DENIED_TOOLS, headerProblem, testingProblem } from '../src/rules.js';
 import type { ReviewItem } from '../src/review.js';
@@ -557,6 +557,29 @@ test('pushBranch sends the job\'s Git LFS objects with git lfs push first, only 
     await commitOn('T-5-fail', { 'e.bin': 'e\n' });
     assert.deepEqual(await pushBranch(repo, 'T-5-fail', 'main'), { code: 'mr_push_failed', message: 'git lfs push origin T-5-fail failed: batch request: 403 Forbidden' });
     assert.equal(onOrigin('T-5-fail'), '');
+  });
+});
+
+test('refuseGuardedLfs: guard_failed naming the LFS paths of the pushed range; a range without one passes', async () => {
+  await withPushRepo(async (_dir, repo, sh) => {
+    await writeFile(join(repo, '.gitattributes'), '*.bin filter=lfs\n');
+    await writeFile(join(repo, 'base.bin'), 'base\n');
+    sh(repo, 'add', '--all');
+    sh(repo, 'commit', '-q', '-m', 'lfs attributes');
+    sh(repo, 'push', '-q', 'origin', 'main');
+    sh(repo, 'switch', '-q', '-c', 'T-1-lfs');
+    await writeFile(join(repo, 'a.bin'), 'a\n');
+    await writeFile(join(repo, 'c.txt'), 'c\n');
+    sh(repo, 'add', '--all');
+    sh(repo, 'commit', '-q', '-m', 'lfs');
+    await assert.rejects(refuseGuardedLfs(repo, 'main', 'refs/heads/T-1-lfs'), {
+      code: 'guard_failed', message: 'The guard cannot read LFS content; this workspace is guarded, so LFS files are not pushed: a.bin',
+    });
+    sh(repo, 'switch', '-q', '-c', 'T-2-plain', 'main');
+    await writeFile(join(repo, 'c.txt'), 'c\n');
+    sh(repo, 'add', '--all');
+    sh(repo, 'commit', '-q', '-m', 'plain');
+    await refuseGuardedLfs(repo, 'main', 'refs/heads/T-2-plain');
   });
 });
 

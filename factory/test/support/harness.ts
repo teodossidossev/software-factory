@@ -134,6 +134,8 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
     SF_HANDOFF: 'off',
     // No automatic Task check unless the test turns it on (test/task-check-auto.test.ts, SF-086).
     SF_TASK_CHECK_AUTO: 'off',
+    // No health checks in the tests' sf serve (SF-153): they would run the fake CLIs' login status.
+    SF_HEALTH: 'off',
     // The job steps of call() and refused() through the socket.
     SF_TEST_HOOKS: 'on',
     // The config lock check scans this fake /proc, not the machine's (SF-105).

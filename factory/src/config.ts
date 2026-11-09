@@ -344,6 +344,16 @@ export function rulesMaxBytes(env: NodeJS.ProcessEnv = process.env): number {
   return positiveInteger(env, 'SF_RULES_MAX_BYTES', DEFAULT_RULES_MAX_BYTES, 16 * 1024 * 1024);
 }
 
+// SF_HEALTH (SF-153): sf serve's health checks, on (the default) or off (the tests' own sf serves:
+// no check spawns the fake CLIs). sf health runs its checks whatever it says.
+export function healthSetting(env: NodeJS.ProcessEnv = process.env): boolean {
+  const mode = env.SF_HEALTH || 'on';
+  if (mode !== 'on' && mode !== 'off') {
+    throw new FactoryError('invalid_config', `SF_HEALTH must be on or off, got "${mode}".`);
+  }
+  return mode === 'on';
+}
+
 // SF_TASK_CHECK_AUTO (SF-086): on (the default) or off.
 export function taskCheckAutoSetting(env: NodeJS.ProcessEnv = process.env): boolean {
   const mode = env.SF_TASK_CHECK_AUTO || 'on';

@@ -159,6 +159,15 @@ export function digestNotification(counts: { landed: number; impact: number }): 
   return { title: 'Morning digest ready', body: `Morning digest ready: ${counts.landed} landed, ${counts.impact} of mine need attention`, priority: 'default', tags: 'newspaper' };
 }
 
+// The notification of a health check (SF-153) that turned down, or is ok again after it was down:
+// its label and detail (the checks' details carry no token).
+export function healthNotification(check: { label: string; detail: string }, turned: 'down' | 'ok'): Notification {
+  const detail = check.detail.replace(/\s+/g, ' ').trim().slice(0, 300);
+  return turned === 'down'
+    ? { title: `Factory health: ${check.label} is down`, body: detail === '' ? `${check.label} is down` : detail, priority: 'high', tags: 'rotating_light' }
+    : { title: `Factory health: ${check.label} is ok again`, body: detail === '' ? `${check.label} is ok again` : detail, priority: 'default', tags: 'white_check_mark' };
+}
+
 async function findExecutable(name: string, path: string | undefined): Promise<string | undefined> {
   for (const dir of (path ?? '').split(delimiter).filter((entry) => entry !== '')) {
     try {

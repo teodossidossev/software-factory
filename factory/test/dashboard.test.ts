@@ -21,6 +21,7 @@ import { buildPatch, fileChanges } from '../src/patch.js';
 import { saveRegistry } from '../src/registry.js';
 import { act, CSP, fakeActions, fakeSetup, fetchRaw, openStream, type Stream, ticketRow, workspaceRow } from './support/dashboard-client.js';
 import type { DashboardDigests } from '../src/dashboard.js';
+import type { HealthCheck } from '../src/health.js';
 import { fixture, withDashboard } from './support/dashboard-state.js';
 import { call, git, newEnv, newRepo, putTask, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
 
@@ -83,8 +84,8 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
       assert.deepEqual([reply.status, reply.body], [404, ''], path);
       assert.equal(reply.headers['content-security-policy'], CSP, path);
     }
-    // SF-137: the dashboard's scripts, in load order.
-    assert.deepEqual([...DASHBOARD_SCRIPTS], ['core.js', 'job-screens.js', 'job-page.js', 'board.js', 'routing.js', 'ticket-page.js', 'reports.js', 'setup.js', 'main.js']);
+    // SF-137: the dashboard's scripts, in load order (SF-153: health.js before main.js).
+    assert.deepEqual([...DASHBOARD_SCRIPTS], ['core.js', 'job-screens.js', 'job-page.js', 'board.js', 'routing.js', 'ticket-page.js', 'reports.js', 'setup.js', 'health.js', 'main.js']);
     // SF-136: every script of DASHBOARD_SCRIPTS is served as JavaScript, each with its own text (its
     // header names it); SF-137: none is longer than 2,500 lines.
     for (const file of DASHBOARD_SCRIPTS) {
@@ -160,6 +161,44 @@ test('dashboard: every script is served from the build output dist/web/, static/
     assert.match(setupScript, /^async function setupRequest\(what, path, body, statusId, describe\) \{$/m);
     const mainScript = (await fetchRaw(new URL('main.js', dashboard.url))).body;
     assert.match(mainScript, /^function openStream\(\) \{$/m);
+  });
+});
+
+test('dashboard (SF-153): GET api/health is the checks\' last result; the stream sends them first on connect and again on healthChanged; 404 without health', async () => {
+  const at = '2026-11-09T10:00:00.000Z';
+  let checks: HealthCheck[] = [
+    { id: 'mcp', label: 'MCP endpoint', status: 'ok', detail: 'answers', since: at },
+    { id: 'tunnel', label: 'ChatGPT tunnel', status: 'off', detail: 'no tunnel profile', since: at },
+  ];
+  await withDashboard('dash-health', fakeActions(), async (dashboard) => {
+    const base = dashboard.url;
+    const reply = await fetchRaw(new URL('api/health', base));
+    assert.deepEqual([reply.status, reply.headers['content-type'], reply.headers['content-security-policy']], [200, 'application/json; charset=utf-8', CSP]);
+    assert.deepEqual(JSON.parse(reply.body), checks);
+    assert.equal((await fetchRaw(new URL('api/health?x=1', base))).status, 404);
+    assert.equal((await act(base, 'api/health', {})).status, 405);
+    const stream = await openStream(new URL('api/stream', base));
+    try {
+      assert.deepEqual(await stream.next('health'), checks);
+      assert.equal(stream.events[0]!.event, 'health', 'the first event on connect');
+      await stream.next('jobs');
+      checks = [{ ...checks[0]!, status: 'down', detail: 'refused the token', since: '2026-11-09T10:00:30.000Z' }, checks[1]!];
+      dashboard.healthChanged();
+      assert.deepEqual(await stream.next('health', (data: HealthCheck[]) => data[0]?.status === 'down'), checks);
+    } finally {
+      stream.close();
+    }
+  }, undefined, { health: { list: () => checks } });
+  await withDashboard('dash-no-health', fakeActions(), async (dashboard) => {
+    assert.equal((await fetchRaw(new URL('api/health', dashboard.url))).status, 404);
+    const stream = await openStream(new URL('api/stream', dashboard.url));
+    try {
+      await stream.next('tickets');
+      dashboard.healthChanged();
+      assert.ok(stream.events.every((event) => event.event !== 'health'));
+    } finally {
+      stream.close();
+    }
   });
 });
 

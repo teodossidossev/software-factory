@@ -23,18 +23,27 @@ export interface DigestScheduleOptions {
 
 const localKey = (date: Date): string => `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
 
+// Whether a scheduled digest is on at all: at least one workspace follows (track or my_work).
+export function digestFollowed(registry: Registry): boolean {
+  return Object.values(registry.workspaces).some((entry) => workspaceDigest(entry).track || workspaceDigest(entry).my_work);
+}
+
+// Today's `at` of the scheduled digest, local time.
+export function digestTime(registry: Registry, now: Date): Date {
+  const [hours, minutes] = digestSettings(registry).at.split(':').map(Number) as [number, number];
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, minutes);
+}
+
 // Whether the scheduled digest is due by the clock and the settings: past today's `at`, on a
 // weekday when weekdays_only, with a workspace that follows.
 export function dueByClock(registry: Registry, now: Date): boolean {
-  if (!Object.values(registry.workspaces).some((entry) => workspaceDigest(entry).track || workspaceDigest(entry).my_work)) {
+  if (!digestFollowed(registry)) {
     return false;
   }
-  const settings = digestSettings(registry);
-  if (settings.weekdays_only && (now.getDay() === 0 || now.getDay() === 6)) {
+  if (digestSettings(registry).weekdays_only && (now.getDay() === 0 || now.getDay() === 6)) {
     return false;
   }
-  const [hours, minutes] = settings.at.split(':').map(Number) as [number, number];
-  return now.getTime() >= new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, minutes).getTime();
+  return now.getTime() >= digestTime(registry, now).getTime();
 }
 
 export class DigestSchedule {

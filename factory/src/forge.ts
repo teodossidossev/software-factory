@@ -173,6 +173,39 @@ export function forgeFor(origin: string | undefined, settings: ForgeSettings): F
   return gitlabForge(new HostClient(choice, `GitLab ${hostnameOf(choice.host)}`), choice.path);
 }
 
+// The forge tokens' check of sf health (SF-153): one read-only "who am I" call to the host's API
+// (GitHub GET /user, GitLab GET /api/v4/user), the token in the Authorization header only, no
+// redirect followed. The answer's body is never read: the result names the host, the variable and
+// the status only.
+export const TOKEN_CHECK_TIMEOUT_MS = 10_000;
+
+export async function checkForgeToken(choice: Extract<ForgeChoice, { ok: true }>, timeoutMs = TOKEN_CHECK_TIMEOUT_MS): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const name = choice.kind === 'github' ? 'GitHub' : `GitLab ${hostnameOf(choice.host)}`;
+  let response: Response;
+  try {
+    response = await fetch(`${choice.api}/user`, {
+      headers: {
+        authorization: `Bearer ${choice.token}`,
+        accept: choice.kind === 'github' ? 'application/vnd.github+json' : 'application/json',
+        'user-agent': 'software-factory',
+      },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    const timedOut = (error as Error).name === 'TimeoutError';
+    return { ok: false, reason: `${name} did not answer${timedOut ? ` within ${timeoutMs / 1000} s` : ''}` };
+  }
+  await response.body?.cancel().catch(() => undefined);
+  if (response.status === 200) {
+    return { ok: true };
+  }
+  if (response.status === 401) {
+    return { ok: false, reason: `${name} refused ${choice.tokenName} (401): renew it in the environment file` };
+  }
+  return { ok: false, reason: `${name} answered ${choice.tokenName}'s check with HTTP ${response.status}` };
+}
+
 interface Reply {
   status: number;
   data: unknown;

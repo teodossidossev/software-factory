@@ -717,3 +717,15 @@ interface StatsPayload {
   // src/stats.ts StatsNotes.
   notes: { truncated: number; unreadable: number; events_skipped: number; digest_excluded: boolean };
 }
+
+// A health check's status: src/health.ts HEALTH_STATUSES. off is "not configured" and counts as green.
+type HealthStatus = 'ok' | 'recovering' | 'down' | 'off';
+
+// One health check of api/health and of the stream's health events (SF-153): src/health.ts
+// HealthCheck.
+interface HealthCheck {
+  label: string;
+  status: HealthStatus;
+  detail: string;
+  since: string;
+}

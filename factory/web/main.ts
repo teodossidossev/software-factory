@@ -27,7 +27,12 @@ function openStream(): void {
   const key = state.key;
   const source = new EventSource(`api/stream?${params}`);
   state.source = source;
-  source.addEventListener('open', () => setConnection('live', 'live'));
+  source.addEventListener('open', () => {
+    setConnection('live', 'live');
+    healthStreamUp();
+  });
+  // The health checks (SF-153): the first event on connect, then one on every status change.
+  source.addEventListener('health', (message: MessageEvent<string>) => onHealthEvent(message.data));
   source.addEventListener('jobs', (message: MessageEvent<string>) => {
     state.jobs = jobsOf(message.data);
     state.jobsSeen += 1;
@@ -88,6 +93,7 @@ function openStream(): void {
     if (state.source === source) {
       state.source = null;
       setConnection('reconnecting', 'down');
+      healthStreamDown();
       state.retry = setTimeout(openStream, RECONNECT_MS);
     }
   });
@@ -243,6 +249,8 @@ function init(): void {
     }
   });
 
+  // The traffic light of the health checks (SF-153).
+  initHealth();
   renderSetup();
   // "Since when" on the cards moves on by itself, unless the focus is on the board (a redraw
   // would take it away). The test stand-in has no interval.
@@ -266,6 +274,7 @@ function load(): void {
     }
   }, () => {
     setConnection('reconnecting', 'down');
+    healthStreamDown();
     state.retry = setTimeout(load, RECONNECT_MS);
   });
 }

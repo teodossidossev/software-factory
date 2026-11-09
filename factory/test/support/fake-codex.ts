@@ -1,5 +1,5 @@
 // A fake Codex CLI for the gate tests (SF-039), run through the wrapper script the harness writes
-// (fakeCodex). `--version` prints a version. `exec` logs argv, cwd, the stdin prompt, the
+// (fakeCodex). `--version` prints a version, `login status` that it is logged in. `exec` logs argv, cwd, the stdin prompt, the
 // environment names and its pid to $HOME/fake-codex.log, takes its run script from
 // $HOME/fake-codex.json ({"runs": [...]}, consumed in order through $HOME/fake-codex.count), and
 // then writes the run's output (default: a clean verdict) to the --output-last-message file and
@@ -43,6 +43,12 @@ const CLEAN = { verdict: 'clean', summary: 'Codex found it right.', items: [], a
 const argv = process.argv.slice(2);
 if (argv[0] === '--version') {
   process.stdout.write('codex-cli 0.0.0-fake\n');
+  process.exit(0);
+}
+// The health checks' login status (SF-153): logged in, like the real `codex login status`; nothing
+// is logged and no run is taken.
+if (argv[0] === 'login' && argv[1] === 'status') {
+  process.stdout.write('Logged in using ChatGPT (fake)\n');
   process.exit(0);
 }
 const option = (name: string): string | undefined => {

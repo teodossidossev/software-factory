@@ -10,6 +10,8 @@ c4f6d33. It found two critical ways out of the sandbox, both closed by SF-159: a
 rewrite the worktree's `.git` so that the factory's next Git call ran a command as you, and a job
 could write `.claude/settings.json` hooks (or `.mcp.json`, `.codex/`) that the next Claude session
 in the worktree ran outside any sandbox. Its other findings are listed under "Open".
+After its fixes (SF-159, SF-161 to SF-166): 2026-11-10, `sf smoke` PASS on `main` at 565d83e
+(12 of 12 steps, every one of its 12 sandbox probes refused).
 Before it: 2026-11-08, `sf smoke` PASS on `main` at aa1a9f1 (12 of 12 steps, every sandbox probe
 refused), and the factory's test command passed in a sandbox without network on `main` at c66ab78.
 

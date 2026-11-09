@@ -141,16 +141,18 @@ export function digestCounts(workspaces: DigestWorkspace[]): DigestCounts {
 const localDay = (date: Date, offset = 0): Date => new Date(date.getFullYear(), date.getMonth(), date.getDate() + offset);
 const isWeekend = (date: Date): boolean => date.getDay() === 0 || date.getDay() === 6;
 
-// The daily's two days: yesterday, the last working day before today (00:00 to 24:00 local time;
-// Friday on a Monday), and today until now.
+// The daily's two days: yesterday, from 00:00 (local time) of the last working day before today to
+// 00:00 of today (Friday and the weekend on a Monday), and today until now. No moment falls between
+// them.
 export function dailyDays(now: Date): { yesterday: Span; today: Span } {
   let yesterday = localDay(now, -1);
   while (isWeekend(yesterday)) {
     yesterday = localDay(yesterday, -1);
   }
+  const today = localDay(now);
   return {
-    yesterday: { from: yesterday.toISOString(), to: localDay(yesterday, 1).toISOString() },
-    today: { from: localDay(now).toISOString(), to: now.toISOString() },
+    yesterday: { from: yesterday.toISOString(), to: today.toISOString() },
+    today: { from: today.toISOString(), to: now.toISOString() },
   };
 }
 

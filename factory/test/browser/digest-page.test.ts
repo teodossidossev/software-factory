@@ -44,7 +44,8 @@ function record(id: string, extra: Partial<DigestRecord> = {}): DigestRecord {
   const tools = workspace('tools', 'tools', null, { fetch: { status: 'skipped', message: 'mirror not created: could not read from the remote', last_fetch_ok_at: null, notes: [] } });
   return {
     id, trigger: 'scheduled', started_at: TO, ended_at: '2026-11-06T07:02:00.000Z', period: { from: '2026-11-05T07:00:00.000Z', to: TO },
-    daily_days: { yesterday: { from: '2026-11-04T22:00:00.000Z', to: '2026-11-05T22:00:00.000Z' }, today: { from: '2026-11-05T22:00:00.000Z', to: TO } },
+    // Yesterday starts 24 hours before the digest: the day before it in any time zone.
+    daily_days: { yesterday: { from: hoursBefore(24), to: hoursBefore(7) }, today: { from: hoursBefore(7), to: TO } },
     model: 'sonnet', language: 'English', workspaces: [api, web, tools],
     daily_sources: [{ app: 'shop', workspaces: ['api'], commits: [{ sha: 'a1b2c3d4e5', ref: 'SHOP-8-mine', date: hoursBefore(20), subject: 'SHOP-8: My orders', why: '', stat: '', workspace: 'api' }], open_branches: [] }],
     output: {

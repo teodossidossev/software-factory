@@ -503,8 +503,12 @@ interface DigestSummary {
 // One digest, api/digests/<id>: src/digest-run.ts DigestRecord.
 interface DigestRecord {
   id: string;
+  started_at: string;
   ended_at: string;
   period: { from: string; to: string };
+  // The daily's days; older records may lack it.
+  daily_days?: { yesterday: { from: string; to: string }; today: { from: string; to: string } };
+  language: string;
   workspaces: DigestWorkspace[];
   daily_sources: DigestDailySource[];
   output: DigestOutput | null;

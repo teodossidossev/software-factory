@@ -154,8 +154,12 @@ test('mark_clean: the MR turn writes the MR text only; the factory commits once 
     enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false,
     network: { allowedDomains: ['registry.npmjs.org', 'pypi.org'], allowLocalBinding: true, allowAllUnixSockets: true },
   });
-  // Filesystem isolation pinned on over the user's settings (SF-100).
-  assert.deepEqual(Object.keys(filesystem).sort(), ['denyRead', 'denyWrite', 'disabled']);
+  // Filesystem isolation pinned on over the user's settings (SF-100); the host's temporary roots
+  // denied, the session's kept paths there read back (src/host-tmp.ts).
+  assert.deepEqual(Object.keys(filesystem).sort(), ['allowRead', 'allowWrite', 'denyRead', 'denyWrite', 'disabled']);
+  assert.ok(filesystem.allowWrite.includes(worktree) && filesystem.allowWrite.includes(log[0]!.tmpdir!.path), JSON.stringify(filesystem.allowWrite));
+  // The session ended at the hand-over, so its temporary folder is gone.
+  assert.equal(await exists(log[0]!.tmpdir!.path), false);
   assert.equal(filesystem.disabled, false);
   // Every turn (the MR turn too): DENIED_TOOLS, then the same path denials, built once by the session.
   for (const entry of log) {

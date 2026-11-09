@@ -6,12 +6,13 @@ import { dirname, resolve } from 'node:path';
 import { type Options, query, type SandboxSettings, type SDKMessage, type SDKResultMessage, type SettingSource } from '@anthropic-ai/claude-agent-sdk';
 import * as z from 'zod/v4';
 import { type ImageRef, promptInput } from './attachments.js';
+import { type ClaudeTmp, makeSessionTmp, removeSessionTmp } from './host-tmp.js';
 import type { UserMessage } from './job-stream.js';
 import type { FileChange } from './jobs.js';
 import { type FixItem, fixItemLine, LEDGER_REF, type LedgerEntry, SCOPE_PROBLEM, SENSITIVE_PROBLEM, settledLines } from './ledger.js';
 import { handbookSection } from './prompts.js';
 import { ENV_FILE_RULES } from './rules.js';
-import { type SandboxDenials, withSandboxDenials } from './sandbox-denials.js';
+import { type PathDenials, type SandboxDenials, withSandboxDenials } from './sandbox-denials.js';
 import { JOB_SESSION_SETTINGS, sessionEnvironment, withSandboxEnvDenials } from './session.js';
 import { TASK_DIR } from './task-file.js';
 
@@ -228,12 +229,19 @@ export interface ReviewOptions {
   // The Task's images: their image blocks follow the prompt in the session's user message,
   // each after a line naming it, as for the Implementer.
   images?: ImageRef[] | undefined;
-  // The session's path denials (src/sandbox-denials.ts): permission rules denied on top of
-  // the session's own, and the sandbox's filesystem deny lists merged into sandbox.
+  // Builds the session's path denials (src/sandbox-denials.ts) for the temporary folder
+  // runStructuredSession makes: their tools, sandbox lists, claudeTmp and hooks go into the fields
+  // below. Its error is the one runStructuredSession throws (the session's refusal before it starts).
+  pathDenials?: ((sessionTmp: string) => Promise<PathDenials>) | undefined;
+  // The session's path denials: permission rules denied on top of the session's own, and the
+  // sandbox's filesystem deny lists and the host's temporary roots' lists merged into sandbox.
   deny?: string[] | undefined;
   filesystem?: SandboxDenials | undefined;
+  claudeTmp?: ClaudeTmp | undefined;
   // The path denials' hooks (the file-tool guard), merged with the session's own hooks.
   hooks?: Options['hooks'];
+  // The session's own temporary folder, its CLAUDE_CODE_TMPDIR.
+  sessionTmp?: string | undefined;
   // The session's tools; REVIEW_TOOLS by default. [] (the morning digest): none but the
   // SDK's structured-output tool.
   tools?: string[];
@@ -267,7 +275,7 @@ export function outsideInstructionFiles(cwd: string): string[] {
 // settings and ~/.claude/CLAUDE.md; CLAUDE_CODE_DISABLE_AUTO_MEMORY leaves out the user's
 // auto-memory of the project, which the CLI loads whatever the setting sources; claudeMdExcludes
 // leaves out the instruction files above the worktree; JOB_SESSION_SETTINGS runs no settings hook.
-export function reviewSessionOptions(options: Omit<ReviewOptions, 'onMessage' | 'signal'>, abortController: AbortController): Options {
+export function reviewSessionOptions(options: Omit<ReviewOptions, 'onMessage' | 'signal' | 'pathDenials'>, abortController: AbortController): Options {
   return readOnlySessionOptions(options, abortController, REVIEW_SCHEMA);
 }
 
@@ -277,13 +285,13 @@ export function reviewSessionOptions(options: Omit<ReviewOptions, 'onMessage' | 
 // guard) merged with the options' hooks (the file-tool guard); the environment's credentials
 // denied to sandboxed commands.
 export function readOnlySessionOptions(
-  options: Omit<ReviewOptions, 'onMessage' | 'signal'>, abortController: AbortController, schema: Record<string, unknown>, deny: readonly string[] = [],
+  options: Omit<ReviewOptions, 'onMessage' | 'signal' | 'pathDenials'>, abortController: AbortController, schema: Record<string, unknown>, deny: readonly string[] = [],
   sessionHooks?: Options['hooks'],
 ): Options {
   // The environment, built once: the CLI gets it, and its credentials are hidden from sandboxed
   // commands, after the path denials, as in an Implementer turn.
   const environment = sessionEnvironment();
-  const sandbox = withSandboxEnvDenials(withSandboxDenials(options.sandbox, options.filesystem), environment);
+  const sandbox = withSandboxEnvDenials(withSandboxDenials(options.sandbox, options.filesystem, options.claudeTmp), environment);
   const hooks = mergeHooks(sessionHooks, options.hooks);
   return {
     abortController,
@@ -296,7 +304,10 @@ export function readOnlySessionOptions(
     outputFormat: { type: 'json_schema', schema },
     maxTurns: options.maxTurns,
     // A known startup failure (such as an unavailable sandbox) then ends with a result message.
-    env: { ...environment, CLAUDE_CODE_STARTUP_FAILURE_RESULTS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
+    env: {
+      ...environment, CLAUDE_CODE_STARTUP_FAILURE_RESULTS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+      ...(options.sessionTmp !== undefined ? { CLAUDE_CODE_TMPDIR: options.sessionTmp } : {}),
+    },
     ...(sandbox !== undefined ? { sandbox } : {}),
     ...(options.model !== undefined ? { model: options.model } : {}),
     ...(options.claudePath !== undefined ? { pathToClaudeCodeExecutable: options.claudePath } : {}),
@@ -342,11 +353,34 @@ export type StructuredOutcome<T> =
   | { ok: true; output: T; costUsd: number | null; model: string | null; startedAt: string; endedAt: string }
   | { ok: false; message: string; model: string | null; startedAt: string; endedAt: string };
 
-// Runs one read-only session. Never throws: an error, a turn that is not a success, or a missing
-// or invalid structured output is a failed outcome. Nothing is retried.
+// Runs one read-only session in a temporary folder of its own (makeSessionTmp, its
+// CLAUDE_CODE_TMPDIR), made at its start and removed at its end, whatever the end; the path
+// denials, given pathDenials, are built for that folder. Never throws but pathDenials' own error:
+// any other error, a turn that is not a success, or a missing or invalid structured output is a
+// failed outcome. Nothing is retried.
 export async function runStructuredSession<T>(prompt: string, options: ReviewOptions, session: StructuredSession<T>): Promise<StructuredOutcome<T>> {
-  const { noun } = session;
   const startedAt = new Date().toISOString();
+  let sessionTmp: string;
+  try {
+    sessionTmp = await makeSessionTmp();
+  } catch (error) {
+    const message = `The ${session.noun} session could not make its temporary folder: ${error instanceof Error ? error.message : String(error)}`;
+    return { ok: false, message: message.slice(0, 1000), model: null, startedAt, endedAt: new Date().toISOString() };
+  }
+  try {
+    const denials = await options.pathDenials?.(sessionTmp);
+    const built: ReviewOptions = denials === undefined ? { ...options, sessionTmp } : {
+      ...options, sessionTmp, deny: [...(options.deny ?? []), ...denials.tools], filesystem: denials.sandbox, claudeTmp: denials.claudeTmp, hooks: mergeHooks(options.hooks, denials.hooks),
+    };
+    return await runSession(prompt, built, session, startedAt);
+  } finally {
+    await removeSessionTmp(sessionTmp);
+  }
+}
+
+// One read-only session with its options built (runStructuredSession): its outcome, never thrown.
+async function runSession<T>(prompt: string, options: ReviewOptions, session: StructuredSession<T>, startedAt: string): Promise<StructuredOutcome<T>> {
+  const { noun } = session;
   let model: string | null = null;
   const failed = (message: string): StructuredOutcome<T> => ({ ok: false, message: message.slice(0, 1000), model, startedAt, endedAt: new Date().toISOString() });
   const abortController = new AbortController();
@@ -392,7 +426,8 @@ export async function runStructuredSession<T>(prompt: string, options: ReviewOpt
   return { ok: true, output: parsed.data, costUsd: result.total_cost_usd ?? null, model, startedAt, endedAt: new Date().toISOString() };
 }
 
-// Runs one review session; never throws (runStructuredSession). A fix without items fails too.
+// Runs one review session; never throws but its path denials' error (runStructuredSession). A fix
+// without items fails too.
 export async function runReview(prompt: string, options: ReviewOptions): Promise<ReviewOutcome> {
   const outcome = await runStructuredSession(prompt, options, { schema: REVIEW_SCHEMA, output: reviewOutput, noun: 'review', outputNoun: 'verdict' });
   const { startedAt, endedAt } = outcome;

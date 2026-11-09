@@ -543,7 +543,12 @@ test('the smoke\'s session (SF-104, SF-109, SF-110): an sf serve whose state dir
   await waitFor(served, 'P-1', 'awaiting_review', 2);
   await stop(served);
 
-  const [smoke, real] = await fakeLog(env);
+  const [smokeLogged, realLogged] = await fakeLog(env);
+  // Each session has a temporary folder of its own (CLAUDE_CODE_TMPDIR), read back by its sandbox:
+  // the same place in both argv once named alike.
+  const own = (entry: typeof smokeLogged): typeof smokeLogged => ({ ...entry!, argv: entry!.argv.map((arg) => arg.split(entry!.tmpdir!.path).join('<session tmp>')) });
+  assert.notEqual(smokeLogged!.tmpdir!.path, realLogged!.tmpdir!.path);
+  const [smoke, real] = [own(smokeLogged), own(realLogged)];
   const allowed = (argv: string[]): string[] => argv.filter((arg) => arg.startsWith('--allowedTools'));
   assert.deepEqual(allowed(smoke!.argv), ['--allowedTools=Bash(node probe.mjs:*),Read,Edit,Write,Glob,Grep,TodoWrite']);
   assert.deepEqual(allowed(real!.argv), []);

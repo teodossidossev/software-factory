@@ -10,13 +10,13 @@ import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:net';
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { createConnection, createServer } from 'node:net';
 import { basename, dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { CLASSIFIER_DENIAL, DONT_ASK_DENIAL, initToolsProblem, outsideWriteProblem, probeCallProblem, probeProblem, smokePaths, smokeProbe, smokeTask, STEPS } from '../src/live-smoke.js';
 import * as liveSmoke from '../src/live-smoke.js';
-import { PROBE_SCRIPT, PROBES, probeCommand, socketProbeScript } from '../src/smoke-probe.js';
+import { hostTmpSocket, PROBE_SCRIPT, PROBES, probeCommand, socketProbeScript } from '../src/smoke-probe.js';
 import { FILE_GUARD } from '../src/sandbox-denials.js';
 import { bwrapLog, codexLog, codexScript, fakeCodex, fakeLog, git, reviewLog, reviewScript, script, temp } from './support/harness.js';
 import { BRANCH, CHECK_READY, CLAUDE_CLEAN, CLEAN_TURNS, cleanScripts, onlyChecksDir, probeOutput, smoke, statuses, untouched } from './support/live-smoke.js';
@@ -84,12 +84,18 @@ test('--keep keeps the directory and prints it; the bare remote has the job\'s b
     assert.match(canary, /^SF_CANARY=[0-9a-f]{48}\n$/);
     // The user's paths found as the smoke finds them, in the test's home (SF-123).
     const found = (path: string): string | undefined => (existsSync(path) ? path : undefined);
+    const task = git(join(ran.dir, 'origin.git'), 'show', 'main:.software-factory/SMOKE-1.md');
+    // The host socket: in a folder of its own under the run's TMPDIR, outside the run's directory,
+    // gone with Cleanup (--keep or not).
+    const tmpSocket = /--tmp-socket '([^']+)'/.exec(task)?.[1];
+    assert.ok(tmpSocket !== undefined && dirname(dirname(tmpSocket)) === ran.tmp && !tmpSocket.startsWith(`${ran.dir}/`), task);
+    assert.equal(existsSync(dirname(tmpSocket)), false);
     const probe = smokeProbe(smokePaths(ran.dir), createHash('sha256').update(canary).digest('hex'), {
       ssh: found(join(ran.env.home, '.ssh')), dbus: found(`/run/user/${process.getuid!()}/bus`), docker: found('/var/run/docker.sock'),
-      claudeProjects: found(join(ran.env.home, '.claude', 'projects')),
+      claudeProjects: found(join(ran.env.home, '.claude', 'projects')), tmpSocket,
     }, ran.env.home);
+    assert.equal(probe.claudeTmp, `/tmp/claude-${process.getuid!()}`);
     assert.equal(probe.homeCanary, join(ran.env.home, `.sf-smoke-${basename(ran.dir).slice('sf-smoke-'.length)}`, 'canary'));
-    const task = git(join(ran.dir, 'origin.git'), 'show', 'main:.software-factory/SMOKE-1.md');
     assert.equal(task, smokeTask(probe, join(ran.dir, 'outside.txt')));
     assert.ok(task.includes(`--home-canary '${probe.homeCanary}'`));
     // SF-123: the Write outside the worktree asked for; the home canary gone with Cleanup.
@@ -329,6 +335,9 @@ test('probeProblem: every probe refused passes, absent only for the user\'s path
   assert.equal(probeProblem(probeOutput({ dbus: 'allowed', 'docker.sock': 'allowed', 'home-canary': 'allowed', '~/.claude/projects': 'allowed' })),
     'dbus allowed, docker.sock allowed, home-canary allowed, ~/.claude/projects allowed');
   assert.equal(probeProblem(probeOutput({ 'home-canary': 'absent' })), 'home-canary absent');
+  // The host's /tmp: its socket connected, other sessions' folder listed, or either failed.
+  assert.equal(probeProblem(probeOutput({ 'tmp-socket': 'allowed', 'claude-tmp': 'allowed' })), 'tmp-socket allowed, claude-tmp allowed');
+  assert.equal(probeProblem(probeOutput({ 'tmp-socket': 'failed', 'claude-tmp': 'absent' })), 'tmp-socket failed, claude-tmp absent');
   // Given the run's probe: absent only for a path the smoke did not give it (missing outside the sandbox).
   const paths = smokePaths('/t/sf-smoke-x');
   const given = smokeProbe(paths, 'ab'.repeat(32), { ssh: '/h/.ssh', dbus: '/run/user/1/bus', docker: '/var/run/docker.sock' }, '/h');
@@ -336,7 +345,7 @@ test('probeProblem: every probe refused passes, absent only for the user\'s path
   assert.equal(probeProblem(absent, given), '~/.ssh absent, though it exists, dbus absent, though it exists, docker.sock absent, though it exists');
   assert.equal(probeProblem(absent, smokeProbe(paths, 'ab'.repeat(32), {}, '/h')), undefined);
   assert.equal(probeProblem(JSON.stringify(PROBES.filter((name) => name !== 'dbus').map((name) => ({ name, outcome: 'refused' })))), 'dbus missing');
-  assert.equal(probeProblem(JSON.stringify([{ name: 'auth.env', outcome: 'refused' }])), 'dashboard-token missing, jobs missing, sf.sock missing, ~/.ssh missing, SSH_AUTH_SOCK missing, dbus missing, docker.sock missing, home-canary missing, ~/.claude/projects missing');
+  assert.equal(probeProblem(JSON.stringify([{ name: 'auth.env', outcome: 'refused' }])), 'dashboard-token missing, jobs missing, sf.sock missing, ~/.ssh missing, SSH_AUTH_SOCK missing, dbus missing, docker.sock missing, home-canary missing, ~/.claude/projects missing, tmp-socket missing, claude-tmp missing');
   assert.equal(probeProblem('not json'), 'probe.json is not JSON');
   assert.equal(probeProblem('{}'), 'probe.json is not a list of probes');
 });
@@ -347,6 +356,7 @@ test('the probe script: allowed only for what access shows (the canary by its SH
   await mkdir(join(dir, 'state', 'jobs', 'smoke'), { recursive: true });
   await mkdir(join(dir, 'ssh'));
   await mkdir(join(dir, 'projects', 'p'), { recursive: true });
+  await mkdir(join(dir, 'claude-tmp', 'tasks'), { recursive: true });
   await writeFile(join(dir, 'home-canary'), 'canary-value\n');
   await writeFile(join(dir, 'probe.mjs'), PROBE_SCRIPT);
   const canary = 'SF_CANARY=0123456789abcdef\n';
@@ -354,7 +364,7 @@ test('the probe script: allowed only for what access shows (the canary by its SH
   await writeFile(join(dir, 'state', 'dashboard-token'), 'token-value\n');
   await writeFile(join(dir, 'ssh', 'id_test'), 'key');
   const socket = join(dir, 'state', 'sf.sock');
-  const servers = [socket, join(dir, 'bus'), join(dir, 'docker.sock')].map((path) => {
+  const servers = [socket, join(dir, 'bus'), join(dir, 'docker.sock'), join(dir, 'tmp.sock')].map((path) => {
     const server = createServer((connection) => connection.end());
     return { server, listening: new Promise<void>((resolve) => server.listen(path, resolve)) };
   });
@@ -366,13 +376,14 @@ test('the probe script: allowed only for what access shows (the canary by its SH
     const open = {
       canary: join(dir, 'auth.env'), canarySha256: sha, token: join(dir, 'state', 'dashboard-token'), jobs: join(dir, 'state', 'jobs'), job: 'smoke', socket, ssh: join(dir, 'ssh'),
       dbus: join(dir, 'bus'), docker: join(dir, 'docker.sock'), claudeProjects: join(dir, 'projects'), homeCanary: join(dir, 'home-canary'),
+      tmpSocket: join(dir, 'tmp.sock'), claudeTmp: join(dir, 'claude-tmp'),
     };
     const allowed = run(open, { PATH: process.env.PATH, SSH_AUTH_SOCK: '/x' });
     assert.deepEqual(JSON.parse(allowed), [
       { name: 'auth.env', outcome: 'allowed', code: null }, { name: 'dashboard-token', outcome: 'allowed', code: null }, { name: 'jobs', outcome: 'allowed', code: null },
       { name: 'sf.sock', outcome: 'allowed', code: null }, { name: '~/.ssh', outcome: 'allowed', code: null }, { name: 'SSH_AUTH_SOCK', outcome: 'allowed', code: null },
       { name: 'dbus', outcome: 'allowed', code: null }, { name: 'docker.sock', outcome: 'allowed', code: null }, { name: 'home-canary', outcome: 'allowed', code: null },
-      { name: '~/.claude/projects', outcome: 'allowed', code: null },
+      { name: '~/.claude/projects', outcome: 'allowed', code: null }, { name: 'tmp-socket', outcome: 'allowed', code: null }, { name: 'claude-tmp', outcome: 'allowed', code: null },
     ]);
     assert.ok(!allowed.includes('SF_CANARY') && !allowed.includes('token-value') && !allowed.includes('canary-value'));
     // What a sandbox shows for a denied path: an empty file, an empty folder, nothing at all.
@@ -381,25 +392,55 @@ test('the probe script: allowed only for what access shows (the canary by its SH
     const hidden = {
       ...open, canary: join(dir, 'empty'), token: join(dir, 'empty'), jobs: join(dir, 'none'), socket: join(dir, 'missing.sock'), ssh: join(dir, 'none'),
       dbus: join(dir, 'missing.sock'), docker: join(dir, 'empty'), claudeProjects: join(dir, 'none'), homeCanary: join(dir, 'empty'),
+      tmpSocket: join(dir, 'missing.sock'), claudeTmp: join(dir, 'none'),
     };
     assert.deepEqual(JSON.parse(run(hidden, { PATH: process.env.PATH })), [
       { name: 'auth.env', outcome: 'refused', code: null }, { name: 'dashboard-token', outcome: 'refused', code: null }, { name: 'jobs', outcome: 'refused', code: null },
       { name: 'sf.sock', outcome: 'refused', code: 'ENOENT' }, { name: '~/.ssh', outcome: 'refused', code: null }, { name: 'SSH_AUTH_SOCK', outcome: 'absent', code: null },
       { name: 'dbus', outcome: 'refused', code: 'ENOENT' }, { name: 'docker.sock', outcome: 'refused', code: 'ECONNREFUSED' }, { name: 'home-canary', outcome: 'refused', code: null },
-      { name: '~/.claude/projects', outcome: 'refused', code: null },
+      { name: '~/.claude/projects', outcome: 'refused', code: null }, { name: 'tmp-socket', outcome: 'refused', code: 'ENOENT' }, { name: 'claude-tmp', outcome: 'refused', code: null },
+    ]);
+    // Under the host's /tmp: a socket that is a file is refused (ECONNREFUSED), /tmp/claude-<uid>
+    // missing too (ENOENT); any other error fails (a path too long for a socket, a file for the folder).
+    const tmpOf = (probe: Parameters<typeof probeCommand>[0]): unknown => (JSON.parse(run(probe, { PATH: process.env.PATH })) as Array<{ name: string }>).filter(({ name }) => name === 'tmp-socket' || name === 'claude-tmp');
+    assert.deepEqual(tmpOf({ ...hidden, tmpSocket: join(dir, 'empty'), claudeTmp: join(dir, 'missing') }), [
+      { name: 'tmp-socket', outcome: 'refused', code: 'ECONNREFUSED' }, { name: 'claude-tmp', outcome: 'refused', code: 'ENOENT' },
+    ]);
+    assert.deepEqual(tmpOf({ ...hidden, tmpSocket: join(dir, 'x'.repeat(120)), claudeTmp: join(dir, 'empty') }), [
+      { name: 'tmp-socket', outcome: 'failed', code: 'EINVAL' }, { name: 'claude-tmp', outcome: 'failed', code: 'ENOTDIR' },
     ]);
     // Options not given: absent, but for the home canary, which is always given (a missing one is refused).
-    const gone = { ...hidden, canary: join(dir, 'missing'), ssh: undefined, dbus: undefined, docker: undefined, claudeProjects: undefined, homeCanary: join(dir, 'missing') };
+    const gone = { ...hidden, canary: join(dir, 'missing'), ssh: undefined, dbus: undefined, docker: undefined, claudeProjects: undefined, homeCanary: join(dir, 'missing'), tmpSocket: undefined };
     const result = JSON.parse(run(gone, { PATH: process.env.PATH })) as Array<{ name: string; outcome: string; code: string | null }>;
     assert.deepEqual(result[0], { name: 'auth.env', outcome: 'refused', code: 'ENOENT' });
     assert.deepEqual(result.slice(4).map(({ name, outcome }) => [name, outcome]), [
       ['~/.ssh', 'absent'], ['SSH_AUTH_SOCK', 'absent'], ['dbus', 'absent'], ['docker.sock', 'absent'], ['home-canary', 'refused'], ['~/.claude/projects', 'absent'],
+      ['tmp-socket', 'absent'], ['claude-tmp', 'refused'],
     ]);
-    assert.equal(probeProblem(JSON.stringify(result)), undefined);
+    // The host socket is always given: absent fails the step.
+    assert.equal(probeProblem(JSON.stringify(result)), 'tmp-socket absent');
+    assert.equal(probeProblem(JSON.stringify(result.filter(({ name }) => name !== 'tmp-socket').concat({ name: 'tmp-socket', outcome: 'refused', code: 'ENOENT' }))), undefined);
     assert.ok(!probeCommand(gone).includes('--dbus') && !probeCommand(gone).includes('--docker') && !probeCommand(gone).includes('--claude-projects') && probeCommand(gone).includes('--home-canary'));
+    assert.ok(!probeCommand(gone).includes('--tmp-socket') && probeCommand(gone).includes(`--claude-tmp '${join(dir, 'none')}'`));
   } finally {
     servers.forEach(({ server }) => server.close());
   }
+});
+
+test('the Sandbox step\'s host socket: a listening Unix socket in a new 0700 folder under the given folder; closed, the folder is gone', async () => {
+  const base = join(temp, 'host-tmp-socket');
+  await rm(base, { recursive: true, force: true });
+  await mkdir(base, { recursive: true });
+  const listening = await hostTmpSocket(base);
+  assert.equal(dirname(dirname(listening.path)), base);
+  assert.equal((await stat(dirname(listening.path))).mode & 0o777, 0o700);
+  const reached = await new Promise<string>((resolve) => {
+    const client = createConnection(listening.path, () => resolve('connected'));
+    client.once('error', (error: NodeJS.ErrnoException) => resolve(error.code ?? 'error'));
+  });
+  assert.equal(reached, 'connected');
+  await listening.close();
+  assert.deepEqual(await readdir(base), []);
 });
 
 test('smoke-probe.ts (SF-161) holds the probe\'s names; live-smoke.ts re-exports the same', () => {

@@ -9,6 +9,7 @@
 // continuations per chain, whatever the hook answers.
 import { query, type SandboxSettings, type SDKMessage, type SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
 import { type ImageRef, promptInput } from './attachments.js';
+import { makeSessionTmp, removeSessionTmp } from './host-tmp.js';
 import { type PathDenials, withSandboxDenials } from './sandbox-denials.js';
 import { factoryRoots, reapOrphanedSandboxes } from './sandbox-reaper.js';
 
@@ -83,11 +84,13 @@ export interface SessionOptions {
   model?: string | undefined;
   // Continuations after a turn limit per chain (SF_TURN_LIMIT_CONTINUES); default 0.
   turnLimitContinues?: number | undefined;
-  // Builds the session's path denials (src/sandbox-denials.ts): called once, by the first
-  // turn before its query(); its tools go on top of every prompt's deny list, its sandbox lists
-  // into the sandbox settings of every query and its hooks (the file-tool guard) are every
-  // query's hooks. A failure fails that turn.
-  pathDenials?: (() => Promise<PathDenials>) | undefined;
+  // Builds the session's path denials (src/sandbox-denials.ts) for its temporary folder: called
+  // once, by the first turn before its query(); its tools go on top of every prompt's deny list, its
+  // sandbox lists and claudeTmp into the sandbox settings of every query and its hooks (the
+  // file-tool guard) are every query's hooks. A failure fails that turn.
+  pathDenials?: ((sessionTmp: string) => Promise<PathDenials>) | undefined;
+  // Where the session's temporary folder is made (default: os.tmpdir()).
+  tmp?: string | undefined;
   // Commands allowed past the permission check: one exact allowedTools rule
   // Bash(<command>) each, never a prefix rule, but in a smoke session (smokeMode), which gets the
   // one prefix rule SMOKE_PROBE_RULE instead. Only sf smoke's probe sets it (config.ts,
@@ -236,6 +239,19 @@ function assistantText(message: SDKMessage): string {
     .trim();
 }
 
+// Ends the live session under key: taken out of the map, then closed, its temporary folder removed
+// (a job handed over or pushed; a later message resumes it in a new session). Safe from the
+// session's own idle hook (close()). No entry under key does nothing.
+export async function endSession(live: Map<string, { session: ImplementerSession }>, key: string): Promise<void> {
+  const ended = live.get(key);
+  live.delete(key);
+  await ended?.session.close();
+}
+
+// The temporary folders of sessions dropped without close() (a fallback: the hand-over and the push
+// end theirs with endSession), removed once the session is collected; close() unregisters its own.
+const droppedSessions = new FinalizationRegistry<string>((dir) => void removeSessionTmp(dir));
+
 export class ImplementerSession {
   readonly #options: SessionOptions;
   readonly #hooks: SessionHooks;
@@ -249,6 +265,10 @@ export class ImplementerSession {
   #drained: Promise<void> = Promise.resolve();
   // The path denials, once the first turn has built them.
   #denials: PathDenials | undefined;
+  // The session's own temporary folder (CLAUDE_CODE_TMPDIR of every query), made by its first turn
+  // and kept for the session's life: removed when the session is closed, when it is dropped without
+  // being closed (once collected, droppedSessions) or when its process exits.
+  #tmp: string | undefined;
 
   constructor(options: SessionOptions, hooks: SessionHooks) {
     this.#options = options;
@@ -283,13 +303,26 @@ export class ImplementerSession {
     }
   }
 
+  // The session's temporary folder, once its first turn has made it.
+  get tmp(): string | undefined {
+    return this.#tmp;
+  }
+
   // Ends the session: queued prompts are dropped, a running turn is aborted, and no idle outcome
-  // is reported. Resolves once the turn has stopped.
+  // is reported. Resolves once the turn has stopped and the session's temporary folder is removed.
+  // Safe from the session's own idle hook (the hand-over closes it there): no turn runs then, and
+  // the drain, which waits for the hook, is not waited for.
   async close(): Promise<void> {
     this.#closed = true;
     this.#queue.length = 0;
     this.#abort?.abort();
-    await this.#drained;
+    if (this.#running) {
+      await this.#drained;
+    }
+    const tmp = this.#tmp;
+    this.#tmp = undefined;
+    droppedSessions.unregister(this);
+    await removeSessionTmp(tmp);
   }
 
   async #drain(): Promise<void> {
@@ -377,9 +410,14 @@ export class ImplementerSession {
     if (this.#closed) {
       throw new TurnError('closed', 'The session was closed before the turn started.');
     }
+    // The session's temporary folder, before its path denials, which keep it.
+    if (this.#tmp === undefined) {
+      this.#tmp = await makeSessionTmp(this.#options.tmp);
+      droppedSessions.register(this, this.#tmp, this);
+    }
     if (this.#denials === undefined && this.#options.pathDenials !== undefined) {
       try {
-        this.#denials = await this.#options.pathDenials();
+        this.#denials = await this.#options.pathDenials(this.#tmp);
       } catch (error) {
         // A refusal with its own code (such as user_settings_weaken_sandbox) keeps it for the job.
         const code = (error as { code?: unknown }).code;
@@ -392,7 +430,7 @@ export class ImplementerSession {
     }
     const denials = this.#denials;
     const environment = sessionEnvironment();
-    const sandbox = withSandboxEnvDenials(withSandboxDenials(this.#options.sandbox, denials?.sandbox), environment);
+    const sandbox = withSandboxEnvDenials(withSandboxDenials(this.#options.sandbox, denials?.sandbox, denials?.claudeTmp), environment);
     const abortController = new AbortController();
     this.#abort = abortController;
     const input = await promptInput(prompt, images);
@@ -410,7 +448,8 @@ export class ImplementerSession {
         ...(allowed.length > 0 ? { allowedTools: allowed } : {}),
         maxTurns: this.#options.maxTurns,
         // A known startup failure (such as an unavailable sandbox) then ends with a result message.
-        env: { ...environment, CLAUDE_CODE_STARTUP_FAILURE_RESULTS: '1' },
+        // Claude Code keeps its temporary files and sockets in the session's own folder.
+        env: { ...environment, CLAUDE_CODE_STARTUP_FAILURE_RESULTS: '1', CLAUDE_CODE_TMPDIR: this.#tmp },
         ...(this.#sessionId !== undefined ? { resume: this.#sessionId } : {}),
         ...(sandbox !== undefined ? { sandbox } : {}),
         // The file-tool guard, in every permission mode.

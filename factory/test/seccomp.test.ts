@@ -204,7 +204,7 @@ const listening = async (server: Server, where: string | number): Promise<void> 
 };
 
 test('under the real bwrap with the gate\'s wrapper: node cannot connect to an abstract Unix socket (EPERM); it can still spawn a child with piped stdio and open a TCP connection to loopback', { skip: realBwrap() }, async () => {
-  const empty: PathDenials = { tools: [], sandbox: { denyRead: [], denyWrite: [] }, kept: [], hooks: undefined };
+  const empty: PathDenials = { tools: [], sandbox: { denyRead: [], denyWrite: [] }, claudeTmp: { denyRead: [], allowRead: [], allowWrite: [] }, kept: [], hooks: undefined };
   const wrapper = gateWrapper(empty, { worktree: temp, codexPath: process.execPath, codexHome: temp, iterationDir: temp, images: [], tmp: tmpdir() });
   assert.ok(wrapper.join(' ').includes('--seccomp 3'));
   const name = `sf-seccomp-test-${process.pid}`;

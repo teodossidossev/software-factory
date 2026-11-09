@@ -51,6 +51,36 @@ review, the simplification pass, the Task check):
 | The Task checks' checkouts (`<temp>/sf-task-checks-<uid>/`) | the Task files being checked |
 | Where your Unix sockets live, when they exist: `/run/user/<uid>` and `$XDG_RUNTIME_DIR`, `/run/dbus`, `/var/run/dbus`, `/run/docker.sock`, `/var/run/docker.sock`, `/run/containerd`, `/run/podman`, `/run/tailscale`, `/var/run/tailscale`, `/run/screen`, `/tmp/.X11-unix`, every `/tmp/ssh-*` and `/tmp/tmux-<uid>` | the D-Bus session bus (the systemd user manager runs commands outside any sandbox), docker, tailscaled, your SSH agents and tmux |
 
+## The host's temporary folder
+
+Claude Code's sandbox shows its commands the machine's own `/tmp`, where other programs keep their
+Unix sockets (a browser extension's bridge, Chrome's, other Claude sessions') and other Claude
+sessions their tool output (`/tmp/claude-<uid>`). So every Claude session the factory starts (the
+Implementer and its MR turns, the Claude review, the simplification pass, the Task check) reads
+nothing in `/tmp`, nor in the system temporary directory when it lies elsewhere, but its own paths
+there, when they lie there at all:
+
+| Kept under the temporary folder | Read | Written |
+| --- | --- | --- |
+| The session's worktree | yes | yes |
+| The session's own temporary folder | yes | yes |
+| The Task check's own folder (a Task check only; not the other checks') | yes | yes |
+| The session's checkout, the factory's state directory | yes | no |
+
+A more specific denial inside a kept path still holds: a `.env` in the worktree, another job's
+worktree, the state directory's `jobs/`. A socket or folder made in `/tmp` after the session
+started is out of reach too. The file tools are refused there the same way ("the host's temporary
+folder is outside this job").
+
+Each session gets a temporary folder of its own (`<temp>/sf-claude-<pid>-…`, 0700), which Claude Code
+uses instead of the shared `/tmp/claude-<uid>`; it is removed when the session ends, however it
+ends: the Implementer's lives as long as its session, through every turn, and goes when the
+session is closed or dropped. A process killed before it could remove it leaves it to the next session, which removes the
+folders of processes that no longer run. The Codex gate and the test runs are not concerned: each
+gets an empty `/tmp` of its own. `sf smoke`'s Sandbox step checks this on every update: the probe
+must neither connect to a socket the smoke listens on under the temporary folder nor list
+`/tmp/claude-<uid>`.
+
 Denied for reading: the `.env` and `.env.*` files that exist in the session's worktree and its
 workspace's checkout (tracked or not, ignored ones included; a folder Git cannot list is walked
 instead), but `.env.example`, `.env.sample` and `.env.template`. The tools are also denied every `.env` and `.env.*` path by pattern.
@@ -248,8 +278,8 @@ apply.
   the Patch, which go to OpenAI as they are.
 - **Unix sockets.** On Linux the sandbox can allow every Unix socket or none (allowing them by path
   is macOS only), and the repositories' tests use sockets of their own, so all are allowed. The
-  known socket locations above are denied instead; a socket elsewhere, in a path not denied, stays
-  reachable. `sf.sock` is in a denied path; whether that refuses a `connect()` to it, and to the
+  known socket locations above are denied instead, and a Claude session sees no host `/tmp` (above);
+  a socket elsewhere, in a path not denied, stays reachable. `sf.sock` is in a denied path; whether that refuses a `connect()` to it, and to the
   session bus and `docker.sock`, is what the `Sandbox` step of `sf smoke` checks. Abstract sockets
   belong to a network namespace and stay out of reach. A repository whose tests need docker needs
   `SF_SANDBOX=off`.

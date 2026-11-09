@@ -20,7 +20,7 @@ import { conflictPrompt, mrPrompt } from '../prompts.js';
 import { COMMIT_TYPES, DENIED_TOOLS, MANUAL_CLAIM, MAX_HEADER_CHARS, MR_REQUIRED_HEADINGS } from '../rules.js';
 import { configDir, type Workspace } from '../registry.js';
 import { actedVerdict, type ReviewItem, uniqueNits } from '../review.js';
-import type { IdleOutcome, ImplementerSession } from '../session.js';
+import { endSession, type IdleOutcome, type ImplementerSession } from '../session.js';
 import { pathDenials } from '../sandbox-denials.js';
 import { withoutDropped } from '../stops.js';
 import { readTask } from '../task-file.js';
@@ -374,7 +374,7 @@ export class MrPart {
     const cwd = live.cwd;
     const tip = (await runGit(cwd, ['rev-parse', '--verify', `refs/heads/${job.branch}`])).stdout.toString('utf8').trim();
     const content = mrMessage(mrText);
-    this.#sessions.live.delete(`${job.workspace}/${job.ticket}`);
+    await endSession(this.#sessions.live, `${job.workspace}/${job.ticket}`);
     const lines = [content.title, notificationLine((await this.#peers.status.lastFiles(job)) ?? [])];
     let ready: Job = { ...job, base_commit: job.target_commit, prepared_commit: tip };
     // The registry as it is now: its handoff may have changed while the job ran. When it cannot be
@@ -859,7 +859,7 @@ export class MrPart {
     if (opened !== undefined) {
       await this.#mrEvent(pushed, opened.reused ? 'reused' : 'created');
     }
-    this.#sessions.live.delete(`${workspaceName}/${ticket}`);
+    await endSession(this.#sessions.live, `${workspaceName}/${ticket}`);
     console.log(`${job.workspace}/${job.ticket}: pushed ${job.branch}\n  ${title}${link !== undefined ? `\n  ${link}` : ''}`);
     return {
       state: pushed.state, branch: pushed.branch, ...(title !== '' ? { title } : {}), ...(link !== undefined ? { link } : {}),

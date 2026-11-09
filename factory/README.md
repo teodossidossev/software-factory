@@ -396,7 +396,8 @@ sf smoke [--keep] [--timeout-min N] [--budget-usd N]
   Dashboard (the page and six API answers), Cleanup (an active job aborted, then `sf reset`: a reset once asked of `sf serve` runs to its end, so the abort comes first whatever the moment of a signal; `sf serve` stopped, what is left
   of every process group the run started, its own and the job runners', ended, a Task check
   worktree a stopped `sf check-task` left in the OS temp dir (`sf-task-checks-<uid>/check-*/repo`)
-  removed (the shared `sf-task-checks-<uid>` parent stays), the directory removed;
+  removed (the shared `sf-task-checks-<uid>` parent stays), the Claude sessions' temporary folders
+  of the run's ended processes swept, the host socket's folder removed, the directory removed;
   `--keep` keeps it). Each PASS is decided from what the factory wrote. A FAIL skips
   every later step up to Dashboard (but the gate off); a job that stops fails the step it was on
   with its error code and message. Cleanup always runs.
@@ -423,7 +424,12 @@ sf smoke [--keep] [--timeout-min N] [--budget-usd N]
   `~/.claude/projects` (each passed, as `--dbus`, `--docker` and `--claude-projects`, only when it
   exists outside the sandbox), and read the home canary `$HOME/.sf-smoke-<suffix>/canary`
   (`--home-canary`, always: Setup makes it with random content, Cleanup removes it, `--keep` or
-  not). It writes only `{name, outcome,
+  not); under the host's `/tmp` (`src/host-tmp.ts`), `connect()` to a Unix socket the step listens
+  on in a new 0700 folder under the OS temp dir, outside the run's directory (`tmp-socket`,
+  `--tmp-socket`: Setup makes it before the session starts, Cleanup closes it and removes the
+  folder, `--keep` or not; refused only on `ENOENT`, `ECONNREFUSED` or `EACCES`), and list other
+  Claude sessions' `/tmp/claude-<uid>` (`claude-tmp`, `--claude-tmp`; refused only on `ENOENT` or
+  an empty listing); any other error there is `failed`, which fails the step. It writes only `{name, outcome,
   code}` per probe (`refused`, `allowed` or `absent`, the error code), never anything it read; `absent`
   exactly for an option not given. As
   the sandbox may hide a denied file as empty, a folder as an empty listing, or answer `ENOENT`, a
@@ -1738,10 +1744,12 @@ command sources first) and the entries of `SF_SANDBOX_ALLOW_READ`. Claude Code's
 directory, when `CLAUDE_CONFIG_DIR` puts it outside the home, is guarded the same way. A kept
 path that is, or holds, the home keeps it whole. Every entry of the home and of
 each folder on the way down to a kept path that is neither a kept path nor on the way to one (nor a
-link into or holding one) goes into the sandbox's `denyRead`, and only there. No `allowRead` is
-used: the installed SDK lets `allowRead` win over `denyRead` for matching paths, which would re-open
-a `.env` or a credential inside a kept path. So every other denial stays a plain `denyRead` entry
-and wins inside a kept path too: a denied path is never covered by anything that re-opens it.
+link into or holding one) goes into the sandbox's `denyRead`, and only there: the home uses no
+`allowRead`. Every other denial stays a plain `denyRead` entry and wins inside a kept path too. A
+nested `denyRead` also wins over an `allowRead` around it (probed on Claude Code 2.1.319: with
+`denyRead: ["/tmp", "<work>/.env", "<work>/sub"]` and `allowRead: ["<work>"]`, `.env` and `sub/`
+stayed unreadable, the rest of `<work>` readable), which the host's temporary folder relies on
+(below); `sf smoke`'s Sandbox step, whose whole run lies under `/tmp`, checks it on every update.
 `SF_SANDBOX_ALLOW_READ` is parsed by `sandboxAllowRead` (`src/config.ts`), which refuses an entry
 naming the home itself (`.`); an entry that is, holds or lies in a path denied for reading, or whose
 path or real path is or holds a guarded root (the home, an outside `CLAUDE_CONFIG_DIR`), whatever
@@ -1765,8 +1773,8 @@ around the test run (section MR preparation) catches the rest. One of the four t
 replace it, so the denials are refused with `watched_path_unsafe`, naming the path: the session
 does not start (the Implementer's turn and the review fail with that code; the test step is
 `unavailable`). `Read`, `Grep`, `Glob` (its pattern's fixed part, per brace alternative too) and
-`LS` are refused when a target's real path is in the home directory outside the kept paths and the
-session's own Claude Code project folder `<CLAUDE_CONFIG_DIR or ~/.claude>/projects/<the worktree's
+`LS` are refused when a target's real path is in the home directory or a temporary root (below)
+outside the kept paths and the session's own Claude Code project folder `<CLAUDE_CONFIG_DIR or ~/.claude>/projects/<the worktree's
 path, every character but ASCII letters and digits as "-">` (past 200 characters cut, with a hash,
 as the CLI does), where Claude Code keeps the transcript and the tool output it saves; Bash stays
 denied it. `Glob` and `Grep` (SF-123 Fix 1) walk folders. The installed CLI runs ripgrep for both
@@ -1776,13 +1784,47 @@ without `--follow` (Glob: `rg --files --null --glob <pattern> --sort=modified --
 `/` matches at any depth), level by level by real path, 64 folders at a time, following every link
 to a folder (outside the worktree too: the temporary directory, a toolchain, where Claude Code lets
 sandboxed commands write `~/.npm/_logs`). It refuses the call when its folder, or a link below, is
-a refused path or holds a guarded root (a search of `/home`), naming the path; a dangling link
+a refused path or holds a guarded or temporary root (a search of `/home` or `/`), naming the path; a dangling link
 leads nowhere, a loop ends at a folder already walked, an error other than `ENOENT`, `ENOTDIR`,
 `ELOOP`, `EACCES` or `EPERM` refuses the call, and more than 50,000 folders refuse it. A link made
-by a background command after the check is not seen. A `~` path, a missing path, a pattern it cannot expand or an input it cannot read is
+by a background command after the check is not seen. A refusal in a temporary root reads "<path> is
+in a temporary root; the host's temporary folder is outside this job"; the home's keeps its own
+text. A `~` path, a missing path, a pattern it cannot expand or an input it cannot read is
 refused, and the reason, which starts with "The factory's file-tool guard", names the path. A
 dangling link is followed to where it points (a `Write` through it would create its target); a
 loop of links is refused.
+
+**The host's temporary folder** (`src/host-tmp.ts`). Claude Code's sandbox mounts the host's `/`
+read-only and keeps the host's `/tmp`, where other programs keep sockets (a browser extension's
+bridge, which takes tool requests without authentication; Chrome's `SingletonSocket`; other Claude
+sessions' proxy bridges; `.ICE-unix`) and other Claude sessions their tool output
+(`/tmp/claude-<uid>`). So every Claude session the factory starts (the Implementer and its MR turns,
+the Claude review, the simplification pass, the Task check) gets `PathDenials.claudeTmp`, merged into
+its sandbox only (`withSandboxDenials`' third argument): `denyRead` holds the temporary roots that
+exist, `/tmp` and the system temporary directory when it is not under `/tmp`, each by its path and
+real path; `allowRead` reads back each kept path that lies under one of them (by each spelling that
+does, when it exists): the session's worktree, its own temporary folder and, for a Task check, its
+own `check-*` folder (`DenialScope.checkFolder`; not the Task checks' parent, so not a sibling
+check's), which `allowWrite` holds too, and its checkout and the state directory (the
+smoke's run is under `/tmp`), read only. Every more specific `denyRead` inside a kept path (a `.env`,
+another job, `jobs/`, the Task checks' parent of a job) stays in force. `pathDenials(...).sandbox`
+does not hold the roots: the Codex gate and the test runs keep their own empty `/tmp`. A job
+session's user settings are held against the roots too: an `allowRead` there under `/tmp` refuses the session with
+`user_settings_weaken_sandbox`. The file-tool guard keeps the same paths there (the state directory
+included); its tool rules still deny the state's entries. Each session gets a temporary folder of its own,
+`mkdtemp(<os.tmpdir()>/sf-claude-<pid>-)` (0700, short: Claude Code puts sockets there), passed as
+`CLAUDE_CODE_TMPDIR`, so Claude Code's `TMPDIR` for sandboxed commands is `<folder>/claude-<uid>`
+instead of the shared `/tmp/claude-<uid>`. The Implementer's session makes it with its first turn, before
+its path denials, keeps it for every later turn (a resumed turn finds what Claude Code left there),
+and removes it when it is closed, after a failed turn too: the hand-over and the push end the
+session (`endSession`, `src/execution/mr-steps.ts`), as abort and stop do; a session dropped
+without being closed loses it once it is collected (a `FinalizationRegistry`); `runStructuredSession` (the review, the simplification
+pass, the Task check, the digest) makes it at its start, builds the session's path denials for it
+(`ReviewOptions.pathDenials`) and removes it in its `finally`, whatever the end. A process that ends
+first removes its folders on exit; one killed before (a SIGKILL) leaves them to the next session,
+which removes every `sf-claude-<pid>-*` folder of the user whose process no longer runs
+(`sweepSessionTmps`), as `sf smoke`'s Cleanup does. The Task check's own guard (`guardHooks`) names
+the temporary folder in its refusal too.
 
 Denied for writing: Claude Code's user settings and global config (`$CLAUDE_CONFIG_DIR/settings.json`
 and `$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude/settings.json` and `~/.claude.json`), which a

@@ -9,10 +9,11 @@
 // Task checks create and the other sessions deny.
 // The user's socket locations are denied too; the .env files of the worktree and the checkout for
 // reading; the worktree's .git and agent configuration (.claude, .mcp.json, .codex) for writing; a
-// job's sandboxed commands read nothing in the home directory but the kept paths (by denyRead only,
-// never allowRead); and the file-tool guard, a PreToolUse hook every job session gets, holds Write
-// and Edit to the own worktree outside that configuration and the read tools out of the home
-// directory's other paths, by real path.
+// job's sandboxed commands read nothing in the home directory but the kept paths (by denyRead of the
+// rest), nor in the host's temporary roots (claudeTmp, host-tmp.ts: allowRead, inside which a nested
+// denyRead still wins); and the file-tool guard, a PreToolUse hook every job session gets, holds
+// Write and Edit to the own worktree outside that configuration and the read tools out of the home
+// directory's and the temporary roots' other paths, by real path.
 // The Codex gate runs inside bubblewrap under the same denyRead list (gateWrapper).
 // This module knows the file system, the registry and Git; it knows nothing about jobs.
 import type { HookCallback, Options, SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
@@ -24,6 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { envFilePath, sandboxAllowRead } from './config.js';
 import { FactoryError } from './errors.js';
 import { gitToplevel, runGit } from './git.js';
+import { type ClaudeTmp, claudeTmpOf, socketLocations, TMP_REFUSAL } from './host-tmp.js';
 import { configDir, loadRegistry } from './registry.js';
 import { AGENT_CONFIG, watchedPaths, within } from './test-command.js';
 
@@ -31,12 +33,14 @@ import { AGENT_CONFIG, watchedPaths, within } from './test-command.js';
 export type SandboxDenials = Required<Pick<NonNullable<SandboxSettings['filesystem']>, 'denyRead' | 'denyWrite'>>;
 
 // tools: permission deny rules for the session's disallowedTools; sandbox: merged into the
-// sandbox's filesystem settings (withSandboxDenials); kept: the paths under the home directory a
-// job's sandboxed commands may still read, real; hooks: the file-tool guard, the
+// sandbox's filesystem settings (withSandboxDenials); claudeTmp: the host's temporary roots, merged
+// only into a Claude session's (not the gate's or a test run's); kept: the paths under the home
+// directory a job's sandboxed commands may still read, real; hooks: the file-tool guard, the
 // hooks option of every job session's query().
 export interface PathDenials {
   tools: string[];
   sandbox: SandboxDenials;
+  claudeTmp: ClaudeTmp;
   kept: string[];
   hooks: Options['hooks'];
 }
@@ -50,6 +54,10 @@ export interface DenialScope {
   checkout: string;
   // The session's own worktree (job sessions), which stays readable and writable.
   worktree?: string | undefined;
+  // The session's own temporary folder (makeSessionTmp), kept readable and writable.
+  sessionTmp?: string | undefined;
+  // A Task check's own folder (its check-* folder under the Task checks' parent), kept readable and writable.
+  checkFolder?: string | undefined;
   stateDir: string;
   worktreeRoot: string;
   // The factory's config directory, which holds the registry (default: configDir(env)).
@@ -271,25 +279,6 @@ async function candidates(scope: DenialScope): Promise<{ readWrite: string[]; wr
   return { readWrite, writeOnly, readOnly, settings: claudeUserSettings(env, home) };
 }
 
-// Where the user's Unix sockets live: the session bus and the systemd user manager in the
-// runtime directory, the system bus, docker, containerd, podman, tailscaled, screen, X11, the SSH
-// agents and tmux, under root (/ but in tests). Linux cannot allow sockets by path, so their
-// locations are denied instead; a missing one is left out like every other.
-async function socketLocations(env: NodeJS.ProcessEnv, root: string): Promise<string[]> {
-  const uid = process.getuid?.() ?? 'user';
-  const at = (...parts: string[]): string => join(root, ...parts);
-  const paths = [
-    at('run', 'user', String(uid)), at('run', 'dbus'), at('var', 'run', 'dbus'), at('run', 'docker.sock'), at('var', 'run', 'docker.sock'),
-    at('run', 'containerd'), at('run', 'podman'), at('run', 'tailscale'), at('var', 'run', 'tailscale'), at('run', 'screen'),
-    at('tmp', '.X11-unix'), at('tmp', `tmux-${uid}`),
-    ...(await readdir(at('tmp')).catch(() => [] as string[])).filter((name) => name.startsWith('ssh-')).map((name) => at('tmp', name)),
-  ];
-  if (env.XDG_RUNTIME_DIR !== undefined && isAbsolute(env.XDG_RUNTIME_DIR)) {
-    paths.push(env.XDG_RUNTIME_DIR);
-  }
-  return paths;
-}
-
 // The example files a repository shares, which hold no secret: never denied.
 const ENV_EXAMPLES = new Set(['.env.example', '.env.sample', '.env.template']);
 
@@ -375,10 +364,10 @@ async function realTarget(path: string, followed = 0): Promise<string> {
   }
 }
 
-// The kept paths of a job session that exist, real: the own worktree and checkout, HOME_KEPT, the
-// installed Claude Code's shell snapshots (each Bash command first sources one) and the entries
-// of SF_SANDBOX_ALLOW_READ, each refused with invalid_config when it is, holds or lies in a path
-// denied for reading (denyRead), or is or holds a guarded root (the home itself, by any link).
+// The kept paths of a session that exist, real: the own worktree, temporary folder, check folder
+// (a Task check) and checkout, HOME_KEPT, Claude Code's shell snapshots (each Bash command
+// first sources one) and the entries of SF_SANDBOX_ALLOW_READ, each refused with invalid_config when
+// it is, holds or lies in a denyRead path, or is or holds a guarded root (the home, by any link).
 async function keptPaths(scope: DenialScope, home: string, denyRead: readonly string[]): Promise<string[]> {
   const env = scope.env ?? process.env;
   const extra: string[] = [];
@@ -399,7 +388,7 @@ async function keptPaths(scope: DenialScope, home: string, denyRead: readonly st
     extra.push(path);
   }
   const paths = [
-    ...(scope.worktree !== undefined ? [scope.worktree] : []), scope.checkout,
+    ...[scope.worktree, scope.sessionTmp, scope.checkFolder].filter((path) => path !== undefined), scope.checkout,
     ...HOME_KEPT.map((path) => join(home, path)), join(claudeConfigDir(env, home), 'shell-snapshots'), ...extra,
   ];
   const kept = new Set<string>();
@@ -497,13 +486,15 @@ export async function pathDenials(scope: DenialScope): Promise<PathDenials> {
   // The specific denials: what the user settings and SF_SANDBOX_ALLOW_READ are held against.
   const specific = { denyRead: [...denyRead], denyWrite: [...denyWrite] };
   const kept = await keptPaths(scope, home, specific.denyRead);
+  // What a Claude session reads in the host's temporary roots (claudeTmp.denyRead): its kept paths.
+  const claudeTmp = await claudeTmpOf({ ...scope, tmp: scope.tmp ?? tmpdir(), systemRoot: scope.systemRoot ?? '/' });
   // The Implementer, the review and the simplification pass load the user settings (settingSources
-  // "user"): one that weakens the sandbox stops the session before it starts. Their sandboxed
-  // commands read nothing in the home directory but the kept paths, by denyRead only: no
-  // allowRead, which would win over every denial inside what it re-opens.
+  // "user"): one that weakens the sandbox, the temporary roots' denial included, stops the session
+  // before it starts. Their sandboxed commands read nothing in the home directory but the kept
+  // paths, by denyRead of the home's other entries.
   const roots = await guardedRoots(env, home);
   if (scope.session === 'job') {
-    await checkUserSettings(claudeUserSettings(env, home)[0]!, specific, home);
+    await checkUserSettings(claudeUserSettings(env, home)[0]!, { ...specific, denyRead: [...specific.denyRead, ...claudeTmp.denyRead] }, home);
     for (const root of roots) {
       for (const path of await homeEntries(root, kept)) {
         (await denied(path))?.spellings.forEach((spelling) => denyRead.add(spelling));
@@ -513,8 +504,9 @@ export async function pathDenials(scope: DenialScope): Promise<PathDenials> {
   const sandbox = { denyRead: [...denyRead], denyWrite: [...denyWrite] };
   const projects = join(claudeConfigDir(env, home), 'projects');
   const ownProjects = scope.worktree === undefined ? [] : [...new Set([resolve(scope.worktree), (await realOrUndefined(scope.worktree)) ?? resolve(scope.worktree)])].map((path) => join(projects, claudeProjectName(path)));
-  const guard = await fileGuard({ worktree: scope.worktree, roots, kept, projects: ownProjects });
-  return { tools: [...tools], sandbox, kept, hooks: guardHooksOf(guard) };
+  // The guard keeps what the sandbox reads back in the temporary roots too (the state directory).
+  const guard = await fileGuard({ worktree: scope.worktree, roots, tmpRoots: claudeTmp.denyRead, kept: [...new Set([...kept, ...claudeTmp.allowRead])], projects: ownProjects });
+  return { tools: [...tools], sandbox, claudeTmp, kept, hooks: guardHooksOf(guard) };
 }
 
 // The text every refusal of the file-tool guard starts with (the smoke looks for it).
@@ -530,10 +522,11 @@ const MAX_ALTERNATIVES = 64;
 const GLOB_CHARS = /[*?[\]{}]/;
 
 // What the guard checks against, real paths: the own worktree (undefined: no write passes), the
-// guarded roots (guardedRoots), the kept paths and the session's own Claude Code project folders.
+// guarded roots, the temporary roots, the kept paths and the session's own Claude project folders.
 interface FileGuard {
   worktree: string | undefined;
   roots: string[];
+  tmpRoots: string[];
   kept: string[];
   projects: string[];
 }
@@ -543,6 +536,7 @@ async function fileGuard(given: FileGuard): Promise<FileGuard> {
   return {
     worktree: given.worktree === undefined ? undefined : await realTarget(resolve(given.worktree)),
     roots: given.roots,
+    tmpRoots: given.tmpRoots,
     kept: given.kept,
     projects: [...new Set(await Promise.all(given.projects.map((path) => realTarget(path))))],
   };
@@ -618,10 +612,12 @@ function targets(tool: string, input: Record<string, unknown>, cwd: string): { p
   return { paths, searches: SEARCH_TOOLS.has(tool) ? paths : [] };
 }
 
-// Whether a real path is one the read tools may not reach: in a guarded root, outside the kept
-// paths and the session's own Claude Code project folders.
-const readDenied = (guard: FileGuard, real: string): boolean =>
-  guard.roots.some((root) => within(real, root)) && !guard.kept.some((kept) => within(real, kept)) && !guard.projects.some((project) => within(real, project));
+// Where a real path the read tools may not reach lies ('tmp' a temporary root, 'home' a guarded
+// root), outside the kept paths and the session's own Claude Code project folders; else undefined.
+function readDenied(guard: FileGuard, real: string): 'tmp' | 'home' | undefined {
+  const outside = !guard.kept.some((kept) => within(real, kept)) && !guard.projects.some((project) => within(real, project));
+  return !outside ? undefined : guard.tmpRoots.some((root) => within(real, root)) ? 'tmp' : guard.roots.some((root) => within(real, root)) ? 'home' : undefined;
+}
 
 // The most folders the link check of one search walks; more refuse the search. SEARCH_BATCH: the
 // folders it reads at once.
@@ -641,12 +637,13 @@ const nowhere = <T>(fallback: T) => (error: NodeJS.ErrnoException): T => {
 };
 
 // Why a search reaching a folder (a real path) is refused: it is a refused path, or it holds one
-// of the guarded roots (a search of /home walks into the home directory).
+// of the guarded or temporary roots (a search of /home walks into the home directory).
 function searchDenied(guard: FileGuard, real: string): string | undefined {
-  if (readDenied(guard, real)) {
-    return 'in the home directory outside the worktree, the checkout and the toolchains';
+  const denied = readDenied(guard, real);
+  if (denied !== undefined) {
+    return denied === 'tmp' ? TMP_REFUSAL : 'in the home directory outside the worktree, the checkout and the toolchains';
   }
-  const held = guard.roots.find((root) => within(root, real));
+  const held = [...guard.roots, ...guard.tmpRoots].find((root) => within(root, real));
   return held === undefined ? undefined : `holding ${held}`;
 }
 
@@ -728,15 +725,15 @@ export async function fileGuardReason(guard: FileGuard, tool: string, input: unk
       const real = await realTarget(path);
       if (WRITE_TOOLS.has(tool)) {
         if (guard.worktree === undefined || !within(real, guard.worktree) || within(real, join(guard.worktree, '.git'))) {
-          return `${FILE_GUARD} refuses this ${tool}: ${path} is outside the job's worktree${guard.worktree === undefined ? '' : ` ${guard.worktree}`}, or in its .git.`;
+          return `${FILE_GUARD} refuses this ${tool}: ${path} ${readDenied(guard, real) === 'tmp' ? `is in a temporary root; ${TMP_REFUSAL}` : `is outside the job's worktree${guard.worktree === undefined ? '' : ` ${guard.worktree}`}, or in its .git`}.`;
         }
         // The agent configuration (.claude, .mcp.json, .codex), by its path or the real path it links to.
         const config = AGENT_CONFIG.map((name) => join(guard.worktree!, name));
         if ([...config, ...(await Promise.all(config.map((root) => realTarget(root))))].some((root) => within(real, root))) {
           return `${FILE_GUARD} refuses this ${tool}: ${path} is agent configuration; the factory does not let a job change it.`;
         }
-      } else if (readDenied(guard, real)) {
-        return `${FILE_GUARD} refuses this ${tool}: ${path} is in the home directory, outside the worktree, the checkout and the toolchains.`;
+      } else if (readDenied(guard, real) !== undefined) {
+        return `${FILE_GUARD} refuses this ${tool}: ${path} ${readDenied(guard, real) === 'tmp' ? `is in a temporary root; ${TMP_REFUSAL}` : 'is in the home directory, outside the worktree, the checkout and the toolchains'}.`;
       }
     }
     for (const path of found.searches) {
@@ -971,20 +968,23 @@ function present(path: string): boolean {
   }
 }
 
-// The sandbox settings with the denials merged into their filesystem lists; undefined (no sandbox,
-// SF_SANDBOX=off) stays undefined. A denied path gone since the denials were built (another job's
-// worktree removed at its push) is left out, so the sandbox leaves no placeholder in its place.
-export function withSandboxDenials(sandbox: SandboxSettings | undefined, denials: SandboxDenials | undefined): SandboxSettings | undefined {
+// The sandbox settings with the denials, and a Claude session's claudeTmp, merged into their
+// filesystem lists; undefined (no sandbox, SF_SANDBOX=off) stays undefined. A path gone since the
+// denials were built (another job's worktree removed at its push) is left out, so the sandbox leaves
+// no placeholder in its place.
+export function withSandboxDenials(sandbox: SandboxSettings | undefined, denials: SandboxDenials | undefined, claudeTmp?: ClaudeTmp): SandboxSettings | undefined {
   if (sandbox === undefined || denials === undefined) {
     return sandbox;
   }
   const filesystem = sandbox.filesystem ?? {};
+  const merged = (key: 'denyRead' | 'denyWrite' | 'allowRead' | 'allowWrite', paths: readonly string[]): string[] => [...new Set([...(filesystem[key] ?? []), ...paths.filter(present)])];
   return {
     ...sandbox,
     filesystem: {
       ...filesystem,
-      denyRead: [...new Set([...(filesystem.denyRead ?? []), ...denials.denyRead.filter(present)])],
-      denyWrite: [...new Set([...(filesystem.denyWrite ?? []), ...denials.denyWrite.filter(present)])],
+      denyRead: merged('denyRead', [...denials.denyRead, ...(claudeTmp?.denyRead ?? [])]),
+      denyWrite: merged('denyWrite', denials.denyWrite),
+      ...(claudeTmp === undefined ? {} : { allowRead: merged('allowRead', claudeTmp.allowRead), allowWrite: merged('allowWrite', claudeTmp.allowWrite) }),
     },
   };
 }

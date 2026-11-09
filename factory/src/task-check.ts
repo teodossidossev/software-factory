@@ -19,6 +19,7 @@ import { writeFileAtomic } from './atomic.js';
 import { attachmentReferences, imageHashes, type ImageRef, type ResolvedImage, resolveImages, writeImages } from './attachments.js';
 import type { Config } from './config.js';
 import { FactoryError } from './errors.js';
+import { inTmpRoot, TMP_REFUSAL, tmpRoots } from './host-tmp.js';
 import { Redactor } from './redact.js';
 import { runGit } from './git.js';
 import { resolveTarget } from './mr.js';
@@ -502,41 +503,44 @@ const STRUCTURED_OUTPUT_TOOL = 'StructuredOutput';
 
 // Why a tool call of the check is refused, or undefined when it is the session's answer
 // (STRUCTURED_OUTPUT_TOOL) or every path it reads is inside root (symlinks resolved) and outside a
-// .software-factory folder there. root is the check's worktree, a real path. Never throws: a call
-// the guard fails to check is refused (Claude Code would take a hook that throws as no decision and
-// let the call through).
-export async function guardReason(root: string, tool: string, input: unknown): Promise<string | undefined> {
+// .software-factory folder there. root is the check's worktree, a real path; temporary: the host's
+// temporary roots (tmpRoots), whose refusal says so (TMP_REFUSAL). Never throws: a call the guard
+// fails to check is refused (Claude Code would take a hook that throws as no decision and let the
+// call through).
+export async function guardReason(root: string, tool: string, input: unknown, temporary: readonly string[] = []): Promise<string | undefined> {
   if (tool === STRUCTURED_OUTPUT_TOOL) {
     return undefined;
   }
   try {
-    return await checkedReason(root, tool, input);
+    return await checkedReason(root, tool, input, temporary);
   } catch {
     return `The Task check could not check this ${tool} call; it is refused.`;
   }
 }
 
-async function checkedReason(root: string, tool: string, input: unknown): Promise<string | undefined> {
+async function checkedReason(root: string, tool: string, input: unknown, temporary: readonly string[]): Promise<string | undefined> {
   const targets = typeof input === 'object' && input !== null ? toolTargets(tool, input as Record<string, unknown>) : undefined;
   if (targets === undefined) {
     return `The Task check reads the repository with Read, Grep and Glob only, inside ${root}, by plain paths (no ~, no surrounding spaces); this ${tool} call is refused.`;
   }
   for (const target of targets) {
-    const inside = relative(root, await realTarget(resolve(root, target)));
+    const real = await realTarget(resolve(root, target));
+    const inside = relative(root, real);
     if (inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside) || inside.split(sep)[0] === TASK_DIR) {
-      return `The Task check may read only the repository checkout ${root}; ${target} is outside it.`;
+      return `The Task check may read only the repository checkout ${root}; ${target} ${inTmpRoot(real, temporary) ? `is in a temporary root: ${TMP_REFUSAL}` : 'is outside it'}.`;
     }
   }
   return undefined;
 }
 
-// The check's PreToolUse hook: every tool call passes guardReason first; a refusal is a deny.
-export function guardHooks(root: string): { PreToolUse: Array<{ hooks: HookCallback[] }> } {
+// The check's PreToolUse hook: every tool call passes guardReason first (with the temporary
+// roots); a refusal is a deny.
+export function guardHooks(root: string, temporary: readonly string[] = []): { PreToolUse: Array<{ hooks: HookCallback[] }> } {
   const guard: HookCallback = async (input) => {
     if (input.hook_event_name !== 'PreToolUse') {
       return {};
     }
-    const reason = await guardReason(root, input.tool_name, input.tool_input).catch(() => 'The Task check could not check this call; it is refused.');
+    const reason = await guardReason(root, input.tool_name, input.tool_input, temporary).catch(() => 'The Task check could not check this call; it is refused.');
     return reason === undefined ? {} : { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } };
   };
   return { PreToolUse: [{ hooks: [guard] }] };
@@ -642,50 +646,44 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
     }
     const refs: ImageRef[] = images.map(({ name, alt, type }) => ({ ticket, name, alt, type, path: join(imageDir, name) }));
     const redactor = new Redactor({ cwd });
+    // A failed record of the check, with its error, before its session ran.
+    const failed = (error: string): CheckRecord => ({
+      ...record, commit: checkout.commit, status: 'failed', output: null, error, model: options.model ?? null, cost_usd: null, started_at: startedAt, ended_at: new Date().toISOString(),
+    });
     let rules: string;
     try {
       rules = (await collectRules(workspace.workCheckout, checkout.commit, {
         workspace: workspace.name, skip: workspace.rulesSkip ?? [], configDir: options.configDir, maxBytes: options.rulesMaxBytes,
       })).block;
     } catch (error) {
-      const message = `The check could not collect the coding rules: ${error instanceof Error ? error.message : String(error)}`;
-      return {
-        ...record, commit: checkout.commit, status: 'failed', output: null, error: redactor.failure(message.slice(0, 1000)),
-        model: options.model ?? null, cost_usd: null, started_at: startedAt, ended_at: new Date().toISOString(),
-      };
+      return failed(redactor.failure(`The check could not collect the coding rules: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1000)));
     }
     if (options.signal?.aborted === true) {
-      return {
-        ...record, commit: checkout.commit, status: 'failed', output: null, error: 'The check was cancelled.',
-        model: options.model ?? null, cost_usd: null, started_at: startedAt, ended_at: new Date().toISOString(),
-      };
+      return failed('The check was cancelled.');
     }
     // The paths off limits to every session, but the Task checks' parent directory the check
-    // runs in: on top of checkDeniedRules for the tools, and for the sandbox.
-    let denials: Awaited<ReturnType<typeof pathDenials>>;
+    // runs in: on top of checkDeniedRules for the tools, and for the sandbox, with the session's
+    // temporary folder and the check's own folder (not its siblings) kept. The check's own guard (guardHooks) holds the tools, not the job's.
+    let outcome: Awaited<ReturnType<typeof runStructuredSession<CheckOutput>>>;
     try {
-      denials = await pathDenials({
-        session: 'task_check', workspace: workspace.name, checkout: workspace.workCheckout, stateDir: options.stateDir, worktreeRoot: options.worktreeRoot, configDir: options.configDir,
+      outcome = await runStructuredSession(checkPrompt(ticket, task, rules), {
+        cwd, claudePath: options.claudePath, sandbox: options.sandbox, model: options.model, maxTurns: options.maxTurns,
+        pathDenials: async (sessionTmp) => ({ ...(await pathDenials({ session: 'task_check', workspace: workspace.name, checkout: workspace.workCheckout, sessionTmp,
+          checkFolder: dirname(cwd), stateDir: options.stateDir, worktreeRoot: options.worktreeRoot, configDir: options.configDir })), hooks: undefined }),
+        signal: options.signal ?? new AbortController().signal, images: refs,
+        // Every message passes the redactor, so a failure after a withheld read is withheld too.
+        onMessage: async (message) => {
+          redactor.reviewMessage(message);
+          await options.onMessage?.(message);
+        },
+      }, {
+        schema: CHECK_SCHEMA, output: checkOutput, noun: 'check', outputNoun: 'output',
+        deny: checkDeniedRules(workspace.workCheckout, options.stateDir, options.configDir), hooks: guardHooks(cwd, await tmpRoots()),
       });
     } catch (error) {
-      const message = `The check could not build its path denials: ${error instanceof Error ? error.message : String(error)}`;
-      return {
-        ...record, commit: checkout.commit, status: 'failed', output: null, error: redactor.failure(message.slice(0, 1000)),
-        model: options.model ?? null, cost_usd: null, started_at: startedAt, ended_at: new Date().toISOString(),
-      };
+      // Only the path denials throw (runStructuredSession).
+      return failed(redactor.failure(`The check could not build its path denials: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1000)));
     }
-    const outcome = await runStructuredSession(checkPrompt(ticket, task, rules), {
-      cwd, claudePath: options.claudePath, sandbox: options.sandbox, model: options.model, maxTurns: options.maxTurns, filesystem: denials.sandbox,
-      signal: options.signal ?? new AbortController().signal, images: refs,
-      // Every message passes the redactor, so a failure after a withheld read is withheld too.
-      onMessage: async (message) => {
-        redactor.reviewMessage(message);
-        await options.onMessage?.(message);
-      },
-    }, {
-      schema: CHECK_SCHEMA, output: checkOutput, noun: 'check', outputNoun: 'output',
-      deny: [...checkDeniedRules(workspace.workCheckout, options.stateDir, options.configDir), ...denials.tools], hooks: guardHooks(cwd),
-    });
     const base = { ...record, commit: checkout.commit, model: outcome.model ?? options.model ?? null, started_at: startedAt, ended_at: outcome.endedAt };
     if (!outcome.ok) {
       return { ...base, status: 'failed', output: null, error: redactor.failure(outcome.message), cost_usd: null };

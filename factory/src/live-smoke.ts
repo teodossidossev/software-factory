@@ -7,8 +7,9 @@
 // review and gate records, the Task check record, the bare remote), not from an exit code alone.
 // A time and a cost budget bound the run; Cleanup always runs. Prints a pass/fail table.
 // The Sandbox step has the Implementer run a probe of the run's own secrets and control
-// paths (a canary env file, the dashboard token, jobs/, sf.sock, ~/.ssh, SSH_AUTH_SOCK) and of the
-// user's (the session bus, docker.sock, a canary in the home directory, ~/.claude/projects)
+// paths (a canary env file, the dashboard token, jobs/, sf.sock, ~/.ssh, SSH_AUTH_SOCK), of the
+// user's (the session bus, docker.sock, a canary in the home directory, ~/.claude/projects) and of
+// the host's /tmp (a socket the step listens on there, other Claude sessions' /tmp/claude-<uid>)
 // inside its sandbox, and passes only when every one was refused, the Implementer was offered no web
 // tool and its Write outside the worktree was refused by the factory's file-tool guard. Only the smoke's Implementer runs in
 // permission mode dontAsk, without the auto mode classifier, with any `node probe.mjs` call (a
@@ -28,21 +29,23 @@ import { fileURLToPath } from 'node:url';
 import { gateConfig } from './config.js';
 import { dashboardUrl, readToken } from './dashboard.js';
 import { findBwrap, gateEnvironment } from './gate.js';
+import { sweepSessionTmps } from './host-tmp.js';
 import { runGit } from './git.js';
 import { type Job, type JobState, JobStore, TERMINAL_STATES } from './jobs.js';
 import { mrTextProblem } from './mr.js';
 import { claudeConfigDir, FILE_GUARD, gateWrapperFor } from './sandbox-denials.js';
 import { filterSupports, spawnSeccomped } from './seccomp.js';
 import { PROBE_SCRIPT_NAME } from './session.js';
-import { PROBE_OUTPUT, PROBE_SCRIPT, PROBES, probeCommand, type SmokeProbe, socketProbeScript } from './smoke-probe.js';
+import { hostTmpSocket, PROBE_OUTPUT, PROBE_SCRIPT, probeCommand, probeProblem, PROBES, type SmokeProbe, socketProbeScript } from './smoke-probe.js';
 import { CheckStore } from './task-check.js';
 
 export const WORKSPACE = 'smoke';
 export const TICKET = 'SMOKE-1';
-export { PROBE_OUTPUT, PROBE_SCRIPT, PROBES, probeCommand, type SmokeProbe };
+export { PROBE_OUTPUT, PROBE_SCRIPT, probeCommand, probeProblem, PROBES, type SmokeProbe };
 
-// The user's paths the probe tries when they exist outside the sandbox.
-export type FoundPaths = Partial<Pick<SmokeProbe, 'ssh' | 'dbus' | 'docker' | 'claudeProjects'>>;
+// The user's paths the probe tries when they exist outside the sandbox, and the host socket the
+// Sandbox step listens on under the host's temporary folder (hostTmpSocket).
+export type FoundPaths = Partial<Pick<SmokeProbe, 'ssh' | 'dbus' | 'docker' | 'claudeProjects' | 'tmpSocket'>>;
 
 export const CANARY_FILE = 'auth.env';
 
@@ -58,7 +61,7 @@ export function smokeProbe(paths: SmokePaths, canarySha256: string, found: Found
   return {
     canary: join(paths.config, CANARY_FILE), canarySha256, token: join(paths.state, 'dashboard-token'), jobs: join(paths.state, 'jobs'), job: WORKSPACE,
     socket: join(paths.state, 'sf.sock'), ssh: found.ssh, dbus: found.dbus, docker: found.docker, claudeProjects: found.claudeProjects,
-    homeCanary: homeCanaryPath(paths, home),
+    homeCanary: homeCanaryPath(paths, home), tmpSocket: found.tmpSocket, claudeTmp: join('/tmp', `claude-${process.getuid?.() ?? ''}`),
   };
 }
 
@@ -107,8 +110,6 @@ Check that \`greeting.txt\` has exactly the two lines "hello" and "hello again".
 the expected probe output of the smoke's sandbox check; do not review it.
 `;
 }
-
-const MAY_BE_ABSENT: readonly string[] = ['~/.ssh', 'SSH_AUTH_SOCK', 'dbus', 'docker.sock', '~/.claude/projects'];
 
 // The text of the auto mode classifier's refusal in a tool_result.
 export const CLASSIFIER_DENIAL = 'denied by the Claude Code auto mode classifier';
@@ -226,45 +227,6 @@ export function outsideWriteProblem(events: string, outside: string, exists: boo
   }
   const text = resultText(results.get(call)?.content);
   return text.includes(FILE_GUARD) ? undefined : `the Write of ${outside} was not refused by the file-tool guard: ${text.trim().split('\n')[0]?.slice(0, PROBE_RESULT_CHARS) ?? ''}`;
-}
-
-// The probe option of each user path that may be absent, by probe name.
-const ABSENT_OPTIONS: Readonly<Record<string, keyof SmokeProbe>> = { '~/.ssh': 'ssh', dbus: 'dbus', 'docker.sock': 'docker', '~/.claude/projects': 'claudeProjects' };
-
-// The Sandbox step's verdict on probe.json's text: undefined when every probe is there and refused
-// (or absent where it may be), else what is wrong. Given the run's probe, absent passes only for a
-// path the smoke did not give it, because it is missing outside the sandbox. Nothing of
-// the file but names and outcomes is used.
-export function probeProblem(text: string, probe?: SmokeProbe): string | undefined {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return `${PROBE_OUTPUT} is not JSON`;
-  }
-  if (!Array.isArray(parsed)) {
-    return `${PROBE_OUTPUT} is not a list of probes`;
-  }
-  const outcomes = new Map<string, unknown>();
-  for (const entry of parsed as unknown[]) {
-    if (entry !== null && typeof entry === 'object' && typeof (entry as { name?: unknown }).name === 'string') {
-      outcomes.set((entry as { name: string }).name, (entry as { outcome?: unknown }).outcome);
-    }
-  }
-  const problems: string[] = [];
-  for (const name of PROBES) {
-    const outcome = outcomes.get(name);
-    const option = ABSENT_OPTIONS[name];
-    if (outcome === 'absent' && probe !== undefined && option !== undefined && probe[option] !== undefined) {
-      problems.push(`${name} absent, though it exists`);
-      continue;
-    }
-    if (outcome === 'refused' || (outcome === 'absent' && MAY_BE_ABSENT.includes(name))) {
-      continue;
-    }
-    problems.push(outcome === undefined ? `${name} missing` : `${name} ${typeof outcome === 'string' ? outcome : 'unreadable'}`);
-  }
-  return problems.length === 0 ? undefined : problems.join(', ');
 }
 
 export const STEPS = ['Setup', 'Task check', 'Start', 'Implementer turn', 'Sandbox', 'Gate sandbox', 'Claude review', 'Codex gate', 'MR text', 'Approve', 'Dashboard', 'Cleanup'] as const;
@@ -626,8 +588,9 @@ class Smoke {
   readonly #stopped: Promise<void>;
   // True until Cleanup: a halt stops the steps only while they run.
   #stepsRunning = true;
-  // The sandbox probe of the run, set by Setup.
+  // The sandbox probe of the run and its host socket under the temporary folder, set by Setup.
   #probe: SmokeProbe | undefined;
+  #tmpSocket: Awaited<ReturnType<typeof hostTmpSocket>> | undefined;
 
   constructor(paths: SmokePaths, options: SmokeOptions, print: (line: string) => void) {
     this.#paths = paths;
@@ -801,9 +764,10 @@ class Smoke {
     // canary, made here with random content.
     const home = homedir();
     const found = (path: string): string | undefined => (existsSync(path) ? path : undefined);
+    this.#tmpSocket = await hostTmpSocket();
     this.#probe = smokeProbe(this.#paths, createHash('sha256').update(canary).digest('hex'), {
       ssh: found(join(home, '.ssh')), dbus: found(`/run/user/${process.getuid?.() ?? ''}/bus`), docker: found('/var/run/docker.sock'),
-      claudeProjects: found(join(claudeConfigDir(process.env, home), 'projects')),
+      claudeProjects: found(join(claudeConfigDir(process.env, home), 'projects')), tmpSocket: this.#tmpSocket.path,
     }, home);
     await mkdir(dirname(this.#probe.homeCanary), { recursive: true, mode: 0o700 });
     await writeFile(this.#probe.homeCanary, `${randomBytes(24).toString('hex')}\n`, { mode: 0o600 });
@@ -1181,6 +1145,10 @@ class Smoke {
       await this.#groups.end(pid);
     }
     await this.#removeOutsideWorktrees(problems);
+    // The Claude sessions' temporary folders a stopped sf process could not remove.
+    await sweepSessionTmps();
+    // The host socket and its folder, outside the run's directory, go whatever --keep says.
+    await this.#tmpSocket?.close().catch((error: Error) => problems.push(`the host socket could not be removed: ${error.message}`));
     // The home canary goes whatever --keep says: it is outside the run's directory.
     if (this.#probe !== undefined) {
       try {

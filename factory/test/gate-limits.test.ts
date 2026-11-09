@@ -11,7 +11,7 @@ import { JobStore } from '../src/jobs.js';
 import { reviewPrompt } from '../src/review.js';
 import { loadHandbook } from '../src/server.js';
 import { fetchRaw } from './support/dashboard-client.js';
-import { call, codexLog, codexScript, fakeLog, git, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, temp, waitFor } from './support/harness.js';
+import { call, codexLog, codexScript, fakeLog, git, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
 import { alive, CLAUDE_CLEAN, eventsOf, exists, GATE_CLEAN, GATE_FIX, gateEnv, iterationDir, mrText, taskFile, until } from './support/gate.js';
 
 test('SF_GATE_MAX_ROUNDS=1: the second fix of the gate is not applied; needs_human gate_rounds with both summaries', async () => {

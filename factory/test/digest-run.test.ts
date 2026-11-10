@@ -151,7 +151,13 @@ test('a manual digest: the output stored with the Git data, the cost and the per
   // A guess in the digest's language, never the English word; no other English words.
   assert.doesNotMatch(call!.prompt, /Mark a guess with "likely"/);
   assert.match(call!.prompt, /Mark a guess with the word for "likely" in Deutsch\./);
-  assert.match(call!.prompt, /stay as they are; unless Deutsch is English, no other English words\./);
+  assert.match(call!.prompt, /stay as they are\. Unless Deutsch is English, no other English words, in any part\./);
+  // Identifiers stay as they are only in the Repositories tab; a daily is spoken at the stand-up
+  // and holds no SHAs, branch names or paths.
+  assert.match(call!.prompt, /In repos and cross_repo, identifiers/);
+  assert.doesNotMatch(call!.prompt, /\. Identifiers \(branch names/);
+  assert.match(call!.prompt, /stand-up/);
+  assert.match(call!.prompt, /A daily never holds commit SHAs, branch names, file paths/);
   const data = JSON.parse(/<git_data>\n(.*)\n<\/git_data>/s.exec(call!.prompt)![1]!);
   assert.deepEqual(data.apps, { shop: ['backend', 'frontend'] });
   assert.equal(data.workspaces[1].description, 'The shop\'s web front end.');

@@ -4269,8 +4269,9 @@ end), in a browser:
 SF-103. Every morning, per followed workspace: what landed on the main branch since the last
 digest, who landed it and what problem it solves; the live branches and what goes on there; and
 how this affects your own branches and tickets, also across the workspaces of one app (a backend
-and its frontend). And **My daily**: a stand-up draft per app (yesterday, the problems visible in
-Git, how you would likely address them, today). Git only: commit messages and the changes, no forge
+and its frontend). And **My daily**: a stand-up draft per app (yesterday, the problems the team
+should hear, how you would likely address them, today), not Git upkeep: being behind the main
+line, duplicate or unpushed commits are never a problem there. Git only: commit messages and the changes, no forge
 API, no issue tracker.
 
 **Settings** (`workspaces.json`, through the Workspaces drawer or by hand): per workspace
@@ -4336,7 +4337,12 @@ Git data.
 the structured output, no setting sources (no CLAUDE.md, AGENTS.md or user settings), no MCP server
 (`strictMcpConfig`, no `mcpServers`, `mcp__*` denied: the user's own would load otherwise), an empty
 `<state dir>/digest/session/` as its cwd, three turns and a 10-minute timeout. Facts only from the
-data, a guess marked "likely", problems and plans as suggestions, the settings' language. An invalid
+data, a guess marked "likely", problems and plans as suggestions, the settings' language. A daily is
+written as you would say it at the team's stand-up, to colleagues and a product owner who do not
+read Git: each piece of work by its ticket key and a short topic from its commits, one item per
+ticket, with no commit SHAs, branch names, file paths, counts of commits ahead or behind, or Git
+words (commit, push, rebase, merge, branch, master, main); the Repositories tab keeps the
+identifiers as they are. An invalid
 or failed answer is retried once; then the digest is stored with the Git data and the error, and the
 page shows the Git data with a note. About $0.30 per run with Sonnet for three repositories.
 

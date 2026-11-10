@@ -233,6 +233,29 @@ ask you a question between Start and your own review, so leave no decision open.
   Product tickets carry `check: required`.
 - **Never write a `## Fix N` section**: those are the factory's.
 
+## A follow-up to an open merge request
+
+When a merge request is already open (review comments to address, a small extension) and the
+follow-up belongs in it, not in a second merge request on top, set `base:` to the merge request's
+target and `continues:` to its branch:
+
+```markdown
+---
+ticket: APP-13
+title: Address the review of the CSV export
+base: main
+continues: APP-12-export-the-report-as-csv
+---
+```
+
+The job starts from `origin/APP-12-export-the-report-as-csv` on a branch of its own (your checkout
+can keep that branch checked out). At Clean its commit is rebased onto the branch as origin has it
+then, and Approve pushes it onto that branch, a fast-forward, never forced; the job's own branch is
+not pushed. The same merge request shows the change, its title and description unchanged; `sf mr
+create` reuses it. If someone pushed to the branch after the preparation, the push is refused
+(`mr_push_failed`) and `sf retry` prepares the commit again on the new tip. `continues` must differ
+from `base` and must not be `main` or `master`.
+
 ## The Task check
 
 The Task check (`sf check-task`; on the dashboard *Check*, *Check the plan* and the **Plan check**

@@ -125,6 +125,7 @@ a Task file or a log.
 ticket: PROJ-123
 title: Short title of the subtask
 base: master          # branch to start from; a feature branch if this depends on unmerged work
+continues: PROJ-100-csv   # optional: the branch of an open merge request this ticket adds to; base stays its target
 may_touch: [package.json, .github/**]   # optional: sensitive paths or globs this ticket is expected to change
 scope: [src/export/**, test/export.test.ts, README.md]   # optional: every file this ticket is expected to create, modify or delete
 lands_after: [PROJ-120, web/WEB-7]   # optional: the tickets this one waits for; another workspace's as <workspace>/<ticket>
@@ -170,6 +171,13 @@ any other Task is small and starts without one (`write_task` answers `not_needed
 reason). `check: required` (any value but `skip` counts as required) always asks for one: use it
 for product tickets; `check: skip` never. The user's Check runs one in every case, and its verdict
 counts: the run queue then waits for it to be `ready`.
+
+`continues:` names the source branch of a merge request already open on origin, for a follow-up
+(review comments, a small extension) that belongs in that same merge request: the job starts from
+`origin/<continues>`, is rebased onto it at Clean, and Approve pushes its commit onto that branch
+(never forced; the job's own branch is not pushed), so the open merge request shows the change and
+keeps its title and description. `base:` stays the merge request's target. Refused when it equals
+`base`, is `main` or `master`, or is not a valid branch name.
 
 `review:` says who reviews the ticket's iterations. `review: claude` adds the Claude review before
 the Codex gate: give it to risky tickets (authentication, the sandbox, the state format, and

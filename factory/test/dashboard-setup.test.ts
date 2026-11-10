@@ -364,7 +364,7 @@ test('dashboard ticket page (SF-081) through the real Setup: the history and the
     assert.equal(result(await act(base, 'api/tickets/app/T-1/task', { content: edited, sha256: taskSha256(plan) })).sha256, taskSha256(edited));
     assert.equal((await pageOf()).check.stale, true);
     await jobs.write({
-      workspace: 'app', ticket: 'T-1', branch: 'T-1-x', base: 'main', base_commit: null, target_commit: null, worktree: null, prepared_commit: null, mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0,
+      workspace: 'app', ticket: 'T-1', branch: 'T-1-x', base: 'main', continues: null, base_commit: null, target_commit: null, worktree: null, prepared_commit: null, mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0,
       state: 'working', iteration: 0, session_id: null, mr: null, created_at: '2026-11-05T10:00:00.000Z', updated_at: '2026-11-05T10:00:00.000Z',
     });
     assert.deepEqual(error(await act(base, 'api/tickets/app/T-1/task', { content: `${edited}Again.\n`, sha256: taskSha256(edited) })), { status: 409, code: 'job_active' });
@@ -462,7 +462,7 @@ test('dashboard images (SF-064) through the real Setup: upload by bytes, the typ
 
     // The guard: a running job refuses both, a paused one does not.
     const jobOf = (state: 'working' | 'paused') => ({
-      workspace: 'app', ticket: 'T-1', branch: 'T-1-x', base: 'main', base_commit: null, target_commit: null, worktree: null, prepared_commit: null, mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0,
+      workspace: 'app', ticket: 'T-1', branch: 'T-1-x', base: 'main', continues: null, base_commit: null, target_commit: null, worktree: null, prepared_commit: null, mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0,
       state, iteration: 0, session_id: null, mr: null, created_at: '2026-11-05T10:00:00.000Z', updated_at: '2026-11-05T10:00:00.000Z',
     });
     await jobs.write(jobOf('working'));

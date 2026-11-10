@@ -5,15 +5,16 @@
 //   MAX_RETRIES per Task sha256. A retry counts once it ran (its check stored a record), so one that
 //   was dropped (a job started, the update marker) is triggered again at a later sweep; the count lives
 //   in memory, so a restart of sf serve starts it again.
-// - not_ready: a new automatic check (moved) when the tip of the Task's base (resolveTarget on the
-//   work checkout, the commit a new check would read) is not the record's commit and the paths
-//   changed in between match the Task's scope or may_touch (any path without either). A commit Git no
-//   longer knows counts as moved, every path changed.
+// - not_ready: a new automatic check (moved) when the tip of the Task's base, or of its continues
+//   (resolveTarget on the work checkout, the commit a new check would read), is not the record's
+//   commit and the paths changed in between match the Task's scope or may_touch (any path without
+//   either). A commit Git no longer knows counts as moved, every path changed.
 // - ready: never re-checked.
 // The tip is resolved (fetched) at most once per workspace and base in a sweep, and only for a
 // not_ready ticket; a fetch or Git error skips the workspace for the sweep and is logged once.
 // The new check goes through AutoChecks' trigger, whose guards (a job that runs, a draft, checkNeed)
 // all apply; its record replaces the old one (same sha256, same file).
+import { taskStartBranch } from './continues.js';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
 import { resolveTarget } from './mr.js';
@@ -54,7 +55,7 @@ export interface RecheckOptions {
   now: () => number;
 }
 
-// One look at a queued ticket: its workspace, base, scope globs and current check record.
+// One look at a queued ticket: its workspace, base (or continues), scope globs and current check record.
 interface Look {
   workspace: Workspace;
   ticket: string;
@@ -161,7 +162,7 @@ export class Rechecks {
       }
       const record = await this.#options.store.read(name, ticket, await currentCheckSha256(workspace, ticket, task));
       const fields = parseFrontMatter(task) ?? new Map<string, string>();
-      return record === undefined ? undefined : { workspace, ticket, base: fields.get('base') ?? '', globs: [...(taskScope(fields) ?? []), ...mayTouch(fields)], record };
+      return record === undefined ? undefined : { workspace, ticket, base: taskStartBranch(fields), globs: [...(taskScope(fields) ?? []), ...mayTouch(fields)], record };
     } catch (error) {
       if (!(error instanceof FactoryError)) {
         console.error(error);

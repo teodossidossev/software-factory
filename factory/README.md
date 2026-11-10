@@ -1218,6 +1218,22 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   `failed`, `aborted` or `pushed` is archived first; any other state refuses (`job_exists`). The
   record and the validation are under the job lock, the fetch and the worktree creation under
   the workspace's Git lock, so a long fetch holds no other job.
+- **Continuing an open merge request** (`src/continues.ts`). A Task file may name
+  `continues: <branch>` in its front matter: the source branch of a merge request already open on
+  `origin`; `base` stays that merge request's target. `write_task` and `start` refuse it
+  (`invalid_content`) when it equals `base` (`"continues" must differ from "base".`), is a protected
+  branch (`main`, `master`: `"continues" must not be a protected branch (<name>).`) or is not a
+  valid branch name (only `A-Z a-z 0-9 . _ / -`, not starting with `-` or `/`, not ending with `/`,
+  `.` or `.lock`, no `..` or `//`: `"continues" must be a valid branch name.`); at start, a name
+  `git check-ref-format --branch` refuses is `base_not_found` ("The continued branch "<name>" is not
+  a valid branch name."). The job records it as `continues` (`null` for every other job). It
+  starts from `origin/<continues>` instead of `origin/<base>` (its `base_commit` is that branch's
+  tip; a missing one is `base_not_found` with its name), the Task check reads the plan at it, and
+  `sf rules` reads the rules there. The job's own branch is still `<ticket>-<slug>` (the user's
+  checkout usually has `<continues>` checked out, and Git allows one worktree per branch); it is
+  never pushed. MR preparation rebases onto the latest `origin/<continues>`, Approve pushes the
+  prepared commit onto `refs/heads/<continues>` (section MR preparation) and the merge request of
+  `<continues>` into `base` is reused.
 - When the session is idle (its last queued turn ended), the factory publishes an iteration: the
   Report (the last assistant text, plus `## Changed files` and `## Denied actions`), the Patch
   (`git diff <base commit>` plus untracked files in the worktree, without ignored,
@@ -2222,7 +2238,8 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    `sf guard <workspace> --worktree <ticket>` to see the matches. A `guard-terms.txt` that cannot be
    used (`guard_terms_invalid`) or a failed scan (`guard_failed`) stops it the same way.
 1. Target: `git fetch origin <base>` (60 s) when `origin` exists, target `origin/<base>`, else the
-   local `<base>`. Its commit is stored as `target_commit`. A rebase left in progress by a restart
+   local `<base>`; for a job with `continues` (section Jobs) the same with `<continues>` instead of
+   `<base>`. Its commit is stored as `target_commit`. A rebase left in progress by a restart
    of `sf serve` is aborted first.
 2. State `preparing_mr`, `mr_attempts + 1`; with a `test_command` in the workspace's entry of
    `workspaces.json`, the **test step** comes first (SF-128, below), and then the **MR text turn**:
@@ -2503,8 +2520,11 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    Then `git push origin <commit>:refs/heads/<branch>` of the very commit the guard checked (a
    branch that moved on since is not published unchecked; a handed-over job's saved commit goes
    through its saved ref; the LFS step above takes the same commit as its `<ref>`) with the
-   protection below (120 s); `pushed` with the
-   title and the merge request link (GitHub's compare page for `github.com`, GitLab's new merge
+   protection below (120 s); a job with `continues` (section Jobs) pushes
+   `<commit>:refs/heads/<continues>` instead, never forced, and never its own branch: a
+   `<continues>` that moved on `origin` since the preparation rejects the push (`mr_push_failed`)
+   and `sf retry` prepares again on its new tip. `pushed` with the
+   title and the merge request link (for `<continues>` with `continues`) (GitHub's compare page for `github.com`, GitLab's new merge
    request form otherwise; only the branch when the `origin` URL cannot be parsed). A failed
    push is `needs_human` with `mr_push_failed` or `mr_push_protected`; `sf approve` again
    retries it.
@@ -2515,7 +2535,9 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    | `mr_push_failed` | `git push origin <branch>:<branch>` failed (120 s; stderr in the message), or the job's Git LFS objects could not be pushed: git-lfs missing, `.lfsconfig` changed by the job or not the base's in the checkout, `git lfs push` failed |
 
 8. `sf mr create` (or the dashboard's Create merge request, SF-048): for a `pushed` job, opens a
-   pull request (GitHub) or merge request (GitLab) from the branch into the base, with the title
+   pull request (GitHub) or merge request (GitLab) from the branch (`<continues>` for a job with
+   `continues`, whose open merge request is reused as it is, title and description unchanged)
+   into the base, with the title
    and the body of `mrMessage`, the same as the commit's message; one already open for the branch
    is reused, never duplicated. From `ready_for_human_review` (or `needs_human` after a failed push)
    it is approve and then the merge request, in one action; the host and the token are checked
@@ -2534,7 +2556,7 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    **The merge check.** In a workspace with a `test_command`, the merge first checks the change
    against its base as it is now, whoever pushed the branch (`src/merge-check.ts`): the factory
    fetches the base and the branch from `origin` (one `git fetch` into `origin/<base>` and
-   `origin/<branch>`), creates a temporary detached worktree
+   `origin/<branch>`; the branch is `<continues>` for a job with `continues`), creates a temporary detached worktree
    `<worktree root>/<workspace>/.merge-check-<ticket>-<random>` at `origin/<base>`, merges the
    branch's head into it (`git merge --no-ff --no-edit`, no hooks, no fsmonitor, unsigned, no
    automatic maintenance) and runs the test command there, in the sandbox of the job's own test
@@ -2874,7 +2896,8 @@ yourself or take it back."). A failed push keeps the job `handed_over` with `err
 nothing else; Approve again, push from the IDE, or take it back.
 
 **The user's own push.** The board's job detail asks origin, without waiting and at most once a
-minute (`handover.checked_at`), `git ls-remote origin refs/heads/<branch>` (20 s). A commit R there
+minute (`handover.checked_at`), `git ls-remote origin refs/heads/<branch>` (20 s; for a job with
+`continues`, section Jobs, the branch is `<continues>`: the user pushes there). A commit R there
 that is known locally, is not B and descends from B moves the job to `pushed` with
 `prepared_commit` R and the event `handover_pushed {commit, same_tree}` (whether R's tree is S's).
 Errors change nothing and are logged. `sf handed-done` (I opened the MR myself) runs the same

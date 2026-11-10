@@ -661,8 +661,8 @@ export type RemoteBranch =
   | { kind: 'unrelated'; commit: string };
 
 // git ls-remote origin refs/heads/<branch> (20 s at most); a failure throws push_check_failed.
-export async function remoteBranch(checkout: string, ticket: string, handover: Handover): Promise<RemoteBranch> {
-  const ref = `refs/heads/${handover.branch}`;
+export async function remoteBranch(checkout: string, ticket: string, handover: Handover, branch = handover.branch): Promise<RemoteBranch> {
+  const ref = `refs/heads/${branch}`;
   const result = await git(checkout, ['ls-remote', 'origin', ref], 64 * 1024, LS_REMOTE_TIMEOUT_MS);
   if (result.code !== 0) {
     throw new FactoryError('push_check_failed', result.code === null ? `origin did not answer within ${LS_REMOTE_TIMEOUT_MS / 1000} s.` : `git ls-remote origin failed: ${result.stderr.trim().slice(0, 300)}`);

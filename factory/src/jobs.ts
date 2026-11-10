@@ -217,6 +217,8 @@ const jobSchema = z.strictObject({
   ticket: z.string().min(1),
   branch: z.string().min(1),
   base: z.string().min(1),
+  // The source branch of the open merge request the job continues (src/continues.ts); null for most.
+  continues: z.string().min(1).nullable().default(null),
   // The commit the branch was created from; the Patch is the difference to it.
   base_commit: commit.nullable(),
   // The target commit of MR preparation: resolved at Clean, the commit the branch is rebased onto.
@@ -261,8 +263,7 @@ const jobSchema = z.strictObject({
     bytes: z.number().int().min(0),
     sha256: z.string().regex(/^[0-9a-f]{64}$/),
   })).optional(),
-  // While paused or waiting_limit: the state the job was paused in, what was
-  // interrupted, and when.
+  // While paused or waiting_limit: the state the job was paused in, what was interrupted, and when.
   paused: z.strictObject({ from: z.enum(PAUSABLE_STATES), step: z.enum(PAUSE_STEPS).nullable(), at: timestamp }).optional(),
   // While waiting_limit: whose usage limit the session hit and when the run queue goes on
   // (the parsed reset, else paused.at + 30 minutes); reset_seen once that time passed under the
@@ -282,8 +283,7 @@ const jobSchema = z.strictObject({
   error: z.strictObject({ code: z.string(), message: z.string() }).optional(),
   // The job in the user's checkout; absent otherwise.
   handover: handoverSchema.optional(),
-  // Why the automatic hand-over did not happen at ready for review; absent once the job
-  // leaves ready_for_human_review or is handed over.
+  // Why the automatic hand-over did not happen; absent once the job leaves ready_for_human_review.
   handoff_skipped: z.strictObject({ code: z.string(), message: z.string() }).optional(),
   // The merge request the factory opened on the Git host, from pushed on; null before.
   mr: z.strictObject({

@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { missingAttachments } from './attachments.js';
 import { writeFileAtomic } from './atomic.js';
+import { validContinues } from './continues.js';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
 import { TERMINAL_STATES, type JobStore } from './jobs.js';
@@ -173,6 +174,10 @@ export function checkTaskContent(ticket: string, content: string): Buffer {
     if (!fields.get(key)) {
       throw new FactoryError('invalid_content', `the front matter must contain a non-empty "${key}:".`);
     }
+  }
+  const continues = fields.get('continues');
+  if (continues !== undefined) {
+    validContinues(continues, fields.get('base')!);
   }
   return buffer;
 }

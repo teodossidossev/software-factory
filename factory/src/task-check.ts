@@ -18,6 +18,7 @@ import * as z from 'zod/v4';
 import { writeFileAtomic } from './atomic.js';
 import { attachmentReferences, imageHashes, type ImageRef, type ResolvedImage, resolveImages, writeImages } from './attachments.js';
 import type { Config } from './config.js';
+import { taskStartBranch } from './continues.js';
 import { FactoryError } from './errors.js';
 import { inTmpRoot, TMP_REFUSAL, tmpRoots } from './host-tmp.js';
 import { Redactor } from './redact.js';
@@ -533,8 +534,7 @@ async function checkedReason(root: string, tool: string, input: unknown, tempora
   return undefined;
 }
 
-// The check's PreToolUse hook: every tool call passes guardReason first (with the temporary
-// roots); a refusal is a deny.
+// The check's PreToolUse hook: guardReason (with the temporary roots) first; a refusal is a deny.
 export function guardHooks(root: string, temporary: readonly string[] = []): { PreToolUse: Array<{ hooks: HookCallback[] }> } {
   const guard: HookCallback = async (input) => {
     if (input.hook_event_name !== 'PreToolUse') {
@@ -574,13 +574,13 @@ export async function cutOutsideLinks(root: string): Promise<string[]> {
   return cut;
 }
 
-// The check's checkout: a detached worktree of the work checkout at the Task's base (fetched from
-// origin when there is one, as Start does), in a new directory check-* under the Task checks' parent
-// directory (<tmp>/sf-task-checks-<uid>, which every other session denies; an unsafe one
-// fails the check with task_check_dir_unsafe), with its symbolic links out of it cut
-// (cutOutsideLinks). remove() takes it away and prunes its registration.
+// The check's checkout: a detached worktree of the work checkout at the Task's base, or its
+// continues (fetched from origin when there is one, as Start does), in a new directory check-*
+// under the Task checks' parent directory (<tmp>/sf-task-checks-<uid>, which every other session
+// denies; an unsafe one fails the check with task_check_dir_unsafe), with its symbolic links out
+// of it cut (cutOutsideLinks). remove() takes it away and prunes its registration.
 async function checkCheckout(checkout: string, task: string): Promise<{ root: string; commit: string; remove: () => Promise<void> }> {
-  const base = parseFrontMatter(task)?.get('base') ?? '';
+  const base = taskStartBranch(parseFrontMatter(task));
   if (base === '' || base.startsWith('-') || (await runGit(checkout, ['check-ref-format', '--branch', base])).code !== 0) {
     throw new FactoryError('base_not_found', `The base "${base}" is not a valid branch name.`);
   }

@@ -57,6 +57,30 @@ test('checkTaskContent refuses content without a matching front matter', () => {
   refused(`${VALID}${'x'.repeat(MAX_TASK_BYTES)}`);
 });
 
+test('checkTaskContent checks continues: not the base, not a protected branch, a valid branch name; without it nothing changes', () => {
+  const withContinues = (value: string, base = 'master'): string => VALID.replace('base: master', `base: ${base}\ncontinues: ${value}`);
+  const message = (content: string): string => {
+    try {
+      checkTaskContent('PROJ-1', content);
+    } catch (error) {
+      assert.ok(error instanceof FactoryError && error.code === 'invalid_content', String(error));
+      return error.message;
+    }
+    return 'accepted';
+  };
+  assert.equal(message(VALID), 'accepted');
+  for (const name of ['feature/csv', 'PROJ-1-export', 'release_2.1', 'a.b/c-d']) {
+    assert.equal(message(withContinues(name)), 'accepted', name);
+  }
+  assert.equal(message(withContinues('feature/csv  # the open MR')), 'accepted');
+  assert.equal(message(withContinues('feature/x', 'feature/x')), '"continues" must differ from "base".');
+  assert.equal(message(withContinues('main')), '"continues" must not be a protected branch (main).');
+  assert.equal(message(withContinues('master', 'develop')), '"continues" must not be a protected branch (master).');
+  for (const name of ['', '-x', '/x', 'x/', 'x.', 'x.lock', 'a..b', 'a//b', 'a b', 'a~1', 'a^b', 'a:b', 'a?b', 'a*b', 'a[b', 'a\\b', 'ü']) {
+    assert.equal(message(withContinues(name)), '"continues" must be a valid branch name.', JSON.stringify(name));
+  }
+});
+
 test('writeTask creates and replaces the Task file atomically and excludes the folder once', async () => {
   const workspace = await newWorkspace('write');
   const created = await writeTask(workspace, 'PROJ-1', VALID, jobs);

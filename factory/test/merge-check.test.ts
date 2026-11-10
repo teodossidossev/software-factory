@@ -434,7 +434,7 @@ async function mergeWorld(name: string, command: string | undefined): Promise<Me
   };
   const execution = new Execution(config, (workspace) => resolveWorkspace(workspace, w.env.config), () => {}, '', { launch: runnerLauncher(processEnv(w.env)) });
   const job: Job = {
-    workspace: 'app', ticket: 'T-1', branch: BRANCH, base: 'main', base_commit: null, target_commit: null, worktree: null, prepared_commit: originHead(w),
+    workspace: 'app', ticket: 'T-1', branch: BRANCH, base: 'main', continues: null, base_commit: null, target_commit: null, worktree: null, prepared_commit: originHead(w),
     mr_attempts: 1, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'pushed', iteration: 2, session_id: null,
     mr: { host: 'github', number: 1, url: 'https://github.com/acme/app/pull/1', state: 'open' }, created_at: '2026-11-09T10:00:00.000Z', updated_at: '2026-11-09T10:05:00.000Z',
   };
@@ -482,6 +482,19 @@ test('sf mr merge after a passing check merges the commit it tested, with one me
     assert.match(chdir, new RegExp(`^${w.worktreeRoot}/app/\\${MERGE_CHECK_PREFIX}T-1-[0-9a-f]{12}$`));
     assert.equal(argv[argv.indexOf('--bind') + 1], chdir);
     assert.ok(argv.includes(join(w.env.state, 'jobs')), JSON.stringify(argv));
+  } finally {
+    await w.fake.close();
+  }
+});
+
+test('sf mr merge of a continuing job runs the merge check on <continues>, the branch it pushed; its own branch is not on origin', async () => {
+  const w = await mergeWorld('mc-merge-continues', 'test -f feature.txt');
+  try {
+    await w.execution.jobs.write({ ...w.job, branch: 'T-1-follow-up', continues: BRANCH });
+    const merged = await w.execution.mergeMergeRequest('app', 'T-1');
+    assert.deepEqual([merged.state, merged.mr.state], ['pushed', 'merged']);
+    assert.deepEqual(puts(w), [{ merge_method: 'merge', sha: originHead(w) }]);
+    assert.deepEqual((await checkedEvents(w)).map((event) => event.outcome), ['passed']);
   } finally {
     await w.fake.close();
   }

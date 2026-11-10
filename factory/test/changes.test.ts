@@ -64,7 +64,7 @@ function clone(repo: string, name: string, commit: string): string {
 
 function jobOf(workspace: string, extra: Partial<Job> = {}): Job {
   return {
-    workspace, ticket: 'T-1', branch: 'T-1-demo', base: 'main', base_commit: null, target_commit: null,
+    workspace, ticket: 'T-1', branch: 'T-1-demo', base: 'main', continues: null, base_commit: null, target_commit: null,
     worktree: null, prepared_commit: null, mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'awaiting_review', iteration: 0, session_id: 's1', mr: null,
     created_at: '2026-11-01T10:00:00.000Z', updated_at: '2026-11-01T10:05:00.000Z', ...extra,
   };

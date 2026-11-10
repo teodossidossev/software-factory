@@ -111,12 +111,18 @@ leaves the priority alone; any other value of any of them stops the run with exi
 the network as `sf smoke` does; without it that test is skipped. Ctrl-C
 (SIGINT) or SIGTERM kills the running files and starts no more. The files and every `sf` process
 they start share Node's compile cache in `dist/.compile-cache` (`NODE_COMPILE_CACHE`, unless already
-set; removed with `dist/` by each build), so an `sf` process does not compile its modules again (about
-a fifth of its start-up CPU); the tests' Git config turns off automatic gc and maintenance. All of this applies to `npm run
-test:browser` too.
+set; it goes with the old `dist/` at each successful build), so an `sf` process does not compile its
+modules again (about a fifth of its start-up CPU); the tests' Git config turns off automatic gc and
+maintenance. All of this applies to `npm run test:browser` too.
 `npm test -- <args>` passes the arguments on to each `node --test`, before its file. `npm run build`
-removes `dist/` first (`scripts/clean.mjs`), so only the current sources are compiled and no compiled test
-of a deleted source runs. `npm run build` also builds the dashboard's page code (SF-146): the
+(`scripts/build.mjs`) removes any `dist.next/`, compiles into it, and only when both `tsc` runs pass swaps it
+in: `dist/` is renamed to `dist.prev/`, `dist.next/` to `dist/` (when that rename fails, `dist.prev/`
+goes back to `dist/`), and `dist.prev/` is removed. So only
+the current sources are compiled and no compiled test of a deleted source runs, and a failed build
+exits non-zero with `tsc`'s output, removes `dist.next/` and keeps the working `dist/`, so `bin/sf`
+still has a program to run. Before compiling, the build heals an interrupted one: when `dist/` is
+missing and `dist.prev/` exists, `dist.prev/` becomes `dist/` again, even if the build then fails;
+a `dist.prev/` next to a `dist/` is removed. `npm run build` also builds the dashboard's page code (SF-146): the
 TypeScript of `web/` through `tsconfig.web.json` into `dist/web/`, and `npm run typecheck` checks
 both configurations. `npm test` and `npm run test:browser` both build first. At the repository
 root, `npm run build`, `npm run typecheck` and `npm test` run the same scripts in `factory/`. Since

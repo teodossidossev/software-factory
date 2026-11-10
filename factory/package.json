@@ -12,7 +12,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.web.json",
-    "build": "node scripts/clean.mjs && tsc && tsc -p tsconfig.web.json",
+    "build": "node scripts/build.mjs",
     "start": "node dist/src/cli.js serve",
     "check-code": "node scripts/check-code.mjs",
     "test": "npm run check-code && npm run build && node scripts/run-tests.mjs unit",

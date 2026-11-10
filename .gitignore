@@ -1,6 +1,8 @@
 # Factory dependencies and build output
 factory/node_modules/
 factory/dist/
+factory/dist.next/
+factory/dist.prev/
 
 # Task files, Reports and MR texts of the factory, kept on disk
 /.software-factory/

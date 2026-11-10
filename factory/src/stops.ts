@@ -172,12 +172,14 @@ export interface JobActions {
 // The actions whose availability is given, every one the page may ask.
 export const ACTION_IDS: readonly ActionId[] = [
   'approve', 'abort', 'say', 'goon', 'review', 'retry', 'accept', 'settle', 'simplify', 'archive', 'mr-create', 'mr-merge', 'mr-status',
-  'pause', 'resume', 'restart', 'handover', 'takeback', 'handed-done', 'mr-save', 'mr-reset', 'review-mr',
+  'pause', 'resume', 'restart', 'handover', 'takeback', 'handed-done', 'handed-done-merged', 'mr-save', 'mr-reset', 'review-mr',
 ];
 
 // The states that take a message (sf say), and the hand-over's actions with the state each takes.
 const SAY_STATES: readonly string[] = statesWith('sayable');
-const HANDOVER_STATES: Readonly<Partial<Record<ActionId, string>>> = { handover: 'ready_for_human_review', 'handed-done': 'handed_over', takeback: 'handed_over' };
+const HANDOVER_STATES: Readonly<Partial<Record<ActionId, string>>> = {
+  handover: 'ready_for_human_review', 'handed-done': 'handed_over', 'handed-done-merged': 'handed_over', takeback: 'handed_over',
+};
 // Pause, Resume and Restart: a job parked on a usage limit (waiting_limit) is
 // resumed (Resume now) and restarted like a paused one.
 const RESUME_STATES: readonly string[] = RESUMABLE_STATES;
@@ -298,6 +300,7 @@ function availabilityOf(id: ActionId, job: Job, facts: JobFacts, now: Date): str
       return (stopRowOf(job, now)?.row.settle ?? null) !== null ? '' : SETTLE_REASON;
     case 'handover':
     case 'handed-done':
+    case 'handed-done-merged':
     case 'takeback': {
       const wanted = HANDOVER_STATES[id]!;
       return job.state === wanted ? '' : `only when the job is ${wanted}; it is ${job.state}.`;

@@ -671,6 +671,24 @@ test('board client: the ready card offers Review the MR and push (the job\'s Mer
   assert.equal(onJobPage(page), false);
 });
 
+test('board client: a handed-over card offers Merged another way…, which opens the job page with its confirmation and posts handed-done-merged only from its button', async () => {
+  const handed = job('T-5', 'handed_over', { prepared_commit: 'a'.repeat(40) });
+  const page = await openBoard([handed], []);
+  assert.deepEqual(labels(card(page, 'app/T-5')), ['Review the MR and push', 'Create merge request…', 'Merged another way…']);
+  const merged = button(card(page, 'app/T-5'), 'Merged another way…')!;
+  assert.deepEqual([merged.className, merged.disabled, merged.dataset.open, merged.dataset.confirm], ['btn small', false, 'app/T-5', 'handed-done-merged']);
+  merged.click();
+  await page.flush();
+  page.streams.at(-1)!.emit('job', detail(handed));
+  await page.flush();
+  assert.deepEqual([page.location.hash, page.$('confirm').hidden, page.$('confirm-title').textContent, page.$('confirm-ok').textContent], ['#app/T-5', false, 'Merged another way app/T-5?', 'Merged another way']);
+  assert.equal(page.$('confirm-text').textContent, 'Mark the job done: you merged its changes yourself under another branch or straight into the main branch. The factory does not check origin.');
+  assert.equal(posts(page).length, 0);
+  page.$('confirm-ok').click();
+  await page.flush();
+  assert.deepEqual(posts(page).map((request) => [request.path, request.body]), [['api/jobs/app/T-5/handed-done-merged', '{}']]);
+});
+
 test('board client: a job card opens the job as a full page, following it on the stream; ← Board and Escape go back, the focus on the card', async () => {
   const page = await openBoard([job('T-1', 'working'), job('T-2', 'awaiting_review')], []);
   assert.equal(page.streams.at(-1)!.url, 'api/stream?');

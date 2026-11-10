@@ -639,7 +639,8 @@ function jobCard(job: JobRow): HTMLLIElement {
 // The one primary action of a Your turn card, and the job's last outcome. It opens the job's page
 // at the stop or the message box (a handed-over branch with the Approve confirmation, a branch
 // ready for review on its Merge request screen), except Retry review, Retry and Resume, which go
-// at once; a prepared branch also offers Create merge request….
+// at once; a prepared branch also offers Create merge request…, and a handed-over one Merged
+// another way….
 function yourTurn(job: JobRow): HTMLElement[] {
   const key = keyOf(job);
   const act = el('div', 'act');
@@ -675,6 +676,9 @@ function yourTurn(job: JobRow): HTMLElement[] {
   if (canApprove(job)) {
     act.append(mrCardButton(job, 'mr-create'));
   }
+  if (job.state === 'handed_over') {
+    act.append(mrCardButton(job, 'handed-done-merged'));
+  }
   return [act, ...cardOutcome(key, true)];
 }
 
@@ -692,8 +696,8 @@ function cardOutcome(key: string, doubts: boolean): HTMLElement[] {
   return parts;
 }
 
-// A card's Create merge request… or Merge…: opens the job's page with that confirmation; off with
-// the reason as its title while the action is unavailable.
+// A card's Create merge request…, Merge… or Merged another way…: opens the job's page with that
+// confirmation; off with the reason as its title while the action is unavailable.
 function mrCardButton(job: JobRow, action: string): HTMLButtonElement {
   const node = button('btn small', `${ACTION_LABELS[action]}…`, { open: keyOf(job), confirm: action });
   const reason = availability(action, job);

@@ -141,7 +141,7 @@ stateDiagram-v2
     handed_over --> working: say
     handed_over --> ready_for_human_review: take_back
     handed_over --> needs_human: ask_for_changes, repair_handover
-    handed_over --> pushed: push, pushed_by_user
+    handed_over --> pushed: push, pushed_by_user, marked_done
     handed_over --> aborted: abort
 
     aborted --> needs_human: repair_handover
@@ -171,8 +171,8 @@ that waits for you do not count.
 | `paused` | You paused it; nothing runs; worktree, branch and session stay. | You | Resume (`sf resume [message]`), Restart… (`sf restart`), Abort… |
 | `waiting_limit` | A session hit the plan's usage limit; parked until the reset, holding its queue slot. Board label "Waiting for limits". | The queue at the reset, or you | Resume now (`sf resume`), Restart… (`sf restart`), Abort…; `sf say` and `sf pause` are refused |
 | `ready_for_human_review` | Clean, MR text written, one commit on the branch; not handed over (hand-over off or refused). Board: "Ready to push". | You | Review the MR and push (the Merge request screen), Approve… (`sf approve [--as-is]`), Hand over to my checkout (`sf handover`), Create merge request (`sf mr create`), Send (`sf say`: a further fix), Abort… |
-| `handed_over` | The branch is checked out in your checkout with the changes uncommitted. Board: "In your checkout on `<branch>`". | You | Approve… (`sf approve`), Ask for changes (`sf say`), I opened the MR myself (`sf handed-done`), Take it back (`sf takeback`), Create merge request (`sf mr create`), Abort… (`sf abort`, without `--discard`) |
-| `pushed` | The branch is on `origin`. Terminal. | You (the merge request) | Create merge request (`sf mr create`), Merge… (`sf mr merge`), Refresh MR status (`sf mr status`), Archive (`sf reset`) |
+| `handed_over` | The branch is checked out in your checkout with the changes uncommitted. Board: "In your checkout on `<branch>`". | You | Approve… (`sf approve`), Ask for changes (`sf say`), I opened the MR myself (`sf handed-done`), Merged another way (`sf handed-done --merged`), Take it back (`sf takeback`), Create merge request (`sf mr create`), Abort… (`sf abort`, without `--discard`) |
+| `pushed` | Done: the branch is on `origin` (pushed by the factory or by you), or you marked the job done with Merged another way (`sf handed-done --merged`) after merging its changes yourself, which the factory does not check on `origin`. Terminal. | You (the merge request) | Create merge request (`sf mr create`), Merge… (`sf mr merge`), Refresh MR status (`sf mr status`), Archive (`sf reset`) |
 | `aborted` | Ended by you; the branch (and, without `--discard`, the worktree) stays. Terminal. | You | Restart… (`sf restart`), Archive (`sf reset`) |
 | `failed` | The job could not start (for example `rules_failed`, a failed worktree creation). Terminal. | You | Restart… (`sf restart`), Archive (`sf reset`) |
 

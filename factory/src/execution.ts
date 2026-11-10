@@ -294,6 +294,10 @@ export class Execution implements RunnerWork {
     return this.#parts.handover.handedDone(workspaceName, ticket);
   }
 
+  markHandedDone(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string }> {
+    return this.#parts.handover.markHandedDone(workspaceName, ticket);
+  }
+
   checkHandedOver(workspaceName: string, ticket: string, minIntervalMs = 0): Promise<{ state: JobState; branch: string; commit?: string; same_tree?: boolean | null }> {
     return this.#parts.handover.checkHandedOver(workspaceName, ticket, minIntervalMs);
   }

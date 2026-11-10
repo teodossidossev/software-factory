@@ -1,7 +1,7 @@
 // The hand-over of a job's branch to the user's checkout: handover, takeback, the check of the
-// user's own push, Ask for changes, the repair of a cut-off step, the saved refs, and the sandbox's
-// leftover config lock around hand-overs and sessions (handOverLocked, afterTaskCheck,
-// afterJobChange).
+// user's own push, Merged another way, Ask for changes, the repair of a cut-off step, the saved
+// refs, and the sandbox's leftover config lock around hand-overs and sessions (handOverLocked,
+// afterTaskCheck, afterJobChange).
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pushedBranch } from '../continues.js';
@@ -46,8 +46,8 @@ const lockedOut = (job: Job): boolean => job.state === 'ready_for_human_review' 
 const SAVED_REF_DAYS = 7;
 
 // A hand-over operation running in this process (sf serve's serve-busy): the hand-over (by
-// hand, or the factory's own after config_locked), Take it back, I opened the MR myself, and the
-// background check of the user's push.
+// hand, or the factory's own after config_locked), Take it back, I opened the MR myself and Merged
+// another way (handed_done), and the background check of the user's push.
 export type HandoverOperation = 'hand_over' | 'take_back' | 'handed_done' | 'push_check';
 export interface HandoverRunning {
   workspace: string;
@@ -309,7 +309,7 @@ export class HandoverPart {
         continue;
       }
       try {
-        const outcome = await this.#handover(job.workspace, job.ticket, true);
+        const outcome = await this.#tracked(job.workspace, job.ticket, 'hand_over', () => this.#handoverLocked(job.workspace, job.ticket, true));
         if (outcome !== undefined) {
           console.log(`${job.workspace}/${job.ticket}: handed over to the checkout now that no other job of the workspace runs`);
         }
@@ -339,16 +339,12 @@ export class HandoverPart {
   // was and is returned as the error; config_locked becomes its handoff_skipped too, so
   // the factory hands it over by itself once no other job of the workspace runs.
   handover(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string }> {
-    return this.#handover(workspaceName, ticket, false) as Promise<{ state: JobState; branch: string }>;
+    return this.#tracked(workspaceName, ticket, 'hand_over', () => this.#handoverLocked(workspaceName, ticket, false)) as Promise<{ state: JobState; branch: string }>;
   }
 
   // retry: the factory's own hand-over of a job waiting with config_locked (handOverLocked): a job
   // no longer waiting so is left alone, and a refusal becomes its handoff_skipped instead of an
   // error; undefined then.
-  #handover(workspaceName: string, ticket: string, retry: boolean): Promise<{ state: JobState; branch: string } | undefined> {
-    return this.#tracked(workspaceName, ticket, 'hand_over', () => this.#handoverLocked(workspaceName, ticket, retry));
-  }
-
   #handoverLocked(workspaceName: string, ticket: string, retry: boolean): Promise<{ state: JobState; branch: string } | undefined> {
     return this.#locks.locked(async () => {
       const check = (job: Job): boolean => {
@@ -432,6 +428,22 @@ export class HandoverPart {
     return this.#pushCheck(workspaceName, ticket, true);
   }
 
+  // sf handed-done --merged: the user merged the changes another way (another branch, or straight
+  // into the base). Origin is not asked; the checkout is left as on a push; prepared_commit stays.
+  markHandedDone(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string }> {
+    return this.#tracked(workspaceName, ticket, 'handed_done', () => this.#locks.locked(async () => {
+      this.checkHandedOverJob(await this.#store.job(workspaceName, ticket), 'sf handed-done --merged');
+      await this.#peers.mr.settled(workspaceName, ticket);
+      const job = await this.#store.job(workspaceName, ticket);
+      this.checkHandedOverJob(job, 'sf handed-done --merged');
+      await this.#store.jobs.appendEvent(workspaceName, ticket, { ts: now(), iteration: job.iteration, type: 'handover_marked_done' });
+      const ended = await this.leaveCheckout(job, await this.#settings.resolve(workspaceName), true);
+      // from: handed_over (checkHandedOverJob)
+      const next = await this.#store.transition(ended, 'pushed', 'marked_done', undefined, [mrMessage((await this.#store.jobs.readMrText(job.workspace, job.ticket)) ?? '').title]);
+      return { state: next.state, branch: next.branch };
+    }));
+  }
+
   // The check for the user's own push of a handed-over branch: origin is asked where the job's
   // pushed branch is (its continued branch, if any), outside the lock; a branch pushed beyond the
   // base moves the job to pushed. Errors change nothing and are logged. minIntervalMs: none when
@@ -490,7 +502,10 @@ export class HandoverPart {
         return { state: job.state, branch: job.branch };
       }
       await this.#store.jobs.appendEvent(workspaceName, ticket, { ts: now(), iteration: job.iteration, type: 'handover_pushed', commit: pushed.commit, same_tree: pushed.same_tree });
-      const next = await this.#pushedByUser(job, workspace, pushed.commit);
+      // The config and the prefilled commit message go, a worktree left over goes.
+      const ended = await this.leaveCheckout(job, workspace, true);
+      // from: handed_over (checkHandedOverJob, checked again under the lock)
+      const next = await this.#store.transition({ ...ended, prepared_commit: pushed.commit }, 'pushed', 'pushed_by_user', undefined, [mrMessage((await this.#store.jobs.readMrText(job.workspace, job.ticket)) ?? '').title]);
       return { state: next.state, branch: next.branch, commit: pushed.commit, same_tree: pushed.same_tree };
     });
   }
@@ -507,19 +522,10 @@ export class HandoverPart {
     if (!done) {
       return undefined;
     }
-    if (remote.kind === 'unrelated') {
-      throw new FactoryError('not_pushed', `The branch ${pushedBranch(job)} on origin (${remote.commit.slice(0, 12)}) does not descend from the job's base ${job.handover!.base.slice(0, 12)}; push your changes to it first.`);
-    }
-    throw new FactoryError('not_pushed', `The branch ${pushedBranch(job)} is not on origin with your changes; push it first.`);
-  }
-
-  // A handed-over job the user pushed: the config and the prefilled commit message go, a worktree
-  // left over goes, and the job is pushed with the pushed commit. Only under the lock.
-  async #pushedByUser(job: Job, workspace: Workspace, commit: string): Promise<Job> {
-    const ended = await this.leaveCheckout(job, workspace, true);
-    const title = mrMessage((await this.#store.jobs.readMrText(job.workspace, job.ticket)) ?? '').title;
-    // from: handed_over (#pushCheck: checkHandedOverJob, checked again under the lock)
-    return this.#store.transition({ ...ended, prepared_commit: commit }, 'pushed', 'pushed_by_user', undefined, [title]);
+    const why = remote.kind === 'unrelated'
+      ? `The branch ${pushedBranch(job)} on origin (${remote.commit.slice(0, 12)}) does not descend from the job's base ${job.handover!.base.slice(0, 12)}; push your changes to it first.`
+      : `The branch ${pushedBranch(job)} is not on origin with your changes; push it first.`;
+    throw new FactoryError('not_pushed', `${why} If you merged it another way, use Merged another way (sf handed-done --merged).`);
   }
 
   // A handed-over job leaves the checkout (the push, abort): the factory's commit.template and

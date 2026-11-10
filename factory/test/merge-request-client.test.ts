@@ -611,7 +611,7 @@ test('mr client (SF-126): from another device (api/jobs remote: true) Merge… a
 
 test('mr client (SF-139): from another device the page asks for the ticket exactly for the detail\'s confirm_actions, the server\'s list; locally never', async () => {
   const opened = job('T-1', 'pushed', { mr: { host: 'github', number: 4, url: URL_1, state: 'open' } });
-  assert.deepEqual(CONFIRM_ACTIONS, ['approve', 'retry', 'mr-create', 'mr-merge']);
+  assert.deepEqual(CONFIRM_ACTIONS, ['approve', 'retry', 'mr-create', 'mr-merge', 'handed-done-merged']);
   const merge = async (page: Page): Promise<void> => {
     page.$('mr-merge-button').click();
     page.$('confirm-ok').click();

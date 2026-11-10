@@ -83,7 +83,7 @@ export const JOB_ACTIONS = [
   'create', 'launch', 'recover', 'repair_handover', 'publish', 'mr_turn_end', 'review_retry', 'go_on', 'verdict', 'prepare_mr',
   // tests: the end of the run of the workspace's test command, a Tests Fix or a stop. mr_retry: the Retry's own stop when MR
   // preparation fails again before it began (retryMr).
-  'tests', 'mr_retry', 'ready', 'hand_over', 'take_back', 'push', 'pushed_by_user', 'abort', 'pause', 'resume', 'park',
+  'tests', 'mr_retry', 'ready', 'hand_over', 'take_back', 'push', 'pushed_by_user', 'marked_done', 'abort', 'pause', 'resume', 'park',
   'limit_reset', 'fix', 'say', 'ask_for_changes',
 ] as const;
 export type JobAction = (typeof JOB_ACTIONS)[number];
@@ -131,6 +131,8 @@ export const JOB_TRANSITIONS: readonly JobTransition[] = Object.freeze([
   ...rows('push', ['needs_human', 'ready_for_human_review', 'handed_over'], ['pushed']),
   ...rows('push', ['needs_human', 'ready_for_human_review'], ['needs_human']),
   ...rows('pushed_by_user', ['handed_over'], ['pushed']),
+  // Merged another way: the user says they merged the changes themselves; origin is not asked.
+  ...rows('marked_done', ['handed_over'], ['pushed']),
   ...rows('abort', JOB_STATES.filter((state) => !TERMINAL_STATES.includes(state)), ['aborted']),
   ...rows('pause', ['working', 'awaiting_review'], ['paused']),
   ...rows('pause', ['preparing_mr'], ['needs_human']),
@@ -482,6 +484,8 @@ export type EventRecord = { ts: string; iteration: number } & (
   // The user's own push of a handed-over branch, found on origin: the commit, and whether
   // its tree is the job's commit's (null when the commit is not known locally).
   | { type: 'handover_pushed'; commit: string; same_tree: boolean | null }
+  // The user marked a handed-over job done: they merged its changes another way (sf handed-done --merged).
+  | { type: 'handover_marked_done' }
   // The factory removed the config lock Claude Code's sandbox left in the workspace checkout's Git
   // directory (src/sandbox-lock.ts): its path.
   | { type: 'sandbox_lock_removed'; path: string }

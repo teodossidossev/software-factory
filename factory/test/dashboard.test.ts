@@ -86,7 +86,7 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
     }
     // SF-137: the dashboard's scripts, in load order (SF-153: health.js before main.js; SF-160: the
     // top bar's header.js before board.js).
-    assert.deepEqual([...DASHBOARD_SCRIPTS], ['core.js', 'job-screens.js', 'job-page.js', 'header.js', 'board.js', 'routing.js', 'ticket-page.js', 'reports.js', 'setup.js', 'health.js', 'main.js']);
+    assert.deepEqual([...DASHBOARD_SCRIPTS], ['core.js', 'job-screens.js', 'job-page.js', 'header.js', 'board.js', 'routing.js', 'ticket-page.js', 'reports.js', 'review-page.js', 'setup.js', 'health.js', 'main.js']);
     // SF-136: every script of DASHBOARD_SCRIPTS is served as JavaScript, each with its own text (its
     // header names it); SF-137: none is longer than 2,500 lines.
     for (const file of DASHBOARD_SCRIPTS) {

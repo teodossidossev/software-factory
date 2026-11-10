@@ -63,6 +63,8 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   checkout_busy: 409, handover_refused: 409, handover_mismatch: 409, checkout_changing: 409, checkout_moved: 409,
   takeback_changed: 409, takeback_switch_failed: 409, branch_in_checkout: 409, not_pushed: 409, handed_over: 409, handover_interrupted: 409, ask_interrupted: 409,
   invalid_content: 400, invalid_ticket: 400, invalid_name: 400, workspace_invalid: 400,
+  // A job from review comments: no comment ticked and no instructions, or a thread the host does not list.
+  invalid_request: 400,
   // The merge request: the host's refusals and the actions being off are conflicts; a host
   // that failed or refused the token is a bad gateway.
   // mr_check_failed: the merge check refused the change on the base as it is now;

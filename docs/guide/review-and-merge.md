@@ -1,7 +1,8 @@
 # Review and merge
 
 This page covers the ways to take a finished job: the hand-over to your own checkout, pushing and
-opening the merge request from the factory, editing the MR text, and what happens after.
+opening the merge request from the factory, editing the MR text, and what happens after; and a
+job from the review comments of a merge request already open.
 
 When both reviews are clean, MR preparation has left the job's branch with **one commit**, rebased
 onto the base, with the MR text as its message. Nothing is pushed yet. You get a notification, and
@@ -151,8 +152,33 @@ text"); edit the commit message in your IDE instead. After the push it is read-o
 - The saved refs `refs/factory/APP-12` and `refs/factory/APP-12-ask` are deleted by `sf serve` seven
   days after the job is pushed or aborted.
 
+## A job from review comments
+
+When a merge request (yours or a colleague's) has review comments on the Git host, the factory can
+implement them on that merge request's branch:
+
+1. Open **Merge requests** in the top bar, choose the workspace and press **Load**: its open merge
+   requests.
+2. Choose one and press **Fetch comments**: its review threads, the open ones first (the resolved
+   ones behind *Show resolved*).
+3. Tick the comments to implement, and write **Your instructions** if you want more ("fix this and
+   that"); instructions alone are enough.
+4. Press **Create job**. The factory reads the comments from the host again and writes a Task file
+   `<key>-review-<n>` (for example `SF-12-review-1`, or `MR-7-review-1` when the branch names no
+   ticket) that continues the merge request's branch, and adds it to the run queue; the page links
+   to its ticket page. It runs as any job: the Task check, the reviews, Clean.
+
+Nothing is written to the host: no reply, no resolve. The change reaches the merge request in one
+of two ways, as the workspace's hand-over setting decides:
+
+- **handed over** to your checkout: you look at it there, commit and push the merge request's
+  branch yourself;
+- **Approve**: the factory pushes its one commit onto the merge request's source branch (never
+  forced), so the open merge request shows it and keeps its title and description.
+
 The details: [MR preparation](../../factory/README.md#mr-preparation),
 [Hand-over to your checkout](../../factory/README.md#hand-over-to-your-checkout),
-[Merge request screen](../../factory/README.md#merge-request-screen).
+[Merge request screen](../../factory/README.md#merge-request-screen),
+[Merge requests](../../factory/README.md#merge-requests).
 
 Next: [When a job stops](when-a-job-stops.md).

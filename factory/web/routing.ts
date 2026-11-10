@@ -59,7 +59,7 @@ const ui: UiState = {
 // The URL hash of the view: #<ws>/<ticket> (the Stream), #<ws>/<ticket>/changes, /mr, /ticket;
 // a new one is a new history entry, so Back and Forward move between them.
 function setHash(): void {
-  const h = ui.screen === 'board' ? '' : ui.screen === 'stats' ? 'stats' : ui.screen === 'digest' ? (dg.id === null ? 'digest' : `digest/${dg.id}`) : ui.screen === 'ticket' ? `${ui.ticket}/ticket` : ui.screen === 'stream' ? ui.job : `${ui.job}/${ui.screen}`;
+  const h = ui.screen === 'board' ? '' : ui.screen === 'stats' || ui.screen === 'merge-requests' ? ui.screen : ui.screen === 'digest' ? (dg.id === null ? 'digest' : `digest/${dg.id}`) : ui.screen === 'ticket' ? `${ui.ticket}/ticket` : ui.screen === 'stream' ? ui.job : `${ui.job}/${ui.screen}`;
   if (decodeURIComponent(location.hash.slice(1)) !== h) {
     history.pushState(null, '', `#${h}`);
   }
@@ -115,9 +115,7 @@ function go(key: string, screen = 'stream', focus: 'composer' | 'stop' | undefin
   ui.pending = false;
   byId('board').hidden = true;
   byId('ticket').hidden = true;
-  byId('digest').hidden = true;
-  leaveDigest();
-  byId('stats').hidden = true;
+  leavePages();
   byId('job').hidden = false;
   state.wantConfirm = confirm === undefined ? null : { action: confirm, key };
   select(key);
@@ -175,9 +173,7 @@ function back(): void {
   ui.ticket = null;
   byId('job').hidden = true;
   byId('ticket').hidden = true;
-  byId('digest').hidden = true;
-  leaveDigest();
-  byId('stats').hidden = true;
+  leavePages();
   byId('board').hidden = false;
   renderBoard();
   setHash();
@@ -189,8 +185,11 @@ function back(): void {
 // The view of the URL hash (on load and on every hashchange). A hash of a job or ticket the board
 // does not have shows the board; it is tried again when the jobs and tickets first arrive.
 function route(): void {
+  const hash = decodeURIComponent(location.hash.slice(1));
+  // The Merge requests page hides on any other hash (the other pages' openers do not know it).
+  byId('merge-requests').hidden = hash !== 'merge-requests';
   // The morning digest: #digest, the newest, or #digest/<id>.
-  const digest = /^digest(?:\/([0-9A-Za-z-]+))?$/.exec(decodeURIComponent(location.hash.slice(1)));
+  const digest = /^digest(?:\/([0-9A-Za-z-]+))?$/.exec(hash);
   if (digest !== null) {
     const id = digest[1] ?? null;
     if (ui.screen !== 'digest' || dg.id !== id) {
@@ -198,14 +197,14 @@ function route(): void {
     }
     return;
   }
-  // The Stats page.
-  if (decodeURIComponent(location.hash.slice(1)) === 'stats') {
-    if (ui.screen !== 'stats') {
-      openStats();
+  // The Stats and the Merge requests pages.
+  if (hash === 'stats' || hash === 'merge-requests') {
+    if (ui.screen !== hash) {
+      (hash === 'stats' ? openStats : openMergeRequests)();
     }
     return;
   }
-  const match = /^([^/]+\/[^/]+?)(?:\/(changes|mr|ticket))?$/.exec(decodeURIComponent(location.hash.slice(1)));
+  const match = /^([^/]+\/[^/]+?)(?:\/(changes|mr|ticket))?$/.exec(hash);
   if (match === null) {
     ui.pending = false;
     if (ui.screen !== 'board') {
@@ -365,10 +364,10 @@ function onClick(event: MouseEvent): void {
     openNewTicket();
   } else if (target.id === 'open-archived') {
     openArchived();
-  } else if (target.id === 'open-digest') {
-    openDigest(null);
-  } else if (target.id === 'open-stats') {
-    openStats();
+  } else if (target.id === 'open-digest' || target.id === 'open-stats') {
+    // The tabs open their page without a hashchange: the Merge requests page hides here.
+    byId('merge-requests').hidden = true;
+    (target.id === 'open-digest' ? () => openDigest(null) : openStats)();
   } else if (target.dataset.qact !== undefined) {
     // The Queue card's buttons carry data-key (board.js queueCard); no ticket has the key ''.
     queueAction(target.dataset.qact, target.dataset.key ?? '');

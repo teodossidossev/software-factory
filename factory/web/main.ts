@@ -51,6 +51,8 @@ function openStream(): void {
     // The hand-over default and the morning digest's settings.
     state.wsSettings = { handoff_default: data.handoff_default ?? null, digest: data.digest ?? null };
     renderSetup();
+    // The Merge requests page's workspace select.
+    renderMergeRequests();
   });
   source.addEventListener('tickets', (message: MessageEvent<string>) => {
     const data = payload<TicketsPayload>(message.data);

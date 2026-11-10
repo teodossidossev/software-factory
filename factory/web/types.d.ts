@@ -733,3 +733,35 @@ interface HealthCheck {
   detail: string;
   since: string;
 }
+
+// An open merge request of a workspace's origin (GET api/workspaces/<ws>/merge-requests):
+// src/forge-comments.ts OpenRequest.
+interface OpenMergeRequest {
+  number: number;
+  title: string;
+  author: string;
+  source: string;
+  target: string;
+  url: string;
+  updated_at: string;
+  draft: boolean;
+}
+
+// A review thread of a merge request (GET api/workspaces/<ws>/merge-requests/<number>/threads):
+// src/forge-comments.ts ReviewThread and ReviewComment. path and line are null for a general
+// comment; resolved is null where the host has no such notion.
+interface ReviewThread {
+  id: string;
+  resolved: boolean | null;
+  path: string | null;
+  line: number | null;
+  comments: Array<{ author: string; body: string; created_at: string }>;
+}
+
+// The job created from review comments: src/review-job.ts ReviewJobResult.
+interface ReviewJobResult {
+  workspace: string;
+  ticket: string;
+  path: string;
+  position: number;
+}

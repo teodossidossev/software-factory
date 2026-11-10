@@ -69,12 +69,13 @@ bin/sf reset <workspace> <ticket>              # end the session, remove the wor
 bin/sf notify-test                             # one test notification on every channel; works without sf serve
 bin/sf info                                    # version, directories, settings (gate: codex <version or path> | off (<reason>); gate level: auto | full | invalid: <message>), sf serve and tunnel state, workspaces, jobs; works without sf serve
 bin/sf health [--json]                         # the health checks, computed here once (section Health checks): one row each, --json the list; exit 0 all ok or off, 3 any recovering, 1 any down; works without sf serve
+bin/sf health --notify [--force]               # the watchdog the service's timer runs (section Service): notifies once when sf serve stops answering and once when it answers again
 bin/sf metrics [<workspace>] [--since YYYY-MM-DD] [--json]  # the Codex gate per job, current and archived: levels, runs, tokens, items by outcome, yield; then the totals (section sf metrics); works without sf serve
 bin/sf guard <workspace> [<rev> | <a>..<b>] [--remote <name>] [--branch <name>] [--mr <ticket>] [--worktree <ticket>] [--history]  # the guard (section Guard): what a push of <rev> (default HEAD) to --remote (default origin) would publish, a range, or --history every commit; each hit with its matched text (a secret's never); exit 1 on hits; works without sf serve
 bin/sf guard install-hook <workspace>          # write the guard's pre-push hook into the workspace's checkout (section Guard); never over a hook it did not write
 bin/sf smoke [--keep] [--timeout-min N] [--budget-usd N]  # the live smoke test (section Live smoke test): one tiny real job from Task check to push on a throwaway repository and state; a pass/fail table; works without sf serve and never touches yours
 bin/sf run <workspace> <ticket>                # the job's runner (section Jobs); sf serve starts it detached, one per job; refused (runner_running) while the job has one
-bin/sf service install|uninstall|status        # sf serve as a systemd user service (section Service); install refuses while an sf serve started by hand answers; run while the service runs, it rewrites the unit and restarts the service
+bin/sf service install|uninstall|status        # sf serve as a systemd user service with its watchdog (section Service); install refuses while an sf serve started by hand answers; run while the service runs, it rewrites the units and restarts the service
 bin/sf update [--check|--abandon] [--no-smoke] # update this Git install to origin/main, drained first, rolled back on a failed build (section Updating the install)
 npm run typecheck && npm test
 npm run browsers                               # once: Playwright's Chromium for the browser tests (npm install downloads no browser)
@@ -506,9 +507,9 @@ at login, restarts after a crash and logs to journald. `sf up` and `sf serve` ke
 before for development.
 
 ```
-sf service install     # writes ~/.config/systemd/user/software-factory.service, then systemctl --user daemon-reload and enable --now
-sf service status      # the unit's state (systemctl --user show) and where its logs are
-sf service uninstall   # stops, disables and removes it
+sf service install     # writes ~/.config/systemd/user/software-factory.service and the watchdog's three units, then systemctl --user daemon-reload and enable --now of the service and the watchdog's timer
+sf service status      # the unit's state (systemctl --user show), the watchdog timer's state and last run, and where its logs are
+sf service uninstall   # stops, disables and removes all four units
 ```
 
 - **The unit.** `ExecStart=<absolute path of the installed bin/sf> serve`, `Restart=on-failure`,
@@ -565,6 +566,40 @@ sf service uninstall   # stops, disables and removes it
   does not run it.
 - **Logs.** `journalctl --user -u software-factory` (also said by `sf service status`). A job's
   runner still writes its own `runner.log`.
+- **The watchdog.** `sf serve` watches everything but itself, so a crash loop or a hung `sf serve`
+  would go unnoticed. The unit therefore has `StartLimitIntervalSec=300`, `StartLimitBurst=5` and
+  `OnFailure=software-factory-alert.service`: after five failed starts in five minutes systemd stops
+  restarting it and starts the alert unit. Next to it, in the same directory, `sf service install`
+  writes three more units, each with the service's `Environment=` lines:
+  - `software-factory-alert.service`: `Type=oneshot`, `ExecStart=<sf> health --notify --force`;
+  - `software-factory-watchdog.service`: `Type=oneshot`, `ExecStart=<sf> health --notify`;
+  - `software-factory-watchdog.timer`: `OnBootSec=5min`, `OnUnitActiveSec=5min`,
+    `WantedBy=timers.target`; install enables it with the service, uninstall disables and removes
+    it with the service.
+
+  `sf health --notify` (`src/watchdog.ts`) runs only the MCP endpoint check (the one row that shows
+  `sf serve` answers; `sf serve` notifies its own checks) and reads the service's `ActiveState`
+  (`systemctl --user show software-factory --property=ActiveState --value`): sf serve is down when
+  the endpoint is `down` or the unit is `failed` (an unanswered `systemctl`, or no unit, leaves it to
+  the endpoint). It keeps the last state in `watchdog.json` in the state directory (`{ "down": …,
+  "since": … }`; missing or corrupt counts as up). From up to down it sends one notification,
+  "Software Factory: sf serve does not answer", "since <local time>; journalctl --user -u
+  software-factory" (priority high); from down to up one, "Software Factory: sf serve answers
+  again", "down since <local time>"; no change sends nothing. They go by `notify-send` and ntfy
+  through the functions `sf serve` uses, with the same settings and token handling (section
+  Notifications). `--force`, the alert unit's run, records down (keeping `since` when it already was)
+  and sends the down notification anyway: systemd gave up. So a crash loop ends in one alert from
+  the alert unit, plus at most one from the timer if it ran during the loop. The exit code is 0, or
+  1 when a channel failed to send (each channel's result is printed); the state is kept either way,
+  so a failed send is not retried every five minutes.
+
+  systemd 249 and later run `OnFailure=` only once the unit will not restart, that is after the
+  start limit. On an older systemd it runs after every failed start, so a crash loop sends one alert
+  per crash: an accepted risk.
+
+  **After updating to a version with the watchdog, run `sf service install` again**: `sf update`
+  restarts the service but does not rewrite its units, so the start limit, the alert unit and the
+  timer appear only then. `sf service status` says "watchdog: not installed" until it is done.
 
 ## Updating the install
 
@@ -2879,6 +2914,9 @@ each runs within 20 s (its requests and commands within 3 s and 10 s), and one t
 | `disk` | Disk space | the file system of the state directory or of the worktree root has less than 10 % or less than 5 GB free | — |
 | `sandboxes` | Sandbox leftovers | a fresh orphan scan (the reaper's finder, section Jobs) finds a pid the previous scan found too, so the reaper did not end it: `sf serve` runs the reaper right before each scan, so such a pid outlived a reap; the first scan of a process is never `down` (`sf health` scans twice, 10 s apart, and reaps between them) | — |
 | `digest` | Morning digest | the scheduled digest was missed (due by the clock, no scheduled digest started since today's start, `at` more than 30 minutes past), or the last scheduled digest's record has an `error` | no workspace follows (no digest scheduled) |
+
+**`sf health --notify [--force]`** is the watchdog outside `sf serve` (section Service): only the
+MCP endpoint check and the service's systemd state, one notification on each change.
 
 **`sf health [--json]`** computes the checks locally without asking `sf serve` (`logins` always
 runs; `queue` reads `queue.json` and the stored plan checks; it recovers nothing but reaps sandbox

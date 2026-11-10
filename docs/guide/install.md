@@ -132,6 +132,15 @@ for nothing: while a Task check or a hand-over runs inside the service's `sf ser
 `serve_busy`; run it again when that has ended. Without systemd user services, run
 `npm run serve` as above.
 
+`sf service install` also writes a watchdog next to the service, because `sf serve` cannot report
+its own crash: a timer runs `sf health --notify` every five minutes, which notifies you once (by
+`notify-send` and ntfy, like the job notifications) when `sf serve` stops answering or its unit
+failed, and once when it answers again. After five failed starts in five minutes systemd stops
+restarting the service and runs an alert unit that notifies you at once. `sf service status` shows
+the timer and its last run; `sf service uninstall` removes all four units. **If you installed the
+service before the watchdog existed, run `sf service install` again after updating**: `sf update`
+does not rewrite the units.
+
 To update it: `sf update`. It pauses the running jobs, waits for their runners to end, pulls
 `origin/main`, builds and typechecks, restarts the service, resumes the jobs it paused and runs
 `sf smoke`; a failed build rolls back to where it started. See

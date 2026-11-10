@@ -9,7 +9,10 @@
 // in that shell; every other setting comes from auth.env, which sf serve reads. Logs go to
 // journald. On a machine without systemd user services sf service says so, and sf serve works
 // without it. Run while the service's own sf serve answers, install rewrites the unit and restarts the
-// service; an sf serve started by hand refuses it.
+// service; an sf serve started by hand refuses it. Next to it install writes the watchdog (sf health
+// --notify, src/watchdog.ts): software-factory-watchdog.timer runs software-factory-watchdog.service
+// every five minutes, and after five failed starts in five minutes systemd stops restarting the
+// service and runs software-factory-alert.service (OnFailure=), which sends the alert once.
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
@@ -22,6 +25,16 @@ import { FactoryError } from './errors.js';
 export const SERVICE_NAME = 'software-factory';
 export const UNIT_FILE = `${SERVICE_NAME}.service`;
 export const JOURNAL_HINT = `journalctl --user -u ${SERVICE_NAME}`;
+export const ALERT_UNIT = `${SERVICE_NAME}-alert.service`;
+export const WATCHDOG_UNIT = `${SERVICE_NAME}-watchdog.service`;
+export const WATCHDOG_TIMER = `${SERVICE_NAME}-watchdog.timer`;
+// The files sf service install writes, the service first.
+export const UNIT_FILES = [UNIT_FILE, ALERT_UNIT, WATCHDOG_UNIT, WATCHDOG_TIMER] as const;
+// The restart limit: after this many failed starts within this many seconds, systemd stops
+// restarting the service and runs the alert unit.
+export const START_LIMIT_BURST = 5;
+export const START_LIMIT_INTERVAL_S = 300;
+const HEADER = '# Written by sf service install (Software Factory); sf service uninstall removes it.';
 // The settings copied from the shell into the unit, when set there: where the factory's files are.
 export const COPIED_SETTINGS = ['XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'SF_CONFIG_DIR', 'SF_STATE_DIR', 'SF_ENV_FILE', 'SF_WORKTREE_ROOT'] as const;
 
@@ -91,15 +104,24 @@ function limitSettings(cores: number): string[] {
   return [`CPUQuota=${cpuQuota(cores)}%`, 'Nice=10'];
 }
 
-// The unit's text: ExecStart of the installed sf, Restart=on-failure, KillMode=process, the CPU cap
-// for these cores and Nice=10, the PATH and the directory settings of the shell (COPIED_SETTINGS
-// that are set), nothing else.
-export function unitText(sf: string, env: NodeJS.ProcessEnv, cores: number): string {
+// The Environment= lines of the units: the PATH and the directory settings of the shell
+// (COPIED_SETTINGS that are set).
+function environmentLines(env: NodeJS.ProcessEnv): string[] {
   const environment = [['PATH', env.PATH ?? ''] as const, ...COPIED_SETTINGS.flatMap((name) => (env[name] ? [[name, env[name]!] as const] : []))];
+  return environment.map(([name, value]) => `Environment=${quoted(`${name}=${value}`)}`);
+}
+
+// The unit's text: ExecStart of the installed sf, Restart=on-failure within the start limit and the
+// alert unit on failure, KillMode=process, the CPU cap for these cores and Nice=10, the PATH and the
+// directory settings of the shell, nothing else.
+export function unitText(sf: string, env: NodeJS.ProcessEnv, cores: number): string {
   return [
-    '# Written by sf service install (Software Factory); sf service uninstall removes it.',
+    HEADER,
     '[Unit]',
     'Description=Software Factory (sf serve)',
+    `StartLimitIntervalSec=${START_LIMIT_INTERVAL_S}`,
+    `StartLimitBurst=${START_LIMIT_BURST}`,
+    `OnFailure=${ALERT_UNIT}`,
     '',
     '[Service]',
     'Type=simple',
@@ -110,10 +132,44 @@ export function unitText(sf: string, env: NodeJS.ProcessEnv, cores: number): str
     'KillMode=process',
     `# The factory must leave the user's machine responsive; a drop-in in ${UNIT_FILE}.d/ overrides these.`,
     ...limitSettings(cores),
-    ...environment.map(([name, value]) => `Environment=${quoted(`${name}=${value}`)}`),
+    ...environmentLines(env),
     '',
     '[Install]',
     'WantedBy=default.target',
+    '',
+  ].join('\n');
+}
+
+// A oneshot unit that runs sf health with these arguments, in the service's environment; no
+// [Install]: the timer or OnFailure= starts it.
+function oneshotText(description: string, sf: string, args: string, env: NodeJS.ProcessEnv): string {
+  return [HEADER, '[Unit]', `Description=${description}`, '', '[Service]', 'Type=oneshot', `ExecStart=${quoted(sf)} health ${args}`, ...environmentLines(env), ''].join('\n');
+}
+
+// The alert unit: OnFailure= of the service runs it once systemd gave up restarting it.
+export function alertUnitText(sf: string, env: NodeJS.ProcessEnv): string {
+  return oneshotText('Software Factory alert: systemd gave up restarting sf serve', sf, '--notify --force', env);
+}
+
+// The watchdog's unit, run by its timer.
+export function watchdogUnitText(sf: string, env: NodeJS.ProcessEnv): string {
+  return oneshotText('Software Factory watchdog (sf health --notify)', sf, '--notify', env);
+}
+
+// The watchdog's timer: five minutes after boot, then five minutes after each run.
+export function watchdogTimerText(): string {
+  return [
+    HEADER,
+    '[Unit]',
+    'Description=Software Factory watchdog every five minutes',
+    '',
+    '[Timer]',
+    'OnBootSec=5min',
+    'OnUnitActiveSec=5min',
+    `Unit=${WATCHDOG_UNIT}`,
+    '',
+    '[Install]',
+    'WantedBy=timers.target',
     '',
   ].join('\n');
 }
@@ -128,12 +184,14 @@ class Service {
   readonly #run: RunCommand;
   readonly #print: (line: string) => void;
   readonly path: string;
+  readonly dir: string;
 
   constructor(options: ServiceOptions) {
     this.#o = options;
     this.#run = options.run ?? runCommand;
     this.#print = options.print ?? console.log;
     this.path = unitPath(options.env, options.home ?? homedir());
+    this.dir = unitDir(options.env, options.home ?? homedir());
   }
 
   systemctl(...args: string[]): Promise<CommandOutput> {
@@ -193,9 +251,18 @@ class Service {
     const running = await this.#ownServe();
     const sf = this.#o.sf ?? INSTALLED_SF;
     const cores = this.#o.cores ?? availableParallelism();
-    await mkdir(unitDir(this.#o.env, this.#o.home ?? homedir()), { recursive: true });
-    await writeFileAtomic(this.path, Buffer.from(unitText(sf, this.#o.env, cores), 'utf8'), 0o644);
+    const texts: Record<(typeof UNIT_FILES)[number], string> = {
+      [UNIT_FILE]: unitText(sf, this.#o.env, cores),
+      [ALERT_UNIT]: alertUnitText(sf, this.#o.env),
+      [WATCHDOG_UNIT]: watchdogUnitText(sf, this.#o.env),
+      [WATCHDOG_TIMER]: watchdogTimerText(),
+    };
+    await mkdir(this.dir, { recursive: true });
+    for (const name of UNIT_FILES) {
+      await writeFileAtomic(join(this.dir, name), Buffer.from(texts[name], 'utf8'), 0o644);
+    }
     this.#print(`Wrote ${this.path} (ExecStart=${sf} serve, KillMode=process: the job runners outlive a restart; ${limitSettings(cores).join(', ')}).`);
+    this.#print(`Wrote the watchdog next to it: ${WATCHDOG_TIMER} runs sf health --notify every five minutes, and after ${START_LIMIT_BURST} failed starts in ${START_LIMIT_INTERVAL_S / 60} minutes systemd stops restarting the service and runs ${ALERT_UNIT}, which notifies you once.`);
     const uncopied = uncopiedSettings(this.#o.env, this.#o.fromEnvFile);
     if (uncopied.length > 0) {
       this.#print(`Not copied into the unit: ${uncopied.join(', ')}. Put them in auth.env (sf info shows where it is), which the service reads.`);
@@ -203,13 +270,14 @@ class Service {
     await this.#lingerWarning();
     await this.#must('daemon-reload');
     if (running === undefined) {
-      await this.#must('enable', '--now', SERVICE_NAME);
-      this.#print(`Enabled and started ${SERVICE_NAME}. Logs: ${JOURNAL_HINT}. sf service status shows it.`);
+      await this.#must('enable', '--now', UNIT_FILE, WATCHDOG_TIMER);
+      this.#print(`Enabled and started ${SERVICE_NAME} and its watchdog timer. Logs: ${JOURNAL_HINT}. sf service status shows it.`);
       return;
     }
     // enable --now would not restart a unit that runs; enable keeps it enabled at login.
-    await this.#must('enable', SERVICE_NAME);
-    await this.#must('restart', SERVICE_NAME);
+    await this.#must('enable', UNIT_FILE);
+    await this.#must('enable', '--now', WATCHDOG_TIMER);
+    await this.#must('restart', UNIT_FILE);
     this.#print(`Rewrote the unit and restarted ${SERVICE_NAME} (its sf serve, pid ${running}, answered on the socket); running jobs keep running (KillMode=process). Logs: ${JOURNAL_HINT}. sf service status shows it.`);
   }
 
@@ -225,15 +293,24 @@ class Service {
 
   async uninstall(): Promise<void> {
     await this.refuseWithoutSystemd();
-    if (!existsSync(this.path)) {
+    const paths = UNIT_FILES.map((name) => join(this.dir, name));
+    if (!paths.some((path) => existsSync(path))) {
       this.#print(`The service is not installed (${this.path} does not exist).`);
       return;
     }
-    // disable --now stops it too; a unit already stopped or disabled is no failure.
-    await this.systemctl('disable', '--now', SERVICE_NAME);
-    await rm(this.path, { force: true });
+    // disable --now stops them too; a unit already stopped or disabled is no failure. systemctl
+    // changes nothing when one of them has no file (an install from before the watchdog), so then
+    // each on its own.
+    if ((await this.systemctl('disable', '--now', WATCHDOG_TIMER, UNIT_FILE)).code !== 0) {
+      for (const unit of [WATCHDOG_TIMER, UNIT_FILE]) {
+        await this.systemctl('disable', '--now', unit);
+      }
+    }
+    for (const path of paths) {
+      await rm(path, { force: true });
+    }
     await this.#must('daemon-reload');
-    this.#print(`Stopped, disabled and removed ${SERVICE_NAME} (${this.path}). Running jobs keep running; start sf serve by hand to follow them.`);
+    this.#print(`Stopped, disabled and removed ${SERVICE_NAME} and its watchdog (${UNIT_FILES.join(', ')} in ${this.dir}). Running jobs keep running; start sf serve by hand to follow them.`);
   }
 
   async status(): Promise<void> {
@@ -242,15 +319,31 @@ class Service {
       this.#print(`not installed (${this.path}); sf service install installs it`);
       return;
     }
-    const shown = await this.systemctl('show', SERVICE_NAME, '--property=ActiveState,SubState,UnitFileState,MainPID');
-    const values = new Map(shown.stdout.split('\n').map((line) => line.split('=', 2) as [string, string]).filter(([key]) => key !== ''));
+    const values = await this.#shown(SERVICE_NAME, 'ActiveState,SubState,UnitFileState,MainPID');
     this.#print(`unit: ${this.path}`);
     this.#print(`state: ${values.get('ActiveState') ?? 'unknown'} (${values.get('SubState') ?? 'unknown'}), ${values.get('UnitFileState') ?? 'unknown'}`);
     const pid = values.get('MainPID');
     if (pid !== undefined && pid !== '0') {
       this.#print(`pid: ${pid}`);
     }
+    this.#print(`watchdog: ${await this.#timerLine()}`);
     this.#print(`logs: ${JOURNAL_HINT}`);
+  }
+
+  // The properties systemctl show prints for a unit, by name.
+  async #shown(unit: string, properties: string): Promise<Map<string, string>> {
+    const shown = await this.systemctl('show', unit, `--property=${properties}`);
+    return new Map(shown.stdout.split('\n').filter((line) => line.includes('=')).map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));
+  }
+
+  // The watchdog timer: active or not, and its last run.
+  async #timerLine(): Promise<string> {
+    if (!existsSync(join(this.dir, WATCHDOG_TIMER))) {
+      return `not installed; run sf service install again to write ${WATCHDOG_TIMER}`;
+    }
+    const values = await this.#shown(WATCHDOG_TIMER, 'ActiveState,LastTriggerUSec');
+    const last = values.get('LastTriggerUSec')?.trim();
+    return `${WATCHDOG_TIMER} ${values.get('ActiveState') ?? 'unknown'}, last run ${last === undefined || last === '' || last === 'n/a' || last === '0' ? 'never' : last}`;
   }
 
   installed(): boolean {

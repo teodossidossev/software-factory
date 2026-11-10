@@ -93,6 +93,28 @@ no limits. The CPU cap needs the `cpu` controller delegated to your systemd user
 default on current distributions); `Nice=10` applies either way. More:
 [Service](../../factory/README.md#service).
 
+## The service's watchdog
+
+`sf serve` reports its own checks, but not its own crash or hang. `sf service install` therefore
+writes, next to the service, `software-factory-watchdog.timer` (every five minutes it runs
+`sf health --notify`) and `software-factory-alert.service` (systemd runs it once it has given up
+restarting the service: five failed starts in five minutes). You get one notification when
+`sf serve` stops answering or its unit failed ("Software Factory: sf serve does not answer since
+…; journalctl --user -u software-factory") and one when it answers again; nothing in between. The
+last state is `watchdog.json` in the state directory.
+
+```sh
+sf service status                                  # watchdog: software-factory-watchdog.timer active, last run …
+systemctl --user list-timers software-factory-watchdog.timer
+journalctl --user -u software-factory-watchdog    # what each run saw and sent
+```
+
+`sf update` does not rewrite the units: after the update that brought the watchdog, run
+`sf service install` once more (`sf service status` says "watchdog: not installed" until then).
+After fixing a crash loop, `systemctl --user reset-failed software-factory` and
+`systemctl --user start software-factory` start the service again. More:
+[Service](../../factory/README.md#service).
+
 ## sf status
 
 ```

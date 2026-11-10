@@ -2,15 +2,17 @@
 // (KillMode=process, the CPU cap and Nice=10 of SF-116, the shell's PATH and directory settings,
 // nothing else), the refusal while a hand-started sf serve answers, the reinstall while the
 // service's own sf serve answers (SF-120: rewrite and restart, refused while it is busy), the
-// machine without systemd user services, the linger warning, uninstall and status; then the CLI
-// with fake systemctl and loginctl on PATH.
+// machine without systemd user services, the linger warning, uninstall and status; the watchdog's
+// units (the start limit and OnFailure= of the service, the alert and watchdog units and the
+// timer), written, enabled and removed with the service; then the CLI with fake systemctl and
+// loginctl on PATH.
 import assert from 'node:assert/strict';
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
-import { type CommandOutput, type RunCommand, serviceCommand, type ServiceOptions, unitPath, unitText } from '../src/service.js';
+import { alertUnitText, type CommandOutput, type RunCommand, serviceCommand, type ServiceOptions, unitDir, unitPath, unitText, watchdogTimerText, watchdogUnitText } from '../src/service.js';
 import { callSocket } from '../src/ipc.js';
 import { newEnv, runCli, serve, stop, temp } from './support/harness.js';
 
@@ -65,7 +67,7 @@ test('sf service install writes the unit with KillMode=process, the PATH and the
   ]);
   // Nothing secret, nothing else.
   assert.doesNotMatch(unit, /secret|SF_GATE|OTHER/);
-  assert.deepEqual(fake.calls, ['systemctl --user show-environment', 'loginctl show-user u --property=Linger', 'systemctl --user daemon-reload', 'systemctl --user enable --now software-factory']);
+  assert.deepEqual(fake.calls, ['systemctl --user show-environment', 'loginctl show-user u --property=Linger', 'systemctl --user daemon-reload', 'systemctl --user enable --now software-factory.service software-factory-watchdog.timer']);
   // SF_GATE is the shell's own, not auth.env's: named; SF_GITHUB_TOKEN came from auth.env: not.
   assert.ok(opts.lines.some((line) => line.includes('Not copied into the unit: SF_GATE.') && line.includes('auth.env')), opts.lines.join('\n'));
   assert.ok(!opts.lines.some((line) => line.includes('SF_GITHUB_TOKEN')));
@@ -137,12 +139,13 @@ test('sf service install, while the service\'s own sf serve answers and is idle,
     MAIN_PID,
     'loginctl show-user u --property=Linger',
     'systemctl --user daemon-reload',
-    'systemctl --user enable software-factory',
-    'systemctl --user restart software-factory',
+    'systemctl --user enable software-factory.service',
+    'systemctl --user enable --now software-factory-watchdog.timer',
+    'systemctl --user restart software-factory.service',
   ]);
   assert.ok(opts.lines.some((line) => line.includes('restarted software-factory') && line.includes('pid 4242') && line.includes('KillMode=process')), opts.lines.join('\n'));
   assert.ok(opts.lines.some((line) => line.startsWith('Wrote ')));
-  assert.ok(!fake.calls.some((call) => call.includes('--now')));
+  assert.ok(existsSync(join(unitDir(opts.env, home), 'software-factory-watchdog.timer')));
 });
 
 test('sf service install refuses with serve_running when the answering sf serve is not the service\'s own, or that is in doubt', async () => {
@@ -190,7 +193,7 @@ test('sf service install refuses with serve_busy while a Task check or a hand-ov
 
 test('sf service install fails with systemctl_failed when the restart of the service\'s own sf serve fails', async () => {
   const home = join(temp, 'service-restart-fails');
-  const fake = ownServe({ 'systemctl --user restart software-factory': { code: 1, stderr: 'boom' } });
+  const fake = ownServe({ 'systemctl --user restart software-factory.service': { code: 1, stderr: 'boom' } });
   await assert.rejects(serviceCommand('install', options(home, fake, own)), (error: unknown) => error instanceof FactoryError && error.code === 'systemctl_failed' && /restart/.test(error.message) && /boom/.test(error.message));
 });
 
@@ -207,6 +210,7 @@ test('sf service status shows the unit state and the journal; uninstall stops, d
   const home = join(temp, 'service-status');
   const fake = fakeCommands({
     'systemctl --user show software-factory --property=ActiveState,SubState,UnitFileState,MainPID': { stdout: 'ActiveState=active\nSubState=running\nUnitFileState=enabled\nMainPID=4242\n' },
+    'systemctl --user show software-factory-watchdog.timer --property=ActiveState,LastTriggerUSec': { stdout: 'ActiveState=active\nLastTriggerUSec=Tue 2026-11-10 09:00:00 CET\n' },
   });
   const notYet = options(home, fake);
   await serviceCommand('status', notYet);
@@ -216,12 +220,93 @@ test('sf service status shows the unit state and the journal; uninstall stops, d
   await serviceCommand('status', shown);
   assert.match(shown.lines.join('\n'), /state: active \(running\), enabled/);
   assert.match(shown.lines.join('\n'), /pid: 4242/);
+  assert.match(shown.lines.join('\n'), /^watchdog: software-factory-watchdog\.timer active, last run Tue 2026-11-10 09:00:00 CET$/m);
   assert.match(shown.lines.join('\n'), /logs: journalctl --user -u software-factory/);
   fake.calls.length = 0;
   const removed = options(home, fake);
   await serviceCommand('uninstall', removed);
-  assert.deepEqual(fake.calls, ['systemctl --user show-environment', 'systemctl --user disable --now software-factory', 'systemctl --user daemon-reload']);
-  assert.equal(existsSync(unitPath(removed.env, home)), false);
+  assert.deepEqual(fake.calls, ['systemctl --user show-environment', 'systemctl --user disable --now software-factory-watchdog.timer software-factory.service', 'systemctl --user daemon-reload']);
+  assert.deepEqual(await readdir(unitDir(removed.env, home)), []);
+});
+
+const UNITS = ['software-factory-alert.service', 'software-factory-watchdog.service', 'software-factory-watchdog.timer', 'software-factory.service'];
+const ENV = { PATH: '/opt/node/bin:/x%y', SF_STATE_DIR: '/state dir/sf', SF_GATE: 'off' };
+const HEADER = '# Written by sf service install (Software Factory); sf service uninstall removes it.';
+
+test('the service unit has the start limit and the alert unit on failure, under [Unit]', () => {
+  const lines = unitText('/opt/sf', ENV, 20).split('\n');
+  const unit = lines.indexOf('[Unit]');
+  const service = lines.indexOf('[Service]');
+  for (const line of ['StartLimitIntervalSec=300', 'StartLimitBurst=5', 'OnFailure=software-factory-alert.service']) {
+    const at = lines.indexOf(line);
+    assert.ok(unit < at && at < service, `${line}:\n${lines.join('\n')}`);
+  }
+  assert.ok(lines.includes('Restart=on-failure') && lines.includes('RestartSec=5'));
+});
+
+test('the alert unit, the watchdog unit and the timer are exact', () => {
+  const environment = ['Environment="PATH=/opt/node/bin:/x%%y"', 'Environment="SF_STATE_DIR=/state dir/sf"'];
+  assert.equal(alertUnitText('/a b/sf', ENV), [
+    HEADER, '[Unit]', 'Description=Software Factory alert: systemd gave up restarting sf serve', '',
+    '[Service]', 'Type=oneshot', 'ExecStart="/a b/sf" health --notify --force', ...environment, '',
+  ].join('\n'));
+  assert.equal(watchdogUnitText('/a b/sf', ENV), [
+    HEADER, '[Unit]', 'Description=Software Factory watchdog (sf health --notify)', '',
+    '[Service]', 'Type=oneshot', 'ExecStart="/a b/sf" health --notify', ...environment, '',
+  ].join('\n'));
+  assert.equal(watchdogTimerText(), [
+    HEADER, '[Unit]', 'Description=Software Factory watchdog every five minutes', '',
+    '[Timer]', 'OnBootSec=5min', 'OnUnitActiveSec=5min', 'Unit=software-factory-watchdog.service', '',
+    '[Install]', 'WantedBy=timers.target', '',
+  ].join('\n'));
+  // The services carry the main unit's Environment= lines.
+  assert.deepEqual(unitText('/a b/sf', ENV, 20).split('\n').filter((line) => line.startsWith('Environment=')), environment);
+});
+
+test('sf service install writes the four units next to each other and enables the service and the timer; uninstall removes all four', async () => {
+  const home = join(temp, 'service-watchdog');
+  const fake = fakeCommands();
+  const opts = options(home, fake);
+  await serviceCommand('install', opts);
+  const dir = unitDir(opts.env, home);
+  assert.deepEqual((await readdir(dir)).sort(), UNITS);
+  assert.equal(await readFile(join(dir, 'software-factory-alert.service'), 'utf8'), alertUnitText('/opt/sf/factory/bin/sf', opts.env));
+  assert.equal(await readFile(join(dir, 'software-factory-watchdog.service'), 'utf8'), watchdogUnitText('/opt/sf/factory/bin/sf', opts.env));
+  assert.equal(await readFile(join(dir, 'software-factory-watchdog.timer'), 'utf8'), watchdogTimerText());
+  assert.equal(fake.calls.filter((call) => call.includes(' enable ')).length, 1);
+  assert.match(fake.calls.at(-1)!, /enable --now software-factory\.service software-factory-watchdog\.timer$/);
+  assert.ok(opts.lines.some((line) => line.includes('software-factory-watchdog.timer') && line.includes('software-factory-alert.service')), opts.lines.join('\n'));
+
+  // An install from before the watchdog: systemctl refuses the pair, each is disabled alone.
+  await rm(join(dir, 'software-factory-watchdog.timer'));
+  const old = fakeCommands({ 'systemctl --user disable --now software-factory-watchdog.timer software-factory.service': { code: 1, stderr: 'Unit file software-factory-watchdog.timer does not exist.' } });
+  const removed = options(home, old);
+  await serviceCommand('uninstall', removed);
+  assert.deepEqual(old.calls, [
+    'systemctl --user show-environment',
+    'systemctl --user disable --now software-factory-watchdog.timer software-factory.service',
+    'systemctl --user disable --now software-factory-watchdog.timer',
+    'systemctl --user disable --now software-factory.service',
+    'systemctl --user daemon-reload',
+  ]);
+  assert.deepEqual(await readdir(dir), []);
+  // Nothing left: not installed.
+  const again = options(home, fakeCommands());
+  await serviceCommand('uninstall', again);
+  assert.match(again.lines.join('\n'), /not installed/);
+});
+
+test('sf service status says when the watchdog timer is missing or never ran', async () => {
+  const home = join(temp, 'service-timer-status');
+  const fake = fakeCommands({ 'systemctl --user show software-factory-watchdog.timer --property=ActiveState,LastTriggerUSec': { stdout: 'ActiveState=inactive\nLastTriggerUSec=n/a\n' } });
+  await serviceCommand('install', options(home, fake));
+  const never = options(home, fake);
+  await serviceCommand('status', never);
+  assert.match(never.lines.join('\n'), /^watchdog: software-factory-watchdog\.timer inactive, last run never$/m);
+  await rm(join(unitDir(never.env, home), 'software-factory-watchdog.timer'));
+  const missing = options(home, fake);
+  await serviceCommand('status', missing);
+  assert.match(missing.lines.join('\n'), /^watchdog: not installed; run sf service install again/m);
 });
 
 // A fake systemctl and loginctl on PATH, logging their arguments; with mainPid, systemctl prints it
@@ -280,8 +365,9 @@ test('the CLI: sf service install, while the service\'s own sf serve answers (it
     assert.match(installed.stdout, new RegExp(`restarted software-factory .*pid ${pid}`));
     assert.equal(existsSync(join(env.home, '.config', 'systemd', 'user', 'software-factory.service')), true);
     const calls = await readFile(join(bin, 'calls.log'), 'utf8');
-    assert.match(calls, /systemctl --user restart software-factory/);
-    assert.doesNotMatch(calls, /enable --now/);
+    assert.match(calls, /systemctl --user restart software-factory\.service/);
+    assert.doesNotMatch(calls, /enable --now software-factory\.service/);
+    assert.match(calls, /systemctl --user enable --now software-factory-watchdog\.timer/);
     const ping = await callSocket(env.state, { command: 'ping', args: [] });
     assert.ok(ping.ok);
     assert.equal((ping.result as { pid?: number }).pid, pid);

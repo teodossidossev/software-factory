@@ -343,7 +343,7 @@ started by the run queue as before.
 | `SF_GATE_FULL_PATHS` | empty | Comma-separated globs (as `SF_SENSITIVE_PATHS`) whose changed paths make an iteration's gate level `full`. |
 | `SF_SMOKE_MODEL` | `haiku` | The model of `sf smoke`'s job (section Live smoke test): its `SF_MODEL` and `SF_REVIEW_MODEL` (Implementer, Claude review, Task check). |
 | `SF_SMOKE_CODEX_MODEL` | unset | The gate's model in `sf smoke`, its `SF_CODEX_MODEL`; unset uses Codex's default. |
-| `SF_SANDBOX` | on | `off` runs the Implementer, the reviews, the simplification pass and the Task check without Claude Code's sandbox, and the Codex gate (SF-125) and the Implementer's Claude Code (SF-181) without their bubblewrap wrappers. The path denials for the tools (SF-100) still apply; those for Bash go with the sandbox. |
+| `SF_SANDBOX` | on | `off` runs the Implementer, the reviews, the simplification pass and the Task check without Claude Code's sandbox, and the Codex gate without its bubblewrap wrapper (SF-125). The path denials for the tools (SF-100) still apply; those for Bash go with the sandbox. |
 | `SF_SANDBOX_DOMAINS` | empty | Comma-separated extra hosts sandboxed commands may reach, besides `registry.npmjs.org`. |
 | `SF_SANDBOX_ALLOW_READ` | empty | Comma-separated paths relative to the home directory that a job's sandboxed commands may read there besides the kept paths (SF-123, section Jobs, "The path denials"), for other toolchains: `.m2/repository,.gradle/caches`. An absolute entry, one with a `..` segment or a `~`, one that is or holds the home directory itself (`.`, a link to it), or one that is, holds or lies in a path denied for reading stops the session with `invalid_config`, naming the entry. |
 | `SF_DESKTOP_NOTIFY` | on | `off` disables the desktop notification. |
@@ -1778,8 +1778,8 @@ is set, SF-123) and, unless `SF_SANDBOX=off`, the sandbox
 Local binding and Unix sockets are allowed so that the repository's own tests, which start servers on
 loopback and on Unix sockets, run inside the sandbox. The factory's own `fetch`, commit, rebase and `push` run outside
 the Implementer, so the Git host is not needed there; a repository whose checks need other hosts
-(another package registry, a test service) lists them in `SF_SANDBOX_DOMAINS`. The factory writes
-nothing under `~/.claude` but the Implementer's missing state folders and files (below). No session gets `SSH_AUTH_SOCK` (SF-100), and neither does the Codex gate: the
+(another package registry, a test service) lists them in `SF_SANDBOX_DOMAINS`. Nothing is written
+under `~/.claude`. No session gets `SSH_AUTH_SOCK` (SF-100), and neither does the Codex gate: the
 factory fetches and pushes itself. On Linux the sandbox can allow every Unix socket or none
 (`allowUnixSockets` is macOS only), so all stay allowed for the repositories' tests; `sf.sock` is
 in a denied path, and so are the user's socket locations (SF-123, below). Every `ANTHROPIC_*`,
@@ -1793,41 +1793,6 @@ Claude Code ignores a command's `dangerouslyDisableSandbox`, and a project's `.c
 (which the Implementer can write in its worktree) can neither switch the sandbox off nor widen it,
 so the path denials below hold for every Bash command. A repository whose checks cannot run inside
 the sandbox needs `SF_SANDBOX=off`.
-
-**The Implementer's wrapper** (SF-181, `src/session-wrapper.ts`). With the sandbox on, every
-`query()` of the Implementer session (its first, Fix, Tests Fix and MR text turns) passes
-`spawnClaudeCodeProcess`, which starts the Claude Code command the SDK gives, its argv, cwd and
-environment unchanged, as `bwrap <wrapper> --chdir <cwd> -- <command> <argv>`. The file-tool guard
-checks a path before Claude Code writes it, and a Bash command of the same session can swap a folder
-for a link in between; the wrapper makes everything outside the allowed set unwritable for the
-whole process, so such a write fails. The wrapper (`implementerWrapper`), a later mount winning:
-the whole system read-only, a new `/dev` and `/proc` (`--unshare-pid`), `--die-with-parent`; every
-`denyRead` entry of the session's path denials hidden as the gate's wrapper hides them (an empty
-tmpfs over a folder, `/dev/null` over a file), but those the CLI needs itself: its credentials
-(`~/.claude/.credentials.json`), its global config (`~/.claude.json`), its installation (the
-executable's real path, its nearest `node_modules` ancestor else its folder, `~/.local/share/claude`
-when it lives there, and node's prefix) and the folders it writes; the installation bound back
-read-only; read-write exactly the job's worktree, the session's temporary folder
-(`CLAUDE_CODE_TMPDIR`), `~/.claude/projects`, `shell-snapshots`, `todos`, `statsig` and
-`session-env`, the credentials and the global config (each made before the wrapper starts when
-missing: a folder, or a file holding `{}` with mode 0600; an existing one is never overwritten);
-then the gate's fix-up pass (a denial inside a bind hidden again, so a worktree's `.env` stays
-hidden); last, read-only again: the worktree's `.git` (the factory runs Git itself, outside) and
-agent configuration (`.claude`, `.mcp.json`, `.codex`), each `denyWrite` entry inside a read-write
-bind that is not denied for reading, and the user settings (`settings.json`, `settings.local.json`),
-which the CLI reads. The checkout's Git directory is read-only through the root. The rest of
-`~/.claude` (the user's `CLAUDE.md`, skills, plugins) is hidden from the Implementer's CLI, and a
-hidden folder is an empty tmpfs whose writes stay inside the wrapper. The host's network namespace
-(Claude Code reaches the API) and no seccomp filter (Claude Code's own Bash sandbox, a bwrap nested
-inside, makes its own sockets). It is one more layer: Claude Code's sandbox, the path denials and
-the file-tool guard stay as they are; the Claude review, the simplification pass, the Task check and
-the digest, read-only sessions, run without it. `bwrap` is required for jobs, as it is for the gate
-and the workspaces' tests: with the sandbox on and no `bwrap` on `PATH` the turn fails with
-`sandbox_unavailable` ("bwrap is required to run the Implementer and was not found."), and a bwrap
-that fails (an error, or an exit other than 0 before Claude Code gives its result, its first messages
-notwithstanding) fails it with
-`sandbox_unavailable` and bwrap's first error line, redacted; Claude Code is never started
-unwrapped. `SF_SANDBOX=off` runs it without the wrapper, as the gate.
 
 **The path denials** (SF-100, `src/sandbox-denials.ts`). Every session the factory starts (the
 Implementer and its MR turns, the Claude review, the simplification pass, the Task check) gets deny

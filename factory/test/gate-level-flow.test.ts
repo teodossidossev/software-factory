@@ -12,7 +12,7 @@ import { LIGHT_SKIPPED } from '../src/gate-level.js';
 import { GATE_SANDBOX_UNAVAILABLE } from '../src/gate.js';
 import { JobStore } from '../src/jobs.js';
 import {
-  call, codexLog, codexScript, type Env, fakeBwrapBin, fakeCodex, fakeLog, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, temp, waitFor,
+  call, codexLog, codexScript, type Env, fakeCodex, fakeLog, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, temp, waitFor,
 } from './support/harness.js';
 
 const CLEAN = { verdict: 'clean', summary: 'Claude found it right.', items: [], accepted_sensitive: [] };
@@ -297,11 +297,10 @@ test('redacted (SF-125): a gate finding holding an environment value is stored i
 });
 
 test('fail closed (SF-125): with the sandbox on and no bwrap on PATH, the gate never starts Codex; the job is needs_human with gate_sandbox_unavailable, gate.json and the event say why', async () => {
-  // A PATH with git and node only (the factory's and the Claude SDK's), and the fake bwrap only for the
-  // Implementer's turn, which runs inside it (SF-181): the turn removes it, so the gate finds none.
+  // A PATH with git and node only (the factory's and the Claude SDK's), no bwrap.
   const bin = join(temp, 'no-bwrap-bin');
   await mkdir(bin, { recursive: true });
-  for (const [name, target] of [['node', process.execPath], ['git', await gitPath()], ['bwrap', join(fakeBwrapBin, 'bwrap')]] as const) {
+  for (const [name, target] of [['node', process.execPath], ['git', await gitPath()]] as const) {
     await symlink(target, join(bin, name)).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== 'EEXIST') {
         throw error;
@@ -311,7 +310,7 @@ test('fail closed (SF-125): with the sandbox on and no bwrap on PATH, the gate n
   const env = await newEnv('level-no-bwrap', levelEnv({ SF_GATE_LEVEL: 'full', PATH: bin }));
   const repo = await newRepo(env, 'level-no-bwrap-repo', false);
   await putTask(env, repo, 'GN-1', 'Export the value');
-  await script(env, [{ write: { 'src/app.ts': 'export const value = 1;\n' }, run: [['/bin/rm', join(bin, 'bwrap')]], text: 'Report of iteration 1' }]);
+  await script(env, [{ write: { 'src/app.ts': 'export const value = 1;\n' }, text: 'Report of iteration 1' }]);
   await codexScript(env, [{ output: GATE_CLEAN }]);
   const served = await serve(env);
   try {

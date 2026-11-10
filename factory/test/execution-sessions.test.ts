@@ -9,7 +9,6 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
 import { factoryPrompt } from '../src/prompts.js';
-import { prepareClaudeState } from '../src/session-wrapper.js';
 import { SMOKE_PROBE_RULE, SMOKE_TOOLS, sessionAllowedTools } from '../src/session.js';
 import { call, fakeLog, newEnv, newRepo, putTask, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
 
@@ -60,10 +59,6 @@ test('the smoke\'s session (SF-104, SF-109, SF-110): an sf serve whose state dir
   // as the home's entries are denied to Bash (SF-123).
   await writeFile(join(env.home, 'fake-claude.count'), '0');
   await writeFile(join(env.home, 'fake-claude.log'), '');
-  // So are the fake bwrap's log and the Claude Code state the Implementer's wrapper makes before its
-  // first run (SF-181): its folders, its credentials and its global config.
-  await writeFile(join(env.home, 'fake-bwrap.log'), '');
-  await prepareClaudeState(join(env.home, '.claude'), join(env.home, '.claude.json'));
   let served = await serve(env);
   await call(served, 'start', { workspace: 'app', ticket: 'P-1' });
   await waitFor(served, 'P-1', 'awaiting_review', 1);

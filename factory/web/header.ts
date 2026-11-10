@@ -18,6 +18,7 @@ const LIMIT_MAX = 20;
 const PAGE_OPEN: Readonly<Record<string, () => void>> = {
   digest: () => openDigest(null),
   stats: () => openStats(),
+  'merge-requests': () => openMergeRequests(),
   archived: () => openArchived(),
   workspaces: () => openWorkspaces(),
 };
@@ -141,12 +142,16 @@ function setLimit(delta: number): void {
 
 function initHeader(): void {
   byId('waits').addEventListener('click', showYourTurn);
+  byId('open-merge-requests').addEventListener('click', openMergeRequests);
   // The page select opens what the tabs open, then shows the board again (the bar is the board's).
   const pages = byIdAs('page-select', 'select');
   pages.value = 'board';
   pages.addEventListener('change', () => {
     const open = PAGE_OPEN[pages.value];
     pages.value = 'board';
+    // A page opened here comes without a hashchange: the Merge requests page hides first (it shows
+    // itself again when it is the one chosen).
+    byId('merge-requests').hidden = true;
     open?.();
   });
   const filter = byIdAs('workspace-filter', 'select');

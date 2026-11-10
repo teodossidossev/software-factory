@@ -66,6 +66,7 @@ Read the first four pages once, in order; the rest when you need them.
 | tell a running job something | [Running jobs: talking to a job](running-jobs.md#talking-to-a-running-job) |
 | get the result into my IDE | [Review and merge: the hand-over](review-and-merge.md#1-the-hand-over-to-your-checkout) |
 | have the factory open and merge the MR | [Review and merge: the Merge request screen](review-and-merge.md#2-pushing-and-opening-the-merge-request-from-the-factory) |
+| implement the review comments of an open merge request | [Review and merge: a job from review comments](review-and-merge.md#a-job-from-review-comments) |
 | find out why a job stopped and what to do | [When a job stops](when-a-job-stops.md) |
 | update the factory without breaking running jobs | [Operations: updating](operations.md#updating-the-factory) |
 | fix "port in use", a lost dashboard URL or an expired login | [Operations: troubleshooting](operations.md#troubleshooting) |

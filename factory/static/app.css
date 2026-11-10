@@ -731,6 +731,30 @@ pre.raw.doc .heading { font-weight: 700; }
   .st-tile-value { font-size: 18px; }
 }
 
+/* Merge requests: a full page like the Stats', up to 960 px wide; the merge requests as a list of
+   choices, the chosen one's threads with their checkboxes, each comment's body as plain text. */
+#merge-requests { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--bg); z-index: 6; padding-top: env(safe-area-inset-top, 0px); padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px)); }
+#merge-requests .jhead .t1 .title { font-size: 16px; font-weight: 600; }
+#merge-requests .jhead .tools { flex-wrap: wrap; }
+.mq-body { max-width: 960px; margin: 0 auto; display: grid; gap: 14px; min-width: 0; }
+.mq-list, .mq-threads { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; min-width: 0; }
+.mq-req { all: unset; box-sizing: border-box; width: 100%; display: grid; gap: 2px; padding: 8px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; min-width: 0; }
+.mq-req:hover, .mq-req.on { border-color: var(--accent); }
+.mq-req:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mq-title { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.mq-meta { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.mq-chosen h3 { text-transform: none; letter-spacing: 0; font-size: 14px; color: var(--fg); flex-wrap: wrap; overflow-wrap: anywhere; }
+.mq-chosen > .btn { justify-self: start; }
+.mq-thread { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; display: grid; gap: 6px; min-width: 0; }
+.mq-tick { display: flex; gap: 8px; align-items: baseline; cursor: pointer; font: 12px var(--mono); overflow-wrap: anywhere; }
+.mq-tag { font: 11px var(--sans); color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+.mq-comment { padding-left: 22px; display: grid; gap: 2px; min-width: 0; }
+.mq-chead { display: flex; gap: 8px; align-items: baseline; font-size: 12px; }
+.mq-chead time { color: var(--muted); }
+.mq-cbody { font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mq-label { font-size: 13px; font-weight: 600; }
+.mq-text { width: 100%; box-sizing: border-box; font: 13px var(--sans); resize: vertical; }
+
 /* Phone (below 768 px), touch (phone or no hover), tablet board. */
 /* Every width: the column headings fold their column (the list and Done's "show all"); the reasons
    of the disabled buttons, shown only by the touch block; the tree's fold, shown only on a phone. */
@@ -750,7 +774,7 @@ pre.raw.doc .heading { font-weight: 700; }
 /* A phone: one list, the top bar scrolls away, the header's whole title and full-width switch, the
    Stream's time and actor above the text, the composer's full-width box, Changes stacked. */
 @media (max-width: 767px) {
-  #job, #ticket, #digest { padding-bottom: env(safe-area-inset-bottom, 0px); }
+  #job, #ticket, #digest, #merge-requests { padding-bottom: env(safe-area-inset-bottom, 0px); }
   .kbd { display: none; }
   .cols { grid-template-columns: minmax(0, 1fr); }
   .qhint { display: none; }

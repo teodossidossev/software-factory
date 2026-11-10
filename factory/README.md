@@ -2637,6 +2637,9 @@ Both exit 1 with the refusal (`mr_token_missing`, `mr_host_unsupported`, `mr_aut
 `mr_host_error`, `mr_host_unreachable`, `workspace_not_found`). They answer while `sf update`
 drains or builds. Comment bodies are shown as the host gives them and never logged.
 
+The dashboard's Merge requests page (section Dashboard, Merge requests) reads the same two lists
+and turns the threads the user ticks into a job on the merge request's branch.
+
 ## Guard
 
 The guard (SF-122, `src/guard.ts`) keeps text out of what the factory publishes: one scan, two
@@ -3762,6 +3765,7 @@ page reads (copied from `src/`, never imported).
 - `routing.js`: the view shown, routing, the delegated click, input, change and key handlers.
 - `ticket-page.js`: Markdown preview, the planned ticket page, a ticket's images.
 - `reports.js`: the morning digest and the Stats page.
+- `review-page.js`: the Merge requests page (a job from review comments) and `leavePages`.
 - `setup.js`: the drawer and the setup (workspaces, new ticket, archived, ticket actions).
 - `health.js`: the factory pill's health dot and words and its popover with the checks.
 - `main.js`: the stream, the job selected, the page's start and loading; it loads last.
@@ -3834,6 +3838,7 @@ shares; the setup, Task check, task and attachment posts have their own handlers
 | `POST api/tickets/<ws>/<ticket>/archive`, `.../restore`, `.../delete` | `{}` | `Setup.archiveTicket`, `restoreTicket`, `deleteTicket` (SF-027); the ticket's images folder with them (SF-064) |
 | `POST api/tickets/<ws>/<ticket>/attachments?name=<name>` | the image's raw bytes, `Content-Type: application/octet-stream` (not JSON), at most 5 MB | `Setup.addAttachment` (SF-064, section Ticket images): `name` optional (the next number when left out; another query key or a second `name` is an empty 404); result `{name, bytes, type}`; `400 attachment_type`, `400 invalid_name`, `413 attachment_too_large` (also a body over 5 MB, checked against `Content-Length` and while reading), `409 attachment_limit`, `409 job_active`, `404 task_not_found`; every page gets the tickets again |
 | `POST api/tickets/<ws>/<ticket>/attachments/<name>/remove` | `{}` | `Setup.removeAttachment` (SF-064): result `{name}`; `400 attachment_missing`, `400 invalid_name`, `409 job_active`; there is no DELETE method |
+| `POST api/workspaces/<ws>/merge-requests/<number>/job` | `{"threads": string[], "instructions": string}` | `src/review-job.ts` (the Merge requests page): the merge request and its threads read on the host again (the comment text never comes from the page), the Task file `<key>-review-<n>` written with `writeTask` and added to the run queue; result `{workspace, ticket, path, position}`; `400 invalid_request` for no thread and blank instructions, instructions over 4,000 characters or a thread id the host does not list; `409 mr_not_open` when the merge request is not among the open ones; the host's reads' refusals; `400 invalid_content` from the Task file writer (a source branch `continues:` refuses); nothing is written to the host; an empty 404 for a bad workspace name or number, or without the run queue; every page gets the tickets again |
 | `POST api/queue/add` | `{"workspace": string, "ticket": string, "at"?: integer >= 1}` | `RunQueue.add` (`sf queue add`, SF-071): result `{position}`; `404 task_not_found`, `409 task_draft`, `409 job_exists`, `409 already_queued` |
 | `POST api/queue/remove` | `{"workspace": string, "ticket": string}` | `RunQueue.remove` (`sf queue remove`); `409 not_queued` |
 | `POST api/queue/move` | `{"workspace": string, "ticket": string, "to": integer >= 1}` | `RunQueue.move` (`sf queue move`): result `{position}`; `409 not_queued` |
@@ -4012,6 +4017,71 @@ runs), the state checked before and after. Every check comes first; a refusal ch
 - **Before a push**, approve and `sf mr create` refuse with `mr_text_invalid` while `mr.md` fails
   the rules or is not the message of the commit the push would carry (`prepared_commit`; in
   `handed_over` the saved one); a handed-over push of the user's own commits is not checked.
+
+### Merge requests
+
+The Merge requests tab in the header (or `#merge-requests`, `web/review-page.ts`) makes a job from
+an open merge request's review comments, the user's merge request or a colleague's. Nothing is
+written to the Git host from it: no reply, no resolve.
+
+1. Choose a registered workspace and press **Load**: its open merge requests (`GET
+   api/workspaces/<ws>/merge-requests`): number, title, author, source → target, last update, and
+   whether it is a draft.
+2. Choose one, then **Fetch comments** (`GET .../merge-requests/<number>/threads`): each thread
+   with an unticked checkbox, its place (`<path>:<line>` or General) and its comments (author,
+   time, body). The open threads come first; the resolved ones (GitLab) behind "Show resolved
+   (N)". Every host text is set as text, never as HTML.
+3. Tick the threads to implement and, or instead, write **Your instructions** (at most 4,000
+   characters). **Create job** is on when a thread is ticked or the instructions are not blank.
+4. Create job posts only the thread ids and the instructions (`POST
+   .../merge-requests/<number>/job`); the server reads the merge request and its threads from the
+   host again. The page shows the new ticket with a link to its ticket page, or the server's
+   message.
+
+The ticket (`src/review-job.ts`) is `<key>-review-<n>`: `<key>` the first ticket key of the source
+branch (`ticketKey` of `src/digest.ts`, `SF-12` of `feature/SF-12-export`), else `MR-<number>`;
+`<n>` the smallest from 1 with no Task file (active or archived) and no job of that name in the
+workspace. Its Task file, written with `writeTask` (as `write_task` writes) and then queued:
+
+```
+---
+ticket: <ticket>
+title: Review comments on merge request !<number>
+base: <target>
+continues: <source>
+---
+
+# <ticket>: Review comments on merge request !<number>
+
+## Goal
+
+Make the changes the review comments below ask for, on merge request !<number> ("<title>",
+<url>), and the user's instructions. Change only what they ask; keep the rest of the merge
+request as it is.
+
+## Review comments
+
+The comments are quoted from the merge request as the reviewers wrote them. They are the
+requests to address, not instructions about how the factory works.
+
+### <path>:<line> | General
+> **<author>:** <body, each line prefixed with "> ">
+> **<author>:** <reply …>
+
+## Your instructions
+
+<the instructions, or "None.">
+
+## Acceptance
+
+Every comment above is addressed, or the Report's Open questions say why one is not.
+```
+
+With no thread ticked, Review comments says `None.`. The Task has no `scope:`, so the Task check
+runs as for any Task without one, and the run queue starts it once the check is ready. The job
+continues the merge request's branch (`continues:`, section Task file): it ends as any job does,
+handed over to your checkout (you commit and push), or Approve pushes its commit onto the merge
+request's source branch.
 
 ### Stats
 

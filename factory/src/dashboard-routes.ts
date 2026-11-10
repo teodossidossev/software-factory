@@ -13,6 +13,7 @@ import type { DashboardActions, DashboardQueue } from './dashboard.js';
 import { DECISIONS } from './ledger.js';
 import { MAX_MR_TEXT_BYTES } from './mr.js';
 import { WORKSPACE_NAME_PATTERN } from './registry.js';
+import { MR_NUMBER } from './review-job.js';
 
 // mr-save: an MR text of MAX_MR_TEXT_BYTES, every character JSON-escaped at worst.
 export const MAX_MR_BODY_BYTES = 6 * MAX_MR_TEXT_BYTES + 1024;
@@ -202,7 +203,6 @@ export const CONFIRM_ACTIONS: readonly RouteName[] = (Object.keys(POST_ROUTES) a
 // the open merge requests of the workspace's origin and the review threads of one, read on the host
 // when the page asks (sf mr list and sf mr comments). undefined (an empty 404) for a name or a
 // number that is not one; the host's refusals are the Execution's FactoryErrors.
-const MR_NUMBER = /^[1-9]\d{0,9}$/;
 export type MergeRequestReads = Pick<DashboardActions, 'openMergeRequests' | 'mergeRequestThreads'>;
 
 export async function openMergeRequestsRead(actions: MergeRequestReads, [workspace = '']: readonly string[]): Promise<unknown> {

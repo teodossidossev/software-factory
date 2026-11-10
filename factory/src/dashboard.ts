@@ -38,6 +38,7 @@ import { internalError, listen, LOOPBACK_HOST, sameSecret, sendJson, statusOf } 
 import { lineEntries, type StreamEntry, streamContext } from './job-stream.js';
 import { claudeReviews, type Job, type JobState, type JobStore } from './jobs.js';
 import { DIGEST_DEFAULTS, HANDOFF_MODES, WORKSPACE_COLORS, WORKSPACE_NAME_PATTERN } from './registry.js';
+import { REVIEW_JOB_SHAPE, reviewJobCall } from './review-job.js';
 import { DASHBOARD_TOKEN_FILE as TOKEN_FILE, readTokenFile } from './secrets.js';
 import type { Setup, TicketRow } from './setup.js';
 import type { CheckRecord, CheckSummary, TaskChecks } from './task-check.js';
@@ -83,7 +84,7 @@ const SECURITY_HEADERS = {
 // The dashboard's script: classic scripts that share the page's globals, in load order.
 // dashboard.html has one deferred <script> per entry, in this order; nothing at the top level of a
 // file uses a name defined in a later one.
-export const DASHBOARD_SCRIPTS = ['core.js', 'job-screens.js', 'job-page.js', 'header.js', 'board.js', 'routing.js', 'ticket-page.js', 'reports.js', 'setup.js', 'health.js', 'main.js'] as const;
+export const DASHBOARD_SCRIPTS = ['core.js', 'job-screens.js', 'job-page.js', 'header.js', 'board.js', 'routing.js', 'ticket-page.js', 'reports.js', 'review-page.js', 'setup.js', 'health.js', 'main.js'] as const;
 export type DashboardScript = (typeof DASHBOARD_SCRIPTS)[number];
 // The files of each entry of DASHBOARD_SCRIPTS, in load order: url, the file
 // served, is the build output dist/web/<name>.js; source, the file written by hand, is
@@ -884,6 +885,8 @@ type Target =
   | { kind: 'both'; route: 'workspace-add' | 'ticket-new' }
   // The run queue: api/queue/<action>, POST only; name is its POST_ROUTES name.
   | { kind: 'queue'; name: string; route: QueueRoute }
+  // A job from a merge request's review comments: api/workspaces/<ws>/merge-requests/<number>/job, POST only.
+  | { kind: 'mr-job'; workspace: string | undefined; number: string | undefined }
   | { kind: 'read' };
 
 function targetOf(path: string[]): Target {
@@ -903,6 +906,9 @@ function targetOf(path: string[]): Target {
   }
   if (kind === 'workspaces' && path.length === 4 && b === 'edit') {
     return { kind: 'workspace-edit', name: a };
+  }
+  if (kind === 'workspaces' && path.length === 6 && b === 'merge-requests' && path[5] === 'job') {
+    return { kind: 'mr-job', workspace: a, number: c };
   }
   if (kind === 'digest-settings' && path.length === 2) {
     return { kind: 'digest-settings' };
@@ -1732,6 +1738,11 @@ export async function startDashboard(
         refreshSetup: true,
       };
     }
+    if (target.kind === 'mr-job') {
+      // src/review-job.ts: the new ticket, queued, reaches every page; nothing without the run queue.
+      const call = queue === undefined ? undefined : reviewJobCall({ reads: actions, jobs, queue }, target.workspace, target.number);
+      return call === undefined ? undefined : { route: 'mr-job', shape: REVIEW_JOB_SHAPE, call, refreshSetup: true };
+    }
     if (target.kind === 'digest-run') {
       const run = digests;
       if (run === undefined) {
@@ -1926,7 +1937,7 @@ export async function startDashboard(
       }
     };
     const what = targetOf(path);
-    if (what.kind === 'action' || what.kind === 'workspace-remove' || what.kind === 'ticket-action' || what.kind === 'workspace-edit' || what.kind === 'digest-settings' || what.kind === 'digest-run') {
+    if (what.kind === 'action' || what.kind === 'workspace-remove' || what.kind === 'ticket-action' || what.kind === 'workspace-edit' || what.kind === 'digest-settings' || what.kind === 'digest-run' || what.kind === 'mr-job') {
       if (req.method !== 'POST') {
         empty(res, 405, { allow: 'POST' });
         return;

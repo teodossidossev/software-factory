@@ -31,7 +31,7 @@ import { dashboardUrl, readToken } from './dashboard.js';
 import { findBwrap, gateEnvironment } from './gate.js';
 import { sweepSessionTmps } from './host-tmp.js';
 import { runGit } from './git.js';
-import { type Job, type JobState, JobStore, TERMINAL_STATES } from './jobs.js';
+import { type Job, JobStore, statesWith, TERMINAL_STATES } from './jobs.js';
 import { mrTextProblem } from './mr.js';
 import { claudeConfigDir, FILE_GUARD, gateWrapperFor } from './sandbox-denials.js';
 import { filterSupports, spawnSeccomped } from './seccomp.js';
@@ -252,9 +252,9 @@ const CLI = fileURLToPath(new URL('./cli.js', import.meta.url));
 // The smoke's own commits in the throwaway repository.
 const GIT_ID = ['-c', 'user.name=sf-smoke', '-c', 'user.email=sf-smoke@localhost', '-c', 'commit.gpgsign=false'];
 // The job states past the reviews: a job there without a review (or gate) record will not get one.
-const PAST_REVIEWS: readonly JobState[] = ['preparing_mr', 'ready_for_human_review', 'pushed'];
+const PAST_REVIEWS = statesWith('past_reviews');
 // The job states in which a job stopped: the step it was on fails.
-const STOPPED: readonly JobState[] = ['needs_human', 'failed', 'aborted'];
+const STOPPED = statesWith('stopped');
 // The child's SF_MAX_ITERATIONS: the Claude review step looks at this many iterations.
 const MAX_ITERATIONS = 2;
 // A child sf command of Cleanup (sf reset, sf abort) that hangs is stopped after this long.

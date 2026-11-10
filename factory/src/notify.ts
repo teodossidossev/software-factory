@@ -7,7 +7,7 @@ import { delimiter, join } from 'node:path';
 import { pushedBranch } from './continues.js';
 import { withoutHostTokens } from './forge.js';
 import type { Job, JobState, JobStore } from './jobs.js';
-import { now } from './jobs.js';
+import { now, statesWith } from './jobs.js';
 import { localTime } from './local-time.js';
 import { HANDOFF_OFF_CODE } from './registry.js';
 import { type CheckRecord, recordVerdict, severityCounts } from './task-check.js';
@@ -15,7 +15,7 @@ import { turnLimitLine } from './turn-limit.js';
 
 const DESKTOP_TIMEOUT_MS = 5_000;
 const NTFY_TIMEOUT_MS = 10_000;
-export const NOTIFIED_STATES: readonly JobState[] = ['ready_for_human_review', 'handed_over', 'needs_human', 'paused', 'waiting_limit', 'pushed', 'failed'];
+export const NOTIFIED_STATES = statesWith('notified');
 // The name of a usage limit's provider in a notification.
 const PROVIDER_NAMES = { claude: 'Claude', codex: 'Codex' } as const;
 

@@ -30,10 +30,10 @@ const DAY = 86_400_000;
 const digestOutput = z.strictObject({
   repos: z.array(z.strictObject({
     name: z.string(),
-    headline: z.string().describe('One or two sentences: what happened and where the work is heading.'),
-    merged: z.array(z.strictObject({ sha: z.string(), problem: z.string().describe('The problem it solves, in one sentence.') })),
-    branches: z.array(z.strictObject({ ref: z.string(), what: z.string().describe('What is going on there, in one sentence.') })),
-    impact_on_me: z.array(z.string()).describe('Concrete effects on my branches and tickets.'),
+    headline: z.string().describe('One or two plain sentences: what happened and where the work is heading.'),
+    merged: z.array(z.strictObject({ sha: z.string(), problem: z.string().describe('The problem it solves, in one plain sentence.') })),
+    branches: z.array(z.strictObject({ ref: z.string(), what: z.string().describe('What is going on there, in one plain sentence.') })),
+    impact_on_me: z.array(z.string()).describe('Per ticket of mine: what I have to do and why, in plain words.'),
   })),
   cross_repo: z.array(z.strictObject({
     ticket: z.string(),

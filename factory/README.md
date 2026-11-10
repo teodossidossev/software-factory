@@ -4341,9 +4341,12 @@ data, a guess marked "likely", problems and plans as suggestions, the settings' 
 written as you would say it at the team's stand-up, to colleagues and a product owner who do not
 read Git: each piece of work by its ticket key and a short topic from its commits, one item per
 ticket, with no commit SHAs, branch names, file paths, counts of commits ahead or behind, or Git
-words (commit, push, rebase, merge, branch, master, main); the Repositories tab keeps the
-identifiers as they are. An invalid
-or failed answer is retried once; then the digest is stored with the Git data and the error, and the
+words (commit, push, rebase, merge, branch, master, main). The Repositories tab is plain too: the
+page shows each landed entry's SHA and each branch's name beside the model's sentence, so the
+sentences hold no commit SHAs, branch names or counts of commits ahead or behind, and a file path
+only when you must open that file; they name work by its ticket key and a short topic and say what
+changed and what you have to do. Effect on my work has one item per ticket of yours: what to do and
+why ("likely done; the branch can go" for a branch that likely landed). An invalid or failed answer is retried once; then the digest is stored with the Git data and the error, and the
 page shows the Git data with a note. About $0.30 per run with Sonnet for three repositories.
 
 **The record**: `<state dir>/digest/<id>.json`, the id the run's start in UTC and its trigger
@@ -4365,7 +4368,8 @@ headings). The first heading names the span: "Yesterday" when it starts the day 
 digest's `language`: Bulgarian (`Bulgarian`, `bg` or `български`, any case) gives Вчера / От
 <weekday>, Проблеми, План, Днес; any other language gives English. The rest of the page stays in
 English. The prompt asks for the digest's language throughout: a guess is marked with its word for
-"likely", and no English words appear but the identifiers.
+"likely", and no English word appears in any script (a transliteration counts) but ticket keys,
+people's names and product names.
 
 **Notification**: a scheduled digest sends one, with counts only ("Morning digest ready: N landed, M
 of mine need attention"), through the configured channels; a manual run sends none. The digest's

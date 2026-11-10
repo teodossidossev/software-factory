@@ -148,14 +148,19 @@ test('a manual digest: the output stored with the Git data, the cost and the per
   // The whole prompt, rules and data, within the cap.
   assert.ok(call!.prompt.length <= 150_000);
   assert.match(call!.prompt, /the data wins/);
-  // A guess in the digest's language, never the English word; no other English words.
+  // A guess in the digest's language, never the English word; no English word in any script.
   assert.doesNotMatch(call!.prompt, /Mark a guess with "likely"/);
   assert.match(call!.prompt, /Mark a guess with the word for "likely" in Deutsch\./);
-  assert.match(call!.prompt, /stay as they are\. Unless Deutsch is English, no other English words, in any part\./);
-  // Identifiers stay as they are only in the Repositories tab; a daily is spoken at the stand-up
-  // and holds no SHAs, branch names or paths.
-  assert.match(call!.prompt, /In repos and cross_repo, identifiers/);
-  assert.doesNotMatch(call!.prompt, /\. Identifiers \(branch names/);
+  assert.match(call!.prompt, /Ticket keys and people's names stay as they are\. Unless Deutsch is English, no English word in any script \(a transliteration counts as English\), except ticket keys, people's names and product names\./);
+  assert.match(call!.prompt, /a transliteration counts as English/);
+  assert.doesNotMatch(call!.prompt, /In repos and cross_repo, identifiers/);
+  // The Repositories tab is plain too: the page shows the SHAs and branch names beside the
+  // sentences, which name work by ticket and topic; sha and ref stay exactly as given.
+  assert.match(call!.prompt, /In headline, problem, what, impact_on_me, by_workspace and for_me: no commit SHAs, no branch names, no counts of commits ahead or behind/);
+  assert.match(call!.prompt, /sha: its sha exactly as given/);
+  assert.match(call!.prompt, /ref: its name exactly as given/);
+  assert.match(call!.prompt, /One item per ticket, never one per file or commit\./);
+  // A daily is spoken at the stand-up and holds no SHAs, branch names or paths.
   assert.match(call!.prompt, /stand-up/);
   assert.match(call!.prompt, /A daily never holds commit SHAs, branch names, file paths/);
   const data = JSON.parse(/<git_data>\n(.*)\n<\/git_data>/s.exec(call!.prompt)![1]!);

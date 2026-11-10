@@ -29,7 +29,7 @@ export const MAX_MODEL_INPUT_CHARS = 150_000;
 // The "why" of one entry and the files listed per entry, at most.
 const MAX_WHY_CHARS = 1500;
 const MAX_FILES = 40;
-export const TICKET_KEY = /[A-Z][A-Z0-9]+-\d+/;
+export const TICKET_KEY = /[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*-\d+/;
 
 export class DigestGitError extends Error {}
 
@@ -69,7 +69,7 @@ const message = (error: unknown): string => maskCredentials(error instanceof Err
 
 // ---------- The text of a commit message ----------
 
-// The first [A-Z][A-Z0-9]+-\d+ of the texts, in order, or null.
+// The first ticket key (TICKET_KEY: "DOCS-AUDIT-1" whole, not "AUDIT-1") of the texts, in order, or null.
 export function ticketKey(...texts: Array<string | undefined>): string | null {
   for (const text of texts) {
     const match = text === undefined ? null : TICKET_KEY.exec(text);

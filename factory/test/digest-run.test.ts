@@ -162,7 +162,20 @@ test('a manual digest: the output stored with the Git data, the cost and the per
   assert.match(call!.prompt, /One item per ticket, never one per file or commit\./);
   // A daily is spoken at the stand-up and holds no SHAs, branch names or paths.
   assert.match(call!.prompt, /stand-up/);
-  assert.match(call!.prompt, /A daily never holds commit SHAs, branch names, file paths/);
+  assert.match(call!.prompt, /A daily never holds commit SHAs, branch names, file paths, counts of commits ahead or behind, or the words commit, push, rebase, merge, branch, master or main in any spelling\./);
+  // A daily names work by its key exactly as in the data and says what was done, at most 5 items.
+  assert.match(call!.prompt, /ticket key exactly as in the data and a topic of two to five words/);
+  assert.match(call!.prompt, /each item is "<key> \(<topic>\): <what was done, one plain sentence/);
+  assert.match(call!.prompt, /At most 5 items; when more tickets were done, group related ones into one item by theme, with their keys\./);
+  // A branch of mine that is behind and shares an area with landed work is a problem; upkeep alone is not.
+  assert.match(call!.prompt, /- problems: what blocks or risks my work, in plain words, from the data on my branches \(behind, overlap, hit_by\)/);
+  assert.match(call!.prompt, /so a conflict is likely/);
+  assert.match(call!.prompt, /Not a problem: being behind with nothing shared, duplicate or local-only commits\./);
+  assert.match(call!.prompt, /- plan: one plain step per problem/);
+  assert.match(call!.prompt, /next: what I do today, each item "<key> \(<topic>\): <what I will do>"\./);
+  // The SF-172 rules that dropped the problems and the "what was done" are gone.
+  assert.doesNotMatch(call!.prompt, /keeping a branch up to date, duplicate or unpushed commits are never a problem/);
+  assert.doesNotMatch(call!.prompt, /in product words, one item per ticket/);
   const data = JSON.parse(/<git_data>\n(.*)\n<\/git_data>/s.exec(call!.prompt)![1]!);
   assert.deepEqual(data.apps, { shop: ['backend', 'frontend'] });
   assert.equal(data.workspaces[1].description, 'The shop\'s web front end.');

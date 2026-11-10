@@ -4292,10 +4292,13 @@ end), in a browser:
 SF-103. Every morning, per followed workspace: what landed on the main branch since the last
 digest, who landed it and what problem it solves; the live branches and what goes on there; and
 how this affects your own branches and tickets, also across the workspaces of one app (a backend
-and its frontend). And **My daily**: a stand-up draft per app (yesterday, the problems the team
-should hear, how you would likely address them, today), not Git upkeep: being behind the main
-line, duplicate or unpushed commits are never a problem there. Git only: commit messages and the changes, no forge
-API, no issue tracker.
+and its frontend). And **My daily**: a stand-up draft per app: what you did yesterday, each ticket
+with what was done (at most five items, related tickets grouped by theme); what blocks or risks
+your work (a branch of yours that needs the latest changes and touches the same area as work that
+landed, so a conflict is likely; a change waiting for a review; a colleague's work on the same
+feature), not Git upkeep (being behind with nothing shared, duplicate or local-only commits); a
+plain step per problem; and what you do today. A section with nothing in it is left out. Git
+only: commit messages and the changes, no forge API, no issue tracker.
 
 **Settings** (`workspaces.json`, through the Workspaces drawer or by hand): per workspace
 `digest: {"track": true, "my_work": true}` (follow it in the digest; my commits here go into the
@@ -4340,7 +4343,8 @@ reported and skipped; a failed first clone ("mirror not created: ...") is skippe
 next time; a failed fetch is not fatal ("fetch failed: ...; data as of <last good fetch>").
 
 **The Git data** (`src/digest.ts`): what landed (the main branch's first-parent commits in the
-period; a merge commit's author and message from the merged tip), each with its ticket key, its
+period; a merge commit's author and message from the merged tip), each with its ticket key (the
+first `[A-Z][A-Z0-9]*(-[A-Z][A-Z0-9]*)*-<digits>`, so `DOCS-AUDIT-1-report` gives `DOCS-AUDIT-1`), its
 "why" (the text under `## Why` or `## What`, else the body's first paragraph), its files, top
 directories and shortstat, and a diff excerpt (2,500 characters) when the "why" is under 40
 characters. The live branches: every branch of origin and every local-only branch, but main, whose
@@ -4362,9 +4366,13 @@ the structured output, no setting sources (no CLAUDE.md, AGENTS.md or user setti
 `<state dir>/digest/session/` as its cwd, three turns and a 10-minute timeout. Facts only from the
 data, a guess marked "likely", problems and plans as suggestions, the settings' language. A daily is
 written as you would say it at the team's stand-up, to colleagues and a product owner who do not
-read Git: each piece of work by its ticket key and a short topic from its commits, one item per
-ticket, with no commit SHAs, branch names, file paths, counts of commits ahead or behind, or Git
-words (commit, push, rebase, merge, branch, master, main). The Repositories tab is plain too: the
+read Git: each piece of work by its ticket key exactly as in the data and a topic of two to five
+words, with no commit SHAs, branch names, file paths, counts of commits ahead or behind, or Git
+words (commit, push, rebase, merge, branch, master, main). Yesterday: "<key> (<topic>): <what was
+done>", at most five items, related tickets grouped by theme. Problems: from your branches' behind,
+overlap and hit_by, what blocks or risks the work (a likely conflict where your work and what
+landed touch the same area, named: the translations, the class tests); being behind with nothing
+shared is not one. Plan: one plain step per problem. Today: "<key> (<topic>): <what I will do>". The Repositories tab is plain too: the
 page shows each landed entry's SHA and each branch's name beside the model's sentence, so the
 sentences hold no commit SHAs, branch names or counts of commits ahead or behind, and a file path
 only when you must open that file; they name work by its ticket key and a short topic and say what
@@ -4386,7 +4394,8 @@ every 10 s while a run goes and opens the new digest) and the earlier digests. R
 ticket across the app", then a card per followed workspace (the headline, Effect on my work, Landed
 on main with the older entries folded, Live branches). My daily: a card per app with Yesterday,
 Problems, Plan, Today, the commits it was made from, and Copy (plain text with "- " items, the same
-headings). The first heading names the span: "Yesterday" when it starts the day before the digest
+headings). A section with no items is left out, on the card and in Copy (no "None."); a daily with
+every section empty shows its title, the commits and Copy. The first heading names the span: "Yesterday" when it starts the day before the digest
 (local dates), else "Since <weekday>" ("Since Friday" on a Monday). The four headings follow the
 digest's `language`: Bulgarian (`Bulgarian`, `bg` or `български`, any case) gives Вчера / От
 <weekday>, Проблеми, План, Днес; any other language gives English. The rest of the page stays in

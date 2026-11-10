@@ -408,8 +408,8 @@ function dgBranches(branches: readonly DigestBranch[], repo: DigestRepo | null):
   return list;
 }
 
-// The daily's sections, headed in Bulgarian (language bulgarian, bg or български, any case) or English:
-// "Yesterday" when the span starts the day before the digest (local dates) or is unknown, else "Since <weekday>".
+// The daily's sections with items (no empty one, on the card or in Copy), in Bulgarian (language bulgarian, bg or
+// български, any case) or English: "Yesterday" when the span starts the day before the digest (local dates) or is unknown, else "Since <weekday>".
 function dailyParts(record: DigestRecord, daily: DigestDaily): Array<[string, readonly string[]]> {
   const bg = ['bulgarian', 'bg', 'български'].includes(String(record.language ?? '').trim().toLowerCase());
   const from = new Date(record.daily_days?.yesterday?.from ?? Number.NaN);
@@ -417,10 +417,10 @@ function dailyParts(record: DigestRecord, daily: DigestDaily): Array<[string, re
   const before = new Date(start.getFullYear(), start.getMonth(), start.getDate() - 1);
   const since = Number.isNaN(from.getTime() - start.getTime()) || from.toDateString() === before.toDateString() ? null : new Intl.DateTimeFormat(bg ? 'bg' : 'en', { weekday: 'long' }).format(from);
   const titles = bg ? [since === null ? 'Вчера' : `От ${since}`, 'Проблеми', 'План', 'Днес'] : [since === null ? 'Yesterday' : `Since ${since}`, 'Problems', 'Plan', 'Today'];
-  return [daily.yesterday, daily.problems, daily.plan, daily.next].map((items, index) => [titles[index]!, items]);
+  return [daily.yesterday, daily.problems, daily.plan, daily.next].flatMap((items, index): Array<[string, readonly string[]]> => (items.length === 0 ? [] : [[titles[index]!, items]]));
 }
 
-// My daily: a card per app, its four sections, the commits it was made from and Copy.
+// My daily: a card per app, its sections with items, the commits it was made from and Copy.
 function dgDaily(record: DigestRecord): HTMLElement[] {
   const sources = record.daily_sources ?? [];
   const dailies: DigestDaily[] = record.output?.dailies ?? sources.map((source) => ({ app: source.app, workspaces: source.workspaces, yesterday: [], problems: [], plan: [], next: [] }));

@@ -9,7 +9,9 @@ Last checked: 2026-11-09, the [audit of 2026-11-09](audits/2026-11-09-audit.md) 
 c4f6d33. It found two critical ways out of the sandbox, both closed by SF-159: a test run could
 rewrite the worktree's `.git` so that the factory's next Git call ran a command as you, and a job
 could write `.claude/settings.json` hooks (or `.mcp.json`, `.codex/`) that the next Claude session
-in the worktree ran outside any sandbox. Its other findings are listed under "Open".
+in the worktree ran outside any sandbox. Its high finding, a link swapped between the file guard's
+check and the write sending the write out of the worktree, is closed by SF-181 (the agent's Claude
+Code runs in a bubblewrap wrapper). Its other findings are listed under "Open".
 After its fixes (SF-159, SF-161 to SF-166): 2026-11-10, `sf smoke` PASS on `main` at 565d83e
 (12 of 12 steps, every one of its 12 sandbox probes refused).
 Before it: 2026-11-08, `sf smoke` PASS on `main` at aa1a9f1 (12 of 12 steps, every sandbox probe
@@ -30,6 +32,12 @@ refused), and the factory's test command passed in a sandbox without network on 
     nothing.
   - It has no WebFetch or WebSearch.
   - It cannot run a command outside the sandbox.
+  - The agent's Claude Code itself runs in a bubblewrap wrapper: only its worktree, its temporary
+    folder and Claude Code's own state (`~/.claude/projects` and its other session folders, its
+    login and `~/.claude.json`) are writable, and the worktree's `.git` is not. So a link swapped
+    in between the file guard's check and the write cannot send the write out of the worktree.
+    Without `bwrap` a job's turn stops; it never runs unwrapped. `SF_SANDBOX=off` turns the
+    wrapper off with the rest of the sandbox, which opens the link swap again.
 - **Sandboxes do not outlive their session.** Sandbox processes left behind by a finished session
   are ended.
 - **Tests run before every merge request.** In the factory's own workspace, typecheck and the unit
@@ -78,9 +86,6 @@ refused), and the factory's test command passed in a sandbox without network on 
 
 ## Open
 
-- **Found by the audit of 2026-11-09, being fixed:**
-  - A link swapped between the file guard's check and the write can send a write out of the
-    worktree.
 - **LFS content is not scanned for secrets in a workspace without the guard flag.** The guard reads
   an LFS file's pointer only.
 - **The network is open to the agents.** It has to be: Claude and Codex are remote models. The

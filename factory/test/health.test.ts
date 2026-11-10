@@ -2,7 +2,8 @@
 // endpoint serving /readyz and /metrics with an old and a fresh poll, a stale and a fresh build, a
 // job past its test limit, a stuck queue, ...), the guard that keeps a failing or hanging check from
 // its caller, sf serve's monitor (since, the change callback, one notification down and one ok
-// again), the reaper before each sandboxes check (SF-154), and sf health's exit codes and --json.
+// again for a check down NOTIFY_AFTER_MS, none for a shorter outage: SF-183), the reaper before
+// each sandboxes check (SF-154), and sf health's exit codes and --json.
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -13,7 +14,7 @@ import { test } from 'node:test';
 import { checkForgeToken, chooseForge, type ForgeChoice, forgeSettings } from '../src/forge.js';
 import {
   checkDigest, checkDisk, checkJobs, checkLogins, checkMcp, checkQueue, checkRemote, checkSandboxes, checkTunnel, checkTunnelCli, type CommandRunner, fetchText, forgeTargets, guarded,
-  HEALTH_CHECKS, type HealthCheck, healthExitCode, healthLines, HealthMonitor, type HealthStatus, metricValue, type QueueFacts, runChecks,
+  HEALTH_CHECKS, type HealthCheck, healthExitCode, healthLines, HealthMonitor, type HealthStatus, metricValue, NOTIFY_AFTER_MS, type QueueFacts, runChecks,
 } from '../src/health.js';
 import type { Job } from '../src/jobs.js';
 import type { Notification } from '../src/notify.js';
@@ -425,7 +426,7 @@ test('runChecks: one result per check in the fixed order, since the run\'s time;
   assert.deepEqual(byId, { mcp: 'ok', tunnel: 'off', 'tunnel-cli': 'off', jobs: 'ok', queue: 'down', remote: 'off', logins: 'ok', disk: 'ok', sandboxes: 'ok', digest: 'off' });
 });
 
-test('HealthMonitor: since moves on a status change only; the change callback on a status change; one notification when a check turns down, none while it stays, one when it is ok again; logins hourly', async () => {
+test('HealthMonitor: since moves on a status change only; the change callback on a status change; the list shows a check down from its first pass, and a check down for one minute is not notified; logins hourly', async () => {
   let clock = NOW;
   let probe: 'answers' | 'refused' = 'answers';
   let loginRuns = 0;
@@ -454,16 +455,78 @@ test('HealthMonitor: since moves on a status change only; the change callback on
   assert.deepEqual([mcp().status, mcp().since], ['down', iso(NOW + 60_000)]);
   clock += 30_000;
   await monitor.check();
-  assert.deepEqual(sent.map((one) => one.title), ['Factory health: MCP endpoint is down']);
   probe = 'answers';
   clock += 30_000;
   await monitor.check();
-  assert.deepEqual(sent.map((one) => one.title), ['Factory health: MCP endpoint is down', 'Factory health: MCP endpoint is ok again']);
-  assert.equal(sent[0]!.priority, 'high');
+  assert.equal(mcp().status, 'ok');
+  assert.deepEqual(sent, [], 'an outage shorter than NOTIFY_AFTER_MS sends nothing');
   assert.equal(loginRuns, 1, 'logins ran once in the first hour');
   clock = NOW + 61 * MIN;
   await monitor.check();
   assert.equal(loginRuns, 2);
+});
+
+// A monitor on a test clock whose pass(answers) runs one pass with the MCP endpoint answering or
+// refused, then moves the clock 30 s on; the notifications kept.
+function mcpMonitor(): { pass: (answers: boolean) => Promise<HealthCheck>; titles: () => string[]; sent: Notification[] } {
+  let clock = NOW;
+  let probe: 'answers' | 'refused' = 'answers';
+  const sent: Notification[] = [];
+  const monitor = new HealthMonitor(deps(() => new Date(clock), { probe: async () => ({ result: probe }) }), { notify: async (notification) => sent.push(notification) });
+  const pass = async (answers: boolean): Promise<HealthCheck> => {
+    probe = answers ? 'answers' : 'refused';
+    await monitor.check();
+    clock += 30_000;
+    return monitor.list().find((one) => one.id === 'mcp')!;
+  };
+  return { pass, titles: () => sent.map((one) => one.title), sent };
+}
+
+test('HealthMonitor: a check down for one pass and ok on the next sends no notification, neither down nor ok again; the list shows it down on that pass', async () => {
+  const monitor = mcpMonitor();
+  assert.equal((await monitor.pass(true)).status, 'ok');
+  const down = await monitor.pass(false);
+  assert.deepEqual([down.status, down.since], ['down', iso(NOW + 30_000)]);
+  assert.equal((await monitor.pass(true)).status, 'ok');
+  await monitor.pass(true);
+  assert.deepEqual(monitor.sent, []);
+});
+
+test('HealthMonitor: a check down from the first pass is notified once it was down NOTIFY_AFTER_MS without a break, once; ok again once after that', async () => {
+  assert.equal(NOTIFY_AFTER_MS, 3 * MIN);
+  const monitor = mcpMonitor();
+  const first = await monitor.pass(false);
+  assert.deepEqual([first.status, first.since], ['down', iso(NOW)], 'the list shows it down at once');
+  for (let passes = 1; passes < NOTIFY_AFTER_MS / 30_000; passes += 1) {
+    assert.equal((await monitor.pass(false)).status, 'down');
+  }
+  assert.deepEqual(monitor.titles(), [], 'nothing before NOTIFY_AFTER_MS');
+  await monitor.pass(false);
+  assert.deepEqual(monitor.titles(), ['Factory health: MCP endpoint is down']);
+  assert.equal(monitor.sent[0]!.priority, 'high');
+  await monitor.pass(false);
+  await monitor.pass(false);
+  assert.deepEqual(monitor.titles(), ['Factory health: MCP endpoint is down'], 'none while it stays down');
+  assert.equal((await monitor.pass(true)).status, 'ok');
+  await monitor.pass(true);
+  assert.deepEqual(monitor.titles(), ['Factory health: MCP endpoint is down', 'Factory health: MCP endpoint is ok again']);
+});
+
+test('HealthMonitor: a check down, ok, then down again within NOTIFY_AFTER_MS sends nothing, and its time starts again at the second outage', async () => {
+  const monitor = mcpMonitor();
+  await monitor.pass(true);
+  for (let passes = 0; passes < 4; passes += 1) {
+    await monitor.pass(false);
+  }
+  await monitor.pass(true);
+  const again = await monitor.pass(false);
+  assert.equal(again.since, iso(NOW + 6 * 30_000));
+  for (let passes = 1; passes < NOTIFY_AFTER_MS / 30_000; passes += 1) {
+    await monitor.pass(false);
+  }
+  assert.deepEqual(monitor.titles(), [], 'the first outage does not count toward the second');
+  await monitor.pass(false);
+  assert.deepEqual(monitor.titles(), ['Factory health: MCP endpoint is down']);
 });
 
 test('sf health computes the checks without sf serve: one row per check, --json the list; exit 1 when one is down', { timeout: 60_000 }, async () => {

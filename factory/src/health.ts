@@ -1,7 +1,7 @@
 // The factory's health checks: a fixed list of checks, each answering ok, down or off (not
 // configured, which counts as green); recovering is set by the recovery only. sf serve runs
 // them every 30 s (logins hourly) in a HealthMonitor, keeps the last result for the dashboard's
-// traffic light (GET api/health, the stream's health event) and notifies a check that turns down
+// traffic light (GET api/health, the stream's health event) and notifies a check down for 3 minutes
 // and that is ok again; sf health runs them once in its own process. A check never throws and never
 // hangs its caller: each runs under a timeout, and a check that fails to run is down with its error.
 // No check's detail holds a token or the body of a host's answer.
@@ -51,9 +51,10 @@ export const HEALTH_CHECKS = [
 ] as const;
 export type HealthId = (typeof HEALTH_CHECKS)[number]['id'];
 
-// sf serve's rhythm: every check every 30 s, logins hourly.
+// sf serve's rhythm: every check every 30 s, logins hourly; a down check notified after 3 minutes.
 export const CHECK_EVERY_MS = 30_000;
 export const LOGINS_EVERY_MS = 60 * 60_000;
+export const NOTIFY_AFTER_MS = 3 * 60_000;
 // The bound of one check's run; a subprocess or request inside it has a shorter one of its own.
 export const CHECK_TIMEOUT_MS = 20_000;
 export const REQUEST_TIMEOUT_MS = 3_000;
@@ -636,11 +637,12 @@ export function healthLines(checks: readonly HealthCheck[]): string[] {
 export interface HealthMonitorOptions {
   everyMs?: number;
   loginsEveryMs?: number;
+  notifyAfterMs?: number;
   timeoutMs?: number;
   // Called after a pass in which any status changed (the dashboard's health event; a changed detail
   // alone is read with GET api/health); never throws.
   onChange?: (checks: HealthCheck[]) => void;
-  // A check turned down, or is ok again after it was down; never rejects.
+  // A check down for notifyAfterMs, or ok again after it was notified down; never rejects.
   notify?: (notification: Notification) => Promise<unknown>;
   // The recovery (src/recovery.ts): each pass's results as they are shown and notified; never throws.
   recover?: (results: HealthCheck[]) => HealthCheck[];
@@ -652,13 +654,14 @@ export class HealthMonitor {
   readonly #deps: HealthDeps;
   readonly #everyMs: number;
   readonly #loginsEveryMs: number;
+  readonly #notifyAfterMs: number;
   readonly #timeoutMs: number;
   readonly #onChange: (checks: HealthCheck[]) => void;
   readonly #notify: (notification: Notification) => Promise<unknown>;
   readonly #recover: (results: HealthCheck[]) => HealthCheck[];
   readonly #checks = new Map<HealthId, HealthCheck>();
-  // The checks notified as down and not yet as ok again.
-  readonly #notifiedDown = new Set<HealthId>();
+  // Each check out of ok and off: since when (recovering does not break it), or notified once down.
+  readonly #outages = new Map<HealthId, number | 'notified'>();
   #loginsAt: number | undefined;
   #timer: NodeJS.Timeout | undefined;
   #pass: Promise<void> | undefined;
@@ -667,6 +670,7 @@ export class HealthMonitor {
     this.#deps = deps;
     this.#everyMs = options.everyMs ?? CHECK_EVERY_MS;
     this.#loginsEveryMs = options.loginsEveryMs ?? LOGINS_EVERY_MS;
+    this.#notifyAfterMs = options.notifyAfterMs ?? NOTIFY_AFTER_MS;
     this.#timeoutMs = options.timeoutMs ?? CHECK_TIMEOUT_MS;
     this.#onChange = options.onChange ?? (() => {});
     this.#notify = options.notify ?? (() => Promise.resolve());
@@ -680,9 +684,7 @@ export class HealthMonitor {
 
   // One pass (the one running, when one runs).
   check(): Promise<void> {
-    this.#pass ??= this.#run().finally(() => {
-      this.#pass = undefined;
-    });
+    this.#pass ??= this.#run().finally(() => (this.#pass = undefined));
     return this.#pass;
   }
 
@@ -690,16 +692,13 @@ export class HealthMonitor {
     const nowMs = this.#deps.now().getTime();
     const loginsDue = this.#loginsAt === undefined || nowMs - this.#loginsAt >= this.#loginsEveryMs;
     const ids = HEALTH_CHECKS.map((check) => check.id).filter((id) => id !== 'logins' || loginsDue);
-    if (loginsDue) {
-      this.#loginsAt = nowMs;
-    }
+    this.#loginsAt = loginsDue ? nowMs : this.#loginsAt;
     const results = this.#recover(await runChecks(this.#deps, ids, this.#timeoutMs));
     let changed = false;
     for (const result of results) {
       const before = this.#checks.get(result.id);
-      const statusChanged = before?.status !== result.status;
-      changed ||= statusChanged;
-      this.#checks.set(result.id, statusChanged ? result : { ...result, since: before!.since });
+      changed ||= before?.status !== result.status;
+      this.#checks.set(result.id, before?.status === result.status ? { ...result, since: before.since } : result);
       this.#notifyChange(result);
     }
     if (changed) {
@@ -711,14 +710,16 @@ export class HealthMonitor {
     }
   }
 
-  // One notification when a check turns down, one when it is ok (or off) again; none while it stays.
+  // One notification once a check is down notifyAfterMs after it left ok and off, one when it is back.
   #notifyChange(result: HealthCheck): void {
+    const atMs = Date.parse(result.since);
+    const outage = this.#outages.get(result.id) ?? atMs;
     let turned: 'down' | 'ok' | undefined;
-    if (result.status === 'down' && !this.#notifiedDown.has(result.id)) {
-      this.#notifiedDown.add(result.id);
-      turned = 'down';
-    } else if ((result.status === 'ok' || result.status === 'off') && this.#notifiedDown.delete(result.id)) {
-      turned = 'ok';
+    if (result.status === 'ok' || result.status === 'off') {
+      turned = this.#outages.delete(result.id) && outage === 'notified' ? 'ok' : undefined;
+    } else {
+      turned = result.status === 'down' && outage !== 'notified' && atMs - outage >= this.#notifyAfterMs ? 'down' : undefined;
+      this.#outages.set(result.id, turned === 'down' ? 'notified' : outage);
     }
     if (turned !== undefined) {
       this.#notify(healthNotification(result, turned)).catch((error: unknown) => console.error(error));
@@ -728,8 +729,7 @@ export class HealthMonitor {
   // The first pass now, then every everyMs.
   start(): void {
     void this.check();
-    this.#timer = setInterval(() => void this.check(), this.#everyMs);
-    this.#timer.unref();
+    this.#timer = setInterval(() => void this.check(), this.#everyMs).unref();
   }
 
   close(): void {

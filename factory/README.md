@@ -3024,12 +3024,18 @@ stream sends a `health` event with the list as its first event on connect and ag
 status changes. When the stream itself is lost for more than 30 s (or the page's first read fails),
 the pill turns red with "sf serve does not answer", until the stream answers again.
 
-**Notification.** A check that turns `down` in `sf serve` sends one notification on the configured
-channels (section Notifications): "Factory health: <label> is down" with its detail, `Priority:
-high`, `Tags: rotating_light`. Nothing more while it stays down; one "Factory health: <label> is ok
-again" (`Priority: default`, `Tags: white_check_mark`) once it is `ok` or `off` again. A check that
-is already down when `sf serve` starts is notified once at the start. A `recovering` check is never
-notified (below).
+**Notification** (SF-183). A check that is `down` in `sf serve` 3 minutes or more after it left `ok`
+or `off`, without a break (`recovering` is no break; `NOTIFY_AFTER_MS`, the monitor's
+`notifyAfterMs`), sends one notification on the configured channels (section Notifications):
+"Factory health: <label> is down" with its detail, `Priority: high`, `Tags: rotating_light`.
+Nothing more while it stays down; one "Factory health: <label> is ok again" (`Priority: default`,
+`Tags: white_check_mark`) once it is `ok` or `off` again. A shorter outage (an `sf serve` restart
+takes the MCP endpoint away for a few seconds) sends nothing at all, neither down nor ok again: it
+shows only on the health light and in `sf health`, which show a check `down` from its first pass.
+A check ok again and then down again starts its 3 minutes anew. A check already down when
+`sf serve` starts counts from the first pass, so it is notified only if it is still down 3 minutes
+later. A `recovering` check is never notified (below). The watchdog (`sf health --notify`) keeps its
+own rule (above).
 
 **Recovery** (SF-154, `src/recovery.ts`). `sf serve` repairs two things by itself, and only these:
 its own tunnel and sandbox leftovers. Sandbox leftovers are reaped right before each `sandboxes`

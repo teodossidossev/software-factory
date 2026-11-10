@@ -152,6 +152,7 @@ push from the dashboard instead.
 
 | Code | What it means | What to do |
 | --- | --- | --- |
+| `handoff_sensitive` | The change touches files your IDE or tools may run by themselves (a Gradle or Maven build file, the Gradle or Maven wrapper, `.vscode/tasks.json`, `.claude/` settings, Git hooks such as `.husky/`; every path the [sensitive-path list](../../factory/README.md#marked-paths) and `SF_SENSITIVE_PATHS` name). The message names up to five of them. "could not list the change's files" means the factory could not tell, so it did not hand over either. | Read those files in the job's diff on the dashboard, then hand it over yourself (*Hand over to my checkout*, `sf handover`), or push from the Merge request screen. |
 | `handoff_off` | Hand-over is off for the workspace (`handoff: "off"`) or by `SF_HANDOFF=off`. | Nothing; push from the Merge request screen, or hand it over by hand. |
 | `checkout_dirty` | Your checkout has changes to tracked files. | Commit or stash your own work, then hand over. |
 | `checkout_busy` | A rebase, merge, cherry-pick or revert is in progress in your checkout. | Finish or abort it. |

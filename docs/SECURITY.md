@@ -50,6 +50,10 @@ refused), and the factory's test command passed in a sandbox without network on 
   MCP tool, so nothing they read can drive one.
 - **Code from a repository never runs as you through Git.** The factory's Git commands run no hooks
   and no fsmonitor.
+- **A change to files your IDE or tools run is handed over only by you.** An automatic hand-over
+  skips a change to a build file, a build wrapper, IDE or agent settings or Git hooks
+  (`handoff_sensitive`), and one whose files cannot be listed; it waits until you have read it
+  and press *Hand over to my checkout*.
 - **The GitLab token goes only to gitlab.com or the host of `SF_GITLAB_URL`.** A workspace on any
   other host that is not GitHub has its merge request actions off, and the hourly logins check
   leaves it out.

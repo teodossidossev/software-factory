@@ -1981,14 +1981,18 @@ and the dashboard's file list: sensitive, outside the Task's scope, and deleted.
 
 Sensitive. `SENSITIVE_PATHS` in `src/rules.ts` (globs from the repository root: `*` and `?` inside one
 segment, `**` across directories, `{a,b}` alternatives) names dependency manifests and lockfiles
-(`package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `pom.xml`, `build.gradle*`,
-`requirements*.txt`, `pyproject.toml`, `Pipfile*`, `go.mod`, `Cargo.toml`, `Gemfile*`,
-`composer.json` and the like), environment and tool configuration (`**/.env*`, `**/*.env`,
+(`package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `requirements*.txt`,
+`pyproject.toml`, `Pipfile*`, `go.mod`, `Cargo.toml`, `Gemfile*`, `composer.json` and the like),
+build files at any depth and the build wrappers (`**/pom.xml`, `**/build.gradle`,
+`**/build.gradle.kts`, `**/settings.gradle*`, `gradle.properties`, `buildSrc/**`, `gradle/**`,
+`gradlew*`, `mvnw*`, `.mvn/**`), environment and tool configuration (`**/.env*`, `**/*.env`,
 `.npmrc`, `.nvmrc`, `.tool-versions`, `tsconfig*.json`, `*.config.{js,ts,mjs,cjs}`, `.eslintrc*`,
 `.prettierrc*`, `.editorconfig`, `.gitignore`, `.gitattributes`, `.gitmodules`), CI and containers
 (`.github/**`, `.gitlab-ci.yml`, `Jenkinsfile`, `Dockerfile*`, `docker-compose*.yml`,
 `compose*.yml`, `.dockerignore`, `Makefile`), IDE and agent files (`.idea/**`, `.vscode/**`,
-`.claude/**`, `CLAUDE.md`, `AGENTS.md`) and every dotfile in the root. `SF_SENSITIVE_PATHS`
+`.claude/**`, `.codex/**`, `CLAUDE.md`, `AGENTS.md`), Git hooks (`.husky/**`, `.githooks/**`) and
+every dotfile in the root (`.envrc` and `.mcp.json` among them). A sensitive path also keeps the
+automatic hand-over from running (section Hand-over to your checkout). `SF_SENSITIVE_PATHS`
 (comma-separated globs) adds patterns. The Task file's front matter may declare `may_touch:` with
 paths or globs the ticket is expected to change (`[a, b]` or `a, b`): a sensitive path matching it
 is `declared`, every other sensitive path `undeclared`. The Report's `## Changed files` lists the
@@ -2382,7 +2386,8 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    request screen stays, below), `base_commit` and `target_commit` become the target,
    `prepared_commit` the branch tip, and the worktree stays (SF-073). With hand-over on (the
    workspace's `handoff`, else `SF_HANDOFF`, SF-083) the factory hands the job over to the checkout
-   at once (`handed_over`); otherwise, or when the hand-over is refused, the job is
+   at once (`handed_over`), unless the change touches a sensitive path (`handoff_sensitive`,
+   section Hand-over to your checkout); otherwise, or when the hand-over is refused, the job is
    `ready_for_human_review` with `handoff_skipped` saying why. Either is
    notified with the MR title and the file lines.
 
@@ -2697,6 +2702,24 @@ notification, `sf status` and the board, next to Hand over to my checkout); it i
 hand-over and whenever the job leaves `ready_for_human_review`. By hand: `sf handover` from
 `ready_for_human_review`; a refusal answers its code and leaves the job as it was.
 
+**A change to files your IDE or tools run** (SF-168, `src/handoff-sensitive.ts`). The checkout is
+the one open in the user's IDE, which runs some of its files by itself, as the user and outside
+any sandbox: IntelliJ reloads Gradle or Maven after an outside change (`build.gradle(.kts)`,
+`pom.xml`, `buildSrc/`), a changed `gradle-wrapper.properties` downloads and runs another Gradle,
+VS Code runs `tasks.json` tasks on folder open, a `.claude/settings.json` hook runs at the next
+`claude` start, `.husky/` hooks at the next commit. Before the automatic hand-over the factory
+lists the prepared change's paths (`git diff --name-status -z -M <base> <prepared>`, with the
+factory's Git safety arguments): every added, changed and deleted path, and both paths of a
+rename. When one of them is sensitive (section Marked paths: `SENSITIVE_PATHS` and
+`SF_SENSITIVE_PATHS`; the Task's `may_touch` exempts nothing here, nor does a reviewer's
+acceptance), the job is not handed over: it waits in `ready_for_human_review` with
+`handoff_skipped` `{code: "handoff_sensitive", message: "it changes files your IDE or tools may
+run: <up to 5 paths>[ and N more]; read them, then hand it over"}`. When Git cannot list them,
+the same code with "could not list the change's files: <error>". A person's hand-over (`sf
+handover`, the dashboard's Hand over to my checkout) runs no check: it is their decision. The
+factory's own retry after `config_locked` takes only jobs waiting with that code, so a
+`handoff_sensitive` skip stays until the user hands the job over.
+
 **The sandbox's config lock** (SF-085). Claude Code's sandbox protects `.git/config` by binding an
 empty, read-only `.git/config.lock` into every sandboxed command; it creates that file in the
 checkout's Git directory (the one holding its config, shared by the job's worktrees) and never
@@ -2817,6 +2840,7 @@ exists.
 
 | Code | Meaning |
 |---|---|
+| `handoff_sensitive` | the automatic hand-over skipped a change to files the user's IDE or tools run, or one whose files could not be listed; the user hands it over |
 | `checkout_dirty` | the checkout has changes to tracked files |
 | `checkout_busy` | a rebase, merge, cherry-pick or revert is in progress in the checkout |
 | `handover_refused` | a file is in the way of the hand-over (or of the switch back at Ask for changes), or Git refused the switch |

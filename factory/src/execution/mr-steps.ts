@@ -11,6 +11,7 @@ import { chooseForge, type Forge, type ForgeKind, forgeFor, type MergeRequestSta
 import { runGit } from '../git.js';
 import { checkTerms, commitsToCheck, GUARD_MAX_FIXES, GUARD_MAX_MR_TURNS, guardFixContent, guardFixCount, guardMessage, type GuardHit, type GuardTerm, maskedMrTextFailure, maskedMrTextProblem, maskTerms, MAX_GUARD_MESSAGE, redactAdded, scanBranch, scanChange, scanCommits, scanMrText, worktreeTree } from '../guard.js';
 import { checkBranchFree, isAncestor, savedRef, settleAfterPush, subjectOf } from '../handoff.js';
+import { handoffSensitive } from '../handoff-sensitive.js';
 import { claudeReviews, type FileChange, type Handover, type Job, type JobMr, type JobState, now } from '../jobs.js';
 import { abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitFailure, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl, parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, refuseGuardedLfs, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, validBranchName, withAccepted, withChecks, withFindings, withNits, withSimplifications, worktreesOn } from '../mr.js';
 import { type LedgerEntry, notFixed } from '../ledger.js';
@@ -366,10 +367,10 @@ export class MrPart {
   }
 
   // The branch holds the one commit on top of the target. With hand-over on (the workspace's
-  // handoff in workspaces.json, else SF_HANDOFF) the factory hands it over to
-  // the workspace's checkout at once (handed_over); a refusal leaves it in ready_for_human_review
-  // with the reason (handoff_skipped), and so does hand-over off, naming the setting. The worktree
-  // stays until the hand-over or the push.
+  // handoff in workspaces.json, else SF_HANDOFF) the factory hands it over to the workspace's
+  // checkout at once (handed_over); a refusal leaves it in ready_for_human_review with the reason
+  // (handoff_skipped), and so do hand-over off, naming the setting, and a change to a file the
+  // user's IDE or tools run (handoff_sensitive), which a person hands over. The worktree stays.
   async #ready(job: Job, live: Live, mrText: string): Promise<void> {
     const cwd = live.cwd;
     const tip = (await runGit(cwd, ['rev-parse', '--verify', `refs/heads/${job.branch}`])).stdout.toString('utf8').trim();
@@ -377,13 +378,12 @@ export class MrPart {
     await endSession(this.#sessions.live, `${job.workspace}/${job.ticket}`);
     const lines = [content.title, notificationLine((await this.#peers.status.lastFiles(job)) ?? [])];
     let ready: Job = { ...job, base_commit: job.target_commit, prepared_commit: tip };
-    // The registry as it is now: its handoff may have changed while the job ran. When it cannot be
-    // read or the checkout not verified, the setting from the job's start applies (the hand-over
-    // itself then answers the checkout's problem as its refusal).
+    // The registry as it is now (its handoff may have changed while the job ran); when it cannot be
+    // read, the setting from the job's start (the hand-over then answers the checkout's problem).
     const own = (await this.#settings.resolve(job.workspace).catch(() => live.workspace)).handoff;
-    const off = handoffOffNotice(own, this.#settings.config.handoff, job.ticket);
-    if (off !== undefined) {
-      ready = { ...ready, handoff_skipped: off };
+    const skip = handoffOffNotice(own, this.#settings.config.handoff, job.ticket) ?? (await handoffSensitive(cwd, job.target_commit!, tip, this.#settings.config.sensitivePaths));
+    if (skip !== undefined) {
+      ready = { ...ready, handoff_skipped: skip };
     } else {
       const outcome = await this.#peers.handover.handOver(ready, live.workspace, content);
       if (outcome.ok) {

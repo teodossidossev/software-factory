@@ -48,6 +48,34 @@ test('sensitivityOf: the built-in patterns, extra globs, and may_touch as paths 
   assert.ok(SENSITIVE_PATHS.includes('package-lock.json'));
 });
 
+test('sensitivityOf: the files an IDE or a tool runs by itself, build files at any depth included', () => {
+  const examples: Record<string, string> = {
+    '**/build.gradle': 'lib/build.gradle',
+    '**/build.gradle.kts': 'app/build.gradle.kts',
+    '**/settings.gradle*': 'settings.gradle.kts',
+    '**/pom.xml': 'module/pom.xml',
+    'buildSrc/**': 'buildSrc/src/main/kotlin/Conventions.kt',
+    'gradle/**': 'gradle/wrapper/gradle-wrapper.properties',
+    'gradlew*': 'gradlew.bat',
+    'mvnw*': 'mvnw',
+    '.mvn/**': '.mvn/wrapper/maven-wrapper.properties',
+    '.husky/**': '.husky/pre-commit',
+    '.githooks/**': '.githooks/pre-push',
+    '.codex/**': '.codex/config.toml',
+  };
+  for (const [glob, path] of Object.entries(examples)) {
+    assert.ok(SENSITIVE_PATHS.includes(glob), glob);
+    assert.ok(matchesGlob(path, glob), `${glob} ${path}`);
+    assert.equal(sensitivityOf(path, []), 'undeclared', path);
+  }
+  for (const path of ['build.gradle', 'pom.xml', 'a/b/settings.gradle', '.envrc', '.mcp.json']) {
+    assert.equal(sensitivityOf(path, []), 'undeclared', path);
+  }
+  for (const path of ['src/gradlew.txt', 'docs/gradle/notes.md', 'src/pom.xml.md']) {
+    assert.equal(sensitivityOf(path, []), 'no', path);
+  }
+});
+
 test('mayTouch reads the front matter list in both forms', () => {
   const fields = (text: string) => parseFrontMatter(`---\nticket: T-1\ntitle: t\nbase: main\n${text}\n---\n`)!;
   assert.deepEqual(mayTouch(fields('may_touch: [package.json, .github/**]')), ['package.json', '.github/**']);

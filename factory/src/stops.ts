@@ -80,6 +80,8 @@ export const STOPS = {
   sandbox_unavailable: row('error', [GO_ON, ABORT]),
   publish_failed: row('error', [GO_ON, ABORT]),
   mr_conflict: row('error', [action('say', 'Tell it how'), ABORT]),
+  // The Implementer changed nothing and its Report asks something (question-stop.ts).
+  implementer_question: row('decision', [SEND, ABORT]),
   mr_text_missing: row('error', [SEND, ABORT], { aliases: ['mr_text_invalid'] }),
   mr_empty: row('error', [SEND, ABORT]),
   worktree_remove_failed: row('error', [GO_ON, ABORT]),

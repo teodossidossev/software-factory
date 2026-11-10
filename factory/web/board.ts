@@ -176,6 +176,10 @@ const STOPS = {
     reason: 'Rebase conflict', button: () => 'Tell it how',
     sentence: (job: JobRow) => `The rebase onto ${job.base} conflicts and the Implementer could not resolve it. Tell it how, or abort.`,
   },
+  implementer_question: {
+    reason: 'Question for you before any change', button: () => 'Answer',
+    sentence: () => 'The Implementer changed nothing and asks you something. Read the question and answer with Send.',
+  },
   mr_text_missing: {
     reason: 'MR text missing or invalid', button: () => 'Tell it to fix it',
     sentence: (job: JobRow) => `The Implementer's MR text is missing or breaks a rule${said(job)}. Tell it to write it again.`,

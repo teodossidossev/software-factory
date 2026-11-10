@@ -2423,6 +2423,7 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
 
    | Code | Meaning |
    |---|---|
+   | `implementer_question` | the reviewed change has nothing to commit against `base_commit` and the Report of the iteration has open questions (not empty, not "None."): checked before the MR text is read (`src/question-stop.ts`); the message is `The Implementer changed nothing and asks: <the questions>`, whitespace collapsed and cut at 400 characters with "…". A decision: `sf say` answers it |
    | `mr_text_missing` | `.software-factory/<ticket>.mr.md` absent or empty |
    | `mr_text_invalid` | over 64 KiB, a first line that breaks `commitHeader(ticket)` in `src/rules.ts` (`<type>(<ticket>): <summary>`, type one of `feat fix chore refactor docs test perf build ci style revert`, at most 72 characters, no trailing period), or a missing `## What`, `## Why`, `## How`, `## Why the change`, `## Special things to note`, `## Change outline`, `## Testing` or `## Checklist` heading, or a `## Testing` line that starts with `By hand` or `Manual` (after any list marker, checkbox or emphasis) and does not contain `not` (`testingProblem` in `src/rules.ts`) |
    | `mr_empty` | the reviewed change has nothing to commit against `base_commit` |
@@ -2461,7 +2462,7 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    and cleared when the resolved iteration goes back to `awaiting_review` (and when MR preparation
    starts); while it is set Retry is refused ("tell the Implementer to go on"). So a stop after a
    clean verdict on the resolved iteration is retryable again. A retry that fails again stops the job with the new code; nothing is retried by
-   itself. The other codes (`mr_conflict`, `mr_text_missing`, `mr_text_invalid`, `mr_empty`,
+   itself. The other codes (`mr_conflict`, `implementer_question`, `mr_text_missing`, `mr_text_invalid`, `mr_empty`,
    `mr_push_protected`, a failed MR text turn) need the Implementer: `sf say`. On `mr_push_failed`
    `sf retry` is `sf approve` (without `--as-is`, step 7): the push again.
 6. Ready: the MR text, with the nits, is copied to `mr.md` (an MR text the user saved on the Merge
@@ -3403,6 +3404,7 @@ words of each row, keyed by `stop_code`:
 | `sandbox_unavailable` | error | Sandbox unavailable | Tell it to go on |
 | `publish_failed` | error | Iteration not published | Tell it to go on |
 | `mr_conflict` | error | Rebase conflict | Tell it how |
+| `implementer_question` | decision | Question for you before any change | Answer |
 | `mr_text_missing`, `mr_text_invalid` | error | MR text missing or invalid | Tell it to fix it |
 | `mr_empty` | error | Nothing to commit | Tell it what is missing |
 | `mr_commit_failed`, `mr_rebase_failed`, `mr_failed` | error | MR preparation failed | Retry (Tell it to go on after a conflict turn) |
@@ -3440,6 +3442,7 @@ confirmation where it has one; *Tell it to go on* is a message, "Go on." when th
 | `session_failed` with the usage-limit message (before SF-072, and MR preparation), `sandbox_unavailable` | the message | Tell it to go on, Abort… |
 | `session_failed`, `turn_failed`, `permission_mode_mismatch` | the whole message | Tell it to go on, Restart…, Abort… |
 | `mr_conflict` | the conflicting files | Tell it how (Send), Abort… |
+| `implementer_question` | the Implementer's open questions (the message) | Send, Abort… |
 | `mr_text_missing`, `mr_text_invalid` | the rule it breaks | Send, Abort… |
 | `mr_empty` | nothing | Send, Abort… |
 | `mr_commit_failed`, `mr_rebase_failed`, `mr_failed` | the whole message | Retry, Tell it to go on, Abort…; after a conflict turn no Retry |

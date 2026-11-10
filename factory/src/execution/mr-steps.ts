@@ -25,6 +25,7 @@ import { actedVerdict, type ReviewItem, uniqueNits } from '../review.js';
 import { endSession, type IdleOutcome, type ImplementerSession } from '../session.js';
 import { pathDenials } from '../sandbox-denials.js';
 import { withoutDropped } from '../stops.js';
+import { implementerQuestion } from '../question-stop.js';
 import { readTask } from '../task-file.js';
 import { checksLine, failureText, inlineCommand, runTestCommand, TEST_CODES, TEST_FIX_ROUNDS, testsFixContent, TESTS_FAILED, type TestsRecord, type TestsResult, TESTS_UNAVAILABLE } from '../test-command.js';
 import { removeWorktree } from '../worktree.js';
@@ -197,8 +198,9 @@ export class MrPart {
         await this.#conflictIdle(job, live, outcome);
         return;
       }
-      if (!outcome.ok) {
-        await needsHuman(outcome.code, outcome.message);
+      const stopped = outcome.ok ? await implementerQuestion(this.#store.jobs, job, cwd) : outcome;
+      if (stopped !== undefined) {
+        await needsHuman(stopped.code, stopped.message);
         return;
       }
       // The guard's terms, before anything quotes the MR text: an invalid title is masked.
@@ -228,13 +230,11 @@ export class MrPart {
       const tests = await this.#store.jobs.readTests(job.workspace, job.ticket, job.iteration);
       const checked = (text: string): string => (tests === undefined ? text : withChecks(text, checksLine(tests, job.iteration), job.iteration));
       const composed = checked(await this.#withAccepted(withFindings(withSkipped, ledger), job, ledger));
-      // The guard: the lines the factory added lose every term; the Implementer's own
-      // lines are its to reword.
+      // The guard: the lines the factory added lose every term; the Implementer's own lines are its to reword.
       const factoryText = redactAdded(composed, written.text, terms);
-      // The user's own MR text, saved on the Merge request screen, stays the MR text: the
-      // commit is made with it, unless it fails the rules; then with the factory's new text, and the
-      // screen shows the problem (approve refuses until it is saved valid or reset). It gets the
-      // factory's ### Checks too, cleaned by the guard as the factory's lines are.
+      // The user's own MR text, saved on the Merge request screen, stays the MR text: the commit is made with it,
+      // unless it fails the rules; then with the factory's new text, and the screen shows the problem (approve
+      // refuses until it is saved valid or reset). It gets the factory's ### Checks too, cleaned by the guard.
       const saved = await this.#userMrText(job);
       const userText = saved === undefined ? undefined : redactAdded(checked(saved), saved, terms);
       const usersOwn = userText !== undefined && mrTextProblem(job.ticket, userText) === undefined;

@@ -186,8 +186,8 @@ The queue never stops a job, but a queued ticket may wait. Its card says why:
 
 | The card or `sf queue list` says | What to do |
 | --- | --- |
-| plan not ready: N blocker, M major | Fix the Task file (the Task check runs again by itself), or *Start anyway* (`sf queue force`). |
-| plan check failed | Press Check again; read the error. |
+| plan not ready: N blocker, M major | Fix the Task file (it is checked again after the save), or *Start anyway* (`sf queue force`). It is also checked again by itself when the base changes a file in its scope. |
+| plan check failed | It is tried again by itself up to 3 times, 15 minutes apart; after that (the notification), read the error and press Check again. |
 | plan being checked | Wait. |
 | plan not checked | Press Check (`sf check-task`), or force it. With `SF_TASK_CHECK_AUTO=off` every ticket says this until checked. |
 | Waits for `APP-11` (pushed, running, planned, missing) | Merge the tickets it waits for; the queue looks again every 5 minutes. Start by hand does not wait. |

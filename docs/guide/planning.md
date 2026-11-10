@@ -281,8 +281,12 @@ them per job (the Plan column) and the rounds per ticket of the plan check.
 **When it runs.** `sf serve` runs it by itself 60 seconds after the last change of a Task file
 (written by `write_task`, saved on the page, or changed on disk), and when a ticket without a check
 is added to the queue, unless `SF_TASK_CHECK_AUTO=off`. It does not run for a skeleton, for a Task
-that needs no check (above), for a version that has a check already (a failed one too: press
-Check to run it again), or while a job of the ticket runs. `SF_TASK_CHECK_PARALLEL` (default 1) checks run at once. You can always run it:
+that needs no check (above), for a version that has a check already, or while a job of the
+ticket runs. Two exceptions, for a ticket in the queue (not forced): a failed check is tried again
+by itself every 15 minutes, up to 3 times, and notified only after the last; a `not_ready` check is
+checked again when a commit on the base changes a path in its `scope` or `may_touch` (any path
+without either), and that re-check, if still not ready, is not notified again. Outside the queue,
+press Check to run a failed one again. `SF_TASK_CHECK_PARALLEL` (default 1) checks run at once. You can always run it:
 
 ```sh
 sf check-task my-app APP-12   # prints the paraphrase, the findings by severity, the files, the verdict

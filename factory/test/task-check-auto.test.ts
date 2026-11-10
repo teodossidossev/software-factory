@@ -1,10 +1,11 @@
 // The automatic Task checks (SF-086): the settings; AutoChecks with a fake clock and a fake runner
 // (the 60 s debounce, one check per ticket, the cancels, the skips, the parallel limit, a manual
-// Check that counts toward it, a trigger during a manual check); TaskChecks' automatic start (a
-// cancelled run stores nothing, the running count, a manual Check that cancels a pending automatic
-// one and is refused during a running one); the watcher of the .software-factory folders; the
-// notification; then sf serve end to end with the fake Claude: write_task, the watcher and the run
-// queue trigger one check each, and the board shows the verdict.
+// Check that counts toward it, a trigger during a manual check, a re-check that runs only on a
+// record of its kind); TaskChecks' automatic start (a cancelled run stores nothing, the running
+// count, a manual Check that cancels a pending automatic one and is refused during a running one);
+// the watcher of the .software-factory folders; the notification; then sf serve end to end with the
+// fake Claude: write_task, the watcher and the run queue trigger one check each, and the board shows
+// the verdict.
 import assert from 'node:assert/strict';
 import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -14,113 +15,13 @@ import { FactoryError } from '../src/errors.js';
 import type { Job, JobState } from '../src/jobs.js';
 import { type Notification, notifyTaskCheck, taskCheckNotification } from '../src/notify.js';
 import type { Workspace } from '../src/registry.js';
-import { type CheckObserver, type CheckRecord, CheckStore, TaskChecks, taskSha256 } from '../src/task-check.js';
-import { type AutoCheckRunner, AutoChecks, type AutoTimers, planCheck, type WatchFolder } from '../src/task-check-auto.js';
+import { type CheckRecord, CheckStore, TaskChecks, taskSha256 } from '../src/task-check.js';
+import { AutoChecks, planCheck, type WatchFolder } from '../src/task-check-auto.js';
+import { FakeClock, FakeRunner } from './support/auto-checks.js';
 import { fetchRaw } from './support/dashboard-client.js';
 import { type Env, newEnv, newRepo, reviewLog, reviewScript, runCli, serve, stop, task, temp } from './support/harness.js';
 
 const MINUTE = 60_000;
-
-// A clock the test moves: timers fire in their order when advance passes them.
-class FakeClock implements AutoTimers {
-  now = 0;
-  #next = 1;
-  readonly #timers = new Map<number, { at: number; callback: () => void }>();
-
-  setTimeout(callback: () => void, ms: number): unknown {
-    const id = this.#next++;
-    this.#timers.set(id, { at: this.now + ms, callback });
-    return id;
-  }
-
-  clearTimeout(handle: unknown): void {
-    this.#timers.delete(handle as number);
-  }
-
-  advance(ms: number): void {
-    const target = this.now + ms;
-    for (;;) {
-      const due = [...this.#timers.entries()].filter(([, timer]) => timer.at <= target).sort((a, b) => a[1].at - b[1].at)[0];
-      if (due === undefined) {
-        break;
-      }
-      this.#timers.delete(due[0]);
-      this.now = due[1].at;
-      due[1].callback();
-    }
-    this.now = target;
-  }
-}
-
-// TaskChecks as AutoChecks sees it: a check runs until the test ends it, with a record (stored) or
-// without; an automatic one ends at once, storing nothing, when its signal aborts.
-class FakeRunner implements AutoCheckRunner {
-  readonly store: CheckStore;
-  // Every start, "auto <key>" or "manual <key>", in order.
-  readonly starts: string[] = [];
-  readonly #running = new Map<string, { signal: AbortSignal | undefined; finish: (record: CheckRecord | undefined) => void }>();
-  readonly #observers: CheckObserver[] = [];
-
-  constructor(stateDir: string) {
-    this.store = new CheckStore(stateDir);
-  }
-
-  observe(observer: CheckObserver): void {
-    this.#observers.push(observer);
-  }
-
-  isRunning(workspace: string, ticket: string): boolean {
-    return this.#running.has(`${workspace}/${ticket}`);
-  }
-
-  runningCount(): number {
-    return this.#running.size;
-  }
-
-  aborted(workspace: string, ticket: string): boolean {
-    return this.#running.get(`${workspace}/${ticket}`)?.signal?.aborted === true;
-  }
-
-  async startAuto(workspace: string, ticket: string, signal: AbortSignal): Promise<{ started: true; sha256: string; ended: Promise<CheckRecord | undefined> }> {
-    const ended = this.#begin(workspace, ticket, signal);
-    signal.addEventListener('abort', () => void this.end(workspace, ticket), { once: true });
-    return { started: true, sha256: '', ended };
-  }
-
-  manual(workspace: string, ticket: string): void {
-    for (const observer of this.#observers) {
-      observer.manualStart?.(workspace, ticket);
-    }
-    void this.#begin(workspace, ticket, undefined);
-  }
-
-  #begin(workspace: string, ticket: string, signal: AbortSignal | undefined): Promise<CheckRecord | undefined> {
-    const key = `${workspace}/${ticket}`;
-    if (this.#running.has(key)) {
-      throw new FactoryError('check_running', `A Task check of ${key} is already running.`);
-    }
-    this.starts.push(`${signal === undefined ? 'manual' : 'auto'} ${key}`);
-    return new Promise((resolve) => this.#running.set(key, { signal, finish: resolve }));
-  }
-
-  // Ends the ticket's check: the record is stored unless the run was cancelled.
-  async end(workspace: string, ticket: string, record?: CheckRecord): Promise<void> {
-    const key = `${workspace}/${ticket}`;
-    const run = this.#running.get(key);
-    if (run === undefined) {
-      return;
-    }
-    const stored = record !== undefined && run.signal?.aborted !== true ? record : undefined;
-    if (stored !== undefined) {
-      await this.store.write(stored);
-    }
-    this.#running.delete(key);
-    run.finish(stored);
-    for (const observer of this.#observers) {
-      observer.ended?.(workspace, ticket);
-    }
-  }
-}
 
 const text = (ticket: string, body = 'Change the README.'): string => `---\nticket: ${ticket}\ntitle: Ticket ${ticket}\nbase: main\n---\n\n# ${ticket}\n\n${body}\n`;
 const DRAFT = (ticket: string): string => `${text(ticket)}\n## Status: waiting for the Context owner\n`;
@@ -277,6 +178,33 @@ test('when it fires, nothing runs for a missing file, a skeleton, a check record
   assert.deepEqual(['S-0', 'S-1', 'S-2', 'S-3', 'S-4'].map((ticket) => r.auto.isPending('app', ticket)), [false, false, false, false, false]);
   await r.runner.end('app', 'S-6');
   await advance(r, 5 * MINUTE);
+  assert.equal(r.runner.starts.length, 2);
+});
+
+test('a re-check runs on a record only of its kind: retry on a failed one, moved on a not_ready one; a running job still drops it', async () => {
+  const r = await rig('auto-recheck-kind');
+  const verdicts = { 'K-1': 'failed', 'K-2': 'not_ready', 'K-3': 'ready', 'K-4': 'failed', 'K-5': 'not_ready', 'K-6': 'failed' } as const;
+  for (const [ticket, verdict] of Object.entries(verdicts)) {
+    await r.runner.store.write(checkRecord('app', ticket, await r.put(ticket), verdict));
+  }
+  r.jobs.set('app/K-6', jobOf('app', 'K-6', 'working'));
+  r.auto.trigger('app', 'K-1', 'retry');
+  r.auto.trigger('app', 'K-2', 'moved');
+  r.auto.trigger('app', 'K-3', 'retry');
+  r.auto.trigger('app', 'K-4', 'moved');
+  r.auto.trigger('app', 'K-5', 'retry');
+  r.auto.trigger('app', 'K-6', 'retry');
+  await advance(r, MINUTE);
+  await r.runner.end('app', 'K-1');
+  await r.auto.idle();
+  assert.deepEqual(r.runner.starts, ['auto app/K-1', 'auto app/K-2']);
+  await r.runner.end('app', 'K-2');
+  await advance(r, 5 * MINUTE);
+  assert.equal(r.runner.starts.length, 2);
+  // A plain trigger after a re-check one asks for none: the record holds it.
+  r.auto.trigger('app', 'K-1', 'retry');
+  r.auto.trigger('app', 'K-1');
+  await advance(r, MINUTE);
   assert.equal(r.runner.starts.length, 2);
 });
 

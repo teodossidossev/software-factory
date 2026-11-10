@@ -6,7 +6,10 @@
 // process below it and every process of its mark (RUN_MARK), and the run fails, so one file cannot
 // hold the suite forever; so is a file whose output processes it left still hold open after it
 // exited. A child's output is printed whole: a passing file's when it ends, a failing file's at
-// the end of the run. A failing file never exits 0.
+// the end of the run. After the parallel run, up to MAX_RETRIED_FILES failed files run once more,
+// one at a time (a file can fail under the load of a full run, as a time-sensitive test that misses
+// its deadline): one that passes then counts as passed, its first output printed all the same. A
+// file failing twice never exits 0.
 import { spawn } from 'node:child_process';
 import { globSync, readdirSync, readFileSync } from 'node:fs';
 import os from 'node:os';
@@ -63,6 +66,9 @@ export const DEFAULT_FILE_TIMEOUT_MS = 5 * 60_000;
 // the same modules, and compiles them again without it. dist/ is removed by every build, and the
 // cache with it.
 export const COMPILE_CACHE_DIR = 'dist/.compile-cache';
+
+// The most failed files run again after the parallel run; more, and the run fails without a retry.
+export const MAX_RETRIED_FILES = 3;
 
 // The longest delay a Node timer keeps (a longer one fires at once).
 export const MAX_FILE_TIMEOUT_MS = 2 ** 31 - 1;
@@ -231,8 +237,8 @@ const defaultDeps = (): RunTestsDeps => ({
 });
 
 // How one file ended: its exit code, or why it has none (a phrase after the file's name); its
-// output and how long it ran.
-type FileEnd = ({ code: number } | { failure: string }) & { output: string; ms: number };
+// output, how long it ran and whether it was killed at its limit.
+type FileEnd = ({ code: number } | { failure: string }) & { output: string; ms: number; timedOut: boolean };
 
 // Whether a file passed: it exited 0.
 const passed = (end: FileEnd): boolean => 'code' in end && end.code === 0;
@@ -244,11 +250,27 @@ function fileReport(file: string, end: FileEnd): string {
   return `run-tests: ${file} (${how}, ${(end.ms / 1000).toFixed(1)} s)\n${end.output}`;
 }
 
+// Whether the failed files of the parallel run get their retry: one to MAX_RETRIED_FILES of them,
+// none killed at its limit (a file that hangs would hold the run as long again), unless
+// SF_TEST_RETRY is 0.
+function retryAllowed(env: Env, failed: readonly FileEnd[]): boolean {
+  return env.SF_TEST_RETRY !== '0' && failed.length > 0 && failed.length <= MAX_RETRIED_FILES && !failed.some((end) => end.timedOut);
+}
+
+// A retried file's two outputs, under a line that says how its runs ended.
+function retryReport(file: string, first: FileEnd, retry: FileEnd): string {
+  const how = passed(retry) ? 'failed on the first run, passed on the retry' : 'failed on the first run and on the retry';
+  return `--- ${file} ${how} ---\n${fileReport(file, first)}${fileReport(file, retry)}`;
+}
+
 // Runs the tests of mode argv[0], each file as `node --test <argv[1..]> <file>`. A passing file's
 // output is printed when it ends; a failing file's at the end of the run, with the line that says
-// why, so the last lines of the run show the failures. Resolves to the exit code: 2 for a usage
-// error (nothing runs); 1 when no file matches, or a file could not start, was killed by a signal
-// or ran past its limit; else the first failing file's exit code, or 0. Never calls process.exit.
+// why, so the last lines of the run show the failures. Failed files of the parallel run get one
+// retry each, one at a time, as retryAllowed says; a file is judged by its last run, and a retried
+// file's outputs are printed together (retryReport). Resolves to the exit code: 2 for a usage
+// error (nothing runs); 1 when no file matches, or a failing file could not start, was killed by a
+// signal or ran past its limit; else the first failing file's exit code, or 0. Never calls
+// process.exit.
 export async function main(argv: string[], deps: RunTestsDeps = defaultDeps()): Promise<number> {
   const [mode, ...extra] = argv;
   if (!isMode(mode)) {
@@ -322,7 +344,7 @@ export async function main(argv: string[], deps: RunTestsDeps = defaultDeps()): 
       clearTimeout(grace);
       if (child.pid !== undefined) running.delete(child.pid);
       const how = timedOut ? { failure: `exceeded ${limit.value} ms and was killed` } : end;
-      resolve({ ...how, output: Buffer.concat(output).toString('utf8'), ms: Date.now() - started });
+      resolve({ ...how, output: Buffer.concat(output).toString('utf8'), ms: Date.now() - started, timedOut });
     };
     child.on('error', (err: Error) => {
       failed = `could not start node --test: ${err.message}`;
@@ -370,18 +392,38 @@ export async function main(argv: string[], deps: RunTestsDeps = defaultDeps()): 
       if (passed(end)) deps.write(fileReport(file, end));
     }
   };
+  // The retry's end of each retried file.
+  const retries = new Map<string, FileEnd>();
   try {
     await Promise.all(Array.from({ length: Math.min(n.value, files.length) }, lane));
+    const failed = files.filter((file) => ends.has(file) && !passed(ends.get(file)!));
+    if (!interrupted && retryAllowed(deps.env, failed.map((file) => ends.get(file)!))) {
+      for (const file of failed) {
+        if (interrupted) break;
+        const end = await runFile(file);
+        retries.set(file, end);
+        if (passed(end)) deps.write(retryReport(file, ends.get(file)!, end));
+      }
+    }
   } finally {
     removeInterrupt?.();
   }
 
-  const failing = files.filter((file) => ends.has(file) && !passed(ends.get(file)!));
-  for (const file of failing) deps.write(fileReport(file, ends.get(file)!));
+  // A file's last run.
+  const last = (file: string): FileEnd => retries.get(file) ?? ends.get(file)!;
+  const failing = files.filter((file) => ends.has(file) && !passed(last(file)));
+  for (const file of failing) {
+    const retry = retries.get(file);
+    deps.write(retry === undefined ? fileReport(file, ends.get(file)!) : retryReport(file, ends.get(file)!, retry));
+  }
   if (interrupted) return 1;
-  if (failing.length === 0) return 0;
+  if (failing.length === 0) {
+    const retried = [...retries.keys()];
+    if (retried.length > 0) deps.log(`run-tests: ${files.length} test files passed (${retried.length} after a retry: ${retried.join(', ')})`);
+    return 0;
+  }
   deps.log(`run-tests: ${failing.length} of ${files.length} test files failed: ${failing.join(', ')}`);
-  const first = ends.get(failing[0]!)!;
+  const first = last(failing[0]!);
   // A failure (no exit code) anywhere is 1; else the first failing file's exit code.
-  return 'code' in first && failing.every((file) => 'code' in ends.get(file)!) ? first.code : 1;
+  return 'code' in first && failing.every((file) => 'code' in last(file)) ? first.code : 1;
 }

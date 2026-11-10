@@ -1,7 +1,8 @@
 // The test runner behind npm test and npm run test:browser (SF-108, SF-152): each file in a child of
 // its own, half the cores at once, at nice 10, a file past SF_TEST_FILE_TIMEOUT_MS killed with every
-// process below it. main runs here with a fake spawn, a fake setPriority and a fake kill over a
-// folder of fake test files, and once for real over a file that hangs.
+// process below it, up to three failed files retried once, one at a time (SF-184). main runs here
+// with a fake spawn, a fake setPriority and a fake kill over a folder of fake test files, and once
+// for real over a file that hangs.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
@@ -247,7 +248,7 @@ test('no file to run exits 1 with one line', async () => {
 
 test("a failing file's exit code is passed on, the other files still run, and the failing files are named", async () => {
   for (const code of [1, 7]) {
-    const { deps, spawned, logs } = fakeDeps({ emit: (child) => exitWith(child.file === FILES[1] ? code : 0)(child) });
+    const { deps, spawned, logs } = fakeDeps({ env: { SF_TEST_RETRY: '0' }, emit: (child) => exitWith(child.file === FILES[1] ? code : 0)(child) });
     assert.equal(await main(['unit'], deps), code);
     assert.equal(spawned.length, 3);
     assert.deepEqual(logs, [`run-tests: 1 of 3 test files failed: ${FILES[1]}`]);
@@ -256,7 +257,7 @@ test("a failing file's exit code is passed on, the other files still run, and th
 
 test("a failing file's output comes after every passing file's, so the run's last lines show the failure", async () => {
   const { deps, written, logs } = fakeDeps({
-    env: { SF_TEST_CONCURRENCY: '1' },
+    env: { SF_TEST_CONCURRENCY: '1', SF_TEST_RETRY: '0' },
     emit: (child) => {
       child.stdout.emit('data', Buffer.from(`${child.file} says\n`));
       exitWith(child.file === FILES[0] ? 1 : 0)(child);
@@ -269,7 +270,7 @@ test("a failing file's output comes after every passing file's, so the run's las
 });
 
 test('a child killed by a signal gives 1 and prints the signal', async () => {
-  const { deps, logs, written } = fakeDeps({ emit: (child) => exitWith(child.file === FILES[0] ? null : 0, child.file === FILES[0] ? 'SIGTERM' : null)(child) });
+  const { deps, logs, written } = fakeDeps({ env: { SF_TEST_RETRY: '0' }, emit: (child) => exitWith(child.file === FILES[0] ? null : 0, child.file === FILES[0] ? 'SIGTERM' : null)(child) });
   assert.equal(await main(['unit'], deps), 1);
   assert.match(written.at(-1)!, new RegExp(`^run-tests: ${FILES[0]} \\(was killed by SIGTERM, `));
   assert.deepEqual(logs, [`run-tests: 1 of 3 test files failed: ${FILES[0]}`]);
@@ -338,6 +339,7 @@ test('marked: the processes whose environment carries the mark, this one left ou
 test('a file whose output is still open after the grace failed: its group and the processes that hold its output are killed, and the run exits 1', async () => {
   assert.equal(CLOSE_GRACE_MS, 5000);
   const { deps, killed, logs, written } = fakeDeps({
+    env: { SF_TEST_RETRY: '0' },
     closeGraceMs: 30,
     // A server the file left, outside the child's group and tree, holds its output.
     marked: (mark) => (mark === `${process.pid}-2` ? [7777] : []),
@@ -389,6 +391,7 @@ test('a failing priority call does not hide a failing test run', async () => {
 
 test('a spawn that emits error gives 1 with its line, and no priority call without a pid', async () => {
   const { deps, priorities, logs, written } = fakeDeps({
+    env: { SF_TEST_RETRY: '0' },
     pid: undefined,
     emit: (child) => {
       child.emit('error', Object.assign(new Error('spawn node ENOENT'), { code: 'ENOENT' }));
@@ -420,6 +423,155 @@ test('an interrupt kills the running files and starts no more; the run exits 1',
   assert.deepEqual(killed, [4242]);
   assert.equal(logs[0], 'run-tests: interrupted; the running test files are killed');
   assert.equal(removed, true);
+});
+
+// An emit that writes `<file> run <n>` and exits with code(file, n), n counting the file's runs from 1.
+function byRun(code: (file: string, run: number) => number): (child: FakeChild) => void {
+  const runs = new Map<string, number>();
+  return (child) => {
+    const run = (runs.get(child.file) ?? 0) + 1;
+    runs.set(child.file, run);
+    child.stdout.emit('data', Buffer.from(`${child.file} run ${run}\n`));
+    exitWith(code(child.file, run))(child);
+  };
+}
+
+const timeless = (text: string): string => text.replace(/, \d+\.\d s\)/g, ', T s)');
+const withoutMark = (env: Record<string, string | undefined>) => Object.fromEntries(Object.entries(env).filter(([name]) => name !== RUN_MARK));
+
+test('a file that fails, then passes on its retry, counts as passed: the summary names it, and its first output is printed under a heading', async () => {
+  const { deps, spawned, written, logs } = fakeDeps({ env: { KEEP: 'me' }, emit: byRun((file, run) => (file === FILES[1] && run === 1 ? 1 : 0)) });
+  assert.equal(await main(['unit', '--test-name-pattern=foo'], deps), 0);
+  assert.deepEqual(spawned.map(({ args }) => args.at(-1)), [...FILES, FILES[1]]);
+  // The same arguments and environment, a mark of its own.
+  assert.deepEqual(spawned[3]!.args, spawned[1]!.args);
+  assert.deepEqual(withoutMark(spawned[3]!.env), withoutMark(spawned[1]!.env));
+  assert.notEqual(spawned[3]!.env[RUN_MARK], spawned[1]!.env[RUN_MARK]);
+  assert.deepEqual(logs, [`run-tests: 3 test files passed (1 after a retry: ${FILES[1]})`]);
+  assert.equal(written.length, 3);
+  assert.equal(
+    timeless(written.at(-1)!),
+    `--- ${FILES[1]} failed on the first run, passed on the retry ---\nrun-tests: ${FILES[1]} (exit 1, T s)\n${FILES[1]} run 1\nrun-tests: ${FILES[1]} (exit 0, T s)\n${FILES[1]} run 2\n`,
+  );
+});
+
+test('a file that fails again on its retry fails the run, with both outputs printed last', async () => {
+  const { deps, spawned, written, logs } = fakeDeps({ emit: byRun((file) => (file === FILES[0] ? 7 : 0)) });
+  assert.equal(await main(['unit'], deps), 7);
+  assert.equal(spawned.length, 4);
+  assert.deepEqual(logs, [`run-tests: 1 of 3 test files failed: ${FILES[0]}`]);
+  assert.equal(
+    timeless(written.at(-1)!),
+    `--- ${FILES[0]} failed on the first run and on the retry ---\nrun-tests: ${FILES[0]} (exit 7, T s)\n${FILES[0]} run 1\nrun-tests: ${FILES[0]} (exit 7, T s)\n${FILES[0]} run 2\n`,
+  );
+});
+
+test('of two retried files, one passing and one failing again, the run fails and both are printed', async () => {
+  const { deps, spawned, written, logs } = fakeDeps({ emit: byRun((file, run) => (file === FILES[0] || (file === FILES[2] && run === 1) ? 1 : 0)) });
+  assert.equal(await main(['unit'], deps), 1);
+  assert.deepEqual(spawned.map(({ args }) => args.at(-1)), [...FILES, FILES[0], FILES[2]]);
+  assert.deepEqual(logs, [`run-tests: 1 of 3 test files failed: ${FILES[0]}`]);
+  assert.match(written.join(''), new RegExp(`--- ${FILES[2]} failed on the first run, passed on the retry ---\\n`));
+  assert.match(written.at(-1)!, new RegExp(`^--- ${FILES[0]} failed on the first run and on the retry ---\\n`));
+});
+
+test('a retry that hangs is killed at the same limit', async () => {
+  const { deps, spawned, logs } = fakeDeps({
+    env: { SF_TEST_FILE_TIMEOUT_MS: '50' },
+    emit: (child) => {
+      if (child.file !== FILES[1]) return exitWith(0)(child);
+      // Fails at once on its first run; hangs on its retry.
+      if (spawned.length <= FILES.length) exitWith(1)(child);
+    },
+  });
+  assert.equal(await main(['unit'], deps), 1);
+  assert.equal(spawned.length, 4);
+  assert.deepEqual(logs, [`run-tests: ${FILES[1]} exceeded 50 ms and was killed`, `run-tests: 1 of 3 test files failed: ${FILES[1]}`]);
+});
+
+test('retries run one at a time, after the parallel run; up to three failed files are retried', async () => {
+  let firstRunsLeft = FILES.length;
+  let retriesNow = 0;
+  let most = 0;
+  let early = false;
+  const runs = new Map<string, number>();
+  const { deps, spawned } = fakeDeps({
+    emit: (child) => {
+      const run = (runs.get(child.file) ?? 0) + 1;
+      runs.set(child.file, run);
+      if (run === 1) {
+        firstRunsLeft -= 1;
+        return exitWith(1)(child);
+      }
+      if (firstRunsLeft > 0) early = true;
+      retriesNow += 1;
+      most = Math.max(most, retriesNow);
+      setTimeout(() => {
+        retriesNow -= 1;
+        exitWith(0)(child);
+      }, 20);
+    },
+  });
+  assert.equal(await main(['unit'], deps), 0);
+  assert.deepEqual(spawned.map(({ args }) => args.at(-1)), [...FILES, ...FILES]);
+  assert.equal(most, 1);
+  assert.equal(early, false);
+});
+
+test('four failed files are not retried', async () => {
+  const four = await mkdtemp(join(tmpdir(), 'sf-run-tests-four-'));
+  try {
+    await mkdir(join(four, 'dist', 'test'), { recursive: true });
+    for (const name of ['a', 'b', 'c', 'd']) await writeFile(join(four, 'dist', 'test', `${name}.test.js`), '');
+    const { deps, spawned, logs } = fakeDeps({ root: four, emit: byRun((_, run) => (run === 1 ? 1 : 0)) });
+    assert.equal(await main(['unit'], deps), 1);
+    assert.equal(spawned.length, 4);
+    assert.match(logs.at(-1)!, /^run-tests: 4 of 4 test files failed: /);
+  } finally {
+    await rm(four, { recursive: true, force: true });
+  }
+});
+
+test('a file killed at its limit is not retried, nor is any other failed file of the run', async () => {
+  const { deps, spawned, logs } = fakeDeps({
+    env: { SF_TEST_FILE_TIMEOUT_MS: '50' },
+    emit: (child) => {
+      if (child.file === FILES[2]) return;
+      exitWith(child.file === FILES[0] ? 1 : 0)(child);
+    },
+  });
+  assert.equal(await main(['unit'], deps), 1);
+  assert.equal(spawned.length, 3);
+  assert.deepEqual(logs, [`run-tests: ${FILES[2]} exceeded 50 ms and was killed`, `run-tests: 2 of 3 test files failed: ${FILES[0]}, ${FILES[2]}`]);
+});
+
+test('SF_TEST_RETRY=0 turns the retry off; any other value leaves it on', async () => {
+  const off = fakeDeps({ env: { SF_TEST_RETRY: '0' }, emit: byRun((file, run) => (file === FILES[1] && run === 1 ? 1 : 0)) });
+  assert.equal(await main(['unit'], off.deps), 1);
+  assert.equal(off.spawned.length, 3);
+  for (const value of ['', '1', 'no', 'off']) {
+    const on = fakeDeps({ env: { SF_TEST_RETRY: value }, emit: byRun((file, run) => (file === FILES[1] && run === 1 ? 1 : 0)) });
+    assert.equal(await main(['unit'], on.deps), 0, value);
+    assert.equal(on.spawned.length, 4, value);
+  }
+});
+
+test('an interrupt during a retry kills it and starts no more; the run exits 1', async () => {
+  let interrupt: (() => void) | undefined;
+  const { deps, spawned, killed } = fakeDeps({
+    emit: (child) => {
+      // The first runs fail; the first retry is interrupted.
+      if (spawned.length <= FILES.length) return exitWith(1)(child);
+      interrupt!();
+    },
+  });
+  deps.onInterrupt = (stop) => {
+    interrupt = stop;
+    return () => undefined;
+  };
+  assert.equal(await main(['unit'], deps), 1);
+  assert.equal(spawned.length, 4);
+  assert.deepEqual(killed, [4245]);
 });
 
 // The pids of the processes whose argv is exactly argv.
@@ -520,7 +672,7 @@ test('for real: a file that exits while a detached process it started holds its 
       kill: (pid) => killTree(pid),
       marked: (mark) => marked(mark),
       closeGraceMs: 1000,
-      env: { SF_TEST_FILE_TIMEOUT_MS: '60000' },
+      env: { SF_TEST_FILE_TIMEOUT_MS: '60000', SF_TEST_RETRY: '0' },
       cores: 2,
       log: (line) => void logs.push(line),
       write: (text) => void written.push(text),

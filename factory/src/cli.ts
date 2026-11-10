@@ -71,6 +71,7 @@ import { turnLimitLine } from './turn-limit.js';
 import { watchEvents } from './watch.js';
 import { DEFAULT_BUDGET_USD, DEFAULT_TIMEOUT_MIN, positiveDecimal, runSmoke } from './live-smoke.js';
 import { INSTALLED_SF, serviceCommand, updateService } from './service.js';
+import { watchdog } from './watchdog.js';
 import { checkStateVersion } from './state-version.js';
 import { answerLines, checkArgs, checkJob, checkName, cliCommand, type Command, COMMANDS, socketName, UsageError, usageLines } from './commands.js';
 import { socketHandler } from './ipc-handlers.js';
@@ -100,13 +101,13 @@ ${usageLines().join('\n')}
   sf explain <workspace> <ticket>                       The plain explanation of the job's current stop (sf serve writes one for each needs_human stop; explain in workspaces.json): the headline, the explanation, the choices and the recommendation; no sf serve needed, no model call
   sf notify-test                                        Send a test notification on every channel
   sf info                                               Version, directories, settings, whether sf serve and the tunnel run, workspaces, jobs
-  sf health [--json]                                    The health checks, computed here once without sf serve (MCP endpoint, tunnel, the tunnel's sf build, jobs, run queue, remote dashboard, logins, disk, sandbox leftovers, digest): one row each; --json the list; exit 0 all ok or off, 3 any recovering, 1 any down
+  sf health [--json | --notify [--force]]               The health checks, computed here once without sf serve (MCP endpoint, tunnel, the tunnel's sf build, jobs, run queue, remote dashboard, logins, disk, sandbox leftovers, digest): one row each; --json the list; exit 0 all ok or off, 3 any recovering, 1 any down. --notify: the watchdog the service's timer runs: only the MCP endpoint and the service's systemd state, one notification when sf serve stops answering and one when it answers again; --force (the alert unit) sends the down one anyway; exit 1 only when the notification could not be sent
   sf guard <workspace> [<rev> | <a>..<b>] [--remote <name>] [--branch <name>] [--mr <ticket>] [--worktree <ticket>] [--history]  The guard: check what a push of <rev> (default HEAD) to --remote (default origin) would publish, the commits of a range, or with --history every commit reachable from <rev>: messages, added lines and new file paths (never authors or committers); --branch adds a branch name, --mr a job's MR text and branch, --worktree a job's uncommitted change. Secrets in every workspace, the names of your other workspaces in one with "guard": true; prints each hit with its matched text (never a secret's); exit 0 no hits, 1 hits or an error; no sf serve needed
   sf guard install-hook <workspace>                     Write the guard's pre-push hook into the workspace's checkout (core.hooksPath followed); rewrites its own hook, never another
   sf metrics [<workspace>] [--since YYYY-MM-DD] [--json]  The Codex gate per job, current and archived: gate levels per iteration (F full, L light, l light skipped, - none, · no decision, ? unreadable), runs, tokens, items by outcome and the yield (fixed over all items), then the totals; no sf serve needed
   sf smoke [--keep] [--timeout-min N] [--budget-usd N]  The live smoke test: one tiny real job (Claude Code, Codex, Git) from Task check to push, on a throwaway repository with a local bare remote, its own sf serve and state in one temporary directory (never yours); prints a pass/fail table. Models: SF_SMOKE_MODEL (default haiku), SF_SMOKE_CODEX_MODEL (default: Codex's); budget: --timeout-min (default ${DEFAULT_TIMEOUT_MIN}) and --budget-usd (default ${DEFAULT_BUDGET_USD}), positive numbers; --keep keeps the directory
   sf run <workspace> <ticket>                           The job's runner: its turns, reviews and gate, detached from sf serve (sf serve starts it; one per job)
-  sf service install|uninstall|status                   sf serve as a systemd user service (software-factory.service in ~/.config/systemd/user, KillMode=process: running jobs outlive a stop or restart); install writes and enables it (refused while an sf serve started by hand answers); logs: journalctl --user -u software-factory
+  sf service install|uninstall|status                   sf serve as a systemd user service (software-factory.service in ~/.config/systemd/user, KillMode=process: running jobs outlive a stop or restart) with its watchdog (a timer that runs sf health --notify every five minutes, and an alert unit when systemd gives up restarting it); install writes and enables them (refused while an sf serve started by hand answers); logs: journalctl --user -u software-factory
   sf update [--check|--abandon] [--no-smoke]            Update the factory's Git install to origin/main: drains first (pauses the running jobs, waits for their runners to end), pulls, npm ci when the lockfile changed, builds and typechecks, restarts the service, resumes the jobs it paused and runs sf smoke; a failed step rolls back to the start commit. --check: how far behind, changes nothing; --abandon: remove the updating marker of an interrupted update and resume its jobs
 
 Notes:
@@ -838,8 +839,7 @@ function claudeExecutable(config: Config): string {
   }
 }
 
-// What sf serve and sf health each read differently: the MCP port and token, the run queue and the
-// digests. Each adds its own orphan scans (sandboxes).
+// What sf serve and sf health each read differently; each adds its own orphan scans (sandboxes).
 type HealthSources = Pick<HealthDeps, 'mcp' | 'queue' | 'digests'>;
 
 // The checks' dependencies, the same for sf serve and sf health but for sources.
@@ -882,8 +882,7 @@ function newestJob(all: Job[]): string | undefined {
   return all.map((job) => job.created_at).sort().at(-1);
 }
 
-// The run queue as sf health sees it without sf serve: a RunQueue of its own that only reads (its
-// view; it starts nothing), with the plan checks as stored.
+// The run queue as sf health sees it: a read-only RunQueue of its own, the plan checks as stored.
 async function localQueueFacts(config: Config): Promise<QueueFacts> {
   const store = new QueueStore(config.stateDir, config.maxJobs);
   const jobs = new JobStore(config.stateDir);
@@ -896,20 +895,17 @@ async function localQueueFacts(config: Config): Promise<QueueFacts> {
   return { view: await queue.view(), lastStart: (await store.read()).last_start, newestJob: newestJob(await jobs.list()) };
 }
 
-// sf health: the second orphan scan this long after the first.
-const SANDBOX_RESCAN_MS = 10_000;
-
-// `sf health [--json]`: the checks computed here once, without asking sf serve; logins
-// always run, the orphan scan runs twice 10 s apart with the reaper between them. Returns the exit code: 0 all ok or off, 3 any
-// recovering and none down, 1 any down.
+// `sf health [--json]`: the checks computed here once, without asking sf serve; the orphan scan
+// twice 10 s apart with the reaper between them. Returns the exit code: 0 all ok or off, 3 any
+// recovering and none down, 1 any down. --notify: the watchdog (src/watchdog.ts), the MCP row only.
 async function health(args: string[]): Promise<number> {
-  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { json: { type: 'boolean' } } });
-  if (positionals.length !== 0) {
-    throw new UsageError('health takes no arguments (only --json).');
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: { json: { type: 'boolean' }, notify: { type: 'boolean' }, force: { type: 'boolean' } } });
+  if (positionals.length !== 0 || (values.force === true && values.notify !== true) || (values.notify === true && values.json === true)) {
+    throw new UsageError('health takes no arguments (only --json, or --notify [--force]).');
   }
   const config = loadConfig();
   const watch = new OrphanWatch(() => factoryRoots(config));
-  const checks = await runChecks({
+  const deps: HealthDeps = {
     ...healthDeps(config, {
       mcp: async () => ({ port: await mcpPort().catch(() => undefined), token: await readMcpToken(config.stateDir).catch(() => undefined) }),
       queue: () => localQueueFacts(config),
@@ -918,10 +914,14 @@ async function health(args: string[]): Promise<number> {
     // The reaper between the two scans, as sf serve before each check.
     sandboxes: async () => {
       await watch.scan();
-      await new Promise((resolve) => setTimeout(resolve, SANDBOX_RESCAN_MS));
+      await new Promise((resolve) => setTimeout(resolve, 10_000));
       return reapThenScan(watch, () => reapOrphanedSandboxes(factoryRoots(config)))();
     },
-  });
+  };
+  if (values.notify === true) {
+    return watchdog({ stateDir: config.stateDir, force: values.force === true, check: async () => (await runChecks(deps, ['mcp']))[0]! });
+  }
+  const checks = await runChecks(deps);
   console.log(values.json === true ? JSON.stringify(checks, null, 2) : healthLines(checks).join('\n'));
   return healthExitCode(checks);
 }

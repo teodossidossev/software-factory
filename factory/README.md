@@ -759,9 +759,31 @@ runs it by itself after each change of a Task file (below); the user can always 
     stores nothing: its record is written to a temporary file and renamed into place only when no
     cancel came first, the look and the rename in one synchronous step.
   - **When it fires**, nothing runs, and the trigger is dropped, when the Task file is missing or a
-    skeleton, when a check record of any status exists for its current sha256 (a failed one too:
-    press Check to run it again), when the Task needs no check (SF-130, above), or when a job of the ticket runs (non-terminal and not paused,
+    skeleton, when a check record of any status exists for its current sha256 (unless the trigger is
+    a re-check of that record, below), when the Task needs no check (SF-130, above), or when a job of the ticket runs (non-terminal and not paused,
     as `write_task`'s guard says). A paused job's Task file is checked.
+  - **Re-checks of a queued ticket** (SF-171, `src/task-check-recheck.ts`, `Rechecks`): every 10
+    minutes a sweep reads the run queue's entries (a forced one is left out, and so is a ticket
+    whose check is pending or runs) and looks at the record of each one's current Task text:
+    - `failed`: a retry, triggered once the record's `ended_at` is 15 minutes old (the trigger's
+      60 s follow), at most 3 per Task sha256. The count lives in memory: a restart of `sf serve`
+      starts it again (up to 3 more retries, and a second notification).
+    - `not_ready`: a re-check when the base's tip (`resolveTarget` on the work checkout, fetched
+      from origin when there is one: the commit a new check would read) is not the record's
+      `commit` and `git diff --name-only <commit> <tip>` lists a path the Task's `scope` or
+      `may_touch` names (`matchesGlob`); without either, any changed path counts. A `commit` Git no
+      longer knows counts as moved, every path changed. The tip is resolved at most once per
+      workspace and base in a sweep, only for a workspace with a queued `not_ready` ticket; a fetch
+      or Git error skips that workspace for the sweep, logged once on stderr ("warning: the
+      re-check of the not-ready Task checks of <ws> skipped this sweep: …"); the next sweep tries
+      again.
+    - `ready`: never re-checked.
+
+    A re-check is a trigger like the others (`AutoChecks.trigger` with `recheck: 'retry'` or
+    `'moved'`): every guard above still applies, except that it runs on a record of its kind
+    (`failed` for a retry, `not_ready` for a moved base). Its record replaces the old one (same
+    sha256, same file). A retry counts toward the 3 once it ran and stored a record; one that was
+    dropped (a job started meanwhile, an update) is triggered again at a later sweep.
   - **At most `SF_TASK_CHECK_PARALLEL`** automatic checks run at once over every workspace; the
     others wait in trigger order. A manual Check counts as running for this limit but never waits
     for it; `sf check-task` runs in its own process, outside it.
@@ -782,7 +804,9 @@ runs it by itself after each change of a Task file (below); the user can always 
     "SF-0xx: plan not ready", "N blocker, M major · <workspace>", or "SF-0xx: plan check failed"
     with the first line of the error; default priority, tag `warning`. A failed channel is logged
     on `sf serve`'s stderr ("<ws>/<ticket>: plan-check notification via <channel> failed: …"),
-    nothing is stored. A ready one, a cancelled one and a manual one are not notified.
+    nothing is stored. A ready one, a cancelled one and a manual one are not notified; nor a failed
+    one a retry follows (its ticket queued, not forced, fewer than 3 retries of its Task text), nor a
+    re-check after a moved base that ends `not_ready` again.
 
 - **The run**: a fresh Agent SDK `query()` with the Claude review's session options (section Jobs,
   the review): the tools `Read`, `Grep` and `Glob` only, the review's denied tools, sandbox and
@@ -2998,7 +3022,8 @@ An automatic Task check (SF-086, section Task check) that ends `not_ready` or `f
 the same channels with the same settings: "<ticket>: plan not ready" with "N blocker, M major ·
 <workspace>", or "<ticket>: plan check failed" with the first line of its error; `Priority:
 default`, `Tags: warning`. A failed channel is logged on `sf serve`'s stderr; nothing is stored. A
-ready, cancelled or manual check is not notified.
+ready, cancelled or manual check is not notified, nor a failed one that a retry of the queue's
+re-checks follows, nor a re-check after a moved base that ends `not_ready` again.
 
 ntfy is a push notification service: install the ntfy app on the phone and add a topic
 name of your choice, then set `SF_NTFY_URL` to that topic's URL (for example
@@ -3084,7 +3109,9 @@ last started a queued ticket, written with the entry's removal before each start
   Otherwise the entry is skipped and kept in place, and its card says why: "plan not ready: N
   blocker, M major", "plan check failed", "plan being checked" (a check runs or is pending) or
   "plan not checked" (no check of this version; also with `SF_TASK_CHECK_AUTO=off`: press Check or
-  force it). The end of every Task check asks for a pass. The last look at the plan and the start
+  force it). A "plan check failed" entry is retried by itself, and a "plan not ready" one checked
+  again when its base changes a path in its scope (section Task check, Re-checks of a queued
+  ticket). The end of every Task check asks for a pass. The last look at the plan and the start
   run under the queue's lock of the ticket (`RunQueue.withTicket`), which `write_task` and the
   planned ticket page's Save also take around their write: such a write lands before that look
   (which then sees the new version) or after the job's claim (which refuses it, `job_active`), so

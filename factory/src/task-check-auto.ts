@@ -3,14 +3,17 @@
 // after its write, the watcher of each workspace's .software-factory folder, a ticket added to the run
 // queue without a check. A new trigger cancels the ticket's pending check and its running automatic
 // one (a cancelled run stores nothing). When it fires, nothing runs for a missing file or a skeleton,
-// a Task file that already has a check record of any status, one that needs no check
-// (checkNeed), or a ticket whose job runs (non-terminal and not paused, as write_task's guard); such a
-// trigger is dropped. At most `parallel` checks run at
+// a Task file that already has a check record (unless the trigger is a re-check of that record: a
+// retry of a failed one, a not_ready one after its base moved; src/task-check-recheck.ts), one that
+// needs no check (checkNeed), or a ticket whose job runs (non-terminal and not paused, as
+// write_task's guard); such a trigger is dropped. At most `parallel` checks run at
 // once over every workspace, a manual Check included (it never waits); the others wait in trigger
 // order. Every check runs through TaskChecks, so the board's "checking…" and check_running see it.
 // A manual Check cancels a pending automatic check of its ticket; a trigger that fires while a check
 // of its ticket runs waits for it to end. A job that starts cancels the ticket's pending and running
-// automatic checks (cancel).
+// automatic checks (cancel). With the run queue's entries (queued), a sweep every sweepMs triggers
+// the re-checks of the queued tickets; a failed automatic check is notified only when no retry
+// follows, a re-check after the base moved that ends not_ready again not at all.
 import { type FSWatcher, watch as fsWatch } from 'node:fs';
 import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -19,6 +22,7 @@ import { type Job, type JobStore, TERMINAL_STATES } from './jobs.js';
 import type { PlanCheck } from './queue.js';
 import type { Workspace } from './registry.js';
 import { type CheckRecord, currentCheckSha256, recordVerdict, severityCounts, type TaskChecks } from './task-check.js';
+import { type QueuedTicket, type Recheck, recheckApplies, Rechecks, SWEEP_MS } from './task-check-recheck.js';
 import { checkNeed, isDraft, readTask, TASK_DIR, TICKET_PATTERN } from './task-file.js';
 
 // The time from a ticket's last trigger to its check.
@@ -63,6 +67,11 @@ export interface AutoChecksOptions {
   delayMs?: number;
   rereadMs?: number;
   timers?: AutoTimers;
+  // The run queue's entries: with them, the sweep of the re-checks runs every sweepMs.
+  queued?: () => Promise<QueuedTicket[]>;
+  sweepMs?: number;
+  // The clock the age of a failed check is read on (Date.now by default).
+  now?: () => number;
   watch?: WatchFolder;
   // The updating marker: while updating() is true no automatic check starts; its trigger
   // goes to skipped (update-skipped-checks.json) for the catch-up after the update.
@@ -71,11 +80,13 @@ export interface AutoChecksOptions {
 
 // A ticket's automatic check: scheduled (its timer runs), due (fired; waits for a slot or for the
 // ticket's running check to end), starting (being looked at and started) or running. gen counts the
-// triggers, so a step that awaited sees whether a newer trigger or a cancel came meanwhile.
+// triggers, so a step that awaited sees whether a newer trigger or a cancel came meanwhile. recheck:
+// the re-check its last trigger asked for, if any.
 interface Entry {
   workspace: string;
   ticket: string;
   gen: number;
+  recheck: Recheck | undefined;
   phase: 'scheduled' | 'due' | 'starting' | 'running';
   timer: unknown;
   controller: AbortController | undefined;
@@ -110,6 +121,12 @@ export class AutoChecks {
   readonly #watchers = new Map<string, { dir: string; close(): void }>();
   #reread: Promise<void> = Promise.resolve();
   #rereadTimer: unknown;
+  readonly #rechecks: Rechecks | undefined;
+  readonly #sweepMs: number;
+  #sweepTimer: unknown;
+  #sweeping: Promise<void> = Promise.resolve();
+  // The notifications of ended checks, one after the other.
+  #notices: Promise<void> = Promise.resolve();
   #closed = false;
 
   constructor(options: AutoChecksOptions) {
@@ -124,6 +141,13 @@ export class AutoChecks {
     this.#timers = options.timers ?? REAL_TIMERS;
     this.#watch = options.watch ?? watchFolder;
     this.#update = options.update;
+    this.#sweepMs = options.sweepMs ?? SWEEP_MS;
+    const queued = options.queued;
+    this.#rechecks = queued === undefined ? undefined : new Rechecks({
+      queued, resolve: this.#resolve, store: this.#checks.store, now: options.now ?? Date.now,
+      busy: (workspace, ticket) => this.isPending(workspace, ticket) || this.#checks.isRunning(workspace, ticket),
+      trigger: (workspace, ticket, recheck) => this.trigger(workspace, ticket, recheck),
+    });
     this.#checks.observe({
       // A manual Check goes at once: the ticket's pending automatic check is dropped.
       manualStart: (workspace, ticket) => {
@@ -138,15 +162,16 @@ export class AutoChecks {
   }
 
   // (Re)schedules the ticket's check delayMs from now; cancels its pending check and its running
-  // automatic one.
-  trigger(workspace: string, ticket: string): void {
+  // automatic one. recheck: the sweep's re-check of the stored record (none for every other trigger).
+  trigger(workspace: string, ticket: string, recheck?: Recheck): void {
     if (this.#closed) {
       return;
     }
     const key = keyOf(workspace, ticket);
-    const entry = this.#entries.get(key) ?? { workspace, ticket, gen: 0, phase: 'scheduled' as const, timer: undefined, controller: undefined };
+    const entry = this.#entries.get(key) ?? { workspace, ticket, gen: 0, recheck, phase: 'scheduled' as const, timer: undefined, controller: undefined };
     this.#stop(key, entry);
     const gen = entry.gen;
+    entry.recheck = recheck;
     entry.phase = 'scheduled';
     entry.timer = this.#timers.setTimeout(() => this.#fire(key, gen), this.#delayMs);
     this.#entries.set(key, entry);
@@ -232,12 +257,16 @@ export class AutoChecks {
     this.#drain = this.#drain.then(() => this.#startDue()).catch((error: unknown) => console.error(error));
   }
 
-  // Settles once the starts asked for so far are done (tests).
+  // Settles once the sweeps, starts and notifications asked for so far are done (tests).
   async idle(): Promise<void> {
-    let seen: Promise<void> | undefined;
-    while (seen !== this.#drain) {
-      seen = this.#drain;
-      await seen;
+    for (;;) {
+      const [sweeping, drain, notices] = [this.#sweeping, this.#drain, this.#notices];
+      await sweeping;
+      await drain;
+      await notices;
+      if (sweeping === this.#sweeping && drain === this.#drain && notices === this.#notices) {
+        return;
+      }
     }
   }
 
@@ -268,8 +297,9 @@ export class AutoChecks {
         this.#due.unshift(key);
       };
       let run: boolean;
+      const recheck = entry.recheck;
       try {
-        run = await this.#shouldRun(entry.workspace, entry.ticket);
+        run = await this.#shouldRun(entry.workspace, entry.ticket, recheck);
       } catch (error) {
         console.error(error);
         run = false;
@@ -315,18 +345,34 @@ export class AutoChecks {
         if (entry.controller === controller) {
           this.#entries.delete(key);
         }
+        if (record !== undefined && recheck === 'retry') {
+          this.#rechecks?.retried(record);
+        }
         // A stored record is the run's result, even when a cancel came after its commit.
         if (record !== undefined && recordVerdict(record) !== 'ready') {
-          this.#onCheckEnded(record);
+          this.#notices = this.#notices.then(async () => {
+            if (await this.#notifies(record, recheck)) {
+              this.#onCheckEnded(record);
+            }
+          }).catch((error: unknown) => console.error(error));
         }
       });
     }
   }
 
-  // Whether the ticket's check runs now: a Task file that is not a skeleton, has no check record of
-  // any status yet, needs a check, and whose ticket has no running job (a paused one does
-  // not count).
-  async #shouldRun(workspace: string, ticket: string): Promise<boolean> {
+  // Whether an automatic check that ended not ready or failed is notified: a failed one unless a
+  // retry follows, a not_ready one unless it is a re-check after the base moved.
+  async #notifies(record: CheckRecord, recheck: Recheck | undefined): Promise<boolean> {
+    if (recordVerdict(record) === 'failed') {
+      return this.#rechecks === undefined || !(await this.#rechecks.retryFollows(record));
+    }
+    return recheck !== 'moved';
+  }
+
+  // Whether the ticket's check runs now: a Task file that is not a skeleton, has no check record
+  // yet (or one the re-check is for), needs a check, and whose ticket has no running job (a paused
+  // one does not count).
+  async #shouldRun(workspace: string, ticket: string, recheck: Recheck | undefined): Promise<boolean> {
     let task: string;
     let resolved: Workspace;
     try {
@@ -339,15 +385,28 @@ export class AutoChecks {
       throw error;
     }
     // Found by the check sha256: the text and its referenced images.
-    if (isDraft(task) || !checkNeed(task, workspace).needed || (await this.#checks.store.read(workspace, ticket, await currentCheckSha256(resolved, ticket, task))) !== undefined) {
+    if (isDraft(task) || !checkNeed(task, workspace).needed) {
+      return false;
+    }
+    const record = await this.#checks.store.read(workspace, ticket, await currentCheckSha256(resolved, ticket, task));
+    if (record !== undefined && !recheckApplies(recheck, record)) {
       return false;
     }
     const job = await this.#jobs.read(workspace, ticket);
     return job === undefined || !usesTaskFile(job);
   }
 
-  // Watches every registered workspace now and re-reads the registry every rereadMs.
+  // Watches every registered workspace now and re-reads the registry every rereadMs; with the run
+  // queue's entries, sweeps for re-checks every sweepMs.
   start(): Promise<void> {
+    const sweepAgain = (): void => {
+      if (!this.#closed && this.#rechecks !== undefined) {
+        this.#sweepTimer = this.#timers.setTimeout(() => {
+          this.#sweeping = this.#sweeping.then(() => this.#rechecks?.sweep()).catch((error: unknown) => console.error(error)).finally(sweepAgain);
+        }, this.#sweepMs);
+      }
+    };
+    sweepAgain();
     const again = (): void => {
       if (!this.#closed) {
         this.#rereadTimer = this.#timers.setTimeout(() => {
@@ -423,6 +482,7 @@ export class AutoChecks {
   close(): void {
     this.#closed = true;
     this.#timers.clearTimeout(this.#rereadTimer);
+    this.#timers.clearTimeout(this.#sweepTimer);
     for (const [key, entry] of this.#entries) {
       this.#stop(key, entry);
     }

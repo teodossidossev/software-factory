@@ -234,19 +234,19 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
       void runQueue.schedule();
     },
   });
-  // The automatic Task checks, unless SF_TASK_CHECK_AUTO=off: write_task, the watcher of
-  // every workspace's .software-factory folder and the run queue trigger them; a check that ends not
-  // ready or failed is notified like a job.
+  // The automatic Task checks, unless SF_TASK_CHECK_AUTO=off: write_task, the watcher of every
+  // workspace's .software-factory folder, the run queue and its re-check sweep trigger them; a check
+  // that ends not ready or failed is notified like a job, except as task-check-auto.ts says.
   if (config.taskCheckAuto) {
-    const notifySettings = notifyConfig();
     autoChecks = new AutoChecks({
       checks, jobs, resolve: (name) => resolveWorkspace(name), parallel: config.taskCheckParallel,
+      queued: async () => (await queueStore.read()).entries.map((entry) => ({ ...entry, force: entry.force === true })),
       // A test hook: a shorter time from the last trigger to the check.
       ...(tests.taskCheckDelayMs !== undefined ? { delayMs: tests.taskCheckDelayMs } : {}),
       workspaces: async () => Object.entries((await loadRegistry()).workspaces).map(([name, entry]) => ({ name, workCheckout: entry.read_checkout })),
       onCheckEnded: (record) => {
         dashboard?.refreshSetup();
-        void notifyTaskCheck(record, notifySettings);
+        void notifyTaskCheck(record, notifyConfig());
       },
       // The updating marker: a check due meanwhile is recorded for the catch-up.
       update: { updating: () => updateMarked(config.stateDir), skipped: (workspace, ticket) => recordSkippedCheck(config.stateDir, { workspace, ticket }) },

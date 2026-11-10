@@ -178,7 +178,7 @@ test('matching: case-insensitive, Unicode word boundaries, ticket keys, columns 
   assert.deepEqual(hits.map((hit) => [hit.where, hit.match, hit.label]), [['t:2:5', 'ACME', 'private list line 1'], ['t:3:1', 'ACME', 'private list line 1']]);
 });
 
-test('scans: added lines and new paths of each commit against its first parent; removed lines, binary files and pure renames give none', async () => {
+test('scans: added lines and new paths of each commit against its first parent; removed lines and pure renames give none', async () => {
   const cwd = await repo('scan', { 'README.md': 'hello\n', 'old.txt': 'ACME was here\nkeep\n', 'notes/acme.txt': 'ACME inside\n' });
   const removed = await commit(cwd, { 'old.txt': 'keep\n' }, 'drop a line');
   assert.deepEqual(await scanCommits(cwd, [removed], [ACME]), []);
@@ -189,7 +189,7 @@ test('scans: added lines and new paths of each commit against its first parent; 
   assert.deepEqual((await scanCommits(cwd, [added], terms)).map((hit) => hit.where), [`commit ${sha} message:2:5`, `src/a.ts:3:5 in commit ${sha}`]);
 
   const binary = await commit(cwd, { 'bin.dat': Buffer.from('ACME\0ACME\n') }, 'binary');
-  assert.deepEqual(await scanCommits(cwd, [binary], terms), []);
+  assert.deepEqual((await scanCommits(cwd, [binary], terms)).map((hit) => hit.where), [`bin.dat:1:1 in commit ${binary.slice(0, 12)}`, `bin.dat:1:6 in commit ${binary.slice(0, 12)}`]);
 
   const path = await commit(cwd, { 'docs/acme-notes.md': 'clean\n' }, 'notes');
   const pathHits = await scanCommits(cwd, [path], terms);
@@ -227,6 +227,29 @@ test('scans: added lines and new paths of each commit against its first parent; 
   const root = await repo('root', { 'a.txt': 'x\nACME\n' });
   const first = git(root, 'rev-parse', 'HEAD').trim();
   assert.deepEqual((await scanCommits(root, [first], terms)).map((hit) => hit.where), [`a.txt:2:1 in commit ${first.slice(0, 12)}`]);
+});
+
+test('every file is scanned as text: a -diff or binary attribute, a NUL byte, a textconv or an external diff hides no added line', async () => {
+  const terms = [ACME, keyTerm('ABC')];
+  const places = async (cwd: string, sha: string): Promise<string[]> => (await scanCommits(cwd, [sha], terms)).map((hit) => hit.where);
+  for (const attributes of ['* -diff\n', '* binary\n']) {
+    const cwd = await repo('attributes', { '.gitattributes': attributes });
+    const added = await commit(cwd, { 'notes.txt': 'one\nsee ABC-12 here\n' }, 'notes');
+    assert.deepEqual(await places(cwd, added), [`notes.txt:2:5 in commit ${added.slice(0, 12)}`], attributes);
+  }
+  const nul = await repo('nul');
+  const withNul = await commit(nul, { 'data.bin': Buffer.from('\0head\nx\0y\nzz ACME\0\n') }, 'data');
+  assert.deepEqual(await places(nul, withNul), [`data.bin:3:4 in commit ${withNul.slice(0, 12)}`]);
+  const plain = await commit(nul, { 'plain.txt': 'ACME\n' }, 'plain');
+  assert.deepEqual(await places(nul, plain), [`plain.txt:1:1 in commit ${plain.slice(0, 12)}`]);
+
+  // A diff driver that would hide the content: Git's textconv and an external diff stay off.
+  const driver = await repo('driver', { '.gitattributes': '* diff=hide\n' });
+  for (const [key, value] of [['diff.hide.textconv', 'true'], ['diff.hide.binary', 'true'], ['diff.hide.command', 'true'], ['diff.external', 'true']]) {
+    git(driver, 'config', key!, value!);
+  }
+  const hidden = await commit(driver, { 'secret.txt': 'ACME\n' }, 'hidden');
+  assert.deepEqual(await places(driver, hidden), [`secret.txt:1:1 in commit ${hidden.slice(0, 12)}`]);
 });
 
 test('a change over 16 MiB of diff is guard_failed with its size message, for a commit and for the worktree', async () => {

@@ -258,6 +258,12 @@ with `git lfs push` before the branch, and only when the job changed LFS files; 
 is any job while the `.lfsconfig` git-lfs reads in your checkout (where another job may be handed
 over) is not the base branch's.
 
+The guard that checks what is published reads every file of a pushed change as text, whatever its
+attributes or bytes (`git diff --text`, with textconv and external diff tools off), so a `-diff` or
+`binary` attribute or a NUL byte hides nothing from it. Of an LFS file it reads only the pointer,
+not the content `git lfs push` sends: in a workspace with `"guard": true` a push whose range holds
+LFS files is refused (`guard_failed`) before anything is pushed.
+
 ## The workspace's test command
 
 A workspace's `test_command` (in `workspaces.json`) runs code the Implementer wrote, so the factory
@@ -335,6 +341,8 @@ apply.
   with your full access.
 - **Your own checkout.** A session reads its workspace's checkout as before, including its other
   Task files in `.software-factory/`.
+- **LFS content is not scanned for secrets in a workspace without the guard flag.** The guard reads
+  an LFS file's pointer; only a workspace with `"guard": true` refuses to push LFS files.
 
 ## Checking it
 

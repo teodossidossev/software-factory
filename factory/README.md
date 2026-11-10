@@ -2346,7 +2346,7 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    | `mr_failed`, `mr_serve_restarted` | the factory failed, or `sf serve` restarted, during preparation |
    | `guard_hit` | the guard found text that must not be published: in the change after two Guard fixes (step 0), or in the MR text after three MR text turns (step 3); the message names the places only (section Guard) |
    | `guard_terms_invalid` | `guard-terms.txt` could not be read or has an invalid line (its number in the message) |
-   | `guard_failed` | a scan of the guard failed: a Git command, a diff over 16 MiB, or an environment or token file that could not be read for the secret check |
+   | `guard_failed` | a scan of the guard failed: a Git command, a diff over 16 MiB, or an environment or token file that could not be read for the secret check; at the push of a workspace with `"guard": true`, also LFS files in the pushed range (the guard cannot read their content; section Approve) |
    | `tests_failed` | the workspace's tests still failed after `TEST_FIX_ROUNDS` (2) Tests Fixes (SF-128): the command and the exit code (or the timeout) in the message; Accept, or `sf say` |
    | `tests_unavailable` | the workspace's tests could not run (SF-128): bwrap missing, the sandbox did not start, a spawn error, or exit 126 or 127; the reason is the message's first line; Retry, Accept, or `sf say` |
 
@@ -2408,7 +2408,11 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    (`as_is` on the dashboard) pushes the tip as it is; `branch_missing` when the branch is gone.
    Then the guard's push check (SF-122, section Guard; `--as-is` does not skip it): the commits the
    push publishes, the branch name and the MR text; a hit is `guard_hit` with the places, nothing is
-   pushed and the job is not changed.
+   pushed and the job is not changed. In a workspace with `"guard": true` it also refuses a pushed
+   range that holds LFS paths (found as in the LFS step below), since the guard reads their
+   pointers, not the content `git lfs push` would send: `guard_failed` ("The guard cannot read LFS
+   content; this workspace is guarded, so LFS files are not pushed: <paths>", at most 5, then
+   `and <n> more`), nothing pushed and the job not changed. Without the flag LFS goes on as below.
    Then the job's Git LFS objects (SF-124), which used to go through the repository's `pre-push`
    hook (`git lfs pre-push`), a hook the factory never runs: the paths the job changed
    (`git diff --name-only --no-renames --diff-filter=AMT`) between the merge base of the pushed
@@ -2562,8 +2566,12 @@ boundaries (`ABC-123`, `abc-7-fix`; not `XABC-1` or `ABC-`); a `re:` line its ow
 as above. A hit records its place with the 1-based line and column.
 
 **What is checked:** for each commit its message, the added lines of its change against its first
-parent (a root commit against the empty tree; removed and context lines and binary files give
-nothing), and the new paths of added, copied and renamed files; the branch name; the MR text. The
+parent (a root commit against the empty tree; removed and context lines give nothing), and the new
+paths of added, copied and renamed files; the branch name; the MR text. Every file is read as text
+(`git diff --text --no-textconv --no-ext-diff`): a `-diff` or `binary` attribute, a diff driver or a
+NUL byte hides no added line, and a line of binary content is scanned like any other. An LFS file
+is read as its pointer, so a workspace with `"guard": true` pushes no LFS file (`guard_failed`,
+section Approve); without the flag its content is not scanned. The
 author and committer of a commit (name and email) are never checked, for names or secrets: they
 are the user's own identity (SF-135). Files under `.software-factory/` are checked like any other
 file when a commit holds them. A diff over 16 MiB or a failing Git command is `guard_failed`.

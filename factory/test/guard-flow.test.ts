@@ -4,8 +4,8 @@
 // Every secret-looking fixture is built at run time.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
 import { mrMessage, pushBranch } from '../src/mr.js';
@@ -252,6 +252,62 @@ test('the push: a term in the branch name refuses sf approve (--as-is too) and s
   } finally {
     await stop(served);
     await fake.close();
+  }
+});
+
+test('the push of LFS files: a guarded workspace refuses sf approve before anything is pushed, naming at most 5 paths; without the guard flag git lfs push goes first', async (t) => {
+  const { env, repo, origin } = await guardEnv('guard-lfs', true);
+  // A fake git-lfs on the PATH of sf serve and the CLI: it logs its arguments.
+  const bin = join(temp, 'guard-lfs-bin');
+  const log = join(temp, 'guard-lfs.log');
+  await mkdir(bin, { recursive: true });
+  await writeFile(join(bin, 'git-lfs'), `#!/bin/sh\necho "$*" >> '${log}'\nexit 0\n`);
+  await chmod(join(bin, 'git-lfs'), 0o755);
+  const path = process.env.PATH;
+  process.env.PATH = `${bin}${delimiter}${path ?? ''}`;
+  t.after(() => {
+    process.env.PATH = path;
+  });
+  const lfsCalls = async (): Promise<string[]> => (await readFile(log, 'utf8').catch(() => '')).split('\n').filter((line) => line !== '');
+  const files = Object.fromEntries(['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((name) => [`${name}.bin`, `${name}\n`]));
+  // The base tracks *.bin with LFS; the job adds seven of them.
+  await writeFile(join(repo, '.gitattributes'), '*.bin filter=lfs\n');
+  git(repo, 'add', '.gitattributes');
+  git(repo, 'commit', '-q', '-m', 'lfs attributes');
+  git(repo, 'push', '-q', 'origin', 'main');
+  await putTask(env, repo, 'T-1', 'Change README');
+  await script(env, [
+    { write: files, text: 'iteration 1' },
+    { write: { '.software-factory/T-1.mr.md': mrText(TITLE) }, text: 'prepared' },
+  ]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'T-1' });
+    await waitFor(served, 'T-1', 'awaiting_review', 1);
+    await call(served, 'mark_clean', { workspace: 'app', ticket: 'T-1' });
+    await waitFor(served, 'T-1', 'ready_for_human_review', 1);
+    const before = await jobJson(env, 'T-1');
+    const { branch, prepared_commit: prepared } = JSON.parse(before) as { branch: string; prepared_commit: string };
+    for (const args of [['approve', 'app', 'T-1'], ['approve', 'app', 'T-1', '--as-is']]) {
+      const refused = await runCli(env, args);
+      assert.equal(refused.code, 1, args.join(' '));
+      assert.match(refused.stderr, /^sf: The guard cannot read LFS content; this workspace is guarded, so LFS files are not pushed: a\.bin, b\.bin, c\.bin, d\.bin, e\.bin and 2 more$/m);
+      assert.equal(onOrigin(origin, branch), false);
+      assert.equal(await jobJson(env, 'T-1'), before);
+      assert.deepEqual(await lfsCalls(), []);
+    }
+
+    // The same push in the workspace without the guard flag.
+    const registry = join(env.config, 'workspaces.json');
+    const workspaces = JSON.parse(await readFile(registry, 'utf8')) as { workspaces: { app: { guard?: boolean } } };
+    delete workspaces.workspaces.app.guard;
+    await writeFile(registry, `${JSON.stringify(workspaces, null, 2)}\n`);
+    const pushed = await runCli(env, ['approve', 'app', 'T-1']);
+    assert.equal(pushed.code, 0, pushed.stdout + pushed.stderr);
+    assert.equal(onOrigin(origin, branch), true);
+    assert.deepEqual(await lfsCalls(), ['version', `push origin ${prepared}`]);
+  } finally {
+    await stop(served);
   }
 });
 

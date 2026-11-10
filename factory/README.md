@@ -105,6 +105,15 @@ tests' harness passes on to the `sf` processes it starts), so both kills also fi
 that left the file's process group and tree. The run's exit code is 0 when every file passed; 1
 when a file could not start, was killed by a signal, ran past its limit or left processes holding
 its output, or when no file matches; else the first failing file's exit code; a last line names the files that failed.
+Since SF-184 a file can fail under the load of a full run (two jobs testing on one machine, a
+time-sensitive test missing its deadline) and pass alone: when one to three files failed and none
+ran past its limit, each runs once more, one at a time, with the same arguments, environment and
+limit. One that passes then counts as passed, and the run's last line names it (`run-tests: <n>
+test files passed (<k> after a retry: <files>)`); its first, failing output is still printed, under
+`--- <file> failed on the first run, passed on the retry ---`. One that fails again fails the run,
+both outputs printed under `--- <file> failed on the first run and on the retry ---`. Four or more
+failed files, or a file killed at its limit, get no retry. `SF_TEST_RETRY=0` turns the retry off
+(any other value leaves it on).
 `SF_TEST_CONCURRENCY=<positive integer>` sets N, `SF_TEST_FILE_TIMEOUT_MS=<positive integer>` the
 limit of a file in ms (at most 2147483647, the longest timer Node keeps), and `SF_TEST_NICE=0`
 leaves the priority alone; any other value of any of them stops the run with exit code 2.

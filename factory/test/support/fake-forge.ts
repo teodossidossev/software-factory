@@ -1,7 +1,8 @@
 // A fake Git host on loopback for the merge request tests (SF-048): GitHub's pulls API under
 // /repos/<owner>/<repo>/ and GitLab's merge requests API under /api/v4/projects/<id>/, with the
 // merge requests in memory. Every request is recorded (method, path, headers, body); a test can
-// set what the next merge answers or make a route fail with a status.
+// set what the next merge answers or make a route fail with a status, and give a GET path a list
+// of the host's own entries (lists), answered page by page (page, per_page).
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -35,6 +36,9 @@ export interface FakeForge {
   fail: Array<{ match: RegExp; status: number; body: unknown }>;
   // GitHub's check runs of every head commit.
   checkRuns: Array<{ status: string; conclusion: string | null }>;
+  // The entries a GET of the path answers (the path as the client sends it, without the query):
+  // page (default 1) of per_page (default 30) of them.
+  lists: Record<string, unknown[]>;
   close(): Promise<void>;
 }
 
@@ -42,7 +46,7 @@ const MERGE_SHA = 'c'.repeat(40);
 const HEAD_SHA = 'd'.repeat(40);
 
 export async function startFakeForge(kind: 'github' | 'gitlab', repoPath: string): Promise<FakeForge> {
-  const fake: FakeForge = { url: '', requests: [], mrs: [], fail: [], checkRuns: [], close: async () => undefined };
+  const fake: FakeForge = { url: '', requests: [], mrs: [], fail: [], checkRuns: [], lists: {}, close: async () => undefined };
   const github = `/repos/${repoPath}`;
   const gitlab = `/api/v4/projects/${encodeURIComponent(repoPath)}`;
   const server: Server = createServer((req, res) => {
@@ -67,6 +71,12 @@ export async function startFakeForge(kind: 'github' | 'gitlab', repoPath: string
       if (failure >= 0) {
         const [entry] = fake.fail.splice(failure, 1);
         send(entry!.status, entry!.body);
+        return;
+      }
+      if (req.method === 'GET' && Object.hasOwn(fake.lists, path)) {
+        const size = Number(url.searchParams.get('per_page') ?? 30);
+        const page = Number(url.searchParams.get('page') ?? 1);
+        send(200, fake.lists[path]!.slice((page - 1) * size, page * size));
         return;
       }
       const input = (body ?? {}) as Record<string, string>;

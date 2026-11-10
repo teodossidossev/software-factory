@@ -27,7 +27,7 @@ import { MAX_ATTACHMENT_BYTES } from './attachments.js';
 import { writeFileAtomic } from './atomic.js';
 import { Changes } from './changes.js';
 import { conversationUrl, MAX_CONVERSATION_URL, ticketConversation } from './conversation.js';
-import { CONFIRM_ACTIONS, type JobKey, type JobRoute, openWhileUpdating, postRoute, type PostRoute, type QueueRoute } from './dashboard-routes.js';
+import { CONFIRM_ACTIONS, type JobKey, type JobRoute, mergeRequestThreadsRead, openMergeRequestsRead, openWhileUpdating, postRoute, type PostRoute, type QueueRoute } from './dashboard-routes.js';
 import { FactoryError } from './errors.js';
 import type { Digests } from './digest-run.js';
 import type { Execution } from './execution.js';
@@ -105,7 +105,8 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 // the start screen once the Task file is written, or with sf start. Archive of a job card is
 // archiveFinished (terminal only), never the any-state reset.
 // The merge request on the Git host: mr-create, mr-merge and mr-status as sf mr create,
-// merge and status, and mergeRequestHost for whether they are on for a job's workspace.
+// merge and status, and mergeRequestHost for whether they are on for a job's workspace; the reads
+// openMergeRequests and mergeRequestThreads (GET, src/dashboard-routes.ts).
 // Pause, Resume and Restart as sf pause, resume and restart.
 // The hand-over to the user's checkout: handover, takeback and handed-done as sf handover,
 // takeback and handed-done, and checkHandedOver, the check for the user's own push that the job's
@@ -113,7 +114,7 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 // resetMr (POST mr-save and mr-reset).
 export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | 'say' | 'retryReview' | 'retryMr' | 'acceptGate' | 'settle' | 'simplify' | 'archiveFinished'
   | 'createMergeRequest' | 'mergeMergeRequest' | 'mergeRequestStatus' | 'mergeRequestHost' | 'pause' | 'resumePaused' | 'restart'
-  | 'handover' | 'takeback' | 'handedDone' | 'checkHandedOver' | 'mergeRequestView' | 'saveMr' | 'resetMr'>;
+  | 'handover' | 'takeback' | 'handedDone' | 'checkHandedOver' | 'mergeRequestView' | 'saveMr' | 'resetMr' | 'openMergeRequests' | 'mergeRequestThreads'>;
 // How often the job's detail asks origin for the user's push of a handed-over branch.
 const PUSH_CHECK_INTERVAL_MS = 60_000;
 
@@ -1303,7 +1304,18 @@ export async function startDashboard(
     { pattern: 'api/jobs/*/*/file', handler: jobRead(({ res, query }, job) => sendFound(res, fileOf(job, query))) },
     { pattern: 'api/jobs/*/*/iterations/*/report', handler: jobRead((get, job) => iterationFile(get, job, 'report')) },
     { pattern: 'api/jobs/*/*/iterations/*/patch', handler: jobRead((get, job) => iterationFile(get, job, 'patch')) },
+    // A workspace's merge requests on its Git host, read when asked; a refusal as refuseRead says.
+    { pattern: 'api/workspaces/*/merge-requests', when: noQuery, handler: ({ res, params }) => hostRead(res, openMergeRequestsRead(actions, params)) },
+    { pattern: 'api/workspaces/*/merge-requests/*/threads', when: noQuery, handler: ({ res, params }) => hostRead(res, mergeRequestThreadsRead(actions, params)) },
   ];
+
+  async function hostRead(res: ServerResponse, found: Promise<unknown>): Promise<void> {
+    try {
+      await sendFound(res, found);
+    } catch (error) {
+      refuseRead(res, error);
+    }
+  }
 
   async function route(req: IncomingMessage, res: ServerResponse, path: string[], query: URLSearchParams, remote: boolean): Promise<void> {
     for (const { pattern, when, handler } of getRoutes) {
@@ -1486,8 +1498,8 @@ export async function startDashboard(
     return { entries, next: from + lines.length, end };
   }
 
-  // A read of a Task file the reader refused: an empty 404 for a missing ticket, workspace or file,
-  // as for the other reads, else the refusal; anything but a FactoryError is thrown on.
+  // A read refused (a Task file's, or the Git host's): an empty 404 for a missing ticket, workspace
+  // or file, as for the other reads, else the refusal; anything but a FactoryError is thrown on.
   function refuseRead(res: ServerResponse, error: unknown): void {
     if (!(error instanceof FactoryError)) {
       throw error;

@@ -93,7 +93,7 @@ test('the CLI\'s lookup: one word or a group\'s two; a group without one of its 
   assert.equal(cliCommand(['accept', 'app', 'T-1'])?.command, COMMANDS.accept);
   assert.deepEqual(cliCommand(['queue', 'add', 'app', 'T-1'])?.args, ['app', 'T-1']);
   assert.equal(cliCommand(['mr', 'status', 'app', 'T-1'])?.command, COMMANDS.mrStatus);
-  assert.throws(() => cliCommand(['mr']), (error: unknown) => error instanceof UsageError && error.message === 'mr needs create, merge or status.');
+  assert.throws(() => cliCommand(['mr']), (error: unknown) => error instanceof UsageError && error.message === 'mr needs create, merge, status, list or comments.');
   assert.throws(() => cliCommand(['mr', 'open']), (error: unknown) => error instanceof UsageError && error.message === 'unknown mr command "open".');
   assert.throws(() => cliCommand(['queue', 'bogus']), (error: unknown) => error instanceof UsageError && error.message === 'unknown queue command "bogus".');
   for (const name of ['status', 'serve', 'ping', 'check', 'fix', 'clean', 'serve-busy', 'digest']) {
@@ -147,7 +147,7 @@ test('while sf update drains or builds, a command not open while updating is ref
       }
     }
     assert.deepEqual(COMMAND_LIST.filter((command) => command.openWhileUpdating === true).map(socketName).sort(),
-      ['check', 'digest-latest', 'mcp-port', 'mr-status', 'pause', 'ping', 'queue-list', 'serve-busy']);
+      ['check', 'digest-latest', 'mcp-port', 'mr-comments', 'mr-list', 'mr-status', 'pause', 'ping', 'queue-list', 'serve-busy']);
     // From the CLI: refused with exit 1; the open pause reaches the job (there is none).
     const accept = await runCli(env, ['accept', 'app', 'T-1']);
     assert.equal(accept.code, 1);

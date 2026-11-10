@@ -6,12 +6,13 @@
 // command it mirrors (src/commands.ts), whose openWhileUpdating is its update gate. The
 // dashboard (src/dashboard.ts) looks a POST up here; the job's detail sends the confirm routes to
 // the page (confirm_actions). The setup, Task check, task and attachment posts have their own
-// handlers there.
+// handlers there. Last, the two reads of a workspace's merge requests on its Git host (GET).
 import * as z from 'zod/v4';
 import { socketCommand } from './commands.js';
 import type { DashboardActions, DashboardQueue } from './dashboard.js';
 import { DECISIONS } from './ledger.js';
 import { MAX_MR_TEXT_BYTES } from './mr.js';
+import { WORKSPACE_NAME_PATTERN } from './registry.js';
 
 // mr-save: an MR text of MAX_MR_TEXT_BYTES, every character JSON-escaped at worst.
 export const MAX_MR_BODY_BYTES = 6 * MAX_MR_TEXT_BYTES + 1024;
@@ -196,3 +197,18 @@ export function openWhileUpdating(route: PostRoute): boolean {
 // The routes that need the job's ticket typed again on the remote port, in the table's order: the
 // job's detail sends them to the page as confirm_actions.
 export const CONFIRM_ACTIONS: readonly RouteName[] = (Object.keys(POST_ROUTES) as RouteName[]).filter((name) => POST_ROUTES[name].confirm === true);
+
+// GET api/workspaces/<ws>/merge-requests and api/workspaces/<ws>/merge-requests/<number>/threads:
+// the open merge requests of the workspace's origin and the review threads of one, read on the host
+// when the page asks (sf mr list and sf mr comments). undefined (an empty 404) for a name or a
+// number that is not one; the host's refusals are the Execution's FactoryErrors.
+const MR_NUMBER = /^[1-9]\d{0,9}$/;
+export type MergeRequestReads = Pick<DashboardActions, 'openMergeRequests' | 'mergeRequestThreads'>;
+
+export async function openMergeRequestsRead(actions: MergeRequestReads, [workspace = '']: readonly string[]): Promise<unknown> {
+  return WORKSPACE_NAME_PATTERN.test(workspace) ? actions.openMergeRequests(workspace) : undefined;
+}
+
+export async function mergeRequestThreadsRead(actions: MergeRequestReads, [workspace = '', number = '']: readonly string[]): Promise<unknown> {
+  return WORKSPACE_NAME_PATTERN.test(workspace) && MR_NUMBER.test(number) ? actions.mergeRequestThreads(workspace, Number(number)) : undefined;
+}

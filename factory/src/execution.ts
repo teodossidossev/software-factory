@@ -40,8 +40,10 @@
 // and reset stop the runner first. approve and the merge request stay in sf serve. The user starts
 // and approves (the dashboard, the CLI); no MCP tool reaches these methods.
 import type { Config } from './config.js';
+import { FactoryError } from './errors.js';
 import type { Decision } from './ledger.js';
 import type { ForgeKind, MergeRequestStatus } from './forge.js';
+import { type OpenRequest, type ReviewThread, workspaceForge } from './forge-comments.js';
 import type { Job, JobMr, JobState, JobStore, PauseStep } from './jobs.js';
 import type { Workspace } from './registry.js';
 import type { RunnerRequest, RunnerWork } from './runner.js';
@@ -76,6 +78,8 @@ export class Execution implements RunnerWork {
   // The same store as the parts' (core.jobs).
   readonly jobs: JobStore;
   readonly #core: Core;
+  readonly #config: Config;
+  readonly #resolve: (name: string) => Promise<Workspace>;
   readonly #parts: { start: StartPart; turns: TurnsPart; reviews: ReviewsPart; mr: MrPart; handover: HandoverPart; control: ControlPart; status: StatusPart };
 
   // handbook: the loaded Handbook text; MR preparation sends its Git rules and MR template, the
@@ -148,6 +152,8 @@ export class Execution implements RunnerWork {
     wired = { turns, mr, control };
     this.#parts = { start, turns, reviews, mr, handover, control, status };
     this.#core = core;
+    this.#config = config;
+    this.#resolve = resolve;
     this.jobs = core.jobs;
   }
 
@@ -243,6 +249,19 @@ export class Execution implements RunnerWork {
 
   mergeRequestHost(workspaceName: string): Promise<{ host: ForgeKind | null; reason: string | null }> {
     return this.#parts.mr.mergeRequestHost(workspaceName);
+  }
+
+  // The reads of a workspace's merge requests on its Git host (src/forge-comments.ts), when the
+  // user asks: no job, nothing written to the host.
+  async openMergeRequests(workspaceName: string): Promise<OpenRequest[]> {
+    return (await workspaceForge(this.#config, this.#resolve, workspaceName)).openRequests();
+  }
+
+  async mergeRequestThreads(workspaceName: string, number: number): Promise<ReviewThread[]> {
+    if (!Number.isSafeInteger(number) || number < 1) {
+      throw new FactoryError('invalid_content', 'The merge request number must be a whole number from 1.');
+    }
+    return (await workspaceForge(this.#config, this.#resolve, workspaceName)).threads(number);
   }
 
   // execution/handover-steps.ts

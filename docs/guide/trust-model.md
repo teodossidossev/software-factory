@@ -258,6 +258,17 @@ with `git lfs push` before the branch, and only when the job changed LFS files; 
 is any job while the `.lfsconfig` git-lfs reads in your checkout (where another job may be handed
 over) is not the base branch's.
 
+An automatic hand-over skips a change to files your IDE or tools run by themselves
+(`handoff_sensitive`); only you hand it over. Your checkout is the one open in your IDE: IntelliJ
+reloads a changed `build.gradle(.kts)` or `pom.xml` and runs it as you, a changed
+`gradle-wrapper.properties` downloads and runs another Gradle, VS Code runs `tasks.json` tasks on
+folder open, a `.claude/settings.json` hook runs at the next `claude` start, `.husky/` hooks at the
+next commit. So when the prepared change adds, changes, deletes or renames (old or new path) a path
+of the sensitive-path list or `SF_SENSITIVE_PATHS`, the factory leaves the job in
+`ready_for_human_review` and names the files; the Task's `may_touch` and a reviewer's acceptance
+do not change that. When the change's files cannot be listed, it does not hand over either. Your
+own *Hand over to my checkout* (`sf handover`) runs no such check: it is your decision.
+
 The guard that checks what is published reads every file of a pushed change as text, whatever its
 attributes or bytes (`git diff --text`, with textconv and external diff tools off), so a `-diff` or
 `binary` attribute or a NUL byte hides nothing from it. Of an LFS file it reads only the pointer,

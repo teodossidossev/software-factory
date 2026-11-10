@@ -103,18 +103,20 @@ export const DENIED_TOOLS = [
   ...ENV_FILE_RULES,
 ];
 
-// Paths that are unusual for a ticket to touch: dependency manifests and lockfiles, environment
-// and tool configuration, CI and containers, IDE and agent files, and every dotfile in the root.
+// Paths that are unusual for a ticket to touch: dependency manifests and lockfiles, build files at
+// any depth and the build wrappers, environment and tool configuration, CI and containers, IDE,
+// agent and Git hook files, and every dotfile in the root.
 // Globs from the repository root: `*` and `?` never cross "/", `**` does, `{a,b}` alternates.
 export const SENSITIVE_PATHS: readonly string[] = [
   'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb',
-  'pom.xml', 'build.gradle', 'build.gradle.kts', 'settings.gradle*', 'gradle.properties',
+  '**/pom.xml', '**/build.gradle', '**/build.gradle.kts', '**/settings.gradle*', 'gradle.properties', 'buildSrc/**', 'gradle/**',
+  'gradlew*', 'mvnw*', '.mvn/**',
   'requirements*.txt', 'pyproject.toml', 'Pipfile*', 'poetry.lock', 'go.mod', 'go.sum', 'Cargo.toml', 'Cargo.lock',
   'Gemfile*', 'composer.json', 'composer.lock',
   '**/.env*', '**/*.env', '.npmrc', '.nvmrc', '.tool-versions', 'tsconfig*.json', '*.config.{js,ts,mjs,cjs}',
   '.eslintrc*', '.prettierrc*', '.editorconfig', '.gitignore', '.gitattributes', '.gitmodules',
   '.github/**', '.gitlab-ci.yml', 'Jenkinsfile', 'Dockerfile*', 'docker-compose*.yml', 'compose*.yml', '.dockerignore', 'Makefile',
-  '.idea/**', '.vscode/**', '.claude/**', 'CLAUDE.md', 'AGENTS.md',
+  '.idea/**', '.vscode/**', '.claude/**', '.codex/**', 'CLAUDE.md', 'AGENTS.md', '.husky/**', '.githooks/**',
   '.*',
 ];
 

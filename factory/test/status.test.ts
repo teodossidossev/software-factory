@@ -201,6 +201,10 @@ test('sf status and the notification of a handed-over job (SF-073): in your chec
   assert.deepEqual([note.title, note.body, note.priority], ['T-1: in your checkout', 'in your checkout on T-1-demo\nfeat(T-1): Demo\n2 files', 'default']);
   const skippedNote = jobNotification(skipped, ['feat(T-1): Demo', '2 files']);
   assert.equal(skippedNote.body, 'branch: T-1-demo\nT-1: ready, but your checkout has changes; hand it over when you are ready\nfeat(T-1): Demo');
+  // A change to files the user's IDE or tools run: the same lines, with its message.
+  const sensitive: Job = { ...skipped, handoff_skipped: { code: 'handoff_sensitive', message: 'it changes files your IDE or tools may run: .vscode/tasks.json; read them, then hand it over' } };
+  assert.deepEqual(handoverLines(sensitive, undefined), ['not handed over to your checkout: it changes files your IDE or tools may run: .vscode/tasks.json; read them, then hand it over (handoff_sensitive); sf handover hands it over']);
+  assert.equal(jobNotification(sensitive, ['feat(T-1): Demo']).body, 'branch: T-1-demo\nit changes files your IDE or tools may run: .vscode/tasks.json; read them, then hand it over\nfeat(T-1): Demo');
 
   // sf status of one job prints the line, without sf serve.
   const env = await newEnv('status-handed');

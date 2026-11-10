@@ -96,3 +96,20 @@ test('digest client: an unknown, empty or missing language gets the English head
     assert.deepEqual(await copy(page, copied), ['Since Friday:', 'Problems:', 'Plan:', 'Today:'], String(language));
   }
 });
+
+test('digest client: a section with no items is left out, on the card and in Copy; an empty daily keeps its title, commits and Copy', async () => {
+  const quiet = (sections: Record<string, string[]>) => record({ output: { repos: [], cross_repo: [], dailies: [{ app: 'shop', workspaces: ['api'], yesterday: ['SHOP-8 (the order list): the shop lists its orders.'], problems: [], plan: [], next: ['SHOP-8 (the order list): add paging.'], ...sections }] } });
+  const { page, copied } = await openDaily(quiet({}));
+  assert.deepEqual(headings(page), ['Since Friday', 'Today']);
+  assert.doesNotMatch(daily(page).textContent, /None\./);
+  await copy(page, copied);
+  assert.equal(copied[0], ['Since Friday:', '- SHOP-8 (the order list): the shop lists its orders.', 'Today:', '- SHOP-8 (the order list): add paging.'].join('\n'));
+  assert.doesNotMatch(copied[0]!, /Problems|Plan/);
+
+  const empty = await openDaily(quiet({ yesterday: [], next: [] }));
+  assert.deepEqual(headings(empty.page), []);
+  assert.doesNotMatch(daily(empty.page).textContent, /None\./);
+  assert.equal(daily(empty.page).querySelector('.dg-name')!.textContent, 'shop');
+  assert.equal(daily(empty.page).querySelector('summary')!.textContent, 'The commits it was made from (0)');
+  assert.equal(daily(empty.page).querySelector('[data-dg="copy"]')!.textContent, 'Copy');
+});

@@ -259,6 +259,10 @@ test('the why: ## Why, ## WHAT, else the first paragraph of the body; ticket key
   assert.equal(ticketKey('no key', 'body with PROJ-12 and AB-3', 'XY-1'), 'PROJ-12');
   assert.equal(ticketKey('nothing', undefined, 'feature/AB-77-x'), 'AB-77');
   assert.equal(ticketKey('lower-1'), null);
+  // A key of several dashed parts is taken whole, never its tail.
+  assert.equal(ticketKey('DOCS-AUDIT-1-report-x'), 'DOCS-AUDIT-1');
+  assert.equal(ticketKey('ABC-123-fix'), 'ABC-123');
+  assert.equal(ticketKey('feat(ABC-12): x'), 'ABC-12');
 });
 
 test('the model input cap: diff excerpts first, then the why texts of the oldest entries', () => {

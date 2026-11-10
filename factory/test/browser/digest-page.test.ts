@@ -47,7 +47,7 @@ function record(id: string, extra: Partial<DigestRecord> = {}): DigestRecord {
     // Yesterday starts 24 hours before the digest: the day before it in any time zone.
     daily_days: { yesterday: { from: hoursBefore(24), to: hoursBefore(7) }, today: { from: hoursBefore(7), to: TO } },
     model: 'sonnet', language: 'English', workspaces: [api, web, tools],
-    daily_sources: [{ app: 'shop', workspaces: ['api'], commits: [{ sha: 'a1b2c3d4e5', ref: 'SHOP-8-mine', date: hoursBefore(20), subject: 'SHOP-8: My orders', why: '', stat: '', workspace: 'api' }], open_branches: [] }],
+    daily_sources: [{ app: 'shop', workspaces: ['api'], commits: [{ sha: 'a1b2c3d4e5', ref: 'SHOP-8-mine', date: hoursBefore(20), subject: 'SHOP-8: My orders', why: '', stat: '', workspace: 'api' }], jobs: [], open_branches: [] }],
     output: {
       repos: [
         { name: 'api', headline: 'The orders list landed; the work moves to payments.', merged: [{ sha: 'a1b2c3d4e5', problem: 'The shop can list its orders.' }], branches: [{ ref: 'SHOP-8-mine', what: 'My orders work, behind main.' }], impact_on_me: ['SHOP-8-mine shares src/orders.ts with a1b2c3d4e5: a rebase is due.'] },

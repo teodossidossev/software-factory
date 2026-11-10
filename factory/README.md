@@ -4296,16 +4296,20 @@ SF-103. Every morning, per followed workspace: what landed on the main branch si
 digest, who landed it and what problem it solves; the live branches and what goes on there; and
 how this affects your own branches and tickets, also across the workspaces of one app (a backend
 and its frontend). And **My daily**: a stand-up draft per app: what you did yesterday, each ticket
-with what was done (at most five items, related tickets grouped by theme); what blocks or risks
+with what was done (at most five items, related tickets grouped by theme), the factory's jobs
+handed over, pushed or merged for you counted as your work; what blocks or risks
 your work (a branch of yours that needs the latest changes and touches the same area as work that
 landed, so a conflict is likely; a change waiting for a review; a colleague's work on the same
 feature), not Git upkeep (being behind with nothing shared, duplicate or local-only commits); a
-plain step per problem; and what you do today. A section with nothing in it is left out. Git
-only: commit messages and the changes, no forge API, no issue tracker.
+plain step per problem; and today, first what is already done, then what you do. Only from your
+live branches: a branch with no commit of yours in the daily's two days and no job going on it is
+parked and left out of the daily (the Repositories tab still shows it). A section with nothing in
+it is left out. Git and the factory's own jobs only: commit messages and the changes, no forge
+API, no issue tracker.
 
 **Settings** (`workspaces.json`, through the Workspaces drawer or by hand): per workspace
-`digest: {"track": true, "my_work": true}` (follow it in the digest; my commits here go into the
-daily of its app; absent: both off), `app` (workspaces with the same app share one daily; absent:
+`digest: {"track": true, "my_work": true}` (follow it in the digest; my commits and the factory's jobs
+here go into the daily of its app; absent: both off), `app` (workspaces with the same app share one daily; absent:
 the workspace's name) and `description` (optional; absent: the first paragraph of the repository's
 `README.md`, else its root `package.json`'s `description`, at most 300 characters; the prompt says
 the Git data wins when they disagree). At the top level `digest: {"at": "08:00", "weekdays_only":
@@ -4357,7 +4361,15 @@ or a squash: a first-parent commit of main since the merge base names its ticket
 `user.email` is the tip's author or one of the commits not on main; for each of my branches not
 landed, the files shared with what main changed since the merge base (`overlap`) and the period's
 commits after the merge base that touched them (`hit_by`). My commits (with `my_work`): my non-merge
-commits on every ref of the mirror, each once, all of them. The model's input (the whole prompt) is
+commits on every ref of the mirror, each once, all of them. The factory's jobs (with `my_work`,
+current and archived): those whose state was entered within the daily's two days, in
+`handed_over`, `pushed`, or `pushed` with the merge request merged (shown as `merged`), each with
+the Task's title and when it got there (the last state event, for `merged` the merge request's
+merged event; else `updated_at`); a daily with such jobs is made even without commits or branches.
+Live branches (with `my_work`): my branches not landed with a commit of mine within the two days,
+or a current job of the workspace on the branch (or continuing it) not `failed` or `aborted`, and
+when `pushed`, with its merge request open or none (it waits for review); the others are parked.
+The model's input (the whole prompt) is
 capped at 150,000 characters, a hard bound: diff excerpts go first, then the "why" of the oldest
 entries, then the oldest entries themselves, then the last items of the longest lists, and last the
 longest texts are cut in half; the digest says what was left out. The stored record keeps the whole
@@ -4372,10 +4384,13 @@ written as you would say it at the team's stand-up, to colleagues and a product 
 read Git: each piece of work by its ticket key exactly as in the data and a topic of two to five
 words, with no commit SHAs, branch names, file paths, counts of commits ahead or behind, or Git
 words (commit, push, rebase, merge, branch, master, main). Yesterday: "<key> (<topic>): <what was
-done>", at most five items, related tickets grouped by theme. Problems: from your branches' behind,
+done>", from the commits and the factory's jobs dated in it, each ticket once, at most five items,
+related tickets grouped by theme. Problems: only from your live branches' behind,
 overlap and hit_by, what blocks or risks the work (a likely conflict where your work and what
 landed touch the same area, named: the translations, the class tests); being behind with nothing
-shared is not one. Plan: one plain step per problem. Today: "<key> (<topic>): <what I will do>". The Repositories tab is plain too: the
+shared is not one. Plan: one plain step per problem, from the live branches too. Today: first what is
+already done today (commits or jobs dated in it), "<key> (<topic>): done: <what changed>", grouped by
+theme when more than five; then "<key> (<topic>): <what I will do>". The Repositories tab is plain too: the
 page shows each landed entry's SHA and each branch's name beside the model's sentence, so the
 sentences hold no commit SHAs, branch names or counts of commits ahead or behind, and a file path
 only when you must open that file; they name work by its ticket key and a short topic and say what
@@ -4385,8 +4400,8 @@ page shows the Git data with a note. About $0.30 per run with Sonnet for three r
 
 **The record**: `<state dir>/digest/<id>.json`, the id the run's start in UTC and its trigger
 (`20261106T060000Z-scheduled`; `-2`, `-3`, ... when that file exists). It holds the trigger, the times,
-the period, the daily's days, each workspace's fetch result and Git data, the dailies' material, the
-model's output, the model, the cost and the errors. Records older than 60 days go at the next run.
+the period, the daily's days, each workspace's fetch result and Git data, the dailies' material (my commits, the
+factory's jobs as `jobs`, the live branches), the model's output, the model, the cost and the errors. Records older than 60 days go at the next run.
 `GET api/digests` lists them (newest first, with counts from the Git data of the followed workspaces:
 landed, live branches not landed, and mine needing attention: not landed with shared files or more
 than 10 commits behind), `GET api/digests/<id>` reads one, `POST api/digests/run` (`{}`) starts a

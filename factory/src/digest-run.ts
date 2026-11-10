@@ -8,8 +8,10 @@ import { mkdir, readdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import * as z from 'zod/v4';
 import { writeFileAtomic } from './atomic.js';
+import { type DailyJob, type DailyJobs, jobsOf, liveBranch, within } from './digest-jobs.js';
 import { capModelInput, derivedDescription, MAX_MODEL_INPUT_CHARS, extractRepo, type LiveBranch, maskCredentials, type MirrorResult, type MyCommit, myEmail, needsAttention, type RepoData, syncMirror } from './digest.js';
 import { FactoryError } from './errors.js';
+import { JobStore } from './jobs.js';
 import { type ChannelResult, digestNotification, type Notification } from './notify.js';
 import { digestPrompt } from './prompts.js';
 import { configDir as defaultConfigDir, type DigestSettings, digestSettings, loadRegistry, verifyCheckout, workspaceApp, workspaceDigest } from './registry.js';
@@ -80,11 +82,15 @@ export interface DailyCommit extends MyCommit {
   workspace: string;
 }
 
-// The material of one daily: an app with a my_work workspace and my commits or open branches.
+// The material of one daily: an app with a my_work workspace and my commits, the factory's jobs
+// for me or live branches.
 export interface DailySource {
   app: string;
   workspaces: string[];
   commits: DailyCommit[];
+  // The factory's jobs handed over, pushed or merged within the two days.
+  jobs: DailyJob[];
+  // My open branches with recent work or a job going (src/digest-jobs.ts liveBranch).
   open_branches: Array<LiveBranch & { workspace: string }>;
 }
 
@@ -109,7 +115,7 @@ export interface DigestRecord {
   cost_usd: number | null;
   // The model call's failure (the page shows the Git data with a note), or null.
   error: string | null;
-  // What the digest says about its data (the cap).
+  // What the digest says about its data (the cap, the factory's jobs it could not read).
   notes: string[];
   counts: DigestCounts;
 }
@@ -168,11 +174,6 @@ export function digestPeriod(now: Date, settings: Pick<DigestSettings, 'at' | 'w
   const from = new Date(day.getFullYear(), day.getMonth(), day.getDate(), hours, minutes);
   return { from: from.toISOString(), to: now.toISOString() };
 }
-
-const within = (date: string, span: Span): boolean => {
-  const time = Date.parse(date);
-  return time >= Date.parse(span.from) && time <= Date.parse(span.to);
-};
 
 // The id's stamp: YYYYMMDDTHHMMSSZ of a time in UTC.
 export function stamp(date: Date): string {
@@ -300,6 +301,8 @@ export interface DigestsOptions {
   modelTimeoutMs?: number;
   // A run started or ended (the dashboard's pages).
   onChange?: () => void;
+  // The factory's jobs, My daily's material; the state directory's by default.
+  jobs?: JobStore;
 }
 
 export interface DigestRunResult {
@@ -318,6 +321,7 @@ export class Digests {
   readonly #now: () => Date;
   readonly #timeoutMs: number;
   readonly #onChange: (() => void) | undefined;
+  readonly #jobs: JobStore;
   #running: Trigger | null = null;
 
   constructor(options: DigestsOptions) {
@@ -329,6 +333,7 @@ export class Digests {
     this.#now = options.now ?? (() => new Date());
     this.#timeoutMs = options.modelTimeoutMs ?? MODEL_TIMEOUT_MS;
     this.#onChange = options.onChange;
+    this.#jobs = options.jobs ?? new JobStore(options.stateDir);
   }
 
   get running(): boolean {
@@ -442,8 +447,14 @@ export class Digests {
       }
     }
 
-    const dailySources = dailiesOf(workspaces, days);
     const notes: string[] = [];
+    let jobs: DailyJobs = { done: [], current: [] };
+    try {
+      jobs = await jobsOf(this.#jobs, workspaces.filter((workspace) => workspace.my_work).map((workspace) => workspace.name), days);
+    } catch (failure) {
+      notes.push(`The factory's jobs could not be read: ${failure instanceof Error ? failure.message : String(failure)}`);
+    }
+    const dailySources = dailiesOf(workspaces, days, jobs);
     let output: DigestOutput | null = null;
     let cost: number | null = null;
     let error: string | null = null;
@@ -494,27 +505,35 @@ export class Digests {
 const pad = (value: number): string => String(value).padStart(2, '0');
 const localDate = (date: Date): string => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 
-// One daily per app with a my_work workspace where I have commits in its two days or open branches
-// (mine, not landed), in the order of the apps' first workspace.
-export function dailiesOf(workspaces: DigestWorkspace[], days: { yesterday: Span; today: Span }): DailySource[] {
+// One daily per app with a my_work workspace where I have commits in its two days, the factory's
+// jobs done for me in them (jobsOf) or live branches (mine, not landed, liveBranch), in the order of
+// the apps' first workspace. A parked branch stays out (the Repositories tab still shows it). A
+// workspace without Git data still gives its jobs.
+export function dailiesOf(workspaces: DigestWorkspace[], days: { yesterday: Span; today: Span }, jobs: DailyJobs): DailySource[] {
   const apps = new Map<string, DailySource>();
   for (const workspace of workspaces) {
-    if (!workspace.my_work || workspace.git === null) {
+    const done = jobs.done.filter((job) => job.workspace === workspace.name);
+    if (!workspace.my_work || (workspace.git === null && done.length === 0)) {
       continue;
     }
-    const source = apps.get(workspace.app) ?? { app: workspace.app, workspaces: [], commits: [], open_branches: [] };
+    const source = apps.get(workspace.app) ?? { app: workspace.app, workspaces: [], commits: [], jobs: [], open_branches: [] };
     apps.set(workspace.app, source);
     source.workspaces.push(workspace.name);
+    source.jobs.push(...done);
+    if (workspace.git === null) {
+      continue;
+    }
     source.commits.push(...workspace.git.my_commits.filter((commit) => within(commit.date, days.yesterday) || within(commit.date, days.today)).map((commit) => ({ ...commit, workspace: workspace.name })));
-    source.open_branches.push(...workspace.git.branches.filter((branch) => branch.mine && !branch.landed).map((branch) => ({ ...branch, workspace: workspace.name })));
+    const { my_commits: mine } = workspace.git;
+    source.open_branches.push(...workspace.git.branches.filter((branch) => branch.mine && !branch.landed && liveBranch(branch, workspace.name, mine, jobs.current, days)).map((branch) => ({ ...branch, workspace: workspace.name })));
   }
-  return [...apps.values()].filter((source) => source.commits.length > 0 || source.open_branches.length > 0);
+  return [...apps.values()].filter((source) => source.commits.length > 0 || source.jobs.length > 0 || source.open_branches.length > 0);
 }
 
 // The model's input: every workspace with Git data (a followed one with what landed, its live
 // branches and my commits of the period; a my_work-only one with my open branches only), the apps,
-// the dailies' material, the period and the daily's days. cut: the entries the cap may cut, in the
-// input itself (a copy of the record's data).
+// the dailies' material (my commits, the factory's jobs, my live branches), the period and the
+// daily's days. cut: the entries the cap may cut, in the input itself (a copy of the record's data).
 function modelInput(workspaces: DigestWorkspace[], dailies: DailySource[], period: Span, days: { yesterday: Span; today: Span }, language: string) {
   const strip = ({ full_sha: _full, ...entry }: RepoData['landed'][number]) => entry;
   const cut: Array<{ date: string; why: string; diff_excerpt?: string }> = [];
@@ -532,7 +551,8 @@ function modelInput(workspaces: DigestWorkspace[], dailies: DailySource[], perio
   const daily = dailies.map((source) => {
     const commits = source.commits.map((commit) => ({ ...commit }));
     cut.push(...commits);
-    return { app: source.app, workspaces: source.workspaces, commits, open_branches: source.open_branches.map((branch) => ({ workspace: branch.workspace, name: branch.name, ahead: branch.ahead, behind: branch.behind, overlap: branch.overlap ?? [], ticket: branch.ticket })) };
+    const jobs = source.jobs.map((job) => ({ ...job }));
+    return { app: source.app, workspaces: source.workspaces, commits, jobs, open_branches: source.open_branches.map((branch) => ({ workspace: branch.workspace, name: branch.name, ahead: branch.ahead, behind: branch.behind, overlap: branch.overlap ?? [], ticket: branch.ticket })) };
   });
   const apps: Record<string, string[]> = {};
   for (const workspace of workspaces) {

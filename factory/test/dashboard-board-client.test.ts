@@ -503,6 +503,7 @@ const STOP_CARDS: Array<[string, 'decision' | 'error', string, string, Record<st
   ['sandbox_unavailable', 'error', 'Sandbox unavailable', 'Tell it to go on'],
   ['publish_failed', 'error', 'Iteration not published', 'Tell it to go on'],
   ['mr_conflict', 'error', 'Rebase conflict', 'Tell it how'],
+  ['implementer_question', 'decision', 'Question for you before any change', 'Answer'],
   ['mr_text_missing', 'error', 'MR text missing or invalid', 'Tell it to fix it'],
   ['mr_text_invalid', 'error', 'MR text missing or invalid', 'Tell it to fix it'],
   ['mr_empty', 'error', 'Nothing to commit', 'Tell it what is missing'],

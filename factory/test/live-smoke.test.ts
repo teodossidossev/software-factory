@@ -92,9 +92,7 @@ test('--keep keeps the directory and prints it; the bare remote has the job\'s b
     assert.equal(existsSync(dirname(tmpSocket)), false);
     const probe = smokeProbe(smokePaths(ran.dir), createHash('sha256').update(canary).digest('hex'), {
       ssh: found(join(ran.env.home, '.ssh')), dbus: found(`/run/user/${process.getuid!()}/bus`), docker: found('/var/run/docker.sock'),
-      // None when the smoke wrote the Task: the test's home has no Claude Code projects folder until
-      // the Implementer's wrapper makes it for the first turn (SF-181).
-      claudeProjects: undefined, tmpSocket,
+      claudeProjects: found(join(ran.env.home, '.claude', 'projects')), tmpSocket,
     }, ran.env.home);
     assert.equal(probe.claudeTmp, `/tmp/claude-${process.getuid!()}`);
     assert.equal(probe.homeCanary, join(ran.env.home, `.sf-smoke-${basename(ran.dir).slice('sf-smoke-'.length)}`, 'canary'));

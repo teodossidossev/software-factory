@@ -18,8 +18,7 @@ import {
   PATH_DENIAL_UNREPRESENTABLE, type PathDenials, pathDenials, prepareTaskChecksDir, taskChecksDir, USER_SETTINGS_WEAKEN_SANDBOX, userSettingsWeakening, withSandboxDenials,
 } from '../src/sandbox-denials.js';
 import { type IdleOutcome, ImplementerSession, sessionEnvironment, withSandboxEnvDenials } from '../src/session.js';
-import { call, FAKE, fakeLog, newEnv, newRepo, putTask, reviewScript, script, serve, stop, temp, useFakeBwrap, waitFor } from './support/harness.js';
-
+import { call, FAKE, fakeLog, newEnv, newRepo, putTask, reviewScript, script, serve, stop, temp, waitFor } from './support/harness.js';
 
 // A factory laid out under root: its config (registry, env file), its state with the worktrees of
 // two workspaces, the tunnel client's profile, a home with every credential but ~/.netrc, the
@@ -43,8 +42,6 @@ interface Layout {
 }
 
 async function layout(name: string): Promise<Layout> {
-  // The Implementer sessions of these layouts run with the sandbox on, so inside the (fake) bwrap.
-  useFakeBwrap();
   await rm(join(temp, name), { recursive: true, force: true });
   await mkdir(join(temp, name), { recursive: true });
   const root = await realpath(join(temp, name));

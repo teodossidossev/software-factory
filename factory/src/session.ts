@@ -7,16 +7,11 @@
 // continuation, which runs next in the same session with the same deny list, or with the reason
 // the turn stops. Every prompt sent starts a chain; the driver sends at most turnLimitContinues
 // continuations per chain, whatever the hook answers.
-// With the sandbox on, every query's Claude Code runs inside the bwrap wrapper (session-wrapper.ts); a
-// missing bwrap, or a wrapper that fails before Claude Code answers, fails the turn with
-// sandbox_unavailable, and Claude Code is never started without it.
 import { query, type SandboxSettings, type SDKMessage, type SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
-import { homedir } from 'node:os';
 import { type ImageRef, promptInput } from './attachments.js';
 import { makeSessionTmp, removeSessionTmp } from './host-tmp.js';
-import { claudeConfigDir, claudeUserSettings, type PathDenials, withSandboxDenials } from './sandbox-denials.js';
+import { type PathDenials, withSandboxDenials } from './sandbox-denials.js';
 import { factoryRoots, reapOrphanedSandboxes } from './sandbox-reaper.js';
-import { BWRAP_MISSING, prepareClaudeState, SANDBOX_UNAVAILABLE, WrappedSpawn } from './session-wrapper.js';
 
 // Markers a running Claude Code session sets for its children; a session inheriting them acts as
 // a child and may not save its transcript.
@@ -83,8 +78,7 @@ export interface SessionOptions {
   claudePath: string | undefined;
   // An existing session to resume; undefined starts a new one with the first turn.
   sessionId?: string | undefined;
-  // Claude Code's sandbox for every turn, and the bwrap wrapper of its process (session-wrapper.ts)
-  // under the path denials' lists; undefined (SF_SANDBOX=off) runs without either, as the gate does.
+  // Claude Code's sandbox for every turn; undefined runs without it.
   sandbox?: SandboxSettings | undefined;
   // The model option of query(); undefined leaves the user's Claude Code default.
   model?: string | undefined;
@@ -362,7 +356,7 @@ export class ImplementerSession {
       // A failed turn drops the prompts still queued: the job needs a person now.
       this.#queue.length = 0;
       const message = (error instanceof Error ? error.message : String(error)).slice(0, 1000);
-      const code = error instanceof TurnError ? error.code : /sandbox/i.test(message) ? SANDBOX_UNAVAILABLE : 'session_failed';
+      const code = error instanceof TurnError ? error.code : /sandbox/i.test(message) ? 'sandbox_unavailable' : 'session_failed';
       outcome = { ok: false, code, message, startedAt };
     }
     this.#running = false;
@@ -408,33 +402,6 @@ export class ImplementerSession {
     }, REAP_AFTER_QUERY_MS).unref();
   }
 
-  // The spawner of the wrapper for this turn's query, Claude Code's state folders made; undefined
-  // without the sandbox (SF_SANDBOX=off). No bwrap on PATH fails the turn: nothing starts unwrapped.
-  async #wrapper(denials: PathDenials | undefined, tmp: string): Promise<WrappedSpawn | undefined> {
-    if (this.#options.sandbox === undefined) {
-      return undefined;
-    }
-    // Loaded here: gate.ts imports review.ts, which imports this module.
-    const { findBwrap } = await import('./gate.js');
-    const bwrap = findBwrap();
-    if (bwrap === undefined) {
-      throw new TurnError(SANDBOX_UNAVAILABLE, BWRAP_MISSING);
-    }
-    const home = process.env.HOME || homedir();
-    const claudeDir = claudeConfigDir(process.env, home);
-    const globalConfig = claudeUserSettings(process.env, home)[1]!;
-    await prepareClaudeState(claudeDir, globalConfig);
-    return new WrappedSpawn(bwrap, denials?.sandbox ?? { denyRead: [], denyWrite: [] }, { worktree: this.#options.cwd, sessionTmp: tmp, home, claudeDir, globalConfig });
-  }
-
-  // A turn that failed before Claude Code answered (its result), with a wrapper that failed:
-  // sandbox_unavailable with bwrap's own line; else undefined. Messages before the result (its
-  // system/init among them) do not count: bwrap may still fail after them.
-  async #wrapperFailure(wrapper: WrappedSpawn | undefined, resulted: boolean): Promise<TurnError | undefined> {
-    const failure = wrapper === undefined || resulted ? undefined : await wrapper.failure();
-    return failure === undefined ? undefined : new TurnError(SANDBOX_UNAVAILABLE, failure);
-  }
-
   async #turn(next: Queued): Promise<TurnResult> {
     const { prompt, disallowedTools, images } = next;
     this.#calls = [];
@@ -462,7 +429,6 @@ export class ImplementerSession {
       }
     }
     const denials = this.#denials;
-    const wrapper = await this.#wrapper(denials, this.#tmp);
     const environment = sessionEnvironment();
     const sandbox = withSandboxEnvDenials(withSandboxDenials(this.#options.sandbox, denials?.sandbox, denials?.claudeTmp), environment);
     const abortController = new AbortController();
@@ -490,7 +456,6 @@ export class ImplementerSession {
         ...(denials?.hooks !== undefined ? { hooks: denials.hooks } : {}),
         ...(this.#options.model !== undefined ? { model: this.#options.model } : {}),
         ...(this.#options.claudePath !== undefined ? { pathToClaudeCodeExecutable: this.#options.claudePath } : {}),
-        ...(wrapper !== undefined ? { spawnClaudeCodeProcess: wrapper.spawn } : {}),
       },
     });
     let text = '';
@@ -512,12 +477,6 @@ export class ImplementerSession {
         }
       }
     } catch (error) {
-      // A failure of the wrapper before the result fails the turn as the sandbox's; the session's own
-      // refusals (TurnError) and a turn it aborted (closed) stand as they are.
-      const wrapped = error instanceof TurnError || abortController.signal.aborted ? undefined : await this.#wrapperFailure(wrapper, result !== undefined);
-      if (wrapped !== undefined) {
-        throw wrapped;
-      }
       // The SDK throws after the CLI's error_max_turns result: the turn limit, not a failed session.
       const message = error instanceof Error ? error.message : String(error);
       if (!(error instanceof TurnError) && (result?.subtype === 'error_max_turns' || MAX_TURNS_TEXT.test(message))) {
@@ -531,10 +490,10 @@ export class ImplementerSession {
       this.#reapAfterQuery();
     }
     if (result === undefined) {
-      throw (await this.#wrapperFailure(wrapper, false)) ?? new TurnError('session_failed', 'The Implementer ended the turn without a result.');
+      throw new TurnError('session_failed', 'The Implementer ended the turn without a result.');
     }
     if (result.subtype !== 'success' && result.startup_failure_reason === 'sandbox_required_unavailable') {
-      throw new TurnError(SANDBOX_UNAVAILABLE, result.errors.join('; ') || 'The sandbox is not available.');
+      throw new TurnError('sandbox_unavailable', result.errors.join('; ') || 'The sandbox is not available.');
     }
     if (result.subtype !== 'success' || result.is_error) {
       const detail = result.subtype === 'success' ? result.result : result.errors.join('; ');

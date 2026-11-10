@@ -238,25 +238,10 @@ export async function codexScript(env: Env, runs: unknown[]): Promise<void> {
   await rm(join(env.home, 'fake-codex.count'), { force: true });
 }
 
-// Puts the fake bwrap first on this test process's own PATH (once): an Implementer session the
-// test runs in-process with the sandbox on starts Claude Code inside bwrap (SF-181), and the fake
-// Claude Code keeps its scripts and logs in $HOME, which the real wrapper hides. Call it from a test
-// (the harness's before hook makes the fake; a test file's own before hook may run first).
-export function useFakeBwrap(): void {
-  if (!(process.env.PATH ?? '').startsWith(`${fakeBwrapBin}${delimiter}`)) {
-    process.env.PATH = `${fakeBwrapBin}${delimiter}${process.env.PATH ?? ''}`;
-  }
-}
-
-// Whether a run of the fake bwrap is the Implementer's (SF-181): the fake Claude Code after "--".
-export const implementerRun = (run: { argv: string[] }): boolean => run.argv.slice(run.argv.indexOf('--') + 1).includes(FAKE);
-
-// The argv of each run of the fake bwrap (SF-125) but the Implementer's own (SF-181: every
-// Implementer turn of a sandboxed job runs in it), all of them with implementer; none when it never ran.
-export async function bwrapLog(env: Env, options: { implementer?: boolean } = {}): Promise<Array<{ argv: string[] }>> {
+// The argv of each run of the fake bwrap (SF-125); none when it never ran.
+export async function bwrapLog(env: Env): Promise<Array<{ argv: string[] }>> {
   const text = await readFile(join(env.home, 'fake-bwrap.log'), 'utf8').catch(() => '');
-  const runs: Array<{ argv: string[] }> = text.trim().split('\n').filter((line) => line !== '').map((line) => JSON.parse(line));
-  return options.implementer === true ? runs : runs.filter((run) => !implementerRun(run));
+  return text.trim().split('\n').filter((line) => line !== '').map((line) => JSON.parse(line));
 }
 
 // What the fake Codex logged of each run.

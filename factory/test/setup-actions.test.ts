@@ -14,7 +14,7 @@ import { type FakeElement, loadPage } from './support/fake-dom.js';
 import { newEnv, newRepo, putTask } from './support/harness.js';
 
 const job = (ticket: string, state: Job['state']): Job => ({
-  workspace: 'app', ticket, branch: `${ticket}-x`, base: 'main', base_commit: null, target_commit: null, worktree: null, prepared_commit: null,
+  workspace: 'app', ticket, branch: `${ticket}-x`, base: 'main', continues: null, base_commit: null, target_commit: null, worktree: null, prepared_commit: null,
   mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0, state, iteration: 0, session_id: null, mr: null, created_at: '2026-11-01T10:00:00.000Z', updated_at: '2026-11-01T10:00:00.000Z',
 });
 

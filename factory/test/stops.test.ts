@@ -15,7 +15,7 @@ const T0 = '2026-11-07T09:00:00.000Z';
 
 function job(state: Job['state'], extra: Partial<Job> = {}): Job {
   return {
-    workspace: 'app', ticket: 'T-1', branch: 'T-1-demo', base: 'main', base_commit: null, target_commit: null, worktree: '/wt/T-1', prepared_commit: null,
+    workspace: 'app', ticket: 'T-1', branch: 'T-1-demo', base: 'main', continues: null, base_commit: null, target_commit: null, worktree: '/wt/T-1', prepared_commit: null,
     mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0, state, iteration: 2, session_id: 's1', mr: null,
     created_at: T0, updated_at: T0, ...extra,
   };

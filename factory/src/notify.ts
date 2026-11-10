@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access } from 'node:fs/promises';
 import { delimiter, join } from 'node:path';
+import { pushedBranch } from './continues.js';
 import { withoutHostTokens } from './forge.js';
 import type { Job, JobState, JobStore } from './jobs.js';
 import { now } from './jobs.js';
@@ -102,7 +103,8 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
   // Why the automatic hand-over did not happen; not when hand-over is off: a
   // setting the user chose is not news, and the files line stays in the body.
   const skipped = job.state === 'ready_for_human_review' && job.handoff_skipped !== undefined && job.handoff_skipped.code !== HANDOFF_OFF_CODE ? [job.handoff_skipped.message] : [];
-  const body = [`branch: ${job.branch}`, ...(job.error !== undefined ? [`${job.error.code}: ${job.error.message}`] : []), ...skipped, ...lines].slice(0, 3);
+  // A pushed job names the branch it pushed (src/continues.ts).
+  const body = [`branch: ${job.state === 'pushed' ? pushedBranch(job) : job.branch}`, ...(job.error !== undefined ? [`${job.error.code}: ${job.error.message}`] : []), ...skipped, ...lines].slice(0, 3);
   // A pushed job's merge request on the Git host names the title once it is opened or merged.
   const mr = job.state === 'pushed' && job.mr !== null && job.mr !== undefined ? job.mr : undefined;
   return {

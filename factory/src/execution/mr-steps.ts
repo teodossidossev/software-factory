@@ -13,6 +13,7 @@ import { checkTerms, commitsToCheck, GUARD_MAX_FIXES, GUARD_MAX_MR_TURNS, guardF
 import { checkBranchFree, isAncestor, savedRef, settleAfterPush, subjectOf } from '../handoff.js';
 import { handoffSensitive } from '../handoff-sensitive.js';
 import { claudeReviews, type FileChange, type Handover, type Job, type JobMr, type JobState, now } from '../jobs.js';
+import { pushedBranch, targetBranch } from '../continues.js';
 import { abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitFailure, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl, parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, refuseGuardedLfs, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, validBranchName, withAccepted, withChecks, withFindings, withNits, withSimplifications, worktreesOn } from '../mr.js';
 import { type LedgerEntry, notFixed } from '../ledger.js';
 import { MergeChecks } from '../merge-check.js';
@@ -330,8 +331,7 @@ export class MrPart {
   // The end of the conflict turn: a failed turn, a file still holding a conflict marker or a
   // failing continue aborts the rebase (mr_conflict); a failing continue first saves the resolved
   // worktree as conflict-resolution.diff of the last published iteration. After a continue the
-  // change is no longer the reviewed one: it goes back to review against the target, in the same
-  // worktree.
+  // change is no longer the reviewed one: it goes back to review against the target, same worktree.
   async #conflictIdle(job: Job, live: Live, outcome: IdleOutcome): Promise<void> {
     const cwd = live.cwd;
     const files = live.mr?.conflicts ?? (await unmergedPaths(cwd));
@@ -540,7 +540,7 @@ export class MrPart {
       await abortRebase(cwd);
       // No turn while the user's checkout holds the branch.
       await checkBranchFree(workspace.workCheckout, cwd, job.branch, ticket);
-      return resolveTarget(workspace.workCheckout, job.base);
+      return resolveTarget(workspace.workCheckout, targetBranch(job));
     });
     await onAccepted?.();
     const attempts = job.mr_attempts;
@@ -807,7 +807,7 @@ export class MrPart {
     await this.#checkGuard(job, workspace, plan.commit);
     // The commit the guard checked is what is pushed, so a branch that moved on since is not
     // published unchecked; a handed-over job's saved commit is pushed through its saved ref.
-    const pushFailure = await this.#locks.gitLocked(workspaceName, () => pushBranch(checkout, job.branch, job.base, plan.source ?? plan.commit));
+    const pushFailure = await this.#locks.gitLocked(workspaceName, () => pushBranch(checkout, pushedBranch(job), job.base, plan.source ?? plan.commit));
     if (pushFailure !== undefined) {
       if (job.state === 'handed_over') {
         // The checkout, the record, the saved ref and the config stay; Approve can be retried.
@@ -842,7 +842,7 @@ export class MrPart {
     const mrText = (await this.#store.jobs.readMrText(workspaceName, ticket)) ?? '';
     const { title } = mrMessage(mrText);
     const url = await originUrl(checkout);
-    const link = url === undefined ? undefined : mergeRequestLink(url, job.base, job.branch);
+    const link = url === undefined ? undefined : mergeRequestLink(url, job.base, pushedBranch(job));
     let opened: (JobMr & { reused: boolean }) | undefined;
     let failure: { code: string; message: string } | undefined;
     if (open !== undefined) {
@@ -860,7 +860,7 @@ export class MrPart {
       await this.#mrEvent(pushed, opened.reused ? 'reused' : 'created');
     }
     await endSession(this.#sessions.live, `${workspaceName}/${ticket}`);
-    console.log(`${job.workspace}/${job.ticket}: pushed ${job.branch}\n  ${title}${link !== undefined ? `\n  ${link}` : ''}`);
+    console.log(`${job.workspace}/${job.ticket}: pushed ${pushedBranch(job)}\n  ${title}${link !== undefined ? `\n  ${link}` : ''}`);
     return {
       state: pushed.state, branch: pushed.branch, ...(title !== '' ? { title } : {}), ...(link !== undefined ? { link } : {}),
       ...(opened !== undefined ? { mr: opened } : {}), ...(failure !== undefined ? { error: failure } : {}), ...(message !== undefined ? { message } : {}),
@@ -902,7 +902,7 @@ export class MrPart {
   }
 
   async #openMr(job: Job, forge: Forge, content: MrContent): Promise<JobMr & { reused: boolean }> {
-    const opened = await forge.open({ branch: job.branch, base: job.base, title: content.title, body: content.body });
+    const opened = await forge.open({ branch: pushedBranch(job), base: job.base, title: content.title, body: content.body });
     return { host: forge.kind, number: opened.number, url: opened.url, state: opened.state, reused: opened.reused };
   }
 

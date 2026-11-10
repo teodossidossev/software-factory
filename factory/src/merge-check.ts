@@ -22,6 +22,7 @@ import { randomBytes } from 'node:crypto';
 import { lstat, readdir, realpath, rm } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { DEFAULT_TEST_TIMEOUT_MS } from './config.js';
+import { pushedBranch } from './continues.js';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
 import { type EventRecord, type Job, type JobMr, now } from './jobs.js';
@@ -468,7 +469,7 @@ export class MergeChecks {
     let outcome: { check: MergeCheck } | { error: unknown };
     try {
       const check = await checkMerge({
-        checkout: workspace.workCheckout, worktreeRoot: config.worktreeRoot, workspace: workspaceName, ticket, base: job.base, branch: job.branch, command,
+        checkout: workspace.workCheckout, worktreeRoot: config.worktreeRoot, workspace: workspaceName, ticket, base: job.base, branch: pushedBranch(job), command,
         timeoutMs: config.testTimeoutMs ?? DEFAULT_TEST_TIMEOUT_MS, signal: running.controller.signal, gitLocked: (work) => locks.gitLocked(workspaceName, work),
         hidden: async (worktree) => (await pathDenials({
           session: 'job', workspace: workspaceName, checkout: workspace.workCheckout, worktree, stateDir: config.stateDir, worktreeRoot: config.worktreeRoot,

@@ -17,7 +17,7 @@ import { fakeBwrapBin, newEnv, runCli, serve, stop } from './support/harness.js'
 
 const CREATED = '2026-11-01T10:00:00.000Z';
 const job = (ticket: string, state: Job['state']): Job => ({
-  workspace: 'app', ticket, branch: `${ticket}-demo`, base: 'main', base_commit: null, target_commit: null, worktree: null, prepared_commit: null,
+  workspace: 'app', ticket, branch: `${ticket}-demo`, base: 'main', continues: null, base_commit: null, target_commit: null, worktree: null, prepared_commit: null,
   mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0, state, iteration: 1, session_id: null, mr: null,
   created_at: CREATED, updated_at: CREATED,
 });

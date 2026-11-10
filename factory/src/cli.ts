@@ -66,6 +66,7 @@ import { parseFrontMatter, readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTER
 import { type TestHooks, testHooks } from './test-hooks.js';
 import { gitToplevel, runGit } from './git.js';
 import { originUrl, resolveTarget } from './mr.js';
+import { taskStartBranch } from './continues.js';
 import { collectRules, readJobRulesList, rulesLines } from './rules-docs.js';
 import { turnLimitLine } from './turn-limit.js';
 import { watchEvents } from './watch.js';
@@ -583,10 +584,10 @@ async function run(args: string[]): Promise<void> {
   console.log(`${new Date().toISOString()} runner ${process.pid} for ${workspace}/${ticket} ended`);
 }
 
-// sf rules <workspace> [ticket]: the coding rules that would be given, without their
-// text. A ticket whose job has its rules stored: the job's own list (rules.json), as its prompts
-// carry them; a job with a base commit and nothing stored: none (it started without them). Else
-// read at the Task file's base (fetched as Start does), and at the checkout's HEAD without a ticket.
+// sf rules <workspace> [ticket]: the coding rules that would be given, without their text. A
+// ticket whose job has its rules stored: the job's own list (rules.json), as its prompts carry them;
+// a job with a base commit and nothing stored: none (it started without them). Else read at the
+// Task file's base or continues (fetched as Start does), at the checkout's HEAD without a ticket.
 async function rules(args: string[]): Promise<void> {
   if (args.length < 1 || args.length > 2) {
     throw new UsageError('rules needs <workspace> [ticket].');
@@ -617,7 +618,7 @@ async function rules(args: string[]): Promise<void> {
       }
       return;
     }
-    const base = parseFrontMatter(await readTask(workspace, ticket))?.get('base') ?? '';
+    const base = taskStartBranch(parseFrontMatter(await readTask(workspace, ticket)));
     if (base === '' || base.startsWith('-') || (await runGit(checkout, ['check-ref-format', '--branch', base])).code !== 0) {
       throw new FactoryError('base_not_found', `The base "${base}" is not a valid branch name.`);
     }
@@ -726,7 +727,7 @@ async function notifyTest(args: string[]): Promise<void> {
   }
   const now = new Date().toISOString();
   const job: Job = {
-    workspace: 'test', ticket: 'SF-TEST', branch: 'SF-TEST-notification', base: 'main', base_commit: null, worktree: null, prepared_commit: null,
+    workspace: 'test', ticket: 'SF-TEST', branch: 'SF-TEST-notification', base: 'main', continues: null, base_commit: null, worktree: null, prepared_commit: null,
     target_commit: null, mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'pushed', iteration: 0, session_id: null, mr: null, created_at: now, updated_at: now,
   };
   const results = await sendNotification(jobNotification(job, ['A test notification from sf notify-test']), notifyConfig());
@@ -1010,8 +1011,7 @@ async function status(args: string[]): Promise<void> {
   if (dashboard !== undefined) {
     console.log(`${job.worktree !== null ? '' : '\n'}dashboard: ${dashboard}`);
   }
-  // The marked paths (sensitive, outside the Task's scope, deleted) of the last published
-  // iteration.
+  // The marked paths (sensitive, outside the Task's scope, deleted) of the last published iteration.
   if (job.iteration > 0) {
     try {
       const files = (await jobs.readMeta(workspace, ticket, job.iteration)).files ?? [];

@@ -124,7 +124,7 @@ test('sf retry is refused with invalid_state on review_failed, on mr_conflict, o
     const jobs = new JobStore(env.state);
     const at = new Date().toISOString();
     const record = (ticket: string, extra: Partial<Job>): Job => ({
-      workspace: 'app', ticket, branch: `${ticket}-x`, base: 'main', base_commit: null, target_commit: null, worktree: join(temp, 'retry-refused-wt'), prepared_commit: null,
+      workspace: 'app', ticket, branch: `${ticket}-x`, base: 'main', continues: null, base_commit: null, target_commit: null, worktree: join(temp, 'retry-refused-wt'), prepared_commit: null,
       mr_attempts: 1, mr_conflict_turn: false, state: 'needs_human', iteration: 1, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, created_at: at, updated_at: at, ...extra,
     });
     const cases: Array<[string, Partial<Job>, RegExp]> = [

@@ -39,7 +39,7 @@ function config(env: Env): Config {
 function jobRecord(workspace: string, ticket: string, state: JobState, extra: Partial<Job> = {}): Job {
   const at = now();
   return {
-    workspace, ticket, branch: `${ticket}-branch`, base: 'main', base_commit: null, state, worktree: null, prepared_commit: null,
+    workspace, ticket, branch: `${ticket}-branch`, base: 'main', continues: null, base_commit: null, state, worktree: null, prepared_commit: null,
     iteration: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, mr_conflict_turn: false, created_at: at, updated_at: at, ...extra,
   };
 }

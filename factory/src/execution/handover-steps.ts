@@ -4,6 +4,7 @@
 // afterJobChange).
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { pushedBranch } from '../continues.js';
 import { FactoryError } from '../errors.js';
 import { runGit } from '../git.js';
 import { askForChanges, commitMessagePath, finishAsk, handOver, remoteBranch, type RemoteBranch, restoreConfig, takeBack, undoHandover } from '../handoff.js';
@@ -431,10 +432,10 @@ export class HandoverPart {
     return this.#pushCheck(workspaceName, ticket, true);
   }
 
-  // The check for the user's own push of a handed-over branch: origin is asked where the
-  // branch is, outside the lock; a branch pushed beyond the base moves the job to pushed. Errors
-  // change nothing and are logged. minIntervalMs: none when origin was asked as recently (the
-  // dashboard's job detail, every 60 s at most).
+  // The check for the user's own push of a handed-over branch: origin is asked where the job's
+  // pushed branch is (its continued branch, if any), outside the lock; a branch pushed beyond the
+  // base moves the job to pushed. Errors change nothing and are logged. minIntervalMs: none when
+  // origin was asked as recently (the dashboard's job detail, every 60 s at most).
   async checkHandedOver(workspaceName: string, ticket: string, minIntervalMs = 0): Promise<{ state: JobState; branch: string; commit?: string; same_tree?: boolean | null }> {
     try {
       return await this.#pushCheck(workspaceName, ticket, false, minIntervalMs);
@@ -473,7 +474,7 @@ export class HandoverPart {
       return { state: asked.job.state, branch: asked.job.branch };
     }
     const workspace = await this.#settings.resolve(workspaceName);
-    const remote = await remoteBranch(workspace.workCheckout, ticket, asked.handover);
+    const remote = await remoteBranch(workspace.workCheckout, ticket, asked.handover, pushedBranch(asked.job));
     return this.#locks.locked(async () => {
       const job = await this.#store.job(workspaceName, ticket);
       // The job moved on (or was handed over again) while origin answered.
@@ -507,9 +508,9 @@ export class HandoverPart {
       return undefined;
     }
     if (remote.kind === 'unrelated') {
-      throw new FactoryError('not_pushed', `The branch ${job.branch} on origin (${remote.commit.slice(0, 12)}) does not descend from the job's base ${job.handover!.base.slice(0, 12)}; push your changes to it first.`);
+      throw new FactoryError('not_pushed', `The branch ${pushedBranch(job)} on origin (${remote.commit.slice(0, 12)}) does not descend from the job's base ${job.handover!.base.slice(0, 12)}; push your changes to it first.`);
     }
-    throw new FactoryError('not_pushed', `The branch ${job.branch} is not on origin with your changes; push it first.`);
+    throw new FactoryError('not_pushed', `The branch ${pushedBranch(job)} is not on origin with your changes; push it first.`);
   }
 
   // A handed-over job the user pushed: the config and the prefilled commit message go, a worktree

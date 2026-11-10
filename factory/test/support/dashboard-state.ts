@@ -19,7 +19,7 @@ export async function fixture(name: string): Promise<Fixture> {
   await mkdir(state, { recursive: true });
   const jobs = new JobStore(state);
   const job: Job = {
-    workspace: 'app', ticket: 'T-1', branch: 'T-1-demo', base: 'main', base_commit: null, target_commit: null,
+    workspace: 'app', ticket: 'T-1', branch: 'T-1-demo', base: 'main', continues: null, base_commit: null, target_commit: null,
     worktree: null, prepared_commit: null, mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'awaiting_review', iteration: 1, session_id: 's1', mr: null,
     created_at: '2026-11-01T10:00:00.000Z', updated_at: '2026-11-01T10:05:00.000Z',
   };

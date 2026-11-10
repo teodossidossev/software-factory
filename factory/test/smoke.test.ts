@@ -504,7 +504,7 @@ test('sf rules (SF-059): the rule files that would be given, without their text:
   const { JobStore } = await import('../src/jobs.js');
   const now = new Date().toISOString();
   await new JobStore(join(temp, 'state')).write({
-    workspace: 'rules-demo', ticket: 'T-1', branch: 'T-1-rules', base: 'main', base_commit: first, worktree: null, prepared_commit: null,
+    workspace: 'rules-demo', ticket: 'T-1', branch: 'T-1-rules', base: 'main', continues: null, base_commit: first, worktree: null, prepared_commit: null,
     target_commit: null, mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'aborted', iteration: 0, session_id: null, mr: null, created_at: now, updated_at: now,
   });
   // A job started before SF-059: nothing stored, no rules in its prompts.

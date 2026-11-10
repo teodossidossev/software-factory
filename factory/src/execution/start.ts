@@ -7,6 +7,7 @@ import { type ImageRef, jobAttachment, type ResolvedImage, resolveTaskImages, wr
 import { FactoryError } from '../errors.js';
 import { runGit } from '../git.js';
 import { claudeReviewDecision } from '../config.js';
+import { startBranch, taskContinues } from '../continues.js';
 import { checkTransition, claudeReviews, type Handover, type Job, type JobState, now, RESTARTABLE_STATES, runningJobs, TERMINAL_STATES } from '../jobs.js';
 import { resolveTarget } from '../mr.js';
 import { changedPaths } from '../patch.js';
@@ -29,6 +30,7 @@ interface Claimed {
   workspace: Workspace;
   ticket: string;
   base: string;
+  continues: string | null;
   branch: string;
   worktree: string;
   // The images the Task file refers to, read when the start was accepted.
@@ -262,15 +264,15 @@ export class StartPart {
     return this.#launch(claimed);
   }
 
-  // The base and the branch of a job from the ticket's Task file, which must not be a draft, and the
-  // Task text they were read from.
-  async #plan(workspace: Workspace, ticket: string): Promise<{ base: string; branch: string; content: string; review: TaskReview | undefined }> {
+  // The base, continues and branch of a job from the Task file (readTask validates it, continues
+  // too: invalid_content), which must not be a draft, and the Task text they were read from.
+  async #plan(workspace: Workspace, ticket: string): Promise<{ base: string; continues: string | null; branch: string; content: string; review: TaskReview | undefined }> {
     const content = await readTask(workspace, ticket);
     if (isDraft(content)) {
       throw new FactoryError('task_draft', `${TASK_DIR}/${ticket}.md is still the skeleton: the Context owner writes the Task with write_task first, then the user starts the job.`);
     }
     const fields = parseFrontMatter(content)!;
-    return { base: fields.get('base')!, branch: branchName(ticket, fields.get('title')!), content, review: taskReview(fields) };
+    return { base: fields.get('base')!, continues: taskContinues(fields), branch: branchName(ticket, fields.get('title')!), content, review: taskReview(fields) };
   }
 
   // The run queue's limit: the running jobs of every workspace (RUNNING_STATES), the
@@ -304,16 +306,15 @@ export class StartPart {
     });
   }
 
-  // Writes the record of a new job in starting (the ticket's directory must be free). Only under
-  // the lock.
+  // Writes the record of a new job in starting (the ticket's directory must be free); under the lock.
   // The job's Claude review is decided here, once: claude_review and its review_setup event.
-  async #claim(workspace: Workspace, ticket: string, plan: { base: string; branch: string; review: TaskReview | undefined }, images: ResolvedImage[]): Promise<Claimed> {
-    const { base, branch } = plan;
+  async #claim(workspace: Workspace, ticket: string, plan: { base: string; continues: string | null; branch: string; review: TaskReview | undefined }, images: ResolvedImage[]): Promise<Claimed> {
+    const { base, continues, branch } = plan;
     const created = now();
     const worktree = this.#peers.handover.worktreePath(workspace.name, ticket);
     const setup = claudeReviewDecision(this.#settings.config, plan.review);
     const job: Job = {
-      workspace: workspace.name, ticket, branch, base, base_commit: null, state: 'starting', worktree, prepared_commit: null,
+      workspace: workspace.name, ticket, branch, base, continues, base_commit: null, state: 'starting', worktree, prepared_commit: null,
       iteration: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, mr_conflict_turn: false, created_at: created, updated_at: created,
       claude_review: setup.claude_review,
     };
@@ -321,7 +322,7 @@ export class StartPart {
     await this.#store.jobs.write(job);
     await this.#store.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, state: { from: null, to: 'starting' } });
     await this.#store.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, type: 'review_setup', ...setup });
-    return { workspace, ticket, base, branch, worktree, images };
+    return { workspace, ticket, base, continues, branch, worktree, images };
   }
 
   // The claimed job's worktree, then its first turn. kept (sf restart --keep-files): the
@@ -329,11 +330,11 @@ export class StartPart {
   // before the first turn, whose prompt names them; the directory goes once they are copied, and
   // stays (named in the error) when the job could not start.
   async #launch(claimed: Claimed, kept?: Kept): Promise<{ branch: string; state: JobState; check_after_minutes: number; worktree: string }> {
-    const { workspace, ticket, base, branch, worktree } = claimed;
+    const { workspace, ticket, base, continues, branch, worktree } = claimed;
     const keptNote = kept !== undefined && kept.paths.length > 0 ? ` The files kept from the previous job are in ${kept.dir}.` : '';
     let baseCommit: string;
     try {
-      baseCommit = await this.#locks.gitLocked(workspace.name, () => this.#createWorktree(workspace.workCheckout, base, branch, worktree));
+      baseCommit = await this.#locks.gitLocked(workspace.name, () => this.#createWorktree(workspace.workCheckout, base, continues, branch, worktree));
     } catch (error) {
       const failure = error instanceof FactoryError ? error : new FactoryError('start_failed', 'Git failed while creating the worktree.');
       await this.#locks.locked(async () => {
@@ -397,9 +398,9 @@ export class StartPart {
     return collected.block;
   }
 
-  // Fetches the base when origin exists, checks the names, creates the branch and its worktree
-  // and returns the base commit.
-  async #createWorktree(checkout: string, base: string, branch: string, path: string): Promise<string> {
+  // Checks the names, fetches the start branch (continues, else the base) when origin exists,
+  // creates the branch and its worktree from it and returns the base commit.
+  async #createWorktree(checkout: string, base: string, continues: string | null, branch: string, path: string): Promise<string> {
     const valid = async (name: string): Promise<boolean> => !name.startsWith('-') && (await runGit(checkout, ['check-ref-format', '--branch', name])).code === 0;
     if (!(await valid(base))) {
       throw new FactoryError('base_not_found', `The base "${base}" is not a valid branch name.`);
@@ -407,7 +408,7 @@ export class StartPart {
     if (!(await valid(branch))) {
       throw new FactoryError('invalid_ticket', `"${branch}" is not a valid branch name.`);
     }
-    const { ref, commit } = await resolveTarget(checkout, base);
+    const { ref, commit } = await resolveTarget(checkout, await startBranch(checkout, base, continues));
     if ((await runGit(checkout, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])).code === 0) {
       throw new FactoryError('branch_exists', `The branch ${branch} already exists in the checkout.`);
     }
@@ -430,8 +431,7 @@ export class StartPart {
     return this.recordTask(job, content);
   }
 
-  // The Task file's version the job works from: its sha256 in job.json, written when it
-  // changed. Returns the job.
+  // The Task file's version the job works from: its sha256 in job.json, written when it changed.
   async recordTask(job: Job, content: string): Promise<Job> {
     const sha256 = taskSha256(content);
     if (job.task_sha256 === sha256) {

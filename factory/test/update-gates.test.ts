@@ -53,7 +53,7 @@ async function deadPid(): Promise<number> {
 function jobRecord(workspace: string, ticket: string, state: JobState, extra: Partial<Job> = {}): Job {
   const at = now();
   return {
-    workspace, ticket, branch: `${ticket}-x`, base: 'main', base_commit: COMMIT, worktree: null, prepared_commit: null, target_commit: null, mr_attempts: 0, mr_conflict_turn: false,
+    workspace, ticket, branch: `${ticket}-x`, base: 'main', continues: null, base_commit: COMMIT, worktree: null, prepared_commit: null, target_commit: null, mr_attempts: 0, mr_conflict_turn: false,
     fixes: 0, gate_fixes: 0, gate_tokens: 0, state, iteration: 1, session_id: null, mr: null, created_at: at, updated_at: at, ...extra,
   };
 }

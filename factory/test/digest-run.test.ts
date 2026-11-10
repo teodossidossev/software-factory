@@ -168,11 +168,11 @@ test('a manual digest: the output stored with the Git data, the cost and the per
   assert.match(call!.prompt, /each item is "<key> \(<topic>\): <what was done, one plain sentence/);
   assert.match(call!.prompt, /At most 5 items; when more tickets were done, group related ones into one item by theme, with their keys\./);
   // A branch of mine that is behind and shares an area with landed work is a problem; upkeep alone is not.
-  assert.match(call!.prompt, /- problems: what blocks or risks my work, in plain words, from the data on my branches \(behind, overlap, hit_by\)/);
+  assert.match(call!.prompt, /- problems: what blocks or risks my work, in plain words, only from daily\[\]\.open_branches \(the live ones\), from the data on those branches \(behind, overlap, hit_by\)/);
   assert.match(call!.prompt, /so a conflict is likely/);
   assert.match(call!.prompt, /Not a problem: being behind with nothing shared, duplicate or local-only commits\./);
   assert.match(call!.prompt, /- plan: one plain step per problem/);
-  assert.match(call!.prompt, /next: what I do today, each item "<key> \(<topic>\): <what I will do>"\./);
+  assert.match(call!.prompt, /then what I do today, each "<key> \(<topic>\): <what I will do>"\./);
   // The SF-172 rules that dropped the problems and the "what was done" are gone.
   assert.doesNotMatch(call!.prompt, /keeping a branch up to date, duplicate or unpushed commits are never a problem/);
   assert.doesNotMatch(call!.prompt, /in product words, one item per ticket/);
@@ -330,7 +330,7 @@ test('the daily\'s days: yesterday from the last working day to today (Friday an
     git: { main: 'main', me: ME, landed: [], branches: [], my_commits: [commit('saturday', new Date(2026, 10, 7, 15, 30)), commit('thursday', new Date(2026, 10, 5, 18))], notes: [] },
     error: null,
   };
-  const [daily] = dailiesOf([workspace], days);
+  const [daily] = dailiesOf([workspace], days, { done: [], current: [] });
   assert.deepEqual(daily!.commits.map((entry) => [entry.sha, entry.workspace]), [['saturday', 'backend']]);
 });
 

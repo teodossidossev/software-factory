@@ -201,6 +201,13 @@ checkout's objects as a reference, then dissociated) and fetched from origin on 
 checkout's local branches are fetched into the mirror's `refs/sf-local/heads/`. It reads your
 checkout's `origin` URL and `user.email`, and its README.md for the description.
 
+My daily also counts the factory's work as yours: the jobs of a My daily workspace (current and
+archived) that were handed over, pushed or merged yesterday or today go into Yesterday and into
+Today's "done:" items, even before you commit a hand-over. It leaves out branches without recent
+work: an open branch of yours is a problem or a plan only when you committed on it yesterday or
+today, or a job on it is still going (a pushed one counts while its merge request is open, or when it has none). The
+Repositories tab still shows the others.
+
 What it never touches: your checkouts. No pull, no checkout, no fetch in them; their refs, index and
 files stay as they are. The digest's texts (your company's code and commit messages) stay on this
 machine: the state directory and the token-protected dashboard; they go only to the model, as every

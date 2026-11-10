@@ -132,11 +132,11 @@ export function conflictPrompt(input: ConflictPromptInput): string {
 }
 
 // The prompt of the morning digest: the rules, today's date and the Git data of every
-// workspace as JSON (src/digest-run.ts builds it, capped at 150,000 characters). The model has no
+// workspace, with the factory's jobs for My daily, as JSON (src/digest-run.ts builds it, capped at 150,000 characters). The model has no
 // tools but the structured output.
 export function digestPrompt(today: string, language: string, data: unknown): string {
   return [
-    'You write the user\'s morning digest of their repositories and a draft of their stand-up ("my daily"), from the Git data below only. You have no tools besides the structured output.',
+    'You write the user\'s morning digest of their repositories and a draft of their stand-up ("my daily"), from the Git data and the factory\'s jobs below only. You have no tools besides the structured output.',
     '',
     'Rules:',
     `- Facts only from the data. Mark a guess with the word for "likely" in ${language}. Problems and plans are suggestions, never facts.`,
@@ -146,11 +146,12 @@ export function digestPrompt(today: string, language: string, data: unknown): st
     '- "I", "me" and "mine" are the user: the entries with mine: true.',
     '- repos: one per workspace with followed: true, in the order of the data, with its name. headline: one or two plain sentences: what happened and where the work is heading. merged: one per landed entry, sha: its sha exactly as given, problem: the problem it solves, in one plain sentence. branches: one per live branch that has not landed, ref: its name exactly as given, what: what is going on there, in one plain sentence. impact_on_me: per affected ticket of mine, what I have to do and why, e.g. "ABC-124 (the read-only superclasses) needs the latest changes; the translations changed on both sides, so expect a conflict there" (from overlap and hit_by: the same files changed by what landed; from behind: my work needs the latest changes; the same ticket in another workspace of the same app). One item per ticket, never one per file or commit. A branch of mine that likely landed already is one item: "likely done; the branch can go". [] when there are none.',
     '- cross_repo: only between workspaces of the same app (see apps), at most 6, the most relevant for me first. ticket: one ticket key, or two keys of one feature joined by " + ". by_workspace: one short sentence per workspace of the app, keyed by its name. for_me: what it means for me, "" when nothing. [] when no ticket spans two workspaces of one app.',
-    '- dailies: one per entry of daily (an app where I have commits or open branches), with its app and workspaces as given. A daily is what I say at the team\'s stand-up, to colleagues and a product owner who do not read Git.',
+    '- dailies: one per entry of daily (an app where I have commits, the factory\'s jobs or live branches), with its app and workspaces as given. A daily is what I say at the team\'s stand-up, to colleagues and a product owner who do not read Git.',
     '- In a daily, name a piece of work by its ticket key exactly as in the data and a topic of two to five words, e.g. "ABC-123 (the property counts in the class view)"; work without a ticket key by its topic only. A daily never holds commit SHAs, branch names, file paths, counts of commits ahead or behind, or the words commit, push, rebase, merge, branch, master or main in any spelling.',
-    '- yesterday: what I did yesterday (the commits dated in daily_days.yesterday): each item is "<key> (<topic>): <what was done, one plain sentence of what changed for the product\'s users or the team>". At most 5 items; when more tickets were done, group related ones into one item by theme, with their keys.',
-    '- problems: what blocks or risks my work, in plain words, from the data on my branches (behind, overlap, hit_by): my work needs the latest changes and touches the same area as work that landed (name the area: the translations, the class tests), so a conflict is likely; a change waiting for a review; a colleague\'s work on the same feature. Not a problem: being behind with nothing shared, duplicate or local-only commits. Each item names the ticket as above. [] when there is none.',
-    '- plan: one plain step per problem ("update ABC-124 with the latest changes and settle the translations"); [] when problems is []. next: what I do today, each item "<key> (<topic>): <what I will do>".',
+    '- yesterday: what I did yesterday (the commits dated in daily_days.yesterday and the jobs in daily[].jobs whose `at` is in it (the factory\'s work for me counts as mine), each ticket once): each item is "<key> (<topic>): <what was done, one plain sentence of what changed for the product\'s users or the team>". At most 5 items; when more tickets were done, group related ones into one item by theme, with their keys.',
+    '- problems: what blocks or risks my work, in plain words, only from daily[].open_branches (the live ones), from the data on those branches (behind, overlap, hit_by): my work needs the latest changes and touches the same area as work that landed (name the area: the translations, the class tests), so a conflict is likely; a change waiting for a review; a colleague\'s work on the same feature. Not a problem: being behind with nothing shared, duplicate or local-only commits. Each item names the ticket as above. [] when there is none.',
+    '- plan: one plain step per problem, only from daily[].open_branches (the live ones) ("update ABC-124 with the latest changes and settle the translations"); [] when problems is [].',
+    '- next: first what is already done today (commits or jobs dated in daily_days.today), each "<key> (<topic>): done: <what changed>", grouped by theme when more than 5; then what I do today, each "<key> (<topic>): <what I will do>".',
     '',
     `Today: ${today}.`,
     '',

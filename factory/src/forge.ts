@@ -1,11 +1,13 @@
 // The Git host's merge requests: GitHub (github.com, REST API v3) and GitLab (gitlab.com or the
 // host of SF_GITLAB_URL, REST API v4), chosen from the workspace checkout's origin URL. Opens a
 // pull request / merge request from the job's branch into its base (or reuses the open one), reads
-// its state and merges it through the host's API; nothing is pushed or forced here. The tokens
+// its state and merges it through the host's API; lists the open ones and reads one's review
+// threads (src/forge-comments.ts); nothing is pushed or forced here. The tokens
 // come from the environment file (SF_GITHUB_TOKEN, SF_GITLAB_TOKEN); each goes only in the
 // Authorization header of a request to its own host's API, redirects are refused, and no message
 // carries it.
 import { FactoryError } from './errors.js';
+import { githubReads, gitlabReads, type OpenRequest, type ReviewThread } from './forge-comments.js';
 import { parseOrigin } from './mr.js';
 
 export type ForgeKind = 'github' | 'gitlab';
@@ -119,6 +121,10 @@ export interface Forge {
   // otherwise. GitHub: merge method merge with the host's commit title; GitLab: PUT .../merge.
   // With head (the commit the merge check tested), the host merges only while the branch is there.
   merge(number: number, head?: string): Promise<{ merge_commit: string | null }>;
+  // Read only (src/forge-comments.ts): the open merge requests of the project, newest update
+  // first, at most 50; the review threads of one, oldest first.
+  openRequests(): Promise<OpenRequest[]>;
+  threads(number: number): Promise<ReviewThread[]>;
 }
 
 // Which host a workspace's origin is on, and why the merge request actions are off when they are:
@@ -223,7 +229,7 @@ interface Reply {
 
 // Requests to one host's API with its token. Every failure is a FactoryError whose message holds
 // no token.
-class HostClient {
+export class HostClient {
   readonly #api: string;
   readonly #token: string;
   readonly #tokenName: string;
@@ -323,9 +329,9 @@ class HostClient {
 }
 
 type Json = Record<string, unknown>;
-const asRecord = (value: unknown): Json => (value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Json : {});
-const asArray = (value: unknown): Json[] => (Array.isArray(value) ? value.map(asRecord) : []);
-const str = (value: unknown): string | undefined => (typeof value === 'string' && value !== '' ? value : undefined);
+export const asRecord = (value: unknown): Json => (value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Json : {});
+export const asArray = (value: unknown): Json[] => (Array.isArray(value) ? value.map(asRecord) : []);
+export const str = (value: unknown): string | undefined => (typeof value === 'string' && value !== '' ? value : undefined);
 const commitOf = (value: unknown): string | undefined => (typeof value === 'string' && /^[0-9a-f]{40,64}$/.test(value) ? value : undefined);
 
 function numbered(client: HostClient, data: Json, key: 'number' | 'iid', urlKey: 'html_url' | 'web_url', state: MergeRequestState): MergeRequest {
@@ -365,6 +371,7 @@ function githubForge(client: HostClient, path: string): Forge {
   const forge: Forge = {
     kind: 'github',
     name: 'GitHub',
+    ...githubReads(client, base),
     async open({ branch, base: target, title, body }) {
       const existing = await findOpen(branch, target);
       if (existing !== undefined) {
@@ -475,6 +482,7 @@ function gitlabForge(client: HostClient, path: string): Forge {
   const forge: Forge = {
     kind: 'gitlab',
     name: client.name,
+    ...gitlabReads(client, project),
     async open({ branch, base: target, title, body }) {
       const existing = await findOpen(branch, target);
       if (existing !== undefined) {

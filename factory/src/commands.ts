@@ -8,6 +8,7 @@ import { parseArgs } from 'node:util';
 import type { Digests } from './digest-run.js';
 import { FactoryError } from './errors.js';
 import type { Execution } from './execution.js';
+import type { OpenRequest, ReviewThread } from './forge-comments.js';
 import { type Decision, DECISIONS } from './ledger.js';
 import { localTime } from './local-time.js';
 import { MAX_RUNNING, MIN_RUNNING, ON_LIMIT_RULES, type QueueView, type RunQueue } from './queue.js';
@@ -142,7 +143,7 @@ export const COMMANDS = {
     description: 'Push the branch prepared at Clean; --as-is pushes it even if its tip was edited by hand',
     run: (s, [w = '', t = ''], flags) => s.execution.approve(w, t, flags['as-is'] === true),
   },
-  // sf mr create|merge|status.
+  // sf mr create|merge|status, and the reads list and comments.
   mrCreate: {
     name: 'mr create', args: ['<workspace>', '<ticket>'],
     description: 'Open the merge request of a pushed job on GitHub or GitLab (or reuse the open one); from ready_for_human_review: approve, then open it',
@@ -157,6 +158,16 @@ export const COMMANDS = {
     name: 'mr status', args: ['<workspace>', '<ticket>'], openWhileUpdating: true,
     description: 'The merge request\'s state on the host: open, merged or closed, mergeable or not, the checks',
     run: (s, [w = '', t = '']) => s.execution.mergeRequestStatus(w, t),
+  },
+  mrList: {
+    name: 'mr list', args: ['<workspace>'], openWhileUpdating: true,
+    description: 'The open merge requests of the workspace\'s origin, newest update first (at most 50); nothing is written to the host',
+    run: async (s, [w = '']) => ({ merge_requests: await s.execution.openMergeRequests(w) }),
+  },
+  mrComments: {
+    name: 'mr comments', args: ['<workspace>', '<N>'], openWhileUpdating: true,
+    description: 'The review threads of merge request N of the workspace\'s origin, oldest first; nothing is written to the host',
+    run: async (s, [w = '', n = '']) => ({ threads: await s.execution.mergeRequestThreads(w, Number(n)) }),
   },
   // sf pause, resume and restart.
   pause: {
@@ -497,6 +508,29 @@ function mergeRequestShown(command: Command, result: Result): Answer {
   return { lines, failed: error !== undefined };
 }
 
+// sf mr list: one line per open merge request.
+function openRequestLines(result: Result): string[] {
+  const requests = result.merge_requests as OpenRequest[];
+  return requests.length === 0 ? ['No open merge requests.'] : requests.map((mr) => `!${mr.number}  ${mr.source} → ${mr.target}  ${mr.author}  ${mr.title}`);
+}
+
+// A thread's place: path:line, the path alone, or general for a comment on no file.
+const threadPlace = (thread: ReviewThread): string => (thread.path === null ? 'general' : thread.line === null ? thread.path : `${thread.path}:${thread.line}`);
+
+// sf mr comments: each thread's place (path:line or general) and whether it is resolved, then
+// each comment's author and time, and its body indented.
+function threadLines(result: Result): string[] {
+  const threads = result.threads as ReviewThread[];
+  if (threads.length === 0) {
+    return ['No review comments.'];
+  }
+  return threads.flatMap((thread, index) => [
+    ...(index > 0 ? [''] : []),
+    `${threadPlace(thread)}${thread.resolved === null ? '' : thread.resolved ? '  resolved' : '  open'}`,
+    ...thread.comments.flatMap((comment) => [`  ${comment.author}${comment.created_at !== '' ? `  ${comment.created_at}` : ''}`, ...comment.body.split('\n').map((line) => `    ${line}`.trimEnd())]),
+  ]);
+}
+
 // The answers the CLI shows in a way of their own; any other is its key: value lines.
 const ANSWERS = new Map<Command, (result: Result, flags: Flags) => Answer>([
   [COMMANDS.queueList, (result) => ({ lines: queueLines(result as unknown as QueueView), failed: false })],
@@ -505,6 +539,8 @@ const ANSWERS = new Map<Command, (result: Result, flags: Flags) => Answer>([
   [COMMANDS.mrCreate, (result) => mergeRequestShown(COMMANDS.mrCreate, result)],
   [COMMANDS.mrMerge, (result) => mergeRequestShown(COMMANDS.mrMerge, result)],
   [COMMANDS.mrStatus, (result) => mergeRequestShown(COMMANDS.mrStatus, result)],
+  [COMMANDS.mrList, (result) => ({ lines: openRequestLines(result), failed: false })],
+  [COMMANDS.mrComments, (result) => ({ lines: threadLines(result), failed: false })],
   [COMMANDS.abort, (result, flags) => ({
     lines: [
       ...resultLines(result),

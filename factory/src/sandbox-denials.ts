@@ -14,7 +14,7 @@
 // denyRead still wins); and the file-tool guard, a PreToolUse hook every job session gets, holds
 // Write and Edit to the own worktree outside that configuration and the read tools out of the home
 // directory's and the temporary roots' other paths, by real path.
-// The Codex gate runs inside bubblewrap under the same denyRead list (gateWrapper).
+// The Codex gate (gateWrapper) and the Implementer (session-wrapper.ts) run in bwrap hiding denyRead.
 // This module knows the file system, the registry and Git; it knows nothing about jobs.
 import type { HookCallback, Options, SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
 import { lstatSync, realpathSync, statSync } from 'node:fs';
@@ -868,7 +868,7 @@ export interface GateWrapperOptions {
 
 // The directory the Codex executable needs whole: the real path of its nearest node_modules
 // ancestor (its launcher spawns the sibling package of the platform's binary), else its own folder.
-function codexPackage(codexPath: string): string {
+export function codexPackage(codexPath: string): string {
   let real: string;
   try {
     real = realpathSync(codexPath);
@@ -888,7 +888,7 @@ function codexPackage(codexPath: string): string {
 // The mount that hides a denied path that exists now: an empty tmpfs over a directory, /dev/null
 // over a file or a socket; none for a path gone since the denials were built (bwrap could not make
 // its mount point under the read-only root).
-function hiding(path: string): string[] {
+export function hiding(path: string): string[] {
   let directory: boolean;
   try {
     directory = statSync(path).isDirectory();
@@ -902,7 +902,7 @@ const depth = (path: string): number => path.split(sep).filter((part) => part !=
 
 // Where bwrap can mount over a path: its real path when it exists, since bwrap cannot create a
 // mount point through a link (/var/run/dbus with /var/run a link to /run); else the path resolved.
-function mountPoint(path: string): string {
+export function mountPoint(path: string): string {
   try {
     return realpathSync(path);
   } catch {
@@ -934,22 +934,22 @@ export function gateWrapper(denials: PathDenials, options: GateWrapperOptions): 
     resolve(options.worktree), ...options.images.map((path) => resolve(path)), codexPackage(options.codexPath),
     dirname(dirname(realpathSync(process.execPath))),
   ])];
-  for (const path of readOnly) {
-    args.push('--ro-bind', path, path);
-  }
-  const inside = (path: string, dirs: readonly string[]): boolean => dirs.some((dir) => dir !== path && within(path, dir));
-  const again = denied.filter((path) => inside(path, readOnly));
-  const rebound = readOnly.filter((path) => inside(path, again));
-  const fixUp = [...again.map((path) => ({ path, mount: () => hiding(path) })), ...rebound.map((path) => ({ path, mount: () => ['--ro-bind', path, path] }))];
-  // Stable: at the same depth a denial comes before a bind.
-  fixUp.sort((a, b) => depth(a.path) - depth(b.path));
-  for (const entry of fixUp) {
-    args.push(...entry.mount());
-  }
+  const binds = new Map(readOnly.map((path) => [path, ['--ro-bind', path, path]]));
+  args.push(...[...binds.values()].flat(), ...fixUp(denied, binds));
   for (const path of [...new Set([resolve(options.codexHome), resolve(options.iterationDir)])]) {
     args.push('--bind', path, path);
   }
   return args;
+}
+
+// A wrapper's fix-up pass after its binds (path to mount): denials inside a bind hidden again, binds
+// inside such a denial mounted again, shallowest first (a denial first): the most specific path wins.
+export function fixUp(denied: readonly string[], binds: ReadonlyMap<string, readonly string[]>): string[] {
+  const inside = (path: string, dirs: readonly string[]): boolean => dirs.some((dir) => dir !== path && within(path, dir));
+  const again = denied.filter((path) => inside(path, [...binds.keys()]));
+  const rebound = [...binds.keys()].filter((path) => inside(path, again));
+  const mounts = [...again.map((path) => ({ path, mount: hiding(path) })), ...rebound.map((path) => ({ path, mount: [...binds.get(path)!] }))];
+  return mounts.sort((a, b) => depth(a.path) - depth(b.path)).flatMap((entry) => entry.mount);
 }
 
 // The gate's wrapper for a denial scope: pathDenials(scope), then gateWrapper. The review pipeline

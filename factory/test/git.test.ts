@@ -37,6 +37,8 @@ const COMPUTED: readonly string[] = [
   'health.ts: command',
   // The sleep inhibitor of sf serve (SF-158): systemd-inhibit, or a fake one in the tests, never git.
   'keep-awake.ts: this.#options.command',
+  // The bwrap of the Implementer's wrapper (SF-181: findBwrap, bwrap on PATH), Claude Code after its "--".
+  'session-wrapper.ts: this.#bwrap',
 ];
 
 const git = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();

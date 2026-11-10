@@ -216,7 +216,9 @@ test('a run that times out is a failure: a Tests Fix names the timeout', async (
 test('with the real bubblewrap and the job\'s path denials, a run that times out ends at its limit: a Tests Fix names the timeout and no process is left', { skip: bubblewrapStarts() ? false : BWRAP_CANNOT_START }, async () => {
   // A sleep of ten minutes only this test runs.
   const sleep = ['sleep', `600.${String(Math.floor(Math.random() * 1_000_000)).padStart(6, '0')}`];
-  const { env, repo } = await testsEnv('tests-timeout-real', `echo before; ${sleep.join(' ')}`, { SF_TEST_TIMEOUT_MS: '2000' }, { realBwrap: true });
+  // SF_SANDBOX=off: the fake Claude Code, which keeps its scripts and logs in $HOME, runs without the
+  // Implementer's real wrapper (SF-181), which would hide and refuse them; the test command's sandbox does not depend on it.
+  const { env, repo } = await testsEnv('tests-timeout-real', `echo before; ${sleep.join(' ')}`, { SF_TEST_TIMEOUT_MS: '2000', SF_SANDBOX: 'off' }, { realBwrap: true });
   await script(env, [{ write: { 'README.md': 'one\n' }, text: 'iteration 1' }, { write: { 'README.md': 'two\n' }, text: 'iteration 2' }]);
   const served = await serve(env);
   try {

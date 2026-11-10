@@ -18,7 +18,7 @@ import { sandboxSettings } from '../src/config.js';
 import { ImplementerSession, type IdleOutcome, sandboxEnvDenials, sessionEnvironment } from '../src/session.js';
 import { writeTask } from '../src/task-file.js';
 import {
-  call, codexLog, codexScript, FAKE, fakeCodex, fakeLog, git, newEnv, newRepo, putTask, refused, reviewLog, reviewScript, runCli, script, serve, stop, task,
+  call, codexLog, codexScript, FAKE, fakeCodex, fakeLog, git, newEnv, newRepo, putTask, refused, reviewLog, reviewScript, runCli, script, serve, stop, task, useFakeBwrap,
   waitFor,
 } from './support/harness.js';
 
@@ -343,6 +343,8 @@ test('cloud credentials (SF-123): sessionEnvironment passes AWS_*, GOOGLE_* and 
 
 test('cloud credentials (SF-123): an Implementer turn adds the denials to the sandbox\'s credentials.envVars after the entries already there', async () => {
   const env = await newEnv('session-env-denials');
+  // With the sandbox on, the session starts Claude Code inside bwrap: the fake one.
+  useFakeBwrap();
   await mkdir(join(env.home, 'work'), { recursive: true });
   await script(env, [{}]);
   const sandbox: SandboxSettings = { ...sandboxSettings({})!, credentials: { envVars: [{ name: 'MY_TOKEN', mode: 'mask' }] } };

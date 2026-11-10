@@ -109,13 +109,13 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 // merge and status, and mergeRequestHost for whether they are on for a job's workspace; the reads
 // openMergeRequests and mergeRequestThreads (GET, src/dashboard-routes.ts).
 // Pause, Resume and Restart as sf pause, resume and restart.
-// The hand-over to the user's checkout: handover, takeback and handed-done as sf handover,
-// takeback and handed-done, and checkHandedOver, the check for the user's own push that the job's
-// detail starts. The Merge request screen: mergeRequestView (GET mr-view), saveMr and
-// resetMr (POST mr-save and mr-reset).
+// The hand-over to the user's checkout: handover, takeback, handedDone and markHandedDone as sf
+// handover, takeback, handed-done and handed-done --merged, and checkHandedOver, the check for the
+// user's own push that the job's detail starts. The Merge request screen: mergeRequestView (GET
+// mr-view), saveMr and resetMr (POST mr-save and mr-reset).
 export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | 'say' | 'retryReview' | 'retryMr' | 'acceptGate' | 'settle' | 'simplify' | 'archiveFinished'
   | 'createMergeRequest' | 'mergeMergeRequest' | 'mergeRequestStatus' | 'mergeRequestHost' | 'pause' | 'resumePaused' | 'restart'
-  | 'handover' | 'takeback' | 'handedDone' | 'checkHandedOver' | 'mergeRequestView' | 'saveMr' | 'resetMr' | 'openMergeRequests' | 'mergeRequestThreads'>;
+  | 'handover' | 'takeback' | 'handedDone' | 'markHandedDone' | 'checkHandedOver' | 'mergeRequestView' | 'saveMr' | 'resetMr' | 'openMergeRequests' | 'mergeRequestThreads'>;
 // How often the job's detail asks origin for the user's push of a handed-over branch.
 const PUSH_CHECK_INTERVAL_MS = 60_000;
 

@@ -406,6 +406,22 @@ test('job client (SF-107): the panel\'s actions: I opened the MR posts handed-do
   assert.deepEqual([menuOf(page).hidden, posts(page, 'takeback').map((request) => request.body)], [true, ['{}']]);
 });
 
+test('job client: the panel\'s Merged another way opens its confirmation with the sentence; Confirm posts handed-done-merged and the outcome says the job is marked done', async () => {
+  const page = await openJob(detail(handedOver(), { mr: true, mr_title: 'feat(T-1): Demo' } as Partial<Omit<Detail, 'job'>>));
+  const path = panelOf(page).querySelectorAll('.ho-path')[0]!;
+  assert.deepEqual(path.querySelectorAll('button').map((node) => node.textContent), ['I opened the MR', 'Merged another way']);
+  inPanel(page, 'Merged another way').click();
+  assert.deepEqual([page.$('confirm').hidden, page.$('confirm-title').textContent, page.$('confirm-ok').textContent], [false, 'Merged another way app/T-1?', 'Merged another way']);
+  assert.equal(page.$('confirm-text').textContent, 'Mark the job done: you merged its changes yourself under another branch or straight into the main branch. The factory does not check origin.');
+  assert.equal(posts(page, 'handed-done-merged').length, 0);
+  page.$('confirm-ok').click();
+  await page.flush();
+  assert.deepEqual(posts(page, 'handed-done-merged').map((request) => request.body), ['{}']);
+  posts(page, 'handed-done-merged')[0]!.respond(200, { ok: true, result: { state: 'pushed', branch: 'T-1-demo' } });
+  await page.flush();
+  assert.match(page.document.body.textContent, /Marked done: you merged T-1-demo's changes another way; the job is pushed\./);
+});
+
 test('job client (SF-107): an outcome from before the hand-over is the "Earlier, at …" note and Dismiss hides it for good; an action on the panel shows as current, with a ×', async () => {
   const ready = job('ready_for_human_review', { worktree: '/wt/T-1', handover: null, handoff_skipped: null, mr_host: { host: 'github', reason: null } });
   const current = detail(ready);

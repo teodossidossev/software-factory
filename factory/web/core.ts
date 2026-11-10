@@ -41,6 +41,7 @@ const ACTION_LABELS: Readonly<Record<string, string>> = {
   approve: 'Approve', abort: 'Abort', say: 'Send', review: 'Retry review', retry: 'Retry', accept: 'Accept and prepare MR', settle: 'Settle', simplify: 'Simplify', archive: 'Archive',
   'mr-create': 'Create merge request', 'mr-merge': 'Merge', 'mr-status': 'Refresh MR status', pause: 'Pause', resume: 'Resume', restart: 'Restart',
   handover: 'Hand over to my checkout', takeback: 'Take it back', 'handed-done': 'I opened the MR myself',
+  'handed-done-merged': 'Merged another way',
   'review-mr': 'Review the MR and push',
 };
 const PENDING_REASONS: Readonly<Record<string, string>> = {
@@ -62,6 +63,7 @@ const PENDING_REASONS: Readonly<Record<string, string>> = {
   handover: 'the hand-over was requested; waiting for its outcome.',
   takeback: 'Take it back was requested; waiting for its outcome.',
   'handed-done': 'origin is being asked for your push.',
+  'handed-done-merged': 'marking it done; waiting for its outcome.',
 };
 const PENDING_TEXT: Readonly<Record<string, string>> = {
   accept: 'Accepting over the gate…',
@@ -82,6 +84,7 @@ const PENDING_TEXT: Readonly<Record<string, string>> = {
   handover: 'Handing the branch over to your checkout…',
   takeback: 'Taking the branch back from your checkout…',
   'handed-done': 'Asking origin for your push…',
+  'handed-done-merged': 'Marking the job done…',
 };
 // The element with the id, or null when the page has none.
 const $ = (id: string): HTMLElement | null => document.getElementById(id);

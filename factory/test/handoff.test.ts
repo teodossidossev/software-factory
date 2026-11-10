@@ -396,7 +396,7 @@ test('the user\'s own push: sf handed-done before it is not_pushed; the job deta
   assert.equal((await refusedSocket(s, 'pause', ['app', 'U-1'])).code, 'invalid_state');
   assert.equal((await refused(s.served, 'mark_clean', { workspace: 'app', ticket: 'U-1' })).code, 'invalid_state');
   const notYet = await refusedSocket(s, 'handed-done', ['app', 'U-1']);
-  assert.deepEqual(notYet, { code: 'not_pushed', message: 'The branch U-1-hand-it-over is not on origin with your changes; push it first.' });
+  assert.deepEqual(notYet, { code: 'not_pushed', message: 'The branch U-1-hand-it-over is not on origin with your changes; push it first. If you merged it another way, use Merged another way (sf handed-done --merged).' });
 
   // The user commits the job's changes as they are and pushes from the checkout.
   const template = config(s.repo, 'commit.template')!;

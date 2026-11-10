@@ -197,9 +197,9 @@ export const COMMANDS = {
     run: (s, [w = '', t = '']) => s.execution.takeback(w, t),
   },
   handedDone: {
-    name: 'handed-done', args: ['<workspace>', '<ticket>'],
-    description: 'I opened the MR myself: the job is pushed once origin has the branch with your changes (handed_over)',
-    run: (s, [w = '', t = '']) => s.execution.handedDone(w, t),
+    name: 'handed-done', args: ['<workspace>', '<ticket>'], flags: ['--merged'],
+    description: 'I opened the MR myself: the job is pushed once origin has the branch with your changes (handed_over); --merged (Merged another way): you merged the changes yourself under another branch or straight into the main branch, and the job is pushed without asking origin',
+    run: (s, [w = '', t = ''], flags) => (flags.merged === true ? s.execution.markHandedDone(w, t) : s.execution.handedDone(w, t)),
   },
   abort: {
     name: 'abort', args: ['<workspace>', '<ticket>'], flags: ['--discard'],

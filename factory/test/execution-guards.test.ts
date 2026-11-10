@@ -1,7 +1,9 @@
-// End-to-end execution tests of what guards a job: the sandbox placeholders, the Task's scope, the
-// sensitive paths, the images, the Fix round limit and the cloud credentials, with the real `sf
-// serve` and the fake Claude Code. Split from execution.test.ts (the job cycle, the queue and the
-// sessions), so that neither file runs near the test runner's time limit.
+// End-to-end execution tests, second part: what the factory keeps out of a job's results or asks
+// to be acknowledged (sandbox placeholders, the Task's scope, sensitive paths), the job's images,
+// the Fix round limit and the cloud credentials. The real `sf serve` and `sf` CLI with private
+// config and state directories, throwaway Git repositories and the fake Claude Code as the
+// Implementer executable, as in test/execution.test.ts, which runs the cycle, the rules and the
+// queue (split so that no file runs near run-tests' per-file limit).
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -31,6 +33,7 @@ function mrText(header: string): string {
   ].join('\n');
 }
 
+// The placeholders bubblewrap left in a real job's work checkout on 2026-11-02.
 const PLACEHOLDERS = [
   '.bash_profile', '.bashrc', '.gitconfig', '.gitmodules', '.mcp.json',
   '.claude/agents', '.claude/commands', '.claude/hooks', '.claude/launch.json', '.claude/loop.md',

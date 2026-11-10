@@ -65,7 +65,7 @@ bin/sf resume <workspace> <ticket> [message...]   # go on with a paused job wher
 bin/sf restart <workspace> <ticket> [--keep-files] # start the ticket again from its current Task file on a fresh worktree and branch (paused, waiting_limit, aborted, failed, needs_human); needs sf serve
 bin/sf handover <workspace> <ticket>           # Hand over to my checkout: the job's branch in the workspace's checkout with its changes as Local Changes (ready_for_human_review); needs sf serve
 bin/sf takeback <workspace> <ticket>           # Take it back: the branch back from your checkout into the job (handed_over); needs sf serve
-bin/sf handed-done <workspace> <ticket>        # I opened the MR myself: pushed once origin has the branch with your changes (handed_over); needs sf serve
+bin/sf handed-done <workspace> <ticket> [--merged] # I opened the MR myself: pushed once origin has the branch with your changes (handed_over); --merged (Merged another way): you merged the changes yourself under another branch or straight into the main branch, pushed without asking origin; needs sf serve
 bin/sf abort <workspace> <ticket> [--discard]  # end the job; the worktree stays (its path printed); --discard removes the worktree and the branch; needs sf serve
 bin/sf reset <workspace> <ticket>              # end the session, remove the worktree and archive the job; the branch stays; needs sf serve
 bin/sf notify-test                             # one test notification on every channel; works without sf serve
@@ -2083,6 +2083,7 @@ any other is refused with `illegal_transition`.
 | `handed_over` | `ready_for_human_review` | `take_back` |
 | `handed_over` | `pushed` | `push` |
 | `handed_over` | `pushed` | `pushed_by_user` |
+| `handed_over` | `pushed` | `marked_done` |
 | `handed_over` | `aborted` | `abort` |
 | `preparing_mr` | `working` | `tests` |
 | `preparing_mr` | `awaiting_review` | `mr_turn_end` |
@@ -2795,6 +2796,7 @@ action, the same on the board and in the CLI:
 | Ask for changes | `sf say <ws> <ticket> <message>` | `handed_over` (and today's states) |
 | Take it back | `sf takeback <ws> <ticket>` | `handed_over` |
 | I opened the MR myself | `sf handed-done <ws> <ticket>` | `handed_over` |
+| Merged another way | `sf handed-done <ws> <ticket> --merged` | `handed_over` |
 | Approve | `sf approve <ws> <ticket>` | `handed_over` too |
 
 The board shows "In your checkout on <branch>" for a `handed_over` job, `sf status` and the
@@ -2811,7 +2813,8 @@ same actions, confirmations and availability rules as before:
   A stop of a hand-over step (the job's `error`) shows at the top, above the heading.
 - **Two paths** side by side (stacked below 720 px), neither preferred: **I push it myself**
   (review and run it in the IDE, commit with the prefilled message and push, open the MR on the
-  forge; its button **I opened the MR** is `sf handed-done`) and **The factory pushes it** (its
+  forge; its button **I opened the MR** is `sf handed-done`, and **Merged another way** under it
+  is `sf handed-done --merged`, with its confirmation) and **The factory pushes it** (its
   commit, or your own commits; your uncommitted edits stay in the checkout). Its button is **Push
   and open the MR…** (Create merge request, with its confirmation) when the workspace's Git host
   takes merge requests, else **Push…** (Approve, with its confirmation).
@@ -2929,7 +2932,7 @@ where a coordinating session opens and merges the merge requests with `sf mr cre
 **The state `handed_over`** does not count as running for the run queue (nothing of the job runs) but is not
 terminal: no new job of the ticket starts. It goes to `working` (Ask for changes),
 `ready_for_human_review` (Take it back), `pushed` (Approve, `sf mr create`, the user's push found,
-`sf handed-done`) and `aborted` (`sf abort` without `--discard`: the config is restored, the
+`sf handed-done`, and `sf handed-done --merged` without asking origin) and `aborted` (`sf abort` without `--discard`: the config is restored, the
 checkout and the branch stay as they are). `sf fix`, `sf abort --discard`, `sf reset` and `sf
 restart` are refused with `handed_over` ("<ticket> is in your checkout on <branch>; take it back
 first."); `mark_clean`, `sf pause` and `sf resume` with `invalid_state`. Every way out puts
@@ -2978,8 +2981,21 @@ that is known locally, is not B and descends from B moves the job to `pushed` wi
 `prepared_commit` R and the event `handover_pushed {commit, same_tree}` (whether R's tree is S's).
 Errors change nothing and are logged. `sf handed-done` (I opened the MR myself) runs the same
 check on demand: `not_pushed` ("The branch <branch> is not on origin with your changes; push it
-first.") when the branch is missing, at B or not descending from B; a commit not known locally
-still counts (`same_tree: null`).
+first. If you merged it another way, use Merged another way (sf handed-done --merged).") when
+the branch is missing, at B or not descending from B; a commit not known locally still counts
+(`same_tree: null`).
+
+**Merged another way** (`sf handed-done --merged`, the route `handed-done-merged`): the user merged
+the job's changes themselves, under another branch name or committed straight to the main branch,
+so origin has no branch for the push check to find. On a `handed_over` job, without asking origin,
+the factory's `commit.template` and `commit.cleanup` and the prefilled message go back as on a push
+(a worktree left over goes too), the event `handover_marked_done` is logged, and the job moves to
+`pushed` (`marked_done`) with its `prepared_commit` as it was. The user's branch, commits and edits
+in the checkout are not touched. Any other state is `invalid_state`, as with `sf handed-done`. On
+the board a handed-over card shows **Merged another way…** next to its other buttons, and the job
+page's panel shows **Merged another way**; both open the confirmation "Mark the job done: you
+merged its changes yourself under another branch or straight into the main branch. The factory
+does not check origin."
 
 **Interrupted** (`recover()` when `sf serve` starts, for a job with `handover.step` set and no
 live runner): `handing_over` is undone when it is safe (the checkout on the branch with exactly S,
@@ -2988,7 +3004,7 @@ or still on what it was on); the job goes to `ready_for_human_review` with `hand
 and the job is `needs_human` with `handover_interrupted`. `asking` is finished from the snapshot
 without the turn: `needs_human` with `ask_interrupted` ("sf serve restarted during Ask for changes;
 your edits are in the job's worktree; use sf say to go on."). Take it back, I opened the MR myself,
-the push check and abort of a handed-over job wait for the job's runner like approve
+Merged another way, the push check and abort of a handed-over job wait for the job's runner like approve
 (`runner_active`).
 
 **No turn while the checkout holds the branch.** Before every Implementer turn (`sf say`, a Fix
@@ -3304,10 +3320,10 @@ but still needs the token, as on the local port.
 
 The actions keep the Origin check (a listed origin on the remote port). The four that can push or
 merge, `approve`, `retry` (which pushes again after `mr_push_failed`), `mr-create` and `mr-merge`,
-need `"confirm": "<the job's ticket>"` in their body on the remote port; without it, or with
+and `handed-done-merged` (Merged another way, which ends the job without asking origin) need `"confirm": "<the job's ticket>"` in their body on the remote port; without it, or with
 another value, they answer 409 `confirm_required` before anything runs (locally `confirm` is
 accepted and ignored). `api/jobs` and the stream's `jobs` events carry a top-level `remote`
-(`true` on the remote port, `false` locally); with `remote` true the page asks for those four
+(`true` on the remote port, `false` locally); with `remote` true the page asks for those five
 actions, after their usual confirmation, in a dialog "Type <ticket> to continue" whose button works
 only with the exact ticket. Which actions ask is the server's: the job's detail lists them in
 `confirm_actions` (SF-139), and the page keeps only the dialog's words.
@@ -3718,7 +3734,7 @@ a header, then the Stream with the composer pinned at the bottom.
   screen), Approve…, *Hand over to my checkout* (SF-073; the composer
   says why the automatic hand-over did not happen, when it was refused), Create merge request (when
   it can be created), Send, Abort…; `handed_over` (SF-073): Approve… (primary), *Ask for changes*
-  (the message, with the edits in the user's checkout), *I opened the MR myself*, *Take it back*,
+  (the message, with the edits in the user's checkout), *I opened the MR myself*, *Merged another way*, *Take it back*,
   Create merge request, Abort…; `needs_human`: the stop table; `pushed`: no message box, the merge request (`#N`, its
   state and link) and its status last read, Create merge request (no merge request yet, or a closed
   one), Merge… (an open one), Refresh MR status (any) and Archive; `aborted`, `failed`: no message
@@ -3828,7 +3844,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | Path | Answer |
 |---|---|
 | `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, fixes, gate_fixes, gate_tokens, updated_at, created_at, error, and for the board (SF-046) `title` (of the Task file, or `null`), `cost_usd` (the estimate of the iterations and their Claude reviews, or `null`), `review` and `gate` (the last iteration's verdicts: `clean`, `fix`, `failed` or `null`) and `review_ended_at` (the end of that clean or fix Claude review, or `null`); `mr` (the merge request on the Git host or `null`) and `mr_host` (`{host, reason}`: `github`, `gitlab` or `null`, and why the merge request actions are off or `null`); for the v3 card (SF-077) `now` (`{who, what, ts}` of a running job: the Implementer's last tool call or the first line of its last text, read from at most the last 256 KB of `events.jsonl`; the Claude review or the Codex gate reviewing iteration N; the MR writer; else `null`), `tool_calls` (the Implementer's tool calls in the job, counted incrementally: only the bytes added since the last count are read) and `stop` (for `needs_human`, `{items, saves_lines}`: the suggestions of the last simplification pass and the lines they save, the ledger entries to settle (`escalated`, `review_disputed`), the open ones (`review_churn`) or the last gate's items (`gate_rounds`, `gate_budget`), none for other codes; `null` otherwise); SF-129 (`src/stops.ts`): `stop_code`, `stop_kind` and `stop_group` (the canonical row of a `needs_human` job's stop, `null` otherwise), `actions` (`[{action, label, primary, danger}]`: the actions the job's page shows, in order) and `availability` (every action's `''` or why it is off; Accept from the real review) |
-| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override, simplify}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied} or {ts, event: "merge_request", action, number, url, state}], mr_title, ledger, settle_ids, confirm_actions, explanation}`; `job` has the fields of an `api/jobs` row's job part, `stop_code`, `stop_kind`, `stop_group`, `actions` and `availability` included (SF-129); `settle_ids` the ids of the ledger entries the stop block offers *Accept risk* / *Must fix* for (`[]` unless the stop's row has a settlement); `confirm_actions` the actions that need the job's ticket typed again on the remote port (SF-139: `approve`, `retry`, `mr-create`, `mr-merge`), on both ports; `mr_title` is the MR text's first line or `null`; `explanation` is the job's `explanation.json` while it is the current stop's (SF-106, section Stop explanations), else `null`; `ledger` is `ledger.json` as written (`[]` before the first Fix section, SF-052); `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null`, `simplify` its `simplify.json` (SF-055) or `null` |
+| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override, simplify}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied} or {ts, event: "merge_request", action, number, url, state}], mr_title, ledger, settle_ids, confirm_actions, explanation}`; `job` has the fields of an `api/jobs` row's job part, `stop_code`, `stop_kind`, `stop_group`, `actions` and `availability` included (SF-129); `settle_ids` the ids of the ledger entries the stop block offers *Accept risk* / *Must fix* for (`[]` unless the stop's row has a settlement); `confirm_actions` the actions that need the job's ticket typed again on the remote port (SF-139: `approve`, `retry`, `mr-create`, `mr-merge`, `handed-done-merged`), on both ports; `mr_title` is the MR text's first line or `null`; `explanation` is the job's `explanation.json` while it is the current stop's (SF-106, section Stop explanations), else `null`; `ledger` is `ledger.json` as written (`[]` before the first Fix section, SF-052); `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null`, `simplify` its `simplify.json` (SF-055) or `null` |
 | `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem, handoff, color, app, description, derived_description, digest}], handoff_default, digest}`: the registry, the checkout's path, its non-terminal jobs, why the checkout cannot be used now or `null`, its own hand-over setting or `null`, and its colour on the board (SF-084: its `color`, else the one its name picks); SF-103: its app (its own, else its name), its own description or `null`, the description derived from the repository or `null`, `digest: {track, my_work}`; at the top `handoff_default` (`checkout` or `off`, from `SF_HANDOFF`) and the morning digest's `digest: {at, weekdays_only, language}` |
 | `api/workspaces/<ws>/merge-requests` | the open merge requests of the workspace's origin on its Git host, as `sf mr list` reads them (section Reading the open merge requests and their review comments): `[{number, title, author, source, target, url, updated_at, draft}]`, newest update first, at most 50; read on the host at each request, nothing written to it; `409 mr_token_missing` or `mr_host_unsupported`, `502 mr_auth_failed`, `mr_host_error` or `mr_host_unreachable`; a name that is not a workspace's, an unknown workspace or any query is an empty 404 |
 | `api/workspaces/<ws>/merge-requests/<number>/threads` | the review threads of one merge request, as `sf mr comments` reads them: `[{id, resolved, path, line, comments: [{author, body, created_at}]}]`, oldest first; `path` and `line` `null` for a general comment, `resolved` `null` where the host has no such state (GitHub); the refusals as above; a number that is not a whole number from 1 is an empty 404 |
@@ -3876,6 +3892,7 @@ shares; the setup, Task check, task and attachment posts have their own handlers
 | `POST api/jobs/<ws>/<ticket>/mr-save` | `{"title": string, "body": string, "branch"?: string, "base"?: string}` | `Execution.saveMr(ws, ticket, input)` (SF-080): the MR text saved, the prepared commit's message rewritten, the branch renamed and the base changed when given and different; result `{state, branch, base, edited, prepared_commit}`; `400 mr_text_invalid`, `409` for `invalid_state`, `runner_active`, `branch_changed`, `branch_locked`, `base_unrelated`, `mr_text_missing`; its body may be up to 6 × 64 KiB + 1 KiB (an MR text of 64 KiB, escaped); the pages that show the job get its detail |
 | `POST api/jobs/<ws>/<ticket>/mr-reset` | `{}` | `Execution.resetMr(ws, ticket)` (SF-080): the factory's text back and the commit message with it; result as `mr-save`; `409 invalid_state` "The MR text is already the factory's." |
 | `POST api/jobs/<ws>/<ticket>/handover`, `.../takeback`, `.../handed-done` | `{}` | `Execution.handover`, `takeback`, `handedDone` (`sf handover`, `sf takeback`, `sf handed-done`, SF-073); `409` for `invalid_state`, `runner_active` and the hand-over's codes (section Hand-over to your checkout). `GET api/jobs/<ws>/<ticket>` of a `handed_over` job also starts `Execution.checkHandedOver` (at most once a minute), whose push reaches the page through the job's events |
+| `POST api/jobs/<ws>/<ticket>/handed-done-merged` | `{"confirm"?: string}` | `Execution.markHandedDone` (`sf handed-done --merged`, Merged another way): result `{state, branch}`; origin is not asked; on the remote port `confirm` must be the job's ticket (`409 confirm_required` without); `409` for `invalid_state` and `runner_active` |
 | `POST api/jobs/<ws>/<ticket>/mr-merge` | `{}` | `Execution.mergeMergeRequest(ws, ticket)` (`sf mr merge`): result `{state, branch, mr}`; `409 mr_not_mergeable` with the host's reason, `409 mr_not_open`, `409 mr_check_failed` (the merge check), `409 runner_stopping` (the check was cancelled), and the codes above |
 | `POST api/jobs/<ws>/<ticket>/mr-status` | `{}` | `Execution.mergeRequestStatus(ws, ticket)` (`sf mr status`): result `{state, branch, mr, status: {number, url, state, draft, mergeable, reason?, checks?, merge_commit?}}`; every page gets the jobs again, and the pages that show the job its detail (a merge request merged or closed on the host shows so at once) |
 | `POST api/workspaces` | `{"name": string, "path": string, "handoff"?: "checkout" \| "off", "color"?: <palette name>, "description"?: string, "app"?: string, "digest"?: {"track": boolean, "my_work": boolean}}` | `Setup.addWorkspace`: the rules of `sf workspace add`; `color` one of `blue`, `teal`, `green`, `olive`, `orange`, `red`, `purple`, `grey` (SF-084), anything else `400 invalid_body`; `description`, `app` and `digest` (SF-103; absent: none, the name, both off); result the workspace row |

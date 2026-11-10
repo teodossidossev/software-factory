@@ -284,7 +284,7 @@ function renderHandoverPanel(job: JobRow, detail: JobDetail | null): void {
   const paths = el('div', 'ho-paths');
   paths.append(
     handoverPath('I push it myself', ['Review and run it in the IDE.', 'Commit (the message is prefilled with the MR text) and push.', 'Open the MR on the forge.'],
-      actionButton(job, 'handed-done', 'I opened the MR', 'btn primary')),
+      actionButton(job, 'handed-done', 'I opened the MR', 'btn primary'), actionButton(job, 'handed-done-merged', ACTION_LABELS['handed-done-merged']!, 'btn')),
     handoverPath('The factory pushes it', ['Review it in the IDE.', 'The factory pushes its commit (or your own commits, if you committed); your uncommitted edits stay in your checkout and are not pushed.',
       ...(viaMr ? ['Then it opens the MR.'] : [])],
     viaMr ? actionButton(job, 'mr-create', 'Push and open the MR…', 'btn primary') : actionButton(job, 'approve', 'Push…', 'btn primary')),
@@ -294,12 +294,12 @@ function renderHandoverPanel(job: JobRow, detail: JobDetail | null): void {
   keepFocus(row, () => row.replaceChildren(actionButton(job, 'say', 'Ask for changes', 'btn'), el('span', 'muted', "The job takes your checkout's edits back and works on your message.")));
 }
 
-// One path of the panel: its title, its steps and its button.
-function handoverPath(title: string, steps: readonly string[], action: HTMLElement): HTMLElement {
+// One path of the panel: its title, its steps and its buttons.
+function handoverPath(title: string, steps: readonly string[], ...actions: HTMLElement[]): HTMLElement {
   const box = el('section', 'ho-path');
   const list = el('ol');
   list.append(...steps.map((step) => el('li', '', step)));
-  box.append(el('b', '', title), list, action);
+  box.append(el('b', '', title), list, ...actions);
   return box;
 }
 
@@ -524,6 +524,9 @@ function describeOutcome(action: string, result: unknown): Outcome {
   if (action === 'handed-done') {
     return { level: 'ok', text: `Pushed by you: ${data.branch} is on origin${typeof data.commit === 'string' ? ` at ${data.commit.slice(0, 12)}` : ''}; the job is ${data.state}.` };
   }
+  if (action === 'handed-done-merged') {
+    return { level: 'ok', text: `Marked done: you merged ${data.branch}'s changes another way; the job is ${data.state}.` };
+  }
   if (action === 'mr-create') {
     if (data.mr !== null && typeof data.mr === 'object') {
       // From ready_for_human_review the push came first: the outcome carries the compare link too.
@@ -600,6 +603,7 @@ const DONE_TEXT: Readonly<Record<string, string>> = {
   say: 'Message sent', approve: 'Pushed', abort: 'Aborted', review: 'The review runs again', accept: 'The MR is being prepared', settle: 'Settled',
   simplify: 'Simplify sent to the Implementer', archive: 'Archived', 'mr-create': 'Merge request opened', 'mr-merge': 'Merged', 'mr-status': 'MR status read',
   pause: 'Paused', resume: 'Resumed', restart: 'Restarted', handover: 'Handed over to your checkout', takeback: 'Taken back', 'handed-done': 'Your push is recorded',
+  'handed-done-merged': 'Marked done',
 };
 
 // The jobs of an api/jobs answer or a jobs event; its remote says which port the page uses.
@@ -619,6 +623,7 @@ const REMOTE_CONFIRM_TEXT: Readonly<Record<string, string>> = {
   retry: 'it runs the MR preparation again, and pushes again after a failed push.',
   'mr-create': 'it opens the merge request on the Git host, pushing the branch first when it is not pushed yet.',
   'mr-merge': 'it merges the merge request on the Git host.',
+  'handed-done-merged': 'it marks the job done without asking origin.',
 };
 
 // The ticket dialog, made on first use: a title, the action's text, the input and two buttons.
@@ -931,6 +936,7 @@ function openConfirm(action: string): void {
     approve: job.state === 'handed_over'
       ? `Pushes branch ${job.branch} to origin from your checkout: the factory's commit when you did not commit on the branch, else your commits on the job's base. Your uncommitted changes stay in your checkout and are not pushed.`
       : `Pushes branch ${job.branch} to origin: the one commit the factory prepared at Clean, rebased onto ${job.base}. Nothing is committed or rebased now; a tip edited by hand is refused unless pushed as it is.`,
+    'handed-done-merged': 'Mark the job done: you merged its changes yourself under another branch or straight into the main branch. The factory does not check origin.',
     abort: `Ends the job on branch ${job.branch}: the Implementer session stops and queued messages are dropped. The branch and its worktree stay as they are.`,
     restart: `Starts ${job.ticket} again from its current Task file, as a new job on a fresh worktree and branch from ${job.base}. Thrown away: the Implementer session${job.state === 'paused' || job.state === 'needs_human' ? ' and its queued messages' : ''}, the worktree${typeof job.worktree === 'string' ? ` ${job.worktree}` : ''} with its uncommitted changes (unless kept below) and the branch ${job.branch}, deleted only when it has no commit beyond the base and was never pushed: otherwise nothing is touched and the restart is refused. The job's history is archived as sf reset does.`,
     simplify: `Writes one Fix section “Simplify” with the suggestions below into the Task file; the Implementer applies them and the Claude review and the gate review the result as usual. The suggestions are recorded in the ledger as your choice, so a reviewer cannot ask for them back. It runs once per job.`,
@@ -999,6 +1005,7 @@ function renderConfirmButton(): void {
   ok.textContent = confirm.action === 'mr-create' ? 'Create the merge request'
     : confirm.action === 'mr-merge' ? `Merge #${job?.mr?.number} into ${job?.base}`
     : confirm.action === 'simplify' ? 'Simplify'
+    : confirm.action === 'handed-done-merged' ? ACTION_LABELS['handed-done-merged']!
     : confirm.action === 'accept' ? (job?.stop_group === 'simplify' ? 'Skip and prepare the MR' : 'Accept and prepare the MR')
     : confirm.action === 'restart' ? (byIdAs('keep-files', 'input').checked ? 'Restart, keep the files' : 'Restart')
     : confirm.action === 'approve' ? (byIdAs('as-is', 'input').checked ? 'Approve: push as it is' : 'Approve: push the branch') : discard ? 'Abort and discard the branch' : 'Abort, keep the worktree';
@@ -1058,7 +1065,7 @@ function act(action: string): void {
     sendSay(action === 'goon');
   } else if (action === 'review-mr') {
     go(key, 'mr');
-  } else if (['abort', 'restart', 'approve', 'accept', 'simplify', 'mr-create', 'mr-merge'].includes(action)) {
+  } else if (['abort', 'restart', 'approve', 'accept', 'simplify', 'mr-create', 'mr-merge', 'handed-done-merged'].includes(action)) {
     openConfirm(action);
   } else if (action === 'resume') {
     const message = byIdAs('msg', 'textarea').value;

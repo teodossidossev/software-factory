@@ -56,8 +56,8 @@ export type PostRoute = JobRoute | QueueRoute;
 const job = <S extends z.ZodType>(route: Omit<JobRoute<S>, 'kind'>): JobRoute<S> => ({ kind: 'job', ...route });
 const queue = <S extends z.ZodType>(route: Omit<QueueRoute<S>, 'kind'>): QueueRoute<S> => ({ kind: 'queue', ...route, refresh: 'setup' });
 const EMPTY = { shape: '{}', body: z.strictObject({}) };
-// The four routes that can push or merge take the ticket beside their other keys; the local port
-// ignores it.
+// The routes that can push or merge, and Merged another way, take the ticket beside their other
+// keys; the local port ignores it.
 const CONFIRM = { confirm: z.string().optional() };
 
 export const POST_ROUTES = {
@@ -121,11 +121,16 @@ export const POST_ROUTES = {
     shape: '{"keep_files"?: boolean}', body: z.strictObject({ keep_files: z.boolean().optional() }), refresh: 'jobs', command: 'restart',
     call: (actions, _queue, [w, t], body) => actions.restart(w, t, body.keep_files === true),
   }),
-  // sf handover, takeback and handed-done: the Execution refuses any state but
-  // ready_for_human_review (handover) and handed_over (the others).
+  // sf handover, takeback, handed-done and handed-done --merged: the Execution refuses any state but
+  // ready_for_human_review (handover) and handed_over (the others). Merged another way ends the job
+  // without asking origin, so the remote port asks for the ticket.
   handover: job({ ...EMPTY, command: 'handover', call: (actions, _queue, [w, t]) => actions.handover(w, t) }),
   takeback: job({ ...EMPTY, command: 'takeback', call: (actions, _queue, [w, t]) => actions.takeback(w, t) }),
   'handed-done': job({ ...EMPTY, command: 'handed-done', call: (actions, _queue, [w, t]) => actions.handedDone(w, t) }),
+  'handed-done-merged': job({
+    shape: '{"confirm"?: string}', body: z.strictObject(CONFIRM), confirm: true, command: 'handed-done',
+    call: (actions, _queue, [w, t]) => actions.markHandedDone(w, t),
+  }),
   // The Merge request screen: the MR title and text, and the branch and the base when they
   // change. The Execution refuses any state but ready_for_human_review and needs_human after a
   // failed push; the job's detail reaches every page that shows it. mr-reset keeps mr-save's bound.

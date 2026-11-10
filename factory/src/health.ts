@@ -12,7 +12,7 @@ import { dirname, join, relative } from 'node:path';
 import { DigestStore } from './digest-run.js';
 import { digestFollowed, digestTime, dueByClock } from './digest-schedule.js';
 import { type ForgeChoice, withoutHostTokens } from './forge.js';
-import { type Job, type JobStore, runningJobs } from './jobs.js';
+import { type Job, type JobStore, runningJobs, statesWith } from './jobs.js';
 import { healthNotification, type Notification } from './notify.js';
 import type { QueueView } from './queue.js';
 import { loadRegistry, type Registry } from './registry.js';
@@ -66,7 +66,7 @@ export const TUNNEL_POLL_METRIC = 'commands_poll_last_successful_timestamp_secon
 export const TEST_RUN_GRACE_MS = 5 * 60_000;
 export const RUNNER_GRACE_MS = 60_000;
 // The states in which a job's runner runs (src/runner.ts).
-export const RUNNER_STATES: readonly Job['state'][] = ['working', 'awaiting_review', 'preparing_mr'];
+export const RUNNER_STATES = statesWith('sandboxed');
 // starting: sf serve creates the worktree and collects the rules before it starts the runner, so a
 // job may be starting without one for this long.
 export const STARTING_GRACE_MS = 10 * 60_000;

@@ -16,51 +16,62 @@ import type { ReviewItem } from './review.js';
 import type { Suggestion } from './simplify.js';
 import type { TestsOutcome, TestsRecord } from './test-command.js';
 
-export const JOB_STATES = [
-  'starting',
-  'working',
-  'awaiting_review',
-  'needs_human',
-  // The user paused the job: nothing runs; sf resume goes on where it stopped.
-  'paused',
-  // A session hit the plan's usage limit: parked, nothing runs, the job keeps its slot; the
-  // run queue resumes it when the limit resets, or sf resume does now.
-  'waiting_limit',
-  'ready_for_human_review',
-  // The job's changes are in the workspace's checkout on its branch: the user reviews them
-  // there; nothing of the job runs.
-  'handed_over',
-  'preparing_mr',
-  'pushed',
-  'aborted',
-  'failed',
-] as const;
+export const JOB_STATES = ['starting', 'working', 'awaiting_review', 'needs_human', 'paused', 'waiting_limit', 'ready_for_human_review',
+  'handed_over', 'preparing_mr', 'pushed', 'aborted', 'failed'] as const;
 export type JobState = (typeof JOB_STATES)[number];
-// Every state in which the session may be alive. paused is not one: nothing of a paused
-// job runs; nor is handed_over: the job's changes wait in the user's checkout.
-export const ACTIVE_STATES: readonly JobState[] = ['starting', 'working', 'awaiting_review', 'needs_human', 'ready_for_human_review', 'preparing_mr'];
-// The states that count as running against the run queue's limit max_running, across
-// every workspace: the job works or is reviewed, or is parked on a usage limit (it holds its
-// slot). A paused job and one that waits for the user (needs_human, ready_for_human_review,
-// handed_over) do not count.
-export const RUNNING_STATES: readonly JobState[] = ['starting', 'working', 'awaiting_review', 'preparing_mr', 'waiting_limit'];
+// The traits of a job state, each the name of a set of states (statesWith gives it, in JOB_STATES order):
+//   active: the session may be alive; nothing of a paused job runs, a handed_over job's changes wait in the user's checkout.
+//   running: counts against the run queue's limit max_running in every workspace: works, is reviewed, or holds its slot on a usage limit.
+//   terminal: a new job for the same ticket may start.
+//   pausable: sf pause takes it (and it is the paused job's paused.from).
+//   restartable: sf restart takes it: the job waits for the user or has ended, not pushed, or is parked on a usage limit.
+//   resumable: sf resume takes it.
+//   sayable: it takes a message (sf say).
+//   notified: a job that reaches it notifies the user (src/notify.ts).
+//   waiting: the job waits for the user (src/stats.ts).
+//   ready: the job reached the user's review (src/stats.ts).
+//   delivered: the job's change reached the user, pushed or in their checkout (src/stats.ts).
+//   sandboxed: a session of the job may run under Claude Code's sandbox: its runner runs (src/health.ts, src/execution/handover-steps.ts).
+//   idle: for sf update's drain, nothing of the job runs or is about to.
+//   busy: for sf update's drain, it must not exist right before the pull.
+//   past_reviews: for the live smoke, past the reviews: a job there without a review (or gate) record will not get one.
+//   stopped: for the live smoke, the job stopped: the step it was on fails.
+type Trait = 'active' | 'running' | 'terminal' | 'pausable' | 'restartable' | 'resumable' | 'sayable' | 'notified' | 'waiting' | 'ready' | 'delivered'
+  | 'sandboxed' | 'idle' | 'busy' | 'past_reviews' | 'stopped';
+export const STATE_TRAITS: Readonly<Record<JobState, readonly Trait[]>> = {
+  starting: ['active', 'running', 'busy'],
+  working: ['active', 'running', 'pausable', 'sayable', 'sandboxed', 'busy'],
+  awaiting_review: ['active', 'running', 'pausable', 'sayable', 'sandboxed', 'busy'],
+  needs_human: ['active', 'restartable', 'sayable', 'notified', 'waiting', 'idle', 'stopped'],
+  // The user paused the job: nothing runs; sf resume goes on where it stopped.
+  paused: ['restartable', 'resumable', 'notified', 'idle'],
+  // A session hit the plan's usage limit: parked, the job keeps its slot; the run queue resumes it when the limit
+  // resets, or sf resume does now.
+  waiting_limit: ['running', 'restartable', 'resumable', 'notified', 'idle'],
+  ready_for_human_review: ['active', 'sayable', 'notified', 'waiting', 'ready', 'idle', 'past_reviews'],
+  // The job's changes are in the workspace's checkout on its branch: the user reviews them there.
+  handed_over: ['sayable', 'notified', 'waiting', 'ready', 'delivered', 'idle'],
+  preparing_mr: ['active', 'running', 'sandboxed', 'busy', 'past_reviews'],
+  pushed: ['terminal', 'notified', 'delivered', 'idle', 'past_reviews'],
+  aborted: ['terminal', 'restartable', 'idle', 'stopped'],
+  failed: ['terminal', 'restartable', 'notified', 'idle', 'stopped'],
+};
+export const statesWith = (trait: Trait): readonly JobState[] => JOB_STATES.filter((state) => STATE_TRAITS[state].includes(trait));
+export const ACTIVE_STATES = statesWith('active');
+export const RUNNING_STATES = statesWith('running');
 // The running jobs of every workspace (RUNNING_STATES): what the run queue's limit counts.
 export function runningJobs(jobs: Job[]): Job[] {
   return jobs.filter((job) => RUNNING_STATES.includes(job.state));
 }
-// States after which a new job for the same ticket may start.
-export const TERMINAL_STATES: readonly JobState[] = ['failed', 'aborted', 'pushed'];
-// The states sf pause takes, and what was interrupted when the job was paused: the
-// Implementer's turn, or a round of the Claude review, the gate or the simplification pass (none
-// when nothing ran, as while awaiting review with the review off).
+export const TERMINAL_STATES = statesWith('terminal');
+// A tuple for z.enum (paused.from); it equals statesWith('pausable'). PAUSE_STEPS: what was interrupted when the job was
+// paused: the Implementer's turn, or a round of the Claude review, the gate or the simplification pass (none when nothing
+// ran, as while awaiting review with the review off).
 export const PAUSABLE_STATES = ['working', 'awaiting_review'] as const;
 export const PAUSE_STEPS = ['turn', 'review', 'gate', 'simplify'] as const;
 export type PauseStep = (typeof PAUSE_STEPS)[number];
-// The states sf restart takes: a job that waits for the user or has ended, not pushed, or
-// is parked on a usage limit.
-export const RESTARTABLE_STATES: readonly JobState[] = ['paused', 'waiting_limit', 'aborted', 'failed', 'needs_human'];
-// The states sf resume takes: paused and waiting_limit.
-export const RESUMABLE_STATES: readonly JobState[] = ['paused', 'waiting_limit'];
+export const RESTARTABLE_STATES = statesWith('restartable');
+export const RESUMABLE_STATES = statesWith('resumable');
 // How long a job parked on a usage limit without a parsed reset time waits before the run queue
 // tries it again.
 export const LIMIT_RETRY_MS = 30 * 60_000;
@@ -69,33 +80,11 @@ export const LIMIT_RETRY_MS = 30 * 60_000;
 // after the error code: every needs_human stop of one step shares its action. The order is the
 // order of the README's table.
 export const JOB_ACTIONS = [
-  'create',
-  'launch',
-  'recover',
-  'repair_handover',
-  'publish',
-  'mr_turn_end',
-  'review_retry',
-  'go_on',
-  'verdict',
-  'prepare_mr',
-  // The end of the run of the workspace's test command: a Tests Fix, or a stop.
-  'tests',
-  // The Retry's own stop when MR preparation fails again before it began (retryMr).
-  'mr_retry',
-  'ready',
-  'hand_over',
-  'take_back',
-  'push',
-  'pushed_by_user',
-  'abort',
-  'pause',
-  'resume',
-  'park',
-  'limit_reset',
-  'fix',
-  'say',
-  'ask_for_changes',
+  'create', 'launch', 'recover', 'repair_handover', 'publish', 'mr_turn_end', 'review_retry', 'go_on', 'verdict', 'prepare_mr',
+  // tests: the end of the run of the workspace's test command, a Tests Fix or a stop. mr_retry: the Retry's own stop when MR
+  // preparation fails again before it began (retryMr).
+  'tests', 'mr_retry', 'ready', 'hand_over', 'take_back', 'push', 'pushed_by_user', 'abort', 'pause', 'resume', 'park',
+  'limit_reset', 'fix', 'say', 'ask_for_changes',
 ] as const;
 export type JobAction = (typeof JOB_ACTIONS)[number];
 

@@ -22,7 +22,7 @@ import { writeFileAtomic } from './atomic.js';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
 import type { IpcResponse } from './ipc.js';
-import { type Job, type JobState, JobStore, now, TERMINAL_STATES } from './jobs.js';
+import { type Job, type JobState, JobStore, now, PAUSABLE_STATES, statesWith, TERMINAL_STATES } from './jobs.js';
 import { liveOwner, ownerAlive, startTime } from './pid-lock.js';
 import { lockPath } from './runner.js';
 import { JOURNAL_HINT, SERVICE_NAME } from './service.js';
@@ -368,11 +368,11 @@ export interface UpdateOptions {
 }
 
 // The job states the drain pauses, and those it waits through.
-const PAUSABLE: readonly JobState[] = ['working', 'awaiting_review'];
+const PAUSABLE: readonly JobState[] = PAUSABLE_STATES;
 // Idle for the drain: nothing of the job runs or is about to.
-const IDLE_STATES: readonly JobState[] = ['needs_human', 'ready_for_human_review', 'handed_over', 'paused', 'waiting_limit', ...TERMINAL_STATES];
+const IDLE_STATES = statesWith('idle');
 // The states that must not exist right before the pull.
-const BUSY_STATES: readonly JobState[] = ['working', 'awaiting_review', 'starting', 'preparing_mr'];
+const BUSY_STATES = statesWith('busy');
 
 interface Busy {
   checks: JobRef[];

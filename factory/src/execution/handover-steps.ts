@@ -8,7 +8,7 @@ import { pushedBranch } from '../continues.js';
 import { FactoryError } from '../errors.js';
 import { runGit } from '../git.js';
 import { askForChanges, commitMessagePath, finishAsk, handOver, remoteBranch, type RemoteBranch, restoreConfig, takeBack, undoHandover } from '../handoff.js';
-import { type FileChange, type Handover, type Job, type JobState, now } from '../jobs.js';
+import { type FileChange, type Handover, type Job, type JobState, now, statesWith } from '../jobs.js';
 import { mrMessage } from '../mr.js';
 import { notificationLine } from '../patch.js';
 import { checkoutGitDir, type LockScan, removeStaleSandboxLock, staleSandboxLock } from '../sandbox-lock.js';
@@ -22,7 +22,7 @@ import { cutOffError, mrFailure } from './errors.js';
 // The states in which a job's sessions may run under Claude Code's sandbox, which binds the
 // workspace checkout's .git/config.lock into each sandboxed command: the Implementer's
 // turns (working, and the MR text and conflict turns of preparing_mr) and the reviewers' sessions.
-const SANDBOXED_STATES: readonly JobState[] = ['working', 'awaiting_review', 'preparing_mr'];
+const SANDBOXED_STATES = statesWith('sandboxed');
 
 // The refusal of a hand-over or Take it back that met the sandbox's leftover config lock while
 // another job of the workspace ran, whose sandbox may be using it; a hand-over refused so
@@ -158,7 +158,7 @@ export class HandoverPart {
     const jobs = new Map((await this.#store.jobs.list()).map((job) => [`${job.workspace}/${job.ticket}`, job]));
     const gone = (workspace: string, ticket: string): boolean => {
       const job = jobs.get(`${workspace}/${ticket}`);
-      return job === undefined || (['pushed', 'aborted'].includes(job.state) && Date.now() - Date.parse(job.updated_at) > SAVED_REF_DAYS * 24 * 3600 * 1000);
+      return job === undefined || ((job.state === 'pushed' || job.state === 'aborted') && Date.now() - Date.parse(job.updated_at) > SAVED_REF_DAYS * 24 * 3600 * 1000);
     };
     for (const name of await this.#store.jobs.workspaceNames()) {
       let workspace: Workspace;

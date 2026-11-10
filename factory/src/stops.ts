@@ -7,7 +7,7 @@
 // holds. job.error.code stays a string on disk: canonicalStop resolves it, and an unknown code is
 // `other`. Pure: the caller reads the facts (the ledger, the last review and gate, the Git host).
 import type { DashboardAction } from './dashboard-routes.js';
-import { claudeReviews, type GateRecord, type Job, PAUSABLE_STATES, RESTARTABLE_STATES, type ReviewRecord, TERMINAL_STATES } from './jobs.js';
+import { claudeReviews, type GateRecord, type Job, PAUSABLE_STATES, RESTARTABLE_STATES, RESUMABLE_STATES, type ReviewRecord, statesWith, TERMINAL_STATES } from './jobs.js';
 import type { LedgerEntry } from './ledger.js';
 import { actedVerdict, type ReviewItem } from './review.js';
 import { usageLimit } from './usage-limit.js';
@@ -176,11 +176,11 @@ export const ACTION_IDS: readonly ActionId[] = [
 ];
 
 // The states that take a message (sf say), and the hand-over's actions with the state each takes.
-const SAY_STATES: readonly string[] = ['working', 'awaiting_review', 'needs_human', 'ready_for_human_review', 'handed_over'];
+const SAY_STATES: readonly string[] = statesWith('sayable');
 const HANDOVER_STATES: Readonly<Partial<Record<ActionId, string>>> = { handover: 'ready_for_human_review', 'handed-done': 'handed_over', takeback: 'handed_over' };
 // Pause, Resume and Restart: a job parked on a usage limit (waiting_limit) is
 // resumed (Resume now) and restarted like a paused one.
-const RESUME_STATES: readonly string[] = ['paused', 'waiting_limit'];
+const RESUME_STATES: readonly string[] = RESUMABLE_STATES;
 
 // The stop row of a needs_human job; null in any other state.
 function stopRowOf(job: Job, now: Date): { code: StopCode; row: StopRow } | null {

@@ -10,7 +10,7 @@ import { FactoryError } from '../errors.js';
 import { runGit } from '../git.js';
 import { attachWorktree, checkBranchFree } from '../handoff.js';
 import { jobUserMessages } from '../job-stream.js';
-import { claudeReviews, type FileChange, type Handover, type Job, type JobState, now, type PauseStep } from '../jobs.js';
+import { claudeReviews, type FileChange, type Handover, type Job, type JobState, now, type PauseStep, statesWith } from '../jobs.js';
 import { answerFix, escalationMessage, headings, type LedgerEntry, userFixItems } from '../ledger.js';
 import { buildPatch, changedFilesSection, fileChanges, notificationLine, type Patch } from '../patch.js';
 import { factoryPrompt, iterationCost } from '../prompts.js';
@@ -509,7 +509,7 @@ export class TurnsPart {
     if (job.state === 'waiting_limit') {
       throw new FactoryError('invalid_state', `The job waits for the usage limit to reset. Resume the job with a message: sf resume ${job.workspace} ${job.ticket} [message]`);
     }
-    if (!['working', 'awaiting_review', 'needs_human', 'ready_for_human_review', 'handed_over'].includes(job.state)) {
+    if (!statesWith('sayable').includes(job.state)) {
       throw new FactoryError('invalid_state', `sf say needs working, awaiting_review, needs_human, ready_for_human_review or handed_over; the job is ${job.state}.`);
     }
     if (job.state === 'handed_over') {

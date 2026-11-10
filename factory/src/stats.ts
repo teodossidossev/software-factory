@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { DIGEST_ID, DigestStore } from './digest-run.js';
 import { explanationPath, readExplanation } from './explain.js';
 import { GATE_REVIEWER } from './gate.js';
-import { type GateTokens, type Job, type JobDir, type JobState, type JobStore, RUNNING_STATES, TERMINAL_STATES } from './jobs.js';
+import { type GateTokens, type Job, type JobDir, type JobState, type JobStore, RUNNING_STATES, statesWith, TERMINAL_STATES } from './jobs.js';
 import { type LedgerEntry, SIMPLIFIER } from './ledger.js';
 import { localTime } from './local-time.js';
 import { entryOf, type Outcome, type Outcomes, outcomeOf } from './metrics.js';
@@ -255,12 +255,12 @@ const MAX_CASES = 50;
 const MAX_JOB_ROWS = 200;
 // The days before the period the cost-spike rule looks at.
 const SPIKE_DAYS = 30;
-const WAITING_STATES: readonly JobState[] = ['needs_human', 'ready_for_human_review', 'handed_over'];
-const READY_STATES: readonly string[] = ['ready_for_human_review', 'handed_over'];
+const WAITING_STATES = statesWith('waiting');
+const READY_STATES: readonly string[] = statesWith('ready');
 const CHURN_CODES: readonly string[] = codesWith('ledger');
 // Only the event lines with one of these are parsed.
 const EVENT_MARKS = ['"type":"result"', '"type":"review"', '"type":"review_failed"', '"type":"simplify_chosen"', '"state":{'];
-const DELIVERED_STATES: readonly JobState[] = ['pushed', 'handed_over'];
+const DELIVERED_STATES = statesWith('delivered');
 const CHECK_FILE = /^[0-9a-f]{16}\.json$/;
 const READ_CHUNK = 1024 * 1024;
 

@@ -9,6 +9,7 @@
 // (test/support/children.ts, SF-114).
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -164,6 +165,12 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
     ...(process.env.RUN_TESTS_MARK !== undefined ? { RUN_TESTS_MARK: process.env.RUN_TESTS_MARK } : {}),
     ...env.extra,
   };
+}
+
+// The package's own code-review skill, and the review_method review.json and gate.json have with it.
+export const OWN_REVIEW_SKILL = fileURLToPath(new URL('../../../skills/code-review/SKILL.md', import.meta.url));
+export async function ownReviewMethod(): Promise<{ path: string; sha256: string }> {
+  return { path: OWN_REVIEW_SKILL, sha256: createHash('sha256').update(await readFile(OWN_REVIEW_SKILL)).digest('hex') };
 }
 
 export async function newEnv(name: string, extra: Record<string, string> = {}, options: { realBwrap?: boolean } = {}): Promise<Env & { proc: string }> {

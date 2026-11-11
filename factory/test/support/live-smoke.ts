@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { type ChildProcess, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { PROBES, STEPS } from '../../src/live-smoke.js';
 import { taskChecksDir } from '../../src/sandbox-denials.js';
@@ -55,12 +55,18 @@ export interface Ran {
   rows: Map<string, { status: string; detail: string }>;
 }
 
+// The TMPDIR of one smoke run: a short directory of its own under the test file's temp, so the
+// socket of the smoke's state (<tmp>/sf-smoke-XXXXXX/state/sf.sock) stays within the 107 bytes a
+// socket path may have (src/ipc.ts) under a long TMPDIR too, such as a sandbox's.
+export async function smokeTmp(): Promise<string> {
+  return mkdtemp(join(temp, 's'));
+}
+
 // Runs sf smoke as the user would, with the test's own state, config (and env file) and TMPDIR.
 // onStdout: called with the output so far on each chunk, with the child (to signal it).
 export async function smoke(name: string, args: string[], setup: (env: Env) => Promise<void>, extra: Record<string, string> = {}, onStdout?: (text: string, child: ChildProcess) => void, extraOf?: (env: Env) => Record<string, string>): Promise<Ran> {
   const env = await newEnv(name);
-  const tmp = join(temp, name, 'tmp');
-  await mkdir(tmp, { recursive: true });
+  const tmp = await smokeTmp();
   await mkdir(env.config, { recursive: true });
   // The user's env file: a Git host token and a notification token the child must never see.
   await writeFile(join(env.config, 'auth.env'), 'SF_GITHUB_TOKEN=ghp_fakeFakeFakeFakeFakeFake1234\nSF_NTFY_TOKEN=tk_fake\n');

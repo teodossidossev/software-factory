@@ -21,7 +21,7 @@ import { loadHandbook } from '../src/server.js';
 import { runSimplify } from '../src/simplify.js';
 import { writeTask } from '../src/task-file.js';
 import { act, fetchRaw } from './support/dashboard-client.js';
-import { assertPathDenials, call, type Env, FAKE, fakeLog, git, newEnv, newRepo, probeLog, putRules, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor } from './support/harness.js';
+import { assertPathDenials, call, type Env, FAKE, fakeLog, git, newEnv, newRepo, ownReviewMethod, probeLog, putRules, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor } from './support/harness.js';
 
 const FIX = {
   verdict: 'fix',
@@ -237,6 +237,7 @@ test('fix, then clean: the Fix section from the items, the next iteration, Clean
     assert.ok(first!.includes(`<task_file path=".software-factory/R-1.md">\n${task('R-1', 'Greet the reader').trimEnd()}\n</task_file>`));
     assert.ok(first!.includes('<report>\nReport of iteration 1\n'));
     assert.ok(first!.includes('<marked_paths>\nNone.\n</marked_paths>'));
+    assert.ok(first!.includes('\n<review_method>\nTwo-axis review of the diff'), first);
     assert.match(first!, /<patch>\ndiff --git a\/README\.md b\/README\.md\n[\s\S]*\n\+hello world\n<\/patch>$/);
     assert.match(second!, /^Code review of iteration 2 of ticket R-1\. /);
     assert.ok(second!.includes(`${FIX_SECTION.trimEnd()}\n</task_file>`));
@@ -246,7 +247,7 @@ test('fix, then clean: the Fix section from the items, the next iteration, Clean
     const recorded = await jobs.readReview('app', 'R-1', 1);
     assert.ok(recorded !== undefined && 'verdict' in recorded);
     const { started_at: startedAt, ended_at: endedAt, ...rest } = recorded;
-    assert.deepEqual(rest, { reviewer: 'claude', ...FIX, items: ledgerFields(FIX.items), cost_usd: 0.0456 });
+    assert.deepEqual(rest, { reviewer: 'claude', ...FIX, items: ledgerFields(FIX.items), cost_usd: 0.0456, review_method: await ownReviewMethod() });
     assert.ok(Date.parse(startedAt) <= Date.parse(endedAt));
     assert.deepEqual((await eventsOf(env, 'R-1')).filter((record) => record.type === 'review').map(({ ts: _ts, ...record }) => record), [
       { iteration: 1, type: 'review', reviewer: 'claude', verdict: 'fix', items: 1 },
@@ -659,7 +660,7 @@ test('a failed review (a turn that is not a success, no output, an invalid verdi
       assert.equal(failed.error.code, 'review_failed');
       assert.match(failed.error.message, entry.message);
       assert.deepEqual(failed.review, { status: 'failed', summary: failed.error.message });
-      assert.deepEqual(await new JobStore(env.state).readReview('app', ticket, 1), { reviewer: 'claude', error: failed.error.message });
+      assert.deepEqual(await new JobStore(env.state).readReview('app', ticket, 1), { reviewer: 'claude', error: failed.error.message, review_method: await ownReviewMethod() });
       assert.doesNotMatch(await taskFile(repo, ticket), /## Fix/);
     }
     assert.match((await runCli(env, ['watch', 'app', 'F-2', '--once'])).stdout, /\[1\] review by claude failed: The review returned no structured output\.$/m);
@@ -808,7 +809,7 @@ test('retry a failed review: sf review and the dashboard put the job back to awa
     assert.match(retried.stdout, /^state: awaiting_review\niteration: 1$/m);
     const again = await waitFor(served, 'R-2', 'needs_human', 1);
     assert.equal(again.error.message, 'The review returned no structured output.');
-    assert.deepEqual(await jobs.readReview('app', 'R-2', 1), { reviewer: 'claude', error: again.error.message });
+    assert.deepEqual(await jobs.readReview('app', 'R-2', 1), { reviewer: 'claude', error: again.error.message, review_method: await ownReviewMethod() });
 
     // The dashboard's route: the third review's fix starts iteration 2, whose review is clean.
     const reply = await act(served.dashboard!, 'api/jobs/app/R-2/review', {});

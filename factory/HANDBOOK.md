@@ -192,6 +192,9 @@ In the factory's own repository, the dashboard's page code is TypeScript in `fac
 script lives in `factory/static/`. It is strict, with no `any`, and each file is a global classic
 script, with no `import` or `export`. A new page file goes into `DASHBOARD_SCRIPTS`
 (`factory/src/dashboard.ts`), in its load order, and gets its `<script>` in `dashboard.html`.
+A payload type of `factory/web/types.d.ts` copies the server's; a new one gets its check in
+`factory/test/web-types/check.ts`, or a `PAGE_ONLY` entry with its reason when no server value
+carries it (`npm run typecheck` and `npm test` fail otherwise).
 
 Comments in the factory's code describe what the code does now and why, not its history: no
 ticket numbers and no "now", "no longer" or "since" about earlier versions. The ticket lives in

@@ -135,7 +135,8 @@ still has a program to run. Before compiling, the build heals an interrupted one
 missing and `dist.prev/` exists, `dist.prev/` becomes `dist/` again, even if the build then fails;
 a `dist.prev/` next to a `dist/` is removed. `npm run build` also builds the dashboard's page code (SF-146): the
 TypeScript of `web/` through `tsconfig.web.json` into `dist/web/`, and `npm run typecheck` checks
-both configurations. `npm test` and `npm run test:browser` both build first. At the repository
+both configurations, then the page's payload types against the server's (`tsconfig.web-types.json`,
+SF-186). `npm test` and `npm run test:browser` both build first. At the repository
 root, `npm run build`, `npm run typecheck` and `npm test` run the same scripts in `factory/`. Since
 SF-114 every sf process a test starts is tracked by `test/support/children.ts` and stopped (SIGTERM,
 then SIGKILL after 5 s) at the end of its file, also on a failure or a signal, and a file whose tests
@@ -3824,7 +3825,15 @@ The page code lives only in `web/`, in TypeScript (SF-146 to SF-150): each scrip
 `web/<name>.ts` is built by `npm run build` into `dist/web/<name>.js` and served from there
 (`dashboardScriptFiles`); `static/` holds no script. A file of `web/` has no `import` or `export`,
 so the compiler keeps it a global classic script; `web/types.d.ts` types the server payloads the
-page reads (copied from `src/`, never imported).
+page reads (copied from `src/`, never imported). Its copies are checked by `test/web-types/check.ts`
+(SF-186), compiled only by `tsconfig.web-types.json` in `npm run typecheck`: for each page type, the
+server's type of the value the page receives it in (a route function's awaited return type, or a
+field or element of it) is assignable to the page's, and the page claims no key the server lacks or
+types `any`, at any depth; a string union is the same union both ways. A drift fails
+`npm run typecheck` with the page type's name and what differs. A new page type gets a check there,
+or a `PAGE_ONLY` entry with its reason when no server value carries it; a server field typed
+`unknown` that the page reads as a narrower type goes in `NARROWED`, else its check fails. `test/web-types.test.ts` fails,
+naming the type, when a type of `web/types.d.ts` has neither.
 
 - `core.js`: constants, state, the DOM, format and HTTP helpers.
 - `job-screens.js`: what the job page reads, Task check, Changes, Merge request, Stream.

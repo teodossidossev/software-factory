@@ -642,7 +642,7 @@ async function stopOf(jobs: JobStore, job: Job): Promise<{ items: unknown[]; sav
 }
 
 // now: nowOf; tool_calls: the Implementer's tool calls in the job (ToolCallCounter); stop: stopOf.
-async function jobsPayload(jobs: JobStore, setup: DashboardSetup, actions: DashboardActions, toolCalls: ToolCallCounter) {
+export async function jobsPayload(jobs: JobStore, setup: DashboardSetup, actions: DashboardActions, toolCalls: ToolCallCounter) {
   const list = [];
   const hosts = new Map<string, MrHost>();
   for (const job of await jobs.list()) {
@@ -661,7 +661,7 @@ async function jobsPayload(jobs: JobStore, setup: DashboardSetup, actions: Dashb
 }
 
 // The workspaces, the hand-over default and the morning digest's settings.
-async function workspacesPayload(setup: DashboardSetup) {
+export async function workspacesPayload(setup: DashboardSetup) {
   return { workspaces: await setup.workspaces(), ...(await setup.workspaceSettings()) };
 }
 
@@ -682,7 +682,7 @@ async function checkOf(checks: DashboardChecks, workspace: string, ticket: strin
 // it in the queue or null, and queue_force, whether Start anyway was given); job_lands_after: the same for the
 // tickets with a live job, for the job page's Waits for and the board's Needed by; queue: the run
 // queue's limit, running count, hold and next ticket (null without a queue).
-async function ticketsPayload(setup: DashboardSetup, checks: DashboardChecks | undefined, queue: DashboardQueue | undefined) {
+export async function ticketsPayload(setup: DashboardSetup, checks: DashboardChecks | undefined, queue: DashboardQueue | undefined) {
   const view = queue === undefined ? undefined : await queue.view();
   const same = (row: TicketRow) => (other: { workspace: string; ticket: string }): boolean => other.workspace === row.workspace && other.ticket === row.ticket;
   const tickets = [];
@@ -706,7 +706,7 @@ async function ticketsPayload(setup: DashboardSetup, checks: DashboardChecks | u
 }
 
 // A row of the tickets payload: the ticket, its conversation and, with the Task checks, its check.
-async function ticketEntry(row: TicketRow, checks: DashboardChecks | undefined) {
+export async function ticketEntry(row: TicketRow, checks: DashboardChecks | undefined) {
   const message = ticketConversation(row.workspace, row.ticket, row.request ?? undefined, row.attachments.map((attachment) => attachment.name));
   const url = conversationUrl(message);
   // A very long message does not fit a link; the page offers it to copy instead.
@@ -721,7 +721,7 @@ async function ticketEntry(row: TicketRow, checks: DashboardChecks | undefined) 
 // path once, a may_touch one marked sensitive), whether there is a scope, and the tickets it waits
 // for with the state of each, from the tickets row (a ticket of another workspace as
 // <workspace>/<ticket>).
-function planOf(text: string, row: TicketRow) {
+export function planOf(text: string, row: TicketRow) {
   const fields = parseFrontMatter(text) ?? new Map<string, string>();
   const scope = taskScope(fields);
   const sensitive = mayTouch(fields);
@@ -772,7 +772,7 @@ async function stateHistory(jobs: JobStore, workspace: string, ticket: string) {
   return history;
 }
 
-async function jobDetail(jobs: JobStore, job: Job, gate: boolean, actions: DashboardActions, setup: DashboardSetup) {
+export async function jobDetail(jobs: JobStore, job: Job, gate: boolean, actions: DashboardActions, setup: DashboardSetup) {
   const iterations = [];
   for (let number = 1; number <= job.iteration; number += 1) {
     try {

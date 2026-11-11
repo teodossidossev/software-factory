@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Job progress (prototype)</title>
+<link rel="stylesheet" href="../../../factory/static/app.css">
+<style>
+/* PROTOTYPE: three ways to show a running job's progress on the board, switchable with ?variant=A|B|C.
+   The phases and step counts are simulated; the time ranges use the factory's own history
+   (working: median 19 min per iteration, p25 10, p75 32; review 2 min; MR text 1 min; start to
+   ready: median 55 min, half of the jobs between 36 and 90). */
+.proto-badge { position: fixed; top: 10px; right: 12px; z-index: 50; font: 700 11px var(--mono); color: var(--proto); border: 1px solid var(--proto); border-radius: 4px; padding: 1px 6px; background: var(--panel); }
+.pbar { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 50; display: flex; gap: 6px; align-items: center; background: var(--bar); color: var(--bar-fg); border-radius: 999px; padding: 6px 8px 6px 14px; box-shadow: 0 4px 16px rgba(0,0,0,.25); font-size: 13px; }
+.pbar button { border: 0; border-radius: 999px; padding: 4px 10px; background: transparent; color: inherit; cursor: pointer; font: inherit; }
+.pbar button.on { background: var(--bar-fg); color: var(--bar); font-weight: 600; }
+.pbar .sep { width: 1px; height: 18px; background: currentColor; opacity: .3; margin: 0 4px; }
+.pbar .name { opacity: .75; margin-right: 4px; }
+
+/* Shared */
+.prog { display: grid; gap: 4px; margin-top: 2px; }
+.eta { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.eta b { color: var(--fg); font-weight: 600; }
+
+/* A: phase stepper + step bar */
+.stepper { display: grid; grid-template-columns: 5fr 1fr 1.4fr 1fr .8fr; gap: 3px; }
+.stepper i { height: 5px; border-radius: 3px; background: var(--border); position: relative; overflow: hidden; }
+.stepper i.done { background: var(--s-ready); }
+.stepper i.now { background: var(--border); }
+.stepper i.now::after { content: ""; position: absolute; inset: 0; width: var(--f, 30%); background: var(--s-working); border-radius: 3px; }
+.stepper i.lap { background: var(--s-review); }
+.steplabels { display: grid; grid-template-columns: 5fr 1fr 1.4fr 1fr .8fr; white-space: nowrap; gap: 3px; font: 10px var(--mono); color: var(--muted); }
+.steplabels span.now { color: var(--s-working); font-weight: 700; }
+.steplabels span.done { color: var(--fg); }
+.stepline { font-size: 12px; display: flex; gap: 6px; align-items: baseline; min-width: 0; }
+.stepline b { white-space: nowrap; }
+.stepline span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; color: var(--muted); }
+
+/* B: one bar with an uncertainty band */
+.onebar { position: relative; height: 8px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--border); overflow: hidden; }
+.onebar .fill { position: absolute; inset: 0 auto 0 0; background: var(--s-working); border-radius: 3px 0 0 3px; }
+.onebar .band { position: absolute; top: 0; bottom: 0; background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--s-working) 28%, transparent) 0 4px, transparent 4px 8px); }
+.onebar .tick { position: absolute; top: -1px; bottom: -1px; width: 1px; background: var(--border-strong); }
+.bline { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.bline .pct { font-weight: 600; }
+.card .tip { display: none; }
+.card:hover .tip { display: block; }
+.tip { font-size: 11px; color: var(--muted); border-top: 1px dashed var(--border); padding-top: 4px; margin-top: 2px; font-family: var(--mono); white-space: pre-line; }
+
+/* C: checklist + ring + clock */
+.cwrap { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 8px; align-items: center; }
+.ring { width: 34px; height: 34px; }
+.ring circle { fill: none; stroke-width: 4; }
+.ring .bg { stroke: var(--border); }
+.ring .fg { stroke: var(--s-working); stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; }
+.ring text { font: 700 10px var(--mono); fill: var(--fg); }
+.cnow { font-size: 12px; min-width: 0; }
+.cnow .k { color: var(--muted); }
+.cnow .t { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.todo { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 2px; font-size: 12px; }
+.todo li { display: flex; gap: 6px; align-items: baseline; min-width: 0; }
+.todo li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.todo .d { color: var(--muted); text-decoration: line-through; }
+.todo .n { font-weight: 600; }
+.todo .m { width: 12px; flex: none; font: 11px var(--mono); }
+.phasechips { display: flex; gap: 4px; flex-wrap: wrap; }
+.phasechips span { font: 10px var(--mono); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; color: var(--muted); }
+.phasechips span.done { color: var(--s-ready); border-color: var(--s-ready); }
+.phasechips span.now { color: var(--accent-fg); background: var(--s-working); border-color: var(--s-working); font-weight: 700; }
+.more { font-size: 11px; color: var(--accent); cursor: pointer; background: none; border: 0; padding: 0; text-align: left; }
+.lapnote { font-size: 11px; color: var(--warn); }
+</style>
+</head>
+<body>
+<div class="proto-badge">PROTOTYPE</div>
+<main id="board">
+  <div class="topbar"><strong>Software Factory</strong><span class="muted" style="font-size:13px">running: 4 · queued: 1</span></div>
+  <div class="cols" id="cols"></div>
+</main>
+<div class="pbar" id="pbar"></div>
+<script>
+// The simulated jobs. phase: 0 code, 1 Claude review, 2 Codex, 3 MR text, 4 ready.
+// steps: the Implementer's todo list (done flags); lap: fix rounds so far.
+const PHASES = ['Code', 'Claude', 'Codex', 'MR text', 'Ready'];
+const jobs = [
+  { key: 'ABC-4049', ws: 'frontend', c: 'ws-teal', title: 'Redesign class view panels, filters and badges', phase: 0, lap: 0, elapsed: 43, cost: 4.1,
+    steps: ['Read the Task and the panel components', 'Split the panel layout', 'Filters: state and URL sync', 'Badges and their tests', 'Deep-link, findings and helper tests', 'Search-behaviour tests', 'Run the full suite, write the Report'], done: 5 },
+  { key: 'SF-189', ws: 'software-factory', c: 'ws-blue', title: 'The Implementer runs the factory\'s own copy of the implement skill', phase: 0, lap: 0, elapsed: 12, cost: 1.2,
+    steps: ['Read the Task and the wrapper', 'PACKAGE_ROOT to its own module', 'WrapperPaths.skills and the bind', 'The guard: Implementer reads under skills/', 'The base-commit rule', 'skill_missing event and stream line', 'sync-skills script', 'Tests', 'Docs and Report'], done: 1 },
+  { key: 'SF-192', ws: 'software-factory', c: 'ws-blue', title: 'Done cards can always be archived, and a merged job archives itself', phase: 0, lap: 1, elapsed: 58, cost: 6.3,
+    steps: ['Fix: the pass must not fetch in the user\'s checkout', 'Fix: Archive on aborted cards', 'Fix: the remote confirmation test'], done: 1 },
+  { key: 'SF-191', ws: 'software-factory', c: 'ws-blue', title: 'The Context owner plans by the grilling skill', phase: 2, lap: 0, elapsed: 31, cost: 2.9,
+    steps: ['Read the Task and server.ts', 'loadHandbook reads the skill', 'Quick start steps 0, 1, 3', 'ticketConversation', 'Tests', 'Docs and Report'], done: 6 },
+];
+// The ranges, in minutes, from the factory's history.
+const WORK = { p25: 10, med: 19, p75: 32 }, REVIEW = 2, CODEX = 3, MR = 1;
+// A fix round happens in about 4 of 10 iterations: its expected cost is folded into the range's top.
+function remaining(job) {
+  const left = job.steps.length - job.done;
+  const frac = job.steps.length ? left / job.steps.length : 0;
+  const after = (job.phase <= 1 ? REVIEW : 0) + (job.phase <= 2 ? CODEX : 0) + (job.phase <= 3 ? MR : 0);
+  const work = job.phase === 0 ? frac : 0;
+  const lo = Math.max(1, Math.round(work * WORK.p25 + after * 0.6));
+  const hi = Math.round(work * WORK.p75 + after * 1.5 + (job.phase <= 2 && job.lap === 0 ? 12 : 4));
+  const mid = Math.round(work * WORK.med + after);
+  return { lo, hi: Math.max(hi, lo + 3), mid: Math.max(mid, lo) };
+}
+function fraction(job) {
+  // Weight of the phases in a typical job: code 80 %, Claude 5 %, Codex 10 %, MR text 5 %.
+  const W = [80, 5, 10, 5];
+  let f = 0;
+  for (let i = 0; i < job.phase; i++) f += W[i];
+  if (job.phase === 0) f += W[0] * (job.steps.length ? job.done / job.steps.length : 0);
+  else if (job.phase < 4) f += W[job.phase] * 0.5;
+  return Math.min(99, Math.round(f));
+}
+const clockIn = (min) => { const d = new Date(Date.now() + min * 60000); return d.toTimeString().slice(0, 5); };
+const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; };
+const html = (s) => { const t = document.createElement('template'); t.innerHTML = s.trim(); return t.content.firstChild; };
+
+function head(job) {
+  const li = el('li', `card ${job.c}`);
+  const r = el('div', 'row1');
+  r.append(el('span', 'key', job.key), html(`<span class="wschip ${job.c}"><i class="wsdot"></i><span class="wsname">${job.ws}</span></span>`), el('span', 'money', `$${job.cost.toFixed(2)} so far · ${job.elapsed} min`));
+  li.append(r, el('div', 'title', job.title));
+  return li;
+}
+const nowStep = (job) => job.phase === 0 ? (job.steps[job.done] ?? job.steps[job.steps.length - 1]) : ['', 'Claude reviews the iteration', 'Codex reviews the iteration', 'Writing the MR text', 'Ready'][job.phase];
+
+// A: the phases as five segments, the steps as a line, the time as a range.
+function variantA(job) {
+  const li = head(job);
+  const st = el('div', 'stepper');
+  const lbl = el('div', 'steplabels');
+  PHASES.forEach((p, i) => {
+    const seg = el('i', i < job.phase ? 'done' : i === job.phase ? 'now' : '');
+    if (i === 0 && job.phase === 0) seg.style.setProperty('--f', `${Math.round(100 * job.done / job.steps.length)}%`);
+    if (i === 1 && job.phase === 1 || i === 2 && job.phase === 2 || i === 3 && job.phase === 3) seg.style.setProperty('--f', '50%');
+    st.append(seg);
+    lbl.append(el('span', i < job.phase ? 'done' : i === job.phase ? 'now' : '', p));
+  });
+  const line = el('div', 'stepline');
+  line.append(el('i', 'pulse'), el('b', '', job.phase === 0 ? `Step ${Math.min(job.done + 1, job.steps.length)} of ${job.steps.length}` : PHASES[job.phase]), el('span', '', nowStep(job)));
+  const r = remaining(job);
+  const eta = el('div', 'eta'); eta.innerHTML = `About <b>${r.lo}–${r.hi} min</b> left`;
+  const prog = el('div', 'prog'); prog.append(st, lbl, line, eta);
+  if (job.lap > 0) prog.append(el('div', 'lapnote', `Fix round ${job.lap}: Codex asked for ${job.steps.length} changes`));
+  li.append(prog);
+  return li;
+}
+
+// B: one bar, a striped band for the uncertainty, the breakdown on hover.
+function variantB(job) {
+  const li = head(job);
+  const f = fraction(job);
+  const r = remaining(job);
+  const total = job.elapsed + r.mid;
+  const bandLo = Math.min(100, 100 * job.elapsed / (job.elapsed + r.hi));
+  const bar = el('div', 'onebar');
+  const fill = el('div', 'fill'); fill.style.width = `${f}%`;
+  const band = el('div', 'band'); band.style.left = `${f}%`; band.style.width = `${Math.max(0, Math.min(100 - f, (100 - bandLo) * 0.5))}%`;
+  bar.append(fill, band);
+  [80, 85, 95].forEach((x) => { const t = el('div', 'tick'); t.style.left = `${x}%`; bar.append(t); });
+  const line = el('div', 'bline');
+  line.append(el('span', 'pct', `${f}%`), el('span', 'muted', `~${r.mid} min left · ready ~${clockIn(r.mid)}`));
+  const now = el('div', 'stepline'); now.append(el('i', 'pulse'), el('span', '', nowStep(job)));
+  const tip = el('div', 'tip', [
+    `code   ${job.phase > 0 ? 'done' : `${job.done}/${job.steps.length} steps`}`,
+    `claude ${job.phase > 1 ? 'done' : job.phase === 1 ? 'now' : '~2 min'}`,
+    `codex  ${job.phase > 2 ? 'done' : job.phase === 2 ? 'now' : '~3 min'}`,
+    `mr     ${job.phase > 3 ? 'done' : job.phase === 3 ? 'now' : '~1 min'}`,
+    `range  ${r.lo}–${r.hi} min (a fix round adds ~10–30)`,
+  ].join('\n'));
+  const prog = el('div', 'prog'); prog.append(bar, line, now, tip);
+  if (job.lap > 0) prog.append(el('div', 'lapnote', `Fix round ${job.lap}`));
+  li.append(prog);
+  return li;
+}
+
+// C: a ring of the steps, the current step in words, the list on demand, the time as a clock.
+const openLists = new Set();
+function variantC(job) {
+  const li = head(job);
+  const n = job.steps.length, d = job.phase > 0 ? n : job.done;
+  const C = 2 * Math.PI * 14;
+  const ring = html(`<svg class="ring" viewBox="0 0 34 34" aria-label="${d} of ${n} steps"><circle class="bg" cx="17" cy="17" r="14"/><circle class="fg" cx="17" cy="17" r="14" stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - d / n)}"/><text x="17" y="21" text-anchor="middle">${d}/${n}</text></svg>`);
+  const now = el('div', 'cnow');
+  now.append(el('span', 'k', job.phase === 0 ? (job.lap ? `Fix round ${job.lap} · now` : 'Now') : PHASES[job.phase]), el('span', 't', nowStep(job)));
+  const wrap = el('div', 'cwrap'); wrap.append(ring, now);
+  const chips = el('div', 'phasechips');
+  PHASES.slice(0, 4).forEach((p, i) => chips.append(el('span', i < job.phase ? 'done' : i === job.phase ? 'now' : '', p)));
+  const r = remaining(job);
+  const eta = el('div', 'eta'); eta.innerHTML = `Ready around <b>${clockIn(r.lo)}–${clockIn(r.hi)}</b>`;
+  const more = el('button', 'more', openLists.has(job.key) ? 'Hide steps' : `Show the ${n} steps`);
+  more.onclick = (e) => { e.stopPropagation(); openLists.has(job.key) ? openLists.delete(job.key) : openLists.add(job.key); render(); };
+  const prog = el('div', 'prog'); prog.append(wrap, chips, eta, more);
+  if (openLists.has(job.key)) {
+    const ul = el('ul', 'todo');
+    job.steps.forEach((s, i) => {
+      const it = el('li');
+      const state = i < d ? 'd' : i === d && job.phase === 0 ? 'n' : '';
+      it.append(el('span', 'm', i < d ? '✓' : i === d && job.phase === 0 ? '›' : '·'), el('span', state, s));
+      ul.append(it);
+    });
+    prog.append(ul);
+  }
+  li.append(prog);
+  return li;
+}
+
+function staticCard(key, ws, c, title, lines) {
+  const li = head({ key, ws, c, title, cost: 0, elapsed: 0 });
+  li.querySelector('.money').textContent = '';
+  lines.forEach(([cls, t]) => li.append(el('div', cls, t)));
+  return li;
+}
+function column(name, cls, cards) {
+  const col = el('section', `col ${cls}`);
+  const h = el('h2'); h.append(document.createTextNode(name + ' '), el('span', 'n', String(cards.length)));
+  const ul = el('ul'); cards.forEach((c) => ul.append(c));
+  col.append(h, ul); return col;
+}
+const variant = () => (new URLSearchParams(location.search).get('variant') || 'A').toUpperCase();
+function render() {
+  const v = { A: variantA, B: variantB, C: variantC }[variant()] || variantA;
+  const cols = document.getElementById('cols');
+  cols.replaceChildren(
+    column('Queue', '', [staticCard('SF-190', 'software-factory', 'ws-blue', 'The Claude review and the Codex gate follow the code-review skill', [['waits', 'Waits for SF-189 (running)']])]),
+    column('Implementing', '', jobs.filter((j) => j.phase === 0).map(v)),
+    column('Reviewing', '', jobs.filter((j) => j.phase > 0 && j.phase < 4).map(v)),
+    column('Your turn', 'you', [staticCard('ABC-3896', 'frontend', 'ws-teal', 'Support read-only anonymous superclass expressions', [['reason ready', 'Ready to push: reviews clean, MR text written'], ['meta', 'Iteration 2']])]),
+    column('Done', '', [staticCard('SF-188', 'software-factory', 'ws-blue', 'startDashboard split into modules that share one context', [['meta', 'Pushed · 1 iteration · 14:38'], ['meta', '#182 merged']])]),
+  );
+  const bar = document.getElementById('pbar');
+  bar.replaceChildren(el('span', 'name', 'Variant'));
+  for (const [k, label] of [['A', 'A · Steps'], ['B', 'B · One bar'], ['C', 'C · Checklist']]) {
+    const b = el('button', variant() === k ? 'on' : '', label);
+    b.onclick = () => { const u = new URL(location); u.searchParams.set('variant', k); history.replaceState(null, '', u); render(); };
+    bar.append(b);
+  }
+  bar.append(el('span', 'sep'));
+  const tick = el('button', '', '+5 min ▸');
+  tick.title = 'Simulate five minutes: each job finishes a step or moves to its next phase';
+  tick.onclick = advance;
+  bar.append(tick);
+}
+function advance() {
+  for (const j of jobs) {
+    j.elapsed += 5; j.cost += 0.4;
+    if (j.phase === 0 && j.done < j.steps.length) { j.done += 1; continue; }
+    if (j.phase < 4) j.phase += 1;
+    if (j.phase === 4) j.phase = 3;
+  }
+  render();
+}
+document.addEventListener('keydown', (e) => {
+  const order = ['A', 'B', 'C'];
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    const i = (order.indexOf(variant()) + (e.key === 'ArrowRight' ? 1 : 2)) % 3;
+    const u = new URL(location); u.searchParams.set('variant', order[i]); history.replaceState(null, '', u); render();
+  }
+});
+render();
+</script>
+</body>
+</html>

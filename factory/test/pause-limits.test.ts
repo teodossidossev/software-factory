@@ -10,8 +10,7 @@ import { createHash } from 'node:crypto';
 import { addAttachment, removeAttachment } from '../src/attachments.js';
 import { JobStore } from '../src/jobs.js';
 import { firstPrompt, imagesChangedNote } from '../src/execution.js';
-import { factoryPrompt } from '../src/prompts.js';
-import { call, codexLog, codexScript, type Env, fakeCodex, fakeLog, git, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, turnsStarted, waitFor } from './support/harness.js';
+import { call, codexLog, codexScript, type Env, fakeCodex, fakeLog, git, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, turnsStarted, waitFor, jobPrompt } from './support/harness.js';
 import { CLEAN, count, eventsOf, FIX, GATE_CLEAN, jobDir, LONG, mrText, nothingRuns, until, worktreeOf } from './support/pause.js';
 
 // SF-072: the usage limit. The known messages as the sessions end with them.
@@ -227,7 +226,7 @@ test('images (SF-065): a Resume finds an image changed while paused (the text un
     const imagesLine = { dir: join(worktreeOf(env, 'P-1'), '.software-factory', 'P-1'), names: ['1.png'] };
     let log = await fakeLog(env);
     // The same session goes on: the line and the folder, no blocks.
-    assert.equal(log.at(-1)!.prompt, factoryPrompt(`Continue where you stopped.\n\n${imagesChangedNote(['1.png'])}`, 'P-1', 2, imagesLine));
+    assert.equal(log.at(-1)!.prompt, await jobPrompt(env, `Continue where you stopped.\n\n${imagesChangedNote(['1.png'])}`, 'P-1', 2, imagesLine));
     assert.equal(log.at(-1)!.blocks, undefined);
     const attachments = (await eventsOf(env, 'P-1')).filter((event) => event.type === 'attachments').map((event) => event.images);
     assert.deepEqual(attachments, [[{ ...record, bytes: PNG.length, sha256: sha(PNG) }], [record]]);
@@ -244,7 +243,7 @@ test('images (SF-065): a Resume finds an image changed while paused (the text un
     await waitFor(served, 'P-1', 'awaiting_review', 1);
     const block = { type: 'image', media_type: 'image/png', bytes: PNG3.length, sha256: sha(PNG3) };
     const blocks = [
-      { type: 'text', text: factoryPrompt(firstPrompt('P-1', []), 'P-1', 1, imagesLine) },
+      { type: 'text', text: await jobPrompt(env, firstPrompt('P-1', []), 'P-1', 1, imagesLine) },
       { type: 'text', text: 'Image P-1/1.png ("the error"), referenced in the Task file:' },
       block,
     ];

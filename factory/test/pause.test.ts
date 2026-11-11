@@ -13,9 +13,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
 import { firstPrompt } from '../src/execution.js';
-import { factoryPrompt } from '../src/prompts.js';
 import { taskSha256 } from '../src/task-file.js';
-import { call, codexLog, codexScript, fakeCodex, fakeLog, git, newEnv, newRepo, putRules, putTask, readyCheck, refused, reviewLog, reviewScript, runCli, script, serve, stop, task, turnsStarted, waitFor } from './support/harness.js';
+import { call, codexLog, codexScript, fakeCodex, fakeLog, git, newEnv, newRepo, putRules, putTask, readyCheck, refused, reviewLog, reviewScript, runCli, script, serve, stop, task, turnsStarted, waitFor, jobPrompt } from './support/harness.js';
 import { CLEAN, count, eventsOf, exists, FIX, GATE_CLEAN, jobDir, LONG, mrText, nothingRuns, until, worktreeOf } from './support/pause.js';
 
 test('Pause during a turn, the Task file rewritten while paused, then Resume: the same session goes on with the diff, the new sha256 is recorded', async () => {
@@ -309,7 +308,7 @@ test('coding rules (SF-059): a Resume that opens a new session gives the <rules>
     assert.equal((await runCli(env, ['pause', 'app', 'P-1'])).code, 0);
     assert.equal((await runCli(env, ['resume', 'app', 'P-1', 'go', 'on'])).code, 0);
     await waitFor(served, 'P-1', 'awaiting_review', 1);
-    assert.equal((await fakeLog(env)).at(-1)!.prompt, factoryPrompt(`${block}\n\ngo on`, 'P-1', 1));
+    assert.equal((await fakeLog(env)).at(-1)!.prompt, await jobPrompt(env, `${block}\n\ngo on`, 'P-1', 1));
 
     await call(served, 'start', { workspace: 'app', ticket: 'P-2' });
     await turnsStarted(env, 3);
@@ -317,7 +316,7 @@ test('coding rules (SF-059): a Resume that opens a new session gives the <rules>
     assert.equal((await runCli(env, ['resume', 'app', 'P-2'])).code, 0);
     await waitFor(served, 'P-2', 'awaiting_review', 1);
     const log = await fakeLog(env);
-    assert.equal(log.at(-1)!.prompt, factoryPrompt(firstPrompt('P-2', [], block), 'P-2', 1));
+    assert.equal(log.at(-1)!.prompt, await jobPrompt(env, firstPrompt('P-2', [], block), 'P-2', 1));
     assert.ok(log.at(-1)!.prompt.startsWith(`/implement .software-factory/P-2.md\n\n${block}\n\nRules from the Software Factory:`));
 
     // Restart collects the rules again, at the new job's base commit.

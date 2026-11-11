@@ -320,6 +320,8 @@ test('lineEntries: simplify with its suggestions and saves; notes with their who
     // The gate level (SF-092): the watch line as a note of the factory.
     [{ type: 'gate_level', level: 'none', ran: false, reasons: ['docs only'] }, 'factory', 'Codex gate: none, skipped (docs only)'],
     [{ type: 'notify_failed', channel: 'ntfy', message: 'down' }, 'factory', 'notification via ntfy failed: down'],
+    // The implement skill missing from the Implementer's session.
+    [{ type: 'skill_missing', skill: 'implement' }, 'factory', 'The implement skill is missing: /implement was read as plain text.'],
     [{ message: { type: 'system', subtype: 'init', session_id: 's1', permissionMode: 'default', model: 'opus' } }, 'factory', 'session s1 (permission mode default, model opus)'],
     [{ type: 'gate_event', reviewer: 'codex', event: { type: 'item.completed', item: { id: 'r', type: 'reasoning', text: 'Thinking\nmore' } } }, 'codex', 'reasoning: Thinking'],
     [{ type: 'gate_event', reviewer: 'codex', event: { type: 'turn.completed', usage: { input_tokens: 5, output_tokens: 6 } } }, 'codex', 'turn completed (5 in, 6 out tokens)'],

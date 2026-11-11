@@ -32,6 +32,10 @@ import { exists, type FixOptions, type Live } from './shared.js';
 
 type Success = Extract<IdleOutcome, { ok: true }>;
 
+// The skill the Implementer's first prompt runs (/implement, firstPrompt), and the event of its absence.
+const IMPLEMENT_SKILL = 'implement';
+const SKILL_MISSING = 'skill_missing';
+
 // The stop at the Fix round limit: fixes Fix sections written, open the open
 // blocker and major findings, iteration the one an Accept takes.
 export function iterationLimitMessage(fixes: number, open: number, iteration: number): string {
@@ -142,9 +146,10 @@ export class TurnsPart {
         allowCommands: probe !== undefined ? [probe] : undefined,
         smokeMode: probe !== undefined,
         // Built by the session's first turn, again for every session the factory creates, with
-        // the session's own temporary folder kept.
+        // the session's own temporary folder kept; under the wrapper (the sandbox on) its skills readable.
         pathDenials: (sessionTmp) => pathDenials({
           session: 'job', workspace: name, checkout: workspace.workCheckout, worktree: cwd, sessionTmp, stateDir: this.#settings.config.stateDir, worktreeRoot: this.#settings.config.worktreeRoot,
+          wrappedSkills: this.#settings.config.sandbox !== undefined,
         }),
       },
       {
@@ -171,6 +176,9 @@ export class TurnsPart {
             // Queued, not awaited: the session must never wait for the lock (abort holds it while
             // it closes the session).
             void this.#recordSession(name, ticket, message.session_id);
+          }
+          if (message.type === 'system' && message.subtype === 'init' && !message.slash_commands.includes(IMPLEMENT_SKILL)) {
+            await this.#recordSkillMissing(name, ticket, iteration);
           }
         },
         idle: (outcome) => this.#idle(name, ticket, outcome),
@@ -222,6 +230,23 @@ export class TurnsPart {
       const { turn_limit: _old, ...rest } = job;
       await this.#store.jobs.write(turnLimit === undefined ? rest : { ...rest, turn_limit: turnLimit });
     });
+  }
+
+  // The session's init message lists no implement skill: /implement reaches the model as plain text.
+  // Recorded once per job (none when the event log has one); the job carries on.
+  async #recordSkillMissing(workspace: string, ticket: string, iteration: number): Promise<void> {
+    // A log not there yet has no record.
+    const log = await readFile(this.#store.jobs.eventsPath(workspace, ticket), 'utf8').catch(() => '');
+    const recorded = (line: string): boolean => {
+      try {
+        return (JSON.parse(line) as { type?: unknown }).type === SKILL_MISSING;
+      } catch { // a line that is not JSON is no record of it
+        return false;
+      }
+    };
+    if (!log.split('\n').some((line) => line.includes(`"${SKILL_MISSING}"`) && recorded(line))) {
+      await this.#store.jobs.appendEvent(workspace, ticket, { ts: now(), iteration, type: SKILL_MISSING, skill: IMPLEMENT_SKILL });
+    }
   }
 
   #recordSession(workspace: string, ticket: string, sessionId: string): Promise<void> {
@@ -489,7 +514,7 @@ export class TurnsPart {
       ? await this.#store.transition({ ...job, ...counts, prepared_commit: null }, 'working', 'tests')
       // from: awaiting_review, ready_for_human_review (checkFix), needs_human (fromStop)
       : await this.#store.transition({ ...job, ...counts, fixes: job.fixes + 1, prepared_commit: null }, 'working', 'fix');
-    this.session(job, workspace).send(factoryPrompt(this.withChange(`/implement ${TASK_DIR}/${ticket}.md Fix ${fix}`, ticket, change), ticket, job.iteration + 1, this.imagesLine(job)), DENIED_TOOLS);
+    this.session(job, workspace).send(factoryPrompt(this.withChange(`/implement ${TASK_DIR}/${ticket}.md Fix ${fix}`, ticket, change), ticket, job.iteration + 1, this.imagesLine(job), job.base_commit), DENIED_TOOLS);
     return { iteration: job.iteration + 1, check_after_minutes: this.#settings.config.checkAfterFixMin };
   }
 
@@ -554,7 +579,7 @@ export class TurnsPart {
         // from: awaiting_review, needs_human, ready_for_human_review, handed_over (checkSay; working changes no state)
         job = await this.#store.transition(job, 'working', 'say');
       }
-      session.send(factoryPrompt(this.withChange(message, ticket, change), ticket, job.iteration + 1, this.imagesLine(job)), DENIED_TOOLS);
+      session.send(factoryPrompt(this.withChange(message, ticket, change), ticket, job.iteration + 1, this.imagesLine(job), job.base_commit), DENIED_TOOLS);
       return { state: job.state, queued };
     });
   }

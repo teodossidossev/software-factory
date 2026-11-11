@@ -220,8 +220,14 @@ Implementer sees it too, so it states checks and reasons, not instructions. The 
 sections are the factory's; never write one.
 
 The Implementer is started with `/implement .software-factory/<ticket>.md` for the first iteration
-and `/implement .software-factory/<ticket>.md Fix N` for each later one. It commits nothing during
-iterations; the last line of `/implement` ("commit your work") is denied on purpose.
+and `/implement .software-factory/<ticket>.md Fix N` for each later one. `/implement` runs the
+factory's own copy of the `implement` skill (with `tdd` and `code-review`, in `factory/skills/`,
+changed only by pull request), never the user's installed skills; the factory's rules sent with
+every prompt win over a skill's steps: the fixed point is the job's base commit, the spec is the
+Task file, there is no issue tracker, and the user is never asked. It commits nothing during
+iterations; the last line of `/implement` ("commit your work") is denied on purpose. When the
+session does not list the skill, the job's stream says "The implement skill is missing" and the
+job carries on with `/implement` read as plain text.
 The user reviews a job in their own checkout through the factory's Hand over to my checkout; you
 never create, switch or check out branches for that.
 

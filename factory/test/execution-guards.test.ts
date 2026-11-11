@@ -12,14 +12,13 @@ import { test } from 'node:test';
 import { addAttachment } from '../src/attachments.js';
 import { firstPrompt } from '../src/execution.js';
 import { JobStore } from '../src/jobs.js';
-import { factoryPrompt } from '../src/prompts.js';
 import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
 import { sandboxSettings } from '../src/config.js';
 import { ImplementerSession, type IdleOutcome, sandboxEnvDenials, sessionEnvironment } from '../src/session.js';
 import { writeTask } from '../src/task-file.js';
 import {
   call, codexLog, codexScript, FAKE, fakeCodex, fakeLog, git, newEnv, newRepo, putTask, refused, reviewLog, reviewScript, runCli, script, serve, stop, task, useFakeBwrap,
-  waitFor,
+  jobPrompt, waitFor,
 } from './support/harness.js';
 
 const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid'];
@@ -227,7 +226,7 @@ test('images (SF-065): Start refuses an unusable image; the job copies the refer
     const log = await fakeLog(env);
     // The first turn: the prompt text as before with the images line, then each image named and its block.
     assert.deepEqual(log[0]!.blocks, [
-      { type: 'text', text: factoryPrompt(firstPrompt('D-1', []), 'D-1', 1, imagesLine) },
+      { type: 'text', text: await jobPrompt(env, firstPrompt('D-1', []), 'D-1', 1, imagesLine) },
       { type: 'text', text: 'Image D-1/form.gif ("the form"), referenced in the Task file:' },
       { type: 'image', media_type: 'image/gif', bytes: GIF.length, sha256: sha(GIF) },
       { type: 'text', text: 'Image D-1/1.png ("one"), referenced in the Task file:' },
@@ -235,7 +234,7 @@ test('images (SF-065): Start refuses an unusable image; the job copies the refer
     ]);
     assert.ok(log[0]!.prompt.startsWith('/implement .software-factory/D-1.md\n\nThe Task\'s images are in '), log[0]!.prompt);
     // A Fix prompt names the folder; no blocks. The MR text turn is as before.
-    assert.equal(log[1]!.prompt, factoryPrompt('/implement .software-factory/D-1.md Fix 1', 'D-1', 2, imagesLine));
+    assert.equal(log[1]!.prompt, await jobPrompt(env, '/implement .software-factory/D-1.md Fix 1', 'D-1', 2, imagesLine));
     assert.equal(log[1]!.blocks, undefined);
     assert.doesNotMatch(log[2]!.prompt, /The Task's images/);
     assert.equal(log[2]!.blocks, undefined);

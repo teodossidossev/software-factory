@@ -375,6 +375,10 @@ async function drafts(raw: string, record: Record<string, unknown>, it: number, 
       reason: typeof record.reason === 'string' ? record.reason : null, tail: cut(typeof record.tail === 'string' ? record.tail : ''), tail_truncated: record.tail_truncated === true,
     }];
   }
+  if (record.type === 'skill_missing') {
+    const skill = String(record.skill);
+    return [{ t: 'note', who: 'factory', text: `The ${skill} skill is missing: /${skill} was read as plain text.` }];
+  }
   // The MR text: the user's save or reset; a new Clean that kept the user's text.
   if (record.type === 'mr_edited') {
     return noteEntry(raw, record.action === 'factory_new' ? 'factory' : 'you');

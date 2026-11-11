@@ -1643,7 +1643,11 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   with `sensitive_unacknowledged`.
 - Every prompt the factory sends (the `/implement` line of a start and of the fix path, or the user's
   message of `sf say`) is followed by a blank line and `FACTORY_PROMPT_RULES` (`src/prompts.ts`):
-  the factory's rules and the Report template, with the ticket and iteration filled in.
+  the factory's rules and the Report template, with the ticket and iteration filled in. Its last
+  rule puts the skills `/implement` runs under them: a skill's fixed point is the job's base commit
+  (`base_commit`, the gate's; "the commit your branch started from" when the job has none) with
+  the uncommitted worktree as the change, the spec is the Task file, there is no issue tracker, the
+  user is never asked, and where a skill's step (commit, push, ask) conflicts, the rules win.
 - `check` (only the end-to-end tests call it, through `SF_TEST_HOOKS=on`) returns the last published Report and Patch in every state except `working` and
   `starting`, and `files`: the sensitive paths (with `declared`) and the deleted paths of that
   iteration. `meta.json` records `cost_usd` (this iteration's cost) and `cost_usd_total` (the
@@ -1826,9 +1830,23 @@ then the gate's fix-up pass (a denial inside a bind hidden again, so a worktree'
 hidden); last, read-only again: the worktree's `.git` (the factory runs Git itself, outside) and
 agent configuration (`.claude`, `.mcp.json`, `.codex`), each `denyWrite` entry inside a read-write
 bind that is not denied for reading, and the user settings (`settings.json`, `settings.local.json`),
-which the CLI reads. The checkout's Git directory is read-only through the root. The rest of
-`~/.claude` (the user's `CLAUDE.md`, skills, plugins) is hidden from the Implementer's CLI, and a
-hidden folder is an empty tmpfs whose writes stay inside the wrapper. The host's network namespace
+which the CLI reads; and very last the factory's own skills (the package's `skills/` folder:
+`implement`, `tdd`, `code-review`, `grilling`, listed in `skills/SOURCE.md`) read-only on
+`<CLAUDE_CONFIG_DIR or ~/.claude>/skills`, over the tmpfs that hid the user's (on the real path of
+a link there, the path the CLI reaches; `prepareClaudeState` makes the folder when it is missing;
+no bind when the package has no `skills/` or the path is a dangling link). So `/implement` runs the
+factory's reviewed copy, the same on any machine, and the CLI lists `implement`, `tdd` and
+`code-review` as user skills. The checkout's Git directory is read-only through the root. The rest
+of `~/.claude` (the user's `CLAUDE.md`, their own skills, plugins) and `~/.agents` stay hidden from
+the Implementer's CLI, and a hidden folder is an empty tmpfs whose writes stay inside the wrapper.
+When the session's init message lists no `implement` among its slash commands, the job's
+`events.jsonl` gets `{ "type": "skill_missing", "skill": "implement" }` once per job and the job's
+Stream shows "The implement skill is missing: /implement was read as plain text."; the job carries
+on. `npm run sync-skills` (in a checkout) updates the copies: it copies the skills `SOURCE.md` lists
+from `~/.agents/skills` (`--from <dir>`), links followed, each folder replaced whole, rewrites
+`SOURCE.md`'s table from `~/.agents/.skill-lock.json` (`--lock <file>`; path, folder hash, date),
+prints the changed files and never commits: the change goes through a pull request. A listed skill
+missing from the source or the lock file exits 1, naming it, and writes nothing. The host's network namespace
 (Claude Code reaches the API) and no seccomp filter (Claude Code's own Bash sandbox, a bwrap nested
 inside, makes its own sockets). It is one more layer: Claude Code's sandbox, the path denials and
 the file-tool guard stay as they are; the Claude review, the simplification pass, the Task check and
@@ -1916,7 +1934,14 @@ does not start (the Implementer's turn and the review fail with that code; the t
 outside the kept paths and the session's own Claude Code project folder `<CLAUDE_CONFIG_DIR or ~/.claude>/projects/<the worktree's
 path, every character but ASCII letters and digits as "-">` (past 200 characters cut, with a hash,
 as the CLI does), where Claude Code keeps the transcript and the tool output it saves; Bash stays
-denied it. `Glob` and `Grep` (SF-123 Fix 1) walk folders. The installed CLI runs ripgrep for both
+denied it. Only the Implementer's session under the wrapper (the sandbox on) also reads its skills:
+a read tool's target whose given, unresolved path lies under `<CLAUDE_CONFIG_DIR or
+~/.claude>/skills` passes without resolving and without the search's link walk, since inside the
+wrapper that path is the factory's read-only copy; the real path of a link there (such as
+`~/.agents/skills`) is not that spelling and stays refused, and so does a write there; the
+sandbox's `denyRead` is unchanged, and every other session (the Claude review, the simplification
+pass, the Task check) is refused there as before. `Glob` and `Grep` (SF-123 Fix 1) walk folders.
+The installed CLI runs ripgrep for both
 without `--follow` (Glob: `rg --files --null --glob <pattern> --sort=modified --no-ignore
 --hidden`), but the guard holds them as if they followed links: it walks every folder of the call
 (its path or the working directory, and each fixed part of a `Glob` pattern: a pattern without a

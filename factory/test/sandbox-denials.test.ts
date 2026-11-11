@@ -890,6 +890,37 @@ test('CLAUDE_CONFIG_DIR outside the home directory (SF-123): its entries but the
   assert.equal(await guard(denials, l.own, 'Read', { file_path: join(own, 'x.jsonl') }), undefined);
 });
 
+test('the factory\'s skills under the wrapper: the Implementer\'s read tools read <config dir>/skills by the path given, unresolved; a write there, a review session\'s read, a read of ~/.agents (the real path of the link included) stay refused; the sandbox\'s denyRead is unchanged', async () => {
+  const l = await homeLayout('denials-skills');
+  // The user's ~/.claude/skills: a link to ~/.agents/skills, as the skills tool installs them.
+  const agents = join(l.home, '.agents', 'skills', 'tdd');
+  await mkdir(agents, { recursive: true });
+  await writeFile(join(agents, 'tests.md'), 'the user\'s');
+  await writeFile(join(l.home, '.agents', 'x'), 'x');
+  await mkdir(join(l.home, '.claude'), { recursive: true });
+  await symlink(join(l.home, '.agents', 'skills'), join(l.home, '.claude', 'skills'));
+  const skills = join(l.home, '.claude', 'skills');
+  const implementer = await pathDenials({ ...homeScope(l), wrappedSkills: true });
+  const review = await pathDenials(homeScope(l));
+  assert.deepEqual(implementer.sandbox, review.sandbox);
+  const ask = (denials: PathDenials, tool: string, input: unknown): Promise<string | undefined> => guard(denials, l.own, tool, input);
+  for (const [tool, input] of [
+    ['Read', { file_path: join(skills, 'tdd', 'tests.md') }],
+    ['Grep', { pattern: 'x', path: skills }], ['Glob', { pattern: '**/*.md', path: join(skills, 'tdd') }], ['Glob', { pattern: `${skills}/*/SKILL.md` }],
+  ] as const) {
+    assert.equal(await ask(implementer, tool, input), undefined, `${tool} ${JSON.stringify(input)}`);
+    assert.ok((await ask(review, tool, input))?.startsWith(FILE_GUARD), `review ${tool} ${JSON.stringify(input)}`);
+  }
+  for (const [tool, input] of [
+    ['Write', { file_path: join(skills, 'tdd', 'tests.md'), content: 'x' }], ['Edit', { file_path: join(skills, 'tdd', 'tests.md'), old_string: 'a', new_string: 'b' }],
+    ['Read', { file_path: join(l.home, '.agents', 'x') }], ['Read', { file_path: join(l.home, '.agents', 'skills', 'tdd', 'tests.md') }],
+    ['Grep', { pattern: 'x', path: join(l.home, '.agents', 'skills') }], ['Read', { file_path: join(skills, '..', '.credentials.json') }], ['Read', { file_path: join(l.home, '.kube', 'config') }],
+    ['Glob', { pattern: '../../.kube/*', path: skills }],
+  ] as const) {
+    assert.ok((await ask(implementer, tool, input))?.startsWith(FILE_GUARD), `${tool} ${JSON.stringify(input)}`);
+  }
+});
+
 test('the file-tool guard and links under a search (SF-123 Fix 1): a Glob or Grep that ripgrep\'s --follow would carry into a denied home path through a link anywhere below its folder is refused; links within the worktree, into a toolchain or dangling ones pass', async () => {
   const l = await homeLayout('denials-guard-links');
   const at = (...parts: string[]): string => join(l.own, ...parts);

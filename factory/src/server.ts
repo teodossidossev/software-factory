@@ -28,6 +28,7 @@ import { handbookSection } from './prompts.js';
 import { resolveWorkspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { DEFAULT_PAGE_BYTES, MAX_FILE_BYTES, MAX_PAGE_BYTES, MAX_PATH_LENGTH, MIN_PAGE_BYTES, RepoFiles, RepoReadError } from './repo-files.js';
 import { DEFAULT_RESULTS, MAX_QUERY_CHARS, MAX_RESULTS, search } from './search.js';
+import { PACKAGE_ROOT } from './package-root.js';
 import { MCP_TOKEN_FILE, readTokenFile } from './secrets.js';
 import { checkFile, checkFinding, recordVerdict, type TaskChecks } from './task-check.js';
 import { AUTO_CHECK_DELAY_MS, type AutoChecks } from './task-check-auto.js';
@@ -36,8 +37,6 @@ import type { TicketHistory } from './ticket-history.js';
 
 export const SERVER_NAME = 'software-factory';
 const MCP_PATH = '/mcp';
-// Compiled to dist/src/server.js; the package root is two levels up.
-const PACKAGE_ROOT = new URL('../../', import.meta.url);
 
 export interface Handbook {
   // The whole file, returned by guide.

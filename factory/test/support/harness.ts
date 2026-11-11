@@ -19,6 +19,7 @@ import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/cli
 import { dashboardUrl, readToken } from '../../src/dashboard.js';
 import { callSocket } from '../../src/ipc.js';
 import { JobStore, refusedTransitions } from '../../src/jobs.js';
+import { factoryPrompt } from '../../src/prompts.js';
 import { saveRegistry } from '../../src/registry.js';
 import { MCP_TOKEN_FILE } from '../../src/server.js';
 import { cliRuleList, FACTORY_MCP_SERVER } from '../../src/sandbox-denials.js';
@@ -597,4 +598,9 @@ export function assertPathDenials(argv: string[], env: Env, own: string, given: 
     }
   }
   return extra;
+}
+
+// factoryPrompt as the factory sends it to the job of ticket in workspace "app": with the job's base commit.
+export async function jobPrompt(env: Env, first: string, ticket: string, iteration: number, images?: { dir: string; names: string[] }): Promise<string> {
+  return factoryPrompt(first, ticket, iteration, images, (await new JobStore(env.state).read('app', ticket))?.base_commit ?? null);
 }

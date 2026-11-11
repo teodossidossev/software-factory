@@ -376,7 +376,7 @@ export class StartPart {
       // from: starting (checked when the job was read above)
       job = await this.#store.transition(await this.syncTask(workspace, job), 'working', 'launch');
       // The first turn runs in the job's runner, with the images' blocks.
-      const prompt = factoryPrompt(firstPrompt(ticket, kept?.paths ?? [], rules), ticket, job.iteration + 1, this.#peers.turns.imagesLine(job));
+      const prompt = factoryPrompt(firstPrompt(ticket, kept?.paths ?? [], rules), ticket, job.iteration + 1, this.#peers.turns.imagesLine(job), job.base_commit);
       const images = this.#peers.reviews.imageRefs(job, (await this.#store.jobs.readTaskCopy(workspace.name, ticket)) ?? '');
       await this.#runner.serveRunners().queue(workspace.name, ticket, { kind: 'turn', prompt, ...(images.length > 0 ? { images } : {}) });
       return { branch, state: job.state, check_after_minutes: this.#settings.config.checkAfterStartMin, worktree };

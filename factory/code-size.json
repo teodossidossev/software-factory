@@ -1,6 +1,6 @@
 {
   "src/cli.ts": 1573,
-  "src/dashboard.ts": 2165,
+  "src/dashboard.ts": 606,
   "src/digest.ts": 819,
   "src/execution/control.ts": 713,
   "src/execution/mr-steps.ts": 1345,

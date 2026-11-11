@@ -9,12 +9,17 @@ import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
-import { MCP_TOKEN_FILE, quickStartSection } from '../src/server.js';
+import { handbookSection } from '../src/prompts.js';
+import { loadHandbook, MCP_TOKEN_FILE, servedHandbook } from '../src/server.js';
 import { CheckStore, taskSha256 } from '../src/task-check.js';
 import { checkChildren, isServe, REFUSAL_MS, removeOnExit, stopChild, trackChild } from './support/children.js';
 
 const CLI = fileURLToPath(new URL('../src/cli.js', import.meta.url));
 const HANDBOOK = fileURLToPath(new URL('../../HANDBOOK.md', import.meta.url));
+const SKILL = fileURLToPath(new URL('../../skills/grilling/SKILL.md', import.meta.url));
+// The two lines of the Planning method before the skill's body.
+const PLANNING = 'Plan every ticket by the method below (the user\'s grilling skill). You have no sub-agents: look facts up yourself with read_file, search and read_attachment, and ask only the questions only the user can decide.\n\n' +
+  'The plan is done when the user confirms you agree; then write the Task file.';
 const READY = /listening on (http:\/\/127\.0\.0\.1:(\d+)\/mcp)\/<token>$/m;
 const TASK = '---\nticket: DEMO-1\ntitle: Demo task\nbase: main\n---\n\n# DEMO-1: Demo task\n\nПроверка ✓\n';
 
@@ -22,6 +27,8 @@ interface Served {
   child: ChildProcess;
   url: URL;
   port: number;
+  // Everything the process wrote so far, stdout and stderr.
+  output: () => string;
 }
 
 let temp: string;
@@ -70,9 +77,10 @@ function serve(extra: Record<string, string> = {}): Promise<Served> {
       const match = READY.exec(output);
       if (match) {
         child.stdout.off('data', onData);
+        child.stdout.on('data', (more: Buffer) => (output += more.toString('utf8')));
         // The URL with the token of the state directory (SF-099); the line shows <token>.
         readFile(join(String(env(extra).SF_STATE_DIR), MCP_TOKEN_FILE), 'utf8').then(
-          (token) => resolve({ child, url: new URL(`${match[1]!}/${token.trim()}`), port: Number(match[2]) }),
+          (token) => resolve({ child, url: new URL(`${match[1]!}/${token.trim()}`), port: Number(match[2]), output: () => output }),
           reject,
         );
       }
@@ -232,14 +240,22 @@ test('sf workspace add, list and remove manage the registry with the documented 
   await rm(join(broken, '.git'), { recursive: true });
 });
 
-test('sf serve gives the Quick start as instructions and the planning and execution tools', async () => {
+test('sf serve gives the Quick start and the Planning method as instructions and the planning and execution tools', async () => {
   const served = await serve();
   const client = await connect(served);
   const handbook = await readFile(HANDBOOK, 'utf8');
   const instructions = client.getInstructions() ?? '';
-  assert.equal(instructions, quickStartSection(handbook));
+  // SF-191: the Quick start, then the Planning method: its two lines and the grilling skill's body
+  // without its front matter, as the file has it.
+  const skill = await readFile(SKILL, 'utf8');
+  assert.match(skill, /^---\nname: grilling\n/);
+  const body = skill.slice(skill.indexOf('\n---\n', 3) + 5).trim();
+  const method = `## Planning method\n\n${PLANNING}\n\n${body}`;
+  assert.equal(instructions, `${handbookSection(handbook, '## Quick start')}\n\n${method}`);
   assert.match(instructions, /^## Quick start\n/);
-  assert.doesNotMatch(instructions, /## The cycle/);
+  assert.match(instructions, /^Interview the user relentlessly/m);
+  assert.doesNotMatch(instructions, /## The cycle|^name: grilling|^description:/m);
+  assert.doesNotMatch(served.output(), /no planning skill/);
   assert.equal(client.getServerVersion()?.name, 'software-factory');
   assert.equal(client.getServerVersion()?.version, '0.1.0');
 
@@ -257,10 +273,49 @@ test('sf serve gives the Quick start as instructions and the planning and execut
   assert.equal(annotations.queue_list?.readOnlyHint, true);
   assert.equal(annotations.queue_add?.readOnlyHint, false);
   assert.equal(annotations.read_attachment?.readOnlyHint, true);
-  assert.deepEqual(await call(client, 'guide', {}), { text: handbook });
+  assert.deepEqual(await call(client, 'guide', {}), { text: `${handbook.trimEnd()}\n\n${method}\n` });
 
   await client.close();
   assert.equal(await stop(served), 0);
+});
+
+test('sf serve without a planning skill gives the Quick start alone; a missing file is logged, SF_PLAN_SKILL= is not', async () => {
+  const handbook = await readFile(HANDBOOK, 'utf8');
+  const missing = join(temp, 'no-skill', 'SKILL.md');
+  for (const [setting, logged] of [['', false], [missing, true]] as const) {
+    const served = await serve({ SF_PLAN_SKILL: setting });
+    const client = await connect(served);
+    assert.equal(client.getInstructions(), handbookSection(handbook, '## Quick start'), setting);
+    assert.deepEqual(await call(client, 'guide', {}), { text: handbook });
+    await client.close();
+    assert.equal(await stop(served), 0);
+    const line = `warning: no planning skill at ${missing}; the instructions are the Quick start alone\n`;
+    // One line, and only for a missing file.
+    assert.equal(served.output().includes(line), logged, served.output());
+    assert.equal(served.output().split('no planning skill').length - 1, logged ? 1 : 0, served.output());
+  }
+});
+
+test('loadHandbook strips the skill\'s front matter; SF_PLAN_SKILL= or a missing file leaves no skill', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sf-plan-skill-'));
+  try {
+    const path = join(dir, 'SKILL.md');
+    await writeFile(path, '---\r\nname: x\r\ndescription: y\r\n---\r\n\nAsk in rounds.\n\n```\n## not a heading\n```\n');
+    const loaded = await loadHandbook(HANDBOOK, path);
+    assert.equal(loaded.planSkill, 'Ask in rounds.\n\n```\n## not a heading\n```');
+    const served = servedHandbook(loaded);
+    assert.equal(served.instructions, `${loaded.quickStart}\n\n## Planning method\n\n${PLANNING}\n\nAsk in rounds.\n\n\`\`\`\n## not a heading\n\`\`\``);
+    assert.ok(served.guide.startsWith(loaded.text.trimEnd()) && served.guide.endsWith('## not a heading\n```\n'));
+    // The review rules and the other sections the factory sends stay the handbook's own.
+    assert.equal(handbookSection(served.guide, '## MR template'), handbookSection(loaded.text, '## MR template'));
+    for (const none of ['', join(dir, 'gone.md')]) {
+      const plain = await loadHandbook(HANDBOOK, none);
+      assert.equal(plain.planSkill, undefined);
+      assert.deepEqual(servedHandbook(plain), { instructions: plain.quickStart, guide: plain.text });
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('read_file and search work on the read checkout and skip ignored, .git and credential files', async () => {

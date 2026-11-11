@@ -6,7 +6,7 @@ vocabulary is in [../CONTEXT.md](../CONTEXT.md).
 
 The MCP endpoint serves only the planning tools (`guide`, `read_file`, `search`, `write_task`,
 `task_check`, `read_attachment` (a ticket's image, section Ticket images), and the run queue's
-`queue_list` and `queue_add`, section Run queue): the Context owner reads the repository, discusses the ticket with the user and
+`queue_list` and `queue_add`, section Run queue): the Context owner reads the repository, grills the user on the ticket (section MCP endpoint, The instructions) and
 writes the Task file with its `## Review brief`. Before Start, the Task check (section Task check)
 reads the Task file and the repository and says whether it is ready to build; `sf serve` runs it by
 itself after each write (SF-086). The user starts the job, with the Start button of the ticket on the
@@ -295,6 +295,17 @@ are `404`.
 The automation is unchanged: a Context owner with the token writes, queues and has tickets
 started by the run queue as before.
 
+- **The instructions** (SF-191): the server's `instructions` are the handbook's `## Quick start`
+  followed by a `## Planning method` section: two lines (plan every ticket by the method below, the
+  user's grilling skill; no sub-agents, so look facts up with `read_file`, `search` and
+  `read_attachment` and ask only what only the user can decide; the plan is done when the user
+  confirms, then write the Task file), then the body of `skills/grilling/SKILL.md` (the factory's
+  reviewed copy, PR #181) without its front matter. `guide` returns the whole handbook ending with
+  the same section. `SF_PLAN_SKILL` names another skill file; empty turns the section off. A
+  missing file leaves the Quick start alone as the instructions (and `guide` the handbook as it
+  is), and `sf serve` logs `warning: no planning skill at <path>; the instructions are the Quick
+  start alone` once at start; an empty `SF_PLAN_SKILL` logs nothing.
+
 ## Environment
 
 | Variable | Default | Meaning |
@@ -308,6 +319,7 @@ started by the run queue as before.
 | `SF_DASHBOARD_REMOTE_LOGINS` | none | Comma-separated Tailscale logins (`Tailscale-User-Login`, compared ignoring case) that may use the remote port; required with remote origins (`invalid_config` at start when missing or empty). |
 | `SF_CONFIG_DIR` | `${XDG_CONFIG_HOME:-~/.config}/software-factory` | Directory of the workspace registry, the default `auth.env` and the `rules/` files. |
 | `SF_HANDBOOK` | `factory/HANDBOOK.md` | Handbook served as instructions (its `## Quick start` section) and by `guide`. |
+| `SF_PLAN_SKILL` | `factory/skills/grilling/SKILL.md` | The planning skill whose body (without front matter) ends the instructions and `guide` as `## Planning method` (section MCP endpoint); empty: none. A missing file: the Quick start alone, and one warning at start. |
 | `SF_STATE_DIR` | `${XDG_STATE_HOME:-~/.local/state}/software-factory` | Job state and the `sf.sock` socket. |
 | `SF_WORKTREE_ROOT` | `${SF_STATE_DIR}/worktrees` | Where every job's worktree is created: `<root>/<workspace>/<ticket>`; absolute. |
 | `SF_MAX_JOBS` | `3` | The default of the run queue's limit `max_running` (section Run queue), within 1-20, while `queue.json` does not exist yet; `sf queue limit` and the board's stepper change the limit from then on. |
@@ -3708,8 +3720,9 @@ The ticket's **conversation** on its page: *Open the ChatGPT conversation ↗*, 
 (`target=_blank`, opened only by the user's click) to `https://chatgpt.com/?q=` plus the message of
 `ticketConversation` URL-encoded, and the first message with Copy. The message names the connector, `guide`, the
 ticket and the workspace, carries the user's words, and tells the Context owner to investigate
-(`read_file`, `search`), discuss, write the Task file over the skeleton with `write_task` with a
-`## Review brief`, and then tell the user it is ready: it only plans and never starts, reviews or
+(`read_file`, `search`), grill the user in rounds (numbered questions, a recommended answer to
+each, facts looked up by itself), write the Task file over the skeleton with `write_task` with a
+`## Review brief` only after the user confirms they agree, and then tell the user it is ready: it only plans and never starts, reviews or
 approves a job; the user reads the Task file and presses Start. A ticket with images gets the
 sentence of section Ticket images before the last one. A message too long for a link
 (over 7500 characters of URL) has no link: the page offers it to copy.

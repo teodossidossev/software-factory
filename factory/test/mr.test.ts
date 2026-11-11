@@ -15,7 +15,6 @@ import { commitAndRebase, commitPaths, continueRebase, filesWithMarkers, gitFail
 import { conflictPrompt, FACTORY_PROMPT_RULES, handbookSection, mrPrompt } from '../src/prompts.js';
 import { COMMIT_TYPES, commitHeader, DENIED_TOOLS, headerProblem, testingProblem } from '../src/rules.js';
 import type { ReviewItem } from '../src/review.js';
-import { quickStartSection } from '../src/server.js';
 
 const HANDBOOK = fileURLToPath(new URL('../../HANDBOOK.md', import.meta.url));
 
@@ -335,9 +334,19 @@ test('handbookSection extracts by heading and skips "## " lines inside fences; m
   // SF-058: the template shows a step that was not run.
   assert.match(template, /^## Testing\n<[^>]*`- Not checked: [^`]+`[^>]*>\n\n## Screenshots$/m);
   assert.doesNotMatch(template, /What the factory never does/);
-  assert.equal(quickStartSection(handbook), handbookSection(handbook, '## Quick start'));
   // SF-040: the Context owner plans only; the user starts; the reviewers review.
   const quick = handbookSection(handbook, '## Quick start');
+  // SF-191: the Context owner grills the user by the Planning method and writes after the user
+  // confirms; the skip path is in step 3.
+  // \s+ spans the line break after "Their" (HANDBOOK.md step 0).
+  assert.match(quick, /Their\s+words are the start of the grilling, not the task/);
+  assert.match(quick, /grill the user by the Planning method below: questions in\s+numbered rounds, each with your recommended answer; look facts up yourself/);
+  assert.match(quick, /A Task check's `decision` finding \(step 4\) goes back to the user as\s+one more round\./);
+  const step3 = quick.slice(quick.indexOf('\n3. '), quick.indexOf('\n4. '));
+  assert.match(step3, /only after the user confirmed you agree/);
+  assert.match(step3, /When the user\s+says to skip the questions \("just write it"\), write it at once/);
+  assert.match(step3, /under a list headed "Decisions taken without asking"/);
+  assert.match(handbookSection(handbook, '## Task file format'), /When the user skipped the questions, a list headed "Decisions taken without asking"\./);
   assert.match(quick, /You never start, review, fix,\s+clean or approve a job/);
   assert.match(quick, /The user reads it and starts the job on the dashboard/);
   assert.match(quick, /`## Review brief`/);

@@ -1,6 +1,6 @@
 // The ChatGPT conversation that plans a ticket: the first message the
 // dashboard offers for a ticket, and the prefilled ChatGPT link that carries it. ChatGPT only
-// plans: it reads the repository, discusses the ticket with the User and writes the Task file;
+// plans: it reads the repository, grills the User on the ticket and writes the Task file;
 // the User starts the job on the dashboard.
 
 // The message that opens the ChatGPT conversation of a ticket from the dashboard: the connector,
@@ -17,8 +17,8 @@ export function ticketConversation(workspace: string, ticket: string, request?: 
   return (
     `Use the Software Factory connector. Call guide. This conversation is for ticket ${ticket} in workspace ${workspace}.\n\n` +
     words +
-    'Investigate it: read the repository with read_file and search, ask me what is unclear, and discuss the solution with me. ' +
-    `When we agree, write the Task file with write_task (workspace "${workspace}", ticket "${ticket}"), replacing the skeleton ` +
+    'Investigate it: read the repository with read_file and search, and grill me on it in rounds: number your questions, give your recommended answer to each, look facts up yourself, and write the Task file only after I confirm we agree. ' +
+    `Write it with write_task (workspace "${workspace}", ticket "${ticket}"), replacing the skeleton ` +
     `.software-factory/${ticket}.md, with a ## Review brief for the reviewers, and show me the plan. ` +
     'Then tell me the Task file is ready; I start the job on the dashboard. ' +
     images +

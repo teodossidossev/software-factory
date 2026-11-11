@@ -56,6 +56,8 @@ export interface DenialScope {
   worktree?: string | undefined;
   // The session's own temporary folder (makeSessionTmp), kept readable and writable.
   sessionTmp?: string | undefined;
+  // The Implementer in its bwrap wrapper, whose <config dir>/skills is the factory's read-only copy.
+  wrappedSkills?: boolean | undefined;
   // A Task check's own folder (its check-* folder under the Task checks' parent), kept readable and writable.
   checkFolder?: string | undefined;
   stateDir: string;
@@ -134,14 +136,8 @@ interface Denied {
 async function denied(path: string): Promise<Denied | undefined> {
   const absolute = resolve(path);
   const real = await realOrUndefined(absolute);
-  if (real === undefined) {
-    return undefined;
-  }
-  const info = await stat(real).catch(() => undefined);
-  if (info === undefined) {
-    return undefined;
-  }
-  return { spellings: [...new Set([absolute, real])], directory: info.isDirectory() };
+  const info = real === undefined ? undefined : await stat(real).catch(() => undefined);
+  return real === undefined || info === undefined ? undefined : { spellings: [...new Set([absolute, real])], directory: info.isDirectory() };
 }
 
 // How the installed Claude Code CLI reads --disallowedTools, to which the SDK joins the list with
@@ -504,8 +500,9 @@ export async function pathDenials(scope: DenialScope): Promise<PathDenials> {
   const sandbox = { denyRead: [...denyRead], denyWrite: [...denyWrite] };
   const projects = join(claudeConfigDir(env, home), 'projects');
   const ownProjects = scope.worktree === undefined ? [] : [...new Set([resolve(scope.worktree), (await realOrUndefined(scope.worktree)) ?? resolve(scope.worktree)])].map((path) => join(projects, claudeProjectName(path)));
+  const skills = scope.wrappedSkills === true ? [resolve(claudeConfigDir(env, home), 'skills')] : [];
   // The guard keeps what the sandbox reads back in the temporary roots too (the state directory).
-  const guard = await fileGuard({ worktree: scope.worktree, roots, tmpRoots: claudeTmp.denyRead, kept: [...new Set([...kept, ...claudeTmp.allowRead])], projects: ownProjects });
+  const guard = await fileGuard({ worktree: scope.worktree, roots, tmpRoots: claudeTmp.denyRead, kept: [...new Set([...kept, ...claudeTmp.allowRead])], projects: ownProjects, skills });
   return { tools: [...tools], sandbox, claudeTmp, kept, hooks: guardHooksOf(guard) };
 }
 
@@ -522,22 +519,22 @@ const MAX_ALTERNATIVES = 64;
 const GLOB_CHARS = /[*?[\]{}]/;
 
 // What the guard checks against, real paths: the own worktree (undefined: no write passes), the
-// guarded roots, the temporary roots, the kept paths and the session's own Claude project folders.
+// guarded roots, the temporary roots, the kept paths, the session's own Claude project folders and
+// the wrapped Implementer's skills folder (as given, never resolved: <config dir>/skills).
 interface FileGuard {
   worktree: string | undefined;
   roots: string[];
   tmpRoots: string[];
   kept: string[];
   projects: string[];
+  skills: string[];
 }
 
 // The guard of the given paths, each by the real path it lands on.
 async function fileGuard(given: FileGuard): Promise<FileGuard> {
   return {
+    ...given,
     worktree: given.worktree === undefined ? undefined : await realTarget(resolve(given.worktree)),
-    roots: given.roots,
-    tmpRoots: given.tmpRoots,
-    kept: given.kept,
     projects: [...new Set(await Promise.all(given.projects.map((path) => realTarget(path))))],
   };
 }
@@ -721,7 +718,9 @@ export async function fileGuardReason(guard: FileGuard, tool: string, input: unk
     if ('unreadable' in found) {
       return `${FILE_GUARD} refuses this ${tool}: the path ${found.unreadable} cannot be checked (give a plain absolute path, no ~).`;
     }
-    for (const path of found.paths) {
+    // A read in the skills folder passes by the path given, unresolved: in the wrapper it is the factory's copy.
+    const checked = (path: string): boolean => WRITE_TOOLS.has(tool) || !guard.skills.some((dir) => within(path, dir));
+    for (const path of found.paths.filter(checked)) {
       const real = await realTarget(path);
       if (WRITE_TOOLS.has(tool)) {
         if (guard.worktree === undefined || !within(real, guard.worktree) || within(real, join(guard.worktree, '.git'))) {
@@ -736,7 +735,7 @@ export async function fileGuardReason(guard: FileGuard, tool: string, input: unk
         return `${FILE_GUARD} refuses this ${tool}: ${path} ${readDenied(guard, real) === 'tmp' ? `is in a temporary root; ${TMP_REFUSAL}` : 'is in the home directory, outside the worktree, the checkout and the toolchains'}.`;
       }
     }
-    for (const path of found.searches) {
+    for (const path of found.searches.filter(checked)) {
       const real = await realTarget(path);
       if ((await stat(real).catch(nowhere(undefined)))?.isDirectory() === true) {
         const escape = await searchEscape(guard, real);

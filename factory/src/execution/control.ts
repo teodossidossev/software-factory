@@ -426,7 +426,7 @@ export class ControlPart {
         const text = names.length > 0 ? `${this.#peers.turns.withChange(first, ticket, change)}\n\n${imagesChangedNote(names)}` : this.#peers.turns.withChange(first, ticket, change);
         // A new Implementer session has not seen the images: its first prompt carries their blocks.
         const blocks = next.session_id === null ? this.#peers.reviews.imageRefs(next, (await this.#store.jobs.readTaskCopy(workspaceName, ticket)) ?? '') : [];
-        this.#peers.turns.session(next, workspace).send(factoryPrompt(text, ticket, next.iteration + 1, this.#peers.turns.imagesLine(next)), DENIED_TOOLS, blocks);
+        this.#peers.turns.session(next, workspace).send(factoryPrompt(text, ticket, next.iteration + 1, this.#peers.turns.imagesLine(next), next.base_commit), DENIED_TOOLS, blocks);
       } else {
         // The reviewers read the new Task file in the worktree and its sha256 is recorded; task.md
         // keeps what the Implementer was last given, so its next prompt (a Fix section, sf say)

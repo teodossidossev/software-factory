@@ -14,7 +14,8 @@ export const FACTORY_PROMPT_RULES = `Rules from the Software Factory:
   ## Checks      (each command run with its result; "not run" and why, when not run)
   ## Open questions   ("None." when there are none)
   ## Fix N items (only when answering a Fix section: one row per item, by its id: | R7 | fixed / contested / escalated / left | <evidence or note> |)
-- Answer each Fix item: fixed; contested only with evidence a reviewer can check without you (a path:line in the worktree, a test name, a §section of the Task file, or the user's own message to this job quoted as: user message "<its exact words, at least 8 characters>"), else it reads as open; escalated only when it turns on something only the user knows, outside the repository and the Task file (the note is the question); left for nits only. An item that conflicts with the Task file only because the user's message asked for what you did is contested with that message, never escalated.`;
+- Answer each Fix item: fixed; contested only with evidence a reviewer can check without you (a path:line in the worktree, a test name, a §section of the Task file, or the user's own message to this job quoted as: user message "<its exact words, at least 8 characters>"), else it reads as open; escalated only when it turns on something only the user knows, outside the repository and the Task file (the note is the question); left for nits only. An item that conflicts with the Task file only because the user's message asked for what you did is contested with that message, never escalated.
+- When a skill needs a fixed point, it is the base commit <base>, and the change is the uncommitted worktree against it; the spec is the Task file; there is no issue tracker. Never ask the user; where a skill's step conflicts with these rules (commit, push, ask), these rules win.`;
 
 // The line of factoryPrompt that names the Task's images; the job stream recognises it.
 export function imagesLine(dir: string, names: readonly string[]): string {
@@ -23,10 +24,11 @@ export function imagesLine(dir: string, names: readonly string[]): string {
 
 // first: the command or the user's message; iteration: the number of the iteration to be published.
 // images: the job's images, dir the absolute path of their folder in the worktree; with
-// any, one line names them before the rules.
-export function factoryPrompt(first: string, ticket: string, iteration: number, images?: { dir: string; names: string[] }): string {
+// any, one line names them before the rules. base: the job's base commit, null when it has none.
+export function factoryPrompt(first: string, ticket: string, iteration: number, images?: { dir: string; names: string[] }, base: string | null = null): string {
   const line = images !== undefined && images.names.length > 0 ? `${imagesLine(images.dir, images.names)}\n\n` : '';
-  return `${first}\n\n${line}${FACTORY_PROMPT_RULES.replaceAll('<ticket>', ticket).replace('<N>', String(iteration))}`;
+  const rules = FACTORY_PROMPT_RULES.replaceAll('<ticket>', ticket).replace('<N>', String(iteration)).replace('<base>', base ?? 'the commit your branch started from');
+  return `${first}\n\n${line}${rules}`;
 }
 
 // This iteration's cost from the SDK's cumulative session total; a total below the previous one

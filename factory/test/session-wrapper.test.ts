@@ -9,16 +9,22 @@ import { existsSync, realpathSync } from 'node:fs';
 import { chmod, mkdir, readFile, realpath, stat, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { sandboxSettings } from '../src/config.js';
 import { findBwrap } from '../src/gate.js';
+import { PACKAGE_ROOT } from '../src/package-root.js';
 import { within } from '../src/test-command.js';
 import type { SandboxDenials } from '../src/sandbox-denials.js';
 import { type IdleOutcome, ImplementerSession } from '../src/session.js';
 import { BWRAP_MISSING, CLAUDE_WRITTEN, claudeExecutable, implementerWrapper, prepareClaudeState, type WrapperPaths } from '../src/session-wrapper.js';
 import { bwrapLog, FAKE, fakeLog, newEnv, script, temp, useFakeBwrap } from './support/harness.js';
 
-// A fake home with Claude Code's state, a native install under ~/.local/share/claude, ~/.ssh, and a
-// worktree with a .git file, a .env and a .claude folder; every path real.
+// The package's skills folder, as the session gives it to the wrapper.
+const PACKAGE_SKILLS = fileURLToPath(new URL('skills', PACKAGE_ROOT));
+
+// A fake home with Claude Code's state, a native install under ~/.local/share/claude, ~/.ssh, the
+// user's own skills (~/.claude/skills/mine, ~/.agents/skills/theirs), a worktree with a .git file, a
+// .env and a .claude folder, and a package's skills folder (skills/implement/SKILL.md); every path real.
 async function fixture(name: string): Promise<{ root: string; paths: WrapperPaths; denials: SandboxDenials }> {
   const root = join(await realpath(temp), name);
   const home = join(root, 'home');
@@ -26,29 +32,38 @@ async function fixture(name: string): Promise<{ root: string; paths: WrapperPath
   const worktree = join(root, 'worktree');
   const sessionTmp = join(root, 'tmp', 'sf-claude-1-x');
   const executable = join(home, '.local', 'share', 'claude', 'versions', '9.9.9');
-  for (const dir of [join(home, '.ssh'), claudeDir, join(claudeDir, 'backups'), join(worktree, '.claude'), sessionTmp, dirname(executable)]) {
+  const skills = join(root, 'package', 'skills');
+  for (const dir of [
+    join(home, '.ssh'), claudeDir, join(claudeDir, 'backups'), join(claudeDir, 'skills', 'mine'), join(home, '.agents', 'skills', 'theirs'), join(worktree, '.claude'), sessionTmp,
+    dirname(executable), join(skills, 'implement'),
+  ]) {
     await mkdir(dir, { recursive: true });
   }
   await prepareClaudeState(claudeDir, join(home, '.claude.json'));
   for (const [path, text] of [
     [join(home, '.ssh', 'id_ed25519'), 'key'], [join(home, '.claude.json'), '{}'], [join(claudeDir, '.credentials.json'), '{}'], [join(claudeDir, 'settings.json'), '{}'],
     [join(worktree, '.git'), 'gitdir: /nowhere\n'], [join(worktree, '.env'), 'SECRET=1\n'], [executable, '#!/bin/sh\n'],
+    [join(skills, 'implement', 'SKILL.md'), 'the factory\'s implement\n'], [join(claudeDir, 'skills', 'mine', 'SKILL.md'), 'mine\n'],
+    [join(home, '.agents', 'skills', 'theirs', 'SKILL.md'), 'theirs\n'],
   ] as const) {
     await writeFile(path, text);
   }
   const share = join(home, '.local', 'share');
   const denials: SandboxDenials = {
     // As pathDenials builds them for a job: the credentials, the global config, the home's other
-    // entries (~/.local/share, Claude Code's own entries), the worktree's .env.
-    denyRead: [join(home, '.ssh'), join(claudeDir, '.credentials.json'), join(home, '.claude.json'), share, join(claudeDir, 'projects'), join(claudeDir, 'backups'), join(claudeDir, 'settings.json'), join(worktree, '.env')],
+    // entries (~/.local/share, ~/.agents, Claude Code's own entries), the worktree's .env.
+    denyRead: [
+      join(home, '.ssh'), join(claudeDir, '.credentials.json'), join(home, '.claude.json'), share, join(home, '.agents'), join(claudeDir, 'projects'), join(claudeDir, 'backups'),
+      join(claudeDir, 'skills'), join(claudeDir, 'settings.json'), join(worktree, '.env'),
+    ],
     denyWrite: [join(home, '.ssh'), join(claudeDir, '.credentials.json'), join(home, '.claude.json'), join(claudeDir, 'settings.json'), join(worktree, '.git'), join(worktree, '.claude')],
   };
-  return { root, paths: { worktree, sessionTmp, home, claudeDir, globalConfig: join(home, '.claude.json'), executable }, denials };
+  return { root, paths: { worktree, sessionTmp, home, claudeDir, globalConfig: join(home, '.claude.json'), skills, executable }, denials };
 }
 
-test('the wrapper\'s arguments: the read-only root, the hidden entries but the CLI\'s own, the installation, the read-write binds, the fix-up pass, then .git, the agent configuration and the user settings read-only again', async () => {
+test('the wrapper\'s arguments: the read-only root, the hidden entries but the CLI\'s own, the installation, the read-write binds, the fix-up pass, then .git, the agent configuration and the user settings read-only again, and last the package\'s skills read-only on <config dir>/skills', async () => {
   const { paths, denials } = await fixture('wrapper-args');
-  const { home, claudeDir, worktree, sessionTmp, executable } = paths;
+  const { home, claudeDir, worktree, sessionTmp, executable, skills } = paths;
   const nodePrefix = dirname(dirname(realpathSync(process.execPath)));
   const native = join(home, '.local', 'share', 'claude');
   const written = CLAUDE_WRITTEN.map((name) => join(claudeDir, name));
@@ -57,7 +72,8 @@ test('the wrapper\'s arguments: the read-only root, the hidden entries but the C
   assert.deepEqual(implementerWrapper(denials, paths), [
     '--die-with-parent', '--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp',
     // Hidden: neither the credentials nor the global config nor the projects folder, which the CLI needs.
-    ...hide(['--tmpfs', join(home, '.ssh')]), ...hide(['--tmpfs', join(home, '.local', 'share')]), ...hide(['--tmpfs', join(claudeDir, 'backups')]),
+    ...hide(['--tmpfs', join(home, '.ssh')]), ...hide(['--tmpfs', join(home, '.local', 'share')]), ...hide(['--tmpfs', join(home, '.agents')]),
+    ...hide(['--tmpfs', join(claudeDir, 'backups')]), ...hide(['--tmpfs', join(claudeDir, 'skills')]),
     ...hide(['--ro-bind', '/dev/null', join(claudeDir, 'settings.json')]), ...hide(['--ro-bind', '/dev/null', join(worktree, '.env')]),
     // The installation read-only: the executable, its folder, the native installer's folder, node's prefix.
     '--ro-bind', executable, executable, '--ro-bind', dirname(executable), dirname(executable), '--ro-bind', native, native, '--ro-bind', nodePrefix, nodePrefix,
@@ -69,7 +85,34 @@ test('the wrapper\'s arguments: the read-only root, the hidden entries but the C
     // Read-only again: the worktree's .git and .claude, then the user settings.
     '--ro-bind', join(worktree, '.git'), join(worktree, '.git'), '--ro-bind', join(worktree, '.claude'), join(worktree, '.claude'),
     '--ro-bind', join(claudeDir, 'settings.json'), join(claudeDir, 'settings.json'),
+    // Last, over the tmpfs that hid the user's skills: the package's, read-only.
+    '--ro-bind', skills, join(claudeDir, 'skills'),
   ]);
+});
+
+test('the skills bind: on <config dir>/skills when it is a folder, made by prepareClaudeState when missing, on the real path of a link; none without the package\'s folder or through a dangling link', async () => {
+  const { root, paths, denials } = await fixture('wrapper-skills');
+  const last = (args: string[]): string[] => args.slice(-3);
+  // A folder (the user's links live in it).
+  assert.deepEqual(last(implementerWrapper(denials, paths)), ['--ro-bind', paths.skills, join(paths.claudeDir, 'skills')]);
+  // Missing: made empty first, so bwrap has its mount point.
+  const fresh = join(root, 'fresh', '.claude');
+  await prepareClaudeState(fresh, join(root, 'fresh', '.claude.json'));
+  assert.ok((await stat(join(fresh, 'skills'))).isDirectory());
+  assert.deepEqual(last(implementerWrapper(denials, { ...paths, claudeDir: fresh })), ['--ro-bind', paths.skills, join(fresh, 'skills')]);
+  // A link (to ~/.agents/skills, which the home's tmpfs hides): on its real path, the path the CLI reaches.
+  const linked = join(root, 'linked', '.claude');
+  await mkdir(linked, { recursive: true });
+  await symlink(join(paths.home, '.agents', 'skills'), join(linked, 'skills'));
+  await prepareClaudeState(linked, join(root, 'linked', '.claude.json'));
+  assert.deepEqual(last(implementerWrapper(denials, { ...paths, claudeDir: linked })), ['--ro-bind', paths.skills, join(paths.home, '.agents', 'skills')]);
+  // No package folder, or a dangling link (prepareClaudeState leaves it): no bind, the job shows skill_missing.
+  assert.ok(!implementerWrapper(denials, { ...paths, skills: join(root, 'none') }).includes(join(root, 'none')));
+  const dangling = join(root, 'dangling', '.claude');
+  await mkdir(dangling, { recursive: true });
+  await symlink(join(root, 'nowhere'), join(dangling, 'skills'));
+  await prepareClaudeState(dangling, join(root, 'dangling', '.claude.json'));
+  assert.ok(!implementerWrapper(denials, { ...paths, claudeDir: dangling }).includes(paths.skills));
 });
 
 test('the private /tmp (SF-185): --tmpfs /tmp after the read-only root and before every bind of a path under /tmp; a denial under /tmp is not mounted, but one inside the session\'s tmp is hidden again on top of its bind; one outside /tmp is hidden', async () => {
@@ -129,7 +172,7 @@ test('prepareClaudeState: the state folders, and the credentials and global conf
   await prepareClaudeState(claudeDir, globalConfig);
   assert.equal(await readFile(globalConfig, 'utf8'), '{"numStartups":3}');
   const args = implementerWrapper({ denyRead: [], denyWrite: [] }, {
-    worktree: root, sessionTmp: root, home: join(root, 'home'), claudeDir, globalConfig, executable: '/bin/sh',
+    worktree: root, sessionTmp: root, home: join(root, 'home'), claudeDir, globalConfig, skills: join(root, 'skills'), executable: '/bin/sh',
   }).join(' ');
   for (const file of [join(claudeDir, '.credentials.json'), globalConfig]) {
     assert.ok(args.includes(`--bind ${file} ${file}`), args);
@@ -142,9 +185,12 @@ test('claudeExecutable: the script after node, else the command', () => {
 });
 
 // Runs one Implementer turn with the sandbox on and HOME the test's; resolves with its outcome.
-async function oneTurn(env: Awaited<ReturnType<typeof newEnv>>, path: string, seen: string[] = []): Promise<IdleOutcome> {
-  const saved = { HOME: process.env.HOME, PATH: process.env.PATH };
+async function oneTurn(env: Awaited<ReturnType<typeof newEnv>>, path: string, seen: string[] = [], configDir?: string): Promise<IdleOutcome> {
+  const saved = { HOME: process.env.HOME, PATH: process.env.PATH, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR };
   Object.assign(process.env, { HOME: env.home, PATH: path });
+  if (configDir !== undefined) {
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+  }
   try {
     return await new Promise<IdleOutcome>((resolve) => {
       new ImplementerSession({ cwd: join(env.home, 'work'), maxTurns: 3, claudePath: FAKE, sandbox: sandboxSettings({}) }, {
@@ -153,7 +199,13 @@ async function oneTurn(env: Awaited<ReturnType<typeof newEnv>>, path: string, se
       }).send('go', []);
     });
   } finally {
-    Object.assign(process.env, saved);
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
   }
 }
 
@@ -178,6 +230,22 @@ test('spawnClaudeCodeProcess: the command, its argv, cwd and environment reach C
   for (const path of [...CLAUDE_WRITTEN.map((name) => join(env.home, '.claude', name)), join(env.home, '.claude', '.credentials.json'), join(env.home, '.claude.json')]) {
     assert.ok(existsSync(path), path);
   }
+  // The package's own skills, read-only on ~/.claude/skills, the last mount before the chdir.
+  assert.deepEqual(run!.argv.slice(cut - 5, cut - 2), ['--ro-bind', PACKAGE_SKILLS, join(env.home, '.claude', 'skills')]);
+});
+
+test('with CLAUDE_CONFIG_DIR set, the package\'s skills are bound read-only on <CLAUDE_CONFIG_DIR>/skills', async () => {
+  const env = await newEnv('wrapper-config-dir');
+  await mkdir(join(env.home, 'work'), { recursive: true });
+  await script(env, [{}]);
+  useFakeBwrap();
+  const configDir = join(env.home, 'claude-config');
+  const outcome = await oneTurn(env, process.env.PATH!, [], configDir);
+  assert.equal(outcome.ok, true, JSON.stringify(outcome));
+  const [run] = await bwrapLog(env, { implementer: true });
+  const cut = run!.argv.indexOf('--');
+  assert.deepEqual(run!.argv.slice(cut - 5, cut - 2), ['--ro-bind', PACKAGE_SKILLS, join(configDir, 'skills')]);
+  assert.ok(existsSync(join(configDir, 'skills')));
 });
 
 test('no bwrap on PATH: the turn ends with sandbox_unavailable and its message, and Claude Code never starts', async () => {
@@ -253,7 +321,7 @@ function realBwrapStarts(): boolean {
   return probe.status === 0;
 }
 
-test('under the real bwrap with the wrapper: a write in the home outside the allowed set, through a link out of the worktree, to ~/.claude/settings.json and to the worktree\'s .git fails; the worktree, the tmp and ~/.claude/projects take one; a file and a Unix socket in the private /tmp are made there and never reach the host\'s /tmp, whose entries are not seen', { skip: process.platform === 'linux' && realBwrapStarts() ? false : 'the real bubblewrap cannot start here' }, async () => {
+test('under the real bwrap with the wrapper: a write in the home outside the allowed set, through a link out of the worktree, to ~/.claude/settings.json and to the worktree\'s .git fails; the worktree, the tmp and ~/.claude/projects take one; a file and a Unix socket in the private /tmp are made there and never reach the host\'s /tmp, whose entries are not seen; <config dir>/skills/implement/SKILL.md is the package\'s, read-only, and neither the user\'s skills nor ~/.agents are seen', { skip: process.platform === 'linux' && realBwrapStarts() ? false : 'the real bubblewrap cannot start here' }, async () => {
   const { root, paths, denials } = await fixture('wrapper-real');
   await mkdir(join(root, 'home', 'elsewhere'));
   await symlink(join(root, 'home', 'elsewhere'), join(paths.worktree, 'out'));
@@ -277,6 +345,10 @@ test('under the real bwrap with the wrapper: a write in the home outside the all
     projects: `echo x > '${join(paths.claudeDir, 'projects', 'ok.txt')}'`,
     tmpFile: `echo x > '${tmpFile}' && test -f '${tmpFile}'`,
     tmpSocket: `'${process.execPath}' -e "${listen}"`,
+    skillRead: `grep -qx "the factory's implement" '${join(paths.claudeDir, 'skills', 'implement', 'SKILL.md')}'`,
+    skillWrite: `echo x > '${join(paths.claudeDir, 'skills', 'implement', 'SKILL.md')}'`,
+    userSkill: `cat '${join(paths.claudeDir, 'skills', 'mine', 'SKILL.md')}'`,
+    agents: `ls '${join(paths.home, '.agents', 'skills')}'`,
     ...(underTmp ? { hostTmp: `cat '${hostOnly}'` } : {}),
   };
   const body = Object.entries(checks).map(([name, command]) => `if ${command} 2>/dev/null; then echo ${name}:ok; else echo ${name}:refused; fi`).join('\n');
@@ -284,8 +356,9 @@ test('under the real bwrap with the wrapper: a write in the home outside the all
   assert.equal(ran.status, 0, ran.stderr);
   assert.deepEqual(ran.stdout.trim().split('\n'), [
     `home:${underTmp ? 'ok' : 'refused'}`, 'link:refused', 'settings:refused', 'git:refused', 'ssh:refused', 'worktree:ok', 'tmp:ok', 'projects:ok',
-    'tmpFile:ok', 'tmpSocket:ok', ...(underTmp ? ['hostTmp:refused'] : []),
+    'tmpFile:ok', 'tmpSocket:ok', 'skillRead:ok', 'skillWrite:refused', 'userSkill:refused', 'agents:refused', ...(underTmp ? ['hostTmp:refused'] : []),
   ]);
+  assert.equal(await readFile(join(paths.skills, 'implement', 'SKILL.md'), 'utf8'), "the factory's implement\n");
   assert.equal(existsSync(join(paths.home, 'outside.txt')), false);
   assert.equal(existsSync(join(root, 'home', 'elsewhere', 'escaped.txt')), false);
   assert.equal(await readFile(join(paths.claudeDir, 'settings.json'), 'utf8'), '{}');

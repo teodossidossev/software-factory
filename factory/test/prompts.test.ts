@@ -7,11 +7,18 @@ test('factoryPrompt puts the prompt first, then a blank line and the rules with 
   const prompt = factoryPrompt('/implement .software-factory/PROJ-1.md Fix 2', 'PROJ-1', 3);
   const [first, blank, ...rest] = prompt.split('\n');
   assert.deepEqual([first, blank], ['/implement .software-factory/PROJ-1.md Fix 2', '']);
-  assert.equal(rest.join('\n'), FACTORY_PROMPT_RULES.replaceAll('<ticket>', 'PROJ-1').replace('<N>', '3'));
+  assert.equal(rest.join('\n'), FACTORY_PROMPT_RULES.replaceAll('<ticket>', 'PROJ-1').replace('<N>', '3').replace('<base>', 'the commit your branch started from'));
   assert.match(prompt, /^- Do not edit \.software-factory\/PROJ-1\.md; the Context owner owns it\.\n- While working, run the tests of the files you change; run the repository's full test suite once, before the report\.\n- End your turn with a report/m);
   assert.match(prompt, /^ {2}# Report: PROJ-1, iteration 3$/m);
   assert.match(prompt, /^ {2}## Fix N items \(only when answering/m);
-  assert.doesNotMatch(prompt, /<ticket>|<N>/);
+  assert.doesNotMatch(prompt, /<ticket>|<N>|<base>/);
+});
+
+test('factoryPrompt\'s last rule puts the skills under the factory\'s rules: the job\'s base commit as their fixed point, the Task file as the spec, no issue tracker, never ask, these rules win', () => {
+  const rule = (base: string): string => `- When a skill needs a fixed point, it is the base commit ${base}, and the change is the uncommitted worktree against it; the spec is the Task file; there is no issue tracker. Never ask the user; where a skill's step conflicts with these rules (commit, push, ask), these rules win.`;
+  assert.equal(factoryPrompt('/implement .software-factory/PROJ-1.md', 'PROJ-1', 1, undefined, 'abc123').split('\n').at(-1), rule('abc123'));
+  assert.equal(factoryPrompt('/implement .software-factory/PROJ-1.md', 'PROJ-1', 1, undefined, null).split('\n').at(-1), rule('the commit your branch started from'));
+  assert.match(FACTORY_PROMPT_RULES, /^- Do not commit, stage, stash, push or switch branches;/m);
 });
 
 test('factoryPrompt with images (SF-065): one line names their folder and names before the rules; without images the prompt is as before', () => {
@@ -21,7 +28,7 @@ test('factoryPrompt with images (SF-065): one line names their folder and names 
   assert.equal(prompt, [
     '/implement .software-factory/PROJ-1.md', '',
     "The Task's images are in /w/.software-factory/PROJ-1: 1.png, 2.png. Read them when you need them.", '',
-    FACTORY_PROMPT_RULES.replaceAll('<ticket>', 'PROJ-1').replace('<N>', '1'),
+    FACTORY_PROMPT_RULES.replaceAll('<ticket>', 'PROJ-1').replace('<N>', '1').replace('<base>', 'the commit your branch started from'),
   ].join('\n'));
 });
 

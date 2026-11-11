@@ -15,11 +15,11 @@ import { Execution } from '../src/execution.js';
 import { type Job, type JobState, JobStore } from '../src/jobs.js';
 import { QueueStore } from '../src/queue.js';
 import { resolveWorkspace } from '../src/registry.js';
-import { FACTORY_PROMPT_RULES, factoryPrompt } from '../src/prompts.js';
+import { FACTORY_PROMPT_RULES } from '../src/prompts.js';
 import { taskSha256 } from '../src/task-file.js';
 import {
   call, FAKE, fakeLog, git, newEnv, newRepo, putRules, putTask, readyCheck, refused, runCli, script, serve, stop, task, temp, turnsStarted,
-  waitFor,
+  jobPrompt, waitFor,
 } from './support/harness.js';
 
 function mrText(header: string): string {
@@ -121,8 +121,8 @@ test('full cycle in a worktree: start, awaiting_review with Report, Patch and fi
 
   let log = await fakeLog(env);
   assert.deepEqual(log.map((entry) => entry.prompt), [
-    factoryPrompt('/implement .software-factory/DEMO-1.md', 'DEMO-1', 1),
-    factoryPrompt('/implement .software-factory/DEMO-1.md Fix 1', 'DEMO-1', 2),
+    await jobPrompt(env, '/implement .software-factory/DEMO-1.md', 'DEMO-1', 1),
+    await jobPrompt(env, '/implement .software-factory/DEMO-1.md Fix 1', 'DEMO-1', 2),
   ]);
   assert.deepEqual(log.map((entry) => entry.cwd), [worktree, worktree]);
   assert.match(log[0]!.prompt, /^\/implement \.software-factory\/DEMO-1\.md\n\nRules from the Software Factory:\n/);
@@ -243,9 +243,9 @@ test('coding rules (SF-059): the first prompt gives the <rules> block after /imp
     await assert.rejects(stat(join(jobDir, 'iterations', '003', 'rules.json')), { code: 'ENOENT' });
     const log = await fakeLog(env);
     assert.deepEqual(log.map((entry) => entry.prompt), [
-      factoryPrompt(`/implement .software-factory/K-1.md\n\n${block}`, 'K-1', 1),
-      factoryPrompt('/implement .software-factory/K-1.md Fix 1', 'K-1', 2),
-      factoryPrompt('/implement .software-factory/K-1.md Fix 2', 'K-1', 3),
+      await jobPrompt(env, `/implement .software-factory/K-1.md\n\n${block}`, 'K-1', 1),
+      await jobPrompt(env, '/implement .software-factory/K-1.md Fix 1', 'K-1', 2),
+      await jobPrompt(env, '/implement .software-factory/K-1.md Fix 2', 'K-1', 3),
     ]);
     assert.ok(log[0]!.prompt.includes('\n\n### repository: docs/style.md\n\n# Style\n\nName things plainly.\n'));
   } finally {
@@ -280,7 +280,7 @@ test('coding rules (SF-059): a Start whose rules cannot be collected fails witho
     const restarted = await runCli(env, ['restart', 'app', 'K-2']);
     assert.equal(restarted.code, 0, restarted.stderr);
     await waitFor(served, 'K-2', 'awaiting_review', 1);
-    assert.equal((await fakeLog(env))[0]!.prompt, factoryPrompt(`/implement .software-factory/K-2.md\n\n${block}`, 'K-2', 1));
+    assert.equal((await fakeLog(env))[0]!.prompt, await jobPrompt(env, `/implement .software-factory/K-2.md\n\n${block}`, 'K-2', 1));
   } finally {
     await chmod(ownRules, 0o600);
     await stop(served);
@@ -431,7 +431,7 @@ test('queue and limits: say during a turn, iteration_limit, base_not_found, bran
   const first = await waitFor(served, 'Q-1', 'awaiting_review', 1);
   assert.match(first.report, /^after say\n/);
   const log = await fakeLog(env);
-  assert.deepEqual(log.map((entry) => entry.prompt), [factoryPrompt('/implement .software-factory/Q-1.md', 'Q-1', 1), factoryPrompt('also do this', 'Q-1', 1)]);
+  assert.deepEqual(log.map((entry) => entry.prompt), [await jobPrompt(env, '/implement .software-factory/Q-1.md', 'Q-1', 1), await jobPrompt(env, 'also do this', 'Q-1', 1)]);
   assert.ok(log[1]!.prompt.startsWith('also do this\n\nRules from the Software Factory:\n'));
   assert.ok(log[1]!.prompt.includes(FACTORY_PROMPT_RULES.split('\n')[1]!));
   assert.ok(log[1]!.argv.includes(`--resume=${log[0]!.sessionId}`));

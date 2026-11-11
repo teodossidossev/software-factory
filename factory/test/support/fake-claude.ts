@@ -48,6 +48,8 @@ interface Turn {
   // once what it waits on happened, so the order does not hang on a fixed delay under load.
   waitFile?: string;
   permissionMode?: string;
+  // The init message's slash commands; default ['implement'], the factory's own skill as the wrapper gives it.
+  slashCommands?: string[];
   denials?: string[];
   subtype?: string;
   // The SDK's cumulative session cost reported in the result; default 0.0123.
@@ -255,7 +257,7 @@ async function run(prompt: string, blocks?: LoggedBlock[]): Promise<void> {
   }
   out({
     type: 'system', subtype: 'init', permissionMode: turn.permissionMode ?? option('permission-mode') ?? 'default',
-    cwd: process.cwd(), tools: [], mcp_servers: [], model: 'fake-model', slash_commands: [], output_style: 'default',
+    cwd: process.cwd(), tools: [], mcp_servers: [], model: 'fake-model', slash_commands: turn.slashCommands ?? ['implement'], output_style: 'default',
     skills: [], plugins: [], apiKeySource: 'none', claude_code_version: '0.0.0-fake',
   });
   for (const [path, content] of Object.entries(turn.write ?? {})) {

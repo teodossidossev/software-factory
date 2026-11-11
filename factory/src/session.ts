@@ -12,8 +12,10 @@
 // sandbox_unavailable, and Claude Code is never started without it.
 import { query, type SandboxSettings, type SDKMessage, type SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { type ImageRef, promptInput } from './attachments.js';
 import { makeSessionTmp, removeSessionTmp } from './host-tmp.js';
+import { PACKAGE_ROOT } from './package-root.js';
 import { claudeConfigDir, claudeUserSettings, type PathDenials, withSandboxDenials } from './sandbox-denials.js';
 import { factoryRoots, reapOrphanedSandboxes } from './sandbox-reaper.js';
 import { BWRAP_MISSING, prepareClaudeState, SANDBOX_UNAVAILABLE, WrappedSpawn } from './session-wrapper.js';
@@ -424,7 +426,9 @@ export class ImplementerSession {
     const claudeDir = claudeConfigDir(process.env, home);
     const globalConfig = claudeUserSettings(process.env, home)[1]!;
     await prepareClaudeState(claudeDir, globalConfig);
-    return new WrappedSpawn(bwrap, denials?.sandbox ?? { denyRead: [], denyWrite: [] }, { worktree: this.#options.cwd, sessionTmp: tmp, home, claudeDir, globalConfig });
+    return new WrappedSpawn(bwrap, denials?.sandbox ?? { denyRead: [], denyWrite: [] }, {
+      worktree: this.#options.cwd, sessionTmp: tmp, home, claudeDir, globalConfig, skills: fileURLToPath(new URL('skills', PACKAGE_ROOT)),
+    });
   }
 
   // A turn that failed before Claude Code answered (its result), with a wrapper that failed:

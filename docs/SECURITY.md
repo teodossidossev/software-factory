@@ -38,6 +38,11 @@ refused), and the factory's test command passed in a sandbox without network on 
     folder of the wrapper's own: writable, but nothing of the host's `/tmp` is seen there and
     nothing written there reaches the host. So a link swapped in between the file guard's check and
     the write cannot send the write out of the worktree.
+    Its skills are the factory's own copies (`factory/skills/`, changed only by pull request),
+    mounted read-only where Claude Code looks for the user's skills: the job can read them but not
+    change them, and the user's own skills (`~/.claude/skills`, `~/.agents`) stay hidden. The file
+    guard lets only this session read that folder, by the path given; every other session, and a
+    write by any session, is refused there.
     Without `bwrap` a job's turn stops; it never runs unwrapped. `SF_SANDBOX=off` turns the
     wrapper off with the rest of the sandbox, which opens the link swap again.
 - **Sandboxes do not outlive their session.** Sandbox processes left behind by a finished session

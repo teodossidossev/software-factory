@@ -16,12 +16,11 @@ import { DASHBOARD_SCRIPTS, MAX_ACTION_BODY_BYTES, startDashboard } from '../src
 import { MAX_MR_BODY_BYTES, openWhileUpdating, POST_ROUTES, type PostRoute, type RouteName } from '../src/dashboard-routes.js';
 import { FactoryError } from '../src/errors.js';
 import { JobStore } from '../src/jobs.js';
-import { factoryPrompt } from '../src/prompts.js';
 import type { DashboardQueue } from '../src/dashboard.js';
 import type { QueueView } from '../src/queue.js';
 import { act, CSP, fakeActions, fakeSetup, fetchRaw, openStream, type Reply, ticketRow, workspaceRow } from './support/dashboard-client.js';
 import { fixture, withDashboard } from './support/dashboard-state.js';
-import { call, fakeLog, git, newEnv, newRepo, putTask, refused, script, serve, stop, waitFor } from './support/harness.js';
+import { call, fakeLog, git, newEnv, newRepo, putTask, refused, script, serve, stop, waitFor, jobPrompt } from './support/harness.js';
 
 
 const error = (reply: Reply): { status: number; code: string } => ({ status: reply.status, code: JSON.parse(reply.body).error.code });
@@ -446,7 +445,7 @@ test('dashboard actions end to end: say resumes needs_human, approve is refused 
     }
     const log = await fakeLog(env);
     assert.equal(log.length, 5);
-    assert.equal(log[2]!.prompt, factoryPrompt('go on\nplease', 'N-1', 3));
+    assert.equal(log[2]!.prompt, await jobPrompt(env, 'go on\nplease', 'N-1', 3));
   } finally {
     await stop(served);
   }
@@ -506,7 +505,7 @@ test('dashboard actions end to end: say queues during a turn, a hand-edited tip 
     assert.deepEqual(error(await act(base, 'api/jobs/app/C-1/abort', {})), { status: 409, code: 'invalid_state' });
     let log = await fakeLog(env);
     assert.equal(log.length, 3);
-    assert.equal(log[1]!.prompt, factoryPrompt(message, 'C-1', 1));
+    assert.equal(log[1]!.prompt, await jobPrompt(env, message, 'C-1', 1));
 
     // C-2: abort while the MR preparation runs ends the job; the worktree stays.
     await call(served, 'start', { workspace: 'app', ticket: 'C-2' });

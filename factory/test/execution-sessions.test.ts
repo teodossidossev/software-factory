@@ -4,14 +4,13 @@
 // throwaway Git repositories and the fake Claude Code as the Implementer executable, as in
 // test/execution.test.ts (split so that no file runs near run-tests' per-file limit).
 import assert from 'node:assert/strict';
-import { mkdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
-import { factoryPrompt } from '../src/prompts.js';
 import { prepareClaudeState } from '../src/session-wrapper.js';
 import { SMOKE_PROBE_RULE, SMOKE_TOOLS, sessionAllowedTools } from '../src/session.js';
-import { call, fakeLog, newEnv, newRepo, putTask, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
+import { call, fakeLog, newEnv, newRepo, putTask, runCli, script, serve, stop, temp, waitFor, jobPrompt } from './support/harness.js';
 
 test('permission_mode_mismatch ends in needs_human; a restart turns working jobs into needs_human and sf say resumes them', async () => {
   const env = await newEnv('restart');
@@ -41,7 +40,7 @@ test('permission_mode_mismatch ends in needs_human; a restart turns working jobs
   const resumed = await waitFor(served, 'M-1', 'awaiting_review', 1);
   assert.match(resumed.report, /^resumed report\n/);
   const log = await fakeLog(env);
-  assert.equal(log[1]!.prompt, factoryPrompt('please continue', 'M-1', 1));
+  assert.equal(log[1]!.prompt, await jobPrompt(env, 'please continue', 'M-1', 1));
   assert.ok(log[1]!.argv.includes('--resume=kept-session'));
   await stop(served);
 });
@@ -142,4 +141,27 @@ test('the init assertion (SF-109): a smoke session reporting auto and a real one
     }
     await stop(served);
   }
+});
+
+test('the implement skill missing from the session\'s init message: one skill_missing event per job, its turns carry on; listed: none', async () => {
+  const env = await newEnv('skill-missing');
+  const repo = await newRepo(env, 'skill-missing-repo', false);
+  await putTask(env, repo, 'K-1', 'Missing');
+  await putTask(env, repo, 'K-2', 'Present');
+  await script(env, [
+    { text: '# Report: K-1, iteration 1', slashCommands: ['tdd'] }, { text: '# Report: K-1, iteration 2', slashCommands: [] }, { text: '# Report: K-2, iteration 1' },
+  ]);
+  const served = await serve(env);
+  await call(served, 'start', { workspace: 'app', ticket: 'K-1' });
+  await waitFor(served, 'K-1', 'awaiting_review', 1);
+  assert.equal((await runCli(env, ['say', 'app', 'K-1', 'go', 'on'])).code, 0);
+  await waitFor(served, 'K-1', 'awaiting_review', 2);
+  await call(served, 'start', { workspace: 'app', ticket: 'K-2' });
+  await waitFor(served, 'K-2', 'awaiting_review', 1);
+  await stop(served);
+  const jobs = new JobStore(env.state);
+  const missing = async (ticket: string): Promise<unknown[]> => (await readFile(jobs.eventsPath('app', ticket), 'utf8')).trim().split('\n')
+    .map((line) => JSON.parse(line) as { type?: string }).filter((record) => record.type === 'skill_missing').map(({ ts: _ts, ...rest }: Record<string, unknown>) => rest);
+  assert.deepEqual(await missing('K-1'), [{ iteration: 1, type: 'skill_missing', skill: 'implement' }]);
+  assert.deepEqual(await missing('K-2'), []);
 });

@@ -9,9 +9,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
 import { liveOwner, tryLock, withLock } from '../src/pid-lock.js';
-import { factoryPrompt } from '../src/prompts.js';
 import { enqueue, hasRequests, runJob, type RunnerRequest, Runners, takeRequest } from '../src/runner.js';
-import { call, fakeLog, newEnv, newRepo, putTask, runCli, script, serve, stop, temp, turnsStarted, waitFor } from './support/harness.js';
+import { call, fakeLog, newEnv, newRepo, putTask, runCli, script, serve, stop, temp, turnsStarted, waitFor, jobPrompt } from './support/harness.js';
 
 function alive(pid: number): boolean {
   try {
@@ -129,7 +128,7 @@ test('say while a turn runs is queued in the runner and runs as the next turn of
     const published = await waitFor(served, 'Q-1', 'awaiting_review', 1);
     assert.match(published.report, /^the said turn\n/);
     const log = await fakeLog(env);
-    assert.deepEqual(log.map((entry) => entry.prompt), [factoryPrompt('/implement .software-factory/Q-1.md', 'Q-1', 1), factoryPrompt('also this', 'Q-1', 1)]);
+    assert.deepEqual(log.map((entry) => entry.prompt), [await jobPrompt(env, '/implement .software-factory/Q-1.md', 'Q-1', 1), await jobPrompt(env, 'also this', 'Q-1', 1)]);
     assert.ok(log[1]!.argv.includes(`--resume=${log[0]!.sessionId}`));
   } finally {
     await stop(served);

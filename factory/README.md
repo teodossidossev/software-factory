@@ -3882,8 +3882,23 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `api/tickets/<ws>/<ticket>/attachments/<name>` | one image of the ticket (SF-064), with the content type its bytes tell and `x-content-type-options: nosniff`; a missing workspace, Task file or image (or any query) is an empty 404, a bad name `400 invalid_name`, a file that is not the image its name says `400 attachment_type` |
 | `api/stream?job=<ws>/<ticket>&from=<line>` | server-sent events: `jobs` (on connect and on every state change), `workspaces` and `tickets` (as the two endpoints, at the same times and after every setup action from a page), `job` (the job's detail, on connect and when it changes state), `event` (`{line, ts, iteration, type, text}` for every visible line of `events.jsonl` from the 0-based `from`, as `sf watch` formats it; the page reads `entries` since SF-078), `entries` (`{line, entries}`, the line's entries as `api/jobs/<ws>/<ticket>/stream` gives them, for every line from `from` that has entries, strictly in line order; a line whose build fails is logged and skipped); a comment every 15 s; at most 8 streams, then 503 |
 
-The reads above are one route table in `src/dashboard.ts` (SF-140), matched in order; a path no
-route matches is an empty 404. The stream tells the pages what changed: the changes that arrive
+The reads above are one route table in `src/dashboard-reads.ts` (SF-140), matched in order; a path
+no route matches is an empty 404 (`api/stream` is the change feed's, sent there first by
+`src/dashboard.ts`). `src/dashboard.ts` keeps the two listeners, the token, the cookies and the
+method rule of each path, and builds one context the other modules share (SF-188):
+
+- `src/dashboard-context.ts`: the shared context (`DashboardContext`) and the helpers of the
+  request's names, target, cookie and body.
+- `src/dashboard-payloads.ts`: the payloads of `api/jobs`, `api/workspaces`, `api/tickets` and a
+  job's detail, which the reads and the stream share.
+- `src/dashboard-reads.ts`: the GET route table and its handlers.
+- `src/dashboard-posts.ts`: the POST handlers: the routes of `POST_ROUTES`, the setup, Task check,
+  task and attachment posts, and their transport checks.
+- `src/dashboard-changes.ts`: the change feed: the event streams and what they are told after a
+  change.
+- `src/dashboard-routes.ts`: `POST_ROUTES`, the job and queue actions (below).
+
+The stream tells the pages what changed: the changes that arrive
 within one tick are merged and sent once, one event per changed kind (`jobs`, then a `job` event
 per changed job to the pages that follow it, `workspaces`, `tickets`), and a change that arrives
 while they are sent goes out right after. A `tickets` event caused by job changes names their

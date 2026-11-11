@@ -14,8 +14,13 @@ import { readTestHooks } from '../src/test-hooks.js';
 
 // The tests run from dist/test; the sources are those of the checkout.
 const SRC = fileURLToPath(new URL('../../src/', import.meta.url));
-// The modules src/execution/ must not import, relative to src/.
-const ABOVE_EXECUTION: readonly string[] = ['dashboard.ts', 'server.ts', 'queue.ts', 'cli.ts'];
+// The modules src/execution/ must not import, relative to src/: the dashboard's (SF-188), the MCP
+// server, the run queue and the CLI.
+const DASHBOARD_MODULES: readonly string[] = ['dashboard.ts', 'dashboard-context.ts', 'dashboard-payloads.ts', 'dashboard-changes.ts', 'dashboard-reads.ts', 'dashboard-posts.ts'];
+const ABOVE_EXECUTION: readonly string[] = [...DASHBOARD_MODULES, 'server.ts', 'queue.ts', 'cli.ts'];
+// The dashboard's parts, which only dashboard.ts imports (SF-188).
+const DASHBOARD_PARTS: readonly string[] = ['dashboard-changes.ts', 'dashboard-reads.ts', 'dashboard-posts.ts'];
+const isDashboardModule = (file: string): boolean => /^dashboard(-[a-z]+)?\.ts$/.test(file);
 // The settings only src/test-hooks.ts reads.
 const HOOK_SETTINGS: readonly string[] = ['SF_TEST_HOOKS', 'SF_TEST_TASK_CHECK_DELAY_MS', 'SF_TEST_MARKER_POLL_MS', 'SF_TEST_PROC_DIR'];
 const HOOKS_MODULE = 'test-hooks.ts';
@@ -141,6 +146,35 @@ function foreignParameters(source: string, ports: readonly string[]): string[] {
   });
 }
 
+// A cycle of a module graph (each module and the modules it imports), as the modules along it with
+// the first one again at the end, or undefined when there is none.
+function importCycle(graph: ReadonlyMap<string, readonly string[]>): string[] | undefined {
+  const done = new Set<string>();
+  const visit = (module: string, path: string[]): string[] | undefined => {
+    if (path.includes(module)) {
+      return [...path.slice(path.indexOf(module)), module];
+    }
+    if (done.has(module)) {
+      return undefined;
+    }
+    for (const next of graph.get(module) ?? []) {
+      const cycle = visit(next, [...path, module]);
+      if (cycle !== undefined) {
+        return cycle;
+      }
+    }
+    done.add(module);
+    return undefined;
+  };
+  for (const module of graph.keys()) {
+    const cycle = visit(module, []);
+    if (cycle !== undefined) {
+      return cycle;
+    }
+  }
+  return undefined;
+}
+
 async function sources(): Promise<Array<{ file: string; source: string }>> {
   const files = (await readdir(SRC, { recursive: true })).filter((file) => file.endsWith('.ts')).sort();
   return Promise.all(files.map(async (file) => ({ file, source: await readFile(join(SRC, file), 'utf8') })));
@@ -235,7 +269,25 @@ test('Core declares no parts field', async () => {
   assert.equal(declaresParts(core.source), false);
 });
 
-test('no module under src/execution/ imports dashboard.ts, server.ts, queue.ts or cli.ts (type-only imports aside)', async () => {
+test('the cycle check catches what it says: a cycle of any length, and none in a graph that only fans in', () => {
+  assert.deepEqual(importCycle(new Map([['a.ts', ['b.ts']], ['b.ts', ['a.ts']]])), ['a.ts', 'b.ts', 'a.ts']);
+  assert.deepEqual(importCycle(new Map([['a.ts', ['b.ts']], ['b.ts', ['c.ts']], ['c.ts', ['b.ts']]])), ['b.ts', 'c.ts', 'b.ts']);
+  assert.equal(importCycle(new Map([['a.ts', ['b.ts', 'c.ts']], ['b.ts', ['c.ts']], ['c.ts', []]])), undefined);
+});
+
+test("only dashboard.ts imports the dashboard's parts, and the dashboard's modules import each other without a cycle (type-only imports aside)", async () => {
+  const all = await sources();
+  for (const module of DASHBOARD_MODULES) {
+    assert.ok(all.some(({ file }) => file === module), `src/${module} is missing`);
+  }
+  const found = all.filter(({ file }) => file !== 'dashboard.ts')
+    .flatMap(({ file, source }) => importedModules(file, source).filter((module) => DASHBOARD_PARTS.includes(module)).map((module) => `src/${file} imports src/${module}`));
+  assert.deepEqual(found, []);
+  const graph = new Map(all.filter(({ file }) => isDashboardModule(file)).map(({ file, source }) => [file, importedModules(file, source).filter(isDashboardModule)]));
+  assert.equal(importCycle(graph), undefined);
+});
+
+test("no module under src/execution/ imports the dashboard's modules, server.ts, queue.ts or cli.ts (type-only imports aside)", async () => {
   const execution = (await sources()).filter(({ file }) => file.startsWith('execution/'));
   assert.ok(execution.length >= 10, `only ${execution.length} modules under src/execution/`);
   const found = execution.flatMap(({ file, source }) => importsAbove(file, source).map((module) => `src/${file} imports src/${module}`));

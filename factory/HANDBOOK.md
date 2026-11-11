@@ -81,6 +81,11 @@ until the user decides.
 
 The factory reviews every published iteration: Codex (the gate) in the job's worktree, read-only,
 with the Task file (its `## Review brief` too), the Report, the Patch and the review rules below.
+Both reviewers follow the method of the factory's copy of the `code-review` skill, sent in their
+prompt: the Spec axis (does the change do what the Task file asked) and the Standards axis (does it
+follow the repository's documented rules), each item's `problem` beginning with `Spec:` or
+`Standards:`, and a baseline code smell only ever a `nit`. The review rules and the Task file win
+where the method differs.
 On a ticket with the Claude review, a fresh, read-only Claude session reviews first, and the gate
 gives the deciding verdict after a `clean` one. A `fix` verdict becomes the next `## Fix N`,
 written by the factory, and the next iteration starts; the deciding `clean` verdict goes to Clean.

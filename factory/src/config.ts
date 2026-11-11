@@ -3,9 +3,11 @@ import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
 import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { FactoryError } from './errors.js';
 import { type ForgeSettings, forgeSettings } from './forge.js';
 import type { Job } from './jobs.js';
+import { PACKAGE_ROOT } from './package-root.js';
 import { configDir, HANDOFF_OFF_CODE, type HandoffMode } from './registry.js';
 import { DEFAULT_RULES_MAX_BYTES } from './rules-docs.js';
 import type { TaskReview } from './task-file.js';
@@ -42,6 +44,9 @@ export interface Config {
   reviewModel: string | undefined;
   // maxTurns of the review (SF_REVIEW_MAX_TURNS).
   reviewMaxTurns: number;
+  // The code-review skill file whose method both reviewers follow (SF_REVIEW_SKILL, reviewSkillPath);
+  // undefined: none (SF_REVIEW_SKILL empty, or a Config made by hand).
+  reviewSkill?: string | undefined;
   // The simplification pass after the deciding clean verdict of a job with review fixes;
   // false with SF_SIMPLIFY=off. Its model and maxTurns are the review's.
   simplify: boolean;
@@ -339,6 +344,13 @@ export function claudeReviewDecision(config: Pick<Config, 'claudeReview' | 'gate
   return { claude_review: setting === 'always', reason: `SF_CLAUDE_REVIEW=${setting}` };
 }
 
+// SF_REVIEW_SKILL: the code-review skill file of the reviewers, read at each review; unset, the
+// package's own copy (skills/code-review/SKILL.md); empty, none.
+export function reviewSkillPath(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const path = env.SF_REVIEW_SKILL ?? fileURLToPath(new URL('skills/code-review/SKILL.md', PACKAGE_ROOT));
+  return path === '' ? undefined : path;
+}
+
 // SF_RULES_MAX_BYTES: the bytes of rule file content the agents are given at most.
 export function rulesMaxBytes(env: NodeJS.ProcessEnv = process.env): number {
   return positiveInteger(env, 'SF_RULES_MAX_BYTES', DEFAULT_RULES_MAX_BYTES, 16 * 1024 * 1024);
@@ -434,6 +446,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     claudeReview: claudeReviewSetting(env),
     reviewModel: env.SF_REVIEW_MODEL || undefined,
     reviewMaxTurns: positiveInteger(env, 'SF_REVIEW_MAX_TURNS', 60),
+    reviewSkill: reviewSkillPath(env),
     simplify: env.SF_SIMPLIFY !== 'off',
     taskCheckMaxTurns: positiveInteger(env, 'SF_TASK_CHECK_MAX_TURNS', 30),
     taskCheckAuto: taskCheckAutoSetting(env),

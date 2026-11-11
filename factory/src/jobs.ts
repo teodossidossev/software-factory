@@ -12,7 +12,7 @@ import { writeFileAtomic, writeFileAtomicWith } from './atomic.js';
 import { FactoryError } from './errors.js';
 import { GATE_LEVELS, type GateLevel } from './gate-level.js';
 import { type LedgerEntry, ledgerSchema } from './ledger.js';
-import type { ReviewItem } from './review.js';
+import type { ReviewItem, ReviewMethod } from './review.js';
 import type { Suggestion } from './simplify.js';
 import type { TestsOutcome, TestsRecord } from './test-command.js';
 
@@ -327,7 +327,8 @@ export interface IterationMeta {
   base_commit?: string;
 }
 
-// iterations/NNN/review.json: the Claude review of the iteration, or why it failed.
+// iterations/NNN/review.json: the Claude review of the iteration, or why it failed. review_method
+// (here and in gate.json): the reviewer's method, 'none' or the skill file; absent in older records.
 export type ReviewRecord =
   | {
       reviewer: string;
@@ -340,8 +341,9 @@ export type ReviewRecord =
       cost_usd: number | null;
       started_at: string;
       ended_at: string;
+      review_method?: ReviewMethod;
     }
-  | { reviewer: string; error: string };
+  | { reviewer: string; error: string; review_method?: ReviewMethod };
 
 // The token usage of one gate run, from Codex's turn.completed events.
 export interface GateTokens {
@@ -364,8 +366,9 @@ export type GateRecord =
       tokens: GateTokens;
       started_at: string;
       ended_at: string;
+      review_method?: ReviewMethod;
     }
-  | { reviewer: string; error: string; model?: string; tokens: GateTokens; started_at: string; ended_at: string };
+  | { reviewer: string; error: string; model?: string; tokens: GateTokens; started_at: string; ended_at: string; review_method?: ReviewMethod };
 
 // iterations/NNN/gate-override.json: the user accepted the iteration over a stopped gate
 // (needs_human with code gate_rounds, gate_budget or gate_failed) with Claude's clean review; at

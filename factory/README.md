@@ -335,6 +335,7 @@ started by the run queue as before.
 | `SF_CLAUDE_REVIEW` | `ticket` | Which jobs get the Claude review (SF-131): `ticket` only those whose Task file says `review: claude`; `always` every job but those that say `review: codex`; any other value is `invalid_config`. Decided at Start; without it the Codex gate is the job's only review. With the gate off (`SF_GATE=off`, or no Codex), Claude reviews every job. |
 | `SF_REVIEW_MODEL` | unset | Model of the Claude review, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
 | `SF_REVIEW_MAX_TURNS` | `60` | `maxTurns` of the Claude review. |
+| `SF_REVIEW_SKILL` | `factory/skills/code-review/SKILL.md` | The code-review skill whose method both reviewers follow (the `<review_method>` block of the Claude review's and the Codex gate's prompt, section Jobs); empty sends none. Read at each review; a missing or unreadable file sends none, and the record says `review_method: "none"`. |
 | `SF_HANDOFF` | `checkout` | The hand-over at ready for review (SF-073, section Hand-over to your checkout): `checkout` checks the job's branch out in the workspace's checkout with its changes as Local Changes; `off` leaves the job in `ready_for_human_review` with its worktree. A workspace's own `handoff` in `workspaces.json` wins over it (SF-083). Anything else refuses to start (`invalid_config`). |
 | `SF_SIMPLIFY` | on | The simplification pass (SF-055) after the deciding clean verdict of a job with at least one Fix section; `off` goes straight to MR preparation. It uses `SF_REVIEW_MODEL` and `SF_REVIEW_MAX_TURNS`. |
 | `SF_TASK_CHECK_MAX_TURNS` | `30` | `maxTurns` of the Task check (SF-054); its model is `SF_REVIEW_MODEL`. |
@@ -1304,8 +1305,21 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   `~/.claude/CLAUDE.md` or `~/.claude/AGENTS.md` read as the home directory's). `CLAUDE.local.md`
   needs no exclude: it loads only with the `local` setting source. The Implementer's session keeps
   `['user', 'project']`.
-  Its prompt says what to verify and defines the item severities, then carries the Handbook's
-  `## Review rules` verbatim, the Task file (with its `## Review brief` when there is one), the
+  Its prompt says what to verify and defines the item severities, then carries the review method:
+  the body of the code-review skill (`SF_REVIEW_SKILL`, by default the factory's own copy
+  `factory/skills/code-review/SKILL.md`; without its front matter, read at each review and cut at
+  32 KB with a line saying so) in a `<review_method>` block. Lines in front of it adapt it to the
+  review: no sub-agents and no question for a fixed point or a spec (the fixed point is the base
+  commit, the change the uncommitted worktree against it, the spec the Task file and the user's
+  messages, the standards the documents the method names plus the rules); the Spec axis first,
+  then the Standards axis; every item's `problem` begins with `Spec:` or `Standards:`; a baseline
+  code smell (the method's Fowler smells) is always a `nit`, never `major` or `blocker`, while a
+  breach of a documented standard or of the Task keeps its severity; the answer is the output schema
+  alone, no `## Standards`/`## Spec` report and no word limits; the issue-tracker and setup
+  instructions are ignored. The reviewers' tools and sandbox stay as they are: they get the
+  method's text, never the skill to run. Without a skill (`SF_REVIEW_SKILL=` or a file that cannot
+  be read) the prompt has neither the block nor its lines. Then the prompt carries the Handbook's
+  `## Review rules` verbatim (they and the Task file win where the method differs), the Task file (with its `## Review brief` when there is one), the
   user's own messages to the job (`<user_decisions>`, SF-112: every message the job's Stream shows
   as the user's up to and including the reviewed iteration, oldest first, each verbatim in a
   `<user_message iteration="N" at="<ts>">`, cut to 4,000 characters, the newest kept while their
@@ -1349,7 +1363,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
 - Every review that ends is kept in `iterations/NNN/review.json`: `{reviewer: "claude", verdict,
   summary, items, accepted_sensitive, dropped?, cost_usd, started_at, ended_at}` (`dropped`: the
   items that reopened an accepted risk, SF-052), or `{reviewer, error}` when
-  it failed. The verdict is recorded as the reviewer gave it. One line goes to `events.jsonl`:
+  it failed; both with `review_method`: `"none"` when the review had no method, else `{path,
+  sha256}` of the skill file it read (the sha256 of its bytes), absent in older records. The verdict is recorded as the reviewer gave it. One line goes to `events.jsonl`:
   `{type: "review", reviewer, verdict, items: <count>}`, with `effective: "clean" | "fix"` when the
   factory acted otherwise (a `fix` with nits only; a `clean` with a blocker or major item, or one
   that leaves an undeclared sensitive path unaccepted), or `{type: "review_failed", reviewer, error}`, with `ignored: true` when the job had
@@ -1634,7 +1649,7 @@ ended. A restart of `sf serve` therefore leaves a working job working.
 - Every gate run that ends is kept in `iterations/NNN/gate.json`: `{reviewer: "codex", verdict,
   summary, items, accepted_sensitive, dropped?, model?, tokens: {input, cached_input, output},
   started_at, ended_at}` (`dropped` as in `review.json`), or `{reviewer, error, model?, tokens, started_at, ended_at}` when it failed (`model`
-  only with `SF_CODEX_MODEL`). Its event lines are the review's, with `reviewer: "codex"`: `review
+  only with `SF_CODEX_MODEL`); both with `review_method` as in `review.json`. Its event lines are the review's, with `reviewer: "codex"`: `review
   by codex: clean`, `review by codex: fix (2 items)`, `review by codex: fix (2 items), acted on as
   clean`, `review by codex failed: <error>`.
 - The job counts its Fix sections in `fixes` (the reviewers'). Once it reaches

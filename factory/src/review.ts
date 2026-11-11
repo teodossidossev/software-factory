@@ -2,6 +2,8 @@
 // the job's worktree, with the Task file, the Report, the Patch and the marked paths (sensitive,
 // outside the Task's scope, deleted) in its prompt and a structured verdict as its output. Knows
 // nothing about job states; the Execution applies the verdict.
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { type Options, query, type SandboxSettings, type SDKMessage, type SDKResultMessage, type SettingSource } from '@anthropic-ai/claude-agent-sdk';
 import * as z from 'zod/v4';
@@ -64,6 +66,42 @@ export type ReviewOutput = Omit<z.output<typeof reviewOutput>, 'items'> & { item
 const { $schema: _draft, ...reviewSchema } = z.toJSONSchema(reviewOutput, { target: 'draft-7' });
 export const REVIEW_SCHEMA: Record<string, unknown> = reviewSchema;
 
+// The review method (the user's code-review skill) is sent up to this size, cut with a note beyond.
+export const MAX_REVIEW_METHOD_BYTES = 32 * 1024;
+// What review.json and gate.json say of the method: none, or the skill file and the sha256 of its bytes.
+export type ReviewMethod = 'none' | { path: string; sha256: string };
+// The lines in front of the <review_method> block: how the skill's method fits a factory review.
+export const REVIEW_METHOD_LINES = [
+  '- Follow the review method below (the user\'s code-review skill), adapted to this review: do not spawn sub-agents and do not ask for a fixed point or a spec. The fixed point is the base commit; the spec is the Task file and the user\'s messages; the standards are the documents the method names plus the rules below. Cover the Spec axis first, then the Standards axis.',
+  '- Begin each item\'s `problem` with `Spec:` or `Standards:`.',
+  '- A baseline smell is always a `nit`, never `major` or `blocker`. A breach of a documented standard or of the Task keeps the severities below.',
+  '- The change is the uncommitted worktree against the base commit (`git diff <base>`, or the Patch below), not `<fixed-point>...HEAD`; do not stop on an empty `...HEAD` diff.',
+  '- Answer only with the output schema: no `## Standards`/`## Spec` report, no word limits.',
+  '- Ignore the issue-tracker and setup instructions.',
+];
+
+// The review method of one review (ReviewInput's method and review_method), read from the skill file
+// at path (Config.reviewSkill) each time: its body without the front matter, cut at MAX_REVIEW_METHOD_BYTES with a line saying so, and its
+// record. No path, or a file that is missing or unreadable: no text, and 'none'.
+export async function readReviewMethod(path: string | undefined): Promise<{ method: string; review_method: ReviewMethod }> {
+  if (path === undefined) {
+    return { method: '', review_method: 'none' };
+  }
+  let raw: Buffer;
+  try {
+    raw = await readFile(path);
+  } catch { // a missing or unreadable skill: the review runs without the method, and its record says so
+    return { method: '', review_method: 'none' };
+  }
+  const review_method = { path, sha256: createHash('sha256').update(raw).digest('hex') };
+  const body = Buffer.from(raw.toString('utf8').replace(/^---\r?\n[\s\S]*?\r?\n---[^\S\n]*(?:\r?\n|$)/, '').trim());
+  if (body.length <= MAX_REVIEW_METHOD_BYTES) {
+    return { method: body.toString('utf8'), review_method };
+  }
+  const note = `(The method is cut here: the file has ${raw.length} bytes, the prompt takes ${MAX_REVIEW_METHOD_BYTES}.)`;
+  return { method: `${cutBuffer(body, MAX_REVIEW_METHOD_BYTES)}\n${note}`, review_method };
+}
+
 export interface ReviewInput {
   ticket: string;
   iteration: number;
@@ -84,6 +122,10 @@ export interface ReviewInput {
   // The user's own messages to the job up to the reviewed iteration, oldest first; absent
   // or [] when there are none.
   userMessages?: UserMessage[];
+  // The review method's text (readReviewMethod); absent or '' without one: no method lines, no block.
+  method?: string;
+  // The review method's record for review.json and gate.json; absent counts as 'none'.
+  review_method?: ReviewMethod;
 }
 
 // The buffer's first maxBytes bytes as text, never splitting a UTF-8 character.
@@ -156,13 +198,15 @@ export function reviewPrompt(input: ReviewInput): string {
   ].join('\n');
 }
 
-// The rules of every reviewer (the Claude review and the gate, src/gate.ts), the Handbook's review
-// rules and the material of the iteration: the job's coding rules when it has them, the
+// The rules of every reviewer (the Claude review and the gate, src/gate.ts), the review method when
+// there is one (the user's code-review skill, before the review rules, which win where they differ),
+// the Handbook's review rules and the material of the iteration: the job's coding rules when it has them, the
 // Task file, the user's messages to the job, the Report, the marked paths (sensitive,
 // outside the Task's scope, deleted) and the Patch, inline up to MAX_REVIEW_PATCH_BYTES.
 export function reviewBody(input: ReviewInput): string[] {
   const { ticket } = input;
   const rules = input.rules ?? '';
+  const method = input.method ?? '';
   const cut = input.patch.length > MAX_REVIEW_PATCH_BYTES;
   const notes: string[] = [];
   if (cut) {
@@ -185,6 +229,7 @@ export function reviewBody(input: ReviewInput): string[] {
     '- The settled findings below (<settled_findings>) are the ledger\'s entries already settled: fixed, contested with evidence, escalated, left (a nit), accepted by the user (accepted_risk) or to be fixed by the user\'s decision (user_fix). Do not raise a settled finding again, nor a narrower variant of it. Raise it only when the settlement is wrong by evidence in the worktree; then set `reopens` to its id and say why in problem. An item that reopens an accepted risk is dropped: the user decided.',
     '- Set `caused_by` to the id of the fix whose change caused the item. `reopens` and `caused_by` are each a ledger id or "".',
     '',
+    ...(method !== '' ? [...REVIEW_METHOD_LINES, '<review_method>', method, '</review_method>', ''] : []),
     handbookSection(input.handbook, '## Review rules'),
     '',
     ...(rules !== '' ? [rules.trimEnd(), ''] : []),

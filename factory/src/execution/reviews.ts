@@ -15,7 +15,7 @@ import { claudeReviews, type FileChange, type GateOverride, type GateRecord, typ
 import { applyVerdict, entryItem, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, LEDGER_ID, type LedgerEntry, FACTORY_PROBLEMS, settle, unappliedEntries, unsettled } from '../ledger.js';
 import { Redactor } from '../redact.js';
 import { readJobRules } from '../rules-docs.js';
-import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, type StructuredOutcome, unacceptedItems } from '../review.js';
+import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type ReviewMethod, readReviewMethod, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, type StructuredOutcome, unacceptedItems } from '../review.js';
 import { type DenialScope, gateWrapperFor, type PathDenials, pathDenials, USER_SETTINGS_WEAKEN_SANDBOX } from '../sandbox-denials.js';
 import { factoryTokens } from '../secrets.js';
 import { changedBetween, type FixFiles, fixNumbers, guardSuggestions, offerMessage, runSimplify, SIMPLIFY_CODE, SIMPLIFY_TITLE, simplifyFix, type SimplifyInput, type SimplifyOutput, simplifyPrompt, type Suggestion } from '../simplify.js';
@@ -345,22 +345,23 @@ export class ReviewsPart {
   }
 
   // The material of a review of the job's last iteration, the Task file read in the worktree.
-  async #reviewInput(job: Job, worktree: string): Promise<ReviewInput> {
+  async #reviewInput(job: Job, worktree: string): Promise<ReviewInput & { review_method: ReviewMethod }> {
     const { workspace: name, ticket, iteration } = job;
-    const { report, patch } = await this.#store.jobs.readIteration(name, ticket, iteration);
-    const meta = await this.#store.jobs.readMeta(name, ticket, iteration);
+    const [{ report, patch }, meta] = await Promise.all([this.#store.jobs.readIteration(name, ticket, iteration), this.#store.jobs.readMeta(name, ticket, iteration)]);
     return {
       ticket, iteration, report, patch, patchTruncated: meta.patch_truncated, files: meta.files, handbook: this.#settings.handbook,
       task: await readFile(join(worktree, TASK_DIR, `${ticket}.md`), 'utf8'), ledger: await this.#store.jobs.readLedger(name, ticket),
       rules: await readJobRules(this.#store.jobs.dir(name, ticket)),
       // Every message sent up to and including the reviewed iteration.
       userMessages: (await jobUserMessages(this.#store.jobs, name, ticket)).filter((m) => m.iteration <= iteration),
+      ...(await readReviewMethod(this.#settings.config.reviewSkill)),
     };
   }
 
   // Runs the review session, then applies its outcome under the lock.
   async #review(job: Job, running: RunningReview): Promise<void> {
     let outcome: ReviewOutcome;
+    let method: ReviewMethod = 'none';
     // The code a session refused before it started stops the job with (user_settings_weaken_sandbox).
     let stop: string | undefined;
     const redactor = await this.#redactor(job);
@@ -370,6 +371,7 @@ export class ReviewsPart {
       }
       const worktree = job.worktree;
       const input = await this.#reviewInput(job, worktree);
+      method = input.review_method;
       outcome = await runReview(reviewPrompt(input), {
         cwd: worktree, claudePath: this.#settings.config.claudePath, sandbox: this.#settings.config.sandbox, model: this.#settings.config.reviewModel,
         pathDenials: (sessionTmp) => this.#pathDenials(job, worktree, sessionTmp),
@@ -396,15 +398,15 @@ export class ReviewsPart {
     }
     const ended = outcome;
     await this.#sessions.afterSession(job);
-    await this.#locks.locked(() => this.#reviewed(job, running, ended, limit, stop));
+    await this.#locks.locked(() => this.#reviewed(job, running, ended, method, limit, stop));
   }
 
   // The end of a review. A cancelled one leaves no trace. One that hit a usage limit (limit) while
   // the job still awaits review of the same iteration parks the job and writes nothing of
-  // the round. Otherwise review.json and the event are written; the verdict applies only while the
-  // job still awaits review of the same iteration.
+  // the round. Otherwise review.json (with method, the review method's record) and the event are
+  // written; the verdict applies only while the job still awaits review of the same iteration.
   // stop: the code of a session refused before it started, for the job's error instead of review_failed.
-  async #reviewed(reviewed: Job, running: RunningReview, outcome: ReviewOutcome, limit?: UsageLimit, stop?: string): Promise<void> {
+  async #reviewed(reviewed: Job, running: RunningReview, outcome: ReviewOutcome, method: ReviewMethod, limit?: UsageLimit, stop?: string): Promise<void> {
     const { workspace: name, ticket, iteration } = reviewed;
     const key = `${name}/${ticket}`;
     if (this.#sessions.reviews.get(key) !== running || running.controller.signal.aborted) {
@@ -423,8 +425,8 @@ export class ReviewsPart {
     }
     const ignored = current ? {} : { ignored: true as const };
     const record: ReviewRecord = outcome.ok
-      ? { reviewer: REVIEWER, ...outcome.output, cost_usd: outcome.costUsd, started_at: outcome.startedAt, ended_at: outcome.endedAt }
-      : { reviewer: REVIEWER, error: outcome.message };
+      ? { reviewer: REVIEWER, ...outcome.output, cost_usd: outcome.costUsd, started_at: outcome.startedAt, ended_at: outcome.endedAt, review_method: method }
+      : { reviewer: REVIEWER, error: outcome.message, review_method: method };
     await this.#store.jobs.writeReview(name, ticket, iteration, record);
     await this.#store.jobs.appendEvent(name, ticket, outcome.ok
       ? { ts: now(), iteration, type: 'review', reviewer: REVIEWER, ...(await this.#verdictOf(job, outcome.output)), items: outcome.output.items.length, ...ignored }
@@ -603,6 +605,7 @@ export class ReviewsPart {
     const { workspace: name, ticket, iteration } = job;
     const gate = this.#settings.config.gate;
     let outcome: GateOutcome;
+    let method: ReviewMethod = 'none';
     const redactor = await this.#redactor(job);
     try {
       if (!gate.on) {
@@ -612,10 +615,10 @@ export class ReviewsPart {
         throw new Error('the job has no worktree or base commit');
       }
       const input = await this.#reviewInput(job, job.worktree);
+      method = input.review_method;
       const dir = this.#store.jobs.iterationDir(name, ticket, iteration);
       const images = this.imageRefs(job, input.task).map((image) => image.path);
-      // Codex inside bubblewrap under the sessions' read denials; with the sandbox off
-      // (SF_SANDBOX=off), unwrapped.
+      // Codex inside bubblewrap under the sessions' read denials; unwrapped with SF_SANDBOX=off.
       const wrapper = this.#settings.config.sandbox === undefined ? undefined : await gateWrapperFor(await this.#denialScope(job, job.worktree), {
         worktree: job.worktree, codexPath: gate.codexPath, codexHome: process.env.CODEX_HOME || join(homedir(), '.codex'), iterationDir: dir, images, tmp: tmpdir(),
       });
@@ -631,33 +634,30 @@ export class ReviewsPart {
     }
     // A usage limit of the plan, read before redaction.
     const limit = outcome.ok ? undefined : usageLimit(outcome.message, new Date(), 'codex');
-    // The failure message (Codex's stderr or error event) goes to gate.json, the event and the
-    // job's error: withheld or redacted like the run's prose (src/redact.ts, failure). A gate the
-    // factory refused to start (a code: gate_sandbox_unavailable) has the factory's own text, which
-    // names the cause for the user (no Codex ran).
-    if (!outcome.ok) {
-      if (outcome.code === undefined) {
-        outcome = { ...outcome, message: redactor.failure(outcome.message) };
-      }
-    } else {
+    // The failure message (Codex's stderr or error event) goes to gate.json, the event and the job's
+    // error: withheld or redacted like the run's prose (src/redact.ts, failure). A gate the factory
+    // refused to start (a code: gate_sandbox_unavailable) keeps its own text, naming the cause.
+    if (!outcome.ok && outcome.code === undefined) {
+      outcome = { ...outcome, message: redactor.failure(outcome.message) };
+    } else if (outcome.ok) {
       // The verdict redacted before gate.json, the events, the Fix section and the prompts.
       outcome = { ...outcome, output: redactor.output(outcome.output) };
     }
     const ended = outcome;
     await this.#sessions.afterSession(job);
-    await this.#locks.locked(() => this.#gated(job, running, claude, ended, limit));
+    await this.#locks.locked(() => this.#gated(job, running, claude, ended, method, limit));
   }
 
   // The end of a gate run. A cancelled one leaves no trace. Otherwise its tokens count for the job,
-  // gate.json and the event are written, and the verdict applies only while the job still awaits
-  // review of the same iteration, as the factory acts on it (decide): clean (a fix with nits
-  // only too) runs Clean with the paths both reviewers accepted, fix (a blocker or major item, or an
-  // undeclared sensitive path or a path outside the Task's scope the gate does not accept) is the
-  // next Fix section unless the gate's rounds are used up. Without a Claude review (claude undefined)
-  // the paths are the gate's alone and SF_GATE_MAX_ROUNDS does not apply: SF_MAX_ITERATIONS
-  // limits the rounds. A run that hit a usage limit (limit) while the job still awaits review of the
+  // gate.json (with method, the review method's record) and the event are written, and the verdict
+  // applies only while the job still awaits review of the same iteration, as the factory acts on it
+  // (decide): clean (a fix with nits only too) runs Clean with the paths both reviewers accepted, fix
+  // (a blocker or major item, or an undeclared sensitive path or a path outside the Task's scope the
+  // gate does not accept) is the next Fix section unless the gate's rounds are used up. Without a
+  // Claude review (claude undefined) the paths are the gate's alone and SF_GATE_MAX_ROUNDS does not
+  // apply: SF_MAX_ITERATIONS limits the rounds. A run that hit a usage limit (limit) while the job still awaits review of the
   // same iteration parks the job: no gate.json, no event, no tokens charged.
-  async #gated(gated: Job, running: RunningReview, claude: ReviewOutput | undefined, outcome: GateOutcome, limit?: UsageLimit): Promise<void> {
+  async #gated(gated: Job, running: RunningReview, claude: ReviewOutput | undefined, outcome: GateOutcome, method: ReviewMethod, limit?: UsageLimit): Promise<void> {
     const { workspace: name, ticket, iteration } = gated;
     const key = `${name}/${ticket}`;
     if (this.#sessions.reviews.get(key) !== running || running.controller.signal.aborted) {
@@ -685,8 +685,8 @@ export class ReviewsPart {
     const model = this.#settings.config.codexModel !== undefined ? { model: this.#settings.config.codexModel } : {};
     const times = { started_at: outcome.startedAt, ended_at: outcome.endedAt };
     const record: GateRecord = outcome.ok
-      ? { reviewer: GATE_REVIEWER, ...outcome.output, ...model, tokens: outcome.tokens, ...times }
-      : { reviewer: GATE_REVIEWER, error: outcome.message, ...model, tokens: outcome.tokens, ...times };
+      ? { reviewer: GATE_REVIEWER, ...outcome.output, ...model, tokens: outcome.tokens, ...times, review_method: method }
+      : { reviewer: GATE_REVIEWER, error: outcome.message, ...model, tokens: outcome.tokens, ...times, review_method: method };
     await this.#store.jobs.writeGate(name, ticket, iteration, record);
     await this.#store.jobs.appendEvent(name, ticket, outcome.ok
       ? { ts: now(), iteration, type: 'review', reviewer: GATE_REVIEWER, ...(await this.#verdictOf(job, outcome.output)), items: outcome.output.items.length, ...ignored }

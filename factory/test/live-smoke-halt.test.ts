@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import { childEnv, PASSED_SETTINGS, positiveDecimal, probeCommand, ProcessGroups, runSmoke, smokePaths, smokeProbe, STEPS, terminate, trackRunnerLock } from '../src/live-smoke.js';
 import { Redactor } from '../src/redact.js';
 import { codexScript, FAKE, fakeCodex, git, newEnv, processEnv, reviewScript, script, temp } from './support/harness.js';
-import { BRANCH, CHECK_READY, CLAUDE_CLEAN, CLEAN_TURNS, onlyChecksDir, processesOf, smoke, statuses, untouched } from './support/live-smoke.js';
+import { BRANCH, CHECK_READY, CLAUDE_CLEAN, CLEAN_TURNS, onlyChecksDir, processesOf, smoke, smokeTmp, statuses, untouched } from './support/live-smoke.js';
 
 // The time budget of the tests that halt a step on it: the steps before that step (Setup alone in
 // two of them) must fit in it under the whole suite's load, where Setup has taken over 6 s; the
@@ -274,8 +274,7 @@ test('trackRunnerLock: a runner is tracked by the identity its lock holds; a pid
 
 test('a budget exceeded after the monitor\'s last poll still fails the run: the check before the next step catches it', async () => {
   const env = await newEnv('smoke-unpolled');
-  const tmp = join(temp, 'smoke-unpolled', 'tmp');
-  await mkdir(tmp, { recursive: true });
+  const tmp = await smokeTmp();
   // The review ends (and its cost lands) only after the Claude review step has started: the steps
   // before it (Gate sandbox, SF-125) take time of their own.
   await script(env, CLEAN_TURNS);
@@ -311,8 +310,7 @@ test('a budget exceeded after the monitor\'s last poll still fails the run: the 
 });
 
 test('a signal while the temporary directory is being made: the run still ends through Cleanup, the directory removed, exit 1', async () => {
-  const tmp = join(temp, 'smoke-early-signal', 'tmp');
-  await mkdir(tmp, { recursive: true });
+  const tmp = await smokeTmp();
   // Never a real Claude Code or Codex, and a short time budget, should the signal not stop the run.
   const saved = { TMPDIR: process.env.TMPDIR, SF_CLAUDE: process.env.SF_CLAUDE, SF_GATE: process.env.SF_GATE };
   Object.assign(process.env, { TMPDIR: tmp, SF_CLAUDE: '/bin/false', SF_GATE: 'off' });

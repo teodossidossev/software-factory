@@ -9,6 +9,7 @@
 // run-tests' per-file limit).
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { gateFullPaths, loadConfig, sensitivePaths } from '../src/config.js';
@@ -18,7 +19,7 @@ import { WITHHELD } from '../src/redact.js';
 import { JobStore } from '../src/jobs.js';
 import { writeTask } from '../src/task-file.js';
 import { fetchRaw } from './support/dashboard-client.js';
-import { bwrapLog, call, codexLog, codexScript, fakeCodex, fakeLog, git, newEnv, newRepo, putRules, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor } from './support/harness.js';
+import { bwrapLog, call, codexLog, codexScript, fakeCodex, fakeLog, git, newEnv, newRepo, ownReviewMethod, putRules, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor } from './support/harness.js';
 import { CLAUDE_CLEAN, eventsOf, exists, FIX_SECTION, GATE_CLEAN, GATE_FIX, gateEnv, iterationDir, mrText, option, taskFile, withoutTime, worktreeOf } from './support/gate.js';
 
 test('the strict schema: no $schema, every object has additionalProperties false and every property required', () => {
@@ -139,6 +140,8 @@ test('clean: Claude, then the gate in a read-only Codex in the worktree, then Cl
     assert.ok(run!.prompt.includes(`<task_file path=".software-factory/G-1.md">\n${task('G-1', 'Greet the reader').trimEnd()}\n</task_file>`));
     assert.ok(run!.prompt.includes('<report>\nReport of iteration 1\n'));
     assert.match(run!.prompt, /<patch>\ndiff --git a\/README\.md b\/README\.md\n[\s\S]*\n\+hello reader\n<\/patch>$/);
+    // The review method: the package's own code-review skill, without its front matter.
+    assert.ok(run!.prompt.includes('\n<review_method>\nTwo-axis review of the diff'), run!.prompt);
     // SF-059: a repository without rule files: no block.
     assert.ok(!run!.prompt.includes('<rules>') && !run!.prompt.includes('rule violation'));
 
@@ -148,7 +151,7 @@ test('clean: Claude, then the gate in a read-only Codex in the worktree, then Cl
     const recorded = await new JobStore(env.state).readGate('app', 'G-1', 1);
     assert.ok(recorded !== undefined && 'verdict' in recorded);
     const { started_at: startedAt, ended_at: endedAt, ...rest } = recorded;
-    assert.deepEqual(rest, { reviewer: 'codex', ...GATE_CLEAN, tokens: { input: 1200, cached_input: 300, output: 34 } });
+    assert.deepEqual(rest, { reviewer: 'codex', ...GATE_CLEAN, tokens: { input: 1200, cached_input: 300, output: 34 }, review_method: await ownReviewMethod() });
     assert.ok(Date.parse(startedAt) <= Date.parse(endedAt));
     assert.deepEqual((await eventsOf(env, 'G-1')).filter((record) => record.type === 'review').map((record) => [record.reviewer, record.verdict]), [['claude', 'clean'], ['codex', 'clean']]);
     const watched = await runCli(env, ['watch', 'app', 'G-1', '--once']);
@@ -532,6 +535,33 @@ test("scope (SF-053): a gate that does not accept a path outside the Task's scop
       [1, 'claude', 'clean', undefined], [1, 'codex', 'clean', 'fix'], [2, 'claude', 'clean', undefined], [2, 'codex', 'clean', undefined],
     ]);
     assert.equal(git(repo, 'show', '--name-only', '--format=', 'G-12-greet-the-reader').trim(), 'README.md\nnotes.txt');
+  } finally {
+    await stop(served);
+  }
+});
+
+test('a missing review skill (SF_REVIEW_SKILL): both prompts as without a method, and review_method none in review.json and gate.json', async () => {
+  const env = await newEnv('gate-no-skill', gateEnv({ SF_REVIEW_SKILL: join(tmpdir(), 'sf-no-such-skill', 'SKILL.md') }));
+  const repo = await newRepo(env, 'gate-no-skill-repo', false);
+  await putTask(env, repo, 'G-20', 'Greet the reader');
+  await script(env, [
+    { write: { 'README.md': 'hello reader\n' }, text: 'Report of iteration 1' },
+    { write: { '.software-factory/G-20.mr.md': mrText('feat(G-20): Greet the reader') }, text: 'prepared' },
+  ]);
+  await reviewScript(env, [{ output: CLAUDE_CLEAN }]);
+  await codexScript(env, [{ output: GATE_CLEAN }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'G-20' });
+    await waitFor(served, 'G-20', 'ready_for_human_review', 1);
+    const prompts = [...(await reviewLog(env)), ...(await codexLog(env))].map((entry) => entry.prompt);
+    assert.equal(prompts.length, 2);
+    for (const prompt of prompts) {
+      assert.ok(!prompt.includes('<review_method>') && !prompt.includes('`Spec:` or `Standards:`'), prompt);
+    }
+    const jobs = new JobStore(env.state);
+    assert.equal((await jobs.readReview('app', 'G-20', 1) as { review_method?: unknown }).review_method, 'none');
+    assert.equal((await jobs.readGate('app', 'G-20', 1) as { review_method?: unknown }).review_method, 'none');
   } finally {
     await stop(served);
   }

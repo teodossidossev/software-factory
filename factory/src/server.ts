@@ -40,10 +40,11 @@ const MCP_PATH = '/mcp';
 const PACKAGE_ROOT = new URL('../../', import.meta.url);
 
 export interface Handbook {
-  // The whole file, returned by guide.
+  // The whole file, its "## Quick start" section, and the planning skill's body (servedHandbook):
+  // undefined when its file is missing or SF_PLAN_SKILL is empty.
   text: string;
-  // The "## Quick start" section, sent as server instructions.
   quickStart: string;
+  planSkill: string | undefined;
 }
 
 // The MCP token's file: src/secrets.ts's.
@@ -368,14 +369,26 @@ export async function packageVersion(): Promise<string> {
   return data.version;
 }
 
-// Extracts the "## Quick start" section, from its heading up to the next level-2 heading.
-export function quickStartSection(text: string): string {
-  return handbookSection(text, '## Quick start');
+// The planning skill's file: SF_PLAN_SKILL (empty: none), else the package's grilling skill.
+export const planSkillPath = (): string => process.env.SF_PLAN_SKILL ?? fileURLToPath(new URL('skills/grilling/SKILL.md', PACKAGE_ROOT));
+
+// A missing skill file leaves planSkill undefined; serve says so.
+export async function loadHandbook(path = process.env.SF_HANDBOOK || fileURLToPath(new URL('HANDBOOK.md', PACKAGE_ROOT)), skillPath = planSkillPath()): Promise<Handbook> {
+  const text = await readFile(path, 'utf8');
+  const skill = skillPath === '' ? undefined : await readFile(skillPath, 'utf8').catch((error: unknown) => ((error as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : Promise.reject(error)));
+  return { text, quickStart: handbookSection(text, '## Quick start'), planSkill: skill?.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '').trim() };
 }
 
-export async function loadHandbook(path = process.env.SF_HANDBOOK || fileURLToPath(new URL('HANDBOOK.md', PACKAGE_ROOT))): Promise<Handbook> {
-  const text = await readFile(path, 'utf8');
-  return { text, quickStart: quickStartSection(text) };
+const PLANNING_LINES = [
+  'Plan every ticket by the method below (the user\'s grilling skill). You have no sub-agents: look facts up yourself with read_file, search and read_attachment, and ask only the questions only the user can decide.',
+  'The plan is done when the user confirms you agree; then write the Task file.',
+];
+
+// The server's instructions (the "## Quick start" section) and guide's answer (the whole file),
+// each followed by the "## Planning method" (PLANNING_LINES, the skill's body) when there is a skill.
+export function servedHandbook({ text, quickStart, planSkill }: Handbook): { instructions: string; guide: string } {
+  const method = planSkill === undefined ? '' : ['## Planning method', ...PLANNING_LINES, planSkill].join('\n\n');
+  return method === '' ? { instructions: quickStart, guide: text } : { instructions: `${quickStart}\n\n${method}`, guide: `${text.trimEnd()}\n\n${method}\n` };
 }
 
 function toolResult<T extends Record<string, unknown>>(structuredContent: T) {
@@ -421,7 +434,8 @@ const dependencyRow = z.object({ workspace: z.string(), ticket: z.string(), stat
 function createMcpServer(
   handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks: ServerChecks | undefined, history?: TicketHistory, queue?: ServerQueue, auto?: ServerAutoChecks,
 ): McpServer {
-  const server = new McpServer({ name: SERVER_NAME, version }, { instructions: handbook.quickStart });
+  const served = servedHandbook(handbook);
+  const server = new McpServer({ name: SERVER_NAME, version }, { instructions: served.instructions });
 
   server.registerTool(
     'guide',
@@ -432,7 +446,7 @@ function createMcpServer(
       outputSchema: z.object({ text: z.string() }),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
-    async () => toolResult({ text: handbook.text }),
+    async () => toolResult({ text: served.guide }),
   );
 
   server.registerTool(
@@ -440,11 +454,9 @@ function createMcpServer(
     {
       title: 'Read a workspace file',
       description:
-        "Reads one UTF-8 text file from the workspace's read checkout. path is relative to the checkout root. " +
-        `Pages of at most max_bytes bytes (default ${DEFAULT_PAGE_BYTES}, ${MIN_PAGE_BYTES}-${MAX_PAGE_BYTES}); pages end ` +
-        'on character boundaries. If next_offset is not null, call again with offset=next_offset. bytes and sha256 ' +
-        'describe the whole file; if sha256 changes between pages, start again at 0. ' +
-        `Files over ${MAX_FILE_BYTES} bytes, non-UTF-8 content, .git and credential-like files are refused.`,
+        `Reads one UTF-8 text file from the workspace's read checkout. path is relative to the checkout root. Pages of at most max_bytes bytes (default ${DEFAULT_PAGE_BYTES}, ` +
+        `${MIN_PAGE_BYTES}-${MAX_PAGE_BYTES}); pages end on character boundaries. If next_offset is not null, call again with offset=next_offset. bytes and sha256 describe the whole file; if sha256 ` +
+        `changes between pages, start again at 0. Files over ${MAX_FILE_BYTES} bytes, non-UTF-8 content, .git and credential-like files are refused.`,
       inputSchema: z.strictObject({
         workspace: workspaceName,
         path: relativePath('Checkout-relative path using "/", e.g. "docs/README.md".'),
@@ -478,11 +490,9 @@ function createMcpServer(
     {
       title: 'Search a workspace',
       description:
-        "Searches the workspace's read checkout, tracked and untracked files; ignored files, .git and credential-like " +
-        'files are skipped. mode "path": files whose relative path contains query (case-insensitive). mode "content": ' +
-        `lines containing query literally (case-insensitive; binary files skipped; lines cut at 200 characters). path_prefix ` +
-        `limits the search to a directory or file. At most max_results matches (default ${DEFAULT_RESULTS}, max ` +
-        `${MAX_RESULTS}); truncated says whether more exist.`,
+        `Searches the workspace's read checkout, tracked and untracked files; ignored files, .git and credential-like files are skipped. mode "path": files whose relative path contains query ` +
+        `(case-insensitive). mode "content": lines containing query literally (case-insensitive; binary files skipped; lines cut at 200 characters). path_prefix limits the search to a directory or ` +
+        `file. At most max_results matches (default ${DEFAULT_RESULTS}, max ${MAX_RESULTS}); truncated says whether more exist.`,
       inputSchema: z.strictObject({
         workspace: workspaceName,
         query: z
@@ -519,14 +529,11 @@ function createMcpServer(
     {
       title: 'Write the Task file',
       description:
-        'Creates or replaces the Task file .software-factory/<ticket>.md in the workspace\'s work checkout. content is ' +
-        'Markdown starting with a front-matter block ("---" lines) containing ticket (equal to the ticket argument), ' +
-        `title and base; at most ${MAX_TASK_BYTES} bytes. The folder is kept out of Git through .git/info/exclude. ` +
-        'Returns the checkout-relative path, created or replaced, byte count and sha256, and check: what happens to the ' +
-        `automatic Task check of what was written: scheduled (it starts after check_after_seconds, ${CHECK_AFTER_SECONDS}), off, ` +
-        'already_checked (this exact text has a check), draft (a skeleton is not checked) or not_needed (a small, scoped ' +
-        'Task starts without a check; check_reason says why). An automatic Task check starts ' +
-        `${CHECK_AFTER_SECONDS} s after the write (unless SF_TASK_CHECK_AUTO=off or not needed); read it with task_check.`,
+        `Creates or replaces the Task file .software-factory/<ticket>.md in the workspace's work checkout. content is Markdown starting with a front-matter block ("---" lines) containing ticket ` +
+        `(equal to the ticket argument), title and base; at most ${MAX_TASK_BYTES} bytes. The folder is kept out of Git through .git/info/exclude. Returns the checkout-relative path, created or ` +
+        `replaced, byte count and sha256, and check: what happens to the automatic Task check of what was written: scheduled (it starts after check_after_seconds, ${CHECK_AFTER_SECONDS}), off, ` +
+        `already_checked (this exact text has a check), draft (a skeleton is not checked) or not_needed (a small, scoped Task starts without a check; check_reason says why). An automatic Task check ` +
+        `starts ${CHECK_AFTER_SECONDS} s after the write (unless SF_TASK_CHECK_AUTO=off or not needed); read it with task_check.`,
       inputSchema: z.strictObject({
         workspace: workspaceName,
         ticket: ticketKey,
@@ -562,14 +569,11 @@ function createMcpServer(
     {
       title: 'Read the Task check',
       description:
-        'Returns the last Task check of the current Task file .software-factory/<ticket>.md: a read-only Claude session ' +
-        'that read only the Task file and the repository (the factory runs it automatically after write_task, or the user ' +
-        'presses Check). running: a check of the ticket runs now; pending: an automatic check of it is scheduled and has ' +
-        'not started; call again until both are false. ' +
-        'paraphrase is the checker\'s reading of the Task; findings are decision, contradiction, missing, overreach or ' +
-        'unclear, each blocker, major or nit; files are the files it expects to change; verdict is ready (no blocker or ' +
-        'major), not_ready, failed (error says why; never ready), or none when the current Task file has no check (a ' +
-        'check of an earlier version does not count). Rewrite the Task from the findings with write_task. Starts nothing.',
+        `Returns the last Task check of the current Task file .software-factory/<ticket>.md: a read-only Claude session that read only the Task file and the repository (the factory runs it ` +
+        `automatically after write_task, or the user presses Check). running: a check of the ticket runs now; pending: an automatic check of it is scheduled and has not started; call again until ` +
+        `both are false. paraphrase is the checker's reading of the Task; findings are decision, contradiction, missing, overreach or unclear, each blocker, major or nit; files are the files it ` +
+        `expects to change; verdict is ready (no blocker or major), not_ready, failed (error says why; never ready), or none when the current Task file has no check (a check of an earlier version ` +
+        `does not count). Rewrite the Task from the findings with write_task. Starts nothing.`,
       inputSchema: z.strictObject({ workspace: workspaceName, ticket: ticketKey }),
       outputSchema: z.object({
         verdict: z.enum(['none', 'ready', 'not_ready', 'failed']),
@@ -612,11 +616,9 @@ function createMcpServer(
     {
       title: 'Read an image of a ticket',
       description:
-        'Returns one image the user attached to the ticket (.software-factory/<ticket>/<name> in the work checkout) as ' +
-        'image content, with one text line of its name, type and size. The first message of the ticket\'s conversation ' +
-        `names its images. PNG, JPEG, WebP or GIF, at most ${MAX_ATTACHMENT_BYTES} bytes. In the Task file, refer to an ` +
-        'image the Task needs as ![what it shows](<ticket>/<name>). Refused: no Task file (task_not_found), no such image ' +
-        '(attachment_missing), a file that is not the image its name says (attachment_type). Starts nothing.',
+        `Returns one image the user attached to the ticket (.software-factory/<ticket>/<name> in the work checkout) as image content, with one text line of its name, type and size. The first message ` +
+        `of the ticket's conversation names its images. PNG, JPEG, WebP or GIF, at most ${MAX_ATTACHMENT_BYTES} bytes. In the Task file, refer to an image the Task needs as ![what it ` +
+        `shows](<ticket>/<name>). Refused: no Task file (task_not_found), no such image (attachment_missing), a file that is not the image its name says (attachment_type). Starts nothing.`,
       inputSchema: z.strictObject({
         workspace: workspaceName,
         ticket: ticketKey,
@@ -672,11 +674,9 @@ function createMcpServer(
     {
       title: 'Read the run queue',
       description:
-        'Returns the run queue of every workspace: max_running (how many jobs run at once at most; the queue starts the ' +
-        'next ticket by itself when a slot is free), running (the jobs running now, started by hand too), held (the queue ' +
-        'starts nothing while true), and the queued tickets in order, each with its 1-based position, when it was queued, ' +
-        'and waits_for: the tickets of its lands_after that are not merged yet, with their states (the queue starts a ticket ' +
-        'only once all are merged). Starts nothing.',
+        `Returns the run queue of every workspace: max_running (how many jobs run at once at most; the queue starts the next ticket by itself when a slot is free), running (the jobs running now, ` +
+        `started by hand too), held (the queue starts nothing while true), and the queued tickets in order, each with its 1-based position, when it was queued, and waits_for: the tickets of its ` +
+        `lands_after that are not merged yet, with their states (the queue starts a ticket only once all are merged). Starts nothing.`,
       inputSchema: z.strictObject({}),
       outputSchema: z.object({
         max_running: z.number().int(),

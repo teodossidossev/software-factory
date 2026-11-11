@@ -2,8 +2,9 @@
 
 How to work with the factory, for whichever model is the Context owner. This file is the single
 source: its "Quick start" section is sent as MCP server instructions when you connect, the `guide`
-tool returns the whole file, and it can be pasted into any chat. It describes how we work, never a
-particular ticket. Vocabulary: `CONTEXT.md` in the repository.
+tool returns the whole file, and it can be pasted into any chat. Both end with a "Planning method"
+section: the factory's reviewed copy of the user's grilling skill (`skills/grilling/SKILL.md`). It
+describes how we work, never a particular ticket. Vocabulary: `CONTEXT.md` in the repository.
 
 ## Quick start
 
@@ -16,17 +17,22 @@ queue (`queue_list`) and add a written ticket to it (`queue_add`) when the user 
 0. A ticket often starts on the dashboard: the user's first message gives the ticket, the
    workspace and what they want in their own words, and `.software-factory/<ticket>.md` is an
    empty skeleton (front matter and a `## Status: waiting for the Context owner` line). Their
-   words are the start of the discussion, not the task: investigate, ask, agree on the solution
-   with the user, then write the whole Task file over the skeleton with `write_task`. When the
-   first message names the ticket's images, read each with `read_attachment`.
+   words are the start of the grilling, not the task: investigate, grill the user, agree on the
+   solution, then write the whole Task file over the skeleton with `write_task`. When the first
+   message names the ticket's images, read each with `read_attachment`.
 1. Plan with the user. Read the application repository with `read_file` and `search` on the
    workspace's read checkout: AGENTS.md, coding and documentation standards, project documentation.
-   Respect them in the plan.
+   Respect them in the plan. Then grill the user by the Planning method below: questions in
+   numbered rounds, each with your recommended answer; look facts up yourself and ask only what
+   only the user can decide. A Task check's `decision` finding (step 4) goes back to the user as
+   one more round.
 2. Split the solution into subtasks of about one merge request each (roughly 20-30 files, a soft
    limit). Each subtask gets one Task file.
-3. Write the Task file with `write_task` (format below), with a `## Review brief`: you are not
-   there when the reviewers review, so the brief carries what they must check and why the plan's
-   decisions were made. Show the user the plan.
+3. Write the Task file with `write_task` (format below) only after the user confirmed you agree,
+   with a `## Review brief`: you are not there when the reviewers review, so the brief carries what
+   they must check and why the plan's decisions were made. Show the user the plan. When the user
+   says to skip the questions ("just write it"), write it at once, and list in the task text the
+   decisions you took without asking, under a list headed "Decisions taken without asking".
 4. The Task is checked before Start only when it needs a check: a small Task (a `scope:` of up to
    10 paths without globs, no `lands_after` ticket of another workspace, at most 1,200 words, no
    `check:` key) starts without one, and `write_task` answers `check: "not_needed"` with the reason
@@ -90,7 +96,7 @@ terminal, and may have the factory open and merge the merge request on the Git h
 
 | Tool | What it does |
 |---|---|
-| `guide` | Returns this handbook. |
+| `guide` | Returns this handbook, ending with the Planning method. |
 | `read_file(workspace, path, offset?, max_bytes?)` | Reads a UTF-8 file from the workspace's read checkout, paged. Credential-like paths are refused. |
 | `search(workspace, query, mode, path_prefix?, max_results?)` | `mode: "path"` finds files whose relative path contains `query`; `mode: "content"` finds lines containing `query`. Both case-insensitive. Tracked and untracked files, ignored ones skipped. Bounded. |
 | `write_task(workspace, ticket, content)` | Creates or replaces the Task file `.software-factory/<ticket>.md` in the work checkout. Refused while a job on that ticket is running, and with `attachment_missing` when an image reference `![…](<ticket>/<name>)` names an image the ticket does not have. An automatic Task check starts 60 s after the write (unless SF_TASK_CHECK_AUTO=off); read it with `task_check`. Its answer's `check:` says what happens to it: `scheduled` (with `check_after_seconds`), `off`, `already_checked` (this exact text has a check), `draft` or `not_needed` (a small Task needs no check; `check_reason` says why, and no check runs). After writing, wait for the check, fix every blocker and major finding or ask the user, and write again; after two automatic rounds, hand the open findings to the user. |
@@ -136,7 +142,8 @@ review: claude        # optional: claude (the Claude review, then the Codex gate
 # PROJ-123: Short title
 
 <The task: what to build, where, the decisions made in planning, acceptance criteria,
-what is out of scope. Reference repository standards by path instead of restating them.>
+what is out of scope. Reference repository standards by path instead of restating them.
+When the user skipped the questions, a list headed "Decisions taken without asking".>
 
 ## Files
 

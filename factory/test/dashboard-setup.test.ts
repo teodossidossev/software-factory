@@ -70,10 +70,14 @@ test('dashboard setup: the reads, the method rules per path and the token; nothi
     // Review brief, and the hand-back to the User, who starts on the dashboard; ChatGPT only plans.
     const message = rows[0].conversation.message as string;
     assert.equal(message, ticketConversation('app', 'T-5'));
-    for (const part of ['Software Factory connector', 'Call guide', 'ticket T-5 in workspace app', 'read_file and search', 'write_task (workspace "app", ticket "T-5")', '## Review brief', 'I start the job on the dashboard', 'You only plan']) {
+    // SF-191: the Context owner grills the user in rounds and writes only after the user confirms.
+    for (const part of [
+      'Software Factory connector', 'Call guide', 'ticket T-5 in workspace app', 'read_file and search', 'write_task (workspace "app", ticket "T-5")', '## Review brief', 'I start the job on the dashboard', 'You only plan',
+      'grill me on it in rounds: number your questions, give your recommended answer to each, look facts up yourself, and write the Task file only after I confirm we agree',
+    ]) {
       assert.ok(message.includes(part), part);
     }
-    for (const gone of ['subscribe', 'software_factory.job', 'request_fix', 'mark_clean', 'call start', 'check']) {
+    for (const gone of ['subscribe', 'software_factory.job', 'request_fix', 'mark_clean', 'call start', 'check', 'ask me what is unclear', 'discuss the solution']) {
       assert.ok(!message.includes(gone), gone);
     }
     assert.equal(rows[0].conversation.url, `${CHATGPT_PREFILL_URL}${encodeURIComponent(message)}`);

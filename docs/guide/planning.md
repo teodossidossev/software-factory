@@ -16,11 +16,16 @@ token, in the path or as `Authorization: Bearer <token>` on `/mcp`; without it t
 other output shows `<token>`. The first `sf serve` makes the token (`mcp-token` in the state
 directory, mode 0600); `sf mcp-url --rotate` makes a new one, which a running `sf serve` takes at
 once ([Configuration](configuration.md#the-mcp-token-mcp-token)). Any MCP client with the URL can
-use the tools; the server sends the Handbook's Quick start as its instructions.
+use the tools. The server's instructions are the Handbook's Quick start followed by a
+`## Planning method` section: two lines on how to plan (look facts up yourself, write the Task file
+only after the user confirms), then the factory's copy of the grilling skill
+(`factory/skills/grilling/SKILL.md`, without its front matter). `SF_PLAN_SKILL` names another skill
+file, and an empty value turns the section off. A missing file leaves the Quick start alone, and
+`sf serve` logs one warning at start.
 
 | Tool | What it does |
 | --- | --- |
-| `guide` | Returns the whole [Handbook](../../factory/HANDBOOK.md): the cycle, the tools, the Task file format, the templates, the rules. |
+| `guide` | Returns the whole [Handbook](../../factory/HANDBOOK.md): the cycle, the tools, the Task file format, the templates, the rules; it ends with the same Planning method. |
 | `read_file(workspace, path, …)` | Reads a file of the workspace's checkout (paged; credential-like paths refused). |
 | `search(workspace, query, mode, …)` | Finds files by path (`mode: "path"`) or lines by content (`mode: "content"`). |
 | `write_task(workspace, ticket, content)` | Creates or replaces the Task file. Refused while a job of the ticket runs (a paused one aside). Schedules the automatic Task check. |
@@ -74,10 +79,15 @@ Then, for every ticket:
    opens ChatGPT with the first message filled in (the connector, `guide`, the ticket, the
    workspace, your words, the names of the images, and what to do). Press Enter if it is not sent
    by itself. (A message too long for a link is offered to copy.)
-5. Discuss the ticket with ChatGPT. It reads the repository (`read_file`, `search`), the images
-   (`read_attachment`), proposes a plan, and writes the Task file over the skeleton with
-   `write_task`. 60 seconds after its last write the factory runs the Task check by itself;
-   ChatGPT reads it with `task_check`, fixes the blockers and majors, and writes again (at most two
+5. ChatGPT grills you on the ticket, by the factory's copy of the grilling skill (the server's
+   instructions carry it). It looks facts up itself in the repository (`read_file`, `search`) and
+   the images (`read_attachment`), and asks you in rounds: numbered questions, each with its
+   recommended answer ("yes" accepts it), only the decisions only you can make. When you confirm
+   you agree, it writes the Task file over the skeleton with `write_task`. To skip the questions,
+   say "just write it": it writes at once and lists the decisions it took without asking under
+   "Decisions taken without asking" in the Task file. 60 seconds after its last write the factory
+   runs the Task check by itself; ChatGPT reads it with `task_check`, fixes the blockers and
+   majors, brings a `decision` finding back to you as one more round, and writes again (at most two
    automatic rounds, then it hands the open findings to you).
 6. When ChatGPT says the Task file is ready, read it on the ticket's page (*Preview*, or *Edit* to
    change it; *Save* or Ctrl+S) and start it ([Running jobs](running-jobs.md)), or ask ChatGPT to
@@ -117,8 +127,11 @@ Then, with `sf serve` running, in a Claude Code session (any directory):
 
 1. Ask it to call `guide` first and to plan ticket `APP-12` in workspace `my-app` with you: "Use
    the software-factory MCP server. Call guide, then plan APP-12 in workspace my-app with me: …".
-2. It reads the repository with `read_file` and `search` (or with its own tools, if the session
-   runs in your checkout), discusses the plan, and writes the Task file with `write_task`.
+2. It grills you on the plan, as in section 1 step 5: it looks facts up itself with `read_file`
+   and `search` (or with its own tools, if the session runs in your checkout), asks in rounds of
+   numbered questions with its recommended answers, and writes the Task file with `write_task`
+   once you confirm you agree, or at once, with "Decisions taken without asking", when you say
+   "just write it".
 3. It waits for the automatic Task check with `task_check`, fixes what it finds, and tells you the
    Task file is ready.
 4. You start the job, or let it `queue_add` the ticket.

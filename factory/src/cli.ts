@@ -44,7 +44,7 @@ import { followJobs, lockPath, runJob } from './runner.js';
 import { jobNotification, notifyConfig, notifyTaskCheck, sendNotification, stateNotifier } from './notify.js';
 import { configDir, HANDOFF_MODES, ignoredWorkCheckouts, isHandoffMode, isWorkspaceColor, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_COLORS, workspaceColor, type WorkspaceEntry } from './registry.js';
 import {
-  ensureMcpToken, keepProfilePrivate, loadHandbook, mcpBaseUrl, mcpUrl, packageVersion, probeMcp, profileHasUrl, readMcpToken, redactMcpToken, requireMcpToken,
+  ensureMcpToken, keepProfilePrivate, loadHandbook, mcpBaseUrl, mcpUrl, packageVersion, planSkillPath, probeMcp, profileHasUrl, readMcpToken, redactMcpToken, requireMcpToken,
   replaceMcpToken, rewriteProfileUrl, SERVER_NAME, startServer, TOKEN_LABEL,
 } from './server.js';
 import { Setup } from './setup.js';
@@ -153,6 +153,9 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
   const keepAwakeOn = keepAwakeSetting();
   const tunnelOn = tunnelSetting() === 'auto' && options.tunnel !== 'off';
   const handbook = await loadHandbook();
+  if (handbook.planSkill === undefined && process.env.SF_PLAN_SKILL !== '') {
+    console.error(`warning: no planning skill at ${planSkillPath()}; the instructions are the Quick start alone`);
+  }
   // Fail at startup on an invalid registry rather than on the first tool call.
   const registry = await loadRegistry();
   const ignored = ignoredWorkCheckouts(registry);
@@ -203,15 +206,12 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
   const digestSchedule = new DigestSchedule({ digests, configDir: configDir() });
   // The plain explanation of each stop: the job follower starts one when a job reaches a
   // new needs_human stop, the start one for each stopped job without; the open pages get it.
-  const explainer = new Explainer({
-    jobs, configDir: configDir(), claudePath: config.claudePath, onWritten: (workspace, ticket) => dashboard?.refreshJob(workspace, ticket),
-  });
-  // The run queue's scheduler: a pass after recovery, on every job state change (sf serve's own and
-  // the runners', below), on every change of the queue; a pass that changed something refreshes
-  // every page.
-  // At a usage limit's reset it resumes the parked jobs (or marks them, under wait) and sends
-  // one notification. With the automatic checks the queue starts a ticket only when its plan
-  // is ready or forced, and a ticket added without a check gets one.
+  const explainer = new Explainer({ jobs, configDir: configDir(), claudePath: config.claudePath, onWritten: (workspace, ticket) => dashboard?.refreshJob(workspace, ticket) });
+  // The run queue's scheduler: a pass after recovery, on every job state change (sf serve's own and the
+  // runners', below), on every change of the queue; a pass that changed something refreshes every page.
+  // At a usage limit's reset it resumes the parked jobs (or marks them, under wait) and sends one
+  // notification. With the automatic checks the queue starts a ticket only when its plan is ready or
+  // forced, and a ticket added without a check gets one.
   const runQueue = new RunQueue(queueStore, execution, setup, jobs, {
     onChange: () => dashboard?.refreshSetup(),
     notify: (notification) => sendNotification(notification, notifyConfig()),

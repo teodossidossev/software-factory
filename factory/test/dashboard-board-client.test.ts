@@ -142,12 +142,23 @@ test('board client: one column per ticket: a pushed one only in Done, a failed o
   assert.deepEqual(COLUMNS.map((column) => page.$(`count-${column}`).textContent), ['3', '1', '0', '0', '2']);
   const all = COLUMNS.flatMap((column) => keys(page, column));
   assert.equal(new Set(all).size, all.length);
-  // The Done card of the pushed job: its Task file is still active, so the card archives it; a
-  // failed Done card has no button.
-  assert.deepEqual(labels(card(page, 'app/X-1')), []);
-  button(card(page, 'app/P-1'), 'Archive ticket')!.click();
+  // Every Done card, whatever its state, has one Archive (SF-192), its Task file active or not: never
+  // Archive ticket. It opens the job's page with its confirmation; the job's route archives the job
+  // and its active Task file.
+  assert.deepEqual(labels(card(page, 'app/X-1')), ['Archive']);
+  assert.deepEqual(labels(card(page, 'app/P-1')), ['Create merge request…', 'Archive']);
+  button(card(page, 'app/P-1'), 'Archive')!.click();
   await page.flush();
-  assert.deepEqual(posts(page).map((request) => request.path), ['api/tickets/app/P-1/archive']);
+  page.streams.at(-1)!.emit('job', detail(jobs[0]!));
+  await page.flush();
+  assert.equal(page.location.hash, '#app/P-1');
+  assert.deepEqual([page.$('confirm').hidden, page.$('confirm-title').textContent, page.$('confirm-text').textContent, page.$('confirm-ok').textContent], [
+    false, 'Archive app/P-1?', 'Archive the job: its worktree is removed and it leaves the board. The branch and its commits stay.', 'Archive',
+  ]);
+  assert.deepEqual(posts(page), []);
+  page.$('confirm-ok').click();
+  await page.flush();
+  assert.deepEqual(posts(page).map((request) => [request.path, request.body]), [['api/jobs/app/P-1/archive', '{}']]);
   for (const [key, mark] of [['app/F-1', 'last job failed'], ['app/A-1', 'last job aborted']] as const) {
     const item = card(page, key);
     assert.ok(button(item, 'Start'), key);

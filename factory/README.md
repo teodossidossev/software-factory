@@ -1772,8 +1772,27 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   job directory as `start` archives a terminal job. The branch is not touched. When the workspace is
   no longer registered (or its checkout is gone), only the job record is archived and the result
   says `checkout: unavailable`; the dashboard's Archive of a finished job behaves the same.
-  That Archive checks the state and retires the job in one hold of the execution lock, so a job
-  that replaced the finished one in the meantime is refused (`invalid_state`), never retired.
+  That Archive (a Done card's, or the job page's: `POST api/jobs/<ws>/<ticket>/archive`,
+  `Execution.archiveFinished`) is for `pushed`, `aborted` and `failed` jobs only (`invalid_state`
+  otherwise). While the ticket's Task file is active it is Setup's ticket archive, which retires
+  the job and moves the Task file (and its MR text and images) to `.software-factory/archive/` in
+  one hold of the execution lock; else it checks the state and retires the job in one hold, so a
+  job that replaced the finished one in the meantime is refused (`invalid_state`), never retired.
+  Neither deletes a branch or a commit.
+- The pass of merged jobs (`Execution.archiveMergedJobs`, `src/execution/archive.ts`): `sf serve`
+  runs it a minute after it starts, then every 10 minutes. It looks at each `pushed` job with no
+  merge request or a `closed` one: once per workspace and base, `git fetch --no-tags origin <base>`
+  in the workspace's checkout under its Git lock (it updates `refs/remotes/origin/<base>` and
+  `FETCH_HEAD` only: never a pull, a checkout or a change of a branch, the index or a file); then,
+  read only, whether the job's tip (origin's branch, else the prepared commit, else the local
+  branch: `branchMerged` of `src/setup.ts`) is an ancestor of `origin/<base>`. Such a job gets
+  `{type: "merged_on_target", commit, target}` in its `events.jsonl`, then the Archive above (its
+  active Task file too), and every page gets the jobs again. A squash or rebase merge is not an
+  ancestor and is not seen: the Archive button covers it. A fetch that fails leaves the jobs of that
+  base alone and is logged once, until a fetch of it works again. A job with an open or merged
+  merge request is left to the merge request (`sf mr status` and Merge do not archive). The
+  dependency rule (`lands_after`) and the morning digest count a job with `merged_on_target` as
+  merged.
 - The ticket actions Archive and Delete (dashboard start screen) run in one hold of the same lock:
   they check the ticket (a live job refuses with `job_active`), retire its finished job, and only
   then move or delete the Task and MR files (and, for Delete, the stored request). Restore and
@@ -3368,10 +3387,11 @@ but still needs the token, as on the local port.
 
 The actions keep the Origin check (a listed origin on the remote port). The four that can push or
 merge, `approve`, `retry` (which pushes again after `mr_push_failed`), `mr-create` and `mr-merge`,
-and `handed-done-merged` (Merged another way, which ends the job without asking origin) need `"confirm": "<the job's ticket>"` in their body on the remote port; without it, or with
+`handed-done-merged` (Merged another way, which ends the job without asking origin) and `archive`
+(which removes the job's worktree and takes it off the board) need `"confirm": "<the job's ticket>"` in their body on the remote port; without it, or with
 another value, they answer 409 `confirm_required` before anything runs (locally `confirm` is
 accepted and ignored). `api/jobs` and the stream's `jobs` events carry a top-level `remote`
-(`true` on the remote port, `false` locally); with `remote` true the page asks for those five
+(`true` on the remote port, `false` locally); with `remote` true the page asks for those six
 actions, after their usual confirmation, in a dialog "Type <ticket> to continue" whose button works
 only with the exact ticket. Which actions ask is the server's: the job's detail lists them in
 `confirm_actions` (SF-139), and the page keeps only the dialog's words.
@@ -3452,8 +3472,9 @@ started" when it did). A job parked on a usage limit (SF-072, under Implementing
 limits · resets at 03:00" and "Iteration N · parked, holds its slot"; once its reset passed under
 `wait`, "Limit reset: resume?" with *Resume* (sent at once). The job's last outcome shows under them. A **Done** card says "Pushed · 2
 iterations · 14:05" (Aborted, Failed); a pushed one keeps its merge request (`#N state` with the
-link), *Create merge request…* or *Merge…* and, while its Task file is active, *Archive ticket*;
-an aborted or failed one has no button (its page has Restart and Archive). SF-069's line about a
+link), *Create merge request…* or *Merge…*; every Done card, whatever its state, has **Archive**
+(SF-192), which opens the job's page with its confirmation (section Jobs, `sf reset` and Archive: the job
+leaves the board, its active Task file goes to the archive, the branch stays). SF-069's line about a
 turn that went on by itself after the turn limit stays on the card. The iteration is numbered from
 1 and is the same on the card and on the job's page: the one under way while the Implementer works
 on it (`starting`, `working`, paused in its turn, stopped by its session), else the last one
@@ -3786,8 +3807,8 @@ a header, then the Stream with the composer pinned at the bottom.
   (the message, with the edits in the user's checkout), *I opened the MR myself*, *Merged another way*, *Take it back*,
   Create merge request, Abort…; `needs_human`: the stop table; `pushed`: no message box, the merge request (`#N`, its
   state and link) and its status last read, Create merge request (no merge request yet, or a closed
-  one), Merge… (an open one), Refresh MR status (any) and Archive; `aborted`, `failed`: no message
-  box, Restart… and Archive. A confirmation opens inline in the composer, before anything is sent;
+  one), Merge… (an open one), Refresh MR status (any) and Archive (it asks first); `aborted`,
+  `failed`: no message box, Restart… and Archive. A confirmation opens inline in the composer, before anything is sent;
   under it the outcome line and the warning of an unknown outcome, with *Refresh state* when the
   read after it failed.
 - **Changes** (SF-079): the file tree on the left and the diff of the selected file on the right,
@@ -3821,12 +3842,13 @@ their primary button, the Done cards of pushed jobs Create merge request… or M
 (each opens the job's page with its confirmation). Without the
 token for the workspace's host the buttons stay off and the reason names the missing variable.
 Approve stays for users who open merge requests themselves. Each is one deliberate click;
-approve (and Push again), abort, restart, accept (and Skip), Simplify, Create merge request and
-Merge ask first, inline in the composer, with a confirmation that names the job, explains what
+approve (and Push again), abort, restart, accept (and Skip), Simplify, Create merge request, Merge
+and Archive ask first, inline in the composer, with a confirmation that names the job, explains what
 follows (the push; the session ends and the worktree stays, or the worktree and the branch go with
-discard; MR preparation without the Codex items or the suggestions) and sends nothing when
-cancelled; Send, Tell it to go on, Pause, Resume, Retry review, Retry, settle, Refresh MR status and
-Archive go at once. The page enables
+discard; MR preparation without the Codex items or the suggestions; "Archive the job: its worktree
+is removed and it leaves the board. The branch and its commits stay.") and sends nothing when
+cancelled; Send, Tell it to go on, Pause, Resume, Retry review, Retry, settle and Refresh MR status
+go at once. The page enables
 a control from the state it shows (approve in `ready_for_human_review` and in `needs_human`
 after a failed push; abort in every non-terminal state; say in `working`, `awaiting_review`,
 `needs_human` and `ready_for_human_review`; accept after a gate code with a clean Claude review)
@@ -3966,6 +3988,7 @@ shares; the setup, Task check, task and attachment posts have their own handlers
 | `POST api/jobs/<ws>/<ticket>/handover`, `.../takeback`, `.../handed-done` | `{}` | `Execution.handover`, `takeback`, `handedDone` (`sf handover`, `sf takeback`, `sf handed-done`, SF-073); `409` for `invalid_state`, `runner_active` and the hand-over's codes (section Hand-over to your checkout). `GET api/jobs/<ws>/<ticket>` of a `handed_over` job also starts `Execution.checkHandedOver` (at most once a minute), whose push reaches the page through the job's events |
 | `POST api/jobs/<ws>/<ticket>/handed-done-merged` | `{"confirm"?: string}` | `Execution.markHandedDone` (`sf handed-done --merged`, Merged another way): result `{state, branch}`; origin is not asked; on the remote port `confirm` must be the job's ticket (`409 confirm_required` without); `409` for `invalid_state` and `runner_active` |
 | `POST api/jobs/<ws>/<ticket>/mr-merge` | `{}` | `Execution.mergeMergeRequest(ws, ticket)` (`sf mr merge`): result `{state, branch, mr}`; `409 mr_not_mergeable` with the host's reason, `409 mr_not_open`, `409 mr_check_failed` (the merge check), `409 runner_stopping` (the check was cancelled), and the codes above |
+| `POST api/jobs/<ws>/<ticket>/archive` | `{"confirm"?: string}` | `Execution.archiveFinished(ws, ticket)` (Archive of a Done card or the job's page): `sf reset` for a `pushed`, `aborted` or `failed` job, its active Task file archived with it (`Setup.archiveTicket`); result `{archived, branch, checkout?}`; `409 invalid_state` for a live job; on the remote port `confirm` must be the job's ticket (`409 confirm_required` without); every page gets the jobs again |
 | `POST api/jobs/<ws>/<ticket>/mr-status` | `{}` | `Execution.mergeRequestStatus(ws, ticket)` (`sf mr status`): result `{state, branch, mr, status: {number, url, state, draft, mergeable, reason?, checks?, merge_commit?}}`; every page gets the jobs again, and the pages that show the job its detail (a merge request merged or closed on the host shows so at once) |
 | `POST api/workspaces` | `{"name": string, "path": string, "handoff"?: "checkout" \| "off", "color"?: <palette name>, "description"?: string, "app"?: string, "digest"?: {"track": boolean, "my_work": boolean}}` | `Setup.addWorkspace`: the rules of `sf workspace add`; `color` one of `blue`, `teal`, `green`, `olive`, `orange`, `red`, `purple`, `grey` (SF-084), anything else `400 invalid_body`; `description`, `app` and `digest` (SF-103; absent: none, the name, both off); result the workspace row |
 | `POST api/workspaces/<name>/edit` | `{"path": string, "description": string, "app": string, "handoff": "default" \| "checkout" \| "off", "color": "auto" \| <palette name>, "digest": {"track": boolean, "my_work": boolean}}`, every key required | `Setup.editWorkspace` (SF-103): the fields replace the entry's (`""` removes description and app, `default` the handoff, `auto` the color; `work_checkout` and `rules_skip` stay); the path checked as Add checks it; a path change while the workspace has a live job `409 workspace_busy`; result the workspace row |

@@ -15,7 +15,7 @@ import { REVIEWER } from '../review.js';
 import { withLock } from '../pid-lock.js';
 import { Runners } from '../runner.js';
 import { TICKET_DESCRIPTION, TICKET_PATTERN } from '../task-file.js';
-import type { StateListener } from './dto.js';
+import type { Retired, StateListener } from './dto.js';
 import type { JobStorePort, LivePort, LockPort, NoticePort, RunnerPort, SettingsPort, StopPort } from './ports.js';
 import type { ExecutionOptions, Live, RunningReview } from './shared.js';
 
@@ -44,6 +44,8 @@ export class Core implements JobStorePort, LockPort, LivePort, RunnerPort, Notic
   readonly lockProc: string | undefined;
   // The run queue's limit max_running (ExecutionOptions.maxRunning); undefined: config.maxJobs.
   readonly maxRunning: (() => Promise<number>) | undefined;
+  // Setup's ticket archive (ExecutionOptions.archiveTicket); undefined: none.
+  readonly archiveTicket: ((workspace: string, ticket: string) => Promise<Retired | undefined>) | undefined;
   // Runner mode: stop() was called; nothing new starts.
   #stopping = false;
   // The hand-over part's clearAfter, set by src/execution.ts once it has built the part (the
@@ -60,6 +62,7 @@ export class Core implements JobStorePort, LockPort, LivePort, RunnerPort, Notic
     this.runners = options.runner === undefined ? new Runners(this.jobs, options.launch) : undefined;
     this.lockProc = options.lockProc;
     this.maxRunning = options.maxRunning;
+    this.archiveTicket = options.archiveTicket;
   }
 
   isStopping(): boolean {

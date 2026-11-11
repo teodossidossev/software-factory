@@ -73,6 +73,18 @@ test('jobsOf: the handed-over, pushed and merged jobs of the workspaces within t
   assert.deepEqual(current.map((entry) => entry.ticket), ['SHOP-1', 'SHOP-2', 'SHOP-3', 'SHOP-4', 'SHOP-6', 'SHOP-7']);
 });
 
+test('jobsOf: a pushed job sf serve found on its target and archived (merged_on_target) is merged, at that event', async () => {
+  const store = new JobStore(join(temp, 'state-merged-on-target'));
+  // Pushed five days ago with no merge request (merged by hand), found merged this morning.
+  await put(store, job('backend', 'SHOP-9', 'pushed', new Date(Date.parse(threeDaysAgo) - 2 * 86_400_000).toISOString()), 'Merged by hand');
+  await store.appendEvent('backend', 'SHOP-9', { ts: today, iteration: 1, type: 'merged_on_target', commit: 'a'.repeat(40), target: 'main' });
+  await store.archive('backend', 'SHOP-9');
+  // Pushed five days ago, a closed merge request, never found merged: not in the two days.
+  await put(store, job('backend', 'SHOP-10', 'pushed', new Date(Date.parse(threeDaysAgo) - 2 * 86_400_000).toISOString(), { mr: mr('closed') }));
+  const { done } = await jobsOf(store, ['backend'], days);
+  assert.deepEqual(done.map((entry) => [entry.ticket, entry.title, entry.state, entry.at]), [['SHOP-9', 'Merged by hand', 'merged', today]]);
+});
+
 const branch = (name: string): LiveBranch => ({
   name, local: false, author: 'Me', mine: true, date: threeDaysAgo, age_days: 4, ahead: 2, behind: 171, local_only: 0,
   subject: `${name}: work`, ticket: name, landed: false, earlier_merge: false, files: ['a.ts'], overlap: ['a.ts'], hit_by: [],

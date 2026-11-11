@@ -17,7 +17,9 @@
 // - execution/handover-steps.ts: the hand-over to the user's checkout and its checks, the
 //   sandbox's config lock.
 // - execution/control.ts: pause and Resume, the usage-limit park, abort, reset,
-//   Archive, exclusive, and the requests sf serve queues to a job's runner.
+//   Archive, the pass of merged jobs, exclusive, and the requests sf serve queues to a job's runner.
+// - execution/archive.ts: the Archive with the ticket's active Task file, and the pass of merged
+//   jobs (the fetch of the target, the merged check, merged_on_target).
 // - execution/status.ts: check and status.
 // - execution/dto.ts: the data shapes Execution's calls return or take.
 // - execution/errors.ts: the codes sf accept and sf retry take on, and the shared refusals.
@@ -61,6 +63,7 @@ import { StatusPart } from './execution/status.js';
 import { TurnsPart } from './execution/turns.js';
 
 export { GATE_OVERRIDE_CODES, LEDGER_ACCEPT_CODES, MR_RETRY_CODES } from './execution/errors.js';
+export { MERGED_EVERY_MS, MERGED_FIRST_MS } from './execution/archive.js';
 export { changeNote, firstPrompt, imagesChangedNote } from './execution/prompts.js';
 export { branchName, MAX_REPORT_BYTES, slugify } from './execution/shared.js';
 export type { CheckResult, ExclusiveScope, MrInput, MrOutcome, MrSaved, MrView, Resumed, Retired, ReviewStatus, StateListener } from './execution/dto.js';
@@ -329,6 +332,10 @@ export class Execution implements RunnerWork {
 
   archiveFinished(workspaceName: string, ticket: string): Promise<Retired> {
     return this.#parts.control.archiveFinished(workspaceName, ticket);
+  }
+
+  archiveMergedJobs(): Promise<Job[]> {
+    return this.#parts.control.archiveMergedJobs();
   }
 
   apply(request: RunnerRequest): Promise<unknown> {

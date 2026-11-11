@@ -144,12 +144,24 @@ text"); edit the commit message in your IDE instead. After the push it is read-o
   checkout and on `origin`.
 - Merge on the host (or *Merge…*, `sf mr merge`). The factory does not delete the remote branch; do
   it on the host or with `git push origin --delete APP-12-…` once merged.
-- **Archive ticket** on the Done card (or Archive on the job's page) moves the Task file (and its
-  images) to `.software-factory/archive/` and retires the job from the board; Restore brings it
-  back from the *Archived* drawer. `sf reset my-app APP-12` archives the job record.
-- Tickets that wait for this one (`lands_after`) can start once it counts as **merged**: its merge
-  request is recorded `merged`, or (with no merge request recorded) its branch is in
-  `origin/<base>`. After a merge on the host, *Refresh MR status* (`sf mr status`) records it.
+- **Archive** on every Done card (pushed, aborted or failed) and on the job's page asks first
+  ("Archive the job: its worktree is removed and it leaves the board. The branch and its commits
+  stay."), then does what `sf reset` does: it ends the session, removes the worktree and archives
+  the job record. While the ticket's Task file is active it also moves the Task file (and its
+  images) to `.software-factory/archive/`; Restore brings it back from the *Archived* drawer. The
+  branch and its commits are never touched. From another device it asks you to type the ticket.
+- **A job merged another way leaves by itself.** A minute after `sf serve` starts and then every 10
+  minutes, the factory looks at each pushed job with no merge request (or a closed one): it fetches
+  the job's base (`git fetch --no-tags origin <base>` in your checkout, which only updates
+  `origin/<base>`, never a branch or a file), and when the job's commit is in `origin/<base>` it
+  records `merged_on_target` in the job's history and archives the job as Archive does. A squash or
+  rebase merge is not seen (the commit is not in the base's history): press Archive. A fetch that
+  fails leaves the jobs alone and is logged once. A job whose merge request the factory tracks stays
+  on Done until you archive it.
+- Tickets that wait for this one (`lands_after`) can start once it counts as **merged**: the factory
+  found it on its base (`merged_on_target`), its merge request is recorded `merged`, or (with no
+  merge request recorded) its branch is in `origin/<base>`. After a merge on the host, *Refresh MR
+  status* (`sf mr status`) records it.
 - The saved refs `refs/factory/APP-12` and `refs/factory/APP-12-ask` are deleted by `sf serve` seven
   days after the job is pushed or aborted.
 

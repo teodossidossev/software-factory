@@ -217,7 +217,7 @@ test('archive: Restore and Start queued during the retirement wait for the whole
     assert.equal((await w.jobs.read('app', 'T-1'))?.session_id, 'first');
 
     gate.release();
-    assert.deepEqual(await archive.promise, { workspace: 'app', ticket: 'T-1', path: '.software-factory/archive/T-1.md', jobArchived: true });
+    assert.deepEqual({ ...(await archive.promise), retired: undefined }, { workspace: 'app', ticket: 'T-1', path: '.software-factory/archive/T-1.md', jobArchived: true, retired: undefined });
     assert.deepEqual(await restore.promise, { workspace: 'app', ticket: 'T-1', path: '.software-factory/T-1.md' });
     const started = await start.promise;
     assert.equal(started.branch, 'T-1-one');
@@ -481,7 +481,7 @@ test('a failed retirement moves and deletes nothing and frees the lock; a file f
     assert.ok(await exists(requestPath(w, 'T-1')));
     assert.equal((await w.jobs.read('app', 'T-1'))?.session_id, 'first');
     // A subsequent Archive succeeds: the failures released the lock.
-    assert.deepEqual(await w.setup.archiveTicket('app', 'T-1'), { workspace: 'app', ticket: 'T-1', path: '.software-factory/archive/T-1.md', jobArchived: true });
+    assert.deepEqual({ ...(await w.setup.archiveTicket('app', 'T-1')), retired: undefined }, { workspace: 'app', ticket: 'T-1', path: '.software-factory/archive/T-1.md', jobArchived: true, retired: undefined });
     assert.deepEqual(await ticketFiles(w, 'T-1'), { 'archive/T-1.md': before['T-1.md']!, 'archive/T-1.mr.md': 'feat(T-1): One\n' });
     assert.ok(await exists(requestPath(w, 'T-1')));
     assert.equal(await w.jobs.read('app', 'T-1'), undefined);

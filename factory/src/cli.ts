@@ -29,7 +29,7 @@ import {
 } from './dashboard.js';
 import { FactoryError } from './errors.js';
 import { currentExplanation, Explainer, explanationLines } from './explain.js';
-import { Execution, type ExecutionOptions, type StateListener } from './execution.js';
+import { Execution, type ExecutionOptions, MERGED_EVERY_MS, MERGED_FIRST_MS, type Retired, type StateListener } from './execution.js';
 import { checkForgeToken, chooseForge, forgeSettings } from './forge.js';
 import { codexVersion } from './gate.js';
 import { checkTerms, commitsToCheck, type CommitSpec, type GuardHit, hitReport, installHook, scanBranch, scanChange, scanCommits, scanMrText, worktreeTree } from './guard.js';
@@ -170,8 +170,7 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
   await queueStore.read();
   const jobs = new JobStore(config.stateDir);
   const notify = stateNotifier(notifyConfig(), jobs);
-  // The dashboard starts after recovery; until then its listener is a no-op. So does the run
-  // queue's scheduler: its first pass runs once recovery is done.
+  // The dashboard starts after recovery; until then its listener is a no-op. So does the run queue's scheduler.
   let dashboard: RunningDashboard | undefined;
   let scheduling = false;
   const reschedule = (job: Job, from: JobState | null): void => {
@@ -179,8 +178,7 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
       void runQueue.schedule();
     }
   };
-  // A job of the ticket that runs (non-terminal, not paused) cancels its automatic Task checks:
-  // no check runs on a Task file a job is using.
+  // A job of the ticket that runs (non-terminal, not paused) cancels its automatic Task checks.
   let autoChecks: AutoChecks | undefined;
   const onStateChange: StateListener = (job, from, lines) => {
     autoChecks?.jobChanged(job);
@@ -189,13 +187,13 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
     reschedule(job, from);
   };
   const tests = testHooks();
-  const execution = new Execution(config, (name) => resolveWorkspace(name), onStateChange, handbook.text, executionOptions(config, tests));
-  // The tickets' history: New ticket and Save (Setup) and write_task (the MCP server)
-  // record the Task file's writes; Execution records its Fix sections itself.
+  // The Archive of a job whose Task file is active archives the Task file too, through Setup (below).
+  const archiveTicket = async (workspace: string, ticket: string): Promise<Retired | undefined> => (await setup.archiveTicket(workspace, ticket)).retired;
+  const execution = new Execution(config, (name) => resolveWorkspace(name), onStateChange, handbook.text, { ...executionOptions(config, tests), archiveTicket });
+  // The tickets' history: New ticket and Save (Setup) and write_task (the MCP server) record the Task file's writes.
   const history = new TicketHistory(config.stateDir);
-  // The start screen of the dashboard: the registry and the Task files, under the Execution's lock.
-  // A finished job leaves with its Task file through the lock's scope, in the same acquisition as
-  // the ticket action's checks: it is archived and a kept worktree removed.
+  // The start screen of the dashboard: the registry and the Task files, under the Execution's lock. A finished
+  // job leaves with its Task file through the lock's scope, in the ticket action's acquisition.
   const setup = new Setup({ configDir: configDir(), jobs, exclusive: (work) => execution.exclusive(work), history, handoffDefault: config.handoff });
   // The morning digest: one a day by the timer, Generate now on the dashboard, sf digest
   // --now through the socket; a scheduled one is notified with its counts.
@@ -331,10 +329,9 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
   }
   console.log(`${SERVER_NAME} listening on ${mcpUrl(server.port)}`);
   console.log(`${SERVER_NAME} socket ${socket.path}`);
-  // The runners write the state of their jobs; the dashboard hears of it from disk. A job
-  // that left working, awaiting_review or preparing_mr may free a hand-over that met the sandbox's config lock,
-  // and so may sf serve's start.
-  // The run queue hears of both: a runner's job that reached ready_for_human_review frees a slot.
+  // The runners write the state of their jobs; the dashboard hears of it from disk. A job that left working,
+  // awaiting_review or preparing_mr may free a hand-over that met the sandbox's config lock, and so may sf
+  // serve's start. The run queue hears of both: a runner's job that reached ready_for_human_review frees a slot.
   const followed = followJobs(jobs, (job, from) => {
     autoChecks?.jobChanged(job);
     explainer.jobChanged(job);
@@ -368,6 +365,9 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
     markerWatch.start();
   }
   explainer.start().catch((error: unknown) => console.error(error));
+  // The pass of merged jobs: a minute after the start, then every 10 minutes; the archived jobs leave every page.
+  const archiveMerged = (): void => void execution.archiveMergedJobs().then((done) => done.forEach((job) => dashboard?.onStateChange(job, job.state)), (error: unknown) => console.error(error));
+  const mergedTimers = [setTimeout(archiveMerged, MERGED_FIRST_MS).unref(), setInterval(archiveMerged, MERGED_EVERY_MS).unref()];
   // The laptop stays awake while a job runs (src/keep-awake.ts), unless SF_KEEP_AWAKE=off.
   const keepAwake = keepAwakeOn ? new KeepAwake({ intervalMs: KEEP_AWAKE_EVERY_MS, jobs: () => jobs.list(), command: KEEP_AWAKE_COMMAND }) : undefined;
   keepAwake?.start();
@@ -378,8 +378,7 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
   } else {
     console.log(`tunnel: not started (${tunnelOn ? `no tunnel profile: ${tunnelProfile()}` : options.tunnel === 'off' ? '--no-tunnel' : 'SF_TUNNEL=off'})`);
   }
-  // The leftovers of the sessions' Bash sandboxes, also those no session end caught: before each
-  // sandboxes check, or every REAP_EVERY_MS with SF_HEALTH=off. The reaper never throws.
+  // The sessions' Bash sandboxes left over: before each sandboxes check, or every REAP_EVERY_MS with SF_HEALTH=off.
   upkept.start();
 
   let stopping = false;
@@ -397,6 +396,7 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
     explainer.close();
     upkept.close();
     keepAwake?.stop();
+    mergedTimers.forEach((timer) => clearTimeout(timer));
     Promise.all([server.close(), socket.close(), dashboard?.close(), tunnel?.stop()]).then(
       () => process.exit(0),
       (error: unknown) => {

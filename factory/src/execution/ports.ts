@@ -13,6 +13,7 @@ import type { Config } from '../config.js';
 import type { Job, JobAction, JobState, JobStore } from '../jobs.js';
 import type { Workspace } from '../registry.js';
 import type { Runners } from '../runner.js';
+import type { Retired } from './dto.js';
 import type { Live, RunningReview } from './shared.js';
 
 // The jobs on disk, and every state change after the first.
@@ -64,6 +65,8 @@ export interface SettingsPort {
   readonly resolve: (name: string) => Promise<Workspace>;
   // undefined: config.maxJobs.
   readonly maxRunning: (() => Promise<number>) | undefined;
+  // ExecutionOptions.archiveTicket; undefined: none (the runner, a test without Setup).
+  readonly archiveTicket: ((workspace: string, ticket: string) => Promise<Retired | undefined>) | undefined;
 }
 
 // Runner mode: once stop() was called, nothing new starts.

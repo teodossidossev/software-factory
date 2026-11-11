@@ -735,7 +735,7 @@ test('stream client: each confirmation opens inline in the composer before it po
   }
 });
 
-test('stream client: Send, Tell it to go on ("Go on." for an empty box), Ctrl+Enter, Pause, Resume with the message, Retry review, Refresh MR status and Archive post at once', async () => {
+test('stream client: Send, Tell it to go on ("Go on." for an empty box), Ctrl+Enter, Pause, Resume with the message, Retry review and Refresh MR status post at once, Archive after its confirmation', async () => {
   const page = await openJob(stopped('max_turns', {}));
   act(page, 'Tell it to go on').click();
   await page.flush();
@@ -796,7 +796,11 @@ test('stream client: Send, Tell it to go on ("Go on." for an empty box), Ctrl+En
   posts(page)[6]!.respond(200, { ok: true, result: { status: { number: 7, state: 'open', draft: false, mergeable: true, reason: null, checks: '2 passed' } } });
   await page.flush();
   assert.equal(page.$('mr-status-line').textContent, 'On the host: #7 open, mergeable, checks: 2 passed.');
+  // Archive asks first (SF-192): posted from its confirmation only.
   act(page, 'Archive').click();
+  await page.flush();
+  assert.deepEqual([page.$('confirm').hidden, page.$('confirm-text').textContent, sent(page)[7]], [false, 'Archive the job: its worktree is removed and it leaves the board. The branch and its commits stay.', undefined]);
+  page.$('confirm-ok').click();
   await page.flush();
   assert.deepEqual(sent(page)[7], ['archive', {}]);
 });

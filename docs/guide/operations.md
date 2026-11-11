@@ -227,13 +227,15 @@ measure); the page and `sf digest --now` show each digest's cost.
   `sf abort --discard`, and by Restart. An aborted job keeps its worktree (its path is printed):
   `sf reset my-app APP-12` removes it. Never delete a worktree directory by hand while its job is
   live; if one is gone anyway, `git worktree prune` in the checkout clears the registration.
-- **Jobs**: `sf reset my-app APP-12`, or *Archive* on a finished job's page, archives the job
-  directory as `jobs/my-app/APP-12.<timestamp>/` (they stay for `sf metrics` and the ticket's
-  history). There is no prune command: delete old archived job directories by hand when you no
-  longer want them.
-- **Tickets**: *Archive ticket* moves the Task file and its images to
-  `.software-factory/archive/`; *Delete…* (in the card's ⋯ menu or the Archived drawer) removes
-  them.
+- **Jobs**: `sf reset my-app APP-12`, or *Archive* on a Done card or a finished job's page,
+  archives the job directory as `jobs/my-app/APP-12.<timestamp>/` (they stay for `sf metrics` and
+  the ticket's history); *Archive* also moves the ticket's active Task file to the archive. A pushed
+  job already merged on its base (its commit in `origin/<base>`, with no merge request or a closed
+  one) is archived by `sf serve` itself, checked every 10 minutes. There is no prune command:
+  delete old archived job directories by hand when you no longer want them.
+- **Tickets**: *Archive* in a Queue card's ⋯ menu (or on a Done card) moves the Task file and its
+  images to `.software-factory/archive/`; *Delete…* (in the card's ⋯ menu or the Archived drawer)
+  removes them.
 - **Branches**: the factory never deletes a pushed branch. Delete merged branches in your checkout
   and on `origin` as usual. Restart deletes the old job's branch only when it has no commits and was
   never pushed.

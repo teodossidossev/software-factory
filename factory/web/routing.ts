@@ -83,7 +83,7 @@ function renderJobScreen(): void {
 }
 
 // Opens a job's page on a screen; focus 'stop' or 'composer' is where its card's action points;
-// confirm ('approve', 'mr-create', 'mr-merge') opens that confirmation once its detail is shown.
+// confirm ('approve', 'mr-create', 'mr-merge', 'archive') opens that confirmation once its detail is shown.
 // The Merge request screen waits for the MR text (written at Clean).
 function go(key: string, screen = 'stream', focus: 'composer' | 'stop' | undefined = undefined, confirm: string | undefined = undefined): void {
   if (jobByKey(key) === null) {
@@ -700,7 +700,7 @@ function onKey(event: KeyboardEvent): void {
   }
 }
 
-// The buttons of a Queue card (and Archive ticket of a pushed card).
+// The buttons of a Queue card.
 function queueAction(action: string, key: string): void {
   const row = ticketByKey(key);
   if (row === null) {

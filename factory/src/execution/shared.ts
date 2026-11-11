@@ -11,6 +11,7 @@ import type { Workspace } from '../registry.js';
 import type { REVIEWER } from '../review.js';
 import type { Launch } from '../runner.js';
 import type { ImplementerSession } from '../session.js';
+import type { Retired } from './dto.js';
 import type { TESTS_RUNNER } from './events.js';
 
 export const MAX_REPORT_BYTES = 64 * 1024;
@@ -80,6 +81,10 @@ export interface ExecutionOptions {
   // The run queue's limit max_running, read at each start of the queue's own (sf serve reads it
   // from queue.json); without it, config.maxJobs.
   maxRunning?: () => Promise<number>;
+  // sf serve: Setup's ticket archive (src/setup.ts archiveTicket), bound late as Setup is built after
+  // the Execution: moves the ticket's active Task file to the archive and retires its finished job in
+  // one lock acquisition; the retired job, if any. Without it the Archive retires the job alone.
+  archiveTicket?: (workspace: string, ticket: string) => Promise<Retired | undefined>;
 }
 
 // The options of a Fix section (fix).

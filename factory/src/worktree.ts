@@ -13,7 +13,7 @@ async function exists(path: string): Promise<boolean> {
   try {
     await stat(path);
     return true;
-  } catch {
+  } catch { // stat fails: the path does not exist
     return false;
   }
 }

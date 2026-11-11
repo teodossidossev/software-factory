@@ -1,6 +1,7 @@
 // The code checks of npm test (SF-144), scripts/check-code.mjs run on temporary package trees: the
 // size ratchet of code-size.json, which --update only ever lowers, no script under static/, and
-// every web/*.ts a dashboard script.
+// every web/*.ts a dashboard script, no comment that cites a ticket, and every catch without a binding
+// saying on its line why any failure there is fine.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -159,5 +160,73 @@ test('check-code: a comment that cites a ticket in a declaration file under web/
     const run = check(root);
     assert.equal(run.code, 1);
     assert.match(run.stderr, /web\/types\.d\.ts:2: a comment cites SF-12/);
+  });
+});
+
+test('check-code: a catch without a binding and without a reason on its line fails, with file and line', async () => {
+  const bare = 'try {\n  x();\n} catch {\n  // the reason on the next line does not count\n}\n';
+  const empty = 'try {\n  x();\n} catch { //   \n}\n';
+  await withTree({ 'src/a.ts': bare, 'src/b.ts': empty, 'web/core.ts': 'try { x(); } catch{ y(); }\n' }, {}, async (root) => {
+    const run = check(root);
+    assert.equal(run.code, 1);
+    assert.match(run.stderr, /src\/a\.ts:3: a catch without a binding drops the error/);
+    assert.match(run.stderr, /src\/b\.ts:3: a catch without a binding drops the error/);
+    assert.match(run.stderr, /web\/core\.ts:1: a catch without a binding drops the error/);
+  });
+});
+
+test('check-code: a catch with its reason on its line, a catch with a binding, and a catch in a string or a comment pass', async () => {
+  const fine = [
+    'try {\n  x();\n} catch { // missing: the job has no record\n}',
+    'try {\n  x();\n} catch (error) {\n  throw error;\n}',
+    "const a = 'try {} catch {}';",
+    'const b = `} catch {`; // a template string',
+    '// } catch {',
+    '/* } catch { */',
+    '/**', ' * } catch {', ' */',
+    'x(); // then catch { y }',
+  ].join('\n');
+  await withTree({ 'src/a.ts': `${fine}\n`, 'test/x.test.ts': 'try {} catch {}\n' }, {}, async (root) => {
+    const run = check(root);
+    assert.equal(run.code, 0, run.stderr);
+  });
+});
+
+test('check-code: a catch on a later line of a multi-line comment or template is not counted; code after them is', async () => {
+  const source = [
+    '/*',
+    '} catch {',
+    '*/',
+    'const t = `first line',
+    '} catch {',
+    '${value} } catch { and ${`nested ${x} catch {`} } catch {',
+    '`;',
+    "const r = /['\"`]/g; const s = 'a /* b';",
+    'try {} catch {',
+    '}',
+  ].join('\n');
+  await withTree({ 'src/a.ts': `${source}\n` }, {}, async (root) => {
+    const run = check(root);
+    assert.equal(run.code, 1);
+    const catches = run.stderr.split('\n').filter((line) => line.includes('a catch without a binding'));
+    assert.deepEqual(catches, ['check-code: src/a.ts:9: a catch without a binding drops the error: say on its line why any failure is fine, catch { // <why>']);
+  });
+});
+
+test('check-code: a ticket on a later line of a block comment fails; one in a multi-line template passes', async () => {
+  await withTree({ 'src/a.ts': '/*\n  since SF-8\n*/\nconst t = `\n// SF-9\n`;\n' }, {}, async (root) => {
+    const run = check(root);
+    assert.equal(run.code, 1);
+    assert.match(run.stderr, /src\/a\.ts:2: a comment cites SF-8/);
+    assert.doesNotMatch(run.stderr, /SF-9/);
+  });
+});
+
+test('check-code: a file that ends inside a template or a comment fails, as its comments cannot be checked', async () => {
+  await withTree({ 'src/a.ts': 'const t = `open\n', 'src/b.ts': '/* open\n' }, {}, async (root) => {
+    const run = check(root);
+    assert.equal(run.code, 1);
+    assert.match(run.stderr, /src\/a\.ts: ends inside a string, a template or a comment/);
+    assert.match(run.stderr, /src\/b\.ts: ends inside a string, a template or a comment/);
   });
 });

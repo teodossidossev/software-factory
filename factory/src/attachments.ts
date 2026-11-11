@@ -156,8 +156,7 @@ async function scan(dir: string | undefined): Promise<{ attachments: Attachment[
       if (ext !== undefined && ext === match[1] && stats.isFile()) {
         attachments.push({ name: entry.name, bytes: stats.size, type: ATTACHMENT_TYPES[ext] });
       }
-    } catch {
-      // Gone or replaced meanwhile: not an attachment.
+    } catch { // gone or replaced meanwhile: not an attachment
     }
   }
   attachments.sort((a, b) => a.name.localeCompare(b.name, 'en', { numeric: true }));
@@ -421,7 +420,7 @@ async function readImage(path: string, name: string): Promise<{ data: Buffer; ty
       return { reason: 'not the image its name says (PNG, JPEG, WebP or GIF, told by its bytes)' };
     }
     return { data, type: ATTACHMENT_TYPES[ext] };
-  } catch {
+  } catch { // a read error: refused as not readable
     return { reason: 'not readable' };
   } finally {
     await handle.close();
@@ -559,8 +558,7 @@ export async function imageHashes(dir: string, references: readonly AttachmentRe
       } finally {
         await handle.close();
       }
-    } catch {
-      // Gone, a link or unreadable: missing.
+    } catch { // gone, a link or unreadable: missing
     }
     hashes.push({ name, sha256 });
   }

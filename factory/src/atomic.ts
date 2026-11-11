@@ -32,7 +32,6 @@ export async function writeFileAtomicWith(target: string, write: (handle: FileHa
     } finally {
       await dirHandle.close();
     }
-  } catch {
-    // Some filesystems do not support fsync on directories.
+  } catch { // fsync of a directory is not supported on every filesystem
   }
 }

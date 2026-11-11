@@ -164,7 +164,7 @@ export class HandoverPart {
       let workspace: Workspace;
       try {
         workspace = await this.#settings.resolve(name);
-      } catch {
+      } catch { // a workspace that does not resolve: skipped
         continue;
       }
       await this.#locks.gitLocked(name, async () => {

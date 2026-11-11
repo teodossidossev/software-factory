@@ -110,7 +110,7 @@ function usableGate(record: GateRecord): boolean {
 async function readOr<T>(read: () => Promise<T>): Promise<{ ok: true; value: T } | { ok: false }> {
   try {
     return { ok: true, value: await read() };
-  } catch {
+  } catch { // a file that cannot be read or parsed: not ok
     return { ok: false };
   }
 }

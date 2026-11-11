@@ -102,7 +102,7 @@ export async function readExplanation(jobs: JobStore, workspace: string, ticket:
   try {
     const parsed = recordSchema.safeParse(JSON.parse(await readFile(explanationPath(jobs, workspace, ticket), 'utf8')));
     return parsed.success ? parsed.data : undefined;
-  } catch {
+  } catch { // missing or not a record: no explanation
     return undefined;
   }
 }

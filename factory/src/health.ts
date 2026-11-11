@@ -148,7 +148,7 @@ export async function checkTunnel(profile: string, address: string, fetcher: Fet
   let ready: number;
   try {
     ready = (await fetcher(`${base}/readyz`, REQUEST_TIMEOUT_MS)).status;
-  } catch {
+  } catch { // refused or timed out: the tunnel client is down, and the returned failure says so
     return down(`the tunnel client does not answer at ${base}/readyz, so the age of its last poll of OpenAI is unknown: start it (sf serve starts it with SF_TUNNEL=auto; or npm run tunnel)`);
   }
   let age: number | undefined;
@@ -156,7 +156,7 @@ export async function checkTunnel(profile: string, address: string, fetcher: Fet
     const metrics = await fetcher(`${base}/metrics`, REQUEST_TIMEOUT_MS);
     const last = metrics.status === 200 ? metricValue(metrics.text, TUNNEL_POLL_METRIC) : undefined;
     age = last === undefined || last <= 0 ? undefined : Math.max(0, Math.round(nowMs / 1000 - last));
-  } catch {
+  } catch { // no metrics: the age of the last poll is unknown
     age = undefined;
   }
   const poll = age === undefined ? 'no successful poll of OpenAI reported' : `last poll of OpenAI ${durationText(age * 1000)} ago`;
@@ -197,7 +197,7 @@ export async function checkTunnelCli(packageRoot: string, script: string): Promi
   let builtAt: number;
   try {
     builtAt = (await stat(built)).mtimeMs;
-  } catch {
+  } catch { // no build output: the returned failure says so
     return down(`${built} is missing: run npm run build in ${packageRoot}`);
   }
   const newest = await newestSource(join(packageRoot, 'src'));
@@ -214,7 +214,7 @@ async function tailLines(path: string, bytes: number): Promise<string[]> {
   let handle;
   try {
     handle = await open(path, 'r');
-  } catch {
+  } catch { // missing or unreadable: no lines
     return [];
   }
   try {
@@ -237,7 +237,7 @@ export async function openTestRun(eventsPath: string): Promise<string | undefine
     let record: { type?: unknown; run?: unknown };
     try {
       record = JSON.parse(line) as typeof record;
-    } catch {
+    } catch { // not a JSON line (a cut first line or a partial write): skipped
       continue;
     }
     if (record.type === 'tests_started' && typeof record.run === 'string') {
@@ -389,7 +389,7 @@ export const httpAnswers: PortProbe = async (port, timeoutMs) => {
     const response = await fetch(`http://127.0.0.1:${port}/`, { redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) });
     await response.body?.cancel().catch(() => undefined);
     return true;
-  } catch {
+  } catch { // refused or timed out: nothing answers on the port
     return false;
   }
 };

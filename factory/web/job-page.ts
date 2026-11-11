@@ -740,7 +740,7 @@ async function confirmActions(key: string): Promise<string[]> {
   if (!Array.isArray(detail?.confirm_actions)) {
     try {
       detail = await withinTime(readDetail(key));
-    } catch {
+    } catch { // the read failed or timed out: none, and the server then refuses with confirm_required
       return [];
     }
   }
@@ -835,7 +835,7 @@ async function refreshDetail(key: string): Promise<void> {
   let detail: JobDetail;
   try {
     detail = await readDetail(key);
-  } catch {
+  } catch { // the detail cannot be read: the page keeps the one it shows
     return;
   }
   if (key === state.key) {

@@ -157,7 +157,7 @@ export async function readMrText(cwd: string, ticket: string): Promise<{ ok: tru
       return fail('mr_text_invalid', `${path} has ${stats.size} bytes, more than ${MAX_MR_TEXT_BYTES}.`);
     }
     text = await readFile(join(cwd, path), 'utf8');
-  } catch {
+  } catch { // missing or unreadable: reported as mr_text_missing
     return fail('mr_text_missing', `${path} does not exist.`);
   }
   const invalid = mrTextProblem(ticket, text);

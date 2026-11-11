@@ -306,8 +306,7 @@ function readFolds(): Set<string> {
   let parsed: unknown = null;
   try {
     parsed = JSON.parse(store.get(FOLD_KEY) ?? 'null');
-  } catch {
-    // Unparseable: nothing folded.
+  } catch { // unparseable: nothing folded
   }
   return new Set<string>(Array.isArray(parsed) ? parsed.filter(isColumn) : []);
 }
@@ -914,8 +913,7 @@ function onDragStart(event: DragEvent): void {
     event.dataTransfer.effectAllowed = 'move';
     try {
       event.dataTransfer.setData('text/plain', ticket);
-    } catch {
-      // Some browsers refuse data here; the drag goes on without it.
+    } catch { // some browsers refuse data here; the drag goes on without it
     }
   }
 }

@@ -221,7 +221,7 @@ export function parseRegistry(text: string): Registry {
   let data: unknown;
   try {
     data = JSON.parse(text);
-  } catch {
+  } catch { // not JSON: reported as registry_invalid
     throw new FactoryError('registry_invalid', `${REGISTRY_FILE} is not valid JSON.`);
   }
   const parsed = registrySchema.safeParse(data);
@@ -256,7 +256,7 @@ export async function verifyCheckout(path: string, role: string): Promise<string
   let real: string;
   try {
     real = await realpath(path);
-  } catch {
+  } catch { // the path does not resolve: reported as workspace_invalid
     throw new FactoryError('workspace_invalid', `The ${role} does not exist.`);
   }
   if ((await gitToplevel(real)) !== real) {

@@ -53,7 +53,7 @@ async function groupMembers(pgid: number, proc = '/proc', strict = false): Promi
   let pids: string[];
   try {
     pids = (await readdir(proc)).filter((name) => /^\d+$/.test(name));
-  } catch {
+  } catch { // no readable proc: undefined
     return undefined;
   }
   let unreadable = false;
@@ -94,14 +94,14 @@ async function processAlive(pid: number): Promise<boolean> {
   try {
     const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
     return stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3) !== 'Z';
-  } catch {
+  } catch { // the stat cannot be read: gone when /proc exists, else by a signal 0
     if (existsSync('/proc/self')) {
       return false;
     }
     try {
       process.kill(pid, 0);
       return true;
-    } catch {
+    } catch { // the signal 0 fails: the process is taken as gone
       return false;
     }
   }
@@ -117,7 +117,7 @@ async function groupAlive(pgid: number, proc?: string): Promise<boolean> {
   try {
     process.kill(-pgid, 0);
     return true;
-  } catch {
+  } catch { // the signal 0 fails: no process of the group is taken as left
     return false;
   }
 }
@@ -194,7 +194,7 @@ export class TunnelChild {
     }
     try {
       await this.#spawn();
-    } catch {
+    } catch { // start never rejects: a spawn that fails is 'failed', and #spawn logs why
       return 'failed';
     }
     this.#owned = true;
@@ -291,7 +291,7 @@ export class TunnelChild {
     let start: string | undefined;
     try {
       start = await startTime(pgid, this.#options.proc);
-    } catch {
+    } catch { // a read error other than the process's end: the group cannot be checked
       return uncheckable();
     }
     const runsScript = members.some((args) => args.some((arg) => arg === this.#options.script || basename(arg) === SCRIPT_NAME));
@@ -334,8 +334,7 @@ export class TunnelChild {
   #signalGroup(pgid: number, signal: NodeJS.Signals): void {
     try {
       this.#kill(-pgid, signal);
-    } catch {
-      // Nothing left to signal.
+    } catch { // the group is already gone: nothing left to signal
     }
   }
 

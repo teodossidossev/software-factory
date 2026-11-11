@@ -83,7 +83,7 @@ export async function readMarker(stateDir: string): Promise<UpdateMarker | undef
   }
   try {
     return markerSchema.parse(JSON.parse(text));
-  } catch {
+  } catch { // not JSON or not a marker: reported as update_marker_invalid
     throw new FactoryError('update_marker_invalid', 'update_marker_invalid: the updating marker in the state directory cannot be read; check the install, then sf update --abandon.');
   }
 }
@@ -142,7 +142,7 @@ export async function readSkippedChecks(stateDir: string): Promise<JobRef[]> {
   try {
     const parsed = z.array(jobRef).safeParse(JSON.parse(await readFile(skippedPath(stateDir), 'utf8')));
     return parsed.success ? parsed.data : [];
-  } catch {
+  } catch { // missing or not JSON: no skipped checks are recorded
     return [];
   }
 }

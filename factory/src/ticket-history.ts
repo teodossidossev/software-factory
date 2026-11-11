@@ -87,7 +87,7 @@ async function readJson(path: string): Promise<Record<string, unknown> | undefin
   try {
     const data: unknown = JSON.parse(await readFile(path, 'utf8'));
     return data !== null && typeof data === 'object' ? (data as Record<string, unknown>) : undefined;
-  } catch {
+  } catch { // missing or not JSON: undefined
     return undefined;
   }
 }
@@ -96,7 +96,7 @@ async function readJson(path: string): Promise<Record<string, unknown> | undefin
 async function sortedEntries(dir: string): Promise<string[]> {
   try {
     return (await readdir(dir)).sort();
-  } catch {
+  } catch { // a missing directory: no entries
     return [];
   }
 }
@@ -148,8 +148,7 @@ export class TicketHistory {
         if (isEvent(value)) {
           events.push(value);
         }
-      } catch {
-        // Not a line of the history (a cut last line): skipped.
+      } catch { // not a line of the history (a cut last line): skipped
       }
     }
     return events;

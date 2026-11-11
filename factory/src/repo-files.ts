@@ -164,7 +164,7 @@ export class RepoFiles {
     let content: string;
     try {
       content = strictUtf8.decode(buffer);
-    } catch {
+    } catch { // not UTF-8: reported as unsupported_content
       throw new RepoReadError('unsupported_content', `${path} is not valid UTF-8 text.`);
     }
     if (content.includes('\0')) {
@@ -219,7 +219,7 @@ export class RepoFiles {
       // -q takes one path. check-ignore refuses --literal-pathspecs (search's way); the ./ prefix
       // keeps a leading ':' from being read as pathspec magic instead.
       code = (await runGit(this.#root, ['check-ignore', '-q', '--no-index', '--', `./${checked}`], CHECK_IGNORE_MAX_BYTES, CHECK_IGNORE_TIMEOUT_MS)).code;
-    } catch {
+    } catch { // Git could not run or timed out: refused below, as it cannot tell
       code = null;
     }
     if (code === 0) {

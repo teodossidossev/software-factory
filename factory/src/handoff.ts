@@ -114,7 +114,7 @@ async function pathExists(path: string): Promise<boolean> {
   try {
     await lstat(path);
     return true;
-  } catch {
+  } catch { // lstat fails: nothing exists there
     return false;
   }
 }
@@ -148,7 +148,7 @@ async function inTheWay(checkout: string, paths: string[]): Promise<string[]> {
       let info;
       try {
         info = await lstat(join(checkout, prefix));
-      } catch {
+      } catch { // nothing at this prefix: nothing deeper is in the way
         break;
       }
       if (depth === parts.length || !info.isDirectory()) {

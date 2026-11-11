@@ -79,7 +79,7 @@ export async function listenSocket(stateDir: string, handler: IpcHandler): Promi
           throw new Error('bad request');
         }
         request = data;
-      } catch {
+      } catch { // not JSON or not a request: answered bad_request
         socket.end(`${JSON.stringify({ ok: false, error: { code: 'bad_request', message: 'Expected {"command", "args"}.' } })}\n`);
         return;
       }
@@ -127,7 +127,7 @@ export function callSocket(stateDir: string, request: IpcRequest): Promise<IpcRe
     socket.once('end', () => {
       try {
         resolve(JSON.parse(output) as IpcResponse);
-      } catch {
+      } catch { // not JSON: rejected as bad_response
         reject(new FactoryError('bad_response', 'sf serve sent an unreadable response.'));
       }
     });

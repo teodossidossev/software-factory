@@ -111,8 +111,7 @@ function knownZone(zone: string | undefined): string {
   if (zone !== undefined && zone !== '') {
     try {
       return new Intl.DateTimeFormat('en-US', { timeZone: zone }).resolvedOptions().timeZone;
-    } catch {
-      // An unknown zone: the process's.
+    } catch { // an unknown zone: the process's
     }
   }
   return Intl.DateTimeFormat().resolvedOptions().timeZone;

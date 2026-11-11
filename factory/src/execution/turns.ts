@@ -309,7 +309,7 @@ export class TurnsPart {
       try {
         const text = await readFile(file, 'utf8');
         return text.split('\n').length - (text.endsWith('\n') ? 1 : 0);
-      } catch {
+      } catch { // missing or unreadable: no line count
         return undefined;
       }
     };

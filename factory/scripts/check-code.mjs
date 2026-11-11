@@ -7,9 +7,11 @@
 // dashboard script (X.js in DASHBOARD_SCRIPTS of src/dashboard.ts). Declaration files (.d.ts) are
 // exempt from those rules. Last, no comment in a .ts file under src/ or web/, .d.ts included, cites
 // a ticket (SF- and a number): comments say what the code does now; the ticket lives in the commit
-// and the Task file. A comment is a line that starts with //, /* or *, or the text after a // on a
-// code line that is not inside a string. The root is the package directory: the working
-// directory, or --root.
+// and the Task file. And every catch without a binding (`catch {`) under src/ or web/ has a
+// comment after it on its line, saying why any failure there is fine. Comments, strings and
+// templates are told apart by a lexer that follows them across lines (lex), so a ticket or a catch
+// in a string, and a catch in a comment, do not count; a file it cannot read to the end fails.
+// The root is the package directory: the working directory, or --root.
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 
@@ -39,38 +41,180 @@ function countLines(text) {
 const isModule = (name) => name.endsWith('.ts') && !name.endsWith('.d.ts');
 const TICKET = /SF-\d+/;
 
-// The comment of a line, or null: the whole line when it starts with //, /* or *; else the text
-// from the first // that is not inside a '', "" or `` string. A line-based check: a string or a
-// comment that spans lines is read line by line.
-function commentOf(line) {
-  const text = line.trimStart();
-  if (text.startsWith('//') || text.startsWith('/*') || text.startsWith('*')) {
-    return text;
-  }
-  let quote = null;
-  for (let index = 0; index < line.length; index += 1) {
-    const char = line[index];
-    if (quote !== null) {
+// The keywords after which a / starts a regular expression, not a division.
+const REGEX_AFTER = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await']);
+const WORD = /[\w$]/;
+
+// A source read as JavaScript is lexed, its strings, templates, comments and regular expressions
+// followed across lines: each line as its code (the content of strings, templates and regular
+// expressions and every comment blanked to spaces, so a word in them is not read as code and the
+// columns hold) and its comments (every comment character at its column, the rest spaces);
+// and clean, whether the source ends outside every string, template and comment. A / starts a
+// regular expression after an operator, an opening bracket, a comma, a semicolon or a keyword
+// such as return, else a division.
+function lex(text) {
+  const lines = [];
+  let code = '';
+  let comment = '';
+  // The open contexts: the source's code and each ${} of a template, with their open braces; a
+  // template's text.
+  const stack = [{ template: false, braces: 0 }];
+  let mode = 'code';
+  let inClass = false;
+  let last = '';
+  let word = '';
+  const emit = (char, kind) => {
+    if (char === '\n') {
+      lines.push({ code, comment });
+      code = '';
+      comment = '';
+    } else {
+      code += kind === 'code' ? char : ' ';
+      comment += kind === 'comment' ? char : ' ';
+    }
+  };
+  const value = () => {
+    last = ')';
+    word = '';
+  };
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+    const top = stack.at(-1);
+    if (top.template) {
       if (char === '\\') {
+        emit(char, 'string');
+        if (next !== undefined) emit(next, 'string');
         index += 1;
-      } else if (char === quote) {
-        quote = null;
+      } else if (char === '`') {
+        emit(char, 'string');
+        stack.pop();
+        value();
+      } else if (char === '$' && next === '{') {
+        emit(' ', 'string');
+        emit(' ', 'string');
+        index += 1;
+        stack.push({ template: false, braces: 0 });
+        last = '(';
+        word = '';
+      } else {
+        emit(char, 'string');
       }
-    } else if (char === "'" || char === '"' || char === '`') {
-      quote = char;
-    } else if (char === '/' && line[index + 1] === '/') {
-      return line.slice(index);
+      continue;
+    }
+    if (mode === 'line') {
+      if (char === '\n') {
+        mode = 'code';
+        emit(char, 'code');
+      } else {
+        emit(char, 'comment');
+      }
+    } else if (mode === 'block') {
+      emit(char, 'comment');
+      if (char === '*' && next === '/') {
+        emit(next, 'comment');
+        index += 1;
+        mode = 'code';
+      }
+    } else if (mode === "'" || mode === '"' || mode === 'regex') {
+      if (char === '\\') {
+        emit(char, 'string');
+        if (next !== undefined) emit(next, 'string');
+        index += 1;
+      } else if (char === '\n') {
+        // A string or a regular expression does not span lines: the code goes on.
+        mode = 'code';
+        emit(char, 'code');
+      } else {
+        emit(char, 'string');
+        if (mode === 'regex' && char === '[') {
+          inClass = true;
+        } else if (mode === 'regex' && char === ']') {
+          inClass = false;
+        } else if (char === mode || (mode === 'regex' && char === '/' && !inClass)) {
+          mode = 'code';
+          value();
+        }
+      }
+    } else if (char === '/' && next === '/') {
+      mode = 'line';
+      emit(char, 'comment');
+    } else if (char === '/' && next === '*') {
+      mode = 'block';
+      emit(char, 'comment');
+      emit(next, 'comment');
+      index += 1;
+    } else if (char === "'" || char === '"') {
+      mode = char;
+      emit(char, 'string');
+    } else if (char === '`') {
+      stack.push({ template: true, braces: 0 });
+      emit(char, 'string');
+    } else if (char === '/' && (last === '' || '(,=:[!&|?{};+-*%<>~^'.includes(last) || REGEX_AFTER.has(word))) {
+      mode = 'regex';
+      inClass = false;
+      emit(char, 'string');
+    } else if (char === '}' && top.braces === 0 && stack.length > 1) {
+      // The end of a template's ${}: its text goes on.
+      stack.pop();
+      emit(char, 'string');
+    } else {
+      if (char === '{') {
+        top.braces += 1;
+      } else if (char === '}') {
+        top.braces -= 1;
+      }
+      emit(char, 'code');
+      if (WORD.test(char)) {
+        word = WORD.test(last) ? word + char : char;
+        last = char;
+      } else if (!/\s/.test(char)) {
+        word = '';
+        last = char;
+      }
     }
   }
-  return null;
+  if (code !== '' || comment !== '') {
+    lines.push({ code, comment });
+  }
+  return { lines, clean: stack.length === 1 && (mode === 'code' || mode === 'line') };
 }
 
-function ticketProblems(root) {
-  const problems = [];
+const BARE_CATCH = /\bcatch\s*\{/g;
+
+// The lexed .ts files under src/ and web/, declaration files included; a file that does not end
+// outside every string and comment cannot be read and is a problem of its own.
+function sources(root) {
   const isSource = (name) => name.endsWith('.ts');
-  for (const file of [...files(root, 'src', isSource), ...files(root, 'web', isSource)]) {
-    readFileSync(join(root, file), 'utf8').split('\n').forEach((line, index) => {
-      const ticket = TICKET.exec(commentOf(line) ?? '');
+  return [...files(root, 'src', isSource), ...files(root, 'web', isSource)]
+    .map((file) => ({ file, ...lex(readFileSync(join(root, file), 'utf8')) }));
+}
+
+function unreadProblems(lexed) {
+  return lexed.filter(({ clean }) => !clean)
+    .map(({ file }) => `${file}: ends inside a string, a template or a comment, so its comments cannot be checked: check its quotes and regular expressions.`);
+}
+
+// A catch without a binding needs, after it on its line, a comment with some text.
+function catchProblems(lexed) {
+  const problems = [];
+  for (const { file, lines } of lexed) {
+    lines.forEach(({ code }, index) => {
+      for (const match of code.matchAll(BARE_CATCH)) {
+        if (lines[index].comment.slice(match.index).replace(/\/\/|\/\*|\*\/|\*/g, '').trim() === '') {
+          problems.push(`${file}:${index + 1}: a catch without a binding drops the error: say on its line why any failure is fine, catch { // <why>`);
+        }
+      }
+    });
+  }
+  return problems;
+}
+
+function ticketProblems(lexed) {
+  const problems = [];
+  for (const { file, lines } of lexed) {
+    lines.forEach(({ comment }, index) => {
+      const ticket = TICKET.exec(comment);
       if (ticket !== null) {
         problems.push(`${file}:${index + 1}: a comment cites ${ticket[0]}: say what the code does now; the ticket lives in the commit and the Task file.`);
       }
@@ -167,6 +311,7 @@ function main(args) {
   const { root, update } = parseArgs(args);
   const counts = new Map([...files(root, 'src', isModule), ...files(root, 'web', isModule)]
     .map((file) => [file, countLines(readFileSync(join(root, file), 'utf8'))]));
+  const lexed = sources(root);
   let list = readList(root);
   if (update) {
     const next = lowered(list, counts);
@@ -174,12 +319,12 @@ function main(args) {
     writeFileSync(join(root, LIST), `${JSON.stringify(sorted, null, 2)}\n`);
     list = sorted;
   }
-  const problems = [...sizeProblems(list, counts), ...layoutProblems(root), ...ticketProblems(root)];
+  const problems = [...sizeProblems(list, counts), ...layoutProblems(root), ...unreadProblems(lexed), ...ticketProblems(lexed), ...catchProblems(lexed)];
   for (const problem of problems) {
     console.error(`check-code: ${problem}`);
   }
   if (problems.length === 0) {
-    console.log(`check-code: ${counts.size} modules, none over ${LIMIT} lines or past ${LIST}; no comment cites a ticket.`);
+    console.log(`check-code: ${counts.size} modules, none over ${LIMIT} lines or past ${LIST}; no comment cites a ticket; every catch {} says why.`);
   }
   return problems.length === 0 ? 0 : 1;
 }

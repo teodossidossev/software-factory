@@ -929,6 +929,12 @@ leading `_`.
   edit of `code-size.json` that review sees.
 - **Layout**: no `.js` file under `static/` (the dashboard's scripts are `web/*.ts`, built to
   `dist/web/`), and each `web/X.ts` has its `X.js` in `DASHBOARD_SCRIPTS` (`src/dashboard.ts`).
+- **Comments**: no comment in a `.ts` file under `src/` or `web/` cites a ticket (`SF-` and a
+  number), and every `catch` there without a binding (`catch {`) says on its line, after `//`, why
+  any failure is fine (`} catch { // the process is already gone`). Strings, templates, comments
+  and regular expressions are followed across lines, so a `catch` or a ticket in a string and a
+  `catch` in a comment do not count; a file that ends inside one of them fails. The check names
+  each `file:line`.
 
 ## Coding rules
 

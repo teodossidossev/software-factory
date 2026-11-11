@@ -392,7 +392,7 @@ async function realTarget(path: string): Promise<string> {
   for (;;) {
     try {
       return join(await realpath(existing), ...rest);
-    } catch {
+    } catch { // this ancestor does not resolve: its parent is tried
       const parent = dirname(existing);
       if (parent === existing) {
         return path;
@@ -514,7 +514,7 @@ export async function guardReason(root: string, tool: string, input: unknown, te
   }
   try {
     return await checkedReason(root, tool, input, temporary);
-  } catch {
+  } catch { // never throws: a call it fails to check is refused
     return `The Task check could not check this ${tool} call; it is refused.`;
   }
 }

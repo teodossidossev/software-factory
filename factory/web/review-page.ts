@@ -76,8 +76,7 @@ async function mqGet(path: string): Promise<unknown> {
     if (isRecord(data) && isRecord(data.error) && typeof data.error.message === 'string') {
       message = data.error.message;
     }
-  } catch {
-    // An empty refusal (an unknown workspace): the status says it.
+  } catch { // an empty refusal (an unknown workspace): the status says it
   }
   throw new Error(message);
 }

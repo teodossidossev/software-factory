@@ -201,6 +201,12 @@ ticket numbers and no "now", "no longer" or "since" about earlier versions. The 
 the commit and the Task file. `npm run check-code` (part of `npm test`) fails on a comment in
 `factory/src/` or `factory/web/` that cites `SF-` and a number.
 
+A `catch` without a binding (`catch {`) in `factory/src/` or `factory/web/` carries, on the `catch`
+line itself, why any failure there is fine: `} catch { // missing or not JSON: the job has no record`.
+It names the failure it expects and what follows; never a bare "ignore" or "best effort".
+`npm run check-code` fails on one without it, naming the file and line; a `catch (error) {` is not
+affected.
+
 The user can attach images to a ticket (screenshots, pasted on the dashboard or added with
 `sf attach`): they live in `.software-factory/<ticket>/` next to the Task file, at most 10 of
 PNG, JPEG, WebP or GIF, 5 MB each. Read them with `read_attachment`. In the Task file, refer to an

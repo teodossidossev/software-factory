@@ -150,8 +150,7 @@ export function findBwrap(env: NodeJS.ProcessEnv = process.env): string | undefi
     try {
       accessSync(join(dir, 'bwrap'), constants.X_OK);
       return join(dir, 'bwrap');
-    } catch {
-      // Not here.
+    } catch { // not here or not executable: the next PATH directory
     }
   }
   return undefined;
@@ -182,7 +181,7 @@ function parseEvent(line: string): Record<string, unknown> | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
-  } catch {
+  } catch { // not JSON: not an event
     return undefined;
   }
   return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : undefined;
@@ -321,13 +320,13 @@ export async function runGate(prompt: string, options: GateOptions): Promise<Gat
     let text: string;
     try {
       text = await readFile(outputPath, 'utf8');
-    } catch {
+    } catch { // no output file: the gate fails, saying so
       return failed('Codex wrote no output.');
     }
     let json: unknown;
     try {
       json = JSON.parse(text);
-    } catch {
+    } catch { // not JSON: the gate fails, quoting the output
       return failed(`Codex returned output that is not JSON: ${oneLine(text).slice(0, 200)}`);
     }
     const parsed = reviewOutput.safeParse(json);

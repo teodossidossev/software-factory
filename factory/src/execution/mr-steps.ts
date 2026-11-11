@@ -1046,7 +1046,7 @@ export class MrPart {
         let record: Record<string, unknown>;
         try {
           record = JSON.parse(line) as Record<string, unknown>;
-        } catch {
+        } catch { // not a JSON line: skipped
           continue;
         }
         const ts = typeof record.ts === 'string' ? record.ts : null;

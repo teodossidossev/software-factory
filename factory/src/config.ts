@@ -162,7 +162,7 @@ export function smokeProbeAllow(env: NodeJS.ProcessEnv, dir: string): string | u
   try {
     real = realpathSync(dir);
     tmp = realpathSync(tmpdir());
-  } catch {
+  } catch { // any realpath error: no allowance
     return undefined;
   }
   const name = basename(dirname(real));
@@ -285,7 +285,7 @@ function executable(path: string): boolean {
   try {
     accessSync(path, constants.X_OK);
     return statSync(path).isFile();
-  } catch {
+  } catch { // missing or not executable: false
     return false;
   }
 }

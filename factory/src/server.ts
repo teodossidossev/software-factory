@@ -333,7 +333,7 @@ function hasResult(body: string): boolean {
     try {
       const message = JSON.parse(text) as unknown;
       return message !== null && typeof message === 'object' && 'result' in message;
-    } catch {
+    } catch { // not JSON: not an answer
       return false;
     }
   });
@@ -354,7 +354,7 @@ export async function probeMcp(port: number, token: string, timeoutMs = 3000): P
     });
     status = response.status;
     body = await response.text().catch(() => '');
-  } catch {
+  } catch { // refused, timed out or nothing listening: unreachable
     return { result: 'unreachable' };
   }
   if (status === 401) {

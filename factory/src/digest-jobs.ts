@@ -48,7 +48,7 @@ async function events(path: string): Promise<EventLine[]> {
   let text: string;
   try {
     text = await readFile(path, 'utf8');
-  } catch {
+  } catch { // missing or unreadable: no events
     return [];
   }
   const lines: EventLine[] = [];
@@ -61,8 +61,7 @@ async function events(path: string): Promise<EventLine[]> {
       if (typeof record === 'object' && record !== null) {
         lines.push(record as EventLine);
       }
-    } catch {
-      // A torn line: the others still count.
+    } catch { // a torn line: the others still count
     }
   }
   return lines;

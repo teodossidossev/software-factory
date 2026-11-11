@@ -270,7 +270,7 @@ function isJsonObject(text: string): boolean {
   try {
     const value: unknown = JSON.parse(text);
     return value !== null && typeof value === 'object' && !Array.isArray(value);
-  } catch {
+  } catch { // not JSON: not a verdict
     return false;
   }
 }
@@ -392,7 +392,7 @@ export async function lineEntries(raw: string, line: number, ctx: StreamContext)
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
-  } catch {
+  } catch { // not JSON: the line shows nothing
     return [];
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {

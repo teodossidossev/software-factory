@@ -153,7 +153,7 @@ export function probeProblem(text: string, probe?: SmokeProbe): string | undefin
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
-  } catch {
+  } catch { // not JSON: the returned failure says so
     return `${PROBE_OUTPUT} is not JSON`;
   }
   if (!Array.isArray(parsed)) {

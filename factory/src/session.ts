@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { type ImageRef, promptInput } from './attachments.js';
 import { makeSessionTmp, removeSessionTmp } from './host-tmp.js';
 import { PACKAGE_ROOT } from './package-root.js';
+import { IMPLEMENTER_TOOLS } from './rules.js';
 import { claudeConfigDir, claudeUserSettings, type PathDenials, withSandboxDenials } from './sandbox-denials.js';
 import { factoryRoots, reapOrphanedSandboxes } from './sandbox-reaper.js';
 import { BWRAP_MISSING, prepareClaudeState, SANDBOX_UNAVAILABLE, WrappedSpawn } from './session-wrapper.js';
@@ -123,6 +124,11 @@ const REAP_AFTER_QUERY_MS = 3_000;
 // file (a .claude/settings.json a job could have written) runs. The hooks passed to query(), such
 // as the file-tool guard, still do.
 export const JOB_SESSION_SETTINGS = { disableAllHooks: true } as const;
+
+// The tools of every Implementer session, the smoke's included: IMPLEMENTER_TOOLS only (its
+// sub-agents inherit the session's tools), and no MCP server: strictMcpConfig with no mcpServers
+// leaves out the user's claude.ai connectors, a project's .mcp.json and the plugins' servers.
+export const IMPLEMENTER_SESSION_TOOLS = { tools: [...IMPLEMENTER_TOOLS], strictMcpConfig: true, mcpServers: {} };
 
 // The file tools the smoke's ticket needs, allowed in its dontAsk session.
 export const SMOKE_TOOLS = ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'TodoWrite'] as const;
@@ -482,6 +488,7 @@ export class ImplementerSession {
         permissionMode: mode,
         settingSources: ['user', 'project'],
         settings: { ...JOB_SESSION_SETTINGS },
+        ...IMPLEMENTER_SESSION_TOOLS,
         disallowedTools: [...disallowedTools, ...(denials?.tools ?? [])],
         ...(allowed.length > 0 ? { allowedTools: allowed } : {}),
         maxTurns: this.#options.maxTurns,

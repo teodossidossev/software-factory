@@ -17,6 +17,7 @@ import { test } from 'node:test';
 import { CLASSIFIER_DENIAL, DONT_ASK_DENIAL, initToolsProblem, outsideWriteProblem, probeCallProblem, probeProblem, smokePaths, smokeProbe, smokeTask, STEPS } from '../src/live-smoke.js';
 import * as liveSmoke from '../src/live-smoke.js';
 import { hostTmpSocket, PROBE_SCRIPT, PROBES, probeCommand, socketProbeScript } from '../src/smoke-probe.js';
+import { IMPLEMENTER_TOOLS } from '../src/rules.js';
 import { FILE_GUARD } from '../src/sandbox-denials.js';
 import { bwrapLog, codexLog, codexScript, fakeCodex, fakeLog, git, reviewLog, reviewScript, script, temp } from './support/harness.js';
 import { BRANCH, CHECK_READY, CLAUDE_CLEAN, CLEAN_TURNS, cleanScripts, onlyChecksDir, probeOutput, smoke, statuses, untouched } from './support/live-smoke.js';
@@ -29,7 +30,7 @@ test('a clean run: every step PASS, exit 0, the temp directory gone, the user\'s
   assert.ok(ran.dir.startsWith(ran.tmp), ran.dir);
   assert.match(ran.stdout, /\nsmoke: PASS, cost \d+\.\d{4} USD, gate 1100 tokens\n$/);
   assert.match(ran.rows.get('Task check')!.detail, /^verdict ready/);
-  assert.equal(ran.rows.get('Sandbox')!.detail, `every probe refused (${PROBES.length}), no web tools, the Write outside the worktree refused`);
+  assert.equal(ran.rows.get('Sandbox')!.detail, `every probe refused (${PROBES.length}), only the allowed tools, the Write outside the worktree refused`);
   assert.equal(ran.rows.get('Gate sandbox')!.detail, 'the canary env file and jobs/ hidden inside the gate\'s wrapper; Unix sockets refused');
   assert.match(ran.rows.get('Codex gate')!.detail, /clean, 1100 tokens/);
   assert.match(ran.rows.get('MR text')!.detail, /^feat\(SMOKE-1\): Add a second greeting line$/);
@@ -227,12 +228,15 @@ test('why probe.json is missing (SF-104, SF-110), from the job\'s events: no pro
   assert.equal(probeCallProblem(implementerEvent('assistant', [bash('p', probe)])), undefined);
 });
 
-test('the init-tools check (SF-123): fails on an Implementer init that lists WebFetch or WebSearch, or on no init; a reviewer\'s init does not count', () => {
+test('the init-tools check (SF-123): fails on an Implementer init that lists a tool outside IMPLEMENTER_TOOLS (WebFetch, WebSearch, an MCP tool, any other), or on no init; a reviewer\'s init does not count', () => {
   const init = (tools: string[], extra: Record<string, unknown> = {}): string =>
     JSON.stringify({ ts: 't', iteration: 1, ...extra, message: { type: 'system', subtype: 'init', tools, session_id: 's' } });
   assert.equal(initToolsProblem(init(['Bash', 'Read', 'Write'])), undefined);
+  assert.equal(initToolsProblem(init(IMPLEMENTER_TOOLS)), undefined);
   assert.equal(initToolsProblem(init(['Bash', 'WebFetch'])), 'the Implementer was offered WebFetch');
-  assert.equal(initToolsProblem([init(['Bash']), init(['WebSearch', 'WebFetch'])].join('\n')), 'the Implementer was offered WebSearch and WebFetch');
+  assert.equal(initToolsProblem([init(['Bash']), init(['WebSearch', 'WebFetch'])].join('\n')), 'the Implementer was offered WebSearch, WebFetch');
+  assert.equal(initToolsProblem(init(['Bash', 'mcp__claude_ai_Claude_Docs__create'])), 'the Implementer was offered mcp__claude_ai_Claude_Docs__create');
+  assert.equal(initToolsProblem([init(['Read', 'Workflow']), init(['CronCreate', 'SendMessage', 'Workflow'])].join('\n')), 'the Implementer was offered Workflow, CronCreate, SendMessage');
   assert.equal(initToolsProblem(''), 'the Implementer\'s events have no init message');
   assert.equal(initToolsProblem([init(['Bash']), init(['WebFetch'], { type: 'review_message' })].join('\n')), undefined);
 });

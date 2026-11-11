@@ -7,6 +7,7 @@ import { TASK_DIR } from './task-file.js';
 export const FACTORY_PROMPT_RULES = `Rules from the Software Factory:
 - Do not commit, stage, stash, push or switch branches; the factory handles Git after review.
 - Do not edit .software-factory/<ticket>.md; the Context owner owns it.
+- Write your own changes to files with Edit and Write only, never through an inline script, \`sed -i\` or a shell redirection: the factory checks every Edit and Write. Running the repository's own tools (formatter, code generator, package manager) is fine.
 - While working, run the tests of the files you change; run the repository's full test suite once, before the report.
 - End your turn with a report in this form, as your last message:
   # Report: <ticket>, iteration <N>

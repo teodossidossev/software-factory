@@ -32,6 +32,9 @@
 // error text, then exit code 1, on which the SDK throws "Claude Code returned an error result".
 // A user message with a block that is not text (the images of SF-065) is logged with its blocks too:
 // each text block's text, each image block's media type, size and sha256 (never its bytes).
+// An Implementer's init lists the tools it was given, as the real CLI does: the --tools list, else
+// a full set (ALL_TOOLS, and a claude.ai connector's tool without --strict-mcp-config), without the
+// plain tool names of --disallowedTools.
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -102,6 +105,18 @@ const option = (name: string): string | undefined => {
   const index = argv.indexOf(`--${name}`);
   return index >= 0 ? argv[index + 1] : undefined;
 };
+
+// The built-in tools of a session given no --tools, as an installed Claude Code offers them.
+const ALL_TOOLS = ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'Skill', 'Agent', 'TodoWrite', 'WebFetch', 'WebSearch', 'EnterWorktree', 'Workflow', 'CronCreate', 'SendMessage', 'PushNotification'];
+const CONNECTOR_TOOL = 'mcp__claude_ai_Claude_Docs__create';
+
+// The init message's tools of an Implementer run: what it was given.
+function givenTools(): string[] {
+  const given = option('tools');
+  const offered = given !== undefined ? given.split(',').filter((tool) => tool !== '') : [...ALL_TOOLS, ...(argv.includes('--strict-mcp-config') ? [] : [CONNECTOR_TOOL])];
+  const denied = new Set((option('disallowedTools') ?? '').split(','));
+  return offered.filter((tool) => !denied.has(tool));
+}
 
 // The CLI's validator knows the draft-07 meta-schema only; any other $schema is refused at start.
 const DRAFT_07 = ['http://json-schema.org/draft-07/schema#', 'http://json-schema.org/draft-07/schema'];
@@ -257,7 +272,7 @@ async function run(prompt: string, blocks?: LoggedBlock[]): Promise<void> {
   }
   out({
     type: 'system', subtype: 'init', permissionMode: turn.permissionMode ?? option('permission-mode') ?? 'default',
-    cwd: process.cwd(), tools: [], mcp_servers: [], model: 'fake-model', slash_commands: turn.slashCommands ?? ['implement'], output_style: 'default',
+    cwd: process.cwd(), tools: givenTools(), mcp_servers: [], model: 'fake-model', slash_commands: turn.slashCommands ?? ['implement'], output_style: 'default',
     skills: [], plugins: [], apiKeySource: 'none', claude_code_version: '0.0.0-fake',
   });
   for (const [path, content] of Object.entries(turn.write ?? {})) {

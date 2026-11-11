@@ -33,6 +33,7 @@ import { sweepSessionTmps } from './host-tmp.js';
 import { runGit } from './git.js';
 import { type Job, JobStore, statesWith, TERMINAL_STATES } from './jobs.js';
 import { mrTextProblem } from './mr.js';
+import { IMPLEMENTER_TOOLS } from './rules.js';
 import { claudeConfigDir, FILE_GUARD, gateWrapperFor } from './sandbox-denials.js';
 import { filterSupports, spawnSeccomped } from './seccomp.js';
 import { PROBE_SCRIPT_NAME } from './session.js';
@@ -187,18 +188,16 @@ export function probeCallProblem(events: string): string | undefined {
   return undefined;
 }
 
-// The web tools no job may be offered (src/rules.ts DENIED_TOOLS).
-const WEB_TOOLS = ['WebFetch', 'WebSearch'];
-
-// Why the Implementer's tools are wrong, from the job's events.jsonl text: an init message
-// that lists a web tool, or no init message at all; undefined when every init lists none.
+// Why the Implementer's tools are wrong, from the job's events.jsonl text: an init message that
+// lists a tool outside IMPLEMENTER_TOOLS (a web tool, an MCP tool, any other), or no init message
+// at all; undefined when every init lists only allowed tools.
 export function initToolsProblem(events: string): string | undefined {
   const inits = implementerMessages(events).filter((message) => message.type === 'system' && message.subtype === 'init');
   if (inits.length === 0) {
     return 'the Implementer\'s events have no init message';
   }
-  const listed = [...new Set(inits.flatMap((message) => (Array.isArray(message.tools) ? message.tools : []).filter((tool) => WEB_TOOLS.includes(tool as string)) as string[]))];
-  return listed.length === 0 ? undefined : `the Implementer was offered ${listed.join(' and ')}`;
+  const listed = [...new Set(inits.flatMap((message) => (Array.isArray(message.tools) ? message.tools : []).filter((tool) => !IMPLEMENTER_TOOLS.includes(tool as string)).map(String)))];
+  return listed.length === 0 ? undefined : `the Implementer was offered ${listed.join(', ')}`;
 }
 
 // Why the Write outside the worktree is wrong, from the job's events.jsonl text: the file
@@ -873,8 +872,8 @@ class Smoke {
 
   // The Sandbox step, once the first iteration is published: probe.json in the job's
   // worktree must exist and say refused for every probe (absent for the user's paths that are);
-  // the Implementer's init lists no web tool, and its Write outside the worktree was refused by the
-  // file-tool guard and left no file. With the sandbox off it is a SKIP.
+  // the Implementer's init lists only IMPLEMENTER_TOOLS, and its Write outside the worktree was
+  // refused by the file-tool guard and left no file. With the sandbox off it is a SKIP.
   async sandbox(): Promise<Outcome> {
     if (this.sandboxOff) {
       return { status: 'SKIP', detail: 'sandbox off' };
@@ -899,7 +898,7 @@ class Smoke {
     const outside = outsidePath(this.#paths);
     const closedPathProblem = initToolsProblem(events) ?? outsideWriteProblem(events, outside, existsSync(outside), job.worktree);
     return closedPathProblem === undefined
-      ? { status: 'PASS', detail: `every probe refused (${PROBES.length}), no web tools, the Write outside the worktree refused` }
+      ? { status: 'PASS', detail: `every probe refused (${PROBES.length}), only the allowed tools, the Write outside the worktree refused` }
       : { status: 'FAIL', detail: short(closedPathProblem) };
   }
 

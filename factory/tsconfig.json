@@ -17,5 +17,5 @@
     "sourceMap": true
   },
   "include": ["src", "test"],
-  "exclude": ["web"]
+  "exclude": ["web", "test/web-types"]
 }

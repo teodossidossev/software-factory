@@ -1,6 +1,7 @@
 // The server's payloads as the page's TypeScript reads them. Each type copies, from the
 // server's own type in src/ (named on each), only the fields the typed page code reads; it never
-// imports from src/. A page script that reads another field adds it here.
+// imports from src/. A page script that reads another field adds it here. test/web-types/check.ts
+// checks each copy against the server's type (npm run typecheck): a new type gets a check there.
 // A global declaration file: no import or export, so every type is visible to every page script.
 
 // A job's state: src/jobs.ts JOB_STATES.
@@ -31,10 +32,8 @@ type PauseStep = 'turn' | 'review' | 'gate' | 'simplify';
 type StopKind = 'decision' | 'error';
 type StopGroup = 'gate' | 'ledger' | 'limit' | 'simplify' | 'tests';
 
-// A job of api/jobs and of the stream's jobs events: src/dashboard.ts jobSummary. title, cost_usd,
-// review, now, tool_calls and stop are the jobs payload's only (jobsPayload, boardFacts); the
-// detail's job has none.
-interface JobRow {
+// A job of a job's detail: src/dashboard.ts jobSummary.
+interface JobSummary {
   workspace: string;
   ticket: string;
   branch: string;
@@ -68,7 +67,13 @@ interface JobRow {
   // availability ('' or why it is off).
   actions: ShownAction[];
   availability: Readonly<Record<string, string>>;
-  title?: string;
+}
+
+// A job of api/jobs and of the stream's jobs events: src/dashboard.ts jobsPayload, jobSummary with
+// title, cost_usd, review, now, tool_calls and stop (boardFacts, nowOf, stopOf). They are optional
+// here, as the page also holds a detail's job (JobSummary) as a JobRow.
+interface JobRow extends JobSummary {
+  title?: string | null;
   cost_usd?: number | null;
   review?: 'clean' | 'fix' | 'failed' | null;
   now?: { who: string; what: string; ts: string | null } | null;
@@ -212,7 +217,7 @@ interface ExplanationRecord {
 
 // A job's detail, api/jobs/<ws>/<ticket> and the stream's job events: src/dashboard.ts jobView.
 interface JobDetail {
-  job: JobRow;
+  job: JobSummary;
   iterations: IterationRow[];
   mr: boolean;
   mr_title: string | null;

@@ -420,7 +420,7 @@ function addLine(sums: EventSums, line: string): void {
   let record: unknown;
   try {
     record = JSON.parse(line);
-  } catch {
+  } catch { // not a JSON line: adds nothing
     return;
   }
   if (!isObject(record) || typeof record.ts !== 'string' || typeof record.iteration !== 'number') {
@@ -563,14 +563,14 @@ export class Stats {
       try {
         const info = await stat(path);
         return `${info.mtimeMs}:${info.size}`;
-      } catch {
+      } catch { // a missing or unreadable file: signature 0:0
         return '0:0';
       }
     };
     const iteration = async (number: number): Promise<string> => {
       try {
         return String((await stat(this.#jobs.iterationDir(dir.workspace, dir.name, number))).mtimeMs);
-      } catch {
+      } catch { // a missing or unreadable iteration: signature 0
         return '0';
       }
     };
@@ -603,7 +603,7 @@ export class Stats {
     const attempt = async <T>(read: () => Promise<T>): Promise<T | undefined> => {
       try {
         return await read();
-      } catch {
+      } catch { // counted in the job's unreadable
         unreadable += 1;
         return undefined;
       }
@@ -721,7 +721,7 @@ export class Stats {
       }
       this.#events.set(key, { size, offset, sums });
       return sums;
-    } catch {
+    } catch { // a read error: null, as the file cannot be read
       return null;
     } finally {
       await handle.close();
@@ -734,7 +734,7 @@ export class Stats {
     const dirs = async (path: string): Promise<string[]> => {
       try {
         return (await readdir(path, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
-      } catch {
+      } catch { // a missing or unreadable directory: none
         return [];
       }
     };
@@ -746,7 +746,7 @@ export class Stats {
         let names: string[];
         try {
           names = (await readdir(join(root, workspace, ticket))).filter((name) => CHECK_FILE.test(name)).sort();
-        } catch {
+        } catch { // a ticket directory gone or unreadable: no records from it
           continue;
         }
         for (const name of names) {
@@ -756,7 +756,7 @@ export class Stats {
           try {
             const info = await stat(path);
             signature = `${info.mtimeMs}:${info.size}`;
-          } catch {
+          } catch { // gone or unreadable: counted in unreadable
             unreadable += 1;
             continue;
           }
@@ -788,7 +788,7 @@ export class Stats {
     let listed;
     try {
       listed = await this.#digests.list();
-    } catch {
+    } catch { // a failed list counts once in unreadable
       return { records: [], unreadable: 1 };
     }
     const records = listed.filter((digest) => typeof digest.ended_at === 'string');
@@ -1138,7 +1138,7 @@ export class Stats {
     let queued: number | null;
     try {
       queued = (await new QueueStore(this.#stateDir, 1).read()).entries.filter((entry) => chosen(entry.workspace)).length;
-    } catch {
+    } catch { // an unreadable queue: its count is unknown (null)
       queued = null;
     }
 
@@ -1176,7 +1176,7 @@ async function readCheck(path: string, workspace: string, ticket: string): Promi
   let record: unknown;
   try {
     record = JSON.parse(await readFile(path, 'utf8'));
-  } catch {
+  } catch { // missing or not JSON: null
     return null;
   }
   if (!isObject(record) || (record.status !== 'checked' && record.status !== 'failed') || typeof record.sha256 !== 'string'

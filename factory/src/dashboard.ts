@@ -415,7 +415,7 @@ async function taskChangedOf(setup: DashboardSetup, job: Job): Promise<boolean |
   }
   try {
     return taskSha256(await setup.taskText(job.workspace, job.ticket)) !== job.task_sha256;
-  } catch {
+  } catch { // the Task file cannot be read: unknown (null)
     return null;
   }
 }
@@ -478,7 +478,7 @@ function implementerBlocks(raw: string): { ts: string | null; blocks: Array<Reco
   let record: Record<string, unknown>;
   try {
     record = JSON.parse(raw) as Record<string, unknown>;
-  } catch {
+  } catch { // not JSON: not an Implementer message
     return undefined;
   }
   if (record === null || typeof record !== 'object' || record.type !== undefined) {
@@ -755,7 +755,7 @@ async function stateHistory(jobs: JobStore, workspace: string, ticket: string) {
     };
     try {
       record = JSON.parse(line) as typeof record;
-    } catch {
+    } catch { // not a JSON line: not part of the history
       continue;
     }
     if (typeof record === 'object' && record !== null && record.type === 'merge_request') {
@@ -1848,7 +1848,7 @@ export async function startDashboard(
     if (post.bytes !== true) {
       try {
         data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw));
-      } catch {
+      } catch { // not UTF-8 JSON: answered 400 invalid_json
         fail(400, 'invalid_json', 'The body must be UTF-8 JSON.');
         return;
       }

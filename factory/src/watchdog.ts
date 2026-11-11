@@ -58,8 +58,7 @@ async function readState(path: string): Promise<WatchdogState | undefined> {
         return { down, since };
       }
     }
-  } catch {
-    // Missing or not JSON: up.
+  } catch { // missing or not JSON: up
   }
   return undefined;
 }

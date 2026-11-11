@@ -214,7 +214,7 @@ function renderCheck(view: CheckView): HTMLElement[] {
 async function readCheck(key: string): Promise<CheckView | null> {
   try {
     return payload<CheckView>(await getText(`api/tickets/${jobPath(key)}/check`));
-  } catch {
+  } catch { // the check cannot be read: none to show
     return null;
   }
 }
@@ -257,15 +257,14 @@ const store = {
   get(name: string): string | null {
     try {
       return localStorage.getItem(name);
-    } catch {
+    } catch { // storage refused (private mode, blocked): nothing stored
       return null;
     }
   },
   set(name: string, value: string): void {
     try {
       localStorage.setItem(name, value);
-    } catch {
-      // none
+    } catch { // storage refused (private mode, full or blocked): the value is not kept
     }
   },
 };
@@ -1768,7 +1767,7 @@ async function loadTaskView(): Promise<void> {
     // The ticket may have been archived since the job started.
     try {
       text = await getText(`api/tickets/${jobPath(key)}/task?archived=1`);
-    } catch {
+    } catch { // not archived either: the first read's error is shown
       text = `Could not load the Task file: ${errorMessage(error)}`;
       // The next toggle tries again.
       view.stamp = null;
@@ -2404,7 +2403,7 @@ async function loadStream(key: string): Promise<void> {
     let page: StreamPage | null;
     try {
       page = payload<StreamPage | null>(await getText(`api/jobs/${jobPath(key)}/stream?from=${state.lastLine}`));
-    } catch {
+    } catch { // a page that cannot be read: the live stream sends the rest
       page = null;
     }
     if (state.streamLoad !== token || state.key !== key) {

@@ -138,7 +138,7 @@ function implementerMessages(events: string): EventMessage[] {
     let record: { type?: unknown; message?: unknown };
     try {
       record = JSON.parse(line);
-    } catch {
+    } catch { // not a JSON line: skipped
       continue;
     }
     if (record !== null && typeof record === 'object' && record.type === undefined && record.message !== null && typeof record.message === 'object') {
@@ -392,7 +392,7 @@ function procStat(pid: number | string): { pgid: number; start: string } | undef
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
     const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
     return { pgid: Number(fields[2]), start: fields[19]! };
-  } catch {
+  } catch { // no /proc or no such process: undefined
     return undefined;
   }
 }
@@ -400,8 +400,7 @@ function procStat(pid: number | string): { pgid: number; start: string } | undef
 function signalGroup(pgid: number, signal: NodeJS.Signals): void {
   try {
     process.kill(-pgid, signal);
-  } catch {
-    // The group is gone.
+  } catch { // the group is already gone
   }
 }
 
@@ -436,7 +435,7 @@ export class ProcessGroups {
     let names: string[];
     try {
       names = readdirSync('/proc');
-    } catch {
+    } catch { // no /proc: nothing to observe
       names = [];
     }
     for (const name of names) {

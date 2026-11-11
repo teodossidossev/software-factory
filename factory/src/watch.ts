@@ -46,7 +46,7 @@ export function describeEvent(raw: string): DescribedEvent | undefined {
   let record: Record<string, unknown>;
   try {
     record = JSON.parse(raw) as Record<string, unknown>;
-  } catch {
+  } catch { // not JSON: not an event
     return undefined;
   }
   if (typeof record !== 'object' || record === null) {
@@ -349,7 +349,7 @@ export async function followLines(path: string, follow: boolean, onLine: (raw: s
       }
       try {
         await sleep(POLL_MS, undefined, { signal });
-      } catch {
+      } catch { // the sleep was aborted: the follow ends
         return;
       }
     }

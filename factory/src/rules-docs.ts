@@ -131,7 +131,7 @@ export function linkedPath(from: string, target: string): string | undefined {
   let path = target.split(/[?#]/, 1)[0]!;
   try {
     path = decodeURIComponent(path);
-  } catch {
+  } catch { // a malformed percent escape: not a link to follow
     return undefined;
   }
   if (path === '' || path.includes('\0') || path.includes('\\') || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(path) || path.startsWith('/')) {

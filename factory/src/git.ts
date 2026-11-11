@@ -84,8 +84,7 @@ export function runGit(
     const signalGroup = (name: NodeJS.Signals): void => {
       try {
         process.kill(-child.pid!, name);
-      } catch {
-        // Already gone, or never started (the error event says so).
+      } catch { // already gone, or never started (the error event says so)
       }
     };
     let killTimer: NodeJS.Timeout | undefined;
@@ -240,7 +239,7 @@ export async function gitToplevel(cwd: string): Promise<string | undefined> {
     const result = await runGit(cwd, ['rev-parse', '--show-toplevel']);
     const top = result.stdout.toString('utf8').trim();
     return result.code === 0 && top !== '' ? top : undefined;
-  } catch {
+  } catch { // Git failed: undefined, as for no repository
     return undefined;
   }
 }

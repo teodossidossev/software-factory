@@ -118,7 +118,7 @@ export async function takeRequest(jobDir: string): Promise<{ id: string; request
     await rm(path, { force: true });
     try {
       return { id, request: JSON.parse(text) as RunnerRequest };
-    } catch {
+    } catch { // not JSON: answered with bad_request
       await writeReply(jobDir, id, { ok: false, error: { code: 'bad_request', message: 'The request file is not valid JSON.' } });
     }
   }
@@ -327,8 +327,7 @@ function signalAll(pids: number[], signal: NodeJS.Signals): void {
   for (const pid of pids) {
     try {
       process.kill(pid, signal);
-    } catch {
-      // Already gone.
+    } catch { // the process is already gone
     }
   }
 }
@@ -510,8 +509,7 @@ export function followJobs(jobs: JobStore, listener: (job: Job, from: JobState |
     });
     watcher.on('error', () => watcher?.close());
     watcher.unref();
-  } catch {
-    // Without fs.watch the interval alone follows the jobs.
+  } catch { // no fs.watch here: the interval alone follows the jobs
   }
   tick();
   return {

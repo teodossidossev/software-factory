@@ -451,8 +451,7 @@ export class AutoChecks {
           });
           const entry = { dir, close: () => watcher.close() };
           this.#watchers.set(name, entry);
-        } catch {
-          // Not there yet (no Task file written), or not readable: the next re-read tries again.
+        } catch { // not there yet (no Task file written), or not readable: the next re-read tries again
         }
       }
     });

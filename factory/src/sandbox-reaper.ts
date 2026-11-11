@@ -64,7 +64,7 @@ function normalRoots(roots: readonly string[]): string[] {
     const real = (() => {
       try {
         return realpathSync(absolute);
-      } catch {
+      } catch { // a path that does not resolve: kept as given
         return absolute;
       }
     })();
@@ -102,7 +102,7 @@ async function readProcess(proc: string, pid: number): Promise<ProcessInfo | und
       return undefined;
     }
     return { pid, name, ppid, uid, start, zombie: rest[0] === 'Z', args: cmdline.split('\0').filter((arg) => arg !== '') };
-  } catch {
+  } catch { // the process is gone or its files cannot be read: undefined
     return undefined;
   }
 }
@@ -199,8 +199,7 @@ export class OrphanWatch {
 function signal(pid: number, name: NodeJS.Signals): void {
   try {
     process.kill(pid, name);
-  } catch {
-    // Nothing to end.
+  } catch { // the process is already gone (ESRCH) or not ours to signal (EPERM): nothing to end
   }
 }
 

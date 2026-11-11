@@ -50,7 +50,7 @@ async function mayBeOpen(path: string, owners: ReadonlySet<number>, proc: string
   let pids: string[];
   try {
     pids = (await readdir(proc)).filter((name) => /^\d+$/.test(name));
-  } catch {
+  } catch { // proc unreadable: fail closed, the lock may be open
     return true;
   }
   for (const pid of pids) {
@@ -83,7 +83,7 @@ async function mayBeGit(dir: string): Promise<boolean> {
   let comm: string;
   try {
     comm = (await readFile(join(dir, 'comm'), 'utf8')).replace(/\n$/, '');
-  } catch {
+  } catch { // comm unreadable too: fail closed, it may be Git
     return true;
   }
   return comm === 'git' || comm.startsWith('git-');
@@ -140,7 +140,7 @@ export async function staleSandboxLock(gitDir: string, scan: LockScan = {}): Pro
   let info;
   try {
     info = await lstat(path);
-  } catch {
+  } catch { // no lock file: no stale lock
     return false;
   }
   if (!info.isFile() || info.size !== 0 || (info.mode & 0o222) !== 0) {

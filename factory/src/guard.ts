@@ -152,8 +152,7 @@ export function parsePrivateTerms(text: string): { terms: GuardTerm[]; drops: st
       let pattern: RegExp;
       try {
         pattern = new RegExp(source, 'giu');
-      } catch {
-        // The engine's message quotes the pattern: never shown.
+      } catch { // not a valid pattern: refused without the engine's message, which quotes the pattern
         throw refuse(number, 'is not a valid regular expression.');
       }
       if (new RegExp(source, 'iu').test('')) {
@@ -301,8 +300,7 @@ export async function buildTerms(input: { workspace: Workspace; configDir: strin
         ownPrefixes.add(prefix);
       }
     }
-  } catch {
-    // The checkout's own reads only narrow the terms; the scan of it reports its failure.
+  } catch { // the checkout's own reads only narrow the terms; the scan of it reports its failure
   }
 
   const automatic: GuardTerm[] = [];
@@ -327,7 +325,7 @@ export async function buildTerms(input: { workspace: Workspace; configDir: strin
         if (domain !== undefined && !PUBLIC_EMAIL_DOMAINS.includes(domain)) {
           domains.push(domain);
         }
-      } catch {
+      } catch { // an unreadable checkout: the warning says so; its name and job tickets stay terms
         warnings.push(`workspace "${name}": its checkout could not be read; only its name and job tickets are terms.`);
       }
     }
@@ -375,8 +373,7 @@ export async function secretTerms(input: { stateDir: string; envFile: string | u
       let parsed: Record<string, string>;
       try {
         parsed = parseEnvFile(text);
-      } catch {
-        // parseEnvFile's message quotes the line.
+      } catch { // malformed: guard_failed naming the file only, as parseEnvFile's message quotes the line
         throw new FactoryError('guard_failed', `${basename(input.envFile)} could not be read for the secret check.`);
       }
       for (const [key, value] of Object.entries(parsed)) {

@@ -137,7 +137,7 @@ export function descendants(pid: number, proc = '/proc'): number[] {
   let names: string[];
   try {
     names = readdirSync(proc);
-  } catch {
+  } catch { // no proc: no descendants
     return [];
   }
   for (const name of names) {
@@ -145,7 +145,7 @@ export function descendants(pid: number, proc = '/proc'): number[] {
     let stat: string;
     try {
       stat = readFileSync(join(proc, name, 'stat'), 'utf8');
-    } catch {
+    } catch { // the process is gone meanwhile: skipped
       continue;
     }
     // "<pid> (<comm>) <state> <ppid> …"; comm may hold spaces and parentheses.
@@ -168,8 +168,7 @@ export function killTree(pid: number, signal: (pid: number, signal: NodeJS.Signa
   const send = (target: number, name: NodeJS.Signals): void => {
     try {
       signal(target, name);
-    } catch {
-      // Already gone.
+    } catch { // the process is already gone
     }
   };
   const tree = new Set<number>([pid]);
@@ -199,15 +198,14 @@ export function marked(mark: string, proc = '/proc', self = process.pid): number
   let names: string[];
   try {
     names = readdirSync(proc);
-  } catch {
+  } catch { // no proc: no marked processes
     return [];
   }
   for (const name of names) {
     if (!/^\d+$/.test(name) || Number(name) === self) continue;
     try {
       if (readFileSync(join(proc, name, 'environ'), 'utf8').split('\0').includes(wanted)) found.push(Number(name));
-    } catch {
-      // Gone, or not ours.
+    } catch { // gone, or not ours: not marked
     }
   }
   return found;

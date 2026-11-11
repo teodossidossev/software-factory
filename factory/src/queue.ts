@@ -102,7 +102,7 @@ export class QueueStore {
     let data: unknown;
     try {
       data = JSON.parse(text);
-    } catch {
+    } catch { // not JSON: reported as queue_invalid
       throw new FactoryError('queue_invalid', `${QUEUE_FILE} is not valid JSON.`);
     }
     const parsed = queueSchema.safeParse(data);

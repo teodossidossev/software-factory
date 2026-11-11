@@ -371,8 +371,7 @@ async function sandboxed(run: TestRun, cwd: string, hidden: readonly HiddenMount
       }
       try {
         process.kill(-child.pid, 'SIGKILL');
-      } catch {
-        // Already gone.
+      } catch { // the group is already gone
       }
     };
     const expire = (): void => {

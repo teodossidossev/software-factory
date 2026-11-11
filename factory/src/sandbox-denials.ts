@@ -746,7 +746,7 @@ export async function fileGuardReason(guard: FileGuard, tool: string, input: unk
       }
     }
     return undefined;
-  } catch {
+  } catch { // never throws: a call it fails to check is refused
     return `${FILE_GUARD} could not check this ${tool} call; it is refused.`;
   }
 }
@@ -799,7 +799,7 @@ export async function userSettingsWeakening(file: string, denials: SandboxDenial
   let settings: unknown;
   try {
     settings = JSON.parse(text);
-  } catch {
+  } catch { // not JSON: the returned reason says so
     return `${file} is not valid JSON, so whether it weakens the sandbox is unknown`;
   }
   const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -872,7 +872,7 @@ export function codexPackage(codexPath: string): string {
   let real: string;
   try {
     real = realpathSync(codexPath);
-  } catch {
+  } catch { // a path that does not resolve: resolved as given
     real = resolve(codexPath);
   }
   for (let dir = dirname(real); ; dir = dirname(dir)) {
@@ -892,7 +892,7 @@ export function hiding(path: string): string[] {
   let directory: boolean;
   try {
     directory = statSync(path).isDirectory();
-  } catch {
+  } catch { // gone since the denials were built: nothing to hide
     return [];
   }
   return directory ? ['--tmpfs', path] : ['--ro-bind', '/dev/null', path];
@@ -905,7 +905,7 @@ const depth = (path: string): number => path.split(sep).filter((part) => part !=
 export function mountPoint(path: string): string {
   try {
     return realpathSync(path);
-  } catch {
+  } catch { // the path does not exist: resolved as given
     return resolve(path);
   }
 }
@@ -963,7 +963,7 @@ function present(path: string): boolean {
   try {
     lstatSync(path);
     return true;
-  } catch {
+  } catch { // lstat fails: the path does not exist
     return false;
   }
 }

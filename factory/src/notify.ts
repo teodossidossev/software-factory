@@ -175,8 +175,7 @@ async function findExecutable(name: string, path: string | undefined): Promise<s
     try {
       await access(join(dir, name), constants.X_OK);
       return join(dir, name);
-    } catch {
-      // Not in this directory.
+    } catch { // not here or not executable: the next PATH directory
     }
   }
   return undefined;

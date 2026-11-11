@@ -221,7 +221,7 @@ export class DigestStore {
     }
     try {
       return JSON.parse(await readFile(this.path(id), 'utf8')) as DigestRecord;
-    } catch {
+    } catch { // missing or not JSON: no record
       return undefined;
     }
   }

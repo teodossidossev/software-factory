@@ -439,7 +439,7 @@ function handoffLabel(entry: WorkspaceEntry): string {
   }
   try {
     return `${handoffSetting()} (SF_HANDOFF)`;
-  } catch {
+  } catch { // an invalid SF_HANDOFF: the row says so
     return 'SF_HANDOFF (invalid)';
   }
 }
@@ -799,14 +799,14 @@ async function info(args: string[]): Promise<void> {
   try {
     await callSocket(state, { command: socketName(COMMANDS.ping), args: [] });
     row('serve', `running (${socketPath(state)})`);
-  } catch {
+  } catch { // no socket or no answer: sf serve is not running
     row('serve', 'not running (npm run serve)');
   }
   const health = tunnelHealthAddress();
   try {
     const reply = await fetch(`http://${health}/readyz`, { signal: AbortSignal.timeout(1500) });
     row('tunnel', `${reply.ok ? 'ready' : `answers ${reply.status}`} (http://${health}/readyz)`);
-  } catch {
+  } catch { // refused or timed out: the tunnel is not running
     row('tunnel', 'not running (npm run tunnel)');
   }
 
@@ -835,7 +835,7 @@ function claudeExecutable(config: Config): string {
   }
   try {
     return createRequire(import.meta.url).resolve(`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/claude`);
-  } catch {
+  } catch { // no SDK binary for this platform: claude on PATH
     return 'claude';
   }
 }
@@ -945,7 +945,7 @@ async function dashboardStatusUrl(): Promise<string | undefined> {
   try {
     const token = await readToken(stateDir());
     return token === undefined ? undefined : dashboardUrl(parsePort('SF_DASHBOARD_PORT', DEFAULT_DASHBOARD_PORT), token).href;
-  } catch {
+  } catch { // an unreadable token file or a bad SF_DASHBOARD_PORT: no URL to show
     return undefined;
   }
 }
@@ -1361,7 +1361,7 @@ async function metrics(args: string[]): Promise<void> {
 async function serveAnswers(): Promise<boolean> {
   try {
     return (await callSocket(stateDir(), { command: socketName(COMMANDS.ping), args: [] })).ok;
-  } catch {
+  } catch { // no socket or no answer: no sf serve answers
     return false;
   }
 }
@@ -1373,7 +1373,7 @@ async function servePid(): Promise<number | undefined> {
     const response = await callSocket(stateDir(), { command: socketName(COMMANDS.ping), args: [] });
     const pid = response.ok ? (response.result as { pid?: unknown } | null)?.pid : undefined;
     return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : undefined;
-  } catch {
+  } catch { // no socket or no answer: no pid to report
     return undefined;
   }
 }
@@ -1449,7 +1449,7 @@ async function update(args: string[], fromEnvFile: readonly string[]): Promise<v
 function guardEnvFile(): string[] {
   try {
     return loadEnvFile();
-  } catch {
+  } catch { // unreadable or malformed: guard_failed naming the file only, as parseEnvFile's message quotes the line
     throw new FactoryError('guard_failed', `${basename(envFilePath() ?? 'auth.env')} could not be read for the secret check.`);
   }
 }

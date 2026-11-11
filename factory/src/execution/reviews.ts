@@ -808,7 +808,7 @@ export class ReviewsPart {
           const before = (await this.#store.jobs.readIteration(workspace, ticket, fix)).patch.toString('utf8');
           const after = (await this.#store.jobs.readIteration(workspace, ticket, fix + 1)).patch.toString('utf8');
           files = changedBetween(before, after);
-        } catch {
+        } catch { // an iteration that cannot be read: its files are unknown
           files = undefined;
         }
       }

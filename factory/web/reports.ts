@@ -107,7 +107,7 @@ async function loadDigests(): Promise<void> {
       if (load === dg.load && ui.screen === 'digest') {
         dg.record = record;
       }
-    } catch {
+    } catch { // missing or unreadable: the error below says so
       if (load === dg.load && ui.screen === 'digest') {
         dg.record = null;
         dg.error = `The digest ${id} could not be read: it may be gone (digests are kept 60 days).`;

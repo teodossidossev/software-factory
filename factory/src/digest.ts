@@ -49,7 +49,7 @@ async function git(cwd: string, args: string[], timeoutMs = GIT_TIMEOUT_MS, maxB
 async function gitOk(cwd: string, args: string[]): Promise<boolean> {
   try {
     return (await runGit(cwd, args, 1024, GIT_TIMEOUT_MS, DIGEST_GIT_ENV)).code === 0;
-  } catch {
+  } catch { // Git cannot run: not ok, never throwing
     return false;
   }
 }
@@ -118,7 +118,7 @@ export async function derivedDescription(checkout: string): Promise<string | nul
   try {
     const description = pkg === undefined ? undefined : (JSON.parse(pkg) as { description?: unknown }).description;
     return typeof description === 'string' && description.trim() !== '' ? shorten(description) : null;
-  } catch {
+  } catch { // package.json is not JSON: no description
     return null;
   }
 }
@@ -138,7 +138,7 @@ async function readHead(path: string): Promise<string | undefined> {
     } finally {
       await handle.close();
     }
-  } catch {
+  } catch { // missing or unreadable: undefined
     return undefined;
   }
 }
@@ -212,8 +212,7 @@ async function readMeta(mirrorsDir: string, name: string): Promise<MirrorMeta | 
     if (typeof data.checkout === 'string' && typeof data.origin_url === 'string') {
       return { checkout: data.checkout, origin_url: data.origin_url, last_fetch_ok_at: data.last_fetch_ok_at ?? null, last_error: data.last_error ?? null };
     }
-  } catch {
-    // Missing or unreadable: the mirror is cloned again.
+  } catch { // missing or unreadable: the mirror is cloned again
   }
   return undefined;
 }
@@ -226,7 +225,7 @@ async function exists(path: string): Promise<boolean> {
   try {
     await lstat(path);
     return true;
-  } catch {
+  } catch { // lstat fails: nothing exists there
     return false;
   }
 }
@@ -237,7 +236,7 @@ export async function originUrl(checkout: string): Promise<string | undefined> {
   let url: string;
   try {
     url = (await git(checkout, ['config', '--get', 'remote.origin.url'])).trim();
-  } catch {
+  } catch { // git config fails without an origin remote: undefined
     return undefined;
   }
   if (url === '') {
@@ -395,7 +394,7 @@ export async function myEmail(checkout: string): Promise<string | null> {
   try {
     const email = (await git(checkout, ['config', '--get', 'user.email'])).trim();
     return email === '' ? null : email;
-  } catch {
+  } catch { // no user.email set (git config fails): null
     return null;
   }
 }

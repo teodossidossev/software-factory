@@ -56,7 +56,7 @@ async function copyEntry(from: string, to: string): Promise<boolean> {
   let info;
   try {
     info = await lstat(from);
-  } catch {
+  } catch { // a path that is gone (a deleted file): skipped
     return false;
   }
   if (!info.isFile() && !info.isSymbolicLink()) {

@@ -25,7 +25,7 @@ export function startTime(pid: number): string | undefined {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
     return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19];
-  } catch {
+  } catch { // no /proc or no such process: undefined
     return undefined;
   }
 }

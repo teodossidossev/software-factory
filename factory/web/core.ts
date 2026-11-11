@@ -412,7 +412,7 @@ async function answerOf(response: Response): Promise<unknown> {
   let data: unknown;
   try {
     data = await response.json();
-  } catch {
+  } catch { // not JSON: thrown below as a refusal or an unreadable answer
     if (refused) {
       // Not the factory's JSON (an empty 404 of a rotated token or a vanished job, a 405).
       throw new ActionError(`http_${response.status}`, `The factory answered HTTP ${response.status} without a result; nothing was done. If sf serve restarted, open the new dashboard URL.`);

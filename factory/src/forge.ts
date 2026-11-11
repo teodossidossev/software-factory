@@ -304,8 +304,7 @@ export class HostClient {
     let data: unknown = text;
     try {
       data = text === '' ? null : JSON.parse(text);
-    } catch {
-      // Not JSON: the text itself is the message.
+    } catch { // not JSON: the text itself is the message
     }
     if (response.status >= 300 && response.status < 400) {
       throw new FactoryError('mr_host_error', `${this.name} answered ${method} with a redirect (${response.status}); it is not followed.`);

@@ -33,7 +33,7 @@ export async function exists(path: string): Promise<boolean> {
   try {
     await stat(path);
     return true;
-  } catch {
+  } catch { // stat fails: the path does not exist
     return false;
   }
 }
@@ -44,7 +44,7 @@ export async function exists(path: string): Promise<boolean> {
 export async function gateSkipped(jobs: JobStore, job: Job): Promise<boolean> {
   try {
     return (await jobs.readGateLevel(job.workspace, job.ticket, job.iteration))?.ran === false;
-  } catch {
+  } catch { // a file that cannot be read counts as no decision
     return false;
   }
 }

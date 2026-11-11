@@ -173,7 +173,7 @@ async function branchMerged(checkout: string, job: JobFacts): Promise<boolean> {
       return false;
     }
     return (await runGit(checkout, ['merge-base', '--is-ancestor', tip, `refs/remotes/origin/${job.base}`])).code === 0;
-  } catch {
+  } catch { // Git fails: not taken as merged
     return false;
   }
 }
@@ -181,7 +181,7 @@ async function branchMerged(checkout: string, job: JobFacts): Promise<boolean> {
 async function isFile(path: string): Promise<boolean> {
   try {
     return (await lstat(path)).isFile();
-  } catch {
+  } catch { // lstat fails: not a file
     return false;
   }
 }
@@ -202,7 +202,7 @@ async function attachmentsOf(workspace: Workspace, ticket: string): Promise<Atta
 async function isDirectory(path: string): Promise<boolean> {
   try {
     return (await lstat(path)).isDirectory();
-  } catch {
+  } catch { // lstat fails: not a directory
     return false;
   }
 }
@@ -211,7 +211,7 @@ async function exists(path: string): Promise<boolean> {
   try {
     await lstat(path);
     return true;
-  } catch {
+  } catch { // lstat fails: nothing exists there
     return false;
   }
 }
@@ -412,7 +412,7 @@ export class Setup {
       let workspace: Workspace;
       try {
         workspace = await resolveWorkspace(name, this.#configDir);
-      } catch {
+      } catch { // an unusable workspace: its Task files are skipped
         continue;
       }
       let names: string[];
@@ -536,7 +536,7 @@ export class Setup {
     let names: string[];
     try {
       names = await readdir(join(this.#jobs.root, ref.workspace));
-    } catch {
+    } catch { // no job directory of the workspace: no archived job
       return undefined;
     }
     const prefix = `${ref.ticket}.`;
@@ -551,8 +551,7 @@ export class Setup {
             mr: mr !== null && typeof mr === 'object' && typeof mr.state === 'string' ? { state: mr.state } : null,
           };
         }
-      } catch {
-        // Not a readable job record: the one before it.
+      } catch { // not a readable job record: the one before it
       }
     }
     return undefined;
@@ -613,7 +612,7 @@ export class Setup {
   async #readRequest(name: string, ticket: string): Promise<string | null> {
     try {
       return await readFile(this.#requestPath(name, ticket), 'utf8');
-    } catch {
+    } catch { // no request file: null
       return null;
     }
   }
@@ -799,7 +798,7 @@ export class Setup {
         }
       }
       return null;
-    } catch {
+    } catch { // none to read (an unregistered workspace, a deleted Task file): the card falls back to the branch
       return null;
     }
   }
@@ -812,14 +811,14 @@ export class Setup {
       let workspace: Workspace;
       try {
         workspace = await resolveWorkspace(name, this.#configDir);
-      } catch {
+      } catch { // an unusable workspace: skipped
         continue;
       }
       const dir = join(workspace.workCheckout, TASK_DIR, ARCHIVE_DIR);
       let names: string[];
       try {
         names = (await readdir(dir, { withFileTypes: true })).filter((entry) => entry.isFile()).map((entry) => entry.name).sort();
-      } catch {
+      } catch { // no archive directory: nothing archived in it
         continue;
       }
       for (const file of names) {

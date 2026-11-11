@@ -615,7 +615,7 @@ export class JobStore {
     let data: unknown;
     try {
       data = JSON.parse(text);
-    } catch {
+    } catch { // not JSON: reported as job_invalid
       throw new FactoryError('job_invalid', `job.json of ${workspace}/${ticket} is not valid JSON.`);
     }
     const parsed = jobSchema.safeParse(data);
@@ -649,8 +649,7 @@ export class JobStore {
         let ticketInFile: unknown = ticket;
         try {
           ticketInFile = (JSON.parse(text) as { ticket?: unknown }).ticket;
-        } catch {
-          // read() below reports the invalid file.
+        } catch { // not JSON: read() below reports the invalid file
         }
         if (ticketInFile === ticket) {
           const job = await this.read(workspace, ticket);
@@ -813,7 +812,7 @@ export class JobStore {
     let data: unknown;
     try {
       data = JSON.parse(text);
-    } catch {
+    } catch { // not JSON: reported as ledger_invalid
       throw new FactoryError('ledger_invalid', `ledger.json of ${workspace}/${ticket} is not valid JSON.`);
     }
     const parsed = ledgerSchema.safeParse(data);
@@ -863,7 +862,7 @@ export class JobStore {
     let data: unknown;
     try {
       data = JSON.parse(text);
-    } catch {
+    } catch { // not JSON: reported as gate_level_invalid
       throw new FactoryError('gate_level_invalid', `gate-level.json of ${workspace}/${ticket} iteration ${number} is not valid JSON.`);
     }
     const parsed = gateLevelSchema.safeParse(data);

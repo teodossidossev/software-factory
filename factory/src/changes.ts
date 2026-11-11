@@ -444,7 +444,7 @@ export class Changes {
     let checkout: string;
     try {
       ({ readCheckout: checkout } = await resolveWorkspace(job.workspace));
-    } catch {
+    } catch { // an unknown workspace or checkout: no repository (null)
       return null;
     }
     const common = await runGit(checkout, ['rev-parse', '--git-common-dir']);
@@ -480,7 +480,7 @@ export class Changes {
     }
     try {
       return { kind: 'text', text: new TextDecoder('utf-8', { fatal: true }).decode(content) };
-    } catch {
+    } catch { // not UTF-8: shown as binary
       return { kind: 'binary', bytes };
     }
   }

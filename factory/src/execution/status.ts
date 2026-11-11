@@ -43,7 +43,7 @@ export class StatusPart {
     }
     try {
       return (await this.#store.jobs.readMeta(job.workspace, job.ticket, job.iteration)).files;
-    } catch {
+    } catch { // the iteration's record cannot be read: no files to show
       return undefined;
     }
   }

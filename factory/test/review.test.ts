@@ -497,6 +497,7 @@ test("the review prompt marks the paths outside the Task's scope in <marked_path
   assert.ok(prompt.includes([
     '<marked_paths>', '- sensitive, declared by may_touch: package.json', "- outside the Task's scope: docs/x.md", "- outside the Task's scope: old.ts", '- deleted: old.ts', '</marked_paths>',
   ].join('\n')), prompt);
+  assert.ok(prompt.includes("- .software-factory/ is the factory's folder (the Task file, the Implementer's steps checklist .software-factory/"), prompt);
   assert.ok(prompt.includes("- An undeclared sensitive path, or a path outside the Task's scope, stays only when you name it in accepted_sensitive and justify it in summary; otherwise it becomes a major fix item, whatever severity you give it. Accept a path outside the scope only for a reason tied to the Task."));
   const none = reviewPrompt({ ticket: 'R-1', iteration: 1, task: 't', report: 'r', patch: Buffer.from('p'), patchTruncated: false, files: [change('b.ts', { scope: 'none' })], handbook: (await loadHandbook()).text });
   assert.ok(none.includes('<marked_paths>\nNone.\n</marked_paths>'));

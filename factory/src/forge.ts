@@ -1,13 +1,13 @@
 // The Git host's merge requests: GitHub (github.com, REST API v3) and GitLab (gitlab.com or the
 // host of SF_GITLAB_URL, REST API v4), chosen from the workspace checkout's origin URL. Opens a
 // pull request / merge request from the job's branch into its base (or reuses the open one), reads
-// its state and merges it through the host's API; lists the open ones and reads one's review
-// threads (src/forge-comments.ts); nothing is pushed or forced here. The tokens
+// its state and merges it through the host's API; finds the open ones of a branch (GET only); lists
+// the open ones and reads one's review threads (src/forge-comments.ts); nothing is pushed or forced here. The tokens
 // come from the environment file (SF_GITHUB_TOKEN, SF_GITLAB_TOKEN); each goes only in the
 // Authorization header of a request to its own host's API, redirects are refused, and no message
 // carries it.
 import { FactoryError } from './errors.js';
-import { githubReads, gitlabReads, type OpenRequest, type ReviewThread } from './forge-comments.js';
+import { allPages, githubReads, gitlabReads, type OpenRequest, type ReviewThread } from './forge-comments.js';
 import { parseOrigin } from './mr.js';
 
 export type ForgeKind = 'github' | 'gitlab';
@@ -116,6 +116,9 @@ export interface Forge {
   readonly name: string;
   // The open merge request from branch into base, or a new one with title and body.
   open(input: { branch: string; base: string; title: string; body: string }): Promise<MergeRequest & { reused: boolean }>;
+  // Read only (GET): every open merge request from branch into base, newest created first, read page
+  // by page to the last; an entry the host answers for another branch or base is dropped.
+  findOpen(branch: string, base: string): Promise<MergeRequest[]>;
   status(number: number): Promise<MergeRequestStatus>;
   // Merges an open, mergeable merge request; mr_not_open or mr_not_mergeable (the host's reason)
   // otherwise. GitHub: merge method merge with the host's commit title; GitLab: PUT .../merge.
@@ -362,24 +365,25 @@ function checkSummary(runs: Json[]): string | undefined {
 function githubForge(client: HostClient, path: string): Forge {
   const [owner, repo] = path.split('/') as [string, string];
   const base = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
-  const findOpen = async (branch: string, target: string): Promise<MergeRequest | undefined> => {
-    const query = new URLSearchParams({ state: 'open', head: `${owner}:${branch}`, base: target });
-    const [first] = asArray(client.expect(await client.request('GET', `${base}/pulls?${query}`), 'list the pull requests', 200));
-    return first === undefined ? undefined : numbered(client, first, 'number', 'html_url', 'open');
+  const findOpen = async (branch: string, target: string): Promise<MergeRequest[]> => {
+    const query = new URLSearchParams({ state: 'open', head: `${owner}:${branch}`, base: target, sort: 'created', direction: 'desc' });
+    const list = await allPages(client, `${base}/pulls?${query}`, 'list the pull requests');
+    return list.filter((pr) => asRecord(pr.head).ref === branch && asRecord(pr.base).ref === target).map((pr) => numbered(client, pr, 'number', 'html_url', 'open'));
   };
   const forge: Forge = {
     kind: 'github',
     name: 'GitHub',
     ...githubReads(client, base),
+    findOpen,
     async open({ branch, base: target, title, body }) {
-      const existing = await findOpen(branch, target);
+      const [existing] = await findOpen(branch, target);
       if (existing !== undefined) {
         return { ...existing, reused: true };
       }
       const reply = await client.request('POST', `${base}/pulls`, { title, head: branch, base: target, body });
       if (reply.status === 422) {
         // Opened meanwhile by someone else: that one is reused.
-        const raced = await findOpen(branch, target);
+        const [raced] = await findOpen(branch, target);
         if (raced !== undefined) {
           return { ...raced, reused: true };
         }
@@ -473,23 +477,26 @@ const GITLAB_PENDING = new Set(['checking', 'unchecked', 'preparing', 'approvals
 function gitlabForge(client: HostClient, path: string): Forge {
   const project = `/projects/${encodeURIComponent(path)}`;
   const stateOf = (value: unknown): MergeRequestState => (value === 'opened' ? 'open' : value === 'merged' ? 'merged' : 'closed');
-  const findOpen = async (branch: string, target: string): Promise<MergeRequest | undefined> => {
-    const query = new URLSearchParams({ state: 'opened', source_branch: branch, target_branch: target });
-    const [first] = asArray(client.expect(await client.request('GET', `${project}/merge_requests?${query}`), 'list the merge requests', 200));
-    return first === undefined ? undefined : numbered(client, first, 'iid', 'web_url', 'open');
+  const findOpen = async (branch: string, target: string): Promise<MergeRequest[]> => {
+    const query = new URLSearchParams({ state: 'opened', source_branch: branch, target_branch: target, order_by: 'created_at', sort: 'desc' });
+    const list = await allPages(client, `${project}/merge_requests?${query}`, 'list the merge requests');
+    // A fork's merge request of a branch of the same name comes from another project: dropped.
+    const sameProject = (mr: Json): boolean => typeof mr.source_project_id !== 'number' || mr.source_project_id === mr.target_project_id;
+    return list.filter((mr) => mr.source_branch === branch && mr.target_branch === target && sameProject(mr)).map((mr) => numbered(client, mr, 'iid', 'web_url', 'open'));
   };
   const forge: Forge = {
     kind: 'gitlab',
     name: client.name,
     ...gitlabReads(client, project),
+    findOpen,
     async open({ branch, base: target, title, body }) {
-      const existing = await findOpen(branch, target);
+      const [existing] = await findOpen(branch, target);
       if (existing !== undefined) {
         return { ...existing, reused: true };
       }
       const reply = await client.request('POST', `${project}/merge_requests`, { source_branch: branch, target_branch: target, title, description: body });
       if (reply.status === 409) {
-        const raced = await findOpen(branch, target);
+        const [raced] = await findOpen(branch, target);
         if (raced !== undefined) {
           return { ...raced, reused: true };
         }

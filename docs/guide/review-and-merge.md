@@ -89,7 +89,7 @@ the lines under `Not checked:` and the checks of the MR rules. The bar has:
 sf approve my-app APP-12            # push the branch prepared at Clean
 sf approve my-app APP-12 --as-is    # push a branch tip you changed by hand
 sf mr create my-app APP-12          # open the merge request (from ready_for_human_review: push first)
-sf mr status my-app APP-12          # open, merged or closed, mergeable or why not, the checks
+sf mr status my-app APP-12          # open, merged or closed, mergeable or why not, the checks (finds one you opened yourself)
 sf mr merge my-app APP-12           # merge it through the host's API (a merge commit)
 ```
 
@@ -109,6 +109,25 @@ sf mr merge my-app APP-12           # merge it through the host's API (a merge c
 - **Refresh MR status** reads what the host says now and records a merge or close done there.
 
 Approve stays for those who open merge requests themselves: push with Approve, then follow the link.
+
+### A merge request you opened yourself
+
+When you pushed the branch and opened its merge request yourself (from the IDE, after a
+hand-over), the job has no merge request recorded. *Refresh MR status* finds it: in
+`handed_over` (the hand-over panel's **More ▾**), `ready_for_human_review` and `pushed`, the
+factory asks the host for an **open** merge request from the job's branch into its base.
+
+- One found: it is recorded as the job's merge request (a `merge_request` event, action `found`),
+  and the answer is the same as for one the factory opened: its state, draft, mergeable or why
+  not, and the checks or the pipeline, after the line "Found by branch APP-12-…".
+- Several found: the newest, and the line says "(newest of N open)".
+- None: "No open merge request for branch APP-12-…"; nothing is recorded.
+
+Later refreshes read the recorded one by its number, and a merge or close on the host is
+recorded as for any other. The lookup only reads (`GET`): a **read-only token** (GitLab:
+`read_api`; GitHub: Pull requests read, Checks read) is enough for the state, the pipeline and
+the review comments (`sf mr comments`). Create merge request and Merge still need a token that may
+write, and your action.
 
 ## Editing the MR text
 

@@ -477,10 +477,10 @@ export type EventRecord = { ts: string; iteration: number } & (
   | { type: 'turn_limit_continued'; continued: number; allowed: number; max_turns: number; changed_paths: number; tool_calls: number }
   // A turn's stream stayed open waited_s seconds after its result: Claude Code ended, the result kept.
   | { type: 'turn_stream_stuck'; waited_s: number }
-  // The merge request on the Git host: opened, reused (already open for the branch),
-  // merged by the factory, or found merged or closed on the host by sf mr status.
+  // The merge request on the Git host: opened, reused (already open for the branch), merged by the
+  // factory; by sf mr status, updated (merged or closed on the host) or found (open for the branch).
   // mr_state, not state: a record with state is a state change.
-  | { type: 'merge_request'; action: 'created' | 'reused' | 'merged' | 'updated'; host: JobMr['host']; number: number; url: string; mr_state: JobMr['state']; merge_commit?: string }
+  | { type: 'merge_request'; action: 'created' | 'reused' | 'merged' | 'updated' | 'found'; host: JobMr['host']; number: number; url: string; mr_state: JobMr['state']; merge_commit?: string }
   // The hand-over to the user's checkout: done, ended (by Ask for changes, Take it back, the
   // push or abort, with the record as it was), or a note (a worktree that could not be removed, the
   // files Ask for changes left in the checkout because they changed).

@@ -57,7 +57,7 @@ bin/sf watch <workspace> <ticket> [--once]     # the session live; works without
 bin/sf approve <workspace> <ticket> [--as-is]  # push the branch prepared at Clean; --as-is pushes a tip edited by hand; needs sf serve
 bin/sf mr create <workspace> <ticket>          # open the job's merge request on GitHub or GitLab (or reuse the open one); from ready_for_human_review: approve, then open; needs sf serve
 bin/sf mr merge <workspace> <ticket>           # merge the job's open merge request through the host's API, after the test command passed on the change merged into the current base (refused with the reason); needs sf serve
-bin/sf mr status <workspace> <ticket>          # the merge request on the host: open, merged or closed, mergeable or why not, the checks; needs sf serve
+bin/sf mr status <workspace> <ticket>          # the merge request on the host: open, merged or closed, mergeable or why not, the checks; without a record, finds the open one of the job's branch; needs sf serve
 bin/sf mr list <workspace>                     # the open merge requests of the workspace's origin, anyone's, newest update first (at most 50); reads only; needs sf serve
 bin/sf mr comments <workspace> <N>             # the review threads of merge request N of the workspace's origin, oldest first; reads only; needs sf serve
 bin/sf pause <workspace> <ticket>              # stop a working job or one awaiting review at once (section Pause, Resume and Restart); worktree, branch, session and history stay; needs sf serve
@@ -368,7 +368,7 @@ started by the run queue as before.
 | `SF_NTFY_URL` | unset | Full ntfy topic URL, e.g. `https://ntfy.sh/<topic>`; unset disables ntfy. |
 | `SF_NTFY_TOKEN` | unset | Sent as `Authorization: Bearer <token>` to a server that needs it. |
 | `SF_GITHUB_TOKEN` | unset | The GitHub token of the merge request actions (SF-048): a fine-grained token on the repository with Pull requests read and write, Contents read and write (write for `sf mr merge`), Checks read for `sf mr status`. Sent only as `Authorization: Bearer <token>` to `https://api.github.com`. Unset turns the actions off for workspaces on `github.com`, saying so. |
-| `SF_GITLAB_TOKEN` | unset | The GitLab token (scope `api`) of the merge request actions, sent only as `Authorization: Bearer <token>` to the GitLab API of `gitlab.com` or of the host of `SF_GITLAB_URL`, never to another host. Unset turns the actions off for GitLab workspaces. |
+| `SF_GITLAB_TOKEN` | unset | The GitLab token (scope `api`) of the merge request actions, sent only as `Authorization: Bearer <token>` to the GitLab API of `gitlab.com` or of the host of `SF_GITLAB_URL`, never to another host. A read-only token (`read_api`) is enough for `sf mr status` (Refresh MR status, which also finds a merge request you opened yourself), `sf mr list` and `sf mr comments`; Create merge request and Merge need `api`. Unset turns the actions off for GitLab workspaces. |
 | `SF_GITLAB_URL` | unset (`https://gitlab.com/api/v4` for `gitlab.com`) | Required for a self-hosted GitLab: its API base, such as `https://git.example.com/api/v4` (`http` only on loopback, so the token never travels in cleartext: any other `http` URL is refused at start). Without it, a host other than `github.com` and `gitlab.com` is refused (`mr_host_unsupported`, naming the URL to set). Set, the GitLab token goes to this URL only, and only for workspaces whose origin is on its host name; other hosts, `gitlab.com` included, are refused (`mr_host_unsupported`). |
 | `SF_GITHUB_API` | `https://api.github.com` | Tests only: the fake GitHub on loopback (`127.0.0.1`, `localhost` or `[::1]`); any other host is refused at start. |
 | `SF_TEST_HOOKS` | off | Tests only. `on` makes `sf serve` answer the socket commands `check`, `fix` and `clean` (the reviewers' verdict paths without a review session) for the end-to-end tests. Never set it in real use. |
@@ -2813,7 +2813,22 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
 10. `sf mr status` (the dashboard's Refresh MR status): what the host says now: open, merged or
     closed, draft, mergeable or why not, and the checks (GitHub's check runs of the head commit,
     GitLab's head pipeline) when the host reports them. A merge request merged or closed on the
-    host meanwhile is recorded so, without a notification.
+    host meanwhile is recorded so, without a notification. A job with no merge request recorded
+    (SF-200: the user pushed it and opened its merge request by hand, after a hand-over), in
+    `handed_over`, `ready_for_human_review` or `pushed`, is looked up by its branch: the factory
+    asks the host, with `GET` only (`Forge.findOpen`: GitHub `GET …/pulls?state=open&head=<owner>:<branch>&base=<base>`,
+    GitLab `GET …/merge_requests?state=opened&source_branch=<branch>&target_branch=<base>`, newest
+    created first, every page of 100 read to the last so the count is whole; an entry of another
+    branch or base, or on GitLab of a fork, is dropped), for the open merge requests from
+    the job's branch on origin into its base. One found is recorded as the job's `mr` (host, number,
+    URL, state) with a `merge_request` event of action `found`, and the answer is as for a recorded
+    one, after the line `Found by branch <branch>`; several: the newest, and the line adds
+    `(newest of N open)` (the answer's `found: {count}`); none: `No open merge request for branch
+    <branch>.`, exit 0, nothing recorded (`mr: null`, no `status`). Later refreshes read the recorded
+    one by number. In any other state without a record it stays `invalid_state` ("No merge request
+    is recorded …"). Nothing is written to the host, so a read-only token is enough for the state,
+    the pipeline and the review comments (GitLab: `read_api`; GitHub: Pull requests read and Checks
+    read); Create merge request and Merge still need a token that may write.
 
    | Code | Meaning |
    |---|---|
@@ -3929,11 +3944,14 @@ a header, then the Stream with the composer pinned at the bottom.
   `ready_for_human_review`: *Review the MR and push* (primary, SF-080: it opens the Merge request
   screen), Approve…, *Hand over to my checkout* (SF-073; the composer
   says why the automatic hand-over did not happen, when it was refused), Create merge request (when
-  it can be created), Send, Abort…; `handed_over` (SF-073): Approve… (primary), *Ask for changes*
+  it can be created), Refresh MR status (SF-200), Send, Abort…; `handed_over` (SF-073): Approve… (primary), *Ask for changes*
   (the message, with the edits in the user's checkout), *I opened the MR myself*, *Merged another way*, *Take it back*,
-  Create merge request, Abort…; `needs_human`: the stop table; `pushed`: no message box, the merge request (`#N`, its
+  Refresh MR status (in the hand-over panel's More ▾, SF-200), Create merge request, Abort…;
+  `needs_human`: the stop table; `pushed`: no message box, the merge request (`#N`, its
   state and link) and its status last read, Create merge request (no merge request yet, or a closed
-  one), Merge… (an open one), Refresh MR status (any) and Archive (it asks first); `aborted`,
+  one), Merge… (an open one), Refresh MR status (always: without a record it finds the open one of
+  the branch, SF-200; the found line, or "No open merge request for branch …" alone, shows with the
+  status) and Archive (it asks first); `aborted`,
   `failed`: no message box, Restart… and Archive. A confirmation opens inline in the composer, before anything is sent;
   under it the outcome line and the warning of an unknown outcome, with *Refresh state* when the
   read after it failed.
@@ -4115,7 +4133,7 @@ shares; the setup, Task check, task and attachment posts have their own handlers
 | `POST api/jobs/<ws>/<ticket>/handed-done-merged` | `{"confirm"?: string}` | `Execution.markHandedDone` (`sf handed-done --merged`, Merged another way): result `{state, branch}`; origin is not asked; on the remote port `confirm` must be the job's ticket (`409 confirm_required` without); `409` for `invalid_state` and `runner_active` |
 | `POST api/jobs/<ws>/<ticket>/mr-merge` | `{}` | `Execution.mergeMergeRequest(ws, ticket)` (`sf mr merge`): result `{state, branch, mr}`; `409 mr_not_mergeable` with the host's reason, `409 mr_not_open`, `409 mr_check_failed` (the merge check), `409 runner_stopping` (the check was cancelled), and the codes above |
 | `POST api/jobs/<ws>/<ticket>/archive` | `{"confirm"?: string}` | `Execution.archiveFinished(ws, ticket)` (Archive of a Done card or the job's page): `sf reset` for a `pushed`, `aborted` or `failed` job, its active Task file archived with it (`Setup.archiveTicket`); result `{archived, branch, checkout?}`; `409 invalid_state` for a live job; on the remote port `confirm` must be the job's ticket (`409 confirm_required` without); every page gets the jobs again |
-| `POST api/jobs/<ws>/<ticket>/mr-status` | `{}` | `Execution.mergeRequestStatus(ws, ticket)` (`sf mr status`): result `{state, branch, mr, status: {number, url, state, draft, mergeable, reason?, checks?, merge_commit?}}`; every page gets the jobs again, and the pages that show the job its detail (a merge request merged or closed on the host shows so at once) |
+| `POST api/jobs/<ws>/<ticket>/mr-status` | `{}` | `Execution.mergeRequestStatus(ws, ticket)` (`sf mr status`): result `{state, branch, mr, status?: {number, url, state, draft, mergeable, reason?, checks?, merge_commit?}, found?: {count}}` (`found` and a null `mr` without `status` for a job without a record looked up by its branch, SF-200); every page gets the jobs again, and the pages that show the job its detail (a merge request merged or closed on the host shows so at once) |
 | `POST api/workspaces` | `{"name": string, "path": string, "handoff"?: "checkout" \| "off", "color"?: <palette name>, "description"?: string, "app"?: string, "digest"?: {"track": boolean, "my_work": boolean}}` | `Setup.addWorkspace`: the rules of `sf workspace add`; `color` one of `blue`, `teal`, `green`, `olive`, `orange`, `red`, `purple`, `grey` (SF-084), anything else `400 invalid_body`; `description`, `app` and `digest` (SF-103; absent: none, the name, both off); result the workspace row |
 | `POST api/workspaces/<name>/edit` | `{"path": string, "description": string, "app": string, "handoff": "default" \| "checkout" \| "off", "color": "auto" \| <palette name>, "digest": {"track": boolean, "my_work": boolean}}`, every key required | `Setup.editWorkspace` (SF-103): the fields replace the entry's (`""` removes description and app, `default` the handoff, `auto` the color; `work_checkout` and `rules_skip` stay); the path checked as Add checks it; a path change while the workspace has a live job `409 workspace_busy`; result the workspace row |
 | `POST api/digest-settings` | `{"at": "HH:MM", "weekdays_only": boolean, "language": string}` | `Setup.saveDigestSettings` (SF-103): a bad time or language `400 invalid_digest_settings`; the model stays; result the settings |

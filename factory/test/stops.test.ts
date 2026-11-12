@@ -68,14 +68,15 @@ test('jobActions per state: the shown list in order, the first non-dangerous one
   assert.deepEqual(shown(job('paused')), ['*resume:Resume', 'restart:Restart…', '!abort:Abort…']);
   assert.deepEqual(shown(job('waiting_limit')), ['*resume:Resume now', '!abort:Abort…']);
   assert.deepEqual(shown(job('ready_for_human_review', { prepared_commit: 'a'.repeat(40) })), [
-    '*review-mr:Review the MR and push', 'approve:Approve…', 'handover:Hand over to my checkout', 'mr-create:Create merge request', 'say:Send', '!abort:Abort…',
+    '*review-mr:Review the MR and push', 'approve:Approve…', 'handover:Hand over to my checkout', 'mr-create:Create merge request', 'mr-status:Refresh MR status', 'say:Send', '!abort:Abort…',
   ]);
   assert.deepEqual(shown(job('handed_over')), []);
   assert.deepEqual(shown(job('aborted')), ['restart:Restart…', 'archive:Archive']);
   assert.deepEqual(shown(job('failed')), ['restart:Restart…', 'archive:Archive']);
-  // pushed: Create merge request without an open or merged one, Merge on an open one, Refresh with any.
+  // pushed: Create merge request without an open or merged one, Merge on an open one, Refresh always
+  // (without a record it looks the branch up, SF-200).
   const mr = (state: 'open' | 'merged' | 'closed') => ({ host: 'github' as const, number: 3, url: 'https://github.com/acme/app/pull/3', state });
-  assert.deepEqual(shown(job('pushed')), ['mr-create:Create merge request', 'archive:Archive']);
+  assert.deepEqual(shown(job('pushed')), ['mr-create:Create merge request', 'mr-status:Refresh MR status', 'archive:Archive']);
   assert.deepEqual(shown(job('pushed', { mr: mr('open') })), ['mr-merge:Merge…', 'mr-status:Refresh MR status', 'archive:Archive']);
   assert.deepEqual(shown(job('pushed', { mr: mr('merged') })), ['mr-status:Refresh MR status', 'archive:Archive']);
   assert.deepEqual(shown(job('pushed', { mr: mr('closed') })), ['mr-create:Create merge request', 'mr-status:Refresh MR status', 'archive:Archive']);
@@ -174,7 +175,16 @@ test('availability: every action has an entry, \'\' or its one-line reason, as t
   assert.equal(reason(job('working'), 'mr-create'), 'a merge request needs a pushed branch, or one ready to approve.');
   assert.equal(reason(job('pushed', { mr: { host: 'github', number: 3, url: 'u', state: 'merged' } }), 'mr-create'), 'the merge request #3 is merged.');
   assert.equal(reason(job('pushed'), 'mr-merge'), 'only an open merge request of a pushed job is merged.');
-  assert.equal(reason(job('pushed'), 'mr-status'), 'no merge request yet.');
+  // Refresh MR status without a record: on in exactly handed_over, ready_for_human_review and pushed
+  // (a lookup by the branch, SF-200); a recorded one in any state.
+  for (const state of ['handed_over', 'ready_for_human_review', 'pushed'] as const) {
+    assert.equal(reason(job(state), 'mr-status'), '', state);
+    assert.equal(reason(job(state), 'mr-status', { mrHost: null }), 'the Git host is not known yet.', state);
+  }
+  for (const state of ['starting', 'working', 'awaiting_review', 'preparing_mr', 'needs_human', 'paused', 'aborted', 'failed'] as const) {
+    assert.equal(reason(job(state), 'mr-status'), 'no merge request yet.', state);
+  }
+  assert.equal(reason(job('aborted', { mr: { host: 'github', number: 3, url: 'u', state: 'open' } }), 'mr-status'), '');
   // settle: '' at a stop whose row is settled in, a reason everywhere else.
   for (const code of ['escalated', 'review_disputed', 'review_churn']) {
     assert.equal(reason(stopped(code), 'settle'), '', code);

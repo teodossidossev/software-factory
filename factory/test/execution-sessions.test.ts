@@ -4,7 +4,7 @@
 // private config and state directories, throwaway Git repositories and the fake Claude Code as the Implementer executable, as in
 // test/execution.test.ts (split so that no file runs near run-tests' per-file limit).
 import assert from 'node:assert/strict';
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readlink, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
@@ -12,7 +12,7 @@ import { prepareClaudeState } from '../src/session-wrapper.js';
 import { initToolsProblem } from '../src/live-smoke.js';
 import { DENIED_TOOLS, IMPLEMENTER_TOOLS } from '../src/rules.js';
 import { IMPLEMENTER_SESSION_TOOLS, SESSION_SHELL_ENV, SMOKE_PROBE_RULE, SMOKE_TOOLS, sessionAllowedTools } from '../src/session.js';
-import { call, fakeLog, newEnv, newRepo, putTask, runCli, script, serve, stop, temp, waitFor, jobPrompt } from './support/harness.js';
+import { bwrapLog, call, FAKE_SKILLS, fakeLog, implementerRun, newEnv, newRepo, putTask, runCli, script, serve, skillsSourceDir, stop, temp, waitFor, jobPrompt } from './support/harness.js';
 
 test('permission_mode_mismatch ends in needs_human; a restart turns working jobs into needs_human and sf say resumes them', async () => {
   const env = await newEnv('restart');
@@ -189,4 +189,74 @@ test('the implement skill missing from the session\'s init message: one skill_mi
     .map((line) => JSON.parse(line) as { type?: string }).filter((record) => record.type === 'skill_missing').map(({ ts: _ts, ...rest }: Record<string, unknown>) => rest);
   assert.deepEqual(await missing('K-1'), [{ iteration: 1, type: 'skill_missing', skill: 'implement' }]);
   assert.deepEqual(await missing('K-2'), []);
+});
+
+test('a job started with no skills source: its one skills event names every skill missing, and sf serve\'s log and the job\'s runner.log each get one warning line for the job', async () => {
+  const none = join(temp, 'no-agents', 'skills');
+  const env = await newEnv('skills-missing-source', { SF_SKILLS_DIR: none });
+  const repo = await newRepo(env, 'skills-missing-source-repo', false);
+  await putTask(env, repo, 'M-1', 'Missing');
+  await script(env, [{ text: '# Report: M-1, iteration 1' }]);
+  const served = await serve(env);
+  let log = '';
+  served.child.stderr!.on('data', (chunk: Buffer) => (log += chunk.toString('utf8')));
+  await call(served, 'start', { workspace: 'app', ticket: 'M-1' });
+  await waitFor(served, 'M-1', 'awaiting_review', 1);
+  await stop(served);
+  const line = `warning: app/M-1: skills missing in ${none} or its lock file: implement, tdd, code-review, grilling; the snapshot keeps the copies it has`;
+  assert.equal(log.split('\n').filter((entry) => entry === line).length, 1, log);
+  // The job's runner.log has it too, once (the runner appends its own output after it).
+  const runnerLog = await readFile(join(new JobStore(env.state).dir('app', 'M-1'), 'runner.log'), 'utf8');
+  assert.equal(runnerLog.split('\n').filter((entry) => entry === line).length, 1, runnerLog);
+  const events = (await readFile(new JobStore(env.state).eventsPath('app', 'M-1'), 'utf8')).trim().split('\n').map((entry) => JSON.parse(entry) as Record<string, unknown>);
+  assert.deepEqual(events.filter((record) => record.type === 'skills').map(({ ts: _ts, ...rest }) => rest), [{ iteration: 0, type: 'skills', versions: {}, missing: ['implement', 'tdd', 'code-review', 'grilling'] }]);
+});
+
+test('the skills event: one per job, at its start before its first prompt, with the snapshot\'s versions and folder; a later turn adds none; a later job takes a changed skill, and the first job\'s next turn still binds its own folder', async () => {
+  const env = await newEnv('skills-event');
+  const repo = await newRepo(env, 'skills-event-repo', false);
+  await putTask(env, repo, 'V-1', 'First');
+  await putTask(env, repo, 'V-2', 'Second');
+  await script(env, [{ text: '# Report: V-1, iteration 1' }, { text: '# Report: V-2, iteration 1' }, { text: '# Report: V-1, iteration 2' }]);
+  const versions = Object.fromEntries(Object.keys(FAKE_SKILLS).map((name) => [name, `${name}-hash`]));
+  const served = await serve(env);
+  await call(served, 'start', { workspace: 'app', ticket: 'V-1' });
+  await waitFor(served, 'V-1', 'awaiting_review', 1);
+  // tdd updated in the source: V-2's start copies it into a new folder and swaps the link to it.
+  const lock = join(skillsSourceDir(), '..', '.skill-lock.json');
+  const saved = await readFile(lock, 'utf8');
+  await writeFile(join(skillsSourceDir(), 'tdd', 'SKILL.md'), 'tdd v2\n');
+  await writeFile(lock, saved.replace('"tdd-hash"', '"tdd-v2"'));
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'V-2' });
+    await waitFor(served, 'V-2', 'awaiting_review', 1);
+    // V-1's next turn, after the swap.
+    assert.equal((await runCli(env, ['say', 'app', 'V-1', 'go', 'on'])).code, 0);
+    await waitFor(served, 'V-1', 'awaiting_review', 2);
+    await stop(served);
+  } finally {
+    await writeFile(lock, saved);
+    await writeFile(join(skillsSourceDir(), 'tdd', 'SKILL.md'), `---\nname: tdd\ndescription: The fake tdd skill\n---\n\n${FAKE_SKILLS.tdd}\n`);
+  }
+  const jobs = new JobStore(env.state);
+  const records = async (ticket: string): Promise<Array<Record<string, unknown>>> => (await readFile(jobs.eventsPath('app', ticket), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+  const skillsOf = async (ticket: string): Promise<Array<Record<string, unknown>>> => (await records(ticket)).filter((record) => record.type === 'skills').map(({ ts: _ts, ...rest }) => rest);
+  const [first] = await skillsOf('V-1');
+  const [second] = await skillsOf('V-2');
+  assert.deepEqual(await skillsOf('V-1'), [{ iteration: 0, type: 'skills', versions, folder: first!.folder }]);
+  assert.deepEqual(await skillsOf('V-2'), [{ iteration: 0, type: 'skills', versions: { ...versions, tdd: 'tdd-v2' }, folder: second!.folder }]);
+  assert.match(String(first!.folder), /^skills\.d\/[\w-]+$/);
+  assert.notEqual(first!.folder, second!.folder);
+  assert.equal(await readlink(join(env.state, 'skills')), second!.folder);
+  const events = await records('V-1');
+  assert.ok(events.findIndex((record) => record.type === 'skills') < events.findIndex((record) => 'prompt' in record));
+  // Every V-1 wrapper, the one after the swap too, binds V-1's folder; V-2's binds its own.
+  const binds = async (ticket: string): Promise<string[]> => {
+    const worktree = (await jobs.read('app', ticket))!.worktree!;
+    const runs = (await bwrapLog(env, { implementer: true })).filter((run) => implementerRun(run) && run.argv[run.argv.indexOf('--chdir') + 1] === worktree);
+    return runs.map((run) => run.argv[run.argv.indexOf(join(env.home, '.claude', 'skills')) - 1]!);
+  };
+  assert.deepEqual(await binds('V-1'), [join(env.state, String(first!.folder)), join(env.state, String(first!.folder))]);
+  assert.deepEqual(await binds('V-2'), [join(env.state, String(second!.folder))]);
+  assert.equal(await readFile(join(env.state, 'skills', 'tdd', 'SKILL.md'), 'utf8'), 'tdd v2\n');
 });

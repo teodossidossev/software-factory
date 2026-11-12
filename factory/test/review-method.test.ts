@@ -1,9 +1,9 @@
 // The reviewers' review method: the code-review skill's text in the prompt of the Claude review and
-// of the Codex gate (reviewBody), read from SF_REVIEW_SKILL or the package's own copy, and the
+// of the Codex gate (reviewBody), read from SF_REVIEW_SKILL or the skills snapshot's copy, and the
 // review_method of review.json and gate.json.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -12,7 +12,8 @@ import { gatePrompt } from '../src/gate.js';
 import { handbookSection } from '../src/prompts.js';
 import { MAX_REVIEW_METHOD_BYTES, readReviewMethod, reviewPrompt, REVIEW_METHOD_LINES } from '../src/review.js';
 import { loadHandbook } from '../src/server.js';
-import { OWN_REVIEW_SKILL as SKILL } from './support/harness.js';
+import { syncSkills } from '../src/skills.js';
+import { FAKE_SKILLS, newEnv, ownReviewMethod } from './support/harness.js';
 
 const input = async () => ({ ticket: 'R-1', iteration: 1, task: 't', report: 'r', patch: Buffer.from('p'), patchTruncated: false, files: [], handbook: (await loadHandbook()).text });
 
@@ -69,11 +70,13 @@ test('readReviewMethod: the body without the front matter, the path and the sha2
   // A file without a front matter is sent whole.
   const plain = await tempFile('plain.md', 'Just the method.\n');
   assert.equal((await readReviewMethod(plain)).method, 'Just the method.');
-  // The package's own copy: its body, not its name and description.
-  const own = await readReviewMethod(SKILL);
-  assert.ok(own.method.startsWith('Two-axis review of the diff'), own.method.slice(0, 80));
-  assert.ok(!own.method.includes('name: code-review'));
-  assert.deepEqual(own.review_method, { path: SKILL, sha256: createHash('sha256').update(await readFile(SKILL)).digest('hex') });
+  // The skills snapshot's copy, read where SF_REVIEW_SKILL unset points: its body, not its name and description.
+  const env = await newEnv('review-method-snapshot');
+  await syncSkills(env.state);
+  const skill = loadConfig({ SF_STATE_DIR: env.state }).reviewSkill!;
+  const own = await readReviewMethod(skill);
+  assert.equal(own.method, FAKE_SKILLS['code-review']);
+  assert.deepEqual(own.review_method, await ownReviewMethod(env));
 });
 
 test('readReviewMethod: a file over 32 KB is cut at 32 KB with a line saying so', async () => {
@@ -96,8 +99,8 @@ test('readReviewMethod: none without a path, or with a missing or unreadable fil
   assert.deepEqual(await readReviewMethod(tmpdir()), none);
 });
 
-test('SF_REVIEW_SKILL: unset, the package\'s own copy; empty, none; a path, that path', () => {
-  assert.equal(loadConfig({}).reviewSkill, SKILL);
+test('SF_REVIEW_SKILL: unset, the skills snapshot\'s code-review; empty, none; a path, that path', () => {
+  assert.equal(loadConfig({ SF_STATE_DIR: '/state' }).reviewSkill, '/state/skills/code-review/SKILL.md');
   assert.equal(loadConfig({ SF_REVIEW_SKILL: '' }).reviewSkill, undefined);
   assert.equal(loadConfig({ SF_REVIEW_SKILL: '/srv/skills/review.md' }).reviewSkill, '/srv/skills/review.md');
 });

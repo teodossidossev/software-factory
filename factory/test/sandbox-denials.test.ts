@@ -901,7 +901,7 @@ test('CLAUDE_CONFIG_DIR outside the home directory (SF-123): its entries but the
   assert.equal(await guard(denials, l.own, 'Read', { file_path: join(own, 'x.jsonl') }), undefined);
 });
 
-test('the factory\'s skills under the wrapper: the Implementer\'s read tools read <config dir>/skills by the path given, unresolved; a write there, a review session\'s read, a read of ~/.agents (the real path of the link included) stay refused; the sandbox\'s denyRead is unchanged', async () => {
+test('the skills snapshot under the wrapper: the Implementer\'s read tools read <config dir>/skills by the path given, unresolved; a write there, a review session\'s read, a read of ~/.agents (the real path of the link included) stay refused; the sandbox\'s denyRead is unchanged', async () => {
   const l = await homeLayout('denials-skills');
   // The user's ~/.claude/skills: a link to ~/.agents/skills, as the skills tool installs them.
   const agents = join(l.home, '.agents', 'skills', 'tdd');

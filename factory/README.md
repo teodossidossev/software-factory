@@ -299,8 +299,10 @@ started by the run queue as before.
   followed by a `## Planning method` section: two lines (plan every ticket by the method below, the
   user's grilling skill; no sub-agents, so look facts up with `read_file`, `search` and
   `read_attachment` and ask only what only the user can decide; the plan is done when the user
-  confirms, then write the Task file), then the body of `skills/grilling/SKILL.md` (the factory's
-  reviewed copy, PR #181) without its front matter. `guide` returns the whole handbook ending with
+  confirms, then write the Task file), then the body of the skills snapshot's
+  `grilling/SKILL.md` (the user's installed skill, copied verbatim; section The agents' skills)
+  without its front matter, read once at `sf serve`'s start right after its sync of the snapshot,
+  so a later update reaches planning at the next start. `guide` returns the whole handbook ending with
   the same section. `SF_PLAN_SKILL` names another skill file; empty turns the section off. A
   missing file leaves the Quick start alone as the instructions (and `guide` the handbook as it
   is), and `sf serve` logs `warning: no planning skill at <path>; the instructions are the Quick
@@ -319,7 +321,7 @@ started by the run queue as before.
 | `SF_DASHBOARD_REMOTE_LOGINS` | none | Comma-separated Tailscale logins (`Tailscale-User-Login`, compared ignoring case) that may use the remote port; required with remote origins (`invalid_config` at start when missing or empty). |
 | `SF_CONFIG_DIR` | `${XDG_CONFIG_HOME:-~/.config}/software-factory` | Directory of the workspace registry, the default `auth.env` and the `rules/` files. |
 | `SF_HANDBOOK` | `factory/HANDBOOK.md` | Handbook served as instructions (its `## Quick start` section) and by `guide`. |
-| `SF_PLAN_SKILL` | `factory/skills/grilling/SKILL.md` | The planning skill whose body (without front matter) ends the instructions and `guide` as `## Planning method` (section MCP endpoint); empty: none. A missing file: the Quick start alone, and one warning at start. |
+| `SF_PLAN_SKILL` | `<state dir>/skills/grilling/SKILL.md` (the skills snapshot) | The planning skill whose body (without front matter) ends the instructions and `guide` as `## Planning method` (section MCP endpoint); empty: none. A missing file: the Quick start alone, and one warning at start. |
 | `SF_STATE_DIR` | `${XDG_STATE_HOME:-~/.local/state}/software-factory` | Job state and the `sf.sock` socket. |
 | `SF_WORKTREE_ROOT` | `${SF_STATE_DIR}/worktrees` | Where every job's worktree is created: `<root>/<workspace>/<ticket>`; absolute. |
 | `SF_MAX_JOBS` | `3` | The default of the run queue's limit `max_running` (section Run queue), within 1-20, while `queue.json` does not exist yet; `sf queue limit` and the board's stepper change the limit from then on. |
@@ -335,7 +337,8 @@ started by the run queue as before.
 | `SF_CLAUDE_REVIEW` | `ticket` | Which jobs get the Claude review (SF-131): `ticket` only those whose Task file says `review: claude`; `always` every job but those that say `review: codex`; any other value is `invalid_config`. Decided at Start; without it the Codex gate is the job's only review. With the gate off (`SF_GATE=off`, or no Codex), Claude reviews every job. |
 | `SF_REVIEW_MODEL` | unset | Model of the Claude review, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
 | `SF_REVIEW_MAX_TURNS` | `60` | `maxTurns` of the Claude review. |
-| `SF_REVIEW_SKILL` | `factory/skills/code-review/SKILL.md` | The code-review skill whose method both reviewers follow (the `<review_method>` block of the Claude review's and the Codex gate's prompt, section Jobs); empty sends none. Read at each review; a missing or unreadable file sends none, and the record says `review_method: "none"`. |
+| `SF_REVIEW_SKILL` | `<state dir>/skills/code-review/SKILL.md` (the skills snapshot) | The code-review skill whose method both reviewers follow (the `<review_method>` block of the Claude review's and the Codex gate's prompt, section Jobs); empty sends none. Read at each review; a missing or unreadable file sends none, and the record says `review_method: "none"`. |
+| `SF_SKILLS_DIR` | `~/.agents/skills` | The folder of the user's installed skills the factory copies into its skills snapshot (section The agents' skills); its lock file is `.skill-lock.json` next to it. |
 | `SF_HANDOFF` | `checkout` | The hand-over at ready for review (SF-073, section Hand-over to your checkout): `checkout` checks the job's branch out in the workspace's checkout with its changes as Local Changes; `off` leaves the job in `ready_for_human_review` with its worktree. A workspace's own `handoff` in `workspaces.json` wins over it (SF-083). Anything else refuses to start (`invalid_config`). |
 | `SF_SIMPLIFY` | on | The simplification pass (SF-055) after the deciding clean verdict of a job with at least one Fix section; `off` goes straight to MR preparation. It uses `SF_REVIEW_MODEL` and `SF_REVIEW_MAX_TURNS`. |
 | `SF_TASK_CHECK_MAX_TURNS` | `30` | `maxTurns` of the Task check (SF-054); its model is `SF_REVIEW_MODEL`. |
@@ -1307,8 +1310,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   needs no exclude: it loads only with the `local` setting source. The Implementer's session keeps
   `['user', 'project']`.
   Its prompt says what to verify and defines the item severities, then carries the review method:
-  the body of the code-review skill (`SF_REVIEW_SKILL`, by default the factory's own copy
-  `factory/skills/code-review/SKILL.md`; without its front matter, read at each review and cut at
+  the body of the code-review skill (`SF_REVIEW_SKILL`, by default the skills snapshot's
+  `<state dir>/skills/code-review/SKILL.md`; without its front matter, read at each review and cut at
   32 KB with a line saying so) in a `<review_method>` block. Lines in front of it adapt it to the
   review: no sub-agents and no question for a fixed point or a spec (the fixed point is the base
   commit, the change the uncommitted worktree against it, the spec the Task file and the user's
@@ -1917,23 +1920,19 @@ then the gate's fix-up pass (a denial inside a bind hidden again, so a worktree'
 hidden); last, read-only again: the worktree's `.git` (the factory runs Git itself, outside) and
 agent configuration (`.claude`, `.mcp.json`, `.codex`), each `denyWrite` entry inside a read-write
 bind that is not denied for reading, and the user settings (`settings.json`, `settings.local.json`),
-which the CLI reads; and very last the factory's own skills (the package's `skills/` folder:
-`implement`, `tdd`, `code-review`, `grilling`, listed in `skills/SOURCE.md`) read-only on
+which the CLI reads; and very last the skills snapshot (section The agents' skills: the current
+folder `<state dir>/skills` links to, resolved when the wrapper is built) read-only on
 `<CLAUDE_CONFIG_DIR or ~/.claude>/skills`, over the tmpfs that hid the user's (on the real path of
 a link there, the path the CLI reaches; `prepareClaudeState` makes the folder when it is missing;
-no bind when the package has no `skills/` or the path is a dangling link). So `/implement` runs the
-factory's reviewed copy, the same on any machine, and the CLI lists `implement`, `tdd` and
-`code-review` as user skills. The checkout's Git directory is read-only through the root. The rest
+no bind when there is no snapshot yet or the path is a dangling link). So `/implement` runs the
+snapshot's copy of the user's installed skill, and the CLI lists `implement`, `tdd`, `code-review`
+and `grilling` as user skills. The checkout's Git directory is read-only through the root. The rest
 of `~/.claude` (the user's `CLAUDE.md`, their own skills, plugins) and `~/.agents` stay hidden from
 the Implementer's CLI, and a hidden folder is an empty tmpfs whose writes stay inside the wrapper.
 When the session's init message lists no `implement` among its slash commands, the job's
 `events.jsonl` gets `{ "type": "skill_missing", "skill": "implement" }` once per job and the job's
 Stream shows "The implement skill is missing: /implement was read as plain text."; the job carries
-on. `npm run sync-skills` (in a checkout) updates the copies: it copies the skills `SOURCE.md` lists
-from `~/.agents/skills` (`--from <dir>`), links followed, each folder replaced whole, rewrites
-`SOURCE.md`'s table from `~/.agents/.skill-lock.json` (`--lock <file>`; path, folder hash, date),
-prints the changed files and never commits: the change goes through a pull request. A listed skill
-missing from the source or the lock file exits 1, naming it, and writes nothing. The host's network namespace
+on. The host's network namespace
 (Claude Code reaches the API) and no seccomp filter (Claude Code's own Bash sandbox, a bwrap nested
 inside, makes its own sockets). It is one more layer: Claude Code's sandbox, the path denials and
 the file-tool guard stay as they are; the Claude review, the simplification pass, the Task check and
@@ -2138,6 +2137,56 @@ touched: a file with content, a writable file, a symbolic link, a non-empty dire
 deeper or elsewhere stay. The Patch and the MR commit also skip an untracked file that matches
 the rule, in case the sandbox recreates one after the cleanup. A file the factory left in place
 does not match the rule, so it is a change of the Implementer's or the user's.
+
+### The agents' skills
+
+The agents use the user's installed skills, exactly as installed: `implement`, `tdd` and
+`code-review` (the Implementer's `/implement`), `code-review` (the method of the Claude review and
+the Codex gate) and `grilling` (the planning method). The factory ships no copy and never edits
+one; where a skill's step conflicts with the factory (commit, push, ask the user), the factory's
+prompt rule wins and the sandbox refuses mutating Git.
+
+- **The source**: `~/.agents/skills/<name>` (where the `skills` tool installs them; links
+  followed) and its lock file `~/.agents/.skill-lock.json` (`skills.<name>.skillFolderHash`).
+  `SF_SKILLS_DIR` names another folder; the lock file is then `.skill-lock.json` next to it.
+- **The snapshot**: `<state dir>/skills` is a link to one folder of `<state dir>/skills.d/`, each a
+  full set: every listed skill's folder, copied verbatim, and `versions.json` (`{ <name>:
+  <skillFolderHash> }`). It is synced once at each job's start (before its first Implementer
+  session, not on later turns or reviews) and once at `sf serve`'s start (before the planning
+  method is read). The sync compares the lock file's hashes with `versions.json`: equal, nothing
+  is copied (two small JSON files read and each skill's source folder looked up, no folder walk);
+  else a new folder is built (the changed skills copied whole from the source, the others from the
+  current snapshot) and the link swapped to it by a rename, so a session never reads a half copy.
+  Two syncs at once each build their own folder and the last swap wins.
+- **A job keeps its folder**: its `skills` event records the folder the link named once its
+  start's sync was done (`"folder": "skills.d/<id>"`), and every wrapper of the job, on every turn
+  and after a runner restart, binds that folder, not the link: a later job's sync that swaps the
+  link changes nothing for its Implementer (the Claude review and the Codex gate read
+  `code-review` through the link, at each review). A job whose event has no `folder` (started
+  before the factory recorded it, or with no snapshot then), or whose folder is gone, binds the
+  link. A sync that
+  swaps the link removes the folders of `skills.d/` other than the current one once they are 7
+  days past being replaced, but never one a job not yet archived recorded (a removal that fails is
+  a warning line on stderr, not a failed sync).
+- **A missing skill** (absent from the source folder or the lock file) keeps its copy in the
+  snapshot, none when it never had one, and the others still update; a missing source folder or
+  lock file leaves the snapshot as it is. Each job's start writes one line for them, `warning:
+  <workspace>/<ticket>: skills missing in <folder> or its lock file: <names>; the snapshot keeps
+  the copies it has`, to the job's `runner.log` and to `sf serve`'s stderr, beside the job's one
+  `skills` event; the sync at `sf serve`'s start writes it, without the job, to its stderr alone.
+  An agent without its skill runs without it (the Implementer's job shows `skill_missing`; the
+  reviewers and planning go without the method).
+- **The record**: each job's `events.jsonl` gets one `{ "type": "skills", "versions": { <name>:
+  <hash> }, "missing": [<names>], "folder": "skills.d/<id>" }` line at its start (`folder` the
+  folder the job binds, absent with no snapshot; `missing` only when there are any: the
+  skills absent from the source or the lock file, all of them when either is missing), and the
+  job's Stream shows it as one line, "Skills: implement 4804b46, tdd 667dbdd, …", followed by
+  "missing in the source: <name> (kept the copy)" or "(not available)". A sync that fails (the
+  state directory not writable, say) does not stop the job: its event holds the versions the
+  snapshot had and `"error": "<why>"`, never `missing` (a skill is
+  missing only when the source or the lock file was seen without it); the Stream adds "the sync
+  failed (<why>), the snapshot as it was", and the job's `runner.log` and `sf serve`'s stderr get a
+  warning line naming the job.
 
 ### Job states
 

@@ -5,8 +5,9 @@
 // file-tool guard's check included) lands anywhere else. It hides the session's denyRead entries as
 // the Codex gate's wrapper does (gateWrapper), but those the CLI itself needs. One more layer: Claude
 // Code's own Bash sandbox, the path denials and the file-tool guard hold inside it as well.
-// The factory's own skills (the package's skills/ folder) are bound read-only where the CLI looks for
-// the user's (<config dir>/skills), so /implement runs the reviewed copy and the user's stay hidden.
+// The skills snapshot (src/skills.ts: the user's installed skills the factory lists, copied
+// verbatim) is bound read-only where the CLI looks for the user's (<config dir>/skills), so /implement
+// runs the snapshot's copy and the rest of the user's stay hidden.
 // The host's network namespace (Claude Code reaches the API) and no socket filter (the Bash sandbox,
 // a bwrap nested inside, makes its own sockets). A missing bwrap or a wrapper that does not start
 // fails the turn with sandbox_unavailable; Claude Code is never started unwrapped.
@@ -31,8 +32,8 @@ const PRIVATE_TMP = '/tmp';
 
 // What the wrapper is built from: the job's worktree, the session's temporary folder
 // (CLAUDE_CODE_TMPDIR), the home directory, Claude Code's configuration directory (CLAUDE_CONFIG_DIR,
-// else ~/.claude) and its global config (~/.claude.json), the factory's skills folder (the package's
-// skills/) and the Claude Code executable the SDK starts (claudeExecutable).
+// else ~/.claude) and its global config (~/.claude.json), the skills snapshot (<state dir>/skills, a
+// link to its current folder) and the Claude Code executable the SDK starts (claudeExecutable).
 export interface WrapperPaths {
   worktree: string;
   sessionTmp: string;
@@ -75,9 +76,10 @@ function installation(paths: WrapperPaths): string[] {
 //      (settings.json, settings.local.json), which the CLI reads. A path the CLI cannot reach
 //      read-only is never shown again here but the user settings: a link of the worktree into a
 //      hidden folder stays hidden;
-//   6. last, the factory's skills folder read-only on <config dir>/skills (skillsMount), over the
-//      tmpfs that hid the user's; none when the package has no skills folder or the mount point is a
-//      dangling link.
+//   6. last, the skills snapshot's current folder (the link resolved when the wrapper is built, so
+//      a later sync does not change a running session's) read-only on <config dir>/skills
+//      (skillsMount), over the tmpfs that hid the user's; none when there is no snapshot yet or the
+//      mount point is a dangling link.
 export function implementerWrapper(denials: SandboxDenials, paths: WrapperPaths): string[] {
   const args = ['--die-with-parent', '--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', PRIVATE_TMP];
   const credentials = join(paths.claudeDir, '.credentials.json');
@@ -108,12 +110,12 @@ export function implementerWrapper(denials: SandboxDenials, paths: WrapperPaths)
     args.push('--ro-bind', path, path);
   }
   if (existsSync(paths.skills) && existsSync(join(paths.claudeDir, 'skills'))) {
-    args.push('--ro-bind', paths.skills, skillsMount(paths.claudeDir));
+    args.push('--ro-bind', mountPoint(paths.skills), skillsMount(paths.claudeDir));
   }
   return args;
 }
 
-// Where the factory's skills are bound: <config dir>/skills, or the real path of a link there (the
+// Where the skills snapshot is bound: <config dir>/skills, or the real path of a link there (the
 // path the CLI reaches, which the home's tmpfs hides); the guard lets the Implementer read only the
 // first spelling, <config dir>/skills.
 const skillsMount = (claudeDir: string): string => mountPoint(join(claudeDir, 'skills'));

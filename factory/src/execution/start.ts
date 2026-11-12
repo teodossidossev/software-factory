@@ -17,6 +17,7 @@ import { configDir, type Workspace } from '../registry.js';
 import { collectRules, writeJobRules } from '../rules-docs.js';
 import { actedVerdict } from '../review.js';
 import { Runners } from '../runner.js';
+import { recordSkills } from '../skills.js';
 import { withoutDropped } from '../stops.js';
 import { isDraft, parseFrontMatter, readTask, TASK_DIR, type TaskReview, taskReview, taskSha256, TICKET_DESCRIPTION, TICKET_PATTERN } from '../task-file.js';
 import { addWorktree, deleteBranch, removeWorktree } from '../worktree.js';
@@ -306,8 +307,7 @@ export class StartPart {
     });
   }
 
-  // Writes the record of a new job in starting (the ticket's directory must be free); under the lock.
-  // The job's Claude review is decided here, once: claude_review and its review_setup event.
+  // Writes the record of a new job in starting (the ticket's directory must be free); under the lock. Decided here, once: the job's Claude review (claude_review, its review_setup event) and its skills (synced, its skills event).
   async #claim(workspace: Workspace, ticket: string, plan: { base: string; continues: string | null; branch: string; review: TaskReview | undefined }, images: ResolvedImage[]): Promise<Claimed> {
     const { base, continues, branch } = plan;
     const created = now();
@@ -315,13 +315,13 @@ export class StartPart {
     const setup = claudeReviewDecision(this.#settings.config, plan.review);
     const job: Job = {
       workspace: workspace.name, ticket, branch, base, continues, base_commit: null, state: 'starting', worktree, prepared_commit: null,
-      iteration: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, mr_conflict_turn: false, created_at: created, updated_at: created,
-      claude_review: setup.claude_review,
+      iteration: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, mr_conflict_turn: false, created_at: created, updated_at: created, claude_review: setup.claude_review,
     };
     checkTransition(null, 'starting', 'create');
     await this.#store.jobs.write(job);
     await this.#store.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, state: { from: null, to: 'starting' } });
     await this.#store.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, type: 'review_setup', ...setup });
+    await recordSkills(this.#settings.config.stateDir, (record) => this.#store.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, ...record }), { job: `${workspace.name}/${ticket}`, log: join(this.#store.jobs.dir(workspace.name, ticket), 'runner.log') });
     return { workspace, ticket, base, continues, branch, worktree, images };
   }
 

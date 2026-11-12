@@ -501,8 +501,8 @@ export type EventRecord = { ts: string; iteration: number } & (
   // the user's Accept of it (accepted_failing), with the last lines of its output (tail).
   | { type: 'tests_started'; run: string; command: string }
   | { type: 'tests'; run: string; command: string; outcome: TestsOutcome; exit_code: number | null; timed_out: boolean; duration_ms: number; reason?: string; tail: string; tail_truncated?: true }
-  // The Implementer's session listed no such skill: its slash command reached the model as plain text.
-  | { type: 'skill_missing'; skill: string }
+  // skills: what a job uses, once at its start (src/skills.ts); skill_missing: the Implementer's session listed no such skill (its slash command reached the model as plain text).
+  | import('./skills.js').SkillsEvent | { type: 'skill_missing'; skill: string }
   // The merge check before sf mr merge (src/merge-check.ts): its last base commit (null: none), how it ended.
   | { type: 'merge_checked'; base_commit: string | null; outcome: 'passed' | 'failed' | 'conflict' | 'timed_out' | 'aborted'; duration_ms: number }
   // sf serve's pass of merged jobs found the pushed commit on the target's history, then archived the job.

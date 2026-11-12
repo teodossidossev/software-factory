@@ -16,7 +16,6 @@ import { checkChildren, isServe, REFUSAL_MS, removeOnExit, stopChild, trackChild
 
 const CLI = fileURLToPath(new URL('../src/cli.js', import.meta.url));
 const HANDBOOK = fileURLToPath(new URL('../../HANDBOOK.md', import.meta.url));
-const SKILL = fileURLToPath(new URL('../../skills/grilling/SKILL.md', import.meta.url));
 // The two lines of the Planning method before the skill's body.
 const PLANNING = 'Plan every ticket by the method below (the user\'s grilling skill). You have no sub-agents: look facts up yourself with read_file, search and read_attachment, and ask only the questions only the user can decide.\n\n' +
   'The plan is done when the user confirms you agree; then write the Task file.';
@@ -37,7 +36,7 @@ let repo: string;
 
 function env(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   // No automatic Task check unless a test turns it on (SF-086).
-  return { PATH: process.env.PATH, HOME: process.env.HOME, SF_CONFIG_DIR: configDir, SF_STATE_DIR: join(temp, 'state'), SF_PORT: '0', SF_DASHBOARD_PORT: '0', SF_TASK_CHECK_AUTO: 'off', ...extra };
+  return { PATH: process.env.PATH, HOME: process.env.HOME, SF_CONFIG_DIR: configDir, SF_STATE_DIR: join(temp, 'state'), SF_SKILLS_DIR: join(temp, 'agents', 'skills'), SF_PORT: '0', SF_DASHBOARD_PORT: '0', SF_TASK_CHECK_AUTO: 'off', ...extra };
 }
 
 // Tracked (SF-114); a serve (expected to refuse) that still runs after REFUSAL_MS is stopped and rejects.
@@ -149,6 +148,10 @@ before(async () => {
   temp = await realpath(await mkdtemp(join(tmpdir(), 'sf-smoke-')));
   removeOnExit(temp);
   configDir = join(temp, 'config');
+  // The installed skills sf serve syncs at its start: grilling alone, at one hash.
+  await mkdir(join(temp, 'agents', 'skills', 'grilling'), { recursive: true });
+  await writeFile(join(temp, 'agents', 'skills', 'grilling', 'SKILL.md'), '---\nname: grilling\ndescription: Grill the user\n---\n\nInterview the user relentlessly about every aspect of the plan.\n');
+  await writeFile(join(temp, 'agents', '.skill-lock.json'), JSON.stringify({ skills: { grilling: { skillFolderHash: 'f551b6e' } } }));
   repo = join(temp, 'repo');
   await mkdir(join(repo, 'src'), { recursive: true });
   await mkdir(join(repo, 'docs'));
@@ -240,14 +243,16 @@ test('sf workspace add, list and remove manage the registry with the documented 
   await rm(join(broken, '.git'), { recursive: true });
 });
 
-test('sf serve gives the Quick start and the Planning method as instructions and the planning and execution tools', async () => {
-  const served = await serve();
+test('sf serve on a fresh state directory syncs the skills and gives the Quick start and the Planning method as instructions and the planning and execution tools', async () => {
+  const state = join(temp, 'fresh-state');
+  const served = await serve({ SF_STATE_DIR: state });
   const client = await connect(served);
   const handbook = await readFile(HANDBOOK, 'utf8');
   const instructions = client.getInstructions() ?? '';
   // SF-191: the Quick start, then the Planning method: its two lines and the grilling skill's body
-  // without its front matter, as the file has it.
-  const skill = await readFile(SKILL, 'utf8');
+  // without its front matter, as the file has it, read from the skills snapshot sf serve made at its start.
+  const skill = await readFile(join(state, 'skills', 'grilling', 'SKILL.md'), 'utf8');
+  assert.equal(skill, await readFile(join(temp, 'agents', 'skills', 'grilling', 'SKILL.md'), 'utf8'));
   assert.match(skill, /^---\nname: grilling\n/);
   const body = skill.slice(skill.indexOf('\n---\n', 3) + 5).trim();
   const method = `## Planning method\n\n${PLANNING}\n\n${body}`;

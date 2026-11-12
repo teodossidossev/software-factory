@@ -3,7 +3,7 @@
 How to work with the factory, for whichever model is the Context owner. This file is the single
 source: its "Quick start" section is sent as MCP server instructions when you connect, the `guide`
 tool returns the whole file, and it can be pasted into any chat. Both end with a "Planning method"
-section: the factory's reviewed copy of the user's grilling skill (`skills/grilling/SKILL.md`). It
+section: the user's installed grilling skill, as the factory's skills snapshot copied it verbatim. It
 describes how we work, never a particular ticket. Vocabulary: `CONTEXT.md` in the repository.
 
 ## Quick start
@@ -81,7 +81,7 @@ until the user decides.
 
 The factory reviews every published iteration: Codex (the gate) in the job's worktree, read-only,
 with the Task file (its `## Review brief` too), the Report, the Patch and the review rules below.
-Both reviewers follow the method of the factory's copy of the `code-review` skill, sent in their
+Both reviewers follow the method of the user's installed `code-review` skill, sent in their
 prompt: the Spec axis (does the change do what the Task file asked) and the Standards axis (does it
 follow the repository's documented rules), each item's `problem` beginning with `Spec:` or
 `Standards:`, and a baseline code smell only ever a `nit`. The review rules and the Task file win
@@ -233,10 +233,10 @@ sections are the factory's; never write one.
 
 The Implementer is started with `/implement .software-factory/<ticket>.md` for the first iteration
 and `/implement .software-factory/<ticket>.md Fix N` for each later one. `/implement` runs the
-factory's own copy of the `implement` skill (with `tdd` and `code-review`, in `factory/skills/`,
-changed only by pull request), never the user's installed skills; the factory's rules sent with
-every prompt win over a skill's steps: the fixed point is the job's base commit, the spec is the
-Task file, there is no issue tracker, and the user is never asked. It commits nothing during
+user's installed `implement` skill (with `tdd` and `code-review`), as the factory copied it
+verbatim at the job's start; the factory's rules sent with every prompt win over a skill's
+steps: the fixed point is the job's base commit, the spec is the Task file, there is no issue
+tracker, and the user is never asked. It commits nothing during
 iterations; the last line of `/implement` ("commit your work") is denied on purpose. When the
 session does not list the skill, the job's stream says "The implement skill is missing" and the
 job carries on with `/implement` read as plain text.

@@ -141,8 +141,8 @@ logins and Git credentials, and there is no notion of users, sharing or remote a
 each run their own.
 
 **What each colleague installs on their own machine** ([Install](install.md#prerequisites)):
-Node.js 24, Git with push access, Claude Code logged in with their own plan and an `implement`
-skill, the Codex CLI logged in with their own ChatGPT account (or the gate off), a clone of the
+Node.js 24, Git with push access, Claude Code logged in with their own plan, the agents' skills
+installed with the `skills` tool, the Codex CLI logged in with their own ChatGPT account (or the gate off), a clone of the
 factory (`npm run setup`), and, if they plan with ChatGPT, their own tunnel and connector.
 
 **What is per person:**
@@ -161,8 +161,11 @@ factory (`npm run setup`), and, if they plan with ChatGPT, their own tunnel and 
 
 - **The coding rules in the repository**: `AGENTS.md` and the Markdown files it links to reach
   every colleague's agents the same way; put the team's rules there, not in personal files.
-- **An `implement` skill in the repository** (`.claude/skills/implement/SKILL.md`), so every
-  colleague's Implementer behaves the same.
+- **The agents' skills, by installing the same ones**: they come from each user's
+  `~/.agents/skills` (`implement`, `tdd`, `code-review`, `grilling`, installed with the `skills`
+  tool), copied verbatim at each job's start ([The agents' skills](../../factory/README.md#the-agents-skills));
+  the factory does not take them from the repository. A repository's own `.claude/skills` are not
+  hidden: they still load in the Implementer's session as its project skills, read-only.
 - **Task files**: they are plain Markdown. `.software-factory/` is excluded from Git in each
   checkout, so share a Task file by sending it, or keep the team's Task files in a separate
   folder or repository and copy the one you take into your checkout's `.software-factory/`.

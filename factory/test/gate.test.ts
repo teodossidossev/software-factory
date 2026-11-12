@@ -151,7 +151,7 @@ test('clean: Claude, then the gate in a read-only Codex in the worktree, then Cl
     const recorded = await new JobStore(env.state).readGate('app', 'G-1', 1);
     assert.ok(recorded !== undefined && 'verdict' in recorded);
     const { started_at: startedAt, ended_at: endedAt, ...rest } = recorded;
-    assert.deepEqual(rest, { reviewer: 'codex', ...GATE_CLEAN, tokens: { input: 1200, cached_input: 300, output: 34 }, review_method: await ownReviewMethod() });
+    assert.deepEqual(rest, { reviewer: 'codex', ...GATE_CLEAN, tokens: { input: 1200, cached_input: 300, output: 34 }, review_method: await ownReviewMethod(env) });
     assert.ok(Date.parse(startedAt) <= Date.parse(endedAt));
     assert.deepEqual((await eventsOf(env, 'G-1')).filter((record) => record.type === 'review').map((record) => [record.reviewer, record.verdict]), [['claude', 'clean'], ['codex', 'clean']]);
     const watched = await runCli(env, ['watch', 'app', 'G-1', '--once']);

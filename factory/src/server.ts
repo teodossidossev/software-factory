@@ -24,11 +24,13 @@ import { replaceSecret } from './redact.js';
 import type { Execution } from './execution.js';
 import type { RunQueue } from './queue.js';
 import { DEPENDENCY_STATES } from './setup.js';
+import { stateDir } from './config.js';
 import { handbookSection } from './prompts.js';
 import { resolveWorkspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { DEFAULT_PAGE_BYTES, MAX_FILE_BYTES, MAX_PAGE_BYTES, MAX_PATH_LENGTH, MIN_PAGE_BYTES, RepoFiles, RepoReadError } from './repo-files.js';
 import { DEFAULT_RESULTS, MAX_QUERY_CHARS, MAX_RESULTS, search } from './search.js';
 import { PACKAGE_ROOT } from './package-root.js';
+import { snapshotSkillFile } from './skills.js';
 import { MCP_TOKEN_FILE, readTokenFile } from './secrets.js';
 import { checkFile, checkFinding, recordVerdict, type TaskChecks } from './task-check.js';
 import { AUTO_CHECK_DELAY_MS, type AutoChecks } from './task-check-auto.js';
@@ -39,8 +41,7 @@ export const SERVER_NAME = 'software-factory';
 const MCP_PATH = '/mcp';
 
 export interface Handbook {
-  // The whole file, its "## Quick start" section, and the planning skill's body (servedHandbook):
-  // undefined when its file is missing or SF_PLAN_SKILL is empty.
+  // The whole file, its "## Quick start" section, and the planning skill's body (servedHandbook): undefined without its file or with SF_PLAN_SKILL empty.
   text: string;
   quickStart: string;
   planSkill: string | undefined;
@@ -368,10 +369,9 @@ export async function packageVersion(): Promise<string> {
   return data.version;
 }
 
-// The planning skill's file: SF_PLAN_SKILL (empty: none), else the package's grilling skill.
-export const planSkillPath = (): string => process.env.SF_PLAN_SKILL ?? fileURLToPath(new URL('skills/grilling/SKILL.md', PACKAGE_ROOT));
-
-// A missing skill file leaves planSkill undefined; serve says so.
+// The planning skill's file: SF_PLAN_SKILL (empty: none), else the skills snapshot's grilling
+// skill (src/skills.ts, synced at sf serve's start). A missing file leaves planSkill undefined; serve says so.
+export const planSkillPath = (): string => process.env.SF_PLAN_SKILL ?? snapshotSkillFile(stateDir(), 'grilling');
 export async function loadHandbook(path = process.env.SF_HANDBOOK || fileURLToPath(new URL('HANDBOOK.md', PACKAGE_ROOT)), skillPath = planSkillPath()): Promise<Handbook> {
   const text = await readFile(path, 'utf8');
   const skill = skillPath === '' ? undefined : await readFile(skillPath, 'utf8').catch((error: unknown) => ((error as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : Promise.reject(error)));

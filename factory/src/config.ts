@@ -3,13 +3,12 @@ import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
 import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { FactoryError } from './errors.js';
 import { type ForgeSettings, forgeSettings } from './forge.js';
 import type { Job } from './jobs.js';
-import { PACKAGE_ROOT } from './package-root.js';
 import { configDir, HANDOFF_OFF_CODE, type HandoffMode } from './registry.js';
 import { DEFAULT_RULES_MAX_BYTES } from './rules-docs.js';
+import { snapshotSkillFile } from './skills.js';
 import type { TaskReview } from './task-file.js';
 
 export interface Config {
@@ -345,9 +344,9 @@ export function claudeReviewDecision(config: Pick<Config, 'claudeReview' | 'gate
 }
 
 // SF_REVIEW_SKILL: the code-review skill file of the reviewers, read at each review; unset, the
-// package's own copy (skills/code-review/SKILL.md); empty, none.
+// skills snapshot's (src/skills.ts); empty, none.
 export function reviewSkillPath(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  const path = env.SF_REVIEW_SKILL ?? fileURLToPath(new URL('skills/code-review/SKILL.md', PACKAGE_ROOT));
+  const path = env.SF_REVIEW_SKILL ?? snapshotSkillFile(stateDir(env), 'code-review');
   return path === '' ? undefined : path;
 }
 

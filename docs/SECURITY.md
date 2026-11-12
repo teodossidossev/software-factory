@@ -47,9 +47,15 @@ refused), and the factory's test command passed in a sandbox without network on 
     folder of the wrapper's own: writable, but nothing of the host's `/tmp` is seen there and
     nothing written there reaches the host. So a link swapped in between the file guard's check and
     the write cannot send the write out of the worktree.
-    Its skills are the factory's own copies (`factory/skills/`, changed only by pull request),
-    mounted read-only where Claude Code looks for the user's skills: the job can read them but not
-    change them, and the user's own skills (`~/.claude/skills`, `~/.agents`) stay hidden. The file
+    Its skills are the user's installed ones (`implement`, `tdd`, `code-review`, `grilling` from
+    `~/.agents/skills`), copied verbatim into the factory's skills snapshot in its state directory
+    when their lock file's hashes change, and never edited. The snapshot is mounted read-only where
+    Claude Code looks for the user's skills: the job can read them but not change them, every turn
+    of a job binds the folder its start recorded (an update builds a new folder and swaps a link to
+    it, and no folder a job not yet archived recorded is removed), the user's other skills
+    (`~/.claude/skills`, `~/.agents`) stay hidden, and each job's event log records the versions
+    and the folder it used. The reviewers' and the planning method are read from the same
+    snapshot. The file
     guard lets only this session read that folder, by the path given; every other session, and a
     write by any session, is refused there.
     Without `bwrap` a job's turn stops; it never runs unwrapped. `SF_SANDBOX=off` turns the

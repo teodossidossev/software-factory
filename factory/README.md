@@ -2590,9 +2590,11 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    turn told the places (`mr_attempts + 1`, nothing committed), at most `GUARD_MAX_MR_TURNS` (2)
    more turns per preparation; then `needs_human` with `guard_hit`. The count lives in memory and
    starts at 0 at each preparation (`sf retry` gives new turns).
-   - `git reset -q --mixed <base_commit>` when the branch has commits on top of `base_commit` (a
-     fix after Clean, or a retry after a commit). `HEAD` and the index go back to the base and the
-     files stay, so the result is always one commit.
+   - `git reset -q --mixed <base_commit>`, always: `HEAD` and the index go back to the base and the
+     files stay. A commit on top of `base_commit` (a fix after Clean, or a retry after a commit) is
+     undone, so the result is always one commit, and anything staged before (a deletion a conflict
+     turn staged on an earlier attempt) leaves the index, so `git add` below never meets a deleted
+     path that is already staged, which it would refuse as a pathspec that matches nothing.
    - The paths: the Patch's paths against `base_commit` (tracked and untracked, without ignored,
      credential-like, `.software-factory/` paths and sandbox placeholders), minus submodules (a
      directory whose index entry has mode 160000). The Git rules forbid changing a submodule
@@ -2623,7 +2625,10 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    - otherwise the factory stages every change of the turn, not only the conflicted files:
      `git add --all` over the listed files plus the worktree's changes against the target, with
      the exclusions of its commit (`.software-factory/`, ignored, credential-like and placeholder
-     paths, submodule pointers), then `git -c core.editor=true rebase --continue`;
+     paths, submodule pointers), then `git -c core.editor=true rebase --continue`. Nothing is
+     reset inside the rebase: a path in neither the index nor the working tree
+     (`git ls-files --cached --others`) is a deletion the turn already staged and is left out of
+     `git add`, which would refuse it;
    - a continue that fails keeps the resolution: before the abort the factory saves the resolved
      worktree as `iterations/NNN/conflict-resolution.diff` of the last published iteration
      (`git diff --binary <target commit>` of the working tree plus the untracked files, the paths

@@ -454,16 +454,13 @@ export async function abortRebase(cwd: string): Promise<boolean> {
   return true;
 }
 
-// The reviewed change as one commit on top of baseCommit, rebased onto targetCommit. A commit
-// already on the branch (a fix after Clean, a retry) is undone first with `reset --mixed`, which
-// leaves the working tree alone, so the result is always one commit. The identity and the signing
-// configuration are the user's Git configuration.
+// The reviewed change as one commit on top of baseCommit, rebased onto targetCommit. Branch and
+// index start at baseCommit (`reset --mixed`, which leaves the working tree alone), undoing a
+// commit already on the branch (a fix after Clean, a retry) and anything staged before, so the
+// result is always one commit. Identity and signing come from the user's Git configuration.
 export async function commitAndRebase(cwd: string, input: { baseCommit: string; targetCommit: string; mrText: string }): Promise<Prepared> {
   const { baseCommit, targetCommit, mrText } = input;
-  const head = (await factoryGitOk(cwd, ['rev-parse', '--verify', 'HEAD'])).trim();
-  if (head !== baseCommit) {
-    await factoryGitOk(cwd, ['reset', '-q', '--mixed', baseCommit]);
-  }
+  await factoryGitOk(cwd, ['reset', '-q', '--mixed', baseCommit]);
   for (const chunk of chunks(await commitPaths(cwd, baseCommit))) {
     await factoryGitOk(cwd, ['add', '--all', '--', ...chunk.map(literal)]);
   }
@@ -520,11 +517,11 @@ export async function filesWithMarkers(cwd: string, files: string[]): Promise<st
 }
 
 // After the conflict turn: every change of the worktree against the target is staged (the
-// conflicted files and any other file the turn changed, filtered as the factory's commit is) and
-// the rebase continues. A file that still holds a marker aborts the rebase (mr_conflict). A
-// continue that fails first saves the resolved worktree, a patch against targetCommit: save opens
-// the file, runs the writer it is given on it and returns where the patch is. Then the rebase is
-// aborted (mr_conflict naming the patch); nothing is retried.
+// conflicted files and any other file the turn changed, filtered as the factory's commit is, but
+// not a deletion it staged itself, in neither index nor working tree) and the rebase continues. A
+// file still holding a marker aborts the rebase (mr_conflict). A failed continue first saves the
+// resolved worktree, a patch against targetCommit (save opens the file, runs the given writer on
+// it, returns its path), then aborts the rebase (mr_conflict naming the patch); no retry.
 export async function continueRebase(
   cwd: string, input: { files: string[]; targetCommit: string; save: (write: (handle: FileHandle) => Promise<void>) => Promise<string> },
 ): Promise<MrFailure | undefined> {
@@ -537,7 +534,11 @@ export async function continueRebase(
   }
   const changed = await commitPaths(cwd, targetCommit);
   for (const chunk of chunks([...new Set([...files, ...changed])].sort())) {
-    await factoryGitOk(cwd, ['add', '--all', '--', ...chunk.map(literal)]);
+    const present = new Set(nulList(await factoryGitOk(cwd, ['ls-files', '-z', '--cached', '--others', '--', ...chunk.map(literal)])));
+    const staged = chunk.filter((path) => present.has(path)).map(literal);
+    if (staged.length > 0) {
+      await factoryGitOk(cwd, ['add', '--all', '--', ...staged]);
+    }
   }
   const continued = await factoryGit(cwd, ['-c', 'core.editor=true', 'rebase', '--continue']);
   if (continued.code !== 0) {

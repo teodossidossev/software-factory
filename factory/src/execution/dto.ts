@@ -1,5 +1,6 @@
 // The data shapes of the job lifecycle: what Execution's calls return or take, and the listener of
 // its state changes. src/execution.ts exports them.
+import type { MergeRequestStatus } from '../forge.js';
 import type { Job, JobMr, JobState, PauseStep } from '../jobs.js';
 import type { Page } from '../repo-files.js';
 
@@ -41,6 +42,17 @@ export interface MrOutcome {
   mr?: JobMr & { reused: boolean };
   // What was pushed of a handed-over job: the factory's commit or the user's.
   message?: string;
+}
+
+// sf mr status: what the host says of the job's merge request. A job without a record has it looked
+// up by its branch and base: found says how many open ones the host has (the newest is recorded); with
+// none, mr is null and there is no status.
+export interface MrStatusOutcome {
+  state: JobState;
+  branch: string;
+  mr: JobMr | null;
+  status?: MergeRequestStatus;
+  found?: { count: number };
 }
 
 // The merge request's title and body, from the MR text.

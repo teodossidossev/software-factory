@@ -122,6 +122,8 @@ interface ActionResult {
   commit?: string;
   mr?: { number: number; url: string; reused?: boolean; merge_commit?: string | null } | null;
   status?: MergeRequestStatus | string | null;
+  // mergeRequestStatus of a job without a record: how many open merge requests its branch has.
+  found?: { count: number };
   iteration?: number;
   step?: string | null;
   id?: string;

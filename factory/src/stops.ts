@@ -7,7 +7,7 @@
 // holds. job.error.code stays a string on disk: canonicalStop resolves it, and an unknown code is
 // `other`. Pure: the caller reads the facts (the ledger, the last review and gate, the Git host).
 import type { DashboardAction } from './dashboard-routes.js';
-import { claudeReviews, type GateRecord, type Job, PAUSABLE_STATES, RESTARTABLE_STATES, RESUMABLE_STATES, type ReviewRecord, statesWith, TERMINAL_STATES } from './jobs.js';
+import { claudeReviews, type GateRecord, type Job, type JobState, PAUSABLE_STATES, RESTARTABLE_STATES, RESUMABLE_STATES, type ReviewRecord, statesWith, TERMINAL_STATES } from './jobs.js';
 import type { LedgerEntry } from './ledger.js';
 import { actedVerdict, type ReviewItem } from './review.js';
 import { usageLimit } from './usage-limit.js';
@@ -234,6 +234,10 @@ function holds(precondition: Precondition, job: Job, facts: JobFacts, now: Date)
 // Merge to an open one.
 const canApprove = (job: Job): boolean => job.state === 'ready_for_human_review' || job.state === 'handed_over' || (job.state === 'needs_human' && typeof job.prepared_commit === 'string');
 const hasMr = (job: Job): boolean => job.mr !== null && typeof job.mr === 'object';
+// The states in which Refresh MR status looks a job without a record up by its branch: the user may
+// have pushed it and opened its merge request by hand.
+export const MR_LOOKUP_STATES: readonly JobState[] = ['handed_over', 'ready_for_human_review', 'pushed'];
+const canReadMr = (job: Job): boolean => hasMr(job) || MR_LOOKUP_STATES.includes(job.state);
 const canCreateMr = (job: Job): boolean => canApprove(job) || (job.state === 'pushed' && !(hasMr(job) && job.mr!.state !== 'closed'));
 const canMerge = (job: Job): boolean => job.state === 'pushed' && hasMr(job) && job.mr!.state === 'open';
 // Why the merge request actions are off for the job's workspace, or ''.
@@ -286,7 +290,7 @@ function availabilityOf(id: ActionId, job: Job, facts: JobFacts, now: Date): str
     case 'mr-merge':
       return canMerge(job) ? mrOff(facts.mrHost) : 'only an open merge request of a pushed job is merged.';
     case 'mr-status':
-      return hasMr(job) ? mrOff(facts.mrHost) : 'no merge request yet.';
+      return canReadMr(job) ? mrOff(facts.mrHost) : 'no merge request yet.';
     case 'review':
       return stopRowOf(job, now)?.code === 'review_failed' ? '' : 'only after a failed review.';
     case 'retry':
@@ -319,6 +323,7 @@ function availabilityOf(id: ActionId, job: Job, facts: JobFacts, now: Date): str
 
 type Listed = { id: ActionId; label: string };
 const listed = (id: ActionId, label: string): Listed => ({ id, label });
+const MR_STATUS = listed('mr-status', 'Refresh MR status');
 
 // The actions the job shows now, in order, without primary (a finished or handed-over job), or
 // with the first non-dangerous one primary.
@@ -337,7 +342,7 @@ function shownActions(job: Job, facts: JobFacts, now: Date): { list: Listed[]; p
     case 'ready_for_human_review':
       // The Merge request screen first; Approve… stays.
       return {
-        list: [listed('review-mr', 'Review the MR and push'), listed('approve', 'Approve…'), listed('handover', 'Hand over to my checkout'), ...mrCreate, toListed(SEND), toListed(ABORT)],
+        list: [listed('review-mr', 'Review the MR and push'), listed('approve', 'Approve…'), listed('handover', 'Hand over to my checkout'), ...mrCreate, MR_STATUS, toListed(SEND), toListed(ABORT)],
         primary: true,
       };
     case 'handed_over':
@@ -349,7 +354,7 @@ function shownActions(job: Job, facts: JobFacts, now: Date): { list: Listed[]; p
     }
     case 'pushed':
       return {
-        list: [...mrCreate, ...(canMerge(job) ? [listed('mr-merge', 'Merge…')] : []), ...(hasMr(job) ? [listed('mr-status', 'Refresh MR status')] : []), listed('archive', 'Archive')],
+        list: [...mrCreate, ...(canMerge(job) ? [listed('mr-merge', 'Merge…')] : []), MR_STATUS, listed('archive', 'Archive')],
         primary: false,
       };
     case 'aborted':

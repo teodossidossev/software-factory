@@ -83,8 +83,9 @@ const links = (item: FakeElement): FakeElement[] => item.all().filter((element) 
 
 test('mr client: Create merge request… on a pushed job, confirmed with the title and the target; one POST; the outcome with the link', async () => {
   const page = await open([job('T-1', 'pushed')], '#app/T-1');
-  assert.deepEqual([state(page, 'mr-create-button'), missing(page, 'mr-merge-button'), missing(page, 'mr-status-button'), missing(page, 'mr-line')], [[false, false], true, true, true]);
-  assert.deepEqual(page.$('acts').children.map((button) => button.textContent), ['Create merge request', 'Archive']);
+  // Refresh MR status without a record looks the branch up.
+  assert.deepEqual([state(page, 'mr-create-button'), missing(page, 'mr-merge-button'), state(page, 'mr-status-button'), missing(page, 'mr-line')], [[false, false], true, [false, false], true]);
+  assert.deepEqual(page.$('acts').children.map((button) => button.textContent), ['Create merge request', 'Refresh MR status', 'Archive']);
   page.$('mr-create-button').click();
   assert.equal(page.$('confirm-title').textContent, 'Create merge request app/T-1?');
   assert.equal(page.$('confirm-text').textContent, 'Opens a merge request on GitHub from T-1-demo into main, titled “feat(T-1): Demo”, with the rest of the MR text as its description. One already open for the branch is reused.');

@@ -7,7 +7,7 @@ import { createInterface } from 'node:readline';
 import { resolve as resolvePath } from 'node:path';
 import { DEFAULT_TEST_TIMEOUT_MS, envFilePath, handoffOffNotice } from '../config.js';
 import { FactoryError } from '../errors.js';
-import { chooseForge, type Forge, type ForgeKind, forgeFor, type MergeRequestStatus } from '../forge.js';
+import { type Forge, type ForgeKind, forgeFor } from '../forge.js';
 import { runGit } from '../git.js';
 import { checkTerms, commitsToCheck, GUARD_MAX_FIXES, GUARD_MAX_MR_TURNS, guardFixContent, guardFixCount, guardMessage, type GuardHit, type GuardTerm, maskedMrTextFailure, maskedMrTextProblem, maskTerms, MAX_GUARD_MESSAGE, redactAdded, scanBranch, scanChange, scanCommits, scanMrText, worktreeTree } from '../guard.js';
 import { checkBranchFree, isAncestor, savedRef, settleAfterPush, subjectOf } from '../handoff.js';
@@ -32,7 +32,8 @@ import { removeWorktree } from '../worktree.js';
 import type { RunnerRequest } from '../runner.js';
 import type { Suggestion } from '../simplify.js';
 import type { JobStorePort, LivePort, LockPort, NoticePort, RunnerPort, SettingsPort, StopPort } from './ports.js';
-import type { MrContent, MrInput, MrOutcome, MrSaved, MrView } from './dto.js';
+import type { MrContent, MrInput, MrOutcome, MrSaved, MrStatusOutcome, MrView } from './dto.js';
+import { MrHostReads } from './mr-host.js';
 import { cutOffError, MR_RETRY_CODES, mrFailure } from './errors.js';
 import { TESTS_RUNNER, testsEvent } from './events.js';
 import { markedGroups } from './prompts.js';
@@ -168,6 +169,7 @@ export class MrPart {
   // The parts it calls (src/execution.ts wires them).
   readonly #peers: MrPeers;
   readonly #mergeChecks: MergeChecks;
+  readonly #hostReads: MrHostReads;
 
   constructor(store: JobStorePort, locks: LockPort, sessions: LivePort, runner: RunnerPort, notice: NoticePort, settings: SettingsPort, stop: StopPort, peers: MrPeers) {
     this.#store = store;
@@ -179,6 +181,7 @@ export class MrPart {
     this.#stop = stop;
     this.#peers = peers;
     this.#mergeChecks = new MergeChecks({ store, locks, sessions, settings, stop });
+    this.#hostReads = new MrHostReads({ store, locks, settings, forge: (job) => this.#forge(job), event: (job, action) => this.#mrEvent(job, action) });
   }
 
   // The end of a turn of MR preparation (mark_clean). After the MR text turn: validate the text,
@@ -906,7 +909,7 @@ export class MrPart {
     return { host: forge.kind, number: opened.number, url: opened.url, state: opened.state, reused: opened.reused };
   }
 
-  async #mrEvent(job: Job, action: 'created' | 'reused' | 'merged' | 'updated'): Promise<void> {
+  async #mrEvent(job: Job, action: 'created' | 'reused' | 'merged' | 'updated' | 'found'): Promise<void> {
     const mr = job.mr!;
     await this.#store.jobs.appendEvent(job.workspace, job.ticket, {
       ts: now(), iteration: job.iteration, type: 'merge_request', action, host: mr.host, number: mr.number, url: mr.url, mr_state: mr.state,
@@ -1306,40 +1309,12 @@ export class MrPart {
     });
   }
 
-  // sf mr status: what the host says of the job's merge request now. A merge request the
-  // host has merged or closed meanwhile (by hand) is recorded so; nobody is notified.
-  async mergeRequestStatus(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; mr: JobMr; status: MergeRequestStatus }> {
-    const job = await this.#store.job(workspaceName, ticket);
-    if (job.mr === null) {
-      throw new FactoryError('invalid_state', `No merge request is recorded for ${workspaceName}/${ticket}; sf mr create opens one.`);
-    }
-    const number = job.mr.number;
-    const status = await (await this.#forge(job)).status(number);
-    return this.#locks.locked(async () => {
-      const current = await this.#store.job(workspaceName, ticket);
-      if (current.mr === null || current.mr.number !== number || current.mr.state === status.state) {
-        return { state: current.state, branch: current.branch, mr: current.mr ?? job.mr!, status };
-      }
-      const next: Job = { ...current, mr: { ...current.mr, state: status.state, ...(status.merge_commit !== undefined ? { merge_commit: status.merge_commit } : {}) } };
-      await this.#store.jobs.write(next);
-      await this.#mrEvent(next, 'updated');
-      return { state: next.state, branch: next.branch, mr: next.mr!, status };
-    });
+  // sf mr status, and whether the merge request actions are on (src/execution/mr-host.ts).
+  mergeRequestStatus(workspaceName: string, ticket: string): Promise<MrStatusOutcome> {
+    return this.#hostReads.status(workspaceName, ticket);
   }
 
-  // Whether the merge request actions are on for a workspace: its host, or why they are off (the
-  // variable missing, an origin on no supported host, the workspace gone). No request is sent.
-  async mergeRequestHost(workspaceName: string): Promise<{ host: ForgeKind | null; reason: string | null }> {
-    let origin: string | undefined;
-    try {
-      origin = await originUrl((await this.#settings.resolve(workspaceName)).workCheckout);
-    } catch (error) {
-      if (error instanceof FactoryError) {
-        return { host: null, reason: error.message };
-      }
-      throw error;
-    }
-    const choice = chooseForge(origin, this.#settings.config.forge);
-    return choice.ok ? { host: choice.kind, reason: null } : { host: choice.kind, reason: choice.reason };
+  mergeRequestHost(workspaceName: string): Promise<{ host: ForgeKind | null; reason: string | null }> {
+    return this.#hostReads.host(workspaceName);
   }
 }

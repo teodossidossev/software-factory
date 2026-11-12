@@ -281,7 +281,7 @@ test('job client (SF-073): a handed-over job says "In your checkout on <branch>"
   page.streams.at(-1)!.emit('jobs', { jobs: [skipped] });
   await show(page, detail(skipped));
   assert.equal(page.$('composer-sentence').children[1]!.textContent, 'Not handed over to your checkout: T-1: ready, but your checkout has changes; hand it over when you are ready');
-  assert.deepEqual(acts().map((node) => node.textContent), ['Review the MR and push', 'Approve…', 'Hand over to my checkout', 'Create merge request', 'Send', 'Abort…']);
+  assert.deepEqual(acts().map((node) => node.textContent), ['Review the MR and push', 'Approve…', 'Hand over to my checkout', 'Create merge request', 'Refresh MR status', 'Send', 'Abort…']);
   act('Hand over to my checkout').click();
   await page.flush();
   assert.deepEqual(posted('handover').map((request) => request.body), ['{}']);
@@ -380,13 +380,16 @@ test('job client (SF-107): the panel\'s actions: I opened the MR posts handed-do
   inPanel(page, 'More ▾').click();
   assert.deepEqual([menuOf(page).hidden, inPanel(page, 'More ▾').getAttribute('aria-expanded'), page.document.activeElement?.textContent.startsWith('Take it back')], [false, 'true', true]);
   assert.deepEqual(menuOf(page).children.map((node) => [(node as FakeElement).getAttribute('role'), (node as FakeElement).className]),
-    [['menuitem', 'ho-item'], ['separator', 'ho-sep'], ['menuitem', 'ho-item danger']]);
+    [['menuitem', 'ho-item'], ['menuitem', 'ho-item'], ['separator', 'ho-sep'], ['menuitem', 'ho-item danger']]);
+  const focused = (): string => page.document.activeElement?.textContent ?? '';
   page.key('ArrowDown');
-  assert.equal(page.document.activeElement?.textContent, 'Abort the job…');
+  assert.equal(focused(), 'Refresh MR status');
   page.key('ArrowDown');
-  assert.equal(page.document.activeElement?.textContent.startsWith('Take it back'), true);
+  assert.equal(focused(), 'Abort the job…');
+  page.key('ArrowDown');
+  assert.equal(focused().startsWith('Take it back'), true);
   page.key('ArrowUp');
-  assert.equal(page.document.activeElement?.textContent, 'Abort the job…');
+  assert.equal(focused(), 'Abort the job…');
   // A click outside closes it.
   page.$('composer-sentence').click();
   assert.equal(menuOf(page).hidden, true);
@@ -404,6 +407,43 @@ test('job client (SF-107): the panel\'s actions: I opened the MR posts handed-do
   inPanel(page, 'Take it back').click();
   await page.flush();
   assert.deepEqual([menuOf(page).hidden, posts(page, 'takeback').map((request) => request.body)], [true, ['{}']]);
+});
+
+test('job client (SF-200): More\'s Refresh MR status on a handed-over job without a record posts mr-status; none found says so alone; one found by the branch shows its line and the host\'s status; a later read by number shows the status only', async () => {
+  const page = await openJob(detail(handedOver(), { mr: true, mr_title: 'feat(T-1): Demo' } as Partial<Omit<Detail, 'job'>>));
+  assert.equal(page.document.getElementById('mr-status-line'), null);
+  inPanel(page, 'More ▾').click();
+  inPanel(page, 'Refresh MR status').click();
+  await page.flush();
+  assert.deepEqual(posts(page, 'mr-status').map((request) => request.body), ['{}']);
+  posts(page, 'mr-status')[0]!.respond(200, { ok: true, result: { state: 'handed_over', branch: 'T-1-demo', mr: null, found: { count: 0 } } });
+  await page.flush();
+  assert.equal(page.$('mr-status-line').textContent, 'No open merge request for branch T-1-demo.');
+  assert.equal(page.document.getElementById('mr-line'), null);
+
+  inPanel(page, 'More ▾').click();
+  inPanel(page, 'Refresh MR status').click();
+  await page.flush();
+  const mr = { host: 'github', number: 7, url: 'https://github.com/o/r/pull/7', state: 'open' };
+  const status = { number: 7, url: mr.url, state: 'open', draft: false, mergeable: false, reason: 'its pipeline is still running', checks: 'pipeline running' };
+  posts(page, 'mr-status')[1]!.respond(200, { ok: true, result: { state: 'handed_over', branch: 'T-1-demo', mr, status, found: { count: 2 } } });
+  await page.flush();
+  // The refresh reads the job again; it now has the record.
+  const recorded = handedOver({ mr });
+  page.streams.at(-1)!.emit('jobs', { jobs: [recorded] });
+  await show(page, detail(recorded, { mr: true, mr_title: 'feat(T-1): Demo' } as Partial<Omit<Detail, 'job'>>));
+  assert.equal(page.$('mr-line').textContent, 'Merge request #7 (open): https://github.com/o/r/pull/7');
+  assert.equal(page.$('mr-status-line').textContent,
+    'Found by branch T-1-demo (newest of 2 open). On the host: #7 open, not mergeable: its pipeline is still running, checks: pipeline running.');
+
+  inPanel(page, 'More ▾').click();
+  inPanel(page, 'Refresh MR status').click();
+  await page.flush();
+  posts(page, 'mr-status')[2]!.respond(200, { ok: true, result: { state: 'handed_over', branch: 'T-1-demo', mr, status: { ...status, mergeable: true, reason: undefined, checks: 'pipeline success' } } });
+  await page.flush();
+  page.streams.at(-1)!.emit('jobs', { jobs: [recorded] });
+  await show(page, detail(recorded, { mr: true, mr_title: 'feat(T-1): Demo' } as Partial<Omit<Detail, 'job'>>));
+  assert.equal(page.$('mr-status-line').textContent, 'On the host: #7 open, mergeable, checks: pipeline success.');
 });
 
 test('job client: the panel\'s Merged another way opens its confirmation with the sentence; Confirm posts handed-done-merged and the outcome says the job is marked done', async () => {

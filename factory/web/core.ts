@@ -171,7 +171,8 @@ interface PageState {
   task: { key: string } | null;
   wantConfirm: { action: string; key: string } | null;
   startHolds: Map<string, { reason: string; failed: boolean }>;
-  mrStatus: Map<string, { number: number; state: string }>;
+  mrStatus: Map<string, MergeRequestStatus>;
+  mrFound: Map<string, { number: number | null; line: string }>;
   refresh: ReturnType<typeof setTimeout> | null;
   jobsSeen: number;
   toastTimer: ReturnType<typeof setTimeout> | null;
@@ -250,8 +251,10 @@ const state: PageState = {
   task: null,
   wantConfirm: null,
   startHolds: new Map(),
-  // The last merge request status read from the host, per job.
+  // The last merge request status read from the host, per job; and, when that read looked a job
+  // without a record up by its branch, the merge request it found (null: none) and the line saying so.
   mrStatus: new Map(),
+  mrFound: new Map(),
   // The board v3: the timer of the next read of api/jobs while a card runs and the count
   // of the stream's jobs events (a read they overtook is dropped); the toast's
   // timer, its message's level and whether the pointer is on it; the new ticket whose card is
@@ -329,6 +332,37 @@ function svgEl(tag: string, attributes: Readonly<Record<string, string | number>
 
 const keyOf = (job: { workspace: string; ticket: string }): string => `${job.workspace}/${job.ticket}`;
 const jobPath = (key: string): string => key.split('/').map(encodeURIComponent).join('/');
+
+// What a Refresh MR status of a job without a record found by its branch: how many open
+// merge requests, or none; '' for a read of a recorded one.
+function mrFoundText(result: ActionResult): string {
+  const count = result.found?.count;
+  return count === undefined ? '' : count === 0 ? `No open merge request for branch ${String(result.branch)}.`
+    : `Found by branch ${String(result.branch)}${count > 1 ? ` (newest of ${count} open)` : ''}.`;
+}
+
+// Keeps what a Refresh MR status answered for the job: the host's status, and the merge request a
+// lookup by the branch found (null: none) with its line.
+function noteMrRead(key: string, read: ActionResult): void {
+  state.mrFound.set(key, { number: read.mr?.number ?? null, line: mrFoundText(read) });
+  if (read.status !== null && typeof read.status === 'object') {
+    state.mrStatus.set(key, read.status);
+  }
+}
+
+// The job page's MR status lines: the status last read shows only while it is of the merge request
+// the job shows now (the same number and state: after a merge, a close or a new merge request it
+// stays hidden), after the line of the lookup that found it; a lookup that found none, alone.
+function mrReadLines(job: JobRow): string[] {
+  const read = state.mrStatus.get(keyOf(job));
+  const found = state.mrFound.get(keyOf(job));
+  if (job.mr === null || job.mr === undefined || typeof job.mr !== 'object') {
+    return found?.number === null ? [found.line] : [];
+  }
+  const shown = read !== undefined && read.number === job.mr.number && read.state === job.mr.state;
+  return shown ? [...(found?.number === job.mr.number && found.line !== '' ? [found.line] : []), mrStatusText(read)] : [];
+}
+
 // "2026-11-04 12:14:25" of a stored timestamp (ISO 8601 UTC) in the browser's local time;
 // empty when it is missing or does not parse.
 function localTime(ts: unknown): string {

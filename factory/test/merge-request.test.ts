@@ -22,7 +22,7 @@ import { jobNotification } from '../src/notify.js';
 import { describeEvent } from '../src/watch.js';
 import { act, fakeActions, fetchRaw, openStream } from './support/dashboard-client.js';
 import { withDashboard } from './support/dashboard-state.js';
-import { FAKE_MERGE_SHA, startFakeForge } from './support/fake-forge.js';
+import { FAKE_MERGE_SHA, type FakeMr, startFakeForge } from './support/fake-forge.js';
 import { call, type Env, FAKE, git, newEnv, newRepo, processEnv, putTask, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
 
 const TOKEN = 'github_pat_E2ESECRET0123456789abcdefgh';
@@ -176,7 +176,8 @@ test('sf mr: a missing token and a wrong host turn the actions off and say why, 
     assert.match(missing.stderr, /^sf: Merge requests are off for this workspace: SF_GITHUB_TOKEN is not set in the environment file\.$/m);
     // A merge request needs one first; status too.
     assert.match((await runCli(env, ['mr', 'merge', 'app', 'T-1'])).stderr, /sf mr merge needs a pushed job with a merge request \(sf mr create opens one\); the job is pushed without one\./);
-    assert.match((await runCli(env, ['mr', 'status', 'app', 'T-1'])).stderr, /No merge request is recorded for app\/T-1; sf mr create opens one\./);
+    // Status looks the pushed branch up (SF-200): the host first, so the missing token is said.
+    assert.match((await runCli(env, ['mr', 'status', 'app', 'T-1'])).stderr, /^sf: Merge requests are off for this workspace: SF_GITHUB_TOKEN is not set in the environment file\.$/m);
     assert.equal((await runCli(env, ['mr', 'open', 'app', 'T-1'])).code, 2);
     assert.equal((await runCli(env, ['mr', 'create', 'app'])).code, 2);
   } finally {
@@ -247,6 +248,62 @@ test('sf mr against GitLab: SF_GITLAB_URL for the origin\'s host; create with th
     assert.equal((await jobs.read('app', 'T-1'))!.mr?.state, 'merged');
     assert.ok(fake.requests.every((r) => r.headers.authorization === `Bearer ${GL_TOKEN}`));
     assert.doesNotMatch((await allText(env.state)) + log(), /E2ESECRET/);
+  } finally {
+    await stop(served);
+    await fake.close();
+  }
+});
+
+test('sf mr status without a record (SF-200): a handed-over job\'s merge request opened by hand is found by its branch and base, recorded with a found event and its pipeline shown; then read by number; none and two found; GET only', async () => {
+  const fake = await startFakeForge('gitlab', 'group/app');
+  const env = await newEnv('mr-found');
+  await envFile(env, [`SF_GITLAB_TOKEN=${GL_TOKEN}`, `SF_GITLAB_URL=${fake.url}/api/v4`]);
+  const { jobs } = await pushedJob(env, 'mr-found-repo', `${fake.url}/group/app.git`, { state: 'handed_over' });
+  const opened = (number: number, branch: string, base: string): FakeMr => ({
+    number, branch, base, title: `MR ${number}`, body: '', state: 'open', draft: false, mergeable: true, mergeableState: 'clean', detailed: 'mergeable', merge_commit: null,
+  });
+  const events = async (): Promise<Array<Record<string, unknown>>> => (await readFile(jobs.eventsPath('app', 'T-1'), 'utf8').catch(() => ''))
+    .split('\n').filter((line) => line !== '').map((line) => JSON.parse(line) as Record<string, unknown>).filter((event) => event.type === 'merge_request');
+  const { served } = await serveLogged(env);
+  try {
+    // None open for the branch (one of another branch, one into another base): said so, exit 0, nothing recorded.
+    fake.mrs.push(opened(1, 'T-1-other', 'main'), opened(2, 'T-1-change-readme', 'develop'));
+    const none = await runCli(env, ['mr', 'status', 'app', 'T-1']);
+    assert.equal(none.code, 0, none.stderr);
+    assert.match(none.stdout, /^No open merge request for branch T-1-change-readme\.$/m);
+    assert.doesNotMatch(none.stdout, /merge request: #/);
+    assert.equal((await jobs.read('app', 'T-1'))!.mr, null);
+    assert.deepEqual(await events(), []);
+
+    // One open: recorded with a found event, shown as a recorded one with its pipeline.
+    fake.mrs.push(opened(3, 'T-1-change-readme', 'main'));
+    const found = await runCli(env, ['mr', 'status', 'app', 'T-1']);
+    assert.equal(found.code, 0, found.stderr);
+    assert.match(found.stdout, /^Found by branch T-1-change-readme\nmerge request: #3 open\nurl: .*\/group\/app\/-\/merge_requests\/3\nmergeable: yes\nchecks: pipeline success$/m);
+    const mr = { host: 'gitlab', number: 3, url: `${fake.url}/group/app/-/merge_requests/3`, state: 'open' };
+    assert.deepEqual((await jobs.read('app', 'T-1'))!.mr, mr);
+    assert.equal((await jobs.read('app', 'T-1'))!.state, 'handed_over');
+    assert.deepEqual((await events()).map(({ ts: _ts, iteration: _iteration, ...event }) => event), [{ type: 'merge_request', action: 'found', host: 'gitlab', number: 3, url: mr.url, mr_state: 'open' }]);
+
+    // A second refresh reads it by number: no list, no second event.
+    const before = fake.requests.length;
+    const again = await runCli(env, ['mr', 'status', 'app', 'T-1']);
+    assert.doesNotMatch(again.stdout, /Found by branch/);
+    assert.match(again.stdout, /^merge request: #3 open$/m);
+    assert.deepEqual(fake.requests.slice(before).map((r) => `${r.method} ${r.path}`), ['GET /api/v4/projects/group%2Fapp/merge_requests/3']);
+    assert.equal((await events()).length, 1);
+
+    // Two open: the newest, with the count.
+    await jobs.write({ ...(await jobs.read('app', 'T-1'))!, mr: null });
+    fake.mrs.push(opened(4, 'T-1-change-readme', 'main'));
+    const two = await runCli(env, ['mr', 'status', 'app', 'T-1']);
+    assert.match(two.stdout, /^Found by branch T-1-change-readme \(newest of 2 open\)\nmerge request: #4 open$/m);
+    assert.equal((await jobs.read('app', 'T-1'))!.mr?.number, 4);
+
+    // Read only: every request a GET, the list asked for the job's branch into its base.
+    assert.deepEqual([...new Set(fake.requests.map((r) => r.method))], ['GET']);
+    assert.ok(fake.requests.filter((r) => r.path.includes('merge_requests?')).every((r) => r.path.includes('source_branch=T-1-change-readme&target_branch=main')));
+    assert.deepEqual(fake.mrs.map((entry) => entry.state), ['open', 'open', 'open', 'open']);
   } finally {
     await stop(served);
     await fake.close();

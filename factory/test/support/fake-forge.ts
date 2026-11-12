@@ -89,7 +89,8 @@ export async function startFakeForge(kind: 'github' | 'gitlab', repoPath: string
         });
         if (req.method === 'GET' && path === `${github}/pulls`) {
           const head = url.searchParams.get('head');
-          send(200, fake.mrs.filter((mr) => mr.state === 'open' && `${repoPath.split('/')[0]}:${mr.branch}` === head && mr.base === url.searchParams.get('base')).map(pr));
+          const found = fake.mrs.filter((mr) => mr.state === 'open' && `${repoPath.split('/')[0]}:${mr.branch}` === head && mr.base === url.searchParams.get('base')).map(pr);
+          send(200, url.searchParams.get('direction') === 'desc' ? found.reverse() : found);
           return;
         }
         if (req.method === 'POST' && path === `${github}/pulls`) {
@@ -134,7 +135,8 @@ export async function startFakeForge(kind: 'github' | 'gitlab', repoPath: string
         source_branch: mr.branch, target_branch: mr.base, title: mr.title, description: mr.body,
       });
       if (req.method === 'GET' && path === `${gitlab}/merge_requests`) {
-        send(200, fake.mrs.filter((mr) => mr.state === 'open' && mr.branch === url.searchParams.get('source_branch') && mr.base === url.searchParams.get('target_branch')).map(mrJson));
+        const found = fake.mrs.filter((mr) => mr.state === 'open' && mr.branch === url.searchParams.get('source_branch') && mr.base === url.searchParams.get('target_branch')).map(mrJson);
+        send(200, url.searchParams.get('sort') === 'desc' ? found.reverse() : found);
         return;
       }
       if (req.method === 'POST' && path === `${gitlab}/merge_requests`) {

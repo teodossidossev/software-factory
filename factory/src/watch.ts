@@ -184,7 +184,7 @@ function recordLines(record: Record<string, unknown>): string[] {
     return [`${prefix} ${line}${moved.length > 0 ? ` (${moved.join(', ')})` : ''}`];
   }
   if (record.type === 'merge_request') {
-    const verb = { created: 'opened', reused: 'already open, reused', merged: 'merged', updated: `found ${String(record.mr_state)} on the host` }[String(record.action)] ?? String(record.action);
+    const verb = { created: 'opened', reused: 'already open, reused', merged: 'merged', updated: `found ${String(record.mr_state)} on the host`, found: 'found open for the branch' }[String(record.action)] ?? String(record.action);
     return [`${prefix} merge request #${String(record.number)} ${verb}: ${String(record.url)}`];
   }
   if (record.type === 'gate_event' || record.type === 'review_message') {

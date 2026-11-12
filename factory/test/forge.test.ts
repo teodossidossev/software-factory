@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
 import { chooseForge, forgeFor, forgeSettings, withoutHostTokens } from '../src/forge.js';
-import { FAKE_MERGE_SHA, startFakeForge } from './support/fake-forge.js';
+import { FAKE_MERGE_SHA, type FakeMr, startFakeForge } from './support/fake-forge.js';
 
 const GH_TOKEN = 'github_pat_TESTTOKEN0123456789abcdef';
 const GL_TOKEN = 'glpat-TESTTOKEN0123456789';
@@ -128,7 +128,7 @@ test('GitHub: create opens a pull request with the title and body, then reuses i
     const created = await forge.open(input);
     assert.deepEqual(created, { number: 1, url: 'https://github.com/acme/app/pull/1', state: 'open', reused: false });
     assert.deepEqual(fake.requests.map((r) => `${r.method} ${r.path}`), [
-      'GET /repos/acme/app/pulls?state=open&head=acme%3AT-1-demo&base=main',
+      'GET /repos/acme/app/pulls?state=open&head=acme%3AT-1-demo&base=main&sort=created&direction=desc&per_page=100&page=1',
       'POST /repos/acme/app/pulls',
     ]);
     assert.deepEqual(fake.requests[1]!.body, { title: 'feat(T-1): Demo', head: 'T-1-demo', base: 'main', body: '## What\nA demo.\n' });
@@ -210,7 +210,7 @@ test('GitLab: create (new and reused) with the description, status with the pipe
     const created = await forge.open(input);
     assert.deepEqual(created, { number: 1, url: `${fake.url}/group/sub/app/-/merge_requests/1`, state: 'open', reused: false });
     assert.deepEqual(fake.requests.map((r) => `${r.method} ${r.path}`), [
-      'GET /api/v4/projects/group%2Fsub%2Fapp/merge_requests?state=opened&source_branch=T-1-demo&target_branch=develop',
+      'GET /api/v4/projects/group%2Fsub%2Fapp/merge_requests?state=opened&source_branch=T-1-demo&target_branch=develop&order_by=created_at&sort=desc&per_page=100&page=1',
       'POST /api/v4/projects/group%2Fsub%2Fapp/merge_requests',
     ]);
     assert.deepEqual(fake.requests[1]!.body, { source_branch: 'T-1-demo', target_branch: 'develop', title: 'feat(T-1): Demo', description: 'Body.' });
@@ -241,5 +241,59 @@ test('GitLab: create (new and reused) with the description, status with the pipe
     }
   } finally {
     await fake.close();
+  }
+});
+
+// An open merge request the user opened by hand, in the fake host's memory.
+function opened(number: number, branch: string, base: string, state: FakeMr['state'] = 'open'): FakeMr {
+  return { number, branch, base, title: `MR ${number}`, body: '', state, draft: false, mergeable: true, mergeableState: 'clean', detailed: 'mergeable', merge_commit: null };
+}
+
+test('findOpen (SF-200): the open merge requests of the branch into the base, newest created first, with GET only; none is []; another branch\'s or base\'s entry is dropped', async () => {
+  for (const kind of ['github', 'gitlab'] as const) {
+    const fake = await startFakeForge(kind, 'acme/app');
+    try {
+      const forge = kind === 'github'
+        ? forgeFor('git@github.com:acme/app.git', forgeSettings({ SF_GITHUB_TOKEN: GH_TOKEN, SF_GITHUB_API: fake.url }))
+        : forgeFor(`${fake.url}/acme/app.git`, forgeSettings({ SF_GITLAB_TOKEN: GL_TOKEN, SF_GITLAB_URL: `${fake.url}/api/v4` }));
+      assert.deepEqual(await forge.findOpen('T-1-demo', 'main'), [], kind);
+      fake.mrs.push(opened(1, 'T-1-demo', 'main'), opened(2, 'T-1-other', 'main'), opened(3, 'T-1-demo', 'develop'), opened(4, 'T-1-demo', 'main', 'closed'), opened(5, 'T-1-demo', 'main'));
+      assert.deepEqual((await forge.findOpen('T-1-demo', 'main')).map((mr) => [mr.number, mr.state]), [[5, 'open'], [1, 'open']], kind);
+      // A host that ignored the filters: only the branch and base asked for are kept.
+      const list = kind === 'github' ? '/repos/acme/app/pulls' : '/api/v4/projects/acme%2Fapp/merge_requests';
+      fake.lists[list] = kind === 'github'
+        ? [{ number: 2, html_url: 'https://github.com/acme/app/pull/2', head: { ref: 'T-1-other' }, base: { ref: 'main' } }, { number: 3, html_url: 'https://github.com/acme/app/pull/3', head: { ref: 'T-1-demo' }, base: { ref: 'develop' } }]
+        : [{ iid: 2, web_url: `${fake.url}/acme/app/-/merge_requests/2`, source_branch: 'T-1-other', target_branch: 'main' }, { iid: 3, web_url: `${fake.url}/acme/app/-/merge_requests/3`, source_branch: 'T-1-demo', target_branch: 'develop' },
+          // A fork's branch of the same name.
+          { iid: 6, web_url: `${fake.url}/acme/app/-/merge_requests/6`, source_branch: 'T-1-demo', target_branch: 'main', source_project_id: 9, target_project_id: 1 }];
+      assert.deepEqual(await forge.findOpen('T-1-demo', 'main'), [], kind);
+      assert.deepEqual([...new Set(fake.requests.map((r) => r.method))], ['GET'], kind);
+      assert.ok(fake.requests.every((r) => r.path.startsWith(list)), kind);
+    } finally {
+      await fake.close();
+    }
+  }
+});
+
+test('findOpen reads every page: 150 open merge requests of the branch (two pages of 100) all count, newest first, with GET only', async () => {
+  for (const kind of ['github', 'gitlab'] as const) {
+    const fake = await startFakeForge(kind, 'acme/app');
+    try {
+      const forge = kind === 'github'
+        ? forgeFor('git@github.com:acme/app.git', forgeSettings({ SF_GITHUB_TOKEN: GH_TOKEN, SF_GITHUB_API: fake.url }))
+        : forgeFor(`${fake.url}/acme/app.git`, forgeSettings({ SF_GITLAB_TOKEN: GL_TOKEN, SF_GITLAB_URL: `${fake.url}/api/v4` }));
+      // The host's answer, newest created first, page by page.
+      const numbers = Array.from({ length: 150 }, (_, index) => 150 - index);
+      const list = kind === 'github' ? '/repos/acme/app/pulls' : '/api/v4/projects/acme%2Fapp/merge_requests';
+      fake.lists[list] = numbers.map((number) => (kind === 'github'
+        ? { number, html_url: `https://github.com/acme/app/pull/${number}`, head: { ref: 'T-1-demo' }, base: { ref: 'main' } }
+        : { iid: number, web_url: `${fake.url}/acme/app/-/merge_requests/${number}`, source_branch: 'T-1-demo', target_branch: 'main' }));
+      const found = await forge.findOpen('T-1-demo', 'main');
+      assert.deepEqual(found.map((mr) => mr.number), numbers, kind);
+      assert.deepEqual(fake.requests.map((r) => [r.method, new URL(r.path, 'http://fake').searchParams.get('page'), new URL(r.path, 'http://fake').searchParams.get('per_page')]),
+        [['GET', '1', '100'], ['GET', '2', '100']], kind);
+    } finally {
+      await fake.close();
+    }
   }
 });

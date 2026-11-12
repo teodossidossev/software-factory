@@ -19,11 +19,6 @@ function byIdAs<K extends keyof HTMLElementTagNameMap>(id: string, tag: K): HTML
 // instanceof: the tests' fake page has no element classes.
 const hasDataset = (node: Element): node is HTMLElement => 'dataset' in node;
 
-// The last merge request status read from the host for a job: run() stores the whole status
-// (MergeRequestStatus) of the mr-status answer, which core.ts's state types by the two fields
-// every reader compares.
-const mrStatusOf = (key: string): MergeRequestStatus | undefined => state.mrStatus.get(key) as MergeRequestStatus | undefined;
-
 // ---------- The header (the prototype's renderHead) ----------
 
 // Draws a part of the job page again (the header, the composer's actions: on every jobs event,
@@ -141,14 +136,12 @@ function renderComposer(): void {
     line.id = 'mr-line';
     line.append(document.createTextNode(`Merge request #${job.mr.number} (${job.mr.state}): `), mrLink(job.mr));
     cs.push(line);
-    // The status last read shows only while it is of the merge request the job shows now (the same
-    // number and state): after a merge, a close or a new merge request it stays hidden.
-    const read = mrStatusOf(keyOf(job));
-    if (read !== undefined && read.number === job.mr.number && read.state === job.mr.state) {
-      const status = el('span', 'muted', mrStatusText(read));
-      status.id = 'mr-status-line';
-      cs.push(status);
-    }
+  }
+  const read = mrReadLines(job);
+  if (read.length > 0) {
+    const status = el('span', 'muted', read.join(' '));
+    status.id = 'mr-status-line';
+    cs.push(status);
   }
   const finished = TERMINAL_STATES.includes(job.state);
   if (finished) {
@@ -331,7 +324,7 @@ function handoverFacts(job: JobRow, detail: JobDetail | null): HTMLElement {
   return facts;
 }
 
-// The More ▾ menu: Take it back (with what it does) and, after a separator, Abort the job….
+// The More ▾ menu: Take it back (with what it does), Refresh MR status, a separator, Abort the job….
 function handoverMenu(job: JobRow): HTMLElement {
   const wrap = el('div', 'ho-more');
   const toggle = button('btn small', 'More ▾', { homenu: '' });
@@ -343,13 +336,14 @@ function handoverMenu(job: JobRow): HTMLElement {
   menu.hidden = !state.handoverMenu;
   const takeback = actionButton(job, 'takeback', 'Take it back', 'ho-item');
   takeback.append(el('span', 'muted', 'Your checkout returns to how it was; the job stays ready.'));
+  const refresh = actionButton(job, 'mr-status', 'Refresh MR status', 'ho-item');
   const separator = el('div', 'ho-sep');
   separator.setAttribute('role', 'separator');
   const abort = actionButton(job, 'abort', 'Abort the job…', 'ho-item danger');
-  for (const item of [takeback, abort]) {
+  for (const item of [takeback, refresh, abort]) {
     item.setAttribute('role', 'menuitem');
   }
-  menu.append(takeback, separator, abort);
+  menu.append(takeback, refresh, separator, abort);
   wrap.append(toggle, menu);
   return wrap;
 }
@@ -546,9 +540,8 @@ function describeOutcome(action: string, result: unknown): Outcome {
     return { level: 'ok', text: `Merged merge request #${data.mr?.number}${commit}.` };
   }
   if (action === 'mr-status') {
-    return data.status !== null && typeof data.status === 'object'
-      ? { level: 'ok', text: mrStatusText(data.status) }
-      : { level: 'warn', text: 'The host said nothing of the merge request.' };
+    const text = [mrFoundText(data), data.status !== null && typeof data.status === 'object' ? mrStatusText(data.status) : ''].filter((part) => part !== '').join(' ');
+    return text !== '' ? { level: 'ok', text } : { level: 'warn', text: 'The host said nothing of the merge request.' };
   }
   if (action === 'review') {
     return { level: 'ok', text: `The review of iteration ${data.iteration} runs again (state ${data.state}).` };
@@ -777,9 +770,8 @@ async function run(action: string, key: string, body: Readonly<Record<string, un
   try {
     const result = await post(`api/jobs/${jobPath(key)}/${action}`, body);
     outcome = describeOutcome(action, result);
-    const status = actionResult(result).status;
-    if (action === 'mr-status' && status && typeof status === 'object') {
-      state.mrStatus.set(key, status);
+    if (action === 'mr-status') {
+      noteMrRead(key, actionResult(result));
     }
     // The sent draft goes; text edited meanwhile stays.
     if ((action === 'say' || action === 'resume') && typeof body.message === 'string' && state.drafts.get(key) === body.message) {

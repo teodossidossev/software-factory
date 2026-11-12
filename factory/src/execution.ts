@@ -44,7 +44,7 @@
 import type { Config } from './config.js';
 import { FactoryError } from './errors.js';
 import type { Decision } from './ledger.js';
-import type { ForgeKind, MergeRequestStatus } from './forge.js';
+import type { ForgeKind } from './forge.js';
 import { type OpenRequest, type ReviewThread, workspaceForge } from './forge-comments.js';
 import type { Job, JobMr, JobState, JobStore, PauseStep } from './jobs.js';
 import type { Workspace } from './registry.js';
@@ -52,7 +52,7 @@ import type { RunnerRequest, RunnerWork } from './runner.js';
 import { DEFAULT_PAGE_BYTES } from './repo-files.js';
 import { ControlPart } from './execution/control.js';
 import { Core } from './execution/core.js';
-import type { CheckResult, ExclusiveScope, MrInput, MrOutcome, MrSaved, MrView, Resumed, Retired, StateListener } from './execution/dto.js';
+import type { CheckResult, ExclusiveScope, MrInput, MrOutcome, MrSaved, MrStatusOutcome, MrView, Resumed, Retired, StateListener } from './execution/dto.js';
 import { type HandoverRunning, HandoverPart } from './execution/handover-steps.js';
 import { MrPart } from './execution/mr-steps.js';
 import type { JobStorePort, LivePort, LockPort, NoticePort, RunnerPort, SettingsPort, StopPort } from './execution/ports.js';
@@ -66,7 +66,7 @@ export { GATE_OVERRIDE_CODES, LEDGER_ACCEPT_CODES, MR_RETRY_CODES } from './exec
 export { MERGED_EVERY_MS, MERGED_FIRST_MS } from './execution/archive.js';
 export { changeNote, firstPrompt, imagesChangedNote } from './execution/prompts.js';
 export { branchName, MAX_REPORT_BYTES, slugify } from './execution/shared.js';
-export type { CheckResult, ExclusiveScope, MrInput, MrOutcome, MrSaved, MrView, Resumed, Retired, ReviewStatus, StateListener } from './execution/dto.js';
+export type { CheckResult, ExclusiveScope, MrInput, MrOutcome, MrSaved, MrStatusOutcome, MrView, Resumed, Retired, ReviewStatus, StateListener } from './execution/dto.js';
 export type { HandoverRunning } from './execution/handover-steps.js';
 export type { ExecutionOptions } from './execution/shared.js';
 
@@ -246,7 +246,7 @@ export class Execution implements RunnerWork {
     return this.#parts.mr.mergeMergeRequest(workspaceName, ticket);
   }
 
-  mergeRequestStatus(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; mr: JobMr; status: MergeRequestStatus }> {
+  mergeRequestStatus(workspaceName: string, ticket: string): Promise<MrStatusOutcome> {
     return this.#parts.mr.mergeRequestStatus(workspaceName, ticket);
   }
 

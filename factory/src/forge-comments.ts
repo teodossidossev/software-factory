@@ -65,7 +65,7 @@ function openRequestsOf(client: HostClient, entries: Json[], map: (entry: Json) 
 
 // Every page of a list (page=1, 2, ...) until a page holds fewer than PAGE_SIZE entries: no page
 // limit, so nothing is cut off silently.
-async function allPages(client: HostClient, path: string, what: string): Promise<Json[]> {
+export async function allPages(client: HostClient, path: string, what: string): Promise<Json[]> {
   const entries: Json[] = [];
   for (let page = 1; ; page += 1) {
     const separator = path.includes('?') ? '&' : '?';

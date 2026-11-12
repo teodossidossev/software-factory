@@ -156,7 +156,7 @@ export const COMMANDS = {
   },
   mrStatus: {
     name: 'mr status', args: ['<workspace>', '<ticket>'], openWhileUpdating: true,
-    description: 'The merge request\'s state on the host: open, merged or closed, mergeable or not, the checks',
+    description: 'The merge request\'s state on the host: open, merged or closed, mergeable or not, the checks; without a record, the open one of the job\'s branch is found and recorded',
     run: (s, [w = '', t = '']) => s.execution.mergeRequestStatus(w, t),
   },
   mrList: {
@@ -495,15 +495,21 @@ function mergeRequestShown(command: Command, result: Result): Answer {
   } else if (command === COMMANDS.mrMerge && mr !== undefined) {
     lines.push(`merge request: #${mr.number} merged`, ...(typeof mr.merge_commit === 'string' ? [`merge commit: ${mr.merge_commit}`] : []), `url: ${mr.url}`);
   } else if (command === COMMANDS.mrStatus) {
-    const status = result.status as { number: number; url: string; state: string; draft: boolean; mergeable: boolean | null; reason?: string; checks?: string; merge_commit?: string };
-    lines.push(
+    // A job without a record, looked up by its branch: how many open ones, or none.
+    const found = result.found as { count: number } | undefined;
+    if (found !== undefined) {
+      lines.push(found.count === 0 ? `No open merge request for branch ${String(result.branch)}.`
+        : `Found by branch ${String(result.branch)}${found.count > 1 ? ` (newest of ${found.count} open)` : ''}`);
+    }
+    const status = result.status as { number: number; url: string; state: string; draft: boolean; mergeable: boolean | null; reason?: string; checks?: string; merge_commit?: string } | undefined;
+    lines.push(...(status === undefined ? [] : [
       `merge request: #${status.number} ${status.state}${status.draft ? ' (draft)' : ''}`,
       `url: ${status.url}`,
       ...(status.state === 'open' ? [`mergeable: ${status.mergeable === null ? 'not known yet' : status.mergeable ? 'yes' : 'no'}`] : []),
       ...(status.reason !== undefined && status.state === 'open' ? [`reason: ${status.reason}`] : []),
       ...(status.checks !== undefined ? [`checks: ${status.checks}`] : []),
       ...(status.merge_commit !== undefined ? [`merge commit: ${status.merge_commit}`] : []),
-    );
+    ]));
   }
   return { lines, failed: error !== undefined };
 }

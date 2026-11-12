@@ -183,7 +183,7 @@ export class MrPart {
 
   // The end of a turn of MR preparation (mark_clean). After the MR text turn: validate the text,
   // then the factory commits and rebases in the worktree. A rebase that stops on conflicts stays
-  // in progress for one conflict turn, whose end comes back here (#conflictIdle). Ready: record
+  // in progress for one conflict turn, whose end comes back here (conflictIdle). Ready: record
   // the branch tip, remove the worktree and hand the job to the user.
   async mrIdle(job: Job, live: Live, outcome: IdleOutcome): Promise<void> {
     const cwd = live.cwd;
@@ -195,7 +195,7 @@ export class MrPart {
     };
     try {
       if (await rebaseInProgress(cwd)) {
-        await this.#conflictIdle(job, live, outcome);
+        await this.conflictIdle(job, live, outcome);
         return;
       }
       const stopped = outcome.ok ? await implementerQuestion(this.#store.jobs, job, cwd) : outcome;
@@ -332,7 +332,8 @@ export class MrPart {
   // failing continue aborts the rebase (mr_conflict); a failing continue first saves the resolved
   // worktree as conflict-resolution.diff of the last published iteration. After a continue the
   // change is no longer the reviewed one: it goes back to review against the target, same worktree.
-  async #conflictIdle(job: Job, live: Live, outcome: IdleOutcome): Promise<void> {
+  // Also the end of a working turn (from #idle) after a stop left the rebase in progress.
+  async conflictIdle(job: Job, live: Live, outcome: IdleOutcome): Promise<void> {
     const cwd = live.cwd;
     const files = live.mr?.conflicts ?? (await unmergedPaths(cwd));
     const targetRef = live.mr?.targetRef ?? job.base;
@@ -341,7 +342,7 @@ export class MrPart {
     if (!outcome.ok) {
       await this.#locks.gitLocked(job.workspace, () => abortRebase(cwd));
       const message = `The rebase had conflicts in ${files.join(', ')}; the conflict turn failed (${outcome.code}: ${outcome.message}). The rebase was aborted.`;
-      // from: preparing_mr (mrIdle, from #idle)
+      // from: preparing_mr (mrIdle, from #idle), working (#idle)
       await this.#store.transition(job, 'needs_human', 'mr_turn_end', { code: 'mr_conflict', message: message.slice(0, 1000) });
       return;
     }
@@ -349,20 +350,16 @@ export class MrPart {
     const save = (write: (handle: FileHandle) => Promise<void>): Promise<string> => this.#store.jobs.writeConflictResolution(job.workspace, job.ticket, job.iteration, write);
     const failure = await this.#locks.gitLocked(job.workspace, () => continueRebase(cwd, { files, targetCommit, save }));
     if (failure !== undefined) {
-      // from: preparing_mr (mrIdle, from #idle)
+      // from: preparing_mr (mrIdle, from #idle), working (#idle)
       await this.#store.transition(job, 'needs_human', 'mr_turn_end', failure);
       return;
     }
     // The resolution goes back to review with this transition: the conflict turn's window ends,
     // so a later stop of MR preparation after a clean verdict on it may be retried.
     const rebased: Job = { ...job, base_commit: targetCommit, target_commit: targetCommit, mr_conflict_turn: false };
-    const note = [
-      '## MR preparation',
-      '',
-      `The rebase onto ${targetRef} (${targetCommit}) had conflicts in ${files.join(', ')}, resolved by the Implementer. The Patch is now against the target.`,
-    ].join('\n');
+    const note = `## MR preparation\n\nThe rebase onto ${targetRef} (${targetCommit}) had conflicts in ${files.join(', ')}, resolved by the Implementer. The Patch is now against the target.`;
     const { job: published, changes } = await this.#peers.turns.publish(rebased, live, outcome, await buildPatch(cwd, targetCommit), [note]);
-    // from: preparing_mr (mrIdle, from #idle)
+    // from: preparing_mr (mrIdle, from #idle), working (#idle)
     await this.#peers.reviews.startReview(await this.#store.transition(published, 'awaiting_review', 'mr_turn_end', undefined, [notificationLine(changes)]));
   }
 

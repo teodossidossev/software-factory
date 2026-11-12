@@ -1485,7 +1485,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   Claude review over `gate_failed` or `gate_budget`, `No reviewer passed iteration N.`
 - The **findings ledger** (SF-052, `src/ledger.ts`): `jobs/<ws>/<ticket>/ledger.json`, one entry per
   review item that went into a Fix section: `{id, iteration, reviewer, severity, path, problem,
-  expected, status, response, evidence, reopened, asked, caused_by, dispute, settled}`. `id` is
+  expected, status, response, evidence, reopened, asked, caused_by, dispute, settled}`, and
+  `fixed_by_clean` (SF-199, optional) on an entry a clean verdict settled. `id` is
   `R1`, `R2`, … per job, in Fix order; `asked` is the Fix section that listed it last. `status` is
   `open`, `fixed`, `contested`, `escalated`, `left` (a nit not done), `accepted_risk` or `user_fix`.
   It is written atomically under the job lock, and `sf reset` archives it with the job.
@@ -1503,7 +1504,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
     entry is `open`. An item that conflicts with the Task file only because the user's message
     asked for it is contested with the message, never escalated. `escalated` needs a question; `left` is for nits only (a blocker or major reads
     as `open`); a `user_fix` entry is settled by `fixed` only. An `open` blocker or major comes back
-    in the next Fix section, even under a clean verdict. An entry for an undeclared sensitive path
+    in the next Fix section, even under a clean verdict, except under a clean verdict of the
+    reviewer that decides the round. An entry for an undeclared sensitive path
     is settled by the reviewers' acceptance of the path instead. The factory's item for a path not
     accepted reopens the path's entry and goes through the same rules as a reviewer's: dropped once
     the user accepted the risk (the path then counts as accepted and Clean passes it), a dispute
@@ -1526,6 +1528,18 @@ ended. A restart of `sf serve` therefore leaves a working job working.
     reopening is
     `needs_human` `review_churn`; when every blocker and major item left names an existing entry in
     `caused_by`, it is `review_churn` as well. Otherwise the verdict applies as before (SF-051).
+  - **A clean verdict settles the round** (SF-199). The reviewer that decides the round is the gate,
+    or the Claude review when the gate does not run on the iteration (the gate off, or skipped by
+    its gate level). Its verdict, as the factory acts on it (no blocker or major item, no path it
+    does not accept; nits allowed), saw the whole change: every `open` blocker or major entry of an
+    earlier round (`asked` below the iteration) that the verdict does not carry again becomes
+    `fixed`, with `response` "Settled by the clean <reviewer> verdict of iteration N." and
+    `fixed_by_clean: N`. The factory's own entries (sensitive paths, paths outside the scope) and
+    `user_fix`, `contested`, `escalated`, `left` and `accepted_risk` entries are untouched, so a fix
+    the user decided still makes a Fix. The Fix round limit (`iteration_limit`) and churn
+    (`review_churn`) count no settled entry; a later item may reopen it like any `fixed` entry,
+    which drops the mark. A clean Claude verdict the gate follows settles nothing: the open entries
+    make the next Fix as before.
   - `sf settle <workspace> <ticket> <id> accept|fix [note...]`, or *Accept risk* / *Must fix* on the
     dashboard (`POST api/jobs/<ws>/<ticket>/settle`), settles an `escalated` or `contested` entry
     while the job is `needs_human`: `accept` makes it `accepted_risk`, `fix` makes it `user_fix`.
@@ -1534,7 +1548,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
     the job goes on by itself (after `review_churn` a settlement is only recorded; `sf say` goes on).
     When the user decided a fix, a Fix section by "the user" follows with the `user_fix` entries
     (named in its lead line) and the open blockers and majors carried along; otherwise the review
-    that stopped runs again, and brings the open entries back itself (the gate when the
+    that stopped runs again, and brings the open entries back itself, or settles them with a clean
+    verdict that decides the round (the gate when the
     gate stopped it, the Claude review otherwise; `review.json` or `gate.json` of the iteration is
     removed first). Refused with `invalid_state` in another state or for another entry, with
     `invalid_content` for a bad id, decision or note.
@@ -2203,9 +2218,11 @@ any other is refused with `illegal_transition`.
 | `starting` | `failed` | `launch` |
 | `starting` | `failed` | `recover` |
 | `working` | `awaiting_review` | `publish` |
+| `working` | `awaiting_review` | `mr_turn_end` |
 | `working` | `needs_human` | `recover` |
 | `working` | `needs_human` | `repair_handover` |
 | `working` | `needs_human` | `publish` |
+| `working` | `needs_human` | `mr_turn_end` |
 | `working` | `paused` | `pause` |
 | `working` | `waiting_limit` | `park` |
 | `working` | `aborted` | `abort` |
@@ -2641,7 +2658,14 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
      report plus `## MR preparation` (the rebase onto `<target ref>` (`<commit>`) had conflicts in
      `<files>`, resolved by the Implementer), and the Patch against the target. The worktree stays
      and the job goes back to `awaiting_review`. The next Clean commits again, and its rebase has
-     nothing to do.
+     nothing to do;
+   - a stop that leaves the rebase in progress (`mr_failed` inside it), then the user's message
+     (*Tell it to go on*, `sf say`): the end of that working turn is the conflict turn's end above,
+     the rebase continued and the iteration published against the target (SF-199). When the turn
+     finished the rebase itself (the worktree's HEAD holds `target_commit`, which differs from
+     `base_commit`), the iteration's `base_commit`, Patch, changed paths and scope check are
+     against the target as well: main's own changes since the original base are never the job's
+     paths.
 5. Failures end in `needs_human` with the worktree kept for the retry. Nothing is committed when
    the MR text fails its check.
 

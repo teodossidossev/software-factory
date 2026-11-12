@@ -1,9 +1,10 @@
 // Unit tests of the findings ledger (SF-052, src/ledger.ts): the ids of a Fix section, the Report
 // table (each answer, a contest without evidence, unreadable rows, left on a major), the five rules
-// of a verdict for both reviewers, the user's settlement, the reviewers' prompt and the MR section.
+// of a verdict for both reviewers, the user's settlement, the reviewers' prompt and the MR section;
+// what a clean verdict of the reviewer that decides the round settles.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { answerFix, applyVerdict, escalationMessage, type EvidenceContext, findEvidence, headings, type LedgerEntry, reportRows, settle, settledLines, unappliedEntries, unsettled, userFixItems } from '../src/ledger.js';
+import { answerFix, applyVerdict, escalationMessage, type EvidenceContext, findEvidence, headings, type LedgerEntry, ledgerSchema, reportRows, settle, settledLines, unappliedEntries, unsettled, userFixItems } from '../src/ledger.js';
 import { FINDINGS_HEADING, NITS_HEADING, withFindings, withNits } from '../src/mr.js';
 import { GATE_SCHEMA } from '../src/gate.js';
 import { fixContent, REVIEW_SCHEMA, type ReviewItem, reviewOutput, reviewPrompt, scopeItem, sensitiveItem } from '../src/review.js';
@@ -393,4 +394,59 @@ test("a path outside the Task's scope keeps its own entry, apart from a sensitiv
   const contested = [entry('R1', 'contested', { path: 'notes.txt', problem: "Outside the Task's scope.", response: 'The README cites it.', evidence: 'a.ts:1' })];
   const disputed = applyVerdict({ ledger: contested, items: [], extra: [outside], reviewer: 'codex', iteration: 2 });
   assert.match(disputed.kind === 'stop' ? disputed.message : '', /Codex reopens it: Codex does not accept the path outside the Task's scope notes\.txt \(it is not in its accepted_sensitive\)\./);
+});
+
+// The ledger of a job whose earlier rounds left findings: open majors and a blocker of Fix 1 and
+// Fix 2, an open nit, the user's fix, a contest, an escalation, a nit left, an accepted risk and an
+// open scope entry of the factory.
+const earlier = (): LedgerEntry[] => [
+  entry('R1', 'open'), entry('R2', 'open', { asked: 2 }), entry('R3', 'open', { severity: 'blocker', asked: 2 }), entry('R4', 'open', { severity: 'nit', asked: 2 }),
+  entry('R5', 'user_fix', { settled: { decision: 'fix', note: 'Do it.', at: '2026-11-05T00:00:00.000Z' } }), entry('R6', 'contested', { evidence: 'a.ts:1' }), entry('R7', 'escalated', { response: 'Which?' }),
+  entry('R8', 'left', { severity: 'nit' }), entry('R9', 'accepted_risk', { settled: { decision: 'accept', note: 'ok', at: '2026-11-05T00:00:00.000Z' } }),
+  entry('R10', 'open', { path: 'notes.txt', problem: "Outside the Task's scope." }),
+];
+const statuses = (ledger: LedgerEntry[]): Array<[string, string, number | undefined]> => ledger.map((e) => [e.id, e.status, e.fixed_by_clean]);
+
+test('a clean verdict of the reviewer that decides the round settles the open blocker and major entries of earlier rounds as fixed, nits on it too; nothing else', () => {
+  for (const [reviewer, name] of [['codex', 'Codex'], ['claude', 'Claude']] as const) {
+    const nit = item('n.ts', 'Wording.', 'nit');
+    const applied = applyVerdict({ ledger: earlier(), items: [nit], extra: [], reviewer, iteration: 3, decides: true });
+    // The user's fix still makes a Fix; the settled entries are not in it.
+    assert.deepEqual(applied.kind === 'fix' && applied.items.map((fixItem) => fixItem.id), ['R5', 'R11']);
+    assert.deepEqual(statuses(applied.ledger).slice(0, 10), [
+      ['R1', 'fixed', 3], ['R2', 'fixed', 3], ['R3', 'fixed', 3], ['R4', 'open', undefined], ['R5', 'user_fix', undefined], ['R6', 'contested', undefined],
+      ['R7', 'escalated', undefined], ['R8', 'left', undefined], ['R9', 'accepted_risk', undefined], ['R10', 'fixed', undefined],
+    ]);
+    assert.equal(applied.ledger[0]!.response, `Settled by the clean ${name} verdict of iteration 3.`);
+    assert.ok(settledLines(applied.ledger).includes(`- R2 · fixed · major · \`a.ts\`: Problem of R2. Response: Settled by the clean ${name} verdict of iteration 3.`));
+  }
+  // Without the user's fix the round is clean: no Fix, so no iteration_limit stop either.
+  const clean = applyVerdict({ ledger: [entry('R1', 'open'), entry('R2', 'open', { asked: 2 }), entry('R3', 'open', { asked: 2 })], items: [], extra: [], reviewer: 'codex', iteration: 3, decides: true });
+  assert.equal(clean.kind, 'clean');
+  assert.deepEqual(statuses(clean.ledger), [['R1', 'fixed', 3], ['R2', 'fixed', 3], ['R3', 'fixed', 3]]);
+  // An entry asked in this very round is not one the verdict saw answered.
+  assert.deepEqual(statuses(applyVerdict({ ledger: [entry('R1', 'open', { asked: 3 })], items: [], extra: [], reviewer: 'codex', iteration: 3, decides: true }).ledger), [['R1', 'open', undefined]]);
+});
+
+test('a clean verdict settles nothing from a reviewer that does not decide the round, nor with a blocking item: the open entries make a Fix as before', () => {
+  const open = [entry('R1', 'open'), entry('R2', 'open', { asked: 2 })];
+  // The Claude review the gate follows: its clean verdict leaves the entries open.
+  const followed = applyVerdict({ ledger: open, items: [], extra: [], reviewer: 'claude', iteration: 3, decides: false });
+  assert.deepEqual(followed.kind === 'fix' && followed.items.map((fixItem) => fixItem.id), ['R1', 'R2']);
+  assert.deepEqual(statuses(followed.ledger), [['R1', 'open', undefined], ['R2', 'open', undefined]]);
+  // A new major item of the deciding reviewer: nothing is settled, the Fix carries it with the entries.
+  const blocked = applyVerdict({ ledger: open, items: [item('c.ts', 'New.')], extra: [], reviewer: 'codex', iteration: 3, decides: true });
+  assert.deepEqual(blocked.kind === 'fix' && blocked.items.map((fixItem) => fixItem.id), ['R3', 'R1', 'R2']);
+  assert.deepEqual(statuses(blocked.ledger).slice(0, 2), [['R1', 'open', undefined], ['R2', 'open', undefined]]);
+  // A path outside the scope the reviewer does not accept blocks too.
+  const outside = applyVerdict({ ledger: open, items: [], extra: [scopeItem('notes.txt')], reviewer: 'codex', iteration: 3, decides: true });
+  assert.deepEqual(statuses(outside.ledger).slice(0, 2), [['R1', 'open', undefined], ['R2', 'open', undefined]]);
+  // An item that reopens a settled entry in a later round opens it again, without its mark.
+  const settled = applyVerdict({ ledger: open, items: [], extra: [], reviewer: 'codex', iteration: 3, decides: true }).ledger;
+  const reopened = applyVerdict({ ledger: settled, items: [item('a.ts', 'Still broken.', 'major', { reopens: 'R1' })], extra: [], reviewer: 'codex', iteration: 4, decides: true });
+  assert.deepEqual(reopened.kind === 'fix' && reopened.items.map((fixItem) => fixItem.id), ['R1']);
+  assert.deepEqual(statuses(reopened.ledger), [['R1', 'open', undefined], ['R2', 'fixed', 3]]);
+  // ledger.json of an earlier version (no fixed_by_clean) reads, and so does the new field.
+  assert.equal(ledgerSchema.safeParse(open).success, true);
+  assert.equal(ledgerSchema.safeParse(settled).success, true);
 });

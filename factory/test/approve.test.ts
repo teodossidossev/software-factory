@@ -3,7 +3,7 @@
 // in the job's worktree. Abort, reset, SF_SANDBOX=off and the notifications are in abort-notify.test.ts.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
@@ -12,7 +12,8 @@ import { mrMessage, pushBranch } from '../src/mr.js';
 import { conflictPrompt, mrPrompt } from '../src/prompts.js';
 import { DENIED_TOOLS } from '../src/rules.js';
 import { prepareClaudeState } from '../src/session-wrapper.js';
-import { assertPathDenials, call, fakeLog, git, newEnv, newRepo, putTask, refused, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
+import { writeTask } from '../src/task-file.js';
+import { assertPathDenials, call, fakeLog, git, newEnv, newRepo, putTask, refused, runCli, script, serve, stop, task, temp, waitFor } from './support/harness.js';
 
 const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid'];
 
@@ -417,6 +418,76 @@ test('mark_clean: a resolved conflict whose rebase --continue fails keeps the re
   assert.match(patch, /^-9 upstream\n\+9 change and upstream$/m);
   assert.match(patch, /^\+adapted$/m);
   await stop(served);
+});
+
+// A job of scope lines.txt whose MR preparation stops (mr_failed) inside the rebase onto a target
+// that changed lines.txt and added upstream.txt: the conflict turn resolves lines.txt, but the
+// worktree's index is locked, so staging the resolution fails and the rebase stays in progress.
+// Then the user tells it to go on, and goOn is that turn (its writes and commands).
+async function stoppedInRebase(name: string, ticket: string, goOn: Record<string, unknown>): Promise<{ env: Awaited<ReturnType<typeof newEnv>>; served: Awaited<ReturnType<typeof serve>>; worktree: string; original: string; upstream: string }> {
+  const env = await newEnv(name);
+  const { repo, origin } = await linesRepo(env, `${name}-repo`);
+  await writeTask({ name: 'app', readCheckout: repo, workCheckout: repo }, ticket, task(ticket, 'Edit line nine').replace('base: main\n', 'base: main\nscope: [lines.txt]\n'), new JobStore(env.state));
+  const lock = ['sh', '-c', 'touch "$(git rev-parse --git-path index.lock)"'];
+  await script(env, [
+    { write: { 'lines.txt': lines({ 9: '9 change' }) }, text: 'iteration 1' },
+    { write: { [`.software-factory/${ticket}.mr.md`]: mrText(`feat(${ticket}): Edit line nine`) }, text: 'MR text' },
+    { write: { 'lines.txt': lines({ 9: '9 change and upstream' }) }, run: [lock], text: 'resolved' },
+    goOn,
+  ]);
+  const served = await serve(env);
+  await call(served, 'start', { workspace: 'app', ticket });
+  await waitFor(served, ticket, 'awaiting_review', 1);
+  const worktree = worktreeOf(env, ticket);
+  const original = (await new JobStore(env.state).read('app', ticket))!.base_commit!;
+  const upstream = pushToOrigin(origin, { 'lines.txt': lines({ 9: '9 upstream' }), 'upstream.txt': 'main only\n' }, 'upstream line nine and a file');
+  await call(served, 'mark_clean', { workspace: 'app', ticket });
+  const failed = await waitFor(served, ticket, 'needs_human', 1);
+  assert.equal(failed.error.code, 'mr_failed', JSON.stringify(failed.error));
+  assert.equal(await rebasing(worktree), true);
+  await rm(resolve(worktree, git(worktree, 'rev-parse', '--git-path', 'index.lock').trim()));
+  const said = await runCli(env, ['say', 'app', ticket, 'Tell', 'it', 'to', 'go', 'on']);
+  assert.equal(said.code, 0, said.stderr);
+  return { env, served, worktree, original, upstream };
+}
+
+// The iteration after the go-on turn is the job's change on top of the target: its base, its Patch
+// and its paths are against the target, never the job's original base.
+async function assertOnTarget(env: { state: string }, ticket: string, reviewed: Record<string, any>, worktree: string, upstream: string): Promise<void> {
+  const jobs = new JobStore(env.state);
+  const job = (await jobs.read('app', ticket))!;
+  // The resolution went back to review: the conflict turn's window is closed (Retry allowed again).
+  assert.deepEqual([job.base_commit, job.target_commit, job.mr_conflict_turn], [upstream, upstream, false]);
+  const meta = await jobs.readMeta('app', ticket, 2);
+  assert.deepEqual([meta.base_commit, meta.changed_files.map((file) => file.path)], [upstream, ['lines.txt']]);
+  assert.match(reviewed.patch.text, /^-9 upstream\n\+9 change and upstream$/m);
+  assert.doesNotMatch(reviewed.patch.text, /upstream\.txt/);
+  assert.doesNotMatch(reviewed.report, /upstream\.txt|outside the Task's scope/);
+  assert.equal(await rebasing(worktree), false);
+  assert.equal(git(worktree, 'rev-parse', 'HEAD~1').trim(), upstream);
+}
+
+test('mr_failed inside the rebase, then go on: the turn ends as the conflict turn, the rebase continues and the iteration is measured against the target', async () => {
+  const { env, served, worktree, original, upstream } = await stoppedInRebase('goonrebase', 'M-4', { text: '# Report: M-4, went on' });
+  try {
+    const reviewed = await waitFor(served, 'M-4', 'awaiting_review', 2);
+    assert.match(reviewed.report, new RegExp(`^## MR preparation\\n\\nThe rebase onto \\S+ \\(${upstream}\\) had conflicts in lines\\.txt, resolved by the Implementer\\.`, 'm'));
+    await assertOnTarget(env, 'M-4', reviewed, worktree, upstream);
+    assert.equal((await new JobStore(env.state).readMeta('app', 'M-4', 1)).base_commit, original);
+  } finally {
+    await stop(served);
+  }
+});
+
+test('mr_failed inside the rebase, then go on: a turn that finishes the rebase itself publishes against the target, not the old base', async () => {
+  const finish = [['git', 'add', 'lines.txt'], ['git', ...ID, '-c', 'core.editor=true', 'rebase', '--continue']];
+  const { env, served, worktree, upstream } = await stoppedInRebase('goonrebased', 'M-5', { run: finish, text: '# Report: M-5, rebase finished' });
+  try {
+    const reviewed = await waitFor(served, 'M-5', 'awaiting_review', 2);
+    await assertOnTarget(env, 'M-5', reviewed, worktree, upstream);
+  } finally {
+    await stop(served);
+  }
 });
 
 test('mark_clean retries directly after a failed MR turn (sandbox_unavailable); approve pushes', async () => {

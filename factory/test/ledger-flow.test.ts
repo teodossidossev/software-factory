@@ -3,7 +3,9 @@
 // ledger.json, an escalation that stops the job before the review and sf settle that resumes it
 // (the review again, or a Fix with the user's decision), an item that reopens an accepted risk
 // (dropped), a gate that disputes a contest and Accept on review_disputed, churn by both reviewers
-// and Accept on review_churn (refused without a clean Claude review), the MR section, sf reset.
+// and Accept on review_churn (refused without a clean Claude review), the MR section, sf reset; a
+// clean verdict of the reviewer that decides the round settles the open entries, a clean Claude
+// verdict the gate follows does not.
 import assert from 'node:assert/strict';
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -116,7 +118,7 @@ test('escalation: sf settle fix writes the next Fix section with the user\'s dec
   }
 });
 
-test('escalation with a second open major: accepting R1 runs the stopped review again, no Fix by the user; the review brings R2 back', async () => {
+test('escalation with a second open major: accepting R1 runs the stopped review again, no Fix by the user; its clean verdict (the gate off: it decides) settles R2', async () => {
   const env = await newEnv('ledger-escalate-open', { SF_REVIEW: 'on' });
   const repo = await newRepo(env, 'ledger-escalate-open-repo', false);
   await putTask(env, repo, 'L-6', 'Greet the reader');
@@ -125,10 +127,9 @@ test('escalation with a second open major: accepting R1 runs the stopped review 
     { write: { 'README.md': 'hello world\n' }, text: 'Report of iteration 1' },
     // R1 escalated, R2 left unanswered: it reads as open.
     { write: { 'README.md': 'hello reader\n' }, text: '| R1 | escalated | Which language? |' },
-    { write: { 'a.txt': 'a line\n' }, text: '| R2 | fixed | A line now. |' },
     { write: { '.software-factory/L-6.mr.md': mrText('feat(L-6): Greet the reader') }, text: 'prepared' },
   ]);
-  await reviewScript(env, [{ output: { ...FIX, items: [ITEM, second] } }, { output: CLEAN }, { output: CLEAN }]);
+  await reviewScript(env, [{ output: { ...FIX, items: [ITEM, second] } }, { output: CLEAN }]);
   const served = await serve(env);
   try {
     await call(served, 'start', { workspace: 'app', ticket: 'L-6' });
@@ -136,19 +137,17 @@ test('escalation with a second open major: accepting R1 runs the stopped review 
     assert.equal(stopped.error.code, 'escalated');
     const settled = await runCli(env, ['settle', 'app', 'L-6', 'R1', 'accept']);
     assert.equal(settled.code, 0, settled.stderr);
-    await waitFor(served, 'L-6', 'ready_for_human_review', 3);
-    // The stopped iteration was reviewed; the Fix that followed is the review's, carrying R2.
+    await waitFor(served, 'L-6', 'ready_for_human_review', 2);
+    // The stopped iteration was reviewed, clean: no Fix followed.
     const reviews = await reviewLog(env);
-    assert.equal(reviews.length, 3);
+    assert.equal(reviews.length, 2);
     assert.match(reviews[1]!.prompt, /^Code review of iteration 2 of ticket L-6\. /);
     const text = await taskFile(repo, 'L-6');
-    assert.doesNotMatch(text, /The user settled the stop/);
-    assert.ok(text.endsWith([
-      '## Fix 2', '', 'Review by Claude: Looks right.', '',
-      '1. [R2, major] `a.txt`: Empty. Expected: A line.', '',
-    ].join('\n')), text);
+    assert.doesNotMatch(text, /The user settled the stop|## Fix 2/);
     const jobs = new JobStore(env.state);
-    assert.deepEqual((await jobs.readLedger('app', 'L-6')).map((entry) => [entry.id, entry.status]), [['R1', 'accepted_risk'], ['R2', 'fixed']]);
+    assert.deepEqual((await jobs.readLedger('app', 'L-6')).map((entry) => [entry.id, entry.status, entry.fixed_by_clean, entry.response]), [
+      ['R1', 'accepted_risk', undefined, 'Which language?'], ['R2', 'fixed', 2, 'Settled by the clean Claude verdict of iteration 2.'],
+    ]);
   } finally {
     await stop(served);
   }
@@ -362,6 +361,66 @@ test("a contest with the user's message: the Implementer cites the message, the 
     const third = reviews[2]!.prompt;
     assert.match(third, /<settled_findings>\n- R1 · contested · major · `README\.md`: It greets the world\. Response: [^\n]* Evidence: user message "greet the world again"\n<\/settled_findings>/);
     assert.match(third, /<user_decisions>\n<user_message iteration="2" at="[^"]+">\nPlease greet the world again\.\n<\/user_message>\n<\/user_decisions>/);
+  } finally {
+    await stop(served);
+  }
+});
+
+test('a clean gate verdict settles the open majors of earlier rounds: at the Fix round limit the job goes on to MR preparation, no iteration_limit stop', async () => {
+  // The gate alone: the ticket does not ask for the Claude review.
+  const env = await newEnv('ledger-clean-settles', { SF_REVIEW: 'on', SF_CLAUDE_REVIEW: 'ticket', SF_GATE: 'codex', SF_CODEX: fakeCodex, SF_MAX_ITERATIONS: '2' });
+  const repo = await newRepo(env, 'ledger-clean-settles-repo', false);
+  await putTask(env, repo, 'L-10', 'Greet the reader');
+  const second = { path: 'a.txt', problem: 'Empty.', expected: 'A line.', severity: 'major' };
+  const third = { path: 'b.txt', problem: 'Missing.', expected: 'A file.', severity: 'major' };
+  await script(env, [
+    { write: { 'README.md': 'hello world\n' }, text: 'Report of iteration 1' },
+    // No Fix table in either Report: every entry stays open.
+    { write: { 'README.md': 'hello reader\n', 'a.txt': 'a line\n' }, text: 'Report of iteration 2' },
+    { write: { 'b.txt': 'b\n' }, text: 'Report of iteration 3' },
+    { write: { '.software-factory/L-10.mr.md': mrText('feat(L-10): Greet the reader') }, text: 'prepared' },
+  ]);
+  await codexScript(env, [{ output: { ...FIX, items: [ITEM, second] } }, { output: { ...FIX, items: [third] } }, { output: CLEAN }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'L-10' });
+    await waitFor(served, 'L-10', 'ready_for_human_review', 3);
+    const jobs = new JobStore(env.state);
+    assert.equal((await jobs.read('app', 'L-10'))!.fixes, 2);
+    assert.equal((await codexLog(env)).length, 3);
+    const settled = 'Settled by the clean Codex verdict of iteration 3.';
+    assert.deepEqual((await jobs.readLedger('app', 'L-10')).map((entry) => [entry.id, entry.status, entry.fixed_by_clean, entry.response]), [
+      ['R1', 'fixed', 3, settled], ['R2', 'fixed', 3, settled], ['R3', 'fixed', 3, settled],
+    ]);
+    assert.ok(!(await jobs.readMrText('app', 'L-10'))!.includes(FINDINGS_HEADING));
+  } finally {
+    await stop(served);
+  }
+});
+
+test('a clean Claude verdict the gate follows settles nothing: the open entry makes the next Fix, and the gate runs only once Claude passes it', async () => {
+  const env = await newEnv('ledger-claude-clean', { SF_REVIEW: 'on', SF_GATE: 'codex', SF_GATE_LEVEL: 'full', SF_CODEX: fakeCodex });
+  const repo = await newRepo(env, 'ledger-claude-clean-repo', false);
+  await putTask(env, repo, 'L-11', 'Greet the reader');
+  await script(env, [
+    { write: { 'README.md': 'hello world\n' }, text: 'Report of iteration 1' },
+    // No Fix table: R1 stays open.
+    { write: { 'a.txt': 'a\n' }, text: 'Report of iteration 2' },
+    { write: { 'README.md': 'hello reader\n' }, text: '| R1 | fixed | It greets the reader. |' },
+    { write: { '.software-factory/L-11.mr.md': mrText('feat(L-11): Greet the reader') }, text: 'prepared' },
+  ]);
+  await reviewScript(env, [{ output: FIX }, { output: CLEAN }, { output: CLEAN }]);
+  await codexScript(env, [{ output: CLEAN }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'L-11' });
+    await waitFor(served, 'L-11', 'ready_for_human_review', 3);
+    assert.ok((await taskFile(repo, 'L-11')).includes([
+      '## Fix 2', '', 'Review by Claude: Looks right.', '', '1. [R1, major] `README.md`: It greets the world. Expected: It greets the reader.',
+    ].join('\n')));
+    const jobs = new JobStore(env.state);
+    assert.deepEqual((await jobs.readLedger('app', 'L-11')).map((entry) => [entry.id, entry.status, entry.fixed_by_clean, entry.response]), [['R1', 'fixed', undefined, 'It greets the reader.']]);
+    assert.equal((await codexLog(env)).length, 1);
   } finally {
     await stop(served);
   }

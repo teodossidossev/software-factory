@@ -8,10 +8,11 @@ import { join, resolve as resolvePath, sep } from 'node:path';
 import { withoutImageData } from '../attachments.js';
 import { FactoryError } from '../errors.js';
 import { runGit } from '../git.js';
-import { attachWorktree, checkBranchFree } from '../handoff.js';
+import { attachWorktree, checkBranchFree, isAncestor } from '../handoff.js';
 import { jobUserMessages } from '../job-stream.js';
 import { claudeReviews, type FileChange, type Handover, type Job, type JobState, now, type PauseStep, statesWith } from '../jobs.js';
 import { answerFix, escalationMessage, headings, type LedgerEntry, userFixItems } from '../ledger.js';
+import { rebaseInProgress } from '../mr.js';
 import { buildPatch, changedFilesSection, fileChanges, notificationLine, type Patch } from '../patch.js';
 import { factoryPrompt, iterationCost } from '../prompts.js';
 import { DENIED_TOOLS, type Marks, marksOf } from '../rules.js';
@@ -58,6 +59,7 @@ export interface TurnsHandover {
 }
 
 export interface TurnsMr {
+  conflictIdle(job: Job, live: Live, outcome: IdleOutcome): Promise<void>;
   mrIdle(job: Job, live: Live, outcome: IdleOutcome): Promise<void>;
 }
 
@@ -264,8 +266,7 @@ export class TurnsPart {
     });
   }
 
-  // The session's queue is empty: publish the iteration, finish MR preparation, or hand the job
-  // to a person.
+  // The session's queue is empty: publish the iteration, finish MR preparation, or stop for a person.
   #idle(workspaceName: string, ticket: string, outcome: IdleOutcome): Promise<void> {
     return this.#locks.locked(async () => {
       const live = this.#sessions.live.get(`${workspaceName}/${ticket}`);
@@ -285,21 +286,28 @@ export class TurnsPart {
         await this.#peers.mr.mrIdle(job, live, outcome);
         return;
       }
+      // A turn that hit the plan's usage limit parks the job; its turn runs again on Resume.
+      const limit = !outcome.ok && (outcome.code === 'session_failed' || outcome.code === 'turn_failed') ? usageLimit(outcome.message, new Date(), 'claude') : undefined;
+      if (limit !== undefined) {
+        await this.#peers.control.park(job, 'turn', limit);
+        return;
+      }
+      // A rebase of MR preparation left in progress (a stop, then a message) ends as a conflict turn.
+      if (job.target_commit !== null && (await rebaseInProgress(live.cwd))) {
+        await this.#peers.mr.conflictIdle(job, live, outcome);
+        return;
+      }
       if (!outcome.ok) {
-        // A turn that hit the plan's usage limit parks the job; its turn runs again on Resume.
-        const limit = outcome.code === 'session_failed' || outcome.code === 'turn_failed' ? usageLimit(outcome.message, new Date(), 'claude') : undefined;
-        if (limit !== undefined) {
-          await this.#peers.control.park(job, 'turn', limit);
-          return;
-        }
         // from: working (#idle: preparing_mr went to mrIdle)
         await this.#store.transition(job, 'needs_human', 'publish', { code: outcome.code, message: outcome.message });
         return;
       }
       try {
-        const { job: published, changes } = await this.publish(job, live, outcome, await buildPatch(live.cwd, job.base_commit!), []);
-        // The Report's answers to the last Fix section go into the ledger; an escalated
-        // item stops the job before the review.
+        // Already rebased onto the target: measured against it, and back to review (as conflictIdle).
+        const onTarget = job.target_commit !== null && job.target_commit !== job.base_commit && (await isAncestor(live.cwd, job.target_commit, 'HEAD'));
+        const based = onTarget ? { ...job, base_commit: job.target_commit, mr_conflict_turn: false } : job;
+        const { job: published, changes } = await this.publish(based, live, outcome, await buildPatch(live.cwd, based.base_commit!), []);
+        // The Report's answers to the last Fix go into the ledger; an escalation stops the job.
         const escalated = await this.#answerFix(published, live.cwd, outcome.text);
         if (escalated.length > 0) {
           // from: working (#idle: preparing_mr went to mrIdle)

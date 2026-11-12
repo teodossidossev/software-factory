@@ -240,6 +240,10 @@ Task file, there is no issue tracker, and the user is never asked. It commits no
 iterations; the last line of `/implement` ("commit your work") is denied on purpose. When the
 session does not list the skill, the job's stream says "The implement skill is missing" and the
 job carries on with `/implement` read as plain text.
+Its tools are an allow list: `Bash`, `Read`, `Edit`, `Write`, `NotebookEdit`, `Glob`, `Grep`,
+`Skill`, `Task`/`Agent` (sub-agents, with the same tools), `TaskOutput`, `TaskStop`, `TodoWrite`
+and `ToolSearch`; no web tool and no MCP server. It changes files with Edit and Write only, never
+through a script; plan nothing that needs another tool.
 At the start of every turn the Implementer writes the turn's steps as a checklist in
 `.software-factory/<ticket>.steps.md` (3 to 12 lines `- [ ] step`; in a Fix turn, the fixes) and
 ticks each one (`- [x]`) as soon as it is done: the board shows them with the job's phase and when

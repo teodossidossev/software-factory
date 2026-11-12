@@ -1,7 +1,7 @@
 // End-to-end execution tests, the Implementer's session: permission_mode_mismatch and its restart,
-// the smoke's session (dontAsk with the probe rule) against a real job's, the allowedTools and the
-// init assertion. The real `sf serve` and `sf` CLI with private config and state directories,
-// throwaway Git repositories and the fake Claude Code as the Implementer executable, as in
+// the smoke's session (dontAsk with the probe rule) against a real job's, the allowedTools, the
+// tool allow list without MCP, and the init assertion. The real `sf serve` and `sf` CLI with
+// private config and state directories, throwaway Git repositories and the fake Claude Code as the Implementer executable, as in
 // test/execution.test.ts (split so that no file runs near run-tests' per-file limit).
 import assert from 'node:assert/strict';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
@@ -9,7 +9,9 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
 import { prepareClaudeState } from '../src/session-wrapper.js';
-import { SMOKE_PROBE_RULE, SMOKE_TOOLS, sessionAllowedTools } from '../src/session.js';
+import { initToolsProblem } from '../src/live-smoke.js';
+import { DENIED_TOOLS, IMPLEMENTER_TOOLS } from '../src/rules.js';
+import { IMPLEMENTER_SESSION_TOOLS, SMOKE_PROBE_RULE, SMOKE_TOOLS, sessionAllowedTools } from '../src/session.js';
 import { call, fakeLog, newEnv, newRepo, putTask, runCli, script, serve, stop, temp, waitFor, jobPrompt } from './support/harness.js';
 
 test('permission_mode_mismatch ends in needs_human; a restart turns working jobs into needs_human and sf say resumes them', async () => {
@@ -98,6 +100,25 @@ test('the smoke\'s session (SF-104, SF-109, SF-110): an sf serve whose state dir
   assert.ok((sandbox(smoke!.argv).filesystem as { denyRead: string[] }).denyRead.length > 0);
   assert.equal(denied(smoke!.argv), denied(real!.argv));
   assert.ok(denied(smoke!.argv)?.includes('Bash(git commit:*)'));
+  // Both sessions: the allowed tools only and no MCP server (strict, no --mcp-config); the init
+  // messages the factory records list nothing else.
+  for (const entry of [smoke!, real!]) {
+    assert.deepEqual(entry.argv.filter((arg) => /^--(tools|strict-mcp-config|mcp-config)\b/.test(arg)), [`--tools=${IMPLEMENTER_TOOLS.join(',')}`, '--strict-mcp-config']);
+  }
+  const events = await readFile(join(env.state, 'jobs', 'app', 'P-1', 'events.jsonl'), 'utf8');
+  const inits = events.split('\n').filter((line) => line !== '').map((line) => JSON.parse(line).message).filter((message) => message?.type === 'system' && message.subtype === 'init');
+  assert.deepEqual(inits.map((message) => message.tools), [IMPLEMENTER_TOOLS, IMPLEMENTER_TOOLS]);
+  assert.equal(initToolsProblem(events), undefined);
+});
+
+test('the Implementer\'s tools: IMPLEMENTER_TOOLS only, no MCP server; DENIED_TOOLS keeps the web, worktree and MCP tools out', () => {
+  assert.deepEqual(IMPLEMENTER_SESSION_TOOLS, { tools: IMPLEMENTER_TOOLS, strictMcpConfig: true, mcpServers: {} });
+  assert.deepEqual(IMPLEMENTER_TOOLS, ['Bash', 'Read', 'Edit', 'Write', 'NotebookEdit', 'Glob', 'Grep', 'Skill', 'Task', 'Agent', 'TaskOutput', 'TaskStop', 'TodoWrite', 'ToolSearch']);
+  for (const tool of ['EnterWorktree', 'WebFetch', 'WebSearch', 'mcp__*', 'Workflow', 'CronCreate', 'SendMessage', 'ExitWorktree', 'Monitor']) {
+    assert.ok(DENIED_TOOLS.includes(tool) && !IMPLEMENTER_TOOLS.includes(tool), tool);
+  }
+  // The smoke's allowed file tools are among them.
+  assert.ok(SMOKE_TOOLS.every((tool) => IMPLEMENTER_TOOLS.includes(tool)));
 });
 
 test('the allowedTools of a session (SF-104, SF-109, SF-110): a smoke session with the probe has exactly the prefix rule and the file tools; a real job none; allowCommands without smokeMode the exact rules', () => {

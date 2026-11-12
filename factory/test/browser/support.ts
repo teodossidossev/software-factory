@@ -243,6 +243,10 @@ export class FakeSetup implements DashboardSetup {
     return refuse('setup_unavailable', 'Not in the browser fixture.');
   }
 
+  async setTicketOwner(): Promise<never> {
+    return refuse('setup_unavailable', 'Not in the browser fixture.');
+  }
+
   async tickets() {
     const rows = [];
     for (const [ticket, entry] of [...this.tasks].sort(([a], [b]) => a.localeCompare(b))) {
@@ -251,7 +255,7 @@ export class FakeSetup implements DashboardSetup {
         continue;
       }
       rows.push({
-        workspace: WS, ticket, title: entry.title, base: 'main', draft: isDraft(entry.text), request: null,
+        workspace: WS, ticket, title: entry.title, base: 'main', draft: isDraft(entry.text), request: null, owner: 'chatgpt' as const,
         job: job?.state ?? null, lands_after: await this.#landsAfter(entry), attachments: [],
       });
     }

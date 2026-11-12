@@ -402,12 +402,13 @@ export async function ticketsPayload(setup: DashboardSetup, checks: DashboardChe
 }
 
 // A row of the tickets payload: the ticket, its conversation and, with the Task checks, its check.
+// The ChatGPT link only when ChatGPT plans it: Claude Code gets the message to copy.
 export async function ticketEntry(row: TicketRow, checks: DashboardChecks | undefined) {
-  const message = ticketConversation(row.workspace, row.ticket, row.request ?? undefined, row.attachments.map((attachment) => attachment.name));
-  const url = conversationUrl(message);
+  const message = ticketConversation(row.workspace, row.ticket, row.request ?? undefined, row.attachments.map((attachment) => attachment.name), row.owner);
+  const url = row.owner === 'chatgpt' ? conversationUrl(message) : null;
   // A very long message does not fit a link; the page offers it to copy instead.
   return {
-    ...row, conversation: { message, url: url.length <= MAX_CONVERSATION_URL ? url : null },
+    ...row, conversation: { message, url: url !== null && url.length <= MAX_CONVERSATION_URL ? url : null },
     ...(checks !== undefined ? { check: await checkOf(checks, row.workspace, row.ticket) } : {}),
   };
 }

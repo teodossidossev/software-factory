@@ -30,7 +30,7 @@ function ticket(key: string, extra: Record<string, unknown> = {}) {
   const [workspaceName, name] = key.split('/') as [string, string];
   const message = `Use the Software Factory connector for ${name}.`;
   return {
-    workspace: workspaceName, ticket: name, title: `Ticket ${name}`, base: 'main', draft: true, job: null,
+    workspace: workspaceName, ticket: name, title: `Ticket ${name}`, base: 'main', draft: true, owner: 'chatgpt', job: null,
     conversation: { message, url: `${PREFIX}${encodeURIComponent(message)}` }, ...extra,
   };
 }
@@ -307,8 +307,8 @@ test('setup client: the new-ticket form posts the exact fields, clears on succes
   await page.flush();
   assert.equal(posts(page).length, 0);
   assert.match(page.$('ticket-status').textContent, /all needed/);
-  assert.equal(page.$('owner-chatgpt').checked, true);
-  assert.equal(page.$('owner-claude').disabled, true);
+  // The Context owner: ChatGPT by default, Claude Code a real choice.
+  assert.deepEqual([page.$('owner-chatgpt').checked, page.$('owner-claude').checked, page.$('owner-claude').disabled, page.$('owner-claude').value], [true, false, false, 'claude_code']);
   page.$('ticket-workspace').value = 'web';
   page.$('ticket-key').value = ' W-7 ';
   page.$('ticket-title').value = ' Seven ';
@@ -318,7 +318,7 @@ test('setup client: the new-ticket form posts the exact fields, clears on succes
   page.$('ticket-form').dispatch('submit');
   await page.flush();
   assert.equal(posts(page).length, 1);
-  assert.deepEqual([posts(page)[0]!.path, JSON.parse(posts(page)[0]!.body!)], ['api/tickets', { workspace: 'web', ticket: 'W-7', title: 'Seven', request }]);
+  assert.deepEqual([posts(page)[0]!.path, JSON.parse(posts(page)[0]!.body!)], ['api/tickets', { workspace: 'web', ticket: 'W-7', title: 'Seven', request, owner: 'chatgpt' }]);
   assert.equal(page.$('ticket-create').disabled, true);
   posts(page)[0]!.respond(409, { ok: false, error: { code: 'ticket_exists', message: '.software-factory/W-7.md already exists in workspace "web"; the ticket is listed below.' } });
   await page.flush();
@@ -342,6 +342,16 @@ test('setup client: the new-ticket form posts the exact fields, clears on succes
   assert.deepEqual([card.className, card.scrolledIntoView, page.document.activeElement === card], ['card hl', 1, true]);
   assert.equal(page.location.hash, '');
   assert.deepEqual(page.requests.filter((request) => request.path.startsWith('http')), []);
+  // Claude Code, in your terminal: the choice goes with the request.
+  page.$('open-new-ticket').click();
+  page.$('owner-chatgpt').checked = false;
+  page.$('owner-claude').checked = true;
+  page.$('ticket-key').value = 'W-8';
+  page.$('ticket-title').value = 'Eight';
+  page.$('ticket-request').value = 'Prototype it.';
+  page.$('ticket-form').dispatch('submit');
+  await page.flush();
+  assert.deepEqual(JSON.parse(posts(page)[2]!.body!), { workspace: 'web', ticket: 'W-8', title: 'Eight', request: 'Prototype it.', owner: 'claude_code' });
 });
 
 // The planned ticket page of a Queue card (SF-081): a click on the card, its page answered from
@@ -498,7 +508,7 @@ test('setup client: New ticket takes pasted and dropped images, names them by pa
   page.$('ticket-request').value = 'See the screenshots.';
   page.$('ticket-form').dispatch('submit');
   await page.flush();
-  assert.deepEqual([posts(page)[0]!.path, posts(page)[0]!.headers['content-type'], JSON.parse(posts(page)[0]!.body!)], ['api/tickets', 'application/json', { workspace: 'app', ticket: 'T-1', title: 'One', request: 'See the screenshots.' }]);
+  assert.deepEqual([posts(page)[0]!.path, posts(page)[0]!.headers['content-type'], JSON.parse(posts(page)[0]!.body!)], ['api/tickets', 'application/json', { workspace: 'app', ticket: 'T-1', title: 'One', request: 'See the screenshots.', owner: 'chatgpt' }]);
   posts(page)[0]!.respond(200, { ok: true, result: { workspace: 'app', ticket: 'T-1', path: '.software-factory/T-1.md', base: 'main' } });
   await page.flush();
   assert.equal(page.$('ticket-status').textContent, 'Ticket created; attaching 2 images…');

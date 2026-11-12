@@ -69,7 +69,8 @@ Then, for every ticket:
    `tunnel | `.
 2. On the dashboard press **New ticket**: the workspace (`my-app`), the ticket key (`APP-12`), a
    one-line title, and what you want in your own words; paste screenshots into the form if they
-   help (Ctrl+V, or drop the files). The Context owner is "ChatGPT, in the browser". Press
+   help (Ctrl+V, or drop the files). The Context owner is "ChatGPT, in the browser" (for Claude
+   Code, see section 2). Press
    *Create the ticket*.
 3. The factory writes a **skeleton**: `.software-factory/APP-12.md` with the front matter
    (`ticket`, `title`, `base`: the branch `origin/HEAD` points at, else `main`), a heading and
@@ -124,22 +125,34 @@ loads into those sessions too) gives a job no way to the planning tools. Do not 
 where a job working in that repository can read it. Run `sf mcp-url` and `claude mcp add` in your
 own terminal, not through an agent's session, whose transcript would keep the URL.
 
-Then, with `sf serve` running, in a Claude Code session (any directory):
+Then, with `sf serve` running, start from the dashboard:
 
-1. Ask it to call `guide` first and to plan ticket `APP-12` in workspace `my-app` with you: "Use
-   the software-factory MCP server. Call guide, then plan APP-12 in workspace my-app with me: …".
-2. It grills you on the plan, as in section 1 step 5: it looks facts up itself with `read_file`
+1. **New ticket** (section 1, step 2) with the Context owner **Claude Code, in your terminal**. A
+   ticket made with ChatGPT switches on its page: *Plan with: ChatGPT · Claude Code* in the
+   Planning conversation card (you can switch back the same way, even after the Task file is
+   written).
+2. Click its card. The ticket's page has no ChatGPT link; the Planning conversation card says "Paste
+   it into a Claude Code session that has the software-factory MCP server (see the planning
+   guide)" and shows the first message: press **Copy**.
+3. Paste it into a Claude Code session (any directory). The message starts "Use the
+   software-factory MCP server. Call guide." and names the ticket, the workspace and your words,
+   as ChatGPT's does; it also lets Claude Code build a throwaway prototype (the prototype skill)
+   outside the factory's worktrees when a design question is best settled by seeing it. The
+   Implementer cannot read that prototype, so what you chose (structure, names, states) goes into
+   the Task file.
+4. It grills you on the plan, as in section 1 step 5: it looks facts up itself with `read_file`
    and `search` (or with its own tools, if the session runs in your checkout), asks in rounds of
    numbered questions with its recommended answers, and writes the Task file with `write_task`
    once you confirm you agree, or at once, with "Decisions taken without asking", when you say
    "just write it".
-3. It waits for the automatic Task check with `task_check`, fixes what it finds, and tells you the
+5. It waits for the automatic Task check with `task_check`, fixes what it finds, and tells you the
    Task file is ready.
-4. You start the job, or let it `queue_add` the ticket.
+6. You start the job, or let it `queue_add` the ticket. The Task check, Start and the jobs are the
+   same whoever planned the ticket.
 
-You can also create the ticket on the dashboard first (New ticket), so its card and page exist, and
-then ask Claude Code to write the Task file over the skeleton. The New ticket form lists Claude Code
-as a Context owner but keeps it disabled: its *Open the conversation* link is ChatGPT's only.
+Without the dashboard, ask a session yourself to call `guide` first and to plan ticket `APP-12` in
+workspace `my-app` with you: "Use the software-factory MCP server. Call guide, then plan APP-12 in
+workspace my-app with me: …".
 
 A Claude Code session that runs in the workspace's checkout may also simply write
 `.software-factory/APP-12.md` itself with its file tools: that is the same as writing it by hand

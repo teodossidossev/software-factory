@@ -507,16 +507,16 @@ async function submitTicket(): Promise<void> {
   }
   const describe = (data: unknown): Outcome => ({ level: 'ok', text: `Ticket created: ${fieldOf(data, 'path')} in ${fieldOf(data, 'workspace')} (base ${fieldOf(data, 'base')}), an empty skeleton in the Queue. Next: a click on its card opens the conversation; your words are its first message.` });
   // The images go with this ticket as they are now; one pasted while it is being created stays for
-  // the next ticket (Fix 4).
+  // the next ticket (Fix 4). The Context owner is the form's choice, kept for the next ticket.
   const sending = snapshotNewImages();
-  const result = await setupRequest('ticket', 'api/tickets', { workspace, ticket, title, request }, 'ticket-status', describe);
+  const owner = byIdAs('owner-claude', 'input').checked ? 'claude_code' : 'chatgpt';
+  const result = await setupRequest('ticket', 'api/tickets', { workspace, ticket, title, request, owner }, 'ticket-status', describe);
   if (result === undefined) {
     releaseNewImages();
   }
-  // Created: the dialog closes and the new ticket's card is highlighted (a click on it
-  // opens its page); a failure keeps the dialog open with the error and the input. Then its images
-  // go up; one that fails leaves the ticket created, and the form stays open saying which
-  // and why.
+  // Created: the dialog closes and the new ticket's card is highlighted (a click on it opens its
+  // page); a failure keeps the dialog open with the error and the input. Then its images go up; one
+  // that fails leaves the ticket created, and the form stays open saying which and why.
   if (result !== undefined) {
     byIdAs('ticket-key', 'input').value = '';
     byIdAs('ticket-title', 'input').value = '';

@@ -5,6 +5,15 @@
 // top-level names stay the page's globals.
 'use strict';
 
+// A link of the page that opens in a new tab, without the opener.
+function tabLink(className: string, text: string | undefined, href: string): HTMLAnchorElement {
+  const link = el('a', className, text);
+  link.href = href;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  return link;
+}
+
 // ---------- Markdown preview (the prototype's md and inl, as DOM nodes) ----------
 
 // Inline Markdown as nodes: `code`, **bold**, *italic* and [text](http(s) link); anything else is
@@ -24,11 +33,7 @@ function inl(text: unknown): Node[] {
     if (code !== undefined) {
       nodes.push(el('code', '', code));
     } else if (label !== undefined) {
-      const link = el('a', '', label);
-      link.href = href ?? '';
-      link.target = '_blank';
-      link.rel = 'noopener noreferrer';
-      nodes.push(link);
+      nodes.push(tabLink('', label, href ?? ''));
     } else if (bold !== undefined) {
       nodes.push(el('b', '', bold));
     } else {
@@ -202,7 +207,7 @@ const TK_HELP = {
   noWaits: 'Nothing: it can start now.',
   check: 'A read-only Claude session reads only this plan and the code, and says whether an Implementer could build it without making a design decision of its own. About $0.50. It only advises.',
   history: 'What happened to this plan.',
-  images: (ticket: string): string => `Screenshots for the plan: PNG, JPEG, WebP or GIF, at most 5 MB each and 10 per ticket. ChatGPT reads them with read_attachment; the Task file refers to one as ![what it shows](${ticket}/<name>).`,
+  images: (ticket: string): string => `Screenshots for the plan: PNG, JPEG, WebP or GIF, at most 5 MB each and 10 per ticket. The Context owner reads them with read_attachment; the Task file refers to one as ![what it shows](${ticket}/<name>).`,
 };
 // "Nov 5, 14:03" of a timestamp, in the browser's time (the prototype's day); empty without one.
 const day = (ts: unknown): string => (typeof ts === 'string' && !Number.isNaN(Date.parse(ts))
@@ -236,8 +241,9 @@ const tkDirty = (s: TicketEditor): boolean => s.text !== s.saved;
 const tkChecking = (key: string, view: CheckView | null): boolean => state.setupPending.has(`check:${key}`) || view?.running === true;
 // The dependencies not merged yet, from the page's plan.
 const tkUnmerged = (): PlanDependency[] => (tkData()?.plan?.waits_for ?? []).filter((dep) => dep.merged !== true);
-// The only link the page makes of the conversation: the server's ChatGPT URL.
-const tkConversationUrl = (row: TicketEntry): string | null => (typeof row?.conversation?.url === 'string' && row.conversation.url.startsWith(CHATGPT_PREFILL_URL) ? row.conversation.url : null);
+// The only link the page makes of the conversation: the server's ChatGPT URL, only when ChatGPT
+// plans the ticket (Claude Code gets the message to copy).
+const tkConversationUrl = (row: TicketEntry): string | null => (row.owner !== 'claude_code' && typeof row?.conversation?.url === 'string' && row.conversation.url.startsWith(CHATGPT_PREFILL_URL) ? row.conversation.url : null);
 
 // Opens a planned ticket's page (the prototype's openTicket): the page is read from
 // api/tickets/<ws>/<ticket>/page; a ticket that is not planned any more goes back to the board.
@@ -311,10 +317,7 @@ async function loadTicket(key: string, reset: boolean): Promise<void> {
   state.tk.check = data.check ?? null;
   const s = tkState(key);
   if (reset || !tkDirty(s)) {
-    s.text = data.task.text;
-    s.saved = data.task.text;
-    s.sha256 = data.task.sha256;
-    s.conflict = false;
+    Object.assign(s, { text: data.task.text, saved: data.task.text, sha256: data.task.sha256, conflict: false });
   }
   renderTicket();
 }
@@ -421,11 +424,7 @@ function tkHead(key: string, row: TicketEntry, view: CheckView | null): HTMLElem
   const tools = el('div', 'tools');
   const url = tkConversationUrl(row);
   if (url !== null) {
-    const link = el('a', 'btn linkbtn', 'Open the ChatGPT conversation ↗');
-    link.href = url;
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    tools.append(link);
+    tools.append(tabLink('btn linkbtn', 'Open the ChatGPT conversation ↗', url));
   }
   if (view !== null) {
     const checking = tkChecking(key, view);
@@ -551,12 +550,7 @@ function tkFiles(plan: TicketPlan): HTMLElement[] {
 
 // The Files card's help line: the list's meaning with a scope; without one, only the lock's, when
 // a may_touch row shows it.
-function tkFilesHelp(plan: TicketPlan): string | null {
-  if (plan.scoped) {
-    return TK_HELP.files;
-  }
-  return plan.files.some((file) => file.sensitive) ? TK_HELP.lock : null;
-}
+const tkFilesHelp = (plan: TicketPlan): string | null => (plan.scoped ? TK_HELP.files : plan.files.some((file) => file.sensitive) ? TK_HELP.lock : null);
 
 // Waits for: each ticket with its state in words, ✓ once merged.
 function tkWaits(plan: TicketPlan): HTMLElement[] {
@@ -673,17 +667,24 @@ function tkCheckCard(key: string, row: TicketEntry, view: CheckView, s: TicketEd
   return tkCard(h3, TK_HELP.check, ...content);
 }
 
-// Planning conversation: the link, the first message and its Copy.
+// Planning conversation: "Plan with: ChatGPT · Claude Code" (the one in use pressed, the other
+// switches), then for ChatGPT its link, for Claude Code where to paste; the first message and its Copy.
 function tkConversation(row: TicketEntry): HTMLElement {
   const url = tkConversationUrl(row);
   const message = typeof row.conversation?.message === 'string' ? row.conversation.message : '';
-  const content: HTMLElement[] = [];
-  if (url !== null) {
-    const link = el('a', 'fs13', 'Open the ChatGPT conversation ↗');
-    link.href = url;
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    content.push(link);
+  const choice = (owner: TicketEntry['owner'], label: string): HTMLButtonElement => {
+    const node = button(row.owner === owner ? 'btn small on' : 'btn small', label, { tk: `owner-${owner}` });
+    node.disabled = row.owner === owner || state.setupPending.has(`owner:${keyOf(row)}`);
+    node.setAttribute('aria-pressed', String(row.owner === owner));
+    return node;
+  };
+  const owners = el('div', 'tk-owner');
+  owners.append(el('span', 'muted fs12', 'Plan with:'), choice('chatgpt', 'ChatGPT'), el('span', 'muted', '·'), choice('claude_code', 'Claude Code'));
+  const content: HTMLElement[] = [owners];
+  if (row.owner === 'claude_code') {
+    content.push(el('span', 'fs13', 'Paste it into a Claude Code session that has the software-factory MCP server (see the planning guide)'));
+  } else if (url !== null) {
+    content.push(tabLink('fs13', 'Open the ChatGPT conversation ↗', url));
   } else {
     content.push(el('span', 'fs13', 'The first message is too long for a link: copy it into a new ChatGPT conversation of this project.'));
   }
@@ -691,10 +692,7 @@ function tkConversation(row: TicketEntry): HTMLElement {
   const status = el('span', 'muted fs12', state.tk.copied ?? '');
   status.setAttribute('role', 'status');
   head.append(el('b', 'fs12', 'First message'), button('btn small', 'Copy', { tk: 'copy' }), status);
-  const fallback = el('textarea', 'copy-fallback');
-  fallback.id = 'tk-copy-text';
-  fallback.readOnly = true;
-  fallback.hidden = true;
+  const fallback = Object.assign(el('textarea', 'copy-fallback'), { id: 'tk-copy-text', readOnly: true, hidden: true });
   fallback.setAttribute('aria-label', 'The first message');
   content.push(head, el('pre', 'cm', message), fallback);
   return tkCard('Planning conversation', null, ...content);
@@ -771,7 +769,7 @@ function renderTicket(): void {
 }
 
 // The page's actions (the prototype's tkAction): save, check, start, para (the paraphrase whole or
-// clamped), reload (the file as it is now) and copy (the first message).
+// clamped), reload (the file as it is now), owner-<owner> (Plan with) and copy (the first message).
 function tkAction(action: string | undefined): void {
   const key = ui.ticket;
   const row = tkRow();
@@ -800,6 +798,8 @@ function tkAction(action: string | undefined): void {
     state.tk.error = null;
     renderTicket();
     void loadTicket(key, true);
+  } else if (action === 'owner-chatgpt' || action === 'owner-claude_code') {
+    void tkOwner(key, action === 'owner-claude_code' ? 'claude_code' : 'chatgpt');
   } else if (action === 'copy') {
     const message = typeof row.conversation?.message === 'string' ? row.conversation.message : '';
     // The Copy button is drawn with its textarea (tkConversation).
@@ -922,6 +922,7 @@ const dragsFiles = (data: DataTransfer | null | undefined): boolean => Array.fro
 const fileLabel = (file: File): string => (typeof file.name === 'string' && file.name !== '' ? file.name : 'the image');
 const refusalText = (error: unknown): string => (error instanceof ActionError ? `${error.code}: ${error.message}` : `${errorMessage(error)}; it may have been attached`);
 const attachmentPath = (key: string, name: string): string => `api/tickets/${jobPath(key)}/attachments/${encodeURIComponent(name)}`;
+const tkRemoveImage = (key: string, name: string): Promise<void> => tkPost(`image:${key}/${name}`, `${attachmentPath(key, name)}/remove`, {}, () => `Removed ${name}.`, 'The removal failed');
 
 // Images: the ticket's images from its row (the stream keeps it current), each opening whole in a
 // new tab, with Copy image and ×, then the drop area; a paste anywhere on the page lands there too.
@@ -933,21 +934,17 @@ function tkImagesCard(key: string, row: TicketEntry): HTMLElement {
     const thumbs = el('div', 'thumbs');
     for (const image of images) {
       const url = attachmentPath(key, image.name);
-      const link = el('a', 'thumb-open');
-      link.href = url;
-      link.target = '_blank';
-      link.rel = 'noopener noreferrer';
+      const link = tabLink('thumb-open', undefined, url);
       link.setAttribute('title', `Open ${image.name} in a new tab`);
       const img = el('img');
       img.src = url;
       img.alt = `Image ${image.name}`;
       link.append(img);
-      const busy = state.setupPending.has(`image:${key}/${image.name}`);
       const copy = button('btn small', 'Copy image', { tkimg: 'copy', name: image.name });
       const remove = button('btn small', '×', { tkimg: 'remove', name: image.name });
       remove.setAttribute('aria-label', `Remove ${image.name}`);
       remove.setAttribute('title', `Remove ${image.name}`);
-      remove.disabled = busy;
+      remove.disabled = state.setupPending.has(`image:${key}/${image.name}`);
       const bar = el('div', 'thumb-bar');
       bar.append(el('span', 'mono fs12', image.name), copy, remove);
       const item = el('figure', 'thumb');
@@ -1016,24 +1013,27 @@ async function tkUpload(key: string, files: File[]): Promise<void> {
   renderTicket();
 }
 
-async function tkRemoveImage(key: string, name: string): Promise<void> {
-  const id = `image:${key}/${name}`;
+// One post of the page, once at a time per id (its control off meanwhile), the outcome in the
+// toast: done's text from the answer, or the refusal; failed names what may have happened.
+async function tkPost(id: string, path: string, body: unknown, done: (result: unknown) => string, failed: string): Promise<void> {
   if (state.setupPending.has(id)) {
     return;
   }
   state.setupPending.add(id);
   renderTicket();
-  let outcome: Outcome;
-  try {
-    await post(`${attachmentPath(key, name)}/remove`, {});
-    outcome = { level: 'ok', text: `Removed ${name}.` };
-  } catch (error) {
-    outcome = { level: 'error', text: error instanceof ActionError ? `${error.code}: ${error.message}` : `The removal failed (${errorMessage(error)}); it may have happened.` };
-  }
+  const outcome = await post(path, body).then((result): Outcome => ({ level: 'ok', text: done(result) }),
+    (error: unknown): Outcome => ({ level: 'error', text: error instanceof ActionError ? `${error.code}: ${error.message}` : `${failed} (${errorMessage(error)}); it may have happened.` }));
   state.setupPending.delete(id);
   toast(outcome);
   renderTicket();
 }
+
+// Plan with: the answer, the ticket's row with its new conversation, is drawn at once.
+const tkOwner = (key: string, owner: TicketOwner): Promise<void> => tkPost(`owner:${key}`, `api/tickets/${jobPath(key)}/owner`, { owner }, (result) => {
+  const fresh = isRecord(result) && result.owner === owner && isRecord(result.conversation) ? { owner, conversation: result.conversation } : {};
+  [ticketByKey(key), tkData()?.ticket].forEach((row) => Object.assign(row ?? {}, fresh));
+  return `${owner === 'claude_code' ? 'Claude Code' : 'ChatGPT'} plans ${key} now.`;
+}, 'The switch failed');
 
 // JPEG, WebP and GIF go on the clipboard as PNG, the image type browsers take there: drawn on a
 // canvas.

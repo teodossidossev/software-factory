@@ -7,8 +7,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as z from 'zod/v4';
 import { MAX_ATTACHMENT_BYTES } from './attachments.js';
+import { TICKET_OWNERS } from './conversation.js';
 import type { DashboardSetup } from './dashboard.js';
 import { type ChangeFeed, type DashboardContext, isJsonContentType, isOctetStream, jobKey, type Post, readBody, type Target } from './dashboard-context.js';
+import { ticketEntry } from './dashboard-payloads.js';
 import { type JobKey, type JobRoute, openWhileUpdating, type PostRoute, type QueueRoute } from './dashboard-routes.js';
 import { FactoryError } from './errors.js';
 import { internalError, sendJson, statusOf } from './http.js';
@@ -63,7 +65,13 @@ const BODIES = {
   // application/octet-stream), not JSON; removing one takes {}.
   'ticket-attachment-add': { shape: 'the image\'s bytes', schema: z.instanceof(Buffer) },
   'ticket-attachment-remove': { shape: '{}', schema: z.strictObject({}) },
-  'ticket-new': { shape: '{"workspace": string, "ticket": string, "title": string, "request": string}', schema: z.strictObject({ workspace: z.string(), ticket: z.string(), title: z.string(), request: z.string() }) },
+  // New ticket: owner, who plans it, chatgpt when left out.
+  'ticket-new': {
+    shape: '{"workspace": string, "ticket": string, "title": string, "request": string, "owner"?: "chatgpt" | "claude_code"}',
+    schema: z.strictObject({ workspace: z.string(), ticket: z.string(), title: z.string(), request: z.string(), owner: z.enum(TICKET_OWNERS).optional() }),
+  },
+  // The ticket page's switch of who plans the ticket.
+  'ticket-owner': { shape: '{"owner": "chatgpt" | "claude_code"}', schema: z.strictObject({ owner: z.enum(TICKET_OWNERS) }) },
 };
 type SetupRoute = keyof typeof BODIES;
 // A setup POST's route and the body as its refusal names it.
@@ -219,6 +227,22 @@ export function postHandlers(ctx: DashboardContext, feed: Pick<ChangeFeed, 'chan
       const methods = { archive: setup.archiveTicket, restore: setup.restoreTicket, delete: setup.deleteTicket };
       const method = methods[target.action].bind(setup);
       return { ...setupBody(route), call: (data) => (BODIES[route].schema.safeParse(data).success ? () => method(workspace, ticket) : undefined), refreshSetup: true, refreshJobs: target.action !== 'restore' };
+    }
+    if (target.kind === 'ticket-owner') {
+      // Setup.setTicketOwner: the names, a live job and a missing Task file refused as the other
+      // ticket actions; the answer is the ticket's row with its new conversation, which every page gets.
+      const key = jobKey(target.workspace, target.ticket);
+      if (key === undefined) {
+        return undefined;
+      }
+      return {
+        ...setupBody('ticket-owner'),
+        call: (data) => {
+          const parsed = BODIES['ticket-owner'].schema.safeParse(data);
+          return parsed.success ? async () => ticketEntry(await setup.setTicketOwner(...key, parsed.data.owner), checks) : undefined;
+        },
+        refreshSetup: true,
+      };
     }
     if (target.kind === 'workspace-remove') {
       const name = target.name;

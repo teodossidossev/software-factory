@@ -3751,7 +3751,7 @@ waits_for: [{ticket, state, merged}]}`, `check` (the Task check's view, `null` w
 checks), `history: [{ts, kind, by, text}]` and `queue: null` (SF-071 leaves the queue out of this page); a ticket that is not in
 the tickets list is an empty 404, and the page goes back to the board). The header has *← Board*
 (Escape), the key, the workspace, the title and `draft` for a skeleton; *Open the ChatGPT
-conversation ↗* (the server's link only), **Check the plan** (*Check again* after a check,
+conversation ↗* (the server's link only, and only when ChatGPT plans the ticket), **Check the plan** (*Check again* after a check,
 *Checking…* while one runs; today's `POST api/tickets/<ws>/<ticket>/check`) and **Start now**; its
 line says "waits for …" while a dependency is not merged, "Starts from <branch>" and the plan check
 in words. On the left the **Task file** (`.software-factory/<ticket>.md`): *Preview* (the default)
@@ -3769,7 +3769,7 @@ itself), each card with a short help line:
 | **Files it will change** | `scope` and `may_touch`, in one list | The files the job is expected to create, change or delete (one path or pattern per row). A change outside the list needs your OK before it can ship. 🔒 marks a `may_touch` entry: a sensitive file (build, CI, packages, credentials) the ticket may change on purpose. Without `scope`: "No list: the job may change any file, and nothing is checked." |
 | **Waits for** | `lands_after` | Each ticket with SF-084's state in words: ✓ merged, pushed, not merged yet, running, planned, not started, unknown ticket (another workspace's as `<workspace>/<ticket>`). Start now still starts it. |
 | **Plan check** | (the Task check) | "Ready: …", "Not ready: N blockers, M majors." with the findings (their kind in words: needs a decision, contradicts itself, something is missing, does more than asked, unclear), what the checker understood and the files it expects to change; "Not checked yet.", "Checking…", "The plan changed after this check: check it again."; the date, the model and the cost. It only advises. |
-| **Planning conversation** | | The link, the first message and its Copy. |
+| **Planning conversation** | | *Plan with: ChatGPT · Claude Code* (the Context owner, switchable); for ChatGPT the link, for Claude Code where to paste; the first message and its Copy (below). |
 | **Images** | | The ticket's images (SF-064, section Ticket images): each opens whole in a new tab, with **Copy image** and ×; "Paste an image here (Ctrl+V) or drop one." |
 | **History** | | What happened to the plan (below). |
 
@@ -3799,7 +3799,7 @@ sha256}` (the sha256 of the text written; a Fix section adds its number `fix`): 
 `fix_added` by `factory` (each `## Fix N`). The page's History merges them, newest first, with what
 the state directory already has: every Task check (`<state dir>/checks/…`) and every job of the
 ticket, current and archived (`<state dir>/jobs/<ws>/<ticket>/job.json` and
-`<ticket>.<stamp>/job.json`): "Created by you", "Plan written by the Context owner (ChatGPT)",
+`<ticket>.<stamp>/job.json`): "Created by you", "Plan written by the Context owner",
 "Edited by you", "Fix N added by the factory", "Checked: ready · $0.45", "Checked: not ready (2
 blockers, 1 major) · $0.48", "Check failed · $0.12", "Started as a job (ended: pushed)". When the
 Task file is not the version the last recorded write left, it says "Changed outside the factory"
@@ -3825,13 +3825,16 @@ checkout, typed or pasted (the page cannot browse the machine's disk), validated
 add` does (an absolute path that exists and is the root of a non-bare Git work tree, a name not
 registered yet) with the refusal shown as it comes. **New ticket** takes the workspace (the
 filter's by default), the ticket key, a one-line title, what the user wants in their own words
-and the Context owner (ChatGPT; Claude Code is listed and disabled until SF-023), and writes a
+and the Context owner (*ChatGPT, in the browser*, the default, or *Claude Code, in your terminal*), and writes a
 **ticket skeleton** (SF-028), `.software-factory/<ticket>.md` in the checkout, through the Task
 file writer: the front matter (`ticket`, `title`, `base` = the branch `origin/HEAD` points at, else
 `main`), `# <ticket>: <title>` and `## Status: waiting for the Context owner` with one line of
 explanation. The user's words are **not** written into it: they are kept in the state directory
 (`<state dir>/requests/<workspace>/<ticket>.md`) and become the first message of the ticket's
-conversation. Images pasted or dropped into the form are uploaded after the ticket is created
+conversation. The Context owner is kept next to them, in `<state dir>/requests/<workspace>/<ticket>.owner`
+(`chatgpt` or `claude_code`); a missing file, or one with anything else in it, reads as `chatgpt`
+(a Task file written without New ticket has none), and the ticket's row carries it as `owner`;
+deleting the ticket removes it with the words. Images pasted or dropped into the form are uploaded after the ticket is created
 (SF-064, section Ticket images). An existing Task file is never replaced from the page (`409 ticket_exists`). Once
 the ticket is created the dialog closes and the board scrolls to the new Queue card and highlights
 it (a click on it opens its page); a refusal keeps the dialog open with the error and the input.
@@ -3842,9 +3845,22 @@ shows the file (`GET api/tickets/<ws>/<ticket>/task?archived=1`) as text: one li
 Markdown headings bold by a line rule, never HTML from the file. With no workspace, or no ticket
 and no job, a line above the board says where to begin.
 
-The ticket's **conversation** on its page: *Open the ChatGPT conversation ↗*, a link
+The ticket's **conversation** on its page, per Context owner. The card starts with the switch
+*Plan with: ChatGPT · Claude Code*: the owner in use is pressed, the other posts `POST
+api/tickets/<ws>/<ticket>/owner`, which rewrites the `.owner` file, and the card and the header are
+redrawn from the answer (every other page gets the tickets again); a ticket whose Task file is
+already written keeps the switch. For **ChatGPT**: *Open the ChatGPT conversation ↗*, a link
 (`target=_blank`, opened only by the user's click) to `https://chatgpt.com/?q=` plus the message of
-`ticketConversation` URL-encoded, and the first message with Copy. The message names the connector, `guide`, the
+`ticketConversation` URL-encoded, and the first message with Copy. For **Claude Code** the payload
+has no link (`conversation.url` is `null`) and neither the header nor the card shows one: the line
+"Paste it into a Claude Code session that has the software-factory MCP server (see the planning
+guide)" (text, not a link), then the first message with Copy; the session is set up as section 2
+of `docs/guide/planning.md` says. Claude Code's message starts "Use the software-factory MCP
+server." instead of "Use the Software Factory connector.", and before its last sentence it may
+build a throwaway prototype (the prototype skill) outside the factory's worktrees when a design
+question is best settled by seeing it, writing what the user chose into the Task file, since the
+Implementer cannot read the prototype; the rest is the same for both. The Task check, Start, the
+MCP tools and the jobs do not depend on the owner. The message names the connector, `guide`, the
 ticket and the workspace, carries the user's words, and tells the Context owner to investigate
 (`read_file`, `search`), grill the user in rounds (numbered questions, a recommended answer to
 each, facts looked up by itself), write the Task file over the skeleton with `write_task` with a
@@ -4100,7 +4116,8 @@ shares; the setup, Task check, task and attachment posts have their own handlers
 | `POST api/digest-settings` | `{"at": "HH:MM", "weekdays_only": boolean, "language": string}` | `Setup.saveDigestSettings` (SF-103): a bad time or language `400 invalid_digest_settings`; the model stays; result the settings |
 | `POST api/digests/run` | `{}` | `Digests.start('manual')` (SF-103): answers at once `{started: true}`; `409 digest_running` while a digest runs; 404 without the digest |
 | `POST api/workspaces/<name>/remove` | `{}` | `Setup.removeWorkspace`; `409 workspace_busy` while the workspace has a live job; result `{removed}` |
-| `POST api/tickets` | `{"workspace", "ticket", "title", "request"}` | `Setup.createTicket`: the ticket skeleton through the Task file writer, the request kept for the conversation; result `{workspace, ticket, path, base}` |
+| `POST api/tickets` | `{"workspace", "ticket", "title", "request", "owner"?: "chatgpt" \| "claude_code"}` | `Setup.createTicket`: the ticket skeleton through the Task file writer, the request and the Context owner (`chatgpt` when left out) kept for the conversation; result `{workspace, ticket, path, base}` |
+| `POST api/tickets/<ws>/<ticket>/owner` | `{"owner": "chatgpt" \| "claude_code"}` | `Setup.setTicketOwner` (the ticket page's *Plan with*): rewrites `<state dir>/requests/<ws>/<ticket>.owner`; the names checked, `409 job_active` while a job of the ticket is live, `404 task_not_found` without a Task file listed as a ticket; result the ticket's row as the tickets payload has it (with `owner` and its `conversation`, without the queue fields); every page gets the tickets again; POST only |
 | `POST api/tickets/<ws>/<ticket>/start` | `{}` | `Execution.start(ws, ticket)` (`sf start`, SF-040, SF-046): the job's record, branch and worktree, then iteration 1; result `{branch, state, check_after_minutes, worktree}`; refusals as they come (`409 task_draft` for a skeleton, `409 job_exists`, `409 branch_exists`, `404 task_not_found`, ...; a start by hand is never held by the run limit); every page gets the jobs, the workspaces and the tickets again |
 | `POST api/tickets/<ws>/<ticket>/archive`, `.../restore`, `.../delete` | `{}` | `Setup.archiveTicket`, `restoreTicket`, `deleteTicket` (SF-027); the ticket's images folder with them (SF-064) |
 | `POST api/tickets/<ws>/<ticket>/attachments?name=<name>` | the image's raw bytes, `Content-Type: application/octet-stream` (not JSON), at most 5 MB | `Setup.addAttachment` (SF-064, section Ticket images): `name` optional (the next number when left out; another query key or a second `name` is an empty 404); result `{name, bytes, type}`; `400 attachment_type`, `400 invalid_name`, `413 attachment_too_large` (also a body over 5 MB, checked against `Content-Length` and while reading), `409 attachment_limit`, `409 job_active`, `404 task_not_found`; every page gets the tickets again |
@@ -4609,7 +4626,10 @@ end), in a browser:
    highlighted, with "waiting for the plan". Its page has *Open the ChatGPT conversation ↗*: a new
    tab on chatgpt.com with your words in the first message (press Enter if it stays there); Copy
    puts the first message on the clipboard; History says "Created by you". Once ChatGPT wrote the Task file, Start
-   appears on the card. Remove on a workspace with a live job is off with the reason. Nowhere on
+   appears on the card. *Plan with: Claude Code* on the page: the ChatGPT link goes from the header
+   and the card, the card says where to paste, and the first message starts "Use the
+   software-factory MCP server."; a new ticket created with *Claude Code, in your terminal* opens
+   that way. Remove on a workspace with a live job is off with the reason. Nowhere on
    the page is there a Reviewer line, a reviewer setup, Nudge, Send test event or Subscriptions.
 14. Stream: a running job's entries arrive live at the bottom and the view follows them while it is
    at the bottom (scroll up: it stays where you are). Each tool call is one line with its result;

@@ -436,6 +436,9 @@ textarea.mdedit.fld { font: 12.5px/1.5 var(--mono); padding: 8px; border: 1px so
 .flist { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; font-size: 12.5px; overflow-wrap: anywhere; }
 .flist .lock { margin-left: 6px; cursor: help; }
 .cmhead { display: flex; gap: 8px; align-items: center; }
+/* Plan with: ChatGPT · Claude Code; the owner in use is pressed, not faded as a disabled button. */
+.tk-owner { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.tk-owner .btn.on { border-color: var(--accent); color: var(--accent); font-weight: 600; opacity: 1; cursor: default; }
 
 /* The live page's own pieces, which the prototype does not show, in its style: the hidden
    attribute (the prototype page's first style element), the board's hint, the toast's close button and its error, an

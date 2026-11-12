@@ -106,6 +106,8 @@ export type Target =
   // Generate now: POST api/digests/run.
   | { kind: 'digest-run' }
   | { kind: 'ticket-action'; action: 'archive' | 'restore' | 'delete' | 'start'; workspace: string | undefined; ticket: string | undefined }
+  // Who plans the ticket: POST api/tickets/<ws>/<ticket>/owner, POST only.
+  | { kind: 'ticket-owner'; workspace: string | undefined; ticket: string | undefined }
   // The Task check: GET reads the ticket's last check, POST starts one.
   | { kind: 'ticket-check'; workspace: string | undefined; ticket: string | undefined }
   // The Task file: GET reads it, POST saves it.
@@ -154,6 +156,9 @@ export function targetOf(path: string[]): Target {
   }
   if (kind === 'tickets' && path.length === 5 && (c === 'archive' || c === 'restore' || c === 'delete' || c === 'start')) {
     return { kind: 'ticket-action', action: c, workspace: a, ticket: b };
+  }
+  if (kind === 'tickets' && path.length === 5 && c === 'owner') {
+    return { kind: 'ticket-owner', workspace: a, ticket: b };
   }
   if (kind === 'tickets' && path.length === 5 && c === 'check') {
     return { kind: 'ticket-check', workspace: a, ticket: b };

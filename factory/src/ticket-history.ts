@@ -63,7 +63,7 @@ function recordedText(event: HistoryEvent): string {
     case 'created':
       return 'Created by you';
     case 'written':
-      return 'Plan written by the Context owner (ChatGPT)';
+      return 'Plan written by the Context owner';
     case 'edited':
       return 'Edited by you';
     case 'fix_added':

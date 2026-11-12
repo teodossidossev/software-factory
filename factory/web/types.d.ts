@@ -366,13 +366,15 @@ interface StreamLine {
 
 // A ticket without a live job, as the planned ticket page's payload carries it: src/setup.ts
 // TicketRow with its conversation (src/dashboard.ts ticketEntry: the first message, and its
-// ChatGPT link or null when it is too long for one; check with the Task checks only).
+// ChatGPT link, or null when it is too long for one or Claude Code plans the ticket; check with
+// the Task checks only).
 interface TicketEntry {
   workspace: string;
   ticket: string;
   title: string;
   base: string;
   draft: boolean;
+  owner: TicketOwner;
   job: JobState | null;
   lands_after: DependencyRow[];
   // src/attachments.ts Attachment: only the name.
@@ -402,6 +404,9 @@ interface CheckSummary {
   // The note of Start's confirmation.
   start_note: string | null;
 }
+
+// Who plans a ticket: src/conversation.ts TICKET_OWNERS.
+type TicketOwner = 'chatgpt' | 'claude_code';
 
 // The state of a ticket another lands after: src/setup.ts DEPENDENCY_STATES.
 type DependencyState = 'merged' | 'pushed' | 'running' | 'planned' | 'missing';

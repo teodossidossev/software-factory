@@ -6,6 +6,7 @@
 // servedDetail).
 import assert from 'node:assert/strict';
 import { get, request, type IncomingMessage } from 'node:http';
+import type { TicketOwner } from '../../src/conversation.js';
 import type { DashboardActions, DashboardSetup } from '../../src/dashboard.js';
 import { FactoryError } from '../../src/errors.js';
 import type { MrInput } from '../../src/execution.js';
@@ -249,7 +250,7 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
 export type SetupCall = ['saveTask', string, string, string, string] | ['addWorkspace', string, string] | ['addWorkspace', string, string, AddWorkspaceOptions] | ['removeWorkspace', string] | ['createTicket', TicketInput]
   // The Workspaces dialog's Edit and the Morning digest section (SF-103).
   | ['editWorkspace', string, Omit<WorkspaceEdit, 'read_checkout'> & { path: string }] | ['saveDigestSettings', { at: string; weekdays_only: boolean; language: string }]
-  | ['archiveTicket', string, string] | ['restoreTicket', string, string] | ['deleteTicket', string, string]
+  | ['archiveTicket', string, string] | ['restoreTicket', string, string] | ['deleteTicket', string, string] | ['setTicketOwner', string, string, TicketOwner]
   // A ticket's images (SF-064): the upload's bytes as hex and its name (null without one).
   | ['addAttachment', string, string, string, string | null] | ['removeAttachment', string, string, string];
 
@@ -277,7 +278,7 @@ export function workspaceRow(name: string, path = `/srv/${name}`, liveJobs = 0, 
 }
 
 export function ticketRow(workspace: string, ticket: string, title = `Ticket ${ticket}`, draft = true, job: TicketRow['job'] = null): TicketRow {
-  return { workspace, ticket, title, base: 'main', draft, request: null, job, lands_after: [], attachments: [] };
+  return { workspace, ticket, title, base: 'main', draft, request: null, owner: 'chatgpt', job, lands_after: [], attachments: [] };
 }
 
 // Lists rows and records every change; the change answers with `answer` (thrown when it is an
@@ -331,6 +332,11 @@ export function fakeSetup(workspaces: WorkspaceRow[] = [], tickets: TicketRow[] 
     archiveTicket: (workspace, ticket) => reply(['archiveTicket', workspace, ticket], { workspace, ticket, path: `.software-factory/archive/${ticket}.md`, jobArchived: false }),
     restoreTicket: (workspace, ticket) => reply(['restoreTicket', workspace, ticket], { workspace, ticket, path: `.software-factory/${ticket}.md` }),
     deleteTicket: (workspace, ticket) => reply(['deleteTicket', workspace, ticket], { workspace, ticket, deleted: [`.software-factory/${ticket}.md`], jobArchived: false }),
+    // The ticket page's switch: by default the listed row (or a new one) with the new owner.
+    setTicketOwner: (workspace, ticket, owner) => {
+      const row = fake.rows.tickets.find((each) => each.workspace === workspace && each.ticket === ticket) ?? ticketRow(workspace, ticket);
+      return reply(['setTicketOwner', workspace, ticket, owner], { ...row, owner });
+    },
     addWorkspace: (name, path, options = {}) => reply(
       Object.keys(options).length === 0 ? ['addWorkspace', name, path] : ['addWorkspace', name, path, options],
       { ...workspaceRow(name, path, 0, options.handoff ?? null), color: workspaceColor(name, options.color) },

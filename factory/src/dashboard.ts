@@ -114,10 +114,10 @@ export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | '
 // The start screen's data and changes: the workspace registry and the Task files (src/setup.ts).
 // jobDependencies: the tickets a live job's Task file lands after. taskFile and saveTask:
 // the planned ticket page's Task file and its Save. addAttachment, removeAttachment and
-// readAttachment: a ticket's images.
+// readAttachment: a ticket's images. setTicketOwner: the ticket page's switch of who plans it.
 // editWorkspace, workspaceSettings and saveDigestSettings: the Workspaces dialog's Edit, the
 // payload's settings and the Morning digest section.
-export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'editWorkspace' | 'workspaceSettings' | 'saveDigestSettings' | 'removeWorkspace' | 'tickets' | 'jobDependencies' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'archivedTickets' | 'taskText' | 'taskTitle'
+export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'editWorkspace' | 'workspaceSettings' | 'saveDigestSettings' | 'removeWorkspace' | 'tickets' | 'jobDependencies' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'setTicketOwner' | 'archivedTickets' | 'taskText' | 'taskTitle'
   | 'taskFile' | 'saveTask' | 'addAttachment' | 'removeAttachment' | 'readAttachment'>;
 
 // The morning digest: the list, one record, a manual run.
@@ -134,7 +134,11 @@ export type DashboardChecks = Pick<TaskChecks, 'start' | 'view' | 'summary' | 's
 // withTicket: Save writes under the queue's lock of the ticket.
 export type DashboardQueue = Pick<RunQueue, 'view' | 'add' | 'remove' | 'move' | 'limit' | 'hold' | 'release' | 'rule' | 'force' | 'withTicket'>;
 
-// A dashboard without a start screen (in-process tests of the endpoints that need none).
+// A dashboard without a start screen (in-process tests of the endpoints that need none): the
+// lists are empty, every other call is refused with setup_unavailable.
+const unavailable = async (): Promise<never> => {
+  throw new FactoryError('setup_unavailable', 'The start screen is not available.');
+};
 const NO_SETUP: DashboardSetup = {
   workspaces: async () => [],
   workspaceSettings: async () => ({ handoff_default: 'checkout', digest: { at: DIGEST_DEFAULTS.at, weekdays_only: DIGEST_DEFAULTS.weekdays_only, language: DIGEST_DEFAULTS.language } }),
@@ -142,48 +146,21 @@ const NO_SETUP: DashboardSetup = {
   jobDependencies: async () => [],
   archivedTickets: async () => [],
   taskTitle: async () => null,
-  taskText: async () => {
-    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
-  },
-  taskFile: async () => {
-    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
-  },
-  saveTask: async () => {
-    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
-  },
-  archiveTicket: async () => {
-    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
-  },
-  restoreTicket: async () => {
-    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
-  },
-  deleteTicket: async () => {
-    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
-  },
-  addWorkspace: async () => {
-    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
-  },
-  removeWorkspace: async () => {
-    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
-  },
-  editWorkspace: async () => {
-    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
-  },
-  saveDigestSettings: async () => {
-    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
-  },
-  createTicket: async () => {
-    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
-  },
-  addAttachment: async () => {
-    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
-  },
-  removeAttachment: async () => {
-    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
-  },
-  readAttachment: async () => {
-    throw new FactoryError('setup_unavailable', 'The start screen is not available.');
-  },
+  taskText: unavailable,
+  taskFile: unavailable,
+  saveTask: unavailable,
+  archiveTicket: unavailable,
+  restoreTicket: unavailable,
+  deleteTicket: unavailable,
+  setTicketOwner: unavailable,
+  addWorkspace: unavailable,
+  removeWorkspace: unavailable,
+  editWorkspace: unavailable,
+  saveDigestSettings: unavailable,
+  createTicket: unavailable,
+  addAttachment: unavailable,
+  removeAttachment: unavailable,
+  readAttachment: unavailable,
 };
 
 export interface RunningDashboard {
@@ -454,7 +431,7 @@ export async function startDashboard(
       }
     };
     const what = targetOf(path);
-    if (what.kind === 'action' || what.kind === 'workspace-remove' || what.kind === 'ticket-action' || what.kind === 'workspace-edit' || what.kind === 'digest-settings' || what.kind === 'digest-run' || what.kind === 'mr-job') {
+    if (what.kind === 'action' || what.kind === 'workspace-remove' || what.kind === 'ticket-action' || what.kind === 'ticket-owner' || what.kind === 'workspace-edit' || what.kind === 'digest-settings' || what.kind === 'digest-run' || what.kind === 'mr-job') {
       if (req.method !== 'POST') {
         empty(res, 405, { allow: 'POST' });
         return;

@@ -57,7 +57,7 @@ plan ─► Task file ─► Task check ─► Start / queue ─► iteration �
 | **Workspace** | Workspaces | A registered repository: a name and the path of your local checkout (the one open in your IDE). Task files live in it; every job's worktree is created from it. |
 | **Task file** | Task | `.software-factory/<ticket>.md` in the workspace's checkout: front matter, the task, the `## Review brief`, and the `## Fix N` sections the factory appends. The complete instruction for the Implementer and the brief for the reviewers. |
 | **Ticket draft** (skeleton) | `draft` | A Task file written by New ticket before anyone planned it: front matter and a status line. It cannot be started or queued. |
-| **Context owner** | Context owner (ChatGPT) | The model you plan with. It only plans: reads the repository, writes the Task file. It never starts, reviews or approves. |
+| **Context owner** | Context owner, Plan with (ChatGPT or Claude Code) | The model you plan with. It only plans: reads the repository, writes the Task file. It never starts, reviews or approves. |
 | **Task check** (`sf check-task`) | Check, Check the plan, Plan check | A fresh read-only Claude session that reads the Task file and the repository before Start and gives `ready`, `not_ready` or `failed`, with findings. Only advises; the queue waits for `ready`. |
 | **Queue** (`sf queue`) | the Queue column, "Run up to N jobs at once" | One ordered list of planned tickets over all workspaces and the limit `max_running`; `sf serve` starts the next one by itself when a slot is free. |
 | **Job** | a card in Implementing, Reviewing, Your turn or Done | One ticket being implemented on one branch. Its state is one of the states below. |

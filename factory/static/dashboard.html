@@ -264,17 +264,17 @@
         <div class="field">
           <label for="ticket-request">What you want, in your words</label>
           <textarea id="ticket-request" rows="5"></textarea>
-          <p class="hint">Not written into the Task file: these words open the conversation, where ChatGPT investigates, discusses it with you and writes the Task file. Once it is written, you start the job on the board, with Start on its Queue card.</p>
+          <p class="hint">Not written into the Task file: these words open the conversation, where the Context owner investigates, discusses it with you and writes the Task file. Once it is written, you start the job on the board, with Start on its Queue card.</p>
         </div>
         <!-- A ticket's images: pasted anywhere in the form (Ctrl+V) or dropped; uploaded once the ticket is created. -->
         <div class="field">
-          <div id="ticket-drop" class="drop">Paste a screenshot anywhere in this form (Ctrl+V) or drop images here. PNG, JPEG, WebP or GIF, at most 5 MB each and 10 per ticket; ChatGPT reads them while it writes the Task file.</div>
+          <div id="ticket-drop" class="drop">Paste a screenshot anywhere in this form (Ctrl+V) or drop images here. PNG, JPEG, WebP or GIF, at most 5 MB each and 10 per ticket; the Context owner reads them while it writes the Task file.</div>
           <div id="ticket-images" class="thumbs" hidden></div>
         </div>
         <fieldset class="owner">
           <legend>Context owner</legend>
           <label class="choice"><input id="owner-chatgpt" type="radio" name="owner" value="chatgpt" checked> ChatGPT, in the browser</label>
-          <label class="choice is-off"><input id="owner-claude" type="radio" name="owner" value="claude" disabled> Claude Code (not available yet)</label>
+          <label class="choice"><input id="owner-claude" type="radio" name="owner" value="claude_code"> Claude Code, in your terminal</label>
         </fieldset>
         <div class="row">
           <button id="ticket-create" type="submit" class="btn btn-primary">Create the ticket</button>

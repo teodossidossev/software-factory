@@ -19,7 +19,7 @@ const summary = (extra: Record<string, unknown> = {}) => ({ state: 'none', check
 
 function ticket(name: string, extra: Record<string, unknown> = {}) {
   return {
-    workspace: 'app', ticket: name, title: `Ticket ${name}`, base: 'main', draft: false, request: null, job: null, lands_after: [],
+    workspace: 'app', ticket: name, title: `Ticket ${name}`, base: 'main', draft: false, request: null, owner: 'chatgpt', job: null, lands_after: [],
     conversation: { message: `Plan ${name}.`, url: `${URL_PREFIX}${encodeURIComponent(`Plan ${name}.`)}` }, check: summary(), ...extra,
   };
 }
@@ -33,7 +33,7 @@ function payload(row: ReturnType<typeof ticket>, extra: Record<string, unknown> 
     check: { check: null, stale: false, running: false, current_sha256: SHA },
     history: [
       { ts: '2026-11-05T10:00:00.000Z', kind: 'edited', by: 'you', text: 'Edited by you' },
-      { ts: '2026-11-04T09:00:00.000Z', kind: 'written', by: 'context_owner', text: 'Plan written by the Context owner (ChatGPT)' },
+      { ts: '2026-11-04T09:00:00.000Z', kind: 'written', by: 'context_owner', text: 'Plan written by the Context owner' },
       { ts: null, kind: 'note', by: null, text: 'Older steps were not recorded; they are known only from checks and jobs.' },
     ],
     queue: null, ...extra,
@@ -116,7 +116,7 @@ test('ticket client: the header, Starts from, Files it will change with the lock
   }
   const history = cardOf(page, /^History$/);
   assert.deepEqual(history.querySelectorAll('ul.hist li').map((item) => item.children[1]!.textContent), [
-    'Edited by you', 'Plan written by the Context owner (ChatGPT)', 'Older steps were not recorded; they are known only from checks and jobs.',
+    'Edited by you', 'Plan written by the Context owner', 'Older steps were not recorded; they are known only from checks and jobs.',
   ]);
   assert.deepEqual(history.querySelectorAll('ul.hist li').map((item) => item.children[0]!.textContent), ['Nov 5, 12:00', 'Nov 4, 11:00', '']);
   assert.equal(hint(history), 'What happened to this plan.');
@@ -154,6 +154,45 @@ test('ticket client: without a scope "No list"; without a dependency "Nothing: i
   assert.deepEqual([sensitive.querySelectorAll('ul.flist li').map((item) => item.textContent), hint(sensitive)], [
     ['.github/**🔒'], '🔒 marks a sensitive file (build, CI, packages, credentials) the ticket is allowed to change.',
   ]);
+});
+
+test('ticket client: Claude Code plans: no ChatGPT link, the first message with Copy under the paste line; ChatGPT: the link; Plan with posts the owner and redraws', async () => {
+  const paste = 'Paste it into a Claude Code session that has the software-factory MCP server (see the planning guide)';
+  const message = 'Use the software-factory MCP server. Call guide.';
+  const row = ticket('T-1', { owner: 'claude_code', conversation: { message, url: null } });
+  const page = await openTicketPage([row], payload(row));
+  const conversation = (): FakeElement => cardOf(page, /^Planning conversation$/);
+  const chatLinks = (): string[] => root(page).querySelectorAll('a').map((node) => node.href).filter((href) => href.startsWith(URL_PREFIX));
+  // Claude Code: neither the header nor the card links to ChatGPT; the line says where to paste, as text.
+  assert.deepEqual(chatLinks(), []);
+  assert.deepEqual(head(page).querySelector('.tools')!.children.map((child) => child.textContent), ['Check the plan', 'Start now']);
+  assert.equal(conversation().querySelectorAll('span.fs13').map((node) => node.textContent).join('|'), paste);
+  assert.doesNotMatch(conversation().textContent, /too long for a link|ChatGPT conversation/);
+  assert.equal(conversation().querySelectorAll('a').length, 0);
+  assert.equal(conversation().querySelector('pre.cm')!.textContent, message);
+  assert.equal(action(page, 'copy').textContent, 'Copy');
+  // The switch: the owner in use is pressed and off, the other switches.
+  assert.equal(conversation().querySelector('.tk-owner')!.textContent, 'Plan with:ChatGPT·Claude Code');
+  assert.deepEqual([action(page, 'owner-claude_code').disabled, action(page, 'owner-claude_code').getAttribute('aria-pressed'), action(page, 'owner-chatgpt').disabled], [true, 'true', false]);
+  action(page, 'owner-chatgpt').click();
+  await page.flush();
+  assert.deepEqual(posts(page).map((request) => [request.path, JSON.parse(request.body!)]), [['api/tickets/app/T-1/owner', { owner: 'chatgpt' }]]);
+  assert.equal(action(page, 'owner-chatgpt').disabled, true);
+  // The answer, the ticket's row with its ChatGPT conversation, is drawn at once: the link in the header and the card.
+  const chat = ticket('T-1');
+  posts(page)[0]!.respond(200, { ok: true, result: chat });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, 'ChatGPT plans app/T-1 now.');
+  assert.deepEqual(chatLinks(), [chat.conversation.url, chat.conversation.url]);
+  assert.doesNotMatch(conversation().textContent, /Paste it into a Claude Code session/);
+  assert.deepEqual([action(page, 'owner-chatgpt').disabled, action(page, 'owner-claude_code').disabled], [true, false]);
+  // A refusal says its code; the page stays as it was.
+  action(page, 'owner-claude_code').click();
+  await page.flush();
+  posts(page)[1]!.respond(409, { ok: false, error: { code: 'job_active', message: 'The job for app/T-1 is working; abort it first.' } });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, 'job_active: The job for app/T-1 is working; abort it first.');
+  assert.deepEqual(chatLinks(), [chat.conversation.url, chat.conversation.url]);
 });
 
 const VIEW = (output: Record<string, unknown> | null, extra: Record<string, unknown> = {}) => ({

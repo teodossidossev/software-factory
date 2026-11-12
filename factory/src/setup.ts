@@ -8,6 +8,7 @@ import { lstat, mkdir, readdir, readFile, realpath, rename, rm } from 'node:fs/p
 import { dirname, isAbsolute, join } from 'node:path';
 import { addAttachment, type Attachment, canHaveAttachments, listAttachments, readAttachment, removeAttachment } from './attachments.js';
 import { writeFileAtomic } from './atomic.js';
+import { ownerOf, type TicketOwner } from './conversation.js';
 import { FactoryError } from './errors.js';
 import type { ExclusiveScope, Retired } from './execution.js';
 import { runGit } from './git.js';
@@ -100,8 +101,10 @@ export interface TicketRow {
   base: string;
   // True while the file still carries the draft marker.
   draft: boolean;
-  // The User's words of New ticket, kept for the conversation (not in the Task file), or null.
+  // The User's words of New ticket, kept for the conversation (not in the Task file), or null;
+  // owner: who plans it, from its .owner file next to them (chatgpt without one).
   request: string | null;
+  owner: TicketOwner;
   // The state of the ticket's last job when it ended, or null without a job.
   job: JobState | null;
   // The tickets it lands after, with their states, in the order of the Task file.
@@ -124,6 +127,7 @@ export interface TicketInput {
   ticket: string;
   title: string;
   request: string;
+  owner?: TicketOwner;
 }
 
 export interface SetupOptions {
@@ -185,6 +189,16 @@ async function isFile(path: string): Promise<boolean> {
     return (await lstat(path)).isFile();
   } catch { // lstat fails: not a file
     return false;
+  }
+}
+
+// The names of an action: invalid_name, then (with a ticket) invalid_ticket.
+function checkNames(name: string, ticket?: string): void {
+  if (!WORKSPACE_NAME_PATTERN.test(name)) {
+    throw new FactoryError('invalid_name', `workspace name must be ${WORKSPACE_NAME_DESCRIPTION}.`);
+  }
+  if (ticket !== undefined && !TICKET_PATTERN.test(ticket)) {
+    throw new FactoryError('invalid_ticket', `ticket must be ${TICKET_DESCRIPTION}.`);
   }
 }
 
@@ -308,9 +322,7 @@ export class Setup {
   // digest's.
   addWorkspace(name: string, path: string, options: AddWorkspaceOptions = {}): Promise<WorkspaceRow> {
     return this.#exclusive(async () => {
-      if (!WORKSPACE_NAME_PATTERN.test(name)) {
-        throw new FactoryError('invalid_name', `workspace name must be ${WORKSPACE_NAME_DESCRIPTION}.`);
-      }
+      checkNames(name);
       if (!isAbsolute(path) || path.includes('\0')) {
         throw new FactoryError('workspace_invalid', 'The path must be absolute.');
       }
@@ -336,9 +348,7 @@ export class Setup {
   // fields change at any time. The name cannot change.
   editWorkspace(name: string, edit: Omit<WorkspaceEdit, 'read_checkout'> & { path: string }): Promise<WorkspaceRow> {
     return this.#exclusive(async () => {
-      if (!WORKSPACE_NAME_PATTERN.test(name)) {
-        throw new FactoryError('invalid_name', `workspace name must be ${WORKSPACE_NAME_DESCRIPTION}.`);
-      }
+      checkNames(name);
       const registry = await loadRegistry(this.#configDir);
       if (!Object.hasOwn(registry.workspaces, name)) {
         throw new FactoryError('workspace_not_found', `workspace "${name}" is not registered.`);
@@ -387,9 +397,7 @@ export class Setup {
   // Refused while a job of the workspace is live: its session and branch belong to the checkout.
   removeWorkspace(name: string): Promise<{ removed: string }> {
     return this.#exclusive(async () => {
-      if (!WORKSPACE_NAME_PATTERN.test(name)) {
-        throw new FactoryError('invalid_name', `workspace name must be ${WORKSPACE_NAME_DESCRIPTION}.`);
-      }
+      checkNames(name);
       const registry = await loadRegistry(this.#configDir);
       if (!Object.hasOwn(registry.workspaces, name)) {
         throw new FactoryError('workspace_not_found', `workspace "${name}" is not registered.`);
@@ -456,7 +464,7 @@ export class Setup {
         continue;
       }
       rows.push({
-        workspace: name, ticket, title: fields.get('title')!, base: fields.get('base')!, draft: isDraft(content), request: await this.#readRequest(name, ticket), job: job?.state ?? null,
+        workspace: name, ticket, title: fields.get('title')!, base: fields.get('base')!, draft: isDraft(content), request: await this.#readRequest(name, ticket), owner: ownerOf(await this.#readRequest(name, ticket, 'owner')), job: job?.state ?? null,
         lands_after: await states(landsAfter(fields, name)), attachments: await attachmentsOf(workspace, ticket),
       });
     }
@@ -586,9 +594,7 @@ export class Setup {
   // The workspace of an attachment action, with its name checked; the ticket's rules are
   // the attachments module's.
   async #attachmentWorkspace(name: string): Promise<Workspace> {
-    if (!WORKSPACE_NAME_PATTERN.test(name)) {
-      throw new FactoryError('invalid_name', `workspace name must be ${WORKSPACE_NAME_DESCRIPTION}.`);
-    }
+    checkNames(name);
     return resolveWorkspace(name, this.#configDir);
   }
 
@@ -609,28 +615,43 @@ export class Setup {
   }
 
   // The User's words of New ticket live in the state directory, next to the jobs, never in the
-  // repository: <state dir>/requests/<workspace>/<ticket>.md.
-  #requestPath(name: string, ticket: string): string {
-    return join(dirname(this.#jobs.root), 'requests', name, `${ticket}.md`);
+  // repository: <state dir>/requests/<workspace>/<ticket>.md; who plans the ticket next to them,
+  // in <ticket>.owner (ext "owner").
+  #requestPath(name: string, ticket: string, ext = 'md'): string {
+    return join(dirname(this.#jobs.root), 'requests', name, `${ticket}.${ext}`);
   }
 
-  async #readRequest(name: string, ticket: string): Promise<string | null> {
+  async #readRequest(name: string, ticket: string, ext = 'md'): Promise<string | null> {
     try {
-      return await readFile(this.#requestPath(name, ticket), 'utf8');
+      return await readFile(this.#requestPath(name, ticket, ext), 'utf8');
     } catch { // no request file: null
       return null;
     }
   }
 
+  // The ticket page's switch of who plans the ticket: its .owner file, rewritten; the same name and
+  // live-job checks as the other ticket actions, and a Task file listed as a ticket. Its row.
+  setTicketOwner(name: string, ticket: string, owner: TicketOwner): Promise<TicketRow> {
+    return this.#exclusive(async () => {
+      await this.#ticketTarget(name, ticket);
+      const row = (await this.tickets()).find((each) => each.workspace === name && each.ticket === ticket);
+      if (row === undefined) {
+        throw new FactoryError('task_not_found', `${TASK_DIR}/${ticket}.md does not exist in workspace "${name}".`);
+      }
+      await this.#writeOwner(name, ticket, owner);
+      return { ...row, owner };
+    });
+  }
+
+  async #writeOwner(name: string, ticket: string, owner: TicketOwner): Promise<void> {
+    await mkdir(dirname(this.#requestPath(name, ticket)), { recursive: true, mode: 0o700 });
+    await writeFileAtomic(this.#requestPath(name, ticket, 'owner'), Buffer.from(ownerOf(owner), 'utf8'));
+  }
+
   // The workspace of a ticket action, with both names checked; a live job refuses it. jobEnded:
   // the ticket has a finished job, read under the lock of the action that retires it.
   async #ticketTarget(name: string, ticket: string): Promise<{ workspace: Workspace; dir: string; jobEnded: boolean }> {
-    if (!WORKSPACE_NAME_PATTERN.test(name)) {
-      throw new FactoryError('invalid_name', `workspace name must be ${WORKSPACE_NAME_DESCRIPTION}.`);
-    }
-    if (!TICKET_PATTERN.test(ticket)) {
-      throw new FactoryError('invalid_ticket', `ticket must be ${TICKET_DESCRIPTION}.`);
-    }
+    checkNames(name, ticket);
     const workspace = await resolveWorkspace(name, this.#configDir);
     const job = await this.#jobs.read(name, ticket);
     if (job !== undefined && !TERMINAL_STATES.includes(job.state)) {
@@ -738,7 +759,7 @@ export class Setup {
         await rm(join(target.dir, folder), { recursive: true, force: true });
         found.push(`${folder}/`);
       }
-      await rm(this.#requestPath(name, ticket), { force: true });
+      await Promise.all(['md', 'owner'].map((ext) => rm(this.#requestPath(name, ticket, ext), { force: true })));
       return { workspace: name, ticket, deleted: found.map((path) => `${TASK_DIR}/${path}`), jobArchived };
     });
   }
@@ -746,12 +767,7 @@ export class Setup {
   // The text of a ticket's Task file (archived: its copy in the archive), through the Task file
   // reader: both names checked, a regular file of valid Task content, else a refusal.
   async taskText(name: string, ticket: string, archived = false): Promise<string> {
-    if (!WORKSPACE_NAME_PATTERN.test(name)) {
-      throw new FactoryError('invalid_name', `workspace name must be ${WORKSPACE_NAME_DESCRIPTION}.`);
-    }
-    if (!TICKET_PATTERN.test(ticket)) {
-      throw new FactoryError('invalid_ticket', `ticket must be ${TICKET_DESCRIPTION}.`);
-    }
+    checkNames(name, ticket);
     return readTask(await resolveWorkspace(name, this.#configDir), ticket, archived);
   }
 
@@ -769,12 +785,7 @@ export class Setup {
   // (sha256; another one is task_changed), recorded as "edited" by you.
   saveTask(name: string, ticket: string, content: string, sha256: string): Promise<WriteTaskResult> {
     return this.#exclusive(async () => {
-      if (!WORKSPACE_NAME_PATTERN.test(name)) {
-        throw new FactoryError('invalid_name', `workspace name must be ${WORKSPACE_NAME_DESCRIPTION}.`);
-      }
-      if (!TICKET_PATTERN.test(ticket)) {
-        throw new FactoryError('invalid_ticket', `ticket must be ${TICKET_DESCRIPTION}.`);
-      }
+      checkNames(name, ticket);
       const workspace = await resolveWorkspace(name, this.#configDir);
       return writeTask(workspace, ticket, content, this.#jobs, { expectedSha256: sha256, record: this.#record(name, ticket, 'edited') });
     });
@@ -835,17 +846,12 @@ export class Setup {
   }
 
   // Writes the ticket skeleton through the Task file writer (the exclude entry, the job guard) and
-  // keeps the User's words for the conversation in the state directory; an existing Task file for
-  // the ticket is never replaced from here.
+  // keeps the User's words for the conversation and its owner (chatgpt by default) in the state
+  // directory; an existing Task file for the ticket is never replaced from here.
   createTicket(input: TicketInput): Promise<{ workspace: string; ticket: string; path: string; base: string }> {
     return this.#exclusive(async () => {
       const { workspace: name, ticket } = input;
-      if (!WORKSPACE_NAME_PATTERN.test(name)) {
-        throw new FactoryError('invalid_name', `workspace name must be ${WORKSPACE_NAME_DESCRIPTION}.`);
-      }
-      if (!TICKET_PATTERN.test(ticket)) {
-        throw new FactoryError('invalid_ticket', `ticket must be ${TICKET_DESCRIPTION}.`);
-      }
+      checkNames(name, ticket);
       const title = input.title.trim();
       if (title === '' || /[\r\n\0]/.test(title) || title.length > MAX_TITLE_CHARS) {
         throw new FactoryError('invalid_content', `The title must be one line of 1 to ${MAX_TITLE_CHARS} characters.`);
@@ -856,15 +862,8 @@ export class Setup {
       }
       const workspace = await resolveWorkspace(name, this.#configDir);
       const path = `${TASK_DIR}/${ticket}.md`;
-      let exists = true;
-      try {
-        await readFile(join(workspace.workCheckout, path));
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-          throw error;
-        }
-        exists = false;
-      }
+      // Only a missing file is no Task file; any other failure is thrown.
+      const exists = await readFile(join(workspace.workCheckout, path)).then(() => true, (error: NodeJS.ErrnoException) => (error.code === 'ENOENT' ? false : Promise.reject(error)));
       if (exists) {
         throw new FactoryError('ticket_exists', `${path} already exists in workspace "${name}"; the ticket is listed below.`);
       }
@@ -875,7 +874,7 @@ export class Setup {
       if (canHaveAttachments(ticket)) {
         await rm(join(workspace.workCheckout, TASK_DIR, ticket), { recursive: true, force: true });
       }
-      await mkdir(dirname(this.#requestPath(name, ticket)), { recursive: true, mode: 0o700 });
+      await this.#writeOwner(name, ticket, input.owner ?? 'chatgpt');
       await writeFileAtomic(this.#requestPath(name, ticket), Buffer.from(request.replace(/\r\n/g, '\n'), 'utf8'));
       return { workspace: name, ticket, path, base };
     });

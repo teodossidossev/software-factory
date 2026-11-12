@@ -51,7 +51,7 @@ test('dashboard setup: the reads, the method rules per path and the token; nothi
     const tickets = await fetchRaw(new URL('api/tickets', base));
     assert.equal(tickets.status, 200);
     const rows = JSON.parse(tickets.body).tickets;
-    assert.deepEqual(Object.keys(rows[0]).sort(), ['attachments', 'base', 'conversation', 'draft', 'job', 'lands_after', 'queue_error', 'queue_force', 'queue_position', 'queue_reason', 'request', 'ticket', 'title', 'workspace']);
+    assert.deepEqual(Object.keys(rows[0]).sort(), ['attachments', 'base', 'conversation', 'draft', 'job', 'lands_after', 'owner', 'queue_error', 'queue_force', 'queue_position', 'queue_reason', 'request', 'ticket', 'title', 'workspace']);
     // SF-071: without a run queue, no ticket is queued and the payload's queue is null.
     assert.deepEqual([rows[0].queue_position, rows[0].queue_error, JSON.parse(tickets.body).queue], [null, null, null]);
     assert.deepEqual([rows[1].draft, rows[1].job], [false, 'pushed']);
@@ -83,6 +83,11 @@ test('dashboard setup: the reads, the method rules per path and the token; nothi
     assert.equal(rows[0].conversation.url, `${CHATGPT_PREFILL_URL}${encodeURIComponent(message)}`);
     assert.equal(rows[0].conversation.url, conversationUrl(message));
     assert.equal(decodeURIComponent(rows[0].conversation.url.slice(CHATGPT_PREFILL_URL.length)), message);
+    // Claude Code plans: its own message, and no ChatGPT link.
+    setup.rows.tickets = [{ ...listed[0]!, owner: 'claude_code' }, ...listed.slice(1)];
+    const claude = JSON.parse((await fetchRaw(new URL('api/tickets', base))).body).tickets[0];
+    assert.deepEqual([claude.owner, claude.conversation], ['claude_code', { message: ticketConversation('app', 'T-5', undefined, [], 'claude_code'), url: null }]);
+    setup.rows.tickets = listed;
 
     // Method rules: the two list-or-act paths answer GET and POST, 405 "GET, POST" otherwise; remove
     // and the ticket's start are POST only; the reads stay GET only.
@@ -127,6 +132,26 @@ test('dashboard setup: the reads, the method rules per path and the token; nothi
   }, setup);
 });
 
+test('dashboard setup: the first message per Context owner: ChatGPT\'s as it was; Claude Code\'s names the MCP server and offers a throwaway prototype before the last sentence', () => {
+  const chatgpt = ticketConversation('app', 'T-5', ' Do it. ', ['1.png']);
+  assert.equal(chatgpt, ticketConversation('app', 'T-5', ' Do it. ', ['1.png'], 'chatgpt'));
+  assert.equal(chatgpt,
+    'Use the Software Factory connector. Call guide. This conversation is for ticket T-5 in workspace app.\n\n' +
+    'Here is what I want, in my words:\n\nDo it.\n\n' +
+    'Investigate it: read the repository with read_file and search, and grill me on it in rounds: number your questions, give your recommended answer to each, look facts up yourself, and write the Task file only after I confirm we agree. ' +
+    'Write it with write_task (workspace "app", ticket "T-5"), replacing the skeleton .software-factory/T-5.md, with a ## Review brief for the reviewers, and show me the plan. ' +
+    'Then tell me the Task file is ready; I start the job on the dashboard. ' +
+    'The ticket has images: 1.png. Read each with read_attachment (workspace "app", ticket "T-5", name). In the Task file, refer to the images the Task needs as ![what it shows](T-5/<name>). ' +
+    'You only plan: you do not start, review or approve jobs.');
+  const prototype = 'If a design question is best settled by seeing it, you may build a throwaway prototype (the prototype skill) outside the factory\'s worktrees; ' +
+    'the Implementer cannot read it, so write what I chose into the Task file (structure, names, states). ';
+  const claude = ticketConversation('app', 'T-5', ' Do it. ', ['1.png'], 'claude_code');
+  assert.ok(claude.startsWith('Use the software-factory MCP server. Call guide. This conversation is for ticket T-5 in workspace app.\n\n'));
+  assert.equal(claude, chatgpt.replace('Use the Software Factory connector.', 'Use the software-factory MCP server.').replace('You only plan:', `${prototype}You only plan:`));
+  assert.ok(ticketConversation('app', 'T-5', undefined, [], 'claude_code').endsWith(`dashboard. ${prototype}You only plan: you do not start, review or approve jobs.`));
+  assert.ok(!ticketConversation('app', 'T-5').includes('prototype'));
+});
+
 test('dashboard setup: the action checks apply to the setup POSTs; exact arguments, results and error mapping; the pages refresh', async () => {
   const fake = fakeActions({ branch: 'T-5-ticket-t-5', state: 'working', check_after_minutes: 15 });
   const setup = fakeSetup([workspaceRow('app')], [ticketRow('app', 'T-5')]);
@@ -134,7 +159,7 @@ test('dashboard setup: the action checks apply to the setup POSTs; exact argumen
     const base = dashboard.url;
     const port = Number(base.port);
     // Origin, content type, body bounds and JSON: as for the job actions.
-    for (const path of ['api/workspaces', 'api/tickets', 'api/workspaces/app/remove', 'api/tickets/app/T-5/start']) {
+    for (const path of ['api/workspaces', 'api/tickets', 'api/workspaces/app/remove', 'api/tickets/app/T-5/start', 'api/tickets/app/T-5/owner']) {
       assert.deepEqual(error(await act(base, path, {}, { headers: { origin: `http://localhost:${port}` } })), { status: 403, code: 'invalid_origin' }, path);
       assert.deepEqual(error(await act(base, path, {}, { headers: { origin: '' } })), { status: 403, code: 'invalid_origin' }, path);
       assert.deepEqual(error(await act(base, path, {}, { headers: { 'content-type': 'text/plain' } })), { status: 415, code: 'unsupported_media_type' }, path);
@@ -146,6 +171,9 @@ test('dashboard setup: the action checks apply to the setup POSTs; exact argumen
       ['api/tickets', '{}'], ['api/tickets', '{"workspace":"app","ticket":"T-1","title":"t"}'], ['api/tickets', '{"workspace":"app","ticket":"T-1","title":"t","request":null}'], ['api/tickets', '{"workspace":"app","ticket":"T-1","title":"t","request":"r","base":"main"}'],
       ['api/workspaces/app/remove', '{"force":true}'], ['api/workspaces/app/remove', '[]'],
       ['api/tickets/app/T-5/start', '{"now":true}'], ['api/tickets/app/T-5/start', '[]'], ['api/tickets/app/T-5/start', 'null'],
+      // The Context owner: one of the two names, in New ticket and in the ticket page's switch.
+      ['api/tickets', '{"workspace":"app","ticket":"T-1","title":"t","request":"r","owner":"claude"}'], ['api/tickets', '{"workspace":"app","ticket":"T-1","title":"t","request":"r","owner":null}'],
+      ['api/tickets/app/T-5/owner', '{}'], ['api/tickets/app/T-5/owner', '{"owner":"claude"}'], ['api/tickets/app/T-5/owner', '{"owner":null}'], ['api/tickets/app/T-5/owner', '{"owner":"chatgpt","now":true}'], ['api/tickets/app/T-5/owner', '[]'],
     ];
     for (const [path, text] of bad) {
       const reply = await act(base, path, undefined, { body: text });
@@ -193,6 +221,25 @@ test('dashboard setup: the action checks apply to the setup POSTs; exact argumen
     assert.deepEqual(result(await act(base, 'api/tickets', { workspace: 'app', ticket: 'T-6', title: 'Six', request })), { workspace: 'app', ticket: 'T-6', path: '.software-factory/T-6.md', base: 'main' });
     assert.deepEqual(setup.calls.at(-1), ['createTicket', { workspace: 'app', ticket: 'T-6', title: 'Six', request }]);
     await stream.next('tickets');
+    // New ticket's Context owner reaches the setup as chosen.
+    assert.equal(result(await act(base, 'api/tickets', { workspace: 'app', ticket: 'T-8', title: 'Eight', request, owner: 'claude_code' })).ticket, 'T-8');
+    assert.deepEqual(setup.calls.at(-1), ['createTicket', { workspace: 'app', ticket: 'T-8', title: 'Eight', request, owner: 'claude_code' }]);
+    await stream.next('tickets');
+    // The ticket page's switch: the setup's call, the ticket's row with its new conversation, and every page refreshes.
+    const switched = result(await act(base, 'api/tickets/app/T-5/owner', { owner: 'claude_code' }));
+    assert.deepEqual(setup.calls.at(-1), ['setTicketOwner', 'app', 'T-5', 'claude_code']);
+    assert.deepEqual([switched.ticket, switched.owner, switched.conversation], ['T-5', 'claude_code', { message: ticketConversation('app', 'T-5', undefined, [], 'claude_code'), url: null }]);
+    await stream.next('tickets');
+    const back = result(await act(base, 'api/tickets/app/T-5/owner', { owner: 'chatgpt' }));
+    assert.deepEqual([back.owner, back.conversation.url], ['chatgpt', conversationUrl(ticketConversation('app', 'T-5'))]);
+    await stream.next('tickets');
+    // POST only; a bad name is an empty 404 before any call.
+    const getOwner = await fetchRaw(new URL('api/tickets/app/T-5/owner', base));
+    assert.deepEqual([getOwner.status, getOwner.headers.allow], [405, 'POST']);
+    const calls = setup.calls.length;
+    for (const path of ['api/tickets/App/T-5/owner', 'api/tickets/app/..%2FT-5/owner']) {
+      assert.deepEqual([(await act(base, path, { owner: 'chatgpt' })).status, setup.calls.length], [404, calls], path);
+    }
     assert.deepEqual(fake.calls, []);
 
     // Error mapping: the guards of the setup with their codes and messages.
@@ -200,12 +247,13 @@ test('dashboard setup: the action checks apply to the setup POSTs; exact argumen
       ['api/workspaces', 'workspace_exists', 409], ['api/workspaces', 'workspace_invalid', 400], ['api/workspaces', 'invalid_name', 400],
       ['api/workspaces/app/remove', 'workspace_busy', 409], ['api/workspaces/app/remove', 'workspace_not_found', 404],
       ['api/tickets', 'ticket_exists', 409], ['api/tickets', 'invalid_content', 400], ['api/tickets', 'job_active', 409],
+      ['api/tickets/app/T-5/owner', 'job_active', 409], ['api/tickets/app/T-5/owner', 'task_not_found', 404],
     ];
     for (const [path, code, status] of mapping) {
       const failure = new FactoryError(code, `The ${code} message.`);
       fake.answer = failure;
       setup.answer = failure;
-      const body = path === 'api/workspaces' ? { name: 'x', path: '/x' } : path === 'api/tickets' ? { workspace: 'app', ticket: 'T-7', title: 't', request: 'r' } : {};
+      const body = path === 'api/workspaces' ? { name: 'x', path: '/x' } : path === 'api/tickets' ? { workspace: 'app', ticket: 'T-7', title: 't', request: 'r' } : path.endsWith('/owner') ? { owner: 'chatgpt' } : {};
       const reply = await act(base, path, body);
       assert.equal(reply.status, status, `${path} ${code}`);
       assert.deepEqual(JSON.parse(reply.body), { ok: false, error: { code, message: `The ${code} message.` } });

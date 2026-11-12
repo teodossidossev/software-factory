@@ -197,6 +197,7 @@ export interface Checks {
   StreamLine: Copy<StreamLine, ServerStreamLine>;
   TicketEntry: Copy<TicketEntry, ServerTicketEntry>;
   TicketRow: Copy<TicketRow, ServerTicketRow>;
+  TicketOwner: Same<TicketOwner, ServerTicketEntry['owner']>;
   CheckSummary: Copy<CheckSummary, NonNullable<ServerTicketRow['check']>>;
   DependencyState: Same<DependencyState, ServerTicketRow['lands_after'][number]['state']>;
   DependencyRow: Copy<DependencyRow, ServerTicketRow['lands_after'][number]>;

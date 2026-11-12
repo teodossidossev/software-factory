@@ -183,10 +183,12 @@ test('setup: tickets lists the Task files without a live job; createTicket write
   assert.equal(await readFile(join(repo, '.software-factory', 'T-1.md'), 'utf8'), draftContent('T-1', 'Add a thing', 'main'));
   // The user's words are kept for the conversation in the state directory, not in the repository.
   assert.equal(await readFile(join(env.state, 'requests', 'app', 'T-1.md'), 'utf8'), 'Please add\nthe thing.');
+  // Without an owner in the input, ChatGPT plans it, saved next to the words.
+  assert.equal(await readFile(join(env.state, 'requests', 'app', 'T-1.owner'), 'utf8'), 'chatgpt');
   // The Task directory is excluded from Git, as write_task does it.
   assert.match(await readFile(join(repo, '.git', 'info', 'exclude'), 'utf8'), /^\.software-factory\/$/m);
   assert.equal(git(repo, 'status', '--porcelain'), '');
-  assert.deepEqual(await setup.tickets(), [{ workspace: 'app', ticket: 'T-1', title: 'Add a thing', base: 'main', draft: true, request: 'Please add\nthe thing.', job: null, lands_after: [], attachments: [] }]);
+  assert.deepEqual(await setup.tickets(), [{ workspace: 'app', ticket: 'T-1', title: 'Add a thing', base: 'main', draft: true, request: 'Please add\nthe thing.', owner: 'chatgpt', job: null, lands_after: [], attachments: [] }]);
 
   // Refused: an existing ticket (never replaced), bad names, an empty or oversized title or request, an unknown workspace.
   assert.match(await refused(setup.createTicket({ workspace: 'app', ticket: 'T-1', title: 'Again', request: 'x' }), 'ticket_exists'), /already exists in workspace "app"/);
@@ -215,8 +217,8 @@ test('setup: tickets lists the Task files without a live job; createTicket write
   await writeFile(join(repo, '.software-factory', 'T-5.md'), '---\nticket: T-9\ntitle: Other\nbase: main\n---\n');
   await writeFile(join(repo, '.software-factory', '.T-6.md'), '---\nticket: .T-6\ntitle: Hidden\nbase: main\n---\n');
   assert.deepEqual(await setup.tickets(), [
-    { workspace: 'app', ticket: 'T-1', title: 'Add a thing', base: 'main', draft: true, request: 'Please add\nthe thing.', job: null, lands_after: [], attachments: [] },
-    { workspace: 'app', ticket: 'T-3', title: 'Third', base: 'main', draft: false, request: null, job: 'pushed', lands_after: [], attachments: [] },
+    { workspace: 'app', ticket: 'T-1', title: 'Add a thing', base: 'main', draft: true, request: 'Please add\nthe thing.', owner: 'chatgpt', job: null, lands_after: [], attachments: [] },
+    { workspace: 'app', ticket: 'T-3', title: 'Third', base: 'main', draft: false, request: null, owner: 'chatgpt', job: 'pushed', lands_after: [], attachments: [] },
   ]);
   await refused(setup.createTicket({ workspace: 'app', ticket: 'T-2', title: 't', request: 'r' }), 'ticket_exists');
 
@@ -231,6 +233,56 @@ test('setup: tickets lists the Task files without a live job; createTicket write
   const gone = join(temp, 'setup-gone');
   await saveRegistry({ workspaces: { app: { read_checkout: repo, work_checkout: repo }, gone: { read_checkout: gone, work_checkout: gone } } }, env.config);
   assert.deepEqual((await setup.tickets()).map((row) => `${row.workspace}/${row.ticket}`), ['app/T-1', 'app/T-3', 'app/T-7']);
+});
+
+test('setup: a ticket\'s Context owner: saved by createTicket in <state>/requests/<ws>/<ticket>.owner, read safely (missing or unknown is chatgpt), switched by setTicketOwner with the ticket actions\' checks, deleted with the ticket', async () => {
+  const env = await newEnv('setup-owner');
+  const repo = await newRepo(env, 'setup-owner-repo', true);
+  const jobs = new JobStore(env.state);
+  const setup = setupOf(env.config, jobs);
+  const ownerFile = (ticket: string): string => join(env.state, 'requests', 'app', `${ticket}.owner`);
+  const rowOwner = async (ticket: string): Promise<string | undefined> => (await setup.tickets()).find((row) => row.ticket === ticket)?.owner;
+  await setup.createTicket({ workspace: 'app', ticket: 'T-1', title: 'One', request: 'r', owner: 'claude_code' });
+  await setup.createTicket({ workspace: 'app', ticket: 'T-2', title: 'Two', request: 'r', owner: 'chatgpt' });
+  assert.deepEqual([await readFile(ownerFile('T-1'), 'utf8'), await readFile(ownerFile('T-2'), 'utf8')], ['claude_code', 'chatgpt']);
+  assert.deepEqual([await rowOwner('T-1'), await rowOwner('T-2')], ['claude_code', 'chatgpt']);
+
+  // Read safely: no file (a Task file written without New ticket), unknown text or a directory is chatgpt.
+  await putTask(env, repo, 'T-3', 'Three');
+  assert.equal(await rowOwner('T-3'), 'chatgpt');
+  for (const text of ['claude', 'CLAUDE_CODE', '', 'chatgpt\n', 'claude_code and more']) {
+    await writeFile(ownerFile('T-2'), text);
+    assert.equal(await rowOwner('T-2'), 'chatgpt', JSON.stringify(text));
+  }
+  await writeFile(ownerFile('T-2'), 'claude_code\n');
+  assert.equal(await rowOwner('T-2'), 'claude_code');
+  await mkdir(ownerFile('T-3'));
+  assert.equal(await rowOwner('T-3'), 'chatgpt');
+  await rm(ownerFile('T-3'), { recursive: true });
+
+  // The switch: the file rewritten, the ticket's row answered with the new owner.
+  const switched = await setup.setTicketOwner('app', 'T-3', 'claude_code');
+  assert.deepEqual([switched.ticket, switched.title, switched.owner], ['T-3', 'Three', 'claude_code']);
+  assert.deepEqual([await readFile(ownerFile('T-3'), 'utf8'), await rowOwner('T-3')], ['claude_code', 'claude_code']);
+  assert.equal((await setup.setTicketOwner('app', 'T-1', 'chatgpt')).owner, 'chatgpt');
+  assert.equal(await readFile(ownerFile('T-1'), 'utf8'), 'chatgpt');
+
+  // Refused as the other ticket actions: bad names, no Task file, a live job; nothing written.
+  await refused(setup.setTicketOwner('App', 'T-1', 'claude_code'), 'invalid_name');
+  await refused(setup.setTicketOwner('app', '../T-1', 'claude_code'), 'invalid_ticket');
+  await refused(setup.setTicketOwner('app', 'T-9', 'claude_code'), 'task_not_found');
+  await assert.rejects(readFile(ownerFile('T-9')), { code: 'ENOENT' });
+  await jobs.write(jobOf('app', 'T-1', 'working'));
+  await refused(setup.setTicketOwner('app', 'T-1', 'claude_code'), 'job_active');
+  assert.equal(await readFile(ownerFile('T-1'), 'utf8'), 'chatgpt');
+  // A finished job keeps the switch.
+  await jobs.write(jobOf('app', 'T-1', 'pushed'));
+  assert.equal((await setup.setTicketOwner('app', 'T-1', 'claude_code')).owner, 'claude_code');
+
+  // Delete takes the owner with the words.
+  await setup.deleteTicket('app', 'T-2');
+  await assert.rejects(readFile(ownerFile('T-2')), { code: 'ENOENT' });
+  await assert.rejects(readFile(join(env.state, 'requests', 'app', 'T-2.md')), { code: 'ENOENT' });
 });
 
 test('setup: taskText reads the Task file or its archived copy through the reader; taskTitle is the title (active, else archived) or null', async () => {

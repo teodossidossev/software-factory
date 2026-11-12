@@ -95,7 +95,7 @@ test('ticket history: the timeline merges the recorded writes, every check and e
     ['2026-11-02T10:00:00.000Z', 'checked', 'factory', 'Checked: ready · $0.50'],
     ['2026-11-02T09:00:00.000Z', 'edited', 'you', 'Edited by you'],
     ['2026-11-01T11:00:00.000Z', 'checked', 'factory', 'Checked: not ready (2 blockers, 1 major) · $0.48'],
-    ['2026-11-01T10:00:00.000Z', 'written', 'context_owner', 'Plan written by the Context owner (ChatGPT)'],
+    ['2026-11-01T10:00:00.000Z', 'written', 'context_owner', 'Plan written by the Context owner'],
     ['2026-11-01T09:00:00.000Z', 'created', 'you', 'Created by you'],
   ]);
 });
@@ -105,16 +105,16 @@ test('ticket history: "Changed outside the factory" when the file is not the ver
   const history = new TicketHistory(state, clock('2026-11-01T09:00:00.000Z', '2026-11-01T10:00:00.000Z', '2026-11-05T08:00:00.000Z'));
   await history.append('app', 'T-1', { kind: 'created', by: 'you', sha256: sha('0') });
   await history.append('app', 'T-1', { kind: 'written', by: 'context_owner', sha256: sha('a') });
-  assert.deepEqual(texts(await history.timeline('app', 'T-1', { sha256: sha('a'), mtime: '2026-11-01T10:00:00.000Z' })), ['Plan written by the Context owner (ChatGPT)', 'Created by you']);
+  assert.deepEqual(texts(await history.timeline('app', 'T-1', { sha256: sha('a'), mtime: '2026-11-01T10:00:00.000Z' })), ['Plan written by the Context owner', 'Created by you']);
   const outside = await history.timeline('app', 'T-1', { sha256: sha('b'), mtime: '2026-11-04T08:30:00.000Z' });
   assert.deepEqual(outside.map((entry) => [entry.ts, entry.kind, entry.text]), [
     ['2026-11-04T08:30:00.000Z', 'changed_outside', 'Changed outside the factory'],
-    ['2026-11-01T10:00:00.000Z', 'written', 'Plan written by the Context owner (ChatGPT)'],
+    ['2026-11-01T10:00:00.000Z', 'written', 'Plan written by the Context owner'],
     ['2026-11-01T09:00:00.000Z', 'created', 'Created by you'],
   ]);
   // The factory's Fix section records the sha256 it left: the file is that version, nothing outside.
   await history.append('app', 'T-1', { kind: 'fix_added', by: 'factory', sha256: sha('c'), fix: 1 });
-  assert.deepEqual(texts(await history.timeline('app', 'T-1', { sha256: sha('c'), mtime: '2026-11-05T08:30:00.000Z' })), ['Fix 1 added by the factory', 'Plan written by the Context owner (ChatGPT)', 'Created by you']);
+  assert.deepEqual(texts(await history.timeline('app', 'T-1', { sha256: sha('c'), mtime: '2026-11-05T08:30:00.000Z' })), ['Fix 1 added by the factory', 'Plan written by the Context owner', 'Created by you']);
 });
 
 test('ticket history: a ticket older than the recording says so once, last: nothing recorded, a first write that is not its creation (written, edited, a Fix), or checks and jobs before it', async () => {
@@ -142,11 +142,11 @@ test('ticket history: a ticket older than the recording says so once, last: noth
   assert.deepEqual(await fresh.read('app', 'T-4'), []);
   // Fix 1, R2: a ticket made before the recording, without a check or a job, whose first recorded
   // write is the Context owner's (or the user's Save): no creation recorded, so the note, once.
-  for (const [kind, by, text] of [['written', 'context_owner', 'Plan written by the Context owner (ChatGPT)'], ['edited', 'you', 'Edited by you'], ['fix_added', 'factory', 'Fix 3 added by the factory']] as const) {
+  for (const [kind, by, text] of [['written', 'context_owner', 'Plan written by the Context owner'], ['edited', 'you', 'Edited by you'], ['fix_added', 'factory', 'Fix 3 added by the factory']] as const) {
     const ticket = `T-old-${kind}`;
     const later = new TicketHistory(state, clock('2026-11-05T09:00:00.000Z', '2026-11-05T10:00:00.000Z'));
     await later.append('app', ticket, { kind, by, sha256: sha('d'), ...(kind === 'fix_added' ? { fix: 3 } : {}) });
     await later.append('app', ticket, { kind: 'written', by: 'context_owner', sha256: sha('e') });
-    assert.deepEqual(texts(await later.timeline('app', ticket, { sha256: sha('e'), mtime: '2026-11-05T09:00:00.000Z' })), ['Plan written by the Context owner (ChatGPT)', text, OLDER_NOTE], kind);
+    assert.deepEqual(texts(await later.timeline('app', ticket, { sha256: sha('e'), mtime: '2026-11-05T09:00:00.000Z' })), ['Plan written by the Context owner', text, OLDER_NOTE], kind);
   }
 });

@@ -45,7 +45,7 @@ export function probeCommand(probe: SmokeProbe): string {
     '--jobs', quoted(probe.jobs), '--job', probe.job, '--socket', quoted(probe.socket), ...(probe.ssh !== undefined ? ['--ssh', quoted(probe.ssh)] : []),
     ...(probe.dbus !== undefined ? ['--dbus', quoted(probe.dbus)] : []), ...(probe.docker !== undefined ? ['--docker', quoted(probe.docker)] : []),
     ...(probe.claudeProjects !== undefined ? ['--claude-projects', quoted(probe.claudeProjects)] : []), '--home-canary', quoted(probe.homeCanary),
-    ...(probe.tmpSocket !== undefined ? ['--tmp-socket', quoted(probe.tmpSocket)] : []), '--claude-tmp', quoted(probe.claudeTmp), '>', PROBE_OUTPUT,
+    ...(probe.tmpSocket !== undefined ? ['--tmp-socket', quoted(probe.tmpSocket)] : []), '--claude-tmp', quoted(probe.claudeTmp), '--out', PROBE_OUTPUT,
   ].join(' ');
 }
 
@@ -59,9 +59,9 @@ export function probeCommand(probe: SmokeProbe): string {
 // set, are absent. Under the host's /tmp the probe is stricter: the socket is refused only on
 // ENOENT, ECONNREFUSED or EACCES, /tmp/claude-<uid> only on ENOENT or an empty listing; any other
 // error is failed.
-export const PROBE_SCRIPT = `// The sandbox probe of sf smoke. Prints only whether each access worked.
+export const PROBE_SCRIPT = `// The sandbox probe of sf smoke. Writes only whether each access worked: to the file --out names, else stdout.
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { connect } from 'node:net';
 
 const args = process.argv.slice(2);
@@ -132,7 +132,9 @@ try {
   const code = typeof error?.code === 'string' ? error.code : 'ERROR';
   results.push({ name: 'claude-tmp', outcome: code === 'ENOENT' ? 'refused' : 'failed', code });
 }
-process.stdout.write(\`\${JSON.stringify(results, null, 2)}\\n\`);
+const out = option('out');
+const text = \`\${JSON.stringify(results, null, 2)}\\n\`;
+if (out === undefined) { process.stdout.write(text); } else { writeFileSync(out, text); }
 `;
 
 // The probes the Sandbox step expects, each refused; absent passes for the user's paths that may be

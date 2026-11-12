@@ -166,6 +166,8 @@ export interface Checks {
   JobSummary: Copy<JobSummary, ServerDetail['job']>;
   JobRow: Copy<JobRow, ServerJobRow>;
   JobMr: Copy<JobMr, NonNullable<ServerJobRow['mr']>>;
+  ProgressPhase: Same<ProgressPhase, NonNullable<ServerJobRow['progress']>['phase']>;
+  JobProgress: Copy<JobProgress, NonNullable<ServerJobRow['progress']>>;
   ShownAction: Copy<ShownAction, ServerJobRow['actions'][number]>;
   JobsPayload: Copy<JobsPayload, ServerJobsPayload>;
   JobStop: Copy<JobStop, ServerJobStop>;

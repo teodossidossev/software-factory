@@ -60,6 +60,8 @@ interface JobSummary {
   handover: { at: string } | null;
   handoff_skipped: { code: string; message: string } | null;
   claude_review: boolean;
+  // A running job's steps, phase and likely ready range; null for a job not running.
+  progress: JobProgress | null;
   stop_code: string | null;
   stop_kind: StopKind | null;
   stop_group: StopGroup | null;
@@ -130,6 +132,16 @@ interface ActionResult {
   discarded?: boolean;
   worktree?: string | null;
   queued?: boolean;
+}
+
+// A running job's progress: src/progress.ts Progress, its phase src/progress.ts PHASES.
+type ProgressPhase = 'code' | 'claude' | 'codex' | 'mr_text';
+interface JobProgress {
+  steps: Array<{ text: string; done: boolean }>;
+  phase: ProgressPhase;
+  fix_round: number;
+  ready_from: string;
+  ready_to: string;
 }
 
 // What a stopped job waits on: src/dashboard.ts stopOf. Its items are unknown[] there: the

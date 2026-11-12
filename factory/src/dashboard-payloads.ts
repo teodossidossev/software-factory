@@ -9,6 +9,7 @@ import type { DashboardActions, DashboardChecks, DashboardQueue, DashboardSetup 
 import { CONFIRM_ACTIONS } from './dashboard-routes.js';
 import { currentExplanation, ledgerStopEntries } from './explain.js';
 import { claudeReviews, type Job, type JobStore } from './jobs.js';
+import { historyOf, phaseOf, type Progress, progressOf, readSteps } from './progress.js';
 import type { TicketRow } from './setup.js';
 import type { CheckSummary } from './task-check.js';
 import { turnLimitLine } from './turn-limit.js';
@@ -107,11 +108,11 @@ async function taskChangedOf(setup: DashboardSetup, job: Job): Promise<boolean |
 // itself after a turn limit, null without one; handover: the job in the user's checkout,
 // null otherwise; handoff_skipped: why the automatic hand-over did not happen, null
 // otherwise; mr_conflict_turn: the MR preparation ran a conflict turn, so no Retry;
-// claude_review: whether the Claude review runs on the job (absent in job.json: true).
+// claude_review: whether the Claude review runs on the job (absent in job.json: true); progress: progressFor.
 // From src/stops.ts: stop_code, stop_kind and stop_group, the canonical row of a needs_human
 // job's stop (null in any other state); actions, the actions the job page shows in order;
 // availability, every action's '' or why it is off. The page renders them and decides no rule.
-function jobSummary(job: Job, counts: { files: number; undeclared: number; deleted: number }, mrHost: MrHost, taskChanged: boolean | null, facts: JobFacts) {
+function jobSummary(job: Job, counts: { files: number; undeclared: number; deleted: number }, mrHost: MrHost, taskChanged: boolean | null, facts: JobFacts, progress: Progress | null) {
   const now = new Date();
   return {
     workspace: job.workspace, ticket: job.ticket, branch: job.branch, base: job.base, state: job.state,
@@ -119,9 +120,24 @@ function jobSummary(job: Job, counts: { files: number; undeclared: number; delet
     error: job.error ?? null, worktree: job.worktree, prepared_commit: job.prepared_commit,
     fixes: job.fixes, gate_fixes: job.gate_fixes, gate_tokens: job.gate_tokens, ...counts,
     mr: job.mr, mr_host: mrHost, paused: job.paused ?? null, limit: job.limit ?? null, task_changed: taskChanged, turn_limit: turnLimitLine(job) ?? null,
-    handover: job.handover ?? null, handoff_skipped: job.handoff_skipped ?? null, claude_review: claudeReviews(job),
+    handover: job.handover ?? null, handoff_skipped: job.handoff_skipped ?? null, claude_review: claudeReviews(job), progress,
     ...stopFields(job, now), ...jobActions(job, facts, now),
   };
+}
+
+// A running job's progress (src/progress.ts): the steps file of its worktree, whether the iteration under
+// review has the Claude review's and the gate's verdict, and the history's durations; null for a job not running.
+async function progressFor(jobs: JobStore, job: Job): Promise<Progress | null> {
+  if (phaseOf(job, false) === null) {
+    return null;
+  }
+  const verdict = (record: object | undefined): boolean => record !== undefined && 'verdict' in record;
+  const reviewing = job.state === 'awaiting_review';
+  const done = {
+    claude: reviewing && verdict(await jobs.readReview(job.workspace, job.ticket, job.iteration)),
+    codex: reviewing && verdict(await jobs.readGate(job.workspace, job.ticket, job.iteration)),
+  };
+  return progressOf(job, { steps: await readSteps(job.worktree, job.ticket), done, durations: await historyOf(jobs).of(job.workspace), now: Date.now() });
 }
 
 // What the rules of a job's actions read (src/stops.ts): for a needs_human job its ledger and the
@@ -332,7 +348,7 @@ export async function jobsPayload(jobs: JobStore, setup: DashboardSetup, actions
     const facts = await boardFacts(jobs, job);
     const host = hosts.get(job.workspace)!;
     list.push({
-      ...jobSummary(job, await fileCounts(jobs, job), host, await taskChangedOf(setup, job), await ruleFacts(jobs, job, host)),
+      ...jobSummary(job, await fileCounts(jobs, job), host, await taskChangedOf(setup, job), await ruleFacts(jobs, job, host), await progressFor(jobs, job)),
       title: await setup.taskTitle(job.workspace, job.ticket), ...facts,
       now: await nowOf(jobs, job, facts), tool_calls: await toolCalls.count(jobs.eventsPath(job.workspace, job.ticket)), stop: await stopOf(jobs, job),
     });
@@ -482,7 +498,7 @@ export async function jobDetail(jobs: JobStore, job: Job, gate: boolean, actions
   const facts = await ruleFacts(jobs, job, mrHost);
   const ledger = job.state === 'needs_human' ? facts.ledger : await jobs.readLedger(job.workspace, job.ticket);
   return {
-    job: jobSummary(job, await fileCounts(jobs, job), mrHost, await taskChangedOf(setup, job), facts),
+    job: jobSummary(job, await fileCounts(jobs, job), mrHost, await taskChangedOf(setup, job), facts, await progressFor(jobs, job)),
     iterations,
     mr: mrText !== undefined,
     // The merge request's title on the Git host: the MR text's first line.

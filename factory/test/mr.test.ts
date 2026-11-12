@@ -213,6 +213,49 @@ test('commitAndRebase makes one commit of the Patch paths without the submodule 
   }
 });
 
+// SF-198: an index already staged on an earlier attempt (a conflict turn's resolution, a `git rm`),
+// HEAD at the base, makes the same one commit as an index with nothing staged; the working tree
+// stays as it is.
+test('commitAndRebase commits the reviewed change, deletions included, whatever the index already holds (SF-198)', async () => {
+  const stagings: Record<string, (sh: (...args: string[]) => string) => void> = {
+    'nothing staged': () => {},
+    'the deletion staged': (sh) => sh('rm', '-q', '--cached', 'gone.txt'),
+    'a modification staged, then changed again': (sh) => sh('add', 'keep.txt'),
+    'everything staged': (sh) => sh('add', '--all'),
+  };
+  for (const [name, stage] of Object.entries(stagings)) {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'sf-staged-')));
+    try {
+      const repo = join(dir, 'repo');
+      const sh = (...args: string[]): string => execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+      execFileSync('git', ['init', '-q', '-b', 'main', repo]);
+      for (const [key, value] of [['user.name', 't'], ['user.email', 't@example.invalid'], ['commit.gpgsign', 'false']]) {
+        sh('config', key!, value!);
+      }
+      await writeFile(join(repo, 'keep.txt'), 'keep\n');
+      await writeFile(join(repo, 'gone.txt'), 'gone\n');
+      sh('add', '.');
+      sh('commit', '-q', '-m', 'base');
+      const base = sh('rev-parse', 'HEAD');
+      await rm(join(repo, 'gone.txt'));
+      await writeFile(join(repo, 'keep.txt'), 'keep, staged\n');
+      await writeFile(join(repo, 'new.txt'), 'new\n');
+      stage(sh);
+      await writeFile(join(repo, 'keep.txt'), 'keep, reviewed\n');
+      assert.deepEqual(await commitAndRebase(repo, { baseCommit: base, targetCommit: base, mrText: VALID_MR_TEXT }), { kind: 'ready' }, name);
+      assert.equal(sh('rev-parse', 'HEAD~1'), base, name);
+      assert.equal(sh('show', '--name-status', '--format=', 'HEAD'), 'D\tgone.txt\nM\tkeep.txt\nA\tnew.txt', name);
+      assert.equal(sh('show', 'HEAD:keep.txt'), 'keep, reviewed', name);
+      // The working tree is the reviewed change, untouched, and all of it is in the commit.
+      assert.equal(sh('status', '--porcelain', '--untracked-files=all'), '', name);
+      assert.equal(await readFile(join(repo, 'keep.txt'), 'utf8'), 'keep, reviewed\n', name);
+      await assert.rejects(stat(join(repo, 'gone.txt')), { code: 'ENOENT' }, name);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 // A repository whose change (one commit on base) conflicts with the target in conflict.txt; the
 // factory's commit and rebase have stopped on it.
 async function stoppedRebase(dir: string): Promise<{ repo: string; sh: (...args: string[]) => string; target: string }> {
@@ -251,6 +294,25 @@ test('continueRebase stages every change of the conflict turn, not only the conf
     assert.equal(sh('show', '--name-only', '--format=', 'HEAD'), 'conflict.txt\nnew.txt\nother.txt');
     assert.equal(sh('status', '--porcelain'), '');
     assert.equal(sh('show', 'HEAD:other.txt'), 'other, adapted to the target');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// SF-198: a resolution that deletes files and stages the deletions (`git rm`), a conflicted file
+// among them; the paths in neither the index nor the working tree are skipped, not refused.
+test('continueRebase continues past deletions the resolution already staged, and commits them (SF-198)', async () => {
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'sf-continue-rm-')));
+  try {
+    const { repo, sh, target } = await stoppedRebase(dir);
+    sh('rm', '-q', 'conflict.txt', 'other.txt');
+    await writeFile(join(repo, 'new.txt'), 'new\n');
+    const save = async (): Promise<string> => assert.fail('nothing is saved when the rebase continues');
+    assert.equal(await continueRebase(repo, { files: ['conflict.txt'], targetCommit: target, save }), undefined);
+    assert.equal(await rebaseInProgress(repo), false);
+    assert.equal(sh('rev-parse', 'HEAD~1'), target);
+    assert.equal(sh('show', '--name-status', '--format=', 'HEAD'), 'D\tconflict.txt\nA\tnew.txt\nD\tother.txt');
+    assert.equal(sh('status', '--porcelain', '--untracked-files=all'), '');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -51,7 +51,7 @@ async function ports(reviews: Map<string, RunningReview> = new Map()): Promise<{
   };
   const sessions: LivePort = { live: new Map(), reviews, appendLive: refused('appendLive'), afterSession: refused('afterSession') };
   const config = { stateDir: root, checkAfterStartMin: 15, checkAfterFixMin: 5, review: true, gate: { on: true } } as Config;
-  const settings: SettingsPort = { config, handbook: '', resolve: refused('resolve'), maxRunning: undefined };
+  const settings: SettingsPort = { config, handbook: '', resolve: refused('resolve'), maxRunning: undefined, archiveTicket: undefined };
   return { jobs, store, sessions, settings };
 }
 

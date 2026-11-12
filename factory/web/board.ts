@@ -569,7 +569,7 @@ function boardCard(key: string, workspace: string): HTMLLIElement {
 }
 
 // A job card (the prototype's jobCard): a click opens the job's page; one primary action only where
-// the user acts (Your turn); a pushed card keeps its merge request and Archive ticket.
+// the user acts (Your turn); a Done card keeps its merge request and Archive.
 function jobCard(job: JobRow): HTMLLIElement {
   const key = keyOf(job);
   const item = boardCard(key, job.workspace);
@@ -620,10 +620,7 @@ function jobCard(job: JobRow): HTMLLIElement {
     if (typeof job.error?.message === 'string') {
       meta.setAttribute('title', `${job.error.code}: ${job.error.message}`);
     }
-    item.append(meta);
-    if (job.state === 'pushed') {
-      item.append(...pushedFoot(job));
-    }
+    item.append(meta, ...doneFoot(job));
   }
   // The Implementer's turn went on by itself after the turn limit.
   if (typeof job.turn_limit === 'string') {
@@ -673,10 +670,10 @@ function yourTurn(job: JobRow): HTMLElement[] {
   }
   act.append(primary);
   if (canApprove(job)) {
-    act.append(mrCardButton(job, 'mr-create'));
+    act.append(cardConfirmButton(job, 'mr-create'));
   }
   if (job.state === 'handed_over') {
-    act.append(mrCardButton(job, 'handed-done-merged'));
+    act.append(cardConfirmButton(job, 'handed-done-merged'));
   }
   return [act, ...cardOutcome(key, true)];
 }
@@ -695,10 +692,10 @@ function cardOutcome(key: string, doubts: boolean): HTMLElement[] {
   return parts;
 }
 
-// A card's Create merge request…, Merge… or Merged another way…: opens the job's page with that
-// confirmation; off with the reason as its title while the action is unavailable.
-function mrCardButton(job: JobRow, action: string): HTMLButtonElement {
-  const node = button('btn small', `${ACTION_LABELS[action]}…`, { open: keyOf(job), confirm: action });
+// A card's Create merge request…, Merge…, Merged another way… or Archive: opens the job's page with
+// that confirmation; off with the reason as its title while the action is unavailable.
+function cardConfirmButton(job: JobRow, action: string, label = `${ACTION_LABELS[action]}…`): HTMLButtonElement {
+  const node = button('btn small', label, { open: keyOf(job), confirm: action });
   const reason = availability(action, job);
   node.disabled = reason !== '';
   if (reason !== '') {
@@ -707,31 +704,21 @@ function mrCardButton(job: JobRow, action: string): HTMLButtonElement {
   return node;
 }
 
-// A pushed job on Done: its merge request with the link, Create merge request… or
-// Merge… where they apply, Archive ticket while its Task file is active (the ticket has
-// no Queue card then), and the job's last outcome. Never a primary button.
-function pushedFoot(job: JobRow): HTMLElement[] {
+// A job on Done (pushed, aborted, failed): its merge request with the link, Create merge request… or
+// Merge… where they apply, Archive (its confirmation on the job's page: the job leaves the board, and
+// its Task file goes to the archive while it is active), and the job's last outcome. Never a primary button.
+function doneFoot(job: JobRow): HTMLElement[] {
   const key = keyOf(job);
   const parts: HTMLElement[] = [];
-  const row = ticketByKey(key);
   if (hasMr(job)) {
     const line = el('div', 'meta');
     line.append(document.createTextNode(`#${job.mr.number} ${job.mr.state} `), mrLink(job.mr));
     parts.push(line);
   }
   const actions = [canCreateMr(job) ? 'mr-create' : null, canMerge(job) ? 'mr-merge' : null].filter((action) => action !== null);
-  if (actions.length > 0 || row !== null) {
-    const act = el('div', 'act');
-    act.append(...actions.map((action) => mrCardButton(job, action)));
-    if (row !== null) {
-      const archive = button('btn small', 'Archive ticket', { qact: 'archive', key });
-      archive.disabled = state.setupPending.has(`ticket:${key}`) || state.ticketConfirm !== null;
-      archive.title = 'Move the Task file to .software-factory/archive/; the finished job leaves the board';
-      act.append(archive);
-    }
-    parts.push(act);
-  }
-  return [...parts, ...cardOutcome(key, false)];
+  const act = el('div', 'act');
+  act.append(...actions.map((action) => cardConfirmButton(job, action)), cardConfirmButton(job, 'archive', ACTION_LABELS.archive));
+  return [...parts, act, ...cardOutcome(key, false)];
 }
 
 // The state of a ticket's last job: the jobs list (read from the stream) before the tickets list,

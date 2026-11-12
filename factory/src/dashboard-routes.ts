@@ -56,8 +56,8 @@ export type PostRoute = JobRoute | QueueRoute;
 const job = <S extends z.ZodType>(route: Omit<JobRoute<S>, 'kind'>): JobRoute<S> => ({ kind: 'job', ...route });
 const queue = <S extends z.ZodType>(route: Omit<QueueRoute<S>, 'kind'>): QueueRoute<S> => ({ kind: 'queue', ...route, refresh: 'setup' });
 const EMPTY = { shape: '{}', body: z.strictObject({}) };
-// The routes that can push or merge, and Merged another way, take the ticket beside their other
-// keys; the local port ignores it.
+// The routes that can push or merge, Merged another way and Archive take the ticket beside their
+// other keys; the local port ignores it.
 const CONFIRM = { confirm: z.string().optional() };
 
 export const POST_ROUTES = {
@@ -94,10 +94,14 @@ export const POST_ROUTES = {
   }),
   // sf simplify: the Execution refuses any state but needs_human with simplify_offered.
   simplify: job({ ...EMPTY, command: 'simplify', call: (actions, _queue, [w, t]) => actions.simplify(w, t) }),
-  // A finished job leaves the Jobs list as with sf reset (the history is archived, a kept worktree
-  // removed, the branch untouched). A live job is refused (invalid_state); the Execution checks the
-  // state and retires the job under one lock acquisition.
-  archive: job({ ...EMPTY, refresh: 'jobs', call: (actions, _queue, [w, t]) => actions.archiveFinished(w, t) }),
+  // The Archive of a Done card or job page: a finished job leaves the board as with sf reset (the
+  // history is archived, a kept worktree removed, the branch and its commits untouched), and its Task
+  // file goes to the archive while it is active (Setup's ticket archive, through the Execution). A live
+  // job is refused (invalid_state). It ends the job without asking origin, so the remote port asks for the ticket.
+  archive: job({
+    shape: '{"confirm"?: string}', body: z.strictObject(CONFIRM), confirm: true, refresh: 'jobs',
+    call: (actions, _queue, [w, t]) => actions.archiveFinished(w, t),
+  }),
   // sf mr create, merge and status. The Execution announces an opened or merged merge
   // request to every page; a state the status found changed on the host reaches them here.
   'mr-create': job({

@@ -504,6 +504,8 @@ export type EventRecord = { ts: string; iteration: number } & (
   | { type: 'skill_missing'; skill: string }
   // The merge check before sf mr merge (src/merge-check.ts): its last base commit (null: none), how it ended.
   | { type: 'merge_checked'; base_commit: string | null; outcome: 'passed' | 'failed' | 'conflict' | 'timed_out' | 'aborted'; duration_ms: number }
+  // sf serve's pass of merged jobs found the pushed commit on the target's history, then archived the job.
+  | { type: 'merged_on_target'; commit: string; target: string }
 );
 
 // The bound of one reviewer event or message in events.jsonl, in bytes of its JSON.

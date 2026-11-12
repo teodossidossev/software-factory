@@ -14,7 +14,7 @@ export interface DailyJob {
   ticket: string;
   // The Task's title, else the ticket.
   title: string;
-  // merged: pushed, its merge request merged.
+  // merged: pushed, its merge request merged, or found on its target by sf serve (merged_on_target).
   state: 'handed_over' | 'pushed' | 'merged';
   // When it entered that state.
   at: string;
@@ -42,8 +42,8 @@ interface EventLine {
   state?: { to?: unknown };
 }
 
-// The events.jsonl lines of a state change or a merge request; [] when the file is missing or
-// cannot be read.
+// The events.jsonl lines of a state change, a merge request or merged_on_target; [] when the file is
+// missing or cannot be read.
 async function events(path: string): Promise<EventLine[]> {
   let text: string;
   try {
@@ -53,7 +53,7 @@ async function events(path: string): Promise<EventLine[]> {
   }
   const lines: EventLine[] = [];
   for (const line of text.split('\n')) {
-    if (!line.includes('"state"') && !line.includes('"merge_request"')) {
+    if (!line.includes('"state"') && !line.includes('"merge_request"') && !line.includes('"merged_on_target"')) {
       continue;
     }
     try {
@@ -66,6 +66,14 @@ async function events(path: string): Promise<EventLine[]> {
   }
   return lines;
 }
+
+// Whether a job directory's events.jsonl (path) records that sf serve's pass of merged jobs found
+// its pushed commit on its target (merged_on_target): the job counts as merged.
+export async function mergedOnTarget(path: string): Promise<boolean> {
+  return (await events(path)).some(onTarget);
+}
+
+const onTarget = (line: EventLine): boolean => line.type === 'merged_on_target';
 
 // The ts of the last event that matches, or undefined.
 function lastTs(lines: EventLine[], matches: (line: EventLine) => boolean): string | undefined {
@@ -94,17 +102,17 @@ export async function jobsOf(store: JobStore, workspaces: string[], days: Days):
     if (job.state !== 'handed_over' && job.state !== 'pushed') {
       continue;
     }
-    const merged = job.state === 'pushed' && job.mr?.state === 'merged';
     const path = store.eventsPath(dir.workspace, dir.name);
     // A state change writes its event with the job's updated_at, so an older updated_at is an older
-    // state; a merge is an event after it: an events.jsonl untouched since the two days began holds
-    // none in them.
-    if (merged ? await stat(path).then((info) => info.mtimeMs < since, () => false) : Date.parse(job.updated_at) < since) {
+    // state; a merge (of the merge request, or found on the target) is an event after it: an
+    // events.jsonl untouched since the two days began holds none in them.
+    if (job.state === 'pushed' ? await stat(path).then((info) => info.mtimeMs < since, () => false) : Date.parse(job.updated_at) < since) {
       continue;
     }
     const lines = await events(path);
+    const merged = job.state === 'pushed' && (job.mr?.state === 'merged' || lines.some(onTarget));
     const at = (merged
-      ? lastTs(lines, (line) => line.type === 'merge_request' && line.mr_state === 'merged')
+      ? lastTs(lines, (line) => (line.type === 'merge_request' && line.mr_state === 'merged') || onTarget(line))
       : lastTs(lines, (line) => typeof line.state === 'object' && line.state !== null && line.state.to === job.state)) ?? job.updated_at;
     if (!inDays(at, days)) {
       continue;

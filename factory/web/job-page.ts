@@ -624,6 +624,7 @@ const REMOTE_CONFIRM_TEXT: Readonly<Record<string, string>> = {
   'mr-create': 'it opens the merge request on the Git host, pushing the branch first when it is not pushed yet.',
   'mr-merge': 'it merges the merge request on the Git host.',
   'handed-done-merged': 'it marks the job done without asking origin.',
+  archive: 'it removes the job\'s worktree and the job leaves the board; the branch and its commits stay.',
 };
 
 // The ticket dialog, made on first use: a title, the action's text, the input and two buttons.
@@ -938,6 +939,7 @@ function openConfirm(action: string): void {
       : `Pushes branch ${job.branch} to origin: the one commit the factory prepared at Clean, rebased onto ${job.base}. Nothing is committed or rebased now; a tip edited by hand is refused unless pushed as it is.`,
     'handed-done-merged': 'Mark the job done: you merged its changes yourself under another branch or straight into the main branch. The factory does not check origin.',
     abort: `Ends the job on branch ${job.branch}: the Implementer session stops and queued messages are dropped. The branch and its worktree stay as they are.`,
+    archive: 'Archive the job: its worktree is removed and it leaves the board. The branch and its commits stay.',
     restart: `Starts ${job.ticket} again from its current Task file, as a new job on a fresh worktree and branch from ${job.base}. Thrown away: the Implementer session${job.state === 'paused' || job.state === 'needs_human' ? ' and its queued messages' : ''}, the worktree${typeof job.worktree === 'string' ? ` ${job.worktree}` : ''} with its uncommitted changes (unless kept below) and the branch ${job.branch}, deleted only when it has no commit beyond the base and was never pushed: otherwise nothing is touched and the restart is refused. The job's history is archived as sf reset does.`,
     simplify: `Writes one Fix section “Simplify” with the suggestions below into the Task file; the Implementer applies them and the Claude review and the gate review the result as usual. The suggestions are recorded in the ledger as your choice, so a reviewer cannot ask for them back. It runs once per job.`,
     accept: job.stop_group === 'tests'
@@ -1004,7 +1006,7 @@ function renderConfirmButton(): void {
   const job = state.detail?.job;
   ok.textContent = confirm.action === 'mr-create' ? 'Create the merge request'
     : confirm.action === 'mr-merge' ? `Merge #${job?.mr?.number} into ${job?.base}`
-    : confirm.action === 'simplify' ? 'Simplify'
+    : confirm.action === 'simplify' || confirm.action === 'archive' ? ACTION_LABELS[confirm.action]!
     : confirm.action === 'handed-done-merged' ? ACTION_LABELS['handed-done-merged']!
     : confirm.action === 'accept' ? (job?.stop_group === 'simplify' ? 'Skip and prepare the MR' : 'Accept and prepare the MR')
     : confirm.action === 'restart' ? (byIdAs('keep-files', 'input').checked ? 'Restart, keep the files' : 'Restart')
@@ -1048,13 +1050,11 @@ function sendSay(goOn = false): void {
   void run('say', key, { message: text.trim() === '' ? 'Go on.' : text });
 }
 
-// The composer's actions posted at once, without a confirmation: Pause, Retry review, Retry, Refresh
-// MR status, Archive and the hand-over's.
-const POSTED_AT_ONCE: readonly string[] = ['pause', 'review', 'retry', 'mr-status', 'archive', 'handover', 'takeback', 'handed-done'];
+// The composer's actions posted at once, without a confirmation: Pause, Retry review, Retry, Refresh MR status and the hand-over's.
+const POSTED_AT_ONCE: readonly string[] = ['pause', 'review', 'retry', 'mr-status', 'handover', 'takeback', 'handed-done'];
 
-// A button of the composer (the prototype's act): the ones that ask first open their confirmation;
-// Send, Tell it to go on, Pause, Resume, Retry review, Refresh MR status, Archive and the hand-over's
-// actions post at once.
+// A button of the composer (the prototype's act): the ones that ask first (Archive too) open their
+// confirmation; Send, Tell it to go on, Resume and POSTED_AT_ONCE post at once.
 function act(action: string): void {
   const job = state.detail?.job ?? null;
   if (job === null) {
@@ -1065,7 +1065,7 @@ function act(action: string): void {
     sendSay(action === 'goon');
   } else if (action === 'review-mr') {
     go(key, 'mr');
-  } else if (['abort', 'restart', 'approve', 'accept', 'simplify', 'mr-create', 'mr-merge', 'handed-done-merged'].includes(action)) {
+  } else if (['abort', 'restart', 'approve', 'accept', 'simplify', 'mr-create', 'mr-merge', 'handed-done-merged', 'archive'].includes(action)) {
     openConfirm(action);
   } else if (action === 'resume') {
     const message = byIdAs('msg', 'textarea').value;

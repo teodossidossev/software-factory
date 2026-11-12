@@ -1,7 +1,6 @@
 // The user's control of a job and the runner's requests: pause and Resume, the park on a usage
-// limit and its reset, abort, reset and Archive (retire), exclusive (the start screen's section
-// under the lock), and the requests sf serve queues to a job's runner (request, apply, resume,
-// stop).
+// limit and its reset, abort, reset, Archive (retire) and the pass of merged jobs, exclusive (the start
+// screen's section under the lock), and the requests sf serve queues to a job's runner (request, apply, resume, stop).
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { changedImages, type ImageRef, jobAttachment, type JobAttachment, type ResolvedImage, resolveTaskImages, sameImages } from '../attachments.js';
@@ -23,6 +22,7 @@ import type { UsageLimit } from '../usage-limit.js';
 import { deleteBranch, removeWorktree } from '../worktree.js';
 import type { ImplementerSession } from '../session.js';
 import type { JobStorePort, LivePort, LockPort, RunnerPort, SettingsPort, StopPort } from './ports.js';
+import { archiveWithTask, MergedPass } from './archive.js';
 import type { ExclusiveScope, Resumed, Retired } from './dto.js';
 import { checkNotInCheckout } from './errors.js';
 import { firstPrompt, imagesChangedNote } from './prompts.js';
@@ -94,6 +94,8 @@ export class ControlPart {
   readonly #stop: StopPort;
   // The parts it calls (src/execution.ts wires them).
   readonly #peers: ControlPeers;
+  // The pass of merged jobs: its logged fetch failures and its run under way.
+  readonly #mergedPass = new MergedPass();
 
   constructor(store: JobStorePort, locks: LockPort, sessions: LivePort, runner: RunnerPort, settings: SettingsPort, stop: StopPort, peers: ControlPeers) {
     this.#store = store;
@@ -490,11 +492,9 @@ export class ControlPart {
 
   // The worktree and the branch go; the checkout is not touched.
   async #discard(checkout: string, job: Job, worktree: string | null): Promise<{ code: string; message: string } | undefined> {
-    if (worktree !== null) {
-      const removed = await removeWorktree(checkout, worktree);
-      if (removed !== undefined) {
-        return { code: 'discard_failed', message: `${removed} The worktree needs a look.` };
-      }
+    const removed = worktree === null ? undefined : await removeWorktree(checkout, worktree);
+    if (removed !== undefined) {
+      return { code: 'discard_failed', message: `${removed} The worktree needs a look.` };
     }
     const deleted = await deleteBranch(checkout, job.branch);
     if (deleted !== undefined) {
@@ -503,10 +503,9 @@ export class ControlPart {
     return undefined;
   }
 
-  // The escape hatch: in any state, ends the session, removes the worktree and archives the job;
-  // the branch is not touched.
-  // A job whose workspace is no longer registered (or whose checkout is gone) is still archived:
-  // only the Git clean-up of the checkout is skipped, and the result says so.
+  // The escape hatch: in any state, ends the session, removes the worktree and archives the job; the
+  // branch is not touched. A job whose workspace is no longer registered (or whose checkout is gone) is
+  // still archived: only the Git clean-up of the checkout is skipped, and the result says so.
   reset(workspaceName: string, ticket: string): Promise<Retired> {
     return this.#locks.locked(async () => {
       const job = await this.#store.job(workspaceName, ticket);
@@ -515,11 +514,17 @@ export class ControlPart {
     });
   }
 
-  // The dashboard's Archive of a job card: reset, for a finished job only. The state is checked
-  // and the job retired in one lock acquisition, so a job that replaced it is refused, never
-  // retired.
-  archiveFinished(workspaceName: string, ticket: string): Promise<Retired> {
-    return this.#locks.locked(async () => this.#retire(await this.#finishedJob(workspaceName, ticket, 'invalid_state')));
+  // The Archive of a Done card or job page, and of the pass of merged jobs: reset, for a finished job
+  // only. With an active Task file, Setup's ticket archive checks it again and moves the file too in its
+  // own lock acquisition; else the state is checked and the job retired in one, so a newer job is refused.
+  async archiveFinished(workspaceName: string, ticket: string): Promise<Retired> {
+    const job = await this.#locks.locked(() => this.#finishedJob(workspaceName, ticket, 'invalid_state'));
+    return (await archiveWithTask(this.#settings, job)) ?? this.#locks.locked(async () => this.#retire(await this.#finishedJob(workspaceName, ticket, 'invalid_state')));
+  }
+
+  // sf serve's pass of merged jobs (MergedPass): the pushed jobs found merged on their target, archived.
+  archiveMergedJobs(): Promise<Job[]> {
+    return this.#mergedPass.run({ store: this.#store, locks: this.#locks, settings: this.#settings }, (job) => this.archiveFinished(job.workspace, job.ticket));
   }
 
   // The ticket's current job, refused unless it is terminal, with the code (and the message) of
@@ -527,10 +532,8 @@ export class ControlPart {
   async #finishedJob(workspaceName: string, ticket: string, code: 'invalid_state' | 'job_active'): Promise<Job> {
     const job = await this.#store.job(workspaceName, ticket);
     if (!TERMINAL_STATES.includes(job.state)) {
-      const message = code === 'invalid_state'
-        ? `Only a finished job can be archived; the job is ${job.state}. Abort it first.`
-        : `The job for ${workspaceName}/${ticket} is ${job.state}; abort it first.`;
-      throw new FactoryError(code, message);
+      throw new FactoryError(code, code === 'invalid_state' ? `Only a finished job can be archived; the job is ${job.state}. Abort it first.`
+        : `The job for ${workspaceName}/${ticket} is ${job.state}; abort it first.`);
     }
     return job;
   }
@@ -540,17 +543,13 @@ export class ControlPart {
   async #retire(job: Job): Promise<Retired> {
     const { workspace: workspaceName, ticket } = job;
     const key = `${workspaceName}/${ticket}`;
-    const live = this.#sessions.live.get(key);
-    let workspace: Workspace | undefined = live?.workspace;
-    if (workspace === undefined) {
-      try {
-        workspace = await this.#settings.resolve(workspaceName);
-      } catch (error) {
-        if (!(error instanceof FactoryError) || (error.code !== 'workspace_not_found' && error.code !== 'workspace_invalid')) {
-          throw error;
-        }
+    const unregistered = (error: unknown): undefined => {
+      if (error instanceof FactoryError && (error.code === 'workspace_not_found' || error.code === 'workspace_invalid')) {
+        return undefined;
       }
-    }
+      throw error;
+    };
+    const workspace: Workspace | undefined = this.#sessions.live.get(key)?.workspace ?? (await this.#settings.resolve(workspaceName).catch(unregistered));
     await this.endSession(workspaceName, ticket);
     if (workspace !== undefined) {
       const checkout = workspace.workCheckout;

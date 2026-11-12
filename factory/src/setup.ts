@@ -9,10 +9,11 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { addAttachment, type Attachment, canHaveAttachments, listAttachments, readAttachment, removeAttachment } from './attachments.js';
 import { writeFileAtomic } from './atomic.js';
 import { FactoryError } from './errors.js';
-import type { ExclusiveScope } from './execution.js';
+import type { ExclusiveScope, Retired } from './execution.js';
 import { runGit } from './git.js';
 import { type Job, type JobState, type JobStore, TERMINAL_STATES } from './jobs.js';
 import { derivedDescription } from './digest.js';
+import { mergedOnTarget } from './digest-jobs.js';
 import {
   checkWorkspaceText, DIGEST_TIME_PATTERN, type DigestSettings, digestSettings, editedEntry, type HandoffMode, loadRegistry, MAX_LANGUAGE_CHARS, type Registry, resolveWorkspace, saveRegistry, verifyCheckout,
   type Workspace, workspaceApp, type WorkspaceColor, workspaceColor, workspaceDigest, type WorkspaceEdit, type WorkspaceEntry, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN,
@@ -143,13 +144,14 @@ export interface SetupOptions {
   handoffDefault?: HandoffMode;
 }
 
-// What the dependency rule reads of a job, current or archived.
+// What the dependency rule reads of a job, current or archived; eventsPath: its events.jsonl.
 interface JobFacts {
   state: string;
   branch: string;
   base: string;
   prepared_commit: string | null;
   mr: { state: string } | null;
+  eventsPath: string;
 }
 
 // An archived job directory of the ticket: <ticket>.<YYYYMMDDTHHMMSSZ> (JobStore.archive).
@@ -164,17 +166,17 @@ async function commitOf(checkout: string, ref: string): Promise<string | undefin
 
 // Whether a pushed job's branch is merged into its base by Git: its tip (origin's branch, else the
 // commit the factory prepared and pushed, else the local branch, which the user may have moved) is
-// an ancestor of origin/<base> as the checkout last fetched it. No fetch: the checkout's own view of
-// origin.
-async function branchMerged(checkout: string, job: JobFacts): Promise<boolean> {
+// an ancestor of origin/<base> as the checkout last fetched it; that tip when it is, else undefined.
+// No fetch, no change of the checkout: its own view of origin, read only.
+export async function branchMerged(checkout: string, job: Omit<JobFacts, 'eventsPath'>): Promise<string | undefined> {
   try {
     const tip = (await commitOf(checkout, `refs/remotes/origin/${job.branch}`)) ?? job.prepared_commit ?? (await commitOf(checkout, `refs/heads/${job.branch}`));
     if (tip === undefined) {
-      return false;
+      return undefined;
     }
-    return (await runGit(checkout, ['merge-base', '--is-ancestor', tip, `refs/remotes/origin/${job.base}`])).code === 0;
+    return (await runGit(checkout, ['merge-base', '--is-ancestor', tip, `refs/remotes/origin/${job.base}`])).code === 0 ? tip : undefined;
   } catch { // Git fails: not taken as merged
-    return false;
+    return undefined;
   }
 }
 
@@ -519,7 +521,7 @@ export class Setup {
     const dir = entry === undefined ? undefined : join(entry.read_checkout, TASK_DIR);
     const active = dir !== undefined && (await isFile(join(dir, `${ref.ticket}.md`)));
     const archived = dir !== undefined && !active && (await isFile(join(dir, ARCHIVE_DIR, `${ref.ticket}.md`)));
-    const last: JobFacts | undefined = current ?? (await this.#lastArchivedJob(ref));
+    const last: JobFacts | undefined = current !== undefined ? { ...current, eventsPath: this.#jobs.eventsPath(ref.workspace, ref.ticket) } : await this.#lastArchivedJob(ref);
     if (last?.state === 'pushed') {
       if (await this.#merged(ref, last, entry, fresh)) {
         return 'merged';
@@ -548,7 +550,7 @@ export class Setup {
         if (data.workspace === ref.workspace && data.ticket === ref.ticket && typeof data.state === 'string' && typeof data.branch === 'string' && typeof data.base === 'string') {
           return {
             state: data.state, branch: data.branch, base: data.base, prepared_commit: typeof data.prepared_commit === 'string' ? data.prepared_commit : null,
-            mr: mr !== null && typeof mr === 'object' && typeof mr.state === 'string' ? { state: mr.state } : null,
+            mr: mr !== null && typeof mr === 'object' && typeof mr.state === 'string' ? { state: mr.state } : null, eventsPath: this.#jobs.eventsPath(ref.workspace, name),
           };
         }
       } catch { // not a readable job record: the one before it
@@ -557,10 +559,13 @@ export class Setup {
     return undefined;
   }
 
-  // Merged: the merge request state the factory recorded decides when there is one (merged
-  // or not: open and closed are not merged); only without one does Git decide, its answer kept
-  // MERGE_CHECK_TTL_MS per ticket (fresh: asked again).
+  // Merged: a job the pass of merged jobs found on its base (merged_on_target) is; else the merge request
+  // state the factory recorded decides when there is one (merged or not: open and closed are not
+  // merged); only without one does Git decide, its answer kept MERGE_CHECK_TTL_MS per ticket (fresh: asked again).
   async #merged(ref: TicketRef, job: JobFacts, entry: WorkspaceEntry | undefined, fresh: boolean): Promise<boolean> {
+    if (await mergedOnTarget(job.eventsPath)) {
+      return true;
+    }
     if (job.mr !== null) {
       return job.mr.state === 'merged';
     }
@@ -573,7 +578,7 @@ export class Setup {
     if (!fresh && cached !== undefined && cached.branch === job.branch && now - cached.at < MERGE_CHECK_TTL_MS) {
       return cached.merged;
     }
-    const merged = await branchMerged(entry.read_checkout, job);
+    const merged = (await branchMerged(entry.read_checkout, job)) !== undefined;
     this.#mergeChecks.set(key, { at: now, branch: job.branch, merged });
     return merged;
   }
@@ -635,21 +640,17 @@ export class Setup {
   }
 
   // A finished job of the ticket leaves the Jobs list before its Task file goes, in the same lock
-  // acquisition as the check that found it.
-  async #retire(scope: ExclusiveScope, name: string, ticket: string, jobEnded: boolean): Promise<boolean> {
-    if (!jobEnded) {
-      return false;
-    }
-    await scope.retireFinished(name, ticket);
-    return true;
+  // acquisition as the check that found it: its Retired, undefined without one.
+  async #retire(scope: ExclusiveScope, name: string, ticket: string, jobEnded: boolean): Promise<Retired | undefined> {
+    return jobEnded ? scope.retireFinished(name, ticket) : undefined;
   }
 
   // Moves <ticket>.md (and <ticket>.mr.md) into .software-factory/archive/, replacing an older
-  // archived copy, then the ticket's images (the folder <ticket>/, replacing an older
-  // archive/<ticket>/); a finished job of the ticket is archived first. All under one lock acquisition:
-  // check, retire the job, then move the files. A failed retirement moves nothing; a file
-  // operation that fails after it leaves the job archived and the files as far as they got.
-  archiveTicket(name: string, ticket: string): Promise<{ workspace: string; ticket: string; path: string; jobArchived: boolean }> {
+  // archived copy, then the ticket's images (the folder <ticket>/, replacing an older archive/<ticket>/);
+  // a finished job of the ticket is archived first (retired: its Retired). All under one lock
+  // acquisition: check, retire the job, then move the files. A failed retirement moves nothing; a
+  // file operation that fails after it leaves the job archived and the files as far as they got.
+  archiveTicket(name: string, ticket: string): Promise<{ workspace: string; ticket: string; path: string; jobArchived: boolean; retired?: Retired }> {
     return this.#exclusive(async (scope) => {
       const target = await this.#ticketTarget(name, ticket);
       if (!(await isFile(join(target.dir, `${ticket}.md`)))) {
@@ -661,7 +662,7 @@ export class Setup {
           files.push(file);
         }
       }
-      const jobArchived = await this.#retire(scope, name, ticket, target.jobEnded);
+      const retired = await this.#retire(scope, name, ticket, target.jobEnded);
       await mkdir(join(target.dir, ARCHIVE_DIR), { recursive: true, mode: 0o700 });
       for (const file of files) {
         await rename(join(target.dir, file), join(target.dir, ARCHIVE_DIR, file));
@@ -673,7 +674,7 @@ export class Setup {
           await rename(join(target.dir, ticket), join(target.dir, ARCHIVE_DIR, ticket));
         }
       }
-      return { workspace: name, ticket, path: `${TASK_DIR}/${ARCHIVE_DIR}/${ticket}.md`, jobArchived };
+      return { workspace: name, ticket, path: `${TASK_DIR}/${ARCHIVE_DIR}/${ticket}.md`, jobArchived: retired !== undefined, ...(retired !== undefined ? { retired } : {}) };
     });
   }
 
@@ -729,7 +730,7 @@ export class Setup {
           }
         }
       }
-      const jobArchived = await this.#retire(scope, name, ticket, target.jobEnded);
+      const jobArchived = (await this.#retire(scope, name, ticket, target.jobEnded)) !== undefined;
       for (const path of found) {
         await rm(join(target.dir, path));
       }

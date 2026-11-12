@@ -128,7 +128,7 @@ Under the rule `wait`, a parked job shows "Limit reset: resume?" with *Resume*; 
 ## Jobs that could not start (`failed`)
 
 These codes end the job in `failed` while it was `starting`. The card goes back to the Queue
-column with "last job failed"; its page has Restart… and Archive. Fix the cause, then Restart…
+column with "last job failed"; its page has Restart… and Archive (which asks first). Fix the cause, then Restart…
 (`sf restart`) or Start again.
 
 | Code | What it means | What to do |
@@ -143,7 +143,8 @@ column with "last job failed"; its page has Restart… and Archive. Fix the caus
 | `serve_restarted` | `sf serve` restarted while the job was starting. | Restart…. |
 
 An aborted job may carry `discard_failed`: `sf abort --discard` could not remove the worktree or
-the branch. Remove them by hand (`git worktree remove`, `git branch -D`) or Archive the job.
+the branch. Remove them by hand (`git worktree remove`, `git branch -D`) or Archive the job (on its
+Done card or its page), which removes the worktree and leaves the branch.
 
 ## When the hand-over did not happen
 

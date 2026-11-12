@@ -56,7 +56,9 @@ test('setup: archive moves the Task file and the MR text, restore brings them ba
     await assert.rejects(setup[action]('app', 'T-2'), (error: unknown) => error instanceof FactoryError && error.code === 'job_active', action);
   }
   // Archive: both files move; the pushed job is retired.
-  assert.deepEqual(await setup.archiveTicket('app', 'T-1'), { workspace: 'app', ticket: 'T-1', path: '.software-factory/archive/T-1.md', jobArchived: true });
+  const archived = await setup.archiveTicket('app', 'T-1');
+  assert.deepEqual({ ...archived, retired: undefined }, { workspace: 'app', ticket: 'T-1', path: '.software-factory/archive/T-1.md', jobArchived: true, retired: undefined });
+  assert.equal(archived.retired?.branch, 'T-1-x');
   assert.deepEqual((await readdir(join(dir, 'archive'))).sort(), ['T-1.md', 'T-1.mr.md']);
   assert.equal(await exists(join(dir, 'T-1.md')), false);
   assert.deepEqual(retired, ['app/T-1']);
@@ -265,11 +267,15 @@ test('dashboard: a finished job is archived from its card; a live one is refused
   await page.flush();
   const stream = page.streams.at(-1)!;
   stream.emit('job', { job: shape('aborted'), iterations: [], mr: false, history: [] });
-  // The composer of a finished job: Restart… and Archive, no Approve or Abort.
+  // The composer of a finished job: Restart… and Archive, no Approve or Abort. Archive asks first.
   const shown = (id: string): boolean => page.document.getElementById(id) !== null;
   assert.deepEqual([shown('archive-button'), shown('approve-button'), shown('abort-button')], [true, false, false]);
   assert.deepEqual(page.$('acts').children.map((button) => button.textContent), ['Restart…', 'Archive']);
   page.$('archive-button').click();
+  await page.flush();
+  assert.deepEqual([page.$('confirm').hidden, page.$('confirm-title').textContent, page.$('confirm-ok').textContent], [false, 'Archive app/T-1?', 'Archive']);
+  assert.equal(page.requests.filter((request) => request.method === 'POST').length, 0);
+  page.$('confirm-ok').click();
   await page.flush();
   const post = page.requests.filter((request) => request.method === 'POST');
   assert.deepEqual([post.length, post[0]!.path, post[0]!.body], [1, 'api/jobs/app/T-1/archive', '{}']);

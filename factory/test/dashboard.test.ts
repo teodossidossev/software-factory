@@ -789,7 +789,7 @@ test('dashboard (SF-126): the remote cookie is __Host- and Secure; api/jobs says
     // SF-139: the job's detail names the actions that ask for the ticket from another device, the
     // confirm routes of POST_ROUTES, on both ports alike.
     const confirmActions = (Object.keys(POST_ROUTES) as RouteName[]).filter((name) => POST_ROUTES[name].confirm === true);
-    assert.deepEqual(confirmActions, ['approve', 'retry', 'mr-create', 'mr-merge', 'handed-done-merged']);
+    assert.deepEqual(confirmActions, ['approve', 'retry', 'archive', 'mr-create', 'mr-merge', 'handed-done-merged']);
     assert.deepEqual(JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', remote), { host: 'pc.tail1234.ts.net', headers: LOGIN })).body).confirm_actions, confirmActions);
     assert.deepEqual(JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body).confirm_actions, confirmActions);
 

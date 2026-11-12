@@ -473,7 +473,8 @@ sf smoke [--keep] [--timeout-min N] [--budget-usd N]
   probe is `refused` (`absent` for a missing `~/.ssh`, session bus, `docker.sock` or
   `~/.claude/projects` and an unset `SSH_AUTH_SOCK`, and only for a path the smoke did not give
   the probe, because it is missing outside the sandbox; the home canary must be refused), the
-  Implementer's `system`/`init` messages in `events.jsonl` list no `WebFetch` or `WebSearch`, and
+  Implementer's `system`/`init` messages in `events.jsonl` list no tool outside `IMPLEMENTER_TOOLS`
+  of `src/rules.ts` (no `WebFetch`, `WebSearch` or `mcp__` tool, SF-194), and
   `outside.txt` does not exist while the tool result of the Implementer's `Write` of it carries the
   file-tool guard's refusal (each named in the step's detail otherwise; the session passes
   `disableAllHooks: true` as every job session does, so this also shows, on the real CLI, that the
@@ -495,8 +496,8 @@ sf smoke [--keep] [--timeout-min N] [--budget-usd N]
   (SF-110; the live smoke of 2026-11-07 saw `; echo …; cat probe.json` appended, which the exact
   rule of SF-109 refused), and the file tools the ticket needs (`Read`, `Edit`, `Write`, `Glob`,
   `Grep`, `TodoWrite`). The ticket asks for the probe as one Bash call on its own and for
-  `probe.json` to be read with the Read tool. Its `cwd`, setting sources, deny list, path denials, sandbox,
-  environment, model and turn limit are exactly a real job's. `dontAsk` also approves, without the
+  `probe.json` to be read with the Read tool. Its `cwd`, setting sources, tools (`IMPLEMENTER_TOOLS`,
+  no MCP server), deny list, path denials, sandbox, environment, model and turn limit are exactly a real job's. `dontAsk` also approves, without the
   classifier, any Bash command that runs in the sandbox (`autoAllowBashIfSandboxed: true`) and the
   allow rules of the settings the session loads (`user`, `project`). That is accepted there: every
   such command still runs in the same sandbox with the same path denials as a real job, the smoke
@@ -1670,7 +1671,10 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   with `sensitive_unacknowledged`.
 - Every prompt the factory sends (the `/implement` line of a start and of the fix path, or the user's
   message of `sf say`) is followed by a blank line and `FACTORY_PROMPT_RULES` (`src/prompts.ts`):
-  the factory's rules and the Report template, with the ticket and iteration filled in. Its last
+  the factory's rules and the Report template, with the ticket and iteration filled in. One rule
+  has the Implementer write its own changes with Edit and Write only, never through an inline
+  script, `sed -i` or a shell redirection, so the file-tool guard sees every write (running the
+  repository's own formatter, code generator or package manager stays fine, SF-194). Its last
   rule puts the skills `/implement` runs under them: a skill's fixed point is the job's base commit
   (`base_commit`, the gate's; "the commit your branch started from" when the job has none) with
   the uncommitted worktree as the change, the spec is the Task file, there is no issue tracker, the
@@ -1824,9 +1828,19 @@ own job only, section Live smoke test), `settingSources: ["user",
 "project"]`, `settings: { disableAllHooks: true }` (SF-159, `JOB_SESSION_SETTINGS` of
 `src/session.ts`: no hook of a settings file runs, so a `.claude/settings.json` a job wrote runs
 nothing outside the sandbox; the hooks given to `query()`, the file-tool guard among them, still
-run, which `sf smoke`'s Sandbox step shows on the real CLI), a deny list from `src/rules.ts` (mutating Git commands, `sudo`, `EnterWorktree`, `.git/**`
-edits, `.env` files, `WebFetch` and `WebSearch`, which the sandbox does not hold (SF-123); the same
-for every turn, MR preparation included), the file-tool guard as its `hooks` (SF-123, below), a
+run, which `sf smoke`'s Sandbox step shows on the real CLI), only the built-in tools of
+`IMPLEMENTER_TOOLS` in `src/rules.ts` as `tools` (`Bash`, `Read`, `Edit`, `Write`, `NotebookEdit`,
+`Glob`, `Grep`, `Skill`, `Task`, `Agent`, `TaskOutput`, `TaskStop`, `TodoWrite`, `ToolSearch`; a
+name the installed CLI lacks is simply absent; sub-agents draw their tools from the session's, so
+no other tool a Claude Code release adds, such as `Workflow`, `CronCreate` or `SendMessage`,
+exists in the session or its sub-agents), `strictMcpConfig: true` with `mcpServers: {}` (no MCP
+server: neither the user's claude.ai connectors, nor a project's `.mcp.json`, nor a plugin's;
+`IMPLEMENTER_SESSION_TOOLS` of `src/session.ts`, SF-194), a deny list from `src/rules.ts` on top
+(mutating Git commands, `sudo`, `EnterWorktree`, `.git/**` edits, `.env` files, `WebFetch` and
+`WebSearch`, which the sandbox does not hold (SF-123), `mcp__*`, and by name the tools outside the
+allow list a release has offered so far (`OUTSIDE_TOOLS`: `Workflow`, `CronCreate`, `SendMessage`
+and the like), should a sub-agent be offered more than the session's tools; the same for every
+turn, MR preparation included), the file-tool guard as its `hooks` (SF-123, below), a
 filtered environment (no `SF_*`, no inherited Claude Code session markers; the cloud providers'
 `AWS_*`, `GOOGLE_*` and `CLOUD_ML_*` only when `CLAUDE_CODE_USE_BEDROCK` or `CLAUDE_CODE_USE_VERTEX`
 is set, SF-123) and, unless `SF_SANDBOX=off`, the sandbox

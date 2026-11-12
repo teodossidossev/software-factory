@@ -30,7 +30,16 @@ refused), and the factory's test command passed in a sandbox without network on 
     `.claude` configuration and `.mcp.json`.
   - Its sessions run no hook from a settings file, so a `.claude/settings.json` a job wrote runs
     nothing.
-  - It has no WebFetch or WebSearch.
+  - Its tools are an allow list: `Bash`, `Read`, `Edit`, `Write`, `NotebookEdit`, `Glob`,
+    `Grep`, `Skill`, `Task`/`Agent` (sub-agents), `TaskOutput`, `TaskStop`, `TodoWrite` and
+    `ToolSearch` (`IMPLEMENTER_TOOLS` in `factory/src/rules.ts`). Any other tool a Claude Code
+    release offers (scheduling, messaging, workflows, WebFetch, WebSearch) does not exist in its
+    session, and those a release has offered so far are also denied by name, sub-agents included.
+  - No MCP server loads in its session: not your claude.ai connectors, not a project's
+    `.mcp.json`, not a plugin's, not the factory's own.
+  - It is told to write its own changes with Edit and Write only, never through an inline script,
+    `sed -i` or a shell redirection, so the file guard sees them; running the repository's own
+    tools (formatter, code generator, package manager) stays allowed.
   - It cannot run a command outside the sandbox.
   - The agent's Claude Code itself runs in a bubblewrap wrapper: only its worktree, its temporary
     folder and Claude Code's own state (`~/.claude/projects` and its other session folders, its

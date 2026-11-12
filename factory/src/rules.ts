@@ -1,5 +1,5 @@
-// The verifiable part of the Git rules, the tool deny lists the factory hands to the Implementer
-// session per turn, and the sensitive paths. The Handbook (## Git rules, ## MR template)
+// The verifiable part of the Git rules, the Implementer's tools and the deny lists the factory
+// hands to its session per turn, and the sensitive paths. The Handbook (## Git rules, ## MR template)
 // is the prose source.
 
 // Conventional Commits types allowed in the commit header.
@@ -90,14 +90,28 @@ const ALL_GIT_COMMANDS = [
 ];
 // .env files are off limits to every session, the reviewer's included.
 export const ENV_FILE_RULES = ['Read', 'Edit', 'Write'].flatMap((tool) => [`${tool}(**/.env)`, `${tool}(**/.env.*)`]);
-// Every turn, MR preparation included: every mutating Git command is the factory's or the user's;
-// .git and .env files are off limits; no web tool, which the sandbox does not hold.
+// The only built-in tools of the Implementer's session and its sub-agents (the tools option of its
+// query()); a name the installed Claude Code does not have is simply absent. No MCP server loads.
+export const IMPLEMENTER_TOOLS = [
+  'Bash', 'Read', 'Edit', 'Write', 'NotebookEdit', 'Glob', 'Grep', 'Skill', 'Task', 'Agent', 'TaskOutput', 'TaskStop', 'TodoWrite', 'ToolSearch',
+];
+// Tools outside IMPLEMENTER_TOOLS a Claude Code release has offered a session, denied by name as
+// well, should a sub-agent be offered more than the session's tools.
+const OUTSIDE_TOOLS = [
+  'RemoteTrigger', 'CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'PushNotification', 'SendMessage', 'SendToProject',
+  'SendToProjectContext', 'ListAgents', 'Workflow', 'DesignSync', 'ExitWorktree', 'ReportFindings', 'Monitor',
+];
+// Every turn, MR preparation included, on top of IMPLEMENTER_TOOLS: every mutating Git command is
+// the factory's or the user's; .git and .env files are off limits; no web tool, which the sandbox
+// does not hold, no MCP tool and none of OUTSIDE_TOOLS.
 export const DENIED_TOOLS = [
   ...ALL_GIT_COMMANDS.map((command) => `Bash(git ${command}:*)`),
   'Bash(sudo:*)',
   'EnterWorktree',
   'WebFetch',
   'WebSearch',
+  'mcp__*',
+  ...OUTSIDE_TOOLS,
   'Edit(.git/**)',
   'Write(.git/**)',
   ...ENV_FILE_RULES,

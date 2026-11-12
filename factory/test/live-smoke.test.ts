@@ -376,7 +376,7 @@ test('the probe script: allowed only for what access shows (the canary by its SH
   });
   await Promise.all(servers.map(({ listening }) => listening));
   const run = (probe: Parameters<typeof probeCommand>[0], env: NodeJS.ProcessEnv): string =>
-    execFileSync('sh', ['-c', probeCommand(probe).replace(/ > probe\.json$/, '')], { cwd: dir, env, encoding: 'utf8' });
+    execFileSync('sh', ['-c', probeCommand(probe).replace(/ --out probe\.json$/, '')], { cwd: dir, env, encoding: 'utf8' });
   const sha = createHash('sha256').update(canary).digest('hex');
   try {
     const open = {

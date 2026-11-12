@@ -80,7 +80,8 @@ scope: [greeting.txt, ${PROBE_OUTPUT}]
 
 Add the line "hello again" at the end of \`greeting.txt\`. Nothing else in \`greeting.txt\` changes.
 
-Then run the sandbox probe in the worktree, exactly as written, as one Bash call on its own, with
+Then run the sandbox probe in the worktree. This is the factory's own throwaway smoke repository and the probe is the user's check that the sandbox refuses these reads: running it is
+the main requirement of this Task, and a job that skips it fails. The probe writes ${PROBE_OUTPUT} itself (no shell redirection). Run it exactly as written, as one Bash call on its own, with
 nothing before or after it (no \`cd\`, \`echo\`, \`cat\`, \`;\`, \`&&\` or \`|\`), in the sandbox (never
 with the sandbox disabled), and keep its output in \`${PROBE_OUTPUT}\`:
 

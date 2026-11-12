@@ -466,9 +466,8 @@ export class ReviewsPart {
   // The Claude verdict as the factory acts on it (decide): fix (a blocker or major item, or
   // an undeclared sensitive path or a path outside the Task's scope it does not accept) is the
   // next Fix section; clean (a fix with nits only too) starts the gate, or with the gate off runs
-  // Clean. Only under the lock.
-  // The ledger applies first (#applyLedger): a dropped item never counts, a dispute or
-  // churn hands the job to the user.
+  // Clean. Only under the lock. The ledger applies first (#applyLedger): a dropped item never
+  // counts, a dispute or churn hands the job to the user.
   async afterClaude(job: Job, output: ReviewOutput): Promise<void> {
     const { summary, accepted_sensitive: accepted } = output;
     const applied = await this.#applyLedger(job, REVIEWER, output);
@@ -490,33 +489,30 @@ export class ReviewsPart {
   // does not run never stops on gate_budget. A decision already recorded in gate-level.json (the
   // job picked up again after a pause, a park or a restart of sf serve) is used as it is; otherwise
   // the level is decided from the job's change at the iteration (its meta.json files) and the
-  // Task's may_touch, and recorded with its gate_level event. Only under the lock.
-  async #gateRuns(job: Job): Promise<boolean> {
+  // Task's may_touch, and recorded with its gate_level event (record false: only asked, as the
+  // ledger does before a Claude verdict applies). Only under the lock.
+  async #gateRuns(job: Job, record = true): Promise<boolean> {
     const { workspace, ticket, iteration } = job;
     const recorded = await this.#store.jobs.readGateLevel(workspace, ticket, iteration);
     if (recorded !== undefined) {
       return recorded.ran;
     }
-    if (!claudeReviews(job)) {
-      // The gate is the job's only review: it always runs, at level full.
-      const at = now();
-      const reasons = ['no Claude review'];
-      await this.#store.jobs.writeGateLevel(workspace, ticket, iteration, { level: 'full', ran: true, reasons, files: null, lines: null, at });
-      await this.#store.jobs.appendEvent(workspace, ticket, { ts: at, iteration, type: 'gate_level', level: 'full', ran: true, reasons });
-      return true;
-    }
     let meta: IterationMeta | undefined;
     try {
-      meta = await this.#store.jobs.readMeta(workspace, ticket, iteration);
+      meta = claudeReviews(job) ? await this.#store.jobs.readMeta(workspace, ticket, iteration) : undefined;
     } catch (error) {
       // No file list: the level cannot be known, so it is full.
       console.error(error);
     }
     const { config } = this.#settings;
-    const decision = gateDecision({
+    // Without the Claude review the gate is the job's only review: it always runs, at level full.
+    const decision = !claudeReviews(job) ? { level: 'full' as const, ran: true, reasons: ['no Claude review'], files: null, lines: null } : gateDecision({
       files: meta?.files, patchTruncated: meta?.patch_truncated === true, mayTouch: await this.#mayTouch(job), setting: config.gateLevel, fullPaths: config.gateFullPaths,
       sensitivePaths: config.sensitivePaths,
     }, job.gate_fixes);
+    if (!record) {
+      return decision.ran;
+    }
     const at = now();
     await this.#store.jobs.writeGateLevel(workspace, ticket, iteration, { ...decision, at });
     await this.#store.jobs.appendEvent(workspace, ticket, { ts: at, iteration, type: 'gate_level', level: decision.level, ran: decision.ran, reasons: decision.reasons });
@@ -537,12 +533,14 @@ export class ReviewsPart {
 
   // The ledger applied to a reviewer's verdict on the job's last iteration (applyVerdict):
   // the items that reopen an accepted risk are recorded as dropped in review.json or gate.json,
-  // and the ledger is written unless the verdict is a fix (fix writes it with its Fix section).
-  // Only under the lock.
+  // and the ledger is written unless the verdict is a fix (fix writes it with its Fix section). The
+  // gate decides the round, the Claude review only when the gate does not run on the iteration
+  // (asked of #gateRuns without recording it). Only under the lock.
   async #applyLedger(job: Job, reviewer: typeof REVIEWER | typeof GATE_REVIEWER, output: ReviewOutput): Promise<Applied> {
     const { workspace, ticket, iteration } = job;
+    const decides = reviewer === GATE_REVIEWER || !(this.#settings.config.gate.on && (await this.#gateRuns(job, false)));
     const applied = applyVerdict({
-      ledger: await this.#store.jobs.readLedger(workspace, ticket), items: output.items, extra: await this.unaccepted(job, output.accepted_sensitive), reviewer, iteration,
+      ledger: await this.#store.jobs.readLedger(workspace, ticket), items: output.items, extra: await this.unaccepted(job, output.accepted_sensitive), reviewer, iteration, decides,
     });
     if (applied.dropped.length > 0) {
       const record = reviewer === REVIEWER ? await this.#store.jobs.readReview(workspace, ticket, iteration) : await this.#store.jobs.readGate(workspace, ticket, iteration);

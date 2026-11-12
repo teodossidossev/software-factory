@@ -49,6 +49,8 @@ const entrySchema = z.strictObject({
   dispute: z.strictObject({ reviewer: z.string(), iteration: z.number().int().min(0), reason: z.string() }).nullable(),
   // The user's settlement (sf settle); null before.
   settled: z.strictObject({ decision: z.enum(DECISIONS), note: z.string(), at: z.iso.datetime() }).nullable(),
+  // The iteration whose clean deciding verdict settled the open entry as fixed; absent otherwise.
+  fixed_by_clean: z.number().int().min(0).optional(),
 });
 export const ledgerSchema = z.array(entrySchema);
 export type LedgerEntry = z.output<typeof entrySchema>;
@@ -278,6 +280,9 @@ export interface VerdictInput {
   reviewer: string;
   // The reviewed iteration; a fix is Fix <iteration>.
   iteration: number;
+  // Whether this reviewer decides the round (the gate, or the Claude review the gate does not
+  // follow): only its clean verdict settles the open entries of earlier rounds. Absent: false.
+  decides?: boolean;
 }
 
 const reviewerName = (reviewer: string): string => (reviewer === 'codex' ? 'Codex' : reviewer === 'claude' ? 'Claude' : reviewer);
@@ -333,7 +338,8 @@ const QUESTION = 'Accept and prepare the MR (when Claude\'s review of the iterat
 // names the fix that caused it (caused_by), the fixes make the findings (review_churn). Otherwise
 // the verdict applies: the blocking items (the reviewer's, the extra ones, the
 // open blocker and major entries and the fixes the user decided) make a fix, with the reviewer's
-// nits as optional; each item of a fix keeps or gets its ledger id.
+// nits as optional; each item of a fix keeps or gets its ledger id. A deciding verdict without a
+// blocking item first settles the open blocker and major entries of earlier rounds as fixed.
 export function applyVerdict(input: VerdictInput): Applied {
   const known = new Map(input.ledger.map((entry) => [entry.id, entry]));
   const ledger = input.ledger.map((entry) => ({ ...entry }));
@@ -402,6 +408,7 @@ export function applyVerdict(input: VerdictInput): Applied {
       // The entry keeps the higher severity of the two.
       const severity = SEVERITY_RANK[item.severity] >= SEVERITY_RANK[entry.severity] ? item.severity : entry.severity;
       Object.assign(entry, { severity, problem: item.problem, expected: item.expected, response: '', evidence: '' });
+      delete entry.fixed_by_clean;
       if (entry.reopened >= 2) {
         churned.push(entry);
       }
@@ -450,8 +457,17 @@ export function applyVerdict(input: VerdictInput): Applied {
     });
     return { id, item };
   };
-  const pending = pendingEntries(ledger, input.iteration).filter((entry) => !carried.has(entry.id));
   const blocking = [...blockingItems, ...extra];
+  // A clean deciding verdict saw the whole change: the open blocker and major entries of earlier
+  // rounds it does not carry again are fixed by it (never a factory entry, nor what the user decided).
+  if (input.decides === true && blocking.length === 0) {
+    for (const entry of ledger) {
+      if (entry.status === 'open' && blocks(entry) && !isFactory(entry) && entry.asked < input.iteration && !carried.has(entry.id)) {
+        Object.assign(entry, { status: 'fixed', response: `Settled by the clean ${name} verdict of iteration ${input.iteration}.`, fixed_by_clean: input.iteration });
+      }
+    }
+  }
+  const pending = pendingEntries(ledger, input.iteration).filter((entry) => !carried.has(entry.id));
   if (blocking.length === 0 && pending.filter((entry) => entry.status === 'user_fix' || blocks(entry)).length === 0) {
     return { kind: 'clean', ledger, dropped };
   }

@@ -116,7 +116,7 @@ export const JOB_TRANSITIONS: readonly JobTransition[] = Object.freeze([
   ...rows('repair_handover', JOB_STATES.filter((state) => !['starting', 'failed', 'pushed'].includes(state)), ['needs_human']),
   ...rows('repair_handover', ['needs_human', 'ready_for_human_review', 'preparing_mr', 'aborted'], ['ready_for_human_review']),
   ...rows('publish', ['working'], ['awaiting_review', 'needs_human']),
-  ...rows('mr_turn_end', ['preparing_mr'], ['awaiting_review', 'needs_human']),
+  ...rows('mr_turn_end', ['preparing_mr', 'working'], ['awaiting_review', 'needs_human']), // working: a turn ending MR preparation's rebase
   ...rows('review_retry', ['needs_human'], ['awaiting_review']),
   ...rows('go_on', ['needs_human'], ['awaiting_review']),
   ...rows('verdict', ['awaiting_review'], ['needs_human']),
